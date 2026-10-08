@@ -1046,6 +1046,55 @@ export type NativeProjectEnvExecutionAcquisition = {
   ) => Promise<void>;
 };
 
+const legacyAdoptionEnvRevisions = new WeakMap<
+  NativeProjectEnvExecutionAcquisition,
+  string
+>();
+const PRIVATE_ENV_REVISION = /^[a-f0-9]{64}$/;
+
+/** Private durable owner only. This is the revision of the initial metadata/value acquisition, never a report field. */
+export function privateLegacyAdoptionEnvRevision(
+  acquisition: NativeProjectEnvExecutionAcquisition
+): string {
+  const revision = legacyAdoptionEnvRevisions.get(acquisition);
+  if (!revision) {
+    throw redactLegacyAdoptionEnvError(undefined);
+  }
+  return revision;
+}
+
+/**
+ * Raw-only saved-generation check through the identical bounded layer selector.
+ * The durable owner must first verify its original source/checkout proof and
+ * supply the root checker. This returns names-only metadata, never bytes, digest or values, and
+ * never resolves a key or grants value-delivery/execution authority.
+ */
+export async function assertSavedLegacyAdoptionEnvRevision(opts: {
+  readonly selection: NativeProjectEnvSelectionOptions;
+  readonly revision: string;
+  readonly inputOwner: ExplicitManagedEnvInputOwner;
+}): Promise<NativeProjectEnvMetadata> {
+  try {
+    const { revision, selection: suppliedSelection, inputOwner } = opts;
+    if (typeof revision !== "string" || !PRIVATE_ENV_REVISION.test(revision)) {
+      throw nativeEnvRevisionError();
+    }
+    const selection = snapshotNativeEnvSelection(suppliedSelection);
+    const recorded = nativeEnvRevisionRecorder();
+    const selected = await readNativeProjectEnvSelection(
+      selection,
+      recorded.onAcquired,
+      inputOwner
+    );
+    if (recorded.finish(selection, selected) !== revision) {
+      throw nativeEnvRevisionError();
+    }
+    return readonlyNativeEnvMetadata(selected.metadata);
+  } catch (error: unknown) {
+    throw redactLegacyAdoptionEnvError(error);
+  }
+}
+
 function nativeEnvRevisionError(): Error {
   return new Error(
     "Cannot use native managed env values: selected inputs changed or could not be rechecked; values omitted."
@@ -1745,6 +1794,9 @@ async function acquireExplicitProjectEnvExecution(opts: {
     };
     Object.defineProperty(acquisition, "resolveValues", { enumerable: false });
     Object.defineProperty(acquisition, "assertFresh", { enumerable: false });
+    if (opts.retainCapturedSignal) {
+      legacyAdoptionEnvRevisions.set(acquisition, revision);
+    }
     return Object.freeze(acquisition);
   } catch (error: unknown) {
     throw redactError(error);

@@ -9,11 +9,13 @@ import {
   type LegacyComposeVerifiedBinding,
 } from "./native-compose-adoption-binding.ts";
 import { acquireLegacyComposeAdoptionCheckout } from "./native-compose-adoption-checkout.ts";
+import { admitLegacyComposeCandidate } from "./native-compose-adoption-compiler.ts";
 import {
   legacyComposeAdoptionCandidateSupported,
   legacyComposeAdoptionLayoutSupported,
 } from "./native-compose-adoption-contract.ts";
 import { planLegacyComposeAdoption } from "./native-compose-adoption-plan.ts";
+import { readSavedLegacyComposeAdoptionProjection } from "./native-compose-adoption-projection.ts";
 import {
   type AdoptionOperation,
   type Anchor,
@@ -44,10 +46,7 @@ import {
   token,
   writeExclusive,
 } from "./native-compose-private-state.ts";
-import {
-  compileNativeConfig,
-  NATIVE_CONFIG_INPUT_LIMIT,
-} from "./native-config-compiler.ts";
+import { NATIVE_CONFIG_INPUT_LIMIT } from "./native-config-compiler.ts";
 import {
   type NativeConfigImportSourceIdentity,
   readNativeConfigImportSourceFile,
@@ -58,6 +57,7 @@ import {
   freezeImportValue,
   mapLegacyNativeStorageAdoption,
 } from "./native-config-import-plan.ts";
+import type { NativeProjectEnvMetadata } from "./project-env-config.ts";
 
 const HASH = /^[a-f0-9]{64}$/;
 const STATE_LIMIT = 64 * 1024;
@@ -74,12 +74,13 @@ const ROUTING = [
   "HACK_EXECUTION_MODE",
 ] as const;
 type SavedManifest = {
-  readonly adoption_generation_version: 1;
+  readonly adoption_generation_version: 1 | 3;
   readonly kind: typeof KIND;
   readonly projectRoot: string;
   readonly id: string;
   readonly binding: unknown;
   readonly runtimeConfig: unknown;
+  readonly projectionProof?: unknown;
   readonly sourceFiles: {
     readonly config: NativeConfigImportSourceIdentity;
     readonly compose: NativeConfigImportSourceIdentity;
@@ -98,6 +99,7 @@ type PrivateInputs = {
   readonly composeText: string;
   readonly candidateText: string;
   readonly binding: LegacyComposeVerifiedBinding;
+  readonly projectionMetadata?: NativeProjectEnvMetadata;
 };
 
 type Code =
@@ -203,9 +205,13 @@ function manifest(value: unknown, root: string, id: string): SavedManifest {
       isRecord(value) &&
       keys(
         value,
-        "adoption_generation_version,binding,files,id,kind,projectRoot,runtimeConfig,sourceFiles"
+        value.adoption_generation_version === 3
+          ? "adoption_generation_version,binding,files,id,kind,projectRoot,projectionProof,runtimeConfig,sourceFiles"
+          : "adoption_generation_version,binding,files,id,kind,projectRoot,runtimeConfig,sourceFiles"
       ) &&
-      value.adoption_generation_version === 1 &&
+      (value.adoption_generation_version === 1 ||
+        (value.adoption_generation_version === 3 &&
+          isRecord(value.projectionProof))) &&
       value.kind === KIND &&
       value.id === id &&
       value.projectRoot === root &&
@@ -223,12 +229,15 @@ function manifest(value: unknown, root: string, id: string): SavedManifest {
     refuse();
   }
   return {
-    adoption_generation_version: 1,
+    adoption_generation_version: value.adoption_generation_version,
     kind: KIND,
     projectRoot: root,
     id,
     binding: value.binding,
     runtimeConfig: value.runtimeConfig,
+    ...(value.adoption_generation_version === 3
+      ? { projectionProof: value.projectionProof }
+      : {}),
     sourceFiles: {
       config: value.sourceFiles.config,
       compose: value.sourceFiles.compose,
@@ -281,7 +290,7 @@ async function writeArtifact(path: string, text: string): Promise<Artifact> {
 /** A distinct private generation claim; it never makes original legacy resources native nonce-owned. */
 export type LegacyComposeAdoptedGeneration = {
   readonly report: {
-    readonly adoption_generation_version: 1;
+    readonly adoption_generation_version: 1 | 3;
     readonly owner: "legacy-compose";
     readonly status: "prepared" | "active";
     readonly containers: number;
@@ -383,11 +392,24 @@ async function readInputs(
     );
     const mapped = mapLegacyNativeStorageAdoption({ configText, composeText });
     const planned = planLegacyComposeAdoption({ configText, composeText });
+    const projectionOpts = {
+      projectRoot: ctx.root,
+      configText,
+      composeText,
+      proof: meta.projectionProof,
+      signal: ctx.signal,
+      checkOwner: ctx.check,
+    };
+    const projection =
+      meta.adoption_generation_version === 3
+        ? await readSavedLegacyComposeAdoptionProjection(projectionOpts)
+        : undefined;
     if (
       !(
         mapped.candidate &&
         planned.intent &&
-        candidateText === JSON.stringify(mapped.candidate)
+        candidateText ===
+          JSON.stringify(projection?.candidate ?? mapped.candidate)
       )
     ) {
       refuse();
@@ -397,6 +419,7 @@ async function readInputs(
       intent: planned.intent,
       signal: ctx.signal,
       timeoutMs: ctx.timeoutMs,
+      composeFiles: projection?.composeFiles,
     });
     if (JSON.stringify(meta.binding) !== JSON.stringify(observed)) {
       refuse("E_LEGACY_ADOPTION_CHANGED");
@@ -428,6 +451,9 @@ async function readInputs(
       meta.files.candidate
     );
     await recheckDirectories([held]);
+    if (projection) {
+      await readSavedLegacyComposeAdoptionProjection(projectionOpts);
+    }
     await ctx.check();
     freezeImportValue(observed);
     return {
@@ -437,6 +463,7 @@ async function readInputs(
         composeText,
         candidateText,
         binding: observed,
+        ...(projection ? { projectionMetadata: projection.metadata } : {}),
       }),
     };
   } finally {
@@ -484,11 +511,12 @@ function claim(
   selected: Anchor,
   known: WeakMap<LegacyComposeAdoptedGeneration, Anchor>,
   binding: LegacyComposeVerifiedBinding,
-  status: "prepared" | "active" = "prepared"
+  status: "prepared" | "active" = "prepared",
+  version: 1 | 3 = 1
 ): LegacyComposeAdoptedGeneration {
   const result: LegacyComposeAdoptedGeneration = {
     report: {
-      adoption_generation_version: 1,
+      adoption_generation_version: version,
       owner: "legacy-compose",
       status,
       containers: binding.containers.length,
@@ -516,13 +544,16 @@ async function prepare(
   if (!mapped.candidate) {
     refuse("E_LEGACY_ADOPTION_UNSUPPORTED");
   }
-  const candidateText = JSON.stringify(mapped.candidate);
-  const compiled = await compileNativeConfig({
-    input: new TextEncoder().encode(candidateText),
+  const candidateText = JSON.stringify(
+    acquired.projection?.candidate ?? mapped.candidate
+  );
+  const admitted = await admitLegacyComposeCandidate({
+    candidateText,
+    metadata: acquired.projection?.metadata,
     binary,
     signal: ctx.signal,
   });
-  if (!compiled.ok) {
+  if (!admitted) {
     refuse("E_LEGACY_ADOPTION_UNSUPPORTED");
   }
   await binding.assertFresh({ projectRoot: ctx.root, signal: ctx.signal });
@@ -550,11 +581,14 @@ async function prepare(
     await originals.file.sync();
     await originals.file.close();
     const meta: Manifest = {
-      adoption_generation_version: 1,
+      adoption_generation_version: acquired.projection ? 3 : 1,
       kind: KIND,
       projectRoot: ctx.root,
       id,
       binding: acquired.binding,
+      ...(acquired.projection
+        ? { projectionProof: acquired.projection.projectionProof }
+        : {}),
       runtimeConfig: await inspectLegacyComposeRuntimeConfig({
         binding: acquired.binding,
         composeFile: join(generationRoot, "legacy-compose.yml"),
@@ -661,6 +695,10 @@ async function absent(path: string) {
   }
 }
 async function requireFirstSliceLayout(ctx: Context, input: PrivateInputs) {
+  if (input.projectionMetadata) {
+    // readInputs has already verified the complete saved source/managed/generated proof.
+    return;
+  }
   if (
     !(await legacyComposeAdoptionLayoutSupported({
       projectRoot: ctx.root,
@@ -700,12 +738,13 @@ async function admitCandidate(
   if (!legacyComposeAdoptionCandidateSupported(candidate)) {
     refuse("E_LEGACY_ADOPTION_UNSUPPORTED");
   }
-  const compiled = await compileNativeConfig({
-    input: new TextEncoder().encode(input.candidateText),
+  const admitted = await admitLegacyComposeCandidate({
+    candidateText: input.candidateText,
+    metadata: input.projectionMetadata,
     binary,
     signal: ctx.signal,
   });
-  if (!compiled.ok) {
+  if (!admitted) {
     refuse("E_LEGACY_ADOPTION_UNSUPPORTED");
   }
 }
@@ -1458,7 +1497,10 @@ export async function openLegacyComposeAdoptedGenerationStore(input: {
             await save(
               ctx,
               {
-                adoption_receipt_version: "kind" in checkout.git ? 2 : 1,
+                adoption_receipt_version:
+                  loaded.manifest.adoption_generation_version === 3
+                    ? 3
+                    : prior.adoption_receipt_version,
                 kind: KIND,
                 checkout,
                 prepared: generated,
@@ -1467,7 +1509,13 @@ export async function openLegacyComposeAdoptedGenerationStore(input: {
               },
               prior
             );
-            return claim(generated, known, loaded.manifest.binding);
+            return claim(
+              generated,
+              known,
+              loaded.manifest.binding,
+              "prepared",
+              loaded.manifest.adoption_generation_version
+            );
           });
         } catch (error: unknown) {
           translate(error, signal);
@@ -1485,7 +1533,13 @@ export async function openLegacyComposeAdoptedGenerationStore(input: {
             return null;
           }
           const loaded = await readInputs(ctx, current);
-          return claim(current, known, loaded.manifest.binding);
+          return claim(
+            current,
+            known,
+            loaded.manifest.binding,
+            "prepared",
+            loaded.manifest.adoption_generation_version
+          );
         } catch (error: unknown) {
           translate(error, signal);
         }
@@ -1506,7 +1560,8 @@ export async function openLegacyComposeAdoptedGenerationStore(input: {
             state.publication.generation,
             known,
             loaded.manifest.binding,
-            "active"
+            "active",
+            loaded.manifest.adoption_generation_version
           );
         } catch (error: unknown) {
           translate(error, signal);

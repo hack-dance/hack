@@ -5,6 +5,7 @@ import {
   acquireNativeConfigImportInputs,
   isOwnedNativeConfigImportAcquisition,
   type NativeConfigImportInputs,
+  privateNativeConfigImportSourceProof,
 } from "./native-config-import-inputs.ts";
 import { parseImportDocument } from "./native-config-import-parser.ts";
 import { mapLegacyNativeStorageAdoption } from "./native-config-import-plan.ts";
@@ -141,6 +142,25 @@ export class LegacyAdoptionManagedEnvAdmission {
     return this.#context.selection;
   }
 
+  /** Private manifest provenance; captured sources are factory-issued and still fresh. No key or layer reread. */
+  async resolvePrivatePrimaryProof() {
+    await this.assertRoot(this.selection);
+    const primary = this.#context.primary;
+    const result = {
+      primary: primary
+        ? {
+            projectRoot: primary.projectRoot,
+            proof: privateNativeConfigImportSourceProof(primary),
+          }
+        : null,
+      inheritPrimaryLocal: shouldInheritPrimaryLocalInputs(this.selection),
+    };
+    for (const key of Object.keys(result)) {
+      Object.defineProperty(result, key, { enumerable: false });
+    }
+    return Object.freeze(result);
+  }
+
   async assertRoot(opts: {
     readonly projectRoot: string;
     readonly signal?: AbortSignal;
@@ -216,47 +236,58 @@ export class LegacyAdoptionManagedEnvAdmission {
     readonly bytes: Uint8Array;
     readonly filename: string;
   }): void {
-    const parsed = parseImportDocument({
-      text: new TextDecoder("utf-8", { fatal: true }).decode(opts.bytes),
-      document: "compose",
-    }).value;
-    const environment = opts.filename
-      .slice("hack.env.".length)
-      .replace(MANAGED_SUFFIX, "");
+    assertLegacyAdoptionManagedDocument({
+      ...opts,
+      declaredWorkloadNames: this.#context.selection.declaredWorkloadNames,
+    });
+  }
+}
+
+/** Strict raw-layer validation shared with key-free saved-generation rechecks. No delivery authority. */
+export function assertLegacyAdoptionManagedDocument(opts: {
+  readonly bytes: Uint8Array;
+  readonly filename: string;
+  readonly declaredWorkloadNames: readonly string[];
+}): void {
+  const parsed = parseImportDocument({
+    text: new TextDecoder("utf-8", { fatal: true }).decode(opts.bytes),
+    document: "compose",
+  }).value;
+  const environment = opts.filename
+    .slice("hack.env.".length)
+    .replace(MANAGED_SUFFIX, "");
+  if (
+    !parsed ||
+    Object.keys(parsed).some(
+      (key) =>
+        !["version", "environment", "secretsprovider", "values"].includes(key)
+    ) ||
+    parsed.version !== 1 ||
+    parsed.secretsprovider !== "project_key" ||
+    (parsed.environment !== undefined &&
+      parsed.environment !== environment &&
+      !(environment === "local" && parsed.environment === "default")) ||
+    !isRecord(parsed.values)
+  ) {
+    refuse();
+  }
+  for (const [scope, values] of Object.entries(parsed.values)) {
     if (
-      !parsed ||
-      Object.keys(parsed).some(
-        (key) =>
-          !["version", "environment", "secretsprovider", "values"].includes(key)
-      ) ||
-      parsed.version !== 1 ||
-      parsed.secretsprovider !== "project_key" ||
-      (parsed.environment !== undefined &&
-        parsed.environment !== environment &&
-        !(environment === "local" && parsed.environment === "default")) ||
-      !isRecord(parsed.values)
+      !(
+        (scope === "global" || opts.declaredWorkloadNames.includes(scope)) &&
+        isRecord(values)
+      )
     ) {
       refuse();
     }
-    for (const [scope, values] of Object.entries(parsed.values)) {
+    for (const value of Object.values(values)) {
       if (
-        !(
-          (scope === "global" ||
-            this.#context.selection.declaredWorkloadNames.includes(scope)) &&
-          isRecord(values)
-        )
+        isRecord(value) &&
+        (Object.keys(value).length !== 1 ||
+          typeof value.secure !== "string" ||
+          !value.secure.length)
       ) {
         refuse();
-      }
-      for (const value of Object.values(values)) {
-        if (
-          isRecord(value) &&
-          (Object.keys(value).length !== 1 ||
-            typeof value.secure !== "string" ||
-            !value.secure.length)
-        ) {
-          refuse();
-        }
       }
     }
   }

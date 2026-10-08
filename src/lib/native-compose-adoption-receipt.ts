@@ -1,4 +1,5 @@
 import { isRecord } from "./guards.ts";
+import type { LinkedAdoptionGitIdentity } from "./native-compose-adoption-checkout.ts";
 import { keys } from "./native-compose-private-state.ts";
 
 const KIND = "legacy-compose-adopted";
@@ -12,11 +13,11 @@ export type Artifact = FileIdentity & { readonly hash: string };
 export type Checkout = {
   readonly root: FileIdentity;
   readonly project: FileIdentity;
-  readonly git: FileIdentity;
+  readonly git: FileIdentity | LinkedAdoptionGitIdentity;
 };
 export type Anchor = { readonly id: string; readonly manifest: Artifact };
 export type Receipt = {
-  readonly adoption_receipt_version: 1;
+  readonly adoption_receipt_version: 1 | 2;
   readonly kind: typeof KIND;
   readonly checkout: Checkout;
   readonly prepared: Anchor | null;
@@ -76,7 +77,7 @@ export function parseLegacyComposeAdoptionReceipt(
         value,
         "adoption_receipt_version,checkout,kind,pendingOperation,prepared,publication"
       ) &&
-      value.adoption_receipt_version === 1 &&
+      value.adoption_receipt_version === ("kind" in checkout.git ? 2 : 1) &&
       value.kind === KIND &&
       JSON.stringify(value.checkout) === JSON.stringify(checkout) &&
       (value.prepared === null || anchor(value.prepared)) &&
@@ -105,7 +106,7 @@ export function parseLegacyComposeAdoptionReceipt(
     refuse();
   }
   return {
-    adoption_receipt_version: 1,
+    adoption_receipt_version: "kind" in checkout.git ? 2 : 1,
     kind: KIND,
     checkout,
     prepared: value.prepared,

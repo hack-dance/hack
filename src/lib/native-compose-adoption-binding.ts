@@ -1,5 +1,6 @@
 import { resolve } from "node:path";
 import { isRecord } from "./guards.ts";
+import { legacyComposeAdoptionLayoutSupported } from "./native-compose-adoption-contract.ts";
 import {
   type LegacyComposeStorageIntent,
   planLegacyComposeAdoption,
@@ -12,7 +13,10 @@ import {
   acquireNativeConfigImportInputs,
   type NativeConfigImportSourceIdentity,
 } from "./native-config-import-inputs.ts";
-import { freezeImportValue } from "./native-config-import-plan.ts";
+import {
+  freezeImportValue,
+  mapLegacyNativeStorageAdoption,
+} from "./native-config-import-plan.ts";
 
 const ID = /^[a-f0-9]{64}$/;
 const NAME = /^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,254}$/;
@@ -28,6 +32,8 @@ const ROUTING = [
   "DOCKER_TLS_VERIFY",
   "DOCKER_CERT_PATH",
   "DOCKER_API_VERSION",
+  "CI",
+  "HACK_EXECUTION_MODE",
 ] as const;
 const formats = {
   container: {
@@ -587,6 +593,7 @@ export async function acquireLegacyComposeAdoptionBinding(input: {
     const source = await acquireNativeConfigImportInputs({
       projectRoot: root,
       signal,
+      allowLinkedWorktree: true,
     });
     if (!source.ok) {
       refuse("E_LEGACY_COMPOSE_BINDING_UNSUPPORTED");
@@ -599,6 +606,26 @@ export async function acquireLegacyComposeAdoptionBinding(input: {
     if (!intent) {
       refuse("E_LEGACY_COMPOSE_BINDING_UNSUPPORTED");
     }
+    const mapped = mapLegacyNativeStorageAdoption({
+      configText: source.configText,
+      composeText: source.composeText,
+    });
+    const candidate = mapped.candidate;
+    const layoutSupported = async (selectedSignal?: AbortSignal) => {
+      if (
+        !(
+          candidate &&
+          (await legacyComposeAdoptionLayoutSupported({
+            projectRoot: root,
+            candidate,
+            signal: selectedSignal,
+          }))
+        )
+      ) {
+        refuse("E_LEGACY_COMPOSE_BINDING_UNSUPPORTED");
+      }
+    };
+    await layoutSupported(signal);
     const baseline = await inspectLegacyComposeAdoptionResources({
       root,
       intent,
@@ -625,6 +652,7 @@ export async function acquireLegacyComposeAdoptionBinding(input: {
           refuse("E_LEGACY_COMPOSE_BINDING_CHANGED");
         }
         await source.assertFresh({ signal: currentSignal });
+        await layoutSupported(currentSignal);
         const observed = await inspectLegacyComposeAdoptionResources({
           root,
           intent,
@@ -635,6 +663,7 @@ export async function acquireLegacyComposeAdoptionBinding(input: {
           refuse("E_LEGACY_COMPOSE_BINDING_CHANGED");
         }
         await source.assertFresh({ signal: currentSignal });
+        await layoutSupported(currentSignal);
         cancelled(signal);
         if (JSON.stringify(routing()) !== route) {
           refuse("E_LEGACY_COMPOSE_BINDING_CHANGED");

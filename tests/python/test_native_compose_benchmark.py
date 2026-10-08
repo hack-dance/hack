@@ -1,5 +1,7 @@
 """Offline controls for matched NC03 overhead; no Docker daemon or timed fixture trials."""
+import base64
 import copy
+import hashlib
 import importlib.util
 import json
 import os
@@ -9,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from types import SimpleNamespace
 from unittest import mock
 
 SOURCE = Path(__file__).resolve().parents[2] / "scripts/benchmark-native-compose.py"
@@ -36,7 +39,8 @@ class Planning(unittest.TestCase):
             docker.write_text(f"#!{sys.executable}\nfrom pathlib import Path\nPath({str(marker)!r}).touch()\n")
             docker.chmod(0o700)
             output = Path(root, "must-not-create")
-            result = subprocess.run([sys.executable, str(SOURCE), "--cli", str(docker), "--output-root", str(output)],
+            result = subprocess.run([sys.executable, str(SOURCE), "--cli", str(docker), "--output-root", str(output),
+                                     "--proxy-fixture-receipt", str(Path(root, "absent-receipt.json"))],
                                     env={**os.environ, "PATH": root}, capture_output=True, text=True, timeout=5)
             self.assertEqual(result.returncode, 0, result.stderr)
             plan = json.loads(result.stdout)
@@ -412,6 +416,232 @@ class PreMutationOwnership(unittest.TestCase):
         with self.assertRaisesRegex(benchmark.Failure, "volume ownership changed"):
             fixture.cleanup()
         fixture.bench.docker.assert_not_called()
+
+
+class ProxyFixtureAdapter(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name).resolve()
+        self.root.chmod(0o700)
+        self.public_der = b"synthetic-public-certificate-pin"
+        self.certificate = "-----BEGIN CERTIFICATE-----\n" + base64.b64encode(self.public_der).decode() + "\n-----END CERTIFICATE-----\n"
+        self.receipt = {"fixture_version": 1, "phase": "qualified", "engine_id": "fixture-engine", "docker_endpoint": "unix:///fixture.sock",
+            "proxy_id": "a" * 64, "proxy_name": "nc03-overhead-proxy-" + "b" * 32, "owner_token": "b" * 32,
+            "image_id": "sha256:" + "c" * 64, "network_id": "d" * 64, "started_at": "2026-10-07T00:00:00Z",
+            "ca_sha256": hashlib.sha256(self.public_der).hexdigest(),
+            "canary": {"hostname": "canary-" + "b" * 32 + ".benchmark.invalid", "marker": "e" * 32}}
+        self.path = self.root / "proxy-receipt.json"
+        self.save()
+        args = SimpleNamespace(output_root=str(self.root / "new-output"), cli="/qualified/hack", compiler="/qualified/compiler",
+                               cli_sha256="1" * 64, compiler_sha256="2" * 64)
+        self.bench = benchmark.Benchmark(args)
+        self.bench.env["DOCKER_HOST"] = self.receipt["docker_endpoint"]
+        self.bench.read_proxy_fixture(self.path)
+        self.proxy = {"id": self.receipt["proxy_id"], "image": self.receipt["image_id"], "name": "/" + self.receipt["proxy_name"],
+            "running": True, "started": self.receipt["started_at"], "project": "hack-dev-proxy", "service": "caddy",
+            "owner": self.receipt["owner_token"], "network": self.receipt["network_id"], "networkMode": self.receipt["network_id"],
+            "ports": {}, "publishAll": False, "publishedPorts": {"80/tcp": None, "443/tcp": []},
+            "privileged": False, "networks": {"hack-dev": {"NetworkID": self.receipt["network_id"]}},
+            "mounts": [{"Type": "bind", "Source": "/var/run/docker.sock", "Destination": "/var/run/docker.sock", "RW": False}],
+            "tmpfs": {"/data": benchmark.PRIVATE_TMPFS, "/config": benchmark.PRIVATE_TMPFS}}
+        self.bench.docker = mock.Mock(return_value=self.receipt["proxy_id"])
+        def inspect(kind, *_):
+            if kind == "info":
+                return self.receipt["engine_id"]
+            if kind == "network":
+                return {"id": self.receipt["network_id"], "name": "hack-dev"}
+            return copy.deepcopy(self.proxy)
+        self.bench.json_docker = mock.Mock(side_effect=inspect)
+        self.response = '{"initialized":"initializer-completed","boot":"fresh-boot","marker":null}\n200'
+        self.bench.run = mock.Mock(side_effect=lambda argv, **_: {"stdout": self.certificate if argv[3] == "cat" else self.response})
+
+    def save(self):
+        self.path.write_text(json.dumps(self.receipt))
+        self.path.chmod(0o600)
+
+    def test_exact_fixture_binding_accepts_no_ports_and_reads_only_public_ca(self):
+        binding = self.bench.proxy_binding()
+        self.assertEqual(binding["id"], self.receipt["proxy_id"])
+        self.assertEqual(binding["ca_sha256"], self.receipt["ca_sha256"])
+        argv = self.bench.run.call_args.args[0]
+        self.assertEqual(argv, ["docker", "exec", self.receipt["proxy_id"], "cat", benchmark.ROOT_CA])
+        self.assertNotIn(".Config.Env", benchmark.PROXY_FIXTURE)
+        self.assertEqual(self.bench.run.call_args.kwargs, {"timeout": 5, "output_limit": 16384})
+
+    def test_fixture_refuses_foreign_owner_ports_privilege_extra_network_mount_or_tmpfs(self):
+        changes = [{"owner": "f" * 32}, {"ports": {"80/tcp": [{"HostPort": "80"}]}}, {"privileged": True},
+                   {"networks": {**self.proxy["networks"], "foreign": {"NetworkID": "f" * 64}}},
+                   {"mounts": self.proxy["mounts"] + [{"Type": "volume", "Name": "foreign", "Destination": "/foreign"}]},
+                   {"tmpfs": {"/data": benchmark.PRIVATE_TMPFS, "/config": "rw"}},
+                   {"tmpfs": {**self.proxy["tmpfs"], "/foreign": benchmark.PRIVATE_TMPFS}}]
+        original = copy.deepcopy(self.proxy)
+        for changed in changes:
+            with self.subTest(changed=changed), self.assertRaises(benchmark.Failure):
+                self.proxy.update(changed)
+                self.bench.proxy_binding()
+            self.proxy = copy.deepcopy(original)
+        self.bench.run.assert_not_called()
+
+    def test_fixture_refuses_ca_rotation_and_engine_or_endpoint_replacement(self):
+        self.bench.run.side_effect = None
+        self.bench.run.return_value = {"stdout": "-----BEGIN CERTIFICATE-----\nY2hhbmdlZA==\n-----END CERTIFICATE-----"}
+        with self.assertRaisesRegex(benchmark.Failure, "CA changed"):
+            self.bench.proxy_binding()
+        with self.assertRaisesRegex(benchmark.Failure, "engine or selected"):
+            self.bench.fixture_proxy_binding("foreign-engine", self.receipt["proxy_id"])
+        self.bench.env["DOCKER_HOST"] = "unix:///foreign.sock"
+        with self.assertRaisesRegex(benchmark.Failure, "endpoint changed"):
+            self.bench.proxy_binding()
+
+    def test_publish_all_or_dynamic_host_bindings_refuse_with_empty_portbindings(self):
+        original = copy.deepcopy(self.proxy)
+        for change in ({"publishAll": True},
+                       {"publishedPorts": {"443/tcp": [{"HostIp": "0.0.0.0", "HostPort": "49153"}]}},
+                       {"publishedPorts": {"443/tcp": False}}):
+            with self.subTest(change=change), self.assertRaises(benchmark.Failure):
+                self.proxy.update(change)
+                self.assertEqual(self.proxy["ports"], {})
+                self.bench.proxy_binding()
+            self.proxy = copy.deepcopy(original)
+        self.assertIn(".HostConfig.PublishAllPorts", benchmark.PROXY_FIXTURE)
+        self.assertIn(".NetworkSettings.Ports", benchmark.PROXY_FIXTURE)
+        self.bench.run.assert_not_called()
+
+    def test_changed_receipt_content_or_inode_refuses_before_public_reader(self):
+        self.save()
+        with self.assertRaisesRegex(benchmark.Failure, "receipt changed"):
+            self.bench.proxy_binding()
+        self.bench.read_proxy_fixture(self.path)
+        self.path.rename(self.root / "original-receipt.json")
+        self.save()
+        with self.assertRaisesRegex(benchmark.Failure, "receipt changed"):
+            self.bench.proxy_binding()
+        self.bench.run.assert_not_called()
+
+    def test_symlink_receipt_or_unqualified_shape_refuses(self):
+        alias = self.root / "alias.json"
+        alias.symlink_to(self.path)
+        with self.assertRaises(benchmark.Failure):
+            self.bench.read_proxy_fixture(alias)
+        self.receipt["phase"] = "create-armed"
+        self.save()
+        with self.assertRaisesRegex(benchmark.Failure, "unqualified"):
+            self.bench.read_proxy_fixture(self.path)
+
+    def test_same_fixed_bounded_http_get_post_oracle_is_used_by_both_lanes(self):
+        self.bench.proxy = self.bench.proxy_binding()
+        host = "nc03-" + "f" * 32 + ".benchmark.invalid"
+        requests = []
+        for lane in ("legacy", "native"):
+            fixture = object.__new__(benchmark.Fixture)
+            fixture.bench, fixture.lane, fixture.hostname = self.bench, lane, host
+            fixture.marker, fixture.boot = "1" * 32, None
+            self.assertEqual(fixture.request()["boot"], "fresh-boot")
+            requests.append(next(call for call in reversed(self.bench.run.call_args_list) if call.args[0][3] == "curl"))
+        self.assertEqual(requests[0], requests[1])
+        argv = requests[0].args[0]
+        self.assertEqual(argv[:5], ["docker", "exec", self.receipt["proxy_id"], "curl", "--disable"])
+        for flag, value in (("--proxy", ""), ("--noproxy", "*"), ("--proto", "=http"), ("--max-redirs", "0"),
+                            ("--max-time", "3"), ("--max-filesize", "4096"), ("--header", "Host: " + host)):
+            self.assertEqual(argv[argv.index(flag) + 1], value)
+        self.assertEqual(requests[0].kwargs, {"timeout": 5, "output_limit": 4100})
+        self.response = self.response.replace("null", '"' + fixture.marker + '"')
+        self.assertEqual(fixture.request(write=True)["marker"], fixture.marker)
+        posted = next(call.args[0] for call in reversed(self.bench.run.call_args_list) if call.args[0][3] == "curl")
+        self.assertEqual(posted[posted.index("--data-raw") + 1], fixture.marker)
+        self.assertNotIn("--location", posted)
+
+    def test_status_body_or_binding_errors_cannot_qualify_readiness(self):
+        self.bench.proxy = self.bench.proxy_binding()
+        host = "nc03-" + "f" * 32 + ".benchmark.invalid"
+        for response in ("redirect\n302", "large" * 900 + "\n200", "missing status"):
+            self.response = response
+            with self.subTest(response=response[:20]), self.assertRaises(benchmark.Failure):
+                self.bench.proxy_request(host)
+        self.response = "{}\n200"
+        self.proxy["started"] = "restarted"
+        with self.assertRaises(benchmark.Failure):
+            self.bench.proxy_request(host)
+
+    def test_tls_canary_is_fixed_to_pinned_ca_and_literal_marker(self):
+        self.bench.proxy = self.bench.proxy_binding()
+        self.response = self.receipt["canary"]["marker"] + "\n200"
+        self.bench.proxy_request("ignored", canary=True)
+        argv = next(call.args[0] for call in reversed(self.bench.run.call_args_list) if call.args[0][3] == "curl")
+        self.assertEqual(argv[argv.index("--cacert") + 1], benchmark.ROOT_CA)
+        self.assertEqual(argv[argv.index("--resolve") + 1], self.receipt["canary"]["hostname"] + ":443:127.0.0.1")
+        self.response = "wrong canary\n200"
+        with self.assertRaisesRegex(benchmark.Failure, "TLS canary"):
+            self.bench.proxy_request("ignored", canary=True)
+
+    def test_normal_host80_mode_still_refuses_unpublished_ingress(self):
+        self.bench.proxy_fixture = None
+        self.bench.json_docker.side_effect = lambda kind, *_: "fixture-engine" if kind == "info" else {
+            "id": self.receipt["proxy_id"], "running": True, "network": self.receipt["network_id"], "ports": {}}
+        with self.assertRaisesRegex(benchmark.Failure, "Standard verified HTTP"):
+            self.bench.proxy_binding()
+
+    def test_real_adapter_subprocess_output_and_timeout_bounds_refuse_without_http_fallback(self):
+        real_run = benchmark.Benchmark.run.__get__(self.bench)
+        with self.assertRaises(benchmark.Failure):
+            real_run([sys.executable, "-c", "print('x'*5000)"], cwd=self.root, output_limit=4100, timeout=2)
+        with self.assertRaises(benchmark.Failure):
+            real_run([sys.executable, "-c", "import time; time.sleep(30)"], cwd=self.root, timeout=.03, output_limit=4100)
+        self.assertTrue(self.bench.uncertain)
+
+    def test_proxy_changed_after_http_success_cannot_qualify_readiness(self):
+        self.bench.proxy = self.bench.proxy_binding()
+        host = "nc03-" + "f" * 32 + ".benchmark.invalid"
+        def request(argv, **_):
+            if argv[3] == "cat":
+                return {"stdout": self.certificate}
+            self.proxy["started"] = "restarted-during-request"
+            return {"stdout": self.response}
+        self.bench.run.side_effect = request
+        with self.assertRaisesRegex(benchmark.Failure, "ownership or isolation"):
+            self.bench.proxy_request(host)
+
+    def test_curl_error_never_falls_back_to_host_http(self):
+        self.bench.proxy = self.bench.proxy_binding()
+        fixture = object.__new__(benchmark.Fixture)
+        fixture.bench, fixture.hostname = self.bench, "nc03-" + "f" * 32 + ".benchmark.invalid"
+        fixture.marker, fixture.boot = "1" * 32, None
+        def request(argv, **_):
+            if argv[3] == "cat":
+                return {"stdout": self.certificate}
+            raise benchmark.Failure("curl refused")
+        self.bench.run.side_effect = request
+        with mock.patch.object(benchmark.http.client, "HTTPConnection") as host_http:
+            with self.assertRaisesRegex(benchmark.Failure, "curl refused"):
+                fixture.request()
+            host_http.assert_not_called()
+
+    def test_malformed_app_or_retained_marker_refuses_same_oracle(self):
+        self.bench.proxy = self.bench.proxy_binding()
+        fixture = object.__new__(benchmark.Fixture)
+        fixture.bench, fixture.hostname = self.bench, "nc03-" + "f" * 32 + ".benchmark.invalid"
+        fixture.marker, fixture.boot = "1" * 32, "previous-boot"
+        for body in ("invalid-json", "[]", '{"initialized":"initializer-completed","boot":"new","marker":null}'):
+            self.response = body + "\n200"
+            with self.subTest(body=body), self.assertRaises((benchmark.Failure, ValueError)):
+                fixture.request()
+
+    def test_receipt_parent_mode_or_identity_replacement_refuses_before_reader(self):
+        self.root.chmod(0o755)
+        with self.assertRaisesRegex(benchmark.Failure, "private owned parent"):
+            self.bench.proxy_binding()
+        self.root.chmod(0o700)
+        original = self.root.with_name(self.root.name + "-original")
+        self.root.rename(original)
+        self.root.mkdir(mode=0o700)
+        try:
+            with self.assertRaisesRegex(benchmark.Failure, "parent changed"):
+                self.bench.proxy_binding()
+        finally:
+            self.root.rmdir()
+            original.rename(self.root)
+        self.bench.run.assert_not_called()
 
 
 class Routes(unittest.TestCase):

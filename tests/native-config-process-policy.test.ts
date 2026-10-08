@@ -48,6 +48,9 @@ test("configured init and eventual readiness cannot substitute for actual reapin
   const noInit = evidence();
   noInit.records["init-result"].appPid = 1;
   expect(() => verifyNativeProcessPolicyEvidence(noInit)).toThrow();
+  const malformedPid = evidence();
+  malformedPid.records["init-result"].adoptedPid = 1.5;
+  expect(() => verifyNativeProcessPolicyEvidence(malformedPid)).toThrow();
   const noRetries = evidence();
   noRetries.restart.restartCount = 0;
   expect(() => verifyNativeProcessPolicyEvidence(noRetries)).toThrow();

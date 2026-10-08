@@ -57,7 +57,7 @@ const FORCED = [
   "let received = null;",
   'process.on("SIGUSR1", async () => { if (received !== null) return; received = performance.now(); await record("forced-signal", { signal: "SIGUSR1" }); });',
   'await ready("forced");',
-  'setInterval(async () => { if (received !== null) await record("forced-heartbeat", { signal: "SIGUSR1", elapsedMs: performance.now() - received }); }, 100);',
+  'while (true) { if (received !== null) await record("forced-heartbeat", { signal: "SIGUSR1", elapsedMs: performance.now() - received }); await Bun.sleep(100); }',
 ].join("\n");
 const INIT = [
   RECORD_PROGRAM,
@@ -164,8 +164,10 @@ export function verifyNativeProcessPolicyEvidence(opts: {
     that:
       opts.initEnabled === true &&
       typeof init.appPid === "number" &&
+      Number.isInteger(init.appPid) &&
       init.appPid > 1 &&
       typeof init.adoptedPid === "number" &&
+      Number.isInteger(init.adoptedPid) &&
       init.adoptedPid > 1 &&
       init.parent === 1 &&
       init.initName === "docker-init" &&
@@ -538,9 +540,30 @@ export const nativeConfigProcessPolicyScenario: Scenario = {
       return id;
     };
     const clearReader = async (): Promise<void> => {
+      const selected = (
+        await docker([
+          "ps",
+          "-aq",
+          "--no-trunc",
+          "--filter",
+          `label=${READER_OWNER}=${readerToken}`,
+        ])
+      )
+        .split(/\s+/)
+        .filter(Boolean);
       if (!readerId) {
+        expect({
+          that: selected.length === 0,
+          message:
+            "Uncaptured reader resources must retain the recovery roots instead of being silently abandoned",
+        });
         return;
       }
+      expect({
+        that: selected.length === 1 && selected[0] === readerId,
+        message:
+          "Reader cleanup must select only its originally captured identity",
+      });
       const actual = object(
         await docker([
           "inspect",
@@ -751,7 +774,53 @@ export const nativeConfigProcessPolicyScenario: Scenario = {
         message:
           "Readback generation must start against retained process evidence",
       });
-      await service("observer");
+      const observerId = await service("observer");
+      const observerMounts: unknown = JSON.parse(
+        await docker(["inspect", observerId, "--format", "{{json .Mounts}}"])
+      );
+      expect({
+        that:
+          Array.isArray(observerMounts) &&
+          observerMounts.length === 1 &&
+          isRecord(observerMounts[0]) &&
+          observerMounts[0].Type === "volume" &&
+          observerMounts[0].Name === volume &&
+          observerMounts[0].Destination === "/evidence" &&
+          observerMounts[0].RW === false,
+        message:
+          "The native observer must mount only the exact retained evidence volume read-only",
+      });
+      const writeControl = await raw([
+        "exec",
+        "observer",
+        "--",
+        "bun",
+        "-e",
+        'try { await Bun.write("/evidence/native-observer-write-canary", "unexpected-write"); process.exit(0); } catch(error) { if(error?.code === "EROFS") { process.stdout.write("read-only-volume"); process.exit(23); } process.exit(24); }',
+      ]);
+      expectExit({
+        result: writeControl,
+        codes: [23],
+        message:
+          "A write through the actual native observer must fail on its read-only filesystem",
+      });
+      expect({
+        that: writeControl.stdout.trim() === "read-only-volume",
+        message:
+          "Read-only acceptance must distinguish EROFS from unrelated execution failure",
+      });
+      const canary = await cli([
+        "exec",
+        "observer",
+        "--",
+        "bun",
+        "-e",
+        'process.stdout.write((await Bun.file("/evidence/native-observer-write-canary").exists()) ? "present" : "absent");',
+      ]);
+      expect({
+        that: canary.stdout.trim() === "absent",
+        message: "Rejected native observer writes must leave no marker",
+      });
       const retained = await list("volume");
       expect({
         that:

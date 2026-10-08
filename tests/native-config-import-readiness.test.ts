@@ -100,13 +100,12 @@ test.each([
 test.each([
   { value: ["db", "db"] },
   { value: ["Bad"] },
-  { value: { db: { condition: "service_completed_successfully" } } },
   { value: { db: { required: false } } },
   { value: { db: { restart: true } } },
   { value: { db: { condition: null } } },
   { value: { db: { unknown: CANARY } } },
   { value: { db: "service_started" } },
-])("optional/completed/restart-propagating or malformed dependency refuses %j", ({
+])("optional/restart-propagating or malformed dependency refuses %j", ({
   value: depends_on,
 }) => {
   expect(mapLegacyComposeDependencies(depends_on)).toBeUndefined();

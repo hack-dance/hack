@@ -22,6 +22,116 @@ import {
 } from "../src/lib/native-config-import-plan.ts";
 
 const CANARY = "synthetic-private-build-import";
+test("completed build job preserves authored source and native job build provenance", () => {
+  const result = mapLegacyNativeImport({
+    configText: '{"name":"fixture"}',
+    composeText: JSON.stringify({
+      services: {
+        web: {
+          image: "fixture",
+          depends_on: {
+            builder: { condition: "service_completed_successfully" },
+          },
+        },
+        builder: {
+          build: {
+            context: "../app",
+            dockerfile: "nested/Containerfile",
+            target: "dev",
+          },
+          pull_policy: "build",
+          restart: "no",
+          command: ["seed", "$$HOME"],
+          profiles: ["later"],
+        },
+      },
+    }),
+  });
+  expect(result.report.complete).toBe(true);
+  expect(result.candidate).toMatchObject({
+    jobs: {
+      builder: {
+        build: {
+          context: "app",
+          dockerfile: "nested/Containerfile",
+          target: "dev",
+        },
+        pull_policy: "build",
+        restart: { kind: "no" },
+        command: { exec: ["seed", "$HOME"] },
+        profiles: ["later"],
+      },
+    },
+  });
+  expect(result.candidate).not.toHaveProperty("services.builder");
+  for (const field of ["context", "dockerfile", "target"]) {
+    expect(result.report.fields).toContainEqual(
+      expect.objectContaining({
+        document: "compose",
+        pointer: `/services/builder/build/${field}`,
+        target: `/jobs/builder/build/${field}`,
+      })
+    );
+  }
+  expect(
+    result.report.fields.some((field) =>
+      field.target?.startsWith("/services/builder/build")
+    )
+  ).toBe(false);
+  expect(JSON.stringify(result)).not.toContain("nested/Containerfile");
+});
+
+test("explicit one-shot basic build keeps job restart/health and adoption fences", () => {
+  const source = {
+    build: "..",
+    labels: { "hack.service.one-shot": "true" },
+    restart: "no",
+  };
+  expect(mapped(source).report.complete).toBe(true);
+  for (const restart of ["always", "unless-stopped", "on-failure"]) {
+    refused(mapped({ ...source, restart }), "job_restart_policy_unsupported");
+  }
+  refused(
+    mapped({
+      ...source,
+      healthcheck: {
+        test: ["CMD", "probe"],
+        interval: "1s",
+        timeout: "1s",
+        retries: 1,
+      },
+    }),
+    "job_healthcheck_unsupported"
+  );
+  refused(
+    mapLegacyNativeStorageAdoption({
+      configText: '{"name":"fixture"}',
+      composeText: JSON.stringify({
+        name: "fixture",
+        volumes: { data: {} },
+        services: { builder: { ...source, volumes: ["data:/data"] } },
+      }),
+    }),
+    "unsupported_field"
+  );
+  const planned = planLegacyComposeAdoption({
+    configText: '{"name":"fixture"}',
+    composeText: JSON.stringify({
+      name: "fixture",
+      volumes: { data: {} },
+      services: { builder: { ...source, volumes: ["data:/data"] } },
+    }),
+  });
+  expect(planned.report.supported).toBe(false);
+  expect(planned.intent).toBeUndefined();
+  expect(planned.report.fields).toContainEqual(
+    expect.objectContaining({
+      pointer: "/services/builder",
+      code: "completed_job_adoption_unqualified",
+      status: "refused",
+    })
+  );
+});
 function mapped(service: unknown, inactive = false) {
   return mapLegacyNativeImport({
     configText: '{"name":"fixture"}',

@@ -22,6 +22,7 @@ import * as importInputs from "../src/lib/native-config-import-inputs.ts";
 import { acquireLegacyAdoptionSourceInputs } from "../src/lib/native-config-import-inputs.ts";
 import {
   mapLegacyNativeAdoptionBaseline,
+  mapLegacyNativeImport,
   mapLegacyNativeRetainedBasicBuild,
   mapLegacyNativeStorageAdoption,
 } from "../src/lib/native-config-import-plan.ts";
@@ -148,6 +149,61 @@ test("retained mapper explicitly projects non-enumerable private source fields",
   expect(mapLegacyNativeRetainedBasicBuild(source).candidate).toMatchObject({
     services: { db: { build: { context: "." } } },
   });
+});
+test.each([
+  ["one-shot", false],
+  ["one-shot", true],
+  ["completed", false],
+  ["completed", true],
+] as const)("preview-qualified %s build job (inactive=%s) cannot acquire retained build source", async (kind, inactive) => {
+  const db = {
+    build: "..",
+    ...(inactive ? { profiles: ["later"] } : {}),
+    ...(kind === "one-shot"
+      ? { labels: { "hack.service.one-shot": "true" } }
+      : {}),
+  };
+  composeText = JSON.stringify({
+    name: "fixture",
+    services: {
+      db,
+      ...(kind === "completed"
+        ? {
+            web: {
+              image: "fixture",
+              depends_on: {
+                db: { condition: "service_completed_successfully" },
+              },
+            },
+          }
+        : {}),
+    },
+  });
+  await writeFile(join(root, ".hack/docker-compose.yml"), composeText);
+  const inputs = { configText: '{"name":"fixture"}', composeText };
+  expect(mapLegacyNativeImport(inputs).report.complete).toBe(true);
+  const retained = mapLegacyNativeRetainedBasicBuild(inputs);
+  expect(retained.candidate).toBeUndefined();
+  expect(retained.report.fields).toContainEqual(
+    expect.objectContaining({
+      pointer: "/services/db",
+      status: "refused",
+      code: "completed_job_adoption_unqualified",
+    })
+  );
+  const source = await acquireLegacyAdoptionSourceInputs({
+    projectRoot: root,
+  });
+  if (!source.ok) {
+    throw new Error("Synthetic source setup refused; values omitted.");
+  }
+  const reader = spyOn(importInputs, "readNativeConfigImportSourceFile");
+  try {
+    await red(acquireLegacyComposeBuildSource({ source }));
+    expect(reader).not.toHaveBeenCalled();
+  } finally {
+    reader.mockRestore();
+  }
 });
 test("root context pins included source and keeps private proof/candidate/callbacks out of reports", async () => {
   const captured = await acquire();

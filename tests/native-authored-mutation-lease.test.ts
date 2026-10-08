@@ -12,6 +12,7 @@ test("native admission borrows the active material lease and cannot retain its g
     const lock = createNativeComposePrivateMutationLock({
       lockPath: join(root, "mutation.lock"),
       recoveryPath: join(root, "mutation.recovery"),
+      parent: undefined,
       check: () => Promise.resolve(),
     });
     let retained: (() => Promise<void>) | undefined;

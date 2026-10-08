@@ -30,6 +30,37 @@ type Acceptance = {
   readonly raw: Raw;
 };
 
+/** Check previously verified origins without asking `open` to select during pending effects. */
+export function nativeRoutedRunPinnedOriginCheck(opts: {
+  readonly checkouts: readonly (Checkout & {
+    readonly origins: readonly string[];
+  })[];
+  readonly tls: (origin: string, marker: string) => Promise<void>;
+  readonly assertIngress: () => Promise<void>;
+}): (checkout: Checkout) => Promise<void> {
+  const pinned = new Map(
+    opts.checkouts.map((checkout) => [
+      checkout.root,
+      { marker: checkout.marker, origins: [...checkout.origins] },
+    ])
+  );
+  if (pinned.size !== opts.checkouts.length) {
+    throw new Error("Routed run requires distinct pinned fixture checkouts");
+  }
+  return async (checkout) => {
+    const selected = pinned.get(checkout.root);
+    if (!selected || selected.marker !== checkout.marker) {
+      throw new Error(
+        "Routed run refuses an unpinned fixture origin selection"
+      );
+    }
+    for (const origin of selected.origins) {
+      await opts.tls(origin, selected.marker);
+    }
+    await opts.assertIngress();
+  };
+}
+
 function object(text: string): Record<string, unknown> {
   const parsed: unknown = JSON.parse(text);
   if (!isRecord(parsed)) {

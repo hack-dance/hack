@@ -14,6 +14,12 @@ build refuses missing prerequisites; it does not install toolchains:
 mise exec -- scripts/build-native-candidate.sh /absolute/new/hack-native-bundle
 ```
 
+The executor includes `native-config-plan` for explicitly selected authored
+projects. Packaging checks the copied executable's pure native planner with a
+private synthetic project and requires the candidate home to remain empty. This
+checks compiled planning capability; it does not start a provider, change the
+default backend or qualify live authored execution.
+
 The destination must not exist. The bundle contains `hack-native`, the static Linux
 ARM64 `hack-relay-guest`, compiled normal CLI `hack-cli`, the `hack-v5` entrypoint,
 the compiled `hack-config-compiler`, generated `hack.project.schema.json` and

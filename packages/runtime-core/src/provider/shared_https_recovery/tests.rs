@@ -349,7 +349,7 @@ fn live_pinned_executable_refuses_quiescence() {
     let (bytes, _) = read_file(&f.paths.source.join("configuration.json"), MAX_FILE, true).unwrap();
     let mut config: Configuration = serde_json::from_slice(&bytes).unwrap();
     config.binding.caddy_binary = f.home.join("live-caddy");
-    fs::copy("/bin/sleep", &config.binding.caddy_binary).unwrap();
+    crate::provider::test_executable::sleeping_executable(&config.binding.caddy_binary);
     fs::set_permissions(
         &config.binding.caddy_binary,
         fs::Permissions::from_mode(0o700),
@@ -361,10 +361,23 @@ fn live_pinned_executable_refuses_quiescence() {
         .arg("10")
         .spawn()
         .unwrap();
-    std::thread::sleep(Duration::from_millis(50));
+    let deadline = std::time::Instant::now() + Duration::from_secs(1);
+    let mut live_before = false;
+    while std::time::Instant::now() < deadline && child.try_wait().unwrap().is_none() {
+        if identity::observe(child.id() as i32).is_ok_and(|observed| {
+            observed.executable == config.binding.caddy_binary && observed.start_micros > 0
+        }) {
+            live_before = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
     let refusal = prove_quiescence(&config, None);
+    let live_after = child.try_wait().unwrap().is_none();
     child.kill().unwrap();
     child.wait().unwrap();
+    assert!(live_before, "owned executable did not become observable");
+    assert!(live_after, "owned executable exited during quiescence");
     assert!(refusal.is_err());
 }
 

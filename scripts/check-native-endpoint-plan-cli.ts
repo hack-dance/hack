@@ -368,7 +368,7 @@ try {
   );
   await authored(checkout, project);
   const runtime = await invoke(
-    ["up"],
+    ["up", "--detach"],
     checkout,
     { HACK_RUNTIME_BACKEND: "native" },
     false
@@ -378,7 +378,7 @@ try {
       (runtime.stdout + runtime.stderr).includes(
         "E_NATIVE_PROJECT_UNSUPPORTED"
       ),
-    "explicit native VM backend remains fenced"
+    "unsupported native detached up refuses before input or runtime work"
   );
   assert(
     !(await Bun.file(marker).exists()),

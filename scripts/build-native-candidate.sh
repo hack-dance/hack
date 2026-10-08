@@ -54,7 +54,7 @@ for path in .hack-local .hack-local/native-candidate-target .hack-local/native-c
 done
 # The isolated target directory also keeps the checkout-bound development build intact.
 cargo build --locked --release --jobs 2 --bin hack-native --bin hack-mcp-adapter --bin hack-mcp-owner \
-  --features installed-candidate,native-http-probe,native-stream-relay,environment-launcher,shared-mcp \
+  --features installed-candidate,native-config-plan,native-http-probe,native-stream-relay,environment-launcher,shared-mcp \
   --manifest-path packages/runtime-core/Cargo.toml \
   --target-dir .hack-local/native-candidate-target
 CARGO_INCREMENTAL=0 \
@@ -91,6 +91,7 @@ chmod 600 "$out/hack.project.schema.json" "$out/hack.local.schema.json"
 /usr/bin/codesign --force --sign - --preserve-metadata=entitlements,flags,runtime "$out/hack-cli"
 /usr/bin/codesign --verify --strict "$out/hack-cli"
 /usr/bin/codesign --verify --strict "$out/hack-native"
+bun scripts/check-native-authored-artifact.ts "$out/hack-native"
 bun build scripts/run-mcp-socket-backend.ts --compile --outfile .hack-local/native-candidate-target/release/hack-mcp-backend
 /usr/bin/codesign --force --sign - --preserve-metadata=entitlements,flags,runtime .hack-local/native-candidate-target/release/hack-mcp-backend
 for artifact in hack-mcp-adapter hack-mcp-owner hack-mcp-backend; do

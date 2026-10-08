@@ -711,7 +711,7 @@ mod tests {
         let root = std::env::temp_dir().join(format!("hack-identity-running-{suffix}"));
         std::fs::create_dir(&root).unwrap();
         let binary = root.join("sleep");
-        std::fs::copy("/bin/sleep", &binary).unwrap();
+        crate::provider::test_executable::sleeping_executable(&binary);
         assert!(!executable_running(&binary).unwrap());
         let mut child = std::process::Command::new(&binary)
             .arg("30")

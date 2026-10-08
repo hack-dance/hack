@@ -106,6 +106,21 @@ records still refuse; they grant no inspection, cleanup or restore authority. A 
 without native input support refuses retained native journals before more graph
 work. Existing Compose v1 codecs, bindings and paths retain their contracts.
 
+On macOS, `provider::graph::native::foreground` adds an explicit library owner for
+this same subset. Its private `native-graph-owner` record and authenticated v2
+`native-graph-control` status/cleanup protocol bind the native review, exact
+process incarnation, directory, socket, file and retained per-run lock. Direct
+run/cleanup and foreground publication exclude each other under that lock.
+Cancellation fences startup before admission and subsequent effects. Cleanup
+retains stop failures by admitted workload name, and retires the publication only
+after exact cleanup succeeds. Replies bind their requested action and immutable
+admitted membership. A cleanup reply crosses the already authenticated connection
+after retirement and requires unchanged parent/lock identities, absent publication
+paths and the exact durable removed journal. Changed current membership and
+unknown native failure-observation fields refuse. Failed or abandoned publications preserve evidence;
+they never authorize adoption, restart or dead-owner recovery. This owner has no
+ordinary frontend selection yet and does not implement reactive health or hooks.
+
 The optional feature exposes this bounded consumer through a distinct public CLI:
 `graph native plan --source-file FILE --json`, then
 `graph native run --source-file FILE --expect-review SHA --json`.
@@ -114,13 +129,81 @@ are explicit image-only prerequisites, not ordinary project startup. Their proje
 network does not publish ports or grant host-service access. Normal native `hack up`
 continues to require the full source/storage/routing/host and foreground-owner contract.
 
+On macOS, `graph native serve` accepts the same source, reviewed identity and private
+stdin options as `run`, and keeps the owner in the foreground until TERM/INT or
+`graph native control --run-id RUN --action cleanup --json`. Its first stdout line is
+the v2 `native-graph-foreground-ready` envelope, binding run, review and admitted
+receipt; its final JSON receipt follows owned shutdown. Authenticated `control`
+with `--action status` returns the exact admitted snapshot. Direct cleanup refuses
+while this owner is published. Serve/control on other platforms refuse before
+reading private stdin or using the provider. These explicit candidate commands
+do not activate ordinary native `hack up`.
+
+The Bun native-source process adapter validates this separate wire format and
+authenticates status and checks its admitted readiness conditions before the
+readiness callback. The selected status request bounds draining after its owned
+child exits, even if descendants retain output pipes. Cancellation or owner exit
+during that handshake prevents publication and waits for owned process shutdown.
+The caller must still recheck selected input before publication and inspect the
+durable native journal after exit; process completion alone does not prove cleanup.
+Its separate `native-authored-project-run` v2 artifact records the original native
+receipt in excluded private storage. It never supplies a Compose plan ID or grants
+cleanup authority; retirement requires unchanged file identity and matching Removed
+evidence. Native startup admission additionally holds an exact process-owned lock
+through the foreground lifetime and publishes a separate hash-only
+`native-authored-project-start` v2 intent before spawning the consumer. Ready
+publication must match that unchanged intent. Failed or interrupted starts retain
+it and refuse a new start, including after ready-file retirement. Only a caller
+that authenticated the exact durable Removed journal can retire the intent;
+missing ready files, expired timeouts and dead processes do not grant cleanup or
+replay. The strict Compose v1 reader and its artifact path remain unchanged.
+Command integration and live frontend acceptance remain gates.
+
+Held startup admission can also publish the exact public source envelope in that
+excluded storage. It captures profiles, overlay and closed names-only metadata
+before asynchronous work, binds the source inode and bytes to its admission, and
+refuses source removal while startup or ready evidence remains. It does not parse
+authored policy or acquire values. Ready publication accepts a synchronous owner
+guard after the final asynchronous authority checks, immediately before linking
+the mapping; the consuming caller must supply its process and cancellation guard.
+Guard returns must be `undefined`. Accidental asynchronous or other return values
+refuse publication, and rejected promises are consumed without printing their details.
+
+The `serveNativeAuthoredProject` owner connects these boundaries without
+Compose normalization: shared input preparation, native source review, durable
+startup intent, compiler-selected private source keys over stdin, authenticated
+readiness and guarded run publication. The review must match the canonical
+project/branch namespace before intent reservation or private delivery. It holds
+admission through foreground exit and preserves the first parsed runtime receipt
+before status or input freshness checks; that observation grants no ready authority.
+It checks this original binding against a fresh native journal inspection before
+retiring mappings, intent and source. Missing, changed or live cleanup evidence
+retains the attempt and refuses replay. Input acquisition shares the original Bun
+startup deadline; it does not renew that budget for each subprocess. This component
+is selected only by explicit native backend foreground `up` on macOS. Detached,
+JSON, recovery, subset and other lifecycle requests refuse before input acquisition.
+Its fake driver tests and effect-free compiler interop do not qualify the installed
+frontend, provider or full authored corpus. See the separate
+[command contract](../../docs/reference/native-authored-commands.md).
+
+Shared Bun input preparation accepts the native source's explicit compiler branch
+context. It binds that branch into resolve and environment planning without
+implicit Git or global-domain discovery, matching the native source's local hash.
+Omitting this context preserves the existing Compose preparation behavior.
+
+Native-source plan and inspect requests have a separate opt-in pipe-lifetime
+bound for those exact read-only arguments. They reject private stdin and other
+actions; the default client and Compose requests retain their prior behavior.
+A closed native snapshot parser binds inspection to its reviewed source and,
+after readiness, the original admitted owner, boot and resource identities.
+
 The stable, absolute source file is a public v2 envelope with
 `kind: "native-graph-source"`, `project`, optional canonical `branch`, 32-hex `run`,
 optional `profiles`, and compiler-owned `env_metadata`. Its `overlay` is `"inherit"`
 (also the omission default), `"base"`, or `{"named":"NAME"}`; null refuses. The source
 and authored files are rechecked before private preparation and effects. It returns
 a native `review_id`; Compose plan IDs and normalized-input fields are not accepted.
-Optional `run --environment-stdin` receives a bounded private pipe envelope with
+Optional `run|serve --environment-stdin` receives a bounded private pipe envelope with
 `version: 2`, `kind: "native-graph-environment"`, `review`, `run`,
 `lifetime_seconds` (1..300), and selected source-keyed `services`. Public selection
 and review comparison happen before reading this descriptor. The old private v1

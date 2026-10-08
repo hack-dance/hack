@@ -255,10 +255,10 @@ mod tests {
                 let directory = owner.real_data_dir(&pool.candidate).unwrap();
                 fs::write(directory.join("agent.pid"), record).unwrap();
             }
-            // Run a copied executable at this candidate's exact provider path.
+            // Run an owned executable at this candidate's exact provider path.
             let provider = binary(&pool.candidate);
             fs::create_dir_all(provider.parent().unwrap()).unwrap();
-            fs::copy("/bin/sleep", &provider).unwrap();
+            crate::provider::test_executable::sleeping_executable(&provider);
             let mut running = std::process::Command::new(&provider)
                 .arg("30")
                 .spawn()

@@ -1,6 +1,10 @@
 import { expect, test } from "bun:test";
+import { join } from "node:path";
 import { isRecord } from "../src/lib/guards.ts";
 import { renderNativeCompose } from "../src/lib/native-compose-renderer.ts";
+import { compileNativeConfig } from "../src/lib/native-config-compiler.ts";
+import { mapLegacyNativeImport } from "../src/lib/native-config-import-plan.ts";
+import { stringAdoptionWorkerSources } from "./e2e/scenarios/native-compose-adoption-worktrees.ts";
 import { composeFixture } from "./helpers/native-compose.ts";
 
 const configTest =
@@ -107,6 +111,279 @@ configTest(
       },
     });
     expect(JSON.stringify(result)).not.toContain("hostile-interpolation-value");
+  }
+);
+
+configTest(
+  "legacy dollar-pair argv matches real compiler plan and Compose normalization",
+  async () => {
+    const source = {
+      name: "fixture",
+      services: {
+        web: {
+          image: "fixture/web:1",
+          command: ["serve", "$${AMBIENT}", "$$", "$$$$", ""],
+          entrypoint: ["/bin/echo", "prefix-$$HOME"],
+        },
+        inactive: {
+          image: "fixture/optional:1",
+          profiles: ["qa"],
+          command: ["optional", "$${INACTIVE}"],
+        },
+      },
+    };
+    const mapped = mapLegacyNativeImport({
+      configText: '{"name":"fixture"}',
+      composeText: JSON.stringify(source),
+    });
+    expect(mapped.report.complete).toBe(true);
+    expect(mapped.candidate).toBeDefined();
+    for (const profiles of [[], ["qa"]]) {
+      const compiled = await compileNativeConfig({
+        input: new TextEncoder().encode(JSON.stringify(mapped.candidate)),
+        binary: join(import.meta.dir, "../dist/hack-config-compiler"),
+        profiles,
+      });
+      expect(compiled.ok).toBe(true);
+      if (!compiled.ok) {
+        continue;
+      }
+      const fixture = composeFixture({
+        services: {
+          web: { image: "fixture/web:1" },
+          inactive: { image: "fixture/optional:1" },
+        },
+      });
+      const selected = profiles.length ? ["web", "inactive"] : ["web"];
+      fixture.environmentPlan.workloads = Object.fromEntries(
+        selected.map((name) => [name, {}])
+      );
+      fixture.managedValues = Object.fromEntries(
+        selected.map((name) => [name, {}])
+      );
+      const generated = renderNativeCompose({
+        ...fixture,
+        plan: compiled.plan,
+      });
+      const original = await normalized({
+        json: JSON.stringify(source),
+        profiles,
+      });
+      const actual = await normalized({ json: generated.json, profiles });
+      expect(Object.keys(generated.document.services).sort()).toEqual(
+        [...selected].sort()
+      );
+      for (const name of selected) {
+        const sourceService = isRecord(original.services)
+          ? original.services[name]
+          : undefined;
+        const generatedService = isRecord(actual.services)
+          ? actual.services[name]
+          : undefined;
+        expect(isRecord(sourceService)).toBe(true);
+        expect(isRecord(generatedService)).toBe(true);
+        if (isRecord(sourceService) && isRecord(generatedService)) {
+          expect(generatedService.command).toEqual(sourceService.command);
+          expect(generatedService.entrypoint).toEqual(sourceService.entrypoint);
+        }
+      }
+      expect(JSON.stringify(actual)).not.toContain(
+        "hostile-interpolation-value"
+      );
+    }
+  }
+);
+
+configTest(
+  "Compose string words match real compiler and renderer exec argv for selected profiles",
+  async () => {
+    const source = {
+      name: "fixture",
+      services: {
+        web: {
+          image: "fixture/web:1",
+          command: "  /bin/echo   'two words' \"\" a\\ b $${AMBIENT} $$$$ ",
+          entrypoint: " /bin/sh -c 'printf \"a b\"' ",
+        },
+        cleared: {
+          image: "fixture/cleared:1",
+          command: " /bin/echo clear ",
+          entrypoint: "",
+        },
+        clearspace: {
+          image: "fixture/clearspace:1",
+          command: "/bin/echo clear",
+          entrypoint: " \t ",
+        },
+        defaults: {
+          image: "fixture/defaults:1",
+          command: null,
+          entrypoint: null,
+        },
+        omitted: { image: "fixture/omitted:1" },
+        joined: {
+          image: "fixture/joined:1",
+          command: "echo 'a'\"b\"c 'a\\ b'",
+        },
+        multiline: {
+          image: "fixture/multiline:1",
+          command: "echo\ta\nb",
+        },
+        escaped: {
+          image: "fixture/escaped:1",
+          command: 'echo a\\ b a\\"b',
+        },
+        doubleescape: {
+          image: "fixture/doubleescape:1",
+          command: 'echo "a\\ b" "a\\qb"',
+        },
+        lineescape: {
+          image: "fixture/lineescape:1",
+          command: "echo a\\\nb",
+        },
+        comment: {
+          image: "fixture/comment:1",
+          command: "echo #comment 'a && b'",
+        },
+        "worker-entrypoint": {
+          image: "fixture/worker-entrypoint:1",
+          ...stringAdoptionWorkerSources["string-entrypoint"],
+        },
+        "worker-cleared": {
+          image: "fixture/worker-cleared:1",
+          ...stringAdoptionWorkerSources["string-cleared"],
+        },
+        inactive: {
+          image: "fixture/inactive:1",
+          profiles: ["qa"],
+          command: "printf 'later arg' $$LATER",
+          entrypoint: " /bin/echo ",
+        },
+      },
+    };
+    const mapped = mapLegacyNativeImport({
+      configText: '{"name":"fixture"}',
+      composeText: JSON.stringify(source),
+    });
+    expect(mapped.report.complete).toBe(true);
+    expect(mapped.candidate).toBeDefined();
+    for (const profiles of [[], ["qa"]]) {
+      const compiled = await compileNativeConfig({
+        input: new TextEncoder().encode(JSON.stringify(mapped.candidate)),
+        binary: join(import.meta.dir, "../dist/hack-config-compiler"),
+        profiles,
+      });
+      expect(compiled.ok).toBe(true);
+      if (!compiled.ok) {
+        continue;
+      }
+      const selected = profiles.length
+        ? [
+            "web",
+            "cleared",
+            "clearspace",
+            "defaults",
+            "omitted",
+            "joined",
+            "multiline",
+            "escaped",
+            "doubleescape",
+            "lineescape",
+            "comment",
+            "worker-entrypoint",
+            "worker-cleared",
+            "inactive",
+          ]
+        : [
+            "web",
+            "cleared",
+            "clearspace",
+            "defaults",
+            "omitted",
+            "joined",
+            "multiline",
+            "escaped",
+            "doubleescape",
+            "lineescape",
+            "comment",
+            "worker-entrypoint",
+            "worker-cleared",
+          ];
+      const fixture = composeFixture({
+        services: Object.fromEntries(
+          selected.map((name) => [name, { image: `fixture/${name}:1` }])
+        ),
+      });
+      fixture.environmentPlan.workloads = Object.fromEntries(
+        selected.map((name) => [name, {}])
+      );
+      fixture.managedValues = Object.fromEntries(
+        selected.map((name) => [name, {}])
+      );
+      const generated = renderNativeCompose({
+        ...fixture,
+        plan: compiled.plan,
+      });
+      const original = await normalized({
+        json: JSON.stringify(source),
+        profiles,
+      });
+      const actual = await normalized({ json: generated.json, profiles });
+      expect(Object.keys(generated.document.services).sort()).toEqual(
+        [...selected].sort()
+      );
+      for (const name of selected) {
+        const sourceService = isRecord(original.services)
+          ? original.services[name]
+          : undefined;
+        const generatedService = isRecord(actual.services)
+          ? actual.services[name]
+          : undefined;
+        expect(isRecord(sourceService)).toBe(true);
+        expect(isRecord(generatedService)).toBe(true);
+        if (isRecord(sourceService) && isRecord(generatedService)) {
+          expect(generatedService.command).toEqual(sourceService.command);
+          expect(generatedService.entrypoint).toEqual(sourceService.entrypoint);
+        }
+      }
+      expect(JSON.stringify(actual)).not.toContain(
+        "hostile-interpolation-value"
+      );
+    }
+  }
+);
+
+configTest(
+  "raw unpaired dollars cannot become accepted pairs after Compose word splitting",
+  async () => {
+    for (const command of [
+      "echo $\\$AMBIENT",
+      "echo $''$AMBIENT",
+      "echo '$' '$AMBIENT'",
+    ]) {
+      const source = {
+        name: "fixture",
+        services: { web: { image: "fixture/web:1", command } },
+      };
+      const original = await normalized({ json: JSON.stringify(source) });
+      expect(JSON.stringify(original)).toContain("hostile-interpolation-value");
+      const mapped = mapLegacyNativeImport({
+        configText: '{"name":"fixture"}',
+        composeText: JSON.stringify(source),
+      });
+      expect(mapped.report.complete).toBe(false);
+      expect(mapped.candidate).toBeUndefined();
+      expect(mapped.report.fields).toContainEqual(
+        expect.objectContaining({
+          pointer: "/services/web/command",
+          status: "refused",
+          code: "invalid_or_ambiguous_value",
+        })
+      );
+      expect(JSON.stringify(mapped)).not.toContain(
+        "hostile-interpolation-value"
+      );
+    }
   }
 );
 

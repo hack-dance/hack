@@ -1,6 +1,7 @@
 import { resolve } from "node:path";
 import { isRecord } from "./guards.ts";
 import { legacyComposeAdoptionLayoutSupported } from "./native-compose-adoption-contract.ts";
+import { retainLegacyAdoptionLocalRefusal } from "./native-compose-adoption-local.ts";
 import {
   type LegacyComposeStorageIntent,
   planLegacyComposeAdoption,
@@ -14,7 +15,7 @@ import {
   NativeComposeOwnershipError,
 } from "./native-compose-ownership.ts";
 import {
-  acquireNativeConfigImportInputs,
+  acquireLegacyAdoptionSourceInputs,
   type NativeConfigImportSourceIdentity,
 } from "./native-config-import-inputs.ts";
 import {
@@ -262,7 +263,7 @@ export type LegacyComposeVerifiedBinding = {
 
 type ProjectedPreparation = Pick<
   Awaited<ReturnType<LegacyComposeAdoptionProjection["resolve"]>>,
-  "candidate" | "composeFiles" | "metadata" | "projectionProof"
+  "candidate" | "composeFiles" | "metadata" | "projectionProof" | "localFields"
 >;
 
 /** Canonical ordered owner paths only; observations cannot introduce caller-selected override authority. */
@@ -601,6 +602,7 @@ export type LegacyComposeAdoptionBinding = {
   }>;
 };
 function translate(error: unknown, signal?: AbortSignal): never {
+  retainLegacyAdoptionLocalRefusal(error);
   cancelled(signal);
   if (error instanceof LegacyComposeAdoptionBindingError) {
     throw error;
@@ -629,6 +631,7 @@ export async function acquireLegacyComposeAdoptionBinding(input: {
   readonly projectRoot: string;
   readonly signal?: AbortSignal;
   readonly timeoutMs?: number;
+  readonly binary?: string;
 }): Promise<LegacyComposeAdoptionBinding> {
   let signal: AbortSignal | undefined;
   try {
@@ -636,9 +639,10 @@ export async function acquireLegacyComposeAdoptionBinding(input: {
     const root = selected.root;
     signal = selected.signal;
     const timeoutMs = input.timeoutMs;
+    const binary = input.binary;
     const route = JSON.stringify(routing());
     cancelled(signal);
-    const source = await acquireNativeConfigImportInputs({
+    const source = await acquireLegacyAdoptionSourceInputs({
       projectRoot: root,
       signal,
       allowLinkedWorktree: true,
@@ -677,6 +681,7 @@ export async function acquireLegacyComposeAdoptionBinding(input: {
       projection = await LegacyComposeAdoptionProjection.acquire({
         source,
         signal,
+        binary,
       });
       const resolved = await projection.resolve({ signal });
       projected = Object.freeze({
@@ -684,6 +689,7 @@ export async function acquireLegacyComposeAdoptionBinding(input: {
         composeFiles: resolved.composeFiles,
         metadata: resolved.metadata,
         projectionProof: resolved.projectionProof,
+        localFields: resolved.localFields,
       });
     }
     const layoutSupported = async (selectedSignal?: AbortSignal) => {

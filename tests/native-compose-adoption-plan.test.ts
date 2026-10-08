@@ -61,6 +61,43 @@ test("strict original fields yield only private identity intent and public prove
   expect(Object.isFrozen(result.intent?.volumes)).toBe(true);
   expect(Object.isFrozen(result.report.fields)).toBe(true);
 });
+test("adoption maps paired Compose dollars without changing retained resource intent", () => {
+  const composeText = source({
+    services: {
+      db: {
+        image: CANARY,
+        command: ["serve", "$${LITERAL}", "$$$$"],
+        entrypoint: ["db", "$$HOME"],
+        volumes: ["data:/var/lib/data"],
+      },
+    },
+  });
+  const result = plan(composeText);
+  expect(result.report.supported).toBe(true);
+  expect(result.intent?.volumes).toEqual([
+    { storage: "data", name: "fixture_data" },
+  ]);
+  expect(result.intent?.mounts).toEqual([
+    {
+      service: "db",
+      storage: "data",
+      target: "/var/lib/data",
+      readOnly: false,
+    },
+  ]);
+  expect(
+    result.report.fields.find(
+      (field) => field.pointer === "/services/db/command/1"
+    )
+  ).toMatchObject({ status: "normalized", code: "escaped_dollar_literal" });
+  expect(
+    result.report.fields.find(
+      (field) => field.pointer === "/services/db/entrypoint/1"
+    )
+  ).toMatchObject({ status: "normalized", code: "escaped_dollar_literal" });
+  expect(JSON.stringify(result)).not.toContain("${LITERAL}");
+  expect(JSON.stringify(result)).not.toContain(CANARY);
+});
 test("authored exact volume names and read-only long mounts retain identity", () => {
   const result = plan(
     source({

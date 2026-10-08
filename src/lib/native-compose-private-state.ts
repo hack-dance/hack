@@ -520,6 +520,9 @@ export function createNativeComposePrivateMutationLock(opts: {
 
   return {
     withLock,
+    /** Native startup admission uses the same active lease without material authority. */
+    withHeldLock: <T>(run: (assertHeld: () => Promise<void>) => Promise<T>) =>
+      withLock((lease) => run(lease.assertHeld)),
     async recoverInterruptedLock() {
       await check();
       await requireAbsentGuard(recoveryPath);

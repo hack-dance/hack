@@ -10,6 +10,7 @@ import {
 } from "./cli-result.ts";
 import { resolveComposeStartupTimeoutMs } from "./compose-startup-budget.ts";
 import { isRecord } from "./guards.ts";
+import { tryLegacyComposeAdoptedCommand } from "./native-compose-adoption-command.ts";
 import {
   assertNativeComposeAfterInputsUnchanged,
   prepareNativeComposeAfterHooks,
@@ -1128,6 +1129,10 @@ function validateNativeOptions(options: NativeComposeCommandOptions): boolean {
 export async function tryNativeComposeCommand(
   options: NativeComposeCommandOptions
 ): Promise<number | null> {
+  const adopted = await tryLegacyComposeAdoptedCommand(options);
+  if (adopted !== null) {
+    return adopted;
+  }
   const selected = await selectNativeComposeProject(options);
   if (!selected) {
     return null;

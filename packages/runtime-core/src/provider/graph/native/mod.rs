@@ -2,6 +2,10 @@
 use super::*;
 use crate::{project::native::NativeInputs, provider::native_input};
 pub mod selection;
+mod journal;
+mod runtime;
+pub use runtime::{inspect, run, cleanup};
+pub use journal::{Phase, Receipt};
 
 /// Public engine configuration only, deliberately without Debug/Serialize.
 /// No image inspection, private staging, journal or engine effect is performed here.

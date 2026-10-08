@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{collections::BTreeMap, time::Instant};
 pub use storage::{load, publish};
+pub(in crate::provider) use storage::read_file;
 
 const MAX_ARTIFACT_BYTES: usize = 8192;
 const IDENTITY_DOMAIN: &[u8] = b"hack.native-graph-review/v1\0";
@@ -193,6 +194,9 @@ impl Prepared {
     }
     pub fn remaining(&self) -> Result<Instant, CandidateError> {
         self.deadline.to_instant()
+    }
+    pub(in crate::provider) fn has_private_delivery(&self) -> bool {
+        !self.environments.is_empty()
     }
     /// Transfer once; a future consumer must retain the deadline and recheck effect admission.
     pub fn into_parts(

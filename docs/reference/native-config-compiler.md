@@ -59,6 +59,13 @@ reviewed compiler; ordinary standalone installations need no override. Keep the
 compiled CLI and compiler together when relocating executables. The slim shell
 wrapper retains its configured absolute installation path.
 
+Compiler subprocess reads remain bounded and cancelable. Successful completion
+requires the direct child to be reaped and both output streams to close; it then
+releases process-group cleanup authority. A leader exit while inherited pipes
+remain open does not complete the invocation. Timeout, cancellation or an output
+failure still cleans up that active owned group and reaps the direct child. A
+fully completed invocation never signals its former process group.
+
 ## Supported authored core
 
 The pure compiler also accepts [named file inputs](native-config-files.md), with

@@ -1,5 +1,6 @@
 import { isRecord } from "./guards.ts";
 import { literalComposeArg } from "./native-config-import-argv.ts";
+import { mapLegacyComposeBuild } from "./native-config-import-build.ts";
 import {
   mapLegacyComposeFileDeclaration,
   mapLegacyComposeFileGrant,
@@ -187,6 +188,7 @@ function mapLegacyNativeInput(opts: {
     candidate,
     mark,
     refuse,
+    buildPreview: opts.purpose === "preview",
     jobPreview: opts.purpose !== "adoption-baseline",
   });
   if (opts.purpose === "preview") {
@@ -205,7 +207,10 @@ function mapLegacyNativeInput(opts: {
 }
 
 function candidateWorkload(candidate: Record<string, unknown>, name: string) {
-  for (const namespace of [candidate.services, candidate.jobs]) {
+  for (const key of ["services", "jobs"]) {
+    const namespace = Object.hasOwn(candidate, key)
+      ? candidate[key]
+      : undefined;
     if (isRecord(namespace) && Object.hasOwn(namespace, name)) {
       return namespace[name];
     }
@@ -223,7 +228,10 @@ function workloadTarget(
     return target;
   }
   const name = target.slice(prefix.length).split("/")[0];
-  return name && isRecord(candidate.jobs) && Object.hasOwn(candidate.jobs, name)
+  return name &&
+    Object.hasOwn(candidate, "jobs") &&
+    isRecord(candidate.jobs) &&
+    Object.hasOwn(candidate.jobs, name)
     ? target.replace(prefix, "/jobs/")
     : target;
 }
@@ -240,7 +248,7 @@ export function mapLegacyNativeImport(opts: {
   });
 }
 
-/** Retained resource planning must not inherit preview-only job or file authority. */
+/** Retained resource planning must not inherit preview-only build, file or job authority. */
 export function mapLegacyNativeAdoptionBaseline(opts: {
   readonly configText: string;
   readonly composeText: string;
@@ -308,7 +316,7 @@ function mapFileGrantEntries(
     readonly kind: "config" | "secret";
     readonly grants: unknown;
     readonly pointer: string;
-    readonly servicePointer: string;
+    readonly targetPointer: string;
     readonly mounts: unknown[];
   }
 ): void {
@@ -319,7 +327,7 @@ function mapFileGrantEntries(
   opts.mark(
     "compose",
     opts.pointer,
-    `${opts.servicePointer}/mounts`,
+    `${opts.targetPointer}/mounts`,
     "compose_explicit_file_grants"
   );
   for (const [index, raw] of opts.grants.entries()) {
@@ -329,7 +337,7 @@ function mapFileGrantEntries(
       opts.refuse("compose", entryPointer, "invalid_or_unsupported_file_grant");
       continue;
     }
-    const target = `${opts.servicePointer}/mounts/${opts.mounts.length}`;
+    const target = `${opts.targetPointer}/mounts/${opts.mounts.length}`;
     opts.mounts.push(mapped.grant);
     for (const field of mapped.fields) {
       opts.mark(
@@ -354,6 +362,7 @@ function mapServiceFileGrants(
   const hasExistingMounts = Object.hasOwn(opts.service, "mounts");
   const existingMounts = hasExistingMounts ? opts.service.mounts : undefined;
   const servicePointer = importPointer("/services", opts.name);
+  const targetPointer = workloadTarget(opts.candidate, servicePointer);
   if (hasExistingMounts && !Array.isArray(existingMounts)) {
     opts.refuse("compose", servicePointer, "invalid_existing_mount_projection");
     return;
@@ -369,7 +378,7 @@ function mapServiceFileGrants(
         kind,
         grants: opts.source[namespace],
         pointer: importPointer(servicePointer, namespace),
-        servicePointer,
+        targetPointer,
         mounts,
       });
     }
@@ -397,12 +406,11 @@ function mapFileCandidate(
     }
   }
   const sources = opts.compose.services;
-  const services = opts.candidate.services;
-  if (!(isRecord(sources) && isRecord(services))) {
+  if (!isRecord(sources)) {
     return;
   }
   for (const [name, source] of Object.entries(sources)) {
-    const service = Object.hasOwn(services, name) ? services[name] : undefined;
+    const service = candidateWorkload(opts.candidate, name);
     if (isRecord(source) && isRecord(service)) {
       mapServiceFileGrants({ ...opts, name, source, service });
     }
@@ -914,6 +922,7 @@ type WorkloadMappingContext = Pick<MappingContext, "mark" | "refuse"> & {
   readonly targetPointer: string;
   readonly jobs: ReadonlySet<string>;
   readonly job: boolean;
+  readonly buildPreview: boolean;
 };
 
 function mapServiceRule(
@@ -938,7 +947,14 @@ function mapServiceRule(
     opts.refuse("compose", pointer, "empty_command_unrepresentable");
     return;
   }
-  const value = SERVICE_RULES[key]?.(raw);
+  let value = SERVICE_RULES[key]?.(raw);
+  if (
+    key === "pull_policy" &&
+    opts.buildPreview &&
+    Object.hasOwn(opts.source, "build")
+  ) {
+    value = raw === "build" ? raw : undefined;
+  }
   if (value === undefined) {
     opts.refuse("compose", pointer, "invalid_or_ambiguous_value");
     return;
@@ -962,6 +978,7 @@ function mapServiceRule(
 
 function mapService(opts: WorkloadMappingContext) {
   const service: Record<string, unknown> = {};
+  const hasBuild = Object.hasOwn(opts.source, "build");
   opts.mark(
     "compose",
     opts.pointer,
@@ -992,7 +1009,12 @@ function mapService(opts: WorkloadMappingContext) {
     }
     mapServiceRule({ ...opts, service, key, raw });
   }
-  if (!Object.hasOwn(opts.source, "image")) {
+  if (opts.buildPreview && hasBuild) {
+    mapServiceBuild({ ...opts, service });
+  }
+  if (
+    !(Object.hasOwn(opts.source, "image") || (opts.buildPreview && hasBuild))
+  ) {
     opts.refuse(
       "compose",
       `${opts.pointer}/image`,
@@ -1000,6 +1022,43 @@ function mapService(opts: WorkloadMappingContext) {
     );
   }
   return service;
+}
+
+function mapServiceBuild(
+  opts: Pick<
+    WorkloadMappingContext,
+    "mark" | "refuse" | "source" | "pointer" | "targetPointer"
+  > & {
+    readonly service: Record<string, unknown>;
+  }
+): void {
+  const pointer = importPointer(opts.pointer, "build");
+  const targetPointer = importPointer(opts.targetPointer, "build");
+  if (Object.hasOwn(opts.source, "image")) {
+    opts.refuse("compose", pointer, "image_build_exclusive");
+    opts.refuse(
+      "compose",
+      importPointer(opts.pointer, "image"),
+      "image_build_exclusive"
+    );
+    return;
+  }
+  const mapped = mapLegacyComposeBuild(opts.source.build);
+  if (!mapped) {
+    opts.refuse("compose", pointer, "invalid_or_unsupported_build");
+    return;
+  }
+  opts.service.build = mapped.build;
+  for (const field of mapped.fields) {
+    opts.mark(
+      "compose",
+      field.source === "" ? pointer : importPointer(pointer, field.source),
+      field.target === ""
+        ? targetPointer
+        : importPointer(targetPointer, field.target),
+      field.code
+    );
+  }
 }
 
 function refuseUndeclaredJobTargets(
@@ -1040,6 +1099,7 @@ function refuseUnqualifiedJobAdoption(
 function mapServices(
   opts: Pick<MappingContext, "mark" | "refuse" | "candidate"> & {
     readonly source: unknown;
+    readonly buildPreview: boolean;
     readonly jobPreview: boolean;
   }
 ) {

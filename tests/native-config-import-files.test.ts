@@ -168,6 +168,220 @@ test("raw file and target locations remain authored while dollars decode exactly
   expect(JSON.stringify(result)).not.toContain("${AMBIENT}");
 });
 
+function jobFileSource() {
+  return {
+    configs: { settings: { file: `../config-${CANARY}` } },
+    secrets: { token: { file: `../secret-${CANARY}` } },
+    services: {
+      app: {
+        image: "fixture",
+        profiles: ["later"],
+        depends_on: {
+          initialize: { condition: "service_completed_successfully" },
+        },
+      },
+      initialize: {
+        build: { context: "..", dockerfile: "Dockerfile", target: "prepare" },
+        profiles: ["later"],
+        entrypoint: [],
+        command: ["initialize", "$$HOME", "", CANARY],
+        restart: "no",
+        pull_policy: "build",
+        configs: ["settings"],
+        secrets: [{ source: "token", target: "renamed", mode: 292 }],
+      },
+    },
+  };
+}
+
+test("converted build jobs publish every explicit file grant with native job provenance", () => {
+  const source = jobFileSource();
+  const before = JSON.stringify(source);
+  const result = mapped(source);
+  expect(result.report.complete).toBe(true);
+  expect(result.candidate).toMatchObject({
+    configs: { settings: { file: `config-${CANARY}` } },
+    secrets: { token: { file: `secret-${CANARY}` } },
+    services: {
+      app: { depends_on: [{ job: "initialize", condition: "completed" }] },
+    },
+    jobs: {
+      initialize: {
+        build: { context: ".", dockerfile: "Dockerfile", target: "prepare" },
+        profiles: ["later"],
+        entrypoint: { exec: [] },
+        command: { exec: ["initialize", "$HOME", "", CANARY] },
+        restart: { kind: "no" },
+        pull_policy: "build",
+        mounts: [
+          {
+            config: "settings",
+            target: "/settings",
+            access: "read-only",
+            mode: "0444",
+          },
+          {
+            secret: "token",
+            target: "/run/secrets/renamed",
+            access: "read-only",
+            mode: "0444",
+          },
+        ],
+      },
+    },
+  });
+  expect(result.candidate).not.toHaveProperty("services.initialize");
+  expect(result.candidate).not.toHaveProperty("services.app.mounts");
+  for (const [pointer, target, code] of [
+    [
+      "/services/initialize/configs/0",
+      "/jobs/initialize/mounts/0",
+      "compose_linux_file_grant_policy",
+    ],
+    [
+      "/services/initialize/secrets/0/source",
+      "/jobs/initialize/mounts/1/secret",
+      "exact",
+    ],
+    [
+      "/services/initialize/secrets/0/mode",
+      "/jobs/initialize/mounts/1/mode",
+      "compose_file_mode_octal",
+    ],
+    [
+      "/services/initialize/build/context",
+      "/jobs/initialize/build/context",
+      "compose_build_context_rebased",
+    ],
+  ]) {
+    expect(result.report.fields).toContainEqual(
+      expect.objectContaining({ document: "compose", pointer, target, code })
+    );
+  }
+  expect(JSON.stringify(source)).toBe(before);
+  expect(JSON.stringify(result)).not.toContain(CANARY);
+  expect(Object.isFrozen(result.candidate?.jobs)).toBe(true);
+});
+
+test("inactive job grants and job restrictions remain closed across preview purposes", () => {
+  const source = jobFileSource();
+  refused(
+    mapped({
+      ...source,
+      services: {
+        ...source.services,
+        initialize: {
+          ...source.services.initialize,
+          configs: [{ source: "settings", uid: "0" }],
+        },
+      },
+    }),
+    "invalid_or_unsupported_file_grant"
+  );
+  refused(
+    mapped({
+      ...source,
+      services: {
+        ...source.services,
+        initialize: { ...source.services.initialize, restart: "always" },
+      },
+    }),
+    "job_restart_policy_unsupported"
+  );
+  refused(
+    mapped({
+      ...source,
+      services: {
+        ...source.services,
+        initialize: {
+          ...source.services.initialize,
+          healthcheck: {
+            test: ["CMD", "probe"],
+            interval: "1s",
+            timeout: "250ms",
+            retries: 1,
+          },
+        },
+      },
+    }),
+    "job_healthcheck_unsupported"
+  );
+  const retained = JSON.stringify({
+    ...source,
+    name: "fixture",
+    volumes: { data: {} },
+    services: {
+      ...source.services,
+      app: { ...source.services.app, volumes: ["data:/data"] },
+    },
+  });
+  refused(
+    mapLegacyNativeAdoptionBaseline({
+      configText: CONFIG,
+      composeText: retained,
+    })
+  );
+  refused(
+    mapLegacyNativeStorageAdoption({
+      configText: CONFIG,
+      composeText: retained,
+    })
+  );
+  const plan = planLegacyComposeAdoption({
+    configText: CONFIG,
+    composeText: retained,
+  });
+  expect(plan.report.supported).toBe(false);
+  expect(plan.intent).toBeUndefined();
+  expect(plan.report.fields).toContainEqual(
+    expect.objectContaining({
+      pointer: "/services/initialize",
+      code: "completed_job_adoption_unqualified",
+      status: "refused",
+    })
+  );
+  expect(plan.report.fields).toContainEqual(
+    expect.objectContaining({
+      pointer: "/services/initialize/configs/0",
+      code: "unsupported_field",
+      status: "refused",
+    })
+  );
+  expect(JSON.stringify(plan)).not.toContain(CANARY);
+});
+
+test("absent native job namespace cannot invoke an inherited getter during file mapping", () => {
+  const original = Object.getOwnPropertyDescriptor(Object.prototype, "jobs");
+  let invoked = 0;
+  try {
+    Object.defineProperty(Object.prototype, "jobs", {
+      configurable: true,
+      get() {
+        invoked++;
+        return { reader: { mounts: [{ secret: "foreign" }] } };
+      },
+    });
+    const result = mapped({
+      configs: { settings: { file: "./missing" } },
+      services: { reader: { image: "fixture", configs: ["settings"] } },
+    });
+    expect(result.report.complete).toBe(true);
+    expect(result.candidate).toMatchObject({
+      services: {
+        reader: { mounts: [{ config: "settings", target: "/settings" }] },
+      },
+    });
+    expect(Object.hasOwn(result.candidate ?? {}, "jobs")).toBe(false);
+    expect(invoked).toBe(0);
+  } finally {
+    if (original) {
+      Object.defineProperty(Object.prototype, "jobs", original);
+    } else {
+      Reflect.deleteProperty(Object.prototype, "jobs");
+    }
+  }
+});
+
 test.each([
   { file: "settings", expected: ".hack/settings" },
   { file: "../settings", expected: "settings" },
@@ -840,6 +1054,46 @@ test.skipIf(!BINARY)(
   }
 );
 
+test.skipIf(!BINARY)(
+  "matching compiler preserves converted job file grants and selected build intent without material acquisition",
+  async () => {
+    const result = mapped(jobFileSource());
+    expect(result.report.complete).toBe(true);
+    const compiled = await compileNativeConfig({
+      input: new TextEncoder().encode(JSON.stringify(result.candidate)),
+      profiles: ["later"],
+      binary: BINARY,
+    });
+    expect(compiled.ok).toBe(true);
+    if (!compiled.ok) {
+      throw new Error("Compiled job file-grant fixture refused");
+    }
+    expect(compiled.plan).toMatchObject({
+      jobs: {
+        initialize: {
+          build: { context: ".", dockerfile: "Dockerfile", target: "prepare" },
+          mounts: [
+            {
+              config: "settings",
+              target: "/settings",
+              access: "read-only",
+              mode: "0444",
+            },
+            {
+              secret: "token",
+              target: "/run/secrets/renamed",
+              access: "read-only",
+              mode: "0444",
+            },
+          ],
+        },
+      },
+    });
+    expect(compiled.plan.services).not.toHaveProperty("initialize");
+    expect(JSON.stringify(result)).not.toContain(CANARY);
+  }
+);
+
 test.skipIf(!BINARY).each([
   {
     configs: { settings: { file: "./missing" } },
@@ -860,6 +1114,30 @@ test.skipIf(!BINARY).each([
     configs: { settings: { file: "./missing" } },
     services: {
       inactive: { image: "fixture", profiles: ["later"], configs: ["unknown"] },
+    },
+  },
+  {
+    configs: { settings: { file: "./missing" } },
+    services: {
+      inactive: {
+        image: "fixture",
+        labels: { "hack.service.one-shot": "true" },
+        profiles: ["later"],
+        configs: ["unknown"],
+      },
+    },
+  },
+  {
+    configs: { settings: { file: "./missing" } },
+    secrets: { token: { file: "./missing" } },
+    services: {
+      inactive: {
+        image: "fixture",
+        labels: { "hack.service.one-shot": "true" },
+        profiles: ["later"],
+        configs: [{ source: "settings", target: "/same" }],
+        secrets: [{ source: "token", target: "/same" }],
+      },
     },
   },
 ])(

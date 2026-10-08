@@ -40,6 +40,22 @@ const ID = /^[a-f0-9]{64}$/;
 const IMAGE = /^sha256:[a-f0-9]{64}$/;
 const CREATED =
   /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/;
+const WORKER_SCRIPT =
+  "trap 'sleep 10; exit 0' TERM; while true; do sleep 1; done";
+const LITERAL_SOURCE_ENTRYPOINT = [
+  "/bin/sh",
+  "-c",
+  WORKER_SCRIPT,
+  "entrypoint-$${NC04_LITERAL}",
+];
+const LITERAL_SOURCE_COMMAND = ["command-$$NC04_LITERAL", "$$$$", ""];
+const LITERAL_ACTUAL_ENTRYPOINT = [
+  "/bin/sh",
+  "-c",
+  WORKER_SCRIPT,
+  "entrypoint-${NC04_LITERAL}",
+];
+const LITERAL_ACTUAL_COMMAND = ["command-$NC04_LITERAL", "$$", ""];
 type Kind = "container" | "network" | "volume";
 type Instance = {
   readonly root: string;
@@ -133,6 +149,23 @@ function object(text: string): Record<string, unknown> {
     }
     return value;
   } catch {
+    refused();
+  }
+}
+
+/** Actual container argv must retain the literal dollars; no environment or shell expansion is inferred. */
+export function assertAdoptionWorkerArgv(opts: {
+  readonly id: string;
+  readonly row: unknown;
+}): void {
+  if (
+    !(ID.test(opts.id) && isRecord(opts.row)) ||
+    opts.row.id !== opts.id ||
+    JSON.stringify(opts.row.command) !==
+      JSON.stringify(LITERAL_ACTUAL_COMMAND) ||
+    JSON.stringify(opts.row.entrypoint) !==
+      JSON.stringify(LITERAL_ACTUAL_ENTRYPOINT)
+  ) {
     refused();
   }
 }
@@ -286,10 +319,12 @@ async function writeLegacy(instance: Instance, image: string) {
           pull_policy: "never",
           // Shadow the image's declared VOLUME with the exact existing named storage.
           volumes: ["data:/var/lib/postgresql/data:ro"],
-          entrypoint: ["/bin/sh", "-c"],
-          command: [
-            "trap 'sleep 10; exit 0' TERM; while true; do sleep 1; done",
-          ],
+          entrypoint: instance.sourceMode
+            ? ["/bin/sh", "-c"]
+            : LITERAL_SOURCE_ENTRYPOINT,
+          command: instance.sourceMode
+            ? [WORKER_SCRIPT]
+            : LITERAL_SOURCE_COMMAND,
           stop_grace_period: "15s",
         },
       },
@@ -476,6 +511,26 @@ function createFixtureRuntime(
     }
     return row.id;
   };
+  const checkWorkerArgv = async (instance: Instance) => {
+    if (instance.sourceMode) {
+      return;
+    }
+    const id = container(instance, "worker");
+    await owned(instance, "container", id);
+    assertAdoptionWorkerArgv({
+      id,
+      row: object(
+        await probe([
+          "container",
+          "inspect",
+          "--format",
+          '{"id":{{json .Id}},"command":{{json .Config.Cmd}},"entrypoint":{{json .Config.Entrypoint}}}',
+          id,
+        ])
+      ),
+    });
+    await owned(instance, "container", id);
+  };
   const sql = async (instance: Instance, query: string) =>
     (
       await probe([
@@ -510,6 +565,7 @@ function createFixtureRuntime(
     ) {
       refused();
     }
+    await checkWorkerArgv(instance);
     if (instance.sourceMode === "canonical-generated") {
       if (
         (await managedAdoptionFixtureSourceSnapshot({ primary, instance })) !==
@@ -553,6 +609,7 @@ function createFixtureRuntime(
     ) {
       refused();
     }
+    await checkWorkerArgv(instance);
     for (const row of baseline.resources.container) {
       if (
         (await probe([

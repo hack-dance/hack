@@ -30,7 +30,7 @@ const config = JSON.stringify({
 const workloads = {
   web: {
     image: "example/web:1",
-    command: ["app", "--mode", "fixture"],
+    command: ["app", "--mode", "fixture", "$${AMBIENT}", "$$$$"],
     entrypoint: [],
     init: false,
     pull_policy: "never",
@@ -43,6 +43,7 @@ const workloads = {
   inactive: {
     image: "example/optional:1",
     profiles: ["qa"],
+    entrypoint: ["optional", "$$HOME"],
     environment: [`TOKEN=${canary}`],
   },
 };
@@ -67,6 +68,21 @@ try {
   assert(
     preview.report.complete && preview.candidate !== undefined,
     "real compiler accepts complete mapping"
+  );
+  const selected = (
+    preview.candidate.services as Record<string, Record<string, unknown>>
+  ).web;
+  const inactive = (
+    preview.candidate.services as Record<string, Record<string, unknown>>
+  ).inactive;
+  assert(
+    JSON.stringify(selected?.command) ===
+      JSON.stringify({
+        exec: ["app", "--mode", "fixture", "${AMBIENT}", "$$"],
+      }) &&
+      JSON.stringify(inactive?.entrypoint) ===
+        JSON.stringify({ exec: ["optional", "$HOME"] }),
+    "real compiler accepts literal dollar argv in selected and inactive services"
   );
   assert(
     !JSON.stringify(preview).includes(canary),

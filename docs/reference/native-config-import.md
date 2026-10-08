@@ -25,7 +25,7 @@ reported as successful.
 | Boolean `worktree.auto_branch` / `autoBranch` and `inherit_local` / `inheritLocal` | The equivalent native worktree policy; conflicting aliases refuse |
 | Optional Compose `name` | Must exactly equal the explicit project name |
 | Image-only services | The same logical service names and image strings |
-| Array `command` and `entrypoint` | Explicit native exec arrays; an empty entrypoint remains explicit |
+| Array `command` and `entrypoint` | Explicit native exec arrays; complete Compose `$$` pairs become literal `$` arguments, and an empty entrypoint remains explicit |
 | `working_dir`, boolean `init` | `working_directory`, `init` |
 | `pull_policy` of `always`, `never`, `missing` | The same authored acquisition intent |
 | `restart` of `no`, `always`, `unless-stopped`, `on-failure[:N]` | Native restart intent; retry counts must fit a positive u32 |
@@ -37,8 +37,11 @@ Names in this slice use lowercase letters, digits and single hyphen separators.
 Overlay aliases additionally accept ASCII case, underscores and spaces and apply
 the existing overlay-name normalization; path-like or punctuation-based spellings
 refuse. All alias spellings and their original source positions remain in the
-report. Strings containing `$` or NUL refuse rather than interpreting interpolation
-or inheriting ambient environment. Environment list entries without `=`, duplicate
+report. In exec arrays only, every dollar must be part of a complete `$$` pair;
+the report marks decoded fields as normalized while retaining the raw source.
+Single or odd dollars, `$VAR`, `${VAR}`, shell-form commands and ambiguous
+expressions refuse. Dollars in other runtime strings and NUL in runtime values refuse
+rather than inheriting ambient environment. Environment list entries without `=`, duplicate
 names, nulls and non-string values refuse. Shell-form commands/entrypoints and
 empty commands refuse.
 

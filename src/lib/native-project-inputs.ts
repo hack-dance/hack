@@ -185,14 +185,37 @@ export async function acquireNativeManagedEnvFile(opts: {
     }
     const projectRoot = resolve(opts.projectRoot);
     await requireNativeFamilyAtRoot({ projectRoot });
-    const bytes = await readAuthoredNativeFile({
-      ...opts,
-      projectRoot,
-      required: false,
-    });
+    const bytes = await acquireManagedProjectEnvFile({ ...opts, projectRoot });
     await requireNativeFamilyAtRoot({ projectRoot });
     throwIfCancelled(opts.signal);
     return bytes;
+  } catch (error: unknown) {
+    throw redactAcquisitionError(error);
+  }
+}
+
+/**
+ * Private raw managed-layer reader shared by admitted owners. This supplies no
+ * input-family or execution authority: each owner must verify its exact source
+ * family before and after this bounded descriptor acquisition. Native entrypoints
+ * retain their native marker checks; legacy adoption supplies its strict source
+ * capability instead. Bytes must never appear in plans, diagnostics or reports.
+ */
+export async function acquireManagedProjectEnvFile(opts: {
+  readonly projectRoot: string;
+  readonly filename: string;
+  readonly signal?: AbortSignal;
+}): Promise<Uint8Array | undefined> {
+  try {
+    throwIfCancelled(opts.signal);
+    if (!MANAGED_ENV_FILENAME.test(opts.filename)) {
+      throw new NativeProjectInputError("unsafe");
+    }
+    return await readAuthoredNativeFile({
+      ...opts,
+      projectRoot: resolve(opts.projectRoot),
+      required: false,
+    });
   } catch (error: unknown) {
     throw redactAcquisitionError(error);
   }

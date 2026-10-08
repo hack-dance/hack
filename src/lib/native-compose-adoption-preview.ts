@@ -1,4 +1,5 @@
 import { acquireLegacyComposeAdoptionBinding } from "./native-compose-adoption-binding.ts";
+import { admitLegacyComposeCandidate } from "./native-compose-adoption-compiler.ts";
 import {
   legacyComposeAdoptionCandidateSupported,
   legacyComposeAdoptionLayoutSupported,
@@ -7,7 +8,6 @@ import {
   inspectLegacyComposeContainerStates,
   inspectLegacyComposeRuntimeConfig,
 } from "./native-compose-adoption-runtime.ts";
-import { compileNativeConfig } from "./native-config-compiler.ts";
 import type { ImportField } from "./native-config-import-parser.ts";
 import {
   freezeImportValue,
@@ -42,7 +42,7 @@ export async function previewLegacyComposeAdoption(input: {
       acquired = await owner.resolvePreparationInputs(opts);
     const mapped = mapLegacyNativeStorageAdoption(acquired);
     fields = mapped.report.fields;
-    const candidate = mapped.candidate;
+    const candidate = acquired.projection?.candidate ?? mapped.candidate;
     if (!candidate) {
       return report({
         complete: false,
@@ -52,7 +52,11 @@ export async function previewLegacyComposeAdoption(input: {
     }
     if (
       !(
-        (await legacyComposeAdoptionLayoutSupported({ ...opts, candidate })) &&
+        (acquired.projection ||
+          (await legacyComposeAdoptionLayoutSupported({
+            ...opts,
+            candidate,
+          }))) &&
         legacyComposeAdoptionCandidateSupported(candidate)
       )
     ) {
@@ -65,12 +69,13 @@ export async function previewLegacyComposeAdoption(input: {
         ],
       });
     }
-    const compiled = await compileNativeConfig({
-      input: new TextEncoder().encode(JSON.stringify(candidate)),
+    const admitted = await admitLegacyComposeCandidate({
+      candidateText: JSON.stringify(candidate),
+      metadata: acquired.projection?.metadata,
       binary: opts.binary,
       signal: opts.signal,
     });
-    if (!compiled.ok) {
+    if (!admitted) {
       return report({
         complete: false,
         adoption: "not_performed",

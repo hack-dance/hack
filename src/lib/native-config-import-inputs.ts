@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { constants, type Stats } from "node:fs";
 import { lstat, open, realpath } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
@@ -8,6 +9,35 @@ import {
 } from "./native-config-compiler.ts";
 import { inspectProjectInputsAtRoot } from "./project-input-selection.ts";
 import { resolveVerifiedGitCheckoutLocation } from "./worktree-local-config.ts";
+
+const ownedAcquisitions = new WeakSet<object>();
+const privateSourceProofs = new WeakMap<
+  object,
+  NativeConfigImportSourceProof
+>();
+
+/** Private durable provenance captured from the same strict source acquisition. Never report. */
+export type NativeConfigImportSourceProof = {
+  readonly root: { readonly dev: number; readonly ino: number };
+  readonly project: { readonly dev: number; readonly ino: number };
+  readonly sourceFiles: {
+    readonly config: NativeConfigImportSourceIdentity;
+    readonly compose: NativeConfigImportSourceIdentity;
+  };
+  readonly configHash: string;
+  readonly composeHash: string;
+};
+
+/** Only an issued source can supply a proof; this performs no second acquisition. */
+export function privateNativeConfigImportSourceProof(
+  source: NativeConfigImportInputs
+): NativeConfigImportSourceProof {
+  const proof = privateSourceProofs.get(source);
+  if (!(proof && ownedAcquisitions.has(source))) {
+    throw failure();
+  }
+  return proof;
+}
 
 function cancelled(signal?: AbortSignal) {
   if (signal?.aborted) {
@@ -367,6 +397,15 @@ export type NativeConfigImportInputs =
       }) => Promise<void>;
     };
 
+/** Identity-only admission for a private source capability; copied or structural claims grant no authority. */
+export function isOwnedNativeConfigImportAcquisition(
+  input: unknown
+): input is Extract<NativeConfigImportInputs, { readonly ok: true }> {
+  return (
+    typeof input === "object" && input !== null && ownedAcquisitions.has(input)
+  );
+}
+
 /**
  * One exact legacy snapshot for import and adoption prerequisites. Original
  * bytes, pathname identities and marker absences stay in the closure. Rechecks
@@ -464,6 +503,27 @@ async function acquireInputs(opts: {
     Object.defineProperty(result, key, { enumerable: false });
   }
   await result.assertFresh();
+  ownedAcquisitions.add(result);
+  const [rootDirectory, projectDirectory] = dirs;
+  if (!(rootDirectory && projectDirectory)) {
+    throw failure();
+  }
+  privateSourceProofs.set(
+    result,
+    Object.freeze({
+      root: Object.freeze({
+        dev: rootDirectory.info.dev,
+        ino: rootDirectory.info.ino,
+      }),
+      project: Object.freeze({
+        dev: projectDirectory.info.dev,
+        ino: projectDirectory.info.ino,
+      }),
+      sourceFiles: result.sourceFiles,
+      configHash: createHash("sha256").update(config.bytes).digest("hex"),
+      composeHash: createHash("sha256").update(compose.bytes).digest("hex"),
+    })
+  );
   return Object.freeze(result);
 }
 

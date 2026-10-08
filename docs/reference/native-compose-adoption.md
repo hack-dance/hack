@@ -87,7 +87,9 @@ transition. The native version-one receipt and manifest contract is unchanged.
 `hack config adopt` requires all original containers stopped. It refuses local,
 dotenv or managed-env inputs, linked/separate Git layouts, selected profiles,
 unsupported source mappings and changed source/resource ownership. It never
-silently stops a running instance. Both authored documents must carry matching
+silently stops a running instance. Add explicit `--stop` to journal and stop all
+verified original IDs before the format switch. `--dry-run --stop` qualifies that
+proposed stopped transition without changing containers or files. Both authored documents must carry matching
 explicit canonical project names. Shell strings, interpolation and unset/empty
 ambiguity remain refused; qualified argv, empty entrypoints, static empty values
 and authored mount order are retained.
@@ -103,11 +105,11 @@ removed; missing or edited candidates refuse execution.
 
 The distinct execution owner consumes the saved binding. It never sends these
 resources through ordinary native startup, which allocates a different Compose
-namespace and native volume names. `up`, `restart` and `down` start, restart and
+namespace and native volume names. `up --detach`, `restart` and `down` start, restart and
 stop only the original container IDs. `down` retains those containers, their
 network and volumes as data anchors. `ps` reports workload names and status;
 plain `logs` and `exec` use the verified retained container. Recreation, `run`,
-changed instance/overlay/profile selections, routing and host-hook migration are
+attached startup, changed instance/overlay/profile selections, routing and host-hook migration are
 unsupported. Original legacy objects never receive native nonce labels.
 
 A retained-container mutation is journaled before its engine child starts.
@@ -127,6 +129,11 @@ a known two-link intermediate is recoverable. The owner verifies original
 resources before committing `rolled-back`. No volume or container is removed.
 Conflicting external bytes, invalid private files or lost bindings refuse and
 retain recovery evidence instead of overwriting edits.
+
+A failed or partial prepared stop keeps both legacy originals selected in its
+private journal and fences ordinary discovery. `hack config adopt --recover --stop`
+rechecks the complete original selection, explicitly retries its stop, and only
+then publishes. Changed sources, resources or config hashes refuse recovery.
 
 `hack config adopt --recover` explicitly recovers a proven dead same-boot lock
 and completes a pending switch. Add `--rollback` to restore a pending switch or

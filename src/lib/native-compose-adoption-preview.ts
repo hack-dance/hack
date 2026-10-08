@@ -33,6 +33,7 @@ export async function previewLegacyComposeAdoption(input: {
   readonly projectRoot: string;
   readonly binary?: string;
   readonly signal?: AbortSignal;
+  readonly stop?: boolean;
 }) {
   const opts = { ...input };
   let fields: readonly ImportField[] = [];
@@ -88,9 +89,9 @@ export async function previewLegacyComposeAdoption(input: {
     if (
       states.some(
         (state) =>
-          state.running ||
+          (!opts.stop && state.running) ||
           state.paused ||
-          !["created", "exited"].includes(state.status)
+          !["created", "running", "exited"].includes(state.status)
       )
     ) {
       return report({
@@ -105,6 +106,7 @@ export async function previewLegacyComposeAdoption(input: {
       adoption: "not_performed",
       containers: acquired.binding.containers.length,
       volumes: acquired.binding.volumes.length,
+      stop: opts.stop ? "requested" : "not_requested",
       fields,
     });
   } catch {

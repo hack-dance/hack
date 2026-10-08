@@ -98,6 +98,7 @@ function validate(options: NativeComposeCommandOptions) {
     options.overlay !== undefined ||
     options.unsupportedOptions ||
     options.operation === "run" ||
+    (options.operation === "up" && !options.detach) ||
     (options.recover && options.operation !== "down")
   ) {
     unsupported();

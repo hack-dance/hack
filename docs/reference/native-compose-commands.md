@@ -13,6 +13,7 @@ Run these commands with the current branch CLI and its matching bundled compiler
 ```sh
 HACK_RUNTIME_BACKEND=compose ./dist/hack --path /absolute/project up --detach
 HACK_RUNTIME_BACKEND=compose ./dist/hack --path /absolute/project ps --json
+HACK_RUNTIME_BACKEND=compose ./dist/hack --path /absolute/project open --json
 HACK_RUNTIME_BACKEND=compose ./dist/hack --path /absolute/project logs --compose
 HACK_RUNTIME_BACKEND=compose ./dist/hack --path /absolute/project exec app -- command arg
 HACK_RUNTIME_BACKEND=compose ./dist/hack --path /absolute/project run app -- command arg
@@ -115,6 +116,15 @@ hook. Explicit recovery for interrupted hooks remains a later lifecycle slice.
 An uncertain hook also prevents routing claim retirement after an owned stop.
 
 ## Saved operations and recovery
+
+`open --json` returns the saved compiler-selected origin without launching a
+browser, recompiling authored input, decrypting environment values, or observing
+Docker. `open` without `--json` explicitly opens that same origin in the browser.
+The default honors the saved OAuth alias and open preference; `--prefer dev|alias|auto`
+and named declared routes select only origins present in the saved routing report.
+`--branch` selects its exact saved instance. Missing or malformed saved routing,
+pending effects, arbitrary URL targets and logs targets refuse. A stopped instance
+may still return its saved origin; this does not assert application reachability.
 
 `ps`, `logs`, `exec`, and `down` use the retained generation. They do not reparse
 authored contents or decrypt the current environment. Profile and overlay changes

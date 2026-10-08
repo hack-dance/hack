@@ -46,7 +46,21 @@ const APP =
 const PRESERVED_FORMAT =
   '{"id":{{json .Id}},"name":{{json .Name}},"running":{{json .State.Running}},"status":{{json .State.Status}},"started":{{json .State.StartedAt}},"finished":{{json .State.FinishedAt}}}';
 const PROXY_FORMAT =
-  '{"id":{{json .Id}},"name":{{json .Name}},"owner":{{json (index .Config.Labels "hack.e2e.native-config-routing-owner")}},"project":{{json (index .Config.Labels "com.docker.compose.project")}},"service":{{json (index .Config.Labels "com.docker.compose.service")}},"network":{{with (index .NetworkSettings.Networks "hack-dev")}}{{json .NetworkID}}{{else}}null{{end}},"networkMode":{{json .HostConfig.NetworkMode}},"running":{{json .State.Running}},"ports":{{json .HostConfig.PortBindings}},"mounts":{{json .Mounts}},"tmpfs":{{json .HostConfig.Tmpfs}}}';
+  '{"id":{{json .Id}},"name":{{json .Name}},"owner":{{json (index .Config.Labels "hack.e2e.native-config-routing-owner")}},"project":{{json (index .Config.Labels "com.docker.compose.project")}},"service":{{json (index .Config.Labels "com.docker.compose.service")}},"network":{{with (index .NetworkSettings.Networks "hack-dev")}}{{json .NetworkID}}{{else}}null{{end}},"networkMode":{{json .HostConfig.NetworkMode}},"running":{{json .State.Running}},"ports":{{json .HostConfig.PortBindings}},"publishAll":{{json .HostConfig.PublishAllPorts}},"runtimePorts":{{json .NetworkSettings.Ports}},"mounts":{{json .Mounts}},"tmpfs":{{json .HostConfig.Tmpfs}}}';
+
+/** Explicit bindings alone miss Docker's dynamically published `-P` ports. */
+export function proxyHasNoPublishedPorts(
+  info: Readonly<Record<string, unknown>>
+): boolean {
+  return (
+    info.publishAll === false &&
+    (info.ports === null ||
+      (isRecord(info.ports) && Object.keys(info.ports).length === 0)) &&
+    (info.runtimePorts === null ||
+      (isRecord(info.runtimePorts) &&
+        Object.values(info.runtimePorts).every((value) => value === null)))
+  );
+}
 
 type Docker = (args: readonly string[]) => Promise<string>;
 type Runtime = {
@@ -385,8 +399,7 @@ export const nativeConfigRoutingScenario: Scenario = {
           info.service === PROXY_SERVICE &&
           info.networkMode === networkId &&
           (info.running === false || info.network === networkId) &&
-          (info.ports === null ||
-            (isRecord(info.ports) && Object.keys(info.ports).length === 0)) &&
+          proxyHasNoPublishedPorts(info) &&
           Array.isArray(info.mounts) &&
           info.mounts.length === 1 &&
           info.mounts.every(

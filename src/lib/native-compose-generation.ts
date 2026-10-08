@@ -1317,7 +1317,10 @@ export async function openNativeComposeGenerationStore(opts: {
       await verifyGeneration(input.generation);
       await input.assertOwned();
       let latest = await receipt();
-      if (JSON.stringify(latest.pending) !== JSON.stringify(pending)) {
+      if (
+        JSON.stringify(latest.pending) !== JSON.stringify(pending) ||
+        (input.operation !== "down" && latest.beforeHooks !== null)
+      ) {
         refuse();
       }
       if (input.beforeComplete) {
@@ -1328,7 +1331,10 @@ export async function openNativeComposeGenerationStore(opts: {
         await verifyGeneration(input.generation);
         await input.assertOwned();
         latest = await receipt();
-        if (JSON.stringify(latest.pending) !== JSON.stringify(pending)) {
+        if (
+          JSON.stringify(latest.pending) !== JSON.stringify(pending) ||
+          (input.operation !== "down" && latest.beforeHooks !== null)
+        ) {
           refuse();
         }
       }

@@ -18,8 +18,15 @@ if (process.argv[2] === "--protocol") {
   const result = {transport_version:1,ok:true,plan:{plan_version:1,services:Object.fromEntries(names.map(name=>[name,{}])),jobs:{}},semantic_hash:"a".repeat(64),declared_workloads:Object.fromEntries(names.map(name=>[name,"service"]))};
   if (raw.request_version) {
     const meta = raw.env_metadata;
-    result.local_resolution = {overlay:meta.overlay,origin:"project",auto_branch:true,inherit_local:true,resolution_hash:"b".repeat(64)};
-    result.environment_plan = {plan_version:1,overlay:meta.overlay,overlay_exists:meta.overlay_exists,complete:true,workloads:Object.fromEntries(names.map(name=>[name,Object.fromEntries(Object.entries(meta.workloads[name] ?? {}).map(([key,value])=>[key,{kind:"managed",key,scope:value.scope,secret:value.secret}]))])),warnings:[],diagnostics:[]};
+    let overlay = project.environment?.default_overlay ?? null;
+    let origin = "project";
+    for (const [role, text] of [["primary_local", project.worktree?.inherit_local === false ? undefined : raw.primary_local], ["checkout_local", raw.checkout_local]]) {
+      if (text === undefined) continue;
+      const local = JSON.parse(text);
+      if (Object.hasOwn(local.environment ?? {}, "default_overlay")) {overlay = local.environment.default_overlay;origin = role;}
+    }
+    result.local_resolution = {overlay,origin,auto_branch:project.worktree?.auto_branch ?? true,inherit_local:project.worktree?.inherit_local ?? true,resolution_hash:"b".repeat(64)};
+    if (meta) result.environment_plan = {plan_version:1,overlay:meta.overlay,overlay_exists:meta.overlay_exists,complete:true,workloads:Object.fromEntries(names.map(name=>[name,Object.fromEntries(Object.entries(meta.workloads[name] ?? {}).map(([key,value])=>[key,{kind:"managed",key,scope:value.scope,secret:value.secret}]))])),warnings:[],diagnostics:[]};
   }
   console.log(JSON.stringify(result));
 }

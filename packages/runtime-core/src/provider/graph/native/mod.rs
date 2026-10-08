@@ -71,7 +71,7 @@ fn labels(owner: &str, review: &native_input::Review, resource: &Resource) -> Va
     json!({
         "io.hack-local.owner":owner,"io.hack-local.graph":scope.run,
         "io.hack-local.namespace":scope.namespace,"io.hack-local.plan":review.review_id(),
-        "io.hack-local.kind":"container","io.hack-local.resource":resource.key,
+        "io.hack-local.kind":resource.kind.word(),"io.hack-local.resource":resource.key,
         "io.hack-local.input-kind":"native"
     })
 }
@@ -98,13 +98,30 @@ pub fn configuration(
     }
     let mut configs = BTreeMap::new();
     let mut resources = BTreeMap::new();
+    // Native workload networking is an implicit project contract: ordinary outbound
+    // bridge access and exact service DNS aliases. Provider policy admission is separate.
+    let network = Resource {
+        routing: None,
+        networks: None,
+        outbound: true,
+        cache: None,
+        cache_provenance: None,
+        kind: Kind::Network,
+        key: "default".into(),
+        name: format!("hkn-{}-network-0", review.scope().run),
+        id: None,
+        image: None,
+        phase: "reserved".into(),
+    };
+    let network_names = BTreeMap::from([("default".into(), network.name.clone())]);
+    resources.insert("network:default".into(), network);
     for (index, (name, workload)) in inputs.workloads.iter().enumerate() {
         if !image_id(&workload.image) {
             return Err(refused());
         }
         let resource = Resource {
             routing: None,
-            networks: Some(Vec::new()),
+            networks: Some(vec!["default".into()]),
             outbound: false,
             cache: None,
             cache_provenance: None,
@@ -116,6 +133,13 @@ pub fn configuration(
             phase: "reserved".into(),
         };
         let mut config = config::container_base(&workload.image, labels(owner, review, &resource));
+        let (primary, endpoints) = config::network_config(
+            name,
+            resource.networks.as_ref().ok_or_else(refused)?,
+            &network_names,
+        )?;
+        config["HostConfig"]["NetworkMode"] = json!(primary);
+        config["NetworkingConfig"] = json!({"EndpointsConfig":endpoints});
         for (field, value) in [
             ("Cmd", workload.command.as_ref()),
             ("Entrypoint", workload.entrypoint.as_ref()),

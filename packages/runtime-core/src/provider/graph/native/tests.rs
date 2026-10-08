@@ -97,7 +97,10 @@ fn real_compiler_native_configs_feed_jobs_readiness_and_exact_process_driver() {
         lowered.review().review_id()
     );
     for (key, value) in [
-        ("NetworkMode", json!("none")),
+        (
+            "NetworkMode",
+            json!("hkn-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-network-0"),
+        ),
         ("Memory", json!(0)),
         ("NanoCpus", json!(0)),
         ("Mounts", json!([])),
@@ -110,8 +113,31 @@ fn real_compiler_native_configs_feed_jobs_readiness_and_exact_process_driver() {
         lowered
             .resources()
             .values()
-            .all(|r| r.kind == Kind::Container && r.name.starts_with("hkn-"))
+            .all(|r| r.name.starts_with("hkn-"))
     );
+    let network = &lowered.resources()["network:default"];
+    assert_eq!(network.kind, Kind::Network);
+    assert!(network.outbound);
+    assert_eq!(
+        web["NetworkingConfig"]["EndpointsConfig"][&network.name]["Aliases"],
+        json!(["a.web"])
+    );
+    assert_eq!(
+        lowered.resources()["container:a.web"].networks,
+        Some(vec!["default".into()])
+    );
+    assert!(
+        check_network_request(
+            &crate::provider::NetworkIntent::Isolated,
+            lowered.resources()
+        )
+        .is_err()
+    );
+    check_network_request(
+        &crate::provider::NetworkIntent::Internet,
+        lowered.resources(),
+    )
+    .unwrap();
     let mut driver = Fake {
         configs: lowered.containers(),
         intents: Vec::new(),

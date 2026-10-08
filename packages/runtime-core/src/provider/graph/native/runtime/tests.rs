@@ -794,6 +794,10 @@ fn committed_removal_retry_does_not_repeat_stop_or_regress_the_receipt_phase() {
     assert!(cleanup_using(&session.backend, &mut session.receipt, &session.root).is_err());
     let (mut retained, _) = journal::load(&fixture.candidate, RUN, OWNER, BOOT).unwrap();
     assert_eq!(retained.phase, Phase::RemovalIntent);
+    // Valid bounded state with missing terminal detail must persist fresh evidence
+    // before Fake's DELETE independently reads the durable journal.
+    retained.terminal.clear();
+    journal::save(&session.root, &retained).unwrap();
     let before_stops = session.backend.state.borrow().stop_batches;
     session.backend.state.borrow_mut().observed_phases.clear();
     cleanup_using(&session.backend, &mut retained, &session.root).unwrap();
@@ -806,7 +810,7 @@ fn committed_removal_retry_does_not_repeat_stop_or_regress_the_receipt_phase() {
             .iter()
             .all(|phase| *phase == Phase::RemovalIntent)
     );
-    assert!(retained.terminal["container:web"].stop_requested);
+    assert!(!retained.terminal["container:web"].stop_requested);
 }
 
 #[test]

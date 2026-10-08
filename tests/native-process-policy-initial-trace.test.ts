@@ -1,8 +1,8 @@
 import { expect, test } from "bun:test";
-import { chmod, mkdtemp, readdir, rm, unlink } from "node:fs/promises";
+import { chmod, mkdtemp, readdir, rm, symlink, unlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { NativeComposeOwnershipOptions } from "../src/lib/native-compose-ownership.ts";
+import { createNativeComposeProbe, type NativeComposeOwnershipOptions } from "../src/lib/native-compose-ownership.ts";
 import { exec } from "../src/lib/shell.ts";
 import { replayProcessPolicyInitialOwnership } from "./e2e/native-process-policy-initial-replay.ts";
 import {
@@ -85,6 +85,62 @@ await Bun.write(Bun.stdout,${JSON.stringify(CANARY)});await Bun.write(Bun.stderr
     await Bun.write(reap, originalReap);
     await unlink(join(prepared.directory, `${row.token}.json.start`));
     await expect(readProcessPolicyInitialTrace(prepared.directory)).rejects.toThrow();
+  } finally {
+    restoreEnv("PATH", previous);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("initial forwarding preserves a multicall Docker entry and refuses its replacement", async () => {
+  const root = await mkdtemp(join(tmpdir(), "process-initial-entry-"));
+  const previous = process.env.PATH;
+  const target = join(root, "docker-tools");
+  const entry = join(root, "docker");
+  const traceRoot = join(root, "trace");
+  try {
+    // The target alone is not the selected command: argv0 determines its operation.
+    await Bun.write(target, `#!/bin/sh\nif [ "$0" != '${entry}' ]; then exit 79; fi\nprintf '%s' entry-preserved\n`);
+    await chmod(target, 0o700);
+    await symlink(target, entry);
+    process.env.PATH = root;
+    expect((await exec([target], { stdin: "ignore", timeoutMs: 3000 })).exitCode).toBe(79);
+    const prepared = await prepareProcessPolicyInitialTrace({ directory: traceRoot });
+    const run = async () => await exec([join(traceRoot, "docker"), "version"], { env: { PATH: prepared.path }, stdin: "ignore", timeoutMs: 3000 });
+    expect(await run()).toEqual({ exitCode: 0, stdout: "entry-preserved", stderr: "" });
+    await unlink(entry);
+    await symlink(target, entry);
+    const replaced = await run();
+    expect(replaced.exitCode).not.toBe(0);
+    expect(replaced.stdout).toBe("");
+    expect(replaced.stderr).toContain("trace unavailable; values omitted");
+  } finally {
+    restoreEnv("PATH", previous);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("malformed UTF-8 keeps the caller's exact bytes/exit and makes replay unavailable", async () => {
+  const root = await mkdtemp(join(tmpdir(), "process-initial-utf8-"));
+  const previous = process.env.PATH;
+  const target = join(root, "docker");
+  const traceRoot = join(root, "trace");
+  const bytes = new Uint8Array([123, 34, 105, 103, 110, 111, 114, 101, 100, 34, 58, 34, 255, 34, 125]);
+  try {
+    await Bun.write(target, `#!${process.execPath} --no-env-file\nawait Bun.write(Bun.stdout,new Uint8Array(${JSON.stringify([...bytes])}));\n`);
+    await chmod(target, 0o700);
+    process.env.PATH = root;
+    const prepared = await prepareProcessPolicyInitialTrace({ directory: traceRoot });
+    const child = Bun.spawn([join(traceRoot, "docker"), ...list("container")], { env: { ...process.env, PATH: prepared.path }, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+    const actual = new Uint8Array(await new Response(child.stdout).arrayBuffer());
+    expect(await child.exited).toBe(0);
+    expect(actual).toEqual(bytes);
+    expect(await new Response(child.stderr).text()).toBe("");
+    process.env.PATH = prepared.path;
+    await expect(createNativeComposeProbe({ timeoutMs: 3000 })(list("container"))).rejects.toMatchObject({ code: "E_NATIVE_COMPOSE_PROBE" });
+    await expect(readProcessPolicyInitialTrace(prepared.directory)).rejects.toThrow("trace unavailable; values omitted");
+    for (const name of await readdir(prepared.directory)) {
+      expect(await Bun.file(join(prepared.directory, name)).text()).not.toContain("�");
+    }
   } finally {
     restoreEnv("PATH", previous);
     await rm(root, { recursive: true, force: true });

@@ -1,4 +1,4 @@
-import { chmod, mkdir, open, readdir, realpath, stat } from "node:fs/promises";
+import { chmod, lstat, mkdir, open, readdir, realpath, stat } from "node:fs/promises";
 import { isAbsolute, join } from "node:path";
 import { isRecord } from "../../src/lib/guards.ts";
 import { findExecutableInPath } from "../../src/lib/shell.ts";
@@ -65,7 +65,8 @@ export function processPolicyInitialTraceQuery(args: readonly string[]): {
     : null;
 }
 
-type BinaryPin = { readonly path: string; readonly dev: number; readonly ino: number; readonly size: number; readonly mtimeMs: number; readonly ctimeMs: number };
+type FilePin = { readonly dev: number; readonly ino: number; readonly size: number; readonly mtimeMs: number; readonly ctimeMs: number };
+type BinaryPin = FilePin & { readonly path: string; readonly entry: string; readonly entryIdentity: FilePin };
 type ForwarderOptions = {
   readonly directory: string;
   readonly binary: BinaryPin;
@@ -92,8 +93,9 @@ async function writePrivate(path: string, value: unknown): Promise<void> {
 /** Fixture-only forwarding preserves original bytes/exit and performs no extra Docker query. */
 export async function runProcessPolicyInitialTraceForwarder(opts: ForwarderOptions): Promise<number> {
   const args = process.argv.slice(2);
+  const entry = await lstat(opts.binary.entry);
   const current = await stat(opts.binary.path);
-  if (!current.isFile() || current.dev !== opts.binary.dev || current.ino !== opts.binary.ino || current.size !== opts.binary.size || current.mtimeMs !== opts.binary.mtimeMs || current.ctimeMs !== opts.binary.ctimeMs) {
+  if (!current.isFile() || current.dev !== opts.binary.dev || current.ino !== opts.binary.ino || current.size !== opts.binary.size || current.mtimeMs !== opts.binary.mtimeMs || current.ctimeMs !== opts.binary.ctimeMs || entry.dev !== opts.binary.entryIdentity.dev || entry.ino !== opts.binary.entryIdentity.ino || entry.size !== opts.binary.entryIdentity.size || entry.mtimeMs !== opts.binary.entryIdentity.mtimeMs || entry.ctimeMs !== opts.binary.entryIdentity.ctimeMs || await realpath(opts.binary.entry) !== opts.binary.path) {
     throw new Error(REFUSAL);
   }
   const query = processPolicyInitialTraceQuery(args);
@@ -116,7 +118,7 @@ export async function runProcessPolicyInitialTraceForwarder(opts: ForwarderOptio
   if (query || composeUp) {
     await record("start", { token, startedAt, startedNs, kind: query?.kind ?? "compose-up", action: query?.action ?? "effect" });
   }
-  const child = Bun.spawn([opts.binary.path, ...args], {
+  const child = Bun.spawn([opts.binary.entry, ...args], {
     stdin: "inherit",
     stdout: query ? "pipe" : "inherit",
     stderr: "inherit",
@@ -136,19 +138,31 @@ export async function runProcessPolicyInitialTraceForwarder(opts: ForwarderOptio
   let bytes = 0;
   try {
     if (query && child.stdout) {
-      for await (const chunk of child.stdout) {
-        await Bun.write(Bun.stdout, chunk);
-        bytes += chunk.byteLength;
-        if (bytes <= LIMIT) {
-          chunks.push(chunk);
+      const reader = child.stdout.getReader();
+      try {
+        while (true) {
+          const read = await reader.read();
+          if (read.done) { break; }
+          await Bun.write(Bun.stdout, read.value);
+          bytes += read.value.byteLength;
+          if (bytes <= LIMIT) {
+            chunks.push(read.value);
+          }
         }
+      } finally {
+        reader.releaseLock();
       }
     }
     const exitCode = await exited;
     const reapedAt = Date.now();
     const reapedNs = process.hrtime.bigint().toString();
     if (query && bytes <= LIMIT) {
-      await record("reply", { token, startedAt, startedNs, reapedAt, args, stdout: Buffer.concat(chunks).toString("utf8"), exitCode });
+      try {
+        const stdout = new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(chunks));
+        await record("reply", { token, startedAt, startedNs, reapedAt, args, stdout, exitCode });
+      } catch {
+        recorded = false;
+      }
     }
     if (query || composeUp) {
       await record("reap", { token, reapedAt, reapedNs, exitCode, recorded: recorded && (!query || bytes <= LIMIT) });
@@ -167,6 +181,7 @@ export async function prepareProcessPolicyInitialTrace(opts: { readonly director
     throw new Error(REFUSAL);
   }
   const path = await realpath(selected);
+  const entry = await lstat(selected);
   const info = await stat(path);
   if (!info.isFile() || (info.mode & 0o111) === 0) {
     throw new Error(REFUSAL);
@@ -177,7 +192,7 @@ export async function prepareProcessPolicyInitialTrace(opts: { readonly director
   const executable = join(opts.directory, "docker");
   const forwarder: ForwarderOptions = {
     directory: replies,
-    binary: { path, dev: info.dev, ino: info.ino, size: info.size, mtimeMs: info.mtimeMs, ctimeMs: info.ctimeMs },
+    binary: { path, entry: selected, entryIdentity: { dev: entry.dev, ino: entry.ino, size: entry.size, mtimeMs: entry.mtimeMs, ctimeMs: entry.ctimeMs }, dev: info.dev, ino: info.ino, size: info.size, mtimeMs: info.mtimeMs, ctimeMs: info.ctimeMs },
   };
   await Bun.write(executable, `#!${process.execPath} --no-env-file\nimport {runProcessPolicyInitialTraceForwarder} from ${JSON.stringify(import.meta.path)};\nprocess.exit(await runProcessPolicyInitialTraceForwarder(${JSON.stringify(forwarder)}));\n`);
   await chmod(executable, 0o700);

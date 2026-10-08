@@ -1597,6 +1597,55 @@ test("v5 retained health owner refuses a v6 topology receipt", async () => {
   }
 });
 
+test("v6 rollback permits a later plain owner without inheriting topology authority", async () => {
+  const composePath = join(projectRoot, ".hack/docker-compose.yml");
+  const plainCompose = await readFile(composePath, "utf8");
+  await ownedBridge();
+  const binary = await compiler();
+  const store = await openLegacyComposeAdoptedGenerationStore({ projectRoot });
+  try {
+    const custom = await store.prepare({ binary });
+    expect(custom.report.adoption_generation_version).toBe(6);
+    await store.publish({ generation: custom, binary });
+    await store.rollback();
+    expect(network().id).toBe(NETWORK);
+    expect(volume().createdAt).toBe(CREATED);
+
+    const plainNetwork = "e".repeat(64);
+    await writeFile(composePath, plainCompose);
+    container().networks = [{ name: "fixture_default", id: plainNetwork }];
+    fixture.network[0] = {
+      ...network(),
+      id: plainNetwork,
+      name: "fixture_default",
+      logical: "default",
+      internal: false,
+    };
+    await save();
+    const plain = await store.prepare({ binary });
+    expect(plain.report.adoption_generation_version).toBe(1);
+    expect((await readReceipt()).adoption_receipt_version).toBe(1);
+    await store.publish({ generation: plain, binary });
+    await store.close();
+    const saved = await openLegacyComposeAdoptedGenerationStore({
+      projectRoot,
+      mode: "saved",
+    });
+    try {
+      expect(
+        (await saved.loadActive())?.report.adoption_generation_version
+      ).toBe(1);
+      expect(container().id).toBe(ID);
+      expect(network().id).toBe(plainNetwork);
+      expect(volume().createdAt).toBe(CREATED);
+    } finally {
+      await saved.close();
+    }
+  } finally {
+    await store.close();
+  }
+});
+
 test("v6 journals a running original stop before effect and retains the owned bridge on recovery", async () => {
   await ownedBridge();
   fixture.running = true;

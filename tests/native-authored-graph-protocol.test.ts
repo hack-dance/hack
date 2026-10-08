@@ -5,6 +5,7 @@ import {
   parseNativeAuthoredReady,
   parseNativeAuthoredReceipt,
   parseNativeAuthoredReview,
+  parseNativeAuthoredSnapshot,
 } from "../src/backends/native-authored-graph-protocol.ts";
 
 const run = "a".repeat(32);
@@ -89,6 +90,86 @@ function cleaned() {
     result: { outcome: "cleaned", receipt: bound },
   };
 }
+
+test("standalone native journal snapshots bind the review before ready and admitted resources afterward", () => {
+  const selected = parseNativeAuthoredReview(review());
+  const admitted = parseNativeAuthoredReceipt(receipt());
+  const snapshot = status().result.snapshot;
+  expect(
+    parseNativeAuthoredSnapshot({ value: snapshot, expectedReview: selected })
+      .receipt
+  ).toEqual(admitted);
+  const removed = cleaned().result.receipt;
+  const after = { receipt: removed, observations: { "a.peer": null } };
+  expect(
+    parseNativeAuthoredSnapshot({
+      value: after,
+      expectedReview: selected,
+      admitted,
+    }).receipt.phase
+  ).toBe("removed");
+  const changed = receipt();
+  changed.resources["container:a.peer"].id = "9".repeat(64);
+  // The runtime authenticates pre-ready journals; once admitted, immutable IDs are also required.
+  expect(
+    parseNativeAuthoredSnapshot({
+      value: { ...snapshot, receipt: changed },
+      expectedReview: selected,
+    }).receipt.resources["container:a.peer"]?.id
+  ).toBe("9".repeat(64));
+  expect(() =>
+    parseNativeAuthoredSnapshot({
+      value: { ...snapshot, receipt: changed },
+      expectedReview: selected,
+      admitted,
+    })
+  ).toThrow("invalid");
+  expect(() =>
+    parseNativeAuthoredSnapshot({
+      value: snapshot,
+      expectedReview: parseNativeAuthoredReview(review(["other"])),
+    })
+  ).toThrow("invalid");
+});
+
+test("standalone native snapshots refuse unknown fields foreign observation names and private failure details", () => {
+  const expectedReview = parseNativeAuthoredReview(review());
+  const snapshot = status().result.snapshot;
+  const canary = "private-synthetic-native-snapshot-canary";
+  for (const value of [
+    { ...snapshot, planId: "9".repeat(64) },
+    { ...snapshot, observations: {} },
+    { ...snapshot, observations: { "a.peer": null, foreign: null } },
+    { ...snapshot, observations: Object.create({ "a.peer": null }) },
+    {
+      ...snapshot,
+      observations: {
+        "a.peer": { state: "running", health: "healthy", values: canary },
+      },
+    },
+    {
+      ...snapshot,
+      receipt: {
+        ...snapshot.receipt,
+        failure: {
+          service: "a.peer",
+          observation: { state: "dead", values: canary },
+        },
+      },
+    },
+  ]) {
+    let error: unknown;
+    try {
+      parseNativeAuthoredSnapshot({ value, expectedReview });
+    } catch (value: unknown) {
+      error = value;
+    }
+    expect(error).toBeInstanceOf(Error);
+    expect(String(error)).toContain("invalid");
+    expect(String(error)).not.toContain(canary);
+    expect(JSON.stringify(error)).not.toContain(canary);
+  }
+});
 
 test("native provenance hashes canonical public fields and preserves UTF8 profile order", () => {
   const selected = review(["\uE000", "\u{10000}"]);

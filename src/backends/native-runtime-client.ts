@@ -75,6 +75,8 @@ export async function invokeNativeRuntime(opts: {
   readonly serviceExecResponse?: boolean;
   /** Native authored status must finish when its owned child exits or admission is canceled. */
   readonly boundNativeStatusDrain?: boolean;
+  /** Native source planning and journal inspection also bind pipe lifetime to their owned read child. */
+  readonly boundNativeAuthoredReadDrain?: boolean;
 }): Promise<unknown> {
   if (opts.signal?.aborted) {
     throw new NativeRuntimeRequestError({
@@ -87,6 +89,11 @@ export async function invokeNativeRuntime(opts: {
     !(
       validExecResponseSelection(opts.args, opts.serviceExecResponse) &&
       validNativeStatusDrainSelection(opts.args, opts.boundNativeStatusDrain) &&
+      validNativeAuthoredReadDrainSelection(
+        opts.args,
+        opts.boundNativeAuthoredReadDrain,
+        opts.privateInput !== undefined
+      ) &&
       Number.isSafeInteger(timeoutMs)
     ) ||
     timeoutMs < 1 ||
@@ -112,7 +119,10 @@ export async function invokeNativeRuntime(opts: {
       stderr: "pipe",
     }
   );
-  const drain = opts.boundNativeStatusDrain ? new AbortController() : undefined;
+  const drain =
+    opts.boundNativeStatusDrain || opts.boundNativeAuthoredReadDrain
+      ? new AbortController()
+      : undefined;
   let drainTimer: ReturnType<typeof setTimeout> | undefined;
   if (drain) {
     void child.exited.then(() => {
@@ -189,6 +199,27 @@ function validNativeStatusDrainSelection(
       args[5] === "--action" &&
       args[6] === "status" &&
       args[7] === "--json")
+  );
+}
+
+function validNativeAuthoredReadDrainSelection(
+  args: readonly string[],
+  selected: boolean | undefined,
+  privateInput: boolean
+): boolean {
+  return (
+    !selected ||
+    (!privateInput &&
+      args.length === 6 &&
+      args[0] === "graph" &&
+      args[1] === "native" &&
+      args[5] === "--json" &&
+      ((args[2] === "plan" &&
+        args[3] === "--source-file" &&
+        isAbsolute(args[4] ?? "")) ||
+        (args[2] === "inspect" &&
+          args[3] === "--run-id" &&
+          NATIVE_RUN.test(args[4] ?? ""))))
   );
 }
 

@@ -164,6 +164,12 @@ context. It binds that branch into resolve and environment planning without
 implicit Git or global-domain discovery, matching the native source's local hash.
 Omitting this context preserves the existing Compose preparation behavior.
 
+Native-source plan and inspect requests have a separate opt-in pipe-lifetime
+bound for those exact read-only arguments. They reject private stdin and other
+actions; the default client and Compose requests retain their prior behavior.
+A closed native snapshot parser binds inspection to its reviewed source and,
+after readiness, the original admitted owner, boot and resource identities.
+
 The stable, absolute source file is a public v2 envelope with
 `kind: "native-graph-source"`, `project`, optional canonical `branch`, 32-hex `run`,
 optional `profiles`, and compiler-owned `env_metadata`. Its `overlay` is `"inherit"`

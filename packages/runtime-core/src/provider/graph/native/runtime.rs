@@ -740,8 +740,10 @@ fn cleanup_using_guarded<B: Backend>(
     }
     if !stopped {
         receipt.phase = Phase::Stopped;
-        journal::save(root, receipt)?;
     }
+    // A resumed removal still durably records each fresh terminal observation
+    // before deletion, without moving its already committed phase backward.
+    journal::save(root, receipt)?;
     if !removing {
         receipt.phase = Phase::RemovalIntent;
         journal::save(root, receipt)?;

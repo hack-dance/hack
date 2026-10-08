@@ -19,8 +19,8 @@ No credentials or running VM are needed.
 ## Native foreground recovery lease takeover
 
 `native-frontend-recovery/Recovery.tla` models the explicit saved-run frontend
-recovery lease protocol. Its checker and exact exploration-count registration
-are pending initial qualification. It bounds one lease to two new candidates,
+recovery lease protocol. The positive configuration exhausts **602 distinct
+states** (695 generated, maximum depth 22). It bounds one lease to two new candidates,
 one crash, one immutable resource selection and one possible foreign-binding
 substitution. Two initial states cover a fresh active recovery at release and a
 dead selected owner awaiting takeover. The same protocol serves the primary and

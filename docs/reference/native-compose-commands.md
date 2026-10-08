@@ -111,8 +111,10 @@ Do not copy these documents into source control or attach them to diagnostics.
 ## Owned project networks
 
 For an unchanged unrouted running instance, `up` reuses its saved generation only
-when the full input revision, selected profiles and freshly rendered private
-document match exactly. Compose and readiness checks still run, as do authored
+when the full input revision, selected profiles and freshly prepared private
+execution document match exactly. Build projects compare the same image-only
+projection and retained literal build declarations that were saved. Compose,
+owned image admission and readiness checks still run, as do authored
 finite hooks. This avoids recreating healthy containers solely because of a new
 generation label. Changed inputs, stopped instances and explicit `restart` retain
 the new-generation path. Routed warm `up` remains outside this reuse slice.

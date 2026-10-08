@@ -825,6 +825,16 @@ async function verifyPhaseProofs(
   }
 }
 
+/** Only the initial failed-after mode may seed data; later startup must observe retained bytes. */
+export function nativeRoutedDownMarkerProgram(opts: {
+  readonly mode: "after17" | "success";
+  readonly path: string;
+  readonly marker: string;
+  readonly primary: boolean;
+}): string {
+  return `const f=Bun.file(${JSON.stringify(opts.path)});if(await f.exists()){if(await f.text()!==${JSON.stringify(opts.marker)})process.exit(48)}else{${opts.mode === "after17" ? `await Bun.write(f,${JSON.stringify(opts.marker)});` : "process.exit(48);"}}${opts.primary ? `if(process.env.${ENV_KEY}!==${JSON.stringify(GUEST_VALUE)}||Object.hasOwn(process.env,"SEEN"))process.exit(47);` : ""}`;
+}
+
 /** Combined routing + finite stop proof, inside the required owned routing scenario. */
 export async function qualifyNativeComposeRoutedDownHooks(
   opts: Acceptance
@@ -885,7 +895,12 @@ export async function qualifyNativeComposeRoutedDownHooks(
         observed.observation.pin.containers[0] ?? "",
         "bun",
         "-e",
-        `const f=Bun.file(${JSON.stringify(MARKER_PATH)});if(await f.exists()){if(await f.text()!==${JSON.stringify(checkout.marker)})process.exit(48)}else await Bun.write(f,${JSON.stringify(checkout.marker)});${checkout.root === opts.primary.root ? `if(process.env.${ENV_KEY}!==${JSON.stringify(GUEST_VALUE)}||Object.hasOwn(process.env,"SEEN"))process.exit(47);` : ""}`,
+        nativeRoutedDownMarkerProgram({
+          mode,
+          path: MARKER_PATH,
+          marker: checkout.marker,
+          primary: checkout.root === opts.primary.root,
+        }),
       ]);
     }
     const own = (await observe(opts.primary, opts.docker, true)).observation

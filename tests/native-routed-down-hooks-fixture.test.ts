@@ -1,8 +1,12 @@
 import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
+import { mkdtemp, rm, stat } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   nativeRoutedDownClaimsMatch,
   nativeRoutedDownHookProofMatches,
+  nativeRoutedDownMarkerProgram,
   nativeRoutedDownPhaseMatches,
 } from "./e2e/scenarios/native-config-routed-down-hooks.ts";
 
@@ -17,6 +21,42 @@ const pin = {
   volume: { name: "native-fixture_state", createdAt: "2026-10-08T12:00:00Z" },
   origins: ["https://primary.test", "https://oauth.test"],
 };
+test("second routed startup refuses lost or changed marker without repairing it", async () => {
+  const root = await mkdtemp(join(tmpdir(), "native-routed-down-marker-"));
+  const path = join(root, "marker");
+  const execute = async (mode: "after17" | "success") => {
+    const program = nativeRoutedDownMarkerProgram({
+      mode,
+      path,
+      marker: pin.marker,
+      primary: false,
+    });
+    const child = Bun.spawn([process.execPath, "-e", program], {
+      stdin: "ignore",
+      stdout: "ignore",
+      stderr: "ignore",
+      timeout: 1500,
+    });
+    return await child.exited;
+  };
+  try {
+    expect(await execute("after17")).toBe(0);
+    expect(await Bun.file(path).text()).toBe(pin.marker);
+    const original = await stat(path);
+    expect(await execute("success")).toBe(0);
+    const retained = await stat(path);
+    expect(retained.ino).toBe(original.ino);
+    expect(retained.mtimeMs).toBe(original.mtimeMs);
+    await rm(path);
+    expect(await execute("success")).toBe(48);
+    expect(await Bun.file(path).exists()).toBe(false);
+    await Bun.write(path, "different-retained-bytes");
+    expect(await execute("success")).toBe(48);
+    expect(await Bun.file(path).text()).toBe("different-retained-bytes");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
 function observed(phase: "before" | "after" | "sibling") {
   return {
     pin: {

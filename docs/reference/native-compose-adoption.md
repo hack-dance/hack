@@ -239,8 +239,9 @@ managed metadata. The private manifest stores file identity and raw-byte proofs;
 it does not copy decrypted managed values. Saved leases, stop repair, publication
 and rollback recheck those same layers and original generated files without key
 lookup or decryption. They retain the original resource IDs, volumes and generated
-files, and preserve both legacy originals for rollback. Any byte, source, selected
-primary, mode, generated-file or original-resource drift refuses before a new
+files, and preserve both legacy originals for rollback. Raw-byte or selection
+drift, unsafe managed-file permissions, generated-file identity changes, and
+original-resource drift refuse before a new
 effect; drift after an effect retains pending evidence. Rechecks do not freeze
 external editors or the engine. Old version 1/2 receipts remain readable; earlier
 upgraded owners refuse version 3 through the existing selector boundary.

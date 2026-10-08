@@ -47,7 +47,13 @@ export type NativeComposeRouteReference = {
 export type NativeComposeRouteAttempt = {
   readonly reference: NativeComposeRouteReference;
   readonly hostnames: readonly string[];
-  readonly phase: "reserved" | "armed" | "complete" | "retained" | "aborted";
+  readonly phase:
+    | "reserved"
+    | "armed"
+    | "complete"
+    | "retained"
+    | "stopped"
+    | "aborted";
 };
 type Claim = {
   readonly version: 1;
@@ -78,6 +84,7 @@ type Journal = {
   readonly armed: boolean;
   readonly complete: boolean;
   readonly retained: boolean;
+  readonly stopped: boolean;
   readonly aborted: boolean;
 };
 type HeldDirectory = {
@@ -335,6 +342,9 @@ function phase(journal: Journal): NativeComposeRouteAttempt["phase"] {
   if (journal.aborted) {
     return "aborted";
   }
+  if (journal.stopped) {
+    return "stopped";
+  }
   if (journal.retained) {
     return "retained";
   }
@@ -460,6 +470,18 @@ export type NativeComposeRouteClaims = {
       readonly binding: NativeComposeRouteBinding;
       readonly owner: NativeComposeRouteOwner;
     }) => Promise<void>;
+  }): Promise<void>;
+  /**
+   * Explicit stop recovery under the instance mutation lock. Every uncertain
+   * journal must have an exact saved reference. Fresh proof must establish all
+   * owned containers and routes absent on this ingress; completion authority is
+   * never restored. Failed proof leaves uncertainty and claims unchanged.
+   */
+  recoverStopped(opts: {
+    readonly references: readonly NativeComposeRouteReference[];
+    readonly assertAbsent: Parameters<
+      NativeComposeRouteClaims["release"]
+    >[0]["assertAbsent"];
   }): Promise<void>;
   close(): Promise<void>;
 };
@@ -728,10 +750,11 @@ export async function openNativeComposeRouteClaims(opts: {
       const armed = await marker("armed");
       const complete = await marker("complete");
       const retained = await marker("retained");
+      const stopped = await marker("stopped");
       const aborted = await marker("aborted");
       if (
         (complete && !armed) ||
-        (aborted && (armed || complete || retained))
+        (aborted && (armed || complete || retained || stopped))
       ) {
         refuse();
       }
@@ -743,6 +766,7 @@ export async function openNativeComposeRouteClaims(opts: {
         armed,
         complete,
         retained,
+        stopped,
         aborted,
       };
     };
@@ -1008,6 +1032,74 @@ export async function openNativeComposeRouteClaims(opts: {
       }
       return result;
     };
+    const uncertain = (record: Journal) =>
+      !record.stopped &&
+      (record.retained || (record.armed && !record.complete));
+    const retire = async (options: {
+      readonly keepHostnames?: readonly string[];
+      readonly references?: readonly NativeComposeRouteReference[];
+      readonly assertAbsent: Parameters<
+        NativeComposeRouteClaims["release"]
+      >[0]["assertAbsent"];
+    }) => {
+      const keep = new Set(hostnames(options.keepHostnames ?? []));
+      const assertAbsent = options.assertAbsent;
+      const references = options.references?.map(snapshotReference);
+      if (typeof assertAbsent !== "function") {
+        refuse();
+      }
+      const records = await journals();
+      const recovering = [
+        ...new Set(
+          (references ?? []).map((reference) => find(records, reference))
+        ),
+      ];
+      if (
+        records.some(
+          (record) => uncertain(record) && !recovering.includes(record)
+        )
+      ) {
+        refuse("E_NATIVE_COMPOSE_ROUTE_RETAINED");
+      }
+      const current = await activeEntries(records);
+      const entries = [...current.entries.values()]
+        .filter((entry) => !keep.has(entry.claim.hostname))
+        .sort((a, b) => a.claim.hostname.localeCompare(b.claim.hostname));
+      for (const entry of await resumedRetirements(current.retired, keep)) {
+        if (!entries.some((value) => equal(value, entry))) {
+          entries.push(entry);
+        }
+      }
+      await assertAbsent({
+        hostnames: Object.freeze(entries.map((entry) => entry.claim.hostname)),
+        binding,
+        owner,
+      });
+      const latest = await journals();
+      if (!equal(latest, records)) {
+        refuse();
+      }
+      await activeEntries(latest);
+      for (const record of recovering) {
+        if (!(record.stopped || record.aborted)) {
+          await publish(
+            join(attemptsRoot, record.intent.attemptId, "stopped.json"),
+            {
+              version: 1,
+              intentHash: record.intentAnchor.hash,
+              reservationHash: record.reservationAnchor?.hash,
+            }
+          );
+        }
+      }
+      await publish(join(releasesRoot, `${hash(token())}.json`), {
+        version: 1,
+        binding,
+        owner,
+        entries,
+      });
+      await removeEntries(entries);
+    };
     return {
       acquire: (options) =>
         guard(async () => {
@@ -1089,9 +1181,8 @@ export async function openNativeComposeRouteClaims(opts: {
             record.armed ||
             record.complete ||
             record.retained ||
-            records.some(
-              (value) => value.retained || (value.armed && !value.complete)
-            )
+            record.stopped ||
+            records.some(uncertain)
           ) {
             refuse("E_NATIVE_COMPOSE_ROUTE_RETAINED");
           }
@@ -1110,7 +1201,8 @@ export async function openNativeComposeRouteClaims(opts: {
             !record.armed ||
             record.aborted ||
             record.complete ||
-            record.retained
+            record.retained ||
+            record.stopped
           ) {
             refuse("E_NATIVE_COMPOSE_ROUTE_RETAINED");
           }
@@ -1122,7 +1214,12 @@ export async function openNativeComposeRouteClaims(opts: {
         guard(async () => {
           const { reference } = capability(attempt);
           const record = find(await journals(), reference);
-          if (record.aborted || record.complete || record.retained) {
+          if (
+            record.aborted ||
+            record.complete ||
+            record.retained ||
+            record.stopped
+          ) {
             refuse();
           }
           await mark(attempt, "retained");
@@ -1135,7 +1232,8 @@ export async function openNativeComposeRouteClaims(opts: {
             record.aborted ||
             record.armed ||
             record.complete ||
-            record.retained
+            record.retained ||
+            record.stopped
           ) {
             refuse("E_NATIVE_COMPOSE_ROUTE_RETAINED");
           }
@@ -1144,52 +1242,14 @@ export async function openNativeComposeRouteClaims(opts: {
           await mark(attempt, "aborted");
           await removeEntries(added);
         }),
-      release: (options) =>
-        guard(async () => {
-          const keep = new Set(hostnames(options.keepHostnames ?? []));
-          const assertAbsent = options.assertAbsent;
-          if (typeof assertAbsent !== "function") {
-            refuse();
-          }
-          const records = await journals();
-          if (
-            records.some(
-              (value) => value.retained || (value.armed && !value.complete)
-            )
-          ) {
-            refuse("E_NATIVE_COMPOSE_ROUTE_RETAINED");
-          }
-          const current = await activeEntries(records);
-          const entries = [...current.entries.values()]
-            .filter((entry) => !keep.has(entry.claim.hostname))
-            .sort((a, b) => a.claim.hostname.localeCompare(b.claim.hostname));
-          // Resume only exact, previously journaled deletion intent, after fresh proof.
-          for (const entry of await resumedRetirements(current.retired, keep)) {
-            if (!entries.some((value) => equal(value, entry))) {
-              entries.push(entry);
-            }
-          }
-          await assertAbsent({
-            hostnames: Object.freeze(
-              entries.map((entry) => entry.claim.hostname)
-            ),
-            binding,
-            owner,
-          });
-          await activeEntries(await journals());
-          await publish(join(releasesRoot, `${hash(token())}.json`), {
-            version: 1,
-            binding,
-            owner,
-            entries,
-          });
-          for (const entry of entries) {
-            await exactUnlink(claimPath(entry.claim.hostname), {
-              text: JSON.stringify(entry.claim),
-              anchor: entry.anchor,
-            });
-          }
-        }),
+      release: (options) => guard(() => retire(options)),
+      recoverStopped: (options) =>
+        guard(() =>
+          retire({
+            references: options.references,
+            assertAbsent: options.assertAbsent,
+          })
+        ),
       close: async () => {
         if (!closed) {
           closed = true;

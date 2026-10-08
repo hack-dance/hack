@@ -163,11 +163,14 @@ proxy route absence. Proxy loss returns a retained-claims diagnostic after the s
 Replacing or removing routing admits the union of old and new hostnames and removes
 owned orphan containers before retiring obsolete claims. Persistent volumes remain.
 
-An uncertain route effect retains its claims, even after `down --recover` proves
-the owned containers stopped. A saved reference cannot complete a prior interrupted
-attempt. Such claims prevent restart and hostname handoff; explicit route-owner
-recovery remains unimplemented. A pre-effect failure rolls back only claims newly
-acquired by that live preparation.
+An uncertain route effect retains its claims and blocks restart and hostname
+handoff. `down --recover` may retire those claims using their exact saved references,
+fresh absence of all owned containers and routes, and the same verified ingress.
+It records a terminal stopped attempt and never completes the interrupted start.
+Missing ingress or failed proof keeps the generation pending for another explicit
+stop recovery. Unknown host-hook completion still blocks claim retirement and keeps
+its hook intent and recovery generation. A pre-effect failure rolls back only claims
+newly acquired by that live preparation.
 
 Startup writes pending engine intent before spawning. After the child is reaped,
 Hack verifies workload and active-route readiness, then checks the owned generation
@@ -178,6 +181,11 @@ engine uncertainty and prevents a ready report. The two private stores do not ha
 an atomic commit: a crash after claim completion but before receipt publication
 still leaves the pending generation for explicit owned stop recovery. Fresh absence
 proof remains required before any remaining hostname claims can be released.
+Stop likewise retires claims before committing its completed generation receipt,
+then rechecks generation, ownership and pending intent. A crash after retirement
+leaves the pending generation; retry proves absence again and preserves any later
+foreign claim. A receipt already lost by an older version cannot be reconstructed
+from orphan generation files by this recovery path.
 
 ## Remaining coverage
 

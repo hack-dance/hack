@@ -15,8 +15,27 @@ the exact `.hack/hack.config.json` and `.hack/docker-compose.yml` pair, bounded
 regular files, strict maintained parsing and private original-byte freshness.
 Matching explicit canonical names in both documents are required. There is no
 caller-supplied resource name, branch override or directory-name fallback.
-Local/dotenv inputs, `.git` file layouts, symlinks, competing input families and
-source changes refuse under the same rules as preview.
+Local/dotenv inputs, symlinks, competing input families and source changes refuse.
+The private adoption owner additionally accepts exact-root linked Git checkouts
+verified through the existing bounded Git owner. Separate Git directories and
+nested project roots remain outside this linked-checkout slice; ordinary import
+preview still refuses `.git` files.
+
+Linked checkout receipts use private version 2. They bind the raw `.git` pointer,
+administrative backlink and common-directory pointer, together with the held Git
+administrative, common and primary directory identities. Pointer edits, redirected
+paths, replaced directories and lost linkage refuse before publication or engine
+effects. These private identities and digests never enter public reports. Existing
+directory checkout receipts retain version 1 and their original wire shape.
+
+The static retained-container slice also inspects relevant filenames in the
+verified primary checkout when local inheritance is enabled. Managed-env,
+dotenv, typed local settings and legacy extra-host aliases refuse without reading
+their contents. The existing explicit `inherit_local: false`, CI and slim-runner
+exclusions still exclude that primary scope. Inherited inputs added after
+preparation refuse publication or later retained-container mutations; they cannot
+be silently applied or ignored by a fresh migration. Successful generated-source
+and managed-env inheritance adoption remains a separate NC04 requirement.
 
 The pure `planLegacyComposeAdoption` prerequisite retains original field pointers
 and positions. It reuses all preview mapping refusals, including unknown fields
@@ -89,7 +108,7 @@ not serialized. Orphan preparations are retained as evidence after a refused
 transition. The native version-one receipt and manifest contract is unchanged.
 
 `hack config adopt` requires all original containers stopped. It refuses local,
-dotenv or managed-env inputs, linked/separate Git layouts, selected profiles,
+dotenv or managed-env inputs, unverified linked or separate Git layouts, selected profiles,
 unsupported source mappings and changed source/resource ownership. It never
 silently stops a running instance. Add explicit `--stop` to journal and stop all
 verified original IDs before the format switch. `--dry-run --stop` qualifies that
@@ -156,6 +175,34 @@ after adopted execution and rollback, retained container/network/volume anchors,
 an interrupted partial stop, process-killed switch and rollback repair, candidate
 edit/removal refusal, exact original-file inode restoration and owned cleanup.
 These observed boundaries supplement the synthetic probe/interruption tests.
-Full NC04 remains open for typed local inheritance, linked-worktree isolation,
+Full NC04 remains open for typed local inheritance, generated-source provenance,
 advanced lossless mappings, recreation and application migration; that acceptance
 does not qualify those unsupported cases or an atomic freeze of external actors.
+
+The maintained `native-compose-adoption-worktrees` Docker scenario exercises two
+real linked checkouts with distinct canonical Compose names, original PostgreSQL
+volumes and stored SQL rows. It checks inherited primary local-env refusal before
+adoption state, then qualifies the static source pair while that unsupported local
+input is withheld. Partial-stop repair, retained-container execution and rollback
+must preserve the other checkout's source inodes, bytes, resource IDs and SQL row.
+Stopped originals remain bound, and unsupported recreation through `run` refuses.
+Cleanup uses only captured, reverified original IDs and volume creation facts.
+Failed acceptance retains its disposable sources and isolated home for inspection;
+retention alone does not prove engine cleanup succeeded.
+
+Run it with the current compiled CLI and adjacent matching compiler, a Linux
+Docker daemon and cached `postgres:17.6-alpine` image:
+
+```sh
+HACK_E2E_CLI_BIN=./dist/hack HACK_E2E_DOCKER=1 HACK_E2E_REQUIRE_DOCKER=1 HACK_E2E_KEEP=1 \
+  bun tests/e2e/run.ts --only=native-compose-adoption-worktrees
+```
+
+This fixture distinguishes static isolation from successful typed inheritance;
+its inherited-input refusal does not qualify migration of generated Compose
+overrides or managed values. The maintained scenario passed on macOS against a
+Linux Docker daemon: both original SQL rows and resource identities survived
+partial-stop repair, adopted execution and separate rollback. Exact owned cleanup
+and an independent inventory check restored the original engine baseline.
+Each later fixture inspection acquires a fresh bounded probe; a probe owner has
+one aggregate acquisition deadline and cannot span the entire lifecycle.

@@ -22,7 +22,7 @@ const spec = defineCommand({
   summary: "Explicitly adopt a stopped, verified existing Compose instance",
   group: "Project",
   description:
-    "Qualifies a strict static legacy subset with exact existing data volumes. --dry-run reports fields without writes. Adoption journals the stopped format switch and holds original files for rollback; retained-container commands never create replacement data. Requires an upgraded launcher. Linked Git/local inheritance and container recreation remain unsupported.",
+    "Qualifies a strict static legacy subset with exact existing data volumes. --dry-run reports fields without writes. Adoption journals the stopped format switch and holds original files for rollback; retained-container commands never create replacement data. Requires an upgraded launcher. Verified linked Git checkouts retain explicit existing identities. Local inheritance, generated overrides and container recreation remain unsupported.",
   options: [
     defineOption({
       name: "stop",

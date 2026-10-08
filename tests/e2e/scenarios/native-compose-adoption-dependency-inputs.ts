@@ -103,6 +103,7 @@ const DEPENDENCY_READ_FORMATS = {
       "a0c775c27577062be0deaf03cc10ccec9deec5512c7f75fa0225ac0fbef58764",
       "2678a2db0e9f357cd7f58dd42d5dc613371e3d69b29a20bab7d37959d73fb551",
       "999c6f5f7f6765c00dbb66f7fc6aa2decef1ec316f7fb6ddcadaa64a1a36eaa8",
+      "177b76bf4a78ee1c08b0339090b509dcf018d70110b78b4a0a283fd59bf8ed73",
     ],
   },
   volume: {

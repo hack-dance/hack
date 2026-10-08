@@ -12,6 +12,20 @@ export type LegacyOwnedNetworkIntent = {
     readonly aliases: readonly string[];
   }[];
 };
+export type LegacyOwnedNetworksIntent = {
+  readonly networks: readonly {
+    readonly logical: string;
+    readonly name: string;
+    readonly internal: boolean;
+  }[];
+  readonly attachments: readonly {
+    readonly service: string;
+    readonly networks: readonly {
+      readonly logical: string;
+      readonly aliases: readonly string[];
+    }[];
+  }[];
+};
 export type NetworkMapping =
   | { readonly kind: "omitted" }
   | {
@@ -22,6 +36,15 @@ export type NetworkMapping =
   | {
       readonly kind: "owned";
       readonly intent: LegacyOwnedNetworkIntent;
+      readonly pointers: readonly {
+        readonly source: string;
+        readonly target: string;
+        readonly code: string;
+      }[];
+    }
+  | {
+      readonly kind: "multiple";
+      readonly intent: LegacyOwnedNetworksIntent;
       readonly pointers: readonly {
         readonly source: string;
         readonly target: string;
@@ -82,21 +105,11 @@ function attachment(opts: {
   return { aliases: [...seen].sort() };
 }
 
-function declared(
-  source: unknown
+function declaredOne(
+  source: Record<string, unknown>,
+  logical: string
 ): NetworkMapping | { readonly logical: string; readonly internal: boolean } {
-  if (!(isRecord(source) && Object.keys(source).length === 1)) {
-    return refuse("/networks", "single_owned_bridge_required");
-  }
-  const logical = Object.keys(source)[0];
-  if (
-    !(
-      logical &&
-      validName(logical) &&
-      logical !== "default" &&
-      logical !== "ingress"
-    )
-  ) {
+  if (!validName(logical) || logical === "default" || logical === "ingress") {
     return refuse("/networks", "named_owned_bridge_required");
   }
   const pointer = importPointer("/networks", logical);
@@ -123,6 +136,18 @@ function declared(
     return refuse(`${pointer}/internal`, "explicit_internal_policy_required");
   }
   return { logical, internal: definition.internal };
+}
+
+function declared(
+  source: unknown
+): NetworkMapping | { readonly logical: string; readonly internal: boolean } {
+  if (!(isRecord(source) && Object.keys(source).length === 1)) {
+    return refuse("/networks", "single_owned_bridge_required");
+  }
+  const logical = Object.keys(source)[0];
+  return logical
+    ? declaredOne(source, logical)
+    : refuse("/networks", "named_owned_bridge_required");
 }
 
 function attached(
@@ -181,7 +206,103 @@ function attached(
   return { attachments, pointers };
 }
 
-/** One physical project bridge only; unknown Compose topology never becomes native authority. */
+function multiple(
+  project: string,
+  source: Record<string, unknown>,
+  services: Record<string, unknown>
+): NetworkMapping {
+  const names = Object.keys(source).sort();
+  if (names.length !== 2) {
+    return refuse("/networks", "two_owned_bridges_required");
+  }
+  const networks: LegacyOwnedNetworksIntent["networks"][number][] = [];
+  for (const logical of names) {
+    const definition = declaredOne(source, logical);
+    if ("kind" in definition) {
+      return definition;
+    }
+    networks.push({
+      logical,
+      name: `${project}_${logical}`,
+      internal: definition.internal,
+    });
+  }
+  const serviceNames = new Set(Object.keys(services));
+  const aliasesByNetwork = new Map<string, Set<string>>(
+    names.map((name) => [name, new Set<string>()])
+  );
+  const used = new Set<string>();
+  const attachments: LegacyOwnedNetworksIntent["attachments"][number][] = [];
+  const pointers = [
+    { source: "/networks", target: "/networks", code: "owned_bridges" },
+  ];
+  for (const [service, declaration] of Object.entries(services).sort(
+    ([a], [b]) => a.localeCompare(b)
+  )) {
+    const selected = `${importPointer("/services", service)}/networks`;
+    if (
+      !(
+        validName(service) &&
+        isRecord(declaration) &&
+        Object.hasOwn(declaration, "networks") &&
+        isRecord(declaration.networks)
+      )
+    ) {
+      return refuse(selected, "explicit_owned_bridge_attachments_required");
+    }
+    const selectedNetworks = Object.keys(declaration.networks).sort();
+    if (
+      selectedNetworks.length === 0 ||
+      selectedNetworks.length > 2 ||
+      selectedNetworks.some((name) => !aliasesByNetwork.has(name))
+    ) {
+      return refuse(selected, "closed_owned_bridge_attachments_required");
+    }
+    const perService: LegacyOwnedNetworksIntent["attachments"][number]["networks"][number][] =
+      [];
+    for (const logical of selectedNetworks) {
+      const mapped = attachment({
+        source: { [logical]: declaration.networks[logical] },
+        logical,
+        pointer: selected,
+      });
+      if ("kind" in mapped) {
+        return mapped;
+      }
+      const seen = aliasesByNetwork.get(logical);
+      if (!seen) {
+        return refuse(selected, "closed_owned_bridge_attachments_required");
+      }
+      for (const alias of mapped.aliases) {
+        if (serviceNames.has(alias) || seen.has(alias)) {
+          return refuse(
+            `${selected}/${logical}/aliases`,
+            "network_alias_collision"
+          );
+        }
+        seen.add(alias);
+      }
+      used.add(logical);
+      perService.push({ logical, aliases: mapped.aliases });
+    }
+    attachments.push({ service, networks: perService });
+    pointers.push({
+      source: selected,
+      target: selected,
+      code: "owned_bridge_attachments",
+    });
+  }
+  if (used.size !== networks.length) {
+    return refuse("/networks", "unused_owned_bridge");
+  }
+  return {
+    kind: "multiple",
+    intent: { networks, attachments },
+    pointers,
+  };
+}
+
+/** One or two closed project bridges; unknown Compose topology never becomes native authority. */
 export function mapLegacyOwnedNetwork(opts: {
   readonly project: string;
   readonly compose: Record<string, unknown>;
@@ -200,6 +321,12 @@ export function mapLegacyOwnedNetwork(opts: {
       }
     }
     return { kind: "omitted" };
+  }
+  if (
+    isRecord(opts.compose.networks) &&
+    Object.keys(opts.compose.networks).length === 2
+  ) {
+    return multiple(opts.project, opts.compose.networks, services);
   }
   const definition = declared(opts.compose.networks);
   if ("kind" in definition) {

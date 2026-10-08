@@ -2,6 +2,7 @@ import { posix } from "node:path";
 import { isRecord } from "./guards.ts";
 import {
   type LegacyOwnedNetworkIntent,
+  type LegacyOwnedNetworksIntent,
   mapLegacyOwnedNetwork,
 } from "./native-config-import-network.ts";
 import { importPointer } from "./native-config-import-parser.ts";
@@ -14,6 +15,7 @@ export type LegacyComposeStorageIntent = {
   readonly composeProject: string;
   readonly services: readonly string[];
   readonly ownedNetwork?: LegacyOwnedNetworkIntent;
+  readonly ownedNetworks?: LegacyOwnedNetworksIntent;
   readonly volumes: readonly {
     readonly storage: string;
     readonly name: string;
@@ -210,6 +212,7 @@ export function mapLegacyComposeStorage(opts: {
       composeProject: config.name,
       services: Object.keys(compose.services).sort(),
       ...(network.kind === "owned" ? { ownedNetwork: network.intent } : {}),
+      ...(network.kind === "multiple" ? { ownedNetworks: network.intent } : {}),
       volumes: mapping.volumes.sort((a, b) =>
         a.storage.localeCompare(b.storage)
       ),

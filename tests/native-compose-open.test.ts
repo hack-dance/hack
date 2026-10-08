@@ -253,8 +253,8 @@ test("native open selects the exact named saved instance and does not substitute
   expect(JSON.parse(result.stdout)).toEqual({ url: RESOLUTION.open_origin });
 });
 
-test("native open refuses malformed, pending, unrouted and unsaved generations without fallback", async () => {
-  for (const mode of ["malformed", "pending", "unrouted", "unsaved"] as const) {
+for (const mode of ["malformed", "pending", "unrouted", "unsaved"] as const) {
+  test(`native open refuses ${mode} generations without fallback`, async () => {
     const root = await fixture();
     if (mode !== "unsaved") {
       await save({ root, mode });
@@ -265,23 +265,23 @@ test("native open refuses malformed, pending, unrouted and unsaved generations w
     expect(`${result.stdout}\n${result.stderr}`).toContain(
       mode === "unrouted" ? "E_NATIVE_PROJECT_UNSUPPORTED" : "E_CONFIG_INVALID"
     );
-  }
-});
+  });
+}
 
-test("native open refuses unknown/arbitrary targets and invalid preferences", async () => {
-  const root = await fixture();
-  await save({ root });
-  for (const args of [
-    ["logs", "--json"],
-    ["https://external.test", "--json"],
-    ["constructor", "--json"],
-    ["toString", "--json"],
-    ["__proto__", "--json"],
-    ["--prefer", "unknown", "--json"],
-  ]) {
+for (const [name, args] of [
+  ["reserved command", ["logs", "--json"]],
+  ["external URL", ["https://external.test", "--json"]],
+  ["constructor target", ["constructor", "--json"]],
+  ["toString target", ["toString", "--json"]],
+  ["__proto__ target", ["__proto__", "--json"]],
+  ["invalid preference", ["--prefer", "unknown", "--json"]],
+] as const) {
+  test(`native open refuses ${name}`, async () => {
+    const root = await fixture();
+    await save({ root });
     expect((await invoke(root, args)).code).toBe(1);
-  }
-});
+  });
+}
 
 test("legacy open JSON preserves authored host behavior without a native store", async () => {
   const root = await fixture();

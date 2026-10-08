@@ -52,7 +52,7 @@ export async function previewLegacyComposeAdoption(input: {
     }
     if (
       !(
-        (await legacyComposeAdoptionLayoutSupported(opts)) &&
+        (await legacyComposeAdoptionLayoutSupported({ ...opts, candidate })) &&
         legacyComposeAdoptionCandidateSupported(candidate)
       )
     ) {

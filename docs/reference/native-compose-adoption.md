@@ -15,8 +15,27 @@ the exact `.hack/hack.config.json` and `.hack/docker-compose.yml` pair, bounded
 regular files, strict maintained parsing and private original-byte freshness.
 Matching explicit canonical names in both documents are required. There is no
 caller-supplied resource name, branch override or directory-name fallback.
-Local/dotenv inputs, `.git` file layouts, symlinks, competing input families and
-source changes refuse under the same rules as preview.
+Local/dotenv inputs, symlinks, competing input families and source changes refuse.
+The private adoption owner additionally accepts exact-root linked Git checkouts
+verified through the existing bounded Git owner. Separate Git directories and
+nested project roots remain outside this linked-checkout slice; ordinary import
+preview still refuses `.git` files.
+
+Linked checkout receipts use private version 2. They bind the raw `.git` pointer,
+administrative backlink and common-directory pointer, together with the held Git
+administrative, common and primary directory identities. Pointer edits, redirected
+paths, replaced directories and lost linkage refuse before publication or engine
+effects. These private identities and digests never enter public reports. Existing
+directory checkout receipts retain version 1 and their original wire shape.
+
+The static retained-container slice also inspects relevant filenames in the
+verified primary checkout when local inheritance is enabled. Managed-env,
+dotenv, typed local settings and legacy extra-host aliases refuse without reading
+their contents. The existing explicit `inherit_local: false`, CI and slim-runner
+exclusions still exclude that primary scope. Inherited inputs added after
+preparation refuse publication or later retained-container mutations; they cannot
+be silently applied or ignored by a fresh migration. Successful generated-source
+and managed-env inheritance adoption remains a separate NC04 requirement.
 
 The pure `planLegacyComposeAdoption` prerequisite retains original field pointers
 and positions. It reuses all preview mapping refusals, including unknown fields
@@ -156,6 +175,6 @@ after adopted execution and rollback, retained container/network/volume anchors,
 an interrupted partial stop, process-killed switch and rollback repair, candidate
 edit/removal refusal, exact original-file inode restoration and owned cleanup.
 These observed boundaries supplement the synthetic probe/interruption tests.
-Full NC04 remains open for typed local inheritance, linked-worktree isolation,
+Full NC04 remains open for typed local inheritance, real linked-worktree isolation,
 advanced lossless mappings, recreation and application migration; that acceptance
 does not qualify those unsupported cases or an atomic freeze of external actors.

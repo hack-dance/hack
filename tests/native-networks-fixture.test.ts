@@ -19,6 +19,7 @@ import {
   nativeNetworkFixtureAttachmentMatches,
   nativeNetworkFixtureCreateArgs,
   nativeNetworkFixtureHasNoPublication,
+  nativeNetworkFixtureInventory,
   nativeNetworkFixtureNetworkMatches,
   nativeNetworkFixtureProtocolMatches,
   nativeNetworkFixtureShim,
@@ -353,6 +354,126 @@ test("created recovery admits empty NetworkID with null, empty or configured ali
       created: true,
     })
   ).toBe(false);
+});
+
+test("network inventory requests complete physical IDs from the engine", async () => {
+  const id = "a".repeat(64);
+  const calls: string[][] = [];
+  const values = await nativeNetworkFixtureInventory(
+    (args) => {
+      calls.push([...args]);
+      return Promise.resolve(
+        args.includes("--no-trunc") ? id : id.slice(0, 12)
+      );
+    },
+    "network",
+    project
+  );
+  expect(values).toEqual([id]);
+  expect(calls).toEqual([
+    [
+      "network",
+      "ls",
+      "-q",
+      "--no-trunc",
+      "--filter",
+      `label=com.docker.compose.project=${project}`,
+    ],
+  ]);
+});
+
+test.each([
+  "a".repeat(12),
+  "A".repeat(64),
+  `sha256:${"a".repeat(64)}`,
+  `${"a".repeat(64)}\n${"a".repeat(64)}`,
+  `${"a".repeat(64)}\nnot-an-id`,
+])("network inventory refuses malformed or truncated response %s", async (reply) => {
+  await expect(
+    nativeNetworkFixtureInventory(
+      (args) => {
+        expect(args).toContain("--no-trunc");
+        return Promise.resolve(reply);
+      },
+      "network",
+      project
+    )
+  ).rejects.toThrow("unique physical identities");
+});
+
+test("container inventory retains its full-ID command and validation", async () => {
+  const id = "a".repeat(64);
+  const calls: string[][] = [];
+  expect(
+    await nativeNetworkFixtureInventory(
+      (args) => {
+        calls.push([...args]);
+        return Promise.resolve(id);
+      },
+      "container",
+      project
+    )
+  ).toEqual([id]);
+  expect(calls).toEqual([
+    [
+      "container",
+      "ls",
+      "-aq",
+      "--no-trunc",
+      "--filter",
+      `label=com.docker.compose.project=${project}`,
+    ],
+  ]);
+  await expect(
+    nativeNetworkFixtureInventory(
+      () => Promise.resolve(id.slice(0, 12)),
+      "container",
+      project
+    )
+  ).rejects.toThrow("unique physical identities");
+});
+
+test("volume inventory preserves legitimate names and its original invocation", async () => {
+  const names = ["shared-deps", "a".repeat(12)];
+  const calls: string[][] = [];
+  expect(
+    await nativeNetworkFixtureInventory(
+      (args) => {
+        calls.push([...args]);
+        return Promise.resolve(names.join("\n"));
+      },
+      "volume",
+      project
+    )
+  ).toEqual([...names].sort());
+  expect(calls).toEqual([
+    [
+      "volume",
+      "ls",
+      "-q",
+      "--filter",
+      `label=com.docker.compose.project=${project}`,
+    ],
+  ]);
+  await expect(
+    nativeNetworkFixtureInventory(
+      () => Promise.resolve(`${names[0]}\n${names[0]}`),
+      "volume",
+      project
+    )
+  ).rejects.toThrow("unique physical identities");
+});
+
+test("empty inventories remain valid for exact absence checks", async () => {
+  for (const kind of ["container", "network", "volume"] as const) {
+    expect(
+      await nativeNetworkFixtureInventory(
+        () => Promise.resolve(""),
+        kind,
+        project
+      )
+    ).toEqual([]);
+  }
 });
 
 test("controlled created interruption rewrites only the exact admitted product up argv", () => {

@@ -632,7 +632,7 @@ async function inventory(
   const prefix =
     kind === "container"
       ? ["container", "ls", "-aq", "--no-trunc"]
-      : [kind, "ls", "-q"];
+      : [kind, "ls", "-q", ...(kind === "network" ? ["--no-trunc"] : [])];
   const values = (
     await docker([...prefix, "--filter", `label=${PROJECT}=${project}`])
   )
@@ -646,6 +646,8 @@ async function inventory(
   );
   return values;
 }
+/** Fixture test seam: validate the actual inventory invocation and response together. */
+export { inventory as nativeNetworkFixtureInventory };
 function runtimeLabels(source: Saved) {
   return {
     project: source.identity.composeProject,

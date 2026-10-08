@@ -131,6 +131,13 @@ retains the original Ready selectors and exact inventory. Pending writes refuse;
 retired paths require the intent's preceding phase and unchanged archived inode.
 This library selector creates no intent, connects no provider and has no CLI or
 frontend recovery activation.
+
+Guarded native cleanup checks its retained authority before and after every
+engine observation and stop/remove request, including failed requests. It also
+checks each private-environment absence and retirement call. A lost guard refuses
+before the next request or journal transition; an already attempted effect remains
+durable evidence for an explicitly admitted retry. This prerequisite introduces
+no dead-publisher cleanup entrypoint.
 Cancellation fences startup before admission and subsequent effects. Cleanup
 retains stop failures by admitted workload name, and retires the publication only
 after exact cleanup succeeds. Replies bind their requested action and immutable

@@ -159,6 +159,24 @@ pub(super) fn retire(
     slot: &str,
     lease: Option<&EnvironmentLease>,
 ) -> Result<(), CandidateError> {
+    retire_guarded(candidate, guest, slot, lease, None)
+}
+fn check_guard(
+    guard: Option<&dyn Fn() -> Result<(), CandidateError>>,
+) -> Result<(), CandidateError> {
+    if let Some(guard) = guard {
+        guard()?;
+    }
+    Ok(())
+}
+fn retire_guarded(
+    candidate: &Candidate,
+    guest: &OwnedGuest<'_>,
+    slot: &str,
+    lease: Option<&EnvironmentLease>,
+    guard: Option<&dyn Fn() -> Result<(), CandidateError>>,
+) -> Result<(), CandidateError> {
+    check_guard(guard)?;
     let intent = read(candidate, slot)?;
     if intent.incarnation != guest.incarnation()
         || intent.boot != guest.boot_id()
@@ -183,10 +201,13 @@ pub(super) fn retire(
         false,
     )?;
     // A native payload may disappear only after the exact bound container name is absent.
-    super::engine::require_container_absent(guest, &intent.binding.container)?;
-    if guest.execute_cleanup(environment_recovery::RETIRE, &[slot, "same"])?
-        != "environment-removed-v1\n"
-    {
+    check_guard(guard)?;
+    let result = super::engine::require_container_absent(guest, &intent.binding.container);
+    check_guard(guard)?;
+    result?;
+    let result = guest.execute_cleanup(environment_recovery::RETIRE, &[slot, "same"]);
+    check_guard(guard)?;
+    if result? != "environment-removed-v1\n" {
         return Err(refused());
     }
     Ok(())
@@ -195,7 +216,9 @@ pub(in crate::provider) fn retire_graph(
     candidate: &Candidate,
     guest: &OwnedGuest<'_>,
     receipt: &super::graph::native::Receipt,
+    guard: Option<&dyn Fn() -> Result<(), CandidateError>>,
 ) -> Result<(), CandidateError> {
+    check_guard(guard)?;
     let directory = root(candidate);
     if *receipt.phase() != super::graph::native::Phase::Removed {
         return Err(refused());
@@ -229,13 +252,17 @@ pub(in crate::provider) fn retire_graph(
                 &intent.service,
                 false,
             )?;
-            super::engine::require_container_absent(guest, &intent.binding.container)?;
+            check_guard(guard)?;
+            let result = super::engine::require_container_absent(guest, &intent.binding.container);
+            check_guard(guard)?;
+            result?;
             selected.push(slot.to_owned());
         }
     }
     for slot in selected {
-        retire(candidate, guest, &slot, None)?;
+        retire_guarded(candidate, guest, &slot, None, guard)?;
     }
+    check_guard(guard)?;
     Ok(())
 }
 

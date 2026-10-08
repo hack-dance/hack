@@ -29,6 +29,35 @@ trait Backend {
         Err(refused())
     }
 }
+/// Recovery authority must survive every bounded engine call, including failed
+/// observations. Losing it stops this attempt before another engine operation.
+struct GuardedBackend<'a, B> {
+    backend: &'a B,
+    guard: Option<&'a dyn Fn() -> Result<(), CandidateError>>,
+}
+impl<B: Backend> Backend for GuardedBackend<'_, B> {
+    fn request(
+        &self,
+        method: Method,
+        path: &str,
+        body: Option<&Value>,
+    ) -> Result<Value, CandidateError> {
+        check_startup(self.guard)?;
+        let result = self.backend.request(method, path, body);
+        check_startup(self.guard)?;
+        result
+    }
+    fn stop(
+        &self,
+        selected: &[(String, u64)],
+        admitted: &BTreeMap<&str, &str>,
+    ) -> Result<(), CandidateError> {
+        check_startup(self.guard)?;
+        let result = self.backend.stop(selected, admitted);
+        check_startup(self.guard)?;
+        result
+    }
+}
 impl Backend for Engine<'_> {
     fn request(
         &self,
@@ -631,6 +660,7 @@ pub(super) fn cleanup_guarded(
 ) -> Result<Receipt, CandidateError> {
     check_startup(guard)?;
     let engine = Engine::connect_cleanup(candidate)?;
+    check_startup(guard)?;
     let (mut receipt, root) = journal::load(
         candidate,
         run,
@@ -640,6 +670,7 @@ pub(super) fn cleanup_guarded(
     if let Some(expected) = expected {
         receipt.check_binding(expected)?;
     }
+    check_startup(guard)?;
     let backend = OwnedBackend {
         engine,
         launcher: None,
@@ -647,7 +678,8 @@ pub(super) fn cleanup_guarded(
     };
     cleanup_using_guarded(&backend, &mut receipt, &root, guard)?;
     check_startup(guard)?;
-    native_environment::retire_graph(candidate, backend.engine.guest(), &receipt)?;
+    native_environment::retire_graph(candidate, backend.engine.guest(), &receipt, guard)?;
+    check_startup(guard)?;
     Ok(receipt)
 }
 #[cfg(test)]
@@ -665,6 +697,8 @@ fn cleanup_using_guarded<B: Backend>(
     guard: Option<&dyn Fn() -> Result<(), CandidateError>>,
 ) -> Result<(), CandidateError> {
     check_startup(guard)?;
+    let guarded = GuardedBackend { backend, guard };
+    let backend = &guarded;
     // A committed cleanup phase is retry authority for this same inventory, never
     // permission to move the receipt back to startup or stop an already retired run.
     let stopped = matches!(

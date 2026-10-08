@@ -949,6 +949,104 @@ fn cleanup_owner_guard_refuses_before_provider_connection_or_receipt_mutation() 
 }
 
 #[test]
+fn cleanup_guard_loss_during_first_observation_prevents_next_request_and_stop_intent() {
+    struct Changed<'a> {
+        backend: &'a Fake,
+        changed: &'a Cell<bool>,
+        requests: Cell<usize>,
+    }
+    impl Backend for Changed<'_> {
+        fn request(
+            &self,
+            method: Method,
+            path: &str,
+            body: Option<&Value>,
+        ) -> Result<Value, CandidateError> {
+            self.requests.set(self.requests.get() + 1);
+            let result = self.backend.request(method, path, body);
+            self.changed.set(true);
+            result
+        }
+    }
+    let fixture = Fixture::new(basic());
+    let (graph, mut session) =
+        fixture.session(fixture.prepared(json!({"web":{}}), &BTreeMap::new()));
+    execution::run(&graph, &mut session, Duration::from_secs(5)).unwrap();
+    let changed = Cell::new(false);
+    let backend = Changed {
+        backend: &session.backend,
+        changed: &changed,
+        requests: Cell::new(0),
+    };
+    let guard = || {
+        if changed.get() {
+            Err(error("native_graph_foreground", "changed"))
+        } else {
+            Ok(())
+        }
+    };
+    let before = fs::read(session.root.join("state.json")).unwrap();
+    let effects = session.backend.state.borrow().effects.clone();
+    assert_eq!(
+        cleanup_using_guarded(&backend, &mut session.receipt, &session.root, Some(&guard))
+            .unwrap_err()
+            .code,
+        "native_graph_foreground"
+    );
+    assert_eq!(backend.requests.get(), 1);
+    assert_eq!(session.backend.state.borrow().effects, effects);
+    assert_eq!(session.backend.state.borrow().stop_batches, 0);
+    assert_eq!(fs::read(session.root.join("state.json")).unwrap(), before);
+}
+
+#[test]
+fn cleanup_guard_rechecks_failed_stop_and_refuses_before_followup_request() {
+    struct FailedStop<'a>(&'a Cell<bool>);
+    impl Backend for FailedStop<'_> {
+        fn request(
+            &self,
+            _method: Method,
+            _path: &str,
+            _body: Option<&Value>,
+        ) -> Result<Value, CandidateError> {
+            panic!("lost guard cannot admit another engine request")
+        }
+        fn stop(
+            &self,
+            _selected: &[(String, u64)],
+            _admitted: &BTreeMap<&str, &str>,
+        ) -> Result<(), CandidateError> {
+            self.0.set(true);
+            Err(error("fake_stop_uncertain", "fixed"))
+        }
+    }
+    let changed = Cell::new(false);
+    let guard = || {
+        if changed.get() {
+            Err(error("native_graph_foreground", "changed"))
+        } else {
+            Ok(())
+        }
+    };
+    let backend = FailedStop(&changed);
+    let guarded = GuardedBackend {
+        backend: &backend,
+        guard: Some(&guard),
+    };
+    assert_eq!(
+        guarded.stop(&[], &BTreeMap::new()).unwrap_err().code,
+        "native_graph_foreground"
+    );
+    assert_eq!(
+        guarded
+            .request(Method::GET, "/unused", None)
+            .unwrap_err()
+            .code,
+        "native_graph_foreground"
+    );
+}
+
+#[test]
 fn native_stop_failure_keeps_reservation_and_maps_only_owned_ids_to_workload_names() {
     let fixture = Fixture::new(basic());
     let (graph, mut session) =

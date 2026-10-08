@@ -250,6 +250,7 @@ jobs:
           docker pull node:24.11.0-bookworm-slim
           docker pull oven/bun:1.4.2-slim
           docker pull postgres:17.6-alpine
+          docker pull lucaslorentz/caddy-docker-proxy:2.10.0-alpine
       - uses: dtolnay/rust-toolchain@1.97.1
       - name: Build current-branch CLI and native config compiler
         run: |

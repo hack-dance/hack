@@ -85,6 +85,32 @@ fixture; host and provider proxy settings remain unchanged. In a real project,
 add its internal service names to the existing proxy exceptions rather than
 discarding the project's other entries.
 
+## Native config routing qualification
+
+`native-config-routing` is a required Docker CI scenario using the current compiled
+CLI and matching config compiler. Prepare `oven/bun:1.4.2-slim` and
+`lucaslorentz/caddy-docker-proxy:2.10.0-alpine` locally first; the scenario resolves
+cached immutable image IDs and never pulls. It requires the existing `hack-dev`
+network and refuses any running global Caddy selector before creating its fixture.
+Stopped user proxy containers and the network are preserved and checked unchanged.
+
+```sh
+HACK_E2E_CLI_BIN=./dist/hack HACK_E2E_DOCKER=1 HACK_E2E_REQUIRE_DOCKER=1 bun tests/e2e/run.ts --only=native-config-routing
+```
+
+The isolated proxy publishes no host ports and uses private bind directories instead
+of anonymous data/config volumes. Requests run inside the captured proxy with exact
+hostname resolution and its verified public root CA, without an insecure or
+app-local fallback. The scenario checks primary and OAuth alias origins, two linked
+worktrees, primary domain replacement, down/up, sibling and proxy canaries, and
+foreign hostname admission before engine effects. It retires native routes and
+claims before removing only its exact owned proxy. This proves same-engine Caddy
+routing and fixture CA TLS; host DNS, system trust and browser access remain separate
+acceptance gates. If owned teardown is incomplete, the scenario fails and retains
+both fixture roots and a private identity receipt for recovery. Successful cleanup
+keeps the normal harness behavior. `HACK_E2E_KEEP=1` also keeps fixtures for debugging
+when an earlier assertion fails but owned teardown succeeds.
+
 ## Domain migration routing qualification
 
 The local `domain-migration-files` scenario checks the real CLI with both default

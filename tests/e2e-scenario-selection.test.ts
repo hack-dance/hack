@@ -1,4 +1,6 @@
 import { expect, test } from "bun:test";
+import { rm } from "node:fs/promises";
+import { join } from "node:path";
 import { runScenarios, type Scenario, selectScenarios } from "./e2e/harness.ts";
 import { domainMigrationScenario } from "./e2e/scenarios/domain-migration.ts";
 
@@ -77,6 +79,104 @@ test("domain qualification refuses absent routing opt-in before host commands", 
       Reflect.deleteProperty(process.env, "HACK_E2E_DOMAIN_ROUTING");
     } else {
       process.env.HACK_E2E_DOMAIN_ROUTING = previous;
+    }
+  }
+});
+
+test("incomplete fixture cleanup retains receipts and data while still failing", async () => {
+  const retained: string[] = [];
+  try {
+    const outcomes = await runScenarios({
+      dockerEnabled: false,
+      scenarios: [
+        {
+          name: "incomplete-owned-cleanup",
+          tier: "local",
+          summary: "retention fixture",
+          run: async (ctx) => {
+            retained.push(ctx.tempRoot, ctx.hackHome);
+            await Bun.write(join(ctx.tempRoot, "owned-data"), "fixture data");
+            await Bun.write(
+              join(ctx.hackHome, "owned-receipt"),
+              "fixture identity"
+            );
+            ctx.retainFixtures("Exact owned teardown is incomplete");
+            throw new Error("Owned cleanup refused");
+          },
+        },
+      ],
+    });
+    expect(outcomes[0]?.status).toBe("fail");
+    expect(outcomes[0]?.reason).toBe("Owned cleanup refused");
+    expect(await Bun.file(join(retained[0] ?? "", "owned-data")).text()).toBe(
+      "fixture data"
+    );
+    expect(
+      await Bun.file(join(retained[1] ?? "", "owned-receipt")).text()
+    ).toBe("fixture identity");
+  } finally {
+    await Promise.all(
+      retained.map((path) => rm(path, { recursive: true, force: true }))
+    );
+  }
+});
+
+test("retained incomplete cleanup cannot silently become pass or skip", async () => {
+  const retained: string[] = [];
+  try {
+    for (const skip of [false, true]) {
+      const outcomes = await runScenarios({
+        dockerEnabled: false,
+        scenarios: [
+          {
+            name: "retained-no-success",
+            tier: "local",
+            summary: "retention fixture",
+            run: async (ctx) => {
+              retained.push(ctx.tempRoot, ctx.hackHome);
+              ctx.retainFixtures("Owned cleanup remains incomplete");
+              if (skip) {
+                ctx.skip("missing prerequisite after retained cleanup");
+              }
+            },
+          },
+        ],
+      });
+      expect(outcomes[0]?.status).toBe("fail");
+    }
+  } finally {
+    await Promise.all(
+      retained.map((path) => rm(path, { recursive: true, force: true }))
+    );
+  }
+});
+
+test("ordinary passing and failing scenarios still remove both temporary roots", async () => {
+  for (const fail of [false, true]) {
+    const paths: string[] = [];
+    const outcomes = await runScenarios({
+      dockerEnabled: false,
+      scenarios: [
+        {
+          name: "ordinary-fixture-cleanup",
+          tier: "local",
+          summary: "default cleanup fixture",
+          run: async (ctx) => {
+            paths.push(ctx.tempRoot, ctx.hackHome);
+            await Bun.write(join(ctx.tempRoot, "marker"), "synthetic data");
+            await Bun.write(join(ctx.hackHome, "marker"), "synthetic receipt");
+            if (fail) {
+              throw new Error(
+                "Earlier assertion failure after complete cleanup"
+              );
+            }
+          },
+        },
+      ],
+    });
+    expect(outcomes[0]?.status).toBe(fail ? "fail" : "pass");
+    for (const path of paths) {
+      expect(await Bun.file(join(path, "marker")).exists()).toBe(false);
     }
   }
 });

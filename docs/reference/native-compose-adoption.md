@@ -108,6 +108,61 @@ same-identity byte repair, separate rollback and
 exact owned cleanup. It requires the current compiled CLI and companion compiler;
 it does not qualify completed jobs or container recreation.
 
+## Retained basic builds
+
+The distinct version 9 owner handles existing basic build-only services with
+qualified named data volumes and the existing default bridge. Context, relative
+Dockerfile and target use the closed import mapping, with current local files
+additionally verified. A service must omit `pull_policy`: explicit `build`
+requires builder execution and cannot be satisfied by starting an old image.
+The owner never builds, pulls, creates a container or substitutes an image during
+the format switch or retained execution. Explicit rebuild/recreation requests
+refuse. Image-only binding APIs and versions 1–5 retain their prior contracts.
+Versions for custom networks, completed jobs and retained files are separate;
+their combinations with this first build proof refuse, as do profiles, readiness,
+managed/generated inputs, typed locals and literal-dollar build paths.
+
+Included context files, the Dockerfile, optional root and Dockerfile-specific
+ignore files, and their safe filesystem identities are privately pinned. A
+Dockerfile-specific ignore file takes precedence, while presence and bytes of
+both files remain bound. The pinned `@balena/dockerignore` Moby port handles only
+the qualified case-sensitive grammar: literal normalized paths, `!` negation,
+bare `**`, blank lines and comments. Other globs, escapes, BOMs and ambiguous
+paths refuse. Every possible adopted-owned path must be excluded by the effective
+rules, including Git markers, `.hack/.internal`, `.hack/.branch` and the switched
+authored files. Excluded subtrees are not read. Parent negations include
+descendants: `**` followed by `!.hack` does not isolate future private outputs.
+Such a context refuses unless later literal exclusions close those paths.
+Root and `.hack` contexts can qualify through these exact exclusions.
+
+One acquisition is limited to 16 builds, depth 32, 256 captured entries, 4096
+directory names, 16 MiB of bytes and a 48 KiB private proof; the existing stable
+file owner also limits each file to 1 MiB. Included byte, identity or mode changes,
+included additions/removals, ignore presence changes and unsafe paths refuse.
+Same-inode exact byte repair can restore a saved proof; it does not repair a
+strict prepared authored-source timestamp or make editor races atomic.
+
+The selected read-only Compose query supplies each original image reference.
+Container IDs and birth, image IDs and birth, and current tag resolution must
+match the privately saved observation, along with the existing config hashes,
+mounts, network identity and volume creation identities. No image environment,
+command or layer contents are read. These facts attest the current retained
+image and current included source separately; they do not establish which source
+historically built that image. Missing images or retargeted tags refuse before
+effects. No image ownership for removal is granted by this proof.
+
+Preparation, dry-run and saved execution use the same closed owner. Public output
+contains field provenance and counts, never context hashes, image references or
+private capabilities. Version 9 requires a finite remaining mutation deadline,
+the whole original selection and the existing signal/process-group owner.
+Starts, stops and recovery consume original IDs; source or image drift retains
+pending evidence. Rollback restores the exact original authored inputs after
+verified stop and keeps their original data. Older upgraded owners that know
+only versions 1–5 refuse the new proof; this is not a universal old-launcher
+fence. Current Moby/BuildKit ignore parity and maintained two-worktree SQL,
+image/ID/birth, recovery and rollback acceptance qualify this slice separately
+from pure preview and synthetic model controls. Full NC04 remains open.
+
 The version 4 typed-local slice reads optional `.hack/hack.local.json` at the
 selected checkout and verified inherited primary in the same issued private source
 acquisition. It accepts only `schema_version: 1` and an optional `environment`
@@ -162,7 +217,8 @@ in the resource binding. Other authored
 network policies remain unsupported. Engine ID, resource inventories and source
 bytes are rechecked, and acquisition compares two complete private observations.
 The Docker routing environment is captured for later comparison. Queries never
-request container environment or image configuration. Execution admission also
+request container environment or full image configuration; version 9 additionally
+reads the minimal image reference, ID and birth described above. Execution admission also
 compares Compose configuration hashes from the saved ordered sources with the
 engine-created `com.docker.compose.config-hash` label on each original container.
 Those private digests never enter reports, authored files or resource labels.

@@ -5,6 +5,7 @@ import {
 import {
   freezeImportValue,
   mapLegacyNativeAdoptionBaseline,
+  mapLegacyNativeRetainedBasicBuild,
 } from "./native-config-import-plan.ts";
 import {
   type LegacyComposeStorageIntent,
@@ -63,7 +64,21 @@ export function planLegacyComposeAdoption(opts: {
   readonly configText: string;
   readonly composeText: string;
 }): LegacyComposeAdoptionPlan {
-  const baseline = mapLegacyNativeAdoptionBaseline(opts);
+  return plan(opts, mapLegacyNativeAdoptionBaseline(opts));
+}
+
+/** Pure closed build/storage intent only; the distinct source/image owner must still admit it. */
+export function planLegacyComposeRetainedBasicBuildAdoption(opts: {
+  readonly configText: string;
+  readonly composeText: string;
+}): LegacyComposeAdoptionPlan {
+  return plan(opts, mapLegacyNativeRetainedBasicBuild(opts));
+}
+
+function plan(
+  opts: { readonly configText: string; readonly composeText: string },
+  baseline: ReturnType<typeof mapLegacyNativeAdoptionBaseline>
+): LegacyComposeAdoptionPlan {
   const config = parseImportDocument({
     text: opts.configText,
     document: "config",

@@ -4,17 +4,22 @@ import { link, lstat, mkdir, rename, unlink } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { isRecord } from "./guards.ts";
 import {
-  acquireLegacyComposeAdoptionBinding,
+  acquireLegacyComposeAdoptionPreparationBinding,
   inspectLegacyComposeAdoptionResources,
   type LegacyComposeVerifiedBinding,
 } from "./native-compose-adoption-binding.ts";
+import { assertSavedLegacyComposeBuildSource } from "./native-compose-adoption-build.ts";
+import { inspectLegacyComposeRetainedBuildImages } from "./native-compose-adoption-build-images.ts";
 import { acquireLegacyComposeAdoptionCheckout } from "./native-compose-adoption-checkout.ts";
 import { admitLegacyComposeCandidate } from "./native-compose-adoption-compiler.ts";
 import {
   legacyComposeAdoptionCandidateSupported,
   legacyComposeAdoptionLayoutSupported,
 } from "./native-compose-adoption-contract.ts";
-import { planLegacyComposeAdoption } from "./native-compose-adoption-plan.ts";
+import {
+  planLegacyComposeAdoption,
+  planLegacyComposeRetainedBasicBuildAdoption,
+} from "./native-compose-adoption-plan.ts";
 import { readSavedLegacyComposeAdoptionProjection } from "./native-compose-adoption-projection.ts";
 import {
   type LegacyComposeRetainedPlan,
@@ -62,6 +67,7 @@ import { parseImportDocument } from "./native-config-import-parser.ts";
 import {
   freezeImportValue,
   mapLegacyNativeStorageAdoption,
+  mapLegacyNativeRetainedBasicBuild,
 } from "./native-config-import-plan.ts";
 import type { NativeProjectEnvMetadata } from "./project-env-config.ts";
 
@@ -80,13 +86,14 @@ const ROUTING = [
   "HACK_EXECUTION_MODE",
 ] as const;
 type SavedManifest = {
-  readonly adoption_generation_version: 1 | 3 | 4 | 5;
+  readonly adoption_generation_version: 1 | 3 | 4 | 5 | 9;
   readonly kind: typeof KIND;
   readonly projectRoot: string;
   readonly id: string;
   readonly binding: unknown;
   readonly runtimeConfig: unknown;
   readonly projectionProof?: unknown;
+  readonly buildProof?: { readonly source: unknown; readonly images: unknown };
   readonly sourceFiles: {
     readonly config: NativeConfigImportSourceIdentity;
     readonly compose: NativeConfigImportSourceIdentity;
@@ -106,6 +113,8 @@ type PrivateInputs = {
   readonly candidateText: string;
   readonly binding: LegacyComposeVerifiedBinding;
   readonly projectionMetadata?: NativeProjectEnvMetadata;
+  /** Private version9 policy; never serialized into a compiler report or receipt label. */
+  readonly retainedBuild?: true;
 };
 type MutationInputs = PrivateInputs & {
   /** Issued while the journal and mutation lock are held; valid only during this callback. */
@@ -216,14 +225,21 @@ function manifest(value: unknown, root: string, id: string): SavedManifest {
       isRecord(value) &&
       keys(
         value,
-        (value.adoption_generation_version === 5 &&
-          Object.hasOwn(value, "projectionProof")) ||
-          value.adoption_generation_version === 3 ||
-          value.adoption_generation_version === 4
-          ? "adoption_generation_version,binding,files,id,kind,projectRoot,projectionProof,runtimeConfig,sourceFiles"
-          : "adoption_generation_version,binding,files,id,kind,projectRoot,runtimeConfig,sourceFiles"
+        value.adoption_generation_version === 9
+          ? "adoption_generation_version,binding,buildProof,files,id,kind,projectRoot,runtimeConfig,sourceFiles"
+          : (value.adoption_generation_version === 5 &&
+                Object.hasOwn(value, "projectionProof")) ||
+              value.adoption_generation_version === 3 ||
+              value.adoption_generation_version === 4
+            ? "adoption_generation_version,binding,files,id,kind,projectRoot,projectionProof,runtimeConfig,sourceFiles"
+            : "adoption_generation_version,binding,files,id,kind,projectRoot,runtimeConfig,sourceFiles"
       ) &&
       (value.adoption_generation_version === 1 ||
+        (value.adoption_generation_version === 9 &&
+          isRecord(value.buildProof) &&
+          keys(value.buildProof, "images,source") &&
+          isRecord(value.buildProof.source) &&
+          Array.isArray(value.buildProof.images)) ||
         (value.adoption_generation_version === 5 &&
           (!Object.hasOwn(value, "projectionProof") ||
             (isRecord(value.projectionProof) &&
@@ -257,6 +273,14 @@ function manifest(value: unknown, root: string, id: string): SavedManifest {
     id,
     binding: value.binding,
     runtimeConfig: value.runtimeConfig,
+    ...(value.adoption_generation_version === 9 && isRecord(value.buildProof)
+      ? {
+          buildProof: {
+            source: value.buildProof.source,
+            images: value.buildProof.images,
+          },
+        }
+      : {}),
     ...((value.adoption_generation_version === 5 &&
       Object.hasOwn(value, "projectionProof")) ||
     value.adoption_generation_version === 3 ||
@@ -315,7 +339,7 @@ async function writeArtifact(path: string, text: string): Promise<Artifact> {
 /** A distinct private generation claim; it never makes original legacy resources native nonce-owned. */
 export type LegacyComposeAdoptedGeneration = {
   readonly report: {
-    readonly adoption_generation_version: 1 | 3 | 4 | 5;
+    readonly adoption_generation_version: 1 | 3 | 4 | 5 | 9;
     readonly owner: "legacy-compose";
     readonly status: "prepared" | "active";
     readonly containers: number;
@@ -418,8 +442,32 @@ async function readInputs(
       join(generationRoot, "candidate.json"),
       meta.files.candidate
     );
-    const mapped = mapLegacyNativeStorageAdoption({ configText, composeText });
-    const planned = planLegacyComposeAdoption({ configText, composeText });
+    const basic = meta.adoption_generation_version === 9;
+    const mapped = (
+      basic ? mapLegacyNativeRetainedBasicBuild : mapLegacyNativeStorageAdoption
+    )({ configText, composeText });
+    const planned = (
+      basic
+        ? planLegacyComposeRetainedBasicBuildAdoption
+        : planLegacyComposeAdoption
+    )({ configText, composeText });
+    const assertBuildSource = async () => {
+      if (!basic) {
+        return;
+      }
+      if (!meta.buildProof) {
+        refuse();
+      }
+      await assertSavedLegacyComposeBuildSource({
+        projectRoot: ctx.root,
+        configText,
+        composeText,
+        proof: meta.buildProof.source,
+        signal: ctx.signal,
+        checkOwner: ctx.check,
+      });
+    };
+    await assertBuildSource();
     const projectionOpts = {
       projectRoot: ctx.root,
       configText,
@@ -453,7 +501,8 @@ async function readInputs(
       const currentReceipt = await publicationState(ctx);
       if (
         (meta.adoption_generation_version === 5) !==
-        (currentReceipt.adoption_receipt_version === 5)
+          (currentReceipt.adoption_receipt_version === 5) ||
+        basic !== (currentReceipt.adoption_receipt_version === 9)
       ) {
         refuse();
       }
@@ -477,6 +526,19 @@ async function readInputs(
     if (JSON.stringify(meta.runtimeConfig) !== JSON.stringify(runtimeConfig)) {
       refuse("E_LEGACY_ADOPTION_CHANGED");
     }
+    if (
+      basic &&
+      JSON.stringify(
+        await inspectLegacyComposeRetainedBuildImages({
+          binding: observed,
+          composeFile: join(generationRoot, "legacy-compose.yml"),
+          signal: ctx.signal,
+          timeoutMs: ctx.timeoutMs,
+        })
+      ) !== JSON.stringify(meta.buildProof?.images)
+    ) {
+      refuse("E_LEGACY_ADOPTION_CHANGED");
+    }
     await readArtifact(
       join(generationRoot, "manifest.json"),
       selected.manifest,
@@ -498,6 +560,7 @@ async function readInputs(
     if (projection) {
       await readSavedLegacyComposeAdoptionProjection(projectionOpts);
     }
+    await assertBuildSource();
     await ctx.check();
     freezeImportValue(observed);
     return {
@@ -508,6 +571,7 @@ async function readInputs(
         candidateText,
         binding: observed,
         ...(projection ? { projectionMetadata: projection.metadata } : {}),
+        ...(basic ? { retainedBuild: true as const } : {}),
       }),
     };
   } finally {
@@ -575,7 +639,7 @@ async function prepare(
   ctx: Context,
   binary: string | undefined
 ): Promise<Anchor> {
-  const binding = await acquireLegacyComposeAdoptionBinding({
+  const binding = await acquireLegacyComposeAdoptionPreparationBinding({
     projectRoot: ctx.root,
     signal: ctx.signal,
     timeoutMs: ctx.timeoutMs,
@@ -585,7 +649,11 @@ async function prepare(
     projectRoot: ctx.root,
     signal: ctx.signal,
   });
-  const mapped = mapLegacyNativeStorageAdoption(acquired);
+  const mapped = (
+    acquired.build
+      ? mapLegacyNativeRetainedBasicBuild
+      : mapLegacyNativeStorageAdoption
+  )(acquired);
   if (!mapped.candidate) {
     refuse("E_LEGACY_ADOPTION_UNSUPPORTED");
   }
@@ -633,12 +701,16 @@ async function prepare(
     if (legacyComposeRetainedPlan(JSON.parse(candidateText)).requiresV5) {
       version = 5;
     }
+    if (acquired.build) {
+      version = 9;
+    }
     const meta: Manifest = {
       adoption_generation_version: version,
       kind: KIND,
       projectRoot: ctx.root,
       id,
       binding: acquired.binding,
+      ...(acquired.build ? { buildProof: acquired.build } : {}),
       ...(acquired.projection
         ? { projectionProof: acquired.projection.projectionProof }
         : {}),
@@ -1248,7 +1320,8 @@ function requireMutationDeadline(
   plan: LegacyComposeRetainedPlan
 ) {
   if (
-    plan.requiresV5 &&
+    (plan.requiresV5 ||
+      captured.generation.report.adoption_generation_version === 9) &&
     (captured.deadline === undefined ||
       !Number.isFinite(captured.deadline) ||
       captured.deadline <= Date.now())
@@ -1257,7 +1330,7 @@ function requireMutationDeadline(
   }
 }
 
-/** V5 reacquisitions share the same remaining clock; old receipt owners keep their prior budgets. */
+/** New proof owners share one remaining clock; old receipt owners keep their prior budgets. */
 function boundedMutationContext(ctx: Context, deadline: number) {
   function remaining() {
     cancelled(ctx.signal);
@@ -1301,8 +1374,11 @@ function preparedReceiptVersion(
   if (version !== 1) {
     return version;
   }
-  // A rolled-back v5 contract must not label a later plain generation as v5.
-  if (prior.adoption_receipt_version === 5) {
+  // A rolled-back proof owner must not label a later plain generation with its version.
+  if (
+    prior.adoption_receipt_version === 5 ||
+    prior.adoption_receipt_version === 9
+  ) {
     return "kind" in checkout.git ? 2 : 1;
   }
   return prior.adoption_receipt_version;
@@ -1374,7 +1450,9 @@ async function mutateRetainedContainers(
   if (!known.has(captured.generation)) {
     refuse();
   }
-  if (captured.generation.report.adoption_generation_version !== 5) {
+  if (
+    ![5, 9].includes(captured.generation.report.adoption_generation_version)
+  ) {
     return await mutateRetainedContainersWithinBudget(
       original,
       known,
@@ -1436,7 +1514,7 @@ async function mutateRetainedContainersWithinBudget(
     JSON.parse(loaded.inputs.candidateText)
   );
   if (
-    retainedPlan.requiresV5 &&
+    (retainedPlan.requiresV5 || loaded.inputs.retainedBuild) &&
     JSON.stringify([...selectedServices].sort()) !==
       JSON.stringify([...services].sort())
   ) {
@@ -1489,6 +1567,7 @@ async function mutateRetainedContainersWithinBudget(
       ? { projectionMetadata: loaded.inputs.projectionMetadata }
       : {}),
     retainedPlan,
+    ...(loaded.inputs.retainedBuild ? { retainedBuild: true as const } : {}),
     assertFresh: async () => {
       if (!callbackOpen) {
         refuse();

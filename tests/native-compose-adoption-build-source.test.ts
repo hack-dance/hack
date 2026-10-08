@@ -1,0 +1,335 @@
+import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
+import {
+  chmod,
+  link,
+  mkdir,
+  mkdtemp,
+  readFile,
+  realpath,
+  rename,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import {
+  acquireLegacyComposeBuildSource,
+  assertSavedLegacyComposeBuildSource,
+} from "../src/lib/native-compose-adoption-build.ts";
+import { legacyComposeBuildIgnore } from "../src/lib/native-compose-adoption-build-ignore.ts";
+import { acquireLegacyAdoptionSourceInputs } from "../src/lib/native-config-import-inputs.ts";
+import * as importInputs from "../src/lib/native-config-import-inputs.ts";
+import {
+  mapLegacyNativeAdoptionBaseline,
+  mapLegacyNativeRetainedBasicBuild,
+  mapLegacyNativeStorageAdoption,
+} from "../src/lib/native-config-import-plan.ts";
+
+const CANARY = "synthetic-private-build-source";
+let root: string;
+let composeText: string;
+beforeEach(async () => {
+  root = await realpath(
+    await mkdtemp(join(tmpdir(), "retained-build-source-"))
+  );
+  await mkdir(join(root, ".hack"));
+  await mkdir(join(root, ".git"));
+  await mkdir(join(root, "src"));
+  await writeFile(join(root, "src/marker"), CANARY);
+  await writeFile(join(root, "Dockerfile"), "FROM scratch\nCOPY src /source\n");
+  await writeFile(join(root, ".dockerignore"), "**\n!Dockerfile\n!src\n");
+  await writeFile(join(root, ".hack/hack.config.json"), '{"name":"fixture"}');
+  composeText = JSON.stringify({
+    name: "fixture",
+    services: { db: { build: "..", volumes: ["data:/data"] } },
+    volumes: { data: {} },
+  });
+  await writeFile(join(root, ".hack/docker-compose.yml"), composeText);
+});
+afterEach(async () => {
+  await rm(root, { recursive: true, force: true });
+});
+async function acquire(signal?: AbortSignal) {
+  const source = await acquireLegacyAdoptionSourceInputs({
+    projectRoot: root,
+    signal,
+    allowLinkedWorktree: true,
+  });
+  if (!source.ok) {
+    throw new Error("Synthetic source setup refused; values omitted.");
+  }
+  return await acquireLegacyComposeBuildSource({ source, signal });
+}
+async function red(pending: Promise<unknown>) {
+  try {
+    await pending;
+    throw new Error("unexpected build source admission");
+  } catch (error) {
+    expect(String(error)).toContain("values omitted");
+    expect(String(error)).not.toContain(root);
+    expect(String(error)).not.toContain(CANARY);
+    expect(JSON.stringify(error)).not.toContain(CANARY);
+  }
+}
+
+test("retained pure intent does not broaden either image-only baseline API", () => {
+  const inputs = { configText: '{"name":"fixture"}', composeText };
+  expect(mapLegacyNativeAdoptionBaseline(inputs).candidate).toBeUndefined();
+  expect(mapLegacyNativeStorageAdoption(inputs).candidate).toBeUndefined();
+  expect(mapLegacyNativeRetainedBasicBuild(inputs).candidate).toMatchObject({
+    services: { db: { build: { context: "." } } },
+  });
+});
+test("root context pins included source and keeps private proof/candidate/callbacks out of reports", async () => {
+  const captured = await acquire();
+  expect(Object.keys(captured)).toEqual([]);
+  expect(JSON.stringify(captured)).toBe("{}");
+  expect(Object.isFrozen(captured.proof)).toBe(true);
+  expect(JSON.stringify(captured.proof)).not.toContain(CANARY);
+  await captured.assertFresh();
+  await assertSavedLegacyComposeBuildSource({
+    projectRoot: root,
+    configText: '{"name":"fixture"}',
+    composeText,
+    proof: captured.proof,
+    checkOwner: async () => {},
+  });
+});
+test("creation and edits inside actually ignored owned outputs do not invalidate included source", async () => {
+  const captured = await acquire();
+  await mkdir(join(root, ".hack/.internal"));
+  await writeFile(join(root, ".hack/.internal/private-output"), CANARY);
+  await captured.assertFresh();
+  await writeFile(
+    join(root, ".hack/.internal/private-output"),
+    `${CANARY}-changed`
+  );
+  await captured.assertFresh();
+  // A native selector changes the issued authored-source family. Only the saved
+  // owner (which separately verifies its published candidate) may read it.
+  await writeFile(join(root, ".hack/hack.project.json"), CANARY);
+  await red(captured.assertFresh());
+  await assertSavedLegacyComposeBuildSource({
+    projectRoot: root,
+    configText: '{"name":"fixture"}',
+    composeText,
+    proof: captured.proof,
+    checkOwner: async () => {},
+  });
+});
+test("Dockerfile-specific ignore wins, while both optional ignore identities remain pinned", async () => {
+  await writeFile(join(root, ".dockerignore"), "src\n.git\n.hack\n");
+  await writeFile(
+    join(root, "Dockerfile.dockerignore"),
+    "**\n!Dockerfile\n!src\n"
+  );
+  const captured = await acquire();
+  expect(captured.proof.contexts[0]?.effectiveIgnore).toBe(
+    "Dockerfile.dockerignore"
+  );
+  await writeFile(join(root, "src/marker"), "changed included source");
+  await red(captured.assertFresh());
+  await writeFile(join(root, "src/marker"), CANARY);
+  await captured.assertFresh();
+  await rm(join(root, "Dockerfile.dockerignore"));
+  await red(captured.assertFresh());
+});
+test("a newly added specific ignore refuses even when its effective rules are byte-equal", async () => {
+  const captured = await acquire();
+  await writeFile(
+    join(root, "Dockerfile.dockerignore"),
+    await readFile(join(root, ".dockerignore"))
+  );
+  await red(captured.assertFresh());
+});
+test.each([
+  "bytes",
+  "added",
+  "removed",
+  "replaced",
+  "symlink",
+  "hardlink",
+  "unsafe mode",
+])("included %s drift refuses with fixed redacted errors", async (kind) => {
+  const captured = await acquire(),
+    path = join(root, "src/marker");
+  if (kind === "bytes") {
+    await writeFile(path, "changed");
+  }
+  if (kind === "added") {
+    await writeFile(join(root, "src/new"), "new");
+  }
+  if (kind === "removed") {
+    await rm(path);
+  }
+  if (kind === "replaced") {
+    await rename(path, join(root, "outside"));
+    await writeFile(path, CANARY);
+  }
+  if (kind === "symlink") {
+    await rename(path, join(root, "outside"));
+    await symlink(join(root, "outside"), path);
+  }
+  if (kind === "hardlink") {
+    await link(path, join(root, "outside"));
+  }
+  if (kind === "unsafe mode") {
+    await chmod(path, 0o666);
+  }
+  await red(captured.assertFresh());
+});
+test("a held root or included directory replacement cannot match same bytes", async () => {
+  const captured = await acquire();
+  await rename(join(root, "src"), join(root, "old-src"));
+  await mkdir(join(root, "src"));
+  await writeFile(join(root, "src/marker"), CANARY);
+  await red(captured.assertFresh());
+});
+test("parents of an excluded Dockerfile remain identity-bound special builder inputs", async () => {
+  await mkdir(join(root, "definitions"));
+  await rename(join(root, "Dockerfile"), join(root, "definitions/Dockerfile"));
+  await writeFile(join(root, ".dockerignore"), "**\n!src\n");
+  composeText = JSON.stringify({
+    name: "fixture",
+    services: {
+      db: {
+        build: { context: "..", dockerfile: "definitions/Dockerfile" },
+        volumes: ["data:/data"],
+      },
+    },
+    volumes: { data: {} },
+  });
+  await writeFile(join(root, ".hack/docker-compose.yml"), composeText);
+  const captured = await acquire();
+  await rename(join(root, "definitions"), join(root, "old-definitions"));
+  await mkdir(join(root, "definitions"));
+  await rename(
+    join(root, "old-definitions/Dockerfile"),
+    join(root, "definitions/Dockerfile")
+  );
+  await red(captured.assertFresh());
+});
+test("Dockerfile whitespace is raw source drift even when the recipe remains valid", async () => {
+  const captured = await acquire();
+  await writeFile(
+    join(root, "Dockerfile"),
+    "FROM scratch\nCOPY src /source\n\n"
+  );
+  await red(captured.assertFresh());
+});
+test("an ignored symlink cannot become a included input or leak its target", async () => {
+  await symlink(join(root, "src/marker"), join(root, "ignored-link"));
+  const captured = await acquire();
+  expect(
+    captured.proof.contexts[0]?.nodes.some(
+      (node) => node.path === "ignored-link"
+    )
+  ).toBe(false);
+  await rm(join(root, "ignored-link"));
+  await symlink(join(root, "Dockerfile"), join(root, "ignored-link"));
+  await captured.assertFresh();
+});
+test("a disjoint context without ignore files pins absent ignore presence", async () => {
+  await mkdir(join(root, ".hack/build"));
+  await writeFile(join(root, ".hack/build/Dockerfile"), "FROM scratch\n");
+  composeText = composeText.replace('"build":".."', '"build":"build"');
+  await writeFile(join(root, ".hack/docker-compose.yml"), composeText);
+  const captured = await acquire();
+  expect(captured.proof.contexts[0]?.effectiveIgnore).toBeNull();
+  await writeFile(
+    join(root, ".hack/build/.dockerignore"),
+    "# no effective rules\n"
+  );
+  await red(captured.assertFresh());
+});
+test("same ignore bytes at a replacement inode cannot repair saved source", async () => {
+  const captured = await acquire();
+  const text = await readFile(join(root, ".dockerignore"));
+  await rename(join(root, ".dockerignore"), join(root, "old-ignore"));
+  await writeFile(join(root, ".dockerignore"), text);
+  await red(captured.assertFresh());
+});
+test("a cloned source cannot issue a build capability", async () => {
+  const source = await acquireLegacyAdoptionSourceInputs({ projectRoot: root });
+  if (!source.ok) {
+    throw new Error("Synthetic source setup refused; values omitted.");
+  }
+  await red(acquireLegacyComposeBuildSource({ source: { ...source } }));
+});
+test("captured cancellation cannot be replaced and the abort reason stays private", async () => {
+  const original = new AbortController(),
+    captured = await acquire(original.signal);
+  original.abort(CANARY);
+  await red(captured.assertFresh({ signal: new AbortController().signal }));
+  await red(acquire(original.signal));
+});
+test("explicit build policy refuses before any included context file is opened", async () => {
+  composeText = JSON.stringify({
+    name: "fixture",
+    services: {
+      db: { build: "..", pull_policy: "build", volumes: ["data:/data"] },
+    },
+    volumes: { data: {} },
+  });
+  await writeFile(join(root, ".hack/docker-compose.yml"), composeText);
+  const source = await acquireLegacyAdoptionSourceInputs({
+    projectRoot: root,
+    allowLinkedWorktree: true,
+  });
+  if (!source.ok) {
+    throw new Error("Synthetic source setup refused; values omitted.");
+  }
+  const read = spyOn(importInputs, "readNativeConfigImportSourceFile");
+  try {
+    await red(acquireLegacyComposeBuildSource({ source }));
+    expect(read).not.toHaveBeenCalled();
+  } finally {
+    read.mockRestore();
+  }
+});
+test(".hack context excludes switched authored files while preserving its included inputs", async () => {
+  await writeFile(join(root, ".hack/Dockerfile"), "FROM scratch\n");
+  await writeFile(join(root, ".hack/.dockerignore"), "**\n!Dockerfile\n");
+  composeText = composeText.replace('"build":".."', '"build":"."');
+  await writeFile(join(root, ".hack/docker-compose.yml"), composeText);
+  const captured = await acquire();
+  expect(captured.proof.contexts[0]?.context).toBe(".hack");
+  await captured.assertFresh();
+});
+test("parent negation includes descendants: toolchain pattern is not assumed to be a safe whitelist", async () => {
+  const rules =
+    "**\n!mise.toml\n!.hack\n!.hack/toolchain\n!.hack/toolchain/Dockerfile\n!.hack/toolchain/run.sh\n";
+  const ignore = legacyComposeBuildIgnore(rules);
+  expect(ignore.excluded(".hack/.internal/arbitrary-future-file")).toBe(false);
+  expect(ignore.subtreeExcluded(".hack/.internal")).toBe(false);
+  await writeFile(join(root, "Dockerfile.dockerignore"), rules);
+  await red(acquire());
+});
+test("later owned subtree exclusion closes earlier broad inclusion", async () => {
+  const ignore = legacyComposeBuildIgnore(
+    "**\n!.hack\n.hack/.internal\n.hack/.branch\n"
+  );
+  expect(ignore.subtreeExcluded(".hack/.internal")).toBe(true);
+  expect(ignore.excluded(".hack/toolchain/run.sh")).toBe(false);
+  expect(
+    legacyComposeBuildIgnore(
+      "**\n!.hack\n.hack/.internal\n!.hack/.internal/later\n"
+    ).subtreeExcluded(".hack/.internal")
+  ).toBe(false);
+});
+test.each([
+  "*.ts",
+  "a/**",
+  "a?",
+  "[ab]",
+  "a\\b",
+  "!",
+  "a/../b",
+  "./a",
+  "/a",
+  "a b",
+  "\uFEFF**",
+])("unqualified ignore grammar %p refuses", (rule) => {
+  expect(() => legacyComposeBuildIgnore(rule)).toThrow("values omitted");
+});

@@ -110,7 +110,7 @@ async function adoptPrepared(
         if (opts.signal.aborted) {
           throw new Error("Legacy adoption cancelled; values omitted.");
         }
-        if (input.retainedPlan.requiresV5) {
+        if (input.retainedPlan.requiresV5 || input.retainedBuild) {
           return await runLegacyComposeRetainedOperation({
             input,
             operation: "stop",

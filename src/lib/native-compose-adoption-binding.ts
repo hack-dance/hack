@@ -1,10 +1,19 @@
 import { resolve } from "node:path";
 import { isRecord } from "./guards.ts";
+import {
+  acquireLegacyComposeBuildSource,
+  type LegacyComposeBuildSourceProof,
+} from "./native-compose-adoption-build.ts";
+import {
+  inspectLegacyComposeRetainedBuildImages,
+  type LegacyComposeRetainedBuildImage,
+} from "./native-compose-adoption-build-images.ts";
 import { legacyComposeAdoptionLayoutSupported } from "./native-compose-adoption-contract.ts";
 import { retainLegacyAdoptionLocalRefusal } from "./native-compose-adoption-local.ts";
 import {
   type LegacyComposeStorageIntent,
   planLegacyComposeAdoption,
+  planLegacyComposeRetainedBasicBuildAdoption,
 } from "./native-compose-adoption-plan.ts";
 import {
   hasLegacyComposeGeneratedSources,
@@ -599,6 +608,10 @@ export type LegacyComposeAdoptionBinding = {
       readonly compose: NativeConfigImportSourceIdentity;
     };
     readonly projection?: Readonly<ProjectedPreparation>;
+    readonly build?: {
+      readonly source: LegacyComposeBuildSourceProof;
+      readonly images: readonly LegacyComposeRetainedBuildImage[];
+    };
   }>;
 };
 function translate(error: unknown, signal?: AbortSignal): never {
@@ -627,12 +640,36 @@ function translate(error: unknown, signal?: AbortSignal): never {
  * consume this binding explicitly and recheck it on the same engine under its
  * lease. Repeated checks cannot atomically freeze Docker or external editors.
  */
-export async function acquireLegacyComposeAdoptionBinding(input: {
+type BindingSelection = {
   readonly projectRoot: string;
   readonly signal?: AbortSignal;
   readonly timeoutMs?: number;
   readonly binary?: string;
-}): Promise<LegacyComposeAdoptionBinding> {
+};
+export async function acquireLegacyComposeAdoptionBinding(
+  input: BindingSelection
+): Promise<LegacyComposeAdoptionBinding> {
+  return await acquireBinding(input, "image-only");
+}
+
+/** Distinct current-source/image proof; ordinary image-only admission is unchanged. */
+export async function acquireLegacyComposeRetainedBasicBuildBinding(
+  input: BindingSelection
+): Promise<LegacyComposeAdoptionBinding> {
+  return await acquireBinding(input, "basic-build");
+}
+
+/** Preparation self-selects a qualified owner; no caller-provided binding or bypass is accepted. */
+export async function acquireLegacyComposeAdoptionPreparationBinding(
+  input: BindingSelection
+): Promise<LegacyComposeAdoptionBinding> {
+  return await acquireBinding(input, "preparation");
+}
+
+async function acquireBinding(
+  input: BindingSelection,
+  purpose: "image-only" | "basic-build" | "preparation"
+): Promise<LegacyComposeAdoptionBinding> {
   let signal: AbortSignal | undefined;
   try {
     const selected = selection(input);
@@ -650,19 +687,25 @@ export async function acquireLegacyComposeAdoptionBinding(input: {
     if (!source.ok) {
       refuse("E_LEGACY_COMPOSE_BINDING_UNSUPPORTED");
     }
-    const planned = planLegacyComposeAdoption({
-      configText: source.configText,
-      composeText: source.composeText,
-    });
+    const ordinary = planLegacyComposeAdoption(source);
+    const basic =
+      purpose === "basic-build" ||
+      (purpose === "preparation" && !ordinary.intent);
+    const planned = basic
+      ? planLegacyComposeRetainedBasicBuildAdoption(source)
+      : ordinary;
     const intent = planned.intent;
     if (!intent) {
       refuse("E_LEGACY_COMPOSE_BINDING_UNSUPPORTED");
     }
+    const buildSource = basic
+      ? await acquireLegacyComposeBuildSource({ source, signal })
+      : undefined;
     const mapped = mapLegacyNativeStorageAdoption({
       configText: source.configText,
       composeText: source.composeText,
     });
-    const candidate = mapped.candidate;
+    const candidate = buildSource?.candidate ?? mapped.candidate;
     let projection: LegacyComposeAdoptionProjection | undefined;
     let projected: Readonly<ProjectedPreparation> | undefined;
     const generatedPresent = await hasLegacyComposeGeneratedSources(
@@ -678,6 +721,9 @@ export async function acquireLegacyComposeAdoptionBinding(input: {
           signal,
         })))
     ) {
+      if (buildSource) {
+        refuse("E_LEGACY_COMPOSE_BINDING_UNSUPPORTED");
+      }
       projection = await LegacyComposeAdoptionProjection.acquire({
         source,
         signal,
@@ -696,6 +742,9 @@ export async function acquireLegacyComposeAdoptionBinding(input: {
       if (projection) {
         await projection.assertFresh({ signal: selectedSignal });
         return;
+      }
+      if (buildSource) {
+        await buildSource.assertFresh({ signal: selectedSignal });
       }
       if (await hasLegacyComposeGeneratedSources(root, selectedSignal)) {
         refuse("E_LEGACY_COMPOSE_BINDING_CHANGED");
@@ -721,6 +770,14 @@ export async function acquireLegacyComposeAdoptionBinding(input: {
       timeoutMs,
       composeFiles: projected?.composeFiles,
     });
+    const buildImages = buildSource
+      ? await inspectLegacyComposeRetainedBuildImages({
+          binding: baseline,
+          composeFile: baseline.composeFile,
+          signal,
+          timeoutMs,
+        })
+      : undefined;
     freezeImportValue(baseline);
     const assertFresh = async (current: {
       readonly projectRoot: string;
@@ -750,6 +807,19 @@ export async function acquireLegacyComposeAdoptionBinding(input: {
           composeFiles: projected?.composeFiles,
         });
         if (JSON.stringify(observed) !== JSON.stringify(baseline)) {
+          refuse("E_LEGACY_COMPOSE_BINDING_CHANGED");
+        }
+        if (
+          buildImages &&
+          JSON.stringify(
+            await inspectLegacyComposeRetainedBuildImages({
+              binding: observed,
+              composeFile: observed.composeFile,
+              signal: currentSignal,
+              timeoutMs,
+            })
+          ) !== JSON.stringify(buildImages)
+        ) {
           refuse("E_LEGACY_COMPOSE_BINDING_CHANGED");
         }
         await source.assertFresh({ signal: currentSignal });
@@ -783,6 +853,14 @@ export async function acquireLegacyComposeAdoptionBinding(input: {
           binding: baseline,
           sourceFiles: source.sourceFiles,
           ...(projected ? { projection: projected } : {}),
+          ...(buildSource && buildImages
+            ? {
+                build: Object.freeze({
+                  source: buildSource.proof,
+                  images: buildImages,
+                }),
+              }
+            : {}),
         };
         for (const key of [
           "configText",
@@ -790,6 +868,7 @@ export async function acquireLegacyComposeAdoptionBinding(input: {
           "binding",
           "sourceFiles",
           "projection",
+          "build",
         ]) {
           Object.defineProperty(result, key, { enumerable: false });
         }

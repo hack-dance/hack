@@ -134,7 +134,11 @@ function mappingFields(
 function mapLegacyNativeInput(opts: {
   readonly configText: string;
   readonly composeText: string;
-  readonly purpose: "preview" | "adoption-baseline" | "storage-adoption";
+  readonly purpose:
+    | "preview"
+    | "adoption-baseline"
+    | "storage-adoption"
+    | "retained-basic-build";
 }): NativeImportPlan {
   const config = parseImportDocument({
     text: opts.configText,
@@ -178,9 +182,13 @@ function mapLegacyNativeInput(opts: {
     candidate,
     mark,
     refuse,
-    buildPreview: opts.purpose === "preview",
+    buildPreview:
+      opts.purpose === "preview" || opts.purpose === "retained-basic-build",
   });
-  if (opts.purpose === "storage-adoption") {
+  if (
+    opts.purpose === "storage-adoption" ||
+    opts.purpose === "retained-basic-build"
+  ) {
     mapStorageCandidate({
       config: config.value,
       compose: compose.value,
@@ -222,6 +230,18 @@ export function mapLegacyNativeStorageAdoption(opts: {
     composeText: opts.composeText,
     purpose: "storage-adoption",
   });
+}
+
+/**
+ * Private closed build-and-storage intent for the retained original-image owner.
+ * This does not grant adoption or build authority. The image-only baseline and
+ * ordinary storage mapper deliberately retain their previous refusals.
+ */
+export function mapLegacyNativeRetainedBasicBuild(opts: {
+  readonly configText: string;
+  readonly composeText: string;
+}): NativeImportPlan {
+  return mapLegacyNativeInput({ ...opts, purpose: "retained-basic-build" });
 }
 
 function mapStorageCandidate(

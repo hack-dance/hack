@@ -22,6 +22,7 @@ function refuse(): never {
  */
 export async function executeLegacyComposeRetainedPlan(opts: {
   readonly plan: LegacyComposeRetainedPlan;
+  readonly retainedBuild?: true;
   readonly binding: LegacyComposeVerifiedBinding;
   readonly operation: AdoptionOperation;
   readonly deadline: number;
@@ -45,12 +46,13 @@ export async function executeLegacyComposeRetainedPlan(opts: {
     assertFresh,
     observe,
     effect,
+    retainedBuild,
   } = opts;
   const ids = new Map(
     binding.containers.map((container) => [container.service, container.id])
   );
   if (
-    !plan.requiresV5 ||
+    (!plan.requiresV5 && !retainedBuild) ||
     ids.size !== binding.containers.length ||
     plan.ordered.length !== ids.size ||
     plan.ordered.some((service) => !ids.has(service.service)) ||
@@ -129,6 +131,7 @@ export async function runLegacyComposeRetainedOperation(opts: {
   readonly input: {
     readonly binding: LegacyComposeVerifiedBinding;
     readonly retainedPlan: LegacyComposeRetainedPlan;
+    readonly retainedBuild?: true;
     readonly assertFresh: () => Promise<void>;
   };
   readonly operation: AdoptionOperation;
@@ -138,6 +141,7 @@ export async function runLegacyComposeRetainedOperation(opts: {
   const { input, operation, deadline, signal } = opts;
   return await executeLegacyComposeRetainedPlan({
     plan: input.retainedPlan,
+    retainedBuild: input.retainedBuild,
     binding: input.binding,
     operation,
     deadline,

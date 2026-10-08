@@ -1,4 +1,4 @@
-import { acquireLegacyComposeAdoptionBinding } from "./native-compose-adoption-binding.ts";
+import { acquireLegacyComposeAdoptionPreparationBinding } from "./native-compose-adoption-binding.ts";
 import { admitLegacyComposeCandidate } from "./native-compose-adoption-compiler.ts";
 import {
   legacyComposeAdoptionCandidateSupported,
@@ -13,6 +13,7 @@ import type { ImportField } from "./native-config-import-parser.ts";
 import {
   freezeImportValue,
   mapLegacyNativeStorageAdoption,
+  mapLegacyNativeRetainedBasicBuild,
 } from "./native-config-import-plan.ts";
 
 function refused(code: string): ImportField {
@@ -39,9 +40,13 @@ export async function previewLegacyComposeAdoption(input: {
   const opts = { ...input };
   let fields: readonly ImportField[] = [];
   try {
-    const owner = await acquireLegacyComposeAdoptionBinding(opts),
+    const owner = await acquireLegacyComposeAdoptionPreparationBinding(opts),
       acquired = await owner.resolvePreparationInputs(opts);
-    const mapped = mapLegacyNativeStorageAdoption(acquired);
+    const mapped = (
+      acquired.build
+        ? mapLegacyNativeRetainedBasicBuild
+        : mapLegacyNativeStorageAdoption
+    )(acquired);
     fields = [
       ...mapped.report.fields,
       ...(acquired.projection?.localFields ?? []),

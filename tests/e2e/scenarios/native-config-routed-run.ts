@@ -258,6 +258,35 @@ function snapshot(values: readonly Record<string, unknown>[]): string {
   return JSON.stringify(retained);
 }
 
+async function siblingContinuity(
+  opts: Acceptance
+): Promise<() => Promise<void>> {
+  const pinned = await Promise.all(
+    opts.siblings.map(async (checkout) => {
+      const source = await saved(checkout.root);
+      expect({
+        that: source.pending === null && !source.stopped,
+        message: "Sibling readiness baseline must be complete",
+      });
+      return {
+        source,
+        containers: snapshot(await containers(opts.docker, source)),
+      };
+    })
+  );
+  return async () => {
+    for (const sibling of pinned) {
+      expect({
+        that:
+          snapshot(await containers(opts.docker, sibling.source)) ===
+          sibling.containers,
+        message:
+          "Routed one-off and recovery must preserve healthy sibling container IDs",
+      });
+    }
+  };
+}
+
 async function heldRun(
   opts: Acceptance,
   source: Awaited<ReturnType<typeof saved>>
@@ -265,6 +294,7 @@ async function heldRun(
   const shim = await removalShim(opts, source, false);
   const before = snapshot(await containers(opts.docker, source));
   const claims = await opts.claims();
+  const assertSiblings = await siblingContinuity(opts);
   const marker = `warm-${source.generationId}`;
   const release = `/state/release-${source.generationId}`;
   const script = [
@@ -308,6 +338,7 @@ async function heldRun(
     // Two proxy polling cycles must not turn this additional container into an upstream.
     await Bun.sleep(2200);
     await assertRoutes(opts, source);
+    await assertSiblings();
     expect({
       that: (await opts.claims()) === claims,
       message: "Running one-off must leave completed hostname claims unchanged",
@@ -354,6 +385,7 @@ async function heldRun(
       "Successful routed run must preserve exact current generation, inputs and completed claims",
   });
   await assertRoutes(opts, after);
+  await assertSiblings();
 }
 
 async function failedRemoval(
@@ -364,6 +396,7 @@ async function failedRemoval(
   const marker = `warm-${source.generationId}`;
   const before = snapshot(await containers(opts.docker, source));
   const claims = await opts.claims();
+  const assertSiblings = await siblingContinuity(opts);
   const result = await opts.raw(
     opts.root,
     ["run", "web", "--", "bun", "-e", "process.exit(0)"],
@@ -388,6 +421,7 @@ async function failedRemoval(
       "Failed removal must retain the exact stopped one-off and recoverable run intent without changing claims or ready graph",
   });
   await assertRoutes(opts, source);
+  await assertSiblings();
   expectExit({
     result: await opts.raw(opts.root, ["up", "--detach", "--json"]),
     codes: [1],
@@ -402,6 +436,7 @@ async function failedRemoval(
   for (const sibling of opts.siblings) {
     await opts.check(sibling);
   }
+  await assertSiblings();
   expectExit({
     result: await opts.raw(opts.root, ["up", "--detach", "--json"]),
     codes: [0],
@@ -414,6 +449,7 @@ async function failedRemoval(
   });
   await checkMarker(opts.docker, restored, marker);
   await assertRoutes(opts, restored);
+  await assertSiblings();
 }
 
 /** Real compiled CLI/engine acceptance. Caller owns isolated ingress and final retained-data cleanup. */

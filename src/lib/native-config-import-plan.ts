@@ -6,6 +6,10 @@ import {
   importPointer,
   parseImportDocument,
 } from "./native-config-import-parser.ts";
+import {
+  mapLegacyComposeDependencies,
+  mapLegacyComposeHealthcheck,
+} from "./native-config-import-readiness.ts";
 import { mapLegacyComposeStorage } from "./native-config-import-storage.ts";
 import { normalizeEnvConfigName } from "./project.ts";
 
@@ -517,6 +521,42 @@ function markServiceValue(opts: {
   }
 }
 
+function mapServiceReadiness(
+  opts: Pick<MappingContext, "mark" | "refuse"> & {
+    readonly service: Record<string, unknown>;
+    readonly key: string;
+    readonly raw: unknown;
+    readonly servicePointer: string;
+  }
+): boolean {
+  if (opts.key !== "depends_on" && opts.key !== "healthcheck") {
+    return false;
+  }
+  const pointer = importPointer(opts.servicePointer, opts.key);
+  const value =
+    opts.key === "depends_on"
+      ? mapLegacyComposeDependencies(opts.raw)
+      : mapLegacyComposeHealthcheck(opts.raw);
+  if (value === undefined) {
+    opts.refuse(
+      "compose",
+      pointer,
+      "dependency_or_health_contract_unsupported"
+    );
+  } else {
+    const property = opts.key === "depends_on" ? "depends_on" : "readiness";
+    opts.service[property] = value;
+    opts.mark(
+      "compose",
+      pointer,
+      `${opts.servicePointer}/${property}`,
+      "compose_readiness_contract",
+      true
+    );
+  }
+  return true;
+}
+
 function mapService(
   opts: Pick<MappingContext, "mark" | "refuse"> & {
     readonly source: Record<string, unknown>;
@@ -527,6 +567,17 @@ function mapService(
   const service: Record<string, unknown> = {};
   opts.mark("compose", opts.pointer, opts.pointer);
   for (const [key, raw] of Object.entries(opts.source)) {
+    if (
+      mapServiceReadiness({
+        ...opts,
+        service,
+        key,
+        raw,
+        servicePointer: opts.pointer,
+      })
+    ) {
+      continue;
+    }
     if (!Object.hasOwn(SERVICE_RULES, key)) {
       continue;
     }

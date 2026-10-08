@@ -145,9 +145,12 @@ test("selected retirement rechecks file and caller authority after its final pro
           }
         }
       }
-      return Array.isArray(command)
-        ? originalSpawn(command, args[1])
-        : originalSpawn(command);
+      const child: ReturnType<typeof Bun.spawn> = Reflect.apply(
+        originalSpawn,
+        Bun,
+        args
+      );
+      return child;
     });
     try {
       await expect(

@@ -12,7 +12,7 @@ export class NativeComposeHostHookError extends Error {
   readonly code = "E_NATIVE_PROJECT_UNSUPPORTED";
   constructor() {
     super(
-      "Native Compose host hooks require finite up.before commands and complete selected host bindings; values omitted."
+      "Native Compose host hooks require finite up commands and complete selected host bindings; values omitted."
     );
     this.name = "NativeComposeHostHookError";
   }
@@ -66,8 +66,21 @@ function relative(value: unknown): value is string {
 export function selectNativeComposeBeforeHooks(
   plan: Readonly<Record<string, unknown>>
 ): readonly NativeComposeHook[] {
+  return selectNativeComposeUpHooks(plan).before;
+}
+
+export function selectNativeComposeAfterHooks(
+  plan: Readonly<Record<string, unknown>>
+): readonly NativeComposeHook[] {
+  return selectNativeComposeUpHooks(plan).after;
+}
+
+function selectNativeComposeUpHooks(plan: Readonly<Record<string, unknown>>): {
+  readonly before: readonly NativeComposeHook[];
+  readonly after: readonly NativeComposeHook[];
+} {
   if (plan.host === undefined) {
-    return [];
+    return { before: [], after: [] };
   }
   const host = plan.host;
   assert(isRecord(host) && only(host, ["up", "down", "processes"]));
@@ -75,7 +88,10 @@ export function selectNativeComposeBeforeHooks(
     host.processes === undefined ||
       (isRecord(host.processes) && Object.keys(host.processes).length === 0)
   );
-  const result: NativeComposeHook[] = [];
+  const result: { before: NativeComposeHook[]; after: NativeComposeHook[] } = {
+    before: [],
+    after: [],
+  };
   const names = new Set<string>();
   for (const phase of ["up", "down"] as const) {
     const hooks = host[phase];
@@ -89,12 +105,12 @@ export function selectNativeComposeBeforeHooks(
         continue;
       }
       assert(Array.isArray(entries));
-      assert((phase === "up" && order === "before") || entries.length === 0);
+      assert(phase === "up" || entries.length === 0);
       for (const entry of entries) {
         const hook = readHook(entry);
         assert(!names.has(hook.name));
         names.add(hook.name);
-        result.push(hook);
+        result[order].push(hook);
       }
     }
   }

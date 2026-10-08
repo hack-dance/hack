@@ -25,11 +25,12 @@ coverage and baseline presence. Preflight is not a freshness receipt; the
 execution owner still fences source and environment generations before apply.
 
 The default renderer refuses nonempty host declarations. The command owner can
-set `beforeHooksOwned: true` after validating and journaling finite `host.up.before`
-execution. This admits that bounded host contract without placing host commands or
+set `beforeHooksOwned: true` for its validated and journaled finite `host.up.before`
+and `host.up.after` execution. The flag retains its original name. This admits that
+bounded host contract without placing host commands or
 host environment values in the Compose document. Shared effective-binding checks
 serve both guest rendering and the hook owner; each supplies its selected baseline
-and allowed endpoint policy. Other hook phases and persistent processes still
+and allowed endpoint policy. Down phases and persistent processes still
 refuse. The flag itself provides no execution or freshness proof.
 
 The component performs no filesystem or process operations, engine requests,
@@ -120,8 +121,8 @@ The first component refuses:
   default command for a non-null entrypoint; resolving that combination requires
   separate image-default qualification. This is partial entrypoint support.
 - HTTP or TCP readiness, without inventing curl, wget, netcat or another image tool.
-- Nonempty host hooks or host environment delivery without the bounded before-hook
-  owner; all other hook phases and persistent processes remain unsupported. Empty
+- Nonempty host hooks or host environment delivery without the bounded up-hook
+  owner; down phases and persistent processes remain unsupported. Empty
   host declarations have no execution effect.
 - Authored routing/open settings and route endpoint delivery, pending a routing owner.
 - Typed host/gateway endpoints, pending backend-specific address qualification.

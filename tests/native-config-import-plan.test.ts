@@ -499,8 +499,6 @@ test.each([
   ["build", { context: CANARY }],
   ["ports", ["3000:3000"]],
   ["volumes", [CANARY]],
-  ["depends_on", ["other"]],
-  ["healthcheck", { test: ["CMD", CANARY] }],
   ["labels", { "hack.domain": CANARY }],
   ["env_file", CANARY],
   ["networks", ["default"]],

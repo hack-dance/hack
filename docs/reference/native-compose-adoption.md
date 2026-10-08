@@ -76,6 +76,38 @@ compiler acceptance. The default import command still refuses volumes and mounts
 
 ## Existing resource verification
 
+The version 5 retained owner supports the closed started/explicit exec-healthy
+subset above without recreating containers. It journals the whole original
+selection, starts exact original IDs in dependency order, and waits for an
+authored healthy edge before starting its dependent. A started edge does not
+wait for health; final successful startup still requires every explicit probe
+to be healthy. Stop uses reverse dependency order; restart stops in reverse
+order before starting through the same readiness gates. Partial graph selection
+refuses before a journal or effect. The same ordering applies to explicit
+`config adopt --stop` and interrupted stop recovery.
+
+Each effect rechecks the held source, original resource and receipt authority.
+Version 5 requires one finite operation deadline; all source, configuration and
+resource reacquisitions use its remaining clock, including final verification.
+Fresh bounded original-ID observations and the shared process runner use one
+operation deadline and cancellation owner. Failure, drift, cancellation or
+unverified final readiness retains the pending journal; only explicit verified
+stop recovery can clear it. These rechecks do not freeze external editors or
+the engine atomically. Public output remains field/count/status metadata;
+capabilities and authored probe arguments are private. Prior versions 1–4 keep
+their existing execution behavior, and older upgraded owners refuse version 5
+before engine/key reads. Unmodified older launchers still require the previously
+documented upgrade boundary. Completed-job dependencies and container recreation
+remain unsupported required follow-up work.
+
+The maintained `native-compose-adoption-dependency-worktrees` selector exercises
+an explicit exec-healthy edge and a short started edge whose target has no health
+probe. It uses two original SQL volumes and checks actual ordered ID starts,
+unchanged-source partial stop recovery, active-candidate raw drift refusal and
+same-identity byte repair, separate rollback and
+exact owned cleanup. It requires the current compiled CLI and companion compiler;
+it does not qualify completed jobs or container recreation.
+
 The version 4 typed-local slice reads optional `.hack/hack.local.json` at the
 selected checkout and verified inherited primary in the same issued private source
 acquisition. It accepts only `schema_version: 1` and an optional `environment`

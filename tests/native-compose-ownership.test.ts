@@ -4,8 +4,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   assertNativeComposeOwned,
+  mergeNativeComposeNetworkPolicies,
   NativeComposeOwnershipError,
   type NativeComposeOwnershipOptions,
+  observeNativeComposeStartupOwned,
+  observeSavedNativeComposeOwned,
 } from "../src/lib/native-compose-ownership.ts";
 import { restoreEnv } from "./helpers/env.ts";
 
@@ -71,6 +74,18 @@ if (action === "ls") {
  const selected = args.slice(args.indexOf("--format") + 2);
  const rows = fixture[kind] ?? [];
  if (fixture.mode === "vanished") process.exit(1);
+ const counter = root + "/inspects-" + kind;
+ const count = existsSync(counter) ? Number(readFileSync(counter, "utf8")) : 0;
+ writeFileSync(counter, String(count + 1));
+ if (fixture.mode === "endpoint-drift" && kind === "container" && count > 0) {
+   rows[0].networks[Object.keys(rows[0].networks)[0]].NetworkID = "f".repeat(64);
+ }
+ if (fixture.mode === "restart-member-transition" && kind === "container" && count > 0) {
+   rows[0].state = "running";
+ }
+ if (fixture.mode === "restart-member-transition" && kind === "network" && count > 0) {
+   rows[0].containers[${JSON.stringify(ID)}] = {};
+ }
  for (const id of selected) { const row = rows.find(row => row.id === id); if (!row) process.exit(1); console.log(JSON.stringify(row)); }
 }
 `
@@ -97,6 +112,12 @@ function owned(): Fixture {
         state: "running",
         exitCode: 0,
         health: "healthy",
+        networks: {
+          [`${PROJECT}_default`]: {
+            NetworkID: NETWORK_ID,
+            Aliases: [`${PROJECT}-web-1`, "web"],
+          },
+        },
       },
     ],
     volume: [
@@ -118,14 +139,19 @@ function owned(): Fixture {
         version: "1",
         instance: PROJECT,
         owner: OWNER,
+        driver: "bridge",
+        internal: false,
+        containers: { [ID]: { Name: `${PROJECT}-web-1` } },
       },
     ],
   };
 }
 async function prepare(value: Fixture): Promise<void> {
   await Promise.all(
-    ["container", "volume", "network"].map((kind) =>
-      rm(join(root, `lists-${kind}`), { force: true })
+    ["container", "volume", "network"].flatMap((kind) =>
+      ["lists", "inspects"].map((query) =>
+        rm(join(root, `${query}-${kind}`), { force: true })
+      )
     )
   );
   await Bun.write(join(root, "fixture.json"), JSON.stringify(value));
@@ -151,6 +177,114 @@ async function expectRefusal(
   }
   expect(await Bun.file(join(root, "mutated")).exists()).toBe(false);
 }
+
+test("selected on-failure restart is unready until two stable owned scans", async () => {
+  const fixture = owned();
+  const container = fixture.container?.[0];
+  const network = fixture.network?.[0];
+  if (!(container && network)) {
+    throw new Error("Missing owned retry fixture");
+  }
+  container.state = "restarting";
+  network.containers = {};
+  await prepare(fixture);
+  expect(await observeNativeComposeStartupOwned(options, ["web"])).toBeNull();
+  // The same observation must never authorize effect or finalization ownership.
+  await expectRefusal(options);
+  fixture.mode = "restart-member-transition";
+  await prepare(fixture);
+  await expectRefusal(options);
+  await prepare(fixture);
+  expect(await observeNativeComposeStartupOwned(options, ["web"])).toBeNull();
+  expect(
+    (await observeNativeComposeStartupOwned(options, ["web"]))?.containers[0]
+  ).toMatchObject({ id: ID, state: "running" });
+  expect((await assertNativeComposeOwned(options)).containers[0]).toMatchObject(
+    {
+      id: ID,
+      state: "running",
+    }
+  );
+  expect(await Bun.file(join(root, "mutated")).exists()).toBe(false);
+});
+
+test("restart observation keeps foreign and incomplete endpoint shapes fenced", async () => {
+  for (const change of [
+    "wrong-service",
+    "running",
+    "wrong-id",
+    "empty-id",
+    "alias-drift",
+    "empty-aliases",
+    "foreign-owner",
+    "foreign-generation",
+    "foreign-member",
+    "extra-attachment",
+    "ingress",
+  ]) {
+    const fixture = owned();
+    const container = fixture.container?.[0];
+    const network = fixture.network?.[0];
+    if (!(container && network)) {
+      throw new Error("Missing owned retry fixture");
+    }
+    container.state = change === "running" ? "running" : "restarting";
+    network.containers =
+      change === "foreign-member" ? { ["f".repeat(64)]: {} } : {};
+    let selection = options;
+    if (change === "wrong-id" || change === "empty-id") {
+      container.networks = {
+        [`${PROJECT}_default`]: {
+          NetworkID: change === "wrong-id" ? "f".repeat(64) : "",
+          Aliases: [`${PROJECT}-web-1`, "web"],
+        },
+      };
+    } else if (change === "alias-drift" || change === "empty-aliases") {
+      container.networks = {
+        [`${PROJECT}_default`]: {
+          NetworkID: NETWORK_ID,
+          Aliases:
+            change === "alias-drift" ? [`${PROJECT}-web-1`, "foreign"] : [],
+        },
+      };
+    } else if (change === "extra-attachment") {
+      (container.networks as Record<string, unknown>).foreign = {
+        NetworkID: "f".repeat(64),
+        Aliases: ["foreign"],
+      };
+    } else if (change === "foreign-owner") {
+      network.owner = "f".repeat(32);
+    } else if (change === "foreign-generation") {
+      container.generation = "f".repeat(32);
+    } else if (change === "ingress") {
+      (container.networks as Record<string, unknown>)["hack-dev"] = {
+        NetworkID: "e".repeat(64),
+        Aliases: [`${PROJECT}-web-1`, "web"],
+      };
+      selection = {
+        ...options,
+        expectedWorkloadNetworks: [
+          {
+            generationId: GENERATION,
+            service: "web",
+            networks: [
+              { name: `${PROJECT}_default`, aliases: [] },
+              { name: "hack-dev", aliases: [], externalId: "e".repeat(64) },
+            ],
+          },
+        ],
+      };
+    }
+    await prepare(fixture);
+    await expect(
+      observeNativeComposeStartupOwned(
+        selection,
+        change === "wrong-service" ? ["install"] : ["web"]
+      )
+    ).rejects.toBeInstanceOf(NativeComposeOwnershipError);
+  }
+  expect(await Bun.file(join(root, "mutated")).exists()).toBe(false);
+});
 test("owned resources yield only bounded readiness observations and exact read-only queries", async () => {
   await prepare(owned());
   expect(await assertNativeComposeOwned(options)).toEqual({
@@ -200,7 +334,7 @@ test("fully completed real queries never signal an exited process group", async 
     expect((await assertNativeComposeOwned(options)).containers).toHaveLength(
       1
     );
-    expect(await commands()).toHaveLength(9);
+    expect(await commands()).toHaveLength(11);
     expect(signals).not.toHaveBeenCalled();
   } finally {
     signals.mockRestore();
@@ -222,6 +356,12 @@ test("oneoffs and successful jobs use receipt-selected generations and explicit 
       state: "exited",
       exitCode: 0,
       health: null,
+      networks: {
+        [`${PROJECT}_default`]: {
+          NetworkID: NETWORK_ID,
+          Aliases: [`${PROJECT}-install-run-random`],
+        },
+      },
     },
   ];
   await prepare(fixture);
@@ -255,6 +395,12 @@ test("mixed receipt-selected generations remain distinct in sanitized observatio
       oneoff: "True",
       state: "exited",
       health: null,
+      networks: {
+        [`${PROJECT}_default`]: {
+          NetworkID: NETWORK_ID,
+          Aliases: [`${PROJECT}-web-run-pending`],
+        },
+      },
     },
   ];
   await prepare(fixture);
@@ -403,13 +549,26 @@ test("inspect argv batching does not cap the number of owned resources", async (
     state: "exited",
     exitCode: 0,
     health: null,
+    networks: {
+      [`${PROJECT}_default`]: {
+        NetworkID: NETWORK_ID,
+        Aliases: [`${PROJECT}-web-run-${index}`],
+      },
+    },
   }));
-  await prepare({ container });
+  const fixture = owned();
+  fixture.container = container;
+  const [network] = fixture.network ?? [];
+  if (!network) {
+    throw new Error("Missing owned network fixture");
+  }
+  network.containers = {};
+  await prepare(fixture);
   expect((await assertNativeComposeOwned(options)).containers).toHaveLength(
     300
   );
   const inspected = (await commands()).filter((args) => args[1] === "inspect");
-  expect(inspected).toHaveLength(2);
+  expect(inspected.filter((args) => args[0] === "container")).toHaveLength(4);
   for (const args of inspected) {
     const ids = args.slice(args.indexOf("--format") + 2);
     expect(
@@ -478,5 +637,535 @@ test("invalid or conflicting selection refuses before Docker discovery/spawn", a
   ]) {
     await expectRefusal({ ...options, ...invalid });
   }
+  expect(await Bun.file(join(root, "commands")).exists()).toBe(false);
+});
+
+const CUSTOM = `hack-net-${PROJECT.length}-${PROJECT}-4-data`;
+function customOwned() {
+  const fixture = owned();
+  const container = fixture.container?.[0];
+  const network = fixture.network?.[0];
+  if (!(container && network)) {
+    throw new Error("Missing owned fixture");
+  }
+  container.networks = {
+    [CUSTOM]: {
+      NetworkID: NETWORK_ID,
+      Aliases: [`${PROJECT}-web-1`, "web", "db-query"],
+    },
+  };
+  network.name = CUSTOM;
+  network.internal = true;
+  const { expectedNetwork: _legacy, ...base } = options;
+  const selection: NativeComposeOwnershipOptions = {
+    ...base,
+    expectedNetworks: [{ name: CUSTOM, driver: "bridge", internal: true }],
+    expectedWorkloadNetworks: [
+      {
+        generationId: GENERATION,
+        service: "web",
+        networks: [{ name: CUSTOM, aliases: ["db-query"] }],
+      },
+    ],
+  };
+  return { fixture, selection, container, network };
+}
+
+test("custom-only bridge topology validates exact policy, generation and aliases without adding default", async () => {
+  const { fixture, selection } = customOwned();
+  await prepare(fixture);
+  const observed = await assertNativeComposeOwned(selection);
+  expect(observed.networks).toEqual([{ id: NETWORK_ID, name: CUSTOM }]);
+  expect(observed.containers[0]).toMatchObject({
+    generationId: GENERATION,
+    service: "web",
+    state: "running",
+    health: "healthy",
+  });
+  expect(JSON.stringify(observed)).not.toContain("db-query");
+  expect(await Bun.file(join(root, "mutated")).exists()).toBe(false);
+});
+
+test("custom bridge driver, internal flag, aliases, generation and unexpected endpoint drift refuse", async () => {
+  for (const change of [
+    "driver",
+    "internal",
+    "alias",
+    "generation",
+    "extra",
+    "missing",
+    "reverse-missing",
+    "foreign-member",
+    "endpoint-drift",
+  ]) {
+    const { fixture, selection, container, network } = customOwned();
+    if (change === "driver") {
+      network.driver = "host";
+    }
+    if (change === "internal") {
+      network.internal = false;
+    }
+    if (change === "alias") {
+      container.networks = {
+        [CUSTOM]: {
+          NetworkID: NETWORK_ID,
+          Aliases: [`${PROJECT}-web-1`, "web", "unrequested"],
+        },
+      };
+    }
+    if (change === "generation") {
+      container.generation = PENDING;
+    }
+    if (change === "extra") {
+      container.networks = {
+        [CUSTOM]: {
+          NetworkID: NETWORK_ID,
+          Aliases: [`${PROJECT}-web-1`, "web", "db-query"],
+        },
+        foreign: { NetworkID: "f".repeat(64), Aliases: ["web"] },
+      };
+    }
+    if (change === "missing") {
+      container.networks = {};
+    }
+    if (change === "reverse-missing") {
+      network.containers = {};
+    }
+    if (change === "foreign-member") {
+      network.containers = { [ID]: {}, ["f".repeat(64)]: {} };
+    }
+    if (change === "endpoint-drift") {
+      fixture.mode = change;
+    }
+    await prepare(fixture);
+    await expectRefusal(selection);
+    expect(await Bun.file(join(root, "mutated")).exists()).toBe(false);
+  }
+});
+
+test("unexpected same-project bridges and foreign expected custom names are not silently reused", async () => {
+  const { fixture, selection, network } = customOwned();
+  fixture.network?.push({
+    ...network,
+    id: "e".repeat(64),
+    name: `${PROJECT}-extra`,
+  });
+  await prepare(fixture);
+  await expectRefusal(selection);
+  fixture.network?.pop();
+  network.project = "foreign";
+  await prepare(fixture);
+  await expectRefusal(selection);
+});
+
+test("separately pinned ingress must match exact endpoint ID and receives no missing-network recovery waiver", async () => {
+  const { fixture, selection, container } = customOwned();
+  const ingressId = "e".repeat(64);
+  const endpoints = {
+    [CUSTOM]: {
+      NetworkID: NETWORK_ID,
+      Aliases: [`${PROJECT}-web-1`, "web", "db-query"],
+    },
+    "hack-dev": { NetworkID: ingressId, Aliases: [`${PROJECT}-web-1`, "web"] },
+  };
+  container.networks = endpoints;
+  const routed: NativeComposeOwnershipOptions = {
+    ...selection,
+    expectedWorkloadNetworks: [
+      {
+        generationId: GENERATION,
+        service: "web",
+        networks: [
+          { name: CUSTOM, aliases: ["db-query"] },
+          { name: "hack-dev", aliases: [], externalId: ingressId },
+        ],
+      },
+    ],
+  };
+  await prepare(fixture);
+  expect((await assertNativeComposeOwned(routed)).containers).toHaveLength(1);
+  endpoints["hack-dev"].NetworkID = "f".repeat(64);
+  await prepare(fixture);
+  await expectRefusal(routed);
+  container.state = "exited";
+  container.networks = {
+    [CUSTOM]: { NetworkID: "", Aliases: null },
+    "hack-dev": { NetworkID: "", Aliases: null },
+  };
+  fixture.network = [];
+  await prepare(fixture);
+  await expectRefusal({ ...routed, recovery: "down" });
+});
+
+test("explicit down recovery can inspect stopped known containers after their owned bridge is absent", async () => {
+  const { fixture, selection, container } = customOwned();
+  container.state = "exited";
+  container.networks = { [CUSTOM]: { NetworkID: "", Aliases: null } };
+  fixture.network = [];
+  await prepare(fixture);
+  await expectRefusal(selection);
+  expect(
+    (await assertNativeComposeOwned({ ...selection, recovery: "down" }))
+      .containers[0]
+  ).toMatchObject({ id: ID, generationId: GENERATION, state: "exited" });
+  for (const state of ["running", "paused", "restarting"]) {
+    container.state = state;
+    await prepare(fixture);
+    await expectRefusal({ ...selection, recovery: "down" });
+  }
+  container.state = "exited";
+  container.networks = { foreign: { NetworkID: "", Aliases: null } };
+  await prepare(fixture);
+  await expectRefusal({ ...selection, recovery: "down" });
+  container.networks = { [CUSTOM]: { NetworkID: "", Aliases: null } };
+  fixture.network = [{ ...customOwned().network, project: "foreign" }];
+  await prepare(fixture);
+  await expectRefusal({ ...selection, recovery: "down" });
+  expect(await Bun.file(join(root, "mutated")).exists()).toBe(false);
+});
+
+test("absent owned bridge recovery refuses an unbound nonempty network ID", async () => {
+  for (const aliases of [null, [`${PROJECT}-web-1`, "web", "db-query"]]) {
+    const { fixture, selection, container } = customOwned();
+    container.state = "exited";
+    container.networks = {
+      [CUSTOM]: { NetworkID: "f".repeat(64), Aliases: aliases },
+    };
+    fixture.network = [];
+    await prepare(fixture);
+    await expectRefusal({ ...selection, recovery: "down" });
+  }
+  expect(await Bun.file(join(root, "mutated")).exists()).toBe(false);
+});
+
+test("ownership options are captured before awaits so caller alias and generation mutations cannot retarget proof", async () => {
+  const { fixture, selection } = customOwned();
+  await prepare(fixture);
+  const aliases = ["db-query"];
+  const generations = [GENERATION];
+  const mutable = {
+    ...selection,
+    generationIds: generations,
+    expectedWorkloadNetworks: [
+      {
+        generationId: GENERATION,
+        service: "web",
+        networks: [{ name: CUSTOM, aliases }],
+      },
+    ],
+  };
+  const spawn = Bun.spawn.bind(Bun);
+  const observed = spyOn(Bun, "spawn").mockImplementation(((
+    ...args: unknown[]
+  ) => {
+    const child = Reflect.apply(spawn, Bun, args);
+    if (Array.isArray(args[0]) && args[0][0] === join(root, "docker")) {
+      aliases.splice(0, aliases.length, "unrequested");
+      generations.splice(0, generations.length, PENDING);
+    }
+    return child;
+  }) as typeof Bun.spawn);
+  try {
+    expect(
+      (await assertNativeComposeOwned(mutable)).containers[0]?.generationId
+    ).toBe(GENERATION);
+  } finally {
+    observed.mockRestore();
+  }
+});
+
+test("saved down recovery admits created empty endpoints only on freshly verified owned bridges", async () => {
+  const { fixture, selection, container, network } = customOwned();
+  container.state = "created";
+  container.networks = { [CUSTOM]: { NetworkID: "", Aliases: null } };
+  network.containers = {};
+  await prepare(fixture);
+  await expectRefusal(selection);
+  expect(
+    (await assertNativeComposeOwned({ ...selection, recovery: "down" }))
+      .containers[0]
+  ).toMatchObject({ id: ID, generationId: GENERATION, state: "created" });
+  container.networks = {
+    [CUSTOM]: {
+      NetworkID: "",
+      Aliases: [`${PROJECT}-web-1`, "web", "db-query"],
+    },
+  };
+  await prepare(fixture);
+  expect(
+    (await assertNativeComposeOwned({ ...selection, recovery: "down" }))
+      .containers[0]
+  ).toMatchObject({ id: ID, state: "created" });
+  container.networks = { [CUSTOM]: { NetworkID: "", Aliases: null } };
+  for (const change of [
+    "wrong-id",
+    "alias-drift",
+    "running",
+    "foreign-bridge",
+    "ingress",
+  ]) {
+    const attempt = structuredClone(fixture);
+    const row = attempt.container?.[0];
+    const bridge = attempt.network?.[0];
+    if (!(row && bridge)) {
+      throw new Error("Missing created fixture");
+    }
+    if (change === "wrong-id") {
+      row.networks = { [CUSTOM]: { NetworkID: "f".repeat(64), Aliases: null } };
+    }
+    if (change === "alias-drift") {
+      row.networks = { [CUSTOM]: { NetworkID: "", Aliases: ["unrequested"] } };
+    }
+    if (change === "running") {
+      row.state = "running";
+    }
+    if (change === "foreign-bridge") {
+      bridge.owner = "f".repeat(32);
+    }
+    const recovery: NativeComposeOwnershipOptions = {
+      ...selection,
+      recovery: "down",
+    };
+    if (change === "ingress") {
+      row.networks = {
+        [CUSTOM]: { NetworkID: "", Aliases: null },
+        "hack-dev": { NetworkID: "", Aliases: null },
+      };
+      await prepare(attempt);
+      await expectRefusal({
+        ...recovery,
+        expectedWorkloadNetworks: [
+          {
+            generationId: GENERATION,
+            service: "web",
+            networks: [
+              { name: CUSTOM, aliases: ["db-query"] },
+              { name: "hack-dev", aliases: [], externalId: "e".repeat(64) },
+            ],
+          },
+        ],
+      });
+    } else {
+      await prepare(attempt);
+      await expectRefusal(recovery);
+    }
+  }
+  expect(await Bun.file(join(root, "mutated")).exists()).toBe(false);
+});
+
+test("saved read observes a created unrealized endpoint without authorizing ordinary effects", async () => {
+  const { fixture, selection, container, network } = customOwned();
+  container.state = "created";
+  container.networks = {
+    [CUSTOM]: {
+      NetworkID: "",
+      Aliases: [`${PROJECT}-web-1`, "web", "db-query"],
+    },
+  };
+  network.containers = {};
+  await prepare(fixture);
+  expect(
+    (await observeSavedNativeComposeOwned(selection)).containers[0]
+  ).toMatchObject({
+    id: ID,
+    state: "created",
+  });
+  await expectRefusal(selection);
+  expect(await Bun.file(join(root, "mutated")).exists()).toBe(false);
+});
+
+function interruptedReplacement(): Fixture {
+  const fixture = owned();
+  const predecessor = fixture.container?.[0];
+  if (!predecessor) {
+    throw new Error("Missing replacement predecessor");
+  }
+  fixture.container?.push({
+    ...structuredClone(predecessor),
+    id: "e".repeat(64),
+    name: `/${ID.slice(0, 12)}_${PROJECT}-web-1`,
+    generation: PENDING,
+    state: "created",
+    health: null,
+    networks: {
+      [`${PROJECT}_default`]: {
+        NetworkID: "",
+        Aliases: [`${PROJECT}-web-1`, "web"],
+      },
+    },
+  });
+  return fixture;
+}
+
+test("interrupted replacement observes and recovers only a verified predecessor's temporary name", async () => {
+  await prepare(interruptedReplacement());
+  const observed = await observeSavedNativeComposeOwned(options);
+  expect(observed.containers).toHaveLength(2);
+  expect(
+    observed.containers.find((row) => row.generationId === PENDING)
+  ).toMatchObject({
+    state: "created",
+    name: `${ID.slice(0, 12)}_${PROJECT}-web-1`,
+  });
+  await expectRefusal(options);
+  expect(
+    (await assertNativeComposeOwned({ ...options, recovery: "down" }))
+      .containers
+  ).toHaveLength(2);
+  expect(await Bun.file(join(root, "mutated")).exists()).toBe(false);
+});
+
+test.each([
+  "unknown-prefix",
+  "missing-predecessor",
+  "same-generation",
+  "other-service",
+  "oneoff",
+  "running",
+  "alias-drift",
+])("interrupted replacement refuses %s", async (change) => {
+  const fixture = interruptedReplacement();
+  const current = fixture.container?.[0];
+  const pending = fixture.container?.[1];
+  if (!(current && pending)) {
+    throw new Error("Missing replacement fixture");
+  }
+  if (change === "unknown-prefix") {
+    pending.name = `/${"f".repeat(12)}_${PROJECT}-web-1`;
+  } else if (change === "missing-predecessor") {
+    fixture.container = [pending];
+    const network = fixture.network?.[0];
+    if (!network) {
+      throw new Error("Missing replacement network");
+    }
+    network.containers = {};
+  } else if (change === "same-generation") {
+    pending.generation = GENERATION;
+  } else if (change === "other-service") {
+    current.service = "install";
+  } else if (change === "oneoff") {
+    pending.oneoff = "True";
+  } else if (change === "running") {
+    pending.state = "running";
+  } else {
+    pending.networks = {
+      [`${PROJECT}_default`]: { NetworkID: "", Aliases: ["unknown", "web"] },
+    };
+  }
+  await prepare(fixture);
+  await expect(observeSavedNativeComposeOwned(options)).rejects.toBeInstanceOf(
+    NativeComposeOwnershipError
+  );
+  await expectRefusal({ ...options, recovery: "down" });
+});
+
+test("empty created aliases retain owned renamed-container observation without authorizing effects", async () => {
+  const fixture = interruptedReplacement();
+  const pending = fixture.container?.[1];
+  if (!pending) {
+    throw new Error("Missing replacement fixture");
+  }
+  pending.name = "/unknown-owned-created-name";
+  pending.networks = {
+    [`${PROJECT}_default`]: { NetworkID: "", Aliases: null },
+  };
+  await prepare(fixture);
+  expect(
+    (await observeSavedNativeComposeOwned(options)).containers
+  ).toHaveLength(2);
+  expect(
+    (await assertNativeComposeOwned({ ...options, recovery: "down" }))
+      .containers
+  ).toHaveLength(2);
+  await expectRefusal(options);
+});
+
+test.each([
+  "running",
+  "paused",
+  "restarting",
+  "exited",
+  "missing-bridge",
+  "foreign-bridge",
+  "foreign-member",
+  "created-member",
+  "wrong-id",
+  "alias-drift",
+  "foreign-key",
+  "endpoint-drift",
+  "recovery-option",
+])("saved created observation refuses %s", async (change) => {
+  const { fixture, selection, container, network } = customOwned();
+  container.state = "created";
+  container.networks = { [CUSTOM]: { NetworkID: "", Aliases: null } };
+  network.containers = {};
+  if (["running", "paused", "restarting", "exited"].includes(change)) {
+    container.state = change;
+  } else if (change === "missing-bridge") {
+    fixture.network = [];
+  } else if (change === "foreign-bridge") {
+    network.owner = "f".repeat(32);
+  } else if (change === "foreign-member" || change === "created-member") {
+    network.containers = {
+      [change === "created-member" ? ID : "f".repeat(64)]: {},
+    };
+  } else if (change === "wrong-id") {
+    container.networks = {
+      [CUSTOM]: { NetworkID: "f".repeat(64), Aliases: null },
+    };
+  } else if (change === "alias-drift") {
+    container.networks = {
+      [CUSTOM]: { NetworkID: "", Aliases: ["unrequested"] },
+    };
+  } else if (change === "foreign-key") {
+    container.networks = { foreign: { NetworkID: "", Aliases: null } };
+  } else if (change === "endpoint-drift") {
+    fixture.mode = change;
+  }
+  await prepare(fixture);
+  await expect(
+    observeSavedNativeComposeOwned({
+      ...selection,
+      ...(change === "recovery-option" ? { recovery: "down" as const } : {}),
+    })
+  ).rejects.toBeInstanceOf(NativeComposeOwnershipError);
+  expect(await Bun.file(join(root, "mutated")).exists()).toBe(false);
+});
+
+test("active topology changes retain every old physical policy; verified stop permits replacement while recovery keeps known union", async () => {
+  const old = { name: CUSTOM, driver: "bridge" as const, internal: true };
+  const added = {
+    name: `${PROJECT}_default`,
+    driver: "bridge" as const,
+    internal: false,
+  };
+  expect(
+    mergeNativeComposeNetworkPolicies({
+      proposed: [old, added],
+      retained: [[old]],
+    })
+  ).toEqual([old, added]);
+  for (const proposed of [[added], [{ ...old, internal: false }]]) {
+    expect(() =>
+      mergeNativeComposeNetworkPolicies({ proposed, retained: [[old]] })
+    ).toThrow("Run hack down");
+  }
+  expect(
+    mergeNativeComposeNetworkPolicies({ proposed: [added], retained: [] })
+  ).toEqual([added]);
+  expect(
+    mergeNativeComposeNetworkPolicies({
+      proposed: [added],
+      retained: [[old]],
+      retiring: true,
+    })
+  ).toEqual([added, old]);
+  expect(() =>
+    mergeNativeComposeNetworkPolicies({
+      proposed: [{ ...old, internal: false }],
+      retained: [[old]],
+      retiring: true,
+    })
+  ).toThrow("Run hack down");
   expect(await Bun.file(join(root, "commands")).exists()).toBe(false);
 });

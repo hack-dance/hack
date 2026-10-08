@@ -6,6 +6,7 @@ import {
   type NativeComposeIngressBinding,
   observeNativeComposeIngress,
 } from "./native-compose-ingress.ts";
+import { readNativeComposeNetworkTopology } from "./native-compose-network-topology.ts";
 import {
   assertNativeComposeProxyAccess,
   assertNativeComposeProxyRoutes,
@@ -310,18 +311,120 @@ function assertServiceRoutes(
   );
   if (
     Object.keys(actual).sort().join() !== Object.keys(expected).sort().join() ||
-    Object.entries(expected).some(([key, value]) => actual[key] !== value) ||
-    (selected.length > 0 &&
-      JSON.stringify(service.networks) !== '["default","ingress"]')
+    Object.entries(expected).some(([key, value]) => actual[key] !== value)
   ) {
     return refused();
+  }
+}
+
+function routeDocumentIdentity(opts: {
+  readonly document: Document;
+  readonly selected: readonly NativeComposeOwnedRoute[];
+  readonly generationId: string;
+  readonly owner?: Owner;
+}) {
+  const { document, generationId } = opts;
+  const first = opts.selected[0];
+  if (
+    !(
+      first &&
+      TOKEN.test(generationId) &&
+      Object.hasOwn(document, "name") &&
+      typeof document.name === "string" &&
+      NAME.test(document.name) &&
+      isRecord(document.services) &&
+      Object.hasOwn(document.services, first.service)
+    )
+  ) {
+    return refused();
+  }
+  const firstService = document.services[first.service];
+  if (!(isRecord(firstService) && isRecord(firstService.labels))) {
+    return refused();
+  }
+  const ownerToken = firstService.labels["io.hack.native-config.owner"];
+  if (!(typeof ownerToken === "string" && TOKEN.test(ownerToken))) {
+    return refused();
+  }
+  const owner = { composeProject: document.name, ownerToken };
+  if (
+    opts.owner &&
+    (opts.owner.composeProject !== owner.composeProject ||
+      opts.owner.ownerToken !== owner.ownerToken)
+  ) {
+    return refused();
+  }
+  return { owner, services: document.services };
+}
+
+function assertRouteWorkloadIdentities(opts: {
+  readonly services: Readonly<Record<string, unknown>>;
+  readonly owner: Owner;
+  readonly generationId: string;
+  readonly routed: ReadonlySet<string>;
+}) {
+  const expected = {
+    "io.hack.native-config.version": "1",
+    "io.hack.native-config.instance": opts.owner.composeProject,
+    "io.hack.native-config.owner": opts.owner.ownerToken,
+    "io.hack.native-config.generation": opts.generationId,
+  };
+  for (const [name, service] of Object.entries(opts.services)) {
+    if (!(isRecord(service) && isRecord(service.labels))) {
+      return refused();
+    }
+    const labels = service.labels;
+    const workload = labels["io.hack.native-config.workload"];
+    if (
+      Object.entries(expected).some(
+        ([key, value]) => !Object.hasOwn(labels, key) || labels[key] !== value
+      ) ||
+      !Object.hasOwn(labels, "io.hack.native-config.workload") ||
+      (opts.routed.has(name)
+        ? workload !== "service"
+        : workload !== "service" && workload !== "job")
+    ) {
+      return refused();
+    }
+  }
+}
+
+/** The generation owner authenticates the private artifact; its parser owns topology. */
+function assertRouteTopology(opts: {
+  readonly document: Document;
+  readonly selected: readonly NativeComposeOwnedRoute[];
+  readonly generationId: string;
+  readonly owner?: Owner;
+}) {
+  if (opts.selected.length === 0) {
+    return;
+  }
+  const { document, generationId } = opts;
+  const routed = new Set(opts.selected.map((route) => route.service));
+  const { owner, services } = routeDocumentIdentity(opts);
+  assertRouteWorkloadIdentities({ services, owner, generationId, routed });
+  const topology = readNativeComposeNetworkTopology(document, owner);
+  for (const workload of topology.workloads) {
+    const ingress = workload.networks.filter((network) => network.external);
+    if (
+      routed.has(workload.service)
+        ? ingress.length !== 1 ||
+          ingress[0]?.logicalName !== "ingress" ||
+          ingress[0]?.name !== DEFAULT_INGRESS_NETWORK ||
+          !workload.networks.some((network) => !network.external)
+        : ingress.length !== 0
+    ) {
+      return refused();
+    }
   }
 }
 
 /** Saved proof targets must describe the actual immutable Compose site labels. */
 function assertRouteDocument(
   document: Document,
-  selected: readonly NativeComposeOwnedRoute[]
+  selected: readonly NativeComposeOwnedRoute[],
+  generationId: string,
+  owner?: Owner
 ) {
   if (!isRecord(document.services)) {
     return refused();
@@ -346,6 +449,7 @@ function assertRouteDocument(
   for (const [name, service] of Object.entries(document.services)) {
     assertServiceRoutes(service, grouped.get(name) ?? []);
   }
+  assertRouteTopology({ document, selected, generationId, owner });
   if (
     selected.length > 0 &&
     !(
@@ -362,12 +466,12 @@ function assertRouteDocument(
 
 /** Parse only private saved metadata; this never observes ingress or authored inputs. */
 export function readNativeComposeRouteMetadata(
-  opts: NativeComposeSavedRouteDocument
+  opts: NativeComposeSavedRouteDocument & { readonly owner?: Owner }
 ): NativeComposeRouteMetadata | null {
   try {
     const value = opts.document[EXTENSION];
     if (value === undefined) {
-      assertRouteDocument(opts.document, []);
+      assertRouteDocument(opts.document, [], opts.generationId, opts.owner);
       return null;
     }
     if (
@@ -434,7 +538,7 @@ export function readNativeComposeRouteMetadata(
     ) {
       return refused();
     }
-    assertRouteDocument(opts.document, selected);
+    assertRouteDocument(opts.document, selected, opts.generationId, opts.owner);
     return Object.freeze({
       version: 1,
       binding: binding(value.binding),
@@ -506,6 +610,7 @@ export async function prepareNativeComposeSavedRunRouting(input: {
   const metadata = readNativeComposeRouteMetadata({
     generationId: input.generationId,
     document: frozenDocument(input.document),
+    owner,
   });
   if (!metadata) {
     return null;
@@ -594,7 +699,9 @@ export async function prepareNativeComposeRouteOwner(input: {
     declared: opts.declared,
   });
   const saved = opts.previous
-    .map(readNativeComposeRouteMetadata)
+    .map((value) =>
+      readNativeComposeRouteMetadata({ ...value, owner: opts.owner })
+    )
     .filter((value): value is NativeComposeRouteMetadata => value !== null);
   if (!planned && saved.length === 0) {
     return null;
@@ -641,7 +748,7 @@ export async function prepareNativeComposeRouteOwner(input: {
           });
         })
     : [];
-  assertRouteDocument(opts.document, selected);
+  assertRouteDocument(opts.document, selected, opts.generationId, opts.owner);
   const hostnames = [
     ...new Set([
       ...activeHostnames(selected),
@@ -803,7 +910,9 @@ async function savedRouteOperation(
   });
   const io = Object.freeze({ ...(input.io ?? defaultIO) });
   const saved = opts.saved
-    .map(readNativeComposeRouteMetadata)
+    .map((value) =>
+      readNativeComposeRouteMetadata({ ...value, owner: opts.owner })
+    )
     .filter((value): value is NativeComposeRouteMetadata => value !== null);
   const byBinding = new Map<string, NativeComposeRouteMetadata[]>();
   for (const value of saved) {

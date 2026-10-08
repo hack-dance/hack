@@ -93,7 +93,7 @@ export async function fixture(
     `#!${process.execPath}
 import {createHash} from "node:crypto";
 await import("node:fs/promises").then(m=>m.appendFile("compiler-requests",process.argv[2]+"\\n"));
-if(process.argv[2]==="--protocol") console.log(${JSON.stringify(JSON.stringify(PROTOCOL))});
+if(process.argv[2]==="--protocol") console.log(JSON.stringify({...${JSON.stringify(PROTOCOL)},...((await Bun.file("restart-transient").exists()||await Bun.file("restart-finalization-gap").exists())?{process_plan_version:1}:{})}));
 else {
  const operation=process.argv[2];const raw=await Bun.stdin.text();const request=operation==="compile"?{}:JSON.parse(raw);
  const text=operation==="compile"?raw:request.project;const source=JSON.parse(text);
@@ -134,11 +134,20 @@ if(args[1]==="ls") {
  if(args[0]==="container" && await Bun.file(engine).exists()) {
   const doc=await Bun.file(engine).json();console.log(JSON.stringify({id:"c".repeat(64),name:doc.name+"-web-1",project:doc.name}));
  }
+ if(args[0]==="network" && await Bun.file(engine).exists()) {
+  const doc=await Bun.file(engine).json();console.log(JSON.stringify({id:"d".repeat(64),name:doc.name+"_default",project:doc.name}));
+ }
  process.exit(0);
 }
 if(args[0]==="container" && args[1]==="inspect" && await Bun.file(engine).exists()) {
  const doc=await Bun.file(engine).json();const labels=doc.services.web.labels;
- console.log(JSON.stringify({id:"c".repeat(64),name:"/"+doc.name+"-web-1",project:doc.name,version:"1",instance:doc.name,owner:labels["io.hack.native-config.owner"],generation:labels["io.hack.native-config.generation"],service:"web",oneoff:"False",state:await Bun.file(root+"/unready").exists()?"exited":"running",exitCode:0,health:null}));process.exit(0);
+ const transitional=await Bun.file(root+"/restart-transient").exists();const finalGap=await Bun.file(root+"/restart-finalization-gap").exists();const counter=root+"/restart-container-inspects";const count=(transitional||finalGap)&&await Bun.file(counter).exists()?Number(await Bun.file(counter).text()):0;if(transitional||finalGap)await Bun.write(counter,String(count+1));
+ console.log(JSON.stringify({id:"c".repeat(64),name:"/"+doc.name+"-web-1",project:doc.name,version:"1",instance:doc.name,owner:labels["io.hack.native-config.owner"],generation:labels["io.hack.native-config.generation"],service:"web",oneoff:"False",state:await Bun.file(root+"/unready").exists()?"exited":transitional&&count<2||finalGap&&count>=2?"restarting":"running",exitCode:0,health:null,networks:{[doc.name+"_default"]:{NetworkID:"d".repeat(64),Aliases:[doc.name+"-web-1","web"]}}}));process.exit(0);
+}
+if(args[0]==="network" && args[1]==="inspect" && await Bun.file(engine).exists()) {
+ const doc=await Bun.file(engine).json();const labels=doc.networks.default.labels;
+ const transitional=await Bun.file(root+"/restart-transient").exists();const finalGap=await Bun.file(root+"/restart-finalization-gap").exists();const counter=root+"/restart-network-inspects";const count=(transitional||finalGap)&&await Bun.file(counter).exists()?Number(await Bun.file(counter).text()):0;if(transitional||finalGap)await Bun.write(counter,String(count+1));
+ console.log(JSON.stringify({id:"d".repeat(64),name:doc.name+"_default",project:doc.name,version:"1",instance:doc.name,owner:labels["io.hack.native-config.owner"],driver:"bridge",internal:false,containers:transitional&&count<2||finalGap&&count>=2?{}:{["c".repeat(64)]:{}}}));process.exit(0);
 }
 process.exit(99);
 `
@@ -150,7 +159,8 @@ process.exit(99);
 
 export async function invoke(
   root: string,
-  args = ["up", "--detach", "--json"]
+  args = ["up", "--detach", "--json"],
+  startupTimeoutMs = 1000
 ) {
   const child = Bun.spawn(
     [
@@ -171,7 +181,7 @@ export async function invoke(
         HACK_CONFIG_COMPILER_BINARY: join(root, "compiler"),
         HACK_RUNTIME_BACKEND: "compose",
         HACK_LOGGER: "console",
-        HACK_COMPOSE_STARTUP_TIMEOUT_MS: "1000",
+        HACK_COMPOSE_STARTUP_TIMEOUT_MS: String(startupTimeoutMs),
         CI: "1",
         HACK_EXECUTION_MODE: "non_interactive",
       },

@@ -5,11 +5,20 @@ import {
   NATIVE_COMPOSE_FILE_BYTES_LIMIT,
 } from "./native-compose-file-bytes.ts";
 import {
+  type NativeComposeFileMode,
+  nativeComposeFileMode,
+  nativeComposeFileModeBits,
+} from "./native-compose-file-permissions.ts";
+import {
   type HeldDirectory,
   holdDirectory,
   recheckDirectories,
 } from "./native-compose-private-state.ts";
-import { freezeImportValue } from "./native-config-import-plan.ts";
+import type { RetainedFilePermissionPolicy } from "./native-config-import-files.ts";
+import {
+  freezeImportValue,
+  legacyNativeRetainedFilePolicies,
+} from "./native-config-import-plan.ts";
 
 const NAME = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const ID = /^[a-f0-9]{64}$/;
@@ -48,16 +57,21 @@ type GuestFact = {
   readonly ino: number;
   readonly uid: number;
   readonly gid: number;
-  readonly mode: "0444";
+  readonly mode: NativeComposeFileMode;
   readonly size: number;
   readonly digest: string;
 };
 /** Private material digests and identities. Never serialize this proof into a public report. */
 export type LegacyComposeRetainedFileProof = {
-  readonly file_proof_version: 1;
   readonly sources: readonly SourceFact[];
   readonly guests: readonly GuestFact[];
-};
+} & (
+  | { readonly file_proof_version: 1 }
+  | {
+      readonly file_proof_version: 2;
+      readonly policies: readonly RetainedFilePermissionPolicy[];
+    }
+);
 export class LegacyComposeRetainedFileError extends Error {
   constructor() {
     super(
@@ -220,6 +234,7 @@ type GrantContext = {
   readonly storage: Record<string, unknown>;
   readonly definitions: Readonly<Record<Kind, Record<string, unknown>>>;
   readonly grants: LegacyComposeRetainedFileGrant[];
+  readonly policies?: readonly RetainedFilePermissionPolicy[];
 };
 function validateRetainedStorage(storage: Record<string, unknown>): void {
   for (const [logical, raw] of Object.entries(storage)) {
@@ -259,19 +274,28 @@ function appendRetainedMount(
   }
   const kind = Object.hasOwn(mount, "config") ? "config" : "secret";
   keys(mount, [kind, "target", "access", "mode"]);
-  // A protected 0400/0600 original secret cannot also be an unchanged 0444 target.
-  // The broader canonical permission contract must be earned separately.
-  if (kind === "secret") {
-    refuse();
-  }
   const logical = mount[kind];
+  const mode = nativeComposeFileMode(mount.mode);
   if (
     typeof logical !== "string" ||
     !Object.hasOwn(opts.definitions[kind], logical) ||
     mount.access !== "read-only" ||
-    mount.mode !== "0444"
+    !mode ||
+    (kind === "config" && mode !== "0444")
   ) {
     refuse();
+  }
+  if (kind === "secret") {
+    const policy = opts.policies?.find(
+      (entry) =>
+        entry.service === opts.service &&
+        entry.kind === kind &&
+        entry.name === logical &&
+        entry.target === mount.target
+    );
+    if (!policy || mode !== (policy.declaredMode ?? "0444")) {
+      refuse();
+    }
   }
   const declaration = record(opts.definitions[kind][logical]);
   if (!relative(declaration.file)) {
@@ -343,7 +367,14 @@ export function legacyComposeRetainedFileGrants(
   validateRetainedStorage(storage);
   const grants: LegacyComposeRetainedFileGrant[] = [];
   for (const [service, raw] of Object.entries(services)) {
-    appendRetainedWorkload({ service, raw, storage, definitions, grants });
+    appendRetainedWorkload({
+      service,
+      raw,
+      storage,
+      definitions,
+      grants,
+      policies: legacyNativeRetainedFilePolicies(candidate),
+    });
   }
   if (grants.length === 0) {
     refuse();
@@ -414,7 +445,7 @@ function parseSource(value: unknown): SourceFact {
     digest: item.digest,
   };
 }
-function parseGuest(value: unknown): GuestFact {
+function parseGuest(value: unknown, version: 1 | 2): GuestFact {
   const item = record(value);
   keys(item, [
     "service",
@@ -437,7 +468,8 @@ function parseGuest(value: unknown): GuestFact {
     !identityNumber(item.ino, true) ||
     !identityNumber(item.uid) ||
     !identityNumber(item.gid) ||
-    item.mode !== "0444" ||
+    !nativeComposeFileMode(item.mode) ||
+    (version === 1 && item.mode !== "0444") ||
     !identityNumber(item.size) ||
     item.size > NATIVE_COMPOSE_FILE_BYTES_LIMIT ||
     typeof item.digest !== "string" ||
@@ -454,10 +486,80 @@ function parseGuest(value: unknown): GuestFact {
     ino: item.ino,
     uid: item.uid,
     gid: item.gid,
-    mode: item.mode,
+    mode: nativeComposeFileMode(item.mode) ?? refuse(),
     size: item.size,
     digest: item.digest,
   };
+}
+function parsePolicy(value: unknown): RetainedFilePermissionPolicy {
+  const item = record(value);
+  keys(item, ["service", "kind", "name", "target", "declaredMode"]);
+  if (
+    typeof item.service !== "string" ||
+    typeof item.name !== "string" ||
+    (item.kind !== "config" && item.kind !== "secret") ||
+    !target(item.target) ||
+    (item.declaredMode !== null && !nativeComposeFileMode(item.declaredMode))
+  ) {
+    refuse();
+  }
+  name(item.service);
+  name(item.name);
+  return {
+    service: item.service,
+    kind: item.kind,
+    name: item.name,
+    target: item.target,
+    declaredMode:
+      item.declaredMode === null
+        ? null
+        : (nativeComposeFileMode(item.declaredMode) ?? refuse()),
+  };
+}
+function effectiveMode(opts: {
+  readonly candidate: unknown;
+  readonly grant: LegacyComposeRetainedFileGrant;
+  readonly source: SourceFact;
+}): NativeComposeFileMode {
+  if (opts.grant.kind === "config") {
+    return "0444";
+  }
+  const policy = legacyNativeRetainedFilePolicies(opts.candidate)?.find(
+    (entry) =>
+      entry.service === opts.grant.service &&
+      entry.target === opts.grant.target &&
+      entry.kind === "secret" &&
+      entry.name === opts.grant.name
+  );
+  const mode = new Map<number, NativeComposeFileMode>([
+    [0o400, "0400"],
+    [0o600, "0600"],
+  ]).get(opts.source.mode);
+  if (
+    !(policy && mode) ||
+    (policy.declaredMode !== null && policy.declaredMode !== mode)
+  ) {
+    refuse();
+  }
+  return mode;
+}
+
+function assertProofSources(opts: {
+  readonly sources: readonly SourceFact[];
+  readonly grants: ReadonlyMap<string, LegacyComposeRetainedFileGrant>;
+}) {
+  for (const source of opts.sources) {
+    const grant = opts.grants.get(sourceKey(source));
+    if (
+      grant?.file !== source.file ||
+      source.uid !== process.getuid?.() ||
+      (source.kind === "secret"
+        ? ![0o400, 0o600].includes(source.mode)
+        : (source.mode & 0o022) !== 0)
+    ) {
+      refuse();
+    }
+  }
 }
 /** Saved proof parsing binds every private claim to the actual converted source and exact original container. */
 export function readLegacyComposeRetainedFileProof(opts: {
@@ -471,12 +573,31 @@ export function readLegacyComposeRetainedFileProof(opts: {
   const grants = legacyComposeRetainedFileGrants(opts.candidate);
   const originals = containers(opts.containers);
   const value = record(opts.proof);
-  keys(value, ["file_proof_version", "sources", "guests"]);
-  if (value.file_proof_version !== 1) {
+  if (value.file_proof_version !== 1 && value.file_proof_version !== 2) {
+    refuse();
+  }
+  const version = value.file_proof_version;
+  keys(
+    value,
+    version === 1
+      ? ["file_proof_version", "sources", "guests"]
+      : ["file_proof_version", "sources", "guests", "policies"]
+  );
+  const protectedGrants = grants.some((grant) => grant.kind === "secret");
+  if ((version === 2) !== protectedGrants) {
+    refuse();
+  }
+  const policies =
+    version === 2 ? array(value.policies).map(parsePolicy) : undefined;
+  if (
+    policies &&
+    JSON.stringify(policies) !==
+      JSON.stringify(legacyNativeRetainedFilePolicies(opts.candidate))
+  ) {
     refuse();
   }
   const sources = array(value.sources).map(parseSource);
-  const guests = array(value.guests).map(parseGuest);
+  const guests = array(value.guests).map((entry) => parseGuest(entry, version));
   const unique = new Map(grants.map((grant) => [sourceKey(grant), grant]));
   if (
     sources.length !== unique.size ||
@@ -486,18 +607,7 @@ export function readLegacyComposeRetainedFileProof(opts: {
   ) {
     refuse();
   }
-  for (const source of sources) {
-    const grant = unique.get(sourceKey(source));
-    if (
-      grant?.file !== source.file ||
-      source.uid !== process.getuid?.() ||
-      (source.kind === "secret"
-        ? ![0o400, 0o600].includes(source.mode)
-        : (source.mode & 0o022) !== 0)
-    ) {
-      refuse();
-    }
-  }
+  assertProofSources({ sources, grants: unique });
   for (const grant of grants) {
     const source = sources.find(
       (entry) => sourceKey(entry) === sourceKey(grant)
@@ -511,14 +621,66 @@ export function readLegacyComposeRetainedFileProof(opts: {
       matches.length !== 1 ||
       guest.container !== matches[0]?.id ||
       guest.size !== source.size ||
-      guest.digest !== source.digest
+      guest.digest !== source.digest ||
+      guest.mode !== effectiveMode({ candidate: opts.candidate, grant, source })
     ) {
       refuse();
     }
   }
   sources.sort((a, b) => sourceKey(a).localeCompare(sourceKey(b)));
   guests.sort((a, b) => guestKey(a).localeCompare(guestKey(b)));
-  const result = { file_proof_version: 1 as const, sources, guests };
+  const result: LegacyComposeRetainedFileProof =
+    version === 1
+      ? { file_proof_version: 1, sources, guests }
+      : {
+          file_proof_version: 2,
+          sources,
+          guests,
+          policies: policies ?? refuse(),
+        };
+  freezeImportValue(result);
+  return result;
+}
+/** Normalize only an issued raw candidate through its closed original permission proof. No material lookup or owner remapping. */
+export function normalizeLegacyComposeRetainedFileCandidate(opts: {
+  readonly candidate: unknown;
+  readonly proof: unknown;
+  readonly containers: readonly {
+    readonly id: string;
+    readonly service: string;
+  }[];
+}): Readonly<Record<string, unknown>> {
+  const proof = readLegacyComposeRetainedFileProof(opts);
+  const candidate = record(opts.candidate);
+  if (proof.file_proof_version === 1) {
+    return candidate;
+  }
+  if (!legacyNativeRetainedFilePolicies(candidate)) {
+    refuse();
+  }
+  const services = Object.fromEntries(
+    Object.entries(record(candidate.services)).map(([service, raw]) => {
+      const workload = record(raw);
+      if (!Object.hasOwn(workload, "mounts")) {
+        return [service, workload];
+      }
+      const mounts = array(workload.mounts).map((rawMount) => {
+        const mount = record(rawMount);
+        if (!Object.hasOwn(mount, "secret")) {
+          return mount;
+        }
+        const guest = proof.guests.find(
+          (entry) => entry.service === service && entry.target === mount.target
+        );
+        if (!guest) {
+          refuse();
+        }
+        return { ...mount, mode: guest.mode };
+      });
+      return [service, { ...workload, mounts }];
+    })
+  );
+  const result = { ...candidate, services };
   freezeImportValue(result);
   return result;
 }
@@ -561,7 +723,7 @@ export async function observeLegacyComposeRetainedFileSources(opts: {
       try {
         await held.assertFresh();
         const info = held.info;
-        facts.push({
+        const fact: SourceFact = {
           kind: grant.kind,
           name: grant.name,
           file: grant.file,
@@ -574,7 +736,17 @@ export async function observeLegacyComposeRetainedFileSources(opts: {
           mtimeMs: info.mtimeMs,
           ctimeMs: info.ctimeMs,
           digest: held.anchor.digest,
-        });
+        };
+        for (const request of grants.filter(
+          (entry) => sourceKey(entry) === sourceKey(grant)
+        )) {
+          effectiveMode({
+            candidate: opts.candidate,
+            grant: request,
+            source: fact,
+          });
+        }
+        facts.push(fact);
         remaining -= info.size;
         await recheckDirectories(directories);
         await held.assertFresh();
@@ -593,13 +765,17 @@ export async function observeLegacyComposeRetainedFileSources(opts: {
   }
 }
 
-function parseGuestStat(raw: string, sourceSize: number) {
+function parseGuestStat(
+  raw: string,
+  sourceSize: number,
+  requiredMode: NativeComposeFileMode
+) {
   const parts = raw.replace(TRAILING_NEWLINE, "").split(":");
   if (
     parts.length !== 7 ||
     parts.slice(0, 5).some((part) => !DECIMAL.test(part)) ||
     !HEX.test(parts[5] ?? "") ||
-    parts[6] !== "444"
+    parts[6] !== requiredMode.slice(1)
   ) {
     refuse();
   }
@@ -613,7 +789,9 @@ function parseGuestStat(raw: string, sourceSize: number) {
       identityNumber(size)
     ) ||
     size !== sourceSize ||
-    (Number.parseInt(parts[5] ?? "", 16) & 0xf0_00) !== 0x80_00
+    (Number.parseInt(parts[5] ?? "", 16) & 0xf0_00) !== 0x80_00 ||
+    (Number.parseInt(parts[5] ?? "", 16) & 0o777) !==
+      nativeComposeFileModeBits(requiredMode)
   ) {
     refuse();
   }
@@ -624,6 +802,7 @@ async function observeRunningGuest(opts: {
   readonly container: { readonly id: string };
   readonly source: SourceFact;
   readonly probe: (args: readonly string[]) => Promise<string>;
+  readonly mode: NativeComposeFileMode;
 }): Promise<GuestFact> {
   const { grant, container, source, probe } = opts;
   const raw = await probe([
@@ -635,7 +814,11 @@ async function observeRunningGuest(opts: {
     "--",
     grant.target,
   ]);
-  const { dev, ino, uid, gid, size } = parseGuestStat(raw, source.size);
+  const { dev, ino, uid, gid, size } = parseGuestStat(
+    raw,
+    source.size,
+    opts.mode
+  );
   const digest = await probe([
     "exec",
     container.id,
@@ -666,7 +849,7 @@ async function observeRunningGuest(opts: {
     ino,
     uid,
     gid,
-    mode: "0444",
+    mode: opts.mode,
     size,
     digest: source.digest,
   };
@@ -726,7 +909,13 @@ export async function observeLegacyComposeRetainedFileGuests(opts: {
       continue;
     }
     guests.push(
-      await observeRunningGuest({ grant, container, source, probe: opts.probe })
+      await observeRunningGuest({
+        grant,
+        container,
+        source,
+        probe: opts.probe,
+        mode: effectiveMode({ candidate: opts.candidate, grant, source }),
+      })
     );
   }
   guests.sort((a, b) => guestKey(a).localeCompare(guestKey(b)));
@@ -776,7 +965,17 @@ export async function observeLegacyComposeRetainedFileProof(opts: {
     refuse();
   }
   return readLegacyComposeRetainedFileProof({
-    proof: { file_proof_version: 1, sources, guests },
+    proof: legacyComposeRetainedFileGrants(opts.candidate).some(
+      (grant) => grant.kind === "secret"
+    )
+      ? {
+          file_proof_version: 2,
+          sources,
+          guests,
+          policies:
+            legacyNativeRetainedFilePolicies(opts.candidate) ?? refuse(),
+        }
+      : { file_proof_version: 1, sources, guests },
     candidate: opts.candidate,
     containers: opts.containers,
   });

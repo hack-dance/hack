@@ -4,6 +4,7 @@ import {
   legacyComposeAdoptionCandidateSupported,
   legacyComposeAdoptionLayoutSupported,
 } from "./native-compose-adoption-contract.ts";
+import { normalizeLegacyComposeRetainedFileCandidate } from "./native-compose-adoption-files.ts";
 import { legacyAdoptionLocalRefusalFields } from "./native-compose-adoption-local.ts";
 import {
   inspectLegacyComposeContainerStates,
@@ -49,7 +50,13 @@ export async function previewLegacyComposeAdoption(input: {
       ...mapped.report.fields,
       ...(acquired.projection?.localFields ?? []),
     ];
-    const candidate = acquired.projection?.candidate ?? mapped.candidate;
+    const candidate = acquired.fileProof
+      ? normalizeLegacyComposeRetainedFileCandidate({
+          candidate: mapped.candidate,
+          proof: acquired.fileProof,
+          containers: acquired.binding.containers,
+        })
+      : (acquired.projection?.candidate ?? mapped.candidate);
     if (!candidate) {
       return report({
         complete: false,

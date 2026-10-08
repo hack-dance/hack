@@ -5,6 +5,7 @@ import {
   type LegacyComposeRetainedFileProof,
   legacyComposeRetainedFileGrants,
   observeLegacyComposeRetainedFileProof,
+  observeLegacyComposeRetainedFileSources,
 } from "./native-compose-adoption-files.ts";
 import { retainLegacyAdoptionLocalRefusal } from "./native-compose-adoption-local.ts";
 import {
@@ -892,6 +893,13 @@ async function acquireBinding(
       }
     };
     await layoutSupported(signal);
+    const initialFileSources = files
+      ? await observeLegacyComposeRetainedFileSources({
+          projectRoot: root,
+          candidate,
+          signal,
+        })
+      : undefined;
     const baseline = await inspectLegacyResources({
       root,
       intent,
@@ -920,6 +928,12 @@ async function acquireBinding(
           probe: createNativeComposeProbe({ signal, timeoutMs }),
         })
       : undefined;
+    if (
+      fileProof &&
+      JSON.stringify(fileProof.sources) !== JSON.stringify(initialFileSources)
+    ) {
+      refuse("E_LEGACY_COMPOSE_BINDING_CHANGED");
+    }
     freezeImportValue(baseline);
     const assertFresh = async (current: {
       readonly projectRoot: string;

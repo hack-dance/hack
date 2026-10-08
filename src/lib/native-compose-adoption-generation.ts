@@ -17,6 +17,7 @@ import {
 } from "./native-compose-adoption-contract.ts";
 import {
   type LegacyComposeRetainedFileProof,
+  normalizeLegacyComposeRetainedFileCandidate,
   observeLegacyComposeRetainedFileProof,
   readLegacyComposeRetainedFileProof,
 } from "./native-compose-adoption-files.ts";
@@ -413,14 +414,13 @@ type Context = {
     { readonly info: Stats; readonly text: string }
   >;
 };
-function savedRetainedFileProof(
-  meta: SavedManifest,
-  candidate: unknown
-): LegacyComposeRetainedFileProof {
+function savedRetainedFileContainers(
+  meta: SavedManifest
+): readonly { readonly id: string; readonly service: string }[] {
   if (!(isRecord(meta.binding) && Array.isArray(meta.binding.containers))) {
     refuse();
   }
-  const containers = meta.binding.containers.map((value: unknown) => {
+  return meta.binding.containers.map((value: unknown) => {
     if (
       !(
         isRecord(value) &&
@@ -434,10 +434,15 @@ function savedRetainedFileProof(
     }
     return { id: value.id, service: value.service };
   });
+}
+function savedRetainedFileProof(
+  meta: SavedManifest,
+  candidate: unknown
+): LegacyComposeRetainedFileProof {
   return readLegacyComposeRetainedFileProof({
     proof: meta.fileProof,
     candidate,
-    containers,
+    containers: savedRetainedFileContainers(meta),
   });
 }
 async function verifyRetainedFileMaterial(opts: {
@@ -625,19 +630,22 @@ async function readInputs(
     const projection = savedProjectionRequired(meta)
       ? await readSavedLegacyComposeAdoptionProjection(projectionOpts)
       : undefined;
-    if (
-      !(
-        mapped.candidate &&
-        planned.intent &&
-        candidateText ===
-          JSON.stringify(projection?.candidate ?? mapped.candidate)
-      )
-    ) {
+    if (!(mapped.candidate && planned.intent)) {
       refuse();
     }
     const fileProof = fileFamily
       ? savedRetainedFileProof(meta, mapped.candidate)
       : undefined;
+    const preparedCandidate = fileProof
+      ? normalizeLegacyComposeRetainedFileCandidate({
+          candidate: mapped.candidate,
+          proof: fileProof,
+          containers: savedRetainedFileContainers(meta),
+        })
+      : (projection?.candidate ?? mapped.candidate);
+    if (candidateText !== JSON.stringify(preparedCandidate)) {
+      refuse();
+    }
     const observed = fileFamily
       ? await inspectLegacyComposeRetainedFileResources({
           root: ctx.root,
@@ -844,9 +852,14 @@ async function prepare(
   if (!mapped.candidate) {
     refuse("E_LEGACY_ADOPTION_UNSUPPORTED");
   }
-  const candidateText = JSON.stringify(
-    acquired.projection?.candidate ?? mapped.candidate
-  );
+  const preparedCandidate = acquired.fileProof
+    ? normalizeLegacyComposeRetainedFileCandidate({
+        candidate: mapped.candidate,
+        proof: acquired.fileProof,
+        containers: acquired.binding.containers,
+      })
+    : (acquired.projection?.candidate ?? mapped.candidate);
+  const candidateText = JSON.stringify(preparedCandidate);
   const retainedPlan = legacyComposeRetainedPlan(JSON.parse(candidateText));
   if (retainedPlan.requiresV5 && acquired.binding.binding_version >= 3) {
     refuse("E_LEGACY_ADOPTION_UNSUPPORTED");

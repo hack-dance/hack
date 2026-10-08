@@ -7,6 +7,7 @@ import {
   readFile,
   realpath,
   rm,
+  stat,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -36,6 +37,7 @@ let fixture: {
   guestDelayMs?: number;
   stateReads?: number;
   flipAfterState?: number;
+  guestMode?: "400" | "600";
 };
 beforeEach(async () => {
   priorPath = process.env.PATH;
@@ -79,7 +81,7 @@ const [kind,action]=args;
 if(kind==='exec') {
   if(args[1]!==id || args.at(-1)!=='/settings') process.exit(91);
   if(value.guestDelayMs) {appendFileSync(root+'/guest-pids',String(process.pid)+'\\n');await Bun.sleep(value.guestDelayMs);}
-  if(args[2]==='stat' && args.length===7 && args[3]==='-c' && args[4]==='%d:%i:%u:%g:%s:%f:%a' && args[5]==='--') {console.log('7:'+value.guestIno+':'+value.uid+':321:'+value.size+':'+(0o100444).toString(16)+':444');process.exit(0);}
+  if(args[2]==='stat' && args.length===7 && args[3]==='-c' && args[4]==='%d:%i:%u:%g:%s:%f:%a' && args[5]==='--') {const mode=value.guestMode??'444';console.log('7:'+value.guestIno+':'+value.uid+':321:'+value.size+':'+(0o100000|Number.parseInt(mode,8)).toString(16)+':'+mode);process.exit(0);}
   if(args[2]==='sha256sum' && args.length===5 && args[3]==='--') {console.log(value.digest+'  /settings');process.exit(0);}
   process.exit(92);
 }
@@ -248,10 +250,16 @@ test("file8 earns explicit preparation, stopped publication, retained lifecycle 
   }
 }, 30_000);
 
-test("ordinary binding and unsupported secret grants refuse without acquiring material or engine", async () => {
+test("ordinary binding and unprotected original secret refuse without engine acquisition", async () => {
   await expect(
     acquireLegacyComposeAdoptionBinding({ projectRoot })
   ).rejects.toThrow();
+  expect(await commands().catch(() => [])).toEqual([]);
+  // File creation respects the caller's umask; establish the intended unsafe
+  // secret permission on this disposable test source before admission.
+  const material = join(projectRoot, "material/config");
+  await chmod(material, 0o444);
+  expect((await stat(material)).mode & 0o777).toBe(0o444);
   const source = await readFile(
     join(projectRoot, ".hack/docker-compose.yml"),
     "utf8"
@@ -268,6 +276,109 @@ test("ordinary binding and unsupported secret grants refuse without acquiring ma
     await store.close();
   }
 });
+test.each([
+  "400",
+  "600",
+] as const)("prepared file8 normalizes original protected secret %s with saved stop/recovery and rollback", async (mode) => {
+  const material = join(projectRoot, "material/config");
+  await chmod(material, Number.parseInt(mode, 8));
+  const before = await stat(material);
+  const authored = await readFile(
+    join(projectRoot, ".hack/docker-compose.yml"),
+    "utf8"
+  );
+  await writeFile(
+    join(projectRoot, ".hack/docker-compose.yml"),
+    authored
+      .replaceAll("configs", "secrets")
+      .replace(
+        "secrets: [settings]",
+        "secrets:\n      - source: settings\n        target: /settings"
+      )
+  );
+  fixture.guestMode = mode;
+  await save();
+  const { store, generation } = await prepared();
+  try {
+    expect(generation.report.adoption_generation_version).toBe(8);
+    await store.withLease({
+      generation,
+      run: async (input) => {
+        expect(
+          JSON.parse(input.candidateText).services.app.mounts
+        ).toContainEqual({
+          secret: "settings",
+          target: "/settings",
+          access: "read-only",
+          mode: `0${mode}`,
+        });
+        expect(JSON.stringify(input)).toBe("{}");
+      },
+    });
+    await store.withPreparationStop({
+      generation,
+      binary,
+      deadline: Date.now() + 15_000,
+      run: async (input) => {
+        await input.assertFresh();
+        return await effect("stop");
+      },
+    });
+    await store.publish({ generation, binary });
+    const active = await store.loadActive();
+    if (!active) {
+      throw new Error("active protected generation missing");
+    }
+    for (const operation of ["start", "restart", "stop"] as const) {
+      expect(
+        await store.withMutation({
+          generation: active,
+          operation,
+          services: [],
+          binary,
+          deadline: Date.now() + 15_000,
+          run: async (input) => {
+            await input.assertFresh();
+            return await effect(operation);
+          },
+        })
+      ).toBe(0);
+    }
+    const after = await stat(material);
+    expect([after.dev, after.ino, after.uid, after.gid, after.mode]).toEqual([
+      before.dev,
+      before.ino,
+      before.uid,
+      before.gid,
+      before.mode,
+    ]);
+    expect(await readFile(material, "utf8")).toBe(CANARY);
+    await rm(material);
+    expect(
+      await store.withLease({
+        generation: active,
+        material: "saved",
+        run: async () => "saved",
+      })
+    ).toBe("saved");
+    await expect(
+      store.withLease({ generation: active, run: async () => "exec" })
+    ).rejects.toThrow();
+    await store.withMutation({
+      generation: active,
+      operation: "stop",
+      services: [],
+      binary,
+      deadline: Date.now() + 15_000,
+      run: async () => await effect("stop"),
+    });
+    await store.rollback();
+    expect((await state()).publication.phase).toBe("rolled-back");
+    expect((await state()).pendingOperation).toBeNull();
+  } finally {
+    await store.close();
+  }
+}, 30_000);
 test.each([
   "foreign-source",
   "writable",

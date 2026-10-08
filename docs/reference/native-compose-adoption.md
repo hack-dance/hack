@@ -241,10 +241,11 @@ it does not independently terminate a caller-owned engine callback.
 
 ### Original file grants: private version 8
 
-The distinct retained-file preparation owner supports a first closed subset:
+The distinct retained-file preparation owner supports a closed subset:
 static image services, the original default bridge, already-bound local named
-volumes and explicit file-backed **config** grants with a verified read-only
-0444 target. The ordinary adoption baseline remains closed; pure import preview
+volumes and explicit file-backed config grants with a verified read-only `0444`
+target, plus protected original secret grants with verified `0400` or `0600`
+source and guest permissions. The ordinary adoption baseline remains closed; pure import preview
 alone never authorizes retained files. Builds, jobs, profiles, routes, custom
 networks, readiness/dependency intersections, managed/generated inputs and typed
 locals remain refused by this file family before material or engine acquisition.
@@ -256,8 +257,8 @@ require canonical owned directories and regular, single-link source files; no
 symlink, hardlink, path escape, source replacement or unsafe writable material is
 adopted. It never rewrites or chmods the original. Private source facts retain
 device/inode, owner, mode, size, timestamps and a content digest. Fixed original-ID
-guest `stat`/`sha256sum` queries must agree with the host content and target 0444
-policy; effective guest UID/GID and file identity are observed, not inferred as
+guest `stat`/`sha256sum` queries must agree with the host content and selected
+permission policy; effective guest UID/GID and file identity are observed, not inferred as
 root. Repeated observations fence drift, but do not atomically freeze the guest,
 host filesystem or Docker.
 
@@ -274,13 +275,24 @@ settle stopped originals even after a material source disappears; missing or
 changed material still refuses a new start or exec. Rollback restores only the
 exact held authored pair and never edits a material file or deletes retained data.
 
-This initial permission intersection deliberately refuses secret grants. Native
-secret sources currently require 0400/0600 while generated targets require 0444;
-an unchanged original bind cannot truthfully satisfy both. Ordinary 0400/0600
-retained secrets require a separately qualified canonical permission contract and
-context-aware mapping. Initial config support is not complete file/secret or NC04
-parity. Original mount/mode/material ownership, linked-checkout isolation, real
-retained lifecycle and recovery acceptance remain separate live gates.
+Private file proof version 1 preserves the config-only `0444` contract. Version 2
+adds protected original secret binds with exact `0400` or `0600` source and guest
+permissions. The strict retained-purpose mapper preserves whether a permission
+was omitted or explicitly declared. An omitted secret permission can normalize
+only to the verified original effective permission; an explicit permission must
+agree with that same source and guest. Explicit `0444` over a protected source
+refuses. Config grants remain `0444`, and pure import preview keeps its existing
+declarative defaults. The private candidate is normalized only after the original
+proof, then compiled. Saved reads derive the same candidate from the immutable
+proof and raw authored intent without material reads. Unknown proof versions,
+policy-presence swaps, changed source mode and changed guest UID/GID refuse.
+
+This source contract is not complete file/secret or NC04 parity. No original
+permission is changed, no guest owner is inferred, and UID/GID overrides remain
+refused. Original mount and material ownership, granted and ungranted reads,
+read-only write refusal, linked-checkout isolation, retained lifecycle, recovery
+and rollback remain required live gates. Mixed build, job, custom-network,
+routing, generated, managed and typed-local families stay outside this owner.
 
 After the original containers are stopped, `hack config adopt --rollback`
 journals `rolling-back`, holds the installed candidate and restores both exact

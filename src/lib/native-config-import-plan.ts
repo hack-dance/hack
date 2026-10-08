@@ -4,6 +4,7 @@ import { mapLegacyComposeBuild } from "./native-config-import-build.ts";
 import {
   mapLegacyComposeFileDeclaration,
   mapLegacyComposeFileGrant,
+  type RetainedFilePermissionPolicy,
 } from "./native-config-import-files.ts";
 import {
   legacyComposeJobNames,
@@ -40,6 +41,17 @@ export type NativeImportPlan = {
   /** Private authored static candidate, never a CLI report or a partially converted input. */
   readonly candidate?: Readonly<Record<string, unknown>>;
 };
+const retainedFilePolicies = new WeakMap<
+  Readonly<Record<string, unknown>>,
+  readonly RetainedFilePermissionPolicy[]
+>();
+
+/** Private raw grant intent issued only by the strict retained-purpose source mapper. No runtime authority. */
+export function legacyNativeRetainedFilePolicies(
+  candidate: unknown
+): readonly RetainedFilePermissionPolicy[] | undefined {
+  return isRecord(candidate) ? retainedFilePolicies.get(candidate) : undefined;
+}
 
 export function freezeImportValue(value: unknown): void {
   if (isRecord(value) || Array.isArray(value)) {
@@ -223,7 +235,24 @@ function mapLegacyNativeInput(opts: {
     opts.purpose === "retained-file-baseline" ||
     opts.purpose === "retained-file-storage"
   ) {
-    mapFileCandidate({ compose: compose.value, candidate, mark, refuse });
+    const retainedPermissions = opts.purpose !== "preview";
+    const policies: RetainedFilePermissionPolicy[] = [];
+    mapFileCandidate({
+      compose: compose.value,
+      candidate,
+      mark,
+      refuse,
+      retainedPermissions,
+      policies,
+    });
+    if (retainedPermissions) {
+      policies.sort(
+        (a, b) =>
+          a.service.localeCompare(b.service) || a.target.localeCompare(b.target)
+      );
+      freezeImportValue(policies);
+      retainedFilePolicies.set(candidate, policies);
+    }
   }
   return nativeImportResult({ fields, candidate });
 }
@@ -374,7 +403,13 @@ export function mapLegacyNativeRetainedFileStorage(opts: {
   });
 }
 
-type FileMappingContext = Pick<MappingContext, "candidate" | "mark" | "refuse">;
+type FileMappingContext = Pick<
+  MappingContext,
+  "candidate" | "mark" | "refuse"
+> & {
+  readonly retainedPermissions: boolean;
+  readonly policies: RetainedFilePermissionPolicy[];
+};
 
 function mapFileDeclarations(
   opts: FileMappingContext & {
@@ -424,6 +459,7 @@ function mapFileGrantEntries(
     readonly pointer: string;
     readonly targetPointer: string;
     readonly mounts: unknown[];
+    readonly serviceName: string;
   }
 ): void {
   if (!Array.isArray(opts.grants)) {
@@ -438,13 +474,27 @@ function mapFileGrantEntries(
   );
   for (const [index, raw] of opts.grants.entries()) {
     const entryPointer = importPointer(opts.pointer, index);
-    const mapped = mapLegacyComposeFileGrant({ kind: opts.kind, value: raw });
+    const mapped = mapLegacyComposeFileGrant({
+      kind: opts.kind,
+      value: raw,
+      retainedPermissions: opts.retainedPermissions,
+    });
     if (!mapped) {
       opts.refuse("compose", entryPointer, "invalid_or_unsupported_file_grant");
       continue;
     }
     const target = `${opts.targetPointer}/mounts/${opts.mounts.length}`;
     opts.mounts.push(mapped.grant);
+    if (opts.retainedPermissions && mapped.declaredMode !== undefined) {
+      opts.policies.push({
+        service: opts.serviceName,
+        kind: opts.kind,
+        name:
+          "config" in mapped.grant ? mapped.grant.config : mapped.grant.secret,
+        target: mapped.grant.target,
+        declaredMode: mapped.declaredMode,
+      });
+    }
     for (const field of mapped.fields) {
       opts.mark(
         "compose",
@@ -486,6 +536,7 @@ function mapServiceFileGrants(
         pointer: importPointer(servicePointer, namespace),
         targetPointer,
         mounts,
+        serviceName: opts.name,
       });
     }
   }

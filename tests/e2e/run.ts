@@ -31,6 +31,7 @@ import {
   nativeConfigFileUnknownStopScenario,
 } from "./scenarios/native-config-files.ts";
 import { nativeConfigProcessPolicyScenario } from "./scenarios/native-config-process-policy.ts";
+import { nativeConfigProtectedFilesScenario } from "./scenarios/native-config-protected-files.ts";
 import { nativeConfigRoutingScenario } from "./scenarios/native-config-routing.ts";
 import { portableMultiserviceScenario } from "./scenarios/portable-multiservice.ts";
 import { upDownScenario } from "./scenarios/up-down.ts";
@@ -81,6 +82,7 @@ const ALL_SCENARIOS: readonly Scenario[] = [
   nativeConfigDownHooksScenario,
   nativeConfigFilesScenario,
   nativeConfigFileUnknownStopScenario,
+  nativeConfigProtectedFilesScenario,
   nativeConfigProcessPolicyScenario,
   nativeConfigRoutingScenario,
   nativeConfigNetworksScenario,

@@ -386,10 +386,15 @@ export async function buildNativeComposeImages(opts: {
     if (intent.rebuild || prior === null) {
       await fresh();
       requireValue((await image(intent, io.probe)) === prior);
-      const code = await io.execute(
-        intent.args,
-        opts.deadline === undefined ? undefined : opts.deadline - Date.now()
+      // The final image read can outlive or invalidate prior admission.
+      // Recheck after it, then admit spawn synchronously with the remaining budget.
+      await fresh();
+      const timeoutMs =
+        opts.deadline === undefined ? undefined : opts.deadline - Date.now();
+      requireValue(
+        !opts.signal.aborted && (timeoutMs === undefined || timeoutMs > 0)
       );
+      const code = await io.execute(intent.args, timeoutMs);
       if (code !== 0 || opts.signal.aborted) {
         return code || 1;
       }

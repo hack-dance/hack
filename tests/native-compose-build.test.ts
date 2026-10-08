@@ -1,4 +1,4 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, spyOn, test } from "bun:test";
 import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -412,6 +412,58 @@ test("source changes, cancellation and failed builders prevent subsequent startu
     return 0;
   };
   expect(await buildNativeComposeImages(cancelled.options)).toBe(1);
+});
+
+test.each([
+  "abort",
+  "deadline",
+  "source",
+  "owner",
+] as const)("last pre-execute image probe invalidating %s prevents any builder spawn", async (change) => {
+  const state = harness();
+  const controller = new AbortController();
+  state.options.signal = controller.signal;
+  let valid = true;
+  let reads = 0;
+  let now = Date.now();
+  const deadline = now + 30_000;
+  const clock = spyOn(Date, "now").mockImplementation(() => now);
+  const probe = state.options.io.probe;
+  state.options.io.probe = async (args) => {
+    const result = await probe(args);
+    if (args[1] === "ls" && ++reads === 3) {
+      valid = false;
+      if (change === "abort") {
+        controller.abort();
+      } else if (change === "deadline") {
+        now = deadline;
+      }
+    }
+    return result;
+  };
+  if (change === "source") {
+    state.options.assertFresh = async () => {
+      if (!valid) {
+        throw new NativeComposeBuildError();
+      }
+    };
+  }
+  if (change === "owner") {
+    state.options.assertOwned = async () => {
+      if (!valid) {
+        throw new NativeComposeBuildError();
+      }
+    };
+  }
+  try {
+    await expect(
+      buildNativeComposeImages({ ...state.options, deadline })
+    ).rejects.toBeInstanceOf(NativeComposeBuildError);
+    expect(reads).toBe(3);
+    expect(state.executed()).toBe(0);
+  } finally {
+    clock.mockRestore();
+  }
 });
 
 test("all cached tags admit before builds and changed tag observations refuse", async () => {

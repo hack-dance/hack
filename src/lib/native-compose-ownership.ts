@@ -998,7 +998,11 @@ function batches(resources: readonly Inventory[]): Inventory[][] {
   return result;
 }
 
-/** Shared bounded, redacted Docker read boundary; callers supply only fixed inspection commands. */
+/**
+ * One bounded aggregate Docker acquisition; callers supply only fixed read commands.
+ * Lifecycle polling must issue a fresh owner for each capture, rather than reuse
+ * an acquisition whose aggregate deadline or output allowance has expired.
+ */
 export function createNativeComposeProbe(
   opts: Pick<NativeComposeOwnershipOptions, "signal" | "timeoutMs">
 ): (args: readonly string[]) => Promise<string> {

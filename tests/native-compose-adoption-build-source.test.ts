@@ -134,9 +134,9 @@ test("retained mapper explicitly projects non-enumerable private source fields",
       composeText: source.composeText,
     }).candidate
   );
-  expect(
-    mapLegacyNativeRetainedBasicBuild(source).candidate?.services.db?.build
-  ).toEqual({ context: "." });
+  expect(mapLegacyNativeRetainedBasicBuild(source).candidate).toMatchObject({
+    services: { db: { build: { context: "." } } },
+  });
 });
 test("root context pins included source and keeps private proof/candidate/callbacks out of reports", async () => {
   const captured = await acquire();

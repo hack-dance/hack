@@ -244,12 +244,32 @@ function mapOwnedNetwork(
     opts.refuse("compose", "/networks", "owned_bridge_jobs_unsupported");
     return;
   }
-  const { logical, internal, attachments } = mapping.intent;
-  opts.candidate.networks = { [logical]: { internal } };
-  for (const { service, aliases } of attachments) {
-    const workload = candidateWorkload(opts.candidate, service);
-    if (isRecord(workload)) {
-      workload.networks = { [logical]: { aliases: [...aliases] } };
+  if (mapping.kind === "owned") {
+    const { logical, internal, attachments } = mapping.intent;
+    opts.candidate.networks = { [logical]: { internal } };
+    for (const { service, aliases } of attachments) {
+      const workload = candidateWorkload(opts.candidate, service);
+      if (isRecord(workload)) {
+        workload.networks = { [logical]: { aliases: [...aliases] } };
+      }
+    }
+  } else {
+    opts.candidate.networks = Object.fromEntries(
+      mapping.intent.networks.map(({ logical, internal }) => [
+        logical,
+        { internal },
+      ])
+    );
+    for (const { service, networks } of mapping.intent.attachments) {
+      const workload = candidateWorkload(opts.candidate, service);
+      if (isRecord(workload)) {
+        workload.networks = Object.fromEntries(
+          networks.map(({ logical, aliases }) => [
+            logical,
+            { aliases: [...aliases] },
+          ])
+        );
+      }
     }
   }
   for (const { source, target, code } of mapping.pointers) {

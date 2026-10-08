@@ -146,6 +146,57 @@ test("one owned internal bridge maps selected and inactive static aliases withou
   expect(JSON.stringify(result)).not.toContain("db-reader");
 });
 
+test("two owned bridges map complete selected and inactive attachment sets without source drift", () => {
+  const source = {
+    name: "fixture",
+    networks: {
+      back: { driver: "bridge", internal: true },
+      edge: { driver: "bridge", internal: false },
+    },
+    services: {
+      db: {
+        image: "postgres:17",
+        networks: { back: { aliases: ["db-reader"] } },
+      },
+      web: {
+        image: "web:1",
+        networks: {
+          back: { aliases: ["web-back"] },
+          edge: { aliases: ["web-edge"] },
+        },
+      },
+      observer: {
+        image: "observer:1",
+        profiles: ["later"],
+        networks: { edge: { aliases: ["observer-edge"] } },
+      },
+    },
+  };
+  const original = JSON.stringify(source);
+  const result = map({ name: "fixture" }, source);
+  expect(result.report.complete).toBe(true);
+  expect(result.candidate).toMatchObject({
+    networks: { back: { internal: true }, edge: { internal: false } },
+    services: {
+      db: { networks: { back: { aliases: ["db-reader"] } } },
+      web: {
+        networks: {
+          back: { aliases: ["web-back"] },
+          edge: { aliases: ["web-edge"] },
+        },
+      },
+      observer: { networks: { edge: { aliases: ["observer-edge"] } } },
+    },
+  });
+  expect(
+    result.report.fields
+      .filter((field) => field.pointer.includes("networks"))
+      .every((field) => field.status === "normalized" && !!field.target)
+  ).toBe(true);
+  expect(JSON.stringify(source)).toBe(original);
+  expect(JSON.stringify(result)).not.toContain("db-reader");
+});
+
 test("basic build preview and owned bridge remain separate from retained adoption", () => {
   const compose = {
     networks: { private: { internal: true } },
@@ -295,15 +346,32 @@ test("explicit outbound bridge policy remains representable without inventing a 
 });
 
 test.each([
-  ["mixed default", { private: { internal: true }, default: {} }],
   [
-    "multiple owned bridges",
-    { private: { internal: true }, second: { internal: true } },
+    "mixed default",
+    { private: { internal: true }, default: {} },
+    "named_owned_bridge_required",
   ],
-  ["custom physical name", { private: { internal: true, name: "foreign" } }],
-  ["IPAM", { private: { internal: true, ipam: { config: [] } } }],
-  ["driver options", { private: { internal: true, driver_opts: {} } }],
-])("owned bridge refuses top-level %s without a candidate", (_name, networks) => {
+  [
+    "multiple owned bridges without closed attachments",
+    { private: { internal: true }, second: { internal: true } },
+    "explicit_owned_bridge_attachments_required",
+  ],
+  [
+    "custom physical name",
+    { private: { internal: true, name: "foreign" } },
+    "unsupported_network_policy",
+  ],
+  [
+    "IPAM",
+    { private: { internal: true, ipam: { config: [] } } },
+    "unsupported_network_policy",
+  ],
+  [
+    "driver options",
+    { private: { internal: true, driver_opts: {} } },
+    "unsupported_network_policy",
+  ],
+])("owned bridge refuses top-level %s without a candidate", (_name, networks, expected) => {
   code(
     map(
       { name: "fixture" },
@@ -312,10 +380,38 @@ test.each([
         networks,
       }
     ),
-    Object.keys(networks).length !== 1
-      ? "single_owned_bridge_required"
-      : "unsupported_network_policy"
+    expected
   );
+});
+
+test.each([
+  [
+    "unused second bridge",
+    { back: { aliases: ["web-reader"] } },
+    "unused_owned_bridge",
+  ],
+  [
+    "undeclared attachment",
+    { back: {}, foreign: {} },
+    "closed_owned_bridge_attachments_required",
+  ],
+  [
+    "duplicate alias on one bridge",
+    { back: { aliases: ["db-reader"] }, edge: { aliases: ["db-reader"] } },
+    "network_alias_collision",
+  ],
+])("two-bridge mapping refuses %s without a candidate", (_name, attachment, expected) => {
+  const source = {
+    networks: { back: { internal: true }, edge: { internal: false } },
+    services: {
+      db: {
+        image: "postgres:17",
+        networks: { back: { aliases: ["db-reader"] } },
+      },
+      web: { image: "web:1", networks: attachment },
+    },
+  };
+  code(map({ name: "fixture" }, source), expected);
 });
 
 test("duplicate static alias across active and inactive services refuses", () => {

@@ -8,6 +8,7 @@ import {
   parseNativeAuthoredReview,
 } from "../src/backends/native-authored-graph-protocol.ts";
 import { serveNativeAuthoredProjectGraph } from "../src/backends/native-project-process.ts";
+import { NativeRuntimeRequestError } from "../src/backends/native-runtime-client.ts";
 
 const roots: string[] = [];
 const run = "a".repeat(32);
@@ -428,7 +429,7 @@ test("safe status failure code does not expose private diagnostics or publish", 
   ).toBe("cleaned");
 });
 
-test("startup deadline cancels pending authentication before publication and awaits cleanup", async () => {
+test("startup deadline refuses publication and settles its observed startup prefix", async () => {
   const opts = await fixture({
     controlDelayMs: 3000,
     fastControlBoundary: true,
@@ -462,19 +463,32 @@ test("startup deadline cancels pending authentication before publication and awa
   let ownerEntered = false;
   let statusEntered = false;
   let cleanupObserved = false;
+  const marker = async (name: string): Promise<string | undefined> =>
+    await Bun.file(join(opts.projectRoot, name))
+      .text()
+      .catch((error: unknown) => {
+        if (
+          error !== null &&
+          typeof error === "object" &&
+          "code" in error &&
+          error.code === "ENOENT"
+        ) {
+          return undefined;
+        }
+        throw error;
+      });
   try {
-    ownerEntered =
-      (await Bun.file(join(opts.projectRoot, "fast-owner-entered"))
-        .text()
-        .catch(() => undefined)) === "entered";
-    statusEntered =
-      (await Bun.file(join(opts.projectRoot, "authenticated-status-started"))
-        .text()
-        .catch(() => undefined)) === "status";
-    cleanupObserved =
-      (await Bun.file(join(opts.projectRoot, "cleanup-complete"))
-        .text()
-        .catch(() => undefined)) === "cleaned";
+    const ownerMarker = await marker("fast-owner-entered");
+    const statusMarker = await marker("authenticated-status-started");
+    const cleanupMarker = await marker("cleanup-complete");
+    expect(ownerMarker === undefined || ownerMarker === "entered").toBe(true);
+    expect(statusMarker === undefined || statusMarker === "status").toBe(true);
+    expect(cleanupMarker === undefined || cleanupMarker === "cleaned").toBe(
+      true
+    );
+    ownerEntered = ownerMarker === "entered";
+    statusEntered = statusMarker === "status";
+    cleanupObserved = cleanupMarker === "cleaned";
     if (process.env.HACK_NATIVE_STARTUP_FIXTURE_DIAGNOSTIC === "1") {
       console.error(
         JSON.stringify({
@@ -490,11 +504,35 @@ test("startup deadline cancels pending authentication before publication and awa
       );
     }
     expect(failure).toBeInstanceOf(Error);
-    expect(String(failure)).toContain("canceled");
+    const failureMessage =
+      failure instanceof Error ? failure.message : undefined;
     expect(elapsedMs).toBeLessThan(1500);
     expect(published).toBe(false);
-    expect(statusEntered).toBe(true);
-    expect(cleanupObserved).toBe(true);
+    expect(nativeFailureObserved).toBe(false);
+    if (receiptObserved) {
+      // Ready is observed synchronously before status admission. The deadline
+      // can interrupt before or after the status child enters its first command.
+      expect(ownerEntered).toBe(true);
+      expect(cleanupObserved).toBe(true);
+      expect(ownedExitCode).toBe(0);
+      expect(failure).toBeInstanceOf(NativeRuntimeRequestError);
+      expect([
+        "Native runtime request was canceled before admission; no request was started.",
+        "Native runtime request was canceled; its outcome may be uncertain. No request was replayed.",
+      ]).toContain(failureMessage);
+    } else {
+      // The deadline also owns prefixes before Ready is consumed: no first
+      // command, owner-only, or a trapped owner whose Ready frame is unread.
+      // These cannot claim pending authentication or publication authority.
+      expect(statusEntered).toBe(false);
+      expect(failureMessage).toBe(
+        "Native graph startup was interrupted or failed; inspect owned state before retrying."
+      );
+      expect(ownedExitCode).toBe(cleanupObserved ? 0 : 143);
+      if (cleanupObserved) {
+        expect(ownerEntered).toBe(true);
+      }
+    }
   } finally {
     if (
       ownerEntered &&

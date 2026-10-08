@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   type NativeComposeHook,
+  selectNativeComposeAfterHooks,
   selectNativeComposeBeforeHooks,
 } from "../src/lib/native-compose-host-contract.ts";
 import {
@@ -211,20 +212,26 @@ test("timeout reaps a resistant descendant group and blocks later hooks", async 
 test("persistent processes, other phases, traversal and unknown normalized fields refuse", () => {
   const valid = hook("before", { shell: "true" });
   for (const host of [
-    { up: { after: [valid] } },
     { down: { before: [valid] } },
     { down: { after: [valid] } },
     { processes: { worker: valid } },
     { up: { before: [{ ...valid, cwd: "../outside" }] } },
     { up: { before: [{ ...valid, persistent: true }] } },
   ]) {
-    expect(() => selectNativeComposeBeforeHooks({ host })).toThrow(
-      "finite up.before"
-    );
+    expect(() => selectNativeComposeBeforeHooks({ host })).toThrow("finite up");
   }
   expect(
     selectNativeComposeBeforeHooks({ host: { up: { before: [valid] } } })
   ).toEqual([valid]);
+  const after = hook("after", { shell: "true" });
+  const both = { host: { up: { before: [valid], after: [after] } } };
+  expect(selectNativeComposeBeforeHooks(both)).toEqual([valid]);
+  expect(selectNativeComposeAfterHooks(both)).toEqual([after]);
+  expect(() =>
+    selectNativeComposeAfterHooks({
+      host: { up: { before: [valid], after: [valid] } },
+    })
+  ).toThrow();
 });
 
 test("wrong target report and unavailable endpoint owners refuse before value delivery", () => {

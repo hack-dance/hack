@@ -11,6 +11,10 @@ import {
 import { resolveComposeStartupTimeoutMs } from "./compose-startup-budget.ts";
 import { isRecord } from "./guards.ts";
 import {
+  assertNativeComposeAfterInputsUnchanged,
+  prepareNativeComposeAfterHooks,
+} from "./native-compose-after-hooks.ts";
+import {
   nativeComposeCompletedOneoff,
   nativeComposeRunDependenciesReady,
   nativeComposeWorkloadsReady as ready,
@@ -25,6 +29,7 @@ import {
 } from "./native-compose-generation.ts";
 import {
   NativeComposeHostHookError,
+  selectNativeComposeAfterHooks,
   selectNativeComposeBeforeHooks,
 } from "./native-compose-host-contract.ts";
 import {
@@ -148,6 +153,7 @@ function assertSavedRunUnrouted(
 function preparedEffectOwnership(opts: {
   readonly selection: NativeComposeOwnershipOptions;
   readonly routing: NativeComposeRoutingOwner | null;
+  readonly afterReadiness?: () => Promise<void>;
 }) {
   let completed = false;
   return {
@@ -157,10 +163,13 @@ function preparedEffectOwnership(opts: {
         await opts.routing?.assertBeforeEffects();
       }
     },
-    ...(opts.routing
+    ...(opts.routing || opts.afterReadiness
       ? {
           beforeComplete: async () => {
-            await opts.routing?.complete();
+            await opts.afterReadiness?.();
+            await opts.routing?.complete({
+              deadline: Date.now() + resolveComposeStartupTimeoutMs(),
+            });
             completed = true;
           },
         }
@@ -354,6 +363,7 @@ async function savedCommand(opts: {
               stopped: true,
               pending: true,
               beforeHooksPending: true,
+              hostHookPhase: state.hostHookPhase,
               services: [],
             },
           }),
@@ -470,6 +480,7 @@ async function savedCommand(opts: {
                 stopped: state.stopped,
                 pending: state.pending !== null,
                 beforeHooksPending: state.beforeHooksPending,
+                hostHookPhase: state.hostHookPhase,
                 services: observed.containers.map(
                   ({ service, state: status, exitCode, health, oneoff }) => ({
                     service,
@@ -700,7 +711,10 @@ async function prepareCommand(opts: {
     declaredWorkloads: inputs.result.declared_workloads,
     beforeHooksOwned: true,
   });
-  const hooks = selectNativeComposeBeforeHooks(inputs.result.plan);
+  const hooks = [
+    ...selectNativeComposeBeforeHooks(inputs.result.plan),
+    ...selectNativeComposeAfterHooks(inputs.result.plan),
+  ];
   assertNativeComposeBeforeHookBindings({
     hooks,
     environmentPlan: inputs.result.environment_plan,
@@ -804,6 +818,17 @@ async function prepareCommand(opts: {
         ) {
           return invalid();
         }
+        const after = preparedAfterHookPhase({
+          inputs,
+          acquire,
+          projectRoot,
+          signal,
+          json: options.json === true,
+          document,
+          generation,
+          selection,
+          routing,
+        });
         const result = await mutation.runEffect({
           generation,
           operation,
@@ -813,7 +838,12 @@ async function prepareCommand(opts: {
               await store.readGenerationDocument(saved.generation);
             }
           },
-          ...preparedEffectOwnership({ selection, routing }),
+          ...preparedEffectOwnership({
+            selection,
+            routing,
+            afterReadiness: after.afterReadiness,
+          }),
+          afterHooks: after.afterHooks,
           effect: async () => {
             if (operation === "run") {
               return await runOneOff({
@@ -835,10 +865,9 @@ async function prepareCommand(opts: {
           },
         });
         if (result.outcome === "uncertain") {
-          throw new HackCliError({
-            code: "E_STARTUP_INCOMPLETE",
-            message:
-              "Native Compose execution is incomplete; inspect saved state and use explicit owned stop recovery before retrying.",
+          return reportNativeStartupIncomplete({
+            afterHookCode: after.code(),
+            json: options.json === true,
           });
         }
         if (options.json) {
@@ -864,6 +893,77 @@ async function prepareCommand(opts: {
 type AcquiredComposeInputs = Awaited<
   ReturnType<typeof acquireNativeComposeInputs>
 >;
+
+function reportNativeStartupIncomplete(opts: {
+  readonly afterHookCode: number | undefined;
+  readonly json: boolean;
+}): number {
+  if (opts.afterHookCode === undefined || opts.afterHookCode === 0) {
+    throw new HackCliError({
+      code: "E_STARTUP_INCOMPLETE",
+      message:
+        "Native Compose execution is incomplete; inspect saved state and use explicit owned stop recovery before retrying.",
+    });
+  }
+  const message =
+    "Native host after hook failed; startup remains incomplete and saved ownership is retained. Values omitted.";
+  if (opts.json) {
+    emitCliResult({
+      result: errorResult({ code: "E_LIFECYCLE_FAILED", message }),
+    });
+  } else {
+    process.stderr.write(`${message}\n`);
+  }
+  return opts.afterHookCode;
+}
+
+function preparedAfterHookPhase(opts: {
+  readonly inputs: AcquiredComposeInputs;
+  readonly acquire: () => Promise<AcquiredComposeInputs>;
+  readonly projectRoot: string;
+  readonly signal: AbortSignal;
+  readonly json: boolean;
+  readonly document: PrivateDocument;
+  readonly generation: NativeComposeGeneration;
+  readonly selection: NativeComposeOwnershipOptions;
+  readonly routing: NativeComposeRoutingOwner | null;
+}) {
+  let code: number | undefined;
+  if (selectNativeComposeAfterHooks(opts.inputs.result.plan).length === 0) {
+    return {
+      afterHooks: undefined,
+      afterReadiness: undefined,
+      code: () => code,
+    };
+  }
+  return {
+    code: () => code,
+    afterHooks: {
+      prepare: async () => {
+        const execute = await prepareNativeComposeAfterHooks(opts);
+        return async () => {
+          const result = await execute();
+          code = result.value;
+          return result;
+        };
+      },
+    },
+    afterReadiness: async () => {
+      await assertNativeComposeAfterInputsUnchanged(opts);
+      const observed = await assertNativeComposeOwned(opts.selection);
+      if (!ready(opts.document, observed, opts.generation)) {
+        throw new HackCliError({
+          code: "E_STARTUP_INCOMPLETE",
+          message:
+            "Native workloads are no longer ready after host hooks; startup remains incomplete. Values omitted.",
+        });
+      }
+      await opts.routing?.verifyTransition({
+        deadline: Date.now() + resolveComposeStartupTimeoutMs(),
+      });
+    },
+  };
+}
 
 function assertSelectedWorkloads(inputs: AcquiredComposeInputs): void {
   if (Object.keys(inputs.result.environment_plan.workloads).length === 0) {

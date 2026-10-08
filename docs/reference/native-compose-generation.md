@@ -72,7 +72,19 @@ ownership check while still blocking engine startup. An exception, uncertain
 result or interrupted completion retains the intent across reopen and prevents
 preparation, generation publication and startup replay.
 
-Saved observation exposes only `beforeHooksPending`. Saved retaining down may
+Finite `up.after` runs inside the existing engine mutation after exact workload
+and route readiness and before the completed receipt. Private approval and value
+acquisition precede its journal. The explicit after intent binds its random token,
+phase, pending operation token, generation and `up`/`restart` operation; completion
+must match every field before clearing it. Known finite failure clears only the
+host intent and retains the pending engine effect. Uncertain completion retains
+both. Final source/environment checks and workload/route readiness precede the
+ready receipt; an after hook cannot rebind the running generation.
+
+Saved observation exposes `beforeHooksPending` for either phase and
+`hostHookPhase`. A legacy token-only receipt decodes as an uncertain before
+intent. Unknown phases refuse without rewriting or clearing the receipt.
+Saved retaining down may
 stop engine resources while preserving that hook intent, and the command reports
 the remaining uncertainty. Recovering a verified dead mutation lock does not
 recover hook execution. No API guesses ownership from a missing or reused PID,

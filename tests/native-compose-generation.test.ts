@@ -484,7 +484,8 @@ test("finite host intent is private, durable before effects, and cleared after v
           expect(saved.generation).toBeNull();
           expect(saved.beforeHooksPending).toBe(true);
           const receipt = JSON.parse(await Bun.file(receiptPath(owner)).text());
-          expect(Object.keys(receipt.beforeHooks)).toEqual(["token"]);
+          expect(Object.keys(receipt.beforeHooks)).toEqual(["token", "phase"]);
+          expect(receipt.beforeHooks.phase).toBe("before");
           expect(receipt.beforeHooks.token).toMatch(/^[a-f0-9]{32}$/);
           return { outcome: "complete", value: 17 };
         },
@@ -568,6 +569,319 @@ test("host exception and freshness failure after journaling preserve redacted un
       "synthetic-private-value"
     );
   }
+});
+
+test("after intent follows engine readiness and binds the pending generation before ready commit", async () => {
+  const owner = await store(await fixture());
+  const order: string[] = [];
+  await owner.withMutation(async (mutation) => {
+    const generation = await publish(mutation);
+    expect(
+      await mutation.runEffect({
+        generation,
+        operation: "up",
+        assertFresh: async () => {},
+        assertOwned: async () => {},
+        effect: async () => {
+          order.push("engine-ready");
+          return { outcome: "complete", value: 0 };
+        },
+        afterHooks: {
+          prepare: async () => {
+            order.push("private-values");
+            expect((await owner.loadCurrent()).hostHookPhase).toBeNull();
+            return async () => {
+              order.push("after");
+              const saved = await owner.loadCurrent();
+              expect(saved.generation).toBeNull();
+              expect(saved.hostHookPhase).toBe("after");
+              const receipt = await Bun.file(receiptPath(owner)).json();
+              expect(receipt.beforeHooks).toEqual({
+                token: expect.stringMatching(/^[a-f0-9]{32}$/),
+                phase: "after",
+                pendingToken: receipt.pending.token,
+                generationId: generation.generationId,
+                operation: "up",
+              });
+              return { outcome: "complete", value: 0, ready: true };
+            };
+          },
+        },
+        beforeComplete: async () => {
+          order.push("final-readiness");
+          expect((await owner.loadCurrent()).pending?.generationId).toBe(
+            generation.generationId
+          );
+          expect((await owner.loadCurrent()).hostHookPhase).toBeNull();
+        },
+      })
+    ).toEqual({ outcome: "complete", value: 0 });
+  });
+  expect(order).toEqual([
+    "engine-ready",
+    "private-values",
+    "after",
+    "final-readiness",
+  ]);
+  expect((await owner.loadCurrent()).pending).toBeNull();
+  expect((await owner.loadCurrent()).stopped).toBe(false);
+});
+
+test.each([
+  "nonzero",
+  "orphan",
+] as const)("after %s retains pending and blocks readiness", async (mode) => {
+  const root = await fixture();
+  const owner = await store(root);
+  await owner.withMutation(async (mutation) => {
+    const generation = await publish(mutation);
+    expect(
+      await mutation.runEffect({
+        generation,
+        operation: "restart",
+        assertFresh: async () => {},
+        assertOwned: async () => {},
+        effect: async () => ({ outcome: "complete", value: 0 }),
+        afterHooks: {
+          prepare: async () => async () => ({
+            outcome: mode === "orphan" ? "uncertain" : "complete",
+            ready: false,
+            value: 17,
+          }),
+        },
+        beforeComplete: async () => {
+          throw new Error("ready must not commit");
+        },
+      })
+    ).toEqual({ outcome: "uncertain", value: 17 });
+  });
+  const saved = await store(root, null, "saved");
+  expect((await saved.loadCurrent()).generation).toBeNull();
+  expect((await saved.loadCurrent()).pending?.operation).toBe("restart");
+  expect((await saved.loadCurrent()).hostHookPhase).toBe(
+    mode === "orphan" ? "after" : null
+  );
+  const pending = await saved.loadPending();
+  if (!pending) {
+    throw new Error("Expected recoverable pending generation");
+  }
+  await saved.withMutation(async (mutation) => {
+    await mutation.runEffect({
+      generation: pending,
+      operation: "down",
+      recoverPending: true,
+      assertOwned: async () => {},
+      effect: async () => ({ outcome: "complete", value: 0 }),
+    });
+  });
+  expect((await saved.loadCurrent()).stopped).toBe(true);
+  expect((await saved.loadCurrent()).hostHookPhase).toBe(
+    mode === "orphan" ? "after" : null
+  );
+});
+
+test("incomplete engine effect never acquires or executes an after phase", async () => {
+  const owner = await store(await fixture());
+  await owner.withMutation(async (mutation) => {
+    const generation = await publish(mutation);
+    expect(
+      await mutation.runEffect({
+        generation,
+        operation: "up",
+        assertFresh: async () => {},
+        assertOwned: async () => {},
+        effect: async () => ({ outcome: "uncertain", value: 1 }),
+        afterHooks: {
+          prepare: async () => {
+            throw new Error("after acquired before readiness");
+          },
+        },
+      })
+    ).toEqual({ outcome: "uncertain", value: 1 });
+  });
+  expect((await owner.loadCurrent()).hostHookPhase).toBeNull();
+});
+
+test.each([
+  "run",
+  "down",
+] as const)("after callback refuses %s before effects", async (operation) => {
+  const owner = await store(await fixture());
+  let effects = 0;
+  await owner.withMutation(async (mutation) => {
+    const generation = await publish(mutation);
+    await rejected(
+      mutation.runEffect({
+        generation,
+        operation,
+        assertOwned: async () => {},
+        effect: async () => {
+          effects++;
+          return { outcome: "complete", value: 0 };
+        },
+        afterHooks: {
+          prepare: async () => async () => ({
+            outcome: "complete",
+            ready: true,
+            value: 0,
+          }),
+        },
+      }),
+      "E_NATIVE_COMPOSE_STATE"
+    );
+  });
+  expect(effects).toBe(0);
+  expect((await owner.loadCurrent()).pending).toBeNull();
+});
+
+test("freshness change after finite after completion keeps engine pending through the final receipt boundary", async () => {
+  const owner = await store(await fixture());
+  let fresh = true;
+  await owner.withMutation(async (mutation) => {
+    const generation = await publish(mutation);
+    await rejected(
+      mutation.runEffect({
+        generation,
+        operation: "up",
+        assertOwned: async () => {},
+        assertFresh: async () => {
+          if (!fresh) {
+            throw new Error("synthetic-private-value");
+          }
+        },
+        effect: async () => ({ outcome: "complete", value: 0 }),
+        afterHooks: {
+          prepare: async () => async () => {
+            fresh = false;
+            return { outcome: "complete", ready: true, value: 0 };
+          },
+        },
+      }),
+      "E_NATIVE_COMPOSE_UNCERTAIN"
+    );
+  });
+  const current = await owner.loadCurrent();
+  expect(current.pending?.operation).toBe("up");
+  expect(current.generation).toBeNull();
+  expect(current.hostHookPhase).toBeNull();
+  expect(await Bun.file(receiptPath(owner)).text()).not.toContain(
+    "synthetic-private-value"
+  );
+});
+
+test("old token-only intent remains uncertain before across decoding and retained down", async () => {
+  const root = await fixture();
+  const owner = await store(root);
+  const generation = await activate(owner);
+  await owner.withMutation(async (mutation) => {
+    await mutation.runBeforeHooks({
+      assertFresh: async () => {},
+      effect: async () => ({ outcome: "uncertain", value: 1 }),
+    });
+  });
+  const receipt = await Bun.file(receiptPath(owner)).json();
+  Reflect.deleteProperty(receipt.beforeHooks, "phase");
+  await Bun.write(receiptPath(owner), JSON.stringify(receipt));
+  const saved = await store(root, null, "saved");
+  expect((await saved.loadCurrent()).hostHookPhase).toBe("before");
+  await saved.withMutation(async (mutation) => {
+    await mutation.runEffect({
+      generation: (await saved.loadCurrent()).generation ?? generation,
+      operation: "down",
+      assertOwned: async () => {},
+      effect: async () => ({ outcome: "complete", value: 0 }),
+    });
+  });
+  expect((await saved.loadCurrent()).hostHookPhase).toBe("before");
+  expect((await saved.loadCurrent()).beforeHooksPending).toBe(true);
+});
+
+test.each([
+  "pendingToken",
+  "generationId",
+  "operation",
+] as const)("after completion refuses a changed %s binding without clearing intent", async (binding) => {
+  const owner = await store(await fixture());
+  await owner.withMutation(async (mutation) => {
+    const generation = await publish(mutation);
+    await rejected(
+      mutation.runEffect({
+        generation,
+        operation: "up",
+        assertFresh: async () => {},
+        assertOwned: async () => {},
+        effect: async () => ({ outcome: "complete", value: 0 }),
+        afterHooks: {
+          prepare: async () => async () => {
+            const receipt = await Bun.file(receiptPath(owner)).json();
+            receipt.beforeHooks[binding] =
+              binding === "operation" ? "restart" : "f".repeat(32);
+            await Bun.write(receiptPath(owner), JSON.stringify(receipt));
+            return { outcome: "complete", ready: true, value: 0 };
+          },
+        },
+      }),
+      "E_NATIVE_COMPOSE_UNCERTAIN"
+    );
+  });
+  const current = await owner.loadCurrent();
+  expect(current.pending?.operation).toBe("up");
+  expect(current.generation).toBeNull();
+  expect(current.hostHookPhase).toBe("after");
+});
+
+test.each([
+  "approval",
+  "execution",
+] as const)("after %s failure retains engine pending and only journals possible host effects", async (failure) => {
+  const owner = await store(await fixture());
+  await owner.withMutation(async (mutation) => {
+    const generation = await publish(mutation);
+    await rejected(
+      mutation.runEffect({
+        generation,
+        operation: "up",
+        assertFresh: async () => {},
+        assertOwned: async () => {},
+        effect: async () => ({ outcome: "complete", value: 0 }),
+        afterHooks: {
+          prepare: async () => {
+            if (failure === "approval") {
+              throw new Error("synthetic-private-value");
+            }
+            return async () => {
+              throw new Error("synthetic-private-value");
+            };
+          },
+        },
+      }),
+      "E_NATIVE_COMPOSE_UNCERTAIN"
+    );
+  });
+  const current = await owner.loadCurrent();
+  expect(current.pending?.operation).toBe("up");
+  expect(current.generation).toBeNull();
+  expect(current.hostHookPhase).toBe(failure === "execution" ? "after" : null);
+  expect(await Bun.file(receiptPath(owner)).text()).not.toContain(
+    "synthetic-private-value"
+  );
+});
+
+test("an unknown saved host phase refuses without clearing its durable intent", async () => {
+  const owner = await store(await fixture());
+  await owner.withMutation(async (mutation) => {
+    await mutation.runBeforeHooks({
+      assertFresh: async () => {},
+      effect: async () => ({ outcome: "uncertain", value: 1 }),
+    });
+  });
+  const path = receiptPath(owner);
+  const receipt = await Bun.file(path).json();
+  receipt.beforeHooks.phase = "unknown";
+  const changed = JSON.stringify(receipt);
+  await Bun.write(path, changed);
+  await rejected(owner.loadCurrent(), "E_NATIVE_COMPOSE_STATE");
+  expect(await Bun.file(path).text()).toBe(changed);
 });
 
 test("random reservation precedes render; exact immutable document and private receipts survive reopen", async () => {

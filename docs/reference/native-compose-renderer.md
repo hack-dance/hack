@@ -54,6 +54,8 @@ portable semantic hashes, or write it into the authored configuration directory.
 | Profiles | Preserve workload profiles; return the exact selected profiles separately for the execution owner. |
 | Bind mounts | Long syntax with absolute checkout-anchored source, explicit access, and `create_host_path: false`; missing sources must not cause implicit directory creation. |
 | Persistent worktree storage | Named volumes with stable instance/storage identity; no generation token in data identity. |
+| Owned bridge networks | Stable instance/network names, bridge driver and explicit internal policy; allocate selected attachments only. |
+| Workload network attachments | Preserve explicit attachment and alias maps; omission retains the outbound default bridge. |
 | Service-started dependency | `service_started`. |
 | Service-ready dependency | `service_healthy`, requiring an explicit supported exec readiness check on the target. |
 | Successful job dependency | `service_completed_successfully`; jobs share the generated Compose services namespace. |
@@ -100,7 +102,7 @@ The workload discriminator is container-only. A service may also have restart
 mode `no`; execution must use this discriminator when distinguishing a running
 service from a successfully completed job.
 
-Persistent volumes and the default network receive version, instance and owner labels.
+Persistent volumes and owned networks receive version, instance and owner labels.
 Volumes additionally receive `io.hack.native-config.storage=<logical-name>`.
 Volume names encode both component lengths to prevent ambiguous concatenation
 between different worktrees. Changing the generation changes container labels,
@@ -129,10 +131,16 @@ The first component refuses:
 - TCP endpoints, pending an explicit address-versus-URI derivation contract.
 - Unknown native fields or unsupported runtime options, rather than dropping them.
 
-No new CPU, memory, PID, port, network-membership or egress restriction is synthesized.
+No new CPU, memory, PID, port or egress restriction is synthesized.
 The generated default Compose network preserves ordinary project-scoped resolution
 and outbound connectivity. Runtime availability and reachability remain apply-time
 checks.
+
+An explicit workload attachment map replaces the implicit default selection. Each
+owned custom network preserves its authored `internal` policy and aliases, with
+names distinct across worktree instances. A routed service additionally joins
+the separately verified ingress; that network is never an authored declaration.
+Disconnected direct-service endpoint bindings refuse before private value delivery.
 
 ## Verification boundary
 

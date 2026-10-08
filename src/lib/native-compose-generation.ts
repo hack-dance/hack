@@ -65,6 +65,8 @@ type Receipt = {
   readonly current: GenerationAnchor | null;
   readonly stopped: boolean;
   readonly pending: (NativeComposePending & GenerationAnchor) | null;
+  /** No command, PID, environment, or content fingerprint. Interrupted finite hooks never replay. */
+  readonly beforeHooks: { readonly token: string } | null;
 };
 type FileIdentity = { readonly dev: number; readonly ino: number };
 type CheckoutAnchor = FileIdentity & {
@@ -550,6 +552,29 @@ function pendingValid(
         TOKEN.test(value.recoveryToken)))
   );
 }
+function beforeHooksValid(
+  value: unknown
+): value is { readonly token: string } | null {
+  return (
+    value === null ||
+    (isRecord(value) &&
+      keys(value, "token") &&
+      typeof value.token === "string" &&
+      TOKEN.test(value.token))
+  );
+}
+function requireBeforeHooksAdmission(
+  state: Receipt,
+  mode: "prepare" | "saved" | undefined
+): void {
+  if (
+    mode === "saved" ||
+    state.pending !== null ||
+    state.beforeHooks !== null
+  ) {
+    throw new NativeComposeGenerationError("E_NATIVE_COMPOSE_UNCERTAIN");
+  }
+}
 function parseReceipt(
   value: unknown,
   identity: NativeComposeIdentity,
@@ -558,7 +583,11 @@ function parseReceipt(
   if (
     !(
       isRecord(value) &&
-      keys(value, "checkout,current,identity,pending,stopped,version") &&
+      (keys(value, "checkout,current,identity,pending,stopped,version") ||
+        keys(
+          value,
+          "beforeHooks,checkout,current,identity,pending,stopped,version"
+        )) &&
       value.version === 1 &&
       identityMatches(value.identity, identity) &&
       checkoutMatches(value.checkout, checkout) &&
@@ -567,7 +596,8 @@ function parseReceipt(
           keys(value.current, "generationId,manifest,manifestHash") &&
           anchorValid(value.current))) &&
       typeof value.stopped === "boolean" &&
-      (value.pending === null || pendingValid(value.pending))
+      (value.pending === null || pendingValid(value.pending)) &&
+      (value.beforeHooks === undefined || beforeHooksValid(value.beforeHooks))
     )
   ) {
     return refuse();
@@ -579,6 +609,7 @@ function parseReceipt(
     current: value.current,
     stopped: value.stopped,
     pending: value.pending,
+    beforeHooks: value.beforeHooks ?? null,
   };
 }
 function checkoutMatches(value: unknown, expected: CheckoutAnchor): boolean {
@@ -768,6 +799,9 @@ function admitEffect<T>(
   if (!["up", "restart", "run", "down"].includes(input.operation)) {
     refuse();
   }
+  if (input.operation !== "down" && state.beforeHooks !== null) {
+    throw new NativeComposeGenerationError("E_NATIVE_COMPOSE_UNCERTAIN");
+  }
   if (
     (mode === "saved" && input.operation !== "down") ||
     (input.operation !== "down" && input.assertFresh === undefined)
@@ -819,6 +853,17 @@ function completedReceipt(
 }
 
 export type NativeComposeMutation = {
+  /** Journal finite host effects before spawning. Unknown completion permanently fences replay. */
+  runBeforeHooks<T>(opts: {
+    readonly assertFresh: () => Promise<void>;
+    readonly effect: () => Promise<{
+      readonly outcome: "complete" | "uncertain";
+      readonly value: T;
+    }>;
+  }): Promise<{
+    readonly outcome: "complete" | "uncertain";
+    readonly value: T;
+  }>;
   reserveGeneration(): NativeComposeReservation;
   publish(opts: PublishOptions): Promise<NativeComposeGeneration>;
   /** Only a caller-verified complete postcondition clears intent; engine exit alone is insufficient. */
@@ -833,6 +878,7 @@ export type NativeComposeGenerationStore = {
     readonly generation: NativeComposeGeneration | null;
     readonly stopped: boolean;
     readonly pending: NativeComposePending | null;
+    readonly beforeHooksPending: boolean;
   }>;
   loadPending(): Promise<NativeComposeGeneration | null>;
   /** Private values: never serialize/log this object. Use within a saved-generation lease. */
@@ -1056,6 +1102,7 @@ export async function openNativeComposeGenerationStore(opts: {
           current: null,
           stopped: true,
           pending: null,
+          beforeHooks: null,
         };
         await writeExclusive(receiptPath, JSON.stringify(value));
         await synchronizeDirectories(directories);
@@ -1216,6 +1263,7 @@ export async function openNativeComposeGenerationStore(opts: {
               : await load(state.current.generationId, state.current),
           stopped: state.stopped,
           pending: publicPending(state.pending),
+          beforeHooksPending: state.beforeHooks !== null,
         };
       },
       async loadPending() {
@@ -1369,6 +1417,39 @@ export async function openNativeComposeGenerationStore(opts: {
             requireActive();
           };
           const mutation: NativeComposeMutation = {
+            async runBeforeHooks<T>(input: {
+              readonly assertFresh: () => Promise<void>;
+              readonly effect: () => Promise<{
+                readonly outcome: "complete" | "uncertain";
+                readonly value: T;
+              }>;
+            }) {
+              const captured = Object.freeze({ ...input });
+              return await runAction(async () => {
+                const state = await receipt();
+                requireBeforeHooksAdmission(state, opts.mode);
+                await assertFresh(captured.assertFresh);
+                const beforeHooks = Object.freeze({ token: token() });
+                await save({ ...state, beforeHooks });
+                try {
+                  await assertFresh(captured.assertFresh);
+                  const result = await captured.effect();
+                  if (result.outcome !== "complete") {
+                    return result;
+                  }
+                  const latest = await receipt();
+                  if (latest.beforeHooks?.token !== beforeHooks.token) {
+                    refuse();
+                  }
+                  await save({ ...latest, beforeHooks: null });
+                  return result;
+                } catch {
+                  throw new NativeComposeGenerationError(
+                    "E_NATIVE_COMPOSE_UNCERTAIN"
+                  );
+                }
+              });
+            },
             reserveGeneration() {
               requireActive();
               if (opts.mode === "saved") {
@@ -1399,7 +1480,8 @@ export async function openNativeComposeGenerationStore(opts: {
                   captured.composeJson,
                   captured.reservation
                 );
-                if ((await receipt()).pending !== null) {
+                const state = await receipt();
+                if (state.pending !== null || state.beforeHooks !== null) {
                   throw new NativeComposeGenerationError(
                     "E_NATIVE_COMPOSE_UNCERTAIN"
                   );

@@ -62,3 +62,22 @@ or defend against a hostile process with the same user authority. Filesystem
 checks do not prove Docker resource ownership, readiness or application parity.
 The command adapter must verify reserved engine labels and qualify the complete
 native-only app/database/job lifecycle separately.
+
+Finite native `up.before` hooks use `runBeforeHooks` under this same mutation lock.
+It synchronizes a separate random hook-intent token before any command starts.
+The receipt contains no command, PID, environment value or input fingerprint for
+the hook. The execution owner may clear the intent only after a complete finite
+result and verified process-group absence. A known nonzero exit can complete this
+ownership check while still blocking engine startup. An exception, uncertain
+result or interrupted completion retains the intent across reopen and prevents
+preparation, generation publication and startup replay.
+
+Saved observation exposes only `beforeHooksPending`. Saved retaining down may
+stop engine resources while preserving that hook intent, and the command reports
+the remaining uncertainty. Recovering a verified dead mutation lock does not
+recover hook execution. No API guesses ownership from a missing or reused PID,
+kills a recorded hook process, or automatically clears interrupted hook intent.
+The spawn/publication gap deliberately remains blocked until a later explicit
+hook recovery contract can qualify it. Existing receipts without the optional
+hook field read as having no pending hook; older readers refuse receipts they
+do not understand.

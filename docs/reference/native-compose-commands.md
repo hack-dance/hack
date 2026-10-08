@@ -53,6 +53,44 @@ documents can contain decrypted values and remain in owned private files with
 restricted permissions. They are never part of the public plan or JSON output.
 Do not copy these documents into source control or attach them to diagnostics.
 
+## Finite host before hooks
+
+Whole-project `up` and `restart` run `host.up.before` in authored order. A hook
+uses either ordered `command.exec` arguments or explicit `command.shell` source
+through `/bin/sh -c`. Its relative `cwd` anchors to the selected checkout. Standard
+input and native authorization prompts remain attached to the terminal; with
+`--json`, child output goes to stderr. Hook output and environment values are not
+written to the ownership receipt.
+
+The existing environment owner supplies each hook's selected host baseline and
+the compiler's effective bindings. `env_target` can select the default host or a
+declared workload's host view. Managed references read that immutable baseline;
+literal overrides, empty defaults and explicit unset destinations retain their
+meaning. HTTP/HTTPS external endpoint bindings are supported. Other endpoint
+owners remain refused. `run` currently refuses projects with nonempty before
+hooks instead of assigning new lifecycle semantics to a one-off command.
+
+The entire hook sequence has a separate budget equal to
+`HACK_COMPOSE_STARTUP_TIMEOUT_MS`; Compose startup gets its own budget afterward.
+A nonzero hook exits with its status and prevents later hooks and engine startup.
+Cancellation and timeout forward signals to the owned process group. Completion
+requires the group to be absent; a hook that leaves descendants is uncertain.
+
+Hooks can prepare managed environment files or local endpoint bindings. Hack
+reacquires source, local, routing and environment inputs after the sequence and
+before private generation publication. A changed project name, source contract,
+worktree policy, selected profiles or hook sequence refuses startup rather than
+silently skipping newly authored hooks.
+
+Before spawning, Hack synchronizes a private hook intent under the same instance
+mutation lock used for engine effects. An interrupted or unverified hook retains
+that intent and blocks `up`, `restart` and `run` without replay. Saved `ps --json`
+reports `beforeHooksPending`, even if no engine generation was created. Saved
+`down` can stop a retained engine generation but reports incomplete cleanup while
+hook intent remains. `down --recover` can recover a verified dead CLI mutation
+owner; it cannot prove hook process ownership, clear hook uncertainty or rerun a
+hook. Explicit recovery for interrupted hooks remains a later lifecycle slice.
+
 ## Saved operations and recovery
 
 `ps`, `logs`, `exec`, and `down` use the retained generation. They do not reparse
@@ -81,7 +119,8 @@ volumes, prune old generations, or replay a start. Unverified ownership refuses.
 ## Remaining coverage
 
 This slice explicitly refuses foreground or partial-service startup, non-plain
-logs, pruning options, host hooks/processes, routing/open declarations, route
+logs, pruning options, `host.up.after`, all `host.down` hooks, persistent host
+processes, routing/open declarations, route
 bindings, typed host/gateway endpoints, TCP endpoint derivation, and HTTP/TCP
 readiness. It preserves ordinary project DNS and outbound networking and adds no
 CPU, memory or PID limits. The renderer documents the remaining field refusals.
@@ -98,4 +137,5 @@ HACK_E2E_CLI_BIN=./dist/hack HACK_E2E_DOCKER=1 HACK_E2E_REQUIRE_DOCKER=1 \
 ```
 
 Container checks do not establish normal browser routing, native trust, host
-lifecycle, or interactive TTY acceptance. Those remain separate NC03 gates.
+lifecycle recovery, persistent host ownership, or interactive TTY acceptance.
+Those remain separate NC03 gates.

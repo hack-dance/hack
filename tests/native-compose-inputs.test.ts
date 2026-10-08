@@ -30,6 +30,7 @@ const PROTOCOL = {
   local_version: 1,
   env_plan_version: 1,
   routing_plan_version: 1,
+  host_env_plan_version: 1,
 };
 const KEYS = [
   "HACK_HOME",
@@ -85,7 +86,13 @@ afterEach(async () => {
 });
 
 /** Only the compiler transport is substituted; input and freshness owners are real. */
-async function compiler(opts: { readonly changeDuringPlan?: string } = {}) {
+async function compiler(
+  opts: {
+    readonly changeDuringPlan?: string;
+    readonly withHost?: boolean;
+    readonly defaultHostName?: string;
+  } = {}
+) {
   const binary = join(root, "compiler");
   await writeFile(
     binary,
@@ -101,6 +108,10 @@ else{
  const services={web:source.services.web};if(profiles.includes('debug'))services.off=source.services.off;
  const plan={plan_version:1,name:'fixture',selected_profiles:profiles,services,jobs:source.jobs,worktree:source.worktree};
  const result={transport_version:1,ok:true,semantic_hash:'a'.repeat(64),declared_workloads:{web:'service',off:'service',seed:'job'},plan};
+ if(${opts.withHost === true}){
+  plan.host={up:{before:[{name:${JSON.stringify(opts.defaultHostName ?? "default-host")},command:{shell:'true'},env_target:{kind:'host'}},{name:'web-host',command:{shell:'true'},env_target:{kind:'workload',name:'web'}}]}};
+  result.host_env_targets={include_default:true,workloads:['web']};
+ }
  if(operation!=='compile'){
   const overlay=request.explicit_overlay??null;
   result.local_resolution={overlay,origin:request.explicit_overlay===undefined?'project':'explicit',auto_branch:false,inherit_local:true,resolution_hash:'b'.repeat(64)};
@@ -114,6 +125,10 @@ else{
   const metadata=request.env_metadata;
   const workloads=Object.fromEntries([...Object.keys(services),'seed'].map(name=>[name,Object.fromEntries(Object.entries(metadata.workloads[name]).map(([key,entry])=>[key,{kind:'managed',key,scope:entry.scope,secret:entry.secret}]))]));
   result.environment_plan={plan_version:1,overlay:metadata.overlay,overlay_exists:metadata.overlay_exists,complete:true,workloads,warnings:[],diagnostics:[]};
+  if(plan.host){
+   const bindings=entries=>Object.fromEntries(Object.entries(entries).map(([key,entry])=>[key,{kind:'managed',key,scope:entry.scope,secret:entry.secret}]));
+   result.environment_plan.host={[${JSON.stringify(opts.defaultHostName ?? "default-host")}]:{env_target:{kind:'host'},bindings:bindings(metadata.host.default)},'web-host':{env_target:{kind:'workload',name:'web'},bindings:bindings(metadata.host.workloads.web)}};
+  }
   const changed=${JSON.stringify(opts.changeDuringPlan)};if(changed)await appendFile(changed,'\\n  \\n');
  }
  console.log(JSON.stringify(result));
@@ -228,6 +243,58 @@ test("Compose input acquisition binds metadata and private selected values to th
   ]);
   expect(JSON.stringify(planRequest)).not.toContain(CANARY);
   await acquired.assertFresh();
+});
+
+test("Compose input owner delivers only the captured host target and keeps its capability private", async () => {
+  await compiler({ withHost: true });
+  await layer("hack.env.default.yaml", {
+    global: { BASE: "global" },
+    host: { HOST: CANARY, BASE: "host" },
+    web: { BASE: "web", WEB: "selected" },
+    off: { OFF: "inactive" },
+  });
+  const acquired = await acquireNativeComposeInputs({ projectRoot });
+  expect(await acquired.resolveHostValues("default-host")).toEqual({
+    BASE: "host",
+    HOST: CANARY,
+  });
+  expect(await acquired.resolveHostValues("web-host")).toEqual({
+    BASE: "host",
+    HOST: CANARY,
+    WEB: "selected",
+  });
+  await refuses(acquired.resolveHostValues("off"));
+  expect(Object.keys(acquired)).toEqual(["result"]);
+  expect(JSON.stringify(acquired)).not.toContain("resolveHostValues");
+  await layer("hack.env.default.yaml", { host: { HOST: "refreshed" } });
+  await refuses(acquired.resolveHostValues("default-host"));
+  const fresh = await acquireNativeComposeInputs({ projectRoot });
+  expect(await fresh.resolveHostValues("default-host")).toEqual({
+    HOST: "refreshed",
+  });
+});
+
+test("unknown inherited hook names refuse before private acquisition", async () => {
+  await compiler({ withHost: true });
+  await layer("hack.env.default.yaml", { host: { TOKEN: await encrypted() } });
+  process.env.HACK_EXECUTION_MODE = "non_interactive";
+  process.env.CI = "1";
+  const acquired = await acquireNativeComposeInputs({ projectRoot });
+  for (const name of ["constructor", "toString", "__proto__"]) {
+    await refuses(acquired.resolveHostValues(name));
+  }
+  expect(
+    await Bun.file(join(projectRoot, PROJECT_ENV_KEY_FILENAME)).exists()
+  ).toBe(false);
+});
+
+test("an own authored constructor hook retains its selected host baseline", async () => {
+  await compiler({ withHost: true, defaultHostName: "constructor" });
+  await layer("hack.env.default.yaml", { host: { TOKEN: CANARY } });
+  const acquired = await acquireNativeComposeInputs({ projectRoot });
+  expect(await acquired.resolveHostValues("constructor")).toEqual({
+    TOKEN: CANARY,
+  });
 });
 
 test("Compose input values follow the selected profile without admitting undeclared scopes", async () => {

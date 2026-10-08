@@ -224,7 +224,10 @@ test("pure named mount mapping includes jobs and keeps original logical storage 
   ).toMatchObject({ target: "/jobs/initialize/mounts" });
 });
 
-test.each([false, true])("custom-network job conversion remains refused, including inactive declarations: %s", (inactive) => {
+test.each([
+  false,
+  true,
+])("custom-network job conversion remains refused, including inactive declarations: %s", (inactive) => {
   const source = graph();
   const services = Object.fromEntries(
     Object.entries(source).map(([name, workload]) => [

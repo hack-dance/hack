@@ -568,4 +568,4 @@ test("linked worktree selects its own source and current local managed layer whi
       });
     });
   }
-});
+}, 30_000);

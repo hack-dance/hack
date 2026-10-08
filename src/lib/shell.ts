@@ -24,11 +24,12 @@ export interface ExecOptions {
  * behavior identical for normal runs while honoring runtime PATH.
  */
 function buildSpawnEnv(
-  override: Record<string, string> | undefined
+  override: Record<string, string> | undefined,
+  unsetKeys: readonly string[] = []
 ): Record<string, string> {
   const base: Record<string, string> = {};
   for (const [key, value] of Object.entries(process.env)) {
-    if (typeof value === "string") {
+    if (typeof value === "string" && !unsetKeys.includes(key)) {
       base[key] = value;
     }
   }
@@ -68,6 +69,8 @@ export async function exec(
 export interface RunOptions {
   readonly cwd?: string;
   readonly env?: Record<string, string>;
+  /** Remove explicitly unset authored destinations from the inherited host environment. */
+  readonly unsetEnvKeys?: readonly string[];
   readonly stdin?: "inherit" | "pipe" | "ignore";
   /**
    * Route the child's stdout to THIS process's stderr (fd 2). Used by
@@ -107,7 +110,7 @@ export async function run(
     return await runWithTerminalGroup({
       command: cmd,
       cwd: opts.cwd,
-      env: buildSpawnEnv(opts.env),
+      env: buildSpawnEnv(opts.env, opts.unsetEnvKeys),
       stdout: opts.stdout,
       stdin: opts.stdin,
       timeoutMs: opts.timeoutMs,
@@ -119,7 +122,7 @@ export async function run(
     opts.timeoutMs !== undefined || opts.forwardSignals === true;
   const proc = Bun.spawn([...cmd], {
     cwd: opts.cwd,
-    env: buildSpawnEnv(opts.env),
+    env: buildSpawnEnv(opts.env, opts.unsetEnvKeys),
     stdin: opts.stdin ?? "inherit",
     stdout: opts.stdout === "stderr" ? 2 : "inherit",
     stderr: "inherit",

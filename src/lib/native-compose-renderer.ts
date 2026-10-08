@@ -6,6 +6,7 @@ import type {
   Workload,
 } from "../../packages/config-compiler/generated/native-config.ts";
 import { isRecord } from "./guards.ts";
+import { selectNativeComposeBeforeHooks } from "./native-compose-host-contract.ts";
 import {
   type NativeComposeRouting,
   planNativeComposeRouting,
@@ -120,6 +121,8 @@ export type NativeComposeInputs = {
   readonly generationIdentity: string;
   readonly routingResolution?: unknown;
   readonly declaredWorkloads?: NativeDeclaredWorkloads;
+  /** The command owner journals and executes the supported finite before-hook sequence. */
+  readonly beforeHooksOwned?: boolean;
 };
 
 /**
@@ -219,7 +222,7 @@ function prepare(opts: NativeComposeInputs): PreparedCompose {
     resolution: opts.routingResolution,
     declared: opts.declaredWorkloads,
   });
-  unsupportedOwners(plan);
+  unsupportedOwners(plan, opts.beforeHooksOwned === true);
   const services = workloadMap(plan.services);
   const jobs = workloadMap(plan.jobs);
   assert(
@@ -234,7 +237,10 @@ function prepare(opts: NativeComposeInputs): PreparedCompose {
   const profiles = names(plan.selected_profiles);
   const storage = record(plan.storage);
   validateStorage(storage);
-  const env = environmentPlan(opts.environmentPlan);
+  const env = environmentPlan(
+    opts.environmentPlan,
+    opts.beforeHooksOwned === true
+  );
   const allNames = [...Object.keys(services), ...Object.keys(jobs)].sort();
   assert(sameKeys(env.workloads, allNames), "E_COMPOSE_ENV_NAMESPACE");
   const context = {
@@ -380,27 +386,15 @@ function settings(plan: Record<string, unknown>): void {
   );
 }
 
-function unsupportedOwners(plan: Record<string, unknown>): void {
+function unsupportedOwners(
+  plan: Record<string, unknown>,
+  beforeHooksOwned: boolean
+): void {
   if (Object.hasOwn(plan, "host")) {
-    const host = record(plan.host);
-    closed(host, ["up", "down", "processes"]);
-    for (const phase of ["up", "down"]) {
-      if (Object.hasOwn(host, phase)) {
-        const hooks = record(host[phase]);
-        closed(hooks, ["before", "after"]);
-        for (const entries of Object.values(hooks)) {
-          assert(
-            Array.isArray(entries) && entries.length === 0,
-            "E_COMPOSE_HOST_OWNER"
-          );
-        }
-      }
-    }
-    if (Object.hasOwn(host, "processes")) {
-      assert(
-        Object.keys(record(host.processes)).length === 0,
-        "E_COMPOSE_HOST_OWNER"
-      );
+    if (beforeHooksOwned) {
+      selectNativeComposeBeforeHooks(plan);
+    } else {
+      assertNoHostHooks(plan.host);
     }
   }
   if (Object.hasOwn(plan, "host_bindings")) {
@@ -410,6 +404,28 @@ function unsupportedOwners(plan: Record<string, unknown>): void {
         "E_COMPOSE_ENDPOINT"
       );
     }
+  }
+}
+function assertNoHostHooks(value: unknown): void {
+  const host = record(value);
+  closed(host, ["up", "down", "processes"]);
+  for (const phase of ["up", "down"]) {
+    if (Object.hasOwn(host, phase)) {
+      const hooks = record(host[phase]);
+      closed(hooks, ["before", "after"]);
+      for (const entries of Object.values(hooks)) {
+        assert(
+          Array.isArray(entries) && entries.length === 0,
+          "E_COMPOSE_HOST_OWNER"
+        );
+      }
+    }
+  }
+  if (Object.hasOwn(host, "processes")) {
+    assert(
+      Object.keys(record(host.processes)).length === 0,
+      "E_COMPOSE_HOST_OWNER"
+    );
   }
 }
 
@@ -436,7 +452,10 @@ function validateStorage(storage: Record<string, unknown>): void {
   }
 }
 
-function environmentPlan(value: unknown): NativeEnvironmentPlan {
+function environmentPlan(
+  value: unknown,
+  beforeHooksOwned: boolean
+): NativeEnvironmentPlan {
   const env = parseNativeEnvironmentPlan({
     value,
     parseDiagnostic,
@@ -446,7 +465,9 @@ function environmentPlan(value: unknown): NativeEnvironmentPlan {
     "E_COMPOSE_ENV_INCOMPLETE"
   );
   assert(
-    env.host === undefined || Object.keys(env.host).length === 0,
+    beforeHooksOwned ||
+      env.host === undefined ||
+      Object.keys(env.host).length === 0,
     "E_COMPOSE_HOST_OWNER"
   );
   return env;
@@ -797,6 +818,25 @@ function renderEnvironment(opts: {
   readonly values?: Readonly<Record<string, string>>;
   readonly directives: unknown;
 }): JsonObject {
+  return resolveNativeComposeEnvironment({
+    bindings: opts.bindings,
+    values: opts.values,
+    directives: opts.directives,
+    scopeNames: ["global", opts.name],
+    endpointValue: (binding) => endpoint(binding, opts.context),
+  });
+}
+
+/** Shared effective binding checks; owners supply only the selected baseline and endpoint policy. */
+export function resolveNativeComposeEnvironment(opts: {
+  readonly bindings: Readonly<Record<string, Readonly<EnvironmentBinding>>>;
+  readonly values?: Readonly<Record<string, string>>;
+  readonly directives: unknown;
+  readonly scopeNames: readonly string[];
+  readonly endpointValue: (
+    binding: Extract<EnvironmentBinding, { kind: "endpoint" }>
+  ) => string;
+}): Record<string, string> {
   const directives = record(opts.directives);
   for (const [key, directive] of Object.entries(directives)) {
     assert(ENV_KEY.test(key), "E_COMPOSE_ENV");
@@ -817,10 +857,7 @@ function renderEnvironment(opts: {
       if (!Object.hasOwn(directives, key)) {
         assert(binding.key === key, "E_COMPOSE_ENV_MISMATCH");
       }
-      assert(
-        binding.scope === "global" || binding.scope === opts.name,
-        "E_COMPOSE_ENV_SCOPE"
-      );
+      assert(opts.scopeNames.includes(binding.scope), "E_COMPOSE_ENV_SCOPE");
       if (opts.values === undefined) {
         continue;
       }
@@ -833,7 +870,7 @@ function renderEnvironment(opts: {
       entries.push([key, value]);
     } else if (binding.kind === "endpoint") {
       assert(Object.hasOwn(directives, key), "E_COMPOSE_ENV_MISMATCH");
-      entries.push([key, endpoint(binding, opts.context)]);
+      entries.push([key, opts.endpointValue(binding)]);
     } else {
       const authored = directives[key];
       assert(

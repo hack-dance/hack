@@ -23,6 +23,7 @@ const COMPOSE_SERVICE = "com.docker.compose.service";
 const INSTANCE = "io.hack.native-config.instance";
 const OWNER = "io.hack.native-config.owner";
 const WORKLOAD = "io.hack.native-config.workload";
+const GENERATION = "io.hack.native-config.generation";
 const CANARY_OWNER = "hack.e2e.native-config-compose-owner";
 // Synthetic public fixtures, never credentials for an external account or service.
 const SYNTHETIC_KEY = "native-e2e-synthetic-key-never-real-credentials";
@@ -77,6 +78,56 @@ type Snapshot = {
   readonly volume: string;
   readonly createdAt: string;
 };
+
+/** An incomplete startup alone cannot prove that the intended dependency job actually failed. */
+export function nativeComposeFixtureFailureJobMatches(opts: {
+  readonly startup: Pick<CliResult, "exitCode" | "timedOut">;
+  readonly payload: unknown;
+  readonly job: unknown;
+  readonly expected: RuntimeIdentity & {
+    readonly containerId: string;
+    readonly generationId: string;
+    readonly image: string;
+  };
+}): boolean {
+  const own = (value: Record<string, unknown>, name: string): unknown =>
+    Object.hasOwn(value, name) ? value[name] : undefined;
+  const { payload, job, expected } = opts;
+  if (
+    opts.startup.timedOut ||
+    opts.startup.exitCode !== 1 ||
+    !/^[a-f0-9]{64}$/.test(expected.containerId) ||
+    !TOKEN.test(expected.ownerToken) ||
+    !TOKEN.test(expected.generationId) ||
+    !IMAGE_ID.test(expected.image) ||
+    !isRecord(payload) ||
+    own(payload, "ok") !== false ||
+    !isRecord(own(payload, "error")) ||
+    !isRecord(job)
+  ) {
+    return false;
+  }
+  const error = own(payload, "error");
+  const labels = own(job, "labels");
+  return (
+    isRecord(error) &&
+    own(error, "code") === "E_STARTUP_INCOMPLETE" &&
+    own(job, "id") === expected.containerId &&
+    own(job, "image") === expected.image &&
+    own(job, "status") === "exited" &&
+    own(job, "exitCode") === 17 &&
+    own(job, "running") === false &&
+    isRecord(labels) &&
+    own(labels, COMPOSE_PROJECT) === expected.composeProject &&
+    own(labels, COMPOSE_SERVICE) === "failure" &&
+    own(labels, INSTANCE) === expected.composeProject &&
+    own(labels, OWNER) === expected.ownerToken &&
+    own(labels, WORKLOAD) === "job" &&
+    own(labels, GENERATION) === expected.generationId &&
+    own(labels, "io.hack.native-config.version") === "1" &&
+    own(labels, "com.docker.compose.oneoff") === "False"
+  );
+}
 
 function object(text: string): Record<string, unknown> {
   let value: unknown;
@@ -1027,6 +1078,70 @@ export const nativeConfigComposeScenario: Scenario = {
         });
       }
     };
+    const verifyFailureJob = async (opts: {
+      readonly startup: CliResult;
+      readonly payload: unknown;
+    }): Promise<void> => {
+      const store = await openNativeComposeGenerationStore({
+        projectRoot: fixture.root,
+        instance: null,
+        mode: "saved",
+      });
+      try {
+        const pending = await store.loadPending();
+        if (!pending) {
+          throw new Error("Failed startup must retain a verified generation");
+        }
+        const failureIds = (
+          await docker([
+            "ps",
+            "-aq",
+            "--no-trunc",
+            "--filter",
+            `label=${COMPOSE_PROJECT}=${identity().composeProject}`,
+            "--filter",
+            `label=${OWNER}=${identity().ownerToken}`,
+            "--filter",
+            `label=${COMPOSE_SERVICE}=failure`,
+            "--filter",
+            `label=${GENERATION}=${pending.generationId}`,
+          ])
+        )
+          .split(/\s+/)
+          .filter(Boolean);
+        const containerId = failureIds[0];
+        if (failureIds.length !== 1 || !containerId) {
+          throw new Error(
+            "Failed startup must expose exactly one owned pending failure job"
+          );
+        }
+        const job = object(
+          await docker([
+            "container",
+            "inspect",
+            containerId,
+            "--format",
+            '{"id":{{json .Id}},"image":{{json .Image}},"status":{{json .State.Status}},"exitCode":{{json .State.ExitCode}},"running":{{json .State.Running}},"labels":{{json .Config.Labels}}}',
+          ])
+        );
+        expect({
+          that: nativeComposeFixtureFailureJobMatches({
+            ...opts,
+            job,
+            expected: {
+              ...identity(),
+              containerId,
+              generationId: pending.generationId,
+              image: bunImage,
+            },
+          }),
+          message:
+            "Failed-dependency recovery requires the exact owned pending job to have exited 17; created, timed-out or unrelated failures do not qualify",
+        });
+      } finally {
+        await store.close();
+      }
+    };
     await runWithOwnedCleanup({
       run: async () => {
         await docker(["volume", "create", ...canaryLabels, canary]);
@@ -1251,7 +1366,9 @@ export const nativeConfigComposeScenario: Scenario = {
 
         const failure = await raw(
           ["up", "--detach", "--profile", "failure", "--json"],
-          { HACK_COMPOSE_STARTUP_TIMEOUT_MS: "10000" }
+          // The declared DB shutdown grace is 15s; allow shutdown plus normal
+          // startup/readiness before requiring the intended job's actual exit.
+          { HACK_COMPOSE_STARTUP_TIMEOUT_MS: "45000" }
         );
         expectExit({
           result: failure,
@@ -1267,6 +1384,7 @@ export const nativeConfigComposeScenario: Scenario = {
           message:
             "Failed readiness must preserve an explicit incomplete outcome",
         });
+        await verifyFailureJob({ startup: failure, payload: failed });
         expect({
           that: data(await cli(["ps", "--json"])).pending === true,
           message:

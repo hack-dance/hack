@@ -20,6 +20,7 @@ import {
 } from "../src/commands/project.ts";
 import { renderManagedComposeEnvOverride } from "../src/lib/compose-managed-env.ts";
 import { tryLegacyComposeAdoptedCommand } from "../src/lib/native-compose-adoption-command.ts";
+import { runLegacyComposeRetainedOperation } from "../src/lib/native-compose-adoption-execution.ts";
 import {
   LegacyComposeAdoptedGenerationError,
   openLegacyComposeAdoptedGenerationStore,
@@ -36,6 +37,7 @@ import {
   discoverProjectInputs,
 } from "../src/lib/project-input-selection.ts";
 import { buildRuntimeHostMetadataOverride } from "../src/lib/runtime-host-metadata.ts";
+import { captureAdoptionDependencyFirstPrepare } from "./e2e/scenarios/native-compose-adoption-dependency-staged-read.ts";
 import { restoreEnv } from "./helpers/env.ts";
 import { managedEnvCompilerFixture } from "./helpers/managed-env-compiler.ts";
 
@@ -57,6 +59,17 @@ type Fixture = {
   running?: boolean;
   mutationFailure?: boolean;
   states?: Record<string, boolean>;
+  health?: Record<string, string>;
+  ordered?: boolean;
+  sourceRace?: boolean;
+  hangMutation?: boolean;
+  dependencyReadScope?: {
+    readonly projectRoot: string;
+    readonly first: Awaited<
+      ReturnType<typeof captureAdoptionDependencyFirstPrepare>
+    >;
+    readonly allowFirstPrepare: boolean;
+  };
 };
 let root: string;
 let projectRoot: string;
@@ -139,14 +152,27 @@ beforeEach(async () => {
     join(root, "docker"),
     `#!${process.execPath}
 import {appendFileSync, readFileSync, writeFileSync} from "node:fs";
+import {adoptionDependencyReadAllowed} from ${JSON.stringify(new URL("./e2e/scenarios/native-compose-adoption-dependency-inputs.ts", import.meta.url).pathname)};
+import {adoptionDependencyStagedReadAllowed} from ${JSON.stringify(new URL("./e2e/scenarios/native-compose-adoption-dependency-staged-read.ts", import.meta.url).pathname)};
 const root = ${JSON.stringify(root)};
 const args = process.argv.slice(2);
 appendFileSync(root + "/commands", JSON.stringify(args) + "\\n");
 const fixture = JSON.parse(readFileSync(root + "/fixture.json", "utf8"));
 const [kind, action] = args;
+if(fixture.dependencyReadScope && !(kind === 'container' && ['start','stop','restart'].includes(action))) {
+ let saved=null;try {saved=JSON.parse(readFileSync(fixture.dependencyReadScope.projectRoot+'/.hack/.internal/legacy-compose-adoption-v1/receipt.json','utf8'));}catch{}
+ const allowed=adoptionDependencyReadAllowed({args,projectRoot:fixture.dependencyReadScope.projectRoot,project:'fixture',containerIds:fixture.container.map(row=>row.id),networkId:fixture.network[0].id,volumeName:fixture.volume[0].id,generationId:saved?.prepared?.id ?? saved?.publication?.generation?.id}) || (fixture.dependencyReadScope.allowFirstPrepare && await adoptionDependencyStagedReadAllowed({args,project:'fixture',first:fixture.dependencyReadScope.first}));
+ const stage=kind==='compose' && args[10]?.includes('/generations/') ? saved?.prepared ? 'published' : 'staged' : 'original';
+ appendFileSync(root+'/read-stages',JSON.stringify({stage,allowed})+'\\n');
+ if(!allowed){console.error('dependency-read-refused stage='+stage+' code=93');process.exit(93);}
+}
 if (kind === 'container' && ['start','restart','stop'].includes(action)) {
  if (!args.slice(2).length || args.slice(2).some(id => !fixture.container.some(container => container.id === id))) { writeFileSync(root + '/mutation','unverified effect');process.exit(99); }
- fixture.running = action !== 'stop'; writeFileSync(root+'/fixture.json',JSON.stringify(fixture));process.exit(fixture.mutationFailure ? 7 : 0);
+ if(fixture.hangMutation) {writeFileSync(root + '/effect-started', String(process.pid));await Bun.sleep(60_000);}
+ if (fixture.ordered) {for(const id of args.slice(2)) fixture.states[id] = action !== 'stop';}
+ else fixture.running = action !== 'stop';
+ if(fixture.sourceRace) { writeFileSync(${JSON.stringify(join(projectRoot, ".hack/hack.project.json"))}, 'synthetic-private-source-race'); }
+ writeFileSync(root+'/fixture.json',JSON.stringify(fixture));process.exit(fixture.mutationFailure ? 7 : 0);
 }
 if (kind === 'container' && ['exec','logs'].includes(action)) { process.exit(0); }
 if (kind === "compose") { for (const container of fixture.container) console.log(container.service + ' ' + 'd'.repeat(64)); process.exit(0); }
@@ -154,15 +180,17 @@ if (!(kind === "info" && action === "--format") && (!['container','volume','netw
 if (fixture.mode === "fail") {console.error(${JSON.stringify(CANARY)});process.exit(29);}
 if (fixture.mode === "malformed") {console.log(${JSON.stringify(CANARY)});process.exit(0);}
 if (fixture.mode === "hang") {writeFileSync(root + "/started", String(process.pid));await Bun.sleep(60_000);}
+if (fixture.mode === "hang-state" && kind === "container" && action === "inspect" && args.join().includes('.State.Running') && !args.join().includes('.Mounts')) {writeFileSync(root + "/started", String(process.pid));await Bun.sleep(60_000);}
 if (fixture.mode === "overflow") {await Bun.write(Bun.stdout, "x".repeat(9 * 1024 * 1024));process.exit(0);}
 if (fixture.mode === "stderr-overflow") {await Bun.write(Bun.stderr, "x".repeat(17 * 1024));process.exit(0);}
 if (kind === "info") {console.log(JSON.stringify({id: fixture.engine, os: "linux"}));}
 else if (action === "ls") {for (const row of fixture[kind]) console.log(JSON.stringify({id: row.id, name: kind === 'container' ? row.name.slice(1) : row.name, project: row.project ?? ""}));}
 else {
+ if(args.join().includes('.State.Health')) {console.error('map has no entry for key Health');process.exit(49);}
  const id = args.at(-1);const rows = fixture[kind].filter(row => row.id === id);
  if (!rows.length) process.exit(1);
  if (kind === "container" && args.join().includes('config-hash')) { console.log(JSON.stringify({id,hash:fixture.configHash ?? 'd'.repeat(64)})); process.exit(0); }
- if (kind === "container" && args.join().includes('.State.Running') && !args.join().includes('.Mounts')) { const running=fixture.states?.[id] ?? fixture.running ?? false;console.log(JSON.stringify({id,running,paused:false,status:running ? 'running' : 'exited'})); process.exit(0); }
+ if (kind === "container" && args.join().includes('.State.Running') && !args.join().includes('.Mounts')) { const running=fixture.states?.[id] ?? fixture.running ?? false;console.log(JSON.stringify({id,running,paused:false,status:running ? 'running' : 'exited', ...(args.join().includes('index .State "Health"') ? {health: fixture.health?.[id] ?? ''} : {})})); process.exit(0); }
  for (const row of rows) {
   if (kind === 'container') console.log(JSON.stringify({...row,running:fixture.states?.[id] ?? fixture.running ?? false}));
   else if (kind === 'network') console.log(JSON.stringify({...row,containers:row.containers.filter(id=>!fixture.container.some(container=>container.id===id) || (fixture.states?.[id] ?? fixture.running ?? false))}));
@@ -236,6 +264,679 @@ async function prepared() {
     throw error;
   }
 }
+
+async function dependencyFixture() {
+  const worker = "c".repeat(64);
+  await writeFile(
+    join(projectRoot, ".hack/docker-compose.yml"),
+    JSON.stringify({
+      name: "fixture",
+      services: {
+        web: {
+          image: CANARY,
+          depends_on: { db: { condition: "service_healthy" } },
+        },
+        db: {
+          image: CANARY,
+          healthcheck: {
+            test: ["CMD", "probe", CANARY],
+            interval: "1s",
+            timeout: "1s",
+            retries: 2,
+          },
+          volumes: ["data:/var/lib/database"],
+        },
+      },
+      volumes: { data: { name: VOLUME } },
+    })
+  );
+  fixture.container.push({
+    ...container(),
+    id: worker,
+    name: "/fixture-web-1",
+    service: "web",
+    mounts: [],
+  });
+  network().containers = [ID, worker];
+  fixture.ordered = true;
+  fixture.states = { [ID]: false, [worker]: false };
+  fixture.health = { [ID]: "healthy", [worker]: "" };
+  await save();
+  return worker;
+}
+
+async function mutationCommands() {
+  const lines = (await readFile(join(root, "commands"), "utf8"))
+    .trim()
+    .split("\n");
+  return lines
+    .map((line) => JSON.parse(line))
+    .filter(
+      (args) =>
+        args[0] === "container" &&
+        ["start", "stop", "restart"].includes(args[1])
+    );
+}
+
+boundedTest(
+  "v5 explicit preparation stop uses reverse original-ID order and can publish after verified completion",
+  async () => {
+    const worker = await dependencyFixture();
+    fixture.states = { [ID]: true, [worker]: true };
+    await save();
+    const { store, generation } = await prepared();
+    const controller = new AbortController();
+    try {
+      const binary = await compiler(),
+        deadline = Date.now() + 20_000;
+      expect(
+        await store.withPreparationStop({
+          generation,
+          binary,
+          deadline,
+          run: async (input) => {
+            expect((await readReceipt()).pendingOperation.operation).toBe(
+              "stop"
+            );
+            return await runLegacyComposeRetainedOperation({
+              input,
+              operation: "stop",
+              deadline,
+              signal: controller.signal,
+            });
+          },
+        })
+      ).toBe(0);
+      expect(await mutationCommands()).toEqual([
+        ["container", "stop", worker],
+        ["container", "stop", ID],
+      ]);
+      expect((await readReceipt()).pendingOperation).toBeNull();
+      await store.publish({ generation, binary });
+      expect((await readReceipt()).publication.phase).toBe("active");
+    } finally {
+      await store.close();
+    }
+  },
+  30_000
+);
+
+boundedTest(
+  "v5 expired aggregate deadline after callback keeps pending instead of acknowledging completion",
+  async () => {
+    await dependencyFixture();
+    const { store, generation } = await prepared();
+    try {
+      const binary = await compiler();
+      await store.publish({ generation, binary });
+      const deadline = Date.now() + 5000;
+      await refusal(
+        store.withMutation({
+          generation,
+          binary,
+          operation: "stop",
+          services: [],
+          deadline,
+          run: async () => {
+            await Bun.sleep(Math.max(1, deadline - Date.now() + 5));
+            return 0;
+          },
+        }),
+        "E_LEGACY_ADOPTION_CHANGED"
+      );
+      expect((await readReceipt()).pendingOperation.operation).toBe("stop");
+    } finally {
+      await store.close();
+    }
+  },
+  30_000
+);
+
+boundedTest(
+  "v5 requires one finite aggregate deadline before probing or journaling a mutation",
+  async () => {
+    await dependencyFixture();
+    const { store, generation } = await prepared();
+    try {
+      const binary = await compiler();
+      await store.publish({ generation, binary });
+      const before = await readFile(join(root, "commands"), "utf8");
+      let called = false;
+      for (const deadline of [
+        undefined,
+        Number.NaN,
+        Number.POSITIVE_INFINITY,
+        Date.now() - 1,
+      ]) {
+        await refusal(
+          store.withMutation({
+            generation,
+            binary,
+            operation: "stop",
+            services: [],
+            deadline,
+            run: async () => {
+              called = true;
+              return 0;
+            },
+          }),
+          "E_LEGACY_ADOPTION_UNSUPPORTED"
+        );
+      }
+      expect(called).toBe(false);
+      expect(await readFile(join(root, "commands"), "utf8")).toBe(before);
+      expect((await readReceipt()).pendingOperation).toBeNull();
+    } finally {
+      await store.close();
+    }
+  },
+  30_000
+);
+
+for (const linked of [false, true]) {
+  boundedTest(
+    `rolled-back v5 can reprepare a verified plain generation with ${linked ? "linked" : "directory"} checkout receipt version`,
+    async () => {
+      if (linked) {
+        await linkedCheckout();
+      }
+      const worker = await dependencyFixture();
+      const { store, generation } = await prepared();
+      try {
+        const binary = await compiler();
+        await store.publish({ generation, binary });
+        await store.rollback();
+        const composePath = join(projectRoot, ".hack/docker-compose.yml");
+        const authored = JSON.parse(await readFile(composePath, "utf8"));
+        authored.services.web.depends_on = undefined;
+        authored.services.db.healthcheck = undefined;
+        await writeFile(composePath, JSON.stringify(authored));
+        // The synthetic engine config-hash owner continues to attest the new source.
+        const plain = await store.prepare({ binary });
+        expect(plain.report.adoption_generation_version).toBe(1);
+        expect((await readReceipt()).adoption_receipt_version).toBe(
+          linked ? 2 : 1
+        );
+        expect(
+          (await store.loadPrepared())?.report.adoption_generation_version
+        ).toBe(1);
+        await store.publish({ generation: plain, binary });
+        expect(
+          (await store.loadActive())?.report.adoption_generation_version
+        ).toBe(1);
+        expect(await mutationCommands()).toEqual([]);
+        expect(fixture.container.map((row) => row.id)).toEqual([ID, worker]);
+        expect(fixture.volume[0]?.createdAt).toBe(CREATED);
+      } finally {
+        await store.close();
+      }
+    },
+    30_000
+  );
+}
+
+for (const stage of ["per-effect freshness", "final observation"] as const) {
+  boundedTest(
+    `v5 remaining aggregate clock terminates held ${stage} and retains pending`,
+    async () => {
+      await dependencyFixture();
+      const { store, generation } = await prepared();
+      try {
+        const binary = await compiler();
+        await store.publish({ generation, binary });
+        const deadline = Date.now() + 5000;
+        let reachedCallback = false;
+        await refusal(
+          store.withMutation({
+            generation,
+            binary,
+            operation: "stop",
+            services: [],
+            deadline,
+            run: async (input) => {
+              reachedCallback = true;
+              fixture.mode =
+                stage === "per-effect freshness" ? "hang" : "hang-state";
+              await save();
+              if (stage === "per-effect freshness") {
+                await input.assertFresh();
+              }
+              return 0;
+            },
+          }),
+          "E_LEGACY_ADOPTION_CHANGED"
+        );
+        expect(reachedCallback).toBe(true);
+        expect(Date.now()).toBeLessThan(deadline + 1500);
+        const pid = Number(
+          (await readFile(join(root, "started"), "utf8")).trim()
+        );
+        expect(Number.isSafeInteger(pid)).toBe(true);
+        let alive = true;
+        try {
+          process.kill(pid, 0);
+        } catch {
+          alive = false;
+        }
+        expect(alive).toBe(false);
+        expect((await readReceipt()).pendingOperation.operation).toBe("stop");
+        expect(await mutationCommands()).toEqual([]);
+        expect(fixture.volume[0]?.createdAt).toBe(CREATED);
+      } finally {
+        await store.close();
+      }
+    },
+    30_000
+  );
+}
+
+boundedTest(
+  "final prepared anchor cannot authorize the earlier staged query; old temporal guard refuses before effects",
+  async () => {
+    await dependencyFixture();
+    fixture.dependencyReadScope = {
+      projectRoot,
+      first: await captureAdoptionDependencyFirstPrepare({ projectRoot }),
+      allowFirstPrepare: false,
+    };
+    await save();
+    await refusal(prepared(), "E_LEGACY_ADOPTION_STATE");
+    const stages = (await readFile(join(root, "read-stages"), "utf8"))
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    expect(stages.at(-1)).toEqual({ stage: "staged", allowed: false });
+    expect((await readReceipt()).prepared).toBeNull();
+    expect((await readReceipt()).pendingOperation).toBeNull();
+    expect(await mutationCommands()).toEqual([]);
+    expect(fixture.volume[0]?.createdAt).toBe(CREATED);
+  },
+  30_000
+);
+
+boundedTest(
+  "dependency fixture admits first preparation before publication and checks later reads against their current receipt",
+  async () => {
+    await dependencyFixture();
+    fixture.dependencyReadScope = {
+      projectRoot,
+      first: await captureAdoptionDependencyFirstPrepare({ projectRoot }),
+      allowFirstPrepare: true,
+    };
+    await save();
+    const { store, generation } = await prepared();
+    try {
+      await store.publish({ generation, binary: await compiler() });
+      const stages = (await readFile(join(root, "read-stages"), "utf8"))
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line));
+      expect(
+        stages.filter((row) => row.stage === "staged").length
+      ).toBeGreaterThan(0);
+      expect(
+        stages.filter((row) => row.stage === "published").length
+      ).toBeGreaterThan(0);
+      expect(stages.every((row) => row.allowed)).toBe(true);
+      expect(await mutationCommands()).toEqual([]);
+      expect(fixture.volume[0]?.createdAt).toBe(CREATED);
+    } finally {
+      await store.close();
+    }
+  },
+  30_000
+);
+
+boundedTest(
+  "v5 retained dispatch orders exact originals and reverses stops without creating data",
+  async () => {
+    const worker = await dependencyFixture(),
+      original = await originalSnapshots();
+    fixture.dependencyReadScope = {
+      projectRoot,
+      first: await captureAdoptionDependencyFirstPrepare({ projectRoot }),
+      allowFirstPrepare: true,
+    };
+    await save();
+    const { store, generation } = await prepared();
+    const priorCompiler = process.env.HACK_CONFIG_COMPILER_BINARY;
+    try {
+      const binary = await compiler();
+      process.env.HACK_CONFIG_COMPILER_BINARY = binary;
+      expect(generation.report.adoption_generation_version).toBe(5);
+      expect((await readReceipt()).adoption_receipt_version).toBe(5);
+      expect(JSON.stringify(generation)).not.toContain(CANARY);
+      await store.publish({ generation, binary });
+      expect(
+        await tryLegacyComposeAdoptedCommand({
+          cwd: projectRoot,
+          operation: "up",
+          detach: true,
+        })
+      ).toBe(0);
+      expect(await mutationCommands()).toEqual([
+        ["container", "start", ID],
+        ["container", "start", worker],
+      ]);
+      expect(
+        await tryLegacyComposeAdoptedCommand({
+          cwd: projectRoot,
+          operation: "down",
+        })
+      ).toBe(0);
+      expect((await mutationCommands()).slice(2)).toEqual([
+        ["container", "stop", worker],
+        ["container", "stop", ID],
+      ]);
+      fixture = JSON.parse(await readFile(join(root, "fixture.json"), "utf8"));
+      expect(fixture.volume[0]?.createdAt).toBe(CREATED);
+      expect(fixture.container.map((row) => row.id)).toEqual([ID, worker]);
+      expect((await readReceipt()).pendingOperation).toBeNull();
+      const reads = (await readFile(join(root, "read-stages"), "utf8"))
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line));
+      expect(reads.length).toBeGreaterThan(20);
+      expect(reads.every((row) => row.allowed)).toBe(true);
+      await store.rollback();
+      await expectOriginals(original);
+    } finally {
+      restoreEnv("HACK_CONFIG_COMPILER_BINARY", priorCompiler);
+      await store.close();
+    }
+  },
+  30_000
+);
+
+boundedTest(
+  "v5 partial selection refuses before a journal or effect; private recheck expires at callback return",
+  async () => {
+    await dependencyFixture();
+    const { store, generation } = await prepared();
+    try {
+      const binary = await compiler();
+      await store.publish({ generation, binary });
+      let calls = 0;
+      await refusal(
+        store.withMutation({
+          deadline: Date.now() + 20_000,
+          generation,
+          binary,
+          operation: "start",
+          services: ["db"],
+          run: async () => {
+            calls++;
+            return 0;
+          },
+        }),
+        "E_LEGACY_ADOPTION_UNSUPPORTED"
+      );
+      expect(calls).toBe(0);
+      expect((await readReceipt()).pendingOperation).toBeNull();
+      let retained: (() => Promise<void>) | undefined;
+      await store.withMutation({
+        deadline: Date.now() + 20_000,
+        generation,
+        binary,
+        operation: "stop",
+        services: [],
+        run: async (input) => {
+          expect(Object.keys(input)).toEqual([]);
+          expect(JSON.stringify(input)).toBe("{}");
+          retained = input.assertFresh;
+          await input.assertFresh();
+          return 0;
+        },
+      });
+      const before = await readFile(join(root, "commands"), "utf8");
+      if (!retained) {
+        throw new Error("missing test capability");
+      }
+      await expect(retained()).rejects.toThrow("values omitted");
+      expect(await readFile(join(root, "commands"), "utf8")).toBe(before);
+    } finally {
+      await store.close();
+    }
+  },
+  30_000
+);
+
+boundedTest(
+  "v5 source drift between ordered effects retains pending evidence and explicit repair permits stop recovery",
+  async () => {
+    const worker = await dependencyFixture();
+    const { store, generation } = await prepared();
+    const priorCompiler = process.env.HACK_CONFIG_COMPILER_BINARY;
+    try {
+      const binary = await compiler();
+      process.env.HACK_CONFIG_COMPILER_BINARY = binary;
+      await store.publish({ generation, binary });
+      const candidate = await readFile(
+        join(projectRoot, ".hack/hack.project.json"),
+        "utf8"
+      );
+      fixture.sourceRace = true;
+      await save();
+      await expect(
+        tryLegacyComposeAdoptedCommand({
+          cwd: projectRoot,
+          operation: "up",
+          detach: true,
+        })
+      ).rejects.toThrow("values omitted");
+      expect(await mutationCommands()).toEqual([["container", "start", ID]]);
+      expect((await readReceipt()).pendingOperation.operation).toBe("start");
+      fixture = JSON.parse(await readFile(join(root, "fixture.json"), "utf8"));
+      fixture.sourceRace = false;
+      await save();
+      await writeFile(join(projectRoot, ".hack/hack.project.json"), candidate);
+      expect(
+        await tryLegacyComposeAdoptedCommand({
+          cwd: projectRoot,
+          operation: "down",
+          recover: true,
+        })
+      ).toBe(0);
+      expect((await mutationCommands()).slice(1)).toEqual([
+        ["container", "stop", worker],
+        ["container", "stop", ID],
+      ]);
+      expect((await readReceipt()).pendingOperation).toBeNull();
+      expect(fixture.volume[0]?.createdAt).toBe(CREATED);
+    } finally {
+      restoreEnv("HACK_CONFIG_COMPILER_BINARY", priorCompiler);
+      await store.close();
+    }
+  },
+  30_000
+);
+
+boundedTest(
+  "v5 final unhealthy observation cannot acknowledge a successful effect",
+  async () => {
+    await dependencyFixture();
+    const { store, generation } = await prepared();
+    try {
+      const binary = await compiler();
+      await store.publish({ generation, binary });
+      await refusal(
+        store.withMutation({
+          deadline: Date.now() + 20_000,
+          generation,
+          binary,
+          operation: "start",
+          services: [],
+          run: async () => {
+            fixture.states = Object.fromEntries(
+              fixture.container.map((row) => [String(row.id), true])
+            );
+            fixture.health = { [ID]: "unhealthy" };
+            await save();
+            return 0;
+          },
+        }),
+        "E_LEGACY_ADOPTION_CHANGED"
+      );
+      expect((await readReceipt()).pendingOperation.operation).toBe("start");
+      await refusal(store.loadActive(), "E_LEGACY_ADOPTION_BUSY");
+      expect(fixture.volume[0]?.createdAt).toBe(CREATED);
+    } finally {
+      await store.close();
+    }
+  },
+  30_000
+);
+
+boundedTest(
+  "v5 recheck cancellation refuses a next effect and retains the journal",
+  async () => {
+    await dependencyFixture();
+    const controller = new AbortController();
+    const store = await openLegacyComposeAdoptedGenerationStore({
+      projectRoot,
+      signal: controller.signal,
+    });
+    try {
+      const binary = await compiler(),
+        generation = await store.prepare({ binary });
+      await store.publish({ generation, binary });
+      let effects = 0;
+      await refusal(
+        store.withMutation({
+          deadline: Date.now() + 20_000,
+          generation,
+          binary,
+          operation: "start",
+          services: [],
+          run: async (input) => {
+            effects++;
+            controller.abort(CANARY);
+            await input.assertFresh();
+            effects++;
+            return 0;
+          },
+        }),
+        "E_LEGACY_ADOPTION_CANCELLED"
+      );
+      expect(effects).toBe(1);
+      expect((await readReceipt()).pendingOperation.operation).toBe("start");
+    } finally {
+      await store.close();
+    }
+  },
+  30_000
+);
+
+boundedTest(
+  "v5 active captured signal reaps the actual retained effect and keeps pending",
+  async () => {
+    await dependencyFixture();
+    const controller = new AbortController();
+    const store = await openLegacyComposeAdoptedGenerationStore({
+      projectRoot,
+      signal: controller.signal,
+    });
+    try {
+      const binary = await compiler(),
+        generation = await store.prepare({ binary });
+      await store.publish({ generation, binary });
+      fixture.hangMutation = true;
+      await save();
+      const deadline = Date.now() + 20_000;
+      let effectStartedAt = 0;
+      await refusal(
+        store.withMutation({
+          generation,
+          binary,
+          operation: "start",
+          services: [],
+          deadline,
+          run: async (input) => {
+            const operation = runLegacyComposeRetainedOperation({
+              input,
+              operation: "start",
+              deadline,
+              signal: controller.signal,
+            });
+            const readyUntil = Date.now() + 4000;
+            while (
+              !(await Bun.file(join(root, "effect-started")).exists()) &&
+              Date.now() < readyUntil
+            ) {
+              await Bun.sleep(10);
+            }
+            expect(await Bun.file(join(root, "effect-started")).exists()).toBe(
+              true
+            );
+            effectStartedAt = Date.now();
+            controller.abort(CANARY);
+            return await operation;
+          },
+        }),
+        "E_LEGACY_ADOPTION_CANCELLED"
+      );
+      expect(Date.now() - effectStartedAt).toBeLessThan(4000);
+      const pid = Number(await Bun.file(join(root, "effect-started")).text());
+      let alive = true;
+      try {
+        process.kill(pid, 0);
+      } catch {
+        alive = false;
+      }
+      expect(alive).toBe(false);
+      expect(await mutationCommands()).toEqual([["container", "start", ID]]);
+      expect((await readReceipt()).pendingOperation.operation).toBe("start");
+      expect(fixture.volume[0]?.createdAt).toBe(CREATED);
+    } finally {
+      await store.close();
+    }
+  },
+  30_000
+);
+
+boundedTest.skipIf(!process.env.HACK_TEST_OLD_ADOPTION_BINARY)(
+  "v5 supplied previous upgraded owner refuses before compiler, key or engine reads",
+  async () => {
+    await dependencyFixture();
+    const { store, generation } = await prepared();
+    try {
+      const binary = await compiler();
+      await store.publish({ generation, binary });
+      const oldBinary = process.env.HACK_TEST_OLD_ADOPTION_BINARY;
+      if (!oldBinary) {
+        throw new Error("required previous binary unavailable");
+      }
+      const before = await readFile(join(root, "commands"), "utf8");
+      const child = Bun.spawn(
+        [oldBinary, "--path", projectRoot, "ps", "--json"],
+        {
+          env: {
+            PATH: `${root}:/usr/bin:/bin`,
+            HOME: root,
+            HACK_HOME: join(root, "old-owner-home"),
+            HACK_CONFIG_COMPILER_BINARY: binary,
+          },
+          stdin: "ignore",
+          stdout: "pipe",
+          stderr: "pipe",
+          timeout: 5000,
+        }
+      );
+      const [stdout, stderr, code] = await Promise.all([
+        new Response(child.stdout).text(),
+        new Response(child.stderr).text(),
+        child.exited,
+      ]);
+      expect(code).not.toBe(0);
+      expect(stdout + stderr).toContain("Legacy adoption selection");
+      expect(stdout + stderr).not.toContain(CANARY);
+      expect(await readFile(join(root, "commands"), "utf8")).toBe(before);
+    } finally {
+      await store.close();
+    }
+  },
+  30_000
+);
 
 async function managedGenerated() {
   const composeText = await readFile(

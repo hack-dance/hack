@@ -3,6 +3,7 @@ import { CliUsageError } from "../cli/command.ts";
 import { HackCliError } from "./cli-result.ts";
 import { resolveComposeStartupTimeoutMs } from "./compose-startup-budget.ts";
 import type { LegacyComposeVerifiedBinding } from "./native-compose-adoption-binding.ts";
+import { runLegacyComposeRetainedOperation } from "./native-compose-adoption-execution.ts";
 import {
   LegacyComposeAdoptedGenerationError,
   openLegacyComposeAdoptedGenerationStore,
@@ -281,13 +282,23 @@ export async function tryLegacyComposeAdoptedCommand(
       const requested = requestedServices(options);
       const operation = mutationOperation(options.operation);
       if (operation) {
+        const deadline = Date.now() + timeoutMs;
         return await store.withMutation({
           generation,
           operation,
           services: requested,
           recover: options.recover,
+          deadline,
           run: async (privateInput) => {
             cancelled(signal);
+            if (privateInput.retainedPlan.requiresV5) {
+              return await runLegacyComposeRetainedOperation({
+                input: privateInput,
+                operation,
+                deadline,
+                signal,
+              });
+            }
             const containers = selectContainers(options, privateInput.binding);
             return await run(
               [

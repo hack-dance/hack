@@ -1,6 +1,8 @@
 //! Native image-only lowering; runtime ownership and effects are separately admitted.
 use super::*;
 use crate::{project::native::NativeInputs, provider::native_input};
+#[cfg(target_os = "macos")]
+pub mod foreground;
 mod journal;
 mod runtime;
 pub mod selection;

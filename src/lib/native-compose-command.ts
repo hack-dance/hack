@@ -92,6 +92,7 @@ import {
   selectNativeComposeProject,
 } from "./native-compose-selection.ts";
 import { NativeConfigCompilerError } from "./native-config-compiler.ts";
+import { parseEnvConfigSelection } from "./project.ts";
 import { run } from "./shell.ts";
 
 type Operation = "up" | "restart" | "down" | "ps" | "logs" | "exec" | "run";
@@ -1721,9 +1722,16 @@ function validateNativeOptions(options: NativeComposeCommandOptions): boolean {
 
 /** Dispatch native authored inputs before any legacy context or registry mutation. */
 export async function tryNativeComposeCommand(
-  options: NativeComposeCommandOptions
+  input: NativeComposeCommandOptions
 ): Promise<number | null> {
-  const adopted = await tryLegacyComposeAdoptedCommand(options);
+  // Capture the CLI selection once: explicit base is null, omission inherits.
+  // Adoption still checks the original request before authored dispatch.
+  const options = {
+    ...input,
+    overlay:
+      input.overlay === null ? null : parseEnvConfigSelection(input.overlay),
+  };
+  const adopted = await tryLegacyComposeAdoptedCommand(input);
   if (adopted !== null) {
     return adopted;
   }

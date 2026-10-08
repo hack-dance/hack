@@ -23,7 +23,8 @@ refuse before managed value resolution and provider work. `--detach`, `--json`,
 service subsets, recovery and other lifecycle operations refuse before input
 acquisition. `--branch` supplies an explicit native namespace; its omission uses
 the canonical project namespace without inferring a Git branch. Profile and env
-selection keep their compiler contracts.
+selection keep their compiler contracts. `--env base` bypasses inherited overlays
+with an explicit base selection; omitting `--env` retains the authored/local default.
 
 Startup shares the configured `HACK_COMPOSE_STARTUP_TIMEOUT_MS` budget across
 input preparation and native review, with a native maximum of 300000 milliseconds.

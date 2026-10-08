@@ -1,5 +1,6 @@
 import { afterEach, expect, spyOn, test } from "bun:test";
 import { chmodSync, copyFileSync, renameSync } from "node:fs";
+import * as privateFiles from "node:fs/promises";
 import {
   chmod,
   copyFile,
@@ -362,6 +363,79 @@ test("held recovery retirement refuses guard loss during its dead-process inspec
       }
     });
   } finally {
+    await parent.file.close();
+  }
+});
+
+test("retirement cannot unlink the selected owner when its recovery callback settles during the final read", async () => {
+  const current = await fixture();
+  await current.kill();
+  const selected = await current.lock.selectInterruptedLock();
+  const parent = await holdDirectory(current.root, true);
+  let readReached!: () => void;
+  const reached = new Promise<void>((resolve) => {
+    readReached = resolve;
+  });
+  let finishRead!: () => void;
+  const paused = new Promise<void>((resolve) => {
+    finishRead = resolve;
+  });
+  const originalOpen = privateFiles.open;
+  const readers: ReturnType<typeof spyOn>[] = [];
+  const intercept = spyOn(privateFiles, "open").mockImplementation(
+    async (...args) => {
+      const file: Awaited<ReturnType<typeof privateFiles.open>> =
+        await Reflect.apply(originalOpen, privateFiles, args);
+      if (args[0] === join(current.root, "held/owner")) {
+        const originalRead = file.read;
+        readers.push(
+          spyOn(file, "read").mockImplementation(async (...readArgs) => {
+            const result = await Reflect.apply(originalRead, file, readArgs);
+            readReached();
+            await paused;
+            return result;
+          })
+        );
+      }
+      return file;
+    }
+  );
+  let request: Promise<void> | undefined;
+  try {
+    const recovery = createNativeComposePrivateMutationLock({
+      lockPath: join(current.root, "recovering"),
+      recoveryPath: join(current.root, "recovering.recovery"),
+      parent,
+      check: () => recheckDirectories([parent]),
+    });
+    await recovery.withLock(async (lease) => {
+      request = current.lock.retireSelectedUnderRecoveryLease({
+        selected,
+        lease,
+      });
+      void request.catch(() => undefined);
+      await Promise.race([
+        reached,
+        Bun.sleep(3000).then(() => {
+          throw new Error("Owned read pause was not reached.");
+        }),
+      ]);
+      // Returning ends the actual issued lease while its retirement is awaiting read.
+    });
+    expect((await readdir(current.root)).includes("recovering")).toBe(false);
+    finishRead();
+    await expect(request).rejects.toThrow();
+    expect(await readdir(join(current.root, "held"))).toEqual(["owner"]);
+    expect((await lstat(join(current.root, "held/owner"))).ino).toBe(
+      selected.file.ino
+    );
+  } finally {
+    finishRead();
+    await request?.catch(() => undefined);
+    for (const reader of readers) {
+      reader.mockRestore();
+    }
+    intercept.mockRestore();
     await parent.file.close();
   }
 });

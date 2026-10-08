@@ -34,6 +34,7 @@ export type NativeComposeMutationLease = {
   readonly owner: { readonly dev: number; readonly ino: number };
   /** Private copied owner/inode metadata; this snapshot alone is not a lease. */
   readonly selection: NativeComposeInterruptedLockSelection;
+  readonly assertActive: () => undefined;
   readonly assertHeld: () => Promise<void>;
 };
 const mutationLeases = new WeakSet<NativeComposeMutationLease>();
@@ -566,6 +567,7 @@ export function createNativeComposePrivateMutationLock(opts: {
     const ownerPath = join(lockPath, "owner");
     const lockToken = JSON.stringify(lockOwner);
     let ownerInfo: Stats | undefined;
+    let issued: NativeComposeMutationLease | undefined;
     let active = true;
     const assertHeld = async () => {
       if (!active) {
@@ -596,11 +598,21 @@ export function createNativeComposePrivateMutationLock(opts: {
           info: ownerInfo,
           text: lockToken,
         }),
+        assertActive: () => {
+          if (issued === undefined || !mutationLeases.has(issued) || !active) {
+            return refuse();
+          }
+          return undefined;
+        },
         assertHeld,
       });
       mutationLeases.add(lease);
+      issued = lease;
       return await run(lease);
     } finally {
+      if (issued !== undefined) {
+        mutationLeases.delete(issued);
+      }
       try {
         await assertHeld();
         await unlink(ownerPath);
@@ -799,6 +811,7 @@ export function createNativeComposePrivateMutationLock(opts: {
                 expected,
                 interruptedSelection(lock, current)
               );
+              lease.assertActive();
               await unlink(ownerPath);
             }
             await verify();
@@ -806,6 +819,7 @@ export function createNativeComposePrivateMutationLock(opts: {
             if ((await readdir(lockPath)).length !== 0) {
               return refuse();
             }
+            lease.assertActive();
             await rmdir(lockPath);
             await parent?.file.sync();
           } finally {

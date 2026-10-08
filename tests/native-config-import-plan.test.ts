@@ -1,6 +1,9 @@
 import { expect, test } from "bun:test";
 import { parseImportDocument } from "../src/lib/native-config-import-parser.ts";
-import { mapLegacyNativeImport } from "../src/lib/native-config-import-plan.ts";
+import {
+  mapLegacyNativeAdoptionBaseline,
+  mapLegacyNativeImport,
+} from "../src/lib/native-config-import-plan.ts";
 
 const CANARY = "synthetic-private-import-value";
 const CONFIG = '{"name":"fixture"}';
@@ -141,6 +144,27 @@ test("one owned internal bridge maps selected and inactive static aliases withou
   ).toBe(true);
   expect(JSON.stringify(source)).toBe(original);
   expect(JSON.stringify(result)).not.toContain("db-reader");
+});
+
+test("owned bridge and inactive completed job refuse retained adoption baseline", () => {
+  code(
+    mapLegacyNativeAdoptionBaseline({
+      configText: '{"name":"fixture"}',
+      composeText: JSON.stringify({
+        networks: { private: { internal: true } },
+        services: {
+          web: { image: "fixture:1", networks: ["private"] },
+          initialize: {
+            image: "fixture:1",
+            labels: { "hack.service.one-shot": "true" },
+            profiles: ["later"],
+            networks: ["private"],
+          },
+        },
+      }),
+    }),
+    "completed_job_adoption_unqualified"
+  );
 });
 
 test.each([

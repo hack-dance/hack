@@ -1,8 +1,8 @@
 import { createHash } from "node:crypto";
 import { lstat, mkdir, rename, unlink } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
-import { DEFAULT_INGRESS_NETWORK } from "../constants.ts";
 import { isRecord } from "./guards.ts";
+import { readNativeComposeNetworkTopology } from "./native-compose-network-topology.ts";
 import {
   createNativeComposePrivateMutationLock,
   type HeldDirectory,
@@ -22,10 +22,17 @@ import {
   writeExclusive,
 } from "./native-compose-private-state.ts";
 import { projectNativeComposeOneOff } from "./native-compose-run-projection.ts";
+
+// biome-ignore lint/performance/noBarrelFile: Preserve the generation store's public topology contract after the single-parser extraction.
+export {
+  type NativeComposeSavedNetworkTopology,
+  readNativeComposeNetworkTopology,
+} from "./native-compose-network-topology.ts";
+
 import { inspectProjectInputsAtRoot } from "./project-input-selection.ts";
 import { resolveVerifiedPrimaryWorktreeRoot } from "./worktree-local-config.ts";
 
-// biome-ignore lint/performance/noBarrelFile: Preserve the existing generation error import and class identity after the mechanical owner extraction.
+// Preserve the generation error's public import and constructor identity.
 export { NativeComposeGenerationError } from "./native-compose-private-state.ts";
 
 const RECEIPT_LIMIT = 64 * 1024;
@@ -556,7 +563,7 @@ function publicPending(value: Receipt["pending"]): NativeComposePending | null {
           : { recoveryToken: value.recoveryToken }),
       };
 }
-/** Check reserved delivery identity only; renderer owns all Compose feature policy. */
+/** Check reserved delivery identity and closed saved topology; renderer owns authoring policy. */
 function documentOwned(
   document: unknown,
   reservation: NativeComposeReservation
@@ -603,18 +610,12 @@ function documentOwned(
   ) {
     return false;
   }
-  return (
-    !Object.hasOwn(document, "networks") ||
-    (isRecord(document.networks) &&
-      Object.entries(document.networks).every(([name, network]) =>
-        name === "ingress"
-          ? isRecord(network) &&
-            keys(network, "external,name") &&
-            network.external === true &&
-            network.name === DEFAULT_INGRESS_NETWORK
-          : labelsMatch(network, false)
-      ))
-  );
+  try {
+    readNativeComposeNetworkTopology(document, reservation.identity);
+    return true;
+  } catch {
+    return false;
+  }
 }
 function requireDocumentOwned(
   json: string,

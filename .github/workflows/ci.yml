@@ -271,7 +271,15 @@ jobs:
       - name: Run local and Docker E2E
         env:
           HACK_E2E_CLI_BIN: ${{ github.workspace }}/dist/hack
-        run: HACK_E2E_REQUIRE_DOCKER=1 HACK_E2E_REQUIRE_TMUX=1 bun run test:e2e:local:docker
+        run: |
+          HACK_E2E_DOCKER_HOST="${DOCKER_HOST:-$(docker context inspect --format '{{.Endpoints.docker.Host}}')}"
+          HACK_E2E_NETWORK_SOURCE_REVISION="$(git rev-parse HEAD)"
+          HACK_E2E_NETWORK_CLI_SHA256="$(sha256sum dist/hack | cut -d ' ' -f1)"
+          HACK_E2E_NETWORK_COMPILER_SHA256="$(sha256sum dist/hack-config-compiler | cut -d ' ' -f1)"
+          HACK_E2E_COMPOSE_PLUGIN_PATH="$(docker info --format '{{json .ClientInfo.Plugins}}' | bun -e 'import { realpath } from "node:fs/promises"; const value = await Bun.stdin.json(); const plugin = Array.isArray(value) ? value.find((entry) => entry && Object.hasOwn(entry, "Name") && entry.Name === "compose") : null; if (!(plugin && Object.hasOwn(plugin, "Path") && typeof plugin.Path === "string" && plugin.Path.startsWith("/"))) throw new Error("Installed Compose plugin path is unavailable"); process.stdout.write(await realpath(plugin.Path));')"
+          HACK_E2E_COMPOSE_PLUGIN_SHA256="$(sha256sum "$HACK_E2E_COMPOSE_PLUGIN_PATH" | cut -d ' ' -f1)"
+          export HACK_E2E_DOCKER_HOST HACK_E2E_NETWORK_SOURCE_REVISION HACK_E2E_NETWORK_CLI_SHA256 HACK_E2E_NETWORK_COMPILER_SHA256 HACK_E2E_COMPOSE_PLUGIN_PATH HACK_E2E_COMPOSE_PLUGIN_SHA256
+          HACK_E2E_REQUIRE_DOCKER=1 HACK_E2E_REQUIRE_TMUX=1 bun run test:e2e:local:docker
       - name: Smoke container resource metadata without optional fields
         run: |
           probe_id=$(docker create --network none --read-only alpine:3.20 true)

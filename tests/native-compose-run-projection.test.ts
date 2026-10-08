@@ -43,6 +43,16 @@ afterEach(async () => {
 });
 
 function inputDocument() {
+  const ownership = {
+    "io.hack.native-config.version": "1",
+    "io.hack.native-config.instance": "fixture",
+    "io.hack.native-config.owner": "b".repeat(32),
+  };
+  const workload = {
+    ...ownership,
+    "io.hack.native-config.generation": "c".repeat(32),
+    "io.hack.native-config.workload": "service",
+  };
   return {
     name: "fixture",
     services: {
@@ -56,20 +66,21 @@ function inputDocument() {
         volumes: ["data:/state"],
         networks: ["default", "ingress"],
         labels: {
+          ...workload,
           caddy_0: "https://fixture.dev.test",
           "caddy_0.reverse_proxy": "{{upstreams http 3000}}",
           "caddy_0.tls": "internal",
           caddy_ingress_network: "hack-dev",
-          "io.hack.native-config.owner": "b".repeat(32),
-          "io.hack.native-config.generation": "c".repeat(32),
-          "io.hack.native-config.workload": "service",
           "caddy-unrelated": "retained",
         },
       },
-      db: { image: "fixture-db:1", labels: {}, networks: ["default"] },
+      db: { image: "fixture-db:1", labels: workload, networks: ["default"] },
     },
     volumes: { data: { name: "fixture-data" } },
-    networks: { default: {}, ingress: { external: true, name: "hack-dev" } },
+    networks: {
+      default: { labels: ownership },
+      ingress: { external: true, name: "hack-dev" },
+    },
     "x-hack-native-routing": {
       version: 1,
       binding: {

@@ -181,7 +181,7 @@ async function fixture(mode: Mode = "ordinary") {
     join(root, "compiler"),
     `#!${process.execPath}
 const operation=process.argv[2];
-if(operation === "--protocol") console.log(JSON.stringify({transport_version:1,authored_version:1,plan_version:1,resolve_version:1,local_version:1,env_plan_version:1,routing_plan_version:1}));
+if(operation === "--protocol") console.log(JSON.stringify({transport_version:1,authored_version:1,plan_version:1,resolve_version:1,local_version:1,env_plan_version:1,routing_plan_version:1,network_plan_version:1}));
 else {
  const request=operation==="compile"?{}:JSON.parse(await Bun.stdin.text());
  const result={transport_version:1,ok:true,semantic_hash:"a".repeat(64),declared_workloads:{web:"service"},plan:${JSON.stringify(input.plan)}};
@@ -220,6 +220,7 @@ const args=process.argv.slice(2), format=args[args.indexOf("--format")+1]??"", o
 appendFileSync(root+"/commands",JSON.stringify(args)+"\\n");
 const hasOne=()=>existsSync(oneFile), oneName=()=>hasOne()?readFileSync(oneFile,"utf8"):"";
 const mainId=()=>mode==="replacement"&&existsSync(root+"/spawned")?"e".repeat(64):main;
+const ownedNetwork="f".repeat(64), ownedName=project+"_default";
 const containers=()=>[{id:mainId(),name:project+"-web-1",project},...(hasOne()?[{id:oneId,name:oneName(),project}]:[])];
 const emit=(value)=>console.log(JSON.stringify(value));
 if(args[0]==="compose") {
@@ -249,10 +250,14 @@ if(args[0]==="info") {
   if(format.includes("routeLabels")) emit({id,routeLabels:mode==="exposed"?["caddy_0",null]:[null]});
   else if(format.includes("sites")) emit({id,project:proxy?"hack-dev-proxy":project,owner:proxy?null:owner,instance:proxy?null:project,generation:proxy?null:generation,sites:proxy||one?[null]:["https://fixture.dev.test",null]});
   else if(proxy) emit({id,project:"hack-dev-proxy",service:"caddy",running:true,network:binding.networkId,ip:binding.proxyIp});
-  else if(format.includes('"health"')) emit({id,name:"/"+(one?oneName():project+"-web-1"),project,version:"1",instance:project,owner:mode==="foreign"?"f".repeat(32):owner,generation,service:"web",oneoff:one?"True":"False",state:one?"exited":mode==="not-ready"?"exited":"running",exitCode:one?17:0,health:null});
+  else if(format.includes('"health"')) emit({id,name:"/"+(one?oneName():project+"-web-1"),project,version:"1",instance:project,owner:mode==="foreign"?"f".repeat(32):owner,generation,service:"web",oneoff:one?"True":"False",state:one?"exited":mode==="not-ready"?"exited":"running",exitCode:one?17:0,health:null,networks:{[ownedName]:{NetworkID:ownedNetwork,Aliases:one?[oneName()]:[project+"-web-1","web"]},"hack-dev":{NetworkID:binding.networkId,Aliases:one?[oneName()]:[project+"-web-1","web"]}}});
   else emit({id,project,instance:project,owner,generation,service:"web",oneoff:one?"True":"False",running:!one,network:binding.networkId,ip:one?"172.29.0.4":"172.29.0.3"});
  }
-} else if(args[0]==="network"&&args[1]==="inspect") emit({id:binding.networkId,name:"hack-dev"});
+} else if(args[0]==="network"&&args[1]==="ls") emit({id:ownedNetwork,name:ownedName,project});
+else if(args[0]==="network"&&args[1]==="inspect") {
+ if(format.includes('"owner"')) emit({id:ownedNetwork,name:ownedName,project,version:"1",instance:project,owner,driver:"bridge",internal:false,containers:{[mainId()]:{Name:project+"-web-1"}}});
+ else emit({id:binding.networkId,name:"hack-dev"});
+}
 else if(!(["network","volume"].includes(args[0])&&args[1]==="ls")) {console.error("private-command-canary");process.exit(97);}
 `
   );

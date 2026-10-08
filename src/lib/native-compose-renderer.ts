@@ -8,6 +8,12 @@ import type {
 import { isRecord } from "./guards.ts";
 import { selectNativeComposeBeforeHooks } from "./native-compose-host-contract.ts";
 import {
+  NativeComposeNetworkError,
+  type NativeComposeNetworks,
+  nativeComposeWorkloadsShareNetwork,
+  prepareNativeComposeNetworks,
+} from "./native-compose-networks.ts";
+import {
   type NativeComposeRouting,
   planNativeComposeRouting,
 } from "./native-compose-routing.ts";
@@ -43,6 +49,7 @@ const PLAN_FIELDS = {
   host_bindings: true,
   selected_profiles: true,
   storage: true,
+  networks: true,
   configs: true,
   secrets: true,
   services: true,
@@ -59,6 +66,7 @@ const WORKLOAD_FIELDS = {
   restart: true,
   working_directory: true,
   mounts: true,
+  networks: true,
   environment: true,
   depends_on: true,
   profiles: true,
@@ -74,6 +82,7 @@ type RenderContext = {
   readonly services: Workloads;
   readonly jobs: Workloads;
   readonly storage: Record<string, unknown>;
+  readonly networks: NativeComposeNetworks;
   readonly profiles: readonly string[];
   readonly routing: NativeComposeRouting | null;
 };
@@ -180,10 +189,7 @@ export function renderNativeCompose(
     ),
     volumes,
     networks: {
-      default: {
-        name: `${opts.runtimeIdentity}_default`,
-        labels: { ...resourceLabels },
-      },
+      ...prepared.context.networks.definitions,
       ...(prepared.context.routing
         ? {
             ingress: { name: prepared.context.routing.network, external: true },
@@ -239,6 +245,24 @@ function prepare(opts: NativeComposeInputs): PreparedCompose {
   const profiles = names(plan.selected_profiles);
   const storage = record(plan.storage);
   validateStorage(storage);
+  let networks: NativeComposeNetworks;
+  try {
+    networks = prepareNativeComposeNetworks({
+      plan,
+      workloads: { ...services, ...jobs },
+      runtimeIdentity: opts.runtimeIdentity,
+      labels: {
+        "io.hack.native-config.version": "1",
+        "io.hack.native-config.instance": opts.runtimeIdentity,
+        "io.hack.native-config.owner": opts.ownerToken,
+      },
+    });
+  } catch (error: unknown) {
+    if (error instanceof NativeComposeNetworkError) {
+      throw new NativeComposeRenderError("E_COMPOSE_NETWORK");
+    }
+    throw error;
+  }
   const env = environmentPlan(
     opts.environmentPlan,
     opts.beforeHooksOwned === true
@@ -256,6 +280,7 @@ function prepare(opts: NativeComposeInputs): PreparedCompose {
     services,
     jobs,
     storage,
+    networks,
     profiles,
     routing,
   };
@@ -550,7 +575,19 @@ function renderWorkload(opts: {
       ...(routingLabels ?? {}),
     },
   };
-  if (routingLabels) {
+  const attachments = context.networks.workloads[opts.name];
+  if (attachments) {
+    const selectedNetworks: JsonObject = Object.fromEntries(
+      Object.entries(attachments).map(([name, attachment]) => [
+        name,
+        { ...(attachment.aliases ? { aliases: [...attachment.aliases] } : {}) },
+      ])
+    );
+    if (routingLabels) {
+      selectedNetworks.ingress = {};
+    }
+    output.networks = selectedNetworks;
+  } else if (routingLabels) {
     output.networks = ["default", "ingress"];
   }
   acquisition(workload, output, context.root);
@@ -829,7 +866,7 @@ function renderEnvironment(opts: {
     values: opts.values,
     directives: opts.directives,
     scopeNames: ["global", opts.name],
-    endpointValue: (binding) => endpoint(binding, opts.context),
+    endpointValue: (binding) => endpoint(binding, opts.context, opts.name),
   });
 }
 
@@ -962,7 +999,8 @@ function verifyDirective(
 
 function endpoint(
   binding: Extract<EnvironmentBinding, { kind: "endpoint" }>,
-  context: RenderContext
+  context: RenderContext,
+  workload: string
 ): string {
   const { reference, target } = binding;
   assert(
@@ -978,6 +1016,14 @@ function endpoint(
         reference.port === target.port &&
         reference.protocol === target.protocol,
       "E_COMPOSE_ENDPOINT"
+    );
+    assert(
+      nativeComposeWorkloadsShareNetwork(
+        context.networks,
+        workload,
+        target.name
+      ),
+      "E_COMPOSE_ENDPOINT_NETWORK"
     );
     return `${target.protocol}://${target.name}:${target.port}`;
   }

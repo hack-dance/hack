@@ -328,6 +328,22 @@ endpoint before insertion. No new fields alter old hashes or replies when absent
 This compiler does not resolve DNS, execute hooks, start services, or prove endpoint
 reachability; native execution and backend translation remain separate work.
 
+## Owned bridge network topology
+
+Optional project `networks` defines owned bridges with `internal` defaulting to
+false. Optional workload `networks` is a nonempty attachment map whose entries
+accept only canonical DNS `aliases`. Omission retains the default outbound
+bridge; explicit attachment selection replaces it. `default` and `ingress`
+cannot be declared as custom bridges. The routing owner supplies ingress.
+
+Validation precedes profile pruning: unknown attachments, alias collisions with
+workloads or other owners on the same bridge, unsupported external/driver/IPAM
+options and disconnected direct service endpoints refuse before a plan is
+produced. Alias order is normalized; absent topology preserves previous plan
+serialization. Compiler validation is separate from execution-adapter acceptance.
+The protocol advertises `network_plan_version: 1`; callers must negotiate it
+before delivering authored network declarations, including inactive workloads.
+
 ## Workload process policy
 
 `process_plan_version: 1` adds optional service/job `entrypoint`, `init`,

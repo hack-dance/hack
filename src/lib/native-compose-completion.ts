@@ -3,6 +3,7 @@ import { isRecord } from "./guards.ts";
 import type { NativeComposeOwnershipObservation } from "./native-compose-ownership.ts";
 
 type PrivateDocument = Readonly<Record<string, unknown>>;
+const ON_FAILURE_RESTART = /^on-failure(?::[1-9][0-9]*)?$/;
 function invalid(): never {
   throw new HackCliError({
     code: "E_CONFIG_INVALID",
@@ -12,6 +13,22 @@ function invalid(): never {
 }
 function serviceMap(document: PrivateDocument): Record<string, unknown> {
   return isRecord(document.services) ? document.services : invalid();
+}
+
+/** Only saved services with a finite or unspecified on-failure policy may have the observed transient restart gap. */
+export function nativeComposeOnFailureServices(
+  document: PrivateDocument
+): readonly string[] {
+  return Object.entries(serviceMap(document))
+    .filter(
+      ([, value]) =>
+        isRecord(value) &&
+        isRecord(value.labels) &&
+        value.labels["io.hack.native-config.workload"] === "service" &&
+        typeof value.restart === "string" &&
+        ON_FAILURE_RESTART.test(value.restart)
+    )
+    .map(([name]) => name);
 }
 
 /** Readiness belongs to the exact proposed generation, not an older healthy graph. */

@@ -213,10 +213,54 @@ backslashes and drive syntax. Lexical `.` and repeated separators normalize; no
 filesystem or symlink resolution occurs. Working directories and mount targets
 must be absolute POSIX container paths without `..`.
 
-Network/security/resources, cache protocols, advanced build options, backend options, arbitrary extensions,
+Advanced network/security/resource options, cache protocols, advanced build options, backend options, arbitrary extensions,
 and other local settings are not yet implemented. They refuse rather than being
 silently dropped. This foundation does not replace the full native contract or
 qualify a migrated advanced project.
+
+## Owned project networks
+
+`networks` declares project-owned bridge networks. Each definition accepts only
+`internal` (default `false`). Workloads may select a nonempty `networks` map with
+optional DNS `aliases` on each attachment:
+
+```json
+{
+  "networks": { "private": { "internal": true } },
+  "services": {
+    "web": {
+      "image": "example/web:1",
+      "networks": { "default": {}, "private": { "aliases": ["frontend"] } }
+    },
+    "db": { "image": "example/db:1", "networks": { "private": {} } }
+  }
+}
+```
+
+Omitting workload attachments retains the owned outbound default bridge. An
+explicit attachment map replaces that selection; a workload on only an internal
+bridge does not acquire an outbound default bridge. `default` is a built-in
+attachment and cannot be redefined. `ingress` is reserved for the qualified
+routing owner, which attaches only routed services to its external proxy network.
+
+Aliases must be canonical and unique on their network, and cannot replace any
+workload name. Separate networks may reuse an alias. A direct service endpoint
+requires a shared authored network. These checks apply to inactive profiles too.
+Unused definitions do not allocate runtime networks.
+
+`network_plan_version: 1` is required before sending authored topology to a
+compiler, including declarations in inactive profiles. Successful replies must
+retain the exact selected workload namespace, definitions, internal policy,
+attachment selection and normalized aliases from the authored input. Omitted
+topology retains earlier plan bytes and hashes.
+
+External networks, arbitrary drivers, host networking, IPAM and static addresses
+remain unsupported and refuse. The compiler's topology preview does not prove
+runtime isolation or backend support; each execution adapter must qualify the
+owned network and attachment contract separately.
+The native graph adapter currently refuses any authored network field, including
+empty declarations and inactive attachments, before private value copying. Its
+default bridge does not qualify this custom-topology contract.
 
 ## Routing and domain previews
 

@@ -2,6 +2,7 @@ import { isRecord } from "../../src/lib/guards.ts";
 import { openNativeComposeGenerationStore } from "../../src/lib/native-compose-generation.ts";
 import {
   assertNativeComposeOwned,
+  type NativeComposeOwnershipObservation,
   type NativeComposeOwnershipOptions,
 } from "../../src/lib/native-compose-ownership.ts";
 
@@ -89,6 +90,71 @@ export async function observeNativeComposeFixture(root: string) {
   } finally {
     await store.close();
   }
+}
+
+export type NativeComposeFixtureVolumePin = {
+  readonly name: string;
+  readonly storage: string;
+  readonly createdAt: string;
+  readonly composeProject: string;
+  readonly runtimeIdentity: string;
+  readonly ownerToken: string;
+};
+
+/** Volumes have no immutable engine ID. Pin creation time and the exact saved storage/owner before cleanup. */
+export async function pinNativeComposeFixtureVolume(opts: {
+  readonly selection: NativeComposeOwnershipOptions;
+  readonly observed: NativeComposeOwnershipObservation;
+  readonly probe: (args: readonly string[]) => Promise<string>;
+}): Promise<NativeComposeFixtureVolumePin> {
+  const volume = opts.observed.volumes[0];
+  const saved = opts.selection.expectedVolumes?.[0];
+  if (
+    !(
+      volume &&
+      saved &&
+      opts.observed.volumes.length === 1 &&
+      opts.selection.expectedVolumes?.length === 1 &&
+      volume.name === saved.name &&
+      volume.storage === saved.storage
+    )
+  ) {
+    throw new Error("Expected original singleton owned fixture volume");
+  }
+  const value: unknown = JSON.parse(
+    await opts.probe([
+      "volume",
+      "inspect",
+      volume.name,
+      "--format",
+      '{"name":{{json .Name}},"createdAt":{{json .CreatedAt}},"storage":{{json (index .Labels "io.hack.native-config.storage")}},"ownerToken":{{json (index .Labels "io.hack.native-config.owner")}},"runtimeIdentity":{{json (index .Labels "io.hack.native-config.instance")}},"composeProject":{{json (index .Labels "com.docker.compose.project")}},"version":{{json (index .Labels "io.hack.native-config.version")}}}',
+    ])
+  );
+  if (
+    !(
+      isRecord(value) &&
+      Object.keys(value).sort().join() ===
+        "composeProject,createdAt,name,ownerToken,runtimeIdentity,storage,version" &&
+      typeof value.createdAt === "string" &&
+      value.createdAt.length > 0 &&
+      value.name === saved.name &&
+      value.storage === saved.storage &&
+      value.ownerToken === opts.selection.ownerToken &&
+      value.runtimeIdentity === opts.selection.runtimeIdentity &&
+      value.composeProject === opts.selection.composeProject &&
+      value.version === "1"
+    )
+  ) {
+    throw new Error("Fixture volume identity changed; values omitted");
+  }
+  return Object.freeze({
+    name: saved.name,
+    storage: saved.storage,
+    createdAt: value.createdAt,
+    ownerToken: opts.selection.ownerToken,
+    runtimeIdentity: opts.selection.runtimeIdentity,
+    composeProject: opts.selection.composeProject,
+  });
 }
 
 /** Cleanup failure fails successful acceptance; an earlier failure keeps its original evidence. */

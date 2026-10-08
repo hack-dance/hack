@@ -18,7 +18,9 @@ import {
   type ScenarioContext,
 } from "../harness.ts";
 import {
+  type NativeComposeFixtureVolumePin,
   observeNativeComposeFixture,
+  pinNativeComposeFixtureVolume,
   runWithOwnedCleanup,
 } from "../native-compose-owned-fixture.ts";
 
@@ -179,7 +181,19 @@ if((await Bun.file("mode").text())===phase+"17")process.exit(17);
     }
     return result;
   };
-  return { root, projectPath, projectText, envPath, envText, raw, docker };
+  const pins: { volume: NativeComposeFixtureVolumePin | null } = {
+    volume: null,
+  };
+  return {
+    root,
+    projectPath,
+    projectText,
+    envPath,
+    envText,
+    raw,
+    docker,
+    pins,
+  };
 }
 type Fixture = Awaited<ReturnType<typeof setup>>;
 async function assertStopped(fixture: Fixture, volume: string): Promise<void> {
@@ -210,18 +224,41 @@ async function cleanup(ctx: ScenarioContext, fixture: Fixture): Promise<void> {
       state.observed.networks.length === 0,
     message: "Unknown hook or engine effects prevent volume cleanup",
   });
-  for (const volume of state.observed.volumes) {
-    const code = await run(["docker", "volume", "rm", volume.name], {
-      stdin: "ignore",
-      timeoutMs: 10_000,
-      forwardSignals: true,
-    });
-    expect({
-      that: code === 0,
-      message:
-        "Remove only the freshly verified isolated fixture volume after retained-data proof",
-    });
+  const pin = fixture.pins.volume;
+  const current = await pinNativeComposeFixtureVolume({
+    ...state,
+    probe: fixture.docker,
+  });
+  if (!pin || JSON.stringify(current) !== JSON.stringify(pin)) {
+    throw new Error("Original fixture volume pin is missing or changed");
   }
+  // Repeat whole-owner absence and the original creation/storage/owner pin immediately before deletion.
+  const immediate = await observeNativeComposeFixture(fixture.root);
+  expect({
+    that:
+      immediate.stopped &&
+      immediate.pending === null &&
+      !immediate.beforeHooksPending &&
+      immediate.observed.containers.length === 0 &&
+      immediate.observed.networks.length === 0,
+    message: "Changed stop ownership prevents fixture volume cleanup",
+  });
+  const final = await pinNativeComposeFixtureVolume({
+    ...immediate,
+    probe: fixture.docker,
+  });
+  if (JSON.stringify(final) !== JSON.stringify(pin)) {
+    throw new Error("Fixture volume changed immediately before cleanup");
+  }
+  const code = await run(["docker", "volume", "rm", pin.name], {
+    stdin: "ignore",
+    timeoutMs: 10_000,
+    forwardSignals: true,
+  });
+  expect({
+    that: code === 0,
+    message: "Remove only the immediately reverified original fixture volume",
+  });
   const absent = await observeNativeComposeFixture(fixture.root);
   expect({
     that:
@@ -233,8 +270,6 @@ async function cleanup(ctx: ScenarioContext, fixture: Fixture): Promise<void> {
   ctx.log("finite down-hook fixture cleanup verified");
 }
 async function exercise(fixture: Fixture): Promise<void> {
-  let volume: string | undefined;
-  let createdAt: string | undefined;
   for (const [index, mode] of ["success", "before17", "after17"].entries()) {
     await Bun.write(join(fixture.root, "mode"), mode);
     await Bun.write(join(fixture.root, "order"), "");
@@ -248,6 +283,19 @@ async function exercise(fixture: Fixture): Promise<void> {
       that: data(up).status === "ready",
       message: "Fixture startup must commit ready",
     });
+    const observed = await observeNativeComposeFixture(fixture.root);
+    const current = await pinNativeComposeFixtureVolume({
+      ...observed,
+      probe: fixture.docker,
+    });
+    expect({
+      that:
+        fixture.pins.volume === null ||
+        JSON.stringify(fixture.pins.volume) === JSON.stringify(current),
+      message: "Later starts preserve original volume creation/storage/owner",
+    });
+    fixture.pins.volume ??= current;
+    const volume = current.name;
     const marker = await fixture.raw([
       "exec",
       "app",
@@ -266,26 +314,6 @@ async function exercise(fixture: Fixture): Promise<void> {
       that: marker.stdout.trim() === String(index + 1),
       message: "Persistent data must survive each completed or recovered stop",
     });
-    const observed = await observeNativeComposeFixture(fixture.root);
-    const currentVolume = observed.observed.volumes[0]?.name;
-    if (!currentVolume || observed.observed.volumes.length !== 1) {
-      throw new Error("Expected one exact owned persistent fixture volume");
-    }
-    const currentCreatedAt = await fixture.docker([
-      "volume",
-      "inspect",
-      currentVolume,
-      "--format",
-      "{{.CreatedAt}}",
-    ]);
-    expect({
-      that:
-        volume === undefined ||
-        (volume === currentVolume && createdAt === currentCreatedAt),
-      message: "Later starts preserve the original data volume",
-    });
-    volume = currentVolume;
-    createdAt = currentCreatedAt;
     const result = await fixture.raw(["down", "--json"]);
     expectExit({
       result,

@@ -22,12 +22,39 @@ import {
   nativeNetworkFixtureInventory,
   nativeNetworkFixtureNetworkMatches,
   nativeNetworkFixtureProtocolMatches,
+  nativeNetworkFixtureRefusalDiagnostic,
   nativeNetworkFixtureShim,
   nativeNetworkFixtureVolumeMatches,
   nativeNetworkFixtureVolumeSelectionMatches,
   provisionNativeNetworkFixtureComposePlugin,
   runNativeNetworkFixtureCommand,
 } from "./e2e/native-config-networks-acceptance.ts";
+
+test("refusal failure evidence distinguishes its fixed stage and both original checks", () => {
+  const result = nativeNetworkFixtureRefusalDiagnostic({
+    stage: "disconnected_endpoint",
+    fragmentPresent: false,
+    dockerInvoked: true,
+  });
+  expect(result).toContain('"stage":"disconnected_endpoint"');
+  expect(result).toContain('"fragmentPresent":false');
+  expect(result).toContain('"dockerInvoked":true');
+});
+
+test("refusal diagnostics never print untrusted labels or non-boolean values", () => {
+  const secret = "external-secret-must-not-appear";
+  for (const value of [
+    { stage: secret, fragmentPresent: false, dockerInvoked: false },
+    { stage: "unrouted_run", fragmentPresent: secret, dockerInvoked: false },
+    { stage: "unrouted_run", fragmentPresent: false, dockerInvoked: secret },
+  ]) {
+    const result = nativeNetworkFixtureRefusalDiagnostic(
+      value as Parameters<typeof nativeNetworkFixtureRefusalDiagnostic>[0]
+    );
+    expect(result).toBe("Network refusal diagnostic unavailable");
+    expect(result).not.toContain(secret);
+  }
+});
 
 async function withPluginFixture(
   run: (opts: {

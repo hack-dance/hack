@@ -48,6 +48,14 @@ const CADDY_TAG = "lucaslorentz/caddy-docker-proxy:2.10.0-alpine";
 const ROOT_CA = "/data/caddy/pki/authorities/local/root.crt";
 const PRIVATE_TMPFS = "rw,nosuid,nodev,noexec,size=64m,mode=0700";
 const NAMES = ["peer", "reader", "vault", "web"] as const;
+const REFUSAL_STAGES = [
+  "unrouted_run",
+  "disconnected_validation",
+  "disconnected_endpoint",
+  "topology_mutation",
+  "routed_run",
+] as const;
+type RefusalStage = (typeof REFUSAL_STAGES)[number];
 type Name = (typeof NAMES)[number];
 type Docker = (args: readonly string[]) => Promise<string>;
 type NetworkPolicy = { readonly name: string; readonly internal: boolean };
@@ -69,6 +77,27 @@ function requireValue(condition: unknown, message: string): asserts condition {
   if (!condition) {
     throw new Error(message);
   }
+}
+
+/** Fixed failure evidence only; never include argv, source, stderr or paths. */
+export function nativeNetworkFixtureRefusalDiagnostic(opts: {
+  readonly stage: RefusalStage;
+  readonly fragmentPresent: boolean;
+  readonly dockerInvoked: boolean;
+}): string {
+  if (
+    typeof opts.stage !== "string" ||
+    !REFUSAL_STAGES.includes(opts.stage) ||
+    typeof opts.fragmentPresent !== "boolean" ||
+    typeof opts.dockerInvoked !== "boolean"
+  ) {
+    return "Network refusal diagnostic unavailable";
+  }
+  return `Network refusal diagnostic ${JSON.stringify({
+    stage: opts.stage,
+    fragmentPresent: opts.fragmentPresent,
+    dockerInvoked: opts.dockerInvoked,
+  })}`;
 }
 function object(text: string): Record<string, unknown> {
   let value: unknown;
@@ -1302,7 +1331,8 @@ export const nativeConfigNetworksScenario: Scenario = {
     const noForward = async (
       checkout: Checkout,
       args: readonly string[],
-      fragment: string
+      fragment: string,
+      stage: RefusalStage
     ): Promise<void> => {
       const source = await saved(checkout.root);
       const before = await observe(checkout);
@@ -1321,9 +1351,19 @@ export const nativeConfigNetworksScenario: Scenario = {
       });
       const result = await raw(checkout, args, { PATH: `${shim}:${env.PATH}` });
       resultOk(result, 1);
+      const fragmentPresent = result.combined.includes(fragment);
+      const dockerInvoked = await Bun.file(receipt).exists();
+      if (!fragmentPresent || dockerInvoked) {
+        ctx.log(
+          nativeNetworkFixtureRefusalDiagnostic({
+            stage,
+            fragmentPresent,
+            dockerInvoked,
+          })
+        );
+      }
       requireValue(
-        result.combined.includes(fragment) &&
-          !(await Bun.file(receipt).exists()),
+        fragmentPresent && !dockerInvoked,
         "Expected precise refusal before any Docker subprocess"
       );
       const after = await saved(checkout.root);
@@ -1567,7 +1607,8 @@ export const nativeConfigNetworksScenario: Scenario = {
       await noForward(
         primary,
         ["run", "web", "--", "bun", "-e", "process.exit(0)"],
-        "requires qualified one-off attachment behavior"
+        "requires qualified one-off attachment behavior",
+        "unrouted_run"
       );
       await cli(primary, ["restart", "--json"]);
       await observe(primary);
@@ -1600,8 +1641,15 @@ export const nativeConfigNetworksScenario: Scenario = {
       await Bun.write(primary.path, `${JSON.stringify(disconnected)}\n`);
       await noForward(
         primary,
+        ["config", "validate", "--json"],
+        "disconnected_endpoint_target",
+        "disconnected_validation"
+      );
+      await noForward(
+        primary,
         ["up", "--detach", "--json"],
-        "disconnected_endpoint_target"
+        "Native execution inputs are invalid or changed",
+        "disconnected_endpoint"
       );
       await Bun.write(primary.path, primary.text);
       await Bun.write(
@@ -1611,7 +1659,8 @@ export const nativeConfigNetworksScenario: Scenario = {
       await noForward(
         primary,
         ["up", "--detach", "--json"],
-        "network topology changed"
+        "network topology changed",
+        "topology_mutation"
       );
       await cli(primary, ["down", "--json"]);
       await resourceAbsent(primary);
@@ -1906,7 +1955,8 @@ export const nativeConfigNetworksScenario: Scenario = {
       await noForward(
         primary,
         ["run", "web", "--", "bun", "-e", "process.exit(0)"],
-        "requires qualified one-off label projection"
+        "requires qualified one-off attachment behavior",
+        "routed_run"
       );
       await cli(primary, ["down", "--json"]);
       await resourceAbsent(primary);

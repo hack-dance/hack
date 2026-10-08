@@ -30,6 +30,10 @@ impl<'a> Context<'a> {
                 progress: Progress::Cleanup,
                 receipt_progress: 0,
                 resource_progress: resource_progress(&admitted.original)?,
+                environment: crate::provider::native_environment::Inventory::capture(
+                    admitted.candidate,
+                    &admitted.original,
+                )?,
             },
         };
         let witness = admitted.witness.take();
@@ -62,6 +66,10 @@ impl<'a> Context<'a> {
             _ => return Err(refused()),
         }
         let committed = self.committed.borrow();
+        committed
+            .intent
+            .environment
+            .verify(admitted.candidate, &admitted.original)?;
         let path = admitted.root.join(FILE);
         match &committed.witness {
             Some((identity, bytes))
@@ -219,12 +227,14 @@ pub struct Outcome {
 }
 pub fn recover(candidate: &Candidate, options: Options<'_>) -> Result<Outcome, CandidateError> {
     recover_using(candidate, options, |context, environment_retired| {
+        let inventory = context.committed.borrow().intent.environment.clone();
         runtime::cleanup_recovery(
             candidate,
             context.admitted.run,
             &context.admitted.original,
             &|| context.guard(),
             environment_retired,
+            &inventory,
             &|snapshot| context.finish(snapshot),
         )
     })

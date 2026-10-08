@@ -101,6 +101,10 @@ impl Receipt {
     pub fn owner(&self) -> &str {
         &self.owner
     }
+    #[cfg(target_os = "macos")]
+    pub(in crate::provider) fn boot(&self) -> &str {
+        &self.boot
+    }
     pub fn resources(&self) -> &BTreeMap<String, Resource> {
         &self.resources
     }

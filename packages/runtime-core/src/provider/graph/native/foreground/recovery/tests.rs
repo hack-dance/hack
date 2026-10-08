@@ -159,6 +159,11 @@ impl Fixture {
             progress: Progress::Cleanup,
             receipt_progress: 0,
             resource_progress: resource_progress(&receipt).unwrap(),
+            environment: crate::provider::native_environment::Inventory::capture(
+                &self.candidate,
+                &receipt,
+            )
+            .unwrap(),
         }
     }
     fn store(&self, intent: &Intent) {
@@ -696,6 +701,76 @@ fn recovery_commits_original_before_driver_and_archives_only_after_removed_absen
     .unwrap();
     assert_eq!(fs::read(fixture.journal_root().join(FILE)).unwrap(), intent);
     assert!(!fixture.candidate.state_root.join("run/smolvm").exists());
+}
+
+#[test]
+fn committed_environment_inventory_refuses_record_loss_or_replacement_before_archives() {
+    for case in ["deleted", "same-bytes-new-inode", "changed-metadata"] {
+        let fixture = Fixture::new();
+        fixture.dead();
+        let receipt = fixture.receipt();
+        let slot = format!("hack-env-lease-{}-{}", receipt.boot, "a".repeat(32));
+        let path = fixture
+            .candidate
+            .state_root
+            .join("run/native-environment-leases")
+            .join(format!("{slot}.json"));
+        state::private_directory(path.parent().unwrap()).unwrap();
+        let metadata = json!({"version":2,"kind":"native-environment-allocation","binding":{
+            "namespace":receipt.review.scope().namespace,"run":RUN,"review":receipt.review.review_id(),"container":receipt.resources["container:web"].name
+        },"service":"web","uid":0,"gid":0,"slot":slot,"incarnation":receipt.owner,"boot":receipt.boot});
+        state::write(&path, &metadata).unwrap();
+        let selected = select(&fixture.candidate, RUN).unwrap();
+        assert!(
+            cleanup::recover_using(
+                &fixture.candidate,
+                recovery_options(&selected),
+                |context, _| {
+                    let original = native_input::read_file(&path, 4096)?;
+                    let identity = id(&path)?;
+                    context.guard()?;
+                    let receipt = removed(&fixture);
+                    context.guard()?;
+                    match case {
+                        "deleted" => fs::remove_file(&path).unwrap(),
+                        "same-bytes-new-inode" => {
+                            fs::rename(&path, fixture.root.join("retained-native-allocation"))
+                                .unwrap();
+                            let mut replacement = OpenOptions::new()
+                                .write(true)
+                                .create_new(true)
+                                .mode(0o600)
+                                .open(&path)
+                                .unwrap();
+                            replacement.write_all(&original).unwrap();
+                            replacement.sync_all().unwrap();
+                            assert_ne!(id(&path).unwrap(), identity);
+                        }
+                        "changed-metadata" => {
+                            let mut changed = metadata.clone();
+                            changed["uid"] = json!(10);
+                            fs::write(&path, changed.to_string()).unwrap();
+                        }
+                        _ => unreachable!(),
+                    }
+                    assert!(context.guard().is_err());
+                    context.finish_using(&absent_snapshot(receipt.clone()), &|_| {
+                        panic!("changed environment inventory cannot retire publication")
+                    })?;
+                    Ok(receipt)
+                }
+            )
+            .is_err()
+        );
+        assert!(fixture.owner_root().join("owner.json").exists());
+        assert!(fixture.owner_root().join("control.sock").exists());
+        let saved: Intent = serde_json::from_slice(
+            &native_input::read_file(&fixture.journal_root().join(FILE), LIMIT).unwrap(),
+        )
+        .unwrap();
+        assert!(saved.progress == Progress::Cleanup);
+        assert!(select(&fixture.candidate, RUN).is_err());
+    }
 }
 
 #[test]

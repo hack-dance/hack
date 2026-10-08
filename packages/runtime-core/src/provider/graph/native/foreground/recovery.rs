@@ -92,6 +92,7 @@ struct Intent {
     progress: Progress,
     receipt_progress: u8,
     resource_progress: BTreeMap<String, u8>,
+    environment: crate::provider::native_environment::Inventory,
 }
 fn receipt_progress(receipt: &Receipt) -> Result<u8, CandidateError> {
     match receipt.phase {
@@ -279,6 +280,7 @@ fn admit<'a>(candidate: &'a Candidate, run: &'a str) -> Result<Admitted<'a>, Can
     if let Some(intent) = &intent {
         intent.current(&root, &original, &again, &current_bytes)?;
         intent.progress.verify(&lease)?;
+        intent.environment.verify(candidate, &original)?;
     } else {
         Progress::Cleanup.verify(&lease)?;
     }

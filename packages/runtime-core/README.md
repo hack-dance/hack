@@ -141,7 +141,12 @@ The separate explicit library recovery entrypoint re-admits both raw selectors
 and commits a bounded 64 KiB recovery intent before cleanup. It retains the
 publication gate, original operation lock and cleanup provider lease through
 matching Removed resources, private-environment absence and publication
-retirement. Durable phases precede each exclusive archive move; original Ready
+retirement. A metadata-only current slot inventory is bound into the intent;
+changed or missing records refuse. Bounded read-only guest slot enumeration
+cross-checks the validated native and Compose host records before cleanup and
+again before publication retirement. Unknown guest slots refuse even when host
+records are empty; no payload contents are read or inferred from missing records.
+Durable phases precede each exclusive archive move; original Ready
 hashes and inventory remain fixed while cleanup phases advance. Completed retry
 checks absence rather than repeating retirement. Pending writes, unexpected
 replacements or missing original and archive paths retain a refusal. Public

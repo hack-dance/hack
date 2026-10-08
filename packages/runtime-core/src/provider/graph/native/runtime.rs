@@ -658,7 +658,7 @@ pub(super) fn cleanup_guarded(
     expected: Option<&Receipt>,
     guard: Option<&dyn Fn() -> Result<(), CandidateError>>,
 ) -> Result<Receipt, CandidateError> {
-    cleanup_inner(candidate, run, expected, guard, false, None)
+    cleanup_inner(candidate, run, expected, guard, false, None, None)
 }
 #[cfg(target_os = "macos")]
 pub(super) fn cleanup_recovery(
@@ -667,6 +667,7 @@ pub(super) fn cleanup_recovery(
     expected: &Receipt,
     guard: &dyn Fn() -> Result<(), CandidateError>,
     environment_retired: bool,
+    inventory: &native_environment::Inventory,
     finish: &dyn Fn(&Snapshot) -> Result<(), CandidateError>,
 ) -> Result<Receipt, CandidateError> {
     cleanup_inner(
@@ -675,6 +676,7 @@ pub(super) fn cleanup_recovery(
         Some(expected),
         Some(guard),
         environment_retired,
+        Some(inventory),
         Some(finish),
     )
 }
@@ -684,6 +686,7 @@ fn cleanup_inner(
     expected: Option<&Receipt>,
     guard: Option<&dyn Fn() -> Result<(), CandidateError>>,
     environment_retired: bool,
+    inventory: Option<&native_environment::Inventory>,
     finish: Option<&dyn Fn(&Snapshot) -> Result<(), CandidateError>>,
 ) -> Result<Receipt, CandidateError> {
     check_startup(guard)?;
@@ -704,6 +707,19 @@ fn cleanup_inner(
         launcher: None,
         leases: BTreeMap::new(),
     };
+    #[cfg(target_os = "macos")]
+    if let Some(inventory) = inventory {
+        native_environment::verify_inventory(
+            candidate,
+            backend.engine.guest(),
+            &receipt,
+            inventory,
+            environment_retired,
+            guard,
+        )?;
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = inventory;
     cleanup_using_guarded(&backend, &mut receipt, &root, guard)?;
     check_startup(guard)?;
     if !environment_retired {
@@ -719,6 +735,17 @@ fn cleanup_inner(
             &receipt,
             guard,
         )?;
+        #[cfg(target_os = "macos")]
+        if let Some(inventory) = inventory {
+            native_environment::verify_inventory(
+                candidate,
+                backend.engine.guest(),
+                &receipt,
+                inventory,
+                true,
+                guard,
+            )?;
+        }
         let guarded = GuardedBackend {
             backend: &backend,
             guard,

@@ -16,6 +16,77 @@ pinned artifact. Each check has a 120-second timeout, 512 MiB Java heap, two wor
 and bounded output; temporary TLC metadata is removed after success or failure.
 No credentials or running VM are needed.
 
+## Native storage witness enrollment and read-only resume
+
+`native-storage-witness/Witness.tla` checks a proposed storage continuity protocol.
+This maintained model is separate from the storage-witness owner, codec and
+required version-three generation-receipt foundation. It does not qualify those
+implementations or their future engine carrier and CLI activation. The positive configuration exhausts **352 distinct
+states** (550 generated, maximum depth 18), with four initial states: absent
+storage, or untracked existing storage with a missing, matching or wrong marker.
+Existing untracked storage requires explicit adoption; matching bytes alone do
+not silently enroll it.
+
+An exclusive enrollment slot is published before the immutable `Expected` record;
+a crash between them leaves a retained empty slot that refuses ordinary retry.
+The expectation is durably published before creation or seeding.
+Only its original live opaque capability may arm the seed once; arming consumes
+that capability before the effect can await. Creation, marker publication,
+observation and enrolled-record completion are separate crash boundaries. The
+completion step rechecks both the observed proof and the current exact witness.
+A crash revokes initial seed and completion authority while retaining published
+records. Reopening an interrupted `Expected` refuses even if the marker now
+matches: it preserves the anchor and reports a need for explicit reconciliation.
+That future reconciliation contract is not modeled as automatic promotion.
+
+After successful enrollment, down/up and recovery use the saved expectation and
+read-only witness comparison. Neither operation can seed or append another
+enrollment. Workload admission requires the enrolled reference, matching marker,
+matching resource binding and current mutation authority. `EmptyReplacement`
+keeps metadata unchanged while removing the marker, representing a replacement
+whose physical name, labels and reported birth cannot distinguish it. A copied
+matching marker with foreign resource metadata also refuses.
+
+Eight unsafe controls remove one obligation each: seed-only-initial authority for
+resume and recovery; missing, wrong or foreign-binding witness admission;
+completion after exact proof; immutable expectation; and read-only enrollment.
+Ten safe-path controls deliberately violate reachability predicates: cold
+creation, down/up without reseeding, enrolled recovery without reseeding,
+interrupted slot publication, enrollment with missing or matching marker,
+missing/wrong marker resume refusal, stale proof refusal and untracked legacy refusal. The interrupted
+missing-marker witness requires an already-created volume, so it cannot pass only
+through a pre-effect crash. All controls require TLC exit 12, the intended
+invariant and complete action/field evidence in one state. Parser errors,
+arbitrary failure, split-state evidence and an incomplete positive exploration
+fail the runner.
+
+| Model action/state | Intended foundation mapping and separate implementation obligation |
+| --- | --- |
+| `ReserveIntent` / `intent` | `prepareNativeComposeStorageWitness` first calls `armNativeComposeStorageWitnessIntent` to publish a required v3 `Expected` entry under the existing generation mutation, then exclusively creates and synchronizes the private per-volume slot before writing the expectation. An empty or absent interrupted slot retains the receipt intent and cannot be recreated. The model's slot intent abstracts that refusal; it does not model the enclosing generation receipt. |
+| `PublishExpected` / `expected` | `prepareNativeComposeStorageWitness` in the separate `native-compose-storage-witness.ts` foundation: validate active pending-generation authority, exclusively publish/sync an immutable random 32-byte expectation and exact engine/instance/owner/physical-volume/logical-volume/generation/pending binding, then return an opaque live capability. A failed publication must not grant one. |
+| `ArmSeed` / `PublishMarker` | `enrollNativeComposeStorageWitness` consumes the original capability before awaiting its single seed callback. Callback transport, create-only behavior, child ownership/reaping and no writes to an existing witness require implementation and carrier tests. `CreateVolume` is an abstract cold-creation boundary, not a claim that the foundation creates Docker volumes. |
+| `ObserveEnrollment` / `CommitEnrollment` | The owner verifies an observed archive through `verifyNativeComposeStorageWitnessArchive`, exclusively publishes/syncs/re-reads the completion file, and rechecks owner/expectation anchors. It issues a private one-use proof bound to the exact live authority and generation; `publishNativeComposeStorageWitnessEnrollment` consumes only that issued proof and obtains its reference and fresh verifier from the owner. `createNativeComposeStorageWitnessReceiptProtocol` verifies again before attaching `Enrolled` and rechecks live authority after the final filesystem await before receipt publication. The model additionally requires the current exact witness at commit; qualifying that predicate across actual carrier awaits remains a separate engine-boundary obligation. Its completion is the enrollment record, not a generation's ready receipt. |
+| `Down` / `BeginResume` / `ReadWitness` | `verifyNativeComposeStorageWitness` validates the saved reference, anchored files/directories, fresh carrier observation and exact archive, then re-reads and rechecks ownership without writing. The receipt protocol requires read-only proof before/after startup/run and at both completion receipt boundaries. The CLI refuses witness-bearing startup/run/exec while carrier authority is withheld; actual down/up activation remains unqualified. |
+| `Crash` / `Recover` / `RecoveryDisposition` | Persisted `Expected` without confirmed completion retains its original bytes and refuses inspection-to-enrollment promotion. Reopened records cannot recover an original seed capability. Explicit saved `down --recover` can stop engine resources but returns incomplete with `Expected` and pending generation retained, skipping dependent ownership retirement. An explicit read-only reconciliation interface requires its own source review and tests; neither this model nor the foundation implements it. |
+| `EmptyReplacement` / `WrongMarker` / `ForeignMetadata` | Owner/codec tests must distinguish absent/wrong bytes, fresh foreign binding, a same-metadata empty replacement and a copied witness. `encodeNativeComposeStorageWitnessArchive` is the proposed carrier codec; decoding bounds, archive path validation and read-only engine transport are outside this model. |
+| `DriftAuthority` | Existing opaque generation authority must reject changed pending selection or revoked lease before seed/completion, and recheck after asynchronous proofs. The model summarizes those identities by one version; it cannot qualify real lease/token/inode checks. |
+| `ReplaceExpectation` / `ReenrollReadOnly` | Immutable anchored records must reject replacement and read-only reopen must not append enrollment, even with matching marker bytes. Filesystem substitution and exact write counts require separate source regressions. |
+
+The finite bound has one volume, one crash, one down/up, two binding versions and
+two distinguishable nonempty markers; marker `1` abstracts expected random bytes,
+`0` absence and `2` wrong bytes. A single storage fault can occur before completion
+or subsequent workload admission, including between observation and completion.
+It is not an active watcher for corruption after a workload has started. Each
+durable publication is modeled as one completed write; partial writes, fsync
+durability, generation receipt decoding/publication, archive bytes/limits, entropy, secrecy, filesystem symlinks/inode reuse,
+malicious same-user replacement, multiple-volume concurrency, repeated crashes,
+real resource creation and child effects are omitted. Current resource and owner
+proofs are abstract predicates; arbitrary concurrent engine changes and atomicity
+between an actual carrier read and workload launch require separate qualification.
+Explicit authorized legacy adoption is not modeled. No fairness, eventual
+recovery, data-payload integrity, legacy historical continuity, command activation
+or whole NC03 completion is claimed.
+
 ## Native file-material retirement
 
 `native-file-material/Material.tla` checks the private file retirement protocol.

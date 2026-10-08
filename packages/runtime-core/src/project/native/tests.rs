@@ -42,6 +42,70 @@ fn refusal(result: Result<NativeInputs, CandidateError>, code: &str) {
     assert!(!encoded.contains("authored-canary"));
 }
 
+#[test]
+fn late_workload_and_binding_refusals_never_copy_private_values() {
+    let project = json!({"schema_version":1,"name":"fixture","services":{
+        "a.first":{"image":"first"},"z.last":{"image":"last"}
+    }});
+    let metadata = json!({
+        "a.first":{"TOKEN":{"scope":"a.first","secret":true}},
+        "z.last":{"LATE":{"scope":"z.last","secret":true}}
+    });
+    let values = BTreeMap::from([
+        (
+            "a.first".into(),
+            BTreeMap::from([("TOKEN".into(), "synthetic-private-first".into())]),
+        ),
+        (
+            "z.last".into(),
+            BTreeMap::from([("LATE".into(), "synthetic-private-last".into())]),
+        ),
+    ]);
+    let originals = values.clone();
+
+    // Positive control: real compiler selection reaches the private copy pass.
+    PRIVATE_COPIES.with(|copies| copies.set(0));
+    let selected = lower(&project, metadata.clone(), &values).unwrap();
+    assert_eq!(PRIVATE_COPIES.with(std::cell::Cell::get), 2);
+    assert_eq!(selected.managed_environment, values);
+    drop(selected);
+
+    let mut unsupported = project.clone();
+    unsupported["services"]["z.last"]["entrypoint"] = json!({"exec":[]});
+    let mut missing = values.clone();
+    missing.get_mut("z.last").unwrap().clear();
+    let mut extra = values.clone();
+    extra
+        .get_mut("z.last")
+        .unwrap()
+        .insert("UNSELECTED".into(), "synthetic-private-extra".into());
+    let mut oversized = values.clone();
+    oversized
+        .get_mut("z.last")
+        .unwrap()
+        .insert("LATE".into(), "x".repeat(32 * 1024));
+    for (authored, selected, code) in [
+        (&unsupported, &values, "native_graph_subset"),
+        (&project, &missing, "native_graph_environment"),
+        (&project, &extra, "native_graph_environment"),
+        (&project, &oversized, "native_graph_environment"),
+    ] {
+        let request = request(authored, metadata.clone());
+        assert!(hack_config_compiler::environment::plan(&request, &[]).complete());
+        PRIVATE_COPIES.with(|copies| copies.set(0));
+        refusal(
+            compile(CompileOptions {
+                request: &request,
+                profiles: &[],
+                managed_values: selected,
+            }),
+            code,
+        );
+        assert_eq!(PRIVATE_COPIES.with(std::cell::Cell::get), 0);
+    }
+    assert_eq!(values, originals);
+}
+
 #[derive(Default)]
 struct Fake {
     starts: Vec<String>,
@@ -293,8 +357,81 @@ fn compiler_environment_remapping_defaults_and_unset_preserve_private_separation
     let second = lower(&project, metadata, &rotated).unwrap();
     assert_eq!(first.semantic_hash, second.semantic_hash);
     assert_eq!(
+        first.environment_policy_hash,
+        second.environment_policy_hash
+    );
+    assert_eq!(
         first.local_resolution.resolution_hash,
         second.local_resolution.resolution_hash
+    );
+}
+
+#[test]
+fn public_review_requires_no_private_values_and_binds_compiler_metadata_policy() {
+    let project = basic();
+    let first_metadata = json!({"web":{"TOKEN":{"scope":"web","secret":true}}});
+    let bytes = request(&project, first_metadata.clone());
+    let reviewed = review(&bytes, &[]).unwrap();
+    let values = BTreeMap::from([(
+        "web".into(),
+        BTreeMap::from([("TOKEN".into(), "synthetic-private".into())]),
+    )]);
+    assert_eq!(
+        lower(&project, first_metadata, &values)
+            .unwrap()
+            .review_identity(),
+        reviewed
+    );
+    let changed = review(
+        &request(
+            &project,
+            json!({"web":{"TOKEN":{"scope":"global","secret":false}}}),
+        ),
+        &[],
+    )
+    .unwrap();
+    assert_eq!(reviewed.semantic_hash, changed.semantic_hash);
+    assert_eq!(
+        reviewed.local_resolution_hash,
+        changed.local_resolution_hash
+    );
+    assert_ne!(
+        reviewed.environment_policy_hash,
+        changed.environment_policy_hash
+    );
+    assert!(
+        !serde_json::to_string(&reviewed)
+            .unwrap()
+            .contains("synthetic-private")
+    );
+}
+
+#[test]
+fn policy_hash_uses_real_compiler_directives_and_resolved_endpoints_even_when_execution_refuses() {
+    let mut project = basic();
+    project["services"]["web"]["environment"] =
+        json!({"API":{"endpoint":{"kind":"service","name":"web","port":3000,"protocol":"http"}}});
+    let hash = |project: &Value| {
+        let PlanResult::Success {
+            plan,
+            environment_plan,
+            ..
+        } = hack_config_compiler::environment::plan(&request(project, json!({"web":{}})), &[])
+        else {
+            panic!("endpoint policy must really compile")
+        };
+        policy_hash(&plan, &environment_plan).unwrap()
+    };
+    let first = hash(&project);
+    project["services"]["web"]["environment"]["API"]["endpoint"]["port"] = json!(3001);
+    assert_ne!(first, hash(&project));
+    refusal(
+        lower(&project, json!({"web":{}}), &BTreeMap::new()),
+        "native_graph_subset",
+    );
+    refusal(
+        review(&request(&project, json!({"web":{}})), &[]).map(|_| unreachable!()),
+        "native_graph_subset",
     );
 }
 

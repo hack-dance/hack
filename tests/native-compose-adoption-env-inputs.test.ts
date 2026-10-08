@@ -490,6 +490,42 @@ test("runtime construction cannot forge factory-issued managed admission", async
   }
 });
 
+test("replacement invocation signals cannot reactivate an aborted managed generation", async () => {
+  const controller = new AbortController();
+  const source = await LegacyAdoptionManagedEnvAdmission.acquire({
+    source: await acquireNativeConfigImportInputs({ projectRoot: root }),
+    signal: controller.signal,
+  });
+  const owned = await acquireProjectEnvForLegacyAdoption({ admission: source });
+  controller.abort(CANARY);
+  const signal = new AbortController().signal;
+  await expect(owned.resolveValues({ signal })).rejects.toMatchObject({
+    code: "E_COMPILER_CANCELLED",
+  });
+  await refuses(() => owned.resolveValues({ signal }));
+  await refuses(() => owned.assertFresh({ ...source.selection, signal }));
+});
+
+test("throwing or malformed private invocation options retain fixed refusal diagnostics", async () => {
+  const source = await admission();
+  const owned = await acquireProjectEnvForLegacyAdoption({ admission: source });
+  await refuses(() => owned.resolveValues(null as never));
+  await refuses(() =>
+    owned.resolveValues({
+      get signal(): AbortSignal {
+        throw new Error(CANARY);
+      },
+    })
+  );
+  await refuses(() =>
+    owned.resolveValues({
+      get signal(): AbortSignal {
+        throw new NativeConfigCompilerError("E_COMPILER_CANCELLED", CANARY);
+      },
+    })
+  );
+});
+
 test("supported unselected overlay is not parsed or decrypted", async () => {
   await writeFile(join(root, ".hack/hack.env.unselected.yaml"), CANARY);
   const source = await admission();

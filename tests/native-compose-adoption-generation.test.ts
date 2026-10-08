@@ -1742,7 +1742,9 @@ test("v11 saved source drift refuses before callback and rollback can prepare a 
   try {
     const generation = await store.prepare({ binary });
     await store.publish({ generation, binary });
-    await writeFile(composePath, `${await readFile(composePath, "utf8")}\n`);
+    const activePath = join(projectRoot, ".hack/hack.project.json");
+    const active = await readFile(activePath, "utf8");
+    await writeFile(activePath, `${active}\n`);
     let calls = 0;
     await refusal(
       store.withLease({
@@ -1754,10 +1756,7 @@ test("v11 saved source drift refuses before callback and rollback can prepare a 
     );
     expect(calls).toBe(0);
     // A byte-exact restoration permits only the selected old owner to roll back.
-    await writeFile(
-      composePath,
-      await readFile(await artifactPath("legacy-compose.yml"), "utf8")
-    );
+    await writeFile(activePath, active);
     await store.rollback();
     fixture.container[0]!.networks = [{ name: "fixture_default", id: NETWORK }];
     fixture.network = [

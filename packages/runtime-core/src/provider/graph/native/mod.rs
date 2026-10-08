@@ -1,6 +1,7 @@
 //! Native image-only lowering; runtime ownership and effects are separately admitted.
 use super::*;
 use crate::{project::native::NativeInputs, provider::native_input};
+pub mod selection;
 
 /// Public engine configuration only, deliberately without Debug/Serialize.
 /// No image inspection, private staging, journal or engine effect is performed here.

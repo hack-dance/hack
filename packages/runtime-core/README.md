@@ -64,6 +64,18 @@ grace up to 30 seconds is represented exactly; fractional seconds refuse. This p
 lowerer checks owner shape and deadline, never real guest ownership, image presence,
 combined capacity, private staging or engine effects.
 
+`provider::graph::native::selection` selects only the exact absolute native project
+root and reads bounded, stable regular `.hack/hack.project.json` and optional
+`.hack/hack.local.json` files. It forwards raw authored text and owner-supplied
+environment metadata through the typed compiler request; it does not parse authored
+policy, decrypt values, search ancestors or fall back to Compose. Selection binds
+the candidate's real project/branch namespace, preserves the ingress deadline, and
+rechecks file/directory identities, content, absent local input and legacy conflicts
+before and after private preparation. Linked-worktree local inheritance explicitly
+refuses until its primary-worktree verification is qualified; opted-out inheritance
+preserves the owning compiler's checkout-local semantics. This is read-only input
+selection and private preparation, with no durable enrollment or runtime ownership.
+
 No backend consumes this adapter yet. Native input provenance, image availability,
 source/storage ownership, provider admission and installed execution/recovery remain
 separate qualification gates. Existing Compose plans and receipts retain their formats.

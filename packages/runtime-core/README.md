@@ -169,6 +169,17 @@ the mapping; the consuming caller must supply its process and cancellation guard
 Guard returns must be `undefined`. Accidental asynchronous or other return values
 refuse publication, and rejected promises are consumed without printing their details.
 
+The inactive `serveNativeAuthoredProject` owner connects these boundaries without
+Compose normalization: shared input preparation, native source review, durable
+startup intent, compiler-selected private source keys over stdin, authenticated
+readiness and guarded run publication. It holds admission through foreground exit
+and checks the original binding against a fresh native journal inspection before
+retiring mappings, intent and source. Missing, changed or live cleanup evidence
+retains the attempt and refuses replay. Input acquisition shares the original Bun
+startup deadline; it does not renew that budget for each subprocess. This component
+is not selected by ordinary commands. Its fake driver tests and effect-free compiler
+interop do not qualify the installed frontend, provider or full authored corpus.
+
 Shared Bun input preparation accepts the native source's explicit compiler branch
 context. It binds that branch into resolve and environment planning without
 implicit Git or global-domain discovery, matching the native source's local hash.

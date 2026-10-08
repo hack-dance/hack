@@ -1169,6 +1169,25 @@ async function withholdPrimaryLocal(h: FixtureRuntime) {
 
 const FOREIGN_CANARY_LABEL = "io.hack.nc04.foreign-canary";
 export const FOREIGN_CANARY_FORMAT = `{"id":{{json .Id}},"name":{{json .Name}},"created":{{json .Created}},"image":{{json .Image}},"project":{{json (index .Config.Labels "${PROJECT_LABEL}")}},"task":{{json (index .Config.Labels "${FOREIGN_CANARY_LABEL}")}},"native":{{json (index .Config.Labels "io.hack.native-config.version")}},"state":{{json .State.Status}},"running":{{json .State.Running}},"pid":{{json .State.Pid}},"startedAt":{{json .State.StartedAt}},"networkMode":{{json .HostConfig.NetworkMode}},"readOnlyRootfs":{{json .HostConfig.ReadonlyRootfs}},"publishAllPorts":{{json .HostConfig.PublishAllPorts}},"portBindings":{{json (index .HostConfig "PortBindings")}},"runtimePorts":{{json .NetworkSettings.Ports}},"configuredTmpfs":{{json (index .HostConfig "Tmpfs")}},"hostBinds":{{json (index .HostConfig "Binds")}},"hostMounts":{{json (index .HostConfig "Mounts")}},"volumesFrom":{{json (index .HostConfig "VolumesFrom")}},"imageVolumes":{{json .Config.Volumes}},"networks":[{{$first := true}}{{range $name,$n := .NetworkSettings.Networks}}{{if not $first}},{{end}}{{$first = false}}{"name":{{json $name}},"id":{{json $n.NetworkID}}}{{end}}],"mounts":[{{range $i,$m := .Mounts}}{{if $i}},{{end}}{"type":{{json $m.Type}},"target":{{json $m.Destination}}}{{end}}]}`;
+/** Docker may omit an active --tmpfs from inspect Mounts; read the owned container's mount namespace. */
+export const FOREIGN_CANARY_MOUNTINFO_SCRIPT = `set -eu
+matched=0
+while IFS=' ' read -r mount_id parent device root mountpoint options rest; do
+  if [ "$mountpoint" = "/var/lib/postgresql/data" ]; then
+    [ "$matched" -eq 0 ] || exit 71
+    case "$rest" in
+      "- "*) after_separator=\${rest#- } ;;
+      *" - "*) after_separator=\${rest#* - } ;;
+      *) exit 72 ;;
+    esac
+    case "$after_separator" in
+      "tmpfs "*) matched=1 ;;
+      *) exit 72 ;;
+    esac
+  fi
+done < /proc/self/mountinfo
+[ "$matched" -eq 1 ] || exit 73
+printf 'tmpfs-ok\\n'`;
 type ForeignCanaryPin = {
   readonly id: string;
   readonly name: string;
@@ -1228,11 +1247,9 @@ function canaryStorageMatches(
     isRecord(row.imageVolumes) &&
     Object.keys(row.imageVolumes).length === 1 &&
     isRecord(row.imageVolumes[target]) &&
-    (state === "running"
-      ? mounts === activeTmpfs
-      : state === "created"
-        ? mounts === "[]"
-        : mounts === "[]" || mounts === activeTmpfs)
+    (state === "created"
+      ? mounts === "[]"
+      : mounts === "[]" || mounts === activeTmpfs)
   );
 }
 
@@ -1408,14 +1425,36 @@ async function foreignCanaryRefusal(
       ),
     });
   };
+  const verifyRunningTmpfs = async () => {
+    if (!pin) {
+      refused();
+    }
+    await inspect("running");
+    await requirePreparedEngine(h);
+    const result = await h.probe([
+      "container",
+      "exec",
+      pin.id,
+      "/bin/sh",
+      "-c",
+      FOREIGN_CANARY_MOUNTINFO_SCRIPT,
+    ]);
+    if (result !== "tmpfs-ok") {
+      refused();
+    }
+    await inspect("running");
+    await requirePreparedEngine(h);
+  };
   const retire = async () => {
     if (!pin) {
       refused();
     }
-    await inspect(stage);
     if (stage === "running") {
+      await verifyRunningTmpfs();
       await h.effect(["container", "stop", "--time", "5", pin.id]);
       await inspect("exited");
+    } else {
+      await inspect(stage);
     }
     await h.effect(["container", "rm", pin.id]);
     await requirePreparedEngine(h);
@@ -1487,7 +1526,7 @@ async function foreignCanaryRefusal(
     await inspect("created");
     await h.effect(["container", "start", id]);
     stage = "running";
-    await inspect("running");
+    await verifyRunningTmpfs();
     await inspectAdoptionBridge({
       instance: first,
       id: bridge.id,
@@ -1515,7 +1554,7 @@ async function foreignCanaryRefusal(
     }
     await h.assertNoState(first);
     await h.check(h.second);
-    await inspect("running");
+    await verifyRunningTmpfs();
     await inspectAdoptionBridge({
       instance: first,
       id: bridge.id,

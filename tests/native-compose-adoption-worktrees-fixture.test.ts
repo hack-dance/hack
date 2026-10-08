@@ -1,5 +1,5 @@
 import { expect, spyOn, test } from "bun:test";
-import { chmod, mkdtemp, readFile, rm } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createNativeComposeProbe } from "../src/lib/native-compose-ownership.ts";
@@ -11,6 +11,7 @@ import {
   cleanupOwnedAdoptionFixture,
   createAdoptionFixtureProbe,
   FOREIGN_CANARY_FORMAT,
+  FOREIGN_CANARY_MOUNTINFO_SCRIPT,
   inspectAdoptionBridge,
   nativeComposeAdoptionWorktreesScenario,
   ownedAdoptionFixtureObservation,
@@ -555,6 +556,14 @@ test("foreign bridge canary pins its distinct owner, network and tmpfs without a
   expect(() =>
     assertAdoptionForeignCanaryObservation({ pin, state: "running", row })
   ).not.toThrow();
+  // Docker can omit --tmpfs from Mounts even after start; mountinfo is checked separately.
+  expect(() =>
+    assertAdoptionForeignCanaryObservation({
+      pin,
+      state: "running",
+      row: { ...row, mounts: [] },
+    })
+  ).not.toThrow();
   expect(() =>
     assertAdoptionForeignCanaryObservation({
       pin,
@@ -628,13 +637,6 @@ test("foreign bridge canary pins its distinct owner, network and tmpfs without a
   expect(() =>
     assertAdoptionForeignCanaryObservation({
       pin,
-      state: "running",
-      row: { ...row, mounts: [] },
-    })
-  ).toThrow(REFUSAL);
-  expect(() =>
-    assertAdoptionForeignCanaryObservation({
-      pin,
       state: "exited",
       row: {
         ...exited,
@@ -651,7 +653,6 @@ test("foreign bridge canary pins its distinct owner, network and tmpfs without a
     { networks: [{ name: pin.networkName, id: "e".repeat(64) }] },
     { networks: [...row.networks, { name: "foreign", id: pin.networkId }] },
     { mounts: [{ type: "volume", target: "/var/lib/postgresql/data" }] },
-    { mounts: [] },
     { state: "exited" },
     { startedAt: "not-a-docker-timestamp" },
     { runtimePorts: { "5432/tcp": [{ HostPort: "15432" }] } },
@@ -663,6 +664,59 @@ test("foreign bridge canary pins its distinct owner, network and tmpfs without a
         row: { ...row, ...changed },
       })
     ).toThrow(REFUSAL);
+  }
+});
+
+test("running canary requires a unique exact-target kernel tmpfs mount", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "hack-canary-mountinfo-"));
+  const path = join(directory, "mountinfo");
+  try {
+    expect(
+      FOREIGN_CANARY_MOUNTINFO_SCRIPT.split("/proc/self/mountinfo")
+    ).toHaveLength(2);
+    const quoted = `'${path.replaceAll("'", "'\\''")}'`;
+    const script = FOREIGN_CANARY_MOUNTINFO_SCRIPT.replace(
+      "done < /proc/self/mountinfo",
+      `done < ${quoted}`
+    );
+    const run = async (lines: string) => {
+      await writeFile(path, lines, { mode: 0o600 });
+      const child = Bun.spawnSync(["/bin/sh", "-c", script], {
+        env: { PATH: "/usr/bin:/bin" },
+        stdin: "ignore",
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      return {
+        code: child.exitCode,
+        stdout: new TextDecoder().decode(child.stdout),
+        stderr: new TextDecoder().decode(child.stderr),
+      };
+    };
+    const target = "/var/lib/postgresql/data";
+    const tmpfs = `42 21 0:51 / ${target} rw,nosuid,nodev,noexec - tmpfs tmpfs rw\n`;
+    expect(await run(tmpfs)).toEqual({
+      code: 0,
+      stdout: "tmpfs-ok\n",
+      stderr: "",
+    });
+    expect(
+      await run(`42 21 0:51 / ${target} rw shared:12 - tmpfs tmpfs rw\n`)
+    ).toEqual({ code: 0, stdout: "tmpfs-ok\n", stderr: "" });
+    for (const lines of [
+      `42 21 0:51 / ${target} rw - ext4 /dev/vda rw\n`,
+      `42 21 0:51 / ${target} rw - ext4 tmpfs - tmpfs rw\n`,
+      `42 21 0:51 / ${target}-other rw - tmpfs tmpfs rw\n`,
+      `${tmpfs}${tmpfs}`,
+      "42 21 0:51 / /other rw - tmpfs tmpfs rw\n",
+    ]) {
+      const result = await run(lines);
+      expect(result.code).not.toBe(0);
+      expect(result.stdout).toBe("");
+      expect(result.stderr).toBe("");
+    }
+  } finally {
+    await rm(directory, { recursive: true, force: true });
   }
 });
 

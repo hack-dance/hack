@@ -31,6 +31,12 @@ pub struct Project {
     #[serde(default)]
     #[ts(as = "Option<BTreeMap<String, Storage>>", optional)]
     pub storage: BTreeMap<String, Storage>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[ts(optional, type = "{ [key in string]: FileConfig }")]
+    pub configs: BTreeMap<String, crate::file::FileConfig>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[ts(optional, type = "{ [key in string]: FileSecret }")]
+    pub secrets: BTreeMap<String, crate::file::FileSecret>,
     #[serde(default)]
     #[ts(as = "Option<Vec<String>>", optional)]
     pub profiles: Vec<String>,
@@ -335,6 +341,56 @@ pub enum Mount {
         target: String,
         access: Access,
     },
+    Config {
+        config: String,
+        target: String,
+        access: Access,
+        #[serde(default = "crate::file::default_mode")]
+        #[schemars(regex(pattern = "^0[0-7]{3}$"))]
+        #[ts(as = "Option<String>", optional)]
+        mode: String,
+        #[serde(
+            default,
+            deserialize_with = "present",
+            skip_serializing_if = "Option::is_none"
+        )]
+        #[schemars(with = "u32")]
+        #[ts(optional, type = "number")]
+        uid: Option<u32>,
+        #[serde(
+            default,
+            deserialize_with = "present",
+            skip_serializing_if = "Option::is_none"
+        )]
+        #[schemars(with = "u32")]
+        #[ts(optional, type = "number")]
+        gid: Option<u32>,
+    },
+    Secret {
+        secret: String,
+        target: String,
+        access: Access,
+        #[serde(default = "crate::file::default_mode")]
+        #[schemars(regex(pattern = "^0[0-7]{3}$"))]
+        #[ts(as = "Option<String>", optional)]
+        mode: String,
+        #[serde(
+            default,
+            deserialize_with = "present",
+            skip_serializing_if = "Option::is_none"
+        )]
+        #[schemars(with = "u32")]
+        #[ts(optional, type = "number")]
+        uid: Option<u32>,
+        #[serde(
+            default,
+            deserialize_with = "present",
+            skip_serializing_if = "Option::is_none"
+        )]
+        #[schemars(with = "u32")]
+        #[ts(optional, type = "number")]
+        gid: Option<u32>,
+    },
 }
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS)]
 #[serde(rename_all = "kebab-case")]
@@ -425,6 +481,12 @@ pub struct Plan {
 
     pub selected_profiles: Vec<String>,
     pub storage: BTreeMap<String, Storage>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    #[ts(optional, type = "{ [key in string]: FileConfig }")]
+    pub configs: BTreeMap<String, crate::file::FileConfig>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    #[ts(optional, type = "{ [key in string]: FileSecret }")]
+    pub secrets: BTreeMap<String, crate::file::FileSecret>,
     pub services: BTreeMap<String, Workload>,
     pub jobs: BTreeMap<String, Workload>,
 }

@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { NativeConfigCompilerError } from "./native-config-compiler.ts";
+import { authoredFilePlanningRequired } from "./native-file-plan-protocol.ts";
 import {
   type NativePreparedProject,
   type NativeProjectSelection,
@@ -90,6 +91,12 @@ export async function acquireNativeComposeInputs(opts: {
     return refused();
   }
   const resolved = prepared.result;
+  if (authoredFilePlanningRequired(prepared.input)) {
+    throw new NativeConfigCompilerError(
+      "E_NATIVE_PROJECT_UNSUPPORTED",
+      "Native file inputs require a qualified private material owner. No private values, hooks or engine operations ran. Values omitted."
+    );
+  }
   const declared = resolved.declared_workloads;
   if (!declared) {
     return refused();
@@ -115,7 +122,13 @@ export async function acquireNativeComposeInputs(opts: {
     metadata: env.metadata,
     signal,
   });
-  if (!(planned.ok && planned.environment_plan.complete)) {
+  if (
+    !(
+      planned.ok &&
+      planned.environment_plan.complete &&
+      planned.file_plan?.complete !== false
+    )
+  ) {
     return refused();
   }
   const selectedWorkloads = Object.keys(planned.environment_plan.workloads);

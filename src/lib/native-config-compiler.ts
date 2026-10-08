@@ -24,6 +24,14 @@ import {
   parseNativeEnvMetadata,
 } from "./native-env-plan-protocol.ts";
 import {
+  authoredFilePlanningRequired,
+  type NativeFilePlan,
+  nativeFilePlanIsValid,
+  nativeFilePlanningRequired,
+  nativeFileSourceMatches,
+  parseNativeFilePlan,
+} from "./native-file-plan-protocol.ts";
+import {
   type NativeHostEnvTargets,
   nativeHostSelectionMatches,
   parseNativeHostTargets,
@@ -85,6 +93,7 @@ export type NativeConfigPlanResult =
   | (Extract<NativeConfigResolveResult, { readonly ok: true }> & {
       readonly declared_workloads: NativeDeclaredWorkloads;
       readonly environment_plan: NativeEnvironmentPlan;
+      readonly file_plan?: NativeFilePlan;
     })
   | Extract<NativeConfigCompileResult, { readonly ok: false }>;
 
@@ -179,13 +188,9 @@ export async function compileNativeConfig(opts: {
   readonly requireEndpointPlanning?: boolean;
   readonly requireProcessPlanning?: boolean;
   readonly requireAcquisitionPlanning?: boolean;
+  readonly requireFilePlanning?: boolean;
 }): Promise<NativeConfigCompileResult> {
-  if (opts.input.byteLength > NATIVE_CONFIG_INPUT_LIMIT) {
-    throw failure(
-      "E_CONFIG_INPUT",
-      "Native configuration exceeds the input budget."
-    );
-  }
+  const authoredInput = captureCompilerInput(opts.input);
   const request = compilerRequest(opts);
   await checkProtocol({
     ...request,
@@ -196,24 +201,34 @@ export async function compileNativeConfig(opts: {
     requireEndpointPlanning: opts.requireEndpointPlanning,
     requireProcessPlanning:
       opts.requireProcessPlanning ||
-      authoredProcessPlanningRequired(opts.input),
+      authoredProcessPlanningRequired(authoredInput),
     requireAcquisitionPlanning:
       opts.requireAcquisitionPlanning ||
-      authoredAcquisitionPlanningRequired(opts.input),
+      authoredAcquisitionPlanningRequired(authoredInput),
+    requireFilePlanning:
+      opts.requireFilePlanning || authoredFilePlanningRequired(authoredInput),
   });
   const response = await invokeCompiler({
     ...request,
     args: compileArguments("compile", opts.profiles),
-    input: opts.input,
+    input: authoredInput,
   });
   const result = parseCompileResponse(response);
   if (result.ok) {
-    assertProcessSource({ input: opts.input, result, profiles: opts.profiles });
-    assertAcquisitionSource({
-      input: opts.input,
+    assertFileSource({ input: authoredInput, result, profiles: opts.profiles });
+    assertProcessSource({
+      input: authoredInput,
       result,
       profiles: opts.profiles,
     });
+    assertAcquisitionSource({
+      input: authoredInput,
+      result,
+      profiles: opts.profiles,
+    });
+    if (nativeFilePlanningRequired(result.plan)) {
+      await checkProtocol({ ...request, requireFilePlanning: true });
+    }
     if (nativeProcessPlanningRequired(result.plan)) {
       await checkProtocol({ ...request, requireProcessPlanning: true });
     }
@@ -259,9 +274,11 @@ export async function resolveNativeConfig(opts: {
   readonly requireEndpointPlanning?: boolean;
   readonly requireProcessPlanning?: boolean;
   readonly requireAcquisitionPlanning?: boolean;
+  readonly requireFilePlanning?: boolean;
   readonly probeRoutingInputs?: boolean;
 }): Promise<NativeConfigResolveResult> {
-  const plainInput = encodeResolveRequest(opts);
+  const authoredInput = captureCompilerInput(opts.input);
+  const plainInput = encodeResolveRequest({ ...opts, input: authoredInput });
   const request = compilerRequest(opts);
   const capabilities = await checkProtocol({
     ...request,
@@ -273,15 +290,17 @@ export async function resolveNativeConfig(opts: {
     requireEndpointPlanning: opts.requireEndpointPlanning,
     requireProcessPlanning:
       opts.requireProcessPlanning ||
-      authoredProcessPlanningRequired(opts.input),
+      authoredProcessPlanningRequired(authoredInput),
     requireAcquisitionPlanning:
       opts.requireAcquisitionPlanning ||
-      authoredAcquisitionPlanningRequired(opts.input),
+      authoredAcquisitionPlanningRequired(authoredInput),
+    requireFilePlanning:
+      opts.requireFilePlanning || authoredFilePlanningRequired(authoredInput),
   });
   const routingProbe =
     opts.probeRoutingInputs === true && capabilities.routingPlanning;
   const input = routingProbe
-    ? encodeResolveRequest({ ...opts, routingProbe })
+    ? encodeResolveRequest({ ...opts, input: authoredInput, routingProbe })
     : plainInput;
   const response = await invokeCompiler({
     ...request,
@@ -301,16 +320,24 @@ export async function resolveNativeConfig(opts: {
   if (!parsed.ok) {
     return parsed;
   }
+  assertFileSource({
+    input: authoredInput,
+    result: parsed,
+    profiles: opts.profiles,
+  });
   assertProcessSource({
-    input: opts.input,
+    input: authoredInput,
     result: parsed,
     profiles: opts.profiles,
   });
   assertAcquisitionSource({
-    input: opts.input,
+    input: authoredInput,
     result: parsed,
     profiles: opts.profiles,
   });
+  if (nativeFilePlanningRequired(parsed.plan)) {
+    await checkProtocol({ ...request, requireFilePlanning: true });
+  }
   if (nativeProcessPlanningRequired(parsed.plan)) {
     await checkProtocol({ ...request, requireProcessPlanning: true });
   }
@@ -415,8 +442,10 @@ export async function planNativeConfig(
     readonly requireEndpointPlanning?: boolean;
     readonly requireProcessPlanning?: boolean;
     readonly requireAcquisitionPlanning?: boolean;
+    readonly requireFilePlanning?: boolean;
   }
 ): Promise<NativeConfigPlanResult> {
+  const authoredInput = captureCompilerInput(opts.input);
   const metadata = parseNativeEnvMetadata(opts.envMetadata);
   if (
     !metadata ||
@@ -428,7 +457,11 @@ export async function planNativeConfig(
       "Native environment metadata is invalid or exceeds its budget; values omitted."
     );
   }
-  const input = encodeResolveRequest({ ...opts, envMetadata: metadata });
+  const input = encodeResolveRequest({
+    ...opts,
+    input: authoredInput,
+    envMetadata: metadata,
+  });
   const request = compilerRequest(opts);
   await checkProtocol({
     ...request,
@@ -440,10 +473,12 @@ export async function planNativeConfig(
     requireEndpointPlanning: opts.requireEndpointPlanning,
     requireProcessPlanning:
       opts.requireProcessPlanning ||
-      authoredProcessPlanningRequired(opts.input),
+      authoredProcessPlanningRequired(authoredInput),
     requireAcquisitionPlanning:
       opts.requireAcquisitionPlanning ||
-      authoredAcquisitionPlanningRequired(opts.input),
+      authoredAcquisitionPlanningRequired(authoredInput),
+    requireFilePlanning:
+      opts.requireFilePlanning || authoredFilePlanningRequired(authoredInput),
   });
   const response = await invokeCompiler({
     ...request,
@@ -463,16 +498,24 @@ export async function planNativeConfig(
   if (!parsed.ok) {
     return parsed;
   }
+  assertFileSource({
+    input: authoredInput,
+    result: parsed,
+    profiles: opts.profiles,
+  });
   assertProcessSource({
-    input: opts.input,
+    input: authoredInput,
     result: parsed,
     profiles: opts.profiles,
   });
   assertAcquisitionSource({
-    input: opts.input,
+    input: authoredInput,
     result: parsed,
     profiles: opts.profiles,
   });
+  if (nativeFilePlanningRequired(parsed.plan)) {
+    await checkProtocol({ ...request, requireFilePlanning: true });
+  }
   if (nativeProcessPlanningRequired(parsed.plan)) {
     await checkProtocol({ ...request, requireProcessPlanning: true });
   }
@@ -492,7 +535,14 @@ export async function planNativeConfig(
     value: parsed.envelope.environment_plan,
     parseDiagnostic,
   });
+  const filePlan = parseNativeFilePlan({
+    value: parsed.envelope.file_plan,
+    plan: parsed.plan,
+    metadata,
+    parseDiagnostic,
+  });
   if (
+    filePlan === null ||
     !(parsed.declared_workloads && environmentPlan) ||
     environmentPlan.overlay !== parsed.local_resolution.overlay ||
     environmentPlan.overlay !== metadata.overlay ||
@@ -517,7 +567,7 @@ export async function planNativeConfig(
       resolution: parsed.host_binding_resolution,
       metadata,
     }) ||
-    response.exitCode !== (environmentPlan.complete ? 0 : 1)
+    response.exitCode !== planExitCode(environmentPlan, filePlan)
   ) {
     throw failure(
       "E_COMPILER_RESPONSE",
@@ -530,7 +580,25 @@ export async function planNativeConfig(
     ...result,
     declared_workloads: parsed.declared_workloads,
     environment_plan: environmentPlan,
+    ...(filePlan === undefined ? {} : { file_plan: filePlan }),
   };
+}
+
+function captureCompilerInput(input: Uint8Array): Uint8Array {
+  if (input.byteLength > NATIVE_CONFIG_INPUT_LIMIT) {
+    throw failure(
+      "E_CONFIG_INPUT",
+      "Native configuration exceeds the input budget."
+    );
+  }
+  return new Uint8Array(input);
+}
+
+function planExitCode(
+  environment: NativeEnvironmentPlan,
+  files: NativeFilePlan | undefined
+): 0 | 1 {
+  return environment.complete && files?.complete !== false ? 0 : 1;
 }
 
 /** Reject inconsistent compiler envelopes without interpreting authored selection policy. */
@@ -749,6 +817,7 @@ async function checkProtocol(opts: {
   readonly requireEndpointPlanning?: boolean;
   readonly requireProcessPlanning?: boolean;
   readonly requireAcquisitionPlanning?: boolean;
+  readonly requireFilePlanning?: boolean;
 }): Promise<{ readonly routingPlanning: boolean }> {
   const handshake = await invokeCompiler({ ...opts, args: ["--protocol"] });
   const protocol = parseControlJson(handshake.output);
@@ -763,6 +832,7 @@ async function checkProtocol(opts: {
     (opts.requireRoutingPlanning && protocol.routing_plan_version !== 1) ||
     (opts.requireEndpointPlanning && protocol.endpoint_plan_version !== 1) ||
     (opts.requireProcessPlanning && protocol.process_plan_version !== 1) ||
+    (opts.requireFilePlanning && protocol.file_plan_version !== 1) ||
     (opts.requireAcquisitionPlanning &&
       protocol.acquisition_plan_version !== 1) ||
     (opts.requireLocalResolution &&
@@ -1085,6 +1155,7 @@ function assertPlanDeclarations(opts: {
     ["endpoint", nativeEndpointPlanIsValid(opts)],
     ["process", nativeProcessPlanIsValid(opts)],
     ["acquisition", nativeAcquisitionPlanIsValid(opts)],
+    ["file", nativeFilePlanIsValid(opts)],
   ] as const) {
     if (!valid) {
       throw failure(
@@ -1092,6 +1163,26 @@ function assertPlanDeclarations(opts: {
         `Native compiler returned invalid ${kind} declarations.`
       );
     }
+  }
+}
+
+function assertFileSource(opts: {
+  readonly input: Uint8Array;
+  readonly result: Extract<NativeConfigCompileResult, { readonly ok: true }>;
+  readonly profiles?: readonly string[];
+}): void {
+  if (
+    !nativeFileSourceMatches({
+      input: opts.input,
+      plan: opts.result.plan,
+      declared: opts.result.declared_workloads,
+      profiles: opts.profiles,
+    })
+  ) {
+    throw failure(
+      "E_COMPILER_RESPONSE",
+      "Native compiler changed the authored file requirements."
+    );
   }
 }
 

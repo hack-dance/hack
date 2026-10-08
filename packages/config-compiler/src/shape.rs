@@ -28,8 +28,17 @@ pub(crate) fn project(document: &json::Document) -> Result<(), Diagnostic> {
         "routes",
         "open",
         "host_bindings",
+        "configs",
+        "secrets",
     ] {
         optional_object(document, &json::child("", key))?;
+    }
+    for namespace in ["configs", "secrets"] {
+        if let Some(entries) = document.value.get(namespace).and_then(Value::as_object) {
+            for name in entries.keys() {
+                object(document, &json::child(&format!("/{namespace}"), name))?;
+            }
+        }
     }
     if let Some(bindings) = document
         .value

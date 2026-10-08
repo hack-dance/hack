@@ -267,6 +267,21 @@ fn compile_inputs(
     profiles: &[String],
     managed_values: Option<&ManagedValues>,
 ) -> Result<NativeInputs, CandidateError> {
+    // Presence remains unqualified even when definitions are empty or grants inactive.
+    // Check the original source before a compiler normalization can omit that intent.
+    if serde_json::from_slice::<serde_json::Value>(request)
+        .ok()
+        .and_then(|request| {
+            request
+                .get("project")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        })
+        .and_then(|source| serde_json::from_str::<serde_json::Value>(&source).ok())
+        .is_some_and(|source| source.get("configs").is_some() || source.get("secrets").is_some())
+    {
+        return Err(refused());
+    }
     let PlanResult::Success {
         plan,
         semantic_hash,
@@ -285,6 +300,8 @@ fn compile_inputs(
     }
     let environment_policy_hash = policy_hash(&plan, &environment_plan)?;
     if !plan.storage.is_empty()
+        || !plan.configs.is_empty()
+        || !plan.secrets.is_empty()
         || plan.routes.is_some()
         || plan.open.is_some()
         || plan.host_bindings.is_some()

@@ -1,4 +1,11 @@
-import { chmod, lstat, mkdir, readFile, rename } from "node:fs/promises";
+import {
+  chmod,
+  lstat,
+  mkdir,
+  readFile,
+  rename,
+  writeFile,
+} from "node:fs/promises";
 import { join } from "node:path";
 import { isRecord } from "../../../src/lib/guards.ts";
 import { createNativeComposeProbe } from "../../../src/lib/native-compose-ownership.ts";
@@ -16,6 +23,13 @@ import {
   type Scenario,
   type ScenarioContext,
 } from "../harness.ts";
+import {
+  MANAGED_FIXTURE_VALUE,
+  managedAdoptionFixtureComposeFiles,
+  managedAdoptionFixtureEnvAssertion,
+  managedAdoptionFixtureSourceSnapshot,
+  prepareManagedAdoptionFixtureSources,
+} from "./native-compose-adoption-managed-inputs.ts";
 
 const TIMEOUT = 180_000;
 const PROJECT_LABEL = "com.docker.compose.project";
@@ -31,6 +45,7 @@ type Instance = {
   readonly root: string;
   readonly name: string;
   readonly marker: string;
+  readonly sourceMode?: "canonical-generated";
 };
 type Observation = {
   readonly id: string;
@@ -141,6 +156,12 @@ function validateOwnedObservation(opts: {
 }): Observation {
   const row = opts.row;
   if (
+    opts.instance.sourceMode !== undefined &&
+    opts.instance.sourceMode !== "canonical-generated"
+  ) {
+    refused();
+  }
+  if (
     !isRecord(row) ||
     row.project !== opts.instance.name ||
     !Array.isArray(row.nativeNames) ||
@@ -159,8 +180,7 @@ function validateOwnedObservation(opts: {
       !["db", "worker"].includes(row.service) ||
       row.name !== `/${opts.instance.name}-${row.service}-1` ||
       row.workingDir !== join(opts.instance.root, ".hack") ||
-      row.configFiles !==
-        join(opts.instance.root, ".hack/docker-compose.yml") ||
+      row.configFiles !== fixtureComposeFiles(opts.instance).join(",") ||
       JSON.stringify(row.mounts) !==
         JSON.stringify([
           {
@@ -199,7 +219,10 @@ function validateOwnedObservation(opts: {
   return { id: String(row.name), createdAt: row.createdAt };
 }
 function privateReport(result: CliResult) {
-  if (result.combined.includes(SYNTHETIC_VALUE)) {
+  if (
+    result.combined.includes(SYNTHETIC_VALUE) ||
+    result.combined.includes(MANAGED_FIXTURE_VALUE)
+  ) {
     refused();
   }
 }
@@ -228,6 +251,12 @@ async function source(instance: Instance) {
   }
   return JSON.stringify(files);
 }
+function fixtureComposeFiles(instance: Instance): readonly string[] {
+  return instance.sourceMode === "canonical-generated"
+    ? managedAdoptionFixtureComposeFiles(instance.root)
+    : [join(instance.root, ".hack/docker-compose.yml")];
+}
+
 async function writeLegacy(instance: Instance, image: string) {
   await mkdir(join(instance.root, ".hack"), { recursive: true });
   await Bun.write(
@@ -235,6 +264,7 @@ async function writeLegacy(instance: Instance, image: string) {
     JSON.stringify({
       name: instance.name,
       worktree: { auto_branch: false, inherit_local: true },
+      ...(instance.sourceMode ? { env: { default_overlay: "qa" } } : {}),
     })
   );
   await Bun.write(
@@ -277,7 +307,7 @@ function formats(kind: Kind): string {
   return `{"name":{{json .Name}},"createdAt":{{json .CreatedAt}},"project":{{json (index .Labels "${PROJECT_LABEL}")}},"nativeNames":[{{$first := true}}{{range $name,$value := .Labels}}{{if not $first}},{{end}}{{$first = false}}{{json $name}}{{end}}],"storage":{{json (index .Labels "com.docker.compose.volume")}}}`;
 }
 
-async function prepareFixtureInputs(ctx: ScenarioContext) {
+async function prepareFixtureInputs(ctx: ScenarioContext, generated = false) {
   expect({
     that: resolveCliSpawnArgs([]).length === 1,
     message:
@@ -300,6 +330,7 @@ async function prepareFixtureInputs(ctx: ScenarioContext) {
     root: fixture.root,
     name: `${fixture.name}-main`,
     marker: "unused-primary",
+    ...(generated ? { sourceMode: "canonical-generated" as const } : {}),
   };
   if ((await probe(["info", "--format", "{{.OSType}}"])) !== "linux") {
     refused();
@@ -326,17 +357,28 @@ async function prepareFixtureInputs(ctx: ScenarioContext) {
     root: await addLinkedWorktree({ fixture, branch: "adoption-alpha" }),
     name: `${fixture.name}-alpha`,
     marker: "alpha-existing-sql-row",
+    ...(generated ? { sourceMode: "canonical-generated" as const } : {}),
   };
   const second: Instance = {
     root: await addLinkedWorktree({ fixture, branch: "adoption-beta" }),
     name: `${fixture.name}-beta`,
     marker: "beta-existing-sql-row",
+    ...(generated ? { sourceMode: "canonical-generated" as const } : {}),
   };
   for (const instance of [first, second]) {
     await writeLegacy(instance, image);
     await commitAll({
       root: instance.root,
       message: "fixture: distinct original identity",
+    });
+  }
+
+  if (generated) {
+    await prepareManagedAdoptionFixtureSources({
+      hackHome: ctx.hackHome,
+      tempRoot: ctx.tempRoot,
+      primary,
+      instances: [first, second],
     });
   }
 
@@ -414,14 +456,17 @@ function createFixtureRuntime(
     return result;
   };
   const anchors = new Map<Instance, Snapshot>();
-  const effect = async (args: readonly string[]) =>
-    successful(
+  const managedAnchors = new Map<Instance, string>();
+  const effect = async (args: readonly string[]) => {
+    await requirePreparedEngine({ engineId, probe });
+    return successful(
       await runCommand({
         argv: [engine, ...args],
         cwd: fixtureRoot,
         timeoutMs: TIMEOUT,
       })
     );
+  };
   const container = (instance: Instance, service: string) => {
     const row = anchors
       .get(instance)
@@ -464,6 +509,28 @@ function createFixtureRuntime(
         instance.marker
     ) {
       refused();
+    }
+    if (instance.sourceMode === "canonical-generated") {
+      if (
+        (await managedAdoptionFixtureSourceSnapshot({ primary, instance })) !==
+        managedAnchors.get(instance)
+      ) {
+        refused();
+      }
+      for (const service of ["db", "worker"] as const) {
+        if (
+          (await probe([
+            "container",
+            "exec",
+            container(instance, service),
+            "/bin/sh",
+            "-c",
+            managedAdoptionFixtureEnvAssertion(instance, service),
+          ])) !== ""
+        ) {
+          refused();
+        }
+      }
     }
   };
   const assertNoState = async (instance: Instance) => {
@@ -515,6 +582,7 @@ function createFixtureRuntime(
     list,
     resources,
     anchors,
+    managedAnchors,
     effect,
     container,
     sql,
@@ -547,6 +615,8 @@ async function bootstrapOriginal(h: FixtureRuntime, instance: Instance) {
     sql,
     waitReady,
     check,
+    managedAnchors,
+    primary,
   } = h;
 
   for (const kind of ["container", "network", "volume"] as const) {
@@ -577,6 +647,14 @@ async function bootstrapOriginal(h: FixtureRuntime, instance: Instance) {
       refused();
     }
   }
+  const originalSource = await source(instance);
+  if (instance.sourceMode === "canonical-generated") {
+    managedAnchors.set(
+      instance,
+      await managedAdoptionFixtureSourceSnapshot({ primary, instance })
+    );
+  }
+  await requirePreparedEngine(h);
   const started = await runCommand({
     argv: [
       engine,
@@ -587,8 +665,7 @@ async function bootstrapOriginal(h: FixtureRuntime, instance: Instance) {
       join(instance.root, ".hack"),
       "--env-file",
       "/dev/null",
-      "--file",
-      join(instance.root, ".hack/docker-compose.yml"),
+      ...fixtureComposeFiles(instance).flatMap((file) => ["--file", file]),
       "up",
       "--detach",
       "--pull",
@@ -600,7 +677,7 @@ async function bootstrapOriginal(h: FixtureRuntime, instance: Instance) {
   const captured = await resources(instance);
   anchors.set(instance, {
     resources: captured,
-    source: await source(instance),
+    source: originalSource,
   });
   successful(started);
   if (
@@ -696,7 +773,7 @@ const engine = ${JSON.stringify(engine)};
 if(args[0]==="container" && args[1]==="stop") {
  if(args.length!==4 || !args.includes(${JSON.stringify(db)}) || !args.includes(${JSON.stringify(worker)})) process.exit(99);
  const state=JSON.parse(await Bun.file(${JSON.stringify(receipt)}).text());
- if(state.adoption_receipt_version!==2 || state.pendingOperation?.operation!=="stop") process.exit(98);
+ if(state.adoption_receipt_version!==${first.sourceMode ? 3 : 2} || state.pendingOperation?.operation!=="stop") process.exit(98);
  const child=Bun.spawn([engine,"container","stop",${JSON.stringify(db)}],{stdin:"ignore",stdout:"ignore",stderr:"ignore"});
  if(await child.exited!==0) process.exit(97);
  await Bun.write(${JSON.stringify(control)},"journal-before-partial-stop");process.exit(71);
@@ -794,12 +871,62 @@ async function adoptSecondAndRollback(h: FixtureRuntime) {
   await check(first);
 }
 
+/** An external raw-byte edit must prevent recovery before another stop while both original data bindings remain intact. */
+async function refuseChangedInheritedRepair(h: FixtureRuntime) {
+  const path = join(h.primary.root, ".hack/hack.env.qa.local.yaml");
+  const original = await readFile(path);
+  const other = JSON.stringify({
+    resources: await h.resources(h.second),
+    source: await source(h.second),
+    row: await h.sql(h.second, "SELECT value FROM marker WHERE id=1"),
+  });
+  const first = h.anchors.get(h.first);
+  if (!first) {
+    refused();
+  }
+  const states = async () =>
+    await Promise.all(
+      first.resources.container.map(
+        async (entry) =>
+          await h.probe([
+            "container",
+            "inspect",
+            "--format",
+            "{{.State.Running}}",
+            entry.id,
+          ])
+      )
+    );
+  const before = await states();
+  await writeFile(path, Buffer.concat([original, Buffer.from("\n")]));
+  try {
+    refusedPreview(
+      await h.cli(h.first, ["config", "adopt", "--recover", "--stop", "--json"])
+    );
+    if (
+      JSON.stringify(await states()) !== JSON.stringify(before) ||
+      JSON.stringify({
+        resources: await h.resources(h.second),
+        source: await source(h.second),
+        row: await h.sql(h.second, "SELECT value FROM marker WHERE id=1"),
+      }) !== other
+    ) {
+      refused();
+    }
+  } finally {
+    await writeFile(path, original);
+  }
+  await h.check(h.second);
+}
+
 type CleanupInputs = Pick<
   FixtureRuntime,
   "engineId" | "anchors" | "resources" | "owned" | "effect" | "list" | "probe"
 > & { readonly instances: readonly Instance[] };
 
-async function requirePreparedEngine(h: CleanupInputs) {
+async function requirePreparedEngine(
+  h: Pick<CleanupInputs, "engineId" | "probe">
+) {
   if ((await h.probe(["info", "--format", "{{json .ID}}"])) !== h.engineId) {
     refused();
   }
@@ -940,6 +1067,52 @@ export const nativeComposeAdoptionWorktreesScenario: Scenario = {
         }
         ctx.log(
           "two linked original SQL volumes, retained IDs, partial-stop recovery and isolated rollback verified"
+        );
+      },
+      cleanup: () =>
+        cleanupOwnedAdoptionFixture({ ...h, instances: [h.first, h.second] }),
+      secondaryFailure: () =>
+        ctx.log(
+          "secondary exact-owned cleanup failed; retain fixture evidence"
+        ),
+    });
+  },
+};
+
+/** Canonical writer-produced sources and six managed layers retain both linked checkouts' original SQL and identities through v3 repair/rollback. */
+export const nativeComposeAdoptionManagedWorktreesScenario: Scenario = {
+  name: "native-compose-adoption-managed-worktrees",
+  tier: "docker",
+  preserveFixtureOnFailure: true,
+  summary:
+    "two linked original SQL volumes survive canonical managed inheritance adoption and rollback",
+  run: async (ctx) => {
+    const h = createFixtureRuntime(await prepareFixtureInputs(ctx, true));
+    await runWithFixtureCleanup({
+      run: async () => {
+        for (const instance of [h.first, h.second]) {
+          await bootstrapOriginal(h, instance);
+          const preview = successful(
+            await h.cli(instance, [
+              "config",
+              "adopt",
+              "--dry-run",
+              "--stop",
+              "--json",
+            ])
+          );
+          if (object(preview.stdout).complete !== true) {
+            refused();
+          }
+          await h.assertNoState(instance);
+          await h.check(instance);
+        }
+        await interruptFirstStop(h);
+        await refuseChangedInheritedRepair(h);
+        await recoverFirstAndRollback(h);
+        await adoptSecondAndRollback(h);
+        ctx.log(
+          "canonical managed inputs, original SQL/IDs, inherited drift refusal, partial-stop repair and separate rollback verified"
         );
       },
       cleanup: () =>

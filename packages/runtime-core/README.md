@@ -133,7 +133,9 @@ This library selector creates no intent, connects no provider and has no CLI or
 frontend recovery activation.
 
 Guarded native cleanup checks its retained authority before and after every
-engine observation and stop/remove request, including failed requests. It also
+engine observation, removal request and admitted stop batch, including failed
+calls. The existing stop batch retains its concurrent HTTP-stop semantics. Cleanup
+checks authority before each journal publication. It also
 checks each private-environment absence and retirement call. A lost guard refuses
 before the next request or journal transition; an already attempted effect remains
 durable evidence for an explicitly admitted retry. This prerequisite introduces

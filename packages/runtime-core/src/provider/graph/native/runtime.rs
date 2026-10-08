@@ -746,6 +746,7 @@ fn cleanup_using_guarded<B: Backend>(
         return Ok(());
     }
     if !stopped {
+        check_startup(guard)?;
         receipt.phase = Phase::StopIntent;
         journal::save(root, receipt)?;
     }
@@ -777,8 +778,10 @@ fn cleanup_using_guarded<B: Backend>(
     }
     // A resumed removal still durably records each fresh terminal observation
     // before deletion, without moving its already committed phase backward.
+    check_startup(guard)?;
     journal::save(root, receipt)?;
     if !removing {
+        check_startup(guard)?;
         receipt.phase = Phase::RemovalIntent;
         journal::save(root, receipt)?;
     }
@@ -799,6 +802,7 @@ fn cleanup_using_guarded<B: Backend>(
         if inspected(backend, receipt, resource)?.is_some() {
             return Err(refused());
         }
+        check_startup(guard)?;
         receipt.resources.get_mut(key).ok_or_else(refused)?.phase = "removed".into();
         journal::save(root, receipt)?;
     }
@@ -815,6 +819,7 @@ fn cleanup_using_guarded<B: Backend>(
         {
             return Err(refused());
         }
+        check_startup(guard)?;
         receipt
             .resources
             .get_mut("network:default")
@@ -834,6 +839,7 @@ fn cleanup_using_guarded<B: Backend>(
             return Err(refused());
         }
     }
+    check_startup(guard)?;
     receipt
         .resources
         .get_mut("network:default")

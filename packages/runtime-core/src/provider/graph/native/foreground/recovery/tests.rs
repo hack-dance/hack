@@ -317,10 +317,15 @@ fn partial_failed_missing_id_or_pending_state_never_creates_an_intent() {
 }
 
 #[test]
-fn replaced_owner_socket_and_operation_lock_refuse_without_repair() {
+fn replaced_selected_owner_or_published_socket_and_lock_refuse_without_repair() {
     for name in ["owner.json", "control.sock", "operation.lock"] {
         let fixture = Fixture::new();
         fixture.dead();
+        if name == "owner.json" {
+            // Publication3 carries no original owner-file inode. Its first
+            // private snapshot becomes the saved intent's later inode anchor.
+            fixture.store(&fixture.intent());
+        }
         let path = fixture.owner_root().join(name);
         let original = if name == "owner.json" {
             Some(fs::read(&path).unwrap())
@@ -344,6 +349,31 @@ fn replaced_owner_socket_and_operation_lock_refuse_without_repair() {
             fixture.assert_refused_unchanged();
         }
     }
+}
+
+#[test]
+fn first_selection_captures_current_private_same_byte_owner_snapshot() {
+    let fixture = Fixture::new();
+    fixture.dead();
+    let path = fixture.owner_root().join("owner.json");
+    let bytes = fs::read(&path).unwrap();
+    let prior_id = id(&path).unwrap();
+    fs::rename(&path, path.with_extension("retained")).unwrap();
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&path)
+        .unwrap();
+    file.write_all(&bytes).unwrap();
+    file.sync_all().unwrap();
+    assert_ne!(id(&path).unwrap(), prior_id);
+    let selected = select(&fixture.candidate, RUN).unwrap();
+    assert_eq!(selected.owner_sha256, digest(&bytes));
+    fixture.store(&fixture.intent());
+    fs::remove_file(&path).unwrap();
+    fs::rename(path.with_extension("retained"), &path).unwrap();
+    fixture.assert_refused_unchanged();
 }
 
 #[test]

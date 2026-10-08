@@ -168,7 +168,9 @@ enum SelectionKind {
     NativeGraphRecoverySelection,
 }
 /// Read-only original selectors. They prove no current guest boot or resource
-/// condition and are independently re-admitted by effectful cleanup.
+/// condition and are independently re-admitted by effectful cleanup. The first
+/// selection captures the current private publication, not an external prior
+/// owner-file inode; a committed intent anchors that admitted inode and digest.
 #[derive(Serialize)]
 pub struct Selection {
     version: u8,

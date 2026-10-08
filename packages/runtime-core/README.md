@@ -122,6 +122,15 @@ receipt boot. Version2 records reject the new field, and version3 records requir
 it. Native runtime receipts and the authenticated control/ready wire remain v2;
 Compose receipt and owner formats remain unchanged. This provenance alone grants
 no dead-owner recovery authority.
+The inactive read-only recovery selector admits only a complete Ready journal and
+a dead version3 publication on the same native host boot. It captures the current
+private owner bytes and inode; its raw SHA is a selector for later independent
+admission, not an external identity anchor from before that capture. After a
+durable intent, the saved inode and digest refuse replacement. Cleanup progress
+retains the original Ready selectors and exact inventory. Pending writes refuse;
+retired paths require the intent's preceding phase and unchanged archived inode.
+This library selector creates no intent, connects no provider and has no CLI or
+frontend recovery activation.
 Cancellation fences startup before admission and subsequent effects. Cleanup
 retains stop failures by admitted workload name, and retires the publication only
 after exact cleanup succeeds. Replies bind their requested action and immutable

@@ -138,6 +138,13 @@ The first component refuses:
 - TCP endpoints, pending an explicit address-versus-URI derivation contract.
 - Unknown native fields or unsupported runtime options, rather than dropping them.
 
+CPU/memory resource declarations, custom logging, workload isolation modes and
+host-device mappings are unsupported authored fields. The compiler rejects them
+before profile selection, including declarations in inactive services or jobs.
+The maintained process-policy fixture checks the exact diagnostic and redacted
+execution refusal behind engine and lifecycle-hook tripwires; a timeout or an
+unrelated validation failure does not qualify this boundary.
+
 No new CPU, memory, PID, port or egress restriction is synthesized.
 The generated default Compose network preserves ordinary project-scoped resolution
 and outbound connectivity. Runtime availability and reachability remain apply-time

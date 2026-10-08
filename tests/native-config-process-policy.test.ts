@@ -47,7 +47,9 @@ test("process evidence requires observed signal, grace, orphan reaping and exact
   expect(() => verifyNativeProcessPolicyEvidence(evidence())).not.toThrow();
 });
 
-function policyRefusals(field: "resources" | "logging") {
+function policyRefusals(
+  field: "resources" | "logging" | "isolation" | "devices"
+) {
   return {
     field,
     compilerReport: {
@@ -73,7 +75,12 @@ function policyRefusals(field: "resources" | "logging") {
 }
 
 test("unsupported policy evidence separates precise compiler refusal from redacted execution output", () => {
-  for (const field of ["resources", "logging"] as const) {
+  for (const field of [
+    "resources",
+    "logging",
+    "isolation",
+    "devices",
+  ] as const) {
     expect(() =>
       verifyUnsupportedNativeProcessPolicy(policyRefusals(field))
     ).not.toThrow();

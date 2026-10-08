@@ -281,7 +281,7 @@ export function nativeProcessPolicyProject(opts: {
 
 /** Compile diagnostics identify unsupported intent; execution deliberately returns a fixed redacted refusal. */
 export function verifyUnsupportedNativeProcessPolicy(opts: {
-  readonly field: "resources" | "logging";
+  readonly field: "resources" | "logging" | "isolation" | "devices";
   readonly compilerReport: unknown;
   readonly executionReport: unknown;
 }): void {
@@ -301,8 +301,7 @@ export function verifyUnsupportedNativeProcessPolicy(opts: {
       diagnostic.code === "unknown_field" &&
       diagnostic.pointer === `/services/unsupported/${opts.field}` &&
       diagnostic.document === "project",
-    message:
-      "Compiler must specifically refuse the unsupported resource/logging field",
+    message: "Compiler must specifically refuse the unsupported runtime field",
   });
   const execution = opts.executionReport;
   expect({
@@ -317,7 +316,7 @@ export function verifyUnsupportedNativeProcessPolicy(opts: {
 }
 
 /** Actual compiler/CLI refusals run behind engine and hook tripwires, including unselected declarations. */
-async function refuseUnsupportedPolicies(opts: {
+export async function refuseUnsupportedPolicies(opts: {
   readonly root: string;
   readonly source: string;
   readonly image: string;
@@ -350,7 +349,12 @@ async function refuseUnsupportedPolicies(opts: {
     `#!${process.execPath}\nawait Bun.write(${JSON.stringify(engineCalled)}, "called");process.exit(99);\n`
   );
   await chmod(fakeDocker, 0o700);
-  for (const field of ["resources", "logging"] as const) {
+  for (const field of [
+    "resources",
+    "logging",
+    "isolation",
+    "devices",
+  ] as const) {
     for (const inactive of [false, true]) {
       const invalid: unknown = {
         ...opts.project,
@@ -397,7 +401,7 @@ async function refuseUnsupportedPolicies(opts: {
           !result.timedOut &&
           !result.combined.includes(UNSUPPORTED_VALUE),
         message:
-          "Unsupported resource/logging intent, including inactive workloads, must refuse with redacted compiler diagnostics",
+          "Unsupported runtime intent, including inactive workloads, must refuse with redacted compiler diagnostics",
       });
       verifyUnsupportedNativeProcessPolicy({
         field,
@@ -514,7 +518,7 @@ export const nativeConfigProcessPolicyScenario: Scenario = {
     });
     await restore();
     stage(
-      "resource/logging and inactive-profile refusals verified before engine/hook access"
+      "resource/logging/isolation/device and inactive-profile refusals verified before engine/hook access"
     );
     let identity: Identity | null = null;
     let readerId: string | null = null;

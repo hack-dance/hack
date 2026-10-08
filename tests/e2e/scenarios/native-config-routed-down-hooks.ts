@@ -11,13 +11,13 @@ import {
   type NativeComposeIdentity,
   openNativeComposeGenerationStore,
 } from "../../../src/lib/native-compose-generation.ts";
-import { createNativeComposeProbe } from "../../../src/lib/native-compose-ownership.ts";
 import { assertNativeComposeProxyRoutes } from "../../../src/lib/native-compose-proxy-routes.ts";
 import {
   readNativeComposeRouteMetadata,
   verifyNativeComposeSavedRoutesAbsent,
 } from "../../../src/lib/native-compose-route-owner.ts";
 import { type CliResult, expect, expectExit } from "../harness.ts";
+import { createNativeRoutedDownProofWindow } from "../native-routed-down-proof-window.ts";
 
 const ID = /^[a-f0-9]{64}$/;
 const TOKEN = /^[a-f0-9]{32}$/;
@@ -519,7 +519,8 @@ function workloadOwned(opts: {
 }
 async function routesLive(
   value: Awaited<ReturnType<typeof observe>>,
-  docker: Docker
+  docker: Docker,
+  deadline: number
 ): Promise<void> {
   const { source, metadata, observation } = value;
   const proof = () =>
@@ -529,7 +530,7 @@ async function routesLive(
       ownerToken: source.owner.ownerToken,
       generationId: source.generation.generationId,
       routes: metadata.routes,
-      deadline: Date.now() + PROOF_WINDOW,
+      deadline,
     });
   await proof();
   for (const url of observation.pin.origins) {
@@ -587,8 +588,10 @@ export async function runNativeRoutedDownHook(
       "Routed hook target environment or checkout changed; values omitted"
     );
   }
-  const docker = createNativeComposeProbe({ timeoutMs: 10_000 });
-  const own = await observe(capsule.own, docker, phase === "before");
+  const window = createNativeRoutedDownProofWindow({ timeoutMs: PROOF_WINDOW });
+  const own = await window.capture((docker) =>
+    observe(capsule.own, docker, phase === "before")
+  );
   if (
     !nativeRoutedDownPhaseMatches({
       expected: capsule.own,
@@ -599,7 +602,7 @@ export async function runNativeRoutedDownHook(
     throw new Error("Routed hook phase finalized early or changed ownership");
   }
   if (phase === "before") {
-    await routesLive(own, docker);
+    await window.capture((docker) => routesLive(own, docker, window.deadline));
   } else {
     await verifyNativeComposeSavedRoutesAbsent({
       owner: own.source.owner,
@@ -609,11 +612,11 @@ export async function runNativeRoutedDownHook(
           document: own.source.document,
         },
       ],
-      deadline: Date.now() + PROOF_WINDOW,
+      deadline: window.deadline,
     });
   }
   for (const sibling of capsule.siblings) {
-    const actual = await observe(sibling, docker, true);
+    const actual = await window.capture((docker) => observe(sibling, docker, true));
     if (
       !nativeRoutedDownPhaseMatches({
         expected: sibling,
@@ -625,7 +628,7 @@ export async function runNativeRoutedDownHook(
         "Sibling route/data ownership changed during routed stop"
       );
     }
-    await routesLive(actual, docker);
+    await window.capture((docker) => routesLive(actual, docker, window.deadline));
   }
   if (
     !nativeRoutedDownClaimsMatch({
@@ -639,7 +642,9 @@ export async function runNativeRoutedDownHook(
       "Routed stop retired or changed claims before after-hook completion"
     );
   }
-  const final = await observe(capsule.own, docker, phase === "before");
+  const final = await window.capture((docker) =>
+    observe(capsule.own, docker, phase === "before")
+  );
   if (
     !nativeRoutedDownPhaseMatches({
       expected: capsule.own,
@@ -649,6 +654,7 @@ export async function runNativeRoutedDownHook(
   ) {
     throw new Error("Routed hook owner changed across proof awaits");
   }
+  window.assertOpen();
   await appendFile(capsule.order, `${phase}\n`);
   // The private proof contains only synthetic fixture identity and booleans, never env/document values.
   await Bun.write(
@@ -665,6 +671,7 @@ export async function runNativeRoutedDownHook(
       routeState: phase === "before" ? "live" : "absent",
     })
   );
+  window.assertOpen();
   return capsule.mode === "after17" && phase === "after" ? 17 : 0;
 }
 

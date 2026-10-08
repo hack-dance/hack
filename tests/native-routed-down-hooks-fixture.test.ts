@@ -1,9 +1,11 @@
-import { expect, test } from "bun:test";
+import { expect, spyOn, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, realpath, rm, stat } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, realpath, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createNativeComposeProbe } from "../src/lib/native-compose-ownership.ts";
 import { acquireProjectEnvForNativeExecution } from "../src/lib/project-env-config.ts";
+import { createNativeRoutedDownProofWindow } from "./e2e/native-routed-down-proof-window.ts";
 import {
   nativeRoutedDownChangedSource,
   nativeRoutedDownClaimsMatch,
@@ -25,6 +27,101 @@ const pin = {
   volume: { name: "native-fixture_state", createdAt: "2026-10-08T12:00:00Z" },
   origins: ["https://primary.test", "https://oauth.test"],
 };
+test("one routed hook's complete observations survive the old acquisition lifetime within the fixed outer window", async () => {
+  const root = await mkdtemp(join(tmpdir(), "routed-proof-lifetime-"));
+  const previous = process.env.PATH;
+  const commands = join(root, "queries");
+  const script = join(root, "docker");
+  await Bun.write(
+    script,
+    `#!${process.execPath}
+import {appendFileSync,writeFileSync} from "node:fs";
+const args=process.argv.slice(2);
+if(args.join(" ")!=="info --format {{.OSType}}") {writeFileSync(${JSON.stringify(join(root, "unexpected"))},"refused");process.exit(99);}
+await Bun.sleep(20);
+appendFileSync(${JSON.stringify(commands)},JSON.stringify(args)+"\\n");
+console.log("linux");
+`
+  );
+  await chmod(script, 0o700);
+  process.env.PATH = root;
+  const wallClock = spyOn(Date, "now").mockReturnValue(0);
+  try {
+    const args = ["info", "--format", "{{.OSType}}"];
+    // This is the pre-fix hook's exact aggregate acquisition: it cannot be reused
+    // for the later final inventory even when the outer proof window is open.
+    const original = createNativeComposeProbe({ timeoutMs: 10_000 });
+    expect((await original(args)).trim()).toBe("linux");
+    const window = createNativeRoutedDownProofWindow({ timeoutMs: 30_000 });
+    expect(window.deadline).toBe(30_000);
+    expect(
+      await window.capture(async (docker) => (await docker(args)).trim())
+    ).toBe("linux");
+    wallClock.mockReturnValue(10_001);
+    await expect(original(args)).rejects.toMatchObject({
+      code: "E_NATIVE_COMPOSE_PROBE_TIMEOUT",
+    });
+    expect(
+      await window.capture(async (docker) => (await docker(args)).trim())
+    ).toBe("linux");
+    wallClock.mockReturnValue(29_000);
+    expect(
+      await window.capture(async (docker) => (await docker(args)).trim())
+    ).toBe("linux");
+    wallClock.mockReturnValue(30_000);
+    await expect(window.capture(async (docker) => docker(args))).rejects.toThrow(
+      "proof window expired"
+    );
+    expect(() => window.assertOpen()).toThrow("proof window expired");
+    expect((await readFile(commands, "utf8")).trim().split("\n")).toHaveLength(
+      4
+    );
+    expect(await Bun.file(join(root, "unexpected")).exists()).toBe(false);
+  } finally {
+    wallClock.mockRestore();
+    if (previous === undefined) {
+      Reflect.deleteProperty(process.env, "PATH");
+    } else {
+      process.env.PATH = previous;
+    }
+    await rm(root, { recursive: true, force: true });
+  }
+});
+test("routed observations use remaining outer time and never accept late or failed capture", async () => {
+  let now = 0;
+  const budgets: number[] = [];
+  const window = createNativeRoutedDownProofWindow({
+    timeoutMs: 30_000,
+    now: () => now,
+    createProbe: (opts) => {
+      budgets.push(opts?.timeoutMs ?? -1);
+      return () => Promise.resolve("synthetic-observation");
+    },
+  });
+  await window.capture(async () => {
+    now = 10_001;
+  });
+  await window.capture(async () => {
+    now = 29_999;
+  });
+  await expect(
+    window.capture(async () => {
+      now = 30_000;
+      return "must not be admitted";
+    })
+  ).rejects.toThrow("proof window expired");
+  expect(budgets).toEqual([10_000, 10_000, 1]);
+  await expect(window.capture(() => Promise.resolve())).rejects.toThrow(
+    "proof window expired"
+  );
+  expect(budgets).toHaveLength(3);
+  const failed = createNativeRoutedDownProofWindow({
+    timeoutMs: 30_000,
+    createProbe: () => () => Promise.resolve("synthetic-observation"),
+  });
+  const refusal = new Error("synthetic capture failed");
+  await expect(failed.capture(() => Promise.reject(refusal))).rejects.toBe(refusal);
+});
 test("routed env authoring works after the native marker and preserves the actual env freshness fence", async () => {
   const created = await mkdtemp(join(tmpdir(), "native-routed-down-env-"));
   const root = await realpath(created);

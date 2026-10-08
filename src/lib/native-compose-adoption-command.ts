@@ -299,7 +299,8 @@ export async function tryLegacyComposeAdoptedCommand(
               {
                 cwd: projectRoot,
                 stdin: "ignore",
-                stdout: "stderr",
+                stdout: "ignore",
+                stderr: "ignore",
                 forwardSignals: true,
                 timeoutMs,
               }

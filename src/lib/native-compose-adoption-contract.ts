@@ -8,6 +8,8 @@ import {
 } from "./worktree-local-config.ts";
 
 const MANAGED = /^hack\.env(?:\.|$)/;
+const CANONICAL_MANAGED =
+  /^hack\.env\.[a-z0-9]+(?:-[a-z0-9]+)*(?:\.local)?\.yaml$/;
 function check(signal?: AbortSignal) {
   if (signal?.aborted) {
     throw new Error("Legacy adoption cancelled; values omitted.");
@@ -28,7 +30,8 @@ export function legacyComposeAdoptionCandidateSupported(
 /** Inspect names/types only, with a bounded directory walk; never read managed values or keys. */
 async function rootLayoutSupported(
   projectRoot: string,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  managed: "refuse" | "canonical" = "refuse"
 ): Promise<boolean> {
   check(signal);
   for (const relative of [
@@ -70,12 +73,26 @@ async function rootLayoutSupported(
   for await (const entry of directory) {
     check(signal);
     count++;
-    if (count > 4096 || MANAGED.test(entry.name)) {
+    if (
+      count > 4096 ||
+      (MANAGED.test(entry.name) &&
+        (managed === "refuse" ||
+          !CANONICAL_MANAGED.test(entry.name) ||
+          !entry.isFile()))
+    ) {
       return false;
     }
   }
   check(signal);
   return true;
+}
+
+/** Names/types only: private managed readers admit canonical YAML filenames, never alternate local/config or generated alias authority. This does not authorize conversion or execution. */
+export async function legacyComposeAdoptionManagedReadLayoutSupported(opts: {
+  readonly projectRoot: string;
+  readonly signal?: AbortSignal;
+}): Promise<boolean> {
+  return await rootLayoutSupported(opts.projectRoot, opts.signal, "canonical");
 }
 
 /** Names-only refusal includes the verified inherited primary scope, without reading values or keys. Validated candidate policy supplies the existing opt-out. */

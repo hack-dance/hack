@@ -29,8 +29,9 @@ function row(text: string) {
 }
 
 /**
- * Private static-source fidelity check. The strict importer has already refused
- * interpolation, env files, source binds and unknown options. Explicit selection
+ * Private ordered-source fidelity check. The strict importer and generated-source
+ * owner have already refused interpolation, env files, source binds and unknown
+ * options. Explicit selection
  * and a null env file prevent Compose from discovering alternate inputs. Only
  * configuration hashes and engine-created hash labels are read, never container
  * environment/image values. This read-only observation grants no effect authority.
@@ -38,6 +39,7 @@ function row(text: string) {
 export async function inspectLegacyComposeRuntimeConfig(opts: {
   readonly binding: LegacyComposeVerifiedBinding;
   readonly composeFile: string;
+  readonly composeFiles?: readonly string[];
   readonly signal?: AbortSignal;
   readonly timeoutMs?: number;
 }): Promise<
@@ -48,6 +50,18 @@ export async function inspectLegacyComposeRuntimeConfig(opts: {
   }[]
 > {
   const probe = createNativeComposeProbe(opts);
+  const expectedFiles = [
+    opts.composeFile,
+    ...(opts.binding.binding_version === 2
+      ? opts.binding.composeFiles.slice(1)
+      : []),
+  ];
+  if (
+    opts.composeFiles &&
+    JSON.stringify(opts.composeFiles) !== JSON.stringify(expectedFiles)
+  ) {
+    refuse();
+  }
   const output = await probe([
     "compose",
     "--project-name",
@@ -58,8 +72,7 @@ export async function inspectLegacyComposeRuntimeConfig(opts: {
     "/dev/null",
     "--profile",
     "*",
-    "--file",
-    opts.composeFile,
+    ...expectedFiles.flatMap((file) => ["--file", file]),
     "config",
     "--no-env-resolution",
     "--hash",

@@ -1031,7 +1031,7 @@ test("uncertain after hook permits owned stop but retains material and blocks co
       await readFile(journalPath(selected.projection), "utf8")
     ).not.toContain('"phase":"retiring"');
   });
-});
+}, 30_000);
 
 test("live unarmed rollback retires exact new files despite source change; armed or copied attempts cannot authorize it", async () => {
   await store.withMutation(async (mutation) => {

@@ -164,24 +164,59 @@ async function removalShim(
   );
   await mkdir(root, { mode: 0o700 });
   const receipt = join(root, "owned-id");
-  const script = [
-    "#!/bin/sh",
-    'if [ "$1" = container ] && [ "$2" = rm ] && [ "$#" = 3 ]; then',
-    `  owner=$(${quote(engine)} container inspect --format '{{index .Config.Labels "${OWNER}"}}' "$3") || exit 98`,
-    `  project=$(${quote(engine)} container inspect --format '{{index .Config.Labels "${PROJECT}"}}' "$3") || exit 98`,
-    `  [ "$owner" = ${quote(source.owner.ownerToken)} ] && [ "$project" = ${quote(source.owner.composeProject)} ] || exit 98`,
-    `  printf '%s\\n' "$3" > ${quote(receipt)}`,
-    ...(block ? ["  exit 71"] : []),
-    "fi",
-    `exec ${quote(engine)} "$@"`,
-    "",
-  ].join("\n");
+  const mainIds = (await containers(opts.docker, source))
+    .filter((value) => !oneOff(value))
+    .map((value) => value.id);
+  if (
+    !(
+      mainIds.length === 1 &&
+      mainIds.every((id) => typeof id === "string" && ID.test(id))
+    )
+  ) {
+    throw new Error("Pinned retained main container is unavailable");
+  }
+  const script = nativeRoutedRunRemovalScript({
+    engine,
+    receipt,
+    project: source.owner.composeProject,
+    owner: source.owner.ownerToken,
+    generationId: source.generationId,
+    mainId: String(mainIds[0]),
+    block,
+  });
   await Bun.write(join(root, "docker"), script);
   await chmod(join(root, "docker"), 0o700);
   return {
     receipt,
     env: { PATH: `${root}:${process.env.PATH ?? "/usr/bin:/bin"}` },
   };
+}
+
+/** Fixture fence: no force, multiple IDs, retained main ID or unproven exit may reach Docker rm. */
+export function nativeRoutedRunRemovalScript(opts: {
+  readonly engine: string;
+  readonly receipt: string;
+  readonly project: string;
+  readonly owner: string;
+  readonly generationId: string;
+  readonly mainId: string;
+  readonly block: boolean;
+}): string {
+  const format = `{{index .Config.Labels "${OWNER}"}}|{{index .Config.Labels "${PROJECT}"}}|{{index .Config.Labels "${GENERATION}"}}|{{index .Config.Labels "com.docker.compose.oneoff"}}|{{.State.Status}}|{{.State.ExitCode}}`;
+  return [
+    "#!/bin/sh",
+    'if [ "$1" = container ] && [ "$2" = rm ]; then',
+    '  [ "$#" = 3 ] && [ "${#3}" = 64 ] || exit 98',
+    '  case "$3" in *[!a-f0-9]*) exit 98 ;; esac',
+    `  [ "$3" != ${quote(opts.mainId)} ] && [ ! -e ${quote(opts.receipt)} ] || exit 98`,
+    `  facts=$(${quote(opts.engine)} container inspect --format ${quote(format)} "$3") || exit 98`,
+    `  [ "$facts" = ${quote(`${opts.owner}|${opts.project}|${opts.generationId}|True|exited|${opts.block ? 0 : 17}`)} ] || exit 98`,
+    `  printf '%s\\n' "$3" > ${quote(opts.receipt)}`,
+    ...(opts.block ? ["  exit 71"] : []),
+    "fi",
+    `exec ${quote(opts.engine)} "$@"`,
+    "",
+  ].join("\n");
 }
 
 async function checkMarker(

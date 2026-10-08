@@ -122,6 +122,13 @@ network names stay stable for an instance and differ between worktrees. Only
 selected networks are allocated. Routing supplies its separately verified ingress
 attachment to routed services.
 
+Private saved route validation uses the same owned topology parser as generation
+publication. Routed services retain their explicit owned attachments and aliases,
+then add exactly the verified ingress without ingress aliases. Extra external
+attachments, inconsistent owner/generation labels and malformed topology refuse
+before saved mutation or route retirement. Runtime ownership still checks physical
+IDs, policy and reciprocal membership separately.
+
 Saved operations verify each owned bridge's exact engine ID, driver, internal
 policy and members, and each container's configured attachments and DNS aliases.
 Unknown attachments, foreign members or changes between inspection passes refuse.

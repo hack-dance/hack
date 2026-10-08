@@ -149,6 +149,57 @@ export async function resolveVerifiedProjectEnvKeyGitLocation(opts: {
   }
 }
 
+/** Exact-root Git ownership for a private durable checkout owner; paths never belong in public reports. */
+export async function resolveVerifiedGitCheckoutLocation(opts: {
+  readonly projectRoot: string;
+  readonly signal?: AbortSignal;
+}): Promise<{
+  readonly gitDir: string;
+  readonly commonDir: string;
+  readonly primaryRoot: string | null;
+}> {
+  let signal: AbortSignal | undefined;
+  try {
+    const projectRootInput = opts.projectRoot;
+    const suppliedSignal = opts.signal;
+    if (
+      typeof projectRootInput !== "string" ||
+      !projectRootInput.length ||
+      projectRootInput.includes("\0") ||
+      (suppliedSignal !== undefined && !(suppliedSignal instanceof AbortSignal))
+    ) {
+      throw worktreeVerificationError();
+    }
+    signal = suppliedSignal;
+    throwIfCancelled(signal);
+    const projectRoot = resolve(projectRootInput);
+    if ((await realpath(projectRoot)) !== projectRoot) {
+      throw worktreeVerificationError();
+    }
+    const before = await readGitCheckoutIdentity({ projectRoot, signal });
+    if (!before) {
+      throw worktreeVerificationError();
+    }
+    const primaryRoot = await resolveVerifiedPrimaryWorktreeRoot({
+      projectRoot,
+      signal,
+    });
+    const after = await readGitCheckoutIdentity({ projectRoot, signal });
+    if (
+      !after ||
+      before.gitDir !== after.gitDir ||
+      before.commonDir !== after.commonDir
+    ) {
+      throw worktreeVerificationError();
+    }
+    throwIfCancelled(signal);
+    return { ...before, primaryRoot };
+  } catch {
+    throwIfCancelled(signal);
+    throw worktreeVerificationError();
+  }
+}
+
 /** Derive a read-only linked-worktree namespace under the existing collision convention. */
 export async function resolveVerifiedNativeBranch(opts: {
   readonly projectRoot: string;

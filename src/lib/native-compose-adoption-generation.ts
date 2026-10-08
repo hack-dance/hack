@@ -8,6 +8,7 @@ import {
   inspectLegacyComposeAdoptionResources,
   type LegacyComposeVerifiedBinding,
 } from "./native-compose-adoption-binding.ts";
+import { acquireLegacyComposeAdoptionCheckout } from "./native-compose-adoption-checkout.ts";
 import {
   legacyComposeAdoptionCandidateSupported,
   legacyComposeAdoptionLayoutSupported,
@@ -69,6 +70,8 @@ const ROUTING = [
   "DOCKER_TLS_VERIFY",
   "DOCKER_CERT_PATH",
   "DOCKER_API_VERSION",
+  "CI",
+  "HACK_EXECUTION_MODE",
 ] as const;
 type SavedManifest = {
   readonly adoption_generation_version: 1;
@@ -657,10 +660,11 @@ async function absent(path: string) {
     throw error;
   }
 }
-async function requireFirstSliceLayout(ctx: Context) {
+async function requireFirstSliceLayout(ctx: Context, input: PrivateInputs) {
   if (
     !(await legacyComposeAdoptionLayoutSupported({
       projectRoot: ctx.root,
+      candidate: JSON.parse(input.candidateText),
       signal: ctx.signal,
     }))
   ) {
@@ -1009,7 +1013,7 @@ async function completePublication(
     refuse();
   }
   const loaded = await readInputs(ctx, publication.generation);
-  await requireFirstSliceLayout(ctx);
+  await requireFirstSliceLayout(ctx, loaded.inputs);
   await admitCandidate(ctx, loaded.inputs, binary);
   await requireStopped(ctx, loaded.inputs.binding);
   const held = await holdDirectory(
@@ -1176,7 +1180,7 @@ async function requirePreparedSourceInputs(
   ctx: Context,
   loaded: Awaited<ReturnType<typeof readInputs>>
 ) {
-  await requireFirstSliceLayout(ctx);
+  await requireFirstSliceLayout(ctx, loaded.inputs);
   if (!(await absent(join(ctx.root, ".hack/hack.project.json")))) {
     refuse("E_LEGACY_ADOPTION_CHANGED");
   }
@@ -1200,6 +1204,7 @@ async function requireMutationInputs(
 ) {
   if (active) {
     await requireActiveCandidate(ctx, active, loaded.inputs);
+    await requireFirstSliceLayout(ctx, loaded.inputs);
   } else {
     await requirePreparedSourceInputs(ctx, loaded);
   }
@@ -1327,19 +1332,23 @@ export async function openLegacyComposeAdoptedGenerationStore(input: {
     const timeoutMs = input.timeoutMs,
       capturedRoute = route();
     cancelled(signal);
-    for (const path of [root, join(root, ".hack"), join(root, ".git")]) {
+    for (const path of [root, join(root, ".hack")]) {
       directories.push(await holdDirectory(path, false));
     }
+    const gitCheckout = await acquireLegacyComposeAdoptionCheckout({
+      projectRoot: root,
+      signal,
+    });
+    directories.push(...gitCheckout.directories);
     const rootInfo = directories[0]?.info,
-      projectInfo = directories[1]?.info,
-      gitInfo = directories[2]?.info;
-    if (!(rootInfo && projectInfo && gitInfo)) {
+      projectInfo = directories[1]?.info;
+    if (!(rootInfo && projectInfo)) {
       refuse();
     }
     const checkout: Checkout = {
       root: fileIdentity(rootInfo),
       project: fileIdentity(projectInfo),
-      git: fileIdentity(gitInfo),
+      git: gitCheckout.identity,
     };
     const internal = join(root, ".hack/.internal");
     if (mode !== "saved") {
@@ -1370,6 +1379,7 @@ export async function openLegacyComposeAdoptedGenerationStore(input: {
         refuse("E_LEGACY_ADOPTION_CHANGED");
       }
       await recheckDirectories(directories);
+      await gitCheckout.assertFresh();
       const currentIgnore = await readPrivate(ignorePath, 2);
       if (
         !sameFile(ignore.info, currentIgnore.info) ||
@@ -1406,7 +1416,7 @@ export async function openLegacyComposeAdoptedGenerationStore(input: {
         await writeExclusive(
           receiptPath,
           JSON.stringify({
-            adoption_receipt_version: 1,
+            adoption_receipt_version: "kind" in checkout.git ? 2 : 1,
             kind: KIND,
             checkout,
             prepared: null,
@@ -1448,7 +1458,7 @@ export async function openLegacyComposeAdoptedGenerationStore(input: {
             await save(
               ctx,
               {
-                adoption_receipt_version: 1,
+                adoption_receipt_version: "kind" in checkout.git ? 2 : 1,
                 kind: KIND,
                 checkout,
                 prepared: generated,
@@ -1518,7 +1528,7 @@ export async function openLegacyComposeAdoptedGenerationStore(input: {
               refuse();
             }
             const loaded = await readInputs(ctx, owned);
-            await requireFirstSliceLayout(ctx);
+            await requireFirstSliceLayout(ctx, loaded.inputs);
             await admitCandidate(ctx, loaded.inputs, binary);
             await requireStopped(ctx, loaded.inputs.binding);
             await requirePreparedSourceInputs(ctx, loaded);

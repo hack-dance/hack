@@ -2,6 +2,7 @@ import { lstat } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { HackCliError } from "./cli-result.ts";
 import { isRecord } from "./guards.ts";
+import { acquireLegacyComposeAdoptionCheckout } from "./native-compose-adoption-checkout.ts";
 import { parseLegacyComposeAdoptionReceipt } from "./native-compose-adoption-receipt.ts";
 import {
   type HeldDirectory,
@@ -36,17 +37,9 @@ function refuse(): never {
 }
 function classify(
   value: unknown,
-  directories: readonly HeldDirectory[]
+  checkout: Parameters<typeof parseLegacyComposeAdoptionReceipt>[1]
 ): LegacyComposeAdoptionSelection {
-  const [root, project, git] = directories;
-  if (!(root && project && git)) {
-    refuse();
-  }
-  const state = parseLegacyComposeAdoptionReceipt(value, {
-    root: { dev: root.info.dev, ino: root.info.ino },
-    project: { dev: project.info.dev, ino: project.info.ino },
-    git: { dev: git.info.dev, ino: git.info.ino },
-  });
+  const state = parseLegacyComposeAdoptionReceipt(value, checkout);
   if (state.pendingOperation !== null) {
     return "pending";
   }
@@ -100,16 +93,31 @@ export async function inspectLegacyComposeAdoptionSelection(opts: {
     for (const path of [
       root,
       join(root, ".hack"),
-      join(root, ".git"),
       join(root, ".hack/.internal"),
       stateRoot,
     ]) {
       directories.push(await holdDirectory(path, path === stateRoot));
     }
+    const gitCheckout = await acquireLegacyComposeAdoptionCheckout({
+      projectRoot: root,
+    });
+    directories.push(...gitCheckout.directories);
+    const [rootDirectory, projectDirectory] = directories;
+    if (!(rootDirectory && projectDirectory)) {
+      refuse();
+    }
     const saved = await readPrivate(receiptPath, 64 * 1024),
       parsed = parseImportDocument({ text: saved.text, document: "config" });
-    const status = classify(parsed.value, directories);
+    const status = classify(parsed.value, {
+      root: { dev: rootDirectory.info.dev, ino: rootDirectory.info.ino },
+      project: {
+        dev: projectDirectory.info.dev,
+        ino: projectDirectory.info.ino,
+      },
+      git: gitCheckout.identity,
+    });
     await recheckDirectories(directories);
+    await gitCheckout.assertFresh();
     const current = await readPrivate(receiptPath, 64 * 1024);
     if (!sameFile(saved.info, current.info) || saved.text !== current.text) {
       refuse();

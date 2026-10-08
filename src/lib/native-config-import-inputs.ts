@@ -7,6 +7,7 @@ import {
   NativeConfigCompilerError,
 } from "./native-config-compiler.ts";
 import { inspectProjectInputsAtRoot } from "./project-input-selection.ts";
+import { resolveVerifiedGitCheckoutLocation } from "./worktree-local-config.ts";
 
 function cancelled(signal?: AbortSignal) {
   if (signal?.aborted) {
@@ -214,7 +215,11 @@ async function absent(path: string): Promise<boolean> {
 }
 
 /** Only marker types are inspected; linked/separate Git layouts are outside this slice. */
-async function gitLayout(root: string) {
+async function gitLayout(
+  root: string,
+  allowLinkedWorktree = false,
+  signal?: AbortSignal
+) {
   const markers: { readonly path: string; readonly info: Stats | null }[] = [];
   let current = root;
   for (let depth = 0; depth < 64; depth++) {
@@ -222,6 +227,24 @@ async function gitLayout(root: string) {
     const info = await markerInfo(path);
     markers.push({ path, info });
     if (info) {
+      if (info.isFile() && allowLinkedWorktree && current === root) {
+        const location = await resolveVerifiedGitCheckoutLocation({
+          projectRoot: root,
+          signal,
+        }).catch(() => {
+          cancelled(signal);
+          return null;
+        });
+        if (!location?.primaryRoot || location.gitDir === location.commonDir) {
+          return { markers, supported: false };
+        }
+        const marker = await readStable(path, signal);
+        return {
+          markers,
+          supported: true,
+          linked: { location, marker },
+        };
+      }
       return { markers, supported: info.isDirectory() };
     }
     const parent = dirname(current);
@@ -244,6 +267,39 @@ async function exactLegacy(root: string): Promise<void> {
     expected.some((path) => !selected.legacyFiles.includes(path))
   ) {
     throw failure();
+  }
+}
+async function recheckGit(
+  root: string,
+  git: Awaited<ReturnType<typeof gitLayout>>,
+  signal?: AbortSignal
+) {
+  for (const marker of git.markers) {
+    const current = await markerInfo(marker.path);
+    if (
+      marker.info === null
+        ? current !== null
+        : !(
+            current !== null &&
+            (git.linked ? current.isFile() : current.isDirectory()) &&
+            current.dev === marker.info.dev &&
+            current.ino === marker.info.ino
+          )
+    ) {
+      throw failure();
+    }
+  }
+  if (git.linked) {
+    const current = await gitLayout(root, true, signal);
+    if (
+      !current.linked ||
+      JSON.stringify(current.linked.location) !==
+        JSON.stringify(git.linked.location) ||
+      !same(current.linked.marker.info, git.linked.marker.info) ||
+      !current.linked.marker.bytes.equals(git.linked.marker.bytes)
+    ) {
+      throw failure();
+    }
   }
 }
 async function recheckInputs(opts: {
@@ -289,20 +345,7 @@ async function recheckInputs(opts: {
       throw failure();
     }
   }
-  for (const marker of opts.git.markers) {
-    const current = await markerInfo(marker.path);
-    if (
-      marker.info === null
-        ? current !== null
-        : !(
-            current?.isDirectory() &&
-            current.dev === marker.info.dev &&
-            current.ino === marker.info.ino
-          )
-    ) {
-      throw failure();
-    }
-  }
+  await recheckGit(opts.root, opts.git, opts.signal);
   await exactLegacy(opts.root);
   cancelled(opts.signal);
 }
@@ -333,6 +376,7 @@ export type NativeConfigImportInputs =
 async function acquireInputs(opts: {
   readonly projectRoot: string;
   readonly signal?: AbortSignal;
+  readonly allowLinkedWorktree?: boolean;
 }): Promise<NativeConfigImportInputs> {
   const root = resolve(opts.projectRoot);
   const signal = opts.signal;
@@ -352,7 +396,7 @@ async function acquireInputs(opts: {
       });
     }
   }
-  const git = await gitLayout(root);
+  const git = await gitLayout(root, opts.allowLinkedWorktree, signal);
   if (!git.supported) {
     return Object.freeze({
       ok: false,
@@ -427,6 +471,8 @@ async function acquireInputs(opts: {
 export async function acquireNativeConfigImportInputs(opts: {
   readonly projectRoot: string;
   readonly signal?: AbortSignal;
+  /** Private adoption owner only; ordinary import preview keeps its existing refusal. */
+  readonly allowLinkedWorktree?: boolean;
 }): Promise<NativeConfigImportInputs> {
   let signal: AbortSignal | undefined;
   try {
@@ -444,7 +490,14 @@ export async function acquireNativeConfigImportInputs(opts: {
       throw failure();
     }
     signal = suppliedSignal;
-    return await acquireInputs({ projectRoot, signal });
+    const allowLinkedWorktree = opts.allowLinkedWorktree;
+    if (
+      allowLinkedWorktree !== undefined &&
+      typeof allowLinkedWorktree !== "boolean"
+    ) {
+      throw failure();
+    }
+    return await acquireInputs({ projectRoot, signal, allowLinkedWorktree });
   } catch (error: unknown) {
     redactFailure(error, signal);
   }

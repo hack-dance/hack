@@ -118,6 +118,7 @@ struct FakeState {
     effects: Vec<String>,
     fail_create: bool,
     fail_start: bool,
+    fail_delete: bool,
     staged: Vec<String>,
 }
 struct Fake {
@@ -217,6 +218,10 @@ impl Backend for Fake {
         );
         assert_ne!(state.containers[&resource.name]["State"]["Running"], true);
         state.effects.push(format!("delete:{}", resource.key));
+        if state.fail_delete {
+            state.fail_delete = false;
+            return Err(error("fake_delete_uncertain", "once"));
+        }
         state.containers.remove(&resource.name);
         Ok(Value::Null)
     }
@@ -460,4 +465,70 @@ fn private_native_input_crosses_typed_stage_intent_without_entering_public_journ
         super::super::environment_binding(&fixture.candidate, OWNER, BOOT, &foreign, "web", true)
             .is_err()
     );
+}
+
+#[test]
+fn cleanup_retry_keeps_observed_stop_request_for_the_same_immutable_id() {
+    let fixture = Fixture::new(basic());
+    let (graph, mut session) =
+        fixture.session(fixture.prepared(json!({"web":{}}), &BTreeMap::new()));
+    execution::run(&graph, &mut session, Duration::from_secs(5)).unwrap();
+    session.backend.state.borrow_mut().fail_delete = true;
+    assert!(cleanup_using(&session.backend, &mut session.receipt, &session.root).is_err());
+    let (mut retained, _) = journal::load(&fixture.candidate, RUN, OWNER, BOOT).unwrap();
+    assert!(retained.terminal["container:web"].stop_requested);
+    cleanup_using(&session.backend, &mut retained, &session.root).unwrap();
+    assert_eq!(retained.phase, Phase::Removed);
+    assert!(retained.terminal["container:web"].stop_requested);
+    assert_eq!(
+        session
+            .backend
+            .state
+            .borrow()
+            .effects
+            .iter()
+            .filter(|event| event.starts_with("stop:"))
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn old_boot_removed_history_releases_capacity_only_after_strict_owner_and_removal_validation() {
+    let fixture = Fixture::new(basic());
+    let (graph, mut session) =
+        fixture.session(fixture.prepared(json!({"web":{}}), &BTreeMap::new()));
+    execution::run(&graph, &mut session, Duration::from_secs(5)).unwrap();
+    cleanup_using(&session.backend, &mut session.receipt, &session.root).unwrap();
+    let new_boot = "87654321-abcd-abcd-abcd-123456789abc";
+    let check = || {
+        reservations_using(
+            &fixture.candidate,
+            OWNER,
+            new_boot,
+            true,
+            |_, _| panic!("removed history must not inspect or allocate"),
+            |_| panic!("removed history must not reserve capacity"),
+        )
+    };
+    check().unwrap();
+    assert!(journal::load(&fixture.candidate, RUN, OWNER, new_boot).is_err());
+    let path = session.root.join("state.json");
+    let valid = serde_json::to_value(&session.receipt).unwrap();
+    for (pointer, value) in [
+        ("/phase", json!("ready-observed")),
+        ("/resources/container:web/phase", json!("started")),
+        ("/owner", json!("e".repeat(32))),
+        ("/version", json!(1)),
+        ("/boot", json!("invalid")),
+        ("/kind", json!("native-graph-preparation")),
+    ] {
+        let mut bad = valid.clone();
+        *bad.pointer_mut(pointer).unwrap() = value;
+        state::write(&path, &bad).unwrap();
+        assert!(check().is_err());
+    }
+    journal::save(&session.root, &session.receipt).unwrap();
+    state::write(&session.root.join("state.pending"), &valid).unwrap();
+    assert!(check().is_err());
 }

@@ -147,11 +147,19 @@ fn stop_error(failure: StopBatchFailure, admitted: &BTreeMap<&str, &str>) -> Can
 
 // Preserve a committed stop observation across cleanup retries, but never carry
 // that claim into a different immutable container generation.
-fn record(evidence: &mut Evidence, key: String, mut observed: Terminal) {
-    if let Some(previous) = evidence.containers.get(&key) {
+fn record(evidence: &mut Evidence, key: String, observed: Terminal) {
+    record_terminal(&mut evidence.containers, key, observed);
+}
+/// Retain an observed stop request only across the same immutable container generation.
+pub(super) fn record_terminal(
+    containers: &mut BTreeMap<String, Terminal>,
+    key: String,
+    mut observed: Terminal,
+) {
+    if let Some(previous) = containers.get(&key) {
         observed.stop_requested |= previous.id == observed.id && previous.stop_requested;
     }
-    evidence.containers.insert(key, observed);
+    containers.insert(key, observed);
 }
 
 #[cfg(test)]

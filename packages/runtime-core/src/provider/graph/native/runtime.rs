@@ -454,7 +454,7 @@ fn cleanup_using<B: Backend>(
         if terminal.id != prepared.id {
             return Err(refused());
         }
-        receipt.terminal.insert(key.clone(), terminal);
+        super::super::shutdown::record_terminal(&mut receipt.terminal, key.clone(), terminal);
     }
     receipt.phase = Phase::Stopped;
     journal::save(root, receipt)?;
@@ -516,7 +516,7 @@ fn reservations_using(
         return Err(refused());
     }
     for run in runs {
-        let (receipt, _) = journal::load(candidate, &run, owner, boot)?;
+        let (receipt, _) = journal::load_admission(candidate, &run, owner, boot)?;
         if receipt.phase == Phase::Removed {
             continue;
         }

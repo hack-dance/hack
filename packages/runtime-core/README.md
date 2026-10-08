@@ -92,6 +92,9 @@ exact container labels, immutable IDs, names and images. Cleanup preflights ever
 stop, retains terminal observations before deletes, and retires private payloads
 only after the bound container is absent. Failed/uncertain attempts retain their
 reservations. Shared admission counts native and Compose attempts together; a build
+with native support accepts validated, fully removed same-owner history from an
+older boot for capacity purposes only. Active, malformed or foreign old-boot
+records still refuse; they grant no inspection, cleanup or restore authority. A build
 without native input support refuses retained native journals before more graph
 work. Existing Compose v1 codecs, bindings and paths retain their contracts.
 

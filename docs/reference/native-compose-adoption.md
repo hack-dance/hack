@@ -70,6 +70,23 @@ use fixed redacted messages and the existing bounded child/process-group owner.
 
 ## Required generation transition
 
+The separate private `openLegacyComposeAdoptedGenerationStore` prepares versioned
+legacy-backed generations under `.hack/.internal/legacy-compose-adoption-v1`.
+Preparation self-acquires the same bounded raw source and verified resource
+binding, validates the private candidate in memory with the matching compiler,
+and synchronizes immutable originals, candidate and binding before committing
+its receipt. Public results contain only status and counts. Saved leases verify
+the original engine, retained container/network IDs and exact data-volume facts
+without reading current authored inputs or managed env/key values. This private
+store shares the native generation file and lock owner; native version-one receipt
+and manifest contracts are unchanged. Prepared generations do not activate a
+format change or grant ordinary native namespace/data-creation authority.
+
+The storage candidate shares the existing closed mappings and preserves authored
+mount order. Unsupported shell/interpolation/unset and unknown inactive-profile
+fields remain complete-conversion refusals. The default read-only import preview
+still refuses storage; this private candidate belongs only to explicit adoption.
+
 The [native generation store](native-compose-generation.md) currently allocates a
 different project namespace, generated volume names and native owner labels.
 It cannot consume this legacy binding. No caller may treat a verified prerequisite

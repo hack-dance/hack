@@ -34,7 +34,7 @@ const RECORDS = [
   "forced-signal",
   "forced-heartbeat",
   "init-result",
-  "retry-ready",
+  "retry-result",
 ] as const;
 type ResourceKind = "container" | "network" | "volume";
 type Identity = {
@@ -84,7 +84,7 @@ const RETRY = [
   "const attempts = before + 1; await Bun.write(path, String(attempts));",
   "if (attempts <= 2) process.exit(17);",
   'process.on("SIGTERM", () => process.exit(0));',
-  'await record("retry-ready", { attempts }); await ready("retry"); setInterval(() => {}, 1000);',
+  'await record("retry-result", { attempts }); await ready("retry"); setInterval(() => {}, 1000);',
 ].join("\n");
 const READ_RECORDS = `const names = ${JSON.stringify(RECORDS)}; const records = {}; for (const name of names) records[name] = await Bun.file("/evidence/" + name + ".json").json(); process.stdout.write(JSON.stringify(records));`;
 
@@ -116,6 +116,8 @@ export function verifyNativeProcessPolicyEvidence(opts: {
   readonly forcedExit: string;
   readonly initEnabled: unknown;
   readonly restart: unknown;
+  readonly retryContainer: string;
+  readonly retryEvents: unknown;
 }): void {
   expect({
     that: isRecord(opts.records),
@@ -177,7 +179,7 @@ export function verifyNativeProcessPolicyEvidence(opts: {
     message:
       "Actual init must adopt and reap an orphan; the engine flag alone does not qualify this",
   });
-  const retry = read("retry-ready");
+  const retry = read("retry-result");
   expect({
     that:
       retry.attempts === 3 &&
@@ -187,6 +189,26 @@ export function verifyNativeProcessPolicyEvidence(opts: {
       opts.restart.restartCount === 2,
     message:
       "Failure policy must execute exactly two retries before its successful third start",
+  });
+  const events = opts.retryEvents;
+  expect({
+    that:
+      RESOURCE_ID.test(opts.retryContainer) &&
+      Array.isArray(events) &&
+      events.length === 5 &&
+      events.every(
+        (event) =>
+          isRecord(event) &&
+          event.id === opts.retryContainer &&
+          (event.action === "start" ||
+            (event.action === "die" && event.exitCode === "17"))
+      ) &&
+      events.filter((event) => isRecord(event) && event.action === "start")
+        .length === 3 &&
+      events.filter((event) => isRecord(event) && event.action === "die")
+        .length === 2,
+    message:
+      "Exact owned retry events must independently show two failures and three starts",
   });
 }
 
@@ -680,6 +702,12 @@ export const nativeConfigProcessPolicyScenario: Scenario = {
     let failure: unknown;
     let failed = false;
     try {
+      const eventStart = await docker(["info", "--format", "{{.SystemTime}}"]);
+      expect({
+        that:
+          eventStart.length <= 64 && Number.isFinite(Date.parse(eventStart)),
+        message: "Retry event history requires the exact engine clock",
+      });
       expect({
         that:
           data(await cli(["--profile", "exercise", "up", "--detach", "--json"]))
@@ -706,6 +734,73 @@ export const nativeConfigProcessPolicyScenario: Scenario = {
           "--format",
           '{"name":{{json .HostConfig.RestartPolicy.Name}},"maximumRetryCount":{{json .HostConfig.RestartPolicy.MaximumRetryCount}},"restartCount":{{json .RestartCount}}}',
         ])
+      );
+      const eventEnd = await docker(["info", "--format", "{{.SystemTime}}"]);
+      expect({
+        that: eventEnd.length <= 64 && Number.isFinite(Date.parse(eventEnd)),
+        message: "Retry event history must have a finite engine-time endpoint",
+      });
+      const eventText = await docker([
+        "events",
+        "--since",
+        eventStart,
+        "--until",
+        eventEnd,
+        "--filter",
+        "type=container",
+        "--filter",
+        `container=${retryId}`,
+        "--filter",
+        `label=${OWNER}=${owner().ownerToken}`,
+        "--filter",
+        "event=start",
+        "--filter",
+        "event=die",
+        "--format",
+        "{{json .}}",
+      ]);
+      expect({
+        that: eventText.length <= 65_536,
+        message: "Exact retry event proof must remain bounded",
+      });
+      const retryEvents = eventText
+        .split("\n")
+        .filter(Boolean)
+        .map((line) => {
+          const event = object(line);
+          expect({
+            that:
+              isRecord(event.Actor) &&
+              isRecord(event.Actor.Attributes) &&
+              event.Actor.ID === retryId &&
+              event.Actor.Attributes[OWNER] === owner().ownerToken &&
+              event.Actor.Attributes[INSTANCE] === owner().composeProject &&
+              event.Actor.Attributes[COMPOSE_SERVICE] === "retry",
+            message: "Retry events must belong to the exact owned workload",
+          });
+          return {
+            id: isRecord(event.Actor) ? event.Actor.ID : null,
+            action: event.Action,
+            exitCode:
+              isRecord(event.Actor) && isRecord(event.Actor.Attributes)
+                ? event.Actor.Attributes.exitCode
+                : null,
+          };
+        });
+      const startupProof = JSON.stringify({
+        owner: created.name,
+        retryContainer: retryId,
+        restart,
+        retryEvents,
+        initEnabled,
+      });
+      expect({
+        that: startupProof.length <= 65_536,
+        message: "Retained synthetic startup proof must remain bounded",
+      });
+      await Bun.write(
+        join(ctx.tempRoot, "native-process-policy-startup-proof.json"),
+        startupProof
       );
       const volumes = await list("volume");
       const volume = volumes[0];
@@ -806,7 +901,12 @@ export const nativeConfigProcessPolicyScenario: Scenario = {
         message:
           "Readback must use only exact owned, unexposed, read-only fixture resources",
       });
-      const records = object(await docker(["start", "--attach", readerId]));
+      const recordText = await docker(["start", "--attach", readerId]);
+      expect({
+        that: recordText.length <= 32_768,
+        message: "Synthetic process records must remain bounded",
+      });
+      const records = object(recordText);
       expect({
         that:
           (await docker([
@@ -817,15 +917,27 @@ export const nativeConfigProcessPolicyScenario: Scenario = {
           ])) === "0",
         message: "Persistent evidence reader must exit successfully",
       });
-      await clearReader();
-      verifyNativeProcessPolicyEvidence({
+      const proof = {
         owner: created.name,
         records,
         gracefulExit: gracefulResult.stdout.trim(),
         forcedExit: forcedResult.stdout.trim(),
         initEnabled,
         restart,
+        retryContainer: retryId,
+        retryEvents,
+      };
+      const proofText = JSON.stringify(proof);
+      expect({
+        that: proofText.length <= 65_536,
+        message: "Retained synthetic process proof must remain bounded",
       });
+      await Bun.write(
+        join(ctx.tempRoot, "native-process-policy-proof.json"),
+        proofText
+      );
+      await clearReader();
+      verifyNativeProcessPolicyEvidence(proof);
       stage(
         "actual SIGUSR1, graceful/forced stop, init adoption/reaping and failure retries verified"
       );

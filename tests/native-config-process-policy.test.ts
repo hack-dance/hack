@@ -22,7 +22,7 @@ function evidence() {
         initName: "docker-init",
         reaped: true,
       },
-      "retry-ready": { owner, attempts: 3 },
+      "retry-result": { owner, attempts: 3 },
     },
     gracefulExit: "0",
     forcedExit: "137",
@@ -32,6 +32,14 @@ function evidence() {
       maximumRetryCount: 2,
       restartCount: 2,
     },
+    retryContainer: "a".repeat(64),
+    retryEvents: [
+      { id: "a".repeat(64), action: "start", exitCode: undefined },
+      { id: "a".repeat(64), action: "die", exitCode: "17" },
+      { id: "a".repeat(64), action: "start", exitCode: undefined },
+      { id: "a".repeat(64), action: "die", exitCode: "17" },
+      { id: "a".repeat(64), action: "start", exitCode: undefined },
+    ],
   };
 }
 
@@ -146,8 +154,38 @@ test("configured init and eventual readiness cannot substitute for actual reapin
   wrongPolicy.restart.name = "always";
   expect(() => verifyNativeProcessPolicyEvidence(wrongPolicy)).toThrow();
   const staleCounter = evidence();
-  staleCounter.records["retry-ready"].attempts = 6;
+  staleCounter.records["retry-result"].attempts = 6;
   expect(() => verifyNativeProcessPolicyEvidence(staleCounter)).toThrow();
+  const wrongLimit = evidence();
+  wrongLimit.restart.maximumRetryCount = 0;
+  expect(() => verifyNativeProcessPolicyEvidence(wrongLimit)).toThrow();
+});
+
+test("readiness markers and unbound engine events cannot substitute for immutable retry evidence", () => {
+  const good = evidence();
+  const { "retry-result": omitted, ...withoutRetry } = good.records;
+  expect(omitted.attempts).toBe(3);
+  expect(() =>
+    verifyNativeProcessPolicyEvidence({ ...good, records: withoutRetry })
+  ).toThrow();
+  expect(() =>
+    verifyNativeProcessPolicyEvidence({
+      ...good,
+      records: {
+        ...withoutRetry,
+        "retry-result": { owner: good.owner, ready: true, pid: 2 },
+      },
+    })
+  ).toThrow();
+  const noEvents = evidence();
+  noEvents.retryEvents = [];
+  expect(() => verifyNativeProcessPolicyEvidence(noEvents)).toThrow();
+  const wrongId = evidence();
+  wrongId.retryEvents[0].id = "b".repeat(64);
+  expect(() => verifyNativeProcessPolicyEvidence(wrongId)).toThrow();
+  const wrongExit = evidence();
+  wrongExit.retryEvents[1].exitCode = "0";
+  expect(() => verifyNativeProcessPolicyEvidence(wrongExit)).toThrow();
 });
 
 test("signal receipt alone, wrong exit or overridden grace cannot become acceptance", () => {

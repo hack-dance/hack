@@ -251,3 +251,17 @@ separate from the earlier static linked Docker qualification. Successful managed
 linked adoption, original SQL fidelity, recovery, rollback and exact cleanup still
 require maintained live acceptance. Full NC04 remains open for the refused maps,
 typed local inheritance, recreation and application migration.
+
+The separate `native-compose-adoption-managed-worktrees` Docker scenario prepares
+both linked instances through the existing managed env and canonical override
+writers under an isolated home. It checks default/overlay and primary/current
+local precedence, service scopes, an encrypted synthetic value, empty values and
+tombstones through silent assertions in the original containers. Partial-stop
+repair must refuse changed inherited bytes before another stop; after exact
+repair, execution and separate rollbacks must preserve both original SQL rows,
+resource identities, shared primary inputs and generated files. It shares the
+static fixture's exact ownership and daemon checks for cleanup.
+
+Use the same prerequisites and flags as above with
+`--only=native-compose-adoption-managed-worktrees`. Registration and synthetic
+fixture controls do not establish a live pass.

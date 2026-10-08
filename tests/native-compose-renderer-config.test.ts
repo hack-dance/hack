@@ -1,6 +1,9 @@
 import { expect, test } from "bun:test";
+import { join } from "node:path";
 import { isRecord } from "../src/lib/guards.ts";
 import { renderNativeCompose } from "../src/lib/native-compose-renderer.ts";
+import { compileNativeConfig } from "../src/lib/native-config-compiler.ts";
+import { mapLegacyNativeImport } from "../src/lib/native-config-import-plan.ts";
 import { composeFixture } from "./helpers/native-compose.ts";
 
 const configTest =
@@ -107,6 +110,86 @@ configTest(
       },
     });
     expect(JSON.stringify(result)).not.toContain("hostile-interpolation-value");
+  }
+);
+
+configTest(
+  "legacy dollar-pair argv matches real compiler plan and Compose normalization",
+  async () => {
+    const source = {
+      name: "fixture",
+      services: {
+        web: {
+          image: "fixture/web:1",
+          command: ["serve", "$${AMBIENT}", "$$", "$$$$", ""],
+          entrypoint: ["/bin/echo", "prefix-$$HOME"],
+        },
+        inactive: {
+          image: "fixture/optional:1",
+          profiles: ["qa"],
+          command: ["optional", "$${INACTIVE}"],
+        },
+      },
+    };
+    const mapped = mapLegacyNativeImport({
+      configText: '{"name":"fixture"}',
+      composeText: JSON.stringify(source),
+    });
+    expect(mapped.report.complete).toBe(true);
+    expect(mapped.candidate).toBeDefined();
+    for (const profiles of [[], ["qa"]]) {
+      const compiled = await compileNativeConfig({
+        input: new TextEncoder().encode(JSON.stringify(mapped.candidate)),
+        binary: join(import.meta.dir, "../dist/hack-config-compiler"),
+        profiles,
+      });
+      expect(compiled.ok).toBe(true);
+      if (!compiled.ok) {
+        continue;
+      }
+      const fixture = composeFixture({
+        services: {
+          web: { image: "fixture/web:1" },
+          inactive: { image: "fixture/optional:1" },
+        },
+      });
+      const selected = profiles.length ? ["web", "inactive"] : ["web"];
+      fixture.environmentPlan.workloads = Object.fromEntries(
+        selected.map((name) => [name, {}])
+      );
+      fixture.managedValues = Object.fromEntries(
+        selected.map((name) => [name, {}])
+      );
+      const generated = renderNativeCompose({
+        ...fixture,
+        plan: compiled.plan,
+      });
+      const original = await normalized({
+        json: JSON.stringify(source),
+        profiles,
+      });
+      const actual = await normalized({ json: generated.json, profiles });
+      expect(Object.keys(generated.document.services).sort()).toEqual(
+        [...selected].sort()
+      );
+      for (const name of selected) {
+        const sourceService = isRecord(original.services)
+          ? original.services[name]
+          : undefined;
+        const generatedService = isRecord(actual.services)
+          ? actual.services[name]
+          : undefined;
+        expect(isRecord(sourceService)).toBe(true);
+        expect(isRecord(generatedService)).toBe(true);
+        if (isRecord(sourceService) && isRecord(generatedService)) {
+          expect(generatedService.command).toEqual(sourceService.command);
+          expect(generatedService.entrypoint).toEqual(sourceService.entrypoint);
+        }
+      }
+      expect(JSON.stringify(actual)).not.toContain(
+        "hostile-interpolation-value"
+      );
+    }
   }
 );
 

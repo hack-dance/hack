@@ -108,6 +108,111 @@ test("static list values split only at first equal sign without source mutation"
   expect(JSON.stringify(source)).toBe(before);
 });
 
+test("complete Compose dollar pairs become literal exec argv in selected and inactive services", () => {
+  const source = {
+    services: {
+      web: {
+        image: "fixture",
+        command: ["serve", "$${AMBIENT}", "$$", "$$$$", "plain", ""],
+        entrypoint: ["/bin/echo", "prefix-$$HOME"],
+      },
+      inactive: {
+        image: "fixture",
+        profiles: ["later"],
+        command: ["print", "$${INACTIVE}"],
+      },
+    },
+  };
+  const original = JSON.stringify(source);
+  const result = map({ name: "fixture" }, source);
+  expect(result.report.complete).toBe(true);
+  expect(result.candidate).toMatchObject({
+    services: {
+      web: {
+        command: { exec: ["serve", "${AMBIENT}", "$", "$$", "plain", ""] },
+        entrypoint: { exec: ["/bin/echo", "prefix-$HOME"] },
+      },
+      inactive: {
+        command: { exec: ["print", "${INACTIVE}"] },
+      },
+    },
+  });
+  expect(JSON.stringify(source)).toBe(original);
+  for (const pointer of [
+    "/services/web/command",
+    "/services/web/command/1",
+    "/services/web/entrypoint",
+    "/services/inactive/command/1",
+  ]) {
+    expect(
+      result.report.fields.find((field) => field.pointer === pointer)
+    ).toMatchObject({
+      document: "compose",
+      status: "normalized",
+      code: "escaped_dollar_literal",
+    });
+  }
+  expect(
+    result.report.fields.find(
+      (field) => field.pointer === "/services/web/command/0"
+    )
+  ).toMatchObject({ status: "exact", code: "exact" });
+  expect(
+    result.report.fields.find(
+      (field) => field.pointer === "/services/web/command/1"
+    )
+  ).toMatchObject({ target: "/services/web/command/exec/1" });
+  expect(JSON.stringify(result)).not.toContain("${AMBIENT}");
+  expect(JSON.stringify(result)).not.toContain("${INACTIVE}");
+});
+
+test.each([
+  "$",
+  "$$$",
+  "$VAR",
+  "${VAR}",
+  "prefix-$$suffix-$",
+  "$$${VAR}",
+])("refuses ambiguous Compose argv dollar expression %s in inactive service", (part) => {
+  const result = map(
+    { name: "fixture" },
+    {
+      services: {
+        web: { image: "fixture" },
+        inactive: {
+          image: "fixture",
+          profiles: ["later"],
+          command: ["print", part],
+        },
+      },
+    }
+  );
+  code(result, "invalid_or_ambiguous_value");
+  expect(
+    result.report.fields.find(
+      (field) => field.pointer === "/services/inactive/command"
+    )
+  ).toMatchObject({
+    status: "refused",
+  });
+});
+
+test("dollar syntax outside exec arrays remains refused", () => {
+  for (const [key, value] of [
+    ["command", "echo $$HOME"],
+    ["entrypoint", "echo $$HOME"],
+    ["environment", { TOKEN: "$$HOME" }],
+  ] as const) {
+    code(
+      map(
+        { name: "fixture" },
+        { services: { web: { image: "fixture", [key]: value } } }
+      ),
+      "invalid_or_ambiguous_value"
+    );
+  }
+});
+
 test("raw provenance retains original spelling, escaped pointers and line positions", () => {
   const result = mapLegacyNativeImport({
     configText: '{\n  "name": "fixture",\n  "defaultEnvConfig": "QA"\n}',

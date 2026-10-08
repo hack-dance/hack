@@ -159,6 +159,14 @@ missing ready files, expired timeouts and dead processes do not grant cleanup or
 replay. The strict Compose v1 reader and its artifact path remain unchanged.
 Command integration and live frontend acceptance remain gates.
 
+Held startup admission can also publish the exact public source envelope in that
+excluded storage. It captures profiles, overlay and closed names-only metadata
+before asynchronous work, binds the source inode and bytes to its admission, and
+refuses source removal while startup or ready evidence remains. It does not parse
+authored policy or acquire values. Ready publication accepts a synchronous owner
+guard after the final asynchronous authority checks, immediately before linking
+the mapping; the consuming caller must supply its process and cancellation guard.
+
 Shared Bun input preparation accepts the native source's explicit compiler branch
 context. It binds that branch into resolve and environment planning without
 implicit Git or global-domain discovery, matching the native source's local hash.

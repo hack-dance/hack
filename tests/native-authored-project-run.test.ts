@@ -1,5 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
+import { readdirSync } from "node:fs";
 import {
   chmod,
   cp,
@@ -29,6 +30,7 @@ import {
   saveNativeProjectRun as saveCompose,
 } from "../src/backends/native-project-run.ts";
 import { isRecord } from "../src/lib/guards.ts";
+import type { NativeEnvMetadata } from "../src/lib/native-env-plan-protocol.ts";
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -114,6 +116,15 @@ async function fixture() {
   await mkdir(projectDir, { mode: 0o755 });
   await mkdir(nativeHome, { mode: 0o700 });
   return { projectRoot, projectDir, nativeHome, branch: null };
+}
+function metadata(): NativeEnvMetadata {
+  return {
+    metadata_version: 1,
+    overlay: null,
+    overlay_exists: true,
+    workloads: { web: { TOKEN: { scope: "global", secret: true } } },
+    inactive_scopes: ["off"],
+  };
 }
 async function file(opts: Awaited<ReturnType<typeof fixture>>) {
   const root = join(opts.projectDir, ".internal", "native-authored-runs");
@@ -698,5 +709,204 @@ test("startup intent decoding is closed and malformed private content stays out 
         admission.reserve({ review: record("9".repeat(32)).receipt.review })
       ).rejects.toThrow("unsafe");
     }
+  });
+});
+
+test("held admission publishes only the captured public native source envelope", async () => {
+  const opts = { ...(await fixture()), branch: "work" };
+  await admit(opts, async (admission) => {
+    const input = {
+      run: "a".repeat(32),
+      metadata: {
+        ...metadata(),
+        workloads: { web: { TOKEN: { scope: "global", secret: true } } },
+      },
+      profiles: ["debug"],
+      overlay: null as string | null,
+    };
+    const pending = admission.prepareSource(input);
+    input.run = "9".repeat(32);
+    input.profiles[0] = "later";
+    input.overlay = "later";
+    input.metadata.workloads.web.TOKEN.scope = "later";
+    const source = await pending;
+    expect(Object.isFrozen(source)).toBe(true);
+    expect(JSON.parse(await Bun.file(source.path).text())).toEqual({
+      version: 2,
+      kind: "native-graph-source",
+      project: opts.projectRoot,
+      branch: "work",
+      run: "a".repeat(32),
+      profiles: ["debug"],
+      overlay: "base",
+      env_metadata: metadata(),
+    });
+    expect((await stat(source.path)).mode & 0o777).toBe(0o600);
+    expect((await stat(source.path)).nlink).toBe(1);
+    expect(source.path).toStartWith(
+      join(opts.projectDir, ".internal", "native-authored-runs")
+    );
+    await source.assertFresh();
+    await source.remove();
+    expect(await Bun.file(source.path).exists()).toBe(false);
+    expect(await admission.loadStart()).toBeNull();
+    expect(await load(opts)).toBeNull();
+  });
+});
+
+test("native source metadata refuses private extras and oversized transport before writing", async () => {
+  const opts = await fixture();
+  const canary = "private-synthetic-source-owner-canary";
+  await admit(opts, async (admission) => {
+    const input = {
+      run: "a".repeat(32),
+      metadata: {
+        ...metadata(),
+        workloads: {
+          web: { TOKEN: { scope: "global", secret: true, value: canary } },
+        },
+      },
+    };
+    const error: unknown = await admission
+      .prepareSource(input)
+      .catch((value: unknown) => value);
+    expect(error).toBeInstanceOf(Error);
+    expect(String(error)).not.toContain(canary);
+    expect(JSON.stringify(error)).not.toContain(canary);
+    await expect(
+      admission.prepareSource({
+        run: "a".repeat(32),
+        metadata: {
+          ...metadata(),
+          inactive_scopes: ["a".repeat(1024 * 1024)],
+        },
+      })
+    ).rejects.toThrow("unsafe");
+    const root = join(opts.projectDir, ".internal", "native-authored-runs");
+    expect(
+      (await readdir(root)).filter((name) => name.endsWith(".json"))
+    ).toEqual([]);
+  });
+});
+
+test("native source ownership refuses replaced bytes inode permissions or hardlinks", async () => {
+  for (const attack of ["bytes", "inode", "mode", "links"] as const) {
+    const opts = await fixture();
+    await admit(opts, async (admission) => {
+      const source = await admission.prepareSource({
+        run: "a".repeat(32),
+        metadata: metadata(),
+      });
+      if (attack === "bytes") {
+        await Bun.write(source.path, "{}\n");
+      } else if (attack === "inode") {
+        await Bun.write(
+          `${source.path}.replacement`,
+          await Bun.file(source.path).text()
+        );
+        await chmod(`${source.path}.replacement`, 0o600);
+        await rename(`${source.path}.replacement`, source.path);
+      } else if (attack === "mode") {
+        await chmod(source.path, 0o644);
+      } else {
+        await link(source.path, `${source.path}.alias`);
+      }
+      await expect(source.assertFresh()).rejects.toThrow("unsafe");
+      await expect(source.remove()).rejects.toThrow("unsafe");
+      expect(await Bun.file(source.path).exists()).toBe(true);
+    });
+  }
+});
+
+test("source remains with retained startup or ready evidence and retires after exact Removed", async () => {
+  const opts = await fixture();
+  await admit(opts, async (admission) => {
+    const source = await admission.prepareSource({
+      run: "a".repeat(32),
+      metadata: metadata(),
+    });
+    const expectedStart = await admission.reserve({
+      review: record().receipt.review,
+    });
+    await expect(source.remove()).rejects.toThrow("unsafe");
+    await expect(
+      admission.prepareSource({ run: "9".repeat(32), metadata: metadata() })
+    ).rejects.toThrow("unsafe");
+    let guarded = 0;
+    const expectedRun = await admission.publish({
+      expectedStart,
+      record: record(),
+      assertReady: () => {
+        guarded += 1;
+      },
+    });
+    expect(guarded).toBe(1);
+    await expect(source.remove()).rejects.toThrow("unsafe");
+    await source.assertFresh();
+    await admission.retire({ expectedStart, expectedRun, cleaned: cleaned() });
+    await source.remove();
+    expect(await Bun.file(source.path).exists()).toBe(false);
+  });
+});
+
+test("source capabilities cannot escape the admission lifetime or replace a same-run source", async () => {
+  const opts = await fixture();
+  let source:
+    | Awaited<
+        ReturnType<Parameters<Parameters<typeof admit>[1]>[0]["prepareSource"]>
+      >
+    | undefined;
+  await admit(opts, async (admission) => {
+    source = await admission.prepareSource({
+      run: "a".repeat(32),
+      metadata: metadata(),
+      overlay: "staging",
+    });
+    expect(JSON.parse(await Bun.file(source.path).text()).overlay).toEqual({
+      named: "staging",
+    });
+    await expect(
+      admission.prepareSource({ run: "a".repeat(32), metadata: metadata() })
+    ).rejects.toThrow("unsafe");
+    await source.assertFresh();
+  });
+  if (!source) {
+    throw new Error("test requires source capability");
+  }
+  await expect(source.assertFresh()).rejects.toThrow("unsafe");
+  await expect(source.remove()).rejects.toThrow("unsafe");
+  expect(await Bun.file(source.path).exists()).toBe(true);
+});
+
+test("ready publication checks the captured synchronous owner guard after pending output exists", async () => {
+  const opts = await fixture();
+  await admit(opts, async (admission) => {
+    const expectedStart = await admission.reserve({
+      review: record().receipt.review,
+    });
+    const root = join(opts.projectDir, ".internal", "native-authored-runs");
+    let guarded = 0;
+    const input = {
+      expectedStart,
+      record: record(),
+      assertReady: (): void => {
+        guarded += 1;
+        expect(
+          readdirSync(root).filter((name) => name.endsWith(".pending"))
+        ).toHaveLength(1);
+        throw new Error("synthetic canceled owner");
+      },
+    };
+    const pending = admission.publish(input);
+    input.assertReady = () => {
+      guarded += 100;
+    };
+    await expect(pending).rejects.toThrow("unsafe");
+    expect(guarded).toBe(1);
+    expect(await load(opts)).toBeNull();
+    expect(await admission.loadStart()).toEqual(expectedStart);
+    expect(
+      readdirSync(root).filter((name) => name.endsWith(".pending"))
+    ).toEqual([]);
   });
 });

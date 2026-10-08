@@ -24,6 +24,7 @@ import {
   type Scenario,
 } from "../harness.ts";
 import {
+  nativeRoutedRunPinnedOriginCheck,
   qualifyNativeComposeRoutedRun,
   ROUTED_RUN_LITERAL,
 } from "./native-config-routed-run.ts";
@@ -989,7 +990,20 @@ export const nativeConfigRoutingScenario: Scenario = {
           tempRoot: privateRoot,
           docker,
           raw,
-          check,
+          check: nativeRoutedRunPinnedOriginCheck({
+            checkouts: [primary, ...siblings].map((checkout, index) => {
+              const resolution = resolutions[index];
+              if (!resolution) {
+                throw new Error("Prepared routed fixture origins are missing");
+              }
+              return { ...checkout, origins: origins(resolution) };
+            }),
+            tls,
+            assertIngress: async () => {
+              await tls(`https://${canaryHost}`, canaryMarker);
+              await preservedUnchanged();
+            },
+          }),
           claims: async () => await claimSnapshot(claimsRoot ?? ""),
         });
         stage(

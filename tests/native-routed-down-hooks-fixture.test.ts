@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { acquireProjectEnvForNativeExecution } from "../src/lib/project-env-config.ts";
 import {
   nativeRoutedDownClaimsMatch,
+  nativeRoutedDownFreshnessEvidence,
   nativeRoutedDownHookProofMatches,
   nativeRoutedDownMarkerProgram,
   nativeRoutedDownPhaseMatches,
@@ -134,6 +135,68 @@ function observed(phase: "before" | "after" | "sibling") {
     marker: phase === "after" ? null : pin.marker,
   };
 }
+test("freshness refusal evidence identifies changed code, hook, state or claim without values", () => {
+  const unchanged = observed("sibling");
+  const opts = {
+    expected: pin,
+    observed: unchanged,
+    inputErrorMatched: true,
+    order: "",
+    claimsBefore: "synthetic-claim-digest",
+    claimsAfter: "synthetic-claim-digest",
+  };
+  const positive = {
+    inputErrorMatched: true,
+    hookOrderUnchanged: true,
+    snapshotUnchanged: true,
+    structuredSnapshotUnchanged: true,
+    claimsUnchanged: true,
+  };
+  expect(nativeRoutedDownFreshnessEvidence(opts)).toEqual(positive);
+  for (const [patch, field] of [
+    [{ inputErrorMatched: false }, "inputErrorMatched"],
+    [{ order: "before\n" }, "hookOrderUnchanged"],
+    [{ claimsAfter: "changed-claim-digest" }, "claimsUnchanged"],
+  ] as const) {
+    expect(nativeRoutedDownFreshnessEvidence({ ...opts, ...patch })).toEqual({
+      ...positive,
+      [field]: false,
+    });
+  }
+  for (const patch of [
+    { pin: { ...pin, generationId: "e".repeat(32) } },
+    { pin: { ...pin, containers: ["e".repeat(64)] } },
+    { pending: { operation: "down", generationId: pin.generationId } },
+    { stopped: true },
+    { beforeHooksPending: true },
+    { hostHookPhase: "down.before" },
+    { marker: "wrong-retained-marker" },
+  ]) {
+    expect(
+      nativeRoutedDownFreshnessEvidence({
+        ...opts,
+        observed: { ...unchanged, ...patch },
+      })
+    ).toEqual({
+      ...positive,
+      snapshotUnchanged: false,
+      structuredSnapshotUnchanged: false,
+    });
+  }
+  const permuted = {
+    marker: unchanged.marker,
+    pin: unchanged.pin,
+    pending: unchanged.pending,
+    stopped: unchanged.stopped,
+    hostHookPhase: unchanged.hostHookPhase,
+    beforeHooksPending: unchanged.beforeHooksPending,
+  };
+  expect(
+    nativeRoutedDownFreshnessEvidence({ ...opts, observed: permuted })
+  ).toEqual({ ...positive, snapshotUnchanged: false });
+  expect(JSON.stringify(positive)).not.toContain(pin.marker);
+  expect(JSON.stringify(positive)).not.toContain(pin.ownerToken);
+});
 test("routed down phases require exact pending generation and true before/after engine boundary", () => {
   for (const phase of ["before", "after", "sibling"] as const) {
     const actual = observed(phase);

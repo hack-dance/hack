@@ -711,27 +711,72 @@ async function refuseManagedEnvDrift(
       message:
         "Changed managed env must refuse routed stop before hook/engine effects",
     });
+    const proof = nativeRoutedDownFreshnessEvidence({
+      expected: capsule.own,
+      observed: (await observe(opts.primary, opts.docker, true)).observation,
+      inputErrorMatched: refused.combined.includes("E_CONFIG_INVALID"),
+      order: await Bun.file(capsule.order).text(),
+      claimsBefore: capsule.claims,
+      claimsAfter: await nativeRoutedDownClaimSnapshot(opts.claimsRoot),
+    });
+    const diagnostic = {
+      ...proof,
+      refusalCode:
+        [
+          "E_CONFIG_INVALID",
+          "E_COMPOSE_FAILED",
+          "E_UNEXPECTED",
+          "E_LIFECYCLE_FAILED",
+        ].find((code) => refused.combined.includes(code)) ?? "other",
+    };
+    await Bun.write(
+      `${capsule.order}.freshness-proof.json`,
+      JSON.stringify(diagnostic)
+    );
+    console.log(
+      `[native-config-routed-down] freshness proof ${JSON.stringify(diagnostic)}`
+    );
     expect({
       that:
-        refused.combined.includes("E_CONFIG_INVALID") &&
-        (await Bun.file(capsule.order).text()) === "" &&
-        equal((await observe(opts.primary, opts.docker, true)).observation, {
-          pin: capsule.own,
-          pending: null,
-          stopped: false,
-          hostHookPhase: null,
-          beforeHooksPending: false,
-          marker: capsule.own.marker,
-        }) &&
-        (await nativeRoutedDownClaimSnapshot(opts.claimsRoot)) ===
-          capsule.claims,
-      message:
-        "Freshness refusal must leave the original route, data, generation and claims unchanged",
+        proof.inputErrorMatched &&
+        proof.hookOrderUnchanged &&
+        proof.snapshotUnchanged &&
+        proof.claimsUnchanged,
+      message: `Freshness refusal must leave the original route, data, generation and claims unchanged: ${JSON.stringify(diagnostic)}`,
     });
     await opts.check(opts.primary);
   } finally {
     await Bun.write(envPath, original);
   }
+}
+
+/** Fixed booleans expose the precise refusal boundary without publishing values or private owner records. */
+export function nativeRoutedDownFreshnessEvidence(opts: {
+  readonly expected: Pin;
+  readonly observed: unknown;
+  readonly inputErrorMatched: boolean;
+  readonly order: string;
+  readonly claimsBefore: string;
+  readonly claimsAfter: string;
+}) {
+  return {
+    inputErrorMatched: opts.inputErrorMatched,
+    hookOrderUnchanged: opts.order === "",
+    snapshotUnchanged: equal(opts.observed, {
+      pin: opts.expected,
+      pending: null,
+      stopped: false,
+      hostHookPhase: null,
+      beforeHooksPending: false,
+      marker: opts.expected.marker,
+    }),
+    structuredSnapshotUnchanged: nativeRoutedDownPhaseMatches({
+      expected: opts.expected,
+      observed: opts.observed,
+      phase: "sibling",
+    }),
+    claimsUnchanged: opts.claimsBefore === opts.claimsAfter,
+  };
 }
 
 async function recoverKnownFailure(

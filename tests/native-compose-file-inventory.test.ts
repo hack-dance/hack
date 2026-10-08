@@ -231,7 +231,15 @@ test("retirement requires global absence on the saved engine even for unowned st
   ).rejects.toMatchObject({ code: "E_NATIVE_COMPOSE_STATE" });
 });
 test("ancestor and normalized parent mounts refuse readiness and retirement while sibling snapshots remain independent", async () => {
-  for (const source of [ROOT, "/private/synthetic", "/", `${ROOT}/other/..`]) {
+  for (const source of [
+    ROOT,
+    `${ROOT}/`,
+    "/private/synthetic",
+    "/private/synthetic/",
+    "/",
+    `${ROOT}/other/..`,
+    `${ROOT}/other/../`,
+  ]) {
     const foreign = { id: OTHER, mounts: [{ ...mount(), Source: source }] };
     await expect(
       assertNativeComposeFileMounts({
@@ -269,9 +277,12 @@ test("ancestor and normalized parent mounts refuse readiness and retirement whil
 test("pre-stage root inventory refuses exposing ancestors without treating retained descendant snapshots as root binds", async () => {
   for (const source of [
     ROOT,
+    `${ROOT}/`,
     "/private",
+    "/private/",
     "/",
     `${ROOT}/../${ROOT.split("/").at(-1)}`,
+    `${ROOT}/other/../`,
   ]) {
     await expect(
       assertNativeComposeFileRootUnbound({
@@ -283,11 +294,22 @@ test("pre-stage root inventory refuses exposing ancestors without treating retai
       })
     ).rejects.toMatchObject({ code: "E_NATIVE_COMPOSE_STATE" });
   }
-  await assertNativeComposeFileRootUnbound({
-    root: ROOT,
-    engineId: "synthetic-engine:1",
-    probe: transport().probe,
-  });
+  for (const root of [ROOT, `${ROOT}/`, `${ROOT}/other/../`]) {
+    await expect(
+      assertNativeComposeFileRootUnbound({
+        root,
+        engineId: "synthetic-engine:1",
+        probe: transport({
+          rows: [{ id: OTHER, mounts: [{ ...mount(), Source: `${ROOT}/` }] }],
+        }).probe,
+      })
+    ).rejects.toMatchObject({ code: "E_NATIVE_COMPOSE_STATE" });
+    await assertNativeComposeFileRootUnbound({
+      root,
+      engineId: "synthetic-engine:1",
+      probe: transport().probe,
+    });
+  }
 });
 test("saved engine observation is checked twice and errors omit daemon output", async () => {
   await expect(

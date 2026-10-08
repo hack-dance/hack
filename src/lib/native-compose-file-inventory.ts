@@ -214,13 +214,23 @@ function containsPath(parent: string, child: string): boolean {
     parent === child || child.startsWith(parent === "/" ? "/" : `${parent}/`)
   );
 }
+function normalizedPath(path: string): string {
+  const normalized = posix.normalize(path);
+  return normalized !== "/" && normalized.endsWith("/")
+    ? normalized.slice(0, -1)
+    : normalized;
+}
 function sourceContains(source: string, path: string): boolean {
-  return source.startsWith("/") && containsPath(posix.normalize(source), path);
+  return (
+    source.startsWith("/") &&
+    containsPath(normalizedPath(source), normalizedPath(path))
+  );
 }
 function overlapsSnapshot(source: string, prefix: string): boolean {
   return (
     sourceContains(source, prefix) ||
-    (source.startsWith("/") && containsPath(prefix, posix.normalize(source)))
+    (source.startsWith("/") &&
+      containsPath(normalizedPath(prefix), normalizedPath(source)))
   );
 }
 /** Existing ancestor/root mounts can expose bytes as soon as staging writes them.
@@ -231,7 +241,7 @@ export async function assertNativeComposeFileRootUnbound(opts: {
   readonly signal?: AbortSignal;
   readonly probe?: Probe;
 }): Promise<void> {
-  const root = posix.normalize(opts.root);
+  const root = normalizedPath(opts.root);
   const expectedEngine = opts.engineId;
   const probe = boundedProbe(opts);
   try {

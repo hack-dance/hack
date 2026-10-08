@@ -291,6 +291,9 @@ fn owner_codec_refuses_legacy_kind_unknown_fields_and_wrong_process_incarnation(
         ("/candidate", json!("/foreign")),
         ("/process/start_micros", json!(0)),
         ("/process/pid", json!(2_000_000)),
+        ("/host_boot_micros", json!(0)),
+        ("/host_boot_micros", json!(1)),
+        ("/host_boot_micros", json!(u64::MAX)),
         ("/values", json!("private-canary")),
     ] {
         let fixture = Fixture::new();
@@ -312,6 +315,46 @@ fn owner_codec_refuses_legacy_kind_unknown_fields_and_wrong_process_incarnation(
         assert!(DirectGuard::acquire(&fixture.candidate, RUN).is_err());
         assert!(file.exists());
     }
+}
+
+#[test]
+fn publication_three_binds_independent_host_boot_and_keeps_closed_live_version_two() {
+    let fixture = Fixture::new();
+    let review = fixture.receipt().review;
+    let publication = owner::Publication::bind(&fixture.candidate, &review).unwrap();
+    let file = fixture.owner_root().join("owner.json");
+    let bytes = fs::read(&file).unwrap();
+    let qualified: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(qualified["version"], 3);
+    let boot = crate::provider::host_filesystem::host_boot_micros().unwrap();
+    assert_eq!(qualified["host_boot_micros"], boot);
+    assert!(qualified["process"]["start_micros"].as_u64().unwrap() >= boot);
+    owner::Pin::load(&fixture.candidate, RUN).unwrap();
+    publication.verify().unwrap();
+    assert!(DirectGuard::acquire(&fixture.candidate, RUN).is_err());
+
+    let mut old = qualified.clone();
+    old["version"] = json!(2);
+    old.as_object_mut().unwrap().remove("host_boot_micros");
+    fs::write(&file, serde_json::to_vec(&old).unwrap()).unwrap();
+    // Exact legacy live authentication remains available without inventing host boot.
+    let legacy = owner::Pin::load(&fixture.candidate, RUN).unwrap();
+    legacy.connect().unwrap();
+    assert!(DirectGuard::acquire(&fixture.candidate, RUN).is_err());
+    assert!(publication.verify().is_err());
+
+    for host_boot in [json!(boot), Value::Null] {
+        let mut wrong_version = old.clone();
+        wrong_version["host_boot_micros"] = host_boot;
+        fs::write(&file, serde_json::to_vec(&wrong_version).unwrap()).unwrap();
+        assert!(owner::Pin::load(&fixture.candidate, RUN).is_err());
+    }
+    let mut missing_boot = old;
+    missing_boot["version"] = json!(3);
+    fs::write(&file, serde_json::to_vec(&missing_boot).unwrap()).unwrap();
+    assert!(owner::Pin::load(&fixture.candidate, RUN).is_err());
+    assert!(file.exists());
+    assert!(!fixture.candidate.state_root.join("run/smolvm").exists());
 }
 
 #[test]

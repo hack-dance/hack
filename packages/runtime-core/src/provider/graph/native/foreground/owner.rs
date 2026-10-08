@@ -33,6 +33,57 @@ struct Record {
     socket: (u64, u64),
     lock: (u64, u64),
 }
+/// A distinct closed publication format: old live owners never acquire boot provenance by inference.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BootQualifiedRecord {
+    version: u32,
+    kind: Kind,
+    candidate: PathBuf,
+    review: native_input::Review,
+    process: ProcessIdentity,
+    parent: (u64, u64),
+    socket: (u64, u64),
+    lock: (u64, u64),
+    host_boot_micros: u64,
+}
+impl BootQualifiedRecord {
+    fn into_record(self) -> (Record, Option<u64>) {
+        (
+            Record {
+                version: self.version,
+                kind: self.kind,
+                candidate: self.candidate,
+                review: self.review,
+                process: self.process,
+                parent: self.parent,
+                socket: self.socket,
+                lock: self.lock,
+            },
+            Some(self.host_boot_micros),
+        )
+    }
+}
+fn decode(bytes: &[u8]) -> Result<(Record, Option<u64>), CandidateError> {
+    let value: Value = serde_json::from_slice(bytes).map_err(|_| refused())?;
+    match value.get("version").and_then(Value::as_u64) {
+        Some(2) => {
+            let record: Record = serde_json::from_slice(bytes).map_err(|_| refused())?;
+            Ok((record, None))
+        }
+        Some(3) => {
+            let record: BootQualifiedRecord =
+                serde_json::from_slice(bytes).map_err(|_| refused())?;
+            if record.host_boot_micros == 0
+                || record.process.start_micros < record.host_boot_micros
+            {
+                return Err(refused());
+            }
+            Ok(record.into_record())
+        }
+        _ => Err(refused()),
+    }
+}
 fn id(metadata: &fs::Metadata) -> (u64, u64) {
     (metadata.dev(), metadata.ino())
 }
@@ -110,22 +161,30 @@ impl<'a> DirectGuard<'a> {
 pub(super) struct Pin {
     root: PathBuf,
     record: Record,
+    host_boot_micros: Option<u64>,
     bytes: Vec<u8>,
     file: (u64, u64),
 }
 impl Pin {
+    fn verify_host_boot(&self) -> Result<(), CandidateError> {
+        if self.host_boot_micros.is_some_and(|boot| {
+            crate::provider::host_filesystem::host_boot_micros().ok() != Some(boot)
+        }) {
+            return Err(refused());
+        }
+        Ok(())
+    }
     pub(super) fn load(candidate: &Candidate, run: &str) -> Result<Self, CandidateError> {
         let root = root(candidate, run)?;
         state::check_private_directory(&root).map_err(|_| refused())?;
         let file = fs::symlink_metadata(root.join("owner.json")).map_err(|_| refused())?;
         let bytes = native_input::read_file(&root.join("owner.json"), 8192)?;
-        let record: Record = serde_json::from_slice(&bytes).map_err(|_| refused())?;
+        let (record, host_boot_micros) = decode(&bytes)?;
         record
             .review
             .validate(record.review.scope())
             .map_err(|_| refused())?;
-        if record.version != 2
-            || record.candidate != candidate.checkout
+        if record.candidate != candidate.checkout
             || record.review.scope().run != run
         {
             return Err(refused());
@@ -133,6 +192,7 @@ impl Pin {
         let pin = Self {
             root,
             record,
+            host_boot_micros,
             bytes,
             file: id(&file),
         };
@@ -145,6 +205,7 @@ impl Pin {
     /// The caller already authenticated its retained connection before the owner
     /// retired. Absence grants no new connection, process or cleanup authority.
     pub(super) fn verify_retired(&self) -> Result<(), CandidateError> {
+        self.verify_host_boot()?;
         state::check_private_directory(&self.root).map_err(|_| refused())?;
         let parent = fs::symlink_metadata(&self.root).map_err(|_| refused())?;
         let lock = fs::symlink_metadata(self.root.join("operation.lock")).map_err(|_| refused())?;
@@ -162,6 +223,7 @@ impl Pin {
         Ok(())
     }
     pub(super) fn verify(&self) -> Result<(), CandidateError> {
+        self.verify_host_boot()?;
         state::check_private_directory(&self.root).map_err(|_| refused())?;
         let parent = fs::symlink_metadata(&self.root).map_err(|_| refused())?;
         let socket = fs::symlink_metadata(self.root.join("control.sock")).map_err(|_| refused())?;
@@ -217,6 +279,8 @@ impl Publication {
         review: &native_input::Review,
     ) -> Result<Self, CandidateError> {
         review.validate(review.scope()).map_err(|_| refused())?;
+        let host_boot_micros =
+            crate::provider::host_filesystem::host_boot_micros().map_err(|_| refused())?;
         let gate = super::super::super::publication_gate::Guard::acquire(candidate)?;
         let run = review.scope().run;
         if exists(&super::super::journal::directory(candidate, run)?)? {
@@ -232,8 +296,8 @@ impl Publication {
         fs::set_permissions(root.join("control.sock"), fs::Permissions::from_mode(0o600))
             .map_err(|_| refused())?;
         listener.set_nonblocking(true).map_err(|_| refused())?;
-        let record = Record {
-            version: 2,
+        let record = BootQualifiedRecord {
+            version: 3,
             kind: Kind::NativeGraphOwner,
             candidate: candidate.checkout.clone(),
             review: review.clone(),
@@ -241,11 +305,13 @@ impl Publication {
             parent: id(&fs::symlink_metadata(&root).map_err(|_| refused())?),
             socket: id(&fs::symlink_metadata(root.join("control.sock")).map_err(|_| refused())?),
             lock: lock.identity().map_err(|_| refused())?,
+            host_boot_micros,
         };
         let bytes = serde_json::to_vec(&record).map_err(|_| refused())?;
         if bytes.len() > 8192 {
             return Err(refused());
         }
+        let (record, host_boot_micros) = decode(&bytes)?;
         let mut file = OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -259,6 +325,7 @@ impl Publication {
         let pin = Pin {
             root,
             record,
+            host_boot_micros,
             bytes,
             file: id(&file.metadata().map_err(|_| refused())?),
         };

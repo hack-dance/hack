@@ -111,6 +111,14 @@ this same subset. Its private `native-graph-owner` record and authenticated v2
 `native-graph-control` status/cleanup protocol bind the native review, exact
 process incarnation, directory, socket, file and retained per-run lock. Direct
 run/cleanup and foreground publication exclude each other under that lock.
+New publications use a closed version3 owner record with independently captured
+native host boot time. Live authentication rechecks that boot together with the
+existing exact process and filesystem identities. The closed version2 live-owner
+decoder remains available without inferring host boot from PID birth or guest
+receipt boot. Version2 records reject the new field, and version3 records require
+it. Native runtime receipts and the authenticated control/ready wire remain v2;
+Compose receipt and owner formats remain unchanged. This provenance alone grants
+no dead-owner recovery authority.
 Cancellation fences startup before admission and subsequent effects. Cleanup
 retains stop failures by admitted workload name, and retires the publication only
 after exact cleanup succeeds. Replies bind their requested action and immutable

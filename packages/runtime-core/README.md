@@ -113,7 +113,11 @@ process incarnation, directory, socket, file and retained per-run lock. Direct
 run/cleanup and foreground publication exclude each other under that lock.
 Cancellation fences startup before admission and subsequent effects. Cleanup
 retains stop failures by admitted workload name, and retires the publication only
-after exact cleanup succeeds. Failed or abandoned publications preserve evidence;
+after exact cleanup succeeds. Replies bind their requested action and immutable
+admitted membership. A cleanup reply crosses the already authenticated connection
+after retirement and requires unchanged parent/lock identities, absent publication
+paths and the exact durable removed journal. Changed current membership and
+unknown native failure-observation fields refuse. Failed or abandoned publications preserve evidence;
 they never authorize adoption, restart or dead-owner recovery. This owner has no
 public CLI/frontend selection yet and does not implement reactive health or hooks.
 

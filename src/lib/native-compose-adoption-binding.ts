@@ -191,7 +191,9 @@ async function inventory(opts: {
   ]);
   const expected = {
     volume: intent.volumes.map((volume) => volume.name),
-    network: [intent.ownedNetwork?.name ?? `${intent.composeProject}_default`],
+    network: intent.ownedNetworks
+      ? intent.ownedNetworks.networks.map((network) => network.name)
+      : [intent.ownedNetwork?.name ?? `${intent.composeProject}_default`],
     container: intent.services.map(
       (service) => `${intent.composeProject}-${service}-1`
     ),
@@ -264,7 +266,7 @@ export type LegacyComposeVerifiedContainer = {
   readonly name: string;
   readonly service: string;
 };
-export type LegacyComposeVerifiedBinding = {
+type LegacyComposeVerifiedBindingBase = {
   readonly projectRoot: string;
   readonly composeFile: string;
   readonly composeProject: string;
@@ -272,19 +274,42 @@ export type LegacyComposeVerifiedBinding = {
   readonly containers: readonly LegacyComposeVerifiedContainer[];
   readonly volumes: readonly LegacyComposeVerifiedVolume[];
   readonly mounts: LegacyComposeStorageIntent["mounts"];
-  readonly network: {
-    readonly id: string;
-    readonly name: string;
-    readonly createdAt: string;
-    readonly logical?: string;
-    readonly internal?: boolean;
-  };
-} & (
-  | { readonly binding_version: 1 }
-  | { readonly binding_version: 2; readonly composeFiles: readonly string[] }
-  | { readonly binding_version: 3 }
-  | { readonly binding_version: 4; readonly composeFiles: readonly string[] }
-);
+};
+type LegacyComposeVerifiedNetwork = {
+  readonly id: string;
+  readonly name: string;
+  readonly createdAt: string;
+  readonly logical: string;
+  readonly internal: boolean;
+};
+type LegacyComposeOriginalNetwork = {
+  readonly id: string;
+  readonly name: string;
+  readonly createdAt: string;
+  readonly logical?: string;
+  readonly internal?: boolean;
+};
+export type LegacyComposeVerifiedBinding = LegacyComposeVerifiedBindingBase &
+  (
+    | {
+        readonly binding_version: 1 | 3;
+        readonly network: LegacyComposeOriginalNetwork;
+      }
+    | {
+        readonly binding_version: 2 | 4;
+        readonly composeFiles: readonly string[];
+        readonly network: LegacyComposeOriginalNetwork;
+      }
+    | {
+        readonly binding_version: 5;
+        readonly networks: readonly LegacyComposeVerifiedNetwork[];
+      }
+    | {
+        readonly binding_version: 6;
+        readonly composeFiles: readonly string[];
+        readonly networks: readonly LegacyComposeVerifiedNetwork[];
+      }
+  );
 
 type ProjectedPreparation = Pick<
   Awaited<ReturnType<LegacyComposeAdoptionProjection["resolve"]>>,
@@ -419,7 +444,8 @@ function containerRows(
     readonly root: string;
     readonly intent: LegacyComposeStorageIntent;
     readonly volumes: readonly LegacyComposeVerifiedVolume[];
-    readonly network: { readonly name: string; readonly id: string };
+    readonly network?: { readonly name: string; readonly id: string };
+    readonly networks?: readonly LegacyComposeVerifiedNetwork[];
     readonly composeFiles: readonly string[];
     readonly fileCandidate?: unknown;
   }
@@ -455,7 +481,7 @@ function containerRows(
           ID.test(row.id) &&
           typeof row.name === "string"
       );
-      if (opts.intent.ownedNetwork) {
+      if (opts.intent.ownedNetwork || opts.intent.ownedNetworks) {
         requireValue(
           row.name === `/${opts.intent.composeProject}-${row.service}-1`
         );
@@ -470,6 +496,53 @@ function containerRows(
           ? {}
           : { fileCandidate: opts.fileCandidate }),
       });
+      if (opts.intent.ownedNetworks) {
+        const verifiedNetworks = opts.networks;
+        const configured = opts.intent.ownedNetworks.attachments.find(
+          (entry) => entry.service === row.service
+        );
+        requireValue(
+          configured &&
+            Array.isArray(row.networks) &&
+            row.networks.length === configured.networks.length &&
+            verifiedNetworks?.length === 2
+        );
+        const observedNames = new Set<string>();
+        for (const item of row.networks) {
+          requireValue(isRecord(item));
+          keys(item, ["name", "id", "aliases"]);
+          requireValue(
+            typeof item.name === "string" && !observedNames.has(item.name)
+          );
+          observedNames.add(item.name);
+          const verified = verifiedNetworks.find(
+            (entry) => entry.name === item.name
+          );
+          const declared = configured.networks.find(
+            (entry) => entry.logical === verified?.logical
+          );
+          requireValue(verified && declared && item.id === verified.id);
+          const expected = [
+            `${opts.intent.composeProject}-${row.service}-1`,
+            row.service,
+            ...declared.aliases,
+          ].sort();
+          const actual = item.aliases;
+          requireValue(
+            (Array.isArray(actual) &&
+              actual.every(
+                (alias) => typeof alias === "string" && NAME.test(alias)
+              ) &&
+              new Set(actual).size === actual.length &&
+              JSON.stringify([...actual].sort()) ===
+                JSON.stringify(expected)) ||
+              (!row.running &&
+                (actual === null ||
+                  (Array.isArray(actual) && actual.length === 0)))
+          );
+        }
+        return { id: row.id, name: row.name.slice(1), service: row.service };
+      }
       requireValue(Array.isArray(row.networks) && row.networks.length === 1);
       const network = row.networks[0];
       requireValue(isRecord(network));
@@ -478,7 +551,9 @@ function containerRows(
         opts.intent.ownedNetwork ? ["name", "id", "aliases"] : ["name", "id"]
       );
       requireValue(
-        network.name === opts.network.name && network.id === opts.network.id
+        opts.network &&
+          network.name === opts.network.name &&
+          network.id === opts.network.id
       );
       if (opts.intent.ownedNetwork) {
         const configured = opts.intent.ownedNetwork.attachments.find(
@@ -555,6 +630,76 @@ function networkRow(
     containerIds: row.containers,
   };
 }
+function pluralNetworkRows(
+  rows: readonly Record<string, unknown>[],
+  intent: LegacyComposeStorageIntent
+): {
+  readonly networks: readonly LegacyComposeVerifiedNetwork[];
+  readonly members: ReadonlyMap<string, readonly string[]>;
+} {
+  const declared = intent.ownedNetworks?.networks;
+  requireValue(declared && declared.length === 2 && rows.length === 2);
+  requireValue(
+    new Set(declared.map((network) => network.logical)).size === 2 &&
+      new Set(declared.map((network) => network.name)).size === 2 &&
+      declared.every(
+        (network) =>
+          typeof network.logical === "string" &&
+          typeof network.name === "string" &&
+          typeof network.internal === "boolean"
+      )
+  );
+  const ids = new Set<string>();
+  const names = new Set<string>();
+  const members = new Map<string, readonly string[]>();
+  const networks = rows
+    .map((row) => {
+      keys(row, [
+        "id",
+        "name",
+        "project",
+        "native",
+        "logical",
+        "createdAt",
+        "driver",
+        "scope",
+        "internal",
+        "containers",
+      ]);
+      const expected = declared.find((network) => network.name === row.name);
+      const id = row.id;
+      const rowMembers = row.containers;
+      requireValue(
+        expected &&
+          typeof id === "string" &&
+          ID.test(id) &&
+          !ids.has(id) &&
+          !names.has(expected.name) &&
+          row.logical === expected.logical &&
+          row.internal === expected.internal &&
+          row.driver === "bridge" &&
+          row.scope === "local" &&
+          timestamp(row.createdAt) &&
+          Array.isArray(rowMembers) &&
+          rowMembers.every(
+            (member) => typeof member === "string" && ID.test(member)
+          ) &&
+          new Set(rowMembers).size === rowMembers.length
+      );
+      ids.add(id);
+      names.add(expected.name);
+      members.set(expected.logical, [...rowMembers].sort());
+      return {
+        id,
+        name: expected.name,
+        createdAt: row.createdAt,
+        logical: expected.logical,
+        internal: expected.internal,
+      };
+    })
+    .sort((a, b) => a.logical.localeCompare(b.logical));
+  return { networks, members };
+}
 async function engine(probe: Probe) {
   const rows = lines(
     await probe([
@@ -611,6 +756,7 @@ async function inspectLegacyResources(opts: {
   readonly fileCandidate?: unknown;
 }): Promise<LegacyComposeVerifiedBinding> {
   const composeFiles = canonicalComposeFiles(opts.root, opts.composeFiles);
+  requireValue(!(opts.intent.ownedNetwork && opts.intent.ownedNetworks));
   const probe = createNativeComposeProbe(opts);
   const engineId = await engine(probe);
   const selected = {
@@ -631,40 +777,66 @@ async function inspectLegacyResources(opts: {
     }),
     opts.intent
   );
-  const { network, containerIds } = networkRow(
-    await inspect({
-      kind: "network",
-      probe,
-      resources: selected.network,
-      project: opts.intent.composeProject,
-    }),
-    opts.intent
-  );
+  const networkFacts = await inspect({
+    kind: "network",
+    probe,
+    resources: selected.network,
+    project: opts.intent.composeProject,
+  });
+  const plural = opts.intent.ownedNetworks
+    ? pluralNetworkRows(networkFacts, opts.intent)
+    : undefined;
+  const single = plural ? undefined : networkRow(networkFacts, opts.intent);
   const containerFacts = await inspect({
     kind: "container",
     probe,
     resources: selected.container,
     project: opts.intent.composeProject,
-    ownedNetwork: opts.intent.ownedNetwork !== undefined,
+    ownedNetwork:
+      opts.intent.ownedNetwork !== undefined ||
+      opts.intent.ownedNetworks !== undefined,
   });
   const containers = containerRows(containerFacts, {
     ...opts,
     composeFiles,
     volumes,
-    network,
+    network: single?.network,
+    networks: plural?.networks,
   });
-  // Docker drops stopped endpoints from network inspection. Every original must
-  // still configure this exact NetworkID; active membership is exactly the
-  // currently running originals. This transient state never enters the binding.
-  requireValue(
-    JSON.stringify([...containerIds].sort()) ===
-      JSON.stringify(
-        containerFacts
-          .filter((container) => container.running)
-          .map((container) => container.id)
-          .sort()
-      )
-  );
+  // Docker drops stopped endpoints from network inspection. Each original must
+  // still configure every declared NetworkID; live members are exact per bridge.
+  if (plural) {
+    for (const network of plural.networks) {
+      const members = plural.members.get(network.logical);
+      requireValue(members);
+      const expected = containerFacts
+        .filter(
+          (container) =>
+            container.running &&
+            opts.intent.ownedNetworks?.attachments.some(
+              (entry) =>
+                entry.service === container.service &&
+                entry.networks.some(
+                  (attached) => attached.logical === network.logical
+                )
+            )
+        )
+        .map((container) => container.id)
+        .sort();
+      requireValue(JSON.stringify(members) === JSON.stringify(expected));
+    }
+  } else {
+    requireValue(single);
+    requireValue(
+      JSON.stringify([...single.containerIds].sort()) ===
+        JSON.stringify(
+          containerFacts
+            .filter((container) => container.running)
+            .map((container) => container.id)
+            .sort()
+        )
+    );
+  }
   for (const kind of ["container", "volume", "network"] as const) {
     requireValue(
       JSON.stringify(await inventory({ kind, probe, intent: opts.intent })) ===
@@ -672,6 +844,30 @@ async function inspectLegacyResources(opts: {
     );
   }
   requireValue((await engine(probe)) === engineId);
+  const common = {
+    projectRoot: opts.root,
+    composeFile: resolve(opts.root, ".hack/docker-compose.yml"),
+    composeProject: opts.intent.composeProject,
+    engineId,
+    containers,
+    volumes,
+    mounts: opts.intent.mounts,
+  };
+  if (plural) {
+    return opts.composeFiles
+      ? {
+          ...common,
+          binding_version: 6 as const,
+          composeFiles: Object.freeze(composeFiles),
+          networks: plural.networks,
+        }
+      : {
+          ...common,
+          binding_version: 5 as const,
+          networks: plural.networks,
+        };
+  }
+  requireValue(single);
   return {
     ...(opts.composeFiles
       ? {
@@ -685,19 +881,13 @@ async function inspectLegacyResources(opts: {
             ? (3 as const)
             : (1 as const),
         }),
-    projectRoot: opts.root,
-    composeFile: resolve(opts.root, ".hack/docker-compose.yml"),
-    composeProject: opts.intent.composeProject,
-    engineId,
-    containers,
-    volumes,
-    mounts: opts.intent.mounts,
-    network,
+    ...common,
+    network: single.network,
   };
 }
 export type LegacyComposeAdoptionBinding = {
   readonly report: {
-    readonly binding_version: 1 | 2 | 3 | 4;
+    readonly binding_version: 1 | 2 | 3 | 4 | 5 | 6;
     readonly status: "verified";
     readonly adoption: "not_performed";
     readonly containers: number;

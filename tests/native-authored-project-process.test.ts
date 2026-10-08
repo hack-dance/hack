@@ -504,8 +504,10 @@ test("startup deadline refuses publication and settles its observed startup pref
       );
     }
     expect(failure).toBeInstanceOf(Error);
-    const failureMessage =
-      failure instanceof Error ? failure.message : undefined;
+    if (!(failure instanceof Error)) {
+      throw new Error("Startup fixture requires its observed Error.");
+    }
+    const failureMessage = failure.message;
     expect(elapsedMs).toBeLessThan(1500);
     expect(published).toBe(false);
     expect(nativeFailureObserved).toBe(false);
@@ -677,6 +679,7 @@ test("status descendant-held pipes cannot outlive startup admission or owned cle
     if (keeper === undefined) {
       throw new Error("Status keeper admission requires an observed live PID.");
     }
+    const admittedKeeper = keeper;
     expect(operationElapsedMs).toBeDefined();
     expect(operationElapsedMs).toBeLessThan(1500);
     expect(failure).toContain("canceled");
@@ -685,8 +688,10 @@ test("status descendant-held pipes cannot outlive startup admission or owned cle
     expect(
       await Bun.file(join(opts.projectRoot, "cleanup-complete")).text()
     ).toBe("cleaned");
-    expect(Number.isSafeInteger(keeper) && keeper > 1).toBe(true);
-    expect(() => process.kill(keeper, 0)).not.toThrow();
+    expect(Number.isSafeInteger(admittedKeeper) && admittedKeeper > 1).toBe(
+      true
+    );
+    expect(() => process.kill(admittedKeeper, 0)).not.toThrow();
     expect(
       await Bun.file(join(opts.projectRoot, "keeper-complete")).exists()
     ).toBe(false);

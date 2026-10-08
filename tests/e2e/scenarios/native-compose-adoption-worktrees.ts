@@ -34,11 +34,11 @@ import {
   RETAINED_BUILD_IMAGE_FORMAT,
   RETAINED_BUILD_IMAGE_OWNER,
   type RetainedBuildFixtureMode,
+  type RetainedFixtureImage,
   retainedBuildFixtureDefinition,
   retainedBuildFixtureImage,
   retainedBuildFixtureMarker,
   retainedBuildFixtureSourceSnapshot,
-  type RetainedFixtureImage,
 } from "./native-compose-adoption-build-inputs.ts";
 import {
   adoptionDependencyHealthcheck,
@@ -565,6 +565,26 @@ function linkedFixtureFeatures(opts: {
   };
 }
 
+function authoredFixtureFeatures(opts: {
+  readonly generated: boolean;
+  readonly stringArgv: boolean;
+  readonly typedLocal: boolean;
+  readonly role: "primary" | "first" | "second";
+}): Partial<Pick<Instance, "sourceMode" | "argvMode" | "typedLocal">> {
+  return {
+    ...(opts.generated ? { sourceMode: "canonical-generated" as const } : {}),
+    ...(opts.stringArgv
+      ? {
+          argvMode:
+            opts.role === "second"
+              ? ("string-cleared" as const)
+              : ("string-entrypoint" as const),
+        }
+      : {}),
+    ...(opts.typedLocal ? { typedLocal: true as const } : {}),
+  };
+}
+
 async function prepareFixtureInputs(
   ctx: ScenarioContext,
   options: {
@@ -622,9 +642,12 @@ async function prepareFixtureInputs(
     root: fixture.root,
     name: `${fixture.name}-main`,
     marker: "unused-primary",
-    ...(generated ? { sourceMode: "canonical-generated" as const } : {}),
-    ...(stringArgv ? { argvMode: "string-entrypoint" as const } : {}),
-    ...(typedLocal ? { typedLocal: true as const } : {}),
+    ...authoredFixtureFeatures({
+      generated,
+      stringArgv,
+      typedLocal,
+      role: "primary",
+    }),
     ...(ownedNetwork ? { ownedNetwork: true as const } : {}),
     ...(basicBuild ? { basicBuild: "root-specific" as const } : {}),
   };
@@ -659,9 +682,12 @@ async function prepareFixtureInputs(
     root: await addLinkedWorktree({ fixture, branch: "adoption-alpha" }),
     name: `${fixture.name}-alpha`,
     marker: "alpha-existing-sql-row",
-    ...(generated ? { sourceMode: "canonical-generated" as const } : {}),
-    ...(stringArgv ? { argvMode: "string-entrypoint" as const } : {}),
-    ...(typedLocal ? { typedLocal: true as const } : {}),
+    ...authoredFixtureFeatures({
+      generated,
+      stringArgv,
+      typedLocal,
+      role: "first",
+    }),
     ...firstFeatures,
     ...(basicBuild ? { basicBuild: "root-specific" as const } : {}),
   };
@@ -669,9 +695,12 @@ async function prepareFixtureInputs(
     root: await addLinkedWorktree({ fixture, branch: "adoption-beta" }),
     name: `${fixture.name}-beta`,
     marker: "beta-existing-sql-row",
-    ...(generated ? { sourceMode: "canonical-generated" as const } : {}),
-    ...(stringArgv ? { argvMode: "string-cleared" as const } : {}),
-    ...(typedLocal ? { typedLocal: true as const } : {}),
+    ...authoredFixtureFeatures({
+      generated,
+      stringArgv,
+      typedLocal,
+      role: "second",
+    }),
     ...secondFeatures,
     ...(basicBuild ? { basicBuild: "hack-default" as const } : {}),
   };
@@ -943,7 +972,48 @@ function createFixtureRuntime(
       });
     }
   };
-  const check = async (instance: Instance, checkSource = true) => {
+  const checkBuild = async (instance: Instance, baseline: Snapshot) => {
+    if (!instance.basicBuild) {
+      refused();
+    }
+    await assertFixtureBuildImages({
+      probe,
+      builtImages,
+      originalImageIds,
+      instance,
+    });
+    if (
+      (await retainedBuildFixtureSourceSnapshot({
+        root: instance.root,
+        mode: instance.basicBuild,
+      })) !== buildSourceAnchors.get(instance) ||
+      (await fixtureRuntimeImages({
+        probe,
+        instance,
+        containers: baseline.resources.container,
+        builtImages,
+        baseImage,
+      })) !== buildImageAnchors.get(instance)
+    ) {
+      refused();
+    }
+    assertRetainedBuildFixtureCopy({
+      mode: instance.basicBuild,
+      text: await probe([
+        "container",
+        "exec",
+        container(instance, "db"),
+        "/bin/sh",
+        "-c",
+        RETAINED_BUILD_COPY_ORACLE,
+      ]),
+    });
+    await owned(instance, "container", container(instance, "db"));
+  };
+  const checkedRunningBaseline = async (
+    instance: Instance,
+    checkSource: boolean
+  ) => {
     const baseline = anchors.get(instance);
     if (
       !baseline ||
@@ -955,44 +1025,16 @@ function createFixtureRuntime(
     ) {
       refused();
     }
+    return baseline;
+  };
+  const check = async (instance: Instance, checkSource = true) => {
+    const baseline = await checkedRunningBaseline(instance, checkSource);
     await assertTopology(instance, true);
     await assertAliasSql(instance);
     await checkWorkerArgv(instance);
     await checkHealthcheck(instance);
     if (instance.basicBuild) {
-      await assertFixtureBuildImages({
-        probe,
-        builtImages,
-        originalImageIds,
-        instance,
-      });
-      if (
-        (await retainedBuildFixtureSourceSnapshot({
-          root: instance.root,
-          mode: instance.basicBuild,
-        })) !== buildSourceAnchors.get(instance) ||
-        (await fixtureRuntimeImages({
-          probe,
-          instance,
-          containers: baseline.resources.container,
-          builtImages,
-          baseImage,
-        })) !== buildImageAnchors.get(instance)
-      ) {
-        refused();
-      }
-      assertRetainedBuildFixtureCopy({
-        mode: instance.basicBuild,
-        text: await probe([
-          "container",
-          "exec",
-          container(instance, "db"),
-          "/bin/sh",
-          "-c",
-          RETAINED_BUILD_COPY_ORACLE,
-        ]),
-      });
-      await owned(instance, "container", container(instance, "db"));
+      await checkBuild(instance, baseline);
     }
     if (instance.sourceMode === "canonical-generated") {
       if (
@@ -1196,7 +1238,7 @@ async function fixtureRuntimeImages(
   if (!selected || opts.containers.length !== 2) {
     refused();
   }
-  const result = [];
+  const result: Record<string, unknown>[] = [];
   for (const container of opts.containers) {
     const row = object(
       await opts.probe([
@@ -1379,23 +1421,11 @@ async function bootstrapFixtureBuildImage(
   }
 }
 
-async function bootstrapOriginal(h: FixtureRuntime, instance: Instance) {
-  const {
-    engine,
-    fixtureRoot,
-    probe,
-    list,
-    resources,
-    anchors,
-    sql,
-    waitReady,
-    check,
-    managedAnchors,
-    localAnchors,
-    primary,
-    buildSourceAnchors,
-  } = h;
-
+async function requireFixtureNamesAbsent(
+  h: FixtureRuntime,
+  instance: Instance
+) {
+  const { list, probe } = h;
   for (const kind of ["container", "network", "volume"] as const) {
     if ((await list(instance, kind)).length) {
       refused();
@@ -1424,6 +1454,24 @@ async function bootstrapOriginal(h: FixtureRuntime, instance: Instance) {
       refused();
     }
   }
+}
+async function bootstrapOriginal(h: FixtureRuntime, instance: Instance) {
+  const {
+    engine,
+    fixtureRoot,
+    probe,
+    resources,
+    anchors,
+    sql,
+    waitReady,
+    check,
+    managedAnchors,
+    localAnchors,
+    primary,
+    buildSourceAnchors,
+  } = h;
+
+  await requireFixtureNamesAbsent(h, instance);
   const originalSource = await source(instance);
   if (instance.basicBuild) {
     buildSourceAnchors.set(
@@ -1967,23 +2015,9 @@ async function foreignCanaryRefusal(
   }
   await h.assertNoState(first);
 }
-async function interruptFirstStop(h: FixtureRuntime) {
-  const { ctx, engine, first, container, cli } = h;
-  const firstPrepare =
-    first.dependency || first.basicBuild
-      ? await captureAdoptionDependencyFirstPrepare({ projectRoot: first.root })
-      : undefined;
-  const shimRoot = join(ctx.tempRoot, "partial-stop-shim");
-  await mkdir(shimRoot, { mode: 0o700 });
-  const receipt = join(
-    first.root,
-    ".hack/.internal/legacy-compose-adoption-v1/receipt.json"
-  );
-  const db = container(first, "db"),
-    worker = container(first, "worker");
-  const control = join(shimRoot, "control-hit");
+function partialStopReceiptVersion(first: Instance): number {
   const generatedVersion = first.typedLocal ? 4 : 3;
-  const receiptVersion = first.basicBuild
+  return first.basicBuild
     ? 9
     : first.ownedNetwork
       ? 6
@@ -1992,10 +2026,20 @@ async function interruptFirstStop(h: FixtureRuntime) {
         : first.sourceMode
           ? generatedVersion
           : 2;
-  const shim = join(shimRoot, "docker");
-  await Bun.write(
-    shim,
-    `#!${process.execPath}
+}
+function partialStopDockerScript(opts: {
+  readonly h: FixtureRuntime;
+  readonly engine: string;
+  readonly first: Instance;
+  readonly receipt: string;
+  readonly db: string;
+  readonly worker: string;
+  readonly control: string;
+  readonly firstPrepare?: AdoptionDependencyFirstPrepare;
+}): string {
+  const { h, engine, first, receipt, db, worker, control, firstPrepare } = opts;
+  const receiptVersion = partialStopReceiptVersion(first);
+  return `#!${process.execPath}
 const args = process.argv.slice(2);
 const engine = ${JSON.stringify(engine)};
 if(args[0]==="container" && args[1]==="stop") {
@@ -2011,7 +2055,36 @@ if(args[0]==="container" && args[1]==="stop") {
 ${first.dependency ? dependencyReadGuard(h, first, receipt, firstPrepare) : ""}
 ${first.basicBuild ? buildReadGuard(h, first, receipt, firstPrepare) : ""}
 const child=Bun.spawn([engine,...args],{stdin:"inherit",stdout:"inherit",stderr:"inherit"});process.exit(await child.exited);
-`
+`;
+}
+async function interruptFirstStop(h: FixtureRuntime) {
+  const { ctx, engine, first, container, cli } = h;
+  const firstPrepare =
+    first.dependency || first.basicBuild
+      ? await captureAdoptionDependencyFirstPrepare({ projectRoot: first.root })
+      : undefined;
+  const shimRoot = join(ctx.tempRoot, "partial-stop-shim");
+  await mkdir(shimRoot, { mode: 0o700 });
+  const receipt = join(
+    first.root,
+    ".hack/.internal/legacy-compose-adoption-v1/receipt.json"
+  );
+  const db = container(first, "db"),
+    worker = container(first, "worker");
+  const control = join(shimRoot, "control-hit");
+  const shim = join(shimRoot, "docker");
+  await Bun.write(
+    shim,
+    partialStopDockerScript({
+      h,
+      engine,
+      first,
+      receipt,
+      db,
+      worker,
+      control,
+      firstPrepare,
+    })
   );
   await chmod(shim, 0o700);
   const partial = await cli(first, ["config", "adopt", "--stop", "--json"], {
@@ -2111,8 +2184,7 @@ function fixtureBuildScope(h: BuildFixtureTransport, instance: Instance) {
   const anchor = h.anchors.get(instance);
   const built = h.builtImages.get(instance);
   if (
-    !anchor ||
-    !built ||
+    !(anchor && built) ||
     anchor.resources.container.length !== 2 ||
     anchor.resources.network.length !== 1 ||
     anchor.resources.volume.length !== 1
@@ -2494,8 +2566,7 @@ async function retainedBuildCandidateRefusal(h: FixtureRuntime) {
     new TextDecoder("utf-8", { fatal: true }).decode(original)
   );
   if (
-    !isRecord(candidate.services) ||
-    !isRecord(candidate.services.db) ||
+    !(isRecord(candidate.services) && isRecord(candidate.services.db)) ||
     !isRecord(candidate.services.db.build)
   ) {
     refused();

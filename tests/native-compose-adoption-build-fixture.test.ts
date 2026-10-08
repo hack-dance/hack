@@ -26,11 +26,11 @@ import {
   retainedBuildFixtureReadAllowed,
   retainedBuildFixtureSourceSnapshot,
 } from "./e2e/scenarios/native-compose-adoption-build-inputs.ts";
+import { captureAdoptionDependencyFirstPrepare } from "./e2e/scenarios/native-compose-adoption-dependency-staged-read.ts";
 import {
   buildFixtureCli,
   nativeComposeAdoptionBuildWorktreesScenario,
 } from "./e2e/scenarios/native-compose-adoption-worktrees.ts";
-import { captureAdoptionDependencyFirstPrepare } from "./e2e/scenarios/native-compose-adoption-dependency-staged-read.ts";
 import { retainedBuildFixture } from "./helpers/retained-build-adoption.ts";
 
 const CANARY = "synthetic-private-builder-canary";

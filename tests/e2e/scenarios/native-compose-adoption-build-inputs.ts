@@ -157,7 +157,13 @@ export async function retainedBuildFixtureSourceSnapshot(opts: {
           ".hack/toolchain/run.sh",
         ]
       : [".hack/Dockerfile", ".hack/.dockerignore", ".hack/data-marker"];
-  const result = [];
+  const result: {
+    readonly path: string;
+    readonly dev: number;
+    readonly ino: number;
+    readonly mode: number;
+    readonly hash: string;
+  }[] = [];
   for (const path of paths) {
     const selected = join(opts.root, path);
     const info = await lstat(selected);

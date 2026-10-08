@@ -230,3 +230,26 @@ any e2e result.
 4. Register it in the `ALL_SCENARIOS` list in `run.ts`.
 5. Docker scenarios: call `requireDockerPreconditions` first and wrap the
    body in `try/finally` with `downBestEffort`.
+
+## Native build acceptance
+
+`native-config-build` is a required Docker scenario using the cached
+`oven/bun:1.4.2-slim` base and the current compiled CLI/compiler. Its native-only
+project builds a selected multistage target through a checkout-anchored context
+with literal dollar characters and a context-relative nested Dockerfile. A second
+job qualifies the default Dockerfile. Actual profile/argv, completed-job readiness,
+changed COPY inputs under `pull_policy: "build"`, and retained data are checked.
+
+Build arguments, platform(s), additional contexts, cache import/export, no-cache,
+build pull/network options, secrets and SSH remain unsupported. Active and inactive
+declarations require their exact compiler diagnostic and a separate redacted `up`
+refusal before hook or Docker tripwires. This scenario qualifies the existing basic
+build subset; it does not close the full advanced-build corpus requirement.
+
+Cleanup checks captured full image IDs, fixed Dockerfile fixture labels, exclusive
+generated tags and baseline absence before ID-only non-forced removal with
+`--no-prune`. The cached base and preexisting images remain. Ordinary builder cache
+is recorded before/after and retained; there is no general cache prune or cache
+reclamation claim. Failed exact cleanup retains the private fixture and recovery
+identities. Host DNS/trust, registry network denial and advanced builder features
+are separate gates.

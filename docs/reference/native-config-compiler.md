@@ -85,7 +85,14 @@ versions refuse; omitted fields retain their documented defaults.
 
 - Each workload selects exactly one `image` or `build`. Basic build accepts a
   relative `context`, a relative `dockerfile` (default `Dockerfile`) and optional
-  `target`. Advanced build settings are not accepted in this slice.
+  `target`. Context anchors to the project checkout; the Dockerfile is relative
+  to that context. Build arguments, platform(s), additional contexts, cache
+  import/export, no-cache, build pull/network settings, secrets and SSH are not
+  accepted. Unknown build fields refuse in services and jobs even when their
+  profiles are inactive; they cannot silently inherit host environment values or
+  bypass managed secret handling. The registered `native-config-build` fixture
+  covers existing basic-build fidelity and these refusals. It does not qualify
+  the full advanced-build contract or builder-cache reclamation.
 - Optional `pull_policy` is a canonical string: image-only workloads accept
   `always`, `never` or `missing`; build-only workloads accept `build`. The names
   follow [Compose's pull policies](https://docs.docker.com/reference/compose-file/services/#pull_policy):

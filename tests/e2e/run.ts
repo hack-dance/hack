@@ -13,6 +13,7 @@ import { envSecretsScenario } from "./scenarios/env-secrets.ts";
 import { initScenario } from "./scenarios/init.ts";
 import { lifecycleHostProcessScenario } from "./scenarios/lifecycle-host-process.ts";
 import { lifecycleSessionRecoveryScenario } from "./scenarios/lifecycle-session-recovery.ts";
+import { nativeConfigBuildScenario } from "./scenarios/native-config-build.ts";
 import { nativeConfigComposeScenario } from "./scenarios/native-config-compose.ts";
 import { nativeConfigRoutingScenario } from "./scenarios/native-config-routing.ts";
 import { portableMultiserviceScenario } from "./scenarios/portable-multiservice.ts";
@@ -60,6 +61,7 @@ const ALL_SCENARIOS: readonly Scenario[] = [
   upDownScenario,
   portableMultiserviceScenario,
   nativeConfigComposeScenario,
+  nativeConfigBuildScenario,
   nativeConfigRoutingScenario,
   lifecycleHostProcessScenario,
   worktreeParallelUpScenario,

@@ -38,7 +38,7 @@ import {
   discoverProjectInputs,
 } from "../src/lib/project-input-selection.ts";
 import { buildRuntimeHostMetadataOverride } from "../src/lib/runtime-host-metadata.ts";
-import { adoptionDependencyReadAllowed } from "./e2e/scenarios/native-compose-adoption-dependency-inputs.ts";
+import { captureAdoptionDependencyFirstPrepare } from "./e2e/scenarios/native-compose-adoption-dependency-staged-read.ts";
 import { restoreEnv } from "./helpers/env.ts";
 import { managedEnvCompilerFixture } from "./helpers/managed-env-compiler.ts";
 
@@ -64,6 +64,13 @@ type Fixture = {
   ordered?: boolean;
   sourceRace?: boolean;
   hangMutation?: boolean;
+  dependencyReadScope?: {
+    readonly projectRoot: string;
+    readonly first: Awaited<
+      ReturnType<typeof captureAdoptionDependencyFirstPrepare>
+    >;
+    readonly allowFirstPrepare: boolean;
+  };
 };
 let root: string;
 let projectRoot: string;
@@ -146,11 +153,20 @@ beforeEach(async () => {
     join(root, "docker"),
     `#!${process.execPath}
 import {appendFileSync, readFileSync, writeFileSync} from "node:fs";
+import {adoptionDependencyReadAllowed} from ${JSON.stringify(new URL("./e2e/scenarios/native-compose-adoption-dependency-inputs.ts", import.meta.url).pathname)};
+import {adoptionDependencyStagedReadAllowed} from ${JSON.stringify(new URL("./e2e/scenarios/native-compose-adoption-dependency-staged-read.ts", import.meta.url).pathname)};
 const root = ${JSON.stringify(root)};
 const args = process.argv.slice(2);
 appendFileSync(root + "/commands", JSON.stringify(args) + "\\n");
 const fixture = JSON.parse(readFileSync(root + "/fixture.json", "utf8"));
 const [kind, action] = args;
+if(fixture.dependencyReadScope && !(kind === 'container' && ['start','stop','restart'].includes(action))) {
+ let saved=null;try {saved=JSON.parse(readFileSync(fixture.dependencyReadScope.projectRoot+'/.hack/.internal/legacy-compose-adoption-v1/receipt.json','utf8'));}catch{}
+ const allowed=adoptionDependencyReadAllowed({args,projectRoot:fixture.dependencyReadScope.projectRoot,project:'fixture',containerIds:fixture.container.map(row=>row.id),networkId:fixture.network[0].id,volumeName:fixture.volume[0].id,generationId:saved?.prepared?.id ?? saved?.publication?.generation?.id}) || (fixture.dependencyReadScope.allowFirstPrepare && await adoptionDependencyStagedReadAllowed({args,project:'fixture',first:fixture.dependencyReadScope.first}));
+ const stage=kind==='compose' && args[10]?.includes('/generations/') ? saved?.prepared ? 'published' : 'staged' : 'original';
+ appendFileSync(root+'/read-stages',JSON.stringify({stage,allowed})+'\\n');
+ if(!allowed){console.error('dependency-read-refused stage='+stage+' code=93');process.exit(93);}
+}
 if (kind === 'container' && ['start','restart','stop'].includes(action)) {
  if (!args.slice(2).length || args.slice(2).some(id => !fixture.container.some(container => container.id === id))) { writeFileSync(root + '/mutation','unverified effect');process.exit(99); }
  if(fixture.hangMutation) {writeFileSync(root + '/effect-started', String(process.pid));await Bun.sleep(60_000);}
@@ -532,10 +548,73 @@ for (const stage of ["per-effect freshness", "final observation"] as const) {
 }
 
 boundedTest(
+  "final prepared anchor cannot authorize the earlier staged query; old temporal guard refuses before effects",
+  async () => {
+    await dependencyFixture();
+    fixture.dependencyReadScope = {
+      projectRoot,
+      first: await captureAdoptionDependencyFirstPrepare({ projectRoot }),
+      allowFirstPrepare: false,
+    };
+    await save();
+    await refusal(prepared(), "E_LEGACY_ADOPTION_STATE");
+    const stages = (await readFile(join(root, "read-stages"), "utf8"))
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    expect(stages.at(-1)).toEqual({ stage: "staged", allowed: false });
+    expect((await readReceipt()).prepared).toBeNull();
+    expect((await readReceipt()).pendingOperation).toBeNull();
+    expect(await mutationCommands()).toEqual([]);
+    expect(fixture.volume[0]?.createdAt).toBe(CREATED);
+  },
+  30_000
+);
+
+boundedTest(
+  "dependency fixture admits first preparation before publication and checks later reads against their current receipt",
+  async () => {
+    await dependencyFixture();
+    fixture.dependencyReadScope = {
+      projectRoot,
+      first: await captureAdoptionDependencyFirstPrepare({ projectRoot }),
+      allowFirstPrepare: true,
+    };
+    await save();
+    const { store, generation } = await prepared();
+    try {
+      await store.publish({ generation, binary: await compiler() });
+      const stages = (await readFile(join(root, "read-stages"), "utf8"))
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line));
+      expect(
+        stages.filter((row) => row.stage === "staged").length
+      ).toBeGreaterThan(0);
+      expect(
+        stages.filter((row) => row.stage === "published").length
+      ).toBeGreaterThan(0);
+      expect(stages.every((row) => row.allowed)).toBe(true);
+      expect(await mutationCommands()).toEqual([]);
+      expect(fixture.volume[0]?.createdAt).toBe(CREATED);
+    } finally {
+      await store.close();
+    }
+  },
+  30_000
+);
+
+boundedTest(
   "v5 retained dispatch orders exact originals and reverses stops without creating data",
   async () => {
     const worker = await dependencyFixture(),
       original = await originalSnapshots();
+    fixture.dependencyReadScope = {
+      projectRoot,
+      first: await captureAdoptionDependencyFirstPrepare({ projectRoot }),
+      allowFirstPrepare: true,
+    };
+    await save();
     const { store, generation } = await prepared();
     const priorCompiler = process.env.HACK_CONFIG_COMPILER_BINARY;
     try {
@@ -570,32 +649,12 @@ boundedTest(
       expect(fixture.volume[0]?.createdAt).toBe(CREATED);
       expect(fixture.container.map((row) => row.id)).toEqual([ID, worker]);
       expect((await readReceipt()).pendingOperation).toBeNull();
-      const commands: readonly string[][] = (
-        await readFile(join(root, "commands"), "utf8")
-      )
+      const reads = (await readFile(join(root, "read-stages"), "utf8"))
         .trim()
         .split("\n")
         .map((line) => JSON.parse(line));
-      const reads = commands.filter(
-        (args) =>
-          !(
-            args[0] === "container" && ["start", "stop"].includes(args[1] ?? "")
-          )
-      );
       expect(reads.length).toBeGreaterThan(20);
-      for (const args of reads) {
-        expect(
-          adoptionDependencyReadAllowed({
-            args,
-            projectRoot,
-            project: "fixture",
-            containerIds: [ID, worker],
-            networkId: NETWORK,
-            volumeName: VOLUME,
-            generationId: (await readReceipt()).prepared.id,
-          })
-        ).toBe(true);
-      }
+      expect(reads.every((row) => row.allowed)).toBe(true);
       await store.rollback();
       await expectOriginals(original);
     } finally {

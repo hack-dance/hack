@@ -576,6 +576,9 @@ async function savedCommand(opts: {
     await store.recoverInterruptedLock();
   }
   const state = await store.loadCurrent();
+  if (options.operation === "exec" && state.storageWitnesses !== null) {
+    throw new NativeComposeGenerationError("E_NATIVE_COMPOSE_STATE");
+  }
   const pending = await store.loadPending();
   const generation =
     options.operation === "down" && options.recover && pending
@@ -820,6 +823,9 @@ async function prepareSavedStop(opts: {
   const { store, generation, document, selection, saved, options, signal } =
     opts;
   const current = await store.loadCurrent();
+  if (current.storageWitnessesPending && !options.recover) {
+    throw new NativeComposeGenerationError("E_NATIVE_COMPOSE_UNCERTAIN");
+  }
   const hasDownHooks = Object.hasOwn(document, "x-hack-native-down-hooks");
   let engineStopped = false;
   let storage: readonly NativeComposeRetainedVolume[] | null = null;
@@ -923,7 +929,11 @@ async function finalizeNativeComposeStop(opts: {
   readonly signal: AbortSignal;
   readonly recover?: boolean;
 }): Promise<void> {
-  if ((await opts.store.loadCurrent()).beforeHooksPending) {
+  const current = await opts.store.loadCurrent();
+  if (current.storageWitnessesPending) {
+    throw new NativeComposeGenerationError("E_NATIVE_COMPOSE_UNCERTAIN");
+  }
+  if (current.beforeHooksPending) {
     throw new HackCliError({
       code: "E_LIFECYCLE_FAILED",
       message:
@@ -1823,6 +1833,10 @@ function assertSelectedWorkloads(inputs: AcquiredComposeInputs): void {
 function assertStartupAvailable(
   current: Awaited<ReturnType<NativeComposeGenerationStore["loadCurrent"]>>
 ) {
+  // The content carrier is deliberately unactivated. Existing witness receipts cannot fall back to metadata.
+  if (current.storageWitnesses !== null) {
+    throw new NativeComposeGenerationError("E_NATIVE_COMPOSE_STATE");
+  }
   if (current.beforeHooksPending) {
     throw new HackCliError({
       code: "E_LIFECYCLE_FAILED",

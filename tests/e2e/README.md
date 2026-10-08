@@ -20,6 +20,16 @@ HACK_E2E_REQUIRE_TMUX=1 bun tests/e2e/run.ts --only=lifecycle-session-recovery
 Exit codes: `0` all pass/skip, `1` any scenario failed, `2` isolation canary
 failed (nothing ran).
 
+The `native-compose-adoption-dependency-worktrees` Docker selector uses a closed
+forwarder for original-ID effects and fixed metadata/config-hash reads. First
+preparation hashes its saved Compose copy before publishing `receipt.prepared`.
+That one read requires a previously absent store, one canonical private staged
+generation, an empty receipt and exact captured original bytes. Later saved reads
+use the current prepared/publication receipt. The temporal regression evaluates
+each emitted query at its actual receipt state; a final receipt cannot authorize
+an earlier query retroactively. Missing interruption controls report fixed stage,
+exit and control flags without printing command output or authored values.
+
 ## Command-path cache regressions
 
 `bun test tests/e2e/run-dependency-cache.test.ts` runs the real source CLI in

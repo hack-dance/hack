@@ -1,9 +1,11 @@
 import { isRecord } from "./guards.ts";
 import { literalComposeArg } from "./native-config-import-argv.ts";
+import { mapLegacyComposeBuild } from "./native-config-import-build.ts";
 import {
   legacyComposeJobNames,
   legacyComposeOneShotMarker,
 } from "./native-config-import-jobs.ts";
+import { mapLegacyOwnedNetwork } from "./native-config-import-network.ts";
 import {
   type ImportDocument,
   type ImportField,
@@ -183,7 +185,16 @@ function mapLegacyNativeInput(opts: {
     candidate,
     mark,
     refuse,
+    buildPreview: opts.purpose === "preview",
     jobPreview: opts.purpose !== "adoption-baseline",
+  });
+  mapOwnedNetwork({
+    project: name,
+    compose: compose.value,
+    candidate,
+    mark,
+    refuse,
+    purpose: opts.purpose,
   });
   if (opts.purpose === "storage-adoption") {
     mapStorageCandidate({
@@ -195,6 +206,54 @@ function mapLegacyNativeInput(opts: {
     });
   }
   return nativeImportResult({ fields, candidate });
+}
+
+function mapOwnedNetwork(
+  opts: Pick<MappingContext, "candidate" | "mark" | "refuse"> & {
+    readonly project: unknown;
+    readonly compose: Record<string, unknown>;
+    readonly purpose: "preview" | "adoption-baseline" | "storage-adoption";
+  }
+): void {
+  if (typeof opts.project !== "string") {
+    return;
+  }
+  const mapping = mapLegacyOwnedNetwork({
+    project: opts.project,
+    compose: opts.compose,
+  });
+  if (mapping.kind === "omitted") {
+    return;
+  }
+  if (mapping.kind === "refused") {
+    opts.refuse("compose", mapping.pointer, mapping.code);
+    return;
+  }
+  if (
+    opts.purpose !== "preview" &&
+    isRecord(opts.candidate.jobs) &&
+    Object.keys(opts.candidate.jobs).length > 0
+  ) {
+    opts.refuse("compose", "/networks", "owned_bridge_jobs_unsupported");
+    return;
+  }
+  const { logical, internal, attachments } = mapping.intent;
+  opts.candidate.networks = { [logical]: { internal } };
+  for (const { service, aliases } of attachments) {
+    const workload = candidateWorkload(opts.candidate, service);
+    if (isRecord(workload)) {
+      workload.networks = { [logical]: { aliases: [...aliases] } };
+    }
+  }
+  for (const { source, target, code } of mapping.pointers) {
+    opts.mark(
+      "compose",
+      source,
+      workloadTarget(opts.candidate, target),
+      code,
+      true
+    );
+  }
 }
 
 function candidateWorkload(candidate: Record<string, unknown>, name: string) {
@@ -233,7 +292,7 @@ export function mapLegacyNativeImport(opts: {
   });
 }
 
-/** Retained resource planning must not inherit preview-only job authority. */
+/** Retained resource planning must not inherit preview-only build or job authority. */
 export function mapLegacyNativeAdoptionBaseline(opts: {
   readonly configText: string;
   readonly composeText: string;
@@ -758,6 +817,7 @@ type WorkloadMappingContext = Pick<MappingContext, "mark" | "refuse"> & {
   readonly targetPointer: string;
   readonly jobs: ReadonlySet<string>;
   readonly job: boolean;
+  readonly buildPreview: boolean;
 };
 
 function mapServiceRule(
@@ -782,7 +842,14 @@ function mapServiceRule(
     opts.refuse("compose", pointer, "empty_command_unrepresentable");
     return;
   }
-  const value = SERVICE_RULES[key]?.(raw);
+  let value = SERVICE_RULES[key]?.(raw);
+  if (
+    key === "pull_policy" &&
+    opts.buildPreview &&
+    Object.hasOwn(opts.source, "build")
+  ) {
+    value = raw === "build" ? raw : undefined;
+  }
   if (value === undefined) {
     opts.refuse("compose", pointer, "invalid_or_ambiguous_value");
     return;
@@ -806,6 +873,7 @@ function mapServiceRule(
 
 function mapService(opts: WorkloadMappingContext) {
   const service: Record<string, unknown> = {};
+  const hasBuild = Object.hasOwn(opts.source, "build");
   opts.mark(
     "compose",
     opts.pointer,
@@ -836,7 +904,12 @@ function mapService(opts: WorkloadMappingContext) {
     }
     mapServiceRule({ ...opts, service, key, raw });
   }
-  if (!Object.hasOwn(opts.source, "image")) {
+  if (opts.buildPreview && hasBuild) {
+    mapServiceBuild({ ...opts, service });
+  }
+  if (
+    !(Object.hasOwn(opts.source, "image") || (opts.buildPreview && hasBuild))
+  ) {
     opts.refuse(
       "compose",
       `${opts.pointer}/image`,
@@ -844,6 +917,43 @@ function mapService(opts: WorkloadMappingContext) {
     );
   }
   return service;
+}
+
+function mapServiceBuild(
+  opts: Pick<
+    WorkloadMappingContext,
+    "mark" | "refuse" | "source" | "pointer" | "targetPointer"
+  > & {
+    readonly service: Record<string, unknown>;
+  }
+): void {
+  const pointer = importPointer(opts.pointer, "build");
+  const targetPointer = importPointer(opts.targetPointer, "build");
+  if (Object.hasOwn(opts.source, "image")) {
+    opts.refuse("compose", pointer, "image_build_exclusive");
+    opts.refuse(
+      "compose",
+      importPointer(opts.pointer, "image"),
+      "image_build_exclusive"
+    );
+    return;
+  }
+  const mapped = mapLegacyComposeBuild(opts.source.build);
+  if (!mapped) {
+    opts.refuse("compose", pointer, "invalid_or_unsupported_build");
+    return;
+  }
+  opts.service.build = mapped.build;
+  for (const field of mapped.fields) {
+    opts.mark(
+      "compose",
+      field.source === "" ? pointer : importPointer(pointer, field.source),
+      field.target === ""
+        ? targetPointer
+        : importPointer(targetPointer, field.target),
+      field.code
+    );
+  }
 }
 
 function refuseUndeclaredJobTargets(
@@ -884,6 +994,7 @@ function refuseUnqualifiedJobAdoption(
 function mapServices(
   opts: Pick<MappingContext, "mark" | "refuse" | "candidate"> & {
     readonly source: unknown;
+    readonly buildPreview: boolean;
     readonly jobPreview: boolean;
   }
 ) {

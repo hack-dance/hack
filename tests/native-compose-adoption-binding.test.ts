@@ -142,6 +142,28 @@ afterEach(async () => {
 async function save() {
   await writeFile(join(root, "fixture.json"), JSON.stringify(fixture));
 }
+async function customBridge() {
+  const path = join(projectRoot, ".hack/docker-compose.yml");
+  const original = await readFile(path, "utf8");
+  await writeFile(
+    path,
+    `${original.replace(
+      "    volumes:\n      - data:/var/lib/database",
+      "    networks:\n      private:\n        aliases: [database]\n    volumes:\n      - data:/var/lib/database"
+    )}networks:\n  private:\n    driver: bridge\n    internal: true\n`
+  );
+  container().networks = [
+    {
+      name: "fixture_private",
+      id: NETWORK,
+      aliases: ["fixture-db-1", "db", "database"],
+    },
+  ];
+  network().name = "fixture_private";
+  network().logical = "private";
+  network().internal = true;
+  await save();
+}
 function container() {
   const row = fixture.container[0];
   if (!row) {
@@ -195,6 +217,108 @@ test("stopped originals retain configured network identity without active endpoi
   await acquired.assertFresh({ projectRoot });
   expect(await acquired.resolveBinding({ projectRoot })).toEqual(original);
   expect(JSON.stringify(original)).not.toContain("running");
+});
+
+test("one authored bridge binds original physical ID, internal policy and exact live aliases", async () => {
+  await customBridge();
+  const acquired = await acquireLegacyComposeAdoptionBinding({ projectRoot });
+  expect(acquired.report.binding_version).toBe(3);
+  const original = await acquired.resolveBinding({ projectRoot });
+  expect(original.network).toMatchObject({
+    id: NETWORK,
+    name: "fixture_private",
+    logical: "private",
+    internal: true,
+  });
+  expect(original.containers).toEqual([
+    { id: ID, name: "fixture-db-1", service: "db" },
+  ]);
+  expect(JSON.stringify(acquired)).not.toContain(NETWORK);
+  const customFormat = (await commands())
+    .filter((args) => args[0] === "container" && args[1] === "inspect")
+    .map((args) => args[args.indexOf("--format") + 1]);
+  expect(customFormat.every((value) => value?.includes("$n.Aliases"))).toBe(
+    true
+  );
+
+  container().running = false;
+  network().containers = [];
+  (container().networks as Record<string, unknown>[])[0]!.aliases = null;
+  await save();
+  await acquired.assertFresh({ projectRoot });
+  expect(await acquired.resolveBinding({ projectRoot })).toEqual(original);
+});
+
+test.each([
+  [
+    "foreign bridge ID",
+    () => {
+      (container().networks as Record<string, unknown>[])[0]!.id = "c".repeat(
+        64
+      );
+    },
+  ],
+  [
+    "foreign alias",
+    () => {
+      (container().networks as Record<string, unknown>[])[0]!.aliases = [
+        "fixture-db-1",
+        "db",
+        "foreign",
+      ];
+    },
+  ],
+  [
+    "extra alias",
+    () => {
+      (container().networks as Record<string, unknown>[])[0]!.aliases = [
+        "fixture-db-1",
+        "db",
+        "database",
+        "foreign",
+      ];
+    },
+  ],
+  [
+    "missing alias",
+    () => {
+      (container().networks as Record<string, unknown>[])[0]!.aliases = [
+        "fixture-db-1",
+        "db",
+      ];
+    },
+  ],
+  [
+    "changed policy",
+    () => {
+      network().internal = false;
+    },
+  ],
+  [
+    "foreign member",
+    () => {
+      network().containers = [ID, "c".repeat(64)];
+    },
+  ],
+  [
+    "replacement bridge",
+    () => {
+      network().id = "c".repeat(64);
+    },
+  ],
+])("owned bridge refuses %s before adoption effects", async (_, change) => {
+  await customBridge();
+  const acquired = await acquireLegacyComposeAdoptionBinding({ projectRoot });
+  change();
+  await save();
+  await refusal(acquired.assertFresh({ projectRoot }));
+});
+
+test("running original cannot hide absent aliases behind stopped endpoint allowance", async () => {
+  await customBridge();
+  (container().networks as Record<string, unknown>[])[0]!.aliases = null;
+  await save();
+  await refusal(acquireLegacyComposeAdoptionBinding({ projectRoot }));
 });
 
 test("mixed stopped and running originals require exactly the running endpoint IDs", async () => {

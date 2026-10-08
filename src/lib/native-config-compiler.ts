@@ -7,6 +7,7 @@ import {
   nativeAcquisitionPlanningRequired,
   nativeAcquisitionSourceMatches,
 } from "./native-acquisition-plan-protocol.ts";
+import { beginNativeCpuChild } from "./native-cpu-diagnostics.ts";
 import {
   type NativeHostBindingResolution,
   nativeEndpointEnvironmentMatches,
@@ -973,6 +974,7 @@ async function invokeCompiler(opts: {
   let cancelled = false;
   let settled = false;
   let stopped = false;
+  const observeCpu = beginNativeCpuChild(child, "compiler");
   const io = new AbortController();
   const kill = () => {
     if (!(settled || stopped)) {
@@ -1019,7 +1021,14 @@ async function invokeCompiler(opts: {
     clearTimeout(timer);
     opts.signal?.removeEventListener("abort", cancel);
     kill();
-    await Promise.allSettled([outputRead, errorRead, child.exited]);
+    const completion = await Promise.allSettled([
+      outputRead,
+      errorRead,
+      child.exited,
+    ]);
+    observeCpu(
+      completion[2].status === "fulfilled" ? completion[2].value : undefined
+    );
   }
 }
 

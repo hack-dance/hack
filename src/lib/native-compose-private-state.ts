@@ -13,6 +13,7 @@ import {
 } from "node:fs/promises";
 import { join } from "node:path";
 import { isRecord } from "./guards.ts";
+import { beginNativeCpuChild } from "./native-cpu-diagnostics.ts";
 
 const TOKEN = /^[a-f0-9]{32}$/;
 const SHA256 = /^[a-f0-9]{64}$/;
@@ -158,6 +159,7 @@ async function inspection(
     },
   });
   const timer = setTimeout(() => child.kill("SIGKILL"), 3000);
+  const observeCpu = beginNativeCpuChild(child, "other");
   try {
     const chunks: Uint8Array[] = [];
     const reader = child.stdout.getReader();
@@ -189,7 +191,7 @@ async function inspection(
     if (child.exitCode === null) {
       child.kill("SIGKILL");
     }
-    await child.exited;
+    observeCpu(await child.exited);
   }
 }
 async function bootId(): Promise<string> {

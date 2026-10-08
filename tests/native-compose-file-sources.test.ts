@@ -18,6 +18,7 @@ import { YAML } from "bun";
 import { PROJECT_ENV_KEY_FILENAME } from "../src/constants.ts";
 import { isRecord } from "../src/lib/guards.ts";
 import {
+  acquireNativeComposeFileDeliveryInputs,
   acquireNativeComposeFileSources,
   assertNativeComposeFileSources,
   closeNativeComposeFileSources,
@@ -28,6 +29,10 @@ import {
   type NativeComposeGenerationStore,
   openNativeComposeGenerationStore,
 } from "../src/lib/native-compose-generation.ts";
+import {
+  acquireNativeComposeFilePlanningInputs,
+  type NativeComposeExecutionInputs,
+} from "../src/lib/native-compose-inputs.ts";
 import { setProjectEnvValue } from "../src/lib/project-env-config.ts";
 import { restoreEnv } from "./helpers/env.ts";
 
@@ -205,6 +210,48 @@ test("selection options and the profiles array are captured before async authori
       reservation: options.reservation,
     });
   });
+});
+test("symbolic file planning reads no file bytes; actual file and env delivery share the acquired owner and revoke together", async () => {
+  let delivery: NativeComposeExecutionInputs | undefined;
+  await store.withMutation(async (mutation) => {
+    const reservation = mutation.reserveGeneration();
+    const selected = await acquired({
+      authority: mutation.materialAuthority,
+      reservation,
+    });
+    delivery = await acquireNativeComposeFileDeliveryInputs({
+      sources: selected,
+      authority: mutation.materialAuthority,
+      reservation,
+    });
+    expect(Object.keys(delivery)).toEqual(["result"]);
+    expect(JSON.stringify(delivery)).not.toContain(CANARY);
+    expect(JSON.stringify(delivery)).not.toContain(parent);
+    expect((await delivery.resolveManagedValues()).reader?.TOKEN).toBe(CANARY);
+    expect(
+      delivery.result.environment_plan.workloads.reader
+    ).not.toHaveProperty("TOKEN");
+    await expect(
+      acquireNativeComposeFileDeliveryInputs({
+        sources: { ...selected },
+        authority: mutation.materialAuthority,
+        reservation,
+      })
+    ).rejects.toMatchObject({ code: "E_NATIVE_COMPOSE_STATE" });
+  });
+  if (!delivery) {
+    throw new Error("missing private delivery fixture");
+  }
+  await expect(delivery.resolveManagedValues()).rejects.toMatchObject({
+    code: "E_NATIVE_COMPOSE_STATE",
+  });
+  await unlink(join(root, "inputs/settings.bin"));
+  await unlink(join(root, "inputs/secret"));
+  const symbolic = await acquireNativeComposeFilePlanningInputs({
+    projectRoot: root,
+  });
+  expect(symbolic.result.file_plan?.complete).toBe(true);
+  await symbolic.assertFresh();
 });
 test.each([
   "leaf",

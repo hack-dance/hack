@@ -18,6 +18,7 @@ import {
   type NativeComposeFileProjection,
 } from "../src/lib/native-compose-file-owner.ts";
 import {
+  acquireNativeComposeFileDeliveryInputs,
   acquireNativeComposeFileSources,
   assertNativeComposeFileSources,
   closeNativeComposeFileSources,
@@ -29,6 +30,10 @@ import {
   type NativeComposeMutation,
   openNativeComposeGenerationStore,
 } from "../src/lib/native-compose-generation.ts";
+import {
+  assertNativeComposeSupported,
+  renderNativeCompose,
+} from "../src/lib/native-compose-renderer.ts";
 import { restoreEnv } from "./helpers/env.ts";
 
 const KEYS = [
@@ -307,6 +312,247 @@ test("literal dollar roots and targets are encoded once in binds while saved fil
     ).toEqual(BYTES);
     await selected.owner.assertSavedReady(selected.generation);
   });
+});
+test("actual renderer requires the exact live owner projection and preserves literal bind encoding once", async () => {
+  await dollarFixture();
+  await store.withMutation(async (mutation) => {
+    const reservation = mutation.reserveGeneration();
+    const selected = await acquireNativeComposeFileSources({
+      authority: mutation.materialAuthority,
+      reservation,
+    });
+    sources.push(selected);
+    const inputs = await acquireNativeComposeFileDeliveryInputs({
+      sources: selected,
+      authority: mutation.materialAuthority,
+      reservation,
+    });
+    const owner = ownerFor(mutation);
+    const attempt = await owner.prepare({ reservation, sources: selected });
+    const projection = await owner.projection(attempt);
+    const options = {
+      plan: inputs.result.plan,
+      environmentPlan: inputs.result.environment_plan,
+      filePlan: inputs.result.file_plan,
+      declaredWorkloads: inputs.result.declared_workloads,
+      projectRoot: root,
+      runtimeIdentity: store.identity.composeProject,
+      generationIdentity: reservation.generationId,
+      ownerToken: store.identity.ownerToken,
+      managedValues: await inputs.resolveManagedValues(),
+    };
+    assertNativeComposeSupported(options);
+    expect(() => renderNativeCompose(options)).toThrow();
+    expect(() =>
+      renderNativeCompose({ ...options, fileProjection: { ...projection } })
+    ).toThrow();
+    const rendered = renderNativeCompose({
+      ...options,
+      fileProjection: projection,
+    });
+    expect(rendered.document.services.reader?.volumes).toEqual([
+      ...(projection.workloads.reader ?? []),
+    ]);
+    expect(rendered.json).toContain("/etc/$${TARGET}/$$settings");
+    expect(rendered.json).not.toContain("/etc/$$$${TARGET}/$$$$settings");
+    const generation = await mutation.publish({
+      reservation,
+      composeJson: rendered.json,
+      profiles: rendered.profiles,
+      inputRevision: inputs.inputRevision,
+      assertFresh: inputs.assertFresh,
+    });
+    await mutation.runEffect({
+      generation,
+      operation: "up",
+      assertFresh: inputs.assertFresh,
+      assertOwned: async () => {},
+      effect: async () => {
+        await owner.arm({ attempt, generation });
+        await owner.recordChildReaped({
+          attempt,
+          generation,
+          assertReaped: async () => {},
+        });
+        return { outcome: "complete", value: 0 };
+      },
+    });
+    await owner.assertSavedReady(generation);
+    await owner.close();
+    expect(() =>
+      renderNativeCompose({ ...options, fileProjection: projection })
+    ).toThrow();
+  });
+});
+test("only the original live stop attempt may reap; copied and replacement-owner handles refuse", async () => {
+  const selected = await store.withMutation(running);
+  await store.withMutation(async (mutation) => {
+    const owner = ownerFor(mutation);
+    await mutation.runEffect({
+      generation: selected.generation,
+      operation: "down",
+      assertOwned: async () => {},
+      beforeComplete: async () => {
+        await owner.retire({
+          generation: selected.generation,
+          assertAbsent: async () => {},
+        });
+      },
+      effect: async () => {
+        const attempt = await owner.armStop(selected.generation);
+        if (!attempt) {
+          throw new Error("Missing actual stop attempt");
+        }
+        const replacement = ownerFor(mutation);
+        await expect(
+          owner.recordStopReaped({
+            attempt: { ...attempt },
+            assertReaped: async () => {},
+          })
+        ).rejects.toMatchObject({ code: "E_NATIVE_COMPOSE_STATE" });
+        await expect(
+          replacement.recordStopReaped({
+            attempt,
+            assertReaped: async () => {},
+          })
+        ).rejects.toMatchObject({ code: "E_NATIVE_COMPOSE_STATE" });
+        await owner.recordStopReaped({ attempt, assertReaped: async () => {} });
+        await expect(
+          owner.recordStopReaped({ attempt, assertReaped: async () => {} })
+        ).rejects.toMatchObject({ code: "E_NATIVE_COMPOSE_STATE" });
+        return { outcome: "complete", value: 0 };
+      },
+    });
+  });
+  await expectAbsent(memberPaths(selected.projection));
+});
+test("stop authority exists only within the exact live down effect; an unknown stop survives mutation revocation and cannot be handed off", async () => {
+  const selected = await store.withMutation(running);
+  let original: Awaited<
+    ReturnType<ReturnType<typeof createNativeComposeFileOwner>["armStop"]>
+  >;
+  let oldOwner: ReturnType<typeof createNativeComposeFileOwner> | undefined;
+  await store.withMutation(async (mutation) => {
+    const owner = ownerFor(mutation);
+    oldOwner = owner;
+    await expect(owner.armStop(selected.generation)).rejects.toMatchObject({
+      code: "E_NATIVE_COMPOSE_STATE",
+    });
+    await mutation.runEffect({
+      generation: selected.generation,
+      operation: "down",
+      assertOwned: async () => {},
+      effect: async () => {
+        original = await owner.armStop(selected.generation);
+        return { outcome: "uncertain", value: 1 };
+      },
+    });
+  });
+  await store.withMutation(async (mutation) => {
+    const owner = ownerFor(mutation);
+    await expect(
+      mutation.runEffect({
+        generation: selected.generation,
+        operation: "down",
+        recoverPending: true,
+        assertOwned: async () => {},
+        beforeComplete: async () => {
+          await owner.retire({
+            generation: selected.generation,
+            assertAbsent: async () => {
+              throw new Error("Unknown stop must veto before absence callback");
+            },
+          });
+        },
+        effect: async () => {
+          expect(await owner.armStop(selected.generation)).toBeNull();
+          if (!(original && oldOwner)) {
+            throw new Error("Missing actual abandoned attempt");
+          }
+          await expect(
+            oldOwner.recordStopReaped({
+              attempt: original,
+              assertReaped: async () => {},
+            })
+          ).rejects.toMatchObject({ code: "E_NATIVE_COMPOSE_STATE" });
+          await expect(
+            owner.recordStopReaped({
+              attempt: original,
+              assertReaped: async () => {},
+            })
+          ).rejects.toMatchObject({ code: "E_NATIVE_COMPOSE_STATE" });
+          return { outcome: "complete", value: 0 };
+        },
+      })
+    ).rejects.toMatchObject({ code: "E_NATIVE_COMPOSE_UNCERTAIN" });
+  });
+  expect((await store.loadPending())?.generationId).toBe(
+    selected.generation.generationId
+  );
+  await expectPresent(memberPaths(selected.projection));
+});
+test("a known stop can re-arm after partial retirement intent and finish exact saved retry without recreating missing members", async () => {
+  const selected = await store.withMutation(running);
+  let unlinked = 0;
+  await store.withMutation(async (mutation) => {
+    const owner = ownerFor(mutation, {
+      afterMemberUnlink: async () => {
+        unlinked++;
+        throw new Error("synthetic interruption before member directory sync");
+      },
+    });
+    await expect(
+      mutation.runEffect({
+        generation: selected.generation,
+        operation: "down",
+        assertOwned: async () => {},
+        beforeComplete: () =>
+          owner.retire({
+            generation: selected.generation,
+            assertAbsent: async () => {},
+          }),
+        effect: async () => {
+          const attempt = await owner.armStop(selected.generation);
+          if (!attempt) {
+            throw new Error("Missing stop attempt");
+          }
+          await owner.recordStopReaped({
+            attempt,
+            assertReaped: async () => {},
+          });
+          return { outcome: "complete", value: 0 };
+        },
+      })
+    ).rejects.toMatchObject({ code: "E_NATIVE_COMPOSE_UNCERTAIN" });
+  });
+  expect(unlinked).toBe(1);
+  expect((await store.loadPending())?.generationId).toBe(
+    selected.generation.generationId
+  );
+  await store.withMutation(async (mutation) => {
+    const owner = ownerFor(mutation);
+    await mutation.runEffect({
+      generation: selected.generation,
+      operation: "down",
+      recoverPending: true,
+      assertOwned: async () => {},
+      beforeComplete: () =>
+        owner.retire({
+          generation: selected.generation,
+          assertAbsent: async () => {},
+        }),
+      effect: async () => {
+        const attempt = await owner.armStop(selected.generation);
+        if (!attempt) {
+          throw new Error("Missing replacement live stop attempt");
+        }
+        await owner.recordStopReaped({ attempt, assertReaped: async () => {} });
+        return { outcome: "complete", value: 0 };
+      },
+    });
+  });
+  await expectAbsent(memberPaths(selected.projection));
+  expect(await store.loadPending()).toBeNull();
 });
 test.each([
   "extra-private-bind",

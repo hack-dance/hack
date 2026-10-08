@@ -1,19 +1,22 @@
 import { createHash } from "node:crypto";
 import { join } from "node:path";
 import type { FileBinding } from "../../packages/config-compiler/generated/native-config.ts";
-import { isRecord } from "./guards.ts";
 import {
   type HeldNativeComposeFile,
   holdNativeComposeFile,
   NATIVE_COMPOSE_FILE_BYTES_LIMIT,
   refuseNativeComposeFile,
 } from "./native-compose-file-bytes.ts";
+import { assertNativeComposeFileSubset } from "./native-compose-file-subset.ts";
 import {
   assertNativeComposeMaterialAuthority,
   type NativeComposeMaterialAuthority,
   type NativeComposeReservation,
 } from "./native-compose-generation.ts";
-import { nativeComposeSourceRevision } from "./native-compose-inputs.ts";
+import {
+  type NativeComposeExecutionInputs,
+  nativeComposeSourceRevision,
+} from "./native-compose-inputs.ts";
 import {
   type HeldDirectory,
   holdDirectory,
@@ -24,7 +27,6 @@ import {
   NativeConfigCompilerError,
   type NativeConfigPlanResult,
 } from "./native-config-compiler.ts";
-import { authoredFilePlanningRequired } from "./native-file-plan-protocol.ts";
 import {
   type NativeProjectSelection,
   planPreparedNativeProject,
@@ -33,6 +35,7 @@ import {
 import {
   acquireProjectEnvForNativeExecution,
   type NativeProjectEnvSelectionOptions,
+  selectProjectEnvValuesForNativeExecutionTarget,
 } from "./project-env-config.ts";
 
 type Planned = Extract<NativeConfigPlanResult, { readonly ok: true }>;
@@ -48,6 +51,7 @@ type SourceState = {
   readonly reservation: NativeComposeReservation;
   readonly members: readonly NativeComposeAcquiredFile[];
   readonly revision: string;
+  readonly inputs: NativeComposeExecutionInputs;
   readonly assertFresh: () => Promise<void>;
   readonly close: () => Promise<void>;
 };
@@ -58,57 +62,6 @@ function freeze(value: unknown): void {
       freeze(child);
     }
     Object.freeze(value);
-  }
-}
-function unsupported(): never {
-  throw new NativeConfigCompilerError(
-    "E_NATIVE_PROJECT_UNSUPPORTED",
-    "Native file delivery requires read-only mode 0444, no UID/GID override and no builds. Values omitted."
-  );
-}
-function assertWorkloadSubset(workload: unknown): void {
-  if (!isRecord(workload)) {
-    refuseNativeComposeFile();
-  }
-  if (Object.hasOwn(workload, "build")) {
-    unsupported();
-  }
-  if (!Array.isArray(workload.mounts)) {
-    return;
-  }
-  for (const mount of workload.mounts) {
-    if (
-      !(
-        isRecord(mount) &&
-        (Object.hasOwn(mount, "config") || Object.hasOwn(mount, "secret"))
-      )
-    ) {
-      continue;
-    }
-    if (
-      mount.access !== "read-only" ||
-      (mount.mode !== undefined && mount.mode !== "0444") ||
-      Object.hasOwn(mount, "uid") ||
-      Object.hasOwn(mount, "gid")
-    ) {
-      unsupported();
-    }
-  }
-}
-/** All authored workloads, including inactive builds and grants, precede private input acquisition. */
-function assertSubset(input: Uint8Array): void {
-  const raw: unknown = JSON.parse(
-    new TextDecoder("utf-8", { fatal: true }).decode(input)
-  );
-  if (!(isRecord(raw) && authoredFilePlanningRequired(input))) {
-    refuseNativeComposeFile();
-  }
-  for (const namespace of [raw.services, raw.jobs]) {
-    if (isRecord(namespace)) {
-      for (const workload of Object.values(namespace)) {
-        assertWorkloadSubset(workload);
-      }
-    }
   }
 }
 const RELATIVE_FORBIDDEN = /[\\\0:]/;
@@ -302,7 +255,7 @@ export async function acquireNativeComposeFileSources(opts: {
     ) {
       return refuseNativeComposeFile();
     }
-    assertSubset(prepared.input);
+    assertNativeComposeFileSubset(prepared.input);
     await checkAuthority();
     const checkout = await holdDirectory(prepared.projectRoot, false);
     directories.push(checkout);
@@ -373,11 +326,57 @@ export async function acquireNativeComposeFileSources(opts: {
       digest.update(member.bytes);
     }
     ticket = Object.freeze({ result: planned });
+    const resolvedValues = async () => {
+      await assertFresh();
+      const resolved = values ?? (await env.resolveValues({ signal }));
+      await assertFresh();
+      return resolved;
+    };
+    const resolveManagedValues = async () => {
+      const resolved = await resolvedValues();
+      return Object.fromEntries(
+        Object.keys(planned.environment_plan.workloads).map((name) => {
+          const selected = resolved.workloadEnv[name];
+          if (selected === undefined) {
+            return refuseNativeComposeFile();
+          }
+          return [name, selected];
+        })
+      );
+    };
+    const resolveHostValues = async (name: string) => {
+      const reports = planned.environment_plan.host;
+      if (!(reports && Object.hasOwn(reports, name))) {
+        return refuseNativeComposeFile();
+      }
+      const report = reports[name];
+      if (!report) {
+        return refuseNativeComposeFile();
+      }
+      return selectProjectEnvValuesForNativeExecutionTarget({
+        resolved: await resolvedValues(),
+        target: "host",
+        workloadName:
+          report.env_target.kind === "workload" ? report.env_target.name : null,
+      });
+    };
+    const inputs = Object.freeze(
+      Object.defineProperties(
+        { result: planned } as NativeComposeExecutionInputs,
+        {
+          inputRevision: { value: revision },
+          assertFresh: { value: assertFresh },
+          resolveManagedValues: { value: resolveManagedValues },
+          resolveHostValues: { value: resolveHostValues },
+        }
+      )
+    );
     acquisitions.set(ticket, {
       authority,
       reservation,
       members,
       revision: digest.digest("hex"),
+      inputs,
       assertFresh,
       close,
     });
@@ -416,6 +415,16 @@ export async function assertNativeComposeFileSources(opts: {
   const state = stateFor(opts);
   await state.assertFresh();
   return state.revision;
+}
+/** Private ordinary env/hook delivery shares the actual acquired managed baseline owner. */
+export async function acquireNativeComposeFileDeliveryInputs(opts: {
+  readonly sources: NativeComposeFileSources;
+  readonly authority: NativeComposeMaterialAuthority;
+  readonly reservation: NativeComposeReservation;
+}): Promise<NativeComposeExecutionInputs> {
+  const state = stateFor(opts);
+  await state.assertFresh();
+  return state.inputs;
 }
 /** Private byte handoff to the material owner; copied buffers are wiped after the owned callback. */
 export async function withNativeComposeFileBytes<T>(opts: {

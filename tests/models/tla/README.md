@@ -19,18 +19,22 @@ No credentials or running VM are needed.
 ## Native file-material retirement
 
 `native-file-material/Material.tla` checks the private file retirement protocol.
-The filesystem owner and bounded acquisition are implemented as unwired helpers;
-command delivery and engine qualification remain disabled. The model
+The filesystem owner and bounded acquisition are wired into the experimental
+ordinary Compose command path. Source CLI controls use the real compiler, file,
+generation and process owners with strict read-only Docker stand-ins; actual
+compiled engine delivery remains a separate qualification. The model
 starts after one uncertain startup has durably published its generation/reference
 and two immutable material members. Generation completion, retirement intent,
 each member unlink and the final retired marker are separate steps. One crash can
 occur between any two effect or commit steps. Hook uncertainty, child uncertainty
 and source availability give eight initial states. The positive configuration
-explores **3,926 distinct states** (13,416 generated, maximum depth 18).
+explores **8,388 distinct states** (27,724 generated, maximum depth 21), including
+durable stop arming, original-attempt reaping and unknown stop retention after a
+crash. A subsequent stop never changes that unknown child into a reaped child.
 
-Eight guard-removal controls distinguish the protocol obligations: retain the
+Nine guard-removal controls distinguish the protocol obligations: retain the
 pending generation until all material retires; require owned-container absence,
-known hooks and known children before deletion; refuse substituted saved anchors;
+known hooks and known startup/stop children before deletion; refuse substituted saved anchors;
 recheck ownership and pending intent after the finalizer; and refuse missing live
 material without a previously recorded retirement intent. Two further controls
 deliberately violate reachability predicates at safe completion: one after a crash
@@ -41,11 +45,12 @@ TLC exit 12, its named invariant and complete witness in the same state.
 
 | Model action | Implementation boundary |
 | --- | --- |
-| `Recover` / `StopContainers` | The generation mutation owner retains the exact saved pending/current generation and stops owned resources. Saved stop does not acquire authored files or decrypt values. |
+| `Recover` / `StopContainers` | The generation mutation owner retains the exact saved pending/current generation and stops owned resources. `retireNativeComposeSavedFiles` rereads the immutable private document; saved stop does not acquire authored files or decrypt values. |
+| `ArmStop` / `ReapStop` | `prepareNativeComposeSavedFileStop` appends/syncs `stop-armed` on every exact retained reference before Compose. The original live opaque stop attempt alone may record `stop-reaped`; actual child natural exit and owned-group absence are separate from resource absence. An older unknown stop returns no new completion capability and continues to veto retirement. |
 | `BeginRetirement` | `native-compose-file-owner.ts` validates all immutable members before appending and syncing a retirement intent to its fixed-inode private journal. Missing material before intent refuses. |
 | `DeleteMember` / `MarkRetired` | `retireMembers` checks the live generation authority, root/manifest/journal anchors, callback-provided owned-container absence and exact member identities. Every unlink has a separate directory sync; the final retired record is synced separately. |
 | `ResumeRetired` | Saved recovery selects the exact private generated extension and validates its immutable root, snapshot, manifest and journal inode. Existing retirement intent permits missing original members; replacements refuse. No orphan discovery or material recreation occurs. |
-| `CommitStop` | `native-compose-generation.ts` already provides `beforeComplete` followed by fresh generation, ownership and pending checks. The filesystem tests invoke retirement through this boundary. The command callback remains unwired. |
+| `CommitStop` | `native-compose-generation.ts` provides `beforeComplete` followed by fresh generation, ownership and pending checks. The command callback retires old file snapshots before completion and rechecks the saved engine during final ownership checks. The source CLI drift control changes the engine only after the retired marker and verifies retained pending/retry. |
 | `DriftAnchor` / `DriftOwner` / `DriftPending` | Independent substitution during an await must cause refusal, including after retirement and before the generation receipt commits. |
 
 The model summarizes exact root, receipt, lease, token and device/inode identities
@@ -55,12 +60,17 @@ whole-owner container absence as one boolean. It does not model acquisition,
 source descriptors, fsync durability, byte bounds, binary/empty material, encryption,
 actual inode reuse, mode/UID/GID, Docker mount projection, arbitrary simultaneous
 external container creation, replacement of a live generation, repeated crashes,
-or uncertain-child containment. No fairness or eventual cleanup is asserted.
+or uncertain-child containment. Stop-child proof callback internals and real process
+identity checks remain outside this finite model. No fairness or eventual cleanup is asserted.
 `tests/native-compose-material-authority.test.ts` covers copied identity, lock/receipt
 substitution, lease revocation and awaited escaped work.
 `tests/native-compose-file-sources.test.ts` exercises actual compiler planning,
 binary/empty acquisition, the existing managed encryption owner, tombstones,
 overlay scope, linked worktrees and source drift.
+`tests/native-compose-file-command.test.ts` uses the real source CLI and strict
+Docker stand-ins to cover exact bytes/modes, missing managed key, before-hook file
+creation, source-free stop, replacement, unknown startup/stop children, hook crash
+and post-retirement engine drift. These controls do not qualify actual Docker binds.
 `tests/native-compose-file-owner.test.ts` covers exact bind projection, missing or
 replaced members, partial unlink interruption, source-free retry, replacement
 handoff, uncertain hooks, unknown startup children and post-finalizer ownership

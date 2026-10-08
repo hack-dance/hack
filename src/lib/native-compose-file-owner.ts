@@ -22,6 +22,7 @@ import {
   type NativeComposeFileManifest,
   type NativeComposeFileMember,
   type NativeComposeFileReference,
+  nativeComposeFileChildrenKnown,
   parseNativeComposeFileJournal,
   parseNativeComposeFileManifest,
   parseNativeComposeFileReference,
@@ -51,6 +52,7 @@ import {
 } from "./native-compose-private-state.ts";
 
 export type NativeComposeFileAttempt = Readonly<Record<never, never>>;
+export type NativeComposeFileStopAttempt = Readonly<Record<never, never>>;
 /** Private generated-document binds. Dollar signs are already encoded once for Compose. */
 export type NativeComposeFileProjection = {
   readonly reference: NativeComposeFileReference;
@@ -67,6 +69,37 @@ export type NativeComposeFileProjection = {
     >
   >;
 };
+const projections = new WeakMap<
+  NativeComposeFileProjection,
+  {
+    readonly reservation: NativeComposeReservation;
+    readonly sources: NativeComposeFileSources;
+    readonly active: () => boolean;
+  }
+>();
+/** A caller-supplied path map cannot qualify private file delivery. This is not effect authority. */
+export function nativeComposeFileProjectionMatches(opts: {
+  readonly projection: NativeComposeFileProjection;
+  readonly plan: unknown;
+  readonly environmentPlan: unknown;
+  readonly filePlan: unknown;
+  readonly projectRoot: string;
+  readonly runtimeIdentity: string;
+  readonly ownerToken: string;
+  readonly generationIdentity: string;
+}): boolean {
+  const selected = projections.get(opts.projection);
+  return Boolean(
+    selected?.active() &&
+      selected.sources.result.plan === opts.plan &&
+      selected.sources.result.environment_plan === opts.environmentPlan &&
+      selected.sources.result.file_plan === opts.filePlan &&
+      selected.reservation.identity.checkoutRoot === opts.projectRoot &&
+      selected.reservation.identity.composeProject === opts.runtimeIdentity &&
+      selected.reservation.identity.ownerToken === opts.ownerToken &&
+      selected.reservation.generationId === opts.generationIdentity
+  );
+}
 type Attempt = {
   readonly reservation: NativeComposeReservation;
   readonly sources: NativeComposeFileSources;
@@ -477,7 +510,7 @@ async function retireMembers(opts: {
   }
 }
 /**
- * Filesystem material owner, deliberately unwired from commands. The generation
+ * Filesystem material owner. The generation
  * mutation is its only authority; saved documents supply exact immutable references.
  * No acquisition/recovery scans or reconstructs orphan snapshots. Close retains data.
  */
@@ -655,7 +688,7 @@ export function createNativeComposeFileOwner(opts: {
   };
   const savedSnapshot = async (
     generation: NativeComposeGeneration,
-    phase: "inspect" | "effect" | "retire"
+    phase: "inspect" | "effect" | "stop" | "retire"
   ) => {
     const selection = { authority, generation, phase };
     const binding = await checkAuthority(selection);
@@ -673,7 +706,79 @@ export function createNativeComposeFileOwner(opts: {
       throw error;
     }
   };
+  const stops = new WeakMap<
+    NativeComposeFileStopAttempt,
+    {
+      readonly generation: NativeComposeGeneration;
+      readonly binding: NativeComposeMaterialBinding;
+      readonly reference: NativeComposeFileReference;
+    }
+  >();
   return Object.freeze({
+    /** A prior unknown stop child is never adopted by a later stop. Returning null
+     * still permits owned engine stop, but cannot authorize material retirement. */
+    async armStop(
+      generation: NativeComposeGeneration
+    ): Promise<NativeComposeFileStopAttempt | null> {
+      return await run(async () => {
+        const snapshot = await savedSnapshot(generation, "stop");
+        try {
+          const state = journalState(snapshot);
+          if (state.stopBinding !== null && !state.stopReaped) {
+            return null;
+          }
+          await appendJournal(snapshot, {
+            phase: "stop-armed",
+            binding: snapshot.binding,
+            members: snapshot.manifest.members.map((member) => member.id),
+          });
+          const attempt = Object.freeze({});
+          stops.set(attempt, {
+            generation,
+            binding: snapshot.binding,
+            reference: snapshot.reference,
+          });
+          return attempt;
+        } finally {
+          await snapshot.close();
+        }
+      });
+    },
+    async recordStopReaped(input: {
+      readonly attempt: NativeComposeFileStopAttempt;
+      readonly assertReaped: () => Promise<void>;
+    }): Promise<void> {
+      const { attempt, assertReaped } = input;
+      await run(async () => {
+        const selected = stops.get(attempt);
+        if (!selected) {
+          refuseNativeComposeFile();
+        }
+        const snapshot = await savedSnapshot(selected.generation, "stop");
+        try {
+          const state = journalState(snapshot);
+          if (
+            state.stopReaped ||
+            !sameNativeComposeFileState(state.stopBinding, selected.binding) ||
+            !sameNativeComposeFileState(snapshot.binding, selected.binding) ||
+            !sameNativeComposeFileState(snapshot.reference, selected.reference)
+          ) {
+            refuseNativeComposeFile();
+          }
+          await snapshot.check();
+          await assertReaped();
+          await snapshot.check();
+          await appendJournal(snapshot, {
+            phase: "stop-reaped",
+            binding: snapshot.binding,
+            members: snapshot.manifest.members.map((member) => member.id),
+          });
+          stops.delete(attempt);
+        } finally {
+          await snapshot.close();
+        }
+      });
+    },
     async prepare(input: {
       readonly reservation: NativeComposeReservation;
       readonly sources: NativeComposeFileSources;
@@ -811,7 +916,16 @@ export function createNativeComposeFileOwner(opts: {
             reservation: selected.reservation,
             sources: selected.sources,
           });
-          return projection(selected.reference, snapshot.manifest.members);
+          const result = projection(
+            selected.reference,
+            snapshot.manifest.members
+          );
+          projections.set(result, {
+            reservation: selected.reservation,
+            sources: selected.sources,
+            active: () => active,
+          });
+          return result;
         } finally {
           await snapshot.close();
         }
@@ -909,6 +1023,7 @@ export function createNativeComposeFileOwner(opts: {
             !(
               state.armed &&
               state.reaped &&
+              (state.stopBinding === null || state.stopReaped) &&
               state.intent === null &&
               !state.retired
             )
@@ -987,7 +1102,7 @@ export function createNativeComposeFileOwner(opts: {
         };
         try {
           let state = journalState(snapshot);
-          if (state.armed && !state.reaped) {
+          if (!nativeComposeFileChildrenKnown(state)) {
             refuseNativeComposeFile();
           }
           await proveAbsent();

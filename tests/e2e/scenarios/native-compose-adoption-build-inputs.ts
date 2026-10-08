@@ -11,6 +11,7 @@ export type RetainedBuildFixtureMode = "root-specific" | "hack-default";
 export const RETAINED_BUILD_BASE_TAG = "postgres:17.6-alpine";
 export const RETAINED_BUILD_IMAGE_OWNER = "hack.e2e.retained-build.owner";
 export const RETAINED_BUILD_IMAGE_FORMAT = `{"id":{{json .Id}},"created":{{json .Created}},"owner":{{json (index .Config.Labels "${RETAINED_BUILD_IMAGE_OWNER}")}},"stage":{{json (index .Config.Labels "hack.e2e.retained-build.stage")}},"tags":{{json .RepoTags}},"digests":{{json .RepoDigests}}}`;
+export const RETAINED_BUILD_OBJECT_FORMAT = `{"id":{{json .Id}},"parent":{{json .Parent}},"created":{{json .Created}},"size":{{json .Size}},"owner":{{json (index .Config.Labels "${RETAINED_BUILD_IMAGE_OWNER}")}},"stage":{{json (index .Config.Labels "hack.e2e.retained-build.stage")}},"tags":{{json .RepoTags}},"digests":{{json .RepoDigests}},"labelNames":[{{$first := true}}{{range $name,$value := .Config.Labels}}{{if not $first}},{{end}}{{$first = false}}{{json $name}}{{end}}]}`;
 const ID = /^[a-f0-9]{64}$/;
 const IMAGE = /^sha256:[a-f0-9]{64}$/;
 const BIRTH = /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?(?:Z|[+-]\d\d:\d\d)$/;
@@ -192,7 +193,20 @@ export type RetainedFixtureImage = {
   readonly reference: string;
   readonly tag: string;
   readonly owner: string;
+  readonly digests: readonly string[] | null;
 };
+function selectedDigests(
+  value: unknown,
+  reference: string,
+  id: string
+): value is readonly string[] | null {
+  return (
+    value === null ||
+    (Array.isArray(value) &&
+      (value.length === 0 ||
+        (value.length === 1 && value[0] === `${reference}@${id}`)))
+  );
+}
 /** Capture no old/foreign image removal authority, even when its tag happens to match. */
 export function retainedBuildFixtureImage(opts: {
   readonly value: unknown;
@@ -220,8 +234,7 @@ export function retainedBuildFixtureImage(opts: {
       value.tags.length === 1 &&
       (value.tags[0] === reference ||
         value.tags[0] === `${reference}:latest`) &&
-      (value.digests === null ||
-        (Array.isArray(value.digests) && value.digests.length === 0))
+      selectedDigests(value.digests, reference, value.id)
     )
   ) {
     refuse();
@@ -232,6 +245,7 @@ export function retainedBuildFixtureImage(opts: {
     reference,
     tag: value.tags[0],
     owner,
+    digests: value.digests === null ? null : Object.freeze([...value.digests]),
   });
 }
 export function assertRetainedFixtureImageUnchanged(opts: {
@@ -241,6 +255,154 @@ export function assertRetainedFixtureImageUnchanged(opts: {
   if (JSON.stringify(opts.current) !== JSON.stringify(opts.captured)) {
     refuse();
   }
+}
+
+export type RetainedFixtureBuildObject = {
+  readonly id: string;
+  readonly parent: string;
+  readonly created: string;
+  readonly size: number;
+  readonly owner: string;
+  readonly stage: "retained";
+  readonly tags: readonly string[] | null;
+  readonly digests: readonly string[] | null;
+  readonly labelNames: readonly string[];
+};
+
+/** Only exact fixture-labelled objects, never arbitrary dangling images or cache entries. */
+export function retainedBuildFixtureObject(opts: {
+  readonly value: unknown;
+  readonly selected: RetainedFixtureImage;
+  readonly originalImageIds: readonly string[];
+}): RetainedFixtureBuildObject {
+  const { value, selected, originalImageIds } = opts;
+  if (
+    !(
+      isRecord(value) &&
+      Object.keys(value).sort().join() ===
+        "created,digests,id,labelNames,owner,parent,size,stage,tags" &&
+      typeof value.id === "string" &&
+      IMAGE.test(value.id) &&
+      !originalImageIds.includes(value.id) &&
+      originalImageIds.every((id) => IMAGE.test(id)) &&
+      typeof value.parent === "string" &&
+      (value.parent === "" || IMAGE.test(value.parent)) &&
+      typeof value.created === "string" &&
+      BIRTH.test(value.created) &&
+      Number.isFinite(Date.parse(value.created)) &&
+      typeof value.size === "number" &&
+      Number.isSafeInteger(value.size) &&
+      value.size >= 0 &&
+      value.owner === selected.owner &&
+      value.stage === "retained" &&
+      Array.isArray(value.labelNames) &&
+      value.labelNames.every((name) => typeof name === "string") &&
+      new Set(value.labelNames).size === value.labelNames.length &&
+      value.labelNames.includes(RETAINED_BUILD_IMAGE_OWNER) &&
+      value.labelNames.includes("hack.e2e.retained-build.stage") &&
+      value.labelNames.every((name) =>
+        [
+          RETAINED_BUILD_IMAGE_OWNER,
+          "hack.e2e.retained-build.stage",
+          "com.docker.compose.image.builder",
+        ].includes(name)
+      )
+    )
+  ) {
+    refuse();
+  }
+  if (value.id === selected.id) {
+    const current = retainedBuildFixtureImage({
+      value: {
+        id: value.id,
+        created: value.created,
+        owner: value.owner,
+        stage: value.stage,
+        tags: value.tags,
+        digests: value.digests,
+      },
+      reference: selected.reference,
+      owner: selected.owner,
+      originalImageIds,
+    });
+    assertRetainedFixtureImageUnchanged({ current, captured: selected });
+  } else if (
+    !(
+      (value.tags === null ||
+        (Array.isArray(value.tags) && value.tags.length === 0)) &&
+      (value.digests === null ||
+        (Array.isArray(value.digests) && value.digests.length === 0))
+    )
+  ) {
+    refuse();
+  }
+  if (
+    !(value.tags === null || Array.isArray(value.tags)) ||
+    !(value.digests === null || Array.isArray(value.digests))
+  ) {
+    refuse();
+  }
+  return Object.freeze({
+    id: value.id,
+    parent: value.parent,
+    created: value.created,
+    size: value.size,
+    owner: selected.owner,
+    stage: "retained",
+    tags: value.tags === null ? null : Object.freeze([...value.tags]),
+    digests: value.digests === null ? null : Object.freeze([...value.digests]),
+    labelNames: Object.freeze([...value.labelNames].sort()),
+  });
+}
+
+/**
+ * Capture a closed child-to-parent image graph from one explicit bootstrap build.
+ * A builder with no exposed Parent may qualify one final object. Exposed parents
+ * must form the exact owned chain to the captured base; unrelated new IDs refuse.
+ * This proves only disposal authority for these objects, never general cache ownership.
+ */
+export function retainedBuildFixtureObjectGraph(opts: {
+  readonly values: readonly unknown[];
+  readonly selected: RetainedFixtureImage;
+  readonly originalImageIds: readonly string[];
+  readonly baseImage: string;
+}): readonly RetainedFixtureBuildObject[] {
+  if (
+    opts.values.length < 1 ||
+    opts.values.length > 16 ||
+    !IMAGE.test(opts.baseImage) ||
+    !opts.originalImageIds.includes(opts.baseImage)
+  ) {
+    refuse();
+  }
+  const nodes = new Map<string, RetainedFixtureBuildObject>();
+  for (const value of opts.values) {
+    const node = retainedBuildFixtureObject({ ...opts, value });
+    if (nodes.has(node.id)) {
+      refuse();
+    }
+    nodes.set(node.id, node);
+  }
+  const result: RetainedFixtureBuildObject[] = [];
+  let id = opts.selected.id;
+  while (id !== opts.baseImage) {
+    const node = nodes.get(id);
+    if (!node || result.some((row) => row.id === id)) {
+      refuse();
+    }
+    result.push(node);
+    if (node.parent === "") {
+      if (result.length !== 1 || nodes.size !== 1) {
+        refuse();
+      }
+      break;
+    }
+    id = node.parent;
+  }
+  if (result.length !== nodes.size) {
+    refuse();
+  }
+  return Object.freeze(result);
 }
 
 type BuildReadScope = {

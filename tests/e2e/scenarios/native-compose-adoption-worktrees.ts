@@ -33,10 +33,14 @@ import {
   RETAINED_BUILD_COPY_ORACLE,
   RETAINED_BUILD_IMAGE_FORMAT,
   RETAINED_BUILD_IMAGE_OWNER,
+  RETAINED_BUILD_OBJECT_FORMAT,
   type RetainedBuildFixtureMode,
   type RetainedFixtureImage,
+  type RetainedFixtureBuildObject,
   retainedBuildFixtureDefinition,
   retainedBuildFixtureImage,
+  retainedBuildFixtureObject,
+  retainedBuildFixtureObjectGraph,
   retainedBuildFixtureMarker,
   retainedBuildFixtureSourceSnapshot,
 } from "./native-compose-adoption-build-inputs.ts";
@@ -820,6 +824,10 @@ function createFixtureRuntime(
   const localAnchors = new Map<Instance, string>();
   const buildSourceAnchors = new Map<Instance, string>();
   const builtImages = new Map<Instance, RetainedFixtureImage>();
+  const builtImageObjects = new Map<
+    Instance,
+    readonly RetainedFixtureBuildObject[]
+  >();
   const buildImageAnchors = new Map<Instance, string>();
   const effect = async (args: readonly string[]) => {
     await requirePreparedEngine({ engineId, probe });
@@ -976,6 +984,7 @@ function createFixtureRuntime(
     await assertFixtureBuildImages({
       probe,
       builtImages,
+      builtImageObjects,
       originalImageIds,
       instance,
     });
@@ -1101,7 +1110,12 @@ function createFixtureRuntime(
       }
     }
     if (instance.basicBuild) {
-      await assertFixtureBuildImages({ ...opts, builtImages, instance });
+      await assertFixtureBuildImages({
+        ...opts,
+        builtImages,
+        builtImageObjects,
+        instance,
+      });
       if (
         (await fixtureRuntimeImages({
           ...opts,
@@ -1134,6 +1148,7 @@ function createFixtureRuntime(
     buildSourceAnchors,
     buildImageAnchors,
     builtImages,
+    builtImageObjects,
     baseImage,
     originalImageIds,
     effect,
@@ -1161,7 +1176,16 @@ async function fixtureImageInventory(
 ) {
   const ids = [
     ...new Set(
-      (await probe(["image", "ls", "--no-trunc", "--format", "{{.ID}}"]))
+      (
+        await probe([
+          "image",
+          "ls",
+          "--all",
+          "--no-trunc",
+          "--format",
+          "{{.ID}}",
+        ])
+      )
         .split(/\s+/)
         .filter(Boolean)
     ),
@@ -1192,13 +1216,17 @@ function fixtureComposePrefix(
 type BuildImageContext = {
   readonly probe: ReturnType<typeof createAdoptionFixtureProbe>;
   readonly builtImages: ReadonlyMap<Instance, RetainedFixtureImage>;
+  readonly builtImageObjects: ReadonlyMap<
+    Instance,
+    readonly RetainedFixtureBuildObject[]
+  >;
   readonly originalImageIds: readonly string[];
   readonly baseImage: string;
 };
 async function assertFixtureBuildImages(
   opts: Pick<
     BuildImageContext,
-    "probe" | "builtImages" | "originalImageIds"
+    "probe" | "builtImages" | "builtImageObjects" | "originalImageIds"
   > & { readonly instance: Instance }
 ) {
   const captured = opts.builtImages.get(opts.instance);
@@ -1223,6 +1251,28 @@ async function assertFixtureBuildImages(
         originalImageIds: opts.originalImageIds,
       }),
     });
+  }
+  const objects = opts.builtImageObjects.get(opts.instance);
+  if (!objects || objects.length < 1) {
+    refused();
+  }
+  for (const expected of objects) {
+    const current = retainedBuildFixtureObject({
+      value: object(
+        await opts.probe([
+          "image",
+          "inspect",
+          "--format",
+          RETAINED_BUILD_OBJECT_FORMAT,
+          expected.id,
+        ])
+      ),
+      selected: captured,
+      originalImageIds: opts.originalImageIds,
+    });
+    if (JSON.stringify(current) !== JSON.stringify(expected)) {
+      refused();
+    }
   }
 }
 async function fixtureRuntimeImages(
@@ -1299,6 +1349,12 @@ async function saveFixtureBuildRecovery(h: FixtureRuntime, pending?: unknown) {
         root: instance.root,
         image,
       })),
+      objects: [...h.builtImageObjects.entries()].map(
+        ([instance, objects]) => ({
+          project: instance.name,
+          objects,
+        })
+      ),
       ...(pending !== undefined ? { pending } : {}),
     })
   );
@@ -1312,6 +1368,18 @@ async function bootstrapFixtureBuildImage(
     refused();
   }
   await requirePreparedEngine(h);
+  const previousIds = [
+    ...h.originalImageIds,
+    ...[...h.builtImageObjects.values()].flatMap((rows) =>
+      rows.map((row) => row.id)
+    ),
+  ].sort();
+  if (
+    JSON.stringify(await fixtureImageInventory(h.probe)) !==
+    JSON.stringify(previousIds)
+  ) {
+    refused();
+  }
   if (
     (
       await h.probe([
@@ -1342,6 +1410,7 @@ async function bootstrapFixtureBuildImage(
       await h.probe([
         "image",
         "ls",
+        "--all",
         "--no-trunc",
         "--filter",
         `reference=${reference}`,
@@ -1353,6 +1422,7 @@ async function bootstrapFixtureBuildImage(
       await h.probe([
         "image",
         "ls",
+        "--all",
         "--no-trunc",
         "--filter",
         `label=${RETAINED_BUILD_IMAGE_OWNER}=${instance.name}`,
@@ -1395,7 +1465,42 @@ async function bootstrapFixtureBuildImage(
     owner: instance.name,
     originalImageIds: h.originalImageIds,
   });
+  const observedIds = await fixtureImageInventory(h.probe);
+  if (!previousIds.every((id) => observedIds.includes(id))) {
+    refused();
+  }
+  const newIds = observedIds.filter((id) => !previousIds.includes(id));
+  if (newIds.length < 1 || newIds.length > 16) {
+    refused();
+  }
+  const values: unknown[] = [];
+  for (const id of newIds) {
+    values.push(
+      object(
+        await h.probe([
+          "image",
+          "inspect",
+          "--format",
+          RETAINED_BUILD_OBJECT_FORMAT,
+          id,
+        ])
+      )
+    );
+    await saveFixtureBuildRecovery(h, {
+      project: instance.name,
+      reference,
+      stage: "objects-observed",
+      observations: values,
+    });
+  }
+  const objects = retainedBuildFixtureObjectGraph({
+    values,
+    selected: image,
+    originalImageIds: h.originalImageIds,
+    baseImage: h.baseImage,
+  });
   h.builtImages.set(instance, image);
+  h.builtImageObjects.set(instance, objects);
   await saveFixtureBuildRecovery(h);
   successful(built);
   await assertFixtureBuildImages({ ...h, instance });
@@ -2615,60 +2720,132 @@ async function rollbackRetainedBuildFixture(
   await h.waitReady(instance);
   await h.check(instance);
 }
-async function cleanupRetainedBuildFixtureImages(h: FixtureRuntime) {
-  const pending = new Set([...h.builtImages.values()].map((row) => row.id));
-  for (const [instance, image] of h.builtImages) {
-    await requirePreparedEngine(h);
-    if (
-      JSON.stringify(await fixtureImageInventory(h.probe)) !==
-      JSON.stringify([...h.originalImageIds, ...pending].sort())
-    ) {
-      refused();
-    }
-    await assertFixtureBuildImages({ ...h, instance });
-    if (
-      (
-        await h.probe([
-          "container",
-          "ls",
-          "--all",
-          "--no-trunc",
-          "--filter",
-          `ancestor=${image.id}`,
-          "--format",
-          "{{.ID}}",
-        ])
-      ).trim() ||
-      (
-        await h.probe([
-          "image",
-          "inspect",
-          "--format",
-          "{{.Id}}",
-          RETAINED_BUILD_BASE_TAG,
-        ])
-      ).trim() !== h.baseImage
-    ) {
-      refused();
-    }
-    await requirePreparedEngine(h);
-    await h.effect(["image", "rm", "--no-prune", image.id]);
-    pending.delete(image.id);
-    await requirePreparedEngine(h);
-    if (
-      JSON.stringify(await fixtureImageInventory(h.probe)) !==
-      JSON.stringify([...h.originalImageIds, ...pending].sort())
-    ) {
-      refused();
-    }
-  }
+type BuildCleanupInputs = Pick<
+  FixtureRuntime,
+  | "engineId"
+  | "probe"
+  | "builtImages"
+  | "builtImageObjects"
+  | "originalImageIds"
+  | "baseImage"
+> & {
+  readonly effect: (args: readonly string[]) => Promise<void>;
+  readonly journal: (value: unknown) => Promise<void>;
+};
+async function requireRemainingBuildObjects(
+  h: BuildCleanupInputs,
+  pending: ReadonlySet<string>
+) {
   await requirePreparedEngine(h);
   if (
     JSON.stringify(await fixtureImageInventory(h.probe)) !==
-    JSON.stringify(h.originalImageIds)
+    JSON.stringify([...h.originalImageIds, ...pending].sort())
   ) {
     refused();
   }
+  for (const [instance, rows] of h.builtImageObjects) {
+    const selected = h.builtImages.get(instance);
+    if (!selected) {
+      refused();
+    }
+    for (const captured of rows) {
+      if (!pending.has(captured.id)) {
+        continue;
+      }
+      const current = retainedBuildFixtureObject({
+        value: object(
+          await h.probe([
+            "image",
+            "inspect",
+            "--format",
+            RETAINED_BUILD_OBJECT_FORMAT,
+            captured.id,
+          ])
+        ),
+        selected,
+        originalImageIds: h.originalImageIds,
+      });
+      if (
+        JSON.stringify(current) !== JSON.stringify(captured) ||
+        (
+          await h.probe([
+            "container",
+            "ls",
+            "--all",
+            "--no-trunc",
+            "--filter",
+            `ancestor=${captured.id}`,
+            "--format",
+            "{{.ID}}",
+          ])
+        ).trim()
+      ) {
+        refused();
+      }
+    }
+  }
+  if (
+    (
+      await h.probe([
+        "image",
+        "inspect",
+        "--format",
+        "{{.Id}}",
+        RETAINED_BUILD_BASE_TAG,
+      ])
+    ).trim() !== h.baseImage
+  ) {
+    refused();
+  }
+  await requirePreparedEngine(h);
+}
+/** Exact captured child-before-parent disposal, never prune or general cache removal. */
+export async function cleanupRetainedBuildFixtureImages(h: BuildCleanupInputs) {
+  if (h.builtImages.size !== h.builtImageObjects.size) {
+    refused();
+  }
+  const rows = [...h.builtImageObjects.values()].flat();
+  const pending = new Set(rows.map((row) => row.id));
+  if (
+    pending.size !== rows.length ||
+    rows.some((row) => h.originalImageIds.includes(row.id))
+  ) {
+    refused();
+  }
+  for (const [instance, objects] of h.builtImageObjects) {
+    const selected = h.builtImages.get(instance);
+    if (
+      !selected ||
+      JSON.stringify(
+        retainedBuildFixtureObjectGraph({
+          values: objects,
+          selected,
+          originalImageIds: h.originalImageIds,
+          baseImage: h.baseImage,
+        })
+      ) !== JSON.stringify(objects)
+    ) {
+      refused();
+    }
+    for (const row of objects) {
+      await requireRemainingBuildObjects(h, pending);
+      await h.journal({
+        stage: "before-image-remove",
+        id: row.id,
+        remaining: [...pending].sort(),
+      });
+      await requireRemainingBuildObjects(h, pending);
+      await h.effect(["image", "rm", "--no-prune", row.id]);
+      pending.delete(row.id);
+      await requireRemainingBuildObjects(h, pending);
+      await h.journal({
+        stage: "after-image-remove",
+        id: row.id,
+        remaining: [...pending].sort(),
+      });
+    }
+  }
+  await requireRemainingBuildObjects(h, pending);
 }
 /** Basic builds qualify separately from preview; no builder is reachable after bootstrap. */
 export const nativeComposeAdoptionBuildWorktreesScenario: Scenario = {
@@ -2752,7 +2929,15 @@ export const nativeComposeAdoptionBuildWorktreesScenario: Scenario = {
           ...h,
           instances: [h.first, h.second],
         });
-        await cleanupRetainedBuildFixtureImages(h);
+        await cleanupRetainedBuildFixtureImages({
+          ...h,
+          effect: async (args) => {
+            await h.effect(args);
+          },
+          journal: async (pending) => {
+            await saveFixtureBuildRecovery(h, pending);
+          },
+        });
       },
       secondaryFailure: () =>
         ctx.retainFixtures(

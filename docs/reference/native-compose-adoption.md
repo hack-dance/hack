@@ -183,8 +183,16 @@ starts/stops. Format switch and saved consumption cannot reach a builder. Its
 source and candidate drift controls retain pending ownership, preserve the other
 worktree's SQL row, and restore both original configurations through rollback.
 Exact fixture image removal requires its captured new ID/birth, sole tag, fixture
-label, unchanged daemon and no remaining container references. Builder cache is
-retained; cache reclamation and historical image-from-source provenance remain
+label, unchanged daemon and no remaining container references. A local final
+image may expose one digest for that exact repository and captured image ID;
+other digest aliases refuse. The fixture privately journals the exact new
+image graph after each bootstrap build. Only fixture-labelled, untagged parents
+on its complete chain to the captured original base qualify for disposal, in
+child-before-parent order with nonforce `image rm --no-prune`. A builder exposing
+no parent qualifies only its single final object. Unexplained new images, foreign
+labels or references retain the failed fixture. Full original image inventory
+and tags must be restored; inventory bounds are not relaxed for new objects.
+General builder cache is retained; cache reclamation and historical image-from-source provenance remain
 unqualified. Fixture source/model checks alone do not establish live builder or
 data-preservation acceptance.
 

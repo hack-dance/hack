@@ -19,9 +19,11 @@ import {
   assertRetainedBuildFixtureCopy,
   assertRetainedFixtureImageUnchanged,
   prepareRetainedBuildFixtureSources,
+  RETAINED_BUILD_OBJECT_FORMAT,
   retainedBuildFixtureCopiedFiles,
   retainedBuildFixtureDefinition,
   retainedBuildFixtureImage,
+  retainedBuildFixtureObjectGraph,
   retainedBuildFixtureMutationAllowed,
   retainedBuildFixtureReadAllowed,
   retainedBuildFixtureSourceSnapshot,
@@ -29,6 +31,7 @@ import {
 import { captureAdoptionDependencyFirstPrepare } from "./e2e/scenarios/native-compose-adoption-dependency-staged-read.ts";
 import {
   buildFixtureCli,
+  cleanupRetainedBuildFixtureImages,
   nativeComposeAdoptionBuildWorktreesScenario,
 } from "./e2e/scenarios/native-compose-adoption-worktrees.ts";
 import { retainedBuildFixture } from "./helpers/retained-build-adoption.ts";
@@ -315,6 +318,265 @@ test("image fixture capture requires a new sole-tag selected-stage image and pin
     })
   ).toThrow("values omitted");
 });
+test("fixture image capture pins the exact observed same-ID repository digest", () => {
+  const digest = `fixture-db@${image}`;
+  const captured = retainedBuildFixtureImage({
+    value: { ...imageRow, digests: [digest] },
+    reference: "fixture-db",
+    owner: "fixture",
+    originalImageIds: [],
+  });
+  expect(captured.digests).toEqual([digest]);
+  expect(Object.isFrozen(captured.digests)).toBe(true);
+  expect(() =>
+    assertRetainedFixtureImageUnchanged({
+      captured,
+      current: { ...captured, digests: null },
+    })
+  ).toThrow("values omitted");
+  for (const digests of [
+    [CANARY],
+    [`other-db@${image}`],
+    [`fixture-db@sha256:${"d".repeat(64)}`],
+    [digest, digest],
+    [digest, CANARY],
+  ]) {
+    expect(() =>
+      retainedBuildFixtureImage({
+        value: { ...imageRow, digests },
+        reference: "fixture-db",
+        owner: "fixture",
+        originalImageIds: [],
+      })
+    ).toThrow("values omitted");
+  }
+});
+
+const baseBuildImage = `sha256:${"1".repeat(64)}`;
+const firstBuildParent = `sha256:${"2".repeat(64)}`;
+const secondBuildParent = `sha256:${"3".repeat(64)}`;
+function capturedBuildGraph() {
+  const selected = retainedBuildFixtureImage({
+    value: { ...imageRow, digests: [`fixture-db@${image}`] },
+    reference: "fixture-db",
+    owner: "fixture",
+    originalImageIds: [baseBuildImage],
+  });
+  const labels = [
+    "hack.e2e.retained-build.owner",
+    "hack.e2e.retained-build.stage",
+  ];
+  const values = [
+    {
+      ...imageRow,
+      parent: secondBuildParent,
+      size: 1000,
+      digests: [`fixture-db@${image}`],
+      labelNames: [...labels, "com.docker.compose.image.builder"],
+    },
+    {
+      ...imageRow,
+      id: firstBuildParent,
+      parent: baseBuildImage,
+      size: 800,
+      tags: [],
+      digests: [],
+      labelNames: labels,
+    },
+    {
+      ...imageRow,
+      id: secondBuildParent,
+      parent: firstBuildParent,
+      size: 900,
+      tags: [],
+      digests: [],
+      labelNames: labels,
+    },
+  ];
+  const capture = (
+    rows: readonly unknown[] = values,
+    originals = [baseBuildImage]
+  ) =>
+    retainedBuildFixtureObjectGraph({
+      values: rows,
+      selected,
+      originalImageIds: originals,
+      baseImage: baseBuildImage,
+    });
+  return { selected, values, capture };
+}
+test("explicit builder graph captures only the owned child-to-base chain", () => {
+  const { capture, values } = capturedBuildGraph();
+  const graph = capture();
+  expect(graph.map((row) => row.id)).toEqual([
+    image,
+    secondBuildParent,
+    firstBuildParent,
+  ]);
+  expect(Object.isFrozen(graph)).toBe(true);
+  expect(Object.isFrozen(graph[0]?.labelNames)).toBe(true);
+  expect(capture([{ ...values[0], parent: "" }]).map((row) => row.id)).toEqual([
+    image,
+  ]);
+  for (const rows of [
+    [values[0], values[1]],
+    [values[0], values[1], { ...values[2], owner: CANARY }],
+    [values[0], values[1], { ...values[2], parent: image }],
+    [values[0], { ...values[1], tags: ["foreign:latest"] }, values[2]],
+    [...values, { ...values[1], id: `sha256:${"4".repeat(64)}` }],
+    [
+      { ...values[0], labelNames: [...values[0].labelNames, CANARY] },
+      values[1],
+      values[2],
+    ],
+    [{ ...values[0], parent: "" }, values[1], values[2]],
+  ])
+    expect(() => capture(rows)).toThrow("values omitted");
+  expect(() => capture(values, [baseBuildImage, firstBuildParent])).toThrow(
+    "values omitted"
+  );
+});
+
+function buildCleanupModel() {
+  const { selected, values, capture } = capturedBuildGraph();
+  const objects = capture();
+  const instance = {
+    root: "/owned/fixture",
+    name: "fixture",
+    marker: "sql-marker",
+  };
+  const remaining = new Set(objects.map((row) => row.id));
+  const refs = new Set<string>();
+  const events: { stage: string; id?: string }[] = [];
+  let daemon = '"fixture-engine"';
+  let afterJournal: (() => void) | undefined;
+  let afterEffect: (() => void) | undefined;
+  const current = new Map(values.map((row) => [row.id, row]));
+  const opts = {
+    engineId: daemon,
+    originalImageIds: [baseBuildImage],
+    baseImage: baseBuildImage,
+    builtImages: new Map([[instance, selected]]),
+    builtImageObjects: new Map([[instance, objects]]),
+    probe: async (args: readonly string[]) => {
+      if (args.join() === "info,--format,{{json .ID}}") return daemon;
+      if (args.join() === "image,ls,--all,--no-trunc,--format,{{.ID}}")
+        return [baseBuildImage, ...remaining].sort().join("\n");
+      if (
+        args[0] === "image" &&
+        args[1] === "inspect" &&
+        args[3] === "{{.Id}}" &&
+        args[4] === "postgres:17.6-alpine"
+      )
+        return baseBuildImage;
+      if (
+        args[0] === "image" &&
+        args[1] === "inspect" &&
+        args[2] === "--format" &&
+        args[3] === RETAINED_BUILD_OBJECT_FORMAT &&
+        args.length === 5 &&
+        args[4] &&
+        remaining.has(args[4])
+      )
+        return JSON.stringify(current.get(args[4]));
+      if (
+        args[0] === "container" &&
+        args[1] === "ls" &&
+        args[2] === "--all" &&
+        args[3] === "--no-trunc" &&
+        args[4] === "--filter" &&
+        args[5]?.startsWith("ancestor=") &&
+        args[6] === "--format" &&
+        args[7] === "{{.ID}}" &&
+        args.length === 8
+      )
+        return refs.has(args[5].slice(9)) ? id : "";
+      throw new Error("Unexpected fixed fixture read");
+    },
+    journal: async (value: unknown) => {
+      if (
+        !(
+          value &&
+          typeof value === "object" &&
+          "stage" in value &&
+          typeof value.stage === "string"
+        )
+      )
+        throw new Error("Missing fixed journal stage");
+      events.push({ stage: value.stage });
+      if (value.stage === "before-image-remove") afterJournal?.();
+    },
+    effect: async (args: readonly string[]) => {
+      expect(args.slice(0, 3)).toEqual(["image", "rm", "--no-prune"]);
+      const selectedId = args[3];
+      if (!selectedId || !remaining.delete(selectedId))
+        throw new Error("Unexpected exact image effect");
+      events.push({ stage: "remove", id: selectedId });
+      afterEffect?.();
+    },
+  };
+  return {
+    opts,
+    remaining,
+    refs,
+    events,
+    current,
+    changeDaemon: () => {
+      daemon = '"foreign-engine"';
+    },
+    setAfterJournal: (action: () => void) => {
+      afterJournal = action;
+    },
+    setAfterEffect: (action: () => void) => {
+      afterEffect = action;
+    },
+  };
+}
+test("owned image cleanup journals and removes exact children before parents without prune", async () => {
+  const model = buildCleanupModel();
+  await cleanupRetainedBuildFixtureImages(model.opts);
+  expect([...model.remaining]).toEqual([]);
+  expect(model.events).toEqual(
+    [image, secondBuildParent, firstBuildParent].flatMap((id) => [
+      { stage: "before-image-remove" },
+      { stage: "remove", id },
+      { stage: "after-image-remove" },
+    ])
+  );
+});
+for (const mode of [
+  "reference-after-journal",
+  "daemon-after-journal",
+  "changed-birth",
+  "foreign-after-effect",
+] as const) {
+  test(`owned image cleanup refuses ${mode} without another effect`, async () => {
+    const model = buildCleanupModel();
+    if (mode === "reference-after-journal")
+      model.setAfterJournal(() => model.refs.add(image));
+    if (mode === "daemon-after-journal")
+      model.setAfterJournal(model.changeDaemon);
+    if (mode === "changed-birth") {
+      const row = model.current.get(secondBuildParent);
+      if (!row) throw new Error("Missing fixed image row");
+      model.current.set(secondBuildParent, {
+        ...row,
+        created: "2026-10-08T21:00:00Z",
+      });
+    }
+    if (mode === "foreign-after-effect")
+      model.setAfterEffect(() =>
+        model.remaining.add(`sha256:${"f".repeat(64)}`)
+      );
+    await expect(cleanupRetainedBuildFixtureImages(model.opts)).rejects.toThrow(
+      "values omitted"
+    );
+    expect(model.events.filter((row) => row.stage === "remove").length).toBe(
+      mode === "foreign-after-effect" ? 1 : 0
+    );
+    expect(model.remaining.has(firstBuildParent)).toBe(true);
+  });
+}
 test("build read shim admits exact original/published images queries and captured image facts only", () => {
   for (const file of [
     "/owned/root/.hack/docker-compose.yml",

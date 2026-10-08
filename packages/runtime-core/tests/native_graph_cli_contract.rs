@@ -291,3 +291,154 @@ fn public_native_source_rejects_legacy_and_unknown_private_fields_without_reflec
         fixture.assert_no_state();
     }
 }
+
+#[cfg(target_os = "macos")]
+#[test]
+fn public_native_serve_checks_review_and_private_codec_before_publication() {
+    let fixture = Fixture::new();
+    let wrong = "c".repeat(64);
+    let legacy =
+        json!({"version":1,"kind":"compose-graph-environment","values":"private-serve-canary"});
+    let output = fixture.invoke_private(
+        &[
+            "graph",
+            "native",
+            "serve",
+            "--source-file",
+            fixture.source_path(),
+            "--expect-review",
+            &wrong,
+            "--environment-stdin",
+            "--json",
+        ],
+        &legacy,
+    );
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("native_graph_review_changed"));
+    fixture.assert_no_state();
+    let planned = fixture.invoke(&[
+        "graph",
+        "native",
+        "plan",
+        "--source-file",
+        fixture.source_path(),
+        "--json",
+    ]);
+    assert!(planned.status.success());
+    let review: Value = serde_json::from_slice(&planned.stdout).unwrap();
+    let output = fixture.invoke_private(
+        &[
+            "graph",
+            "native",
+            "serve",
+            "--source-file",
+            fixture.source_path(),
+            "--expect-review",
+            review["review_id"].as_str().unwrap(),
+            "--environment-stdin",
+            "--json",
+        ],
+        &legacy,
+    );
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("graph_environment_input"));
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("private-serve-canary"));
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("private-serve-canary"));
+    fixture.assert_no_state();
+}
+
+#[test]
+fn public_native_control_requires_exact_action_and_never_adopts_absent_owner() {
+    let fixture = Fixture::new();
+    let run = "b".repeat(32);
+    for action in ["status", "cleanup"] {
+        let output = fixture.invoke(&[
+            "graph", "native", "control", "--run-id", &run, "--action", action, "--json",
+        ]);
+        assert!(!output.status.success());
+        #[cfg(target_os = "macos")]
+        assert!(String::from_utf8_lossy(&output.stderr).contains("native_graph_foreground"));
+        #[cfg(not(target_os = "macos"))]
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("native_graph_foreground_unsupported")
+        );
+        fixture.assert_no_state();
+    }
+    for args in [
+        vec!["graph", "native", "control", "--run-id", &run],
+        vec![
+            "graph", "native", "control", "--run-id", &run, "--action", "restart",
+        ],
+        vec![
+            "graph", "native", "control", "--run-id", &run, "--action", "status", "--action",
+            "cleanup",
+        ],
+        vec![
+            "graph",
+            "native",
+            "control",
+            "--run-id",
+            &run,
+            "--action",
+            "cleanup",
+            "--environment-stdin",
+        ],
+        vec![
+            "graph",
+            "native",
+            "control",
+            "--run-id",
+            &run,
+            "--action",
+            "status",
+            "--source-file",
+            fixture.source_path(),
+        ],
+        vec![
+            "graph",
+            "native",
+            "serve",
+            "--source-file",
+            fixture.source_path(),
+            "--run-id",
+            &run,
+        ],
+        vec![
+            "graph",
+            "native",
+            "run",
+            "--source-file",
+            fixture.source_path(),
+            "--action",
+            "status",
+        ],
+    ] {
+        let output = fixture.invoke(&args);
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("native_graph_arguments"));
+        fixture.assert_no_state();
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn public_native_serve_refuses_platform_before_private_descriptor_or_source_read() {
+    let fixture = Fixture::new();
+    let wrong = "c".repeat(64);
+    let output = fixture.invoke(&[
+        "graph",
+        "native",
+        "serve",
+        "--source-file",
+        "/missing/native-source.json",
+        "--expect-review",
+        &wrong,
+        "--environment-stdin",
+        "--json",
+    ]);
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("native_graph_foreground_unsupported")
+    );
+    fixture.assert_no_state();
+}

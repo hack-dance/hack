@@ -307,7 +307,7 @@ fn complete_fixture() -> (Fixture, Candidate, Alias) {
     owner.save(&candidate).unwrap();
     drop(state::Lock::acquire(&candidate.state_root.join("run/smolvm")).unwrap());
     let binary = f.home.join("tool");
-    fs::copy("/bin/sleep", &binary).unwrap();
+    crate::provider::test_executable::sleeping_executable(&binary);
     fs::set_permissions(&binary, fs::Permissions::from_mode(0o755)).unwrap();
     let hash = executable_hash(&binary).unwrap();
     let path = f.root.join("shared-owner/configuration.json");

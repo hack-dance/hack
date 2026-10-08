@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
 import {
+  chmod,
   lstat,
   mkdir,
   mkdtemp,
@@ -25,9 +26,14 @@ import {
   closeNativeComposeFileSources,
   type NativeComposeFileSources,
 } from "../src/lib/native-compose-file-sources.ts";
-import { NATIVE_COMPOSE_FILES_EXTENSION } from "../src/lib/native-compose-file-state.ts";
+import {
+  NATIVE_COMPOSE_FILES_EXTENSION,
+  parseNativeComposeFileManifest,
+  parseNativeComposeFileReference,
+} from "../src/lib/native-compose-file-state.ts";
 import {
   type NativeComposeGenerationStore,
+  type NativeComposeMaterialBinding,
   type NativeComposeMutation,
   openNativeComposeGenerationStore,
 } from "../src/lib/native-compose-generation.ts";
@@ -309,6 +315,7 @@ test("actual acquisition stages binary and empty 0444 files outside checkout", a
     const selected = await staged(mutation);
     expect(JSON.stringify(selected.attempt)).toBe("{}");
     const paths = memberPaths(selected.projection);
+    expect(selected.projection.reference.version).toBe(1);
     expect(paths.every((path) => !path.startsWith(root))).toBe(true);
     expect(await readFile(paths[0] ?? "")).toEqual(BYTES);
     expect(await readFile(paths[1] ?? "")).toEqual(Buffer.alloc(0));
@@ -1352,3 +1359,248 @@ test("known reaped readiness failure retains pending material until a separate v
     await expectAbsent(memberPaths(selected.projection));
   });
 }, 30_000);
+
+test.each([
+  ["0400", 0o400],
+  ["0600", 0o600],
+] as const)("protected %s delivery preserves original permissions and binds exact private snapshot2 modes", async (mode, bits) => {
+  const secretPath = join(root, "protected.bin");
+  await writeFile(secretPath, BYTES, { mode: bits });
+  const original = await lstat(secretPath);
+  await writeFile(
+    join(root, ".hack/hack.project.json"),
+    JSON.stringify({
+      ...SOURCE,
+      secrets: { empty: { file: "protected.bin" } },
+      services: {
+        reader: {
+          ...SOURCE.services.reader,
+          mounts: [
+            SOURCE.services.reader.mounts[0],
+            {
+              secret: "empty",
+              target: "/run/empty",
+              access: "read-only",
+              mode,
+            },
+          ],
+        },
+      },
+    })
+  );
+  const selected = await store.withMutation(running);
+  expect(selected.projection.reference.version).toBe(2);
+  const granted = selected.projection.workloads.reader;
+  const secret = granted?.find((grant) => grant.target === "/run/empty");
+  const config = granted?.find((grant) => grant.target === "/etc/settings");
+  if (!(secret && config)) {
+    throw new Error("Missing selected file grants");
+  }
+  expect(await readFile(secret.source)).toEqual(BYTES);
+  expect((await lstat(secret.source)).mode & 0o777).toBe(bits);
+  expect((await lstat(config.source)).mode & 0o777).toBe(0o444);
+  const after = await lstat(secretPath);
+  expect({
+    dev: after.dev,
+    ino: after.ino,
+    mode: after.mode,
+    uid: after.uid,
+    gid: after.gid,
+  }).toEqual({
+    dev: original.dev,
+    ino: original.ino,
+    mode: original.mode,
+    uid: original.uid,
+    gid: original.gid,
+  });
+  const reference = selected.projection.reference;
+  const text = await readFile(
+    join(
+      reference.root,
+      `${reference.generationId}-${reference.snapshotToken}`,
+      "manifest.json"
+    ),
+    "utf8"
+  );
+  const raw: unknown = JSON.parse(text);
+  if (!(isRecord(raw) && isRecord(raw.creation))) {
+    throw new Error("Missing owned material binding");
+  }
+  // This binding comes from the genuine owner-produced private manifest; parsing
+  // below verifies it and no external effect authority is obtained from this fixture.
+  const binding = raw.creation as NativeComposeMaterialBinding;
+  const manifest = parseNativeComposeFileManifest({ text, reference, binding });
+  expect(manifest.version).toBe(2);
+  expect(
+    manifest.members.find((member) => member.target === "/run/empty")?.file.mode
+  ).toBe(bits);
+  for (const changed of [0o000, 0o644, 0o777, "0400", null]) {
+    const forged = structuredClone(manifest);
+    const originalMembers = forged.members.map((member) => ({
+      ...member,
+      file: { ...member.file },
+    }));
+    const member = originalMembers.find(
+      (entry) => entry.target === "/run/empty"
+    );
+    if (!member) {
+      throw new Error("Missing owned secret member");
+    }
+    const altered = {
+      ...forged,
+      members: originalMembers.map((entry) =>
+        entry === member
+          ? { ...entry, file: { ...entry.file, mode: changed } }
+          : entry
+      ),
+    };
+    expect(() =>
+      parseNativeComposeFileManifest({
+        text: JSON.stringify(altered),
+        reference,
+        binding,
+      })
+    ).toThrow();
+  }
+  const legacy = {
+    ...manifest,
+    version: 1,
+    reference: { ...manifest.reference, version: 1 },
+  };
+  expect(() =>
+    parseNativeComposeFileManifest({
+      text: JSON.stringify(legacy),
+      reference: { ...reference, version: 1 },
+      binding,
+    })
+  ).toThrow();
+  const allPublic = {
+    ...manifest,
+    members: manifest.members.map((member) => ({
+      ...member,
+      file: { ...member.file, mode: 0o444 },
+    })),
+  };
+  expect(() =>
+    parseNativeComposeFileManifest({
+      text: JSON.stringify(allPublic),
+      reference,
+      binding,
+    })
+  ).toThrow();
+  expect(() =>
+    parseNativeComposeFileReference({ ...reference, version: 3 })
+  ).toThrow();
+  const unknownVersion = {
+    ...manifest,
+    version: 3,
+    reference: { ...manifest.reference, version: 3 },
+  };
+  expect(() =>
+    Reflect.apply(parseNativeComposeFileManifest, undefined, [
+      {
+        text: JSON.stringify(unknownVersion),
+        reference: { ...reference, version: 3 },
+        binding,
+      },
+    ])
+  ).toThrow();
+  await store.withMutation(async (mutation) => {
+    await ownerFor(mutation).assertSavedReady(selected.generation);
+  });
+  expect(JSON.stringify(selected.attempt)).toBe("{}");
+});
+
+test("protected snapshot mode drift refuses saved readiness while preserving owned stop recovery", async () => {
+  await writeFile(join(root, "protected.bin"), BYTES, { mode: 0o600 });
+  await writeFile(
+    join(root, ".hack/hack.project.json"),
+    JSON.stringify({
+      ...SOURCE,
+      secrets: { empty: { file: "protected.bin" } },
+      services: {
+        reader: {
+          ...SOURCE.services.reader,
+          mounts: [
+            SOURCE.services.reader.mounts[0],
+            {
+              secret: "empty",
+              target: "/run/empty",
+              access: "read-only",
+              mode: "0400",
+            },
+          ],
+        },
+      },
+    })
+  );
+  const selected = await store.withMutation(running);
+  const secret = selected.projection.workloads.reader?.find(
+    (grant) => grant.target === "/run/empty"
+  );
+  if (!secret) {
+    throw new Error("Missing selected secret grant");
+  }
+  await chmod(secret.source, 0o600);
+  let children = 0;
+  let readinessChecks = 0;
+  await expect(
+    store.withMutation(async (mutation) => {
+      const owner = ownerFor(mutation);
+      await mutation.runEffect({
+        generation: selected.generation,
+        operation: "up",
+        // This control isolates the saved-material guard, not source admission;
+        // input freshness is synthetic and no expired first-mutation authority is reused.
+        assertFresh: async () => {},
+        assertOwned: async () => {},
+        effect: async () => {
+          readinessChecks++;
+          await owner.assertSavedReady(selected.generation);
+          children++;
+          return { outcome: "complete", value: 0 };
+        },
+      });
+    })
+  ).rejects.toMatchObject({ code: "E_NATIVE_COMPOSE_UNCERTAIN" });
+  expect(readinessChecks).toBe(1);
+  expect(children).toBe(0);
+  expect((await store.loadPending())?.generationId).toBe(
+    selected.generation.generationId
+  );
+  await expect(
+    store.withMutation(async (mutation) => {
+      const owner = ownerFor(mutation);
+      await mutation.runEffect({
+        generation: selected.generation,
+        operation: "down",
+        recoverPending: true,
+        assertOwned: async () => {},
+        effect: async () => {
+          const attempt = await owner.armStop(selected.generation);
+          if (!attempt) {
+            throw new Error("Missing known owned stop attempt");
+          }
+          children++;
+          await owner.recordStopReaped({
+            attempt,
+            assertReaped: async () => {},
+          });
+          return { outcome: "complete", value: 0 };
+        },
+        beforeComplete: async () => {
+          await owner.retire({
+            generation: selected.generation,
+            assertAbsent: async () => {},
+          });
+        },
+      });
+    })
+  ).rejects.toMatchObject({ code: "E_NATIVE_COMPOSE_UNCERTAIN" });
+  expect(children).toBe(1);
+  expect((await store.loadPending())?.generationId).toBe(
+    selected.generation.generationId
+  );
+  expect((await lstat(secret.source)).mode & 0o777).toBe(0o600);
+  expect((await lstat(join(root, "protected.bin"))).mode & 0o777).toBe(0o600);
+});

@@ -2,6 +2,11 @@ import { createHash } from "node:crypto";
 import { constants, type Stats } from "node:fs";
 import { type FileHandle, lstat, open } from "node:fs/promises";
 import {
+  type NativeComposeFileMode,
+  nativeComposeFileMode,
+  nativeComposeFileModeBits,
+} from "./native-compose-file-permissions.ts";
+import {
   NativeComposeGenerationError,
   sameFile,
 } from "./native-compose-private-state.ts";
@@ -171,29 +176,37 @@ export async function holdNativeComposeFile(opts: {
 export async function writeNativeComposeFile(opts: {
   readonly path: string;
   readonly bytes: Uint8Array;
+  readonly mode?: NativeComposeFileMode;
 }): Promise<NativeComposeFileAnchor> {
+  const path = opts.path;
+  const mode = nativeComposeFileMode(
+    opts.mode === undefined ? "0444" : opts.mode
+  );
+  if (!mode) {
+    return refuseNativeComposeFile();
+  }
+  const bits = nativeComposeFileModeBits(mode);
   const bytes = Buffer.from(opts.bytes);
   if (bytes.length > NATIVE_COMPOSE_FILE_BYTES_LIMIT) {
     bytes.fill(0);
     return refuseNativeComposeFile();
   }
   const file = await open(
-    opts.path,
+    path,
     constants.O_WRONLY |
       constants.O_CREAT |
       constants.O_EXCL |
       constants.O_NOFOLLOW,
-    0o444
+    bits
   );
   try {
     await file.writeFile(bytes);
-    await file.chmod(0o444);
+    await file.chmod(bits);
     await file.sync();
     const info = await file.stat();
     if (
       !(
-        allowed(info, [0o444], bytes.length) &&
-        sameFile(info, await lstat(opts.path))
+        allowed(info, [bits], bytes.length) && sameFile(info, await lstat(path))
       )
     ) {
       return refuseNativeComposeFile();
@@ -202,7 +215,7 @@ export async function writeNativeComposeFile(opts: {
       dev: info.dev,
       ino: info.ino,
       size: bytes.length,
-      mode: 0o444,
+      mode: bits,
       digest: nativeComposeFileDigest(bytes),
     });
   } finally {

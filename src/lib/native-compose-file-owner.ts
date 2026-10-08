@@ -8,6 +8,7 @@ import {
   refuseNativeComposeFile,
   writeNativeComposeFile,
 } from "./native-compose-file-bytes.ts";
+import { nativeComposeFileMode } from "./native-compose-file-permissions.ts";
 import {
   assertNativeComposeFileSources,
   closeNativeComposeFileSources,
@@ -137,9 +138,12 @@ function snapshotPath(reference: NativeComposeFileReference): string {
   );
 }
 function headerFor(
-  reference: Pick<NativeComposeFileReference, "generationId" | "snapshotToken">
+  reference: Pick<
+    NativeComposeFileReference,
+    "generationId" | "snapshotToken" | "version"
+  >
 ): string {
-  return `${JSON.stringify({ version: 1, kind: "native-compose-file-journal", generationId: reference.generationId, snapshotToken: reference.snapshotToken })}\n`;
+  return `${JSON.stringify({ version: reference.version, kind: "native-compose-file-journal", generationId: reference.generationId, snapshotToken: reference.snapshotToken })}\n`;
 }
 function checkText(
   read: {
@@ -400,6 +404,25 @@ function matchVolume(opts: {
   }
 }
 
+function snapshotVersion(sources: NativeComposeFileSources): 1 | 2 {
+  const plan = sources.result.file_plan;
+  if (!plan?.complete) {
+    return refuseNativeComposeFile();
+  }
+  let version: 1 | 2 = 1;
+  for (const bindings of Object.values(plan.workloads)) {
+    for (const binding of bindings) {
+      const mode = nativeComposeFileMode(binding.mode);
+      if (!mode) {
+        return refuseNativeComposeFile();
+      }
+      if (mode !== "0444") {
+        version = 2;
+      }
+    }
+  }
+  return version;
+}
 async function memberPresent(
   snapshot: Snapshot,
   member: NativeComposeFileMember
@@ -415,7 +438,7 @@ async function memberPresent(
   }
   const held = await holdNativeComposeFile({
     path,
-    modes: [0o444],
+    modes: [member.file.mode],
     limit: member.file.size,
   });
   try {
@@ -793,13 +816,14 @@ export function createNativeComposeFileOwner(opts: {
           reservation,
           sources,
         });
+        const version = snapshotVersion(sources);
         const initialized = await initializeRoot(root);
         let directory: HeldDirectory | undefined;
         try {
           await checkAuthority(selection);
           const snapshotToken = token();
           const base = {
-            version: 1 as const,
+            version,
             root,
             rootToken: initialized.rootToken,
             rootDirectory: {
@@ -834,9 +858,14 @@ export function createNativeComposeFileOwner(opts: {
                   ...(directory ? [directory] : []),
                 ]);
                 const id = token();
+                const mode = nativeComposeFileMode(member.binding.mode);
+                if (!mode) {
+                  return refuseNativeComposeFile();
+                }
                 const file = await writeNativeComposeFile({
                   path: join(path, id),
                   bytes: member.bytes,
+                  mode,
                 });
                 members.push({
                   id,
@@ -855,7 +884,7 @@ export function createNativeComposeFileOwner(opts: {
             header
           );
           const manifest: NativeComposeFileManifest = {
-            version: 1,
+            version,
             kind: "native-compose-file-material",
             reference: referenceBase,
             creation: binding,

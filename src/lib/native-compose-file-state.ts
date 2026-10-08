@@ -3,6 +3,7 @@ import {
   type NativeComposeFileAnchor,
   refuseNativeComposeFile,
 } from "./native-compose-file-bytes.ts";
+import { nativeComposeFileModeBitsValid } from "./native-compose-file-permissions.ts";
 import type { NativeComposeMaterialBinding } from "./native-compose-generation.ts";
 import { keys, parsePrivateJson } from "./native-compose-private-state.ts";
 export const NATIVE_COMPOSE_FILE_STATE_LIMIT = 1024 * 1024;
@@ -14,7 +15,7 @@ const TARGET_FORBIDDEN = /[\\\0]/;
 export type FileIdentity = { readonly dev: number; readonly ino: number };
 export type StateAnchor = FileIdentity & { readonly digest: string };
 export type NativeComposeFileReference = {
-  readonly version: 1;
+  readonly version: 1 | 2;
   readonly root: string;
   readonly rootToken: string;
   readonly rootDirectory: FileIdentity;
@@ -31,7 +32,7 @@ export type NativeComposeFileMember = {
   readonly file: NativeComposeFileAnchor;
 };
 export type NativeComposeFileManifest = {
-  readonly version: 1;
+  readonly version: 1 | 2;
   readonly kind: "native-compose-file-material";
   readonly reference: Omit<NativeComposeFileReference, "manifest">;
   readonly creation: NativeComposeMaterialBinding;
@@ -136,7 +137,7 @@ export function parseNativeComposeFileReference(
         value,
         "generationId,manifest,root,rootDirectory,rootReceipt,rootToken,snapshotDirectory,snapshotToken,version"
       ) &&
-      value.version === 1 &&
+      (value.version === 1 || value.version === 2) &&
       typeof value.root === "string" &&
       value.root.startsWith("/") &&
       typeof value.rootToken === "string" &&
@@ -154,7 +155,7 @@ export function parseNativeComposeFileReference(
     return refuseNativeComposeFile();
   }
   const result: NativeComposeFileReference = {
-    version: 1,
+    version: value.version,
     root: value.root,
     rootToken: value.rootToken,
     rootDirectory: value.rootDirectory,
@@ -167,19 +168,27 @@ export function parseNativeComposeFileReference(
   freezeNativeComposeFileState(result);
   return result;
 }
-function fileAnchor(value: unknown): value is NativeComposeFileAnchor {
+function fileAnchor(
+  value: unknown,
+  version: 1 | 2
+): value is NativeComposeFileAnchor {
   return (
     isRecord(value) &&
     keys(value, "dev,digest,ino,mode,size") &&
     anchor({ dev: value.dev, ino: value.ino, digest: value.digest }) &&
-    value.mode === 0o444 &&
+    (version === 1
+      ? value.mode === 0o444
+      : nativeComposeFileModeBitsValid(value.mode)) &&
     typeof value.size === "number" &&
     Number.isSafeInteger(value.size) &&
     value.size >= 0 &&
     value.size <= NATIVE_COMPOSE_FILE_STATE_LIMIT
   );
 }
-function member(value: unknown): value is NativeComposeFileMember {
+function member(
+  value: unknown,
+  version: 1 | 2
+): value is NativeComposeFileMember {
   if (
     !(
       isRecord(value) &&
@@ -192,7 +201,7 @@ function member(value: unknown): value is NativeComposeFileMember {
       value.target.startsWith("/") &&
       value.target !== "/" &&
       !TARGET_FORBIDDEN.test(value.target) &&
-      fileAnchor(value.file)
+      fileAnchor(value.file, version)
     )
   ) {
     return false;
@@ -277,7 +286,8 @@ export function parseNativeComposeFileManifest(opts: {
     !(
       isRecord(value) &&
       keys(value, "creation,journal,kind,members,reference,version") &&
-      value.version === 1 &&
+      (value.version === 1 || value.version === 2) &&
+      value.version === opts.reference.version &&
       value.kind === "native-compose-file-material" &&
       sameNativeComposeFileState(value.reference, reference) &&
       isRecord(value.creation) &&
@@ -290,7 +300,7 @@ export function parseNativeComposeFileManifest(opts: {
       value.creation.documentHash === null &&
       anchor(value.journal) &&
       Array.isArray(value.members) &&
-      value.members.every(member)
+      value.members.every((entry) => member(entry, opts.reference.version))
     )
   ) {
     return refuseNativeComposeFile();
@@ -301,14 +311,16 @@ export function parseNativeComposeFileManifest(opts: {
   );
   if (
     ids.size !== value.members.length ||
-    targets.size !== value.members.length
+    targets.size !== value.members.length ||
+    (opts.reference.version === 2 &&
+      !value.members.some((entry) => entry.file.mode !== 0o444))
   ) {
     return refuseNativeComposeFile();
   }
   // Creation bindings are produced by the same opaque authority. Saved identities
   // select immutable material; they never grant a live completion capability.
   const result: NativeComposeFileManifest = {
-    version: 1,
+    version: opts.reference.version,
     kind: "native-compose-file-material",
     reference,
     creation: parseBinding(value.creation, {

@@ -85,6 +85,30 @@ fixture; host and provider proxy settings remain unchanged. In a real project,
 add its internal service names to the existing proxy exceptions rather than
 discarding the project's other entries.
 
+## Native config process-policy qualification
+
+`native-config-process-policy` is registered in required Docker CI. It needs the
+current compiled CLI, matching compiler and cached `oven/bun:1.4.2-slim`; it resolves
+the immutable image ID and never pulls, publishes ports, or activates DNS/trust.
+
+```sh
+HACK_E2E_CLI_BIN=./dist/hack HACK_E2E_DOCKER=1 HACK_E2E_REQUIRE_DOCKER=1 bun tests/e2e/run.ts --only=native-config-process-policy
+```
+
+The fixture observes `SIGUSR1` delivery, delayed graceful exit and forced termination
+after authored grace. Persistent monotonic heartbeats distinguish grace enforcement
+from merely setting a Compose field. A double-forked child is observed after adoption
+by PID 1 and then after reaping by the actual init process. Failure counters and engine
+restart counts prove two `on-failure` retries before a successful third start.
+Readback uses the same retained volume through a separate native profile. Unsupported
+resource/logging declarations, including inactive workloads, must refuse before any
+engine access or lifecycle hook. These refusal controls do not qualify resource
+limits, reservations, logging policy or the full advanced signals/resources corpus.
+
+Cleanup checks exact native ownership and separately removes its captured read-only
+evidence reader. An incomplete teardown fails and preserves both private roots and
+recovery identities; ordinary successful cleanup remains unchanged.
+
 ## Native config routing qualification
 
 `native-config-routing` is a required Docker CI scenario using the current compiled

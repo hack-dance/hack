@@ -8,6 +8,7 @@ import {
   nativeBuildProject,
   verifyNativeBuildEvidence,
   verifyNativeBuildImage,
+  verifyNativeBuildWorkloadState,
   verifyUnsupportedNativeBuild,
 } from "./e2e/scenarios/native-config-build.ts";
 import { composeFixture } from "./helpers/native-compose.ts";
@@ -15,6 +16,56 @@ import { composeFixture } from "./helpers/native-compose.ts";
 const OWNER = "b".repeat(32);
 const ID = `sha256:${"c".repeat(64)}`;
 const TAG = "native-fixture-builder:latest";
+
+const SAFE_WORKLOAD = {
+  service: "builder",
+  image: ID,
+  running: true,
+  exit: 0,
+  ports: {},
+  publishAll: false,
+  runtimePorts: { "3000/tcp": null },
+};
+
+test("build workload accepts explicit no-publication facts for service and completed job", () => {
+  expect(() => verifyNativeBuildWorkloadState(SAFE_WORKLOAD)).not.toThrow();
+  expect(() =>
+    verifyNativeBuildWorkloadState({
+      ...SAFE_WORKLOAD,
+      service: "defaultfile",
+      running: false,
+      ports: null,
+      runtimePorts: null,
+    })
+  ).not.toThrow();
+});
+
+test.each([
+  {
+    publishAll: true,
+    runtimePorts: { "3000/tcp": [{ HostIp: "0.0.0.0", HostPort: "49153" }] },
+  },
+  {
+    publishAll: false,
+    runtimePorts: { "3000/tcp": [{ HostIp: "127.0.0.1", HostPort: "49153" }] },
+  },
+  { publishAll: true, runtimePorts: { "3000/tcp": null } },
+])("build workload refuses dynamic publication %#", (ports) => {
+  expect(() =>
+    verifyNativeBuildWorkloadState({ ...SAFE_WORKLOAD, ...ports })
+  ).toThrow();
+});
+
+test.each([
+  "ports",
+  "publishAll",
+  "runtimePorts",
+])("build workload refuses missing %s fact", (field) => {
+  const missing: Record<string, unknown> = { ...SAFE_WORKLOAD };
+  delete missing[field];
+  expect(() => verifyNativeBuildWorkloadState(missing)).toThrow();
+});
+
 function evidence(): Record<string, unknown> {
   return {
     owner: OWNER,

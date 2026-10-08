@@ -13,6 +13,7 @@ import {
   runCommand,
   type Scenario,
 } from "../harness.ts";
+import { proxyHasNoPublishedPorts } from "./native-config-routing.ts";
 
 const TIMEOUT = 120_000;
 const IMAGE_ID = /^sha256:[a-f0-9]{64}$/;
@@ -81,6 +82,27 @@ function data(result: CliResult): Record<string, unknown> {
     throw new Error("Native build command data is absent");
   }
   return envelope.data;
+}
+
+/** Both the running service and completed job must prove no runtime host publication. */
+export function verifyNativeBuildWorkloadState(state: unknown): void {
+  expect({
+    that:
+      isRecord(state) &&
+      typeof state.image === "string" &&
+      IMAGE_ID.test(state.image) &&
+      (state.service === "builder"
+        ? state.running === true
+        : state.service === "defaultfile" &&
+          state.running === false &&
+          state.exit === 0) &&
+      ["ports", "publishAll", "runtimePorts"].every((field) =>
+        Object.hasOwn(state, field)
+      ) &&
+      proxyHasNoPublishedPorts(state),
+    message:
+      "Built service/job must have the expected state and no published ports",
+  });
 }
 
 /** A default final stage, lost argv, or reinitialized data must not pass build acceptance. */
@@ -643,23 +665,10 @@ export const nativeConfigBuildScenario: Scenario = {
             "inspect",
             id,
             "--format",
-            '{"service":{{json (index .Config.Labels "com.docker.compose.service")}},"image":{{json .Image}},"running":{{json .State.Running}},"exit":{{json .State.ExitCode}},"ports":{{json .HostConfig.PortBindings}}}',
+            '{"service":{{json (index .Config.Labels "com.docker.compose.service")}},"image":{{json .Image}},"running":{{json .State.Running}},"exit":{{json .State.ExitCode}},"ports":{{json .HostConfig.PortBindings}},"publishAll":{{json .HostConfig.PublishAllPorts}},"runtimePorts":{{json .NetworkSettings.Ports}}}',
           ])
         );
-        expect({
-          that:
-            typeof state.image === "string" &&
-            IMAGE_ID.test(state.image) &&
-            (state.service === "builder"
-              ? state.running === true
-              : state.service === "defaultfile" &&
-                state.running === false &&
-                state.exit === 0) &&
-            (state.ports === null ||
-              (isRecord(state.ports) && Object.keys(state.ports).length === 0)),
-          message:
-            "Built service/job must have the expected state and no published ports",
-        });
+        verifyNativeBuildWorkloadState(state);
         if (typeof state.image !== "string") {
           throw new Error("Built image is absent");
         }

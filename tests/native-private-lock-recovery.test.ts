@@ -145,7 +145,9 @@ test("selected retirement rechecks file and caller authority after its final pro
           }
         }
       }
-      return originalSpawn(...args);
+      return Array.isArray(command)
+        ? originalSpawn(command, args[1])
+        : originalSpawn(command);
     });
     try {
       await expect(

@@ -51,6 +51,17 @@ function refused(): never {
   );
 }
 
+/**
+ * Each complete fixture query needs its own bounded acquisition. The shared
+ * createNativeComposeProbe aggregates time and output from factory creation;
+ * its owner cannot span later stop/start/recovery stages. Product acquisitions
+ * retain their existing aggregate limits and are never renewed by this helper.
+ */
+export function createAdoptionFixtureProbe() {
+  return async (args: readonly string[]) =>
+    (await createNativeComposeProbe({ timeoutMs: 30_000 })(args)).trim();
+}
+
 /** Fixture-only polling; callers bind SQL to captured original IDs and only seed markers before adoption. */
 export async function waitForAdoptionFixtureSql(opts: {
   readonly read: () => Promise<string>;
@@ -275,9 +286,7 @@ async function prepareFixtureInputs(ctx: ScenarioContext) {
   if (process.platform !== "darwin" && process.platform !== "linux") {
     ctx.skip("requires supported native private-state host");
   }
-  const boundedProbe = createNativeComposeProbe({ timeoutMs: 30_000 });
-  const probe = async (args: readonly string[]) =>
-    (await boundedProbe(args)).trim();
+  const probe = createAdoptionFixtureProbe();
   const engine = Bun.which("docker");
   if (!engine) {
     ctx.skip("Docker executable unavailable");

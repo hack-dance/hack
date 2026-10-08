@@ -90,9 +90,10 @@ export function nativeComposeRetainedVolumesValid(
 
 /**
  * First observations may add facts; existing facts are never forgotten or rebound.
- * Missing or replaced volumes refuse before effects, including after a verified stop.
+ * Missing volumes or changed birth metadata refuse before effects, including after a verified stop.
  * A birth timestamp is an engine-provided fence, not cryptographic proof against a
- * hostile daemon or an administrator able to recreate all volume metadata.
+ * unique engine identity. Identical metadata, including an ordinary same-second
+ * replacement when timestamp precision is coarse, cannot prove content continuity.
  */
 export function mergeNativeComposeRetainedVolumes(opts: {
   readonly retained: readonly NativeComposeRetainedVolume[];

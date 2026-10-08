@@ -39,8 +39,11 @@ volumes must exist before any new effect, and the first verified observation
 records their current birth. This cannot prove that a same-name replacement did
 not happen before that first observation. Older clients refuse version `2`
 receipts; do not remove or edit private receipts to force a downgrade. The birth
-fence trusts engine metadata and cannot protect against a hostile daemon or an
-administrator recreating the same metadata. No volume deletion or automatic
+fence trusts engine metadata and is not a unique engine identity. An ordinary
+same-second replacement with identical labels and `CreatedAt` can be
+indistinguishable when the engine timestamp has coarse precision. This guard
+does not establish volume-content continuity or detect every empty replacement;
+that requires a separately qualified persistent content witness. No volume deletion or automatic
 data-loss repair is added.
 
 Verified readiness and one-off ownership observations also feed this storage

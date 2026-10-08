@@ -40,9 +40,13 @@ readiness or cleanup decisions. Failures discard daemon output and diagnostics.
 
 Containers and networks are inspected by full immutable IDs. Docker volumes expose
 names rather than immutable engine IDs. The selected inventory is checked again
-after inspection, so additions, removals, renames, and project-label conflicts
-refuse. This is not an atomic engine transaction: another Docker client can change
-resources after the last observation, or replace a volume under the same name.
+after inspection, including a second selected-volume inspection that compares
+name, storage key and reported creation timestamp. Additions, removals, renames,
+project-label conflicts or changed birth metadata refuse. This is not an atomic
+engine transaction: another Docker client can change resources after the last
+observation. Identical names, labels and timestamps do not establish unique
+physical identity or content continuity; an ordinary same-second replacement
+may be indistinguishable. A persistent content witness remains a separate gate.
 The caller must recheck at its effect boundary and retain explicit recovery for
 uncertain outcomes.
 

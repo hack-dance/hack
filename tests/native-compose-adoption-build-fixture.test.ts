@@ -14,6 +14,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { acquireLegacyComposeBuildSource } from "../src/lib/native-compose-adoption-build.ts";
 import { acquireLegacyAdoptionSourceInputs } from "../src/lib/native-config-import-inputs.ts";
+import { runCommand } from "./e2e/harness.ts";
 import {
   assertRetainedBuildFixtureCopy,
   assertRetainedFixtureImageUnchanged,
@@ -25,7 +26,10 @@ import {
   retainedBuildFixtureReadAllowed,
   retainedBuildFixtureSourceSnapshot,
 } from "./e2e/scenarios/native-compose-adoption-build-inputs.ts";
-import { nativeComposeAdoptionBuildWorktreesScenario } from "./e2e/scenarios/native-compose-adoption-worktrees.ts";
+import {
+  buildFixtureCli,
+  nativeComposeAdoptionBuildWorktreesScenario,
+} from "./e2e/scenarios/native-compose-adoption-worktrees.ts";
 import { captureAdoptionDependencyFirstPrepare } from "./e2e/scenarios/native-compose-adoption-dependency-staged-read.ts";
 import { retainedBuildFixture } from "./helpers/retained-build-adoption.ts";
 
@@ -162,6 +166,109 @@ for (const mode of ["root-specific", "hack-default"] as const) {
       );
     } finally {
       await rm(root, { recursive: true, force: true });
+    }
+  });
+}
+for (const mode of ["root-specific", "hack-default"] as const) {
+  test(`actual ${mode} preview transport refuses an injected build before forwarding`, async () => {
+    const outer = await realpath(
+      await mkdtemp(join(tmpdir(), "retained-build-preview-transport-"))
+    );
+    const root = join(outer, "checkout");
+    const engine = join(outer, "synthetic-engine");
+    const forwarded = join(outer, "engine-forwarded");
+    const previewArgs = ["config", "adopt", "--dry-run", "--stop", "--json"];
+    const instance = {
+      root,
+      name: "fixture",
+      marker: "synthetic-sql-marker",
+      basicBuild: mode,
+    };
+    try {
+      await chmod(outer, 0o700);
+      await mkdir(root, { mode: 0o700 });
+      await mkdir(join(root, ".hack"), { mode: 0o700 });
+      await writeFile(
+        join(root, ".hack/docker-compose.yml"),
+        JSON.stringify({
+          services: { db: { build: retainedBuildFixtureDefinition(mode) } },
+        }),
+        { mode: 0o600 }
+      );
+      await writeFile(
+        engine,
+        `#!${process.execPath}\nawait Bun.write(${JSON.stringify(forwarded)},'unexpected-forwarding');process.exit(0);\n`,
+        { mode: 0o700 }
+      );
+      let invocations = 0;
+      const cli: Parameters<typeof buildFixtureCli>[0]["cli"] = async (
+        selected,
+        args,
+        extra
+      ) => {
+        invocations += 1;
+        expect(selected).toBe(instance);
+        expect(args).toEqual(previewArgs);
+        return await runCommand({
+          argv: ["docker", "compose", "build", "db"],
+          cwd: root,
+          env: extra,
+          timeoutMs: 5000,
+        });
+      };
+      const result = await buildFixtureCli(
+        {
+          ctx: { tempRoot: outer },
+          engine,
+          engineId: "synthetic-daemon",
+          baseImage: `sha256:${"1".repeat(64)}`,
+          anchors: new Map([
+            [
+              instance,
+              {
+                source: "synthetic-original-source",
+                resources: {
+                  container: [
+                    { id, service: "db" },
+                    { id: other, service: "worker" },
+                  ],
+                  network: [{ id: scope.networkId }],
+                  volume: [{ id: scope.volumeName }],
+                },
+              },
+            ],
+          ]),
+          builtImages: new Map([
+            [
+              instance,
+              retainedBuildFixtureImage({
+                value: imageRow,
+                reference: "fixture-db",
+                owner: "fixture",
+                originalImageIds: [],
+              }),
+            ],
+          ]),
+          cli,
+        },
+        instance,
+        previewArgs
+      );
+      expect(invocations).toBe(1);
+      expect(result.timedOut).toBe(false);
+      expect(result.exitCode).toBe(93);
+      expect(result.stdout).toBe("");
+      expect(result.stderr).toBe(
+        "retained-build-refused stage=read-admission code=93\n"
+      );
+      expect(await Bun.file(forwarded).exists()).toBe(false);
+      expect(
+        await Bun.file(
+          join(root, ".hack/.internal/legacy-compose-adoption-v1/receipt.json")
+        ).exists()
+      ).toBe(false);
+    } finally {
+      await rm(outer, { recursive: true, force: true });
     }
   });
 }

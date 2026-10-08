@@ -2058,7 +2058,7 @@ async function dependencyControlMarker(path: string, expected: string) {
   }
 }
 
-function dependencyEngineCheck(h: FixtureRuntime): string {
+function dependencyEngineCheck(h: Pick<FixtureRuntime, "engineId">): string {
   return `const engineCheck=Bun.spawn([engine,'info','--format','{{json .ID}}'],{stdin:'ignore',stdout:'pipe',stderr:'ignore'});
  const engineId=(await new Response(engineCheck.stdout).text()).trim();if(await engineCheck.exited!==0 || engineId!==${JSON.stringify(h.engineId)})process.exit(95);`;
 }
@@ -2101,7 +2101,13 @@ try {
  if(!allowed){console.error('dependency-read-refused stage=read-admission code=93');process.exit(93);}
 }catch{console.error('dependency-read-refused stage=read-admission code=93');process.exit(93);}`;
 }
-function fixtureBuildScope(h: FixtureRuntime, instance: Instance) {
+type BuildFixtureTransport = Pick<
+  FixtureRuntime,
+  "engine" | "engineId" | "baseImage" | "anchors" | "builtImages" | "cli"
+> & {
+  readonly ctx: Pick<ScenarioContext, "tempRoot">;
+};
+function fixtureBuildScope(h: BuildFixtureTransport, instance: Instance) {
   const anchor = h.anchors.get(instance);
   const built = h.builtImages.get(instance);
   if (
@@ -2126,7 +2132,7 @@ function fixtureBuildScope(h: FixtureRuntime, instance: Instance) {
   };
 }
 function buildMutationGuard(
-  h: FixtureRuntime,
+  h: BuildFixtureTransport,
   instance: Instance,
   receipt: string
 ) {
@@ -2138,7 +2144,7 @@ const mutationReceipt=JSON.parse(await Bun.file(${JSON.stringify(receipt)}).text
 if(!retainedBuildFixtureMutationAllowed({args,receipt:mutationReceipt,ids:${JSON.stringify(fixtureBuildScope(h, instance).containerIds)},services:['db','worker']})) {console.error('retained-build-refused stage=mutation-admission code=94');process.exit(94);}`;
 }
 function buildReadGuard(
-  h: FixtureRuntime,
+  h: BuildFixtureTransport,
   instance: Instance,
   receipt: string,
   firstPrepare?: AdoptionDependencyFirstPrepare
@@ -2156,8 +2162,9 @@ try {
  if(!allowed){console.error('retained-build-refused stage=read-admission code=93');process.exit(93);}
 }catch{console.error('retained-build-refused stage=read-admission code=93');process.exit(93);}`;
 }
-async function buildFixtureCli(
-  h: FixtureRuntime,
+/** Actual closed transport used by every post-bootstrap build9 CLI invocation, including previews. */
+export async function buildFixtureCli(
+  h: BuildFixtureTransport,
   instance: Instance,
   args: readonly string[],
   driftAfterStart = false
@@ -2443,14 +2450,12 @@ async function retainedBuildContextRecovery(h: FixtureRuntime) {
     refusedPreview(
       await buildFixtureCli(h, first, ["up", "--detach", "--json"], true)
     );
-    const receipt = object(
-      await Bun.file(
-        join(
-          first.root,
-          ".hack/.internal/legacy-compose-adoption-v1/receipt.json"
-        )
-      ).text()
+    const receiptPath = join(
+      first.root,
+      ".hack/.internal/legacy-compose-adoption-v1/receipt.json"
     );
+    const receiptBytes = await Bun.file(receiptPath).text();
+    const receipt = object(receiptBytes);
     if (
       !isRecord(receipt.pendingOperation) ||
       receipt.pendingOperation.operation !== "start"
@@ -2461,7 +2466,10 @@ async function retainedBuildContextRecovery(h: FixtureRuntime) {
     refusedPreview(
       await buildFixtureCli(h, first, ["down", "--recover", "--json"])
     );
-    if ((await fixtureRunningIds(h, first)) !== state) {
+    if (
+      (await fixtureRunningIds(h, first)) !== state ||
+      (await Bun.file(receiptPath).text()) !== receiptBytes
+    ) {
       refused();
     }
     await assertFixtureBuildImages({ ...h, instance: first });
@@ -2607,7 +2615,7 @@ export const nativeComposeAdoptionBuildWorktreesScenario: Scenario = {
         for (const instance of [h.first, h.second]) {
           await bootstrapOriginal(h, instance);
           const preview = successful(
-            await h.cli(instance, [
+            await buildFixtureCli(h, instance, [
               "config",
               "adopt",
               "--dry-run",

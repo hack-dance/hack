@@ -10,6 +10,7 @@ import {
   verifyNativeBuildImage,
   verifyNativeBuildReuse,
   verifyNativeBuildWorkloadState,
+  verifySupersededNativeBuildImageAbsent,
   verifyUnsupportedNativeBuild,
 } from "./e2e/scenarios/native-config-build.ts";
 import { composeFixture } from "./helpers/native-compose.ts";
@@ -195,6 +196,50 @@ test("owned self-digest requires the exact generated repository and inspected fu
     "not-an-array",
   ]) {
     expect(() => verifyImage({ ...image(), digests })).toThrow();
+  }
+});
+
+test("superseded image absence requires two stable pinned inventories and its admitted successor", () => {
+  const old = ID;
+  const successor = `sha256:${"d".repeat(64)}`;
+  const baseline = `sha256:${"e".repeat(64)}`;
+  const view = { engineId: "fixture-daemon:1", ids: [baseline, successor] };
+  const valid = {
+    id: old,
+    successor,
+    capturedIds: [old, successor],
+    baselineIds: [baseline],
+    engineId: view.engineId,
+    before: view,
+    after: view,
+  };
+  expect(() => verifySupersededNativeBuildImageAbsent(valid)).not.toThrow();
+  for (const changed of [
+    { id: successor },
+    { id: baseline },
+    { id: "short-id" },
+    { successor: old },
+    { capturedIds: [successor] },
+    { capturedIds: [old, successor, old] },
+    { baselineIds: [baseline, old] },
+    { baselineIds: [baseline, `sha256:${"f".repeat(64)}`] },
+    { before: null },
+    { after: { ...view, engineId: "other-daemon:1" } },
+    { after: { ...view, ids: [baseline] } },
+    { before: { ...view, ids: [baseline, successor, old] } },
+    {
+      after: {
+        ...view,
+        ids: [baseline, successor, `sha256:${"f".repeat(64)}`],
+      },
+    },
+    { before: { ...view, ids: [baseline, successor, successor] } },
+    { after: { ...view, ids: ["short-id", successor] } },
+    { after: { ...view, extra: "not-allowed" } },
+  ]) {
+    expect(() =>
+      verifySupersededNativeBuildImageAbsent({ ...valid, ...changed })
+    ).toThrow();
   }
 });
 

@@ -19,6 +19,7 @@ const TIMEOUT = 120_000;
 const IMAGE_ID = /^sha256:[a-f0-9]{64}$/;
 const RESOURCE_ID = /^[a-f0-9]{64}$/;
 const TOKEN = /^[a-f0-9]{32}$/;
+const ENGINE_ID = /^[A-Za-z0-9:-]{1,128}$/;
 const BASE_TAG = "oven/bun:1.4.2-slim";
 const IMAGE_OWNER = "hack.e2e.native-build.owner";
 const IMAGE_PROJECT = "hack.e2e.native-build.project";
@@ -197,6 +198,58 @@ export function verifyNativeBuildImage(opts: {
           ))),
     message:
       "Only a new exact source-labeled fixture image with no foreign tags or digests may be removed",
+  });
+}
+
+/** Read-only absence of a previously admitted superseded image never authorizes removal. */
+export function verifySupersededNativeBuildImageAbsent(opts: {
+  readonly id: string;
+  readonly successor: string;
+  readonly capturedIds: readonly string[];
+  readonly baselineIds: readonly string[];
+  readonly engineId: string;
+  readonly before: unknown;
+  readonly after: unknown;
+}): void {
+  const ids = (value: unknown): string[] | null => {
+    if (
+      !isRecord(value) ||
+      Object.keys(value).sort().join(",") !== "engineId,ids" ||
+      value.engineId !== opts.engineId ||
+      !Array.isArray(value.ids) ||
+      !value.ids.every((id) => typeof id === "string" && IMAGE_ID.test(id)) ||
+      new Set(value.ids).size !== value.ids.length
+    ) {
+      return null;
+    }
+    return [...value.ids].sort();
+  };
+  const before = ids(opts.before);
+  const after = ids(opts.after);
+  expect({
+    that:
+      ENGINE_ID.test(opts.engineId) &&
+      IMAGE_ID.test(opts.id) &&
+      IMAGE_ID.test(opts.successor) &&
+      opts.id !== opts.successor &&
+      opts.capturedIds.every((id) => IMAGE_ID.test(id)) &&
+      opts.baselineIds.every((id) => IMAGE_ID.test(id)) &&
+      new Set(opts.capturedIds).size === opts.capturedIds.length &&
+      opts.capturedIds.includes(opts.id) &&
+      opts.capturedIds.includes(opts.successor) &&
+      !opts.baselineIds.includes(opts.id) &&
+      !opts.baselineIds.includes(opts.successor) &&
+      before !== null &&
+      after !== null &&
+      JSON.stringify(before) === JSON.stringify(after) &&
+      !before.includes(opts.id) &&
+      before.includes(opts.successor) &&
+      opts.baselineIds.every((id) => before.includes(id)) &&
+      before.every(
+        (id) => opts.baselineIds.includes(id) || opts.capturedIds.includes(id)
+      ),
+    message:
+      "Only a previously admitted superseded image may be observed absent on the unchanged daemon and inventory",
   });
 }
 
@@ -439,9 +492,19 @@ export const nativeConfigBuildScenario: Scenario = {
       that: IMAGE_ID.test(baseId),
       message: "Bun base must already be cached; fixture never invokes pull",
     });
-    const baselineIds = (await docker(["image", "ls", "-aq", "--no-trunc"]))
-      .split(/\s+/)
-      .filter(Boolean);
+    const engineId: unknown = JSON.parse(
+      await docker(["info", "--format", "{{json .ID}}"])
+    );
+    if (typeof engineId !== "string" || !ENGINE_ID.test(engineId)) {
+      throw new Error("Pinned build fixture daemon identity is absent");
+    }
+    const baselineIds = [
+      ...new Set(
+        (await docker(["image", "ls", "-aq", "--no-trunc"]))
+          .split(/\s+/)
+          .filter(Boolean)
+      ),
+    ];
     const cacheBefore = await docker([
       "system",
       "df",
@@ -547,6 +610,7 @@ export const nativeConfigBuildScenario: Scenario = {
     stage("unsupported build fields refused before hooks/engine access");
     let identity: Identity | null = null;
     const capturedImages = new Set<string>();
+    const supersededImages = new Map<string, string>();
     const saveRecovery = async (): Promise<void> => {
       await Bun.write(
         join(ctx.tempRoot, "build-recovery.json"),
@@ -556,6 +620,8 @@ export const nativeConfigBuildScenario: Scenario = {
             owner,
             identity,
             capturedImages: [...capturedImages],
+            supersededImages: [...supersededImages],
+            engineId,
             baselineIds,
             baseTag: BASE_TAG,
             baseId,
@@ -684,9 +750,10 @@ export const nativeConfigBuildScenario: Scenario = {
         capturedImages.add(id);
       }
     };
-    const verifyWorkloads = async (): Promise<
-      Readonly<Record<string, string>>
-    > => {
+    const verifyWorkloads = async (): Promise<{
+      readonly builder: string;
+      readonly defaultfile: string;
+    }> => {
       const ids = await list("container");
       const images: Record<string, string> = {};
       expect({
@@ -722,7 +789,15 @@ export const nativeConfigBuildScenario: Scenario = {
         capturedImages.add(state.image);
         images[String(state.service)] = state.image;
       }
-      return images;
+      if (
+        typeof images.builder !== "string" ||
+        typeof images.defaultfile !== "string"
+      ) {
+        throw new Error(
+          "Distinct builder and completed-job image facts missing"
+        );
+      }
+      return { builder: images.builder, defaultfile: images.defaultfile };
     };
     const readEvidence = async (marker: string): Promise<unknown> => {
       const result = await cli(["exec", "builder", "--", "bun", "-e", READ]);
@@ -734,6 +809,56 @@ export const nativeConfigBuildScenario: Scenario = {
         firstMarker: initial,
       });
       return evidence;
+    };
+    const inventory = async () => {
+      const observedEngine: unknown = JSON.parse(
+        await docker(["info", "--format", "{{json .ID}}"])
+      );
+      const ids = [
+        ...new Set(
+          (await docker(["image", "ls", "-aq", "--no-trunc"]))
+            .split(/\s+/)
+            .filter(Boolean)
+        ),
+      ];
+      const afterEngine: unknown = JSON.parse(
+        await docker(["info", "--format", "{{json .ID}}"])
+      );
+      expect({
+        that: observedEngine === engineId && afterEngine === engineId,
+        message: "Image inventory must stay on the pinned fixture daemon",
+      });
+      return { engineId: observedEngine, ids };
+    };
+    const retireImage = async (id: string): Promise<void> => {
+      const before = await inventory();
+      if (!before.ids.includes(id)) {
+        const successor = supersededImages.get(id);
+        if (!successor) {
+          throw new Error("A current admitted build image is missing");
+        }
+        const replacement = await imageOwned(successor);
+        expect({
+          that:
+            Array.isArray(replacement.tags) &&
+            replacement.tags.includes(
+              `${currentOwner().composeProject}-builder:latest`
+            ),
+          message: "Superseded image must retain its exact tagged replacement",
+        });
+        verifySupersededNativeBuildImageAbsent({
+          id,
+          successor,
+          capturedIds: [...capturedImages],
+          baselineIds,
+          engineId,
+          before,
+          after: await inventory(),
+        });
+        return;
+      }
+      await imageOwned(id);
+      await docker(["image", "rm", "--no-prune", id]);
     };
     const cleanup = async (): Promise<void> => {
       await assertSource();
@@ -764,8 +889,7 @@ export const nativeConfigBuildScenario: Scenario = {
         }
         await captureImages();
         for (const id of capturedImages) {
-          await imageOwned(id);
-          await docker(["image", "rm", "--no-prune", id]);
+          await retireImage(id);
         }
       }
       const remaining = await docker([
@@ -835,6 +959,7 @@ export const nativeConfigBuildScenario: Scenario = {
       data(await cli(["--profile", "exercise", "up", "--detach", "--json"]));
       const secondImages = await verifyWorkloads();
       verifyNativeBuildReuse({ first: firstImages, second: secondImages });
+      supersededImages.set(firstImages.builder, secondImages.builder);
       const second = await readEvidence(updated);
       await captureImages();
       await saveRecovery();

@@ -278,8 +278,12 @@ Cleanup checks captured full image IDs, fixed Dockerfile fixture labels, exclusi
 generated tags and baseline absence before ID-only non-forced removal with
 `--no-prune`. A generated repository's self-digest is accepted only when its hash
 equals that inspected full image ID; foreign repositories or mismatched digests
-still refuse cleanup. The cached base and preexisting images remain. Ordinary builder cache
-is recorded before/after and retained; there is no general cache prune or cache
+still refuse cleanup. The cached base and preexisting images remain.
+An already absent superseded image receives no deletion: two successful full
+inventories must prove the same pinned daemon, baseline continuity, old-ID
+absence and its verified current owned replacement. Current-image verification
+and removal remain unchanged. Ordinary builder cache is recorded before/after
+and retained; there is no general cache prune or cache
 reclamation claim. Failed exact cleanup retains the private fixture and recovery
 identities. Host DNS/trust, registry network denial and advanced builder features
 are separate gates.

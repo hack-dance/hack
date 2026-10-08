@@ -185,6 +185,7 @@ struct FakeState {
     cancel_after_network: Option<Rc<Cell<bool>>>,
     cancel_after_stop: Option<Rc<Cell<bool>>>,
     cancel_after_delete: Option<Rc<Cell<bool>>>,
+    cancel_on_delete_inspection: Option<Rc<Cell<bool>>>,
 }
 struct Fake {
     root: PathBuf,
@@ -258,6 +259,11 @@ impl Backend for Fake {
             return Ok(Value::Null);
         }
         if method == Method::GET {
+            if self.receipt().phase == Phase::RemovalIntent
+                && let Some(changed) = &state.cancel_on_delete_inspection
+            {
+                changed.set(true);
+            }
             let name = path
                 .strip_prefix("/v1.53/containers/")
                 .unwrap()
@@ -906,6 +912,62 @@ fn cleanup_owner_guard_fences_delete_after_stop_and_network_delete_after_contain
         );
         assert_eq!(effects.last().unwrap(), "delete:network");
     }
+}
+
+#[test]
+fn owner_change_during_final_terminal_inspection_refuses_container_delete() {
+    let fixture = Fixture::new(basic());
+    let (graph, mut session) =
+        fixture.session(fixture.prepared(json!({"web":{}}), &BTreeMap::new()));
+    execution::run(&graph, &mut session, Duration::from_secs(5)).unwrap();
+    let changed = Rc::new(Cell::new(false));
+    session
+        .backend
+        .state
+        .borrow_mut()
+        .cancel_on_delete_inspection = Some(changed.clone());
+    let guard = || {
+        if changed.get() {
+            Err(error("native_graph_foreground", "changed"))
+        } else {
+            Ok(())
+        }
+    };
+    assert!(
+        cleanup_using_guarded(
+            &session.backend,
+            &mut session.receipt,
+            &session.root,
+            Some(&guard)
+        )
+        .is_err()
+    );
+    assert!(changed.get());
+    assert!(
+        session
+            .backend
+            .state
+            .borrow()
+            .effects
+            .iter()
+            .all(|effect| !effect.starts_with("delete:"))
+    );
+    assert_eq!(session.backend.receipt().phase, Phase::RemovalIntent);
+    assert!(session.backend.receipt().terminal["container:web"].stop_requested);
+    changed.set(false);
+    session
+        .backend
+        .state
+        .borrow_mut()
+        .cancel_on_delete_inspection = None;
+    cleanup_using_guarded(
+        &session.backend,
+        &mut session.receipt,
+        &session.root,
+        Some(&guard),
+    )
+    .unwrap();
+    assert_eq!(session.receipt.phase, Phase::Removed);
 }
 
 #[test]

@@ -690,6 +690,21 @@ test("nonempty host hooks/processes and authored routing require their separate 
         before: [{ name: "hook", command: { exec: ["private-sentinel"] } }],
       },
     },
+    {
+      up: {
+        after: [{ name: "hook", command: { exec: ["private-sentinel"] } }],
+      },
+    },
+    {
+      down: {
+        before: [{ name: "hook", command: { exec: ["private-sentinel"] } }],
+      },
+    },
+    {
+      down: {
+        after: [{ name: "hook", command: { exec: ["private-sentinel"] } }],
+      },
+    },
     { processes: { tunnel: { command: { shell: "private-sentinel" } } } },
   ]) {
     refuses(

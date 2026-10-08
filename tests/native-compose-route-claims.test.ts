@@ -732,6 +732,95 @@ test("failed absence proof retains every claim and does not publish deletion int
   expect(await fs.readdir(join(ownerPath(root), "releases"))).toEqual([]);
 });
 
+test("non-retiring absence proof keeps the completed journal and exact claim inode", async () => {
+  const root = await fixture();
+  const result = await store(root);
+  const attempt = await acquire(result);
+  await complete(result, attempt);
+  const path = claimPath(root);
+  const before = await fs.lstat(path);
+  const text = await Bun.file(path).text();
+  const journal = await fs.readdir(attemptPath(root, attempt));
+  let proofs = 0;
+  await result.verifyAbsent({
+    references: [attempt.reference],
+    assertAbsent: async (selection) => {
+      expect(selection).toEqual({
+        binding: BINDING,
+        owner: OWNER,
+        hostnames: [HOST],
+      });
+      proofs += 1;
+    },
+  });
+  expect(proofs).toBe(1);
+  expect((await fs.lstat(path)).ino).toBe(before.ino);
+  expect(await Bun.file(path).text()).toBe(text);
+  expect(await fs.readdir(attemptPath(root, attempt))).toEqual(journal);
+  expect(await fs.readdir(join(ownerPath(root), "releases"))).toEqual([]);
+  expect((await result.reopen(attempt.reference)).phase).toBe("complete");
+});
+
+test.each([
+  "armed",
+  "retained",
+] as const)("non-retiring absence refuses anchored %s uncertainty before proof or journal writes", async (phase) => {
+  const root = await fixture();
+  const result = await store(root);
+  const attempt = await acquire(result);
+  await result.markEffectsPossible(attempt);
+  if (phase === "retained") {
+    await result.retain(attempt);
+  }
+  const journal = await fs.readdir(attemptPath(root, attempt));
+  const claim = await Bun.file(claimPath(root)).text();
+  let proofs = 0;
+  await expect(
+    result.verifyAbsent({
+      references: [attempt.reference],
+      assertAbsent: async () => {
+        proofs += 1;
+      },
+    })
+  ).rejects.toMatchObject({ code: "E_NATIVE_COMPOSE_ROUTE_RETAINED" });
+  expect(proofs).toBe(0);
+  expect(await fs.readdir(attemptPath(root, attempt))).toEqual(journal);
+  expect(await fs.readdir(join(ownerPath(root), "releases"))).toEqual([]);
+  expect(await Bun.file(claimPath(root)).text()).toBe(claim);
+  expect((await result.reopen(attempt.reference)).phase).toBe(phase);
+});
+
+test.each([
+  "wrong-reference",
+  "journal-drift",
+] as const)("non-retiring absence refuses %s and retains claims", async (failure) => {
+  const root = await fixture();
+  const result = await store(root);
+  const attempt = await acquire(result);
+  await complete(result, attempt);
+  const before = await Bun.file(claimPath(root)).text();
+  let proofs = 0;
+  await expect(
+    result.verifyAbsent({
+      references: [
+        failure === "wrong-reference"
+          ? { ...attempt.reference, generationIdentity: "e".repeat(32) }
+          : attempt.reference,
+      ],
+      assertAbsent: async () => {
+        proofs += 1;
+        await acquire(result, ["drift.fixture.hack.local"]);
+      },
+    })
+  ).rejects.toThrow("values omitted");
+  expect(proofs).toBe(failure === "wrong-reference" ? 0 : 1);
+  expect(await Bun.file(claimPath(root)).text()).toBe(before);
+  expect(await fs.readdir(join(ownerPath(root), "releases"))).toEqual([]);
+  expect(
+    await Bun.file(join(attemptPath(root, attempt), "stopped.json")).exists()
+  ).toBe(false);
+});
+
 for (const change of [
   "inode",
   "symlink",

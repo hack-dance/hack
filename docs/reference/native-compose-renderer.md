@@ -26,12 +26,11 @@ execution owner still fences source and environment generations before apply.
 
 The default renderer refuses nonempty host declarations. The command owner can
 set `beforeHooksOwned: true` for its validated and journaled finite `host.up.before`
-and `host.up.after` execution. The flag retains its original name. This admits that
+`host.up.after`, `host.down.before` and `host.down.after` execution. The flag retains its original name. This admits that
 bounded host contract without placing host commands or
 host environment values in the Compose document. Shared effective-binding checks
 serve both guest rendering and the hook owner; each supplies its selected baseline
-and allowed endpoint policy. Down phases and persistent processes still
-refuse. The flag itself provides no execution or freshness proof.
+and allowed endpoint policy. Persistent processes still refuse. The flag itself provides no execution or freshness proof.
 
 The component performs no filesystem or process operations, engine requests,
 environment lookup, decryption, hook execution, or registry/cache inspection. Its

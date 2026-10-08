@@ -29,6 +29,11 @@ import {
   nativeComposeWorkloadsReady as ready,
 } from "./native-compose-completion.ts";
 import {
+  bindNativeComposeDownHooks,
+  prepareNativeComposeDownHooks,
+  readNativeComposeDownHookBinding,
+} from "./native-compose-down-hooks.ts";
+import {
   type NativeComposeGeneration,
   NativeComposeGenerationError,
   type NativeComposeGenerationStore,
@@ -41,6 +46,7 @@ import {
   NativeComposeHostHookError,
   selectNativeComposeAfterHooks,
   selectNativeComposeBeforeHooks,
+  selectNativeComposeDownHooks,
 } from "./native-compose-host-contract.ts";
 import {
   assertNativeComposeBeforeHookBindings,
@@ -67,6 +73,7 @@ import {
   prepareNativeComposeSavedRunRouting,
   readNativeComposeRouteMetadata,
   releaseNativeComposeSavedRoutes,
+  verifyNativeComposeSavedRoutesAbsent,
 } from "./native-compose-route-owner.ts";
 import { NativeComposeRoutingError } from "./native-compose-routing.ts";
 import {
@@ -466,17 +473,31 @@ async function savedCommand(opts: {
   if (options.operation === "down") {
     return await store.withMutation(async (mutation) => {
       const saved = await savedRouteDocuments(store);
+      const prepared = await prepareSavedStop({
+        store,
+        generation,
+        document,
+        selection,
+        saved,
+        options,
+        signal,
+      });
+      const { assertOwned, assertAbsent, hooks, hasDownHooks } = prepared;
       let finalizationError: HackCliError | null = null;
       const result = await mutation
         .runEffect({
           generation,
           operation: "down",
           recoverPending: options.recover === true && pending !== null,
-          assertOwned: async () => {
-            await assertNativeComposeOwned(selection);
-          },
+          assertOwned,
+          assertFresh: hooks?.assertFresh,
+          downHooks: hooks?.downHooks,
           beforeComplete: async () => {
             try {
+              if (hooks) {
+                await hooks.assertSelectionUnchanged();
+                await assertAbsent();
+              }
               await finalizeNativeComposeStop({
                 store,
                 saved,
@@ -502,6 +523,11 @@ async function savedCommand(opts: {
               }
             );
             const observed = await assertNativeComposeOwned(selection);
+            prepared.setStopped(
+              code === 0 &&
+                observed.containers.length === 0 &&
+                observed.networks.length === 0
+            );
             return {
               value: code,
               outcome:
@@ -517,11 +543,7 @@ async function savedCommand(opts: {
           throw finalizationError ?? error;
         });
       if (result.outcome !== "complete") {
-        throw new HackCliError({
-          code: "E_COMPOSE_FAILED",
-          message:
-            "Native Compose stop is incomplete; saved ownership and persistent data are retained.",
-        });
+        return reportNativeStopIncomplete(hooks?.code(), options.json === true);
       }
       if (options.json) {
         emitCliResult({
@@ -530,9 +552,17 @@ async function savedCommand(opts: {
               status: "stopped",
               composeProject: generation.identity.composeProject,
               dataRetained: true,
+              ...(hasDownHooks && options.recover
+                ? { hostHooksSkipped: true }
+                : {}),
             },
           }),
         });
+      }
+      if (hasDownHooks && options.recover && !options.json) {
+        process.stderr.write(
+          "Saved native Compose resources stopped; authored down hooks were skipped by explicit recovery.\n"
+        );
       }
       return result.value;
     });
@@ -580,6 +610,111 @@ async function savedCommand(opts: {
       return await runSavedProcess({ options, generation, document, base });
     },
   });
+}
+
+async function prepareSavedStop(opts: {
+  readonly store: NativeComposeGenerationStore;
+  readonly generation: NativeComposeGeneration;
+  readonly document: PrivateDocument;
+  readonly selection: NativeComposeOwnershipOptions;
+  readonly saved: Awaited<ReturnType<typeof savedRouteDocuments>>;
+  readonly options: NativeComposeCommandOptions;
+  readonly signal: AbortSignal;
+}) {
+  const { store, generation, document, selection, saved, options, signal } =
+    opts;
+  const current = await store.loadCurrent();
+  const hasDownHooks = Object.hasOwn(document, "x-hack-native-down-hooks");
+  let engineStopped = false;
+  const assertOwned = async () => {
+    const observed = await assertNativeComposeOwned(selection);
+    if (
+      engineStopped &&
+      (observed.containers.length !== 0 || observed.networks.length !== 0)
+    ) {
+      throw new NativeComposeGenerationError("E_NATIVE_COMPOSE_UNCERTAIN");
+    }
+  };
+  const assertAbsent = async () => {
+    const observed = await assertNativeComposeOwned(selection);
+    if (observed.containers.length !== 0 || observed.networks.length !== 0) {
+      throw new NativeComposeGenerationError("E_NATIVE_COMPOSE_UNCERTAIN");
+    }
+    for (const value of saved) {
+      await store.readGenerationDocument(value.generation);
+    }
+    await verifyNativeComposeSavedRoutesAbsent({
+      owner: store.identity,
+      saved,
+      signal,
+      deadline: Date.now() + resolveComposeStartupTimeoutMs(),
+    });
+  };
+  let hooks:
+    | Awaited<ReturnType<typeof prepareNativeComposeDownHooks>>
+    | undefined;
+  if (
+    hasDownHooks &&
+    !options.recover &&
+    !(
+      current.stopped &&
+      current.pending === null &&
+      !current.beforeHooksPending
+    )
+  ) {
+    // This check precedes compiler/environment acquisition and cannot replay an interrupted phase.
+    assertStartupAvailable(current);
+    if (current.generation?.generationId !== generation.generationId) {
+      return invalid();
+    }
+    const binding = readNativeComposeDownHookBinding({
+      generation,
+      document,
+    });
+    if (!binding) {
+      return invalid();
+    }
+    await assertOwned();
+    hooks = await prepareNativeComposeDownHooks({
+      binding,
+      projectRoot: store.identity.checkoutRoot,
+      signal,
+      json: options.json === true,
+      assertAbsent,
+    });
+  }
+  return {
+    assertOwned,
+    assertAbsent,
+    hooks,
+    hasDownHooks,
+    setStopped: (stopped: boolean) => {
+      engineStopped = stopped;
+    },
+  };
+}
+
+function reportNativeStopIncomplete(
+  code: number | undefined,
+  json: boolean
+): number {
+  if (code === undefined || code === 0) {
+    throw new HackCliError({
+      code: "E_COMPOSE_FAILED",
+      message:
+        "Native Compose stop is incomplete; saved ownership and persistent data are retained.",
+    });
+  }
+  const message =
+    "Native host down hook failed; stop remains incomplete and saved ownership is retained. Values omitted.";
+  if (json) {
+    emitCliResult({
+      result: errorResult({ code: "E_LIFECYCLE_FAILED", message }),
+    });
+  } else {
+    process.stderr.write(`${message}\n`);
+  }
+  return code;
 }
 
 /** Retire routes before the stop receipt can forget its recovery generation. */
@@ -1053,6 +1188,8 @@ async function prepareCommand(opts: {
   const hooks = [
     ...selectNativeComposeBeforeHooks(inputs.result.plan),
     ...selectNativeComposeAfterHooks(inputs.result.plan),
+    ...selectNativeComposeDownHooks(inputs.result.plan).before,
+    ...selectNativeComposeDownHooks(inputs.result.plan).after,
   ];
   assertNativeComposeBeforeHookBindings({
     hooks,
@@ -1122,7 +1259,11 @@ async function prepareCommand(opts: {
         composeProject: store.identity.composeProject,
         ownerToken: store.identity.ownerToken,
       });
-      const { routing, runRouting, document } = await prepareExecutionRouting({
+      const {
+        routing,
+        runRouting,
+        document: routedDocument,
+      } = await prepareExecutionRouting({
         options,
         store,
         existingRun,
@@ -1133,6 +1274,12 @@ async function prepareCommand(opts: {
         signal,
       });
       try {
+        const document = bindNativeComposeDownHooks({
+          inputs,
+          profiles: rendered.profiles,
+          explicitOverlay: options.overlay,
+          document: routedDocument,
+        });
         const generation = await publishPreparedGeneration({
           existing: existingRun,
           reservation,

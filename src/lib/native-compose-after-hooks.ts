@@ -1,6 +1,7 @@
 import { HackCliError } from "./cli-result.ts";
 import { resolveComposeStartupTimeoutMs } from "./compose-startup-budget.ts";
 import {
+  type NativeComposeHook,
   NativeComposeHostHookError,
   selectNativeComposeAfterHooks,
 } from "./native-compose-host-contract.ts";
@@ -19,8 +20,22 @@ export async function prepareNativeComposeAfterHooks(opts: {
   readonly signal: AbortSignal;
   readonly json: boolean;
 }) {
+  return await prepareNativeComposeFiniteHooks({
+    ...opts,
+    hooks: selectNativeComposeAfterHooks(opts.inputs.result.plan),
+  });
+}
+
+/** Capture a finite phase's target values before its journal; no commands or values are persisted. */
+export async function prepareNativeComposeFiniteHooks(opts: {
+  readonly inputs: Inputs;
+  readonly hooks: readonly NativeComposeHook[];
+  readonly projectRoot: string;
+  readonly signal: AbortSignal;
+  readonly json: boolean;
+}) {
   await opts.inputs.assertFresh();
-  const hooks = selectNativeComposeAfterHooks(opts.inputs.result.plan);
+  const hooks = opts.hooks;
   const values = new Map<string, Readonly<Record<string, string>>>();
   for (const hook of hooks) {
     values.set(hook.name, await opts.inputs.resolveHostValues(hook.name));

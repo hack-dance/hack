@@ -591,6 +591,15 @@ export const nativeConfigFilesScenario: Scenario = {
   },
 };
 
+/** Preserve the selected executable spelling: multiplexed Docker tools select their command by argv0. */
+export function nativeFileUnknownStopWrapper(opts: {
+  readonly executable: string;
+  readonly bun: string;
+  readonly marker: string;
+}): string {
+  return `#!${opts.bun}\nconst args=process.argv.slice(2);const child=Bun.spawn([${JSON.stringify(opts.executable)},...args],{stdin:"inherit",stdout:"inherit",stderr:"inherit"});const code=await child.exited;if(code===0&&args[0]==="compose"&&args.includes("down")){await Bun.write(${JSON.stringify(opts.marker)},"stopped");await Bun.sleep(600000);}process.exit(code);\n`;
+}
+
 /** An expected uncertain journal remains owned; explicit kept roots are mandatory. */
 export const nativeConfigFileUnknownStopScenario: Scenario = {
   name: "native-config-file-stop-unknown",
@@ -607,14 +616,17 @@ export const nativeConfigFileUnknownStopScenario: Scenario = {
     const memberPaths = selected.members.map((member) => member.source);
     const originalMembers = await observeNativeFileFixtureMembers(memberPaths);
     const executable = Bun.which("docker");
-    requireValue(executable !== null);
-    const realDocker = await realpath(executable),
-      wrapper = join(ctx.tempRoot, "stop-wrapper");
+    requireValue(typeof executable === "string" && executable.startsWith("/"));
+    const wrapper = join(ctx.tempRoot, "stop-wrapper");
     await mkdir(wrapper);
     const marker = join(wrapper, "stopped");
     await writeFile(
       join(wrapper, "docker"),
-      `#!${process.execPath}\nconst args=process.argv.slice(2);const child=Bun.spawn([${JSON.stringify(realDocker)},...args],{stdin:"inherit",stdout:"inherit",stderr:"inherit"});const code=await child.exited;if(code===0&&args[0]==="compose"&&args.includes("down")){await Bun.write(${JSON.stringify(marker)},"stopped");await Bun.sleep(600000);}process.exit(code);\n`,
+      nativeFileUnknownStopWrapper({
+        executable,
+        bun: process.execPath,
+        marker,
+      }),
       { mode: 0o700 }
     );
     const result = await fixture.invoke(fixture.root, ["down", "--json"], {

@@ -1,8 +1,17 @@
 import { expect, test } from "bun:test";
-import { chmod, mkdtemp, rename, rm, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  mkdtemp,
+  realpath,
+  rename,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  nativeFileUnknownStopWrapper,
   normalizeNativeFileObservation,
   observeNativeFileFixtureMembers,
 } from "./e2e/scenarios/native-config-files.ts";
@@ -54,6 +63,50 @@ test("metadata normalization preserves optional mount names, complete rows, dupl
     { ...before, id: "c".repeat(64) },
   ]) {
     expect(normalizeNativeFileObservation(changed)).not.toEqual(normalized);
+  }
+});
+
+test("unknown-stop delegation preserves a multiplexed Docker executable name instead of executing its canonical shared tool", async () => {
+  const root = await mkdtemp(join(tmpdir(), "native-file-argv0-"));
+  const shared = join(root, "shared-tools"),
+    docker = join(root, "docker"),
+    wrapper = join(root, "wrapper");
+  try {
+    await writeFile(
+      shared,
+      '#!/bin/sh\ncase "$0" in */docker) printf delegated;; *) exit 71;; esac\n',
+      { mode: 0o700 }
+    );
+    await symlink(shared, docker);
+    for (const [executable, code, output] of [
+      [docker, 0, "delegated"],
+      [await realpath(docker), 71, ""],
+    ] as const) {
+      await writeFile(
+        wrapper,
+        nativeFileUnknownStopWrapper({
+          executable,
+          bun: process.execPath,
+          marker: join(root, "marker"),
+        }),
+        { mode: 0o700 }
+      );
+      const child = Bun.spawn(
+        [process.execPath, "--no-env-file", wrapper, "version"],
+        { stdin: "ignore", stdout: "pipe", stderr: "pipe", timeout: 2000 }
+      );
+      const [actual, stdout, stderr] = await Promise.all([
+        child.exited,
+        new Response(child.stdout).text(),
+        new Response(child.stderr).text(),
+      ]);
+      expect(actual).toBe(code);
+      expect(stdout).toBe(output);
+      expect(stderr).toBe("");
+      expect(await Bun.file(join(root, "marker")).exists()).toBe(false);
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
   }
 });
 

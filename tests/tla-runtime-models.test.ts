@@ -80,6 +80,114 @@ test("runtime model config selection rejects paths and arbitrary filenames", () 
   }
 });
 
+test("storage witness controls distinguish missing bytes from foreign metadata", () => {
+  const model = runtimeModels.find(
+    (entry) => entry.name === "native-storage-witness"
+  );
+  for (const name of ["missing-witness", "wrong-witness", "foreign-metadata"]) {
+    const control = model?.additionalControls.find(
+      (entry) => entry.name === name
+    );
+    expect(control).toBeDefined();
+    if (!control) {
+      throw new Error("Missing storage witness control");
+    }
+    const valid = tlaWitness(control);
+    expect(
+      control.verify({ negative: true, exitCode: 12, output: valid })
+    ).toBe(true);
+    for (const invalid of [
+      valid.replace("enrolled = 1", "enrolled = 0"),
+      valid.replace("unsafeStart = TRUE", "unsafeStart = FALSE"),
+      valid.replace("<StartWorkload ", "<ReadWitness "),
+      valid.replace(
+        "/\\ marker =",
+        "State 3: <StartWorkload line 2>\n/\\ marker ="
+      ),
+      `${valid}\nError: unrelated checker failure`,
+    ]) {
+      expect(
+        control.verify({ negative: true, exitCode: 12, output: invalid })
+      ).toBe(false);
+    }
+  }
+});
+
+test("storage witness resume and recovery evidence retains read-only authority", () => {
+  const model = runtimeModels.find(
+    (entry) => entry.name === "native-storage-witness"
+  );
+  for (const name of [
+    "resume-reachable",
+    "recovery-reachable",
+    "interrupted-missing-reachable",
+    "interrupted-matching-reachable",
+    "recovery-seed",
+  ]) {
+    const control = model?.additionalControls.find(
+      (entry) => entry.name === name
+    );
+    expect(control).toBeDefined();
+    if (!control) {
+      throw new Error("Missing storage witness control");
+    }
+    const valid = tlaWitness(control);
+    expect(
+      control.verify({ negative: true, exitCode: 12, output: valid })
+    ).toBe(true);
+    for (const invalid of [
+      valid.replace("seedCapability = FALSE", "seedCapability = TRUE"),
+      valid.replace(
+        "completionCapability = FALSE",
+        "completionCapability = TRUE"
+      ),
+      valid
+        .replace("originalExpected = 1", "originalExpected = 2")
+        .replace("expected = 1", "expected = 2"),
+      valid.replace(
+        "/\\ completionCapability = FALSE",
+        "State 3: <Recover line 2>\n/\\ completionCapability = FALSE"
+      ),
+    ]) {
+      expect(
+        control.verify({ negative: true, exitCode: 12, output: invalid })
+      ).toBe(false);
+    }
+  }
+});
+
+test("interrupted empty witness slot evidence cannot imply enrollment or effects", () => {
+  const model = runtimeModels.find(
+    (entry) => entry.name === "native-storage-witness"
+  );
+  const control = model?.additionalControls.find(
+    (entry) => entry.name === "empty-intent-refusal-reachable"
+  );
+  expect(control).toBeDefined();
+  if (!control) {
+    throw new Error("Missing storage witness control");
+  }
+  const valid = tlaWitness(control);
+  expect(control.verify({ negative: true, exitCode: 12, output: valid })).toBe(
+    true
+  );
+  for (const invalid of [
+    valid.replace("intent = TRUE", "intent = FALSE"),
+    valid.replace("expected = 0", "expected = 1"),
+    valid.replace("enrolled = 0", "enrolled = 1"),
+    valid.replace("volumePresent = FALSE", "volumePresent = TRUE"),
+    valid.replace("seedWrites = 0", "seedWrites = 1"),
+    valid.replace(
+      'disposition = "needs-explicit-reconcile"',
+      'disposition = "none"'
+    ),
+  ]) {
+    expect(
+      control.verify({ negative: true, exitCode: 12, output: invalid })
+    ).toBe(false);
+  }
+});
+
 test("registry ownership control requires live successor deletion in the same Reap state", () => {
   const model = runtimeModels.find((entry) => entry.name === "registry-writer");
   expect(model).toBeDefined();

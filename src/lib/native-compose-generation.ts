@@ -27,6 +27,15 @@ import {
   nativeComposeRetainedVolumesValid,
 } from "./native-compose-retained-storage.ts";
 import { projectNativeComposeOneOff } from "./native-compose-run-projection.ts";
+import { createNativeComposeStorageWitnessReceiptProtocol } from "./native-compose-storage-witness-receipt.ts";
+import {
+  type NativeComposeStorageWitnessCompletionProof,
+  type NativeComposeStorageWitnessIntent,
+  type NativeComposeStorageWitnessReference,
+  type NativeComposeStorageWitnessState,
+  nativeComposeStorageWitnessIntentValid,
+  nativeComposeStorageWitnessStatesValid,
+} from "./native-compose-storage-witness-state.ts";
 
 // biome-ignore lint/performance/noBarrelFile: Preserve the generation store's public topology contract after the single-parser extraction.
 export {
@@ -117,6 +126,63 @@ const materialActions = new WeakMap<
   object,
   <T>(run: () => Promise<T>) => Promise<T>
 >();
+export type NativeComposeStorageWitnessPublication =
+  | {
+      readonly state: "expected";
+      readonly intent: NativeComposeStorageWitnessIntent;
+    }
+  | {
+      readonly state: "enrolled";
+      readonly reference: NativeComposeStorageWitnessReference;
+      readonly verify: () => Promise<void>;
+    };
+const witnessPublications = new WeakMap<
+  object,
+  (
+    generation: NativeComposeGeneration,
+    input: NativeComposeStorageWitnessPublication
+  ) => Promise<void>
+>();
+/** Only the live generation owner can durably arm an expectation, before its private slot exists. */
+export async function armNativeComposeStorageWitnessIntent(opts: {
+  readonly authority: NativeComposeMaterialAuthority;
+  readonly generation: NativeComposeGeneration;
+  readonly intent: NativeComposeStorageWitnessIntent;
+}): Promise<void> {
+  const { authority, generation } = opts;
+  if (!nativeComposeStorageWitnessIntentValid(opts.intent)) {
+    refuse();
+  }
+  const intent = structuredClone(opts.intent);
+  const publish = witnessPublications.get(authority) ?? refuse();
+  await runNativeComposeMaterialAction({
+    authority,
+    run: async () => await publish(generation, { state: "expected", intent }),
+  });
+}
+/** Append the exact completed extension; publication never repairs or reenrolls an Expected entry. */
+export async function publishNativeComposeStorageWitnessEnrollment(opts: {
+  readonly authority: NativeComposeMaterialAuthority;
+  readonly generation: NativeComposeGeneration;
+  readonly proof: NativeComposeStorageWitnessCompletionProof;
+}): Promise<void> {
+  const { authority, generation, proof } = opts;
+  const publish = witnessPublications.get(authority) ?? refuse();
+  await runNativeComposeMaterialAction({
+    authority,
+    run: async () => {
+      const { consumeNativeComposeStorageWitnessCompletionProof } =
+        await import("./native-compose-storage-witness.ts");
+      const { reference, verify } =
+        consumeNativeComposeStorageWitnessCompletionProof({
+          authority,
+          generation,
+          proof,
+        });
+      await publish(generation, { state: "enrolled", reference, verify });
+    },
+  });
+}
 /** The generation lease remains held until owned material work has settled, even after revocation. */
 export async function runNativeComposeMaterialAction<T>(opts: {
   readonly authority: NativeComposeMaterialAuthority;
@@ -172,6 +238,9 @@ function materialEffectAllowed(
   if (state.beforeHooks !== null || state.pending === null) {
     return false;
   }
+  if (phase === "retire" && witnessPending(state)) {
+    return false;
+  }
   const startup = operation === "up" || operation === "restart";
   if (phase === "effect") {
     return startup && state.pending.generationId === generationId;
@@ -183,6 +252,45 @@ function materialEffectAllowed(
         state.current?.generationId === generationId &&
         state.pending.generationId !== generationId))
   );
+}
+function requireMaterialEffectLive(opts: {
+  readonly selection: MaterialSelection;
+  readonly state: Receipt;
+  readonly effectOperation: NativeComposeOperation | null;
+  readonly activePending: Receipt["pending"];
+  readonly generationId: string;
+}): void {
+  const { selection, state, effectOperation, activePending, generationId } =
+    opts;
+  if (["prepare", "source"].includes(selection.phase)) {
+    return;
+  }
+  if (
+    !materialEffectAllowed(
+      selection.phase,
+      effectOperation,
+      state,
+      generationId
+    )
+  ) {
+    refuse();
+  }
+  if (
+    selection.phase !== "inspect" &&
+    (activePending === null ||
+      JSON.stringify(state.pending) !== JSON.stringify(activePending))
+  ) {
+    refuse();
+  }
+}
+function admitWitnessEffect(
+  operation: NativeComposeOperation,
+  recover: boolean | undefined,
+  state: Receipt
+): void {
+  if (witnessPending(state) && !(operation === "down" && recover === true)) {
+    throw new NativeComposeGenerationError("E_NATIVE_COMPOSE_UNCERTAIN");
+  }
 }
 function materialPreparation(opts: {
   readonly selection: MaterialSelection;
@@ -296,7 +404,7 @@ type HostHookIntent =
       readonly operation: "down";
     };
 type Receipt = {
-  readonly version: 1 | 2;
+  readonly version: 1 | 2 | 3;
   readonly identity: NativeComposeIdentity;
   readonly checkout: CheckoutAnchor;
   readonly current: GenerationAnchor | null;
@@ -306,7 +414,14 @@ type Receipt = {
   readonly beforeHooks: HostHookIntent | null;
   /** Version two records monotonic engine birth facts; old readers refuse this receipt. */
   readonly storage?: readonly NativeComposeRetainedVolume[];
+  /** Required v3 continuity state. Older readers must refuse, never silently ignore it. */
+  readonly storageWitnesses?: readonly NativeComposeStorageWitnessState[];
 };
+function witnessPending(state: Receipt): boolean {
+  return (
+    state.storageWitnesses?.some((entry) => entry.state === "expected") ?? false
+  );
+}
 type FileIdentity = { readonly dev: number; readonly ino: number };
 type CheckoutAnchor = FileIdentity & {
   readonly projectDirectory: FileIdentity;
@@ -455,7 +570,8 @@ function requireBeforeHooksAdmission(
   if (
     mode === "saved" ||
     state.pending !== null ||
-    state.beforeHooks !== null
+    state.beforeHooks !== null ||
+    state.storageWitnesses !== undefined
   ) {
     throw new NativeComposeGenerationError("E_NATIVE_COMPOSE_UNCERTAIN");
   }
@@ -479,7 +595,15 @@ function parseReceipt(
             value,
             "beforeHooks,checkout,current,identity,pending,stopped,storage,version"
           ) &&
-          nativeComposeRetainedVolumesValid(value.storage))) &&
+          nativeComposeRetainedVolumesValid(value.storage)) ||
+        (value.version === 3 &&
+          keys(
+            value,
+            "beforeHooks,checkout,current,identity,pending,stopped,storage,storageWitnesses,version"
+          ) &&
+          nativeComposeRetainedVolumesValid(value.storage) &&
+          nativeComposeStorageWitnessStatesValid(value.storageWitnesses) &&
+          receiptWitnessesCorrespond(value))) &&
       identityMatches(value.identity, identity) &&
       checkoutMatches(value.checkout, checkout) &&
       (value.current === null ||
@@ -494,7 +618,7 @@ function parseReceipt(
     return refuse();
   }
   let storage: readonly NativeComposeRetainedVolume[] | undefined;
-  if (value.version === 2) {
+  if (value.version === 2 || value.version === 3) {
     if (!nativeComposeRetainedVolumesValid(value.storage)) {
       return refuse();
     }
@@ -509,7 +633,61 @@ function parseReceipt(
     pending: value.pending,
     beforeHooks: normalizeHostIntent(value.beforeHooks),
     ...(storage === undefined ? {} : { storage }),
+    ...(value.version === 3
+      ? {
+          storageWitnesses:
+            value.storageWitnesses as readonly NativeComposeStorageWitnessState[],
+        }
+      : {}),
   };
+}
+function expectedWitnessCorresponds(
+  entry: Extract<NativeComposeStorageWitnessState, { state: "expected" }>,
+  pending: unknown,
+  storage: readonly NativeComposeRetainedVolume[]
+): boolean {
+  if (
+    !pendingValid(pending) ||
+    pending.generationId !== entry.generationId ||
+    pending.token !== entry.pendingToken
+  ) {
+    return false;
+  }
+  const retained = storage.find((volume) => volume.name === entry.name);
+  return (
+    (!retained || retained.storage === entry.storage) &&
+    (entry.originalVolume === null ||
+      retained?.createdAt === entry.originalVolume.createdAt)
+  );
+}
+function receiptWitnessesCorrespond(value: Record<string, unknown>): boolean {
+  if (
+    !(
+      nativeComposeStorageWitnessStatesValid(value.storageWitnesses) &&
+      nativeComposeRetainedVolumesValid(value.storage)
+    )
+  ) {
+    return false;
+  }
+  for (const entry of value.storageWitnesses) {
+    if (entry.state === "expected") {
+      if (!expectedWitnessCorresponds(entry, value.pending, value.storage)) {
+        return false;
+      }
+    } else {
+      const retained = value.storage.find(
+        (volume) => volume.name === entry.name
+      );
+      if (
+        !retained ||
+        retained.storage !== entry.storage ||
+        retained.createdAt !== entry.reference.volume.createdAt
+      ) {
+        return false;
+      }
+    }
+  }
+  return true;
 }
 function checkoutMatches(value: unknown, expected: CheckoutAnchor): boolean {
   if (
@@ -680,6 +858,18 @@ export type NativeComposeEffectOptions<T> = {
   readonly assertOwned: () => Promise<void>;
   /** Reuse the exact preceding ownership observation; never perform extra probes here. */
   readonly captureStorage?: () => readonly NativeComposeRetainedVolume[];
+  /** Required for previously enrolled v3 startup/run. Carrier remains unactivated in the CLI. */
+  readonly storageWitnesses?: {
+    readonly engineId: string;
+    readonly observe: (selection: {
+      readonly name: string;
+      readonly storage: string;
+      readonly markerName: string;
+    }) => Promise<{
+      readonly volume: NativeComposeRetainedVolume;
+      readonly archive: Uint8Array;
+    }>;
+  };
   readonly recoverPending?: boolean;
   /** Store-derived immutable one-off delivery, verified before/after run effects. */
   readonly projection?: NativeComposeRunProjection;
@@ -780,6 +970,7 @@ function admitEffect<T>(
     refuse();
   }
   admitDownHooks(input, state);
+  admitWitnessEffect(input.operation, input.recoverPending, state);
   if (
     input.afterHooks &&
     input.operation !== "up" &&
@@ -884,6 +1075,11 @@ export type NativeComposeGenerationStore = {
     readonly hostHookPhase: HostHookIntent["phase"] | null;
     /** Nonenumerable private provenance; null is an older receipt with no birth history. */
     readonly retainedStorage: readonly NativeComposeRetainedVolume[] | null;
+    /** Private mandatory continuity state. No marker or reference is serialized publicly. */
+    readonly storageWitnesses:
+      | readonly NativeComposeStorageWitnessState[]
+      | null;
+    readonly storageWitnessesPending: boolean;
   }>;
   loadPending(): Promise<NativeComposeGeneration | null>;
   /** Private values: never serialize/log this object. Use within a saved-generation lease. */
@@ -1125,7 +1321,7 @@ export async function openNativeComposeGenerationStore(opts: {
         refuse();
       }
     };
-    const save = async (state: Receipt) => {
+    const save = async (state: Receipt, beforePublish?: () => void) => {
       await receipt();
       await assertMutationReceipt();
       const temporary = join(instanceRoot, `${token()}.receipt.tmp`);
@@ -1138,6 +1334,7 @@ export async function openNativeComposeGenerationStore(opts: {
         refuse();
       }
       await assertMutationReceipt();
+      beforePublish?.();
       await rename(temporary, receiptPath);
       if (mutationReceipt !== null) {
         mutationReceipt = { dev: stagedInfo.dev, ino: stagedInfo.ino, text };
@@ -1324,7 +1521,9 @@ export async function openNativeComposeGenerationStore(opts: {
     ) => {
       if (
         JSON.stringify(latest.pending) !== JSON.stringify(pending) ||
-        ((operation !== "down" || hasDownHooks) && latest.beforeHooks !== null)
+        ((operation !== "down" || hasDownHooks) &&
+          latest.beforeHooks !== null) ||
+        witnessPending(latest)
       ) {
         refuse();
       }
@@ -1347,13 +1546,14 @@ export async function openNativeComposeGenerationStore(opts: {
         storage.length &&
         JSON.stringify(storage) !== JSON.stringify(state.storage)
       ) {
-        await save({ ...state, version: 2, storage });
+        await save({ ...state, version: state.version === 3 ? 3 : 2, storage });
       }
     };
     const finalizeEffect = async <T>(
       input: NativeComposeEffectOptions<T>,
       pending: Receipt["pending"],
-      anchor: GenerationAnchor
+      anchor: GenerationAnchor,
+      assertWitnesses: () => Promise<void>
     ) => {
       if (input.assertFresh) {
         await assertFresh(input.assertFresh);
@@ -1364,6 +1564,7 @@ export async function openNativeComposeGenerationStore(opts: {
       }
       await input.assertOwned();
       await rememberStorage(input);
+      await assertWitnesses();
       let latest = await receipt();
       requireFinalPending(
         latest,
@@ -1382,6 +1583,7 @@ export async function openNativeComposeGenerationStore(opts: {
         }
         await input.assertOwned();
         await rememberStorage(input);
+        await assertWitnesses();
         latest = await receipt();
         requireFinalPending(
           latest,
@@ -1419,8 +1621,18 @@ export async function openNativeComposeGenerationStore(opts: {
                 observed: state.storage,
               })
             : null,
+          storageWitnesses: state.storageWitnesses
+            ? structuredClone(state.storageWitnesses)
+            : null,
+          storageWitnessesPending: witnessPending(state),
         };
         Object.defineProperty(result, "retainedStorage", { enumerable: false });
+        Object.defineProperty(result, "storageWitnesses", {
+          enumerable: false,
+        });
+        Object.defineProperty(result, "storageWitnessesPending", {
+          enumerable: false,
+        });
         return result;
       },
       async loadPending() {
@@ -1568,6 +1780,13 @@ export async function openNativeComposeGenerationStore(opts: {
             ) {
               return refuse();
             }
+            requireMaterialEffectLive({
+              selection,
+              state,
+              effectOperation,
+              activePending,
+              generationId,
+            });
             return Object.freeze({
               identity: ownedIdentity,
               generationId,
@@ -1589,6 +1808,55 @@ export async function openNativeComposeGenerationStore(opts: {
               pendingToken: state.pending?.token ?? null,
             });
           });
+          const requireWitnessEffect = (
+            generation: NativeComposeGeneration,
+            intent?: NativeComposeStorageWitnessIntent
+          ) => {
+            requireActive();
+            if (
+              !(
+                (effectOperation === "up" || effectOperation === "restart") &&
+                activePending !== null &&
+                activePending.generationId === generation.generationId &&
+                (!intent ||
+                  (intent.generationId === generation.generationId &&
+                    intent.pendingToken === activePending.token))
+              )
+            ) {
+              return refuse();
+            }
+          };
+          const witnessProtocol =
+            createNativeComposeStorageWitnessReceiptProtocol({
+              authority: materialAuthority,
+              read: receipt,
+              save,
+              requireActive,
+              requireEffect: requireWitnessEffect,
+              verifyAuthority: async (generation) => {
+                await assertNativeComposeMaterialAuthority({
+                  authority: materialAuthority,
+                  generation,
+                  phase: "effect",
+                });
+              },
+              load: async (state) => {
+                const saved = state.pending ?? state.current ?? refuse();
+                return await load(saved.generationId, {
+                  generationId: saved.generationId,
+                  manifestHash: saved.manifestHash,
+                  manifest: saved.manifest,
+                });
+              },
+            });
+          witnessPublications.set(materialAuthority, witnessProtocol.publish);
+          const assertWitnesses = async <T>(
+            input: NativeComposeEffectOptions<T>
+          ) =>
+            await witnessProtocol.assert(
+              input.operation,
+              input.storageWitnesses
+            );
           const fenceEffectInputs = async <T>(
             input: NativeComposeEffectOptions<T>
           ) => {
@@ -1599,6 +1867,7 @@ export async function openNativeComposeGenerationStore(opts: {
             if (input.assertFresh) {
               await assertFresh(input.assertFresh);
             }
+            await assertWitnesses(input);
           };
           const checkEffect = async <T>(
             input: NativeComposeEffectOptions<T>
@@ -1658,11 +1927,13 @@ export async function openNativeComposeGenerationStore(opts: {
             anchor: GenerationAnchor,
             result: Awaited<ReturnType<NativeComposeEffectOptions<T>["effect"]>>
           ) => {
-            if (result.outcome !== "complete") {
-              // Preserve an already verified observation without probing an
-              // uncertain child or clearing its pending effect intent.
+            if (
+              result.outcome !== "complete" ||
+              witnessPending(await receipt())
+            ) {
+              // Saved recovery may stop engine resources, but unresolved enrollment keeps its anchor.
               await rememberStorage(input);
-              return result;
+              return { value: result.value, outcome: "uncertain" as const };
             }
             const hooks = input.afterHooks ?? input.downHooks?.after;
             if (hooks) {
@@ -1676,7 +1947,12 @@ export async function openNativeComposeGenerationStore(opts: {
                 return { value: after.value, outcome: "uncertain" as const };
               }
             }
-            await finalizeEffect(input, pending, anchor);
+            await finalizeEffect(
+              input,
+              pending,
+              anchor,
+              async () => await assertWitnesses(input)
+            );
             return result;
           };
           const effectPending = <T>(
@@ -1958,7 +2234,13 @@ export async function openNativeComposeGenerationStore(opts: {
                       : undefined,
                   })
                 : undefined;
-              const input = Object.freeze({ ...options, downHooks });
+              const input = Object.freeze({
+                ...options,
+                downHooks,
+                storageWitnesses: options.storageWitnesses
+                  ? Object.freeze({ ...options.storageWitnesses })
+                  : undefined,
+              });
               return await runAction(async () => {
                 requireActive();
                 let state = await receipt();
@@ -2008,6 +2290,7 @@ export async function openNativeComposeGenerationStore(opts: {
             active = false;
             materialAuthorities.delete(materialAuthority);
             materialActions.delete(materialAuthority);
+            witnessPublications.delete(materialAuthority);
             if (actionDone !== null) {
               await actionDone;
             }

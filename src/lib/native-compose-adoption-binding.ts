@@ -6,6 +6,10 @@ import {
   planLegacyComposeAdoption,
 } from "./native-compose-adoption-plan.ts";
 import {
+  hasLegacyComposeGeneratedSources,
+  LegacyComposeAdoptionProjection,
+} from "./native-compose-adoption-projection.ts";
+import {
   createNativeComposeProbe,
   NativeComposeOwnershipError,
 } from "./native-compose-ownership.ts";
@@ -239,7 +243,6 @@ export type LegacyComposeVerifiedContainer = {
   readonly service: string;
 };
 export type LegacyComposeVerifiedBinding = {
-  readonly binding_version: 1;
   readonly projectRoot: string;
   readonly composeFile: string;
   readonly composeProject: string;
@@ -252,7 +255,42 @@ export type LegacyComposeVerifiedBinding = {
     readonly name: string;
     readonly createdAt: string;
   };
-};
+} & (
+  | { readonly binding_version: 1 }
+  | { readonly binding_version: 2; readonly composeFiles: readonly string[] }
+);
+
+type ProjectedPreparation = Pick<
+  Awaited<ReturnType<LegacyComposeAdoptionProjection["resolve"]>>,
+  "candidate" | "composeFiles" | "metadata" | "projectionProof"
+>;
+
+/** Canonical ordered owner paths only; observations cannot introduce caller-selected override authority. */
+function canonicalComposeFiles(
+  root: string,
+  files?: readonly string[]
+): readonly string[] {
+  const base = resolve(root, ".hack/docker-compose.yml");
+  if (files === undefined) {
+    return [base];
+  }
+  const allowed = [
+    base,
+    resolve(root, ".hack/.internal/compose.runtime.override.yml"),
+    resolve(root, ".hack/.internal/compose.env.override.yml"),
+  ];
+  requireValue(
+    Array.isArray(files) &&
+      files.length > 0 &&
+      files.length <= 3 &&
+      files[0] === base
+  );
+  requireValue(
+    JSON.stringify(files) ===
+      JSON.stringify(allowed.filter((file) => files.includes(file)))
+  );
+  return [...files];
+}
 function volumeRows(
   rows: readonly Record<string, unknown>[],
   intent: LegacyComposeStorageIntent
@@ -335,6 +373,7 @@ function containerRows(
     readonly intent: LegacyComposeStorageIntent;
     readonly volumes: readonly LegacyComposeVerifiedVolume[];
     readonly network: { readonly name: string; readonly id: string };
+    readonly composeFiles: readonly string[];
   }
 ): LegacyComposeVerifiedContainer[] {
   requireValue(rows.length === opts.intent.services.length);
@@ -363,7 +402,7 @@ function containerRows(
           (row.oneoff === "False" || row.oneoff === "false") &&
           typeof row.running === "boolean" &&
           row.workingDir === resolve(opts.root, ".hack") &&
-          row.configFiles === resolve(opts.root, ".hack/docker-compose.yml") &&
+          row.configFiles === opts.composeFiles.join(",") &&
           typeof row.id === "string" &&
           ID.test(row.id) &&
           typeof row.name === "string"
@@ -449,7 +488,9 @@ export async function inspectLegacyComposeAdoptionResources(opts: {
   readonly intent: LegacyComposeStorageIntent;
   readonly signal?: AbortSignal;
   readonly timeoutMs?: number;
+  readonly composeFiles?: readonly string[];
 }): Promise<LegacyComposeVerifiedBinding> {
+  const composeFiles = canonicalComposeFiles(opts.root, opts.composeFiles);
   const probe = createNativeComposeProbe(opts);
   const engineId = await engine(probe);
   const selected = {
@@ -487,6 +528,7 @@ export async function inspectLegacyComposeAdoptionResources(opts: {
   });
   const containers = containerRows(containerFacts, {
     ...opts,
+    composeFiles,
     volumes,
     network,
   });
@@ -510,7 +552,12 @@ export async function inspectLegacyComposeAdoptionResources(opts: {
   }
   requireValue((await engine(probe)) === engineId);
   return {
-    binding_version: 1,
+    ...(opts.composeFiles
+      ? {
+          binding_version: 2 as const,
+          composeFiles: Object.freeze(composeFiles),
+        }
+      : { binding_version: 1 as const }),
     projectRoot: opts.root,
     composeFile: resolve(opts.root, ".hack/docker-compose.yml"),
     composeProject: opts.intent.composeProject,
@@ -523,7 +570,7 @@ export async function inspectLegacyComposeAdoptionResources(opts: {
 }
 export type LegacyComposeAdoptionBinding = {
   readonly report: {
-    readonly binding_version: 1;
+    readonly binding_version: 1 | 2;
     readonly status: "verified";
     readonly adoption: "not_performed";
     readonly containers: number;
@@ -550,6 +597,7 @@ export type LegacyComposeAdoptionBinding = {
       readonly config: NativeConfigImportSourceIdentity;
       readonly compose: NativeConfigImportSourceIdentity;
     };
+    readonly projection?: Readonly<ProjectedPreparation>;
   }>;
 };
 function translate(error: unknown, signal?: AbortSignal): never {
@@ -611,7 +659,41 @@ export async function acquireLegacyComposeAdoptionBinding(input: {
       composeText: source.composeText,
     });
     const candidate = mapped.candidate;
+    let projection: LegacyComposeAdoptionProjection | undefined;
+    let projected: Readonly<ProjectedPreparation> | undefined;
+    const generatedPresent = await hasLegacyComposeGeneratedSources(
+      root,
+      signal
+    );
+    if (
+      candidate &&
+      (generatedPresent ||
+        !(await legacyComposeAdoptionLayoutSupported({
+          projectRoot: root,
+          candidate,
+          signal,
+        })))
+    ) {
+      projection = await LegacyComposeAdoptionProjection.acquire({
+        source,
+        signal,
+      });
+      const resolved = await projection.resolve({ signal });
+      projected = Object.freeze({
+        candidate: resolved.candidate,
+        composeFiles: resolved.composeFiles,
+        metadata: resolved.metadata,
+        projectionProof: resolved.projectionProof,
+      });
+    }
     const layoutSupported = async (selectedSignal?: AbortSignal) => {
+      if (projection) {
+        await projection.assertFresh({ signal: selectedSignal });
+        return;
+      }
+      if (await hasLegacyComposeGeneratedSources(root, selectedSignal)) {
+        refuse("E_LEGACY_COMPOSE_BINDING_CHANGED");
+      }
       if (
         !(
           candidate &&
@@ -631,6 +713,7 @@ export async function acquireLegacyComposeAdoptionBinding(input: {
       intent,
       signal,
       timeoutMs,
+      composeFiles: projected?.composeFiles,
     });
     freezeImportValue(baseline);
     const assertFresh = async (current: {
@@ -658,6 +741,7 @@ export async function acquireLegacyComposeAdoptionBinding(input: {
           intent,
           signal: currentSignal,
           timeoutMs,
+          composeFiles: projected?.composeFiles,
         });
         if (JSON.stringify(observed) !== JSON.stringify(baseline)) {
           refuse("E_LEGACY_COMPOSE_BINDING_CHANGED");
@@ -674,7 +758,7 @@ export async function acquireLegacyComposeAdoptionBinding(input: {
     };
     const result: LegacyComposeAdoptionBinding = {
       report: {
-        binding_version: 1,
+        binding_version: baseline.binding_version,
         status: "verified",
         adoption: "not_performed",
         containers: baseline.containers.length,
@@ -692,12 +776,14 @@ export async function acquireLegacyComposeAdoptionBinding(input: {
           composeText: source.composeText,
           binding: baseline,
           sourceFiles: source.sourceFiles,
+          ...(projected ? { projection: projected } : {}),
         };
         for (const key of [
           "configText",
           "composeText",
           "binding",
           "sourceFiles",
+          "projection",
         ]) {
           Object.defineProperty(result, key, { enumerable: false });
         }

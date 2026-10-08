@@ -8,6 +8,10 @@ import {
   resolveNativeConfig,
 } from "./native-config-compiler.ts";
 import { nativeEndpointPlanningRequired } from "./native-endpoint-plan-protocol.ts";
+import type {
+  NativeDeclaredWorkloads,
+  NativeEnvMetadata,
+} from "./native-env-plan-protocol.ts";
 import {
   acquireNativeLocalInputs,
   acquireNativeProjectInput,
@@ -112,21 +116,10 @@ export async function planPreparedNativeProject(opts: {
     input: prepared.input,
     ...prepared.locals,
     ...prepared.routingInputs,
-    envMetadata: {
-      metadata_version: 1,
-      overlay: metadata.overlay,
-      overlay_exists: metadata.overlayExists,
-      workloads: Object.fromEntries(
-        Object.keys(declared).map((name) => [
-          name,
-          metadata.effectiveMetadata[name] ?? {},
-        ])
-      ),
-      inactive_scopes: metadata.unknownScopes,
-      ...(metadata.hostMetadata === undefined
-        ? {}
-        : { host: metadata.hostMetadata }),
-    },
+    envMetadata: nativeEnvironmentMetadata({
+      metadata,
+      declaredWorkloads: declared,
+    }),
   });
   if (
     result.ok &&
@@ -144,6 +137,29 @@ export async function planPreparedNativeProject(opts: {
     );
   }
   return result;
+}
+
+/** Public metadata projection shared by compiler planning and native source transport; never values. */
+export function nativeEnvironmentMetadata(opts: {
+  readonly metadata: NativeProjectEnvMetadata;
+  readonly declaredWorkloads: NativeDeclaredWorkloads;
+}): NativeEnvMetadata {
+  const { metadata, declaredWorkloads } = opts;
+  return {
+    metadata_version: 1,
+    overlay: metadata.overlay,
+    overlay_exists: metadata.overlayExists,
+    workloads: Object.fromEntries(
+      Object.keys(declaredWorkloads).map((name) => [
+        name,
+        metadata.effectiveMetadata[name] ?? {},
+      ])
+    ),
+    inactive_scopes: metadata.unknownScopes,
+    ...(metadata.hostMetadata === undefined
+      ? {}
+      : { host: metadata.hostMetadata }),
+  };
 }
 
 export type NativePreparedProject = Awaited<

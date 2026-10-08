@@ -15,6 +15,7 @@ import { YAML } from "bun";
 import { PROJECT_ENV_KEY_FILENAME } from "../src/constants.ts";
 import { isRecord } from "../src/lib/guards.ts";
 import { acquireNativeComposeInputs } from "../src/lib/native-compose-inputs.ts";
+import { acquireNativeExecutionInputs } from "../src/lib/native-execution-inputs.ts";
 import {
   type ProjectEnvStoredValue,
   type ProjectEnvValuesByScope,
@@ -243,6 +244,38 @@ test("Compose input acquisition binds metadata and private selected values to th
   ]);
   expect(JSON.stringify(planRequest)).not.toContain(CANARY);
   await acquired.assertFresh();
+});
+
+test("shared execution owner exposes the exact immutable compiler metadata without serializing private capabilities", async () => {
+  await compiler();
+  await layer("hack.env.default.yaml", {
+    global: { TOKEN: CANARY },
+    web: { MODE: "selected" },
+    off: { INACTIVE: CANARY },
+    rogue: { UNKNOWN: CANARY },
+  });
+  const acquired = await acquireNativeExecutionInputs({ projectRoot });
+  const request = (await requests()).find(
+    (entry) => entry.operation === "plan"
+  );
+  expect(request?.request.env_metadata).toEqual(acquired.metadata);
+  expect(acquired.metadata.workloads).toHaveProperty("off.INACTIVE", {
+    scope: "off",
+    secret: false,
+  });
+  expect(acquired.metadata.inactive_scopes).toEqual(["rogue"]);
+  expect(Reflect.set(acquired.metadata.workloads, "foreign", {})).toBe(false);
+  expect(Reflect.set(acquired, "metadata", {})).toBe(false);
+  expect(Object.keys(acquired)).toEqual(["result"]);
+  expect(JSON.stringify(acquired.metadata)).not.toContain(CANARY);
+  expect(JSON.stringify({ ...acquired })).not.toContain("metadata");
+  expect(await acquired.resolveManagedValues()).toEqual({
+    web: { TOKEN: CANARY, MODE: "selected" },
+    seed: { TOKEN: CANARY },
+  });
+  await layer("hack.env.default.yaml", { global: { TOKEN: "changed" } });
+  await refuses(acquired.assertFresh());
+  await refuses(acquired.resolveManagedValues());
 });
 
 test("Compose input owner delivers only the captured host target and keeps its capability private", async () => {

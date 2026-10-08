@@ -1459,7 +1459,6 @@ async function bootstrapOriginal(h: FixtureRuntime, instance: Instance) {
   const {
     engine,
     fixtureRoot,
-    probe,
     resources,
     anchors,
     sql,
@@ -2566,8 +2565,11 @@ async function retainedBuildCandidateRefusal(h: FixtureRuntime) {
     new TextDecoder("utf-8", { fatal: true }).decode(original)
   );
   if (
-    !(isRecord(candidate.services) && isRecord(candidate.services.db)) ||
-    !isRecord(candidate.services.db.build)
+    !(
+      isRecord(candidate.services) &&
+      isRecord(candidate.services.db) &&
+      isRecord(candidate.services.db.build)
+    )
   ) {
     refused();
   }

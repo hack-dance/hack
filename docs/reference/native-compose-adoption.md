@@ -220,3 +220,12 @@ partial-stop repair, adopted execution and separate rollback. Exact owned cleanu
 and an independent inventory check restored the original engine baseline.
 Each later fixture inspection acquires a fresh bounded probe; a probe owner has
 one aggregate acquisition deadline and cannot span the entire lifecycle.
+
+The private generated-source projection can now qualify the canonical runtime
+metadata and managed-env fragments without calling their writers. It compares
+the exact acquired bytes with the existing pure writer projections, including
+service and key order. The compiler receives deterministic runtime fallbacks and
+names-only managed metadata; managed values remain private runtime inputs. This
+read-only capability does not yet admit a generated-source execution or publish
+an adoption generation. Interpolation inside managed values, alternate generated
+fragments and typed local settings remain refused.

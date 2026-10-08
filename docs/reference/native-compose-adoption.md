@@ -173,6 +173,19 @@ fence. Current Moby/BuildKit ignore parity and maintained two-worktree SQL,
 image/ID/birth, recovery and rollback acceptance qualify this slice separately
 from pure preview and synthetic model controls. Full NC04 remains open.
 
+The maintained `native-compose-adoption-build-worktrees` scenario requires
+explicit selection. It bootstraps two disposable Postgres images, checks the
+complete `COPY .` projection for root/Dockerfile-specific and default `.hack`
+contexts, and then permits only captured metadata queries and journaled original-ID
+starts/stops. Format switch and saved consumption cannot reach a builder. Its
+source and candidate drift controls retain pending ownership, preserve the other
+worktree's SQL row, and restore both original configurations through rollback.
+Exact fixture image removal requires its captured new ID/birth, sole tag, fixture
+label, unchanged daemon and no remaining container references. Builder cache is
+retained; cache reclamation and historical image-from-source provenance remain
+unqualified. Fixture source/model checks alone do not establish live builder or
+data-preservation acceptance.
+
 The version 4 typed-local slice reads optional `.hack/hack.local.json` at the
 selected checkout and verified inherited primary in the same issued private source
 acquisition. It accepts only `schema_version: 1` and an optional `environment`

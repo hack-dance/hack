@@ -66,7 +66,9 @@ type Intent = {
   readonly lease: NativeComposeInterruptedLockSelection;
   readonly mutation: NativeComposeInterruptedLockSelection;
   readonly lease_releasing: boolean;
-  readonly mutation_retirement: boolean;
+  readonly mutation_releasing: boolean;
+  readonly next_lease: NativeComposeInterruptedLockSelection | null;
+  readonly next_mutation: NativeComposeInterruptedLockSelection | null;
 };
 type Store = Parameters<
   Parameters<typeof withNativeAuthoredProjectRecoveryStorage>[1]
@@ -111,7 +113,7 @@ function parseIntent(value: unknown): Intent {
       isRecord(value) &&
       keys(
         value,
-        "admission,kind,lease,lease_releasing,mutation,mutation_retirement,native,phase,ready,source,start,version"
+        "admission,kind,lease,lease_releasing,mutation,mutation_releasing,native,next_lease,next_mutation,phase,ready,source,start,version"
       )
     ) ||
     value.version !== 1 ||
@@ -119,7 +121,7 @@ function parseIntent(value: unknown): Intent {
     typeof value.phase !== "string" ||
     !PHASES.includes(value.phase as Phase) ||
     typeof value.lease_releasing !== "boolean" ||
-    typeof value.mutation_retirement !== "boolean"
+    typeof value.mutation_releasing !== "boolean"
   ) {
     return refused();
   }
@@ -128,11 +130,22 @@ function parseIntent(value: unknown): Intent {
   const admission = parseNativeComposeInterruptedLockSelection(value.admission);
   const lease = parseNativeComposeInterruptedLockSelection(value.lease);
   const mutation = parseNativeComposeInterruptedLockSelection(value.mutation);
+  const nextLease =
+    value.next_lease === null
+      ? null
+      : parseNativeComposeInterruptedLockSelection(value.next_lease);
+  const nextMutation =
+    value.next_mutation === null
+      ? null
+      : parseNativeComposeInterruptedLockSelection(value.next_mutation);
   if (
     JSON.stringify(start.record.review) !==
       JSON.stringify(ready.record.receipt.review) ||
     lease.owner.bootId !== admission.owner.bootId ||
-    mutation.owner.bootId !== admission.owner.bootId
+    mutation.owner.bootId !== admission.owner.bootId ||
+    (nextLease !== null && nextLease.owner.bootId !== admission.owner.bootId) ||
+    (nextMutation !== null &&
+      nextMutation.owner.bootId !== admission.owner.bootId)
   ) {
     return refused();
   }
@@ -151,7 +164,9 @@ function parseIntent(value: unknown): Intent {
     lease,
     mutation,
     lease_releasing: value.lease_releasing,
-    mutation_retirement: value.mutation_retirement,
+    mutation_releasing: value.mutation_releasing,
+    next_lease: nextLease,
+    next_mutation: nextMutation,
   });
 }
 function rank(record: Intent): number {
@@ -252,6 +267,68 @@ async function readIntent(store: Store): Promise<Saved | null> {
       sha256: hash(read.text),
     },
   };
+}
+type PublicationGuard = Pick<
+  NativeComposeMutationLease,
+  "assertHeld" | "assertActive"
+>;
+async function publishIntent(opts: {
+  readonly store: Store;
+  readonly previous: Saved | null;
+  readonly record: Intent;
+  readonly guard: PublicationGuard;
+  readonly other?: PublicationGuard;
+}): Promise<Saved> {
+  const { store, previous, guard, other } = opts;
+  const record = parseIntent(opts.record);
+  const text = JSON.stringify({ scope: store.scope, record });
+  if (Buffer.byteLength(text) > LIMIT) {
+    return refused();
+  }
+  await guard.assertHeld();
+  await other?.assertHeld();
+  await store.check();
+  if (JSON.stringify(await readIntent(store)) !== JSON.stringify(previous)) {
+    return refused();
+  }
+  const info = await writeExclusive(pendingPath(store), text);
+  await guard.assertHeld();
+  await other?.assertHeld();
+  await store.check();
+  const pending = await readPrivate(pendingPath(store), LIMIT);
+  if (!sameFile(pending.info, info) || pending.text !== text) {
+    return refused();
+  }
+  if (previous) {
+    const old = await readPrivate(intentPath(store), LIMIT);
+    if (
+      !sameFile(old.info, previous.identity) ||
+      hash(old.text) !== previous.identity.sha256
+    ) {
+      return refused();
+    }
+    guard.assertActive();
+    other?.assertActive();
+    await rename(pendingPath(store), intentPath(store));
+  } else {
+    guard.assertActive();
+    other?.assertActive();
+    await link(pendingPath(store), intentPath(store));
+    await linkedArchive(store, pendingPath(store), {
+      dev: info.dev,
+      ino: info.ino,
+      sha256: hash(text),
+    });
+    guard.assertActive();
+    other?.assertActive();
+    await unlink(pendingPath(store));
+  }
+  await synchronizeDirectories(store.held);
+  const saved = await readIntent(store);
+  if (!saved || JSON.stringify(saved.record) !== JSON.stringify(record)) {
+    return refused();
+  }
+  return saved;
 }
 function lock(store: Store, path: string, recoveryPath: string) {
   return createNativeComposePrivateMutationLock({
@@ -420,24 +497,26 @@ export async function recoverNativeAuthoredProject(opts: {
     opts.scope,
     async (store) => {
       let saved = await readIntent(store);
+      const record = () => saved?.record ?? refused();
+      const update = async (
+        value: Intent,
+        guard: PublicationGuard,
+        other?: PublicationGuard
+      ) => {
+        saved = await publishIntent({
+          store,
+          previous: saved,
+          record: value,
+          guard,
+          other,
+        });
+      };
       const recovery = lock(
         store,
         store.recovery,
         `${store.recovery}.recovery`
       );
-      if (!(await absent(store.recovery))) {
-        if (!saved) {
-          return refused();
-        }
-        const current = await recovery.selectInterruptedLock();
-        if (JSON.stringify(current) !== JSON.stringify(saved.record.lease)) {
-          return refused();
-        }
-        await recovery.recoverSelectedInterruptedLock(current);
-      } else if (saved && !saved.record.lease_releasing) {
-        return refused();
-      }
-      return await recovery.withLock(async (lease) => {
+      const primaryRun = async (lease: NativeComposeMutationLease) => {
         const check = async () => {
           await lease.assertHeld();
           await store.check();
@@ -446,101 +525,22 @@ export async function recoverNativeAuthoredProject(opts: {
             return refused();
           }
         };
-        const commit = async (
-          value: Intent,
-          mutation?: NativeComposeMutationLease
-        ) => {
-          const active = () => {
-            lease.assertActive();
-            mutation?.assertActive();
-          };
-          const record = parseIntent(value);
-          const text = JSON.stringify({ scope: store.scope, record });
-          if (Buffer.byteLength(text) > LIMIT) {
-            return refused();
-          }
-          await check();
-          await mutation?.assertHeld();
-          const info = await writeExclusive(pendingPath(store), text);
-          // This attempt's own pending file is allowed only at this publication boundary.
-          await lease.assertHeld();
-          await mutation?.assertHeld();
-          await store.check();
-          const current = await readPrivate(pendingPath(store), LIMIT);
-          if (!sameFile(current.info, info) || current.text !== text) {
-            return refused();
-          }
-          if (saved) {
-            const old = await readPrivate(intentPath(store), LIMIT);
-            if (
-              !sameFile(old.info, saved.identity) ||
-              hash(old.text) !== saved.identity.sha256
-            ) {
-              return refused();
-            }
-            active();
-            await rename(pendingPath(store), intentPath(store));
-          } else {
-            active();
-            await link(pendingPath(store), intentPath(store));
-            active();
-            await unlink(pendingPath(store));
-          }
-          await synchronizeDirectories(store.held);
-          saved = await readIntent(store);
-          if (
-            !saved ||
-            JSON.stringify(saved.record) !== JSON.stringify(record)
-          ) {
-            return refused();
-          }
-        };
+        const commit = (value: Intent, mutation?: NativeComposeMutationLease) =>
+          update(value, lease, mutation);
         const mutation = lock(
           store,
           store.mutation,
           `${store.mutation}.recovery`
         );
-        if (!(await absent(store.mutation))) {
-          if (!saved) {
-            return refused();
-          }
-          if (!saved.record.mutation_retirement) {
-            const selected = await mutation.selectInterruptedLock();
-            if (
-              JSON.stringify(selected) !== JSON.stringify(saved.record.mutation)
-            ) {
-              return refused();
-            }
-          }
-          await commit({
-            ...saved.record,
-            lease: lease.selection,
-            mutation_retirement: true,
-          });
-          await lock(
-            store,
-            store.mutation,
-            store.recovery
-          ).retireSelectedUnderRecoveryLease({
-            selected: saved.record.mutation,
-            lease,
-            allowOwnerAbsent: true,
-          });
-        } else if (
-          saved &&
-          !saved.record.lease_releasing &&
-          !saved.record.mutation_retirement
-        ) {
-          return refused();
-        }
-        return await mutation.withLock(async (mutationLease) => {
-          const record = () => saved?.record ?? refused();
+        const mutationRun = async (
+          mutationLease: NativeComposeMutationLease
+        ) => {
           const both = async () => {
             remaining();
             await check();
             await mutationLease.assertHeld();
           };
-          try {
+          {
             if (saved) {
               await commit(
                 {
@@ -548,7 +548,9 @@ export async function recoverNativeAuthoredProject(opts: {
                   lease: lease.selection,
                   mutation: mutationLease.selection,
                   lease_releasing: false,
-                  mutation_retirement: false,
+                  mutation_releasing: false,
+                  next_lease: null,
+                  next_mutation: null,
                 },
                 mutationLease
               );
@@ -595,7 +597,9 @@ export async function recoverNativeAuthoredProject(opts: {
                   lease: lease.selection,
                   mutation: mutationLease.selection,
                   lease_releasing: false,
-                  mutation_retirement: false,
+                  mutation_releasing: false,
+                  next_lease: null,
+                  next_mutation: null,
                 },
                 mutationLease
               );
@@ -697,16 +701,105 @@ export async function recoverNativeAuthoredProject(opts: {
               publication_retired: true,
               receipt: removed,
             };
-          } finally {
-            if (saved) {
-              await commit(
-                { ...saved.record, lease_releasing: true },
-                mutationLease
-              );
+          }
+        };
+        const releaseMutation = async (
+          mutationLease: NativeComposeMutationLease
+        ) => {
+          if (saved) {
+            await commit(
+              {
+                ...record(),
+                mutation: mutationLease.selection,
+                next_mutation: null,
+                mutation_releasing: true,
+              },
+              mutationLease
+            );
+          }
+        };
+        if (!saved) {
+          return await mutation.withLock(async (mutationLease) => {
+            try {
+              return await mutationRun(mutationLease);
+            } finally {
+              await releaseMutation(mutationLease);
             }
+          });
+        }
+        return await mutation.withPreparedRecoveryLock(
+          {
+            expected: record().mutation,
+            successor: record().next_mutation ?? undefined,
+            allowOwnerAbsent: record().mutation_releasing,
+            reserve: (reservation) =>
+              update(
+                {
+                  ...record(),
+                  mutation: reservation.previous,
+                  next_mutation: reservation.next,
+                  mutation_releasing: reservation.previousAbsent,
+                },
+                reservation,
+                lease
+              ),
+            release: releaseMutation,
+          },
+          mutationRun
+        );
+      };
+      const releasePrimary = async (lease: NativeComposeMutationLease) => {
+        if (saved) {
+          await update(
+            {
+              ...record(),
+              lease: lease.selection,
+              next_lease: null,
+              lease_releasing: true,
+            },
+            lease
+          );
+        }
+      };
+      if (!saved) {
+        return await recovery.withLock(async (lease) => {
+          try {
+            return await primaryRun(lease);
+          } finally {
+            await releasePrimary(lease);
           }
         });
-      });
+      }
+      return await recovery.withPreparedRecoveryLock(
+        {
+          expected: record().lease,
+          successor: record().next_lease ?? undefined,
+          allowOwnerAbsent: record().lease_releasing,
+          reserve: (reservation) =>
+            update(
+              {
+                ...record(),
+                lease: reservation.previous,
+                next_lease: reservation.next,
+                lease_releasing: reservation.previousAbsent,
+              },
+              reservation
+            ),
+          release: releasePrimary,
+        },
+        async (lease) => {
+          await update(
+            {
+              ...record(),
+              lease: lease.selection,
+              next_lease: null,
+              lease_releasing: false,
+            },
+            lease
+          );
+          return await primaryRun(lease);
+        }
+      );
     }
   );
 }
@@ -723,7 +816,13 @@ export async function archiveCompletedNativeAuthoredRecovery(opts: {
     if (!saved) {
       return;
     }
-    if (saved.record.phase !== "complete" || !saved.record.lease_releasing) {
+    if (
+      saved.record.phase !== "complete" ||
+      !saved.record.lease_releasing ||
+      !saved.record.mutation_releasing ||
+      saved.record.next_lease !== null ||
+      saved.record.next_mutation !== null
+    ) {
       return refused();
     }
     const mutation = lock(store, store.mutation, `${store.mutation}.recovery`);

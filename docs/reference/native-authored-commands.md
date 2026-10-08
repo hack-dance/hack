@@ -56,6 +56,14 @@ history is archived under fresh startup admission before a later generation can
 start; incomplete history never permits automatic takeover. Persistent data stays
 retained, and no recovery operation reboots the guest or allocates new resources.
 
+Dead recovery lease takeover retains its private directory and commits the exact
+next owner file before replacing the old owner. A recorded candidate may be pending
+or already published after interruption; both forms must match the saved inode and
+bytes before a fresh lease is issued. Separate committed release flags authorize
+only the corresponding owner/directory absence. An unrecorded pending candidate
+and an interrupted completed-history hardlink archive remain retained refusals;
+this operation does not repair arbitrary partial lock or file publications.
+
 The native receipt and source paths are distinct from strict Compose v1 artifacts.
 No native hash substitutes for a normalized Compose hash. Source and fake-driver
 checks do not qualify an installed frontend, a live provider, the full authored

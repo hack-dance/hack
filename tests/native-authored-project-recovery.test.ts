@@ -26,12 +26,15 @@ import type { invokeNativeRuntime } from "../src/backends/native-runtime-client.
 const fixtures: Array<{ root: string; child: ReturnType<typeof Bun.spawn> }> =
   [];
 afterEach(async () => {
-  for (const current of fixtures.splice(0)) {
+  const retained = fixtures.splice(0);
+  for (const current of retained) {
     if (current.child.exitCode === null) {
       current.child.kill("SIGKILL");
     }
     await current.child.exited;
-    await rm(current.root, { recursive: true, force: true });
+  }
+  for (const root of new Set(retained.map((item) => item.root))) {
+    await rm(root, { recursive: true, force: true });
   }
 });
 function receipt() {
@@ -427,3 +430,172 @@ test("unexpected ready absence and pending intent never become retry or ordinary
   ).rejects.toThrow();
   expect(called).toBe(false);
 });
+
+async function interruptTakeover(
+  current: Awaited<ReturnType<typeof fixture>>,
+  stage: "reserved" | "promoted" | "released-owner" | "unreserved",
+  kill = true
+) {
+  const witness = join(current.root, `takeover-${stage}`);
+  const program = [
+    "import {spyOn} from 'bun:test'; import * as files from 'node:fs/promises';",
+    `import {recoverNativeAuthoredProject} from ${JSON.stringify(join(import.meta.dir, "../src/backends/native-authored-project-recovery.ts"))};`,
+    `const paths=${JSON.stringify(current.paths)}; const stage=${JSON.stringify(stage)}; const witness=${JSON.stringify(witness)};`,
+    "const pause=async()=>{await Bun.write(witness,stage);await new Promise(resolve=>setTimeout(resolve,120000));};",
+    "const rename=files.rename, unlink=files.unlink, open=files.open;",
+    "spyOn(files,'rename').mockImplementation(async(from,to)=>{",
+    "if(stage==='reserved'&&from===paths.recovery+'/owner.pending'&&to===paths.recovery+'/owner'){await pause();}",
+    "await rename(from,to);",
+    "if(stage==='promoted'&&from===paths.recovery+'/owner.pending'&&to===paths.recovery+'/owner'){await pause();}",
+    "});",
+    "spyOn(files,'unlink').mockImplementation(async(path)=>{await unlink(path);if(stage==='released-owner'&&path===paths.recovery+'/owner'){await pause();}});",
+    "spyOn(files,'open').mockImplementation(async(...args)=>{if(stage==='unreserved'&&args[0]===paths.intent+'.pending'){await pause();}return Reflect.apply(open,files,args);});",
+    `const selection=${JSON.stringify(current.selection)};const result=${JSON.stringify(current.result)};`,
+    `await recoverNativeAuthoredProject({scope:${JSON.stringify(current.scope)},runtime:${JSON.stringify(current.options.runtime)},timeoutMs:30000,request:async opts=>{`,
+    "if(opts.args[2]!=='inspect'){throw new Error('Already removed retry must not replay cleanup.');}",
+    "return {receipt:result.receipt,observations:{web:null}};}});",
+    "await Bun.write(witness,'unexpected-completion');",
+  ].join("\n");
+  const child = Bun.spawn([process.execPath, "--eval", program], {
+    stdin: "ignore",
+    stdout: "ignore",
+    stderr: "ignore",
+    env: { PATH: process.env.PATH, TMPDIR: process.env.TMPDIR },
+  });
+  fixtures.push({ root: current.root, child });
+  const deadline = performance.now() + 5000;
+  while (!(await Bun.file(witness).exists())) {
+    if (child.exitCode !== null || performance.now() >= deadline) {
+      throw new Error("Owned takeover did not reach the named interruption.");
+    }
+    await Bun.sleep(10);
+  }
+  expect(await Bun.file(witness).text()).toBe(stage);
+  if (kill) {
+    child.kill("SIGKILL");
+    expect(await child.exited).toBe(137);
+  }
+  return child;
+}
+
+test("durably reserved takeover survives exact abrupt exits before promotion, after promotion and during final release", async () => {
+  for (const stage of ["reserved", "promoted", "released-owner"] as const) {
+    const current = await fixture();
+    await current.kill();
+    const request: typeof invokeNativeRuntime = async (opts) => {
+      const value = await current.request(opts);
+      if (opts.args[2] === "inspect") {
+        throw new Error("Retain native-removed for the next exact attempt.");
+      }
+      return value;
+    };
+    await expect(
+      recoverNativeAuthoredProject({ ...current.options, request })
+    ).rejects.toThrow();
+    const original = JSON.parse(
+      await Bun.file(current.paths.intent).text()
+    ).record;
+    expect(original.phase).toBe("native-removed");
+    await interruptTakeover(current, stage);
+    const interrupted = JSON.parse(
+      await Bun.file(current.paths.intent).text()
+    ).record;
+    for (const key of ["ready", "start", "source", "admission", "native"]) {
+      expect(interrupted[key]).toEqual(original[key]);
+    }
+    if (stage === "released-owner") {
+      expect(interrupted.lease_releasing).toBe(true);
+      expect(interrupted.next_lease).toBeNull();
+      expect(await readdir(current.paths.recovery)).toEqual([]);
+    } else {
+      expect(interrupted.next_lease).not.toBeNull();
+      expect(
+        (
+          await lstat(
+            join(
+              current.paths.recovery,
+              stage === "reserved" ? "owner.pending" : "owner"
+            )
+          )
+        ).ino
+      ).toBe(interrupted.next_lease.file.ino);
+    }
+    expect(
+      (await recoverNativeAuthoredProject(current.options)).receipt.phase
+    ).toBe("removed");
+    expect(current.cleanupCalls()).toBe(1);
+    expect(
+      JSON.parse(await Bun.file(current.paths.intent).text()).record.phase
+    ).toBe("complete");
+  }
+}, 30_000);
+
+test("an abrupt exit before candidate reservation retains unknown pending publication without runtime replay", async () => {
+  const current = await fixture();
+  await current.kill();
+  const request: typeof invokeNativeRuntime = async (opts) => {
+    const value = await current.request(opts);
+    if (opts.args[2] === "inspect") {
+      throw new Error("Retain native-removed.");
+    }
+    return value;
+  };
+  await expect(
+    recoverNativeAuthoredProject({ ...current.options, request })
+  ).rejects.toThrow();
+  await interruptTakeover(current, "unreserved");
+  const record = JSON.parse(await Bun.file(current.paths.intent).text()).record;
+  expect(record.next_lease).toBeNull();
+  expect(await readdir(current.paths.recovery)).toEqual(["owner.pending"]);
+  const before = current.calls.length;
+  await expect(recoverNativeAuthoredProject(current.options)).rejects.toThrow();
+  expect(current.calls.length).toBe(before);
+  expect(await readdir(current.paths.recovery)).toEqual(["owner.pending"]);
+});
+
+test("reserved takeover refuses live candidates and same-byte replaced pending inodes before requests", async () => {
+  for (const attack of ["live", "replacement"] as const) {
+    const current = await fixture();
+    await current.kill();
+    const request: typeof invokeNativeRuntime = async (opts) => {
+      const value = await current.request(opts);
+      if (opts.args[2] === "inspect") {
+        throw new Error("Retain native-removed.");
+      }
+      return value;
+    };
+    await expect(
+      recoverNativeAuthoredProject({ ...current.options, request })
+    ).rejects.toThrow();
+    const child = await interruptTakeover(
+      current,
+      "reserved",
+      attack !== "live"
+    );
+    const pending = join(current.paths.recovery, "owner.pending");
+    const original = await lstat(pending);
+    if (attack === "replacement") {
+      const replacement = join(current.root, "replacement-owner");
+      await Bun.write(replacement, await Bun.file(pending).text());
+      await chmod(replacement, 0o600);
+      await rename(replacement, pending);
+      expect((await lstat(pending)).ino).not.toBe(original.ino);
+    }
+    const before = current.calls.length;
+    await expect(
+      recoverNativeAuthoredProject(current.options)
+    ).rejects.toThrow();
+    expect(current.calls.length).toBe(before);
+    expect(await Bun.file(current.paths.ready).exists()).toBe(true);
+    if (attack === "live") {
+      expect(child.exitCode).toBeNull();
+      expect((await lstat(pending)).ino).toBe(original.ino);
+      child.kill("SIGKILL");
+      expect(await child.exited).toBe(137);
+      await recoverNativeAuthoredProject(current.options);
+      expect(current.cleanupCalls()).toBe(1);
+    } else {
+      expect((await lstat(pending)).ino).not.toBe(original.ino);
+    }
+  }
+}, 30_000);

@@ -88,10 +88,19 @@ export function parseLegacyComposeAdoptionReceipt(
     refuse();
   }
   if (
+    value.publication &&
+    JSON.stringify(value.publication.generation) !==
+      JSON.stringify(value.prepared)
+  ) {
+    refuse();
+  }
+  if (
     value.pendingOperation !== null &&
-    (value.publication?.phase !== "active" ||
-      JSON.stringify(value.pendingOperation.generation) !==
-        JSON.stringify(value.publication.generation))
+    !pendingSelectionMatches({
+      prepared: value.prepared,
+      publication: value.publication,
+      pendingOperation: value.pendingOperation,
+    })
   ) {
     refuse();
   }
@@ -103,6 +112,25 @@ export function parseLegacyComposeAdoptionReceipt(
     publication: value.publication,
     pendingOperation: value.pendingOperation,
   };
+}
+function pendingSelectionMatches(
+  value: Pick<Receipt, "publication" | "pendingOperation" | "prepared">
+) {
+  if (!value.pendingOperation) {
+    return false;
+  }
+  if (value.publication?.phase === "active") {
+    return (
+      JSON.stringify(value.pendingOperation.generation) ===
+      JSON.stringify(value.publication.generation)
+    );
+  }
+  return (
+    (value.publication === null || value.publication.phase === "rolled-back") &&
+    value.pendingOperation.operation === "stop" &&
+    JSON.stringify(value.pendingOperation.generation) ===
+      JSON.stringify(value.prepared)
+  );
 }
 function pendingOperation(value: unknown): value is PendingOperation {
   return (

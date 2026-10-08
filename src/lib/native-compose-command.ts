@@ -17,6 +17,7 @@ import {
 } from "./native-compose-after-hooks.ts";
 import {
   nativeComposeCompletedOneoff,
+  nativeComposeOnFailureServices,
   nativeComposeRunDependenciesReady,
   nativeComposeWorkloadsReady as ready,
 } from "./native-compose-completion.ts";
@@ -52,6 +53,7 @@ import {
   NativeComposeOwnershipError,
   type NativeComposeOwnershipObservation,
   type NativeComposeOwnershipOptions,
+  observeNativeComposeStartupOwned,
   observeSavedNativeComposeOwned,
 } from "./native-compose-ownership.ts";
 import { NativeComposeProxyAccessError } from "./native-compose-proxy-routes.ts";
@@ -386,9 +388,13 @@ async function waitReady(opts: {
   readonly deadline: number;
   readonly generation: NativeComposeGeneration;
 }): Promise<NativeComposeOwnershipObservation | null> {
+  const services = nativeComposeOnFailureServices(opts.document);
   while (Date.now() < opts.deadline) {
-    const state = await assertNativeComposeOwned(opts.ownership);
-    if (ready(opts.document, state, opts.generation)) {
+    const state = await observeNativeComposeStartupOwned(
+      opts.ownership,
+      services
+    );
+    if (state && ready(opts.document, state, opts.generation)) {
       return state;
     }
     if (opts.ownership.signal?.aborted) {

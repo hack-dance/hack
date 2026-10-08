@@ -29,6 +29,41 @@ test("unchanged source CLI up reuses exact private generation while still execut
   expect(await state(root)).toMatchObject({ pending: false, stopped: false });
 }, 30_000);
 
+test("source CLI waits through an owned on-failure restart before final strict readiness", async () => {
+  const root = await fixture("", false, { noHooks: true });
+  const path = join(root, ".hack/hack.project.json");
+  const source = await Bun.file(path).json();
+  source.services.web.restart = { kind: "on-failure", max_retries: 2 };
+  await Bun.write(path, JSON.stringify(source));
+  await Bun.write(join(root, "restart-transient"), "selected restart");
+  const result = await invoke(root, ["up", "--detach", "--json"], 5000);
+  expect(result.code).toBe(0);
+  expect(JSON.parse(result.stdout)).toMatchObject({
+    ok: true,
+    data: { status: "ready" },
+  });
+  expect(
+    Number(await Bun.file(join(root, "restart-network-inspects")).text())
+  ).toBeGreaterThanOrEqual(4);
+  expect(await state(root)).toMatchObject({ pending: false, stopped: false });
+}, 30_000);
+
+test("a restart after readiness cannot pass strict finalization", async () => {
+  const root = await fixture("", false, { noHooks: true });
+  const path = join(root, ".hack/hack.project.json");
+  const source = await Bun.file(path).json();
+  source.services.web.restart = { kind: "on-failure", max_retries: 2 };
+  await Bun.write(path, JSON.stringify(source));
+  await Bun.write(join(root, "restart-finalization-gap"), "selected restart");
+  const result = await invoke(root, ["up", "--detach", "--json"], 5000);
+  expect(result.code).toBe(1);
+  expect(JSON.parse(result.stdout)).toMatchObject({
+    ok: false,
+    error: { code: "E_CONFIG_INVALID" },
+  });
+  expect(await composeStarts(root)).toHaveLength(1);
+}, 30_000);
+
 test.each([
   "source",
   "env-values",

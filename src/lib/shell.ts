@@ -131,10 +131,23 @@ export async function run(
     privateIo: opts.privateIo ? { ...opts.privateIo } : undefined,
   };
   const command = [...cmd];
-  if (options.privateIo && (options.forwardSignals === true ||
-    !(typeof options.timeoutMs === "number" && Number.isFinite(options.timeoutMs) && options.timeoutMs > 0) ||
-    ![options.privateIo.stdin, options.privateIo.stdout, options.privateIo.stderr].every((fd) => Number.isInteger(fd) && fd >= 0 && fd <= 2_147_483_647))) {
-    throw new Error("Private subprocess descriptors require a non-TTY owned invocation.");
+  if (
+    options.privateIo &&
+    (options.forwardSignals === true ||
+      !(
+        typeof options.timeoutMs === "number" &&
+        Number.isFinite(options.timeoutMs) &&
+        options.timeoutMs > 0
+      ) ||
+      ![
+        options.privateIo.stdin,
+        options.privateIo.stdout,
+        options.privateIo.stderr,
+      ].every((fd) => Number.isInteger(fd) && fd >= 0 && fd <= 2_147_483_647))
+  ) {
+    throw new Error(
+      "Private subprocess descriptors require a non-TTY owned invocation."
+    );
   }
   const signal = options.signal;
   if (signal?.aborted) {
@@ -172,7 +185,9 @@ export async function run(
     cwd: options.cwd,
     env: buildSpawnEnv(options.env, options.unsetEnvKeys),
     stdin: options.privateIo?.stdin ?? options.stdin ?? "inherit",
-    stdout: options.privateIo?.stdout ?? (options.stdout === "stderr" ? 2 : (options.stdout ?? "inherit")),
+    stdout:
+      options.privateIo?.stdout ??
+      (options.stdout === "stderr" ? 2 : (options.stdout ?? "inherit")),
     stderr: options.privateIo?.stderr ?? options.stderr ?? "inherit",
     detached: ownsProcessGroup,
   });

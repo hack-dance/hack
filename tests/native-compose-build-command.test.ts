@@ -21,7 +21,7 @@ const PROTOCOL = {
 };
 
 /** The real command/input/generation owners run; only compiler and engine transports are stand-ins. */
-async function fixture() {
+async function fixture(build = true) {
   const root = await realpath(
     await mkdtemp(join(tmpdir(), "native-build-command-"))
   );
@@ -36,7 +36,14 @@ async function fixture() {
       worktree: { inherit_local: false, auto_branch: false },
       services: {
         web: {
-          build: { context: "literal-${AMBIENT}", dockerfile: "Dockerfile" },
+          ...(build
+            ? {
+                build: {
+                  context: "literal-${AMBIENT}",
+                  dockerfile: "Dockerfile",
+                },
+              }
+            : { image: "cached:fixture" }),
           command: { exec: ["true"] },
         },
       },
@@ -78,8 +85,9 @@ if(args[0]==="buildx") {
 }
 if(args[0]==="compose") {
  const doc=await Bun.file(args[args.indexOf("-f")+1]).json();const web=doc.services.web;
- if(web.build!==undefined || web.image!==doc.name+"-web:latest" || web.pull_policy!=="never" || !doc["x-hack-native-build"] || !(await Bun.file(image).exists())) process.exit(92);
- if(args.includes("up")) {if(!args.includes("--no-build")) process.exit(93);await Bun.write(engine,JSON.stringify({doc,oneoff:false}));process.exit(0);}
+ const built=Object.hasOwn(doc,"x-hack-native-build");
+ if(web.build!==undefined || (built ? web.image!==doc.name+"-web:latest" || web.pull_policy!=="never" || !(await Bun.file(image).exists()) : web.image!=="cached:fixture" || web.pull_policy!==undefined)) process.exit(92);
+ if(args.includes("up")) {if(args.includes("--no-build")!==built) process.exit(93);await Bun.write(engine,JSON.stringify({doc,oneoff:false}));process.exit(0);}
  if(args.includes("run")) {if(args.includes("--no-build")) process.exit(94);await Bun.write(engine,JSON.stringify({doc,oneoff:true,name:args[args.indexOf("--name")+1]}));process.exit(0);}
  process.exit(95);
 }
@@ -169,6 +177,18 @@ test.each([
   expect(JSON.stringify(requests)).not.toContain("must-not-expand");
   expect(JSON.stringify(requests)).not.toContain('"bake"');
   if (operation === "up") {
+    const args = requests[compose];
+    expect(args).toEqual([
+      "compose",
+      "-p",
+      expect.any(String),
+      "-f",
+      expect.any(String),
+      "up",
+      "--no-build",
+      "-d",
+      "--remove-orphans",
+    ]);
     expect(isRecord(JSON.parse(result.stdout))).toBe(true);
     expect(JSON.parse(result.stdout)).toMatchObject({
       ok: true,
@@ -177,4 +197,34 @@ test.each([
   } else {
     expect(await Bun.file(join(root, "engine")).exists()).toBe(false);
   }
+}, 30_000);
+
+test("source native image-only up preserves its exact startup argv", async () => {
+  const root = await fixture(false);
+  const result = await invoke(root, "up");
+  expect(result.code).toBe(0);
+  expect(JSON.parse(result.stdout)).toMatchObject({
+    ok: true,
+    data: { status: "ready" },
+  });
+  const requests: unknown[] = (await Bun.file(join(root, "requests")).text())
+    .trim()
+    .split("\n")
+    .map((row) => JSON.parse(row));
+  expect(
+    requests.filter((args) => Array.isArray(args) && args[0] === "buildx")
+  ).toHaveLength(0);
+  const args = requests.find(
+    (value) => Array.isArray(value) && value[0] === "compose"
+  );
+  expect(args).toEqual([
+    "compose",
+    "-p",
+    expect.any(String),
+    "-f",
+    expect.any(String),
+    "up",
+    "-d",
+    "--remove-orphans",
+  ]);
 }, 30_000);

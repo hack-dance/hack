@@ -691,6 +691,7 @@ async function startNativeComposeWorkloads(opts: {
   readonly selection: NativeComposeOwnershipOptions;
   readonly base: RuntimeBaseOptions;
   readonly routing: NativeComposeRoutingOwner | null;
+  readonly builds: readonly NativeComposeBuildIntent[];
   readonly deadline: number;
 }) {
   const { options, generation, document, selection, base, routing, deadline } =
@@ -704,7 +705,7 @@ async function startNativeComposeWorkloads(opts: {
     [
       ...composeArgs(generation),
       "up",
-      "--no-build",
+      ...(opts.builds.length > 0 ? ["--no-build"] : []),
       "-d",
       "--remove-orphans",
       ...(options.operation === "restart" ? ["--force-recreate"] : []),

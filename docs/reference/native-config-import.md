@@ -24,15 +24,18 @@ reported as successful.
 | `defaultEnvConfig`, `default_env_config`, `env.defaultOverlay`, `env.default_overlay` | `environment.default_overlay`; all present aliases must select the same overlay |
 | Boolean `worktree.auto_branch` / `autoBranch` and `inherit_local` / `inheritLocal` | The equivalent native worktree policy; conflicting aliases refuse |
 | Optional Compose `name` | Must exactly equal the explicit project name |
-| Image-only services | The same logical service names and image strings |
+| Image-only services and explicit completion jobs | The same logical workload names and image strings |
+| Basic build-only services and explicit completion jobs | String context or a closed object containing `context`, `dockerfile`, `target`; legacy `.hack` context rebased to the checkout root |
 | Array or bounded string `command` and `entrypoint` | Explicit native exec arrays; Compose string words are split without an implicit shell, complete `$$` pairs become literal `$` arguments, and an empty entrypoint remains explicit |
 | `working_dir`, boolean `init` | `working_directory`, `init` |
-| `pull_policy` of `always`, `never`, `missing` | The same authored acquisition intent |
-| `restart` of `no`, `always`, `unless-stopped`, `on-failure[:N]` | Native restart intent; retry counts must fit a positive u32 |
+| `pull_policy` of `always`, `never`, `missing` for images, or `build` for builds | The same authored acquisition intent; omitted policy stays omitted |
+| Service `restart` of `no`, `always`, `unless-stopped`, `on-failure[:N]` | Native restart intent; retry counts must fit a positive u32; jobs accept only explicit `no` or omission |
 | String `stop_signal`, `stop_grace_period` | Native shutdown signal/grace, validated by the compiler |
 | String environment map or `KEY=value` list | Native `default` bindings, preserving managed-value precedence and empty values |
-| Nonempty canonical `profiles` lists | Native service selection and the union of declared profiles |
+| Nonempty canonical `profiles` lists | Native workload selection and the union of declared profiles |
 | Short `depends_on` lists, or long edges with `service_started` / `service_healthy` | Native service `started` / `ready` edges; `required` must be absent/true and `restart` absent/false |
+| Long edges with `service_completed_successfully` | The referenced declaration becomes a native job; the edge becomes `job` / `completed` |
+| Exact `hack.service.one-shot: "true"` label map or singleton `hack.service.one-shot=true` label list | An explicit standalone native job; the known marker is consumed as semantic provenance, without adding resource labels |
 | `healthcheck.test: [CMD, executable, ...args]` with authored positive `interval`, `timeout`, `retries` | Native exec readiness; complete argument dollar pairs decode once, and the compiler validates timings |
 | File-only top-level `configs` and `secrets` | Checkout-relative native file declarations, rebased from the known `.hack` Compose source directory |
 | Explicit service `configs` and `secrets` grants | Native read-only file mounts with canonical Linux targets and normalized `0444` permission intent |
@@ -52,24 +55,49 @@ empty executable word, single or odd dollars, `$VAR` and `${VAR}` refuse.
 Omitted or explicit null command/entrypoint keeps Compose's image-default behavior. Empty or
 whitespace-only entrypoint explicitly clears the image entrypoint; empty or
 whitespace-only command refuses because the native command model cannot express
-Compose's explicit empty override. Dollars in other runtime strings and NUL in runtime values refuse
+Compose's explicit empty override. Outside argv and basic build paths, dollars in runtime strings and NUL in runtime values refuse
 rather than inheriting ambient environment. Environment list entries without `=`, duplicate
 names, nulls and non-string values refuse.
 
 Every unknown field remains a refusal, including fields in inactive profiles.
-Builds, volumes/bind mounts, networks, ports, labels,
+Advanced builds, volumes/bind mounts, networks, ports, other labels,
 routes, host/lifecycle settings, `env_file`, deployment options and extensions
 are outside the first slice. They cannot be silently omitted from a complete
 conversion.
+
+Completion roles are discovered before declarations are converted, including
+inactive declarations. A completed target or explicit one-shot keeps its authored
+argv, entrypoint, environment and other supported fields under `jobs`; original
+field positions remain in the report with native job targets. Unmarked installers,
+command text, service names, `restart: no` and observed exit zero do not infer jobs.
+The same target cannot also satisfy a started or healthy service edge. Undeclared
+completed targets, optional or restart-propagating edges, mixed or noncanonical
+one-shot labels, job health checks and non-`no` job restart policies refuse. Omitted
+job restart stays omitted; no native default is invented. Supported profile fields
+remain authored selection, and unsupported fields in inactive jobs still refuse.
+
+This is pure conversion, not retained-job adoption. Existing retained adoption
+owners still refuse job candidates: their receipt versions do not qualify job
+ordering, completion, recovery or replay. A job import preview does not upgrade a
+receipt, launch or recreate a container, transfer ownership, or qualify application
+migration. Job-aware retained lifecycle and two-worktree data acceptance remain
+separate work.
+
+Retained resource planning uses its own closed adoption baseline and refuses jobs
+before acquiring existing engine resource bindings, even when pure conversion
+can preserve a job's named mounts. Symbolic conversion is not an ownership grant.
+
+Custom-network job combinations remain refused; no static-bridge import or
+retained network authority is added by this completed-job conversion.
 
 Health intervals and timeouts must use integer `ms`, `s`, `m` or `h` durations
 that fit the compiler's positive u32 milliseconds. Missing or zero timings,
 `CMD-SHELL`, string probes, `NONE`, disabled probes, `start_period` and
 `start_interval` refuse: image health settings and image `SHELL` are not acquired,
 and the native contract cannot express all of those options. Explicit `disable:
-false` is the default enabled setting. Optional edges, restart propagation and
-`service_completed_successfully` refuse. Completed jobs remain a required later
-conversion and retained execution slice. Unknown HTTP/TCP fields also refuse.
+false` is the default enabled setting. Optional edges and restart propagation
+refuse. Completed-job conversion is supported as described above; retained-job
+execution remains a separate slice. Unknown HTTP/TCP fields also refuse.
 The compiler rejects missing, cyclic or inactive dependency targets and ready
 edges whose target has no explicit readiness. Refusals include inactive profiles.
 
@@ -81,15 +109,19 @@ becomes `settings`. Absolute paths, checkout escapes and unsupported source opti
 refuse. No referenced material is read or inspected. Complete dollar pairs in file
 paths and grant targets decode once; ambient interpolation refuses.
 
-Declaring a file does not grant access. Explicit short or long service grants map
+Declaring a file does not grant access. Explicit short or long workload grants map
 to read-only mounts. A short config targets `/<name>`; a short secret targets
 `/run/secrets/<name>`. Long grants require `source` and may select a canonical
 absolute target; a secret basename target is placed under `/run/secrets`.
 Omitted mode, quoted `"0444"` and numeric `292` normalize to `"0444"`.
 UID/GID, alternate modes and unknown grant fields refuse, including inactive
-services. Bare YAML `0444` becomes unsupported decimal `444`; explicit `0o444`
+services and converted jobs. Bare YAML `0444` becomes unsupported decimal `444`; explicit `0o444`
 retains the parser's compatibility refusal. Quoted `"0444"` and numeric `292`
 are supported. The compiler validates source references and target overlaps.
+For converted jobs, grant provenance retains the original `/services/<name>`
+source positions and points to the published `/jobs/<name>/mounts` fields.
+File recognition remains preview-only; combining a job or build with a file
+grant does not authorize retained adoption of any of those feature families.
 
 These are Linux declaration defaults. Compose's file-backed binds can ignore
 permission options, so this preview does not establish original file modes or
@@ -97,6 +129,58 @@ runtime binding equivalence. Retained adoption still refuses these declarations
 and grants before private values, keys or engine probes. See Docker's
 [config grants](https://docs.docker.com/reference/compose-file/services/#configs)
 and [secret grants](https://docs.docker.com/reference/compose-file/services/#secrets).
+
+## Pure basic build preview
+
+The [Compose build contract](https://docs.docker.com/reference/compose-file/build/)
+allows a short context string or an object. This preview accepts only relative
+local context paths and optional relative `dockerfile` and canonical `target`.
+It converts the raw `.hack/docker-compose.yml` declaration: legacy context paths
+start at `.hack/`, while native contexts start at the checkout root. Thus
+`build: ..` maps to native context `.`, `build: .` maps to `.hack`, and
+`context: ../app` maps to `app`. An object without `context` uses the legacy
+default directory `.hack`. An omitted Dockerfile remains omitted for the native
+compiler's `Dockerfile` default; an explicit Dockerfile stays relative to the
+build context. Lexical path normalization and complete `$$` pair decoding do not
+read files or evaluate environment variables. Source pointers and positions
+remain those of the raw declaration, and the report contains no path values.
+For a converted job, native build target pointers use `/jobs/<name>/build` while
+source pointers retain the original `/services/<name>/build` declaration.
+
+Context paths escaping the checkout root, Dockerfiles escaping their context,
+absolute/home-relative/remote paths, ambiguous dollar expressions and malformed
+fields refuse. Build arguments, cache options, SSH, secrets, labels, network,
+inline Dockerfiles, platforms, tags and every other build option remain refused,
+even when empty or in an inactive profile. `build.pull` is unsupported; the
+workload's `pull_policy: build` is a separate supported acquisition requirement.
+Combined `build` and `image` refuse because the native model requires exactly one
+source. Invalid builds cannot fall back to an authored image or a default policy.
+
+This expands read-only preview only. Retained-container adoption still uses its
+separate image-only mapping and refuses builds. The mapper runs no Compose
+normalization, builder or runtime command, and does not validate Dockerfile
+contents, path existence or filesystem identity. The authoritative compiler still
+must validate the whole private candidate before a complete CLI preview; actual
+build import and adoption acceptance remain open.
+
+The maintained config-only correspondence gate is
+`bun scripts/check-native-config-import-build.ts`. Select the prepared matching
+sidecar with an absolute `HACK_CONFIG_COMPILER_BINARY` and the installed standalone
+Compose plugin with an absolute `HACK_IMPORT_COMPOSE_BINARY`. It compares the
+actual normalized Compose projections of the raw legacy and compiled/rendered
+native inputs for default context, checkout-root context, nested Dockerfile/stage
+and literal dollars, including an inactive profile selected explicitly for the
+comparison. Context and lexically resolved Dockerfile paths must match; stage, source and
+policy presence must remain exact. These are Compose's serialized config strings,
+including its escaped-dollar representation; the comparison does not decode them
+again or certify the builder's actual filesystem paths. No builder or engine command is admitted.
+Compose receives an isolated empty Docker configuration and a nonexistent engine
+socket. The aggregate gate is bounded to 90 seconds with bounded child captures.
+An optional fresh absolute `HACK_IMPORT_BUILD_EVIDENCE_DIR` retains private
+captures and the result; a failure keeps its temporary evidence and returns
+nonzero. The result records matched projections and requires the command's final
+zero exit; it cannot independently certify completion after a late write or
+cancellation. This proves config correspondence, not build or adoption acceptance.
 
 ## Parsing and input boundary
 

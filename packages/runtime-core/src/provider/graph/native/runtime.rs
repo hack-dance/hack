@@ -665,6 +665,14 @@ fn cleanup_using_guarded<B: Backend>(
     guard: Option<&dyn Fn() -> Result<(), CandidateError>>,
 ) -> Result<(), CandidateError> {
     check_startup(guard)?;
+    // A committed cleanup phase is retry authority for this same inventory, never
+    // permission to move the receipt back to startup or stop an already retired run.
+    let stopped = matches!(
+        receipt.phase,
+        Phase::Stopped | Phase::RemovalIntent | Phase::Removed
+    );
+    let removing = matches!(receipt.phase, Phase::RemovalIntent | Phase::Removed);
+    let removed = receipt.phase == Phase::Removed;
     let mut prepared = BTreeMap::new();
     let network = receipt
         .resources
@@ -673,7 +681,7 @@ fn cleanup_using_guarded<B: Backend>(
         .clone();
     let network_present = inspected(backend, receipt, &network)?.is_some();
     if network_present {
-        if network.id.is_none() {
+        if network.id.is_none() || removed || network.phase == "removed" {
             return Err(refused());
         }
         project_network(backend, receipt, None)?;
@@ -685,22 +693,28 @@ fn cleanup_using_guarded<B: Backend>(
         .filter(|(_, r)| r.kind == Kind::Container)
     {
         if let Some(value) = inspected(backend, receipt, resource)? {
-            if resource.id.is_none() {
+            if resource.id.is_none() || removed || resource.phase == "removed" {
                 return Err(refused());
             }
             if network_present {
                 verify_attachment(receipt, &resource.key, &value)?;
                 project_network(backend, receipt, Some(&value))?;
             }
-            prepared.insert(
-                key.clone(),
-                super::super::shutdown::prepare(resource, &value)?,
-            );
+            let selected = super::super::shutdown::prepare(resource, &value)?;
+            if stopped && selected.running {
+                return Err(refused());
+            }
+            prepared.insert(key.clone(), selected);
         }
     }
     check_startup(guard)?;
-    receipt.phase = Phase::StopIntent;
-    journal::save(root, receipt)?;
+    if removed {
+        return Ok(());
+    }
+    if !stopped {
+        receipt.phase = Phase::StopIntent;
+        journal::save(root, receipt)?;
+    }
     let stops = prepared
         .values()
         .filter(|p| p.running)
@@ -712,7 +726,9 @@ fn cleanup_using_guarded<B: Backend>(
         .filter(|(_, prepared)| prepared.running)
         .map(|(key, prepared)| (prepared.id.as_str(), receipt.resources[key].key.as_str()))
         .collect::<BTreeMap<_, _>>();
-    backend.stop(&stops, &admitted)?;
+    if !stopped {
+        backend.stop(&stops, &admitted)?;
+    }
     for (key, prepared) in &prepared {
         let resource = &receipt.resources[key];
         let value = inspected(backend, receipt, resource)?.ok_or_else(refused)?;
@@ -722,10 +738,16 @@ fn cleanup_using_guarded<B: Backend>(
         }
         super::super::shutdown::record_terminal(&mut receipt.terminal, key.clone(), terminal);
     }
-    receipt.phase = Phase::Stopped;
+    if !stopped {
+        receipt.phase = Phase::Stopped;
+    }
+    // A resumed removal still durably records each fresh terminal observation
+    // before deletion, without moving its already committed phase backward.
     journal::save(root, receipt)?;
-    receipt.phase = Phase::RemovalIntent;
-    journal::save(root, receipt)?;
+    if !removing {
+        receipt.phase = Phase::RemovalIntent;
+        journal::save(root, receipt)?;
+    }
     for key in prepared.keys() {
         check_startup(guard)?;
         let resource = &receipt.resources[key];

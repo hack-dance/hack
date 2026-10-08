@@ -42,6 +42,28 @@ function same(a: Stats, b: Stats): boolean {
     a.ctimeMs === b.ctimeMs
   );
 }
+export type NativeConfigImportSourceIdentity = {
+  readonly dev: number;
+  readonly ino: number;
+  readonly mode: number;
+  readonly nlink: number;
+  readonly size: number;
+  readonly mtimeMs: number;
+  readonly ctimeMs: number;
+  readonly uid: number;
+};
+function sourceIdentity(info: Stats): NativeConfigImportSourceIdentity {
+  return Object.freeze({
+    dev: info.dev,
+    ino: info.ino,
+    mode: info.mode,
+    nlink: info.nlink,
+    size: info.size,
+    mtimeMs: info.mtimeMs,
+    ctimeMs: info.ctimeMs,
+    uid: info.uid,
+  });
+}
 async function directories(root: string) {
   const result: { readonly path: string; readonly info: Stats }[] = [];
   for (const path of [root, resolve(root, ".hack")]) {
@@ -53,13 +75,17 @@ async function directories(root: string) {
   }
   return result;
 }
-async function readStable(path: string, signal?: AbortSignal) {
+async function readStable(
+  path: string,
+  signal?: AbortSignal,
+  expectedLinks = 1
+) {
   cancelled(signal);
   const entry = await lstat(path);
   if (
     !entry.isFile() ||
     entry.isSymbolicLink() ||
-    entry.nlink !== 1 ||
+    entry.nlink !== expectedLinks ||
     entry.size > NATIVE_CONFIG_INPUT_LIMIT ||
     !(entry.mode & 0o444)
   ) {
@@ -101,6 +127,76 @@ async function readStable(path: string, signal?: AbortSignal) {
     return { bytes: buffer.subarray(0, size), info: before };
   } finally {
     await descriptor.close();
+  }
+}
+/** Same bounded authored reader for a durable owner's exact canonical or held-original paths. Private bytes grant no discovery or effect authority. */
+export async function readNativeConfigImportSourceFile(opts: {
+  readonly path: string;
+  readonly signal?: AbortSignal;
+}) {
+  let signal: AbortSignal | undefined;
+  try {
+    const path = opts.path;
+    signal = opts.signal;
+    if (
+      typeof path !== "string" ||
+      !path.length ||
+      path.includes("\0") ||
+      (signal !== undefined && !(signal instanceof AbortSignal))
+    ) {
+      throw failure();
+    }
+    return await readStable(path, signal);
+  } catch (error: unknown) {
+    redactFailure(error, signal);
+  }
+}
+/** Only the durable owner's two known paths may account for an interrupted link-before-unlink restore. Ordinary source acquisition still requires one link. */
+export async function readNativeConfigImportSourceLinkPair(opts: {
+  readonly left: string;
+  readonly right: string;
+  readonly signal?: AbortSignal;
+}) {
+  let signal: AbortSignal | undefined;
+  try {
+    const { left, right } = opts;
+    signal = opts.signal;
+    if (
+      typeof left !== "string" ||
+      typeof right !== "string" ||
+      !left.length ||
+      !right.length ||
+      left.includes("\0") ||
+      right.includes("\0") ||
+      (signal !== undefined && !(signal instanceof AbortSignal))
+    ) {
+      throw failure();
+    }
+    cancelled(signal);
+    const a = await lstat(left),
+      b = await lstat(right);
+    if (
+      left === right ||
+      !same(a, b) ||
+      a.nlink !== 2 ||
+      !a.isFile() ||
+      !b.isFile()
+    ) {
+      throw failure();
+    }
+    const read = await readStable(left, signal, 2);
+    if (
+      !(
+        same(a, read.info) &&
+        same(a, await lstat(left)) &&
+        same(a, await lstat(right))
+      )
+    ) {
+      throw failure();
+    }
+    return read;
+  } catch (error: unknown) {
+    redactFailure(error, signal);
   }
 }
 async function markerInfo(path: string): Promise<Stats | null> {
@@ -219,6 +315,10 @@ export type NativeConfigImportInputs =
       readonly configText: string;
       readonly composeText: string;
       readonly projectRoot: string;
+      readonly sourceFiles: {
+        readonly config: NativeConfigImportSourceIdentity;
+        readonly compose: NativeConfigImportSourceIdentity;
+      };
       readonly assertFresh: (opts?: {
         readonly signal?: AbortSignal;
       }) => Promise<void>;
@@ -273,6 +373,10 @@ async function acquireInputs(opts: {
     configText: decoder.decode(config.bytes),
     composeText: decoder.decode(compose.bytes),
     projectRoot: root,
+    sourceFiles: Object.freeze({
+      config: sourceIdentity(config.info),
+      compose: sourceIdentity(compose.info),
+    }),
     assertFresh: async (current?: { readonly signal?: AbortSignal }) => {
       let recheckSignal = signal;
       try {
@@ -310,6 +414,7 @@ async function acquireInputs(opts: {
     "configText",
     "composeText",
     "projectRoot",
+    "sourceFiles",
     "assertFresh",
   ]) {
     Object.defineProperty(result, key, { enumerable: false });

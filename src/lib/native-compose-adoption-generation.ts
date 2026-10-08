@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import type { Stats } from "node:fs";
-import { mkdir, rename } from "node:fs/promises";
+import { link, lstat, mkdir, rename, unlink } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { isRecord } from "./guards.ts";
 import {
@@ -8,7 +8,25 @@ import {
   inspectLegacyComposeAdoptionResources,
   type LegacyComposeVerifiedBinding,
 } from "./native-compose-adoption-binding.ts";
+import {
+  legacyComposeAdoptionCandidateSupported,
+  legacyComposeAdoptionLayoutSupported,
+} from "./native-compose-adoption-contract.ts";
 import { planLegacyComposeAdoption } from "./native-compose-adoption-plan.ts";
+import {
+  type AdoptionOperation,
+  type Anchor,
+  type Artifact,
+  type Checkout,
+  type FileIdentity,
+  type Publication,
+  type Receipt,
+  parseLegacyComposeAdoptionReceipt as receipt,
+} from "./native-compose-adoption-receipt.ts";
+import {
+  inspectLegacyComposeContainerStates,
+  inspectLegacyComposeRuntimeConfig,
+} from "./native-compose-adoption-runtime.ts";
 import {
   createNativeComposePrivateMutationLock,
   type HeldDirectory,
@@ -29,13 +47,18 @@ import {
   compileNativeConfig,
   NATIVE_CONFIG_INPUT_LIMIT,
 } from "./native-config-compiler.ts";
+import {
+  acquireNativeConfigImportInputs,
+  type NativeConfigImportSourceIdentity,
+  readNativeConfigImportSourceFile,
+  readNativeConfigImportSourceLinkPair,
+} from "./native-config-import-inputs.ts";
 import { parseImportDocument } from "./native-config-import-parser.ts";
 import {
   freezeImportValue,
   mapLegacyNativeStorageAdoption,
 } from "./native-config-import-plan.ts";
 
-const TOKEN = /^[a-f0-9]{32}$/;
 const HASH = /^[a-f0-9]{64}$/;
 const STATE_LIMIT = 64 * 1024;
 const KIND = "legacy-compose-adopted";
@@ -48,26 +71,17 @@ const ROUTING = [
   "DOCKER_CERT_PATH",
   "DOCKER_API_VERSION",
 ] as const;
-type FileIdentity = { readonly dev: number; readonly ino: number };
-type Artifact = FileIdentity & { readonly hash: string };
-type Checkout = {
-  readonly root: FileIdentity;
-  readonly project: FileIdentity;
-  readonly git: FileIdentity;
-};
-type Anchor = { readonly id: string; readonly manifest: Artifact };
-type Receipt = {
-  readonly adoption_receipt_version: 1;
-  readonly kind: typeof KIND;
-  readonly checkout: Checkout;
-  readonly prepared: Anchor | null;
-};
 type SavedManifest = {
   readonly adoption_generation_version: 1;
   readonly kind: typeof KIND;
   readonly projectRoot: string;
   readonly id: string;
   readonly binding: unknown;
+  readonly runtimeConfig: unknown;
+  readonly sourceFiles: {
+    readonly config: NativeConfigImportSourceIdentity;
+    readonly compose: NativeConfigImportSourceIdentity;
+  };
   readonly files: {
     readonly config: Artifact;
     readonly compose: Artifact;
@@ -161,34 +175,25 @@ function artifact(value: unknown): value is Artifact {
     HASH.test(value.hash)
   );
 }
-function anchor(value: unknown): value is Anchor {
+function sourceFileIdentity(
+  value: unknown
+): value is NativeConfigImportSourceIdentity {
   return (
-    isRecord(value) &&
-    keys(value, "id,manifest") &&
-    typeof value.id === "string" &&
-    TOKEN.test(value.id) &&
-    artifact(value.manifest)
+    identity(value) &&
+    keys(value, "ctimeMs,dev,ino,mode,mtimeMs,nlink,size,uid") &&
+    typeof value.mode === "number" &&
+    Number.isSafeInteger(value.mode) &&
+    value.nlink === 1 &&
+    typeof value.size === "number" &&
+    Number.isSafeInteger(value.size) &&
+    value.size >= 0 &&
+    value.size <= NATIVE_CONFIG_INPUT_LIMIT &&
+    typeof value.mtimeMs === "number" &&
+    Number.isFinite(value.mtimeMs) &&
+    typeof value.ctimeMs === "number" &&
+    Number.isFinite(value.ctimeMs) &&
+    value.uid === process.getuid?.()
   );
-}
-function receipt(value: unknown, checkout: Checkout): Receipt {
-  if (
-    !(
-      isRecord(value) &&
-      keys(value, "adoption_receipt_version,checkout,kind,prepared") &&
-      value.adoption_receipt_version === 1 &&
-      value.kind === KIND &&
-      JSON.stringify(value.checkout) === JSON.stringify(checkout) &&
-      (value.prepared === null || anchor(value.prepared))
-    )
-  ) {
-    refuse();
-  }
-  return {
-    adoption_receipt_version: 1,
-    kind: KIND,
-    checkout,
-    prepared: value.prepared,
-  };
 }
 function manifest(value: unknown, root: string, id: string): SavedManifest {
   if (
@@ -196,13 +201,16 @@ function manifest(value: unknown, root: string, id: string): SavedManifest {
       isRecord(value) &&
       keys(
         value,
-        "adoption_generation_version,binding,files,id,kind,projectRoot"
+        "adoption_generation_version,binding,files,id,kind,projectRoot,runtimeConfig,sourceFiles"
       ) &&
       value.adoption_generation_version === 1 &&
       value.kind === KIND &&
       value.id === id &&
       value.projectRoot === root &&
       isRecord(value.binding) &&
+      isRecord(value.sourceFiles) &&
+      sourceFileIdentity(value.sourceFiles.config) &&
+      sourceFileIdentity(value.sourceFiles.compose) &&
       isRecord(value.files) &&
       keys(value.files, "candidate,compose,config") &&
       artifact(value.files.config) &&
@@ -218,6 +226,11 @@ function manifest(value: unknown, root: string, id: string): SavedManifest {
     projectRoot: root,
     id,
     binding: value.binding,
+    runtimeConfig: value.runtimeConfig,
+    sourceFiles: {
+      config: value.sourceFiles.config,
+      compose: value.sourceFiles.compose,
+    },
     files: {
       config: value.files.config,
       compose: value.files.compose,
@@ -268,7 +281,7 @@ export type LegacyComposeAdoptedGeneration = {
   readonly report: {
     readonly adoption_generation_version: 1;
     readonly owner: "legacy-compose";
-    readonly status: "prepared";
+    readonly status: "prepared" | "active";
     readonly containers: number;
     readonly volumes: number;
   };
@@ -279,11 +292,34 @@ export type LegacyComposeAdoptedGenerationStore = {
     readonly binary?: string;
   }) => Promise<LegacyComposeAdoptedGeneration>;
   readonly loadPrepared: () => Promise<LegacyComposeAdoptedGeneration | null>;
+  readonly loadActive: (opts?: {
+    readonly recoverOperation?: boolean;
+  }) => Promise<LegacyComposeAdoptedGeneration | null>;
+  /** Explicit owned stopped transition; journal commits before moving any selected authored input. */
+  readonly publish: (opts: {
+    readonly generation: LegacyComposeAdoptedGeneration;
+    readonly binary?: string;
+  }) => Promise<void>;
+  readonly rollback: () => Promise<void>;
+  /** Explicit repair after lock recovery; incomplete source/resource ownership refuses rather than overwriting edits. */
+  readonly repairPublication: (opts: {
+    readonly action: "complete" | "rollback";
+    readonly binary?: string;
+  }) => Promise<void>;
   /** Private exact original source/candidate/binding; neither lease nor preparation performs engine effects. */
   readonly withLease: <T>(opts: {
     readonly generation: LegacyComposeAdoptedGeneration;
     readonly run: (input: Readonly<PrivateInputs>) => Promise<T>;
   }) => Promise<T>;
+  /** Journal retained-container effects before spawning. Failed or uncertain completion fences ordinary replay. */
+  readonly withMutation: (opts: {
+    readonly generation: LegacyComposeAdoptedGeneration;
+    readonly operation: AdoptionOperation;
+    readonly services: readonly string[];
+    readonly binary?: string;
+    readonly recover?: boolean;
+    readonly run: (input: Readonly<PrivateInputs>) => Promise<number>;
+  }) => Promise<number>;
   readonly recoverInterruptedLock: () => Promise<void>;
   readonly close: () => Promise<void>;
 };
@@ -298,6 +334,10 @@ type Context = {
   readonly signal?: AbortSignal;
   readonly timeoutMs?: number;
   readonly check: () => Promise<void>;
+  readonly receiptSnapshots: WeakMap<
+    Receipt,
+    { readonly info: Stats; readonly text: string }
+  >;
 };
 async function readInputs(
   ctx: Context,
@@ -350,6 +390,32 @@ async function readInputs(
     if (JSON.stringify(meta.binding) !== JSON.stringify(observed)) {
       refuse("E_LEGACY_ADOPTION_CHANGED");
     }
+    const runtimeConfig = await inspectLegacyComposeRuntimeConfig({
+      binding: observed,
+      composeFile: join(generationRoot, "legacy-compose.yml"),
+      signal: ctx.signal,
+      timeoutMs: ctx.timeoutMs,
+    });
+    if (JSON.stringify(meta.runtimeConfig) !== JSON.stringify(runtimeConfig)) {
+      refuse("E_LEGACY_ADOPTION_CHANGED");
+    }
+    await readArtifact(
+      join(generationRoot, "manifest.json"),
+      selected.manifest,
+      STATE_LIMIT
+    );
+    await readArtifact(
+      join(generationRoot, "legacy-config.json"),
+      meta.files.config
+    );
+    await readArtifact(
+      join(generationRoot, "legacy-compose.yml"),
+      meta.files.compose
+    );
+    await readArtifact(
+      join(generationRoot, "candidate.json"),
+      meta.files.candidate
+    );
     await recheckDirectories([held]);
     await ctx.check();
     freezeImportValue(observed);
@@ -366,10 +432,21 @@ async function readInputs(
     await held.file.close();
   }
 }
-async function save(ctx: Context, value: Receipt) {
+async function save(
+  ctx: Context,
+  value: Receipt,
+  expected: Receipt
+): Promise<Receipt> {
   await ctx.check();
   const previous = await json(ctx.receiptPath);
   receipt(previous.value, ctx.checkout);
+  const snapshot = ctx.receiptSnapshots.get(expected);
+  if (
+    !(snapshot && sameFile(previous.info, snapshot.info)) ||
+    previous.text !== snapshot.text
+  ) {
+    refuse();
+  }
   const temporary = join(ctx.stateRoot, `${token()}.receipt`);
   await writeExclusive(temporary, JSON.stringify(value));
   const staged = await readPrivate(temporary, STATE_LIMIT);
@@ -388,17 +465,21 @@ async function save(ctx: Context, value: Receipt) {
     refuse();
   }
   await ctx.check();
+  const result = receipt(published.value, ctx.checkout);
+  ctx.receiptSnapshots.set(result, published);
+  return result;
 }
 function claim(
   selected: Anchor,
   known: WeakMap<LegacyComposeAdoptedGeneration, Anchor>,
-  binding: LegacyComposeVerifiedBinding
+  binding: LegacyComposeVerifiedBinding,
+  status: "prepared" | "active" = "prepared"
 ): LegacyComposeAdoptedGeneration {
   const result: LegacyComposeAdoptedGeneration = {
     report: {
       adoption_generation_version: 1,
       owner: "legacy-compose",
-      status: "prepared",
+      status,
       containers: binding.containers.length,
       volumes: binding.volumes.length,
     },
@@ -454,12 +535,22 @@ async function prepare(
         candidateText
       ),
     };
+    const originals = await privateDirectory(join(generationRoot, "originals"));
+    await originals.file.sync();
+    await originals.file.close();
     const meta: Manifest = {
       adoption_generation_version: 1,
       kind: KIND,
       projectRoot: ctx.root,
       id,
       binding: acquired.binding,
+      runtimeConfig: await inspectLegacyComposeRuntimeConfig({
+        binding: acquired.binding,
+        composeFile: join(generationRoot, "legacy-compose.yml"),
+        signal: ctx.signal,
+        timeoutMs: ctx.timeoutMs,
+      }),
+      sourceFiles: acquired.sourceFiles,
       files,
     };
     const text = JSON.stringify(meta);
@@ -481,12 +572,577 @@ async function prepare(
   }
 }
 
+async function publicationState(ctx: Context) {
+  await ctx.check();
+  const read = await json(ctx.receiptPath);
+  const state = receipt(read.value, ctx.checkout);
+  ctx.receiptSnapshots.set(state, read);
+  return state;
+}
+function pending(state: Receipt) {
+  return (
+    state.publication?.phase === "switching" ||
+    state.publication?.phase === "rolling-back"
+  );
+}
+function requireStablePublication(state: Receipt) {
+  if (pending(state)) {
+    refuse("E_LEGACY_ADOPTION_BUSY");
+  }
+}
+function requireNoPendingOperation(state: Receipt) {
+  if (state.pendingOperation !== null) {
+    refuse("E_LEGACY_ADOPTION_BUSY");
+  }
+}
+function validateMutationSelection(
+  state: Receipt,
+  captured: {
+    readonly operation: AdoptionOperation;
+    readonly services: readonly string[];
+    readonly recover?: boolean;
+  },
+  services: readonly string[]
+) {
+  if (
+    !(
+      ["start", "restart", "stop"].includes(captured.operation) &&
+      captured.services.length
+    ) ||
+    new Set(captured.services).size !== captured.services.length ||
+    captured.services.some((service) => !services.includes(service))
+  ) {
+    refuse();
+  }
+  if (captured.recover) {
+    if (
+      !state.pendingOperation ||
+      captured.operation !== "stop" ||
+      JSON.stringify([...captured.services].sort()) !==
+        JSON.stringify([...services].sort())
+    ) {
+      refuse();
+    }
+  } else {
+    requireNoPendingOperation(state);
+  }
+}
+async function requireReceiptSnapshot(ctx: Context, state: Receipt) {
+  const expected = ctx.receiptSnapshots.get(state),
+    current = await json(ctx.receiptPath);
+  if (
+    !(expected && sameFile(expected.info, current.info)) ||
+    expected.text !== current.text
+  ) {
+    refuse();
+  }
+  await ctx.check();
+}
+async function absent(path: string) {
+  try {
+    await lstat(path);
+    return false;
+  } catch (error: unknown) {
+    if (hasCode(error, "ENOENT")) {
+      return true;
+    }
+    throw error;
+  }
+}
+async function requireFirstSliceLayout(ctx: Context) {
+  if (
+    !(await legacyComposeAdoptionLayoutSupported({
+      projectRoot: ctx.root,
+      signal: ctx.signal,
+    }))
+  ) {
+    refuse("E_LEGACY_ADOPTION_UNSUPPORTED");
+  }
+}
+async function requireStopped(
+  ctx: Context,
+  binding: LegacyComposeVerifiedBinding
+) {
+  const states = await inspectLegacyComposeContainerStates({
+    binding,
+    signal: ctx.signal,
+    timeoutMs: ctx.timeoutMs,
+  });
+  if (
+    states.some(
+      (state) =>
+        state.running ||
+        state.paused ||
+        !["created", "exited"].includes(state.status)
+    )
+  ) {
+    refuse("E_LEGACY_ADOPTION_UNSUPPORTED");
+  }
+}
+async function admitCandidate(
+  ctx: Context,
+  input: PrivateInputs,
+  binary?: string
+) {
+  const candidate: unknown = JSON.parse(input.candidateText);
+  if (!legacyComposeAdoptionCandidateSupported(candidate)) {
+    refuse("E_LEGACY_ADOPTION_UNSUPPORTED");
+  }
+  const compiled = await compileNativeConfig({
+    input: new TextEncoder().encode(input.candidateText),
+    binary,
+    signal: ctx.signal,
+  });
+  if (!compiled.ok) {
+    refuse("E_LEGACY_ADOPTION_UNSUPPORTED");
+  }
+}
+function originalLocations(
+  ctx: Context,
+  selected: Anchor,
+  meta: SavedManifest,
+  input: PrivateInputs
+) {
+  const holding = join(ctx.generationsRoot, selected.id, "originals");
+  return [
+    {
+      active: join(ctx.root, ".hack/hack.config.json"),
+      held: join(holding, "legacy-config.original"),
+      info: meta.sourceFiles.config,
+      text: input.configText,
+    },
+    {
+      active: join(ctx.root, ".hack/docker-compose.yml"),
+      held: join(holding, "legacy-compose.original"),
+      info: meta.sourceFiles.compose,
+      text: input.composeText,
+    },
+  ];
+}
+type OriginalLocation = ReturnType<typeof originalLocations>[number];
+function sourceMatches(
+  read: { readonly info: Stats; readonly bytes: Uint8Array },
+  location: OriginalLocation,
+  strict: boolean
+) {
+  const info = read.info,
+    expected = location.info;
+  return (
+    sameFile(info, expected) &&
+    info.mode === expected.mode &&
+    info.uid === expected.uid &&
+    info.size === expected.size &&
+    info.mtimeMs === expected.mtimeMs &&
+    (!strict || info.ctimeMs === expected.ctimeMs) &&
+    new TextDecoder("utf-8", { fatal: true }).decode(read.bytes) ===
+      location.text
+  );
+}
+async function requireOriginal(
+  ctx: Context,
+  path: string,
+  location: OriginalLocation,
+  strict = false
+) {
+  const read = await readNativeConfigImportSourceFile({
+    path,
+    signal: ctx.signal,
+  });
+  if (!sourceMatches(read, location, strict)) {
+    refuse("E_LEGACY_ADOPTION_CHANGED");
+  }
+}
+async function holdOriginal(ctx: Context, location: OriginalLocation) {
+  const activeAbsent = await absent(location.active),
+    heldAbsent = await absent(location.held);
+  if (activeAbsent && !heldAbsent) {
+    await requireOriginal(ctx, location.held, location);
+    return;
+  }
+  if (activeAbsent || !heldAbsent) {
+    refuse("E_LEGACY_ADOPTION_CHANGED");
+  }
+  await requireOriginal(ctx, location.active, location, true);
+  await ctx.check();
+  await rename(location.active, location.held);
+  await requireOriginal(ctx, location.held, location);
+}
+async function restoreOriginal(
+  ctx: Context,
+  location: OriginalLocation,
+  holding: HeldDirectory
+) {
+  const activeAbsent = await absent(location.active),
+    heldAbsent = await absent(location.held);
+  if (!activeAbsent && heldAbsent) {
+    await requireOriginal(ctx, location.active, location);
+    return;
+  }
+  if (heldAbsent) {
+    refuse("E_LEGACY_ADOPTION_CHANGED");
+  }
+  if (activeAbsent) {
+    await requireOriginal(ctx, location.held, location);
+    await ctx.check();
+    await link(location.held, location.active);
+    const pair = await readNativeConfigImportSourceLinkPair({
+      left: location.active,
+      right: location.held,
+      signal: ctx.signal,
+    });
+    if (!sourceMatches(pair, location, false)) {
+      refuse("E_LEGACY_ADOPTION_CHANGED");
+    }
+  } else {
+    const pair = await readNativeConfigImportSourceLinkPair({
+      left: location.active,
+      right: location.held,
+      signal: ctx.signal,
+    });
+    if (!sourceMatches(pair, location, false)) {
+      refuse("E_LEGACY_ADOPTION_CHANGED");
+    }
+  }
+  await ctx.directories[1]?.file.sync();
+  await ctx.check();
+  await unlink(location.held);
+  await holding.file.sync();
+  await requireOriginal(ctx, location.active, location);
+}
+async function requireActiveCandidate(
+  ctx: Context,
+  publication: Publication,
+  input: PrivateInputs
+) {
+  if (
+    !publication.native ||
+    publication.native.hash !== hash(input.candidateText)
+  ) {
+    refuse();
+  }
+  await readArtifact(
+    join(ctx.root, ".hack/hack.project.json"),
+    publication.native
+  );
+  for (const relative of [
+    ".hack/hack.config.json",
+    ".hack/docker-compose.yml",
+  ]) {
+    if (!(await absent(join(ctx.root, relative)))) {
+      refuse("E_LEGACY_ADOPTION_CHANGED");
+    }
+  }
+}
+async function installCandidate(
+  ctx: Context,
+  selected: Anchor,
+  input: PrivateInputs,
+  expected: Artifact | null
+): Promise<Artifact> {
+  const staged = join(
+    ctx.generationsRoot,
+    selected.id,
+    "originals/native.publish"
+  );
+  const active = join(ctx.root, ".hack/hack.project.json");
+  if (await absent(staged)) {
+    if (!(await absent(active))) {
+      if (!expected || expected.hash !== hash(input.candidateText)) {
+        refuse("E_LEGACY_ADOPTION_CHANGED");
+      }
+      await readArtifact(active, expected);
+      return expected;
+    }
+    await writeExclusive(staged, input.candidateText);
+  }
+  if (await absent(active)) {
+    const source = await readPrivate(staged, NATIVE_CONFIG_INPUT_LIMIT);
+    if (source.text !== input.candidateText) {
+      refuse();
+    }
+    await ctx.check();
+    await link(staged, active);
+  }
+  const pair = await readNativeConfigImportSourceLinkPair({
+    left: active,
+    right: staged,
+    signal: ctx.signal,
+  });
+  if (
+    new TextDecoder("utf-8", { fatal: true }).decode(pair.bytes) !==
+      input.candidateText ||
+    (pair.info.mode & 0o777) !== 0o600
+  ) {
+    refuse();
+  }
+  const installed = {
+    ...fileIdentity(pair.info),
+    hash: hash(input.candidateText),
+  };
+  if (expected && JSON.stringify(installed) !== JSON.stringify(expected)) {
+    refuse();
+  }
+  return installed;
+}
+async function finishCandidatePublication(
+  ctx: Context,
+  selected: Anchor,
+  native: Artifact
+) {
+  const active = join(ctx.root, ".hack/hack.project.json"),
+    staged = join(ctx.generationsRoot, selected.id, "originals/native.publish");
+  if (await absent(staged)) {
+    await readArtifact(active, native);
+    return;
+  }
+  const pair = await readNativeConfigImportSourceLinkPair({
+    left: active,
+    right: staged,
+    signal: ctx.signal,
+  });
+  if (
+    !sameFile(pair.info, native) ||
+    hash(new TextDecoder("utf-8", { fatal: true }).decode(pair.bytes)) !==
+      native.hash ||
+    (pair.info.mode & 0o777) !== 0o600
+  ) {
+    refuse();
+  }
+  await ctx.check();
+  await unlink(staged);
+  await readArtifact(active, native);
+}
+async function finishArchivedCandidate(
+  ctx: Context,
+  held: string,
+  staged: string,
+  native: Artifact
+) {
+  if (!(await absent(staged))) {
+    const pair = await readNativeConfigImportSourceLinkPair({
+      left: held,
+      right: staged,
+      signal: ctx.signal,
+    });
+    if (
+      !sameFile(pair.info, native) ||
+      hash(new TextDecoder("utf-8", { fatal: true }).decode(pair.bytes)) !==
+        native.hash
+    ) {
+      refuse();
+    }
+    await ctx.check();
+    await unlink(staged);
+  }
+  await readArtifact(held, native);
+}
+async function archiveCandidate(
+  ctx: Context,
+  selected: Anchor,
+  publication: Publication,
+  input: PrivateInputs
+) {
+  const active = join(ctx.root, ".hack/hack.project.json"),
+    held = join(ctx.generationsRoot, selected.id, "originals/native.rollback");
+  if (await absent(active)) {
+    if (publication.native !== null) {
+      const staged = join(
+        ctx.generationsRoot,
+        selected.id,
+        "originals/native.publish"
+      );
+      await finishArchivedCandidate(ctx, held, staged, publication.native);
+    }
+    return;
+  }
+  if (!(await absent(held))) {
+    refuse("E_LEGACY_ADOPTION_CHANGED");
+  }
+  const staged = join(
+    ctx.generationsRoot,
+    selected.id,
+    "originals/native.publish"
+  );
+  if (!(await absent(staged))) {
+    const pair = await readNativeConfigImportSourceLinkPair({
+      left: active,
+      right: staged,
+      signal: ctx.signal,
+    });
+    if (
+      new TextDecoder("utf-8", { fatal: true }).decode(pair.bytes) !==
+        input.candidateText ||
+      (publication.native !== null && !sameFile(pair.info, publication.native))
+    ) {
+      refuse();
+    }
+  } else if (publication.native) {
+    await readArtifact(active, publication.native);
+  } else {
+    refuse();
+  }
+  await ctx.check();
+  await rename(active, held);
+  if (!(await absent(staged))) {
+    await ctx.check();
+    await unlink(staged);
+  }
+  if (publication.native) {
+    await readArtifact(held, publication.native);
+  }
+}
+async function completePublication(
+  ctx: Context,
+  state: Receipt,
+  binary?: string
+) {
+  const publication = state.publication;
+  if (!publication || publication.phase !== "switching") {
+    refuse();
+  }
+  const loaded = await readInputs(ctx, publication.generation);
+  await requireFirstSliceLayout(ctx);
+  await admitCandidate(ctx, loaded.inputs, binary);
+  await requireStopped(ctx, loaded.inputs.binding);
+  const held = await holdDirectory(
+    join(ctx.generationsRoot, publication.generation.id, "originals"),
+    true
+  );
+  const transaction: Context = {
+    ...ctx,
+    check: async () => {
+      await ctx.check();
+      await recheckDirectories([held]);
+    },
+  };
+  try {
+    for (const location of originalLocations(
+      transaction,
+      publication.generation,
+      loaded.manifest,
+      loaded.inputs
+    )) {
+      await holdOriginal(transaction, location);
+      await held.file.sync();
+      await transaction.directories[1]?.file.sync();
+    }
+    const native = await installCandidate(
+      transaction,
+      publication.generation,
+      loaded.inputs,
+      publication.native
+    );
+    const installed: Publication = { ...publication, native };
+    await held.file.sync();
+    await transaction.directories[1]?.file.sync();
+    let current = state;
+    if (publication.native === null) {
+      current = await save(
+        transaction,
+        { ...state, publication: installed },
+        state
+      );
+    }
+    await finishCandidatePublication(
+      transaction,
+      publication.generation,
+      native
+    );
+    await requireActiveCandidate(transaction, installed, loaded.inputs);
+    await held.file.sync();
+    await transaction.directories[1]?.file.sync();
+    await readInputs(transaction, publication.generation);
+    await requireStopped(transaction, loaded.inputs.binding);
+    await recheckDirectories([held]);
+    await save(
+      transaction,
+      {
+        ...current,
+        publication: { ...installed, phase: "active" },
+      },
+      current
+    );
+  } finally {
+    await held.file.close();
+  }
+}
+async function completeRollback(ctx: Context, state: Receipt) {
+  let publication = state.publication;
+  if (!publication || publication.phase !== "rolling-back") {
+    refuse();
+  }
+  const loaded = await readInputs(ctx, publication.generation);
+  await requireStopped(ctx, loaded.inputs.binding);
+  const held = await holdDirectory(
+    join(ctx.generationsRoot, publication.generation.id, "originals"),
+    true
+  );
+  const transaction: Context = {
+    ...ctx,
+    check: async () => {
+      await ctx.check();
+      await recheckDirectories([held]);
+    },
+  };
+  try {
+    let current = state;
+    if (
+      publication.native === null &&
+      !(await absent(join(transaction.root, ".hack/hack.project.json")))
+    ) {
+      const native = await installCandidate(
+        transaction,
+        publication.generation,
+        loaded.inputs,
+        null
+      );
+      publication = { ...publication, native };
+      current = await save(transaction, { ...state, publication }, state);
+    }
+    await archiveCandidate(
+      transaction,
+      publication.generation,
+      publication,
+      loaded.inputs
+    );
+    await held.file.sync();
+    await transaction.directories[1]?.file.sync();
+    for (const location of originalLocations(
+      transaction,
+      publication.generation,
+      loaded.manifest,
+      loaded.inputs
+    )) {
+      await restoreOriginal(transaction, location, held);
+      await held.file.sync();
+      await transaction.directories[1]?.file.sync();
+    }
+    if (!(await absent(join(transaction.root, ".hack/hack.project.json")))) {
+      refuse();
+    }
+    await readInputs(transaction, publication.generation);
+    await requireStopped(transaction, loaded.inputs.binding);
+    await recheckDirectories([held]);
+    await save(
+      transaction,
+      {
+        ...current,
+        publication: { ...publication, phase: "rolled-back" },
+      },
+      current
+    );
+  } finally {
+    await held.file.close();
+  }
+}
+
 /**
- * Durable preparation for an explicit future format transition. Uses the same
+ * Durable preparation and explicit stopped format transition. Uses the same
  * bounded private file/lock authority as native generations, with a distinct
  * receipt/type/path and the original legacy resource owner. Saved reads need no
- * current authored files, env values or keys. This owner never publishes active
- * authored files, relabels resources, creates replacement data or runs an engine.
+ * current authored files, env values or keys. Format publication holds the exact originals for rollback. Engine effects are
+ * accepted only through a pending retained-resource operation; labels and data
+ * names are never regenerated.
  * Cooperative leases and rechecks cannot freeze Docker or external editors.
  */
 export async function openLegacyComposeAdoptedGenerationStore(input: {
@@ -575,6 +1231,7 @@ export async function openLegacyComposeAdoptedGenerationStore(input: {
       signal,
       timeoutMs,
       check,
+      receiptSnapshots: new WeakMap(),
     };
     const lock = createNativeComposePrivateMutationLock({
       lockPath: join(stateRoot, "mutation.lock"),
@@ -596,6 +1253,8 @@ export async function openLegacyComposeAdoptedGenerationStore(input: {
             kind: KIND,
             checkout,
             prepared: null,
+            publication: null,
+            pendingOperation: null,
           })
         );
         await synchronizeDirectories(directories);
@@ -609,7 +1268,7 @@ export async function openLegacyComposeAdoptedGenerationStore(input: {
     const known = new WeakMap<LegacyComposeAdoptedGeneration, Anchor>();
     const selected = async () => {
       await check();
-      return receipt((await json(receiptPath)).value, checkout).prepared;
+      return (await publicationState(ctx)).prepared;
     };
     const result: LegacyComposeAdoptedGenerationStore = {
       async prepare(opts = {}) {
@@ -619,14 +1278,28 @@ export async function openLegacyComposeAdoptedGenerationStore(input: {
             refuse();
           }
           return await lock.withLock(async () => {
+            const prior = await publicationState(ctx);
+            requireNoPendingOperation(prior);
+            if (
+              prior.publication !== null &&
+              prior.publication.phase !== "rolled-back"
+            ) {
+              refuse("E_LEGACY_ADOPTION_BUSY");
+            }
             const generated = await prepare(ctx, binary);
             const loaded = await readInputs(ctx, generated);
-            await save(ctx, {
-              adoption_receipt_version: 1,
-              kind: KIND,
-              checkout,
-              prepared: generated,
-            });
+            await save(
+              ctx,
+              {
+                adoption_receipt_version: 1,
+                kind: KIND,
+                checkout,
+                prepared: generated,
+                publication: null,
+                pendingOperation: null,
+              },
+              prior
+            );
             return claim(generated, known, loaded.manifest.binding);
           });
         } catch (error: unknown) {
@@ -635,6 +1308,7 @@ export async function openLegacyComposeAdoptedGenerationStore(input: {
       },
       async loadPrepared() {
         try {
+          requireStablePublication(await publicationState(ctx));
           const current = await selected();
           if (!current) {
             return null;
@@ -645,10 +1319,134 @@ export async function openLegacyComposeAdoptedGenerationStore(input: {
           translate(error, signal);
         }
       },
+      async loadActive(opts = {}) {
+        try {
+          const state = await publicationState(ctx);
+          requireStablePublication(state);
+          if (!opts.recoverOperation) {
+            requireNoPendingOperation(state);
+          }
+          if (state.publication?.phase !== "active") {
+            return null;
+          }
+          const loaded = await readInputs(ctx, state.publication.generation);
+          await requireActiveCandidate(ctx, state.publication, loaded.inputs);
+          return claim(
+            state.publication.generation,
+            known,
+            loaded.manifest.binding,
+            "active"
+          );
+        } catch (error: unknown) {
+          translate(error, signal);
+        }
+      },
+      async publish(opts) {
+        try {
+          const generation = opts.generation,
+            binary = opts.binary;
+          await lock.withLock(async () => {
+            const state = await publicationState(ctx),
+              owned = known.get(generation);
+            requireNoPendingOperation(state);
+            if (
+              !(owned && state.prepared) ||
+              JSON.stringify(owned) !== JSON.stringify(state.prepared) ||
+              (state.publication && state.publication.phase !== "rolled-back")
+            ) {
+              refuse();
+            }
+            const loaded = await readInputs(ctx, owned);
+            await requireFirstSliceLayout(ctx);
+            await admitCandidate(ctx, loaded.inputs, binary);
+            await requireStopped(ctx, loaded.inputs.binding);
+            const source = await acquireNativeConfigImportInputs({
+              projectRoot: root,
+              signal,
+            });
+            if (
+              !source.ok ||
+              source.configText !== loaded.inputs.configText ||
+              source.composeText !== loaded.inputs.composeText ||
+              JSON.stringify(source.sourceFiles) !==
+                JSON.stringify(loaded.manifest.sourceFiles)
+            ) {
+              refuse("E_LEGACY_ADOPTION_CHANGED");
+            }
+            await source.assertFresh({ signal });
+            const publication: Publication = {
+              generation: owned,
+              phase: "switching",
+              native: null,
+            };
+            const pending = await save(ctx, { ...state, publication }, state);
+            await completePublication(ctx, pending, binary);
+          });
+        } catch (error: unknown) {
+          translate(error, signal);
+        }
+      },
+      async rollback() {
+        try {
+          await lock.withLock(async () => {
+            const state = await publicationState(ctx);
+            requireNoPendingOperation(state);
+            if (state.publication?.phase !== "active") {
+              refuse();
+            }
+            const loaded = await readInputs(ctx, state.publication.generation);
+            await requireActiveCandidate(ctx, state.publication, loaded.inputs);
+            await requireStopped(ctx, loaded.inputs.binding);
+            const next: Receipt = {
+              ...state,
+              publication: { ...state.publication, phase: "rolling-back" },
+            };
+            const pending = await save(ctx, next, state);
+            await completeRollback(ctx, pending);
+          });
+        } catch (error: unknown) {
+          translate(error, signal);
+        }
+      },
+      async repairPublication(opts) {
+        try {
+          const action = opts.action,
+            binary = opts.binary;
+          if (action !== "complete" && action !== "rollback") {
+            refuse();
+          }
+          await lock.withLock(async () => {
+            let state = await publicationState(ctx);
+            if (!(state.publication && pending(state))) {
+              refuse();
+            }
+            if (
+              action === "rollback" &&
+              state.publication.phase === "switching"
+            ) {
+              const next: Receipt = {
+                ...state,
+                publication: { ...state.publication, phase: "rolling-back" },
+              };
+              state = await save(ctx, next, state);
+            }
+            if (action === "rollback") {
+              await completeRollback(ctx, state);
+            } else {
+              await completePublication(ctx, state, binary);
+            }
+          });
+        } catch (error: unknown) {
+          translate(error, signal);
+        }
+      },
       async withLease(opts) {
         try {
           const captured = { ...opts };
           return await lock.withLock(async () => {
+            const publication = await publicationState(ctx);
+            requireStablePublication(publication);
+            requireNoPendingOperation(publication);
             const current = await selected(),
               selectedAnchor = known.get(captured.generation);
             if (
@@ -658,12 +1456,128 @@ export async function openLegacyComposeAdoptedGenerationStore(input: {
               refuse();
             }
             const loaded = await readInputs(ctx, current);
+            if (publication.publication?.phase === "active") {
+              await requireActiveCandidate(
+                ctx,
+                publication.publication,
+                loaded.inputs
+              );
+            }
+            await requireReceiptSnapshot(ctx, publication);
             const value = await captured.run(loaded.inputs);
             await readInputs(ctx, current);
-            if (JSON.stringify(await selected()) !== JSON.stringify(current)) {
+            if (publication.publication?.phase === "active") {
+              await requireActiveCandidate(
+                ctx,
+                publication.publication,
+                loaded.inputs
+              );
+            }
+            if (
+              JSON.stringify(await publicationState(ctx)) !==
+              JSON.stringify(publication)
+            ) {
               refuse();
             }
             return value;
+          });
+        } catch (error: unknown) {
+          translate(error, signal);
+        }
+      },
+      async withMutation(opts) {
+        try {
+          const captured = { ...opts, services: [...opts.services] };
+          return await lock.withLock(async () => {
+            let state = await publicationState(ctx);
+            requireStablePublication(state);
+            const owned = known.get(captured.generation);
+            if (
+              !owned ||
+              state.publication?.phase !== "active" ||
+              JSON.stringify(owned) !==
+                JSON.stringify(state.publication.generation)
+            ) {
+              refuse();
+            }
+            const loaded = await readInputs(ctx, owned);
+            const activePublication = state.publication;
+            await requireActiveCandidate(ctx, activePublication, loaded.inputs);
+            await admitCandidate(ctx, loaded.inputs, captured.binary);
+            const services = loaded.inputs.binding.containers.map(
+              (container) => container.service
+            );
+            const selectedServices = captured.services.length
+              ? captured.services
+              : services;
+            validateMutationSelection(
+              state,
+              { ...captured, services: selectedServices },
+              services
+            );
+            const observed = await inspectLegacyComposeContainerStates({
+              binding: loaded.inputs.binding,
+              signal,
+              timeoutMs,
+            });
+            if (
+              observed.some(
+                (value) =>
+                  value.paused ||
+                  !["created", "running", "exited"].includes(value.status)
+              )
+            ) {
+              refuse("E_LEGACY_ADOPTION_UNSUPPORTED");
+            }
+            if (!captured.recover) {
+              state = await save(
+                ctx,
+                {
+                  ...state,
+                  pendingOperation: {
+                    generation: owned,
+                    operation: captured.operation,
+                    services: selectedServices,
+                  },
+                },
+                state
+              );
+            }
+            await readInputs(ctx, owned);
+            await requireActiveCandidate(ctx, activePublication, loaded.inputs);
+            await requireReceiptSnapshot(ctx, state);
+            const code = await captured.run(loaded.inputs);
+            await ctx.check();
+            await readInputs(ctx, owned);
+            await requireActiveCandidate(ctx, activePublication, loaded.inputs);
+            const completed = await inspectLegacyComposeContainerStates({
+              binding: loaded.inputs.binding,
+              signal,
+              timeoutMs,
+            });
+            const ids = new Set(
+              loaded.inputs.binding.containers
+                .filter((container) =>
+                  selectedServices.includes(container.service)
+                )
+                .map((container) => container.id)
+            );
+            if (code !== 0) {
+              return code;
+            }
+            if (
+              completed.some(
+                (value) =>
+                  ids.has(value.id) &&
+                  (value.paused ||
+                    value.running !== (captured.operation !== "stop") ||
+                    !["created", "running", "exited"].includes(value.status))
+              )
+            ) {
+              refuse("E_LEGACY_ADOPTION_CHANGED");
+            }
+            await save(ctx, { ...state, pendingOperation: null }, state);
+            return code;
           });
         } catch (error: unknown) {
           translate(error, signal);

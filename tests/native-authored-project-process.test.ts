@@ -461,6 +461,9 @@ test("status descendant-held pipes cannot outlive startup admission or owned cle
     controlKeeper: true,
     fastControlBoundary: true,
   });
+  // Keep the fixture even if admission/settlement outlives the outer test.
+  // Cleanup becomes eligible only after its exact keeper completion+absence.
+  roots.splice(roots.indexOf(opts.projectRoot), 1);
   let published = false;
   let failure = "";
   let keeper: number | undefined;
@@ -469,6 +472,7 @@ test("status descendant-held pipes cannot outlive startup admission or owned cle
   let nativeFailureObserved = false;
   let operationSettled = false;
   let admitted = false;
+  let cancellationRequested = false;
   let cancellationStarted: number | undefined;
   let cancellationTimer: ReturnType<typeof setTimeout> | undefined;
   const controller = new AbortController();
@@ -527,7 +531,12 @@ test("status descendant-held pipes cannot outlive startup admission or owned cle
     }
     if (admitted) {
       cancellationStarted = performance.now();
-      cancellationTimer = setTimeout(() => controller.abort(), 200);
+      cancellationTimer = setTimeout(() => {
+        if (!operationSettled) {
+          cancellationRequested = true;
+          controller.abort();
+        }
+      }, 200);
     } else {
       controller.abort();
     }
@@ -541,6 +550,7 @@ test("status descendant-held pipes cannot outlive startup admission or owned cle
         JSON.stringify({
           kind: "native-status-fixture-stages",
           admitted,
+          cancellationRequested,
           receiptObserved,
           ownedExitCode: ownedExitCode ?? null,
           nativeFailureObserved,
@@ -560,6 +570,7 @@ test("status descendant-held pipes cannot outlive startup admission or owned cle
       );
     }
     expect(admitted).toBe(true);
+    expect(cancellationRequested).toBe(true);
     if (keeper === undefined) {
       throw new Error("Status keeper admission requires an observed live PID.");
     }
@@ -582,10 +593,7 @@ test("status descendant-held pipes cannot outlive startup admission or owned cle
       controller.abort();
     }
     await operation;
-    if (!admitted || keeper === undefined) {
-      // A failed setup never supplies a PID or completion authority.
-      roots.splice(roots.indexOf(opts.projectRoot), 1);
-    } else {
+    if (admitted && keeper !== undefined) {
       const keeperPid = keeper;
       const absent = () => {
         try {
@@ -619,8 +627,8 @@ test("status descendant-held pipes cannot outlive startup admission or owned cle
         .text()
         .catch(() => undefined);
       const keeperAbsent = absent();
-      if (completion !== "exited" || !keeperAbsent) {
-        roots.splice(roots.indexOf(opts.projectRoot), 1);
+      if (completion === "exited" && keeperAbsent) {
+        roots.push(opts.projectRoot);
       }
       expect(completion).toBe("exited");
       expect(keeperAbsent).toBe(true);

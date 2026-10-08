@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { acquireProjectEnvForNativeExecution } from "../src/lib/project-env-config.ts";
 import {
+  nativeRoutedDownChangedSource,
   nativeRoutedDownClaimsMatch,
   nativeRoutedDownFreshnessEvidence,
   nativeRoutedDownHookProofMatches,
@@ -56,30 +57,81 @@ test("routed env authoring works after the native marker and preserves the actua
       writeNativeRoutedDownEnvFixture({ root, mode: "initial" })
     ).rejects.toThrow("must not overwrite unrelated fixture inputs");
     expect(await Bun.file(envPath).text()).toBe(original);
-    await writeNativeRoutedDownEnvFixture({ root, mode: "drift" });
+    await writeNativeRoutedDownEnvFixture({ root, mode: "refresh" });
     await expect(acquired.assertFresh(selection)).rejects.toThrow(
       "selected inputs changed"
     );
     await expect(acquired.resolveValues()).rejects.toThrow(
       "selected inputs changed"
     );
+    // A new command captures the refreshed current values; only the old acquisition is stale.
     const changed = await acquireProjectEnvForNativeExecution(selection);
     const changedValues = await changed.resolveValues();
     expect(changedValues.workloadEnv.web?.ROUTED_DOWN_TOKEN).toBe(
       "synthetic-routed-down-guest"
     );
     expect(changedValues.hostValues?.default?.ROUTED_DOWN_TOKEN).toBe(
-      "synthetic-routed-down-drift"
+      "synthetic-routed-down-host-$literal-refreshed"
     );
-    await Bun.write(envPath, original);
+    await changed.assertFresh(selection);
+    await writeNativeRoutedDownEnvFixture({ root, mode: "reset" });
+    expect(await Bun.file(envPath).text()).toBe(original);
     await acquired.assertFresh(selection);
     await Bun.write(envPath, "unrelated fixture bytes\n");
     await expect(
-      writeNativeRoutedDownEnvFixture({ root, mode: "drift" })
+      writeNativeRoutedDownEnvFixture({ root, mode: "refresh" })
     ).rejects.toThrow("must not overwrite unrelated fixture inputs");
     expect(await Bun.file(envPath).text()).toBe("unrelated fixture bytes\n");
   } finally {
     await rm(created, { recursive: true, force: true });
+  }
+});
+test("saved-source control changes only the declared owned hook name", () => {
+  const source = {
+    version: 1,
+    name: "fixture",
+    services: { web: { image: "fixture-image" } },
+    host: {
+      down: {
+        before: [
+          {
+            name: "routed-down-before",
+            command: { exec: ["fixture-bun", "fixture-hook.ts", "before"] },
+            environment: { SEEN: { env_ref: "ROUTED_DOWN_TOKEN" } },
+          },
+        ],
+        after: [
+          {
+            name: "routed-down-after",
+            command: { exec: ["fixture-bun", "fixture-hook.ts", "after"] },
+          },
+        ],
+      },
+    },
+  };
+  const changed = JSON.parse(
+    nativeRoutedDownChangedSource(JSON.stringify(source))
+  );
+  expect(changed).toEqual({
+    ...source,
+    host: {
+      down: {
+        ...source.host.down,
+        before: [
+          { ...source.host.down.before[0], name: "changed-routed-down-before" },
+        ],
+      },
+    },
+  });
+  for (const value of [
+    {},
+    { ...source, host: {} },
+    { ...source, host: { down: { before: [] } } },
+    changed,
+  ]) {
+    expect(() => nativeRoutedDownChangedSource(JSON.stringify(value))).toThrow(
+      "exact owned before hook"
+    );
   }
 });
 test("second routed startup refuses lost or changed marker without repairing it", async () => {

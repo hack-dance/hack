@@ -133,9 +133,13 @@ and CA-valid TLS routes; after sees its own container/network/dispatch absence w
 its claims remain held. A known after-hook exit 17 keeps the stop pending and claims
 held until explicit saved recovery skips the hooks. A later successful stop retires
 only the primary claims. Both modes check unchanged sibling container/network IDs,
-generation, data, volume creation and TLS routes; managed-env drift refuses before
-hooks or teardown. Unknown hook completion is covered by the separate generation
-regressions; this fixture does not create an unrecoverable orphan to simulate it.
+generation, data, volume creation and TLS routes; saved-source drift refuses before
+hooks or teardown. Before each down, a valid managed host value is refreshed after up; both hook
+phases must receive that new value while guest values remain unchanged. In-flight
+env changes are separately covered by source-CLI before/after regressions with a
+controlled engine stand-in; this Docker fixture does not claim to exercise that race.
+Unknown hook completion is covered by the separate generation regressions; this
+fixture does not create an unrecoverable orphan to simulate it.
 It retires native routes and claims before removing only its exact owned proxy.
 This proves same-engine Caddy
 routing and fixture CA TLS; host DNS, system trust and browser access remain separate

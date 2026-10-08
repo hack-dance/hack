@@ -214,7 +214,10 @@ any hook journal or spawn. Each phase receives its own finite budget.
 The private saved generation binds down hooks to its immutable source revision,
 profiles, effective overlay (including no overlay) and original explicit overlay
 selection. Normal hook-enabled down rechecks source, local, routing and managed
-environment freshness before engine effects and final claim retirement. Hooks
+environment freshness before engine effects and final claim retirement. Managed
+values are captured from the current environment for each new down invocation;
+they are not frozen to the earlier up invocation. Changes during that acquisition
+or between its hook phases prevent teardown/finalization as appropriate. Hooks
 cannot rebind that generation. Any pre-existing pending operation or unknown hook
 intent refuses normal hook-enabled down before private value acquisition. Changed
 or malformed inputs require explicit recovery. Generations saved without this

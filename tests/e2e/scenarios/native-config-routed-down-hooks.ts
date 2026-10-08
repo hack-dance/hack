@@ -29,6 +29,7 @@ const INSTANCE = "io.hack.native-config.instance";
 const MARKER_PATH = "/state/routed-down-marker";
 const ENV_KEY = "ROUTED_DOWN_TOKEN";
 const HOST_VALUE = "synthetic-routed-down-host-$literal";
+const REFRESHED_HOST_VALUE = "synthetic-routed-down-host-$literal-refreshed";
 const GUEST_VALUE = "synthetic-routed-down-guest";
 const PROOF_WINDOW = 30_000;
 type Checkout = { readonly root: string; readonly marker: string };
@@ -578,7 +579,7 @@ export async function runNativeRoutedDownHook(
   if (
     !(
       process.cwd() === capsule.own.root &&
-      process.env.SEEN === HOST_VALUE &&
+      process.env.SEEN === REFRESHED_HOST_VALUE &&
       !Object.hasOwn(process.env, ENV_KEY)
     )
   ) {
@@ -692,24 +693,21 @@ async function assertKnownStop(
   await opts.absent(own.origins.map((url) => new URL(url).hostname));
 }
 
-async function refuseManagedEnvDrift(
+async function refuseSavedSourceDrift(
   opts: Acceptance,
   capsule: Capsule,
   raw: (args: readonly string[]) => Promise<CliResult>
 ): Promise<void> {
-  const envPath = join(opts.primary.root, ".hack", "hack.env.default.yaml");
-  const original = await Bun.file(envPath).text();
-  await writeNativeRoutedDownEnvFixture({
-    root: opts.primary.root,
-    mode: "drift",
-  });
+  const sourcePath = join(opts.primary.root, ".hack", "hack.project.json");
+  const original = await Bun.file(sourcePath).text();
+  await Bun.write(sourcePath, nativeRoutedDownChangedSource(original));
   try {
     const refused = await raw(["down", "--json"]);
     expectExit({
       result: refused,
       codes: [1],
       message:
-        "Changed managed env must refuse routed stop before hook/engine effects",
+        "Changed saved source must refuse routed stop before hook/engine effects",
     });
     const proof = nativeRoutedDownFreshnessEvidence({
       expected: capsule.own,
@@ -742,12 +740,39 @@ async function refuseManagedEnvDrift(
         proof.hookOrderUnchanged &&
         proof.snapshotUnchanged &&
         proof.claimsUnchanged,
-      message: `Freshness refusal must leave the original route, data, generation and claims unchanged: ${JSON.stringify(diagnostic)}`,
+      message: `Saved-source refusal must leave the original route, data, generation and claims unchanged: ${JSON.stringify(diagnostic)}`,
     });
     await opts.check(opts.primary);
   } finally {
-    await Bun.write(envPath, original);
+    await Bun.write(sourcePath, original);
+    expect({
+      that: (await Bun.file(sourcePath).text()) === original,
+      message: "Saved-source control must restore exact authored bytes",
+    });
   }
+}
+
+/** Change a declared hook name, preserving its argv/env and every unrelated authored field. */
+export function nativeRoutedDownChangedSource(text: string): string {
+  const value = object(text);
+  const host = value.host;
+  const down = isRecord(host) ? host.down : null;
+  const before = isRecord(down) ? down.before : null;
+  if (
+    !(
+      isRecord(host) &&
+      isRecord(down) &&
+      Array.isArray(before) &&
+      before.length === 1 &&
+      isRecord(before[0]) &&
+      before[0].name === "routed-down-before"
+    )
+  ) {
+    throw new Error(
+      "Saved-source control requires its exact owned before hook; values omitted"
+    );
+  }
+  return `${JSON.stringify({ ...value, host: { ...host, down: { ...down, before: [{ ...before[0], name: "changed-routed-down-before" }] } } }, null, 2)}\n`;
 }
 
 /** Fixed booleans expose the precise refusal boundary without publishing values or private owner records. */
@@ -875,7 +900,7 @@ export function nativeRoutedDownMarkerProgram(opts: {
   return `const f=Bun.file(${JSON.stringify(opts.path)});if(await f.exists()){if(await f.text()!==${JSON.stringify(opts.marker)})process.exit(48)}else{${opts.mode === "after17" ? `await Bun.write(f,${JSON.stringify(opts.marker)});` : "process.exit(48);"}}${opts.primary ? `if(process.env.${ENV_KEY}!==${JSON.stringify(GUEST_VALUE)}||Object.hasOwn(process.env,"SEEN"))process.exit(47);` : ""}`;
 }
 
-function envFixtureText(mode: "initial" | "drift"): string {
+function envFixtureText(mode: "initial" | "refresh"): string {
   const text = YAML.stringify({
     version: 1,
     environment: "default",
@@ -883,8 +908,7 @@ function envFixtureText(mode: "initial" | "drift"): string {
     values: {
       global: { [ENV_KEY]: GUEST_VALUE },
       host: {
-        [ENV_KEY]:
-          mode === "initial" ? HOST_VALUE : "synthetic-routed-down-drift",
+        [ENV_KEY]: mode === "initial" ? HOST_VALUE : REFRESHED_HOST_VALUE,
       },
     },
   });
@@ -894,7 +918,7 @@ function envFixtureText(mode: "initial" | "drift"): string {
 /** Author only this isolated synthetic input; legacy mutation APIs intentionally refuse native projects. */
 export async function writeNativeRoutedDownEnvFixture(opts: {
   readonly root: string;
-  readonly mode: "initial" | "drift";
+  readonly mode: "initial" | "refresh" | "reset";
 }): Promise<void> {
   const path = join(opts.root, ".hack", "hack.env.default.yaml");
   const file = Bun.file(path);
@@ -903,11 +927,16 @@ export async function writeNativeRoutedDownEnvFixture(opts: {
     that:
       opts.mode === "initial"
         ? !exists
-        : exists && (await file.text()) === envFixtureText("initial"),
+        : exists &&
+          (await file.text()) ===
+            envFixtureText(opts.mode === "refresh" ? "initial" : "refresh"),
     message:
       "Synthetic native env authoring must not overwrite unrelated fixture inputs",
   });
-  await Bun.write(path, envFixtureText(opts.mode));
+  await Bun.write(
+    path,
+    envFixtureText(opts.mode === "refresh" ? "refresh" : "initial")
+  );
 }
 
 /** Combined routing + finite stop proof, inside the required owned routing scenario. */
@@ -992,8 +1021,13 @@ export async function qualifyNativeComposeRoutedDownHooks(
     );
     await Bun.write(order, "");
     if (mode === "after17") {
-      await refuseManagedEnvDrift(opts, capsule, raw);
+      await refuseSavedSourceDrift(opts, capsule, raw);
     }
+    // New down invocation owns fresh current values; it does not freeze the earlier up acquisition.
+    await writeNativeRoutedDownEnvFixture({
+      root: opts.primary.root,
+      mode: "refresh",
+    });
     const result = await raw(["down", "--json"]);
     expectExit({
       result,
@@ -1043,6 +1077,10 @@ export async function qualifyNativeComposeRoutedDownHooks(
       });
       await opts.check(sibling);
     }
+    await writeNativeRoutedDownEnvFixture({
+      root: opts.primary.root,
+      mode: "reset",
+    });
   }
   await opts.up(opts.primary.root);
   const restored = await observe(opts.primary, opts.docker, true);

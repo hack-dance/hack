@@ -106,6 +106,17 @@ records still refuse; they grant no inspection, cleanup or restore authority. A 
 without native input support refuses retained native journals before more graph
 work. Existing Compose v1 codecs, bindings and paths retain their contracts.
 
+On macOS, `provider::graph::native::foreground` adds an explicit library owner for
+this same subset. Its private `native-graph-owner` record and authenticated v2
+`native-graph-control` status/cleanup protocol bind the native review, exact
+process incarnation, directory, socket, file and retained per-run lock. Direct
+run/cleanup and foreground publication exclude each other under that lock.
+Cancellation fences startup before admission and subsequent effects. Cleanup
+retains stop failures by admitted workload name, and retires the publication only
+after exact cleanup succeeds. Failed or abandoned publications preserve evidence;
+they never authorize adoption, restart or dead-owner recovery. This owner has no
+public CLI/frontend selection yet and does not implement reactive health or hooks.
+
 The optional feature exposes this bounded consumer through a distinct public CLI:
 `graph native plan --source-file FILE --json`, then
 `graph native run --source-file FILE --expect-review SHA --json`.

@@ -1,7 +1,7 @@
 //! Explicit native consumption. The provider lease covers admission through the last observation.
 use super::*;
 use crate::provider::{environment::PendingEnvironment, native_environment};
-use std::{path::Path, time::Instant};
+use std::{cell::Cell, path::Path, time::Instant};
 
 trait Backend {
     fn request(
@@ -21,7 +21,11 @@ trait Backend {
     fn verify_private(&self, _service: &str) -> Result<(), CandidateError> {
         Ok(())
     }
-    fn stop(&self, _selected: &[(String, u64)]) -> Result<(), CandidateError> {
+    fn stop(
+        &self,
+        _selected: &[(String, u64)],
+        _admitted: &BTreeMap<&str, &str>,
+    ) -> Result<(), CandidateError> {
         Err(refused())
     }
 }
@@ -70,10 +74,14 @@ impl Backend for OwnedBackend<'_> {
         }
         Ok(())
     }
-    fn stop(&self, selected: &[(String, u64)]) -> Result<(), CandidateError> {
+    fn stop(
+        &self,
+        selected: &[(String, u64)],
+        admitted: &BTreeMap<&str, &str>,
+    ) -> Result<(), CandidateError> {
         self.engine
             .stop_containers_diagnosed(selected)
-            .map_err(|failure| failure.error)
+            .map_err(|failure| super::super::shutdown::stop_error(failure, admitted))
     }
 }
 
@@ -430,7 +438,14 @@ pub fn run(
     candidate: &Candidate,
     prepared: selection::Prepared,
 ) -> Result<Receipt, CandidateError> {
-    run_guarded(candidate, prepared, None)
+    #[cfg(target_os = "macos")]
+    {
+        let run = prepared.input().review().scope().run.to_owned();
+        let guard = super::foreground::DirectGuard::acquire(candidate, &run)?;
+        run_guarded(candidate, prepared, Some(&|| guard.verify()), None)
+    }
+    #[cfg(not(target_os = "macos"))]
+    run_guarded(candidate, prepared, None, None)
 }
 
 fn check_startup(
@@ -445,6 +460,7 @@ pub(super) fn run_guarded(
     candidate: &Candidate,
     prepared: selection::Prepared,
     startup_guard: Option<&dyn Fn() -> Result<(), CandidateError>>,
+    admitted: Option<&Cell<bool>>,
 ) -> Result<Receipt, CandidateError> {
     check_startup(startup_guard)?;
     let (selected, input) = prepared.into_parts(candidate)?;
@@ -489,6 +505,9 @@ pub(super) fn run_guarded(
         engine.guest().boot_id(),
     )?;
     let root = journal::reserve(candidate, &receipt)?;
+    if let Some(admitted) = admitted {
+        admitted.set(true);
+    }
     // Retain a native reservation before launcher publication, staging or container creation.
     let execution = (|| {
         check_startup(startup_guard)?;
@@ -596,6 +615,21 @@ fn snapshot<B: Backend>(backend: &B, receipt: Receipt) -> Result<Snapshot, Candi
 
 /// Bounded same-incarnation cleanup; no restart, cross-boot restore, force or volume pruning.
 pub fn cleanup(candidate: &Candidate, run: &str) -> Result<Receipt, CandidateError> {
+    #[cfg(target_os = "macos")]
+    {
+        let guard = super::foreground::DirectGuard::acquire(candidate, run)?;
+        cleanup_guarded(candidate, run, None, Some(&|| guard.verify()))
+    }
+    #[cfg(not(target_os = "macos"))]
+    cleanup_guarded(candidate, run, None, None)
+}
+pub(super) fn cleanup_guarded(
+    candidate: &Candidate,
+    run: &str,
+    review: Option<&native_input::Review>,
+    guard: Option<&dyn Fn() -> Result<(), CandidateError>>,
+) -> Result<Receipt, CandidateError> {
+    check_startup(guard)?;
     let engine = Engine::connect_cleanup(candidate)?;
     let (mut receipt, root) = journal::load(
         candidate,
@@ -603,20 +637,34 @@ pub fn cleanup(candidate: &Candidate, run: &str) -> Result<Receipt, CandidateErr
         engine.guest().incarnation(),
         engine.guest().boot_id(),
     )?;
+    if review.is_some_and(|review| *review != receipt.review) {
+        return Err(refused());
+    }
     let backend = OwnedBackend {
         engine,
         launcher: None,
         leases: BTreeMap::new(),
     };
-    cleanup_using(&backend, &mut receipt, &root)?;
+    cleanup_using_guarded(&backend, &mut receipt, &root, guard)?;
+    check_startup(guard)?;
     native_environment::retire_graph(candidate, backend.engine.guest(), &receipt)?;
     Ok(receipt)
 }
+#[cfg(test)]
 fn cleanup_using<B: Backend>(
     backend: &B,
     receipt: &mut Receipt,
     root: &Path,
 ) -> Result<(), CandidateError> {
+    cleanup_using_guarded(backend, receipt, root, None)
+}
+fn cleanup_using_guarded<B: Backend>(
+    backend: &B,
+    receipt: &mut Receipt,
+    root: &Path,
+    guard: Option<&dyn Fn() -> Result<(), CandidateError>>,
+) -> Result<(), CandidateError> {
+    check_startup(guard)?;
     let mut prepared = BTreeMap::new();
     let network = receipt
         .resources
@@ -650,6 +698,7 @@ fn cleanup_using<B: Backend>(
             );
         }
     }
+    check_startup(guard)?;
     receipt.phase = Phase::StopIntent;
     journal::save(root, receipt)?;
     let stops = prepared
@@ -657,7 +706,13 @@ fn cleanup_using<B: Backend>(
         .filter(|p| p.running)
         .map(|p| (p.id.clone(), u64::from(p.grace_seconds)))
         .collect::<Vec<_>>();
-    backend.stop(&stops)?;
+    check_startup(guard)?;
+    let admitted = prepared
+        .iter()
+        .filter(|(_, prepared)| prepared.running)
+        .map(|(key, prepared)| (prepared.id.as_str(), receipt.resources[key].key.as_str()))
+        .collect::<BTreeMap<_, _>>();
+    backend.stop(&stops, &admitted)?;
     for (key, prepared) in &prepared {
         let resource = &receipt.resources[key];
         let value = inspected(backend, receipt, resource)?.ok_or_else(refused)?;
@@ -672,6 +727,7 @@ fn cleanup_using<B: Backend>(
     receipt.phase = Phase::RemovalIntent;
     journal::save(root, receipt)?;
     for key in prepared.keys() {
+        check_startup(guard)?;
         let resource = &receipt.resources[key];
         let value = inspected(backend, receipt, resource)?.ok_or_else(refused)?;
         super::super::shutdown::terminal(resource, &value, false)?;
@@ -708,6 +764,7 @@ fn cleanup_using<B: Backend>(
             .ok_or_else(refused)?
             .phase = "remove-intent".into();
         journal::save(root, receipt)?;
+        check_startup(guard)?;
         backend.request(
             Method::DELETE,
             &format!(

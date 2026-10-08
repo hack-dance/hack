@@ -4,7 +4,7 @@ import { link, mkdtemp, readFile, realpath, rename, rm, symlink, writeFile } fro
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { holdDirectory, writeExclusive } from "../src/lib/native-compose-private-state.ts";
-import { holdNativeComposeStorageDockerIo } from "../src/lib/native-compose-storage-witness-docker-io.ts";
+import { createNativeComposeStorageDockerEmptyLeaf, holdNativeComposeStorageDockerIo } from "../src/lib/native-compose-storage-witness-docker-io.ts";
 import { runNativeComposeStorageDockerCommand } from "../src/lib/native-compose-storage-witness-docker.ts";
 import { run } from "../src/lib/shell.ts";
 
@@ -16,7 +16,7 @@ async function fixture() {
   const directory = await holdDirectory(root, true);
   const input = join(root, "input"), stdout = join(root, "stdout"), stderr = join(root, "stderr");
   const text = "synthetic private input";
-  const inputInfo = await writeExclusive(input, text), outInfo = await writeExclusive(stdout, ""), errInfo = await writeExclusive(stderr, "");
+  const inputInfo = await writeExclusive(input, text), outInfo = await createNativeComposeStorageDockerEmptyLeaf(stdout), errInfo = await createNativeComposeStorageDockerEmptyLeaf(stderr);
   const io = await holdNativeComposeStorageDockerIo({ directories: [directory], input: { path: input, info: inputInfo, text },
     stdout: { path: stdout, info: outInfo }, stderr: { path: stderr, info: errInfo }, limit: 4096 });
   return { root, directory, input, inputInfo, stdout, stderr, text, io };
@@ -31,6 +31,16 @@ test("held IO passes exact stdin and preserves caller descriptors through comple
     expect(code).toBe(0); expect(exited).toBe(true);
     expect(f.io.read()).toEqual({ stdout: f.text, stderr: "" });
     expect(fstatSync(f.io.descriptors.stdin).isFile()).toBe(true);
+  } finally { await f.io.close(); await f.directory.file.close(); }
+});
+test("separate empty command leaf never overwrites existing bytes or follows a symlink", async () => {
+  const f = await fixture();
+  try {
+    await expect(createNativeComposeStorageDockerEmptyLeaf(f.input)).rejects.toThrow();
+    const alias = join(f.root, "alias"); await symlink(f.input, alias);
+    await expect(createNativeComposeStorageDockerEmptyLeaf(alias)).rejects.toThrow();
+    expect(await readFile(f.input, "utf8")).toBe(f.text);
+    await expect(writeExclusive(join(f.root, "receipt-empty"), "")).rejects.toThrow("values omitted");
   } finally { await f.io.close(); await f.directory.file.close(); }
 });
 test.each(["input-replace", "input-symlink", "stdout-replace", "stderr-replace", "input-hardlink", "input-change", "stdout-hardlink", "stdout-symlink"] as const)(

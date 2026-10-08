@@ -29,6 +29,17 @@ function readLeaf(leaf: HeldLeaf, limit: number): string {
   return new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes.subarray(0, count));
 }
 
+/** Empty command leaves are not receipts: the shared receipt writer deliberately
+ * requires nonempty bytes. This separate create-only leaf keeps that invariant. */
+export async function createNativeComposeStorageDockerEmptyLeaf(path: string): Promise<Stats> {
+  const file = await open(path, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, 0o600);
+  try {
+    await file.sync();
+    const info = await file.stat();
+    return checkLeaf({ path, info, file }, 0);
+  } catch { return refuse(); } finally { await file.close(); }
+}
+
 /** Holds exact no-follow leaves through shared run() and owned group settlement.
  * Child writes are separately quota-limited by the fixed shell wrapper; reads
  * accept at most limit bytes. No named path is reopened or truncated by the child. */

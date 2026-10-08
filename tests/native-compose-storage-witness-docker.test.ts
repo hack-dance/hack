@@ -45,7 +45,7 @@ async function withBinding(run: (value: NativeComposeMaterialBinding) => Promise
       services: { app: { image: "synthetic:1", labels: { ...labels, "io.hack.native-config.generation": reservation.generationId, "io.hack.native-config.workload": "service" } } },
       volumes: { data: { name: selection.name, labels: { ...labels, "io.hack.native-config.storage": selection.storage } } },
     }) });
-    await mutation.runEffect({ generation, operation: "up", assertOwned: async () => {},
+    await mutation.runEffect({ generation, operation: "up", assertOwned: async () => {}, assertFresh: async () => {},
       effect: async () => {
         await run(await assertNativeComposeMaterialAuthority({ authority: mutation.materialAuthority, generation, phase: "effect" }));
         return { outcome: "complete", value: 0 };

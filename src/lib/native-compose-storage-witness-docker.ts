@@ -26,7 +26,7 @@ import {
   inspectNativeComposeStorageDockerVolume,
   observeNativeComposeStorageDockerTarget,
 } from "./native-compose-storage-witness-docker-inventory.ts";
-import { holdNativeComposeStorageDockerIo } from "./native-compose-storage-witness-docker-io.ts";
+import { createNativeComposeStorageDockerEmptyLeaf, holdNativeComposeStorageDockerIo } from "./native-compose-storage-witness-docker-io.ts";
 import {
   checkNativeComposeStorageDockerCarrier,
   NATIVE_STORAGE_CARRIER_FORMAT,
@@ -181,7 +181,7 @@ export async function runNativeComposeStorageDockerCommand(supplied: {
   const opts = { ...supplied, context: { ...supplied.context }, args: [...supplied.args] };
   const capture = randomBytes(16).toString("hex");
   const stdout = join(opts.files.path, `${capture}.stdout`), stderr = join(opts.files.path, `${capture}.stderr`);
-  const out = await writeExclusive(stdout, ""), err = await writeExclusive(stderr, "");
+  const out = await createNativeComposeStorageDockerEmptyLeaf(stdout), err = await createNativeComposeStorageDockerEmptyLeaf(stderr);
   opts.files.captures.push({ path: stdout, info: out }, { path: stderr, info: err });
   await opts.files.held.at(-1)?.file.sync();
   const io = await holdNativeComposeStorageDockerIo({ directories: opts.files.held,
@@ -263,7 +263,7 @@ export async function createNativeComposeDockerStorageXattrCarrier(opts: Context
       const path = join(root.path, nonce); await mkdir(path, { mode: 0o700 }); await root.file.sync();
       const leaf = await holdDirectory(path, true); held.push(leaf);
       const request = join(path, "request.json"), program = join(path, "intent.json");
-      const inputInfo = await writeExclusive(request, "");
+      const inputInfo = await createNativeComposeStorageDockerEmptyLeaf(request);
       const programInfo = await writeExclusive(program, JSON.stringify({ ...selection, nonce })); await leaf.file.sync();
       files = { held, path, input: request, program, programInfo, inputInfo, requestText: "", captures: [] };
       const read = probe(); await engine(read, context);

@@ -274,21 +274,6 @@ fn compile_inputs(
     profiles: &[String],
     managed_values: Option<&ManagedValues>,
 ) -> Result<NativeInputs, CandidateError> {
-    // Presence remains unqualified even when definitions are empty or grants inactive.
-    // Check the original source before a compiler normalization can omit that intent.
-    if serde_json::from_slice::<serde_json::Value>(request)
-        .ok()
-        .and_then(|request| {
-            request
-                .get("project")
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_owned)
-        })
-        .and_then(|source| serde_json::from_str::<serde_json::Value>(&source).ok())
-        .is_some_and(|source| source.get("configs").is_some() || source.get("secrets").is_some())
-    {
-        return Err(refused());
-    }
     let PlanResult::Success {
         plan,
         semantic_hash,
@@ -302,6 +287,23 @@ fn compile_inputs(
             "Native compiler metadata planning failed; values omitted.",
         ));
     };
+    // Presence remains unqualified even when definitions are empty or grants inactive.
+    // The owning compiler has enforced its request and authored-document bounds before
+    // this raw scan. Inspect original presence before hashes or private copies, because
+    // normalization can omit empty definitions and inactive grants.
+    if serde_json::from_slice::<serde_json::Value>(request)
+        .ok()
+        .and_then(|request| {
+            request
+                .get("project")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        })
+        .and_then(|source| serde_json::from_str::<serde_json::Value>(&source).ok())
+        .is_some_and(|source| source.get("configs").is_some() || source.get("secrets").is_some())
+    {
+        return Err(refused());
+    }
     if !environment_plan.complete || !environment_plan.diagnostics.is_empty() {
         return Err(private_refused());
     }

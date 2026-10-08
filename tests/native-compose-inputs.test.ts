@@ -32,6 +32,7 @@ const PROTOCOL = {
   env_plan_version: 1,
   routing_plan_version: 1,
   host_env_plan_version: 1,
+  file_plan_version: 1,
 };
 const KEYS = [
   "HACK_HOME",
@@ -180,6 +181,27 @@ async function refuses(operation: Promise<unknown>) {
     expect(JSON.stringify(error)).not.toContain(forbidden);
   }
 }
+
+test.each([
+  "configs",
+  "secrets",
+])("unqualified %s presence refuses before private env acquisition", async (field) => {
+  await compiler();
+  await writeFile(
+    join(projectRoot, ".hack/hack.project.json"),
+    JSON.stringify({ ...SOURCE, [field]: {} })
+  );
+  // Reaching the managed owner would produce a different invalid-store refusal.
+  await writeFile(join(projectRoot, ".hack/hack.env.json"), CANARY);
+  const error: unknown = await acquireNativeComposeInputs({
+    projectRoot,
+  }).catch((value: unknown) => value);
+  expect(String(error)).toContain("qualified private material owner");
+  expect(String(error)).not.toContain(CANARY);
+  expect(
+    (await requests()).some((request) => request.operation === "plan")
+  ).toBe(false);
+});
 
 /** Produce synthetic ciphertext through the existing owner outside the native fixture. */
 async function encrypted(): Promise<ProjectEnvStoredValue> {

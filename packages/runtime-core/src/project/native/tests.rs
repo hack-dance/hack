@@ -69,6 +69,57 @@ fn refusal(result: Result<NativeInputs, CandidateError>, code: &str) {
 }
 
 #[test]
+fn authored_file_presence_refuses_before_private_copies_even_empty_or_inactive() {
+    let values = BTreeMap::from([(
+        "web".into(),
+        BTreeMap::from([("TOKEN".into(), "synthetic-private-file".into())]),
+    )]);
+    for (field, definition) in [
+        ("configs", json!({})),
+        ("secrets", json!({})),
+        ("configs", json!({"unused":{"file":"authored-canary"}})),
+        ("secrets", json!({"token":{"env_ref":"TOKEN"}})),
+    ] {
+        let mut project = basic();
+        project[field] = definition;
+        let input = request(
+            &project,
+            json!({"web":{"TOKEN":{"scope":"web","secret":true}}}),
+        );
+        assert!(hack_config_compiler::environment::plan(&input, &[]).complete());
+        PRIVATE_COPIES.with(|copies| copies.set(0));
+        refusal(
+            compile(CompileOptions {
+                request: &input,
+                profiles: &[],
+                managed_values: &values,
+            }),
+            "native_graph_subset",
+        );
+        assert_eq!(PRIVATE_COPIES.with(std::cell::Cell::get), 0);
+    }
+    let mut project = basic();
+    project["profiles"] = json!(["dev"]);
+    project["configs"] = json!({"settings":{"file":"authored-canary"}});
+    project["jobs"] = json!({"inactive":{"image":"reader","profiles":["dev"],"mounts":[{"config":"settings","target":"/settings","access":"read-only"}]}});
+    let input = request(
+        &project,
+        json!({"web":{"TOKEN":{"scope":"web","secret":true}},"inactive":{}}),
+    );
+    assert!(hack_config_compiler::environment::plan(&input, &[]).complete());
+    PRIVATE_COPIES.with(|copies| copies.set(0));
+    refusal(
+        compile(CompileOptions {
+            request: &input,
+            profiles: &[],
+            managed_values: &values,
+        }),
+        "native_graph_subset",
+    );
+    assert_eq!(PRIVATE_COPIES.with(std::cell::Cell::get), 0);
+}
+
+#[test]
 fn late_workload_and_binding_refusals_never_copy_private_values() {
     let project = json!({"schema_version":1,"name":"fixture","services":{
         "a.first":{"image":"first"},"z.last":{"image":"last"}

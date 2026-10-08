@@ -18,6 +18,10 @@ import {
   writeExclusive,
 } from "../lib/native-compose-private-state.ts";
 import {
+  type NativeEnvMetadata,
+  parseNativeEnvMetadata,
+} from "../lib/native-env-plan-protocol.ts";
+import {
   type NativeAuthoredReceipt,
   type NativeAuthoredReview,
   nativeAuthoredReceiptBinding,
@@ -26,8 +30,10 @@ import {
 } from "./native-authored-graph-protocol.ts";
 
 const LIMIT = 64 * 1024;
+const SOURCE_LIMIT = 1024 * 1024;
 const CONTROL = /\p{Cc}/u;
 const HEX64 = /^[a-f0-9]{64}$/;
+const HEX32 = /^[a-f0-9]{32}$/;
 export type NativeAuthoredProjectRunScope = {
   readonly projectRoot: string;
   readonly projectDir: string;
@@ -56,15 +62,32 @@ export type NativeAuthoredProjectStartSelection = {
   readonly record: NativeAuthoredProjectStart;
   readonly identity: NativeAuthoredProjectRunSelection["identity"];
 };
+export type NativeAuthoredProjectSource = {
+  readonly path: string;
+  readonly assertFresh: () => Promise<void>;
+  /** Start and ready must both be absent; retained attempts keep their source. */
+  readonly remove: () => Promise<void>;
+};
+type SourceOptions = {
+  readonly run: string;
+  readonly metadata: NativeEnvMetadata;
+  readonly profiles?: readonly string[];
+  readonly overlay?: string | null;
+};
 export type NativeAuthoredProjectAdmission = {
   readonly assertHeld: () => Promise<void>;
   readonly loadStart: () => Promise<NativeAuthoredProjectStartSelection | null>;
+  readonly prepareSource: (
+    opts: SourceOptions
+  ) => Promise<NativeAuthoredProjectSource>;
   readonly reserve: (opts: {
     readonly review: NativeAuthoredReview;
   }) => Promise<NativeAuthoredProjectStartSelection>;
   readonly publish: (opts: {
     readonly expectedStart: NativeAuthoredProjectStartSelection;
     readonly record: NativeAuthoredProjectRun;
+    /** Synchronous owner/cancellation guard at the final publication boundary. */
+    readonly assertReady?: () => void;
   }) => Promise<NativeAuthoredProjectRunSelection>;
   readonly retire: (opts: {
     readonly expectedStart: NativeAuthoredProjectStartSelection;
@@ -152,6 +175,53 @@ function validBranch(branch: string | null): boolean {
       Buffer.byteLength(branch) <= 256 &&
       !CONTROL.test(branch))
   );
+}
+function sourceOverlay(overlay: string | null | undefined) {
+  if (overlay === undefined) {
+    return "inherit";
+  }
+  if (overlay === null) {
+    return "base";
+  }
+  return { named: overlay };
+}
+function sourceText(store: Store, input: SourceOptions) {
+  // Only envelope projection is done here; authored grammar and capability
+  // admission remain in the compiler and native runtime plan request.
+  const run = input.run;
+  const profiles = input.profiles === undefined ? [] : [...input.profiles];
+  const overlay = input.overlay;
+  const metadata = parseNativeEnvMetadata(input.metadata);
+  if (
+    typeof run !== "string" ||
+    !HEX32.test(run) ||
+    profiles.length > 64 ||
+    profiles.some(
+      (profile) => typeof profile !== "string" || !validBranch(profile)
+    ) ||
+    !(
+      overlay === undefined ||
+      overlay === null ||
+      (typeof overlay === "string" && validBranch(overlay))
+    ) ||
+    !metadata
+  ) {
+    return refused();
+  }
+  const text = JSON.stringify({
+    version: 2,
+    kind: "native-graph-source",
+    project: store.identity.projectRoot,
+    branch: store.identity.branch,
+    run,
+    profiles,
+    overlay: sourceOverlay(overlay),
+    env_metadata: metadata,
+  });
+  if (Buffer.byteLength(text) > SOURCE_LIMIT) {
+    return refused();
+  }
+  return { run, text };
 }
 async function storeDirectory(
   path: string,
@@ -322,7 +392,8 @@ async function publish<T>(
   path: string,
   record: T,
   parse: (value: unknown) => T,
-  check = store.check
+  check = store.check,
+  assertReady?: () => void
 ) {
   const text = JSON.stringify({ scope: store.identity, record });
   if (Buffer.byteLength(text) > LIMIT) {
@@ -339,6 +410,7 @@ async function publish<T>(
       return refused();
     }
     await check();
+    assertReady?.();
     await link(temporary, path);
     await unlink(temporary);
     written = undefined;
@@ -525,6 +597,49 @@ export async function withNativeAuthoredProjectAdmission<T>(
       const capability: NativeAuthoredProjectAdmission = {
         assertHeld,
         loadStart,
+        async prepareSource(input) {
+          const { run, text } = sourceText(store, input);
+          const path = join(store.root.path, `${run}.source.json`);
+          const info = await withMutation(async (check) => {
+            await absent(store.file);
+            await absent(store.startFile);
+            await check();
+            const written = await writeExclusive(path, text);
+            await check();
+            await synchronizeDirectories(store.held);
+            return written;
+          });
+          const unchangedSource = async () => {
+            const current = await readPrivate(path, SOURCE_LIMIT);
+            if (!sameFile(info, current.info) || current.text !== text) {
+              return refused();
+            }
+          };
+          const assertFresh = async () => {
+            try {
+              await assertHeld();
+              await unchangedSource();
+              await assertHeld();
+            } catch {
+              return refused();
+            }
+          };
+          await assertFresh();
+          return Object.freeze({
+            path,
+            assertFresh,
+            remove: async () => {
+              await withMutation(async (check) => {
+                await absent(store.file);
+                await absent(store.startFile);
+                await unchangedSource();
+                await check();
+                await unlink(path);
+                await synchronizeDirectories(store.held);
+              });
+            },
+          });
+        },
         async reserve(input) {
           const record = started({
             version: 2,
@@ -546,6 +661,7 @@ export async function withNativeAuthoredProjectAdmission<T>(
         async publish(input) {
           const expected = selection(input.expectedStart, started);
           const record = selected(input.record);
+          const assertReady = input.assertReady;
           if (
             JSON.stringify(expected.record.review) !==
             JSON.stringify(record.receipt.review)
@@ -562,7 +678,8 @@ export async function withNativeAuthoredProjectAdmission<T>(
               async () => {
                 await unchanged(store, store.startFile, expected, started);
                 await check();
-              }
+              },
+              assertReady
             );
           });
         },

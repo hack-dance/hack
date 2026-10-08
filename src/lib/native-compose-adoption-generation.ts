@@ -402,7 +402,7 @@ type Context = {
   >;
 };
 function requireRetainedGenerationVersion(
-  meta: Manifest,
+  meta: SavedManifest,
   retainedPlan: LegacyComposeRetainedPlan,
   candidate: unknown
 ): void {
@@ -1628,7 +1628,7 @@ async function mutateRetainedContainersWithinBudget(
     jobIds,
     operation: captured.operation,
   });
-  async function confirmV7Commit() {
+  const confirmV7Commit = async () => {
     await readInputs(ctx, owned);
     await requireMutationInputs(ctx, activePublication, loaded);
     await requireReceiptSnapshot(ctx, state);
@@ -1679,7 +1679,7 @@ async function mutateRetainedContainersWithinBudget(
     await ctx.check();
     cancelled(ctx.signal);
     requireMutationDeadline(captured, retainedPlan);
-  }
+  };
   if (
     !retainedPlan.requiresV7 &&
     retainedPlan.requiresV5 &&

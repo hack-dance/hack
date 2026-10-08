@@ -393,9 +393,9 @@ async function completedJobFixture() {
   return { app, job };
 }
 
-boundedTest(
-  "v7 retains original IDs through fresh job start, reverse stop, restart and stopped rollback",
-  async () => {
+boundedTest.each(["start", "restart", "stop"] as const)(
+  "v7 %s preserves original IDs, fresh job proof and stopped rollback",
+  async (operation) => {
     const { app, job } = await completedJobFixture(),
       { store, generation } = await prepared();
     const signal = new AbortController().signal;
@@ -404,46 +404,66 @@ boundedTest(
       expect(generation.report.adoption_generation_version).toBe(7);
       await store.publish({ generation, binary });
       expect((await readReceipt()).adoption_receipt_version).toBe(7);
-      for (const operation of ["start", "restart", "stop"] as const) {
-        const deadline = Date.now() + 20_000;
-        expect(
-          await store.withMutation({
-            generation,
-            binary,
-            operation,
-            services: [],
-            deadline,
-            run: (input) =>
-              runLegacyComposeRetainedOperation({
-                input,
-                operation,
-                deadline,
-                signal,
-              }),
-          })
-        ).toBe(0);
+      // Restart/stop independently exercise retained running facts, not an inferred prior start effect.
+      if (operation !== "start") {
+        fixture.states = { [ID]: true, [app]: true, [job]: false };
+        await save();
       }
-      expect(await mutationCommands()).toEqual([
-        ["container", "start", ID],
-        ["container", "start", job],
-        ["container", "start", app],
-        ["container", "stop", app],
-        ["container", "stop", job],
-        ["container", "stop", ID],
-        ["container", "start", ID],
-        ["container", "start", job],
-        ["container", "start", app],
-        ["container", "stop", app],
-        ["container", "stop", job],
-        ["container", "stop", ID],
-      ]);
-      expect((await readReceipt()).pendingOperation).toBeNull();
-      await store.rollback();
-      expect((await readReceipt()).publication.phase).toBe("rolled-back");
+      const deadline = Date.now() + 20_000;
       expect(
-        await Bun.file(join(projectRoot, ".hack/hack.project.json")).exists()
-      ).toBe(false);
-      expect(fixture.volume[0]?.createdAt).toBe(CREATED);
+        await store.withMutation({
+          generation,
+          binary,
+          operation,
+          services: [],
+          deadline,
+          run: (input) =>
+            runLegacyComposeRetainedOperation({
+              input,
+              operation,
+              deadline,
+              signal,
+            }),
+        })
+      ).toBe(0);
+      const forward = [
+        ["container", "start", ID],
+        ["container", "start", job],
+        ["container", "start", app],
+      ];
+      const reverse = [
+        ["container", "stop", app],
+        ["container", "stop", job],
+        ["container", "stop", ID],
+      ];
+      let expected = forward;
+      if (operation === "restart") {
+        expected = [...reverse, ...forward];
+      } else if (operation === "stop") {
+        expected = reverse;
+      }
+      expect(await mutationCommands()).toEqual(expected);
+      expect((await readReceipt()).pendingOperation).toBeNull();
+      const observed: unknown = JSON.parse(
+        await readFile(join(root, "fixture.json"), "utf8")
+      );
+      expect(observed).toMatchObject({
+        container: [{ id: ID }, { id: job }, { id: app }],
+        volume: [{ id: VOLUME, createdAt: CREATED }],
+        jobs: { [job]: { attempts: operation === "stop" ? 0 : 1 } },
+        states: {
+          [ID]: operation !== "stop",
+          [job]: false,
+          [app]: operation !== "stop",
+        },
+      });
+      if (operation === "stop") {
+        await store.rollback();
+        expect((await readReceipt()).publication.phase).toBe("rolled-back");
+        expect(
+          await Bun.file(join(projectRoot, ".hack/hack.project.json")).exists()
+        ).toBe(false);
+      }
     } finally {
       await store.close();
     }

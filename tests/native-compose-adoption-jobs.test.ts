@@ -120,7 +120,7 @@ test("numeric and structural completions cannot acknowledge job startup", async 
   ]) {
     expect(() =>
       consumeLegacyComposeJobCompletion({ ...opts, outcome: value })
-    ).toThrow("values omitted");
+    ).toThrow("Values omitted.");
   }
   for (const changed of [
     { plan: plan() },
@@ -131,10 +131,10 @@ test("numeric and structural completions cannot acknowledge job startup", async 
   ]) {
     expect(() =>
       consumeLegacyComposeJobCompletion({ ...opts, ...changed, outcome })
-    ).toThrow("values omitted");
+    ).toThrow("Values omitted.");
   }
   expect(() => consumeLegacyComposeJobCompletion({ ...opts, outcome })).toThrow(
-    "values omitted"
+    "Values omitted."
   );
 });
 test("reverse stopped recovery starts no jobs; explicit restart is a fresh forward attempt", async () => {
@@ -200,7 +200,7 @@ test("historical exit0 and equivalent UTC spellings cannot unblock a consumer", 
         return 0;
       },
     })
-  ).rejects.toThrow("values omitted");
+  ).rejects.toThrow("Values omitted.");
   expect(opts.commands).toEqual([`start:${DB}`, `start:${JOB}`]);
 });
 test.each([
@@ -287,7 +287,7 @@ test("closed snapshots refuse missing/duplicate/foreign/accessor/extra facts wit
     [row(DB), { ...row(), unknown: "synthetic-private" }, row(APP)],
   ]) {
     expect(() => legacyComposeJobStates({ binding, observed })).toThrow(
-      "values omitted"
+      "Values omitted."
     );
   }
   expect(reads).toBe(0);

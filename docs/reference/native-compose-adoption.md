@@ -175,7 +175,7 @@ after adopted execution and rollback, retained container/network/volume anchors,
 an interrupted partial stop, process-killed switch and rollback repair, candidate
 edit/removal refusal, exact original-file inode restoration and owned cleanup.
 These observed boundaries supplement the synthetic probe/interruption tests.
-Full NC04 remains open for typed local inheritance, real linked-worktree isolation,
+Full NC04 remains open for typed local inheritance, generated-source provenance,
 advanced lossless mappings, recreation and application migration; that acceptance
 does not qualify those unsupported cases or an atomic freeze of external actors.
 
@@ -200,5 +200,9 @@ HACK_E2E_CLI_BIN=./dist/hack HACK_E2E_DOCKER=1 HACK_E2E_REQUIRE_DOCKER=1 HACK_E2
 
 This fixture distinguishes static isolation from successful typed inheritance;
 its inherited-input refusal does not qualify migration of generated Compose
-overrides or managed values. A registered scenario and cleanup unit tests alone
-do not establish live acceptance.
+overrides or managed values. The maintained scenario passed on macOS against a
+Linux Docker daemon: both original SQL rows and resource identities survived
+partial-stop repair, adopted execution and separate rollback. Exact owned cleanup
+and an independent inventory check restored the original engine baseline.
+Each later fixture inspection acquires a fresh bounded probe; a probe owner has
+one aggregate acquisition deadline and cannot span the entire lifecycle.

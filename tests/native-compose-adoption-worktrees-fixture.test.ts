@@ -378,6 +378,9 @@ test("maintained adoption acceptance refuses source invocation before probes or 
           throw new Error("Unexpected fixture command");
         },
         log: () => {},
+        retainFixtures: () => {
+          throw new Error("Unexpected fixture retention");
+        },
         skip: () => {
           throw new Error("Unexpected fixture skip");
         },

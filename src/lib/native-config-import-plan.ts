@@ -144,7 +144,12 @@ function mappingFields(
 function mapLegacyNativeInput(opts: {
   readonly configText: string;
   readonly composeText: string;
-  readonly purpose: "preview" | "adoption-baseline" | "storage-adoption";
+  readonly purpose:
+    | "preview"
+    | "adoption-baseline"
+    | "storage-adoption"
+    | "retained-file-baseline"
+    | "retained-file-storage";
 }): NativeImportPlan {
   const config = parseImportDocument({
     text: opts.configText,
@@ -189,12 +194,13 @@ function mapLegacyNativeInput(opts: {
     mark,
     refuse,
     buildPreview: opts.purpose === "preview",
-    jobPreview: opts.purpose !== "adoption-baseline",
+    jobPreview:
+      opts.purpose === "preview" || opts.purpose === "storage-adoption",
   });
-  if (opts.purpose === "preview") {
-    mapFileCandidate({ compose: compose.value, candidate, mark, refuse });
-  }
-  if (opts.purpose === "storage-adoption") {
+  if (
+    opts.purpose === "storage-adoption" ||
+    opts.purpose === "retained-file-storage"
+  ) {
     mapStorageCandidate({
       config: config.value,
       compose: compose.value,
@@ -202,6 +208,13 @@ function mapLegacyNativeInput(opts: {
       mark,
       refuse,
     });
+  }
+  if (
+    opts.purpose === "preview" ||
+    opts.purpose === "retained-file-baseline" ||
+    opts.purpose === "retained-file-storage"
+  ) {
+    mapFileCandidate({ compose: compose.value, candidate, mark, refuse });
   }
   return nativeImportResult({ fields, candidate });
 }
@@ -265,6 +278,30 @@ export function mapLegacyNativeStorageAdoption(opts: {
     configText: opts.configText,
     composeText: opts.composeText,
     purpose: "storage-adoption",
+  });
+}
+
+/** Explicit file-owner source baseline. Mapping alone never binds material or authorizes retained effects. */
+export function mapLegacyNativeRetainedFileAdoptionBaseline(opts: {
+  readonly configText: string;
+  readonly composeText: string;
+}): NativeImportPlan {
+  return mapLegacyNativeInput({
+    configText: opts.configText,
+    composeText: opts.composeText,
+    purpose: "retained-file-baseline",
+  });
+}
+
+/** Original local storage is mapped first; explicit file grants append rather than erase its mounts. */
+export function mapLegacyNativeRetainedFileStorage(opts: {
+  readonly configText: string;
+  readonly composeText: string;
+}): NativeImportPlan {
+  return mapLegacyNativeInput({
+    configText: opts.configText,
+    composeText: opts.composeText,
+    purpose: "retained-file-storage",
   });
 }
 

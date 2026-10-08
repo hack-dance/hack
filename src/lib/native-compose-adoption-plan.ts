@@ -5,6 +5,8 @@ import {
 import {
   freezeImportValue,
   mapLegacyNativeAdoptionBaseline,
+  mapLegacyNativeRetainedFileAdoptionBaseline,
+  type NativeImportPlan,
 } from "./native-config-import-plan.ts";
 import {
   type LegacyComposeStorageIntent,
@@ -63,7 +65,30 @@ export function planLegacyComposeAdoption(opts: {
   readonly configText: string;
   readonly composeText: string;
 }): LegacyComposeAdoptionPlan {
-  const baseline = mapLegacyNativeAdoptionBaseline(opts);
+  return planLegacyComposeStorageInput(
+    opts,
+    mapLegacyNativeAdoptionBaseline(opts)
+  );
+}
+
+/** Source-only prerequisite consumed exclusively by the distinct proof-bearing retained-file owner. */
+export function planLegacyComposeRetainedFileAdoption(opts: {
+  readonly configText: string;
+  readonly composeText: string;
+}): LegacyComposeAdoptionPlan {
+  return planLegacyComposeStorageInput(
+    opts,
+    mapLegacyNativeRetainedFileAdoptionBaseline(opts)
+  );
+}
+
+function planLegacyComposeStorageInput(
+  opts: {
+    readonly configText: string;
+    readonly composeText: string;
+  },
+  baseline: NativeImportPlan
+): LegacyComposeAdoptionPlan {
   const config = parseImportDocument({
     text: opts.configText,
     document: "config",

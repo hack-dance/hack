@@ -224,6 +224,49 @@ it does not independently terminate a caller-owned engine callback.
 
 ## Rollback and interruption recovery
 
+### Original file grants: private version 8
+
+The distinct retained-file preparation owner supports a first closed subset:
+static image services, the original default bridge, already-bound local named
+volumes and explicit file-backed **config** grants with a verified read-only
+0444 target. The ordinary adoption baseline remains closed; pure import preview
+alone never authorizes retained files. Builds, jobs, profiles, routes, custom
+networks, readiness/dependency intersections, managed/generated inputs and typed
+locals remain refused by this file family before material or engine acquisition.
+Unused declarations do not grant access or authorize material reads.
+
+Preparation checks every original bind's exact source path, target and read-only
+flag alongside the existing original resource identities. Descriptor-held reads
+require canonical owned directories and regular, single-link source files; no
+symlink, hardlink, path escape, source replacement or unsafe writable material is
+adopted. It never rewrites or chmods the original. Private source facts retain
+device/inode, owner, mode, size, timestamps and a content digest. Fixed original-ID
+guest `stat`/`sha256sum` queries must agree with the host content and target 0444
+policy; effective guest UID/GID and file identity are observed, not inferred as
+root. Repeated observations fence drift, but do not atomically freeze the guest,
+host filesystem or Docker.
+
+Private manifest and receipt version 8 retain that proof. Material bytes, paths,
+identities and digests never enter public plans, reports or diagnostics. Current
+material and guest proof are reacquired before retained start/restart or exec,
+after effects and immediately before successful journal publication. The file
+owner requires one finite mutation deadline. Failure, uncertainty, permission or
+content drift leaves pending ownership for explicit stop recovery.
+
+Saved ps/logs, stop/recovery and rollback validate the saved closed proof and exact
+original bind/resource identities without acquiring current material. They can
+settle stopped originals even after a material source disappears; missing or
+changed material still refuses a new start or exec. Rollback restores only the
+exact held authored pair and never edits a material file or deletes retained data.
+
+This initial permission intersection deliberately refuses secret grants. Native
+secret sources currently require 0400/0600 while generated targets require 0444;
+an unchanged original bind cannot truthfully satisfy both. Ordinary 0400/0600
+retained secrets require a separately qualified canonical permission contract and
+context-aware mapping. Initial config support is not complete file/secret or NC04
+parity. Original mount/mode/material ownership, linked-checkout isolation, real
+retained lifecycle and recovery acceptance remain separate live gates.
+
 After the original containers are stopped, `hack config adopt --rollback`
 journals `rolling-back`, holds the installed candidate and restores both exact
 legacy originals. Link-before-unlink restoration cannot overwrite another file;

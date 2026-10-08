@@ -1,15 +1,22 @@
 import { resolve } from "node:path";
 import { isRecord } from "./guards.ts";
 import { legacyComposeAdoptionLayoutSupported } from "./native-compose-adoption-contract.ts";
+import {
+  type LegacyComposeRetainedFileProof,
+  legacyComposeRetainedFileGrants,
+  observeLegacyComposeRetainedFileProof,
+} from "./native-compose-adoption-files.ts";
 import { retainLegacyAdoptionLocalRefusal } from "./native-compose-adoption-local.ts";
 import {
   type LegacyComposeStorageIntent,
   planLegacyComposeAdoption,
+  planLegacyComposeRetainedFileAdoption,
 } from "./native-compose-adoption-plan.ts";
 import {
   hasLegacyComposeGeneratedSources,
   LegacyComposeAdoptionProjection,
 } from "./native-compose-adoption-projection.ts";
+import { inspectLegacyComposeContainerStates } from "./native-compose-adoption-runtime.ts";
 import {
   createNativeComposeProbe,
   NativeComposeOwnershipError,
@@ -20,6 +27,7 @@ import {
 } from "./native-config-import-inputs.ts";
 import {
   freezeImportValue,
+  mapLegacyNativeRetainedFileStorage,
   mapLegacyNativeStorageAdoption,
 } from "./native-config-import-plan.ts";
 
@@ -339,13 +347,21 @@ function containerMounts(
     readonly service: string;
     readonly intent: LegacyComposeStorageIntent;
     readonly volumes: readonly LegacyComposeVerifiedVolume[];
+    readonly root: string;
+    readonly fileCandidate?: unknown;
   }
 ) {
   requireValue(Array.isArray(row.mounts));
   const expected = opts.intent.mounts.filter(
     (mount) => mount.service === opts.service
   );
-  requireValue(row.mounts.length === expected.length);
+  const files =
+    opts.fileCandidate === undefined
+      ? []
+      : legacyComposeRetainedFileGrants(opts.fileCandidate).filter(
+          (grant) => grant.service === opts.service
+        );
+  requireValue(row.mounts.length === expected.length + files.length);
   const targets = new Set<string>();
   for (const item of row.mounts) {
     requireValue(isRecord(item));
@@ -354,6 +370,19 @@ function containerMounts(
     const volume = opts.volumes.find(
       (entry) => entry.storage === mount?.storage
     );
+    const file = files.find((grant) => grant.target === item.target);
+    requireValue(typeof item.target === "string" && !targets.has(item.target));
+    if (file) {
+      requireValue(
+        !mount &&
+          item.type === "bind" &&
+          item.name === "" &&
+          item.source === resolve(opts.root, file.file) &&
+          item.rw === false
+      );
+      targets.add(item.target);
+      continue;
+    }
     requireValue(
       mount &&
         volume &&
@@ -375,6 +404,7 @@ function containerRows(
     readonly volumes: readonly LegacyComposeVerifiedVolume[];
     readonly network: { readonly name: string; readonly id: string };
     readonly composeFiles: readonly string[];
+    readonly fileCandidate?: unknown;
   }
 ): LegacyComposeVerifiedContainer[] {
   requireValue(rows.length === opts.intent.services.length);
@@ -413,6 +443,10 @@ function containerRows(
         service: row.service,
         intent: opts.intent,
         volumes: opts.volumes,
+        root: opts.root,
+        ...(opts.fileCandidate === undefined
+          ? {}
+          : { fileCandidate: opts.fileCandidate }),
       });
       requireValue(Array.isArray(row.networks) && row.networks.length === 1);
       const network = row.networks[0];
@@ -490,6 +524,32 @@ export async function inspectLegacyComposeAdoptionResources(opts: {
   readonly signal?: AbortSignal;
   readonly timeoutMs?: number;
   readonly composeFiles?: readonly string[];
+}): Promise<LegacyComposeVerifiedBinding> {
+  return await inspectLegacyResources(opts);
+}
+
+/** Only the closed file family may add exact authored original bind mounts. No effect authority. */
+export async function inspectLegacyComposeRetainedFileResources(opts: {
+  readonly root: string;
+  readonly intent: LegacyComposeStorageIntent;
+  readonly candidate: unknown;
+  readonly signal?: AbortSignal;
+  readonly timeoutMs?: number;
+}): Promise<LegacyComposeVerifiedBinding> {
+  legacyComposeRetainedFileGrants(opts.candidate);
+  return await inspectLegacyResources({
+    ...opts,
+    fileCandidate: opts.candidate,
+  });
+}
+
+async function inspectLegacyResources(opts: {
+  readonly root: string;
+  readonly intent: LegacyComposeStorageIntent;
+  readonly signal?: AbortSignal;
+  readonly timeoutMs?: number;
+  readonly composeFiles?: readonly string[];
+  readonly fileCandidate?: unknown;
 }): Promise<LegacyComposeVerifiedBinding> {
   const composeFiles = canonicalComposeFiles(opts.root, opts.composeFiles);
   const probe = createNativeComposeProbe(opts);
@@ -599,6 +659,7 @@ export type LegacyComposeAdoptionBinding = {
       readonly compose: NativeConfigImportSourceIdentity;
     };
     readonly projection?: Readonly<ProjectedPreparation>;
+    readonly fileProof?: LegacyComposeRetainedFileProof;
   }>;
 };
 function translate(error: unknown, signal?: AbortSignal): never {
@@ -633,6 +694,38 @@ export async function acquireLegacyComposeAdoptionBinding(input: {
   readonly timeoutMs?: number;
   readonly binary?: string;
 }): Promise<LegacyComposeAdoptionBinding> {
+  return await acquireBinding(input, "legacy");
+}
+
+/** Separate proof-bearing family; never widens ordinary binding or the preview mapper. */
+export async function acquireLegacyComposeRetainedFileBinding(input: {
+  readonly projectRoot: string;
+  readonly signal?: AbortSignal;
+  readonly timeoutMs?: number;
+  readonly binary?: string;
+}): Promise<LegacyComposeAdoptionBinding> {
+  return await acquireBinding(input, "files");
+}
+
+/** Durable preparation selects a closed family from authored sources, never a caller-supplied proof. */
+export async function acquireLegacyComposeAdoptionPreparationBinding(input: {
+  readonly projectRoot: string;
+  readonly signal?: AbortSignal;
+  readonly timeoutMs?: number;
+  readonly binary?: string;
+}): Promise<LegacyComposeAdoptionBinding> {
+  return await acquireBinding(input, "preparation");
+}
+
+async function acquireBinding(
+  input: {
+    readonly projectRoot: string;
+    readonly signal?: AbortSignal;
+    readonly timeoutMs?: number;
+    readonly binary?: string;
+  },
+  family: "legacy" | "files" | "preparation"
+): Promise<LegacyComposeAdoptionBinding> {
   let signal: AbortSignal | undefined;
   try {
     const selected = selection(input);
@@ -650,25 +743,45 @@ export async function acquireLegacyComposeAdoptionBinding(input: {
     if (!source.ok) {
       refuse("E_LEGACY_COMPOSE_BINDING_UNSUPPORTED");
     }
-    const planned = planLegacyComposeAdoption({
+    const sourcePair = {
       configText: source.configText,
       composeText: source.composeText,
-    });
+    };
+    const ordinary = planLegacyComposeAdoption(sourcePair);
+    const files =
+      family === "files" || (family === "preparation" && !ordinary.intent);
+    const planned = files
+      ? planLegacyComposeRetainedFileAdoption(sourcePair)
+      : ordinary;
     const intent = planned.intent;
     if (!intent) {
       refuse("E_LEGACY_COMPOSE_BINDING_UNSUPPORTED");
     }
-    const mapped = mapLegacyNativeStorageAdoption({
-      configText: source.configText,
-      composeText: source.composeText,
-    });
+    const mapped = files
+      ? mapLegacyNativeRetainedFileStorage(sourcePair)
+      : mapLegacyNativeStorageAdoption(sourcePair);
     const candidate = mapped.candidate;
+    if (files) {
+      // Close the static family before any generated/env/material/engine acquisition.
+      legacyComposeRetainedFileGrants(candidate);
+    }
     let projection: LegacyComposeAdoptionProjection | undefined;
     let projected: Readonly<ProjectedPreparation> | undefined;
     const generatedPresent = await hasLegacyComposeGeneratedSources(
       root,
       signal
     );
+    if (
+      files &&
+      (generatedPresent ||
+        !(await legacyComposeAdoptionLayoutSupported({
+          projectRoot: root,
+          candidate,
+          signal,
+        })))
+    ) {
+      refuse("E_LEGACY_COMPOSE_BINDING_UNSUPPORTED");
+    }
     if (
       candidate &&
       (generatedPresent ||
@@ -714,13 +827,34 @@ export async function acquireLegacyComposeAdoptionBinding(input: {
       }
     };
     await layoutSupported(signal);
-    const baseline = await inspectLegacyComposeAdoptionResources({
+    const baseline = await inspectLegacyResources({
       root,
       intent,
       signal,
       timeoutMs,
       composeFiles: projected?.composeFiles,
+      ...(files ? { fileCandidate: candidate } : {}),
     });
+    const fileProof = files
+      ? await observeLegacyComposeRetainedFileProof({
+          projectRoot: root,
+          candidate,
+          containers: await inspectLegacyComposeContainerStates({
+            binding: baseline,
+            signal,
+            timeoutMs,
+          }).then((states) =>
+            baseline.containers.map((container) => ({
+              ...container,
+              running:
+                states.find((state) => state.id === container.id)?.running ===
+                true,
+            }))
+          ),
+          signal,
+          probe: createNativeComposeProbe({ signal, timeoutMs }),
+        })
+      : undefined;
     freezeImportValue(baseline);
     const assertFresh = async (current: {
       readonly projectRoot: string;
@@ -742,15 +876,53 @@ export async function acquireLegacyComposeAdoptionBinding(input: {
         }
         await source.assertFresh({ signal: currentSignal });
         await layoutSupported(currentSignal);
-        const observed = await inspectLegacyComposeAdoptionResources({
+        const observed = await inspectLegacyResources({
           root,
           intent,
           signal: currentSignal,
           timeoutMs,
           composeFiles: projected?.composeFiles,
+          ...(files ? { fileCandidate: candidate } : {}),
         });
         if (JSON.stringify(observed) !== JSON.stringify(baseline)) {
           refuse("E_LEGACY_COMPOSE_BINDING_CHANGED");
+        }
+        if (fileProof) {
+          await observeLegacyComposeRetainedFileProof({
+            projectRoot: root,
+            candidate,
+            containers: await inspectLegacyComposeContainerStates({
+              binding: observed,
+              signal: currentSignal,
+              timeoutMs,
+            }).then((states) =>
+              observed.containers.map((container) => ({
+                ...container,
+                running:
+                  states.find((state) => state.id === container.id)?.running ===
+                  true,
+              }))
+            ),
+            saved: fileProof,
+            signal: currentSignal,
+            probe: createNativeComposeProbe({
+              signal: currentSignal,
+              timeoutMs,
+            }),
+          });
+          if (
+            JSON.stringify(
+              await inspectLegacyResources({
+                root,
+                intent,
+                signal: currentSignal,
+                timeoutMs,
+                fileCandidate: candidate,
+              })
+            ) !== JSON.stringify(baseline)
+          ) {
+            refuse("E_LEGACY_COMPOSE_BINDING_CHANGED");
+          }
         }
         await source.assertFresh({ signal: currentSignal });
         await layoutSupported(currentSignal);
@@ -783,6 +955,7 @@ export async function acquireLegacyComposeAdoptionBinding(input: {
           binding: baseline,
           sourceFiles: source.sourceFiles,
           ...(projected ? { projection: projected } : {}),
+          ...(fileProof ? { fileProof } : {}),
         };
         for (const key of [
           "configText",
@@ -790,6 +963,7 @@ export async function acquireLegacyComposeAdoptionBinding(input: {
           "binding",
           "sourceFiles",
           "projection",
+          "fileProof",
         ]) {
           Object.defineProperty(result, key, { enumerable: false });
         }

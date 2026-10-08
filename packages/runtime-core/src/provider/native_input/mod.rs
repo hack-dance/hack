@@ -92,7 +92,7 @@ fn identity(provenance: &Provenance) -> Result<String, CandidateError> {
     Ok(format!("{:x}", hash.finalize()))
 }
 impl Review {
-    fn new(scope: Scope<'_>, input: ReviewIdentity) -> Result<Self, CandidateError> {
+    pub(crate) fn new(scope: Scope<'_>, input: ReviewIdentity) -> Result<Self, CandidateError> {
         let provenance = Provenance {
             version: 1,
             kind: InputKind::Native,

@@ -5,6 +5,7 @@ import {
   type NativeAuthoredReview,
   parseNativeAuthoredControl,
   parseNativeAuthoredReady,
+  parseNativeAuthoredReceipt,
   parseNativeAuthoredReview,
 } from "./native-authored-graph-protocol.ts";
 import {
@@ -84,6 +85,8 @@ export async function serveNativeAuthoredProjectGraph(
   opts: ProcessOptions & {
     readonly sourceFile: string;
     readonly review: NativeAuthoredReview;
+    /** Synchronous first-receipt observation before status; grants no publication authority. */
+    readonly onReceipt?: (receipt: NativeAuthoredReceipt) => undefined;
     readonly onReady: (
       receipt: NativeAuthoredReceipt,
       assertRunning: () => void
@@ -91,6 +94,7 @@ export async function serveNativeAuthoredProjectGraph(
   }
 ): Promise<number> {
   const expected = parseNativeAuthoredReview(opts.review);
+  const onReceipt = opts.onReceipt;
   if (
     !isAbsolute(opts.sourceFile) ||
     expected.provenance.run !== opts.run ||
@@ -119,6 +123,17 @@ export async function serveNativeAuthoredProjectGraph(
     strictReady: true,
     onReady: async (value, interrupted, ownerSignal) => {
       const receipt = parseNativeAuthoredReady(value, expected);
+      // Give the caller an independent copy so it cannot alter status admission.
+      // Retain this membership for cleanup even when current readiness later fails.
+      const observed: unknown = onReceipt?.(
+        parseNativeAuthoredReceipt(receipt)
+      );
+      if (observed !== undefined) {
+        void Promise.resolve(observed).catch(() => undefined);
+        throw new Error(
+          "Native receipt observation must be synchronous; values omitted."
+        );
+      }
       const status = await invokeNativeRuntime({
         runtime: opts.runtime,
         cwd: opts.projectRoot,

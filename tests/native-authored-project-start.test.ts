@@ -51,11 +51,18 @@ afterEach(async () => {
 type FixtureOptions = {
   readonly planFailure?: boolean;
   readonly foreignPlan?: boolean;
+  readonly foreignNamespace?: boolean;
+  readonly branch?: string | null;
   readonly failedStatus?: boolean;
   readonly changeDuringStatus?: boolean;
   readonly changeDuringPlan?: boolean;
   readonly noManaged?: boolean;
-  readonly cleanup?: "removed" | "live" | "missing" | "foreign-id";
+  readonly cleanup?:
+    | "removed"
+    | "live"
+    | "missing"
+    | "foreign-id"
+    | "foreign-owner";
 };
 
 /** Fake compiler/engine transport; real managed inputs, admission, process and storage owners. */
@@ -158,7 +165,10 @@ const journal=${JSON.stringify(journal)};
 const root=${JSON.stringify(join(projectDir, ".internal", "native-authored-runs"))};
 if(action==='plan'||action==='serve'){
  const path=args[args.indexOf('--source-file')+1];const input=JSON.parse(await readFile(path,'utf8'));
- const provenance={version:1,kind:'native',namespace:'b'.repeat(64),run:input.run,input:{semantic_hash:'c'.repeat(64),local_resolution_hash:'d'.repeat(64),environment_policy_hash:'e'.repeat(64),selected_profiles:[]}};
+ const digest=createHash('sha256');
+ if(input.branch!==null)digest.update('hack-native-branch-namespace-v1\\0');
+ digest.update(input.project);if(input.branch!==null)digest.update('\\0').update(input.branch);
+ const provenance={version:1,kind:'native',namespace:digest.digest('hex'),run:input.run,input:{semantic_hash:'c'.repeat(64),local_resolution_hash:'d'.repeat(64),environment_policy_hash:'e'.repeat(64),selected_profiles:[]}};
  const review={provenance,review_id:createHash('sha256').update('hack.native-graph-review/v1\\0').update(JSON.stringify(provenance)).digest('hex')};
  const planner=${JSON.stringify(realPlanner)};
  if(planner!==undefined){
@@ -172,6 +182,10 @@ if(action==='plan'||action==='serve'){
  }
  if(${options.foreignPlan === true}&&action==='plan'){
   provenance.input.semantic_hash='9'.repeat(64);
+  review.review_id=createHash('sha256').update('hack.native-graph-review/v1\\0').update(JSON.stringify(provenance)).digest('hex');
+ }
+ if(${options.foreignNamespace === true}&&action==='plan'){
+  provenance.namespace='9'.repeat(64);
   review.review_id=createHash('sha256').update('hack.native-graph-review/v1\\0').update(JSON.stringify(provenance)).digest('hex');
  }
  if(action==='plan'){
@@ -193,6 +207,7 @@ if(action==='plan'||action==='serve'){
    receipt.phase='removed';for(const resource of Object.values(receipt.resources))resource.phase='removed';
   }
   if(${JSON.stringify(options.cleanup)}==='foreign-id')receipt.resources['container:web'].id='9'.repeat(64);
+  if(${JSON.stringify(options.cleanup)}==='foreign-owner')receipt.owner='9'.repeat(32);
   await writeFile(journal,JSON.stringify(receipt));await writeFile(${JSON.stringify(join(root, "owner-exited"))},'owned');process.exit(0);
  };
  process.on('SIGTERM',finish);await writeFile(journal,JSON.stringify(receipt));
@@ -215,7 +230,12 @@ if(action==='plan'||action==='serve'){
 `
   );
   await chmod(binary, 0o700);
-  const scope = { projectRoot, projectDir, nativeHome, branch: "main" };
+  const scope = {
+    projectRoot,
+    projectDir,
+    nativeHome,
+    branch: options.branch === undefined ? "main" : options.branch,
+  };
   return {
     root,
     scope,
@@ -278,7 +298,11 @@ macTest(
   }
 );
 
-for (const option of ["planFailure", "foreignPlan"] as const) {
+for (const option of [
+  "planFailure",
+  "foreignPlan",
+  "foreignNamespace",
+] as const) {
   macTest(
     `native frontend ${option} refuses before reservation or private delivery`,
     async () => {
@@ -297,6 +321,32 @@ for (const option of ["planFailure", "foreignPlan"] as const) {
     }
   );
 }
+
+macTest(
+  "unscoped native frontend binds the canonical project namespace",
+  async () => {
+    const selected = await fixture({ branch: null });
+    let ready = 0;
+    expect(
+      await serveNativeAuthoredProject({
+        ...selected,
+        run,
+        startupTimeoutMs: 10_000,
+        onReady: (mapping) => {
+          expect(mapping.record.receipt.review.provenance.namespace).toBe(
+            createHash("sha256")
+              .update(selected.scope.projectRoot)
+              .digest("hex")
+          );
+          ready += 1;
+          return undefined;
+        },
+      })
+    ).toBe(0);
+    expect(ready).toBe(1);
+    expect(await artifacts(selected.scope)).toEqual([]);
+  }
+);
 
 for (const option of ["failedStatus", "changeDuringStatus"] as const) {
   macTest(
@@ -323,6 +373,58 @@ for (const option of ["failedStatus", "changeDuringStatus"] as const) {
       );
     }
   );
+}
+
+for (const option of ["failedStatus", "changeDuringStatus"] as const) {
+  for (const cleanup of ["foreign-id", "foreign-owner"] as const) {
+    macTest(
+      `pre-publication ${option} cannot retire from ${cleanup} cleanup`,
+      async () => {
+        const selected = await fixture({ [option]: true, cleanup });
+        let ready = false;
+        await failure(
+          serveNativeAuthoredProject({
+            ...selected,
+            run,
+            startupTimeoutMs: 10_000,
+            onReady: () => {
+              ready = true;
+              return undefined;
+            },
+          }),
+          "retained"
+        );
+        expect(ready).toBe(false);
+        expect(await loadNativeAuthoredProjectRun(selected.scope)).toBeNull();
+        const retained = await artifacts(selected.scope);
+        expect(retained).toHaveLength(2);
+        expect(retained.some((name) => name.endsWith(".start.json"))).toBe(
+          true
+        );
+        expect(retained.some((name) => name.endsWith(".source.json"))).toBe(
+          true
+        );
+        expect(
+          await Bun.file(join(selected.root, "owner-exited")).exists()
+        ).toBe(true);
+        await failure(
+          serveNativeAuthoredProject({
+            ...selected,
+            run: "9".repeat(32),
+            startupTimeoutMs: 10_000,
+          }),
+          "retained"
+        );
+        const calls = (await Bun.file(selected.calls).text())
+          .trim()
+          .split("\n")
+          .map((line) => JSON.parse(line));
+        expect(
+          calls.filter((args: string[]) => args.includes("serve"))
+        ).toHaveLength(1);
+      }
+    );
+  }
 }
 
 for (const cleanup of ["live", "missing", "foreign-id"] as const) {

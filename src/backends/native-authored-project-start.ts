@@ -1,6 +1,8 @@
+import { createHash } from "node:crypto";
 import { isAbsolute } from "node:path";
 import { acquireNativeExecutionInputs } from "../lib/native-execution-inputs.ts";
 import {
+  type NativeAuthoredReceipt,
   type NativeAuthoredReview,
   parseNativeAuthoredReview,
   parseNativeAuthoredSnapshot,
@@ -96,10 +98,29 @@ function observedReady(
   }
 }
 
-function matchingReview(value: unknown, inputs: Inputs, run: string) {
+/** Match Candidate::plan_with_branch after storage has admitted the canonical scope. */
+function projectNamespace(scope: NativeAuthoredProjectRunScope): string {
+  const digest = createHash("sha256");
+  if (scope.branch !== null) {
+    digest.update("hack-native-branch-namespace-v1\0");
+  }
+  digest.update(scope.projectRoot);
+  if (scope.branch !== null) {
+    digest.update("\0").update(scope.branch);
+  }
+  return digest.digest("hex");
+}
+
+function matchingReview(
+  value: unknown,
+  inputs: Inputs,
+  run: string,
+  scope: NativeAuthoredProjectRunScope
+) {
   const review = parseNativeAuthoredReview(value);
   if (
     review.provenance.run !== run ||
+    review.provenance.namespace !== projectNamespace(scope) ||
     review.provenance.input.semantic_hash !== inputs.result.semantic_hash ||
     review.provenance.input.local_resolution_hash !==
       inputs.result.local_resolution.resolution_hash ||
@@ -180,6 +201,8 @@ async function privateDelivery(
 type Attempt = {
   readonly source: NativeAuthoredProjectSource;
   readonly start: NativeAuthoredProjectStartSelection;
+  /** First parsed runtime membership; observation alone grants no ready authority. */
+  observed?: NativeAuthoredReceipt;
   ready?: NativeAuthoredProjectRunSelection;
 };
 async function removeUnstartedSource(
@@ -223,7 +246,7 @@ async function retireAttempt(opts: {
       boundNativeAuthoredReadDrain: true,
     }),
     expectedReview: attempt.start.record.review,
-    admitted: attempt.ready?.record.receipt,
+    admitted: attempt.observed,
   });
   if (
     snapshot.receipt.phase !== "removed" ||
@@ -344,7 +367,8 @@ export async function serveNativeAuthoredProject(
               boundNativeAuthoredReadDrain: true,
             }),
             inputs,
-            opts.run
+            opts.run,
+            opts.scope
           );
           await source.assertFresh();
           remaining();
@@ -372,8 +396,18 @@ export async function serveNativeAuthoredProject(
                 const observed: unknown = opts.onExitDiagnostic?.(diagnostic);
                 void Promise.resolve(observed).catch(() => undefined);
               },
+              onReceipt: (receipt) => {
+                freeze(receipt);
+                admitted.observed = receipt;
+                return undefined;
+              },
               onReady: async (receipt, assertRunning) => {
                 payload?.fill(0);
+                if (!admitted.observed) {
+                  throw new Error(
+                    "Native runtime membership is unobserved; values omitted."
+                  );
+                }
                 await inputs.assertFresh();
                 await admitted.source.assertFresh();
                 await admission.assertHeld();

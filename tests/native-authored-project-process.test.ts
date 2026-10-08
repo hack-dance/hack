@@ -302,6 +302,93 @@ test("self-valid changed admitted resources refuse after status and await owner 
   ).toBe("cleaned");
 });
 
+test("first runtime receipt is observed before a refused status without publishing", async () => {
+  const opts = await fixture({ controlFailure: true });
+  const observed: unknown[] = [];
+  let published = false;
+  await expect(
+    serveNativeAuthoredProjectGraph({
+      ...opts,
+      onReceipt: (bound) => {
+        observed.push(bound);
+        expect(
+          Bun.file(join(opts.projectRoot, "authenticated-status-started")).size
+        ).toBe(0);
+        return undefined;
+      },
+      onReady: async () => {
+        published = true;
+      },
+    })
+  ).rejects.toThrow("graph_owner_recovery");
+  expect(observed).toEqual([receipt()]);
+  expect(published).toBe(false);
+  expect(
+    await Bun.file(join(opts.projectRoot, "cleanup-complete")).text()
+  ).toBe("cleaned");
+});
+
+test("receipt observation cannot mutate the owner's status admission", async () => {
+  const opts = await fixture();
+  expect(
+    await serveNativeAuthoredProjectGraph({
+      ...opts,
+      onReceipt: (bound) => {
+        Object.assign(bound, { owner: "9".repeat(32) });
+        const resource = bound.resources["container:web"];
+        if (!resource) {
+          throw new Error("test fixture requires its web resource");
+        }
+        Object.assign(resource, { id: "9".repeat(64) });
+        return undefined;
+      },
+      onReady: async (bound, assertRunning) => {
+        expect(bound).toEqual(receipt());
+        assertRunning();
+        await Bun.write(join(opts.projectRoot, "finish-request"), "finish");
+      },
+    })
+  ).toBe(0);
+});
+
+test("asynchronous first receipt observation refuses status and consumes private rejection", async () => {
+  const opts = await fixture();
+  const completed = Promise.withResolvers<void>();
+  let published = false;
+  const callback = async () => {
+    await Bun.sleep(10);
+    completed.resolve();
+    throw new Error("synthetic-private-receipt-observer");
+  };
+  let failure = "";
+  try {
+    await serveNativeAuthoredProjectGraph({
+      ...opts,
+      // Deliberately bypass the public synchronous type to exercise the runtime fence.
+      onReceipt: callback as unknown as () => undefined,
+      onReady: async () => {
+        published = true;
+        await Bun.write(join(opts.projectRoot, "finish-request"), "finish");
+      },
+    });
+  } catch (error) {
+    failure = String(error);
+  }
+  await completed.promise;
+  await Bun.sleep(0);
+  expect(failure).toContain("must be synchronous");
+  expect(failure).not.toContain("synthetic-private-receipt-observer");
+  expect(published).toBe(false);
+  expect(
+    await Bun.file(
+      join(opts.projectRoot, "authenticated-status-started")
+    ).exists()
+  ).toBe(false);
+  expect(
+    await Bun.file(join(opts.projectRoot, "cleanup-complete")).text()
+  ).toBe("cleaned");
+});
+
 test("safe status failure code does not expose private diagnostics or publish", async () => {
   const opts = await fixture({ controlFailure: true });
   let failure = "";

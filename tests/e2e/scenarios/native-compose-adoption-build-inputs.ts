@@ -337,8 +337,10 @@ export function retainedBuildFixtureObject(opts: {
     refuse();
   }
   if (
-    !(value.tags === null || Array.isArray(value.tags)) ||
-    !(value.digests === null || Array.isArray(value.digests))
+    !(
+      (value.tags === null || Array.isArray(value.tags)) &&
+      (value.digests === null || Array.isArray(value.digests))
+    )
   ) {
     refuse();
   }

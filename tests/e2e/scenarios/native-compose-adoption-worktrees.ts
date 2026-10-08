@@ -35,13 +35,13 @@ import {
   RETAINED_BUILD_IMAGE_OWNER,
   RETAINED_BUILD_OBJECT_FORMAT,
   type RetainedBuildFixtureMode,
-  type RetainedFixtureImage,
   type RetainedFixtureBuildObject,
+  type RetainedFixtureImage,
   retainedBuildFixtureDefinition,
   retainedBuildFixtureImage,
+  retainedBuildFixtureMarker,
   retainedBuildFixtureObject,
   retainedBuildFixtureObjectGraph,
-  retainedBuildFixtureMarker,
   retainedBuildFixtureSourceSnapshot,
 } from "./native-compose-adoption-build-inputs.ts";
 import {

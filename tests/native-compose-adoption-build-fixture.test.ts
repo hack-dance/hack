@@ -23,8 +23,8 @@ import {
   retainedBuildFixtureCopiedFiles,
   retainedBuildFixtureDefinition,
   retainedBuildFixtureImage,
-  retainedBuildFixtureObjectGraph,
   retainedBuildFixtureMutationAllowed,
+  retainedBuildFixtureObjectGraph,
   retainedBuildFixtureReadAllowed,
   retainedBuildFixtureSourceSnapshot,
 } from "./e2e/scenarios/native-compose-adoption-build-inputs.ts";
@@ -430,8 +430,9 @@ test("explicit builder graph captures only the owned child-to-base chain", () =>
       values[2],
     ],
     [{ ...values[0], parent: "" }, values[1], values[2]],
-  ])
+  ]) {
     expect(() => capture(rows)).toThrow("values omitted");
+  }
   expect(() => capture(values, [baseBuildImage, firstBuildParent])).toThrow(
     "values omitted"
   );
@@ -459,16 +460,20 @@ function buildCleanupModel() {
     builtImages: new Map([[instance, selected]]),
     builtImageObjects: new Map([[instance, objects]]),
     probe: async (args: readonly string[]) => {
-      if (args.join() === "info,--format,{{json .ID}}") return daemon;
-      if (args.join() === "image,ls,--all,--no-trunc,--format,{{.ID}}")
+      if (args.join() === "info,--format,{{json .ID}}") {
+        return daemon;
+      }
+      if (args.join() === "image,ls,--all,--no-trunc,--format,{{.ID}}") {
         return [baseBuildImage, ...remaining].sort().join("\n");
+      }
       if (
         args[0] === "image" &&
         args[1] === "inspect" &&
         args[3] === "{{.Id}}" &&
         args[4] === "postgres:17.6-alpine"
-      )
+      ) {
         return baseBuildImage;
+      }
       if (
         args[0] === "image" &&
         args[1] === "inspect" &&
@@ -477,8 +482,9 @@ function buildCleanupModel() {
         args.length === 5 &&
         args[4] &&
         remaining.has(args[4])
-      )
+      ) {
         return JSON.stringify(current.get(args[4]));
+      }
       if (
         args[0] === "container" &&
         args[1] === "ls" &&
@@ -489,8 +495,9 @@ function buildCleanupModel() {
         args[6] === "--format" &&
         args[7] === "{{.ID}}" &&
         args.length === 8
-      )
+      ) {
         return refs.has(args[5].slice(9)) ? id : "";
+      }
       throw new Error("Unexpected fixed fixture read");
     },
     journal: async (value: unknown) => {
@@ -501,16 +508,20 @@ function buildCleanupModel() {
           "stage" in value &&
           typeof value.stage === "string"
         )
-      )
+      ) {
         throw new Error("Missing fixed journal stage");
+      }
       events.push({ stage: value.stage });
-      if (value.stage === "before-image-remove") afterJournal?.();
+      if (value.stage === "before-image-remove") {
+        afterJournal?.();
+      }
     },
     effect: async (args: readonly string[]) => {
       expect(args.slice(0, 3)).toEqual(["image", "rm", "--no-prune"]);
       const selectedId = args[3];
-      if (!selectedId || !remaining.delete(selectedId))
+      if (!(selectedId && remaining.delete(selectedId))) {
         throw new Error("Unexpected exact image effect");
+      }
       events.push({ stage: "remove", id: selectedId });
       afterEffect?.();
     },
@@ -552,22 +563,27 @@ for (const mode of [
 ] as const) {
   test(`owned image cleanup refuses ${mode} without another effect`, async () => {
     const model = buildCleanupModel();
-    if (mode === "reference-after-journal")
+    if (mode === "reference-after-journal") {
       model.setAfterJournal(() => model.refs.add(image));
-    if (mode === "daemon-after-journal")
+    }
+    if (mode === "daemon-after-journal") {
       model.setAfterJournal(model.changeDaemon);
+    }
     if (mode === "changed-birth") {
       const row = model.current.get(secondBuildParent);
-      if (!row) throw new Error("Missing fixed image row");
+      if (!row) {
+        throw new Error("Missing fixed image row");
+      }
       model.current.set(secondBuildParent, {
         ...row,
         created: "2026-10-08T21:00:00Z",
       });
     }
-    if (mode === "foreign-after-effect")
+    if (mode === "foreign-after-effect") {
       model.setAfterEffect(() =>
         model.remaining.add(`sha256:${"f".repeat(64)}`)
       );
+    }
     await expect(cleanupRetainedBuildFixtureImages(model.opts)).rejects.toThrow(
       "values omitted"
     );

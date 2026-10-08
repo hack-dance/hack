@@ -1346,6 +1346,7 @@ async function prepareCommand(opts: {
         current,
         inputs,
         store,
+        projectRoot,
         render,
       });
       const existingRun =
@@ -1436,6 +1437,7 @@ async function unchangedUnroutedUp(opts: {
   >;
   readonly inputs: AcquiredComposeInputs;
   readonly store: NativeComposeGenerationStore;
+  readonly projectRoot: string;
   readonly render: (
     generationId: string
   ) => ReturnType<typeof renderNativeCompose>;
@@ -1461,11 +1463,17 @@ async function unchangedUnroutedUp(opts: {
     return null;
   }
   const rendered = opts.render(generation.generationId);
+  const buildExecution = prepareNativeComposeBuildExecution({
+    document: rendered.document,
+    projectRoot: opts.projectRoot,
+    composeProject: opts.store.identity.composeProject,
+    ownerToken: opts.store.identity.ownerToken,
+  });
   const document = bindNativeComposeDownHooks({
     inputs: opts.inputs,
     profiles: rendered.profiles,
     explicitOverlay: opts.options.overlay,
-    document: rendered.document,
+    document: buildExecution.document,
   });
   return JSON.stringify(generation.profiles) ===
     JSON.stringify(rendered.profiles) &&

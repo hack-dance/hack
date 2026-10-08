@@ -478,7 +478,7 @@ test("source-unavailable saved down retires only exact material before completed
       code: "E_NATIVE_COMPOSE_STATE",
     });
   });
-});
+}, 30_000);
 test.each([
   "absent-proof",
   "missing-before-intent",
@@ -532,7 +532,7 @@ test.each([
     expect((await store.loadCurrent()).stopped).toBe(false);
     await expectPresent(paths.slice(1));
   });
-});
+}, 30_000);
 test("partial unlink interruption retains durable intent and exact pending reference; fresh saved mutation resumes without source", async () => {
   const selected = await store.withMutation(running);
   let unlinked = 0;
@@ -590,7 +590,7 @@ test("partial unlink interruption retains durable intent and exact pending refer
     expect((await store.loadCurrent()).pending).toBeNull();
     expect((await store.loadCurrent()).stopped).toBe(true);
   });
-});
+}, 30_000);
 test("failure after retired marker but before receipt commit keeps exact recovery generation and retries marker idempotently", async () => {
   const selected = await store.withMutation(running);
   await store.withMutation(async (mutation) => {

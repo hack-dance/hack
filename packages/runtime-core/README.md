@@ -76,9 +76,28 @@ refuses until its primary-worktree verification is qualified; opted-out inherita
 preserves the owning compiler's checkout-local semantics. This is read-only input
 selection and private preparation, with no durable enrollment or runtime ownership.
 
-No backend consumes this adapter yet. Native input provenance, image availability,
-source/storage ownership, provider admission and installed execution/recovery remain
-separate qualification gates. Existing Compose plans and receipts retain their formats.
+`provider::graph::native::run` is an explicit library consumer for the bounded
+image-only subset. It retains the development guest mutation lease, verifies existing
+immutable images and shared graph/allocation capacity, and reserves a distinct v2
+`native-graph-runtime` journal in `run/native-graphs` before effects. Create/start
+intent is durable and never replayed or adopted. The same authored selection and
+ingress deadline are checked before staging, creates, starts and observations.
+Omitted shutdown grace uses a bounded ten-second runtime default. Optional private
+delivery uses the existing static launcher and tmpfs through separate v2
+`native-environment-allocation` records in `run/native-environment-leases`, binding
+namespace, native review, run, workload and container without persisting values.
+
+Native `inspect` and `cleanup` require the original guest incarnation and boot,
+exact container labels, immutable IDs, names and images. Cleanup preflights every
+stop, retains terminal observations before deletes, and retires private payloads
+only after the bound container is absent. Failed/uncertain attempts retain their
+reservations. Shared admission counts native and Compose attempts together; a build
+without native input support refuses retained native journals before more graph
+work. Existing Compose v1 codecs, bindings and paths retain their contracts.
+
+The public frontend does not select this library consumer yet. Actual installed
+native execution, frontend ownership/cancellation, interrupted recovery and broader
+source/storage/routing/host contracts remain separate qualification gates.
 
 Run its pure regressions with
 `cargo test --locked --manifest-path packages/runtime-core/Cargo.toml --features native-config-plan project::native::tests`.

@@ -9,6 +9,7 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{collections::BTreeMap, time::Instant};
+pub(in crate::provider) use storage::read_file;
 pub use storage::{load, publish};
 
 const MAX_ARTIFACT_BYTES: usize = 8192;
@@ -193,6 +194,9 @@ impl Prepared {
     }
     pub fn remaining(&self) -> Result<Instant, CandidateError> {
         self.deadline.to_instant()
+    }
+    pub(in crate::provider) fn private_services(&self) -> std::collections::BTreeSet<String> {
+        self.environments.keys().cloned().collect()
     }
     /// Transfer once; a future consumer must retain the deadline and recheck effect admission.
     pub fn into_parts(

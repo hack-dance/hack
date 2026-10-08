@@ -697,13 +697,15 @@ export async function prepareNativeComposeRouteOwner(input: {
 /**
  * Call only after all owned containers and the owned network are freshly absent.
  * Reopening conveys cleanup authority only; it never completes interrupted starts.
- * Proxy loss or retained uncertainty leaves claims in place after owned stop.
+ * Proxy loss leaves claims in place after owned stop. Explicit recovery may retire
+ * anchored uncertain attempts only after fresh whole-owner and proxy absence proof.
  */
 export async function releaseNativeComposeSavedRoutes(input: {
   readonly owner: Owner;
   readonly saved: readonly NativeComposeSavedRouteDocument[];
   readonly signal?: AbortSignal;
   readonly deadline: number;
+  readonly recover?: boolean;
   readonly io?: IO;
 }): Promise<void> {
   const opts = Object.freeze({
@@ -740,7 +742,7 @@ export async function releaseNativeComposeSavedRoutes(input: {
           return refused();
         }
       }
-      await claims.release({
+      const retirement = {
         assertAbsent: async ({ hostnames }) => {
           await io.ingress({ expected: selected.binding, signal: opts.signal });
           await io.inventory({
@@ -757,7 +759,15 @@ export async function releaseNativeComposeSavedRoutes(input: {
             deadline: opts.deadline,
           });
         },
-      });
+      } satisfies Parameters<NativeComposeRouteClaims["release"]>[0];
+      if (opts.recover) {
+        await claims.recoverStopped({
+          ...retirement,
+          references: group.map((value) => value.reference),
+        });
+      } else {
+        await claims.release(retirement);
+      }
     } finally {
       await claims.close();
     }

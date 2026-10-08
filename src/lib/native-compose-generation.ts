@@ -860,6 +860,7 @@ function completedReceipt(
   }
   return {
     ...state,
+    current: state.current ?? anchor,
     stopped: operation === "down" || state.stopped,
     pending: null,
   };

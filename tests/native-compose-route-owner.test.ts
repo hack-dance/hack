@@ -417,6 +417,62 @@ test("post-effect proxy failure retains claims and blocks cleanup and another st
   ).rejects.toThrow();
 });
 
+test.each([
+  "ingress",
+  "inventory",
+  "proxy",
+] as const)("explicit saved stop recovery retains uncertain claims on missing %s proof", async (proof) => {
+  const owner = await prepare(fixture());
+  await owner.markEffectsPossible();
+  await owner.close();
+  const saved = [{ generationId: GENERATION, document: owner.document }];
+  const checks = probes();
+  if (proof === "ingress") {
+    checks.loseIngress();
+  }
+  if (proof === "inventory") {
+    checks.collideInventory();
+  }
+  if (proof === "proxy") {
+    checks.staleProxy();
+  }
+  await expect(
+    releaseNativeComposeSavedRoutes({
+      owner: OWNER,
+      saved,
+      recover: true,
+      deadline: Date.now() + 5000,
+      io: checks.io,
+    })
+  ).rejects.toThrow();
+  await expect(
+    (await claims(OTHER)).acquire({
+      hostnames: ["fixture.dev.test"],
+      generationIdentity: NEXT,
+    })
+  ).rejects.toThrow();
+  const clean = probes();
+  await releaseNativeComposeSavedRoutes({
+    owner: OWNER,
+    saved,
+    recover: true,
+    deadline: Date.now() + 5000,
+    io: clean.io,
+  });
+  expect(clean.events).toEqual([
+    "ingress-recheck",
+    "inventory-absent",
+    "proxy-absent-fixture.dev.test",
+  ]);
+  const foreign = await claims(OTHER);
+  await foreign.rollback(
+    await foreign.acquire({
+      hostnames: ["fixture.dev.test"],
+      generationIdentity: NEXT,
+    })
+  );
+});
+
 test("verified routes do not complete an armed attempt before generation finalization", async () => {
   const owner = await prepare(fixture());
   await owner.markEffectsPossible();

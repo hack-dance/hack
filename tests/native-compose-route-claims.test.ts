@@ -602,6 +602,83 @@ test("explicit retained attempt survives new flows and cannot be overridden by a
   ).toBe(true);
 });
 
+test.each([
+  "armed",
+  "retained",
+] as const)("explicit verified stop recovers an anchored %s attempt without startup completion authority", async (phase) => {
+  const root = await fixture();
+  const result = await store(root);
+  const attempt = await acquire(result);
+  await result.markEffectsPossible(attempt);
+  if (phase === "retained") {
+    await result.retain(attempt);
+  }
+  const reopened = await store(root);
+  const foreign = await store(root, OTHER);
+  const otherHost = "other.fixture.hack.local";
+  const other = await acquire(foreign, [otherHost]);
+  const canary = await Bun.file(claimPath(root, otherHost)).text();
+  let proofs = 0;
+  await reopened.recoverStopped({
+    references: [attempt.reference],
+    assertAbsent: async (observed) => {
+      expect(observed).toEqual({
+        binding: BINDING,
+        owner: OWNER,
+        hostnames: [HOST],
+      });
+      expect((await reopened.reopen(attempt.reference)).phase).toBe(phase);
+      expect(await Bun.file(claimPath(root)).exists()).toBe(true);
+      proofs += 1;
+    },
+  });
+  expect(proofs).toBe(1);
+  expect((await reopened.reopen(attempt.reference)).phase).toBe("stopped");
+  expect(await Bun.file(claimPath(root)).exists()).toBe(false);
+  expect(await Bun.file(claimPath(root, otherHost)).text()).toBe(canary);
+  await expect(
+    reopened.complete({ attempt, assertTransition: async () => {} })
+  ).rejects.toThrow();
+  const replacement = await acquire(foreign);
+  await foreign.rollback(replacement);
+  const restart = await acquire(reopened);
+  await reopened.markEffectsPossible(restart);
+  await reopened.retain(restart);
+  await foreign.rollback(other);
+});
+
+test.each([
+  "missing-reference",
+  "failed-proof",
+  "journal-drift",
+] as const)("verified stop recovery refuses %s without retiring uncertain claims", async (failure) => {
+  const root = await fixture();
+  const result = await store(root);
+  const attempt = await acquire(result);
+  await result.markEffectsPossible(attempt);
+  let proofs = 0;
+  await expect(
+    result.recoverStopped({
+      references: failure === "missing-reference" ? [] : [attempt.reference],
+      assertAbsent: async () => {
+        proofs += 1;
+        if (failure === "failed-proof") {
+          throw new Error("private-recovery-proof-canary");
+        }
+        if (failure === "journal-drift") {
+          await result.retain(attempt);
+        }
+      },
+    })
+  ).rejects.toThrow("values omitted");
+  expect(proofs).toBe(failure === "missing-reference" ? 0 : 1);
+  expect(await Bun.file(claimPath(root)).exists()).toBe(true);
+  expect(
+    await Bun.file(join(attemptPath(root, attempt), "stopped.json")).exists()
+  ).toBe(false);
+  await expect(acquire(await store(root, OTHER))).rejects.toThrow();
+});
+
 test("normal verified release touches only this owner; other claim and network canary survive", async () => {
   const root = await fixture();
   const one = await store(root);

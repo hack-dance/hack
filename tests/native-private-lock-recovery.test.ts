@@ -1,4 +1,5 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, spyOn, test } from "bun:test";
+import { chmodSync, copyFileSync, renameSync } from "node:fs";
 import {
   chmod,
   copyFile,
@@ -36,7 +37,7 @@ afterEach(async () => {
   }
 });
 
-async function fixture() {
+async function fixture(check = () => Promise.resolve()) {
   const root = await realpath(
     await mkdtemp(join(tmpdir(), "native-dead-lock-"))
   );
@@ -75,7 +76,10 @@ async function fixture() {
     lockPath: join(root, "held"),
     recoveryPath: join(root, "recovering"),
     parent,
-    check: () => recheckDirectories([parent]),
+    check: async () => {
+      await check();
+      await recheckDirectories([parent]);
+    },
   });
   return {
     root,
@@ -107,6 +111,57 @@ test("selected private lock recovery refuses a live owner and reads a dead owner
   ).rejects.toThrow();
   // The legacy helper's absent-lock behavior is unchanged.
   await current.lock.recoverInterruptedLock();
+});
+
+test("selected retirement rechecks file and caller authority after its final process inspection", async () => {
+  for (const interference of ["replacement", "cancellation"]) {
+    let canceled = false;
+    const current = await fixture(() => {
+      if (canceled) {
+        throw new Error("Caller authority is no longer held.");
+      }
+      return Promise.resolve();
+    });
+    await current.kill();
+    const selected = await current.lock.selectInterruptedLock();
+    const originalSpawn = Bun.spawn;
+    let inspections = 0;
+    const intercept = spyOn(Bun, "spawn").mockImplementation((...args) => {
+      const command = args[0];
+      if (
+        Array.isArray(command) &&
+        command[0] === "/bin/ps" &&
+        command[2] === String(current.child.pid)
+      ) {
+        inspections += 1;
+        if (inspections === 4) {
+          if (interference === "replacement") {
+            const path = join(current.root, "held/owner");
+            copyFileSync(path, join(current.root, "replacement"));
+            chmodSync(join(current.root, "replacement"), 0o600);
+            renameSync(join(current.root, "replacement"), path);
+          } else {
+            canceled = true;
+          }
+        }
+      }
+      return originalSpawn(...args);
+    });
+    try {
+      await expect(
+        current.lock.recoverSelectedInterruptedLock(selected)
+      ).rejects.toThrow();
+      expect(inspections).toBe(4);
+      expect(await readdir(join(current.root, "held"))).toEqual(["owner"]);
+      if (interference === "replacement") {
+        expect((await lstat(join(current.root, "held/owner"))).ino).not.toBe(
+          selected.file.ino
+        );
+      }
+    } finally {
+      intercept.mockRestore();
+    }
+  }
 });
 
 test("selected private lock recovery captures the complete caller selection before its first await", async () => {

@@ -634,6 +634,53 @@ export function createNativeComposePrivateMutationLock(opts: {
     }
   };
 
+  const retireInterruptedLock = async (
+    recovery: HeldDirectory,
+    expected: NativeComposeInterruptedLockSelection | undefined
+  ) => {
+    const lock = await holdDirectory(lockPath, true);
+    try {
+      const ownerPath = join(lockPath, "owner");
+      const original = await readPrivate(ownerPath, LOCK_OWNER_LIMIT);
+      const owner = parseLockOwner(original.text);
+      if (expected !== undefined) {
+        requireInterruptedSelection(
+          expected,
+          interruptedSelection(lock, original)
+        );
+      }
+      await requireDeadOwner(owner);
+      await check();
+      await recheckDirectories([recovery, lock]);
+      const latest = await readPrivate(ownerPath, LOCK_OWNER_LIMIT);
+      if (
+        !sameFile(original.info, latest.info) ||
+        latest.text !== original.text ||
+        JSON.stringify(await readdir(lockPath)) !== '["owner"]'
+      ) {
+        return refuse();
+      }
+      await requireDeadOwner(owner);
+      await recheckDirectories([recovery, lock]);
+      if (expected !== undefined) {
+        await check();
+        await recheckDirectories([recovery, lock]);
+        const final = await readPrivate(ownerPath, LOCK_OWNER_LIMIT);
+        if (
+          !sameFile(original.info, final.info) ||
+          final.text !== original.text
+        ) {
+          return refuse();
+        }
+      }
+      await unlink(ownerPath);
+      await rmdir(lockPath);
+      await parent?.file.sync();
+    } finally {
+      await lock.file.close();
+    }
+  };
+
   const recoverInterruptedLock = async (
     expected?: NativeComposeInterruptedLockSelection
   ) => {
@@ -660,36 +707,7 @@ export function createNativeComposePrivateMutationLock(opts: {
     }
     const recovery = await holdDirectory(recoveryPath, true);
     try {
-      const lock = await holdDirectory(lockPath, true);
-      try {
-        const ownerPath = join(lockPath, "owner");
-        const original = await readPrivate(ownerPath, LOCK_OWNER_LIMIT);
-        const owner = parseLockOwner(original.text);
-        if (expected !== undefined) {
-          requireInterruptedSelection(
-            expected,
-            interruptedSelection(lock, original)
-          );
-        }
-        await requireDeadOwner(owner);
-        await check();
-        await recheckDirectories([recovery, lock]);
-        const latest = await readPrivate(ownerPath, LOCK_OWNER_LIMIT);
-        if (
-          !sameFile(original.info, latest.info) ||
-          latest.text !== original.text ||
-          JSON.stringify(await readdir(lockPath)) !== '["owner"]'
-        ) {
-          return refuse();
-        }
-        await requireDeadOwner(owner);
-        await recheckDirectories([recovery, lock]);
-        await unlink(ownerPath);
-        await rmdir(lockPath);
-        await parent?.file.sync();
-      } finally {
-        await lock.file.close();
-      }
+      await retireInterruptedLock(recovery, expected);
     } finally {
       try {
         await check();

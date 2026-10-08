@@ -37,6 +37,7 @@ import {
   discoverProjectInputs,
 } from "../src/lib/project-input-selection.ts";
 import { buildRuntimeHostMetadataOverride } from "../src/lib/runtime-host-metadata.ts";
+import { adoptionDependencyReadAllowed } from "./e2e/scenarios/native-compose-adoption-dependency-inputs.ts";
 import { restoreEnv } from "./helpers/env.ts";
 import { managedEnvCompilerFixture } from "./helpers/managed-env-compiler.ts";
 
@@ -552,6 +553,32 @@ boundedTest(
       expect(fixture.volume[0]?.createdAt).toBe(CREATED);
       expect(fixture.container.map((row) => row.id)).toEqual([ID, worker]);
       expect((await readReceipt()).pendingOperation).toBeNull();
+      const commands: readonly string[][] = (
+        await readFile(join(root, "commands"), "utf8")
+      )
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line));
+      const reads = commands.filter(
+        (args) =>
+          !(
+            args[0] === "container" && ["start", "stop"].includes(args[1] ?? "")
+          )
+      );
+      expect(reads.length).toBeGreaterThan(20);
+      for (const args of reads) {
+        expect(
+          adoptionDependencyReadAllowed({
+            args,
+            projectRoot,
+            project: "fixture",
+            containerIds: [ID, worker],
+            networkId: NETWORK,
+            volumeName: VOLUME,
+            generationId: (await readReceipt()).prepared.id,
+          })
+        ).toBe(true);
+      }
       await store.rollback();
       await expectOriginals(original);
     } finally {

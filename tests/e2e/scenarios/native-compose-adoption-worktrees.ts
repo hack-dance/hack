@@ -956,10 +956,12 @@ if(args[0]==="container" && args[1]==="stop") {
  if(${first.dependency ? `args.length!==3 || args[2]!==${JSON.stringify(worker)}` : `args.length!==4 || !args.includes(${JSON.stringify(db)}) || !args.includes(${JSON.stringify(worker)})`}) process.exit(99);
  const state=JSON.parse(await Bun.file(${JSON.stringify(receipt)}).text());
  if(state.adoption_receipt_version!==${receiptVersion} || state.pendingOperation?.operation!=="stop") process.exit(98);
+ ${first.dependency ? dependencyEngineCheck(h) : ""}
  const child=Bun.spawn([engine,"container","stop",${JSON.stringify(first.dependency ? worker : db)}],{stdin:"ignore",stdout:"ignore",stderr:"ignore"});
  if(await child.exited!==0) process.exit(97);
  await Bun.write(${JSON.stringify(control)},"journal-before-partial-stop");process.exit(71);
 }
+${first.dependency ? dependencyReadGuard(h, first, receipt) : ""}
 const child=Bun.spawn([engine,...args],{stdin:"inherit",stdout:"inherit",stderr:"inherit"});process.exit(await child.exited);
 `
   );
@@ -982,6 +984,41 @@ const child=Bun.spawn([engine,...args],{stdin:"inherit",stdout:"inherit",stderr:
   if (blocked.exitCode === 0) {
     refused();
   }
+}
+
+function dependencyEngineCheck(h: FixtureRuntime): string {
+  return `const engineCheck=Bun.spawn([engine,'info','--format','{{json .ID}}'],{stdin:'ignore',stdout:'pipe',stderr:'ignore'});
+ const engineId=(await new Response(engineCheck.stdout).text()).trim();if(await engineCheck.exited!==0 || engineId!==${JSON.stringify(h.engineId)})process.exit(95);`;
+}
+
+/** Only fixed metadata reads and canonical config hashes reach the real engine through new dependency shims. */
+function dependencyReadGuard(
+  h: FixtureRuntime,
+  instance: Instance,
+  receipt: string
+): string {
+  const anchor = h.anchors.get(instance);
+  const network = anchor?.resources.network[0];
+  const volume = anchor?.resources.volume[0];
+  if (
+    !anchor ||
+    anchor.resources.network.length !== 1 ||
+    anchor.resources.volume.length !== 1 ||
+    !network ||
+    !volume
+  ) {
+    refused();
+  }
+  const helper = fileURLToPath(
+    new URL("./native-compose-adoption-dependency-inputs.ts", import.meta.url)
+  );
+  return `import {adoptionDependencyReadAllowed} from ${JSON.stringify(helper)};
+try {
+ const savedFile=Bun.file(${JSON.stringify(receipt)});
+ const saved=await savedFile.exists() ? JSON.parse(await savedFile.text()) : null;
+ const generationId=saved?.prepared?.id ?? saved?.publication?.generation?.id;
+ if(!adoptionDependencyReadAllowed({args,projectRoot:${JSON.stringify(instance.root)},project:${JSON.stringify(instance.name)},containerIds:${JSON.stringify(anchor.resources.container.map((row) => row.id))},networkId:${JSON.stringify(network.id)},volumeName:${JSON.stringify(volume.id)},generationId}))process.exit(93);
+}catch{process.exit(93);}`;
 }
 async function recoverFirstAndRollback(h: FixtureRuntime) {
   const { first, second, cli, container, waitReady, check, anchors, effect } =
@@ -1094,14 +1131,13 @@ if(args[0]==='container' && args[1]==='start') {
   const text=await new Response(capture.stdout).text();if(await capture.exited!==0)process.exit(97);observed=JSON.parse(text);
  }
  try {assertAdoptionDependencyStart({db:${JSON.stringify(db)},worker:${JSON.stringify(worker)},condition:${JSON.stringify(instance.dependency)},prior,requested:args[2],observed});}catch{process.exit(96);}
- const engineCheck=Bun.spawn([engine,'info','--format','{{json .ID}}'],{stdin:'ignore',stdout:'pipe',stderr:'ignore'});
- const engineId=(await new Response(engineCheck.stdout).text()).trim();if(await engineCheck.exited!==0 || engineId!==${JSON.stringify(h.engineId)})process.exit(95);
+ ${dependencyEngineCheck(h)}
  const effect=Bun.spawn([engine,...args],{stdin:'ignore',stdout:'ignore',stderr:'ignore'});if(await effect.exited!==0)process.exit(94);
  await Bun.write(startsFile,JSON.stringify([...prior,args[2]]));
  if(${partial} && args[2]===${JSON.stringify(db)})process.exit(71);
  process.exit(0);
 }
-if(args[0]==='container' && ['stop','restart','rm','run','exec'].includes(args[1]))process.exit(93);
+${dependencyReadGuard(h, instance, receipt)}
 const child=Bun.spawn([engine,...args],{stdin:'inherit',stdout:'inherit',stderr:'inherit'});process.exit(await child.exited);
 `
   );
@@ -1129,14 +1165,9 @@ const child=Bun.spawn([engine,...args],{stdin:'inherit',stdout:'inherit',stderr:
   }
 }
 
-async function dependencySourceDriftRefusal(
-  h: FixtureRuntime,
-  candidate: boolean
-) {
-  const path = join(
-    h.first.root,
-    candidate ? ".hack/hack.project.json" : ".hack/docker-compose.yml"
-  );
+/** Active candidate repair pins identity and bytes; prepared authored source timestamps are never rewritten. */
+async function dependencyCandidateDriftRefusal(h: FixtureRuntime) {
+  const path = join(h.first.root, ".hack/hack.project.json");
   const original = await readFile(path);
   const states = async () =>
     Promise.all(
@@ -1154,14 +1185,7 @@ async function dependencySourceDriftRefusal(
   await h.check(h.second);
   await writeFile(path, Buffer.concat([original, Buffer.from("\n")]));
   try {
-    refusedPreview(
-      await h.cli(
-        h.first,
-        candidate
-          ? ["down", "--recover", "--json"]
-          : ["config", "adopt", "--recover", "--stop", "--json"]
-      )
-    );
+    refusedPreview(await h.cli(h.first, ["down", "--recover", "--json"]));
     if (JSON.stringify(await states()) !== JSON.stringify(prior)) {
       refused();
     }
@@ -1224,7 +1248,6 @@ export const nativeComposeAdoptionDependencyWorktreesScenario: Scenario = {
           await h.check(instance);
         }
         await interruptFirstStop(h);
-        await dependencySourceDriftRefusal(h, false);
         successful(
           await h.cli(h.first, [
             "config",
@@ -1248,7 +1271,7 @@ export const nativeComposeAdoptionDependencyWorktreesScenario: Scenario = {
         ) {
           refused();
         }
-        await dependencySourceDriftRefusal(h, true);
+        await dependencyCandidateDriftRefusal(h);
         successful(await h.cli(h.first, ["down", "--recover", "--json"]));
         await h.assertStopped(h.first);
         await h.check(h.second);
@@ -1269,7 +1292,7 @@ export const nativeComposeAdoptionDependencyWorktreesScenario: Scenario = {
         await rollbackDependencyInstance(h, h.second);
         await h.check(h.first);
         ctx.log(
-          "started/exec-healthy ordered originals, SQL/birth/IDs, partial-stop/start drift repair and isolated rollback verified"
+          "started/exec-healthy ordered originals, SQL/birth/IDs, unchanged-source stop recovery, active-candidate repair and isolated rollback verified"
         );
       },
       cleanup: () =>

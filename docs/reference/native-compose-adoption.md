@@ -103,7 +103,8 @@ remain unsupported required follow-up work.
 The maintained `native-compose-adoption-dependency-worktrees` selector exercises
 an explicit exec-healthy edge and a short started edge whose target has no health
 probe. It uses two original SQL volumes and checks actual ordered ID starts,
-partial stop/start recovery, raw source drift refusal, separate rollback and
+unchanged-source partial stop recovery, active-candidate raw drift refusal and
+same-identity byte repair, separate rollback and
 exact owned cleanup. It requires the current compiled CLI and companion compiler;
 it does not qualify completed jobs or container recreation.
 

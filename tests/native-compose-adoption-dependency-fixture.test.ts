@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { readFile } from "node:fs/promises";
 import {
   adoptionDependencyHealthcheck,
+  adoptionDependencyReadAllowed,
   assertAdoptionDependencyHealthcheck,
   assertAdoptionDependencyStart,
 } from "./e2e/scenarios/native-compose-adoption-dependency-inputs.ts";
@@ -47,6 +48,104 @@ test("actual ordered-start oracle requires original DB first and a healthy prere
     })
   ).not.toThrow();
 });
+
+const readScope = {
+  projectRoot: "/synthetic/nc04-checkout",
+  project: "fixture",
+  containerIds: [db, worker],
+  networkId: "c".repeat(64),
+  volumeName: "fixture_data",
+  generationId: "d".repeat(32),
+};
+const composePrefix = [
+  "compose",
+  "--project-name",
+  "fixture",
+  "--project-directory",
+  "/synthetic/nc04-checkout/.hack",
+  "--env-file",
+  "/dev/null",
+  "--profile",
+  "*",
+  "--file",
+];
+const composeSuffix = ["config", "--no-env-resolution", "--hash", "*"];
+const originalCompose = "/synthetic/nc04-checkout/.hack/docker-compose.yml";
+const savedCompose = `/synthetic/nc04-checkout/.hack/.internal/legacy-compose-adoption-v1/generations/${readScope.generationId}/legacy-compose.yml`;
+const statesFormat =
+  '{"id":{{json .Id}},"running":{{json .State.Running}},"paused":{{json .State.Paused}},"status":{{json .State.Status}}}';
+
+test("dependency forwarder accepts only canonical original or receipt-anchored saved config hashes", () => {
+  for (const file of [originalCompose, savedCompose]) {
+    expect(
+      adoptionDependencyReadAllowed({
+        ...readScope,
+        args: [...composePrefix, file, ...composeSuffix],
+      })
+    ).toBe(true);
+  }
+  expect(
+    adoptionDependencyReadAllowed({
+      ...readScope,
+      generationId: undefined,
+      args: [...composePrefix, originalCompose, ...composeSuffix],
+    })
+  ).toBe(true);
+  expect(
+    adoptionDependencyReadAllowed({
+      ...readScope,
+      args: ["info", "--format", "{{json .ID}}"],
+    })
+  ).toBe(true);
+  expect(
+    adoptionDependencyReadAllowed({
+      ...readScope,
+      args: ["container", "inspect", "--format", statesFormat, db],
+    })
+  ).toBe(true);
+});
+
+for (const [name, args] of [
+  ["Compose up", [...composePrefix, originalCompose, "up", "--detach"]],
+  ["Compose down", [...composePrefix, originalCompose, "down"]],
+  ["unbounded config", [...composePrefix, originalCompose, "config"]],
+  [
+    "foreign authored file",
+    [...composePrefix, "/synthetic/foreign-compose.yml", ...composeSuffix],
+  ],
+  [
+    "foreign generation file",
+    [
+      ...composePrefix,
+      savedCompose.replace("d".repeat(32), "e".repeat(32)),
+      ...composeSuffix,
+    ],
+  ],
+  ["container removal", ["container", "rm", db]],
+  ["container start passthrough", ["container", "start", db]],
+  ["container exec", ["container", "exec", db, "true"]],
+  ["volume removal", ["volume", "rm", "fixture_data"]],
+  ["network removal", ["network", "rm", readScope.networkId]],
+  ["image inspect", ["image", "inspect", "fixture"]],
+  [
+    "foreign container inspect",
+    ["container", "inspect", "--format", statesFormat, "e".repeat(64)],
+  ],
+  [
+    "container env inspect",
+    ["container", "inspect", "--format", "{{json .Config.Env}}", db],
+  ],
+  ["unknown private format", ["info", "--format", "PRIVATE_CANARY"]],
+  ["unformatted inventory", ["container", "ls", "--all"]],
+  [
+    "extra flag",
+    ["container", "inspect", "--format", statesFormat, db, "--size"],
+  ],
+] as const) {
+  test(`dependency forwarder refuses ${name} before engine passthrough`, () => {
+    expect(adoptionDependencyReadAllowed({ ...readScope, args })).toBe(false);
+  });
+}
 
 for (const [name, changed] of [
   ["worker before db", { prior: [] }],

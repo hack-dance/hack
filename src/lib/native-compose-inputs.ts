@@ -1,236 +1,30 @@
-import { createHash } from "node:crypto";
-import { assertNativeComposeFileSubset } from "./native-compose-file-subset.ts";
 import {
-  NativeConfigCompilerError,
-  type NativeConfigPlanResult,
-} from "./native-config-compiler.ts";
-import { authoredFilePlanningRequired } from "./native-file-plan-protocol.ts";
-import {
-  type NativePreparedProject,
-  type NativeProjectSelection,
-  planPreparedNativeProject,
-  prepareNativeProjectSelection,
-} from "./native-project-validation.ts";
-import {
-  acquireProjectEnvForNativeExecution,
-  type NativeProjectEnvSelectionOptions,
-  selectProjectEnvValuesForNativeExecutionTarget,
-} from "./project-env-config.ts";
+  acquireNativeExecutionFilePlanningInputs,
+  acquireNativeExecutionInputs,
+  nativeExecutionSourceRevision,
+} from "./native-execution-inputs.ts";
 
-function refused(): never {
-  throw new NativeConfigCompilerError(
-    "E_CONFIG_INVALID",
-    "Native execution inputs are invalid or changed; prepare a fresh generation. Values omitted."
-  );
-}
-
-function freezePlan(value: unknown): void {
-  if (typeof value === "object" && value !== null) {
-    for (const child of Object.values(value)) {
-      freezePlan(child);
-    }
-    Object.freeze(value);
-  }
-}
-
-/** Private receipt fingerprint. Managed env fingerprints remain inside their owner. */
+/** Preserve the material owner's fingerprint API through the shared input owner. */
 export function nativeComposeSourceRevision(
-  prepared: NativePreparedProject
+  prepared: Parameters<typeof nativeExecutionSourceRevision>[0]
 ): string {
-  const digest = createHash("sha256");
-  const add = (name: string, bytes: Uint8Array | undefined) => {
-    digest.update(name);
-    digest.update(bytes === undefined ? "absent" : `${bytes.byteLength}:`);
-    if (bytes !== undefined) {
-      digest.update(bytes);
-    }
-  };
-  add("project", prepared.input);
-  add("primary-local", prepared.locals.primaryLocal);
-  add("checkout-local", prepared.locals.checkoutLocal);
-  digest.update(
-    JSON.stringify({
-      projectRoot: prepared.projectRoot,
-      profiles: [...(prepared.selection.profiles ?? [])].sort(),
-      explicitOverlay: prepared.selection.explicitOverlay,
-      explicitDomain: prepared.selection.explicitDomain,
-      routing: prepared.routingInputs,
-      result: prepared.result.ok
-        ? {
-            semantic: prepared.result.semantic_hash,
-            local: prepared.result.local_resolution,
-            routing: prepared.result.routing_resolution,
-            hosts: prepared.result.host_binding_resolution,
-          }
-        : null,
-    })
-  );
-  return digest.digest("hex");
+  return nativeExecutionSourceRevision(prepared);
 }
 
-/**
- * Private preparation for the Compose adapter. The same bounded env acquisition
- * supplies metadata and values. Neither values nor source revision belong in a
- * CLI report or engine labels. Rechecking detects changes; it does not freeze
- * unrelated editors or provide an atomic snapshot across files.
- */
-type NativeComposeInputSelection = {
-  readonly projectRoot: string;
-  readonly profiles?: readonly string[];
-  readonly explicitOverlay?: string | null;
-  readonly explicitDomain?: string;
-  readonly signal?: AbortSignal;
-};
-export type NativeComposeExecutionInputs = {
-  readonly result: Extract<NativeConfigPlanResult, { readonly ok: true }>;
-  readonly inputRevision: string;
-  readonly assertFresh: () => Promise<void>;
-  readonly resolveManagedValues: () => Promise<
-    Readonly<Record<string, Readonly<Record<string, string>>>>
-  >;
-  readonly resolveHostValues: (
-    name: string
-  ) => Promise<Readonly<Record<string, string>>>;
-};
-export async function acquireNativeComposeInputs(
-  opts: NativeComposeInputSelection
-): Promise<NativeComposeExecutionInputs> {
-  return await acquireInputs({ selection: opts, filePolicy: "refuse" });
+export type NativeComposeExecutionInputs = Awaited<
+  ReturnType<typeof acquireNativeExecutionInputs>
+>;
+
+/** Existing Compose adapter import; both consumers retain the same private input owner. */
+export function acquireNativeComposeInputs(
+  opts: Parameters<typeof acquireNativeExecutionInputs>[0]
+): ReturnType<typeof acquireNativeExecutionInputs> {
+  return acquireNativeExecutionInputs(opts);
 }
-/** Symbolic file planning for the command owner; it neither acquires files nor stages material. */
-export async function acquireNativeComposeFilePlanningInputs(
-  opts: NativeComposeInputSelection
-): Promise<NativeComposeExecutionInputs> {
-  return await acquireInputs({ selection: opts, filePolicy: "plan" });
-}
-async function acquireInputs(input: {
-  readonly selection: NativeComposeInputSelection;
-  readonly filePolicy: "refuse" | "plan";
-}) {
-  const opts = input.selection;
-  const filePolicy = input.filePolicy;
-  const projectRoot = opts.projectRoot;
-  const signal = opts.signal;
-  const selection: NativeProjectSelection = {
-    startDir: projectRoot,
-    ...(opts.profiles === undefined ? {} : { profiles: [...opts.profiles] }),
-    explicitOverlay: opts.explicitOverlay,
-    explicitDomain: opts.explicitDomain,
-    signal,
-  };
-  const prepare = () =>
-    prepareNativeProjectSelection({ ...selection, requireEnvPlanning: true });
-  const prepared = await prepare();
-  if (prepared.projectRoot !== projectRoot || !prepared.result.ok) {
-    return refused();
-  }
-  const resolved = prepared.result;
-  if (authoredFilePlanningRequired(prepared.input)) {
-    if (filePolicy === "refuse") {
-      throw new NativeConfigCompilerError(
-        "E_NATIVE_PROJECT_UNSUPPORTED",
-        "Native file inputs require a qualified private material owner. No private values, hooks or engine operations ran. Values omitted."
-      );
-    }
-    assertNativeComposeFileSubset(prepared.input);
-  }
-  const declared = resolved.declared_workloads;
-  if (!declared) {
-    return refused();
-  }
-  const envSelection: NativeProjectEnvSelectionOptions = {
-    projectRoot: prepared.projectRoot,
-    overlay: resolved.local_resolution.overlay,
-    inheritLocal: resolved.local_resolution.inherit_local,
-    declaredWorkloadNames: Object.keys(declared),
-    ...(resolved.host_env_targets === undefined
-      ? {}
-      : {
-          hostTargets: {
-            includeDefault: resolved.host_env_targets.include_default,
-            workloadNames: resolved.host_env_targets.workloads,
-          },
-        }),
-    signal,
-  };
-  const env = await acquireProjectEnvForNativeExecution(envSelection);
-  const planned = await planPreparedNativeProject({
-    prepared,
-    metadata: env.metadata,
-    signal,
-  });
-  if (
-    !(
-      planned.ok &&
-      planned.environment_plan.complete &&
-      planned.file_plan?.complete !== false
-    )
-  ) {
-    return refused();
-  }
-  const selectedWorkloads = Object.keys(planned.environment_plan.workloads);
-  freezePlan(planned);
-  const revision = nativeComposeSourceRevision(prepared);
-  const assertFresh = async () => {
-    const current = await prepare();
-    if (
-      current.projectRoot !== prepared.projectRoot ||
-      !current.result.ok ||
-      nativeComposeSourceRevision(current) !== revision
-    ) {
-      return refused();
-    }
-    await env.assertFresh(envSelection);
-  };
-  await assertFresh();
-  const resolveManagedValues = async () => {
-    const values = await env.resolveValues({ signal });
-    await assertFresh();
-    return Object.fromEntries(
-      selectedWorkloads.map((name) => {
-        const selected = values.workloadEnv[name];
-        if (selected === undefined) {
-          return refused();
-        }
-        return [name, selected];
-      })
-    );
-  };
-  const resolveHostValues = async (name: string) => {
-    const reports = planned.environment_plan.host;
-    if (!(reports && Object.hasOwn(reports, name))) {
-      return refused();
-    }
-    const report = reports[name];
-    if (!report) {
-      return refused();
-    }
-    const values = await env.resolveValues({ signal });
-    await assertFresh();
-    return selectProjectEnvValuesForNativeExecutionTarget({
-      resolved: values,
-      target: "host",
-      workloadName:
-        report.env_target.kind === "workload" ? report.env_target.name : null,
-    });
-  };
-  // Symbolic planning is serializable; private execution receipts and delivery
-  // capabilities are deliberately absent from JSON/spread/public diagnostics.
-  return Object.freeze(
-    Object.defineProperties(
-      { result: planned } as {
-        readonly result: typeof planned;
-        readonly inputRevision: string;
-        readonly assertFresh: typeof assertFresh;
-        readonly resolveManagedValues: typeof resolveManagedValues;
-        readonly resolveHostValues: typeof resolveHostValues;
-      },
-      {
-        inputRevision: { value: revision },
-        assertFresh: { value: assertFresh },
-        resolveManagedValues: { value: resolveManagedValues },
-        resolveHostValues: { value: resolveHostValues },
-      }
-    )
-  );
+
+/** Symbolic planning only; the Compose command separately owns private material. */
+export function acquireNativeComposeFilePlanningInputs(
+  opts: Parameters<typeof acquireNativeExecutionFilePlanningInputs>[0]
+): ReturnType<typeof acquireNativeExecutionFilePlanningInputs> {
+  return acquireNativeExecutionFilePlanningInputs(opts);
 }

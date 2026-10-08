@@ -10,11 +10,15 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { YAML } from "bun";
 import { PROJECT_ENV_KEY_FILENAME } from "../src/constants.ts";
 import { isRecord } from "../src/lib/guards.ts";
-import { acquireNativeComposeInputs } from "../src/lib/native-compose-inputs.ts";
+import {
+  acquireNativeComposeFilePlanningInputs,
+  acquireNativeComposeInputs,
+} from "../src/lib/native-compose-inputs.ts";
+import { acquireNativeExecutionInputs } from "../src/lib/native-execution-inputs.ts";
 import {
   type ProjectEnvStoredValue,
   type ProjectEnvValuesByScope,
@@ -46,6 +50,9 @@ const KEYS = [
 ] as const;
 const CANARY = "private-synthetic-compose-input-canary";
 const KEY = "synthetic-compose-key-never-real-credentials";
+const realCompiler = resolve(
+  process.env.HACK_CONFIG_COMPILER_BINARY ?? "dist/hack-config-compiler"
+);
 const SOURCE = {
   schema_version: 1,
   name: "fixture",
@@ -92,6 +99,7 @@ async function compiler(
     readonly changeDuringPlan?: string;
     readonly withHost?: boolean;
     readonly defaultHostName?: string;
+    readonly implicitForBranch?: boolean;
   } = {}
 ) {
   const binary = join(root, "compiler");
@@ -116,11 +124,12 @@ else{
  if(operation!=='compile'){
   const overlay=request.explicit_overlay??null;
   result.local_resolution={overlay,origin:request.explicit_overlay===undefined?'project':'explicit',auto_branch:false,inherit_local:true,resolution_hash:'b'.repeat(64)};
-  if(request.explicit_domain!==undefined){
-   const domain=request.explicit_domain;const origin='https://fixture.'+domain;
+  if(request.explicit_domain!==undefined || request.branch!==undefined){
+   const domain=request.explicit_domain??'hack.local';const origin='https://'+(request.branch===undefined?'':request.branch+'.')+'fixture.'+domain;
    if(request.routing_probe===true)result.routing_inputs_required=true;
-   else result.routing_resolution={domain,domain_origin:'explicit',project_origin:origin,aliases:{},oauth_alias:null,open_preference:'auto',open_preference_origin:'default',open_origin:origin,routes:{}};
+   else result.routing_resolution={domain,domain_origin:request.explicit_domain===undefined?'default':'explicit',branch:request.branch,project_origin:origin,aliases:{},oauth_alias:null,open_preference:'auto',open_preference_origin:'default',open_origin:origin,routes:{}};
   }
+  if(${opts.implicitForBranch === true} && request.branch!==undefined) result.routing_inputs_required=true;
  }
  if(operation==='plan'){
   const metadata=request.env_metadata;
@@ -265,6 +274,146 @@ test("Compose input acquisition binds metadata and private selected values to th
   ]);
   expect(JSON.stringify(planRequest)).not.toContain(CANARY);
   await acquired.assertFresh();
+});
+
+test("shared execution owner exposes the exact immutable compiler metadata without serializing private capabilities", async () => {
+  await compiler();
+  await layer("hack.env.default.yaml", {
+    global: { TOKEN: CANARY },
+    web: { MODE: "selected" },
+    off: { INACTIVE: CANARY },
+    rogue: { UNKNOWN: CANARY },
+  });
+  const acquired = await acquireNativeExecutionInputs({ projectRoot });
+  const request = (await requests()).find(
+    (entry) => entry.operation === "plan"
+  );
+  expect(request?.request.env_metadata).toEqual(acquired.metadata);
+  expect(acquired.metadata.workloads).toHaveProperty("off.INACTIVE", {
+    scope: "off",
+    secret: false,
+  });
+  expect(acquired.metadata.inactive_scopes).toEqual(["rogue"]);
+  expect(Reflect.set(acquired.metadata.workloads, "foreign", {})).toBe(false);
+  expect(Reflect.set(acquired, "metadata", {})).toBe(false);
+  expect(Object.keys(acquired)).toEqual(["result"]);
+  expect(JSON.stringify(acquired.metadata)).not.toContain(CANARY);
+  expect(JSON.stringify({ ...acquired })).not.toContain("metadata");
+  expect(await acquired.resolveManagedValues()).toEqual({
+    web: { TOKEN: CANARY, MODE: "selected" },
+    seed: { TOKEN: CANARY },
+  });
+  await layer("hack.env.default.yaml", { global: { TOKEN: "changed" } });
+  await refuses(acquired.assertFresh());
+  await refuses(acquired.resolveManagedValues());
+});
+
+test("shared input owner keeps graph file refusal before env acquisition while Compose plans without reading material", async () => {
+  process.env.HACK_CONFIG_COMPILER_BINARY = realCompiler;
+  await writeFile(
+    join(projectRoot, ".hack/hack.project.json"),
+    JSON.stringify({
+      schema_version: 1,
+      name: "file-policy-control",
+      worktree: { inherit_local: false, auto_branch: false },
+      configs: { settings: { file: "missing-settings.bin" } },
+      services: {
+        web: {
+          image: "fixture",
+          mounts: [
+            {
+              config: "settings",
+              target: "/etc/settings",
+              access: "read-only",
+            },
+          ],
+        },
+      },
+    })
+  );
+  await writeFile(join(projectRoot, ".hack/hack.env.default.yaml"), "{invalid");
+  await expect(
+    acquireNativeExecutionInputs({ projectRoot })
+  ).rejects.toMatchObject({ code: "E_NATIVE_PROJECT_UNSUPPORTED" });
+  await layer("hack.env.default.yaml", { global: { TOKEN: CANARY } });
+  const planned = await acquireNativeComposeFilePlanningInputs({ projectRoot });
+  expect(planned.result.file_plan?.complete).toBe(true);
+  expect(planned.metadata.workloads.web).toEqual({
+    TOKEN: { scope: "global", secret: false },
+  });
+  expect(Object.keys(planned)).toEqual(["result"]);
+  expect(JSON.stringify(planned)).not.toContain(CANARY);
+  expect(
+    await Bun.file(join(projectRoot, "missing-settings.bin")).exists()
+  ).toBe(false);
+  await planned.assertFresh();
+  await layer("hack.env.default.yaml", { global: { TOKEN: "changed" } });
+  await refuses(planned.assertFresh());
+});
+
+test("explicit native compiler branch stays captured and avoids implicit routing discovery", async () => {
+  await compiler();
+  await layer("hack.env.default.yaml", { global: { TOKEN: CANARY } });
+  const invalidGlobal = join(root, "invalid-global.json");
+  await writeFile(invalidGlobal, CANARY);
+  process.env.HACK_GLOBAL_CONFIG_PATH = invalidGlobal;
+  const opts = {
+    projectRoot,
+    explicitOverlay: null,
+    compilerBranch: "native-branch",
+  };
+  const pending = acquireNativeExecutionInputs(opts);
+  opts.compilerBranch = "caller-replacement";
+  const acquired = await pending;
+  await acquired.assertFresh();
+  expect(await acquired.resolveManagedValues()).toEqual({
+    web: { TOKEN: CANARY },
+    seed: { TOKEN: CANARY },
+  });
+  const captured = (await requests()).filter(
+    (entry) => entry.operation !== "compile"
+  );
+  expect(captured.some((entry) => entry.operation === "plan")).toBe(true);
+  for (const { request } of captured) {
+    expect(request.branch).toBe("native-branch");
+    expect(request.routing_probe).toBeUndefined();
+    expect(request.global_domain).toBeUndefined();
+  }
+  expect(Object.keys(acquired)).toEqual(["result"]);
+  expect(JSON.stringify(acquired)).not.toContain(CANARY);
+});
+
+test("omitted native compiler context preserves Compose routing probing and branch omission", async () => {
+  await compiler();
+  await layer("hack.env.default.yaml", { global: { TOKEN: CANARY } });
+  const acquired = await acquireNativeComposeInputs({ projectRoot });
+  await acquired.assertFresh();
+  const captured = await requests();
+  const resolved = captured.filter((entry) => entry.operation === "resolve");
+  expect(resolved.length).toBeGreaterThan(0);
+  for (const { request } of resolved) {
+    expect(request.routing_probe).toBe(true);
+    expect(request.branch).toBeUndefined();
+  }
+  expect(
+    captured.find((entry) => entry.operation === "plan")?.request.branch
+  ).toBeUndefined();
+});
+
+test("explicit branch cannot request implicit routing acquisition or expose private values", async () => {
+  await compiler({ implicitForBranch: true });
+  await layer("hack.env.default.yaml", { global: { TOKEN: CANARY } });
+  const error: unknown = await acquireNativeExecutionInputs({
+    projectRoot,
+    compilerBranch: "native-branch",
+  }).catch((value: unknown) => value);
+  expect(error).toBeInstanceOf(Error);
+  expect(String(error)).toContain("routing input probe");
+  expect(String(error)).not.toContain(CANARY);
+  expect(JSON.stringify(error)).not.toContain(CANARY);
+  expect(
+    (await requests()).filter((entry) => entry.operation === "plan")
+  ).toEqual([]);
 });
 
 test("Compose input owner delivers only the captured host target and keeps its capability private", async () => {

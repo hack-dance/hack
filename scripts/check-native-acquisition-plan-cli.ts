@@ -264,7 +264,7 @@ try {
     ],
     checkout
   );
-  const runtime = await invoke(["up"], checkout, false, {
+  const runtime = await invoke(["up", "--detach"], checkout, false, {
     HACK_RUNTIME_BACKEND: "native",
   });
   assert(
@@ -272,7 +272,7 @@ try {
       (runtime.stdout + runtime.stderr).includes(
         "E_NATIVE_PROJECT_UNSUPPORTED"
       ),
-    "explicit native VM backend remains fenced before engine acquisition"
+    "unsupported native detached up refuses before input or runtime work"
   );
   assert(!(await Bun.file(marker).exists()), "planning executes no hook");
   for (const cwd of [primary, checkout]) {

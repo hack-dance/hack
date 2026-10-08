@@ -309,7 +309,8 @@ fn compile_inputs(
     }
     refuse_authored_network_intent(request)?;
     let environment_policy_hash = policy_hash(&plan, &environment_plan)?;
-    if !plan.storage.is_empty()
+    if plan.source.root != "."
+        || !plan.storage.is_empty()
         || !plan.configs.is_empty()
         || !plan.secrets.is_empty()
         || plan.routes.is_some()

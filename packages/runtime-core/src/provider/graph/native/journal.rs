@@ -23,7 +23,32 @@ enum InputKind {
 #[serde(deny_unknown_fields)]
 struct Failure {
     service: String,
+    #[serde(deserialize_with = "decode_failure_observation")]
     observation: Observation,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
+pub(super) enum WireObservation {
+    Created {},
+    Running { health: execution::Health },
+    Exited { code: i64 },
+    Dead {},
+}
+impl From<WireObservation> for Observation {
+    fn from(value: WireObservation) -> Self {
+        match value {
+            WireObservation::Created {} => Self::Created,
+            WireObservation::Running { health } => Self::Running { health },
+            WireObservation::Exited { code } => Self::Exited { code },
+            WireObservation::Dead {} => Self::Dead,
+        }
+    }
+}
+fn decode_failure_observation<'de, D: serde::Deserializer<'de>>(
+    reader: D,
+) -> Result<Observation, D::Error> {
+    WireObservation::deserialize(reader).map(Into::into)
 }
 
 /// Hash-only native provenance plus value-free resource ownership. No replay authority,
@@ -45,6 +70,28 @@ pub struct Receipt {
     pub(super) terminal: BTreeMap<String, super::super::shutdown::Terminal>,
 }
 impl Receipt {
+    /// Mutable phases and terminal evidence may advance; admitted identity cannot.
+    pub(super) fn check_binding(&self, expected: &Self) -> Result<(), CandidateError> {
+        self.validate(expected.review.scope().run, &expected.owner)?;
+        if self.review != expected.review
+            || self.boot != expected.boot
+            || self.readiness != expected.readiness
+            || self.resources.keys().ne(expected.resources.keys())
+            || self.resources.iter().any(|(key, resource)| {
+                let prior = &expected.resources[key];
+                resource.kind != prior.kind
+                    || resource.key != prior.key
+                    || resource.name != prior.name
+                    || resource.id != prior.id
+                    || resource.image != prior.image
+                    || resource.networks != prior.networks
+                    || resource.outbound != prior.outbound
+            })
+        {
+            return Err(refused());
+        }
+        Ok(())
+    }
     pub fn phase(&self) -> &Phase {
         &self.phase
     }
@@ -88,7 +135,7 @@ impl Receipt {
             observation,
         });
     }
-    fn validate(&self, run: &str, owner: &str) -> Result<(), CandidateError> {
+    pub(super) fn validate(&self, run: &str, owner: &str) -> Result<(), CandidateError> {
         let scope = self.review.scope();
         self.review.validate(scope).map_err(|_| refused())?;
         if self.version != 2
@@ -258,7 +305,7 @@ pub(super) fn load(
     owner: &str,
     boot: &str,
 ) -> Result<(Receipt, PathBuf), CandidateError> {
-    let (receipt, root) = load_validated(candidate, run, owner)?;
+    let (receipt, root) = load_validated(candidate, run, Some(owner))?;
     if receipt.boot != boot {
         return Err(refused());
     }
@@ -274,16 +321,30 @@ pub(super) fn load_admission(
     if !crate::provider::environment_recovery::uuid(boot) {
         return Err(refused());
     }
-    let (receipt, root) = load_validated(candidate, run, owner)?;
+    let (receipt, root) = load_validated(candidate, run, Some(owner))?;
     if receipt.boot != boot && receipt.phase != Phase::Removed {
         return Err(refused());
     }
     Ok((receipt, root))
 }
+/// Read only the exact native control membership. This does not grant guest effect
+/// authority; runtime operations still independently require the real owner and boot.
+#[cfg(target_os = "macos")]
+pub(super) fn read_control(
+    candidate: &Candidate,
+    review: &native_input::Review,
+) -> Result<Receipt, CandidateError> {
+    review.validate(review.scope()).map_err(|_| refused())?;
+    let (receipt, _) = load_validated(candidate, review.scope().run, None)?;
+    if receipt.review != *review {
+        return Err(refused());
+    }
+    Ok(receipt)
+}
 fn load_validated(
     candidate: &Candidate,
     run: &str,
-    owner: &str,
+    owner: Option<&str>,
 ) -> Result<(Receipt, PathBuf), CandidateError> {
     let root = directory(candidate, run)?;
     for path in root
@@ -298,6 +359,6 @@ fn load_validated(
     }
     let bytes = native_input::read_file(&root.join("state.json"), LIMIT).map_err(|_| refused())?;
     let receipt: Receipt = serde_json::from_slice(&bytes).map_err(|_| refused())?;
-    receipt.validate(run, owner)?;
+    receipt.validate(run, owner.unwrap_or(&receipt.owner))?;
     Ok((receipt, root))
 }

@@ -86,7 +86,7 @@ const ROUTING = [
   "HACK_EXECUTION_MODE",
 ] as const;
 type SavedManifest = {
-  readonly adoption_generation_version: 1 | 3 | 4 | 5 | 6 | 9 | 10;
+  readonly adoption_generation_version: 1 | 3 | 4 | 5 | 6 | 9 | 10 | 11;
   readonly kind: typeof KIND;
   readonly projectRoot: string;
   readonly id: string;
@@ -244,6 +244,7 @@ function manifest(value: unknown, root: string, id: string): SavedManifest {
           keys(value.buildProof, "images,source") &&
           isRecord(value.buildProof.source) &&
           Array.isArray(value.buildProof.images)) ||
+        value.adoption_generation_version === 11 ||
         value.adoption_generation_version === 10 ||
         (value.adoption_generation_version === 5 &&
           (!Object.hasOwn(value, "projectionProof") ||
@@ -441,22 +442,29 @@ async function requireSelectedTopologyOwner(opts: {
   readonly selected: Anchor;
   readonly meta: SavedManifest;
   readonly custom: boolean;
+  readonly plural: boolean;
   readonly requiresV5: boolean;
   readonly preparing: boolean;
 }) {
-  const { ctx, selected, meta, custom, requiresV5, preparing } = opts;
+  const { ctx, selected, meta, custom, plural, requiresV5, preparing } = opts;
   if (!isRecord(meta.binding)) {
     refuse();
   }
   const bridgeOnly = custom && !requiresV5;
-  const healthOnly = !custom && requiresV5;
+  const healthOnly = !(custom || plural) && requiresV5;
   const bridgeAndHealth = custom && requiresV5;
   if (
     (meta.adoption_generation_version === 6) !== bridgeOnly ||
+    (meta.adoption_generation_version === 11) !== plural ||
     (meta.adoption_generation_version === 5) !== healthOnly ||
     (meta.adoption_generation_version === 10) !== bridgeAndHealth ||
+    (plural && requiresV5) ||
+    (custom && plural) ||
     (custom &&
       (meta.binding.binding_version !== 3 ||
+        meta.projectionProof !== undefined)) ||
+    (plural &&
+      (meta.binding.binding_version !== 5 ||
         meta.projectionProof !== undefined)) ||
     (!custom &&
       (meta.binding.binding_version === 3 ||
@@ -464,7 +472,10 @@ async function requireSelectedTopologyOwner(opts: {
     (meta.adoption_generation_version === 9 &&
       (meta.binding.binding_version !== 1 ||
         meta.projectionProof !== undefined ||
-        requiresV5))
+        requiresV5)) ||
+    (!plural &&
+      (meta.binding.binding_version === 5 ||
+        meta.binding.binding_version === 6))
   ) {
     refuse();
   }
@@ -474,6 +485,7 @@ async function requireSelectedTopologyOwner(opts: {
   const state = await publicationState(ctx);
   if (
     (state.adoption_receipt_version === 6) !== bridgeOnly ||
+    (state.adoption_receipt_version === 11) !== plural ||
     (state.adoption_receipt_version === 5) !== healthOnly ||
     (state.adoption_receipt_version === 10) !== bridgeAndHealth ||
     (state.adoption_receipt_version === 9) !==
@@ -533,6 +545,7 @@ async function readInputs(
       selected,
       meta,
       custom: planned.intent?.ownedNetwork !== undefined,
+      plural: planned.intent?.ownedNetworks !== undefined,
       requiresV5: retainedPlan.requiresV5,
       preparing,
     });
@@ -696,6 +709,15 @@ function manifestVersion(
     readonly projectionProof: { readonly projection_version: number };
   }
 ): Manifest["adoption_generation_version"] {
+  if (binding.binding_version === 5) {
+    if (requiresV5 || projection) {
+      refuse("E_LEGACY_ADOPTION_UNSUPPORTED");
+    }
+    return 11;
+  }
+  if (binding.binding_version === 6) {
+    refuse("E_LEGACY_ADOPTION_UNSUPPORTED");
+  }
   if (binding.binding_version === 3) {
     return requiresV5 ? 10 : 6;
   }
@@ -727,11 +749,14 @@ async function prepare(
     projectRoot: ctx.root,
     signal: ctx.signal,
   });
-  // Versions 6 and 10 own the static custom bridge. Generated-source or typed
-  // local combinations need a separate selected owner, never a v3/v4 alias.
+  // Versions 6, 10 and 11 require static authored bridges. Projected source
+  // combinations need a separate selected owner, never a binding alias.
   if (
     acquired.binding.binding_version === 4 ||
-    (acquired.binding.binding_version === 3 && acquired.projection)
+    acquired.binding.binding_version === 6 ||
+    ((acquired.binding.binding_version === 3 ||
+      acquired.binding.binding_version === 5) &&
+      acquired.projection)
   ) {
     refuse("E_LEGACY_ADOPTION_UNSUPPORTED");
   }
@@ -748,10 +773,11 @@ async function prepare(
   );
   const retainedPlan = legacyComposeRetainedPlan(JSON.parse(candidateText));
   if (
-    acquired.build &&
-    (acquired.binding.binding_version !== 1 ||
-      acquired.projection !== undefined ||
-      retainedPlan.requiresV5)
+    (acquired.build &&
+      (acquired.binding.binding_version !== 1 ||
+        acquired.projection !== undefined ||
+        retainedPlan.requiresV5)) ||
+    (acquired.binding.binding_version === 5 && retainedPlan.requiresV5)
   ) {
     refuse("E_LEGACY_ADOPTION_UNSUPPORTED");
   }
@@ -1469,7 +1495,8 @@ function preparedReceiptVersion(
     prior.adoption_receipt_version === 5 ||
     prior.adoption_receipt_version === 6 ||
     prior.adoption_receipt_version === 9 ||
-    prior.adoption_receipt_version === 10
+    prior.adoption_receipt_version === 10 ||
+    prior.adoption_receipt_version === 11
   ) {
     return "kind" in checkout.git ? 2 : 1;
   }

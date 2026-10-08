@@ -115,6 +115,7 @@ type Instance = {
   readonly argvMode?: "string-entrypoint" | "string-cleared";
   readonly typedLocal?: true;
   readonly ownedNetwork?: true;
+  readonly ownedNetworks?: true;
   readonly dependency?: "service_started" | "service_healthy";
   readonly basicBuild?: RetainedBuildFixtureMode;
 };
@@ -132,19 +133,26 @@ type Snapshot = {
   readonly source: string;
 };
 function fixtureNetworkName(instance: Instance): string {
-  return `${instance.name}_${instance.ownedNetwork ? "private" : "default"}`;
+  return `${instance.name}_${instance.ownedNetwork || instance.ownedNetworks ? "private" : "default"}`;
+}
+function fixtureNetworkNames(instance: Instance): readonly string[] {
+  return instance.ownedNetworks
+    ? [`${instance.name}_edge`, `${instance.name}_private`]
+    : [fixtureNetworkName(instance)];
 }
 function networkPolicyMatches(
   instance: Instance,
   row: Record<string, unknown>
 ) {
   return (
-    row.name === fixtureNetworkName(instance) &&
-    row.logical === (instance.ownedNetwork ? "private" : "default") &&
-    (!instance.ownedNetwork ||
+    typeof row.name === "string" &&
+    typeof row.logical === "string" &&
+    fixtureNetworkNames(instance).includes(row.name) &&
+    row.name === `${instance.name}_${row.logical}` &&
+    (!(instance.ownedNetwork || instance.ownedNetworks) ||
       (row.driver === "bridge" &&
         row.scope === "local" &&
-        row.internal === true))
+        row.internal === (row.logical === "private")))
   );
 }
 
@@ -246,6 +254,75 @@ export function assertAdoptionEndpointObservation(opts: {
     )
   ) {
     refused();
+  }
+}
+/** A plural original keeps each configured ID even when stopped aliases vanish. */
+export function assertAdoptionPluralEndpointObservation(opts: {
+  readonly instance: Instance;
+  readonly networkIds: Readonly<Record<"edge" | "private", string>>;
+  readonly container: Observation;
+  readonly running: boolean;
+  readonly row: unknown;
+}) {
+  const { instance, networkIds, container, running, row } = opts;
+  const expected =
+    container.service === "db"
+      ? { edge: "db-edge", private: "db-reader" }
+      : container.service === "worker"
+        ? { private: "worker-reader" }
+        : undefined;
+  if (
+    !(
+      instance.ownedNetworks &&
+      expected &&
+      isRecord(row) &&
+      row.id === container.id &&
+      row.running === running &&
+      Array.isArray(row.networks) &&
+      row.networks.length === Object.keys(expected).length &&
+      ID.test(networkIds.edge) &&
+      ID.test(networkIds.private) &&
+      networkIds.edge !== networkIds.private
+    )
+  ) {
+    refused();
+  }
+  const seen = new Set<string>();
+  for (const endpoint of row.networks) {
+    if (!isRecord(endpoint) || typeof endpoint.name !== "string") {
+      refused();
+    }
+    const logical = endpoint.name.slice(instance.name.length + 1);
+    if (
+      !(
+        endpoint.name === `${instance.name}_${logical}` &&
+        Object.hasOwn(expected, logical) &&
+        !seen.has(logical) &&
+        endpoint.id === networkIds[logical as "edge" | "private"]
+      )
+    ) {
+      refused();
+    }
+    seen.add(logical);
+    const aliases = endpoint.aliases;
+    const full = [
+      `${instance.name}-${container.service}-1`,
+      container.service,
+      expected[logical as keyof typeof expected],
+    ].sort();
+    if (
+      !(
+        (Array.isArray(aliases) &&
+          aliases.every((alias) => typeof alias === "string") &&
+          new Set(aliases).size === aliases.length &&
+          JSON.stringify([...aliases].sort()) === JSON.stringify(full)) ||
+        (!running &&
+          (aliases === null ||
+            (Array.isArray(aliases) && aliases.length === 0)))
+      )
+    ) {
+      refused();
+    }
   }
 }
 function refused(): never {
@@ -493,9 +570,16 @@ async function writeLegacy(instance: Instance, image: string) {
             POSTGRES_HOST_AUTH_METHOD: "trust",
           },
           volumes: ["data:/var/lib/postgresql/data"],
-          ...(instance.ownedNetwork
-            ? { networks: { private: { aliases: ["db-reader"] } } }
-            : {}),
+          ...(instance.ownedNetworks
+            ? {
+                networks: {
+                  private: { aliases: ["db-reader"] },
+                  edge: { aliases: ["db-edge"] },
+                },
+              }
+            : instance.ownedNetwork
+              ? { networks: { private: { aliases: ["db-reader"] } } }
+              : {}),
           ...(instance.dependency === "service_healthy"
             ? { healthcheck: adoptionDependencyHealthcheck }
             : {}),
@@ -512,9 +596,11 @@ async function writeLegacy(instance: Instance, image: string) {
             ? [WORKER_SCRIPT]
             : (stringSource?.command ?? LITERAL_SOURCE_COMMAND),
           stop_grace_period: "15s",
-          ...(instance.ownedNetwork
+          ...(instance.ownedNetworks
             ? { networks: { private: { aliases: ["worker-reader"] } } }
-            : {}),
+            : instance.ownedNetwork
+              ? { networks: { private: { aliases: ["worker-reader"] } } }
+              : {}),
           ...(instance.dependency
             ? {
                 depends_on:
@@ -532,9 +618,16 @@ async function writeLegacy(instance: Instance, image: string) {
         },
       },
       volumes: { data: { name: `${instance.name}_data` } },
-      ...(instance.ownedNetwork
-        ? { networks: { private: { driver: "bridge", internal: true } } }
-        : {}),
+      ...(instance.ownedNetworks
+        ? {
+            networks: {
+              private: { driver: "bridge", internal: true },
+              edge: { driver: "bridge", internal: false },
+            },
+          }
+        : instance.ownedNetwork
+          ? { networks: { private: { driver: "bridge", internal: true } } }
+          : {}),
     })
   );
 }
@@ -550,11 +643,16 @@ function formats(kind: Kind): string {
 
 function linkedFixtureFeatures(opts: {
   readonly ownedNetwork: boolean;
+  readonly ownedNetworks: boolean;
   readonly dependencies: boolean;
   readonly role: "first" | "second";
-}): Partial<Pick<Instance, "ownedNetwork" | "dependency">> {
+}): Partial<Pick<Instance, "ownedNetwork" | "ownedNetworks" | "dependency">> {
+  if (opts.ownedNetworks && (opts.ownedNetwork || opts.dependencies)) {
+    refused();
+  }
   return {
     ...(opts.ownedNetwork ? { ownedNetwork: true as const } : {}),
+    ...(opts.ownedNetworks ? { ownedNetworks: true as const } : {}),
     ...(opts.dependencies
       ? {
           dependency:
@@ -593,6 +691,7 @@ async function prepareFixtureInputs(
     readonly typedLocal?: boolean;
     readonly stringArgv?: boolean;
     readonly ownedNetwork?: boolean;
+    readonly ownedNetworks?: boolean;
     readonly dependencies?: boolean;
     readonly basicBuild?: boolean;
   } = {}
@@ -602,22 +701,30 @@ async function prepareFixtureInputs(
     typedLocal = false,
     stringArgv = false,
     ownedNetwork = false,
+    ownedNetworks = false,
     dependencies = false,
     basicBuild = false,
   } = options;
   if (
     basicBuild &&
-    (generated || typedLocal || stringArgv || ownedNetwork || dependencies)
+    (generated ||
+      typedLocal ||
+      stringArgv ||
+      ownedNetwork ||
+      ownedNetworks ||
+      dependencies)
   ) {
     refused();
   }
   const firstFeatures = linkedFixtureFeatures({
     ownedNetwork,
+    ownedNetworks,
     dependencies,
     role: "first",
   });
   const secondFeatures = linkedFixtureFeatures({
     ownedNetwork,
+    ownedNetworks,
     dependencies,
     role: "second",
   });
@@ -651,6 +758,7 @@ async function prepareFixtureInputs(
     }),
     ...(ownedNetwork ? { ownedNetwork: true as const } : {}),
     ...(basicBuild ? { basicBuild: "root-specific" as const } : {}),
+    ...(ownedNetworks ? { ownedNetworks: true as const } : {}),
   };
   if ((await probe(["info", "--format", "{{.OSType}}"])) !== "linux") {
     refused();
@@ -922,10 +1030,34 @@ function createFixtureRuntime(
         "SELECT value FROM marker WHERE id=1",
       ])
     ).trim();
+  const edgeAliasSql = async (instance: Instance) =>
+    (
+      await probe([
+        "container",
+        "exec",
+        container(instance, "db"),
+        "psql",
+        "-h",
+        "db-edge",
+        "-U",
+        "postgres",
+        "-d",
+        "fixture",
+        "-At",
+        "-c",
+        "SELECT value FROM marker WHERE id=1",
+      ])
+    ).trim();
   const assertAliasSql = async (instance: Instance) => {
     if (
-      instance.ownedNetwork &&
+      (instance.ownedNetwork || instance.ownedNetworks) &&
       (await aliasSql(instance)) !== instance.marker
+    ) {
+      refused();
+    }
+    if (
+      instance.ownedNetworks &&
+      (await edgeAliasSql(instance)) !== instance.marker
     ) {
       refused();
     }
@@ -937,10 +1069,74 @@ function createFixtureRuntime(
     });
   };
   const assertTopology = async (instance: Instance, running: boolean) => {
-    if (!instance.ownedNetwork) {
+    if (!(instance.ownedNetwork || instance.ownedNetworks)) {
       return;
     }
     const baseline = anchors.get(instance);
+    if (instance.ownedNetworks) {
+      if (
+        !baseline ||
+        baseline.resources.network.length !== 2 ||
+        baseline.resources.container.length !== 2
+      ) {
+        refused();
+      }
+      const networkIds: Partial<Record<"edge" | "private", string>> = {};
+      for (const network of baseline.resources.network) {
+        const row = object(
+          await probe([
+            "network",
+            "inspect",
+            "--format",
+            BRIDGE_INSPECT_FORMAT,
+            network.id,
+          ])
+        );
+        const logical = row.logical;
+        if (
+          (logical !== "edge" && logical !== "private") ||
+          networkIds[logical]
+        ) {
+          refused();
+        }
+        networkIds[logical] = network.id;
+        const members = running
+          ? baseline.resources.container
+              .filter(
+                (entry) => logical === "private" || entry.service === "db"
+              )
+              .map((entry) => entry.id)
+          : [];
+        assertAdoptionBridgeObservation({
+          instance,
+          id: network.id,
+          members,
+          row,
+        });
+      }
+      if (!(networkIds.edge && networkIds.private)) {
+        refused();
+      }
+      for (const entry of baseline.resources.container) {
+        const row = object(
+          await probe([
+            "container",
+            "inspect",
+            "--format",
+            `{"id":{{json .Id}},"running":{{json .State.Running}},"networks":[{{$first := true}}{{range $name,$n := .NetworkSettings.Networks}}{{if not $first}},{{end}}{{$first = false}}{"name":{{json $name}},"id":{{json $n.NetworkID}},"aliases":{{json $n.Aliases}}}{{end}}]}`,
+            entry.id,
+          ])
+        );
+        assertAdoptionPluralEndpointObservation({
+          instance,
+          networkIds: { edge: networkIds.edge, private: networkIds.private },
+          container: entry,
+          running,
+          row,
+        });
+      }
+      return;
+    }
     const network = baseline?.resources.network[0];
     if (
       !network ||
@@ -1535,7 +1731,7 @@ async function requireFixtureNamesAbsent(
   }
   for (const [kind, name] of [
     ["volume", `${instance.name}_data`],
-    ["network", fixtureNetworkName(instance)],
+    ...fixtureNetworkNames(instance).map((name) => ["network", name] as const),
     ["container", `${instance.name}-db-1`],
     ["container", `${instance.name}-worker-1`],
   ] as const) {
@@ -1626,7 +1822,7 @@ async function bootstrapOriginal(h: FixtureRuntime, instance: Instance) {
   if (
     captured.container.length !== 2 ||
     captured.volume.length !== 1 ||
-    captured.network.length !== 1
+    captured.network.length !== (instance.ownedNetworks ? 2 : 1)
   ) {
     refused();
   }
@@ -1865,16 +2061,42 @@ async function foreignCanaryRefusal(
   gate: { pending: boolean }
 ) {
   const first = h.first;
-  if (!first.ownedNetwork || gate.pending) {
+  if (!(first.ownedNetwork || first.ownedNetworks) || gate.pending) {
     refused();
   }
   await h.check(first);
   await h.check(h.second);
   const baseline = h.anchors.get(first);
-  const bridge = baseline?.resources.network[0];
+  const privateBridges = [] as Observation[];
+  if (first.ownedNetworks && baseline) {
+    for (const candidate of baseline.resources.network) {
+      const row = object(
+        await h.probe([
+          "network",
+          "inspect",
+          "--format",
+          BRIDGE_INSPECT_FORMAT,
+          candidate.id,
+        ])
+      );
+      if (row.logical === "private") {
+        assertAdoptionBridgeObservation({
+          instance: first,
+          id: candidate.id,
+          members: baseline.resources.container.map((entry) => entry.id),
+          row,
+        });
+        privateBridges.push(candidate);
+      }
+    }
+  }
+  const bridge = first.ownedNetworks
+    ? privateBridges[0]
+    : baseline?.resources.network[0];
   if (
     !baseline ||
-    baseline.resources.network.length !== 1 ||
+    baseline.resources.network.length !== (first.ownedNetworks ? 2 : 1) ||
+    (first.ownedNetworks && privateBridges.length !== 1) ||
     baseline.resources.container.length !== 2 ||
     !bridge ||
     !ID.test(bridge.id)
@@ -2120,15 +2342,17 @@ function partialStopReceiptVersion(first: Instance): number {
   const generatedVersion = first.typedLocal ? 4 : 3;
   return first.basicBuild
     ? 9
-    : first.ownedNetwork
-      ? first.dependency
-        ? 10
-        : 6
-      : first.dependency
-        ? 5
-        : first.sourceMode
-          ? generatedVersion
-          : 2;
+    : first.ownedNetworks
+      ? 11
+      : first.ownedNetwork
+        ? first.dependency
+          ? 10
+          : 6
+        : first.dependency
+          ? 5
+          : first.sourceMode
+            ? generatedVersion
+            : 2;
 }
 function partialStopDockerScript(opts: {
   readonly h: FixtureRuntime;
@@ -3242,10 +3466,11 @@ export function guardedAdoptionCanaryCleanup(
 async function runLiteralWorktrees(
   ctx: ScenarioContext,
   stringArgv: boolean,
-  ownedNetwork = false
+  ownedNetwork = false,
+  ownedNetworks = false
 ) {
   const h = createFixtureRuntime(
-    await prepareFixtureInputs(ctx, { stringArgv, ownedNetwork })
+    await prepareFixtureInputs(ctx, { stringArgv, ownedNetwork, ownedNetworks })
   );
   const foreignCanary = { pending: false };
   await runWithFixtureCleanup({
@@ -3255,7 +3480,7 @@ async function runLiteralWorktrees(
       }
       await checkInheritedRefusal(h);
       const local = await withholdPrimaryLocal(h);
-      if (ownedNetwork) {
+      if (ownedNetwork || ownedNetworks) {
         await foreignCanaryRefusal(h, foreignCanary);
       }
       await interruptFirstStop(h);
@@ -3315,6 +3540,16 @@ export const nativeComposeAdoptionNetworkWorktreesScenario: Scenario = {
   summary:
     "owned internal bridges retain original IDs, alias DNS and linked SQL; a foreign member refuses before adoption",
   run: (ctx) => runLiteralWorktrees(ctx, false, true),
+};
+
+/** Two distinct original bridge IDs, per-bridge member sets and aliases survive adoption. */
+export const nativeComposeAdoptionPluralNetworkWorktreesScenario: Scenario = {
+  name: "native-compose-adoption-plural-network-worktrees",
+  tier: "docker",
+  preserveFixtureOnFailure: true,
+  summary:
+    "two owned bridges preserve original IDs, policies, alias SQL and linked data through recovery and rollback",
+  run: (ctx) => runLiteralWorktrees(ctx, false, false, true),
 };
 
 /** Canonical writer-produced sources and six managed layers retain both linked checkouts' original SQL and identities through v3 repair/rollback. */

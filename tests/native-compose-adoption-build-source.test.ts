@@ -272,6 +272,64 @@ test.each([
   }
 });
 test.each([
+  false,
+  true,
+])("preview-qualified two bridge build (inactive=%s) refuses retained source before context reads", async (inactive) => {
+  composeText = JSON.stringify({
+    name: "fixture",
+    services: {
+      db: {
+        build: "..",
+        ...(inactive ? { profiles: ["later"] } : {}),
+        networks: {
+          lab: { aliases: ["database"] },
+          edge: { aliases: ["writer"] },
+        },
+      },
+    },
+    networks: {
+      lab: { driver: "bridge", internal: true },
+      edge: { driver: "bridge", internal: false },
+    },
+  });
+  await writeFile(join(root, ".hack/docker-compose.yml"), composeText);
+  const inputs = { configText: '{"name":"fixture"}', composeText };
+  const preview = mapLegacyNativeImport(inputs);
+  expect(preview.report.complete).toBe(true);
+  expect(preview.candidate).toMatchObject({
+    services: {
+      db: {
+        build: { context: "." },
+        networks: {
+          lab: { aliases: ["database"] },
+          edge: { aliases: ["writer"] },
+        },
+      },
+    },
+    networks: { lab: { internal: true }, edge: { internal: false } },
+  });
+  const retained = mapLegacyNativeRetainedBasicBuild(inputs);
+  expect(retained.candidate).toBeUndefined();
+  expect(retained.report.fields).toContainEqual(
+    expect.objectContaining({
+      pointer: "/networks",
+      status: "refused",
+      code: "retained_build_network_adoption_unqualified",
+    })
+  );
+  const source = await acquireLegacyAdoptionSourceInputs({ projectRoot: root });
+  if (!source.ok) {
+    throw new Error("Synthetic source setup refused; values omitted.");
+  }
+  const reader = spyOn(importInputs, "readNativeConfigImportSourceFile");
+  try {
+    await red(acquireLegacyComposeBuildSource({ source }));
+    expect(reader).not.toHaveBeenCalled();
+  } finally {
+    reader.mockRestore();
+  }
+});
+test.each([
   ["config", false],
   ["config", true],
   ["secret", false],

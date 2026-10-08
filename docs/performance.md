@@ -5,6 +5,12 @@ container IDs, daemon freshness and the workload window. A healthy endpoint is n
 evidence that every project is fast. Avoid treating stopped containers, large RSS,
 or bind mounts as a cause without measuring the associated work.
 
+The CLI loads its terminal renderer only when a TUI or retained remote-monitor
+handler is selected after project resolution. Help, version output and the TUI's
+non-TTY refusal keep their ordinary parser behavior without initializing OpenTUI.
+This changes the startup import path; it does not establish a measured CPU or
+memory improvement. The remote surface remains unsupported.
+
 ## Project listing
 
 ```sh

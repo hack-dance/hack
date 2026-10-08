@@ -164,6 +164,56 @@ async function customBridge() {
   network().internal = true;
   await save();
 }
+async function twoBridges() {
+  await writeFile(
+    join(projectRoot, ".hack/docker-compose.yml"),
+    `name: fixture\nservices:\n  db:\n    image: ${CANARY}\n    networks:\n      private:\n        aliases: [database]\n      edge:\n        aliases: [writer]\n    volumes:\n      - data:/var/lib/database\n  reader:\n    image: ${CANARY}\n    networks:\n      private:\n        aliases: [read-alias]\nnetworks:\n  private:\n    driver: bridge\n    internal: true\n  edge:\n    driver: bridge\n    internal: false\nvolumes:\n  data:\n    name: ${VOLUME}\n`
+  );
+  const reader = "c".repeat(64);
+  const edge = "d".repeat(64);
+  container().networks = [
+    {
+      name: "fixture_private",
+      id: NETWORK,
+      aliases: ["fixture-db-1", "db", "database"],
+    },
+    {
+      name: "fixture_edge",
+      id: edge,
+      aliases: ["fixture-db-1", "db", "writer"],
+    },
+  ];
+  fixture.container.push({
+    ...container(),
+    id: reader,
+    name: "/fixture-reader-1",
+    service: "reader",
+    mounts: [],
+    networks: [
+      {
+        name: "fixture_private",
+        id: NETWORK,
+        aliases: ["fixture-reader-1", "reader", "read-alias"],
+      },
+    ],
+  });
+  fixture.network[0] = {
+    ...network(),
+    name: "fixture_private",
+    logical: "private",
+    internal: true,
+    containers: [ID, reader],
+  };
+  fixture.network.push({
+    ...network(),
+    id: edge,
+    name: "fixture_edge",
+    logical: "edge",
+    internal: false,
+    containers: [ID],
+  });
+  await save();
+}
 function container() {
   const row = fixture.container[0];
   if (!row) {
@@ -224,6 +274,9 @@ test("one authored bridge binds original physical ID, internal policy and exact 
   const acquired = await acquireLegacyComposeAdoptionBinding({ projectRoot });
   expect(acquired.report.binding_version).toBe(3);
   const original = await acquired.resolveBinding({ projectRoot });
+  if (original.binding_version !== 3) {
+    throw new Error("Expected one owned bridge binding");
+  }
   expect(original.network).toMatchObject({
     id: NETWORK,
     name: "fixture_private",
@@ -247,6 +300,92 @@ test("one authored bridge binds original physical ID, internal policy and exact 
   await save();
   await acquired.assertFresh({ projectRoot });
   expect(await acquired.resolveBinding({ projectRoot })).toEqual(original);
+});
+
+test("two owned bridges bind both original IDs, policies, aliases and exact members", async () => {
+  await twoBridges();
+  const acquired = await acquireLegacyComposeAdoptionBinding({ projectRoot });
+  expect(acquired.report.binding_version).toBe(5);
+  const original = await acquired.resolveBinding({ projectRoot });
+  expect(original.binding_version).toBe(5);
+  if (original.binding_version !== 5) {
+    throw new Error("missing plural binding");
+  }
+  expect(
+    original.networks.map((network) => [
+      network.logical,
+      network.id,
+      network.internal,
+    ])
+  ).toEqual([
+    ["edge", "d".repeat(64), false],
+    ["private", NETWORK, true],
+  ]);
+  expect(original.containers.map((container) => container.id)).toEqual([
+    ID,
+    "c".repeat(64),
+  ]);
+  container().running = false;
+  fixture.network[0]!.containers = ["c".repeat(64)];
+  fixture.network[1]!.containers = [];
+  (container().networks as Record<string, unknown>[]).forEach((network) => {
+    network.aliases = null;
+  });
+  await save();
+  await acquired.assertFresh({ projectRoot });
+  expect(await acquired.resolveBinding({ projectRoot })).toEqual(original);
+});
+
+test.each([
+  [
+    "foreign member",
+    () => {
+      fixture.network[1]!.containers = [ID, "e".repeat(64)];
+    },
+  ],
+  [
+    "duplicate selected name",
+    () => {
+      fixture.network[1]!.name = "fixture_private";
+    },
+  ],
+  [
+    "replaced bridge",
+    () => {
+      fixture.network[1]!.id = "e".repeat(64);
+    },
+  ],
+  [
+    "changed policy",
+    () => {
+      fixture.network[1]!.internal = true;
+    },
+  ],
+  [
+    "alias drift",
+    () => {
+      (container().networks as Record<string, unknown>[])[1]!.aliases = [
+        "db",
+        "writer",
+      ];
+    },
+  ],
+  [
+    "extra attachment",
+    () => {
+      (fixture.container[1]!.networks as Record<string, unknown>[]).push({
+        name: "fixture_edge",
+        id: "d".repeat(64),
+        aliases: [],
+      });
+    },
+  ],
+])("plural binding refuses %s before effect", async (_, change) => {
+  await twoBridges();
+  const acquired = await acquireLegacyComposeAdoptionBinding({ projectRoot });
+  change();
+  await save();
+  await refusal(acquired.assertFresh({ projectRoot }));
 });
 
 test.each([

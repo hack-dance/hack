@@ -217,7 +217,7 @@ test("foreign receipt versions cannot label a build manifest", async () => {
       parseLegacyComposeAdoptionReceipt(receipt, receipt.checkout)
         .adoption_receipt_version
     ).toBe(9);
-    for (const version of [1, 2, 3, 4, 5, 6, 10]) {
+    for (const version of [1, 2, 3, 4, 5, 6, 10, 11]) {
       await writeReceipt({ ...receipt, adoption_receipt_version: version });
       await red(store.loadPrepared());
     }

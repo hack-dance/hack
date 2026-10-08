@@ -49,9 +49,13 @@ type Fixture = {
 let root: string;
 let projectRoot: string;
 let priorPath: string | undefined;
+let priorCI: string | undefined;
+let priorExecutionMode: string | undefined;
 let fixture: Fixture;
 beforeEach(async () => {
   priorPath = process.env.PATH;
+  priorCI = process.env.CI;
+  priorExecutionMode = process.env.HACK_EXECUTION_MODE;
   root = await realpath(
     await mkdtemp(join(tmpdir(), "native-adoption-binding-"))
   );
@@ -165,6 +169,8 @@ if (fixture.mode === "inventory-change" && kind === "container" && action === "l
 });
 afterEach(async () => {
   restoreEnv("PATH", priorPath);
+  restoreEnv("CI", priorCI);
+  restoreEnv("HACK_EXECUTION_MODE", priorExecutionMode);
   await rm(root, { recursive: true, force: true });
 });
 async function save() {
@@ -239,6 +245,114 @@ async function refusal(pending: Promise<unknown>, code?: string) {
     }
   }
   expect(await Bun.file(join(root, "mutation")).exists()).toBe(false);
+}
+
+async function linkedCheckout() {
+  Reflect.deleteProperty(process.env, "CI");
+  Reflect.deleteProperty(process.env, "HACK_EXECUTION_MODE");
+  await rm(join(projectRoot, ".git"), { recursive: true });
+  const git = async (args: readonly string[]) => {
+    const child = Bun.spawn(["/usr/bin/git", "-C", projectRoot, ...args], {
+      env: {
+        PATH: priorPath ?? "/usr/bin:/bin",
+        GIT_CONFIG_NOSYSTEM: "1",
+        GIT_CONFIG_GLOBAL: "/dev/null",
+      },
+      stdin: "ignore",
+      stdout: "ignore",
+      stderr: "ignore",
+    });
+    expect(await child.exited).toBe(0);
+  };
+  await git(["init", "--quiet", "-b", "main"]);
+  await git(["add", ".hack"]);
+  await git([
+    "-c",
+    "user.name=Fixture",
+    "-c",
+    "user.email=fixture@example.invalid",
+    "commit",
+    "--quiet",
+    "-m",
+    "fixture",
+  ]);
+  const linked = join(root, "linked-checkout");
+  await git(["worktree", "add", "--quiet", "-b", "linked", linked]);
+  await symlink("/usr/bin/git", join(root, "git"));
+  projectRoot = linked;
+  container().workingDir = join(linked, ".hack");
+  container().configFiles = join(linked, ".hack/docker-compose.yml");
+  await save();
+}
+
+test("a verified linked checkout adopts and rolls back using the original resources", async () => {
+  await linkedCheckout();
+  const config = await readFile(join(projectRoot, ".hack/hack.config.json"));
+  const compose = await readFile(join(projectRoot, ".hack/docker-compose.yml"));
+  const { store, generation } = await prepared();
+  try {
+    const saved = JSON.parse(
+      await readFile(join(stateRoot(), "receipt.json"), "utf8")
+    );
+    expect(saved.adoption_receipt_version).toBe(2);
+    expect(JSON.stringify(generation)).not.toContain(CANARY);
+    await store.publish({ generation, binary: await compiler() });
+    expect(await inspectLegacyComposeAdoptionSelection({ projectRoot })).toBe(
+      "active"
+    );
+    await store.rollback();
+    expect(await readFile(join(projectRoot, ".hack/hack.config.json"))).toEqual(
+      config
+    );
+    expect(
+      await readFile(join(projectRoot, ".hack/docker-compose.yml"))
+    ).toEqual(compose);
+    expect(await inspectLegacyComposeAdoptionSelection({ projectRoot })).toBe(
+      "rolled-back"
+    );
+    expect(fixture.container[0]?.id).toBe(ID);
+    expect(fixture.volume[0]?.createdAt).toBe(CREATED);
+  } finally {
+    await store.close();
+  }
+});
+
+test("unsupported inherited primary inputs refuse before engine inspection or preparation writes", async () => {
+  await linkedCheckout();
+  const primaryFile = join(root, "checkout/.hack/hack.env.local.yaml");
+  await writeFile(primaryFile, CANARY);
+  const preview = await previewLegacyComposeAdoption({
+    projectRoot,
+    binary: await compiler(),
+  });
+  expect(preview.complete).toBe(false);
+  expect(JSON.stringify(preview)).not.toContain(CANARY);
+  expect(await Bun.file(join(root, "commands")).exists()).toBe(false);
+  expect(await Bun.file(join(stateRoot(), "receipt.json")).exists()).toBe(
+    false
+  );
+  expect(await readFile(primaryFile, "utf8")).toBe(CANARY);
+});
+
+for (const mode of ["policy", "ci"] as const) {
+  test(`the existing inheritance opt-out ${mode} excludes primary managed inputs`, async () => {
+    await linkedCheckout();
+    await writeFile(join(root, "checkout/.hack/hack.env.local.yaml"), CANARY);
+    if (mode === "policy") {
+      await writeFile(
+        join(projectRoot, ".hack/hack.config.json"),
+        '{"name":"fixture","worktree":{"inherit_local":false}}'
+      );
+    } else {
+      process.env.CI = "1";
+    }
+    const preview = await previewLegacyComposeAdoption({
+      projectRoot,
+      binary: await compiler(),
+    });
+    expect(preview.complete).toBe(true);
+    expect(JSON.stringify(preview)).not.toContain(CANARY);
+  });
 }
 
 test("preparation durably binds original sources and resources without active publication or native labels", async () => {

@@ -88,6 +88,8 @@ export type Scenario = {
   readonly name: string;
   readonly tier: ScenarioTier;
   readonly summary: string;
+  /** Retain disposable source and isolated-home evidence after failed ownership cleanup. */
+  readonly preserveFixtureOnFailure?: boolean;
   readonly run: (ctx: ScenarioContext) => Promise<void>;
 };
 
@@ -765,6 +767,7 @@ export async function runScenarios(
 
     process.stdout.write(`-- ${scenario.name} (${scenario.tier}) --\n`);
     let outcome: ScenarioOutcome;
+    let preserveFailedFixture = false;
     try {
       expect({
         that: scenario.tier !== "host-ingress" || opts.dockerEnabled,
@@ -802,9 +805,11 @@ export async function runScenarios(
               durationMs: Date.now() - startedAt,
               reason: error instanceof Error ? error.message : String(error),
             };
+      preserveFailedFixture =
+        outcome.status === "fail" && scenario.preserveFixtureOnFailure === true;
     } finally {
       await cleanupScenarioRoots({
-        keep: opts.keepTempDirs === true,
+        keep: opts.keepTempDirs === true || preserveFailedFixture,
         retained: retentionReason !== null,
         tempRoot,
         hackHome,

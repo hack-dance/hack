@@ -372,7 +372,10 @@ test("effect captures its dependent finalizer before the first asynchronous chec
   });
 });
 
-test("SIGKILL after route retirement preserves the pending stop generation for idempotent recovery", async () => {
+test.each([
+  "recovery",
+  "finite-down",
+] as const)("SIGKILL after %s route retirement preserves the pending stop generation for idempotent recovery", async (mode) => {
   const root = await fixture();
   const owner = await store(root);
   const generation = await owner.withMutation(async (mutation) => {
@@ -382,7 +385,10 @@ test("SIGKILL after route retirement preserves the pending stop generation for i
       operation: "up",
       assertFresh: async () => {},
       assertOwned: async () => {},
-      effect: async () => ({ outcome: "uncertain", value: 1 }),
+      effect: async () => ({
+        outcome: mode === "recovery" ? "uncertain" : "complete",
+        value: 0,
+      }),
     });
     return published;
   });
@@ -392,7 +398,11 @@ test("SIGKILL after route retirement preserves the pending stop generation for i
     generationIdentity: generation.generationId,
   });
   await claims.markEffectsPossible(attempt);
-  await claims.retain(attempt);
+  if (mode === "recovery") {
+    await claims.retain(attempt);
+  } else {
+    await claims.complete({ attempt, assertTransition: async () => {} });
+  }
   const generationModule = new URL(
     "../src/lib/native-compose-generation.ts",
     import.meta.url
@@ -419,9 +429,9 @@ test("SIGKILL after route retirement preserves the pending stop generation for i
     import {openNativeComposeRouteClaims} from ${JSON.stringify(claimsModule)};
     const owner=await openNativeComposeGenerationStore({projectRoot:${JSON.stringify(root)},instance:null,mode:"saved"});
     const claims=await openNativeComposeRouteClaims({root:${JSON.stringify(join(root, "claims"))},binding:${JSON.stringify(binding)},owner:${JSON.stringify(claimOwner)}});
-    const generation=await owner.loadPending();
+    const generation=await owner.${mode === "recovery" ? "loadPending()" : "loadCurrent().then(s=>s.generation)"};
     if(!generation) throw new Error("missing recovery generation");
-    await owner.withMutation(m=>m.runEffect({generation,operation:"down",recoverPending:true,assertOwned:async()=>{},effect:async()=>({outcome:"complete",value:0}),beforeComplete:async()=>{
+    await owner.withMutation(m=>m.runEffect({generation,operation:"down",${mode === "recovery" ? "recoverPending:true" : 'assertFresh:async()=>{},downHooks:{after:{prepare:async()=>async()=>({outcome:"complete",value:0,ready:true})}}'},assertOwned:async()=>{},effect:async()=>({outcome:"complete",value:0}),beforeComplete:async()=>{
       await claims.recoverStopped({references:[${JSON.stringify(attempt.reference)}],assertAbsent:async()=>{}});
       await Bun.write(${JSON.stringify(join(root, "claims-retired"))},"retired");
       process.kill(process.pid,"SIGKILL");
@@ -1345,9 +1355,8 @@ test("failed recovery preserves the original pending generation", async () => {
   );
 });
 
-test("second freshness failure after journaling preserves intent and invokes no effect", async () => {
+test("freshness failure after journaling preserves intent and invokes no effect", async () => {
   const owner = await store(await fixture());
-  let checks = 0;
   let effects = 0;
   await rejected(
     owner.withMutation(async (mutation) => {
@@ -1356,8 +1365,7 @@ test("second freshness failure after journaling preserves intent and invokes no 
         generation,
         operation: "up",
         assertFresh: async () => {
-          checks += 1;
-          if (checks === 2) {
+          if ((await owner.loadCurrent()).pending !== null) {
             throw new Error("changed");
           }
         },
@@ -1984,3 +1992,303 @@ for (const unsafe of [
     ).toHaveLength(0);
   });
 }
+
+test.each([
+  "before",
+  "after",
+] as const)("finite down %s has exact phase/pending/operation/generation binding and known17 keeps stop pending", async (phase) => {
+  const owner = await store(await fixture());
+  const generation = await activate(owner);
+  const events: string[] = [];
+  let captured: unknown;
+  await owner.withMutation(async (mutation) => {
+    const hook = {
+      prepare: async () => async () => {
+        captured = (await Bun.file(receiptPath(owner)).json()).beforeHooks;
+        events.push(phase);
+        return { outcome: "complete" as const, value: 17, ready: false };
+      },
+    };
+    const result = await mutation.runEffect({
+      generation,
+      operation: "down",
+      assertFresh: async () => {},
+      assertOwned: async () => {},
+      downHooks: { [phase]: hook },
+      effect: async () => {
+        events.push("engine");
+        return { outcome: "complete", value: 0 };
+      },
+      beforeComplete: async () => {
+        events.push("retire");
+      },
+    });
+    expect(result).toEqual({ outcome: "uncertain", value: 17 });
+  });
+  const state = await owner.loadCurrent();
+  expect(captured).toEqual({
+    token: expect.stringMatching(/^[a-f0-9]{32}$/),
+    phase: `down.${phase}`,
+    pendingToken: state.pending?.token,
+    generationId: generation.generationId,
+    operation: "down",
+  });
+  expect(events).toEqual(phase === "before" ? ["before"] : ["engine", "after"]);
+  expect(state).toMatchObject({ stopped: false, beforeHooksPending: false });
+  expect(state.pending?.generationId).toBe(generation.generationId);
+});
+
+test.each([
+  "before",
+  "after",
+] as const)("unknown down %s persists across decoding and explicit saved engine recovery without replay", async (phase) => {
+  const root = await fixture();
+  const owner = await store(root);
+  const generation = await activate(owner);
+  const hook = {
+    prepare: async () => async () => ({
+      outcome: "uncertain" as const,
+      value: 130,
+      ready: false,
+    }),
+  };
+  await owner.withMutation(async (mutation) => {
+    const result = await mutation.runEffect({
+      generation,
+      operation: "down",
+      assertFresh: async () => {},
+      assertOwned: async () => {},
+      downHooks: { [phase]: hook },
+      effect: async () => ({ outcome: "complete", value: 0 }),
+    });
+    expect(result.outcome).toBe("uncertain");
+  });
+  const intent = (await Bun.file(receiptPath(owner)).json()).beforeHooks;
+  const saved = await store(root, null, "saved");
+  let prepared = false;
+  await saved.withMutation(async (mutation) => {
+    await rejected(
+      mutation.runEffect({
+        generation: (await saved.loadPending()) ?? generation,
+        operation: "down",
+        assertFresh: async () => {},
+        assertOwned: async () => {},
+        recoverPending: true,
+        downHooks: {
+          before: {
+            prepare: async () => {
+              prepared = true;
+              return async () => ({
+                outcome: "complete",
+                value: 0,
+                ready: true,
+              });
+            },
+          },
+        },
+        effect: async () => ({ outcome: "complete", value: 0 }),
+      }),
+      "E_NATIVE_COMPOSE_STATE"
+    );
+    await rejected(
+      mutation.runEffect({
+        generation: (await saved.loadPending()) ?? generation,
+        operation: "down",
+        recoverPending: true,
+        assertOwned: async () => {},
+        effect: async () => ({ outcome: "complete", value: 0 }),
+        beforeComplete: async () => {
+          if ((await saved.loadCurrent()).beforeHooksPending) {
+            throw new Error("host uncertainty retained");
+          }
+        },
+      }),
+      "E_NATIVE_COMPOSE_UNCERTAIN"
+    );
+  });
+  expect(prepared).toBe(false);
+  expect((await Bun.file(receiptPath(owner)).json()).beforeHooks).toEqual(
+    intent
+  );
+  expect(await saved.loadCurrent()).toMatchObject({
+    stopped: false,
+    beforeHooksPending: true,
+    hostHookPhase: `down.${phase}`,
+  });
+  expect((await saved.loadCurrent()).pending?.generationId).toBe(
+    generation.generationId
+  );
+});
+
+test.each([
+  "pendingToken",
+  "generationId",
+  "operation",
+] as const)("down hook completion refuses changed %s without clearing exact intent", async (field) => {
+  const owner = await store(await fixture());
+  const generation = await activate(owner);
+  await owner.withMutation(async (mutation) => {
+    await rejected(
+      mutation.runEffect({
+        generation,
+        operation: "down",
+        assertFresh: async () => {},
+        assertOwned: async () => {},
+        downHooks: {
+          before: {
+            prepare: async () => async () => {
+              const receipt = await Bun.file(receiptPath(owner)).json();
+              receipt.beforeHooks[field] =
+                field === "operation" ? "up" : "e".repeat(32);
+              await Bun.write(receiptPath(owner), JSON.stringify(receipt));
+              return { outcome: "complete", value: 0, ready: true };
+            },
+          },
+        },
+        effect: async () => ({ outcome: "complete", value: 0 }),
+      }),
+      "E_NATIVE_COMPOSE_UNCERTAIN"
+    );
+  });
+  if (field !== "operation") {
+    expect((await owner.loadCurrent()).hostHookPhase).toBe("down.before");
+    expect((await owner.loadCurrent()).pending?.generationId).toBe(
+      generation.generationId
+    );
+  } else {
+    await expect(owner.loadCurrent()).rejects.toThrow();
+  }
+});
+
+test.each([
+  "effect",
+  "finalizer",
+] as const)("hook-enabled down refuses a late host intent at the %s completion boundary", async (boundary) => {
+  const owner = await store(await fixture());
+  const generation = await activate(owner);
+  const inject = async () => {
+    const receipt = await Bun.file(receiptPath(owner)).json();
+    receipt.beforeHooks = {
+      token: "e".repeat(32),
+      phase: "down.after",
+      pendingToken: receipt.pending.token,
+      generationId: generation.generationId,
+      operation: "down",
+    };
+    await Bun.write(receiptPath(owner), JSON.stringify(receipt));
+  };
+  let finalized = false;
+  await owner.withMutation(async (mutation) => {
+    await rejected(
+      mutation.runEffect({
+        generation,
+        operation: "down",
+        assertFresh: async () => {},
+        assertOwned: async () => {},
+        downHooks: {},
+        effect: async () => {
+          if (boundary === "effect") {
+            await inject();
+          }
+          return { outcome: "complete", value: 0 };
+        },
+        beforeComplete: async () => {
+          finalized = true;
+          await inject();
+        },
+      }),
+      "E_NATIVE_COMPOSE_UNCERTAIN"
+    );
+  });
+  expect(finalized).toBe(boundary === "finalizer");
+  expect(await owner.loadCurrent()).toMatchObject({
+    stopped: false,
+    beforeHooksPending: true,
+    hostHookPhase: "down.after",
+  });
+  expect((await owner.loadCurrent()).pending?.generationId).toBe(
+    generation.generationId
+  );
+});
+
+test.each([
+  "up",
+  "restart",
+  "run",
+] as const)("down callback admission refuses %s before prepare/effect", async (operation) => {
+  const owner = await store(await fixture());
+  const generation = await activate(owner);
+  let calls = 0;
+  await owner.withMutation(async (mutation) => {
+    await rejected(
+      mutation.runEffect({
+        generation,
+        operation,
+        assertFresh: async () => {},
+        assertOwned: async () => {},
+        downHooks: {
+          before: {
+            prepare: async () => {
+              calls++;
+              return async () => ({
+                outcome: "complete",
+                value: 0,
+                ready: true,
+              });
+            },
+          },
+        },
+        effect: async () => {
+          calls++;
+          return { outcome: "complete", value: 0 };
+        },
+      }),
+      "E_NATIVE_COMPOSE_STATE"
+    );
+  });
+  expect(calls).toBe(0);
+  expect((await owner.loadCurrent()).pending).toBeNull();
+});
+
+test("finite down callbacks refuse a saved generation that is no longer current", async () => {
+  const owner = await store(await fixture());
+  const old = await activate(owner);
+  let prepared = false;
+  await owner.withMutation(async (mutation) => {
+    const generation = await publish(mutation);
+    await mutation.runEffect({
+      generation,
+      operation: "restart",
+      assertFresh: async () => {},
+      assertOwned: async () => {},
+      effect: async () => ({ outcome: "complete", value: 0 }),
+    });
+    await rejected(
+      mutation.runEffect({
+        generation: old,
+        operation: "down",
+        assertFresh: async () => {},
+        assertOwned: async () => {},
+        downHooks: {
+          before: {
+            prepare: async () => {
+              prepared = true;
+              return async () => ({
+                outcome: "complete",
+                value: 0,
+                ready: true,
+              });
+            },
+          },
+        },
+        effect: async () => ({ outcome: "complete", value: 0 }),
+      }),
+      "E_NATIVE_COMPOSE_UNCERTAIN"
+    );
+  });
+  expect(prepared).toBe(false);
+  expect((await owner.loadCurrent()).pending).toBeNull();
+  expect((await owner.loadCurrent()).generation?.generationId).not.toBe(
+    old.generationId
+  );
+});

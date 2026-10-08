@@ -47,7 +47,7 @@ export function nativeComposeSourceRevision(
   digest.update(
     JSON.stringify({
       projectRoot: prepared.projectRoot,
-      profiles: prepared.selection.profiles ?? [],
+      profiles: [...(prepared.selection.profiles ?? [])].sort(),
       explicitOverlay: prepared.selection.explicitOverlay,
       explicitDomain: prepared.selection.explicitDomain,
       routing: prepared.routingInputs,

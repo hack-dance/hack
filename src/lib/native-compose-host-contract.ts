@@ -12,7 +12,7 @@ export class NativeComposeHostHookError extends Error {
   readonly code = "E_NATIVE_PROJECT_UNSUPPORTED";
   constructor() {
     super(
-      "Native Compose host hooks require finite up commands and complete selected host bindings; values omitted."
+      "Native Compose host hooks require finite lifecycle commands and complete selected host bindings; values omitted."
     );
     this.name = "NativeComposeHostHookError";
   }
@@ -62,25 +62,34 @@ function relative(value: unknown): value is string {
   );
 }
 
-/** Validate the normalized compiler contract. Other lifecycle phases and persistent owners refuse. */
+/** Validate all finite normalized lifecycle phases. Persistent owners refuse. */
 export function selectNativeComposeBeforeHooks(
   plan: Readonly<Record<string, unknown>>
 ): readonly NativeComposeHook[] {
-  return selectNativeComposeUpHooks(plan).before;
+  return selectNativeComposeLifecycleHooks(plan).up.before;
 }
 
 export function selectNativeComposeAfterHooks(
   plan: Readonly<Record<string, unknown>>
 ): readonly NativeComposeHook[] {
-  return selectNativeComposeUpHooks(plan).after;
+  return selectNativeComposeLifecycleHooks(plan).up.after;
 }
 
-function selectNativeComposeUpHooks(plan: Readonly<Record<string, unknown>>): {
+export function selectNativeComposeDownHooks(
+  plan: Readonly<Record<string, unknown>>
+): HookSequence {
+  return selectNativeComposeLifecycleHooks(plan).down;
+}
+
+type HookSequence = {
   readonly before: readonly NativeComposeHook[];
   readonly after: readonly NativeComposeHook[];
-} {
+};
+function selectNativeComposeLifecycleHooks(
+  plan: Readonly<Record<string, unknown>>
+): { readonly up: HookSequence; readonly down: HookSequence } {
   if (plan.host === undefined) {
-    return { before: [], after: [] };
+    return { up: { before: [], after: [] }, down: { before: [], after: [] } };
   }
   const host = plan.host;
   assert(isRecord(host) && only(host, ["up", "down", "processes"]));
@@ -88,9 +97,12 @@ function selectNativeComposeUpHooks(plan: Readonly<Record<string, unknown>>): {
     host.processes === undefined ||
       (isRecord(host.processes) && Object.keys(host.processes).length === 0)
   );
-  const result: { before: NativeComposeHook[]; after: NativeComposeHook[] } = {
-    before: [],
-    after: [],
+  const result: Record<
+    "up" | "down",
+    { before: NativeComposeHook[]; after: NativeComposeHook[] }
+  > = {
+    up: { before: [], after: [] },
+    down: { before: [], after: [] },
   };
   const names = new Set<string>();
   for (const phase of ["up", "down"] as const) {
@@ -105,12 +117,11 @@ function selectNativeComposeUpHooks(plan: Readonly<Record<string, unknown>>): {
         continue;
       }
       assert(Array.isArray(entries));
-      assert(phase === "up" || entries.length === 0);
       for (const entry of entries) {
         const hook = readHook(entry);
         assert(!names.has(hook.name));
         names.add(hook.name);
-        result[order].push(hook);
+        result[phase][order].push(hook);
       }
     }
   }

@@ -489,6 +489,73 @@ export type NativeComposeRoutingOwner = {
   close(): Promise<void>;
 };
 
+export type NativeComposeSavedRunRouting = {
+  assertContinuity(opts: { readonly deadline: number }): Promise<void>;
+  close(): Promise<void>;
+};
+
+/** Reopen completed references for observation only; no claim or attempt mutation. */
+export async function prepareNativeComposeSavedRunRouting(input: {
+  readonly owner: Owner;
+  readonly generationId: string;
+  readonly document: Document;
+  readonly signal?: AbortSignal;
+  readonly io?: IO;
+}): Promise<NativeComposeSavedRunRouting | null> {
+  const owner = Object.freeze({ ...input.owner });
+  const metadata = readNativeComposeRouteMetadata({
+    generationId: input.generationId,
+    document: frozenDocument(input.document),
+  });
+  if (!metadata) {
+    return null;
+  }
+  const io = Object.freeze({ ...(input.io ?? defaultIO) });
+  const claims = await io.claims(claimScope(owner, metadata.binding));
+  const assertContinuity = async ({
+    deadline,
+  }: {
+    readonly deadline: number;
+  }) => {
+    const attempt = await claims.reopen(metadata.reference);
+    if (
+      attempt.phase !== "complete" ||
+      attempt.hostnames.join() !== metadata.hostnames.join()
+    ) {
+      return refused();
+    }
+    await io.ingress({ expected: metadata.binding, signal: input.signal });
+    await io.inventory({
+      ...owner,
+      hostnames: metadata.hostnames,
+      requireGenerationId: input.generationId,
+      signal: input.signal,
+    });
+    await io.proxy({
+      binding: metadata.binding,
+      ...owner,
+      generationId: input.generationId,
+      routes: metadata.routes,
+      absentHostnames: metadata.hostnames.filter(
+        (hostname) => !activeHostnames(metadata.routes).includes(hostname)
+      ),
+      signal: input.signal,
+      deadline,
+    });
+    const after = await claims.reopen(metadata.reference);
+    if (
+      after.phase !== "complete" ||
+      after.hostnames.join() !== metadata.hostnames.join()
+    ) {
+      return refused();
+    }
+  };
+  return {
+    assertContinuity,
+    close: () => claims.close(),
+  };
+}
+
 /**
  * Own admission under the caller's instance mutation lock. Only this live attempt
  * can complete after a reaped engine child and verified workload readiness. Closing
@@ -700,14 +767,32 @@ export async function prepareNativeComposeRouteOwner(input: {
  * Proxy loss leaves claims in place after owned stop. Explicit recovery may retire
  * anchored uncertain attempts only after fresh whole-owner and proxy absence proof.
  */
-export async function releaseNativeComposeSavedRoutes(input: {
+type SavedRouteOperation = {
   readonly owner: Owner;
   readonly saved: readonly NativeComposeSavedRouteDocument[];
   readonly signal?: AbortSignal;
   readonly deadline: number;
   readonly recover?: boolean;
   readonly io?: IO;
-}): Promise<void> {
+};
+
+/** Verify exact saved dispatch absence while retaining every referenced hostname claim. */
+export async function verifyNativeComposeSavedRoutesAbsent(
+  input: SavedRouteOperation
+): Promise<void> {
+  await savedRouteOperation(input, false);
+}
+
+export async function releaseNativeComposeSavedRoutes(
+  input: SavedRouteOperation
+): Promise<void> {
+  await savedRouteOperation(input, true);
+}
+
+async function savedRouteOperation(
+  input: SavedRouteOperation,
+  retire: boolean
+): Promise<void> {
   const opts = Object.freeze({
     ...input,
     owner: Object.freeze({
@@ -760,7 +845,12 @@ export async function releaseNativeComposeSavedRoutes(input: {
           });
         },
       } satisfies Parameters<NativeComposeRouteClaims["release"]>[0];
-      if (opts.recover) {
+      if (!retire) {
+        await claims.verifyAbsent({
+          ...retirement,
+          references: group.map((value) => value.reference),
+        });
+      } else if (opts.recover) {
         await claims.recoverStopped({
           ...retirement,
           references: group.map((value) => value.reference),

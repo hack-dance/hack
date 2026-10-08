@@ -71,8 +71,33 @@ command exit remains nonzero after verified completion. Failure to start or remo
 the one-off leaves execution incomplete; absence alone does not prove completion.
 The selected target's direct dependency conditions are checked as authored;
 `service_started` does not acquire an extra health requirement.
-`run` refuses selected or retained routing generations until one-off Caddy label
-projection is qualified, including an unrouted job in a routed project.
+For routed projects, `run` requires an already-ready current generation and
+unchanged effective inputs. Run `up` first for a cold or stopped instance;
+those routed runs refuse before hooks or engine operations. The target's
+dependency conditions and every saved workload's readiness must hold.
+
+The owned generation store privately publishes a one-off projection that removes
+the target's Caddy routing label keys. Its environment, command, mounts,
+dependencies and storage identities remain unchanged. Compose receives only this
+verified immutable file and `--no-deps`, so the ready graph remains in place.
+The adapter reopens completed hostname claims for read-only checks, verifies the
+active routes before and after execution, and requires the retained containers'
+IDs to remain unchanged. It also checks routing-key absence on the actual stopped
+one-off before removing that exact owned ID. Claim drift, unexpected exposure,
+container replacement or incomplete cleanup retain pending recovery state;
+they do not trigger automatic replay. `down --recover` uses the original saved
+generation and retains persistent data. The private projection remains available
+for owned inspection and is never replayed.
+
+The source tests exercise projection publication, tamper refusal, readonly claims,
+literal delivery, exit status and recovery with substituted engine observations.
+The maintained `native-config-routing` Docker fixture additionally observes a
+running one-off with no routing keys, exact exit 17 and removal, unchanged main
+and sibling container IDs and HTTPS markers, completed claims, retained data and
+recovery from a deliberately blocked one-off removal. This fixture passed on an
+M3 macOS host with the current compiled CLI and its matching compiler. That
+qualification is separate from unit tests and does not establish cold routed-run
+support or whole-product parity.
 
 Managed environment selection, native source and selected local configuration
 are acquired together. Support preflight precedes private value delivery. Private
@@ -82,7 +107,7 @@ documents can contain decrypted values and remain in owned private files with
 restricted permissions. They are never part of the public plan or JSON output.
 Do not copy these documents into source control or attach them to diagnostics.
 
-## Finite host up hooks
+## Finite host lifecycle hooks
 
 Whole-project `up` and `restart` run `host.up.before` before engine startup, then
 `host.up.after` after the exact workloads and routes are ready. Each phase runs in
@@ -98,7 +123,7 @@ the compiler's effective bindings. `env_target` can select the default host or a
 declared workload's host view. Managed references read that immutable baseline;
 literal overrides, empty defaults and explicit unset destinations retain their
 meaning. HTTP/HTTPS external endpoint bindings are supported. Other endpoint
-owners remain refused. `run` currently refuses projects with either nonempty up
+owners remain refused. `run` currently refuses projects with any nonempty lifecycle
 hooks instead of assigning new lifecycle semantics to a one-off command.
 
 Each hook phase has a separate budget equal to `HACK_COMPOSE_STARTUP_TIMEOUT_MS`;
@@ -124,8 +149,8 @@ operation pending. The generation becomes ready only after those checks pass.
 Before spawning, Hack synchronizes a private hook intent under the same instance
 mutation lock used for engine effects. An interrupted or unverified hook retains
 that intent and blocks `up`, `restart` and `run` without replay. Saved `ps --json`
-reports `beforeHooksPending` for either phase and `hostHookPhase` as `before`,
-`after`, or null, even if no engine generation was created. Older token-only
+reports `beforeHooksPending` for every phase and `hostHookPhase` as `before`,
+`after`, `down.before`, `down.after`, or null, even if no engine generation was created. Older token-only
 receipts remain uncertain before intents. An after intent also binds its exact
 pending startup operation and generation. Saved
 `down` can stop a retained engine generation but reports incomplete cleanup while
@@ -133,7 +158,32 @@ hook intent remains. `down --recover` can recover a verified dead CLI mutation
 owner; it cannot prove hook process ownership, clear hook uncertainty or rerun a
 hook. Explicit recovery for interrupted hooks remains a later lifecycle slice.
 An uncertain hook also prevents routing claim retirement after an owned stop.
-Down hooks and persistent host processes remain unsupported.
+Normal `down` runs `host.down.before` before stopping the owned engine and
+`host.down.after` only after fresh exact container, network and proxy dispatch
+absence. Hostname claims remain held through after hooks. A hook failure returns
+its exit status and leaves stop pending; a before failure runs no engine mutation.
+Private target values for both phases are captured under the instance lock before
+any hook journal or spawn. Each phase receives its own finite budget.
+
+The private saved generation binds down hooks to its immutable source revision,
+profiles, effective overlay (including no overlay) and original explicit overlay
+selection. Normal hook-enabled down rechecks source, local, routing and managed
+environment freshness before engine effects and final claim retirement. Hooks
+cannot rebind that generation. Any pre-existing pending operation or unknown hook
+intent refuses normal hook-enabled down before private value acquisition. Changed
+or malformed inputs require explicit recovery. Generations saved without this
+binding retain saved-only stop semantics; newly authored hooks cannot attach to an
+already-running old generation. Completed stopped generations do not replay hooks.
+
+`down --recover` skips authored down hooks, compiler/source parsing and private
+value acquisition. A successful hook-enabled engine recovery reports
+`hostHooksSkipped: true`; it does not report skipped or previously failed hooks as
+successful. A known finite nonzero with proven group absence clears only its exact
+hook intent, so later explicit engine recovery can retire claims after fresh absence.
+Unknown completion preserves host intent, pending generation and claims even after
+owned engine stop, and still reports incomplete. Persistent host processes and
+explicit uncertain-hook recovery remain unsupported. `restart` retains its current
+up/recreate contract; down hooks run on explicit `down`.
 
 ## Saved operations and recovery
 
@@ -204,7 +254,7 @@ from orphan generation files by this recovery path.
 ## Remaining coverage
 
 This slice explicitly refuses foreground or partial-service startup, non-plain
-logs, pruning options, all `host.down` hooks, persistent host
+logs, pruning options, persistent host
 processes, browser opening, route
 bindings, typed host/gateway endpoints, TCP endpoint derivation, and HTTP/TCP
 readiness. It preserves ordinary project DNS and outbound networking and adds no
@@ -224,3 +274,11 @@ HACK_E2E_CLI_BIN=./dist/hack HACK_E2E_DOCKER=1 HACK_E2E_REQUIRE_DOCKER=1 \
 Container checks do not establish normal browser routing, native trust, host
 lifecycle recovery, persistent host ownership, or interactive TTY acceptance.
 Those remain separate NC03 gates.
+
+The registered `native-config-down-hooks` Docker scenario requires the current
+compiled CLI and a cached exact Bun image. It checks finite before/after order and
+managed host isolation around production ownership probes, exit 17 with pending
+stop, malformed-source/env recovery with skipped hooks, and the same owned volume
+with a preserved data counter across stops. Final cleanup removes only that
+freshly verified isolated fixture volume. PTY, cancellation, timeout, orphan
+completion and routed claim retirement require their separate lifecycle controls.

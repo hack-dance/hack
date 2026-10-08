@@ -8,6 +8,7 @@ isolated proxy with no published ports. This measures reaped CLI-tree CPU, not
 Docker/VM or application CPU.
 """
 import argparse
+from contextlib import ExitStack
 import hashlib
 import http.client
 import json
@@ -38,6 +39,8 @@ ROOT_CA = "/data/caddy/pki/authorities/local/root.crt"
 PRIVATE_TMPFS = "rw,noexec,nosuid,nodev,mode=700"
 BUILD = re.compile(r"^(cargo|rustc|clang|clang\+\+|ld|ld64|zig|swiftc|swift-frontend|xcodebuild)$")
 OUTPUT_LIMIT = 2 * 1024 * 1024
+COMPILER_INPUT_LIMIT = 1024 * 1024
+COMPILER_POLL_SECONDS = 0.001
 ACTIONS = ("up", "ps", "exec", "restart", "down")
 GATES = {
     "rounds": 8,
@@ -107,23 +110,43 @@ def private_json(path, with_anchor=False):
         os.close(descriptor)
 
 
-def command(argv, *, cwd, env, timeout, capture=None, output_limit=OUTPUT_LIMIT):
+def command(argv, *, cwd, env, timeout, capture=None, output_limit=OUTPUT_LIMIT,
+            stdin_bytes=None, poll_seconds=0.01):
     """wait4 isolates each terminated CLI and the children it actually reaped.
 
     Keep the session leader unreaped until interruption decisions are finished.
     Never signal a group after successful wait4: its numeric ID may be reused.
     Detached engine processes are deliberately outside this accounting boundary.
     """
-    with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
+    if not (isinstance(poll_seconds, (int, float)) and not isinstance(poll_seconds, bool) and
+            math.isfinite(poll_seconds) and 0 < poll_seconds <= 0.01):
+        raise Failure("Invalid process observation interval")
+    if stdin_bytes is not None and (not isinstance(stdin_bytes, bytes) or len(stdin_bytes) > COMPILER_INPUT_LIMIT):
+        raise Failure("Compiler input exceeds its byte budget or has invalid shape")
+    with ExitStack() as files:
+        out = files.enter_context(tempfile.TemporaryFile())
+        err = files.enter_context(tempfile.TemporaryFile())
+        incoming = subprocess.DEVNULL
+        if stdin_bytes is not None:
+            incoming = files.enter_context(tempfile.TemporaryFile())
+            incoming.write(stdin_bytes)
+            incoming.seek(0)
         started = time.monotonic()
-        child = subprocess.Popen(argv, cwd=cwd, env=env, stdin=subprocess.DEVNULL,
+        child = subprocess.Popen(argv, cwd=cwd, env=env, stdin=incoming,
                                  stdout=out, stderr=err, start_new_session=True)
         interrupted = None
         try:
             while True:
-                pid, status, usage = os.wait4(child.pid, os.WNOHANG)
+                # Deliver asynchronous interruption only after reaping is reflected
+                # in the owned child object; an already-reaped PID no longer pins a group.
+                previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGINT, signal.SIGTERM})
+                try:
+                    pid, status, usage = os.wait4(child.pid, os.WNOHANG)
+                    if pid:
+                        child.returncode = os.waitstatus_to_exitcode(status)
+                finally:
+                    signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
                 if pid:
-                    child.returncode = os.waitstatus_to_exitcode(status)
                     break
                 if interrupted is None:
                     if time.monotonic() - started >= timeout:
@@ -136,15 +159,19 @@ def command(argv, *, cwd, env, timeout, capture=None, output_limit=OUTPUT_LIMIT)
                             os.killpg(child.pid, signal.SIGKILL)
                         except ProcessLookupError:
                             pass
-                time.sleep(0.01)
+                time.sleep(poll_seconds)
         except BaseException:
-            if child.returncode is None:
-                try:
-                    os.killpg(child.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-                _, status, _ = os.wait4(child.pid, 0)
-                child.returncode = os.waitstatus_to_exitcode(status)
+            previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGINT, signal.SIGTERM})
+            try:
+                if child.returncode is None:
+                    try:
+                        os.killpg(child.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    _, status, _ = os.wait4(child.pid, 0)
+                    child.returncode = os.waitstatus_to_exitcode(status)
+            finally:
+                signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
             raise
         wall = time.monotonic() - started
         out.seek(0)
@@ -163,6 +190,85 @@ def command(argv, *, cwd, env, timeout, capture=None, output_limit=OUTPUT_LIMIT)
             "wall_s": wall, "cli_cpu_s": usage.ru_utime + usage.ru_stime,
             "child_maxrss_bytes": usage.ru_maxrss * (1 if platform.system() == "Darwin" else 1024),
             "interrupted": interrupted}
+
+
+def compiler_fingerprint(path, expected):
+    """Fence this pure measurement input; do not search PATH or follow a replacement link."""
+    if not path.is_absolute():
+        raise Failure("Compiler measurement requires an absolute executable")
+    try:
+        before = path.lstat()
+        if not (stat.S_ISREG(before.st_mode) and before.st_uid == os.getuid() and before.st_nlink == 1 and
+                before.st_mode & 0o022 == 0 and before.st_mode & 0o111):
+            raise Failure("Compiler measurement executable has unsafe ownership or shape")
+        digest = fingerprint(path)
+        after = path.lstat()
+    except (OSError, ValueError):
+        raise Failure("Compiler measurement executable is unavailable") from None
+    anchor = lambda value: (value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns, value.st_ctime_ns, value.st_mode)
+    if digest != expected or anchor(before) != anchor(after):
+        raise Failure("Compiler measurement executable changed")
+    return anchor(after)
+
+
+def compiler_sample(*, compiler, compiler_sha256, action, input_bytes=None, input_sha256=None,
+                    expected_output_sha256, cwd, timeout=5):
+    """One direct pure-compiler observation; callers own the fixed trial schedule and private report.
+
+    Use untimed, independently checked JSON to pin the expected canonical output.
+    Anonymous regular stdin avoids pipe backpressure and shell wrappers. Input setup,
+    hashing/JSON checks and this observer's CPU are outside launch-to-reap accounting.
+    Failure rows retain real metrics; they are never successful zero samples.
+    """
+    if not (action in ("--protocol", "compile", "plan") and isinstance(compiler_sha256, str) and
+            OBJECT_ID.fullmatch(compiler_sha256) and isinstance(expected_output_sha256, str) and
+            OBJECT_ID.fullmatch(expected_output_sha256) and isinstance(timeout, (int, float)) and
+            not isinstance(timeout, bool) and math.isfinite(timeout) and 0 < timeout <= 5):
+        raise Failure("Compiler measurement requires exact bounded qualification")
+    if action == "--protocol":
+        if input_bytes is not None or input_sha256 is not None:
+            raise Failure("Protocol measurement accepts no authored input")
+    elif not (isinstance(input_bytes, bytes) and 0 < len(input_bytes) <= COMPILER_INPUT_LIMIT and
+              isinstance(input_sha256, str) and OBJECT_ID.fullmatch(input_sha256) and
+              hashlib.sha256(input_bytes).hexdigest() == input_sha256):
+        raise Failure("Compiler measurement input does not match its frozen byte budget")
+    if not isinstance(compiler, (str, Path)):
+        raise Failure("Compiler measurement requires an absolute executable")
+    compiler = Path(compiler)
+    anchor = compiler_fingerprint(compiler, compiler_sha256)
+    observed = command([str(compiler), action], cwd=cwd,
+                       env={"PATH": os.environ.get("PATH", ""), "LANG": "C", "LC_ALL": "C"},
+                       timeout=timeout, output_limit=COMPILER_INPUT_LIMIT, stdin_bytes=input_bytes,
+                       poll_seconds=COMPILER_POLL_SECONDS)
+    result = {"action": action, "ok": False, "exit": observed["exit"], "interrupted": observed["interrupted"],
+              "wall_s": observed["wall_s"], "compiler_cpu_s": observed["cli_cpu_s"],
+              "poll_seconds": COMPILER_POLL_SECONDS, "input_sha256": input_sha256}
+    try:
+        if compiler_fingerprint(compiler, compiler_sha256) != anchor:
+            raise Failure("Compiler measurement executable changed")
+    except (Failure, OSError):
+        return {**result, "reason": "compiler-changed"}
+    if observed["interrupted"]:
+        return {**result, "reason": "interrupted"}
+    if observed["wall_s"] >= timeout:
+        # Reaping can win the polling race after the budget has elapsed. Keep
+        # that observation failed without signaling an already-reaped group.
+        return {**result, "interrupted": "timeout", "reason": "interrupted"}
+    if observed["exit"] != 0:
+        return {**result, "reason": "nonzero-exit"}
+    try:
+        payload = json.loads(observed["stdout"])
+        versions = ("transport_version", "authored_version", "plan_version") if action == "--protocol" else ("transport_version",)
+        if not (isinstance(payload, dict) and all(type(payload.get(key)) is int and payload[key] == 1 for key in versions) and
+                (action == "--protocol" or payload.get("ok") is True)):
+            raise ValueError("invalid envelope")
+        canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
+    except (ValueError, TypeError):
+        return {**result, "reason": "invalid-output"}
+    digest = hashlib.sha256(canonical).hexdigest()
+    if digest != expected_output_sha256:
+        return {**result, "reason": "output-mismatch", "output_sha256": digest}
+    return {**result, "ok": True, "output_sha256": digest}
 
 
 def fixture_documents(name, image, hostname, token):

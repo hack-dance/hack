@@ -16,6 +16,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  assertNativeComposeMaterialAuthority,
   type NativeComposeGeneration,
   type NativeComposeGenerationStore,
   type NativeComposeMutation,
@@ -137,7 +138,8 @@ test("enrollment captures original callbacks before admission can replace them",
     });
   });
   expect(originalSeeds).toBe(1);
-  expect(originalObservations).toBe(1);
+  // Enrollment proof, fresh receipt publication proof, and final startup proof use the captured callback.
+  expect(originalObservations).toBe(3);
   expect(replacements).toBe(0);
 });
 
@@ -569,6 +571,13 @@ test.each([
         operation: "up",
         assertOwned: async () => {},
         assertFresh: async () => {},
+        storageWitnesses: {
+          engineId,
+          observe: async () => {
+            probes++;
+            return { volume: { ...volume }, archive: replaced };
+          },
+        },
         effect: async () => {
           await verifyNativeComposeStorageWitness({
             authority: mutation.materialAuthority,
@@ -584,14 +593,12 @@ test.each([
           return { value: 0, outcome: "complete" };
         },
       })
-    ).rejects.toMatchObject({ code: "E_NATIVE_COMPOSE_UNCERTAIN" });
+    ).rejects.toThrow("values omitted");
   });
   expect(workloads).toBe(0);
   expect(probes).toBe(1);
   expect(await readFile(join(slot(store), "expectation.json"))).toEqual(before);
-  expect((await store.loadCurrent()).pending?.generationId).toBe(
-    generation.generationId
-  );
+  expect((await store.loadCurrent()).pending).toBeNull();
 });
 
 test("a seed failure consumes capability and retains expectation with no completion", async () => {
@@ -784,4 +791,434 @@ test.each([
     ).rejects.toThrow();
   });
   expect(probes).toBe(0);
+});
+
+function receiptFile(store: NativeComposeGenerationStore) {
+  return join(
+    store.identity.checkoutRoot,
+    ".hack",
+    ".internal",
+    "native-compose",
+    store.identity.instanceId,
+    "receipt.json"
+  );
+}
+
+test("v3 Expected is durable before the slot and survives failed publication and explicit saved stop", async () => {
+  const store = await fixture();
+  const originalMkdir = fs.mkdir;
+  let journalBeforeSlot = false;
+  const mocked = spyOn(fs, "mkdir").mockImplementation((async (
+    path,
+    options
+  ) => {
+    if (String(path) === slot(store)) {
+      const value = JSON.parse(await readFile(receiptFile(store), "utf8"));
+      journalBeforeSlot =
+        value.version === 3 && value.storageWitnesses[0]?.state === "expected";
+      throw new Error("synthetic slot creation interruption");
+    }
+    return await originalMkdir(path, options);
+  }) as typeof fs.mkdir);
+  let generation: NativeComposeGeneration;
+  try {
+    generation = await store.withMutation(async (mutation) => {
+      const current = await publish(mutation);
+      await expect(
+        mutation.runEffect({
+          generation: current,
+          operation: "up",
+          assertFresh: async () => {},
+          assertOwned: async () => {},
+          effect: async () => {
+            await prepare(mutation, current);
+            return { value: 0, outcome: "complete" };
+          },
+        })
+      ).rejects.toMatchObject({ code: "E_NATIVE_COMPOSE_UNCERTAIN" });
+      return current;
+    });
+  } finally {
+    mocked.mockRestore();
+  }
+  expect(journalBeforeSlot).toBe(true);
+  await expect(lstat(slot(store))).rejects.toMatchObject({ code: "ENOENT" });
+  const expected = (await store.loadCurrent()).storageWitnesses;
+  expect(expected?.[0]?.state).toBe("expected");
+  await store.close();
+  const saved = await openNativeComposeGenerationStore({
+    projectRoot: store.identity.checkoutRoot,
+    instance: null,
+    mode: "saved",
+  });
+  stores.push(saved);
+  const pending = await saved.loadPending();
+  expect(pending?.generationId).toBe(generation.generationId);
+  if (!pending) {
+    throw new Error("Expected recovery anchor");
+  }
+  let probes = 0;
+  let effects = 0;
+  let retirements = 0;
+  await saved.withMutation(async (mutation) => {
+    await expect(
+      mutation.runEffect({
+        generation: pending,
+        operation: "down",
+        assertOwned: async () => {
+          probes++;
+        },
+        effect: async () => {
+          effects++;
+          return { value: 0, outcome: "complete" };
+        },
+      })
+    ).rejects.toMatchObject({ code: "E_NATIVE_COMPOSE_UNCERTAIN" });
+    expect(probes).toBe(0);
+    expect(effects).toBe(0);
+    const result = await mutation.runEffect({
+      generation: pending,
+      operation: "down",
+      recoverPending: true,
+      assertOwned: async () => {
+        probes++;
+      },
+      beforeComplete: async () => {
+        retirements++;
+      },
+      effect: async () => {
+        effects++;
+        return { value: 0, outcome: "complete" };
+      },
+    });
+    expect(result).toEqual({ value: 0, outcome: "uncertain" });
+  });
+  expect(effects).toBe(1);
+  expect(retirements).toBe(0);
+  const current = await saved.loadCurrent();
+  expect(current.storageWitnesses).toEqual(expected);
+  expect(current.storageWitnessesPending).toBe(true);
+  expect(current.pending?.generationId).toBe(generation.generationId);
+  // No successful startup existed: its original stopped bit remains, alongside the required pending anchor.
+  expect(current.stopped).toBe(true);
+  expect(JSON.stringify(current)).not.toContain("storageWitness");
+});
+
+test("enrolled v3 references survive metadata capture, reopen and saved down, and resume requires a carrier", async () => {
+  const { store, generation, reference } = await active();
+  const before = (await store.loadCurrent()).storageWitnesses;
+  expect(before?.[0]?.state).toBe("enrolled");
+  expect(before?.[0]?.state === "enrolled" && before[0].reference).toEqual(
+    reference
+  );
+  expect((await store.loadCurrent()).retainedStorage).toEqual([volume]);
+  expect(JSON.stringify(await store.loadCurrent())).not.toContain(volume.name);
+  await store.withMutation(async (mutation) => {
+    await mutation.runEffect({
+      generation,
+      operation: "down",
+      assertOwned: async () => {},
+      captureStorage: () => [volume],
+      effect: async () => ({ value: 0, outcome: "complete" }),
+    });
+  });
+  expect(JSON.parse(await readFile(receiptFile(store), "utf8")).version).toBe(
+    3
+  );
+  await store.close();
+  const reopened = await openNativeComposeGenerationStore({
+    projectRoot: store.identity.checkoutRoot,
+    instance: null,
+    mode: "prepare",
+  });
+  stores.push(reopened);
+  const current = await reopened.loadCurrent();
+  expect(current.storageWitnesses).toEqual(before);
+  expect(current.storageWitnessesPending).toBe(false);
+  expect(current.stopped).toBe(true);
+  if (!current.generation) {
+    throw new Error("Expected saved generation");
+  }
+  let probes = 0;
+  let effects = 0;
+  await reopened.withMutation(async (mutation) => {
+    await expect(
+      mutation.runEffect({
+        generation: current.generation!,
+        operation: "up",
+        assertFresh: async () => {},
+        assertOwned: async () => {
+          probes++;
+        },
+        effect: async () => {
+          effects++;
+          return { value: 0, outcome: "complete" };
+        },
+      })
+    ).rejects.toMatchObject({ code: "E_NATIVE_COMPOSE_STATE" });
+  });
+  expect(probes).toBe(0);
+  expect(effects).toBe(0);
+  expect((await reopened.loadCurrent()).pending).toBeNull();
+});
+
+test("store fences an unchanged resume before and after workload without enrollment replay", async () => {
+  const { store, generation, archive } = await active();
+  const events: string[] = [];
+  await store.withMutation(async (mutation) => {
+    await mutation.runEffect({
+      generation,
+      operation: "up",
+      assertFresh: async () => {},
+      assertOwned: async () => {
+        events.push("owned");
+      },
+      storageWitnesses: {
+        engineId,
+        observe: async ({ name, storage, markerName }) => {
+          expect(name).toBe(volume.name);
+          expect(storage).toBe(volume.storage);
+          expect(markerName).toMatch(/^\.hack-storage-[a-f0-9]{64}\.witness$/);
+          events.push("marker");
+          return { volume, archive };
+        },
+      },
+      effect: async () => {
+        events.push("workload");
+        return { value: 0, outcome: "complete" };
+      },
+    });
+  });
+  expect(events.indexOf("marker")).toBeLessThan(events.indexOf("owned"));
+  expect(events.lastIndexOf("marker")).toBeGreaterThan(
+    events.indexOf("workload")
+  );
+  expect(events.filter((event) => event === "workload")).toHaveLength(1);
+  expect((await store.loadCurrent()).pending).toBeNull();
+});
+
+test("finalizer marker drift preserves exact v3 recovery state and cannot publish ready", async () => {
+  const { store, generation, archive } = await active();
+  let currentArchive = archive;
+  const before = (await store.loadCurrent()).storageWitnesses;
+  let finalizers = 0;
+  await store.withMutation(async (mutation) => {
+    await expect(
+      mutation.runEffect({
+        generation,
+        operation: "restart",
+        assertFresh: async () => {},
+        assertOwned: async () => {},
+        storageWitnesses: {
+          engineId,
+          observe: async () => ({ volume, archive: currentArchive }),
+        },
+        beforeComplete: async () => {
+          finalizers++;
+          currentArchive = new Uint8Array(2048);
+        },
+        effect: async () => ({ value: 0, outcome: "complete" }),
+      })
+    ).rejects.toMatchObject({ code: "E_NATIVE_COMPOSE_UNCERTAIN" });
+  });
+  expect(finalizers).toBe(1);
+  const current = await store.loadCurrent();
+  expect(current.pending?.generationId).toBe(generation.generationId);
+  expect(current.storageWitnesses).toEqual(before);
+});
+
+test.each([
+  "downgrade",
+  "missing",
+  "duplicate",
+  "birth",
+  "unknown",
+] as const)("required v3 witness receipt refuses %s without rewriting", async (change) => {
+  const { store } = await active();
+  const file = receiptFile(store);
+  const value = JSON.parse(await readFile(file, "utf8"));
+  if (change === "downgrade") {
+    value.version = 2;
+  }
+  if (change === "missing") {
+    Reflect.deleteProperty(value, "storageWitnesses");
+  }
+  if (change === "duplicate") {
+    value.storageWitnesses.push(value.storageWitnesses[0]);
+  }
+  if (change === "birth") {
+    value.storage[0].createdAt = "2026-10-08T12:00:01Z";
+  }
+  if (change === "unknown") {
+    value.storageWitnesses[0].state = "synthetic-private-canary";
+  }
+  const changed = JSON.stringify(value);
+  await writeFile(file, changed, { mode: 0o600 });
+  await expect(store.loadCurrent()).rejects.toMatchObject({
+    code: "E_NATIVE_COMPOSE_STATE",
+  });
+  expect(await readFile(file, "utf8")).toBe(changed);
+});
+
+test("material effect revocation during its own final receipt read cannot return authority", async () => {
+  const store = await fixture();
+  const waiting = Promise.withResolvers<void>();
+  const resume = Promise.withResolvers<void>();
+  const held: { work: Promise<boolean> | null } = { work: null };
+  const originalOpen = fs.open;
+  let armed = false;
+  let count = 0;
+  let hit = false;
+  const mocked = spyOn(fs, "open").mockImplementation(
+    async (path, flags, mode) => {
+      if (
+        armed &&
+        String(path) === receiptFile(store) &&
+        Number(flags) ===
+          (constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
+      ) {
+        count++;
+        if (count === 2) {
+          hit = true;
+          waiting.resolve();
+          await resume.promise;
+        }
+      }
+      return await originalOpen(path, flags, mode);
+    }
+  );
+  const guard = setTimeout(() => waiting.resolve(), 3000);
+  try {
+    await store.withMutation(async (mutation) => {
+      const generation = await publish(mutation);
+      await mutation.runEffect({
+        generation,
+        operation: "up",
+        assertFresh: async () => {},
+        assertOwned: async () => {},
+        effect: async () => {
+          armed = true;
+          held.work = assertNativeComposeMaterialAuthority({
+            authority: mutation.materialAuthority,
+            generation,
+            phase: "effect",
+          }).then(
+            () => true,
+            () => false
+          );
+          await waiting.promise;
+          return { value: 0, outcome: "uncertain" };
+        },
+      });
+      armed = false;
+      resume.resolve();
+      expect(await held.work).toBe(false);
+    });
+    expect(hit).toBe(true);
+    expect((await store.loadCurrent()).pending).not.toBeNull();
+  } finally {
+    waiting.resolve();
+    resume.resolve();
+    clearTimeout(guard);
+    await held.work;
+    mocked.mockRestore();
+  }
+});
+
+test("revocation during the staged Enrolled receipt read preserves Expected and never promotes", async () => {
+  const store = await fixture();
+  const waiting = Promise.withResolvers<void>();
+  const resume = Promise.withResolvers<void>();
+  const held: { work: Promise<boolean> | null } = { work: null };
+  let seeds = 0;
+  let hit = false;
+  let archive: Uint8Array = new Uint8Array();
+  const originalOpen = fs.open;
+  const mocked = spyOn(fs, "open").mockImplementation(
+    async (path, flags, mode) => {
+      if (
+        !hit &&
+        String(path).endsWith(".receipt.tmp") &&
+        Number(flags) ===
+          (constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
+      ) {
+        const staged = await Bun.file(String(path)).json();
+        if (staged.storageWitnesses?.[0]?.state === "enrolled") {
+          hit = true;
+          waiting.resolve();
+          await resume.promise;
+        }
+      }
+      return await originalOpen(path, flags, mode);
+    }
+  );
+  const guard = setTimeout(() => waiting.resolve(), 3000);
+  try {
+    await store.withMutation(async (mutation) => {
+      const generation = await publish(mutation);
+      await mutation.runEffect({
+        generation,
+        operation: "up",
+        assertFresh: async () => {},
+        assertOwned: async () => {},
+        effect: async () => {
+          const enrollment = await prepare(mutation, generation);
+          held.work = enrollNativeComposeStorageWitness({
+            enrollment,
+            seed: async (bytes) => {
+              seeds++;
+              archive = bytes;
+            },
+            observe: async () => ({ volume, archive }),
+          }).then(
+            () => true,
+            () => false
+          );
+          await waiting.promise;
+          return { value: 0, outcome: "uncertain" };
+        },
+      });
+      resume.resolve();
+      expect(await held.work).toBe(false);
+    });
+    expect(hit).toBe(true);
+    expect(seeds).toBe(1);
+    // The completed extension alone cannot authorize promotion after this invocation ends.
+    expect(await Bun.file(join(slot(store), "enrolled.json")).exists()).toBe(
+      true
+    );
+    const current = await store.loadCurrent();
+    expect(current.storageWitnessesPending).toBe(true);
+    expect(current.storageWitnesses?.[0]?.state).toBe("expected");
+    expect(current.generation).toBeNull();
+    expect(current.pending).not.toBeNull();
+  } finally {
+    waiting.resolve();
+    resume.resolve();
+    clearTimeout(guard);
+    await held.work;
+    mocked.mockRestore();
+  }
+});
+
+test("witness-bearing before hooks refuse before private acquisition or spawn while the carrier is inactive", async () => {
+  const { store } = await active();
+  let acquisitions = 0;
+  let effects = 0;
+  await store.withMutation(async (mutation) => {
+    await expect(
+      mutation.runBeforeHooks({
+        assertFresh: async () => {
+          acquisitions++;
+        },
+        effect: async () => {
+          effects++;
+          return { value: 0, outcome: "complete" };
+        },
+      })
+    ).rejects.toMatchObject({ code: "E_NATIVE_COMPOSE_UNCERTAIN" });
+  });
+  expect(acquisitions).toBe(0);
+  expect(effects).toBe(0);
+  expect((await store.loadCurrent()).beforeHooksPending).toBe(false);
 });

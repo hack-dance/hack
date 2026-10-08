@@ -3,10 +3,12 @@ import { mkdir, opendir } from "node:fs/promises";
 import { join } from "node:path";
 import { isRecord } from "./guards.ts";
 import {
+  armNativeComposeStorageWitnessIntent,
   assertNativeComposeMaterialAuthority,
   type NativeComposeGeneration,
   type NativeComposeMaterialAuthority,
   type NativeComposeMaterialBinding,
+  publishNativeComposeStorageWitnessEnrollment,
   runNativeComposeMaterialAction,
 } from "./native-compose-generation.ts";
 import {
@@ -31,6 +33,13 @@ import {
   refuseNativeComposeStorageWitness as refuse,
   verifyNativeComposeStorageWitnessArchive,
 } from "./native-compose-storage-witness-codec.ts";
+
+import {
+  type NativeComposeStorageWitnessReference,
+  nativeComposeStorageWitnessReferenceValid,
+} from "./native-compose-storage-witness-state.ts";
+
+export type { NativeComposeStorageWitnessReference } from "./native-compose-storage-witness-state.ts";
 
 const LIMIT = 16 * 1024;
 const SLOT_LIMIT = 4096;
@@ -63,15 +72,6 @@ type Completion = {
   readonly expectationHash: string;
   readonly volume: NativeComposeRetainedVolume;
 };
-/** Private receipt extension candidate. Existing v1/v2 receipts must never silently ignore it. */
-export type NativeComposeStorageWitnessReference = {
-  readonly version: 1;
-  readonly volume: NativeComposeRetainedVolume;
-  readonly root: DirectoryAnchor;
-  readonly directory: DirectoryAnchor;
-  readonly expectation: Anchor;
-  readonly completion: Anchor;
-};
 export type NativeComposeStorageWitnessEnrollment = Readonly<
   Record<never, never>
 >;
@@ -102,32 +102,6 @@ function anchor(read: {
     ino: read.info.ino,
     hash: hash(read.text),
   });
-}
-function anchorValid(value: unknown): value is Anchor {
-  return (
-    isRecord(value) &&
-    keys(value, "dev,hash,ino") &&
-    typeof value.dev === "number" &&
-    Number.isSafeInteger(value.dev) &&
-    value.dev >= 0 &&
-    typeof value.ino === "number" &&
-    Number.isSafeInteger(value.ino) &&
-    value.ino > 0 &&
-    typeof value.hash === "string" &&
-    HASH.test(value.hash)
-  );
-}
-function directoryAnchorValid(value: unknown): value is DirectoryAnchor {
-  return (
-    isRecord(value) &&
-    keys(value, "dev,ino") &&
-    typeof value.dev === "number" &&
-    Number.isSafeInteger(value.dev) &&
-    value.dev >= 0 &&
-    typeof value.ino === "number" &&
-    Number.isSafeInteger(value.ino) &&
-    value.ino > 0
-  );
 }
 function selectionValid(value: Selection): boolean {
   return nativeComposeRetainedVolumesValid([
@@ -225,18 +199,6 @@ function completion(text: string): Completion {
     expectationHash: value.expectationHash,
     volume: parseVolume(value.volume),
   };
-}
-function referenceValid(value: NativeComposeStorageWitnessReference): boolean {
-  return (
-    isRecord(value) &&
-    keys(value, "completion,directory,expectation,root,version,volume") &&
-    value.version === 1 &&
-    nativeComposeRetainedVolumesValid([value.volume]) &&
-    directoryAnchorValid(value.root) &&
-    directoryAnchorValid(value.directory) &&
-    anchorValid(value.expectation) &&
-    anchorValid(value.completion)
-  );
 }
 function sameVolume(
   left: NativeComposeRetainedVolume,
@@ -370,10 +332,10 @@ async function checkedExpectation(
 }
 
 /**
- * Foundation only: the CLI does not yet enroll or enforce these references.
+ * Internal foundation: the CLI refuses witness-bearing workload admission until its carrier is qualified.
  * The owning generation mutation must prove a genuinely absent new volume or
  * explicit stopped adoption. It must publish a required new receipt version
- * before using this extension; v1/v2 migration cannot establish past continuity.
+ * before creating this extension; v1/v2 migration cannot establish past continuity.
  * Durable expectation precedes all provisioning. An existing slot is never reset.
  */
 export async function prepareNativeComposeStorageWitness(opts: {
@@ -424,6 +386,19 @@ export async function prepareNativeComposeStorageWitness(opts: {
         return refuse();
       }
       await input.assertAdmission();
+      await armNativeComposeStorageWitnessIntent({
+        authority: input.authority,
+        generation: input.generation,
+        intent: {
+          name: binding.name,
+          storage: binding.storage,
+          engineId: binding.engineId,
+          generationId: binding.generationId,
+          pendingToken: binding.pendingToken,
+          admission: record.admission,
+          originalVolume: record.originalVolume,
+        },
+      });
       const held = await directories({
         binding: current,
         name: binding.name,
@@ -546,14 +521,29 @@ export async function enrollNativeComposeStorageWitness(opts: {
         }
         await recheckDirectories(held);
         await check();
-        return Object.freeze({
-          version: 1,
+        const reference = Object.freeze({
+          version: 1 as const,
           volume: Object.freeze({ ...volume }),
           root: selected.root,
           directory: selected.directory,
           expectation: selected.anchor,
           completion: anchor({ info, text }),
         });
+        await publishNativeComposeStorageWitnessEnrollment({
+          authority: selected.authority,
+          generation: selected.generation,
+          reference,
+          verify: async () => {
+            await verifyNativeComposeStorageWitness({
+              authority: selected.authority,
+              generation: selected.generation,
+              engineId: saved.binding.engineId,
+              reference,
+              observe: async () => await observe(),
+            });
+          },
+        });
+        return reference;
       } finally {
         await close(held);
       }
@@ -573,7 +563,7 @@ export async function verifyNativeComposeStorageWitness(opts: {
   }>;
 }): Promise<void> {
   const { authority, generation, engineId, observe } = opts;
-  if (!referenceValid(opts.reference)) {
+  if (!nativeComposeStorageWitnessReferenceValid(opts.reference)) {
     return refuse();
   }
   const reference = structuredClone(opts.reference);

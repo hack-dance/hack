@@ -3,6 +3,10 @@ import { realpath, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { runScenarios, type Scenario, selectScenarios } from "./e2e/harness.ts";
 import { domainMigrationScenario } from "./e2e/scenarios/domain-migration.ts";
+import {
+  nativeConfigFilesScenario,
+  nativeConfigFileUnknownStopScenario,
+} from "./e2e/scenarios/native-config-files.ts";
 
 const scenarios: readonly Scenario[] = [
   { name: "local", tier: "local", summary: "fixture", run: async () => {} },
@@ -23,6 +27,22 @@ test("explicit selection includes host ingress without unrelated scenarios", () 
   expect(selectScenarios({ scenarios, only: ["domain-migration"] })).toEqual([
     domainMigrationScenario,
   ]);
+});
+
+test("retained unknown-stop acceptance requires explicit selection while ordinary file delivery stays portable", () => {
+  const fileScenarios = [
+    nativeConfigFilesScenario,
+    nativeConfigFileUnknownStopScenario,
+  ];
+  expect(selectScenarios({ scenarios: fileScenarios })).toEqual([
+    nativeConfigFilesScenario,
+  ]);
+  expect(
+    selectScenarios({
+      scenarios: fileScenarios,
+      only: [nativeConfigFileUnknownStopScenario.name],
+    })
+  ).toEqual([nativeConfigFileUnknownStopScenario]);
 });
 
 test("portable Docker skips remain visible for required-Docker enforcement", async () => {

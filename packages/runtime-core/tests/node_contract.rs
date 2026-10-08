@@ -332,7 +332,7 @@ fn output_is_drained_beyond_retention_limit_and_failure_is_distinct() {
     assert!(result.truncated);
     let failed = n.ask(&n.submit("failure", "failure", 5000, 3000));
     let result = n.terminal(failed["job_id"].as_str().unwrap());
-    assert_eq!(result.state, "failed");
+    assert_eq!(result.state, "failed", "{result:?}");
     assert_eq!(result.exit_code, Some(23));
     assert_eq!(result.stderr, "fixture failure\n");
 }

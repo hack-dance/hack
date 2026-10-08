@@ -85,6 +85,39 @@ fixture; host and provider proxy settings remain unchanged. In a real project,
 add its internal service names to the existing proxy exceptions rather than
 discarding the project's other entries.
 
+## Native file qualification
+
+`native-config-files` requires the current compiled CLI, its matching compiler and
+cached `oven/bun:1.4.2-slim`. It pins the existing image, uses no builds or published
+ports, and does not pull or activate DNS/trust. The primary and two linked worktrees
+deliver distinct binary configs, encrypted managed secrets and empty files through
+literal dollar-containing targets and a private runtime home outside the checkout.
+The actual container checks exact bytes, mode 0444, absent unset env and EROFS on
+writes. Missing-key restart must refuse before a Docker tripwire. Saved down then
+retires exact members despite malformed authored input and unavailable source/key;
+stopping the primary must preserve both linked containers. Metadata-only baseline
+checks preserve IDs, birth/running state, complete mount rows and counts without
+reading container environment values.
+
+```sh
+HACK_E2E_CLI_BIN=./dist/hack HACK_E2E_DOCKER=1 HACK_E2E_REQUIRE_DOCKER=1 bun tests/e2e/run.ts --only=native-config-files
+```
+
+`native-config-file-stop-unknown` is selected explicitly and requires kept roots.
+Its owned Docker wrapper runs the real stop and then waits past the CLI child
+deadline. A source-free retry must stop resources while refusing retirement:
+the exact pending generation, immutable reference, unchanged stop-armed journal
+and material remain. The wrapper never forges a reaping receipt or changes saved
+state. Expected retention is the result being qualified; there is no interface in
+this slice to clear that uncertainty. Unexpected cleanup still fails the harness.
+
+```sh
+HACK_E2E_KEEP=1 HACK_E2E_CLI_BIN=./dist/hack HACK_E2E_DOCKER=1 HACK_E2E_REQUIRE_DOCKER=1 bun tests/e2e/run.ts --only=native-config-file-stop-unknown
+```
+
+These maintained scenarios are prepared source, not evidence of a successful live
+run. Source/whole/CI and compiled synthetic engine acceptance remain separate.
+
 ## Native config process-policy qualification
 
 `native-config-process-policy` is registered in required Docker CI. It needs the

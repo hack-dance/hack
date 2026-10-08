@@ -43,7 +43,7 @@ const contracts: readonly ModelContract[] = [
   {
     name: "native-file-material",
     module: "Material",
-    states: 3926,
+    states: 8388,
     invariant: "NoLostRecovery",
     action: "CommitStop",
     fields: [
@@ -87,6 +87,19 @@ const contracts: readonly ModelContract[] = [
           'phase = "retiring"',
           "hookPending = FALSE",
           "childPending = TRUE",
+          "unsafeDelete = TRUE",
+        ],
+      },
+      {
+        name: "unknown-stop-child",
+        negative: true,
+        invariant: "NoUnprovedDeletion",
+        action: "DeleteMember",
+        fields: [
+          'phase = "retiring"',
+          'stopChild = "unknown"',
+          "childPending = FALSE",
+          "hookPending = FALSE",
           "unsafeDelete = TRUE",
         ],
       },

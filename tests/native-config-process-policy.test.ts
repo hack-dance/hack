@@ -66,7 +66,7 @@ function policyRefusals(
     executionReport: {
       ok: false,
       error: {
-        code: "E_UNEXPECTED",
+        code: "E_CONFIG_INVALID",
         message:
           "Native execution inputs are invalid or changed; prepare a fresh generation. Values omitted.",
       },
@@ -119,6 +119,10 @@ test("compiler refusal cannot substitute for a failed redacted execution refusal
   for (const executionReport of [
     null,
     { ok: true },
+    {
+      ok: false,
+      error: { ...good.executionReport.error, code: "E_UNEXPECTED" },
+    },
     {
       ok: false,
       error: { ...good.executionReport.error, code: "E_PROJECT_NOT_FOUND" },

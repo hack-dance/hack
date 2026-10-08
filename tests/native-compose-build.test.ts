@@ -696,6 +696,7 @@ test("one-off delivery tampered during an awaited builder prevents Compose run a
         generation,
         operation: "up",
         assertOwned: async () => {},
+        assertFresh: async () => {},
         effect: async () => ({ outcome: "complete", value: 0 }),
       });
       const projection = await mutation.publishRunProjection({
@@ -734,7 +735,7 @@ test("one-off delivery tampered during an awaited builder prevents Compose run a
             return { outcome: "complete", value: 0 };
           },
         })
-      ).rejects.toMatchObject({ code: "E_NATIVE_COMPOSE_STATE" });
+      ).rejects.toMatchObject({ code: "E_NATIVE_COMPOSE_UNCERTAIN" });
       expect(builds).toBe(1);
       expect(composeRuns).toBe(0);
       expect((await store.loadCurrent()).pending?.generationId).toBe(

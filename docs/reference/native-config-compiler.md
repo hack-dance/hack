@@ -101,7 +101,8 @@ versions refuse; omitted fields retain their documented defaults.
   substitutes owned image tags and an internal `never` policy for build sources;
   authored image-only policies remain unchanged. A private `x-hack-native-build`
   extension retains escaped build declarations in the generation's immutable
-  hash and saved-command comparison. Compose `up` also uses `--no-build`;
+  hash and saved-command comparison. Build-backed Compose `up` also uses `--no-build`;
+  authored image-only startup keeps its existing arguments.
   Compose `run` receives no unsupported no-build flag and cannot rebuild this
   image-only document. Omitted policy builds a missing generated image; `build` rebuilds
   it using the builder's normal cache and FROM pull behavior. The generated image

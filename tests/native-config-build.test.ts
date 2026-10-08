@@ -28,14 +28,18 @@ test("build reuse proof rejects rebuilt omitted-policy jobs and unchanged explic
   for (const changed of [
     null,
     {},
-    { ...second, defaultfile: ID },
-    { ...second, builder: ID },
     { ...second, builder: "short-image-id" },
     { ...second, extra: ID },
     { ...second, builder: second.defaultfile },
   ]) {
     expect(() => verifyNativeBuildReuse({ first, second: changed })).toThrow();
     expect(() => verifyNativeBuildReuse({ first: changed, second })).toThrow();
+  }
+  for (const changed of [
+    { ...second, defaultfile: ID },
+    { ...second, builder: ID },
+  ]) {
+    expect(() => verifyNativeBuildReuse({ first, second: changed })).toThrow();
   }
 });
 

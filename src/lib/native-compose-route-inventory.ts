@@ -91,6 +91,9 @@ function inspectRows(
       typeof value.id !== "string" ||
       !batch.includes(value.id) ||
       seen.has(value.id) ||
+      ![value.project, value.owner, value.instance, value.generation].every(
+        (label) => label === null || typeof label === "string"
+      ) ||
       !Array.isArray(value.sites) ||
       value.sites.at(-1) !== null ||
       !value.sites.slice(0, -1).every((site) => typeof site === "string")

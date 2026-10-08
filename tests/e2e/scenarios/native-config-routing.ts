@@ -23,6 +23,10 @@ import {
   runCommand,
   type Scenario,
 } from "../harness.ts";
+import {
+  qualifyNativeComposeRoutedRun,
+  ROUTED_RUN_LITERAL,
+} from "./native-config-routed-run.ts";
 
 const TIMEOUT = 180_000;
 const OBSERVATION_WINDOW = 30_000;
@@ -114,13 +118,18 @@ function authored(opts: {
     name: opts.name,
     source: { root: ".", mode: "host-mounted" },
     worktree: { auto_branch: true, inherit_local: true },
+    storage: { state: { kind: "persistent", scope: "worktree" } },
     services: {
       web: {
         image: opts.image,
         pull_policy: "never",
         command: { exec: ["bun", "-e", APP] },
         restart: { kind: "no" },
-        environment: { BRANCH_MARKER: { literal: opts.marker } },
+        environment: {
+          BRANCH_MARKER: { literal: opts.marker },
+          RUN_LITERAL: { literal: ROUTED_RUN_LITERAL },
+        },
+        mounts: [{ storage: "state", target: "/state", access: "read-write" }],
         readiness: {
           kind: "exec",
           command: {
@@ -345,8 +354,17 @@ export const nativeConfigRoutingScenario: Scenario = {
           }
         : {}),
     };
-    const raw = (root: string, args: readonly string[]): Promise<CliResult> =>
-      ctx.cli({ args, cwd: root, timeoutMs: TIMEOUT, env });
+    const raw = (
+      root: string,
+      args: readonly string[],
+      extra: Readonly<Record<string, string>> = {}
+    ): Promise<CliResult> =>
+      ctx.cli({
+        args,
+        cwd: root,
+        timeoutMs: TIMEOUT,
+        env: { ...env, ...extra },
+      });
     const cli = async (
       root: string,
       args: readonly string[]
@@ -598,6 +616,34 @@ export const nativeConfigRoutingScenario: Scenario = {
       });
       return true;
     };
+    const cleanupResource = async (
+      owner: Runtime,
+      kind: "container" | "network" | "volume",
+      id: string
+    ): Promise<void> => {
+      const labels = object(
+        await docker([
+          kind,
+          "inspect",
+          id,
+          "--format",
+          kind === "container" ? "{{json .Config.Labels}}" : "{{json .Labels}}",
+        ])
+      );
+      expect({
+        that:
+          labels[OWNER_LABEL] === owner.ownerToken &&
+          labels[INSTANCE_LABEL] === owner.composeProject &&
+          labels[PROJECT_LABEL] === owner.composeProject,
+        message:
+          "Cleanup refuses any resource outside exact native fixture ownership",
+      });
+      if (kind === "volume") {
+        // Product down retains data. Only exact labels of this disposable,
+        // fully stopped fixture permit non-forced volume cleanup here.
+        await docker(["volume", "rm", id]);
+      }
+    };
     const cleanupCheckout = async (root: string): Promise<void> => {
       if (await unpreparedWithoutEffects(root)) {
         return;
@@ -614,28 +660,10 @@ export const nativeConfigRoutingScenario: Scenario = {
           .split(/\s+/)
           .filter(Boolean);
         for (const id of resources) {
-          const labels = object(
-            await docker([
-              kind,
-              "inspect",
-              id,
-              "--format",
-              kind === "container"
-                ? "{{json .Config.Labels}}"
-                : "{{json .Labels}}",
-            ])
-          );
-          expect({
-            that:
-              labels[OWNER_LABEL] === owner.ownerToken &&
-              labels[INSTANCE_LABEL] === owner.composeProject &&
-              labels[PROJECT_LABEL] === owner.composeProject,
-            message:
-              "Cleanup refuses any resource outside exact native fixture ownership",
-          });
+          await cleanupResource(owner, kind, id);
         }
         expect({
-          that: resources.length === 0,
+          that: (await list(owner, kind)) === "",
           message:
             "Native routed fixture teardown must leave no engine resources",
         });
@@ -816,6 +844,19 @@ export const nativeConfigRoutingScenario: Scenario = {
         await check(primary);
         stage(
           "primary/OAuth alias and two linked worktrees route distinct TLS markers"
+        );
+        await qualifyNativeComposeRoutedRun({
+          root: primary.root,
+          primary,
+          siblings,
+          tempRoot: privateRoot,
+          docker,
+          raw,
+          check,
+          claims: async () => await claimSnapshot(claimsRoot ?? ""),
+        });
+        stage(
+          "warm one-off has no route exposure; literal argv/env, exit17, retained data and owned cleanup recovery preserve sibling TLS routes"
         );
         const renamedDomain = `renamed-${token}.test`;
         await writeProject(primary, renamedDomain);

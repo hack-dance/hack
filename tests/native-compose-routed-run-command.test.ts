@@ -378,6 +378,38 @@ test.each([
   expect((await Bun.file(receipt).json()).pending).toBeNull();
 }, 30_000);
 
+test("stopped routed source CLI refuses before any Docker request and preserves its saved anchor", async () => {
+  const { root, receipt, generation } = await fixture();
+  const owner = await openNativeComposeGenerationStore({
+    projectRoot: root,
+    instance: null,
+    mode: "saved",
+  });
+  try {
+    const saved = (await owner.loadCurrent()).generation;
+    if (!saved) {
+      throw new Error("Expected saved generation");
+    }
+    await owner.withMutation(async (mutation) => {
+      await mutation.runEffect({
+        generation: saved,
+        operation: "down",
+        assertOwned: async () => {},
+        effect: async () => ({ outcome: "complete", value: 0 }),
+      });
+    });
+  } finally {
+    await owner.close();
+  }
+  const result = await invoke(root);
+  expect(result.exit).toBe(1);
+  expect(result.output).toContain("already-ready saved instance");
+  expect(await Bun.file(join(root, "commands")).exists()).toBe(false);
+  expect((await Bun.file(receipt).json()).current.generationId).toBe(
+    generation.generationId
+  );
+}, 30_000);
+
 test.each([
   "cleanup-failure",
   "exposed",

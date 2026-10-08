@@ -226,6 +226,9 @@ export async function readProcessPolicyInitialTrace(directory: string): Promise<
     }
     rows.push({ token, startedAt: row.startedAt, startedNs: row.startedNs, reapedAt: row.reapedAt, args: row.args, stdout: row.stdout, exitCode: row.exitCode });
   }
+  if (names.length !== rows.length * 3 + effects.length * 2) {
+    throw new Error(REFUSAL);
+  }
   rows.sort((left, right) => BigInt(left.startedNs) < BigInt(right.startedNs) ? -1 : 1);
   if (new Set(rows.map((row) => row.startedNs)).size !== rows.length) {
     throw new Error(REFUSAL);

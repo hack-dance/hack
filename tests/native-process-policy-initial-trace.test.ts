@@ -78,7 +78,12 @@ await Bun.write(Bun.stdout,${JSON.stringify(CANARY)});await Bun.write(Bun.stderr
     }
     const row = trace.queries[0];
     if (!row) { throw new Error("Missing synthetic trace"); }
-    await unlink(join(prepared.directory, `${row.token}.json.reap`));
+    const reap = join(prepared.directory, `${row.token}.json.reap`);
+    const originalReap = await Bun.file(reap).text();
+    await unlink(reap);
+    await expect(readProcessPolicyInitialTrace(prepared.directory)).rejects.toThrow();
+    await Bun.write(reap, originalReap);
+    await unlink(join(prepared.directory, `${row.token}.json.start`));
     await expect(readProcessPolicyInitialTrace(prepared.directory)).rejects.toThrow();
   } finally {
     restoreEnv("PATH", previous);

@@ -103,6 +103,8 @@ async function fixture(
     readonly ownerExits?: boolean;
     readonly splitReady?: boolean;
     readonly padding?: string;
+    /** Keep short deadline oracles independent of two interpreter startups. */
+    readonly fastControlBoundary?: true;
   } = {}
 ) {
   const root = await mkdtemp(join(tmpdir(), "native-authored-process-"));
@@ -159,7 +161,23 @@ async function fixture(
   );
   await writeFile(
     binary,
-    `#!/bin/sh\nexec ${quote(process.execPath)} ${quote(script)} "$@"\n`
+    opts.fastControlBoundary
+      ? `#!/bin/sh
+case " $* " in
+  *" control "*)
+    printf status > authenticated-status-started
+    ${opts.controlKeeper ? `${quote(process.execPath)} -e ${quote('await Bun.sleep(2000); await Bun.write("keeper-complete", "exited");')} &\nprintf '%s' "$!" > keeper-pid\nprintf '%s\\n' synthetic-private-keeper-detail >&2` : ":"}
+    /bin/sleep ${(opts.controlDelayMs ?? 0) / 1000}
+    printf '%s\\n' ${quote(JSON.stringify(opts.control ?? status()))}
+    exit 0
+    ;;
+esac
+trap 'printf cleaned > cleanup-complete; exit 0' TERM
+printf '%s' ${quote(first)}
+while [ ! -f finish-request ]; do /bin/sleep 0.01; done
+printf exited > completion-observed
+`
+      : `#!/bin/sh\nexec ${quote(process.execPath)} ${quote(script)} "$@"\n`
   );
   await chmod(binary, 0o700);
   return {
@@ -410,7 +428,10 @@ test("safe status failure code does not expose private diagnostics or publish", 
 });
 
 test("startup deadline cancels pending authentication before publication and awaits cleanup", async () => {
-  const opts = await fixture({ controlDelayMs: 3000 });
+  const opts = await fixture({
+    controlDelayMs: 3000,
+    fastControlBoundary: true,
+  });
   let published = false;
   const start = performance.now();
   await expect(
@@ -435,9 +456,13 @@ test("startup deadline cancels pending authentication before publication and awa
 });
 
 test("status descendant-held pipes cannot outlive startup admission or owned cleanup", async () => {
-  const opts = await fixture({ controlKeeper: true });
+  const opts = await fixture({
+    controlKeeper: true,
+    fastControlBoundary: true,
+  });
   let published = false;
   let failure = "";
+  let keeper: number | undefined;
   const start = performance.now();
   try {
     await serveNativeAuthoredProjectGraph({
@@ -458,25 +483,54 @@ test("status descendant-held pipes cannot outlive startup admission or owned cle
     expect(
       await Bun.file(join(opts.projectRoot, "cleanup-complete")).text()
     ).toBe("cleaned");
-    const keeper = Number(
+    keeper = Number(
       await Bun.file(join(opts.projectRoot, "keeper-pid")).text()
     );
+    expect(Number.isSafeInteger(keeper) && keeper > 1).toBe(true);
     expect(() => process.kill(keeper, 0)).not.toThrow();
     expect(
       await Bun.file(join(opts.projectRoot, "keeper-complete")).exists()
     ).toBe(false);
   } finally {
-    // The stand-in descendant exits itself; retain its fixture until completion.
-    const deadline = performance.now() + 4000;
-    while (
-      !(await Bun.file(join(opts.projectRoot, "keeper-complete")).exists()) &&
-      performance.now() < deadline
-    ) {
-      await Bun.sleep(25);
+    if (keeper === undefined) {
+      // A failed setup never supplies a PID or completion authority.
+      roots.splice(roots.indexOf(opts.projectRoot), 1);
+    } else {
+      const keeperPid = keeper;
+      const absent = () => {
+        try {
+          process.kill(keeperPid, 0);
+          return false;
+        } catch (error: unknown) {
+          return (
+            typeof error === "object" &&
+            error !== null &&
+            "code" in error &&
+            error.code === "ESRCH"
+          );
+        }
+      };
+      // A done file alone does not prove exit. Observe exact PID absence without
+      // signalling it; any live/reused/unknown PID retains the private fixture.
+      const deadline = performance.now() + 4000;
+      while (
+        !(
+          (await Bun.file(
+            join(opts.projectRoot, "keeper-complete")
+          ).exists()) && absent()
+        ) &&
+        performance.now() < deadline
+      ) {
+        await Bun.sleep(25);
+      }
+      if (!absent()) {
+        roots.splice(roots.indexOf(opts.projectRoot), 1);
+      }
+      expect(
+        await Bun.file(join(opts.projectRoot, "keeper-complete")).text()
+      ).toBe("exited");
+      expect(absent()).toBe(true);
     }
-    expect(
-      await Bun.file(join(opts.projectRoot, "keeper-complete")).text()
-    ).toBe("exited");
   }
 }, 6000);
 

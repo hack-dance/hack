@@ -1,5 +1,5 @@
 import type { Dirent } from "node:fs";
-import { mkdir, mkdtemp, readdir, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, realpath, rm } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -434,7 +434,7 @@ export async function runCommand(opts: {
 export async function makeTempDir(opts: {
   readonly prefix: string;
 }): Promise<string> {
-  return await mkdtemp(join(tmpdir(), `${opts.prefix}-`));
+  return await realpath(await mkdtemp(join(tmpdir(), `${opts.prefix}-`)));
 }
 
 /**

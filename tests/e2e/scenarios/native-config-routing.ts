@@ -1,5 +1,5 @@
 import { createHash, randomBytes, X509Certificate } from "node:crypto";
-import { chmod, mkdir, readdir, realpath, rm } from "node:fs/promises";
+import { chmod, lstat, mkdir, readdir, realpath, rm } from "node:fs/promises";
 import { join } from "node:path";
 import type { Project } from "../../../packages/config-compiler/generated/native-config.ts";
 import { isRecord } from "../../../src/lib/guards.ts";
@@ -299,6 +299,17 @@ export const nativeConfigRoutingScenario: Scenario = {
     };
     const bunImage = await image("oven/bun:1.4.2-slim");
     const caddyImage = await image(CADDY_IMAGE);
+    const nativeInventory = async (): Promise<string> =>
+      ids(
+        await docker([
+          "ps",
+          "--no-trunc",
+          "-aq",
+          "--filter",
+          "label=io.hack.native-config.version=1",
+        ])
+      ).join("\n");
+    const nativeBefore = await nativeInventory();
     const token = randomBytes(16).toString("hex");
     const proxyName = `e2e-native-routing-proxy-${token}`;
     const canaryHost = `canary-${token}.test`;
@@ -311,6 +322,7 @@ export const nativeConfigRoutingScenario: Scenario = {
     let proxyId: string | null = null;
     let claimsRoot: string | null = null;
     const attempted = new Set<string>();
+    const successfulStarts = new Set<string>();
     const knownOwners = new Map<string, Runtime>();
     const env = {
       HACK_RUNTIME_BACKEND: "compose",
@@ -523,6 +535,7 @@ export const nativeConfigRoutingScenario: Scenario = {
     const up = async (root: string): Promise<void> => {
       attempted.add(root);
       await cli(root, ["up", "--detach", "--json"]);
+      successfulStarts.add(root);
       const owner = await runtime(root);
       if (owner) {
         knownOwners.set(root, owner);
@@ -539,7 +552,36 @@ export const nativeConfigRoutingScenario: Scenario = {
         "--filter",
         `label=${PROJECT_LABEL}=${owner.composeProject}`,
       ]);
+    const unpreparedWithoutEffects = async (root: string): Promise<boolean> => {
+      if (successfulStarts.has(root) || knownOwners.has(root)) {
+        return false;
+      }
+      const absentStore = await lstat(
+        join(root, ".hack", ".internal", "native-compose")
+      )
+        .then(() => false)
+        .catch((error: unknown) => {
+          if (isRecord(error) && error.code === "ENOENT") {
+            return true;
+          }
+          throw error;
+        });
+      if (!absentStore) {
+        return false;
+      }
+      expect({
+        that:
+          (await nativeInventory()) === nativeBefore &&
+          (claimsRoot === null || (await claimSnapshot(claimsRoot)) === ""),
+        message:
+          "A missing unprepared store permits fixture teardown only after native container inventory and hostname claims prove no effects",
+      });
+      return true;
+    };
     const cleanupCheckout = async (root: string): Promise<void> => {
+      if (await unpreparedWithoutEffects(root)) {
+        return;
+      }
       const owner = await runtime(root);
       if (!owner) {
         return;

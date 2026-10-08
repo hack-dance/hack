@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { rm } from "node:fs/promises";
+import { realpath, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { runScenarios, type Scenario, selectScenarios } from "./e2e/harness.ts";
 import { domainMigrationScenario } from "./e2e/scenarios/domain-migration.ts";
@@ -163,6 +163,8 @@ test("ordinary passing and failing scenarios still remove both temporary roots",
           summary: "default cleanup fixture",
           run: async (ctx) => {
             paths.push(ctx.tempRoot, ctx.hackHome);
+            expect(await realpath(ctx.tempRoot)).toBe(ctx.tempRoot);
+            expect(await realpath(ctx.hackHome)).toBe(ctx.hackHome);
             await Bun.write(join(ctx.tempRoot, "marker"), "synthetic data");
             await Bun.write(join(ctx.hackHome, "marker"), "synthetic receipt");
             if (fail) {

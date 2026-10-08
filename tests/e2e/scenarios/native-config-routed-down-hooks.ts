@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { appendFile, mkdir, readdir } from "node:fs/promises";
 import { isAbsolute, join } from "node:path";
+import { YAML } from "bun";
 import type {
   HostHook,
   Project,
@@ -16,7 +17,6 @@ import {
   readNativeComposeRouteMetadata,
   verifyNativeComposeSavedRoutesAbsent,
 } from "../../../src/lib/native-compose-route-owner.ts";
-import { setProjectEnvValue } from "../../../src/lib/project-env-config.ts";
 import { type CliResult, expect, expectExit } from "../harness.ts";
 
 const ID = /^[a-f0-9]{64}$/;
@@ -699,14 +699,9 @@ async function refuseManagedEnvDrift(
 ): Promise<void> {
   const envPath = join(opts.primary.root, ".hack", "hack.env.default.yaml");
   const original = await Bun.file(envPath).text();
-  await setProjectEnvValue({
-    projectRoot: opts.primary.root,
-    projectDir: join(opts.primary.root, ".hack"),
-    envName: null,
-    scope: "host",
-    key: ENV_KEY,
-    value: "synthetic-routed-down-drift",
-    secret: false,
+  await writeNativeRoutedDownEnvFixture({
+    root: opts.primary.root,
+    mode: "drift",
   });
   try {
     const refused = await raw(["down", "--json"]);
@@ -835,6 +830,41 @@ export function nativeRoutedDownMarkerProgram(opts: {
   return `const f=Bun.file(${JSON.stringify(opts.path)});if(await f.exists()){if(await f.text()!==${JSON.stringify(opts.marker)})process.exit(48)}else{${opts.mode === "after17" ? `await Bun.write(f,${JSON.stringify(opts.marker)});` : "process.exit(48);"}}${opts.primary ? `if(process.env.${ENV_KEY}!==${JSON.stringify(GUEST_VALUE)}||Object.hasOwn(process.env,"SEEN"))process.exit(47);` : ""}`;
 }
 
+function envFixtureText(mode: "initial" | "drift"): string {
+  const text = YAML.stringify({
+    version: 1,
+    environment: "default",
+    secretsprovider: "project_key",
+    values: {
+      global: { [ENV_KEY]: GUEST_VALUE },
+      host: {
+        [ENV_KEY]:
+          mode === "initial" ? HOST_VALUE : "synthetic-routed-down-drift",
+      },
+    },
+  });
+  return text.endsWith("\n") ? text : `${text}\n`;
+}
+
+/** Author only this isolated synthetic input; legacy mutation APIs intentionally refuse native projects. */
+export async function writeNativeRoutedDownEnvFixture(opts: {
+  readonly root: string;
+  readonly mode: "initial" | "drift";
+}): Promise<void> {
+  const path = join(opts.root, ".hack", "hack.env.default.yaml");
+  const file = Bun.file(path);
+  const exists = await file.exists();
+  expect({
+    that:
+      opts.mode === "initial"
+        ? !exists
+        : exists && (await file.text()) === envFixtureText("initial"),
+    message:
+      "Synthetic native env authoring must not overwrite unrelated fixture inputs",
+  });
+  await Bun.write(path, envFixtureText(opts.mode));
+}
+
 /** Combined routing + finite stop proof, inside the required owned routing scenario. */
 export async function qualifyNativeComposeRoutedDownHooks(
   opts: Acceptance
@@ -853,20 +883,10 @@ export async function qualifyNativeComposeRoutedDownHooks(
     command: { exec: [process.execPath, helper, phase] },
     environment: { SEEN: { env_ref: ENV_KEY }, [ENV_KEY]: { unset: true } },
   });
-  for (const [scope, value] of [
-    ["global", GUEST_VALUE],
-    ["host", HOST_VALUE],
-  ] as const) {
-    await setProjectEnvValue({
-      projectRoot: opts.primary.root,
-      projectDir: join(opts.primary.root, ".hack"),
-      envName: null,
-      scope,
-      key: ENV_KEY,
-      value,
-      secret: false,
-    });
-  }
+  await writeNativeRoutedDownEnvFixture({
+    root: opts.primary.root,
+    mode: "initial",
+  });
   await opts.configure({
     down: { before: [hook("before")], after: [hook("after")] },
   });

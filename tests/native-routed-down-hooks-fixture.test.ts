@@ -1,13 +1,15 @@
 import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { mkdtemp, rm, stat } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { acquireProjectEnvForNativeExecution } from "../src/lib/project-env-config.ts";
 import {
   nativeRoutedDownClaimsMatch,
   nativeRoutedDownHookProofMatches,
   nativeRoutedDownMarkerProgram,
   nativeRoutedDownPhaseMatches,
+  writeNativeRoutedDownEnvFixture,
 } from "./e2e/scenarios/native-config-routed-down-hooks.ts";
 
 const pin = {
@@ -21,6 +23,64 @@ const pin = {
   volume: { name: "native-fixture_state", createdAt: "2026-10-08T12:00:00Z" },
   origins: ["https://primary.test", "https://oauth.test"],
 };
+test("routed env authoring works after the native marker and preserves the actual env freshness fence", async () => {
+  const created = await mkdtemp(join(tmpdir(), "native-routed-down-env-"));
+  const root = await realpath(created);
+  const envPath = join(root, ".hack", "hack.env.default.yaml");
+  const selection = {
+    projectRoot: root,
+    overlay: null,
+    inheritLocal: false,
+    declaredWorkloadNames: ["web"],
+    hostTargets: { includeDefault: true, workloadNames: [] },
+  } as const;
+  try {
+    await mkdir(join(root, ".hack"));
+    await Bun.write(join(root, ".hack", "hack.project.json"), "{}\n");
+    await writeNativeRoutedDownEnvFixture({ root, mode: "initial" });
+    const original = await Bun.file(envPath).text();
+    const acquired = await acquireProjectEnvForNativeExecution(selection);
+    const privateValues = await acquired.resolveValues();
+    expect(privateValues.workloadEnv.web?.ROUTED_DOWN_TOKEN).toBe(
+      "synthetic-routed-down-guest"
+    );
+    expect(privateValues.hostValues?.default?.ROUTED_DOWN_TOKEN).toBe(
+      "synthetic-routed-down-host-$literal"
+    );
+    expect(JSON.stringify(acquired.metadata)).not.toContain(
+      "synthetic-routed-down"
+    );
+    await acquired.assertFresh(selection);
+    await expect(
+      writeNativeRoutedDownEnvFixture({ root, mode: "initial" })
+    ).rejects.toThrow("must not overwrite unrelated fixture inputs");
+    expect(await Bun.file(envPath).text()).toBe(original);
+    await writeNativeRoutedDownEnvFixture({ root, mode: "drift" });
+    await expect(acquired.assertFresh(selection)).rejects.toThrow(
+      "selected inputs changed"
+    );
+    await expect(acquired.resolveValues()).rejects.toThrow(
+      "selected inputs changed"
+    );
+    const changed = await acquireProjectEnvForNativeExecution(selection);
+    const changedValues = await changed.resolveValues();
+    expect(changedValues.workloadEnv.web?.ROUTED_DOWN_TOKEN).toBe(
+      "synthetic-routed-down-guest"
+    );
+    expect(changedValues.hostValues?.default?.ROUTED_DOWN_TOKEN).toBe(
+      "synthetic-routed-down-drift"
+    );
+    await Bun.write(envPath, original);
+    await acquired.assertFresh(selection);
+    await Bun.write(envPath, "unrelated fixture bytes\n");
+    await expect(
+      writeNativeRoutedDownEnvFixture({ root, mode: "drift" })
+    ).rejects.toThrow("must not overwrite unrelated fixture inputs");
+    expect(await Bun.file(envPath).text()).toBe("unrelated fixture bytes\n");
+  } finally {
+    await rm(created, { recursive: true, force: true });
+  }
+});
 test("second routed startup refuses lost or changed marker without repairing it", async () => {
   const root = await mkdtemp(join(tmpdir(), "native-routed-down-marker-"));
   const path = join(root, "marker");

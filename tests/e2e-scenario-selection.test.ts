@@ -182,3 +182,85 @@ test("ordinary passing and failing scenarios still remove both temporary roots",
     }
   }
 });
+
+test.each([
+  {
+    name: "failed opted-in fixture",
+    optedIn: true,
+    fail: true,
+    keep: false,
+    retained: true,
+  },
+  {
+    name: "ordinary failed fixture",
+    optedIn: false,
+    fail: true,
+    keep: false,
+    retained: false,
+  },
+  {
+    name: "successful opted-in fixture",
+    optedIn: true,
+    fail: false,
+    keep: false,
+    retained: false,
+  },
+  {
+    name: "global KEEP after failure",
+    optedIn: false,
+    fail: true,
+    keep: true,
+    retained: true,
+  },
+  {
+    name: "global KEEP after success",
+    optedIn: false,
+    fail: false,
+    keep: true,
+    retained: true,
+  },
+])("fixture evidence policy preserves $name", async (policy) => {
+  let paths: { tempRoot: string; hackHome: string } | undefined;
+  try {
+    const outcomes = await runScenarios({
+      keepTempDirs: policy.keep,
+      scenarios: [
+        {
+          name: "owned-evidence-control",
+          tier: "local",
+          summary: "synthetic evidence policy control",
+          preserveFixtureOnFailure: policy.optedIn,
+          run: async (ctx) => {
+            paths = { tempRoot: ctx.tempRoot, hackHome: ctx.hackHome };
+            await Bun.write(
+              join(ctx.tempRoot, "source-evidence"),
+              "synthetic source"
+            );
+            await Bun.write(
+              join(ctx.hackHome, "home-evidence"),
+              "synthetic home"
+            );
+            if (policy.fail) {
+              throw new Error("Synthetic fixture refusal; values omitted.");
+            }
+          },
+        },
+      ],
+    });
+    if (!paths) {
+      throw new Error("Expected isolated evidence paths");
+    }
+    expect(outcomes[0]?.status).toBe(policy.fail ? "fail" : "pass");
+    expect(
+      await Bun.file(join(paths.tempRoot, "source-evidence")).exists()
+    ).toBe(policy.retained);
+    expect(await Bun.file(join(paths.hackHome, "home-evidence")).exists()).toBe(
+      policy.retained
+    );
+  } finally {
+    if (paths) {
+      await rm(paths.tempRoot, { recursive: true, force: true });
+      await rm(paths.hackHome, { recursive: true, force: true });
+    }
+  }
+});

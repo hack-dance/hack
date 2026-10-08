@@ -1,6 +1,10 @@
 #!/usr/bin/env bun
 
 import {
+  finishNativeCpuDiagnostics,
+  initializeNativeCpuDiagnostics,
+} from "./src/lib/native-cpu-diagnostics.ts";
+import {
   runTtySupervisor,
   TTY_SUPERVISOR_ARGUMENT,
 } from "./src/lib/tty-supervisor.ts";
@@ -17,5 +21,12 @@ if (Bun.argv[2] === "--internal-native-https-owner") {
   );
   process.exit(await runNativeHttpsOwner({ configurationPath: Bun.argv[3] }));
 }
-const { runCli } = await import("./packages/cli/index.ts");
-process.exitCode = await runCli(Bun.argv.slice(2));
+initializeNativeCpuDiagnostics();
+try {
+  const { runCli } = await import("./packages/cli/index.ts");
+  process.exitCode = await runCli(Bun.argv.slice(2));
+} finally {
+  finishNativeCpuDiagnostics(
+    typeof process.exitCode === "number" ? process.exitCode : undefined
+  );
+}

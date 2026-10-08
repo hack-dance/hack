@@ -146,6 +146,56 @@ test("one owned internal bridge maps selected and inactive static aliases withou
   expect(JSON.stringify(result)).not.toContain("db-reader");
 });
 
+test("basic build preview and owned bridge remain separate from retained adoption", () => {
+  const compose = {
+    networks: { private: { internal: true } },
+    services: {
+      db: {
+        image: "postgres:17",
+        networks: { private: { aliases: ["db-reader"] } },
+      },
+      worker: {
+        build: "..",
+        pull_policy: "build",
+        profiles: ["later"],
+        networks: { private: { aliases: ["worker-reader"] } },
+      },
+    },
+  };
+  const source = {
+    configText: CONFIG,
+    composeText: JSON.stringify(compose),
+  };
+  const preview = mapLegacyNativeImport(source);
+  expect(preview.report.complete).toBe(true);
+  expect(preview.candidate).toMatchObject({
+    networks: { private: { internal: true } },
+    services: {
+      db: { networks: { private: { aliases: ["db-reader"] } } },
+      worker: {
+        build: { context: "." },
+        pull_policy: "build",
+        profiles: ["later"],
+        networks: { private: { aliases: ["worker-reader"] } },
+      },
+    },
+  });
+  expect(preview.report.fields).toContainEqual(
+    expect.objectContaining({
+      pointer: "/services/worker/build",
+      status: "normalized",
+    })
+  );
+  const adoption = mapLegacyNativeAdoptionBaseline(source);
+  expect(adoption.candidate).toBeUndefined();
+  expect(adoption.report.fields).toContainEqual(
+    expect.objectContaining({
+      pointer: "/services/worker/build",
+      status: "refused",
+    })
+  );
+});
+
 test("owned bridge and inactive completed job refuse retained adoption baseline", () => {
   code(
     mapLegacyNativeAdoptionBaseline({

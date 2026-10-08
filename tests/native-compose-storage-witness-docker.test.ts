@@ -1,4 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -8,6 +9,7 @@ import {
   type NativeComposeMaterialBinding,
   openNativeComposeGenerationStore,
 } from "../src/lib/native-compose-generation.ts";
+import { assertNativeComposeStorageDockerImage } from "../src/lib/native-compose-storage-witness-docker.ts";
 import {
   NATIVE_STORAGE_DOCKER_ARTIFACT,
   nativeComposeStorageDockerHelper,
@@ -29,6 +31,53 @@ const roots: string[] = [],
 const engineId = "engine-fixture";
 const selection = { name: "owned_data", storage: "data" };
 const createdAt = "2026-10-08T12:00:00Z";
+const SPARSE_IMAGE_FIELD = /{{json ([^{}]+)}}/g;
+
+test("cached image prerequisite emits complete sparse JSON before carrier effects", async () => {
+  const fields: Readonly<Record<string, unknown>> = {
+    ".Id": NATIVE_STORAGE_DOCKER_ARTIFACT.imageId,
+    ".Os": "linux",
+    ".Architecture": "arm64",
+    '(index .Config "Volumes")': null,
+  };
+  const requests: string[][] = [];
+  await assertNativeComposeStorageDockerImage(async (args) => {
+    requests.push([...args]);
+    expect(args).toHaveLength(5);
+    expect(args.slice(0, 3)).toEqual(["image", "inspect", "--format"]);
+    expect(args[4]).toBe(NATIVE_STORAGE_DOCKER_ARTIFACT.imageId);
+    const format = args[3];
+    if (typeof format !== "string") {
+      throw new Error("Missing fixed sparse image format");
+    }
+    const rendered = format.replace(SPARSE_IMAGE_FIELD, (_, field: string) => {
+      if (!Object.hasOwn(fields, field)) {
+        throw new Error("Unexpected sparse image field");
+      }
+      const encoded = JSON.stringify(fields[field]);
+      if (typeof encoded !== "string") {
+        throw new Error("Invalid fixed sparse image field");
+      }
+      return encoded;
+    });
+    const output = `${rendered}\n`;
+    expect(Buffer.byteLength(output)).toBe(124);
+    return output;
+  });
+  expect(requests).toHaveLength(1);
+});
+
+test("cached image prerequisite refuses the faithful truncated sparse output", async () => {
+  const truncated = `{"id":"${NATIVE_STORAGE_DOCKER_ARTIFACT.imageId}","os":"linux","arch":"arm64","volumes":null\n`;
+  expect(Buffer.byteLength(truncated)).toBe(123);
+  expect(createHash("sha256").update(truncated).digest("hex")).toBe(
+    "aea01511888599e3e1cacfc66c146dadb3ffdec207e1a620fe0136c2bca72ad8"
+  );
+  await expect(
+    assertNativeComposeStorageDockerImage(async () => truncated)
+  ).rejects.toBeInstanceOf(SyntaxError);
+});
+
 afterEach(async () => {
   await Promise.all(stores.splice(0).map((store) => store.close()));
   await Promise.all(

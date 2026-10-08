@@ -135,7 +135,7 @@ async function image(
       "image",
       "inspect",
       "--format",
-      '{"id":{{json .Id}},"os":{{json .Os}},"arch":{{json .Architecture}},"volumes":{{json (index .Config "Volumes")}}',
+      '{"id":{{json .Id}},"os":{{json .Os}},"arch":{{json .Architecture}},"volumes":{{json (index .Config "Volumes")}}}',
       artifact.imageId,
     ])
   );
@@ -151,6 +151,7 @@ async function image(
     return refuse();
   }
 }
+export { image as assertNativeComposeStorageDockerImage };
 async function invocationFiles(
   context: Context,
   input: NativeComposeStorageXattrInvocation

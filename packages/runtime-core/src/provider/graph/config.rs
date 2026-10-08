@@ -2,6 +2,17 @@ use super::*;
 use crate::project::{execution::Graph, inputs::ExecutionInputs};
 use std::collections::BTreeSet;
 
+/// Common bounded container isolation. Input-family lowering owns all overrides;
+/// this does not select an image, grant ownership or authorize engine effects.
+pub(super) fn container_base(image: &str, labels: Value) -> Value {
+    json!({"Image":image,"Labels":labels,"HostConfig":{
+        "NetworkMode":"none","Memory":0,"NanoCpus":0,
+        "ReadonlyRootfs":false,"CapDrop":["ALL"],"SecurityOpt":["no-new-privileges"],"Init":false,
+        "Mounts":[],"ShmSize":67108864,
+        "RestartPolicy":{"Name":"no"},"LogConfig":{"Type":"json-file","Config":{"max-size":"1m","max-file":"1"}}
+    }})
+}
+
 pub(super) struct Prepared {
     pub graph: Graph,
     pub cache_initializers: BTreeMap<String, String>,
@@ -347,12 +358,24 @@ pub(super) fn prepare_delivery(
         }).collect();
         // Writable roots are container-owned layers, not writable source binds.
         // Their contents are discarded when the container is removed; durable data uses named volumes.
-        let mut config = json!({"Image":image,"Labels":labels,"HostConfig":{
-            "NetworkMode":network,"Memory":service.limits.memory_bytes.unwrap_or(0),"NanoCpus":(service.limits.cpus.unwrap_or(0.0)*1e9) as u64,
-            "ReadonlyRootfs":service.read_only,"CapDrop":["ALL"],"SecurityOpt":["no-new-privileges"],"Init":service.init,
-            "Mounts":mounts,"ShmSize":service.limits.shared_memory_bytes.unwrap_or(67108864),
-            "RestartPolicy":{"Name":"no"},"LogConfig":{"Type":"json-file","Config":{"max-size":"1m","max-file":"1"}}
-        }});
+        let mut config = container_base(image, labels);
+        for (field, value) in [
+            ("NetworkMode", json!(network)),
+            ("Memory", json!(service.limits.memory_bytes.unwrap_or(0))),
+            (
+                "NanoCpus",
+                json!((service.limits.cpus.unwrap_or(0.0) * 1e9) as u64),
+            ),
+            ("ReadonlyRootfs", json!(service.read_only)),
+            ("Init", json!(service.init)),
+            ("Mounts", json!(mounts)),
+            (
+                "ShmSize",
+                json!(service.limits.shared_memory_bytes.unwrap_or(67108864)),
+            ),
+        ] {
+            config["HostConfig"][field] = value;
+        }
         // An omitted Compose pids_limit leaves the engine default unchanged.
         // Threads count toward this limit, so inventing a cap can stall dev servers.
         if let Some(pids) = service.limits.pids {

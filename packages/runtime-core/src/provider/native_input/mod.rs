@@ -107,7 +107,7 @@ impl Review {
         review.validate(scope)?;
         Ok(review)
     }
-    fn validate(&self, scope: Scope<'_>) -> Result<(), CandidateError> {
+    pub(crate) fn validate(&self, scope: Scope<'_>) -> Result<(), CandidateError> {
         let provenance = &self.provenance;
         let input = &provenance.input;
         if !valid_scope(scope)
@@ -135,7 +135,7 @@ impl Review {
     pub fn compiler_identity(&self) -> &ReviewIdentity {
         &self.provenance.input
     }
-    fn scope(&self) -> Scope<'_> {
+    pub(crate) fn scope(&self) -> Scope<'_> {
         Scope {
             namespace: &self.provenance.namespace,
             run: &self.provenance.run,

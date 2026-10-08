@@ -263,6 +263,61 @@ test("full holder inventory admits stopped and exact owned running readers and p
     ).toBe(true);
   });
 });
+test("full carrier target is projected into exact retained volume facts", async () => {
+  await withBinding(async (current) => {
+    const fake = inventory(current);
+    const target = await observeNativeComposeStorageDockerTarget({
+      current,
+      engineId,
+      selection,
+      stopped: true,
+      probe: fake.probe,
+    });
+    expect(Object.keys(target)).toHaveLength(10);
+    const repeated = await observeNativeComposeStorageDockerTarget({
+      current,
+      engineId,
+      selection: target,
+      stopped: true,
+      probe: fake.probe,
+    });
+    expect(repeated).toEqual(target);
+    expect(Object.keys(repeated.volume ?? {}).sort()).toEqual([
+      "createdAt",
+      "name",
+      "storage",
+    ]);
+    expect(fake.calls.every((args) => !args.includes("create"))).toBe(true);
+  });
+});
+
+test("holder observation captures selection before the first probe await", async () => {
+  await withBinding(async (current) => {
+    const fake = inventory(current);
+    const mutable = { ...selection };
+    let changed = false;
+    const target = await observeNativeComposeStorageDockerTarget({
+      current,
+      engineId,
+      selection: mutable,
+      stopped: true,
+      probe: async (args) => {
+        if (!changed) {
+          changed = true;
+          mutable.name = "substituted_data";
+          mutable.storage = "substituted";
+        }
+        return await fake.probe(args);
+      },
+    });
+    expect(changed).toBe(true);
+    expect(target.name).toBe(selection.name);
+    expect(target.storage).toBe(selection.storage);
+    expect(target.volume).toEqual({ ...selection, createdAt });
+    expect(fake.calls.some((args) => args.includes(mutable.name))).toBe(false);
+  });
+});
+
 test.each([
   "foreign",
   "running",

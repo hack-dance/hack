@@ -11,12 +11,27 @@ import { refuseNativeComposeStorageXattr as refuse } from "./native-compose-stor
 
 const ID = /^[a-f0-9]{64}$/;
 const NAME = /^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,254}$/;
+const STORAGE = /^[a-z0-9][a-z0-9._-]{0,62}$/;
 const PREFIX = "io.hack.native-config";
 const TRAILING_SEPARATOR = /\/+$/;
 const VOLUME = `{"name":{{json .Name}},"createdAt":{{json .CreatedAt}},"driver":{{json .Driver}},"options":{{json .Options}},"mountpoint":{{json .Mountpoint}},"project":{{json (index .Labels "com.docker.compose.project")}},"instance":{{json (index .Labels "${PREFIX}.instance")}},"owner":{{json (index .Labels "${PREFIX}.owner")}},"version":{{json (index .Labels "${PREFIX}.version")}},"storage":{{json (index .Labels "${PREFIX}.storage")}},"provision":{{json (index .Labels "${PREFIX}.storage-provision")}}}`;
 const HOLDER = `{"id":{{json .Id}},"createdAt":{{json .Created}},"mounts":{{json .Mounts}},"running":{{json .State.Running}},"project":{{json (index .Config.Labels "com.docker.compose.project")}},"instance":{{json (index .Config.Labels "${PREFIX}.instance")}},"owner":{{json (index .Config.Labels "${PREFIX}.owner")}},"version":{{json (index .Config.Labels "${PREFIX}.version")}},"generation":{{json (index .Config.Labels "${PREFIX}.generation")}},"carrier":{{json (index .Config.Labels "io.hack.storage-witness.carrier")}},"carrierOwner":{{json (index .Config.Labels "io.hack.storage-witness.owner")}},"carrierGeneration":{{json (index .Config.Labels "io.hack.storage-witness.generation")}}}`;
 type Probe = ReturnType<typeof createNativeComposeProbe>;
 type Selection = { readonly name: string; readonly storage: string };
+function captureSelection(value: Selection): Selection {
+  const { name, storage } = value;
+  if (
+    !(
+      typeof name === "string" &&
+      NAME.test(name) &&
+      typeof storage === "string" &&
+      STORAGE.test(storage)
+    )
+  ) {
+    return refuse();
+  }
+  return Object.freeze({ name, storage });
+}
 /** A parent or child bind exposes the selected root too. Normalize complete paths,
  * then compare separator boundaries so a similarly named sibling stays independent. */
 export function nativeComposeStorageDockerPathsOverlap(
@@ -91,10 +106,8 @@ export async function inspectNativeComposeStorageDockerVolume(opts: {
   readonly selection: Selection;
   readonly current: NativeComposeMaterialBinding;
 }): Promise<Record<string, unknown>> {
-  const { probe, selection, current } = opts;
-  if (!NAME.test(selection.name)) {
-    return refuse();
-  }
+  const { probe, current } = opts;
+  const selection = captureSelection(opts.selection);
   const values = rows(
     await probe(["volume", "inspect", "--format", VOLUME, selection.name])
   );
@@ -137,10 +150,8 @@ export async function observeNativeComposeStorageDockerTarget(opts: {
     readonly invocationId: string;
   };
 }): Promise<NativeComposeStorageXattrTarget> {
-  const { probe, selection, current, engineId, stopped } = opts;
-  if (!NAME.test(selection.name)) {
-    return refuse();
-  }
+  const { probe, current, engineId, stopped } = opts;
+  const selection = captureSelection(opts.selection);
   if (
     JSON.parse(await probe(["info", "--format", "{{json .ID}}"])) !== engineId
   ) {
@@ -148,7 +159,11 @@ export async function observeNativeComposeStorageDockerTarget(opts: {
   }
   const beforeVolumes = await volumes(probe);
   const volume = beforeVolumes.includes(selection.name)
-    ? await inspectNativeComposeStorageDockerVolume(opts)
+    ? await inspectNativeComposeStorageDockerVolume({
+        probe,
+        current,
+        selection,
+      })
     : null;
   const beforeContainers = await containers(probe);
   const holders: Record<string, unknown>[] = [];
@@ -233,7 +248,11 @@ export async function observeNativeComposeStorageDockerTarget(opts: {
     }
   }
   const repeated = volume
-    ? await inspectNativeComposeStorageDockerVolume(opts)
+    ? await inspectNativeComposeStorageDockerVolume({
+        probe,
+        current,
+        selection,
+      })
     : null;
   if (
     JSON.stringify(repeated) !== JSON.stringify(volume) ||
@@ -253,8 +272,15 @@ export async function observeNativeComposeStorageDockerTarget(opts: {
       engineId,
       runtimeIdentity: current.identity.composeProject,
       ownerToken: current.identity.ownerToken,
-      ...selection,
-      volume: volume ? { ...selection, createdAt: volume.createdAt } : null,
+      name: selection.name,
+      storage: selection.storage,
+      volume: volume
+        ? {
+            name: selection.name,
+            storage: selection.storage,
+            createdAt: volume.createdAt,
+          }
+        : null,
       mountpoint: volume?.mountpoint ?? null,
       driver: volume ? "local" : null,
       options: volume ? {} : null,

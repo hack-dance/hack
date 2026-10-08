@@ -172,8 +172,11 @@ refuse publication, and rejected promises are consumed without printing their de
 The inactive `serveNativeAuthoredProject` owner connects these boundaries without
 Compose normalization: shared input preparation, native source review, durable
 startup intent, compiler-selected private source keys over stdin, authenticated
-readiness and guarded run publication. It holds admission through foreground exit
-and checks the original binding against a fresh native journal inspection before
+readiness and guarded run publication. The review must match the canonical
+project/branch namespace before intent reservation or private delivery. It holds
+admission through foreground exit and preserves the first parsed runtime receipt
+before status or input freshness checks; that observation grants no ready authority.
+It checks this original binding against a fresh native journal inspection before
 retiring mappings, intent and source. Missing, changed or live cleanup evidence
 retains the attempt and refuses replay. Input acquisition shares the original Bun
 startup deadline; it does not renew that budget for each subprocess. This component

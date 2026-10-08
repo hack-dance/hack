@@ -1,10 +1,12 @@
-# Legacy Compose adoption binding
+# Legacy Compose adoption
 
 The private `acquireLegacyComposeAdoptionBinding` API verifies the existing
-Compose instance and named data volumes before a future explicit format adoption.
-It performs read-only Docker queries and source checks. It does not publish a
-candidate, change configuration selection, start or stop workloads, create or
-copy data, relabel resources, or change engines. There is no adoption CLI yet.
+Compose instance and named data volumes. That acquisition remains read-only.
+The separate explicit `hack config adopt` owner can switch a qualified stopped
+instance to native authored selection while retaining its original resources.
+`hack config adopt --dry-run` reports field provenance, compiler admission and
+existing-resource counts without writing private state or active inputs. Neither
+path copies data, creates replacement volumes, relabels resources or changes engines.
 
 ## Authored identity and storage intent
 
@@ -55,11 +57,18 @@ sufficient ownership token. Docker [refuses removal of a referenced volume](http
 so retaining and rechecking the referencing container IDs matters.
 
 The existing default bridge network must also match its Compose labels, immutable
-ID, creation timestamp and complete selected container membership. Other authored
+ID and creation timestamp. Every retained original must configure that exact
+network ID; active endpoint membership must exactly match the running originals.
+Stopped originals remain bound through their configured network IDs even though
+Docker removes their active endpoints. This transient running state is not saved
+in the resource binding. Other authored
 network policies remain unsupported. Engine ID, resource inventories and source
 bytes are rechecked, and acquisition compares two complete private observations.
 The Docker routing environment is captured for later comparison. Queries never
-request container environment, image configuration or arbitrary labels.
+request container environment or image configuration. Execution admission also
+compares Compose configuration hashes from the saved static source with the
+engine-created `com.docker.compose.config-hash` label on each original container.
+Those private digests never enter reports, authored files or resource labels.
 
 Only counts, a version and `adoption: not_performed` enter the public result.
 Frozen non-enumerable `assertFresh` and `resolveBinding` methods retain source
@@ -68,19 +77,85 @@ selection to either method. Private returned binding facts must never enter logs
 public reports, engine labels or unrelated receipts. Cancellation and failures
 use fixed redacted messages and the existing bounded child/process-group owner.
 
-## Required generation transition
+## Explicit stopped transition
 
-The [native generation store](native-compose-generation.md) currently allocates a
-different project namespace, generated volume names and native owner labels.
-It cannot consume this legacy binding. No caller may treat a verified prerequisite
-as permission to send legacy resources through ordinary native startup, whose
-ownership check permits missing resources for new projects.
+The separate private `openLegacyComposeAdoptedGenerationStore` owns versioned
+legacy-backed generations under `.hack/.internal/legacy-compose-adoption-v1`.
+Preparation self-acquires the same bounded source and resource binding, validates
+the private candidate in memory with the matching compiler, and synchronizes
+immutable source copies, candidate and binding before committing its receipt.
+Public claims contain status and counts; private identities and callbacks are
+not serialized. Orphan preparations are retained as evidence after a refused
+transition. The native version-one receipt and manifest contract is unchanged.
 
-An explicit adoption transaction still needs a versioned generation-owner
-contract that consumes this binding, preserves the existing backend and data
-names without fabricating labels, and repeats source/resource freshness under
-its lease before each effect. Atomic configuration publication, old-client
-refusal, recovery/rollback, typed local inheritance, linked-worktree isolation,
-advanced lossless mappings and actual application/data readback remain NC04
-acceptance work. Rechecks are cooperative; they cannot freeze arbitrary external
-editors or Docker mutations. Synthetic probe tests do not qualify live adoption.
+`hack config adopt` requires all original containers stopped. It refuses local,
+dotenv or managed-env inputs, linked/separate Git layouts, selected profiles,
+unsupported source mappings and changed source/resource ownership. It never
+silently stops a running instance. Add explicit `--stop` to journal and stop all
+verified original IDs before the format switch. `--dry-run --stop` qualifies that
+proposed stopped transition without changing containers or files. Both authored documents must carry matching
+explicit canonical project names. Shell strings, interpolation and unset/empty
+ambiguity remain refused; qualified argv, empty entrypoints, static empty values
+and authored mount order are retained.
+
+The receipt commits `switching` before either legacy input moves. The owner holds
+the exact original inodes and bytes in its private generation, installs the
+qualified candidate without overwriting an existing path, records its identity,
+and only then commits `active`. Every pathname transition and receipt replacement
+is checked and synchronized. Upgraded project discovery refuses pending
+publication before it can select ancestor Compose inputs or write legacy files.
+An active adopted receipt remains a selection boundary even if its candidate is
+removed; missing or edited candidates refuse execution.
+
+The distinct execution owner consumes the saved binding. It never sends these
+resources through ordinary native startup, which allocates a different Compose
+namespace and native volume names. `up --detach`, `restart` and `down` start, restart and
+stop only the original container IDs. `down` retains those containers, their
+network and volumes as data anchors. `ps` reports workload names and status;
+plain `logs` and `exec` use the verified retained container. Recreation, `run`,
+attached startup, changed instance/overlay/profile selections, routing and host-hook migration are
+unsupported. Original legacy objects never receive native nonce labels.
+
+A retained-container mutation is journaled before its engine child starts.
+Nonzero exit, cancellation, missing resources or failed postconditions leave it
+pending. `hack down --recover` explicitly stops the complete original selection
+and clears pending execution only after verified stopped completion. OS signals,
+TTY/stdin forwarding, deadlines and process-group cleanup use the existing
+shared runner. The store's AbortSignal is a cooperative admission/recheck control;
+it does not independently terminate a caller-owned engine callback.
+
+## Rollback and interruption recovery
+
+After the original containers are stopped, `hack config adopt --rollback`
+journals `rolling-back`, holds the installed candidate and restores both exact
+legacy originals. Link-before-unlink restoration cannot overwrite another file;
+a known two-link intermediate is recoverable. The owner verifies original
+resources before committing `rolled-back`. No volume or container is removed.
+Conflicting external bytes, invalid private files or lost bindings refuse and
+retain recovery evidence instead of overwriting edits.
+
+A failed or partial prepared stop keeps both legacy originals selected in its
+private journal and fences ordinary discovery. `hack config adopt --recover --stop`
+rechecks the complete original selection, explicitly retries its stop, and only
+then publishes. Changed sources, resources or config hashes refuse recovery.
+
+`hack config adopt --recover` explicitly recovers a proven dead same-boot lock
+and completes a pending switch. Add `--rollback` to restore a pending switch or
+rollback. Discovery and ordinary operations stay fenced while either transition
+is pending. This is cooperative publication, not an atomic freeze of arbitrary
+editors or Docker mutations.
+
+Unmodified v4 clients cannot be universally fenced: they ignore future legacy
+versions and may select ancestor Compose inputs. Adoption requires the upgraded
+selector/launcher boundary. Configuration rollback must restore the held legacy
+pair and verify the original data binding before using an older client; installing
+an old executable alone is not rollback.
+
+Disposable Compose/PostgreSQL acceptance on macOS verified the original SQL row
+after adopted execution and rollback, retained container/network/volume anchors,
+an interrupted partial stop, process-killed switch and rollback repair, candidate
+edit/removal refusal, exact original-file inode restoration and owned cleanup.
+These observed boundaries supplement the synthetic probe/interruption tests.
+Full NC04 remains open for typed local inheritance, linked-worktree isolation,
+advanced lossless mappings, recreation and application migration; that acceptance
+does not qualify those unsupported cases or an atomic freeze of external actors.

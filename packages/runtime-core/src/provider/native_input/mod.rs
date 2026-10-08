@@ -9,6 +9,7 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{collections::BTreeMap, time::Instant};
+pub(in crate::provider) use storage::read_file;
 pub use storage::{load, publish};
 
 const MAX_ARTIFACT_BYTES: usize = 8192;
@@ -92,7 +93,7 @@ fn identity(provenance: &Provenance) -> Result<String, CandidateError> {
     Ok(format!("{:x}", hash.finalize()))
 }
 impl Review {
-    fn new(scope: Scope<'_>, input: ReviewIdentity) -> Result<Self, CandidateError> {
+    pub(crate) fn new(scope: Scope<'_>, input: ReviewIdentity) -> Result<Self, CandidateError> {
         let provenance = Provenance {
             version: 1,
             kind: InputKind::Native,
@@ -107,7 +108,7 @@ impl Review {
         review.validate(scope)?;
         Ok(review)
     }
-    fn validate(&self, scope: Scope<'_>) -> Result<(), CandidateError> {
+    pub(crate) fn validate(&self, scope: Scope<'_>) -> Result<(), CandidateError> {
         let provenance = &self.provenance;
         let input = &provenance.input;
         if !valid_scope(scope)
@@ -135,7 +136,7 @@ impl Review {
     pub fn compiler_identity(&self) -> &ReviewIdentity {
         &self.provenance.input
     }
-    fn scope(&self) -> Scope<'_> {
+    pub(crate) fn scope(&self) -> Scope<'_> {
         Scope {
             namespace: &self.provenance.namespace,
             run: &self.provenance.run,
@@ -193,6 +194,9 @@ impl Prepared {
     }
     pub fn remaining(&self) -> Result<Instant, CandidateError> {
         self.deadline.to_instant()
+    }
+    pub(in crate::provider) fn private_services(&self) -> std::collections::BTreeSet<String> {
+        self.environments.keys().cloned().collect()
     }
     /// Transfer once; a future consumer must retain the deadline and recheck effect admission.
     pub fn into_parts(

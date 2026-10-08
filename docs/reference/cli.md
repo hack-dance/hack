@@ -508,6 +508,7 @@ hack config <subcommand> [options]
 | `hack config validate` | Validate native configuration and selected local overlays without starting workloads |
 | `hack config plan` | Inspect native environment binding completeness without decrypting or starting workloads |
 | `hack config import` | Preview a bounded legacy config and Compose conversion without writes |
+| `hack config adopt` | Explicitly adopt a stopped, verified existing Compose instance |
 
 ### Options
 
@@ -640,6 +641,32 @@ Requires --dry-run. Inspects the exact .hack/hack.config.json and docker-compose
 | Option | Description |
 | --- | --- |
 | `--dry-run` | Preview only; adoption and draft export are unavailable |
+| `--path, -p <dir>` | Run a project command against a repo path (overrides cwd search) |
+| `--json` | Output JSON (machine-readable) |
+| `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
+| `--help, -h` | Show help |
+| `--version, -v` | Show version |
+
+## `hack config adopt`
+
+Explicitly adopt a stopped, verified existing Compose instance
+
+### Usage
+
+```bash
+hack config adopt [options]
+```
+
+Qualifies a strict static legacy subset with exact existing data volumes. --dry-run reports fields without writes. Adoption journals the stopped format switch and holds original files for rollback; retained-container commands never create replacement data. Requires an upgraded launcher. Linked Git/local inheritance and container recreation remain unsupported.
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--stop` | Explicitly journal and stop the exact original containers before adopting; never removes data anchors |
+| `--dry-run` | Read-only field, compiler and existing-resource preview |
+| `--rollback` | Restore the exact held legacy inputs after the original containers are stopped |
+| `--recover` | Explicitly repair interrupted adoption or rollback using the saved original binding |
 | `--path, -p <dir>` | Run a project command against a repo path (overrides cwd search) |
 | `--json` | Output JSON (machine-readable) |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |

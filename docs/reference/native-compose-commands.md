@@ -71,8 +71,33 @@ command exit remains nonzero after verified completion. Failure to start or remo
 the one-off leaves execution incomplete; absence alone does not prove completion.
 The selected target's direct dependency conditions are checked as authored;
 `service_started` does not acquire an extra health requirement.
-`run` refuses selected or retained routing generations until one-off Caddy label
-projection is qualified, including an unrouted job in a routed project.
+For routed projects, `run` requires an already-ready current generation and
+unchanged effective inputs. Run `up` first for a cold or stopped instance;
+those routed runs refuse before hooks or engine operations. The target's
+dependency conditions and every saved workload's readiness must hold.
+
+The owned generation store privately publishes a one-off projection that removes
+the target's Caddy routing label keys. Its environment, command, mounts,
+dependencies and storage identities remain unchanged. Compose receives only this
+verified immutable file and `--no-deps`, so the ready graph remains in place.
+The adapter reopens completed hostname claims for read-only checks, verifies the
+active routes before and after execution, and requires the retained containers'
+IDs to remain unchanged. It also checks routing-key absence on the actual stopped
+one-off before removing that exact owned ID. Claim drift, unexpected exposure,
+container replacement or incomplete cleanup retain pending recovery state;
+they do not trigger automatic replay. `down --recover` uses the original saved
+generation and retains persistent data. The private projection remains available
+for owned inspection and is never replayed.
+
+The source tests exercise projection publication, tamper refusal, readonly claims,
+literal delivery, exit status and recovery with substituted engine observations.
+The maintained `native-config-routing` Docker fixture additionally observes a
+running one-off with no routing keys, exact exit 17 and removal, unchanged main
+and sibling container IDs and HTTPS markers, completed claims, retained data and
+recovery from a deliberately blocked one-off removal. This fixture passed on an
+M3 macOS host with the current compiled CLI and its matching compiler. That
+qualification is separate from unit tests and does not establish cold routed-run
+support or whole-product parity.
 
 Managed environment selection, native source and selected local configuration
 are acquired together. Support preflight precedes private value delivery. Private

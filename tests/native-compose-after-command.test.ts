@@ -283,3 +283,19 @@ test.each([
     services: { web: { environment: { TOKEN: "global" } } },
   });
 }, 20_000);
+
+test("source CLI run refuses an after-only host lifecycle before engine or hook effects", async () => {
+  const root = await fixture('await Bun.write("after-ran","unexpected")');
+  const path = join(root, ".hack/hack.project.json");
+  const authored = await Bun.file(path).json();
+  authored.host.up.before = [];
+  await Bun.write(path, JSON.stringify(authored));
+  const result = await invoke(root, ["run", "web", "--", "synthetic"]);
+  expect(result.code).toBe(1);
+  expect(`${result.stdout}\n${result.stderr}`).toContain(
+    "E_NATIVE_PROJECT_UNSUPPORTED"
+  );
+  for (const name of ["order", "after-ran", "engine"]) {
+    expect(await Bun.file(join(root, name)).exists()).toBe(false);
+  }
+}, 30_000);

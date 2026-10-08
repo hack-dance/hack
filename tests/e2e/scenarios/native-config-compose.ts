@@ -117,6 +117,8 @@ export function nativeComposeFixtureFailureJobMatches(opts: {
     own(job, "status") === "exited" &&
     own(job, "exitCode") === 17 &&
     own(job, "running") === false &&
+    own(job, "restartCount") === 0 &&
+    own(job, "restartPolicy") === "no" &&
     isRecord(labels) &&
     own(labels, COMPOSE_PROJECT) === expected.composeProject &&
     own(labels, COMPOSE_SERVICE) === "failure" &&
@@ -1121,7 +1123,7 @@ export const nativeConfigComposeScenario: Scenario = {
             "inspect",
             containerId,
             "--format",
-            '{"id":{{json .Id}},"image":{{json .Image}},"status":{{json .State.Status}},"exitCode":{{json .State.ExitCode}},"running":{{json .State.Running}},"labels":{{json .Config.Labels}}}',
+            '{"id":{{json .Id}},"image":{{json .Image}},"status":{{json .State.Status}},"exitCode":{{json .State.ExitCode}},"running":{{json .State.Running}},"restartCount":{{json .RestartCount}},"restartPolicy":{{json .HostConfig.RestartPolicy.Name}},"labels":{{json .Config.Labels}}}',
           ])
         );
         expect({

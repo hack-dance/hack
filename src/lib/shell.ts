@@ -75,9 +75,11 @@ export interface RunOptions {
   /**
    * Route the child's stdout to THIS process's stderr (fd 2). Used by
    * `--json` code paths where stdout must stay a single parseable
-   * envelope while subprocess output remains visible to humans.
+   * envelope while subprocess output remains visible to humans. Ignore output
+   * when an owned mutation would disclose private resource identities.
    */
-  readonly stdout?: "inherit" | "stderr";
+  readonly stdout?: "inherit" | "stderr" | "ignore";
+  readonly stderr?: "inherit" | "ignore";
   readonly timeoutMs?: number;
   /** Forward cancellation to an owned command process group, preserving TTY input. */
   readonly forwardSignals?: boolean;
@@ -112,6 +114,7 @@ export async function run(
       cwd: opts.cwd,
       env: buildSpawnEnv(opts.env, opts.unsetEnvKeys),
       stdout: opts.stdout,
+      stderr: opts.stderr,
       stdin: opts.stdin,
       timeoutMs: opts.timeoutMs,
       onSpawn: opts.onSpawn,
@@ -124,8 +127,8 @@ export async function run(
     cwd: opts.cwd,
     env: buildSpawnEnv(opts.env, opts.unsetEnvKeys),
     stdin: opts.stdin ?? "inherit",
-    stdout: opts.stdout === "stderr" ? 2 : "inherit",
-    stderr: "inherit",
+    stdout: opts.stdout === "stderr" ? 2 : (opts.stdout ?? "inherit"),
+    stderr: opts.stderr ?? "inherit",
     detached: ownsProcessGroup,
   });
   const timeout = installSubprocessTimeout({

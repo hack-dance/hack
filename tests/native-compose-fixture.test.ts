@@ -22,6 +22,8 @@ function fixture() {
       status: "exited",
       exitCode: 17,
       running: false,
+      restartCount: 0,
+      restartPolicy: "no",
       labels: {
         "com.docker.compose.project": expected.composeProject,
         "com.docker.compose.service": "failure",
@@ -91,6 +93,38 @@ test("a timed-out CLI cannot qualify even if a stopped job has exit 17", () => {
     nativeComposeFixtureFailureJobMatches({
       ...input,
       startup: { ...input.startup, timedOut: true },
+    })
+  ).toBe(false);
+});
+
+test.each([
+  1,
+  2,
+  "0",
+  null,
+  undefined,
+])("retried or malformed restart count %s cannot qualify a failed job", (restartCount) => {
+  const input = fixture();
+  expect(
+    nativeComposeFixtureFailureJobMatches({
+      ...input,
+      job: { ...input.job, restartCount },
+    })
+  ).toBe(false);
+});
+
+test.each([
+  "always",
+  "on-failure",
+  "unless-stopped",
+  null,
+  undefined,
+])("restart policy %s must match the authored no-restart failure job", (restartPolicy) => {
+  const input = fixture();
+  expect(
+    nativeComposeFixtureFailureJobMatches({
+      ...input,
+      job: { ...input.job, restartPolicy },
     })
   ).toBe(false);
 });

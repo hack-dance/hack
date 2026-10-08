@@ -15,6 +15,10 @@ import {
   updateProjectConfigBatch,
 } from "../src/lib/config.ts";
 import {
+  inspectLegacyComposeAdoptionSelection,
+  LegacyComposeAdoptionSelectionError,
+} from "../src/lib/native-compose-adoption-marker.ts";
+import {
   findProjectContext,
   findProjectContextAtRoot,
   findRepoRootForInit,
@@ -30,6 +34,25 @@ const roots: string[] = [];
 afterEach(async () => {
   for (const root of roots.splice(0)) {
     await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("adoption marker reconstructs fixed errors from a forged typed argument getter", async () => {
+  const canary = "synthetic-private-marker-diagnostic",
+    forged = new LegacyComposeAdoptionSelectionError();
+  forged.message = canary;
+  try {
+    await inspectLegacyComposeAdoptionSelection({
+      get projectRoot(): string {
+        throw forged;
+      },
+    });
+    throw new Error("unexpected adoption marker success");
+  } catch (error: unknown) {
+    expect(error).toBeInstanceOf(LegacyComposeAdoptionSelectionError);
+    expect(error).not.toBe(forged);
+    expect(String(error)).not.toContain(canary);
+    expect(JSON.stringify(error)).not.toContain(canary);
   }
 });
 
@@ -161,11 +184,14 @@ test("unreadable native input remains a boundary without reading its values", as
   }
 });
 
-test("invalid project directory access refuses rather than selecting ancestor Compose", async () => {
+test.each([
+  ".hack",
+  ".hack/.internal",
+])("invalid project directory %s refuses rather than selecting ancestor Compose", async (path) => {
   const outer = await fixture();
   await file(outer, ".hack/docker-compose.yml");
   const inner = join(outer, "child");
-  await file(inner, ".hack", "not a directory");
+  await file(inner, path, "not a directory");
   await expect(findProjectContext(inner)).rejects.toThrow(
     "Cannot inspect Hack project inputs"
   );

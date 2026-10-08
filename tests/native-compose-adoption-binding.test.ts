@@ -60,6 +60,7 @@ beforeEach(async () => {
         service: "db",
         number: "1",
         oneoff: "False",
+        running: true,
         workingDir: join(projectRoot, ".hack"),
         configFiles: join(projectRoot, ".hack/docker-compose.yml"),
         mounts: [
@@ -184,6 +185,63 @@ async function commands(): Promise<string[][]> {
     .split("\n")
     .map((line) => JSON.parse(line));
 }
+
+test("stopped originals retain configured network identity without active endpoints", async () => {
+  const acquired = await acquireLegacyComposeAdoptionBinding({ projectRoot });
+  const original = await acquired.resolveBinding({ projectRoot });
+  container().running = false;
+  network().containers = [];
+  await save();
+  await acquired.assertFresh({ projectRoot });
+  expect(await acquired.resolveBinding({ projectRoot })).toEqual(original);
+  expect(JSON.stringify(original)).not.toContain("running");
+});
+
+test("mixed stopped and running originals require exactly the running endpoint IDs", async () => {
+  const second = "c".repeat(64),
+    path = join(projectRoot, ".hack/docker-compose.yml");
+  const text = await readFile(path, "utf8"),
+    insert = text.lastIndexOf("volumes:\n  data:");
+  await writeFile(
+    path,
+    `${text.slice(0, insert)}  worker:\n    image: ${CANARY}\n    volumes:\n      - data:/var/lib/database\n${text.slice(insert)}`
+  );
+  fixture.container.push({
+    ...container(),
+    id: second,
+    name: "/fixture-worker-1",
+    service: "worker",
+    running: false,
+  });
+  await save();
+  const acquired = await acquireLegacyComposeAdoptionBinding({ projectRoot });
+  expect(
+    (await acquired.resolveBinding({ projectRoot })).containers
+  ).toHaveLength(2);
+  network().containers = [];
+  await save();
+  await refusal(acquired.assertFresh({ projectRoot }));
+  network().containers = [ID, second];
+  await save();
+  await refusal(acquired.assertFresh({ projectRoot }));
+  network().containers = [ID, "d".repeat(64)];
+  await save();
+  await refusal(acquired.assertFresh({ projectRoot }));
+});
+
+test("stopped configured NetworkID drift and malformed running state refuse", async () => {
+  container().running = false;
+  network().containers = [];
+  await save();
+  const acquired = await acquireLegacyComposeAdoptionBinding({ projectRoot });
+  container().networks = [{ name: "fixture_default", id: "d".repeat(64) }];
+  await save();
+  await refusal(acquired.assertFresh({ projectRoot }));
+  container().networks = [{ name: "fixture_default", id: NETWORK }];
+  container().running = "false";
+  await save();
+  await refusal(acquired.assertFresh({ projectRoot }));
+});
 test("exact existing identities are private, frozen and repeatedly verified without writes", async () => {
   const before = await readFile(join(projectRoot, ".hack/docker-compose.yml"));
   const acquired = await acquireLegacyComposeAdoptionBinding({ projectRoot });

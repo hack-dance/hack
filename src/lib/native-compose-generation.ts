@@ -1,32 +1,41 @@
-import { createHash, randomUUID } from "node:crypto";
-import { constants, type Stats } from "node:fs";
-import {
-  type FileHandle,
-  lstat,
-  mkdir,
-  open,
-  readdir,
-  realpath,
-  rename,
-  rmdir,
-  unlink,
-} from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { createHash } from "node:crypto";
+import { lstat, mkdir, rename, unlink } from "node:fs/promises";
+import { dirname, join, resolve } from "node:path";
 import { DEFAULT_INGRESS_NETWORK } from "../constants.ts";
 import { isRecord } from "./guards.ts";
+import {
+  createNativeComposePrivateMutationLock,
+  type HeldDirectory,
+  hasCode,
+  holdDirectory,
+  jsonPrivate,
+  keys,
+  NativeComposeGenerationError,
+  privateDirectory,
+  privateIgnore,
+  readPrivate,
+  recheckDirectories,
+  sameFile,
+  synchronizeDirectories,
+  token,
+  writeExclusive,
+} from "./native-compose-private-state.ts";
+import { projectNativeComposeOneOff } from "./native-compose-run-projection.ts";
 import { inspectProjectInputsAtRoot } from "./project-input-selection.ts";
 import { resolveVerifiedPrimaryWorktreeRoot } from "./worktree-local-config.ts";
+
+// biome-ignore lint/performance/noBarrelFile: Preserve the existing generation error import and class identity after the mechanical owner extraction.
+export { NativeComposeGenerationError } from "./native-compose-private-state.ts";
+
+const RECEIPT_LIMIT = 64 * 1024;
+function refuse(): never {
+  throw new NativeComposeGenerationError("E_NATIVE_COMPOSE_STATE");
+}
 
 const TOKEN = /^[a-f0-9]{32}$/;
 const HASH = /^[a-f0-9]{64}$/;
 const PROFILE = /^[a-z0-9][a-z0-9._-]{0,62}$/;
 const CONTROL = /[\x00-\x1f\x7f]/;
-const BOOT_ID = /^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/;
-const BIRTH =
-  /^(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun) (?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) \d{1,2} \d{2}:\d{2}:\d{2} \d{4}$/;
-const PROCESS_BIRTH_ROW = /^(\d+)\s+(.+)$/;
-const LOCK_OWNER_LIMIT = 1024;
-const RECEIPT_LIMIT = 64 * 1024;
 /** Matches the compiler output budget; this is an artifact bound, not a workload limit. */
 export const NATIVE_COMPOSE_DOCUMENT_LIMIT = 8 * 1024 * 1024;
 
@@ -51,6 +60,32 @@ export type NativeComposeReservation = {
   readonly generationId: string;
 };
 
+export type NativeComposeRunProjection = {
+  readonly generation: NativeComposeGeneration;
+  readonly projectionId: string;
+  readonly service: string;
+  readonly composeFile: string;
+};
+type ProjectionAnchor = {
+  readonly projectionId: string;
+  readonly manifestHash: string;
+  readonly manifest: FileIdentity;
+};
+type ProjectionManifest = {
+  readonly version: 1;
+  readonly identity: NativeComposeIdentity;
+  readonly generationId: string;
+  readonly projectionId: string;
+  readonly service: string;
+  readonly source: GenerationAnchor;
+  readonly documentHash: string;
+  readonly document: FileIdentity;
+};
+type PendingReceipt = NativeComposePending &
+  GenerationAnchor & {
+    readonly projection?: ProjectionAnchor;
+  };
+
 export type NativeComposeOperation = "up" | "restart" | "run" | "down";
 export type NativeComposePending = {
   readonly token: string;
@@ -74,7 +109,7 @@ type Receipt = {
   readonly checkout: CheckoutAnchor;
   readonly current: GenerationAnchor | null;
   readonly stopped: boolean;
-  readonly pending: (NativeComposePending & GenerationAnchor) | null;
+  readonly pending: PendingReceipt | null;
   /** No command, PID, environment, or content fingerprint. Interrupted finite hooks never replay. */
   readonly beforeHooks: HostHookIntent | null;
 };
@@ -97,260 +132,8 @@ type Manifest = {
   readonly inputRevision: string;
   readonly document: { readonly dev: number; readonly ino: number };
 };
-type HeldDirectory = {
-  readonly path: string;
-  readonly file: FileHandle;
-  readonly info: Stats;
-  readonly private: boolean;
-};
-type LockOwner = {
-  readonly version: 1;
-  readonly token: string;
-  readonly pid: number;
-  readonly uid: number;
-  readonly bootId: string;
-  readonly birth: string;
-};
-
-async function inspection(
-  command: readonly string[]
-): Promise<{ readonly output: string; readonly code: number }> {
-  const child = Bun.spawn([...command], {
-    stdin: "ignore",
-    stdout: "pipe",
-    stderr: "ignore",
-    env: {
-      PATH: process.env.PATH ?? "/usr/bin:/bin:/usr/sbin",
-      LANG: "C",
-      LC_ALL: "C",
-    },
-  });
-  const timer = setTimeout(() => child.kill("SIGKILL"), 3000);
-  try {
-    const chunks: Uint8Array[] = [];
-    const reader = child.stdout.getReader();
-    let total = 0;
-    try {
-      while (true) {
-        const next = await reader.read();
-        if (next.done) {
-          break;
-        }
-        total += next.value.byteLength;
-        if (total > LOCK_OWNER_LIMIT) {
-          child.kill("SIGKILL");
-          refuse();
-        }
-        chunks.push(next.value);
-      }
-    } finally {
-      reader.releaseLock();
-    }
-    return {
-      output: new TextDecoder("utf-8", { fatal: true, ignoreBOM: true })
-        .decode(Buffer.concat(chunks))
-        .trim(),
-      code: await child.exited,
-    };
-  } finally {
-    clearTimeout(timer);
-    if (child.exitCode === null) {
-      child.kill("SIGKILL");
-    }
-    await child.exited;
-  }
-}
-async function bootId(): Promise<string> {
-  let value: string;
-  if (process.platform === "darwin") {
-    const result = await inspection([
-      "/usr/sbin/sysctl",
-      "-n",
-      "kern.bootsessionuuid",
-    ]);
-    if (result.code !== 0) {
-      refuse();
-    }
-    value = result.output.toLowerCase();
-  } else if (process.platform === "linux") {
-    const file = await open(
-      "/proc/sys/kernel/random/boot_id",
-      constants.O_RDONLY | constants.O_NOFOLLOW
-    );
-    try {
-      const bytes = Buffer.alloc(128);
-      const { bytesRead } = await file.read(bytes, 0, bytes.length, 0);
-      value = new TextDecoder("utf-8", { fatal: true })
-        .decode(bytes.subarray(0, bytesRead))
-        .trim();
-    } finally {
-      await file.close();
-    }
-  } else {
-    return refuse();
-  }
-  if (!BOOT_ID.test(value)) {
-    refuse();
-  }
-  return value;
-}
-async function processBirth(
-  pid: number
-): Promise<{ readonly uid: number; readonly birth: string } | null> {
-  const result = await inspection([
-    "/bin/ps",
-    "-p",
-    String(pid),
-    "-o",
-    "uid=,lstart=",
-  ]);
-  if (result.code === 1 && result.output === "") {
-    return null;
-  }
-  const match = PROCESS_BIRTH_ROW.exec(result.output);
-  const birth = match?.[2]?.replace(/\s+/g, " ");
-  const uid = Number(match?.[1]);
-  if (
-    result.code !== 0 ||
-    !Number.isSafeInteger(uid) ||
-    uid < 0 ||
-    birth === undefined ||
-    !BIRTH.test(birth)
-  ) {
-    refuse();
-  }
-  return { uid, birth };
-}
-async function captureLockOwner(): Promise<LockOwner> {
-  const birth = await processBirth(process.pid);
-  const uid = process.getuid?.();
-  if (!birth || uid === undefined || birth.uid !== uid) {
-    return refuse();
-  }
-  return {
-    version: 1,
-    token: token(),
-    pid: process.pid,
-    uid,
-    bootId: await bootId(),
-    birth: birth.birth,
-  };
-}
-function parseLockOwner(text: string): LockOwner {
-  let value: unknown;
-  try {
-    value = JSON.parse(text) as unknown;
-  } catch {
-    return refuse();
-  }
-  if (
-    !(
-      isRecord(value) &&
-      keys(value, "birth,bootId,pid,token,uid,version") &&
-      value.version === 1 &&
-      typeof value.token === "string" &&
-      TOKEN.test(value.token) &&
-      typeof value.pid === "number" &&
-      Number.isSafeInteger(value.pid) &&
-      value.pid > 0 &&
-      typeof value.uid === "number" &&
-      value.uid === process.getuid?.() &&
-      typeof value.bootId === "string" &&
-      BOOT_ID.test(value.bootId) &&
-      typeof value.birth === "string" &&
-      BIRTH.test(value.birth)
-    )
-  ) {
-    return refuse();
-  }
-  return {
-    version: 1,
-    token: value.token,
-    pid: value.pid,
-    uid: value.uid,
-    bootId: value.bootId,
-    birth: value.birth,
-  };
-}
-function absentProcess(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return false;
-  } catch (error) {
-    return hasCode(error, "ESRCH");
-  }
-}
-async function requireDeadOwner(owner: LockOwner): Promise<void> {
-  if (
-    owner.bootId !== (await bootId()) ||
-    owner.uid !== process.getuid?.() ||
-    !absentProcess(owner.pid) ||
-    (await processBirth(owner.pid)) !== null ||
-    !absentProcess(owner.pid)
-  ) {
-    throw new NativeComposeGenerationError("E_NATIVE_COMPOSE_BUSY");
-  }
-}
-
-export class NativeComposeGenerationError extends Error {
-  readonly code:
-    | "E_NATIVE_COMPOSE_STATE"
-    | "E_NATIVE_COMPOSE_BUSY"
-    | "E_NATIVE_COMPOSE_UNCERTAIN"
-    | "E_NATIVE_COMPOSE_STALE";
-  constructor(
-    code:
-      | "E_NATIVE_COMPOSE_STATE"
-      | "E_NATIVE_COMPOSE_BUSY"
-      | "E_NATIVE_COMPOSE_UNCERTAIN"
-      | "E_NATIVE_COMPOSE_STALE"
-  ) {
-    super(
-      {
-        E_NATIVE_COMPOSE_STATE:
-          "Native Compose state is unsafe or changed; values omitted. Inspect owned state before recovery.",
-        E_NATIVE_COMPOSE_BUSY:
-          "Native Compose instance is busy or has an interrupted lock; explicit ownership recovery is required.",
-        E_NATIVE_COMPOSE_UNCERTAIN:
-          "Native Compose operation has an uncertain outcome; inspect the saved generation or explicitly stop its owned resources before retrying.",
-        E_NATIVE_COMPOSE_STALE:
-          "Native Compose inputs changed before execution; prepare a fresh generation. Values omitted.",
-      }[code]
-    );
-    this.code = code;
-  }
-}
-function refuse(): never {
-  throw new NativeComposeGenerationError("E_NATIVE_COMPOSE_STATE");
-}
-function token(): string {
-  return randomUUID().replaceAll("-", "");
-}
 function hash(text: string): string {
   return createHash("sha256").update(text).digest("hex");
-}
-function keys(value: Record<string, unknown>, expected: string): boolean {
-  return Object.keys(value).sort().join() === expected;
-}
-function sameFile(
-  left: Stats,
-  right: { readonly dev: number; readonly ino: number }
-): boolean {
-  return left.dev === right.dev && left.ino === right.ino;
-}
-function hasCode(error: unknown, code: string): boolean {
-  return isRecord(error) && error.code === code;
-}
-async function requireAbsentGuard(path: string): Promise<void> {
-  try {
-    await lstat(path);
-  } catch (error) {
-    if (hasCode(error, "ENOENT")) {
-      return;
-    }
-    throw error;
-  }
-  throw new NativeComposeGenerationError("E_NATIVE_COMPOSE_BUSY");
 }
 function identityMatches(left: unknown, right: NativeComposeIdentity): boolean {
   return (
@@ -366,166 +149,6 @@ function identityMatches(left: unknown, right: NativeComposeIdentity): boolean {
     left.composeProject === right.composeProject &&
     left.ownerToken === right.ownerToken
   );
-}
-function fileSafe(info: Stats, limit: number): boolean {
-  return (
-    info.isFile() &&
-    info.nlink === 1 &&
-    info.uid === process.getuid?.() &&
-    (info.mode & 0o777) === 0o600 &&
-    info.size > 0 &&
-    info.size <= limit
-  );
-}
-async function holdDirectory(
-  path: string,
-  privateDirectory: boolean
-): Promise<HeldDirectory> {
-  const file = await open(
-    path,
-    constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK
-  ).catch(() => refuse());
-  try {
-    const info = await file.stat();
-    const named = await lstat(path);
-    if (
-      !(info.isDirectory() && sameFile(info, named)) ||
-      named.isSymbolicLink() ||
-      info.uid !== process.getuid?.() ||
-      (info.mode & 0o022) !== 0 ||
-      (privateDirectory && (info.mode & 0o777) !== 0o700) ||
-      (await realpath(path)) !== path
-    ) {
-      refuse();
-    }
-    return { path, file, info, private: privateDirectory };
-  } catch (error) {
-    await file.close();
-    throw error;
-  }
-}
-async function recheckDirectories(
-  directories: readonly HeldDirectory[]
-): Promise<void> {
-  for (const held of directories) {
-    const named = await lstat(held.path);
-    if (
-      !(named.isDirectory() && sameFile(named, held.info)) ||
-      named.uid !== process.getuid?.() ||
-      (named.mode & 0o022) !== 0 ||
-      (held.private && (named.mode & 0o777) !== 0o700) ||
-      (await realpath(held.path)) !== held.path
-    ) {
-      refuse();
-    }
-  }
-}
-async function privateDirectory(path: string): Promise<HeldDirectory> {
-  try {
-    await mkdir(path, { mode: 0o700 });
-  } catch (error) {
-    if (!hasCode(error, "EEXIST")) {
-      throw error;
-    }
-  }
-  return await holdDirectory(path, true);
-}
-async function readPrivate(
-  path: string,
-  limit: number
-): Promise<{ readonly text: string; readonly info: Stats }> {
-  const file = await open(
-    path,
-    constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK
-  ).catch((error: unknown) => {
-    if (hasCode(error, "ENOENT")) {
-      throw error;
-    }
-    return refuse();
-  });
-  try {
-    const before = await file.stat();
-    if (!fileSafe(before, limit)) {
-      refuse();
-    }
-    const bytes = Buffer.alloc(before.size + 1);
-    const { bytesRead } = await file.read(bytes, 0, bytes.length, 0);
-    const after = await file.stat();
-    const named = await lstat(path);
-    if (
-      bytesRead !== before.size ||
-      !fileSafe(after, limit) ||
-      !sameFile(before, after) ||
-      !sameFile(before, named) ||
-      before.size !== after.size ||
-      before.mtimeMs !== after.mtimeMs ||
-      before.ctimeMs !== after.ctimeMs
-    ) {
-      refuse();
-    }
-    return {
-      text: new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(
-        bytes.subarray(0, bytesRead)
-      ),
-      info: before,
-    };
-  } catch {
-    return refuse();
-  } finally {
-    await file.close();
-  }
-}
-async function jsonPrivate(path: string): Promise<unknown> {
-  const read = await readPrivate(path, RECEIPT_LIMIT);
-  try {
-    return JSON.parse(read.text) as unknown;
-  } catch {
-    return refuse();
-  }
-}
-async function writeExclusive(path: string, text: string): Promise<Stats> {
-  const file = await open(
-    path,
-    constants.O_CREAT |
-      constants.O_EXCL |
-      constants.O_WRONLY |
-      constants.O_NOFOLLOW,
-    0o600
-  );
-  try {
-    await file.writeFile(text);
-    await file.sync();
-    const info = await file.stat();
-    if (!fileSafe(info, Buffer.byteLength(text))) {
-      refuse();
-    }
-    return info;
-  } finally {
-    await file.close();
-  }
-}
-async function privateIgnore(path: string, create: boolean) {
-  if (create) {
-    try {
-      await writeExclusive(path, "*\n");
-    } catch (error) {
-      if (!hasCode(error, "EEXIST")) {
-        throw error;
-      }
-    }
-  }
-  const read = await readPrivate(path, 2);
-  if (read.text !== "*\n") {
-    refuse();
-  }
-  return read;
-}
-async function synchronizeDirectories(
-  directories: readonly HeldDirectory[]
-): Promise<void> {
-  for (const directory of [...directories].reverse()) {
-    await directory.file.sync();
-  }
 }
 function anchorValid(
   value: unknown
@@ -544,14 +167,14 @@ function anchorValid(
     Number.isSafeInteger(value.manifest.ino)
   );
 }
-function pendingValid(
-  value: unknown
-): value is NativeComposePending & GenerationAnchor {
+function pendingValid(value: unknown): value is PendingReceipt {
   return (
     isRecord(value) &&
     [
       "generationId,manifest,manifestHash,operation,token",
       "generationId,manifest,manifestHash,operation,recoveryToken,token",
+      "generationId,manifest,manifestHash,operation,projection,token",
+      "generationId,manifest,manifestHash,operation,projection,recoveryToken,token",
     ].includes(Object.keys(value).sort().join()) &&
     anchorValid(value) &&
     typeof value.token === "string" &&
@@ -559,7 +182,25 @@ function pendingValid(
     ["up", "restart", "run", "down"].includes(String(value.operation)) &&
     (!Object.hasOwn(value, "recoveryToken") ||
       (typeof value.recoveryToken === "string" &&
-        TOKEN.test(value.recoveryToken)))
+        TOKEN.test(value.recoveryToken))) &&
+    (!Object.hasOwn(value, "projection") ||
+      (value.operation === "run" && projectionAnchorValid(value.projection)))
+  );
+}
+function projectionAnchorValid(value: unknown): value is ProjectionAnchor {
+  return (
+    isRecord(value) &&
+    keys(value, "manifest,manifestHash,projectionId") &&
+    typeof value.projectionId === "string" &&
+    TOKEN.test(value.projectionId) &&
+    typeof value.manifestHash === "string" &&
+    HASH.test(value.manifestHash) &&
+    isRecord(value.manifest) &&
+    keys(value.manifest, "dev,ino") &&
+    typeof value.manifest.dev === "number" &&
+    Number.isSafeInteger(value.manifest.dev) &&
+    typeof value.manifest.ino === "number" &&
+    Number.isSafeInteger(value.manifest.ino)
   );
 }
 function beforeHooksValid(
@@ -1013,6 +654,8 @@ export type NativeComposeEffectOptions<T> = {
   readonly assertFresh?: () => Promise<void>;
   readonly assertOwned: () => Promise<void>;
   readonly recoverPending?: boolean;
+  /** Store-derived immutable one-off delivery, verified before/after run effects. */
+  readonly projection?: NativeComposeRunProjection;
   /**
    * Finalize dependent ownership after a reaped, verified complete effect and fresh
    * pending/ownership checks, before publishing the completed generation receipt.
@@ -1062,6 +705,9 @@ function admitEffect<T>(
     input.operation !== "up" &&
     input.operation !== "restart"
   ) {
+    refuse();
+  }
+  if (input.projection !== undefined && input.operation !== "run") {
     refuse();
   }
   if (input.operation !== "down" && state.beforeHooks !== null) {
@@ -1132,6 +778,12 @@ export type NativeComposeMutation = {
   }>;
   reserveGeneration(): NativeComposeReservation;
   publish(opts: PublishOptions): Promise<NativeComposeGeneration>;
+  /** Derive inside this mutation owner; arbitrary Compose overrides are never accepted. */
+  publishRunProjection(opts: {
+    readonly generation: NativeComposeGeneration;
+    readonly service: string;
+    readonly assertFresh: () => Promise<void>;
+  }): Promise<NativeComposeRunProjection>;
   /** Only a caller-verified complete postcondition clears intent; engine exit alone is insufficient. */
   runEffect<T>(opts: NativeComposeEffectOptions<T>): Promise<{
     readonly outcome: "complete" | "uncertain";
@@ -1301,48 +953,13 @@ export async function openNativeComposeGenerationStore(opts: {
         refuse();
       }
     };
-    const withLock = async <T>(run: () => Promise<T>) => {
-      await check();
-      await requireAbsentGuard(recoveryPath);
-      const lockOwner = await captureLockOwner();
-      try {
-        await mkdir(lockPath, { mode: 0o700 });
-      } catch (error) {
-        if (hasCode(error, "EEXIST")) {
-          throw new NativeComposeGenerationError("E_NATIVE_COMPOSE_BUSY");
-        }
-        throw error;
-      }
-      const lock = await holdDirectory(lockPath, true);
-      const ownerPath = join(lockPath, "owner");
-      const lockToken = JSON.stringify(lockOwner);
-      let ownerInfo: Stats | undefined;
-      try {
-        ownerInfo = await writeExclusive(ownerPath, lockToken);
-        await lock.file.sync();
-        await check();
-        await requireAbsentGuard(recoveryPath);
-        return await run();
-      } finally {
-        try {
-          await check();
-          await recheckDirectories([lock]);
-          const latest = await readPrivate(ownerPath, LOCK_OWNER_LIMIT);
-          if (
-            ownerInfo === undefined ||
-            !sameFile(latest.info, ownerInfo) ||
-            latest.text !== lockToken
-          ) {
-            refuse();
-          }
-          await unlink(ownerPath);
-          await rmdir(lockPath);
-          await directories[4]?.file.sync();
-        } finally {
-          await lock.file.close();
-        }
-      }
-    };
+    const { withLock, recoverInterruptedLock } =
+      createNativeComposePrivateMutationLock({
+        lockPath,
+        recoveryPath,
+        parent: directories[4],
+        check,
+      });
     const initialize = async () => {
       let value: unknown;
       try {
@@ -1422,6 +1039,13 @@ export async function openNativeComposeGenerationStore(opts: {
     const known = new WeakMap<NativeComposeGeneration, Manifest>();
     const anchors = new WeakMap<NativeComposeGeneration, GenerationAnchor>();
     const reservations = new WeakSet<NativeComposeReservation>();
+    const projections = new WeakMap<
+      NativeComposeRunProjection,
+      {
+        readonly manifest: ProjectionManifest;
+        readonly anchor: ProjectionAnchor;
+      }
+    >();
     const load = async (
       generationId: string,
       expected?: GenerationAnchor
@@ -1498,6 +1122,96 @@ export async function openNativeComposeGenerationStore(opts: {
       }
       return anchor;
     };
+    const readGenerationDocument = async (
+      generation: NativeComposeGeneration
+    ) => {
+      await verifyGeneration(generation);
+      const manifest = known.get(generation);
+      if (!manifest) {
+        return refuse();
+      }
+      const read = await readPrivate(
+        generation.composeFile,
+        NATIVE_COMPOSE_DOCUMENT_LIMIT
+      );
+      if (
+        !sameFile(read.info, manifest.document) ||
+        hash(read.text) !== manifest.documentHash
+      ) {
+        refuse();
+      }
+      let value: unknown;
+      try {
+        value = JSON.parse(read.text) as unknown;
+      } catch {
+        return refuse();
+      }
+      if (
+        !(
+          isRecord(value) &&
+          documentOwned(value, {
+            identity: ownedIdentity,
+            generationId: generation.generationId,
+          })
+        )
+      ) {
+        return refuse();
+      }
+      await check();
+      return Object.freeze(value);
+    };
+    const verifyProjection = async (
+      projection: NativeComposeRunProjection,
+      generation: NativeComposeGeneration
+    ) => {
+      const owned = projections.get(projection);
+      if (!owned || projection.generation !== generation) {
+        return refuse();
+      }
+      await verifyGeneration(generation);
+      const held = await holdDirectory(dirname(projection.composeFile), true);
+      try {
+        const manifestRead = await readPrivate(
+          join(held.path, "manifest.json"),
+          RECEIPT_LIMIT
+        );
+        if (
+          !sameFile(manifestRead.info, owned.anchor.manifest) ||
+          hash(manifestRead.text) !== owned.anchor.manifestHash ||
+          manifestRead.text !== JSON.stringify(owned.manifest) ||
+          JSON.stringify(owned.manifest.source) !==
+            JSON.stringify(knownAnchor(generation))
+        ) {
+          refuse();
+        }
+        const read = await readPrivate(
+          projection.composeFile,
+          NATIVE_COMPOSE_DOCUMENT_LIMIT
+        );
+        if (
+          !sameFile(read.info, owned.manifest.document) ||
+          hash(read.text) !== owned.manifest.documentHash
+        ) {
+          refuse();
+        }
+        await recheckDirectories([held]);
+        await check();
+      } finally {
+        await held.file.close();
+      }
+    };
+    const requireFinalPending = (
+      latest: Receipt,
+      pending: Receipt["pending"],
+      operation: NativeComposeOperation
+    ) => {
+      if (
+        JSON.stringify(latest.pending) !== JSON.stringify(pending) ||
+        (operation !== "down" && latest.beforeHooks !== null)
+      ) {
+        refuse();
+      }
+    };
     const finalizeEffect = async <T>(
       input: NativeComposeEffectOptions<T>,
       pending: Receipt["pending"],
@@ -1507,28 +1221,24 @@ export async function openNativeComposeGenerationStore(opts: {
         await assertFresh(input.assertFresh);
       }
       await verifyGeneration(input.generation);
+      if (input.projection) {
+        await verifyProjection(input.projection, input.generation);
+      }
       await input.assertOwned();
       let latest = await receipt();
-      if (
-        JSON.stringify(latest.pending) !== JSON.stringify(pending) ||
-        (input.operation !== "down" && latest.beforeHooks !== null)
-      ) {
-        refuse();
-      }
+      requireFinalPending(latest, pending, input.operation);
       if (input.beforeComplete) {
         await input.beforeComplete();
         if (input.assertFresh) {
           await assertFresh(input.assertFresh);
         }
         await verifyGeneration(input.generation);
+        if (input.projection) {
+          await verifyProjection(input.projection, input.generation);
+        }
         await input.assertOwned();
         latest = await receipt();
-        if (
-          JSON.stringify(latest.pending) !== JSON.stringify(pending) ||
-          (input.operation !== "down" && latest.beforeHooks !== null)
-        ) {
-          refuse();
-        }
+        requireFinalPending(latest, pending, input.operation);
       }
       await save(completedReceipt(latest, anchor, input.operation));
     };
@@ -1565,98 +1275,8 @@ export async function openNativeComposeGenerationStore(opts: {
               manifest: state.pending.manifest,
             });
       },
-      async readGenerationDocument(generation) {
-        await verifyGeneration(generation);
-        const manifest = known.get(generation);
-        if (!manifest) {
-          return refuse();
-        }
-        const read = await readPrivate(
-          generation.composeFile,
-          NATIVE_COMPOSE_DOCUMENT_LIMIT
-        );
-        if (
-          !sameFile(read.info, manifest.document) ||
-          hash(read.text) !== manifest.documentHash
-        ) {
-          refuse();
-        }
-        let value: unknown;
-        try {
-          value = JSON.parse(read.text) as unknown;
-        } catch {
-          return refuse();
-        }
-        if (
-          !(
-            isRecord(value) &&
-            documentOwned(value, {
-              identity: ownedIdentity,
-              generationId: generation.generationId,
-            })
-          )
-        ) {
-          return refuse();
-        }
-        await check();
-        return Object.freeze(value);
-      },
-      async recoverInterruptedLock() {
-        await check();
-        await requireAbsentGuard(recoveryPath);
-        try {
-          await lstat(lockPath);
-        } catch (error) {
-          if (hasCode(error, "ENOENT")) {
-            return;
-          }
-          throw error;
-        }
-        try {
-          await mkdir(recoveryPath, { mode: 0o700 });
-        } catch (error) {
-          if (hasCode(error, "EEXIST")) {
-            throw new NativeComposeGenerationError("E_NATIVE_COMPOSE_BUSY");
-          }
-          throw error;
-        }
-        const recovery = await holdDirectory(recoveryPath, true);
-        try {
-          const lock = await holdDirectory(lockPath, true);
-          try {
-            const ownerPath = join(lockPath, "owner");
-            const original = await readPrivate(ownerPath, LOCK_OWNER_LIMIT);
-            const owner = parseLockOwner(original.text);
-            await requireDeadOwner(owner);
-            await check();
-            await recheckDirectories([recovery, lock]);
-            const latest = await readPrivate(ownerPath, LOCK_OWNER_LIMIT);
-            if (
-              !sameFile(original.info, latest.info) ||
-              latest.text !== original.text ||
-              JSON.stringify(await readdir(lockPath)) !== '["owner"]'
-            ) {
-              refuse();
-            }
-            await requireDeadOwner(owner);
-            await recheckDirectories([recovery, lock]);
-            await unlink(ownerPath);
-            await rmdir(lockPath);
-            await directories[4]?.file.sync();
-          } finally {
-            await lock.file.close();
-          }
-        } finally {
-          try {
-            await check();
-            await recheckDirectories([recovery]);
-            await rmdir(recoveryPath);
-            await directories[4]?.file.sync();
-          } finally {
-            await recovery.file.close();
-          }
-        }
-      },
+      readGenerationDocument,
+      recoverInterruptedLock,
       async withMutation<T>(
         run: (mutation: NativeComposeMutation) => Promise<T>
       ) {
@@ -1686,14 +1306,22 @@ export async function openNativeComposeGenerationStore(opts: {
               actionDone = null;
             }
           };
+          const fenceEffectInputs = async <T>(
+            input: NativeComposeEffectOptions<T>
+          ) => {
+            await verifyGeneration(input.generation);
+            if (input.projection) {
+              await verifyProjection(input.projection, input.generation);
+            }
+            if (input.assertFresh) {
+              await assertFresh(input.assertFresh);
+            }
+          };
           const checkEffect = async <T>(
             input: NativeComposeEffectOptions<T>
           ) => {
             requireActive();
-            await verifyGeneration(input.generation);
-            if (input.assertFresh) {
-              await assertFresh(input.assertFresh);
-            }
+            await fenceEffectInputs(input);
             try {
               await input.assertOwned();
             } catch (error) {
@@ -1702,6 +1330,9 @@ export async function openNativeComposeGenerationStore(opts: {
               }
               refuse();
             }
+            // Engine observations can be slow. Fence the actual delivery again
+            // after them, immediately before intent publication or effect entry.
+            await fenceEffectInputs(input);
             await check();
             requireActive();
           };
@@ -1762,7 +1393,125 @@ export async function openNativeComposeGenerationStore(opts: {
             await finalizeEffect(input, pending, anchor);
             return result;
           };
+          const effectPending = <T>(
+            state: Receipt,
+            input: NativeComposeEffectOptions<T>,
+            anchor: GenerationAnchor
+          ): PendingReceipt => {
+            if (state.pending !== null) {
+              return { ...state.pending, recoveryToken: token() };
+            }
+            const pending = {
+              ...anchor,
+              token: token(),
+              operation: input.operation,
+            };
+            if (input.projection) {
+              return {
+                ...pending,
+                projection:
+                  projections.get(input.projection)?.anchor ?? refuse(),
+              };
+            }
+            return pending;
+          };
           const mutation: NativeComposeMutation = {
+            async publishRunProjection(options) {
+              const captured = Object.freeze({ ...options });
+              return await runAction(async () => {
+                if (
+                  opts.mode === "saved" ||
+                  (await receipt()).pending !== null
+                ) {
+                  throw new NativeComposeGenerationError(
+                    "E_NATIVE_COMPOSE_UNCERTAIN"
+                  );
+                }
+                await assertFresh(captured.assertFresh);
+                const document = await readGenerationDocument(
+                  captured.generation
+                );
+                const json = JSON.stringify(
+                  projectNativeComposeOneOff({
+                    document,
+                    generationId: captured.generation.generationId,
+                    service: captured.service,
+                  })
+                );
+                if (Buffer.byteLength(json) > NATIVE_COMPOSE_DOCUMENT_LIMIT) {
+                  refuse();
+                }
+                const opened: HeldDirectory[] = [];
+                try {
+                  const generationRoot = await holdDirectory(
+                    dirname(captured.generation.composeFile),
+                    true
+                  );
+                  opened.push(generationRoot);
+                  const projectionRoot = await privateDirectory(
+                    join(generationRoot.path, "oneoffs")
+                  );
+                  opened.push(projectionRoot);
+                  const projectionId = token();
+                  const held = await privateDirectory(
+                    join(projectionRoot.path, projectionId)
+                  );
+                  opened.push(held);
+                  const composeFile = join(held.path, "compose.json");
+                  const written = await writeExclusive(composeFile, json);
+                  const manifest: ProjectionManifest = {
+                    version: 1,
+                    identity: ownedIdentity,
+                    generationId: captured.generation.generationId,
+                    projectionId,
+                    service: captured.service,
+                    source: knownAnchor(captured.generation),
+                    documentHash: hash(json),
+                    document: { dev: written.dev, ino: written.ino },
+                  };
+                  const manifestJson = JSON.stringify(manifest);
+                  const writtenManifest = await writeExclusive(
+                    join(held.path, "manifest.json"),
+                    manifestJson
+                  );
+                  await synchronizeDirectories([
+                    held,
+                    projectionRoot,
+                    generationRoot,
+                  ]);
+                  await recheckDirectories([
+                    held,
+                    projectionRoot,
+                    generationRoot,
+                  ]);
+                  await assertFresh(captured.assertFresh);
+                  requireActive();
+                  const projection = Object.freeze({
+                    generation: captured.generation,
+                    projectionId,
+                    service: captured.service,
+                    composeFile,
+                  });
+                  projections.set(projection, {
+                    manifest,
+                    anchor: {
+                      projectionId,
+                      manifestHash: hash(manifestJson),
+                      manifest: {
+                        dev: writtenManifest.dev,
+                        ino: writtenManifest.ino,
+                      },
+                    },
+                  });
+                  await verifyProjection(projection, captured.generation);
+                  return projection;
+                } finally {
+                  await Promise.all(
+                    opened.map((directory) => directory.file.close())
+                  );
+                }
+              });
+            },
             async runBeforeHooks<T>(input: {
               readonly assertFresh: () => Promise<void>;
               readonly effect: () => Promise<{
@@ -1885,10 +1634,7 @@ export async function openNativeComposeGenerationStore(opts: {
                 admitEffect(input, state, opts.mode);
                 await checkEffect(input);
                 const anchor = knownAnchor(input.generation);
-                const pending: NativeComposePending & GenerationAnchor =
-                  state.pending === null
-                    ? { ...anchor, token: token(), operation: input.operation }
-                    : { ...state.pending, recoveryToken: token() };
+                const pending = effectPending(state, input, anchor);
                 await save({ ...state, pending });
                 try {
                   await checkEffect(input);

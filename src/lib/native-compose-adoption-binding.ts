@@ -8,7 +8,10 @@ import {
   createNativeComposeProbe,
   NativeComposeOwnershipError,
 } from "./native-compose-ownership.ts";
-import { acquireNativeConfigImportInputs } from "./native-config-import-inputs.ts";
+import {
+  acquireNativeConfigImportInputs,
+  type NativeConfigImportSourceIdentity,
+} from "./native-config-import-inputs.ts";
 import { freezeImportValue } from "./native-config-import-plan.ts";
 
 const ID = /^[a-f0-9]{64}$/;
@@ -29,7 +32,7 @@ const ROUTING = [
 const formats = {
   container: {
     list: `{"id":{{json .ID}},"name":{{json .Names}},"project":{{json (.Label "${PROJECT}")}}}`,
-    inspect: `{"id":{{json .Id}},"name":{{json .Name}},"project":{{json (index .Config.Labels "${PROJECT}")}},"native":{{json (index .Config.Labels "${VERSION}")}},"service":{{json (index .Config.Labels "com.docker.compose.service")}},"number":{{json (index .Config.Labels "com.docker.compose.container-number")}},"oneoff":{{json (index .Config.Labels "com.docker.compose.oneoff")}},"workingDir":{{json (index .Config.Labels "com.docker.compose.project.working_dir")}},"configFiles":{{json (index .Config.Labels "com.docker.compose.project.config_files")}},"mounts":[{{range $i, $m := .Mounts}}{{if $i}},{{end}}{"type":{{json $m.Type}},"name":{{json $m.Name}},"source":{{json $m.Source}},"target":{{json $m.Destination}},"rw":{{json $m.RW}}}{{end}}],"networks":[{{$first := true}}{{range $name, $n := .NetworkSettings.Networks}}{{if not $first}},{{end}}{{$first = false}}{"name":{{json $name}},"id":{{json $n.NetworkID}}}{{end}}]}`,
+    inspect: `{"id":{{json .Id}},"name":{{json .Name}},"project":{{json (index .Config.Labels "${PROJECT}")}},"native":{{json (index .Config.Labels "${VERSION}")}},"service":{{json (index .Config.Labels "com.docker.compose.service")}},"number":{{json (index .Config.Labels "com.docker.compose.container-number")}},"oneoff":{{json (index .Config.Labels "com.docker.compose.oneoff")}},"running":{{json .State.Running}},"workingDir":{{json (index .Config.Labels "com.docker.compose.project.working_dir")}},"configFiles":{{json (index .Config.Labels "com.docker.compose.project.config_files")}},"mounts":[{{range $i, $m := .Mounts}}{{if $i}},{{end}}{"type":{{json $m.Type}},"name":{{json $m.Name}},"source":{{json $m.Source}},"target":{{json $m.Destination}},"rw":{{json $m.RW}}}{{end}}],"networks":[{{$first := true}}{{range $name, $n := .NetworkSettings.Networks}}{{if not $first}},{{end}}{{$first = false}}{"name":{{json $name}},"id":{{json $n.NetworkID}}}{{end}}]}`,
   },
   volume: {
     list: `{"id":{{json .Name}},"name":{{json .Name}},"project":{{json (.Label "${PROJECT}")}}}`,
@@ -340,6 +343,7 @@ function containerRows(
         "service",
         "number",
         "oneoff",
+        "running",
         "workingDir",
         "configFiles",
         "mounts",
@@ -351,6 +355,7 @@ function containerRows(
           !services.has(row.service) &&
           row.number === "1" &&
           (row.oneoff === "False" || row.oneoff === "false") &&
+          typeof row.running === "boolean" &&
           row.workingDir === resolve(opts.root, ".hack") &&
           row.configFiles === resolve(opts.root, ".hack/docker-compose.yml") &&
           typeof row.id === "string" &&
@@ -428,7 +433,12 @@ async function engine(probe: Probe) {
   );
   return row.id;
 }
-async function snapshot(opts: {
+/**
+ * Private read-only observation reused by the durable adoption owner. It grants
+ * no mutation authority: that owner must first validate its saved source/binding
+ * anchors and compare every returned fact to the original verified acquisition.
+ */
+export async function inspectLegacyComposeAdoptionResources(opts: {
   readonly root: string;
   readonly intent: LegacyComposeStorageIntent;
   readonly signal?: AbortSignal;
@@ -463,18 +473,28 @@ async function snapshot(opts: {
     }),
     opts.intent
   );
-  const containers = containerRows(
-    await inspect({
-      kind: "container",
-      probe,
-      resources: selected.container,
-      project: opts.intent.composeProject,
-    }),
-    { ...opts, volumes, network }
-  );
+  const containerFacts = await inspect({
+    kind: "container",
+    probe,
+    resources: selected.container,
+    project: opts.intent.composeProject,
+  });
+  const containers = containerRows(containerFacts, {
+    ...opts,
+    volumes,
+    network,
+  });
+  // Docker drops stopped endpoints from network inspection. Every original must
+  // still configure this exact NetworkID; active membership is exactly the
+  // currently running originals. This transient state never enters the binding.
   requireValue(
     JSON.stringify([...containerIds].sort()) ===
-      JSON.stringify(containers.map((container) => container.id).sort())
+      JSON.stringify(
+        containerFacts
+          .filter((container) => container.running)
+          .map((container) => container.id)
+          .sort()
+      )
   );
   for (const kind of ["container", "volume", "network"] as const) {
     requireValue(
@@ -512,6 +532,19 @@ export type LegacyComposeAdoptionBinding = {
     readonly projectRoot: string;
     readonly signal?: AbortSignal;
   }) => Promise<LegacyComposeVerifiedBinding>;
+  /** Same bounded raw-source acquisition and binding, exclusively for private durable preparation. */
+  readonly resolvePreparationInputs: (opts: {
+    readonly projectRoot: string;
+    readonly signal?: AbortSignal;
+  }) => Promise<{
+    readonly configText: string;
+    readonly composeText: string;
+    readonly binding: LegacyComposeVerifiedBinding;
+    readonly sourceFiles: {
+      readonly config: NativeConfigImportSourceIdentity;
+      readonly compose: NativeConfigImportSourceIdentity;
+    };
+  }>;
 };
 function translate(error: unknown, signal?: AbortSignal): never {
   cancelled(signal);
@@ -566,7 +599,12 @@ export async function acquireLegacyComposeAdoptionBinding(input: {
     if (!intent) {
       refuse("E_LEGACY_COMPOSE_BINDING_UNSUPPORTED");
     }
-    const baseline = await snapshot({ root, intent, signal, timeoutMs });
+    const baseline = await inspectLegacyComposeAdoptionResources({
+      root,
+      intent,
+      signal,
+      timeoutMs,
+    });
     freezeImportValue(baseline);
     const assertFresh = async (current: {
       readonly projectRoot: string;
@@ -587,7 +625,7 @@ export async function acquireLegacyComposeAdoptionBinding(input: {
           refuse("E_LEGACY_COMPOSE_BINDING_CHANGED");
         }
         await source.assertFresh({ signal: currentSignal });
-        const observed = await snapshot({
+        const observed = await inspectLegacyComposeAdoptionResources({
           root,
           intent,
           signal: currentSignal,
@@ -618,9 +656,31 @@ export async function acquireLegacyComposeAdoptionBinding(input: {
         await assertFresh(current);
         return baseline;
       },
+      resolvePreparationInputs: async (current) => {
+        await assertFresh(current);
+        const result = {
+          configText: source.configText,
+          composeText: source.composeText,
+          binding: baseline,
+          sourceFiles: source.sourceFiles,
+        };
+        for (const key of [
+          "configText",
+          "composeText",
+          "binding",
+          "sourceFiles",
+        ]) {
+          Object.defineProperty(result, key, { enumerable: false });
+        }
+        return Object.freeze(result);
+      },
     };
     freezeImportValue(result.report);
-    for (const key of ["assertFresh", "resolveBinding"]) {
+    for (const key of [
+      "assertFresh",
+      "resolveBinding",
+      "resolvePreparationInputs",
+    ]) {
       Object.defineProperty(result, key, { enumerable: false });
     }
     await assertFresh({ projectRoot: root, signal });

@@ -37,6 +37,12 @@ running, healthy when it declares a health check, and each initializer job must
 have exited successfully. An older healthy container does not satisfy a new
 generation's readiness.
 
+Whole-project startup removes workloads that were removed or renamed in the
+selected native configuration, after verifying ownership of all existing project
+resources. Persistent volumes remain available for the next startup. A foreign
+container with the same Compose project still refuses startup before any engine
+effect; it is never adopted or removed as an orphan.
+
 `run` can start a cold project’s dependencies. It gives the one-off container a
 fresh name, verifies its generation, service, stopped state and exact exit code,
 then removes that verified stopped ID without forcing removal. A real nonzero

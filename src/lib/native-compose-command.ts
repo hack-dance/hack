@@ -596,6 +596,7 @@ async function prepareCommand(opts: {
               ...composeArgs(generation),
               "up",
               "-d",
+              "--remove-orphans",
               ...(operation === "restart" ? ["--force-recreate"] : []),
             ],
             {

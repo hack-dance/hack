@@ -151,6 +151,70 @@ test("source CLI mixed authored families refuse before native dispatch", async (
 });
 
 const macTest = process.platform === "darwin" ? test : test.skip;
+const unsupportedFiles = [
+  { name: "configs-empty", files: { configs: {} } },
+  { name: "secrets-empty", files: { secrets: {} } },
+  {
+    name: "files-inactive",
+    files: { configs: { unused: { file: "must-not-read.txt" } } },
+  },
+] as const;
+macTest.each(
+  unsupportedFiles.flatMap((selection) =>
+    ["malformed-metadata", "invalid-ciphertext"].map((managed) => ({
+      ...selection,
+      managed,
+    }))
+  )
+)(
+  "source CLI $name with $managed preserves early unsupported classification before environment acquisition",
+  async ({ files, managed }) => {
+    const selected = await fixture();
+    await Bun.write(
+      join(selected.root, ".hack/hack.project.json"),
+      JSON.stringify({
+        schema_version: 1,
+        name: "file-refusal-control",
+        worktree: { inherit_local: false, auto_branch: false },
+        services: {
+          web: {
+            image: `sha256:${"a".repeat(64)}`,
+            environment: { TOKEN: { env_ref: "TOKEN" } },
+          },
+        },
+        ...files,
+      })
+    );
+    // Neither metadata parsing nor value resolution may supersede the raw file fence.
+    await Bun.write(
+      join(selected.root, ".hack/hack.env.default.yaml"),
+      managed === "malformed-metadata"
+        ? `values: [${PRIVATE}`
+        : JSON.stringify({
+            version: 1,
+            environment: "default",
+            secretsprovider: "project_key",
+            values: { global: { TOKEN: { secure: `v1:${PRIVATE}` } } },
+          })
+    );
+    const value = await invoke({
+      selected: { ...selected, compiler: realCompiler },
+      args: ["up", "--env", "base"],
+      backend: "native",
+    });
+    expect(value.code).toBe(1);
+    expect(value.stdout + value.stderr).toMatch(
+      /^ERROR E_NATIVE_PROJECT_UNSUPPORTED:/
+    );
+    expect(value.stdout + value.stderr).not.toContain("E_STARTUP_INCOMPLETE");
+    expect(value.stdout + value.stderr).toContain(
+      "no native consumer was started"
+    );
+    expect(
+      await readdir(join(selected.root, ".hack/.internal/native-authored-runs"))
+    ).toEqual([".gitignore"]);
+  }
+);
 macTest.each([
   { option: "base", overlay: "base", metadata: null },
   { option: undefined, overlay: "inherit", metadata: "qa" },
@@ -244,6 +308,10 @@ macTest(
     expect(value.code).toBe(1);
     expect(value.stdout + value.stderr).toContain(
       "no native consumer was started"
+    );
+    expect(value.stdout + value.stderr).toContain("E_STARTUP_INCOMPLETE");
+    expect(value.stdout + value.stderr).not.toContain(
+      "E_NATIVE_PROJECT_UNSUPPORTED"
     );
     expect(
       await Bun.file(join(selected.root, "compiler-called")).exists()

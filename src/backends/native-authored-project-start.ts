@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { isAbsolute } from "node:path";
+import { NativeConfigCompilerError } from "../lib/native-config-compiler.ts";
 import { acquireNativeExecutionInputs } from "../lib/native-execution-inputs.ts";
 import {
   type NativeAuthoredReceipt,
@@ -447,6 +448,15 @@ export async function serveNativeAuthoredProject(
           outcome = await removeUnstartedSource(source, attempt, outcome);
           if (error instanceof NativeRuntimeRequestError) {
             nativeCode = error.nativeCode;
+          } else if (
+            outcome === "not-started" &&
+            source === undefined &&
+            attempt === undefined &&
+            error instanceof NativeConfigCompilerError &&
+            error.code === "E_NATIVE_PROJECT_UNSUPPORTED"
+          ) {
+            // Preserve only the typed pre-attempt capability refusal, never its diagnostics.
+            nativeCode = "native_graph_subset";
           }
           return {
             ok: false as const,

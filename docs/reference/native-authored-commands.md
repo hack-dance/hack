@@ -19,8 +19,10 @@ The native planner admits image-only workloads, exec readiness, initializer jobs
 and dependencies with the ordinary project network and outbound mode. Source
 root must remain `.`; source acquisition, mounts, storage, authored networks, file inputs, routing, endpoints
 and host effects remain outside this bounded frontend. Unsupported intent must
-refuse before managed value resolution and provider work. `--detach`, `--json`,
-service subsets, recovery and other lifecycle operations refuse before input
+refuse before managed value resolution and provider work. Early typed input
+capability refusals retain `E_NATIVE_PROJECT_UNSUPPORTED` without exposing
+compiler diagnostics or creating native source/start/run authority. `--detach`,
+`--json`, service subsets, recovery and other lifecycle operations refuse before input
 acquisition. `--branch` supplies an explicit native namespace; its omission uses
 the canonical project namespace without inferring a Git branch. Profile and env
 selection keep their compiler contracts. `--env base` bypasses inherited overlays

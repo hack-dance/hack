@@ -17,7 +17,7 @@ HACK_NATIVE_HOME=/absolute/private/candidate-home \
 
 The native planner admits image-only workloads, exec readiness, initializer jobs
 and dependencies with the ordinary project network and outbound mode. Source
-acquisition, mounts, storage, authored networks, file inputs, routing, endpoints
+root must remain `.`; source acquisition, mounts, storage, authored networks, file inputs, routing, endpoints
 and host effects remain outside this bounded frontend. Unsupported intent must
 refuse before managed value resolution and provider work. `--detach`, `--json`,
 service subsets, recovery and other lifecycle operations refuse before input

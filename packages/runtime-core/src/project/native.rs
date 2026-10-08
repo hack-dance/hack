@@ -291,7 +291,8 @@ fn compile_inputs(
         return Err(private_refused());
     }
     let environment_policy_hash = policy_hash(&plan, &environment_plan)?;
-    if !plan.storage.is_empty()
+    if plan.source.root != "."
+        || !plan.storage.is_empty()
         || plan.routes.is_some()
         || plan.open.is_some()
         || plan.host_bindings.is_some()

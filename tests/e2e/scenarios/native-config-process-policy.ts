@@ -736,8 +736,12 @@ export const nativeConfigProcessPolicyScenario: Scenario = {
           ctx.log(`fixed-field startup diagnostic: ${JSON.stringify(summary)}`);
         },
       });
-      if (diagnostic !== "not-applicable") {
-        stage(`fixed-field startup diagnostic ${diagnostic}`);
+      if (diagnostic.status === "unavailable") {
+        stage(
+          `fixed-field startup diagnostic unavailable stage=${diagnostic.stage} reason=${diagnostic.reason}`
+        );
+      } else if (diagnostic.status === "captured") {
+        stage("fixed-field startup diagnostic captured");
       }
       expectExit({
         result: initialUp,

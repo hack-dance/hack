@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import {
   nativeComposeCompletedOneoff,
+  nativeComposeOnFailureServices,
   nativeComposeRunDependenciesReady,
   nativeComposeWorkloadsReady,
 } from "../src/lib/native-compose-completion.ts";
@@ -43,6 +44,30 @@ function container(
     ...overrides,
   };
 }
+test("restart observation selects saved services and excludes on-failure jobs", () => {
+  expect(
+    nativeComposeOnFailureServices({
+      services: {
+        retry: {
+          labels: { "io.hack.native-config.workload": "service" },
+          restart: "on-failure:2",
+        },
+        init: {
+          labels: { "io.hack.native-config.workload": "job" },
+          restart: "on-failure:2",
+        },
+        noRetry: {
+          labels: { "io.hack.native-config.workload": "service" },
+          restart: "no",
+        },
+        malformed: {
+          labels: { "io.hack.native-config.workload": "service" },
+          restart: ["on-failure:2"],
+        },
+      },
+    })
+  ).toEqual(["retry"]);
+});
 test("old healthy service or completed job cannot publish a proposed generation", () => {
   const current = [container("web"), container("init")];
   expect(

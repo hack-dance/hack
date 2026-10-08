@@ -48,6 +48,14 @@ const CADDY_TAG = "lucaslorentz/caddy-docker-proxy:2.10.0-alpine";
 const ROOT_CA = "/data/caddy/pki/authorities/local/root.crt";
 const PRIVATE_TMPFS = "rw,nosuid,nodev,noexec,size=64m,mode=0700";
 const NAMES = ["peer", "reader", "vault", "web"] as const;
+const REFUSAL_STAGES = [
+  "unrouted_run",
+  "disconnected_validation",
+  "disconnected_endpoint",
+  "topology_mutation",
+  "routed_run",
+] as const;
+type RefusalStage = (typeof REFUSAL_STAGES)[number];
 type Name = (typeof NAMES)[number];
 type Docker = (args: readonly string[]) => Promise<string>;
 type NetworkPolicy = { readonly name: string; readonly internal: boolean };
@@ -70,6 +78,27 @@ function requireValue(condition: unknown, message: string): asserts condition {
     throw new Error(message);
   }
 }
+
+/** Fixed failure evidence only; never include argv, source, stderr or paths. */
+export function nativeNetworkFixtureRefusalDiagnostic(opts: {
+  readonly stage: RefusalStage;
+  readonly fragmentPresent: boolean;
+  readonly dockerInvoked: boolean;
+}): string {
+  if (
+    typeof opts.stage !== "string" ||
+    !REFUSAL_STAGES.includes(opts.stage) ||
+    typeof opts.fragmentPresent !== "boolean" ||
+    typeof opts.dockerInvoked !== "boolean"
+  ) {
+    return "Network refusal diagnostic unavailable";
+  }
+  return `Network refusal diagnostic ${JSON.stringify({
+    stage: opts.stage,
+    fragmentPresent: opts.fragmentPresent,
+    dockerInvoked: opts.dockerInvoked,
+  })}`;
+}
 function object(text: string): Record<string, unknown> {
   let value: unknown;
   try {
@@ -85,6 +114,76 @@ function object(text: string): Record<string, unknown> {
 }
 function own(value: Record<string, unknown>, name: string): unknown {
   return Object.hasOwn(value, name) ? value[name] : undefined;
+}
+
+/** The mutation owner redacts admission failures to this fixed state error. */
+export function nativeNetworkFixtureStateRefused(value: unknown): boolean {
+  if (!isRecord(value) || own(value, "ok") !== false) {
+    return false;
+  }
+  const error = own(value, "error");
+  return (
+    isRecord(error) &&
+    own(error, "code") === "E_CONFIG_INVALID" &&
+    own(error, "message") ===
+      "Native Compose state is unsafe or changed; values omitted. Inspect owned state before recovery."
+  );
+}
+
+/** Docker inspect may permute Mounts; every field and mount entry must survive. */
+export function nativeNetworkFixturePreservedContainerMatches(opts: {
+  readonly before: string;
+  readonly after: string;
+}): boolean {
+  const normalize = (text: string): Record<string, unknown> | null => {
+    if (Buffer.byteLength(text) > OUTPUT_LIMIT) {
+      return null;
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      return null;
+    }
+    if (
+      !Array.isArray(parsed) ||
+      parsed.length !== 1 ||
+      !isRecord(parsed[0]) ||
+      typeof parsed[0].Id !== "string" ||
+      !ID.test(parsed[0].Id) ||
+      !Array.isArray(parsed[0].Mounts)
+    ) {
+      return null;
+    }
+    const mounts: {
+      readonly destination: string;
+      readonly value: Record<string, unknown>;
+    }[] = [];
+    const destinations = new Set<string>();
+    for (const mount of parsed[0].Mounts) {
+      if (
+        !isRecord(mount) ||
+        typeof mount.Destination !== "string" ||
+        mount.Destination.length === 0 ||
+        destinations.has(mount.Destination)
+      ) {
+        return null;
+      }
+      destinations.add(mount.Destination);
+      mounts.push({ destination: mount.Destination, value: mount });
+    }
+    mounts.sort((left, right) =>
+      left.destination.localeCompare(right.destination)
+    );
+    return { ...parsed[0], Mounts: mounts.map((mount) => mount.value) };
+  };
+  const before = normalize(opts.before);
+  const after = normalize(opts.after);
+  return (
+    before !== null &&
+    after !== null &&
+    JSON.stringify(before) === JSON.stringify(after)
+  );
 }
 function sameNames(value: unknown, expected: readonly string[]): boolean {
   return (
@@ -1302,7 +1401,8 @@ export const nativeConfigNetworksScenario: Scenario = {
     const noForward = async (
       checkout: Checkout,
       args: readonly string[],
-      fragment: string
+      fragment: string,
+      stage: RefusalStage
     ): Promise<void> => {
       const source = await saved(checkout.root);
       const before = await observe(checkout);
@@ -1321,9 +1421,19 @@ export const nativeConfigNetworksScenario: Scenario = {
       });
       const result = await raw(checkout, args, { PATH: `${shim}:${env.PATH}` });
       resultOk(result, 1);
+      const fragmentPresent = result.combined.includes(fragment);
+      const dockerInvoked = await Bun.file(receipt).exists();
+      if (!fragmentPresent || dockerInvoked) {
+        ctx.log(
+          nativeNetworkFixtureRefusalDiagnostic({
+            stage,
+            fragmentPresent,
+            dockerInvoked,
+          })
+        );
+      }
       requireValue(
-        result.combined.includes(fragment) &&
-          !(await Bun.file(receipt).exists()),
+        fragmentPresent && !dockerInvoked,
         "Expected precise refusal before any Docker subprocess"
       );
       const after = await saved(checkout.root);
@@ -1567,7 +1677,8 @@ export const nativeConfigNetworksScenario: Scenario = {
       await noForward(
         primary,
         ["run", "web", "--", "bun", "-e", "process.exit(0)"],
-        "requires qualified one-off attachment behavior"
+        "requires qualified one-off attachment behavior",
+        "unrouted_run"
       );
       await cli(primary, ["restart", "--json"]);
       await observe(primary);
@@ -1600,8 +1711,15 @@ export const nativeConfigNetworksScenario: Scenario = {
       await Bun.write(primary.path, `${JSON.stringify(disconnected)}\n`);
       await noForward(
         primary,
+        ["config", "validate", "--json"],
+        "disconnected_endpoint_target",
+        "disconnected_validation"
+      );
+      await noForward(
+        primary,
         ["up", "--detach", "--json"],
-        "disconnected_endpoint_target"
+        "Native execution inputs are invalid or changed",
+        "disconnected_endpoint"
       );
       await Bun.write(primary.path, primary.text);
       await Bun.write(
@@ -1611,7 +1729,8 @@ export const nativeConfigNetworksScenario: Scenario = {
       await noForward(
         primary,
         ["up", "--detach", "--json"],
-        "network topology changed"
+        "network topology changed",
+        "topology_mutation"
       );
       await cli(primary, ["down", "--json"]);
       await resourceAbsent(primary);
@@ -1670,13 +1789,31 @@ export const nativeConfigNetworksScenario: Scenario = {
         created: canaryValue.Created,
       };
       await docker(["container", "start", canaryId]);
+      const activeCanary = await inspect(docker, "container", canaryId);
+      const occupiedBridge = await inspect(docker, "network", outbound.id);
+      requireValue(
+        activeCanary.Id === canaryId &&
+          activeCanary.Created === canary.created &&
+          isRecord(activeCanary.State) &&
+          activeCanary.State.Status === "running" &&
+          occupiedBridge.Id === outbound.id &&
+          isRecord(occupiedBridge.Containers) &&
+          Object.hasOwn(occupiedBridge.Containers, canaryId),
+        "Foreign endpoint must be running on the pinned bridge before admission"
+      );
       const foreign = await raw(primary, ["up", "--detach", "--json"]);
       resultOk(foreign, 1);
+      const foreignState = await saved(primary.root);
+      const foreignSnapshot = await observe(primary);
       requireValue(
-        foreign.combined.includes("ownership") &&
-          (await saved(primary.root)).state.pending === null &&
-          JSON.stringify(await observe(primary)) ===
-            JSON.stringify(originalSnapshot),
+        nativeNetworkFixtureStateRefused(object(foreign.stdout)),
+        "Foreign endpoint must produce the fixed redacted state refusal"
+      );
+      requireValue(
+        foreignState.state.pending === null &&
+          foreignState.generation.generationId ===
+            original.generation.generationId &&
+          JSON.stringify(foreignSnapshot) === JSON.stringify(originalSnapshot),
         "Foreign endpoint must refuse without mutating owned saved state"
       );
       await continuity();
@@ -1906,7 +2043,8 @@ export const nativeConfigNetworksScenario: Scenario = {
       await noForward(
         primary,
         ["run", "web", "--", "bun", "-e", "process.exit(0)"],
-        "requires qualified one-off label projection"
+        "requires qualified one-off attachment behavior",
+        "routed_run"
       );
       await cli(primary, ["down", "--json"]);
       await resourceAbsent(primary);
@@ -2015,7 +2153,10 @@ export const nativeConfigNetworksScenario: Scenario = {
         );
         for (const [id, before] of selected.preserved) {
           requireValue(
-            (await docker(["container", "inspect", id])) === before,
+            nativeNetworkFixturePreservedContainerMatches({
+              before,
+              after: await docker(["container", "inspect", id]),
+            }),
             "Stopped user Caddy containers must remain unchanged"
           );
         }

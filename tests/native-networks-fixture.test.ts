@@ -21,13 +21,125 @@ import {
   nativeNetworkFixtureHasNoPublication,
   nativeNetworkFixtureInventory,
   nativeNetworkFixtureNetworkMatches,
+  nativeNetworkFixturePreservedContainerMatches,
   nativeNetworkFixtureProtocolMatches,
+  nativeNetworkFixtureRefusalDiagnostic,
   nativeNetworkFixtureShim,
+  nativeNetworkFixtureStateRefused,
   nativeNetworkFixtureVolumeMatches,
   nativeNetworkFixtureVolumeSelectionMatches,
   provisionNativeNetworkFixtureComposePlugin,
   runNativeNetworkFixtureCommand,
 } from "./e2e/native-config-networks-acceptance.ts";
+
+test("preserved user container comparison permits only mount ordering", () => {
+  const mount = {
+    Type: "bind",
+    Source: "/fixture/source",
+    Destination: "/source",
+    RW: false,
+  };
+  const volume = {
+    Type: "volume",
+    Name: "fixture-volume",
+    Destination: "/data",
+    RW: true,
+  };
+  const value = {
+    Id: "a".repeat(64),
+    Created: "fixed-birth",
+    State: { Status: "exited" },
+    Mounts: [mount, volume],
+  };
+  const before = JSON.stringify([value]);
+  expect(
+    nativeNetworkFixturePreservedContainerMatches({
+      before,
+      after: JSON.stringify([{ ...value, Mounts: [volume, mount] }]),
+    })
+  ).toBe(true);
+  for (const after of [
+    { ...value, Id: "b".repeat(64) },
+    { ...value, Created: "other-birth" },
+    { ...value, State: { Status: "running" } },
+    { ...value, Mounts: [volume] },
+    { ...value, Mounts: [volume, { ...mount, Source: "/other-source" }] },
+    { ...value, Mounts: [volume, { ...mount, RW: true }] },
+    { ...value, Mounts: [volume, mount, mount] },
+    { ...value, Mounts: [volume, { ...mount, Destination: "" }] },
+    { ...value, unexpected: true },
+  ]) {
+    expect(
+      nativeNetworkFixturePreservedContainerMatches({
+        before,
+        after: JSON.stringify([after]),
+      })
+    ).toBe(false);
+  }
+  for (const after of [
+    "invalid",
+    "null",
+    "[]",
+    JSON.stringify([value, value]),
+    JSON.stringify([{ Id: value.Id, Mounts: null }]),
+  ]) {
+    expect(
+      nativeNetworkFixturePreservedContainerMatches({ before, after })
+    ).toBe(false);
+  }
+});
+
+test("foreign endpoint admission requires the structured redacted state error", () => {
+  const message =
+    "Native Compose state is unsafe or changed; values omitted. Inspect owned state before recovery.";
+  expect(
+    nativeNetworkFixtureStateRefused({
+      ok: false,
+      error: { code: "E_CONFIG_INVALID", message },
+    })
+  ).toBe(true);
+  for (const value of [
+    null,
+    message,
+    { ok: true, error: { code: "E_CONFIG_INVALID", message } },
+    { ok: false, error: { code: "E_STARTUP_INCOMPLETE", message } },
+    { ok: false, error: { code: "E_CONFIG_INVALID", message: "ownership" } },
+    {
+      ok: false,
+      error: { code: "E_CONFIG_INVALID", message: `${message} extra` },
+    },
+    { ok: false, error: { code: "E_CONFIG_INVALID" } },
+    { ok: false, error: null },
+  ]) {
+    expect(nativeNetworkFixtureStateRefused(value)).toBe(false);
+  }
+});
+
+test("refusal failure evidence distinguishes its fixed stage and both original checks", () => {
+  const result = nativeNetworkFixtureRefusalDiagnostic({
+    stage: "disconnected_endpoint",
+    fragmentPresent: false,
+    dockerInvoked: true,
+  });
+  expect(result).toContain('"stage":"disconnected_endpoint"');
+  expect(result).toContain('"fragmentPresent":false');
+  expect(result).toContain('"dockerInvoked":true');
+});
+
+test("refusal diagnostics never print untrusted labels or non-boolean values", () => {
+  const secret = "external-secret-must-not-appear";
+  for (const value of [
+    { stage: secret, fragmentPresent: false, dockerInvoked: false },
+    { stage: "unrouted_run", fragmentPresent: secret, dockerInvoked: false },
+    { stage: "unrouted_run", fragmentPresent: false, dockerInvoked: secret },
+  ]) {
+    const result = nativeNetworkFixtureRefusalDiagnostic(
+      value as Parameters<typeof nativeNetworkFixtureRefusalDiagnostic>[0]
+    );
+    expect(result).toBe("Network refusal diagnostic unavailable");
+    expect(result).not.toContain(secret);
+  }
+});
 
 async function withPluginFixture(
   run: (opts: {

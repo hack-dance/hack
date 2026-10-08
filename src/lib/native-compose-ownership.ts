@@ -297,21 +297,41 @@ function validateOptions(opts: NativeComposeOwnershipOptions): void {
 export async function observeSavedNativeComposeOwned(
   input: NativeComposeOwnershipOptions
 ): Promise<NativeComposeOwnershipObservation> {
-  return await queryNativeComposeOwned(input, true);
+  return (await queryNativeComposeOwned(input, "saved", new Set())).observation;
 }
 
 export async function assertNativeComposeOwned(
   input: NativeComposeOwnershipOptions
 ): Promise<NativeComposeOwnershipObservation> {
-  return await queryNativeComposeOwned(input, false);
+  return (await queryNativeComposeOwned(input, "strict", new Set()))
+    .observation;
+}
+
+/** Startup readiness only: an exact owned on-failure restart without bridge membership remains unready. Never use this observation as effect authority. */
+export async function observeNativeComposeStartupOwned(
+  input: NativeComposeOwnershipOptions,
+  restartingServices: readonly string[]
+): Promise<NativeComposeOwnershipObservation | null> {
+  const selected = new Set(restartingServices);
+  requireValue(
+    input.recovery === undefined &&
+      selected.size === restartingServices.length &&
+      restartingServices.every((name) => input.expectedServices.includes(name))
+  );
+  const result = await queryNativeComposeOwned(input, "startup", selected);
+  return result.restarting ? null : result.observation;
 }
 
 async function queryNativeComposeOwned(
   input: NativeComposeOwnershipOptions,
-  observeCreated: boolean
-): Promise<NativeComposeOwnershipObservation> {
+  mode: "saved" | "startup" | "strict",
+  restartingServices: ReadonlySet<string>
+): Promise<{
+  readonly observation: NativeComposeOwnershipObservation;
+  readonly restarting: boolean;
+}> {
   try {
-    requireValue(!observeCreated || input.recovery === undefined);
+    requireValue(mode === "strict" || input.recovery === undefined);
     validateOptions(input);
     const opts: NativeComposeOwnershipOptions = {
       ...input,
@@ -406,7 +426,12 @@ async function queryNativeComposeOwned(
         observations,
       });
     }
-    validateTopology(opts, observations, observeCreated);
+    const firstRestarting = validateTopology(
+      opts,
+      observations,
+      mode,
+      restartingServices
+    );
     // Attachments can change without changing container or network object IDs.
     // Recheck policy IDs, aliases and membership; this is not an IP/endpoint-incarnation fence.
     const rechecked: MutableObservation = {
@@ -425,10 +450,28 @@ async function queryNativeComposeOwned(
         observations: rechecked,
       });
     }
-    validateTopology(opts, rechecked, observeCreated);
+    const secondRestarting = validateTopology(
+      opts,
+      rechecked,
+      mode,
+      restartingServices
+    );
+    const restarting = new Set([...firstRestarting, ...secondRestarting]);
+    for (const id of restarting) {
+      const first = observations.containers.find((value) => value.id === id);
+      const second = rechecked.containers.find((value) => value.id === id);
+      requireValue(
+        first !== undefined &&
+          second !== undefined &&
+          first.name === second.name &&
+          first.generationId === second.generationId &&
+          first.service === second.service &&
+          first.oneoff === second.oneoff
+      );
+    }
     requireValue(
-      JSON.stringify(topologySnapshot(observations)) ===
-        JSON.stringify(topologySnapshot(rechecked))
+      JSON.stringify(topologySnapshot(observations, restarting)) ===
+        JSON.stringify(topologySnapshot(rechecked, restarting))
     );
     for (const kind of ["container", "volume", "network"] as const) {
       requireValue(
@@ -437,9 +480,12 @@ async function queryNativeComposeOwned(
       );
     }
     return {
-      containers: rechecked.containers,
-      volumes: observations.volumes,
-      networks: rechecked.networks,
+      observation: {
+        containers: rechecked.containers,
+        volumes: observations.volumes,
+        networks: rechecked.networks,
+      },
+      restarting: restarting.size > 0,
     };
   } catch (error: unknown) {
     if (error instanceof NativeComposeOwnershipError) {
@@ -709,11 +755,57 @@ function endpointContainerName(opts: {
   return predecessors.length === 1 ? canonical : container.name;
 }
 
+function requireLiveMember(opts: {
+  readonly selection: NativeComposeOwnershipOptions;
+  readonly observations: MutableObservation;
+  readonly container: NativeComposeContainerObservation;
+  readonly attachment: NativeComposeWorkloadNetworks["networks"][number];
+  readonly policy: NativeComposeWorkloadNetworks;
+  readonly networkId: string | undefined;
+  readonly endpoint: Record<string, unknown>;
+  readonly mode: "saved" | "startup" | "strict";
+  readonly restartingServices: ReadonlySet<string>;
+}): boolean {
+  const {
+    selection,
+    observations,
+    container,
+    attachment,
+    policy,
+    networkId,
+    endpoint,
+    mode,
+    restartingServices,
+  } = opts;
+  if (
+    attachment.externalId !== undefined ||
+    !["running", "paused", "restarting"].includes(container.state) ||
+    observations.members.get(attachment.name)?.includes(container.id)
+  ) {
+    return false;
+  }
+  requireValue(
+    mode === "startup" &&
+      container.state === "restarting" &&
+      !container.oneoff &&
+      restartingServices.has(container.service) &&
+      policy.networks.length === 1 &&
+      attachment.name === `${selection.runtimeIdentity}_default` &&
+      networkPolicies(selection).length === 1 &&
+      networkPolicies(selection)[0]?.internal === false &&
+      networkId !== undefined &&
+      endpoint.NetworkID === networkId
+  );
+  return true;
+}
+
 function validateTopology(
   opts: NativeComposeOwnershipOptions,
   observations: MutableObservation,
-  observeCreated: boolean
-): void {
+  mode: "saved" | "startup" | "strict",
+  restartingServices: ReadonlySet<string>
+): ReadonlySet<string> {
+  const restarting = new Set<string>();
   const policies = workloadNetworks(opts);
   const owned = new Map(
     observations.networks.map((network) => [network.name, network.id])
@@ -755,7 +847,7 @@ function validateTopology(
         id === undefined &&
         ["created", "exited", "dead", "removing"].includes(container.state);
       const unrealizedCreatedEndpoint = isUnrealizedCreatedEndpoint({
-        eligible: opts.recovery === "down" || observeCreated,
+        eligible: opts.recovery === "down" || mode === "saved",
         state: container.state,
         externalId: attachment.externalId,
         id,
@@ -788,20 +880,29 @@ function validateTopology(
         unrealizedCreatedEndpoint,
       });
       if (
-        attachment.externalId === undefined &&
-        (container.state === "running" ||
-          container.state === "paused" ||
-          container.state === "restarting")
+        requireLiveMember({
+          selection: opts,
+          observations,
+          container,
+          attachment,
+          policy,
+          networkId: id,
+          endpoint,
+          mode,
+          restartingServices,
+        })
       ) {
-        requireValue(
-          observations.members.get(attachment.name)?.includes(container.id)
-        );
+        restarting.add(container.id);
       }
     }
   }
+  return restarting;
 }
 
-function topologySnapshot(observations: MutableObservation) {
+function topologySnapshot(
+  observations: MutableObservation,
+  restarting: ReadonlySet<string> = new Set()
+) {
   return {
     endpoints: [...observations.endpoints]
       .map(([id, endpoints]) => [
@@ -820,9 +921,12 @@ function topologySnapshot(observations: MutableObservation) {
           .sort(([left], [right]) => String(left).localeCompare(String(right))),
       ])
       .sort(([left], [right]) => String(left).localeCompare(String(right))),
-    members: [...observations.members].sort(([left], [right]) =>
-      left.localeCompare(right)
-    ),
+    members: [...observations.members]
+      .map(([name, members]) => [
+        name,
+        members.filter((id) => !restarting.has(id)),
+      ])
+      .sort(([left], [right]) => String(left).localeCompare(String(right))),
   };
 }
 

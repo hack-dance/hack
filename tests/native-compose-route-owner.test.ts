@@ -9,9 +9,11 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { isRecord } from "../src/lib/guards.ts";
 import type { NativeComposeIngressBinding } from "../src/lib/native-compose-ingress.ts";
 import { renderNativeCompose } from "../src/lib/native-compose-renderer.ts";
 import {
+  NativeComposeRouteClaimError,
   type NativeComposeRouteClaims,
   openNativeComposeRouteClaims,
 } from "../src/lib/native-compose-route-claims.ts";
@@ -60,8 +62,37 @@ afterEach(async () => {
   await rm(root, { recursive: true, force: true });
 });
 
-function fixture(domain = "dev.test", generationId = GENERATION) {
-  const input = composeFixture();
+function fixture(
+  domain = "dev.test",
+  generationId = GENERATION,
+  opts: { readonly customNetworks?: boolean } = {}
+) {
+  const input = composeFixture(
+    opts.customNetworks
+      ? {
+          services: {
+            web: {
+              image: "fixture/web:1",
+              networks: { outbound: { aliases: ["web-alias"] } },
+            },
+            peer: {
+              image: "fixture/peer:1",
+              networks: { outbound: { aliases: ["peer-alias"] } },
+            },
+            vault: {
+              image: "fixture/vault:1",
+              networks: { inside: { aliases: ["vault-alias"] } },
+            },
+          },
+        }
+      : {}
+  );
+  if (opts.customNetworks) {
+    input.plan.networks = {
+      outbound: { internal: false },
+      inside: { internal: true },
+    };
+  }
   input.plan.routes = {
     domain,
     aliases: {},
@@ -94,7 +125,9 @@ function fixture(domain = "dev.test", generationId = GENERATION) {
       },
     },
   };
-  const declared = { web: "service" } as const;
+  const declared = Object.fromEntries(
+    Object.keys(input.plan.services).map((name) => [name, "service" as const])
+  );
   const rendered = renderNativeCompose({
     ...input,
     runtimeIdentity: OWNER.composeProject,
@@ -359,6 +392,221 @@ test("private route metadata binds the generation, proof targets and immutable c
       generationIdentity: NEXT,
     })
   ).rejects.toThrow();
+});
+
+test("custom owned attachments retain aliases through routed saved metadata and verified retirement", async () => {
+  const input = fixture("dev.test", GENERATION, { customNetworks: true });
+  const checks = probes();
+  const owner = await prepare(input, checks);
+  const saved = { generationId: GENERATION, document: owner.document };
+  expect(owner.document.services).toMatchObject({
+    web: { networks: { outbound: { aliases: ["web-alias"] }, ingress: {} } },
+  });
+  expect(readNativeComposeRouteMetadata(saved)?.binding).toEqual(BINDING);
+  await complete(owner);
+  const before = await claimFiles();
+  await verifyNativeComposeSavedRoutesAbsent({
+    owner: OWNER,
+    saved: [saved],
+    deadline: Date.now() + 5000,
+    io: checks.io,
+  });
+  expect(await claimFiles()).toEqual(before);
+  await releaseNativeComposeSavedRoutes({
+    owner: OWNER,
+    saved: [saved],
+    deadline: Date.now() + 5000,
+    io: checks.io,
+  });
+  expect(checks.events).toContain("inventory-absent");
+  expect(checks.events).toContain("proxy-absent-fixture.dev.test");
+});
+
+test("custom routed recovery retains uncertain claims until fresh exact absence proof", async () => {
+  const owner = await prepare(
+    fixture("dev.test", GENERATION, { customNetworks: true })
+  );
+  await owner.markEffectsPossible();
+  await owner.close();
+  const saved = { generationId: GENERATION, document: owner.document };
+  const before = await claimFiles();
+  const failed = probes();
+  failed.staleProxy();
+  await expect(
+    releaseNativeComposeSavedRoutes({
+      owner: OWNER,
+      saved: [saved],
+      recover: true,
+      deadline: Date.now() + 5000,
+      io: failed.io,
+    })
+  ).rejects.toBeInstanceOf(NativeComposeRouteClaimError);
+  expect(failed.events).toEqual([
+    "ingress-recheck",
+    "inventory-absent",
+    "proxy-absent-fixture.dev.test",
+  ]);
+  expect(await claimFiles()).toEqual(before);
+  await releaseNativeComposeSavedRoutes({
+    owner: OWNER,
+    saved: [saved],
+    recover: true,
+    deadline: Date.now() + 5000,
+    io: probes().io,
+  });
+  await expect(
+    (await claims(OTHER)).acquire({
+      hostnames: ["fixture.dev.test"],
+      generationIdentity: NEXT,
+    })
+  ).resolves.toMatchObject({ phase: "reserved" });
+});
+
+test.each([
+  "extra-attachment",
+  "extra-definition",
+  "external-owned-network",
+  "ingress-name",
+  "ingress-alias",
+  "missing-ingress",
+  "ingress-only",
+  "unrouted-ingress",
+  "array-custom-attachment",
+  "unknown-attachment-field",
+  "duplicate-alias",
+  "service-alias",
+  "malformed-alias",
+  "physical-network-name",
+  "network-owner",
+  "container-owner",
+  "container-instance",
+  "container-generation",
+  "inherited-labels",
+  "routed-job",
+  "route-label",
+] as const)("custom saved routes reject %s without changing claims", async (change) => {
+  const owner = await prepare(
+    fixture("dev.test", GENERATION, { customNetworks: true })
+  );
+  const before = await claimFiles();
+  const document = structuredClone(owner.document);
+  if (!(isRecord(document.services) && isRecord(document.networks))) {
+    throw new Error("Expected fixture topology");
+  }
+  const web = document.services.web;
+  const peer = document.services.peer;
+  const outbound = document.networks.outbound;
+  const ingress = document.networks.ingress;
+  if (
+    !(
+      isRecord(web) &&
+      isRecord(web.networks) &&
+      isRecord(web.labels) &&
+      isRecord(peer) &&
+      isRecord(peer.networks) &&
+      isRecord(peer.labels) &&
+      isRecord(outbound) &&
+      isRecord(outbound.labels) &&
+      isRecord(ingress)
+    )
+  ) {
+    throw new Error("Expected fixture attachments and labels");
+  }
+  switch (change) {
+    case "extra-attachment":
+      web.networks.foreign = {};
+      break;
+    case "extra-definition":
+      document.networks.unused = structuredClone(outbound);
+      break;
+    case "external-owned-network":
+      document.networks.outbound = { external: true, name: "hack-dev" };
+      break;
+    case "ingress-name":
+      ingress.name = "foreign-ingress";
+      break;
+    case "ingress-alias":
+      web.networks.ingress = { aliases: ["foreign-alias"] };
+      break;
+    case "missing-ingress":
+      web.networks = Object.fromEntries(
+        Object.entries(web.networks).filter(([name]) => name !== "ingress")
+      );
+      break;
+    case "ingress-only":
+      web.networks = { ingress: {} };
+      break;
+    case "unrouted-ingress":
+      peer.networks.ingress = {};
+      break;
+    case "array-custom-attachment":
+      web.networks = ["outbound", "ingress"];
+      break;
+    case "unknown-attachment-field":
+      web.networks.outbound = { aliases: ["web-alias"], priority: 1 };
+      break;
+    case "duplicate-alias":
+      peer.networks.outbound = { aliases: ["web-alias"] };
+      break;
+    case "service-alias":
+      web.networks.outbound = { aliases: ["peer"] };
+      break;
+    case "malformed-alias":
+      web.networks.outbound = { aliases: ["INVALID"] };
+      break;
+    case "physical-network-name":
+      outbound.name = "foreign-bridge";
+      break;
+    case "network-owner":
+      outbound.labels["io.hack.native-config.owner"] = OTHER.ownerToken;
+      break;
+    case "container-owner":
+      peer.labels["io.hack.native-config.owner"] = OTHER.ownerToken;
+      break;
+    case "container-instance":
+      web.labels["io.hack.native-config.instance"] = OTHER.composeProject;
+      break;
+    case "container-generation":
+      web.labels["io.hack.native-config.generation"] = NEXT;
+      break;
+    case "inherited-labels":
+      web.labels = Object.create(web.labels);
+      break;
+    case "routed-job":
+      web.labels["io.hack.native-config.workload"] = "job";
+      break;
+    case "route-label":
+      web.labels.caddy_ingress_network = "foreign-ingress";
+      break;
+    default:
+      throw new Error("Unknown fixture topology mutation");
+  }
+  expect(() =>
+    readNativeComposeRouteMetadata({ generationId: GENERATION, document })
+  ).toThrow(NativeComposeRoutingError);
+  expect(await claimFiles()).toEqual(before);
+});
+
+test("custom route admission binds topology to the caller's verified manifest owner", async () => {
+  const input = fixture("dev.test", GENERATION, { customNetworks: true });
+  const checks = probes();
+  await expect(
+    prepareNativeComposeRouteOwner({
+      ...input,
+      owner: OTHER,
+      previous: [],
+      io: checks.io,
+    })
+  ).rejects.toBeInstanceOf(NativeComposeRoutingError);
+  expect(checks.events).not.toContain("inventory-admission");
+  const owner = await prepare(input);
+  expect(() =>
+    readNativeComposeRouteMetadata({
+      generationId: GENERATION,
+      document: owner.document,
+      owner: OTHER,
+    })
+  ).toThrow(NativeComposeRoutingError);
 });
 
 test("saved metadata rejects extra fields, malformed anchors and a different generation", async () => {

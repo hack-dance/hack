@@ -181,10 +181,18 @@ test("readiness markers and unbound engine events cannot substitute for immutabl
   noEvents.retryEvents = [];
   expect(() => verifyNativeProcessPolicyEvidence(noEvents)).toThrow();
   const wrongId = evidence();
-  wrongId.retryEvents[0].id = "b".repeat(64);
+  for (const event of wrongId.retryEvents) {
+    event.id = "b".repeat(64);
+    break;
+  }
   expect(() => verifyNativeProcessPolicyEvidence(wrongId)).toThrow();
   const wrongExit = evidence();
-  wrongExit.retryEvents[1].exitCode = "0";
+  for (const event of wrongExit.retryEvents) {
+    if (event.action === "die") {
+      event.exitCode = "0";
+      break;
+    }
+  }
   expect(() => verifyNativeProcessPolicyEvidence(wrongExit)).toThrow();
 });
 

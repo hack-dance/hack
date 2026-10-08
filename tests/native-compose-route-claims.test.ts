@@ -542,12 +542,14 @@ test("armed interrupted process retains claims; reopened snapshot cannot clear i
     import.meta.url
   ).href;
   const child = spawn(`
+    import {rename} from "node:fs/promises";
     import {openNativeComposeRouteClaims} from ${JSON.stringify(module)};
     const root = ${JSON.stringify(root)};
     const store = await openNativeComposeRouteClaims({root: root + "/compose-routing", binding: ${JSON.stringify(BINDING)}, owner: ${JSON.stringify(OWNER)}});
     const attempt = await store.acquire({hostnames:[${JSON.stringify(HOST)}], generationIdentity:${JSON.stringify(GENERATION)}});
     await store.markEffectsPossible(attempt);
-    await Bun.write(root + "/attempt", JSON.stringify(attempt.reference));
+    await Bun.write(root + "/attempt-pending", JSON.stringify(attempt.reference));
+    await rename(root + "/attempt-pending", root + "/attempt");
     await Bun.sleep(60_000);
   `);
   await waitForFile(join(root, "attempt"));

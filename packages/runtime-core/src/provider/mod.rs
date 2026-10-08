@@ -35,6 +35,8 @@ pub mod image_ensure;
 mod image_load;
 pub mod managed_environment;
 #[cfg(feature = "native-config-plan")]
+mod native_environment;
+#[cfg(feature = "native-config-plan")]
 pub mod native_input;
 pub mod private_deadline;
 pub mod private_input;

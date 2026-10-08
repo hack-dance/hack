@@ -2,13 +2,13 @@
 use super::*;
 
 #[derive(Default, Debug, PartialEq, Eq)]
-struct Budget {
+pub(super) struct Budget {
     services: u64,
     memory: u64,
     nano_cpus: u64,
 }
 impl Budget {
-    fn add(&mut self, config: &Value) -> Result<(), CandidateError> {
+    pub(super) fn add(&mut self, config: &Value) -> Result<(), CandidateError> {
         let memory = config["HostConfig"]["Memory"]
             .as_u64()
             .ok_or_else(invalid)?;
@@ -94,6 +94,17 @@ pub(super) fn check(
             // must not silently consume capacity already given to another branch.
             budget.add(&value)?;
         }
+    }
+    #[cfg(feature = "native-config-plan")]
+    native::reservations(candidate, engine, except.is_none(), |config| {
+        budget.add(config)
+    })?;
+    #[cfg(not(feature = "native-config-plan"))]
+    if !storage_inventory::runs(&candidate.state_root.join("run/native-graphs"))?.is_empty() {
+        return Err(error(
+            "native_graph_feature_unavailable",
+            "Retained native graph ownership requires the native-config-plan feature before more graph work can be admitted.",
+        ));
     }
     Ok(())
 }

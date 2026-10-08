@@ -1,7 +1,40 @@
 //! Native image-only lowering; runtime ownership and effects are separately admitted.
 use super::*;
 use crate::{project::native::NativeInputs, provider::native_input};
+mod journal;
+mod runtime;
 pub mod selection;
+pub use journal::{Phase, Receipt};
+pub(super) use runtime::reservations;
+pub use runtime::{Snapshot, cleanup, inspect, run};
+
+pub(in crate::provider) fn environment_binding(
+    candidate: &Candidate,
+    owner: &str,
+    boot: &str,
+    binding: &crate::provider::native_environment::Binding,
+    service: &str,
+    staging: bool,
+) -> Result<(), CandidateError> {
+    let (receipt, _) = journal::load(candidate, &binding.run, owner, boot)?;
+    let resource = receipt
+        .resources
+        .get(&format!("container:{service}"))
+        .ok_or_else(refused)?;
+    let scope = receipt.review.scope();
+    if binding.namespace != scope.namespace
+        || binding.review != receipt.review.review_id()
+        || binding.container != resource.name
+        || (staging
+            && (receipt.phase != Phase::Preparing
+                || resource.phase != "create-intent"
+                || resource.id.is_some()))
+        || (!staging && resource.phase == "reserved")
+    {
+        return Err(refused());
+    }
+    Ok(())
+}
 
 /// Public engine configuration only, deliberately without Debug/Serialize.
 /// No image inspection, private staging, journal or engine effect is performed here.

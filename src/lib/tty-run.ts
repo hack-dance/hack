@@ -12,6 +12,7 @@ export async function runWithTerminalGroup(opts: {
   readonly stderr?: RunOptions["stderr"];
   readonly stdin?: RunOptions["stdin"];
   readonly timeoutMs?: number;
+  readonly beforeSpawn?: RunOptions["beforeSpawn"];
   readonly onSpawn?: RunOptions["onSpawn"];
   readonly onExit?: RunOptions["onExit"];
 }): Promise<number> {
@@ -37,6 +38,12 @@ export async function runWithTerminalGroup(opts: {
   const invocation = Bun.main.startsWith("/$bunfs/")
     ? [process.execPath]
     : [process.execPath, entrypoint];
+  try {
+    opts.beforeSpawn?.();
+  } catch (error) {
+    terminal.close();
+    throw error;
+  }
   const child = Bun.spawn([...invocation, TTY_SUPERVISOR_ARGUMENT], {
     cwd: opts.cwd,
     env: opts.env,

@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { chmod, mkdir, realpath } from "node:fs/promises";
+import { mkdir, realpath } from "node:fs/promises";
 import { join } from "node:path";
 import type { Project } from "../../../packages/config-compiler/generated/native-config.ts";
 import { isRecord } from "../../../src/lib/guards.ts";
@@ -13,6 +13,7 @@ import {
   runCommand,
   type Scenario,
 } from "../harness.ts";
+import { prepareNativeEngineTripwire } from "../native-engine-tripwire.ts";
 import { proxyHasNoPublishedPorts } from "./native-config-routing.ts";
 
 const TIMEOUT = 120_000;
@@ -285,7 +286,7 @@ export function verifyUnsupportedNativeBuild(opts: {
       isRecord(execution) &&
       execution.ok === false &&
       isRecord(execution.error) &&
-      execution.error.code === "E_UNEXPECTED" &&
+      execution.error.code === "E_CONFIG_INVALID" &&
       execution.error.message === INPUT_REFUSAL,
     message: "Build execution must return the fixed redacted input refusal",
   });
@@ -369,14 +370,10 @@ async function refusalControls(opts: {
   });
   const tripwire = join(opts.root, "tripwire");
   await mkdir(tripwire);
-  const engineCalled = join(tripwire, "engine-called");
+  const engineCalled = await prepareNativeEngineTripwire({
+    directory: tripwire,
+  });
   const hookCalled = join(tripwire, "hook-called");
-  const fakeDocker = join(tripwire, "docker");
-  await Bun.write(
-    fakeDocker,
-    `#!${process.execPath}\nawait Bun.write(${JSON.stringify(engineCalled)}, "called");process.exit(99);\n`
-  );
-  await chmod(fakeDocker, 0o700);
   for (const field of UNSUPPORTED_BUILD_FIELDS) {
     for (const namespace of ["services", "jobs"] as const) {
       const invalid: unknown = {

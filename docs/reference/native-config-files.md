@@ -53,11 +53,12 @@ The CLI negotiates `file_plan_version: 1` before sending authored file intent an
 checks that sources, grants, permission intent and managed metadata were preserved.
 An older compiler refuses even an empty file namespace.
 
-Execution remains unqualified in this component. Native Compose refuses original
-file intent before managed-env acquisition, hooks or engine operations. The native
-graph adapter also refuses raw file namespace presence, including empty definitions
-and inactive grants, before private value copies. A successful file plan must not be
-treated as permission to launch a workload or fall back to another backend.
+The experimental Compose path maps selected grants to private read-only bind files
+for whole-project `up` and `restart`. A successful file plan alone grants no
+execution authority: delivery requires the live generation mutation, selected
+managed owner and exact material projection. The native graph adapter continues to
+refuse raw file namespace presence, including empty definitions and inactive
+grants, before private value copies. Neither path falls back to another backend.
 
 The first private owner subset is read-only mode `0444` with no UID/GID override;
 custom permissions, writable access, one-off `run`, and projects combining builds
@@ -65,18 +66,23 @@ with file inputs remain outside that subset. File-backed Compose config/secret
 mounts do not implement portable ownership remapping, so emitting ignored attributes
 would not satisfy this contract. See the [Compose long-syntax contract](https://docs.docker.com/reference/compose-file/services/#secrets).
 Private snapshot ownership, freshness, exact bind
-projection, interruption recovery and verified cleanup require separate source and
-synthetic engine qualification before delivery is enabled. See the
+projection, interruption recovery and verified cleanup have separate source and
+synthetic engine qualification boundaries. See the
 [Compose renderer boundary](native-compose-renderer.md) and
 [generation recovery contract](native-compose-generation.md).
 
-The unwired filesystem owner acquires only compiler-selected grants under the
+The filesystem owner acquires only compiler-selected grants under the
 actual generation mutation lease. It keeps the checkout, source parents and leaf
 files open and rechecks their identities around bounded reads. The aggregate input
 bound is 1 MiB. Secret files require mode 0400 or 0600; config files and source
 parents must not be group/world writable. Empty and binary bytes remain exact.
 Managed references resolve through the existing env owner, independently of
 authored env delivery, without reading caller env or introducing encryption.
+Before hooks receive symbolic planning inputs without file reads or staging. After
+known before-hook completion, Hack reacquires the same compiler selection and
+managed owner before reading file bytes. Hooks may create the selected source file;
+changing selection or unsupported permission intent refuses delivery. All authored
+build/file combinations, including inactive workloads, refuse before private reads.
 
 Snapshots use owned 0700 directories outside the checkout, exclusive 0444 files,
 0600 metadata and exact read-only binds with `create_host_path: false`. A private
@@ -88,20 +94,52 @@ extra binds into the private material root.
 Public plans, logs and CLI receipts contain no values, private paths or content
 digests. Copied identities, reservations or handles cannot mint mutation authority;
 closing the mutation revokes that authority and awaits its owned work.
+The material root is under the existing canonical global runtime directory, outside
+the checkout and build context. Hack does not create an authored source or an
+absent bind path to make admission pass. The private generated document also binds
+the exact Docker engine. Before and after delivery, fixed bounded read-only queries
+verify that each file container has the exact source, target and read-only mount.
+Existing mounts of the material root or its ancestors refuse before staging writes
+members; retained descendant snapshots stay independent. The root fence repeats
+before spawning, together with immutable member/projection and ownership checks.
+Any extra mount overlapping the snapshot, including an unrelated container's mount
+of an ancestor directory, refuses readiness or retirement. The observation has a configured phase deadline
+and aggregate private output budget.
 
 A fixed-inode append journal separates effects-possible, known child reaping,
 retirement intent, each member unlink and the final retired marker. Unarmed rollback
 requires the original live attempt. Armed material cannot retire merely because
 containers disappeared: the original live attempt must have recorded verified child
 completion, and hooks must be known. Saved stop checks exact immutable references
-and fresh owned-container absence without authored reads or decryption. A missing
+and fresh owned-container and global snapshot-mount absence on the saved engine,
+without authored reads or decryption. Natural Compose child exit qualifies reaping
+only after its owned process group is absent. Cancellation, timeout or surviving
+descendants never infer a reaping receipt from container absence. A missing
 member before retirement intent refuses; a missing member after exact intent permits
 retry, while replacement always refuses. Old material retires before generation
-handoff, and the pending generation remains until the finalizer and fresh ownership
-and pending checks pass. A failed finalizer retains the exact recovery reference.
+handoff, and the pending generation remains until the finalizer and fresh ownership,
+full current file/member/mount readiness, engine and pending checks pass. A failed finalizer retains the exact recovery
+reference, including a crash or drift after member unlink but before the stopped
+receipt. Repeating verified stop can finish an exact already-retired journal.
 
 Closing a material owner does not delete snapshots. Interrupted preparation before
 generation publication conservatively retains its directory; this slice does not
 scan or adopt orphan snapshots. An interrupted journal write that cannot be parsed
-also retains material. Command delivery remains refused until independent source
-review and the compiled synthetic engine fixture qualify these boundaries.
+also retains material. Unknown hooks or an armed journal without original-attempt
+reaping remain retained after `down --recover`; this slice has no interface for
+clearing that uncertainty. It does not reconstruct a lost generation from an orphan
+snapshot. Compiler/filesystem/process controls with strict Docker stand-ins do not
+establish actual container delivery; compiled synthetic engine acceptance remains
+a separate gate.
+
+Each saved stop also synchronizes a `stop-armed` record before Compose. Only that
+live stop attempt may append `stop-reaped` after natural exit and owned-group
+absence. A prior unknown stop cannot be handed off to a later invocation, even if
+another `down --recover` succeeds and no snapshot binds remain. Owned stop remains
+available; the exact pending reference and material remain retained. Stop records
+can append after retirement intent or the retired marker, so a retry cannot lose
+this boundary during partial deletion or the retirement/receipt crash gap.
+After durable arming, cancellation and the configured deadline are checked again
+after fresh ownership checks and synchronously at the actual spawn boundary,
+including terminal setup. An interrupted arm retains its exact pending reference
+without launching a later child or inferring reaping from engine absence.

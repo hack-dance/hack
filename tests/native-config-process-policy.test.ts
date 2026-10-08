@@ -47,7 +47,9 @@ test("process evidence requires observed signal, grace, orphan reaping and exact
   expect(() => verifyNativeProcessPolicyEvidence(evidence())).not.toThrow();
 });
 
-function policyRefusals(field: "resources" | "logging") {
+function policyRefusals(
+  field: "resources" | "logging" | "isolation" | "devices"
+) {
   return {
     field,
     compilerReport: {
@@ -64,7 +66,7 @@ function policyRefusals(field: "resources" | "logging") {
     executionReport: {
       ok: false,
       error: {
-        code: "E_UNEXPECTED",
+        code: "E_CONFIG_INVALID",
         message:
           "Native execution inputs are invalid or changed; prepare a fresh generation. Values omitted.",
       },
@@ -73,7 +75,12 @@ function policyRefusals(field: "resources" | "logging") {
 }
 
 test("unsupported policy evidence separates precise compiler refusal from redacted execution output", () => {
-  for (const field of ["resources", "logging"] as const) {
+  for (const field of [
+    "resources",
+    "logging",
+    "isolation",
+    "devices",
+  ] as const) {
     expect(() =>
       verifyUnsupportedNativeProcessPolicy(policyRefusals(field))
     ).not.toThrow();
@@ -112,6 +119,10 @@ test("compiler refusal cannot substitute for a failed redacted execution refusal
   for (const executionReport of [
     null,
     { ok: true },
+    {
+      ok: false,
+      error: { ...good.executionReport.error, code: "E_UNEXPECTED" },
+    },
     {
       ok: false,
       error: { ...good.executionReport.error, code: "E_PROJECT_NOT_FOUND" },

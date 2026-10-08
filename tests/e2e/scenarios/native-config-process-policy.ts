@@ -1,4 +1,4 @@
-import { chmod, mkdir, open, realpath } from "node:fs/promises";
+import { mkdir, open, realpath } from "node:fs/promises";
 import { join } from "node:path";
 import type {
   Project,
@@ -15,6 +15,7 @@ import {
   runCommand,
   type Scenario,
 } from "../harness.ts";
+import { prepareNativeEngineTripwire } from "../native-engine-tripwire.ts";
 import { recordKnownUncertainProcessPolicyStartup } from "../native-process-policy-startup-diagnostic.ts";
 
 const TIMEOUT = 120_000;
@@ -281,7 +282,7 @@ export function nativeProcessPolicyProject(opts: {
 
 /** Compile diagnostics identify unsupported intent; execution deliberately returns a fixed redacted refusal. */
 export function verifyUnsupportedNativeProcessPolicy(opts: {
-  readonly field: "resources" | "logging";
+  readonly field: "resources" | "logging" | "isolation" | "devices";
   readonly compilerReport: unknown;
   readonly executionReport: unknown;
 }): void {
@@ -301,8 +302,7 @@ export function verifyUnsupportedNativeProcessPolicy(opts: {
       diagnostic.code === "unknown_field" &&
       diagnostic.pointer === `/services/unsupported/${opts.field}` &&
       diagnostic.document === "project",
-    message:
-      "Compiler must specifically refuse the unsupported resource/logging field",
+    message: "Compiler must specifically refuse the unsupported runtime field",
   });
   const execution = opts.executionReport;
   expect({
@@ -310,14 +310,14 @@ export function verifyUnsupportedNativeProcessPolicy(opts: {
       isRecord(execution) &&
       execution.ok === false &&
       isRecord(execution.error) &&
-      execution.error.code === "E_UNEXPECTED" &&
+      execution.error.code === "E_CONFIG_INVALID" &&
       execution.error.message === EXECUTION_INPUT_REFUSAL,
     message: "Native execution must return its fixed redacted input refusal",
   });
 }
 
 /** Actual compiler/CLI refusals run behind engine and hook tripwires, including unselected declarations. */
-async function refuseUnsupportedPolicies(opts: {
+export async function refuseUnsupportedPolicies(opts: {
   readonly root: string;
   readonly source: string;
   readonly image: string;
@@ -342,15 +342,16 @@ async function refuseUnsupportedPolicies(opts: {
   });
   const tripwire = join(opts.root, "tripwire");
   await mkdir(tripwire);
-  const engineCalled = join(tripwire, "engine-called");
+  const engineCalled = await prepareNativeEngineTripwire({
+    directory: tripwire,
+  });
   const hookCalled = join(tripwire, "hook-called");
-  const fakeDocker = join(tripwire, "docker");
-  await Bun.write(
-    fakeDocker,
-    `#!${process.execPath}\nawait Bun.write(${JSON.stringify(engineCalled)}, "called");process.exit(99);\n`
-  );
-  await chmod(fakeDocker, 0o700);
-  for (const field of ["resources", "logging"] as const) {
+  for (const field of [
+    "resources",
+    "logging",
+    "isolation",
+    "devices",
+  ] as const) {
     for (const inactive of [false, true]) {
       const invalid: unknown = {
         ...opts.project,
@@ -397,7 +398,7 @@ async function refuseUnsupportedPolicies(opts: {
           !result.timedOut &&
           !result.combined.includes(UNSUPPORTED_VALUE),
         message:
-          "Unsupported resource/logging intent, including inactive workloads, must refuse with redacted compiler diagnostics",
+          "Unsupported runtime intent, including inactive workloads, must refuse with redacted compiler diagnostics",
       });
       verifyUnsupportedNativeProcessPolicy({
         field,
@@ -514,7 +515,7 @@ export const nativeConfigProcessPolicyScenario: Scenario = {
     });
     await restore();
     stage(
-      "resource/logging and inactive-profile refusals verified before engine/hook access"
+      "resource/logging/isolation/device and inactive-profile refusals verified before engine/hook access"
     );
     let identity: Identity | null = null;
     let readerId: string | null = null;

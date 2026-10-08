@@ -46,6 +46,37 @@ const ADMIN_COMMAND = [
   "--url",
   ADMIN_GET,
 ] as const;
+const TLS_COMMAND = [
+  "exec",
+  PROXY,
+  "curl",
+  "--disable",
+  "--silent",
+  "--show-error",
+  "--proxy",
+  "",
+  "--noproxy",
+  "*",
+  "--proto",
+  "=https",
+  "--head",
+  "--output",
+  "/dev/null",
+  "--max-redirs",
+  "0",
+  "--connect-timeout",
+  "2",
+  "--max-time",
+  "5",
+  "--cacert",
+  "/data/caddy/pki/authorities/local/root.crt",
+  "--resolve",
+  `${HOST}:443:127.0.0.1`,
+  "--write-out",
+  "%{http_code}",
+  "--url",
+  `https://${HOST}/`,
+] as const;
 const ACCESS_MESSAGE =
   "Native Compose routing needs the verified live Caddy API reader. Refresh the global runtime template with hack global install or the guided hack doctor --fix repair, retaining caddy_data, before restarting it. Values omitted.";
 const BINDING = {
@@ -90,6 +121,11 @@ function active(hosts = [HOST], dials = ["172.29.0.3:3000"]) {
     },
   };
 }
+function automatic() {
+  const server: Record<string, unknown> = { ...active().srv0 };
+  server.tls_connection_policies = undefined;
+  return { srv0: server };
+}
 function options() {
   return {
     binding: { ...BINDING },
@@ -124,8 +160,9 @@ const args = process.argv.slice(2);
 appendFileSync(root + "/commands", JSON.stringify(args) + "\\n");
 const f = JSON.parse(readFileSync(root + "/fixture.json", "utf8"));
 const [kind, action] = args;
+const tls = JSON.stringify(args) === JSON.stringify(${JSON.stringify(TLS_COMMAND)});
 const permitted = kind === "exec"
- ? JSON.stringify(args) === JSON.stringify(${JSON.stringify(ADMIN_COMMAND)})
+ ? tls || JSON.stringify(args) === JSON.stringify(${JSON.stringify(ADMIN_COMMAND)})
  : args.includes("--format") && (kind === "info" || (kind === "network" && action === "inspect") || (kind === "container" && ["ls", "inspect"].includes(action)));
 if (!permitted) { writeFileSync(root + "/mutated", "unexpected command"); process.exit(99); }
 function count(key) {
@@ -140,6 +177,12 @@ if (f.mode === "hang" || (f.mode === "wait" && !existsSync(root + "/started"))) 
 if (kind === "info") console.log(JSON.stringify(${JSON.stringify(ENGINE)}));
 else if (kind === "network") console.log(JSON.stringify({id: ${JSON.stringify(NETWORK)}, name: "hack-dev"}));
 else if (kind === "exec") {
+ if (tls) {
+  count("tls-count");
+  if (f.mode === "tls-hang") { writeFileSync(root + "/started", String(process.pid)); await Bun.sleep(60_000); }
+  if (f.mode === "tls-fail") { console.error(${JSON.stringify(CANARY)}); process.exit(60); }
+  process.stdout.write(f.tlsOutput ?? "200"); process.exit(0);
+ }
  if (f.mode === "access-hang") { writeFileSync(root + "/started", String(process.pid)); await Bun.sleep(60_000); }
  if (f.mode === "active-fail") { console.error(${JSON.stringify(CANARY)}); process.exit(23); }
  if (f.mode === "active-malformed") { console.log(${JSON.stringify(CANARY)}); process.exit(0); }
@@ -178,6 +221,7 @@ async function prepare(value: unknown): Promise<void> {
     "proxy-lists",
     "workload-lists",
     "selected-workload-index",
+    "tls-count",
   ]) {
     await rm(join(root, counter), { force: true });
   }
@@ -230,7 +274,10 @@ async function readOnlyCommands(): Promise<string[][]> {
   expect(observed.flat()).not.toContain("wget");
   for (const args of observed) {
     if (args[0] === "exec") {
-      expect(args).toEqual([...ADMIN_COMMAND]);
+      expect(
+        JSON.stringify(args) === JSON.stringify(ADMIN_COMMAND) ||
+          JSON.stringify(args) === JSON.stringify(TLS_COMMAND)
+      ).toBe(true);
     } else {
       expect(args.includes("--format")).toBe(true);
       expect(
@@ -275,6 +322,101 @@ test("proxy confirmation uses exact read-only GET and two current workload/upstr
     expect(format).not.toContain("{{json .}}");
   }
   expect(await Bun.file(join(root, "mutated")).exists()).toBe(false);
+});
+test("omitted automatic TLS needs exact CA-verified HEAD plus fresh dispatch and owner observations", async () => {
+  await prepare({ active: automatic(), tlsOutput: "405" });
+  await assertNativeComposeProxyRoutes(options());
+  const observed = await commands();
+  expect(observed.filter((args) => args[0] === "exec")).toEqual([
+    [...ADMIN_COMMAND],
+    [...TLS_COMMAND],
+    [...ADMIN_COMMAND],
+    [...ADMIN_COMMAND],
+    [...TLS_COMMAND],
+    [...ADMIN_COMMAND],
+  ]);
+  expect(observed.flat()).not.toContain("--insecure");
+  expect(observed.flat()).not.toContain("--location");
+  expect(
+    observed.filter(
+      (args) =>
+        args[0] === "container" &&
+        args[1] === "ls" &&
+        args.includes(`label=com.docker.compose.project=${PROJECT}`)
+    )
+  ).toHaveLength(2);
+});
+test("automatic TLS refuses failed or malformed handshakes without exposing private diagnostics", async () => {
+  for (const fixture of [
+    { mode: "tls-fail" },
+    { tlsOutput: "000" },
+    { tlsOutput: "200\n" },
+    { tlsOutput: `200${CANARY}` },
+  ]) {
+    await prepare({ active: automatic(), ...fixture });
+    await refusal({ ...options(), deadline: Date.now() + 600 });
+    expect((await commands()).some((args) => args.includes("--head"))).toBe(
+      true
+    );
+  }
+}, 10_000);
+test("automatic TLS cannot excuse wrong ports, explicit denial, duplicate listeners or static shadowing", async () => {
+  const shadow = automatic();
+  shadow.srv0.routes = [
+    { handle: [{ handler: "static_response", status_code: 200 }] },
+    ...active().srv0.routes,
+  ];
+  for (const servers of [
+    { srv0: { ...automatic().srv0, listen: [":80"] } },
+    { srv0: { ...automatic().srv0, listen: [":8443"] } },
+    { srv0: { ...automatic().srv0, listen: ["127.0.0.1:443"] } },
+    { srv0: { ...automatic().srv0, tls_connection_policies: [] } },
+    {
+      srv0: {
+        ...automatic().srv0,
+        tls_connection_policies: [{ match: { sni: ["foreign.test"] } }],
+      },
+    },
+    { srv0: { ...automatic().srv0, automatic_https: { disable: true } } },
+    { ...automatic(), srv1: automatic().srv0 },
+    shadow,
+  ]) {
+    await prepare({ active: servers });
+    await refusal({ ...options(), deadline: Date.now() + 600 });
+    expect((await commands()).some((args) => args.includes("--head"))).toBe(
+      false
+    );
+  }
+}, 15_000);
+test("automatic TLS proof cannot survive changed upstream dispatch or workload generation", async () => {
+  const changed = automatic();
+  changed.srv0.routes = active([HOST], ["172.29.0.99:3000"]).srv0.routes;
+  for (const fixture of [
+    { activeSnapshots: [automatic(), changed] },
+    {
+      active: automatic(),
+      workloadSnapshots: [
+        { rows: [workload()] },
+        { rows: [{ ...workload(), generation: "2".repeat(32) }] },
+      ],
+    },
+  ]) {
+    await prepare(fixture);
+    await refusal({ ...options(), deadline: Date.now() + 800 });
+    expect((await commands()).some((args) => args.includes("--head"))).toBe(
+      true
+    );
+  }
+});
+test("automatic TLS HEAD is bounded by cancellation and its owned child is reaped", async () => {
+  await prepare({ active: automatic(), mode: "tls-hang" });
+  const controller = new AbortController();
+  const task = refusal({ ...options(), signal: controller.signal });
+  const pid = await startedPid();
+  controller.abort();
+  await task;
+  expect(() => process.kill(pid, 0)).toThrow();
+  await commands();
 });
 test("curl completion must include exact 200 status; redirects and malformed suffixes refuse", async () => {
   for (const fixture of [

@@ -238,26 +238,31 @@ async function cli(args: readonly string[]) {
   return { stdout, stderr, exit };
 }
 
-test("both native CLI commands forward --domain; explicit-file mode refuses it before any compiler read", async () => {
-  await mockCompiler();
-  await globalPolicy();
-  for (const operation of ["validate", "plan"]) {
+for (const operation of ["validate", "plan"] as const) {
+  test(`native CLI ${operation} forwards --domain in JSON output`, async () => {
+    await mockCompiler();
+    await globalPolicy();
     const output = await cli([operation, "--domain", "cli.invalid", "--json"]);
     expect(output.exit).toBe(0);
     expect(JSON.parse(output.stdout).routing_resolution.domain).toBe(
       "cli.invalid"
     );
-  }
-  for (const operation of ["validate", "plan"]) {
+  });
+
+  test(`native CLI ${operation} forwards --domain in human output`, async () => {
+    await mockCompiler();
+    await globalPolicy();
     const human = await cli([operation, "--domain", "cli.invalid"]);
     expect(human.exit).toBe(0);
     expect(human.stdout).toContain(
       "Routing preview: https://fixture.cli.invalid"
     );
     expect(human.stdout).toContain("DNS and TLS are not checked");
-  }
-  await rm(receipt);
-  for (const operation of ["validate", "plan"]) {
+  });
+
+  test(`native CLI ${operation} explicit-file mode refuses --domain before any compiler read`, async () => {
+    await mockCompiler();
+    await globalPolicy();
     const output = await cli([
       operation,
       "--file",
@@ -267,5 +272,5 @@ test("both native CLI commands forward --domain; explicit-file mode refuses it b
     ]);
     expect(output.exit).not.toBe(0);
     expect(await Bun.file(receipt).exists()).toBe(false);
-  }
-});
+  });
+}

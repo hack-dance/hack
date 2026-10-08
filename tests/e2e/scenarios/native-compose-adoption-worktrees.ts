@@ -1168,7 +1168,7 @@ async function withholdPrimaryLocal(h: FixtureRuntime) {
 }
 
 const FOREIGN_CANARY_LABEL = "io.hack.nc04.foreign-canary";
-export const FOREIGN_CANARY_FORMAT = `{"id":{{json .Id}},"name":{{json .Name}},"created":{{json .Created}},"image":{{json .Image}},"project":{{json (index .Config.Labels "${PROJECT_LABEL}")}},"task":{{json (index .Config.Labels "${FOREIGN_CANARY_LABEL}")}},"native":{{json (index .Config.Labels "io.hack.native-config.version")}},"state":{{json .State.Status}},"running":{{json .State.Running}},"pid":{{json .State.Pid}},"startedAt":{{json .State.StartedAt}},"networkMode":{{json .HostConfig.NetworkMode}},"readOnlyRootfs":{{json .HostConfig.ReadonlyRootfs}},"publishAllPorts":{{json .HostConfig.PublishAllPorts}},"portBindings":{{json .HostConfig.PortBindings}},"configuredTmpfs":{{json .HostConfig.Tmpfs}},"hostBinds":{{json .HostConfig.Binds}},"hostMounts":{{json .HostConfig.Mounts}},"volumesFrom":{{json .HostConfig.VolumesFrom}},"imageVolumes":{{json .Config.Volumes}},"networks":[{{$first := true}}{{range $name,$n := .NetworkSettings.Networks}}{{if not $first}},{{end}}{{$first = false}}{"name":{{json $name}},"id":{{json $n.NetworkID}}}{{end}}],"mounts":[{{range $i,$m := .Mounts}}{{if $i}},{{end}}{"type":{{json $m.Type}},"target":{{json $m.Destination}}}{{end}}]}`;
+export const FOREIGN_CANARY_FORMAT = `{"id":{{json .Id}},"name":{{json .Name}},"created":{{json .Created}},"image":{{json .Image}},"project":{{json (index .Config.Labels "${PROJECT_LABEL}")}},"task":{{json (index .Config.Labels "${FOREIGN_CANARY_LABEL}")}},"native":{{json (index .Config.Labels "io.hack.native-config.version")}},"state":{{json .State.Status}},"running":{{json .State.Running}},"pid":{{json .State.Pid}},"startedAt":{{json .State.StartedAt}},"networkMode":{{json .HostConfig.NetworkMode}},"readOnlyRootfs":{{json .HostConfig.ReadonlyRootfs}},"publishAllPorts":{{json .HostConfig.PublishAllPorts}},"portBindings":{{json (index .HostConfig "PortBindings")}},"runtimePorts":{{json .NetworkSettings.Ports}},"configuredTmpfs":{{json (index .HostConfig "Tmpfs")}},"hostBinds":{{json (index .HostConfig "Binds")}},"hostMounts":{{json (index .HostConfig "Mounts")}},"volumesFrom":{{json (index .HostConfig "VolumesFrom")}},"imageVolumes":{{json .Config.Volumes}},"networks":[{{$first := true}}{{range $name,$n := .NetworkSettings.Networks}}{{if not $first}},{{end}}{{$first = false}}{"name":{{json $name}},"id":{{json $n.NetworkID}}}{{end}}],"mounts":[{{range $i,$m := .Mounts}}{{if $i}},{{end}}{"type":{{json $m.Type}},"target":{{json $m.Destination}}}{{end}}]}`;
 type ForeignCanaryPin = {
   readonly id: string;
   readonly name: string;
@@ -1241,12 +1241,21 @@ function absentOrEmptyArray(value: unknown) {
 }
 
 function canaryHostIsolationMatches(row: Record<string, unknown>) {
+  const noRuntimePorts =
+    row.runtimePorts === null ||
+    (isRecord(row.runtimePorts) &&
+      Object.values(row.runtimePorts).every(
+        (bindings) =>
+          bindings === null ||
+          (Array.isArray(bindings) && bindings.length === 0)
+      ));
   return (
     row.readOnlyRootfs === true &&
     row.publishAllPorts === false &&
     (row.portBindings === null ||
       (isRecord(row.portBindings) &&
         Object.keys(row.portBindings).length === 0)) &&
+    noRuntimePorts &&
     absentOrEmptyArray(row.hostBinds) &&
     absentOrEmptyArray(row.hostMounts) &&
     absentOrEmptyArray(row.volumesFrom)

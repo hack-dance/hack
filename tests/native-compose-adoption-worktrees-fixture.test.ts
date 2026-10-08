@@ -529,6 +529,7 @@ test("foreign bridge canary pins its distinct owner, network and tmpfs without a
     readOnlyRootfs: true,
     publishAllPorts: false,
     portBindings: null,
+    runtimePorts: null,
     configuredTmpfs: {
       "/var/lib/postgresql/data": "rw,noexec,nosuid,nodev,mode=700",
     },
@@ -539,12 +540,27 @@ test("foreign bridge canary pins its distinct owner, network and tmpfs without a
     networks: [{ name: pin.networkName, id: pin.networkId }],
     mounts: [{ type: "tmpfs", target: "/var/lib/postgresql/data" }],
   };
-  expect(FOREIGN_CANARY_FORMAT).toContain("{{json .HostConfig.Tmpfs}}");
+  expect(FOREIGN_CANARY_FORMAT).toContain(
+    '{{json (index .HostConfig "Tmpfs")}}'
+  );
+  expect(FOREIGN_CANARY_FORMAT).toContain(
+    '{{json (index .HostConfig "Mounts")}}'
+  );
   expect(FOREIGN_CANARY_FORMAT).toContain("{{json .Config.Volumes}}");
-  expect(FOREIGN_CANARY_FORMAT).not.toContain("index .HostConfig");
+  expect(FOREIGN_CANARY_FORMAT).toContain(
+    "{{json .HostConfig.PublishAllPorts}}"
+  );
+  expect(FOREIGN_CANARY_FORMAT).toContain("{{json .NetworkSettings.Ports}}");
   expect(FOREIGN_CANARY_FORMAT).toContain(".Mounts");
   expect(() =>
     assertAdoptionForeignCanaryObservation({ pin, state: "running", row })
+  ).not.toThrow();
+  expect(() =>
+    assertAdoptionForeignCanaryObservation({
+      pin,
+      state: "running",
+      row: { ...row, runtimePorts: { "5432/tcp": null } },
+    })
   ).not.toThrow();
   const created = {
     ...row,
@@ -593,6 +609,7 @@ test("foreign bridge canary pins its distinct owner, network and tmpfs without a
     { volumesFrom: ["foreign"] },
     { imageVolumes: {} },
     { portBindings: { "5432/tcp": [{ HostPort: "15432" }] } },
+    { runtimePorts: { "5432/tcp": [{ HostPort: "15432" }] } },
     { publishAllPorts: true },
     { readOnlyRootfs: false },
     { startedAt: row.startedAt },
@@ -637,6 +654,7 @@ test("foreign bridge canary pins its distinct owner, network and tmpfs without a
     { mounts: [] },
     { state: "exited" },
     { startedAt: "not-a-docker-timestamp" },
+    { runtimePorts: { "5432/tcp": [{ HostPort: "15432" }] } },
   ]) {
     expect(() =>
       assertAdoptionForeignCanaryObservation({

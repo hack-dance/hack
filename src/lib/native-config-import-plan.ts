@@ -1,4 +1,6 @@
 import { isRecord } from "./guards.ts";
+import { mapLegacyComposeBuild } from "./native-config-import-build.ts";
+import { literalComposeArg } from "./native-config-import-literal.ts";
 import {
   type ImportDocument,
   type ImportField,
@@ -167,7 +169,13 @@ function mapLegacyNativeInput(opts: {
   const context = { config: config.value, candidate, mark, refuse };
   mapOverlay(context);
   mapWorktree(context);
-  mapServices({ source: compose.value.services, candidate, mark, refuse });
+  mapServices({
+    source: compose.value.services,
+    candidate,
+    mark,
+    refuse,
+    buildPreview: !opts.storageAdoption,
+  });
   if (opts.storageAdoption) {
     mapStorageCandidate({
       config: config.value,
@@ -414,24 +422,6 @@ function staticText(value: unknown): value is string {
     !value.includes("\0")
   );
 }
-function literalComposeArg(value: unknown): string | undefined {
-  if (typeof value !== "string" || value.includes("\0")) {
-    return undefined;
-  }
-  let decoded = "";
-  for (let index = 0; index < value.length; index++) {
-    if (value[index] !== "$") {
-      decoded += value[index];
-      continue;
-    }
-    if (value[index + 1] !== "$") {
-      return undefined;
-    }
-    decoded += "$";
-    index++;
-  }
-  return decoded;
-}
 function composeWordSpace(character: string | undefined): boolean {
   return (
     character === " " ||
@@ -657,10 +647,12 @@ function mapService(
     readonly source: Record<string, unknown>;
     readonly pointer: string;
     readonly profiles: Set<string>;
+    readonly buildPreview: boolean;
   }
 ) {
   const service: Record<string, unknown> = {};
   opts.mark("compose", opts.pointer, opts.pointer);
+  const hasBuild = Object.hasOwn(opts.source, "build");
   for (const [key, raw] of Object.entries(opts.source)) {
     if (!Object.hasOwn(SERVICE_RULES, key)) {
       continue;
@@ -675,7 +667,12 @@ function mapService(
       opts.refuse("compose", pointer, "empty_command_unrepresentable");
       continue;
     }
-    const value = SERVICE_RULES[key]?.(raw);
+    let value: unknown;
+    if (key === "pull_policy" && opts.buildPreview && hasBuild) {
+      value = raw === "build" ? raw : undefined;
+    } else {
+      value = SERVICE_RULES[key]?.(raw);
+    }
     if (value === undefined) {
       opts.refuse("compose", pointer, "invalid_or_ambiguous_value");
       continue;
@@ -696,7 +693,12 @@ function mapService(
       }
     }
   }
-  if (!Object.hasOwn(opts.source, "image")) {
+  if (opts.buildPreview && hasBuild) {
+    mapServiceBuild({ ...opts, service });
+  }
+  if (
+    !(Object.hasOwn(opts.source, "image") || (opts.buildPreview && hasBuild))
+  ) {
     opts.refuse(
       "compose",
       `${opts.pointer}/image`,
@@ -705,9 +707,44 @@ function mapService(
   }
   return service;
 }
+
+function mapServiceBuild(
+  opts: Pick<MappingContext, "mark" | "refuse"> & {
+    readonly source: Record<string, unknown>;
+    readonly service: Record<string, unknown>;
+    readonly pointer: string;
+  }
+): void {
+  const pointer = importPointer(opts.pointer, "build");
+  if (Object.hasOwn(opts.source, "image")) {
+    opts.refuse("compose", pointer, "image_build_exclusive");
+    opts.refuse(
+      "compose",
+      importPointer(opts.pointer, "image"),
+      "image_build_exclusive"
+    );
+    return;
+  }
+  const mapped = mapLegacyComposeBuild(opts.source.build);
+  if (!mapped) {
+    opts.refuse("compose", pointer, "invalid_or_unsupported_build");
+    return;
+  }
+  opts.service.build = mapped.build;
+  for (const field of mapped.fields) {
+    opts.mark(
+      "compose",
+      field.source === "" ? pointer : importPointer(pointer, field.source),
+      field.target === "" ? pointer : importPointer(pointer, field.target),
+      field.code
+    );
+  }
+}
+
 function mapServices(
   opts: Pick<MappingContext, "mark" | "refuse" | "candidate"> & {
     readonly source: unknown;
+    readonly buildPreview: boolean;
   }
 ) {
   if (!(isRecord(opts.source) && Object.keys(opts.source).length)) {

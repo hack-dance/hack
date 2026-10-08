@@ -25,9 +25,10 @@ reported as successful.
 | Boolean `worktree.auto_branch` / `autoBranch` and `inherit_local` / `inheritLocal` | The equivalent native worktree policy; conflicting aliases refuse |
 | Optional Compose `name` | Must exactly equal the explicit project name |
 | Image-only services | The same logical service names and image strings |
+| Basic build-only services | String context or a closed object containing `context`, `dockerfile`, `target`; legacy `.hack` context rebased to the checkout root |
 | Array or bounded string `command` and `entrypoint` | Explicit native exec arrays; Compose string words are split without an implicit shell, complete `$$` pairs become literal `$` arguments, and an empty entrypoint remains explicit |
 | `working_dir`, boolean `init` | `working_directory`, `init` |
-| `pull_policy` of `always`, `never`, `missing` | The same authored acquisition intent |
+| `pull_policy` of `always`, `never`, `missing` for images, or `build` for builds | The same authored acquisition intent; omitted policy stays omitted |
 | `restart` of `no`, `always`, `unless-stopped`, `on-failure[:N]` | Native restart intent; retry counts must fit a positive u32 |
 | String `stop_signal`, `stop_grace_period` | Native shutdown signal/grace, validated by the compiler |
 | String environment map or `KEY=value` list | Native `default` bindings, preserving managed-value precedence and empty values |
@@ -48,15 +49,66 @@ empty executable word, single or odd dollars, `$VAR` and `${VAR}` refuse.
 Omitted or explicit null command/entrypoint keeps Compose's image-default behavior. Empty or
 whitespace-only entrypoint explicitly clears the image entrypoint; empty or
 whitespace-only command refuses because the native command model cannot express
-Compose's explicit empty override. Dollars in other runtime strings and NUL in runtime values refuse
-rather than inheriting ambient environment. Environment list entries without `=`, duplicate
+Compose's explicit empty override. Outside argv and basic build paths, dollars in
+runtime strings refuse rather than inheriting ambient environment. NUL in runtime
+values refuses. Environment list entries without `=`, duplicate
 names, nulls and non-string values refuse.
 
 Every unknown field remains a refusal, including fields in inactive profiles.
-Builds, volumes/bind mounts, networks, ports, dependencies, health checks, labels,
+Advanced builds, volumes/bind mounts, networks, ports, dependencies, health checks, labels,
 routes, host/lifecycle settings, `env_file`, deployment options and extensions
 are outside the first slice. They cannot be silently omitted from a complete
 conversion.
+
+## Pure basic build preview
+
+The [Compose build contract](https://docs.docker.com/reference/compose-file/build/)
+allows a short context string or an object. This preview accepts only relative
+local context paths and optional relative `dockerfile` and canonical `target`.
+It converts the raw `.hack/docker-compose.yml` declaration: legacy context paths
+start at `.hack/`, while native contexts start at the checkout root. Thus
+`build: ..` maps to native context `.`, `build: .` maps to `.hack`, and
+`context: ../app` maps to `app`. An object without `context` uses the legacy
+default directory `.hack`. An omitted Dockerfile remains omitted for the native
+compiler's `Dockerfile` default; an explicit Dockerfile stays relative to the
+build context. Lexical path normalization and complete `$$` pair decoding do not
+read files or evaluate environment variables. Source pointers and positions
+remain those of the raw declaration, and the report contains no path values.
+
+Context paths escaping the checkout root, Dockerfiles escaping their context,
+absolute/home-relative/remote paths, ambiguous dollar expressions and malformed
+fields refuse. Build arguments, cache options, SSH, secrets, labels, network,
+inline Dockerfiles, platforms, tags and every other build option remain refused,
+even when empty or in an inactive profile. `build.pull` is unsupported; the
+service's `pull_policy: build` is a separate supported acquisition requirement.
+Combined `build` and `image` refuse because the native model requires exactly one
+source. Invalid builds cannot fall back to an authored image or a default policy.
+
+This expands read-only preview only. Retained-container adoption still uses its
+separate image-only mapping and refuses builds. The mapper runs no Compose
+normalization, builder or runtime command, and does not validate Dockerfile
+contents, path existence or filesystem identity. The authoritative compiler still
+must validate the whole private candidate before a complete CLI preview; actual
+build import and adoption acceptance remain open.
+
+The maintained config-only correspondence gate is
+`bun scripts/check-native-config-import-build.ts`. Select the prepared matching
+sidecar with an absolute `HACK_CONFIG_COMPILER_BINARY` and the installed standalone
+Compose plugin with an absolute `HACK_IMPORT_COMPOSE_BINARY`. It compares the
+actual normalized Compose projections of the raw legacy and compiled/rendered
+native inputs for default context, checkout-root context, nested Dockerfile/stage
+and literal dollars, including an inactive profile selected explicitly for the
+comparison. Context and lexically resolved Dockerfile paths must match; stage, source and
+policy presence must remain exact. These are Compose's serialized config strings,
+including its escaped-dollar representation; the comparison does not decode them
+again or certify the builder's actual filesystem paths. No builder or engine command is admitted.
+Compose receives an isolated empty Docker configuration and a nonexistent engine
+socket. The aggregate gate is bounded to 90 seconds with bounded child captures.
+An optional fresh absolute `HACK_IMPORT_BUILD_EVIDENCE_DIR` retains private
+captures and the result; a failure keeps its temporary evidence and returns
+nonzero. The result records matched projections and requires the command's final
+zero exit; it cannot independently certify completion after a late write or
+cancellation. This proves config correspondence, not build or adoption acceptance.
 
 ## Parsing and input boundary
 

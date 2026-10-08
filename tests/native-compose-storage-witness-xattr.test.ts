@@ -101,6 +101,10 @@ function refused(value: unknown) {
 
 describe("distinct bounded directory-xattr codec", () => {
   test("Linux open flags retain the separate arm64 and x64 UAPI contracts without loading libc", () => {
+    // Linux open does not set FD_CLOEXEC unless the initial flags request it.
+    expect(NATIVE_STORAGE_XATTR_LINUX_ABI.openCloseExec).toBe(524_288);
+    expect(NATIVE_STORAGE_XATTR_LINUX_ABI.fGetFd).toBe(1);
+    expect(NATIVE_STORAGE_XATTR_LINUX_ABI.fdCloseExec).toBe(1);
     expect(NATIVE_STORAGE_XATTR_LINUX_ABI.arm64).toEqual({
       libc: "/lib/aarch64-linux-gnu/libc.so.6",
       directory: 16_384,

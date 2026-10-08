@@ -22,6 +22,7 @@ export const NATIVE_STORAGE_XATTR_LINUX_ABI = Object.freeze({
   version: 1,
   root: "/hack-storage-witness",
   xattrCreate: 1,
+  openCloseExec: 1 << 19,
   fGetFd: 1,
   fdCloseExec: 1,
   pointerBits: 64,
@@ -139,7 +140,10 @@ export async function createNativeComposeStorageXattrLinuxKernel(): Promise<{
       active();
       const fd = openSync(
         NATIVE_STORAGE_XATTR_LINUX_ABI.root,
-        constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW
+        constants.O_RDONLY |
+          constants.O_DIRECTORY |
+          constants.O_NOFOLLOW |
+          NATIVE_STORAGE_XATTR_LINUX_ABI.openCloseExec
       );
       held.add(fd);
       const flags = fcntl(fd, NATIVE_STORAGE_XATTR_LINUX_ABI.fGetFd, 0);

@@ -215,7 +215,7 @@ test("expired readiness is canceled and cannot deliver late SIGINT or release te
   const originalKill = ChildProcess.prototype.kill;
   const interrupts: number[] = [];
   const signals = spyOn(ChildProcess.prototype, "kill").mockImplementation(
-    function (signal) {
+    function (this: ChildProcess, signal) {
       if (signal === "SIGINT") {
         interrupts.push(Date.now());
       }

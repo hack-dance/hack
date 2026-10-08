@@ -20,11 +20,13 @@ export type LegacyComposeAdoptionSelection =
   | "rolled-back";
 /** Private owner markers fence upgraded discovery without parsing authored inputs or contacting an engine. */
 export class LegacyComposeAdoptionSelectionError extends HackCliError {
-  constructor() {
+  constructor(kind: "adoption" | "input-access" = "adoption") {
     super({
       code: "E_CONFIG_INVALID",
       message:
-        "Legacy adoption selection is unsafe or interrupted. Use explicit adoption recovery; values omitted.",
+        kind === "input-access"
+          ? "Cannot inspect Hack project inputs. Check filesystem permissions and paths before retrying. Values omitted."
+          : "Legacy adoption selection is unsafe or interrupted. Use explicit adoption recovery; values omitted.",
     });
     this.name = "LegacyComposeAdoptionSelectionError";
   }
@@ -87,6 +89,11 @@ export async function inspectLegacyComposeAdoptionSelection(opts: {
       if (hasCode(error, "ENOENT")) {
         return null;
       }
+      // A non-directory ancestor is an input access failure, never absence or
+      // permission to search an ancestor project. Preserve the selector refusal.
+      if (hasCode(error, "ENOTDIR")) {
+        throw new LegacyComposeAdoptionSelectionError("input-access");
+      }
       throw error;
     }
     for (const path of [
@@ -107,7 +114,10 @@ export async function inspectLegacyComposeAdoptionSelection(opts: {
       refuse();
     }
     return status;
-  } catch {
+  } catch (error: unknown) {
+    if (error instanceof LegacyComposeAdoptionSelectionError) {
+      throw error;
+    }
     refuse();
   } finally {
     await Promise.all(directories.map((held) => held.file.close()));

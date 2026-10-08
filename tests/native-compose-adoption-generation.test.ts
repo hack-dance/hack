@@ -1556,14 +1556,42 @@ test("v6 manifest and receipt must select the same saved topology owner", async 
   try {
     expect(generation.report.adoption_generation_version).toBe(6);
     const current = await readReceipt();
-    await writeReceipt({ ...current, adoption_receipt_version: 4 });
+    for (const foreignVersion of [4, 5]) {
+      await writeReceipt({
+        ...current,
+        adoption_receipt_version: foreignVersion,
+      });
+      await refusal(store.loadPrepared());
+      expect(await readReceipt()).toEqual({
+        ...current,
+        adoption_receipt_version: foreignVersion,
+      });
+    }
+    expect(fixture.container[0]?.id).toBe(ID);
+    expect(fixture.network[0]?.id).toBe(NETWORK);
+  } finally {
+    await store.close();
+  }
+});
+
+test("v5 retained health owner refuses a v6 topology receipt", async () => {
+  await dependencyFixture();
+  const { store, generation } = await prepared();
+  try {
+    expect(generation.report.adoption_generation_version).toBe(5);
+    const current = await readReceipt();
+    expect(current.adoption_receipt_version).toBe(5);
+    await writeReceipt({ ...current, adoption_receipt_version: 6 });
     await refusal(store.loadPrepared());
     expect(await readReceipt()).toEqual({
       ...current,
-      adoption_receipt_version: 4,
+      adoption_receipt_version: 6,
     });
-    expect(fixture.container[0]?.id).toBe(ID);
-    expect(fixture.network[0]?.id).toBe(NETWORK);
+    expect(fixture.container.map((row) => row.id)).toEqual([
+      ID,
+      "c".repeat(64),
+    ]);
+    expect(network().id).toBe(NETWORK);
   } finally {
     await store.close();
   }

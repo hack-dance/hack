@@ -83,6 +83,11 @@ export interface RunOptions {
   readonly timeoutMs?: number;
   /** Forward cancellation to an owned command process group, preserving TTY input. */
   readonly forwardSignals?: boolean;
+  /**
+   * Cancel the same owned process group as OS forwarding. Pre-aborted admission
+   * returns 143 without spawning or invoking observations. The reason is private.
+   */
+  readonly signal?: AbortSignal;
   /** Synchronous admission after awaited setup, immediately before spawning. */
   readonly beforeSpawn?: () => void;
   readonly onSpawn?: (event: {
@@ -106,45 +111,64 @@ export async function run(
   cmd: readonly string[],
   opts: RunOptions = {}
 ): Promise<number> {
-  const beforeSpawn = opts.beforeSpawn;
+  const options = {
+    ...opts,
+    env: opts.env ? { ...opts.env } : undefined,
+    unsetEnvKeys: opts.unsetEnvKeys ? [...opts.unsetEnvKeys] : undefined,
+  };
+  const command = [...cmd];
+  const signal = options.signal;
+  if (signal?.aborted) {
+    return 143;
+  }
+  const beforeSpawn = options.beforeSpawn;
   if (
-    opts.forwardSignals &&
+    options.forwardSignals &&
     (process.stdin.isTTY || hasControllingTerminal())
   ) {
     const { runWithTerminalGroup } = await import("./tty-run.ts");
     return await runWithTerminalGroup({
-      command: cmd,
-      cwd: opts.cwd,
-      env: buildSpawnEnv(opts.env, opts.unsetEnvKeys),
-      stdout: opts.stdout,
-      stderr: opts.stderr,
-      stdin: opts.stdin,
-      timeoutMs: opts.timeoutMs,
+      command,
+      cwd: options.cwd,
+      env: buildSpawnEnv(options.env, options.unsetEnvKeys),
+      stdout: options.stdout,
+      stderr: options.stderr,
+      stdin: options.stdin,
+      timeoutMs: options.timeoutMs,
+      signal,
       beforeSpawn,
-      onSpawn: opts.onSpawn,
-      onExit: opts.onExit,
+      onSpawn: options.onSpawn,
+      onExit: options.onExit,
     });
   }
   const ownsProcessGroup =
-    opts.timeoutMs !== undefined || opts.forwardSignals === true;
+    options.timeoutMs !== undefined ||
+    options.forwardSignals === true ||
+    signal !== undefined;
   beforeSpawn?.();
-  const proc = Bun.spawn([...cmd], {
-    cwd: opts.cwd,
-    env: buildSpawnEnv(opts.env, opts.unsetEnvKeys),
-    stdin: opts.stdin ?? "inherit",
-    stdout: opts.stdout === "stderr" ? 2 : (opts.stdout ?? "inherit"),
-    stderr: opts.stderr ?? "inherit",
+  if (signal?.aborted) {
+    return 143;
+  }
+  const proc = Bun.spawn(command, {
+    cwd: options.cwd,
+    env: buildSpawnEnv(options.env, options.unsetEnvKeys),
+    stdin: options.stdin ?? "inherit",
+    stdout: options.stdout === "stderr" ? 2 : (options.stdout ?? "inherit"),
+    stderr: options.stderr ?? "inherit",
     detached: ownsProcessGroup,
   });
   const timeout = installSubprocessTimeout({
     pid: proc.pid,
-    timeoutMs: opts.timeoutMs,
+    timeoutMs: options.timeoutMs,
   });
-  const cancellation = opts.forwardSignals
-    ? installSubprocessSignalForwarding({
-        pid: proc.pid,
-      })
-    : null;
+  const cancellation =
+    options.forwardSignals || signal
+      ? installSubprocessSignalForwarding({
+          pid: proc.pid,
+          forwardSignals: options.forwardSignals === true,
+          signal,
+        })
+      : null;
   // Observe completion immediately: diagnostic setup must not keep deadlines armed
   // after the command has exited. Record callbacks still finish in spawn/exit order.
   const completion = (async (): Promise<RunExitEvent> => {
@@ -152,7 +176,7 @@ export async function run(
       const exitCode = await proc.exited;
       const code =
         cancellation?.exitCode() ?? (timeout.didTimeout() ? 124 : exitCode);
-      const usage = opts.onExit
+      const usage = options.onExit
         ? readSubprocessResourceUsage(proc)
         : { cpuTimeMs: null, maxRssBytes: null };
       return {
@@ -169,14 +193,18 @@ export async function run(
   })();
   const [result] = await Promise.all([
     completion,
-    opts.onSpawn?.({ pid: proc.pid, ownsProcessGroup }),
+    options.onSpawn?.({ pid: proc.pid, ownsProcessGroup }),
   ]);
-  await opts.onExit?.(result);
+  await options.onExit?.(result);
   return result.exitCode;
 }
 
 /** Detached noninteractive children keep cancellation scoped to their group. */
-function installSubprocessSignalForwarding(opts: { readonly pid: number }): {
+function installSubprocessSignalForwarding(opts: {
+  readonly pid: number;
+  readonly forwardSignals: boolean;
+  readonly signal?: AbortSignal;
+}): {
   readonly dispose: () => void;
   readonly exitCode: () => number | null;
 } {
@@ -200,13 +228,20 @@ function installSubprocessSignalForwarding(opts: { readonly pid: number }): {
   };
   const onInterrupt = (): void => cancel("SIGINT");
   const onTerminate = (): void => cancel("SIGTERM");
-  process.on("SIGINT", onInterrupt);
-  process.on("SIGTERM", onTerminate);
+  if (opts.forwardSignals) {
+    process.on("SIGINT", onInterrupt);
+    process.on("SIGTERM", onTerminate);
+  }
+  opts.signal?.addEventListener("abort", onTerminate, { once: true });
+  if (opts.signal?.aborted) {
+    onTerminate();
+  }
   return {
     exitCode: () => exitCode,
     dispose: () => {
       process.off("SIGINT", onInterrupt);
       process.off("SIGTERM", onTerminate);
+      opts.signal?.removeEventListener("abort", onTerminate);
       if (forceKillTimer) {
         clearTimeout(forceKillTimer);
       }

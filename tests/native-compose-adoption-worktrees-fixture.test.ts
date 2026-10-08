@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { join } from "node:path";
 import {
+  cleanupOwnedAdoptionFixture,
   nativeComposeAdoptionWorktreesScenario,
   ownedAdoptionFixtureObservation,
 } from "./e2e/scenarios/native-compose-adoption-worktrees.ts";
@@ -248,4 +249,121 @@ test("maintained adoption acceptance refuses source invocation before probes or 
       process.env.HACK_E2E_CLI_BIN = previous;
     }
   }
+});
+
+test.each([
+  "entry",
+  "container",
+  "network",
+  "volume",
+] as const)("changed daemon at cleanup %s sends no removal command", async (phase) => {
+  const resourceKind = phase === "entry" ? "container" : phase;
+  const observation = ownedAdoptionFixtureObservation({
+    instance,
+    kind: resourceKind,
+    row: rows[resourceKind],
+  });
+  const resources = {
+    container: resourceKind === "container" ? [observation] : [],
+    network: resourceKind === "network" ? [observation] : [],
+    volume: resourceKind === "volume" ? [observation] : [],
+  };
+  let daemonReads = 0;
+  let removals = 0;
+  await expect(
+    cleanupOwnedAdoptionFixture({
+      engineId: "prepared-daemon",
+      instances: [instance],
+      anchors: new Map([[instance, { resources, source: "synthetic-source" }]]),
+      resources: async () => resources,
+      owned: async (_instance, kind) =>
+        ownedAdoptionFixtureObservation({ instance, kind, row: rows[kind] }),
+      list: async () => [],
+      probe: async (args) => {
+        if (args[0] === "info") {
+          daemonReads++;
+          return phase === "entry" || daemonReads > 1
+            ? "changed-daemon"
+            : "prepared-daemon";
+        }
+        return args[0] === "network" ? "0" : "";
+      },
+      effect: async () => {
+        removals++;
+        return {
+          command: "synthetic-removal",
+          exitCode: 0,
+          stdout: "",
+          stderr: "",
+          combined: "",
+          timedOut: false,
+          durationMs: 0,
+        };
+      },
+    })
+  ).rejects.toThrow(REFUSAL);
+  expect(removals).toBe(0);
+  expect(daemonReads).toBe(phase === "entry" ? 1 : 2);
+});
+
+test("unchanged prepared daemon allows only the captured cleanup identities", async () => {
+  const resources = {
+    container: [
+      ownedAdoptionFixtureObservation({
+        instance,
+        kind: "container",
+        row: rows.container,
+      }),
+    ],
+    network: [
+      ownedAdoptionFixtureObservation({
+        instance,
+        kind: "network",
+        row: rows.network,
+      }),
+    ],
+    volume: [
+      ownedAdoptionFixtureObservation({
+        instance,
+        kind: "volume",
+        row: rows.volume,
+      }),
+    ],
+  };
+  let daemonReads = 0;
+  const removals: string[][] = [];
+  await cleanupOwnedAdoptionFixture({
+    engineId: "prepared-daemon",
+    instances: [instance],
+    anchors: new Map([[instance, { resources, source: "synthetic-source" }]]),
+    resources: async () => resources,
+    owned: async (_instance, kind) =>
+      ownedAdoptionFixtureObservation({ instance, kind, row: rows[kind] }),
+    list: async () => [],
+    probe: async (args) => {
+      if (args[0] === "info") {
+        daemonReads++;
+        return "prepared-daemon";
+      }
+      return args[0] === "network" ? "0" : "";
+    },
+    effect: async (args) => {
+      removals.push([...args]);
+      return {
+        command: "synthetic-removal",
+        exitCode: 0,
+        stdout: "",
+        stderr: "",
+        combined: "",
+        timedOut: false,
+        durationMs: 0,
+      };
+    },
+  });
+  expect(removals).toEqual([
+    ["container", "rm", "--force", id],
+    ["network", "rm", id],
+    ["volume", "rm", `${instance.name}_data`],
+  ]);
+  expect(daemonReads).toBe(4);
 });

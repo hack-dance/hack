@@ -142,6 +142,32 @@ export function assertAdoptionBridgeObservation(opts: {
   }
 }
 
+const BRIDGE_INSPECT_FORMAT = `{"id":{{json .Id}},"name":{{json .Name}},"logical":{{json (index .Labels "com.docker.compose.network")}},"internal":{{json .Internal}},"driver":{{json .Driver}},"scope":{{json .Scope}},"members":[{{$first := true}}{{range $id,$c := .Containers}}{{if not $first}},{{end}}{{$first = false}}{{json $id}}{{end}}]}`;
+
+/** The real inspection request and the policy oracle share one fixed row contract. */
+export async function inspectAdoptionBridge(opts: {
+  readonly instance: Instance;
+  readonly id: string;
+  readonly members: readonly string[];
+  readonly probe: (args: readonly string[]) => Promise<string>;
+}) {
+  const row = object(
+    await opts.probe([
+      "network",
+      "inspect",
+      "--format",
+      BRIDGE_INSPECT_FORMAT,
+      opts.id,
+    ])
+  );
+  assertAdoptionBridgeObservation({
+    instance: opts.instance,
+    id: opts.id,
+    members: opts.members,
+    row,
+  });
+}
+
 /** A retained original may lose stopped aliases, never a running alias or bridge ID. */
 export function assertAdoptionEndpointObservation(opts: {
   readonly instance: Instance;
@@ -727,23 +753,14 @@ function createFixtureRuntime(
     ) {
       refused();
     }
-    const selected = object(
-      await probe([
-        "network",
-        "inspect",
-        "--format",
-        `{"id":{{json .Id}},"name":{{json .Name}},"internal":{{json .Internal}},"driver":{{json .Driver}},"scope":{{json .Scope}},"members":[{{$first := true}}{{range $id,$c := .Containers}}{{if not $first}},{{end}}{{$first = false}}{{json $id}}{{end}}]}`,
-        network.id,
-      ])
-    );
     const expectedMembers = running
       ? baseline.resources.container.map((entry) => entry.id).sort()
       : [];
-    assertAdoptionBridgeObservation({
+    await inspectAdoptionBridge({
       instance,
       id: network.id,
       members: expectedMembers,
-      row: selected,
+      probe,
     });
     for (const entry of baseline.resources.container) {
       const container = object(

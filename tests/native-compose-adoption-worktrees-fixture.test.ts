@@ -9,6 +9,7 @@ import {
   assertAdoptionWorkerArgv,
   cleanupOwnedAdoptionFixture,
   createAdoptionFixtureProbe,
+  inspectAdoptionBridge,
   nativeComposeAdoptionWorktreesScenario,
   ownedAdoptionFixtureObservation,
   waitForAdoptionFixtureSql,
@@ -468,6 +469,35 @@ test("owned bridge observation refuses foreign membership and policy", () => {
       })
     ).toThrow(REFUSAL);
   }
+});
+
+test("owned bridge inspection requests the logical Compose label consumed by the policy oracle", async () => {
+  const custom = { ...instance, ownedNetwork: true as const };
+  let inspected = 0;
+  await inspectAdoptionBridge({
+    instance: custom,
+    id,
+    members: [id],
+    probe: async (args) => {
+      inspected++;
+      expect(args.slice(0, 3)).toEqual(["network", "inspect", "--format"]);
+      expect(args.at(-1)).toBe(id);
+      const format = args[3];
+      expect(format).toContain('index .Labels "com.docker.compose.network"');
+      return JSON.stringify({
+        id,
+        name: `${instance.name}_private`,
+        ...(format?.includes('index .Labels "com.docker.compose.network"')
+          ? { logical: "private" }
+          : {}),
+        driver: "bridge",
+        scope: "local",
+        internal: true,
+        members: [id],
+      });
+    },
+  });
+  expect(inspected).toBe(1);
 });
 
 test("running original requires exact bridge ID and static aliases; stopped alias loss stays bounded", () => {

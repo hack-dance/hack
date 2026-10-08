@@ -80,7 +80,7 @@ const ROUTING = [
   "HACK_EXECUTION_MODE",
 ] as const;
 type SavedManifest = {
-  readonly adoption_generation_version: 1 | 3 | 4 | 5;
+  readonly adoption_generation_version: 1 | 3 | 4 | 5 | 6;
   readonly kind: typeof KIND;
   readonly projectRoot: string;
   readonly id: string;
@@ -224,6 +224,7 @@ function manifest(value: unknown, root: string, id: string): SavedManifest {
           : "adoption_generation_version,binding,files,id,kind,projectRoot,runtimeConfig,sourceFiles"
       ) &&
       (value.adoption_generation_version === 1 ||
+        value.adoption_generation_version === 6 ||
         (value.adoption_generation_version === 5 &&
           (!Object.hasOwn(value, "projectionProof") ||
             (isRecord(value.projectionProof) &&
@@ -315,7 +316,7 @@ async function writeArtifact(path: string, text: string): Promise<Artifact> {
 /** A distinct private generation claim; it never makes original legacy resources native nonce-owned. */
 export type LegacyComposeAdoptedGeneration = {
   readonly report: {
-    readonly adoption_generation_version: 1 | 3 | 4 | 5;
+    readonly adoption_generation_version: 1 | 3 | 4 | 5 | 6;
     readonly owner: "legacy-compose";
     readonly status: "prepared" | "active";
     readonly containers: number;
@@ -386,6 +387,43 @@ type Context = {
     { readonly info: Stats; readonly text: string }
   >;
 };
+async function requireSelectedTopologyOwner(opts: {
+  readonly ctx: Context;
+  readonly selected: Anchor;
+  readonly meta: SavedManifest;
+  readonly custom: boolean;
+  readonly requiresV5: boolean;
+  readonly preparing: boolean;
+}) {
+  const { ctx, selected, meta, custom, requiresV5, preparing } = opts;
+  if (!isRecord(meta.binding)) {
+    refuse();
+  }
+  if (
+    (meta.adoption_generation_version === 6) !== custom ||
+    (meta.adoption_generation_version === 5) !== requiresV5 ||
+    (custom && requiresV5) ||
+    (custom &&
+      (meta.binding.binding_version !== 3 ||
+        meta.projectionProof !== undefined)) ||
+    (!custom &&
+      (meta.binding.binding_version === 3 ||
+        meta.binding.binding_version === 4))
+  ) {
+    refuse();
+  }
+  if (preparing) {
+    return;
+  }
+  const state = await publicationState(ctx);
+  if (
+    (state.adoption_receipt_version === 6) !== custom ||
+    (state.adoption_receipt_version === 5) !== requiresV5 ||
+    JSON.stringify(state.prepared) !== JSON.stringify(selected)
+  ) {
+    refuse();
+  }
+}
 async function readInputs(
   ctx: Context,
   selected: Anchor,
@@ -420,6 +458,15 @@ async function readInputs(
     );
     const mapped = mapLegacyNativeStorageAdoption({ configText, composeText });
     const planned = planLegacyComposeAdoption({ configText, composeText });
+    const retainedPlan = legacyComposeRetainedPlan(JSON.parse(candidateText));
+    await requireSelectedTopologyOwner({
+      ctx,
+      selected,
+      meta,
+      custom: planned.intent?.ownedNetwork !== undefined,
+      requiresV5: retainedPlan.requiresV5,
+      preparing,
+    });
     const projectionOpts = {
       projectRoot: ctx.root,
       configText,
@@ -444,19 +491,6 @@ async function readInputs(
       )
     ) {
       refuse();
-    }
-    const retainedPlan = legacyComposeRetainedPlan(JSON.parse(candidateText));
-    if (retainedPlan.requiresV5 !== (meta.adoption_generation_version === 5)) {
-      refuse();
-    }
-    if (!preparing) {
-      const currentReceipt = await publicationState(ctx);
-      if (
-        (meta.adoption_generation_version === 5) !==
-        (currentReceipt.adoption_receipt_version === 5)
-      ) {
-        refuse();
-      }
     }
     const observed = await inspectLegacyComposeAdoptionResources({
       root: ctx.root,
@@ -556,7 +590,7 @@ function claim(
   known: WeakMap<LegacyComposeAdoptedGeneration, Anchor>,
   binding: LegacyComposeVerifiedBinding,
   status: "prepared" | "active" = "prepared",
-  version: 1 | 3 | 4 | 5 = 1
+  version: 1 | 3 | 4 | 5 | 6 = 1
 ): LegacyComposeAdoptedGeneration {
   const result: LegacyComposeAdoptedGeneration = {
     report: {
@@ -570,6 +604,30 @@ function claim(
   freezeImportValue(result);
   known.set(result, selected);
   return result;
+}
+function manifestVersion(
+  binding: LegacyComposeVerifiedBinding,
+  requiresV5: boolean,
+  projection?: {
+    readonly projectionProof: { readonly projection_version: number };
+  }
+): 1 | 3 | 4 | 5 | 6 {
+  if (requiresV5) {
+    if (binding.binding_version === 3 || binding.binding_version === 4) {
+      refuse("E_LEGACY_ADOPTION_UNSUPPORTED");
+    }
+    return 5;
+  }
+  if (binding.binding_version === 3) {
+    return 6;
+  }
+  if (binding.binding_version === 4) {
+    refuse("E_LEGACY_ADOPTION_UNSUPPORTED");
+  }
+  if (!projection) {
+    return 1;
+  }
+  return projection.projectionProof.projection_version === 2 ? 4 : 3;
 }
 async function prepare(
   ctx: Context,
@@ -585,6 +643,14 @@ async function prepare(
     projectRoot: ctx.root,
     signal: ctx.signal,
   });
+  // Version 6 owns only the static custom bridge. Generated-source or typed
+  // local combinations need a separate selected owner, never a v3/v4 alias.
+  if (
+    acquired.binding.binding_version === 4 ||
+    (acquired.binding.binding_version === 3 && acquired.projection)
+  ) {
+    refuse("E_LEGACY_ADOPTION_UNSUPPORTED");
+  }
   const mapped = mapLegacyNativeStorageAdoption(acquired);
   if (!mapped.candidate) {
     refuse("E_LEGACY_ADOPTION_UNSUPPORTED");
@@ -592,6 +658,10 @@ async function prepare(
   const candidateText = JSON.stringify(
     acquired.projection?.candidate ?? mapped.candidate
   );
+  const retainedPlan = legacyComposeRetainedPlan(JSON.parse(candidateText));
+  if (retainedPlan.requiresV5 && acquired.binding.binding_version >= 3) {
+    refuse("E_LEGACY_ADOPTION_UNSUPPORTED");
+  }
   const admitted = await admitLegacyComposeCandidate({
     candidateText,
     metadata: acquired.projection?.metadata,
@@ -625,16 +695,12 @@ async function prepare(
     const originals = await privateDirectory(join(generationRoot, "originals"));
     await originals.file.sync();
     await originals.file.close();
-    const projectionVersion =
-      acquired.projection?.projectionProof.projection_version === 2 ? 4 : 3;
-    let version: Manifest["adoption_generation_version"] = acquired.projection
-      ? projectionVersion
-      : 1;
-    if (legacyComposeRetainedPlan(JSON.parse(candidateText)).requiresV5) {
-      version = 5;
-    }
     const meta: Manifest = {
-      adoption_generation_version: version,
+      adoption_generation_version: manifestVersion(
+        acquired.binding,
+        retainedPlan.requiresV5,
+        acquired.projection
+      ),
       kind: KIND,
       projectRoot: ctx.root,
       id,
@@ -1301,8 +1367,12 @@ function preparedReceiptVersion(
   if (version !== 1) {
     return version;
   }
-  // A rolled-back v5 contract must not label a later plain generation as v5.
-  if (prior.adoption_receipt_version === 5) {
+  // A rolled-back dependency or topology owner must not label a later plain
+  // generation with its superseded contract.
+  if (
+    prior.adoption_receipt_version === 5 ||
+    prior.adoption_receipt_version === 6
+  ) {
     return "kind" in checkout.git ? 2 : 1;
   }
   return prior.adoption_receipt_version;

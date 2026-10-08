@@ -421,7 +421,9 @@ function assertRunNetworkSupported(opts: {
   if (
     topology.workloads
       .find((workload) => workload.service === service)
-      ?.networks.some((network) => network.logicalName !== "default")
+      ?.networks.some(
+        (network) => !network.external && network.logicalName !== "default"
+      )
   ) {
     throw new HackCliError({
       code: "E_NATIVE_PROJECT_UNSUPPORTED",

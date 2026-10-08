@@ -2,8 +2,10 @@
 """Preview-first, matched native-authoring versus legacy Compose CLI overhead.
 
 Only --run touches Docker. Use a frozen, independently qualified current-branch
-CLI/compiler, an already running global proxy with curl, and an exclusive Docker
-test slot. This measures reaped CLI-tree CPU, not Docker/VM or application CPU.
+CLI/compiler, a qualified running proxy with curl, and an exclusive Docker test
+slot. Default ingress uses host port 80; an explicit private receipt selects an
+isolated proxy with no published ports. This measures reaped CLI-tree CPU, not
+Docker/VM or application CPU.
 """
 import argparse
 import hashlib
@@ -16,6 +18,7 @@ import platform
 import re
 import secrets
 import signal
+import ssl
 import stat
 import statistics
 import subprocess
@@ -31,6 +34,8 @@ OWNER = "io.hack.benchmark.owner"
 PROJECT = "com.docker.compose.project"
 SERVICE = "com.docker.compose.service"
 NATIVE_OWNER = "io.hack.native-config.owner"
+ROOT_CA = "/data/caddy/pki/authorities/local/root.crt"
+PRIVATE_TMPFS = "rw,noexec,nosuid,nodev,mode=700"
 BUILD = re.compile(r"^(cargo|rustc|clang|clang\+\+|ld|ld64|zig|swiftc|swift-frontend|xcodebuild)$")
 OUTPUT_LIMIT = 2 * 1024 * 1024
 ACTIONS = ("up", "ps", "exec", "restart", "down")
@@ -67,6 +72,7 @@ HEALTH = 'const r = await fetch("http://127.0.0.1:3000/", {signal:AbortSignal.ti
 INSPECT = '{"id":{{json .Id}},"project":{{json (index .Config.Labels "com.docker.compose.project")}},"service":{{json (index .Config.Labels "com.docker.compose.service")}},"owner":{{json (index .Config.Labels "io.hack.benchmark.owner")}},"nativeOwner":{{json (index .Config.Labels "io.hack.native-config.owner")}},"instance":{{json (index .Config.Labels "io.hack.native-config.instance")}},"oneoff":{{json (index .Config.Labels "com.docker.compose.oneoff")}},"state":{{json .State.Status}},"exit":{{json .State.ExitCode}},"health":{{with (index .State "Health")}}{{json .Status}}{{else}}null{{end}}}'
 SEMANTICS = '{"image":{{json .Image}},"command":{{json .Config.Cmd}},"entrypoint":{{json .Config.Entrypoint}},"init":{{json .HostConfig.Init}},"signal":{{json .Config.StopSignal}},"grace":{{json (index .Config "StopTimeout")}},"restart":{{json .HostConfig.RestartPolicy}},"health":{{json (index .Config "Healthcheck")}},"memory":{{json .HostConfig.Memory}},"cpus":{{json .HostConfig.NanoCpus}},"mounts":{{json .Mounts}}}'
 PROXY = '{"id":{{json .Id}},"image":{{json .Image}},"running":{{json .State.Running}},"started":{{json .State.StartedAt}},"network":{{with (index .NetworkSettings.Networks "hack-dev")}}{{json .NetworkID}}{{else}}null{{end}},"ports":{{json .NetworkSettings.Ports}}}'
+PROXY_FIXTURE = '{"id":{{json .Id}},"image":{{json .Image}},"name":{{json .Name}},"running":{{json .State.Running}},"started":{{json .State.StartedAt}},"project":{{json (index .Config.Labels "com.docker.compose.project")}},"service":{{json (index .Config.Labels "com.docker.compose.service")}},"owner":{{json (index .Config.Labels "io.hack.benchmark.proxy-owner")}},"network":{{with (index .NetworkSettings.Networks "hack-dev")}}{{json .NetworkID}}{{else}}null{{end}},"networks":{{json .NetworkSettings.Networks}},"networkMode":{{json .HostConfig.NetworkMode}},"ports":{{json .HostConfig.PortBindings}},"publishAll":{{json .HostConfig.PublishAllPorts}},"publishedPorts":{{json .NetworkSettings.Ports}},"privileged":{{json .HostConfig.Privileged}},"mounts":{{json .Mounts}},"tmpfs":{{json .HostConfig.Tmpfs}}}'
 
 
 class Failure(RuntimeError):
@@ -81,7 +87,7 @@ def fingerprint(path):
     return digest.hexdigest()
 
 
-def private_json(path):
+def private_json(path, with_anchor=False):
     """Read only a bounded, private, stable named receipt; never follow a replacement link."""
     descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     try:
@@ -95,12 +101,13 @@ def private_json(path):
         anchor = lambda value: (value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns, value.st_ctime_ns)
         if len(data) > 65536 or anchor(before) != anchor(after) or anchor(after) != anchor(named):
             raise Failure("Private fixture receipt changed while observed")
-        return json.loads(data)
+        value = json.loads(data)
+        return (value, anchor(named)) if with_anchor else value
     finally:
         os.close(descriptor)
 
 
-def command(argv, *, cwd, env, timeout, capture=None):
+def command(argv, *, cwd, env, timeout, capture=None, output_limit=OUTPUT_LIMIT):
     """wait4 isolates each terminated CLI and the children it actually reaped.
 
     Keep the session leader unreaped until interruption decisions are finished.
@@ -121,7 +128,7 @@ def command(argv, *, cwd, env, timeout, capture=None):
                 if interrupted is None:
                     if time.monotonic() - started >= timeout:
                         interrupted = "timeout"
-                    elif os.fstat(out.fileno()).st_size + os.fstat(err.fileno()).st_size > OUTPUT_LIMIT:
+                    elif os.fstat(out.fileno()).st_size + os.fstat(err.fileno()).st_size > output_limit:
                         interrupted = "output-budget"
                     if interrupted:
                         # The unreaped owned leader pins this process/group identity.
@@ -142,16 +149,16 @@ def command(argv, *, cwd, env, timeout, capture=None):
         wall = time.monotonic() - started
         out.seek(0)
         err.seek(0)
-        stdout = out.read(OUTPUT_LIMIT + 1)
-        stderr = err.read(OUTPUT_LIMIT + 1)
-    if len(stdout) + len(stderr) > OUTPUT_LIMIT:
+        stdout = out.read(output_limit + 1)
+        stderr = err.read(output_limit + 1)
+    if len(stdout) + len(stderr) > output_limit:
         interrupted = interrupted or "output-budget"
     if capture is not None:
         # Captures contain only this synthetic fixture's CLI output. Never capture
         # global proxy JSON, Docker context credentials or raw inspect environment.
         with open(capture, "xb") as file:
             os.chmod(capture, 0o600)
-            file.write((stdout + b"\n" + stderr)[:OUTPUT_LIMIT])
+            file.write((stdout + b"\n" + stderr)[:output_limit])
     return {"exit": child.returncode, "stdout": stdout.decode(errors="replace"), "started_monotonic": started,
             "wall_s": wall, "cli_cpu_s": usage.ru_utime + usage.ru_stime,
             "child_maxrss_bytes": usage.ru_maxrss * (1 if platform.system() == "Darwin" else 1024),
@@ -453,6 +460,10 @@ class Benchmark:
         self.proxy = None
         self.image = None
         self.uncertain = False
+        self.proxy_fixture = None
+        self.proxy_fixture_anchor = None
+        self.proxy_fixture_path = None
+        self.proxy_fixture_parent = None
 
     def budget(self):
         left = self.deadline - time.monotonic()
@@ -460,11 +471,13 @@ class Benchmark:
             raise Failure("Experiment deadline expired; no new effect may start")
         return min(GATES["command_seconds"], left)
 
-    def run(self, argv, *, cwd=None, env=None, capture=False):
+    def run(self, argv, *, cwd=None, env=None, capture=False, timeout=None, output_limit=OUTPUT_LIMIT):
         self.sequence += 1
         try:
-            result = command(argv, cwd=cwd or self.root, env=env or self.env, timeout=self.budget(),
-                             capture=self.root / f"cli-{self.sequence:04d}.log" if capture else None)
+            result = command(argv, cwd=cwd or self.root, env=env or self.env,
+                             timeout=min(self.budget(), timeout) if timeout is not None else self.budget(),
+                             capture=self.root / f"cli-{self.sequence:04d}.log" if capture else None,
+                             output_limit=output_limit)
         except BaseException:
             self.uncertain = True
             raise
@@ -488,12 +501,101 @@ class Benchmark:
             if fingerprint(path) != expected:
                 raise Failure("Qualified executable changed; stop instead of mixing revisions")
 
+    def fixture_receipt_parent(self, path):
+        for parent in (path, *path.parents):
+            info = parent.lstat()
+            if not stat.S_ISDIR(info.st_mode) or info.st_uid not in (0, os.getuid()):
+                raise Failure("Proxy fixture receipt directory ancestry changed")
+            if info.st_mode & 0o022 and not info.st_mode & stat.S_ISVTX:
+                raise Failure("Proxy fixture receipt directory ancestry is writable")
+        info = path.lstat()
+        if info.st_uid != os.getuid() or info.st_mode & 0o777 != 0o700:
+            raise Failure("Proxy fixture receipt requires a private owned parent")
+        return info
+
+    def read_proxy_fixture(self, path):
+        selected = Path(path)
+        if not selected.is_absolute() or str(selected.resolve()) != str(selected):
+            raise Failure("Proxy fixture receipt must be canonical")
+        parent = self.fixture_receipt_parent(selected.parent)
+        receipt, anchor = private_json(selected, with_anchor=True)
+        fields = {"fixture_version", "phase", "engine_id", "docker_endpoint", "proxy_id", "proxy_name", "owner_token",
+                  "image_id", "network_id", "started_at", "ca_sha256", "canary"}
+        if not (isinstance(receipt, dict) and set(receipt) == fields and type(receipt["fixture_version"]) is int and
+                receipt["fixture_version"] == 1 and receipt["phase"] == "qualified" and
+                isinstance(receipt["engine_id"], str) and re.fullmatch(r"[A-Za-z0-9:-]{1,128}", receipt["engine_id"]) and
+                isinstance(receipt["docker_endpoint"], str) and receipt["docker_endpoint"].startswith("unix://") and
+                all(isinstance(receipt[key], str) and OBJECT_ID.fullmatch(receipt[key]) for key in ("proxy_id", "network_id", "ca_sha256")) and
+                isinstance(receipt["image_id"], str) and IMAGE.fullmatch(receipt["image_id"]) and
+                isinstance(receipt["owner_token"], str) and TOKEN.fullmatch(receipt["owner_token"]) and
+                receipt["proxy_name"] == "nc03-overhead-proxy-" + receipt["owner_token"] and
+                isinstance(receipt["started_at"], str) and 1 <= len(receipt["started_at"]) <= 128 and
+                isinstance(receipt["canary"], dict) and set(receipt["canary"]) == {"hostname", "marker"} and
+                receipt["canary"]["hostname"] == "canary-" + receipt["owner_token"] + ".benchmark.invalid" and
+                isinstance(receipt["canary"]["marker"], str) and TOKEN.fullmatch(receipt["canary"]["marker"])):
+            raise Failure("Proxy fixture receipt is malformed or unqualified")
+        self.proxy_fixture, self.proxy_fixture_anchor, self.proxy_fixture_path = receipt, anchor, selected
+        self.proxy_fixture_parent = (parent.st_dev, parent.st_ino, parent.st_uid, parent.st_mode)
+
+    def assert_proxy_fixture(self):
+        parent = self.fixture_receipt_parent(self.proxy_fixture_path.parent)
+        if (parent.st_dev, parent.st_ino, parent.st_uid, parent.st_mode) != self.proxy_fixture_parent:
+            raise Failure("Proxy fixture receipt parent changed")
+        if str(self.proxy_fixture_path.resolve()) != str(self.proxy_fixture_path):
+            raise Failure("Proxy fixture receipt ancestry changed")
+        receipt, anchor = private_json(self.proxy_fixture_path, with_anchor=True)
+        if receipt != self.proxy_fixture or anchor != self.proxy_fixture_anchor:
+            raise Failure("Proxy fixture receipt changed")
+        if self.env.get("DOCKER_HOST") != self.proxy_fixture["docker_endpoint"]:
+            raise Failure("Proxy fixture engine endpoint changed")
+
+    def fixture_proxy_binding(self, engine, id):
+        self.assert_proxy_fixture()
+        receipt = self.proxy_fixture
+        if engine != receipt["engine_id"] or id != receipt["proxy_id"]:
+            raise Failure("Proxy fixture engine or selected identity changed")
+        proxy = self.json_docker("container", "inspect", "--format", PROXY_FIXTURE, id)
+        expected = {"id": id, "image": receipt["image_id"], "name": "/" + receipt["proxy_name"],
+                    "running": True, "started": receipt["started_at"], "project": "hack-dev-proxy", "service": "caddy",
+                    "owner": receipt["owner_token"], "network": receipt["network_id"], "networkMode": receipt["network_id"],
+                    "privileged": False, "publishAll": False, "tmpfs": {"/data": PRIVATE_TMPFS, "/config": PRIVATE_TMPFS}}
+        if not (isinstance(proxy, dict) and set(proxy) == {*expected, "ports", "publishedPorts", "mounts", "networks"} and
+                all(proxy[key] == value for key, value in expected.items()) and proxy["ports"] in (None, {}) and
+                proxy["running"] is True and proxy["privileged"] is False and proxy["publishAll"] is False and
+                isinstance(proxy["networks"], dict) and set(proxy["networks"]) == {"hack-dev"} and
+                isinstance(proxy["networks"]["hack-dev"], dict) and proxy["networks"]["hack-dev"].get("NetworkID") == receipt["network_id"]):
+            raise Failure("Proxy fixture ownership or isolation changed")
+        published = proxy["publishedPorts"]
+        if not (published is None or (isinstance(published, dict) and
+                all(value is None or (isinstance(value, list) and not value) for value in published.values()))):
+            raise Failure("Proxy fixture has published ports")
+        mounts = proxy["mounts"]
+        expected_mounts = [("/var/run/docker.sock", "/var/run/docker.sock", False)]
+        if not (isinstance(mounts, list) and all(isinstance(item, dict) and item.get("Type") == "bind" and
+                isinstance(item.get("Source"), str) and isinstance(item.get("Destination"), str) and type(item.get("RW")) is bool for item in mounts) and
+                sorted((item.get("Source"), item.get("Destination"), item.get("RW")) for item in mounts) == expected_mounts):
+            raise Failure("Proxy fixture mounts changed")
+        network = self.json_docker("network", "inspect", "hack-dev", "--format", '{"id":{{json .Id}},"name":{{json .Name}}}')
+        if network != {"id": receipt["network_id"], "name": "hack-dev"}:
+            raise Failure("Proxy fixture network changed")
+        certificate = self.run(["docker", "exec", id, "cat", ROOT_CA], timeout=5, output_limit=16384)["stdout"]
+        try:
+            ca_hash = hashlib.sha256(ssl.PEM_cert_to_DER_cert(certificate)).hexdigest()
+        except ValueError:
+            raise Failure("Proxy fixture public CA unavailable") from None
+        if ca_hash != receipt["ca_sha256"]:
+            raise Failure("Proxy fixture public CA changed")
+        self.assert_proxy_fixture()
+        return {"engine": engine, **proxy, "ca_sha256": ca_hash}
+
     def proxy_binding(self):
         engine = self.json_docker("info", "--format", "{{json .ID}}")
         ids = self.docker("container", "ls", "--no-trunc", "--filter", "label=com.docker.compose.project=hack-dev-proxy",
                           "--filter", "label=com.docker.compose.service=caddy", "--format", "{{.ID}}").split()
         if len(ids) != 1 or not OBJECT_ID.fullmatch(ids[0]):
             raise Failure("An already-running exact global proxy is required; no setup is performed")
+        if self.proxy_fixture is not None:
+            return self.fixture_proxy_binding(engine, ids[0])
         proxy = self.json_docker("container", "inspect", "--format", PROXY, ids[0])
         if not isinstance(proxy, dict):
             raise Failure("Structured proxy observation unavailable")
@@ -505,6 +607,33 @@ class Benchmark:
                 isinstance(ports, list) and ports and all(isinstance(item, dict) and item.get("HostPort") == "80" for item in ports)):
             raise Failure("Standard verified HTTP ingress is required; no global configuration changes occur")
         return {"engine": engine, **proxy}
+
+    def proxy_request(self, hostname, marker=None, canary=False):
+        require_matched(self.proxy, self.proxy_binding())
+        if canary:
+            hostname = self.proxy_fixture["canary"]["hostname"]
+        elif not re.fullmatch(r"nc03-[a-f0-9]{32}\.benchmark\.invalid", hostname):
+            raise Failure("Synthetic app hostname required")
+        if marker is not None and not TOKEN.fullmatch(marker):
+            raise Failure("Synthetic app marker required")
+        argv = ["docker", "exec", self.proxy["id"], "curl", "--disable", "--silent", "--show-error", "--fail",
+                "--proxy", "", "--noproxy", "*", "--proto", "=https" if canary else "=http",
+                "--connect-timeout", "2", "--max-time", "3", "--max-redirs", "0", "--max-filesize", "4096",
+                "--write-out", "\n%{http_code}"]
+        if canary:
+            argv += ["--cacert", ROOT_CA, "--resolve", hostname + ":443:127.0.0.1", "--url", "https://" + hostname + "/"]
+        else:
+            argv += ["--header", "Host: " + hostname, "--url", "http://127.0.0.1:80/"]
+        if marker is not None:
+            argv += ["--request", "POST", "--data-raw", marker]
+        text = self.run(argv, timeout=5, output_limit=4100)["stdout"]
+        body, separator, status = text.rpartition("\n")
+        if not separator or status != "200" or len(body.encode()) > 4096:
+            raise Failure("Common proxy HTTP readiness failed")
+        require_matched(self.proxy, self.proxy_binding())
+        if canary and body != self.proxy_fixture["canary"]["marker"]:
+            raise Failure("Proxy fixture TLS canary differs")
+        return body
 
     def active_routes(self, hostname):
         require_matched(self.proxy, self.proxy_binding())
@@ -548,16 +677,21 @@ class Benchmark:
         # Docker context selection for later fixture effects.
         self.env["DOCKER_HOST"] = endpoint
         self.env.pop("DOCKER_CONTEXT", None)
+        if self.args.proxy_fixture_receipt:
+            self.read_proxy_fixture(self.args.proxy_fixture_receipt)
         self.image = self.json_docker("image", "inspect", self.args.image, "--format", "{{json .Id}}")
         if not isinstance(self.image, str) or not IMAGE.fullmatch(self.image):
             raise Failure("Exact cached image ID required; no images are pulled")
         self.proxy = self.proxy_binding()
+        if self.proxy_fixture is not None:
+            self.proxy_request(self.proxy_fixture["canary"]["hostname"], canary=True)
         self.active_routes(f"nc03-preflight-{secrets.token_hex(16)}.benchmark.invalid")
         self.metadata = {"protocol_version": 1, "source_sha": self.args.qualified_source_sha,
             "cli_sha256": self.args.cli_sha256, "compiler_sha256": self.args.compiler_sha256,
             "platform": platform.platform(), "architecture": platform.machine(), "python": platform.python_version(),
             "cpus": os.cpu_count(), "engine": self.proxy["engine"], "proxy_id": self.proxy["id"],
             "proxy_image": self.proxy["image"], "image_id": self.image,
+            "proxy_mode": "isolated-no-ports" if self.proxy_fixture is not None else "host80",
             "compose_version": self.docker("compose", "version", "--short"), "gates": GATES,
             "docker_version": self.docker("version", "--format", "{{.Client.Version}}/{{.Server.Version}}"),
             "boundary": "reaped CLI-tree CPU and common readiness wall; container/shared engine CPU not measured"}
@@ -694,6 +828,9 @@ class Fixture:
         self.check_root()
 
     def request(self, write=False):
+        if self.bench.proxy_fixture is not None:
+            value = json.loads(self.bench.proxy_request(self.hostname, self.marker if write else None))
+            return self.application_result(value)
         connection = http.client.HTTPConnection("127.0.0.1", 80, timeout=3)
         try:
             connection.request("POST" if write else "GET", "/", body=self.marker if write else None,
@@ -702,14 +839,16 @@ class Fixture:
             body = response.read(4097)
             if response.status != 200 or len(body) > 4096:
                 raise Failure("Common application HTTP readiness failed")
-            value = json.loads(body)
-            if not (isinstance(value, dict) and value.get("initialized") == "initializer-completed" and
-                    isinstance(value.get("boot"), str) and
-                    (value.get("marker") == self.marker or (self.boot is None and value.get("marker") is None))):
-                raise Failure("Application result or retained marker differs")
-            return value
+            return self.application_result(json.loads(body))
         finally:
             connection.close()
+
+    def application_result(self, value):
+        if not (isinstance(value, dict) and value.get("initialized") == "initializer-completed" and
+                isinstance(value.get("boot"), str) and
+                (value.get("marker") == self.marker or (self.boot is None and value.get("marker") is None))):
+            raise Failure("Application result or retained marker differs")
+        return value
 
     def ready(self):
         deadline = time.monotonic() + min(45, self.bench.budget())
@@ -882,11 +1021,13 @@ def main():
     parser.add_argument("--qualified-source-sha")
     parser.add_argument("--output-root")
     parser.add_argument("--image", default="oven/bun:1.4.2-slim")
+    parser.add_argument("--proxy-fixture-receipt", help="private qualified no-port proxy receipt; setup is separate from this run")
     args = parser.parse_args()
     if not args.run:
         print(json.dumps({"preview": True, "gates": GATES, "actions": ACTIONS,
             "cohort": "sequential lanes, up to two active projects, web + initializer each",
             "routing": "same per-pair HTTP origin through existing proxy; no DNS/trust/global configuration changes",
+            "proxy_mode": "explicit qualified no-port fixture receipt" if args.proxy_fixture_receipt else "existing proxy host port 80",
             "prerequisites": ["frozen qualified CLI/compiler", "cached exact image", "existing proxy with curl",
                               "exclusive Docker slot", "new output root under private non-Git parent"],
             "not_measured": ["container CPU", "shared VM CPU/memory", "app-wide throughput", "cold installs"]}, indent=2))
@@ -898,6 +1039,8 @@ def main():
         parser.error("fingerprints must be exact SHA-1 source / SHA-256 executables")
     if not all(Path(value).is_absolute() for value in (args.cli, args.compiler, args.output_root)):
         parser.error("executable/output paths must be absolute")
+    if args.proxy_fixture_receipt and not Path(args.proxy_fixture_receipt).is_absolute():
+        parser.error("proxy fixture receipt path must be absolute")
     try:
         return execute(args)
     except (Failure, OSError, ValueError, KeyError):

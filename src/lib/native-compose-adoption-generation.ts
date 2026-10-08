@@ -74,7 +74,7 @@ const ROUTING = [
   "HACK_EXECUTION_MODE",
 ] as const;
 type SavedManifest = {
-  readonly adoption_generation_version: 1 | 3 | 4;
+  readonly adoption_generation_version: 1 | 3 | 4 | 6;
   readonly kind: typeof KIND;
   readonly projectRoot: string;
   readonly id: string;
@@ -211,6 +211,7 @@ function manifest(value: unknown, root: string, id: string): SavedManifest {
           : "adoption_generation_version,binding,files,id,kind,projectRoot,runtimeConfig,sourceFiles"
       ) &&
       (value.adoption_generation_version === 1 ||
+        value.adoption_generation_version === 6 ||
         ((value.adoption_generation_version === 3 ||
           value.adoption_generation_version === 4) &&
           isRecord(value.projectionProof) &&
@@ -295,7 +296,7 @@ async function writeArtifact(path: string, text: string): Promise<Artifact> {
 /** A distinct private generation claim; it never makes original legacy resources native nonce-owned. */
 export type LegacyComposeAdoptedGeneration = {
   readonly report: {
-    readonly adoption_generation_version: 1 | 3 | 4;
+    readonly adoption_generation_version: 1 | 3 | 4 | 6;
     readonly owner: "legacy-compose";
     readonly status: "prepared" | "active";
     readonly containers: number;
@@ -364,9 +365,43 @@ type Context = {
     { readonly info: Stats; readonly text: string }
   >;
 };
+async function requireSelectedTopologyOwner(opts: {
+  readonly ctx: Context;
+  readonly selected: Anchor;
+  readonly meta: SavedManifest;
+  readonly custom: boolean;
+  readonly preparing: boolean;
+}) {
+  const { ctx, selected, meta, custom, preparing } = opts;
+  if (!isRecord(meta.binding)) {
+    refuse();
+  }
+  if (
+    (meta.adoption_generation_version === 6) !== custom ||
+    (custom &&
+      (meta.binding.binding_version !== 3 ||
+        meta.projectionProof !== undefined)) ||
+    (!custom &&
+      (meta.binding.binding_version === 3 ||
+        meta.binding.binding_version === 4))
+  ) {
+    refuse();
+  }
+  if (preparing) {
+    return;
+  }
+  const state = await publicationState(ctx);
+  if (
+    (state.adoption_receipt_version === 6) !== custom ||
+    JSON.stringify(state.prepared) !== JSON.stringify(selected)
+  ) {
+    refuse();
+  }
+}
 async function readInputs(
   ctx: Context,
-  selected: Anchor
+  selected: Anchor,
+  preparing = false
 ): Promise<{
   readonly manifest: Manifest;
   readonly inputs: Readonly<PrivateInputs>;
@@ -397,6 +432,13 @@ async function readInputs(
     );
     const mapped = mapLegacyNativeStorageAdoption({ configText, composeText });
     const planned = planLegacyComposeAdoption({ configText, composeText });
+    await requireSelectedTopologyOwner({
+      ctx,
+      selected,
+      meta,
+      custom: planned.intent?.ownedNetwork !== undefined,
+      preparing,
+    });
     const projectionOpts = {
       projectRoot: ctx.root,
       configText,
@@ -518,7 +560,7 @@ function claim(
   known: WeakMap<LegacyComposeAdoptedGeneration, Anchor>,
   binding: LegacyComposeVerifiedBinding,
   status: "prepared" | "active" = "prepared",
-  version: 1 | 3 | 4 = 1
+  version: 1 | 3 | 4 | 6 = 1
 ): LegacyComposeAdoptedGeneration {
   const result: LegacyComposeAdoptedGeneration = {
     report: {
@@ -532,6 +574,33 @@ function claim(
   freezeImportValue(result);
   known.set(result, selected);
   return result;
+}
+function manifestVersion(
+  binding: LegacyComposeVerifiedBinding,
+  projection?: {
+    readonly projectionProof: { readonly projection_version: number };
+  }
+): 1 | 3 | 4 | 6 {
+  if (binding.binding_version === 3) {
+    return 6;
+  }
+  if (!projection) {
+    return 1;
+  }
+  return projection.projectionProof.projection_version === 2 ? 4 : 3;
+}
+function receiptVersion(
+  manifest: Manifest,
+  prior: Receipt,
+  checkout: Checkout
+): Receipt["adoption_receipt_version"] {
+  if (manifest.adoption_generation_version !== 1) {
+    return manifest.adoption_generation_version;
+  }
+  if (prior.adoption_receipt_version === 6) {
+    return "kind" in checkout.git ? 2 : 1;
+  }
+  return prior.adoption_receipt_version;
 }
 async function prepare(
   ctx: Context,
@@ -547,9 +616,12 @@ async function prepare(
     projectRoot: ctx.root,
     signal: ctx.signal,
   });
-  // A custom bridge needs its own durable receipt owner. Never serialize it
-  // with the default-network wire contract while that owner is unavailable.
-  if (acquired.binding.binding_version >= 3) {
+  // Version 6 owns only the static custom bridge. Generated-source or typed
+  // local combinations need a separate selected owner, never a v3/v4 alias.
+  if (
+    acquired.binding.binding_version === 4 ||
+    (acquired.binding.binding_version === 3 && acquired.projection)
+  ) {
     refuse("E_LEGACY_ADOPTION_UNSUPPORTED");
   }
   const mapped = mapLegacyNativeStorageAdoption(acquired);
@@ -592,10 +664,11 @@ async function prepare(
     const originals = await privateDirectory(join(generationRoot, "originals"));
     await originals.file.sync();
     await originals.file.close();
-    const projectionVersion =
-      acquired.projection?.projectionProof.projection_version === 2 ? 4 : 3;
     const meta: Manifest = {
-      adoption_generation_version: acquired.projection ? projectionVersion : 1,
+      adoption_generation_version: manifestVersion(
+        acquired.binding,
+        acquired.projection
+      ),
       kind: KIND,
       projectRoot: ctx.root,
       id,
@@ -1507,15 +1580,15 @@ export async function openLegacyComposeAdoptedGenerationStore(input: {
               refuse("E_LEGACY_ADOPTION_BUSY");
             }
             const generated = await prepare(ctx, binary);
-            const loaded = await readInputs(ctx, generated);
+            const loaded = await readInputs(ctx, generated, true);
             await save(
               ctx,
               {
-                adoption_receipt_version:
-                  loaded.manifest.adoption_generation_version === 3 ||
-                  loaded.manifest.adoption_generation_version === 4
-                    ? loaded.manifest.adoption_generation_version
-                    : prior.adoption_receipt_version,
+                adoption_receipt_version: receiptVersion(
+                  loaded.manifest,
+                  prior,
+                  checkout
+                ),
                 kind: KIND,
                 checkout,
                 prepared: generated,

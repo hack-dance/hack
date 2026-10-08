@@ -32,6 +32,7 @@ reported as successful.
 | String `stop_signal`, `stop_grace_period` | Native shutdown signal/grace, validated by the compiler |
 | String environment map or `KEY=value` list | Native `default` bindings, preserving managed-value precedence and empty values |
 | Nonempty canonical `profiles` lists | Native service selection and the union of declared profiles |
+| One explicitly declared project-owned Compose `bridge` network with boolean `internal`, attached explicitly to every service and optional static aliases | The same logical native bridge policy and per-service aliases; no implicit default attachment or physical-ID claim |
 
 Names in this slice use lowercase letters, digits and single hyphen separators.
 Overlay aliases additionally accept ASCII case, underscores and spaces and apply
@@ -53,10 +54,20 @@ rather than inheriting ambient environment. Environment list entries without `=`
 names, nulls and non-string values refuse.
 
 Every unknown field remains a refusal, including fields in inactive profiles.
-Builds, volumes/bind mounts, networks, ports, dependencies, health checks, labels,
+Builds, volumes/bind mounts, other network shapes, ports, dependencies, health checks, labels,
 routes, host/lifecycle settings, `env_file`, deployment options and extensions
 are outside the first slice. They cannot be silently omitted from a complete
 conversion.
+
+The network mapping accepts one named non-default, non-ingress bridge only. It
+requires explicit `internal: true` or `false`, optional `driver: bridge`, and
+one explicit attachment per service, including inactive services. Unknown
+network/attachment fields, custom physical names, external networks, IPAM,
+driver options, implicit or mixed default attachments, and duplicate or
+workload-colliding aliases refuse. Import preview preserves the authored
+logical topology; it does not claim that a running Compose bridge belongs to
+the project. The separate adoption owner must prove the existing bridge and
+container endpoints before a retained-ID transition.
 
 ## Parsing and input boundary
 

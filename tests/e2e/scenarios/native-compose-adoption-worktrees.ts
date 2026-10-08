@@ -1051,7 +1051,12 @@ async function interruptFirstStop(h: FixtureRuntime) {
     worker = container(first, "worker");
   const control = join(shimRoot, "control-hit");
   const generatedVersion = first.typedLocal ? 4 : 3;
-  const receiptVersion = first.sourceMode ? generatedVersion : 2;
+  let receiptVersion = 2;
+  if (first.ownedNetwork) {
+    receiptVersion = 6;
+  } else if (first.sourceMode) {
+    receiptVersion = generatedVersion;
+  }
   const shim = join(shimRoot, "docker");
   await Bun.write(
     shim,

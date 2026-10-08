@@ -73,7 +73,7 @@ export async function inspectLegacyComposeRetainedBuildImages(opts: {
     }
     const result: LegacyComposeRetainedBuildImage[] = [];
     for (const container of originals) {
-      if (!ID.test(container.id) || !NAME.test(container.service)) {
+      if (!(ID.test(container.id) && NAME.test(container.service))) {
         refuse();
       }
       const imageOutput = await probe([

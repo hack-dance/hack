@@ -66,8 +66,8 @@ import {
 import { parseImportDocument } from "./native-config-import-parser.ts";
 import {
   freezeImportValue,
-  mapLegacyNativeStorageAdoption,
   mapLegacyNativeRetainedBasicBuild,
+  mapLegacyNativeStorageAdoption,
 } from "./native-config-import-plan.ts";
 import type { NativeProjectEnvMetadata } from "./project-env-config.ts";
 
@@ -219,21 +219,24 @@ function sourceFileIdentity(
     value.uid === process.getuid?.()
   );
 }
+function manifestFieldKeys(value: Record<string, unknown>) {
+  if (value.adoption_generation_version === 9) {
+    return "adoption_generation_version,binding,buildProof,files,id,kind,projectRoot,runtimeConfig,sourceFiles";
+  }
+  const projected =
+    (value.adoption_generation_version === 5 &&
+      Object.hasOwn(value, "projectionProof")) ||
+    value.adoption_generation_version === 3 ||
+    value.adoption_generation_version === 4;
+  return projected
+    ? "adoption_generation_version,binding,files,id,kind,projectRoot,projectionProof,runtimeConfig,sourceFiles"
+    : "adoption_generation_version,binding,files,id,kind,projectRoot,runtimeConfig,sourceFiles";
+}
 function manifest(value: unknown, root: string, id: string): SavedManifest {
   if (
     !(
       isRecord(value) &&
-      keys(
-        value,
-        value.adoption_generation_version === 9
-          ? "adoption_generation_version,binding,buildProof,files,id,kind,projectRoot,runtimeConfig,sourceFiles"
-          : (value.adoption_generation_version === 5 &&
-                Object.hasOwn(value, "projectionProof")) ||
-              value.adoption_generation_version === 3 ||
-              value.adoption_generation_version === 4
-            ? "adoption_generation_version,binding,files,id,kind,projectRoot,projectionProof,runtimeConfig,sourceFiles"
-            : "adoption_generation_version,binding,files,id,kind,projectRoot,runtimeConfig,sourceFiles"
-      ) &&
+      keys(value, manifestFieldKeys(value)) &&
       (value.adoption_generation_version === 1 ||
         (value.adoption_generation_version === 9 &&
           isRecord(value.buildProof) &&
@@ -410,6 +413,27 @@ type Context = {
     { readonly info: Stats; readonly text: string }
   >;
 };
+async function assertRetainedBuildSource(opts: {
+  readonly ctx: Context;
+  readonly meta: Manifest;
+  readonly configText: string;
+  readonly composeText: string;
+}) {
+  if (opts.meta.adoption_generation_version !== 9) {
+    return;
+  }
+  if (!opts.meta.buildProof) {
+    refuse();
+  }
+  await assertSavedLegacyComposeBuildSource({
+    projectRoot: opts.ctx.root,
+    configText: opts.configText,
+    composeText: opts.composeText,
+    proof: opts.meta.buildProof.source,
+    signal: opts.ctx.signal,
+    checkOwner: opts.ctx.check,
+  });
+}
 async function readInputs(
   ctx: Context,
   selected: Anchor,
@@ -451,22 +475,8 @@ async function readInputs(
         ? planLegacyComposeRetainedBasicBuildAdoption
         : planLegacyComposeAdoption
     )({ configText, composeText });
-    const assertBuildSource = async () => {
-      if (!basic) {
-        return;
-      }
-      if (!meta.buildProof) {
-        refuse();
-      }
-      await assertSavedLegacyComposeBuildSource({
-        projectRoot: ctx.root,
-        configText,
-        composeText,
-        proof: meta.buildProof.source,
-        signal: ctx.signal,
-        checkOwner: ctx.check,
-      });
-    };
+    const assertBuildSource = () =>
+      assertRetainedBuildSource({ ctx, meta, configText, composeText });
     await assertBuildSource();
     const projectionOpts = {
       projectRoot: ctx.root,

@@ -733,6 +733,25 @@ function commandPresence(
   return undefined;
 }
 
+function serviceRuleValue(opts: {
+  readonly key: string;
+  readonly raw: unknown;
+  readonly buildPreview: boolean;
+}) {
+  if (opts.key === "pull_policy" && opts.buildPreview) {
+    return opts.raw === "build" ? opts.raw : undefined;
+  }
+  return SERVICE_RULES[opts.key]?.(opts.raw);
+}
+function rememberProfiles(value: unknown, profiles: Set<string>) {
+  if (Array.isArray(value)) {
+    for (const name of value) {
+      if (typeof name === "string") {
+        profiles.add(name);
+      }
+    }
+  }
+}
 function mapService(
   opts: Pick<MappingContext, "mark" | "refuse"> & {
     readonly source: Record<string, unknown>;
@@ -759,12 +778,11 @@ function mapService(
       opts.refuse("compose", pointer, "empty_command_unrepresentable");
       continue;
     }
-    let value: unknown;
-    if (key === "pull_policy" && opts.buildPreview && hasBuild) {
-      value = raw === "build" ? raw : undefined;
-    } else {
-      value = SERVICE_RULES[key]?.(raw);
-    }
+    const value = serviceRuleValue({
+      key,
+      raw,
+      buildPreview: opts.buildPreview && hasBuild,
+    });
     if (value === undefined) {
       opts.refuse("compose", pointer, "invalid_or_ambiguous_value");
       continue;
@@ -777,12 +795,8 @@ function mapService(
       pointer,
       target: `${opts.pointer}/${property}`,
     });
-    if (key === "profiles" && Array.isArray(value)) {
-      for (const name of value) {
-        if (typeof name === "string") {
-          opts.profiles.add(name);
-        }
-      }
+    if (key === "profiles") {
+      rememberProfiles(value, opts.profiles);
     }
   }
   if (opts.buildPreview && hasBuild) {

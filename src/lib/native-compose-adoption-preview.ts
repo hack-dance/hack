@@ -12,8 +12,8 @@ import {
 import type { ImportField } from "./native-config-import-parser.ts";
 import {
   freezeImportValue,
-  mapLegacyNativeStorageAdoption,
   mapLegacyNativeRetainedBasicBuild,
+  mapLegacyNativeStorageAdoption,
 } from "./native-config-import-plan.ts";
 
 function refused(code: string): ImportField {

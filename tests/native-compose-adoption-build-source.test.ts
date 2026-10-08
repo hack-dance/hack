@@ -18,8 +18,8 @@ import {
   assertSavedLegacyComposeBuildSource,
 } from "../src/lib/native-compose-adoption-build.ts";
 import { legacyComposeBuildIgnore } from "../src/lib/native-compose-adoption-build-ignore.ts";
-import { acquireLegacyAdoptionSourceInputs } from "../src/lib/native-config-import-inputs.ts";
 import * as importInputs from "../src/lib/native-config-import-inputs.ts";
+import { acquireLegacyAdoptionSourceInputs } from "../src/lib/native-config-import-inputs.ts";
 import {
   mapLegacyNativeAdoptionBaseline,
   mapLegacyNativeRetainedBasicBuild,

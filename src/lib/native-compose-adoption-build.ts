@@ -20,6 +20,8 @@ const MAX_BYTES = 16 * 1024 * 1024;
 const MAX_NAMES = 4096;
 const MAX_DEPTH = 32;
 const MAX_PROOF_BYTES = 48 * 1024;
+const MANAGED_PATH = /^\.hack\/hack\.env(?:\.|$)/;
+const UNSAFE_PATH_BYTES = /[\\\0\r\n]/;
 const PRIVATE_PATHS = [
   { path: ".git", tree: true },
   { path: ".hack/.internal", tree: true },
@@ -80,7 +82,7 @@ function refusePrivateMaterial(root: string, path: string) {
   const relative = posix.relative(root, path);
   if (
     [".env", ".hack/.env", ".hack/hack.local.json"].includes(relative) ||
-    /^\.hack\/hack\.env(?:\.|$)/.test(relative)
+    MANAGED_PATH.test(relative)
   ) {
     refuse();
   }
@@ -120,8 +122,68 @@ function pathSupported(path: string) {
     path !== ".." &&
     !path.startsWith("../") &&
     !path.includes("$") &&
-    !/[\\\0\r\n]/.test(path)
+    !UNSAFE_PATH_BYTES.test(path)
   );
+}
+function selectedBuild(service: string, value: unknown): Build | null {
+  if (!isRecord(value)) {
+    refuse();
+  }
+  // These other version owners cannot be implicitly combined with a new proof.
+  if (
+    Object.hasOwn(value, "profiles") ||
+    Object.hasOwn(value, "depends_on") ||
+    Object.hasOwn(value, "readiness")
+  ) {
+    refuse();
+  }
+  if (!Object.hasOwn(value, "build")) {
+    return null;
+  }
+  // The retained start owner never invokes a builder. Explicit build policy
+  // requires a new image even when one exists, so it cannot be honored here.
+  if (Object.hasOwn(value, "pull_policy")) {
+    refuse();
+  }
+  const build = value.build;
+  if (
+    !(
+      isRecord(build) &&
+      typeof build.context === "string" &&
+      pathSupported(build.context)
+    )
+  ) {
+    refuse();
+  }
+  const context = build.context;
+  if (
+    PRIVATE_PATHS.some(
+      (owned) => context === owned.path || context.startsWith(`${owned.path}/`)
+    )
+  ) {
+    refuse();
+  }
+  const dockerfile = build.dockerfile ?? "Dockerfile";
+  const target = build.target ?? null;
+  if (
+    typeof dockerfile !== "string" ||
+    !pathSupported(dockerfile) ||
+    dockerfile === "." ||
+    (target !== null && typeof target !== "string")
+  ) {
+    refuse();
+  }
+  const definitionPath = posix.join(context, dockerfile);
+  if (
+    PRIVATE_PATHS.some(
+      (owned) =>
+        definitionPath === owned.path ||
+        (owned.tree && definitionPath.startsWith(`${owned.path}/`))
+    )
+  ) {
+    refuse();
+  }
+  return { service, context, dockerfile, target };
 }
 function selectedBuilds(candidate: unknown): readonly Build[] {
   if (!(isRecord(candidate) && isRecord(candidate.services))) {
@@ -129,65 +191,10 @@ function selectedBuilds(candidate: unknown): readonly Build[] {
   }
   const result: Build[] = [];
   for (const [service, value] of Object.entries(candidate.services)) {
-    if (!isRecord(value)) {
-      refuse();
+    const build = selectedBuild(service, value);
+    if (build) {
+      result.push(build);
     }
-    // These other version owners cannot be implicitly combined with a new proof.
-    if (
-      Object.hasOwn(value, "profiles") ||
-      Object.hasOwn(value, "depends_on") ||
-      Object.hasOwn(value, "readiness")
-    ) {
-      refuse();
-    }
-    if (!Object.hasOwn(value, "build")) {
-      continue;
-    }
-    // The retained start owner never invokes a builder. Explicit build policy
-    // requires a new image even when one exists, so it cannot be honored here.
-    if (Object.hasOwn(value, "pull_policy")) {
-      refuse();
-    }
-    const build = value.build;
-    if (
-      !(
-        isRecord(build) &&
-        typeof build.context === "string" &&
-        pathSupported(build.context)
-      )
-    ) {
-      refuse();
-    }
-    const context = build.context;
-    if (
-      PRIVATE_PATHS.some(
-        (owned) =>
-          context === owned.path || context.startsWith(`${owned.path}/`)
-      )
-    ) {
-      refuse();
-    }
-    const dockerfile = build.dockerfile ?? "Dockerfile";
-    const target = build.target ?? null;
-    if (
-      typeof dockerfile !== "string" ||
-      !pathSupported(dockerfile) ||
-      dockerfile === "." ||
-      (target !== null && typeof target !== "string")
-    ) {
-      refuse();
-    }
-    const definitionPath = posix.join(context, dockerfile);
-    if (
-      PRIVATE_PATHS.some(
-        (owned) =>
-          definitionPath === owned.path ||
-          (owned.tree && definitionPath.startsWith(`${owned.path}/`))
-      )
-    ) {
-      refuse();
-    }
-    result.push({ service, context, dockerfile, target });
   }
   if (!result.length || result.length > 16) {
     refuse();
@@ -360,6 +367,24 @@ async function captureContext(opts: {
   );
   requireExcluded(build.context, ignore);
   const nodes: Node[] = [];
+  async function captureNode(path: string, nodePath: string, depth: number) {
+    const info = await lstat(path);
+    if (info.isDirectory()) {
+      await walk(path, nodePath, depth);
+      return;
+    }
+    if (!info.isFile()) {
+      refuse();
+    }
+    if (ignore.excluded(nodePath)) {
+      return;
+    }
+    const read = await pinFile(nodePath);
+    if (!read) {
+      refuse();
+    }
+    nodes.push({ ...read.file, kind: "file" });
+  }
   async function walk(path: string, relative: string, depth: number) {
     check(signal);
     if (depth > MAX_DEPTH || ++budget.entries > MAX_ENTRIES) {
@@ -376,18 +401,7 @@ async function captureContext(opts: {
     for (const name of entries) {
       const selected = join(path, name);
       const nodePath = relative ? `${relative}/${name}` : name;
-      const info = await lstat(selected);
-      if (info.isDirectory()) {
-        await walk(selected, nodePath, depth + 1);
-      } else if (info.isFile() && !ignore.excluded(nodePath)) {
-        const read = await pinFile(nodePath);
-        if (!read) {
-          refuse();
-        }
-        nodes.push({ ...read.file, kind: "file" });
-      } else if (!info.isFile()) {
-        refuse();
-      }
+      await captureNode(selected, nodePath, depth + 1);
     }
     // Excluded output creation does not change the projected names. Included
     // additions/removals and ancestor replacement still refuse this acquisition.
@@ -404,6 +418,7 @@ async function captureContext(opts: {
     check(signal);
     await recheck();
   }
+  const rootIgnorePath = rootIgnore ? ".dockerignore" : null;
   return {
     ...build,
     ancestors: [...ancestors.entries()]
@@ -414,11 +429,7 @@ async function captureContext(opts: {
       { path: ".dockerignore", file: rootIgnore?.file ?? null },
       { path: specificPath, file: specificIgnore?.file ?? null },
     ],
-    effectiveIgnore: specificIgnore
-      ? specificPath
-      : rootIgnore
-        ? ".dockerignore"
-        : null,
+    effectiveIgnore: specificIgnore ? specificPath : rootIgnorePath,
     nodes,
   };
 }

@@ -10,11 +10,11 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { isRecord } from "../../src/lib/guards.ts";
-import { openLegacyComposeAdoptedGenerationStore } from "../../src/lib/native-compose-adoption-generation.ts";
 import { runLegacyComposeRetainedOperation } from "../../src/lib/native-compose-adoption-execution.ts";
+import { openLegacyComposeAdoptedGenerationStore } from "../../src/lib/native-compose-adoption-generation.ts";
 import { parseLegacyComposeAdoptionReceipt } from "../../src/lib/native-compose-adoption-receipt.ts";
-import { managedEnvCompilerFixture } from "./managed-env-compiler.ts";
 import { restoreEnv } from "./env.ts";
+import { managedEnvCompilerFixture } from "./managed-env-compiler.ts";
 
 export const BUILD_CANARY = "synthetic-private-retained-build";
 const CREATED = "2026-01-01T01:02:03Z";
@@ -166,8 +166,10 @@ else red();
         .map((line) => {
           const value: unknown = JSON.parse(line);
           if (
-            !Array.isArray(value) ||
-            !value.every((part): part is string => typeof part === "string")
+            !(
+              Array.isArray(value) &&
+              value.every((part): part is string => typeof part === "string")
+            )
           ) {
             throw new Error(
               "Synthetic command ledger is invalid; values omitted."
@@ -182,7 +184,7 @@ else red();
           "utf8"
         )
       );
-      if (!isRecord(value) || !isRecord(value.checkout)) {
+      if (!(isRecord(value) && isRecord(value.checkout))) {
         throw new Error("Synthetic receipt is invalid; values omitted.");
       }
       return parseLegacyComposeAdoptionReceipt(value, {

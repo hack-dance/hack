@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, expect, test as boundedTest } from "bun:test";
+import { afterEach, beforeEach, test as boundedTest, expect } from "bun:test";
 import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { previewLegacyComposeAdoption } from "../src/lib/native-compose-adoption-preview.ts";
@@ -269,7 +269,7 @@ test("remaining operation budget settles a held pre-effect ownership query witho
       store.withPreparationStop({
         generation,
         binary: h.compiler,
-        deadline: Date.now() + 1_000,
+        deadline: Date.now() + 1000,
         run: async () => {
           entered = true;
           return 0;
@@ -277,7 +277,7 @@ test("remaining operation budget settles a held pre-effect ownership query witho
       })
     );
     expect(await Bun.file(join(h.outer, "probe-started")).exists()).toBe(true);
-    expect(performance.now() - start).toBeLessThan(5_000);
+    expect(performance.now() - start).toBeLessThan(5000);
     expect(entered).toBe(false);
     expect((await h.receipt()).pendingOperation).toBeNull();
     await assertNoAllocation();

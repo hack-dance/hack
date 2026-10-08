@@ -1,6 +1,7 @@
 import createDockerignore from "@balena/dockerignore";
 
 const LITERAL = /^[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)*$/;
+const LINES = /\r?\n/;
 const MAX_RULES = 128;
 const MAX_IGNORE_BYTES = 16 * 1024;
 
@@ -21,7 +22,7 @@ export function legacyComposeBuildIgnore(text: string) {
   }
   const rules: string[] = [];
   const literals: string[] = [];
-  for (const raw of text.split(/\r?\n/)) {
+  for (const raw of text.split(LINES)) {
     if (raw.startsWith("#") || !raw.trim()) {
       continue;
     }

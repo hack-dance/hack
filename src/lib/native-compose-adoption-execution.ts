@@ -52,7 +52,7 @@ export async function executeLegacyComposeRetainedPlan(opts: {
     binding.containers.map((container) => [container.service, container.id])
   );
   if (
-    (!plan.requiresV5 && !retainedBuild) ||
+    !(plan.requiresV5 || retainedBuild) ||
     ids.size !== binding.containers.length ||
     plan.ordered.length !== ids.size ||
     plan.ordered.some((service) => !ids.has(service.service)) ||

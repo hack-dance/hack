@@ -471,6 +471,13 @@ export type NativeComposeRouteClaims = {
       readonly owner: NativeComposeRouteOwner;
     }) => Promise<void>;
   }): Promise<void>;
+  /** Read-only stop proof under the instance lock; anchors saved references and keeps all active claims held. */
+  verifyAbsent(opts: {
+    readonly references: readonly NativeComposeRouteReference[];
+    readonly assertAbsent: Parameters<
+      NativeComposeRouteClaims["release"]
+    >[0]["assertAbsent"];
+  }): Promise<void>;
   /**
    * Explicit stop recovery under the instance mutation lock. Every uncertain
    * journal must have an exact saved reference. Fresh proof must establish all
@@ -1035,7 +1042,22 @@ export async function openNativeComposeRouteClaims(opts: {
     const uncertain = (record: Journal) =>
       !record.stopped &&
       (record.retained || (record.armed && !record.complete));
+    const requireStopAdmission = (
+      records: readonly Journal[],
+      recovering: readonly Journal[],
+      verifyOnly: boolean
+    ) => {
+      if (
+        records.some(
+          (record) =>
+            uncertain(record) && (verifyOnly || !recovering.includes(record))
+        )
+      ) {
+        refuse("E_NATIVE_COMPOSE_ROUTE_RETAINED");
+      }
+    };
     const retire = async (options: {
+      readonly verifyOnly?: boolean;
       readonly keepHostnames?: readonly string[];
       readonly references?: readonly NativeComposeRouteReference[];
       readonly assertAbsent: Parameters<
@@ -1045,6 +1067,7 @@ export async function openNativeComposeRouteClaims(opts: {
       const keep = new Set(hostnames(options.keepHostnames ?? []));
       const assertAbsent = options.assertAbsent;
       const references = options.references?.map(snapshotReference);
+      const verifyOnly = options.verifyOnly === true;
       if (typeof assertAbsent !== "function") {
         refuse();
       }
@@ -1054,13 +1077,7 @@ export async function openNativeComposeRouteClaims(opts: {
           (references ?? []).map((reference) => find(records, reference))
         ),
       ];
-      if (
-        records.some(
-          (record) => uncertain(record) && !recovering.includes(record)
-        )
-      ) {
-        refuse("E_NATIVE_COMPOSE_ROUTE_RETAINED");
-      }
+      requireStopAdmission(records, recovering, verifyOnly);
       const current = await activeEntries(records);
       const entries = [...current.entries.values()]
         .filter((entry) => !keep.has(entry.claim.hostname))
@@ -1080,6 +1097,9 @@ export async function openNativeComposeRouteClaims(opts: {
         refuse();
       }
       await activeEntries(latest);
+      if (verifyOnly) {
+        return;
+      }
       for (const record of recovering) {
         if (!(record.stopped || record.aborted)) {
           await publish(
@@ -1243,6 +1263,14 @@ export async function openNativeComposeRouteClaims(opts: {
           await removeEntries(added);
         }),
       release: (options) => guard(() => retire(options)),
+      verifyAbsent: (options) =>
+        guard(() =>
+          retire({
+            references: options.references,
+            assertAbsent: options.assertAbsent,
+            verifyOnly: true,
+          })
+        ),
       recoverStopped: (options) =>
         guard(() =>
           retire({

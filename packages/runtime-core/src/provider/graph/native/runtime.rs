@@ -262,6 +262,7 @@ fn network_members(
 
 struct Session<'a, B> {
     candidate: &'a Candidate,
+    startup_guard: Option<&'a dyn Fn() -> Result<(), CandidateError>>,
     selected: selection::Selected,
     backend: B,
     root: PathBuf,
@@ -320,6 +321,7 @@ impl<B: Backend> Session<'_, B> {
 }
 impl<B: Backend> Driver for Session<'_, B> {
     fn check_cancelled(&self) -> Result<(), CandidateError> {
+        check_startup(self.startup_guard)?;
         self.selected.assert_fresh(self.candidate)
     }
     fn record(&mut self, event: Event<'_>) -> Result<(), CandidateError> {
@@ -428,16 +430,36 @@ pub fn run(
     candidate: &Candidate,
     prepared: selection::Prepared,
 ) -> Result<Receipt, CandidateError> {
+    run_guarded(candidate, prepared, None)
+}
+
+fn check_startup(
+    guard: Option<&dyn Fn() -> Result<(), CandidateError>>,
+) -> Result<(), CandidateError> {
+    guard.map_or(Ok(()), |check| check())
+}
+
+// The foreground owner retains this guard throughout startup. It fences the exact
+// publication and cancellation, without interrupting or replaying in-flight effects.
+pub(super) fn run_guarded(
+    candidate: &Candidate,
+    prepared: selection::Prepared,
+    startup_guard: Option<&dyn Fn() -> Result<(), CandidateError>>,
+) -> Result<Receipt, CandidateError> {
+    check_startup(startup_guard)?;
     let (selected, input) = prepared.into_parts(candidate)?;
     let deadline = selected.remaining()?;
     #[cfg(target_os = "macos")]
-    let engine =
-        Engine::connect_until(candidate, deadline, || false)?.with_admission_deadline(deadline);
+    let engine = Engine::connect_until(candidate, deadline, || {
+        check_startup(startup_guard).is_err()
+    })?
+    .with_admission_deadline(deadline);
     #[cfg(not(target_os = "macos"))]
     let engine = Engine::connect(candidate)?;
     if engine.guest().profile() != crate::provider::Profile::Development {
         return Err(refused());
     }
+    check_startup(startup_guard)?;
     selected.assert_fresh(candidate)?;
     let mut config = configuration(&input, engine.guest().incarnation())?;
     check_network_intent(&engine, &config.resources)?;
@@ -459,6 +481,7 @@ pub fn run(
     for name in &private {
         launcher::validate(&config.configs[name])?;
     }
+    check_startup(startup_guard)?;
     selected.assert_fresh(candidate)?;
     let receipt = Receipt::preparing(
         &config,
@@ -468,6 +491,7 @@ pub fn run(
     let root = journal::reserve(candidate, &receipt)?;
     // Retain a native reservation before launcher publication, staging or container creation.
     let execution = (|| {
+        check_startup(startup_guard)?;
         selected.assert_fresh(candidate)?;
         let launcher = if private.is_empty() {
             None
@@ -478,6 +502,7 @@ pub fn run(
         let graph = config.graph;
         let mut session = Session {
             candidate,
+            startup_guard,
             selected,
             backend: OwnedBackend {
                 engine,

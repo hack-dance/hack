@@ -699,6 +699,7 @@ export const nativeConfigProcessPolicyScenario: Scenario = {
       await owned("volume", volume);
       readerId = await docker([
         "create",
+        "--pull=never",
         "--name",
         `native-process-reader-${readerToken}`,
         "--label",

@@ -73,6 +73,7 @@ export async function acquireNativeExecutionInputs(opts: {
   readonly profiles?: readonly string[];
   readonly explicitOverlay?: string | null;
   readonly explicitDomain?: string;
+  readonly compilerBranch?: string;
   readonly signal?: AbortSignal;
 }) {
   const projectRoot = opts.projectRoot;
@@ -82,6 +83,7 @@ export async function acquireNativeExecutionInputs(opts: {
     ...(opts.profiles === undefined ? {} : { profiles: [...opts.profiles] }),
     explicitOverlay: opts.explicitOverlay,
     explicitDomain: opts.explicitDomain,
+    compilerBranch: opts.compilerBranch,
     signal,
   };
   const prepare = () =>

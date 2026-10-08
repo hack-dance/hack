@@ -159,6 +159,11 @@ missing ready files, expired timeouts and dead processes do not grant cleanup or
 replay. The strict Compose v1 reader and its artifact path remain unchanged.
 Command integration and live frontend acceptance remain gates.
 
+Shared Bun input preparation accepts the native source's explicit compiler branch
+context. It binds that branch into resolve and environment planning without
+implicit Git or global-domain discovery, matching the native source's local hash.
+Omitting this context preserves the existing Compose preparation behavior.
+
 The stable, absolute source file is a public v2 envelope with
 `kind: "native-graph-source"`, `project`, optional canonical `branch`, 32-hex `run`,
 optional `profiles`, and compiler-owned `env_metadata`. Its `overlay` is `"inherit"`

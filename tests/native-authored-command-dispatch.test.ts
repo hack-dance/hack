@@ -1,0 +1,168 @@
+import { afterEach, expect, test } from "bun:test";
+import { chmod, mkdir, mkdtemp, readdir, realpath, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+
+const roots: string[] = [];
+const PRIVATE = "synthetic-private-dispatch-diagnostic";
+afterEach(async () => {
+  await Promise.all(
+    roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))
+  );
+});
+async function fixture() {
+  const root = await realpath(
+    await mkdtemp(join(tmpdir(), "native-authored-dispatch-"))
+  );
+  roots.push(root);
+  await mkdir(join(root, ".hack"));
+  await mkdir(join(root, "candidate"), { mode: 0o700 });
+  await Bun.write(
+    join(root, ".hack/hack.project.json"),
+    "{malformed authored input"
+  );
+  const native = join(root, "native");
+  await Bun.write(
+    native,
+    `#!${process.execPath}
+await Bun.write(${JSON.stringify(join(root, "runtime-called"))}, "unexpected-runtime-call");
+process.exit(2);
+`
+  );
+  await chmod(native, 0o700);
+  const compiler = join(root, "compiler");
+  await Bun.write(
+    compiler,
+    `#!${process.execPath}
+await Bun.write(${JSON.stringify(join(root, "compiler-called"))}, "pure-compiler-call");
+if(process.argv[2]==='--protocol')console.log(JSON.stringify({transport_version:1,authored_version:1,plan_version:1,resolve_version:1,local_version:1,env_plan_version:1,routing_plan_version:1,host_env_plan_version:1,endpoint_plan_version:1}));
+else console.log(JSON.stringify({transport_version:1,ok:false,diagnostics:[{code:'invalid_json',pointer:'/',document:'project',message:${JSON.stringify(PRIVATE)}}]}));
+`
+  );
+  await chmod(compiler, 0o700);
+  return { root, native, compiler };
+}
+async function invoke(opts: {
+  readonly selected: Awaited<ReturnType<typeof fixture>>;
+  readonly args: readonly string[];
+  readonly backend?: string;
+}) {
+  const { root, native, compiler } = opts.selected;
+  const child = Bun.spawn(
+    [
+      process.execPath,
+      resolve(import.meta.dir, "../index.ts"),
+      "--path",
+      root,
+      ...opts.args,
+    ],
+    {
+      env: {
+        PATH: process.env.PATH ?? "",
+        HOME: root,
+        CI: "1",
+        HACK_EXECUTION_MODE: "ci",
+        HACK_HOME: join(root, "home"),
+        HACK_CONFIG_COMPILER_BINARY: compiler,
+        HACK_NATIVE_BINARY: native,
+        HACK_NATIVE_HOME: join(root, "candidate"),
+        ...(opts.backend === undefined
+          ? {}
+          : { HACK_RUNTIME_BACKEND: opts.backend }),
+      },
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+    }
+  );
+  const timer = setTimeout(() => child.kill("SIGKILL"), 15_000);
+  try {
+    const [stdout, stderr, code] = await Promise.all([
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+      child.exited,
+    ]);
+    expect(stdout.length + stderr.length).toBeLessThan(64 * 1024);
+    expect(stdout + stderr).not.toContain(PRIVATE);
+    expect(await Bun.file(join(root, "runtime-called")).exists()).toBe(false);
+    expect(await readdir(join(root, "candidate"))).toEqual([]);
+    return { stdout, stderr, code };
+  } finally {
+    clearTimeout(timer);
+    if (child.exitCode === null) {
+      child.kill("SIGKILL");
+      await child.exited;
+    }
+  }
+}
+
+test.each([
+  { args: ["up", "--detach"] },
+  { args: ["up", "--json"] },
+  { args: ["down"] },
+])("source CLI native %j refuses before compiler or runtime work", async ({
+  args,
+}) => {
+  const selected = await fixture();
+  const value = await invoke({ selected, args, backend: "native" });
+  expect(value.code).toBe(1);
+  expect(value.stdout + value.stderr).toContain(
+    "whole-project foreground up on macOS"
+  );
+  expect(await Bun.file(join(selected.root, "compiler-called")).exists()).toBe(
+    false
+  );
+  expect(await readdir(join(selected.root, ".hack"))).toEqual([
+    "hack.project.json",
+  ]);
+});
+
+test("source CLI omitted backend retains the existing Compose foreground refusal", async () => {
+  const selected = await fixture();
+  const value = await invoke({ selected, args: ["up"] });
+  expect(value.code).toBe(1);
+  expect(value.stdout + value.stderr).toContain(
+    "whole-project detached startup"
+  );
+  expect(await Bun.file(join(selected.root, "compiler-called")).exists()).toBe(
+    false
+  );
+  expect(await readdir(join(selected.root, ".hack"))).toEqual([
+    "hack.project.json",
+  ]);
+});
+
+test("source CLI mixed authored families refuse before native dispatch", async () => {
+  const selected = await fixture();
+  await Bun.write(
+    join(selected.root, ".hack/docker-compose.yml"),
+    "services: {}\n"
+  );
+  const value = await invoke({ selected, args: ["up"], backend: "native" });
+  expect(value.code).toBe(1);
+  expect(value.stdout + value.stderr).toContain("E_NATIVE_PROJECT_CONFLICT");
+  expect(await Bun.file(join(selected.root, "compiler-called")).exists()).toBe(
+    false
+  );
+});
+
+const macTest = process.platform === "darwin" ? test : test.skip;
+macTest(
+  "source CLI foreground native up reaches pure compilation and redacts refusal before runtime",
+  async () => {
+    const selected = await fixture();
+    const value = await invoke({ selected, args: ["up"], backend: "native" });
+    expect(value.code).toBe(1);
+    expect(value.stdout + value.stderr).toContain(
+      "no native consumer was started"
+    );
+    expect(
+      await Bun.file(join(selected.root, "compiler-called")).exists()
+    ).toBe(true);
+    const files = await readdir(
+      join(selected.root, ".hack/.internal/native-authored-runs")
+    );
+    expect(files.filter((file) => file.endsWith(".json"))).toEqual([]);
+    expect(files.filter((file) => file.endsWith(".lock"))).toEqual([]);
+  }
+);

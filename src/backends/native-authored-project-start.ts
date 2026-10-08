@@ -268,9 +268,9 @@ async function retireAttempt(opts: {
 }
 
 /**
- * Inactive native-source frontend owner. Hold shared input, exact startup intent
+ * Native-source frontend owner. Hold shared input, exact startup intent
  * and authenticated foreground ownership through durable Removed retirement.
- * No Compose normalization, auto-recovery, backend switch or ordinary CLI activation.
+ * No Compose normalization, auto-recovery or implicit backend switch.
  */
 export async function serveNativeAuthoredProject(
   input: Options

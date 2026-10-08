@@ -21,9 +21,10 @@ HACK_RUNTIME_BACKEND=compose ./dist/hack --path /absolute/project restart
 HACK_RUNTIME_BACKEND=compose ./dist/hack --path /absolute/project down
 ```
 
-An unset runtime selection also uses Compose for this authored format. An explicit
-selection of another backend refuses; Hack does not change that selection or
-silently fall back. Discovery chooses the authored family before legacy project
+An unset runtime selection also uses Compose for this authored format. Explicit
+native execution has a separate [foreground command contract](native-authored-commands.md).
+Other backend selections refuse; Hack does not change the selection or silently
+fall back. Discovery chooses the authored family before legacy project
 registration and runtime operations. Native and legacy files at the same root
 conflict. Registered names select their exact registered root without ancestor
 fallback.

@@ -10,6 +10,7 @@ import {
 } from "./cli-result.ts";
 import { resolveComposeStartupTimeoutMs } from "./compose-startup-budget.ts";
 import { isRecord } from "./guards.ts";
+import { tryNativeAuthoredCommand } from "./native-authored-command.ts";
 import { tryLegacyComposeAdoptedCommand } from "./native-compose-adoption-command.ts";
 import {
   assertNativeComposeAfterInputsUnchanged,
@@ -1475,6 +1476,10 @@ export async function tryNativeComposeCommand(
   const selected = await selectNativeComposeProject(options);
   if (!selected) {
     return null;
+  }
+  const native = await tryNativeAuthoredCommand({ options, selected });
+  if (native !== null) {
+    return native;
   }
   requireNativeComposeBackend({ backend: process.env.HACK_RUNTIME_BACKEND });
   const prepare = validateNativeOptions(options);

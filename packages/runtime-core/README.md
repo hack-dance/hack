@@ -169,7 +169,7 @@ the mapping; the consuming caller must supply its process and cancellation guard
 Guard returns must be `undefined`. Accidental asynchronous or other return values
 refuse publication, and rejected promises are consumed without printing their details.
 
-The inactive `serveNativeAuthoredProject` owner connects these boundaries without
+The `serveNativeAuthoredProject` owner connects these boundaries without
 Compose normalization: shared input preparation, native source review, durable
 startup intent, compiler-selected private source keys over stdin, authenticated
 readiness and guarded run publication. The review must match the canonical
@@ -180,8 +180,11 @@ It checks this original binding against a fresh native journal inspection before
 retiring mappings, intent and source. Missing, changed or live cleanup evidence
 retains the attempt and refuses replay. Input acquisition shares the original Bun
 startup deadline; it does not renew that budget for each subprocess. This component
-is not selected by ordinary commands. Its fake driver tests and effect-free compiler
-interop do not qualify the installed frontend, provider or full authored corpus.
+is selected only by explicit native backend foreground `up` on macOS. Detached,
+JSON, recovery, subset and other lifecycle requests refuse before input acquisition.
+Its fake driver tests and effect-free compiler interop do not qualify the installed
+frontend, provider or full authored corpus. See the separate
+[command contract](../../docs/reference/native-authored-commands.md).
 
 Shared Bun input preparation accepts the native source's explicit compiler branch
 context. It binds that branch into resolve and environment planning without

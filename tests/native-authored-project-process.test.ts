@@ -163,6 +163,7 @@ async function fixture(
     binary,
     opts.fastControlBoundary
       ? `#!/bin/sh
+printf entered > fast-owner-entered
 case " $* " in
   *" control "*)
     printf status > authenticated-status-started
@@ -463,17 +464,50 @@ test("status descendant-held pipes cannot outlive startup admission or owned cle
   let published = false;
   let failure = "";
   let keeper: number | undefined;
+  let receiptObserved = false;
+  let ownedExitCode: number | undefined;
+  let nativeFailureObserved = false;
   const start = performance.now();
   try {
     await serveNativeAuthoredProjectGraph({
       ...opts,
       startupTimeoutMs: 200,
+      onReceipt: () => {
+        receiptObserved = true;
+        return undefined;
+      },
+      onExitDiagnostic: (diagnostic) => {
+        ownedExitCode = diagnostic.exitCode;
+        nativeFailureObserved = diagnostic.nativeCode !== undefined;
+      },
       onReady: async () => {
         published = true;
       },
     });
   } catch (error) {
     failure = String(error);
+  }
+  if (process.env.HACK_NATIVE_STATUS_FIXTURE_DIAGNOSTIC === "1") {
+    console.error(
+      JSON.stringify({
+        kind: "native-status-fixture-stages",
+        receiptObserved,
+        ownedExitCode: ownedExitCode ?? null,
+        nativeFailureObserved,
+        ownerEntered: await Bun.file(
+          join(opts.projectRoot, "fast-owner-entered")
+        ).exists(),
+        statusEntered: await Bun.file(
+          join(opts.projectRoot, "authenticated-status-started")
+        ).exists(),
+        keeperSelected: await Bun.file(
+          join(opts.projectRoot, "keeper-pid")
+        ).exists(),
+        cleanupObserved: await Bun.file(
+          join(opts.projectRoot, "cleanup-complete")
+        ).exists(),
+      })
+    );
   }
   try {
     expect(performance.now() - start).toBeLessThan(1500);

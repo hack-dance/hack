@@ -53,6 +53,16 @@ const LITERAL_SOURCE_ENTRYPOINT = [
   "entrypoint-$${NC04_LITERAL}",
 ];
 const LITERAL_SOURCE_COMMAND = ["command-$$NC04_LITERAL", "$$$$", ""];
+export const stringAdoptionWorkerSources = {
+  "string-entrypoint": {
+    entrypoint: `/bin/sh -c ${JSON.stringify(WORKER_SCRIPT)} "entrypoint-${"$$"}{NC04_LITERAL}"`,
+    command: '  "command-$$NC04_LITERAL"   "$$$$" ""  ',
+  },
+  "string-cleared": {
+    entrypoint: "",
+    command: `/bin/sh -c ${JSON.stringify(WORKER_SCRIPT)} "command-$$NC04_LITERAL" "$$$$" ""`,
+  },
+} as const;
 const LITERAL_ACTUAL_ENTRYPOINT = [
   "/bin/sh",
   "-c",
@@ -60,12 +70,19 @@ const LITERAL_ACTUAL_ENTRYPOINT = [
   "entrypoint-${NC04_LITERAL}",
 ];
 const LITERAL_ACTUAL_COMMAND = ["command-$NC04_LITERAL", "$$", ""];
+const CLEARED_ACTUAL_COMMAND = [
+  "/bin/sh",
+  "-c",
+  WORKER_SCRIPT,
+  ...LITERAL_ACTUAL_COMMAND,
+];
 type Kind = "container" | "network" | "volume";
 type Instance = {
   readonly root: string;
   readonly name: string;
   readonly marker: string;
   readonly sourceMode?: "canonical-generated";
+  readonly argvMode?: "string-entrypoint" | "string-cleared";
   readonly typedLocal?: true;
 };
 type Observation = {
@@ -162,14 +179,19 @@ function object(text: string): Record<string, unknown> {
 export function assertAdoptionWorkerArgv(opts: {
   readonly id: string;
   readonly row: unknown;
+  readonly mode?: Instance["argvMode"];
 }): void {
+  const command =
+    opts.mode === "string-cleared"
+      ? CLEARED_ACTUAL_COMMAND
+      : LITERAL_ACTUAL_COMMAND;
+  const entrypoint =
+    opts.mode === "string-cleared" ? [] : LITERAL_ACTUAL_ENTRYPOINT;
   if (
     !(ID.test(opts.id) && isRecord(opts.row)) ||
     opts.row.id !== opts.id ||
-    JSON.stringify(opts.row.command) !==
-      JSON.stringify(LITERAL_ACTUAL_COMMAND) ||
-    JSON.stringify(opts.row.entrypoint) !==
-      JSON.stringify(LITERAL_ACTUAL_ENTRYPOINT)
+    JSON.stringify(opts.row.command) !== JSON.stringify(command) ||
+    JSON.stringify(opts.row.entrypoint) !== JSON.stringify(entrypoint)
   ) {
     refused();
   }
@@ -296,6 +318,9 @@ function fixtureComposeFiles(instance: Instance): readonly string[] {
 }
 
 async function writeLegacy(instance: Instance, image: string) {
+  const stringSource = instance.argvMode
+    ? stringAdoptionWorkerSources[instance.argvMode]
+    : undefined;
   await mkdir(join(instance.root, ".hack"), { recursive: true });
   await Bun.write(
     join(instance.root, ".hack/hack.config.json"),
@@ -326,10 +351,10 @@ async function writeLegacy(instance: Instance, image: string) {
           volumes: ["data:/var/lib/postgresql/data:ro"],
           entrypoint: instance.sourceMode
             ? ["/bin/sh", "-c"]
-            : LITERAL_SOURCE_ENTRYPOINT,
+            : (stringSource?.entrypoint ?? LITERAL_SOURCE_ENTRYPOINT),
           command: instance.sourceMode
             ? [WORKER_SCRIPT]
-            : LITERAL_SOURCE_COMMAND,
+            : (stringSource?.command ?? LITERAL_SOURCE_COMMAND),
           stop_grace_period: "15s",
         },
       },
@@ -349,9 +374,13 @@ function formats(kind: Kind): string {
 
 async function prepareFixtureInputs(
   ctx: ScenarioContext,
-  generated = false,
-  typedLocal = false
+  options: {
+    readonly generated?: boolean;
+    readonly typedLocal?: boolean;
+    readonly stringArgv?: boolean;
+  } = {}
 ) {
+  const { generated = false, typedLocal = false, stringArgv = false } = options;
   expect({
     that: resolveCliSpawnArgs([]).length === 1,
     message:
@@ -375,6 +404,7 @@ async function prepareFixtureInputs(
     name: `${fixture.name}-main`,
     marker: "unused-primary",
     ...(generated ? { sourceMode: "canonical-generated" as const } : {}),
+    ...(stringArgv ? { argvMode: "string-entrypoint" as const } : {}),
     ...(typedLocal ? { typedLocal: true as const } : {}),
   };
   if ((await probe(["info", "--format", "{{.OSType}}"])) !== "linux") {
@@ -403,6 +433,7 @@ async function prepareFixtureInputs(
     name: `${fixture.name}-alpha`,
     marker: "alpha-existing-sql-row",
     ...(generated ? { sourceMode: "canonical-generated" as const } : {}),
+    ...(stringArgv ? { argvMode: "string-entrypoint" as const } : {}),
     ...(typedLocal ? { typedLocal: true as const } : {}),
   };
   const second: Instance = {
@@ -410,6 +441,7 @@ async function prepareFixtureInputs(
     name: `${fixture.name}-beta`,
     marker: "beta-existing-sql-row",
     ...(generated ? { sourceMode: "canonical-generated" as const } : {}),
+    ...(stringArgv ? { argvMode: "string-cleared" as const } : {}),
     ...(typedLocal ? { typedLocal: true as const } : {}),
   };
   for (const instance of [first, second]) {
@@ -538,6 +570,7 @@ function createFixtureRuntime(
     await owned(instance, "container", id);
     assertAdoptionWorkerArgv({
       id,
+      mode: instance.argvMode,
       row: object(
         await probe([
           "container",
@@ -1137,6 +1170,38 @@ async function runWithFixtureCleanup(opts: {
   }
 }
 
+async function runLiteralWorktrees(ctx: ScenarioContext, stringArgv: boolean) {
+  const h = createFixtureRuntime(
+    await prepareFixtureInputs(ctx, { stringArgv })
+  );
+  await runWithFixtureCleanup({
+    run: async () => {
+      for (const instance of [h.first, h.second]) {
+        await bootstrapOriginal(h, instance);
+      }
+      await checkInheritedRefusal(h);
+      const local = await withholdPrimaryLocal(h);
+      await interruptFirstStop(h);
+      await recoverFirstAndRollback(h);
+      await adoptSecondAndRollback(h);
+      await rename(
+        join(ctx.tempRoot, "primary-local-withheld.yaml"),
+        local.localPath
+      );
+      if (!(await readFile(local.localPath)).equals(local.localOriginal)) {
+        refused();
+      }
+      ctx.log(
+        "two linked original SQL volumes, retained IDs, partial-stop recovery and isolated rollback verified"
+      );
+    },
+    cleanup: () =>
+      cleanupOwnedAdoptionFixture({ ...h, instances: [h.first, h.second] }),
+    secondaryFailure: () =>
+      ctx.log("secondary exact-owned cleanup failed; retain fixture evidence"),
+  });
+}
+
 /** Two real linked checkouts keep independent original SQL data, sources and retained resource identities. No ingress or global effects. */
 export const nativeComposeAdoptionWorktreesScenario: Scenario = {
   name: "native-compose-adoption-worktrees",
@@ -1144,37 +1209,17 @@ export const nativeComposeAdoptionWorktreesScenario: Scenario = {
   preserveFixtureOnFailure: true,
   summary:
     "two linked original SQL volumes survive isolated adoption, repair and rollback",
-  run: async (ctx) => {
-    const h = createFixtureRuntime(await prepareFixtureInputs(ctx));
-    await runWithFixtureCleanup({
-      run: async () => {
-        for (const instance of [h.first, h.second]) {
-          await bootstrapOriginal(h, instance);
-        }
-        await checkInheritedRefusal(h);
-        const local = await withholdPrimaryLocal(h);
-        await interruptFirstStop(h);
-        await recoverFirstAndRollback(h);
-        await adoptSecondAndRollback(h);
-        await rename(
-          join(ctx.tempRoot, "primary-local-withheld.yaml"),
-          local.localPath
-        );
-        if (!(await readFile(local.localPath)).equals(local.localOriginal)) {
-          refused();
-        }
-        ctx.log(
-          "two linked original SQL volumes, retained IDs, partial-stop recovery and isolated rollback verified"
-        );
-      },
-      cleanup: () =>
-        cleanupOwnedAdoptionFixture({ ...h, instances: [h.first, h.second] }),
-      secondaryFailure: () =>
-        ctx.log(
-          "secondary exact-owned cleanup failed; retain fixture evidence"
-        ),
-    });
-  },
+  run: (ctx) => runLiteralWorktrees(ctx, false),
+};
+
+/** String-form exec words and explicit empty entrypoint keep actual argv and SQL through both linked adoptions. */
+export const nativeComposeAdoptionStringWorktreesScenario: Scenario = {
+  name: "native-compose-adoption-string-worktrees",
+  tier: "docker",
+  preserveFixtureOnFailure: true,
+  summary:
+    "Compose string argv and explicit cleared entrypoint keep linked SQL and exact original identities",
+  run: (ctx) => runLiteralWorktrees(ctx, true),
 };
 
 /** Canonical writer-produced sources and six managed layers retain both linked checkouts' original SQL and identities through v3 repair/rollback. */
@@ -1185,7 +1230,9 @@ export const nativeComposeAdoptionManagedWorktreesScenario: Scenario = {
   summary:
     "two linked original SQL volumes survive canonical managed inheritance adoption and rollback",
   run: async (ctx) => {
-    const h = createFixtureRuntime(await prepareFixtureInputs(ctx, true));
+    const h = createFixtureRuntime(
+      await prepareFixtureInputs(ctx, { generated: true })
+    );
     await runWithFixtureCleanup({
       run: async () => {
         for (const instance of [h.first, h.second]) {
@@ -1231,7 +1278,12 @@ export const nativeComposeAdoptionLocalWorktreesScenario: Scenario = {
   summary:
     "two linked original SQL volumes survive unchanged typed-local adoption and rollback",
   run: async (ctx) => {
-    const h = createFixtureRuntime(await prepareFixtureInputs(ctx, true, true));
+    const h = createFixtureRuntime(
+      await prepareFixtureInputs(ctx, {
+        generated: true,
+        typedLocal: true,
+      })
+    );
     await runWithFixtureCleanup({
       run: async () => {
         for (const instance of [h.first, h.second]) {

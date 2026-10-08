@@ -67,11 +67,46 @@ const literalArgv = {
     "entrypoint-${NC04_LITERAL}",
   ],
 };
+const clearedArgv = {
+  id,
+  command: [
+    "/bin/sh",
+    "-c",
+    "trap 'sleep 10; exit 0' TERM; while true; do sleep 1; done",
+    "command-$NC04_LITERAL",
+    "$$",
+    "",
+  ],
+  entrypoint: [],
+};
 
 test("owned fixture actual argv keeps both dollar forms and an empty argument", () => {
   expect(() =>
     assertAdoptionWorkerArgv({ id, row: literalArgv })
   ).not.toThrow();
+  expect(() =>
+    assertAdoptionWorkerArgv({
+      id,
+      row: literalArgv,
+      mode: "string-entrypoint",
+    })
+  ).not.toThrow();
+});
+
+test("string-form fixture requires an explicitly cleared image entrypoint and exact command words", () => {
+  expect(() =>
+    assertAdoptionWorkerArgv({ id, row: clearedArgv, mode: "string-cleared" })
+  ).not.toThrow();
+  for (const row of [
+    { ...clearedArgv, entrypoint: null },
+    { ...clearedArgv, entrypoint: ["/bin/sh"] },
+    { ...clearedArgv, command: clearedArgv.command.slice(0, -1) },
+    { ...clearedArgv, command: [CANARY] },
+  ]) {
+    expect(() =>
+      assertAdoptionWorkerArgv({ id, row, mode: "string-cleared" })
+    ).toThrow(REFUSAL);
+  }
 });
 
 test.each([

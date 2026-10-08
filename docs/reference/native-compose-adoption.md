@@ -181,9 +181,10 @@ unsupported source mappings and changed source/resource ownership. It never
 silently stops a running instance. Add explicit `--stop` to journal and stop all
 verified original IDs before the format switch. `--dry-run --stop` qualifies that
 proposed stopped transition without changing containers or files. Both authored documents must carry matching
-explicit canonical project names. Shell strings, interpolation and unset/empty
-ambiguity remain refused; qualified argv, empty entrypoints, static empty values
-and authored mount order are retained.
+explicit canonical project names. Implicit shell execution, unpaired-dollar
+interpolation and unset/empty ambiguity remain refused; qualified array and
+bounded Compose string exec words, explicit empty entrypoints, static empty
+values and authored mount order are retained.
 
 The receipt commits `switching` before either legacy input moves. The owner holds
 the exact original inodes and bytes in its private generation, installs the

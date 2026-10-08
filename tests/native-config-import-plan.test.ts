@@ -197,12 +197,151 @@ test.each([
   });
 });
 
-test("dollar syntax outside exec arrays remains refused", () => {
-  for (const [key, value] of [
-    ["command", "echo $$HOME"],
-    ["entrypoint", "echo $$HOME"],
-    ["environment", { TOKEN: "$$HOME" }],
-  ] as const) {
+test("Compose strings map only their parsed exec words, preserving quotes, empty words and dollars", () => {
+  const source = {
+    services: {
+      web: {
+        image: "fixture",
+        command: "  /bin/echo   'two words' \"\" a\\ b $${AMBIENT} $$$$ ",
+        entrypoint: "  /bin/sh -c 'printf \"a b\"' ",
+      },
+      inactive: {
+        image: "fixture",
+        profiles: ["later"],
+        command: "printf 'inactive arg' $$LATER",
+        entrypoint: "",
+      },
+      defaults: { image: "fixture", command: null, entrypoint: null },
+      omitted: { image: "fixture" },
+    },
+  };
+  const raw = JSON.stringify(source);
+  const result = map({ name: "fixture" }, source);
+  expect(result.report.complete).toBe(true);
+  expect(result.candidate).toMatchObject({
+    services: {
+      web: {
+        command: {
+          exec: ["/bin/echo", "two words", "", "a b", "${AMBIENT}", "$$"],
+        },
+        entrypoint: { exec: ["/bin/sh", "-c", 'printf "a b"'] },
+      },
+      inactive: {
+        command: { exec: ["printf", "inactive arg", "$LATER"] },
+        entrypoint: { exec: [] },
+      },
+      defaults: { image: "fixture" },
+      omitted: { image: "fixture" },
+    },
+  });
+  expect(JSON.stringify(source)).toBe(raw);
+  expect(result.report.fields).toContainEqual(
+    expect.objectContaining({
+      pointer: "/services/web/command",
+      target: "/services/web/command",
+      status: "normalized",
+      code: "compose_string_exec_argv",
+    })
+  );
+  expect(result.report.fields).toContainEqual(
+    expect.objectContaining({
+      pointer: "/services/defaults/command",
+      status: "normalized",
+      code: "image_default",
+    })
+  );
+  expect(JSON.stringify(result)).not.toContain("${AMBIENT}");
+});
+
+test("string conversion retains the authored source pointer and position without reporting its value", () => {
+  const composeText = `{
+    "services": {
+      "web": {
+        "image": "fixture",
+        "command": "  /bin/echo 'source words'  "
+      }
+    }
+  }`;
+  const result = mapLegacyNativeImport({
+    configText: CONFIG,
+    composeText,
+  });
+  expect(result.report.complete).toBe(true);
+  expect(result.report.fields).toContainEqual({
+    document: "compose",
+    pointer: "/services/web/command",
+    line: 5,
+    column: 9,
+    status: "normalized",
+    code: "compose_string_exec_argv",
+    target: "/services/web/command",
+  });
+  expect(JSON.stringify(result)).not.toContain("source words");
+});
+
+test("an ambiguous string in an inactive profile still refuses the complete import", () => {
+  const result = map(
+    { name: "fixture" },
+    {
+      services: {
+        web: { image: "fixture" },
+        inactive: {
+          image: "fixture",
+          profiles: ["later"],
+          entrypoint: "echo a && true",
+        },
+      },
+    }
+  );
+  code(result, "invalid_or_ambiguous_value");
+  expect(result.report.fields).toContainEqual(
+    expect.objectContaining({
+      pointer: "/services/inactive/entrypoint",
+      status: "refused",
+    })
+  );
+});
+
+test.each([
+  ["command", '"" next'],
+  ["entrypoint", '"" next'],
+  ["command", "echo $$HOME $VAR"],
+  ["command", "echo $\\$VAR"],
+  ["command", "echo $''$VAR"],
+  ["command", "echo '$' '$VAR'"],
+  ["entrypoint", "echo ${VAR}"],
+  ["command", "echo $$$"],
+  ["command", "echo foo\\"],
+  ["command", "echo 'unfinished"],
+  ["command", 'echo "unfinished'],
+  ["command", "echo a && true"],
+  ["command", "echo a | cat"],
+  ["command", "echo a;true"],
+  ["command", "echo a(b)c"],
+  ["command", "echo\0secret"],
+])("refuses unrepresentable or ambiguous Compose string %s %p", (key, value) => {
+  const result = map(
+    { name: "fixture" },
+    { services: { web: { image: "fixture", [key]: value } } }
+  );
+  code(result, "invalid_or_ambiguous_value");
+});
+
+test.each([
+  "",
+  " \t\n ",
+])("explicit empty Compose command %p refuses with its unrepresentable-override reason", (command) => {
+  code(
+    map(
+      { name: "fixture" },
+      { services: { web: { image: "fixture", command } } }
+    ),
+    "empty_command_unrepresentable"
+  );
+});
+
+test("dollar syntax outside command and entrypoint remains refused", () => {
+  for (const [key, value] of [["environment", { TOKEN: "$$HOME" }]] as const) {
     code(
       map(
         { name: "fixture" },
@@ -330,11 +469,11 @@ test("conflicting worktree aliases retain both original refusals", () => {
 });
 
 test.each([
-  ["command", CANARY],
+  ["command", "echo ${PRIVATE}"],
   ["command", []],
   ["command", [""]],
   ["entrypoint", [""]],
-  ["entrypoint", CANARY],
+  ["entrypoint", "echo ${PRIVATE}"],
   ["image", "${PRIVATE}"],
   ["init", "true"],
   ["restart", "on-failure:4294967296"],

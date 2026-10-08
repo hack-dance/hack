@@ -1,19 +1,32 @@
+import { createHash } from "node:crypto";
 import type { Stats } from "node:fs";
-import { lstat } from "node:fs/promises";
-import { join } from "node:path";
+import { lstat, opendir } from "node:fs/promises";
+import { join, resolve } from "node:path";
 import { DEFAULT_PROJECT_TLD } from "../constants.ts";
 import { renderManagedComposeEnvOverride } from "./compose-managed-env.ts";
 import { isRecord } from "./guards.ts";
-import { legacyComposeAdoptionCandidateSupported } from "./native-compose-adoption-contract.ts";
-import { LegacyAdoptionManagedEnvAdmission } from "./native-compose-adoption-env-inputs.ts";
+import {
+  legacyComposeAdoptionCandidateSupported,
+  legacyComposeAdoptionManagedReadLayoutSupported,
+} from "./native-compose-adoption-contract.ts";
+import {
+  assertLegacyAdoptionManagedDocument,
+  LegacyAdoptionManagedEnvAdmission,
+} from "./native-compose-adoption-env-inputs.ts";
 import {
   hasCode,
   holdDirectory,
+  keys,
   recheckDirectories,
 } from "./native-compose-private-state.ts";
-import { NativeConfigCompilerError } from "./native-config-compiler.ts";
 import {
+  NATIVE_CONFIG_INPUT_LIMIT,
+  NativeConfigCompilerError,
+} from "./native-config-compiler.ts";
+import {
+  acquireNativeConfigImportInputs,
   type NativeConfigImportInputs,
+  privateNativeConfigImportSourceProof,
   readNativeConfigImportSourceFile,
 } from "./native-config-import-inputs.ts";
 import { parseImportDocument } from "./native-config-import-parser.ts";
@@ -21,12 +34,19 @@ import {
   freezeImportValue,
   mapLegacyNativeStorageAdoption,
 } from "./native-config-import-plan.ts";
+import { acquireManagedProjectEnvFile } from "./native-project-inputs.ts";
 import { defaultProjectSlugFromPath } from "./project.ts";
 import {
   acquireProjectEnvForLegacyAdoption,
+  assertSavedLegacyAdoptionEnvRevision,
   type NativeProjectEnvExecutionAcquisition,
+  privateLegacyAdoptionEnvRevision,
 } from "./project-env-config.ts";
 import { buildRuntimeHostMetadataOverride } from "./runtime-host-metadata.ts";
+import {
+  resolveVerifiedPrimaryWorktreeRoot,
+  shouldInheritPrimaryLocalInputs,
+} from "./worktree-local-config.ts";
 
 const FILES = [
   "compose.runtime.override.yml",
@@ -90,14 +110,271 @@ function revision(generated: Generated): string {
     files: generated.files.map(fileRevision),
   });
 }
+
+function digest(text: string): string {
+  return createHash("sha256").update(text).digest("hex");
+}
+function generatedProof(generated: Generated) {
+  return {
+    directory: generated.directory,
+    files: generated.files.map((file) => {
+      if (!file) {
+        return null;
+      }
+      const info = file.info;
+      return {
+        hash: digest(file.text),
+        info: {
+          dev: info.dev,
+          ino: info.ino,
+          mode: info.mode,
+          nlink: info.nlink,
+          size: info.size,
+          mtimeMs: info.mtimeMs,
+          ctimeMs: info.ctimeMs,
+          uid: info.uid,
+        },
+      };
+    }),
+  };
+}
+function privatePrimaryProof(
+  provenance: Awaited<
+    ReturnType<LegacyAdoptionManagedEnvAdmission["resolvePrivatePrimaryProof"]>
+  >
+) {
+  return {
+    primary: provenance.primary,
+    inheritPrimaryLocal: provenance.inheritPrimaryLocal,
+  };
+}
+
+/** Validate and snapshot the bounded private envelope before any async recheck. */
+function savedProjectionEnvelope(value: unknown) {
+  const text = JSON.stringify(value);
+  if (typeof text !== "string" || Buffer.byteLength(text) > 64 * 1024) {
+    refuse();
+  }
+  const proof: unknown = JSON.parse(text);
+  freezeImportValue(proof);
+  if (
+    !(
+      isRecord(proof) &&
+      keys(
+        proof,
+        "generated,inheritPrimaryLocal,managedRevision,primary,projection_version"
+      ) &&
+      proof.projection_version === 1 &&
+      typeof proof.managedRevision === "string" &&
+      typeof proof.inheritPrimaryLocal === "boolean" &&
+      isRecord(proof.generated)
+    )
+  ) {
+    refuse();
+  }
+  const primary = proof.primary;
+  if (
+    !(
+      primary === null ||
+      (isRecord(primary) &&
+        keys(primary, "projectRoot,proof") &&
+        typeof primary.projectRoot === "string" &&
+        isRecord(primary.proof))
+    )
+  ) {
+    refuse();
+  }
+  return {
+    managedRevision: proof.managedRevision,
+    inheritPrimaryLocal: proof.inheritPrimaryLocal,
+    generated: proof.generated,
+    primary,
+  };
+}
+
+/**
+ * Key-free saved consumption of an authenticated private manifest. The generation
+ * owner must validate its receipt, checkout and original source artifacts first.
+ * Only canonical generated paths and the verified linked primary are inspected;
+ * source and managed-byte rechecks grant no fresh delivery or effect authority.
+ * All returned compiler/resource inputs are non-enumerable.
+ */
+export async function readSavedLegacyComposeAdoptionProjection(opts: {
+  readonly projectRoot: string;
+  readonly configText: string;
+  readonly composeText: string;
+  readonly proof: unknown;
+  readonly signal?: AbortSignal;
+  readonly checkOwner: () => Promise<void>;
+}) {
+  try {
+    const { projectRoot, configText, composeText, signal, checkOwner } = opts;
+    if (
+      typeof projectRoot !== "string" ||
+      projectRoot.includes("\0") ||
+      resolve(projectRoot) !== projectRoot ||
+      typeof configText !== "string" ||
+      typeof composeText !== "string" ||
+      Buffer.byteLength(configText) > NATIVE_CONFIG_INPUT_LIMIT ||
+      Buffer.byteLength(composeText) > NATIVE_CONFIG_INPUT_LIMIT
+    ) {
+      refuse();
+    }
+    const proof = savedProjectionEnvelope(opts.proof);
+    check(signal);
+    const mapped = mapLegacyNativeStorageAdoption({ configText, composeText });
+    const candidate = mapped.candidate;
+    if (
+      !(
+        candidate &&
+        legacyComposeAdoptionCandidateSupported(candidate) &&
+        isRecord(candidate.services)
+      )
+    ) {
+      refuse();
+    }
+    const selection = {
+      projectRoot,
+      overlay:
+        isRecord(candidate.environment) &&
+        typeof candidate.environment.default_overlay === "string"
+          ? candidate.environment.default_overlay
+          : null,
+      inheritLocal: !(
+        isRecord(candidate.worktree) &&
+        candidate.worktree.inherit_local === false
+      ),
+      declaredWorkloadNames: Object.freeze(
+        Object.keys(candidate.services).sort()
+      ),
+      signal,
+    };
+    const expectedPrimary = proof.primary;
+    await checkOwner();
+    const primaryRoot = proof.inheritPrimaryLocal
+      ? await resolveVerifiedPrimaryWorktreeRoot({ projectRoot, signal })
+      : null;
+    if (primaryRoot !== (expectedPrimary?.projectRoot ?? null)) {
+      refuse();
+    }
+    const primary = primaryRoot
+      ? await acquireNativeConfigImportInputs({
+          projectRoot: primaryRoot,
+          signal,
+        })
+      : null;
+    if (
+      primary &&
+      (!primary.ok ||
+        JSON.stringify(privateNativeConfigImportSourceProof(primary)) !==
+          JSON.stringify(expectedPrimary?.proof))
+    ) {
+      refuse();
+    }
+    const assertRoot = async (current: {
+      readonly projectRoot: string;
+      readonly signal?: AbortSignal;
+    }) => {
+      check(signal);
+      check(current.signal);
+      await checkOwner();
+      if (
+        shouldInheritPrimaryLocalInputs(selection) !== proof.inheritPrimaryLocal
+      ) {
+        refuse();
+      }
+      if (
+        current.projectRoot !== projectRoot &&
+        current.projectRoot !== primaryRoot
+      ) {
+        refuse();
+      }
+      if (primary?.ok) {
+        await primary.assertFresh({ signal: current.signal ?? signal });
+      }
+      if (
+        !(await legacyComposeAdoptionManagedReadLayoutSupported({
+          projectRoot: current.projectRoot,
+          signal: current.signal ?? signal,
+        }))
+      ) {
+        refuse();
+      }
+      await checkOwner();
+    };
+    const metadata = await assertSavedLegacyAdoptionEnvRevision({
+      selection,
+      revision: proof.managedRevision,
+      inputOwner: {
+        assertRoot,
+        acquireFile: async (current) => {
+          await assertRoot(current);
+          const bytes = await acquireManagedProjectEnvFile(current);
+          if (bytes !== undefined) {
+            assertLegacyAdoptionManagedDocument({
+              bytes,
+              filename: current.filename,
+              declaredWorkloadNames: selection.declaredWorkloadNames,
+            });
+          }
+          await assertRoot(current);
+          return bytes;
+        },
+      },
+    });
+    const generated = await acquireGenerated({
+      projectRoot,
+      assertFresh: checkOwner,
+      signal,
+    });
+    if (
+      JSON.stringify(generatedProof(generated)) !==
+      JSON.stringify(proof.generated)
+    ) {
+      refuse();
+    }
+    const runtime = generated.files[0];
+    const runtimeText = buildRuntimeHostMetadataOverride({
+      composeYamls: [composeText],
+      branch: null,
+      devHost: `${defaultProjectSlugFromPath(projectRoot)}.${DEFAULT_PROJECT_TLD}`,
+      aliasHost: null,
+      composeProject: String(candidate.name),
+    });
+    if (runtime && runtime.text !== runtimeText) {
+      refuse();
+    }
+    const result = {
+      candidate: projectRuntimeFallbacks(candidate, runtime),
+      metadata,
+      composeFiles: [
+        join(projectRoot, ".hack/docker-compose.yml"),
+        ...generated.files.flatMap((file) => (file ? [file.path] : [])),
+      ],
+    };
+    await checkOwner();
+    check(signal);
+    for (const [key, value] of Object.entries(result)) {
+      freezeImportValue(value);
+      Object.defineProperty(result, key, { enumerable: false });
+    }
+    return Object.freeze(result);
+  } catch (error: unknown) {
+    redact(error);
+  }
+}
 /** Acquire known generated inputs through existing descriptor owners; no writer or key lookup. */
 async function acquireGenerated(opts: {
-  readonly source: Source;
+  readonly projectRoot: string;
+  readonly assertFresh: (opts: {
+    readonly signal?: AbortSignal;
+  }) => Promise<void>;
   readonly signal?: AbortSignal;
 }): Promise<Generated> {
   check(opts.signal);
-  await opts.source.assertFresh(opts);
-  const path = join(opts.source.projectRoot, ".hack/.internal");
+  await opts.assertFresh(opts);
+  await hasLegacyComposeGeneratedSources(opts.projectRoot, opts.signal);
+  const path = join(opts.projectRoot, ".hack/.internal");
   const named = await lstat(path).catch((error: unknown) => {
     if (hasCode(error, "ENOENT")) {
       return null;
@@ -105,7 +382,7 @@ async function acquireGenerated(opts: {
     refuse();
   });
   if (named === null) {
-    await opts.source.assertFresh(opts);
+    await opts.assertFresh(opts);
     return { directory: null, files: FILES.map(() => null) };
   }
   const directory = await holdDirectory(path, false);
@@ -141,7 +418,7 @@ async function acquireGenerated(opts: {
       });
     }
     await recheckDirectories([directory]);
-    await opts.source.assertFresh(opts);
+    await opts.assertFresh(opts);
     check(opts.signal);
     return {
       directory: { dev: directory.info.dev, ino: directory.info.ino },
@@ -149,6 +426,57 @@ async function acquireGenerated(opts: {
     };
   } finally {
     await directory.file.close();
+  }
+}
+
+/** Alternate generated authority remains outside this ordered branch-free slice. */
+export async function hasLegacyComposeGeneratedSources(
+  root: string,
+  signal?: AbortSignal
+): Promise<boolean> {
+  check(signal);
+  if (
+    await lstat(join(root, ".hack/.branch")).catch((error: unknown) => {
+      if (hasCode(error, "ENOENT")) {
+        return null;
+      }
+      refuse();
+    })
+  ) {
+    refuse();
+  }
+  const path = join(root, ".hack/.internal");
+  const named = await lstat(path).catch((error: unknown) => {
+    if (hasCode(error, "ENOENT")) {
+      return null;
+    }
+    refuse();
+  });
+  if (!named) {
+    check(signal);
+    return false;
+  }
+  const held = await holdDirectory(path, false);
+  try {
+    const directory = await opendir(path);
+    let count = 0;
+    let found = false;
+    for await (const entry of directory) {
+      check(signal);
+      const canonical = FILES.some((file) => file === entry.name);
+      if (
+        ++count > 4096 ||
+        (entry.name.startsWith("compose.") && !(canonical && entry.isFile()))
+      ) {
+        refuse();
+      }
+      found ||= canonical;
+    }
+    await recheckDirectories([held]);
+    check(signal);
+    return found;
+  } finally {
+    await held.file.close();
   }
 }
 
@@ -241,7 +569,11 @@ export class LegacyComposeAdoptionProjection {
         refuse();
       }
       const env = await acquireProjectEnvForLegacyAdoption({ admission });
-      const generated = await acquireGenerated({ source, signal });
+      const generated = await acquireGenerated({
+        projectRoot: source.projectRoot,
+        assertFresh: source.assertFresh,
+        signal,
+      });
       const projection = new LegacyComposeAdoptionProjection(
         {
           source,
@@ -304,7 +636,8 @@ export class LegacyComposeAdoptionProjection {
       check(context.signal);
       await context.env.assertFresh({ ...context.admission.selection, signal });
       const current = await acquireGenerated({
-        source: context.source,
+        projectRoot: context.source.projectRoot,
+        assertFresh: context.source.assertFresh,
         signal,
       });
       if (revision(current) !== revision(context.generated)) {
@@ -360,6 +693,14 @@ export class LegacyComposeAdoptionProjection {
         ]),
         globalEnv: values.globalEnv,
         metadata: context.env.metadata,
+        projectionProof: {
+          projection_version: 1,
+          managedRevision: privateLegacyAdoptionEnvRevision(context.env),
+          ...privatePrimaryProof(
+            await context.admission.resolvePrivatePrimaryProof()
+          ),
+          generated: generatedProof(context.generated),
+        },
       };
       for (const [key, value] of Object.entries(result)) {
         freezeImportValue(value);

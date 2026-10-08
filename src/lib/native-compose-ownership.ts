@@ -1,6 +1,7 @@
 import { DEFAULT_INGRESS_NETWORK } from "../constants.ts";
 import { isRecord } from "./guards.ts";
 import { nativeComposeVolumeCreatedAt } from "./native-compose-retained-storage.ts";
+import { beginNativeCpuChild } from "./native-cpu-diagnostics.ts";
 import { findExecutableInPath } from "./shell.ts";
 
 const PROJECT = /^[a-z0-9][a-z0-9_-]*$/;
@@ -1038,6 +1039,7 @@ export function createNativeComposeProbe(
       refuse("E_NATIVE_COMPOSE_PROBE");
     }
     const io = new AbortController();
+    const observeCpu = beginNativeCpuChild(child, "docker");
     let settled = false;
     let stopped = false;
     const stop = () => {
@@ -1080,7 +1082,14 @@ export function createNativeComposeProbe(
       clearTimeout(timer);
       opts.signal?.removeEventListener("abort", stop);
       stop();
-      await Promise.allSettled([output, diagnostics, child.exited]);
+      const completion = await Promise.allSettled([
+        output,
+        diagnostics,
+        child.exited,
+      ]);
+      observeCpu(
+        completion[2].status === "fulfilled" ? completion[2].value : undefined
+      );
     }
   };
 }

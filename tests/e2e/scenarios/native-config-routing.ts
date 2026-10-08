@@ -1,5 +1,5 @@
 import { createHash, randomBytes, X509Certificate } from "node:crypto";
-import { chmod, lstat, mkdir, readdir, realpath, rm } from "node:fs/promises";
+import { chmod, lstat, mkdir, readdir, realpath } from "node:fs/promises";
 import { join } from "node:path";
 import type { Project } from "../../../packages/config-compiler/generated/native-config.ts";
 import { isRecord } from "../../../src/lib/guards.ts";
@@ -40,12 +40,13 @@ const PROXY_SERVICE = "caddy";
 const NETWORK = "hack-dev";
 const ADMIN_URL = "http://127.0.0.1:2019/config/apps/http/servers";
 const CADDY_IMAGE = "lucaslorentz/caddy-docker-proxy:2.10.0-alpine";
+const PRIVATE_TMPFS = "rw,noexec,nosuid,nodev,mode=700";
 const APP =
   "Bun.serve({hostname:'0.0.0.0',port:3000,fetch(){return new Response(process.env.BRANCH_MARKER)}})";
 const PRESERVED_FORMAT =
   '{"id":{{json .Id}},"name":{{json .Name}},"running":{{json .State.Running}},"status":{{json .State.Status}},"started":{{json .State.StartedAt}},"finished":{{json .State.FinishedAt}}}';
 const PROXY_FORMAT =
-  '{"id":{{json .Id}},"name":{{json .Name}},"owner":{{json (index .Config.Labels "hack.e2e.native-config-routing-owner")}},"project":{{json (index .Config.Labels "com.docker.compose.project")}},"service":{{json (index .Config.Labels "com.docker.compose.service")}},"network":{{with (index .NetworkSettings.Networks "hack-dev")}}{{json .NetworkID}}{{else}}null{{end}},"networkMode":{{json .HostConfig.NetworkMode}},"running":{{json .State.Running}},"ports":{{json .HostConfig.PortBindings}},"mounts":{{json .Mounts}}}';
+  '{"id":{{json .Id}},"name":{{json .Name}},"owner":{{json (index .Config.Labels "hack.e2e.native-config-routing-owner")}},"project":{{json (index .Config.Labels "com.docker.compose.project")}},"service":{{json (index .Config.Labels "com.docker.compose.service")}},"network":{{with (index .NetworkSettings.Networks "hack-dev")}}{{json .NetworkID}}{{else}}null{{end}},"networkMode":{{json .HostConfig.NetworkMode}},"running":{{json .State.Running}},"ports":{{json .HostConfig.PortBindings}},"mounts":{{json .Mounts}},"tmpfs":{{json .HostConfig.Tmpfs}}}';
 
 type Docker = (args: readonly string[]) => Promise<string>;
 type Runtime = {
@@ -315,10 +316,6 @@ export const nativeConfigRoutingScenario: Scenario = {
     const canaryHost = `canary-${token}.test`;
     const canaryMarker = `proxy-canary-${token}`;
     const privateRoot = await realpath(ctx.tempRoot);
-    const dataRoot = join(privateRoot, `routing-${token}`, "data");
-    const configRoot = join(privateRoot, `routing-${token}`, "config");
-    await mkdir(dataRoot, { recursive: true, mode: 0o700 });
-    await mkdir(configRoot, { recursive: true, mode: 0o700 });
     let proxyId: string | null = null;
     let claimsRoot: string | null = null;
     const attempted = new Set<string>();
@@ -391,9 +388,19 @@ export const nativeConfigRoutingScenario: Scenario = {
           (info.ports === null ||
             (isRecord(info.ports) && Object.keys(info.ports).length === 0)) &&
           Array.isArray(info.mounts) &&
+          info.mounts.length === 1 &&
           info.mounts.every(
-            (mount: unknown) => isRecord(mount) && mount.Type === "bind"
-          ),
+            (mount: unknown) =>
+              isRecord(mount) &&
+              mount.Type === "bind" &&
+              mount.Destination === "/var/run/docker.sock" &&
+              mount.Source === "/var/run/docker.sock" &&
+              mount.RW === false
+          ) &&
+          isRecord(info.tmpfs) &&
+          Object.keys(info.tmpfs).length === 2 &&
+          info.tmpfs["/data"] === PRIVATE_TMPFS &&
+          info.tmpfs["/config"] === PRIVATE_TMPFS,
         message:
           "Proxy effects require exact fixture ownership/network, no published ports or anonymous volumes",
       });
@@ -650,10 +657,9 @@ export const nativeConfigRoutingScenario: Scenario = {
             `label=${FIXTURE_LABEL}=${token}`,
           ])) === "",
         message:
-          "Exact proxy fixture must be absent before deleting its private bind directories",
+          "Exact proxy fixture and its ephemeral filesystem must be absent after cleanup",
       });
       await preservedUnchanged();
-      await rm(join(privateRoot, `routing-${token}`), { recursive: true });
     };
     await runWithOwnedCleanup({
       run: async () => {
@@ -686,10 +692,12 @@ export const nativeConfigRoutingScenario: Scenario = {
           `CADDY_INGRESS_NETWORKS=${NETWORK}`,
           "--mount",
           "type=bind,source=/var/run/docker.sock,target=/var/run/docker.sock,readonly",
-          "--mount",
-          `type=bind,source=${dataRoot},target=/data`,
-          "--mount",
-          `type=bind,source=${configRoot},target=/config`,
+          // Caddy writes private root-owned files. Keep these in the disposable
+          // container so Linux cleanup never needs host chown or sudo.
+          "--tmpfs",
+          `/data:${PRIVATE_TMPFS}`,
+          "--tmpfs",
+          `/config:${PRIVATE_TMPFS}`,
           caddyImage,
           "docker-proxy",
           "--polling-interval",
@@ -935,7 +943,10 @@ export const nativeConfigRoutingScenario: Scenario = {
               {
                 version: 1,
                 proxy: { id: proxyId, name: proxyName, token, networkId },
-                privateBinds: { dataRoot, configRoot },
+                privateTmpfs: {
+                  "/data": PRIVATE_TMPFS,
+                  "/config": PRIVATE_TMPFS,
+                },
                 roots: [...attempted],
                 owners: Object.fromEntries(knownOwners),
                 claimsRoot,

@@ -12,6 +12,7 @@ import {
 import { isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { isRecord } from "../../../src/lib/guards.ts";
+import { bindNativeComposeEngineSocketPath } from "../../../src/lib/native-compose-engine-identity.ts";
 import { parseNativeComposeFileReference } from "../../../src/lib/native-compose-file-state.ts";
 import { openNativeComposeGenerationStore } from "../../../src/lib/native-compose-generation.ts";
 import {
@@ -401,7 +402,10 @@ async function setup(ctx: ScenarioContext) {
   requireValue(
     typeof requestedSocket === "string" && requestedSocket.startsWith("unix://")
   );
-  const socket = await realpath(requestedSocket.slice(7)),
+  const socketBinding = bindNativeComposeEngineSocketPath(
+    requestedSocket.slice(7)
+  );
+  const socket = socketBinding.path,
     socketInfo = await lstat(socket);
   requireValue(socketInfo.isSocket());
   const artifacts = await Promise.all(
@@ -496,13 +500,15 @@ async function setup(ctx: ScenarioContext) {
   };
   const fence = async () => {
     remaining();
+    socketBinding.assertFresh();
     const currentSocket = await lstat(socket);
     requireValue(
       currentSocket.isSocket() &&
         currentSocket.dev === socketInfo.dev &&
         currentSocket.ino === socketInfo.ino &&
         currentSocket.mode === socketInfo.mode &&
-        (await realpath(socket)) === socket
+        currentSocket.uid === socketInfo.uid &&
+        currentSocket.gid === socketInfo.gid
     );
     for (const pin of artifacts) {
       requireValue((await realpath(pin.path)) === pin.physical);

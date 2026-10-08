@@ -115,6 +115,38 @@ function bindPath(path: string, kind: "socket" | "executable"): Binding {
 function sameBinding(left: Binding, right: Binding): boolean {
   return JSON.stringify(left) === JSON.stringify(right);
 }
+/**
+ * Pure filesystem binding only: this neither admits an engine nor performs a
+ * probe. Reuses the transport owner's bounded component walk because Bun's
+ * async realpath rejects a Unix-socket leaf on macOS. All named ancestor/link
+ * and final socket identity facts are rechecked by assertFresh.
+ */
+export function bindNativeComposeEngineSocketPath(path: string): {
+  readonly path: string;
+  readonly assertFresh: () => void;
+} {
+  try {
+    requireValue(
+      typeof path === "string" &&
+        !AMBIGUOUS_PATH.test(path) &&
+        normalize(path) === path
+    );
+    const bound = bindPath(path, "socket");
+    return Object.freeze({
+      path: bound.canonical,
+      assertFresh: () => {
+        try {
+          requireValue(sameBinding(bound, bindPath(path, "socket")));
+        } catch {
+          refuse();
+        }
+      },
+    });
+  } catch {
+    return refuse();
+  }
+}
+
 function check(signal: AbortSignal | undefined, deadline: number): void {
   requireValue(!signal?.aborted && Date.now() < deadline);
 }

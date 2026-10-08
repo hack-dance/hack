@@ -120,7 +120,10 @@ pub(super) fn stop_owned(
     state::write(&path, &evidence)
 }
 
-fn stop_error(failure: StopBatchFailure, admitted: &BTreeMap<&str, &str>) -> CandidateError {
+pub(super) fn stop_error(
+    failure: StopBatchFailure,
+    admitted: &BTreeMap<&str, &str>,
+) -> CandidateError {
     let StopBatchFailure { error, failures } = failure;
     if failures.is_empty() {
         return error;

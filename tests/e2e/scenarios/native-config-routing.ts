@@ -1138,6 +1138,7 @@ export const nativeConfigRoutingScenario: Scenario = {
                 },
                 roots: [...attempted],
                 owners: Object.fromEntries(knownOwners),
+                volumes: Object.fromEntries(volumePins),
                 claimsRoot,
               },
               null,

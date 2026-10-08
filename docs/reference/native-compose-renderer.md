@@ -122,8 +122,8 @@ The first component refuses:
   default command for a non-null entrypoint; resolving that combination requires
   separate image-default qualification. This is partial entrypoint support.
 - HTTP or TCP readiness, without inventing curl, wget, netcat or another image tool.
-- Nonempty host hooks or host environment delivery without the bounded up-hook
-  owner; down phases and persistent processes remain unsupported. Empty
+- Nonempty host hooks or host environment delivery without the bounded finite
+  lifecycle owner; persistent processes remain unsupported. Empty
   host declarations have no execution effect.
 - Authored routing/open settings and route endpoint delivery, pending a routing owner.
 - Typed host/gateway endpoints, pending backend-specific address qualification.

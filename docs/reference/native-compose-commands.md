@@ -109,6 +109,13 @@ Do not copy these documents into source control or attach them to diagnostics.
 
 ## Owned project networks
 
+For an unchanged unrouted running instance, `up` reuses its saved generation only
+when the full input revision, selected profiles and freshly rendered private
+document match exactly. Compose and readiness checks still run, as do authored
+finite hooks. This avoids recreating healthy containers solely because of a new
+generation label. Changed inputs, stopped instances and explicit `restart` retain
+the new-generation path. Routed warm `up` remains outside this reuse slice.
+
 The compiler's owned bridge declarations and workload attachment maps are lowered
 without adding an outbound default attachment to an explicit selection. Custom
 network names stay stable for an instance and differ between worktrees. Only

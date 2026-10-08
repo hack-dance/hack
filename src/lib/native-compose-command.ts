@@ -1248,26 +1248,37 @@ async function prepareCommand(opts: {
       }
       inputs = prepared.inputs;
       const values = await inputs.resolveManagedValues();
+      const render = (generationIdentity: string) =>
+        renderNativeCompose({
+          plan: inputs.result.plan,
+          environmentPlan: inputs.result.environment_plan,
+          projectRoot,
+          runtimeIdentity: store.identity.composeProject,
+          generationIdentity,
+          ownerToken: store.identity.ownerToken,
+          managedValues: values,
+          routingResolution: inputs.result.routing_resolution,
+          declaredWorkloads: inputs.result.declared_workloads,
+          beforeHooksOwned: true,
+        });
+      // Preserve an unchanged unrouted generation under this mutation owner.
+      // New generation labels alone would make Compose recreate healthy services.
+      const reusableUp = await unchangedUnroutedUp({
+        options,
+        current,
+        inputs,
+        store,
+        render,
+      });
       const existingRun =
         options.operation === "run" ? current.generation : null;
-      const reservation = existingRun ? null : mutation.reserveGeneration();
-      const generationId =
-        existingRun?.generationId ?? reservation?.generationId;
+      const existing = existingRun ?? reusableUp?.generation ?? null;
+      const reservation = existing ? null : mutation.reserveGeneration();
+      const generationId = existing?.generationId ?? reservation?.generationId;
       if (!generationId) {
         return invalid();
       }
-      const rendered = renderNativeCompose({
-        plan: inputs.result.plan,
-        environmentPlan: inputs.result.environment_plan,
-        projectRoot,
-        runtimeIdentity: store.identity.composeProject,
-        generationIdentity: generationId,
-        ownerToken: store.identity.ownerToken,
-        managedValues: values,
-        routingResolution: inputs.result.routing_resolution,
-        declaredWorkloads: inputs.result.declared_workloads,
-        beforeHooksOwned: true,
-      });
+      const rendered = reusableUp?.rendered ?? render(generationId);
       assertRunNetworkSupported({
         options,
         document: rendered.document,
@@ -1295,7 +1306,7 @@ async function prepareCommand(opts: {
           document: routedDocument,
         });
         const generation = await publishPreparedGeneration({
-          existing: existingRun,
+          existing,
           reservation,
           mutation,
           store,
@@ -1331,6 +1342,52 @@ async function prepareCommand(opts: {
 type AcquiredComposeInputs = Awaited<
   ReturnType<typeof acquireNativeComposeInputs>
 >;
+
+/** Exact private correspondence permits reuse; it never bypasses effects or readiness. */
+async function unchangedUnroutedUp(opts: {
+  readonly options: NativeComposeCommandOptions;
+  readonly current: Awaited<
+    ReturnType<NativeComposeGenerationStore["loadCurrent"]>
+  >;
+  readonly inputs: AcquiredComposeInputs;
+  readonly store: NativeComposeGenerationStore;
+  readonly render: (
+    generationId: string
+  ) => ReturnType<typeof renderNativeCompose>;
+}) {
+  const generation = opts.current.generation;
+  if (
+    opts.options.operation !== "up" ||
+    opts.current.stopped ||
+    !generation ||
+    generation.inputRevision !== opts.inputs.inputRevision ||
+    opts.inputs.result.plan.routes !== undefined ||
+    opts.inputs.result.plan.open !== undefined
+  ) {
+    return null;
+  }
+  const saved = await opts.store.readGenerationDocument(generation);
+  if (
+    readNativeComposeRouteMetadata({
+      generationId: generation.generationId,
+      document: saved,
+    })
+  ) {
+    return null;
+  }
+  const rendered = opts.render(generation.generationId);
+  const document = bindNativeComposeDownHooks({
+    inputs: opts.inputs,
+    profiles: rendered.profiles,
+    explicitOverlay: opts.options.overlay,
+    document: rendered.document,
+  });
+  return JSON.stringify(generation.profiles) ===
+    JSON.stringify(rendered.profiles) &&
+    JSON.stringify(saved) === JSON.stringify(document)
+    ? { generation, rendered }
+    : null;
+}
 
 function reportNativeStartupIncomplete(opts: {
   readonly afterHookCode: number | undefined;

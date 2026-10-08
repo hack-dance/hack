@@ -17,10 +17,12 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import {
   type NativeComposeGeneration,
+  NativeComposeGenerationError,
   type NativeComposeGenerationStore,
   type NativeComposeRunProjection,
   openNativeComposeGenerationStore,
 } from "../src/lib/native-compose-generation.ts";
+import { NativeComposeGenerationError as PrivateStateError } from "../src/lib/native-compose-private-state.ts";
 import { renderNativeCompose } from "../src/lib/native-compose-renderer.ts";
 import {
   assertNativeComposeOneOffUnexposed,
@@ -488,4 +490,13 @@ test("stale projection publication runs no effect and leaves no uncertain intent
     ).rejects.toMatchObject({ code: "E_NATIVE_COMPOSE_STALE" });
   });
   expect((await owner.loadCurrent()).pending).toBeNull();
+});
+
+test("saved document refusal preserves the shared private owner error class identity", async () => {
+  const { owner, generation } = await generationFixture();
+  expect(NativeComposeGenerationError).toBe(PrivateStateError);
+  await chmod(generation.composeFile, 0o640);
+  await expect(owner.readGenerationDocument(generation)).rejects.toBeInstanceOf(
+    NativeComposeGenerationError
+  );
 });

@@ -19,8 +19,10 @@ import {
 } from "../lib/native-compose-private-state.ts";
 import {
   type NativeAuthoredReceipt,
+  type NativeAuthoredReview,
   nativeAuthoredReceiptBinding,
   parseNativeAuthoredReceipt,
+  parseNativeAuthoredReview,
 } from "./native-authored-graph-protocol.ts";
 
 const LIMIT = 64 * 1024;
@@ -44,6 +46,31 @@ export type NativeAuthoredProjectRunSelection = {
     readonly ino: number;
     readonly sha256: string;
   };
+};
+export type NativeAuthoredProjectStart = {
+  readonly version: 2;
+  readonly kind: "native-authored-project-start";
+  readonly review: NativeAuthoredReview;
+};
+export type NativeAuthoredProjectStartSelection = {
+  readonly record: NativeAuthoredProjectStart;
+  readonly identity: NativeAuthoredProjectRunSelection["identity"];
+};
+export type NativeAuthoredProjectAdmission = {
+  readonly assertHeld: () => Promise<void>;
+  readonly loadStart: () => Promise<NativeAuthoredProjectStartSelection | null>;
+  readonly reserve: (opts: {
+    readonly review: NativeAuthoredReview;
+  }) => Promise<NativeAuthoredProjectStartSelection>;
+  readonly publish: (opts: {
+    readonly expectedStart: NativeAuthoredProjectStartSelection;
+    readonly record: NativeAuthoredProjectRun;
+  }) => Promise<NativeAuthoredProjectRunSelection>;
+  readonly retire: (opts: {
+    readonly expectedStart: NativeAuthoredProjectStartSelection;
+    readonly expectedRun?: NativeAuthoredProjectRunSelection;
+    readonly cleaned: NativeAuthoredReceipt;
+  }) => Promise<void>;
 };
 function refused(): never {
   throw new Error(
@@ -71,7 +98,21 @@ function selected(value: unknown): NativeAuthoredProjectRun {
 function digest(text: string): string {
   return createHash("sha256").update(text).digest("hex");
 }
-function selectedFile(value: unknown): NativeAuthoredProjectRunSelection {
+function started(value: unknown): NativeAuthoredProjectStart {
+  if (
+    !(isRecord(value) && keys(value, "kind,review,version")) ||
+    value.version !== 2 ||
+    value.kind !== "native-authored-project-start"
+  ) {
+    return refused();
+  }
+  return {
+    version: 2,
+    kind: "native-authored-project-start",
+    review: parseNativeAuthoredReview(value.review),
+  };
+}
+function selection<T>(value: unknown, parse: (value: unknown) => T) {
   if (
     !(
       isRecord(value) &&
@@ -96,9 +137,12 @@ function selectedFile(value: unknown): NativeAuthoredProjectRunSelection {
     return refused();
   }
   return {
-    record: selected(value.record),
+    record: parse(value.record),
     identity: { dev: identity.dev, ino: identity.ino, sha256: identity.sha256 },
   };
+}
+function selectedFile(value: unknown): NativeAuthoredProjectRunSelection {
+  return selection(value, selected);
 }
 function validBranch(branch: string | null): boolean {
   return (
@@ -199,8 +243,12 @@ async function storage<T>(
       root,
       held,
       file,
+      startFile: join(root.path, `${key}.start.json`),
+      admissionPath: join(root.path, `${key}.admission.lock`),
+      admissionRecovery: join(root.path, `${key}.admission.recovery`),
       check,
       withLock: lock.withLock,
+      withHeldLock: lock.withHeldLock,
     });
   } catch {
     return refused();
@@ -222,11 +270,24 @@ type Store = {
   readonly root: HeldDirectory;
   readonly held: readonly HeldDirectory[];
   readonly file: string;
+  readonly startFile: string;
+  readonly admissionPath: string;
+  readonly admissionRecovery: string;
   readonly check: () => Promise<void>;
   readonly withLock: <T>(action: () => Promise<T>) => Promise<T>;
+  readonly withHeldLock: <T>(
+    action: (assertHeld: () => Promise<void>) => Promise<T>
+  ) => Promise<T>;
 };
 async function read(store: Store): Promise<NativeAuthoredProjectRunSelection> {
-  const current = await readPrivate(store.file, LIMIT);
+  return await readRecord(store, store.file, selected);
+}
+async function readRecord<T>(
+  store: Store,
+  path: string,
+  parse: (value: unknown) => T
+) {
+  const current = await readPrivate(path, LIMIT);
   const value: unknown = JSON.parse(current.text);
   if (
     !(isRecord(value) && keys(value, "record,scope")) ||
@@ -234,7 +295,7 @@ async function read(store: Store): Promise<NativeAuthoredProjectRunSelection> {
   ) {
     return refused();
   }
-  const record = selected(value.record);
+  const record = parse(value.record);
   await store.check();
   return {
     record,
@@ -244,6 +305,55 @@ async function read(store: Store): Promise<NativeAuthoredProjectRunSelection> {
       sha256: digest(current.text),
     },
   };
+}
+async function absent(path: string): Promise<void> {
+  try {
+    await lstat(path);
+  } catch (error) {
+    if (hasCode(error, "ENOENT")) {
+      return;
+    }
+    throw error;
+  }
+  return refused();
+}
+async function publish<T>(
+  store: Store,
+  path: string,
+  record: T,
+  parse: (value: unknown) => T,
+  check = store.check
+) {
+  const text = JSON.stringify({ scope: store.identity, record });
+  if (Buffer.byteLength(text) > LIMIT) {
+    return refused();
+  }
+  const temporary = join(store.root.path, `${token()}.pending`);
+  let written: { readonly dev: number; readonly ino: number } | undefined;
+  try {
+    const info = await writeExclusive(temporary, text);
+    written = info;
+    await check();
+    const current = await readPrivate(temporary, LIMIT);
+    if (!sameFile(info, current.info) || current.text !== text) {
+      return refused();
+    }
+    await check();
+    await link(temporary, path);
+    await unlink(temporary);
+    written = undefined;
+    await synchronizeDirectories(store.held);
+    return await readRecord(store, path, parse);
+  } finally {
+    if (written) {
+      await store.check();
+      const current = await readPrivate(temporary, LIMIT);
+      if (!sameFile(current.info, written) || current.text !== text) {
+        refused();
+      }
+      await unlink(temporary);
+    }
+  }
 }
 
 /** Prepare excluded native-only storage before reviewing source; never a Compose v1 mapping. */
@@ -282,35 +392,8 @@ export async function saveNativeAuthoredProjectRun(
       return refused();
     }
     return await store.withLock(async () => {
-      const text = JSON.stringify({ scope: store.identity, record });
-      if (Buffer.byteLength(text) > LIMIT) {
-        return refused();
-      }
-      const temporary = join(store.root.path, `${token()}.pending`);
-      let written: { readonly dev: number; readonly ino: number } | undefined;
-      try {
-        const info = await writeExclusive(temporary, text);
-        written = info;
-        await store.check();
-        const current = await readPrivate(temporary, LIMIT);
-        if (!sameFile(info, current.info) || current.text !== text) {
-          return refused();
-        }
-        await link(temporary, store.file);
-        await unlink(temporary);
-        written = undefined;
-        await synchronizeDirectories(store.held);
-        return await read(store);
-      } finally {
-        if (written) {
-          await store.check();
-          const current = await readPrivate(temporary, LIMIT);
-          if (!sameFile(current.info, written) || current.text !== text) {
-            refused();
-          }
-          await unlink(temporary);
-        }
-      }
+      await absent(store.startFile);
+      return await publish(store, store.file, record, selected);
     });
   });
 }
@@ -338,6 +421,7 @@ export async function removeNativeAuthoredProjectRun(
       return refused();
     }
     await store.withLock(async () => {
+      await absent(store.startFile);
       const current = await read(store);
       if (JSON.stringify(current) !== JSON.stringify(expected)) {
         return refused();
@@ -345,6 +429,182 @@ export async function removeNativeAuthoredProjectRun(
       await store.check();
       await unlink(store.file);
       await synchronizeDirectories(store.held);
+    });
+  });
+}
+
+function removed(value: unknown): NativeAuthoredReceipt {
+  const receipt = parseNativeAuthoredReceipt(value);
+  if (
+    receipt.phase !== "removed" ||
+    Object.values(receipt.resources).some(
+      (resource) => resource.phase !== "removed"
+    )
+  ) {
+    return refused();
+  }
+  return receipt;
+}
+async function unchanged<T>(
+  store: Store,
+  path: string,
+  expected: {
+    readonly record: T;
+    readonly identity: NativeAuthoredProjectRunSelection["identity"];
+  },
+  parse: (value: unknown) => T
+) {
+  if (
+    JSON.stringify(await readRecord(store, path, parse)) !==
+    JSON.stringify(expected)
+  ) {
+    return refused();
+  }
+}
+
+/**
+ * Hold native startup admission through foreground ownership and retirement. Reserve
+ * the hash-only intent before spawning a provider consumer. An interrupted or failed
+ * start retains its intent; no timeout, dead PID, or missing ready mapping permits
+ * replay. The caller must authenticate the exact durable Removed journal before
+ * retirement, including failures before ready publication. Compose v1 stays separate.
+ */
+export async function withNativeAuthoredProjectAdmission<T>(
+  opts: NativeAuthoredProjectRunScope,
+  action: (admission: NativeAuthoredProjectAdmission) => Promise<T>
+): Promise<T> {
+  return await storage(opts, true, async (store) => {
+    if (!store) {
+      return refused();
+    }
+    const admission = createNativeComposePrivateMutationLock({
+      lockPath: store.admissionPath,
+      recoveryPath: store.admissionRecovery,
+      parent: store.root,
+      check: store.check,
+    });
+    return await admission.withHeldLock(async (verifyLock) => {
+      let active = true;
+      const assertHeld = async () => {
+        if (!active) {
+          return refused();
+        }
+        try {
+          await verifyLock();
+        } catch {
+          return refused();
+        }
+      };
+      const withMutation = async <R>(
+        run: (check: () => Promise<void>) => Promise<R>
+      ) => {
+        try {
+          await assertHeld();
+          return await store.withHeldLock(async (verifyMutation) => {
+            await assertHeld();
+            return await run(async () => {
+              await verifyMutation();
+              await assertHeld();
+            });
+          });
+        } catch {
+          return refused();
+        }
+      };
+      const loadStart = async () => {
+        await assertHeld();
+        try {
+          return await readRecord(store, store.startFile, started);
+        } catch (error) {
+          if (hasCode(error, "ENOENT")) {
+            return null;
+          }
+          return refused();
+        }
+      };
+      const capability: NativeAuthoredProjectAdmission = {
+        assertHeld,
+        loadStart,
+        async reserve(input) {
+          const record = started({
+            version: 2,
+            kind: "native-authored-project-start",
+            review: input.review,
+          });
+          return await withMutation(async (check) => {
+            await absent(store.file);
+            await absent(store.startFile);
+            return await publish(
+              store,
+              store.startFile,
+              record,
+              started,
+              check
+            );
+          });
+        },
+        async publish(input) {
+          const expected = selection(input.expectedStart, started);
+          const record = selected(input.record);
+          if (
+            JSON.stringify(expected.record.review) !==
+            JSON.stringify(record.receipt.review)
+          ) {
+            return refused();
+          }
+          return await withMutation(async (check) => {
+            await unchanged(store, store.startFile, expected, started);
+            return await publish(
+              store,
+              store.file,
+              record,
+              selected,
+              async () => {
+                await unchanged(store, store.startFile, expected, started);
+                await check();
+              }
+            );
+          });
+        },
+        async retire(input) {
+          const expected = selection(input.expectedStart, started);
+          const run =
+            input.expectedRun === undefined
+              ? undefined
+              : selectedFile(input.expectedRun);
+          const cleaned = removed(input.cleaned);
+          if (
+            JSON.stringify(expected.record.review) !==
+              JSON.stringify(cleaned.review) ||
+            (run !== undefined &&
+              nativeAuthoredReceiptBinding(run.record.receipt) !==
+                nativeAuthoredReceiptBinding(cleaned))
+          ) {
+            return refused();
+          }
+          await withMutation(async (check) => {
+            await unchanged(store, store.startFile, expected, started);
+            if (run === undefined) {
+              await absent(store.file);
+            } else {
+              await unchanged(store, store.file, run, selected);
+              await check();
+              await unlink(store.file);
+              await synchronizeDirectories(store.held);
+            }
+            // If retirement stops here, the durable start continues to block a new run.
+            await unchanged(store, store.startFile, expected, started);
+            await check();
+            await unlink(store.startFile);
+            await synchronizeDirectories(store.held);
+          });
+        },
+      };
+      try {
+        return await action(Object.freeze(capability));
+      } finally {
+        active = false;
+      }
     });
   });
 }

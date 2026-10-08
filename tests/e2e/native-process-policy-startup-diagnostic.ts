@@ -35,6 +35,38 @@ const defaultDependencies: Dependencies = {
   openStore: openNativeComposeGenerationStore,
   createProbe: createNativeComposeProbe,
 };
+const OWN_REASONS = [
+  "diagnostic_bound",
+  "diagnostic_engine_drift",
+  "diagnostic_engine_selection",
+  "diagnostic_foreign_bridge",
+  "diagnostic_foreign_name",
+  "diagnostic_inventory_drift",
+  "diagnostic_inventory",
+  "diagnostic_pending_drift",
+  "diagnostic_pending_selection",
+  "diagnostic_saved_image",
+  "diagnostic_saved_topology",
+  "diagnostic_shape",
+] as const;
+type OwnReason = (typeof OWN_REASONS)[number];
+type DiagnosticStage =
+  | "saved-selection"
+  | "saved-document"
+  | "first-scan"
+  | "second-scan"
+  | "final-recheck"
+  | "record";
+class DiagnosticRefusal extends Error {
+  readonly reason: OwnReason;
+  constructor(reason: OwnReason) {
+    super(reason);
+    this.reason = reason;
+  }
+}
+function refuse(reason: OwnReason): never {
+  throw new DiagnosticRefusal(reason);
+}
 
 /** Only the exact failed startup envelope opts into diagnostic observation. */
 export function isKnownUncertainProcessPolicyStartup(result: {
@@ -77,22 +109,22 @@ function object(value: string): Row {
   try {
     parsed = JSON.parse(value);
   } catch {
-    throw new Error("diagnostic_shape");
+    refuse("diagnostic_shape");
   }
   if (
     !(parsed !== null && typeof parsed === "object" && !Array.isArray(parsed))
   ) {
-    throw new Error("diagnostic_shape");
+    refuse("diagnostic_shape");
   }
   return parsed as Row;
 }
 function rows(value: string): Row[] {
   if (value.length > 65_536) {
-    throw new Error("diagnostic_bound");
+    refuse("diagnostic_bound");
   }
   const lines = value.trim() ? value.trim().split("\n") : [];
   if (lines.length > 64) {
-    throw new Error("diagnostic_bound");
+    refuse("diagnostic_bound");
   }
   return lines.map(object);
 }
@@ -121,7 +153,7 @@ function container(value: Row): Container {
       )
     )
   ) {
-    throw new Error("diagnostic_shape");
+    refuse("diagnostic_shape");
   }
   return value as Container;
 }
@@ -138,7 +170,7 @@ function network(value: Row): Network {
       )
     )
   ) {
-    throw new Error("diagnostic_shape");
+    refuse("diagnostic_shape");
   }
   return value as Network;
 }
@@ -151,7 +183,7 @@ async function scan(
   const probe: Probe = createProbe({ timeoutMs: 30_000 });
   const engineBefore = (await probe(["info", "--format", "{{.ID}}"])).trim();
   if (engineBefore !== ctx.engine) {
-    throw new Error("diagnostic_engine_drift");
+    refuse("diagnostic_engine_drift");
   }
   const listed = rows(
     await probe([
@@ -174,7 +206,7 @@ async function scan(
         knownNames.includes(String(row.name)) && row.project !== ctx.project
     )
   ) {
-    throw new Error("diagnostic_foreign_name");
+    refuse("diagnostic_foreign_name");
   }
   if (
     selected.length > 8 ||
@@ -182,7 +214,7 @@ async function scan(
     new Set(selected.map((row) => row.id)).size !== selected.length ||
     new Set(selected.map((row) => row.name)).size !== selected.length
   ) {
-    throw new Error("diagnostic_inventory");
+    refuse("diagnostic_inventory");
   }
   const inspected =
     selected.length === 0
@@ -200,7 +232,7 @@ async function scan(
     inspected.length !== selected.length ||
     inspected.some((row) => !selected.some((item) => item.id === row.id))
   ) {
-    throw new Error("diagnostic_inventory_drift");
+    refuse("diagnostic_inventory_drift");
   }
   const bridges = rows(
     await probe(["network", "ls", "--no-trunc", "--format", NETWORKS])
@@ -210,14 +242,14 @@ async function scan(
       (row) => row.name === ctx.bridge && row.project !== ctx.project
     )
   ) {
-    throw new Error("diagnostic_foreign_bridge");
+    refuse("diagnostic_foreign_bridge");
   }
   if (
     bridges.length > 2 ||
     bridges.some((row) => !ID.test(String(row.id))) ||
     new Set(bridges.map((row) => row.id)).size !== bridges.length
   ) {
-    throw new Error("diagnostic_inventory");
+    refuse("diagnostic_inventory");
   }
   const selectedBridge = bridges.find((row) => row.name === ctx.bridge);
   const bridge = selectedBridge
@@ -234,11 +266,11 @@ async function scan(
       )
     : null;
   if (bridge && bridge.id !== selectedBridge?.id) {
-    throw new Error("diagnostic_inventory_drift");
+    refuse("diagnostic_inventory_drift");
   }
   const engineAfter = (await probe(["info", "--format", "{{.ID}}"])).trim();
   if (engineAfter !== ctx.engine) {
-    throw new Error("diagnostic_engine_drift");
+    refuse("diagnostic_engine_drift");
   }
   return { containers: inspected, bridge };
 }
@@ -438,9 +470,11 @@ export async function captureNativeProcessPolicyStartupDiagnostic(opts: {
   readonly projectRoot: string;
   readonly expectedEngineId: string;
   readonly dependencies?: Dependencies;
+  readonly onStage?: (stage: DiagnosticStage) => void;
 }) {
+  opts.onStage?.("saved-selection");
   if (!ENGINE.test(opts.expectedEngineId)) {
-    throw new Error("diagnostic_engine_selection");
+    refuse("diagnostic_engine_selection");
   }
   const dependencies = opts.dependencies ?? defaultDependencies;
   const store = await dependencies.openStore({
@@ -458,8 +492,9 @@ export async function captureNativeProcessPolicyStartupDiagnostic(opts: {
         before.pending.generationId === pending.generationId
       )
     ) {
-      throw new Error("diagnostic_pending_selection");
+      refuse("diagnostic_pending_selection");
     }
+    opts.onStage?.("saved-document");
     const document = await store.readGenerationDocument(pending);
     const serviceMap = document.services;
     const networkMap = document.networks;
@@ -497,7 +532,7 @@ export async function captureNativeProcessPolicyStartupDiagnostic(opts: {
         )
       )
     ) {
-      throw new Error("diagnostic_saved_topology");
+      refuse("diagnostic_saved_topology");
     }
     const images = SERVICES.map((service) => (serviceMap as Row)[service]).map(
       (value) =>
@@ -514,7 +549,7 @@ export async function captureNativeProcessPolicyStartupDiagnostic(opts: {
         IMAGE.test(image)
       )
     ) {
-      throw new Error("diagnostic_saved_image");
+      refuse("diagnostic_saved_image");
     }
     const context: Context = {
       project: store.identity.composeProject,
@@ -524,8 +559,11 @@ export async function captureNativeProcessPolicyStartupDiagnostic(opts: {
       image,
       engine: opts.expectedEngineId,
     };
+    opts.onStage?.("first-scan");
     const first = await scan(context, dependencies.createProbe);
+    opts.onStage?.("second-scan");
     const second = await scan(context, dependencies.createProbe);
+    opts.onStage?.("final-recheck");
     const after = await store.loadCurrent();
     const afterPending = await store.loadPending();
     const afterDocument = afterPending
@@ -536,7 +574,7 @@ export async function captureNativeProcessPolicyStartupDiagnostic(opts: {
       JSON.stringify(afterPending) !== JSON.stringify(pending) ||
       JSON.stringify(afterDocument) !== JSON.stringify(document)
     ) {
-      throw new Error("diagnostic_pending_drift");
+      refuse("diagnostic_pending_drift");
     }
     return {
       version: 1,
@@ -552,6 +590,13 @@ export async function captureNativeProcessPolicyStartupDiagnostic(opts: {
 export type NativeProcessPolicyStartupDiagnostic = Awaited<
   ReturnType<typeof captureNativeProcessPolicyStartupDiagnostic>
 >;
+type DiagnosticOutcome =
+  | { readonly status: "not-applicable" | "captured" }
+  | {
+      readonly status: "unavailable";
+      readonly stage: DiagnosticStage;
+      readonly reason: OwnReason | "external_store_or_probe";
+    };
 
 /** Diagnostic failure cannot replace the original uncertain startup result. */
 export async function recordKnownUncertainProcessPolicyStartup(opts: {
@@ -566,20 +611,32 @@ export async function recordKnownUncertainProcessPolicyStartup(opts: {
     summary: NativeProcessPolicyStartupDiagnostic
   ) => Promise<void>;
   readonly capture?: typeof captureNativeProcessPolicyStartupDiagnostic;
-}): Promise<"not-applicable" | "captured" | "unavailable"> {
+}): Promise<DiagnosticOutcome> {
   if (!isKnownUncertainProcessPolicyStartup(opts.result)) {
-    return "not-applicable";
+    return { status: "not-applicable" };
   }
+  let stage: DiagnosticStage = "saved-selection";
   try {
     const summary = await (
       opts.capture ?? captureNativeProcessPolicyStartupDiagnostic
     )({
       projectRoot: opts.projectRoot,
       expectedEngineId: opts.expectedEngineId,
+      onStage: (selected) => {
+        stage = selected;
+      },
     });
+    stage = "record";
     await opts.record(summary);
-    return "captured";
-  } catch {
-    return "unavailable";
+    return { status: "captured" };
+  } catch (error: unknown) {
+    return {
+      status: "unavailable",
+      stage,
+      reason:
+        error instanceof DiagnosticRefusal
+          ? error.reason
+          : "external_store_or_probe",
+    };
   }
 }

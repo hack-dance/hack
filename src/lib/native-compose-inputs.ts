@@ -30,7 +30,9 @@ function freezePlan(value: unknown): void {
 }
 
 /** Private receipt fingerprint. Managed env fingerprints remain inside their owner. */
-function sourceRevision(prepared: NativePreparedProject): string {
+export function nativeComposeSourceRevision(
+  prepared: NativePreparedProject
+): string {
   const digest = createHash("sha256");
   const add = (name: string, bytes: Uint8Array | undefined) => {
     digest.update(name);
@@ -133,13 +135,13 @@ export async function acquireNativeComposeInputs(opts: {
   }
   const selectedWorkloads = Object.keys(planned.environment_plan.workloads);
   freezePlan(planned);
-  const revision = sourceRevision(prepared);
+  const revision = nativeComposeSourceRevision(prepared);
   const assertFresh = async () => {
     const current = await prepare();
     if (
       current.projectRoot !== prepared.projectRoot ||
       !current.result.ok ||
-      sourceRevision(current) !== revision
+      nativeComposeSourceRevision(current) !== revision
     ) {
       return refused();
     }

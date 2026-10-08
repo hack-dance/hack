@@ -59,7 +59,7 @@ graph adapter also refuses raw file namespace presence, including empty definiti
 and inactive grants, before private value copies. A successful file plan must not be
 treated as permission to launch a workload or fall back to another backend.
 
-The proposed first delivery subset is read-only mode `0444` with no UID/GID override;
+The first private owner subset is read-only mode `0444` with no UID/GID override;
 custom permissions, writable access, one-off `run`, and projects combining builds
 with file inputs remain outside that subset. File-backed Compose config/secret
 mounts do not implement portable ownership remapping, so emitting ignored attributes
@@ -69,3 +69,35 @@ projection, interruption recovery and verified cleanup require separate source a
 synthetic engine qualification before delivery is enabled. See the
 [Compose renderer boundary](native-compose-renderer.md) and
 [generation recovery contract](native-compose-generation.md).
+
+The unwired filesystem owner acquires only compiler-selected grants under the
+actual generation mutation lease. It keeps the checkout, source parents and leaf
+files open and rechecks their identities around bounded reads. The aggregate input
+bound is 1 MiB. Secret files require mode 0400 or 0600; config files and source
+parents must not be group/world writable. Empty and binary bytes remain exact.
+Managed references resolve through the existing env owner, independently of
+authored env delivery, without reading caller env or introducing encryption.
+
+Snapshots use owned 0700 directories outside the checkout, exclusive 0444 files,
+0600 metadata and exact read-only binds with `create_host_path: false`. A private
+generated extension anchors the root receipt, snapshot, manifest and file identities.
+Public plans, logs and CLI receipts contain no values, private paths or content
+digests. Copied identities, reservations or handles cannot mint mutation authority;
+closing the mutation revokes that authority and awaits its owned work.
+
+A fixed-inode append journal separates effects-possible, known child reaping,
+retirement intent, each member unlink and the final retired marker. Unarmed rollback
+requires the original live attempt. Armed material cannot retire merely because
+containers disappeared: the original live attempt must have recorded verified child
+completion, and hooks must be known. Saved stop checks exact immutable references
+and fresh owned-container absence without authored reads or decryption. A missing
+member before retirement intent refuses; a missing member after exact intent permits
+retry, while replacement always refuses. Old material retires before generation
+handoff, and the pending generation remains until the finalizer and fresh ownership
+and pending checks pass. A failed finalizer retains the exact recovery reference.
+
+Closing a material owner does not delete snapshots. Interrupted preparation before
+generation publication conservatively retains its directory; this slice does not
+scan or adopt orphan snapshots. An interrupted journal write that cannot be parsed
+also retains material. Command delivery remains refused until independent source
+review and the compiled synthetic engine fixture qualify these boundaries.

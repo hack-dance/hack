@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createNativeComposeProbe } from "../src/lib/native-compose-ownership.ts";
 import {
+  assertAdoptionWorkerArgv,
   cleanupOwnedAdoptionFixture,
   createAdoptionFixtureProbe,
   nativeComposeAdoptionWorktreesScenario,
@@ -55,6 +56,41 @@ const rows = {
     createdAt,
   },
 };
+
+const literalArgv = {
+  id,
+  command: ["command-$NC04_LITERAL", "$$", ""],
+  entrypoint: [
+    "/bin/sh",
+    "-c",
+    "trap 'sleep 10; exit 0' TERM; while true; do sleep 1; done",
+    "entrypoint-${NC04_LITERAL}",
+  ],
+};
+
+test("owned fixture actual argv keeps both dollar forms and an empty argument", () => {
+  expect(() =>
+    assertAdoptionWorkerArgv({ id, row: literalArgv })
+  ).not.toThrow();
+});
+
+test.each([
+  ["changed container ID", { ...literalArgv, id: "b".repeat(64) }],
+  ["interpolated command", { ...literalArgv, command: [CANARY, "$$", ""] }],
+  [
+    "missing empty argument",
+    { ...literalArgv, command: ["command-$NC04_LITERAL", "$$"] },
+  ],
+  ["changed entrypoint", { ...literalArgv, entrypoint: ["/bin/sh", "-c"] }],
+  [
+    "interpolated entrypoint",
+    { ...literalArgv, entrypoint: ["/bin/sh", "-c", CANARY, "literal"] },
+  ],
+  ["malformed command", { ...literalArgv, command: null }],
+])("actual argv oracle refuses %s with a fixed diagnostic", (_label, row) => {
+  expect(() => assertAdoptionWorkerArgv({ id, row })).toThrow(REFUSAL);
+  expect(() => assertAdoptionWorkerArgv({ id, row })).not.toThrow(CANARY);
+});
 
 test("later fixture lifecycle reads create independent bounded acquisitions after the original expires", async () => {
   const root = await mkdtemp(join(tmpdir(), "adoption-probe-lifetime-"));

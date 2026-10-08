@@ -253,3 +253,118 @@ test("native nested failures observations terminal evidence and unknown intent s
     ).toThrow("invalid");
   }
 });
+
+test("required native resources and terminal members must be exact own keys", () => {
+  const bound = receipt();
+  const inherited = Object.create(bound.resources);
+  inherited.foo = bound.resources["network:default"];
+  inherited.bar = bound.resources["container:a.peer"];
+  expect(() =>
+    parseNativeAuthoredReceipt({ ...bound, resources: inherited })
+  ).toThrow("invalid");
+  const terminal = {
+    id: "2".repeat(64),
+    exit_code: 0,
+    oom_killed: false,
+    stop_requested: false,
+  };
+  expect(
+    parseNativeAuthoredReceipt({
+      ...bound,
+      terminal: { "container:a.peer": terminal },
+    }).terminal?.["container:a.peer"]?.id
+  ).toBe(terminal.id);
+  expect(() =>
+    parseNativeAuthoredReceipt({
+      ...bound,
+      terminal: { constructor: terminal },
+    })
+  ).toThrow("invalid");
+});
+
+test("prototype resource membership cannot admit a foreign terminal", () => {
+  const bound = receipt();
+  const key = "container:foreign-prototype-test";
+  const previous = Object.getOwnPropertyDescriptor(Object.prototype, key);
+  Object.defineProperty(Object.prototype, key, {
+    value: bound.resources["container:a.peer"],
+    configurable: true,
+  });
+  try {
+    const terminal = {
+      id: "2".repeat(64),
+      exit_code: 0,
+      oom_killed: false,
+      stop_requested: false,
+    };
+    expect(() =>
+      parseNativeAuthoredReceipt({ ...bound, terminal: { [key]: terminal } })
+    ).toThrow("invalid");
+  } finally {
+    if (previous) {
+      Object.defineProperty(Object.prototype, key, previous);
+    } else {
+      Reflect.deleteProperty(Object.prototype, key);
+    }
+  }
+});
+
+test("native receipts require at least one Rust workload", () => {
+  const empty = receipt();
+  expect(() =>
+    parseNativeAuthoredReceipt({
+      ...empty,
+      readiness: {},
+      resources: { "network:default": empty.resources["network:default"] },
+    })
+  ).toThrow("invalid");
+});
+
+test.each([
+  ".web",
+  "\u2603",
+  "w".repeat(129),
+])("native receipt rejects a self-consistent invalid service name %s", (name) => {
+  const bound = receipt();
+  const container = { ...bound.resources["container:a.peer"], key: name };
+  expect(() =>
+    parseNativeAuthoredReceipt({
+      ...bound,
+      readiness: { [name]: "healthy" },
+      resources: {
+        "network:default": bound.resources["network:default"],
+        [`container:${name}`]: container,
+      },
+    })
+  ).toThrow("invalid");
+});
+
+test.each([
+  "_web",
+  "-web",
+  "A_B-9",
+  "web.",
+  "w".repeat(128),
+])("native receipt preserves a valid Rust service identifier %s", (name) => {
+  const bound = receipt();
+  const container = { ...bound.resources["container:a.peer"], key: name };
+  const parsed = parseNativeAuthoredReceipt({
+    ...bound,
+    readiness: { [name]: "healthy" },
+    resources: {
+      "network:default": bound.resources["network:default"],
+      [`container:${name}`]: container,
+    },
+  });
+  expect(Object.keys(parsed.readiness)).toEqual([name]);
+});
+
+test("native profile names require scalar strings including valid surrogate pairs", () => {
+  expect(
+    parseNativeAuthoredReview(review(["\u{10000}"])).provenance.input
+      .selected_profiles
+  ).toEqual(["\u{10000}"]);
+  for (const name of ["\uD800", "\uDC00"]) {
+    expect(() => parseNativeAuthoredReview(review([name]))).toThrow("invalid");
+  }
+});

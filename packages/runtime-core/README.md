@@ -166,6 +166,8 @@ refuses source removal while startup or ready evidence remains. It does not pars
 authored policy or acquire values. Ready publication accepts a synchronous owner
 guard after the final asynchronous authority checks, immediately before linking
 the mapping; the consuming caller must supply its process and cancellation guard.
+Guard returns must be `undefined`. Accidental asynchronous or other return values
+refuse publication, and rejected promises are consumed without printing their details.
 
 Shared Bun input preparation accepts the native source's explicit compiler branch
 context. It binds that branch into resolve and environment planning without

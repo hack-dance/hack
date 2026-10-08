@@ -99,7 +99,10 @@ changed network policy refuse before cleanup effects. Cleanup preflights every
 stop, retains terminal observations before deletes, removes the verified empty project
 network after containers, and retires private payloads
 only after the bound container is absent. Failed/uncertain attempts retain their
-reservations. Shared admission counts native and Compose attempts together; a build
+reservations. Cleanup retries preserve committed stop/removal progress: terminal
+instances are not stopped again, and fully Removed inventories are inspected without
+rewriting their receipt. A restarted stopped instance or reappearing removed resource
+refuses before any cleanup effect. Shared admission counts native and Compose attempts together; a build
 with native support accepts validated, fully removed same-owner history from an
 older boot for capacity purposes only. Active, malformed or foreign old-boot
 records still refuse; they grant no inspection, cleanup or restore authority. A build

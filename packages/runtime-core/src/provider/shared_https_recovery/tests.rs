@@ -349,24 +349,7 @@ fn live_pinned_executable_refuses_quiescence() {
     let (bytes, _) = read_file(&f.paths.source.join("configuration.json"), MAX_FILE, true).unwrap();
     let mut config: Configuration = serde_json::from_slice(&bytes).unwrap();
     config.binding.caddy_binary = f.home.join("live-caddy");
-    // A copied Apple platform executable can be killed before the scan. Use an
-    // owned fixture whose lifetime is witnessed independently of quiescence.
-    let source = f.home.join("live-caddy.c");
-    fs::write(
-        &source,
-        b"#include <unistd.h>\nint main(void) { sleep(10); return 0; }\n",
-    )
-    .unwrap();
-    assert!(
-        Command::new("cc")
-            .args(["-Wall", "-Wextra", "-Werror"])
-            .arg(&source)
-            .arg("-o")
-            .arg(&config.binding.caddy_binary)
-            .status()
-            .unwrap()
-            .success()
-    );
+    crate::provider::test_executable::sleeping_executable(&config.binding.caddy_binary);
     fs::set_permissions(
         &config.binding.caddy_binary,
         fs::Permissions::from_mode(0o700),

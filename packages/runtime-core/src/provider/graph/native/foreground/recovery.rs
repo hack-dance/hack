@@ -9,7 +9,9 @@ use std::{
 };
 
 const FILE: &str = "live-owner-recovery.json";
-const LIMIT: usize = 128 * 1024;
+// Keep the complete intent inside the existing secure reader's admitted bound.
+// Oversized original selections cannot acquire retry authority.
+const LIMIT: usize = 64 * 1024;
 fn refused() -> CandidateError {
     error(
         "native_graph_live_owner_recovery",

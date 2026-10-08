@@ -122,6 +122,43 @@ fn authored_file_presence_refuses_before_private_copies_even_empty_or_inactive()
 }
 
 #[test]
+fn direct_compile_and_review_enforce_owning_byte_bounds_before_raw_file_scan() {
+    let mut project = basic();
+    project["configs"] = json!({});
+    let input = request(&project, json!({"web":{}}));
+    assert!(hack_config_compiler::environment::plan(&input, &[]).complete());
+
+    // Valid JSON with trailing whitespace would reach the raw empty-config fence
+    // if the owning request-size preflight no longer ran first.
+    let mut outer_oversized = input.clone();
+    outer_oversized.resize(hack_config_compiler::local::MAX_REQUEST_BYTES + 1, b' ');
+    let mut inner_request: Value = serde_json::from_slice(&input).unwrap();
+    let mut authored = project.to_string();
+    authored.extend(std::iter::repeat_n(
+        ' ',
+        hack_config_compiler::MAX_INPUT_BYTES + 1 - authored.len(),
+    ));
+    inner_request["project"] = json!(authored);
+    let inner_oversized = serde_json::to_vec(&inner_request).unwrap();
+    assert!(inner_oversized.len() < hack_config_compiler::local::MAX_REQUEST_BYTES);
+    let values = ManagedValues::new();
+    for input in [&outer_oversized, &inner_oversized] {
+        PRIVATE_COPIES.with(|copies| copies.set(0));
+        refusal(
+            compile(CompileOptions {
+                request: input,
+                profiles: &[],
+                managed_values: &values,
+            }),
+            "native_graph_compile",
+        );
+        let error = review(input, &[]).unwrap_err();
+        assert_eq!(error.code, "native_graph_compile");
+        assert_eq!(PRIVATE_COPIES.with(std::cell::Cell::get), 0);
+    }
+}
+
+#[test]
 fn late_workload_and_binding_refusals_never_copy_private_values() {
     let project = json!({"schema_version":1,"name":"fixture","services":{
         "a.first":{"image":"first"},"z.last":{"image":"last"}

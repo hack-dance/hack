@@ -1,4 +1,4 @@
-import { chmod, mkdir, open, realpath } from "node:fs/promises";
+import { mkdir, open, realpath } from "node:fs/promises";
 import { join } from "node:path";
 import type {
   Project,
@@ -15,6 +15,7 @@ import {
   runCommand,
   type Scenario,
 } from "../harness.ts";
+import { prepareNativeEngineTripwire } from "../native-engine-tripwire.ts";
 import { recordKnownUncertainProcessPolicyStartup } from "../native-process-policy-startup-diagnostic.ts";
 
 const TIMEOUT = 120_000;
@@ -341,14 +342,10 @@ export async function refuseUnsupportedPolicies(opts: {
   });
   const tripwire = join(opts.root, "tripwire");
   await mkdir(tripwire);
-  const engineCalled = join(tripwire, "engine-called");
+  const engineCalled = await prepareNativeEngineTripwire({
+    directory: tripwire,
+  });
   const hookCalled = join(tripwire, "hook-called");
-  const fakeDocker = join(tripwire, "docker");
-  await Bun.write(
-    fakeDocker,
-    `#!${process.execPath}\nawait Bun.write(${JSON.stringify(engineCalled)}, "called");process.exit(99);\n`
-  );
-  await chmod(fakeDocker, 0o700);
   for (const field of [
     "resources",
     "logging",

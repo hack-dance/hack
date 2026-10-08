@@ -87,7 +87,7 @@ export type NativeAuthoredProjectAdmission = {
     readonly expectedStart: NativeAuthoredProjectStartSelection;
     readonly record: NativeAuthoredProjectRun;
     /** Synchronous owner/cancellation guard at the final publication boundary. */
-    readonly assertReady?: () => void;
+    readonly assertReady?: () => undefined;
   }) => Promise<NativeAuthoredProjectRunSelection>;
   readonly retire: (opts: {
     readonly expectedStart: NativeAuthoredProjectStartSelection;
@@ -393,7 +393,7 @@ async function publish<T>(
   record: T,
   parse: (value: unknown) => T,
   check = store.check,
-  assertReady?: () => void
+  assertReady?: () => undefined
 ) {
   const text = JSON.stringify({ scope: store.identity, record });
   if (Buffer.byteLength(text) > LIMIT) {
@@ -410,7 +410,13 @@ async function publish<T>(
       return refused();
     }
     await check();
-    assertReady?.();
+    const guarded: unknown = assertReady?.();
+    if (guarded !== undefined) {
+      // Refuse accidental asynchronous guards and consume their eventual rejection
+      // without exposing application details as an unhandled Promise diagnostic.
+      void Promise.resolve(guarded).catch(() => undefined);
+      return refused();
+    }
     await link(temporary, path);
     await unlink(temporary);
     written = undefined;

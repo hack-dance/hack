@@ -838,6 +838,7 @@ test("source remains with retained startup or ready evidence and retires after e
       record: record(),
       assertReady: () => {
         guarded += 1;
+        return undefined;
       },
     });
     expect(guarded).toBe(1);
@@ -889,7 +890,7 @@ test("ready publication checks the captured synchronous owner guard after pendin
     const input = {
       expectedStart,
       record: record(),
-      assertReady: (): void => {
+      assertReady: (): undefined => {
         guarded += 1;
         expect(
           readdirSync(root).filter((name) => name.endsWith(".pending"))
@@ -900,11 +901,45 @@ test("ready publication checks the captured synchronous owner guard after pendin
     const pending = admission.publish(input);
     input.assertReady = () => {
       guarded += 100;
+      return undefined;
     };
     await expect(pending).rejects.toThrow("unsafe");
     expect(guarded).toBe(1);
     expect(await load(opts)).toBeNull();
     expect(await admission.loadStart()).toEqual(expectedStart);
+    expect(
+      readdirSync(root).filter((name) => name.endsWith(".pending"))
+    ).toEqual([]);
+  });
+});
+
+test("an asynchronous rejecting ready guard never publishes or leaks a private diagnostic", async () => {
+  const opts = await fixture();
+  const canary = "private-synthetic-async-ready-guard-canary";
+  const completed = Promise.withResolvers<void>();
+  await admit(opts, async (admission) => {
+    const expectedStart = await admission.reserve({
+      review: record().receipt.review,
+    });
+    const asynchronous = async () => {
+      await Bun.sleep(10);
+      completed.resolve();
+      throw new Error(canary);
+    };
+    // Simulate an untyped caller. The public type deliberately excludes Promise returns.
+    const assertReady = asynchronous as unknown as () => undefined;
+    const error: unknown = await admission
+      .publish({ expectedStart, record: record(), assertReady })
+      .catch((value: unknown) => value);
+    expect(error).toBeInstanceOf(Error);
+    expect(String(error)).toContain("unsafe");
+    expect(String(error)).not.toContain(canary);
+    expect(JSON.stringify(error)).not.toContain(canary);
+    await completed.promise;
+    await Bun.sleep(0);
+    expect(await load(opts)).toBeNull();
+    expect(await admission.loadStart()).toEqual(expectedStart);
+    const root = join(opts.projectDir, ".internal", "native-authored-runs");
     expect(
       readdirSync(root).filter((name) => name.endsWith(".pending"))
     ).toEqual([]);

@@ -669,6 +669,8 @@ export type NativeComposeMutation = {
     readonly service: string;
     readonly assertFresh: () => Promise<void>;
   }): Promise<NativeComposeRunProjection>;
+  /** Fence an existing projection across awaited sub-effects; never mint or modify it. */
+  assertRunProjection(projection: NativeComposeRunProjection): Promise<void>;
   /** Only a caller-verified complete postcondition clears intent; engine exit alone is insufficient. */
   runEffect<T>(opts: NativeComposeEffectOptions<T>): Promise<{
     readonly outcome: "complete" | "uncertain";
@@ -1441,6 +1443,11 @@ export async function openNativeComposeGenerationStore(opts: {
                   );
                 }
               });
+            },
+            async assertRunProjection(projection) {
+              requireActive();
+              await verifyProjection(projection, projection.generation);
+              requireActive();
             },
             async runBeforeHooks<T>(input: {
               readonly assertFresh: () => Promise<void>;

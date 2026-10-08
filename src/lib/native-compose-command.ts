@@ -16,6 +16,14 @@ import {
   prepareNativeComposeAfterHooks,
 } from "./native-compose-after-hooks.ts";
 import {
+  assertNativeComposeBuildExecution,
+  buildNativeComposeImages,
+  NativeComposeBuildError,
+  type NativeComposeBuildIntent,
+  planNativeComposeBuilds,
+  prepareNativeComposeBuildExecution,
+} from "./native-compose-build.ts";
+import {
   nativeComposeCompletedOneoff,
   nativeComposeRunDependenciesReady,
   nativeComposeWorkloadsReady as ready,
@@ -818,15 +826,21 @@ async function startNativeComposeWorkloads(opts: {
   readonly selection: NativeComposeOwnershipOptions;
   readonly base: RuntimeBaseOptions;
   readonly routing: NativeComposeRoutingOwner | null;
+  readonly builds: readonly NativeComposeBuildIntent[];
+  readonly deadline: number;
 }) {
-  const { options, generation, document, selection, base, routing } = opts;
-  const timeout = resolveComposeStartupTimeoutMs();
-  const deadline = Date.now() + timeout;
+  const { options, generation, document, selection, base, routing, deadline } =
+    opts;
+  const timeout = deadline - Date.now();
+  if (timeout <= 0) {
+    return { value: 1, outcome: "uncertain" as const };
+  }
   await routing?.markEffectsPossible();
   const code = await run(
     [
       ...composeArgs(generation),
       "up",
+      ...(opts.builds.length > 0 ? ["--no-build"] : []),
       "-d",
       "--remove-orphans",
       ...(options.operation === "restart" ? ["--force-recreate"] : []),
@@ -855,6 +869,50 @@ async function startNativeComposeWorkloads(opts: {
     value: observed ? 0 : code || 1,
     outcome: observed ? ("complete" as const) : ("uncertain" as const),
   };
+}
+
+async function executePreparedNativeWorkloads(opts: {
+  readonly options: NativeComposeCommandOptions;
+  readonly generation: NativeComposeGeneration;
+  readonly document: PrivateDocument;
+  readonly selection: NativeComposeOwnershipOptions;
+  readonly base: RuntimeBaseOptions;
+  readonly routing: NativeComposeRoutingOwner | null;
+  readonly builds: readonly NativeComposeBuildIntent[];
+  readonly projection?: NativeComposeRunProjection;
+  readonly projectRoot: string;
+  readonly signal: AbortSignal;
+  readonly assertFresh: () => Promise<void>;
+  readonly assertOwned: () => Promise<void>;
+}) {
+  const deadline =
+    opts.options.operation === "run"
+      ? undefined
+      : Date.now() + resolveComposeStartupTimeoutMs();
+  if (opts.builds.length > 0) {
+    const code = await buildNativeComposeImages({
+      intents: opts.builds,
+      projectRoot: opts.projectRoot,
+      deadline,
+      signal: opts.signal,
+      env: opts.base.env,
+      json: opts.options.json === true,
+      assertFresh: opts.assertFresh,
+      assertOwned: opts.assertOwned,
+    });
+    if (code !== 0) {
+      return { value: code, outcome: "uncertain" as const };
+    }
+    await opts.assertFresh();
+    await opts.assertOwned();
+  }
+  if (opts.options.operation === "run") {
+    return await runOneOff(opts);
+  }
+  return await startNativeComposeWorkloads({
+    ...opts,
+    deadline: deadline ?? Date.now() + resolveComposeStartupTimeoutMs(),
+  });
 }
 
 async function publishPreparedGeneration(opts: {
@@ -897,7 +955,7 @@ async function prepareExecutionRouting(opts: {
   readonly store: NativeComposeGenerationStore;
   readonly existingRun: NativeComposeGeneration | null;
   readonly generationId: string;
-  readonly rendered: ReturnType<typeof renderNativeCompose>;
+  readonly document: PrivateDocument;
   readonly inputs: AcquiredComposeInputs;
   readonly previous: SavedRouteDocuments;
   readonly signal: AbortSignal;
@@ -907,7 +965,7 @@ async function prepareExecutionRouting(opts: {
     store,
     existingRun,
     generationId,
-    rendered,
+    document,
     inputs,
     previous,
     signal,
@@ -918,7 +976,7 @@ async function prepareExecutionRouting(opts: {
     if (
       !nativeComposeRunSourceMatches({
         saved: savedRun,
-        rendered: rendered.document,
+        rendered: document,
         generationId,
       })
     ) {
@@ -935,7 +993,7 @@ async function prepareExecutionRouting(opts: {
       : await prepareNativeComposeRouteOwner({
           owner: store.identity,
           generationId,
-          document: rendered.document,
+          document,
           plan: inputs.result.plan,
           resolution: inputs.result.routing_resolution,
           declared: inputs.result.declared_workloads,
@@ -953,7 +1011,7 @@ async function prepareExecutionRouting(opts: {
   return {
     routing,
     runRouting,
-    document: savedRun ?? routing?.document ?? rendered.document,
+    document: savedRun ?? routing?.document ?? document,
   };
 }
 
@@ -966,6 +1024,7 @@ async function executePreparedGeneration(opts: {
   readonly projectRoot: string;
   readonly generation: NativeComposeGeneration;
   readonly document: PrivateDocument;
+  readonly buildSource: PrivateDocument;
   readonly previous: SavedRouteDocuments;
   readonly routing: NativeComposeRoutingOwner | null;
   readonly runRouting: NativeComposeSavedRunRouting | null;
@@ -980,6 +1039,7 @@ async function executePreparedGeneration(opts: {
     projectRoot,
     generation,
     document,
+    buildSource,
     previous,
     routing,
     runRouting,
@@ -1017,50 +1077,68 @@ async function executePreparedGeneration(opts: {
     selection,
     routing,
   });
+  const buildOptions = {
+    document: buildSource,
+    projectRoot,
+    composeProject: store.identity.composeProject,
+    ownerToken: store.identity.ownerToken,
+    service:
+      operation === "run"
+        ? requireService(document, options.service)
+        : undefined,
+    includeDependencies: runRouting === null,
+  };
+  const builds = planNativeComposeBuilds(buildOptions);
+  const assertFresh = async () => {
+    await inputs.assertFresh();
+    const saved = await store.readGenerationDocument(generation);
+    assertNativeComposeBuildExecution({
+      ...buildOptions,
+      executionDocument: saved,
+      intents: builds,
+    });
+    if (projection) {
+      await mutation.assertRunProjection(projection);
+    }
+    for (const prior of previous) {
+      await store.readGenerationDocument(prior.generation);
+    }
+  };
+  const ownership = runRouting
+    ? routedRunEffectOwnership({
+        selection,
+        generation,
+        document,
+        service: requireService(document, options.service),
+        routing: runRouting,
+      })
+    : preparedEffectOwnership({
+        selection,
+        routing,
+        afterReadiness: after.afterReadiness,
+      });
   const result = await mutation.runEffect({
     generation,
     operation,
     ...(projection ? { projection } : {}),
-    assertFresh: async () => {
-      await inputs.assertFresh();
-      for (const saved of previous) {
-        await store.readGenerationDocument(saved.generation);
-      }
-    },
-    ...(runRouting
-      ? routedRunEffectOwnership({
-          selection,
-          generation,
-          document,
-          service: requireService(document, options.service),
-          routing: runRouting,
-        })
-      : preparedEffectOwnership({
-          selection,
-          routing,
-          afterReadiness: after.afterReadiness,
-        })),
+    assertFresh,
+    ...ownership,
     afterHooks: after.afterHooks,
-    effect: async () => {
-      if (operation === "run") {
-        return await runOneOff({
-          options,
-          generation,
-          document,
-          selection,
-          base,
-          projection,
-        });
-      }
-      return await startNativeComposeWorkloads({
+    effect: () =>
+      executePreparedNativeWorkloads({
         options,
         generation,
         document,
         selection,
         base,
         routing,
-      });
-    },
+        projection,
+        builds,
+        projectRoot,
+        signal,
+        assertFresh,
+        assertOwned: ownership.assertOwned,
+      }),
   });
   if (result.outcome === "uncertain") {
     return reportNativeStartupIncomplete({
@@ -1175,6 +1253,12 @@ async function prepareCommand(opts: {
         declaredWorkloads: inputs.result.declared_workloads,
         beforeHooksOwned: true,
       });
+      const buildExecution = prepareNativeComposeBuildExecution({
+        document: rendered.document,
+        projectRoot,
+        composeProject: store.identity.composeProject,
+        ownerToken: store.identity.ownerToken,
+      });
       const {
         routing,
         runRouting,
@@ -1184,7 +1268,7 @@ async function prepareCommand(opts: {
         store,
         existingRun,
         generationId,
-        rendered,
+        document: buildExecution.document,
         inputs,
         previous,
         signal,
@@ -1215,6 +1299,7 @@ async function prepareCommand(opts: {
           projectRoot,
           generation,
           document,
+          buildSource: rendered.document,
           previous,
           routing,
           runRouting,
@@ -1520,7 +1605,8 @@ function throwNativeComposeCommandError(error: unknown): never {
   }
   if (
     error instanceof NativeComposeGenerationError ||
-    error instanceof NativeComposeOwnershipError
+    error instanceof NativeComposeOwnershipError ||
+    error instanceof NativeComposeBuildError
   ) {
     throw new HackCliError({
       code: "E_CONFIG_INVALID",

@@ -3,6 +3,7 @@
   "extends": ["//"],
   "tasks": {
     "test": {
+      "env": ["HACK_CONFIG_COMPILER_BINARY"],
       "inputs": [
         "$TURBO_DEFAULT$",
         "$TURBO_ROOT$/src/**",

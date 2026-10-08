@@ -28,7 +28,8 @@ jobs:
             platform: darwin
             arch: x64
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 15
+    # Intel needs time for full compiler, schema and bundle verification.
+    timeout-minutes: ${{ matrix.os == 'macos-15-intel' && 30 || 15 }}
     permissions:
       contents: read
     steps:

@@ -124,3 +124,19 @@ test("witness archive checksum corruption and duplicate member both refuse", () 
     verifyNativeComposeStorageWitnessArchive({ marker, archive: duplicate })
   ).toThrow("values omitted");
 });
+
+test.each([
+  { byte: 0x80 },
+  { byte: 0xb0 },
+  { byte: 0 },
+  { byte: 32 },
+])("numeric header raw bytes cannot be normalized into valid octal", ({
+  byte,
+}) => {
+  const archive = changedHeader((bytes) => {
+    bytes[100] = byte;
+  });
+  expect(() =>
+    verifyNativeComposeStorageWitnessArchive({ marker, archive })
+  ).toThrow("values omitted");
+});

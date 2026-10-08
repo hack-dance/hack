@@ -5,7 +5,6 @@ const MARKER = /^\.hack-storage-[a-f0-9]{64}\.witness$/;
 const TOKEN = /^[a-f0-9]{64}$/;
 const BLOCK = 512;
 const ARCHIVE_LIMIT = 8192;
-const OCTAL = /^[0-7]+$/;
 const CONTENT_PREFIX = "hack-native-storage-witness-v1\n";
 
 /** A private random leaf and token; never include either in public reports or argv. */
@@ -91,19 +90,31 @@ function field(header: Buffer, offset: number, length: number): string {
 }
 
 function octal(header: Buffer, offset: number, length: number): number {
-  const value = header
-    .subarray(offset, offset + length)
-    .toString("ascii")
-    .replaceAll("\0", "")
-    .trim();
-  if (!OCTAL.test(value)) {
+  const bytes = header.subarray(offset, offset + length);
+  const nul = bytes.indexOf(0);
+  let end = nul === -1 ? bytes.length : nul;
+  if (nul !== -1 && bytes.subarray(nul + 1).some((byte) => byte !== 32)) {
     return refuseNativeComposeStorageWitness();
   }
-  const parsed = Number.parseInt(value, 8);
-  if (!Number.isSafeInteger(parsed)) {
+  if (nul === -1) {
+    while (end > 0 && bytes[end - 1] === 32) {
+      end--;
+    }
+  }
+  if (end === 0) {
     return refuseNativeComposeStorageWitness();
   }
-  return parsed;
+  let value = 0;
+  for (const byte of bytes.subarray(0, end)) {
+    if (byte < 48 || byte > 55) {
+      return refuseNativeComposeStorageWitness();
+    }
+    value = value * 8 + byte - 48;
+  }
+  if (!Number.isSafeInteger(value)) {
+    return refuseNativeComposeStorageWitness();
+  }
+  return value;
 }
 
 /**

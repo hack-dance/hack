@@ -1,5 +1,7 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, spyOn, test } from "bun:test";
 import { createHash } from "node:crypto";
+import { constants } from "node:fs";
+import * as fs from "node:fs/promises";
 import {
   lstat,
   mkdir,
@@ -77,6 +79,184 @@ test("reused and copied enrollment capabilities cannot authorize a second seed",
     });
   });
   expect(seeds).toBe(1);
+});
+
+test("enrollment captures original callbacks before admission can replace them", async () => {
+  const store = await fixture();
+  let originalSeeds = 0;
+  let originalObservations = 0;
+  let replacements = 0;
+  let archive: Uint8Array = new Uint8Array();
+  const mutable: {
+    enrollment: NativeComposeStorageWitnessEnrollment;
+    seed: (bytes: Uint8Array) => Promise<void>;
+    observe: () => Promise<{ volume: typeof volume; archive: Uint8Array }>;
+  } = {
+    enrollment: {},
+    seed: async (bytes) => {
+      originalSeeds++;
+      archive = bytes;
+    },
+    observe: async () => {
+      originalObservations++;
+      return { volume, archive };
+    },
+  };
+  let replace = false;
+  await store.withMutation(async (mutation) => {
+    const generation = await publish(mutation);
+    await mutation.runEffect({
+      generation,
+      operation: "up",
+      assertFresh: async () => {},
+      assertOwned: async () => {},
+      effect: async () => {
+        mutable.enrollment = await prepareNativeComposeStorageWitness({
+          authority: mutation.materialAuthority,
+          generation,
+          engineId,
+          volume: { name: volume.name, storage: volume.storage },
+          admission: "initial-create",
+          assertAdmission: async () => {
+            if (replace) {
+              mutable.seed = async (bytes) => {
+                replacements++;
+                archive = bytes;
+              };
+              mutable.observe = async () => {
+                replacements++;
+                return { volume, archive };
+              };
+            }
+          },
+        });
+        replace = true;
+        await enrollNativeComposeStorageWitness(mutable);
+        return { value: 0, outcome: "complete" };
+      },
+    });
+  });
+  expect(originalSeeds).toBe(1);
+  expect(originalObservations).toBe(1);
+  expect(replacements).toBe(0);
+});
+
+test.each([
+  { change: "callback" },
+  { change: "bindings" },
+])("verification captures original inputs before its first await", async ({
+  change,
+}) => {
+  const { store, generation, archive, reference } = await active();
+  let original = 0;
+  let substituted = 0;
+  await store.withMutation(async (mutation) => {
+    const mutable = {
+      authority: mutation.materialAuthority,
+      generation,
+      engineId,
+      reference,
+      observe: async () => {
+        original++;
+        return { volume, archive };
+      },
+    };
+    const verifying = verifyNativeComposeStorageWitness(mutable);
+    mutable.observe = async () => {
+      substituted++;
+      return { volume, archive };
+    };
+    if (change === "bindings") {
+      mutable.authority = {};
+      mutable.engineId = "substituted";
+    }
+    await verifying;
+  });
+  expect(original).toBe(1);
+  expect(substituted).toBe(0);
+});
+
+test.each([
+  { boundary: "seed", read: 2 },
+  { boundary: "completion", read: 3 },
+])("revoked effect authority refuses at the final filesystem boundary", async ({
+  boundary,
+  read,
+}) => {
+  const store = await fixture();
+  const waiting = Promise.withResolvers<void>();
+  const resume = Promise.withResolvers<void>();
+  const work: { result: Promise<boolean> | null } = { result: null };
+  let hit = false;
+  let count = 0;
+  let seeds = 0;
+  let archive: Uint8Array = new Uint8Array();
+  const originalOpen = fs.open;
+  const opened = spyOn(fs, "open").mockImplementation(
+    async (...args: Parameters<typeof fs.open>) => {
+      const file = await originalOpen(...args);
+      if (
+        args[0] === join(slot(store), "expectation.json") &&
+        typeof args[1] === "number" &&
+        (args[1] & constants.O_CREAT) === 0
+      ) {
+        count++;
+        if (count === read) {
+          hit = true;
+          waiting.resolve();
+          await resume.promise;
+        }
+      }
+      return file;
+    }
+  );
+  const guard = setTimeout(() => {
+    waiting.resolve();
+    resume.resolve();
+  }, 3000);
+  try {
+    await store.withMutation(async (mutation) => {
+      const generation = await publish(mutation);
+      await mutation.runEffect({
+        generation,
+        operation: "up",
+        assertFresh: async () => {},
+        assertOwned: async () => {},
+        effect: async () => {
+          const enrollment = await prepare(mutation, generation);
+          work.result = enrollNativeComposeStorageWitness({
+            enrollment,
+            seed: async (bytes) => {
+              seeds++;
+              archive = bytes;
+            },
+            observe: async () => ({ volume, archive }),
+          }).then(
+            () => true,
+            () => false
+          );
+          await waiting.promise;
+          return { value: 1, outcome: "uncertain" };
+        },
+      });
+      // Returning from runEffect revokes effectOperation/activePending. The
+      // registered material action still owns its process/files until settled.
+      resume.resolve();
+      expect(await work.result).toBe(false);
+    });
+    expect(hit).toBe(true);
+    expect(seeds).toBe(boundary === "seed" ? 0 : 1);
+    expect(await Bun.file(join(slot(store), "enrolled.json")).exists()).toBe(
+      false
+    );
+    expect((await store.loadCurrent()).pending).not.toBeNull();
+  } finally {
+    waiting.resolve();
+    resume.resolve();
+    clearTimeout(guard);
+    await work.result;
+    opened.mockRestore();
+  }
 });
 
 test("failed initial admission creates no expectation or seed capability", async () => {

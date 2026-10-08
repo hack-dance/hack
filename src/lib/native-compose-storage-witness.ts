@@ -477,7 +477,8 @@ export async function enrollNativeComposeStorageWitness(opts: {
     readonly archive: Uint8Array;
   }>;
 }): Promise<NativeComposeStorageWitnessReference> {
-  const selected = enrollments.get(opts.enrollment);
+  const { enrollment, seed, observe } = opts;
+  const selected = enrollments.get(enrollment);
   if (!selected || selected.consumed) {
     return refuse();
   }
@@ -505,10 +506,10 @@ export async function enrollNativeComposeStorageWitness(opts: {
         checkDirectoryAnchors(held, selected);
         const saved = await checkedExpectation(held, selected.anchor);
         await selected.assertAdmission();
-        await check();
         await checkedExpectation(held, selected.anchor);
-        await opts.seed(encodeNativeComposeStorageWitnessArchive(saved.marker));
-        const observed = await opts.observe();
+        await check();
+        await seed(encodeNativeComposeStorageWitnessArchive(saved.marker));
+        const observed = await observe();
         const volume = parseVolume(observed.volume);
         if (
           volume.name !== saved.binding.name ||
@@ -521,8 +522,8 @@ export async function enrollNativeComposeStorageWitness(opts: {
           marker: saved.marker,
           archive: observed.archive,
         });
-        await check();
         await checkedExpectation(held, selected.anchor);
+        await check();
         const text = JSON.stringify({
           version: 1,
           expectationHash: selected.anchor.hash,
@@ -544,6 +545,7 @@ export async function enrollNativeComposeStorageWitness(opts: {
           return refuse();
         }
         await recheckDirectories(held);
+        await check();
         return Object.freeze({
           version: 1,
           volume: Object.freeze({ ...volume }),
@@ -570,16 +572,17 @@ export async function verifyNativeComposeStorageWitness(opts: {
     readonly archive: Uint8Array;
   }>;
 }): Promise<void> {
+  const { authority, generation, engineId, observe } = opts;
   if (!referenceValid(opts.reference)) {
     return refuse();
   }
   const reference = structuredClone(opts.reference);
   return await runNativeComposeMaterialAction({
-    authority: opts.authority,
+    authority,
     run: async () => {
       const current = await assertNativeComposeMaterialAuthority({
-        authority: opts.authority,
-        generation: opts.generation,
+        authority,
+        generation,
         phase: "inspect",
       });
       const held = await directories({
@@ -610,10 +613,10 @@ export async function verifyNativeComposeStorageWitness(opts: {
           }
         };
         await readCompletion();
-        if (!matchesBinding(saved.binding, current, opts.engineId)) {
+        if (!matchesBinding(saved.binding, current, engineId)) {
           return refuse();
         }
-        const observed = await opts.observe(saved.marker.name);
+        const observed = await observe(saved.marker.name);
         if (!sameVolume(parseVolume(observed.volume), reference.volume)) {
           return refuse();
         }
@@ -623,15 +626,15 @@ export async function verifyNativeComposeStorageWitness(opts: {
         });
         await checkedExpectation(held, reference.expectation);
         await readCompletion();
+        await recheckDirectories(held);
         const latest = await assertNativeComposeMaterialAuthority({
-          authority: opts.authority,
-          generation: opts.generation,
+          authority,
+          generation,
           phase: "inspect",
         });
-        if (!matchesBinding(saved.binding, latest, opts.engineId)) {
+        if (!matchesBinding(saved.binding, latest, engineId)) {
           refuse();
         }
-        await recheckDirectories(held);
       } finally {
         await close(held);
       }

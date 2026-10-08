@@ -156,6 +156,7 @@ export async function runLegacyComposeRetainedOperation(opts: {
         stdout: "ignore",
         stderr: "ignore",
         forwardSignals: true,
+        signal,
         timeoutMs: remainingMs,
       }),
   });

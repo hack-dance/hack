@@ -87,6 +87,8 @@ refuses before a journal or effect. The same ordering applies to explicit
 `config adopt --stop` and interrupted stop recovery.
 
 Each effect rechecks the held source, original resource and receipt authority.
+Version 5 requires one finite operation deadline; all source, configuration and
+resource reacquisitions use its remaining clock, including final verification.
 Fresh bounded original-ID observations and the shared process runner use one
 operation deadline and cancellation owner. Failure, drift, cancellation or
 unverified final readiness retains the pending journal; only explicit verified

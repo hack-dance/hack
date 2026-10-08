@@ -655,6 +655,25 @@ function mapServiceReadiness(
   return true;
 }
 
+function mapServiceReadinessFields(
+  opts: Pick<MappingContext, "mark" | "refuse"> & {
+    readonly source: Record<string, unknown>;
+    readonly pointer: string;
+    readonly service: Record<string, unknown>;
+  }
+) {
+  for (const key of ["depends_on", "healthcheck"]) {
+    if (Object.hasOwn(opts.source, key)) {
+      mapServiceReadiness({
+        ...opts,
+        key,
+        raw: opts.source[key],
+        servicePointer: opts.pointer,
+      });
+    }
+  }
+}
+
 function commandPresence(
   key: string,
   raw: unknown
@@ -684,18 +703,8 @@ function mapService(
 ) {
   const service: Record<string, unknown> = {};
   opts.mark("compose", opts.pointer, opts.pointer);
+  mapServiceReadinessFields({ ...opts, service });
   for (const [key, raw] of Object.entries(opts.source)) {
-    if (
-      mapServiceReadiness({
-        ...opts,
-        service,
-        key,
-        raw,
-        servicePointer: opts.pointer,
-      })
-    ) {
-      continue;
-    }
     if (!Object.hasOwn(SERVICE_RULES, key)) {
       continue;
     }

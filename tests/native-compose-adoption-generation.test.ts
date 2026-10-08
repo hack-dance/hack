@@ -61,6 +61,7 @@ type Fixture = {
   health?: Record<string, string>;
   ordered?: boolean;
   sourceRace?: boolean;
+  hangMutation?: boolean;
 };
 let root: string;
 let projectRoot: string;
@@ -150,6 +151,7 @@ const fixture = JSON.parse(readFileSync(root + "/fixture.json", "utf8"));
 const [kind, action] = args;
 if (kind === 'container' && ['start','restart','stop'].includes(action)) {
  if (!args.slice(2).length || args.slice(2).some(id => !fixture.container.some(container => container.id === id))) { writeFileSync(root + '/mutation','unverified effect');process.exit(99); }
+ if(fixture.hangMutation) {writeFileSync(root + '/effect-started', String(process.pid));await Bun.sleep(60_000);}
  if (fixture.ordered) {for(const id of args.slice(2)) fixture.states[id] = action !== 'stop';}
  else fixture.running = action !== 'stop';
  if(fixture.sourceRace) { writeFileSync(${JSON.stringify(join(projectRoot, ".hack/hack.project.json"))}, 'synthetic-private-source-race'); }
@@ -161,15 +163,17 @@ if (!(kind === "info" && action === "--format") && (!['container','volume','netw
 if (fixture.mode === "fail") {console.error(${JSON.stringify(CANARY)});process.exit(29);}
 if (fixture.mode === "malformed") {console.log(${JSON.stringify(CANARY)});process.exit(0);}
 if (fixture.mode === "hang") {writeFileSync(root + "/started", String(process.pid));await Bun.sleep(60_000);}
+if (fixture.mode === "hang-state" && kind === "container" && action === "inspect" && args.join().includes('.State.Running') && !args.join().includes('.Mounts')) {writeFileSync(root + "/started", String(process.pid));await Bun.sleep(60_000);}
 if (fixture.mode === "overflow") {await Bun.write(Bun.stdout, "x".repeat(9 * 1024 * 1024));process.exit(0);}
 if (fixture.mode === "stderr-overflow") {await Bun.write(Bun.stderr, "x".repeat(17 * 1024));process.exit(0);}
 if (kind === "info") {console.log(JSON.stringify({id: fixture.engine, os: "linux"}));}
 else if (action === "ls") {for (const row of fixture[kind]) console.log(JSON.stringify({id: row.id, name: kind === 'container' ? row.name.slice(1) : row.name, project: row.project ?? ""}));}
 else {
+ if(args.join().includes('.State.Health')) {console.error('map has no entry for key Health');process.exit(49);}
  const id = args.at(-1);const rows = fixture[kind].filter(row => row.id === id);
  if (!rows.length) process.exit(1);
  if (kind === "container" && args.join().includes('config-hash')) { console.log(JSON.stringify({id,hash:fixture.configHash ?? 'd'.repeat(64)})); process.exit(0); }
- if (kind === "container" && args.join().includes('.State.Running') && !args.join().includes('.Mounts')) { const running=fixture.states?.[id] ?? fixture.running ?? false;console.log(JSON.stringify({id,running,paused:false,status:running ? 'running' : 'exited', ...(args.join().includes('.State.Health') ? {health: fixture.health?.[id] ?? ''} : {})})); process.exit(0); }
+ if (kind === "container" && args.join().includes('.State.Running') && !args.join().includes('.Mounts')) { const running=fixture.states?.[id] ?? fixture.running ?? false;console.log(JSON.stringify({id,running,paused:false,status:running ? 'running' : 'exited', ...(args.join().includes('index .State "Health"') ? {health: fixture.health?.[id] ?? ''} : {})})); process.exit(0); }
  for (const row of rows) {
   if (kind === 'container') console.log(JSON.stringify({...row,running:fixture.states?.[id] ?? fixture.running ?? false}));
   else if (kind === 'network') console.log(JSON.stringify({...row,containers:row.containers.filter(id=>!fixture.container.some(container=>container.id===id) || (fixture.states?.[id] ?? fixture.running ?? false))}));
@@ -372,6 +376,102 @@ boundedTest(
 );
 
 boundedTest(
+  "v5 requires one finite aggregate deadline before probing or journaling a mutation",
+  async () => {
+    await dependencyFixture();
+    const { store, generation } = await prepared();
+    try {
+      const binary = await compiler();
+      await store.publish({ generation, binary });
+      const before = await readFile(join(root, "commands"), "utf8");
+      let called = false;
+      for (const deadline of [
+        undefined,
+        Number.NaN,
+        Number.POSITIVE_INFINITY,
+        Date.now() - 1,
+      ]) {
+        await refusal(
+          store.withMutation({
+            generation,
+            binary,
+            operation: "stop",
+            services: [],
+            deadline,
+            run: async () => {
+              called = true;
+              return 0;
+            },
+          }),
+          "E_LEGACY_ADOPTION_UNSUPPORTED"
+        );
+      }
+      expect(called).toBe(false);
+      expect(await readFile(join(root, "commands"), "utf8")).toBe(before);
+      expect((await readReceipt()).pendingOperation).toBeNull();
+    } finally {
+      await store.close();
+    }
+  },
+  30_000
+);
+
+for (const stage of ["per-effect freshness", "final observation"] as const) {
+  boundedTest(
+    `v5 remaining aggregate clock terminates held ${stage} and retains pending`,
+    async () => {
+      await dependencyFixture();
+      const { store, generation } = await prepared();
+      try {
+        const binary = await compiler();
+        await store.publish({ generation, binary });
+        const deadline = Date.now() + 5000;
+        let reachedCallback = false;
+        await refusal(
+          store.withMutation({
+            generation,
+            binary,
+            operation: "stop",
+            services: [],
+            deadline,
+            run: async (input) => {
+              reachedCallback = true;
+              fixture.mode =
+                stage === "per-effect freshness" ? "hang" : "hang-state";
+              await save();
+              if (stage === "per-effect freshness") {
+                await input.assertFresh();
+              }
+              return 0;
+            },
+          }),
+          "E_LEGACY_ADOPTION_CHANGED"
+        );
+        expect(reachedCallback).toBe(true);
+        expect(Date.now()).toBeLessThan(deadline + 1500);
+        const pid = Number(
+          (await readFile(join(root, "started"), "utf8")).trim()
+        );
+        expect(Number.isSafeInteger(pid)).toBe(true);
+        let alive = true;
+        try {
+          process.kill(pid, 0);
+        } catch {
+          alive = false;
+        }
+        expect(alive).toBe(false);
+        expect((await readReceipt()).pendingOperation.operation).toBe("stop");
+        expect(await mutationCommands()).toEqual([]);
+        expect(fixture.volume[0]?.createdAt).toBe(CREATED);
+      } finally {
+        await store.close();
+      }
+    },
+    30_000
+  );
+}
+
+boundedTest(
   "v5 retained dispatch orders exact originals and reverses stops without creating data",
   async () => {
     const worker = await dependencyFixture(),
@@ -431,6 +531,7 @@ boundedTest(
       let calls = 0;
       await refusal(
         store.withMutation({
+          deadline: Date.now() + 20_000,
           generation,
           binary,
           operation: "start",
@@ -446,6 +547,7 @@ boundedTest(
       expect((await readReceipt()).pendingOperation).toBeNull();
       let retained: (() => Promise<void>) | undefined;
       await store.withMutation({
+        deadline: Date.now() + 20_000,
         generation,
         binary,
         operation: "stop",
@@ -531,6 +633,7 @@ boundedTest(
       await store.publish({ generation, binary });
       await refusal(
         store.withMutation({
+          deadline: Date.now() + 20_000,
           generation,
           binary,
           operation: "start",
@@ -572,6 +675,7 @@ boundedTest(
       let effects = 0;
       await refusal(
         store.withMutation({
+          deadline: Date.now() + 20_000,
           generation,
           binary,
           operation: "start",
@@ -588,6 +692,73 @@ boundedTest(
       );
       expect(effects).toBe(1);
       expect((await readReceipt()).pendingOperation.operation).toBe("start");
+    } finally {
+      await store.close();
+    }
+  },
+  30_000
+);
+
+boundedTest(
+  "v5 active captured signal reaps the actual retained effect and keeps pending",
+  async () => {
+    await dependencyFixture();
+    const controller = new AbortController();
+    const store = await openLegacyComposeAdoptedGenerationStore({
+      projectRoot,
+      signal: controller.signal,
+    });
+    try {
+      const binary = await compiler(),
+        generation = await store.prepare({ binary });
+      await store.publish({ generation, binary });
+      fixture.hangMutation = true;
+      await save();
+      const deadline = Date.now() + 20_000;
+      let effectStartedAt = 0;
+      await refusal(
+        store.withMutation({
+          generation,
+          binary,
+          operation: "start",
+          services: [],
+          deadline,
+          run: async (input) => {
+            const operation = runLegacyComposeRetainedOperation({
+              input,
+              operation: "start",
+              deadline,
+              signal: controller.signal,
+            });
+            const readyUntil = Date.now() + 4000;
+            while (
+              !(await Bun.file(join(root, "effect-started")).exists()) &&
+              Date.now() < readyUntil
+            ) {
+              await Bun.sleep(10);
+            }
+            expect(await Bun.file(join(root, "effect-started")).exists()).toBe(
+              true
+            );
+            effectStartedAt = Date.now();
+            controller.abort(CANARY);
+            return await operation;
+          },
+        }),
+        "E_LEGACY_ADOPTION_CANCELLED"
+      );
+      expect(Date.now() - effectStartedAt).toBeLessThan(4000);
+      const pid = Number(await Bun.file(join(root, "effect-started")).text());
+      let alive = true;
+      try {
+        process.kill(pid, 0);
+      } catch {
+        alive = false;
+      }
+      expect(alive).toBe(false);
+      expect(await mutationCommands()).toEqual([["container", "start", ID]]);
+      expect((await readReceipt()).pendingOperation.operation).toBe("start");
+      expect(fixture.volume[0]?.createdAt).toBe(CREATED);
     } finally {
       await store.close();
     }

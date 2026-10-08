@@ -1249,11 +1249,47 @@ function requireMutationDeadline(
 ) {
   if (
     plan.requiresV5 &&
-    captured.deadline !== undefined &&
-    (!Number.isFinite(captured.deadline) || captured.deadline <= Date.now())
+    (captured.deadline === undefined ||
+      !Number.isFinite(captured.deadline) ||
+      captured.deadline <= Date.now())
   ) {
     refuse("E_LEGACY_ADOPTION_CHANGED");
   }
+}
+
+/** V5 reacquisitions share the same remaining clock; old receipt owners keep their prior budgets. */
+function boundedMutationContext(ctx: Context, deadline: number) {
+  function remaining() {
+    cancelled(ctx.signal);
+    const time = Math.floor(deadline - Date.now());
+    if (time <= 0) {
+      refuse("E_LEGACY_ADOPTION_CHANGED");
+    }
+    return time;
+  }
+  const controller = new AbortController();
+  const abort = () => controller.abort();
+  ctx.signal?.addEventListener("abort", abort, { once: true });
+  const timer = setTimeout(abort, remaining());
+  const bounded: Context = {
+    ...ctx,
+    signal: controller.signal,
+    get timeoutMs() {
+      return Math.min(ctx.timeoutMs ?? 15_000, 60_000, remaining());
+    },
+    check: async () => {
+      remaining();
+      await ctx.check();
+      remaining();
+    },
+  };
+  return {
+    ctx: bounded,
+    dispose: () => {
+      clearTimeout(timer);
+      ctx.signal?.removeEventListener("abort", abort);
+    },
+  };
 }
 function mutationPublication(
   state: Receipt,
@@ -1314,6 +1350,51 @@ async function requireMutationInputs(
   }
 }
 async function mutateRetainedContainers(
+  original: Context,
+  known: WeakMap<LegacyComposeAdoptedGeneration, Anchor>,
+  captured: MutationOptions,
+  preparationStop = false
+): Promise<number> {
+  if (!known.has(captured.generation)) {
+    refuse();
+  }
+  if (captured.generation.report.adoption_generation_version !== 5) {
+    return await mutateRetainedContainersWithinBudget(
+      original,
+      known,
+      captured,
+      preparationStop
+    );
+  }
+  const deadline = captured.deadline;
+  if (
+    deadline === undefined ||
+    !Number.isSafeInteger(deadline) ||
+    deadline <= Date.now() ||
+    deadline > Date.now() + 3_600_000
+  ) {
+    refuse("E_LEGACY_ADOPTION_UNSUPPORTED");
+  }
+  const bounded = boundedMutationContext(original, deadline);
+  try {
+    return await mutateRetainedContainersWithinBudget(
+      bounded.ctx,
+      known,
+      captured,
+      preparationStop
+    );
+  } catch (error: unknown) {
+    cancelled(original.signal);
+    if (Date.now() >= deadline) {
+      refuse("E_LEGACY_ADOPTION_CHANGED");
+    }
+    throw error;
+  } finally {
+    bounded.dispose();
+  }
+}
+
+async function mutateRetainedContainersWithinBudget(
   ctx: Context,
   known: WeakMap<LegacyComposeAdoptedGeneration, Anchor>,
   captured: MutationOptions,

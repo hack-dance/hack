@@ -201,7 +201,7 @@ export async function inspectLegacyComposeReadiness(opts: {
         "container",
         "inspect",
         "--format",
-        '{"id":{{json .Id}},"running":{{json .State.Running}},"paused":{{json .State.Paused}},"status":{{json .State.Status}},"health":{{if .State.Health}}{{json .State.Health.Status}}{{else}}""{{end}}}',
+        '{"id":{{json .Id}},"running":{{json .State.Running}},"paused":{{json .State.Paused}},"status":{{json .State.Status}},"health":{{with (index .State "Health")}}{{json .Status}}{{else}}""{{end}}}',
         container.id,
       ])
     );

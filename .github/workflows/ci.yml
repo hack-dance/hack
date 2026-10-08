@@ -136,6 +136,8 @@ jobs:
           bun run test:models
       - name: Check prepared-base benchmark harness controls
         run: python3 -m unittest discover -s tests/python -p test_prepared_base_benchmark.py
+      - name: Check native Compose overhead harness controls
+        run: python3 -m unittest discover -s tests/python -p test_native_compose_benchmark.py
       - name: Check native frontend acceptance controls
         run: python3 -m unittest discover -s tests/python -p test_native_frontend_acceptance.py
 

@@ -980,12 +980,33 @@ alias or cross-VM network. Internal Docker networks remain internal.
 
 The development profile's guest allocation is 6 GiB; guest allocation plus
 2 GiB is a provisional provider-footprint estimate, not a hard operating cap.
-Before new effects, the candidate requires normal macOS memory pressure,
-unchanged swapouts, and at least 2 GiB of estimated host headroom plus any
-provider footprint above that estimate. A larger healthy application graph can
-therefore continue operating, while its excess footprint consumes an equal
-amount of the allowed headroom. `runtime status` reports the actual provider
-footprint separately; this admission rule does not qualify its efficiency.
+Startup requires the unchanged 10 GiB free-plus-file-cache estimate: 6 GiB guest,
+2 GiB provisional provider overhead and 2 GiB host reserve. Development admits
+observed normal or warning macOS memory pressure only with that headroom, normal
+thermal/performance status, and unchanged swapouts. It samples before acquiring
+the startup lease, then samples a fresh three-observation window under the lease
+before creating ownership, aliases, disks or provider capacity. Swapouts must
+remain at the pre-lease baseline; a stale or incomplete observation refuses.
+The final pre-boot check remains in place. Research keeps its normal-only pressure
+policy, 16 GiB raw-free-memory floor and three samples 15 seconds apart.
+
+Before new live Development effects, normal pressure requires at least 2 GiB of
+estimated host headroom; warning requires 4 GiB, retaining both provisional
+overhead and host reserve after the guest allocation has been charged. Either
+floor increases by the measured provider footprint above the guest-plus-overhead
+estimate. Critical or unknown pressure, changed swapouts, or thermal/performance
+warnings refuse new effects. Cleanup retains its separate ownership checks. A
+larger healthy application graph can continue operating when its excess footprint
+has matching host headroom. `runtime status` reports that footprint separately;
+this experimental policy does not qualify efficiency or host capacity.
+
+Admission reports add `memory_pressure_level` (the observed sysctl value or null)
+and `memory_pressure_state` (`normal`, `warning`, `critical`, or `unknown`). Apple's
+exported dispatch masks are 1, 2 and 4; other or missing values refuse. The retained
+`memory_pressure_normal` field stays true only for normal pressure and remains
+false in an admitted warning report. Older reports containing only that boolean are
+historical observations and cannot authorize the warning policy; every operation
+uses a fresh typed observation.
 
 An existing owned pool changes policy only while stopped through
 `runtime network internet --json`, then an explicit up with `--internet`.

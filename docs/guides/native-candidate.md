@@ -347,11 +347,25 @@ v4 state is enabled. Runtime startup is a further explicit operation subject to
 host resource admission. Read `--help` for the candidate command surface.
 
 The development profile reserves the declared 32 GiB storage disk and 10 GiB
-overlay ceiling plus 16 GiB of host disk space before startup. It reports host
-load but does not reject an interactive start solely because unrelated jobs raise
-the one-minute load average; memory pressure, thermal state and swapouts remain
-admission checks. The research profile keeps its separate 100 GiB disk and host
-load qualification envelope.
+overlay ceiling plus 16 GiB of host disk space before startup. Its unchanged memory
+budget is a 10 GiB free-plus-file-cache estimate: 6 GiB guest, 2 GiB provisional
+provider overhead and 2 GiB host reserve. Normal and warning macOS pressure can
+qualify only with that headroom, normal thermal/performance state and stable
+swapouts. Development samples before the startup lease and again under the lease
+before allocation, keeping the same swapout baseline across both windows.
+Critical, unknown or incomplete observations refuse; there is no bypass option.
+It reports host load without refusing solely because unrelated jobs raise the
+one-minute average. The research profile keeps its normal-only pressure policy,
+16 GiB raw-free-memory floor, 100 GiB disk floor and host-load qualification
+envelope.
+
+For live Development effects, the host headroom floor is 2 GiB under normal
+pressure and 4 GiB under warning, plus measured provider footprint above the
+6 GiB guest and 2 GiB provisional overhead estimate. Changed swapouts and thermal
+warnings still refuse effects. This does not cap provider footprint or qualify
+runtime efficiency. Admission JSON records the numeric pressure level and typed
+state; the legacy `memory_pressure_normal` boolean remains false for warning.
+Saved reports do not grant resource authority.
 
 The normal `hack-runtime-candidate` / `hack-local` development build remains bound
 to its source checkout, including when all Cargo features are enabled. Only the

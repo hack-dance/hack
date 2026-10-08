@@ -1,7 +1,10 @@
 mod admission_pool;
 pub mod host_filesystem;
 mod interrupted;
+mod operating_guard;
 mod prepared_boot;
+#[cfg(test)]
+mod pressure_tests;
 #[cfg(any(target_os = "macos", test))]
 mod private_child;
 mod relay_process;
@@ -282,6 +285,20 @@ pub(super) fn startup_lease(root: &Path, wait: Duration) -> Result<state::Lock, 
     operation_lease(root, Some(Instant::now() + wait), || Ok(())).map(|(lock, ())| lock)
 }
 
+/// Returning the mutation lease requires a fresh Development admission window.
+/// On failure RAII drops the lease, without granting owner/allocation authority.
+fn startup_admission_lease(
+    root: &Path,
+    wait: Duration,
+    profile: super::Profile,
+    samples: &[admission::Admission],
+    observe: impl FnMut() -> Result<admission::Admission, CandidateError>,
+) -> Result<(state::Lock, Vec<admission::Admission>), CandidateError> {
+    let lock = startup_lease(root, wait)?;
+    let fresh = admission::recheck_after_lease(profile, samples, observe)?;
+    Ok((lock, fresh))
+}
+
 /// Read-only observation takes no mutation lease and detects lifecycle changes around each read.
 pub(super) struct ObservedGuest<'a> {
     candidate: &'a Candidate,
@@ -342,7 +359,15 @@ pub(super) struct OwnedGuest<'a> {
     owner: Owner,
     _lock: state::Lock,
     allocation_allowed: bool,
-    guard: Option<(u64, std::cell::Cell<Instant>)>,
+    guard: Option<operating_guard::OperatingGuard>,
+}
+
+fn operating_observation(
+    owner: &Owner,
+) -> Result<(admission::OperatingSample, u64), CandidateError> {
+    let sample = admission::operating_sample()?;
+    let usage = identity::memory_usage(owner.process.as_ref().expect("verified process").pid)?;
+    Ok((sample, usage.physical_footprint_bytes))
 }
 
 impl<'a> OwnedGuest<'a> {
@@ -373,20 +398,8 @@ impl<'a> OwnedGuest<'a> {
         self.owner.project_share.as_ref()
     }
     pub(super) fn before_effect(&self) -> Result<(), CandidateError> {
-        if let Some((swapouts, last)) = &self.guard {
-            if last.get().elapsed() >= Duration::from_secs(2) {
-                let sample = admission::operating_sample()?;
-                let usage = identity::memory_usage(
-                    self.owner.process.as_ref().expect("verified process").pid,
-                )?;
-                admission::validate_operating(
-                    &sample,
-                    *swapouts,
-                    usage.physical_footprint_bytes,
-                    self.owner.profile,
-                )?;
-                last.set(Instant::now());
-            }
+        if let Some(guard) = &self.guard {
+            guard.before_effect(self.owner.profile, || operating_observation(&self.owner))?;
         }
         Ok(())
     }
@@ -448,16 +461,10 @@ impl<'a> OwnedGuest<'a> {
             Ok(current)
         })?;
         let guard = if enforce_budget && current.profile == super::Profile::Development {
-            let sample = admission::operating_sample()?;
-            let usage =
-                identity::memory_usage(current.process.as_ref().expect("verified process").pid)?;
-            admission::validate_operating(
-                &sample,
-                sample.swapouts,
-                usage.physical_footprint_bytes,
+            Some(operating_guard::OperatingGuard::connect(
                 current.profile,
-            )?;
-            Some((sample.swapouts, std::cell::Cell::new(Instant::now())))
+                || operating_observation(&current),
+            )?)
         } else {
             None
         };
@@ -1060,16 +1067,33 @@ fn start_pool(
             admission.reasons.join(" "),
         ));
     }
-    let samples = admission::sample_with(profile, || {
-        admission_pool::probe(candidate, profile, admission_owner.as_ref())
-    })?;
+    let mut samples = if profile == super::Profile::Development {
+        let baseline_swapouts = admission.swapouts;
+        let mut samples = vec![admission];
+        samples.extend(admission::sample_after(profile, baseline_swapouts, || {
+            admission_pool::probe(candidate, profile, admission_owner.as_ref())
+        })?);
+        samples
+    } else {
+        // Retain the frozen Research window and baseline semantics.
+        admission::sample_with(profile, || {
+            admission_pool::probe(candidate, profile, admission_owner.as_ref())
+        })?
+    };
     artifact::verify(candidate)?;
     artifact::verify_engine(candidate)?;
     super::network_tools::verify(candidate)?;
-    let lock = startup_lease(&root(candidate), STARTUP_LEASE_WAIT)?;
+    let (lock, fresh_samples) = startup_admission_lease(
+        &root(candidate),
+        STARTUP_LEASE_WAIT,
+        profile,
+        &samples,
+        || admission_pool::probe(candidate, profile, admission_owner.as_ref()),
+    )?;
     if let Some(selected) = &admission_owner {
         selected.reverify(candidate)?;
     }
+    samples.extend(fresh_samples);
     #[cfg(target_os = "macos")]
     if let Some(guard) = &retained_guard {
         guard.verify(candidate)?;
@@ -2489,9 +2513,9 @@ printf 'verified-cache\n'
             .stage_with_guest(&guest)
             .unwrap();
         // Force a baseline mismatch without creating real host pressure or changing global state.
-        guest.guard = Some((
+        guest.guard = Some(operating_guard::OperatingGuard::fixture(
             u64::MAX,
-            std::cell::Cell::new(Instant::now() - Duration::from_secs(3)),
+            Instant::now() - Duration::from_secs(3),
         ));
         assert_eq!(
             lease

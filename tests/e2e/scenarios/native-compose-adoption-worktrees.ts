@@ -745,7 +745,18 @@ async function adoptSecondAndRollback(h: FixtureRuntime) {
   await check(first);
 }
 
-async function cleanupInstance(h: FixtureRuntime, instance: Instance) {
+type CleanupInputs = Pick<
+  FixtureRuntime,
+  "engineId" | "anchors" | "resources" | "owned" | "effect" | "list" | "probe"
+> & { readonly instances: readonly Instance[] };
+
+async function requirePreparedEngine(h: CleanupInputs) {
+  if ((await h.probe(["info", "--format", "{{json .ID}}"])) !== h.engineId) {
+    refused();
+  }
+}
+
+async function cleanupInstance(h: CleanupInputs, instance: Instance) {
   const baseline = h.anchors.get(instance);
   if (!baseline) {
     return;
@@ -758,6 +769,7 @@ async function cleanupInstance(h: FixtureRuntime, instance: Instance) {
   }
   for (const row of baseline.resources.container) {
     await h.owned(instance, "container", row.id);
+    await requirePreparedEngine(h);
     await h.effect(["container", "rm", "--force", row.id]);
   }
   await cleanupNetworks(h, instance, baseline);
@@ -769,7 +781,7 @@ async function cleanupInstance(h: FixtureRuntime, instance: Instance) {
   }
 }
 async function cleanupNetworks(
-  h: FixtureRuntime,
+  h: CleanupInputs,
   instance: Instance,
   baseline: Snapshot
 ) {
@@ -787,11 +799,12 @@ async function cleanupNetworks(
     ) {
       refused();
     }
+    await requirePreparedEngine(h);
     await h.effect(["network", "rm", row.id]);
   }
 }
 async function cleanupVolumes(
-  h: FixtureRuntime,
+  h: CleanupInputs,
   instance: Instance,
   baseline: Snapshot
 ) {
@@ -813,14 +826,14 @@ async function cleanupVolumes(
     ) {
       refused();
     }
+    await requirePreparedEngine(h);
     await h.effect(["volume", "rm", row.id]);
   }
 }
-async function cleanupFixture(h: FixtureRuntime) {
-  if ((await h.probe(["info", "--format", "{{json .ID}}"])) !== h.engineId) {
-    refused();
-  }
-  for (const instance of [h.first, h.second]) {
+/** Recheck the prepared daemon at cleanup admission and immediately before each exact removal. */
+export async function cleanupOwnedAdoptionFixture(h: CleanupInputs) {
+  await requirePreparedEngine(h);
+  for (const instance of h.instances) {
     await cleanupInstance(h, instance);
   }
 }
@@ -880,7 +893,8 @@ export const nativeComposeAdoptionWorktreesScenario: Scenario = {
           "two linked original SQL volumes, retained IDs, partial-stop recovery and isolated rollback verified"
         );
       },
-      cleanup: () => cleanupFixture(h),
+      cleanup: () =>
+        cleanupOwnedAdoptionFixture({ ...h, instances: [h.first, h.second] }),
       secondaryFailure: () =>
         ctx.log(
           "secondary exact-owned cleanup failed; retain fixture evidence"

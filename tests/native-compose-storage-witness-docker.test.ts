@@ -12,7 +12,7 @@ import {
   NATIVE_STORAGE_DOCKER_ARTIFACT,
   nativeComposeStorageDockerHelper,
 } from "../src/lib/native-compose-storage-witness-docker-artifact.ts";
-import { observeNativeComposeStorageDockerTarget } from "../src/lib/native-compose-storage-witness-docker-inventory.ts";
+import { nativeComposeStorageDockerPathsOverlap, observeNativeComposeStorageDockerTarget } from "../src/lib/native-compose-storage-witness-docker-inventory.ts";
 import {
   checkNativeComposeStorageDockerCarrier,
   NATIVE_STORAGE_CARRIER_LABEL,
@@ -53,7 +53,8 @@ async function withBinding(run: (value: NativeComposeMaterialBinding) => Promise
   });
 }
 function inventory(binding: NativeComposeMaterialBinding) {
-  const state = { present: true, drift: false, foreign: false, running: false, mounts: true, version: "1", volumeReads: 0 };
+  const state = { present: true, drift: false, foreign: false, running: false, mounts: true, version: "1", volumeReads: 0,
+    mountType: "volume", mountName: selection.name, mountSource: `/var/lib/docker/volumes/${selection.name}/_data` };
   const id = "c".repeat(64);
   const mutableCalls: string[][] = [];
   const probe = async (args: readonly string[]): Promise<string> => {
@@ -68,7 +69,7 @@ function inventory(binding: NativeComposeMaterialBinding) {
     }
     if (args[0] === "container" && args[1] === "ls") return state.mounts ? JSON.stringify(id) : "";
     if (args[0] === "container" && args[1] === "inspect") return JSON.stringify({ id, createdAt,
-      mounts: [{ Type: "volume", Name: selection.name, Source: `/var/lib/docker/volumes/${selection.name}/_data`, Destination: "/data", RW: true }],
+      mounts: [{ Type: state.mountType, Name: state.mountName, Source: state.mountSource, Destination: "/data", RW: true }],
       running: state.running, project: binding.identity.composeProject, instance: binding.identity.composeProject,
       owner: state.foreign ? "f".repeat(32) : binding.identity.ownerToken, version: state.version, generation: binding.generationId,
       carrier: null, carrierOwner: null, carrierGeneration: null });
@@ -102,6 +103,26 @@ test("genuinely absent cold storage needs an empty complete holder selection", a
     fake.state.mounts = true;
     await expect(observeNativeComposeStorageDockerTarget({ current, engineId, selection, stopped: true, probe: fake.probe })).rejects.toThrow();
   });
+});
+test.each([
+  "/var/lib/docker/volumes", "/var/lib/docker/volumes/owned_data/", "/var/lib/docker/volumes/owned_data/_data/",
+  "/var/lib/docker/volumes/owned_data/_data/child", "/var/lib/docker/volumes/other/../owned_data/_data",
+] as const)("foreign overlapping bind %s refuses rather than disappearing from holder selection", async (source) => {
+  await withBinding(async (current) => {
+    const fake = inventory(current);
+    fake.state.foreign = true; fake.state.mountType = "bind"; fake.state.mountName = ""; fake.state.mountSource = source;
+    await expect(observeNativeComposeStorageDockerTarget({ current, engineId, selection, stopped: true, probe: fake.probe })).rejects.toThrow("values omitted");
+    expect(fake.calls.every((args) => !args.includes("create") && !args.includes("start") && !args.includes("rm"))).toBe(true);
+  });
+});
+test("complete holder inventory keeps a similarly named foreign sibling independent", async () => {
+  await withBinding(async (current) => {
+    const fake = inventory(current);
+    fake.state.foreign = true; fake.state.mountType = "bind"; fake.state.mountName = "";
+    fake.state.mountSource = "/var/lib/docker/volumes/owned_data_other/_data";
+    expect((await observeNativeComposeStorageDockerTarget({ current, engineId, selection, stopped: true, probe: fake.probe })).holders).toEqual([]);
+  });
+  expect(nativeComposeStorageDockerPathsOverlap("relative/path", "/var/lib/docker/volumes/owned_data/_data")).toBe(false);
 });
 function input(): NativeComposeStorageXattrInvocation {
   return { recordCreated: async () => {}, invocationId: "a".repeat(32), artifact: NATIVE_STORAGE_DOCKER_ARTIFACT,

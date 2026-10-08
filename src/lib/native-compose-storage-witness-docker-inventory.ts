@@ -1,4 +1,5 @@
 import { isRecord } from "./guards.ts";
+import { posix } from "node:path";
 import type { NativeComposeMaterialBinding } from "./native-compose-generation.ts";
 import { createNativeComposeProbe } from "./native-compose-ownership.ts";
 import { nativeComposeVolumeCreatedAt } from "./native-compose-retained-storage.ts";
@@ -15,6 +16,14 @@ const VOLUME = `{"name":{{json .Name}},"createdAt":{{json .CreatedAt}},"driver":
 const HOLDER = `{"id":{{json .Id}},"createdAt":{{json .Created}},"mounts":{{json .Mounts}},"running":{{json .State.Running}},"project":{{json (index .Config.Labels "com.docker.compose.project")}},"instance":{{json (index .Config.Labels "${PREFIX}.instance")}},"owner":{{json (index .Config.Labels "${PREFIX}.owner")}},"version":{{json (index .Config.Labels "${PREFIX}.version")}},"generation":{{json (index .Config.Labels "${PREFIX}.generation")}},"carrier":{{json (index .Config.Labels "io.hack.storage-witness.carrier")}},"carrierOwner":{{json (index .Config.Labels "io.hack.storage-witness.owner")}},"carrierGeneration":{{json (index .Config.Labels "io.hack.storage-witness.generation")}}}`;
 type Probe = ReturnType<typeof createNativeComposeProbe>;
 type Selection = { readonly name: string; readonly storage: string };
+/** A parent or child bind exposes the selected root too. Normalize complete paths,
+ * then compare separator boundaries so a similarly named sibling stays independent. */
+export function nativeComposeStorageDockerPathsOverlap(left: string, right: string): boolean {
+  if (!(posix.isAbsolute(left) && posix.isAbsolute(right))) return false;
+  const a = posix.normalize(left).replace(/\/+$/, "") || "/";
+  const b = posix.normalize(right).replace(/\/+$/, "") || "/";
+  return a === b || a === "/" || b === "/" || a.startsWith(`${b}/`) || b.startsWith(`${a}/`);
+}
 
 function rows(text: string): Record<string, unknown>[] {
   if (text.trim() === "") return [];
@@ -82,7 +91,8 @@ export async function observeNativeComposeStorageDockerTarget(opts: {
       let selected = false;
       for (const mount of value.mounts) {
         if (!(isRecord(mount) && typeof mount.Type === "string" && typeof mount.Source === "string" && typeof mount.Destination === "string" && typeof mount.RW === "boolean")) return refuse();
-        if ((mount.Type === "volume" && mount.Name === selection.name) || mount.Source === `/var/lib/docker/volumes/${selection.name}/_data`) selected = true;
+        if ((mount.Type === "volume" && mount.Name === selection.name) ||
+          nativeComposeStorageDockerPathsOverlap(mount.Source, `/var/lib/docker/volumes/${selection.name}/_data`)) selected = true;
       }
       if (!selected) continue;
       if (opts.carrier && value.id === opts.carrier.id) {

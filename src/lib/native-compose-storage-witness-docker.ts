@@ -14,7 +14,6 @@ import {
   type HeldDirectory,
   holdDirectory,
   privateDirectory,
-  readPrivate,
   recheckDirectories,
   sameFile,
   writeExclusive,
@@ -27,6 +26,7 @@ import {
   inspectNativeComposeStorageDockerVolume,
   observeNativeComposeStorageDockerTarget,
 } from "./native-compose-storage-witness-docker-inventory.ts";
+import { holdNativeComposeStorageDockerIo } from "./native-compose-storage-witness-docker-io.ts";
 import {
   checkNativeComposeStorageDockerCarrier,
   NATIVE_STORAGE_CARRIER_FORMAT,
@@ -169,38 +169,44 @@ async function groupAbsent(pid: number): Promise<void> {
 }
 /** No callback can reject before the shared owner awaits exit. A rejected owner or
  * unproven group retains the journal; daemon effects are never inferred from exit. */
-async function command(opts: {
-  readonly context: Context;
-  readonly files: Files;
+export async function runNativeComposeStorageDockerCommand(supplied: {
+  readonly context: Pick<Context, "signal" | "deadline">;
+  readonly files: Pick<Files, "held" | "path" | "input" | "inputInfo" | "requestText" | "captures">;
   readonly args: readonly string[];
   readonly beforeSpawn: () => void;
   readonly assertAdmitted: () => Promise<void>;
   readonly timeoutMs: number;
   readonly cleanup?: boolean;
 }): Promise<{ readonly exitCode: number; readonly stdout: string }> {
+  const opts = { ...supplied, context: { ...supplied.context }, args: [...supplied.args] };
   const capture = randomBytes(16).toString("hex");
   const stdout = join(opts.files.path, `${capture}.stdout`), stderr = join(opts.files.path, `${capture}.stderr`);
   const out = await writeExclusive(stdout, ""), err = await writeExclusive(stderr, "");
   opts.files.captures.push({ path: stdout, info: out }, { path: stderr, info: err });
   await opts.files.held.at(-1)?.file.sync();
-  await opts.assertAdmitted();
-  const timeoutMs = opts.cleanup ? opts.timeoutMs : Math.min(opts.timeoutMs, opts.context.deadline - Date.now());
-  if (!(timeoutMs > 0)) return refuse();
-  let pid = 0, exit: RunExitEvent | null = null;
-  // No awaited setup in run(): this noninteractive pipe uses AbortSignal rather
-  // than the terminal handoff. The async authority read immediately precedes it.
-  const code = await run(["/bin/sh", "-c", 'ulimit -f 8; input=$1; out=$2; err=$3; shift 3; exec "$@" < "$input" > "$out" 2> "$err"', "storage-witness-command", opts.files.input, stdout, stderr, ...opts.args], {
-    stdin: "ignore", stdout: "ignore", stderr: "ignore", timeoutMs,
-    signal: opts.cleanup ? undefined : opts.context.signal,
-    beforeSpawn: opts.beforeSpawn,
-    onSpawn: async (event) => { pid = event.ownsProcessGroup ? event.processGroupId ?? event.pid : 0; },
-    onExit: async (event) => { exit = event; },
-  });
-  await groupAbsent(pid);
-  if (!(exit && !(exit as RunExitEvent).timedOut && !(exit as RunExitEvent).cancelled)) return refuse();
-  const output = await readPrivate(stdout, CAPTURE_LIMIT), errors = await readPrivate(stderr, CAPTURE_LIMIT);
-  if (!(sameFile(output.info, out) && sameFile(errors.info, err))) return refuse();
-  return { exitCode: code, stdout: output.text };
+  const io = await holdNativeComposeStorageDockerIo({ directories: opts.files.held,
+    input: { path: opts.files.input, info: opts.files.inputInfo, text: opts.files.requestText },
+    stdout: { path: stdout, info: out }, stderr: { path: stderr, info: err }, limit: CAPTURE_LIMIT });
+  let admitted = false, settled = false, pid = 0, exit: RunExitEvent | null = null;
+  try {
+    await opts.assertAdmitted();
+    const timeoutMs = opts.cleanup ? opts.timeoutMs : Math.min(opts.timeoutMs, opts.context.deadline - Date.now());
+    if (!(timeoutMs > 0)) return refuse();
+    // Fixed FSIZE quota bounds both inherited capture files, including daemon
+    // stderr. Acceptance remains 4096 bytes; no child reopens a named file.
+    const code = await run(["/bin/sh", "-c", 'ulimit -f 8; exec "$@"', "storage-witness-command", ...opts.args], {
+      privateIo: io.descriptors, timeoutMs, signal: opts.cleanup ? undefined : opts.context.signal,
+      beforeSpawn: () => { io.assertFresh(); opts.beforeSpawn(); admitted = true; },
+      onSpawn: async (event) => { pid = event.ownsProcessGroup ? event.processGroupId ?? event.pid : 0; },
+      onExit: async (event) => { exit = event; },
+    });
+    await groupAbsent(pid);
+    settled = true;
+    if (!(exit && !(exit as RunExitEvent).timedOut && !(exit as RunExitEvent).cancelled)) return refuse();
+    return { exitCode: code, stdout: io.read().stdout };
+  } finally {
+    if (!admitted || settled) await io.close(); else io.retainUnsettled();
+  }
 }
 function matchesScope(input: NativeComposeStorageXattrInvocation, binding: NativeComposeMaterialBinding): boolean {
   return input.scope.generationId === binding.generationId && input.scope.currentGenerationId === binding.currentGenerationId &&
@@ -266,7 +272,7 @@ export async function createNativeComposeDockerStorageXattrCarrier(opts: Context
       tool(); await recheckDirectories(held);
       const latest = await current(context, selection, true);
       if (!same(before, latest)) return refuse();
-      const result = await command({ context, files,
+      const result = await runNativeComposeStorageDockerCommand({ context, files,
         args: [docker, "volume", "create", "--driver", "local", "--label", `com.docker.compose.project=${selection.runtimeIdentity}`,
           "--label", `com.docker.compose.volume=${selection.storage}`, "--label", "io.hack.native-config.version=1",
           "--label", `io.hack.native-config.instance=${selection.runtimeIdentity}`, "--label", `io.hack.native-config.owner=${selection.ownerToken}`,
@@ -292,7 +298,7 @@ export async function createNativeComposeDockerStorageXattrCarrier(opts: Context
       const read = probe(); await engine(read, context); await image(read); await checkFiles(files); tool();
       const admitted = await current(context, input.target, !input.readonly);
       if (!same(before, admitted)) return refuse();
-      const created = await command({ context, files, args: [docker, ...nativeComposeStorageDockerCreateArgs({ input, program: files.program })],
+      const created = await runNativeComposeStorageDockerCommand({ context, files, args: [docker, ...nativeComposeStorageDockerCreateArgs({ input, program: files.program })],
         timeoutMs: 15_000, beforeSpawn: () => { tool(); lifetime(context); },
         assertAdmitted: async () => { await engine(probe(), context); tool(); if (!same(before, await current(context, input.target, !input.readonly))) refuse(); } });
       const id = created.stdout.trim();
@@ -318,7 +324,7 @@ export async function createNativeComposeDockerStorageXattrCarrier(opts: Context
       tool();
       const final = await current(context, input.target, !input.readonly);
       if (!same(before, final)) return refuse();
-      const result = await command({ context, files, args: [docker, "start", "-ai", id], timeoutMs: 15_000,
+      const result = await runNativeComposeStorageDockerCommand({ context, files, args: [docker, "start", "-ai", id], timeoutMs: 15_000,
         beforeSpawn: () => { tool(); lifetime(context); },
         assertAdmitted: async () => {
           const selected = await observeNativeComposeStorageDockerTarget({ probe: probe(), current: before, selection: input.target, engineId: context.engineId,
@@ -341,7 +347,7 @@ export async function createNativeComposeDockerStorageXattrCarrier(opts: Context
       await checkFiles(files); tool();
       const cleanupAuthority = await current(context, input.target);
       if (!same(before, cleanupAuthority)) return refuse();
-      const removed = await command({ context, files, cleanup: true, args: [docker, "rm", id], timeoutMs: 10_000, beforeSpawn: tool,
+      const removed = await runNativeComposeStorageDockerCommand({ context, files, cleanup: true, args: [docker, "rm", id], timeoutMs: 10_000, beforeSpawn: tool,
         assertAdmitted: async () => {
           const finalCarrier = await inspectCarrier(true);
           if (!(finalCarrier.createdAt === owned.createdAt && nativeComposeStorageDockerCarrierPolicy(finalCarrier) === owned.policy && same(finalCarrier.state, stopped.state))) refuse();

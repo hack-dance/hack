@@ -3,8 +3,8 @@
 This is an unactivated Linux helper source, injectable owner protocol and offline
 controls. The [witness foundation](native-compose-storage-witness.md) accepts its
 distinct xattr expectation/reference format under the same opaque generation
-authority. There is no Docker implementation of the carrier ports, and the CLI
-does not enroll volume witnesses. Ordinary CLI instances retain the metadata
+authority. A candidate Docker implementation of the carrier ports is unactivated;
+the CLI does not enroll volume witnesses. Ordinary CLI instances retain the metadata
 guard's same-metadata replacement limitation.
 
 The proposed directory xattr avoids adding a directory entry to PostgreSQL's
@@ -184,6 +184,14 @@ mount or requests bind source creation. Known completion requires an exact stopp
 helper, non-force removal and fresh empty helper inventory. Unknown disposition
 retains the private journal and input. Journal bytes do not replace these actual
 stop and absence observations. The CLI does not call this unactivated port.
+
+Holder selection includes normalized ancestor and descendant bind paths; similarly
+named sibling roots stay independent. Command stdin and captures use held no-follow
+descriptors, checked after the final admission await and held until owned group
+absence. A fixed shell file-size quota bounds each capture to at most 8192 bytes
+on the admitted shell platforms; acceptance is at most 4096 bytes per stream.
+Unknown child disposition retains descriptors and the pending journal rather than
+starting competing cleanup. No child redirects through a reopened named path.
 
 The first declared dependency is the fixed Linux arm64 Bun 1.4.2 image
 `sha256:cb3bbbb08e13a4a2ff400f24c7a2a1d5efa83f6ef8544d52d95a519631e2fc61`.

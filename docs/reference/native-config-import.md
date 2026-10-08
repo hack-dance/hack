@@ -36,6 +36,8 @@ reported as successful.
 | Long edges with `service_completed_successfully` | The referenced declaration becomes a native job; the edge becomes `job` / `completed` |
 | Exact `hack.service.one-shot: "true"` label map or singleton `hack.service.one-shot=true` label list | An explicit standalone native job; the known marker is consumed as semantic provenance, without adding resource labels |
 | `healthcheck.test: [CMD, executable, ...args]` with authored positive `interval`, `timeout`, `retries` | Native exec readiness; complete argument dollar pairs decode once, and the compiler validates timings |
+| File-only top-level `configs` and `secrets` | Checkout-relative native file declarations, rebased from the known `.hack` Compose source directory |
+| Explicit service `configs` and `secrets` grants | Native read-only file mounts with canonical Linux targets and normalized `0444` permission intent |
 
 Names in this slice use lowercase letters, digits and single hyphen separators.
 Overlay aliases additionally accept ASCII case, underscores and spaces and apply
@@ -97,6 +99,31 @@ refuse. Completed-job conversion is supported as described above; retained-job
 execution remains a separate slice. Unknown HTTP/TCP fields also refuse.
 The compiler rejects missing, cyclic or inactive dependency targets and ready
 edges whose target has no explicit readiness. Refusals include inactive profiles.
+
+## File declarations and grants
+
+Only own `{file: string}` declarations are supported, including unused declarations.
+Relative paths are lexically rebased from `.hack` into the checkout; `../settings`
+becomes `settings`. Absolute paths, checkout escapes and unsupported source options
+refuse. No referenced material is read or inspected. Complete dollar pairs in file
+paths and grant targets decode once; ambient interpolation refuses.
+
+Declaring a file does not grant access. Explicit short or long service grants map
+to read-only mounts. A short config targets `/<name>`; a short secret targets
+`/run/secrets/<name>`. Long grants require `source` and may select a canonical
+absolute target; a secret basename target is placed under `/run/secrets`.
+Omitted mode, quoted `"0444"` and numeric `292` normalize to `"0444"`.
+UID/GID, alternate modes and unknown grant fields refuse, including inactive
+services. Bare YAML `0444` becomes unsupported decimal `444`; explicit `0o444`
+retains the parser's compatibility refusal. Quoted `"0444"` and numeric `292`
+are supported. The compiler validates source references and target overlaps.
+
+These are Linux declaration defaults. Compose's file-backed binds can ignore
+permission options, so this preview does not establish original file modes or
+runtime binding equivalence. Retained adoption still refuses these declarations
+and grants before private values, keys or engine probes. See Docker's
+[config grants](https://docs.docker.com/reference/compose-file/services/#configs)
+and [secret grants](https://docs.docker.com/reference/compose-file/services/#secrets).
 
 ## Parsing and input boundary
 

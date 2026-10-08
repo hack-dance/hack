@@ -63,8 +63,11 @@ the original owner's obligations. A format downgrade is not rollback.
    retains originals/data and restores the exact held legacy pair.
 
 `freshJobResultDraft` refuses malformed, duplicate, missing, foreign or extra rows,
-wrong restart facts and impossible terminal status. It uses exact timestamp strings
-within the same-daemon cooperative observation boundary. A changed timestamp is
+wrong restart facts and impossible terminal status. It compares validated UTC
+seconds plus all nine nanosecond digits, so equivalent fractional spellings and
+fractional Docker-zero timestamps cannot establish a new attempt. A real
+one-nanosecond change remains distinct; no monotonic clock ordering is assumed.
+Within the same-daemon cooperative observation boundary, a changed timestamp is
 not a general exactly-once, hostile-engine or clock-authentication guarantee. The
 future owner must mint the admitted-attempt capability; a caller boolean in this
 offline draft is not that capability.
@@ -79,7 +82,9 @@ bounds, not workload resource caps or production deadlines. Explicit recovery is
 a separate caller invocation with its own budget and the same original pending
 anchor. Recovery may itself time out; no fairness or eventual cleanup is asserted.
 
-The positive model exhausts **9,248 distinct states / 18,049 generated states**.
+The prior `a59c23d3` positive model exhausted **9,248 distinct states / 18,049
+generated states**. Timestamp and final-publication guard corrections are awaiting
+their focused validation; prior counts are not a pass claim for those amendments.
 Reachability checks require healthy observation, fast and running job completion,
 known failure, interruption, stopped recovery, finalization and explicit restart.
 SQL continuity is represented by a fixed seed witness (`seedWrites = 1`); the job
@@ -95,8 +100,16 @@ the test.
 | Nonzero refuses before consumer | `NoFailedDependencyStart`: ignore exit 17, then start app |
 | Recovery never starts jobs | `NoRecoveryJobReplay`: interrupted pending start, explicit recovery, new job start counter |
 | Stop postcondition before clearing pending | `NoPrematureReceiptClear`: clear the receipt with the original DB still running |
-| Fresh final authority | `NoForeignEffect`: replace the selected fence, then start an original |
-| One aggregate deadline | `NoExpiredEffect`: consume all elapsed budget, then start an original |
+| Fresh effect authority | `NoForeignEffect`: replace the selected fence, then start an original |
+| Effect aggregate deadline | `NoExpiredEffect`: consume all elapsed budget, then start an original |
+| Final start authority only | `NoForeignCommit`: complete admitted effects, replace the fence, then clear pending in `CommitStart` |
+| Final start deadline only | `NoExpiredCommit`: complete admitted effects, exhaust the budget, then clear pending in `CommitStart` |
+| Final stop authority only | `NoForeignCommit`: complete admitted stops, replace the fence, then clear pending in `CommitStop` |
+| Final stop deadline only | `NoExpiredCommit`: complete admitted stops, exhaust the budget, then clear pending in `CommitStop` |
+
+Commit controls keep every engine-effect guard enabled. Publication records its
+own authority/deadline facts independently, so no-child receipt clearing cannot
+pass merely because the last engine operation was admitted earlier.
 
 ## Source correspondence and omissions
 

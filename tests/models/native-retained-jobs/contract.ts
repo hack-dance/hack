@@ -166,18 +166,26 @@ export type ObservationDraft = {
   readonly restartPolicy: "no" | "always" | "unless-stopped" | "on-failure";
   readonly maximumRetryCount: number;
 };
-function timestamp(value: string): boolean {
+/** Compare exact UTC instants without discarding submillisecond precision. */
+function timestampInstant(value: string): bigint | undefined {
   const match = TIME.exec(value);
   const base = match?.[1];
   if (!base) {
-    return false;
+    return undefined;
   }
   const milliseconds = Date.parse(`${base}Z`);
+  if (
+    !Number.isFinite(milliseconds) ||
+    new Date(milliseconds).toISOString().slice(0, 19) !== base
+  ) {
+    return undefined;
+  }
   return (
-    Number.isFinite(milliseconds) &&
-    new Date(milliseconds).toISOString().slice(0, 19) === base
+    BigInt(milliseconds) * 1_000_000n +
+    BigInt((match?.[2] ?? "").padEnd(9, "0"))
   );
 }
+const NEVER_STARTED_INSTANT = timestampInstant(NEVER_STARTED);
 function validObservation(value: unknown): value is ObservationDraft {
   if (
     !closed(
@@ -198,9 +206,9 @@ function validObservation(value: unknown): value is ObservationDraft {
     value.exitCode >= 0 &&
     value.exitCode <= 255 &&
     typeof value.startedAt === "string" &&
-    timestamp(value.startedAt) &&
+    timestampInstant(value.startedAt) !== undefined &&
     typeof value.finishedAt === "string" &&
-    timestamp(value.finishedAt) &&
+    timestampInstant(value.finishedAt) !== undefined &&
     typeof value.restartPolicy === "string" &&
     ["no", "always", "unless-stopped", "on-failure"].includes(
       value.restartPolicy
@@ -238,8 +246,10 @@ export function freshJobResultDraft(opts: {
     (item) => item.kind === "job" && item.id === opts.attempt.id
   );
   const row = byId.get(opts.attempt.id);
+  const priorStartedAt = timestampInstant(opts.attempt.priorStartedAt);
   if (
-    !(job && row && timestamp(opts.attempt.priorStartedAt)) ||
+    !(job && row) ||
+    priorStartedAt === undefined ||
     row.paused ||
     row.status === "dead" ||
     row.restartPolicy !== "no" ||
@@ -247,20 +257,22 @@ export function freshJobResultDraft(opts: {
   ) {
     return "refused";
   }
+  const startedAt = timestampInstant(row.startedAt);
+  const finishedAt = timestampInstant(row.finishedAt);
   if (row.status === "exited" && !row.running && row.exitCode !== 0) {
     return "failed";
   }
   const fresh =
     opts.attempt.started === true &&
-    row.startedAt !== NEVER_STARTED &&
-    row.startedAt !== opts.attempt.priorStartedAt;
+    startedAt !== NEVER_STARTED_INSTANT &&
+    startedAt !== priorStartedAt;
   if (!fresh) {
     return "waiting";
   }
   if (
     row.status === "exited" &&
     !row.running &&
-    row.finishedAt !== NEVER_STARTED &&
+    finishedAt !== NEVER_STARTED_INSTANT &&
     row.exitCode === 0
   ) {
     return "ready";

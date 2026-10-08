@@ -83,7 +83,7 @@ function step(state: State, action: string): State {
   expect(violation(edge.state)).toBeUndefined();
   return edge.state;
 }
-function firstSuccess() {
+function firstReady() {
   let state = initialState();
   for (const action of [
     "JournalStart",
@@ -93,11 +93,13 @@ function firstSuccess() {
     "StartJob:zero",
     "ObserveFreshZero",
     "StartApp",
-    "CommitStart",
   ]) {
     state = step(state, action);
   }
   return state;
+}
+function firstSuccess() {
+  return step(firstReady(), "CommitStart");
 }
 
 test("closed draft version7 keeps original IDs and refuses withheld combinations", () => {
@@ -211,6 +213,36 @@ test("fresh fast exit0 is valid without an observed intermediate running state",
     result(job({ running: true, status: "running", finishedAt: NEVER_STARTED }))
   ).toBe("waiting");
   expect(result(job({ exitCode: 17 }))).toBe("failed");
+});
+
+test.each([
+  ["2026-10-08T00:00:01Z", "2026-10-08T00:00:01.000Z"],
+  ["2026-10-08T00:00:01.000000000Z", "2026-10-08T00:00:01Z"],
+  ["2026-10-08T00:00:01.1Z", "2026-10-08T00:00:01.100000000Z"],
+])("equivalent UTC spellings cannot make historical exit0 fresh: %s -> %s", (
+  prior,
+  current
+) => {
+  expect(result(job({ startedAt: current }), true, prior)).toBe("waiting");
+});
+
+test.each([
+  "0001-01-01T00:00:00.000Z",
+  "0001-01-01T00:00:00.000000000Z",
+])("fractional Docker zero remains never-started/never-finished: %s", (zero) => {
+  expect(result(job({ startedAt: zero }))).toBe("waiting");
+  expect(result(job({ finishedAt: zero }))).toBe("refused");
+  expect(result(job({ startedAt: NEVER_STARTED }), true, zero)).toBe("waiting");
+  expect(result(job({ startedAt: NEW }), true, zero)).toBe("ready");
+});
+
+test("a genuine one-nanosecond attempt change survives millisecond normalization", () => {
+  expect(
+    result(job({ startedAt: OLD }), true, "2026-10-08T00:00:01.123456788Z")
+  ).toBe("ready");
+  expect(
+    result(job({ startedAt: "1970-01-01T00:00:00Z" }), true, OLD)
+  ).toBe("ready");
 });
 
 test.each([
@@ -342,6 +374,26 @@ test.each([
   },
   { fault: "fence", invariant: "NoForeignEffect", witness: "StartDb" },
   { fault: "deadline", invariant: "NoExpiredEffect", witness: "StartDb" },
+  {
+    fault: "commit-start-fence",
+    invariant: "NoForeignCommit",
+    witness: "CommitStart",
+  },
+  {
+    fault: "commit-start-deadline",
+    invariant: "NoExpiredCommit",
+    witness: "CommitStart",
+  },
+  {
+    fault: "commit-stop-fence",
+    invariant: "NoForeignCommit",
+    witness: "CommitStop",
+  },
+  {
+    fault: "commit-stop-deadline",
+    invariant: "NoExpiredCommit",
+    witness: "CommitStop",
+  },
 ] satisfies readonly {
   fault: Fault;
   invariant: Violation;
@@ -356,6 +408,46 @@ test.each([
   expect(explored.counterexample?.invariant).toBe(invariant);
   expect(explored.counterexample?.trace.at(-1)?.action).toBe(witness);
   expect(explored.counterexample?.trace.length).toBeGreaterThan(1);
+  if (fault.startsWith("commit-")) {
+    // Only the final publication guard is removed; every engine effect remains admitted.
+    expect(
+      explored.counterexample?.trace.every(
+        (edge) => !(edge.state.unsafeFence || edge.state.unsafeDeadline)
+      )
+    ).toBe(true);
+    expect(explored.counterexample?.trace.at(-2)?.state.pending).not.toBeNull();
+    expect(explored.counterexample?.trace.at(-1)?.state.pending).toBeNull();
+  }
+});
+
+test.each(["start", "stop"] as const)("final %s publication refuses new fence/deadline drift and preserves pending", (
+  operation
+) => {
+  let ready = firstReady();
+  if (operation === "stop") {
+    ready = step(step(ready, "CommitStart"), "JournalStop");
+    for (const action of ["StopApp", "StopJob", "StopDb"]) {
+      ready = step(ready, action);
+    }
+  }
+  const commitAction = operation === "start" ? "CommitStart" : "CommitStop";
+  expect(transitions(ready).some((edge) => edge.action === commitAction)).toBe(
+    true
+  );
+  const changed = step(ready, "ReplaceFence");
+  let expired = ready;
+  for (const action of ["Tick", "Tick", "Tick"]) {
+    expired = step(expired, action);
+  }
+  for (const blocked of [changed, expired]) {
+    expect(transitions(blocked).some((edge) => edge.action === commitAction)).toBe(
+      false
+    );
+    expect(blocked.pending).toBe(operation);
+    expect(blocked.anchor).toBe(ready.anchor);
+    expect(blocked.originalIds).toBe(ready.originalIds);
+    expect(violation(blocked)).toBeUndefined();
+  }
 });
 
 test("restart stops in reverse order then starts forward with a new admitted job attempt", () => {

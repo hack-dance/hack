@@ -6,7 +6,11 @@ export type Fault =
   | "recovery-replay"
   | "early-clear"
   | "fence"
-  | "deadline";
+  | "deadline"
+  | "commit-start-fence"
+  | "commit-start-deadline"
+  | "commit-stop-fence"
+  | "commit-stop-deadline";
 type Phase =
   | "idle"
   | "starting"
@@ -44,6 +48,8 @@ export type State = {
   readonly unsafeReplay: boolean;
   readonly unsafeFence: boolean;
   readonly unsafeDeadline: boolean;
+  readonly unsafeCommitFence: boolean;
+  readonly unsafeCommitDeadline: boolean;
 };
 export type Edge = { readonly action: string; readonly state: State };
 export type Violation =
@@ -52,7 +58,9 @@ export type Violation =
   | "NoRecoveryJobReplay"
   | "NoPrematureReceiptClear"
   | "NoForeignEffect"
-  | "NoExpiredEffect";
+  | "NoExpiredEffect"
+  | "NoForeignCommit"
+  | "NoExpiredCommit";
 
 export function initialState(): State {
   return Object.freeze({
@@ -81,6 +89,8 @@ export function initialState(): State {
     unsafeReplay: false,
     unsafeFence: false,
     unsafeDeadline: false,
+    unsafeCommitFence: false,
+    unsafeCommitDeadline: false,
   });
 }
 function admitted(s: State, fault: Fault): boolean {
@@ -104,8 +114,30 @@ function effect(s: State, change: Partial<State>): State {
         change.jobStarts > s.jobStarts),
   });
 }
+function commitAdmitted(
+  s: State,
+  fault: Fault,
+  operation: "start" | "stop"
+): boolean {
+  return (
+    (s.fence === 1 || fault === `commit-${operation}-fence`) &&
+    (s.remaining > 0 || fault === `commit-${operation}-deadline`)
+  );
+}
+/** Publication is an authority/deadline boundary even when it spawns no child. */
+function commit(s: State, change: Partial<State>): State {
+  return next(s, {
+    ...change,
+    unsafeCommitFence: s.unsafeCommitFence || s.fence !== 1,
+    unsafeCommitDeadline: s.unsafeCommitDeadline || s.remaining === 0,
+  });
+}
 function startPhase(s: State, fault: Fault): readonly Edge[] {
-  if (!admitted(s, fault)) {
+  if (
+    !(s.cursor === 3
+      ? commitAdmitted(s, fault, "start")
+      : admitted(s, fault))
+  ) {
     return [];
   }
   if (s.cursor === 0) {
@@ -148,7 +180,7 @@ function startPhase(s: State, fault: Fault): readonly Edge[] {
     return [
       {
         action: "CommitStart",
-        state: next(s, { phase: "running", pending: null }),
+        state: commit(s, { phase: "running", pending: null }),
       },
     ];
   }
@@ -194,7 +226,14 @@ function jobPhase(s: State, fault: Fault): readonly Edge[] {
   return edges;
 }
 function stopPhase(s: State, fault: Fault): readonly Edge[] {
-  if (!admitted(s, fault)) {
+  const finalStop =
+    s.cursor === -1 &&
+    !(s.phase === "stopping" && s.pending === "restart");
+  if (
+    !(finalStop
+      ? commitAdmitted(s, fault, "stop")
+      : admitted(s, fault))
+  ) {
     return [];
   }
   const edges: Edge[] = [];
@@ -245,7 +284,7 @@ function stopPhase(s: State, fault: Fault): readonly Edge[] {
     } else {
       edges.push({
         action: "CommitStop",
-        state: next(s, { phase: "stopped", pending: null, accepted: false }),
+        state: commit(s, { phase: "stopped", pending: null, accepted: false }),
       });
     }
   }
@@ -377,6 +416,12 @@ export function violation(s: State): Violation | undefined {
   }
   if (s.unsafeDeadline) {
     return "NoExpiredEffect";
+  }
+  if (s.unsafeCommitFence) {
+    return "NoForeignCommit";
+  }
+  if (s.unsafeCommitDeadline) {
+    return "NoExpiredCommit";
   }
   return undefined;
 }

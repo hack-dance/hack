@@ -135,6 +135,7 @@ import {
   HackCliError,
   okResult,
 } from "../lib/cli-result.ts";
+import { renderManagedComposeEnvOverride } from "../lib/compose-managed-env.ts";
 import {
   DEFAULT_COMPOSE_STARTUP_TIMEOUT_MS,
   resolveComposeStartupTimeoutMs,
@@ -1324,16 +1325,12 @@ async function resolveModernComposeEnvOverrides(opts: {
     });
   }
 
-  const overrideServices: Record<string, Record<string, unknown>> = {};
-  for (const service of opts.targetServices) {
-    const env = modern.serviceEnv[service] ?? modern.globalEnv;
-    if (Object.keys(env).length === 0) {
-      continue;
-    }
-    overrideServices[service] = { environment: env };
-  }
-
-  if (Object.keys(overrideServices).length === 0) {
+  const text = renderManagedComposeEnvOverride({
+    targetServices: opts.targetServices,
+    globalEnv: modern.globalEnv,
+    serviceEnv: modern.serviceEnv,
+  });
+  if (text === null) {
     return {
       composeFiles: [],
       env: modern.globalEnv,
@@ -1343,9 +1340,6 @@ async function resolveModernComposeEnvOverrides(opts: {
     };
   }
 
-  const override = { services: overrideServices };
-  const yaml = YAML.stringify(override, null, 2);
-  const text = ensureTrailingNewline(cleanupYaml(yaml));
   await ensureHackDirGitignore({ projectDir: opts.project.projectDir });
   const overrideDir = resolve(opts.project.projectDir, ".internal");
   await ensureDir(overrideDir);

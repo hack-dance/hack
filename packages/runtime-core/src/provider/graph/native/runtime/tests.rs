@@ -1,8 +1,9 @@
 use super::*;
 use hack_config_compiler::environment::EnvMetadata;
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     os::unix::fs::{DirBuilderExt, symlink},
+    rc::Rc,
     sync::atomic::{AtomicU64, Ordering},
 };
 
@@ -89,6 +90,7 @@ impl Fixture {
             config.graph,
             Session {
                 candidate: &self.candidate,
+                startup_guard: None,
                 selected,
                 backend,
                 root,
@@ -112,6 +114,62 @@ fn basic() -> Value {
     json!({"schema_version":1,"name":"fixture","services":{"web":{"image":image(),"command":{"exec":["/bin/echo","$EXACT"]}}}})
 }
 
+#[test]
+fn foreground_guard_refuses_before_provider_connection_or_graph_reservation() {
+    let fixture = Fixture::new(basic());
+    let prepared = fixture.prepared(json!({"web":{}}), &BTreeMap::new());
+    let guard = || Err(error("native_graph_canceled", "canceled"));
+    assert_eq!(
+        run_guarded(&fixture.candidate, prepared, Some(&guard))
+            .unwrap_err()
+            .code,
+        "native_graph_canceled"
+    );
+    assert!(
+        !fixture
+            .candidate
+            .state_root
+            .join("run/native-graphs")
+            .exists()
+    );
+    assert!(!fixture.candidate.state_root.join("run/smolvm").exists());
+}
+
+#[test]
+fn foreground_cancellation_after_network_creation_prevents_container_effects_and_replay() {
+    let fixture = Fixture::new(basic());
+    let prepared = fixture.prepared(json!({"web":{}}), &BTreeMap::new());
+    let (graph, mut session) = fixture.session(prepared);
+    let canceled = Rc::new(Cell::new(false));
+    let check = canceled.clone();
+    let guard = || {
+        if check.get() {
+            Err(error("native_graph_canceled", "canceled"))
+        } else {
+            Ok(())
+        }
+    };
+    session.startup_guard = Some(&guard);
+    session.backend.state.borrow_mut().cancel_after_network = Some(canceled.clone());
+    assert_eq!(
+        execution::run(&graph, &mut session, Duration::from_secs(1))
+            .unwrap_err()
+            .code,
+        "native_graph_canceled"
+    );
+    assert_eq!(session.backend.state.borrow().effects, ["create:network"]);
+    assert!(session.backend.state.borrow().containers.is_empty());
+    let retained = session.backend.receipt();
+    assert_eq!(retained.resources["network:default"].phase, "created");
+    assert!(retained.resources["network:default"].id.is_some());
+    canceled.set(false);
+    assert!(execution::run(&graph, &mut session, Duration::from_secs(1)).is_err());
+    assert_eq!(session.backend.state.borrow().effects, ["create:network"]);
+    cleanup_using(&session.backend, &mut session.receipt, &session.root).unwrap();
+    assert_eq!(session.receipt.phase, Phase::Removed);
+    assert!(session.backend.state.borrow().networks.is_empty());
+}
+
 #[derive(Default)]
 struct FakeState {
     containers: BTreeMap<String, Value>,
@@ -123,6 +181,7 @@ struct FakeState {
     fail_network_create: bool,
     fail_network_after_apply: bool,
     staged: Vec<String>,
+    cancel_after_network: Option<Rc<Cell<bool>>>,
 }
 struct Fake {
     root: PathBuf,
@@ -168,6 +227,9 @@ impl Backend for Fake {
             let mut network = body.clone();
             network["Id"] = json!(id);
             network["Containers"] = json!({});
+            if let Some(canceled) = &state.cancel_after_network {
+                canceled.set(true);
+            }
             state.networks.insert(resource.name.clone(), network);
             if state.fail_network_after_apply {
                 return Err(error("fake_network_create_uncertain", "applied once"));

@@ -137,7 +137,7 @@ same scan. An unknown prefix cannot justify that substitution; an empty alias
 set still requires the owned CREATED-container and bridge proofs. Changed
 observations refuse.
 
-## Finite host up hooks
+## Finite host lifecycle hooks
 
 Whole-project `up` and `restart` run `host.up.before` before engine startup, then
 `host.up.after` after the exact workloads and routes are ready. Each phase runs in
@@ -153,7 +153,7 @@ the compiler's effective bindings. `env_target` can select the default host or a
 declared workload's host view. Managed references read that immutable baseline;
 literal overrides, empty defaults and explicit unset destinations retain their
 meaning. HTTP/HTTPS external endpoint bindings are supported. Other endpoint
-owners remain refused. `run` currently refuses projects with either nonempty up
+owners remain refused. `run` currently refuses projects with any nonempty lifecycle
 hooks instead of assigning new lifecycle semantics to a one-off command.
 
 Each hook phase has a separate budget equal to `HACK_COMPOSE_STARTUP_TIMEOUT_MS`;
@@ -179,8 +179,8 @@ operation pending. The generation becomes ready only after those checks pass.
 Before spawning, Hack synchronizes a private hook intent under the same instance
 mutation lock used for engine effects. An interrupted or unverified hook retains
 that intent and blocks `up`, `restart` and `run` without replay. Saved `ps --json`
-reports `beforeHooksPending` for either phase and `hostHookPhase` as `before`,
-`after`, or null, even if no engine generation was created. Older token-only
+reports `beforeHooksPending` for every phase and `hostHookPhase` as `before`,
+`after`, `down.before`, `down.after`, or null, even if no engine generation was created. Older token-only
 receipts remain uncertain before intents. An after intent also binds its exact
 pending startup operation and generation. Saved
 `down` can stop a retained engine generation but reports incomplete cleanup while
@@ -188,7 +188,32 @@ hook intent remains. `down --recover` can recover a verified dead CLI mutation
 owner; it cannot prove hook process ownership, clear hook uncertainty or rerun a
 hook. Explicit recovery for interrupted hooks remains a later lifecycle slice.
 An uncertain hook also prevents routing claim retirement after an owned stop.
-Down hooks and persistent host processes remain unsupported.
+Normal `down` runs `host.down.before` before stopping the owned engine and
+`host.down.after` only after fresh exact container, network and proxy dispatch
+absence. Hostname claims remain held through after hooks. A hook failure returns
+its exit status and leaves stop pending; a before failure runs no engine mutation.
+Private target values for both phases are captured under the instance lock before
+any hook journal or spawn. Each phase receives its own finite budget.
+
+The private saved generation binds down hooks to its immutable source revision,
+profiles, effective overlay (including no overlay) and original explicit overlay
+selection. Normal hook-enabled down rechecks source, local, routing and managed
+environment freshness before engine effects and final claim retirement. Hooks
+cannot rebind that generation. Any pre-existing pending operation or unknown hook
+intent refuses normal hook-enabled down before private value acquisition. Changed
+or malformed inputs require explicit recovery. Generations saved without this
+binding retain saved-only stop semantics; newly authored hooks cannot attach to an
+already-running old generation. Completed stopped generations do not replay hooks.
+
+`down --recover` skips authored down hooks, compiler/source parsing and private
+value acquisition. A successful hook-enabled engine recovery reports
+`hostHooksSkipped: true`; it does not report skipped or previously failed hooks as
+successful. A known finite nonzero with proven group absence clears only its exact
+hook intent, so later explicit engine recovery can retire claims after fresh absence.
+Unknown completion preserves host intent, pending generation and claims even after
+owned engine stop, and still reports incomplete. Persistent host processes and
+explicit uncertain-hook recovery remain unsupported. `restart` retains its current
+up/recreate contract; down hooks run on explicit `down`.
 
 ## Saved operations and recovery
 
@@ -259,7 +284,7 @@ from orphan generation files by this recovery path.
 ## Remaining coverage
 
 This slice explicitly refuses foreground or partial-service startup, non-plain
-logs, pruning options, all `host.down` hooks, persistent host
+logs, pruning options, persistent host
 processes, browser opening, route
 bindings, typed host/gateway endpoints, TCP endpoint derivation, and HTTP/TCP
 readiness. It preserves ordinary project DNS and outbound networking and adds no
@@ -279,3 +304,11 @@ HACK_E2E_CLI_BIN=./dist/hack HACK_E2E_DOCKER=1 HACK_E2E_REQUIRE_DOCKER=1 \
 Container checks do not establish normal browser routing, native trust, host
 lifecycle recovery, persistent host ownership, or interactive TTY acceptance.
 Those remain separate NC03 gates.
+
+The registered `native-config-down-hooks` Docker scenario requires the current
+compiled CLI and a cached exact Bun image. It checks finite before/after order and
+managed host isolation around production ownership probes, exit 17 with pending
+stop, malformed-source/env recovery with skipped hooks, and the same owned volume
+with a preserved data counter across stops. Final cleanup removes only that
+freshly verified isolated fixture volume. PTY, cancellation, timeout, orphan
+completion and routed claim retirement require their separate lifecycle controls.

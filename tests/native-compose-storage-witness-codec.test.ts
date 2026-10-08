@@ -98,6 +98,7 @@ test.each([
 test.each([
   0, 512, 1536, 2049, 8704,
 ])("witness archive length %s fails its bounded exact-member contract", (length) => {
+  expect(typeof length).toBe("number");
   expect(() =>
     verifyNativeComposeStorageWitnessArchive({
       marker,

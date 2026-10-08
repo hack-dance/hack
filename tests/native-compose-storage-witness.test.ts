@@ -166,6 +166,7 @@ test.each([
   false,
   true,
 ])("explicit adoption requires its original exact birth (changed=%s)", async (changed) => {
+  expect(typeof changed).toBe("boolean");
   const store = await fixture();
   await store.withMutation(async (mutation) => {
     const generation = await publish(mutation);
@@ -458,6 +459,7 @@ test.each([
   false,
   true,
 ])("interrupted expectation (marker written=%s) cannot be replayed after saved stop", async (written) => {
+  expect(typeof written).toBe("boolean");
   const store = await fixture();
   let savedArchive: Uint8Array = new Uint8Array();
   let oldCapability: NativeComposeStorageWitnessEnrollment | null = null;

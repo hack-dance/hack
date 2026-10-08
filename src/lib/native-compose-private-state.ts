@@ -447,7 +447,9 @@ export function createNativeComposePrivateMutationLock(opts: {
   readonly check: () => Promise<void>;
 }) {
   const { lockPath, recoveryPath, parent, check } = opts;
-  const withLock = async <T>(run: () => Promise<T>) => {
+  const withHeldLock = async <T>(
+    run: (assertHeld: () => Promise<void>) => Promise<T>
+  ) => {
     await check();
     await requireAbsentGuard(recoveryPath);
     const lockOwner = await captureLockOwner();
@@ -468,7 +470,20 @@ export function createNativeComposePrivateMutationLock(opts: {
       await lock.file.sync();
       await check();
       await requireAbsentGuard(recoveryPath);
-      return await run();
+      const assertHeld = async () => {
+        await check();
+        await recheckDirectories([lock]);
+        await requireAbsentGuard(recoveryPath);
+        const current = await readPrivate(ownerPath, LOCK_OWNER_LIMIT);
+        if (
+          ownerInfo === undefined ||
+          !sameFile(current.info, ownerInfo) ||
+          current.text !== lockToken
+        ) {
+          refuse();
+        }
+      };
+      return await run(assertHeld);
     } finally {
       try {
         await check();
@@ -491,7 +506,9 @@ export function createNativeComposePrivateMutationLock(opts: {
   };
 
   return {
-    withLock,
+    withLock: <T>(run: () => Promise<T>) => withHeldLock(() => run()),
+    /** Optional active guard binds the exact authority this invocation published. */
+    withHeldLock,
     async recoverInterruptedLock() {
       await check();
       await requireAbsentGuard(recoveryPath);

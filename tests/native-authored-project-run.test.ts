@@ -12,11 +12,13 @@ import {
   rm,
   stat,
   symlink,
+  unlink,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseNativeAuthoredReceipt } from "../src/backends/native-authored-graph-protocol.ts";
 import {
+  withNativeAuthoredProjectAdmission as admit,
   loadNativeAuthoredProjectRun as load,
   prepareNativeAuthoredProjectRunStorage as prepare,
   removeNativeAuthoredProjectRun as remove,
@@ -26,6 +28,7 @@ import {
   loadNativeProjectRun as loadCompose,
   saveNativeProjectRun as saveCompose,
 } from "../src/backends/native-project-run.ts";
+import { isRecord } from "../src/lib/guards.ts";
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -375,4 +378,325 @@ test("shared internal metadata permissions stay unchanged and branch scopes rema
   for (const invalid of ["", "bad\nbranch", "\uD800", "w".repeat(257)]) {
     await expect(load({ ...opts, branch: invalid })).rejects.toThrow("unsafe");
   }
+});
+
+test("startup admission excludes a concurrent caller and invalidates an escaped capability", async () => {
+  const opts = await fixture();
+  const entered = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  let escaped: Parameters<Parameters<typeof admit>[1]>[0] | undefined;
+  const first = admit(opts, async (admission) => {
+    escaped = admission;
+    entered.resolve();
+    await release.promise;
+    await admission.assertHeld();
+  });
+  await entered.promise;
+  await expect(admit(opts, () => Promise.resolve())).rejects.toThrow("unsafe");
+  release.resolve();
+  await first;
+  if (!escaped) {
+    throw new Error("test requires captured admission");
+  }
+  await expect(escaped.assertHeld()).rejects.toThrow("unsafe");
+  await expect(
+    escaped.reserve({ review: record().receipt.review })
+  ).rejects.toThrow("unsafe");
+  await admit(opts, (admission) => admission.assertHeld());
+});
+
+test("failed pre-publication startup retains a private hash-only intent and blocks a fresh start", async () => {
+  const opts = await fixture();
+  let intent:
+    | Awaited<ReturnType<Parameters<Parameters<typeof admit>[1]>[0]["reserve"]>>
+    | undefined;
+  await expect(
+    admit(opts, async (admission) => {
+      intent = await admission.reserve({ review: record().receipt.review });
+      throw new Error("synthetic preparation failure");
+    })
+  ).rejects.toThrow("unsafe");
+  expect(await load(opts)).toBeNull();
+  if (!intent) {
+    throw new Error("test requires reserved intent");
+  }
+  const expected = intent;
+  const root = join(opts.projectDir, ".internal", "native-authored-runs");
+  const startName = (await readdir(root)).find((name) =>
+    name.endsWith(".start.json")
+  );
+  if (!startName) {
+    throw new Error("test requires durable intent");
+  }
+  const start = join(root, startName);
+  expect((await stat(start)).mode & 0o777).toBe(0o600);
+  expect((await stat(start)).nlink).toBe(1);
+  expect(JSON.parse(await Bun.file(start).text()).record).toEqual(
+    expected.record
+  );
+  expect(JSON.stringify(expected)).not.toMatch(/values|planId|owner|boot/);
+  await admit(opts, async (admission) => {
+    expect(await admission.loadStart()).toEqual(expected);
+    await expect(
+      admission.reserve({ review: record("9".repeat(32)).receipt.review })
+    ).rejects.toThrow("unsafe");
+    await expect(save({ ...opts, record: record() })).rejects.toThrow("unsafe");
+    expect(await admission.loadStart()).toEqual(expected);
+  });
+});
+
+test("ready publication and retirement require the exact unchanged reserved review", async () => {
+  const opts = await fixture();
+  await admit(opts, async (admission) => {
+    const expectedStart = await admission.reserve({
+      review: record().receipt.review,
+    });
+    await expect(
+      admission.publish({ expectedStart, record: record("9".repeat(32)) })
+    ).rejects.toThrow("unsafe");
+    expect(await load(opts)).toBeNull();
+    expect(await admission.loadStart()).toEqual(expectedStart);
+    const expectedRun = await admission.publish({
+      expectedStart,
+      record: record(),
+    });
+    expect(await load(opts)).toEqual(expectedRun);
+    await expect(
+      remove({ ...opts, expected: expectedRun, cleaned: cleaned() })
+    ).rejects.toThrow("unsafe");
+    await expect(
+      admission.retire({ expectedStart, cleaned: cleaned() })
+    ).rejects.toThrow("unsafe");
+    await expect(
+      admission.retire({
+        expectedStart,
+        expectedRun,
+        cleaned: cleaned(receipt("9".repeat(32))),
+      })
+    ).rejects.toThrow("unsafe");
+    const changed = receipt();
+    changed.resources["container:web"].id = "9".repeat(64);
+    await expect(
+      admission.retire({
+        expectedStart,
+        expectedRun,
+        cleaned: cleaned(changed),
+      })
+    ).rejects.toThrow("unsafe");
+    expect(await load(opts)).toEqual(expectedRun);
+    expect(await admission.loadStart()).toEqual(expectedStart);
+    await admission.retire({ expectedStart, expectedRun, cleaned: cleaned() });
+    expect(await load(opts)).toBeNull();
+    expect(await admission.loadStart()).toBeNull();
+    await admission.reserve({ review: record("9".repeat(32)).receipt.review });
+  });
+});
+
+test("interrupted retirement with ready artifact removed retains the blocking startup intent", async () => {
+  const opts = await fixture();
+  await admit(opts, async (admission) => {
+    const expectedStart = await admission.reserve({
+      review: record().receipt.review,
+    });
+    const expectedRun = await admission.publish({
+      expectedStart,
+      record: record(),
+    });
+    const root = join(opts.projectDir, ".internal", "native-authored-runs");
+    const ready = (await readdir(root)).find(
+      (name) => name.endsWith(".json") && !name.endsWith(".start.json")
+    );
+    if (!ready) {
+      throw new Error("test requires ready artifact");
+    }
+    // Reproduce the durable boundary after ready unlink, before intent unlink.
+    await unlink(join(root, ready));
+    expect(await load(opts)).toBeNull();
+    expect(await admission.loadStart()).toEqual(expectedStart);
+    await expect(
+      admission.reserve({ review: record("9".repeat(32)).receipt.review })
+    ).rejects.toThrow("unsafe");
+    await expect(
+      admission.retire({ expectedStart, expectedRun, cleaned: cleaned() })
+    ).rejects.toThrow("unsafe");
+    expect(await admission.loadStart()).toEqual(expectedStart);
+    await admission.retire({ expectedStart, cleaned: cleaned() });
+    expect(await admission.loadStart()).toBeNull();
+  });
+});
+
+test("a replaced startup file or admission authority cannot publish or retire", async () => {
+  for (const replace of ["start", "owner"] as const) {
+    const opts = await fixture();
+    await expect(
+      admit(opts, async (admission) => {
+        const expectedStart = await admission.reserve({
+          review: record().receipt.review,
+        });
+        const root = join(opts.projectDir, ".internal", "native-authored-runs");
+        const name = (await readdir(root)).find((entry) =>
+          entry.endsWith(
+            replace === "start" ? ".start.json" : ".admission.lock"
+          )
+        );
+        if (!name) {
+          throw new Error("test requires admitted authority");
+        }
+        const target =
+          replace === "start" ? join(root, name) : join(root, name, "owner");
+        await Bun.write(`${target}.replacement`, await Bun.file(target).text());
+        await chmod(`${target}.replacement`, 0o600);
+        await rename(`${target}.replacement`, target);
+        await expect(
+          admission.publish({ expectedStart, record: record() })
+        ).rejects.toThrow("unsafe");
+        await expect(
+          admission.retire({ expectedStart, cleaned: cleaned() })
+        ).rejects.toThrow("unsafe");
+        expect(await load(opts)).toBeNull();
+        if (replace === "start") {
+          expect((await admission.loadStart())?.identity.ino).not.toBe(
+            expectedStart.identity.ino
+          );
+          throw new Error("retain replaced intent");
+        }
+      })
+    ).rejects.toThrow("unsafe");
+  }
+});
+
+test("stale startup caller mutation cannot publish or retire a newer run", async () => {
+  const opts = await fixture();
+  await admit(opts, async (admission) => {
+    const old = await admission.reserve({ review: record().receipt.review });
+    await admission.retire({ expectedStart: old, cleaned: cleaned() });
+    const current = await admission.reserve({
+      review: record("9".repeat(32)).receipt.review,
+    });
+    const publication = {
+      expectedStart: { record: old.record, identity: { ...old.identity } },
+      record: record("9".repeat(32)),
+    };
+    const pendingPublication = admission.publish(publication);
+    publication.expectedStart = current;
+    await expect(pendingPublication).rejects.toThrow("unsafe");
+    const retirement = {
+      expectedStart: { record: old.record, identity: { ...old.identity } },
+      cleaned: cleaned(),
+    };
+    const pendingRetirement = admission.retire(retirement);
+    retirement.expectedStart.record = current.record;
+    Object.assign(retirement.expectedStart.identity, current.identity);
+    await expect(pendingRetirement).rejects.toThrow("unsafe");
+    expect(await admission.loadStart()).toEqual(current);
+    expect(await load(opts)).toBeNull();
+  });
+});
+
+test("retained ready runs and abandoned admission locks refuse new startup", async () => {
+  const opts = await fixture();
+  const existing = await save({ ...opts, record: record() });
+  await admit(opts, async (admission) => {
+    await expect(
+      admission.reserve({ review: record("9".repeat(32)).receipt.review })
+    ).rejects.toThrow("unsafe");
+    expect(await admission.loadStart()).toBeNull();
+    expect(await load(opts)).toEqual(existing);
+  });
+  const target = await file(opts);
+  const lock = target.replace(/\.json$/, ".admission.lock");
+  await mkdir(lock, { mode: 0o700 });
+  await expect(admit(opts, () => Promise.resolve())).rejects.toThrow("unsafe");
+  expect(await readdir(lock)).toEqual([]);
+  expect(await load(opts)).toEqual(existing);
+});
+
+test("SIGKILL after startup intent leaves evidence and refuses implicit dead-owner recovery", async () => {
+  const opts = await fixture();
+  const module = new URL(
+    "../src/backends/native-authored-project-run.ts",
+    import.meta.url
+  ).pathname;
+  const script = `import { withNativeAuthoredProjectAdmission } from ${JSON.stringify(module)};
+await withNativeAuthoredProjectAdmission(${JSON.stringify(opts)}, async (admission) => {
+  await admission.reserve({review:${JSON.stringify(record().receipt.review)}});
+  console.log('intent-published');
+  await Bun.sleep(60_000);
+});`;
+  const child = Bun.spawn([process.execPath, "--eval", script], {
+    stdout: "pipe",
+    stderr: "ignore",
+    stdin: "ignore",
+  });
+  const timeout = setTimeout(() => child.kill("SIGKILL"), 3000);
+  try {
+    const reader = child.stdout.getReader();
+    try {
+      const first = await reader.read();
+      expect(new TextDecoder().decode(first.value)).toBe("intent-published\n");
+    } finally {
+      reader.releaseLock();
+    }
+    child.kill("SIGKILL");
+    await child.exited;
+    expect(child.signalCode).toBe("SIGKILL");
+    expect(await load(opts)).toBeNull();
+    const root = join(opts.projectDir, ".internal", "native-authored-runs");
+    const names = await readdir(root);
+    expect(names.filter((name) => name.endsWith(".start.json"))).toHaveLength(
+      1
+    );
+    expect(
+      names.filter((name) => name.endsWith(".admission.lock"))
+    ).toHaveLength(1);
+    await expect(admit(opts, () => Promise.resolve())).rejects.toThrow(
+      "unsafe"
+    );
+    expect(await readdir(root)).toEqual(names);
+  } finally {
+    clearTimeout(timeout);
+    if (child.exitCode === null) {
+      child.kill("SIGKILL");
+      await child.exited;
+    }
+  }
+});
+
+test("startup intent decoding is closed and malformed private content stays out of refusals", async () => {
+  const opts = await fixture();
+  await admit(opts, async (admission) => {
+    const start = await admission.reserve({ review: record().receipt.review });
+    const root = join(opts.projectDir, ".internal", "native-authored-runs");
+    const name = (await readdir(root)).find((entry) =>
+      entry.endsWith(".start.json")
+    );
+    if (!name) {
+      throw new Error("test requires intent");
+    }
+    const target = join(root, name);
+    const initial: unknown = JSON.parse(await Bun.file(target).text());
+    if (!isRecord(initial)) {
+      throw new Error("test requires startup record");
+    }
+    const canary = "private-synthetic-startup-artifact-canary";
+    for (const invalid of [
+      JSON.stringify({
+        ...initial,
+        record: { ...start.record, values: canary },
+      }),
+      `{"values":"${canary}",`,
+    ]) {
+      await Bun.write(target, invalid);
+      const error: unknown = await admission
+        .loadStart()
+        .catch((value: unknown) => value);
+      expect(error).toBeInstanceOf(Error);
+      expect(String(error)).toContain("unsafe");
+      expect(String(error)).not.toContain(canary);
+      expect(JSON.stringify(error)).not.toContain(canary);
+      await expect(
+        admission.reserve({ review: record("9".repeat(32)).receipt.review })
+      ).rejects.toThrow("unsafe");
+    }
+  });
 });

@@ -534,7 +534,7 @@ export async function recoverNativeAuthoredProject(opts: {
         );
         const mutationRun = async (
           mutationLease: NativeComposeMutationLease
-        ) => {
+        ): Promise<NativeAuthoredRecoveryResult> => {
           const both = async () => {
             remaining();
             await check();

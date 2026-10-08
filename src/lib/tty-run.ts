@@ -183,7 +183,11 @@ export async function runWithTerminalGroup(opts: {
   process.on("SIGTERM", terminate);
   process.on("SIGTSTP", suspend);
   process.on("SIGCONT", resume);
-  const disposeAbort = observeAbort(signal, terminate);
+  const disposeAbort = observeAbort(signal, () => {
+    if (cancellationCode === null) {
+      terminate();
+    }
+  });
   if (options.timeoutMs !== undefined) {
     timeout = setTimeout(() => cancel("SIGTERM", 124, true), options.timeoutMs);
   }
@@ -228,11 +232,24 @@ function observeAbort(
   signal: AbortSignal | undefined,
   cancel: () => void
 ): () => void {
-  signal?.addEventListener("abort", cancel, { once: true });
+  let active = true;
+  const onAbort = () => {
+    // The caller can abort from an earlier OS handler; preserve that dispatch's
+    // signal-specific exit code before considering generic signal cancellation.
+    queueMicrotask(() => {
+      if (active) {
+        cancel();
+      }
+    });
+  };
+  signal?.addEventListener("abort", onAbort, { once: true });
   if (signal?.aborted) {
-    cancel();
+    onAbort();
   }
-  return () => signal?.removeEventListener("abort", cancel);
+  return () => {
+    active = false;
+    signal?.removeEventListener("abort", onAbort);
+  };
 }
 
 function readAccounting(

@@ -209,6 +209,7 @@ function installSubprocessSignalForwarding(opts: {
   readonly exitCode: () => number | null;
 } {
   let exitCode: number | null = null;
+  let active = true;
   let forceKillTimer: ReturnType<typeof setTimeout> | null = null;
   const send = (signal: NodeJS.Signals): void => {
     try {
@@ -228,20 +229,30 @@ function installSubprocessSignalForwarding(opts: {
   };
   const onInterrupt = (): void => cancel("SIGINT");
   const onTerminate = (): void => cancel("SIGTERM");
+  const onAbort = (): void => {
+    // A caller's earlier OS handler may abort this signal in the same dispatch.
+    // Let the existing OS owner retain SIGINT's 130 before generic abort's 143.
+    queueMicrotask(() => {
+      if (active && exitCode === null) {
+        onTerminate();
+      }
+    });
+  };
   if (opts.forwardSignals) {
     process.on("SIGINT", onInterrupt);
     process.on("SIGTERM", onTerminate);
   }
-  opts.signal?.addEventListener("abort", onTerminate, { once: true });
+  opts.signal?.addEventListener("abort", onAbort, { once: true });
   if (opts.signal?.aborted) {
-    onTerminate();
+    onAbort();
   }
   return {
     exitCode: () => exitCode,
     dispose: () => {
+      active = false;
       process.off("SIGINT", onInterrupt);
       process.off("SIGTERM", onTerminate);
-      opts.signal?.removeEventListener("abort", onTerminate);
+      opts.signal?.removeEventListener("abort", onAbort);
       if (forceKillTimer) {
         clearTimeout(forceKillTimer);
       }

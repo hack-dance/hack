@@ -69,8 +69,12 @@ def probe(bun, program, mode):
 
         try:
             deadline = time.monotonic() + 15
+            signalled = False
             while time.monotonic() < deadline:
                 drain()
+                if mode in ['os-int', 'os-term'] and not signalled and (root / 'grandchild.pid').exists():
+                    os.kill(int((root / 'wrapper.pid').read_text()), signal.SIGINT if mode == 'os-int' else signal.SIGTERM)
+                    signalled = True
                 if (root / 'completion.json').exists() and (root / 'result.json').exists():
                     break
                 time.sleep(.01)

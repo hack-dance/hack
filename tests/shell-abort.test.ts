@@ -182,7 +182,13 @@ test("spawn admission cannot replace captured argv, env or abort signal", async 
   expect(await readFile(output, "utf8")).toBe("original");
 });
 
-for (const mode of ["pre-abort", "active-abort", "late-abort"] as const) {
+for (const mode of [
+  "pre-abort",
+  "active-abort",
+  "late-abort",
+  "os-int",
+  "os-term",
+] as const) {
   test.skipIf(!Bun.which("python3"))(
     `TTY ${mode} uses the same owned cancellation and restores foreground`,
     async () => {
@@ -206,7 +212,7 @@ for (const mode of ["pre-abort", "active-abort", "late-abort"] as const) {
       expect(stdout).not.toContain("PRIVATE_ABORT_CANARY");
       const result = JSON.parse(stdout);
       expect(result).toMatchObject({
-        code: mode === "late-abort" ? 7 : 143,
+        code: mode === "late-abort" ? 7 : mode === "os-int" ? 130 : 143,
         foregroundRestored: true,
         siblingAlive: true,
         childAlive: false,
@@ -221,13 +227,56 @@ for (const mode of ["pre-abort", "active-abort", "late-abort"] as const) {
           foreground: true,
         });
         expect(result.exit).toMatchObject({
-          cancelled: mode === "active-abort",
+          cancelled: ["active-abort", "os-int", "os-term"].includes(mode),
           timedOut: false,
         });
       }
     },
     20_000
   );
+}
+
+for (const signal of ["SIGINT", "SIGTERM"] as const) {
+  test(`pipe controller-first ${signal} preserves the OS exit code and reaps its group`, async () => {
+    const root = await mkdtemp(join(tmpdir(), "hack-shell-abort-os-"));
+    roots.push(root);
+    const child = Bun.spawn(
+      [
+        process.execPath,
+        resolve(import.meta.dir, "fixtures/shell-abort.ts"),
+        signal === "SIGINT" ? "pipe-int" : "pipe-term",
+        root,
+        "unused",
+        "unused",
+      ],
+      { stdin: "ignore", stdout: "ignore", stderr: "ignore" }
+    );
+    try {
+      const deadline = Date.now() + 3000;
+      const ready = join(root, "grandchild.pid");
+      while (!(await Bun.file(ready).exists()) && Date.now() < deadline) {
+        await Bun.sleep(10);
+      }
+      expect(await Bun.file(ready).exists()).toBe(true);
+      const group = Number(await Bun.file(join(root, "group.pid")).text());
+      groups.push(group);
+      process.kill(child.pid, signal);
+      expect(await child.exited).toBe(0);
+      const result = JSON.parse(
+        await Bun.file(join(root, "result.json")).text()
+      );
+      expect(result).toMatchObject({
+        code: signal === "SIGINT" ? 130 : 143,
+        listenersAfter: 0,
+        exit: { cancelled: true, timedOut: false },
+      });
+      expect(processAlive(-group)).toBe(false);
+      expect(processAlive(Number(await Bun.file(ready).text()))).toBe(false);
+    } finally {
+      child.kill("SIGKILL");
+      await child.exited;
+    }
+  }, 15_000);
 }
 
 function processAlive(pid: number): boolean {

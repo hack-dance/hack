@@ -57,7 +57,11 @@ sufficient ownership token. Docker [refuses removal of a referenced volume](http
 so retaining and rechecking the referencing container IDs matters.
 
 The existing default bridge network must also match its Compose labels, immutable
-ID, creation timestamp and complete selected container membership. Other authored
+ID and creation timestamp. Every retained original must configure that exact
+network ID; active endpoint membership must exactly match the running originals.
+Stopped originals remain bound through their configured network IDs even though
+Docker removes their active endpoints. This transient running state is not saved
+in the resource binding. Other authored
 network policies remain unsupported. Engine ID, resource inventories and source
 bytes are rechecked, and acquisition compares two complete private observations.
 The Docker routing environment is captured for later comparison. Queries never

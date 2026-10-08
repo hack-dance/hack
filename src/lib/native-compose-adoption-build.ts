@@ -158,11 +158,11 @@ function selectedBuilds(candidate: unknown): readonly Build[] {
     ) {
       refuse();
     }
+    const context = build.context;
     if (
       PRIVATE_PATHS.some(
         (owned) =>
-          build.context === owned.path ||
-          build.context.startsWith(`${owned.path}/`)
+          context === owned.path || context.startsWith(`${owned.path}/`)
       )
     ) {
       refuse();
@@ -177,7 +177,7 @@ function selectedBuilds(candidate: unknown): readonly Build[] {
     ) {
       refuse();
     }
-    const definitionPath = posix.join(build.context, dockerfile);
+    const definitionPath = posix.join(context, dockerfile);
     if (
       PRIVATE_PATHS.some(
         (owned) =>
@@ -187,7 +187,7 @@ function selectedBuilds(candidate: unknown): readonly Build[] {
     ) {
       refuse();
     }
-    result.push({ service, context: build.context, dockerfile, target });
+    result.push({ service, context, dockerfile, target });
   }
   if (!result.length || result.length > 16) {
     refuse();

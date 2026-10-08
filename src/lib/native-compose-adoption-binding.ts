@@ -687,7 +687,10 @@ async function acquireBinding(
     if (!source.ok) {
       refuse("E_LEGACY_COMPOSE_BINDING_UNSUPPORTED");
     }
-    const ordinary = planLegacyComposeAdoption(source);
+    const ordinary = planLegacyComposeAdoption({
+      configText: source.configText,
+      composeText: source.composeText,
+    });
     const basic =
       purpose === "basic-build" ||
       (purpose === "preparation" && !ordinary.intent);

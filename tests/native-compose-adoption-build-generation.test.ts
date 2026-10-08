@@ -29,8 +29,13 @@ async function red(pending: Promise<unknown>) {
 }
 async function prepared() {
   const store = await h.store();
-  const generation = await store.prepare({ binary: h.compiler });
-  return { store, generation };
+  try {
+    const generation = await store.prepare({ binary: h.compiler });
+    return { store, generation };
+  } catch (error: unknown) {
+    await store.close();
+    throw error;
+  }
 }
 async function assertNoAllocation() {
   const commands = await h.commands();

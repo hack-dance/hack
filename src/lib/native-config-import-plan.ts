@@ -241,7 +241,11 @@ export function mapLegacyNativeRetainedBasicBuild(opts: {
   readonly configText: string;
   readonly composeText: string;
 }): NativeImportPlan {
-  return mapLegacyNativeInput({ ...opts, purpose: "retained-basic-build" });
+  return mapLegacyNativeInput({
+    configText: opts.configText,
+    composeText: opts.composeText,
+    purpose: "retained-basic-build",
+  });
 }
 
 function mapStorageCandidate(

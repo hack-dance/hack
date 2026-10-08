@@ -122,6 +122,22 @@ test("retained pure intent does not broaden either image-only baseline API", () 
     services: { db: { build: { context: "." } } },
   });
 });
+test("retained mapper explicitly projects non-enumerable private source fields", async () => {
+  const source = await acquireLegacyAdoptionSourceInputs({ projectRoot: root });
+  if (!source.ok) {
+    throw new Error("Synthetic source setup refused; values omitted.");
+  }
+  expect(Object.keys(source)).not.toContain("composeText");
+  expect(mapLegacyNativeRetainedBasicBuild(source).candidate).toEqual(
+    mapLegacyNativeRetainedBasicBuild({
+      configText: source.configText,
+      composeText: source.composeText,
+    }).candidate
+  );
+  expect(
+    mapLegacyNativeRetainedBasicBuild(source).candidate?.services.db?.build
+  ).toEqual({ context: "." });
+});
 test("root context pins included source and keeps private proof/candidate/callbacks out of reports", async () => {
   const captured = await acquire();
   expect(Object.keys(captured)).toEqual([]);

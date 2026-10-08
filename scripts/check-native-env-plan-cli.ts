@@ -249,13 +249,13 @@ try {
   await Bun.write(join(checkout, ".hack/hack.config.json"), "{}");
   await refused([], "E_NATIVE_PROJECT_CONFLICT", checkout);
   await rm(join(checkout, ".hack/hack.config.json"));
-  const unsupported = await invoke(["up", "--json"], checkout, {
+  const unsupported = await invoke(["up", "--detach", "--json"], checkout, {
     HACK_RUNTIME_BACKEND: "native",
   });
   require(unsupported.exit !== 0 &&
     (unsupported.stdout + unsupported.stderr).includes(
       "E_NATIVE_PROJECT_UNSUPPORTED"
-    ), "explicit native VM backend remains fenced");
+    ), "unsupported native detached up refuses before input or runtime work");
   require((await readdir(home)).length === 0 &&
     !(await readdir(join(checkout, ".hack"))).some(
       (name) => name === ".internal" || name === ".branch"

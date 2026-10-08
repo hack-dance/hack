@@ -1,5 +1,5 @@
 import { createHash, randomBytes, X509Certificate } from "node:crypto";
-import { chmod, lstat, mkdir, readdir, realpath } from "node:fs/promises";
+import { chmod, lstat, mkdir, realpath } from "node:fs/promises";
 import { join } from "node:path";
 import type { Project } from "../../../packages/config-compiler/generated/native-config.ts";
 import { isRecord } from "../../../src/lib/guards.ts";
@@ -23,6 +23,10 @@ import {
   runCommand,
   type Scenario,
 } from "../harness.ts";
+import {
+  nativeRoutedDownClaimSnapshot as claimSnapshot,
+  qualifyNativeComposeRoutedDownHooks,
+} from "./native-config-routed-down-hooks.ts";
 import {
   nativeRoutedRunPinnedOriginCheck,
   qualifyNativeComposeRoutedRun,
@@ -326,28 +330,6 @@ async function runtime(root: string): Promise<Runtime | null> {
     }
     throw error;
   }
-}
-
-async function claimSnapshot(root: string): Promise<string> {
-  const names = await readdir(root).catch((error: unknown) => {
-    if (isRecord(error) && error.code === "ENOENT") {
-      return [];
-    }
-    throw error;
-  });
-  const hashes: string[] = [];
-  for (const name of names.sort()) {
-    expect({
-      that: /^[a-f0-9]{64}\.json$/.test(name),
-      message: "Fixture hostname claims must contain only complete claim files",
-    });
-    hashes.push(
-      `${name}:${createHash("sha256")
-        .update(await Bun.file(join(root, name)).text())
-        .digest("hex")}`
-    );
-  }
-  return hashes.join("\n");
 }
 
 /** Same-engine Caddy routing/TLS acceptance, with no host port, DNS or trust effects. */
@@ -931,11 +913,12 @@ export const nativeConfigRoutingScenario: Scenario = {
         const aliasDomain = `oauth-${token}.test`;
         const writeProject = async (
           checkout: Checkout,
-          projectDomain = domain
+          projectDomain = domain,
+          host?: Project["host"]
         ): Promise<void> => {
           await Bun.write(
             join(checkout.root, ".hack", "hack.project.json"),
-            `${JSON.stringify(authored({ name: fixture.name, image: bunImage, domain: projectDomain, aliasDomain, marker: checkout.marker }), null, 2)}\n`
+            `${JSON.stringify({ ...authored({ name: fixture.name, image: bunImage, domain: projectDomain, aliasDomain, marker: checkout.marker }), ...(host ? { host } : {}) }, null, 2)}\n`
           );
           for (const name of [
             "hack.config.json",
@@ -1024,15 +1007,20 @@ export const nativeConfigRoutingScenario: Scenario = {
         for (const checkout of siblings) {
           await check(checkout);
         }
-        await cli(primary.root, ["down", "--json"]);
-        await absent(hostnames(renamed));
-        for (const checkout of siblings) {
-          await check(checkout);
-        }
-        await up(primary.root);
-        await check(primary);
+        await qualifyNativeComposeRoutedDownHooks({
+          primary,
+          siblings,
+          tempRoot: privateRoot,
+          claimsRoot,
+          docker,
+          raw,
+          configure: (host) => writeProject(primary, renamedDomain, host),
+          up,
+          check,
+          absent,
+        });
         stage(
-          "primary domain replacement and down/up preserve aliases, siblings and proxy canary"
+          "routed down hooks observe retained data/live routes before stop and exact absence/held claims after; env freshness, exit17 recovery and down/up preserve sibling TLS/data/IDs"
         );
         const beforeClaims = await claimSnapshot(claimsRoot);
         const beforeConfig = createHash("sha256")

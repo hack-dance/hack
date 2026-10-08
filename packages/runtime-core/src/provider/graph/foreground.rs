@@ -17,7 +17,7 @@ mod publishers;
 pub(in crate::provider::graph) mod redelivery;
 pub use dependency_refresh::request as refresh_dependencies_request;
 mod retained_data;
-mod signals;
+pub(in crate::provider::graph) mod signals;
 #[cfg(test)]
 mod tests;
 pub(in crate::provider::graph) mod transport;

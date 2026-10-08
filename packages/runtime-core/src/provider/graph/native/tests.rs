@@ -3,13 +3,16 @@ use crate::project::native::{CompileOptions, ManagedValues};
 use std::time::{Duration, Instant};
 
 const OWNER: &str = "cccccccccccccccccccccccccccccccc";
-fn prepare(project: Value, metadata: Value, values: &ManagedValues) -> native_input::Prepared {
-    let request = serde_json::to_vec(&json!({
+fn request(project: Value, metadata: Value) -> Vec<u8> {
+    serde_json::to_vec(&json!({
         "request_version":1,"project":project.to_string(),
         "env_metadata":{"metadata_version":1,"overlay":null,"overlay_exists":false,
             "workloads":metadata,"inactive_scopes":[]}
     }))
-    .unwrap();
+    .unwrap()
+}
+fn prepare(project: Value, metadata: Value, values: &ManagedValues) -> native_input::Prepared {
+    let request = request(project, metadata);
     let namespace = "a".repeat(64);
     let run = "b".repeat(32);
     let scope = native_input::Scope {
@@ -178,19 +181,14 @@ fn omission_empty_override_and_whole_second_shutdown_remain_distinct() {
 }
 
 #[test]
-fn mutable_images_subsecond_shutdown_custom_source_and_owner_shapes_refuse() {
+fn mutable_images_subsecond_shutdown_and_owner_shapes_refuse() {
     for (pointer, value) in [
         ("/services/web/image", json!("latest")),
         ("/services/web/shutdown", json!({"grace":"1500ms"})),
         ("/services/web/shutdown", json!({"grace":"31s"})),
-        ("/source", json!({"root":"./other"})),
     ] {
         let mut project = basic();
-        if pointer == "/source" {
-            project["source"] = value;
-        } else {
-            project["services"]["web"][pointer.rsplit('/').next().unwrap()] = value;
-        }
+        project["services"]["web"][pointer.rsplit('/').next().unwrap()] = value;
         let prepared = prepare(project, json!({"web":{}}), &ManagedValues::new());
         assert_eq!(
             configuration(&prepared, OWNER).err().unwrap().code,
@@ -202,6 +200,52 @@ fn mutable_images_subsecond_shutdown_custom_source_and_owner_shapes_refuse() {
         configuration(&prepared, "owner").err().unwrap().code,
         "native_graph_admission"
     );
+}
+
+#[test]
+fn custom_source_refuses_before_native_private_preparation() {
+    let mut project = basic();
+    project["services"]["web"]["environment"] = json!({"TOKEN":{"env_ref":"TOKEN"}});
+    let metadata = json!({"web":{"TOKEN":{"scope":"global","secret":true}}});
+    let namespace = "a".repeat(64);
+    let run = "b".repeat(32);
+    let scope = native_input::Scope {
+        namespace: &namespace,
+        run: &run,
+    };
+    let valid = request(project.clone(), metadata.clone());
+    let review = native_input::review(&valid, &[], scope).unwrap();
+    project["source"] = json!({"root":"./other"});
+    let unsupported = request(project, metadata);
+    assert_eq!(
+        native_input::review(&unsupported, &[], scope)
+            .err()
+            .unwrap()
+            .code,
+        "native_graph_subset"
+    );
+    let values = BTreeMap::from([(
+        "web".into(),
+        BTreeMap::from([("TOKEN".into(), "synthetic-source-private-canary".into())]),
+    )]);
+    let before = values.clone();
+    assert_eq!(
+        native_input::prepare(native_input::PrepareOptions {
+            compile: CompileOptions {
+                request: &unsupported,
+                profiles: &[],
+                managed_values: &values,
+            },
+            scope,
+            expected_review: &review,
+            deadline: Instant::now() + Duration::from_secs(60),
+        })
+        .err()
+        .unwrap()
+        .code,
+        "native_graph_subset"
+    );
+    assert_eq!(values, before);
 }
 
 #[cfg(feature = "environment-launcher")]

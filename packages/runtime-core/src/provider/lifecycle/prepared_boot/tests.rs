@@ -140,10 +140,10 @@ fn an_abandoned_root_whose_provider_still_runs_is_kept_until_it_exits() {
     let fixture = Fixture::new("provider");
     let work = Work::create(&fixture.candidate, &fixture.store).unwrap();
     let name = Fixture::root_name(&work);
-    // Run a copied executable at the work root's exact provider path.
+    // Run an owned executable at the work root's exact provider path.
     let provider = binary(&work.candidate);
     fs::create_dir_all(provider.parent().unwrap()).unwrap();
-    fs::copy("/bin/sleep", &provider).unwrap();
+    crate::provider::test_executable::sleeping_executable(&provider);
     let mut running = std::process::Command::new(&provider)
         .arg("30")
         .spawn()

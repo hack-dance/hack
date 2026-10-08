@@ -7,6 +7,7 @@ import {
 } from "./native-stop-diagnostics.ts";
 
 const ERROR_CODE = /^[a-z][a-z0-9_]{0,63}$/;
+const NATIVE_RUN = /^[a-f0-9]{32}$/;
 interface NativeFailure {
   readonly code: string;
   readonly causeCode?: string;
@@ -72,6 +73,10 @@ export async function invokeNativeRuntime(opts: {
   readonly privateInput?: Uint8Array;
   /** Graph exec and run-service return command exit status alongside JSON. */
   readonly serviceExecResponse?: boolean;
+  /** Native authored status must finish when its owned child exits or admission is canceled. */
+  readonly boundNativeStatusDrain?: boolean;
+  /** Native source planning and journal inspection also bind pipe lifetime to their owned read child. */
+  readonly boundNativeAuthoredReadDrain?: boolean;
 }): Promise<unknown> {
   if (opts.signal?.aborted) {
     throw new NativeRuntimeRequestError({
@@ -83,6 +88,12 @@ export async function invokeNativeRuntime(opts: {
   if (
     !(
       validExecResponseSelection(opts.args, opts.serviceExecResponse) &&
+      validNativeStatusDrainSelection(opts.args, opts.boundNativeStatusDrain) &&
+      validNativeAuthoredReadDrainSelection(
+        opts.args,
+        opts.boundNativeAuthoredReadDrain,
+        opts.privateInput !== undefined
+      ) &&
       Number.isSafeInteger(timeoutMs)
     ) ||
     timeoutMs < 1 ||
@@ -108,11 +119,22 @@ export async function invokeNativeRuntime(opts: {
       stderr: "pipe",
     }
   );
-  const failureDetails = readNativeFailure(child.stderr);
+  const drain =
+    opts.boundNativeStatusDrain || opts.boundNativeAuthoredReadDrain
+      ? new AbortController()
+      : undefined;
+  let drainTimer: ReturnType<typeof setTimeout> | undefined;
+  if (drain) {
+    void child.exited.then(() => {
+      drainTimer = setTimeout(() => drain.abort(), 250);
+    });
+  }
+  const failureDetails = readNativeFailure(child.stderr, drain?.signal);
   let timedOut = false;
   let canceled = false;
   const cancel = () => {
     canceled = true;
+    drain?.abort();
     child.kill("SIGKILL");
   };
   opts.signal?.addEventListener("abort", cancel, { once: true });
@@ -121,6 +143,7 @@ export async function invokeNativeRuntime(opts: {
   }
   const timer = setTimeout(() => {
     timedOut = true;
+    drain?.abort();
     child.kill("SIGKILL");
   }, timeoutMs);
   try {
@@ -128,7 +151,7 @@ export async function invokeNativeRuntime(opts: {
       child.stdin,
       opts.privateInput
     );
-    const bytes = await readBoundedOutput(child.stdout);
+    const bytes = await readBoundedOutput(child.stdout, drain?.signal);
     const code = await child.exited;
     const failure = await failureDetails;
     if (canceled) {
@@ -156,7 +179,48 @@ export async function invokeNativeRuntime(opts: {
       child.kill("SIGKILL");
       await child.exited;
     }
+    clearTimeout(drainTimer);
+    drain?.abort();
   }
+}
+
+function validNativeStatusDrainSelection(
+  args: readonly string[],
+  selected?: boolean
+): boolean {
+  return (
+    !selected ||
+    (args.length === 8 &&
+      args[0] === "graph" &&
+      args[1] === "native" &&
+      args[2] === "control" &&
+      args[3] === "--run-id" &&
+      NATIVE_RUN.test(args[4] ?? "") &&
+      args[5] === "--action" &&
+      args[6] === "status" &&
+      args[7] === "--json")
+  );
+}
+
+function validNativeAuthoredReadDrainSelection(
+  args: readonly string[],
+  selected: boolean | undefined,
+  privateInput: boolean
+): boolean {
+  return (
+    !selected ||
+    (!privateInput &&
+      args.length === 6 &&
+      args[0] === "graph" &&
+      args[1] === "native" &&
+      args[5] === "--json" &&
+      ((args[2] === "plan" &&
+        args[3] === "--source-file" &&
+        isAbsolute(args[4] ?? "")) ||
+        (args[2] === "inspect" &&
+          args[3] === "--run-id" &&
+          NATIVE_RUN.test(args[4] ?? ""))))
+  );
 }
 
 function nativeFailureMessage(failure: NativeFailure | undefined): string {
@@ -234,11 +298,19 @@ function parseExecCompletion(bytes: Uint8Array, code: number): unknown {
 }
 
 async function readBoundedOutput(
-  stream: ReadableStream<Uint8Array>
+  stream: ReadableStream<Uint8Array>,
+  signal?: AbortSignal
 ): Promise<Uint8Array> {
   const chunks: Uint8Array[] = [];
   let total = 0;
   const reader = stream.getReader();
+  const cancel = () => {
+    void reader.cancel().catch(() => undefined);
+  };
+  signal?.addEventListener("abort", cancel, { once: true });
+  if (signal?.aborted) {
+    cancel();
+  }
   try {
     while (true) {
       const { done, value: chunk } = await reader.read();
@@ -254,6 +326,7 @@ async function readBoundedOutput(
       chunks.push(chunk);
     }
   } finally {
+    signal?.removeEventListener("abort", cancel);
     reader.releaseLock();
   }
   const result = new Uint8Array(total);

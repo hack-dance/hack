@@ -10,6 +10,7 @@ import {
 } from "./cli-result.ts";
 import { resolveComposeStartupTimeoutMs } from "./compose-startup-budget.ts";
 import { isRecord } from "./guards.ts";
+import { tryNativeAuthoredCommand } from "./native-authored-command.ts";
 import { tryLegacyComposeAdoptedCommand } from "./native-compose-adoption-command.ts";
 import {
   assertNativeComposeAfterInputsUnchanged,
@@ -105,6 +106,7 @@ import {
 import { waitNativeComposeReady } from "./native-compose-wait-ready.ts";
 import { NativeConfigCompilerError } from "./native-config-compiler.ts";
 import { nativeFilePlanningRequired } from "./native-file-plan-protocol.ts";
+import { parseEnvConfigSelection } from "./project.ts";
 import { run } from "./shell.ts";
 
 type Operation = "up" | "restart" | "down" | "ps" | "logs" | "exec" | "run";
@@ -1907,15 +1909,26 @@ function validateNativeOptions(options: NativeComposeCommandOptions): boolean {
 
 /** Dispatch native authored inputs before any legacy context or registry mutation. */
 export async function tryNativeComposeCommand(
-  options: NativeComposeCommandOptions
+  input: NativeComposeCommandOptions
 ): Promise<number | null> {
-  const adopted = await tryLegacyComposeAdoptedCommand(options);
+  // Capture the CLI selection once: explicit base is null, omission inherits.
+  // Adoption still checks the original request before authored dispatch.
+  const options = {
+    ...input,
+    overlay:
+      input.overlay === null ? null : parseEnvConfigSelection(input.overlay),
+  };
+  const adopted = await tryLegacyComposeAdoptedCommand(input);
   if (adopted !== null) {
     return adopted;
   }
   const selected = await selectNativeComposeProject(options);
   if (!selected) {
     return null;
+  }
+  const native = await tryNativeAuthoredCommand({ options, selected });
+  if (native !== null) {
+    return native;
   }
   requireNativeComposeBackend({ backend: process.env.HACK_RUNTIME_BACKEND });
   const prepare = validateNativeOptions(options);

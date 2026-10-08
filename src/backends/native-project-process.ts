@@ -1,5 +1,15 @@
+import { isAbsolute } from "node:path";
 import { isRecord } from "../lib/guards.ts";
 import {
+  type NativeAuthoredReceipt,
+  type NativeAuthoredReview,
+  parseNativeAuthoredControl,
+  parseNativeAuthoredReady,
+  parseNativeAuthoredReceipt,
+  parseNativeAuthoredReview,
+} from "./native-authored-graph-protocol.ts";
+import {
+  invokeNativeRuntime,
   type NativeRuntimeSelection,
   readNativeFailureCode,
   rethrowNativeInputFailure,
@@ -15,24 +25,188 @@ export type NativeExitDiagnostic = {
   readonly nativeCode?: string;
 };
 
+type ProcessOptions = {
+  readonly runtime: NativeRuntimeSelection;
+  readonly projectRoot: string;
+  readonly run: string;
+  readonly privateInput?: Uint8Array;
+  readonly startupTimeoutMs: number;
+  readonly signal?: AbortSignal;
+  readonly onExitDiagnostic?: (diagnostic: NativeExitDiagnostic) => void;
+};
+
 /**
  * Keep the graph owner attached to the calling CLI until owned shutdown completes.
  * Startup values travel over stdin only. Readiness is a handshake, not application
  * acceptance; the caller must inspect ownership before publishing a run mapping.
  * Aborted/failed attempts retain native recovery state and are never replayed.
  */
-export async function serveNativeProjectGraph(opts: {
-  readonly runtime: NativeRuntimeSelection;
-  readonly projectRoot: string;
-  readonly run: string;
-  readonly args: readonly string[];
-  readonly restore?: boolean;
-  readonly privateInput?: Uint8Array;
-  readonly startupTimeoutMs: number;
-  readonly signal?: AbortSignal;
-  readonly onReady: () => Promise<void>;
-  readonly onExitDiagnostic?: (diagnostic: NativeExitDiagnostic) => void;
-}): Promise<number> {
+export async function serveNativeProjectGraph(
+  opts: ProcessOptions & {
+    readonly args: readonly string[];
+    readonly restore?: boolean;
+    readonly onReady: () => Promise<void>;
+  }
+): Promise<number> {
+  return await serveGraphProcess({
+    ...opts,
+    command: [
+      "graph",
+      opts.restore ? "serve-restore" : "serve",
+      ...opts.args,
+      "--run-id",
+      opts.run,
+      "--json",
+    ],
+    readyLimit: 8192,
+    strictReady: false,
+    onReady: async (value) => {
+      if (
+        !isRecord(value) ||
+        value.kind !== "graph_foreground_ready" ||
+        value.run !== opts.run
+      ) {
+        throw new Error(
+          "Native graph readiness identity is invalid or canceled."
+        );
+      }
+      await opts.onReady();
+    },
+  });
+}
+
+/**
+ * Native authored source has its own ready/control codec. Authenticate the owner
+ * and admitted receipt before the caller can publish a mapping. The callback
+ * must recheck its input and `assertRunning` immediately before publication.
+ * Completion remains subject to exact native journal inspection by the caller.
+ */
+export async function serveNativeAuthoredProjectGraph(
+  opts: ProcessOptions & {
+    readonly sourceFile: string;
+    readonly review: NativeAuthoredReview;
+    /** Synchronous first-receipt observation before status; grants no publication authority. */
+    readonly onReceipt?: (receipt: NativeAuthoredReceipt) => undefined;
+    readonly onReady: (
+      receipt: NativeAuthoredReceipt,
+      assertRunning: () => void
+    ) => Promise<void>;
+  }
+): Promise<number> {
+  const expected = parseNativeAuthoredReview(opts.review);
+  const onReceipt = opts.onReceipt;
+  if (
+    !isAbsolute(opts.sourceFile) ||
+    expected.provenance.run !== opts.run ||
+    opts.startupTimeoutMs > 300_000
+  ) {
+    throw new Error(
+      "Native authored source selection is invalid; values omitted."
+    );
+  }
+  return await serveGraphProcess({
+    ...opts,
+    command: [
+      "graph",
+      "native",
+      "serve",
+      "--source-file",
+      opts.sourceFile,
+      "--expect-review",
+      expected.review_id,
+      "--timeout-seconds",
+      String(Math.ceil(opts.startupTimeoutMs / 1000)),
+      ...(opts.privateInput ? ["--environment-stdin"] : []),
+      "--json",
+    ],
+    readyLimit: 64 * 1024,
+    strictReady: true,
+    onReady: async (value, interrupted, ownerSignal) => {
+      const receipt = parseNativeAuthoredReady(value, expected);
+      // Give the caller an independent copy so it cannot alter status admission.
+      // Retain this membership for cleanup even when current readiness later fails.
+      const observed: unknown = onReceipt?.(
+        parseNativeAuthoredReceipt(receipt)
+      );
+      if (observed !== undefined) {
+        void Promise.resolve(observed).catch(() => undefined);
+        throw new Error(
+          "Native receipt observation must be synchronous; values omitted."
+        );
+      }
+      const status = await invokeNativeRuntime({
+        runtime: opts.runtime,
+        cwd: opts.projectRoot,
+        args: [
+          "graph",
+          "native",
+          "control",
+          "--run-id",
+          opts.run,
+          "--action",
+          "status",
+          "--json",
+        ],
+        timeoutMs: 45_000,
+        signal: ownerSignal,
+        boundNativeStatusDrain: true,
+      });
+      const current = parseNativeAuthoredControl(status, receipt, "status");
+      const assertRunning = () => {
+        if (interrupted() || !nativeSnapshotReady(current)) {
+          throw new Error(
+            "Native graph readiness identity is invalid or canceled."
+          );
+        }
+      };
+      assertRunning();
+      await opts.onReady(current.receipt, assertRunning);
+    },
+  });
+}
+
+/** Match the admitted Rust readiness conditions without starting a monitoring loop. */
+function nativeSnapshotReady(
+  current: ReturnType<typeof parseNativeAuthoredControl>
+): boolean {
+  return (
+    current.receipt.phase === "ready-observed" &&
+    current.receipt.failure === undefined &&
+    Object.entries(current.receipt.readiness).every(([name, condition]) => {
+      const observation = current.observations?.[name];
+      if (
+        !observation ||
+        observation.state === "dead" ||
+        (observation.state === "running" && observation.health === "unhealthy")
+      ) {
+        return false;
+      }
+      if (condition === "healthy") {
+        return (
+          observation.state === "running" && observation.health === "healthy"
+        );
+      }
+      const completed =
+        observation.state === "exited" && observation.code === 0;
+      return condition === "completed"
+        ? completed
+        : observation.state === "running" || completed;
+    })
+  );
+}
+
+async function serveGraphProcess(
+  opts: ProcessOptions & {
+    readonly command: readonly string[];
+    readonly readyLimit: number;
+    readonly strictReady: boolean;
+    readonly onReady: (
+      value: unknown,
+      interrupted: () => boolean,
+      ownerSignal: AbortSignal
+    ) => Promise<void>;
+  }
+): Promise<number> {
   if (
     !(RUN.test(opts.run) && Number.isSafeInteger(opts.startupTimeoutMs)) ||
     opts.startupTimeoutMs < 1 ||
@@ -54,12 +228,7 @@ export async function serveNativeProjectGraph(opts: {
       opts.runtime.binary,
       "--candidate-root",
       opts.runtime.home,
-      "graph",
-      opts.restore ? "serve-restore" : "serve",
-      ...opts.args,
-      "--run-id",
-      opts.run,
-      "--json",
+      ...opts.command,
     ],
     {
       cwd: opts.projectRoot,
@@ -73,8 +242,10 @@ export async function serveNativeProjectGraph(opts: {
   // not unrelated writers' EOF, bounds draining; final graph inspection remains
   // the caller's authority for cleanup, regardless of a successful exit code.
   const drain = new AbortController();
+  const owner = new AbortController();
   let drainTimer: ReturnType<typeof setTimeout> | undefined;
   void child.exited.then(() => {
+    owner.abort();
     drainTimer = setTimeout(() => drain.abort(), 250);
   });
   const failureCode = readNativeFailureCode(child.stderr, drain.signal);
@@ -97,6 +268,7 @@ export async function serveNativeProjectGraph(opts: {
   };
   const abort = () => {
     canceled = true;
+    owner.abort();
     terminate();
   };
   opts.signal?.addEventListener("abort", abort, { once: true });
@@ -105,6 +277,7 @@ export async function serveNativeProjectGraph(opts: {
   }
   const startupTimer = setTimeout(() => {
     timedOut = true;
+    owner.abort();
     terminate();
   }, opts.startupTimeoutMs);
   try {
@@ -115,10 +288,15 @@ export async function serveNativeProjectGraph(opts: {
     ready = await consumeGraphOutput({
       output: child.stdout,
       signal: drain.signal,
-      run: opts.run,
-      interrupted: () => canceled || timedOut || inputFailure !== undefined,
-      onReady: async () => {
-        await opts.onReady();
+      readyLimit: opts.readyLimit,
+      strictReady: opts.strictReady,
+      interrupted: () =>
+        canceled ||
+        timedOut ||
+        inputFailure !== undefined ||
+        (opts.strictReady && child.exitCode !== null),
+      onReady: async (value, interrupted) => {
+        await opts.onReady(value, interrupted, owner.signal);
         clearTimeout(startupTimer);
       },
     });
@@ -163,9 +341,13 @@ export async function serveNativeProjectGraph(opts: {
 async function consumeGraphOutput(opts: {
   readonly output: ReadableStream<Uint8Array>;
   readonly signal: AbortSignal;
-  readonly run: string;
+  readonly readyLimit: number;
+  readonly strictReady: boolean;
   readonly interrupted: () => boolean;
-  readonly onReady: () => Promise<void>;
+  readonly onReady: (
+    value: unknown,
+    interrupted: () => boolean
+  ) => Promise<void>;
 }): Promise<boolean> {
   let ready = false;
   const reader = opts.output.getReader();
@@ -195,30 +377,20 @@ async function consumeGraphOutput(opts: {
       line += decoder.decode(chunk.value, { stream: true });
       const end = line.indexOf("\n");
       if (end < 0) {
-        if (line.length > 8192) {
+        if (readyFrameSize(line, opts.strictReady) > opts.readyLimit) {
           throw new Error(
             "Native graph readiness response exceeded its budget."
           );
         }
         continue;
       }
-      let value: unknown;
-      try {
-        value = JSON.parse(line.slice(0, end));
-      } catch {
-        throw new Error("Native graph readiness response is invalid.");
-      }
       if (
-        !isRecord(value) ||
-        value.kind !== "graph_foreground_ready" ||
-        value.run !== opts.run ||
-        opts.interrupted()
+        opts.strictReady &&
+        Buffer.byteLength(line.slice(0, end)) > opts.readyLimit
       ) {
-        throw new Error(
-          "Native graph readiness identity is invalid or canceled."
-        );
+        throw new Error("Native graph readiness response exceeded its budget.");
       }
-      await opts.onReady();
+      await acceptGraphReady({ ...opts, line: line.slice(0, end) });
       ready = true;
       line = "";
     }
@@ -227,4 +399,32 @@ async function consumeGraphOutput(opts: {
     reader.releaseLock();
   }
   return ready;
+}
+
+function readyFrameSize(line: string, strict: boolean): number {
+  return strict ? Buffer.byteLength(line) : line.length;
+}
+
+async function acceptGraphReady(opts: {
+  readonly line: string;
+  readonly strictReady: boolean;
+  readonly interrupted: () => boolean;
+  readonly onReady: (
+    value: unknown,
+    interrupted: () => boolean
+  ) => Promise<void>;
+}): Promise<void> {
+  let value: unknown;
+  try {
+    value = JSON.parse(opts.line);
+  } catch {
+    throw new Error("Native graph readiness response is invalid.");
+  }
+  if (opts.interrupted()) {
+    throw new Error("Native graph readiness identity is invalid or canceled.");
+  }
+  await opts.onReady(value, opts.interrupted);
+  if (opts.strictReady && opts.interrupted()) {
+    throw new Error("Native graph readiness identity is invalid or canceled.");
+  }
 }

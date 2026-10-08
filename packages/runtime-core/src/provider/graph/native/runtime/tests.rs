@@ -1,8 +1,9 @@
 use super::*;
 use hack_config_compiler::environment::EnvMetadata;
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     os::unix::fs::{DirBuilderExt, symlink},
+    rc::Rc,
     sync::atomic::{AtomicU64, Ordering},
 };
 
@@ -89,6 +90,7 @@ impl Fixture {
             config.graph,
             Session {
                 candidate: &self.candidate,
+                startup_guard: None,
                 selected,
                 backend,
                 root,
@@ -112,6 +114,62 @@ fn basic() -> Value {
     json!({"schema_version":1,"name":"fixture","services":{"web":{"image":image(),"command":{"exec":["/bin/echo","$EXACT"]}}}})
 }
 
+#[test]
+fn foreground_guard_refuses_before_provider_connection_or_graph_reservation() {
+    let fixture = Fixture::new(basic());
+    let prepared = fixture.prepared(json!({"web":{}}), &BTreeMap::new());
+    let guard = || Err(error("native_graph_canceled", "canceled"));
+    assert_eq!(
+        run_guarded(&fixture.candidate, prepared, Some(&guard), None)
+            .unwrap_err()
+            .code,
+        "native_graph_canceled"
+    );
+    assert!(
+        !fixture
+            .candidate
+            .state_root
+            .join("run/native-graphs")
+            .exists()
+    );
+    assert!(!fixture.candidate.state_root.join("run/smolvm").exists());
+}
+
+#[test]
+fn foreground_cancellation_after_network_creation_prevents_container_effects_and_replay() {
+    let fixture = Fixture::new(basic());
+    let prepared = fixture.prepared(json!({"web":{}}), &BTreeMap::new());
+    let (graph, mut session) = fixture.session(prepared);
+    let canceled = Rc::new(Cell::new(false));
+    let check = canceled.clone();
+    let guard = || {
+        if check.get() {
+            Err(error("native_graph_canceled", "canceled"))
+        } else {
+            Ok(())
+        }
+    };
+    session.startup_guard = Some(&guard);
+    session.backend.state.borrow_mut().cancel_after_network = Some(canceled.clone());
+    assert_eq!(
+        execution::run(&graph, &mut session, Duration::from_secs(1))
+            .unwrap_err()
+            .code,
+        "native_graph_canceled"
+    );
+    assert_eq!(session.backend.state.borrow().effects, ["create:network"]);
+    assert!(session.backend.state.borrow().containers.is_empty());
+    let retained = session.backend.receipt();
+    assert_eq!(retained.resources["network:default"].phase, "created");
+    assert!(retained.resources["network:default"].id.is_some());
+    canceled.set(false);
+    assert!(execution::run(&graph, &mut session, Duration::from_secs(1)).is_err());
+    assert_eq!(session.backend.state.borrow().effects, ["create:network"]);
+    cleanup_using(&session.backend, &mut session.receipt, &session.root).unwrap();
+    assert_eq!(session.receipt.phase, Phase::Removed);
+    assert!(session.backend.state.borrow().networks.is_empty());
+}
+
 #[derive(Default)]
 struct FakeState {
     containers: BTreeMap<String, Value>,
@@ -120,9 +178,14 @@ struct FakeState {
     fail_create: bool,
     fail_start: bool,
     fail_delete: bool,
+    fail_stop: bool,
     fail_network_create: bool,
     fail_network_after_apply: bool,
     staged: Vec<String>,
+    cancel_after_network: Option<Rc<Cell<bool>>>,
+    cancel_after_stop: Option<Rc<Cell<bool>>>,
+    cancel_after_delete: Option<Rc<Cell<bool>>>,
+    cancel_on_delete_inspection: Option<Rc<Cell<bool>>>,
 }
 struct Fake {
     root: PathBuf,
@@ -168,6 +231,9 @@ impl Backend for Fake {
             let mut network = body.clone();
             network["Id"] = json!(id);
             network["Containers"] = json!({});
+            if let Some(canceled) = &state.cancel_after_network {
+                canceled.set(true);
+            }
             state.networks.insert(resource.name.clone(), network);
             if state.fail_network_after_apply {
                 return Err(error("fake_network_create_uncertain", "applied once"));
@@ -193,6 +259,11 @@ impl Backend for Fake {
             return Ok(Value::Null);
         }
         if method == Method::GET {
+            if self.receipt().phase == Phase::RemovalIntent
+                && let Some(changed) = &state.cancel_on_delete_inspection
+            {
+                changed.set(true);
+            }
             let name = path
                 .strip_prefix("/v1.53/containers/")
                 .unwrap()
@@ -291,6 +362,9 @@ impl Backend for Fake {
         for network in state.networks.values_mut() {
             network["Containers"].as_object_mut().unwrap().remove(id);
         }
+        if let Some(canceled) = &state.cancel_after_delete {
+            canceled.set(true);
+        }
         Ok(Value::Null)
     }
     fn stage(
@@ -310,11 +384,28 @@ impl Backend for Fake {
         self.state.borrow_mut().staged.push(service.into());
         Ok(())
     }
-    fn stop(&self, selected: &[(String, u64)]) -> Result<(), CandidateError> {
+    fn stop(
+        &self,
+        selected: &[(String, u64)],
+        admitted: &BTreeMap<&str, &str>,
+    ) -> Result<(), CandidateError> {
         assert_eq!(self.receipt().phase, Phase::StopIntent);
         let mut state = self.state.borrow_mut();
+        if state.fail_stop {
+            return Err(super::super::super::shutdown::stop_error(
+                crate::provider::engine::StopBatchFailure {
+                    error: error("engine_protocol", "value-free stop refusal"),
+                    failures: vec![crate::provider::engine::StopFailure {
+                        id: selected[0].0.clone(),
+                        stage: crate::error::StopFailureStage::Timeout,
+                    }],
+                },
+                admitted,
+            ));
+        }
         for (id, timeout) in selected {
             assert_eq!(*timeout, 10);
+            assert!(self.receipt().readiness.contains_key(admitted[id.as_str()]));
             let value = state
                 .containers
                 .values_mut()
@@ -324,6 +415,9 @@ impl Backend for Fake {
             value["State"]["Pid"] = json!(0);
             value["State"]["Status"] = json!("exited");
             state.effects.push(format!("stop:{id}"));
+        }
+        if let Some(canceled) = &state.cancel_after_stop {
+            canceled.set(true);
         }
         Ok(())
     }
@@ -684,6 +778,196 @@ fn cleanup_retry_keeps_observed_stop_request_for_the_same_immutable_id() {
             .count(),
         1
     );
+}
+
+#[test]
+fn cleanup_owner_guard_refuses_before_provider_connection_or_receipt_mutation() {
+    let fixture = Fixture::new(basic());
+    let guard = || Err(error("native_graph_foreground", "changed"));
+    assert_eq!(
+        cleanup_guarded(&fixture.candidate, RUN, None, Some(&guard))
+            .unwrap_err()
+            .code,
+        "native_graph_foreground"
+    );
+    assert!(!fixture.candidate.state_root.join("run/smolvm").exists());
+    let (graph, mut session) =
+        fixture.session(fixture.prepared(json!({"web":{}}), &BTreeMap::new()));
+    execution::run(&graph, &mut session, Duration::from_secs(5)).unwrap();
+    let before = session.backend.state.borrow().effects.clone();
+    assert!(
+        cleanup_using_guarded(
+            &session.backend,
+            &mut session.receipt,
+            &session.root,
+            Some(&guard)
+        )
+        .is_err()
+    );
+    assert_eq!(session.backend.state.borrow().effects, before);
+    assert_eq!(session.backend.receipt().phase, Phase::ReadyObserved);
+}
+
+#[test]
+fn native_stop_failure_keeps_reservation_and_maps_only_owned_ids_to_workload_names() {
+    let fixture = Fixture::new(basic());
+    let (graph, mut session) =
+        fixture.session(fixture.prepared(json!({"web":{}}), &BTreeMap::new()));
+    execution::run(&graph, &mut session, Duration::from_secs(5)).unwrap();
+    session.backend.state.borrow_mut().fail_stop = true;
+    let error = cleanup_using(&session.backend, &mut session.receipt, &session.root).unwrap_err();
+    let detail = error.stop_failures.as_ref().unwrap();
+    assert_eq!(detail.failures[0].service, "web");
+    assert_eq!(
+        detail.failures[0].stage,
+        crate::error::StopFailureStage::Timeout
+    );
+    let id = session.receipt.resources["container:web"]
+        .id
+        .as_ref()
+        .unwrap();
+    assert!(!serde_json::to_string(&error).unwrap().contains(id));
+    assert_eq!(session.backend.receipt().phase, Phase::StopIntent);
+    assert!(
+        !session
+            .backend
+            .state
+            .borrow()
+            .effects
+            .iter()
+            .any(|effect| effect.starts_with("delete:"))
+    );
+    session.backend.state.borrow_mut().fail_stop = false;
+    cleanup_using(&session.backend, &mut session.receipt, &session.root).unwrap();
+    assert_eq!(session.receipt.phase, Phase::Removed);
+}
+
+#[test]
+fn cleanup_owner_guard_fences_delete_after_stop_and_network_delete_after_container_removal() {
+    for after_delete in [false, true] {
+        let fixture = Fixture::new(basic());
+        let (graph, mut session) =
+            fixture.session(fixture.prepared(json!({"web":{}}), &BTreeMap::new()));
+        execution::run(&graph, &mut session, Duration::from_secs(5)).unwrap();
+        let changed = Rc::new(Cell::new(false));
+        {
+            let mut state = session.backend.state.borrow_mut();
+            if after_delete {
+                state.cancel_after_delete = Some(changed.clone());
+            } else {
+                state.cancel_after_stop = Some(changed.clone());
+            }
+        }
+        let guard = || {
+            if changed.get() {
+                Err(error("native_graph_foreground", "changed"))
+            } else {
+                Ok(())
+            }
+        };
+        assert!(
+            cleanup_using_guarded(
+                &session.backend,
+                &mut session.receipt,
+                &session.root,
+                Some(&guard)
+            )
+            .is_err()
+        );
+        assert!(
+            !session
+                .backend
+                .state
+                .borrow()
+                .effects
+                .iter()
+                .any(|effect| effect == "delete:network")
+        );
+        assert_eq!(
+            session.backend.state.borrow().containers.is_empty(),
+            after_delete
+        );
+        let (mut retained, _) = journal::load(&fixture.candidate, RUN, OWNER, BOOT).unwrap();
+        assert!(retained.terminal["container:web"].stop_requested);
+        changed.set(false);
+        session.backend.state.borrow_mut().cancel_after_stop = None;
+        session.backend.state.borrow_mut().cancel_after_delete = None;
+        cleanup_using_guarded(&session.backend, &mut retained, &session.root, Some(&guard))
+            .unwrap();
+        assert_eq!(retained.phase, Phase::Removed);
+        let effects = &session.backend.state.borrow().effects;
+        assert_eq!(
+            effects
+                .iter()
+                .filter(|effect| effect.starts_with("stop:"))
+                .count(),
+            1
+        );
+        assert_eq!(
+            effects
+                .iter()
+                .filter(|effect| *effect == "delete:web")
+                .count(),
+            1
+        );
+        assert_eq!(effects.last().unwrap(), "delete:network");
+    }
+}
+
+#[test]
+fn owner_change_during_final_terminal_inspection_refuses_container_delete() {
+    let fixture = Fixture::new(basic());
+    let (graph, mut session) =
+        fixture.session(fixture.prepared(json!({"web":{}}), &BTreeMap::new()));
+    execution::run(&graph, &mut session, Duration::from_secs(5)).unwrap();
+    let changed = Rc::new(Cell::new(false));
+    session
+        .backend
+        .state
+        .borrow_mut()
+        .cancel_on_delete_inspection = Some(changed.clone());
+    let guard = || {
+        if changed.get() {
+            Err(error("native_graph_foreground", "changed"))
+        } else {
+            Ok(())
+        }
+    };
+    assert!(
+        cleanup_using_guarded(
+            &session.backend,
+            &mut session.receipt,
+            &session.root,
+            Some(&guard)
+        )
+        .is_err()
+    );
+    assert!(changed.get());
+    assert!(
+        session
+            .backend
+            .state
+            .borrow()
+            .effects
+            .iter()
+            .all(|effect| !effect.starts_with("delete:"))
+    );
+    assert_eq!(session.backend.receipt().phase, Phase::RemovalIntent);
+    assert!(session.backend.receipt().terminal["container:web"].stop_requested);
+    changed.set(false);
+    session
+        .backend
+        .state
+        .borrow_mut()
+        .cancel_on_delete_inspection = None;
+    cleanup_using_guarded(
+        &session.backend,
+        &mut session.receipt,
+        &session.root,
+        Some(&guard),
+    )
+    .unwrap();
+    assert_eq!(session.receipt.phase, Phase::Removed);
 }
 
 #[test]

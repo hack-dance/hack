@@ -14,6 +14,11 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import {
+  resolveModernComposeEnvOverrides,
+  resolveRuntimeHostMetadataOverride,
+} from "../src/commands/project.ts";
+import { renderManagedComposeEnvOverride } from "../src/lib/compose-managed-env.ts";
 import { tryLegacyComposeAdoptedCommand } from "../src/lib/native-compose-adoption-command.ts";
 import {
   LegacyComposeAdoptedGenerationError,
@@ -22,10 +27,17 @@ import {
 import { inspectLegacyComposeAdoptionSelection } from "../src/lib/native-compose-adoption-marker.ts";
 import { previewLegacyComposeAdoption } from "../src/lib/native-compose-adoption-preview.ts";
 import {
+  defaultProjectSlugFromPath,
+  findProjectContextAtRoot,
+} from "../src/lib/project.ts";
+import { setProjectEnvValue } from "../src/lib/project-env-config.ts";
+import {
   assertLegacyProjectInputFamily,
   discoverProjectInputs,
 } from "../src/lib/project-input-selection.ts";
+import { buildRuntimeHostMetadataOverride } from "../src/lib/runtime-host-metadata.ts";
 import { restoreEnv } from "./helpers/env.ts";
+import { managedEnvCompilerFixture } from "./helpers/managed-env-compiler.ts";
 
 // Each owner workflow performs multiple bounded child probes; allow their cumulative work on shared CI hosts.
 const test = (name: string, run: () => Promise<void>) =>
@@ -224,6 +236,364 @@ async function prepared() {
     throw error;
   }
 }
+
+async function managedGenerated() {
+  const composeText = await readFile(
+    join(projectRoot, ".hack/docker-compose.yml"),
+    "utf8"
+  );
+  await mkdir(join(projectRoot, ".hack/.internal"), { recursive: true });
+  await writeFile(
+    join(projectRoot, ".hack/hack.env.default.yaml"),
+    JSON.stringify({
+      version: 1,
+      secretsprovider: "project_key",
+      values: { global: { MANAGED: CANARY, EMPTY: "" } },
+    })
+  );
+  const runtime = buildRuntimeHostMetadataOverride({
+    composeYamls: [composeText],
+    branch: null,
+    devHost: `${defaultProjectSlugFromPath(projectRoot)}.hack`,
+    aliasHost: null,
+    composeProject: "fixture",
+  });
+  const env = renderManagedComposeEnvOverride({
+    targetServices: ["db"],
+    globalEnv: { MANAGED: CANARY, EMPTY: "" },
+    serviceEnv: { db: { MANAGED: CANARY, EMPTY: "" } },
+  });
+  if (!(runtime && env)) {
+    throw new Error("Synthetic projections missing");
+  }
+  const files = [
+    join(projectRoot, ".hack/docker-compose.yml"),
+    join(projectRoot, ".hack/.internal/compose.runtime.override.yml"),
+    join(projectRoot, ".hack/.internal/compose.env.override.yml"),
+  ];
+  await writeFile(files[1] ?? "", runtime);
+  await writeFile(files[2] ?? "", env);
+  container().configFiles = files.join(",");
+  await save();
+  return files;
+}
+
+async function trackedManagedCheckout() {
+  await rm(join(projectRoot, ".git"), { recursive: true });
+  for (const args of [
+    ["init", "--quiet", "-b", "main"],
+    ["add", ".hack"],
+    [
+      "-c",
+      "user.name=Fixture",
+      "-c",
+      "user.email=fixture@example.invalid",
+      "commit",
+      "--quiet",
+      "-m",
+      "fixture",
+    ],
+  ]) {
+    const child = Bun.spawn(["/usr/bin/git", "-C", projectRoot, ...args], {
+      env: {
+        PATH: priorPath ?? "/usr/bin:/bin",
+        GIT_CONFIG_NOSYSTEM: "1",
+        GIT_CONFIG_GLOBAL: "/dev/null",
+      },
+      stdin: "ignore",
+      stdout: "ignore",
+      stderr: "ignore",
+    });
+    expect(await child.exited).toBe(0);
+  }
+  await symlink("/usr/bin/git", join(root, "git"));
+}
+
+test("v3 saved adoption consumes canonical original generated sources without env or key delivery", async () => {
+  Reflect.deleteProperty(process.env, "CI");
+  Reflect.deleteProperty(process.env, "HACK_EXECUTION_MODE");
+  await trackedManagedCheckout();
+  const files = await managedGenerated();
+  await writeFile(join(projectRoot, ".hack.secret.key"), "synthetic-v3-key");
+  await setProjectEnvValue({
+    projectRoot,
+    projectDir: join(projectRoot, ".hack"),
+    envName: null,
+    scope: "global",
+    key: "MANAGED",
+    value: CANARY,
+    secret: true,
+  });
+  const binary = await managedEnvCompilerFixture(
+    join(root, "managed-compiler")
+  );
+  expect(
+    (await previewLegacyComposeAdoption({ projectRoot, binary })).complete
+  ).toBe(true);
+  const store = await openLegacyComposeAdoptedGenerationStore({ projectRoot });
+  try {
+    const generation = await store.prepare({ binary });
+    expect(generation.report.adoption_generation_version).toBe(3);
+    const receipt = JSON.parse(
+      await readFile(join(stateRoot(), "receipt.json"), "utf8")
+    );
+    expect(receipt.adoption_receipt_version).toBe(3);
+    const metaText = await readFile(
+      await artifactPath("manifest.json"),
+      "utf8"
+    );
+    const meta = JSON.parse(metaText);
+    expect(meta.adoption_generation_version).toBe(3);
+    expect(meta.binding.composeFiles).toEqual(files);
+    expect(metaText).not.toContain('"MANAGED"');
+    expect(JSON.stringify(generation)).not.toContain(
+      meta.projectionProof.managedRevision
+    );
+    await store.publish({ generation, binary });
+    await store.close();
+    await rm(join(projectRoot, ".hack.secret.key"));
+    await mkdir(join(projectRoot, ".hack.secret.key"));
+    const savedStore = await openLegacyComposeAdoptedGenerationStore({
+      projectRoot,
+      mode: "saved",
+    });
+    try {
+      const active = await savedStore.loadActive();
+      if (!active) {
+        throw new Error("Expected active adopted generation");
+      }
+      expect(active.report.adoption_generation_version).toBe(3);
+      await savedStore.withLease({
+        generation: active,
+        run: async (input) => {
+          expect(input.binding.containers[0]?.id).toBe(ID);
+          expect(input.binding.volumes[0]?.createdAt).toBe(CREATED);
+          expect(JSON.stringify(input)).toBe("{}");
+        },
+      });
+      await savedStore.rollback();
+      expect(await readFile(files[0] ?? "", "utf8")).toContain("name: fixture");
+      expect(await readFile(files[2] ?? "", "utf8")).toContain(CANARY);
+      expect(await inspectLegacyComposeAdoptionSelection({ projectRoot })).toBe(
+        "rolled-back"
+      );
+    } finally {
+      await savedStore.close();
+    }
+  } finally {
+    await store.close();
+  }
+});
+
+test("v3 raw managed drift fences saved execution and preserves the original stopped IDs", async () => {
+  Reflect.deleteProperty(process.env, "CI");
+  Reflect.deleteProperty(process.env, "HACK_EXECUTION_MODE");
+  await trackedManagedCheckout();
+  await managedGenerated();
+  const binary = await managedEnvCompilerFixture(
+    join(root, "managed-compiler")
+  );
+  const store = await openLegacyComposeAdoptedGenerationStore({ projectRoot });
+  try {
+    const generation = await store.prepare({ binary });
+    await store.publish({ generation, binary });
+    const path = join(projectRoot, ".hack/hack.env.default.yaml");
+    await writeFile(path, `${await readFile(path, "utf8")}\n`);
+    let effects = 0;
+    await refusal(
+      store.withLease({
+        generation,
+        run: async () => {
+          effects++;
+        },
+      })
+    );
+    expect(effects).toBe(0);
+    expect(container().id).toBe(ID);
+    expect(volume().createdAt).toBe(CREATED);
+    expect(await inspectLegacyComposeAdoptionSelection({ projectRoot })).toBe(
+      "active"
+    );
+  } finally {
+    await store.close();
+  }
+});
+
+boundedTest(
+  "v3 linked saved proof preserves overlay, primary/current precedence, tombstones and original rollback",
+  async () => {
+    await linkedCheckout();
+    const primary = join(root, "checkout");
+    await writeFile(
+      join(projectRoot, ".hack/hack.config.json"),
+      JSON.stringify({
+        name: "fixture",
+        env: { default_overlay: "qa" },
+        worktree: { auto_branch: false },
+      })
+    );
+    await managedGenerated();
+    const layer = async (
+      selectedRoot: string,
+      filename: string,
+      values: Record<string, string | null>
+    ) =>
+      await writeFile(
+        join(selectedRoot, ".hack", filename),
+        JSON.stringify({
+          version: 1,
+          secretsprovider: "project_key",
+          values: { global: values },
+        })
+      );
+    await layer(projectRoot, "hack.env.qa.yaml", {
+      ORDER: "overlay",
+      DROP: "overlay",
+    });
+    await layer(primary, "hack.env.local.yaml", {
+      ORDER: "primary",
+      PRIMARY: "primary",
+    });
+    await layer(primary, "hack.env.qa.local.yaml", {
+      ORDER: "primary-qa",
+      PRIMARY_QA: "primary-qa",
+    });
+    await layer(projectRoot, "hack.env.local.yaml", {
+      ORDER: "current",
+      CURRENT: "current",
+    });
+    await layer(projectRoot, "hack.env.qa.local.yaml", {
+      ORDER: "current-qa",
+      DROP: null,
+      EMPTY: "",
+    });
+    const project = await findProjectContextAtRoot({
+      projectRoot,
+      projectDirName: ".hack",
+    });
+    if (!project) {
+      throw new Error("Expected canonical linked context");
+    }
+    await resolveRuntimeHostMetadataOverride({
+      project,
+      composeFiles: [project.composeFile],
+      branch: null,
+      devHost: `${defaultProjectSlugFromPath(projectRoot)}.hack`,
+      aliasHost: null,
+      composeProject: "fixture",
+    });
+    const delivery = await resolveModernComposeEnvOverrides({
+      project,
+      targetServices: ["db"],
+      allServiceNames: ["db"],
+    });
+    expect(delivery?.env.ORDER).toBe("current-qa");
+    expect(delivery?.env.DROP).toBeUndefined();
+    expect(delivery?.env.EMPTY).toBe("");
+    const binary = await managedEnvCompilerFixture(
+      join(root, "managed-compiler")
+    );
+    const store = await openLegacyComposeAdoptedGenerationStore({
+      projectRoot,
+    });
+    try {
+      const generation = await store.prepare({ binary });
+      await store.publish({ generation, binary });
+      await store.withLease({
+        generation,
+        run: async (input) => {
+          expect(input.binding.volumes[0]?.createdAt).toBe(CREATED);
+        },
+      });
+      const path = join(primary, ".hack/hack.env.qa.local.yaml");
+      const original = await readFile(path, "utf8");
+      await writeFile(path, `${original}\n`);
+      let effects = 0;
+      await refusal(
+        store.withLease({
+          generation,
+          run: async () => {
+            effects++;
+          },
+        })
+      );
+      expect(effects).toBe(0);
+      await writeFile(path, original);
+      await store.rollback();
+      expect(container().id).toBe(ID);
+      expect(volume().createdAt).toBe(CREATED);
+      expect(
+        await readFile(join(primary, ".hack/docker-compose.yml"), "utf8")
+      ).toContain("name: fixture");
+    } finally {
+      await store.close();
+    }
+  },
+  240_000
+);
+
+boundedTest(
+  "v3 source race after a preparation effect retains pending stop evidence and needs exact raw repair",
+  async () => {
+    Reflect.deleteProperty(process.env, "CI");
+    Reflect.deleteProperty(process.env, "HACK_EXECUTION_MODE");
+    await trackedManagedCheckout();
+    await managedGenerated();
+    const binary = await managedEnvCompilerFixture(
+      join(root, "managed-compiler")
+    );
+    const store = await openLegacyComposeAdoptedGenerationStore({
+      projectRoot,
+    });
+    const path = join(projectRoot, ".hack/hack.env.default.yaml");
+    const original = await readFile(path, "utf8");
+    try {
+      const generation = await store.prepare({ binary });
+      await refusal(
+        store.withPreparationStop({
+          generation,
+          binary,
+          run: async () => {
+            await writeFile(path, `${original}\n`);
+            return 0;
+          },
+        })
+      );
+      expect(await inspectLegacyComposeAdoptionSelection({ projectRoot })).toBe(
+        "pending"
+      );
+      let effects = 0;
+      await refusal(
+        store.withPreparationStop({
+          generation,
+          binary,
+          recover: true,
+          run: async () => {
+            effects++;
+            return 0;
+          },
+        })
+      );
+      expect(effects).toBe(0);
+      await writeFile(path, original);
+      expect(
+        await store.withPreparationStop({
+          generation,
+          binary,
+          recover: true,
+          run: async () => 0,
+        })
+      ).toBe(0);
+      await store.publish({ generation, binary });
+      await store.rollback();
+      expect(container().id).toBe(ID);
+      expect(volume().createdAt).toBe(CREATED);
+    } finally {
+      await store.close();
+    }
+  },
+  60_000
+);
 async function artifactPath(name: string) {
   const receipt = JSON.parse(
     await readFile(join(stateRoot(), "receipt.json"), "utf8")

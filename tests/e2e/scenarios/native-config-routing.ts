@@ -37,6 +37,7 @@ const PROJECT_LABEL = "com.docker.compose.project";
 const SERVICE_LABEL = "com.docker.compose.service";
 const OWNER_LABEL = "io.hack.native-config.owner";
 const INSTANCE_LABEL = "io.hack.native-config.instance";
+const STORAGE_LABEL = "io.hack.native-config.storage";
 const FIXTURE_LABEL = "hack.e2e.native-config-routing-owner";
 const ROOT_CA = "/data/caddy/pki/authorities/local/root.crt";
 const PROXY_PROJECT = "hack-dev-proxy";
@@ -74,6 +75,111 @@ type Runtime = {
   readonly needsDown: boolean;
 };
 type Checkout = { readonly root: string; readonly marker: string };
+type VolumePin = { readonly name: string; readonly createdAt: string };
+
+async function expectedVolumeName(
+  root: string,
+  owner: Runtime
+): Promise<string> {
+  const store = await openNativeComposeGenerationStore({
+    projectRoot: root,
+    instance: null,
+    mode: "saved",
+  });
+  try {
+    const generation = (await store.loadCurrent()).generation;
+    if (
+      !generation ||
+      store.identity.composeProject !== owner.composeProject ||
+      store.identity.ownerToken !== owner.ownerToken
+    ) {
+      throw new Error("Saved fixture storage identity is unavailable");
+    }
+    return await store.withLease({
+      generation,
+      run: async () => {
+        const document = await store.readGenerationDocument(generation);
+        if (
+          !(
+            isRecord(document.volumes) &&
+            Object.keys(document.volumes).join() === "state" &&
+            isRecord(document.volumes.state) &&
+            typeof document.volumes.state.name === "string"
+          )
+        ) {
+          throw new Error(
+            "Fixture requires exactly its declared physical state volume"
+          );
+        }
+        return document.volumes.state.name;
+      },
+    });
+  } finally {
+    await store.close();
+  }
+}
+
+export function nativeRoutingFixtureVolumeMatches(opts: {
+  readonly value: unknown;
+  readonly name: string;
+  readonly owner: Pick<Runtime, "composeProject" | "ownerToken">;
+}): boolean {
+  const { value, name, owner } = opts;
+  return (
+    isRecord(value) &&
+    value.name === name &&
+    typeof value.createdAt === "string" &&
+    Number.isFinite(Date.parse(value.createdAt)) &&
+    isRecord(value.labels) &&
+    value.labels[OWNER_LABEL] === owner.ownerToken &&
+    value.labels[INSTANCE_LABEL] === owner.composeProject &&
+    value.labels[PROJECT_LABEL] === owner.composeProject &&
+    value.labels[STORAGE_LABEL] === "state"
+  );
+}
+
+async function observedVolume(
+  name: string,
+  owner: Runtime,
+  docker: Docker
+): Promise<VolumePin> {
+  const value = object(
+    await docker([
+      "volume",
+      "inspect",
+      name,
+      "--format",
+      '{"name":{{json .Name}},"createdAt":{{json .CreatedAt}},"labels":{{json .Labels}}}',
+    ])
+  );
+  expect({
+    that: nativeRoutingFixtureVolumeMatches({ value, name, owner }),
+    message:
+      "Fixture storage requires the exact declared name, creation identity and logical storage owner",
+  });
+  if (typeof value.createdAt !== "string") {
+    throw new Error("Missing fixture volume creation identity");
+  }
+  return { name, createdAt: value.createdAt };
+}
+
+export function nativeRoutingFixtureVolumeSelectionMatches(
+  resources: readonly string[],
+  pin: VolumePin | undefined
+): boolean {
+  return resources.length <= 1 && resources.every((name) => name === pin?.name);
+}
+
+function volumeSelection(
+  resources: readonly string[],
+  pin: VolumePin | undefined
+): void {
+  expect({
+    that: nativeRoutingFixtureVolumeSelectionMatches(resources, pin),
+    message:
+      "Refuse extra or unpinned same-project volumes before any fixture deletion",
+  });
+}
 
 function object(text: string): Record<string, unknown> {
   const value: unknown = JSON.parse(text);
@@ -344,6 +450,7 @@ export const nativeConfigRoutingScenario: Scenario = {
     const attempted = new Set<string>();
     const successfulStarts = new Set<string>();
     const knownOwners = new Map<string, Runtime>();
+    const volumePins = new Map<string, VolumePin>();
     const env = {
       HACK_RUNTIME_BACKEND: "compose",
       HACK_DAEMON_DISABLE_DOCKER_EVENTS: "1",
@@ -577,6 +684,20 @@ export const nativeConfigRoutingScenario: Scenario = {
       const owner = await runtime(root);
       if (owner) {
         knownOwners.set(root, owner);
+        const pin = await observedVolume(
+          await expectedVolumeName(root, owner),
+          owner,
+          docker
+        );
+        const previous = volumePins.get(root);
+        expect({
+          that:
+            previous === undefined ||
+            JSON.stringify(previous) === JSON.stringify(pin),
+          message:
+            "Every fixture restart must preserve the pinned physical volume creation identity",
+        });
+        volumePins.set(root, pin);
       }
     };
     const list = (
@@ -619,7 +740,8 @@ export const nativeConfigRoutingScenario: Scenario = {
     const cleanupResource = async (
       owner: Runtime,
       kind: "container" | "network" | "volume",
-      id: string
+      id: string,
+      pin: VolumePin | undefined
     ): Promise<void> => {
       const labels = object(
         await docker([
@@ -639,8 +761,17 @@ export const nativeConfigRoutingScenario: Scenario = {
           "Cleanup refuses any resource outside exact native fixture ownership",
       });
       if (kind === "volume") {
-        // Product down retains data. Only exact labels of this disposable,
-        // fully stopped fixture permit non-forced volume cleanup here.
+        expect({
+          that:
+            pin !== undefined &&
+            id === pin.name &&
+            JSON.stringify(await observedVolume(id, owner, docker)) ===
+              JSON.stringify(pin),
+          message:
+            "Fixture volume cleanup refuses name, logical storage or creation-identity drift",
+        });
+        // Non-forced deletion follows a fresh exact creation/owner inspection;
+        // Docker also refuses a volume attached to any remaining container.
         await docker(["volume", "rm", id]);
       }
     };
@@ -659,8 +790,12 @@ export const nativeConfigRoutingScenario: Scenario = {
         const resources = (await list(owner, kind))
           .split(/\s+/)
           .filter(Boolean);
+        const pin = volumePins.get(root);
+        if (kind === "volume") {
+          volumeSelection(resources, pin);
+        }
         for (const id of resources) {
-          await cleanupResource(owner, kind, id);
+          await cleanupResource(owner, kind, id, pin);
         }
         expect({
           that: (await list(owner, kind)) === "",

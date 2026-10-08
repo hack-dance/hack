@@ -2,6 +2,10 @@ import { isRecord } from "./guards.ts";
 import { literalComposeArg } from "./native-config-import-argv.ts";
 import { mapLegacyComposeBuild } from "./native-config-import-build.ts";
 import {
+  mapLegacyComposeFileDeclaration,
+  mapLegacyComposeFileGrant,
+} from "./native-config-import-files.ts";
+import {
   legacyComposeJobNames,
   legacyComposeOneShotMarker,
 } from "./native-config-import-jobs.ts";
@@ -196,6 +200,9 @@ function mapLegacyNativeInput(opts: {
     refuse,
     purpose: opts.purpose,
   });
+  if (opts.purpose === "preview") {
+    mapFileCandidate({ compose: compose.value, candidate, mark, refuse });
+  }
   if (opts.purpose === "storage-adoption") {
     mapStorageCandidate({
       config: config.value,
@@ -257,7 +264,10 @@ function mapOwnedNetwork(
 }
 
 function candidateWorkload(candidate: Record<string, unknown>, name: string) {
-  for (const namespace of [candidate.services, candidate.jobs]) {
+  for (const key of ["services", "jobs"]) {
+    const namespace = Object.hasOwn(candidate, key)
+      ? candidate[key]
+      : undefined;
     if (isRecord(namespace) && Object.hasOwn(namespace, name)) {
       return namespace[name];
     }
@@ -275,7 +285,10 @@ function workloadTarget(
     return target;
   }
   const name = target.slice(prefix.length).split("/")[0];
-  return name && isRecord(candidate.jobs) && Object.hasOwn(candidate.jobs, name)
+  return name &&
+    Object.hasOwn(candidate, "jobs") &&
+    isRecord(candidate.jobs) &&
+    Object.hasOwn(candidate.jobs, name)
     ? target.replace(prefix, "/jobs/")
     : target;
 }
@@ -292,7 +305,7 @@ export function mapLegacyNativeImport(opts: {
   });
 }
 
-/** Retained resource planning must not inherit preview-only build or job authority. */
+/** Retained resource planning must not inherit preview-only build, file or job authority. */
 export function mapLegacyNativeAdoptionBaseline(opts: {
   readonly configText: string;
   readonly composeText: string;
@@ -310,6 +323,155 @@ export function mapLegacyNativeStorageAdoption(opts: {
     composeText: opts.composeText,
     purpose: "storage-adoption",
   });
+}
+
+type FileMappingContext = Pick<MappingContext, "candidate" | "mark" | "refuse">;
+
+function mapFileDeclarations(
+  opts: FileMappingContext & {
+    readonly namespace: string;
+    readonly source: unknown;
+  }
+): void {
+  const { namespace, source } = opts;
+  if (!isRecord(source)) {
+    opts.refuse("compose", `/${namespace}`, "invalid_file_declarations");
+    return;
+  }
+  const definitions: Record<string, unknown> = Object.create(null);
+  opts.mark("compose", `/${namespace}`, `/${namespace}`);
+  for (const [name, raw] of Object.entries(source)) {
+    const pointer = importPointer(`/${namespace}`, name);
+    const declaration = mapLegacyComposeFileDeclaration(raw);
+    if (!NAME.test(name) || name.length > 63 || !declaration) {
+      opts.refuse(
+        "compose",
+        pointer,
+        "invalid_or_unsupported_file_declaration"
+      );
+      continue;
+    }
+    definitions[name] = declaration;
+    opts.mark("compose", pointer, pointer);
+    opts.mark(
+      "compose",
+      importPointer(pointer, "file"),
+      importPointer(pointer, "file"),
+      "compose_file_source_rebased"
+    );
+  }
+  Object.defineProperty(opts.candidate, namespace, {
+    value: definitions,
+    enumerable: true,
+    configurable: true,
+    writable: true,
+  });
+}
+
+function mapFileGrantEntries(
+  opts: FileMappingContext & {
+    readonly kind: "config" | "secret";
+    readonly grants: unknown;
+    readonly pointer: string;
+    readonly targetPointer: string;
+    readonly mounts: unknown[];
+  }
+): void {
+  if (!Array.isArray(opts.grants)) {
+    opts.refuse("compose", opts.pointer, "invalid_file_grants");
+    return;
+  }
+  opts.mark(
+    "compose",
+    opts.pointer,
+    `${opts.targetPointer}/mounts`,
+    "compose_explicit_file_grants"
+  );
+  for (const [index, raw] of opts.grants.entries()) {
+    const entryPointer = importPointer(opts.pointer, index);
+    const mapped = mapLegacyComposeFileGrant({ kind: opts.kind, value: raw });
+    if (!mapped) {
+      opts.refuse("compose", entryPointer, "invalid_or_unsupported_file_grant");
+      continue;
+    }
+    const target = `${opts.targetPointer}/mounts/${opts.mounts.length}`;
+    opts.mounts.push(mapped.grant);
+    for (const field of mapped.fields) {
+      opts.mark(
+        "compose",
+        field.source === ""
+          ? entryPointer
+          : importPointer(entryPointer, field.source),
+        field.target === "" ? target : importPointer(target, field.target),
+        field.code
+      );
+    }
+  }
+}
+
+function mapServiceFileGrants(
+  opts: FileMappingContext & {
+    readonly name: string;
+    readonly source: Record<string, unknown>;
+    readonly service: Record<string, unknown>;
+  }
+): void {
+  const hasExistingMounts = Object.hasOwn(opts.service, "mounts");
+  const existingMounts = hasExistingMounts ? opts.service.mounts : undefined;
+  const servicePointer = importPointer("/services", opts.name);
+  const targetPointer = workloadTarget(opts.candidate, servicePointer);
+  if (hasExistingMounts && !Array.isArray(existingMounts)) {
+    opts.refuse("compose", servicePointer, "invalid_existing_mount_projection");
+    return;
+  }
+  const mounts: unknown[] = Array.isArray(existingMounts)
+    ? [...existingMounts]
+    : [];
+  for (const kind of ["config", "secret"] as const) {
+    const namespace = `${kind}s`;
+    if (Object.hasOwn(opts.source, namespace)) {
+      mapFileGrantEntries({
+        ...opts,
+        kind,
+        grants: opts.source[namespace],
+        pointer: importPointer(servicePointer, namespace),
+        targetPointer,
+        mounts,
+      });
+    }
+  }
+  if (mounts.length > 0) {
+    Object.defineProperty(opts.service, "mounts", {
+      value: mounts,
+      enumerable: true,
+      configurable: true,
+      writable: true,
+    });
+  }
+}
+
+function mapFileCandidate(
+  opts: FileMappingContext & { readonly compose: Record<string, unknown> }
+): void {
+  for (const namespace of ["configs", "secrets"]) {
+    if (Object.hasOwn(opts.compose, namespace)) {
+      mapFileDeclarations({
+        ...opts,
+        namespace,
+        source: opts.compose[namespace],
+      });
+    }
+  }
+  const sources = opts.compose.services;
+  if (!isRecord(sources)) {
+    return;
+  }
+  for (const [name, source] of Object.entries(sources)) {
+    const service = candidateWorkload(opts.candidate, name);
+    if (isRecord(source) && isRecord(service)) {
+      mapServiceFileGrants({ ...opts, name, source, service });
+    }
+  }
 }
 
 function mapStorageCandidate(

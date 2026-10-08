@@ -82,6 +82,8 @@ pub struct PendingEnvironment {
 /// Expiry blocks verification/use; explicit removal or VM shutdown reclaims the tmpfs.
 pub struct EnvironmentLease {
     pub(super) graph: Option<super::environment_recovery::GraphBinding>,
+    #[cfg(feature = "native-config-plan")]
+    pub(super) native: Option<super::native_environment::Binding>,
     pub(super) service: String,
     pub(super) uid: u32,
     pub(super) gid: u32,
@@ -89,6 +91,11 @@ pub struct EnvironmentLease {
     pub(super) incarnation: String,
     pub(super) boot: String,
     deadline: Instant,
+}
+enum Binding {
+    Compose(Option<super::environment_recovery::GraphBinding>),
+    #[cfg(feature = "native-config-plan")]
+    Native(super::native_environment::Binding),
 }
 impl PendingEnvironment {
     pub(super) fn with_identity(mut self, uid: u32, gid: u32) -> Self {
@@ -180,6 +187,21 @@ impl PendingEnvironment {
         guest: &OwnedGuest<'_>,
         graph: Option<super::environment_recovery::GraphBinding>,
     ) -> Result<EnvironmentLease, CandidateError> {
+        self.stage_binding(guest, Binding::Compose(graph))
+    }
+    #[cfg(feature = "native-config-plan")]
+    pub(super) fn stage_native(
+        self,
+        guest: &OwnedGuest<'_>,
+        binding: super::native_environment::Binding,
+    ) -> Result<EnvironmentLease, CandidateError> {
+        self.stage_binding(guest, Binding::Native(binding))
+    }
+    fn stage_binding(
+        self,
+        guest: &OwnedGuest<'_>,
+        binding: Binding,
+    ) -> Result<EnvironmentLease, CandidateError> {
         guest.require_allocation()?;
         remaining(self.deadline)?;
         preflight_capacity(guest, 1)?;
@@ -190,8 +212,23 @@ impl PendingEnvironment {
             .and_then(|mut f| f.read_exact(&mut random))
             .map_err(|_| error("environment_identity"))?;
         let token: String = random.iter().map(|b| format!("{b:02x}")).collect();
+        #[cfg(feature = "native-config-plan")]
+        let native = match &binding {
+            Binding::Native(binding) => Some(binding.clone()),
+            _ => None,
+        };
+        #[cfg(feature = "native-config-plan")]
+        let graph = match binding {
+            Binding::Compose(graph) => graph,
+            #[cfg(feature = "native-config-plan")]
+            Binding::Native(_) => None,
+        };
+        #[cfg(not(feature = "native-config-plan"))]
+        let Binding::Compose(graph) = binding;
         let lease = EnvironmentLease {
             graph,
+            #[cfg(feature = "native-config-plan")]
+            native,
             uid: self.uid,
             gid: self.gid,
             service: self.service,
@@ -200,6 +237,13 @@ impl PendingEnvironment {
             boot: guest.boot_id().into(),
             deadline: self.deadline,
         };
+        #[cfg(feature = "native-config-plan")]
+        if lease.native.is_some() {
+            super::native_environment::record(candidate, guest, &lease)?;
+        } else {
+            super::environment_recovery::record(candidate, &lease)?;
+        }
+        #[cfg(not(feature = "native-config-plan"))]
         super::environment_recovery::record(candidate, &lease)?;
         let seconds = remaining(lease.deadline)?;
         let result = guest.execute(
@@ -221,8 +265,7 @@ impl PendingEnvironment {
             .is_ok_and(|value| value == "environment-staged-v1\n")
         {
             // Identity-checked removal also handles a partially written payload. Never expose output.
-            let _ =
-                super::environment_recovery::retire(candidate, guest, &lease.slot, Some(&lease));
+            let _ = lease.remove_with_guest(guest);
             return Err(CandidateError::new(
                 "environment_stage_uncertain",
                 format!(
@@ -232,8 +275,7 @@ impl PendingEnvironment {
             ));
         }
         if remaining(lease.deadline).is_err() {
-            let _ =
-                super::environment_recovery::retire(candidate, guest, &lease.slot, Some(&lease));
+            let _ = lease.remove_with_guest(guest);
             return Err(error("environment_expired"));
         }
         Ok(lease)
@@ -303,6 +345,15 @@ impl EnvironmentLease {
     }
     pub(super) fn remove_with_guest(&self, guest: &OwnedGuest<'_>) -> Result<(), CandidateError> {
         self.matches_guest(guest)?;
+        #[cfg(feature = "native-config-plan")]
+        if self.native.is_some() {
+            return super::native_environment::retire(
+                guest.candidate(),
+                guest,
+                &self.slot,
+                Some(self),
+            );
+        }
         super::environment_recovery::retire(guest.candidate(), guest, &self.slot, Some(self))
     }
     fn matches_guest(&self, guest: &OwnedGuest<'_>) -> Result<(), CandidateError> {

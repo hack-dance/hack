@@ -20,6 +20,7 @@ import {
   buildNativeComposeImages,
   NativeComposeBuildError,
   type NativeComposeBuildIntent,
+  planNativeComposeBuilds,
   prepareNativeComposeBuildExecution,
 } from "./native-compose-build.ts";
 import {
@@ -33,6 +34,7 @@ import {
   type NativeComposeGenerationStore,
   type NativeComposeMutation,
   type NativeComposeReservation,
+  type NativeComposeRunProjection,
   openNativeComposeGenerationStore,
 } from "./native-compose-generation.ts";
 import {
@@ -60,11 +62,18 @@ import {
 import { NativeComposeRouteClaimError } from "./native-compose-route-claims.ts";
 import {
   type NativeComposeRoutingOwner,
+  type NativeComposeSavedRunRouting,
   prepareNativeComposeRouteOwner,
+  prepareNativeComposeSavedRunRouting,
   readNativeComposeRouteMetadata,
   releaseNativeComposeSavedRoutes,
 } from "./native-compose-route-owner.ts";
 import { NativeComposeRoutingError } from "./native-compose-routing.ts";
+import {
+  assertNativeComposeOneOffUnexposed,
+  nativeComposeRunContainerIdentity,
+  nativeComposeRunSourceMatches,
+} from "./native-compose-run-projection.ts";
 import {
   requireNativeComposeBackend,
   selectNativeComposeProject,
@@ -142,19 +151,69 @@ function refuseRoutedRun(): never {
   throw new HackCliError({
     code: "E_NATIVE_PROJECT_UNSUPPORTED",
     message:
-      "Native Compose run with routing requires qualified one-off label projection. Use up or restart for this project; no engine operation ran.",
+      "Routed native Compose run requires an already-ready saved instance. Run up first; no hook or engine operation ran.",
   });
 }
-function assertSavedRunUnrouted(
+function assertRoutedRunAvailable(
   options: NativeComposeCommandOptions,
-  previous: Awaited<ReturnType<typeof savedRouteDocuments>>
+  current: Awaited<ReturnType<NativeComposeGenerationStore["loadCurrent"]>>,
+  previous: Awaited<ReturnType<typeof savedRouteDocuments>>,
+  selected: boolean
 ): void {
+  const retained = previous.some(
+    (saved) => readNativeComposeRouteMetadata(saved) !== null
+  );
   if (
     options.operation === "run" &&
-    previous.some((saved) => readNativeComposeRouteMetadata(saved) !== null)
+    (selected || retained) &&
+    (current.stopped || current.generation === null || !retained)
   ) {
     refuseRoutedRun();
   }
+}
+
+function routedRunEffectOwnership(opts: {
+  readonly selection: NativeComposeOwnershipOptions;
+  readonly generation: NativeComposeGeneration;
+  readonly document: PrivateDocument;
+  readonly service: string;
+  readonly routing: NativeComposeSavedRunRouting;
+}) {
+  let before: string | null = null;
+  return {
+    assertOwned: async () => {
+      const observed = await assertNativeComposeOwned(opts.selection);
+      if (
+        !(
+          ready(opts.document, observed, opts.generation) &&
+          nativeComposeRunDependenciesReady(
+            opts.document,
+            observed,
+            opts.generation,
+            opts.service
+          )
+        )
+      ) {
+        throw new HackCliError({
+          code: "E_STARTUP_INCOMPLETE",
+          message:
+            "The routed native instance or run dependencies are not ready; values omitted.",
+        });
+      }
+      const identity = nativeComposeRunContainerIdentity(observed);
+      if (before !== null && before !== identity) {
+        throw new HackCliError({
+          code: "E_STARTUP_INCOMPLETE",
+          message:
+            "Retained native containers changed during the one-off command; values omitted.",
+        });
+      }
+      before = identity;
+      await opts.routing.assertContinuity({
+        deadline: Date.now() + resolveComposeStartupTimeoutMs(),
+      });
+    },
+  };
 }
 
 /** Completion proves retirement; released old hostnames may now have a new owner. */
@@ -251,14 +310,17 @@ function runtimeOptions(
     },
   };
 }
-function composeArgs(generation: NativeComposeGeneration): string[] {
+function composeArgs(
+  generation: NativeComposeGeneration,
+  projection?: NativeComposeRunProjection
+): string[] {
   return [
     "docker",
     "compose",
     "-p",
     generation.identity.composeProject,
     "-f",
-    generation.composeFile,
+    projection?.composeFile ?? generation.composeFile,
     ...generation.profiles.flatMap((profile) => ["--profile", profile]),
   ];
 }
@@ -560,14 +622,16 @@ async function runOneOff(opts: {
   readonly document: PrivateDocument;
   readonly selection: NativeComposeOwnershipOptions;
   readonly base: RuntimeBaseOptions;
+  readonly projection?: NativeComposeRunProjection;
 }) {
-  const { options, generation, document, selection, base } = opts;
+  const { options, generation, document, selection, base, projection } = opts;
   const service = requireService(document, options.service);
-  const name = `${generation.identity.composeProject}-run-${randomBytes(16).toString("hex")}`;
+  const name = `${generation.identity.composeProject}-run-${projection?.projectionId ?? randomBytes(16).toString("hex")}`;
   const code = await run(
     [
-      ...composeArgs(generation),
+      ...composeArgs(generation, projection),
       "run",
+      ...(projection ? ["--no-deps"] : []),
       "--name",
       name,
       ...(options.workdir ? ["-w", options.workdir] : []),
@@ -592,6 +656,12 @@ async function runOneOff(opts: {
   });
   if (!completed) {
     return { value: code || 1, outcome: "uncertain" as const };
+  }
+  if (projection) {
+    await assertNativeComposeOneOffUnexposed({
+      id: completed.id,
+      signal: selection.signal,
+    });
   }
   // Its exact stopped ID was just verified under the retained owner.
   // Never force removal, match a name alone, or infer completion from absence.
@@ -673,6 +743,7 @@ async function executePreparedNativeWorkloads(opts: {
   readonly base: RuntimeBaseOptions;
   readonly routing: NativeComposeRoutingOwner | null;
   readonly builds: readonly NativeComposeBuildIntent[];
+  readonly projection?: NativeComposeRunProjection;
   readonly projectRoot: string;
   readonly signal: AbortSignal;
   readonly assertFresh: () => Promise<void>;
@@ -708,23 +779,6 @@ async function executePreparedNativeWorkloads(opts: {
   });
 }
 
-function commandBuildExecution(opts: {
-  readonly options: NativeComposeCommandOptions;
-  readonly document: PrivateDocument;
-  readonly identity: NativeComposeGeneration["identity"];
-}) {
-  return prepareNativeComposeBuildExecution({
-    document: opts.document,
-    projectRoot: opts.identity.checkoutRoot,
-    composeProject: opts.identity.composeProject,
-    ownerToken: opts.identity.ownerToken,
-    service:
-      opts.options.operation === "run"
-        ? requireService(opts.document, opts.options.service)
-        : undefined,
-  });
-}
-
 async function publishPreparedGeneration(opts: {
   readonly existing: NativeComposeGeneration | null;
   readonly reservation: NativeComposeReservation | null;
@@ -756,6 +810,217 @@ async function publishPreparedGeneration(opts: {
     inputRevision: opts.inputRevision,
     assertFresh: opts.assertFresh,
   });
+}
+
+type SavedRouteDocuments = Awaited<ReturnType<typeof savedRouteDocuments>>;
+
+async function prepareExecutionRouting(opts: {
+  readonly options: NativeComposeCommandOptions;
+  readonly store: NativeComposeGenerationStore;
+  readonly existingRun: NativeComposeGeneration | null;
+  readonly generationId: string;
+  readonly document: PrivateDocument;
+  readonly inputs: AcquiredComposeInputs;
+  readonly previous: SavedRouteDocuments;
+  readonly signal: AbortSignal;
+}) {
+  const {
+    options,
+    store,
+    existingRun,
+    generationId,
+    document,
+    inputs,
+    previous,
+    signal,
+  } = opts;
+  let savedRun: PrivateDocument | null = null;
+  if (existingRun) {
+    savedRun = await store.readGenerationDocument(existingRun);
+    if (
+      !nativeComposeRunSourceMatches({
+        saved: savedRun,
+        rendered: document,
+        generationId,
+      })
+    ) {
+      throw new HackCliError({
+        code: "E_CONFIG_INVALID",
+        message:
+          "Native Compose inputs differ from the saved run generation. Run up or restart first; values omitted.",
+      });
+    }
+  }
+  const routing =
+    options.operation === "run"
+      ? null
+      : await prepareNativeComposeRouteOwner({
+          owner: store.identity,
+          generationId,
+          document,
+          plan: inputs.result.plan,
+          resolution: inputs.result.routing_resolution,
+          declared: inputs.result.declared_workloads,
+          previous,
+          signal,
+        });
+  const runRouting = savedRun
+    ? await prepareNativeComposeSavedRunRouting({
+        owner: store.identity,
+        generationId,
+        document: savedRun,
+        signal,
+      })
+    : null;
+  return {
+    routing,
+    runRouting,
+    document: savedRun ?? routing?.document ?? document,
+  };
+}
+
+async function executePreparedGeneration(opts: {
+  readonly options: NativeComposeCommandOptions;
+  readonly mutation: NativeComposeMutation;
+  readonly store: NativeComposeGenerationStore;
+  readonly inputs: AcquiredComposeInputs;
+  readonly acquire: () => Promise<AcquiredComposeInputs>;
+  readonly projectRoot: string;
+  readonly generation: NativeComposeGeneration;
+  readonly document: PrivateDocument;
+  readonly buildSource: PrivateDocument;
+  readonly previous: SavedRouteDocuments;
+  readonly routing: NativeComposeRoutingOwner | null;
+  readonly runRouting: NativeComposeSavedRunRouting | null;
+  readonly signal: AbortSignal;
+}): Promise<number> {
+  const {
+    options,
+    mutation,
+    store,
+    inputs,
+    acquire,
+    projectRoot,
+    generation,
+    document,
+    buildSource,
+    previous,
+    routing,
+    runRouting,
+    signal,
+  } = opts;
+  const selection = await ownershipSelection({
+    store,
+    generation,
+    document,
+    signal,
+  });
+  const base = {
+    ...runtimeOptions(generation),
+    routeStdoutToStderr: options.json === true,
+  };
+  const projection = runRouting
+    ? await mutation.publishRunProjection({
+        generation,
+        service: requireService(document, options.service),
+        assertFresh: inputs.assertFresh,
+      })
+    : undefined;
+  const operation = options.operation;
+  if (operation !== "up" && operation !== "restart" && operation !== "run") {
+    return invalid();
+  }
+  const after = preparedAfterHookPhase({
+    inputs,
+    acquire,
+    projectRoot,
+    signal,
+    json: options.json === true,
+    document,
+    generation,
+    selection,
+    routing,
+  });
+  const buildOptions = {
+    document: buildSource,
+    projectRoot,
+    composeProject: store.identity.composeProject,
+    ownerToken: store.identity.ownerToken,
+    service:
+      operation === "run"
+        ? requireService(document, options.service)
+        : undefined,
+    includeDependencies: runRouting === null,
+  };
+  const builds = planNativeComposeBuilds(buildOptions);
+  const assertFresh = async () => {
+    await inputs.assertFresh();
+    const saved = await store.readGenerationDocument(generation);
+    assertNativeComposeBuildExecution({
+      ...buildOptions,
+      executionDocument: saved,
+      intents: builds,
+    });
+    if (projection) {
+      await mutation.assertRunProjection(projection);
+    }
+    for (const prior of previous) {
+      await store.readGenerationDocument(prior.generation);
+    }
+  };
+  const ownership = runRouting
+    ? routedRunEffectOwnership({
+        selection,
+        generation,
+        document,
+        service: requireService(document, options.service),
+        routing: runRouting,
+      })
+    : preparedEffectOwnership({
+        selection,
+        routing,
+        afterReadiness: after.afterReadiness,
+      });
+  const result = await mutation.runEffect({
+    generation,
+    operation,
+    ...(projection ? { projection } : {}),
+    assertFresh,
+    ...ownership,
+    afterHooks: after.afterHooks,
+    effect: () =>
+      executePreparedNativeWorkloads({
+        options,
+        generation,
+        document,
+        selection,
+        base,
+        routing,
+        projection,
+        builds,
+        projectRoot,
+        signal,
+        assertFresh,
+        assertOwned: ownership.assertOwned,
+      }),
+  });
+  if (result.outcome === "uncertain") {
+    return reportNativeStartupIncomplete({
+      afterHookCode: after.code(),
+      json: options.json === true,
+    });
+  }
+  if (options.json) {
+    emitCliResult({
+      result: okResult({
+        data: {
+          status: "ready",
+          composeProject: store.identity.composeProject,
+        },
+      }),
+    });
+  }
+  return result.value;
 }
 
 async function prepareCommand(opts: {
@@ -799,13 +1064,6 @@ async function prepareCommand(opts: {
         "Native Compose run with authored host hooks is not supported in this slice. No hook or engine operation ran. Values omitted.",
     });
   }
-  if (
-    options.operation === "run" &&
-    (inputs.result.plan.routes !== undefined ||
-      inputs.result.plan.open !== undefined)
-  ) {
-    return refuseRoutedRun();
-  }
   const store = await openNativeComposeGenerationStore({
     projectRoot,
     instance: options.instance ?? null,
@@ -816,7 +1074,13 @@ async function prepareCommand(opts: {
       const current = await store.loadCurrent();
       assertStartupAvailable(current);
       const previous = current.stopped ? [] : await savedRouteDocuments(store);
-      assertSavedRunUnrouted(options, previous);
+      assertRoutedRunAvailable(
+        options,
+        current,
+        previous,
+        inputs.result.plan.routes !== undefined ||
+          inputs.result.plan.open !== undefined
+      );
       const prepared = await prepareBeforeHooks({
         inputs,
         acquire,
@@ -851,23 +1115,23 @@ async function prepareCommand(opts: {
         declaredWorkloads: inputs.result.declared_workloads,
         beforeHooksOwned: true,
       });
-      const buildExecution = commandBuildExecution({
-        options,
+      const buildExecution = prepareNativeComposeBuildExecution({
         document: rendered.document,
-        identity: store.identity,
+        projectRoot,
+        composeProject: store.identity.composeProject,
+        ownerToken: store.identity.ownerToken,
       });
-      const routing = await prepareNativeComposeRouteOwner({
-        owner: store.identity,
+      const { routing, runRouting, document } = await prepareExecutionRouting({
+        options,
+        store,
+        existingRun,
         generationId,
         document: buildExecution.document,
-        plan: inputs.result.plan,
-        resolution: inputs.result.routing_resolution,
-        declared: inputs.result.declared_workloads,
+        inputs,
         previous,
         signal,
       });
       try {
-        const document = routing?.document ?? buildExecution.document;
         const generation = await publishPreparedGeneration({
           existing: existingRun,
           reservation,
@@ -878,99 +1142,23 @@ async function prepareCommand(opts: {
           inputRevision: inputs.inputRevision,
           assertFresh: inputs.assertFresh,
         });
-        const selection = await ownershipSelection({
+        return await executePreparedGeneration({
+          options,
+          mutation,
           store,
-          generation,
-          document,
-          signal,
-        });
-        const base = {
-          ...runtimeOptions(generation),
-          routeStdoutToStderr: options.json === true,
-        };
-        const operation = options.operation;
-        if (
-          operation !== "up" &&
-          operation !== "restart" &&
-          operation !== "run"
-        ) {
-          return invalid();
-        }
-        const after = preparedAfterHookPhase({
           inputs,
           acquire,
           projectRoot,
-          signal,
-          json: options.json === true,
+          generation,
           document,
-          generation,
-          selection,
+          buildSource: rendered.document,
+          previous,
           routing,
+          runRouting,
+          signal,
         });
-        const builds = buildExecution.intents;
-        const assertFresh = async () => {
-          await inputs.assertFresh();
-          const saved = await store.readGenerationDocument(generation);
-          assertNativeComposeBuildExecution({
-            document: rendered.document,
-            executionDocument: saved,
-            intents: builds,
-            projectRoot,
-            composeProject: store.identity.composeProject,
-            ownerToken: store.identity.ownerToken,
-            service:
-              options.operation === "run"
-                ? requireService(rendered.document, options.service)
-                : undefined,
-          });
-          for (const saved of previous) {
-            await store.readGenerationDocument(saved.generation);
-          }
-        };
-        const ownership = preparedEffectOwnership({
-          selection,
-          routing,
-          afterReadiness: after.afterReadiness,
-        });
-        const result = await mutation.runEffect({
-          generation,
-          operation,
-          assertFresh,
-          ...ownership,
-          afterHooks: after.afterHooks,
-          effect: () =>
-            executePreparedNativeWorkloads({
-              options,
-              generation,
-              document,
-              selection,
-              base,
-              routing,
-              builds,
-              projectRoot,
-              signal,
-              assertFresh,
-              assertOwned: ownership.assertOwned,
-            }),
-        });
-        if (result.outcome === "uncertain") {
-          return reportNativeStartupIncomplete({
-            afterHookCode: after.code(),
-            json: options.json === true,
-          });
-        }
-        if (options.json) {
-          emitCliResult({
-            result: okResult({
-              data: {
-                status: "ready",
-                composeProject: store.identity.composeProject,
-              },
-            }),
-          });
-        }
-        return result.value;
       } finally {
+        await runRouting?.close();
         await routing?.close();
       }
     });

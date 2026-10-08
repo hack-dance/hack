@@ -1,0 +1,127 @@
+//! Explicit tagged native source reaches the owning runtime without Compose normalization.
+use super::*;
+use hack_runtime_core::provider::graph::native;
+use std::{
+    os::fd::{FromRawFd, OwnedFd},
+    time::Instant,
+};
+
+fn refused() -> CandidateError {
+    CandidateError::new(
+        "native_graph_arguments",
+        "Use graph native plan --source-file FILE, run --source-file FILE --expect-review SHA [--environment-stdin] [--timeout-seconds 1..300], or inspect|cleanup --run-id ID; optional --json. Native source and private envelopes require their exact kind/version; values omitted.",
+    )
+}
+fn hex(value: &str, len: usize) -> bool {
+    value.len() == len
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+pub(super) fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateError> {
+    let (action, args) = args.split_first().ok_or_else(refused)?;
+    let mut singles = BTreeMap::new();
+    let mut private = false;
+    let mut json = false;
+    let mut index = 0;
+    while index < args.len() {
+        match args[index] {
+            "--json" if !json => {
+                json = true;
+                index += 1;
+            }
+            "--environment-stdin" if !private => {
+                private = true;
+                index += 1;
+            }
+            key @ ("--source-file" | "--expect-review" | "--timeout-seconds" | "--run-id") => {
+                let value = *args
+                    .get(index + 1)
+                    .filter(|value| !value.starts_with("--"))
+                    .ok_or_else(refused)?;
+                if singles.insert(key, value).is_some() {
+                    return Err(refused());
+                }
+                index += 2;
+            }
+            _ => return Err(refused()),
+        }
+    }
+    if ["inspect", "cleanup"].contains(action) {
+        if private || singles.len() != 1 {
+            return Err(refused());
+        }
+        let run = *singles
+            .get("--run-id")
+            .filter(|run| hex(run, 32))
+            .ok_or_else(refused)?;
+        return if *action == "inspect" {
+            serde_json::to_value(native::inspect(candidate, run)?).map_err(|_| refused())
+        } else {
+            serde_json::to_value(native::cleanup(candidate, run)?).map_err(|_| refused())
+        };
+    }
+    if !["plan", "run"].contains(action) || singles.contains_key("--run-id") {
+        return Err(refused());
+    }
+    let path = Path::new(singles.get("--source-file").ok_or_else(refused)?);
+    let timeout = singles
+        .get("--timeout-seconds")
+        .map(|value| value.parse::<u64>().map_err(|_| refused()))
+        .transpose()?
+        .unwrap_or(30);
+    if !(1..=300).contains(&timeout)
+        || (*action == "plan"
+            && (private
+                || singles.contains_key("--expect-review")
+                || singles.contains_key("--timeout-seconds")))
+    {
+        return Err(refused());
+    }
+    let started = Instant::now();
+    let mut deadline = started
+        .checked_add(Duration::from_secs(timeout))
+        .ok_or_else(refused)?;
+    let source = native::selection::Source::read(path)?;
+    if *action == "plan" {
+        return serde_json::to_value(source.select(candidate, deadline)?.review())
+            .map_err(|_| refused());
+    }
+    let expected = *singles
+        .get("--expect-review")
+        .filter(|review| hex(review, 64))
+        .ok_or_else(refused)?;
+    let run = source.run_id().to_owned();
+    let mut selected = source.select(candidate, deadline)?;
+    if selected.review().review_id() != expected {
+        return Err(CandidateError::new(
+            "native_graph_review_changed",
+            "Native authored selection or public environment policy changed; no provider work was started.",
+        ));
+    }
+    let managed = if private {
+        // SAFETY: duplicate checked stdin into an owned descriptor; the bounded private receiver
+        // verifies its type, deadline, EOF and schema. The original process descriptor stays owned.
+        let fd = unsafe { libc::fcntl(0, libc::F_DUPFD_CLOEXEC, 3) };
+        if fd < 0 {
+            return Err(refused());
+        }
+        let managed = hack_runtime_core::provider::managed_environment::receive_native(
+            unsafe { OwnedFd::from_raw_fd(fd) },
+            expected,
+            &run,
+        )?;
+        deadline = deadline.min(managed.deadline());
+        Some(managed)
+    } else {
+        None
+    };
+    selected.restrict_deadline(deadline)?;
+    let empty = BTreeMap::new();
+    let prepared = selected.prepare(
+        candidate,
+        managed.as_ref().map_or(&empty, |managed| managed.values()),
+    )?;
+    drop(managed);
+    serde_json::to_value(native::run(candidate, prepared)?).map_err(|_| refused())
+}

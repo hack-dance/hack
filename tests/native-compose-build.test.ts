@@ -180,6 +180,13 @@ test("run build scope contains only selected target and transitive dependencies"
   expect(
     planNativeComposeBuilds(options).map((intent) => intent.service)
   ).toEqual(["init", "target", "unrelated"]);
+  expect(
+    planNativeComposeBuilds({
+      ...options,
+      service: "target",
+      includeDependencies: false,
+    }).map((intent) => intent.service)
+  ).toEqual(["target"]);
   expect(() =>
     planNativeComposeBuilds({ ...options, service: "constructor" })
   ).toThrow(NativeComposeBuildError);
@@ -200,6 +207,13 @@ test("run build scope contains only selected target and transitive dependencies"
     },
     db: { image: "fixture/db:1" },
   });
+  const warm = prepareNativeComposeBuildExecution({
+    ...options,
+    service: "target",
+    includeDependencies: false,
+  });
+  expect(warm.document).toEqual(projected.document);
+  expect(warm.intents.map((intent) => intent.service)).toEqual(["target"]);
 });
 
 test("one immutable image-only document preserves exact build source and authored image policies", () => {
@@ -628,6 +642,117 @@ test("failed direct build remains in the existing generation mutation journal", 
       expect((await store.loadCurrent()).pending?.generationId).toBe(
         generation.generationId
       );
+    });
+  } finally {
+    await store.close();
+  }
+});
+
+test("one-off delivery tampered during an awaited builder prevents Compose run and preserves pending", async () => {
+  const root = await realpath(
+    await mkdtemp(join(tmpdir(), "native-build-projection-"))
+  );
+  roots.push(root);
+  await mkdir(join(root, ".hack"));
+  await Bun.write(
+    join(root, ".hack/hack.project.json"),
+    JSON.stringify({ schema_version: 1, name: "fixture" })
+  );
+  const store = await openNativeComposeGenerationStore({
+    projectRoot: root,
+    instance: null,
+    mode: "prepare",
+  });
+  let builds = 0;
+  let composeRuns = 0;
+  try {
+    await store.withMutation(async (mutation) => {
+      const reservation = mutation.reserveGeneration();
+      const input = composeFixture({
+        services: {
+          web: { build: { context: ".", dockerfile: "Dockerfile" } },
+        },
+      });
+      input.projectRoot = root;
+      input.runtimeIdentity = store.identity.composeProject;
+      input.ownerToken = store.identity.ownerToken;
+      input.generationIdentity = reservation.generationId;
+      const execution = prepareNativeComposeBuildExecution({
+        document: renderNativeCompose(input).document,
+        projectRoot: root,
+        composeProject: store.identity.composeProject,
+        ownerToken: store.identity.ownerToken,
+        service: "web",
+        includeDependencies: false,
+      });
+      const generation = await mutation.publish({
+        reservation,
+        composeJson: JSON.stringify(execution.document),
+        profiles: [],
+        inputRevision: "e".repeat(64),
+        assertFresh: async () => {},
+      });
+      await mutation.runEffect({
+        generation,
+        operation: "up",
+        assertOwned: async () => {},
+        effect: async () => ({ outcome: "complete", value: 0 }),
+      });
+      const projection = await mutation.publishRunProjection({
+        generation,
+        service: "web",
+        assertFresh: async () => {},
+      });
+      const original = await Bun.file(generation.composeFile).text();
+      await expect(
+        mutation.runEffect({
+          generation,
+          projection,
+          operation: "run",
+          assertOwned: async () => {},
+          assertFresh: () => mutation.assertRunProjection(projection),
+          effect: async () => {
+            await buildNativeComposeImages({
+              intents: execution.intents,
+              projectRoot: root,
+              signal: new AbortController().signal,
+              env: undefined,
+              json: true,
+              assertFresh: () => mutation.assertRunProjection(projection),
+              assertOwned: async () => {},
+              io: {
+                engine: async () => "fixture-engine:1",
+                probe: async () => "",
+                execute: async () => {
+                  builds++;
+                  await Bun.write(projection.composeFile, "{}");
+                  return 0;
+                },
+              },
+            });
+            composeRuns++;
+            return { outcome: "complete", value: 0 };
+          },
+        })
+      ).rejects.toMatchObject({ code: "E_NATIVE_COMPOSE_STATE" });
+      expect(builds).toBe(1);
+      expect(composeRuns).toBe(0);
+      expect((await store.loadCurrent()).pending?.generationId).toBe(
+        generation.generationId
+      );
+      expect((await store.loadCurrent()).generation?.generationId).toBe(
+        generation.generationId
+      );
+      expect(await Bun.file(generation.composeFile).text()).toBe(original);
+      await mutation.runEffect({
+        generation,
+        operation: "down",
+        recoverPending: true,
+        assertOwned: async () => {},
+        effect: async () => ({ outcome: "complete", value: 0 }),
+      });
+      expect((await store.loadCurrent()).pending).toBeNull();
+      expect((await store.loadCurrent()).stopped).toBe(true);
     });
   } finally {
     await store.close();

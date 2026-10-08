@@ -67,6 +67,8 @@ type BuildPlanOptions = {
   readonly composeProject: string;
   readonly ownerToken: string;
   readonly service?: string;
+  /** Only a qualified saved routed run skips dependency startup/builds. */
+  readonly includeDependencies?: boolean;
 };
 const BUILD_SOURCE = "x-hack-native-build";
 
@@ -79,7 +81,9 @@ export function planNativeComposeBuilds(
       normalize(opts.projectRoot) === opts.projectRoot &&
       !UNSAFE_PATH.test(opts.projectRoot) &&
       NAME.test(opts.composeProject) &&
-      TOKEN.test(opts.ownerToken)
+      TOKEN.test(opts.ownerToken) &&
+      (opts.includeDependencies === undefined ||
+        typeof opts.includeDependencies === "boolean")
   );
   const services = record(record(opts.document).services);
   const selected = new Set<string>();
@@ -90,7 +94,10 @@ export function planNativeComposeBuilds(
     }
     selected.add(name);
     const workload = record(services[name]);
-    if (Object.hasOwn(workload, "depends_on")) {
+    if (
+      opts.includeDependencies !== false &&
+      Object.hasOwn(workload, "depends_on")
+    ) {
       for (const dependency of Object.keys(record(workload.depends_on))) {
         visit(dependency);
       }
@@ -192,7 +199,11 @@ export function prepareNativeComposeBuildExecution(opts: BuildPlanOptions): {
 } {
   const source = record(opts.document);
   requireValue(!Object.hasOwn(source, BUILD_SOURCE));
-  const all = planNativeComposeBuilds({ ...opts, service: undefined });
+  const all = planNativeComposeBuilds({
+    ...opts,
+    service: undefined,
+    includeDependencies: true,
+  });
   const intents =
     opts.service === undefined ? all : planNativeComposeBuilds(opts);
   if (all.length === 0) {
@@ -246,6 +257,7 @@ export function assertNativeComposeBuildExecution(
   for (const intent of planNativeComposeBuilds({
     ...opts,
     service: undefined,
+    includeDependencies: true,
   })) {
     requireValue(Object.hasOwn(services, intent.service));
     const workload = record(services[intent.service]);

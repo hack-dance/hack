@@ -107,7 +107,10 @@ versions refuse; omitted fields retain their documented defaults.
   it using the builder's normal cache and FROM pull behavior. The generated image
   tag follows Compose's `<project>-<workload>:latest` convention; image and build
   remain mutually exclusive in authored configuration. `run` includes only its
-  selected workload and transitive dependencies. Existing generated tags must
+  selected workload and transitive dependencies for cold or unrouted commands;
+  a qualified warm routed run uses `--no-deps` and builds only its target, keeping
+  retained dependency containers and routes unchanged. Its one-off projection is
+  reverified by the generation owner across awaited build effects. Existing generated tags must
   carry the exact native owner, instance and workload image labels before reuse
   or replacement. Unlabelled images from earlier candidates require explicit
   migration; they are never silently adopted or pruned. Failed or cancelled

@@ -224,6 +224,9 @@ External networks, arbitrary drivers, host networking, IPAM and static addresses
 remain unsupported and refuse. The compiler's topology preview does not prove
 runtime isolation or backend support; each execution adapter must qualify the
 owned network and attachment contract separately.
+The native graph adapter currently refuses any authored network field, including
+empty declarations and inactive attachments, before private value copying. Its
+default bridge does not qualify this custom-topology contract.
 
 ## Routing and domain previews
 

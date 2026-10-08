@@ -117,7 +117,7 @@ pub struct ExecReadiness {
 fn refused() -> CandidateError {
     CandidateError::new(
         "native_graph_subset",
-        "Native graph adapter requires image-only workloads, exec readiness and no acquisition, mounts, storage, routing, endpoints, host effects or automatic restart; values omitted.",
+        "Native graph adapter requires image-only workloads, exec readiness and no acquisition, mounts, storage, custom networks, routing, endpoints, host effects or automatic restart; values omitted.",
     )
 }
 
@@ -283,6 +283,7 @@ fn compile_inputs(
     if !environment_plan.complete || !environment_plan.diagnostics.is_empty() {
         return Err(private_refused());
     }
+    refuse_authored_network_intent(request)?;
     let environment_policy_hash = policy_hash(&plan, &environment_plan)?;
     if !plan.storage.is_empty()
         || plan.routes.is_some()
@@ -418,6 +419,33 @@ fn compile_inputs(
         workloads,
         managed_environment,
     })
+}
+
+/// The compiler can admit topology before this execution adapter qualifies it.
+/// Inspect authored presence after owning compiler validation so empty declarations
+/// and inactive attachments cannot disappear through normalization/profile pruning.
+fn refuse_authored_network_intent(request: &[u8]) -> Result<(), CandidateError> {
+    let envelope: serde_json::Value = serde_json::from_slice(request).map_err(|_| refused())?;
+    let authored = envelope["project"].as_str().ok_or_else(refused)?;
+    let project: serde_json::Value = serde_json::from_str(authored).map_err(|_| refused())?;
+    let object = project.as_object().ok_or_else(refused)?;
+    if object.contains_key("networks")
+        || ["services", "jobs"].into_iter().any(|field| {
+            object
+                .get(field)
+                .and_then(serde_json::Value::as_object)
+                .is_some_and(|workloads| {
+                    workloads.values().any(|workload| {
+                        workload
+                            .as_object()
+                            .is_some_and(|workload| workload.contains_key("networks"))
+                    })
+                })
+        })
+    {
+        return Err(refused());
+    }
+    Ok(())
 }
 
 #[cfg(test)]

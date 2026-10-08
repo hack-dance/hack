@@ -21,6 +21,7 @@ import {
   nativeComposeAdoptionManagedWorktreesScenario,
   nativeComposeAdoptionNetworkHealthWorktreesScenario,
   nativeComposeAdoptionNetworkWorktreesScenario,
+  nativeComposeAdoptionPluralNetworkWorktreesScenario,
   nativeComposeAdoptionStringWorktreesScenario,
   nativeComposeAdoptionWorktreesScenario,
 } from "./scenarios/native-compose-adoption-worktrees.ts";
@@ -88,6 +89,7 @@ const ALL_SCENARIOS: readonly Scenario[] = [
   nativeComposeAdoptionWorktreesScenario,
   nativeComposeAdoptionStringWorktreesScenario,
   nativeComposeAdoptionNetworkWorktreesScenario,
+  nativeComposeAdoptionPluralNetworkWorktreesScenario,
   nativeComposeAdoptionNetworkHealthWorktreesScenario,
   nativeComposeAdoptionManagedWorktreesScenario,
   nativeComposeAdoptionLocalWorktreesScenario,

@@ -222,6 +222,33 @@ pub(super) fn load(
     owner: &str,
     boot: &str,
 ) -> Result<(Receipt, PathBuf), CandidateError> {
+    let (receipt, root) = load_validated(candidate, run, owner)?;
+    if receipt.boot != boot {
+        return Err(refused());
+    }
+    Ok((receipt, root))
+}
+/// Old boot history releases capacity only after strict same-owner removal validation.
+pub(super) fn load_admission(
+    candidate: &Candidate,
+    run: &str,
+    owner: &str,
+    boot: &str,
+) -> Result<(Receipt, PathBuf), CandidateError> {
+    if !crate::provider::environment_recovery::uuid(boot) {
+        return Err(refused());
+    }
+    let (receipt, root) = load_validated(candidate, run, owner)?;
+    if receipt.boot != boot && receipt.phase != Phase::Removed {
+        return Err(refused());
+    }
+    Ok((receipt, root))
+}
+fn load_validated(
+    candidate: &Candidate,
+    run: &str,
+    owner: &str,
+) -> Result<(Receipt, PathBuf), CandidateError> {
     let root = directory(candidate, run)?;
     for path in root
         .ancestors()
@@ -236,8 +263,5 @@ pub(super) fn load(
     let bytes = native_input::read_file(&root.join("state.json"), LIMIT).map_err(|_| refused())?;
     let receipt: Receipt = serde_json::from_slice(&bytes).map_err(|_| refused())?;
     receipt.validate(run, owner)?;
-    if receipt.boot != boot {
-        return Err(refused());
-    }
     Ok((receipt, root))
 }

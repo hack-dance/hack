@@ -435,8 +435,8 @@ export async function readGitInspection(opts: {
   readonly projectRoot: string;
   readonly args: readonly string[];
   readonly signal?: AbortSignal;
-  readonly beforeSpawn?: () => void;
-  readonly onSpawn?: (pid: number) => void;
+  readonly beforeSpawn?: () => undefined;
+  readonly onSpawn?: (pid: number) => undefined;
 }): Promise<string | null> {
   const { projectRoot, signal, beforeSpawn, onSpawn } = opts;
   const args = [...opts.args];
@@ -463,7 +463,10 @@ export async function readGitInspection(opts: {
     }
   }
   try {
-    beforeSpawn?.();
+    const admitted: unknown = beforeSpawn?.();
+    if (admitted !== undefined) {
+      throw worktreeVerificationError();
+    }
     throwIfCancelled(signal);
     const child = Bun.spawn(["git", "-C", projectRoot, ...args], {
       env,
@@ -494,15 +497,19 @@ export async function readGitInspection(opts: {
       cancel();
     }
     try {
-      onSpawn?.(child.pid);
-      const [output, code] = await Promise.all([
-        readGitOutput(child.stdout),
-        child.exited,
-      ]);
+      const reading = readGitOutput(child.stdout);
+      let observationFailed = false;
+      try {
+        const observed: unknown = onSpawn?.(child.pid);
+        observationFailed = observed !== undefined;
+      } catch {
+        observationFailed = true;
+      }
+      const [output, code] = await Promise.all([reading, child.exited]);
       if (cancelled) {
         throwIfCancelled(signal);
       }
-      return code === 0 && !timedOut ? output : null;
+      return code === 0 && !timedOut && !observationFailed ? output : null;
     } finally {
       clearTimeout(timer);
       signal?.removeEventListener("abort", cancel);

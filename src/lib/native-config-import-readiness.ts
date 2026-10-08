@@ -20,6 +20,19 @@ export type ImportedServiceDependency = {
   readonly service: string;
   readonly condition: "started" | "ready";
 };
+export type ImportedDependency =
+  | ImportedServiceDependency
+  | { readonly job: string; readonly condition: "completed" };
+type ComposeDependency = {
+  readonly service: string;
+  readonly condition: "started" | "ready" | "completed";
+};
+function dependencyCondition(value: unknown): ComposeDependency["condition"] {
+  if (value === "service_completed_successfully") {
+    return "completed";
+  }
+  return value === "service_healthy" ? "ready" : "started";
+}
 function duration(value: unknown): value is string {
   if (typeof value !== "string") {
     return false;
@@ -82,10 +95,9 @@ export function mapLegacyComposeHealthcheck(
   };
 }
 
-/** Completed jobs, optional edges and restart propagation need their own execution contract. */
-export function mapLegacyComposeDependencies(
+function composeDependencies(
   value: unknown
-): readonly ImportedServiceDependency[] | undefined {
+): readonly ComposeDependency[] | undefined {
   if (Array.isArray(value)) {
     if (
       value.some((name) => typeof name !== "string" || !NAME.test(name)) ||
@@ -98,7 +110,7 @@ export function mapLegacyComposeDependencies(
   if (!isRecord(value)) {
     return undefined;
   }
-  const result: ImportedServiceDependency[] = [];
+  const result: ComposeDependency[] = [];
   for (const [service, edge] of Object.entries(value)) {
     if (
       !(NAME.test(service) && isRecord(edge)) ||
@@ -109,14 +121,61 @@ export function mapLegacyComposeDependencies(
       (Object.hasOwn(edge, "restart") && edge.restart !== false) ||
       (Object.hasOwn(edge, "condition") &&
         edge.condition !== "service_started" &&
-        edge.condition !== "service_healthy")
+        edge.condition !== "service_healthy" &&
+        edge.condition !== "service_completed_successfully")
     ) {
       return undefined;
     }
     result.push({
       service,
-      condition: edge.condition === "service_healthy" ? "ready" : "started",
+      condition: dependencyCondition(
+        Object.hasOwn(edge, "condition") ? edge.condition : undefined
+      ),
     });
+  }
+  return result;
+}
+
+/** Role discovery shares the closed edge parser; malformed intent never infers a job. */
+export function legacyComposeCompletedJobTargets(
+  value: unknown
+): readonly string[] {
+  return (composeDependencies(value) ?? [])
+    .filter((edge) => edge.condition === "completed")
+    .map((edge) => edge.service);
+}
+
+export function legacyComposeMixedJobDependency(opts: {
+  readonly value: unknown;
+  readonly jobs: ReadonlySet<string>;
+}): boolean {
+  return (composeDependencies(opts.value) ?? []).some(
+    (edge) => edge.condition !== "completed" && opts.jobs.has(edge.service)
+  );
+}
+
+/** Typed dependency conversion only; retained-job execution is a separate owner contract. */
+export function mapLegacyComposeDependencies(
+  value: unknown,
+  jobs: ReadonlySet<string> = new Set()
+): readonly ImportedDependency[] | undefined {
+  const parsed = composeDependencies(value);
+  if (!parsed) {
+    return undefined;
+  }
+  const result: ImportedDependency[] = [];
+  for (const edge of parsed) {
+    if (edge.condition === "completed") {
+      if (!jobs.has(edge.service)) {
+        return undefined;
+      }
+      result.push({ job: edge.service, condition: "completed" });
+    } else {
+      if (jobs.has(edge.service)) {
+        return undefined;
+      }
+      result.push({ service: edge.service, condition: edge.condition });
+    }
   }
   return result;
 }

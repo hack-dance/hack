@@ -1,4 +1,4 @@
-/** Decode complete Compose dollar pairs without evaluating caller environment. */
+/** Decode complete Compose dollar pairs once; ambient interpolation is refused. */
 export function literalComposeArg(value: unknown): string | undefined {
   if (typeof value !== "string" || value.includes("\0")) {
     return undefined;

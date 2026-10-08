@@ -7,6 +7,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { isRecord } from "../../../src/lib/guards.ts";
 import { createNativeComposeProbe } from "../../../src/lib/native-compose-ownership.ts";
 import { setProjectEnvValue } from "../../../src/lib/project-env-config.ts";
@@ -23,6 +24,15 @@ import {
   type Scenario,
   type ScenarioContext,
 } from "../harness.ts";
+import {
+  adoptionDependencyHealthcheck,
+  assertAdoptionDependencyControl,
+  assertAdoptionDependencyHealthcheck,
+} from "./native-compose-adoption-dependency-inputs.ts";
+import {
+  type AdoptionDependencyFirstPrepare,
+  captureAdoptionDependencyFirstPrepare,
+} from "./native-compose-adoption-dependency-staged-read.ts";
 import {
   prepareTypedLocalAdoptionFixtureSources,
   typedLocalAdoptionFixtureSourceSnapshot,
@@ -84,6 +94,7 @@ type Instance = {
   readonly sourceMode?: "canonical-generated";
   readonly argvMode?: "string-entrypoint" | "string-cleared";
   readonly typedLocal?: true;
+  readonly dependency?: "service_started" | "service_healthy";
 };
 type Observation = {
   readonly id: string;
@@ -343,6 +354,9 @@ async function writeLegacy(instance: Instance, image: string) {
             POSTGRES_HOST_AUTH_METHOD: "trust",
           },
           volumes: ["data:/var/lib/postgresql/data"],
+          ...(instance.dependency === "service_healthy"
+            ? { healthcheck: adoptionDependencyHealthcheck }
+            : {}),
         },
         worker: {
           image,
@@ -356,6 +370,20 @@ async function writeLegacy(instance: Instance, image: string) {
             ? [WORKER_SCRIPT]
             : (stringSource?.command ?? LITERAL_SOURCE_COMMAND),
           stop_grace_period: "15s",
+          ...(instance.dependency
+            ? {
+                depends_on:
+                  instance.dependency === "service_started"
+                    ? ["db"]
+                    : {
+                        db: {
+                          condition: instance.dependency,
+                          required: true,
+                          restart: false,
+                        },
+                      },
+              }
+            : {}),
         },
       },
       volumes: { data: { name: `${instance.name}_data` } },
@@ -378,9 +406,15 @@ async function prepareFixtureInputs(
     readonly generated?: boolean;
     readonly typedLocal?: boolean;
     readonly stringArgv?: boolean;
+    readonly dependencies?: boolean;
   } = {}
 ) {
-  const { generated = false, typedLocal = false, stringArgv = false } = options;
+  const {
+    generated = false,
+    typedLocal = false,
+    stringArgv = false,
+    dependencies = false,
+  } = options;
   expect({
     that: resolveCliSpawnArgs([]).length === 1,
     message:
@@ -435,6 +469,7 @@ async function prepareFixtureInputs(
     ...(generated ? { sourceMode: "canonical-generated" as const } : {}),
     ...(stringArgv ? { argvMode: "string-entrypoint" as const } : {}),
     ...(typedLocal ? { typedLocal: true as const } : {}),
+    ...(dependencies ? { dependency: "service_healthy" as const } : {}),
   };
   const second: Instance = {
     root: await addLinkedWorktree({ fixture, branch: "adoption-beta" }),
@@ -443,6 +478,7 @@ async function prepareFixtureInputs(
     ...(generated ? { sourceMode: "canonical-generated" as const } : {}),
     ...(stringArgv ? { argvMode: "string-cleared" as const } : {}),
     ...(typedLocal ? { typedLocal: true as const } : {}),
+    ...(dependencies ? { dependency: "service_started" as const } : {}),
   };
   for (const instance of [first, second]) {
     await writeLegacy(instance, image);
@@ -583,6 +619,25 @@ function createFixtureRuntime(
     });
     await owned(instance, "container", id);
   };
+  const checkHealthcheck = async (instance: Instance) => {
+    if (instance.dependency !== "service_healthy") {
+      return;
+    }
+    const id = container(instance, "db");
+    await owned(instance, "container", id);
+    assertAdoptionDependencyHealthcheck(
+      object(
+        await probe([
+          "container",
+          "inspect",
+          "--format",
+          '{"test":{{json .Config.Healthcheck.Test}},"interval":{{json .Config.Healthcheck.Interval}},"timeout":{{json .Config.Healthcheck.Timeout}},"retries":{{json .Config.Healthcheck.Retries}}}',
+          id,
+        ])
+      )
+    );
+    await owned(instance, "container", id);
+  };
   const sql = async (instance: Instance, query: string) =>
     (
       await probe([
@@ -618,6 +673,7 @@ function createFixtureRuntime(
       refused();
     }
     await checkWorkerArgv(instance);
+    await checkHealthcheck(instance);
     if (instance.sourceMode === "canonical-generated") {
       if (
         (await managedAdoptionFixtureSourceSnapshot({ primary, instance })) !==
@@ -669,6 +725,7 @@ function createFixtureRuntime(
       refused();
     }
     await checkWorkerArgv(instance);
+    await checkHealthcheck(instance);
     for (const row of baseline.resources.container) {
       if (
         (await probe([
@@ -879,6 +936,9 @@ async function withholdPrimaryLocal(h: FixtureRuntime) {
 }
 async function interruptFirstStop(h: FixtureRuntime) {
   const { ctx, engine, first, container, cli } = h;
+  const firstPrepare = first.dependency
+    ? await captureAdoptionDependencyFirstPrepare({ projectRoot: first.root })
+    : undefined;
   const shimRoot = join(ctx.tempRoot, "partial-stop-shim");
   await mkdir(shimRoot, { mode: 0o700 });
   const receipt = join(
@@ -889,7 +949,11 @@ async function interruptFirstStop(h: FixtureRuntime) {
     worker = container(first, "worker");
   const control = join(shimRoot, "control-hit");
   const generatedVersion = first.typedLocal ? 4 : 3;
-  const receiptVersion = first.sourceMode ? generatedVersion : 2;
+  const receiptVersion = first.dependency
+    ? 5
+    : first.sourceMode
+      ? generatedVersion
+      : 2;
   const shim = join(shimRoot, "docker");
   await Bun.write(
     shim,
@@ -897,13 +961,15 @@ async function interruptFirstStop(h: FixtureRuntime) {
 const args = process.argv.slice(2);
 const engine = ${JSON.stringify(engine)};
 if(args[0]==="container" && args[1]==="stop") {
- if(args.length!==4 || !args.includes(${JSON.stringify(db)}) || !args.includes(${JSON.stringify(worker)})) process.exit(99);
+ if(${first.dependency ? `args.length!==3 || args[2]!==${JSON.stringify(worker)}` : `args.length!==4 || !args.includes(${JSON.stringify(db)}) || !args.includes(${JSON.stringify(worker)})`}) process.exit(99);
  const state=JSON.parse(await Bun.file(${JSON.stringify(receipt)}).text());
  if(state.adoption_receipt_version!==${receiptVersion} || state.pendingOperation?.operation!=="stop") process.exit(98);
- const child=Bun.spawn([engine,"container","stop",${JSON.stringify(db)}],{stdin:"ignore",stdout:"ignore",stderr:"ignore"});
+ ${first.dependency ? dependencyEngineCheck(h) : ""}
+ const child=Bun.spawn([engine,"container","stop",${JSON.stringify(first.dependency ? worker : db)}],{stdin:"ignore",stdout:"ignore",stderr:"ignore"});
  if(await child.exited!==0) process.exit(97);
  await Bun.write(${JSON.stringify(control)},"journal-before-partial-stop");process.exit(71);
 }
+${first.dependency ? dependencyReadGuard(h, first, receipt, firstPrepare) : ""}
 const child=Bun.spawn([engine,...args],{stdin:"inherit",stdout:"inherit",stderr:"inherit"});process.exit(await child.exited);
 `
   );
@@ -911,7 +977,17 @@ const child=Bun.spawn([engine,...args],{stdin:"inherit",stdout:"inherit",stderr:
   const partial = await cli(first, ["config", "adopt", "--stop", "--json"], {
     PATH: `${shimRoot}:${process.env.PATH ?? "/usr/bin:/bin"}`,
   });
-  if (
+  if (first.dependency) {
+    assertAdoptionDependencyControl({
+      stage: "prepared-stop",
+      exitCode: partial.exitCode,
+      timedOut: partial.timedOut,
+      control: await dependencyControlMarker(
+        control,
+        "journal-before-partial-stop"
+      ),
+    });
+  } else if (
     partial.timedOut ||
     partial.exitCode === 0 ||
     (await Bun.file(control).text()) !== "journal-before-partial-stop"
@@ -926,6 +1002,64 @@ const child=Bun.spawn([engine,...args],{stdin:"inherit",stdout:"inherit",stderr:
   if (blocked.exitCode === 0) {
     refused();
   }
+}
+
+async function dependencyControlMarker(path: string, expected: string) {
+  try {
+    const file = Bun.file(path);
+    if (!(await file.exists())) {
+      return "missing" as const;
+    }
+    return (await file.text()) === expected
+      ? ("valid" as const)
+      : ("invalid" as const);
+  } catch {
+    return "invalid" as const;
+  }
+}
+
+function dependencyEngineCheck(h: FixtureRuntime): string {
+  return `const engineCheck=Bun.spawn([engine,'info','--format','{{json .ID}}'],{stdin:'ignore',stdout:'pipe',stderr:'ignore'});
+ const engineId=(await new Response(engineCheck.stdout).text()).trim();if(await engineCheck.exited!==0 || engineId!==${JSON.stringify(h.engineId)})process.exit(95);`;
+}
+
+/** Only fixed metadata reads and canonical config hashes reach the real engine through new dependency shims. */
+function dependencyReadGuard(
+  h: FixtureRuntime,
+  instance: Instance,
+  receipt: string,
+  firstPrepare?: AdoptionDependencyFirstPrepare
+): string {
+  const anchor = h.anchors.get(instance);
+  const network = anchor?.resources.network[0];
+  const volume = anchor?.resources.volume[0];
+  if (
+    !anchor ||
+    anchor.resources.network.length !== 1 ||
+    anchor.resources.volume.length !== 1 ||
+    !network ||
+    !volume
+  ) {
+    refused();
+  }
+  const helper = fileURLToPath(
+    new URL("./native-compose-adoption-dependency-inputs.ts", import.meta.url)
+  );
+  const stagedHelper = fileURLToPath(
+    new URL(
+      "./native-compose-adoption-dependency-staged-read.ts",
+      import.meta.url
+    )
+  );
+  return `import {adoptionDependencyReadAllowed} from ${JSON.stringify(helper)};
+import {adoptionDependencyStagedReadAllowed} from ${JSON.stringify(stagedHelper)};
+try {
+ const savedFile=Bun.file(${JSON.stringify(receipt)});
+ const saved=await savedFile.exists() ? JSON.parse(await savedFile.text()) : null;
+ const generationId=saved?.prepared?.id ?? saved?.publication?.generation?.id;
+ const allowed=adoptionDependencyReadAllowed({args,projectRoot:${JSON.stringify(instance.root)},project:${JSON.stringify(instance.name)},containerIds:${JSON.stringify(anchor.resources.container.map((row) => row.id))},networkId:${JSON.stringify(network.id)},volumeName:${JSON.stringify(volume.id)},generationId})${firstPrepare ? ` || await adoptionDependencyStagedReadAllowed({args,project:${JSON.stringify(instance.name)},first:${JSON.stringify(firstPrepare)}})` : ""};
+ if(!allowed){console.error('dependency-read-refused stage=read-admission code=93');process.exit(93);}
+}catch{console.error('dependency-read-refused stage=read-admission code=93');process.exit(93);}`;
 }
 async function recoverFirstAndRollback(h: FixtureRuntime) {
   const { first, second, cli, container, waitReady, check, anchors, effect } =
@@ -996,6 +1130,220 @@ async function adoptSecondAndRollback(h: FixtureRuntime) {
   await check(second);
   await check(first);
 }
+
+/** Fixture forwarder observes the actual ordered starts, with no substitution of resources or engine replies. */
+async function dependencyFixtureUp(
+  h: FixtureRuntime,
+  instance: Instance,
+  partial: boolean
+) {
+  if (!instance.dependency) {
+    refused();
+  }
+  const shimRoot = join(
+    h.ctx.tempRoot,
+    `dependency-start-${instance.name}-${partial ? "partial" : "complete"}`
+  );
+  await mkdir(shimRoot, { mode: 0o700 });
+  const receipt = join(
+    instance.root,
+    ".hack/.internal/legacy-compose-adoption-v1/receipt.json"
+  );
+  const db = h.container(instance, "db"),
+    worker = h.container(instance, "worker");
+  const starts = join(shimRoot, "starts.json");
+  const helper = fileURLToPath(
+    new URL("./native-compose-adoption-dependency-inputs.ts", import.meta.url)
+  );
+  const shim = join(shimRoot, "docker");
+  await Bun.write(
+    shim,
+    `#!${process.execPath}
+import {assertAdoptionDependencyStart} from ${JSON.stringify(helper)};
+const args=process.argv.slice(2), engine=${JSON.stringify(h.engine)};
+if(args[0]==='container' && args[1]==='start') {
+ if(args.length!==3)process.exit(99);
+ const receipt=JSON.parse(await Bun.file(${JSON.stringify(receipt)}).text());
+ if(receipt.adoption_receipt_version!==5 || receipt.pendingOperation?.operation!=='start')process.exit(98);
+ const startsFile=Bun.file(${JSON.stringify(starts)}), prior=await startsFile.exists() ? JSON.parse(await startsFile.text()) : [];
+ let observed;
+ if(args[2]===${JSON.stringify(worker)}) {
+  const capture=Bun.spawn([engine,'container','inspect','--format','{"id":{{json .Id}},"running":{{json .State.Running}},"paused":{{json .State.Paused}},"status":{{json .State.Status}},"health":{{with (index .State "Health")}}{{json .Status}}{{else}}""{{end}}}',${JSON.stringify(db)}],{stdin:'ignore',stdout:'pipe',stderr:'ignore'});
+  const text=await new Response(capture.stdout).text();if(await capture.exited!==0)process.exit(97);observed=JSON.parse(text);
+ }
+ try {assertAdoptionDependencyStart({db:${JSON.stringify(db)},worker:${JSON.stringify(worker)},condition:${JSON.stringify(instance.dependency)},prior,requested:args[2],observed});}catch{process.exit(96);}
+ ${dependencyEngineCheck(h)}
+ const effect=Bun.spawn([engine,...args],{stdin:'ignore',stdout:'ignore',stderr:'ignore'});if(await effect.exited!==0)process.exit(94);
+ await Bun.write(startsFile,JSON.stringify([...prior,args[2]]));
+ if(${partial} && args[2]===${JSON.stringify(db)})process.exit(71);
+ process.exit(0);
+}
+${dependencyReadGuard(h, instance, receipt)}
+const child=Bun.spawn([engine,...args],{stdin:'inherit',stdout:'inherit',stderr:'inherit'});process.exit(await child.exited);
+`
+  );
+  await chmod(shim, 0o700);
+  const result = await h.cli(instance, ["up", "--detach", "--json"], {
+    PATH: `${shimRoot}:${process.env.PATH ?? "/usr/bin:/bin"}`,
+  });
+  const expected = partial ? [db] : [db, worker];
+  assertAdoptionDependencyControl({
+    stage: partial ? "pending-start" : "ordered-start",
+    exitCode: result.exitCode,
+    timedOut: result.timedOut,
+    control: await dependencyControlMarker(starts, JSON.stringify(expected)),
+  });
+  if (partial) {
+    if (
+      result.exitCode === 0 ||
+      object(await Bun.file(receipt).text()).pendingOperation === null
+    ) {
+      refused();
+    }
+  } else {
+    successful(result);
+  }
+}
+
+/** Active candidate repair pins identity and bytes; prepared authored source timestamps are never rewritten. */
+async function dependencyCandidateDriftRefusal(h: FixtureRuntime) {
+  const path = join(h.first.root, ".hack/hack.project.json");
+  const original = await readFile(path);
+  const states = async () =>
+    Promise.all(
+      ["db", "worker"].map((service) =>
+        h.probe([
+          "container",
+          "inspect",
+          "--format",
+          "{{.State.Running}}",
+          h.container(h.first, service),
+        ])
+      )
+    );
+  const prior = await states();
+  await h.check(h.second);
+  await writeFile(path, Buffer.concat([original, Buffer.from("\n")]));
+  try {
+    refusedPreview(await h.cli(h.first, ["down", "--recover", "--json"]));
+    if (JSON.stringify(await states()) !== JSON.stringify(prior)) {
+      refused();
+    }
+    await h.check(h.second);
+  } finally {
+    await writeFile(path, original);
+  }
+}
+
+async function rollbackDependencyInstance(
+  h: FixtureRuntime,
+  instance: Instance
+) {
+  successful(await h.cli(instance, ["down", "--json"]));
+  await h.assertStopped(instance);
+  successful(
+    await h.cli(instance, ["config", "adopt", "--rollback", "--json"])
+  );
+  if ((await source(instance)) !== h.anchors.get(instance)?.source) {
+    refused();
+  }
+  await h.effect([
+    "container",
+    "start",
+    h.container(instance, "db"),
+    h.container(instance, "worker"),
+  ]);
+  await h.waitReady(instance);
+  await h.check(instance);
+}
+
+/** Explicit selector keeps the new v5 dependency acceptance independent of all previously qualified worktree cases. */
+export const nativeComposeAdoptionDependencyWorktreesScenario: Scenario = {
+  name: "native-compose-adoption-dependency-worktrees",
+  tier: "docker",
+  preserveFixtureOnFailure: true,
+  summary:
+    "started and exec-healthy edges preserve two linked original SQL volumes through ordered repair and rollback",
+  run: async (ctx) => {
+    const h = createFixtureRuntime(
+      await prepareFixtureInputs(ctx, { dependencies: true })
+    );
+    await runWithFixtureCleanup({
+      run: async () => {
+        for (const instance of [h.first, h.second]) {
+          await bootstrapOriginal(h, instance);
+          const preview = successful(
+            await h.cli(instance, [
+              "config",
+              "adopt",
+              "--dry-run",
+              "--stop",
+              "--json",
+            ])
+          );
+          if (object(preview.stdout).complete !== true) {
+            refused();
+          }
+          await h.assertNoState(instance);
+          await h.check(instance);
+        }
+        await interruptFirstStop(h);
+        successful(
+          await h.cli(h.first, [
+            "config",
+            "adopt",
+            "--recover",
+            "--stop",
+            "--json",
+          ])
+        );
+        await h.assertStopped(h.first);
+        refusedPreview(
+          await h.cli(h.first, ["up", "db", "--detach", "--json"])
+        );
+        await h.assertStopped(h.first);
+        await h.check(h.second);
+        await dependencyFixtureUp(h, h.first, true);
+        await h.waitReady(h.first);
+        if (
+          (await h.sql(h.first, "SELECT value FROM marker WHERE id=1")) !==
+          h.first.marker
+        ) {
+          refused();
+        }
+        await dependencyCandidateDriftRefusal(h);
+        successful(await h.cli(h.first, ["down", "--recover", "--json"]));
+        await h.assertStopped(h.first);
+        await h.check(h.second);
+        await dependencyFixtureUp(h, h.first, false);
+        await h.check(h.first, false);
+        await h.check(h.second);
+        refusedPreview(await h.cli(h.first, ["run", "db", "--", "true"]));
+        await rollbackDependencyInstance(h, h.first);
+        await h.check(h.second);
+        successful(
+          await h.cli(h.second, ["config", "adopt", "--stop", "--json"])
+        );
+        await h.assertStopped(h.second);
+        await h.check(h.first);
+        await dependencyFixtureUp(h, h.second, false);
+        await h.check(h.second, false);
+        await h.check(h.first);
+        await rollbackDependencyInstance(h, h.second);
+        await h.check(h.first);
+        ctx.log(
+          "started/exec-healthy ordered originals, SQL/birth/IDs, unchanged-source stop recovery, active-candidate repair and isolated rollback verified"
+        );
+      },
+      cleanup: () =>
+        cleanupOwnedAdoptionFixture({ ...h, instances: [h.first, h.second] }),
+      secondaryFailure: () =>
+        ctx.log(
+          "secondary exact-owned cleanup failed; retain fixture evidence"
+        ),
+    });
+  },
+};
 
 /** An external raw-byte edit must prevent recovery before another stop while both original data bindings remain intact. */
 async function refuseChangedInheritedRepair(h: FixtureRuntime) {

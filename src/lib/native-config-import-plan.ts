@@ -1,12 +1,16 @@
 import { isRecord } from "./guards.ts";
+import { literalComposeArg } from "./native-config-import-argv.ts";
 import { mapLegacyComposeBuild } from "./native-config-import-build.ts";
-import { literalComposeArg } from "./native-config-import-literal.ts";
 import {
   type ImportDocument,
   type ImportField,
   importPointer,
   parseImportDocument,
 } from "./native-config-import-parser.ts";
+import {
+  mapLegacyComposeDependencies,
+  mapLegacyComposeHealthcheck,
+} from "./native-config-import-readiness.ts";
 import { mapLegacyComposeStorage } from "./native-config-import-storage.ts";
 import { normalizeEnvConfigName } from "./project.ts";
 
@@ -130,7 +134,7 @@ function mappingFields(
 function mapLegacyNativeInput(opts: {
   readonly configText: string;
   readonly composeText: string;
-  readonly storageAdoption: boolean;
+  readonly purpose: "preview" | "adoption-baseline" | "storage-adoption";
 }): NativeImportPlan {
   const config = parseImportDocument({
     text: opts.configText,
@@ -174,9 +178,9 @@ function mapLegacyNativeInput(opts: {
     candidate,
     mark,
     refuse,
-    buildPreview: !opts.storageAdoption,
+    buildPreview: opts.purpose === "preview",
   });
-  if (opts.storageAdoption) {
+  if (opts.purpose === "storage-adoption") {
     mapStorageCandidate({
       config: config.value,
       compose: compose.value,
@@ -196,8 +200,16 @@ export function mapLegacyNativeImport(opts: {
   return mapLegacyNativeInput({
     configText: opts.configText,
     composeText: opts.composeText,
-    storageAdoption: false,
+    purpose: "preview",
   });
+}
+
+/** Retained identity planning must not inherit preview-only build authority. */
+export function mapLegacyNativeAdoptionBaseline(opts: {
+  readonly configText: string;
+  readonly composeText: string;
+}): NativeImportPlan {
+  return mapLegacyNativeInput({ ...opts, purpose: "adoption-baseline" });
 }
 
 /** Private static candidate with the same closed mappings plus strictly qualified local named storage. No ownership grant. */
@@ -208,7 +220,7 @@ export function mapLegacyNativeStorageAdoption(opts: {
   return mapLegacyNativeInput({
     configText: opts.configText,
     composeText: opts.composeText,
-    storageAdoption: true,
+    purpose: "storage-adoption",
   });
 }
 
@@ -622,6 +634,61 @@ function markServiceValue(opts: {
   }
 }
 
+function mapServiceReadiness(
+  opts: Pick<MappingContext, "mark" | "refuse"> & {
+    readonly service: Record<string, unknown>;
+    readonly key: string;
+    readonly raw: unknown;
+    readonly servicePointer: string;
+  }
+): boolean {
+  if (opts.key !== "depends_on" && opts.key !== "healthcheck") {
+    return false;
+  }
+  const pointer = importPointer(opts.servicePointer, opts.key);
+  const value =
+    opts.key === "depends_on"
+      ? mapLegacyComposeDependencies(opts.raw)
+      : mapLegacyComposeHealthcheck(opts.raw);
+  if (value === undefined) {
+    opts.refuse(
+      "compose",
+      pointer,
+      "dependency_or_health_contract_unsupported"
+    );
+  } else {
+    const property = opts.key === "depends_on" ? "depends_on" : "readiness";
+    opts.service[property] = value;
+    opts.mark(
+      "compose",
+      pointer,
+      `${opts.servicePointer}/${property}`,
+      "compose_readiness_contract",
+      true
+    );
+  }
+  return true;
+}
+
+function mapServiceReadinessFields(
+  opts: Pick<MappingContext, "mark" | "refuse"> & {
+    readonly source: Record<string, unknown>;
+    readonly pointer: string;
+    readonly service: Record<string, unknown>;
+  }
+) {
+  for (const key of ["depends_on", "healthcheck"]) {
+    if (Object.hasOwn(opts.source, key)) {
+      mapServiceReadiness({
+        ...opts,
+        key,
+        raw: opts.source[key],
+        servicePointer: opts.pointer,
+      });
+    }
+  }
+}
+
 function commandPresence(
   key: string,
   raw: unknown
@@ -653,6 +720,7 @@ function mapService(
   const service: Record<string, unknown> = {};
   opts.mark("compose", opts.pointer, opts.pointer);
   const hasBuild = Object.hasOwn(opts.source, "build");
+  mapServiceReadinessFields({ ...opts, service });
   for (const [key, raw] of Object.entries(opts.source)) {
     if (!Object.hasOwn(SERVICE_RULES, key)) {
       continue;

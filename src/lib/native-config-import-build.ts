@@ -1,7 +1,7 @@
 import { posix } from "node:path";
 import type { Build } from "../../packages/config-compiler/generated/native-config.ts";
 import { isRecord } from "./guards.ts";
-import { literalComposeArg } from "./native-config-import-literal.ts";
+import { literalComposeArg } from "./native-config-import-argv.ts";
 
 const TARGET = /^[a-z0-9][a-z0-9._-]{0,62}$/;
 const UNSAFE_PATH = /[\\\0\r\n:]/;

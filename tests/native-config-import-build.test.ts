@@ -14,6 +14,7 @@ import {
   runNativeImportBuildConfig,
 } from "../scripts/check-native-config-import-build.ts";
 import { isRecord } from "../src/lib/guards.ts";
+import { planLegacyComposeAdoption } from "../src/lib/native-compose-adoption-plan.ts";
 import { mapLegacyComposeBuild } from "../src/lib/native-config-import-build.ts";
 import {
   mapLegacyNativeImport,
@@ -97,6 +98,84 @@ test("object context/default Dockerfile/stage/policy preserve absence and author
   expect(Object.keys(result)).toEqual(["report"]);
   expect(Object.isFrozen(result.candidate)).toBe(true);
   expect(JSON.stringify(result)).not.toContain("${NOT_EXPANDED}");
+});
+
+test("basic-build preview composes with current readiness and shared literal argv mappings", () => {
+  const result = mapLegacyNativeImport({
+    configText: '{"name":"fixture"}',
+    composeText: JSON.stringify({
+      services: {
+        db: {
+          image: "fixture:1",
+          healthcheck: {
+            test: ["CMD", "probe", "$${LITERAL}"],
+            interval: "1s",
+            timeout: "250ms",
+            retries: 2,
+          },
+        },
+        builder: {
+          build: {
+            context: "../app",
+            dockerfile: "Dockerfile-$$$$",
+            target: "selected",
+          },
+          pull_policy: "build",
+          entrypoint: ["printf", "$${LITERAL}"],
+          depends_on: { db: { condition: "service_healthy" } },
+          profiles: ["later"],
+        },
+      },
+    }),
+  });
+  expect(result.report.complete).toBe(true);
+  expect(result.candidate).toMatchObject({
+    profiles: ["later"],
+    services: {
+      db: {
+        readiness: {
+          kind: "exec",
+          command: { exec: ["probe", "${LITERAL}"] },
+          interval: "1s",
+          timeout: "250ms",
+          retries: 2,
+        },
+      },
+      builder: {
+        build: {
+          context: "app",
+          dockerfile: "Dockerfile-$$",
+          target: "selected",
+        },
+        pull_policy: "build",
+        entrypoint: { exec: ["printf", "${LITERAL}"] },
+        depends_on: [{ service: "db", condition: "ready" }],
+      },
+    },
+  });
+  expect(JSON.stringify(result)).not.toContain("${LITERAL}");
+});
+
+test("build preview cannot authorize the retained adoption prerequisite through named storage", () => {
+  const source = {
+    configText: '{"name":"fixture"}',
+    composeText: JSON.stringify({
+      name: "fixture",
+      services: { builder: { build: "..", volumes: ["data:/data"] } },
+      volumes: { data: {} },
+    }),
+  };
+  const result = planLegacyComposeAdoption(source);
+  expect(result.report.supported).toBe(false);
+  expect(result.intent).toBeUndefined();
+  expect(result.report.fields).toContainEqual(
+    expect.objectContaining({
+      pointer: "/services/builder/build",
+      status: "refused",
+      code: "unsupported_field",
+    })
+  );
+  expect(mapLegacyNativeStorageAdoption(source).candidate).toBeUndefined();
 });
 
 test.each([

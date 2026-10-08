@@ -11,7 +11,7 @@ use std::{
     io::{Read, Write},
     net::Shutdown,
     os::{
-        fd::{AsRawFd, FromRawFd, OwnedFd, RawFd},
+        fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd},
         unix::{
             fs::{FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt},
             net::{UnixListener, UnixStream},
@@ -593,7 +593,9 @@ fn private(m: &fs::Metadata) -> bool {
     // SAFETY: geteuid has no arguments or effects.
     m.uid() == unsafe { libc::geteuid() } && m.mode() & 0o077 == 0
 }
-fn peer(stream: &UnixStream) -> Result<ProcessIdentity, CandidateError> {
+pub(in crate::provider::graph) fn peer(
+    stream: &UnixStream,
+) -> Result<ProcessIdentity, CandidateError> {
     let (mut uid, mut gid, mut pid) = (0, 0, 0i32);
     let mut len = std::mem::size_of_val(&pid) as libc::socklen_t;
     // SAFETY: all output pointers reference correctly sized initialized storage;
@@ -966,6 +968,9 @@ impl Publication {
     pub fn fd(&self) -> RawFd {
         self.listener.as_raw_fd()
     }
+    pub(in crate::provider::graph) fn descriptor(&self) -> BorrowedFd<'_> {
+        self.listener.as_fd()
+    }
     pub fn verify(&self) -> Result<(), CandidateError> {
         super::super::host_pin_recovery::exact_lock_path(&self.pin.root, &self._lock)?;
         self.pin.verify()
@@ -1068,7 +1073,7 @@ fn receive(
         }
     }
 }
-pub(super) fn read<T: DeserializeOwned>(
+pub(in crate::provider::graph) fn read<T: DeserializeOwned>(
     stream: &mut UnixStream,
     budget: Duration,
     limit: usize,
@@ -1101,7 +1106,7 @@ fn read_exact(
     }
     Ok(())
 }
-pub(super) fn write<T: Serialize>(
+pub(in crate::provider::graph) fn write<T: Serialize>(
     stream: &mut UnixStream,
     value: &T,
     budget: Duration,

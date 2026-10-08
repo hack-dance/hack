@@ -1,6 +1,9 @@
 import { resolve } from "node:path";
 import { isRecord } from "./guards.ts";
-import { legacyComposeAdoptionLayoutSupported } from "./native-compose-adoption-contract.ts";
+import {
+  legacyComposeAdoptionCandidateSupported,
+  legacyComposeAdoptionLayoutSupported,
+} from "./native-compose-adoption-contract.ts";
 import { retainLegacyAdoptionLocalRefusal } from "./native-compose-adoption-local.ts";
 import {
   type LegacyComposeStorageIntent,
@@ -10,6 +13,7 @@ import {
   hasLegacyComposeGeneratedSources,
   LegacyComposeAdoptionProjection,
 } from "./native-compose-adoption-projection.ts";
+import { legacyComposeRetainedPlan } from "./native-compose-adoption-readiness.ts";
 import {
   createNativeComposeProbe,
   NativeComposeOwnershipError,
@@ -663,6 +667,11 @@ export async function acquireLegacyComposeAdoptionBinding(input: {
       composeText: source.composeText,
     });
     const candidate = mapped.candidate;
+    const jobFamily =
+      candidate && legacyComposeRetainedPlan(candidate).requiresV7 === true;
+    if (jobFamily && !legacyComposeAdoptionCandidateSupported(candidate)) {
+      refuse("E_LEGACY_COMPOSE_BINDING_UNSUPPORTED");
+    }
     let projection: LegacyComposeAdoptionProjection | undefined;
     let projected: Readonly<ProjectedPreparation> | undefined;
     const generatedPresent = await hasLegacyComposeGeneratedSources(
@@ -678,6 +687,9 @@ export async function acquireLegacyComposeAdoptionBinding(input: {
           signal,
         })))
     ) {
+      if (jobFamily) {
+        refuse("E_LEGACY_COMPOSE_BINDING_UNSUPPORTED");
+      }
       projection = await LegacyComposeAdoptionProjection.acquire({
         source,
         signal,

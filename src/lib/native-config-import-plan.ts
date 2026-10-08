@@ -139,7 +139,11 @@ function mappingFields(
 function mapLegacyNativeInput(opts: {
   readonly configText: string;
   readonly composeText: string;
-  readonly storageAdoption: boolean;
+  readonly purpose:
+    | "preview"
+    | "adoption-baseline"
+    | "completed-job-adoption"
+    | "storage-adoption";
 }): NativeImportPlan {
   const config = parseImportDocument({
     text: opts.configText,
@@ -178,8 +182,14 @@ function mapLegacyNativeInput(opts: {
   const context = { config: config.value, candidate, mark, refuse };
   mapOverlay(context);
   mapWorktree(context);
-  mapServices({ source: compose.value.services, candidate, mark, refuse });
-  if (opts.storageAdoption) {
+  mapServices({
+    source: compose.value.services,
+    candidate,
+    mark,
+    refuse,
+    jobPreview: opts.purpose !== "adoption-baseline",
+  });
+  if (opts.purpose === "storage-adoption") {
     mapStorageCandidate({
       config: config.value,
       compose: compose.value,
@@ -223,8 +233,24 @@ export function mapLegacyNativeImport(opts: {
   return mapLegacyNativeInput({
     configText: opts.configText,
     composeText: opts.composeText,
-    storageAdoption: false,
+    purpose: "preview",
   });
+}
+
+/** Retained resource planning must not inherit preview-only job authority. */
+export function mapLegacyNativeAdoptionBaseline(opts: {
+  readonly configText: string;
+  readonly composeText: string;
+}): NativeImportPlan {
+  return mapLegacyNativeInput({ ...opts, purpose: "adoption-baseline" });
+}
+
+/** Pure v7 baseline used only after the retained owner has selected its closed static job family. */
+export function mapLegacyNativeCompletedJobAdoptionBaseline(opts: {
+  readonly configText: string;
+  readonly composeText: string;
+}): NativeImportPlan {
+  return mapLegacyNativeInput({ ...opts, purpose: "completed-job-adoption" });
 }
 
 /** Private static candidate with the same closed mappings plus strictly qualified local named storage. No ownership grant. */
@@ -235,7 +261,7 @@ export function mapLegacyNativeStorageAdoption(opts: {
   return mapLegacyNativeInput({
     configText: opts.configText,
     composeText: opts.composeText,
-    storageAdoption: true,
+    purpose: "storage-adoption",
   });
 }
 
@@ -855,9 +881,22 @@ function refuseUndeclaredJobTargets(
   }
 }
 
+function refuseUnqualifiedJobAdoption(
+  opts: Pick<MappingContext, "refuse"> & {
+    readonly job: boolean;
+    readonly jobPreview: boolean;
+    readonly pointer: string;
+  }
+) {
+  if (opts.job && !opts.jobPreview) {
+    opts.refuse("compose", opts.pointer, "completed_job_adoption_unqualified");
+  }
+}
+
 function mapServices(
   opts: Pick<MappingContext, "mark" | "refuse" | "candidate"> & {
     readonly source: unknown;
+    readonly jobPreview: boolean;
   }
 ) {
   if (!(isRecord(opts.source) && Object.keys(opts.source).length)) {
@@ -884,6 +923,12 @@ function mapServices(
         jobs: jobNames,
       });
       (job ? jobs : services)[name] = workload;
+      refuseUnqualifiedJobAdoption({
+        job,
+        jobPreview: opts.jobPreview,
+        pointer,
+        refuse: opts.refuse,
+      });
       refuseUndeclaredJobTargets({
         ...opts,
         services: opts.source,

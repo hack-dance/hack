@@ -73,12 +73,11 @@ one-shot labels, job health checks and non-`no` job restart policies refuse. Omi
 job restart stays omitted; no native default is invented. Supported profile fields
 remain authored selection, and unsupported fields in inactive jobs still refuse.
 
-This is pure conversion, not retained-job adoption. Existing retained adoption
-owners still refuse job candidates: their receipt versions do not qualify job
-ordering, completion, recovery or replay. A job import preview does not upgrade a
+This is pure conversion, not retained-job adoption. Versions 1–5 do not qualify job
+ordering, completion, recovery or replay. The distinct [version-7 retained owner](native-compose-adoption.md)
+qualifies only its closed static/default-network family. A job import preview does not upgrade a
 receipt, launch or recreate a container, transfer ownership, or qualify application
-migration. Job-aware retained lifecycle and two-worktree data acceptance remain
-separate work.
+migration. Two-worktree data acceptance remains a separate live gate.
 
 Custom-network job combinations remain refused; no static-bridge import or
 retained network authority is added by this completed-job conversion.
@@ -90,7 +89,7 @@ that fit the compiler's positive u32 milliseconds. Missing or zero timings,
 and the native contract cannot express all of those options. Explicit `disable:
 false` is the default enabled setting. Optional edges and restart propagation
 refuse. Completed-job conversion is supported as described above; retained-job
-execution remains a separate slice. Unknown HTTP/TCP fields also refuse.
+execution has its own version and family boundary. Unknown HTTP/TCP fields also refuse.
 The compiler rejects missing, cyclic or inactive dependency targets and ready
 edges whose target has no explicit readiness. Refusals include inactive profiles.
 

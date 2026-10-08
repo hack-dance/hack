@@ -1,10 +1,14 @@
+import { legacyComposeAdoptionCandidateSupported } from "./native-compose-adoption-contract.ts";
+import { legacyComposeRetainedPlan } from "./native-compose-adoption-readiness.ts";
 import {
   type ImportField,
   parseImportDocument,
 } from "./native-config-import-parser.ts";
 import {
   freezeImportValue,
-  mapLegacyNativeImport,
+  mapLegacyNativeAdoptionBaseline,
+  mapLegacyNativeCompletedJobAdoptionBaseline,
+  mapLegacyNativeStorageAdoption,
 } from "./native-config-import-plan.ts";
 import {
   type LegacyComposeStorageIntent,
@@ -63,7 +67,17 @@ export function planLegacyComposeAdoption(opts: {
   readonly configText: string;
   readonly composeText: string;
 }): LegacyComposeAdoptionPlan {
-  const baseline = mapLegacyNativeImport(opts);
+  const converted = mapLegacyNativeStorageAdoption(opts);
+  let jobs = false;
+  if (
+    converted.candidate &&
+    legacyComposeAdoptionCandidateSupported(converted.candidate)
+  ) {
+    jobs = legacyComposeRetainedPlan(converted.candidate).requiresV7 === true;
+  }
+  const baseline = jobs
+    ? mapLegacyNativeCompletedJobAdoptionBaseline(opts)
+    : mapLegacyNativeAdoptionBaseline(opts);
   const config = parseImportDocument({
     text: opts.configText,
     document: "config",

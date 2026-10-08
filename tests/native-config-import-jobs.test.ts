@@ -224,7 +224,10 @@ test("pure named mount mapping includes jobs and keeps original logical storage 
   ).toMatchObject({ target: "/jobs/initialize/mounts" });
 });
 
-test.each([false, true])("custom-network job conversion remains refused, including inactive declarations: %s", (inactive) => {
+test.each([
+  false,
+  true,
+])("custom-network job conversion remains refused, including inactive declarations: %s", (inactive) => {
   const source = graph();
   const services = Object.fromEntries(
     Object.entries(source).map(([name, workload]) => [
@@ -580,12 +583,12 @@ test("parsed declarations do not acquire roles from Object.prototype getters", (
   expect(reads).toBe(0);
 });
 
-test("positive mapping does not activate retained-job adoption or change v5 meaning", () => {
+test("positive mapping selects the distinct job family rather than service-only v5", () => {
   const result = map(graph());
   expect(result.report.complete).toBe(true);
-  expect(() => legacyComposeRetainedPlan(result.candidate)).toThrow(
-    "retained dependency plan refused"
-  );
+  expect(legacyComposeRetainedPlan(result.candidate)).toMatchObject({
+    requiresV7: true,
+  });
 });
 
 test.skipIf(!BINARY)(

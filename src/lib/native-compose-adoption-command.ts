@@ -9,6 +9,7 @@ import {
   openLegacyComposeAdoptedGenerationStore,
 } from "./native-compose-adoption-generation.ts";
 import { inspectLegacyComposeAdoptionSelection } from "./native-compose-adoption-marker.ts";
+import { legacyComposeRetainedOrdered } from "./native-compose-adoption-readiness.ts";
 import { inspectLegacyComposeContainerStates } from "./native-compose-adoption-runtime.ts";
 import type { NativeComposeCommandOptions } from "./native-compose-command.ts";
 import { requireNativeComposeBackend } from "./native-compose-selection.ts";
@@ -291,7 +292,7 @@ export async function tryLegacyComposeAdoptedCommand(
           deadline,
           run: async (privateInput) => {
             cancelled(signal);
-            if (privateInput.retainedPlan.requiresV5) {
+            if (legacyComposeRetainedOrdered(privateInput.retainedPlan)) {
               return await runLegacyComposeRetainedOperation({
                 input: privateInput,
                 operation,

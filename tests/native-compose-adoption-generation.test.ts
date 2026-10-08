@@ -20,7 +20,10 @@ import {
 } from "../src/commands/project.ts";
 import { renderManagedComposeEnvOverride } from "../src/lib/compose-managed-env.ts";
 import { tryLegacyComposeAdoptedCommand } from "../src/lib/native-compose-adoption-command.ts";
-import { runLegacyComposeRetainedOperation } from "../src/lib/native-compose-adoption-execution.ts";
+import {
+  type LegacyComposeRetainedOutcome,
+  runLegacyComposeRetainedOperation,
+} from "../src/lib/native-compose-adoption-execution.ts";
 import {
   LegacyComposeAdoptedGenerationError,
   openLegacyComposeAdoptedGenerationStore,
@@ -61,6 +64,16 @@ type Fixture = {
   states?: Record<string, boolean>;
   health?: Record<string, string>;
   ordered?: boolean;
+  jobs?: Record<
+    string,
+    {
+      startedAt: string;
+      finishedAt: string;
+      exitCode: number;
+      attempts: number;
+    }
+  >;
+  jobFinalRace?: boolean;
   sourceRace?: boolean;
   hangMutation?: boolean;
   dependencyReadScope?: {
@@ -171,6 +184,10 @@ if (kind === 'container' && ['start','restart','stop'].includes(action)) {
  if(fixture.hangMutation) {writeFileSync(root + '/effect-started', String(process.pid));await Bun.sleep(60_000);}
  if (fixture.ordered) {for(const id of args.slice(2)) fixture.states[id] = action !== 'stop';}
  else fixture.running = action !== 'stop';
+ if(fixture.jobs) for(const id of args.slice(2)) if(fixture.jobs[id]) {
+  fixture.states[id]=false;
+  if(action==='start') {fixture.jobs[id].attempts++;fixture.jobs[id].startedAt='2026-10-08T00:00:02.'+String(fixture.jobs[id].attempts).padStart(9,'0')+'Z';fixture.jobs[id].finishedAt='2026-10-08T00:00:03Z';}
+ }
  if(fixture.sourceRace) { writeFileSync(${JSON.stringify(join(projectRoot, ".hack/hack.project.json"))}, 'synthetic-private-source-race'); }
  writeFileSync(root+'/fixture.json',JSON.stringify(fixture));process.exit(fixture.mutationFailure ? 7 : 0);
 }
@@ -190,7 +207,12 @@ else {
  const id = args.at(-1);const rows = fixture[kind].filter(row => row.id === id);
  if (!rows.length) process.exit(1);
  if (kind === "container" && args.join().includes('config-hash')) { console.log(JSON.stringify({id,hash:fixture.configHash ?? 'd'.repeat(64)})); process.exit(0); }
- if (kind === "container" && args.join().includes('.State.Running') && !args.join().includes('.Mounts')) { const running=fixture.states?.[id] ?? fixture.running ?? false;console.log(JSON.stringify({id,running,paused:false,status:running ? 'running' : 'exited', ...(args.join().includes('index .State "Health"') ? {health: fixture.health?.[id] ?? ''} : {})})); process.exit(0); }
+ if (kind === "container" && args.join().includes('.State.Running') && !args.join().includes('.Mounts')) { const running=fixture.states?.[id] ?? fixture.running ?? false;
+  if(args.join().includes('.State.ExitCode')) {
+   if(fixture.jobFinalRace) writeFileSync(${JSON.stringify(join(projectRoot, ".hack/hack.project.json"))}, 'synthetic-private-final-job-race');
+   console.log(JSON.stringify({id,running,paused:false,status:running?'running':'exited',health:fixture.health?.[id]??'',exitCode:fixture.jobs?.[id]?.exitCode??0,startedAt:fixture.jobs?.[id]?.startedAt??'2026-10-08T00:00:01Z',finishedAt:fixture.jobs?.[id]?.finishedAt??'2026-10-08T00:00:03Z',restartPolicy:'no',maximumRetryCount:0})); process.exit(0);
+  }
+  console.log(JSON.stringify({id,running,paused:false,status:running ? 'running' : 'exited', ...(args.join().includes('index .State "Health"') ? {health: fixture.health?.[id] ?? ''} : {})})); process.exit(0); }
  for (const row of rows) {
   if (kind === 'container') console.log(JSON.stringify({...row,running:fixture.states?.[id] ?? fixture.running ?? false}));
   else if (kind === 'network') console.log(JSON.stringify({...row,containers:row.containers.filter(id=>!fixture.container.some(container=>container.id===id) || (fixture.states?.[id] ?? fixture.running ?? false))}));
@@ -317,6 +339,455 @@ async function mutationCommands() {
         ["start", "stop", "restart"].includes(args[1])
     );
 }
+
+async function completedJobFixture() {
+  const app = await dependencyFixture(),
+    job = "e".repeat(64);
+  await writeFile(
+    join(projectRoot, ".hack/docker-compose.yml"),
+    JSON.stringify({
+      name: "fixture",
+      services: {
+        db: {
+          image: CANARY,
+          volumes: ["data:/var/lib/database"],
+          healthcheck: {
+            test: ["CMD", "probe"],
+            interval: "1s",
+            timeout: "1s",
+            retries: 2,
+          },
+        },
+        seed: {
+          image: CANARY,
+          command: ["seed-once"],
+          labels: { "hack.service.one-shot": "true" },
+          depends_on: { db: { condition: "service_healthy" } },
+        },
+        web: {
+          image: CANARY,
+          depends_on: { seed: { condition: "service_completed_successfully" } },
+        },
+      },
+      volumes: { data: { name: VOLUME } },
+    })
+  );
+  fixture.container.push({
+    ...container(),
+    id: job,
+    name: "/fixture-seed-1",
+    service: "seed",
+    mounts: [],
+  });
+  network().containers = [ID, app, job];
+  fixture.states = { [ID]: false, [app]: false, [job]: false };
+  fixture.jobs = {
+    [job]: {
+      startedAt: "2026-10-08T00:00:01Z",
+      finishedAt: "2026-10-08T00:00:01.5Z",
+      exitCode: 0,
+      attempts: 0,
+    },
+  };
+  await save();
+  return { app, job };
+}
+
+boundedTest(
+  "v7 retains original IDs through fresh job start, reverse stop, restart and stopped rollback",
+  async () => {
+    const { app, job } = await completedJobFixture(),
+      { store, generation } = await prepared();
+    const signal = new AbortController().signal;
+    try {
+      const binary = await compiler();
+      expect(generation.report.adoption_generation_version).toBe(7);
+      await store.publish({ generation, binary });
+      expect((await readReceipt()).adoption_receipt_version).toBe(7);
+      for (const operation of ["start", "restart", "stop"] as const) {
+        const deadline = Date.now() + 20_000;
+        expect(
+          await store.withMutation({
+            generation,
+            binary,
+            operation,
+            services: [],
+            deadline,
+            run: (input) =>
+              runLegacyComposeRetainedOperation({
+                input,
+                operation,
+                deadline,
+                signal,
+              }),
+          })
+        ).toBe(0);
+      }
+      expect(await mutationCommands()).toEqual([
+        ["container", "start", ID],
+        ["container", "start", job],
+        ["container", "start", app],
+        ["container", "stop", app],
+        ["container", "stop", job],
+        ["container", "stop", ID],
+        ["container", "start", ID],
+        ["container", "start", job],
+        ["container", "start", app],
+        ["container", "stop", app],
+        ["container", "stop", job],
+        ["container", "stop", ID],
+      ]);
+      expect((await readReceipt()).pendingOperation).toBeNull();
+      await store.rollback();
+      expect((await readReceipt()).publication.phase).toBe("rolled-back");
+      expect(
+        await Bun.file(join(projectRoot, ".hack/hack.project.json")).exists()
+      ).toBe(false);
+      expect(fixture.volume[0]?.createdAt).toBe(CREATED);
+    } finally {
+      await store.close();
+    }
+  },
+  30_000
+);
+
+boundedTest(
+  "v7 old exit0 and callback numeric0 cannot clear the pending job attempt; recovery never starts jobs",
+  async () => {
+    const { app, job } = await completedJobFixture(),
+      { store, generation } = await prepared();
+    try {
+      const binary = await compiler();
+      await store.publish({ generation, binary });
+      await expect(
+        store.withMutation({
+          generation,
+          binary,
+          operation: "start",
+          services: [],
+          deadline: Date.now() + 20_000,
+          run: async () => {
+            fixture.states = { [ID]: true, [app]: true, [job]: false };
+            await save();
+            return 0;
+          },
+        })
+      ).rejects.toThrow("values omitted");
+      expect((await readReceipt()).pendingOperation.operation).toBe("start");
+      expect(await mutationCommands()).toEqual([]);
+      const deadline = Date.now() + 20_000;
+      expect(
+        await store.withMutation({
+          generation,
+          binary,
+          operation: "stop",
+          recover: true,
+          services: [],
+          deadline,
+          run: (input) =>
+            runLegacyComposeRetainedOperation({
+              input,
+              operation: "stop",
+              deadline,
+              signal: new AbortController().signal,
+            }),
+        })
+      ).toBe(0);
+      expect(await mutationCommands()).toEqual([
+        ["container", "stop", app],
+        ["container", "stop", job],
+        ["container", "stop", ID],
+      ]);
+      expect((await readReceipt()).pendingOperation).toBeNull();
+    } finally {
+      await store.close();
+    }
+  },
+  30_000
+);
+
+boundedTest(
+  "v7 immediate job exit17 keeps pending and prevents every dependent start",
+  async () => {
+    const { job } = await completedJobFixture();
+    if (!fixture.jobs?.[job]) {
+      throw new Error("missing job fixture");
+    }
+    fixture.jobs[job].exitCode = 17;
+    await save();
+    const { store, generation } = await prepared();
+    try {
+      const binary = await compiler();
+      await store.publish({ generation, binary });
+      const deadline = Date.now() + 20_000;
+      await expect(
+        store.withMutation({
+          generation,
+          binary,
+          operation: "start",
+          services: [],
+          deadline,
+          run: (input) =>
+            runLegacyComposeRetainedOperation({
+              input,
+              operation: "start",
+              deadline,
+              signal: new AbortController().signal,
+            }),
+        })
+      ).rejects.toThrow("values omitted");
+      expect(await mutationCommands()).toEqual([
+        ["container", "start", ID],
+        ["container", "start", job],
+      ]);
+      expect((await readReceipt()).pendingOperation.operation).toBe("start");
+      expect(fixture.volume[0]?.createdAt).toBe(CREATED);
+    } finally {
+      await store.close();
+    }
+  },
+  30_000
+);
+
+boundedTest(
+  "v7 consumed production completion cannot acknowledge a later invocation",
+  async () => {
+    await completedJobFixture();
+    const { store, generation } = await prepared();
+    try {
+      const binary = await compiler();
+      await store.publish({ generation, binary });
+      let previous: LegacyComposeRetainedOutcome | undefined;
+      const deadline = Date.now() + 20_000;
+      expect(
+        await store.withMutation({
+          generation,
+          binary,
+          operation: "start",
+          services: [],
+          deadline,
+          run: async (input) => {
+            previous = await runLegacyComposeRetainedOperation({
+              input,
+              operation: "start",
+              deadline,
+              signal: new AbortController().signal,
+            });
+            expect(JSON.stringify(previous)).toBe("{}");
+            return previous;
+          },
+        })
+      ).toBe(0);
+      const before = await mutationCommands();
+      await expect(
+        store.withMutation({
+          generation,
+          binary,
+          operation: "start",
+          services: [],
+          deadline: Date.now() + 20_000,
+          run: async () => {
+            if (!previous) {
+              throw new Error("missing completion");
+            }
+            return previous;
+          },
+        })
+      ).rejects.toThrow("values omitted");
+      expect(await mutationCommands()).toEqual(before);
+      expect((await readReceipt()).pendingOperation.operation).toBe("start");
+    } finally {
+      await store.close();
+    }
+  },
+  30_000
+);
+
+boundedTest(
+  "v7 cloned production completion cannot acknowledge otherwise ready original workloads",
+  async () => {
+    await completedJobFixture();
+    const { store, generation } = await prepared();
+    try {
+      const binary = await compiler();
+      await store.publish({ generation, binary });
+      const deadline = Date.now() + 20_000;
+      await expect(
+        store.withMutation({
+          generation,
+          binary,
+          operation: "start",
+          services: [],
+          deadline,
+          run: async (input) => {
+            const outcome = await runLegacyComposeRetainedOperation({
+              input,
+              operation: "start",
+              deadline,
+              signal: new AbortController().signal,
+            });
+            if (typeof outcome !== "object") {
+              throw new Error("missing completion");
+            }
+            return { ...outcome };
+          },
+        })
+      ).rejects.toThrow("values omitted");
+      expect(
+        (await mutationCommands()).filter((args) => args[1] === "start")
+      ).toHaveLength(3);
+      expect((await readReceipt()).pendingOperation.operation).toBe("start");
+    } finally {
+      await store.close();
+    }
+  },
+  30_000
+);
+
+boundedTest(
+  "v7 source drift in the final job probe prevents pending publication after successful children",
+  async () => {
+    const { app, job } = await completedJobFixture(),
+      { store, generation } = await prepared();
+    try {
+      const binary = await compiler();
+      await store.publish({ generation, binary });
+      const original = await readFile(
+        join(projectRoot, ".hack/hack.project.json"),
+        "utf8"
+      );
+      const deadline = Date.now() + 20_000;
+      await refusal(
+        store.withMutation({
+          generation,
+          binary,
+          operation: "start",
+          services: [],
+          deadline,
+          run: async (input) => {
+            const outcome = await runLegacyComposeRetainedOperation({
+              input,
+              operation: "start",
+              deadline,
+              signal: new AbortController().signal,
+            });
+            fixture = JSON.parse(
+              await readFile(join(root, "fixture.json"), "utf8")
+            );
+            fixture.jobFinalRace = true;
+            await save();
+            return outcome;
+          },
+        }),
+        "E_LEGACY_ADOPTION_STATE"
+      );
+      expect(await mutationCommands()).toEqual([
+        ["container", "start", ID],
+        ["container", "start", job],
+        ["container", "start", app],
+      ]);
+      expect((await readReceipt()).pendingOperation.operation).toBe("start");
+      fixture.jobFinalRace = false;
+      await save();
+      await writeFile(join(projectRoot, ".hack/hack.project.json"), original);
+      const recoveryDeadline = Date.now() + 20_000;
+      expect(
+        await store.withMutation({
+          generation,
+          binary,
+          operation: "stop",
+          recover: true,
+          services: [],
+          deadline: recoveryDeadline,
+          run: (input) =>
+            runLegacyComposeRetainedOperation({
+              input,
+              operation: "stop",
+              deadline: recoveryDeadline,
+              signal: new AbortController().signal,
+            }),
+        })
+      ).toBe(0);
+    } finally {
+      await store.close();
+    }
+  },
+  30_000
+);
+
+boundedTest(
+  "v7 final historical exit0 cannot clear pending even after a minted successful attempt",
+  async () => {
+    const { job } = await completedJobFixture(),
+      { store, generation } = await prepared();
+    try {
+      const binary = await compiler();
+      await store.publish({ generation, binary });
+      const deadline = Date.now() + 20_000;
+      await expect(
+        store.withMutation({
+          generation,
+          binary,
+          operation: "start",
+          services: [],
+          deadline,
+          run: async (input) => {
+            const outcome = await runLegacyComposeRetainedOperation({
+              input,
+              operation: "start",
+              deadline,
+              signal: new AbortController().signal,
+            });
+            fixture = JSON.parse(
+              await readFile(join(root, "fixture.json"), "utf8")
+            );
+            const state = fixture.jobs?.[job];
+            if (!state) {
+              throw new Error("missing job fixture");
+            }
+            state.startedAt = "2026-10-08T00:00:01.000Z";
+            await save();
+            return outcome;
+          },
+        })
+      ).rejects.toThrow("values omitted");
+      expect(
+        (await mutationCommands()).filter((args) => args[1] === "start")
+      ).toHaveLength(3);
+      expect((await readReceipt()).pendingOperation.operation).toBe("start");
+    } finally {
+      await store.close();
+    }
+  },
+  30_000
+);
+
+boundedTest(
+  "v7 managed layout refuses before compiler/value acquisition or engine probe",
+  async () => {
+    await completedJobFixture();
+    await writeFile(
+      join(projectRoot, ".hack/hack.env.prod.yaml"),
+      "synthetic-private-unqualified-managed-input"
+    );
+    const store = await openLegacyComposeAdoptedGenerationStore({
+      projectRoot,
+    });
+    try {
+      await expect(store.prepare({ binary: await compiler() })).rejects.toThrow(
+        "values omitted"
+      );
+      expect(await Bun.file(join(root, "commands")).exists()).toBe(false);
+      expect(await Bun.file(join(root, "candidate-received")).exists()).toBe(
+        false
+      );
+      expect((await readReceipt()).prepared).toBeNull();
+    } finally {
+      await store.close();
+    }
+  },
+  30_000
+);
 
 boundedTest(
   "v5 explicit preparation stop uses reverse original-ID order and can publish after verified completion",

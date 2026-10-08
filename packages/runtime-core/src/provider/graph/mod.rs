@@ -93,6 +93,8 @@ mod config;
 mod dependency_cache;
 mod image_environment;
 mod image_process;
+#[cfg(feature = "native-config-plan")]
+pub mod native;
 pub use cleanup_enrollment::{Phase as RelayCleanupPhase, RelayCleanup};
 mod endpoints;
 #[cfg(target_os = "macos")]

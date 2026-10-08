@@ -74,7 +74,7 @@ const ROUTING = [
   "HACK_EXECUTION_MODE",
 ] as const;
 type SavedManifest = {
-  readonly adoption_generation_version: 1 | 3;
+  readonly adoption_generation_version: 1 | 3 | 4;
   readonly kind: typeof KIND;
   readonly projectRoot: string;
   readonly id: string;
@@ -205,13 +205,17 @@ function manifest(value: unknown, root: string, id: string): SavedManifest {
       isRecord(value) &&
       keys(
         value,
-        value.adoption_generation_version === 3
+        value.adoption_generation_version === 3 ||
+          value.adoption_generation_version === 4
           ? "adoption_generation_version,binding,files,id,kind,projectRoot,projectionProof,runtimeConfig,sourceFiles"
           : "adoption_generation_version,binding,files,id,kind,projectRoot,runtimeConfig,sourceFiles"
       ) &&
       (value.adoption_generation_version === 1 ||
-        (value.adoption_generation_version === 3 &&
-          isRecord(value.projectionProof))) &&
+        ((value.adoption_generation_version === 3 ||
+          value.adoption_generation_version === 4) &&
+          isRecord(value.projectionProof) &&
+          value.projectionProof.projection_version ===
+            (value.adoption_generation_version === 4 ? 2 : 1))) &&
       value.kind === KIND &&
       value.id === id &&
       value.projectRoot === root &&
@@ -235,7 +239,8 @@ function manifest(value: unknown, root: string, id: string): SavedManifest {
     id,
     binding: value.binding,
     runtimeConfig: value.runtimeConfig,
-    ...(value.adoption_generation_version === 3
+    ...(value.adoption_generation_version === 3 ||
+    value.adoption_generation_version === 4
       ? { projectionProof: value.projectionProof }
       : {}),
     sourceFiles: {
@@ -290,7 +295,7 @@ async function writeArtifact(path: string, text: string): Promise<Artifact> {
 /** A distinct private generation claim; it never makes original legacy resources native nonce-owned. */
 export type LegacyComposeAdoptedGeneration = {
   readonly report: {
-    readonly adoption_generation_version: 1 | 3;
+    readonly adoption_generation_version: 1 | 3 | 4;
     readonly owner: "legacy-compose";
     readonly status: "prepared" | "active";
     readonly containers: number;
@@ -401,7 +406,8 @@ async function readInputs(
       checkOwner: ctx.check,
     };
     const projection =
-      meta.adoption_generation_version === 3
+      meta.adoption_generation_version === 3 ||
+      meta.adoption_generation_version === 4
         ? await readSavedLegacyComposeAdoptionProjection(projectionOpts)
         : undefined;
     if (
@@ -512,7 +518,7 @@ function claim(
   known: WeakMap<LegacyComposeAdoptedGeneration, Anchor>,
   binding: LegacyComposeVerifiedBinding,
   status: "prepared" | "active" = "prepared",
-  version: 1 | 3 = 1
+  version: 1 | 3 | 4 = 1
 ): LegacyComposeAdoptedGeneration {
   const result: LegacyComposeAdoptedGeneration = {
     report: {
@@ -535,6 +541,7 @@ async function prepare(
     projectRoot: ctx.root,
     signal: ctx.signal,
     timeoutMs: ctx.timeoutMs,
+    binary,
   });
   const acquired = await binding.resolvePreparationInputs({
     projectRoot: ctx.root,
@@ -580,8 +587,10 @@ async function prepare(
     const originals = await privateDirectory(join(generationRoot, "originals"));
     await originals.file.sync();
     await originals.file.close();
+    const projectionVersion =
+      acquired.projection?.projectionProof.projection_version === 2 ? 4 : 3;
     const meta: Manifest = {
-      adoption_generation_version: acquired.projection ? 3 : 1,
+      adoption_generation_version: acquired.projection ? projectionVersion : 1,
       kind: KIND,
       projectRoot: ctx.root,
       id,
@@ -1498,8 +1507,9 @@ export async function openLegacyComposeAdoptedGenerationStore(input: {
               ctx,
               {
                 adoption_receipt_version:
-                  loaded.manifest.adoption_generation_version === 3
-                    ? 3
+                  loaded.manifest.adoption_generation_version === 3 ||
+                  loaded.manifest.adoption_generation_version === 4
+                    ? loaded.manifest.adoption_generation_version
                     : prior.adoption_receipt_version,
                 kind: KIND,
                 checkout,

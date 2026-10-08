@@ -31,13 +31,14 @@ export function legacyComposeAdoptionCandidateSupported(
 async function rootLayoutSupported(
   projectRoot: string,
   signal?: AbortSignal,
-  managed: "refuse" | "canonical" = "refuse"
+  managed: "refuse" | "canonical" = "refuse",
+  allowTypedLocal = false
 ): Promise<boolean> {
   check(signal);
   for (const relative of [
     ".env",
     ".hack/.env",
-    ".hack/hack.local.json",
+    ...(allowTypedLocal ? [] : [".hack/hack.local.json"]),
     ".hack/.internal/extra-hosts.json",
     ".hack/hack.config.toml",
     ".dev/hack.config.json",
@@ -91,8 +92,14 @@ async function rootLayoutSupported(
 export async function legacyComposeAdoptionManagedReadLayoutSupported(opts: {
   readonly projectRoot: string;
   readonly signal?: AbortSignal;
+  readonly allowTypedLocal?: boolean;
 }): Promise<boolean> {
-  return await rootLayoutSupported(opts.projectRoot, opts.signal, "canonical");
+  return await rootLayoutSupported(
+    opts.projectRoot,
+    opts.signal,
+    "canonical",
+    opts.allowTypedLocal
+  );
 }
 
 /** Names-only refusal includes the verified inherited primary scope, without reading values or keys. Validated candidate policy supplies the existing opt-out. */

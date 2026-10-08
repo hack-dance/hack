@@ -1,8 +1,12 @@
 import { isRecord } from "./guards.ts";
 import { legacyComposeAdoptionManagedReadLayoutSupported } from "./native-compose-adoption-contract.ts";
+import {
+  resolveLegacyAdoptionLocalInputs,
+  retainLegacyAdoptionLocalRefusal,
+} from "./native-compose-adoption-local.ts";
 import { NativeConfigCompilerError } from "./native-config-compiler.ts";
 import {
-  acquireNativeConfigImportInputs,
+  acquireLegacyAdoptionSourceInputs,
   isOwnedNativeConfigImportAcquisition,
   type NativeConfigImportInputs,
   privateNativeConfigImportSourceProof,
@@ -24,6 +28,7 @@ type Source = Extract<NativeConfigImportInputs, { readonly ok: true }>;
 type Context = {
   readonly source: Source;
   readonly primary: Source | null;
+  readonly local: Awaited<ReturnType<typeof resolveLegacyAdoptionLocalInputs>>;
   readonly selection: NativeProjectEnvSelectionOptions;
   readonly ci: string | undefined;
   readonly mode: string | undefined;
@@ -35,6 +40,7 @@ function refuse(): never {
   );
 }
 function redact(error: unknown): never {
+  retainLegacyAdoptionLocalRefusal(error);
   if (
     error instanceof NativeConfigCompilerError &&
     error.code === "E_COMPILER_CANCELLED"
@@ -69,6 +75,7 @@ export class LegacyAdoptionManagedEnvAdmission {
   static async acquire(opts: {
     readonly source: NativeConfigImportInputs;
     readonly signal?: AbortSignal;
+    readonly binary?: string;
   }): Promise<LegacyAdoptionManagedEnvAdmission> {
     try {
       if (
@@ -78,6 +85,7 @@ export class LegacyAdoptionManagedEnvAdmission {
       }
       const source = opts.source;
       const signal = opts.signal;
+      const binary = opts.binary;
       if (signal !== undefined && !(signal instanceof AbortSignal)) {
         refuse();
       }
@@ -109,7 +117,7 @@ export class LegacyAdoptionManagedEnvAdmission {
         ? await resolveVerifiedPrimaryWorktreeRoot(selection)
         : null;
       const primary = primaryRoot
-        ? await acquireNativeConfigImportInputs({
+        ? await acquireLegacyAdoptionSourceInputs({
             projectRoot: primaryRoot,
             signal,
           })
@@ -117,9 +125,18 @@ export class LegacyAdoptionManagedEnvAdmission {
       if (primary && !primary.ok) {
         refuse();
       }
+      const local = await resolveLegacyAdoptionLocalInputs({
+        source,
+        primary,
+        candidate,
+        overlay,
+        binary,
+        signal,
+      });
       const context = {
         source,
         primary,
+        local,
         selection,
         ci: process.env.CI,
         mode: process.env.HACK_EXECUTION_MODE,
@@ -142,6 +159,14 @@ export class LegacyAdoptionManagedEnvAdmission {
     return this.#context.selection;
   }
 
+  /** Names and pointers only. Raw selection, identities and source bytes remain private. */
+  get localFields() {
+    if (!ownedAdmissions.has(this)) {
+      refuse();
+    }
+    return this.#context.local.fields;
+  }
+
   /** Private manifest provenance; captured sources are factory-issued and still fresh. No key or layer reread. */
   async resolvePrivatePrimaryProof() {
     await this.assertRoot(this.selection);
@@ -154,6 +179,7 @@ export class LegacyAdoptionManagedEnvAdmission {
           }
         : null,
       inheritPrimaryLocal: shouldInheritPrimaryLocalInputs(this.selection),
+      localInputs: this.#context.local.proof,
     };
     for (const key of Object.keys(result)) {
       Object.defineProperty(result, key, { enumerable: false });
@@ -195,6 +221,7 @@ export class LegacyAdoptionManagedEnvAdmission {
         !(await legacyComposeAdoptionManagedReadLayoutSupported({
           projectRoot: opts.projectRoot,
           signal,
+          allowTypedLocal: this.#context.local.proof !== undefined,
         }))
       ) {
         refuse();

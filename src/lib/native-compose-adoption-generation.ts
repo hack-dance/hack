@@ -48,7 +48,6 @@ import {
   NATIVE_CONFIG_INPUT_LIMIT,
 } from "./native-config-compiler.ts";
 import {
-  acquireNativeConfigImportInputs,
   type NativeConfigImportSourceIdentity,
   readNativeConfigImportSourceFile,
   readNativeConfigImportSourceLinkPair,
@@ -291,7 +290,9 @@ export type LegacyComposeAdoptedGenerationStore = {
   readonly prepare: (opts?: {
     readonly binary?: string;
   }) => Promise<LegacyComposeAdoptedGeneration>;
-  readonly loadPrepared: () => Promise<LegacyComposeAdoptedGeneration | null>;
+  readonly loadPrepared: (opts?: {
+    readonly recoverOperation?: boolean;
+  }) => Promise<LegacyComposeAdoptedGeneration | null>;
   readonly loadActive: (opts?: {
     readonly recoverOperation?: boolean;
   }) => Promise<LegacyComposeAdoptedGeneration | null>;
@@ -316,6 +317,13 @@ export type LegacyComposeAdoptedGenerationStore = {
     readonly generation: LegacyComposeAdoptedGeneration;
     readonly operation: AdoptionOperation;
     readonly services: readonly string[];
+    readonly binary?: string;
+    readonly recover?: boolean;
+    readonly run: (input: Readonly<PrivateInputs>) => Promise<number>;
+  }) => Promise<number>;
+  /** Explicit stop of all verified originals before publication; partial completion requires explicit recovery. */
+  readonly withPreparationStop: (opts: {
+    readonly generation: LegacyComposeAdoptedGeneration;
     readonly binary?: string;
     readonly recover?: boolean;
     readonly run: (input: Readonly<PrivateInputs>) => Promise<number>;
@@ -699,7 +707,7 @@ async function admitCandidate(
 }
 function originalLocations(
   ctx: Context,
-  selected: Anchor,
+  selected: Pick<Anchor, "id">,
   meta: SavedManifest,
   input: PrivateInputs
 ) {
@@ -1136,6 +1144,155 @@ async function completeRollback(ctx: Context, state: Receipt) {
   }
 }
 
+type MutationOptions = Parameters<
+  LegacyComposeAdoptedGenerationStore["withMutation"]
+>[0];
+function mutationPublication(
+  state: Receipt,
+  owned: Anchor | undefined,
+  preparationStop: boolean
+): Publication | null {
+  const selected = preparationStop
+    ? state.prepared
+    : state.publication?.generation;
+  if (
+    !(owned && selected) ||
+    JSON.stringify(owned) !== JSON.stringify(selected)
+  ) {
+    refuse();
+  }
+  if (preparationStop) {
+    if (state.publication && state.publication.phase !== "rolled-back") {
+      refuse();
+    }
+    return null;
+  }
+  if (state.publication?.phase !== "active") {
+    refuse();
+  }
+  return state.publication;
+}
+async function requirePreparedSourceInputs(
+  ctx: Context,
+  loaded: Awaited<ReturnType<typeof readInputs>>
+) {
+  await requireFirstSliceLayout(ctx);
+  if (!(await absent(join(ctx.root, ".hack/hack.project.json")))) {
+    refuse("E_LEGACY_ADOPTION_CHANGED");
+  }
+  const selected = {
+    id: loaded.manifest.id,
+  };
+  for (const location of originalLocations(
+    ctx,
+    selected,
+    loaded.manifest,
+    loaded.inputs
+  )) {
+    await requireOriginal(ctx, location.active, location, true);
+  }
+  await ctx.check();
+}
+async function requireMutationInputs(
+  ctx: Context,
+  active: Publication | null,
+  loaded: Awaited<ReturnType<typeof readInputs>>
+) {
+  if (active) {
+    await requireActiveCandidate(ctx, active, loaded.inputs);
+  } else {
+    await requirePreparedSourceInputs(ctx, loaded);
+  }
+}
+async function mutateRetainedContainers(
+  ctx: Context,
+  known: WeakMap<LegacyComposeAdoptedGeneration, Anchor>,
+  captured: MutationOptions,
+  preparationStop = false
+): Promise<number> {
+  let state = await publicationState(ctx);
+  requireStablePublication(state);
+  const owned = known.get(captured.generation);
+  const activePublication = mutationPublication(state, owned, preparationStop);
+  if (!owned) {
+    refuse();
+  }
+  const loaded = await readInputs(ctx, owned);
+  await requireMutationInputs(ctx, activePublication, loaded);
+  await admitCandidate(ctx, loaded.inputs, captured.binary);
+  const services = loaded.inputs.binding.containers.map(
+    (container) => container.service
+  );
+  const selectedServices = captured.services.length
+    ? captured.services
+    : services;
+  validateMutationSelection(
+    state,
+    { ...captured, services: selectedServices },
+    services
+  );
+  const observed = await inspectLegacyComposeContainerStates({
+    binding: loaded.inputs.binding,
+    signal: ctx.signal,
+    timeoutMs: ctx.timeoutMs,
+  });
+  if (
+    observed.some(
+      (value) =>
+        value.paused || !["created", "running", "exited"].includes(value.status)
+    )
+  ) {
+    refuse("E_LEGACY_ADOPTION_UNSUPPORTED");
+  }
+  if (!captured.recover) {
+    state = await save(
+      ctx,
+      {
+        ...state,
+        pendingOperation: {
+          generation: owned,
+          operation: captured.operation,
+          services: selectedServices,
+        },
+      },
+      state
+    );
+  }
+  await readInputs(ctx, owned);
+  await requireMutationInputs(ctx, activePublication, loaded);
+  await requireReceiptSnapshot(ctx, state);
+  const code = await captured.run(loaded.inputs);
+  await ctx.check();
+  await readInputs(ctx, owned);
+  await requireMutationInputs(ctx, activePublication, loaded);
+  const completed = await inspectLegacyComposeContainerStates({
+    binding: loaded.inputs.binding,
+    signal: ctx.signal,
+    timeoutMs: ctx.timeoutMs,
+  });
+  const ids = new Set(
+    loaded.inputs.binding.containers
+      .filter((container) => selectedServices.includes(container.service))
+      .map((container) => container.id)
+  );
+  if (code !== 0) {
+    return code;
+  }
+  if (
+    completed.some(
+      (value) =>
+        ids.has(value.id) &&
+        (value.paused ||
+          value.running !== (captured.operation !== "stop") ||
+          !["created", "running", "exited"].includes(value.status))
+    )
+  ) {
+    refuse("E_LEGACY_ADOPTION_CHANGED");
+  }
+  await save(ctx, { ...state, pendingOperation: null }, state);
+  return code;
+}
+
 /**
  * Durable preparation and explicit stopped format transition. Uses the same
  * bounded private file/lock authority as native generations, with a distinct
@@ -1306,9 +1463,13 @@ export async function openLegacyComposeAdoptedGenerationStore(input: {
           translate(error, signal);
         }
       },
-      async loadPrepared() {
+      async loadPrepared(opts = {}) {
         try {
-          requireStablePublication(await publicationState(ctx));
+          const state = await publicationState(ctx);
+          requireStablePublication(state);
+          if (!opts.recoverOperation) {
+            requireNoPendingOperation(state);
+          }
           const current = await selected();
           if (!current) {
             return null;
@@ -1360,20 +1521,7 @@ export async function openLegacyComposeAdoptedGenerationStore(input: {
             await requireFirstSliceLayout(ctx);
             await admitCandidate(ctx, loaded.inputs, binary);
             await requireStopped(ctx, loaded.inputs.binding);
-            const source = await acquireNativeConfigImportInputs({
-              projectRoot: root,
-              signal,
-            });
-            if (
-              !source.ok ||
-              source.configText !== loaded.inputs.configText ||
-              source.composeText !== loaded.inputs.composeText ||
-              JSON.stringify(source.sourceFiles) !==
-                JSON.stringify(loaded.manifest.sourceFiles)
-            ) {
-              refuse("E_LEGACY_ADOPTION_CHANGED");
-            }
-            await source.assertFresh({ signal });
+            await requirePreparedSourceInputs(ctx, loaded);
             const publication: Publication = {
               generation: owned,
               phase: "switching",
@@ -1488,97 +1636,24 @@ export async function openLegacyComposeAdoptedGenerationStore(input: {
       async withMutation(opts) {
         try {
           const captured = { ...opts, services: [...opts.services] };
-          return await lock.withLock(async () => {
-            let state = await publicationState(ctx);
-            requireStablePublication(state);
-            const owned = known.get(captured.generation);
-            if (
-              !owned ||
-              state.publication?.phase !== "active" ||
-              JSON.stringify(owned) !==
-                JSON.stringify(state.publication.generation)
-            ) {
-              refuse();
-            }
-            const loaded = await readInputs(ctx, owned);
-            const activePublication = state.publication;
-            await requireActiveCandidate(ctx, activePublication, loaded.inputs);
-            await admitCandidate(ctx, loaded.inputs, captured.binary);
-            const services = loaded.inputs.binding.containers.map(
-              (container) => container.service
-            );
-            const selectedServices = captured.services.length
-              ? captured.services
-              : services;
-            validateMutationSelection(
-              state,
-              { ...captured, services: selectedServices },
-              services
-            );
-            const observed = await inspectLegacyComposeContainerStates({
-              binding: loaded.inputs.binding,
-              signal,
-              timeoutMs,
-            });
-            if (
-              observed.some(
-                (value) =>
-                  value.paused ||
-                  !["created", "running", "exited"].includes(value.status)
-              )
-            ) {
-              refuse("E_LEGACY_ADOPTION_UNSUPPORTED");
-            }
-            if (!captured.recover) {
-              state = await save(
-                ctx,
-                {
-                  ...state,
-                  pendingOperation: {
-                    generation: owned,
-                    operation: captured.operation,
-                    services: selectedServices,
-                  },
-                },
-                state
-              );
-            }
-            await readInputs(ctx, owned);
-            await requireActiveCandidate(ctx, activePublication, loaded.inputs);
-            await requireReceiptSnapshot(ctx, state);
-            const code = await captured.run(loaded.inputs);
-            await ctx.check();
-            await readInputs(ctx, owned);
-            await requireActiveCandidate(ctx, activePublication, loaded.inputs);
-            const completed = await inspectLegacyComposeContainerStates({
-              binding: loaded.inputs.binding,
-              signal,
-              timeoutMs,
-            });
-            const ids = new Set(
-              loaded.inputs.binding.containers
-                .filter((container) =>
-                  selectedServices.includes(container.service)
-                )
-                .map((container) => container.id)
-            );
-            if (code !== 0) {
-              return code;
-            }
-            if (
-              completed.some(
-                (value) =>
-                  ids.has(value.id) &&
-                  (value.paused ||
-                    value.running !== (captured.operation !== "stop") ||
-                    !["created", "running", "exited"].includes(value.status))
-              )
-            ) {
-              refuse("E_LEGACY_ADOPTION_CHANGED");
-            }
-            await save(ctx, { ...state, pendingOperation: null }, state);
-            return code;
-          });
+          return await lock.withLock(
+            async () => await mutateRetainedContainers(ctx, known, captured)
+          );
+        } catch (error: unknown) {
+          translate(error, signal);
+        }
+      },
+      async withPreparationStop(opts) {
+        try {
+          const captured = {
+            ...opts,
+            operation: "stop" as const,
+            services: [],
+          };
+          return await lock.withLock(
+            async () =>
+              await mutateRetainedContainers(ctx, known, captured, true)
+          );
         } catch (error: unknown) {
           translate(error, signal);
         }

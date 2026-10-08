@@ -7,11 +7,14 @@ import {
 } from "../cli/command.ts";
 import { optJson, optPath } from "../cli/options.ts";
 import { HackCliError } from "../lib/cli-result.ts";
+import { resolveComposeStartupTimeoutMs } from "../lib/compose-startup-budget.ts";
 import {
   LegacyComposeAdoptedGenerationError,
+  type LegacyComposeAdoptedGenerationStore,
   openLegacyComposeAdoptedGenerationStore,
 } from "../lib/native-compose-adoption-generation.ts";
 import { previewLegacyComposeAdoption } from "../lib/native-compose-adoption-preview.ts";
+import { run } from "../lib/shell.ts";
 
 const spec = defineCommand({
   name: "adopt",
@@ -20,6 +23,13 @@ const spec = defineCommand({
   description:
     "Qualifies a strict static legacy subset with exact existing data volumes. --dry-run reports fields without writes. Adoption journals the stopped format switch and holds original files for rollback; retained-container commands never create replacement data. Requires an upgraded launcher. Linked Git/local inheritance and container recreation remain unsupported.",
   options: [
+    defineOption({
+      name: "stop",
+      type: "boolean",
+      long: "--stop",
+      description:
+        "Explicitly journal and stop the exact original containers before adopting; never removes data anchors",
+    } as const),
     defineOption({
       name: "dryRun",
       type: "boolean",
@@ -50,11 +60,13 @@ const spec = defineCommand({
 async function dryRun(
   projectRoot: string,
   signal: AbortSignal,
-  json?: boolean
+  json?: boolean,
+  stop?: boolean
 ) {
   const report = await previewLegacyComposeAdoption({
     projectRoot,
     signal,
+    stop,
   });
   if (json) {
     process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
@@ -71,12 +83,61 @@ async function dryRun(
   return report.complete ? 0 : 1;
 }
 
+async function adoptPrepared(
+  opts: Parameters<typeof apply>[0],
+  store: LegacyComposeAdoptedGenerationStore
+): Promise<number> {
+  if (opts.recover) {
+    await store.recoverInterruptedLock();
+  }
+  const generation = opts.recover
+    ? await store.loadPrepared({ recoverOperation: true })
+    : await store.prepare();
+  if (!generation) {
+    throw new Error(
+      "Legacy adoption preparation is unavailable; values omitted."
+    );
+  }
+  if (opts.stop) {
+    const code = await store.withPreparationStop({
+      generation,
+      recover: opts.recover,
+      run: async (input) => {
+        if (opts.signal.aborted) {
+          throw new Error("Legacy adoption cancelled; values omitted.");
+        }
+        return await run(
+          [
+            "docker",
+            "container",
+            "stop",
+            ...input.binding.containers.map((container) => container.id),
+          ],
+          {
+            cwd: opts.projectRoot,
+            stdin: "ignore",
+            stdout: "stderr",
+            timeoutMs: resolveComposeStartupTimeoutMs(),
+            forwardSignals: true,
+          }
+        );
+      },
+    });
+    if (code !== 0) {
+      return code;
+    }
+  }
+  await store.publish({ generation });
+  return 0;
+}
+
 async function apply(opts: {
   readonly projectRoot: string;
   readonly signal: AbortSignal;
   readonly rollback?: boolean;
   readonly recover?: boolean;
   readonly json?: boolean;
+  readonly stop?: boolean;
 }) {
   const saved = opts.rollback || opts.recover,
     store = await openLegacyComposeAdoptedGenerationStore({
@@ -85,7 +146,7 @@ async function apply(opts: {
       signal: opts.signal,
     });
   try {
-    if (opts.recover) {
+    if (opts.recover && !opts.stop) {
       await store.recoverInterruptedLock();
       await store.repairPublication({
         action: opts.rollback ? "rollback" : "complete",
@@ -93,8 +154,10 @@ async function apply(opts: {
     } else if (opts.rollback) {
       await store.rollback();
     } else {
-      const generation = await store.prepare();
-      await store.publish({ generation });
+      const code = await adoptPrepared(opts, store);
+      if (code !== 0) {
+        return code;
+      }
     }
     const status = opts.rollback ? "rolled-back" : "active";
     const report = {
@@ -115,6 +178,9 @@ async function apply(opts: {
 }
 
 export const configAdoptCommand = withHandler(spec, async ({ ctx, args }) => {
+  if (args.options.stop && args.options.rollback) {
+    throw new CliUsageError("Use --stop separately from --rollback.");
+  }
   if (args.options.dryRun && (args.options.rollback || args.options.recover)) {
     throw new CliUsageError(
       "Use --dry-run separately from --rollback or --recover."
@@ -127,7 +193,12 @@ export const configAdoptCommand = withHandler(spec, async ({ ctx, args }) => {
   process.once("SIGTERM", cancel);
   try {
     if (args.options.dryRun) {
-      return await dryRun(projectRoot, controller.signal, args.options.json);
+      return await dryRun(
+        projectRoot,
+        controller.signal,
+        args.options.json,
+        args.options.stop
+      );
     }
     return await apply({
       projectRoot,
@@ -135,6 +206,7 @@ export const configAdoptCommand = withHandler(spec, async ({ ctx, args }) => {
       rollback: args.options.rollback,
       recover: args.options.recover,
       json: args.options.json,
+      stop: args.options.stop,
     });
   } catch (error: unknown) {
     throw new HackCliError({

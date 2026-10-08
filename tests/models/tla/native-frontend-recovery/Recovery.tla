@@ -15,10 +15,10 @@ Issued == active /\ owner = savedOwner /\ savedNext = 0 /\ alive
 Init == /\ fresh \in BOOLEAN
         /\ directory = TRUE /\ owner = 1 /\ pending = 0
         /\ savedOwner = 1 /\ savedNext = 0 /\ release = FALSE
-        /\ stage = IF fresh THEN "leased" ELSE "admitted"
+        /\ stage = (IF fresh THEN "leased" ELSE "admitted")
         /\ active = fresh /\ alive = fresh /\ attempts = 0
         /\ crashed = FALSE /\ crashStage = "none"
-        /\ progress = IF fresh THEN 3 ELSE 0 /\ ready = ~fresh
+        /\ progress = (IF fresh THEN 3 ELSE 0) /\ ready = ~fresh
         /\ binding = 1 /\ unsafePromotion = FALSE
         /\ unsafeAbsence = FALSE /\ unsafeEffect = FALSE
 ReserveCandidate ==
@@ -57,7 +57,7 @@ AdvanceResources ==
     /\ stage = "leased" /\ progress < 3
     /\ (EnforceAuthority => Issued) /\ (EnforceBinding => Matches)
     /\ progress' = progress + 1
-    /\ ready' = IF progress = 1 THEN FALSE ELSE ready
+    /\ ready' = (IF progress = 1 THEN FALSE ELSE ready)
     /\ unsafeEffect' = unsafeEffect \/ ~Issued \/ ~Matches
     /\ UNCHANGED <<fresh, publication, process, history, binding,
                     unsafePromotion, unsafeAbsence>>

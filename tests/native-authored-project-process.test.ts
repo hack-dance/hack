@@ -467,32 +467,80 @@ test("status descendant-held pipes cannot outlive startup admission or owned cle
   let receiptObserved = false;
   let ownedExitCode: number | undefined;
   let nativeFailureObserved = false;
-  const start = performance.now();
-  try {
-    await serveNativeAuthoredProjectGraph({
-      ...opts,
-      startupTimeoutMs: 200,
-      onReceipt: () => {
-        receiptObserved = true;
-        return undefined;
-      },
-      onExitDiagnostic: (diagnostic) => {
-        ownedExitCode = diagnostic.exitCode;
-        nativeFailureObserved = diagnostic.nativeCode !== undefined;
-      },
-      onReady: async () => {
-        published = true;
-      },
+  let operationSettled = false;
+  let admitted = false;
+  let cancellationStarted: number | undefined;
+  let cancellationTimer: ReturnType<typeof setTimeout> | undefined;
+  const controller = new AbortController();
+  const operation = serveNativeAuthoredProjectGraph({
+    ...opts,
+    // Admission is a precondition here; the independent 200ms startup test
+    // above retains that deadline. Cancel only an observed pending status.
+    startupTimeoutMs: 2000,
+    signal: controller.signal,
+    onReceipt: () => {
+      receiptObserved = true;
+      return undefined;
+    },
+    onExitDiagnostic: (diagnostic) => {
+      ownedExitCode = diagnostic.exitCode;
+      nativeFailureObserved = diagnostic.nativeCode !== undefined;
+    },
+    onReady: async () => {
+      published = true;
+    },
+  })
+    .catch((error: unknown) => {
+      failure = String(error);
+    })
+    .finally(() => {
+      operationSettled = true;
     });
-  } catch (error) {
-    failure = String(error);
-  }
-  const operationElapsedMs = performance.now() - start;
   try {
+    const admissionDeadline = performance.now() + 2000;
+    while (!operationSettled && performance.now() < admissionDeadline) {
+      const statusEntered = await Bun.file(
+        join(opts.projectRoot, "authenticated-status-started")
+      )
+        .text()
+        .catch(() => undefined);
+      const keeperText = await Bun.file(join(opts.projectRoot, "keeper-pid"))
+        .text()
+        .catch(() => undefined);
+      const selectedKeeper = Number(keeperText);
+      if (
+        receiptObserved &&
+        statusEntered === "status" &&
+        Number.isSafeInteger(selectedKeeper) &&
+        selectedKeeper > 1
+      ) {
+        keeper = selectedKeeper;
+        try {
+          process.kill(keeper, 0);
+          admitted = true;
+          break;
+        } catch {
+          // Unknown or already-dead keeper never supplies admission authority.
+        }
+      }
+      await Bun.sleep(5);
+    }
+    if (admitted) {
+      cancellationStarted = performance.now();
+      cancellationTimer = setTimeout(() => controller.abort(), 200);
+    } else {
+      controller.abort();
+    }
+    await operation;
+    const operationElapsedMs =
+      cancellationStarted === undefined
+        ? undefined
+        : performance.now() - cancellationStarted;
     if (process.env.HACK_NATIVE_STATUS_FIXTURE_DIAGNOSTIC === "1") {
       console.error(
         JSON.stringify({
           kind: "native-status-fixture-stages",
+          admitted,
           receiptObserved,
           ownedExitCode: ownedExitCode ?? null,
           nativeFailureObserved,
@@ -511,6 +559,11 @@ test("status descendant-held pipes cannot outlive startup admission or owned cle
         })
       );
     }
+    expect(admitted).toBe(true);
+    if (keeper === undefined) {
+      throw new Error("Status keeper admission requires an observed live PID.");
+    }
+    expect(operationElapsedMs).toBeDefined();
     expect(operationElapsedMs).toBeLessThan(1500);
     expect(failure).toContain("canceled");
     expect(failure).not.toContain("synthetic-private-keeper-detail");
@@ -518,16 +571,18 @@ test("status descendant-held pipes cannot outlive startup admission or owned cle
     expect(
       await Bun.file(join(opts.projectRoot, "cleanup-complete")).text()
     ).toBe("cleaned");
-    keeper = Number(
-      await Bun.file(join(opts.projectRoot, "keeper-pid")).text()
-    );
     expect(Number.isSafeInteger(keeper) && keeper > 1).toBe(true);
     expect(() => process.kill(keeper, 0)).not.toThrow();
     expect(
       await Bun.file(join(opts.projectRoot, "keeper-complete")).exists()
     ).toBe(false);
   } finally {
-    if (keeper === undefined) {
+    clearTimeout(cancellationTimer);
+    if (!operationSettled) {
+      controller.abort();
+    }
+    await operation;
+    if (!admitted || keeper === undefined) {
       // A failed setup never supplies a PID or completion authority.
       roots.splice(roots.indexOf(opts.projectRoot), 1);
     } else {

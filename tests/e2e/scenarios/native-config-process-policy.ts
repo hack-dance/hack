@@ -16,7 +16,10 @@ import {
   type Scenario,
 } from "../harness.ts";
 import { prepareNativeEngineTripwire } from "../native-engine-tripwire.ts";
-import { summarizeProcessPolicyInitialTrace } from "../native-process-policy-initial-replay.ts";
+import {
+  persistProcessPolicyFirstAfterComposeRefusal,
+  summarizeProcessPolicyInitialTrace,
+} from "../native-process-policy-initial-replay.ts";
 import { prepareProcessPolicyInitialTrace } from "../native-process-policy-initial-trace.ts";
 import {
   isKnownUncertainProcessPolicyStartup,
@@ -732,6 +735,13 @@ export const nativeConfigProcessPolicyScenario: Scenario = {
           });
           ctx.log(
             `fixed-field original-query replay: ${JSON.stringify(replay)}`
+          );
+          const capsule = await persistProcessPolicyFirstAfterComposeRefusal({
+            directory: ctx.tempRoot,
+            summary: replay,
+          });
+          ctx.log(
+            `fixed-field first after-compose replay refusal: ${JSON.stringify(capsule)}`
           );
         } catch {
           stage(

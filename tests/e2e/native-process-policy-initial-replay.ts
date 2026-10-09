@@ -281,3 +281,55 @@ export async function summarizeProcessPolicyInitialTrace(opts: {
     await store.close();
   }
 }
+
+/** Persist only the first owner-issued refusal from matching after-Compose
+ * recorded replies. This cannot identify the original caller mode or timing. */
+export async function persistProcessPolicyFirstAfterComposeRefusal(opts: {
+  readonly directory: string;
+  readonly summary: Awaited<
+    ReturnType<typeof summarizeProcessPolicyInitialTrace>
+  >;
+}) {
+  const row = opts.summary.observations.find(
+    (observation) =>
+      observation.phase === "after-compose" &&
+      observation.startup.protocolMatched &&
+      observation.strict.protocolMatched &&
+      [observation.startup, observation.strict].some(
+        (mode) =>
+          mode.outcome === "refused" &&
+          mode.code === "E_NATIVE_COMPOSE_OWNERSHIP"
+      )
+  );
+  if (!row) {
+    return null;
+  }
+  const capsule = {
+    version: 1 as const,
+    kind: "native-process-policy-after-compose-replay-refusal" as const,
+    observationIndex: row.index,
+    replayUsesRecordedReplies: true as const,
+    replaysWallTiming: false as const,
+    originalCallerModeKnown: false as const,
+    startupReason:
+      row.startup.code === "E_NATIVE_COMPOSE_OWNERSHIP"
+        ? row.startup.reason
+        : null,
+    strictReason:
+      row.strict.code === "E_NATIVE_COMPOSE_OWNERSHIP"
+        ? row.strict.reason
+        : null,
+  };
+  const handle = await open(
+    join(opts.directory, "first-after-compose-replay-refusal.json"),
+    "wx",
+    0o600
+  );
+  try {
+    await handle.writeFile(`${JSON.stringify(capsule)}\n`);
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+  return capsule;
+}

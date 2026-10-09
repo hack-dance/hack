@@ -3325,11 +3325,18 @@ test("unsupported inherited primary inputs refuse before engine inspection or pr
 for (const mode of ["policy", "ci"] as const) {
   test(`the existing inheritance opt-out ${mode} excludes primary managed inputs`, async () => {
     await linkedCheckout();
-    await writeFile(join(root, "checkout/.hack/hack.env.local.yaml"), CANARY);
+    const primaryFile = join(root, "checkout/.hack/hack.env.local.yaml");
+    await writeFile(primaryFile, CANARY);
+    const inherited = await previewLegacyComposeAdoption({
+      projectRoot,
+      binary: await compiler(),
+    });
+    expect(inherited.complete).toBe(false);
+    expect(JSON.stringify(inherited)).not.toContain(CANARY);
     if (mode === "policy") {
       await writeFile(
         join(projectRoot, ".hack/hack.config.json"),
-        '{"name":"fixture","worktree":{"inherit_local":false}}'
+        '{"name":"fixture","worktree":{"auto_branch":false,"inherit_local":false}}'
       );
     } else {
       process.env.CI = "1";
@@ -3340,6 +3347,7 @@ for (const mode of ["policy", "ci"] as const) {
     });
     expect(preview.complete).toBe(true);
     expect(JSON.stringify(preview)).not.toContain(CANARY);
+    expect(await readFile(primaryFile, "utf8")).toBe(CANARY);
   });
 }
 

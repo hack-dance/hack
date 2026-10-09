@@ -507,7 +507,9 @@ function resource(
     value.name !== `hkn-${run}-network-${network.index}` ||
     value.image !== null ||
     (value.networks !== undefined && value.networks !== null) ||
-    value.outbound !== !network.internal ||
+    // Rust omits false on serialization; an omitted internal policy is false.
+    (value.outbound === undefined ? false : value.outbound) !==
+      !network.internal ||
     ![
       "reserved",
       "create-intent",

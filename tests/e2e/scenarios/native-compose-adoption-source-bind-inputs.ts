@@ -417,7 +417,7 @@ try {
  const receipt=exists?JSON.parse(await file.text()):null;
  if(args[0]==='container' && ['start','stop'].includes(args[1])) {
   if(!sourceBindFixtureMutationAllowed({args,scope,receipt,recoverPendingStartStop:${opts.recoverPendingStartStop}}))refused('mutation-admission',94);
-  const observed=await createNativeComposeProbe({timeoutMs:Math.min(10000,remaining())})(['info','--format','{{json .ID}}']);
+  const observed=(await createNativeComposeProbe({timeoutMs:Math.min(10000,remaining())})(['info','--format','{{json .ID}}'])).trim();
   if(observed!==${JSON.stringify(opts.engineId)})refused('daemon',95);
   ${opts.interruption === "prepared-stop" ? `if(args[1]!=='stop'||args[2]!==scope.worker)refused('partial-stop',96);` : ""}
   const code=await run([engine,...args],{stdin:'ignore',stdout:'ignore',stderr:'ignore',forwardSignals:true,timeoutMs:remaining(),beforeSpawn:remaining});

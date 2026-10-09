@@ -46,6 +46,7 @@ const ACTIVE = {
 };
 const RECOVER = ["down", "--recover", "--json"];
 const CANARY = "synthetic-private-fixture-output";
+const ENGINE_ID = JSON.stringify("synthetic-daemon");
 
 async function emitted(opts: {
   readonly args: string[];
@@ -83,7 +84,7 @@ async function emitted(opts: {
         "import {appendFile} from 'node:fs/promises';",
         "const args=process.argv.slice(2);",
         `await appendFile(${JSON.stringify(forwarded)},JSON.stringify(args)+'\\n');`,
-        `if(JSON.stringify(args)===JSON.stringify(['info','--format','{{json .ID}}'])){console.log(${JSON.stringify(opts.engineId ?? "synthetic-daemon")});process.exit(0);}`,
+        `if(JSON.stringify(args)===JSON.stringify(['info','--format','{{json .ID}}'])){console.log(${JSON.stringify(opts.engineId ?? ENGINE_ID)});process.exit(0);}`,
         `if(JSON.stringify(args)===JSON.stringify(['container','stop',${JSON.stringify(ID)}]))process.exit(0);`,
         "process.exit(97);",
       ].join("\n"),
@@ -94,7 +95,7 @@ async function emitted(opts: {
       {
         ctx: { tempRoot: outer },
         engine,
-        engineId: "synthetic-daemon",
+        engineId: ENGINE_ID,
         anchors: new Map([
           [
             instance,

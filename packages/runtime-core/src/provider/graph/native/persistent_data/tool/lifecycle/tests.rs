@@ -494,7 +494,7 @@ fn foreign_provider_lease_and_unknown_invocation_never_gain_late_admission() {
 }
 
 #[test]
-fn active_transport_use_prevents_retirement_and_capacity_never_evicts_revocation() {
+fn active_transport_use_prevents_retirement_and_uncertainty_revokes_the_run() {
     let f = Fixture::new();
     let mut port = Fake::default();
     let first = f.issued(&mut port);
@@ -507,16 +507,60 @@ fn active_transport_use_prevents_retirement_and_capacity_never_evicts_revocation
     retire_with(second, &f.candidate, &mut port).unwrap();
     assert_eq!(port.removals, 1);
 
-    let lifetime = guest_tool::Lifetime::default();
-    for run in 0..64 {
-        lifetime.retire(&lifetime, &format!("{run:032x}")).unwrap();
-    }
-    let next = format!("{:032x}", 64);
-    assert!(lifetime.retire(&lifetime, &next).is_err());
-    assert!(lifetime.enter(&lifetime, &next).is_err());
-    assert!(lifetime.check(&lifetime, &format!("{:032x}", 0)).is_err());
     let uncertain = guest_tool::Lifetime::default();
     drop(uncertain.enter(&uncertain, RUN).unwrap());
     assert!(uncertain.check(&uncertain, RUN).is_err());
     assert!(uncertain.retire(&uncertain, RUN).is_err());
+}
+
+#[test]
+fn lease_binds_one_run_before_transport_without_a_cross_lease_run_budget() {
+    let f = Fixture::new();
+    let other = Fixture::with_run("eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee");
+    let mut port = Fake::default();
+    let first = f.issued(&mut port);
+    let reads = port.reads;
+    assert!(reopen_with(&other.candidate, &other.receipt, &mut port).is_err());
+    assert_eq!((port.reads, port.invocations, port.removals), (reads, 0, 0));
+    // A completed use does not clear the binding. Its original sibling remains
+    // usable even after a different run was refused on the same lease.
+    verify(&first, &mut port).unwrap();
+    f.issued(&mut port);
+    assert!(
+        port.lifetime
+            .check(port.lifetime(), other.receipt.review.scope().run)
+            .is_err()
+    );
+    assert!(
+        port.lifetime
+            .retire(port.lifetime(), other.receipt.review.scope().run)
+            .is_err()
+    );
+    verify(&first, &mut port).unwrap();
+
+    let original = guest_tool::Lifetime::default();
+    original.check(&original, RUN).unwrap(); // installation admission also binds
+    assert!(
+        original
+            .enter(&original, other.receipt.review.scope().run)
+            .is_err()
+    );
+    original.enter(&original, RUN).unwrap().complete();
+    original.retire(&original, RUN).unwrap();
+    assert!(original.check(&original, RUN).is_err());
+    assert!(
+        original
+            .check(&original, other.receipt.review.scope().run)
+            .is_err()
+    );
+    // Independent operation leases have independent authority; retiring more
+    // than the removed map ceiling cannot exhaust a process-wide run budget.
+    for index in 0..128 {
+        let lifetime = guest_tool::Lifetime::default();
+        let run = format!("{index:032x}");
+        lifetime.check(&lifetime, &run).unwrap();
+        lifetime.enter(&lifetime, &run).unwrap().complete();
+        lifetime.retire(&lifetime, &run).unwrap();
+        assert!(lifetime.enter(&lifetime, &run).is_err());
+    }
 }

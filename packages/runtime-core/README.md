@@ -1617,10 +1617,12 @@ so ordinary workload removal cannot retire its verifier. A separately eligible h
 can remove only its exact helper, owner file and empty original directory; an ambiguous
 result has no retry, follow-up cleanup or crash-resume authority. These source and
 stand-in transport controls do not qualify guest execution or enable storage startup.
-Tool handles are bound to one original Engine/provider lease. The bounded volatile
-retirement-attempt set is shared by all handles from that lease; claiming a run before
-transport permanently revokes every sibling handle, even if failure leaves guest files
-unchanged. A fresh lease cannot accept an older handle, and no revocation entry is evicted.
+Tool handles are bound to one run on its original Engine/provider lease. The first
+admission binds that run for the lease's entire lifetime; another run on that lease
+refuses before transport. Its constant-size volatile state is shared by all sibling
+handles; claiming retirement before transport permanently revokes them, even if failure
+leaves guest files unchanged. A fresh lease cannot accept an older handle and has its own
+independent run authority. There is no count limit shared across operation leases.
 Active tool transport also prevents retirement; uncertain transport revokes sibling
 handles rather than treating guard destruction as proof that a guest command settled.
 The shared artifact reader now requires a current-UID regular file with one link,

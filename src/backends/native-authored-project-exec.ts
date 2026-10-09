@@ -1,5 +1,5 @@
-import { constants } from "node:fs";
-import { lstat, open, realpath } from "node:fs/promises";
+import { constants, fstatSync, lstatSync, realpathSync } from "node:fs";
+import { open, realpath } from "node:fs/promises";
 import { isRecord } from "../lib/guards.ts";
 import { keys, sameFile } from "../lib/native-compose-private-state.ts";
 import { nativeAuthoredExecOptions } from "./native-authored-exec-options.ts";
@@ -157,10 +157,10 @@ export async function nativeAuthoredProjectExec(input: {
     );
     try {
       const original = await file.stat();
-      const check = async () => {
+      const executableFresh = () => {
         active();
-        const named = await lstat(runtime.binary),
-          held = await file.stat();
+        const named = lstatSync(runtime.binary),
+          held = fstatSync(file.fd);
         if (
           !original.isFile() ||
           original.nlink !== 1 ||
@@ -176,16 +176,24 @@ export async function nativeAuthoredProjectExec(input: {
               info.ctimeMs !== original.ctimeMs ||
               info.mode !== original.mode ||
               info.uid !== original.uid ||
+              info.gid !== original.gid ||
               info.nlink !== 1
           ) ||
-          (await realpath(runtime.binary)) !== runtime.binary
+          realpathSync(runtime.binary) !== runtime.binary
         ) {
           return refused();
         }
-        await saved.assertFresh();
         active();
       };
+      const check = async () => {
+        executableFresh();
+        await saved.assertFresh();
+        // Recheck the executable after any awaited saved-owner admission.
+        executableFresh();
+      };
       await check();
+      // No await separates this final path/descriptor admission from real spawn.
+      executableFresh();
       const value = await invoke({
         runtime,
         cwd: scope.projectRoot,

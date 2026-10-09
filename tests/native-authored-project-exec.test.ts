@@ -337,6 +337,40 @@ test("exec cancellation after the real held owner closes admits no output", asyn
     expect(closed).toBe(true);
   }));
 
+test("runtime replacement during the last saved-owner assertion refuses before dispatch", async () =>
+  owned(async () => {
+    const f = await fixture();
+    let invokes = 0,
+      assertions = 0;
+    await expect(
+      nativeAuthoredProjectExec({
+        ...f,
+        service: "web",
+        command,
+        withStatus: (scope, action) =>
+          withNativeAuthoredProjectStatus(scope, (saved) =>
+            action({
+              ...saved,
+              assertFresh: async () => {
+                await saved.assertFresh();
+                assertions++;
+                const bytes = await readFile(f.runtime.binary);
+                await rename(f.runtime.binary, `${f.runtime.binary}.old`);
+                await Bun.write(f.runtime.binary, bytes);
+                await chmod(f.runtime.binary, 0o700);
+              },
+            })
+          ),
+        invoke: async () => {
+          invokes++;
+          return f.reply;
+        },
+      })
+    ).rejects.toThrow();
+    expect(assertions).toBe(1);
+    expect(invokes).toBe(0);
+  }));
+
 test.each([
   "container",
   "service",
@@ -644,6 +678,52 @@ macTest(
         expect(write).not.toHaveBeenCalled();
       } finally {
         write.mockRestore();
+      }
+    })
+);
+
+macTest.each([1, 2])(
+  "cancellation during admitted local output write%d returns130 without later writes",
+  async (cancelAt) =>
+    owned(async () => {
+      const f = await fixture();
+      let writes = 0;
+      const writer = spyOn(Bun, "write").mockImplementation(async () => {
+        writes++;
+        if (writes === cancelAt) {
+          process.emit("SIGINT");
+        }
+        return 1;
+      });
+      try {
+        const result = await tryNativeAuthoredCommand({
+          selected: { kind: "native", projectRoot: f.scope.projectRoot },
+          options: {
+            cwd: f.scope.projectRoot,
+            operation: "exec",
+            service: "web",
+            command,
+          },
+          env: {
+            HACK_RUNTIME_BACKEND: "native",
+            HACK_NATIVE_BINARY: f.runtime.binary,
+            HACK_NATIVE_HOME: f.runtime.home,
+          },
+          exec: async () => ({
+            backend: "native",
+            run: "a".repeat(32),
+            service: "web",
+            container: "2".repeat(64),
+            exitCode: 17,
+            stdout: new Uint8Array([1]),
+            stderr: new Uint8Array([2]),
+            truncated: false,
+          }),
+        });
+        expect(result).toBe(130);
+        expect(writes).toBe(cancelAt);
+      } finally {
+        writer.mockRestore();
       }
     })
 );

@@ -499,11 +499,17 @@ async function runAuthoredExec(input: {
       return 130;
     }
     await Bun.write(Bun.stdout, result.stdout);
+    if (controller.signal.aborted) {
+      return 130;
+    }
     await Bun.write(Bun.stderr, result.stderr);
+    if (controller.signal.aborted) {
+      return 130;
+    }
     if (result.truncated) {
       process.stderr.write("Native exec output was truncated.\n");
     }
-    return result.exitCode;
+    return controller.signal.aborted ? 130 : result.exitCode;
   } catch {
     if (controller.signal.aborted) {
       return 130;

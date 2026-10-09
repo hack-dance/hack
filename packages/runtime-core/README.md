@@ -81,8 +81,8 @@ read-only project source bind per selected workload. The authored source mode is
 of descendants inside a selected directory. A selected regular file may change
 in place; replacing that file itself changes the selected identity and refuses.
 Writable source binds and custom source roots remain unsupported. Source-bearing
-projects cannot combine live source with persistent storage; the separate storage
-intent contract remains inactive before provider admission.
+projects cannot combine live source with persistent storage. The separate storage
+candidate requires an explicitly pinned guest witness tool before provider admission.
 This does not create an immutable snapshot or publish a new source revision.
 
 Source consumption requires the provider pool to already contain the exact
@@ -1515,20 +1515,23 @@ retention remain open.
 
 ### Native persistent-storage adapter and receipt v4
 
-Ordinary persistent startup is explicitly gated before provider connection or
-graph/data owner publication. The adapter and receipt v4 below are inactive
-groundwork until a durable root-continuity witness and its transport are qualified.
+Persistent startup without an explicit witness tool remains gated before provider
+connection or graph/data owner publication. The candidate can select a caller-pinned
+Linux arm64 tool through paired `--storage-witness-tool` and
+`--expect-storage-witness-tool` options on native `run`/`serve`. The path must be
+absolute and the SHA-256 exact. There is no artifact discovery, build, download,
+emulation or fallback. Source wiring is not package/ABI or live SQL qualification.
 Name, labels, `CreatedAt` and directory device/inode can all alias after an empty
 volume replacement; matching that tuple is insufficient. No metadata-only pass
 can enable storage or establish unique physical continuity.
 
-The inactive source implementation connects `persistent_data::engine` to the existing
+The explicit candidate implementation connects `persistent_data::engine` to the existing
 native graph Engine. Receipt v4 carries stable data references and exact workload
 mounts outside its run-owned container/network inventory. A persistent identity has
 no run, plan or generation ID. Graph2 image-only receipts retain their old binding
 bytes; graph3 is reserved for the separate source-bearing contract. Persistent
-graph4 is not eligible for the dead-publication recovery selector: its explicit
-qualification remains open. Ordinary authenticated compute teardown uses the
+graph4 with a complete enrolled proof may enter the same-boot recovery candidate;
+its runtime qualification remains open. Ordinary authenticated compute teardown uses the
 original graph owner and never deletes, recreates or replays data or jobs.
 
 All supported mutation paths retain `OwnedGuest` and its original provider
@@ -1592,14 +1595,14 @@ created only during the original enrollment with `XATTR_CREATE` on a retained
 nofollow root descriptor, synchronized, and independently reread with exact
 descriptor/path/root checks. Retained startup only reads; missing/changed witness
 refuses without repair. Whole-root/xattr copying remains outside the claimed
-guarantee. The metadata-only checkpoint does not implement or qualify that helper
-boundary; the inactive witnessed continuation below adds its source.
+guarantee. The historical metadata-only checkpoint did not implement that helper
+boundary; the witnessed continuation below connects its source without claiming live qualification.
 
 These runtime/SQL gates and replacement safety are not yet qualified by this source implementation. Stock
 PostgreSQL parity remains a separate NC05 gate requiring authored ownership/user
 or a specifically qualified capability policy. This slice guesses no UID/GID,
 changes no volume permissions, and adds no capability to make a stock image work.
-# Witnessed enrollment continuation (inactive)
+# Witnessed runtime enrollment (candidate)
 
 The separate persistent owner version2 stores its expected root xattr in the private
 pending intent before the single original volume create. It captures the original
@@ -1613,9 +1616,36 @@ Native receipt4 may describe a separate pinned guest tool installation, includin
 original directory and helper identities. This control path shares the existing relay
 artifact/upload boundary and uses private descriptor input under the original operation
 deadline. Dependency-free legacy graphs continue to install no guest artifact. Tool
-receipt parsing grants neither installation nor storage authority, and this continuation
-does not enable ordinary persistent startup. The Linux private-filesystem controls,
-installed helper/guest transport, and real Bun/SQLite retention still require qualification.
+receipt parsing grants neither installation nor storage authority. Startup selects only
+version2 owners, publishes the current run/tool reservation before upload, then reopens
+the complete saved helper against the current receipt before every owner proof. Metadata
+selection alone cannot authorize a mount. Every receipt write requires new admission.
+The one-run verifier lease can read another retained data owner only while both its own
+tool receipt and the target receipt remain pinned; it cannot seed that other owner.
+The exact Preparing reservation is excluded from capacity accounting only while every
+resource is still reserved without an ID. All other uncertain attempts continue blocking.
+Each installation or proof transport publishes one exclusive synchronized
+`storage-call.pending` leaf before dispatch. Only its issued value clears the exact
+inode after known completion and fresh admission. Unknown replies or interrupted
+publication retain this fence across fresh provider leases; neither reopening nor
+a new storage attempt can replay it or create a competing verifier. No command
+resumes or repairs a retained marker. Receipt2–5 wire formats do not change.
+
+The initial process policy is explicit Bun with an empty entrypoint, UID/GID0, dropped
+capabilities and no privilege gain. The maintained SQLite initializer/web/check corpus
+is the first live acceptance target. Captured root UID/GID remain exact; a PostgreSQL
+entrypoint or owner handoff is refused rather than inferred from unchanged inode/xattr.
+No permissions are changed. The separate `hack-storage-root-witness` binary target
+uses the same bounded codec/Linux kernel implementation and emits only closed replies;
+its artifact, guest transport, durability and real SQLite lifecycle remain live gates.
+
+Inspect and cleanup reopen the saved verifier without requiring a current host artifact.
+Cleanup verifies content before effects and retains data and verifier dependencies after
+workload removal. A complete Ready receipt4 may enter the existing same-boot dead-owner
+cleanup protocol; actual owner2/root/xattr checks still precede cleanup effects. Partial
+installation, pending enrollment, lost proof or unknown transport never authorizes
+repair, seed replay, data deletion or migration. Receipts2–5 retain their wire shapes;
+version1 metadata owners remain separately decodable and never become continuity proof.
 
 Saved helper re-admission is read-only and requires the same complete tool reference,
 guest/boot/disk, canonical private directory chain, and receipt inode and bytes before
@@ -1651,9 +1681,53 @@ pinned finite-hook permit and active owner match the original frontend parent PI
 UID, run, project/branch and compiler semantic hash. Permit/owner bytes, incarnations
 and canonical private parent are rechecked through preparation and effect fences.
 Finite normalized host intent stays ephemeral in `NativeInputs`; it is not discarded
-or serialized in graph receipts. Persistent host processes and host endpoint bindings
-remain unsupported. Source/storage/topology admission and receipt versions2–5 are
+or serialized in graph receipts. Source/storage/topology admission and receipt versions2–5 are
 unchanged. The TypeScript frontend owns phase intent/completion, managed hook values,
 supervised host children and owner-mediated stop; Rust owns workload readiness and
 exact native cleanup. See [finite hook lifecycle](../../docs/reference/native-authored-commands.md#finite-host-lifecycle-hooks)
 for uncertainty and recovery limits.
+
+The separate source-version5 frontend permit additionally binds the private persistent
+process owner and, for execution, its ready document. It admits exactly the normalized
+process-name selection and compiler-verified host-context or external HTTP(S) endpoint
+references. The frontend uses Hack's existing mux controller and private one-use command
+delivery; no command/value is serialized in graph receipts or mux argv. Standalone graph
+commands still refuse all host intent. Source5 refuses live-source/storage/topology
+intersections and guest/routed/TCP endpoint delivery. See
+[supervised host processes](../../docs/reference/native-authored-commands.md#supervised-host-processes)
+for stop/recovery and current qualification limits.
+
+### Native guest endpoint observations
+
+`provider::graph::native::endpoints::observe` adapts a decoded native receipt and
+captured Engine inspections to the existing `GuestEndpoint` representation. It
+requires a Ready receipt, the current boot, the selected started container's exact
+ID/name/image/native labels and readiness, and the complete ordered declared
+attachment set. Every network must match its recorded ID/name/labels/bridge policy;
+container and network must agree on endpoint ID, private IPv4 address and membership.
+Captured running/paused/restarting/dead/OOM flags must be explicit booleans proving
+running without pause, restart, death or OOM; missing or malformed flags refuse.
+The primary comes from the receipt, never from inspection order. A secondary
+attachment replacement also changes the generation. The native generation domain
+is separate from legacy graph generations and includes immutable receipt identity,
+boot, selected service/port, StartedAt and every attachment identity. Mutable
+lifecycle phases and terminal observations are excluded from the hash. Legacy
+generation encoding is unchanged.
+
+This is an observation-only foundation with no runtime or frontend caller. A parsed
+receipt, captured inspection or generation hash is not a source/ownership capability,
+bridge reservation, host publication or reachability proof. A later authenticated
+owner must bracket current source/data/receipt/boot and live observations across
+awaits under its original cancellation/deadline, then use the existing bridge and
+publication owner before private value delivery. No normalized Compose receipt is
+constructed. Source5 guest-service, routed and TCP delivery stays refused.
+
+The common-corpus acceptance still requires a guest-dependent persistent host
+consumer under the existing controller/private IPC, launched only after authoritative
+healthy publication. It must bind run/review/boot/member/start/attachment generation,
+slot and reservation; prove normal stop, cancellation, recovery, source/member drift
+and foreign-owner refusal; and retain unknown outcomes. Host providers must still
+start before their guest consumers, and unsupported cycles must refuse before effects.
+Routed HTTPS authority and a typed TCP projection remain separate gates. Portable
+captured-inspection tests qualify none of those live behaviors, installed execution,
+old-receipt recovery or full NC05 corpus acceptance.

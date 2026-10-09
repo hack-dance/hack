@@ -8,7 +8,7 @@ this bundle is not application parity or release qualification.
 
 Build with the repository's pinned Bun 1.4.2, Rust 1.97.1 and Zig 0.15.2 toolchain, Python 3,
 and the Rust `aarch64-unknown-linux-musl` standard library already installed. The
-build refuses missing prerequisites; it does not install toolchains:
+build requires a clean checkout and refuses missing prerequisites; it does not install toolchains:
 
 ```sh
 mise exec -- scripts/build-native-candidate.sh /absolute/new/hack-native-bundle
@@ -21,7 +21,8 @@ checks compiled planning capability; it does not start a provider, change the
 default backend or qualify live authored execution.
 
 The destination must not exist. The bundle contains `hack-native`, the static Linux
-ARM64 `hack-relay-guest`, compiled normal CLI `hack-cli`, the `hack-v5` entrypoint,
+ARM64 `hack-relay-guest`, `hack-storage-root-witness` with its `native-storage-tool.json`
+byte manifest, compiled normal CLI `hack-cli`, the `hack-v5` entrypoint,
 the compiled `hack-config-compiler`, generated `hack.project.schema.json` and
 `hack.local.schema.json`, provider pins, this guide, `SHA256SUMS`, and one content-addressed shared MCP bundle
 under `mcp/BUNDLE_ID/`. Its manifest and native adapter, owner, and compiled backend
@@ -32,6 +33,18 @@ interpreter or shared-library requirements before publishing the bundle. It cont
 state, project data, or credentials. It can be copied outside the source checkout;
 Rust, Zig, Bun and the checkout are not needed to run the resulting executable.
 Host system utilities and the pinned provider remain runtime prerequisites.
+
+Authored persistent mounts resolve the witness tool only from the explicitly selected
+native binary's sibling bundle, before hooks or native startup. The helper is built from
+the same checkout with the pinned musl target and Zig linker; packaging checks static
+Linux ARM64 ELF structure and records its hash, size and source revision. Admission holds
+both manifest and helper descriptors, rejects changed bytes or file identities, and passes
+the captured path/hash to Rust for independent admission before provider effects. No
+download, host execution or emulation fallback occurs. Saved inspection and cleanup use
+the already installed, receipt-pinned guest helper and do not require the host artifact.
+The byte manifest is not proof of kernel ABI, durable storage or application acceptance.
+The first supported qualification corpus is explicit UID/GID0 Bun with SQLite; arbitrary
+owner changes and stock PostgreSQL handoff remain refused pending separate qualification.
 For versioned candidate packages, channel rules and publishing gates are described
 in the [prerelease guide](https://github.com/hack-dance/hack/blob/next/docs/guides/prereleases.md),
 and the separate `hack-next` installation path is described in the

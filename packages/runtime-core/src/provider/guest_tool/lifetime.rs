@@ -29,6 +29,13 @@ pub(in crate::provider) struct Use {
     completed: bool,
 }
 impl Lifetime {
+    pub(in crate::provider) fn bound_run(&self) -> Result<Option<String>, CandidateError> {
+        let state = self.0.lock().map_err(|_| refused())?;
+        if state.attempted {
+            return Err(refused());
+        }
+        Ok(state.run.clone())
+    }
     pub(in crate::provider) fn check(
         &self,
         current: &Self,

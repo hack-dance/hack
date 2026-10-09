@@ -421,6 +421,63 @@ it does not independently terminate a caller-owned engine callback.
 
 ## Rollback and interruption recovery
 
+### Original file grants: private version 8
+
+The distinct retained-file preparation owner supports a closed subset:
+static image services, the original default bridge, already-bound local named
+volumes and explicit file-backed config grants with a verified read-only `0444`
+target, plus protected original secret grants with verified `0400` or `0600`
+source and guest permissions. The ordinary adoption baseline remains closed; pure import preview
+alone never authorizes retained files. Builds, jobs, profiles, routes, custom
+networks, readiness/dependency intersections, managed/generated inputs and typed
+locals remain refused by this file family before material or engine acquisition.
+Unused declarations do not grant access or authorize material reads.
+
+Preparation checks every original bind's exact source path, target and read-only
+flag alongside the existing original resource identities. Docker may omit a
+bind's `Name` field; its observation projects that absence as the exact empty
+name. Named volumes still require their literal verified name. Descriptor-held reads
+require canonical owned directories and regular, single-link source files; no
+symlink, hardlink, path escape, source replacement or unsafe writable material is
+adopted. It never rewrites or chmods the original. Private source facts retain
+device/inode, owner, mode, size, timestamps and a content digest. Fixed original-ID
+guest `stat`/`sha256sum` queries must agree with the host content and selected
+permission policy; effective guest UID/GID and file identity are observed, not inferred as
+root. Repeated observations fence drift, but do not atomically freeze the guest,
+host filesystem or Docker.
+
+Private manifest and receipt version 8 retain that proof. Material bytes, paths,
+identities and digests never enter public plans, reports or diagnostics. Current
+material and guest proof are reacquired before retained start/restart or exec,
+after effects and immediately before successful journal publication. The file
+owner requires one finite mutation deadline. Failure, uncertainty, permission or
+content drift leaves pending ownership for explicit stop recovery.
+
+Saved ps/logs, stop/recovery and rollback validate the saved closed proof and exact
+original bind/resource identities without acquiring current material. They can
+settle stopped originals even after a material source disappears; missing or
+changed material still refuses a new start or exec. Rollback restores only the
+exact held authored pair and never edits a material file or deletes retained data.
+
+Private file proof version 1 preserves the config-only `0444` contract. Version 2
+adds protected original secret binds with exact `0400` or `0600` source and guest
+permissions. The strict retained-purpose mapper preserves whether a permission
+was omitted or explicitly declared. An omitted secret permission can normalize
+only to the verified original effective permission; an explicit permission must
+agree with that same source and guest. Explicit `0444` over a protected source
+refuses. Config grants remain `0444`, and pure import preview keeps its existing
+declarative defaults. The private candidate is normalized only after the original
+proof, then compiled. Saved reads derive the same candidate from the immutable
+proof and raw authored intent without material reads. Unknown proof versions,
+policy-presence swaps, changed source mode and changed guest UID/GID refuse.
+
+This source contract is not complete file/secret or NC04 parity. No original
+permission is changed, no guest owner is inferred, and UID/GID overrides remain
+refused. Original mount and material ownership, granted and ungranted reads,
+read-only write refusal, linked-checkout isolation, retained lifecycle, recovery
+and rollback remain required live gates. Mixed build, job, custom-network,
+routing, generated, managed and typed-local families stay outside this owner.
+
 After the original containers are stopped, `hack config adopt --rollback`
 journals `rolling-back`, holds the installed candidate and restores both exact
 legacy originals. Link-before-unlink restoration cannot overwrite another file;
@@ -524,6 +581,56 @@ Use the same prerequisites and flags as above with
 `--only=native-compose-adoption-managed-worktrees`. Registration and synthetic
 fixture controls do not establish a live pass.
 
+## Retained routing contract under implementation
+
+The separate private version 14 mapper admits literal legacy `dev_host`, its
+already configured OAuth alias and `open.prefer`, together with closed static
+Caddy HTTP upstream labels. It pins full HTTPS origins rather than deriving a
+new host from the project name or a global domain. Routed services must configure
+exactly the existing `hack-dev` attachment and the project default bridge; other
+services retain only the default bridge and existing local named storage.
+
+Ordinary import preview remains outside this private family. The retained routing
+owner binds the original resources and ingress incarnations, reserves the exact
+hostnames, and verifies current proxy dispatch before clearing a startup receipt.
+Saved reads preserve literal origins and typed local precedence without acquiring
+managed values. Every original-ID lifecycle child has a durable prospective
+record; only its one-use known-return and process-group-absence proof settles that
+record. Explicit recovery can contain an uncertain child but cannot clear its
+uncertainty merely because containers are stopped.
+
+Within one read-only dispatch proof, a private owner-issued context reuses its
+entry resource observation while checking source, receipt, claims and lease
+authority throughout. Routing, ingress and foreign-site observations remain
+fresh. A complete resource/runtime observation brackets the proof, including
+final volume and inventory rereads. The context is revoked before return and
+cannot cross a lifecycle effect, publication or another observation phase.
+This reduces nested inspection calls; it is not a measured runtime or CPU claim.
+
+Rollback requires restored source bytes, stopped original resources and absent
+proxy dispatch before handing hostname claims back to the restored legacy source.
+It retains a durable handoff state across interrupted claim removal. Builds, jobs,
+readiness, source binds, files, branch overrides and custom bridges remain outside
+this initial routing family. The owner and private-store model do not prove live
+TLS, SQL fidelity, OAuth login or application acceptance. The maintained isolated
+ingress lifecycle fixture remains required; global DNS and trust are unchanged.
+
+The explicitly selected `native-compose-adoption-routing-worktrees` scenario
+adds an HTTP service to the original two-worktree PostgreSQL fixture. It requires
+both literal HTTPS origins and the existing OAuth alias to serve each checkout's
+marker, with no published proxy ports. Saved `open` must select alpha's
+checkout-local alias over the authored and primary-local dev preference. It also
+checks original SQL/IDs/births, a known partial-stop journal and explicit
+recovery, two retained up/down cycles, exact source rollback and claim handoff.
+Unknown child or cleanup disposition retains the fixture. The temporary Caddy
+owner is shared with `native-config-routing`; stopped user proxies and the
+existing `hack-dev` network stay intact. This scenario does not perform OAuth
+login, change host DNS/trust, or qualify combined unsupported families.
+
+With current compiled artifacts, cached fixture images and an exclusively
+coordinated Docker lane, select it using the same prerequisites above and
+`--only=native-compose-adoption-routing-worktrees`. Its source and pure controls
+are separate from a completed live TLS/SQL run.
 ## Retained directory binds
 
 Version 12 is a distinct retained source-directory owner. It accepts literal

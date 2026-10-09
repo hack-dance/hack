@@ -4,6 +4,7 @@ import {
   legacyComposeAdoptionCandidateSupported,
   legacyComposeAdoptionLayoutSupported,
 } from "./native-compose-adoption-contract.ts";
+import { normalizeLegacyComposeRetainedFileCandidate } from "./native-compose-adoption-files.ts";
 import { legacyAdoptionLocalRefusalFields } from "./native-compose-adoption-local.ts";
 import {
   inspectLegacyComposeContainerStates,
@@ -13,6 +14,7 @@ import type { ImportField } from "./native-config-import-parser.ts";
 import {
   freezeImportValue,
   mapLegacyNativeRetainedBasicBuild,
+  mapLegacyNativeRetainedFileStorage,
   mapLegacyNativeRetainedSourceBind,
   mapLegacyNativeStorageAdoption,
 } from "./native-config-import-plan.ts";
@@ -44,7 +46,9 @@ export async function previewLegacyComposeAdoption(input: {
     const owner = await acquireLegacyComposeAdoptionPreparationBinding(opts),
       acquired = await owner.resolvePreparationInputs(opts);
     let mapper = mapLegacyNativeStorageAdoption;
-    if (acquired.sourceBindProof) {
+    if (acquired.fileProof) {
+      mapper = mapLegacyNativeRetainedFileStorage;
+    } else if (acquired.sourceBindProof) {
       mapper = mapLegacyNativeRetainedSourceBind;
     } else if (acquired.build) {
       mapper = mapLegacyNativeRetainedBasicBuild;
@@ -54,7 +58,13 @@ export async function previewLegacyComposeAdoption(input: {
       ...mapped.report.fields,
       ...(acquired.projection?.localFields ?? []),
     ];
-    const candidate = acquired.projection?.candidate ?? mapped.candidate;
+    const candidate = acquired.fileProof
+      ? normalizeLegacyComposeRetainedFileCandidate({
+          candidate: mapped.candidate,
+          proof: acquired.fileProof,
+          containers: acquired.binding.containers,
+        })
+      : (acquired.projection?.candidate ?? mapped.candidate);
     if (!candidate) {
       return report({
         complete: false,

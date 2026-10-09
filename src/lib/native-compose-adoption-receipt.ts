@@ -1,6 +1,10 @@
 import { isRecord } from "./guards.ts";
 import type { LinkedAdoptionGitIdentity } from "./native-compose-adoption-checkout.ts";
 import { keys } from "./native-compose-private-state.ts";
+import {
+  type NativeComposeRouteReference,
+  parseNativeComposeRouteReference,
+} from "./native-compose-route-claims.ts";
 
 const KIND = "legacy-compose-adopted";
 const TOKEN = /^[a-f0-9]{32}$/;
@@ -25,16 +29,30 @@ export type Receipt = {
     | 5
     | 6
     | 7
+    | 8
     | 9
     | 10
     | 11
     | 12
-    | 13;
+    | 13
+    | 14;
   readonly kind: typeof KIND;
   readonly checkout: Checkout;
   readonly prepared: Anchor | null;
   readonly publication: Publication | null;
   readonly pendingOperation: PendingOperation | null;
+  /** Required only by v14. Unknown child disposition survives stop containment. */
+  readonly routingOperation?: RetainedRoutingOperation | null;
+  /** Required only by v14; releasing is an interrupted rollback handoff,
+   * never active workload or publisher admission. */
+  readonly routingHandoff?: "held" | "releasing";
+};
+export type RetainedRoutingOperation = {
+  readonly generation: Anchor;
+  readonly token: string;
+  readonly reference: NativeComposeRouteReference;
+  readonly disposition: "prospective" | "settled";
+  readonly code: number | null;
 };
 export type AdoptionOperation = "start" | "restart" | "stop";
 export type PendingOperation = {
@@ -87,15 +105,19 @@ export function parseLegacyComposeAdoptionReceipt(
       isRecord(value) &&
       keys(
         value,
-        "adoption_receipt_version,checkout,kind,pendingOperation,prepared,publication"
+        value.adoption_receipt_version === 14
+          ? "adoption_receipt_version,checkout,kind,pendingOperation,prepared,publication,routingHandoff,routingOperation"
+          : "adoption_receipt_version,checkout,kind,pendingOperation,prepared,publication"
       ) &&
-      (value.adoption_receipt_version === 13 ||
+      (value.adoption_receipt_version === 14 ||
+        value.adoption_receipt_version === 13 ||
         value.adoption_receipt_version === 12 ||
         value.adoption_receipt_version === 11 ||
         value.adoption_receipt_version === 10 ||
         value.adoption_receipt_version === 9 ||
         value.adoption_receipt_version === 7 ||
         value.adoption_receipt_version === 6 ||
+        value.adoption_receipt_version === 8 ||
         value.adoption_receipt_version === 5 ||
         value.adoption_receipt_version === 4 ||
         value.adoption_receipt_version === 3 ||
@@ -109,6 +131,67 @@ export function parseLegacyComposeAdoptionReceipt(
     )
   ) {
     refuse();
+  }
+  let routingOperation: RetainedRoutingOperation | null | undefined;
+  if (value.adoption_receipt_version === 14) {
+    if (
+      value.prepared === null ||
+      (value.routingHandoff !== "held" && value.routingHandoff !== "releasing")
+    ) {
+      refuse();
+    }
+    if (
+      value.routingHandoff === "releasing" &&
+      (value.pendingOperation !== null ||
+        !value.publication ||
+        !["rolling-back", "rolled-back"].includes(value.publication.phase))
+    ) {
+      refuse();
+    }
+    const operation = value.routingOperation;
+    if (operation === null) {
+      routingOperation = null;
+    } else {
+      if (
+        !(
+          isRecord(operation) &&
+          keys(operation, "code,disposition,generation,reference,token") &&
+          anchor(operation.generation) &&
+          typeof operation.token === "string" &&
+          TOKEN.test(operation.token) &&
+          (operation.disposition === "prospective"
+            ? operation.code === null
+            : operation.disposition === "settled" &&
+              Number.isSafeInteger(operation.code) &&
+              typeof operation.code === "number" &&
+              operation.code >= 0 &&
+              operation.code <= 255) &&
+          JSON.stringify(operation.generation) ===
+            JSON.stringify(value.prepared)
+        )
+      ) {
+        refuse();
+      }
+      routingOperation = {
+        generation: operation.generation,
+        token: operation.token,
+        reference: parseNativeComposeRouteReference(operation.reference),
+        disposition:
+          operation.disposition === "prospective" ? "prospective" : "settled",
+        code: typeof operation.code === "number" ? operation.code : null,
+      };
+      if (
+        routingOperation.reference.generationIdentity !==
+          operation.generation.id ||
+        (routingOperation.disposition === "prospective" &&
+          value.pendingOperation === null)
+      ) {
+        refuse();
+      }
+    }
+    if (value.pendingOperation !== null && routingOperation === null) {
+      refuse();
+    }
   }
   // The distinct job family is issued with a prepared generation, never a bare version upgrade.
   if (
@@ -139,12 +222,14 @@ export function parseLegacyComposeAdoptionReceipt(
   const version = value.adoption_receipt_version;
   return {
     adoption_receipt_version:
+      version === 14 ||
       version === 13 ||
       version === 12 ||
       version === 11 ||
       version === 10 ||
       version === 9 ||
       version === 7 ||
+      version === 8 ||
       version === 6 ||
       version === 5 ||
       version === 4 ||
@@ -156,6 +241,15 @@ export function parseLegacyComposeAdoptionReceipt(
     prepared: value.prepared,
     publication: value.publication,
     pendingOperation: value.pendingOperation,
+    ...(version === 14
+      ? {
+          routingOperation: routingOperation ?? null,
+          routingHandoff:
+            value.routingHandoff === "held"
+              ? ("held" as const)
+              : ("releasing" as const),
+        }
+      : {}),
   };
 }
 function pendingSelectionMatches(

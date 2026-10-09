@@ -976,3 +976,90 @@ fn finite_host_intent_requires_exact_frontend_capability_and_remains_ephemeral()
         "native_graph_subset",
     );
 }
+
+#[test]
+fn persistent_host_capability_is_exact_ephemeral_and_keeps_standalone_and_mixed_refusals() {
+    let mut project = basic();
+    project["host"] = json!({"processes":{"tunnel":{"command":{"exec":["sleep","60"]},"environment":{"API":{"endpoint":{"kind":"host_binding","name":"api"}}}}}});
+    project["host_bindings"] = json!({"api":{"kind":"host","port":4321,"protocol":"http"}});
+    let host_request = |project: &Value| {
+        let mut value: Value =
+            serde_json::from_slice(&request(project, json!({"web":{}}))).unwrap();
+        value["env_metadata"]["host"] = json!({"default":{},"workloads":{}});
+        serde_json::to_vec(&value).unwrap()
+    };
+    let bytes = host_request(&project);
+    let PlanResult::Success { semantic_hash, .. } =
+        hack_config_compiler::environment::plan(&bytes, &[])
+    else {
+        panic!("fixture must compile")
+    };
+    refusal(review_inputs(&bytes, &[]), "native_graph_subset");
+    refusal(
+        review_frontend(&bytes, &[], &FrontendHooks::verified(semantic_hash.clone())),
+        "native_graph_subset",
+    );
+    let permit =
+        FrontendHooks::verified_processes(semantic_hash.clone(), Some(vec!["tunnel".into()]));
+    let selected = review_frontend(&bytes, &[], &permit).unwrap();
+    assert_eq!(selected.host.as_ref().unwrap().processes.len(), 1);
+    let wire = serde_json::to_string(&selected.review_identity()).unwrap();
+    assert!(!wire.contains("tunnel"));
+    assert!(!wire.contains("4321"));
+    for names in [
+        vec![],
+        vec!["other".into()],
+        vec!["tunnel".into(), "tunnel".into()],
+    ] {
+        refusal(
+            review_frontend(
+                &bytes,
+                &[],
+                &FrontendHooks::verified_processes(semantic_hash.clone(), Some(names)),
+            ),
+            "native_graph_subset",
+        );
+    }
+    for mutation in ["source", "storage", "network", "tcp", "guest"] {
+        let mut changed = project.clone();
+        match mutation {
+            "source" => {
+                changed["source"] = json!({"root":".","mode":"host-mounted"});
+                changed["services"]["web"]["mounts"] =
+                    json!([{"source":"src","target":"/app","access":"read-only"}]);
+            }
+            "storage" => {
+                changed["storage"] = json!({"data":{"kind":"persistent","scope":"worktree"}});
+                changed["services"]["web"]["mounts"] =
+                    json!([{"storage":"data","target":"/data","access":"read-write"}]);
+            }
+            "network" => {
+                changed["networks"] = json!({"edge":{"internal":false}});
+                changed["services"]["web"]["networks"] = json!({"edge":{}});
+            }
+            "tcp" => {
+                changed["host_bindings"]["api"]["protocol"] = json!("tcp");
+            }
+            "guest" => {
+                changed["services"]["web"]["environment"] =
+                    json!({"API":{"endpoint":{"kind":"host_binding","name":"api"}}});
+            }
+            _ => unreachable!(),
+        }
+        let bytes = host_request(&changed);
+        let PlanResult::Success { semantic_hash, .. } =
+            hack_config_compiler::environment::plan(&bytes, &[])
+        else {
+            panic!("{mutation} must compile before native refusal")
+        };
+        assert!(
+            review_frontend(
+                &bytes,
+                &[],
+                &FrontendHooks::verified_processes(semantic_hash, Some(vec!["tunnel".into()]))
+            )
+            .is_err(),
+            "{mutation}"
+        );
+    }
+}

@@ -12,6 +12,30 @@ use std::time::{Duration, Instant};
 static SERIAL: AtomicU32 = AtomicU32::new(0);
 
 #[test]
+fn journal_entropy_preserves_saved_identity_and_distinguishes_new_incarnations() {
+    let root = std::env::temp_dir().canonicalize().unwrap().join(format!(
+        "hkl-journal-entropy-{}-{}",
+        std::process::id(),
+        SERIAL.fetch_add(1, Ordering::SeqCst)
+    ));
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&root)
+        .unwrap();
+    let original = Store::open(&root, true).unwrap();
+    let identity = original.target.clone();
+    drop(original);
+    let saved = Store::open(&root, false).unwrap();
+    assert_eq!(saved.target, identity);
+    drop(saved);
+    std::fs::remove_file(root.join("journal.sqlite")).unwrap();
+    let replacement = Store::open(&root, true).unwrap();
+    assert_ne!(replacement.target, identity);
+    drop(replacement);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn source_job_refusals_do_not_advance_the_journal_or_create_provider_state() {
     let directory = std::env::temp_dir().join(format!(
         "hkl-source-admission-{}-{}",

@@ -99,7 +99,9 @@ const DEPENDENCY_READ_FORMATS = {
   container: {
     list: "b2e981e67b44cf6e783ce33d9bf30e6acf8ece4f4577e0e271b2375d041a49be",
     inspect: [
-      "51d0339130db3ac49d475ed2c5060e8cf1ab97111f3f158c19062b787ec3e65e",
+      "e0e3f0a70d4d4f591add56cad0cccd87d8c5a0a19651457c90f460d25ca36f26",
+      "91c2e3a5ba23f39982fc158a61bb6548d5fa8d1c6ac06b42b573b8acaa1ed15b",
+      // Exact runtime config-hash observation is separate from full ownership inspection.
       "a0c775c27577062be0deaf03cc10ccec9deec5512c7f75fa0225ac0fbef58764",
       "2678a2db0e9f357cd7f58dd42d5dc613371e3d69b29a20bab7d37959d73fb551",
       "999c6f5f7f6765c00dbb66f7fc6aa2decef1ec316f7fb6ddcadaa64a1a36eaa8",

@@ -7,6 +7,10 @@ import {
   mergeNativeComposeNetworkPolicies,
   NativeComposeOwnershipError,
   type NativeComposeOwnershipOptions,
+  type NativeComposeOwnershipRefusal,
+  type NativeComposeTopologyPredicate,
+  nativeComposeOwnershipRefusal,
+  nativeComposeTopologyPredicate,
   observeNativeComposeStartupOwned,
   observeSavedNativeComposeOwned,
 } from "../src/lib/native-compose-ownership.ts";
@@ -172,19 +176,217 @@ async function commands(): Promise<string[][]> {
 }
 async function expectRefusal(
   opts = options,
-  code = "E_NATIVE_COMPOSE_OWNERSHIP"
+  code = "E_NATIVE_COMPOSE_OWNERSHIP",
+  reason?: NativeComposeOwnershipRefusal,
+  topologyPredicate?: NativeComposeTopologyPredicate
 ) {
+  let captured: unknown;
   try {
     await assertNativeComposeOwned(opts);
     throw new Error("unexpected probe success");
   } catch (error: unknown) {
+    captured = error;
     expect(error).toBeInstanceOf(NativeComposeOwnershipError);
     expect(error).toMatchObject({ code });
+    if (reason !== undefined) {
+      expect(nativeComposeOwnershipRefusal(error)).toBe(reason);
+    }
+    if (topologyPredicate !== undefined) {
+      expect(nativeComposeTopologyPredicate(error)).toBe(topologyPredicate);
+    }
     expect(String(error)).not.toContain(CANARY);
     expect(JSON.stringify(error)).not.toContain(CANARY);
   }
   expect(await Bun.file(join(root, "mutated")).exists()).toBe(false);
+  return captured;
 }
+
+test("ownership refusal diagnostics cannot be forged, copied or obtained through getters", () => {
+  let issued: unknown;
+  try {
+    mergeNativeComposeNetworkPolicies({
+      proposed: [],
+      retained: [
+        [{ name: "fixture_default", driver: "bridge", internal: false }],
+      ],
+    });
+  } catch (error: unknown) {
+    issued = error;
+  }
+  expect(issued).toBeInstanceOf(NativeComposeOwnershipError);
+  if (!(issued instanceof NativeComposeOwnershipError)) {
+    throw new Error("Missing owner-issued refusal");
+  }
+  expect(nativeComposeOwnershipRefusal(issued)).toBe("bridge-policy");
+  expect(issued).toMatchObject({ code: "E_NATIVE_COMPOSE_NETWORK_TRANSITION" });
+  expect(String(issued)).toBe(
+    "NativeComposeOwnershipError: Native Compose network topology changed. Run hack down for this instance before applying the change; values omitted."
+  );
+  expect(JSON.parse(JSON.stringify(issued))).toEqual({
+    code: "E_NATIVE_COMPOSE_NETWORK_TRANSITION",
+    name: "NativeComposeOwnershipError",
+  });
+  const clone = { ...issued, reason: "bridge-policy", secret: CANARY };
+  let getters = 0;
+  const accessor = Object.defineProperty({}, "reason", {
+    get() {
+      getters += 1;
+      throw new Error(CANARY);
+    },
+  });
+  const proxy = new Proxy(
+    {},
+    {
+      get() {
+        getters += 1;
+        throw new Error(CANARY);
+      },
+    }
+  );
+  for (const candidate of [
+    new NativeComposeOwnershipError("E_NATIVE_COMPOSE_OWNERSHIP"),
+    clone,
+    Object.create(issued),
+    accessor,
+    proxy,
+    null,
+    undefined,
+    CANARY,
+    1,
+  ]) {
+    expect(nativeComposeOwnershipRefusal(candidate)).toBeUndefined();
+    expect(nativeComposeTopologyPredicate(candidate)).toBeUndefined();
+  }
+  expect(getters).toBe(0);
+});
+
+test("topology predicates distinguish original refusal sites and preserve the first failure", async () => {
+  const predicates: NativeComposeTopologyPredicate[] = [
+    "network-members-shape",
+    "network-member-id",
+    "member-container-endpoint",
+    "workload-policy",
+    "workload-endpoint-keyset",
+    "created-endpoint-membership",
+    "live-endpoint-membership",
+  ];
+  for (const predicate of predicates) {
+    const fixture = owned();
+    const container = fixture.container?.[0];
+    const network = fixture.network?.[0];
+    if (!(container && network)) {
+      throw new Error("Missing topology fixture");
+    }
+    let selection = options;
+    if (predicate === "network-members-shape") {
+      network.containers = null;
+      // A later keyset failure must not replace the first refused predicate.
+      container.networks = {};
+    } else if (predicate === "network-member-id") {
+      network.containers = { invalid: {} };
+    } else if (predicate === "member-container-endpoint") {
+      network.containers = { ["f".repeat(64)]: {} };
+    } else if (predicate === "workload-policy") {
+      selection = { ...options, expectedWorkloadNetworks: [] };
+    } else if (predicate === "workload-endpoint-keyset") {
+      (container.networks as Record<string, unknown>).foreign = {};
+    } else if (predicate === "created-endpoint-membership") {
+      container.state = "created";
+      container.networks = {
+        [`${PROJECT}_default`]: { NetworkID: "", Aliases: null },
+      };
+    } else {
+      network.containers = {};
+    }
+    await prepare(fixture);
+    let error: unknown;
+    if (predicate === "created-endpoint-membership") {
+      try {
+        await observeSavedNativeComposeOwned(selection);
+      } catch (caught) {
+        error = caught;
+      }
+      expect(nativeComposeOwnershipRefusal(error)).toBe("topology");
+      expect(nativeComposeTopologyPredicate(error)).toBe(predicate);
+    } else {
+      error = await expectRefusal(
+        selection,
+        "E_NATIVE_COMPOSE_OWNERSHIP",
+        "topology",
+        predicate
+      );
+    }
+    const serialized = JSON.stringify(error);
+    expect(serialized).not.toContain(predicate);
+    expect(serialized).not.toContain(CANARY);
+    expect(await Bun.file(join(root, "mutated")).exists()).toBe(false);
+  }
+}, 30_000);
+
+test("topology predicate evidence rejects hostile fields and cannot be copied or forged", async () => {
+  const fixture = owned();
+  const network = fixture.network?.[0];
+  if (!network) {
+    throw new Error("Missing topology fixture");
+  }
+  network.containers = {};
+  await prepare(fixture);
+  const issued = await expectRefusal(
+    options,
+    "E_NATIVE_COMPOSE_OWNERSHIP",
+    "topology",
+    "live-endpoint-membership"
+  );
+  expect(nativeComposeTopologyPredicate(issued)).toBe(
+    "live-endpoint-membership"
+  );
+  let reads = 0;
+  const hostile = new Proxy(
+    {},
+    {
+      get() {
+        reads++;
+        throw new Error(CANARY);
+      },
+      has() {
+        reads++;
+        throw new Error(CANARY);
+      },
+    }
+  );
+  const accessor = Object.defineProperty({}, "topologyPredicate", {
+    get() {
+      reads++;
+      throw new Error(CANARY);
+    },
+  });
+  for (const candidate of [
+    { topologyPredicate: "live-endpoint-membership" },
+    { ...(issued as object), topologyPredicate: "live-endpoint-membership" },
+    Object.create(issued as object),
+    new NativeComposeOwnershipError("E_NATIVE_COMPOSE_OWNERSHIP"),
+    hostile,
+    accessor,
+    null,
+    undefined,
+    CANARY,
+  ]) {
+    expect(nativeComposeTopologyPredicate(candidate)).toBeUndefined();
+  }
+  expect(reads).toBe(0);
+  // A later independent refusal cannot relabel the exact first issued error.
+  network.containers = null;
+  await prepare(fixture);
+  await expectRefusal(
+    options,
+    "E_NATIVE_COMPOSE_OWNERSHIP",
+    "topology",
+    "network-members-shape"
+  );
+  expect(nativeComposeTopologyPredicate(issued)).toBe(
+    "live-endpoint-membership"
+  );
+});
 
 test("selected on-failure restart is unready until two stable owned scans", async () => {
   const fixture = owned();
@@ -198,7 +400,7 @@ test("selected on-failure restart is unready until two stable owned scans", asyn
   await prepare(fixture);
   expect(await observeNativeComposeStartupOwned(options, ["web"])).toBeNull();
   // The same observation must never authorize effect or finalization ownership.
-  await expectRefusal(options);
+  await expectRefusal(options, "E_NATIVE_COMPOSE_OWNERSHIP", "topology");
   fixture.mode = "restart-member-transition";
   await prepare(fixture);
   await expectRefusal(options);
@@ -453,7 +655,11 @@ test("old or missing owner tokens never adopt same-instance resources", async ()
       }
       row.owner = owner;
       await prepare(fixture);
-      await expectRefusal();
+      await expectRefusal(
+        options,
+        "E_NATIVE_COMPOSE_OWNERSHIP",
+        "resource-label"
+      );
     }
   }
 });
@@ -465,7 +671,7 @@ test("unsolicited raw inspect fields are rejected without disclosing private val
   }
   row.Config = { Env: [CANARY], Image: CANARY };
   await prepare(fixture);
-  await expectRefusal();
+  await expectRefusal(options, "E_NATIVE_COMPOSE_OWNERSHIP", "unknown");
 });
 test("every project container is checked, including unknown services and stale or absent generation", async () => {
   for (const fields of [
@@ -494,11 +700,23 @@ test("every project container is checked, including unknown services and stale o
         state: "running",
         exitCode: 0,
         health: null,
+        networks: {
+          [`${PROJECT}_default`]: {
+            NetworkID: NETWORK_ID,
+            Aliases: ["otherwise-unexpected-name", "web"],
+          },
+        },
         ...fields,
       },
     ];
     await prepare(fixture);
-    await expectRefusal();
+    const reason =
+      "generation" in fields
+        ? "generation"
+        : "state" in fields || "health" in fields || "exitCode" in fields
+          ? "state"
+          : "resource-label";
+    await expectRefusal(options, "E_NATIVE_COMPOSE_OWNERSHIP", reason);
   }
 });
 test("persistent storage must match exact generated name and logical storage ownership", async () => {
@@ -533,7 +751,7 @@ test("retained volume policy requires exact presence and birth while cold invent
     { name: VOLUME, storage: "data", createdAt: CREATED },
   ]);
   await prepare({});
-  await expectRefusal(retained);
+  await expectRefusal(retained, "E_NATIVE_COMPOSE_OWNERSHIP", "volume-birth");
   // Legacy history can require presence without inventing a prior birth.
   await expectRefusal({
     ...options,
@@ -547,7 +765,7 @@ test("retained volume policy requires exact presence and birth while cold invent
   }
   volume.createdAt = REBORN;
   await prepare(replaced);
-  await expectRefusal(retained);
+  await expectRefusal(retained, "E_NATIVE_COMPOSE_OWNERSHIP", "volume-birth");
 });
 test.each([
   null,
@@ -614,7 +832,8 @@ test("vanished resources and changed selected inventory refuse without retry or 
       options,
       mode === "vanished"
         ? "E_NATIVE_COMPOSE_PROBE"
-        : "E_NATIVE_COMPOSE_OWNERSHIP"
+        : "E_NATIVE_COMPOSE_OWNERSHIP",
+      mode === "vanished" ? undefined : "cross-scan-drift"
     );
   }
 });
@@ -833,7 +1052,13 @@ test("custom bridge driver, internal flag, aliases, generation and unexpected en
       fixture.mode = change;
     }
     await prepare(fixture);
-    await expectRefusal(selection);
+    const reason =
+      change === "driver" || change === "internal"
+        ? "bridge-policy"
+        : change === "alias" || change === "endpoint-drift"
+          ? "endpoint"
+          : "topology";
+    await expectRefusal(selection, "E_NATIVE_COMPOSE_OWNERSHIP", reason);
     expect(await Bun.file(join(root, "mutated")).exists()).toBe(false);
   }
 });

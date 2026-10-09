@@ -262,6 +262,19 @@ jobs:
         run: bun install
       - name: Create isolated Hack network
         run: docker network create --subnet 172.30.0.0/16 hack-dev
+      - name: TEMP probe docker events under restart policy (remove before merge)
+        run: |
+          docker version --format 'server={{.Server.Version}} api={{.Server.APIVersion}}'
+          S="$(docker info --format '{{.SystemTime}}')"
+          ID="$(docker run -d --label hack.probe=1 --restart on-failure:2 alpine:3.20 sh -c 'exit 17')"
+          R=""; for i in $(seq 1 60); do R="$(docker inspect --format '{{.RestartCount}} {{.State.Running}}' "$ID")"; [ "$R" = "2 false" ] && break; sleep 1; done
+          echo "restart state: $R"
+          E="$(docker info --format '{{.SystemTime}}')"
+          echo "since=$S until=$E"
+          echo "--- filtered (type+container+label+start/die)"; docker events --since "$S" --until "$E" --filter type=container --filter "container=$ID" --filter label=hack.probe=1 --filter event=start --filter event=die --format '{{.Action}} exit={{index .Actor.Attributes "exitCode"}}' || true
+          echo "--- container filter only"; docker events --since "$S" --until "$E" --filter "container=$ID" --format '{{.Action}} exit={{index .Actor.Attributes "exitCode"}}' || true
+          echo "--- type=container only"; docker events --since "$S" --until "$E" --filter type=container --format '{{.Action}} {{.Actor.ID}} exit={{index .Actor.Attributes "exitCode"}}' || true
+          docker rm -f "$ID" >/dev/null
       - name: Prepare offline cache fixture images
         run: |
           docker pull alpine:3.20
@@ -296,7 +309,7 @@ jobs:
           HACK_E2E_COMPOSE_PLUGIN_SHA256="$(sha256sum "$HACK_E2E_COMPOSE_PLUGIN_PATH" | cut -d ' ' -f1)"
           export HACK_E2E_DOCKER_HOST HACK_E2E_NETWORK_SOURCE_REVISION HACK_E2E_NETWORK_CLI_SHA256 HACK_E2E_NETWORK_COMPILER_SHA256 HACK_E2E_COMPOSE_PLUGIN_PATH HACK_E2E_COMPOSE_PLUGIN_SHA256
           # TEMP: frames diagnostics + failing-scenario subset (remove before merge)
-          HACK_NATIVE_COMPOSE_DIAG_FRAMES=1 HACK_E2E_DOCKER=1 HACK_E2E_REQUIRE_DOCKER=1 HACK_E2E_REQUIRE_TMUX=1 bun tests/e2e/run.ts --only=native-config-down-hooks,native-config-networks,native-config-build,native-config-process-policy,native-config-routing
+          HACK_NATIVE_COMPOSE_DIAG_FRAMES=1 HACK_E2E_DOCKER=1 HACK_E2E_REQUIRE_DOCKER=1 HACK_E2E_REQUIRE_TMUX=1 bun tests/e2e/run.ts --only=native-config-networks,native-config-process-policy,native-config-routing
       - name: Smoke container resource metadata without optional fields
         run: |
           probe_id=$(docker create --network none --read-only alpine:3.20 true)

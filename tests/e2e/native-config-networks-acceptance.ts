@@ -1026,7 +1026,7 @@ export async function nativeNetworkFixtureShim(opts: {
         'const d=await Bun.file(a[4]).json();if(!d.services||Object.keys(d.services).length!==4||Object.values(d.services).some(s=>s.labels?.["io.hack.native-config.owner"]!==owner||s.labels?.["io.hack.native-config.instance"]!==project))process.exit(98);',
         'await Bun.write(receipt,"create-admitted");const p=Bun.spawn([engine,...a.slice(0,5),"create","--no-build","--pull","never"],{stdin:"ignore",stdout:"inherit",stderr:"inherit"});const code=await p.exited;process.exit(code===0?71:code);',
         "}",
-        `const p=Bun.spawn([engine,...a],{stdin:"ignore",stdout:"inherit",stderr:"inherit"});process.exit(await p.exited);`,
+        `const p=Bun.spawn([engine,...a],{stdin:"inherit",stdout:"inherit",stderr:"inherit"});process.exit(await p.exited);`,
         "",
       ].join("\n")
     : [
@@ -1597,6 +1597,7 @@ export const nativeConfigNetworksScenario: Scenario = {
       startedRoots.add(primary.root);
       const controlledUp = await raw(primary, ["up", "--detach", "--json"], {
         PATH: `${shim}:${env.PATH}`,
+        HACK_NATIVE_COMPOSE_DIAG_FRAMES: "1", // TEMP diag; remove before merge
       });
       if (!(await Bun.file(createReceipt).exists())) {
         // TEMP diag: closed CLI JSON and frames only; remove before merge.

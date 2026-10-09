@@ -224,7 +224,7 @@ function validNativeAuthoredReadDrainSelection(
       args[0] === "graph" &&
       args[1] === "native" &&
       args[5] === "--json" &&
-      ((args[2] === "plan" &&
+      ((["plan", "frontend-plan"].includes(args[2] ?? "") &&
         args[3] === "--source-file" &&
         isAbsolute(args[4] ?? "")) ||
         (args[2] === "inspect" &&

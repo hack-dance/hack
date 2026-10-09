@@ -45,6 +45,12 @@ import {
   readNativeComposeDownHookBinding,
 } from "./native-compose-down-hooks.ts";
 import {
+  type NativeComposeEffectRefusal,
+  nativeComposeEffectReason,
+  nativeComposeEffectRefusal,
+  retainNativeComposeEffectRefusal,
+} from "./native-compose-effect-diagnostics.ts";
+import {
   assertNativeComposeFileRunSupported,
   assertNativeComposeSavedFileEngines,
   type NativeComposeCommandFiles,
@@ -1063,12 +1069,24 @@ export async function assertNativeComposeEffectOwned(opts: {
   readonly assertOwned: () => Promise<void>;
   readonly verifyStorage?: () => Promise<void>;
 }) {
-  await measureNativeComposePhase("guard.fresh-before", opts.assertFresh);
-  await measureNativeComposePhase("guard.ownership", opts.assertOwned);
-  await measureNativeComposePhase("guard.storage", async () =>
-    opts.verifyStorage?.()
-  );
-  await measureNativeComposePhase("guard.fresh-after", opts.assertFresh);
+  let stage: NativeComposeEffectRefusal["stage"] = "guard-fresh-before";
+  try {
+    await measureNativeComposePhase("guard.fresh-before", opts.assertFresh);
+    stage = "guard-ownership";
+    await measureNativeComposePhase("guard.ownership", opts.assertOwned);
+    stage = "guard-storage";
+    await measureNativeComposePhase("guard.storage", async () =>
+      opts.verifyStorage?.()
+    );
+    stage = "guard-fresh-after";
+    await measureNativeComposePhase("guard.fresh-after", opts.assertFresh);
+  } catch (error) {
+    retainNativeComposeEffectRefusal(error, {
+      stage,
+      reason: nativeComposeEffectReason(error),
+    });
+    throw error;
+  }
 }
 
 function startupOperation(
@@ -1198,48 +1216,60 @@ async function startNativeComposeWorkloads(opts: {
   if (deadline <= Date.now()) {
     return { value: 1, outcome: "uncertain" as const };
   }
-  const code = await runNativeComposeOwnedFileChild({
-    signal,
-    deadline,
-    arm: async () => {
-      await routing?.markEffectsPossible();
-      await files?.arm(generation);
-    },
-    assertOwned,
-    command: [
-      ...composeArgs(generation),
-      "up",
-      ...(opts.builds.length > 0 ? ["--no-build"] : []),
-      "-d",
-      "--remove-orphans",
-      ...(options.operation === "restart" ? ["--force-recreate"] : []),
-    ],
-    options: {
-      cwd: base.cwd,
-      env: base.env,
-      stdout: options.json ? "stderr" : "inherit",
-      forwardSignals: true,
-    },
-    hooks: () => files?.childHooks(generation) ?? {},
-  });
-  const observed =
-    code === 0 && (files === null || files.childReaped())
-      ? await waitReady({
-          document,
-          ownership: selection,
-          deadline,
-          generation,
-          observeStorage: opts.observeStorage,
-        })
-      : null;
-  if (observed) {
-    await files?.assertReady(selection, generation);
-    await routing?.verifyTransition({ deadline });
+  let stage: NativeComposeEffectRefusal["stage"] = "compose-child";
+  try {
+    const code = await runNativeComposeOwnedFileChild({
+      signal,
+      deadline,
+      arm: async () => {
+        await routing?.markEffectsPossible();
+        await files?.arm(generation);
+      },
+      assertOwned,
+      command: [
+        ...composeArgs(generation),
+        "up",
+        ...(opts.builds.length > 0 ? ["--no-build"] : []),
+        "-d",
+        "--remove-orphans",
+        ...(options.operation === "restart" ? ["--force-recreate"] : []),
+      ],
+      options: {
+        cwd: base.cwd,
+        env: base.env,
+        stdout: options.json ? "stderr" : "inherit",
+        forwardSignals: true,
+      },
+      hooks: () => files?.childHooks(generation) ?? {},
+    });
+    stage = "compose-readiness";
+    const observed =
+      code === 0 && (files === null || files.childReaped())
+        ? await waitReady({
+            document,
+            ownership: selection,
+            deadline,
+            generation,
+            observeStorage: opts.observeStorage,
+          })
+        : null;
+    if (observed) {
+      stage = "compose-file-readiness";
+      await files?.assertReady(selection, generation);
+      stage = "compose-routing-readiness";
+      await routing?.verifyTransition({ deadline });
+    }
+    return {
+      value: observed ? 0 : code || 1,
+      outcome: observed ? ("complete" as const) : ("uncertain" as const),
+    };
+  } catch (error) {
+    retainNativeComposeEffectRefusal(error, {
+      stage,
+      reason: nativeComposeEffectReason(error),
+    });
+    throw error;
   }
-  return {
-    value: observed ? 0 : code || 1,
-    outcome: observed ? ("complete" as const) : ("uncertain" as const),
-  };
 }
 
 async function executePreparedNativeWorkloads(opts: {
@@ -1532,32 +1562,42 @@ async function executePreparedGeneration(opts: {
     afterHooks: after.afterHooks,
     storageWitnesses: storage?.effectWitnesses,
     effect: async () => {
-      await measureNativeComposePhase("storage.enroll", async () =>
-        storage?.enroll(generation, document)
-      );
-      return await executePreparedNativeWorkloads({
-        options,
-        generation,
-        document,
-        selection,
-        base,
-        routing,
-        files,
-        projection,
-        builds,
-        projectRoot,
-        signal,
-        assertFresh,
-        observeStorage: ownership.observeStorage,
-        assertOwned: () =>
-          assertNativeComposeEffectOwned({
-            assertFresh,
-            assertOwned: () => ownership.assertOwned(),
-            verifyStorage: storage
-              ? () => storage.verify(generation)
-              : undefined,
-          }),
-      });
+      let stage: NativeComposeEffectRefusal["stage"] = "storage-enrollment";
+      try {
+        await measureNativeComposePhase("storage.enroll", async () =>
+          storage?.enroll(generation, document)
+        );
+        stage = "workload-execution";
+        return await executePreparedNativeWorkloads({
+          options,
+          generation,
+          document,
+          selection,
+          base,
+          routing,
+          files,
+          projection,
+          builds,
+          projectRoot,
+          signal,
+          assertFresh,
+          observeStorage: ownership.observeStorage,
+          assertOwned: () =>
+            assertNativeComposeEffectOwned({
+              assertFresh,
+              assertOwned: () => ownership.assertOwned(),
+              verifyStorage: storage
+                ? () => storage.verify(generation)
+                : undefined,
+            }),
+        });
+      } catch (error) {
+        retainNativeComposeEffectRefusal(error, {
+          stage,
+          reason: nativeComposeEffectReason(error),
+        });
+        throw error;
+      }
     },
   });
   if (result.outcome === "uncertain") {
@@ -2233,9 +2273,13 @@ function throwNativeComposeCommandError(error: unknown): never {
     error instanceof NativeComposeOwnershipError ||
     error instanceof NativeComposeBuildError
   ) {
+    const diagnostic = nativeComposeEffectRefusal(error);
     throw new HackCliError({
       code: "E_CONFIG_INVALID",
       message: error.message,
+      ...(diagnostic
+        ? { detail: { native_compose_effect_refusal: diagnostic } }
+        : {}),
     });
   }
   if (error instanceof NativeComposeRenderError) {

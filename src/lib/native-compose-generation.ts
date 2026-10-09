@@ -2,6 +2,12 @@ import { createHash } from "node:crypto";
 import { lstat, mkdir, rename, unlink } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { isRecord } from "./guards.ts";
+import {
+  copyNativeComposeEffectRefusal,
+  type NativeComposeEffectRefusal,
+  nativeComposeEffectReason,
+  retainNativeComposeEffectRefusal,
+} from "./native-compose-effect-diagnostics.ts";
 import { readNativeComposeNetworkTopology } from "./native-compose-network-topology.ts";
 import { measureNativeComposePhase } from "./native-compose-phase-trace.ts";
 import {
@@ -1035,6 +1041,26 @@ export type NativeComposeEffectOptions<T> = {
     readonly value: T;
   }>;
 };
+function captureEffectOptions<T>(options: NativeComposeEffectOptions<T>) {
+  const downHooks = options.downHooks
+    ? Object.freeze({
+        before: options.downHooks.before
+          ? Object.freeze({ ...options.downHooks.before })
+          : undefined,
+        after: options.downHooks.after
+          ? Object.freeze({ ...options.downHooks.after })
+          : undefined,
+      })
+    : undefined;
+  return Object.freeze({
+    ...options,
+    downHooks,
+    storageWitnesses: options.storageWitnesses
+      ? Object.freeze({ ...options.storageWitnesses })
+      : undefined,
+  });
+}
+
 type PublishOptions = {
   readonly reservation: NativeComposeReservation;
   readonly composeJson: string;
@@ -2065,22 +2091,51 @@ export async function openNativeComposeGenerationStore(opts: {
               },
             });
           witnessPublications.set(materialAuthority, witnessProtocol.publish);
+          let effectRefusalStage: NativeComposeEffectRefusal["stage"] =
+            "effect-entry";
           const assertWitnesses = async <T>(
             input: NativeComposeEffectOptions<T>
-          ) =>
-            await witnessProtocol.assert(
-              input.operation,
-              input.storageWitnesses
-            );
+          ) => {
+            const enclosingStage = effectRefusalStage;
+            try {
+              effectRefusalStage = "effect-witness";
+              await witnessProtocol.assert(
+                input.operation,
+                input.storageWitnesses
+              );
+            } catch (error) {
+              retainNativeComposeEffectRefusal(error, {
+                stage: effectRefusalStage,
+                reason: nativeComposeEffectReason(error),
+              });
+              throw error;
+            } finally {
+              effectRefusalStage = enclosingStage;
+            }
+          };
           const fenceEffectSource = async <T>(
             input: NativeComposeEffectOptions<T>
           ) => {
-            await verifyGeneration(input.generation);
-            if (input.projection) {
-              await verifyProjection(input.projection, input.generation);
-            }
-            if (input.assertFresh) {
-              await assertFresh(input.assertFresh);
+            const enclosingStage = effectRefusalStage;
+            try {
+              effectRefusalStage = "effect-source";
+              await verifyGeneration(input.generation);
+              if (input.projection) {
+                effectRefusalStage = "effect-projection";
+                await verifyProjection(input.projection, input.generation);
+              }
+              if (input.assertFresh) {
+                effectRefusalStage = "effect-freshness";
+                await assertFresh(input.assertFresh);
+              }
+            } catch (error) {
+              retainNativeComposeEffectRefusal(error, {
+                stage: effectRefusalStage,
+                reason: nativeComposeEffectReason(error),
+              });
+              throw error;
+            } finally {
+              effectRefusalStage = enclosingStage;
             }
           };
           const fenceEffectInputs = async <T>(
@@ -2092,46 +2147,108 @@ export async function openNativeComposeGenerationStore(opts: {
           const checkEffect = async <T>(
             input: NativeComposeEffectOptions<T>
           ) => {
-            requireActive();
-            await fenceEffectInputs(input);
+            const enclosingStage = effectRefusalStage;
             try {
-              await input.assertOwned();
-              await rememberStorage(input);
-            } catch (error) {
-              if (error instanceof NativeComposeGenerationError) {
-                throw error;
+              requireActive();
+              await fenceEffectInputs(input);
+              try {
+                effectRefusalStage = "effect-ownership";
+                await input.assertOwned();
+                effectRefusalStage = "effect-storage-observation";
+                await rememberStorage(input);
+              } catch (error) {
+                retainNativeComposeEffectRefusal(error, {
+                  stage: effectRefusalStage,
+                  reason: nativeComposeEffectReason(error),
+                });
+                if (error instanceof NativeComposeGenerationError) {
+                  throw error;
+                }
+                const failure = new NativeComposeGenerationError(
+                  "E_NATIVE_COMPOSE_STATE"
+                );
+                copyNativeComposeEffectRefusal(error, failure);
+                retainNativeComposeEffectRefusal(failure, {
+                  stage: effectRefusalStage,
+                  reason: nativeComposeEffectReason(error),
+                });
+                throw failure;
               }
-              refuse();
+              // Engine observations can be slow. Fence the actual delivery again
+              // after them, immediately before intent publication or effect entry.
+              await fenceEffectInputs(input);
+              effectRefusalStage = "effect-boundary";
+              await check();
+              requireActive();
+            } catch (error) {
+              retainNativeComposeEffectRefusal(error, {
+                stage: effectRefusalStage,
+                reason: nativeComposeEffectReason(error),
+              });
+              throw error;
+            } finally {
+              effectRefusalStage = enclosingStage;
             }
-            // Engine observations can be slow. Fence the actual delivery again
-            // after them, immediately before intent publication or effect entry.
-            await fenceEffectInputs(input);
-            await check();
-            requireActive();
           };
           const assertEffectReceiptSnapshot = async (
             snapshot: Awaited<ReturnType<typeof readPrivate>>
           ) => {
-            const current = await readPrivate(receiptPath, RECEIPT_LIMIT);
-            if (
-              !(
-                matchesMutationReceipt(current) &&
-                sameReceiptRead(snapshot, current)
-              )
-            ) {
-              return refuse();
+            const enclosingStage = effectRefusalStage;
+            try {
+              effectRefusalStage = "effect-receipt";
+              const current = await readPrivate(receiptPath, RECEIPT_LIMIT);
+              if (
+                !(
+                  matchesMutationReceipt(current) &&
+                  sameReceiptRead(snapshot, current)
+                )
+              ) {
+                return refuse();
+              }
+            } catch (error) {
+              retainNativeComposeEffectRefusal(error, {
+                stage: effectRefusalStage,
+                reason: nativeComposeEffectReason(error),
+              });
+              throw error;
+            } finally {
+              effectRefusalStage = enclosingStage;
             }
           };
           const assertSpeculativeEffectOwned = async <T>(
             input: NativeComposeEffectOptions<T>
           ) => {
+            const enclosingStage = effectRefusalStage;
             try {
-              await input.assertOwned();
-            } catch (error) {
-              if (error instanceof NativeComposeGenerationError) {
-                throw error;
+              try {
+                effectRefusalStage = "effect-ownership";
+                await input.assertOwned();
+              } catch (error) {
+                retainNativeComposeEffectRefusal(error, {
+                  stage: effectRefusalStage,
+                  reason: nativeComposeEffectReason(error),
+                });
+                if (error instanceof NativeComposeGenerationError) {
+                  throw error;
+                }
+                const failure = new NativeComposeGenerationError(
+                  "E_NATIVE_COMPOSE_STATE"
+                );
+                copyNativeComposeEffectRefusal(error, failure);
+                retainNativeComposeEffectRefusal(failure, {
+                  stage: effectRefusalStage,
+                  reason: nativeComposeEffectReason(error),
+                });
+                throw failure;
               }
-              return refuse();
+            } catch (error) {
+              retainNativeComposeEffectRefusal(error, {
+                stage: effectRefusalStage,
+                reason: nativeComposeEffectReason(error),
+              });
+              throw error;
+            } finally {
+              effectRefusalStage = enclosingStage;
             }
           };
           const witnessPhaseSupported = async <T>(
@@ -2145,11 +2262,21 @@ export async function openNativeComposeGenerationStore(opts: {
               state.storageWitnesses ?? []
             );
           const retainUncertainEffect = async <T>(
-            input: NativeComposeEffectOptions<T>
+            input: NativeComposeEffectOptions<T>,
+            original: unknown
           ): Promise<never> => {
             const failure = new NativeComposeGenerationError(
               "E_NATIVE_COMPOSE_UNCERTAIN"
             );
+            retainNativeComposeEffectRefusal(original, {
+              stage: effectRefusalStage,
+              reason: nativeComposeEffectReason(original),
+            });
+            copyNativeComposeEffectRefusal(original, failure);
+            retainNativeComposeEffectRefusal(failure, {
+              stage: effectRefusalStage,
+              reason: nativeComposeEffectReason(original),
+            });
             try {
               await rememberStorage(input);
             } catch {
@@ -2548,88 +2675,98 @@ export async function openNativeComposeGenerationStore(opts: {
               });
             },
             async runEffect<T>(options: NativeComposeEffectOptions<T>) {
-              const downHooks = options.downHooks
-                ? Object.freeze({
-                    before: options.downHooks.before
-                      ? Object.freeze({ ...options.downHooks.before })
-                      : undefined,
-                    after: options.downHooks.after
-                      ? Object.freeze({ ...options.downHooks.after })
-                      : undefined,
-                  })
-                : undefined;
-              const input = Object.freeze({
-                ...options,
-                downHooks,
-                storageWitnesses: options.storageWitnesses
-                  ? Object.freeze({ ...options.storageWitnesses })
-                  : undefined,
-              });
-              return await runAction(async () => {
-                requireActive();
-                const admit = async (state: Receipt) => {
-                  const unknown = await witnessWorkPending(state);
-                  if (
-                    unknown &&
-                    !(
-                      input.operation === "down" &&
-                      input.recoverPending === true
-                    )
-                  ) {
-                    throw new NativeComposeGenerationError(
-                      "E_NATIVE_COMPOSE_UNCERTAIN"
-                    );
-                  }
-                  // A read-only preflight can leave required helper intent before a
-                  // main workload intent exists. Only exact saved down recovery may
-                  // arm its stop; all generic empty-pending recovery still refuses.
-                  const carrierRecovery =
-                    unknown &&
-                    state.pending === null &&
-                    !witnessPending(state) &&
-                    input.operation === "down" &&
-                    input.recoverPending === true &&
-                    state.current?.generationId ===
-                      input.generation.generationId &&
-                    (state.storageWitnesses?.some(
-                      (entry) =>
-                        entry.state === "enrolled" &&
-                        entry.reference.version === 3
-                    ) ??
-                      false);
-                  admitEffect(input, state, opts.mode, { carrierRecovery });
-                };
-                let state = await receipt();
-                await admit(state);
-                await checkEffectPhase(input, "prepublication");
-                // Ownership can publish newly observed births. Never overwrite them
-                // with the pre-observation receipt when arming the effect intent.
-                state = await receipt();
-                await admit(state);
-                const anchor = knownAnchor(input.generation);
-                const pending = effectPending(state, input, anchor);
-                const coldStorage = coldRunStoragePending(input, state);
-                await save({ ...state, pending });
-                effectOperation = input.operation;
-                effectRecovery = input.recoverPending === true;
-                activePending = pending;
-                coldStoragePending = coldStorage ? pending : null;
-                try {
-                  const before = await prepareEffectBoundary(input, pending);
-                  if (before) {
-                    return before;
-                  }
-                  const result = await input.effect();
-                  return await finishEffect(input, pending, anchor, result);
-                } catch {
-                  return await retainUncertainEffect(input);
-                } finally {
-                  effectOperation = null;
-                  effectRecovery = false;
-                  activePending = null;
-                  coldStoragePending = null;
+              const input = captureEffectOptions(options);
+              const admit = async (state: Receipt) => {
+                const unknown = await witnessWorkPending(state);
+                if (
+                  unknown &&
+                  !(input.operation === "down" && input.recoverPending === true)
+                ) {
+                  throw new NativeComposeGenerationError(
+                    "E_NATIVE_COMPOSE_UNCERTAIN"
+                  );
                 }
-              });
+                // A read-only preflight can leave required helper intent before a
+                // main workload intent exists. Only exact saved down recovery may
+                // arm its stop; all generic empty-pending recovery still refuses.
+                const carrierRecovery =
+                  unknown &&
+                  state.pending === null &&
+                  !witnessPending(state) &&
+                  input.operation === "down" &&
+                  input.recoverPending === true &&
+                  state.current?.generationId ===
+                    input.generation.generationId &&
+                  (state.storageWitnesses?.some(
+                    (entry) =>
+                      entry.state === "enrolled" &&
+                      entry.reference.version === 3
+                  ) ??
+                    false);
+                admitEffect(input, state, opts.mode, { carrierRecovery });
+              };
+              let refusalStage: NativeComposeEffectRefusal["stage"] =
+                "effect-entry";
+              try {
+                return await runAction(async () => {
+                  effectRefusalStage = "effect-entry";
+                  try {
+                    requireActive();
+
+                    effectRefusalStage = "effect-receipt";
+                    let state = await receipt();
+                    effectRefusalStage = "effect-admission";
+                    await admit(state);
+                    effectRefusalStage = "effect-prepublication";
+                    await checkEffectPhase(input, "prepublication");
+                    // Ownership can publish newly observed births. Never overwrite them
+                    // with the pre-observation receipt when arming the effect intent.
+                    effectRefusalStage = "effect-receipt";
+                    state = await receipt();
+                    effectRefusalStage = "effect-admission";
+                    await admit(state);
+                    const anchor = knownAnchor(input.generation);
+                    const pending = effectPending(state, input, anchor);
+                    const coldStorage = coldRunStoragePending(input, state);
+                    effectRefusalStage = "effect-intent";
+                    await save({ ...state, pending });
+                    effectOperation = input.operation;
+                    effectRecovery = input.recoverPending === true;
+                    activePending = pending;
+                    coldStoragePending = coldStorage ? pending : null;
+                    try {
+                      effectRefusalStage = "effect-entry";
+                      const before = await prepareEffectBoundary(
+                        input,
+                        pending
+                      );
+                      if (before) {
+                        return before;
+                      }
+                      effectRefusalStage = "effect-execution";
+                      const result = await input.effect();
+                      effectRefusalStage = "effect-finalization";
+                      return await finishEffect(input, pending, anchor, result);
+                    } catch (error) {
+                      return await retainUncertainEffect(input, error);
+                    } finally {
+                      effectOperation = null;
+                      effectRecovery = false;
+                      activePending = null;
+                      coldStoragePending = null;
+                    }
+                  } finally {
+                    // Snapshot this invocation before runAction releases serialization.
+                    refusalStage = effectRefusalStage;
+                  }
+                });
+              } catch (error) {
+                retainNativeComposeEffectRefusal(error, {
+                  stage: refusalStage,
+                  reason: nativeComposeEffectReason(error),
+                });
+                throw error;
+              }
             },
           };
           Object.defineProperty(mutation, "materialAuthority", {

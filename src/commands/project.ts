@@ -7260,7 +7260,10 @@ async function handlePs({
     project: args.options.project,
     operation: "ps",
     instance: args.options.branch,
-    profiles: parseCsvList(args.options.profile),
+    profiles:
+      args.options.profile === undefined
+        ? undefined
+        : parseCsvList(args.options.profile),
     json: args.options.json,
   });
   if (authored !== null) {

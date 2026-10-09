@@ -17,7 +17,10 @@ the original startup transaction. Existing unenrolled v1/v2 storage refuses even
 when its volume is missing; it is never treated as cold or silently adopted.
 Saved exec verifies under the existing mutation owner without parsing authored
 source or creating an exec pending operation. A fresh finite read carrier is used
-after an arbitrary-duration exec or run; the final proofs are retained.
+after an arbitrary-duration known exec or run; the final proofs are retained.
+Cancelled saved exec preserves its known exit without starting a late helper or
+claiming post-return proof. An unknown exec return is refused, and future
+admission always re-verifies content.
 Saved down and explicit down recovery do not require the helper dependency and
 never seed or replay enrollment. Expected or unknown helper intent remains an
 incomplete retained recovery anchor.

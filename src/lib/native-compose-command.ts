@@ -35,6 +35,7 @@ import {
   nativeComposePlanStorage,
   type NativeComposeCommandStorage,
   prepareNativeComposeCommandStorage,
+  runNativeComposeStorageVerifiedExec,
 } from "./native-compose-command-storage.ts";
 import {
   bindNativeComposeDownHooks,
@@ -780,10 +781,10 @@ async function savedCommand(opts: {
         await assertNativeComposeOwned(selection);
         await storage?.verify(generation);
       };
-      await assertSaved();
-      const code = await runSavedProcess({ options, generation, document, base, signal });
-      await assertSaved();
-      return code;
+      return await runNativeComposeStorageVerifiedExec({
+        signal, assertSaved,
+        run: () => runSavedProcess({ options, generation, document, base, signal }),
+      });
     });
   }
   return await store.withLease({

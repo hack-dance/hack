@@ -183,3 +183,19 @@ export async function prepareNativeComposeCommandStorage(opts: {
 }
 
 export type NativeComposeCommandStorage = Awaited<ReturnType<typeof prepareNativeComposeCommandStorage>>;
+
+/** Saved exec does not publish a ready receipt. Cancellation preserves its known
+ * exit and starts no late helper; every future admission re-verifies content. */
+export async function runNativeComposeStorageVerifiedExec(opts: {
+  readonly signal: AbortSignal;
+  readonly assertSaved: () => Promise<void>;
+  readonly run: () => Promise<number>;
+}): Promise<number> {
+  const { signal, assertSaved, run } = opts;
+  await assertSaved();
+  const code = await run();
+  if (!signal.aborted) {
+    await assertSaved();
+  }
+  return code;
+}

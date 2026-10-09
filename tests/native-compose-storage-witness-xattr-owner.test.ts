@@ -13,6 +13,7 @@ import { join } from "node:path";
 import {
   nativeComposeDocumentStorage,
   prepareNativeComposeCommandStorage,
+  runNativeComposeStorageVerifiedExec,
 } from "../src/lib/native-compose-command-storage.ts";
 import {
   assertNativeComposeMaterialAuthority,
@@ -436,6 +437,70 @@ test("command prerequisite failure precedes Expected, provisioning and any autho
 
 test("command document storage projection never passes private fields to a carrier selection", () => {
   expect(nativeComposeDocumentStorage({ volumes: { data: { name: volume.name, labels: { private: "omitted" } } } })).toEqual([selection]);
+});
+
+test.each([130, 143])("cancelled saved exec preserves exit%s and launches zero late proofs or helpers", async (code) => {
+  const controller = new AbortController();
+  let proofs = 0;
+  const result = await runNativeComposeStorageVerifiedExec({
+    signal: controller.signal,
+    assertSaved: async () => { proofs++; },
+    run: async () => { controller.abort(); return code; },
+  });
+  expect(result).toBe(code);
+  expect(proofs).toBe(1);
+});
+
+test("unknown saved exec return preserves its refusal without a late proof", async () => {
+  let proofs = 0;
+  await expect(runNativeComposeStorageVerifiedExec({
+    signal: new AbortController().signal,
+    assertSaved: async () => { proofs++; },
+    run: async () => { throw new Error("unknown command disposition"); },
+  })).rejects.toThrow("unknown command disposition");
+  expect(proofs).toBe(1);
+});
+
+test("runEffect captures the original fresh carrier factory across a long phase and final proofs", async () => {
+  const { store, transport, generation } = await active();
+  const start = Date.now();
+  let clock = start;
+  const now = spyOn(Date, "now").mockImplementation(() => clock);
+  let original = 0;
+  let substituted = 0;
+  const storageWitnesses = {
+    kind: "directory-xattr" as const, engineId,
+    carrier: async () => {
+      original++;
+      return captureNativeComposeStorageXattrCarrier({
+        artifact, ports: transport.ports, signal: transport.controller.signal,
+        deadline: clock + 60_000,
+      });
+    },
+  };
+  try {
+    await store.withMutation(async (mutation) => {
+      const result = await mutation.runEffect({
+        generation, operation: "run", storageWitnesses,
+        assertFresh: async () => {},
+        assertOwned: async () => {
+          storageWitnesses.carrier = async () => {
+            substituted++; return transport.carrier;
+          };
+        },
+        effect: async () => {
+          clock = start + 120_000;
+          return { value: 17, outcome: "complete" };
+        },
+      });
+      expect(result).toEqual({ value: 17, outcome: "complete" });
+    });
+    expect(original).toBeGreaterThan(1);
+    expect(substituted).toBe(0);
+    expect((await store.loadCurrent()).pending).toBeNull();
+  } finally {
+    now.mockRestore();
+  }
 });
 
 test("durable tagged Expected precedes one cold provision/seed and fresh proof before workload", async () => {

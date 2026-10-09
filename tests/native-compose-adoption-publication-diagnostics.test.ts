@@ -154,3 +154,22 @@ test("config adopt exposes issued publication detail without changing code or fi
     opened.mockRestore();
   }
 });
+
+test("save-active diagnostic substages and the proof-deadline reason remain closed data", () => {
+  const original = new Error("private-source-canary");
+  attachLegacyComposePublicationRefusal(original, {
+    stage: "publication-save-active-routing",
+    reason: "proof-deadline",
+  });
+  expect(legacyComposePublicationRefusal(original)).toEqual({
+    stage: "publication-save-active-routing",
+    reason: "proof-deadline",
+  });
+  expect(legacyComposePublicationRefusal({ ...original })).toBeUndefined();
+  expect(() =>
+    attachLegacyComposePublicationRefusal(new Error("fixed"), {
+      stage: "publication-save-active-routing",
+      reason: "private-deadline-canary",
+    })
+  ).toThrow("values omitted");
+});

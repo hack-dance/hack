@@ -556,8 +556,23 @@ rechecked inside the scoped context, and a complete fresh binding remains the
 exit gate before originals can move. The same absolute publication deadline
 applies; an already expired entry still refuses.
 
+At the final active-receipt boundary, publication captures the actual final
+resource read and reuses only its entry observation across the exclusive temporary
+receipt write. The authoritative switching receipt is still unchanged. Scoped
+source, manifest, claim, receipt, stopped-state and deadline checks continue;
+the full closing resource binding and final receipt snapshot run before rename.
+This reuse cannot cross an authoritative save, native installation, original
+move, lifecycle effect or another callback. Clock controls cover this installed
+native boundary separately from the earlier pre-move routing proof; they do not
+identify a historical runtime refusal by themselves.
+
 Publication refusals may include
 `legacy_adoption_publication_refusal: {stage, reason}` in the JSON error detail.
+The active-receipt save distinguishes its original context, receipt, staging,
+routing, commit and readback boundaries. Its explicit deadline guard may issue
+`proof-deadline`; other state refusals retain their owner code classification.
+An inner issued diagnostic survives the outer publication catch. These fixed
+labels contain no paths, identities, source text or error messages.
 The owner records the fixed boundary that rejected and a closed error category;
 it retains no source values, resource identities, compiler output or error text.
 The public error code, guard order, deadlines and recovery requirements remain

@@ -223,6 +223,21 @@ export class LegacyComposeAdoptedGenerationError extends Error {
 function refuse(code: Code = "E_LEGACY_ADOPTION_STATE"): never {
   throw new LegacyComposeAdoptedGenerationError(code);
 }
+/** Only the original deadline guards may issue this value-free reason. */
+function refuseRoutingProofDeadline(
+  stage?: LegacyComposePublicationRefusal["stage"]
+): never {
+  const error = new LegacyComposeAdoptedGenerationError(
+    "E_LEGACY_ADOPTION_STATE"
+  );
+  if (stage) {
+    retainLegacyComposePublicationRefusal(error, {
+      stage,
+      reason: "proof-deadline",
+    });
+  }
+  throw error;
+}
 function cancelled(signal?: AbortSignal) {
   if (signal?.aborted) {
     refuse("E_LEGACY_ADOPTION_CANCELLED");
@@ -263,6 +278,9 @@ function recordPublicationRefusal(
   stage: LegacyComposePublicationRefusal["stage"]
 ): void {
   try {
+    if (legacyComposePublicationRefusal(error)) {
+      return;
+    }
     let reason: LegacyComposePublicationRefusal["reason"] = "unclassified";
     const code: unknown =
       typeof error === "object" && error !== null
@@ -816,15 +834,16 @@ async function assertRetainedRouteState(
   assertOwner: (
     current: Context
   ) => Promise<Awaited<ReturnType<typeof readInputs>>>,
-  entryObserved = false
+  entryObserved = false,
+  refusalStage?: LegacyComposePublicationRefusal["stage"]
 ): Promise<void> {
   const binding = loaded.inputs.binding;
   if (binding.binding_version !== 14 || retainedRouteObservations.has(ctx)) {
     refuse();
   }
-  // Publication has just completed this full resource proof, followed only by
-  // candidate admission and stopped-state reads. Recheck source/receipt authority
-  // under the scoped observation; the exit still performs a full fresh binding.
+  // The caller just completed this full resource proof. Only read-only admission
+  // or an uncommitted receipt staging write may intervene. Scoped observations
+  // recheck source/receipt authority; exit still performs a full fresh binding.
   const first = entryObserved ? loaded : await assertOwner(ctx);
   if (
     first.manifest.id !== loaded.manifest.id ||
@@ -837,8 +856,11 @@ async function assertRetainedRouteState(
   let active = true;
   const assertActive = () => {
     cancelled(current.signal);
-    if (!(active && Number.isFinite(deadline)) || Date.now() >= deadline) {
+    if (!(active && Number.isFinite(deadline))) {
       refuse();
+    }
+    if (Date.now() >= deadline) {
+      refuseRoutingProofDeadline(refusalStage);
     }
   };
   retainedRouteObservations.set(current, {
@@ -1195,48 +1217,77 @@ async function save(
   ctx: Context,
   value: Receipt,
   expected: Receipt,
-  opts?: { readonly beforeCommit: () => Promise<void> }
+  opts?: {
+    readonly beforeCommit?: () => Promise<void>;
+    readonly publication?: true;
+  }
 ): Promise<Receipt> {
-  await ctx.check();
-  const previous = await json(ctx.receiptPath);
-  receipt(previous.value, ctx.checkout);
-  const snapshot = ctx.receiptSnapshots.get(expected);
-  if (
-    !(snapshot && sameFile(previous.info, snapshot.info)) ||
-    previous.text !== snapshot.text
-  ) {
-    refuse();
+  const beforeCommit = opts?.beforeCommit;
+  const publication = opts?.publication === true;
+  let stage: LegacyComposePublicationRefusal["stage"] =
+    "publication-save-active-context";
+  try {
+    await ctx.check();
+    stage = "publication-save-active-previous";
+    const previous = await json(ctx.receiptPath);
+    receipt(previous.value, ctx.checkout);
+    const snapshot = ctx.receiptSnapshots.get(expected);
+    if (
+      !(snapshot && sameFile(previous.info, snapshot.info)) ||
+      previous.text !== snapshot.text
+    ) {
+      refuse();
+    }
+    const temporary = join(ctx.stateRoot, `${token()}.receipt`);
+    stage = "publication-save-active-staging";
+    await writeExclusive(temporary, JSON.stringify(value));
+    const staged = await readPrivate(temporary, STATE_LIMIT);
+    stage = "publication-save-active-staged-context";
+    await ctx.check();
+    stage = "publication-save-active-latest";
+    const latest = await json(ctx.receiptPath);
+    if (
+      !sameFile(previous.info, latest.info) ||
+      previous.text !== latest.text
+    ) {
+      refuse();
+    }
+    if (beforeCommit) {
+      stage = "publication-save-active-routing";
+      await beforeCommit();
+    }
+    if (value.adoption_receipt_version === 14 || ctx.sourceBind.current) {
+      // Both owners await fresh source proofs; preserve receipt incarnation and
+      // revalidate mounted directories after that last admission boundary.
+      stage = "publication-save-active-receipt";
+      await requireReceiptSnapshot(ctx, expected);
+    }
+    stage = "publication-save-active-rename";
+    await rename(temporary, ctx.receiptPath);
+    stage = "publication-save-active-sync";
+    await ctx.directories.at(-2)?.file.sync();
+    stage = "publication-save-active-published";
+    const published = await json(ctx.receiptPath);
+    if (
+      !sameFile(staged.info, published.info) ||
+      staged.text !== published.text
+    ) {
+      refuse();
+    }
+    stage = "publication-save-active-final-context";
+    await ctx.check();
+    stage = "publication-save-active-decode";
+    const result = receipt(published.value, ctx.checkout);
+    ctx.receiptSnapshots.set(result, published);
+    return result;
+  } catch (error: unknown) {
+    if (publication) {
+      recordPublicationRefusal(error, stage);
+    }
+    throw error;
   }
-  const temporary = join(ctx.stateRoot, `${token()}.receipt`);
-  await writeExclusive(temporary, JSON.stringify(value));
-  const staged = await readPrivate(temporary, STATE_LIMIT);
-  await ctx.check();
-  const latest = await json(ctx.receiptPath);
-  if (!sameFile(previous.info, latest.info) || previous.text !== latest.text) {
-    refuse();
-  }
-  if (opts) {
-    await opts.beforeCommit();
-  }
-  if (value.adoption_receipt_version === 14 || ctx.sourceBind.current) {
-    // Both owners await fresh source proofs; preserve receipt incarnation and
-    // revalidate mounted directories after that last admission boundary.
-    await requireReceiptSnapshot(ctx, expected);
-  }
-  await rename(temporary, ctx.receiptPath);
-  await ctx.directories.at(-2)?.file.sync();
-  const published = await json(ctx.receiptPath);
-  if (
-    !sameFile(staged.info, published.info) ||
-    staged.text !== published.text
-  ) {
-    refuse();
-  }
-  await ctx.check();
-  const result = receipt(published.value, ctx.checkout);
-  ctx.receiptSnapshots.set(result, published);
-  return result;
 }
+
 function claim(
   selected: Anchor,
   known: WeakMap<LegacyComposeAdoptedGeneration, Anchor>,
@@ -2040,7 +2091,7 @@ async function completePublication(
       await held.file.sync();
       await transaction.directories[1]?.file.sync();
       stage = "publication-final-inputs";
-      await readInputs(transaction, publication.generation);
+      const finalInputs = await readInputs(transaction, publication.generation);
       stage = "publication-final-stopped";
       await requireStopped(transaction, loaded.inputs.binding);
       stage = "publication-final-directories";
@@ -2053,17 +2104,23 @@ async function completePublication(
           publication: { ...installed, phase: "active" },
         },
         current,
-        loaded.inputs.retainedRouting
-          ? {
-              beforeCommit: () =>
-                assertPublicationRoutingStopped(
-                  transaction,
-                  loaded,
-                  current,
-                  routingDeadline
-                ),
-            }
-          : undefined
+        {
+          publication: true,
+          ...(loaded.inputs.retainedRouting
+            ? {
+                beforeCommit: () =>
+                  assertPublicationRoutingStopped(
+                    transaction,
+                    finalInputs,
+                    current,
+                    routingDeadline,
+                    false,
+                    true,
+                    "publication-save-active-routing"
+                  ),
+              }
+            : {}),
+        }
       );
     } finally {
       const bodyStage = stage;
@@ -2224,7 +2281,8 @@ async function assertPublicationRoutingStopped(
   state: Receipt,
   deadline: number,
   restored = false,
-  entryObserved = false
+  entryObserved = false,
+  refusalStage?: LegacyComposePublicationRefusal["stage"]
 ): Promise<void> {
   if (!loaded.inputs.retainedRouting) {
     return;
@@ -2249,11 +2307,12 @@ async function assertPublicationRoutingStopped(
       await requireReceiptSnapshot(current, state);
       cancelled(current.signal);
       if (Date.now() >= deadline) {
-        refuse();
+        refuseRoutingProofDeadline(refusalStage);
       }
       return fresh;
     },
-    entryObserved
+    entryObserved,
+    refusalStage
   );
 }
 

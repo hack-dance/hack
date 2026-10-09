@@ -18,6 +18,18 @@ export type LegacyComposePublicationRefusal = {
     | "publication-final-stopped"
     | "publication-final-directories"
     | "publication-save-active"
+    | "publication-save-active-context"
+    | "publication-save-active-previous"
+    | "publication-save-active-staging"
+    | "publication-save-active-staged-context"
+    | "publication-save-active-latest"
+    | "publication-save-active-routing"
+    | "publication-save-active-receipt"
+    | "publication-save-active-rename"
+    | "publication-save-active-sync"
+    | "publication-save-active-published"
+    | "publication-save-active-final-context"
+    | "publication-save-active-decode"
     | "publication-close-originals";
   readonly reason:
     | "legacy-state"
@@ -30,6 +42,7 @@ export type LegacyComposePublicationRefusal = {
     | "private-uncertain"
     | "private-stale"
     | "compiler-transport"
+    | "proof-deadline"
     | "unclassified";
 };
 
@@ -52,6 +65,18 @@ const stages: readonly LegacyComposePublicationRefusal["stage"][] = [
   "publication-final-stopped",
   "publication-final-directories",
   "publication-save-active",
+  "publication-save-active-context",
+  "publication-save-active-previous",
+  "publication-save-active-staging",
+  "publication-save-active-staged-context",
+  "publication-save-active-latest",
+  "publication-save-active-routing",
+  "publication-save-active-receipt",
+  "publication-save-active-rename",
+  "publication-save-active-sync",
+  "publication-save-active-published",
+  "publication-save-active-final-context",
+  "publication-save-active-decode",
   "publication-close-originals",
 ];
 const reasons: readonly LegacyComposePublicationRefusal["reason"][] = [
@@ -65,6 +90,7 @@ const reasons: readonly LegacyComposePublicationRefusal["reason"][] = [
   "private-uncertain",
   "private-stale",
   "compiler-transport",
+  "proof-deadline",
   "unclassified",
 ];
 

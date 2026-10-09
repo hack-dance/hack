@@ -926,3 +926,202 @@ test("publication repeats full volume authority after its observed-entry routing
     await store.close();
   }
 });
+
+test("save-active uses its newly observed binding within the unchanged publication deadline", async () => {
+  const { store, generation } = await prepare();
+  const originalNow = Date.now;
+  let virtualNow = originalNow();
+  let charged = 0;
+  const clock = spyOn(Date, "now").mockImplementation(() => virtualNow);
+  try {
+    h.hooks.afterProbe = async (args) => {
+      const saved = await h.receipt();
+      if (
+        args[0] === "volume" &&
+        args[1] === "inspect" &&
+        saved.publication?.phase === "switching" &&
+        saved.publication.native !== null
+      ) {
+        charged += 1;
+        virtualNow += 2600;
+      }
+    };
+    await store.publish({ generation, binary: h.compiler });
+    expect(charged).toBe(4);
+    expect((await h.receipt()).publication?.phase).toBe("active");
+    expect(h.effects).toEqual([]);
+  } finally {
+    if (h.canRestore()) {
+      clock.mockRestore();
+      Reflect.deleteProperty(h.hooks, "afterProbe");
+    }
+    await store.close();
+  }
+});
+
+test("save-active classifies its original deadline guard after staging without active rename", async () => {
+  const { store, generation } = await prepare();
+  const originalNow = Date.now;
+  let virtualNow = originalNow();
+  let reached = false;
+  const clock = spyOn(Date, "now").mockImplementation(() => virtualNow);
+  let restoreRead: (() => void) | undefined;
+  try {
+    const originalRead = privateState.readPrivate;
+    const readSpy = spyOn(privateState, "readPrivate").mockImplementation(
+      async (...args) => {
+        const value = await originalRead(...args);
+        if (!reached && args[0].endsWith(".receipt")) {
+          const staged: unknown = JSON.parse(value.text);
+          if (
+            isRecord(staged) &&
+            isRecord(staged.publication) &&
+            staged.publication.phase === "active"
+          ) {
+            expect((await h.receipt()).publication).toMatchObject({
+              phase: "switching",
+            });
+            reached = true;
+            virtualNow += 16_000;
+          }
+        }
+        return value;
+      }
+    );
+    restoreRead = () => readSpy.mockRestore();
+    let error: unknown;
+    try {
+      await store.publish({ generation, binary: h.compiler });
+    } catch (caught: unknown) {
+      error = caught;
+    }
+    expect(reached).toBe(true);
+    expect(legacyComposePublicationRefusal(error)).toEqual({
+      stage: "publication-save-active-routing",
+      reason: "proof-deadline",
+    });
+    const saved = await h.receipt();
+    expect(saved.publication?.phase).toBe("switching");
+    expect(saved.publication?.native).not.toBeNull();
+    expect(saved.routingHandoff).toBe("held");
+    expect(h.effects).toEqual([]);
+  } finally {
+    if (h.canRestore()) {
+      clock.mockRestore();
+      restoreRead?.();
+    }
+    await store.close();
+  }
+});
+
+test("save-active rechecks receipt incarnation after the staged-write await", async () => {
+  const { store, generation } = await prepare();
+  let reached = false;
+  let restoreRead: (() => void) | undefined;
+  try {
+    const originalRead = privateState.readPrivate;
+    const readSpy = spyOn(privateState, "readPrivate").mockImplementation(
+      async (...args) => {
+        const value = await originalRead(...args);
+        if (!reached && args[0].endsWith(".receipt")) {
+          const staged: unknown = JSON.parse(value.text);
+          if (
+            isRecord(staged) &&
+            isRecord(staged.publication) &&
+            staged.publication.phase === "active"
+          ) {
+            const path = join(
+              h.root,
+              ".hack/.internal/legacy-compose-adoption-v1/receipt.json"
+            );
+            const previous = await readFile(path, "utf8");
+            await fs.rename(
+              path,
+              join(h.outer, "receipt-before-save-active-rebirth")
+            );
+            await fs.writeFile(path, previous, { flag: "wx", mode: 0o600 });
+            reached = true;
+          }
+        }
+        return value;
+      }
+    );
+    restoreRead = () => readSpy.mockRestore();
+    let error: unknown;
+    try {
+      await store.publish({ generation, binary: h.compiler });
+    } catch (caught: unknown) {
+      error = caught;
+    }
+    expect(reached).toBe(true);
+    expect(legacyComposePublicationRefusal(error)).toEqual({
+      stage: "publication-save-active-latest",
+      reason: "legacy-state",
+    });
+    const saved = await h.receipt();
+    expect(saved.publication?.phase).toBe("switching");
+    expect(saved.publication?.native).not.toBeNull();
+    expect(saved.routingHandoff).toBe("held");
+    expect(h.effects).toEqual([]);
+  } finally {
+    if (h.canRestore()) {
+      restoreRead?.();
+    }
+    await store.close();
+  }
+});
+
+test("save-active repeats full volume authority after its scoped routing observations", async () => {
+  const { store, generation } = await prepare();
+  let admins = 0;
+  let volumeReads = 0;
+  let readsAtInjection: number | undefined;
+  let reached = false;
+  try {
+    h.hooks.afterProbe = async (args) => {
+      const saved = await h.receipt();
+      if (
+        saved.publication?.phase !== "switching" ||
+        saved.publication.native === null
+      ) {
+        return;
+      }
+      if (args[0] === "volume" && args[1] === "inspect") {
+        volumeReads += 1;
+      }
+      if (
+        args[0] === "exec" &&
+        args.at(-1) === "http://127.0.0.1:2019/config/apps/http/servers"
+      ) {
+        admins += 1;
+        if (admins === 2) {
+          readsAtInjection = volumeReads;
+          reached = true;
+          h.model.volumeBirth = "2026-02-02T02:03:04Z";
+        }
+      }
+    };
+    let error: unknown;
+    try {
+      await store.publish({ generation, binary: h.compiler });
+    } catch (caught: unknown) {
+      error = caught;
+    }
+    expect(reached).toBe(true);
+    expect(readsAtInjection).toBe(2);
+    expect(legacyComposePublicationRefusal(error)).toEqual({
+      stage: "publication-save-active-routing",
+      reason: "legacy-changed",
+    });
+    const saved = await h.receipt();
+    expect(saved.publication?.phase).toBe("switching");
+    expect(saved.publication?.native).not.toBeNull();
+    expect(saved.routingHandoff).toBe("held");
+    expect(h.effects).toEqual([]);
+  } finally {
+    if (h.canRestore()) {
+      Reflect.deleteProperty(h.hooks, "afterProbe");
+    }
+    await store.close();
+  }
+});

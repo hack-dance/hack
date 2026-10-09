@@ -33,6 +33,12 @@ type ProcessOptions = {
   readonly startupTimeoutMs: number;
   readonly signal?: AbortSignal;
   readonly onExitDiagnostic?: (diagnostic: NativeExitDiagnostic) => void;
+  /** Finite frontend hooks intercept the first stop; failed hooks retain the live owner. */
+  readonly beforeStop?: () => Promise<boolean>;
+  readonly forceSignal?: AbortSignal;
+  readonly onStopFailure?: () => void;
+  /** Durable capture in the existing frontend owner, before private input delivery. */
+  readonly onGroup?: (group: number) => Promise<void>;
 };
 
 /**
@@ -84,12 +90,15 @@ export async function serveNativeProjectGraph(
 export async function serveNativeAuthoredProjectGraph(
   opts: ProcessOptions & {
     readonly sourceFile: string;
+    readonly frontendHooks?: boolean;
     readonly review: NativeAuthoredReview;
     /** Synchronous first-receipt observation before status; grants no publication authority. */
     readonly onReceipt?: (receipt: NativeAuthoredReceipt) => undefined;
     readonly onReady: (
       receipt: NativeAuthoredReceipt,
-      assertRunning: () => void
+      assertRunning: () => void,
+      refreshRunning: () => Promise<void>,
+      publishReady: () => void
     ) => Promise<void>;
   }
 ): Promise<number> {
@@ -109,7 +118,7 @@ export async function serveNativeAuthoredProjectGraph(
     command: [
       "graph",
       "native",
-      "serve",
+      opts.frontendHooks ? "frontend-serve" : "serve",
       "--source-file",
       opts.sourceFile,
       "--expect-review",
@@ -121,7 +130,7 @@ export async function serveNativeAuthoredProjectGraph(
     ],
     readyLimit: 64 * 1024,
     strictReady: true,
-    onReady: async (value, interrupted, ownerSignal) => {
+    onReady: async (value, interrupted, ownerSignal, publishReady) => {
       const receipt = parseNativeAuthoredReady(value, expected);
       // Give the caller an independent copy so it cannot alter status admission.
       // Retain this membership for cleanup even when current readiness later fails.
@@ -160,7 +169,39 @@ export async function serveNativeAuthoredProjectGraph(
         }
       };
       assertRunning();
-      await opts.onReady(current.receipt, assertRunning);
+      await opts.onReady(
+        current.receipt,
+        assertRunning,
+        async () => {
+          const fresh = parseNativeAuthoredControl(
+            await invokeNativeRuntime({
+              runtime: opts.runtime,
+              cwd: opts.projectRoot,
+              args: [
+                "graph",
+                "native",
+                "control",
+                "--run-id",
+                opts.run,
+                "--action",
+                "status",
+                "--json",
+              ],
+              timeoutMs: 45_000,
+              signal: ownerSignal,
+              boundNativeStatusDrain: true,
+            }),
+            receipt,
+            "status"
+          );
+          if (interrupted() || !nativeSnapshotReady(fresh)) {
+            throw new Error(
+              "Native graph readiness identity changed; values omitted."
+            );
+          }
+        },
+        publishReady
+      );
     },
   });
 }
@@ -195,6 +236,22 @@ function nativeSnapshotReady(
   );
 }
 
+function assertProcessSelection(opts: ProcessOptions): void {
+  if (
+    !(RUN.test(opts.run) && Number.isSafeInteger(opts.startupTimeoutMs)) ||
+    opts.startupTimeoutMs < 1 ||
+    opts.startupTimeoutMs > 600_000 ||
+    (opts.privateInput?.byteLength ?? 0) > MAX_INPUT ||
+    canceledAtEntry(opts)
+  ) {
+    throw new Error("Native graph startup input is invalid or canceled.");
+  }
+}
+
+function canceledAtEntry(opts: ProcessOptions): boolean {
+  return opts.signal?.aborted === true || opts.forceSignal?.aborted === true;
+}
+
 async function serveGraphProcess(
   opts: ProcessOptions & {
     readonly command: readonly string[];
@@ -203,19 +260,12 @@ async function serveGraphProcess(
     readonly onReady: (
       value: unknown,
       interrupted: () => boolean,
-      ownerSignal: AbortSignal
+      ownerSignal: AbortSignal,
+      publishReady: () => void
     ) => Promise<void>;
   }
 ): Promise<number> {
-  if (
-    !(RUN.test(opts.run) && Number.isSafeInteger(opts.startupTimeoutMs)) ||
-    opts.startupTimeoutMs < 1 ||
-    opts.startupTimeoutMs > 600_000 ||
-    (opts.privateInput?.byteLength ?? 0) > MAX_INPUT ||
-    opts.signal?.aborted
-  ) {
-    throw new Error("Native graph startup input is invalid or canceled.");
-  }
+  assertProcessSelection(opts);
   const environment: Record<string, string> = {};
   for (const key of ["PATH", "HOME", "TMPDIR", "USER", "LOGNAME"]) {
     const value = process.env[key];
@@ -236,6 +286,7 @@ async function serveGraphProcess(
       stdin: opts.privateInput ? "pipe" : "ignore",
       stdout: "pipe",
       stderr: "pipe",
+      detached: opts.beforeStop !== undefined,
     }
   );
   // Descendants may inherit a pipe after the owned receiver exits. Its exit,
@@ -266,14 +317,46 @@ async function serveGraphProcess(
       }
     }, 130_000);
   };
-  const abort = () => {
+  const stopFailure = () => {
+    try {
+      void Promise.resolve(opts.onStopFailure?.()).catch(() => undefined);
+    } catch {
+      /* observation only */
+    }
+  };
+  let stopping: Promise<void> | undefined;
+  const force = () => {
     canceled = true;
     owner.abort();
     terminate();
   };
+  const abort = () => {
+    if (!(ready && opts.beforeStop)) {
+      force();
+      return;
+    }
+    if (stopping) {
+      return;
+    }
+    stopping = (async () => {
+      try {
+        if (await opts.beforeStop?.()) {
+          terminate();
+        } else {
+          stopFailure();
+        }
+      } catch {
+        stopFailure();
+      }
+    })();
+  };
+  opts.forceSignal?.addEventListener("abort", force, { once: true });
   opts.signal?.addEventListener("abort", abort, { once: true });
   if (opts.signal?.aborted) {
     abort();
+  }
+  if (opts.forceSignal?.aborted) {
+    force();
   }
   const startupTimer = setTimeout(() => {
     timedOut = true;
@@ -281,6 +364,7 @@ async function serveGraphProcess(
     terminate();
   }, opts.startupTimeoutMs);
   try {
+    await opts.onGroup?.(child.pid);
     const inputFailure = await writeNativePrivateInput(
       child.stdin,
       opts.privateInput
@@ -296,7 +380,16 @@ async function serveGraphProcess(
         inputFailure !== undefined ||
         (opts.strictReady && child.exitCode !== null),
       onReady: async (value, interrupted) => {
-        await opts.onReady(value, interrupted, owner.signal);
+        await opts.onReady(value, interrupted, owner.signal, () => {
+          if (interrupted()) {
+            throw new Error(
+              "Native graph publication interrupted; values omitted."
+            );
+          }
+          ready = true;
+          clearTimeout(startupTimer);
+        });
+        ready = true;
         clearTimeout(startupTimer);
       },
     });
@@ -316,6 +409,8 @@ async function serveGraphProcess(
   } finally {
     clearTimeout(startupTimer);
     opts.signal?.removeEventListener("abort", abort);
+    opts.forceSignal?.removeEventListener("abort", force);
+    await stopping;
     if (child.exitCode === null) {
       terminate();
       await child.exited;
@@ -335,7 +430,30 @@ async function serveGraphProcess(
     } catch {
       // Observation must never replace the startup result or cleanup authority.
     }
+    if (opts.beforeStop) {
+      await requireGroupAbsent(child.pid);
+    }
   }
+}
+
+/** An attached finite-hook owner must not retire while its captured detached group is present.
+ * Unknown permission or lifetime is a refusal, never a signal to a later/reused group.
+ */
+async function requireGroupAbsent(group: number): Promise<void> {
+  for (let attempt = 0; attempt < 20; attempt++) {
+    try {
+      process.kill(-group, 0);
+    } catch (error) {
+      if (isRecord(error) && error.code === "ESRCH") {
+        return;
+      }
+      throw error;
+    }
+    await Bun.sleep(50);
+  }
+  throw new Error(
+    "Native foreground child group settlement is unknown; values omitted."
+  );
 }
 
 async function consumeGraphOutput(opts: {

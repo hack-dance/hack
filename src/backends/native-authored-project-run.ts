@@ -28,6 +28,15 @@ import {
   parseNativeAuthoredReceipt,
   parseNativeAuthoredReview,
 } from "./native-authored-graph-protocol.ts";
+import {
+  createNativeAuthoredHookOwner,
+  loadNativeAuthoredHookOwner,
+  type NativeAuthoredHookOwner,
+  type NativeHookFilePin,
+  nativeHookPermitIssued,
+  retireNativeAuthoredRecoveredHooks,
+} from "./native-authored-hook-journal.ts";
+import { requestNativeHookStop } from "./native-authored-hook-stop.ts";
 
 const LIMIT = 64 * 1024;
 const SOURCE_LIMIT = 1024 * 1024;
@@ -73,10 +82,16 @@ type SourceOptions = {
   readonly metadata: NativeEnvMetadata;
   readonly profiles?: readonly string[];
   readonly overlay?: string | null;
+  readonly hookPermit?: NativeHookFilePin;
 };
 export type NativeAuthoredProjectAdmission = {
   readonly assertHeld: () => Promise<void>;
   readonly loadStart: () => Promise<NativeAuthoredProjectStartSelection | null>;
+  readonly hooksRetained: () => Promise<boolean>;
+  readonly createHooks: (opts: {
+    readonly run: string;
+    readonly selectionHash: string;
+  }) => Promise<NativeAuthoredHookOwner>;
   readonly prepareSource: (
     opts: SourceOptions
   ) => Promise<NativeAuthoredProjectSource>;
@@ -192,6 +207,19 @@ function sourceOverlay(overlay: string | null | undefined) {
   }
   return { named: overlay };
 }
+function validHookPin(value: unknown): value is NativeHookFilePin {
+  return (
+    isRecord(value) &&
+    keys(value, "dev,ino,path,sha256") &&
+    typeof value.path === "string" &&
+    typeof value.dev === "number" &&
+    Number.isSafeInteger(value.dev) &&
+    typeof value.ino === "number" &&
+    Number.isSafeInteger(value.ino) &&
+    typeof value.sha256 === "string" &&
+    HEX64.test(value.sha256)
+  );
+}
 function sourceText(store: Store, input: SourceOptions) {
   // Only envelope projection is done here; authored grammar and capability
   // admission remain in the compiler and native runtime plan request.
@@ -211,12 +239,17 @@ function sourceText(store: Store, input: SourceOptions) {
       overlay === null ||
       (typeof overlay === "string" && validBranch(overlay))
     ) ||
-    !metadata
+    !metadata ||
+    (input.hookPermit !== undefined &&
+      !(
+        validHookPin(input.hookPermit) &&
+        nativeHookPermitIssued(input.hookPermit)
+      ))
   ) {
     return refused();
   }
   const text = JSON.stringify({
-    version: 2,
+    version: input.hookPermit === undefined ? 2 : 3,
     kind: "native-graph-source",
     project: store.identity.projectRoot,
     branch: store.identity.branch,
@@ -224,6 +257,9 @@ function sourceText(store: Store, input: SourceOptions) {
     profiles,
     overlay: sourceOverlay(overlay),
     env_metadata: metadata,
+    ...(input.hookPermit === undefined
+      ? {}
+      : { hook_permit: input.hookPermit }),
   });
   if (Buffer.byteLength(text) > SOURCE_LIMIT) {
     return refused();
@@ -377,6 +413,7 @@ export async function withNativeAuthoredProjectRecoveryStorage<T>(
     readonly readReady: () => Promise<NativeAuthoredProjectRunSelection>;
     readonly readStart: () => Promise<NativeAuthoredProjectStartSelection>;
     readonly sourcePath: (run: string) => string;
+    readonly retireHooks: (run: string) => Promise<void>;
     readonly readSource: (run: string) => Promise<{
       readonly dev: number;
       readonly ino: number;
@@ -408,6 +445,18 @@ export async function withNativeAuthoredProjectRecoveryStorage<T>(
       readReady: () => read(store),
       readStart: () => readRecord(store, store.startFile, started),
       sourcePath,
+      retireHooks: (run) =>
+        retireNativeAuthoredRecoveredHooks(
+          {
+            root: store.root,
+            held: store.held,
+            key: digest(JSON.stringify(opts.branch)),
+            projectRoot: store.identity.projectRoot,
+            branch: store.identity.branch,
+            check: store.check,
+          },
+          run
+        ),
       async readSource(run) {
         const current = await readPrivate(sourcePath(run), SOURCE_LIMIT);
         const value: unknown = JSON.parse(current.text);
@@ -416,10 +465,13 @@ export async function withNativeAuthoredProjectRecoveryStorage<T>(
             isRecord(value) &&
             keys(
               value,
-              "branch,env_metadata,kind,overlay,profiles,project,run,version"
-            )
+              value.version === 3
+                ? "branch,env_metadata,hook_permit,kind,overlay,profiles,project,run,version"
+                : "branch,env_metadata,kind,overlay,profiles,project,run,version"
+            ) &&
+            (value.version === 2 ||
+              (value.version === 3 && validHookPin(value.hook_permit)))
           ) ||
-          value.version !== 2 ||
           value.kind !== "native-graph-source" ||
           value.project !== store.identity.projectRoot ||
           value.branch !== store.identity.branch ||
@@ -713,9 +765,21 @@ export async function withNativeAuthoredProjectAdmission<T>(
           return refused();
         }
       };
+      const hookStore = {
+        root: store.root,
+        held: store.held,
+        key: digest(JSON.stringify(opts.branch)),
+        projectRoot: store.identity.projectRoot,
+        branch: store.identity.branch,
+        check: assertHeld,
+      };
       const capability: NativeAuthoredProjectAdmission = {
         assertHeld,
         loadStart,
+        async hooksRetained() {
+          return (await loadNativeAuthoredHookOwner(hookStore)) !== null;
+        },
+        createHooks: (input) => createNativeAuthoredHookOwner(hookStore, input),
         async prepareSource(input) {
           const { run, text } = sourceText(store, input);
           const path = join(store.root.path, `${run}.source.json`);
@@ -842,5 +906,107 @@ export async function withNativeAuthoredProjectAdmission<T>(
         active = false;
       }
     });
+  });
+}
+
+/** Read-only client of the still-live foreground owner. Does not acquire/replay inputs. */
+export async function stopNativeAuthoredProject(input: {
+  readonly scope: NativeAuthoredProjectRunScope;
+  readonly timeoutMs: number;
+  readonly signal?: AbortSignal;
+}): Promise<void> {
+  const opts = { ...input, scope: { ...input.scope } };
+  const deadline = performance.now() + opts.timeoutMs;
+  const remaining = () => {
+    const budget = Math.ceil(deadline - performance.now());
+    if (
+      !Number.isSafeInteger(opts.timeoutMs) ||
+      budget < 1 ||
+      opts.signal?.aborted
+    ) {
+      return refused();
+    }
+    return budget;
+  };
+  remaining();
+  await withNativeAuthoredProjectRecoveryStorage(opts.scope, async (store) => {
+    const ready = await store.readReady();
+    const start = await store.readStart();
+    const run = ready.record.receipt.review.provenance.run;
+    const readyFile = await readPrivate(store.ready, LIMIT);
+    const startFile = await readPrivate(store.start, LIMIT);
+    if (
+      readyFile.info.dev !== ready.identity.dev ||
+      readyFile.info.ino !== ready.identity.ino ||
+      digest(readyFile.text) !== ready.identity.sha256 ||
+      startFile.info.dev !== start.identity.dev ||
+      startFile.info.ino !== start.identity.ino ||
+      digest(startFile.text) !== start.identity.sha256
+    ) {
+      return refused();
+    }
+    if (
+      start.record.review.review_id !== ready.record.receipt.review.review_id
+    ) {
+      return refused();
+    }
+    const path = join(store.root.path, `${run}.hook-stop.json`);
+    const current = await readPrivate(path, 8192);
+    const value: unknown = JSON.parse(current.text);
+    if (
+      !(isRecord(value) && keys(value, "kind,owner,port,run,token,version")) ||
+      value.version !== 1 ||
+      value.kind !== "native-authored-hook-stop" ||
+      value.run !== run ||
+      !validHookPin(value.owner) ||
+      value.owner.path !==
+        join(
+          store.root.path,
+          `${digest(JSON.stringify(opts.scope.branch))}.hooks.json`
+        ) ||
+      typeof value.port !== "number" ||
+      typeof value.token !== "string"
+    ) {
+      return refused();
+    }
+    const owner = await readPrivate(value.owner.path, 8192);
+    if (
+      owner.info.dev !== value.owner.dev ||
+      owner.info.ino !== value.owner.ino ||
+      digest(owner.text) !== value.owner.sha256
+    ) {
+      return refused();
+    }
+    await store.check();
+    for (const [target, captured] of [
+      [store.ready, readyFile],
+      [store.start, startFile],
+      [path, current],
+      [value.owner.path, owner],
+    ] as const) {
+      const fresh = await readPrivate(target, LIMIT);
+      if (
+        !sameFile(captured.info, fresh.info) ||
+        captured.info.mtimeMs !== fresh.info.mtimeMs ||
+        captured.info.ctimeMs !== fresh.info.ctimeMs ||
+        captured.text !== fresh.text
+      ) {
+        return refused();
+      }
+    }
+    await store.check();
+    await requestNativeHookStop({
+      run,
+      port: value.port,
+      token: value.token,
+      timeoutMs: remaining(),
+      signal: opts.signal,
+    });
+    await store.check();
+    // The trusted foreground owner only responds after its exact native absence/retirement.
+    for (const path of [store.ready, store.start, value.owner.path]) {
+      await absent(path);
+    }
+    await store.check();
   });
 }

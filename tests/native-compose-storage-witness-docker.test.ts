@@ -640,6 +640,8 @@ test.each([
   "helper-host-policy",
   "helper-mount-cardinality",
   "helper-program-mount",
+  "helper-storage-request",
+  "helper-storage-identity",
   "helper-storage-mount",
   "helper-policy-stability",
 ] as const)("carrier policy identifies the closed %s conjunct without values", (reason) => {
@@ -664,6 +666,12 @@ test.each([
       break;
     case "helper-program-mount":
       value.mounts[0] = { ...value.mounts[0], Source: "private-mount-canary" };
+      break;
+    case "helper-storage-request":
+      fixture.volumeOptions.Labels = {};
+      break;
+    case "helper-storage-identity":
+      fixture.rootMount.Driver = "private-driver-canary";
       break;
     case "helper-storage-mount":
       fixture.rootMount.RW = true;

@@ -180,14 +180,23 @@ export function checkNativeComposeStorageDockerCarrier(opts: {
         !Object.hasOwn(requested, "BindOptions") &&
         isRecord(requested.VolumeOptions) &&
         Object.keys(requested.VolumeOptions).length === 1 &&
-        requested.VolumeOptions.NoCopy === true &&
+        requested.VolumeOptions.NoCopy === true
+      )
+    ) {
+      // Closed predicate groups keep the refusal value-free while identifying
+      // whether the request, the observed identity or the observed mode differed.
+      return policyRefusal("helper-storage-request");
+    } else if (
+      !(
         observed.Type === "volume" &&
         observed.Name === input.target.name &&
         observed.Source === input.target.mountpoint &&
-        observed.Driver === "local" &&
-        observed.RW === !input.readonly &&
-        observed.Propagation === ""
+        observed.Driver === "local"
       )
+    ) {
+      return policyRefusal("helper-storage-identity");
+    } else if (
+      !(observed.RW === !input.readonly && observed.Propagation === "")
     ) {
       return policyRefusal("helper-storage-mount");
     }

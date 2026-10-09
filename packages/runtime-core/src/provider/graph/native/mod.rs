@@ -4,6 +4,7 @@ use crate::{project::native::NativeInputs, provider::native_input};
 #[cfg(target_os = "macos")]
 pub mod foreground;
 mod journal;
+pub mod persistent_data;
 mod runtime;
 pub mod selection;
 pub use journal::{Phase, Receipt};

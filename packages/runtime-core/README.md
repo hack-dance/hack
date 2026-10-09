@@ -1372,3 +1372,28 @@ machine name and both disks' current identities and declared sizes. Every sample
 and the acquired startup lease recheck the selected owner; changed ownership
 refuses, and a reserve-qualified request cannot enter VM create or boot. Stopped,
 missing or unproved capacity retains fresh-allocation requirements or refuses.
+
+### Inactive native persistent-data codec
+
+`provider::graph::native::persistent_data` defines one closed, private-candidate
+version-1 owner record and a pure comparison. Its persistent binding contains a
+64-hex project namespace, logical storage name, 32-hex owner, exact guest owner,
+boot UUID and backing-disk identity, and the default local-volume policy. An
+enrolled record retains the exact volume name, UTC `CreatedAt` bytes and directory
+device/inode. Runtime run, plan and generation IDs are absent, so independent
+compute generations can compare the same explicitly selected data identity.
+
+Pending intent is distinct from enrolled observation and always refuses the
+comparison, even when supplied an exact volume observation. Missing observations,
+unknown/duplicate fields, malformed identities, unsupported versions/policies,
+and scope, guest, birth or directory changes refuse. Copied labels do not make a
+replacement volume match its original birth. Guest boot/disk rollover remains a
+refusal requiring a future separately owned handoff; no migration is inferred.
+
+This codec is inactive: no command reads or writes it and no create, adoption,
+promotion, repair or deletion path is added. Decoding an enrolled assertion does
+not prove a durable enrollment commit, fresh observation, contents or effect
+authority. It is separate from dependency-cache provenance and does not qualify
+persistent databases, initializer replay, SQL retention or the full NC05 corpus.
+Future enrollment and runtime owners must establish those commit/freshness and
+same-data lifecycle gates before activation.

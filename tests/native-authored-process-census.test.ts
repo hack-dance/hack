@@ -40,13 +40,17 @@ const original = {
 async function standin(
   options: {
     readonly frames: readonly string[];
-    readonly expireAfterFailedLookup?: boolean;
+    readonly expiry?:
+      | "before-first-child"
+      | "after-disappearance"
+      | "after-final-pair"
+      | "churn";
     readonly foreignSession?: boolean;
   },
   body: (calls: () => number) => Promise<void>
 ) {
   const frames = [...options.frames];
-  const expireAfterFailedLookup = options.expireAfterFailedLookup === true;
+  const expiry = options.expiry;
   const foreignSession = options.foreignSession === true;
   let calls = 0;
   let inspectors = 0;
@@ -62,12 +66,24 @@ async function standin(
     "openProcessSessionInspector"
   ).mockImplementation(() => {
     const selected = ++inspectors;
+    let failed = false;
     return {
-      session: (pid: number) =>
-        pid === 88 ? null : foreignSession && pid === 77 ? 123 : pid,
+      session: (pid: number) => {
+        if (pid !== process.pid && [88, 89, 90].includes(pid)) {
+          failed = true;
+          return null;
+        }
+        return foreignSession && pid === 77 ? 123 : pid;
+      },
       close: () => {
-        if (expireAfterFailedLookup && selected === 2) {
+        if (
+          (expiry === "before-first-child" && selected === 1) ||
+          (expiry === "after-disappearance" && failed) ||
+          (expiry === "after-final-pair" && selected === 4)
+        ) {
           offset = 4000;
+        } else if (expiry === "churn" && failed) {
+          offset += 1000;
         }
       },
     };
@@ -128,6 +144,22 @@ censusTest(
   }
 );
 censusTest(
+  "two positively disappeared rows require a wholly fresh stable successor pair",
+  async () => {
+    await standin(
+      { frames: [raw(88), raw(77), raw(89), raw(77), raw(77), raw(77)] },
+      async (calls) => {
+        const result = await readNativeAuthoredProcessCensus();
+        expect(result.map((row) => row.pid)).toEqual([77]);
+        expect(calls()).toBe(6);
+        expect(() =>
+          requireNativeAuthoredProcessQuiescent(original, result)
+        ).not.toThrow();
+      }
+    );
+  }
+);
+censusTest(
   "fresh successor foreign group, session and original PID still veto recovery",
   async () => {
     for (const [current, foreignSession] of [
@@ -150,9 +182,9 @@ censusTest(
 );
 censusTest.each([
   {
-    name: "second disappearance",
-    frames: [raw(88), raw(77), raw(88), raw(77)],
-    reason: "disappeared",
+    name: "reappeared PID",
+    frames: [raw(88), raw(77), raw(88)],
+    reason: "PID reappeared",
   },
   {
     name: "same live unavailable",
@@ -174,13 +206,26 @@ censusTest.each([
     frames: [raw(88), "garbage\n"],
     reason: "unknown",
   },
+  {
+    name: "unknown after disappearance",
+    frames: [raw(88), raw(77), raw(89), raw(89)],
+    reason: "same-live-SID-unavailable",
+  },
+  {
+    name: "changed after disappearance",
+    frames: [raw(88), raw(77), raw(89), raw(89).replace(" S ", " Z ")],
+    reason: "changed",
+  },
+  {
+    name: "reappeared PID in diagnostic",
+    frames: [raw(88), raw(77), raw(89), raw(88)],
+    reason: "unknown",
+  },
 ])(
   "$name cannot restart or discard unknown membership",
   async ({ frames, reason }) => {
     await standin({ frames }, async (calls) => {
-      await expect(readNativeAuthoredProcessCensus()).rejects.toThrow(
-        `(${reason})`
-      );
+      await expect(readNativeAuthoredProcessCensus()).rejects.toThrow(reason);
       expect(calls()).toBe(frames.length);
     });
   }
@@ -189,7 +234,7 @@ censusTest(
   "expiry after proven disappearance admits no successor child",
   async () => {
     await standin(
-      { frames: [raw(88), raw(77)], expireAfterFailedLookup: true },
+      { frames: [raw(88), raw(77)], expiry: "after-disappearance" },
       async (calls) => {
         await expect(readNativeAuthoredProcessCensus()).rejects.toThrow(
           "(disappeared)"
@@ -197,5 +242,20 @@ censusTest(
         expect(calls()).toBe(2);
       }
     );
+  }
+);
+censusTest(
+  "expired admission and late complete pair cannot confer successful census",
+  async () => {
+    for (const [expiry, frames] of [
+      ["before-first-child", []],
+      ["after-final-pair", [raw(77), raw(77)]],
+      ["churn", [raw(88), raw(77), raw(89), raw(77), raw(90), raw(77)]],
+    ] as const) {
+      await standin({ frames, expiry }, async (calls) => {
+        await expect(readNativeAuthoredProcessCensus()).rejects.toThrow();
+        expect(calls()).toBe(frames.length);
+      });
+    }
   }
 );

@@ -97,11 +97,13 @@ at the observations; it does not prove the numeric group/session is absent.
 It never signals a saved numeric group. The original owner separately publishes
 one bound settlement observation only after its captured exit, drain and existing
 group-absence check. That observation cannot replace fresh recovery checks.
-A live SID lookup race permits one entirely fresh attempt only if a complete
+A live SID lookup race permits an entirely fresh attempt only if a complete
 bounded reread positively observes that PID missing. Both earlier observations
 and their SID mappings are discarded; two new complete observations must fit the
-original monotonic budget. Reuse, state changes, still-live or unavailable rows,
-failed rereads and a second disappearance refuse. No individual row is skipped.
+original monotonic budget, including any further proven disappearance. Disappeared
+PIDs remain only as denial facts: any reappearance in a later census or diagnostic
+reread refuses. State changes, still-live or unavailable rows, failed rereads and
+exhausted budget refuse. No individual row is skipped and no deadline is renewed.
 
 Darwin's [ps state implementation](https://github.com/apple-oss-distributions/adv_cmds/blob/main/ps/print.c)
 maps `SZOMB` to `Z`. The [XNU exit path](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/kern_exit.c)

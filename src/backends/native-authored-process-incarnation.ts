@@ -42,7 +42,7 @@ export type NativeAuthoredProcessIncarnation = NativeAuthoredProcessRow & {
   readonly selected: Executable;
 };
 const issued = new WeakSet<NativeAuthoredProcessIncarnation>();
-const disappearedCensuses = new WeakSet<object>();
+const disappearedCensuses = new WeakMap<object, number>();
 export function isCapturedNativeAuthoredProcess(
   value: NativeAuthoredProcessIncarnation
 ): boolean {
@@ -183,15 +183,18 @@ export function parseNativeAuthoredProcessCensus(
 }
 /** Read-only system metadata; never sends a signal to a saved PID/group. Only
  * the newly captured ps child can be canceled. Pipe/exit uncertainty refuses. */
-async function readRows(timeoutMs: number): Promise<{
+async function readRows(
+  end: number,
+  denied: ReadonlySet<number> = new Set()
+): Promise<{
   readonly rows: readonly NativeAuthoredProcessRow[];
   readonly probe: number;
   readonly session: number;
 }> {
+  const timeoutMs = Math.ceil(end - performance.now());
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 3000) {
     return refused();
   }
-  const end = performance.now() + timeoutMs;
   const sessions = { darwin: "sess", linux: "sid" };
   if (process.platform !== "darwin" && process.platform !== "linux") {
     return refused();
@@ -256,7 +259,7 @@ async function readRows(timeoutMs: number): Promise<{
   const complete = Promise.all([output, child.exited]);
   const observed = Promise.allSettled([output, child.exited]);
   // Every continuation is handled even if a system metadata child cannot be
-  // confirmed within its separate bounded settlement interval. No saved process
+  // confirmed within the remaining original budget. No saved process
   // or resource authority follows that failed observation.
   void complete.catch(() => undefined);
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -276,8 +279,12 @@ async function readRows(timeoutMs: number): Promise<{
     if (interrupted || value[1] !== 0) {
       return refused();
     }
+    const rows = parseNativeAuthoredProcessCensus(value[0]);
+    if (rows.some((row) => denied.has(row.pid))) {
+      throw new Error("Native process census PID reappeared; values omitted.");
+    }
     return {
-      rows: parseNativeAuthoredProcessCensus(value[0]),
+      rows,
       probe: child.pid,
       session: ownSession,
     };
@@ -290,7 +297,10 @@ async function readRows(timeoutMs: number): Promise<{
     const settled = await Promise.race([
       observed.then(() => true),
       new Promise<false>((resolve) => {
-        bound = setTimeout(() => resolve(false), 250);
+        bound = setTimeout(
+          () => resolve(false),
+          Math.max(0, Math.min(250, Math.ceil(end - performance.now())))
+        );
       }),
     ]);
     clearTimeout(bound);
@@ -360,13 +370,14 @@ export function classifyNativeAuthoredSessionFailure(
 }
 async function unavailableSession(
   selected: NativeAuthoredProcessRow,
-  end: number
+  end: number,
+  denied: ReadonlySet<number>
 ): Promise<never> {
   let reason:
     | ReturnType<typeof classifyNativeAuthoredSessionFailure>
     | "unknown" = "unknown";
   try {
-    const fresh = await readRows(Math.ceil(end - performance.now()));
+    const fresh = await readRows(end, denied);
     if (performance.now() < end) {
       reason = classifyNativeAuthoredSessionFailure(selected, fresh.rows);
     }
@@ -377,15 +388,15 @@ async function unavailableSession(
     `Native process live-session observation refused (${reason}); values omitted.`
   );
   if (reason === "disappeared") {
-    disappearedCensuses.add(failure);
+    disappearedCensuses.set(failure, selected.pid);
   }
   throw failure;
 }
 async function sessionRows(
-  timeoutMs: number
+  end: number,
+  denied: ReadonlySet<number>
 ): Promise<readonly NativeAuthoredProcessRow[]> {
-  const end = performance.now() + timeoutMs;
-  const { rows, probe, session } = await readRows(timeoutMs);
+  const { rows, probe, session } = await readRows(end, denied);
   if (process.platform === "linux") {
     if (
       rows.some(
@@ -409,7 +420,7 @@ async function sessionRows(
       }
       const sid = row.pid === probe ? session : inspector.session(row.pid);
       if (sid === null) {
-        return await unavailableSession(row, end);
+        return await unavailableSession(row, end, denied);
       }
       result.push({ ...row, session: String(sid) });
     }
@@ -420,31 +431,43 @@ async function sessionRows(
 }
 /** Complete read-only metadata, including explicit unresolved zombie rows. The
  * second observation brackets state/identity across SID lookup. A positively
- * disappeared live row may discard one entire attempt; its successor requires
- * two new complete observations within the original monotonic budget. Unknown,
- * changed or repeatedly disappearing membership refuses. No saved PID signals. */
+ * disappeared live row may discard an entire attempt; its successor requires
+ * two new complete observations within the original monotonic budget. Only
+ * disappeared PIDs survive as denial facts: any reappearance refuses. Unknown
+ * or changed membership refuses immediately. No saved PID signals. */
 export async function readNativeAuthoredProcessCensus(
   timeoutMs = 3000
 ): Promise<readonly NativeAuthoredProcessRow[]> {
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 3000) {
+    return refused();
+  }
   const end = performance.now() + timeoutMs;
-  for (let attempt = 0; attempt < 2; attempt++) {
+  const denied = new Set<number>();
+  while (performance.now() < end) {
     try {
-      const before = await sessionRows(Math.ceil(end - performance.now()));
-      const after = await sessionRows(Math.ceil(end - performance.now()));
+      const before = await sessionRows(end, denied);
+      const after = await sessionRows(end, denied);
       if (performance.now() >= end) {
         return refused();
       }
-      return mergeNativeAuthoredProcessCensuses(before, after);
+      const merged = mergeNativeAuthoredProcessCensuses(before, after);
+      if (performance.now() >= end) {
+        return refused();
+      }
+      return merged;
     } catch (error) {
+      const disappeared =
+        typeof error === "object" && error !== null
+          ? disappearedCensuses.get(error)
+          : undefined;
       if (
-        attempt !== 0 ||
-        typeof error !== "object" ||
-        error === null ||
-        !disappearedCensuses.has(error) ||
+        disappeared === undefined ||
+        denied.has(disappeared) ||
         performance.now() >= end
       ) {
         throw error;
       }
+      denied.add(disappeared);
       // Never carry rows/SIDs from the failed attempt into a successful proof.
     }
   }
@@ -452,7 +475,7 @@ export async function readNativeAuthoredProcessCensus(
 }
 
 async function originalRow(pid: number): Promise<NativeAuthoredProcessRow> {
-  const { rows } = await readRows(3000);
+  const { rows } = await readRows(performance.now() + 3000);
   const row = rows.find((item) => item.pid === pid) ?? refused();
   const inspector = openProcessSessionInspector();
   try {
@@ -594,7 +617,7 @@ export async function assertNativeAuthoredOriginalGroupAbsent(
   ) {
     return refused();
   }
-  const { rows } = await readRows(3000);
+  const { rows } = await readRows(performance.now() + 3000);
   if (rows.some((row) => row.pid === value.pid || row.group === value.group)) {
     return refused();
   }

@@ -391,6 +391,7 @@ test("trace replay exposes startup vs strict ownership without accepting a trunc
     expect(startup).toEqual({
       outcome: "unready",
       code: null,
+      reason: null,
       consumed: calls.length,
       protocolMatched: true,
     });
@@ -403,6 +404,7 @@ test("trace replay exposes startup vs strict ownership without accepting a trunc
     expect(strict).toEqual({
       outcome: "refused",
       code: "E_NATIVE_COMPOSE_OWNERSHIP",
+      reason: "topology",
       consumed: 6,
       protocolMatched: true,
     });

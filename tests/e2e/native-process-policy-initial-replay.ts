@@ -3,7 +3,10 @@ import { join } from "node:path";
 import { isRecord } from "../../src/lib/guards.ts";
 import { openNativeComposeGenerationStore } from "../../src/lib/native-compose-generation.ts";
 import { readNativeComposeNetworkTopology } from "../../src/lib/native-compose-network-topology.ts";
-import type { NativeComposeOwnershipOptions } from "../../src/lib/native-compose-ownership.ts";
+import type {
+  NativeComposeOwnershipOptions,
+  NativeComposeOwnershipRefusal,
+} from "../../src/lib/native-compose-ownership.ts";
 import { exec } from "../../src/lib/shell.ts";
 import {
   type ProcessPolicyInitialTraceQuery,
@@ -22,11 +25,27 @@ const CODES = [
 type Replay = {
   readonly outcome: "owned" | "unready" | "refused";
   readonly code: (typeof CODES)[number] | null;
+  /** First replayed ownership predicate only; absent for success or unclassified probe errors. */
+  readonly reason: NativeComposeOwnershipRefusal | null;
   readonly consumed: number;
   readonly protocolMatched: boolean;
 };
 function replayCode(value: unknown): value is Replay["code"] {
   return value === null || CODES.some((code) => code === value);
+}
+function replayReason(value: unknown): value is Replay["reason"] {
+  return (
+    value === null ||
+    value === "resource-label" ||
+    value === "generation" ||
+    value === "state" ||
+    value === "volume-birth" ||
+    value === "bridge-policy" ||
+    value === "topology" ||
+    value === "endpoint" ||
+    value === "cross-scan-drift" ||
+    value === "unknown"
+  );
 }
 
 /** Run the real ownership policy against original recorded replies, with no engine access. */
@@ -65,13 +84,13 @@ await Bun.write(Bun.stdout,row.stdout);process.exit(row.exitCode);
   );
   await chmod(docker, 0o700);
   const program = `
-import {assertNativeComposeOwned,observeNativeComposeStartupOwned,NativeComposeOwnershipError} from ${JSON.stringify(join(import.meta.dir, "../../src/lib/native-compose-ownership.ts"))};
+import {assertNativeComposeOwned,observeNativeComposeStartupOwned,NativeComposeOwnershipError,nativeComposeOwnershipRefusal} from ${JSON.stringify(join(import.meta.dir, "../../src/lib/native-compose-ownership.ts"))};
 const {selection}=await Bun.file(${JSON.stringify(inputs)}).json();
-let outcome="refused",code=null;
+let outcome="refused",code=null,reason=null;
 try {const value=${opts.mode === "startup" ? 'await observeNativeComposeStartupOwned(selection,["retry"])' : "await assertNativeComposeOwned(selection)"};outcome=value===null?"unready":"owned";}
-catch(error){code=error instanceof NativeComposeOwnershipError?error.code:null;}
+catch(error){code=error instanceof NativeComposeOwnershipError?error.code:null;reason=nativeComposeOwnershipRefusal(error)??null;}
 const consumed=(await Bun.file(${JSON.stringify(cursor)}).exists())?Number(await Bun.file(${JSON.stringify(cursor)}).text()):0;
-process.stdout.write(JSON.stringify({outcome,code,consumed,protocolMatched:!(await Bun.file(${JSON.stringify(mismatch)}).exists())}));
+process.stdout.write(JSON.stringify({outcome,code,reason,consumed,protocolMatched:!(await Bun.file(${JSON.stringify(mismatch)}).exists())}));
 `;
   const result = await exec(
     [process.execPath, "--no-env-file", "-e", program],
@@ -93,6 +112,7 @@ process.stdout.write(JSON.stringify({outcome,code,consumed,protocolMatched:!(awa
         value.outcome === "unready" ||
         value.outcome === "refused") &&
       replayCode(value.code) &&
+      replayReason(value.reason) &&
       Number.isInteger(value.consumed) &&
       typeof value.consumed === "number" &&
       value.consumed >= 0 &&
@@ -105,6 +125,7 @@ process.stdout.write(JSON.stringify({outcome,code,consumed,protocolMatched:!(awa
   return {
     outcome: value.outcome,
     code: value.code,
+    reason: value.reason,
     consumed: value.consumed,
     protocolMatched: value.protocolMatched,
   };

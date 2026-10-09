@@ -9,6 +9,10 @@ import {
   type ProcessPolicyInitialTraceQuery,
   readProcessPolicyInitialTrace,
 } from "./native-process-policy-initial-trace.ts";
+import {
+  isProcessPolicyReplayReason,
+  type ProcessPolicyReplayReason,
+} from "./native-process-policy-replay-reason.ts";
 
 const REFUSAL = "Initial process-policy replay unavailable; values omitted";
 const SERVICES = ["forced", "graceful", "reaper", "retry"] as const;
@@ -24,6 +28,7 @@ type Replay = {
   readonly code: (typeof CODES)[number] | null;
   readonly consumed: number;
   readonly protocolMatched: boolean;
+  readonly reason: ProcessPolicyReplayReason | null;
 };
 function replayCode(value: unknown): value is Replay["code"] {
   return value === null || CODES.some((code) => code === value);
@@ -65,13 +70,16 @@ await Bun.write(Bun.stdout,row.stdout);process.exit(row.exitCode);
   );
   await chmod(docker, 0o700);
   const program = `
-import {assertNativeComposeOwned,observeNativeComposeStartupOwned,NativeComposeOwnershipError} from ${JSON.stringify(join(import.meta.dir, "../../src/lib/native-compose-ownership.ts"))};
+import {captureProcessPolicyOwnershipSource,sameProcessPolicyOwnershipSource,processPolicyReplayReason} from ${JSON.stringify(join(import.meta.dir, "native-process-policy-replay-reason.ts"))};
+const sourceBefore=captureProcessPolicyOwnershipSource();
+const {assertNativeComposeOwned,observeNativeComposeStartupOwned,NativeComposeOwnershipError}=await import(${JSON.stringify(join(import.meta.dir, "../../src/lib/native-compose-ownership.ts"))});
 const {selection}=await Bun.file(${JSON.stringify(inputs)}).json();
-let outcome="refused",code=null;
+let outcome="refused",code=null,reason=null;
 try {const value=${opts.mode === "startup" ? 'await observeNativeComposeStartupOwned(selection,["retry"])' : "await assertNativeComposeOwned(selection)"};outcome=value===null?"unready":"owned";}
-catch(error){code=error instanceof NativeComposeOwnershipError?error.code:null;}
+catch(error){code=error instanceof NativeComposeOwnershipError?error.code:null;reason=code==="E_NATIVE_COMPOSE_OWNERSHIP"&&sourceBefore?processPolicyReplayReason({stack:error.stack,sourcePath:sourceBefore.path,sourceSha256:sourceBefore.sha256}):"unavailable";}
+if(outcome==="refused"&&!sameProcessPolicyOwnershipSource(sourceBefore,captureProcessPolicyOwnershipSource()))reason="unavailable";
 const consumed=(await Bun.file(${JSON.stringify(cursor)}).exists())?Number(await Bun.file(${JSON.stringify(cursor)}).text()):0;
-process.stdout.write(JSON.stringify({outcome,code,consumed,protocolMatched:!(await Bun.file(${JSON.stringify(mismatch)}).exists())}));
+process.stdout.write(JSON.stringify({outcome,code,reason,consumed,protocolMatched:!(await Bun.file(${JSON.stringify(mismatch)}).exists())}));
 `;
   const result = await exec(
     [process.execPath, "--no-env-file", "-e", program],
@@ -93,6 +101,13 @@ process.stdout.write(JSON.stringify({outcome,code,consumed,protocolMatched:!(awa
         value.outcome === "unready" ||
         value.outcome === "refused") &&
       replayCode(value.code) &&
+      (value.reason === null || isProcessPolicyReplayReason(value.reason)) &&
+      (value.outcome === "refused"
+        ? value.reason !== null
+        : value.reason === null) &&
+      (value.code === "E_NATIVE_COMPOSE_OWNERSHIP" ||
+        value.reason === null ||
+        value.reason === "unavailable") &&
       Number.isInteger(value.consumed) &&
       typeof value.consumed === "number" &&
       value.consumed >= 0 &&
@@ -105,6 +120,7 @@ process.stdout.write(JSON.stringify({outcome,code,consumed,protocolMatched:!(awa
   return {
     outcome: value.outcome,
     code: value.code,
+    reason: value.reason,
     consumed: value.consumed,
     protocolMatched: value.protocolMatched,
   };

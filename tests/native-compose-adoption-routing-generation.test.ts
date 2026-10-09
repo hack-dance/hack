@@ -15,8 +15,13 @@ import {
 let h: Awaited<ReturnType<typeof retainedRoutingFixture>>;
 let fixtureActive = false;
 let fixtureUncertain = false;
-const test = (name: string, run: () => Promise<void>) =>
-  boundedTest(
+const test = (
+  name: string,
+  run: () => Promise<void>,
+  opts: { readonly timeoutMs?: 30_000 | 60_000 } = {}
+) => {
+  const timeoutMs = opts.timeoutMs ?? 30_000;
+  return boundedTest(
     name,
     async () => {
       if (fixtureActive || fixtureUncertain) {
@@ -26,7 +31,7 @@ const test = (name: string, run: () => Promise<void>) =>
         );
       }
       fixtureActive = true;
-      const lifetime = retainedRoutingFixtureLifetime(Date.now() + 30_000);
+      const lifetime = retainedRoutingFixtureLifetime(Date.now() + timeoutMs);
       let issued = false;
       let failed = false;
       let failure: unknown;
@@ -74,8 +79,9 @@ const test = (name: string, run: () => Promise<void>) =>
         throw failure;
       }
     },
-    30_000
+    timeoutMs
   );
+};
 async function prepare() {
   const store = await h.store();
   try {
@@ -95,61 +101,97 @@ async function red(value: Promise<unknown>) {
     expect(String(error)).not.toContain(h.root);
   }
 }
-test("v14 keeps original resources and data through stop/publication/up/down/up/rollback and saved open", async () => {
-  const { store, generation } = await prepare();
-  try {
-    expect(generation.report.adoption_generation_version).toBe(14);
-    expect((await h.receipt()).routingHandoff).toBe("held");
-    expect(
-      await h.operation(store, generation, "stop", { preparation: true })
-    ).toBe(0);
-    await store.publish({ generation, binary: h.compiler });
-    const active = await store.loadActive();
-    if (!active) {
-      throw new Error("Synthetic active generation missing");
+test(
+  "v14 keeps original resources and data through stop/publication/up/down/up/rollback and saved open",
+  async () => {
+    const phase = (value: string) => {
+      try {
+        const inspections = (kind: string) =>
+          h.commands.filter((args) => args[0] === kind && args[1] === "inspect")
+            .length;
+        console.info(
+          JSON.stringify({
+            fixture: "retained-routing-compound",
+            phase: value,
+            probes: h.commands.length,
+            containerInspections: inspections("container"),
+            networkInspections: inspections("network"),
+            volumeInspections: inspections("volume"),
+            effects: h.effects.length,
+          })
+        );
+      } catch {
+        // Diagnostic failure must not skip close or replace an original test error.
+      }
+    };
+    phase("prepare-enter");
+    const { store, generation } = await prepare();
+    phase("prepare-return");
+    try {
+      expect(generation.report.adoption_generation_version).toBe(14);
+      expect((await h.receipt()).routingHandoff).toBe("held");
+      expect(
+        await h.operation(store, generation, "stop", { preparation: true })
+      ).toBe(0);
+      phase("preparation-stop-return");
+      await store.publish({ generation, binary: h.compiler });
+      phase("publication-return");
+      const active = await store.loadActive();
+      if (!active) {
+        throw new Error("Synthetic active generation missing");
+      }
+      phase("active-load-return");
+      for (const operation of ["start", "stop", "start", "stop"] as const) {
+        expect(await h.operation(store, active, operation)).toBe(0);
+      }
+      phase("four-lifecycle-operations-return");
+      await store.withLease({
+        generation: active,
+        run: async (input) => {
+          expect(input.retainedRouting).toBe(true);
+          expect(input.routingResolution).toEqual(h.resolution);
+          expect(JSON.stringify(input)).not.toContain("original.hack");
+        },
+      });
+      phase("saved-lease-return");
+      await store.rollback();
+      phase("rollback-return");
+      expect(
+        await readFile(join(h.root, ".hack/hack.config.json"), "utf8")
+      ).toBe(h.config);
+      expect(
+        await readFile(join(h.root, ".hack/docker-compose.yml"), "utf8")
+      ).toBe(h.compose);
+      expect((await h.receipt()).publication?.phase).toBe("rolled-back");
+      expect((await h.receipt()).routingHandoff).toBe("releasing");
+      expect(h.model.sqlRow).toBe(ROUTING_CANARY);
+      expect(
+        h.effects.every(
+          (args) =>
+            args.length === 5 &&
+            args[3] === ROUTING_IDS.db &&
+            args[4] === ROUTING_IDS.web
+        )
+      ).toBe(true);
+      expect(
+        h.commands.some(
+          (args) =>
+            args.includes("pull") ||
+            args.includes("build") ||
+            args.includes("create") ||
+            args.includes("rm")
+        )
+      ).toBe(false);
+      phase("assertions-complete");
+    } finally {
+      await store.close();
+      phase("store-close-return");
     }
-    for (const operation of ["start", "stop", "start", "stop"] as const) {
-      expect(await h.operation(store, active, operation)).toBe(0);
-    }
-    await store.withLease({
-      generation: active,
-      run: async (input) => {
-        expect(input.retainedRouting).toBe(true);
-        expect(input.routingResolution).toEqual(h.resolution);
-        expect(JSON.stringify(input)).not.toContain("original.hack");
-      },
-    });
-    await store.rollback();
-    expect(await readFile(join(h.root, ".hack/hack.config.json"), "utf8")).toBe(
-      h.config
-    );
-    expect(
-      await readFile(join(h.root, ".hack/docker-compose.yml"), "utf8")
-    ).toBe(h.compose);
-    expect((await h.receipt()).publication?.phase).toBe("rolled-back");
-    expect((await h.receipt()).routingHandoff).toBe("releasing");
-    expect(h.model.sqlRow).toBe(ROUTING_CANARY);
-    expect(
-      h.effects.every(
-        (args) =>
-          args.length === 5 &&
-          args[3] === ROUTING_IDS.db &&
-          args[4] === ROUTING_IDS.web
-      )
-    ).toBe(true);
-    expect(
-      h.commands.some(
-        (args) =>
-          args.includes("pull") ||
-          args.includes("build") ||
-          args.includes("create") ||
-          args.includes("rm")
-      )
-    ).toBe(false);
-  } finally {
-    await store.close();
-  }
-});
+    // One full cold preparation/publication, four lifecycle operations and rollback.
+    // Canonical bracketed scans add four probes per stable binding observation.
+  },
+  { timeoutMs: 60_000 }
+);
 test("numeric callback cannot settle a prospective child; explicit stop containment retains original uncertainty", async () => {
   const { store, generation } = await prepare();
   try {

@@ -326,6 +326,12 @@ and each service's closed one-or-two-bridge attachment and aliases. Neither a
 shared network ID nor a partial member observation can stand in for the other
 bridge. Engine ID, resource inventories and source
 bytes are rechecked, and acquisition compares two complete private observations.
+Container observations bracket the active-member read. If an original changes
+running state while all immutable facts remain verified, the mixed observation
+is discarded within the same aggregate deadline and output allowance. Foreign
+members, replaced identities and stable membership mismatches refuse immediately.
+This is not an atomic daemon snapshot: delayed endpoint removal can still refuse,
+and fresh successful job completion remains the scheduler's separate decision.
 The Docker routing environment is captured for later comparison. Queries never
 request container environment or full image configuration; version 9 additionally
 reads the minimal image reference, ID and birth described above. This retained-resource authority

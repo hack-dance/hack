@@ -205,6 +205,14 @@ Cleanup checks exact native ownership and separately removes its captured read-o
 evidence reader. An incomplete teardown fails and preserves both private roots and
 recovery identities; ordinary successful cleanup remains unchanged.
 
+The initial-observation replay reports the original query count, protocol match and
+ownership outcome. Future replay refusals may also include a fixed callsite reason
+for the exact hash-pinned ownership source. Only the immediate owning caller is
+matched; source drift, unknown stacks and other failures report `unavailable`.
+This diagnostic emits no stack, source path, identifiers, labels or reply values,
+and changes no ownership decision, query or budget. It does not reproduce wall
+timing, establish the original caller mode, or recover replies that were not saved.
+
 ## Native config routing qualification
 
 `native-config-routing` is a required Docker CI scenario using the current compiled

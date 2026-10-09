@@ -38,6 +38,61 @@ fn image() -> String {
 fn basic() -> Value {
     json!({"schema_version":1,"name":"fixture","services":{"web":{"image":image()}}})
 }
+fn two_bridges() -> Value {
+    json!({"schema_version":1,"name":"fixture","networks":{"outbound":{"internal":false},"inside":{"internal":true}},"services":{
+        "db":{"image":image(),"networks":{"inside":{"aliases":["db-reader"]}}},
+        "web":{"image":image(),"networks":{"inside":{},"outbound":{"aliases":["web-public"]}}}
+    }})
+}
+
+#[test]
+fn selected_two_bridge_aliases_lower_to_distinct_owned_resources_and_receipt_five() {
+    let prepared = prepare(
+        two_bridges(),
+        json!({"db":{},"web":{}}),
+        &ManagedValues::new(),
+    );
+    let config = configuration(&prepared, OWNER).unwrap();
+    let resources = config.resources();
+    assert_eq!(resources.len(), 4);
+    assert!(!resources["network:inside"].outbound);
+    assert!(resources["network:outbound"].outbound);
+    assert_ne!(
+        resources["network:inside"].name,
+        resources["network:outbound"].name
+    );
+    assert_eq!(
+        resources["container:db"].networks.as_ref().unwrap(),
+        &["inside"]
+    );
+    assert_eq!(
+        resources["container:web"].networks.as_ref().unwrap(),
+        &["inside", "outbound"]
+    );
+    let inside = &resources["network:inside"].name;
+    let outbound = &resources["network:outbound"].name;
+    assert_eq!(
+        config.containers()["db"]["NetworkingConfig"]["EndpointsConfig"][inside]["Aliases"],
+        json!(["db", "db-reader"])
+    );
+    assert_eq!(
+        config.containers()["web"]["NetworkingConfig"]["EndpointsConfig"][outbound]["Aliases"],
+        json!(["web", "web-public"])
+    );
+    let receipt =
+        Receipt::preparing(&config, OWNER, "12345678-abcd-abcd-abcd-123456789abc").unwrap();
+    assert_eq!(serde_json::to_value(&receipt).unwrap()["version"], 5);
+    assert!(receipt.validate(receipt.review.scope().run, OWNER).is_ok());
+    #[cfg(target_os = "macos")]
+    assert!(receipt.require_recovery_ready().is_err());
+    let mut crossed = serde_json::to_value(&receipt).unwrap();
+    crossed["topology"]["attachments"]["db"]["inside"] = json!(["wrong"]);
+    let crossed: Receipt = serde_json::from_value(crossed).unwrap();
+    assert!(crossed.check_binding(&receipt).is_err());
+    let mut old = serde_json::to_value(&receipt).unwrap();
+    old["version"] = json!(2);
+    assert!(serde_json::from_value::<Receipt>(old).is_err());
+}
 
 struct Fake<'a> {
     configs: &'a BTreeMap<String, Value>,

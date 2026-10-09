@@ -30,6 +30,59 @@ each emitted query at its actual receipt state; a final receipt cannot authorize
 an earlier query retroactively. Missing interruption controls report fixed stage,
 exit and control flags without printing command output or authored values.
 
+The `native-compose-adoption-job-worktrees` Docker selector uses the current
+compiled CLI and matching compiler with cached `postgres:17.6-alpine`. The static
+default-bridge fixture has no published ports and never pulls. Two linked
+worktrees retain their original container/network IDs and volume creation identity
+through ordered adoption, down/up, restart and rollback. An explicitly declared
+job must have a fresh exact-ID start and exit zero before its dependent starts.
+SQL keeps the original seed separate from attempt, successful-attempt and dependent
+counters; the dependent must read the current successful attempt. Exit 17 and
+interrupted startup must preserve pending state without starting the dependent.
+Saved stop recovery never replays the job. Cleanup refuses unknown ownership and
+retains both roots if child settlement or exact retirement cannot be confirmed.
+
+```sh
+HACK_E2E_CLI_BIN=./dist/hack HACK_E2E_DOCKER=1 HACK_E2E_REQUIRE_DOCKER=1 bun tests/e2e/run.ts --only=native-compose-adoption-job-worktrees
+```
+
+This is a maintained acceptance gate, not a recorded live pass. It does not qualify
+generated/managed/typed-local input, profiles, custom networks, routes, files or
+builds with jobs. Fresh observed job completion plus dependent SQL readback does
+not guarantee exactly-once business effects or atomic exclusion of external Docker
+writers. Cancellation checks captured host child/pipe settlement; uncertain
+callbacks prevent teardown rather than being treated as canceled work.
+Ordinary fixture effects and CLI calls use that same bounded child owner and
+write private PID/PGID plus exit, stdout/stderr EOF and fresh absence receipts.
+These files are observations only: an uncancellable receipt write can finish late.
+Cleanup still requires the capture's successful return and its live settlement
+gate; a failed or uncertain capture permanently withholds teardown authority,
+even if a later file records exit zero and absence.
+Group absence refers to the captured host child's group; it does not establish
+guest Docker worker completion or recursively inventory unrelated child groups.
+
+Retained ordered-command failures may include a fixed `legacy_adoption_refusal`
+stage/reason in the JSON error detail. Observer categories distinguish malformed
+shape, timestamp, restart policy and membership. Probe reasons separately identify
+operation admission/discovery/spawn, nonzero child exit, timeout, cancellation,
+I/O budget, capture failure, UTF-8 decoding, JSON parsing, non-object row and unknown
+failure. The legacy `probe` reason remains accepted for historical diagnostic
+compatibility; newly observed unknown errors use `probe-unknown`. These classifications
+come from the probe owner's weak association and fixed parse boundaries, never
+arbitrary error properties. Scheduler
+categories distinguish selection, deadline, attempts, job failure, readiness and
+completion authority. They never include daemon output, resource IDs, SQL or env
+values. Unknown ownership errors retain their existing fixed generic refusal.
+The earlier `ordered-observation/probe` live failure does not establish which of
+these newly distinguished seams failed; it remains preserved as unresolved evidence.
+The disabled job restart codec accepts both `no` and the empty daemon spelling,
+with zero retries still required. This is an independent compatibility correction,
+not an established explanation for the earlier live startup refusal. Compose
+[v5.1.2's default policy](https://github.com/docker/compose/blob/v5.1.2/pkg/compose/create.go#L551-L575)
+and its pinned Moby API
+[v1.54.1 disabled-policy contract](https://github.com/moby/moby/blob/api/v1.54.1/api/types/container/hostconfig.go#L267-L270)
+define those two spellings.
+
 ## Command-path cache regressions
 
 `bun test tests/e2e/run-dependency-cache.test.ts` runs the real source CLI in

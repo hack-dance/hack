@@ -22,9 +22,29 @@ export function legacyComposeAdoptionCandidateSupported(
   return (
     isRecord(candidate) &&
     isRecord(candidate.services) &&
-    Object.values(candidate.services).every(
+    (!Object.hasOwn(candidate, "jobs") || isRecord(candidate.jobs)) &&
+    [
+      ...Object.values(candidate.services),
+      ...(Object.hasOwn(candidate, "jobs") && isRecord(candidate.jobs)
+        ? Object.values(candidate.jobs)
+        : []),
+    ].every(
       (service) => isRecord(service) && !Object.hasOwn(service, "profiles")
-    )
+    ) &&
+    (!(
+      Object.hasOwn(candidate, "jobs") &&
+      isRecord(candidate.jobs) &&
+      Object.keys(candidate.jobs).length
+    ) ||
+      [
+        "environment",
+        "profiles",
+        "routes",
+        "host",
+        "host_bindings",
+        "networks",
+        "files",
+      ].every((key) => !Object.hasOwn(candidate, key)))
   );
 }
 /** Inspect names/types only, with a bounded directory walk; never read managed values or keys. */

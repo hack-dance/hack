@@ -1,3 +1,5 @@
+import { legacyComposeAdoptionCandidateSupported } from "./native-compose-adoption-contract.ts";
+import { legacyComposeRetainedPlan } from "./native-compose-adoption-readiness.ts";
 import {
   type ImportField,
   parseImportDocument,
@@ -5,7 +7,9 @@ import {
 import {
   freezeImportValue,
   mapLegacyNativeAdoptionBaseline,
+  mapLegacyNativeCompletedJobAdoptionBaseline,
   mapLegacyNativeRetainedFileAdoptionBaseline,
+  mapLegacyNativeStorageAdoption,
   type NativeImportPlan,
 } from "./native-config-import-plan.ts";
 import {
@@ -65,10 +69,18 @@ export function planLegacyComposeAdoption(opts: {
   readonly configText: string;
   readonly composeText: string;
 }): LegacyComposeAdoptionPlan {
-  return planLegacyComposeStorageInput(
-    opts,
-    mapLegacyNativeAdoptionBaseline(opts)
-  );
+  const converted = mapLegacyNativeStorageAdoption(opts);
+  let jobs = false;
+  if (
+    converted.candidate &&
+    legacyComposeAdoptionCandidateSupported(converted.candidate)
+  ) {
+    jobs = legacyComposeRetainedPlan(converted.candidate).requiresV7 === true;
+  }
+  const baseline = jobs
+    ? mapLegacyNativeCompletedJobAdoptionBaseline(opts)
+    : mapLegacyNativeAdoptionBaseline(opts);
+  return planLegacyComposeStorageInput(opts, baseline);
 }
 
 /** Source-only prerequisite consumed exclusively by the distinct proof-bearing retained-file owner. */
@@ -83,10 +95,7 @@ export function planLegacyComposeRetainedFileAdoption(opts: {
 }
 
 function planLegacyComposeStorageInput(
-  opts: {
-    readonly configText: string;
-    readonly composeText: string;
-  },
+  opts: { readonly configText: string; readonly composeText: string },
   baseline: NativeImportPlan
 ): LegacyComposeAdoptionPlan {
   const config = parseImportDocument({

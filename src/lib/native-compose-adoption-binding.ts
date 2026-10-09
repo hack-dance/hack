@@ -1,6 +1,9 @@
 import { resolve } from "node:path";
 import { isRecord } from "./guards.ts";
-import { legacyComposeAdoptionLayoutSupported } from "./native-compose-adoption-contract.ts";
+import {
+  legacyComposeAdoptionCandidateSupported,
+  legacyComposeAdoptionLayoutSupported,
+} from "./native-compose-adoption-contract.ts";
 import {
   type LegacyComposeRetainedFileProof,
   legacyComposeRetainedFileGrants,
@@ -17,6 +20,7 @@ import {
   hasLegacyComposeGeneratedSources,
   LegacyComposeAdoptionProjection,
 } from "./native-compose-adoption-projection.ts";
+import { legacyComposeRetainedPlan } from "./native-compose-adoption-readiness.ts";
 import { inspectLegacyComposeContainerStates } from "./native-compose-adoption-runtime.ts";
 import {
   createNativeComposeProbe,
@@ -438,6 +442,91 @@ function containerMounts(
     targets.add(item.target);
   }
 }
+function containerNetworks(
+  row: Record<string, unknown>,
+  opts: Parameters<typeof containerRows>[1]
+): void {
+  if (opts.intent.ownedNetworks) {
+    const verifiedNetworks = opts.networks;
+    const configured = opts.intent.ownedNetworks.attachments.find(
+      (entry) => entry.service === row.service
+    );
+    requireValue(
+      configured &&
+        Array.isArray(row.networks) &&
+        row.networks.length === configured.networks.length &&
+        verifiedNetworks?.length === 2
+    );
+    const observedNames = new Set<string>();
+    for (const item of row.networks) {
+      requireValue(isRecord(item));
+      keys(item, ["name", "id", "aliases"]);
+      requireValue(
+        typeof item.name === "string" && !observedNames.has(item.name)
+      );
+      observedNames.add(item.name);
+      const verified = verifiedNetworks.find(
+        (entry) => entry.name === item.name
+      );
+      const declared = configured.networks.find(
+        (entry) => entry.logical === verified?.logical
+      );
+      requireValue(verified && declared && item.id === verified.id);
+      const expected = [
+        `${opts.intent.composeProject}-${row.service}-1`,
+        row.service,
+        ...declared.aliases,
+      ].sort();
+      const actual = item.aliases;
+      requireValue(
+        (Array.isArray(actual) &&
+          actual.every(
+            (alias) => typeof alias === "string" && NAME.test(alias)
+          ) &&
+          new Set(actual).size === actual.length &&
+          JSON.stringify([...actual].sort()) === JSON.stringify(expected)) ||
+          (!row.running &&
+            (actual === null || (Array.isArray(actual) && actual.length === 0)))
+      );
+    }
+    return;
+  }
+  requireValue(Array.isArray(row.networks) && row.networks.length === 1);
+  const network = row.networks[0];
+  requireValue(isRecord(network));
+  keys(
+    network,
+    opts.intent.ownedNetwork ? ["name", "id", "aliases"] : ["name", "id"]
+  );
+  requireValue(
+    opts.network &&
+      network.name === opts.network.name &&
+      network.id === opts.network.id
+  );
+  if (opts.intent.ownedNetwork) {
+    const configured = opts.intent.ownedNetwork.attachments.find(
+      (entry) => entry.service === row.service
+    );
+    requireValue(configured);
+    const expected = [
+      `${opts.intent.composeProject}-${row.service}-1`,
+      row.service,
+      ...configured.aliases,
+    ].sort();
+    const actual = network.aliases;
+    requireValue(
+      (Array.isArray(actual) &&
+        actual.every(
+          (alias) => typeof alias === "string" && NAME.test(alias)
+        ) &&
+        new Set(actual).size === actual.length &&
+        JSON.stringify([...actual].sort()) === JSON.stringify(expected)) ||
+        (!row.running &&
+          (actual === null || (Array.isArray(actual) && actual.length === 0)))
+    );
+  }
+}
+
 function containerRows(
   rows: readonly Record<string, unknown>[],
   opts: {
@@ -496,88 +585,7 @@ function containerRows(
           ? {}
           : { fileCandidate: opts.fileCandidate }),
       });
-      if (opts.intent.ownedNetworks) {
-        const verifiedNetworks = opts.networks;
-        const configured = opts.intent.ownedNetworks.attachments.find(
-          (entry) => entry.service === row.service
-        );
-        requireValue(
-          configured &&
-            Array.isArray(row.networks) &&
-            row.networks.length === configured.networks.length &&
-            verifiedNetworks?.length === 2
-        );
-        const observedNames = new Set<string>();
-        for (const item of row.networks) {
-          requireValue(isRecord(item));
-          keys(item, ["name", "id", "aliases"]);
-          requireValue(
-            typeof item.name === "string" && !observedNames.has(item.name)
-          );
-          observedNames.add(item.name);
-          const verified = verifiedNetworks.find(
-            (entry) => entry.name === item.name
-          );
-          const declared = configured.networks.find(
-            (entry) => entry.logical === verified?.logical
-          );
-          requireValue(verified && declared && item.id === verified.id);
-          const expected = [
-            `${opts.intent.composeProject}-${row.service}-1`,
-            row.service,
-            ...declared.aliases,
-          ].sort();
-          const actual = item.aliases;
-          requireValue(
-            (Array.isArray(actual) &&
-              actual.every(
-                (alias) => typeof alias === "string" && NAME.test(alias)
-              ) &&
-              new Set(actual).size === actual.length &&
-              JSON.stringify([...actual].sort()) ===
-                JSON.stringify(expected)) ||
-              (!row.running &&
-                (actual === null ||
-                  (Array.isArray(actual) && actual.length === 0)))
-          );
-        }
-        return { id: row.id, name: row.name.slice(1), service: row.service };
-      }
-      requireValue(Array.isArray(row.networks) && row.networks.length === 1);
-      const network = row.networks[0];
-      requireValue(isRecord(network));
-      keys(
-        network,
-        opts.intent.ownedNetwork ? ["name", "id", "aliases"] : ["name", "id"]
-      );
-      requireValue(
-        opts.network &&
-          network.name === opts.network.name &&
-          network.id === opts.network.id
-      );
-      if (opts.intent.ownedNetwork) {
-        const configured = opts.intent.ownedNetwork.attachments.find(
-          (entry) => entry.service === row.service
-        );
-        requireValue(configured);
-        const expected = [
-          `${opts.intent.composeProject}-${row.service}-1`,
-          row.service,
-          ...configured.aliases,
-        ].sort();
-        const actual = network.aliases;
-        requireValue(
-          (Array.isArray(actual) &&
-            actual.every(
-              (alias) => typeof alias === "string" && NAME.test(alias)
-            ) &&
-            new Set(actual).size === actual.length &&
-            JSON.stringify([...actual].sort()) === JSON.stringify(expected)) ||
-            (!row.running &&
-              (actual === null ||
-                (Array.isArray(actual) && actual.length === 0)))
-        );
-      }
+      containerNetworks(row, opts);
       return { id: row.id, name: row.name.slice(1), service: row.service };
     })
     .sort((a, b) => a.service.localeCompare(b.service));
@@ -973,6 +981,43 @@ export async function acquireLegacyComposeAdoptionPreparationBinding(input: {
   return await acquireBinding(input, "preparation");
 }
 
+function requireInitialRetainedFamily(
+  candidate: Readonly<Record<string, unknown>> | undefined,
+  files: boolean
+): boolean {
+  if (files) {
+    // Close the static family before any generated/env/material/engine acquisition.
+    legacyComposeRetainedFileGrants(candidate);
+  }
+  const jobFamily =
+    candidate !== undefined &&
+    legacyComposeRetainedPlan(candidate).requiresV7 === true;
+  if (jobFamily && !legacyComposeAdoptionCandidateSupported(candidate)) {
+    refuse("E_LEGACY_COMPOSE_BINDING_UNSUPPORTED");
+  }
+  return jobFamily;
+}
+
+async function requireRetainedFileStaticLayout(opts: {
+  readonly files: boolean;
+  readonly generatedPresent: boolean;
+  readonly root: string;
+  readonly candidate: unknown;
+  readonly signal?: AbortSignal;
+}): Promise<void> {
+  if (
+    opts.files &&
+    (opts.generatedPresent ||
+      !(await legacyComposeAdoptionLayoutSupported({
+        projectRoot: opts.root,
+        candidate: opts.candidate,
+        signal: opts.signal,
+      })))
+  ) {
+    refuse("E_LEGACY_COMPOSE_BINDING_UNSUPPORTED");
+  }
+}
+
 async function acquireBinding(
   input: {
     readonly projectRoot: string;
@@ -1017,27 +1062,20 @@ async function acquireBinding(
       ? mapLegacyNativeRetainedFileStorage(sourcePair)
       : mapLegacyNativeStorageAdoption(sourcePair);
     const candidate = mapped.candidate;
-    if (files) {
-      // Close the static family before any generated/env/material/engine acquisition.
-      legacyComposeRetainedFileGrants(candidate);
-    }
+    const jobFamily = requireInitialRetainedFamily(candidate, files);
     let projection: LegacyComposeAdoptionProjection | undefined;
     let projected: Readonly<ProjectedPreparation> | undefined;
     const generatedPresent = await hasLegacyComposeGeneratedSources(
       root,
       signal
     );
-    if (
-      files &&
-      (generatedPresent ||
-        !(await legacyComposeAdoptionLayoutSupported({
-          projectRoot: root,
-          candidate,
-          signal,
-        })))
-    ) {
-      refuse("E_LEGACY_COMPOSE_BINDING_UNSUPPORTED");
-    }
+    await requireRetainedFileStaticLayout({
+      files,
+      generatedPresent,
+      root,
+      candidate,
+      signal,
+    });
     if (
       candidate &&
       (generatedPresent ||
@@ -1047,6 +1085,9 @@ async function acquireBinding(
           signal,
         })))
     ) {
+      if (jobFamily) {
+        refuse("E_LEGACY_COMPOSE_BINDING_UNSUPPORTED");
+      }
       projection = await LegacyComposeAdoptionProjection.acquire({
         source,
         signal,

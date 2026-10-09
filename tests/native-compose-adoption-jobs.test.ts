@@ -99,6 +99,23 @@ function fixture() {
   };
 }
 
+test("a retained basic-build flag cannot select the completed-job scheduler", async () => {
+  const h = fixture();
+  let reads = 0;
+  await expect(
+    executeLegacyComposeRetainedPlan({
+      ...h,
+      retainedBuild: true,
+      observe: async () => {
+        reads += 1;
+        return await h.observe();
+      },
+    })
+  ).rejects.toThrow("Values omitted");
+  expect(reads).toBe(0);
+  expect(h.commands).toEqual([]);
+});
+
 test.each([
   "",
   "no",

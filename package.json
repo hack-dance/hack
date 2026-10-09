@@ -104,6 +104,7 @@
     "typescript": "^5"
   },
   "dependencies": {
+    "@balena/dockerignore": "1.0.2",
     "@charmland/lipgloss": "2.0.0-beta.3-0e280f3",
     "@clack/prompts": "1.0.0-alpha.9",
     "elysia": "^1.4.9",

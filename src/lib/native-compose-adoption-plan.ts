@@ -8,6 +8,7 @@ import {
   freezeImportValue,
   mapLegacyNativeAdoptionBaseline,
   mapLegacyNativeCompletedJobAdoptionBaseline,
+  mapLegacyNativeRetainedBasicBuild,
   mapLegacyNativeStorageAdoption,
 } from "./native-config-import-plan.ts";
 import {
@@ -78,6 +79,21 @@ export function planLegacyComposeAdoption(opts: {
   const baseline = jobs
     ? mapLegacyNativeCompletedJobAdoptionBaseline(opts)
     : mapLegacyNativeAdoptionBaseline(opts);
+  return plan(opts, baseline);
+}
+
+/** Pure closed build/storage intent only; the distinct source/image owner must still admit it. */
+export function planLegacyComposeRetainedBasicBuildAdoption(opts: {
+  readonly configText: string;
+  readonly composeText: string;
+}): LegacyComposeAdoptionPlan {
+  return plan(opts, mapLegacyNativeRetainedBasicBuild(opts));
+}
+
+function plan(
+  opts: { readonly configText: string; readonly composeText: string },
+  baseline: ReturnType<typeof mapLegacyNativeAdoptionBaseline>
+): LegacyComposeAdoptionPlan {
   const config = parseImportDocument({
     text: opts.configText,
     document: "config",

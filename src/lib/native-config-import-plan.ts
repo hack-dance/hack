@@ -141,6 +141,7 @@ type NativeImportPurpose =
   | "preview"
   | "adoption-baseline"
   | "completed-job-adoption"
+  | "retained-basic-build"
   | "storage-adoption";
 
 /**
@@ -195,8 +196,11 @@ function mapLegacyNativeInput(opts: {
     candidate,
     mark,
     refuse,
-    buildPreview: opts.purpose === "preview",
-    jobPreview: opts.purpose !== "adoption-baseline",
+    buildPreview:
+      opts.purpose === "preview" || opts.purpose === "retained-basic-build",
+    jobPreview:
+      opts.purpose !== "adoption-baseline" &&
+      opts.purpose !== "retained-basic-build",
   });
   mapOwnedNetwork({
     project: name,
@@ -209,7 +213,10 @@ function mapLegacyNativeInput(opts: {
   if (opts.purpose === "preview") {
     mapFileCandidate({ compose: compose.value, candidate, mark, refuse });
   }
-  if (opts.purpose === "storage-adoption") {
+  if (
+    opts.purpose === "storage-adoption" ||
+    opts.purpose === "retained-basic-build"
+  ) {
     mapStorageCandidate({
       config: config.value,
       compose: compose.value,
@@ -240,6 +247,14 @@ function mapOwnedNetwork(
   }
   if (mapping.kind === "refused") {
     opts.refuse("compose", mapping.pointer, mapping.code);
+    return;
+  }
+  if (opts.purpose === "retained-basic-build") {
+    opts.refuse(
+      "compose",
+      "/networks",
+      "retained_build_network_adoption_unqualified"
+    );
     return;
   }
   if (
@@ -356,6 +371,22 @@ export function mapLegacyNativeStorageAdoption(opts: {
     configText: opts.configText,
     composeText: opts.composeText,
     purpose: "storage-adoption",
+  });
+}
+
+/**
+ * Private closed build-and-storage intent for the retained original-image owner.
+ * This does not grant adoption or build authority. The image-only baseline and
+ * ordinary storage mapper deliberately retain their previous refusals.
+ */
+export function mapLegacyNativeRetainedBasicBuild(opts: {
+  readonly configText: string;
+  readonly composeText: string;
+}): NativeImportPlan {
+  return mapLegacyNativeInput({
+    configText: opts.configText,
+    composeText: opts.composeText,
+    purpose: "retained-basic-build",
   });
 }
 

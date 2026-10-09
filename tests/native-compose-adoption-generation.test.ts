@@ -1279,22 +1279,61 @@ for (const linked of [false, true]) {
   boundedTest(
     `rolled-back v5 can reprepare a verified plain generation with ${linked ? "linked" : "directory"} checkout receipt version`,
     async () => {
+      const captureStages =
+        process.env.HACK_TEST_ADOPTION_REPREPARE_STAGES === "1";
+      const started = performance.now();
+      const stage = (
+        value:
+          | "entry"
+          | "checkout"
+          | "dependencies"
+          | "v5-prepared"
+          | "v5-published"
+          | "v5-rolled-back"
+          | "plain-source"
+          | "plain-prepared"
+          | "plain-loaded-prepared"
+          | "plain-published"
+          | "plain-loaded-active"
+          | "closed"
+      ) => {
+        if (captureStages) {
+          // Opt-in diagnostic only: fixed stages and elapsed time, no fixture
+          // path, source, private receipt, child argv or resource values.
+          process.stderr.write(
+            `${JSON.stringify({
+              diagnostic: "v5-reprepare-stage",
+              layout: linked ? "linked" : "directory",
+              stage: value,
+              elapsedMs: Math.round(performance.now() - started),
+            })}\n`
+          );
+        }
+      };
+      stage("entry");
       if (linked) {
         await linkedCheckout();
       }
+      stage("checkout");
       const worker = await dependencyFixture();
+      stage("dependencies");
       const { store, generation } = await prepared();
+      stage("v5-prepared");
       try {
         const binary = await compiler();
         await store.publish({ generation, binary });
+        stage("v5-published");
         await store.rollback();
+        stage("v5-rolled-back");
         const composePath = join(projectRoot, ".hack/docker-compose.yml");
         const authored = JSON.parse(await readFile(composePath, "utf8"));
         authored.services.web.depends_on = undefined;
         authored.services.db.healthcheck = undefined;
         await writeFile(composePath, JSON.stringify(authored));
+        stage("plain-source");
         // The synthetic engine config-hash owner continues to attest the new source.
         const plain = await store.prepare({ binary });
+        stage("plain-prepared");
         expect(plain.report.adoption_generation_version).toBe(1);
         expect((await readReceipt()).adoption_receipt_version).toBe(
           linked ? 2 : 1
@@ -1302,15 +1341,19 @@ for (const linked of [false, true]) {
         expect(
           (await store.loadPrepared())?.report.adoption_generation_version
         ).toBe(1);
+        stage("plain-loaded-prepared");
         await store.publish({ generation: plain, binary });
+        stage("plain-published");
         expect(
           (await store.loadActive())?.report.adoption_generation_version
         ).toBe(1);
+        stage("plain-loaded-active");
         expect(await mutationCommands()).toEqual([]);
         expect(fixture.container.map((row) => row.id)).toEqual([ID, worker]);
         expect(fixture.volume[0]?.createdAt).toBe(CREATED);
       } finally {
         await store.close();
+        stage("closed");
       }
     },
     30_000

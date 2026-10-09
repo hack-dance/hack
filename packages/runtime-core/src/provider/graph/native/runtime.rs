@@ -21,6 +21,18 @@ trait Backend {
     fn verify_private(&self, _service: &str) -> Result<(), CandidateError> {
         Ok(())
     }
+    fn verify_data(
+        &self,
+        receipt: &Receipt,
+        _deadline: Instant,
+        _fresh: &dyn Fn() -> Result<(), CandidateError>,
+    ) -> Result<(), CandidateError> {
+        if receipt.data.is_empty() {
+            Ok(())
+        } else {
+            Err(refused())
+        }
+    }
     fn stop(
         &self,
         _selected: &[(String, u64)],
@@ -36,6 +48,20 @@ struct GuardedBackend<'a, B> {
     guard: Option<&'a dyn Fn() -> Result<(), CandidateError>>,
 }
 impl<B: Backend> Backend for GuardedBackend<'_, B> {
+    fn verify_data(
+        &self,
+        receipt: &Receipt,
+        deadline: Instant,
+        fresh: &dyn Fn() -> Result<(), CandidateError>,
+    ) -> Result<(), CandidateError> {
+        let guard = || {
+            check_startup(self.guard)?;
+            fresh()
+        };
+        let result = self.backend.verify_data(receipt, deadline, &guard);
+        guard()?;
+        result
+    }
     fn request(
         &self,
         method: Method,
@@ -59,6 +85,14 @@ impl<B: Backend> Backend for GuardedBackend<'_, B> {
     }
 }
 impl Backend for Engine<'_> {
+    fn verify_data(
+        &self,
+        receipt: &Receipt,
+        deadline: Instant,
+        fresh: &dyn Fn() -> Result<(), CandidateError>,
+    ) -> Result<(), CandidateError> {
+        verify_data_using_engine(self, receipt, deadline, fresh)
+    }
     fn request(
         &self,
         method: Method,
@@ -74,6 +108,14 @@ struct OwnedBackend<'a> {
     leases: BTreeMap<String, crate::provider::environment::EnvironmentLease>,
 }
 impl Backend for OwnedBackend<'_> {
+    fn verify_data(
+        &self,
+        receipt: &Receipt,
+        deadline: Instant,
+        fresh: &dyn Fn() -> Result<(), CandidateError>,
+    ) -> Result<(), CandidateError> {
+        verify_data_using_engine(&self.engine, receipt, deadline, fresh)
+    }
     fn request(
         &self,
         method: Method,
@@ -112,6 +154,43 @@ impl Backend for OwnedBackend<'_> {
             .stop_containers_diagnosed(selected)
             .map_err(|failure| super::super::shutdown::stop_error(failure, admitted))
     }
+}
+
+fn verify_prior_data_retirement(
+    prior: &Receipt,
+    selected: &BTreeMap<String, persistent_data::engine::Reference>,
+) -> Result<(), CandidateError> {
+    if prior.data.values().any(|reference| {
+        selected
+            .values()
+            .any(|current| current.name() == reference.name())
+            && (prior.phase != Phase::Removed || !reference.enrolled())
+    }) {
+        return Err(refused());
+    }
+    Ok(())
+}
+
+fn verify_data_using_engine(
+    engine: &Engine<'_>,
+    receipt: &Receipt,
+    deadline: Instant,
+    fresh: &dyn Fn() -> Result<(), CandidateError>,
+) -> Result<(), CandidateError> {
+    for reference in receipt
+        .data
+        .values()
+        .filter(|reference| reference.enrolled())
+    {
+        persistent_data::engine::verify(
+            engine.guest().candidate(),
+            engine,
+            reference,
+            deadline,
+            fresh,
+        )?;
+    }
+    fresh()
 }
 
 fn ownership(receipt: &Receipt, resource: &Resource, value: &Value) -> Result<(), CandidateError> {
@@ -211,6 +290,7 @@ fn verify_attachment(
     service: &str,
     actual: &Value,
 ) -> Result<(), CandidateError> {
+    verify_data_mounts(receipt, service, actual)?;
     let network = receipt
         .resources
         .get("network:default")
@@ -229,6 +309,49 @@ fn verify_attachment(
             .is_some_and(|aliases| aliases.iter().any(|alias| alias == service))
     {
         return Err(refused());
+    }
+    Ok(())
+}
+
+fn verify_data_mounts(
+    receipt: &Receipt,
+    service: &str,
+    actual: &Value,
+) -> Result<(), CandidateError> {
+    if receipt.data.is_empty() {
+        return Ok(());
+    }
+    let expected = receipt
+        .data_mounts
+        .get(service)
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    let mounts = actual["Mounts"].as_array().ok_or_else(refused)?;
+    if mounts.len() != expected.len() {
+        return Err(refused());
+    }
+    for selected in expected {
+        let reference = receipt
+            .data
+            .get(&selected.storage)
+            .filter(|reference| reference.enrolled())
+            .ok_or_else(refused)?;
+        let matching = mounts
+            .iter()
+            .filter(|mount| mount["Destination"] == selected.target)
+            .collect::<Vec<_>>();
+        if matching.len() != 1 {
+            return Err(refused());
+        }
+        let mount = matching[0];
+        if mount["Type"] != "volume"
+            || mount["Name"] != reference.name()
+            || mount["Source"] != reference.mountpoint()
+            || mount["Driver"] != "local"
+            || mount["RW"].as_bool() != Some(!selected.read_only)
+        {
+            return Err(refused());
+        }
     }
     Ok(())
 }
@@ -359,7 +482,12 @@ impl<B: Backend> Session<'_, B> {
 impl<B: Backend> Driver for Session<'_, B> {
     fn check_cancelled(&self) -> Result<(), CandidateError> {
         check_startup(self.startup_guard)?;
-        self.selected.assert_fresh(self.candidate)
+        self.selected.assert_fresh(self.candidate)?;
+        self.backend
+            .verify_data(&self.receipt, self.selected.remaining()?, &|| {
+                check_startup(self.startup_guard)?;
+                self.selected.assert_fresh(self.candidate)
+            })
     }
     fn record(&mut self, event: Event<'_>) -> Result<(), CandidateError> {
         match event {
@@ -390,6 +518,7 @@ impl<B: Backend> Driver for Session<'_, B> {
             }
             Event::Observed { .. } => Ok(()),
             Event::Ready => {
+                self.check_cancelled()?;
                 self.receipt.phase = Phase::ReadyObserved;
                 self.save()
             }
@@ -493,6 +622,15 @@ pub(super) fn run_guarded(
 ) -> Result<Receipt, CandidateError> {
     check_startup(startup_guard)?;
     let (selected, input) = prepared.into_parts(candidate)?;
+    // Birth/device/inode/labels can all alias after replacement. Until the native
+    // root-witness transport is qualified, no ordinary invocation may reach the
+    // provider or publish receipt4/create/enroll/use persistent data.
+    if !input.inputs().storage.is_empty() {
+        return Err(error(
+            "native_graph_storage_unqualified",
+            "Native persistent storage requires a qualified root continuity witness; no provider or data effects were authorized.",
+        ));
+    }
     let deadline = selected.remaining()?;
     #[cfg(target_os = "macos")]
     let engine = Engine::connect_until(candidate, deadline, || {
@@ -507,6 +645,35 @@ pub(super) fn run_guarded(
     check_startup(startup_guard)?;
     selected.assert_fresh(candidate)?;
     let mut config = configuration(&input, engine.guest().incarnation())?;
+    config.data = persistent_data::engine::select(
+        candidate,
+        &engine,
+        config.review.scope().namespace,
+        &config.storage,
+        deadline,
+        &|| {
+            check_startup(startup_guard)?;
+            selected.assert_fresh(candidate)
+        },
+    )?;
+    // A new compute attempt may reuse data only after all earlier admitted consumers
+    // have completed exact retirement. Exited/uncertain containers still count.
+    if !config.data.is_empty() {
+        for run in storage_inventory::runs(&candidate.state_root.join("run/native-graphs"))? {
+            let (prior, _) = journal::load_admission(
+                candidate,
+                &run,
+                engine.guest().incarnation(),
+                engine.guest().boot_id(),
+            )?;
+            verify_prior_data_retirement(&prior, &config.data)?;
+        }
+    }
+    for (service, mounts) in &config.data_mounts {
+        config.configs.get_mut(service).ok_or_else(refused)?["HostConfig"]["Mounts"] = json!(mounts.iter().map(|mount| {
+            Ok(json!({"Type":"volume","Source":config.data.get(&mount.storage).ok_or_else(refused)?.name(),"Target":mount.target,"ReadOnly":mount.read_only,"VolumeOptions":{"NoCopy":true}}))
+        }).collect::<Result<Vec<_>, CandidateError>>()?);
+    }
     check_network_intent(&engine, &config.resources)?;
     let private = input.private_services();
     // Stop observations require a whole-second bounded timeout even when authored intent omits it.
@@ -522,13 +689,22 @@ pub(super) fn run_guarded(
     if !private.is_empty() {
         crate::provider::environment::preflight_capacity(engine.guest(), private.len())?;
     }
-    let expected = verify_images(&engine, &config.resources, &mut config.configs, &private)?;
+    if !config.data.is_empty() && !private.is_empty() {
+        // Delivery bind + persistent mount intersection needs its own saved physical
+        // mount membership proof. Refuse before any stable-volume or container effect.
+        return Err(refused());
+    }
+    let expected = if config.data.is_empty() {
+        verify_images(&engine, &config.resources, &mut config.configs, &private)?
+    } else {
+        verify_native_images(&engine, &config.resources, &mut config.configs, &private)?
+    };
     for name in &private {
         launcher::validate(&config.configs[name])?;
     }
     check_startup(startup_guard)?;
     selected.assert_fresh(candidate)?;
-    let receipt = Receipt::preparing(
+    let mut receipt = Receipt::preparing(
         &config,
         engine.guest().incarnation(),
         engine.guest().boot_id(),
@@ -541,6 +717,14 @@ pub(super) fn run_guarded(
     let execution = (|| {
         check_startup(startup_guard)?;
         selected.assert_fresh(candidate)?;
+        for logical in receipt.data.keys().cloned().collect::<Vec<_>>() {
+            let reference = receipt.data.get_mut(&logical).ok_or_else(refused)?;
+            persistent_data::engine::enroll(candidate, &engine, reference, deadline, &|| {
+                check_startup(startup_guard)?;
+                selected.assert_fresh(candidate)
+            })?;
+            journal::save(&root, &receipt)?;
+        }
         let launcher = if private.is_empty() {
             None
         } else {
@@ -613,6 +797,8 @@ pub struct Snapshot {
     pub observations: BTreeMap<String, Option<Observation>>,
 }
 fn snapshot<B: Backend>(backend: &B, receipt: Receipt) -> Result<Snapshot, CandidateError> {
+    let data_deadline = Instant::now() + Duration::from_secs(40);
+    backend.verify_data(&receipt, data_deadline, &|| Ok(()))?;
     let mut observations = BTreeMap::new();
     if receipt.phase == Phase::Removed {
         if inspected(backend, &receipt, &receipt.resources["network:default"])?.is_some() {
@@ -636,6 +822,7 @@ fn snapshot<B: Backend>(backend: &B, receipt: Receipt) -> Result<Snapshot, Candi
             observed.as_ref().map(observation).transpose()?,
         );
     }
+    backend.verify_data(&receipt, data_deadline, &|| Ok(()))?;
     Ok(Snapshot {
         receipt,
         observations,
@@ -775,6 +962,9 @@ fn cleanup_using_guarded<B: Backend>(
     check_startup(guard)?;
     let guarded = GuardedBackend { backend, guard };
     let backend = &guarded;
+    backend.verify_data(receipt, Instant::now() + Duration::from_secs(40), &|| {
+        check_startup(guard)
+    })?;
     // A committed cleanup phase is retry authority for this same inventory, never
     // permission to move the receipt back to startup or stop an already retired run.
     let stopped = matches!(
@@ -922,7 +1112,70 @@ fn cleanup_using_guarded<B: Backend>(
         .ok_or_else(refused)?
         .phase = "removed".into();
     receipt.phase = Phase::Removed;
+    backend.verify_data(receipt, Instant::now() + Duration::from_secs(40), &|| {
+        check_startup(guard)
+    })?;
     journal::save(root, receipt)
+}
+
+fn verify_native_images(
+    engine: &Engine<'_>,
+    resources: &BTreeMap<String, Resource>,
+    configs: &mut BTreeMap<String, Value>,
+    private: &BTreeSet<String>,
+) -> Result<BTreeMap<String, BTreeMap<String, String>>, CandidateError> {
+    let mut expected = BTreeMap::new();
+    for resource in resources
+        .values()
+        .filter(|resource| resource.kind == Kind::Container)
+    {
+        let image = engine.request(
+            Method::GET,
+            &format!(
+                "/v1.53/images/{}/json",
+                resource.image.as_deref().ok_or_else(refused)?
+            ),
+            None,
+        )?;
+        let config = configs.get_mut(&resource.key).ok_or_else(refused)?;
+        if image["Id"].as_str() != resource.image.as_deref()
+            || image["Os"] != "linux"
+            || image["Architecture"] != "arm64"
+        {
+            return Err(refused());
+        }
+        if !image["Config"]["Volumes"].is_null() {
+            let volumes = image["Config"]["Volumes"].as_object().ok_or_else(refused)?;
+            let mounts = config["HostConfig"]["Mounts"]
+                .as_array()
+                .ok_or_else(refused)?;
+            // Every image-declared volume must be overridden by exactly one admitted
+            // persistent mount; anonymous engine allocation is never allowed.
+            for (target, options) in volumes {
+                if !options.as_object().is_some_and(|object| object.is_empty())
+                    || mounts
+                        .iter()
+                        .filter(|mount| {
+                            mount["Type"] == "volume"
+                                && mount["Target"] == *target
+                                && mount["VolumeOptions"]["NoCopy"] == true
+                        })
+                        .count()
+                        != 1
+                {
+                    return Err(refused());
+                }
+            }
+        }
+        if private.contains(&resource.key) {
+            image_process::apply_private(config, &image["Config"])?;
+        }
+        expected.insert(
+            resource.key.clone(),
+            image_environment::compose(&image["Config"]["Env"], &config["Env"])?,
+        );
+    }
+    Ok(expected)
 }
 
 #[cfg(test)]
@@ -934,12 +1187,22 @@ pub(in crate::provider::graph) fn reservations(
     new_attempt: bool,
     add: impl FnMut(&Value) -> Result<(), CandidateError>,
 ) -> Result<(), CandidateError> {
+    let mut verified_data = BTreeSet::new();
     reservations_using(
         candidate,
         engine.guest().incarnation(),
         engine.guest().boot_id(),
         new_attempt,
-        |receipt, resource| inspected(engine, receipt, resource),
+        |receipt, resource| {
+            if verified_data.insert(receipt.review.scope().run.to_owned()) {
+                engine.verify_data(
+                    receipt,
+                    Instant::now() + Duration::from_secs(40),
+                    &|| Ok(()),
+                )?;
+            }
+            inspected(engine, receipt, resource)
+        },
         add,
     )
 }

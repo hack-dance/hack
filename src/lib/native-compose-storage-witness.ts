@@ -29,6 +29,8 @@ import {
 import {
   beginNativeComposeStorageCarrierIntent,
   initializeNativeComposeStorageCarrierJournal,
+  type NativeComposeStorageReadonlyCarrierIntent,
+  readNativeComposeStorageReadonlyCarrierIntent,
 } from "./native-compose-storage-carrier-journal.ts";
 import {
   encodeNativeComposeStorageWitnessArchive,
@@ -1318,4 +1320,127 @@ export async function verifyNativeComposeStorageXattrWitness(
 ): Promise<void> {
   const { carrier, ...input } = opts;
   await verifyNativeComposeStorageWitness({ ...input, xattrCarrier: carrier });
+}
+
+/** Private saved observation seam. It never performs a kernel read, repairs an
+ * expectation, enrolls storage or clears uncertain carrier work. The callback is
+ * a trusted readonly transport, not a completion/retirement proof issuer. */
+export async function observeNativeComposeStorageWitnessCarrier(opts: {
+  readonly authority: NativeComposeMaterialAuthority;
+  readonly generation: NativeComposeGeneration;
+  readonly engineId: string;
+  readonly reference: NativeComposeStorageWitnessReference;
+  readonly observe: (input: {
+    readonly intent: NativeComposeStorageReadonlyCarrierIntent;
+    readonly request: ReturnType<typeof decodeNativeComposeStorageXattrRequest>;
+    readonly assertUnchanged: () => Promise<void>;
+  }) => Promise<"created" | "exited">;
+}): Promise<{
+  readonly kind: "readonly-verification-retained";
+  readonly helperState: "created" | "exited";
+  readonly hostCommandSettlement: "unknown";
+}> {
+  const { authority, generation, engineId, observe } = opts;
+  if (
+    !nativeComposeStorageWitnessReferenceValid(opts.reference) ||
+    opts.reference.version !== 3 ||
+    typeof observe !== "function"
+  ) {
+    return refuse();
+  }
+  const reference = structuredClone(opts.reference);
+  return await runNativeComposeMaterialAction({
+    authority,
+    run: async () => {
+      const current = await assertNativeComposeMaterialAuthority({
+        authority,
+        generation,
+        phase: "storage-recovery-observe",
+      });
+      const held = await directories({
+        binding: current,
+        name: reference.volume.name,
+        create: false,
+      });
+      try {
+        checkDirectoryAnchors(held, reference);
+        const saved = await checkedExpectation(held, reference.expectation);
+        if (
+          saved.version !== 3 ||
+          !expectationMatchesReference({ saved, reference }) ||
+          !matchesBinding(saved.binding, current, engineId)
+        ) {
+          return refuse();
+        }
+        const readCompletion = async () => {
+          const read = await readPrivate(
+            join(last(held).path, "enrolled.json"),
+            LIMIT
+          );
+          const record = completion(read.text);
+          if (
+            record.version !== 3 ||
+            !sameFile(read.info, reference.completion) ||
+            hash(read.text) !== reference.completion.hash ||
+            !completionMatches({ record, reference, saved })
+          ) {
+            return refuse();
+          }
+          return record;
+        };
+        const completed = await readCompletion();
+        const check = async () => {
+          await checkedExpectation(held, reference.expectation);
+          await readCompletion();
+          await recheckDirectories(held);
+          const latest = await assertNativeComposeMaterialAuthority({
+            authority,
+            generation,
+            phase: "storage-recovery-observe",
+          });
+          if (JSON.stringify(latest) !== JSON.stringify(current)) {
+            return refuse();
+          }
+        };
+        const selected = await readNativeComposeStorageReadonlyCarrierIntent({
+          directory: last(held),
+          token: saved.carrierJournalToken,
+          check,
+          current,
+          engineId,
+          volume: reference.volume,
+          artifact: saved.artifact,
+        });
+        const request = decodeNativeComposeStorageXattrRequest({
+          ...saved.marker,
+          operation: "verify",
+          root: completed.kernelProof.root,
+        });
+        if (
+          selected.intent.uid !== completed.kernelProof.root.uid ||
+          selected.intent.gid !== completed.kernelProof.root.gid
+        ) {
+          return refuse();
+        }
+        const helperState = await observe(
+          Object.freeze({
+            intent: selected.intent,
+            request,
+            assertUnchanged: selected.assertUnchanged,
+          })
+        );
+        await selected.assertUnchanged();
+        if (helperState !== "created" && helperState !== "exited") {
+          return refuse();
+        }
+        return Object.freeze({
+          kind: "readonly-verification-retained" as const,
+          helperState,
+          hostCommandSettlement: "unknown" as const,
+        });
+      } finally {
+        await close(held);
+      }
+    },
+  }).catch(() => refuse());
 }

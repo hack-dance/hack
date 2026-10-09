@@ -24,7 +24,7 @@ export type NativeComposeStorageDockerCarrier = Record<string, unknown> & {
 };
 export function checkNativeComposeStorageDockerCarrier(opts: {
   readonly value: unknown;
-  readonly input: NativeComposeStorageXattrInvocation;
+  readonly input: Omit<NativeComposeStorageXattrInvocation, "recordCreated">;
   readonly program: string;
   readonly imageIds: readonly string[];
 }): NativeComposeStorageDockerCarrier {
@@ -192,6 +192,41 @@ export function nativeComposeStorageDockerCarrierPolicy(
     execIds: [],
     mounts,
   });
+}
+
+/** A readonly stopped/created helper observation, never a command-settlement,
+ * retirement or successful kernel-verification proof. */
+export function checkNativeComposeStorageReadonlyCarrierRecovery(
+  opts: Parameters<typeof checkNativeComposeStorageDockerCarrier>[0] & {
+    readonly created: { readonly id: string; readonly createdAt: string };
+  }
+): NativeComposeStorageDockerCarrier {
+  const carrier = checkNativeComposeStorageDockerCarrier(opts);
+  const state = carrier.state;
+  if (
+    opts.input.readonly !== true ||
+    opts.input.request.operation !== "verify" ||
+    carrier.id !== opts.created.id ||
+    carrier.createdAt !== opts.created.createdAt ||
+    state.Running !== false ||
+    state.Pid !== 0 ||
+    (state.Status !== "created" && state.Status !== "exited") ||
+    state.Paused !== false ||
+    state.Restarting !== false ||
+    state.OOMKilled !== false ||
+    state.Dead !== false ||
+    state.Error !== "" ||
+    typeof state.ExitCode !== "number" ||
+    !Number.isInteger(state.ExitCode) ||
+    state.ExitCode < 0 ||
+    state.ExitCode > 255 ||
+    !isRecord(carrier.host) ||
+    !isRecord(carrier.host.RestartPolicy) ||
+    carrier.host.RestartPolicy.MaximumRetryCount !== 0
+  ) {
+    return refuse();
+  }
+  return carrier;
 }
 export function nativeComposeStorageDockerCreateArgs(opts: {
   readonly input: NativeComposeStorageXattrInvocation;

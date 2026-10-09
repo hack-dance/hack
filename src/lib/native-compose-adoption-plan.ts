@@ -10,10 +10,13 @@ import {
   mapLegacyNativeBranchStorageAdoption,
   mapLegacyNativeCompletedJobAdoptionBaseline,
   mapLegacyNativeRetainedBasicBuild,
+  mapLegacyNativeRetainedSourceBind,
   mapLegacyNativeStorageAdoption,
 } from "./native-config-import-plan.ts";
 import {
+  type LegacyComposeSourceBindIntent,
   type LegacyComposeStorageIntent,
+  mapLegacyComposeSourceBindStorage,
   mapLegacyComposeStorage,
 } from "./native-config-import-storage.ts";
 
@@ -27,7 +30,7 @@ export type LegacyComposeAdoptionPlan = {
     readonly fields: readonly ImportField[];
   };
   /** Private authored identity intent, not resource ownership or a converted config. */
-  readonly intent?: LegacyComposeStorageIntent;
+  readonly intent?: LegacyComposeStorageIntent | LegacyComposeSourceBindIntent;
 };
 
 function storageFields(
@@ -96,13 +99,22 @@ export function planLegacyComposeRetainedBasicBuildAdoption(opts: {
   return plan(opts, mapLegacyNativeRetainedBasicBuild(opts));
 }
 
+/** Closed static directory-binding family; still requires the separate issued path and engine owner. */
+export function planLegacyComposeSourceBindAdoption(opts: {
+  readonly configText: string;
+  readonly composeText: string;
+}): LegacyComposeAdoptionPlan {
+  return plan(opts, mapLegacyNativeRetainedSourceBind(opts), true);
+}
+
 function plan(
   opts: {
     readonly configText: string;
     readonly composeText: string;
     readonly selectedComposeProject?: string;
   },
-  baseline: ReturnType<typeof mapLegacyNativeAdoptionBaseline>
+  baseline: ReturnType<typeof mapLegacyNativeAdoptionBaseline>,
+  sourceBind = false
 ): LegacyComposeAdoptionPlan {
   const config = parseImportDocument({
     text: opts.configText,
@@ -112,11 +124,13 @@ function plan(
     text: opts.composeText,
     document: "compose",
   }).value;
-  const qualified = mapLegacyComposeStorage({
-    config,
-    compose,
-    selectedComposeProject: opts.selectedComposeProject,
-  });
+  const qualified = sourceBind
+    ? mapLegacyComposeSourceBindStorage({ config, compose })
+    : mapLegacyComposeStorage({
+        config,
+        compose,
+        selectedComposeProject: opts.selectedComposeProject,
+      });
   const mapping = {
     supported: qualified !== undefined,
     accepted: qualified?.accepted ?? new Map<string, string>(),

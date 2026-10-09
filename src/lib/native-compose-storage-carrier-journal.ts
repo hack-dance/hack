@@ -2,7 +2,10 @@ import { createHash, randomBytes } from "node:crypto";
 import { rename } from "node:fs/promises";
 import { join } from "node:path";
 import { isRecord } from "./guards.ts";
-import type { NativeComposeIdentity } from "./native-compose-generation.ts";
+import type {
+  NativeComposeIdentity,
+  NativeComposeMaterialBinding,
+} from "./native-compose-generation.ts";
 import {
   type HeldDirectory,
   holdDirectory,
@@ -32,7 +35,9 @@ type Intent = {
   readonly engineId: string;
   readonly runtimeIdentity: string;
   readonly ownerToken: string;
-  readonly volume: NativeComposeStorageXattrInvocation["target"]["volume"];
+  readonly volume: NonNullable<
+    NativeComposeStorageXattrInvocation["target"]["volume"]
+  >;
   readonly artifact: NativeComposeStorageXattrInvocation["artifact"];
   readonly scope: NativeComposeStorageXattrInvocation["scope"];
   readonly operation: NativeComposeStorageXattrInvocation["request"]["operation"];
@@ -52,6 +57,31 @@ type Bound = {
   readonly token: string;
   readonly check: () => Promise<unknown>;
 };
+/** Saved observation only. Neither this snapshot nor its check grants retirement
+ * or completion authority for an original host command. */
+export type NativeComposeStorageReadonlyCarrierIntent = Intent & {
+  readonly operation: "verify";
+  readonly readonly: true;
+  readonly created: Created;
+};
+export function captureNativeComposeStorageReadonlyCarrierIntent(
+  value: unknown
+): NativeComposeStorageReadonlyCarrierIntent {
+  if (
+    !intentValid(value) ||
+    value.operation !== "verify" ||
+    value.readonly !== true ||
+    value.created === null
+  ) {
+    return refuse();
+  }
+  return Object.freeze({
+    ...structuredClone(value),
+    operation: "verify",
+    readonly: true,
+    created: Object.freeze({ ...value.created }),
+  });
+}
 function created(value: unknown): Created {
   if (
     !(
@@ -280,6 +310,60 @@ export async function beginNativeComposeStorageCarrierIntent(
       await save(bound, latest, null);
     },
   });
+}
+
+/** Read an already recorded readonly verification without initializing, changing,
+ * completing or replaying any journal. Exact original scope remains required. */
+export async function readNativeComposeStorageReadonlyCarrierIntent(
+  opts: Bound & {
+    readonly current: NativeComposeMaterialBinding;
+    readonly engineId: string;
+    readonly volume: NativeComposeStorageXattrInvocation["target"]["volume"];
+    readonly artifact: NativeComposeStorageXattrInvocation["artifact"];
+  }
+) {
+  const bound = Object.freeze({
+    directory: Object.freeze({ ...opts.directory }),
+    token: opts.token,
+    check: opts.check,
+  });
+  const expected = structuredClone({
+    current: opts.current,
+    engineId: opts.engineId,
+    volume: opts.volume,
+    artifact: opts.artifact,
+  });
+  await bound.check();
+  const prior = await read(bound);
+  const value = prior.state.intent;
+  if (
+    !value ||
+    value.operation !== "verify" ||
+    value.readonly !== true ||
+    value.created === null ||
+    value.engineId !== expected.engineId ||
+    value.runtimeIdentity !== expected.current.identity.composeProject ||
+    value.ownerToken !== expected.current.identity.ownerToken ||
+    JSON.stringify(value.volume) !== JSON.stringify(expected.volume) ||
+    JSON.stringify(value.artifact) !== JSON.stringify(expected.artifact) ||
+    value.scope.generationId !== expected.current.generationId ||
+    value.scope.currentGenerationId !== expected.current.currentGenerationId ||
+    value.scope.pendingGenerationId !== expected.current.pendingGenerationId ||
+    value.scope.pendingToken !== expected.current.pendingToken
+  ) {
+    return refuse();
+  }
+  const intent = captureNativeComposeStorageReadonlyCarrierIntent(value);
+  const assertUnchanged = async () => {
+    await bound.check();
+    const latest = await read(bound);
+    if (!sameFile(latest.info, prior.info) || latest.text !== prior.text) {
+      return refuse();
+    }
+    await bound.check();
+  };
+  await assertUnchanged();
+  return Object.freeze({ intent, assertUnchanged });
 }
 
 /** Saved-only check. Broken anchors and unknown intent block admission/retirement but permit explicit saved stop. */

@@ -72,6 +72,17 @@ import {
   managedAdoptionFixtureSourceSnapshot,
   prepareManagedAdoptionFixtureSources,
 } from "./native-compose-adoption-managed-inputs.ts";
+import {
+  assertSourceBindFixtureHostBytes,
+  prepareSourceBindFixtureSources,
+  SOURCE_BIND_FIXTURE_INSPECT_FORMAT,
+  type SourceBindFixtureInterruption,
+  sourceBindFixtureAccessScript,
+  sourceBindFixtureCli,
+  sourceBindFixtureDirectorySnapshot,
+  sourceBindFixtureMountObservation,
+  sourceBindFixtureMounts,
+} from "./native-compose-adoption-source-bind-inputs.ts";
 
 const TIMEOUT = 180_000;
 const PROJECT_LABEL = "com.docker.compose.project";
@@ -128,11 +139,13 @@ type Instance = {
   readonly ownedNetworks?: true;
   readonly dependency?: "service_started" | "service_healthy";
   readonly basicBuild?: RetainedBuildFixtureMode;
+  readonly sourceBinds?: "first" | "second";
 };
 type Observation = {
   readonly id: string;
   readonly service?: string;
   readonly createdAt?: string;
+  readonly mounts?: string;
 };
 type Snapshot = {
   readonly resources: {
@@ -478,19 +491,32 @@ function validateOwnedObservation(opts: {
       row.name !== `/${opts.instance.name}-${row.service}-1` ||
       row.workingDir !== join(opts.instance.root, ".hack") ||
       row.configFiles !== fixtureComposeFiles(opts.instance).join(",") ||
-      JSON.stringify(row.mounts) !==
-        JSON.stringify([
-          {
-            type: "volume",
-            name: `${opts.instance.name}_data`,
-            target: "/var/lib/postgresql/data",
-            rw: row.service === "db",
-          },
-        ])
+      (!opts.instance.sourceBinds &&
+        JSON.stringify(row.mounts) !==
+          JSON.stringify([
+            {
+              type: "volume",
+              name: `${opts.instance.name}_data`,
+              target: "/var/lib/postgresql/data",
+              rw: row.service === "db",
+            },
+          ]))
     ) {
       refused();
     }
-    return { id: row.id, service: row.service };
+    return {
+      id: row.id,
+      service: row.service,
+      ...(opts.instance.sourceBinds
+        ? {
+            mounts: sourceBindFixtureMountObservation({
+              instance: opts.instance,
+              service: row.service,
+              mounts: row.mounts,
+            }),
+          }
+        : {}),
+    };
   }
   if (
     typeof row.createdAt !== "string" ||
@@ -733,7 +759,12 @@ async function writeLegacy(instance: Instance, image: string) {
         image,
         pull_policy: "never",
         // Shadow the image's declared VOLUME with the exact existing named storage.
-        volumes: ["data:/var/lib/postgresql/data:ro"],
+        volumes: [
+          "data:/var/lib/postgresql/data:ro",
+          ...(instance.sourceBinds
+            ? sourceBindFixtureMounts(instance.sourceBinds === "second")
+            : []),
+        ],
         entrypoint: instance.sourceMode
           ? ["/bin/sh", "-c"]
           : (stringSource?.entrypoint ?? LITERAL_SOURCE_ENTRYPOINT),
@@ -797,8 +828,11 @@ async function writeLegacy(instance: Instance, image: string) {
     );
   }
 }
-function formats(kind: Kind): string {
+function formats(kind: Kind, sourceBinds = false): string {
   if (kind === "container") {
+    if (sourceBinds) {
+      return SOURCE_BIND_FIXTURE_INSPECT_FORMAT;
+    }
     return `{"id":{{json .Id}},"name":{{json .Name}},"project":{{json (index .Config.Labels "${PROJECT_LABEL}")}},"nativeNames":[{{$first := true}}{{range $name,$value := .Config.Labels}}{{if not $first}},{{end}}{{$first = false}}{{json $name}}{{end}}],"service":{{json (index .Config.Labels "com.docker.compose.service")}},"workingDir":{{json (index .Config.Labels "com.docker.compose.project.working_dir")}},"configFiles":{{json (index .Config.Labels "com.docker.compose.project.config_files")}},"mounts":[{{range $i,$m := .Mounts}}{{if $i}},{{end}}{"type":{{json $m.Type}},"name":{{json $m.Name}},"target":{{json $m.Destination}},"rw":{{json $m.RW}}}{{end}}]}`;
   }
   if (kind === "network") {
@@ -850,7 +884,7 @@ function authoredFixtureFeatures(opts: {
   };
 }
 
-async function prepareFixtureInputs(
+export async function prepareFixtureInputs(
   ctx: ScenarioContext,
   options: {
     readonly generated?: boolean;
@@ -860,6 +894,7 @@ async function prepareFixtureInputs(
     readonly ownedNetworks?: boolean;
     readonly dependencies?: boolean;
     readonly basicBuild?: boolean;
+    readonly sourceBinds?: boolean;
     readonly branchAdoption?: boolean;
   } = {}
 ) {
@@ -871,6 +906,7 @@ async function prepareFixtureInputs(
     ownedNetworks = false,
     dependencies = false,
     basicBuild = false,
+    sourceBinds = false,
     branchAdoption = false,
   } = options;
   if (
@@ -881,7 +917,8 @@ async function prepareFixtureInputs(
       ownedNetwork ||
       ownedNetworks ||
       dependencies ||
-      basicBuild)
+      basicBuild ||
+      sourceBinds)
   ) {
     refused();
   }
@@ -893,6 +930,19 @@ async function prepareFixtureInputs(
       ownedNetwork ||
       ownedNetworks ||
       dependencies)
+  ) {
+    refused();
+  }
+  if (
+    sourceBinds &&
+    (generated ||
+      typedLocal ||
+      stringArgv ||
+      ownedNetwork ||
+      ownedNetworks ||
+      dependencies ||
+      basicBuild ||
+      branchAdoption)
   ) {
     refused();
   }
@@ -939,6 +989,7 @@ async function prepareFixtureInputs(
     ...(ownedNetwork ? { ownedNetwork: true as const } : {}),
     ...(basicBuild ? { basicBuild: "root-specific" as const } : {}),
     ...(ownedNetworks ? { ownedNetworks: true as const } : {}),
+    ...(sourceBinds ? { sourceBinds: "first" as const } : {}),
   };
   if ((await probe(["info", "--format", "{{.OSType}}"])) !== "linux") {
     refused();
@@ -957,6 +1008,9 @@ async function prepareFixtureInputs(
     refused();
   }
   await writeLegacy(primary, image);
+  if (primary.sourceBinds) {
+    await prepareSourceBindFixtureSources(primary);
+  }
   if (primary.basicBuild) {
     await prepareRetainedBuildFixtureSources({
       ...primary,
@@ -987,6 +1041,7 @@ async function prepareFixtureInputs(
     }),
     ...firstFeatures,
     ...(basicBuild ? { basicBuild: "root-specific" as const } : {}),
+    ...(sourceBinds ? { sourceBinds: "first" as const } : {}),
   };
   const second: Instance = {
     root: await addLinkedWorktree({ fixture, branch: "adoption-beta" }),
@@ -1008,9 +1063,13 @@ async function prepareFixtureInputs(
     }),
     ...secondFeatures,
     ...(basicBuild ? { basicBuild: "hack-default" as const } : {}),
+    ...(sourceBinds ? { sourceBinds: "second" as const } : {}),
   };
   for (const instance of [first, second]) {
     await writeLegacy(instance, image);
+    if (instance.sourceBinds) {
+      await prepareSourceBindFixtureSources(instance);
+    }
     if (instance.basicBuild) {
       await prepareRetainedBuildFixtureSources({
         ...instance,
@@ -1052,7 +1111,7 @@ async function prepareFixtureInputs(
   };
 }
 
-function createFixtureRuntime(
+export function createFixtureRuntime(
   opts: Awaited<ReturnType<typeof prepareFixtureInputs>>
 ) {
   const {
@@ -1072,7 +1131,7 @@ function createFixtureRuntime(
     CI: "",
     HACK_EXECUTION_MODE: "",
   };
-  const cli = async (
+  const rawCli = async (
     instance: Instance,
     args: readonly string[],
     extra?: Readonly<Record<string, string>>
@@ -1086,12 +1145,26 @@ function createFixtureRuntime(
     privateReport(result);
     return result;
   };
+  const cli = async (
+    instance: Instance,
+    args: readonly string[],
+    extra?: Readonly<Record<string, string>>
+  ): Promise<CliResult> =>
+    instance.sourceBinds
+      ? await sourceBindFixtureCommand(runtime(), instance, args, "none", extra)
+      : await rawCli(instance, args, extra);
   const owned = async (instance: Instance, kind: Kind, id: string) =>
     ownedAdoptionFixtureObservation({
       instance,
       kind,
       row: object(
-        await probe([kind, "inspect", "--format", formats(kind), id])
+        await probe([
+          kind,
+          "inspect",
+          "--format",
+          formats(kind, Boolean(instance.sourceBinds)),
+          id,
+        ])
       ),
     });
   const list = async (instance: Instance, kind: Kind) =>
@@ -1127,6 +1200,7 @@ function createFixtureRuntime(
   const managedAnchors = new Map<Instance, string>();
   const localAnchors = new Map<Instance, string>();
   const buildSourceAnchors = new Map<Instance, string>();
+  const sourceBindAnchors = new Map<Instance, string>();
   const buildEvidence = createRetainedBuildFixtureEvidence({
     tempRoot: ctx.tempRoot,
   });
@@ -1451,6 +1525,28 @@ function createFixtureRuntime(
     await assertAliasSql(instance);
     await checkWorkerArgv(instance);
     await checkHealthcheck(instance);
+    if (instance.sourceBinds) {
+      if (
+        (await sourceBindFixtureDirectorySnapshot(instance.root)) !==
+        sourceBindAnchors.get(instance)
+      ) {
+        refused();
+      }
+      if (
+        (await probe([
+          "container",
+          "exec",
+          container(instance, "worker"),
+          "/bin/sh",
+          "-c",
+          sourceBindFixtureAccessScript(instance),
+        ])) !== ""
+      ) {
+        refused();
+      }
+      await assertSourceBindFixtureHostBytes(instance);
+      await owned(instance, "container", container(instance, "worker"));
+    }
     if (instance.basicBuild) {
       await checkBuild(instance, baseline);
     }
@@ -1508,6 +1604,13 @@ function createFixtureRuntime(
     await assertTopology(instance, false);
     await checkWorkerArgv(instance);
     await checkHealthcheck(instance);
+    if (
+      instance.sourceBinds &&
+      (await sourceBindFixtureDirectorySnapshot(instance.root)) !==
+        sourceBindAnchors.get(instance)
+    ) {
+      refused();
+    }
     for (const row of baseline.resources.container) {
       if (
         (await probe([
@@ -1540,7 +1643,7 @@ function createFixtureRuntime(
       }
     }
   };
-  return {
+  const runtime = () => ({
     ctx,
     engine,
     engineId,
@@ -1551,6 +1654,7 @@ function createFixtureRuntime(
     env,
     probe,
     cli,
+    rawCli,
     owned,
     list,
     resources,
@@ -1558,6 +1662,7 @@ function createFixtureRuntime(
     managedAnchors,
     localAnchors,
     buildSourceAnchors,
+    sourceBindAnchors,
     buildEvidence,
     buildEnv,
     buildImageAnchors,
@@ -1572,9 +1677,75 @@ function createFixtureRuntime(
     check,
     assertNoState,
     assertStopped,
-  };
+  });
+  return runtime();
 }
 type FixtureRuntime = ReturnType<typeof createFixtureRuntime>;
+
+/** The source-bind selector shares existing SQL/resource/cleanup owners, while every CLI uses its closed v12 transport. */
+type SourceBindFixtureTransport = {
+  readonly ctx: Pick<ScenarioContext, "tempRoot">;
+  readonly engine: string;
+  readonly engineId: string;
+  readonly anchors: ReadonlyMap<Instance, Snapshot>;
+  readonly rawCli: (
+    instance: Instance,
+    args: readonly string[],
+    env?: Readonly<Record<string, string>>
+  ) => Promise<CliResult>;
+};
+export async function sourceBindFixtureCommand(
+  h: SourceBindFixtureTransport,
+  instance: Instance,
+  args: readonly string[],
+  interruption: SourceBindFixtureInterruption = "none",
+  extra?: Readonly<Record<string, string>>
+): Promise<CliResult> {
+  if (!instance.sourceBinds) {
+    refused();
+  }
+  const captured = h.anchors.get(instance)?.resources;
+  const db = captured?.container.find((row) => row.service === "db")?.id;
+  const worker = captured?.container.find(
+    (row) => row.service === "worker"
+  )?.id;
+  const networkId = captured?.network[0]?.id;
+  const volumeName = captured?.volume[0]?.id;
+  if (
+    !(
+      captured &&
+      db &&
+      worker &&
+      networkId &&
+      volumeName &&
+      captured.container.length === 2 &&
+      captured.network.length === 1 &&
+      captured.volume.length === 1
+    )
+  ) {
+    refused();
+  }
+  const invocation = Object.freeze([...args]);
+  const env = Object.freeze({ ...extra });
+  return await sourceBindFixtureCli({
+    tempRoot: h.ctx.tempRoot,
+    engine: h.engine,
+    engineId: h.engineId,
+    scope: {
+      projectRoot: instance.root,
+      project: instance.name,
+      containerIds: captured.container.map((row) => row.id),
+      db,
+      worker,
+      networkId,
+      volumeName,
+    },
+    args: invocation,
+    interruption,
+    run: (transport) =>
+      h.rawCli(instance, invocation, { ...env, ...transport }),
+  });
+}
 
 function refusedPreview(result: CliResult) {
   privateReport(result);
@@ -1997,7 +2168,7 @@ async function requireFixtureNamesAbsent(
     }
   }
 }
-async function bootstrapOriginal(h: FixtureRuntime, instance: Instance) {
+export async function bootstrapOriginal(h: FixtureRuntime, instance: Instance) {
   const {
     engine,
     fixtureRoot,
@@ -2014,6 +2185,12 @@ async function bootstrapOriginal(h: FixtureRuntime, instance: Instance) {
 
   await requireFixtureNamesAbsent(h, instance);
   const originalSource = await source(instance);
+  if (instance.sourceBinds) {
+    h.sourceBindAnchors.set(
+      instance,
+      await sourceBindFixtureDirectorySnapshot(instance.root)
+    );
+  }
   if (instance.basicBuild) {
     buildSourceAnchors.set(
       instance,
@@ -3706,7 +3883,10 @@ async function refuseChangedInheritedRepair(h: FixtureRuntime) {
 type CleanupInputs = Pick<
   FixtureRuntime,
   "engineId" | "anchors" | "resources" | "owned" | "effect" | "list" | "probe"
-> & { readonly instances: readonly Instance[] };
+> & {
+  readonly instances: readonly Instance[];
+  readonly sourceBindAnchors?: ReadonlyMap<Instance, string>;
+};
 
 async function requirePreparedEngine(
   h: Pick<CleanupInputs, "engineId" | "probe">
@@ -3720,6 +3900,16 @@ async function cleanupInstance(h: CleanupInputs, instance: Instance) {
   const baseline = h.anchors.get(instance);
   if (!baseline) {
     return;
+  }
+  if (instance.sourceBinds) {
+    // Unknown source replacement also retains fixture cleanup authority for inspection.
+    const original = h.sourceBindAnchors?.get(instance);
+    if (
+      !original ||
+      (await sourceBindFixtureDirectorySnapshot(instance.root)) !== original
+    ) {
+      refused();
+    }
   }
   if (
     JSON.stringify(await h.resources(instance)) !==

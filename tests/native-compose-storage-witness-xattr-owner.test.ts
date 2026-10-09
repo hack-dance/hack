@@ -1,5 +1,7 @@
 import { afterEach, expect, spyOn, test } from "bun:test";
+import { createHash } from "node:crypto";
 import {
+  lstat,
   mkdir,
   mkdtemp,
   readFile,
@@ -26,6 +28,7 @@ import * as carrierJournal from "../src/lib/native-compose-storage-carrier-journ
 import {
   enrollNativeComposeStorageXattrWitness,
   type NativeComposeStorageWitnessEnrollment,
+  observeNativeComposeStorageWitnessCarrier,
   prepareNativeComposeStorageXattrWitness,
   verifyNativeComposeStorageXattrWitness,
 } from "../src/lib/native-compose-storage-witness.ts";
@@ -1632,3 +1635,260 @@ test("cancellation during readonly carrier await refuses before workload without
   expect(transport.calls).not.toContain("seed");
   expect(transport.calls).not.toContain("provision");
 });
+
+async function interruptedReadonlyVerification() {
+  const owned = await active();
+  await owned.store.withMutation(async (mutation) => {
+    await expect(
+      mutation.runEffect({
+        generation: owned.generation,
+        operation: "up",
+        assertOwned: async () => {},
+        assertFresh: async () => {},
+        storageWitnesses: {
+          kind: "directory-xattr",
+          engineId,
+          carrier: owned.transport.carrier,
+        },
+        effect: async () => {
+          owned.transport.state.afterInvoke = (input) => {
+            if (input.request.operation === "verify") {
+              throw new Error("stand-in verification outcome unavailable");
+            }
+          };
+          await verifyNativeComposeStorageXattrWitness({
+            authority: mutation.materialAuthority,
+            generation: owned.generation,
+            engineId,
+            reference: owned.reference,
+            carrier: owned.transport.carrier,
+          });
+          throw new Error("unknown verification must not complete");
+        },
+      })
+    ).rejects.toMatchObject({ code: "E_NATIVE_COMPOSE_UNCERTAIN" });
+  });
+  const journal = join(
+    owned.store.identity.checkoutRoot,
+    ".hack",
+    ".internal",
+    "native-compose",
+    owned.store.identity.instanceId,
+    "storage-witnesses",
+    createHash("sha256").update(volume.name).digest("hex"),
+    "carrier.json"
+  );
+  const text = await readFile(journal, "utf8");
+  const info = await lstat(journal);
+  owned.transport.calls.length = 0;
+  return { ...owned, journal, text, info };
+}
+
+test.each([
+  "created",
+  "exited",
+] as const)("readonly carrier recovery observation %s retains exact uncertainty without replay", async (helperState) => {
+  const owned = await interruptedReadonlyVerification();
+  const before = await owned.store.loadCurrent();
+  let observed = 0,
+    retired = 0;
+  await owned.store.withMutation(async (mutation) => {
+    const result = await mutation.runEffect({
+      generation: owned.generation,
+      operation: "down",
+      recoverPending: true,
+      assertOwned: async () => {},
+      beforeComplete: async () => {
+        retired++;
+      },
+      effect: async () => {
+        const value = await observeNativeComposeStorageWitnessCarrier({
+          authority: mutation.materialAuthority,
+          generation: owned.generation,
+          engineId,
+          reference: owned.reference,
+          observe: async (input) => {
+            observed++;
+            expect(input.intent.operation).toBe("verify");
+            expect(input.intent.readonly).toBe(true);
+            expect(input.intent.created.id).toHaveLength(64);
+            expect(input.request.operation).toBe("verify");
+            await input.assertUnchanged();
+            return helperState;
+          },
+        });
+        expect(value).toEqual({
+          kind: "readonly-verification-retained",
+          helperState,
+          hostCommandSettlement: "unknown",
+        });
+        expect(JSON.stringify(value)).not.toContain(
+          owned.store.identity.ownerToken
+        );
+        return { value: 0, outcome: "complete" };
+      },
+    });
+    expect(result).toEqual({ value: 0, outcome: "uncertain" });
+  });
+  expect(observed).toBe(1);
+  expect(retired).toBe(0);
+  expect(owned.transport.calls).toEqual([]);
+  expect(await readFile(owned.journal, "utf8")).toBe(owned.text);
+  const afterInfo = await lstat(owned.journal);
+  expect([afterInfo.dev, afterInfo.ino]).toEqual([
+    owned.info.dev,
+    owned.info.ino,
+  ]);
+  const after = await owned.store.loadCurrent();
+  expect(after.storageWitnesses).toEqual(before.storageWitnesses);
+  expect(after.storageWitnessesPending).toBe(true);
+  expect(after.pending?.token).toBe(before.pending?.token);
+  expect(after.pending?.operation).toBe("up");
+}, 30_000);
+
+test.each([
+  "unrecorded",
+  "writable",
+  "root",
+  "seed",
+  "engine",
+  "birth",
+  "artifact",
+  "owner",
+  "generation",
+  "pending",
+  "uid",
+] as const)("saved readonly observation refuses %s before transport and retains journal", async (failure) => {
+  const owned = await interruptedReadonlyVerification();
+  const journal = JSON.parse(owned.text);
+  const intent = journal.intent;
+  if (failure === "unrecorded") {
+    intent.created = null;
+  }
+  if (failure === "writable") {
+    intent.readonly = false;
+  }
+  if (failure === "root" || failure === "seed") {
+    intent.operation = failure;
+  }
+  if (failure === "seed") {
+    intent.readonly = false;
+  }
+  if (failure === "engine") {
+    intent.engineId = "foreign-engine";
+  }
+  if (failure === "birth") {
+    intent.volume.createdAt = "2026-10-08T12:01:00Z";
+  }
+  if (failure === "artifact") {
+    intent.artifact.helperHash = "f".repeat(64);
+  }
+  if (failure === "owner") {
+    intent.ownerToken = "f".repeat(32);
+  }
+  if (failure === "generation") {
+    intent.scope.generationId = "f".repeat(32);
+  }
+  if (failure === "pending") {
+    intent.scope.pendingToken = "f".repeat(32);
+  }
+  if (failure === "uid") {
+    intent.uid++;
+  }
+  const changed = JSON.stringify(journal);
+  await writeFile(owned.journal, changed);
+  let observed = 0;
+  await owned.store.withMutation(async (mutation) => {
+    await mutation.runEffect({
+      generation: owned.generation,
+      operation: "down",
+      recoverPending: true,
+      assertOwned: async () => {},
+      effect: async () => {
+        await expect(
+          observeNativeComposeStorageWitnessCarrier({
+            authority: mutation.materialAuthority,
+            generation: owned.generation,
+            engineId,
+            reference: owned.reference,
+            observe: async () => {
+              observed++;
+              return "created";
+            },
+          })
+        ).rejects.toThrow("values omitted");
+        return { value: 0, outcome: "uncertain" };
+      },
+    });
+  });
+  expect(observed).toBe(0);
+  expect(await readFile(owned.journal, "utf8")).toBe(changed);
+  expect(owned.transport.calls).toEqual([]);
+}, 30_000);
+
+test("readonly observation rejects a journal replacement across its await", async () => {
+  const owned = await interruptedReadonlyVerification();
+  await owned.store.withMutation(async (mutation) => {
+    await mutation.runEffect({
+      generation: owned.generation,
+      operation: "down",
+      recoverPending: true,
+      assertOwned: async () => {},
+      effect: async () => {
+        await expect(
+          observeNativeComposeStorageWitnessCarrier({
+            authority: mutation.materialAuthority,
+            generation: owned.generation,
+            engineId,
+            reference: owned.reference,
+            observe: async () => {
+              const next = `${owned.journal}.replacement`;
+              await writeFile(next, owned.text, { mode: 0o600 });
+              await rename(next, owned.journal);
+              return "created";
+            },
+          })
+        ).rejects.toThrow("values omitted");
+        return { value: 0, outcome: "uncertain" };
+      },
+    });
+  });
+  expect((await lstat(owned.journal)).ino).not.toBe(owned.info.ino);
+  expect((await owned.store.loadCurrent()).storageWitnessesPending).toBe(true);
+  expect(owned.transport.calls).toEqual([]);
+}, 30_000);
+
+test("ordinary inspection authority cannot enter saved carrier recovery observation", async () => {
+  const owned = await active();
+  let observed = 0;
+  await owned.store.withMutation(async (mutation) => {
+    await expect(
+      observeNativeComposeStorageWitnessCarrier({
+        authority: mutation.materialAuthority,
+        generation: owned.generation,
+        engineId,
+        reference: owned.reference,
+        observe: async () => {
+          observed++;
+          return "created";
+        },
+      })
+    ).rejects.toThrow("values omitted");
+    await mutation.runEffect({
+      generation: owned.generation,
+      operation: "down",
+      assertOwned: async () => {},
+      effect: async () => {
+        await expect(
+          assertNativeComposeMaterialAuthority({
+            authority: mutation.materialAuthority,
+            generation: owned.generation,
+            phase: "storage-recovery-observe",
+          })
+        ).rejects.toMatchObject({ code: "E_NATIVE_COMPOSE_STATE" });
+        return { value: 0, outcome: "complete" };
+      },
+    });
+  });
+  expect(observed).toBe(0);
+}, 30_000);

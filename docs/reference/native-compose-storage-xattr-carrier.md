@@ -277,3 +277,25 @@ Primary contracts: Linux [fsetxattr](https://man7.org/linux/man-pages/man2/fsetx
 [generic open flags](https://github.com/torvalds/linux/blob/master/include/uapi/asm-generic/fcntl.h),
 [Bun FFI](https://bun.sh/docs/runtime/ffi), Docker [volumes](https://docs.docker.com/engine/storage/volumes/),
 and tagged Moby [mount fields](https://github.com/moby/moby/blob/v28.5.1/api/types/mount/mount.go).
+
+## Saved readonly carrier observation
+
+The internal `observeNativeComposeStorageCarrierRecovery` API requires a live,
+explicit saved down-recovery mutation. It reads an already enrolled v3 witness
+and its exact readonly `verify` intent, including the recorded full helper ID and
+birth. It reopens the original helper and request without creating or repairing
+files, then checks the selected daemon, cached artifact, complete helper policy,
+empty selected-volume holder set, volume birth, and unchanged private ownership
+before and after the observations. Running, missing, writable, changed or
+unrecorded work refuses. The original generation and pending scope must still
+match; observation does not rebind an old intent to a new command.
+
+The result says `readonly-verification-retained` and
+`hostCommandSettlement: "unknown"`. It does not prove the xattr value, successful
+verification, or settlement of the old host start/attach/remove command. Saved
+capture bytes, including empty captures, cannot establish that settlement.
+The API performs no helper start, exec, removal, volume effect, enrollment,
+journal completion or pending clear. It is not called automatically by ordinary
+`down --recover`; the existing incomplete-stop result and retained uncertainty
+remain until an independently reviewed original-command completion protocol is
+available. This observation seam has no live recovery acceptance yet.

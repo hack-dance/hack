@@ -21,6 +21,7 @@ import {
 } from "../src/lib/native-compose-storage-witness-docker-inventory.ts";
 import {
   checkNativeComposeStorageDockerCarrier,
+  checkNativeComposeStorageReadonlyCarrierRecovery,
   NATIVE_STORAGE_CARRIER_LABEL,
   nativeComposeStorageDockerCarrierPolicy,
   nativeComposeStorageDockerCreateArgs,
@@ -626,6 +627,126 @@ function carrier(input: NativeComposeStorageXattrInvocation) {
   };
   return { program, value, rootMount, rootConfig, volumeOptions };
 }
+
+function readonlyRecovery() {
+  const selected = { ...input() };
+  selected.request = {
+    kind: "directory-xattr",
+    version: 1,
+    operation: "verify",
+    name: `user.hack.storage.${"a".repeat(64)}`,
+    valueHex: "ab".repeat(32),
+    root: { device: "1", inode: "42", uid: 70, gid: 70 },
+  };
+  const fake = carrier(selected);
+  const value = {
+    ...fake.value,
+    host: {
+      ...fake.value.host,
+      RestartPolicy: { Name: "no", MaximumRetryCount: 0 },
+    },
+    state: {
+      Status: "created",
+      Running: false,
+      Pid: 0,
+      ExitCode: 0,
+      Paused: false,
+      Restarting: false,
+      OOMKilled: false,
+      Dead: false,
+      Error: "",
+    } as Record<string, unknown>,
+  };
+  return {
+    input: selected,
+    value,
+    program: fake.program,
+    imageIds: [selected.artifact.imageId],
+    created: { id: value.id, createdAt },
+    fake,
+  };
+}
+
+test.each([
+  "created",
+  "exited",
+])("readonly recovery admits only retained %s observations, with no completion inference", (status) => {
+  const fixture = readonlyRecovery();
+  fixture.value.state.Status = status;
+  fixture.value.state.ExitCode = status === "exited" ? 1 : 0;
+  const value = checkNativeComposeStorageReadonlyCarrierRecovery(fixture);
+  expect(value.state.Status).toBe(status);
+  expect(value.id).toBe(fixture.created.id);
+  expect(value).not.toHaveProperty("settled");
+  expect(value).not.toHaveProperty("complete");
+});
+
+test.each([
+  ["Running", true],
+  ["Pid", 123],
+  ["Status", "running"],
+  ["Paused", true],
+  ["Restarting", true],
+  ["OOMKilled", true],
+  ["Dead", true],
+  ["Error", "private-canary"],
+  ["ExitCode", Number.NaN],
+  ["ExitCode", undefined],
+] as const)("readonly recovery refuses unsafe or incomplete helper state %s", (field, value) => {
+  const fixture = readonlyRecovery();
+  fixture.value.state[field] = value;
+  expect(() =>
+    checkNativeComposeStorageReadonlyCarrierRecovery(fixture)
+  ).toThrow("values omitted");
+});
+
+test.each([
+  "id",
+  "birth",
+  "exec",
+  "retry",
+  "writable",
+  "root",
+  "seed",
+  "helper-bind",
+  "volume-bind",
+] as const)("readonly recovery keeps exact %s policy fences", (failure) => {
+  const fixture = readonlyRecovery();
+  if (failure === "id") {
+    fixture.created.id = "f".repeat(64);
+  }
+  if (failure === "birth") {
+    fixture.created.createdAt = "2026-10-08T12:01:00Z";
+  }
+  if (failure === "exec") {
+    fixture.value.execIds = ["f".repeat(64)];
+  }
+  if (failure === "retry") {
+    fixture.value.host.RestartPolicy.MaximumRetryCount = 1;
+  }
+  if (failure === "writable") {
+    fixture.input.readonly = false;
+  }
+  if (failure === "root") {
+    fixture.input.request = {
+      kind: "directory-xattr",
+      version: 1,
+      operation: "root",
+    };
+  }
+  if (failure === "seed" && fixture.input.request.operation === "verify") {
+    fixture.input.request = { ...fixture.input.request, operation: "seed" };
+  }
+  if (failure === "helper-bind") {
+    fixture.program = "/foreign/helper.mjs";
+  }
+  if (failure === "volume-bind") {
+    fixture.fake.rootMount.RW = true;
+  }
+  expect(() =>
+    checkNativeComposeStorageReadonlyCarrierRecovery(fixture)
+  ).toThrow("values omitted");
+});
 test.each([
   "omitted",
   "null",

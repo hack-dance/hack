@@ -926,3 +926,53 @@ fn mixed_live_source_and_persistent_storage_refuses_before_private_copy() {
         assert_eq!(PRIVATE_COPIES.with(std::cell::Cell::get), 0);
     }
 }
+
+#[test]
+fn finite_host_intent_requires_exact_frontend_capability_and_remains_ephemeral() {
+    let mut project = basic();
+    project["host"] = json!({"up":{"before":[{"name":"prepare","command":{"exec":["true"]}}]},"down":{"after":[{"name":"done","command":{"shell":"true"}}]}});
+    let host_request = |project: &Value| {
+        let mut value: Value =
+            serde_json::from_slice(&self::request(project, json!({"web":{}}))).unwrap();
+        value["env_metadata"]["host"] = json!({"default":{},"workloads":{}});
+        serde_json::to_vec(&value).unwrap()
+    };
+    let request = host_request(&project);
+    refusal(review_inputs(&request, &[]), "native_graph_subset");
+    refusal(
+        compile(CompileOptions {
+            request: &request,
+            profiles: &[],
+            managed_values: &ManagedValues::new(),
+        }),
+        "native_graph_subset",
+    );
+    let PlanResult::Success { semantic_hash, .. } =
+        hack_config_compiler::environment::plan(&request, &[])
+    else {
+        panic!("fixture must compile")
+    };
+    let permit = FrontendHooks::verified(semantic_hash);
+    let inputs = review_frontend(&request, &[], &permit).unwrap();
+    assert_eq!(inputs.host.as_ref().unwrap().up.before[0].name, "prepare");
+    assert!(
+        !serde_json::to_string(&inputs.review_identity())
+            .unwrap()
+            .contains("prepare")
+    );
+    refusal(
+        review_frontend(&request, &[], &FrontendHooks::verified("f".repeat(64))),
+        "native_graph_subset",
+    );
+    project["host"]["processes"] = json!({"persistent":{"command":{"exec":["sleep","60"]}}});
+    let request = host_request(&project);
+    let PlanResult::Success { semantic_hash, .. } =
+        hack_config_compiler::environment::plan(&request, &[])
+    else {
+        panic!("fixture must compile")
+    };
+    refusal(
+        review_frontend(&request, &[], &FrontendHooks::verified(semantic_hash)),
+        "native_graph_subset",
+    );
+}

@@ -16,6 +16,8 @@ use std::{
     time::Instant,
 };
 
+mod hooks;
+
 const LIMIT: usize = 1024 * 1024;
 
 fn refused() -> CandidateError {
@@ -92,29 +94,45 @@ struct SourceInput {
     #[serde(default)]
     overlay: Overlay,
     env_metadata: EnvMetadata,
+    #[serde(default)]
+    hook_permit: Option<hooks::Pin>,
 }
 /// Tagged public native-source selection, with no Compose or private-value fields.
 pub struct Source {
     path: PathBuf,
     snapshot: Document,
     input: SourceInput,
+    hooks: Option<hooks::Permit>,
 }
 impl Source {
     /// Read a stable, bounded, unaliased regular envelope; authored selection remains compiler-owned.
     pub fn read(path: &Path) -> Result<Self, CandidateError> {
+        Self::read_kind(path, None)
+    }
+    /// Explicit frontend action only; ordinary plan/run/serve never admit host intent.
+    pub fn read_frontend(path: &Path, execution: bool) -> Result<Self, CandidateError> {
+        Self::read_kind(path, Some(execution))
+    }
+    fn read_kind(path: &Path, execution: Option<bool>) -> Result<Self, CandidateError> {
         if !path.is_absolute() {
             return Err(refused());
         }
         let (snapshot, text) = document(path, true)?;
-        let input: SourceInput =
-            serde_json::from_str(&text.ok_or_else(refused)?).map_err(|_| refused())?;
-        if input.version != 2
+        let text = text.ok_or_else(refused)?;
+        let raw: serde_json::Value = serde_json::from_str(&text).map_err(|_| refused())?;
+        let input: SourceInput = serde_json::from_str(&text).map_err(|_| refused())?;
+        if input.version != if execution.is_some() { 3 } else { 2 }
+            || (execution.is_none() && raw.get("hook_permit").is_some())
             || !matches!(input.kind, SourceKind::NativeGraphSource)
             || !super::hex(&input.run, 32)
         {
             return Err(refused());
         }
+        let hooks = execution
+            .map(|execution| hooks::Permit::read(path, &input, execution))
+            .transpose()?;
         Ok(Self {
+            hooks,
             path: path.into(),
             snapshot: snapshot.ok_or_else(refused)?,
             input,
@@ -134,7 +152,7 @@ impl Source {
             Overlay::Base => Some(None),
             Overlay::Named(name) => Some(Some(name)),
         };
-        let mut selected = select(
+        let mut selected = select_frontend(
             candidate,
             Options {
                 project: &self.input.project,
@@ -145,6 +163,7 @@ impl Source {
                 metadata: self.input.env_metadata,
                 deadline,
             },
+            self.hooks,
         )?;
         selected.source = Some((self.path, self.snapshot));
         selected.assert_fresh(candidate)?;
@@ -285,6 +304,7 @@ pub struct Options<'a> {
 pub struct Selected {
     pub(super) project_source: Option<super::source::Selection>,
     source: Option<(PathBuf, Document)>,
+    hooks: Option<hooks::Permit>,
     candidate_root: PathBuf,
     root: PathBuf,
     branch: Option<String>,
@@ -301,6 +321,7 @@ pub struct Selected {
 /// Value-free authored input fence retained by the live owner for read-only control.
 /// Its lifetime is the owner lifetime; this does not renew a startup deadline.
 pub(super) struct ReadPin {
+    hooks: Option<hooks::Permit>,
     source: Option<(PathBuf, Document)>,
     candidate_root: PathBuf,
     root: PathBuf,
@@ -343,12 +364,16 @@ impl ReadPin {
         {
             return Err(refused());
         }
+        if let Some(hooks) = &self.hooks {
+            hooks.verify()?;
+        }
         Ok(())
     }
 }
 impl Selected {
     fn read_pin(&self) -> ReadPin {
         ReadPin {
+            hooks: self.hooks.clone(),
             source: self.source.clone(),
             candidate_root: self.candidate_root.clone(),
             root: self.root.clone(),
@@ -393,7 +418,7 @@ impl Selected {
         values: &native::ManagedValues,
     ) -> Result<Prepared, CandidateError> {
         self.assert_fresh(candidate)?;
-        let prepared = native_input::prepare(native_input::PrepareOptions {
+        let options = native_input::PrepareOptions {
             compile: native::CompileOptions {
                 request: &self.request,
                 profiles: &self.profiles,
@@ -402,7 +427,12 @@ impl Selected {
             scope: self.review.scope(),
             expected_review: &self.review,
             deadline: self.remaining()?,
-        })?;
+        };
+        let prepared = if let Some(hooks) = &self.hooks {
+            native_input::prepare_frontend(options, &hooks.capability())?
+        } else {
+            native_input::prepare(options)?
+        };
         self.assert_fresh(candidate)?;
         Ok(Prepared {
             selected: self,
@@ -443,6 +473,13 @@ impl Prepared {
 }
 
 pub fn select(candidate: &Candidate, options: Options<'_>) -> Result<Selected, CandidateError> {
+    select_frontend(candidate, options, None)
+}
+fn select_frontend(
+    candidate: &Candidate,
+    options: Options<'_>,
+    hooks: Option<hooks::Permit>,
+) -> Result<Selected, CandidateError> {
     let deadline = Deadline::from_instant(options.deadline)?;
     if !super::hex(options.run, 32)
         || options.profiles.len() > 64
@@ -488,7 +525,12 @@ pub fn select(candidate: &Candidate, options: Options<'_>) -> Result<Selected, C
         },
     )
     .map_err(|_| refused())?;
-    let inputs = native::review_inputs(&writer.0, options.profiles)?;
+    let inputs = if let Some(hooks) = &hooks {
+        hooks.verify()?;
+        native::review_frontend(&writer.0, options.profiles, &hooks.capability())?
+    } else {
+        native::review_inputs(&writer.0, options.profiles)?
+    };
     if matches!(git, GitMarker::Linked(_)) && inputs.local_resolution.inherit_local {
         return Err(refused());
     }
@@ -501,6 +543,7 @@ pub fn select(candidate: &Candidate, options: Options<'_>) -> Result<Selected, C
     )?;
     let selected = Selected {
         project_source: super::source::Selection::new(root, &inputs)?,
+        hooks,
         source: None,
         candidate_root: candidate.state_root.clone(),
         root: root.to_owned(),

@@ -308,3 +308,89 @@ fn run_profile_bounds_and_nonblocking_fifo_controls_refuse() {
     assert!(fs::symlink_metadata(&marker).unwrap().file_type().is_fifo());
     assert!(!fixture.candidate.state_root.exists());
 }
+
+#[test]
+fn frontend_hook_permit_is_versioned_scoped_and_rechecked_without_normal_graph_bypass() {
+    use std::os::unix::fs::PermissionsExt;
+    let fixture = Fixture::new();
+    let mut project = basic();
+    project["host"] = json!({"up":{"before":[{"name":"prepare","command":{"exec":["true"]}}]}});
+    fixture.write_project(project);
+    let root = fixture.project.join(".hack/.internal/native-authored-runs");
+    fs::create_dir_all(&root).unwrap();
+    fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+    let run = "b".repeat(32);
+    let branch = Some("feature-one");
+    let key = format!("{:x}", Sha256::digest(serde_json::to_vec(&branch).unwrap()));
+    let private = |path: &Path, value: Value| {
+        fs::write(path, value.to_string()).unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
+        let meta = fs::symlink_metadata(path).unwrap();
+        json!({"path":path,"dev":meta.dev(),"ino":meta.ino(),"sha256":format!("{:x}",Sha256::digest(value.to_string().as_bytes()))})
+    };
+    let owner = private(
+        &root.join(format!("{key}.hooks.json")),
+        json!({"version":1,"kind":"native-authored-hook-owner","run":run,"project":fixture.project,"branch":branch,"selection":"a".repeat(64),"pid":unsafe{libc::getppid()},"uid":unsafe{libc::getuid()}}),
+    );
+    let path = root.join(format!("{run}.source.json"));
+    let mut wire = json!({"version":3,"kind":"native-graph-source","project":fixture.project,"branch":branch,"run":run,"profiles":[],"overlay":"inherit","env_metadata":{"metadata_version":1,"overlay":null,"overlay_exists":false,"workloads":{"web":{}},"inactive_scopes":[],"host":{"default":{},"workloads":{}}}});
+    let request = json!({"request_version":1,"project":fs::read_to_string(fixture.marker()).unwrap(),"env_metadata":wire["env_metadata"]});
+    let hack_config_compiler::environment::PlanResult::Success { semantic_hash, .. } =
+        hack_config_compiler::environment::plan(&serde_json::to_vec(&request).unwrap(), &[])
+    else {
+        panic!("real host fixture must compile")
+    };
+    wire["hook_permit"] = private(
+        &root.join(format!("{run}.hook-preflight-permit.json")),
+        json!({"version":1,"kind":"native-authored-finite-hook-permit","role":"preflight","run":run,"project":fixture.project,"branch":branch,"semantic_hash":semantic_hash,"owner":owner,"pid":unsafe{libc::getppid()},"uid":unsafe{libc::getuid()}}),
+    );
+    fs::write(&path, wire.to_string()).unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+    selection_refused(Source::read(&path));
+    selection_refused(Source::read_frontend(&path, true));
+    let selected = Source::read_frontend(&path, false)
+        .unwrap()
+        .select(&fixture.candidate, fixture.options().deadline)
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(selected.review()).unwrap()["provenance"]["input"]["semantic_hash"],
+        semantic_hash
+    );
+    let read_pin = selected.read_pin();
+    read_pin.verify(&fixture.candidate).unwrap();
+    let permit = root.join(format!("{run}.hook-preflight-permit.json"));
+    let original = fs::read(&permit).unwrap();
+    fs::remove_file(&permit).unwrap();
+    fs::write(&permit, original).unwrap();
+    fs::set_permissions(&permit, fs::Permissions::from_mode(0o600)).unwrap();
+    selection_refused(read_pin.verify(&fixture.candidate));
+    selection_refused(selected.prepare(&fixture.candidate, &native::ManagedValues::new()));
+    wire["hook_permit"] = private(
+        &root.join(format!("{run}.hook-execution-permit.json")),
+        json!({"version":1,"kind":"native-authored-finite-hook-permit","role":"execution","run":run,"project":fixture.project,"branch":branch,"semantic_hash":semantic_hash,"owner":owner,"pid":unsafe{libc::getppid()},"uid":unsafe{libc::getuid()}}),
+    );
+    fs::write(&path, wire.to_string()).unwrap();
+    let execution = Source::read_frontend(&path, true)
+        .unwrap()
+        .select(&fixture.candidate, fixture.options().deadline)
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(execution.review()).unwrap()["provenance"]["input"]["semantic_hash"],
+        semantic_hash
+    );
+    let execution_read_pin = execution.read_pin();
+    execution_read_pin.verify(&fixture.candidate).unwrap();
+    let owner_path = root.join(format!("{key}.hooks.json"));
+    let original_owner = fs::read(&owner_path).unwrap();
+    fs::rename(&owner_path, root.join("preserved-owner.json")).unwrap();
+    fs::write(&owner_path, original_owner).unwrap();
+    fs::set_permissions(&owner_path, fs::Permissions::from_mode(0o600)).unwrap();
+    selection_refused(execution_read_pin.verify(&fixture.candidate));
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+    selection_refused(Source::read_frontend(&path, true));
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+    wire["version"] = json!(2);
+    wire["hook_permit"] = Value::Null;
+    fs::write(&path, wire.to_string()).unwrap();
+    selection_refused(Source::read(&path));
+}

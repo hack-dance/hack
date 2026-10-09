@@ -187,7 +187,7 @@ pub(super) fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, Can
             serde_json::to_value(native::cleanup(candidate, run)?).map_err(|_| refused())
         };
     }
-    if !["plan", "run", "serve"].contains(action)
+    if !["plan", "run", "serve", "frontend-plan", "frontend-serve"].contains(action)
         || singles.contains_key("--run-id")
         || singles.contains_key("--action")
         || singles.contains_key("--expect-receipt")
@@ -204,7 +204,7 @@ pub(super) fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, Can
         .transpose()?
         .unwrap_or(30);
     if !(1..=300).contains(&timeout)
-        || (*action == "plan"
+        || (["plan", "frontend-plan"].contains(action)
             && (private
                 || singles.contains_key("--expect-review")
                 || singles.contains_key("--timeout-seconds")))
@@ -212,15 +212,19 @@ pub(super) fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, Can
         return Err(refused());
     }
     #[cfg(not(target_os = "macos"))]
-    if *action == "serve" {
+    if ["serve", "frontend-serve"].contains(action) {
         return Err(foreground_unavailable());
     }
     let started = Instant::now();
     let mut deadline = started
         .checked_add(Duration::from_secs(timeout))
         .ok_or_else(refused)?;
-    let source = native::selection::Source::read(path)?;
-    if *action == "plan" {
+    let source = if ["frontend-plan", "frontend-serve"].contains(action) {
+        native::selection::Source::read_frontend(path, *action == "frontend-serve")?
+    } else {
+        native::selection::Source::read(path)?
+    };
+    if ["plan", "frontend-plan"].contains(action) {
         return serde_json::to_value(source.select(candidate, deadline)?.review())
             .map_err(|_| refused());
     }
@@ -261,7 +265,7 @@ pub(super) fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, Can
     )?;
     drop(managed);
     #[cfg(target_os = "macos")]
-    if *action == "serve" {
+    if ["serve", "frontend-serve"].contains(action) {
         return serde_json::to_value(native::foreground::serve(candidate, prepared)?)
             .map_err(|_| refused());
     }

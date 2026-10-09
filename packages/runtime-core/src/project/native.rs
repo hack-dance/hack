@@ -43,6 +43,8 @@ pub struct NativeInputs {
     pub storage: BTreeSet<String>,
     /// Closed authored two-bridge topology. Omission retains the implicit outbound bridge.
     pub topology: Option<NetworkTopology>,
+    /// Ephemeral finite host intent retained for the frontend owner; never serialized.
+    pub host: Option<hack_config_compiler::host::HostConfig>,
     /// Destination keys only; values cannot enter public engine configuration or receipts.
     pub managed_environment: ManagedValues,
 }
@@ -310,6 +312,7 @@ pub fn compile(options: CompileOptions<'_>) -> Result<NativeInputs, CandidateErr
         options.request,
         options.profiles,
         Some(options.managed_values),
+        None,
     )
 }
 
@@ -323,7 +326,36 @@ pub(crate) fn review_inputs(
     request: &[u8],
     profiles: &[String],
 ) -> Result<NativeInputs, CandidateError> {
-    compile_inputs(request, profiles, None)
+    compile_inputs(request, profiles, None, None)
+}
+
+/// Issued only after the tagged frontend source permit has been verified.
+/// Ordinary compile/review entry points cannot admit host effects.
+pub(crate) struct FrontendHooks {
+    semantic_hash: String,
+}
+impl FrontendHooks {
+    pub(crate) fn verified(semantic_hash: String) -> Self {
+        Self { semantic_hash }
+    }
+}
+pub(crate) fn compile_frontend(
+    options: CompileOptions<'_>,
+    hooks: &FrontendHooks,
+) -> Result<NativeInputs, CandidateError> {
+    compile_inputs(
+        options.request,
+        options.profiles,
+        Some(options.managed_values),
+        Some(hooks),
+    )
+}
+pub(crate) fn review_frontend(
+    request: &[u8],
+    profiles: &[String],
+    hooks: &FrontendHooks,
+) -> Result<NativeInputs, CandidateError> {
+    compile_inputs(request, profiles, None, Some(hooks))
 }
 
 #[cfg(test)]
@@ -342,6 +374,7 @@ fn compile_inputs(
     request: &[u8],
     profiles: &[String],
     managed_values: Option<&ManagedValues>,
+    frontend: Option<&FrontendHooks>,
 ) -> Result<NativeInputs, CandidateError> {
     let PlanResult::Success {
         plan,
@@ -404,9 +437,28 @@ fn compile_inputs(
         || plan.routes.is_some()
         || plan.open.is_some()
         || plan.host_bindings.is_some()
-        || plan.host.is_some()
+        || (plan.host.is_some() && frontend.is_none())
     {
         return Err(refused());
+    }
+    if let Some(frontend) = frontend {
+        if frontend.semantic_hash != semantic_hash
+            || plan
+                .host
+                .as_ref()
+                .is_none_or(|host| !host.processes.is_empty())
+            || environment_plan
+                .host
+                .iter()
+                .flat_map(|hosts| hosts.values())
+                .any(|hook| {
+                    hook.bindings
+                        .values()
+                        .any(|binding| matches!(binding, EnvironmentBinding::Endpoint { .. }))
+                })
+        {
+            return Err(refused());
+        }
     }
     if plan.services.len() + plan.jobs.len() > 32 {
         return Err(refused());
@@ -538,6 +590,7 @@ fn compile_inputs(
         workloads,
         storage,
         topology,
+        host: plan.host,
         managed_environment,
     })
 }

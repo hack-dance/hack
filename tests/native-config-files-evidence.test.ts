@@ -115,6 +115,7 @@ test("actual private member observation distinguishes same-mode content drift an
   const member = join(root, "member");
   try {
     await writeFile(member, Buffer.from([0, 255, 3]), { mode: 0o444 });
+    await chmod(member, 0o444);
     const original = await observeNativeFileFixtureMembers([member]);
     await chmod(member, 0o600);
     await writeFile(member, Buffer.from([0, 254, 3]));
@@ -125,6 +126,7 @@ test("actual private member observation distinguishes same-mode content drift an
     expect(changed).not.toEqual(original);
     await rename(member, join(root, "original"));
     await writeFile(member, Buffer.from([0, 255, 3]), { mode: 0o444 });
+    await chmod(member, 0o444);
     const replaced = await observeNativeFileFixtureMembers([member]);
     expect(replaced[0]?.digest).toBe(original[0]?.digest);
     expect(replaced[0]?.mode).toBe(original[0]?.mode);

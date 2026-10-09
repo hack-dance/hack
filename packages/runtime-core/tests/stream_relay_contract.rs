@@ -1014,8 +1014,8 @@ fn private_control_stops_only_matching_publisher_and_preserves_replaced_path() {
 }
 
 #[test]
-fn control_startup_refuses_occupied_and_nonprivate_paths_without_leaking_port() {
-    use std::os::unix::net::UnixListener;
+fn control_startup_refuses_occupied_and_nonprivate_paths_without_retaining_publisher_resources() {
+    use std::os::unix::{fs::MetadataExt, net::UnixListener};
     let root = PathBuf::from(format!(
         "/tmp/hkcf-{}-{}",
         std::process::id(),
@@ -1028,21 +1028,63 @@ fn control_startup_refuses_occupied_and_nonprivate_paths_without_leaking_port() 
     fs::set_permissions(&upstream, fs::Permissions::from_mode(0o700)).unwrap();
     let control = root.join("control");
     fs::write(&control, b"foreign").unwrap();
-    for mode in [0o700, 0o755] {
-        fs::set_permissions(&root, fs::Permissions::from_mode(mode)).unwrap();
-        let port = free_loopback_port();
-        let output = Command::new(BINARY)
-            .args(["--publish", &port.to_string()])
-            .arg(&upstream)
-            .args(["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "10000", "--control"])
-            .arg(&control)
-            .arg("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
-            .output()
-            .unwrap();
-        assert!(!output.status.success());
-        assert!(output.stdout.is_empty());
-        assert!(std::net::TcpStream::connect(("127.0.0.1", port)).is_err());
-        assert_eq!(fs::read(&control).unwrap(), b"foreign");
+    let control_identity = fs::symlink_metadata(&control).unwrap();
+    let frontend = root.join("frontend");
+    for unix in [false, true] {
+        for (mode, expected_exit) in [(0o700, 70), (0o755, 78)] {
+            fs::set_permissions(&root, fs::Permissions::from_mode(mode)).unwrap();
+            let mut command = Command::new(BINARY);
+            command
+                .arg(if unix { "--publish-unix" } else { "--publish" })
+                .arg(if unix {
+                    frontend.as_os_str().to_owned()
+                } else {
+                    free_loopback_port().to_string().into()
+                })
+                .arg(&upstream)
+                .args(["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "10000", "--control"])
+                .arg(&control)
+                .arg("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+            let child = command.spawn().unwrap();
+            let pid = child.id();
+            let output = child.wait_with_output().unwrap();
+            assert_eq!(output.status.code(), Some(expected_exit));
+            assert!(output.stdout.is_empty());
+            let mut status = 0;
+            // The publisher is one C process with no fork/thread/exec path. Exact
+            // reaping and absence prove its descriptors released the TCP port;
+            // connecting to a reusable port cannot identify the former owner.
+            // SAFETY: pid identifies the awaited child and status is writable.
+            assert_eq!(
+                unsafe { libc::waitpid(pid as i32, &mut status, libc::WNOHANG) },
+                -1
+            );
+            assert_eq!(
+                io::Error::last_os_error().raw_os_error(),
+                Some(libc::ECHILD)
+            );
+            // SAFETY: signal zero observes the exact child PID without signaling.
+            assert_eq!(unsafe { libc::kill(pid as i32, 0) }, -1);
+            assert_eq!(io::Error::last_os_error().raw_os_error(), Some(libc::ESRCH));
+            for path in [
+                &frontend,
+                &root.join("frontend.identity"),
+                &root.join("control.identity"),
+            ] {
+                assert_eq!(
+                    fs::symlink_metadata(path).unwrap_err().kind(),
+                    io::ErrorKind::NotFound
+                );
+            }
+            let retained = fs::symlink_metadata(&control).unwrap();
+            assert!(retained.is_file());
+            assert_eq!(retained.dev(), control_identity.dev());
+            assert_eq!(retained.ino(), control_identity.ino());
+            assert_eq!(fs::read(&control).unwrap(), b"foreign");
+        }
     }
     fs::remove_dir_all(root).unwrap();
 }

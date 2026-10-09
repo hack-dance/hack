@@ -145,7 +145,7 @@ test("closed draft version7 keeps original IDs and refuses withheld combinations
   }
 });
 
-test("draft7 does not register or upgrade the current production receipt codec", () => {
+test("a bare draft7 cannot upgrade a receipt without its prepared generation", () => {
   const checkout = {
     root: { dev: 1, ino: 1 },
     project: { dev: 1, ino: 2 },

@@ -329,7 +329,7 @@ test("compiler output failure still reaps its leader and inherited-pipe descenda
   const descendant = `process.on('SIGTERM', () => {}); await Bun.write(${JSON.stringify(readyPath)}, String(process.pid)); await Bun.sleep(10_000);`;
   const binary = await fixture(
     script(
-      `Bun.spawn([process.execPath, '-e', ${JSON.stringify(descendant)}], {stdout:'inherit', stderr:'inherit'}); while (!(await Bun.file(${JSON.stringify(readyPath)}).exists())) { await Bun.sleep(5); } await Bun.write(Bun.stdout, 'x'.repeat(9 * 1024 * 1024)); await Bun.sleep(10_000);`
+      `Bun.spawn([process.execPath, '-e', ${JSON.stringify(descendant)}], {stdout:'inherit', stderr:'inherit'}); while (!(await Bun.file(${JSON.stringify(readyPath)}).exists())) { await Bun.sleep(5); } try { await Bun.write(Bun.stdout, 'x'.repeat(9 * 1024 * 1024)); } catch (error) { if (typeof error !== 'object' || error === null || !('code' in error) || !['EPIPE', 'ECANCELED'].includes(error.code)) { throw error; } } await Bun.sleep(10_000);`
     )
   );
   const children = observeFixtureChildren(binary);

@@ -80,6 +80,47 @@ let saved: Record<string, string | undefined> = {};
 const sources: NativeComposeFileSources[] = [];
 const owners: ReturnType<typeof createNativeComposeFileOwner>[] = [];
 const stores: NativeComposeGenerationStore[] = [];
+type FileOwnerDiagnosticStage =
+  | "authored-fixture"
+  | "mutation"
+  | "acquire"
+  | "prepare"
+  | "projection"
+  | "publish"
+  | "assert-fresh"
+  | "effect"
+  | "arm"
+  | "reap"
+  | "member-bytes"
+  | "saved-ready";
+type FileOwnerDiagnostic = (
+  stage: FileOwnerDiagnosticStage,
+  boundary: "begin" | "end"
+) => void;
+
+/** Opt-in same-budget timing exposes fixed lifecycle stages, never material. */
+function literalDollarDiagnostic(): FileOwnerDiagnostic | undefined {
+  const enabled = process.env.HACK_TEST_NATIVE_FILE_OWNER_DIAGNOSTICS === "1";
+  if (!enabled) {
+    return;
+  }
+  const startedAt = performance.now();
+  const counts: Partial<Record<FileOwnerDiagnosticStage, number>> = {};
+  return (stage, boundary) => {
+    if (boundary === "begin") {
+      counts[stage] = (counts[stage] ?? 0) + 1;
+    }
+    console.error(
+      JSON.stringify({
+        diagnostic: "native-file-owner-literal-dollar",
+        stage,
+        boundary,
+        count: counts[stage] ?? 0,
+        elapsedMs: Math.round(performance.now() - startedAt),
+      })
+    );
+  };
+}
 beforeEach(async () => {
   saved = Object.fromEntries(KEYS.map((key) => [key, process.env[key]]));
   for (const key of KEYS) {
@@ -149,17 +190,24 @@ async function staged(
   options: {
     afterMemberUnlink?: () => Promise<void>;
     mutateDocument?: (document: Record<string, unknown>) => void;
+    diagnostic?: FileOwnerDiagnostic;
   } = {}
 ) {
   const reservation = mutation.reserveGeneration();
+  options.diagnostic?.("acquire", "begin");
   const acquired = await acquireNativeComposeFileSources({
     authority: mutation.materialAuthority,
     reservation,
   });
+  options.diagnostic?.("acquire", "end");
   sources.push(acquired);
   const owner = ownerFor(mutation, options);
+  options.diagnostic?.("prepare", "begin");
   const attempt = await owner.prepare({ reservation, sources: acquired });
+  options.diagnostic?.("prepare", "end");
+  options.diagnostic?.("projection", "begin");
   const projection = await owner.projection(attempt);
+  options.diagnostic?.("projection", "end");
   const labels = {
     "io.hack.native-config.version": "1",
     "io.hack.native-config.instance": reservation.identity.composeProject,
@@ -183,12 +231,15 @@ async function staged(
   };
   options.mutateDocument?.(document);
   const assertFresh = async () => {
+    options.diagnostic?.("assert-fresh", "begin");
     await assertNativeComposeFileSources({
       authority: mutation.materialAuthority,
       reservation,
       sources: acquired,
     });
+    options.diagnostic?.("assert-fresh", "end");
   };
+  options.diagnostic?.("publish", "begin");
   const generation = await mutation.publish({
     reservation,
     composeJson: JSON.stringify(document),
@@ -200,6 +251,7 @@ async function staged(
     }),
     assertFresh,
   });
+  options.diagnostic?.("publish", "end");
   return { owner, attempt, generation, projection, assertFresh };
 }
 async function running(
@@ -207,24 +259,30 @@ async function running(
   options: Parameters<typeof staged>[1] = {}
 ) {
   const selected = await staged(mutation, options);
+  options.diagnostic?.("effect", "begin");
   await mutation.runEffect({
     generation: selected.generation,
     operation: "up",
     assertFresh: selected.assertFresh,
     assertOwned: async () => {},
     effect: async () => {
+      options.diagnostic?.("arm", "begin");
       await selected.owner.arm({
         attempt: selected.attempt,
         generation: selected.generation,
       });
+      options.diagnostic?.("arm", "end");
+      options.diagnostic?.("reap", "begin");
       await selected.owner.recordChildReaped({
         attempt: selected.attempt,
         generation: selected.generation,
         assertReaped: async () => {},
       });
+      options.diagnostic?.("reap", "end");
       return { outcome: "complete", value: 0 };
     },
   });
+  options.diagnostic?.("effect", "end");
   return selected;
 }
 async function expectPresent(paths: readonly string[]) {
@@ -374,9 +432,13 @@ async function dollarFixture(): Promise<void> {
   );
 }
 test("literal dollar roots and targets are encoded once in binds while saved filesystem anchors stay raw", async () => {
+  const diagnostic = literalDollarDiagnostic();
+  diagnostic?.("authored-fixture", "begin");
   await dollarFixture();
+  diagnostic?.("authored-fixture", "end");
+  diagnostic?.("mutation", "begin");
   await store.withMutation(async (mutation) => {
-    const selected = await running(mutation);
+    const selected = await running(mutation, { diagnostic });
     const grant = selected.projection.workloads.reader?.[0];
     expect(grant?.target).toBe("/etc/$${TARGET}/$$settings");
     expect(grant?.source).toBe(
@@ -388,6 +450,7 @@ test("literal dollar roots and targets are encoded once in binds while saved fil
       )
     );
     expect(selected.projection.reference.root).toBe(materialRoot);
+    diagnostic?.("member-bytes", "begin");
     expect(
       await readFile(
         join(
@@ -397,8 +460,12 @@ test("literal dollar roots and targets are encoded once in binds while saved fil
         )
       )
     ).toEqual(BYTES);
+    diagnostic?.("member-bytes", "end");
+    diagnostic?.("saved-ready", "begin");
     await selected.owner.assertSavedReady(selected.generation);
+    diagnostic?.("saved-ready", "end");
   });
+  diagnostic?.("mutation", "end");
 });
 test("actual renderer requires the exact live owner projection and preserves literal bind encoding once", async () => {
   await dollarFixture();

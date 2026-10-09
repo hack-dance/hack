@@ -1,4 +1,5 @@
 import { resolve } from "node:path";
+import { DEFAULT_INGRESS_NETWORK } from "../constants.ts";
 import { isRecord } from "./guards.ts";
 import {
   acquireLegacyComposeBuildSource,
@@ -17,12 +18,21 @@ import {
   type LegacyComposeStorageIntent,
   planLegacyComposeAdoption,
   planLegacyComposeRetainedBasicBuildAdoption,
+  planLegacyComposeRetainedRoutingAdoption,
 } from "./native-compose-adoption-plan.ts";
 import {
   hasLegacyComposeGeneratedSources,
   LegacyComposeAdoptionProjection,
 } from "./native-compose-adoption-projection.ts";
 import { legacyComposeRetainedPlan } from "./native-compose-adoption-readiness.ts";
+import {
+  inspectLegacyComposeRetainedRouting,
+  type LegacyComposeRetainedRoutingProof,
+} from "./native-compose-adoption-routing.ts";
+import {
+  type NativeComposeIngressBinding,
+  observeNativeComposeIngress,
+} from "./native-compose-ingress.ts";
 import {
   createNativeComposeProbe,
   NativeComposeOwnershipError,
@@ -33,6 +43,7 @@ import {
 } from "./native-config-import-inputs.ts";
 import {
   freezeImportValue,
+  mapLegacyNativeRetainedRouting,
   mapLegacyNativeStorageAdoption,
 } from "./native-config-import-plan.ts";
 
@@ -313,6 +324,12 @@ export type LegacyComposeVerifiedBinding = LegacyComposeVerifiedBindingBase &
         readonly composeFiles: readonly string[];
         readonly networks: readonly LegacyComposeVerifiedNetwork[];
       }
+    | {
+        readonly binding_version: 14;
+        readonly composeFiles: readonly string[];
+        readonly network: LegacyComposeOriginalNetwork;
+        readonly routing: LegacyComposeRetainedRoutingProof;
+      }
   );
 
 type ProjectedPreparation = Pick<
@@ -430,6 +447,7 @@ function containerRows(
     readonly network?: { readonly name: string; readonly id: string };
     readonly networks?: readonly LegacyComposeVerifiedNetwork[];
     readonly composeFiles: readonly string[];
+    readonly ingress?: NativeComposeIngressBinding;
   }
 ): LegacyComposeVerifiedContainer[] {
   requireValue(rows.length === opts.intent.services.length);
@@ -521,8 +539,36 @@ function containerRows(
         }
         return { id: row.id, name: row.name.slice(1), service: row.service };
       }
-      requireValue(Array.isArray(row.networks) && row.networks.length === 1);
-      const network = row.networks[0];
+      requireValue(Array.isArray(row.networks));
+      const routed =
+        opts.intent.routing?.routes.some(
+          (route) => route.service === row.service
+        ) === true;
+      if (opts.intent.routing) {
+        requireValue(
+          opts.ingress &&
+            !opts.intent.ownedNetwork &&
+            !opts.intent.ownedNetworks &&
+            row.networks.length === (routed ? 2 : 1)
+        );
+        const shared = row.networks.filter(
+          (item) => isRecord(item) && item.name === DEFAULT_INGRESS_NETWORK
+        );
+        requireValue(routed ? shared.length === 1 : shared.length === 0);
+        if (routed) {
+          const item = shared[0];
+          requireValue(isRecord(item));
+          keys(item, ["id", "name"]);
+          requireValue(item.id === opts.ingress.networkId);
+        }
+      } else {
+        requireValue(row.networks.length === 1);
+      }
+      const local = row.networks.filter(
+        (item) => !isRecord(item) || item.name !== DEFAULT_INGRESS_NETWORK
+      );
+      requireValue(local.length === 1);
+      const network = local[0];
       requireValue(isRecord(network));
       keys(
         network,
@@ -748,12 +794,17 @@ export async function inspectLegacyComposeAdoptionResources(opts: {
       opts.intent.ownedNetwork !== undefined ||
       opts.intent.ownedNetworks !== undefined,
   });
+  const ingress = opts.intent.routing
+    ? await observeNativeComposeIngress({ signal: opts.signal })
+    : undefined;
+  requireValue(!ingress || ingress.engineId === engineId);
   const containers = containerRows(containerFacts, {
     ...opts,
     composeFiles,
     volumes,
     network: single?.network,
     networks: plural?.networks,
+    ingress,
   });
   // Docker drops stopped endpoints from network inspection. Each original must
   // still configure every declared NetworkID; live members are exact per bridge.
@@ -820,6 +871,26 @@ export async function inspectLegacyComposeAdoptionResources(opts: {
         };
   }
   requireValue(single);
+  if (opts.intent.routing) {
+    requireValue(
+      !(plural || opts.intent.ownedNetwork || opts.intent.ownedNetworks) &&
+        ingress
+    );
+    const routing = await inspectLegacyComposeRetainedRouting({
+      binding: common,
+      routing: opts.intent.routing,
+      signal: opts.signal,
+      timeoutMs: opts.timeoutMs,
+    });
+    requireValue(JSON.stringify(routing.ingress) === JSON.stringify(ingress));
+    return {
+      ...common,
+      binding_version: 14,
+      composeFiles: Object.freeze(composeFiles),
+      network: single.network,
+      routing,
+    };
+  }
   return {
     ...(opts.composeFiles
       ? {
@@ -839,7 +910,7 @@ export async function inspectLegacyComposeAdoptionResources(opts: {
 }
 export type LegacyComposeAdoptionBinding = {
   readonly report: {
-    readonly binding_version: 1 | 2 | 3 | 4 | 5 | 6;
+    readonly binding_version: 1 | 2 | 3 | 4 | 5 | 6 | 14;
     readonly status: "verified";
     readonly adoption: "not_performed";
     readonly containers: number;
@@ -950,12 +1021,19 @@ async function acquireBinding(
       configText: source.configText,
       composeText: source.composeText,
     });
+    const routed =
+      purpose === "preparation" && !ordinary.intent
+        ? planLegacyComposeRetainedRoutingAdoption(source)
+        : undefined;
     const basic =
       purpose === "basic-build" ||
-      (purpose === "preparation" && !ordinary.intent);
-    const planned = basic
-      ? planLegacyComposeRetainedBasicBuildAdoption(source)
-      : ordinary;
+      (purpose === "preparation" && !ordinary.intent && !routed?.intent);
+    let planned = ordinary;
+    if (basic) {
+      planned = planLegacyComposeRetainedBasicBuildAdoption(source);
+    } else if (routed?.intent) {
+      planned = routed;
+    }
     const intent = planned.intent;
     if (!intent) {
       refuse("E_LEGACY_COMPOSE_BINDING_UNSUPPORTED");
@@ -963,7 +1041,11 @@ async function acquireBinding(
     const buildSource = basic
       ? await acquireLegacyComposeBuildSource({ source, signal })
       : undefined;
-    const mapped = mapLegacyNativeStorageAdoption({
+    const mapped = (
+      intent.routing
+        ? mapLegacyNativeRetainedRouting
+        : mapLegacyNativeStorageAdoption
+    )({
       configText: source.configText,
       composeText: source.composeText,
     });
@@ -984,7 +1066,8 @@ async function acquireBinding(
     );
     if (
       candidate &&
-      (generatedPresent ||
+      (intent.routing !== undefined ||
+        generatedPresent ||
         !(await legacyComposeAdoptionLayoutSupported({
           projectRoot: root,
           candidate,
@@ -998,6 +1081,7 @@ async function acquireBinding(
         source,
         signal,
         binary,
+        retainedRouting: intent.routing !== undefined,
       });
       const resolved = await projection.resolve({ signal });
       projected = Object.freeze({

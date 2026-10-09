@@ -17,6 +17,7 @@ import {
   assertSavedLegacyAdoptionLocalInputs,
   retainLegacyAdoptionLocalRefusal,
 } from "./native-compose-adoption-local.ts";
+import { legacyComposeRoutingResolutionMatches } from "./native-compose-adoption-routing-resolution.ts";
 import {
   hasCode,
   holdDirectory,
@@ -37,9 +38,12 @@ import {
 import { parseImportDocument } from "./native-config-import-parser.ts";
 import {
   freezeImportValue,
+  mapLegacyNativeRetainedRouting,
   mapLegacyNativeStorageAdoption,
 } from "./native-config-import-plan.ts";
+import { mapLegacyComposeRouting } from "./native-config-import-routing.ts";
 import { acquireManagedProjectEnvFile } from "./native-project-inputs.ts";
+import { parseNativeRoutingResolution } from "./native-routing-plan-protocol.ts";
 import { defaultProjectSlugFromPath } from "./project.ts";
 import {
   acquireProjectEnvForLegacyAdoption,
@@ -163,6 +167,23 @@ function primarySourceFactory(localInputs: unknown) {
     : acquireLegacyAdoptionSourceInputs;
 }
 
+function projectionKeys(version: unknown): string {
+  if (version === 3) {
+    return "generated,inheritPrimaryLocal,localInputs,managedRevision,primary,projection_version,routingResolution";
+  }
+  if (version === 2) {
+    return "generated,inheritPrimaryLocal,localInputs,managedRevision,primary,projection_version";
+  }
+  return "generated,inheritPrimaryLocal,managedRevision,primary,projection_version";
+}
+function projectionVersion(
+  admission: LegacyAdoptionManagedEnvAdmission
+): number {
+  if (admission.routingResolution) {
+    return 3;
+  }
+  return admission.localFields.length ? 2 : 1;
+}
 /** Validate and snapshot the bounded private envelope before any async recheck. */
 function savedProjectionEnvelope(value: unknown) {
   const text = JSON.stringify(value);
@@ -174,13 +195,11 @@ function savedProjectionEnvelope(value: unknown) {
   if (
     !(
       isRecord(proof) &&
-      keys(
-        proof,
-        proof.projection_version === 2
-          ? "generated,inheritPrimaryLocal,localInputs,managedRevision,primary,projection_version"
-          : "generated,inheritPrimaryLocal,managedRevision,primary,projection_version"
-      ) &&
+      keys(proof, projectionKeys(proof.projection_version)) &&
       (proof.projection_version === 1 ||
+        (proof.projection_version === 3 &&
+          (proof.localInputs === null || isRecord(proof.localInputs)) &&
+          parseNativeRoutingResolution(proof.routingResolution) !== null) ||
         (proof.projection_version === 2 && isRecord(proof.localInputs))) &&
       typeof proof.managedRevision === "string" &&
       typeof proof.inheritPrimaryLocal === "boolean" &&
@@ -206,7 +225,15 @@ function savedProjectionEnvelope(value: unknown) {
     inheritPrimaryLocal: proof.inheritPrimaryLocal,
     generated: proof.generated,
     primary,
-    localInputs: proof.projection_version === 2 ? proof.localInputs : undefined,
+    localInputs:
+      proof.projection_version === 2 ||
+      (proof.projection_version === 3 && proof.localInputs !== null)
+        ? proof.localInputs
+        : undefined,
+    routingResolution:
+      proof.projection_version === 3
+        ? parseNativeRoutingResolution(proof.routingResolution)
+        : undefined,
   };
 }
 
@@ -240,13 +267,39 @@ export async function readSavedLegacyComposeAdoptionProjection(opts: {
     }
     const proof = savedProjectionEnvelope(opts.proof);
     check(signal);
-    const mapped = mapLegacyNativeStorageAdoption({ configText, composeText });
+    const mapped = (
+      proof.routingResolution
+        ? mapLegacyNativeRetainedRouting
+        : mapLegacyNativeStorageAdoption
+    )({ configText, composeText });
     const candidate = mapped.candidate;
     if (
       !(
         candidate &&
         legacyComposeAdoptionCandidateSupported(candidate) &&
         isRecord(candidate.services)
+      )
+    ) {
+      refuse();
+    }
+    const routing = proof.routingResolution
+      ? mapLegacyComposeRouting({
+          config: parseImportDocument({ text: configText, document: "config" })
+            .value,
+          compose: parseImportDocument({
+            text: composeText,
+            document: "compose",
+          }).value,
+        })?.intent
+      : undefined;
+    if (
+      proof.routingResolution &&
+      !(
+        routing &&
+        legacyComposeRoutingResolutionMatches({
+          routing,
+          resolution: proof.routingResolution,
+        })
       )
     ) {
       refuse();
@@ -317,6 +370,7 @@ export async function readSavedLegacyComposeAdoptionProjection(opts: {
           proof: proof.localInputs,
           signal: current.signal ?? signal,
           checkOwner,
+          retainedRouting: routing !== undefined,
         });
       }
       if (
@@ -365,8 +419,10 @@ export async function readSavedLegacyComposeAdoptionProjection(opts: {
     const runtimeText = buildRuntimeHostMetadataOverride({
       composeYamls: [composeText],
       branch: null,
-      devHost: `${defaultProjectSlugFromPath(projectRoot)}.${DEFAULT_PROJECT_TLD}`,
-      aliasHost: null,
+      devHost:
+        routing?.devHost ??
+        `${defaultProjectSlugFromPath(projectRoot)}.${DEFAULT_PROJECT_TLD}`,
+      aliasHost: routing?.aliasHost ?? null,
       composeProject: String(candidate.name),
     });
     if (runtime && runtime.text !== runtimeText) {
@@ -374,6 +430,9 @@ export async function readSavedLegacyComposeAdoptionProjection(opts: {
     }
     const result = {
       candidate: projectRuntimeFallbacks(candidate, runtime),
+      ...(proof.routingResolution
+        ? { routingResolution: proof.routingResolution }
+        : {}),
       metadata,
       composeFiles: [
         join(projectRoot, ".hack/docker-compose.yml"),
@@ -575,18 +634,25 @@ export class LegacyComposeAdoptionProjection {
     readonly source: NativeConfigImportInputs;
     readonly signal?: AbortSignal;
     readonly binary?: string;
+    readonly retainedRouting?: boolean;
   }): Promise<LegacyComposeAdoptionProjection> {
     try {
       const { source, signal } = opts;
+      const retainedRouting = opts.retainedRouting === true;
       const admission = await LegacyAdoptionManagedEnvAdmission.acquire({
         source,
         signal,
         binary: opts.binary,
+        retainedRouting,
       });
       if (!source.ok) {
         refuse();
       }
-      const mapped = mapLegacyNativeStorageAdoption(source);
+      const mapped = (
+        retainedRouting
+          ? mapLegacyNativeRetainedRouting
+          : mapLegacyNativeStorageAdoption
+      )(source);
       const candidate = mapped.candidate;
       if (!(candidate && legacyComposeAdoptionCandidateSupported(candidate))) {
         refuse();
@@ -596,6 +662,18 @@ export class LegacyComposeAdoptionProjection {
         document: "compose",
       }).value;
       if (!(compose && isRecord(compose.services))) {
+        refuse();
+      }
+      const routing = retainedRouting
+        ? mapLegacyComposeRouting({
+            config: parseImportDocument({
+              text: source.configText,
+              document: "config",
+            }).value,
+            compose,
+          })?.intent
+        : undefined;
+      if (retainedRouting && !(routing && admission.routingResolution)) {
         refuse();
       }
       const env = await acquireProjectEnvForLegacyAdoption({ admission });
@@ -617,8 +695,10 @@ export class LegacyComposeAdoptionProjection {
           runtimeText: buildRuntimeHostMetadataOverride({
             composeYamls: [source.composeText],
             branch: null,
-            devHost: `${defaultProjectSlugFromPath(source.projectRoot)}.${DEFAULT_PROJECT_TLD}`,
-            aliasHost: null,
+            devHost:
+              routing?.devHost ??
+              `${defaultProjectSlugFromPath(source.projectRoot)}.${DEFAULT_PROJECT_TLD}`,
+            aliasHost: routing?.aliasHost ?? null,
             composeProject: String(candidate.name),
           }),
           signal,
@@ -638,7 +718,7 @@ export class LegacyComposeAdoptionProjection {
     }
     const context = this.#context;
     const result = {
-      projection_version: context.admission.localFields.length ? 2 : 1,
+      projection_version: projectionVersion(context.admission),
       status: "acquired",
       admission: "not_performed",
       files: [
@@ -715,6 +795,9 @@ export class LegacyComposeAdoptionProjection {
         refuse();
       }
       const candidate = projectRuntimeFallbacks(context.candidate, runtime);
+      const primary = privatePrimaryProof(
+        await context.admission.resolvePrivatePrimaryProof()
+      );
       await this.assertFresh({ signal });
       const result = {
         candidate,
@@ -728,12 +811,16 @@ export class LegacyComposeAdoptionProjection {
         metadata: context.env.metadata,
         localFields: context.admission.localFields,
         projectionProof: {
-          projection_version: context.admission.localFields.length ? 2 : 1,
+          projection_version: projectionVersion(context.admission),
           managedRevision: privateLegacyAdoptionEnvRevision(context.env),
-          ...privatePrimaryProof(
-            await context.admission.resolvePrivatePrimaryProof()
-          ),
+          ...primary,
           generated: generatedProof(context.generated),
+          ...(context.admission.routingResolution
+            ? {
+                routingResolution: context.admission.routingResolution,
+                localInputs: primary.localInputs ?? null,
+              }
+            : {}),
         },
       };
       for (const [key, value] of Object.entries(result)) {

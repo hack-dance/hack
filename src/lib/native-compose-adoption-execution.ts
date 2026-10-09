@@ -17,6 +17,7 @@ import {
   legacyComposeRetainedReady,
 } from "./native-compose-adoption-readiness.ts";
 import type { AdoptionOperation } from "./native-compose-adoption-receipt.ts";
+import type { LegacyComposeRoutingCompletion } from "./native-compose-adoption-routing-execution.ts";
 import {
   inspectLegacyComposeJobStates,
   inspectLegacyComposeReadiness,
@@ -38,7 +39,10 @@ function refuse(
 }
 const COMPLETION = Symbol("legacy-compose-job-completion");
 export type LegacyComposeJobCompletion = { readonly [COMPLETION]: true };
-export type LegacyComposeRetainedOutcome = number | LegacyComposeJobCompletion;
+export type LegacyComposeRetainedOutcome =
+  | number
+  | LegacyComposeJobCompletion
+  | LegacyComposeRoutingCompletion;
 type CompletionWitness = {
   readonly plan: LegacyComposeRetainedPlan;
   readonly binding: LegacyComposeVerifiedBinding;

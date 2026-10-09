@@ -507,11 +507,19 @@ new host from the project name or a global domain. Routed services must configur
 exactly the existing `hack-dev` attachment and the project default bridge; other
 services retain only the default bridge and existing local named storage.
 
-This mapper is not enabled by the ordinary import preview or adoption command.
-It supplies private intent and value-free field provenance only. Resource and
-ingress incarnation, hostname reservations, active proxy dispatch, typed local
-precedence, generated-source fidelity and stopped rollback must be admitted by
-the distinct retained routing owner before activation. Builds, jobs, readiness,
-source binds, files, branch overrides and custom bridges remain outside this
-initial routing family. Neither the map nor a synthetic control proves browser
-TLS, OAuth login or application acceptance; global DNS and trust are unchanged.
+Ordinary import preview remains outside this private family. The retained routing
+owner binds the original resources and ingress incarnations, reserves the exact
+hostnames, and verifies current proxy dispatch before clearing a startup receipt.
+Saved reads preserve literal origins and typed local precedence without acquiring
+managed values. Every original-ID lifecycle child has a durable prospective
+record; only its one-use known-return and process-group-absence proof settles that
+record. Explicit recovery can contain an uncertain child but cannot clear its
+uncertainty merely because containers are stopped.
+
+Rollback requires restored source bytes, stopped original resources and absent
+proxy dispatch before handing hostname claims back to the restored legacy source.
+It retains a durable handoff state across interrupted claim removal. Builds, jobs,
+readiness, source binds, files, branch overrides and custom bridges remain outside
+this initial routing family. The owner and private-store model do not prove live
+TLS, SQL fidelity, OAuth login or application acceptance. The maintained isolated
+ingress lifecycle fixture remains required; global DNS and trust are unchanged.

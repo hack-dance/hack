@@ -11,6 +11,7 @@ import {
 } from "./native-compose-adoption-generation.ts";
 import { inspectLegacyComposeAdoptionSelection } from "./native-compose-adoption-marker.ts";
 import { legacyComposeRetainedOrdered } from "./native-compose-adoption-readiness.ts";
+import { runLegacyComposeRetainedRoutingOperation } from "./native-compose-adoption-routing-execution.ts";
 import { inspectLegacyComposeContainerStates } from "./native-compose-adoption-runtime.ts";
 import type { NativeComposeCommandOptions } from "./native-compose-command.ts";
 import { requireNativeComposeBackend } from "./native-compose-selection.ts";
@@ -61,7 +62,9 @@ async function registeredAdoptedRoot(project: string) {
 }
 
 /** Check private adoption ownership before ordinary authored discovery can allocate a fresh native namespace. */
-async function adoptedRoot(options: NativeComposeCommandOptions) {
+export async function selectLegacyComposeAdoptedRoot(
+  options: Pick<NativeComposeCommandOptions, "cwd" | "path" | "project">
+) {
   if (options.path && options.project !== undefined) {
     throw new CliUsageError("Use either --path or --project (not both).");
   }
@@ -253,7 +256,7 @@ export async function tryLegacyComposeAdoptedCommand(
     command: input.command ? [...input.command] : undefined,
     profiles: input.profiles ? [...input.profiles] : undefined,
   };
-  const projectRoot = await adoptedRoot(options);
+  const projectRoot = await selectLegacyComposeAdoptedRoot(options);
   if (!projectRoot) {
     return null;
   }
@@ -293,6 +296,14 @@ export async function tryLegacyComposeAdoptedCommand(
           deadline,
           run: async (privateInput) => {
             cancelled(signal);
+            if (privateInput.retainedRouting) {
+              return await runLegacyComposeRetainedRoutingOperation({
+                input: privateInput,
+                operation,
+                deadline,
+                signal,
+              });
+            }
             if (
               legacyComposeRetainedOrdered(privateInput.retainedPlan) ||
               privateInput.retainedBuild

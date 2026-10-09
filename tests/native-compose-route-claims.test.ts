@@ -180,6 +180,111 @@ test("foreign same-origin collision refuses before caller effect and preserves o
   expect(await winner.reopen(attempt.reference)).toEqual(attempt);
 });
 
+test("retained stopped recovery marks only exact referenced uncertainty and keeps its hostname claimed", async () => {
+  const root = await fixture(),
+    result = await store(root),
+    attempt = await acquire(result);
+  const original = await Bun.file(claimPath(root)).text();
+  await result.markEffectsPossible(attempt);
+  await result.recoverRetainedStopped({
+    references: [attempt.reference],
+    assertStopped: async (selection) => {
+      expect(selection).toEqual({
+        hostnames: [HOST],
+        binding: BINDING,
+        owner: OWNER,
+      });
+    },
+  });
+  expect((await result.reopen(attempt.reference)).phase).toBe("stopped");
+  expect(await Bun.file(claimPath(root)).text()).toBe(original);
+  await result.assertHeld(attempt.reference);
+  await expect(acquire(await store(root, OTHER))).rejects.toMatchObject({
+    code: "E_NATIVE_COMPOSE_ROUTE_CONFLICT",
+  });
+  await expect(
+    result.complete({ attempt, assertTransition: async () => {} })
+  ).rejects.toMatchObject({ code: "E_NATIVE_COMPOSE_ROUTE_RETAINED" });
+});
+test("retained handoff refuses unknown children and failed restored-source proof without releasing a claim", async () => {
+  const root = await fixture(),
+    result = await store(root),
+    attempt = await acquire(result);
+  await result.markEffectsPossible(attempt);
+  let callbacks = 0;
+  await expect(
+    result.releaseRetained({
+      assertStoppedAndRestored: async () => {
+        callbacks++;
+      },
+    })
+  ).rejects.toMatchObject({ code: "E_NATIVE_COMPOSE_ROUTE_RETAINED" });
+  expect(callbacks).toBe(0);
+  const bytes = await Bun.file(claimPath(root)).text();
+  await expect(
+    result.recoverRetainedStopped({
+      references: [],
+      assertStopped: async () => {},
+    })
+  ).rejects.toMatchObject({ code: "E_NATIVE_COMPOSE_ROUTE_RETAINED" });
+  await expect(
+    result.recoverRetainedStopped({
+      references: [attempt.reference],
+      assertStopped: async () => {
+        throw new Error("synthetic stopped proof refused");
+      },
+    })
+  ).rejects.toThrow();
+  expect((await result.reopen(attempt.reference)).phase).toBe("armed");
+  expect(await Bun.file(claimPath(root)).text()).toBe(bytes);
+  await result.recoverRetainedStopped({
+    references: [attempt.reference],
+    assertStopped: async () => {},
+  });
+  await expect(
+    result.releaseRetained({
+      assertStoppedAndRestored: async () => {
+        throw new Error("synthetic restored source refused");
+      },
+    })
+  ).rejects.toThrow();
+  expect(await Bun.file(claimPath(root)).text()).toBe(bytes);
+});
+test("retained rollback handoff is exact, revalidates claim incarnation and is resumable after removal", async () => {
+  const root = await fixture(),
+    result = await store(root),
+    attempt = await acquire(result);
+  await complete(result, attempt);
+  const bytes = await fs.readFile(claimPath(root));
+  await expect(
+    result.releaseRetained({
+      assertStoppedAndRestored: async () => {
+        await fs.rename(claimPath(root), `${claimPath(root)}.original`);
+        await fs.writeFile(claimPath(root), bytes, { mode: 0o600 });
+      },
+    })
+  ).rejects.toThrow();
+  await fs.unlink(claimPath(root));
+  await fs.rename(`${claimPath(root)}.original`, claimPath(root));
+  const callbacks: (readonly string[])[] = [];
+  await result.releaseRetained({
+    assertStoppedAndRestored: async (selection) => {
+      callbacks.push(selection.hostnames);
+    },
+  });
+  expect(await Bun.file(claimPath(root)).exists()).toBe(false);
+  await result.releaseRetained({
+    assertStoppedAndRestored: async (selection) => {
+      callbacks.push(selection.hostnames);
+    },
+  });
+  expect(callbacks).toEqual([[HOST], []]);
+  await expect(result.assertHeld(attempt.reference)).rejects.toThrow();
+  expect((await result.reopen(attempt.reference)).reference).toEqual(
+    attempt.reference
+  );
+});
+
 test("real simultaneous independent processes have exactly one hostname winner and effect", async () => {
   const root = await fixture();
   const module = new URL(

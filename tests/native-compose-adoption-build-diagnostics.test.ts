@@ -2,8 +2,8 @@ import { expect, test } from "bun:test";
 import {
   chmod,
   mkdtemp,
-  readFile,
   readdir,
+  readFile,
   realpath,
   rm,
   stat,
@@ -167,7 +167,7 @@ test("retained build CLI omits unknown labels, codes, malformed replies and over
       .map((message) => JSON.parse(message.slice("retained-build-cli ".length)))
       .filter((row) => row.stage === "result");
     expect(results).toHaveLength(3);
-    for (const row of results)
+    for (const row of results) {
       expect(row).toMatchObject({
         mode: "unavailable",
         operation: "unavailable",
@@ -175,6 +175,7 @@ test("retained build CLI omits unknown labels, codes, malformed replies and over
         readGuardRefused: false,
         mutationGuardRefused: false,
       });
+    }
     expect(h.messages.join("\n")).not.toContain(CANARY);
   } finally {
     await h.close();

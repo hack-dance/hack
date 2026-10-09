@@ -25,13 +25,13 @@ import {
   type Scenario,
   type ScenarioContext,
 } from "../harness.ts";
+import { observeRetainedBuildFixtureCli } from "./native-compose-adoption-build-diagnostics.ts";
 import {
   createRetainedBuildFixtureEvidence,
   qualifyRetainedBuildFixtureBuilder,
   qualifyRetainedBuildFixtureCopy,
   RETAINED_BUILD_BOOTSTRAP_ENV,
 } from "./native-compose-adoption-build-evidence.ts";
-import { observeRetainedBuildFixtureCli } from "./native-compose-adoption-build-diagnostics.ts";
 import {
   assertRetainedFixtureImageUnchanged,
   prepareRetainedBuildFixtureSources,

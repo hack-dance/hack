@@ -97,6 +97,167 @@ function sourceReceipt() {
   };
 }
 
+function topologyReceipt() {
+  const old = receipt();
+  // Rust Resource uses skip_serializing_if for false, so an internal bridge
+  // has no outbound field on the actual foreground-ready or journal wire.
+  const { outbound: _legacyOutbound, ...internalNetwork } =
+    old.resources["network:default"];
+  return {
+    ...old,
+    version: 5,
+    topology: {
+      networks: { inside: true, outbound: false },
+      attachments: {
+        "a.peer": { inside: ["db-reader"], outbound: ["web-public"] },
+      },
+    },
+    resources: {
+      "network:inside": {
+        ...internalNetwork,
+        key: "inside",
+      },
+      "network:outbound": {
+        ...old.resources["network:default"],
+        key: "outbound",
+        name: `hkn-${run}-network-1`,
+        id: "4".repeat(64),
+      },
+      "container:a.peer": {
+        ...old.resources["container:a.peer"],
+        networks: ["inside", "outbound"],
+      },
+    },
+  };
+}
+
+test("two-bridge v5 topology binds exact policies, selected attachments and aliases", () => {
+  const raw = topologyReceipt();
+  const admitted = parseNativeAuthoredReceipt(raw);
+  expect(admitted.version).toBe(5);
+  expect(
+    parseNativeAuthoredReady(
+      {
+        version: 2,
+        kind: "native-graph-foreground-ready",
+        run,
+        review: raw.review.review_id,
+        receipt: raw,
+      },
+      parseNativeAuthoredReview(raw.review)
+    )
+  ).toEqual(admitted);
+  expect(admitted.resources["network:inside"]?.outbound).toBe(false);
+  expect(Object.hasOwn(raw.resources["network:inside"], "outbound")).toBe(
+    false
+  );
+  expect(
+    parseNativeAuthoredReceipt({
+      ...raw,
+      resources: {
+        ...raw.resources,
+        "network:inside": {
+          ...raw.resources["network:inside"],
+          outbound: false,
+        },
+      },
+    }).resources["network:inside"]?.outbound
+  ).toBe(false);
+  expect(admitted.resources["container:a.peer"]?.networks).toEqual([
+    "inside",
+    "outbound",
+  ]);
+  for (const changed of [
+    { ...raw, version: 2 },
+    { ...raw, source: sourceReceipt().source },
+    { ...raw, data: {}, data_mounts: {} },
+    {
+      ...raw,
+      topology: {
+        ...raw.topology,
+        networks: { inside: false, outbound: false },
+      },
+    },
+    {
+      ...raw,
+      topology: {
+        ...raw.topology,
+        attachments: { "a.peer": { inside: ["db-reader"] } },
+      },
+    },
+    {
+      ...raw,
+      topology: {
+        ...raw.topology,
+        attachments: {
+          "a.peer": {
+            inside: ["db-reader", "db-reader"],
+            outbound: ["web-public"],
+          },
+        },
+      },
+    },
+    {
+      ...raw,
+      resources: {
+        ...raw.resources,
+        "network:inside": {
+          ...raw.resources["network:inside"],
+          outbound: true,
+        },
+      },
+    },
+    {
+      ...raw,
+      resources: {
+        ...raw.resources,
+        "network:inside": {
+          ...raw.resources["network:inside"],
+          outbound: null,
+        },
+      },
+    },
+    {
+      ...raw,
+      resources: {
+        ...raw.resources,
+        "network:inside": {
+          ...raw.resources["network:inside"],
+          outbound: "false",
+        },
+      },
+    },
+    {
+      ...raw,
+      resources: {
+        ...raw.resources,
+        "network:outbound": {
+          ...raw.resources["network:outbound"],
+          outbound: false,
+        },
+      },
+    },
+  ]) {
+    expect(() => parseNativeAuthoredReceipt(changed)).toThrow(
+      "invalid or changed"
+    );
+  }
+  const changed = topologyReceipt();
+  changed.topology.attachments["a.peer"].inside[0] = "other-reader";
+  expect(
+    nativeAuthoredReceiptBinding(parseNativeAuthoredReceipt(changed))
+  ).not.toBe(nativeAuthoredReceiptBinding(admitted));
+  expect(parseNativeAuthoredReceipt(receipt()).version).toBe(2);
+  const oldNetworkMissing = receipt();
+  const { outbound: _omitted, ...networkWithoutOutbound } =
+    oldNetworkMissing.resources["network:default"];
+  oldNetworkMissing.resources["network:default"] =
+    networkWithoutOutbound as (typeof oldNetworkMissing.resources)["network:default"];
+  expect(() => parseNativeAuthoredReceipt(oldNetworkMissing)).toThrow(
+    "invalid or changed"
+  );
+});
+
 test("source-bearing native receipts bind host-mounted intent while retaining image-only v2", () => {
   const old = parseNativeAuthoredReceipt(receipt());
   expect(old.version).toBe(2);

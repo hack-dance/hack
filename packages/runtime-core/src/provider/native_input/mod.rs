@@ -210,11 +210,30 @@ impl Prepared {
 pub fn prepare(options: PrepareOptions<'_>) -> Result<Prepared, CandidateError> {
     options.expected_review.validate(options.scope)?;
     let deadline = Deadline::from_instant(options.deadline)?;
-    let mut inputs = native::compile(options.compile)?;
+    let inputs = native::compile(options.compile)?;
+    finish_prepare(options.scope, options.expected_review, deadline, inputs)
+}
+
+pub(crate) fn prepare_frontend(
+    options: PrepareOptions<'_>,
+    hooks: &native::FrontendHooks,
+) -> Result<Prepared, CandidateError> {
+    options.expected_review.validate(options.scope)?;
+    let deadline = Deadline::from_instant(options.deadline)?;
+    let inputs = native::compile_frontend(options.compile, hooks)?;
+    finish_prepare(options.scope, options.expected_review, deadline, inputs)
+}
+
+fn finish_prepare(
+    scope: Scope<'_>,
+    expected_review: &Review,
+    deadline: Deadline,
+    mut inputs: native::NativeInputs,
+) -> Result<Prepared, CandidateError> {
     let private = SelectedValues(std::mem::take(&mut inputs.managed_environment));
-    let fresh = Review::new(options.scope, inputs.review_identity())?;
+    let fresh = Review::new(scope, inputs.review_identity())?;
     deadline.to_instant()?;
-    if &fresh != options.expected_review {
+    if &fresh != expected_review {
         return Err(stale());
     }
     if !private.0.is_empty() && !cfg!(feature = "environment-launcher") {

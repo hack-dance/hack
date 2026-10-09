@@ -4,6 +4,9 @@ use crate::provider::{environment::PendingEnvironment, native_environment};
 use std::{cell::Cell, path::Path, time::Instant};
 
 trait Backend {
+    fn logs(&self, _id: &str, _tail: u16) -> Result<(String, String, bool), CandidateError> {
+        Err(refused())
+    }
     fn verify_source(&self, receipt: &Receipt, _active: bool) -> Result<(), CandidateError> {
         if receipt.source.is_some() {
             return Err(refused());
@@ -54,6 +57,12 @@ struct GuardedBackend<'a, B> {
     guard: Option<&'a dyn Fn() -> Result<(), CandidateError>>,
 }
 impl<B: Backend> Backend for GuardedBackend<'_, B> {
+    fn logs(&self, id: &str, tail: u16) -> Result<(String, String, bool), CandidateError> {
+        check_startup(self.guard)?;
+        let result = self.backend.logs(id, tail);
+        check_startup(self.guard)?;
+        result
+    }
     fn verify_source(&self, receipt: &Receipt, active: bool) -> Result<(), CandidateError> {
         check_startup(self.guard)?;
         let result = self.backend.verify_source(receipt, active);
@@ -97,6 +106,9 @@ impl<B: Backend> Backend for GuardedBackend<'_, B> {
     }
 }
 impl Backend for Engine<'_> {
+    fn logs(&self, id: &str, tail: u16) -> Result<(String, String, bool), CandidateError> {
+        self.logs_tail(id, tail)
+    }
     fn verify_data(
         &self,
         receipt: &Receipt,
@@ -120,6 +132,9 @@ struct OwnedBackend<'a> {
     leases: BTreeMap<String, crate::provider::environment::EnvironmentLease>,
 }
 impl Backend for OwnedBackend<'_> {
+    fn logs(&self, id: &str, tail: u16) -> Result<(String, String, bool), CandidateError> {
+        self.engine.logs_tail(id, tail)
+    }
     fn verify_source(&self, receipt: &Receipt, active: bool) -> Result<(), CandidateError> {
         if let Some(binding) = &receipt.source {
             source::verify(&self.engine, binding, active)?;
@@ -896,6 +911,89 @@ pub(super) fn run_guarded(
         journal::save(&root, &retained)?;
     }
     execution
+}
+
+/// The exact current member is inspected before and after a finite Engine log read.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct ServiceLogs {
+    pub receipt: Receipt,
+    pub service: String,
+    pub container: String,
+    pub stdout: String,
+    pub stderr: String,
+    pub truncated: bool,
+}
+#[cfg(target_os = "macos")]
+pub(super) fn logs(
+    candidate: &Candidate,
+    expected: &Receipt,
+    service: &str,
+    tail: u16,
+    guard: &dyn Fn() -> Result<(), CandidateError>,
+) -> Result<ServiceLogs, CandidateError> {
+    guard()?;
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let engine = Engine::connect_cleanup_until(candidate, deadline)?;
+    let (receipt, _) = journal::load(
+        candidate,
+        expected.review.scope().run,
+        engine.guest().incarnation(),
+        engine.guest().boot_id(),
+    )?;
+    receipt.check_binding(expected)?;
+    let backend = OwnedBackend {
+        engine,
+        launcher: None,
+        leases: BTreeMap::new(),
+    };
+    let backend = GuardedBackend {
+        backend: &backend,
+        guard: Some(guard),
+    };
+    let result = logs_with(&backend, receipt, service, tail)?;
+    journal::read_control(candidate, &expected.review)?.check_binding(expected)?;
+    guard()?;
+    Ok(result)
+}
+fn logs_with<B: Backend>(
+    backend: &B,
+    receipt: Receipt,
+    service: &str,
+    tail: u16,
+) -> Result<ServiceLogs, CandidateError> {
+    if receipt.phase != Phase::ReadyObserved || !(1..=1000).contains(&tail) {
+        return Err(refused());
+    }
+    let resource = receipt
+        .resources
+        .get(&format!("container:{service}"))
+        .ok_or_else(refused)?;
+    if resource.kind != Kind::Container || !receipt.readiness.contains_key(service) {
+        return Err(refused());
+    }
+    let container = resource.id.clone().ok_or_else(refused)?;
+    snapshot(backend, receipt.clone())?;
+    let before = inspected(backend, &receipt, resource)?.ok_or_else(refused)?;
+    let generation = before["State"]["StartedAt"]
+        .as_str()
+        .filter(|value| !value.is_empty() && value.len() <= 64)
+        .ok_or_else(refused)?
+        .to_owned();
+    let (stdout, stderr, truncated) = backend.logs(&container, tail)?;
+    let after = inspected(backend, &receipt, resource)?.ok_or_else(refused)?;
+    if after["State"]["StartedAt"] != generation {
+        return Err(refused());
+    }
+    snapshot(backend, receipt.clone())?;
+    Ok(ServiceLogs {
+        receipt,
+        service: service.into(),
+        container,
+        stdout,
+        stderr,
+        truncated,
+    })
 }
 
 /// Read-only same-incarnation inspection. A historical ready phase is not current health.

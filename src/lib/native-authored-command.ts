@@ -1,6 +1,10 @@
 import { randomBytes } from "node:crypto";
 import { realpath } from "node:fs/promises";
 import { join } from "node:path";
+import {
+  nativeAuthoredLogsOptions,
+  nativeAuthoredProjectLogs,
+} from "../backends/native-authored-project-logs.ts";
 import { recoverNativeAuthoredProject } from "../backends/native-authored-project-recovery.ts";
 import {
   NativeAuthoredProjectStartError,
@@ -18,8 +22,29 @@ function unsupported(): never {
   throw new HackCliError({
     code: "E_NATIVE_PROJECT_UNSUPPORTED",
     message:
-      "Native authored execution requires whole-project foreground up or explicit stored-generation down --recover on macOS. This request ran no input or runtime operation.",
+      "Native authored execution requires whole-project foreground up, finite single-service logs --no-follow, or explicit stored-generation down --recover on macOS. This request ran no input or runtime operation.",
   });
+}
+
+function assertLogsOptions(options: NativeComposeCommandOptions): void {
+  if (
+    process.platform !== "darwin" ||
+    options.operation !== "logs" ||
+    options.follow !== false ||
+    !nativeAuthoredLogsOptions(options.service, options.tail ?? 200) ||
+    options.recover ||
+    options.detach ||
+    options.unsupportedOptions ||
+    options.services !== undefined ||
+    options.command !== undefined ||
+    options.workdir !== undefined ||
+    options.profiles !== undefined ||
+    options.overlay !== undefined ||
+    (options.logFormat !== undefined &&
+      options.logFormat !== (options.json ? "json" : "plain"))
+  ) {
+    unsupported();
+  }
 }
 
 function assertRecoveryOptions(options: NativeComposeCommandOptions): void {
@@ -64,6 +89,69 @@ function assertForegroundOptions(options: NativeComposeCommandOptions): void {
   }
 }
 
+function assertOperation(options: NativeComposeCommandOptions): void {
+  if (options.operation === "logs") {
+    assertLogsOptions(options);
+  } else if (options.operation === "down" && options.recover === true) {
+    assertRecoveryOptions(options);
+  } else {
+    assertForegroundOptions(options);
+  }
+}
+
+async function runAuthoredLogs(input: {
+  readonly options: NativeComposeCommandOptions;
+  readonly projectRoot: string;
+  readonly runtime: NonNullable<
+    ReturnType<typeof resolveNativeRuntimeSelection>
+  >;
+  readonly logs: typeof nativeAuthoredProjectLogs;
+}): Promise<number> {
+  const { options, runtime, logs } = input;
+  const service = options.service;
+  if (typeof service !== "string") {
+    return unsupported();
+  }
+  const controller = new AbortController();
+  const cancel = () => controller.abort();
+  process.on("SIGINT", cancel);
+  process.on("SIGTERM", cancel);
+  try {
+    const root = await realpath(input.projectRoot);
+    const result = await logs({
+      runtime,
+      scope: {
+        projectRoot: root,
+        projectDir: join(root, ".hack"),
+        nativeHome: runtime.home,
+        branch: options.instance ?? null,
+      },
+      service,
+      tail: options.tail,
+      signal: controller.signal,
+    });
+    if (options.json) {
+      process.stdout.write(`${JSON.stringify(result)}\n`);
+    } else {
+      process.stdout.write(result.stdout);
+      process.stderr.write(result.stderr);
+    }
+    return 0;
+  } catch {
+    if (controller.signal.aborted) {
+      return 130;
+    }
+    throw new HackCliError({
+      code: "E_LIFECYCLE_FAILED",
+      message:
+        "Native authored logs are unavailable or their owner/selection changed; values omitted.",
+    });
+  } finally {
+    process.off("SIGINT", cancel);
+    process.off("SIGTERM", cancel);
+  }
+}
+
 function startupFailure(error: unknown): number {
   if (error instanceof NativeAuthoredProjectStartError) {
     if (error.canceled && error.outcome === "removed") {
@@ -104,6 +192,7 @@ export async function tryNativeAuthoredCommand(opts: {
   /** Execution seam for command-selection controls; the CLI always uses the real owner. */
   readonly serve?: typeof serveNativeAuthoredProject;
   readonly recover?: typeof recoverNativeAuthoredProject;
+  readonly logs?: typeof nativeAuthoredProjectLogs;
 }): Promise<number | null> {
   const sourceEnv = opts.env ?? process.env;
   const env = {
@@ -133,12 +222,10 @@ export async function tryNativeAuthoredCommand(opts: {
   const projectRoot = opts.selected.projectRoot;
   const serve = opts.serve ?? serveNativeAuthoredProject;
   const recover = opts.recover ?? recoverNativeAuthoredProject;
+  const readingLogs = options.operation === "logs";
+  const logs = opts.logs ?? nativeAuthoredProjectLogs;
   const recovering = options.operation === "down" && options.recover === true;
-  if (recovering) {
-    assertRecoveryOptions(options);
-  } else {
-    assertForegroundOptions(options);
-  }
+  assertOperation(options);
   let runtime: ReturnType<typeof resolveNativeRuntimeSelection>;
   try {
     runtime = resolveNativeRuntimeSelection(env);
@@ -149,6 +236,9 @@ export async function tryNativeAuthoredCommand(opts: {
   }
   if (!runtime) {
     return unsupported();
+  }
+  if (readingLogs) {
+    return await runAuthoredLogs({ options, projectRoot, runtime, logs });
   }
   const startupTimeoutMs = resolveComposeStartupTimeoutMs({ env });
   if (startupTimeoutMs > 300_000) {

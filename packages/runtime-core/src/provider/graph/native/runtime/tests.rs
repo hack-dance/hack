@@ -499,6 +499,8 @@ fn foreground_cancellation_after_network_creation_prevents_container_effects_and
 
 #[derive(Default)]
 struct FakeState {
+    log_reads: Vec<(String, u16)>,
+    restart_on_logs: bool,
     containers: BTreeMap<String, Value>,
     networks: BTreeMap<String, Value>,
     effects: Vec<String>,
@@ -530,6 +532,15 @@ impl Fake {
     }
 }
 impl Backend for Fake {
+    fn logs(&self, id: &str, tail: u16) -> Result<(String, String, bool), CandidateError> {
+        let mut state = self.state.borrow_mut();
+        state.log_reads.push((id.into(), tail));
+        if state.restart_on_logs {
+            state.containers.values_mut().next().unwrap()["State"]["StartedAt"] =
+                json!("2026-10-09T00:00:01.000000000Z");
+        }
+        Ok(("authored stdout\n".into(), "authored stderr\n".into(), true))
+    }
     fn verify_source(&self, receipt: &Receipt, active: bool) -> Result<(), CandidateError> {
         // This fake verifies the admitted binding and real host selection. The
         // real backend separately checks the provider lease and virtiofs mapping.
@@ -2622,4 +2633,56 @@ mod live_source {
         assert!(!project.join("src").exists());
         remaining(deadline);
     }
+}
+
+#[test]
+fn finite_native_logs_bind_exact_member_tail_and_restart_generation_without_effects() {
+    let fixture = Fixture::new(basic());
+    let (graph, mut session) =
+        fixture.session(fixture.prepared(json!({"web":{}}), &BTreeMap::new()));
+    execution::run(&graph, &mut session, Duration::from_secs(2)).unwrap();
+    let name = session.receipt.resources["container:web"].name.clone();
+    let id = session.receipt.resources["container:web"]
+        .id
+        .clone()
+        .unwrap();
+    session
+        .backend
+        .state
+        .borrow_mut()
+        .containers
+        .get_mut(&name)
+        .unwrap()["State"]["StartedAt"] = json!("2026-10-09T00:00:00.000000000Z");
+    let effects = session.backend.state.borrow().effects.clone();
+    let logs = logs_with(&session.backend, session.receipt.clone(), "web", 17).unwrap();
+    assert_eq!(logs.container, id);
+    assert_eq!(logs.stdout, "authored stdout\n");
+    assert_eq!(logs.stderr, "authored stderr\n");
+    assert!(logs.truncated);
+    assert_eq!(session.backend.state.borrow().log_reads, [(id.clone(), 17)]);
+    assert_eq!(session.backend.state.borrow().effects, effects);
+    for (service, tail) in [("foreign", 17), ("web", 0), ("web", 1001)] {
+        assert!(logs_with(&session.backend, session.receipt.clone(), service, tail).is_err());
+    }
+    assert_eq!(session.backend.state.borrow().log_reads.len(), 1);
+    session
+        .backend
+        .state
+        .borrow_mut()
+        .containers
+        .get_mut(&name)
+        .unwrap()["Config"]["Labels"]["io.hack-local.graph"] = json!("f".repeat(32));
+    assert!(logs_with(&session.backend, session.receipt.clone(), "web", 17).is_err());
+    assert_eq!(session.backend.state.borrow().log_reads.len(), 1);
+    session
+        .backend
+        .state
+        .borrow_mut()
+        .containers
+        .get_mut(&name)
+        .unwrap()["Config"]["Labels"]["io.hack-local.graph"] = json!(RUN);
+    session.backend.state.borrow_mut().restart_on_logs = true;
+    assert!(logs_with(&session.backend, session.receipt.clone(), "web", 17).is_err());
+    assert_eq!(session.backend.state.borrow().log_reads.len(), 2);
+    assert_eq!(session.backend.state.borrow().effects, effects);
 }

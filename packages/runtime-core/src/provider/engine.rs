@@ -75,6 +75,10 @@ impl Transport {
         path: &str,
         body: Option<&Value>,
     ) -> Result<Vec<u8>, CandidateError> {
+        self.request_bytes_until(method, path, body, None)
+    }
+
+    fn request_bytes_until(&self, method: Method, path: &str, body: Option<&Value>, deadline: Option<Instant>) -> Result<Vec<u8>, CandidateError> {
         if !path.starts_with('/')
             || path.starts_with("//")
             || path.contains('#')
@@ -101,6 +105,10 @@ impl Transport {
         // Cleanup observations and deletion remain possible after expiry; owned
         // stop has its separate cleanup-only batch transport and deadline.
         if requires_admission && let Some(deadline) = self.admission_deadline {
+            let remaining = super::managed_environment::remaining_until(deadline)?;
+            request = request.timeout(remaining.min(self.timeout));
+        }
+        if let Some(deadline) = deadline {
             let remaining = super::managed_environment::remaining_until(deadline)?;
             request = request.timeout(remaining.min(self.timeout));
         }
@@ -185,6 +193,22 @@ pub(super) struct Engine<'a> {
 }
 
 impl<'a> Engine<'a> {
+    #[cfg(feature = "native-config-plan")]
+    pub(in crate::provider) fn request_until(&self, method: Method, path: &str, body: Option<&Value>, deadline: Instant) -> Result<Value, CandidateError> {
+        if self.cleanup_only && ![Method::GET, Method::HEAD, Method::DELETE].contains(&method) {
+            return Err(failure("A cleanup connection cannot allocate or start resources."));
+        }
+        self.guest.verify()?;
+        if ![Method::GET, Method::HEAD, Method::DELETE].contains(&method) {
+            self.guest.before_effect()?;
+        }
+        let bytes = self.transport.request_bytes_until(method, path, body, Some(deadline));
+        self.guest.verify()?;
+        if Instant::now() >= deadline { return Err(failure("Private engine deadline expired; outcome remains uncertain.")); }
+        let bytes = bytes?;
+        if bytes.is_empty() { return Ok(Value::Null); }
+        serde_json::from_slice(&bytes).map_err(|_| failure("Malformed engine response; values omitted."))
+    }
     pub(super) fn load_image_archive(&self, archive: Vec<u8>) -> Result<(), CandidateError> {
         if self.cleanup_only {
             return Err(failure("A cleanup connection cannot load images."));

@@ -114,6 +114,58 @@ fn basic() -> Value {
     json!({"schema_version":1,"name":"fixture","services":{"web":{"image":image(),"command":{"exec":["/bin/echo","$EXACT"]}}}})
 }
 
+fn persistent_reference(receipt: &Receipt) -> persistent_data::engine::Reference {
+    let namespace = receipt.review.scope().namespace;
+    let owner = "9".repeat(32);
+    serde_json::from_value(json!({"binding":{"scope":{"namespace":namespace,"storage":"database","owner":owner},"guest":{"owner":receipt.owner,"boot_id":receipt.boot,"storage":{"device":0,"inode":21,"bytes":128,"uuid":"11111111-2222-3333-4444-555555555555"}},"policy":{"driver":"local","scope":"local","options":{}}},"state":{"status":"enrolled","volume":{"name":format!("hkp-{namespace}-{owner}-database"),"created_at":"2026-10-08T00:00:01Z","directory":{"device":0,"inode":42}}}})).unwrap()
+}
+
+#[test]
+fn persistent_journal_has_distinct_version_and_exact_data_membership_without_volume_ids() {
+    let fixture = Fixture::new(basic());
+    let (_, session) = fixture.session(fixture.prepared(json!({"web":{}}), &BTreeMap::new()));
+    let mut receipt = session.receipt;
+    receipt.version = 4;
+    receipt.data.insert("database".into(), persistent_reference(&receipt));
+    receipt.data_mounts.insert("web".into(), vec![crate::project::native::StorageMount { storage: "database".into(), target: "/data".into(), read_only: false }]);
+    receipt.validate(RUN, OWNER).unwrap();
+    assert_eq!(receipt.resources.len(), 2);
+    assert!(receipt.resources.values().all(|resource| resource.kind != Kind::Volume));
+    let observed = json!({"Mounts":[{"Type":"volume","Name":receipt.data["database"].name(),"Source":receipt.data["database"].mountpoint(),"Destination":"/data","RW":true,"Driver":"local"}]});
+    verify_data_mounts(&receipt, "web", &observed).unwrap();
+    for field in ["Name", "Source", "Destination", "Driver", "RW", "Type"] {
+        let mut wrong = observed.clone(); wrong["Mounts"][0][field] = json!("foreign");
+        assert!(verify_data_mounts(&receipt, "web", &wrong).is_err());
+    }
+    let mut extra = observed.clone(); extra["Mounts"].as_array_mut().unwrap().push(observed["Mounts"][0].clone());
+    assert!(verify_data_mounts(&receipt, "web", &extra).is_err());
+    for version in [2, 3, 5] { let mut wrong = receipt.clone(); wrong.version = version; assert!(wrong.validate(RUN, OWNER).is_err()); }
+    let mut omitted = receipt.clone(); omitted.data.clear(); assert!(omitted.validate(RUN, OWNER).is_err());
+    let encoded = serde_json::to_value(&receipt).unwrap();
+    let mut pending = encoded.clone(); pending["data"]["database"]["state"] = json!({"status":"reserved","intent":"8".repeat(32)});
+    let mut pending: Receipt = serde_json::from_value(pending).unwrap();
+    pending.resources.get_mut("container:web").unwrap().id = Some("6".repeat(64));
+    assert!(pending.validate(RUN, OWNER).is_err());
+    let mut independent = receipt.clone();
+    let run = "7".repeat(32);
+    independent.review = native_input::Review::new(native_input::Scope { namespace: receipt.review.scope().namespace, run: &run }, receipt.review.compiler_identity().clone()).unwrap();
+    independent.resources.get_mut("network:default").unwrap().name = format!("hkn-{run}-network-0");
+    independent.resources.get_mut("container:web").unwrap().name = format!("hkn-{run}-container-0");
+    independent.validate(&run, OWNER).unwrap();
+    assert_eq!(independent.data, receipt.data);
+    assert!(independent.check_binding(&receipt).is_err());
+    assert!(verify_prior_data_retirement(&receipt, &independent.data).is_err());
+    receipt.phase = Phase::Removed;
+    verify_prior_data_retirement(&receipt, &independent.data).unwrap();
+    // Compute-only retirement cannot turn an uncertain original data create into
+    // authority for a second attempt, even if an enrolled pathname appeared late.
+    let mut reserved = encoded;
+    reserved["data"]["database"]["state"] = json!({"status":"reserved","intent":"8".repeat(32)});
+    let mut reserved: Receipt = serde_json::from_value(reserved).unwrap();
+    reserved.phase = Phase::Removed;
+    assert!(verify_prior_data_retirement(&reserved, &independent.data).is_err());
+}
+
 #[test]
 fn foreground_guard_refuses_before_provider_connection_or_graph_reservation() {
     let fixture = Fixture::new(basic());

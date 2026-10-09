@@ -1,4 +1,13 @@
 import { expect, test } from "bun:test";
+import {
+  errorResultFromUnknown,
+  HackCliError,
+  renderCliResult,
+} from "../src/lib/cli-result.ts";
+import {
+  legacyComposeOrderedError,
+  legacyComposeOrderedRefusal,
+} from "../src/lib/native-compose-adoption-diagnostics.ts";
 import { createCompletedJobFixtureStartDiagnostics } from "./e2e/scenarios/native-compose-adoption-job-diagnostics.ts";
 
 function diagnostics(messages: string[]) {
@@ -105,11 +114,90 @@ test("completed-job start diagnostics omit reply values and unknown codes or lab
   await unknown.step("fresh-exit", () => ++calls);
   expect(calls).toBe(2);
   expect(messages[0]).toContain("code=E_CONFIG_INVALID");
+  expect(messages[0]).toContain(
+    "ordered-stage=unavailable ordered-reason=unavailable"
+  );
   expect(messages[1]).toContain("code=unavailable");
-  expect(messages[3]).toContain("timed-out=yes code=unavailable");
+  expect(messages[3]).toContain(
+    "timed-out=yes code=unavailable ordered-stage=unavailable ordered-reason=unavailable"
+  );
   expect(messages.at(-1)).toBe(
     "start-operation=unavailable worktree=unavailable stage=fresh-exit status=end"
   );
+  expect(messages.join("\n")).not.toContain("canary");
+});
+
+test("completed-job CLI diagnostics report only the owner-issued closed ordered refusal", () => {
+  const messages: string[] = [];
+  const diagnostic = diagnostics(messages);
+  for (const issued of [
+    { stage: "ordered-observation", reason: "probe-child" },
+    { stage: "ordered-scheduler", reason: "job-refused" },
+  ] as const) {
+    const original = legacyComposeOrderedError({
+      diagnostic: issued,
+      message: "private-original-message-canary",
+    });
+    const detail = legacyComposeOrderedRefusal(original);
+    expect(detail).toEqual(issued);
+    diagnostic.cliOutcome({
+      exitCode: 1,
+      timedOut: false,
+      stdout: renderCliResult({
+        result: errorResultFromUnknown({
+          error: new HackCliError({
+            code: "E_CONFIG_INVALID",
+            message: "private-envelope-message-canary",
+            detail: { legacy_adoption_refusal: detail },
+          }),
+        }),
+      }),
+    });
+    expect(messages.at(-1)).toBe(
+      `start-operation=restart worktree=alpha stage=cli-result exit=nonzero timed-out=no code=E_CONFIG_INVALID ordered-stage=${issued.stage} ordered-reason=${issued.reason}`
+    );
+  }
+  expect(messages.join("\n")).not.toContain("canary");
+});
+
+test("completed-job CLI diagnostics refuse malformed, extra and unrelated detail", () => {
+  const messages: string[] = [];
+  const diagnostic = diagnostics(messages);
+  const closed = { stage: "ordered-scheduler", reason: "job-refused" };
+  for (const [code, detail] of [
+    [
+      "E_CONFIG_INVALID",
+      {
+        legacy_adoption_refusal: { ...closed, reason: "private-reason-canary" },
+      },
+    ],
+    [
+      "E_CONFIG_INVALID",
+      { legacy_adoption_refusal: { ...closed, stage: "ordered-observation" } },
+    ],
+    [
+      "E_CONFIG_INVALID",
+      { legacy_adoption_refusal: { ...closed, raw: "private-field-canary" } },
+    ],
+    ["E_CONFIG_INVALID", { legacy_adoption_refusal: [closed] }],
+    [
+      "E_CONFIG_INVALID",
+      { legacy_adoption_refusal: closed, env: "private-env-canary" },
+    ],
+    ["E_NATIVE_COMPOSE_OWNERSHIP", { legacy_adoption_refusal: closed }],
+  ] as const) {
+    diagnostic.cliOutcome({
+      exitCode: 1,
+      timedOut: false,
+      stdout: JSON.stringify({
+        ok: false,
+        error: { code, detail, message: "private-message-canary" },
+      }),
+    });
+    expect(messages.at(-1)).toBe(
+      `start-operation=restart worktree=alpha stage=cli-result exit=nonzero timed-out=no code=${code} ordered-stage=unavailable ordered-reason=unavailable`
+    );
+  }
   expect(messages.join("\n")).not.toContain("canary");
 });
 
@@ -150,6 +238,6 @@ test("completed-job CLI diagnostics treat an unreadable reply as unavailable", (
   });
   expect(() => diagnostic.cliOutcome(result)).not.toThrow();
   expect(messages).toEqual([
-    "start-operation=restart worktree=alpha stage=cli-result exit=unavailable timed-out=unavailable code=unavailable",
+    "start-operation=restart worktree=alpha stage=cli-result exit=unavailable timed-out=unavailable code=unavailable ordered-stage=unavailable ordered-reason=unavailable",
   ]);
 });

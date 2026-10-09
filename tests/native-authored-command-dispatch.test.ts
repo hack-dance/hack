@@ -105,7 +105,6 @@ async function invoke(opts: {
 test.each([
   { args: ["up", "--detach"] },
   { args: ["up", "--json"] },
-  { args: ["down"] },
 ])("source CLI native %j refuses before compiler or runtime work", async ({
   args,
 }) => {
@@ -114,7 +113,7 @@ test.each([
   expect(value.code).toBe(1);
   expect(value.stdout + value.stderr).toContain("E_NATIVE_PROJECT_UNSUPPORTED");
   expect(value.stdout + value.stderr).toContain(
-    "whole-project foreground up, ps, or explicit stored-generation down --recover on macOS"
+    "whole-project foreground up, owner-mediated down, ps, or explicit stored-generation down --recover on macOS"
   );
   expect(await Bun.file(join(selected.root, "compiler-called")).exists()).toBe(
     false
@@ -154,6 +153,22 @@ test("source CLI mixed authored families refuse before native dispatch", async (
 });
 
 const macTest = process.platform === "darwin" ? test : test.skip;
+macTest(
+  "ordinary source CLI down with no live hook owner refuses without compiler or runtime work",
+  async () => {
+    const selected = await fixture();
+    const value = await invoke({ selected, args: ["down"], backend: "native" });
+    expect(value.code).toBe(1);
+    expect(value.stdout + value.stderr).toContain("E_LIFECYCLE_FAILED");
+    expect(
+      await Bun.file(join(selected.root, "compiler-called")).exists()
+    ).toBe(false);
+    expect(await readdir(join(selected.root, ".hack"))).toEqual([
+      "hack.project.json",
+    ]);
+  }
+);
+
 macTest.each([
   { name: "omitted", args: [], code: "E_LIFECYCLE_FAILED" },
   {

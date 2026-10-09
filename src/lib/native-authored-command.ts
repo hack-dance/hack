@@ -6,6 +6,7 @@ import {
   nativeAuthoredProjectPs,
 } from "../backends/native-authored-project-observe.ts";
 import { recoverNativeAuthoredProject } from "../backends/native-authored-project-recovery.ts";
+import { stopNativeAuthoredProject } from "../backends/native-authored-project-run.ts";
 import {
   NativeAuthoredProjectStartError,
   serveNativeAuthoredProject,
@@ -23,7 +24,7 @@ function unsupported(): never {
   throw new HackCliError({
     code: "E_NATIVE_PROJECT_UNSUPPORTED",
     message:
-      "Native authored execution requires whole-project foreground up, ps, or explicit stored-generation down --recover on macOS. This request ran no input or runtime operation.",
+      "Native authored execution requires whole-project foreground up, owner-mediated down, ps, or explicit stored-generation down --recover on macOS. This request ran no input or runtime operation.",
   });
 }
 
@@ -73,7 +74,7 @@ function assertRecoveryOptions(options: NativeComposeCommandOptions): void {
 function assertForegroundOptions(options: NativeComposeCommandOptions): void {
   if (
     process.platform !== "darwin" ||
-    options.operation !== "up" ||
+    !["up", "down"].includes(options.operation) ||
     options.detach ||
     options.json ||
     options.recover ||
@@ -84,7 +85,11 @@ function assertForegroundOptions(options: NativeComposeCommandOptions): void {
     options.workdir !== undefined ||
     options.follow !== undefined ||
     options.tail !== undefined ||
-    options.logFormat !== undefined
+    options.logFormat !== undefined ||
+    (options.operation === "down" &&
+      (options.profiles !== undefined ||
+        options.overlay !== undefined ||
+        options.services !== undefined))
   ) {
     unsupported();
   }
@@ -116,7 +121,7 @@ function startupFailure(error: unknown): number {
   });
 }
 
-type Mode = "status" | "recovery" | "start";
+type Mode = "status" | "recovery" | "start" | "stop";
 function commandMode(options: NativeComposeCommandOptions): Mode {
   if (options.operation === "ps") {
     assertStatusOptions(options);
@@ -127,7 +132,7 @@ function commandMode(options: NativeComposeCommandOptions): Mode {
     return "recovery";
   }
   assertForegroundOptions(options);
-  return "start";
+  return options.operation === "down" ? "stop" : "start";
 }
 
 async function showStatus(options: {
@@ -173,7 +178,7 @@ function commandFailure(options: {
         "Native project status is unconfirmed or its ownership changed; values omitted. No request was replayed.",
     });
   }
-  if (options.mode === "recovery") {
+  if (options.mode === "recovery" || options.mode === "stop") {
     throw new HackCliError({
       code: "E_LIFECYCLE_FAILED",
       message:
@@ -183,10 +188,22 @@ function commandFailure(options: {
   return startupFailure(options.error);
 }
 
+function capturedOptions(
+  input: NativeComposeCommandOptions
+): NativeComposeCommandOptions {
+  return {
+    ...input,
+    profiles: input.profiles === undefined ? undefined : [...input.profiles],
+    services: input.services === undefined ? undefined : [...input.services],
+    command: input.command === undefined ? undefined : [...input.command],
+  };
+}
+
 /**
  * Explicit native dispatch after exact authored-family and adoption selection.
  * Compose and omitted selections retain their existing owner. Foreground up delegates
- * to the tagged lifetime owner. Whole-project ps observes its authenticated saved run;
+ * to the tagged lifetime owner; ordinary down uses its authenticated stop.
+ * Whole-project ps observes its authenticated saved run;
  * explicit down --recover uses the stored cleanup owner without input acquisition.
  * Unsupported requests never start input acquisition or runtime work.
  */
@@ -198,6 +215,7 @@ export async function tryNativeAuthoredCommand(opts: {
   readonly serve?: typeof serveNativeAuthoredProject;
   readonly recover?: typeof recoverNativeAuthoredProject;
   readonly observe?: typeof nativeAuthoredProjectPs;
+  readonly stop?: typeof stopNativeAuthoredProject;
 }): Promise<number | null> {
   const sourceEnv = opts.env ?? process.env;
   const env = {
@@ -209,21 +227,7 @@ export async function tryNativeAuthoredCommand(opts: {
   if (env.HACK_RUNTIME_BACKEND !== "native") {
     return null;
   }
-  const options = {
-    ...opts.options,
-    profiles:
-      opts.options.profiles === undefined
-        ? undefined
-        : [...opts.options.profiles],
-    services:
-      opts.options.services === undefined
-        ? undefined
-        : [...opts.options.services],
-    command:
-      opts.options.command === undefined
-        ? undefined
-        : [...opts.options.command],
-  };
+  const options = capturedOptions(opts.options);
   const projectRoot = opts.selected.projectRoot;
   const serve = opts.serve ?? serveNativeAuthoredProject;
   const recover = opts.recover ?? recoverNativeAuthoredProject;
@@ -247,7 +251,9 @@ export async function tryNativeAuthoredCommand(opts: {
     );
   }
   const controller = new AbortController();
-  const cancel = () => controller.abort();
+  const forceController = new AbortController();
+  const cancel = () =>
+    (controller.signal.aborted ? forceController : controller).abort();
   process.on("SIGINT", cancel);
   process.on("SIGTERM", cancel);
   try {
@@ -283,6 +289,18 @@ export async function tryNativeAuthoredCommand(opts: {
       });
       return 0;
     }
+    if (options.operation === "down") {
+      await (opts.stop ?? stopNativeAuthoredProject)({
+        scope,
+        timeoutMs: startupTimeoutMs,
+        signal: controller.signal,
+      });
+      logger.info({
+        message:
+          "Selected native project stopped; persistent data is retained.",
+      });
+      return 0;
+    }
     return await serve({
       runtime,
       scope,
@@ -291,6 +309,18 @@ export async function tryNativeAuthoredCommand(opts: {
       overlay: options.overlay,
       startupTimeoutMs,
       signal: controller.signal,
+      forceSignal: forceController.signal,
+      onHookDiagnostic: (event) => {
+        if (
+          event.boundary === "failed" ||
+          event.boundary === "stop-operation"
+        ) {
+          logger.error({
+            message:
+              "Native lifecycle hook stop is incomplete; the foreground owner and selected state are retained. Values omitted.",
+          });
+        }
+      },
       onReady: () => {
         logger.info({ message: "Project is ready. Press Ctrl-C to stop." });
         return undefined;

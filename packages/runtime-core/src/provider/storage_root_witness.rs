@@ -6,6 +6,38 @@ use crate::CandidateError;
 use zeroize::Zeroize;
 
 const MAGIC: &str = "hack-storage-root-v1";
+#[cfg(feature = "storage-root-witness-tool")]
+pub(super) fn entry() -> std::process::ExitCode {
+    #[cfg(target_os = "linux")]
+    {
+        use std::io::{Read, Write};
+        let args: Vec<_> = std::env::args_os().skip(1).take(2).collect();
+        if !arguments(&args) {
+            return std::process::ExitCode::FAILURE;
+        }
+        let result = (|| {
+            let mut bytes = zeroize::Zeroizing::new(Vec::new());
+            std::io::stdin()
+                .lock()
+                .take(MAX_REQUEST as u64 + 1)
+                .read_to_end(&mut bytes)
+                .map_err(|_| refused())?;
+            let reply = execute(Request::parse(&bytes)?)?;
+            let mut stdout = std::io::stdout().lock();
+            stdout
+                .write_all(reply.encode().as_bytes())
+                .and_then(|()| stdout.flush())
+                .map_err(|_| refused())
+        })();
+        if result.is_ok() {
+            std::process::ExitCode::SUCCESS
+        } else {
+            std::process::ExitCode::FAILURE
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    std::process::ExitCode::FAILURE
+}
 pub(crate) const MAX_REQUEST: usize = 1024;
 pub(crate) fn arguments(args: &[std::ffi::OsString]) -> bool {
     args.len() == 1 && args[0] == "--storage-root-witness"

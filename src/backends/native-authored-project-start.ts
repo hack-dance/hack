@@ -44,6 +44,11 @@ import {
   withNativeAuthoredProjectAdmission,
 } from "./native-authored-project-run.ts";
 import {
+  type NativeAuthoredStorageTool,
+  nativeAuthoredStorageToolRequired,
+  resolveNativeAuthoredStorageTool,
+} from "./native-authored-storage-tool.ts";
+import {
   type NativeExitDiagnostic,
   serveNativeAuthoredProjectGraph,
 } from "./native-project-process.ts";
@@ -63,6 +68,7 @@ const STAGES = [
   "admission",
   "retained-state",
   "inputs",
+  "storage-tool",
   "source",
   "native-plan",
   "review",
@@ -438,6 +444,7 @@ async function runPreparedLifecycle(ctx: {
   readonly review: NativeAuthoredReview;
   readonly payload: Buffer | undefined;
   readonly inputs: () => Inputs;
+  readonly storageTool: NativeAuthoredStorageTool | undefined;
   readonly hookOwner: NativeAuthoredHookOwner | undefined;
   readonly hostProcesses: NativeAuthoredHostProcesses | undefined;
   readonly hostRetired: () => void;
@@ -468,6 +475,7 @@ async function runPreparedLifecycle(ctx: {
       sourceFile: ctx.admitted.source.path,
       review,
       privateInput: ctx.payload,
+      storageTool: ctx.storageTool,
       startupTimeoutMs: ctx.remaining(),
       signal: ctx.graph.signal,
       forceSignal: ctx.hard.signal,
@@ -631,6 +639,27 @@ async function stopUnstartedHostProcesses(opts: {
   }
 }
 
+async function closeAttemptOwners(opts: {
+  readonly host: NativeAuthoredHostProcesses | undefined;
+  readonly hookStop:
+    | Awaited<ReturnType<typeof serveNativeHookStop>>
+    | undefined;
+  readonly storageTool: NativeAuthoredStorageTool | undefined;
+  readonly retained: boolean;
+}): Promise<void> {
+  try {
+    await opts.hookStop?.close(opts.retained);
+  } finally {
+    try {
+      await opts.host?.close();
+    } catch {
+      /* retained durable owner, no replay */
+    } finally {
+      await opts.storageTool?.close();
+    }
+  }
+}
+
 /**
  * Native-source frontend owner. Hold shared input, exact startup intent
  * and authenticated foreground ownership through durable Removed retirement.
@@ -710,6 +739,7 @@ export async function serveNativeAuthoredProject(
         let nativeCode: string | undefined;
         let hookOwner: NativeAuthoredHookOwner | undefined;
         let hostProcesses: NativeAuthoredHostProcesses | undefined;
+        let storageTool: NativeAuthoredStorageTool | undefined;
         let hookStop:
           | Awaited<ReturnType<typeof serveNativeHookStop>>
           | undefined;
@@ -740,6 +770,13 @@ export async function serveNativeAuthoredProject(
               signal,
             });
           let inputs = await acquire(controller.signal);
+          if (nativeAuthoredStorageToolRequired(inputs.result.plan)) {
+            stage = "storage-tool";
+            storageTool = await resolveNativeAuthoredStorageTool(
+              opts.runtime.binary
+            );
+            remaining();
+          }
           const identity = hookSelection(inputs);
           const selectedHost = await prepareHostSelection({
             inputs: () => inputs,
@@ -862,6 +899,7 @@ export async function serveNativeAuthoredProject(
           stage = "runtime";
           payload = await privateDelivery(inputs, review, remaining);
           await inputs.assertFresh();
+          await storageTool?.assertFresh();
           await source.assertFresh();
           await admission.assertHeld();
           await hostProcesses?.assertReady();
@@ -873,6 +911,7 @@ export async function serveNativeAuthoredProject(
             review,
             payload,
             inputs: () => inputs,
+            storageTool,
             hookOwner,
             hostProcesses,
             hostRetired: () => {
@@ -928,12 +967,12 @@ export async function serveNativeAuthoredProject(
           return { ok: false as const, error: failure };
         } finally {
           payload?.fill(0);
-          await hookStop?.close(outcome !== "removed");
-          try {
-            await hostProcesses?.close();
-          } catch {
-            /* retained durable owner, no replay */
-          }
+          await closeAttemptOwners({
+            host: hostProcesses,
+            hookStop,
+            storageTool,
+            retained: outcome !== "removed",
+          });
         }
       }
     );

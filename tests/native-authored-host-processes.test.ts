@@ -4,6 +4,7 @@ import {
   mkdtemp,
   readFile,
   realpath,
+  rename,
   rm,
   writeFile,
 } from "node:fs/promises";
@@ -239,6 +240,50 @@ ownedCase(
         )
       );
       expect(metadata.entries).toEqual([]);
+    });
+  }
+);
+ownedCase(
+  "byte-identical ready replacement refuses before stop and the original inode remains recoverable",
+  async (f) => {
+    await withNativeAuthoredProjectAdmission(f.scope, async (admission) => {
+      const owner = await createNativeAuthoredHostProcesses({
+        scope: f.scope,
+        run,
+        semanticHash: semantic,
+        projectName: "fixture",
+        lifecycle: f.lifecycle,
+        report: () => f.report,
+        resolveValues: () => Promise.resolve({ TOKEN: canary }),
+        assertFresh: admission.assertHeld,
+        signal: f.abort.signal,
+        remaining: f.remaining,
+      });
+      unknown = true;
+      await owner.start();
+      const proof = await owner.proof(true);
+      const original = `${proof.path}.preserved`;
+      const bytes = await readFile(proof.path);
+      await rename(proof.path, original);
+      await writeFile(proof.path, bytes, { flag: "wx", mode: 0o600 });
+      const calls = await readFile(`${f.state}.calls`, "utf8");
+      await expect(owner.assertReady()).rejects.toThrow("values omitted");
+      await expect(owner.stop()).rejects.toThrow("values omitted");
+      const later = (await readFile(`${f.state}.calls`, "utf8")).slice(
+        calls.length
+      );
+      expect(later).not.toContain("send-keys");
+      expect(later).not.toContain("kill-session");
+      await rm(proof.path);
+      await rename(original, proof.path);
+      // Rename changes ctime, so the old live owner conservatively retains its proof.
+      await expect(owner.close()).rejects.toThrow("values omitted");
+      await retireNativeAuthoredHostProcesses({
+        scope: f.scope,
+        run,
+        assertFresh: admission.assertHeld,
+      });
+      unknown = false;
     });
   }
 );

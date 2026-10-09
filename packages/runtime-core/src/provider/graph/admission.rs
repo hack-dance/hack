@@ -49,6 +49,25 @@ pub(super) fn check(
     except: Option<&str>,
     requested: &BTreeMap<String, Value>,
 ) -> Result<(), CandidateError> {
+    check_using(candidate, engine, except, requested, None)
+}
+#[cfg(feature = "native-config-plan")]
+pub(super) fn check_native_reserved(
+    candidate: &Candidate,
+    engine: &Engine<'_>,
+    receipt: &native::Receipt,
+    requested: &BTreeMap<String, Value>,
+) -> Result<(), CandidateError> {
+    check_using(candidate, engine, None, requested, Some(receipt))
+}
+fn check_using(
+    candidate: &Candidate,
+    engine: &Engine<'_>,
+    except: Option<&str>,
+    requested: &BTreeMap<String, Value>,
+    #[cfg(feature = "native-config-plan")] native_except: Option<&native::Receipt>,
+    #[cfg(not(feature = "native-config-plan"))] _native_except: Option<&()>,
+) -> Result<(), CandidateError> {
     let mut budget = Budget::default();
     for config in requested.values() {
         budget.add(config)?;
@@ -96,9 +115,15 @@ pub(super) fn check(
         }
     }
     #[cfg(feature = "native-config-plan")]
-    native::reservations(candidate, engine, except.is_none(), |config| {
-        budget.add(config)
-    })?;
+    if native_except.is_some() {
+        native::reservations_except(candidate, engine, false, native_except, |config| {
+            budget.add(config)
+        })?;
+    } else {
+        native::reservations(candidate, engine, except.is_none(), |config| {
+            budget.add(config)
+        })?;
+    }
     #[cfg(not(feature = "native-config-plan"))]
     if !storage_inventory::runs(&candidate.state_root.join("run/native-graphs"))?.is_empty() {
         return Err(error(

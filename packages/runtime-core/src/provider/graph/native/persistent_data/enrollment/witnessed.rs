@@ -90,6 +90,13 @@ pub struct BindingSelectionOptions<'a> {
 pub fn existing_binding(
     options: BindingSelectionOptions<'_>,
 ) -> Result<Option<Binding>, CandidateError> {
+    Ok(selected_owner(options)?.map(|owner| owner.0.binding.clone()))
+}
+/// Metadata selection only. This cannot admit a mount: the selected owner still
+/// requires read_retained under a freshly admitted installed verifier.
+pub(in crate::provider::graph::native) fn selected_owner(
+    options: BindingSelectionOptions<'_>,
+) -> Result<Option<witnessed::Owner>, CandidateError> {
     if !super::super::super::hex(options.namespace, 64)
         || !super::super::logical_name(options.storage)
     {
@@ -120,7 +127,7 @@ pub fn existing_binding(
         return Err(refused());
     }
     files.verify(Some(&record))?;
-    Ok(Some(owner.0.binding.clone()))
+    Ok(Some(owner))
 }
 fn encode(owner: &witnessed::Owner) -> Result<Vec<u8>, CandidateError> {
     let bytes = serde_json::to_vec(owner).map_err(|_| refused())?;

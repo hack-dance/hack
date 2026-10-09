@@ -74,6 +74,7 @@ struct Fake {
     seed_error: bool,
     replace_record: bool,
     changed_root: bool,
+    postgres_owner: bool,
 }
 impl Fake {
     fn new(f: &Fixture) -> Self {
@@ -87,6 +88,7 @@ impl Fake {
             seed_error: false,
             replace_record: false,
             changed_root: false,
+            postgres_owner: false,
         }
     }
 }
@@ -135,6 +137,10 @@ impl Transport for Fake {
         let mut r = root();
         if self.changed_root {
             r.uid = 1;
+        }
+        if self.postgres_owner {
+            r.uid = 70;
+            r.gid = 70;
         }
         Ok(r)
     }
@@ -264,6 +270,36 @@ fn ambiguous_seed_keeps_pending_and_never_promotes_or_retries() {
     assert_eq!(
         fs::read(f.0.join(slot_name(&b)).join("owner.json")).unwrap(),
         bytes
+    );
+}
+
+#[test]
+fn metadata_selection_is_not_a_mount_proof_and_owner_handoff_remains_refused() {
+    let f = Fixture::new();
+    let b = binding();
+    let w = witness();
+    let c = AtomicBool::new(false);
+    let mut fake = Fake::new(&f);
+    enroll_new(options(&f, &b, &w, &c), &mut fake).unwrap();
+    let select = || {
+        selected_owner(BindingSelectionOptions {
+            state_root: &f.0,
+            namespace: &b.scope.namespace,
+            storage: &b.scope.storage,
+        })
+    };
+    let original = fs::read(f.0.join(slot_name(&b)).join("owner.json")).unwrap();
+    fake.witness_present = false;
+    assert!(select().unwrap().is_some());
+    assert!(read_retained(read_options(&f, &b, &c), &mut fake).is_err());
+    fake.witness_present = true;
+    fake.postgres_owner = true;
+    assert!(select().unwrap().is_some());
+    assert!(read_retained(read_options(&f, &b, &c), &mut fake).is_err());
+    assert_eq!((fake.created, fake.seeds), (1, 1));
+    assert_eq!(
+        fs::read(f.0.join(slot_name(&b)).join("owner.json")).unwrap(),
+        original
     );
 }
 #[test]

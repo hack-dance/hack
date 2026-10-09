@@ -96,6 +96,7 @@ type FixtureOptions = {
   readonly changeHookOwnerAfter?: boolean;
   readonly persistent?: boolean;
   readonly hostProcesses?: boolean;
+  readonly storage?: boolean;
   readonly semanticAfterHook?: boolean;
   readonly planFailure?: boolean;
   readonly foreignPlan?: boolean;
@@ -164,6 +165,9 @@ async function fixture(options: FixtureOptions = {}) {
     schema_version: 1,
     name: "fixture",
     profiles: ["debug"],
+    ...(options.storage
+      ? { storage: { data: { kind: "persistent", scope: "worktree" } } }
+      : {}),
     ...(options.finiteHooks
       ? {
           host: {
@@ -198,6 +202,13 @@ async function fixture(options: FixtureOptions = {}) {
     services: {
       web: {
         image: `sha256:${"3".repeat(64)}`,
+        ...(options.storage
+          ? {
+              mounts: [
+                { storage: "data", target: "/data", access: "read_write" },
+              ],
+            }
+          : {}),
         environment:
           options.noManaged === true
             ? {
@@ -891,6 +902,32 @@ macTest(
         name.endsWith(".hooks.json")
       )
     ).toBe(false);
+  },
+  30_000
+);
+macTest(
+  "missing storage bundle refuses before hooks, native planning, reservation or private delivery",
+  async () => {
+    const selected = await fixture({
+      finiteHooks: true,
+      storage: true,
+      noManaged: true,
+    });
+    const error = await failure(
+      serveNativeAuthoredProject({
+        ...selected,
+        run,
+        startupTimeoutMs: 15_000,
+      }),
+      "not-started"
+    );
+    expect(error).toHaveProperty("stage", "storage-tool");
+    expect(
+      await Bun.file(join(selected.scope.projectRoot, "hook-order")).exists()
+    ).toBe(false);
+    expect(await Bun.file(selected.calls).exists()).toBe(false);
+    expect(await Bun.file(selected.delivery).exists()).toBe(false);
+    expect(await artifacts(selected.scope)).toEqual([]);
   },
   30_000
 );

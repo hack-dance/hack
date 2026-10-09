@@ -56,7 +56,7 @@ const ROUTING = [
 const formats = {
   container: {
     list: `{"id":{{json .ID}},"name":{{json .Names}},"project":{{json (.Label "${PROJECT}")}}}`,
-    inspect: `{"id":{{json .Id}},"name":{{json .Name}},"project":{{json (index .Config.Labels "${PROJECT}")}},"native":{{json (index .Config.Labels "${VERSION}")}},"service":{{json (index .Config.Labels "com.docker.compose.service")}},"number":{{json (index .Config.Labels "com.docker.compose.container-number")}},"oneoff":{{json (index .Config.Labels "com.docker.compose.oneoff")}},"running":{{json .State.Running}},"workingDir":{{json (index .Config.Labels "com.docker.compose.project.working_dir")}},"configFiles":{{json (index .Config.Labels "com.docker.compose.project.config_files")}},"mounts":[{{range $i, $m := .Mounts}}{{if $i}},{{end}}{"type":{{json $m.Type}},"name":{{json $m.Name}},"source":{{json $m.Source}},"target":{{json $m.Destination}},"rw":{{json $m.RW}}}{{end}}],"networks":[{{$first := true}}{{range $name, $n := .NetworkSettings.Networks}}{{if not $first}},{{end}}{{$first = false}}{"name":{{json $name}},"id":{{json $n.NetworkID}}}{{end}}]}`,
+    inspect: `{"id":{{json .Id}},"name":{{json .Name}},"project":{{json (index .Config.Labels "${PROJECT}")}},"native":{{json (index .Config.Labels "${VERSION}")}},"service":{{json (index .Config.Labels "com.docker.compose.service")}},"number":{{json (index .Config.Labels "com.docker.compose.container-number")}},"oneoff":{{json (index .Config.Labels "com.docker.compose.oneoff")}},"running":{{json .State.Running}},"workingDir":{{json (index .Config.Labels "com.docker.compose.project.working_dir")}},"configFiles":{{json (index .Config.Labels "com.docker.compose.project.config_files")}},"mounts":[{{range $i, $m := .Mounts}}{{if $i}},{{end}}{"type":{{json $m.Type}},"name":{{$name := ""}}{{range $key, $value := $m}}{{if eq $key "Name"}}{{$name = $value}}{{end}}{{end}}{{json $name}},"source":{{json $m.Source}},"target":{{json $m.Destination}},"rw":{{json $m.RW}}}{{end}}],"networks":[{{$first := true}}{{range $name, $n := .NetworkSettings.Networks}}{{if not $first}},{{end}}{{$first = false}}{"name":{{json $name}},"id":{{json $n.NetworkID}}}{{end}}]}`,
   },
   volume: {
     list: `{"id":{{json .Name}},"name":{{json .Name}},"project":{{json (.Label "${PROJECT}")}}}`,
@@ -67,6 +67,9 @@ const formats = {
     inspect: `{"id":{{json .Id}},"name":{{json .Name}},"project":{{json (index .Labels "${PROJECT}")}},"native":{{json (index .Labels "${VERSION}")}},"logical":{{json (index .Labels "com.docker.compose.network")}},"createdAt":{{json .Created}},"driver":{{json .Driver}},"scope":{{json .Scope}},"internal":{{json .Internal}},"containers":[{{$first := true}}{{range $id, $c := .Containers}}{{if not $first}},{{end}}{{$first = false}}{{json $id}}{{end}}]}`,
   },
 } as const;
+/** Observation text only: only omitted bind Name defaults empty; present values stay literal. */
+export const legacyComposeAdoptionContainerInspectFormat =
+  formats.container.inspect;
 const CUSTOM_CONTAINER_NETWORK_FORMAT = formats.container.inspect.replace(
   '"id":{{json $n.NetworkID}}}',
   '"id":{{json $n.NetworkID}},"aliases":{{json $n.Aliases}}}'

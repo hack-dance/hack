@@ -87,6 +87,15 @@ UTF-8 errors now normalize to the fixed `E_NATIVE_COMPOSE_PROBE` refusal. Ordere
 commands translate this metadata and their separate JSON/object boundaries into
 fixed redacted reasons; no argv, daemon output, IDs or exit values are retained.
 
+Topology refusals additionally retain a private fixed predicate label on the
+exact owner-issued error: network member shape or ID, member/container endpoint
+agreement, workload policy or endpoint keyset, and created or live endpoint
+membership. Recorded-query replay reports this label alongside the existing
+broad reason. It identifies the first refused check on those saved replies;
+it does not reconstruct the original caller mode, timing or external cause.
+No inspect values are exposed, and admission, scan order and deadlines are
+unchanged.
+
 The closest regression suite is `tests/native-compose-ownership.test.ts`. Its
 isolated executable checks accepted resources, collisions, stale generations,
 inventory changes, redaction, and actual subprocess overflow/timeout/cancellation.

@@ -404,6 +404,7 @@ test("trace replay exposes startup vs strict ownership without accepting a trunc
       outcome: "unready",
       code: null,
       reason: null,
+      topologyPredicate: null,
       consumed: calls.length,
       protocolMatched: true,
     });
@@ -417,6 +418,7 @@ test("trace replay exposes startup vs strict ownership without accepting a trunc
       outcome: "refused",
       code: "E_NATIVE_COMPOSE_OWNERSHIP",
       reason: "topology",
+      topologyPredicate: "live-endpoint-membership",
       consumed: 6,
       protocolMatched: true,
     });
@@ -443,6 +445,7 @@ test("trace replay exposes startup vs strict ownership without accepting a trunc
       outcome: "refused",
       code: "E_NATIVE_COMPOSE_OWNERSHIP",
       reason: "bridge-policy",
+      topologyPredicate: null,
       consumed: 6,
       protocolMatched: true,
     });
@@ -466,6 +469,7 @@ test("trace replay exposes startup vs strict ownership without accepting a trunc
       outcome: "refused",
       code: "E_NATIVE_COMPOSE_OWNERSHIP",
       reason: "endpoint",
+      topologyPredicate: null,
       consumed: 6,
       protocolMatched: true,
     });
@@ -517,6 +521,8 @@ test("trace replay exposes startup vs strict ownership without accepting a trunc
       originalCallerModeKnown: false,
       startupReason: null,
       strictReason: "topology",
+      startupTopologyPredicate: null,
+      strictTopologyPredicate: "live-endpoint-membership",
     });
     const capsulePath = join(root, "first-after-compose-replay-refusal.json");
     const capsuleBytes = await readFile(capsulePath, "utf8");

@@ -36,6 +36,34 @@ pub fn check_private_directory(path: &Path) -> Result<(), CandidateError> {
 
 pub struct Lock(File);
 impl Lock {
+    /// Verify that the retained cooperative lock still names this exact private inode.
+    /// Holding an unlinked predecessor cannot serialize a replacement pathname.
+    pub(crate) fn verify_path(&self, root: &Path) -> Result<(), CandidateError> {
+        check_private_directory(root)?;
+        let descriptor = self.0.metadata().map_err(io)?;
+        let current = fs::symlink_metadata(root.join("operation.lock")).map_err(io)?;
+        // SAFETY: geteuid has no preconditions.
+        let uid = unsafe { libc::geteuid() };
+        for metadata in [&descriptor, &current] {
+            if !metadata.is_file()
+                || metadata.nlink() != 1
+                || metadata.uid() != uid
+                || metadata.mode() & 0o7777 != 0o600
+            {
+                return Err(CandidateError::new(
+                    "foreign_state",
+                    "Provider mutation lock changed.",
+                ));
+            }
+        }
+        if (descriptor.dev(), descriptor.ino()) != (current.dev(), current.ino()) {
+            return Err(CandidateError::new(
+                "foreign_state",
+                "Provider mutation lock changed.",
+            ));
+        }
+        Ok(())
+    }
     #[cfg(target_os = "macos")]
     pub(crate) fn file(&self) -> &File {
         &self.0

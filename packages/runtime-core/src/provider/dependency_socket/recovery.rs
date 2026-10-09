@@ -116,12 +116,68 @@ pub(super) fn path(directory: &Path, slot: u8) -> PathBuf {
     directory.join(format!("dependency-{slot:02}.sock"))
 }
 
+// Test-only first-refusal facts survive fixture Drop in the captured test log.
+// No paths, request data or production diagnostic behavior are added.
+#[cfg(test)]
+pub(super) mod observation_diagnostic {
+    use super::*;
+    use std::cell::RefCell;
+
+    thread_local! {
+        static FIRST: RefCell<Option<Value>> = const { RefCell::new(None) };
+    }
+
+    pub(in crate::provider::dependency_socket) fn clear() {
+        FIRST.with(|first| *first.borrow_mut() = None);
+    }
+    pub(in crate::provider::dependency_socket) fn take() -> Option<Value> {
+        FIRST.with(|first| first.borrow_mut().take())
+    }
+    #[derive(Serialize)]
+    #[serde(rename_all = "kebab-case")]
+    pub(in crate::provider::dependency_socket) enum Stage {
+        MetadataRead,
+        SocketMetadata,
+        SocketConnect,
+        MetadataRecheckRead,
+        MetadataRecheck,
+    }
+
+    pub(in crate::provider::dependency_socket) fn record(
+        stage: Stage,
+        metadata: Option<&fs::Metadata>,
+        errno: Option<i32>,
+    ) {
+        FIRST.with(|first| {
+            let mut first = first.borrow_mut();
+            if first.is_none() {
+                *first = Some(json!({"stage":stage,"errno":errno,
+                    "metadata":metadata.map(|metadata| json!({
+                        "type":if metadata.file_type().is_socket(){"socket"}
+                            else if metadata.file_type().is_symlink(){"symlink"}
+                            else if metadata.is_file(){"file"}
+                            else if metadata.is_dir(){"directory"}else{"other"},
+                        "mode":metadata.mode(),"uid":metadata.uid(),
+                        "nlink":metadata.nlink(),"inode":metadata.ino()}))}));
+            }
+        });
+    }
+}
+
 pub(super) fn observed(directory: &Path, slot: u8) -> Result<Option<Socket>, CandidateError> {
     let target = path(directory, slot);
     let metadata = match fs::symlink_metadata(&target) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(_) => return Err(refused()),
+        Err(_error) => {
+            #[cfg(test)]
+            observation_diagnostic::record(
+                observation_diagnostic::Stage::MetadataRead,
+                None,
+                _error.raw_os_error(),
+            );
+            return Err(refused());
+        }
     };
     if !metadata.file_type().is_socket()
         || metadata.uid() != unsafe { libc::geteuid() }
@@ -129,19 +185,47 @@ pub(super) fn observed(directory: &Path, slot: u8) -> Result<Option<Socket>, Can
         || metadata.nlink() != 1
         || metadata.ino() == 0
     {
+        #[cfg(test)]
+        observation_diagnostic::record(
+            observation_diagnostic::Stage::SocketMetadata,
+            Some(&metadata),
+            None,
+        );
         return Err(refused());
     }
     match UnixStream::connect(&target) {
         Err(error) if error.raw_os_error() == Some(libc::ECONNREFUSED) => {}
-        _ => return Err(refused()),
+        _result => {
+            #[cfg(test)]
+            observation_diagnostic::record(
+                observation_diagnostic::Stage::SocketConnect,
+                Some(&metadata),
+                _result.err().and_then(|error| error.raw_os_error()),
+            );
+            return Err(refused());
+        }
     }
-    let again = fs::symlink_metadata(&target).map_err(|_| refused())?;
+    let again = fs::symlink_metadata(&target).map_err(|_error| {
+        #[cfg(test)]
+        observation_diagnostic::record(
+            observation_diagnostic::Stage::MetadataRecheckRead,
+            Some(&metadata),
+            _error.raw_os_error(),
+        );
+        refused()
+    })?;
     if again.dev() != metadata.dev()
         || again.ino() != metadata.ino()
         || again.mode() != metadata.mode()
         || again.uid() != metadata.uid()
         || !again.file_type().is_socket()
     {
+        #[cfg(test)]
+        observation_diagnostic::record(
+            observation_diagnostic::Stage::MetadataRecheck,
+            Some(&again),
+            None,
+        );
         return Err(refused());
     }
     Ok(Some(Socket {

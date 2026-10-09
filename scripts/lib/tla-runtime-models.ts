@@ -20,7 +20,7 @@ type ModelContract = {
   readonly alternativeWitnesses?: readonly ModelWitness[];
   readonly additionalControls?: readonly {
     readonly name: string;
-    readonly module?: "TerminalReuse";
+    readonly module?: "TerminalReuse" | "MetadataAliasing";
     readonly negative: boolean;
     readonly states?: number;
     readonly invariant?: string;
@@ -40,6 +40,58 @@ const laterIncompleteMissingLockStages = [
   "owner",
 ] as const;
 const contracts: readonly ModelContract[] = [
+  {
+    name: "native-persistent-enrollment",
+    module: "Enrollment",
+    states: 38,
+    invariant: "NoExistingAdoption",
+    action: "CreateOriginal",
+    fields: ['phase = "created"', "volume = 2", "unsafeAdoption = TRUE"],
+    additionalControls: [
+      {
+        name: "metadata-alias",
+        module: "MetadataAliasing",
+        negative: true,
+        invariant: "NoAliasedMatch",
+        action: "ReadRetained",
+        fields: [
+          "actualVolume = 2",
+          "reportedMetadata = 1",
+          "capturedMetadata = 1",
+          "witness = 0",
+          "expectedWitness = 1",
+          "matched = TRUE",
+        ],
+      },
+      {
+        name: "wrong-birth",
+        negative: true,
+        invariant: "OriginalBirthAtCommit",
+        action: "PublishEnrollment",
+        fields: ["captured = 1", "volume = 2", "unsafeCommit = TRUE"],
+        alternativeWitnesses: [
+          {
+            action: "PublishEnrollment",
+            fields: ["captured = 2", "volume = 2", "unsafeCommit = TRUE"],
+          },
+        ],
+      },
+      {
+        name: "pending-read",
+        negative: true,
+        invariant: "NoPendingMatch",
+        action: "ReadRetained",
+        fields: ['record = "pending"', "matched = TRUE", "unsafeRead = TRUE"],
+      },
+      {
+        name: "retire-data",
+        negative: true,
+        invariant: "RetirementPreservesData",
+        action: "RetireCompute",
+        fields: ["run = 2", "volume = 0", "unsafeRetirement = TRUE"],
+      },
+    ],
+  },
   {
     name: "native-frontend-recovery",
     module: "Recovery",

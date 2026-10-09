@@ -391,6 +391,7 @@ test("trace replay exposes startup vs strict ownership without accepting a trunc
     expect(startup).toEqual({
       outcome: "unready",
       code: null,
+      reason: null,
       consumed: calls.length,
       protocolMatched: true,
     });
@@ -403,11 +404,62 @@ test("trace replay exposes startup vs strict ownership without accepting a trunc
     expect(strict).toEqual({
       outcome: "refused",
       code: "E_NATIVE_COMPOSE_OWNERSHIP",
+      reason: "live-network-membership",
       consumed: 6,
       protocolMatched: true,
     });
     expect(JSON.stringify({ startup, strict })).not.toContain(owner);
     expect(JSON.stringify({ startup, strict })).not.toContain(id);
+    const refused = async (
+      name: string,
+      replace: (
+        row: ProcessPolicyInitialTraceQuery
+      ) => ProcessPolicyInitialTraceQuery
+    ) =>
+      replayProcessPolicyInitialOwnership({
+        directory: join(root, name),
+        queries: queries.map(replace),
+        selection,
+        mode: "startup",
+      });
+    const policy = await refused("policy", (row) =>
+      JSON.stringify(row.args) === JSON.stringify(inspect("network"))
+        ? { ...row, stdout: JSON.stringify({ ...network, internal: true }) }
+        : row
+    );
+    expect(policy).toEqual({
+      outcome: "refused",
+      code: "E_NATIVE_COMPOSE_OWNERSHIP",
+      reason: "network-policy",
+      consumed: 6,
+      protocolMatched: true,
+    });
+    const aliases = await refused("aliases", (row) =>
+      JSON.stringify(row.args) === JSON.stringify(inspect("container"))
+        ? {
+            ...row,
+            stdout: JSON.stringify({
+              ...container,
+              networks: {
+                [`${project}_default`]: {
+                  NetworkID: networkId,
+                  Aliases: ["unexpected-alias"],
+                },
+              },
+            }),
+          }
+        : row
+    );
+    expect(aliases).toEqual({
+      outcome: "refused",
+      code: "E_NATIVE_COMPOSE_OWNERSHIP",
+      reason: "endpoint-aliases",
+      consumed: 6,
+      protocolMatched: true,
+    });
+    expect(JSON.stringify({ policy, aliases })).not.toContain(owner);
+    expect(JSON.stringify({ policy, aliases })).not.toContain(id);
+    expect(JSON.stringify({ policy, aliases })).not.toContain(import.meta.dir);
     const missing = await replayProcessPolicyInitialOwnership({
       directory: join(root, "missing"),
       queries: queries.slice(0, 1),
@@ -416,6 +468,7 @@ test("trace replay exposes startup vs strict ownership without accepting a trunc
     });
     expect(missing.protocolMatched).toBe(false);
     expect(missing.outcome).toBe("refused");
+    expect(missing.reason).toBe("unavailable");
     const first = queries[0];
     if (!first) {
       throw new Error("Missing synthetic query");
@@ -428,6 +481,7 @@ test("trace replay exposes startup vs strict ownership without accepting a trunc
     });
     expect(changed.protocolMatched).toBe(false);
     expect(changed.outcome).toBe("refused");
+    expect(changed.reason).toBe("unavailable");
   } finally {
     await rm(root, { recursive: true, force: true });
   }

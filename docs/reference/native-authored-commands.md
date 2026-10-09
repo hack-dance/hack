@@ -15,10 +15,21 @@ HACK_NATIVE_HOME=/absolute/private/candidate-home \
 ./dist/hack --path /absolute/project up
 ```
 
-The native planner admits image-only workloads, exec readiness, initializer jobs
-and dependencies with the ordinary project network and outbound mode. Source
-root must remain `.`; source acquisition, mounts, storage, authored networks, file inputs, routing, endpoints
-and host effects remain outside this bounded frontend. Unsupported intent must
+The native planner admits image workloads, exec readiness, initializer jobs
+and dependencies with the ordinary project network and outbound mode. It also
+admits one read-only project source mount per selected workload, using the existing
+`host-mounted` source mode and root `.`. The provider pool must already contain
+the exact explicitly approved unfiltered live project share. That existing
+virtiofs share grants the guest writable access to the whole tree; only the
+individual workload bind is read-only. This command does not enroll the share or
+change pool mounts. Host edits remain visible. A selected
+directory allows descendant edits; a selected regular file allows in-place edits
+but refuses replacement of its inode. Selected path/ancestor aliases, identity
+or permission changes refuse, while exact owned shutdown remains possible after
+the host source is moved or deleted and preserves host data.
+
+Writable/other mounts, source acquisition, storage, authored networks, file inputs,
+routing, endpoints and host effects remain outside this bounded frontend. Unsupported intent must
 refuse before managed value resolution and provider work. Early typed input
 capability refusals retain `E_NATIVE_PROJECT_UNSUPPORTED` without exposing
 compiler diagnostics or creating native source/start/run authority. `--detach`,
@@ -30,6 +41,9 @@ with an explicit base selection; omitting `--env` retains the authored/local def
 
 Startup shares the configured `HACK_COMPOSE_STARTUP_TIMEOUT_MS` budget across
 input preparation and native review, with a native maximum of 300000 milliseconds.
+Startup refusals identify a fixed owning stage and, when available, a closed
+compiler or native error code. They omit arbitrary errors, child output, paths and
+values. These diagnostics do not grant retry or cleanup authority.
 Readiness requires authenticated current observations and unchanged input before
 publication. The foreground owner remains attached until owned shutdown finishes;
 Ctrl-C requests that shutdown. Exact durable Removed evidence retires the tagged
@@ -74,6 +88,10 @@ and an interrupted completed-history hardlink archive remain retained refusals;
 this operation does not repair arbitrary partial lock or file publications.
 
 The native receipt and source paths are distinct from strict Compose v1 artifacts.
-No native hash substitutes for a normalized Compose hash. Source and fake-driver
+Image-only graph receipts remain v2; source-bearing graph receipts use a closed v3
+binding, distinct from the existing foreground publication-owner v3. Ready/control
+envelopes remain v2. Dead-owner recovery of source-bearing receipts is not admitted
+by the separately qualified image-only recovery path. No native hash substitutes
+for a normalized Compose hash. Source and fake-driver
 checks do not qualify an installed frontend, a live provider, the full authored
 corpus, actual dead-owner recovery or resource overhead; those remain separate gates.

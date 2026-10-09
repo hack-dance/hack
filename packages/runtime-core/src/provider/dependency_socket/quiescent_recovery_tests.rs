@@ -43,7 +43,16 @@ impl Fixture {
         drop(self.bind(slot));
     }
     fn selection(&self) -> Selection {
-        current(self.scope(), &self.0).unwrap()
+        super::super::recovery::observation_diagnostic::clear();
+        current(self.scope(), &self.0).unwrap_or_else(|error| {
+            panic!(
+                "Synthetic quiescent selection refused: code={}; closed_first_observation={}",
+                error.code,
+                super::super::recovery::observation_diagnostic::take()
+                    .map(|facts| serde_json::to_string(&facts).unwrap())
+                    .unwrap_or_else(|| "null".into())
+            )
+        })
     }
     fn hash(&self) -> String {
         digest(&self.selection()).unwrap()
@@ -51,6 +60,52 @@ impl Fixture {
     fn recover(&self, hash: &str) -> Result<Value, CandidateError> {
         recover_scope(&self.journal(), &self.scope(), &self.0, hash, || Ok(()))
     }
+}
+
+#[test]
+fn first_socket_refusal_records_closed_live_listener_facts_without_removal() {
+    use super::super::recovery::observation_diagnostic as diagnostic;
+    let fixture = Fixture::new();
+    let listener = fixture.bind(0);
+    diagnostic::clear();
+    assert!(observed(&fixture.0, 0).is_err());
+    let facts = diagnostic::take().unwrap();
+    assert_eq!(facts["stage"], "socket-connect");
+    assert!(facts["errno"].is_null());
+    assert_eq!(facts["metadata"]["type"], "socket");
+    assert_eq!(facts["metadata"]["mode"].as_u64().unwrap() & 0o7777, 0o600);
+    assert_eq!(facts["metadata"]["nlink"], 1);
+    assert!(facts["metadata"]["inode"].as_u64().unwrap() > 0);
+    let text = serde_json::to_string(&facts).unwrap();
+    assert!(text.len() < 512);
+    assert!(!text.contains(fixture.0.to_str().unwrap()));
+    assert!(path(&fixture.0, 0).exists());
+    drop(listener);
+    assert!(observed(&fixture.0, 0).unwrap().is_some());
+}
+
+#[test]
+fn first_socket_refusal_precedes_later_facts_and_clear_starts_a_fresh_observation() {
+    use super::super::recovery::observation_diagnostic as diagnostic;
+    let fixture = Fixture::new();
+    let listener = fixture.bind(0);
+    fs::set_permissions(path(&fixture.0, 0), fs::Permissions::from_mode(0o644)).unwrap();
+    diagnostic::clear();
+    assert!(observed(&fixture.0, 0).is_err());
+    diagnostic::record(diagnostic::Stage::MetadataRead, None, Some(libc::EACCES));
+    let first = diagnostic::take().unwrap();
+    assert_eq!(first["stage"], "socket-metadata");
+    assert_eq!(first["metadata"]["mode"].as_u64().unwrap() & 0o7777, 0o644);
+    assert!(first["errno"].is_null());
+    diagnostic::clear();
+    assert!(diagnostic::take().is_none());
+    diagnostic::record(diagnostic::Stage::MetadataRead, None, Some(libc::EACCES));
+    assert_eq!(
+        diagnostic::take().unwrap(),
+        json!({"stage":"metadata-read","errno":libc::EACCES,"metadata":null})
+    );
+    assert!(path(&fixture.0, 0).exists());
+    drop(listener);
 }
 impl Drop for Fixture {
     fn drop(&mut self) {

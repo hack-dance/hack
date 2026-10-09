@@ -14,7 +14,8 @@ The owner shares the [import preview](native-config-import.md) source acquisitio
 the exact `.hack/hack.config.json` and `.hack/docker-compose.yml` pair, bounded
 regular files, strict maintained parsing and private original-byte freshness.
 Matching explicit canonical names in both documents are required. There is no
-caller-supplied resource name, branch override or directory-name fallback.
+caller-supplied resource name or directory-name fallback. The qualified branch
+selection below accepts `--branch` as a selector, never as a resource claim.
 Dotenv inputs, symlinks, competing input families and source changes refuse.
 Canonical managed-env layers require the version 3 path below; the bounded typed
 local mapping uses version 4 and preserves the effective legacy selection.
@@ -51,6 +52,25 @@ unqualified family intersections, still refuse. This version keeps the original
 containers and volumes; it does not silently replace either original bridge.
 Any later newly created native generation needs its own explicit topology and
 data acceptance. Earlier receipt versions retain their narrower authority.
+
+Private manifest, receipt and resource binding version 13 admits one existing
+branch instance per checkout. The authored config and Compose names remain the
+base name; the exact original physical project is `<base>--<selected-branch>`.
+In a linked Git worktree with `worktree.auto_branch` enabled, omission selects
+the existing effective branch using the ordinary read-only Git resolver,
+including its collision suffix. An explicit `--branch` selects the same saved
+slug. The owner binds the raw default Git branch, selected slug, physical
+project, both original input bytes, the sole canonical branch runtime fragment,
+its file and directory identities, complete original container/network IDs and
+volume creation identities. It verifies the fragment against the ordinary
+runtime-host metadata builder and the actual Compose config-file labels and
+hashes. It never creates a branch, writes an override, registers a project or
+recreates resources. A changed default Git selection refuses; the original
+explicit slug can still select the same saved receipt for recovery or rollback.
+One checkout cannot retarget a prepared branch generation. Branch routing,
+managed env, source binds, owned custom bridges, jobs, build, files, health
+dependencies and other mixed families remain unqualified in version 13.
+`--dry-run --branch` refuses until its selected preview has a separate owner.
 
 The static retained-container slice also inspects relevant filenames in the
 verified primary checkout when local inheritance is enabled. Managed-env,
@@ -164,6 +184,106 @@ same-identity byte repair, separate rollback and
 exact owned cleanup. It requires the current compiled CLI and companion compiler;
 it does not qualify completed jobs or container recreation.
 
+## Retained basic builds
+
+The distinct version 9 owner handles existing basic build-only services with
+qualified named data volumes and the existing default bridge. Context, relative
+Dockerfile and target use the closed import mapping, with current local files
+additionally verified. A service must omit `pull_policy`: explicit `build`
+requires builder execution and cannot be satisfied by starting an old image.
+The owner never builds, pulls, creates a container or substitutes an image during
+the format switch or retained execution. Explicit rebuild/recreation requests
+refuse. Image-only binding APIs and versions 1–5 retain their prior contracts.
+Versions for custom networks, completed jobs and retained files are separate;
+their combinations with this first build proof refuse, as do profiles, readiness,
+managed/generated inputs, typed locals and literal-dollar build paths.
+Pure preview can map a qualified custom bridge alongside a basic build; retained
+build adoption refuses that intersection before opening context files, including
+inactive workloads.
+
+Included context files, the Dockerfile, optional root and Dockerfile-specific
+ignore files, and their safe filesystem identities are privately pinned. The
+names-only private env/local layout refusal precedes the context walk and is
+rechecked afterwards; known private material added mid-walk is never opened as
+an included file. A Dockerfile-specific ignore file takes precedence, while presence and bytes of
+both files remain bound. The pinned `@balena/dockerignore` Moby port handles only
+the qualified case-sensitive grammar: literal normalized paths, `!` negation,
+bare `**`, blank lines and comments. Other globs, escapes, BOMs and ambiguous
+paths refuse. Every possible adopted-owned path must be excluded by the effective
+rules, including Git markers, `.hack/.internal`, `.hack/.branch` and the switched
+authored files. Excluded subtrees are not read. Parent negations include
+descendants: `**` followed by `!.hack` does not isolate future private outputs.
+Such a context refuses unless later literal exclusions close those paths.
+Root and `.hack` contexts can qualify through these exact exclusions.
+
+The maintained `native-compose-adoption-build-worktrees` acceptance explicitly
+requires Buildx's default Docker driver, `DOCKER_BUILDKIT=1` and
+`compose build --builder default` for fixture bootstrap. It never creates or
+bootstraps a separate builder. Its private fixed-stage evidence retains the
+complete fatal-decoded synthetic COPY reply before applying the unchanged file
+and hash oracle. This separates builder qualification from source/image guards;
+it does not infer which builder caused an earlier failure or prove cache ownership.
+
+One acquisition is limited to 16 builds, depth 32, 256 captured entries, 4096
+directory names, 16 MiB of bytes and a 48 KiB private proof; the existing stable
+file owner also limits each file to 1 MiB. Included byte, identity or mode changes,
+included additions/removals, ignore presence changes and unsafe paths refuse.
+Same-inode exact byte repair can restore a saved proof; it does not repair a
+strict prepared authored-source timestamp or make editor races atomic.
+
+The selected read-only Compose query supplies each original image reference.
+Container IDs and birth, image IDs and birth, and current tag resolution must
+match the privately saved observation, along with the existing config hashes,
+mounts, network identity and volume creation identities. No image environment,
+command or layer contents are read. These facts attest the current retained
+image and current included source separately; they do not establish which source
+historically built that image. Missing images or retargeted tags refuse before
+effects. No image ownership for removal is granted by this proof.
+
+Preparation, dry-run and saved execution use the same closed owner. Public output
+contains field provenance and counts, never context hashes, image references or
+private capabilities. Version 9 requires a finite remaining mutation deadline,
+the whole original selection and the existing signal/process-group owner.
+Starts, stops and recovery consume original IDs; source or image drift retains
+pending evidence. Rollback restores the exact original authored inputs after
+verified stop and keeps their original data. Older upgraded owners that know
+only versions 1–5 refuse the new proof; this is not a universal old-launcher
+fence. Current Moby/BuildKit ignore parity and maintained two-worktree SQL,
+image/ID/birth, recovery and rollback acceptance qualify this slice separately
+from pure preview and synthetic model controls. Full NC04 remains open.
+
+The maintained `native-compose-adoption-build-worktrees` scenario requires
+explicit selection. It bootstraps two disposable Postgres images, checks the
+complete `COPY .` projection for root/Dockerfile-specific and default `.hack`
+contexts, and then permits only captured metadata queries and journaled original-ID
+starts/stops. Format switch and saved consumption cannot reach a builder. Its
+source and candidate drift controls retain pending ownership, preserve the other
+worktree's SQL row, and restore both original configurations through rollback.
+The fixture issues a recovery-stop transport capability only for the exact
+`down --recover --json` invocation. It can stop the original IDs while the active
+generation retains its interrupted start journal; publication, generation,
+complete service selection and daemon checks still precede each effect. Private
+per-invocation evidence records closed operation/substage names and CLI exit/code
+classifications before caller assertions, without reply values or arbitrary errors.
+Exact fixture image removal requires its captured new ID/birth, sole tag, fixture
+label, unchanged daemon and no remaining container references. A local final
+image may expose one digest for that exact repository and captured image ID;
+other digest aliases refuse. The fixture privately journals the exact new
+image graph after each bootstrap build. Only fixture-labelled, untagged parents
+on its complete chain to the captured original base qualify for disposal, in
+child-before-parent order with nonforce `image rm --no-prune`. A builder exposing
+no parent qualifies only its single final object. Unexplained new images, foreign
+labels or references retain the failed fixture. Only an absent `Parent` key
+defaults to empty; an explicit empty parent is preserved and malformed present
+values still refuse.
+The known Compose project, service and version labels must match the exact
+fixture project, `db` service and selected Compose release. Other label names
+remain refused. Full original image inventory
+and tags must be restored; inventory bounds are not relaxed for new objects.
+General builder cache is retained; cache reclamation and historical image-from-source provenance remain
+unqualified. Fixture source/model checks alone do not establish live builder or
+data-preservation acceptance.
+
 The version 4 typed-local slice reads optional `.hack/hack.local.json` at the
 selected checkout and verified inherited primary in the same issued private source
 acquisition. It accepts only `schema_version: 1` and an optional `environment`
@@ -226,8 +346,15 @@ and each service's closed one-or-two-bridge attachment and aliases. Neither a
 shared network ID nor a partial member observation can stand in for the other
 bridge. Engine ID, resource inventories and source
 bytes are rechecked, and acquisition compares two complete private observations.
+Container observations bracket the active-member read. If an original changes
+running state while all immutable facts remain verified, the mixed observation
+is discarded within the same aggregate deadline and output allowance. Foreign
+members, replaced identities and stable membership mismatches refuse immediately.
+This is not an atomic daemon snapshot: delayed endpoint removal can still refuse,
+and fresh successful job completion remains the scheduler's separate decision.
 The Docker routing environment is captured for later comparison. Queries never
-request container environment or image configuration. This retained-resource authority
+request container environment or full image configuration; version 9 additionally
+reads the minimal image reference, ID and birth described above. This retained-resource authority
 keeps the original bridge and container IDs through stop, saved restart,
 recovery and rollback; it does not authorize a later newly created native
 generation to take over those identities. That transition needs a separate
@@ -396,3 +523,51 @@ static fixture's exact ownership and daemon checks for cleanup.
 Use the same prerequisites and flags as above with
 `--only=native-compose-adoption-managed-worktrees`. Registration and synthetic
 fixture controls do not establish a live pass.
+
+## Retained directory binds
+
+Version 12 is a distinct retained source-directory owner. It accepts literal
+checkout-relative bind sources in the canonical `.hack/docker-compose.yml`,
+including existing checkout-root and gitignored directories. Long syntax must
+explicitly set `bind.create_host_path: false`. Short syntax is conditional on an
+existing directory and exact original mount; it does not establish general
+missing-path conversion parity. Access stays exactly read-only or read-write as
+authored and observed. No path is created, repaired, chmodded or added to Git.
+
+The private proof binds held canonical checkout, ancestor and source directory
+identities to the original container's exact engine Source, Target and RW fields.
+Symlinked, missing, replaced or unsafe directories refuse. Explicit `.git`,
+`.hack/.internal` and `.hack/.branch` sources remain unsupported. Binding the
+whole checkout does not require excluding those descendants or reading their
+contents. Directory content, timestamps and tracked status are not integrity
+claims: legitimate writes within a retained RW directory may continue.
+
+This first family supports static image services, the default bridge and optional
+original named storage. Generated/managed/local projection, build, jobs,
+dependency readiness, file grants and custom networks refuse, including inactive
+declarations. Version 12 keeps the previous receipt meanings intact and older
+owners fail closed. Saved checks remain key-free and private; reports contain
+only field provenance and counts.
+
+Publication, explicit preparation stop, original-ID start/stop, pending repair and
+rollback reuse the existing transaction. Every effect checks the held source and
+original resources under one finite operation deadline. No container recreation,
+new bind allocation or empty replacement storage is accepted. Directory
+replacement after a partial effect retains the pending receipt; returning the
+same original directory may permit explicit repair. Rechecks cannot atomically
+freeze external editors, directory writers or Docker.
+
+Source/model controls are separate from actual two-worktree RO/RW access, SQL,
+directory identity and resource-birth qualification. Full NC04 still requires
+the mixed corpus and the unsupported feature intersections.
+
+The explicit `native-compose-adoption-source-bind-worktrees` Docker selector
+uses two linked legacy instances with distinct existing SQL rows and directory
+contents. It checks short and no-create long syntax, RO write refusal, persisted
+RW writes, a gitignored directory and the checkout-root mount. Every adoption
+CLI, including previews, uses a closed read/start/stop transport. A controlled
+partial start replaces one source directory; recovery must retain the exact
+pending receipt and leave both instances unchanged until that same original
+directory is restored. Independent rollbacks and exact owned cleanup retain the
+original resource and volume-birth checks. Registration and synthetic controls
+alone do not qualify live mounts or Docker behavior.

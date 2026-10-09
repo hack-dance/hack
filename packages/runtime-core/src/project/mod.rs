@@ -23,6 +23,8 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 pub use enrollment::{EnrollmentReceipt, enroll, status, status_with_branch};
+#[cfg(feature = "native-config-plan")]
+pub(crate) use source::resolve as resolve_source;
 pub use source::{SourceEntry, SourceSelection};
 
 pub struct PlanOptions<'a> {

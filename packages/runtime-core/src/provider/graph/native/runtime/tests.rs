@@ -64,7 +64,12 @@ impl Fixture {
     }
     fn session(&self, prepared: selection::Prepared) -> (execution::Graph, Session<'_, Fake>) {
         let (selected, input) = prepared.into_parts(&self.candidate).unwrap();
-        let mut config = configuration(&input, OWNER).unwrap();
+        let source = selected.project_source.as_ref().map(|source| {
+            source
+                .bind(&crate::provider::ProjectShareIntent::approve(&self.project, true).unwrap())
+                .unwrap()
+        });
+        let mut config = configuration_with_source(&input, OWNER, source.clone()).unwrap();
         for value in config.configs.values_mut() {
             value["StopTimeout"] = json!(10);
         }
@@ -84,6 +89,7 @@ impl Fixture {
         let backend = Fake {
             root: root.clone(),
             run: RUN.into(),
+            source,
             state: RefCell::new(FakeState::default()),
         };
         (
@@ -112,6 +118,190 @@ fn image() -> String {
 }
 fn basic() -> Value {
     json!({"schema_version":1,"name":"fixture","services":{"web":{"image":image(),"command":{"exec":["/bin/echo","$EXACT"]}}}})
+}
+
+fn persistent_reference(receipt: &Receipt) -> persistent_data::engine::Reference {
+    let namespace = receipt.review.scope().namespace;
+    let owner = "9".repeat(32);
+    serde_json::from_value(json!({"binding":{"scope":{"namespace":namespace,"storage":"database","owner":owner},"guest":{"owner":receipt.owner,"boot_id":receipt.boot,"storage":{"device":0,"inode":21,"bytes":128,"uuid":"11111111-2222-3333-4444-555555555555"}},"policy":{"driver":"local","scope":"local","options":{}}},"state":{"status":"enrolled","volume":{"name":format!("hkp-{namespace}-{owner}-database"),"created_at":"2026-10-08T00:00:01Z","directory":{"device":0,"inode":42}}}})).unwrap()
+}
+
+#[test]
+fn persistent_journal_has_distinct_version_and_exact_data_membership_without_volume_ids() {
+    let fixture = Fixture::new(basic());
+    let (_, session) = fixture.session(fixture.prepared(json!({"web":{}}), &BTreeMap::new()));
+    let mut receipt = session.receipt;
+    let image_only = serde_json::to_value(&receipt).unwrap();
+    for fields in [
+        json!({"data":{}}),
+        json!({"data_mounts":{}}),
+        json!({"data":{},"data_mounts":{}}),
+        json!({"data":null}),
+        json!({"data_mounts":null}),
+        json!({"data":null,"data_mounts":null}),
+        json!({"data_tool":null}),
+        json!({"data_tool":{"version":1,"artifact":"a".repeat(64),"bytes":8192,"root":null,"helper":null}}),
+    ] {
+        let mut wire = image_only.clone();
+        wire.as_object_mut()
+            .unwrap()
+            .extend(fields.as_object().unwrap().clone());
+        assert!(serde_json::from_value::<Receipt>(wire).is_err());
+    }
+    serde_json::from_value::<Receipt>(image_only)
+        .unwrap()
+        .validate(RUN, OWNER)
+        .unwrap();
+    receipt
+        .data
+        .insert("database".into(), persistent_reference(&receipt));
+    receipt.data_mounts.insert(
+        "web".into(),
+        vec![crate::project::native::StorageMount {
+            storage: "database".into(),
+            target: "/data".into(),
+            read_only: false,
+        }],
+    );
+    let mut persistent_wire = serde_json::to_value(&receipt).unwrap();
+    persistent_wire["version"] = json!(4);
+    receipt = serde_json::from_value(persistent_wire).unwrap();
+    receipt.validate(RUN, OWNER).unwrap();
+    let mut installed = serde_json::to_value(&receipt).unwrap();
+    installed["data_tool"] = json!({"version":1,"artifact":"a".repeat(64),"bytes":8192,"root":{"device":0,"inode":1},"helper":{"device":0,"inode":2}});
+    let with_tool: Receipt = serde_json::from_value(installed.clone()).unwrap();
+    with_tool.validate(RUN, OWNER).unwrap();
+    assert!(with_tool.check_binding(&receipt).is_err());
+    installed["data_tool"]["helper"]["inode"] = json!(0);
+    assert!(
+        serde_json::from_value::<Receipt>(installed)
+            .unwrap()
+            .validate(RUN, OWNER)
+            .is_err()
+    );
+    assert_eq!(receipt.resources.len(), 2);
+    assert!(
+        receipt
+            .resources
+            .values()
+            .all(|resource| resource.kind != Kind::Volume)
+    );
+    let observed = json!({"Mounts":[{"Type":"volume","Name":receipt.data["database"].name(),"Source":receipt.data["database"].mountpoint(),"Destination":"/data","RW":true,"Driver":"local"}]});
+    verify_data_mounts(&receipt, "web", &observed).unwrap();
+    for field in ["Name", "Source", "Destination", "Driver", "RW", "Type"] {
+        let mut wrong = observed.clone();
+        wrong["Mounts"][0][field] = json!("foreign");
+        assert!(verify_data_mounts(&receipt, "web", &wrong).is_err());
+    }
+    let mut extra = observed.clone();
+    extra["Mounts"]
+        .as_array_mut()
+        .unwrap()
+        .push(observed["Mounts"][0].clone());
+    assert!(verify_data_mounts(&receipt, "web", &extra).is_err());
+    for version in [2, 3, 5] {
+        let mut wrong = serde_json::to_value(&receipt).unwrap();
+        wrong["version"] = json!(version);
+        if let Ok(wrong) = serde_json::from_value::<Receipt>(wrong) {
+            assert!(wrong.validate(RUN, OWNER).is_err());
+        }
+    }
+    let mut omitted = receipt.clone();
+    omitted.data.clear();
+    assert!(omitted.validate(RUN, OWNER).is_err());
+    let encoded = serde_json::to_value(&receipt).unwrap();
+    let mut pending = encoded.clone();
+    pending["data"]["database"]["state"] = json!({"status":"reserved","intent":"8".repeat(32)});
+    let mut pending: Receipt = serde_json::from_value(pending).unwrap();
+    pending.resources.get_mut("container:web").unwrap().id = Some("6".repeat(64));
+    assert!(pending.validate(RUN, OWNER).is_err());
+    let mut independent = receipt.clone();
+    let run = "7".repeat(32);
+    independent.review = native_input::Review::new(
+        native_input::Scope {
+            namespace: receipt.review.scope().namespace,
+            run: &run,
+        },
+        receipt.review.compiler_identity().clone(),
+    )
+    .unwrap();
+    independent
+        .resources
+        .get_mut("network:default")
+        .unwrap()
+        .name = format!("hkn-{run}-network-0");
+    independent.resources.get_mut("container:web").unwrap().name = format!("hkn-{run}-container-0");
+    independent.validate(&run, OWNER).unwrap();
+    assert_eq!(independent.data, receipt.data);
+    assert!(independent.check_binding(&receipt).is_err());
+    assert!(verify_prior_data_retirement(&receipt, &independent.data).is_err());
+    receipt.phase = Phase::Removed;
+    verify_prior_data_retirement(&receipt, &independent.data).unwrap();
+    // Compute-only retirement cannot turn an uncertain original data create into
+    // authority for a second attempt, even if an enrolled pathname appeared late.
+    let mut reserved = encoded;
+    reserved["data"]["database"]["state"] = json!({"status":"reserved","intent":"8".repeat(32)});
+    let mut reserved: Receipt = serde_json::from_value(reserved).unwrap();
+    reserved.phase = Phase::Removed;
+    assert!(verify_prior_data_retirement(&reserved, &independent.data).is_err());
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn otherwise_valid_ready_graph4_refuses_dead_publication_recovery() {
+    let fixture = Fixture::new(basic());
+    let (_, session) = fixture.session(fixture.prepared(json!({"web":{}}), &BTreeMap::new()));
+    let mut receipt = session.receipt;
+    receipt.phase = Phase::ReadyObserved;
+    for resource in receipt.resources.values_mut() {
+        resource.id = Some(if resource.kind == Kind::Network {
+            "1".repeat(64)
+        } else {
+            "2".repeat(64)
+        });
+        resource.phase = if resource.kind == Kind::Network {
+            "created".into()
+        } else {
+            "started".into()
+        };
+    }
+    receipt.require_recovery_ready().unwrap();
+    receipt
+        .data
+        .insert("database".into(), persistent_reference(&receipt));
+    receipt.data_mounts.insert(
+        "web".into(),
+        vec![crate::project::native::StorageMount {
+            storage: "database".into(),
+            target: "/data".into(),
+            read_only: false,
+        }],
+    );
+    let mut persistent_wire = serde_json::to_value(&receipt).unwrap();
+    persistent_wire["version"] = json!(4);
+    receipt = serde_json::from_value(persistent_wire).unwrap();
+    receipt.validate(RUN, OWNER).unwrap();
+    assert!(receipt.require_recovery_ready().is_err());
+}
+
+#[test]
+fn ordinary_persistent_start_refuses_before_provider_or_any_owner_publication() {
+    let mut project = basic();
+    project["storage"] = json!({"database":{"kind":"persistent","scope":"worktree"}});
+    project["services"]["web"]["mounts"] =
+        json!([{"storage":"database","target":"/data","access":"read-write"}]);
+    let fixture = Fixture::new(project);
+    let prepared = fixture.prepared(json!({"web":{}}), &BTreeMap::new());
+    assert_eq!(
+        run_guarded(&fixture.candidate, prepared, None, None)
+            .unwrap_err()
+            .code,
+        "native_graph_storage_unqualified"
+    );
+    for path in ["run/smolvm", "run/native-graphs"] {
+        assert!(!fixture.candidate.state_root.join(path).exists());
+    }
+    assert!(!fixture.candidate.state_root.exists());
 }
 
 #[test]
@@ -188,10 +378,12 @@ struct FakeState {
     cancel_after_stop: Option<Rc<Cell<bool>>>,
     cancel_after_delete: Option<Rc<Cell<bool>>>,
     cancel_on_delete_inspection: Option<Rc<Cell<bool>>>,
+    replace_source_after_create: Option<PathBuf>,
 }
 struct Fake {
     root: PathBuf,
     run: String,
+    source: Option<source::Binding>,
     state: RefCell<FakeState>,
 }
 impl Fake {
@@ -200,6 +392,17 @@ impl Fake {
     }
 }
 impl Backend for Fake {
+    fn verify_source(&self, receipt: &Receipt, active: bool) -> Result<(), CandidateError> {
+        // This fake verifies the admitted binding and real host selection. The
+        // real backend separately checks the provider lease and virtiofs mapping.
+        if receipt.source != self.source {
+            return Err(refused());
+        }
+        if active && let Some(source) = &receipt.source {
+            source.verify_host()?;
+        }
+        Ok(())
+    }
     fn request(
         &self,
         method: Method,
@@ -307,8 +510,12 @@ impl Backend for Fake {
             assert_eq!(config["HostConfig"]["NetworkMode"], network.name);
             let aliases = &config["NetworkingConfig"]["EndpointsConfig"][&network.name]["Aliases"];
             assert_eq!(aliases, &json!([resource.key]));
-            let value = json!({"Id":id,"Name":format!("/{name}"),"Image":config["Image"],"Config":process,"HostConfig":config["HostConfig"],"NetworkSettings":{"Networks":{network.name.clone():{"NetworkID":"","Aliases":aliases}}},"State":{"Running":false,"Status":"created","Pid":0,"ExitCode":0,"OOMKilled":false,"Dead":false,"Paused":false,"Restarting":false}});
+            let value = json!({"Id":id,"Name":format!("/{name}"),"Image":config["Image"],"Config":process,"HostConfig":config["HostConfig"],"Mounts":[],"NetworkSettings":{"Networks":{network.name.clone():{"NetworkID":"","Aliases":aliases}}},"State":{"Running":false,"Status":"created","Pid":0,"ExitCode":0,"OOMKilled":false,"Dead":false,"Paused":false,"Restarting":false}});
             state.containers.insert(name.into(), value);
+            if let Some(path) = &state.replace_source_after_create {
+                fs::rename(path, path.with_extension("original")).unwrap();
+                fs::DirBuilder::new().mode(0o700).create(path).unwrap();
+            }
             return Ok(json!({"Id":id}));
         }
         if let Some(id) = path
@@ -328,6 +535,7 @@ impl Backend for Fake {
                 return Err(error("fake_start_uncertain", "once"));
             }
             let value = state.containers.get_mut(&resource.name).unwrap();
+            value["Mounts"] = json!(value["HostConfig"]["Mounts"].as_array().map(|mounts| mounts.iter().map(|mount| json!({"Type":mount["Type"],"Source":mount["Source"],"Destination":mount["Target"],"RW":!mount["ReadOnly"].as_bool().unwrap(),"Propagation":mount["BindOptions"]["Propagation"]})).collect::<Vec<_>>()).unwrap_or_default());
             value["State"] = if resource.key == "z.seed" {
                 json!({"Running":false,"Status":"exited","Pid":0,"ExitCode":0,"OOMKilled":false,"Dead":false,"Paused":false,"Restarting":false})
             } else {
@@ -424,6 +632,180 @@ impl Backend for Fake {
             canceled.set(true);
         }
         Ok(())
+    }
+}
+
+fn source_fixture() -> Fixture {
+    let mut project = basic();
+    project["services"]["web"]["mounts"] =
+        json!([{"source":"src","target":"/app","access":"read-only"}]);
+    let fixture = Fixture::new(project);
+    fs::write(fixture.project.join("package.json"), "{}").unwrap();
+    fs::DirBuilder::new()
+        .mode(0o700)
+        .create(fixture.project.join("src"))
+        .unwrap();
+    fs::write(fixture.project.join("src/main.js"), "initial live source").unwrap();
+    fixture
+}
+
+#[test]
+fn source_and_storage_receipt_wire_families_refuse_cross_fields() {
+    let fixture = source_fixture();
+    let (_, session) = fixture.session(fixture.prepared(json!({"web":{}}), &BTreeMap::new()));
+    let source = serde_json::to_value(&session.receipt).unwrap();
+    serde_json::from_value::<Receipt>(source.clone())
+        .unwrap()
+        .validate(RUN, OWNER)
+        .unwrap();
+    for fields in [
+        json!({"data":{}}),
+        json!({"data_mounts":{}}),
+        json!({"data_tool":null}),
+    ] {
+        let mut wire = source.clone();
+        wire.as_object_mut()
+            .unwrap()
+            .extend(fields.as_object().unwrap().clone());
+        assert!(serde_json::from_value::<Receipt>(wire).is_err());
+    }
+    for version in [2, 4, 5] {
+        let mut wire = source.clone();
+        wire["version"] = json!(version);
+        assert!(serde_json::from_value::<Receipt>(wire).is_err());
+    }
+    let mut wire = source;
+    wire["version"] = json!(4);
+    wire["data"] = json!({});
+    wire["data_mounts"] = json!({});
+    assert!(serde_json::from_value::<Receipt>(wire).is_err());
+}
+
+#[test]
+fn live_source_controller_preserves_edits_and_cleans_only_original_owned_resources_after_move() {
+    let fixture = source_fixture();
+    let (graph, mut session) =
+        fixture.session(fixture.prepared(json!({"web":{}}), &BTreeMap::new()));
+    execution::run(&graph, &mut session, Duration::from_secs(5)).unwrap();
+    assert_eq!(
+        serde_json::to_value(&session.receipt).unwrap()["version"],
+        3
+    );
+    fs::write(fixture.project.join("src/new"), "atomic edit").unwrap();
+    fs::rename(
+        fixture.project.join("src/new"),
+        fixture.project.join("src/main.js"),
+    )
+    .unwrap();
+    snapshot(&session.backend, session.receipt.clone()).unwrap();
+    let moved = fixture.project.join("moved");
+    fs::rename(fixture.project.join("src"), &moved).unwrap();
+    fs::write(
+        fixture.project.join("foreign-canary"),
+        "preserve foreign data",
+    )
+    .unwrap();
+    assert!(snapshot(&session.backend, session.receipt.clone()).is_err());
+    cleanup_using(&session.backend, &mut session.receipt, &session.root).unwrap();
+    assert_eq!(session.receipt.phase, Phase::Removed);
+    assert!(session.backend.state.borrow().containers.is_empty());
+    assert!(session.backend.state.borrow().networks.is_empty());
+    assert_eq!(
+        fs::read_to_string(moved.join("main.js")).unwrap(),
+        "atomic edit"
+    );
+    assert_eq!(
+        fs::read_to_string(fixture.project.join("foreign-canary")).unwrap(),
+        "preserve foreign data"
+    );
+    snapshot(&session.backend, session.receipt.clone()).unwrap();
+}
+
+#[test]
+fn selected_source_replacement_before_effect_or_after_create_refuses_without_start_or_adoption() {
+    for after_create in [false, true] {
+        let fixture = source_fixture();
+        let (graph, mut session) =
+            fixture.session(fixture.prepared(json!({"web":{}}), &BTreeMap::new()));
+        let path = fixture.project.join("src");
+        if after_create {
+            session
+                .backend
+                .state
+                .borrow_mut()
+                .replace_source_after_create = Some(path);
+        } else {
+            fs::rename(&path, fixture.project.join("original")).unwrap();
+            fs::DirBuilder::new().mode(0o700).create(&path).unwrap();
+        }
+        assert!(execution::run(&graph, &mut session, Duration::from_secs(5)).is_err());
+        assert!(
+            !session
+                .backend
+                .state
+                .borrow()
+                .effects
+                .iter()
+                .any(|effect| effect.starts_with("start:"))
+        );
+        if after_create {
+            assert_eq!(
+                session.backend.state.borrow().effects,
+                ["create:network", "create:web"]
+            );
+            cleanup_using(&session.backend, &mut session.receipt, &session.root).unwrap();
+            assert_eq!(session.receipt.phase, Phase::Removed);
+        } else {
+            assert!(session.backend.state.borrow().effects.is_empty());
+        }
+        assert!(execution::run(&graph, &mut session, Duration::from_secs(5)).is_err());
+    }
+}
+
+#[test]
+fn retained_source_bind_or_approved_share_drift_refuses_cleanup_before_mutation() {
+    for changed_share in [false, true] {
+        let fixture = source_fixture();
+        let (graph, mut session) =
+            fixture.session(fixture.prepared(json!({"web":{}}), &BTreeMap::new()));
+        execution::run(&graph, &mut session, Duration::from_secs(5)).unwrap();
+        if changed_share {
+            session.backend.source.as_mut().unwrap().share.inode += 1;
+        } else {
+            let mut state = session.backend.state.borrow_mut();
+            state.containers.values_mut().next().unwrap()["Mounts"][0]["RW"] = json!(true);
+        }
+        let effects = session.backend.state.borrow().effects.clone();
+        assert!(cleanup_using(&session.backend, &mut session.receipt, &session.root).is_err());
+        assert_eq!(session.backend.state.borrow().effects, effects);
+    }
+}
+
+#[test]
+fn source_cleanup_does_not_recapture_a_moved_or_deleted_host_project() {
+    for deleted in [false, true] {
+        let fixture = source_fixture();
+        let (graph, mut session) =
+            fixture.session(fixture.prepared(json!({"web":{}}), &BTreeMap::new()));
+        execution::run(&graph, &mut session, Duration::from_secs(5)).unwrap();
+        let moved = fixture.root.join("moved-project");
+        if deleted {
+            fs::remove_dir_all(&fixture.project).unwrap();
+        } else {
+            fs::rename(&fixture.project, &moved).unwrap();
+        }
+        assert!(snapshot(&session.backend, session.receipt.clone()).is_err());
+        cleanup_using(&session.backend, &mut session.receipt, &session.root).unwrap();
+        assert_eq!(session.receipt.phase, Phase::Removed);
+        assert!(session.backend.state.borrow().containers.is_empty());
+        assert!(session.backend.state.borrow().networks.is_empty());
+        assert!(!fixture.project.exists());
+        if !deleted {
+            assert_eq!(
+                fs::read_to_string(moved.join("src/main.js")).unwrap(),
+                "initial live source"
+            );
+        }
     }
 }
 
@@ -1258,4 +1640,805 @@ fn old_boot_removed_history_releases_capacity_only_after_strict_owner_and_remova
     journal::save(&session.root, &session.receipt).unwrap();
     state::write(&session.root.join("state.pending"), &valid).unwrap();
     assert!(check().is_err());
+}
+
+// This owned synthetic fixture never approves a share or initializes a provider
+// pool. The caller must use the explicit development project-share setup first.
+#[cfg(target_os = "macos")]
+mod live_source {
+    use super::*;
+
+    use std::{
+        fs::{File, OpenOptions},
+        io::{Read, Write},
+        os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
+    };
+
+    fn identity(metadata: &fs::Metadata) -> Value {
+        // SAFETY: geteuid has no caller preconditions.
+        assert_eq!(
+            metadata.uid(),
+            unsafe { libc::geteuid() },
+            "synthetic fixture owner differs"
+        );
+        json!({"device":metadata.dev(),"inode":metadata.ino(),"mode":metadata.mode(),
+            "uid":metadata.uid(),"gid":metadata.gid(),
+            "kind":if metadata.is_dir(){"directory"}else{"file"}})
+    }
+    fn directory(path: &Path, mode: u32) -> Value {
+        crate::reject_aliased_state(path).unwrap();
+        let metadata = path.symlink_metadata().unwrap();
+        assert!(metadata.is_dir(), "synthetic fixture directory differs");
+        assert_eq!(
+            metadata.mode() & 0o7777,
+            mode,
+            "synthetic fixture directory mode differs"
+        );
+        identity(&metadata)
+    }
+    fn file(path: &Path, mode: u32, write: bool) -> (File, Value) {
+        crate::reject_aliased_state(path.parent().unwrap()).unwrap();
+        let opened = OpenOptions::new()
+            .read(true)
+            .write(write)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
+            .open(path)
+            .unwrap();
+        let metadata = opened.metadata().unwrap();
+        assert!(
+            metadata.is_file() && metadata.nlink() == 1 && metadata.len() <= 128 * 1024,
+            "synthetic fixture file differs"
+        );
+        assert_eq!(
+            metadata.mode() & 0o7777,
+            mode,
+            "synthetic fixture file mode differs"
+        );
+        let anchor = identity(&metadata);
+        assert_eq!(
+            identity(&path.symlink_metadata().unwrap()),
+            anchor,
+            "synthetic fixture file incarnation differs"
+        );
+        (opened, anchor)
+    }
+    fn bytes(path: &Path, mode: u32, anchor: &Value) -> Vec<u8> {
+        let (opened, observed) = file(path, mode, false);
+        assert_eq!(&observed, anchor, "synthetic fixture file changed");
+        let mut bytes = Vec::new();
+        opened.take(128 * 1024 + 1).read_to_end(&mut bytes).unwrap();
+        assert!(bytes.len() <= 128 * 1024, "synthetic fixture input grew");
+        assert_eq!(
+            file(path, mode, false).1,
+            observed,
+            "synthetic fixture input replaced"
+        );
+        bytes
+    }
+    fn entries(path: &Path, expected: &[&str]) {
+        let mut found: Vec<_> = fs::read_dir(path)
+            .unwrap()
+            .map(|entry| {
+                entry
+                    .unwrap()
+                    .file_name()
+                    .into_string()
+                    .expect("synthetic fixture name differs")
+            })
+            .collect();
+        found.sort();
+        let mut expected: Vec<_> = expected.iter().map(|name| (*name).to_string()).collect();
+        expected.sort();
+        assert!(
+            found == expected,
+            "synthetic fixture contains unexpected entries"
+        );
+    }
+    struct Scope {
+        root: PathBuf,
+        project: PathBuf,
+        roots: BTreeMap<PathBuf, Value>,
+        src: Value,
+        files: BTreeMap<String, Value>,
+        marker: Value,
+        manifest: Value,
+        started: Option<Value>,
+    }
+    impl Scope {
+        fn admit(
+            root: &Path,
+            candidate: &Candidate,
+            project: &Path,
+            image: &str,
+            run: &str,
+        ) -> Self {
+            let root = root.to_path_buf();
+            assert_eq!(root.file_name().unwrap(), "live-fixture");
+            assert_eq!(root.canonicalize().unwrap(), root);
+            assert_eq!(project, root.join("project"));
+            assert_eq!(candidate.checkout, root.join("native-home"));
+            let roots = [&root, project, &project.join(".hack"), &candidate.checkout]
+                .into_iter()
+                .map(|path| (path.to_owned(), directory(path, 0o700)))
+                .collect::<BTreeMap<_, _>>();
+            let src = directory(&project.join("src"), 0o755);
+            entries(&root, &["fixture.json", "native-home", "project"]);
+            entries(project, &[".hack", "package.json", "src"]);
+            entries(&project.join(".hack"), &["hack.project.json"]);
+            entries(
+                &project.join("src"),
+                &["health.txt", "message.txt", "server.js"],
+            );
+
+            let files = [
+                "package.json",
+                ".hack/hack.project.json",
+                "src/server.js",
+                "src/health.txt",
+                "src/message.txt",
+            ]
+            .into_iter()
+            .map(|name| {
+                let mode = if name.starts_with("src/") {
+                    0o644
+                } else {
+                    0o600
+                };
+                (name.to_owned(), file(&project.join(name), mode, false).1)
+            })
+            .collect();
+            let marker_path = root.join("fixture.json");
+            let marker = file(&marker_path, 0o600, false).1;
+            let manifest = json!({"version":1,"run":run,"image":image,
+                "fixture":roots[&root],"project":roots[project],"home":roots[&candidate.checkout],
+                "hack":roots[&project.join(".hack")],"src":src,"files":files});
+            let stored: Value =
+                serde_json::from_slice(&bytes(&marker_path, 0o600, &marker)).unwrap();
+            assert!(stored == manifest, "synthetic fixture manifest differs");
+            let mut scope = Self {
+                root,
+                project: project.into(),
+                roots,
+                src,
+                files,
+                marker,
+                manifest,
+                started: None,
+            };
+            scope.verify();
+            // Exclusive, nonrenewable invocation marker before native graph effects.
+            let claimed = scope.root.join("started.json");
+            let mut opened = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+                .open(&claimed)
+                .unwrap();
+            assert!(
+                opened.metadata().unwrap().is_file() && opened.metadata().unwrap().nlink() == 1
+            );
+            assert_eq!(opened.metadata().unwrap().mode() & 0o7777, 0o600);
+            opened
+                .write_all(
+                    serde_json::to_string(&json!({"version":1,"run":run}))
+                        .unwrap()
+                        .as_bytes(),
+                )
+                .unwrap();
+            opened.sync_all().unwrap();
+            let started = identity(&opened.metadata().unwrap());
+            assert_eq!(started, identity(&claimed.symlink_metadata().unwrap()));
+            scope.started = Some(started);
+            let root_fd = OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+                .open(&scope.root)
+                .unwrap();
+            assert_eq!(
+                identity(&root_fd.metadata().unwrap()),
+                scope.roots[&scope.root]
+            );
+            root_fd.sync_all().unwrap();
+            scope.verify();
+            scope
+        }
+        fn verify_roots(&self) {
+            for (path, anchor) in &self.roots {
+                assert_eq!(
+                    &directory(path, 0o700),
+                    anchor,
+                    "synthetic fixture directory replaced"
+                );
+            }
+            let current: Value = serde_json::from_slice(&bytes(
+                &self.root.join("fixture.json"),
+                0o600,
+                &self.marker,
+            ))
+            .unwrap();
+            assert!(
+                current == self.manifest,
+                "synthetic fixture manifest changed"
+            );
+            if let Some(anchor) = &self.started {
+                let current: Value =
+                    serde_json::from_slice(&bytes(&self.root.join("started.json"), 0o600, anchor))
+                        .unwrap();
+                assert!(
+                    current == json!({"version":1,"run":self.manifest["run"]}),
+                    "synthetic invocation marker changed"
+                );
+            }
+        }
+        fn verify(&self) {
+            self.verify_roots();
+            assert_eq!(
+                directory(&self.project.join("src"), 0o755),
+                self.src,
+                "synthetic source directory replaced"
+            );
+            for (name, anchor) in &self.files {
+                let mode = if name.starts_with("src/") {
+                    0o644
+                } else {
+                    0o600
+                };
+                assert_eq!(
+                    &file(&self.project.join(name), mode, false).1,
+                    anchor,
+                    "synthetic fixture file replaced"
+                );
+            }
+            self.expect("package.json", b"{}\n");
+            self.expect("src/server.js", APP.as_bytes());
+            self.expect("src/health.txt", b"live-source-ready\n");
+            let authored: Value = serde_json::from_slice(&bytes(
+                &self.project.join(".hack/hack.project.json"),
+                0o600,
+                &self.files[".hack/hack.project.json"],
+            ))
+            .unwrap();
+            assert!(
+                authored == document(self.manifest["image"].as_str().unwrap()),
+                "synthetic authored document changed"
+            );
+        }
+        fn expect(&self, name: &str, expected: &[u8]) {
+            let mode = if name.starts_with("src/") {
+                0o644
+            } else {
+                0o600
+            };
+            assert!(
+                bytes(&self.project.join(name), mode, &self.files[name]) == expected,
+                "synthetic fixture input differs"
+            );
+        }
+        fn edit(&self, expected: &[u8]) {
+            self.verify();
+            let path = self.project.join("src/message.txt");
+            let (mut opened, anchor) = file(&path, 0o644, true);
+            assert_eq!(anchor, self.files["src/message.txt"]);
+            opened.set_len(0).unwrap();
+            opened.write_all(expected).unwrap();
+            opened.sync_all().unwrap();
+            self.verify();
+            self.expect("src/message.txt", expected);
+        }
+        fn replace(&mut self, expected: &[u8]) {
+            self.verify();
+            let source = self.project.join("src/message-next.txt");
+            let target = self.project.join("src/message.txt");
+            let mut opened = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o644)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+                .open(&source)
+                .unwrap();
+            assert!(
+                opened.metadata().unwrap().is_file() && opened.metadata().unwrap().nlink() == 1
+            );
+            // Exact new owned descriptor only; do not path-chmod an existing input.
+            opened
+                .set_permissions(fs::Permissions::from_mode(0o644))
+                .unwrap();
+            opened.write_all(expected).unwrap();
+            opened.sync_all().unwrap();
+            let anchor = identity(&opened.metadata().unwrap());
+            assert_eq!(file(&source, 0o644, false).1, anchor);
+            self.verify();
+            fs::rename(&source, &target).unwrap();
+            self.files.insert("src/message.txt".into(), anchor);
+            self.verify();
+            self.expect("src/message.txt", expected);
+        }
+        fn withdraw(&self) {
+            self.verify();
+            entries(
+                &self.project.join("src"),
+                &["health.txt", "message.txt", "server.js"],
+            );
+            assert!(!self.project.join("src-withdrawn").try_exists().unwrap());
+            fs::rename(self.project.join("src"), self.project.join("src-withdrawn")).unwrap();
+            self.verify_roots();
+            assert_eq!(
+                directory(&self.project.join("src-withdrawn"), 0o755),
+                self.src
+            );
+            entries(
+                &self.project.join("src-withdrawn"),
+                &["health.txt", "message.txt", "server.js"],
+            );
+        }
+        fn verify_withdrawn(&self, expected: &[u8]) {
+            self.verify_roots();
+            assert_eq!(
+                directory(&self.project.join("src-withdrawn"), 0o755),
+                self.src
+            );
+            assert!(!self.project.join("src").try_exists().unwrap());
+            entries(
+                &self.project.join("src-withdrawn"),
+                &["health.txt", "message.txt", "server.js"],
+            );
+            assert!(
+                bytes(
+                    &self.project.join("src-withdrawn/message.txt"),
+                    0o644,
+                    &self.files["src/message.txt"]
+                ) == expected,
+                "withdrawn synthetic source differs"
+            );
+        }
+    }
+
+    const INITIAL: &[u8] = b"source-initial\n";
+    const EDITED: &[u8] = b"source-edited\n";
+    const REPLACED: &[u8] = b"source-atomic-replacement\n";
+    const APP: &str = "const routes = new Map([[\"/health.txt\", \"/app/health.txt\"], [\"/message.txt\", \"/app/message.txt\"]]);\nBun.serve({hostname: \"0.0.0.0\", port: 8080, fetch(request) { const file = routes.get(new URL(request.url).pathname); return file ? new Response(Bun.file(file), {headers: {\"cache-control\": \"no-store\"}}) : new Response(\"missing\", {status: 404}); }});\n";
+
+    fn document(image: &str) -> Value {
+        json!({"schema_version":1,"name":"native-source-fixture",
+            "source":{"mode":"host-mounted","root":"."},
+            "services":{"web":{"image":image,"entrypoint":{"exec":[]},
+                "command":{"exec":["/usr/local/bin/bun","/app/server.js"]},"init":true,
+                "restart":{"kind":"no"},"shutdown":{"signal":"SIGTERM","grace":"5s"},
+                "mounts":[{"source":"src","target":"/app","access":"read-only"}],
+                "readiness":{"kind":"exec","command":{"exec":["/usr/local/bin/bun","-e",
+                    "if (await (await fetch(\"http://127.0.0.1:8080/health.txt\", {signal: AbortSignal.timeout(1000)})).text() !== \"live-source-ready\\n\") process.exit(1)"]},
+                    "interval":"200ms","timeout":"2s","retries":20}}}})
+    }
+
+    fn remaining(deadline: Instant) -> Duration {
+        deadline
+            .checked_duration_since(Instant::now())
+            .filter(|remaining| !remaining.is_zero())
+            .expect("owned live-source fixture deadline expired")
+    }
+
+    // Use the existing engine and source owners under the same mutation lease.
+    // This is a native backend proof, not a new native frontend exec capability.
+    fn exec(
+        candidate: &Candidate,
+        ready: &Receipt,
+        argv: &[&str],
+        deadline: Instant,
+    ) -> (i32, Vec<u8>, Vec<u8>) {
+        remaining(deadline);
+        let engine = Engine::connect(candidate).unwrap();
+        let (receipt, _) = journal::load(
+            candidate,
+            ready.review.scope().run,
+            engine.guest().incarnation(),
+            engine.guest().boot_id(),
+        )
+        .unwrap();
+        receipt.check_binding(ready).unwrap();
+        let backend = OwnedBackend {
+            engine,
+            launcher: None,
+            leases: BTreeMap::new(),
+        };
+        let before = snapshot(&backend, receipt.clone()).unwrap();
+        assert_eq!(before.receipt.phase, Phase::ReadyObserved);
+        assert_eq!(
+            before.observations["web"],
+            Some(Observation::Running {
+                health: execution::Health::Healthy,
+            })
+        );
+        let workload = &receipt.resources["container:web"];
+        let observed = inspected(&backend, &receipt, workload).unwrap().unwrap();
+        assert_eq!(observed["HostConfig"]["PublishAllPorts"], false);
+        let bindings = &observed["HostConfig"]["PortBindings"];
+        assert!(
+            bindings.is_null()
+                || bindings
+                    .as_object()
+                    .is_some_and(|bindings| bindings.is_empty()),
+            "fixture publishes host ports"
+        );
+        let ports = &observed["NetworkSettings"]["Ports"];
+        assert!(
+            ports.is_null()
+                || ports
+                    .as_object()
+                    .is_some_and(|ports| ports.values().all(|bindings| bindings.is_null()
+                        || bindings
+                            .as_array()
+                            .is_some_and(|bindings| bindings.is_empty()))),
+            "fixture has dynamic host ports"
+        );
+        let id = workload.id.as_deref().unwrap();
+        let result = backend
+            .engine
+            .service_exec(
+                id,
+                &argv.iter().map(|arg| (*arg).into()).collect::<Vec<_>>(),
+                None,
+                remaining(deadline).min(Duration::from_secs(12)),
+            )
+            .unwrap();
+        let after = snapshot(&backend, receipt).unwrap();
+        after.receipt.check_binding(ready).unwrap();
+        assert_eq!(before.observations, after.observations);
+        assert!(!result.truncated);
+        remaining(deadline);
+        (result.exit_code, result.stdout, result.stderr)
+    }
+
+    fn http(candidate: &Candidate, ready: &Receipt, expected: &[u8], deadline: Instant) {
+        let result = exec(
+            candidate,
+            ready,
+            &[
+                "/usr/local/bin/bun",
+                "-e",
+                "process.stdout.write(await (await fetch(\"http://127.0.0.1:8080/message.txt\", {signal: AbortSignal.timeout(2000)})).text())",
+            ],
+            deadline,
+        );
+        assert_eq!(result.0, 0);
+        assert!(result.2.is_empty());
+        assert!(result.1 == expected, "synthetic HTTP data differs");
+    }
+
+    fn fixture() -> (
+        crate::provider::graph::tests::Fixture,
+        PathBuf,
+        Candidate,
+        String,
+    ) {
+        let owner = crate::provider::graph::tests::Fixture::new();
+        let root = owner.0.join("live-fixture");
+        let project = root.join("project");
+        let home = root.join("native-home");
+        for path in [
+            &root,
+            &project,
+            &project.join(".hack"),
+            &home,
+            &project.join("src"),
+        ] {
+            fs::DirBuilder::new().mode(0o700).create(path).unwrap();
+        }
+        let src = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(project.join("src"))
+            .unwrap();
+        src.set_permissions(fs::Permissions::from_mode(0o755))
+            .unwrap();
+        let image = image();
+        for (name, data, mode) in [
+            ("package.json", b"{}\n".to_vec(), 0o600),
+            (
+                ".hack/hack.project.json",
+                serde_json::to_vec(&document(&image)).unwrap(),
+                0o600,
+            ),
+            ("src/server.js", APP.as_bytes().to_vec(), 0o644),
+            ("src/health.txt", b"live-source-ready\n".to_vec(), 0o644),
+            ("src/message.txt", INITIAL.to_vec(), 0o644),
+        ] {
+            let mut opened = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(mode)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+                .open(project.join(name))
+                .unwrap();
+            opened
+                .set_permissions(fs::Permissions::from_mode(mode))
+                .unwrap();
+            opened.write_all(&data).unwrap();
+        }
+        let files = [
+            "package.json",
+            ".hack/hack.project.json",
+            "src/server.js",
+            "src/health.txt",
+            "src/message.txt",
+        ]
+        .into_iter()
+        .map(|name| {
+            let mode = if name.starts_with("src/") {
+                0o644
+            } else {
+                0o600
+            };
+            (name.to_owned(), file(&project.join(name), mode, false).1)
+        })
+        .collect::<BTreeMap<_, _>>();
+        let manifest = json!({"version":1,"run":RUN,"image":image,
+            "fixture":directory(&root,0o700),"project":directory(&project,0o700),
+            "home":directory(&home,0o700),"hack":directory(&project.join(".hack"),0o700),
+            "src":directory(&project.join("src"),0o755),"files":files});
+        let mut marker = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(root.join("fixture.json"))
+            .unwrap();
+        marker
+            .write_all(&serde_json::to_vec(&manifest).unwrap())
+            .unwrap();
+        (
+            owner,
+            root,
+            Candidate::discover_installed(&home).unwrap(),
+            image,
+        )
+    }
+
+    #[test]
+    fn fixture_edits_preserve_descriptor_ownership_and_original_source_directory() {
+        let (_owner, root, candidate, image) = fixture();
+        let mut scope = Scope::admit(&root, &candidate, &root.join("project"), &image, RUN);
+        scope.expect("src/message.txt", INITIAL);
+        scope.edit(EDITED);
+        scope.replace(REPLACED);
+        scope.withdraw();
+        scope.verify_withdrawn(REPLACED);
+        assert!(root.join("started.json").is_file());
+    }
+    #[test]
+    fn fixture_scope_refuses_source_aliases_without_changing_foreign_data() {
+        for hardlink in [false, true] {
+            let (_owner, root, candidate, image) = fixture();
+            let foreign = root.parent().unwrap().join("foreign-message");
+            let mut opened = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o644)
+                .custom_flags(libc::O_NOFOLLOW)
+                .open(&foreign)
+                .unwrap();
+            opened
+                .set_permissions(fs::Permissions::from_mode(0o644))
+                .unwrap();
+            opened.write_all(INITIAL).unwrap();
+            let original = identity(&opened.metadata().unwrap());
+            let message = root.join("project/src/message.txt");
+            fs::remove_file(&message).unwrap();
+            if hardlink {
+                fs::hard_link(&foreign, &message).unwrap();
+            } else {
+                symlink(&foreign, &message).unwrap();
+            }
+            assert!(
+                std::panic::catch_unwind(|| Scope::admit(
+                    &root,
+                    &candidate,
+                    &root.join("project"),
+                    &image,
+                    RUN
+                ))
+                .is_err()
+            );
+            assert!(!root.join("started.json").exists());
+            assert!(fs::read(&foreign).unwrap() == INITIAL);
+            assert_eq!(identity(&foreign.symlink_metadata().unwrap()), original);
+        }
+    }
+    #[test]
+    fn fixture_scope_refuses_rebound_project_and_existing_invocation_before_edit() {
+        let (_owner, root, candidate, image) = fixture();
+        let scope = Scope::admit(&root, &candidate, &root.join("project"), &image, RUN);
+        assert!(
+            std::panic::catch_unwind(|| Scope::admit(
+                &root,
+                &candidate,
+                &root.join("project"),
+                &image,
+                RUN
+            ))
+            .is_err()
+        );
+        let old = root.join("project-original");
+        fs::rename(root.join("project"), &old).unwrap();
+        fs::DirBuilder::new()
+            .mode(0o700)
+            .create(root.join("project"))
+            .unwrap();
+        fs::DirBuilder::new()
+            .mode(0o700)
+            .create(root.join("project/src"))
+            .unwrap();
+        let replacement = root.join("project/src/message.txt");
+        fs::write(&replacement, b"unrelated replacement").unwrap();
+        assert!(std::panic::catch_unwind(|| scope.edit(EDITED)).is_err());
+        assert!(fs::read(&replacement).unwrap() == b"unrelated replacement");
+        assert!(fs::read(old.join("src/message.txt")).unwrap() == INITIAL);
+    }
+    #[test]
+    fn fixture_edits_refuse_replaced_inode_and_preexisting_atomic_target() {
+        for atomic in [false, true] {
+            let (_owner, root, candidate, image) = fixture();
+            let mut scope = Scope::admit(&root, &candidate, &root.join("project"), &image, RUN);
+            let message = root.join("project/src/message.txt");
+            let target = if atomic {
+                root.join("project/src/message-next.txt")
+            } else {
+                fs::rename(&message, root.join("project/src/message-original.txt")).unwrap();
+                message.clone()
+            };
+            let mut opened = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o644)
+                .custom_flags(libc::O_NOFOLLOW)
+                .open(&target)
+                .unwrap();
+            opened
+                .set_permissions(fs::Permissions::from_mode(0o644))
+                .unwrap();
+            opened.write_all(b"unrelated replacement").unwrap();
+            assert!(
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    if atomic {
+                        scope.replace(REPLACED);
+                    } else {
+                        scope.edit(EDITED);
+                    }
+                }))
+                .is_err()
+            );
+            assert!(fs::read(&target).unwrap() == b"unrelated replacement");
+            assert!(
+                fs::read(if atomic {
+                    message
+                } else {
+                    root.join("project/src/message-original.txt")
+                })
+                .unwrap()
+                    == INITIAL
+            );
+        }
+    }
+
+    #[test]
+    fn fixture_withdrawal_refuses_an_added_descendant_before_renaming_source() {
+        let (_owner, root, candidate, image) = fixture();
+        let scope = Scope::admit(&root, &candidate, &root.join("project"), &image, RUN);
+        let added = root.join("project/src/foreign-descendant");
+        fs::write(&added, b"foreign retained").unwrap();
+        assert!(std::panic::catch_unwind(|| scope.withdraw()).is_err());
+        assert!(root.join("project/src").is_dir());
+        assert!(!root.join("project/src-withdrawn").exists());
+        assert!(fs::read(&added).unwrap() == b"foreign retained");
+        assert!(fs::read(root.join("project/src/message.txt")).unwrap() == INITIAL);
+    }
+
+    #[test]
+    #[ignore = "Caller-prepared exact synthetic project share, isolated development pool, pinned Linux ARM64 Bun image and 300s external watchdog required"]
+    fn approved_live_source_preserves_host_edits_and_cleanup_after_selected_source_moves() {
+        let deadline = Instant::now() + Duration::from_secs(180);
+        let candidate = Candidate::discover_installed(Path::new(
+            &std::env::var("HACK_LOCAL_TEST_ROOT").unwrap(),
+        ))
+        .unwrap();
+        let project = PathBuf::from(std::env::var("HACK_NATIVE_SOURCE_TEST_PROJECT").unwrap());
+        let image = std::env::var("HACK_LOCAL_TEST_IMAGE").unwrap();
+        let run_id = std::env::var("HACK_NATIVE_SOURCE_TEST_RUN").unwrap();
+        assert!(image_id(&image));
+        assert!(super::super::super::hex(&run_id, 32));
+        let fixture = PathBuf::from(std::env::var("HACK_NATIVE_SOURCE_TEST_FIXTURE").unwrap());
+        let mut scope = Scope::admit(&fixture, &candidate, &project, &image, &run_id);
+        assert!(
+            !candidate
+                .state_root
+                .join("run/native-graphs")
+                .join(&run_id)
+                .exists()
+        );
+        scope.expect("package.json", b"{}\n");
+        scope.expect("src/server.js", APP.as_bytes());
+        scope.expect("src/health.txt", b"live-source-ready\n");
+        scope.expect("src/message.txt", INITIAL);
+        assert!(!project.join("src-withdrawn").exists());
+        assert!(!project.join("src/guest-write").exists());
+        let authored: Value = serde_json::from_slice(&bytes(
+            &project.join(".hack/hack.project.json"),
+            0o600,
+            &scope.files[".hack/hack.project.json"],
+        ))
+        .unwrap();
+        assert!(
+            authored == document(&image),
+            "synthetic authored document differs"
+        );
+        {
+            let engine = Engine::connect(&candidate).unwrap();
+            assert_eq!(
+                engine.guest().profile(),
+                crate::provider::Profile::Development
+            );
+            let share = engine.guest().project_share().unwrap();
+            assert_eq!(share.project, project);
+            assert!(share.unfiltered_source);
+            share.validate().unwrap();
+        }
+        let metadata: EnvMetadata = serde_json::from_value(json!({"metadata_version":1,
+            "overlay":null,"overlay_exists":false,"workloads":{"web":{}},"inactive_scopes":[]}))
+        .unwrap();
+        scope.verify();
+        let prepared = selection::select(
+            &candidate,
+            selection::Options {
+                project: &project,
+                branch: Some("live-source-fixture"),
+                run: &run_id,
+                profiles: &[],
+                explicit_overlay: None,
+                metadata,
+                deadline,
+            },
+        )
+        .unwrap()
+        .prepare(&candidate, &BTreeMap::new())
+        .unwrap();
+        scope.verify();
+        let ready = run(&candidate, prepared).unwrap();
+        assert_eq!(serde_json::to_value(&ready).unwrap()["version"], 3);
+        assert_eq!(ready.phase, Phase::ReadyObserved);
+        assert_eq!(ready.source.as_ref().unwrap().share.project, project);
+        http(&candidate, &ready, INITIAL, deadline);
+        scope.edit(EDITED);
+        http(&candidate, &ready, EDITED, deadline);
+        scope.replace(REPLACED);
+        http(&candidate, &ready, REPLACED, deadline);
+        let denied = exec(
+            &candidate,
+            &ready,
+            &[
+                "/usr/local/bin/bun",
+                "-e",
+                "try { await Bun.write(\"/app/guest-write\", \"synthetic-denied\"); process.exit(71); } catch (error) { if (!error || error.code !== \"EROFS\") process.exit(72); } if (await Bun.file(\"/app/guest-write\").exists()) process.exit(73); process.stdout.write(\"read-only\")",
+            ],
+            deadline,
+        );
+        assert_eq!(denied.0, 0);
+        assert_eq!(denied.1, b"read-only");
+        assert!(!project.join("src/guest-write").exists());
+        remaining(deadline);
+        scope.withdraw();
+        assert_eq!(
+            inspect(&candidate, &run_id).unwrap_err().code,
+            "native_graph_source"
+        );
+        let removed = cleanup(&candidate, &run_id).unwrap();
+        assert_eq!(removed.phase, Phase::Removed);
+        removed.check_binding(&ready).unwrap();
+        let final_state = inspect(&candidate, &run_id).unwrap();
+        assert_eq!(final_state.receipt.phase, Phase::Removed);
+        assert!(final_state.observations.values().all(Option::is_none));
+        scope.verify_withdrawn(REPLACED);
+        scope.expect("package.json", b"{}\n");
+        assert!(!project.join("src").exists());
+        remaining(deadline);
+    }
 }

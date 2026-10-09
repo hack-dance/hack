@@ -1,5 +1,6 @@
 //! MacOS wildcard and loopback claims held across HTTPS recovery effects.
 use super::{CandidateError, refused};
+
 pub(in crate::provider) fn port_absent(
     port: u16,
 ) -> Result<Vec<std::os::fd::OwnedFd>, CandidateError> {
@@ -11,16 +12,28 @@ pub(in crate::provider) fn port_absent(
 }
 fn bind_pair(port: u16, wildcard: bool) -> Result<[std::os::fd::OwnedFd; 2], CandidateError> {
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    macro_rules! failure {
+        ($stage:ident, $family:expr) => {{
+            #[cfg(all(test, target_os = "macos"))]
+            observation_diagnostic::record(
+                observation_diagnostic::Stage::$stage,
+                wildcard,
+                $family,
+                std::io::Error::last_os_error().raw_os_error(),
+            );
+            refused()
+        }};
+    }
     let make = |family| {
         // SAFETY: socket takes scalar constants; a successful new descriptor is uniquely owned below.
         let fd = unsafe { libc::socket(family, libc::SOCK_STREAM, 0) };
         if fd < 0 {
-            return Err(refused());
+            return Err(failure!(Socket, family));
         }
         let fd = unsafe { OwnedFd::from_raw_fd(fd) };
         // SAFETY: fd is owned; fcntl uses only scalar arguments and does not retain pointers.
         if unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) } < 0 {
-            return Err(refused());
+            return Err(failure!(Cloexec, family));
         }
         Ok(fd)
     };
@@ -38,10 +51,10 @@ fn bind_pair(port: u16, wildcard: bool) -> Result<[std::os::fd::OwnedFd; 2], Can
         )
     } != 0
     {
-        return Err(refused());
+        return Err(failure!(Ipv6Only, libc::AF_INET6));
     }
     if !wildcard {
-        for fd in [&v4, &v6] {
+        for (fd, _family) in [(&v4, libc::AF_INET), (&v6, libc::AF_INET6)] {
             // SAFETY: only is a live integer; this permits our specific loopback guard beside the wildcard guard.
             // SO_REUSEPORT is never enabled, so another listener cannot share this exact address.
             if unsafe {
@@ -54,7 +67,7 @@ fn bind_pair(port: u16, wildcard: bool) -> Result<[std::os::fd::OwnedFd; 2], Can
                 )
             } != 0
             {
-                return Err(refused());
+                return Err(failure!(ReuseAddress, _family));
             }
         }
     }
@@ -81,22 +94,76 @@ fn bind_pair(port: u16, wildcard: bool) -> Result<[std::os::fd::OwnedFd; 2], Can
             std::mem::size_of_val(&address4) as libc::socklen_t,
         )
     } != 0
-        || unsafe {
-            libc::bind(
-                v6.as_raw_fd(),
-                (&address6 as *const libc::sockaddr_in6).cast(),
-                std::mem::size_of_val(&address6) as libc::socklen_t,
-            )
-        } != 0
     {
-        return Err(refused());
+        return Err(failure!(Bind, libc::AF_INET));
+    }
+    if unsafe {
+        libc::bind(
+            v6.as_raw_fd(),
+            (&address6 as *const libc::sockaddr_in6).cast(),
+            std::mem::size_of_val(&address6) as libc::socklen_t,
+        )
+    } != 0
+    {
+        return Err(failure!(Bind, libc::AF_INET6));
     }
     // SAFETY: both descriptors are owned bound TCP sockets; listen retains the exact address claim.
-    for fd in [&v4, &v6] {
+    for (fd, _family) in [(&v4, libc::AF_INET), (&v6, libc::AF_INET6)] {
         if unsafe { libc::listen(fd.as_raw_fd(), 1) } != 0 {
-            return Err(refused());
+            return Err(failure!(Listen, _family));
         }
     }
     // Retain these listeners across archival; never accept a connection.
     Ok([v4, v6])
+}
+
+// Test-only first-refusal facts distinguish bind contention from a failed socket
+// prerequisite. No port, address, descriptor or production diagnostic is exposed.
+#[cfg(all(test, target_os = "macos"))]
+pub(super) mod observation_diagnostic {
+    use std::cell::RefCell;
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(in crate::provider::https_recovery) enum Stage {
+        Socket,
+        Cloexec,
+        Ipv6Only,
+        ReuseAddress,
+        Bind,
+        Listen,
+    }
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(in crate::provider::https_recovery) struct Facts {
+        pub stage: Stage,
+        pub wildcard: bool,
+        pub family: i32,
+        pub errno: Option<i32>,
+    }
+    thread_local! {
+        static FIRST: RefCell<Option<Facts>> = const { RefCell::new(None) };
+    }
+    pub(in crate::provider::https_recovery) fn clear() {
+        FIRST.with(|first| *first.borrow_mut() = None);
+    }
+    pub(in crate::provider::https_recovery) fn take() -> Option<Facts> {
+        FIRST.with(|first| first.borrow_mut().take())
+    }
+    pub(in crate::provider::https_recovery) fn record(
+        stage: Stage,
+        wildcard: bool,
+        family: i32,
+        errno: Option<i32>,
+    ) {
+        FIRST.with(|first| {
+            let mut first = first.borrow_mut();
+            if first.is_none() {
+                *first = Some(Facts {
+                    stage,
+                    wildcard,
+                    family,
+                    errno,
+                });
+            }
+        });
+    }
 }

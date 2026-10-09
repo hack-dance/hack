@@ -360,6 +360,30 @@ macTest(
 );
 
 macTest(
+  "command retains only closed startup stage and compiler code",
+  async () => {
+    const selected = await fixture();
+    const value = await tryNativeAuthoredCommand({
+      ...selected,
+      serve: () =>
+        Promise.reject(
+          new NativeAuthoredProjectStartError({
+            outcome: "not-started",
+            canceled: false,
+            stage: "inputs",
+            compilerCode: "E_COMPILER_RESPONSE",
+          })
+        ),
+    }).catch((error: unknown) => error);
+    expect(value).toBeInstanceOf(HackCliError);
+    expect(value).toHaveProperty("code", "E_STARTUP_INCOMPLETE");
+    expect(value).toHaveProperty("detail.stage", "inputs");
+    expect(value).toHaveProperty("detail.compilerCode", "E_COMPILER_RESPONSE");
+    expect(value).toHaveProperty("detail.outcome", "not-started");
+  }
+);
+
+macTest(
   "command reports fixed owner outcomes and omits arbitrary failure details",
   async () => {
     const selected = await fixture();

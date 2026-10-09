@@ -1,0 +1,82 @@
+{
+  "schema_version": 1,
+  "name": "native-persistent-sqlite",
+  "storage": {
+    "database": { "kind": "persistent", "scope": "worktree" }
+  },
+  "jobs": {
+    "z.seed": {
+      "image": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "entrypoint": { "exec": [] },
+      "command": {
+        "exec": [
+          "/usr/local/bin/bun",
+          "-e",
+          "import {Database} from 'bun:sqlite';const db=new Database('/data/proof.sqlite');db.exec('CREATE TABLE IF NOT EXISTS proof(id INTEGER PRIMARY KEY,value TEXT)');db.query('INSERT OR IGNORE INTO proof VALUES (1,?)').run('native-persistent-sqlite');if(db.query('SELECT value FROM proof WHERE id=1').get().value!=='native-persistent-sqlite')throw Error('persistence');db.query('INSERT OR IGNORE INTO proof VALUES (2,?)').run(crypto.randomUUID());db.exec('CREATE TABLE IF NOT EXISTS initializer_attempts(id INTEGER PRIMARY KEY)');db.exec('INSERT INTO initializer_attempts DEFAULT VALUES');console.log(db.query('SELECT value FROM proof WHERE id=2').get().value);db.close();"
+        ]
+      },
+      "mounts": [
+        { "storage": "database", "target": "/data", "access": "read-write" }
+      ]
+    },
+    "z.check": {
+      "image": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "entrypoint": { "exec": [] },
+      "command": {
+        "exec": [
+          "/usr/local/bin/bun",
+          "-e",
+          "const origin='http://b.web:3000';let r=await fetch(origin+'/state');let state=await r.json();if(!r.ok||state.marker!=='native-persistent-sqlite'||typeof state.nonce!=='string'||state.attempts<1)throw Error('state');r=await fetch(origin+'/write',{method:'POST',body:'written-through-app'});if(!r.ok)throw Error('write');r=await fetch(origin+'/state');state=await r.json();if(!r.ok||state.value!=='written-through-app')throw Error('readback');"
+        ]
+      },
+      "depends_on": [{ "service": "b.web", "condition": "ready" }]
+    }
+  },
+  "services": {
+    "a.db": {
+      "image": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "entrypoint": { "exec": [] },
+      "command": {
+        "exec": [
+          "/usr/local/bin/bun",
+          "-e",
+          "import {Database} from 'bun:sqlite';const db=new Database('/data/proof.sqlite');const server=Bun.serve({hostname:'0.0.0.0',port:3000,async fetch(request){const path=new URL(request.url).pathname;if(path==='/state'&&request.method==='GET'){return Response.json({marker:db.query('SELECT value FROM proof WHERE id=1').get().value,nonce:db.query('SELECT value FROM proof WHERE id=2').get().value,value:db.query('SELECT value FROM proof WHERE id=3').get()?.value??null,attempts:db.query('SELECT COUNT(*) AS count FROM initializer_attempts').get().count});}if(path==='/write'&&request.method==='POST'){const value=await request.text();if(!/^[a-z-]{1,63}$/.test(value))return new Response('',{status:400});db.query('INSERT OR REPLACE INTO proof VALUES (3,?)').run(value);return new Response('ok');}return new Response('',{status:404});}});process.on('SIGTERM',()=>{server.stop(true);db.close();process.exit(0);});"
+        ]
+      },
+      "mounts": [
+        { "storage": "database", "target": "/data", "access": "read-write" }
+      ],
+      "depends_on": [{ "job": "z.seed", "condition": "completed" }],
+      "readiness": {
+        "kind": "exec",
+        "command": {
+          "exec": ["/usr/local/bin/bun", "-e", "const r=await fetch('http://127.0.0.1:3000/state');if(!r.ok)process.exit(1)"]
+        },
+        "interval": "1s",
+        "timeout": "1s",
+        "retries": 10
+      }
+    },
+    "b.web": {
+      "image": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "entrypoint": { "exec": [] },
+      "command": {
+        "exec": [
+          "/usr/local/bin/bun",
+          "-e",
+          "const server=Bun.serve({hostname:'0.0.0.0',port:3000,fetch(request){const path=new URL(request.url).pathname;return fetch('http://a.db:3000'+path,{method:request.method,body:request.method==='POST'?request.body:undefined});}});process.on('SIGTERM',()=>{server.stop(true);process.exit(0);});"
+        ]
+      },
+      "depends_on": [{ "service": "a.db", "condition": "ready" }],
+      "readiness": {
+        "kind": "exec",
+        "command": {
+          "exec": ["/usr/local/bin/bun", "-e", "const r=await fetch('http://127.0.0.1:3000/state');if(!r.ok)process.exit(1)"]
+        },
+        "interval": "1s",
+        "timeout": "1s",
+        "retries": 10
+      }
+    }
+  }
+}

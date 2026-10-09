@@ -15,7 +15,10 @@ import { initScenario } from "./scenarios/init.ts";
 import { lifecycleHostProcessScenario } from "./scenarios/lifecycle-host-process.ts";
 import { lifecycleSessionRecoveryScenario } from "./scenarios/lifecycle-session-recovery.ts";
 import { nativeComposeAdoptionJobWorktreesScenario } from "./scenarios/native-compose-adoption-job-worktrees.ts";
+import { nativeComposeAdoptionSourceBindWorktreesScenario } from "./scenarios/native-compose-adoption-source-bind-worktrees.ts";
 import {
+  nativeComposeAdoptionBranchWorktreesScenario,
+  nativeComposeAdoptionBuildWorktreesScenario,
   nativeComposeAdoptionDependencyWorktreesScenario,
   nativeComposeAdoptionLocalWorktreesScenario,
   nativeComposeAdoptionManagedWorktreesScenario,
@@ -87,6 +90,7 @@ const ALL_SCENARIOS: readonly Scenario[] = [
   nativeConfigRoutingScenario,
   nativeConfigNetworksScenario,
   nativeComposeAdoptionWorktreesScenario,
+  nativeComposeAdoptionBranchWorktreesScenario,
   nativeComposeAdoptionStringWorktreesScenario,
   nativeComposeAdoptionNetworkWorktreesScenario,
   nativeComposeAdoptionPluralNetworkWorktreesScenario,
@@ -94,7 +98,9 @@ const ALL_SCENARIOS: readonly Scenario[] = [
   nativeComposeAdoptionManagedWorktreesScenario,
   nativeComposeAdoptionLocalWorktreesScenario,
   nativeComposeAdoptionDependencyWorktreesScenario,
+  nativeComposeAdoptionBuildWorktreesScenario,
   nativeComposeAdoptionJobWorktreesScenario,
+  nativeComposeAdoptionSourceBindWorktreesScenario,
   lifecycleHostProcessScenario,
   worktreeParallelUpScenario,
 ];

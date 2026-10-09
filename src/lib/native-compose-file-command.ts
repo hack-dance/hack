@@ -36,6 +36,7 @@ import {
 } from "./native-compose-ownership.ts";
 import {
   assertNativeComposeVmFiles,
+  assertPreparedNativeComposeVmFiles,
   stageNativeComposeVmFiles,
 } from "./native-compose-vm-file-owner.ts";
 import { NATIVE_COMPOSE_VM_FILES_EXTENSION } from "./native-compose-vm-file-protocol.ts";
@@ -348,13 +349,28 @@ export async function prepareNativeComposeCommandFiles(opts: {
         await assertNativeComposeFileRootUnbound({ root, engineId, signal });
         const document = await store.readGenerationDocument(generation);
         if (Object.hasOwn(document, NATIVE_COMPOSE_VM_FILES_EXTENSION)) {
-          await assertNativeComposeVmFiles({
-            authority: mutation.materialAuthority,
-            generation,
-            document,
-            signal,
-            deadline,
-          });
+          const pending = await store.loadPending();
+          if (armed || pending?.generationId === generation.generationId) {
+            await assertNativeComposeVmFiles({
+              authority: mutation.materialAuthority,
+              generation,
+              document,
+              signal,
+              deadline,
+            });
+          } else {
+            if (generation.generationId !== reservation.generationId) {
+              refuseNativeComposeFile();
+            }
+            await assertPreparedNativeComposeVmFiles({
+              authority: mutation.materialAuthority,
+              reservation,
+              projection,
+              document,
+              signal,
+              deadline,
+            });
+          }
         }
         await assertProjection();
       },

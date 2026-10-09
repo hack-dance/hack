@@ -118,7 +118,12 @@ const CONTAINER_FORMAT =
   '{"id":{{json .Id}},"name":{{json .Name}},"created":{{json .Created}},"image":{{json .Image}},"labels":{{json .Config.Labels}},"entrypoint":{{json .Config.Entrypoint}},"command":{{json .Config.Cmd}},"user":{{json .Config.User}},"openStdin":{{json .Config.OpenStdin}},"tty":{{json .Config.Tty}},"network":{{json .HostConfig.NetworkMode}},"ports":{{json .HostConfig.PortBindings}},"restart":{{json .HostConfig.RestartPolicy}},"readonly":{{json .HostConfig.ReadonlyRootfs}},"privileged":{{json .HostConfig.Privileged}},"capAdd":{{json .HostConfig.CapAdd}},"capDrop":{{json .HostConfig.CapDrop}},"security":{{json .HostConfig.SecurityOpt}},"autoRemove":{{json .HostConfig.AutoRemove}},"mounts":{{json .Mounts}},"running":{{json .State.Running}},"status":{{json .State.Status}},"exitCode":{{json .State.ExitCode}},"restarts":{{json .RestartCount}},"execs":{{json .ExecIDs}}}';
 const projections = new WeakMap<
   NativeComposeFileProjection,
-  { readonly host: NativeComposeFileProjection }
+  {
+    readonly host: NativeComposeFileProjection;
+    readonly authority: NativeComposeMaterialAuthority;
+    readonly reservation: NativeComposeReservation;
+    readonly check: () => Promise<void>;
+  }
 >();
 function digest(text: string): string {
   return nativeComposeFileDigest(Buffer.from(text));
@@ -1365,7 +1370,7 @@ export async function stageNativeComposeVmFiles(opts: {
             Object.fromEntries(images.map((row) => [row.workload, row.id]))
           ),
         });
-        projections.set(result, { host });
+        projections.set(result, { host, authority, reservation, check });
         return result;
       } finally {
         for (const row of payload) {
@@ -1471,6 +1476,44 @@ export async function assertNativeComposeVmJournalReady(
   }
 }
 
+/** Initial startup owns an issued reservation, not a saved generation. This
+ * capability expires at pending publication; generic inspection stays closed. */
+export async function assertPreparedNativeComposeVmFiles(opts: {
+  readonly authority: NativeComposeMaterialAuthority;
+  readonly reservation: NativeComposeReservation;
+  readonly projection: NativeComposeFileProjection;
+  readonly document: Document;
+  readonly signal: AbortSignal;
+  readonly deadline: number;
+}): Promise<void> {
+  const { authority, reservation, projection, document } = opts;
+  const issued = projections.get(projection);
+  requireValue(
+    issued &&
+      issued.authority === authority &&
+      issued.reservation === reservation &&
+      projection.vm &&
+      sameNativeComposeFileState(
+        document[NATIVE_COMPOSE_VM_FILES_EXTENSION],
+        projection.vm
+      )
+  );
+  await assertVmFiles({
+    ...opts,
+    generationId: reservation.generationId,
+    assertBinding: async () => {
+      await issued.check();
+      const binding = await assertNativeComposeMaterialAuthority({
+        authority,
+        reservation,
+        phase: "prepare",
+      });
+      requireValue(binding.currentGenerationId !== reservation.generationId);
+      return binding;
+    },
+  });
+}
+
 export async function assertNativeComposeVmFiles(opts: {
   readonly authority: NativeComposeMaterialAuthority;
   readonly generation: NativeComposeGeneration;
@@ -1483,14 +1526,44 @@ export async function assertNativeComposeVmFiles(opts: {
   if (!Object.hasOwn(document, NATIVE_COMPOSE_VM_FILES_EXTENSION)) {
     return;
   }
-  await runNativeComposeMaterialAction({
+  await assertVmFiles({
     authority,
-    run: async () => {
-      const binding = await assertNativeComposeMaterialAuthority({
+    document,
+    signal,
+    deadline,
+    observed,
+    generationId: generation.generationId,
+    assertBinding: async () =>
+      await assertNativeComposeMaterialAuthority({
         authority,
         generation,
         phase: "inspect",
-      });
+      }),
+  });
+}
+
+async function assertVmFiles(opts: {
+  readonly authority: NativeComposeMaterialAuthority;
+  readonly generationId: string;
+  readonly document: Document;
+  readonly signal: AbortSignal;
+  readonly deadline: number;
+  readonly observed?: NativeComposeOwnershipObservation;
+  readonly assertBinding: () => Promise<NativeComposeMaterialBinding>;
+}): Promise<void> {
+  const {
+    authority,
+    generationId,
+    document,
+    signal,
+    deadline,
+    observed,
+    assertBinding,
+  } = opts;
+  await runNativeComposeMaterialAction({
+    authority,
+    run: async () => {
+      const binding = await assertBinding();
       const selected = await state(document);
       try {
         sameOwner(selected.binding, binding);
@@ -1502,11 +1575,7 @@ export async function assertNativeComposeVmFiles(opts: {
           deadline,
           assertFresh: async () => {
             await selected.check();
-            await assertNativeComposeMaterialAuthority({
-              authority,
-              generation,
-              phase: "inspect",
-            });
+            await assertBinding();
           },
         });
         requireValue(
@@ -1553,7 +1622,7 @@ export async function assertNativeComposeVmFiles(opts: {
             const containers = observed.containers.filter(
               (container) =>
                 !container.oneoff &&
-                container.generationId === generation.generationId &&
+                container.generationId === generationId &&
                 container.service === workload
             );
             requireValue(containers.length === 1);
@@ -1617,11 +1686,7 @@ export async function assertNativeComposeVmFiles(opts: {
         requireValue((await inspect(client, observerId)).execs.length === 0);
         await selected.append("observe-complete");
         await selected.check();
-        await assertNativeComposeMaterialAuthority({
-          authority,
-          generation,
-          phase: "inspect",
-        });
+        await assertBinding();
       } finally {
         await selected.close();
       }

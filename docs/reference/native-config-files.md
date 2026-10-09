@@ -196,6 +196,13 @@ loses the observer witness while its volume remains, a later invocation retains
 the volume rather than deleting from its name and birth alone. Saved owned stop
 remains possible with a valid unknown-observation journal; retirement stays refused.
 
+Before the first pending intent is saved, VM admission uses only the original
+issued reservation and VM projection under the same live material lease. It
+rechecks the original sources, host projection, tools and guest material. After
+pending publication, admission requires the saved generation reference. Generic
+inspection never accepts an unpublished generation, and copying a reservation or
+projection does not grant preparation authority.
+
 Offline emitted-program and fake-engine controls do not establish provider support.
 Actual owner/nonowner access, readonly write refusal, ungranted isolation and full
 lifecycle/recovery qualification remain separate gates for this VM transport.

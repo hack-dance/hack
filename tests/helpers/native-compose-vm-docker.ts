@@ -106,6 +106,10 @@ function exact(expected: unknown) {
 }
 const helper = `sha256:${"a".repeat(64)}`,
   app = `sha256:${"b".repeat(64)}`;
+if (same(args, ["info", "--format", "{{json .ID}}"])) {
+  console.log(JSON.stringify("synthetic-vm-file-engine:1"));
+  process.exit(0);
+}
 if (args[0] === "synthetic-lifetime") {
   if (
     args.length !== 2 ||
@@ -421,6 +425,22 @@ if (
   process.exit(0);
 }
 if (args[0] === "container" && args[1] === "inspect") {
+  if (
+    args[2] === "--format" &&
+    args[3] === '{"id":{{json .Id}},"mounts":{{json .Mounts}}}'
+  ) {
+    if (args.length < 5 || args.length > 132) {
+      refuse();
+    }
+    for (const id of args.slice(4)) {
+      const row = state.containers[id];
+      if (!row) {
+        refuse();
+      }
+      console.log(JSON.stringify({ id, mounts: row.mounts }));
+    }
+    process.exit(0);
+  }
   const id = args[4] ?? refuse();
   if (args.length !== 5 || args[2] !== "--format") {
     refuse();

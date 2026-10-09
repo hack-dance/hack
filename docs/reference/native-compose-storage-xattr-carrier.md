@@ -299,3 +299,48 @@ journal completion or pending clear. It is not called automatically by ordinary
 `down --recover`; the existing incomplete-stop result and retained uncertainty
 remain until an independently reviewed original-command completion protocol is
 available. This observation seam has no live recovery acceptance yet.
+
+## Original command records (inactive prerequisite)
+
+The internal `originalCommandRecords: true` transport option creates a distinct
+private command-record version 2 beside the existing carrier journal version 1.
+Ordinary callers do not select this option. Old journals and missing command
+records retain unknown host-command settlement; no record is reconstructed from
+an old PID, empty capture or stopped guest helper.
+
+For this option, each fixed carrier create/start/remove command first synchronizes
+its arm record and parent directory. The existing captured `run()` owner starts
+a fixed wrapper that stops itself before executing Docker. The original owner
+observes that stopped PID, owned group, process birth and shell executable,
+publishes and synchronizes that identity, then repeats identity, boot, executable
+and admission checks before a one-use continuation of the captured child. A
+missing or failed publication cancels that original invocation; an armed record
+alone proves neither spawn nor absence. The command's original budget includes
+the handshake. No guessed PID or retry is used to rescue a fast command.
+Live handshake and settlement budgets use a captured monotonic deadline; the
+saved wall deadline is a record field only. Executable device/inode identities
+use exact decimal strings from bigint metadata, including sealed macOS binaries.
+The one-use continuation uses the original owner's captured PID and checks its
+original completion state. It does not acquire a PID from the durable record.
+
+The carrier uses held regular capture files, not pipes. Version 2 therefore names
+its capture evidence `held-files-quiescent`, never EOF. The original exit callback,
+strict ESRCH group absence, held file/path identity, both synchronized bounded
+captures and their hashes precede settlement publication. EPERM/EIO and unknown
+exit or capture disposition refuse. Settlement publication shares the existing
+three-second post-command group-observation budget; timeout/cancellation remain
+refused results and cannot grant a subsequent daemon command.
+
+Only the original in-memory writer can advance its exact sequence. Publication
+failure or deadline permanently invalidates that writer and retains its private
+files/descriptors. A rename or sync may finish after refusal, so a serialized
+settlement is an observation, not standalone successful-return, enrollment or
+cleanup authority. This slice has no recovery consumer, helper removal, intent
+clear, volume effect or automatic legacy upgrade. Linux process birth additionally
+binds kernel start ticks; macOS uses the existing `ps` birth representation while
+the captured subprocess remains the delivery owner. Future recovery must never
+use that representation to acquire or signal a replacement process.
+
+Focused private-filesystem and owned-child controls qualify only their tested
+writer/handshake boundaries. Installed carrier transport, interruption/recovery
+and persistent SQL acceptance remain separate runtime gates.

@@ -107,6 +107,9 @@ export interface RunOptions {
     readonly pid: number;
     readonly ownsProcessGroup: boolean;
     readonly processGroupId?: number;
+    /** One-use continuation for a caller's fixed pre-exec STOP handshake.
+     * Uses only the captured live child; never signals a former process group. */
+    readonly resumeSuspended?: () => boolean;
   }) => Promise<void>;
   readonly onExit?: (event: RunExitEvent) => Promise<void>;
 }
@@ -209,9 +212,11 @@ export async function run(
       : null;
   // Observe completion immediately: diagnostic setup must not keep deadlines armed
   // after the command has exited. Record callbacks still finish in spawn/exit order.
+  let originalExited = false;
   const completion = (async (): Promise<RunExitEvent> => {
     try {
       const exitCode = await proc.exited;
+      originalExited = true;
       const diagnosticUsage = observeCpu(exitCode);
       const code =
         cancellation?.exitCode() ?? (timeout.didTimeout() ? 124 : exitCode);
@@ -226,13 +231,35 @@ export async function run(
         ...usage,
       };
     } finally {
+      originalExited = true;
       timeout.dispose();
       cancellation?.dispose();
     }
   })();
+  let resumed = false;
+  const resumeSuspended = () => {
+    if (
+      !options.privateIo ||
+      resumed ||
+      originalExited ||
+      proc.exitCode !== null
+    ) {
+      return false;
+    }
+    resumed = true;
+    try {
+      // Bun 1.4.2's Subprocess.kill(SIGCONT) does not resume a stopped child on
+      // macOS. Delivery remains inside this original owner, to its captured PID
+      // before observed completion; no saved/reacquired PID or group is used.
+      process.kill(proc.pid, "SIGCONT");
+      return true;
+    } catch {
+      return false;
+    }
+  };
   const [result] = await Promise.all([
     completion,
-    options.onSpawn?.({ pid: proc.pid, ownsProcessGroup }),
+    options.onSpawn?.({ pid: proc.pid, ownsProcessGroup, resumeSuspended }),
   ]);
   await options.onExit?.(result);
   return result.exitCode;

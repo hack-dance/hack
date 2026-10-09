@@ -1,6 +1,14 @@
 import { randomBytes } from "node:crypto";
 import { constants } from "node:fs";
-import { lstat, mkdir, open, readdir, rmdir, unlink } from "node:fs/promises";
+import {
+  lstat,
+  mkdir,
+  open,
+  readdir,
+  realpath,
+  rmdir,
+  unlink,
+} from "node:fs/promises";
 import { join } from "node:path";
 import { isRecord } from "./guards.ts";
 import {
@@ -23,6 +31,20 @@ import {
   captureNativeComposeStorageReadonlyCarrierIntent,
   type NativeComposeStorageReadonlyCarrierIntent,
 } from "./native-compose-storage-carrier-journal.ts";
+import {
+  armNativeComposeStorageCommand,
+  createNativeComposeStorageCommandOwner,
+  invalidateNativeComposeStorageCommandOwner,
+  type NativeComposeStorageArmedCommand,
+  type NativeComposeStorageCommandChild,
+  type NativeComposeStorageCommandExecutable,
+  type NativeComposeStorageCommandKind,
+  type NativeComposeStorageCommandOwner,
+  nativeComposeStorageCommandHash,
+  nativeComposeStorageCommandOwnerConfirmed,
+  publishNativeComposeStorageCommandChild,
+  settleNativeComposeStorageCommand,
+} from "./native-compose-storage-command-record.ts";
 import {
   NATIVE_STORAGE_DOCKER_DEPENDENCIES,
   nativeComposeStorageDockerHelper,
@@ -59,7 +81,13 @@ import {
 import { findExecutableInPath, type RunExitEvent, run } from "./shell.ts";
 
 const ID = /^[a-f0-9]{64}$/;
+const PROCESS =
+  /^(\d+)\s+(\d+)\s+(\S+)\s+((?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}\s+\d{4})\s+([^\n\r]+)$/;
+const TICKS = /^[1-9][0-9]*$/;
+const BOOT = /^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/;
 const CAPTURE_LIMIT = 4096;
+// A late/unconfirmed publication cannot release its original held directory FDs.
+const unsettledCommandFiles = new Set<readonly HeldDirectory[]>();
 type Selection = { readonly name: string; readonly storage: string };
 type Context = {
   readonly authority: NativeComposeMaterialAuthority;
@@ -67,6 +95,8 @@ type Context = {
   readonly engineId: string;
   readonly signal: AbortSignal;
   readonly deadline: number;
+  /** Inactive until its original-owner handshake/transport is qualified. */
+  readonly originalCommandRecords?: true;
 };
 type Files = {
   readonly held: readonly HeldDirectory[];
@@ -542,11 +572,16 @@ export async function observeNativeComposeStorageDockerCarrierRecovery(opts: {
     await Promise.all(files.held.map((directory) => directory.file.close()));
   }
 }
-async function groupAbsent(pid: number): Promise<void> {
+async function groupAbsent(
+  pid: number,
+  monotonicDeadline?: number
+): Promise<void> {
   if (!(Number.isInteger(pid) && pid > 1)) {
     return refuse();
   }
-  const deadline = Date.now() + 3000;
+  const now =
+    monotonicDeadline === undefined ? Date.now : () => performance.now();
+  const deadline = monotonicDeadline ?? Date.now() + 3000;
   while (true) {
     try {
       process.kill(-pid, 0);
@@ -556,11 +591,156 @@ async function groupAbsent(pid: number): Promise<void> {
       }
       return refuse();
     }
-    if (Date.now() >= deadline) {
+    if (now() >= deadline) {
       return refuse();
     }
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
+}
+async function commandExecutable(
+  path: string
+): Promise<NativeComposeStorageCommandExecutable> {
+  const canonical = await realpath(path);
+  const file = await open(canonical, constants.O_RDONLY | constants.O_NOFOLLOW);
+  try {
+    const before = await file.stat({ bigint: true });
+    if (
+      !before.isFile() ||
+      before.nlink !== 1n ||
+      before.size <= 0n ||
+      before.size > 268_435_456n ||
+      (before.mode & 0o022n) !== 0n
+    ) {
+      return refuse();
+    }
+    const hash = new Bun.CryptoHasher("sha256");
+    const bytes = Buffer.alloc(65_536);
+    let position = 0;
+    const size = Number(before.size);
+    while (position < size) {
+      const read = await file.read(
+        bytes,
+        0,
+        Math.min(bytes.length, size - position),
+        position
+      );
+      if (read.bytesRead <= 0) {
+        return refuse();
+      }
+      hash.update(bytes.subarray(0, read.bytesRead));
+      position += read.bytesRead;
+    }
+    const after = await file.stat({ bigint: true }),
+      named = await lstat(canonical, { bigint: true });
+    if (
+      !(
+        before.dev === after.dev &&
+        before.ino === after.ino &&
+        before.dev === named.dev &&
+        before.ino === named.ino
+      ) ||
+      before.size !== after.size ||
+      before.mtimeNs !== after.mtimeNs ||
+      before.ctimeNs !== after.ctimeNs ||
+      (await realpath(path)) !== canonical
+    ) {
+      return refuse();
+    }
+    return {
+      path: canonical,
+      dev: before.dev.toString(),
+      ino: before.ino.toString(),
+      uid: Number(before.uid),
+      mode: Number(before.mode),
+      size,
+      hash: hash.digest("hex"),
+    };
+  } finally {
+    await file.close();
+  }
+}
+async function boundedHostFile(path: string): Promise<string> {
+  const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  try {
+    const buffer = Buffer.alloc(4097);
+    const result = await file.read(buffer, 0, buffer.length, 0);
+    if (result.bytesRead === 0 || result.bytesRead > 4096) {
+      return refuse();
+    }
+    return new TextDecoder("utf-8", { fatal: true }).decode(
+      buffer.subarray(0, result.bytesRead)
+    );
+  } finally {
+    await file.close();
+  }
+}
+async function commandProcess(opts: {
+  readonly pid: number;
+  readonly read: (args: readonly string[]) => Promise<string>;
+}): Promise<{
+  readonly uid: number;
+  readonly group: number;
+  readonly state: string;
+  readonly birth: string;
+  readonly executable: string;
+}> {
+  if (!Number.isSafeInteger(opts.pid) || opts.pid <= 1) {
+    return refuse();
+  }
+  const output = (
+    await opts.read([
+      "/bin/ps",
+      "-p",
+      String(opts.pid),
+      "-o",
+      "uid=,pgid=,state=,lstart=,comm=",
+    ])
+  ).trim();
+  const match = PROCESS.exec(output);
+  if (!match) {
+    return refuse();
+  }
+  let birth = match[4]?.replace(/\s+/g, " ") ?? refuse();
+  let executable = match[5] ?? refuse();
+  if (process.platform === "linux") {
+    const stat = await boundedHostFile(`/proc/${opts.pid}/stat`);
+    const close = stat.lastIndexOf(")");
+    const ticks = stat.slice(close + 2).split(" ")[19];
+    if (close <= 0 || !ticks || !TICKS.test(ticks)) {
+      return refuse();
+    }
+    birth = `${birth}|${ticks}`;
+    executable = await realpath(`/proc/${opts.pid}/exe`);
+  }
+  return {
+    uid: Number(match[1]),
+    group: Number(match[2]),
+    state: match[3] ?? refuse(),
+    birth,
+    executable,
+  };
+}
+async function commandBoot(
+  read: (args: readonly string[]) => Promise<string>
+): Promise<string> {
+  let value: string;
+  if (process.platform === "darwin") {
+    value = (await read(["/usr/sbin/sysctl", "-n", "kern.bootsessionuuid"]))
+      .trim()
+      .toLowerCase();
+  } else if (process.platform === "linux") {
+    value = (await boundedHostFile("/proc/sys/kernel/random/boot_id")).trim();
+  } else {
+    return refuse();
+  }
+  if (
+    value.length !== 36 ||
+    !BOOT.test(value) ||
+    value === "00000000-0000-0000-0000-000000000000"
+  ) {
+    return refuse();
+  }
+  return value;
 }
 /** No callback can reject before the shared owner awaits exit. A rejected owner or
  * unproven group retains the journal; daemon effects are never inferred from exit. */
@@ -575,11 +755,22 @@ export async function runNativeComposeStorageDockerCommand(supplied: {
   readonly assertAdmitted: () => Promise<void>;
   readonly timeoutMs: number;
   readonly cleanup?: boolean;
+  readonly originalCommand?: {
+    readonly owner: NativeComposeStorageCommandOwner;
+    readonly kind: NativeComposeStorageCommandKind;
+    readonly carrier: {
+      readonly id: string;
+      readonly createdAt: string;
+    } | null;
+  };
 }): Promise<{ readonly exitCode: number; readonly stdout: string }> {
   const opts = {
     ...supplied,
     context: { ...supplied.context },
     args: [...supplied.args],
+    originalCommand: supplied.originalCommand
+      ? { ...supplied.originalCommand }
+      : undefined,
   };
   const capture = randomBytes(16).toString("hex");
   const stdout = join(opts.files.path, `${capture}.stdout`),
@@ -606,6 +797,9 @@ export async function runNativeComposeStorageDockerCommand(supplied: {
     settled = false,
     pid = 0,
     exit: RunExitEvent | null = null;
+  let armed: NativeComposeStorageArmedCommand | null = null;
+  let publicationRefused = false;
+  const cancellation = new AbortController();
   try {
     await opts.assertAdmitted();
     const timeoutMs = opts.cleanup
@@ -614,30 +808,200 @@ export async function runNativeComposeStorageDockerCommand(supplied: {
     if (!(timeoutMs > 0)) {
       return refuse();
     }
+    const deadline = Date.now() + timeoutMs;
+    let boundaryDeadline = performance.now() + timeoutMs;
+    let recordingSettlement = false;
+    const record = opts.originalCommand;
+    const guard = () => {
+      if (
+        performance.now() >= boundaryDeadline ||
+        publicationRefused ||
+        (!(recordingSettlement || opts.cleanup) && opts.context.signal.aborted)
+      ) {
+        return refuse();
+      }
+    };
+    const bounded = async <T>(work: Promise<T>): Promise<T> => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        guard();
+        const result = await Promise.race([
+          work,
+          new Promise<never>((_, reject) => {
+            timer = setTimeout(
+              () => {
+                publicationRefused = true;
+                if (record) {
+                  invalidateNativeComposeStorageCommandOwner(record.owner);
+                }
+                cancellation.abort();
+                reject(
+                  new Error(
+                    "Original command publication unavailable; values omitted."
+                  )
+                );
+              },
+              Math.max(0, boundaryDeadline - performance.now())
+            );
+          }),
+        ]);
+        guard();
+        return result;
+      } catch {
+        publicationRefused = true;
+        if (record) {
+          invalidateNativeComposeStorageCommandOwner(record.owner);
+        }
+        cancellation.abort();
+        return refuse();
+      } finally {
+        if (timer !== undefined) {
+          clearTimeout(timer);
+        }
+      }
+    };
+    const read = async (args: readonly string[]) => {
+      guard();
+      const result = await runNativeComposeStorageDockerCommand({
+        context: {
+          signal: recordingSettlement
+            ? new AbortController().signal
+            : cancellation.signal,
+          deadline:
+            Date.now() + Math.max(0, boundaryDeadline - performance.now()),
+        },
+        files: opts.files,
+        args,
+        beforeSpawn: guard,
+        assertAdmitted: () => {
+          guard();
+          return Promise.resolve();
+        },
+        timeoutMs: Math.min(1000, boundaryDeadline - performance.now()),
+      });
+      if (result.exitCode !== 0) {
+        return refuse();
+      }
+      guard();
+      return result.stdout;
+    };
+    let wrapper: NativeComposeStorageCommandExecutable | null = null;
+    let executable: NativeComposeStorageCommandExecutable | null = null;
+    let boot = "";
+    if (record) {
+      executable = await bounded(commandExecutable(opts.args[0] ?? refuse()));
+      wrapper = await bounded(commandExecutable("/bin/sh"));
+      boot = await bounded(commandBoot(read));
+      const host = await bounded(commandProcess({ pid: process.pid, read }));
+      if (host.uid !== process.getuid?.()) {
+        return refuse();
+      }
+      armed = await bounded(
+        armNativeComposeStorageCommand({
+          owner: record.owner,
+          kind: record.kind,
+          host: { boot, pid: process.pid, uid: host.uid, birth: host.birth },
+          executable,
+          argumentsHash: nativeComposeStorageCommandHash(
+            JSON.stringify(opts.args)
+          ),
+          deadline,
+          carrier: record.carrier,
+          stdout: {
+            dev: out.dev,
+            ino: out.ino,
+            name: stdout.slice(opts.files.path.length + 1),
+          },
+          stderr: {
+            dev: err.dev,
+            ino: err.ino,
+            name: stderr.slice(opts.files.path.length + 1),
+          },
+        })
+      );
+      await opts.assertAdmitted();
+      guard();
+    }
     // Fixed FSIZE quota bounds both inherited capture files, including daemon
     // stderr. Acceptance remains 4096 bytes; no child reopens a named file.
+    let signal = opts.cleanup ? undefined : opts.context.signal;
+    if (record) {
+      signal = AbortSignal.any([
+        cancellation.signal,
+        ...(opts.cleanup ? [] : [opts.context.signal]),
+      ]);
+    }
     const code = await run(
       [
         "/bin/sh",
         "-c",
-        'ulimit -f 8; exec "$@"',
+        record
+          ? 'ulimit -f 8; kill -STOP "$$"; exec "$@"'
+          : 'ulimit -f 8; exec "$@"',
         "storage-witness-command",
         ...opts.args,
       ],
       {
         privateIo: io.descriptors,
-        timeoutMs,
-        signal: opts.cleanup ? undefined : opts.context.signal,
+        timeoutMs: record ? boundaryDeadline - performance.now() : timeoutMs,
+        signal,
         beforeSpawn: () => {
           io.assertFresh();
           opts.beforeSpawn();
           admitted = true;
         },
-        onSpawn: (event) => {
+        onSpawn: async (event) => {
           pid = event.ownsProcessGroup
             ? (event.processGroupId ?? event.pid)
             : 0;
-          return Promise.resolve();
+          if (!(record && armed && wrapper && executable)) {
+            return;
+          }
+          try {
+            let observed = await bounded(commandProcess({ pid, read }));
+            while (!observed.state.startsWith("T")) {
+              await bounded(new Promise((resolve) => setTimeout(resolve, 2)));
+              observed = await bounded(commandProcess({ pid, read }));
+            }
+            if (
+              observed.group !== pid ||
+              observed.uid !== process.getuid?.() ||
+              (await realpath(observed.executable)) !== wrapper.path
+            ) {
+              return refuse();
+            }
+            const identity: NativeComposeStorageCommandChild = {
+              pid,
+              group: pid,
+              birth: observed.birth,
+              wrapper,
+            };
+            await bounded(
+              publishNativeComposeStorageCommandChild(armed, identity)
+            );
+            await bounded(opts.assertAdmitted());
+            const final = await bounded(commandProcess({ pid, read }));
+            if (
+              !same(final, observed) ||
+              (await bounded(commandBoot(read))) !== boot ||
+              !same(await bounded(commandExecutable(wrapper.path)), wrapper) ||
+              !same(
+                await bounded(commandExecutable(opts.args[0] ?? refuse())),
+                executable
+              )
+            ) {
+              return refuse();
+            }
+            io.assertFresh();
+            guard();
+            if (!event.resumeSuspended?.()) {
+              return refuse();
+            }
+          } catch {
+            publicationRefused = true;
+            invalidateNativeComposeStorageCommandOwner(record.owner);
+            cancellation.abort();
+          }
         },
         onExit: (event) => {
           exit = event;
@@ -645,8 +1009,39 @@ export async function runNativeComposeStorageDockerCommand(supplied: {
         },
       }
     );
-    await groupAbsent(pid);
+    boundaryDeadline = performance.now() + 3000;
+    recordingSettlement = true;
+    await groupAbsent(pid, record ? boundaryDeadline : undefined);
     settled = true;
+    if (record) {
+      if (publicationRefused || !armed || !exit) {
+        return refuse();
+      }
+      if (
+        (await bounded(commandBoot(read))) !== boot ||
+        !executable ||
+        !same(
+          await bounded(commandExecutable(opts.args[0] ?? refuse())),
+          executable
+        )
+      ) {
+        return refuse();
+      }
+      await bounded(io.sync());
+      const captures = io.read();
+      const event = exit as RunExitEvent;
+      await bounded(
+        settleNativeComposeStorageCommand(armed, {
+          exitCode: event.exitCode,
+          timedOut: event.timedOut,
+          cancelled: event.cancelled,
+          groupAbsent: true,
+          captureMode: "held-files-quiescent",
+          stdoutHash: nativeComposeStorageCommandHash(captures.stdout),
+          stderrHash: nativeComposeStorageCommandHash(captures.stderr),
+        })
+      );
+    }
     if (
       !(
         exit &&
@@ -657,11 +1052,21 @@ export async function runNativeComposeStorageDockerCommand(supplied: {
       return refuse();
     }
     return { exitCode: code, stdout: io.read().stdout };
+  } catch (error) {
+    if (opts.originalCommand) {
+      invalidateNativeComposeStorageCommandOwner(opts.originalCommand.owner);
+      return refuse();
+    }
+    throw error;
   } finally {
-    if (!admitted || settled) {
+    const publicationKnown =
+      !opts.originalCommand ||
+      nativeComposeStorageCommandOwnerConfirmed(opts.originalCommand.owner);
+    if ((!admitted || settled) && publicationKnown) {
       await io.close();
     } else {
       io.retainUnsettled();
+      unsettledCommandFiles.add(opts.files.held);
     }
   }
 }
@@ -911,6 +1316,7 @@ export async function createNativeComposeDockerStorageXattrCarrier(
       return refuse();
     }
     const files = await invocationFiles(context, input);
+    let commandOwner: NativeComposeStorageCommandOwner | undefined;
     let known: {
       readonly id: string;
       readonly createdAt: string;
@@ -918,6 +1324,44 @@ export async function createNativeComposeDockerStorageXattrCarrier(
     } | null = null;
     let completed = false;
     try {
+      if (context.originalCommandRecords === true) {
+        const directory = files.held.at(-1) ?? refuse();
+        const recordPath = join(directory.path, "commands.json");
+        const recordIndex = files.captures.length;
+        commandOwner = await createNativeComposeStorageCommandOwner({
+          directory,
+          binding: {
+            invocationId: input.invocationId,
+            engineId: context.engineId,
+            materialHash: nativeComposeStorageCommandHash(
+              JSON.stringify(before)
+            ),
+            helperHash: nativeComposeStorageCommandHash(
+              nativeComposeStorageDockerHelper()
+            ),
+            requestHash: nativeComposeStorageCommandHash(files.requestText),
+            invocationHash: nativeComposeStorageCommandHash(
+              JSON.stringify({ ...input, recordCreated: undefined })
+            ),
+            directory: { dev: directory.info.dev, ino: directory.info.ino },
+          },
+          check: async () => {
+            tool();
+            await checkFiles(files);
+            if (
+              !same(
+                before,
+                await current(context, input.target, !input.readonly)
+              )
+            ) {
+              return refuse();
+            }
+          },
+          published: (info) => {
+            files.captures[recordIndex] = { path: recordPath, info };
+          },
+        });
+      }
       const read = probe();
       await engine(read, context);
       await image(read, dependency);
@@ -930,6 +1374,9 @@ export async function createNativeComposeDockerStorageXattrCarrier(
       const created = await runNativeComposeStorageDockerCommand({
         context,
         files,
+        originalCommand: commandOwner
+          ? { owner: commandOwner, kind: "create", carrier: null }
+          : undefined,
         args: [
           docker,
           ...nativeComposeStorageDockerCreateArgs({
@@ -1032,6 +1479,13 @@ export async function createNativeComposeDockerStorageXattrCarrier(
       const result = await runNativeComposeStorageDockerCommand({
         context,
         files,
+        originalCommand: commandOwner
+          ? {
+              owner: commandOwner,
+              kind: "start",
+              carrier: { id, createdAt: owned.createdAt },
+            }
+          : undefined,
         args: [docker, "start", "-ai", id],
         timeoutMs: 15_000,
         beforeSpawn: () => {
@@ -1116,6 +1570,13 @@ export async function createNativeComposeDockerStorageXattrCarrier(
       const removed = await runNativeComposeStorageDockerCommand({
         context,
         files,
+        originalCommand: commandOwner
+          ? {
+              owner: commandOwner,
+              kind: "remove",
+              carrier: { id, createdAt: owned.createdAt },
+            }
+          : undefined,
         cleanup: true,
         args: [docker, "rm", id],
         timeoutMs: 10_000,
@@ -1208,7 +1669,15 @@ export async function createNativeComposeDockerStorageXattrCarrier(
     } finally {
       // Failure never starts a competing stop/remove after unknown child disposition.
       // The original prospective/created journal and private input remain authoritative.
-      await Promise.allSettled(files.held.map((entry) => entry.file.close()));
+      if (
+        unsettledCommandFiles.has(files.held) ||
+        (commandOwner &&
+          !nativeComposeStorageCommandOwnerConfirmed(commandOwner))
+      ) {
+        unsettledCommandFiles.add(files.held);
+      } else {
+        await Promise.allSettled(files.held.map((entry) => entry.file.close()));
+      }
       if (!completed && known) {
         // Exact retained ID/birth are already in the existing private finite journal.
       }

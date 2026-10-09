@@ -169,6 +169,10 @@ export async function holdNativeComposeStorageDockerIo(opts: {
           return refuse();
         }
       },
+      sync: async () => {
+        await out.file.sync();
+        await err.file.sync();
+      },
       close: async () => {
         await Promise.all(held.map((leaf) => leaf.file.close()));
       },

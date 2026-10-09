@@ -69,6 +69,11 @@ emitting ignored attributes would not satisfy this contract. See the
 [Compose long-syntax contract](https://docs.docker.com/reference/compose-file/services/#secrets).
 This transport does not change retained adoption policy or permissions on an
 original config or secret file.
+The VM owner pins the selected image's user and inherited labels before creating
+material. An omitted image user has Docker's empty-user default, `0:0`; a present
+user value is validated without empty-value coercion. Omitted volumes and labels
+mean no image-declared volumes or inherited labels. Present malformed values and
+nonempty image volume declarations refuse before VM resource creation.
 Private snapshot ownership, freshness, exact bind
 projection, interruption recovery and verified cleanup have separate source and
 synthetic engine qualification boundaries. See the

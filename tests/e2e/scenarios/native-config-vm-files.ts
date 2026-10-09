@@ -20,11 +20,13 @@ import {
   recheckDirectories,
   sameFile,
 } from "../../../src/lib/native-compose-private-state.ts";
+import { decodeNativeComposeVmFileImage } from "../../../src/lib/native-compose-vm-file-owner.ts";
 import {
   NATIVE_COMPOSE_VM_FILE_IMAGE,
   NATIVE_COMPOSE_VM_FILES_EXTENSION,
   parseVmFileFacts,
   parseVmFileJournal,
+  VM_FILE_IMAGE_FORMAT,
   vmFileJournalReady,
 } from "../../../src/lib/native-compose-vm-file-protocol.ts";
 import {
@@ -53,7 +55,6 @@ import {
 } from "./native-compose-adoption-job-worktrees.ts";
 
 const ID = /^[a-f0-9]{64}$/;
-const IMAGE = /^sha256:[a-f0-9]{64}$/;
 const SPACE = /\s+/;
 const LIMIT = 2 * 1024 * 1024;
 const FORMATS = {
@@ -458,22 +459,20 @@ async function setup(ctx: ScenarioContext) {
     return result.stdout.trim();
   };
   requireValue((await probe(["info", "--format", "{{.OSType}}"])) === "linux");
-  const image = object(
-    await probe([
-      "image",
-      "inspect",
-      NATIVE_COMPOSE_VM_FILE_IMAGE,
-      "--format",
-      '{"id":{{json .Id}},"user":{{json .Config.User}},"volumes":{{json .Config.Volumes}}}',
-    ])
-  );
-  requireValue(
-    typeof image.id === "string" &&
-      IMAGE.test(image.id) &&
-      image.user === "" &&
-      (image.volumes === null ||
-        (isRecord(image.volumes) && Object.keys(image.volumes).length === 0))
-  );
+  const image = decodeNativeComposeVmFileImage({
+    workload: "",
+    reference: NATIVE_COMPOSE_VM_FILE_IMAGE,
+    value: object(
+      await probe([
+        "image",
+        "inspect",
+        NATIVE_COMPOSE_VM_FILE_IMAGE,
+        "--format",
+        VM_FILE_IMAGE_FORMAT,
+      ])
+    ),
+  });
+  requireValue(image.user === "");
   const engine = await probe(["info", "--format", "{{json .ID}}"]);
   const inventory = async () => {
     const containers = await probe([

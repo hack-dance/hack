@@ -5,6 +5,10 @@ import { keys } from "./native-compose-private-state.ts";
 export const NATIVE_COMPOSE_VM_FILES_EXTENSION = "x-hack-native-vm-files";
 export const NATIVE_COMPOSE_VM_FILE_IMAGE = "oven/bun:1.4.2-slim";
 export const NATIVE_COMPOSE_VM_FILE_LIMIT = 2 * 1024 * 1024;
+/** Docker omits optional empty image fields. Default absence only, retaining
+ * every present value for the image decoder's type and policy checks. */
+export const VM_FILE_IMAGE_FORMAT =
+  '{"id":{{json .Id}},"user":{{$user := ""}}{{range $key, $value := .Config}}{{if eq $key "User"}}{{$user = $value}}{{end}}{{end}}{{json $user}},"volumes":{{$volumesPresent := false}}{{range $key, $value := .Config}}{{if eq $key "Volumes"}}{{$volumesPresent = true}}{{json $value}}{{end}}{{end}}{{if not $volumesPresent}}null{{end}},"labels":{{$labelsPresent := false}}{{range $key, $value := .Config}}{{if eq $key "Labels"}}{{$labelsPresent = true}}{{json $value}}{{end}}{{end}}{{if not $labelsPresent}}null{{end}}}';
 const TOKEN = /^[a-f0-9]{32}$/;
 const DIGEST = /^[a-f0-9]{64}$/;
 const WORKLOAD = /^[a-z0-9][a-z0-9._-]{0,62}$/;

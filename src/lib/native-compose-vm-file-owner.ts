@@ -50,6 +50,7 @@ import {
   parseVmFileFacts,
   parseVmFileJournal,
   resolveVmFileOwnership,
+  VM_FILE_IMAGE_FORMAT,
   VM_FILE_OBSERVER_PROGRAM,
   VM_FILE_VERIFY_PROGRAM,
   VM_FILE_WRITER_PROGRAM,
@@ -252,10 +253,19 @@ async function image(
       "image",
       "inspect",
       "--format",
-      '{"id":{{json .Id}},"user":{{json .Config.User}},"volumes":{{json .Config.Volumes}},"labels":{{json .Config.Labels}}}',
+      VM_FILE_IMAGE_FORMAT,
       reference,
     ])
   );
+  return decodeNativeComposeVmFileImage({ value: row, workload, reference });
+}
+/** Decode only the bounded image projection; no material or engine authority. */
+export function decodeNativeComposeVmFileImage(opts: {
+  readonly value: unknown;
+  readonly workload: string;
+  readonly reference: string;
+}): Image {
+  const row = opts.value;
   requireValue(
     isRecord(row) &&
       keys(row, "id,labels,user,volumes") &&
@@ -263,8 +273,8 @@ async function image(
         (isRecord(row.volumes) && Object.keys(row.volumes).length === 0))
   );
   return parseImage({
-    workload,
-    reference,
+    workload: opts.workload,
+    reference: opts.reference,
     id: row.id,
     user: row.user,
     labels: row.labels,

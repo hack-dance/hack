@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { appendFile, readFile, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import {
+  VM_FILE_IMAGE_FORMAT,
   VM_FILE_OBSERVER_PROGRAM,
   VM_FILE_VERIFY_PROGRAM,
   VM_FILE_WRITER_PROGRAM,
@@ -182,13 +183,7 @@ if (args[0] === "synthetic-program") {
   process.exit(await child.exited);
 }
 if (args[0] === "image") {
-  exact([
-    "image",
-    "inspect",
-    "--format",
-    '{"id":{{json .Id}},"user":{{json .Config.User}},"volumes":{{json .Config.Volumes}},"labels":{{json .Config.Labels}}}',
-    args[4],
-  ]);
+  exact(["image", "inspect", "--format", VM_FILE_IMAGE_FORMAT, args[4]]);
   if (!["oven/bun:1.4.2-slim", "synthetic/reader:1"].includes(args[4] ?? "")) {
     refuse();
   }

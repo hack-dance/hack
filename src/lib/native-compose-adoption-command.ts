@@ -3,12 +3,14 @@ import { CliUsageError } from "../cli/command.ts";
 import { HackCliError } from "./cli-result.ts";
 import { resolveComposeStartupTimeoutMs } from "./compose-startup-budget.ts";
 import type { LegacyComposeVerifiedBinding } from "./native-compose-adoption-binding.ts";
+import { legacyComposeOrderedRefusal } from "./native-compose-adoption-diagnostics.ts";
 import { runLegacyComposeRetainedOperation } from "./native-compose-adoption-execution.ts";
 import {
   LegacyComposeAdoptedGenerationError,
   openLegacyComposeAdoptedGenerationStore,
 } from "./native-compose-adoption-generation.ts";
 import { inspectLegacyComposeAdoptionSelection } from "./native-compose-adoption-marker.ts";
+import { legacyComposeRetainedOrdered } from "./native-compose-adoption-readiness.ts";
 import { inspectLegacyComposeContainerStates } from "./native-compose-adoption-runtime.ts";
 import type { NativeComposeCommandOptions } from "./native-compose-command.ts";
 import { requireNativeComposeBackend } from "./native-compose-selection.ts";
@@ -291,7 +293,7 @@ export async function tryLegacyComposeAdoptedCommand(
           deadline,
           run: async (privateInput) => {
             cancelled(signal);
-            if (privateInput.retainedPlan.requiresV5) {
+            if (legacyComposeRetainedOrdered(privateInput.retainedPlan)) {
               return await runLegacyComposeRetainedOperation({
                 input: privateInput,
                 operation,
@@ -342,6 +344,13 @@ export async function tryLegacyComposeAdoptedCommand(
         error instanceof LegacyComposeAdoptedGenerationError
           ? error.message
           : "Adopted Compose ownership or execution refused; original data is retained. Values omitted.",
+      ...(legacyComposeOrderedRefusal(error)
+        ? {
+            detail: {
+              legacy_adoption_refusal: legacyComposeOrderedRefusal(error),
+            },
+          }
+        : {}),
     });
   } finally {
     process.off("SIGINT", cancel);

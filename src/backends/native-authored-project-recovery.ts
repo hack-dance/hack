@@ -688,6 +688,7 @@ export async function recoverNativeAuthoredProject(opts: {
               },
               inspect,
             };
+            await store.retireHooks(selected.run);
             await retireFiles(store, retirement);
             await retireAdmission(store, retirement, lease);
             const removed = await inspect();

@@ -1,20 +1,35 @@
 import { createHash } from "node:crypto";
 import { isAbsolute } from "node:path";
+import { NativeComposeHostHookError } from "../lib/native-compose-host-contract.ts";
 import { NativeConfigCompilerError } from "../lib/native-config-compiler.ts";
 import { acquireNativeExecutionInputs } from "../lib/native-execution-inputs.ts";
 import {
-  type NativeAuthoredReceipt,
+  assertNativeFiniteHookBindings,
+  type NativeHookPhase,
+  type NativeHookResult,
+  selectNativeFiniteHooks,
+} from "../lib/native-host-hook-runner.ts";
+import {
   type NativeAuthoredReview,
   parseNativeAuthoredReview,
   parseNativeAuthoredSnapshot,
 } from "./native-authored-graph-protocol.ts";
+import type { NativeAuthoredHookOwner } from "./native-authored-hook-journal.ts";
+import {
+  hookPhaseRunner,
+  hookSelection,
+  type NativeAuthoredStartupAttempt,
+  type NativeHookDiagnostic,
+  publishAuthoredReady,
+  requireHookSuccess,
+} from "./native-authored-hook-lifecycle.ts";
+import type { serveNativeHookStop } from "./native-authored-hook-stop.ts";
 import {
   loadNativeAuthoredProjectRun,
   type NativeAuthoredProjectAdmission,
   type NativeAuthoredProjectRunScope,
   type NativeAuthoredProjectRunSelection,
   type NativeAuthoredProjectSource,
-  type NativeAuthoredProjectStartSelection,
   withNativeAuthoredProjectAdmission,
 } from "./native-authored-project-run.ts";
 import {
@@ -43,6 +58,10 @@ const STAGES = [
   "source-freshness",
   "reservation",
   "runtime",
+  "hook-up-before",
+  "hook-up-after",
+  "hook-down-before",
+  "hook-down-after",
 ] as const;
 type Stage = (typeof STAGES)[number];
 const COMPILER_CODES = new Set([
@@ -114,11 +133,13 @@ type Options = {
   readonly overlay?: string | null;
   readonly startupTimeoutMs: number;
   readonly signal?: AbortSignal;
+  readonly forceSignal?: AbortSignal;
   /** Observation after publication; the immutable selection grants no runtime authority. */
   readonly onReady?: (
     selection: NativeAuthoredProjectRunSelection
   ) => undefined;
   readonly onExitDiagnostic?: (diagnostic: NativeExitDiagnostic) => void;
+  readonly onHookDiagnostic?: (event: NativeHookDiagnostic) => void;
 };
 
 function freeze(value: unknown): void {
@@ -242,13 +263,7 @@ async function privateDelivery(
   return payload;
 }
 
-type Attempt = {
-  readonly source: NativeAuthoredProjectSource;
-  readonly start: NativeAuthoredProjectStartSelection;
-  /** First parsed runtime membership; observation alone grants no ready authority. */
-  observed?: NativeAuthoredReceipt;
-  ready?: NativeAuthoredProjectRunSelection;
-};
+type Attempt = NativeAuthoredStartupAttempt;
 async function removeUnstartedSource(
   source: NativeAuthoredProjectSource | undefined,
   attempt: Attempt | undefined,
@@ -311,6 +326,183 @@ async function retireAttempt(opts: {
   await attempt.source.remove();
 }
 
+const HOOK_STAGES: Record<NativeHookPhase, Stage> = {
+  "up.before": "hook-up-before",
+  "up.after": "hook-up-after",
+  "down.before": "hook-down-before",
+  "down.after": "hook-down-after",
+};
+function observeHook(opts: Options, event: NativeHookDiagnostic): void {
+  try {
+    void Promise.resolve(opts.onHookDiagnostic?.(event)).catch(() => undefined);
+  } catch {
+    /* observation only */
+  }
+}
+
+async function runPreparedLifecycle(ctx: {
+  readonly options: Options;
+  readonly admitted: Attempt;
+  readonly review: NativeAuthoredReview;
+  readonly payload: Buffer | undefined;
+  readonly inputs: () => Inputs;
+  readonly hookOwner: NativeAuthoredHookOwner | undefined;
+  readonly phase: (name: NativeHookPhase) => Promise<NativeHookResult>;
+  readonly graph: AbortController;
+  readonly hard: AbortController;
+  readonly remaining: () => number;
+  readonly admission: NativeAuthoredProjectAdmission;
+  readonly stopped: Promise<boolean>;
+  readonly completeStop: (removed: boolean) => void;
+  readonly endpoint: (
+    value: Awaited<ReturnType<typeof serveNativeHookStop>>
+  ) => void;
+  readonly published: () => void;
+  readonly removed: () => void;
+  readonly hookRetired: () => void;
+  readonly nativeCode: (code: string | undefined) => void;
+}): Promise<number> {
+  const review = ctx.review;
+  let downBefore = false;
+  let failure: unknown;
+  let code = 1;
+  try {
+    code = await serveNativeAuthoredProjectGraph({
+      runtime: ctx.options.runtime,
+      projectRoot: ctx.options.scope.projectRoot,
+      run: ctx.options.run,
+      sourceFile: ctx.admitted.source.path,
+      review,
+      privateInput: ctx.payload,
+      startupTimeoutMs: ctx.remaining(),
+      signal: ctx.graph.signal,
+      forceSignal: ctx.hard.signal,
+      frontendHooks: ctx.hookOwner !== undefined,
+      onGroup: ctx.hookOwner?.graphChild,
+      beforeStop: ctx.hookOwner
+        ? async () => {
+            const result = await ctx.phase("down.before");
+            downBefore =
+              result.outcome === "complete" &&
+              result.exitCode === 0 &&
+              !result.timedOut &&
+              !result.canceled;
+            if (!downBefore) {
+              ctx.completeStop(false);
+            }
+            return downBefore;
+          }
+        : undefined,
+      onStopFailure: () => {
+        observeHook(ctx.options, {
+          phase: "down.before",
+          boundary: "stop-operation",
+        });
+        ctx.completeStop(false);
+      },
+      onExitDiagnostic: (diagnostic) => {
+        ctx.nativeCode(diagnostic.nativeCode);
+        const observed: unknown = ctx.options.onExitDiagnostic?.(diagnostic);
+        void Promise.resolve(observed).catch(() => undefined);
+      },
+      onReceipt: (receipt) => {
+        freeze(receipt);
+        ctx.admitted.observed = receipt;
+        return undefined;
+      },
+      onReady: (receipt, assertRunning, refreshRunning, publishReady) =>
+        publishAuthoredReady(
+          {
+            run: ctx.options.run,
+            observe: (event) => observeHook(ctx.options, event),
+            onReady: (value) => observedReady(ctx.options, value),
+            payload: () => ctx.payload,
+            admitted: ctx.admitted,
+            hookOwner: ctx.hookOwner,
+            phase: ctx.phase,
+            inputs: ctx.inputs,
+            admission: ctx.admission,
+            remaining: ctx.remaining,
+            published: ctx.published,
+            stop: () => ctx.graph.abort(),
+            stopped: ctx.stopped,
+            endpoint: ctx.endpoint,
+          },
+          receipt,
+          assertRunning,
+          refreshRunning,
+          publishReady
+        ),
+    });
+  } catch (error) {
+    failure = error;
+  }
+  ctx.hookOwner?.graphSettled();
+  await retireAttempt({
+    runtime: ctx.options.runtime,
+    scope: ctx.options.scope,
+    admission: ctx.admission,
+    attempt: ctx.admitted,
+  });
+  ctx.removed();
+  if (ctx.hookOwner) {
+    await ctx.hookOwner.graphRemoved();
+    if (downBefore) {
+      requireHookSuccess(await ctx.phase("down.after"));
+    }
+    await ctx.hookOwner.retire();
+    ctx.hookRetired();
+  }
+  ctx.completeStop(true);
+  if (failure) {
+    throw failure;
+  }
+  return code;
+}
+
+async function failedAdmission(opts: {
+  readonly error: unknown;
+  readonly options: Options;
+  readonly stage: Stage;
+  readonly outcome: Outcome;
+  readonly source: NativeAuthoredProjectSource | undefined;
+  readonly attempt: Attempt | undefined;
+  readonly hookOwner: NativeAuthoredHookOwner | undefined;
+  readonly nativeCode: string | undefined;
+}): Promise<NativeAuthoredProjectStartError> {
+  const { error, source, attempt, hookOwner } = opts;
+  let outcome = await removeUnstartedSource(source, attempt, opts.outcome);
+  let nativeCode = opts.nativeCode;
+  if (hookOwner && !attempt) {
+    try {
+      await hookOwner.retire();
+    } catch {
+      outcome = "retained";
+    }
+  } else if (hookOwner) {
+    outcome = "retained";
+  }
+  if (error instanceof NativeRuntimeRequestError) {
+    nativeCode = error.nativeCode;
+  } else if (
+    outcome === "not-started" &&
+    source === undefined &&
+    attempt === undefined &&
+    ((error instanceof NativeConfigCompilerError &&
+      error.code === "E_NATIVE_PROJECT_UNSUPPORTED") ||
+      error instanceof NativeComposeHostHookError)
+  ) {
+    nativeCode = "native_graph_subset";
+  }
+  return new NativeAuthoredProjectStartError({
+    outcome,
+    canceled: opts.options.signal?.aborted === true,
+    nativeCode,
+    stage: opts.stage,
+    compilerCode: compilerDiagnostic(error),
+  });
+}
+
 /**
  * Native-source frontend owner. Hold shared input, exact startup intent
  * and authenticated foreground ownership through durable Removed retirement.
@@ -338,7 +530,8 @@ export async function serveNativeAuthoredProject(
     !Number.isSafeInteger(opts.startupTimeoutMs) ||
     opts.startupTimeoutMs < 1 ||
     opts.startupTimeoutMs > 300_000 ||
-    opts.signal?.aborted
+    opts.signal?.aborted ||
+    opts.forceSignal?.aborted
   ) {
     throw new NativeAuthoredProjectStartError({
       outcome: "not-started",
@@ -346,6 +539,9 @@ export async function serveNativeAuthoredProject(
     });
   }
   const controller = new AbortController();
+  const graphSignal = new AbortController();
+  const hardSignal = new AbortController();
+  let published = false;
   const deadline = performance.now() + opts.startupTimeoutMs;
   const remaining = () => {
     const time = Math.ceil(deadline - performance.now());
@@ -354,10 +550,24 @@ export async function serveNativeAuthoredProject(
     }
     return time;
   };
-  const abort = () => controller.abort();
+  const abort = () => {
+    if (!published) {
+      controller.abort();
+    }
+    graphSignal.abort();
+  };
+  const force = () => {
+    hardSignal.abort();
+    controller.abort();
+    graphSignal.abort();
+  };
+  opts.forceSignal?.addEventListener("abort", force, { once: true });
   opts.signal?.addEventListener("abort", abort, { once: true });
   if (opts.signal?.aborted) {
     abort();
+  }
+  if (opts.forceSignal?.aborted) {
+    force();
   }
   const timer = setTimeout(abort, remaining());
   let stage: Stage = "admission";
@@ -370,11 +580,20 @@ export async function serveNativeAuthoredProject(
         let payload: Buffer | undefined;
         let outcome: Outcome = "not-started";
         let nativeCode: string | undefined;
+        let hookOwner: NativeAuthoredHookOwner | undefined;
+        let hookStop:
+          | Awaited<ReturnType<typeof serveNativeHookStop>>
+          | undefined;
+        let stopCompleted: ((removed: boolean) => void) | undefined;
+        const stopped = new Promise<boolean>((resolve) => {
+          stopCompleted = resolve;
+        });
         try {
           remaining();
           stage = "retained-state";
           if (
             (await admission.loadStart()) ||
+            (await admission.hooksRetained()) ||
             (await loadNativeAuthoredProjectRun(opts.scope))
           ) {
             outcome = "retained";
@@ -383,12 +602,54 @@ export async function serveNativeAuthoredProject(
             );
           }
           stage = "inputs";
-          const inputs = await acquireNativeExecutionInputs({
+          const acquire = (signal: AbortSignal) =>
+            acquireNativeExecutionInputs({
+              projectRoot: opts.scope.projectRoot,
+              profiles: opts.profiles,
+              explicitOverlay: opts.overlay,
+              compilerBranch: opts.scope.branch ?? undefined,
+              signal,
+            });
+          let inputs = await acquire(controller.signal);
+          const identity = hookSelection(inputs);
+          const hooks =
+            inputs.result.plan.host === undefined
+              ? undefined
+              : selectNativeFiniteHooks(inputs.result.plan);
+          if (hooks) {
+            assertNativeFiniteHookBindings({
+              hooks,
+              report: inputs.result.environment_plan,
+            });
+            hookOwner = await admission.createHooks({
+              run: opts.run,
+              selectionHash: createHash("sha256")
+                .update(identity)
+                .digest("hex"),
+            });
+          }
+          const phase = hookPhaseRunner({
+            owner: hookOwner,
+            hooks,
+            readInputs: () => inputs,
+            setInputs: (value) => {
+              inputs = value;
+            },
+            identity,
+            acquire,
+            admission,
+            startup: controller.signal,
+            hard: hardSignal.signal,
+            remaining,
             projectRoot: opts.scope.projectRoot,
-            profiles: opts.profiles,
-            explicitOverlay: opts.overlay,
-            compilerBranch: opts.scope.branch ?? undefined,
-            signal: controller.signal,
+            stage: (value) => {
+              stage = HOOK_STAGES[value];
+            },
+            diagnostic: (error) => {
+              const code = compilerDiagnostic(error);
+              return code && COMPILER_CODES.has(code) ? code : undefined;
+            },
+            observe: (event) => observeHook(opts, event),
           });
           remaining();
           stage = "source";
@@ -397,6 +658,10 @@ export async function serveNativeAuthoredProject(
             metadata: inputs.metadata,
             profiles: opts.profiles,
             overlay: opts.overlay,
+            hookPermit: await hookOwner?.permit({
+              role: "preflight",
+              semanticHash: inputs.result.semantic_hash,
+            }),
           });
           stage = "native-plan";
           const planned = await invokeNativeRuntime({
@@ -405,7 +670,7 @@ export async function serveNativeAuthoredProject(
             args: [
               "graph",
               "native",
-              "plan",
+              hookOwner ? "frontend-plan" : "plan",
               "--source-file",
               source.path,
               "--json",
@@ -415,7 +680,54 @@ export async function serveNativeAuthoredProject(
             boundNativeAuthoredReadDrain: true,
           });
           stage = "review";
-          const review = matchingReview(planned, inputs, opts.run, opts.scope);
+          let review = matchingReview(planned, inputs, opts.run, opts.scope);
+          if (hookOwner && hooks) {
+            requireHookSuccess(await phase("up.before"));
+            await source.remove();
+            source = undefined;
+            const semanticBefore = inputs.result.semantic_hash;
+            inputs = await acquire(controller.signal);
+            if (
+              hookSelection(inputs) !== identity ||
+              inputs.result.semantic_hash !== semanticBefore
+            ) {
+              throw new Error("Native hook source changed; values omitted.");
+            }
+            assertNativeFiniteHookBindings({
+              hooks,
+              report: inputs.result.environment_plan,
+            });
+            source = await admission.prepareSource({
+              run: opts.run,
+              metadata: inputs.metadata,
+              profiles: opts.profiles,
+              overlay: opts.overlay,
+              hookPermit: await hookOwner.permit({
+                role: "execution",
+                semanticHash: inputs.result.semantic_hash,
+              }),
+            });
+            review = matchingReview(
+              await invokeNativeRuntime({
+                runtime: opts.runtime,
+                cwd: opts.scope.projectRoot,
+                args: [
+                  "graph",
+                  "native",
+                  "frontend-plan",
+                  "--source-file",
+                  source.path,
+                  "--json",
+                ],
+                timeoutMs: remaining(),
+                signal: controller.signal,
+                boundNativeAuthoredReadDrain: true,
+              }),
+              inputs,
+              opts.run,
+              opts.scope
+            );
+          }
           stage = "source-freshness";
           await source.assertFresh();
           remaining();
@@ -428,99 +740,58 @@ export async function serveNativeAuthoredProject(
           await source.assertFresh();
           await admission.assertHeld();
           const admitted = attempt;
-          let failure: unknown;
-          let code = 1;
-          try {
-            code = await serveNativeAuthoredProjectGraph({
-              runtime: opts.runtime,
-              projectRoot: opts.scope.projectRoot,
-              run: opts.run,
-              sourceFile: source.path,
-              review,
-              privateInput: payload,
-              startupTimeoutMs: remaining(),
-              signal: controller.signal,
-              onExitDiagnostic: (diagnostic) => {
-                nativeCode = diagnostic.nativeCode;
-                const observed: unknown = opts.onExitDiagnostic?.(diagnostic);
-                void Promise.resolve(observed).catch(() => undefined);
-              },
-              onReceipt: (receipt) => {
-                freeze(receipt);
-                admitted.observed = receipt;
-                return undefined;
-              },
-              onReady: async (receipt, assertRunning) => {
-                payload?.fill(0);
-                if (!admitted.observed) {
-                  throw new Error(
-                    "Native runtime membership is unobserved; values omitted."
-                  );
-                }
-                await inputs.assertFresh();
-                await admitted.source.assertFresh();
-                await admission.assertHeld();
-                admitted.ready = await admission.publish({
-                  expectedStart: admitted.start,
-                  record: {
-                    version: 2,
-                    kind: "native-authored-project-run",
-                    receipt,
-                  },
-                  assertReady: () => {
-                    remaining();
-                    assertRunning();
-                    return undefined;
-                  },
-                });
-                freeze(admitted.ready);
-                clearTimeout(timer);
-                observedReady(opts, admitted.ready);
-              },
-            });
-          } catch (error) {
-            failure = error;
-          }
-          await retireAttempt({
-            runtime: opts.runtime,
-            scope: opts.scope,
+          await hookOwner?.graphEntered();
+          const code = await runPreparedLifecycle({
+            options: opts,
+            admitted,
+            review,
+            payload,
+            inputs: () => inputs,
+            hookOwner,
+            phase,
+            graph: graphSignal,
+            hard: hardSignal,
+            remaining,
             admission,
-            attempt: admitted,
+            stopped,
+            completeStop: (value) => stopCompleted?.(value),
+            endpoint: (value) => {
+              hookStop = value;
+            },
+            published: () => {
+              published = true;
+              stage = "runtime";
+              clearTimeout(timer);
+            },
+            removed: () => {
+              outcome = "removed";
+            },
+            hookRetired: () => {
+              hookOwner = undefined;
+            },
+            nativeCode: (value) => {
+              nativeCode = value;
+            },
           });
-          outcome = "removed";
-          if (failure) {
-            throw failure;
-          }
           return { ok: true as const, code };
         } catch (error) {
-          // Capture only closed owning stages/codes before cleanup can fail.
           const failedStage = stage;
-          const compilerCode = compilerDiagnostic(error);
-          outcome = await removeUnstartedSource(source, attempt, outcome);
-          if (error instanceof NativeRuntimeRequestError) {
-            nativeCode = error.nativeCode;
-          } else if (
-            outcome === "not-started" &&
-            source === undefined &&
-            attempt === undefined &&
-            error instanceof NativeConfigCompilerError &&
-            error.code === "E_NATIVE_PROJECT_UNSUPPORTED"
-          ) {
-            // Preserve only the typed pre-attempt capability refusal, never its diagnostics.
-            nativeCode = "native_graph_subset";
-          }
-          return {
-            ok: false as const,
-            error: new NativeAuthoredProjectStartError({
-              outcome,
-              canceled: opts.signal?.aborted === true,
-              nativeCode,
-              stage: failedStage,
-              compilerCode,
-            }),
-          };
+          stopCompleted?.(false);
+          const failure = await failedAdmission({
+            error,
+            options: opts,
+            stage: failedStage,
+            source,
+            attempt,
+            outcome,
+            nativeCode,
+            hookOwner,
+          });
+          outcome = failure.outcome;
+          return { ok: false as const, error: failure };
         } finally {
           payload?.fill(0);
+          await hookStop?.close(outcome !== "removed");
         }
       }
     );
@@ -540,5 +811,6 @@ export async function serveNativeAuthoredProject(
   } finally {
     clearTimeout(timer);
     opts.signal?.removeEventListener("abort", abort);
+    opts.forceSignal?.removeEventListener("abort", force);
   }
 }

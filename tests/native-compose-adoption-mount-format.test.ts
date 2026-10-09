@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { isRecord } from "../src/lib/guards.ts";
 import { legacyComposeAdoptionContainerInspectFormat } from "../src/lib/native-compose-adoption-binding.ts";
 import { nativeComposeProbeFailure } from "../src/lib/native-compose-ownership.ts";
+import { adoptionDependencyReadAllowed } from "./e2e/scenarios/native-compose-adoption-dependency-inputs.ts";
 import {
   DOCKER_FORMAT_CONTAINER_ID,
   withDockerContainerFormatFixture,
@@ -43,6 +44,22 @@ const SYNTHETIC_CONTAINER = {
 };
 const binary = process.env.HACK_TEST_DOCKER_FORMAT_BINARY,
   sha256 = process.env.HACK_TEST_DOCKER_FORMAT_SHA256;
+function forwardingAllowed(format: string): boolean {
+  return adoptionDependencyReadAllowed({
+    projectRoot: "/synthetic",
+    project: "synthetic",
+    containerIds: [DOCKER_FORMAT_CONTAINER_ID],
+    networkId: "b".repeat(64),
+    volumeName: "synthetic_data",
+    args: [
+      "container",
+      "inspect",
+      "--format",
+      format,
+      DOCKER_FORMAT_CONTAINER_ID,
+    ],
+  });
+}
 test.skipIf(binary === undefined && sha256 === undefined)(
   "real pinned Docker formatter accepts omitted bind Name while preserving volume name",
   async () => {
@@ -59,6 +76,10 @@ test.skipIf(binary === undefined && sha256 === undefined)(
           "{{json $m.Name}}"
         );
         expect(old).not.toBe(legacyComposeAdoptionContainerInspectFormat);
+        expect(forwardingAllowed(old)).toBe(false);
+        expect(
+          forwardingAllowed(legacyComposeAdoptionContainerInspectFormat)
+        ).toBe(true);
         let failure: unknown;
         try {
           await probe(old);
@@ -117,6 +138,9 @@ test
       sha256,
       container,
       observe: async (probe) => {
+        expect(
+          forwardingAllowed(legacyComposeAdoptionContainerInspectFormat)
+        ).toBe(true);
         let text: string;
         try {
           text = await probe(legacyComposeAdoptionContainerInspectFormat);
@@ -141,6 +165,46 @@ test
         }
         expect(value.mounts[0].name).toEqual(name);
         expect(value.mounts[0].name).not.toBe("");
+      },
+    });
+  },
+  20_000
+);
+test.skipIf(binary === undefined && sha256 === undefined)(
+  "closed dependency forwarder preserves an explicit empty bind Name through the real formatter",
+  async () => {
+    if (!(binary && sha256)) {
+      throw new Error("Explicit pinned Docker format client is required");
+    }
+    await withDockerContainerFormatFixture({
+      binary,
+      sha256,
+      container: {
+        ...SYNTHETIC_CONTAINER,
+        Mounts: [
+          { ...SYNTHETIC_CONTAINER.Mounts[0], Name: "" },
+          SYNTHETIC_CONTAINER.Mounts[1],
+        ],
+      },
+      observe: async (probe) => {
+        expect(
+          forwardingAllowed(legacyComposeAdoptionContainerInspectFormat)
+        ).toBe(true);
+        const value: unknown = JSON.parse(
+          await probe(legacyComposeAdoptionContainerInspectFormat)
+        );
+        if (
+          !(
+            isRecord(value) &&
+            Array.isArray(value.mounts) &&
+            isRecord(value.mounts[0]) &&
+            isRecord(value.mounts[1])
+          )
+        ) {
+          throw new Error("Synthetic container projection is malformed");
+        }
+        expect(value.mounts[0].name).toBe("");
+        expect(value.mounts[1].name).toBe("synthetic_data");
       },
     });
   },

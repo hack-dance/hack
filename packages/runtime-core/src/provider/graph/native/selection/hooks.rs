@@ -76,10 +76,9 @@ struct ProcessReady {
     pid: u32,
     uid: u32,
 }
-fn process_proof(
-    parent: &Path,
-    input: &Input,
-) -> Result<(Vec<String>, Vec<(Pin, Document)>), CandidateError> {
+type ProcessProof = (Vec<String>, Vec<(Pin, Document)>);
+
+fn process_proof(parent: &Path, input: &Input) -> Result<ProcessProof, CandidateError> {
     let pin = input.processes.clone().ok_or_else(refused)?;
     let mut documents = Vec::new();
     let owner_pin = if input.role == "execution" {

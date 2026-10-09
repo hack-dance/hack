@@ -2,6 +2,7 @@ import { constants } from "node:fs";
 import { type FileHandle, lstat, mkdir, open, unlink } from "node:fs/promises";
 import { dirname, join, relative, resolve } from "node:path";
 import { isRecord } from "./guards.ts";
+import { copyNativeComposeEffectRefusal } from "./native-compose-effect-diagnostics.ts";
 import {
   holdNativeComposeFile,
   nativeComposeFileDigest,
@@ -43,6 +44,7 @@ import {
   hasCode,
   holdDirectory,
   keys,
+  NativeComposeGenerationError,
   parsePrivateJson,
   privateDirectory,
   readPrivate,
@@ -51,12 +53,96 @@ import {
   token,
   writeExclusive,
 } from "./native-compose-private-state.ts";
+import {
+  assertNativeComposeVmJournalReady,
+  type NativeComposeVmFileReference,
+  nativeComposeVmProjectionHost,
+  restoreNativeComposeVmHostProjection,
+  retireNativeComposeVmFiles,
+} from "./native-compose-vm-file-owner.ts";
+import { NATIVE_COMPOSE_VM_FILES_EXTENSION } from "./native-compose-vm-file-protocol.ts";
 
 export type NativeComposeFileAttempt = Readonly<Record<never, never>>;
 export type NativeComposeFileStopAttempt = Readonly<Record<never, never>>;
+export type NativeComposeFileRetirementProof = Readonly<Record<never, never>>;
+const retirements = new WeakMap<
+  NativeComposeFileRetirementProof,
+  {
+    readonly authority: NativeComposeMaterialAuthority;
+    readonly reference: NativeComposeFileReference;
+    readonly selection: Parameters<
+      typeof assertNativeComposeMaterialAuthority
+    >[0];
+    readonly check: () => Promise<void>;
+    readonly signal: AbortSignal;
+    consumed: boolean;
+  }
+>();
+/** Only the host journal owner issues this one-use proof after its exact
+ * children-known/unarmed-rollback and synchronized retirement intent checks. */
+export function consumeNativeComposeFileRetirementProof(opts: {
+  readonly proof: NativeComposeFileRetirementProof;
+  readonly authority: NativeComposeMaterialAuthority;
+  readonly reference: NativeComposeFileReference;
+}) {
+  const selected = retirements.get(opts.proof);
+  if (
+    !selected ||
+    selected.consumed ||
+    selected.authority !== opts.authority ||
+    !sameNativeComposeFileState(selected.reference, opts.reference)
+  ) {
+    return refuseNativeComposeFile();
+  }
+  selected.consumed = true;
+  return {
+    selection: selected.selection,
+    signal: selected.signal,
+    check: async () => {
+      if (retirements.get(opts.proof) !== selected) {
+        return refuseNativeComposeFile();
+      }
+      await selected.check();
+    },
+  };
+}
+async function retireVmProjection(opts: {
+  readonly authority: NativeComposeMaterialAuthority;
+  readonly reference: NativeComposeFileReference;
+  readonly selection: Parameters<
+    typeof assertNativeComposeMaterialAuthority
+  >[0];
+  readonly signal: AbortSignal | undefined;
+  readonly check: () => Promise<void>;
+  readonly document: Record<string, unknown>;
+}): Promise<void> {
+  if (!opts.signal) {
+    refuseNativeComposeFile();
+  }
+  const proof = Object.freeze({});
+  retirements.set(proof, {
+    authority: opts.authority,
+    reference: opts.reference,
+    selection: opts.selection,
+    signal: opts.signal,
+    check: opts.check,
+    consumed: false,
+  });
+  try {
+    await retireNativeComposeVmFiles({
+      authority: opts.authority,
+      proof,
+      document: opts.document,
+    });
+  } finally {
+    retirements.delete(proof);
+  }
+}
 /** Private generated-document binds. Dollar signs are already encoded once for Compose. */
 export type NativeComposeFileProjection = {
   readonly reference: NativeComposeFileReference;
+  readonly vm?: NativeComposeVmFileReference;
+  readonly images?: Readonly<Record<string, string>>;
   readonly workloads: Readonly<
     Record<
       string,
@@ -79,7 +165,7 @@ const projections = new WeakMap<
   }
 >();
 /** A caller-supplied path map cannot qualify private file delivery. This is not effect authority. */
-export function nativeComposeFileProjectionMatches(opts: {
+type ProjectionSelection = {
   readonly projection: NativeComposeFileProjection;
   readonly plan: unknown;
   readonly environmentPlan: unknown;
@@ -88,8 +174,12 @@ export function nativeComposeFileProjectionMatches(opts: {
   readonly runtimeIdentity: string;
   readonly ownerToken: string;
   readonly generationIdentity: string;
-}): boolean {
-  const selected = projections.get(opts.projection);
+};
+function projectionBindingMatches(opts: ProjectionSelection): boolean {
+  const vmHost = nativeComposeVmProjectionHost(opts.projection);
+  const selected =
+    projections.get(opts.projection) ??
+    projections.get(vmHost ?? opts.projection);
   return Boolean(
     selected?.active() &&
       selected.sources.result.plan === opts.plan &&
@@ -101,10 +191,37 @@ export function nativeComposeFileProjectionMatches(opts: {
       selected.reservation.generationId === opts.generationIdentity
   );
 }
+/** Staging can consume an issued host snapshot, but cannot render protected
+ * grants until the separate VM projection has actually been earned. */
+export function nativeComposeFileHostProjectionMatches(
+  opts: ProjectionSelection
+): boolean {
+  return projections.has(opts.projection) && projectionBindingMatches(opts);
+}
+export function nativeComposeFileProjectionMatches(
+  opts: ProjectionSelection
+): boolean {
+  const vmHost = nativeComposeVmProjectionHost(opts.projection);
+  const selected =
+    projections.get(opts.projection) ??
+    projections.get(vmHost ?? opts.projection);
+  const vmRequired = Object.values(
+    selected?.sources.result.file_plan?.workloads ?? {}
+  ).some((grants) =>
+    grants.some(
+      (grant) =>
+        grant.mode !== "0444" ||
+        grant.uid !== undefined ||
+        grant.gid !== undefined
+    )
+  );
+  return (!vmRequired || vmHost !== null) && projectionBindingMatches(opts);
+}
 type Attempt = {
   readonly reservation: NativeComposeReservation;
   readonly sources: NativeComposeFileSources;
   readonly reference: NativeComposeFileReference;
+  vm?: NativeComposeVmFileReference;
 };
 type Snapshot = {
   readonly binding: NativeComposeMaterialBinding;
@@ -349,22 +466,35 @@ function projection(
   freezeNativeComposeFileState(result);
   return result;
 }
-function assertDocumentProjection(
+async function assertDocumentProjection(
   document: Record<string, unknown>,
   reference: NativeComposeFileReference,
   members: readonly NativeComposeFileMember[]
-): void {
+): Promise<void> {
+  const selectedDocument = Object.hasOwn(
+    document,
+    NATIVE_COMPOSE_VM_FILES_EXTENSION
+  )
+    ? await restoreNativeComposeVmHostProjection(
+        document,
+        reference,
+        projection(reference, members).workloads,
+        members
+      )
+    : document;
   if (
-    !isRecord(document.services) ||
+    !isRecord(selectedDocument.services) ||
     JSON.stringify(
-      parseNativeComposeFileReference(document[NATIVE_COMPOSE_FILES_EXTENSION])
+      parseNativeComposeFileReference(
+        selectedDocument[NATIVE_COMPOSE_FILES_EXTENSION]
+      )
     ) !== JSON.stringify(reference)
   ) {
     refuseNativeComposeFile();
   }
   const expected = projection(reference, members).workloads;
   const matched = new Set<string>();
-  for (const [name, service] of Object.entries(document.services)) {
+  for (const [name, service] of Object.entries(selectedDocument.services)) {
     if (
       !isRecord(service) ||
       (service.volumes !== undefined && !Array.isArray(service.volumes))
@@ -545,11 +675,13 @@ async function retireMembers(opts: {
 export function createNativeComposeFileOwner(opts: {
   readonly root: string;
   readonly authority: NativeComposeMaterialAuthority;
+  readonly signal?: AbortSignal;
   /** Failure seam after an individual unlink and before its directory sync. It cannot suppress guards. */
   readonly afterMemberUnlink?: () => Promise<void>;
 }) {
   const root = resolve(opts.root);
   const authority = opts.authority;
+  const signal = opts.signal;
   const afterMemberUnlink = opts.afterMemberUnlink;
   const attempts = new WeakMap<NativeComposeFileAttempt, Attempt>();
   const ownedSources = new Set<NativeComposeFileSources>();
@@ -570,8 +702,12 @@ export function createNativeComposeFileOwner(opts: {
       run: async () => {
         try {
           return await action();
-        } catch {
-          return refuseNativeComposeFile();
+        } catch (error) {
+          const failure = new NativeComposeGenerationError(
+            "E_NATIVE_COMPOSE_STATE"
+          );
+          copyNativeComposeEffectRefusal(error, failure);
+          throw failure;
         }
       },
     });
@@ -726,7 +862,11 @@ export function createNativeComposeFileOwner(opts: {
     );
     const snapshot = await openSnapshot({ selection, reference });
     try {
-      assertDocumentProjection(document, reference, snapshot.manifest.members);
+      await assertDocumentProjection(
+        document,
+        reference,
+        snapshot.manifest.members
+      );
       await snapshot.check();
       return snapshot;
     } catch (error) {
@@ -743,6 +883,26 @@ export function createNativeComposeFileOwner(opts: {
     }
   >();
   return Object.freeze({
+    selectVmProjection(input: {
+      readonly attempt: NativeComposeFileAttempt;
+      readonly projection: NativeComposeFileProjection;
+    }): void {
+      const selected = attempts.get(input.attempt);
+      const original = nativeComposeVmProjectionHost(input.projection);
+      if (
+        !(
+          selected &&
+          original &&
+          input.projection.vm &&
+          sameNativeComposeFileState(original.reference, selected.reference)
+        ) ||
+        projections.get(original)?.sources !== selected.sources ||
+        selected.vm
+      ) {
+        refuseNativeComposeFile();
+      }
+      selected.vm = input.projection.vm;
+    },
     /** A prior unknown stop child is never adopted by a later stop. Returning null
      * still permits owned engine stop, but cannot authorize material retirement. */
     async armStop(
@@ -968,7 +1128,18 @@ export function createNativeComposeFileOwner(opts: {
         const selected = attempts.get(attempt);
         if (
           !selected ||
-          selected.reference.generationId !== generation.generationId
+          selected.reference.generationId !== generation.generationId ||
+          (Object.values(
+            selected.sources.result.file_plan?.workloads ?? {}
+          ).some((grants) =>
+            grants.some(
+              (grant) =>
+                grant.mode !== "0444" ||
+                grant.uid !== undefined ||
+                grant.gid !== undefined
+            )
+          ) &&
+            !selected.vm)
         ) {
           refuseNativeComposeFile();
         }
@@ -979,6 +1150,20 @@ export function createNativeComposeFileOwner(opts: {
         });
         const snapshot = await savedSnapshot(generation, "effect");
         try {
+          const document = await readOwnedDocument(
+            generation,
+            snapshot.binding
+          );
+          if (
+            selected.vm
+              ? !sameNativeComposeFileState(
+                  document[NATIVE_COMPOSE_VM_FILES_EXTENSION],
+                  selected.vm
+                )
+              : Object.hasOwn(document, NATIVE_COMPOSE_VM_FILES_EXTENSION)
+          ) {
+            return refuseNativeComposeFile();
+          }
           if (
             JSON.stringify(snapshot.reference) !==
               JSON.stringify(selected.reference) ||
@@ -1077,6 +1262,9 @@ export function createNativeComposeFileOwner(opts: {
             refuseNativeComposeFile();
           }
           await requireMembers(snapshot);
+          await assertNativeComposeVmJournalReady(
+            await readOwnedDocument(generation, snapshot.binding)
+          );
           await snapshot.check();
         } finally {
           await snapshot.close();
@@ -1113,6 +1301,26 @@ export function createNativeComposeFileOwner(opts: {
               members: snapshot.manifest.members.map((member) => member.id),
             });
             state = journalState(snapshot);
+          }
+          if (selected.vm) {
+            await retireVmProjection({
+              authority,
+              reference: snapshot.reference,
+              selection: {
+                authority,
+                reservation: selected.reservation,
+                phase: "prepare",
+              },
+              signal,
+              check: async () => {
+                await snapshot.check();
+                const current = journalState(snapshot);
+                if (current.armed || current.intent?.phase !== "rollback") {
+                  return refuseNativeComposeFile();
+                }
+              },
+              document: { [NATIVE_COMPOSE_VM_FILES_EXTENSION]: selected.vm },
+            });
           }
           await retireMembers({
             snapshot,
@@ -1161,6 +1369,29 @@ export function createNativeComposeFileOwner(opts: {
               members: snapshot.manifest.members.map((member) => member.id),
             });
             state = journalState(snapshot);
+          }
+          const document = await readOwnedDocument(
+            generation,
+            snapshot.binding
+          );
+          if (Object.hasOwn(document, NATIVE_COMPOSE_VM_FILES_EXTENSION)) {
+            await retireVmProjection({
+              authority,
+              reference: snapshot.reference,
+              selection: { authority, generation, phase: "retire" },
+              signal,
+              check: async () => {
+                await proveAbsent();
+                const current = journalState(snapshot);
+                if (
+                  !nativeComposeFileChildrenKnown(current) ||
+                  current.intent?.phase !== "retiring"
+                ) {
+                  return refuseNativeComposeFile();
+                }
+              },
+              document,
+            });
           }
           await retireMembers({
             snapshot,

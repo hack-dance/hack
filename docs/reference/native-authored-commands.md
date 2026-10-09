@@ -2,7 +2,8 @@
 
 An explicit `HACK_RUNTIME_BACKEND=native` selection delegates an authored
 `.hack/hack.project.json` project to the separate native foreground owner. The
-current command slice supports whole-project foreground `up` on macOS with an
+current command slice supports whole-project foreground `up` and saved-run `ps`
+on macOS with an
 absolute `HACK_NATIVE_BINARY` and private canonical `HACK_NATIVE_HOME`. It requires
 the caller's separately prepared native provider pool and matching runtime binary.
 It does not install or select a runtime automatically. An omitted backend continues
@@ -36,11 +37,30 @@ frontend owner described below. Unsupported intent must
 refuse before managed value resolution and provider work. Early typed input
 capability refusals retain `E_NATIVE_PROJECT_UNSUPPORTED` without exposing
 compiler diagnostics or creating native source/start/run authority. `--detach`,
-`--json`, service subsets and other lifecycle operations except owner-mediated
-`down` refuse before input acquisition. `--branch` supplies an explicit native namespace; its omission uses
+`--json` for `up`, service subsets and unsupported lifecycle operations except
+owner-mediated `down` refuse before input acquisition. `--branch` supplies an explicit native namespace; its omission uses
 the canonical project namespace without inferring a Git branch. Profile and env
 selection keep their compiler contracts. `--env base` bypasses inherited overlays
 with an explicit base selection; omitting `--env` retains the authored/local default.
+
+`ps` and `ps --json` issue one authenticated current status request for the exact
+saved project and explicit branch selection. Text output lists service, container,
+current state and current health. JSON uses the ordinary result envelope with
+`data.backend: "native"`, `data.status`, `data.run`, historical `data.phase`, and
+`data.items`; each item includes service, container, state, health and exitCode.
+Only fresh runtime observations supply state and health. Stored readiness and phase
+do not prove that a service is still live.
+
+A project with no saved attempt reports `not_started`; a retained startup intent
+without a Ready mapping reports `pending` with no confirmed service rows. A dead
+owner, uncertain recovery, changed selection, or malformed or mismatched reply
+refuses with unconfirmed status. The reader holds and rechecks project, private
+directories, saved record identities and the selected executable across its single
+bounded request. It does not compile or read authored values, resolve env, run
+hooks, start workloads, repair state or perform cleanup. Cancellation waits for the
+owned request to settle. Profiles, env overrides, service subsets and other `ps`
+options are unsupported. Native `logs`, `exec`, `run` and `restart` remain separate
+unsupported command slices.
 
 The separate persistent-storage capability requires the runtime's pinned sibling
 witness tool and retains its own ownership and recovery checks. It cannot be combined

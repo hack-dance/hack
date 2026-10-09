@@ -1,5 +1,7 @@
 import { CliUsageError } from "../cli/command.ts";
 import { HackCliError } from "./cli-result.ts";
+import { selectLegacyComposeAdoptedRoot } from "./native-compose-adoption-command.ts";
+import { openLegacyComposeAdoptedGenerationStore } from "./native-compose-adoption-generation.ts";
 import { openNativeComposeGenerationStore } from "./native-compose-generation.ts";
 import { readNativeComposeRouteMetadata } from "./native-compose-route-owner.ts";
 import {
@@ -22,6 +24,16 @@ function unsupported(): never {
     code: "E_NATIVE_PROJECT_UNSUPPORTED",
     message:
       "Native open requires a saved routed generation and supports only its default or named route. Run hack up to save current routing intent. Values omitted.",
+  });
+}
+
+function invalidSavedRouting(error: unknown): never {
+  if (error instanceof HackCliError || error instanceof CliUsageError) {
+    throw error;
+  }
+  throw new HackCliError({
+    code: "E_CONFIG_INVALID",
+    message: "Saved native routing selection is invalid; values omitted.",
   });
 }
 
@@ -90,12 +102,51 @@ export function resolveNativeComposeOpenOrigin(opts: {
 
 /**
  * Select native inputs before legacy context/registration. Read the immutable saved
- * routing report under its generation lease; never compile, decrypt, observe Docker,
- * or invent a host from current authored input merely to answer `open`.
+ * routing report under its generation lease. Retained routing also rechecks its
+ * original resource owner; neither path compiles, decrypts or invents a host.
  */
 export async function tryNativeComposeOpen(
-  opts: NativeComposeOpenOptions
+  input: NativeComposeOpenOptions
 ): Promise<string | null> {
+  const opts = { ...input };
+  const adopted = await selectLegacyComposeAdoptedRoot(opts);
+  if (adopted) {
+    requireNativeComposeBackend({ backend: process.env.HACK_RUNTIME_BACKEND });
+    if (opts.instance !== undefined) {
+      return unsupported();
+    }
+    try {
+      const store = await openLegacyComposeAdoptedGenerationStore({
+        projectRoot: adopted,
+        mode: "saved",
+      });
+      try {
+        const generation = await store.loadActive();
+        if (!generation) {
+          return unsupported();
+        }
+        return await store.withLease({
+          generation,
+          run: (input) => {
+            if (!(input.retainedRouting && input.routingResolution)) {
+              return unsupported();
+            }
+            return Promise.resolve(
+              resolveNativeComposeOpenOrigin({
+                resolution: input.routingResolution,
+                target: opts.target,
+                prefer: opts.prefer,
+              })
+            );
+          },
+        });
+      } finally {
+        await store.close();
+      }
+    } catch (error: unknown) {
+      return invalidSavedRouting(error);
+    }
+  }
   const selected = await selectNativeComposeProject(opts);
   if (!selected) {
     return null;
@@ -142,12 +193,6 @@ export async function tryNativeComposeOpen(
       await store.close();
     }
   } catch (error: unknown) {
-    if (error instanceof HackCliError || error instanceof CliUsageError) {
-      throw error;
-    }
-    throw new HackCliError({
-      code: "E_CONFIG_INVALID",
-      message: "Saved native routing selection is invalid; values omitted.",
-    });
+    return invalidSavedRouting(error);
   }
 }

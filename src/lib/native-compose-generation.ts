@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { lstat, mkdir, rename, unlink } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { isRecord } from "./guards.ts";
+import { copyNativeComposeEffectRefusal } from "./native-compose-effect-diagnostics.ts";
 import { readNativeComposeNetworkTopology } from "./native-compose-network-topology.ts";
 import { measureNativeComposePhase } from "./native-compose-phase-trace.ts";
 import {
@@ -2290,10 +2291,11 @@ export async function openNativeComposeGenerationStore(opts: {
                   }
                   const result = await input.effect();
                   return await finishEffect(input, pending, anchor, result);
-                } catch {
+                } catch (error) {
                   const failure = new NativeComposeGenerationError(
                     "E_NATIVE_COMPOSE_UNCERTAIN"
                   );
+                  copyNativeComposeEffectRefusal(error, failure);
                   try {
                     await rememberStorage(input);
                   } catch {

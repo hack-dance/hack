@@ -1043,7 +1043,26 @@ async function finalizeNativeComposeStop(opts: {
   }
 }
 
-async function runOneOff(opts: {
+export async function assertNativeComposeEffectOwned(opts: {
+  readonly assertFresh: () => Promise<void>;
+  readonly assertOwned: () => Promise<void>;
+  readonly verifyStorage?: () => Promise<void>;
+}) {
+  await measureNativeComposePhase("guard.fresh-before", opts.assertFresh);
+  await measureNativeComposePhase("guard.ownership", opts.assertOwned);
+  await measureNativeComposePhase("guard.storage", async () =>
+    opts.verifyStorage?.()
+  );
+  await measureNativeComposePhase("guard.fresh-after", opts.assertFresh);
+}
+
+function startupOperation(
+  operation: NativeComposeCommandOptions["operation"]
+): operation is "up" | "restart" | "run" {
+  return operation === "up" || operation === "restart" || operation === "run";
+}
+
+export async function runOneOff(opts: {
   readonly options: NativeComposeCommandOptions;
   readonly generation: NativeComposeGeneration;
   readonly document: PrivateDocument;
@@ -1053,6 +1072,7 @@ async function runOneOff(opts: {
   readonly observeStorage: (
     observed: NativeComposeOwnershipObservation
   ) => void;
+  readonly beforeSpawn?: () => void;
   readonly assertOwned: () => Promise<void>;
   readonly assertFresh: () => Promise<void>;
   readonly signal: AbortSignal;
@@ -1079,6 +1099,7 @@ async function runOneOff(opts: {
       stdin: "inherit",
       forwardSignals: true,
       signal: opts.signal,
+      beforeSpawn: opts.beforeSpawn,
       stdout: options.json ? "stderr" : "inherit",
     }
   );
@@ -1513,16 +1534,14 @@ async function executePreparedGeneration(opts: {
         signal,
         assertFresh,
         observeStorage: ownership.observeStorage,
-        assertOwned: async () => {
-          await measureNativeComposePhase("guard.fresh-before", assertFresh);
-          await measureNativeComposePhase("guard.ownership", () =>
-            ownership.assertOwned()
-          );
-          await measureNativeComposePhase("guard.storage", async () =>
-            storage?.verify(generation)
-          );
-          await measureNativeComposePhase("guard.fresh-after", assertFresh);
-        },
+        assertOwned: () =>
+          assertNativeComposeEffectOwned({
+            assertFresh,
+            assertOwned: () => ownership.assertOwned(),
+            verifyStorage: storage
+              ? () => storage.verify(generation)
+              : undefined,
+          }),
       });
     },
   });
@@ -1728,11 +1747,7 @@ async function prepareCommand(opts: {
           inputs.result.plan.open !== undefined
       );
       const operation = options.operation;
-      if (
-        operation !== "up" &&
-        operation !== "restart" &&
-        operation !== "run"
-      ) {
+      if (!startupOperation(operation)) {
         return invalid();
       }
       const storage = await prepareNativeComposeCommandStorage({

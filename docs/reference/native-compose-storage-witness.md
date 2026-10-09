@@ -87,3 +87,25 @@ PostgreSQL and compiled CLI qualification remain required; source wiring is not
 runtime acceptance. Required finite carrier intent survives unknown
 helper outcomes even after enrollment; saved recovery stops resources without
 retiring that anchor. Its offline controls do not qualify a carrier.
+
+Candidate ordinary image-only `up` and `restart` can coalesce the opening and
+closing witness checks within each of the two read phases immediately before
+pending publication and effect entry. This applies only to already enrolled
+directory-xattr storage with an exact unchanged storage merge, no hooks, build,
+projection, recovery or newly declared volume. A speculative ownership read can
+preview that merge but cannot publish it. A birth addition repeats the original
+fully fenced path. Each qualifying phase keeps a fresh closing kernel proof and
+exact source, generation and receipt-incarnation checks. No proof is reused across
+pending publication or effects. Opening preparation, enrollment, pre-spawn and
+both final receipt proofs remain separate. The one-volume offline counter is
+three full proofs before effect entry rather than five; it establishes call
+ordering and count, not CPU savings or atomic observation across the daemon and
+private filesystem.
+
+The candidate one-off `run` path separately omits the enrollment-tail read that
+would immediately repeat its mandatory pre-spawn witness read. `up` and `restart`
+keep that tail read. Cold enrollment still seeds once and verifies before
+publishing its enrolled reference. The one-volume cold-run control reaches the
+actual pre-spawn boundary after eleven helper calls rather than fourteen; it
+intercepts the workload there and does not qualify Docker execution or timing.
+Post-effect generation and final receipt proofs remain separate.

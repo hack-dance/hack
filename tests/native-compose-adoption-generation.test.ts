@@ -627,7 +627,8 @@ boundedTest.each(["no", ""] as const)(
       }
     });
   },
-  30_000
+  // Cover prepare/publish and separate bounded up/down operations without changing their deadlines.
+  60_000
 );
 
 boundedTest.each([

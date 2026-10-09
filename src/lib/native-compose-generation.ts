@@ -449,6 +449,99 @@ function witnessPending(state: Receipt): boolean {
     state.storageWitnesses?.some((entry) => entry.state === "expected") ?? false
   );
 }
+
+/** Only an already enrolled, image-only ordinary startup can share a read phase. */
+function witnessPhaseDocumentSupported(
+  document: Readonly<Record<string, unknown>>,
+  witnesses: readonly NativeComposeStorageWitnessState[]
+): boolean {
+  if (
+    Object.keys(document).some((key) => key.startsWith("x-hack-native-")) ||
+    !isRecord(document.services) ||
+    Object.values(document.services).some(
+      (service) => !isRecord(service) || Object.hasOwn(service, "build")
+    ) ||
+    !isRecord(document.volumes)
+  ) {
+    return false;
+  }
+  const volumes = Object.entries(document.volumes);
+  return (
+    volumes.length === witnesses.length &&
+    volumes.every(
+      ([storage, value]) =>
+        isRecord(value) &&
+        witnesses.some(
+          (entry) => entry.storage === storage && entry.name === value.name
+        )
+    )
+  );
+}
+type WitnessEffectPhase = "prepublication" | "effect-entry";
+function witnessPhaseOptionsSupported<T>(
+  input: NativeComposeEffectOptions<T>
+): boolean {
+  return (
+    (input.operation === "up" || input.operation === "restart") &&
+    input.storageWitnesses?.kind === "directory-xattr" &&
+    input.captureStorage !== undefined &&
+    input.projection === undefined &&
+    input.recoverPending !== true &&
+    input.afterHooks === undefined &&
+    input.downHooks === undefined
+  );
+}
+function witnessPhaseReceiptSupported<T>(
+  state: Receipt,
+  input: NativeComposeEffectOptions<T>,
+  phase: WitnessEffectPhase,
+  activePending: Receipt["pending"]
+): boolean {
+  const witnesses = state.storageWitnesses ?? [];
+  return (
+    state.version === 3 &&
+    state.current !== null &&
+    state.beforeHooks === null &&
+    witnesses.length > 0 &&
+    witnesses.every(
+      (entry) =>
+        entry.state === "enrolled" &&
+        entry.reference.version === 3 &&
+        entry.engineId === input.storageWitnesses?.engineId
+    ) &&
+    (phase === "prepublication"
+      ? state.pending === null
+      : activePending !== null &&
+        state.pending?.generationId === input.generation.generationId &&
+        JSON.stringify(state.pending) === JSON.stringify(activePending))
+  );
+}
+function previewWitnessPhaseStorage<T>(
+  input: NativeComposeEffectOptions<T>,
+  state: Receipt
+): readonly NativeComposeRetainedVolume[] {
+  try {
+    return mergeNativeComposeRetainedVolumes({
+      retained: state.storage ?? [],
+      observed: input.captureStorage?.() ?? refuse(),
+    });
+  } catch {
+    return refuse();
+  }
+}
+function coldRunStoragePending<T>(
+  input: NativeComposeEffectOptions<T>,
+  state: Receipt
+): boolean {
+  return (
+    input.operation === "run" &&
+    state.current === null &&
+    state.pending === null &&
+    input.projection === undefined &&
+    (state.storage?.length ?? 0) === 0 &&
+    (state.storageWitnesses?.length ?? 0) === 0
+  );
+}
 async function witnessWorkPending(state: Receipt): Promise<boolean> {
   return (
     witnessPending(state) ||
@@ -1973,7 +2066,7 @@ export async function openNativeComposeGenerationStore(opts: {
               input.operation,
               input.storageWitnesses
             );
-          const fenceEffectInputs = async <T>(
+          const fenceEffectSource = async <T>(
             input: NativeComposeEffectOptions<T>
           ) => {
             await verifyGeneration(input.generation);
@@ -1983,6 +2076,11 @@ export async function openNativeComposeGenerationStore(opts: {
             if (input.assertFresh) {
               await assertFresh(input.assertFresh);
             }
+          };
+          const fenceEffectInputs = async <T>(
+            input: NativeComposeEffectOptions<T>
+          ) => {
+            await fenceEffectSource(input);
             await assertWitnesses(input);
           };
           const checkEffect = async <T>(
@@ -2003,6 +2101,104 @@ export async function openNativeComposeGenerationStore(opts: {
             // after them, immediately before intent publication or effect entry.
             await fenceEffectInputs(input);
             await check();
+            requireActive();
+          };
+          const assertEffectReceiptSnapshot = async (
+            snapshot: Awaited<ReturnType<typeof readPrivate>>
+          ) => {
+            const current = await readPrivate(receiptPath, RECEIPT_LIMIT);
+            if (
+              !(
+                matchesMutationReceipt(current) &&
+                sameReceiptRead(snapshot, current)
+              )
+            ) {
+              return refuse();
+            }
+          };
+          const assertSpeculativeEffectOwned = async <T>(
+            input: NativeComposeEffectOptions<T>
+          ) => {
+            try {
+              await input.assertOwned();
+            } catch (error) {
+              if (error instanceof NativeComposeGenerationError) {
+                throw error;
+              }
+              return refuse();
+            }
+          };
+          const witnessPhaseSupported = async <T>(
+            input: NativeComposeEffectOptions<T>,
+            state: Receipt,
+            phase: WitnessEffectPhase
+          ) =>
+            witnessPhaseReceiptSupported(state, input, phase, activePending) &&
+            witnessPhaseDocumentSupported(
+              await readGenerationDocument(input.generation),
+              state.storageWitnesses ?? []
+            );
+          const retainUncertainEffect = async <T>(
+            input: NativeComposeEffectOptions<T>
+          ): Promise<never> => {
+            const failure = new NativeComposeGenerationError(
+              "E_NATIVE_COMPOSE_UNCERTAIN"
+            );
+            try {
+              await rememberStorage(input);
+            } catch {
+              // Storage publication failure cannot clear engine uncertainty.
+              throw failure;
+            }
+            throw failure;
+          };
+          /**
+           * One invocation owns one read-only phase, never a reusable proof cache.
+           * A speculative ownership read may qualify only an exact no-op storage
+           * merge. A birth addition repeats the original fully fenced path; no
+           * receipt write or effect can consume the speculative observation.
+           */
+          const checkEffectPhase = async <T>(
+            input: NativeComposeEffectOptions<T>,
+            phase: WitnessEffectPhase
+          ) => {
+            if (!witnessPhaseOptionsSupported(input)) {
+              return await checkEffect(input);
+            }
+            requireActive();
+            await fenceEffectSource(input);
+            const snapshot = await readPrivate(receiptPath, RECEIPT_LIMIT);
+            if (!matchesMutationReceipt(snapshot)) {
+              return refuse();
+            }
+            const state = parseReceipt(
+              parsePrivateJson(snapshot.text),
+              ownedIdentity,
+              checkoutAnchor
+            );
+            if (!(await witnessPhaseSupported(input, state, phase))) {
+              return await checkEffect(input);
+            }
+            await assertEffectReceiptSnapshot(snapshot);
+            await assertSpeculativeEffectOwned(input);
+            const storage = JSON.stringify(
+              previewWitnessPhaseStorage(input, state)
+            );
+            await fenceEffectSource(input);
+            await assertEffectReceiptSnapshot(snapshot);
+            if (storage !== JSON.stringify(state.storage)) {
+              return await checkEffect(input);
+            }
+            await assertWitnesses(input);
+            await fenceEffectSource(input);
+            if (
+              JSON.stringify(previewWitnessPhaseStorage(input, state)) !==
+              storage
+            ) {
+              return refuse();
+            }
+            await check();
+            await assertEffectReceiptSnapshot(snapshot);
             requireActive();
           };
           const performBoundHooks = async <T>(
@@ -2103,7 +2299,7 @@ export async function openNativeComposeGenerationStore(opts: {
             input: NativeComposeEffectOptions<T>,
             pending: NonNullable<Receipt["pending"]>
           ) => {
-            await checkEffect(input);
+            await checkEffectPhase(input, "effect-entry");
             if (input.downHooks?.before) {
               const before = await performBoundHooks(
                 input,
@@ -2399,20 +2595,14 @@ export async function openNativeComposeGenerationStore(opts: {
                 };
                 let state = await receipt();
                 await admit(state);
-                await checkEffect(input);
+                await checkEffectPhase(input, "prepublication");
                 // Ownership can publish newly observed births. Never overwrite them
                 // with the pre-observation receipt when arming the effect intent.
                 state = await receipt();
                 await admit(state);
                 const anchor = knownAnchor(input.generation);
                 const pending = effectPending(state, input, anchor);
-                const coldStorage =
-                  input.operation === "run" &&
-                  state.current === null &&
-                  state.pending === null &&
-                  input.projection === undefined &&
-                  (state.storage?.length ?? 0) === 0 &&
-                  (state.storageWitnesses?.length ?? 0) === 0;
+                const coldStorage = coldRunStoragePending(input, state);
                 await save({ ...state, pending });
                 effectOperation = input.operation;
                 effectRecovery = input.recoverPending === true;
@@ -2426,16 +2616,7 @@ export async function openNativeComposeGenerationStore(opts: {
                   const result = await input.effect();
                   return await finishEffect(input, pending, anchor, result);
                 } catch {
-                  const failure = new NativeComposeGenerationError(
-                    "E_NATIVE_COMPOSE_UNCERTAIN"
-                  );
-                  try {
-                    await rememberStorage(input);
-                  } catch {
-                    // Storage publication failure cannot clear engine uncertainty.
-                    throw failure;
-                  }
-                  throw failure;
+                  return await retainUncertainEffect(input);
                 } finally {
                   effectOperation = null;
                   effectRecovery = false;

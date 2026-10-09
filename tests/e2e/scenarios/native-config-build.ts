@@ -14,7 +14,7 @@ import {
   type Scenario,
 } from "../harness.ts";
 import { prepareNativeEngineTripwire } from "../native-engine-tripwire.ts";
-import { proxyHasNoPublishedPorts } from "./native-config-routing.ts";
+import { proxyHasNoPublishedPorts } from "./native-routing-fixture-ingress.ts";
 
 const TIMEOUT = 120_000;
 const IMAGE_ID = /^sha256:[a-f0-9]{64}$/;

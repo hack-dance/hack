@@ -3,16 +3,15 @@ import { join } from "node:path";
 import { isRecord } from "../../src/lib/guards.ts";
 import { openNativeComposeGenerationStore } from "../../src/lib/native-compose-generation.ts";
 import { readNativeComposeNetworkTopology } from "../../src/lib/native-compose-network-topology.ts";
-import type { NativeComposeOwnershipOptions } from "../../src/lib/native-compose-ownership.ts";
+import type {
+  NativeComposeOwnershipOptions,
+  NativeComposeOwnershipRefusal,
+} from "../../src/lib/native-compose-ownership.ts";
 import { exec } from "../../src/lib/shell.ts";
 import {
   type ProcessPolicyInitialTraceQuery,
   readProcessPolicyInitialTrace,
 } from "./native-process-policy-initial-trace.ts";
-import {
-  isProcessPolicyReplayReason,
-  type ProcessPolicyReplayReason,
-} from "./native-process-policy-replay-reason.ts";
 
 const REFUSAL = "Initial process-policy replay unavailable; values omitted";
 const SERVICES = ["forced", "graceful", "reaper", "retry"] as const;
@@ -26,12 +25,27 @@ const CODES = [
 type Replay = {
   readonly outcome: "owned" | "unready" | "refused";
   readonly code: (typeof CODES)[number] | null;
+  /** First replayed ownership predicate only; absent for success or unclassified probe errors. */
+  readonly reason: NativeComposeOwnershipRefusal | null;
   readonly consumed: number;
   readonly protocolMatched: boolean;
-  readonly reason: ProcessPolicyReplayReason | null;
 };
 function replayCode(value: unknown): value is Replay["code"] {
   return value === null || CODES.some((code) => code === value);
+}
+function replayReason(value: unknown): value is Replay["reason"] {
+  return (
+    value === null ||
+    value === "resource-label" ||
+    value === "generation" ||
+    value === "state" ||
+    value === "volume-birth" ||
+    value === "bridge-policy" ||
+    value === "topology" ||
+    value === "endpoint" ||
+    value === "cross-scan-drift" ||
+    value === "unknown"
+  );
 }
 
 /** Run the real ownership policy against original recorded replies, with no engine access. */
@@ -70,14 +84,11 @@ await Bun.write(Bun.stdout,row.stdout);process.exit(row.exitCode);
   );
   await chmod(docker, 0o700);
   const program = `
-import {captureProcessPolicyOwnershipSource,sameProcessPolicyOwnershipSource,processPolicyReplayReason} from ${JSON.stringify(join(import.meta.dir, "native-process-policy-replay-reason.ts"))};
-const sourceBefore=captureProcessPolicyOwnershipSource();
-const {assertNativeComposeOwned,observeNativeComposeStartupOwned,NativeComposeOwnershipError}=await import(${JSON.stringify(join(import.meta.dir, "../../src/lib/native-compose-ownership.ts"))});
+import {assertNativeComposeOwned,observeNativeComposeStartupOwned,NativeComposeOwnershipError,nativeComposeOwnershipRefusal} from ${JSON.stringify(join(import.meta.dir, "../../src/lib/native-compose-ownership.ts"))};
 const {selection}=await Bun.file(${JSON.stringify(inputs)}).json();
 let outcome="refused",code=null,reason=null;
 try {const value=${opts.mode === "startup" ? 'await observeNativeComposeStartupOwned(selection,["retry"])' : "await assertNativeComposeOwned(selection)"};outcome=value===null?"unready":"owned";}
-catch(error){code=error instanceof NativeComposeOwnershipError?error.code:null;reason=code==="E_NATIVE_COMPOSE_OWNERSHIP"&&sourceBefore?processPolicyReplayReason({stack:error.stack,sourcePath:sourceBefore.path,sourceSha256:sourceBefore.sha256}):"unavailable";}
-if(outcome==="refused"&&!sameProcessPolicyOwnershipSource(sourceBefore,captureProcessPolicyOwnershipSource()))reason="unavailable";
+catch(error){code=error instanceof NativeComposeOwnershipError?error.code:null;reason=nativeComposeOwnershipRefusal(error)??null;}
 const consumed=(await Bun.file(${JSON.stringify(cursor)}).exists())?Number(await Bun.file(${JSON.stringify(cursor)}).text()):0;
 process.stdout.write(JSON.stringify({outcome,code,reason,consumed,protocolMatched:!(await Bun.file(${JSON.stringify(mismatch)}).exists())}));
 `;
@@ -101,13 +112,9 @@ process.stdout.write(JSON.stringify({outcome,code,reason,consumed,protocolMatche
         value.outcome === "unready" ||
         value.outcome === "refused") &&
       replayCode(value.code) &&
-      (value.reason === null || isProcessPolicyReplayReason(value.reason)) &&
-      (value.outcome === "refused"
-        ? value.reason !== null
-        : value.reason === null) &&
-      (value.code === "E_NATIVE_COMPOSE_OWNERSHIP" ||
-        value.reason === null ||
-        value.reason === "unavailable") &&
+      replayReason(value.reason) &&
+      (value.outcome === "refused" || value.reason === null) &&
+      (value.code === "E_NATIVE_COMPOSE_OWNERSHIP" || value.reason === null) &&
       Number.isInteger(value.consumed) &&
       typeof value.consumed === "number" &&
       value.consumed >= 0 &&
@@ -275,4 +282,60 @@ export async function summarizeProcessPolicyInitialTrace(opts: {
   } finally {
     await store.close();
   }
+}
+
+/** Explicit opt-in persists only the first owner-issued refusal from matching after-Compose
+ * recorded replies. This cannot identify the original caller mode or timing. */
+export async function persistProcessPolicyFirstAfterComposeRefusal(opts: {
+  readonly directory: string;
+  readonly enabled: string | undefined;
+  readonly summary: Awaited<
+    ReturnType<typeof summarizeProcessPolicyInitialTrace>
+  >;
+}) {
+  if (opts.enabled !== "1") {
+    return null;
+  }
+  const row = opts.summary.observations.find(
+    (observation) =>
+      observation.phase === "after-compose" &&
+      observation.startup.protocolMatched &&
+      observation.strict.protocolMatched &&
+      [observation.startup, observation.strict].some(
+        (mode) =>
+          mode.outcome === "refused" &&
+          mode.code === "E_NATIVE_COMPOSE_OWNERSHIP"
+      )
+  );
+  if (!row) {
+    return null;
+  }
+  const capsule = {
+    version: 1 as const,
+    kind: "native-process-policy-after-compose-replay-refusal" as const,
+    observationIndex: row.index,
+    replayUsesRecordedReplies: true as const,
+    replaysWallTiming: false as const,
+    originalCallerModeKnown: false as const,
+    startupReason:
+      row.startup.code === "E_NATIVE_COMPOSE_OWNERSHIP"
+        ? row.startup.reason
+        : null,
+    strictReason:
+      row.strict.code === "E_NATIVE_COMPOSE_OWNERSHIP"
+        ? row.strict.reason
+        : null,
+  };
+  const handle = await open(
+    join(opts.directory, "first-after-compose-replay-refusal.json"),
+    "wx",
+    0o600
+  );
+  try {
+    await handle.writeFile(`${JSON.stringify(capsule)}\n`);
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+  return capsule;
 }

@@ -257,6 +257,16 @@ function snapshotReference(
     }),
   });
 }
+
+/** Strict private reference decoder shared with retained-generation receipts. */
+export function parseNativeComposeRouteReference(
+  value: unknown
+): NativeComposeRouteReference {
+  if (!referenceValid(value)) {
+    refuse();
+  }
+  return snapshotReference(value);
+}
 function freezeAttempt(
   attempt: NativeComposeRouteAttempt
 ): NativeComposeRouteAttempt {
@@ -448,6 +458,8 @@ export type NativeComposeRouteClaims = {
   reopen(
     reference: NativeComposeRouteReference
   ): Promise<NativeComposeRouteAttempt>;
+  /** Read-only: the referenced original claim tokens and inodes remain active. */
+  assertHeld(reference: NativeComposeRouteReference): Promise<void>;
   /** Synchronize uncertain intent before invoking any engine child/effect. */
   markEffectsPossible(attempt: NativeComposeRouteAttempt): Promise<void>;
   /** Only the live armed attempt can complete; reopened uncertainty cannot. */
@@ -487,6 +499,22 @@ export type NativeComposeRouteClaims = {
   recoverStopped(opts: {
     readonly references: readonly NativeComposeRouteReference[];
     readonly assertAbsent: Parameters<
+      NativeComposeRouteClaims["release"]
+    >[0]["assertAbsent"];
+  }): Promise<void>;
+  /** Retained legacy owner only: exact original containers remain stopped. The
+   * saved generation must prove known child settlement and route absence. This
+   * marks referenced uncertainty stopped while keeping every claim held. */
+  recoverRetainedStopped(opts: {
+    readonly references: readonly NativeComposeRouteReference[];
+    readonly assertStopped: Parameters<
+      NativeComposeRouteClaims["release"]
+    >[0]["assertAbsent"];
+  }): Promise<void>;
+  /** Retained rollback handoff only, after exact stopped-original, known-child,
+   * route-absence and restored-source proofs. Uncertain journals still veto. */
+  releaseRetained(opts: {
+    readonly assertStoppedAndRestored: Parameters<
       NativeComposeRouteClaims["release"]
     >[0]["assertAbsent"];
   }): Promise<void>;
@@ -1058,6 +1086,7 @@ export async function openNativeComposeRouteClaims(opts: {
     };
     const retire = async (options: {
       readonly verifyOnly?: boolean;
+      readonly keepClaims?: boolean;
       readonly keepHostnames?: readonly string[];
       readonly references?: readonly NativeComposeRouteReference[];
       readonly assertAbsent: Parameters<
@@ -1068,6 +1097,7 @@ export async function openNativeComposeRouteClaims(opts: {
       const assertAbsent = options.assertAbsent;
       const references = options.references?.map(snapshotReference);
       const verifyOnly = options.verifyOnly === true;
+      const keepClaims = options.keepClaims === true;
       if (typeof assertAbsent !== "function") {
         refuse();
       }
@@ -1111,6 +1141,9 @@ export async function openNativeComposeRouteClaims(opts: {
             }
           );
         }
+      }
+      if (keepClaims) {
+        return;
       }
       await publish(join(releasesRoot, `${hash(token())}.json`), {
         version: 1,
@@ -1191,6 +1224,28 @@ export async function openNativeComposeRouteClaims(opts: {
           await activeEntries(records);
           return result;
         }),
+      assertHeld: (reference) => {
+        const snapshot = snapshotReference(reference);
+        return guard(async () => {
+          const records = await journals();
+          const record = find(records, snapshot);
+          const current = await activeEntries(records);
+          if (
+            record.aborted ||
+            record.intent.claims.some((claim) => {
+              const expected = record.entries?.find((entry) =>
+                equal(entry.claim, claim)
+              );
+              return !(
+                expected && equal(current.entries.get(claim.hostname), expected)
+              );
+            })
+          ) {
+            refuse();
+          }
+          await check();
+        });
+      },
       markEffectsPossible: (attempt) =>
         guard(async () => {
           const { reference } = capability(attempt);
@@ -1278,6 +1333,17 @@ export async function openNativeComposeRouteClaims(opts: {
             assertAbsent: options.assertAbsent,
           })
         ),
+      recoverRetainedStopped: (options) => {
+        const references = options.references.map(snapshotReference);
+        const assertAbsent = options.assertStopped;
+        return guard(() =>
+          retire({ references, assertAbsent, keepClaims: true })
+        );
+      },
+      releaseRetained: (options) => {
+        const assertAbsent = options.assertStoppedAndRestored;
+        return guard(() => retire({ assertAbsent }));
+      },
       close: async () => {
         if (!closed) {
           closed = true;

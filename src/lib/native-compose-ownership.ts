@@ -155,6 +155,28 @@ export type NativeComposeProbeFailure =
   | "decode";
 const probeFailures = new WeakMap<object, NativeComposeProbeFailure>();
 
+/** The first refused ownership predicate only; never a claim about its external cause. */
+export type NativeComposeOwnershipRefusal =
+  | "resource-label"
+  | "generation"
+  | "state"
+  | "volume-birth"
+  | "bridge-policy"
+  | "topology"
+  | "endpoint"
+  | "cross-scan-drift"
+  | "unknown";
+const ownershipRefusals = new WeakMap<object, NativeComposeOwnershipRefusal>();
+
+/** Only captured-reply replay reads this diagnostic; callers cannot mint it from error properties. */
+export function nativeComposeOwnershipRefusal(
+  error: unknown
+): NativeComposeOwnershipRefusal | undefined {
+  return typeof error === "object" && error !== null
+    ? ownershipRefusals.get(error)
+    : undefined;
+}
+
 /** Copies, prototypes and caller-created errors cannot acquire an observed probe classification. */
 export function nativeComposeProbeFailure(
   error: unknown
@@ -196,12 +218,20 @@ export class NativeComposeOwnershipError extends Error {
     this.code = code;
   }
 }
-function refuse(code: FailureCode = "E_NATIVE_COMPOSE_OWNERSHIP"): never {
-  throw new NativeComposeOwnershipError(code);
+function refuse(
+  code: FailureCode = "E_NATIVE_COMPOSE_OWNERSHIP",
+  reason: NativeComposeOwnershipRefusal = "unknown"
+): never {
+  const error = new NativeComposeOwnershipError(code);
+  ownershipRefusals.set(error, reason);
+  throw error;
 }
-function requireValue(value: unknown): asserts value {
+function requireValue(
+  value: unknown,
+  reason: NativeComposeOwnershipRefusal = "unknown"
+): asserts value {
   if (!value) {
-    refuse();
+    refuse("E_NATIVE_COMPOSE_OWNERSHIP", reason);
   }
 }
 
@@ -229,7 +259,7 @@ export function mergeNativeComposeNetworkPolicies(opts: {
           next.internal === previous.internal
         )
       ) {
-        return refuse("E_NATIVE_COMPOSE_NETWORK_TRANSITION");
+        return refuse("E_NATIVE_COMPOSE_NETWORK_TRANSITION", "bridge-policy");
       }
     }
   }
@@ -484,7 +514,8 @@ async function queryNativeComposeOwned(
               current.storage === volume.storage &&
               (volume.createdAt === undefined ||
                 current.createdAt === volume.createdAt)
-          )
+          ),
+          "volume-birth"
         );
       }
     }
@@ -522,21 +553,25 @@ async function queryNativeComposeOwned(
           first.name === second.name &&
           first.generationId === second.generationId &&
           first.service === second.service &&
-          first.oneoff === second.oneoff
+          first.oneoff === second.oneoff,
+        "cross-scan-drift"
       );
     }
     requireValue(
       JSON.stringify(topologySnapshot(observations, restarting)) ===
-        JSON.stringify(topologySnapshot(rechecked, restarting))
+        JSON.stringify(topologySnapshot(rechecked, restarting)),
+      "cross-scan-drift"
     );
     requireValue(
       JSON.stringify(volumeSnapshot(observations)) ===
-        JSON.stringify(volumeSnapshot(rechecked))
+        JSON.stringify(volumeSnapshot(rechecked)),
+      "cross-scan-drift"
     );
     for (const kind of ["container", "volume", "network"] as const) {
       requireValue(
         JSON.stringify(await inventory(kind)) ===
-          JSON.stringify(selected.get(kind))
+          JSON.stringify(selected.get(kind)),
+        "cross-scan-drift"
       );
     }
     return {
@@ -594,19 +629,22 @@ async function collectInspections(input: {
       remaining.delete(row.id);
       requireValue(
         row.name ===
-          (kind === "container" ? `/${resource.name}` : resource.name)
+          (kind === "container" ? `/${resource.name}` : resource.name),
+        "resource-label"
       );
       requireValue(
-        row.project === opts.composeProject && row.project === resource.project
+        row.project === opts.composeProject && row.project === resource.project,
+        "resource-label"
       );
       requireValue(
         row.version === "1" &&
           row.instance === opts.runtimeIdentity &&
-          row.owner === opts.ownerToken
+          row.owner === opts.ownerToken,
+        "resource-label"
       );
       if (kind === "container") {
         containers.push(containerObservation(row, opts));
-        requireValue(isRecord(row.networks));
+        requireValue(isRecord(row.networks), "endpoint");
         observations.endpoints.set(resource.id, row.networks);
       } else if (kind === "volume") {
         requireValue(
@@ -622,18 +660,25 @@ async function collectInspections(input: {
           ])
         );
         requireValue(
-          typeof row.storage === "string" && SERVICE.test(row.storage)
+          typeof row.storage === "string" && SERVICE.test(row.storage),
+          "resource-label"
         );
         const expectedVolume = opts.expectedVolumes?.find(
           (volume) => volume.name === resource.name
         );
         requireValue(
-          expectedVolume !== undefined && expectedVolume.storage === row.storage
+          expectedVolume !== undefined &&
+            expectedVolume.storage === row.storage,
+          "resource-label"
         );
-        requireValue(nativeComposeVolumeCreatedAt(row.createdAt));
+        requireValue(
+          nativeComposeVolumeCreatedAt(row.createdAt),
+          "volume-birth"
+        );
         requireValue(
           expectedVolume.createdAt === undefined ||
-            expectedVolume.createdAt === row.createdAt
+            expectedVolume.createdAt === row.createdAt,
+          "volume-birth"
         );
         volumes.push({
           name: resource.name,
@@ -660,11 +705,15 @@ async function collectInspections(input: {
         requireValue(
           expected !== undefined &&
             row.driver === expected.driver &&
-            row.internal === expected.internal
+            row.internal === expected.internal,
+          "bridge-policy"
         );
-        requireValue(isRecord(row.containers));
+        requireValue(isRecord(row.containers), "topology");
         const members = Object.keys(row.containers);
-        requireValue(members.every((id) => ID.test(id)));
+        requireValue(
+          members.every((id) => ID.test(id)),
+          "topology"
+        );
         observations.members.set(resource.name, members.sort());
         networks.push({ id: resource.id, name: resource.name });
       }
@@ -695,17 +744,20 @@ function containerObservation(
   );
   requireValue(
     typeof row.generation === "string" &&
-      opts.generationIds.includes(row.generation)
+      opts.generationIds.includes(row.generation),
+    "generation"
   );
   requireValue(
     typeof row.service === "string" &&
-      opts.expectedServices.includes(row.service)
+      opts.expectedServices.includes(row.service),
+    "resource-label"
   );
   requireValue(
     row.oneoff === "True" ||
       row.oneoff === "False" ||
       row.oneoff === "true" ||
-      row.oneoff === "false"
+      row.oneoff === "false",
+    "resource-label"
   );
   requireValue(
     row.state === "created" ||
@@ -714,18 +766,21 @@ function containerObservation(
       row.state === "removing" ||
       row.state === "paused" ||
       row.state === "exited" ||
-      row.state === "dead"
+      row.state === "dead",
+    "state"
   );
   requireValue(
     typeof row.exitCode === "number" &&
       Number.isSafeInteger(row.exitCode) &&
-      row.exitCode >= 0
+      row.exitCode >= 0,
+    "state"
   );
   requireValue(
     row.health === null ||
       row.health === "starting" ||
       row.health === "healthy" ||
-      row.health === "unhealthy"
+      row.health === "unhealthy",
+    "state"
   );
   requireValue(typeof row.id === "string" && ID.test(row.id));
   requireValue(typeof row.name === "string");
@@ -745,7 +800,8 @@ function endpointAliases(value: unknown): readonly string[] {
   requireValue(
     Array.isArray(value) &&
       value.every((alias) => typeof alias === "string" && NAME.test(alias)) &&
-      new Set(value).size === value.length
+      new Set(value).size === value.length,
+    "endpoint"
   );
   return [...new Set(value as string[])].sort();
 }
@@ -767,7 +823,8 @@ function validateEndpointIdentity(opts: {
   if (unrealizedCreatedEndpoint) {
     requireValue(
       id !== undefined &&
-        (endpoint.NetworkID === undefined || endpoint.NetworkID === "")
+        (endpoint.NetworkID === undefined || endpoint.NetworkID === ""),
+      "endpoint"
     );
     if (
       endpoint.Aliases === undefined ||
@@ -777,16 +834,20 @@ function validateEndpointIdentity(opts: {
       return;
     }
   } else if (absentOwnedRecovery) {
-    requireValue(endpoint.NetworkID === undefined || endpoint.NetworkID === "");
+    requireValue(
+      endpoint.NetworkID === undefined || endpoint.NetworkID === "",
+      "endpoint"
+    );
     if (endpoint.Aliases === undefined || endpoint.Aliases === null) {
       return;
     }
   } else {
-    requireValue(id !== undefined && endpoint.NetworkID === id);
+    requireValue(id !== undefined && endpoint.NetworkID === id, "endpoint");
   }
   requireValue(
     JSON.stringify(endpointAliases(endpoint.Aliases)) ===
-      JSON.stringify(expectedAliases)
+      JSON.stringify(expectedAliases),
+    "endpoint"
   );
 }
 
@@ -869,7 +930,8 @@ function requireLiveMember(opts: {
       networkPolicies(selection).length === 1 &&
       networkPolicies(selection)[0]?.internal === false &&
       networkId !== undefined &&
-      endpoint.NetworkID === networkId
+      endpoint.NetworkID === networkId,
+    "topology"
   );
   return true;
 }
@@ -894,7 +956,8 @@ function validateTopology(
         (id) =>
           containers.has(id) &&
           Object.hasOwn(observations.endpoints.get(id) ?? {}, name)
-      )
+      ),
+      "topology"
     );
   }
   for (const container of observations.containers) {
@@ -903,18 +966,19 @@ function validateTopology(
         workload.generationId === container.generationId &&
         workload.service === container.service
     );
-    requireValue(policy !== undefined);
+    requireValue(policy !== undefined, "topology");
     const endpoints = observations.endpoints.get(container.id);
     requireValue(
       endpoints !== undefined &&
         hasKeys(
           endpoints,
           policy.networks.map((network) => network.name)
-        )
+        ),
+      "topology"
     );
     for (const attachment of policy.networks) {
       const endpoint = endpoints[attachment.name];
-      requireValue(isRecord(endpoint));
+      requireValue(isRecord(endpoint), "endpoint");
       const id = attachment.externalId ?? owned.get(attachment.name);
       const absentOwnedRecovery =
         opts.recovery === "down" &&
@@ -930,7 +994,8 @@ function validateTopology(
       });
       if (unrealizedCreatedEndpoint) {
         requireValue(
-          !observations.members.get(attachment.name)?.includes(container.id)
+          !observations.members.get(attachment.name)?.includes(container.id),
+          "topology"
         );
       }
       const expected = container.oneoff
@@ -984,7 +1049,7 @@ function topologySnapshot(
         id,
         Object.entries(endpoints)
           .map(([name, endpoint]) => {
-            requireValue(isRecord(endpoint));
+            requireValue(isRecord(endpoint), "endpoint");
             return [
               name,
               endpoint.NetworkID,

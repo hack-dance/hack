@@ -103,6 +103,7 @@ let projectRoot: string;
 let priorPath: string | undefined;
 let priorCI: string | undefined;
 let priorExecutionMode: string | undefined;
+let priorRuntimeBackend: string | undefined;
 let fixture: Fixture;
 let publicStatic7Commands = 0;
 const publicStatic7Settlement = createCompletedJobFixtureSettlement();
@@ -112,6 +113,8 @@ beforeEach(async () => {
   priorPath = process.env.PATH;
   priorCI = process.env.CI;
   priorExecutionMode = process.env.HACK_EXECUTION_MODE;
+  priorRuntimeBackend = process.env.HACK_RUNTIME_BACKEND;
+  process.env.HACK_RUNTIME_BACKEND = "compose";
   root = await realpath(
     await mkdtemp(join(tmpdir(), "native-adoption-binding-"))
   );
@@ -268,6 +271,7 @@ afterEach(async () => {
   restoreEnv("PATH", priorPath);
   restoreEnv("CI", priorCI);
   restoreEnv("HACK_EXECUTION_MODE", priorExecutionMode);
+  restoreEnv("HACK_RUNTIME_BACKEND", priorRuntimeBackend);
   await rm(root, { recursive: true, force: true });
 });
 async function save() {
@@ -573,6 +577,45 @@ function publicStatic7Stages() {
     );
   };
 }
+
+test("retained Compose fixture admits its explicit backend and preserves opposite-backend refusal before probes", async () => {
+  await publicStatic7Case(async () => {
+    expect(process.env.HACK_RUNTIME_BACKEND).toBe("compose");
+    const binary = await compiler();
+    const { store, generation } = await prepared(binary);
+    const priorCompiler = process.env.HACK_CONFIG_COMPILER_BINARY;
+    try {
+      process.env.HACK_CONFIG_COMPILER_BINARY = binary;
+      await store.publish({ generation, binary });
+      const commands = await readFile(join(root, "commands"), "utf8");
+      process.env.HACK_RUNTIME_BACKEND = "native";
+      try {
+        await expect(
+          tryLegacyComposeAdoptedCommand({
+            cwd: projectRoot,
+            operation: "up",
+            detach: true,
+          })
+        ).rejects.toMatchObject({ code: "E_NATIVE_PROJECT_UNSUPPORTED" });
+        expect(await readFile(join(root, "commands"), "utf8")).toBe(commands);
+        expect((await readReceipt()).pendingOperation).toBeNull();
+      } finally {
+        process.env.HACK_RUNTIME_BACKEND = "compose";
+      }
+      expect(
+        await tryLegacyComposeAdoptedCommand({
+          cwd: projectRoot,
+          operation: "up",
+          detach: true,
+        })
+      ).toBe(0);
+      expect(await mutationCommands()).toEqual([["container", "start", ID]]);
+    } finally {
+      restoreEnv("HACK_CONFIG_COMPILER_BINARY", priorCompiler);
+      await store.close();
+    }
+  });
+});
 
 boundedTest.each(["no", ""] as const)(
   "public retained up dispatches the maintained static7 family with disabled policy %j",

@@ -81,7 +81,16 @@ fn selected_two_bridge_aliases_lower_to_distinct_owned_resources_and_receipt_fiv
     );
     let receipt =
         Receipt::preparing(&config, OWNER, "12345678-abcd-abcd-abcd-123456789abc").unwrap();
-    assert_eq!(serde_json::to_value(&receipt).unwrap()["version"], 5);
+    let wire = serde_json::to_value(&receipt).unwrap();
+    assert_eq!(wire["version"], 5);
+    assert!(
+        wire["resources"]["network:inside"]
+            .as_object()
+            .unwrap()
+            .get("outbound")
+            .is_none()
+    );
+    assert_eq!(wire["resources"]["network:outbound"]["outbound"], true);
     assert!(receipt.validate(receipt.review.scope().run, OWNER).is_ok());
     #[cfg(target_os = "macos")]
     assert!(receipt.require_recovery_ready().is_err());

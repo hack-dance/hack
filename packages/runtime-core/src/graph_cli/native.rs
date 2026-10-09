@@ -9,7 +9,7 @@ use std::{
 fn refused() -> CandidateError {
     CandidateError::new(
         "native_graph_arguments",
-        "Use graph native plan --source-file FILE, run|serve --source-file FILE --expect-review SHA [--environment-stdin] [--timeout-seconds 1..300] [--storage-witness-tool FILE --expect-storage-witness-tool SHA], inspect|cleanup|recovery-selection --run-id ID, recover-live-owner --run-id ID --expect-receipt SHA --expect-owner SHA, or control --run-id ID --action status|cleanup; optional --json. Foreground ownership and its recovery require macOS. Native source and private envelopes require their exact kind/version; values omitted.",
+        "Use graph native plan --source-file FILE, run|serve --source-file FILE --expect-review SHA [--environment-stdin] [--timeout-seconds 1..300] [--storage-witness-tool FILE --expect-storage-witness-tool SHA], inspect|cleanup|recovery-selection --run-id ID, recover-live-owner --run-id ID --expect-receipt SHA --expect-owner SHA, or logs --run-id ID --service SERVICE [--tail 1..1000], or control --run-id ID --action status|cleanup; optional --json. Foreground ownership and its recovery require macOS. Native source and private envelopes require their exact kind/version; values omitted.",
     )
 }
 fn hex(value: &str, len: usize) -> bool {
@@ -41,6 +41,8 @@ pub(super) fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, Can
             | "--action"
             | "--expect-receipt"
             | "--expect-owner"
+            | "--service"
+            | "--tail"
             | "--storage-witness-tool"
             | "--expect-storage-witness-tool") => {
                 let value = *args
@@ -53,6 +55,43 @@ pub(super) fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, Can
                 index += 2;
             }
             _ => return Err(refused()),
+        }
+    }
+    if *action == "logs" {
+        if private
+            || !(2..=3).contains(&singles.len())
+            || singles
+                .keys()
+                .any(|key| !["--run-id", "--service", "--tail"].contains(key))
+        {
+            return Err(refused());
+        }
+        let run = *singles
+            .get("--run-id")
+            .filter(|run| hex(run, 32))
+            .ok_or_else(refused)?;
+        let service = *singles
+            .get("--service")
+            .filter(|s| {
+                !s.is_empty()
+                    && s.len() <= 128
+                    && s.bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.'))
+            })
+            .ok_or_else(refused)?;
+        let raw = singles.get("--tail").copied().unwrap_or("200");
+        let tail = raw.parse::<u16>().map_err(|_| refused())?;
+        if !(1..=1000).contains(&tail) || tail.to_string() != raw {
+            return Err(refused());
+        }
+        #[cfg(target_os = "macos")]
+        {
+            return native::foreground::logs(candidate, run, service, tail);
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = (run, service, tail);
+            return Err(foreground_unavailable());
         }
     }
     if *action == "recover-live-owner" {
@@ -161,6 +200,8 @@ pub(super) fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, Can
         || singles.contains_key("--action")
         || singles.contains_key("--expect-receipt")
         || singles.contains_key("--expect-owner")
+        || singles.contains_key("--service")
+        || singles.contains_key("--tail")
     {
         return Err(refused());
     }

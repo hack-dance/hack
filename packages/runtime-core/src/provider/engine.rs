@@ -35,6 +35,7 @@ struct Transport {
     client: Client,
     timeout: Duration,
     admission_deadline: Option<Instant>,
+    observation_deadline: Option<Instant>,
 }
 
 impl Transport {
@@ -52,6 +53,7 @@ impl Transport {
             client,
             timeout,
             admission_deadline: None,
+            observation_deadline: None,
         })
     }
 
@@ -115,7 +117,10 @@ impl Transport {
             requires_admission
                 .then_some(self.admission_deadline)
                 .flatten(),
-            deadline,
+            match (deadline, self.observation_deadline) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (a, b) => a.or(b),
+            },
         )?);
         let response = request.send().map_err(|_| failure("Engine request failed or timed out; its effect may be uncertain. No request was replayed."))?;
         response_bytes(response)
@@ -452,6 +457,20 @@ impl<'a> Engine<'a> {
         Self::connect_mode(candidate, true)
     }
 
+    /// Read-only operations share one fixed budget across connection and every query.
+    #[cfg(all(target_os = "macos", feature = "native-config-plan"))]
+    pub(in crate::provider) fn connect_cleanup_until(
+        candidate: &'a Candidate,
+        deadline: Instant,
+    ) -> Result<Self, CandidateError> {
+        super::managed_environment::remaining_until(deadline)?;
+        Self::from_guest_until(
+            OwnedGuest::connect_cleanup(candidate)?,
+            true,
+            Some(deadline),
+        )
+    }
+
     #[cfg(target_os = "macos")]
     pub(super) fn connect_cleanup_wait(candidate: &'a Candidate) -> Result<Self, CandidateError> {
         Self::from_guest(OwnedGuest::connect_cleanup_wait(candidate)?, true)
@@ -467,7 +486,15 @@ impl<'a> Engine<'a> {
     }
 
     fn from_guest(guest: OwnedGuest<'a>, cleanup_only: bool) -> Result<Self, CandidateError> {
-        let transport = Transport::new(&guest.engine_socket()?, Duration::from_secs(40))?;
+        Self::from_guest_until(guest, cleanup_only, None)
+    }
+    fn from_guest_until(
+        guest: OwnedGuest<'a>,
+        cleanup_only: bool,
+        deadline: Option<Instant>,
+    ) -> Result<Self, CandidateError> {
+        let mut transport = Transport::new(&guest.engine_socket()?, Duration::from_secs(40))?;
+        transport.observation_deadline = deadline;
         let engine = Self {
             guest,
             transport,

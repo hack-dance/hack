@@ -1697,7 +1697,6 @@ intersections and guest/routed/TCP endpoint delivery. See
 [supervised host processes](../../docs/reference/native-authored-commands.md#supervised-host-processes)
 for stop/recovery and current qualification limits.
 
-
 ### Native guest endpoint observations
 
 `provider::graph::native::endpoints::observe` adapts a decoded native receipt and

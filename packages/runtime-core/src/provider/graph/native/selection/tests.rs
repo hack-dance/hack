@@ -356,11 +356,14 @@ fn frontend_hook_permit_is_versioned_scoped_and_rechecked_without_normal_graph_b
         serde_json::to_value(selected.review()).unwrap()["provenance"]["input"]["semantic_hash"],
         semantic_hash
     );
+    let read_pin = selected.read_pin();
+    read_pin.verify(&fixture.candidate).unwrap();
     let permit = root.join(format!("{run}.hook-preflight-permit.json"));
     let original = fs::read(&permit).unwrap();
     fs::remove_file(&permit).unwrap();
     fs::write(&permit, original).unwrap();
     fs::set_permissions(&permit, fs::Permissions::from_mode(0o600)).unwrap();
+    selection_refused(read_pin.verify(&fixture.candidate));
     selection_refused(selected.prepare(&fixture.candidate, &native::ManagedValues::new()));
     wire["hook_permit"] = private(
         &root.join(format!("{run}.hook-execution-permit.json")),
@@ -375,6 +378,14 @@ fn frontend_hook_permit_is_versioned_scoped_and_rechecked_without_normal_graph_b
         serde_json::to_value(execution.review()).unwrap()["provenance"]["input"]["semantic_hash"],
         semantic_hash
     );
+    let execution_read_pin = execution.read_pin();
+    execution_read_pin.verify(&fixture.candidate).unwrap();
+    let owner_path = root.join(format!("{key}.hooks.json"));
+    let original_owner = fs::read(&owner_path).unwrap();
+    fs::rename(&owner_path, root.join("preserved-owner.json")).unwrap();
+    fs::write(&owner_path, original_owner).unwrap();
+    fs::set_permissions(&owner_path, fs::Permissions::from_mode(0o600)).unwrap();
+    selection_refused(execution_read_pin.verify(&fixture.candidate));
     fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
     selection_refused(Source::read_frontend(&path, true));
     fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();

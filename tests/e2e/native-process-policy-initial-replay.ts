@@ -6,7 +6,9 @@ import { readNativeComposeNetworkTopology } from "../../src/lib/native-compose-n
 import type {
   NativeComposeOwnershipOptions,
   NativeComposeOwnershipRefusal,
+  NativeComposeTopologyPredicate,
 } from "../../src/lib/native-compose-ownership.ts";
+import { isNativeComposeTopologyPredicate } from "../../src/lib/native-compose-ownership.ts";
 import { exec } from "../../src/lib/shell.ts";
 import {
   type ProcessPolicyInitialTraceQuery,
@@ -27,6 +29,7 @@ type Replay = {
   readonly code: (typeof CODES)[number] | null;
   /** First replayed ownership predicate only; absent for success or unclassified probe errors. */
   readonly reason: NativeComposeOwnershipRefusal | null;
+  readonly topologyPredicate: NativeComposeTopologyPredicate | null;
   readonly consumed: number;
   readonly protocolMatched: boolean;
 };
@@ -84,13 +87,13 @@ await Bun.write(Bun.stdout,row.stdout);process.exit(row.exitCode);
   );
   await chmod(docker, 0o700);
   const program = `
-import {assertNativeComposeOwned,observeNativeComposeStartupOwned,NativeComposeOwnershipError,nativeComposeOwnershipRefusal} from ${JSON.stringify(join(import.meta.dir, "../../src/lib/native-compose-ownership.ts"))};
+import {assertNativeComposeOwned,observeNativeComposeStartupOwned,NativeComposeOwnershipError,nativeComposeOwnershipRefusal,nativeComposeTopologyPredicate} from ${JSON.stringify(join(import.meta.dir, "../../src/lib/native-compose-ownership.ts"))};
 const {selection}=await Bun.file(${JSON.stringify(inputs)}).json();
-let outcome="refused",code=null,reason=null;
+let outcome="refused",code=null,reason=null,topologyPredicate=null;
 try {const value=${opts.mode === "startup" ? 'await observeNativeComposeStartupOwned(selection,["retry"])' : "await assertNativeComposeOwned(selection)"};outcome=value===null?"unready":"owned";}
-catch(error){code=error instanceof NativeComposeOwnershipError?error.code:null;reason=nativeComposeOwnershipRefusal(error)??null;}
+catch(error){code=error instanceof NativeComposeOwnershipError?error.code:null;reason=nativeComposeOwnershipRefusal(error)??null;topologyPredicate=nativeComposeTopologyPredicate(error)??null;}
 const consumed=(await Bun.file(${JSON.stringify(cursor)}).exists())?Number(await Bun.file(${JSON.stringify(cursor)}).text()):0;
-process.stdout.write(JSON.stringify({outcome,code,reason,consumed,protocolMatched:!(await Bun.file(${JSON.stringify(mismatch)}).exists())}));
+process.stdout.write(JSON.stringify({outcome,code,reason,topologyPredicate,consumed,protocolMatched:!(await Bun.file(${JSON.stringify(mismatch)}).exists())}));
 `;
   const result = await exec(
     [process.execPath, "--no-env-file", "-e", program],
@@ -113,6 +116,12 @@ process.stdout.write(JSON.stringify({outcome,code,reason,consumed,protocolMatche
         value.outcome === "refused") &&
       replayCode(value.code) &&
       replayReason(value.reason) &&
+      (value.topologyPredicate === null ||
+        isNativeComposeTopologyPredicate(value.topologyPredicate)) &&
+      (value.topologyPredicate === null ||
+        (value.code === "E_NATIVE_COMPOSE_OWNERSHIP" &&
+          value.reason === "topology" &&
+          value.outcome === "refused")) &&
       (value.outcome === "refused" || value.reason === null) &&
       (value.code === "E_NATIVE_COMPOSE_OWNERSHIP" || value.reason === null) &&
       Number.isInteger(value.consumed) &&
@@ -128,6 +137,7 @@ process.stdout.write(JSON.stringify({outcome,code,reason,consumed,protocolMatche
     outcome: value.outcome,
     code: value.code,
     reason: value.reason,
+    topologyPredicate: value.topologyPredicate,
     consumed: value.consumed,
     protocolMatched: value.protocolMatched,
   };
@@ -325,6 +335,8 @@ export async function persistProcessPolicyFirstAfterComposeRefusal(opts: {
       row.strict.code === "E_NATIVE_COMPOSE_OWNERSHIP"
         ? row.strict.reason
         : null,
+    startupTopologyPredicate: row.startup.topologyPredicate,
+    strictTopologyPredicate: row.strict.topologyPredicate,
   };
   const handle = await open(
     join(opts.directory, "first-after-compose-replay-refusal.json"),

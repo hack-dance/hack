@@ -40,7 +40,7 @@ impl Identity {
         }
     }
 }
-#[derive(PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 struct Content {
     identity: Identity,
     size: u64,
@@ -61,7 +61,7 @@ impl Content {
         }
     }
 }
-#[derive(PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 struct Document {
     content: Content,
     digest: [u8; 32],
@@ -251,7 +251,7 @@ fn document(
     Ok((Some(Document { content, digest }), Some(text)))
 }
 
-#[derive(PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 enum GitMarker {
     Absent,
     Directory(Identity),
@@ -321,28 +321,23 @@ pub struct Selected {
     review: native_input::Review,
     deadline: Deadline,
 }
-impl Selected {
-    pub fn review(&self) -> &native_input::Review {
-        &self.review
-    }
-    pub fn project_root(&self) -> &Path {
-        &self.root
-    }
-    pub fn remaining(&self) -> Result<Instant, CandidateError> {
-        self.deadline.to_instant()
-    }
-    /// Shorten the existing ingress deadline after bounded private descriptor consumption.
-    /// A later supplied deadline cannot renew this selection.
-    pub fn restrict_deadline(&mut self, deadline: Instant) -> Result<(), CandidateError> {
-        self.deadline = Deadline::from_instant(self.remaining()?.min(deadline))?;
-        Ok(())
-    }
-    /// Read-only recheck; no atomic multi-file snapshot or editor exclusion is claimed.
-    pub fn assert_fresh(&self, candidate: &Candidate) -> Result<(), CandidateError> {
-        self.remaining()?;
-        if let Some(source) = &self.project_source {
-            source.verify()?;
-        }
+/// Value-free authored input fence retained by the live owner for read-only control.
+/// Its lifetime is the owner lifetime; this does not renew a startup deadline.
+pub(super) struct ReadPin {
+    hooks: Option<hooks::Permit>,
+    source: Option<(PathBuf, Document)>,
+    candidate_root: PathBuf,
+    root: PathBuf,
+    branch: Option<String>,
+    root_identity: Identity,
+    hack_identity: Identity,
+    project: Document,
+    local: Option<Document>,
+    git: GitMarker,
+    review: native_input::Review,
+}
+impl ReadPin {
+    pub(super) fn verify(&self, candidate: &Candidate) -> Result<(), CandidateError> {
         if let Some((path, snapshot)) = &self.source {
             if document(path, true)?.0.as_ref() != Some(snapshot) {
                 return Err(refused());
@@ -375,6 +370,47 @@ impl Selected {
         if let Some(hooks) = &self.hooks {
             hooks.verify()?;
         }
+        Ok(())
+    }
+}
+impl Selected {
+    fn read_pin(&self) -> ReadPin {
+        ReadPin {
+            hooks: self.hooks.clone(),
+            source: self.source.clone(),
+            candidate_root: self.candidate_root.clone(),
+            root: self.root.clone(),
+            branch: self.branch.clone(),
+            root_identity: self.root_identity.clone(),
+            hack_identity: self.hack_identity.clone(),
+            project: self.project.clone(),
+            local: self.local.clone(),
+            git: self.git.clone(),
+            review: self.review.clone(),
+        }
+    }
+    pub fn review(&self) -> &native_input::Review {
+        &self.review
+    }
+    pub fn project_root(&self) -> &Path {
+        &self.root
+    }
+    pub fn remaining(&self) -> Result<Instant, CandidateError> {
+        self.deadline.to_instant()
+    }
+    /// Shorten the existing ingress deadline after bounded private descriptor consumption.
+    /// A later supplied deadline cannot renew this selection.
+    pub fn restrict_deadline(&mut self, deadline: Instant) -> Result<(), CandidateError> {
+        self.deadline = Deadline::from_instant(self.remaining()?.min(deadline))?;
+        Ok(())
+    }
+    /// Read-only recheck; no atomic multi-file snapshot or editor exclusion is claimed.
+    pub fn assert_fresh(&self, candidate: &Candidate) -> Result<(), CandidateError> {
+        self.remaining()?;
+        if let Some(source) = &self.project_source {
+            source.verify()?;
+        }
+        self.read_pin().verify(candidate)?;
         self.remaining()?;
         Ok(())
     }
@@ -413,6 +449,10 @@ pub struct Prepared {
     prepared: native_input::Prepared,
 }
 impl Prepared {
+    #[cfg(target_os = "macos")]
+    pub(super) fn read_pin(&self) -> ReadPin {
+        self.selected.read_pin()
+    }
     pub fn assert_fresh(&self, candidate: &Candidate) -> Result<(), CandidateError> {
         self.selected.assert_fresh(candidate)?;
         self.prepared.remaining()?;

@@ -339,6 +339,7 @@ export async function tryLegacyComposeAdoptedCommand(
       }
       return await store.withLease({
         generation,
+        material: options.operation === "exec" ? "verify" : "saved",
         run: async (privateInput) =>
           await observe({
             options,

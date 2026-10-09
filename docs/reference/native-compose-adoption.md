@@ -307,7 +307,9 @@ locals remain refused by this file family before material or engine acquisition.
 Unused declarations do not grant access or authorize material reads.
 
 Preparation checks every original bind's exact source path, target and read-only
-flag alongside the existing original resource identities. Descriptor-held reads
+flag alongside the existing original resource identities. Docker may omit a
+bind's `Name` field; its observation projects that absence as the exact empty
+name. Named volumes still require their literal verified name. Descriptor-held reads
 require canonical owned directories and regular, single-link source files; no
 symlink, hardlink, path escape, source replacement or unsafe writable material is
 adopted. It never rewrites or chmods the original. Private source facts retain

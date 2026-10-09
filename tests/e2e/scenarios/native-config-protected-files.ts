@@ -53,12 +53,14 @@ const DB_TAG = "postgres:17.6-alpine";
 const LOOP = ["bun", "-e", "setInterval(()=>{},1000)"];
 const FORMATS = {
   container:
-    '{"id":{{json .Id}},"name":{{json .Name}},"createdAt":{{json .Created}},"image":{{json .Image}},"labels":{{json .Config.Labels}},"command":{{json .Config.Cmd}},"entrypoint":{{json .Config.Entrypoint}},"running":{{json .State.Running}},"status":{{json .State.Status}},"paused":{{json .State.Paused}},"ports":{{json .HostConfig.PortBindings}},"publishAll":{{json .HostConfig.PublishAllPorts}},"runtimePorts":{{json .NetworkSettings.Ports}},"mounts":[{{range $i,$m := .Mounts}}{{if $i}},{{end}}{"type":{{json $m.Type}},"name":{{json $m.Name}},"source":{{json $m.Source}},"target":{{json $m.Destination}},"rw":{{json $m.RW}}}{{end}}],"networks":[{{$first := true}}{{range $name,$n := .NetworkSettings.Networks}}{{if not $first}},{{end}}{{$first = false}}{"name":{{json $name}},"id":{{json $n.NetworkID}},"aliases":{{json $n.Aliases}}}{{end}}]}',
+    '{"id":{{json .Id}},"name":{{json .Name}},"createdAt":{{json .Created}},"image":{{json .Image}},"labels":{{json .Config.Labels}},"command":{{json .Config.Cmd}},"entrypoint":{{json .Config.Entrypoint}},"running":{{json .State.Running}},"status":{{json .State.Status}},"paused":{{json .State.Paused}},"ports":{{json .HostConfig.PortBindings}},"publishAll":{{json .HostConfig.PublishAllPorts}},"runtimePorts":{{json .NetworkSettings.Ports}},"mounts":[{{range $i,$m := .Mounts}}{{if $i}},{{end}}{"type":{{json $m.Type}},"name":{{$name := ""}}{{range $key, $value := $m}}{{if eq $key "Name"}}{{$name = $value}}{{end}}{{end}}{{json $name}},"source":{{json $m.Source}},"target":{{json $m.Destination}},"rw":{{json $m.RW}}}{{end}}],"networks":[{{$first := true}}{{range $name,$n := .NetworkSettings.Networks}}{{if not $first}},{{end}}{{$first = false}}{"name":{{json $name}},"id":{{json $n.NetworkID}},"aliases":{{json $n.Aliases}}}{{end}}]}',
   network:
     '{"id":{{json .Id}},"name":{{json .Name}},"createdAt":{{json .Created}},"driver":{{json .Driver}},"scope":{{json .Scope}},"internal":{{json .Internal}},"labels":{{json .Labels}},"members":[{{$first := true}}{{range $id,$c := .Containers}}{{if not $first}},{{end}}{{$first = false}}{{json $id}}{{end}}]}',
   volume:
     '{"name":{{json .Name}},"createdAt":{{json .CreatedAt}},"driver":{{json .Driver}},"scope":{{json .Scope}},"labels":{{json .Labels}},"options":{{json .Options}},"mountpoint":{{json .Mountpoint}}}',
 } as const;
+/** Fixed observation text only; absent bind Name defaults empty, present values remain exact. */
+export const nativeProtectedFileContainerInspectFormat = FORMATS.container;
 type Kind = keyof typeof FORMATS;
 type Row = Record<string, unknown>;
 type Inventory = {

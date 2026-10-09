@@ -649,6 +649,18 @@ test.each([
   await refusal(acquireLegacyComposeAdoptionBinding({ projectRoot }));
 });
 test.each([
+  undefined,
+  "",
+])("a named volume cannot acquire an absent or empty observed name: %j", async (name) => {
+  const mount = container().mounts;
+  if (!(Array.isArray(mount) && mount[0])) {
+    throw new Error("Missing synthetic retained mount");
+  }
+  mount[0].name = name;
+  await save();
+  await refusal(acquireLegacyComposeAdoptionBinding({ projectRoot }));
+});
+test.each([
   "container",
   "network",
 ])("missing existing %s refuses", async (kind) => {

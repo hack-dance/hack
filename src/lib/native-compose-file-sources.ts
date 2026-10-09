@@ -382,6 +382,17 @@ export async function acquireNativeComposeFileSources(opts: {
     });
     return ticket;
   } catch (error) {
+    // Private one-shot diagnosis: report the caught location before the existing
+    // redaction, preserving cleanup, error selection and the original throw.
+    try {
+      const code = typeof error === "object" && error !== null && "code" in error ? error.code : undefined;
+      console.error(JSON.stringify({
+        privateDiagnostic: "ordinary-up-d0",
+        stage: "source-acquisition-catch",
+        code: typeof code === "string" && ["E_NATIVE_COMPOSE_STATE", "ENOENT", "EACCES", "EPERM", "EOPNOTSUPP", "EINVAL"].includes(code) ? code : "other",
+        frames: (error instanceof Error ? error.stack ?? "" : "").split("\n").filter((line) => line.includes("/src/lib/")).slice(0, 8).map((line) => line.slice(0, 512)),
+      }));
+    } catch { /* Diagnostics cannot replace the original throw. */ }
     await close();
     if (
       error instanceof NativeConfigCompilerError &&

@@ -352,6 +352,18 @@ export class NativeComposeGenerationError extends Error {
       }[code]
     );
     this.code = code;
+    // Private one-shot diagnosis only. Preserve this exact exception and expose
+    // source frames, never input values, messages, environment or material.
+    if (code === "E_NATIVE_COMPOSE_STATE") {
+      try {
+        console.error(JSON.stringify({
+          privateDiagnostic: "ordinary-up-d0",
+          stage: "state-factory",
+          code,
+          frames: (this.stack ?? "").split("\n").filter((line) => line.includes("/src/lib/")).slice(0, 8).map((line) => line.slice(0, 512)),
+        }));
+      } catch { /* Diagnostics cannot replace the original throw. */ }
+    }
   }
 }
 function refuse(): never {

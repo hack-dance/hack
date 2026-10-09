@@ -16,6 +16,7 @@ import {
 } from "../lib/native-compose-adoption-generation.ts";
 import { previewLegacyComposeAdoption } from "../lib/native-compose-adoption-preview.ts";
 import { legacyComposeRetainedOrdered } from "../lib/native-compose-adoption-readiness.ts";
+import { runLegacyComposeRetainedRoutingOperation } from "../lib/native-compose-adoption-routing-execution.ts";
 import { requireNativeComposeBackend } from "../lib/native-compose-selection.ts";
 import { run } from "../lib/shell.ts";
 
@@ -116,6 +117,14 @@ async function adoptPrepared(
       run: async (input) => {
         if (opts.signal.aborted) {
           throw new Error("Legacy adoption cancelled; values omitted.");
+        }
+        if (input.retainedRouting) {
+          return await runLegacyComposeRetainedRoutingOperation({
+            input,
+            operation: "stop",
+            deadline,
+            signal: opts.signal,
+          });
         }
         if (
           legacyComposeRetainedOrdered(input.retainedPlan) ||

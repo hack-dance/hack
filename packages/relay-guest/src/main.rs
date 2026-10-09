@@ -7,6 +7,8 @@ pub use error::CandidateError;
 mod private_input;
 #[cfg(target_os = "linux")]
 #[path = "../../runtime-core/src/provider/storage_root_witness.rs"]
+// The host also uses request encoding/reply decoding from this shared source.
+#[allow(dead_code)]
 mod storage_root_witness;
 // This shared module also supplies host-only authority/effect APIs. Keep them
 // compiled and checked by runtime-core without requiring guest-side callers.

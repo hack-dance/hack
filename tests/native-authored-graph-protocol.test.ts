@@ -8,6 +8,7 @@ import {
   parseNativeAuthoredReview,
   parseNativeAuthoredSnapshot,
 } from "../src/backends/native-authored-graph-protocol.ts";
+import { parseNativePersistentTool } from "../src/backends/native-authored-persistent-data-protocol.ts";
 import { parseNativeAuthoredRecoverySelection } from "../src/backends/native-authored-recovery-protocol.ts";
 
 const run = "a".repeat(32);
@@ -102,6 +103,62 @@ function persistentReceipt() {
     },
   };
 }
+test("inactive storage tool codec is graph4-only and cannot claim readiness before installed identity", () => {
+  const pending = {
+    version: 1 as const,
+    artifact: "a".repeat(64),
+    bytes: 8192,
+    root: null,
+    helper: null,
+  };
+  expect(parseNativePersistentTool(pending)).toEqual(pending);
+  expect(() =>
+    parseNativeAuthoredReceipt({ ...receipt(), data_tool: pending })
+  ).toThrow();
+  expect(() =>
+    parseNativeAuthoredReceipt({ ...receipt(), data_tool: null })
+  ).toThrow();
+  expect(() =>
+    parseNativeAuthoredReceipt({ ...persistentReceipt(), data_tool: pending })
+  ).toThrow();
+  const installed = {
+    ...pending,
+    root: { device: 0, inode: 1 },
+    helper: { device: 0, inode: 2 },
+  };
+  const qualifiedAssertion = parseNativeAuthoredReceipt({
+    ...persistentReceipt(),
+    data_tool: installed,
+  });
+  expect(qualifiedAssertion.data_tool).toEqual(installed);
+  const changed = parseNativeAuthoredReceipt({
+    ...persistentReceipt(),
+    data_tool: { ...installed, artifact: "b".repeat(64) },
+  });
+  expect(nativeAuthoredReceiptBinding(changed)).not.toBe(
+    nativeAuthoredReceiptBinding(qualifiedAssertion)
+  );
+  for (const wrong of [
+    null,
+    { ...pending, version: 2 },
+    { ...pending, extra: true },
+    { ...pending, helper: { device: 0, inode: 2 } },
+    { ...pending, artifact: `${"a".repeat(64)}\n` },
+    { ...installed, helper: { device: 0, inode: 0 } },
+  ]) {
+    expect(() => parseNativePersistentTool(wrong)).toThrow();
+  }
+  let calls = 0;
+  const getter = Object.defineProperty({ ...pending }, "root", {
+    enumerable: true,
+    get() {
+      calls += 1;
+      return null;
+    },
+  });
+  expect(() => parseNativePersistentTool(getter)).toThrow();
+  expect(calls).toBe(0);
+});
 test("persistent graph4 keeps stable data across independent compute membership and excludes graph2/3 recovery", () => {
   const first = parseNativeAuthoredReceipt(persistentReceipt());
   const later = persistentReceipt();

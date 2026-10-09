@@ -9,6 +9,10 @@ use reqwest::Method;
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, io::Read, sync::atomic::AtomicBool, time::Instant};
 
+// This installed transport is intentionally not called by the gated runtime yet.
+#[allow(dead_code)]
+mod witnessed;
+
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
 enum State {

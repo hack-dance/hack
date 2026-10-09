@@ -137,6 +137,19 @@ pub(super) fn exec_until(
     arguments: &[&str],
     deadline: Instant,
 ) -> Result<String, CandidateError> {
+    exec_input_until(path, script, arguments, None, deadline)
+}
+
+/// Private input follows the same absolute deadline as connect, dispatch and reply.
+/// A timed-out exec is uncertain; no late successful reply restores authority.
+#[cfg(feature = "native-config-plan")]
+pub(super) fn exec_input_until(
+    path: &Path,
+    script: &str,
+    arguments: &[&str],
+    input: Option<&str>,
+    deadline: Instant,
+) -> Result<String, CandidateError> {
     let mut stream = connect_until(path, deadline)?;
     let remaining = deadline
         .checked_duration_since(Instant::now())
@@ -147,7 +160,7 @@ pub(super) fn exec_until(
     }
     let mut command = vec!["/bin/sh", "-c", script, "hack-local"];
     command.extend_from_slice(arguments);
-    let body = json!({"method":"vm_exec","command":command,"env":[["PATH","/opt/hack-engine:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"]],"workdir":"/","timeout_ms":milliseconds,"interactive":false,"tty":false,"background":false,"stdin_data":null});
+    let body = json!({"method":"vm_exec","command":command,"env":[["PATH","/opt/hack-engine:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"]],"workdir":"/","timeout_ms":milliseconds,"interactive":false,"tty":false,"background":false,"stdin_data":input});
     let bytes = encode(&body)?;
     let timeout = deadline
         .checked_duration_since(Instant::now())

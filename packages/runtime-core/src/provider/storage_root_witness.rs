@@ -116,6 +116,60 @@ fn number(value: &str) -> Result<u64, CandidateError> {
     value.parse().map_err(|_| refused())
 }
 impl Request {
+    pub(crate) fn root(volume: &str) -> Result<Self, CandidateError> {
+        Self::parse(format!("{MAGIC}\nroot\n{volume}\n").as_bytes())
+    }
+    pub(crate) fn bound(
+        volume: &str,
+        seed: bool,
+        root: Root,
+        name: &str,
+        value: &str,
+    ) -> Result<Self, CandidateError> {
+        Self::parse(
+            format!(
+                "{MAGIC}\n{}\n{volume}\n{}\n{}\n{}\n{}\n{name}\n{value}\n",
+                if seed { "seed" } else { "verify" },
+                root.device,
+                root.inode,
+                root.uid,
+                root.gid
+            )
+            .as_bytes(),
+        )
+    }
+    pub(crate) fn is_seed(&self) -> bool {
+        matches!(&self.operation, Operation::Seed { .. })
+    }
+    pub(crate) fn encode(&self) -> Vec<u8> {
+        match &self.operation {
+            Operation::Root => format!("{MAGIC}\nroot\n{}\n", self.volume).into_bytes(),
+            Operation::Seed { root, witness } | Operation::Verify { root, witness } => {
+                let mut value: String = witness
+                    .value
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect();
+                let name = std::str::from_utf8(&witness.name).unwrap_or("");
+                let bytes = format!(
+                    "{MAGIC}\n{}\n{}\n{}\n{}\n{}\n{}\nuser.hack.storage.{name}\n{value}\n",
+                    if matches!(&self.operation, Operation::Seed { .. }) {
+                        "seed"
+                    } else {
+                        "verify"
+                    },
+                    self.volume,
+                    root.device,
+                    root.inode,
+                    root.uid,
+                    root.gid
+                )
+                .into_bytes();
+                value.zeroize();
+                bytes
+            }
+        }
+    }
     /// Exact ASCII newline record from a bounded private pipe. Unknown keys,
     /// modes, alternate spelling, argv data and trailing records are refused.
     pub(crate) fn parse(bytes: &[u8]) -> Result<Self, CandidateError> {
@@ -164,6 +218,37 @@ pub(crate) enum Observation {
     Verified,
 }
 impl Observation {
+    pub(crate) fn decode(bytes: &[u8]) -> Result<Self, CandidateError> {
+        if bytes == b"seeded\n" {
+            return Ok(Self::Seeded);
+        }
+        if bytes == b"verified\n" {
+            return Ok(Self::Verified);
+        }
+        if bytes.len() > 100 || !bytes.is_ascii() {
+            return Err(refused());
+        }
+        let text = std::str::from_utf8(bytes).map_err(|_| refused())?;
+        let parts: Vec<_> = text
+            .strip_prefix("root:")
+            .and_then(|text| text.strip_suffix('\n'))
+            .ok_or_else(refused)?
+            .split(':')
+            .collect();
+        if parts.len() != 4 {
+            return Err(refused());
+        }
+        let root = Root {
+            device: number(parts[0])?,
+            inode: number(parts[1])?,
+            uid: number(parts[2])?.try_into().map_err(|_| refused())?,
+            gid: number(parts[3])?.try_into().map_err(|_| refused())?,
+        };
+        if !root.valid() {
+            return Err(refused());
+        }
+        Ok(Self::Root(root))
+    }
     /// Observation only. Neither this reply nor a successful helper exit can
     /// promote pending storage or authorize compute use without the owner commit.
     pub(crate) fn encode(&self) -> String {

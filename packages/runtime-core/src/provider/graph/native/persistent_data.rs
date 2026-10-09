@@ -261,3 +261,8 @@ mod tests;
 
 pub(super) mod engine;
 pub mod enrollment;
+pub mod witnessed;
+
+// Inactive APIs are deliberately not selected by ordinary startup until qualification.
+#[allow(dead_code)]
+pub(super) mod tool;

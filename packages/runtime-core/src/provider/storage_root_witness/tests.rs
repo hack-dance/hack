@@ -1,5 +1,48 @@
 use super::*;
 
+#[test]
+fn host_request_and_reply_codecs_share_the_exact_guest_mode_and_reject_trailing_data() {
+    let volume = format!("hkp-{}-{}-db", "a".repeat(64), "b".repeat(32));
+    let root = Root {
+        device: 0,
+        inode: 1,
+        uid: 0,
+        gid: 0,
+    };
+    for seed in [false, true] {
+        let request = Request::bound(
+            &volume,
+            seed,
+            root,
+            &format!("user.hack.storage.{}", "c".repeat(64)),
+            &"d".repeat(64),
+        )
+        .unwrap();
+        let bytes = request.encode();
+        assert!(Request::parse(&bytes).unwrap().is_seed() == seed);
+        let mut extra = bytes.clone();
+        extra.extend_from_slice(b"extra\n");
+        assert!(Request::parse(&extra).is_err());
+    }
+    let request = Request::root(&volume).unwrap();
+    assert!(matches!(
+        Request::parse(&request.encode()).unwrap().operation,
+        Operation::Root
+    ));
+    assert!(
+        matches!(Observation::decode(b"root:0:1:0:0\n").unwrap(), Observation::Root(selected) if selected == root)
+    );
+    for bytes in [
+        b"root:0:0:0:0\n".as_slice(),
+        b"root:00:1:0:0\n",
+        b"root:0:1:0:0\nextra\n",
+        b"seeded\nextra",
+        b"verified\n\n",
+    ] {
+        assert!(Observation::decode(bytes).is_err());
+    }
+}
+
 fn volume() -> String {
     format!("hkp-{}-{}-database", "a".repeat(64), "b".repeat(32))
 }

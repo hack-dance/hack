@@ -133,6 +133,8 @@ fn persistent_journal_has_distinct_version_and_exact_data_membership_without_vol
         json!({"data":null}),
         json!({"data_mounts":null}),
         json!({"data":null,"data_mounts":null}),
+        json!({"data_tool":null}),
+        json!({"data_tool":{"version":1,"artifact":"a".repeat(64),"bytes":8192,"root":null,"helper":null}}),
     ] {
         let mut wire = image_only.clone();
         wire.as_object_mut()
@@ -159,6 +161,18 @@ fn persistent_journal_has_distinct_version_and_exact_data_membership_without_vol
     persistent_wire["version"] = json!(4);
     receipt = serde_json::from_value(persistent_wire).unwrap();
     receipt.validate(RUN, OWNER).unwrap();
+    let mut installed = serde_json::to_value(&receipt).unwrap();
+    installed["data_tool"] = json!({"version":1,"artifact":"a".repeat(64),"bytes":8192,"root":{"device":0,"inode":1},"helper":{"device":0,"inode":2}});
+    let with_tool: Receipt = serde_json::from_value(installed.clone()).unwrap();
+    with_tool.validate(RUN, OWNER).unwrap();
+    assert!(with_tool.check_binding(&receipt).is_err());
+    installed["data_tool"]["helper"]["inode"] = json!(0);
+    assert!(
+        serde_json::from_value::<Receipt>(installed)
+            .unwrap()
+            .validate(RUN, OWNER)
+            .is_err()
+    );
     assert_eq!(receipt.resources.len(), 2);
     assert!(
         receipt

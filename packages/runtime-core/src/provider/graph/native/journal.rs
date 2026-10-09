@@ -69,6 +69,8 @@ pub struct Receipt {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub(super) data_mounts: BTreeMap<String, Vec<crate::project::native::StorageMount>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) data_tool: Option<persistent_data::tool::Reference>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     failure: Option<Failure>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub(super) terminal: BTreeMap<String, super::super::shutdown::Terminal>,
@@ -91,6 +93,8 @@ struct ReceiptWire {
     data: Option<BTreeMap<String, persistent_data::engine::Reference>>,
     #[serde(default, deserialize_with = "present_map")]
     data_mounts: Option<BTreeMap<String, Vec<crate::project::native::StorageMount>>>,
+    #[serde(default, deserialize_with = "present_map")]
+    data_tool: Option<persistent_data::tool::Reference>,
     #[serde(default)]
     failure: Option<Failure>,
     #[serde(default)]
@@ -104,7 +108,8 @@ fn present_map<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(
 impl TryFrom<ReceiptWire> for Receipt {
     type Error = &'static str;
     fn try_from(wire: ReceiptWire) -> Result<Self, Self::Error> {
-        if (wire.version == 2 && (wire.data.is_some() || wire.data_mounts.is_some()))
+        if (wire.version == 2
+            && (wire.data.is_some() || wire.data_mounts.is_some() || wire.data_tool.is_some()))
             || (wire.version == 4 && (wire.data.is_none() || wire.data_mounts.is_none()))
         {
             return Err("Native receipt storage fields do not match its wire version.");
@@ -120,6 +125,7 @@ impl TryFrom<ReceiptWire> for Receipt {
             resources: wire.resources,
             data: wire.data.unwrap_or_default(),
             data_mounts: wire.data_mounts.unwrap_or_default(),
+            data_tool: wire.data_tool,
             failure: wire.failure,
             terminal: wire.terminal,
         })
@@ -134,6 +140,7 @@ impl Receipt {
             || self.readiness != expected.readiness
             || self.data != expected.data
             || self.data_mounts != expected.data_mounts
+            || self.data_tool != expected.data_tool
             || self.resources.keys().ne(expected.resources.keys())
             || self.resources.iter().any(|(key, resource)| {
                 let prior = &expected.resources[key];
@@ -149,6 +156,9 @@ impl Receipt {
             return Err(refused());
         }
         Ok(())
+    }
+    pub(in crate::provider::graph::native) fn persistent(&self) -> bool {
+        self.version == 4
     }
     pub fn phase(&self) -> &Phase {
         &self.phase
@@ -202,6 +212,7 @@ impl Receipt {
             resources: config.resources.clone(),
             data: config.data.clone(),
             data_mounts: config.data_mounts.clone(),
+            data_tool: None,
             failure: None,
             terminal: BTreeMap::new(),
         };
@@ -348,7 +359,10 @@ impl Receipt {
 
     fn validate_data(&self) -> Result<(), CandidateError> {
         if self.version == 2 {
-            return if self.data.is_empty() && self.data_mounts.is_empty() {
+            return if self.data.is_empty()
+                && self.data_mounts.is_empty()
+                && self.data_tool.is_none()
+            {
                 Ok(())
             } else {
                 Err(refused())
@@ -356,6 +370,18 @@ impl Receipt {
         }
         if self.data.is_empty() || self.data_mounts.is_empty() {
             return Err(refused());
+        }
+        if let Some(tool) = &self.data_tool {
+            tool.validate()?;
+            if (self.phase == Phase::ReadyObserved
+                || self
+                    .resources
+                    .values()
+                    .any(|resource| resource.kind == Kind::Container && resource.id.is_some()))
+                && tool.helper.is_none()
+            {
+                return Err(refused());
+            }
         }
         let mut used = BTreeSet::new();
         for (service, mounts) in &self.data_mounts {

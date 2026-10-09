@@ -557,18 +557,32 @@ impl<'a> OwnedGuest<'a> {
         arguments: &[&str],
         deadline: Instant,
     ) -> Result<String, CandidateError> {
+        self.execute_input_until(script, arguments, None, deadline, false)
+    }
+
+    #[cfg(feature = "native-config-plan")]
+    pub(in crate::provider) fn execute_input_until(
+        &self,
+        script: &str,
+        arguments: &[&str],
+        input: Option<&str>,
+        deadline: Instant,
+        allocation: bool,
+    ) -> Result<String, CandidateError> {
         self.verify()?;
+        if allocation {
+            self.before_effect()?;
+        }
         let script = format!(
             "set -eu\ntest \"$(cat /proc/sys/kernel/random/boot_id)\" = \"$1\"\ntest \"$(cat /storage/.hack-local-owner)\" = \"$2\"\ntest \"$(findmnt -n -o FSTYPE --mountpoint /storage)\" = ext4\nshift 2\n{script}"
         );
         let mut args = vec![self.boot_id(), self.incarnation()];
         args.extend_from_slice(arguments);
-        let result = agent::exec_until(
-            &socket(self.candidate, &self.owner, "agent.sock")?,
-            &script,
-            &args,
-            deadline,
-        );
+        let path = socket(self.candidate, &self.owner, "agent.sock")?;
+        let result = match input {
+            Some(input) => agent::exec_input_until(&path, &script, &args, Some(input), deadline),
+            None => agent::exec_until(&path, &script, &args, deadline),
+        };
         self.verify()?;
         result
     }

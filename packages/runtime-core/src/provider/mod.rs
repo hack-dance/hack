@@ -26,6 +26,8 @@ pub use engine::{EngineInfo, info as engine_info};
 #[cfg(all(test, target_os = "macos", target_arch = "aarch64"))]
 mod gateway_probe_test;
 pub mod guest_storage;
+#[cfg(any(target_os = "macos", feature = "native-config-plan"))]
+mod guest_tool;
 pub mod host_endpoint;
 pub mod hostname_authority;
 pub mod http_probe;
@@ -52,7 +54,9 @@ pub mod relay_owner;
 pub mod resources;
 #[cfg(target_os = "macos")]
 pub mod shared_https_recovery;
-#[cfg(test)]
+#[cfg(any(test, feature = "native-config-plan"))]
+// Host clients and the guest executable use different parts of this shared codec.
+#[allow(dead_code)]
 mod storage_root_witness;
 pub mod storage_usage;
 #[cfg(all(test, target_os = "macos"))]

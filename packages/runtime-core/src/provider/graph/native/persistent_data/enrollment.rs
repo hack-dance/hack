@@ -141,7 +141,7 @@ fn snapshot(binding: &Binding) -> Result<Binding, CandidateError> {
     }
     Ok(binding.clone())
 }
-fn refused() -> CandidateError {
+pub(super) fn refused() -> CandidateError {
     CandidateError::new(
         "native_persistent_data_enrollment",
         "Persistent data enrollment is incomplete, ambiguous or changed; retained data was not adopted or deleted.",
@@ -505,6 +505,17 @@ impl RecordPin {
     ) -> Result<Self, CandidateError> {
         let bytes = serde_json::to_vec(owner).map_err(|_| refused())?;
         super::decode(&bytes)?;
+        Self::create_bytes(path, bytes, sync, step)
+    }
+    fn create_bytes<S: Sync>(
+        path: &Path,
+        bytes: Vec<u8>,
+        sync: &mut S,
+        step: Step,
+    ) -> Result<Self, CandidateError> {
+        if bytes.is_empty() || bytes.len() > super::LIMIT {
+            return Err(refused());
+        }
         let mut file = OpenOptions::new()
             .read(true)
             .write(true)
@@ -524,13 +535,19 @@ impl RecordPin {
         Ok(pin)
     }
     fn read(path: &Path) -> Result<Self, CandidateError> {
+        Self::read_validated(path, |bytes| super::decode(bytes).map(|_| ()))
+    }
+    fn read_validated(
+        path: &Path,
+        validate: impl FnOnce(&[u8]) -> Result<(), CandidateError>,
+    ) -> Result<Self, CandidateError> {
         let file = OpenOptions::new()
             .read(true)
             .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
             .open(path)
             .map_err(|_| refused())?;
         let bytes = read_bytes(&file)?;
-        super::decode(&bytes)?;
+        validate(&bytes)?;
         let pin = Self {
             path: path.into(),
             file,
@@ -588,3 +605,5 @@ impl Sync for SystemSync {
 
 #[cfg(test)]
 mod tests;
+
+pub mod witnessed;

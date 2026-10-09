@@ -361,3 +361,60 @@ export function parseNativePersistentData(opts: ParseOptions): {
   }
   return { data: Object.freeze(data), data_mounts: Object.freeze(mounts) };
 }
+
+/** Inactive graph4 tool assertion; parsing cannot install or invoke this artifact. */
+export type NativePersistentTool = {
+  readonly version: 1;
+  readonly artifact: string;
+  readonly bytes: number;
+  readonly root: { readonly device: number; readonly inode: number } | null;
+  readonly helper: { readonly device: number; readonly inode: number } | null;
+};
+export function parseNativePersistentTool(
+  value: unknown
+): NativePersistentTool {
+  const tool = record(value, "version,artifact,bytes,root,helper");
+  if (
+    tool.version !== 1 ||
+    typeof tool.artifact !== "string" ||
+    tool.artifact.length !== 64 ||
+    !HEX64.test(tool.artifact) ||
+    typeof tool.bytes !== "number" ||
+    !Number.isSafeInteger(tool.bytes) ||
+    tool.bytes <= 0 ||
+    tool.bytes > 2 * 1024 * 1024
+  ) {
+    return refused();
+  }
+  function identity(
+    value: unknown
+  ): { readonly device: number; readonly inode: number } | null {
+    if (value === null) {
+      return null;
+    }
+    const id = record(value, "device,inode");
+    if (
+      typeof id.device !== "number" ||
+      !Number.isSafeInteger(id.device) ||
+      id.device < 0 ||
+      typeof id.inode !== "number" ||
+      !Number.isSafeInteger(id.inode) ||
+      id.inode <= 0
+    ) {
+      return refused();
+    }
+    return Object.freeze({ device: id.device, inode: id.inode });
+  }
+  const root = identity(tool.root);
+  const helper = identity(tool.helper);
+  if (helper !== null && root === null) {
+    return refused();
+  }
+  return Object.freeze({
+    version: 1,
+    artifact: tool.artifact,
+    bytes: tool.bytes,
+    root,
+    helper,
+  });
+}

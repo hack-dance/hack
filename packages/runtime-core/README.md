@@ -1526,9 +1526,33 @@ created only during the original enrollment with `XATTR_CREATE` on a retained
 nofollow root descriptor, synchronized, and independently reread with exact
 descriptor/path/root checks. Retained startup only reads; missing/changed witness
 refuses without repair. Whole-root/xattr copying remains outside the claimed
-guarantee. This native helper/transport is not implemented or qualified here.
+guarantee. The metadata-only checkpoint does not implement or qualify that helper
+boundary; the inactive witnessed continuation below adds its source.
 
 These runtime/SQL gates and replacement safety are not yet qualified by this source implementation. Stock
 PostgreSQL parity remains a separate NC05 gate requiring authored ownership/user
 or a specifically qualified capability policy. This slice guesses no UID/GID,
 changes no volume permissions, and adds no capability to make a stock image work.
+# Witnessed enrollment continuation (inactive)
+
+The separate persistent owner version2 stores its expected root xattr in the private
+pending intent before the single original volume create. It captures the original
+volume and root UID/GID/device/inode, seeds with `XATTR_CREATE`, independently verifies
+the root, and only then publishes enrollment under the original private lock. A missing
+or changed witness refuses retained reads without repair. Version1 metadata records
+are not upgraded or treated as continuity proof. Ambiguous create/seed retains the
+intent; publication after rename can be uncertain even when an enrolled file is visible.
+
+Native receipt4 may describe a separate pinned guest tool installation, including the
+original directory and helper identities. This control path shares the existing relay
+artifact/upload boundary and uses private descriptor input under the original operation
+deadline. Dependency-free legacy graphs continue to install no guest artifact. Tool
+receipt parsing grants neither installation nor storage authority, and this continuation
+does not enable ordinary persistent startup. The Linux private-filesystem controls,
+installed helper/guest transport, and real Bun/SQLite retention still require qualification.
+The shared artifact reader now requires a current-UID regular file with one link,
+no group/world write permission, and matching held-FD/path identity and bytes. Legacy
+relay graphs with dependencies use that stricter reader and its fixed
+`guest_tool_artifact` refusal; dependency-free graphs do not read an artifact.
+Whole-root copies retaining the exact xattr remain outside this witness guarantee.
+Stock PostgreSQL remains a separate ownership/capability acceptance gate.

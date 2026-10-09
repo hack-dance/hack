@@ -50,11 +50,7 @@
       "readiness": {
         "kind": "exec",
         "command": {
-          "exec": [
-            "/usr/local/bin/bun",
-            "-e",
-            "const r=await fetch('http://127.0.0.1:3000/state');if(!r.ok)process.exit(1)"
-          ]
+          "exec": ["/usr/local/bin/bun", "-e", "const r=await fetch('http://127.0.0.1:3000/state');if(!r.ok)process.exit(1)"]
         },
         "interval": "1s",
         "timeout": "1s",
@@ -75,11 +71,7 @@
       "readiness": {
         "kind": "exec",
         "command": {
-          "exec": [
-            "/usr/local/bin/bun",
-            "-e",
-            "const r=await fetch('http://127.0.0.1:3000/state');if(!r.ok)process.exit(1)"
-          ]
+          "exec": ["/usr/local/bin/bun", "-e", "const r=await fetch('http://127.0.0.1:3000/state');if(!r.ok)process.exit(1)"]
         },
         "interval": "1s",
         "timeout": "1s",

@@ -1605,6 +1605,26 @@ deadline. Dependency-free legacy graphs continue to install no guest artifact. T
 receipt parsing grants neither installation nor storage authority, and this continuation
 does not enable ordinary persistent startup. The Linux private-filesystem controls,
 installed helper/guest transport, and real Bun/SQLite retention still require qualification.
+
+Saved helper re-admission is read-only and requires the same complete tool reference,
+guest/boot/disk, canonical private directory chain, and receipt inode and bytes before
+and after transport. A receipt transition requires fresh re-admission; missing or partial
+installation never triggers upload, repair or seed. Retirement consumes the issued
+handle and checks the complete bounded native receipt inventory under the original
+provider lease. Every saved dependency, including a Removed receipt4 that still proves
+retained data, prevents deletion. No receipt archival or proof withdrawal is implemented,
+so ordinary workload removal cannot retire its verifier. A separately eligible handle
+can remove only its exact helper, owner file and empty original directory; an ambiguous
+result has no retry, follow-up cleanup or crash-resume authority. These source and
+stand-in transport controls do not qualify guest execution or enable storage startup.
+Tool handles are bound to one run on its original Engine/provider lease. The first
+admission binds that run for the lease's entire lifetime; another run on that lease
+refuses before transport. Its constant-size volatile state is shared by all sibling
+handles; claiming retirement before transport permanently revokes them, even if failure
+leaves guest files unchanged. A fresh lease cannot accept an older handle and has its own
+independent run authority. There is no count limit shared across operation leases.
+Active tool transport also prevents retirement; uncertain transport revokes sibling
+handles rather than treating guard destruction as proof that a guest command settled.
 The shared artifact reader now requires a current-UID regular file with one link,
 no group/world write permission, and matching held-FD/path identity and bytes. Legacy
 relay graphs with dependencies use that stricter reader and its fixed

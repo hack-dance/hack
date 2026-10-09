@@ -26,6 +26,12 @@ import {
   type ScenarioContext,
 } from "../harness.ts";
 import {
+  createRetainedBuildFixtureEvidence,
+  qualifyRetainedBuildFixtureBuilder,
+  qualifyRetainedBuildFixtureCopy,
+  RETAINED_BUILD_BOOTSTRAP_ENV,
+} from "./native-compose-adoption-build-evidence.ts";
+import {
   assertRetainedFixtureImageUnchanged,
   prepareRetainedBuildFixtureSources,
   RETAINED_BUILD_BASE_TAG,
@@ -43,12 +49,6 @@ import {
   retainedBuildFixtureObjectGraph,
   retainedBuildFixtureSourceSnapshot,
 } from "./native-compose-adoption-build-inputs.ts";
-import {
-  createRetainedBuildFixtureEvidence,
-  qualifyRetainedBuildFixtureBuilder,
-  qualifyRetainedBuildFixtureCopy,
-  RETAINED_BUILD_BOOTSTRAP_ENV,
-} from "./native-compose-adoption-build-evidence.ts";
 import {
   adoptionDependencyHealthcheck,
   assertAdoptionDependencyControl,

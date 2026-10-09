@@ -7,8 +7,8 @@ import {
 import {
   freezeImportValue,
   mapLegacyNativeAdoptionBaseline,
-  mapLegacyNativeRetainedBasicBuild,
   mapLegacyNativeCompletedJobAdoptionBaseline,
+  mapLegacyNativeRetainedBasicBuild,
   mapLegacyNativeStorageAdoption,
 } from "./native-config-import-plan.ts";
 import {

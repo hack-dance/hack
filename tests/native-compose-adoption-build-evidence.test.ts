@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { lstat, mkdtemp, readFile, readdir, rm } from "node:fs/promises";
+import { lstat, mkdtemp, readdir, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -123,10 +123,9 @@ for (const mode of ["root-specific", "hack-default"] as const) {
       expect((await lstat(join(directory, paths[1] ?? ""))).mode & 0o777).toBe(
         0o600
       );
-      const valid =
-        retainedBuildFixtureCopiedFiles(mode)
-          .map((item) => `${item.path} ${item.hash}`)
-          .join("\n") + "\n";
+      const valid = `${retainedBuildFixtureCopiedFiles(mode)
+        .map((item) => `${item.path} ${item.hash}`)
+        .join("\n")}\n`;
       await qualifyRetainedBuildFixtureCopy({
         mode,
         record,

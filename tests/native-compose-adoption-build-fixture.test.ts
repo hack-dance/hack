@@ -438,9 +438,11 @@ test("explicit builder graph captures only the owned child-to-base chain", () =>
   );
 });
 
-function buildCleanupModel() {
+function buildCleanupModel(opts?: { readonly withoutExposedParent: true }) {
   const { selected, values, capture } = capturedBuildGraph();
-  const objects = capture();
+  const objects = opts?.withoutExposedParent
+    ? capture([{ ...values[0], parent: "" }])
+    : capture();
   const instance = {
     root: "/owned/fixture",
     name: "fixture",
@@ -452,8 +454,8 @@ function buildCleanupModel() {
   let daemon = '"fixture-engine"';
   let afterJournal: (() => void) | undefined;
   let afterEffect: (() => void) | undefined;
-  const current = new Map(values.map((row) => [row.id, row]));
-  const opts = {
+  const current = new Map(objects.map((row) => [row.id, row]));
+  const controls = {
     engineId: daemon,
     originalImageIds: [baseBuildImage],
     baseImage: baseBuildImage,
@@ -527,7 +529,7 @@ function buildCleanupModel() {
     },
   };
   return {
-    opts,
+    opts: controls,
     remaining,
     refs,
     events,
@@ -554,6 +556,19 @@ test("owned image cleanup journals and removes exact children before parents wit
       { stage: "after-image-remove" },
     ])
   );
+});
+test("one final image without exposed Parent retains exact facts and only its ID removal authority", async () => {
+  const model = buildCleanupModel({ withoutExposedParent: true });
+  expect([...model.remaining]).toEqual([image]);
+  await cleanupRetainedBuildFixtureImages(model.opts);
+  expect([...model.remaining]).toEqual([]);
+  expect(model.events).toEqual([
+    { stage: "before-image-remove" },
+    { stage: "remove", id: image },
+    { stage: "after-image-remove" },
+  ]);
+  expect(model.current.get(image)?.parent).toBe("");
+  expect(model.current.has(baseBuildImage)).toBe(false);
 });
 for (const mode of [
   "reference-after-journal",

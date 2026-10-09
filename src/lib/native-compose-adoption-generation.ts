@@ -802,6 +802,26 @@ function manifestVersion(
   }
   return projection.projectionProof.projection_version === 2 ? 4 : 3;
 }
+function preparedManifestVersion(opts: {
+  readonly build: boolean;
+  readonly retainedPlan: LegacyComposeRetainedPlan;
+  readonly binding: LegacyComposeVerifiedBinding;
+  readonly projection?: {
+    readonly projectionProof: { readonly projection_version: number };
+  };
+}): Manifest["adoption_generation_version"] {
+  if (opts.build) {
+    return 9;
+  }
+  if (opts.retainedPlan.requiresV7) {
+    return 7;
+  }
+  return manifestVersion(
+    opts.binding,
+    opts.retainedPlan.requiresV5,
+    opts.projection
+  );
+}
 async function prepare(
   ctx: Context,
   binary: string | undefined
@@ -889,15 +909,12 @@ async function prepare(
     await originals.file.sync();
     await originals.file.close();
     const meta: Manifest = {
-      adoption_generation_version: acquired.build
-        ? 9
-        : retainedPlan.requiresV7
-          ? 7
-          : manifestVersion(
-              acquired.binding,
-              retainedPlan.requiresV5,
-              acquired.projection
-            ),
+      adoption_generation_version: preparedManifestVersion({
+        build: Boolean(acquired.build),
+        retainedPlan,
+        binding: acquired.binding,
+        projection: acquired.projection,
+      }),
       kind: KIND,
       projectRoot: ctx.root,
       id,

@@ -260,6 +260,17 @@ jobs:
         run: bun install
       - name: Create isolated Hack network
         run: docker network create --subnet 172.30.0.0/16 hack-dev
+      - name: TEMP probe volume mount inspect shape (remove before merge)
+        run: |
+          docker version --format '{{.Server.Version}} api={{.Server.APIVersion}}'
+          docker pull -q alpine:3.20
+          P="$RUNNER_TEMP/probe.mjs"; echo 'console.log(1)' > "$P"
+          docker volume create hack-probe-vol >/dev/null
+          docker create --name hack-probe-ctr --network none --read-only --mount "type=bind,src=$P,dst=/hack-storage-witness-helper.mjs,readonly,bind-recursive=disabled,bind-propagation=rprivate" --mount "type=volume,src=hack-probe-vol,dst=/hack-storage-witness,volume-nocopy,readonly" alpine:3.20 true >/dev/null
+          echo "volume Mountpoint=$(docker volume inspect hack-probe-vol --format '{{.Mountpoint}}')"
+          docker inspect hack-probe-ctr --format '{{json .HostConfig.Mounts}}'
+          docker inspect hack-probe-ctr --format '{{json .Mounts}}'
+          docker rm -f hack-probe-ctr >/dev/null; docker volume rm hack-probe-vol >/dev/null
       - name: Prepare offline cache fixture images
         run: |
           docker pull alpine:3.20

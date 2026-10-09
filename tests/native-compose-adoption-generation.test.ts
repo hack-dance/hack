@@ -21,6 +21,7 @@ import {
 } from "../src/commands/project.ts";
 import { HackCliError } from "../src/lib/cli-result.ts";
 import { renderManagedComposeEnvOverride } from "../src/lib/compose-managed-env.ts";
+import { acquireLegacyComposeAdoptionPreparationBinding } from "../src/lib/native-compose-adoption-binding.ts";
 import { tryLegacyComposeAdoptedCommand } from "../src/lib/native-compose-adoption-command.ts";
 import {
   type LegacyComposeRetainedOutcome,
@@ -2349,6 +2350,10 @@ async function linkedCheckout() {
   Reflect.deleteProperty(process.env, "CI");
   Reflect.deleteProperty(process.env, "HACK_EXECUTION_MODE");
   await rm(join(projectRoot, ".git"), { recursive: true });
+  await writeFile(
+    join(projectRoot, ".hack/hack.config.json"),
+    '{"name":"fixture","worktree":{"auto_branch":false}}\n'
+  );
   const git = async (args: readonly string[]) => {
     const child = Bun.spawn(["/usr/bin/git", "-C", projectRoot, ...args], {
       env: {
@@ -2413,6 +2418,169 @@ test("a verified linked checkout adopts and rolls back using the original resour
   } finally {
     await store.close();
   }
+});
+
+test("v13 linked default pins the physical branch originals and explicit selection recovers after Git drift", async () => {
+  await linkedCheckout();
+  const composeText = await readFile(
+    join(projectRoot, ".hack/docker-compose.yml"),
+    "utf8"
+  );
+  await writeFile(
+    join(projectRoot, ".hack/hack.config.json"),
+    JSON.stringify({
+      name: "fixture",
+      dev_host: "fixture.test",
+      worktree: { auto_branch: true },
+    })
+  );
+  const physical = "fixture--linked";
+  const fragment = buildRuntimeHostMetadataOverride({
+    composeYamls: [composeText],
+    branch: "linked",
+    devHost: "fixture.test",
+    aliasHost: null,
+    composeProject: physical,
+  });
+  expect(fragment).toBeTruthy();
+  await mkdir(join(projectRoot, ".hack/.branch"));
+  const fragmentPath = join(
+    projectRoot,
+    ".hack/.branch/compose.linked.runtime.override.yml"
+  );
+  await writeFile(fragmentPath, fragment ?? "");
+  container().name = `/${physical}-db-1`;
+  container().project = physical;
+  container().configFiles = `${join(projectRoot, ".hack/docker-compose.yml")},${fragmentPath}`;
+  container().networks = [{ name: `${physical}_default`, id: NETWORK }];
+  fixture.volume[0]!.project = physical;
+  fixture.network[0]!.project = physical;
+  fixture.network[0]!.name = `${physical}_default`;
+  await save();
+  const binary = await compiler();
+  const verified = await acquireLegacyComposeAdoptionPreparationBinding({
+    projectRoot,
+    binary,
+  });
+  const privateInputs = await verified.resolvePreparationInputs({
+    projectRoot,
+  });
+  expect(privateInputs.branch?.branch).toBe("linked");
+  expect(JSON.stringify(privateInputs)).toBe("{}");
+  const store = await openLegacyComposeAdoptedGenerationStore({ projectRoot });
+  try {
+    const generation = await store.prepare({ binary });
+    expect(generation.report.adoption_generation_version).toBe(13);
+    const meta = JSON.parse(
+      await readFile(await artifactPath("manifest.json"), "utf8")
+    );
+    expect(meta.binding.binding_version).toBe(13);
+    expect(meta.binding.composeProject).toBe(physical);
+    expect(meta.binding.containers[0]?.id).toBe(ID);
+    expect(meta.binding.volumes[0]?.createdAt).toBe(CREATED);
+    expect(meta.branchProof.branch).toBe("linked");
+    expect(meta.branchProof.selection).toBe("worktree");
+    await store.publish({ generation, binary });
+  } finally {
+    await store.close();
+  }
+  const git = Bun.spawn(
+    ["/usr/bin/git", "-C", projectRoot, "switch", "-q", "-c", "drift"],
+    {
+      stdin: "ignore",
+      stdout: "ignore",
+      stderr: "ignore",
+      env: {
+        PATH: priorPath ?? "/usr/bin:/bin",
+        GIT_CONFIG_NOSYSTEM: "1",
+        GIT_CONFIG_GLOBAL: "/dev/null",
+      },
+    }
+  );
+  expect(await git.exited).toBe(0);
+  const defaultStore = await openLegacyComposeAdoptedGenerationStore({
+    projectRoot,
+    mode: "saved",
+  });
+  try {
+    await refusal(defaultStore.loadActive(), "E_LEGACY_ADOPTION_STATE");
+  } finally {
+    await defaultStore.close();
+  }
+  const saved = await openLegacyComposeAdoptedGenerationStore({
+    projectRoot,
+    mode: "saved",
+    requestedBranch: "linked",
+  });
+  try {
+    const active = await saved.loadActive();
+    expect(active?.report.adoption_generation_version).toBe(13);
+    if (!active) {
+      throw new Error("Expected exact saved branch");
+    }
+    await saved.withLease({
+      generation: active,
+      run: async ({ binding }) => {
+        expect(binding.composeProject).toBe(physical);
+        expect(binding.containers[0]?.id).toBe(ID);
+        expect(binding.volumes[0]?.createdAt).toBe(CREATED);
+      },
+    });
+    await saved.rollback();
+    expect(fixture.container[0]?.id).toBe(ID);
+    expect(fixture.volume[0]?.createdAt).toBe(CREATED);
+  } finally {
+    await saved.close();
+  }
+});
+
+test("branch selection cannot retarget an older saved generation through dispatch, rollback or recovery", async () => {
+  const binary = await compiler();
+  const store = await openLegacyComposeAdoptedGenerationStore({ projectRoot });
+  try {
+    const generation = await store.prepare({ binary });
+    expect(generation.report.adoption_generation_version).toBe(1);
+    await store.publish({ generation, binary });
+  } finally {
+    await store.close();
+  }
+  const receipt = await readFile(join(stateRoot(), "receipt.json"));
+  const commands = await readFile(join(root, "commands"));
+  const selected = await openLegacyComposeAdoptedGenerationStore({
+    projectRoot,
+    mode: "saved",
+    requestedBranch: "other",
+  });
+  try {
+    await refusal(selected.loadActive(), "E_LEGACY_ADOPTION_STATE");
+    await refusal(
+      selected.loadActive({ recoverOperation: true }),
+      "E_LEGACY_ADOPTION_STATE"
+    );
+    await refusal(selected.rollback(), "E_LEGACY_ADOPTION_STATE");
+  } finally {
+    await selected.close();
+  }
+  try {
+    await tryLegacyComposeAdoptedCommand({
+      cwd: projectRoot,
+      operation: "down",
+      instance: "other",
+    });
+    throw new Error("Unexpected public branch dispatch success");
+  } catch (error: unknown) {
+    expect(error).toBeInstanceOf(HackCliError);
+    expect(error).toMatchObject({ code: "E_CONFIG_INVALID" });
+    for (const value of [CANARY, projectRoot, VOLUME, ID, NETWORK]) {
+      expect(String(error)).not.toContain(value);
+      expect(JSON.stringify(error)).not.toContain(value);
+    }
+  }
+  expect(await readFile(join(stateRoot(), "receipt.json"))).toEqual(receipt);
+  expect(await readFile(join(root, "commands"))).toEqual(commands);
+  expect(await mutationCommands()).toEqual([]);
+  expect(fixture.container[0]?.id).toBe(ID);
+  expect(fixture.volume[0]?.createdAt).toBe(CREATED);
 });
 
 test("v6 static owned bridge preserves the selected original IDs through saved publication and rollback", async () => {

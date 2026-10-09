@@ -493,11 +493,7 @@ fn successful_port_guards_own_all_four_allocated_addresses_during_observation() 
         let flags = unsafe { libc::fcntl(guard.as_raw_fd(), libc::F_GETFD) };
         assert!(flags >= 0);
         assert_eq!(flags & libc::FD_CLOEXEC, libc::FD_CLOEXEC);
-        for (option, expected) in [
-            (libc::SO_TYPE, libc::SOCK_STREAM),
-            (libc::SO_ACCEPTCONN, 1),
-            (libc::SO_REUSEPORT, 0),
-        ] {
+        for (option, expected) in [(libc::SO_TYPE, libc::SOCK_STREAM), (libc::SO_REUSEPORT, 0)] {
             let mut value: libc::c_int = -1;
             let mut length = std::mem::size_of_val(&value) as libc::socklen_t;
             assert_eq!(
@@ -519,6 +515,22 @@ fn successful_port_guards_own_all_four_allocated_addresses_during_observation() 
         let error = std::net::TcpListener::bind(address).unwrap_err();
         assert_eq!(error.raw_os_error(), Some(libc::EADDRINUSE));
         assert!(port_absent(address.port()).is_err());
+        assert_eq!(listener.local_addr().unwrap(), address);
+        // Darwin does not expose SO_ACCEPTCONN through getsockopt. Exercise each
+        // listener instead, without waiting indefinitely for an accept result.
+        listener.set_nonblocking(true).unwrap();
+        let local_ip = match address.ip() {
+            IpAddr::V4(_) => IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+            IpAddr::V6(_) => IpAddr::V6(std::net::Ipv6Addr::LOCALHOST),
+        };
+        let reachable = std::net::SocketAddr::new(local_ip, address.port());
+        let peer =
+            std::net::TcpStream::connect_timeout(&reachable, std::time::Duration::from_secs(1))
+                .unwrap();
+        let (accepted, peer_address) = listener.accept().unwrap();
+        assert_eq!(peer_address, peer.local_addr().unwrap());
+        assert_eq!(accepted.local_addr().unwrap(), reachable);
+        assert_eq!(peer.peer_addr().unwrap(), reachable);
         assert_eq!(listener.local_addr().unwrap(), address);
     }
 }

@@ -28,6 +28,7 @@ export type Receipt = {
     | 9
     | 10
     | 11
+    | 12
     | 13;
   readonly kind: typeof KIND;
   readonly checkout: Checkout;
@@ -89,6 +90,7 @@ export function parseLegacyComposeAdoptionReceipt(
         "adoption_receipt_version,checkout,kind,pendingOperation,prepared,publication"
       ) &&
       (value.adoption_receipt_version === 13 ||
+        value.adoption_receipt_version === 12 ||
         value.adoption_receipt_version === 11 ||
         value.adoption_receipt_version === 10 ||
         value.adoption_receipt_version === 9 ||
@@ -109,7 +111,11 @@ export function parseLegacyComposeAdoptionReceipt(
     refuse();
   }
   // The distinct job family is issued with a prepared generation, never a bare version upgrade.
-  if (value.adoption_receipt_version === 7 && value.prepared === null) {
+  if (
+    (value.adoption_receipt_version === 7 ||
+      value.adoption_receipt_version === 12) &&
+    value.prepared === null
+  ) {
     refuse();
   }
   if (
@@ -134,6 +140,7 @@ export function parseLegacyComposeAdoptionReceipt(
   return {
     adoption_receipt_version:
       version === 13 ||
+      version === 12 ||
       version === 11 ||
       version === 10 ||
       version === 9 ||

@@ -333,10 +333,23 @@ pub(crate) fn review_inputs(
 /// Ordinary compile/review entry points cannot admit host effects.
 pub(crate) struct FrontendHooks {
     semantic_hash: String,
+    processes: Option<Vec<String>>,
 }
 impl FrontendHooks {
     pub(crate) fn verified(semantic_hash: String) -> Self {
-        Self { semantic_hash }
+        Self {
+            semantic_hash,
+            processes: None,
+        }
+    }
+    pub(crate) fn verified_processes(
+        semantic_hash: String,
+        processes: Option<Vec<String>>,
+    ) -> Self {
+        Self {
+            semantic_hash,
+            processes,
+        }
     }
 }
 pub(crate) fn compile_frontend(
@@ -436,7 +449,7 @@ fn compile_inputs(
         || !plan.secrets.is_empty()
         || plan.routes.is_some()
         || plan.open.is_some()
-        || plan.host_bindings.is_some()
+        || (plan.host_bindings.is_some() && frontend.is_none_or(|owner| owner.processes.is_none()))
         || (plan.host.is_some() && frontend.is_none())
     {
         return Err(refused());
@@ -446,15 +459,26 @@ fn compile_inputs(
             || plan
                 .host
                 .as_ref()
-                .is_none_or(|host| !host.processes.is_empty())
+                .is_none_or(|host| match &frontend.processes {
+                    None => !host.processes.is_empty(),
+                    Some(names) => {
+                        host.processes.keys().collect::<Vec<_>>()
+                            != names.iter().collect::<Vec<_>>()
+                    }
+                })
+            || (frontend.processes.is_some()
+                && (source_bearing || !plan.storage.is_empty() || topology.is_some()))
             || environment_plan
                 .host
                 .iter()
                 .flat_map(|hosts| hosts.values())
                 .any(|hook| {
-                    hook.bindings
-                        .values()
-                        .any(|binding| matches!(binding, EnvironmentBinding::Endpoint { .. }))
+                    hook.bindings.values().any(|binding| match binding {
+                        EnvironmentBinding::Endpoint { reference, target } => {
+                            frontend.processes.is_none() || !host_endpoint(reference, target)
+                        }
+                        _ => false,
+                    })
                 })
         {
             return Err(refused());
@@ -593,6 +617,27 @@ fn compile_inputs(
         host: plan.host,
         managed_environment,
     })
+}
+
+fn host_endpoint(
+    reference: &hack_config_compiler::endpoint::EndpointReference,
+    target: &hack_config_compiler::endpoint::EndpointTarget,
+) -> bool {
+    use hack_config_compiler::endpoint::{
+        EndpointContext, EndpointProtocol, EndpointReference, EndpointTarget,
+    };
+    matches!(reference, EndpointReference::HostBinding { .. })
+        && matches!(
+            target,
+            EndpointTarget::Host {
+                context: EndpointContext::Host,
+                protocol: EndpointProtocol::Http | EndpointProtocol::Https,
+                ..
+            } | EndpointTarget::External {
+                protocol: EndpointProtocol::Http | EndpointProtocol::Https,
+                ..
+            }
+        )
 }
 
 /// The compiler can admit topology before this execution adapter qualifies it.

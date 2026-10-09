@@ -147,7 +147,20 @@ fn owner_eof_bounds_slow_clients_and_preserves_foreign_paths() {
         .unwrap();
     let mut reply = String::new();
     client.read_to_string(&mut reply).unwrap();
-    assert!(reply.starts_with("HTTP/1.1 400"));
+    let reply_status_class = if reply.is_empty() {
+        "empty"
+    } else if reply.starts_with("HTTP/1.1 400") {
+        "expected-400"
+    } else if reply.starts_with("HTTP/") {
+        "other-http"
+    } else {
+        "non-http"
+    };
+    assert!(
+        reply.starts_with("HTTP/1.1 400"),
+        "reply_status_class={reply_status_class}; reply_bytes={}",
+        reply.len()
+    );
     let mut end = [0; 1];
     assert_eq!(slow.read(&mut end).unwrap(), 0);
     let mut oversized = a.connect();

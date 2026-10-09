@@ -1681,12 +1681,21 @@ pinned finite-hook permit and active owner match the original frontend parent PI
 UID, run, project/branch and compiler semantic hash. Permit/owner bytes, incarnations
 and canonical private parent are rechecked through preparation and effect fences.
 Finite normalized host intent stays ephemeral in `NativeInputs`; it is not discarded
-or serialized in graph receipts. Persistent host processes and host endpoint bindings
-remain unsupported. Source/storage/topology admission and receipt versions2–5 are
+or serialized in graph receipts. Source/storage/topology admission and receipt versions2–5 are
 unchanged. The TypeScript frontend owns phase intent/completion, managed hook values,
 supervised host children and owner-mediated stop; Rust owns workload readiness and
 exact native cleanup. See [finite hook lifecycle](../../docs/reference/native-authored-commands.md#finite-host-lifecycle-hooks)
 for uncertainty and recovery limits.
+
+The separate source-version5 frontend permit additionally binds the private persistent
+process owner and, for execution, its ready document. It admits exactly the normalized
+process-name selection and compiler-verified host-context or external HTTP(S) endpoint
+references. The frontend uses Hack's existing mux controller and private one-use command
+delivery; no command/value is serialized in graph receipts or mux argv. Standalone graph
+commands still refuse all host intent. Source5 refuses live-source/storage/topology
+intersections and guest/routed/TCP endpoint delivery. See
+[supervised host processes](../../docs/reference/native-authored-commands.md#supervised-host-processes)
+for stop/recovery and current qualification limits.
 
 ### Native guest endpoint observations
 

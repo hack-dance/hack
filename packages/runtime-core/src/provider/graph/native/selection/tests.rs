@@ -394,3 +394,78 @@ fn frontend_hook_permit_is_versioned_scoped_and_rechecked_without_normal_graph_b
     fs::write(&path, wire.to_string()).unwrap();
     selection_refused(Source::read(&path));
 }
+
+#[test]
+fn frontend_process_source5_binds_owner_ready_and_rechecks_replacement_without_source3_bypass() {
+    use std::os::unix::fs::PermissionsExt;
+    let fixture = Fixture::new();
+    let mut project = basic();
+    project["host"] = json!({"processes":{"tunnel":{"command":{"exec":["sleep","60"]}}}});
+    fixture.write_project(project);
+    let root = fixture.project.join(".hack/.internal/native-authored-runs");
+    fs::create_dir_all(&root).unwrap();
+    fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+    let run = "b".repeat(32);
+    let branch = Some("feature-one");
+    let key = format!("{:x}", Sha256::digest(serde_json::to_vec(&branch).unwrap()));
+    let private = |path: &Path, value: Value| {
+        fs::write(path, value.to_string()).unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
+        let meta = fs::symlink_metadata(path).unwrap();
+        json!({"path":path,"dev":meta.dev(),"ino":meta.ino(),"sha256":format!("{:x}",Sha256::digest(value.to_string().as_bytes()))})
+    };
+    // SAFETY: these pointer-free kernel identity queries do not mutate process state.
+    let (pid, uid) = unsafe { (libc::getppid(), libc::getuid()) };
+    let owner = private(
+        &root.join(format!("{key}.hooks.json")),
+        json!({"version":1,"kind":"native-authored-hook-owner","run":run,"project":fixture.project,"branch":branch,"selection":"a".repeat(64),"pid":pid,"uid":uid}),
+    );
+    let path = root.join(format!("{run}.source.json"));
+    let mut wire = json!({"version":5,"kind":"native-graph-source","project":fixture.project,"branch":branch,"run":run,"profiles":[],"overlay":"inherit","env_metadata":{"metadata_version":1,"overlay":null,"overlay_exists":false,"workloads":{"web":{}},"inactive_scopes":[],"host":{"default":{},"workloads":{}}}});
+    let request = json!({"request_version":1,"project":fs::read_to_string(fixture.marker()).unwrap(),"env_metadata":wire["env_metadata"]});
+    let hack_config_compiler::environment::PlanResult::Success { semantic_hash, .. } =
+        hack_config_compiler::environment::plan(&serde_json::to_vec(&request).unwrap(), &[])
+    else {
+        panic!("real process fixture must compile")
+    };
+    let process_owner = private(
+        &root.join(format!("{run}.host-process-owner.json")),
+        json!({"version":1,"kind":"native-authored-host-process-owner","run":run,"project":fixture.project,"branch":branch,"semantic_hash":semantic_hash,"pid":pid,"uid":uid,"names":["tunnel"],"compose_project":"native-authored-fixture","project_name":"fixture"}),
+    );
+    wire["hook_permit"] = private(
+        &root.join(format!("{run}.hook-preflight-permit.json")),
+        json!({"version":1,"kind":"native-authored-host-lifecycle-permit","role":"preflight","run":run,"project":fixture.project,"branch":branch,"semantic_hash":semantic_hash,"owner":owner,"pid":pid,"uid":uid,"processes":process_owner}),
+    );
+    fs::write(&path, wire.to_string()).unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+    selection_refused(Source::read(&path));
+    selection_refused(Source::read_frontend(&path, true));
+    Source::read_frontend(&path, false)
+        .unwrap()
+        .select(&fixture.candidate, fixture.options().deadline)
+        .unwrap();
+    let mut wrong = wire.clone();
+    wrong["version"] = json!(3);
+    fs::write(&path, wrong.to_string()).unwrap();
+    selection_refused(Source::read_frontend(&path, false));
+    let ready_path = root.join(format!("{run}.host-process-ready.json"));
+    let ready = private(
+        &ready_path,
+        json!({"version":1,"kind":"native-authored-host-process-ready","run":run,"project":fixture.project,"branch":branch,"semantic_hash":semantic_hash,"owner":process_owner,"pid":pid,"uid":uid}),
+    );
+    wire["hook_permit"] = private(
+        &root.join(format!("{run}.hook-execution-permit.json")),
+        json!({"version":1,"kind":"native-authored-host-lifecycle-permit","role":"execution","run":run,"project":fixture.project,"branch":branch,"semantic_hash":semantic_hash,"owner":owner,"pid":pid,"uid":uid,"processes":ready}),
+    );
+    fs::write(&path, wire.to_string()).unwrap();
+    let selected = Source::read_frontend(&path, true)
+        .unwrap()
+        .select(&fixture.candidate, fixture.options().deadline)
+        .unwrap();
+    let original = fs::read(&ready_path).unwrap();
+    fs::rename(&ready_path, root.join("preserved-ready")).unwrap();
+    fs::write(&ready_path, original).unwrap();
+    fs::set_permissions(&ready_path, fs::Permissions::from_mode(0o600)).unwrap();
+    selection_refused(selected.prepare(&fixture.candidate, &native::ManagedValues::new()));
+    assert!(!fixture.candidate.state_root.exists());
+}

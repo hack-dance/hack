@@ -9,9 +9,13 @@ if [ "$#" -lt 1 ] || [ "$#" -gt 2 ]; then
 fi
 version=
 metadata=
+source_revision=$(git -C "$repo" rev-parse HEAD)
+if [ -n "$(git -C "$repo" status --porcelain --untracked-files=normal)" ]; then
+  echo "Candidate storage tool provenance requires a clean source checkout" >&2
+  exit 73
+fi
 if [ "$#" -eq 2 ]; then
   case "$2" in --version=*) version=${2#--version=} ;; *) echo "Unknown build option" >&2; exit 64 ;; esac
-  source_revision=$(git -C "$repo" rev-parse HEAD)
   metadata=$(HACK_PRERELEASE_VERSION="$version" HACK_PRERELEASE_SOURCE_REVISION="$source_revision" bun "$repo/scripts/prerelease-plan.ts" metadata)
   if [ -n "$(git -C "$repo" status --porcelain --untracked-files=normal)" ]; then
     echo "Versioned prereleases require a clean source checkout" >&2
@@ -46,7 +50,7 @@ if [ ! -f "$1" ]; then
   echo "Install the pinned Rust toolchain's aarch64-unknown-linux-musl standard library before building" >&2
   exit 69
 fi
-for path in .hack-local .hack-local/native-candidate-target .hack-local/native-candidate-target/release .hack-local/native-candidate-target/release/hack-native .hack-local/native-candidate-target/release/hack-mcp-adapter .hack-local/native-candidate-target/release/hack-mcp-owner .hack-local/native-candidate-target/release/hack-mcp-backend .hack-local/native-guest-target .hack-local/native-guest-target/aarch64-unknown-linux-musl .hack-local/native-guest-target/aarch64-unknown-linux-musl/release .hack-local/native-guest-target/aarch64-unknown-linux-musl/release/hack-relay-guest; do
+for path in .hack-local .hack-local/native-candidate-target .hack-local/native-candidate-target/release .hack-local/native-candidate-target/release/hack-native .hack-local/native-candidate-target/release/hack-mcp-adapter .hack-local/native-candidate-target/release/hack-mcp-owner .hack-local/native-candidate-target/release/hack-mcp-backend .hack-local/native-guest-target .hack-local/native-guest-target/aarch64-unknown-linux-musl .hack-local/native-guest-target/aarch64-unknown-linux-musl/release .hack-local/native-guest-target/aarch64-unknown-linux-musl/release/hack-relay-guest .hack-local/native-storage-tool-target .hack-local/native-storage-tool-target/aarch64-unknown-linux-musl .hack-local/native-storage-tool-target/aarch64-unknown-linux-musl/release .hack-local/native-storage-tool-target/aarch64-unknown-linux-musl/release/hack-storage-root-witness; do
   if [ -L "$path" ]; then
     echo "Refusing aliased candidate build directories" >&2
     exit 73
@@ -66,10 +70,29 @@ cargo build --locked --release --jobs 2 --bin hack-relay-guest \
   --target-dir .hack-local/native-guest-target
 guest=.hack-local/native-guest-target/aarch64-unknown-linux-musl/release/hack-relay-guest
 python3 scripts/verify-native-relay.py "$guest"
+CARGO_INCREMENTAL=0 \
+CC_aarch64_unknown_linux_musl="$repo/scripts/zig-aarch64-musl-linker" \
+CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_RUSTFLAGS='-C link-self-contained=no' \
+CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER="$repo/scripts/zig-aarch64-musl-linker" \
+cargo build --locked --release --jobs 2 --bin hack-storage-root-witness \
+  --features storage-root-witness-tool \
+  --manifest-path packages/runtime-core/Cargo.toml \
+  --target aarch64-unknown-linux-musl \
+  --target-dir .hack-local/native-storage-tool-target
+storage_tool=.hack-local/native-storage-tool-target/aarch64-unknown-linux-musl/release/hack-storage-root-witness
+python3 scripts/verify-native-relay.py "$storage_tool" --storage-witness
 # Exclusive mkdir refuses races; an interrupted bundle is retained for inspection.
 mkdir -m 700 "$out"
 cp .hack-local/native-candidate-target/release/hack-native "$out/hack-native"
 cp "$guest" "$out/hack-relay-guest"
+cp "$storage_tool" "$out/hack-storage-root-witness"
+chmod 500 "$out/hack-storage-root-witness"
+python3 scripts/verify-native-relay.py "$out/hack-storage-root-witness" --storage-witness
+if [ "$(git -C "$repo" rev-parse HEAD)" != "$source_revision" ] || [ -n "$(git -C "$repo" status --porcelain --untracked-files=normal)" ]; then
+  echo "Candidate source changed during build; retaining incomplete output" >&2
+  exit 73
+fi
+bun scripts/package-native-storage-tool.ts "$out" "$source_revision"
 chmod 755 "$out/hack-native" "$out/hack-relay-guest"
 python3 scripts/verify-native-relay.py "$out/hack-relay-guest"
 cp packages/runtime-core/provider-pins.json "$out/provider-pins.json"
@@ -114,9 +137,9 @@ fi
 (
   cd "$out"
   if [ -n "$version" ]; then
-    shasum -a 256 hack-native hack-relay-guest hack-cli hack-v5 provider-pins.json README.md prerelease.json > SHA256SUMS
+    shasum -a 256 hack-native hack-relay-guest hack-storage-root-witness native-storage-tool.json hack-cli hack-v5 provider-pins.json README.md prerelease.json > SHA256SUMS
   else
-    shasum -a 256 hack-native hack-relay-guest hack-cli hack-v5 provider-pins.json README.md > SHA256SUMS
+    shasum -a 256 hack-native hack-relay-guest hack-storage-root-witness native-storage-tool.json hack-cli hack-v5 provider-pins.json README.md > SHA256SUMS
   fi
   shasum -a 256 hack-config-compiler hack.project.schema.json hack.local.schema.json >> SHA256SUMS
   shasum -a 256 mcp/*/manifest.json mcp/*/hack-mcp-adapter mcp/*/hack-mcp-owner mcp/*/hack-mcp-backend >> SHA256SUMS

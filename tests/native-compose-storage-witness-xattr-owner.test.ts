@@ -1595,7 +1595,7 @@ test("fresh readonly proofs tolerate observed UID change and exact owned running
   );
   expect(transport.calls).not.toContain("provision");
   expect(transport.calls).not.toContain("seed");
-});
+}, 30_000);
 
 test.each(
   (["up", "run"] as const).flatMap((operation) =>

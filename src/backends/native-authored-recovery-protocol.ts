@@ -6,15 +6,19 @@ import {
 } from "./native-authored-graph-protocol.ts";
 
 const HEX64 = /^[a-f0-9]{64}$/;
-export type NativeAuthoredRecoverySelection = {
-  readonly version: 1;
+const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
+type RecoverySelectionFields = {
   readonly kind: "native-graph-recovery-selection";
   readonly run: string;
   readonly receipt: NativeAuthoredReceipt;
   readonly receipt_sha256: string;
   readonly owner_sha256: string;
-  readonly host_boot_micros: number;
 };
+export type NativeAuthoredRecoverySelection = RecoverySelectionFields &
+  (
+    | { readonly version: 1; readonly host_boot_micros: number }
+    | { readonly version: 2; readonly host_boot_uuid: string }
+  );
 export type NativeAuthoredRecoveryResult = {
   readonly version: 1;
   readonly kind: "native-graph-live-owner-recovered";
@@ -61,6 +65,10 @@ export function parseNativeAuthoredRecoverySelection(opts: {
 }): NativeAuthoredRecoverySelection {
   const admitted = ready(opts.admitted);
   const value = opts.value;
+  const qualifier =
+    isRecord(value) && Object.hasOwn(value, "host_boot_uuid")
+      ? "host_boot_uuid"
+      : "host_boot_micros";
   if (
     !fields(value, [
       "version",
@@ -69,16 +77,13 @@ export function parseNativeAuthoredRecoverySelection(opts: {
       "receipt",
       "receipt_sha256",
       "owner_sha256",
-      "host_boot_micros",
+      qualifier,
     ]) ||
-    value.version !== 1 ||
+    (value.version !== 1 && value.version !== 2) ||
     value.kind !== "native-graph-recovery-selection" ||
     value.run !== admitted.review.provenance.run ||
     !hash(value.receipt_sha256) ||
-    !hash(value.owner_sha256) ||
-    typeof value.host_boot_micros !== "number" ||
-    !Number.isSafeInteger(value.host_boot_micros) ||
-    value.host_boot_micros <= 0
+    !hash(value.owner_sha256)
   ) {
     return refused();
   }
@@ -89,15 +94,32 @@ export function parseNativeAuthoredRecoverySelection(opts: {
   ) {
     return refused();
   }
-  return {
-    version: 1,
+  const common: RecoverySelectionFields = {
     kind: "native-graph-recovery-selection",
     run: value.run,
     receipt,
     receipt_sha256: value.receipt_sha256,
     owner_sha256: value.owner_sha256,
-    host_boot_micros: value.host_boot_micros,
   };
+  if (value.version === 1) {
+    if (
+      typeof value.host_boot_micros !== "number" ||
+      !Number.isSafeInteger(value.host_boot_micros) ||
+      value.host_boot_micros <= 0
+    ) {
+      return refused();
+    }
+    return { ...common, version: 1, host_boot_micros: value.host_boot_micros };
+  }
+  if (
+    typeof value.host_boot_uuid !== "string" ||
+    value.host_boot_uuid.length !== 36 ||
+    !UUID.test(value.host_boot_uuid) ||
+    value.host_boot_uuid === "00000000-0000-0000-0000-000000000000"
+  ) {
+    return refused();
+  }
+  return { ...common, version: 2, host_boot_uuid: value.host_boot_uuid };
 }
 
 /** Matching Removed is a cleanup result, not frontend retirement authority.

@@ -1,6 +1,7 @@
-import { expect, test } from "bun:test";
-import { join } from "node:path";
+import { afterEach, expect, test } from "bun:test";
+import { join, resolve } from "node:path";
 import { openNativeComposeGenerationStore } from "../src/lib/native-compose-generation.ts";
+import { captureCompletedJobFixtureCommand } from "./e2e/scenarios/native-compose-adoption-job-worktrees.ts";
 import { fixture, invoke } from "./helpers/native-compose-command.ts";
 
 const storage = { data: { kind: "persistent", scope: "worktree" } } as const;
@@ -8,6 +9,96 @@ const storage = { data: { kind: "persistent", scope: "worktree" } } as const;
 // accommodates several real source-CLI transactions, not an unbounded helper.
 function command(root: string, args = ["up", "--detach", "--json"]) {
   return invoke(root, args, 30_000, 120_000);
+}
+// The cold case owns three separate 120s CLI transactions. A whole-callback
+// timeout or unconfirmed child retains its fixture and refuses further calls.
+let coldLifetimeUnknown = false;
+let activeColdCases = 0;
+afterEach(() => {
+  if (activeColdCases > 0) {
+    coldLifetimeUnknown = true;
+  }
+});
+async function ownedColdCase(
+  body: (owner: {
+    readonly cleanupAllowed: () => boolean;
+    readonly invoke: (
+      root: string,
+      args: readonly string[]
+    ) => Promise<{ code: number; stdout: string; stderr: string }>;
+  }) => Promise<void>
+) {
+  if (coldLifetimeUnknown) {
+    throw new Error(
+      "Prior cold storage case lifetime is unconfirmed; fixture retained."
+    );
+  }
+  let active = true;
+  activeColdCases++;
+  let capture = 0;
+  const retain = () => {
+    coldLifetimeUnknown = true;
+  };
+  const cleanupAllowed = () => {
+    if (active) {
+      retain();
+    }
+    return !coldLifetimeUnknown;
+  };
+  try {
+    await body({
+      cleanupAllowed,
+      invoke: async (root, args) => {
+        if (coldLifetimeUnknown || !active) {
+          throw new Error(
+            "Cold storage case lifetime is unconfirmed; fixture retained."
+          );
+        }
+        let result: Awaited<
+          ReturnType<typeof captureCompletedJobFixtureCommand>
+        >;
+        try {
+          result = await captureCompletedJobFixtureCommand({
+            argv: [
+              process.execPath,
+              resolve(import.meta.dir, "../index.ts"),
+              "--path",
+              root,
+              ...args,
+            ],
+            cwd: root,
+            env: {
+              HOME: process.env.HOME ?? root,
+              LANG: "C",
+              PATH: `${root}:/usr/bin:/bin`,
+              HACK_HOME: join(root, "home"),
+              HACK_GLOBAL_CONFIG_PATH: join(root, "global.json"),
+              HACK_CONFIG_COMPILER_BINARY: join(root, "compiler"),
+              HACK_RUNTIME_BACKEND: "compose",
+              HACK_LOGGER: "console",
+              HACK_COMPOSE_STARTUP_TIMEOUT_MS: "30000",
+              CI: "1",
+              HACK_EXECUTION_MODE: "non_interactive",
+            },
+            captures: join(root, `storage-capture-${capture++}`),
+            timeoutMs: 120_000,
+            onUnconfirmed: retain,
+          });
+        } catch (error) {
+          retain();
+          throw error;
+        }
+        return {
+          code: result.exitCode,
+          stdout: result.stdout,
+          stderr: result.stderr,
+        };
+      },
+    });
+  } finally {
+    active = false;
+    activeColdCases--;
+  }
 }
 async function saved(root: string) {
   const store = await openNativeComposeGenerationStore({
@@ -47,56 +138,71 @@ async function disposition(root: string, code: number): Promise<string> {
   });
 }
 
-test("source CLI cold enrollment precedes workload and down/up only verifies retained content", async () => {
-  const root = await fixture("", false, { storage, noHooks: true });
-  const up = await command(root);
-  expect(up.code, await disposition(root, up.code)).toBe(0);
-  expect(JSON.parse(up.stdout)).toMatchObject({
-    ok: true,
-    data: { status: "ready" },
-  });
-  const first = await saved(root);
-  expect(first.storageWitnesses?.[0]).toMatchObject({
-    state: "enrolled",
-    reference: { version: 3, kind: "directory-xattr" },
-  });
-  expect(first.pending).toBeNull();
-  expect(first.storageWitnessesPending).toBe(false);
-  expect(await Bun.file(join(root, "carriers")).json()).toEqual([]);
-  const before = await Bun.file(join(root, "volumes")).text();
-  const calls = await requests(root);
-  const create = calls.findIndex(
-    (args) => args[0] === "volume" && args[1] === "create"
-  );
-  const helper = calls.findIndex((args) => args[0] === "start");
-  const workload = calls.findIndex(
-    (args) => args[0] === "compose" && args.includes("up")
-  );
-  expect(create).toBeGreaterThanOrEqual(0);
-  expect(helper).toBeGreaterThan(create);
-  expect(workload).toBeGreaterThan(helper);
-  const events = (await Bun.file(join(root, "storage-events")).text())
-    .trim()
-    .split("\n");
-  expect(events.indexOf("seed")).toBeGreaterThanOrEqual(0);
-  expect(events.indexOf("workload")).toBeGreaterThan(events.indexOf("seed"));
-  expect((await operations(root)).filter((op) => op === "seed")).toHaveLength(
-    1
-  );
-  expect((await command(root, ["down", "--json"])).code).toBe(0);
-  expect((await command(root)).code).toBe(0);
-  expect(await Bun.file(join(root, "volumes")).text()).toBe(before);
-  expect((await saved(root)).storageWitnesses).toEqual(first.storageWitnesses);
-  expect((await operations(root)).filter((op) => op === "seed")).toHaveLength(
-    1
-  );
-  expect(
-    (await requests(root)).filter(
-      (args) => args[0] === "volume" && args[1] === "create"
-    )
-  ).toHaveLength(1);
-  expect(await Bun.file(join(root, "carriers")).json()).toEqual([]);
-}, 120_000);
+test(
+  "source CLI cold enrollment precedes workload and down/up only verifies retained content",
+  async () =>
+    await ownedColdCase(async (owner) => {
+      const root = await fixture("", false, {
+        storage,
+        noHooks: true,
+        cleanupAllowed: owner.cleanupAllowed,
+      });
+      const up = await owner.invoke(root, ["up", "--detach", "--json"]);
+      expect(up.code, await disposition(root, up.code)).toBe(0);
+      expect(JSON.parse(up.stdout)).toMatchObject({
+        ok: true,
+        data: { status: "ready" },
+      });
+      const first = await saved(root);
+      expect(first.storageWitnesses?.[0]).toMatchObject({
+        state: "enrolled",
+        reference: { version: 3, kind: "directory-xattr" },
+      });
+      expect(first.pending).toBeNull();
+      expect(first.storageWitnessesPending).toBe(false);
+      expect(await Bun.file(join(root, "carriers")).json()).toEqual([]);
+      const before = await Bun.file(join(root, "volumes")).text();
+      const calls = await requests(root);
+      const create = calls.findIndex(
+        (args) => args[0] === "volume" && args[1] === "create"
+      );
+      const helper = calls.findIndex((args) => args[0] === "start");
+      const workload = calls.findIndex(
+        (args) => args[0] === "compose" && args.includes("up")
+      );
+      expect(create).toBeGreaterThanOrEqual(0);
+      expect(helper).toBeGreaterThan(create);
+      expect(workload).toBeGreaterThan(helper);
+      const events = (await Bun.file(join(root, "storage-events")).text())
+        .trim()
+        .split("\n");
+      expect(events.indexOf("seed")).toBeGreaterThanOrEqual(0);
+      expect(events.indexOf("workload")).toBeGreaterThan(
+        events.indexOf("seed")
+      );
+      expect(
+        (await operations(root)).filter((op) => op === "seed")
+      ).toHaveLength(1);
+      expect((await owner.invoke(root, ["down", "--json"])).code).toBe(0);
+      expect(
+        (await owner.invoke(root, ["up", "--detach", "--json"])).code
+      ).toBe(0);
+      expect(await Bun.file(join(root, "volumes")).text()).toBe(before);
+      expect((await saved(root)).storageWitnesses).toEqual(
+        first.storageWitnesses
+      );
+      expect(
+        (await operations(root)).filter((op) => op === "seed")
+      ).toHaveLength(1);
+      expect(
+        (await requests(root)).filter(
+          (args) => args[0] === "volume" && args[1] === "create"
+        )
+      ).toHaveLength(1);
+      expect(await Bun.file(join(root, "carriers")).json()).toEqual([]);
+    }),
+  390_000
+);
 
 test("source CLI refuses SAME-birth empty replacement before hooks or another workload start", async () => {
   const root = await fixture("", false, {

@@ -23,6 +23,33 @@ function decode(value: unknown) {
 }
 
 test.skipIf(binary === undefined && sha256 === undefined)(
+  "VM transport preserves the selected Docker multiplexer command name",
+  async () => {
+    if (!(binary && sha256)) {
+      throw new Error("Explicit pinned Docker format client is required");
+    }
+    await withDockerImageFormatFixture({
+      binary,
+      sha256,
+      image,
+      observe: async (probe, vmProbe) => {
+        const expected = await probe(VM_FILE_IMAGE_FORMAT);
+        const actual = await vmProbe(VM_FILE_IMAGE_FORMAT);
+        expect(actual).toBe(expected);
+        expect(decode(JSON.parse(actual))).toEqual({
+          workload: "reader",
+          reference: "synthetic/reader:1",
+          id: image.Id,
+          user: "",
+          labels: {},
+        });
+      },
+    });
+  },
+  20_000
+);
+
+test.skipIf(binary === undefined && sha256 === undefined)(
   "real Docker formatter defaults only absent image User, Volumes and Labels",
   async () => {
     if (!(binary && sha256)) {

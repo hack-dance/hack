@@ -252,7 +252,9 @@ export function createNativeComposeVmFileClient(opts: {
           1000,
           Math.max(1, Math.floor((terminalDeadline - Date.now()) / 4))
         );
-        const child = Bun.spawn([binary, ...command], {
+        // Preserve the selected command name for Docker multiplexer binaries.
+        // check() still binds that selection to the captured physical executable.
+        const child = Bun.spawn([selected, ...command], {
           env: environment,
           stdin: bytes ?? "ignore",
           stdout: "pipe",

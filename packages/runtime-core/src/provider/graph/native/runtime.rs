@@ -5,12 +5,12 @@ use std::{cell::Cell, path::Path, time::Instant};
 
 #[cfg(any(target_os = "macos", test))]
 mod exec;
-#[cfg(target_os = "macos")]
-pub(super) use exec::execute as service_exec;
 #[cfg(any(target_os = "macos", test))]
 pub(super) use exec::ExecSelection;
 #[cfg(target_os = "macos")]
 pub(super) use exec::ServiceExec;
+#[cfg(target_os = "macos")]
+pub(super) use exec::execute as service_exec;
 
 trait Backend {
     #[cfg(any(target_os = "macos", test))]

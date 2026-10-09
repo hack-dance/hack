@@ -21,6 +21,7 @@ import {
   prepareRetainedBuildFixtureSources,
   RETAINED_BUILD_OBJECT_FORMAT,
   retainedBuildFixtureCopiedFiles,
+  retainedBuildFixtureComposeVersion,
   retainedBuildFixtureDefinition,
   retainedBuildFixtureImage,
   retainedBuildFixtureMutationAllowed,
@@ -355,6 +356,11 @@ test("fixture image capture pins the exact observed same-ID repository digest", 
 const baseBuildImage = `sha256:${"1".repeat(64)}`;
 const firstBuildParent = `sha256:${"2".repeat(64)}`;
 const secondBuildParent = `sha256:${"3".repeat(64)}`;
+const noComposeImageLabels = {
+  composeProject: null,
+  composeService: null,
+  composeVersion: null,
+};
 function capturedBuildGraph() {
   const selected = retainedBuildFixtureImage({
     value: { ...imageRow, digests: [`fixture-db@${image}`] },
@@ -369,6 +375,7 @@ function capturedBuildGraph() {
   const values = [
     {
       ...imageRow,
+      ...noComposeImageLabels,
       parent: secondBuildParent,
       size: 1000,
       digests: [`fixture-db@${image}`],
@@ -376,6 +383,7 @@ function capturedBuildGraph() {
     },
     {
       ...imageRow,
+      ...noComposeImageLabels,
       id: firstBuildParent,
       parent: baseBuildImage,
       size: 800,
@@ -385,6 +393,7 @@ function capturedBuildGraph() {
     },
     {
       ...imageRow,
+      ...noComposeImageLabels,
       id: secondBuildParent,
       parent: firstBuildParent,
       size: 900,
@@ -436,6 +445,94 @@ test("explicit builder graph captures only the owned child-to-base chain", () =>
   expect(() => capture(values, [baseBuildImage, firstBuildParent])).toThrow(
     "values omitted"
   );
+});
+
+test("captured Compose image labels require the exact project, service and selected release", () => {
+  const { selected, values } = capturedBuildGraph();
+  const composeVersion = retainedBuildFixtureComposeVersion("2.40.3\n");
+  const publicLabels = [
+    "com.docker.compose.project",
+    "com.docker.compose.service",
+    "com.docker.compose.version",
+  ];
+  const row = {
+    ...values[0],
+    parent: "",
+    composeProject: "fixture",
+    composeService: "db",
+    composeVersion,
+    labelNames: [...values[0].labelNames, ...publicLabels],
+  };
+  const capture = (
+    value: unknown,
+    version: string | undefined = composeVersion
+  ) =>
+    retainedBuildFixtureObjectGraph({
+      values: [value],
+      selected,
+      originalImageIds: [baseBuildImage],
+      baseImage: baseBuildImage,
+      ...(version !== undefined ? { composeVersion: version } : {}),
+    });
+  const captured = capture(row);
+  expect(captured).toHaveLength(1);
+  expect(captured[0]).toMatchObject({
+    id: selected.id,
+    parent: "",
+    created: selected.created,
+    owner: selected.owner,
+    composeProject: "fixture",
+    composeService: "db",
+    composeVersion,
+    tags: row.tags,
+    digests: row.digests,
+  });
+  for (const malformed of [
+    { ...row, composeProject: CANARY },
+    { ...row, composeService: "worker" },
+    { ...row, composeVersion: "2.40.4" },
+    { ...row, composeVersion: null },
+    {
+      ...row,
+      labelNames: row.labelNames.filter((name) => name !== publicLabels[2]),
+    },
+    {
+      ...row,
+      labelNames: [...row.labelNames, "com.docker.compose.private-canary"],
+    },
+    { ...row, labelNames: [...row.labelNames, CANARY] },
+    { ...row, ...noComposeImageLabels, labelNames: values[0].labelNames },
+  ]) {
+    let error: unknown;
+    try {
+      capture(malformed);
+    } catch (caught: unknown) {
+      error = caught;
+    }
+    expect(error).toBeInstanceOf(Error);
+    expect(String(error)).toContain("values omitted");
+    expect(String(error)).not.toContain(CANARY);
+  }
+  expect(() => capture(row, "2.40.4")).toThrow("values omitted");
+  expect(() =>
+    retainedBuildFixtureObjectGraph({
+      values: [row],
+      selected,
+      originalImageIds: [baseBuildImage],
+      baseImage: baseBuildImage,
+    })
+  ).toThrow("values omitted");
+  for (const version of [
+    "v2.40.3",
+    "2.40.3-rc.1",
+    "2.40.3+local",
+    "02.40.3",
+    CANARY,
+  ]) {
+    expect(() => retainedBuildFixtureComposeVersion(version)).toThrow(
+      "values omitted"
+    );
+  }
 });
 
 function buildCleanupModel(opts?: { readonly withoutExposedParent: true }) {

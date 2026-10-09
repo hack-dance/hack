@@ -42,6 +42,7 @@ import {
   type RetainedBuildFixtureMode,
   type RetainedFixtureBuildObject,
   type RetainedFixtureImage,
+  retainedBuildFixtureComposeVersion,
   retainedBuildFixtureDefinition,
   retainedBuildFixtureImage,
   retainedBuildFixtureMarker,
@@ -1492,6 +1493,9 @@ async function assertFixtureBuildImages(
       ),
       selected: captured,
       originalImageIds: opts.originalImageIds,
+      ...(expected.composeVersion !== null
+        ? { composeVersion: expected.composeVersion }
+        : {}),
     });
     if (JSON.stringify(current) !== JSON.stringify(expected)) {
       refused();
@@ -1656,6 +1660,9 @@ async function bootstrapFixtureBuildImage(
   ) {
     refused();
   }
+  const composeVersion = retainedBuildFixtureComposeVersion(
+    await h.probe(["compose", "version", "--short"])
+  );
   await saveFixtureBuildRecovery(h, {
     project: instance.name,
     reference,
@@ -1739,6 +1746,7 @@ async function bootstrapFixtureBuildImage(
     selected: image,
     originalImageIds: h.originalImageIds,
     baseImage: h.baseImage,
+    composeVersion,
   });
   h.builtImages.set(instance, image);
   h.builtImageObjects.set(instance, objects);
@@ -3053,6 +3061,9 @@ async function requireRemainingBuildObjects(
         ),
         selected,
         originalImageIds: h.originalImageIds,
+        ...(captured.composeVersion !== null
+          ? { composeVersion: captured.composeVersion }
+          : {}),
       });
       if (
         JSON.stringify(current) !== JSON.stringify(captured) ||

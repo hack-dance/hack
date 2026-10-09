@@ -11,7 +11,7 @@ export type RetainedBuildFixtureMode = "root-specific" | "hack-default";
 export const RETAINED_BUILD_BASE_TAG = "postgres:17.6-alpine";
 export const RETAINED_BUILD_IMAGE_OWNER = "hack.e2e.retained-build.owner";
 export const RETAINED_BUILD_IMAGE_FORMAT = `{"id":{{json .Id}},"created":{{json .Created}},"owner":{{json (index .Config.Labels "${RETAINED_BUILD_IMAGE_OWNER}")}},"stage":{{json (index .Config.Labels "hack.e2e.retained-build.stage")}},"tags":{{json .RepoTags}},"digests":{{json .RepoDigests}}}`;
-export const RETAINED_BUILD_OBJECT_FORMAT = `{"id":{{json .Id}},"parent":{{json .Parent}},"created":{{json .Created}},"size":{{json .Size}},"owner":{{json (index .Config.Labels "${RETAINED_BUILD_IMAGE_OWNER}")}},"stage":{{json (index .Config.Labels "hack.e2e.retained-build.stage")}},"tags":{{json .RepoTags}},"digests":{{json .RepoDigests}},"labelNames":[{{$first := true}}{{range $name,$value := .Config.Labels}}{{if not $first}},{{end}}{{$first = false}}{{json $name}}{{end}}]}`;
+export const RETAINED_BUILD_OBJECT_FORMAT = `{"id":{{json .Id}},"parent":{{$parent := ""}}{{range $key, $value := .}}{{if eq $key "Parent"}}{{$parent = $value}}{{end}}{{end}}{{json $parent}},"created":{{json .Created}},"size":{{json .Size}},"owner":{{json (index .Config.Labels "${RETAINED_BUILD_IMAGE_OWNER}")}},"stage":{{json (index .Config.Labels "hack.e2e.retained-build.stage")}},"tags":{{json .RepoTags}},"digests":{{json .RepoDigests}},"composeProject":{{json (index .Config.Labels "com.docker.compose.project")}},"composeService":{{json (index .Config.Labels "com.docker.compose.service")}},"composeVersion":{{json (index .Config.Labels "com.docker.compose.version")}},"labelNames":[{{$first := true}}{{range $name,$value := .Config.Labels}}{{if not $first}},{{end}}{{$first = false}}{{json $name}}{{end}}]}`;
 const ID = /^[a-f0-9]{64}$/;
 const IMAGE = /^sha256:[a-f0-9]{64}$/;
 const BIRTH = /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?(?:Z|[+-]\d\d:\d\d)$/;
@@ -267,20 +267,81 @@ export type RetainedFixtureBuildObject = {
   readonly tags: readonly string[] | null;
   readonly digests: readonly string[] | null;
   readonly labelNames: readonly string[];
+  readonly composeProject: string | null;
+  readonly composeService: "db" | null;
+  readonly composeVersion: string | null;
 };
+
+const COMPOSE_IMAGE_LABELS = [
+  "com.docker.compose.project",
+  "com.docker.compose.service",
+  "com.docker.compose.version",
+] as const;
+const COMPOSE_RELEASE = /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/;
+/**
+ * Release-only short version matches Compose's public core-version image label.
+ * https://github.com/docker/compose/blob/v2.40.3/pkg/api/labels.go
+ * https://github.com/docker/compose/blob/v2.40.3/pkg/compose/build.go
+ */
+export function retainedBuildFixtureComposeVersion(text: string) {
+  const version = text.trim();
+  if (!COMPOSE_RELEASE.test(version)) {
+    refuse();
+  }
+  return version;
+}
+function capturedComposeImageLabels(opts: {
+  readonly value: Record<string, unknown>;
+  readonly selected: RetainedFixtureImage;
+  readonly composeVersion?: string;
+}) {
+  const { value, selected, composeVersion } = opts;
+  const labels = value.labelNames;
+  if (!Array.isArray(labels)) {
+    refuse();
+  }
+  const present = COMPOSE_IMAGE_LABELS.filter((name) => labels.includes(name));
+  if (present.length === 0) {
+    if (
+      value.composeProject !== null ||
+      value.composeService !== null ||
+      value.composeVersion !== null ||
+      (value.id === selected.id && composeVersion !== undefined)
+    ) {
+      refuse();
+    }
+    return { composeProject: null, composeService: null, composeVersion: null };
+  }
+  if (
+    present.length !== 3 ||
+    composeVersion === undefined ||
+    !COMPOSE_RELEASE.test(composeVersion) ||
+    value.composeProject !== selected.owner ||
+    value.composeService !== "db" ||
+    value.composeVersion !== composeVersion
+  ) {
+    refuse();
+  }
+  return {
+    composeProject: selected.owner,
+    composeService: "db" as const,
+    composeVersion,
+  };
+}
 
 /** Only exact fixture-labelled objects, never arbitrary dangling images or cache entries. */
 export function retainedBuildFixtureObject(opts: {
   readonly value: unknown;
   readonly selected: RetainedFixtureImage;
   readonly originalImageIds: readonly string[];
+  readonly composeVersion?: string;
 }): RetainedFixtureBuildObject {
   const { value, selected, originalImageIds } = opts;
   if (
     !(
       isRecord(value) &&
       Object.keys(value).sort().join() ===
-        "created,digests,id,labelNames,owner,parent,size,stage,tags" &&
+        "composeProject,composeService,composeVersion,created,digests,id,labelNames,owner,parent,size,stage,tags" &&
       typeof value.id === "string" &&
       IMAGE.test(value.id) &&
       !originalImageIds.includes(value.id) &&
@@ -305,12 +366,14 @@ export function retainedBuildFixtureObject(opts: {
           RETAINED_BUILD_IMAGE_OWNER,
           "hack.e2e.retained-build.stage",
           "com.docker.compose.image.builder",
+          ...COMPOSE_IMAGE_LABELS,
         ].includes(name)
       )
     )
   ) {
     refuse();
   }
+  const composeLabels = capturedComposeImageLabels({ ...opts, value });
   if (value.id === selected.id) {
     const current = retainedBuildFixtureImage({
       value: {
@@ -354,6 +417,7 @@ export function retainedBuildFixtureObject(opts: {
     tags: value.tags === null ? null : Object.freeze([...value.tags]),
     digests: value.digests === null ? null : Object.freeze([...value.digests]),
     labelNames: Object.freeze([...value.labelNames].sort()),
+    ...composeLabels,
   });
 }
 
@@ -368,6 +432,7 @@ export function retainedBuildFixtureObjectGraph(opts: {
   readonly selected: RetainedFixtureImage;
   readonly originalImageIds: readonly string[];
   readonly baseImage: string;
+  readonly composeVersion?: string;
 }): readonly RetainedFixtureBuildObject[] {
   if (
     opts.values.length < 1 ||

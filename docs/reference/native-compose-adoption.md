@@ -549,6 +549,12 @@ fresh. A complete resource/runtime observation brackets the proof, including
 final volume and inventory rereads. The context is revoked before return and
 cannot cross a lifecycle effect, publication or another observation phase.
 This reduces nested inspection calls; it is not a measured runtime or CPU claim.
+Before moving originals, publication uses its just-completed resource observation
+as that proof's entry. Candidate admission and stopped-state reads do not extend
+the observation into an effect: source, receipt, claims and stopped state are
+rechecked inside the scoped context, and a complete fresh binding remains the
+exit gate before originals can move. The same absolute publication deadline
+applies; an already expired entry still refuses.
 
 Publication refusals may include
 `legacy_adoption_publication_refusal: {stage, reason}` in the JSON error detail.

@@ -802,3 +802,127 @@ test("interrupted claim handoff retries from durable releasing state after exact
     await store.close();
   }
 });
+
+test("publication uses its just-observed entry binding within the unchanged proof deadline", async () => {
+  const { store, generation } = await prepare();
+  const originalNow = Date.now;
+  let virtualNow: number | undefined;
+  let charged = 0;
+  const clock = spyOn(Date, "now").mockImplementation(
+    () => virtualNow ?? originalNow()
+  );
+  try {
+    h.hooks.afterProbe = async (args) => {
+      const saved = await h.receipt();
+      if (
+        args[0] === "volume" &&
+        args[1] === "inspect" &&
+        saved.publication?.phase === "switching" &&
+        saved.publication.native === null
+      ) {
+        charged += 1;
+        virtualNow ??= originalNow();
+        virtualNow += 2600;
+      }
+    };
+    await store.publish({ generation, binary: h.compiler });
+    expect(charged).toBe(4);
+    expect((await h.receipt()).publication?.phase).toBe("active");
+    expect(h.effects).toEqual([]);
+  } finally {
+    clock.mockRestore();
+    Reflect.deleteProperty(h.hooks, "afterProbe");
+    await store.close();
+  }
+});
+
+test("publication keeps the fixed deadline when its first full proof already expires", async () => {
+  const { store, generation } = await prepare();
+  const originalNow = Date.now;
+  let virtualNow: number | undefined;
+  let reached = false;
+  const clock = spyOn(Date, "now").mockImplementation(
+    () => virtualNow ?? originalNow()
+  );
+  try {
+    h.hooks.afterProbe = async (args) => {
+      if (
+        !reached &&
+        args[0] === "volume" &&
+        args[1] === "inspect" &&
+        (await h.receipt()).publication?.phase === "switching"
+      ) {
+        reached = true;
+        virtualNow = originalNow() + 16_000;
+      }
+    };
+    let error: unknown;
+    try {
+      await store.publish({ generation, binary: h.compiler });
+    } catch (caught: unknown) {
+      error = caught;
+    }
+    expect(reached).toBe(true);
+    expect(legacyComposePublicationRefusal(error)).toEqual({
+      stage: "publication-routing",
+      reason: "legacy-state",
+    });
+    expect((await h.receipt()).publication).toMatchObject({
+      phase: "switching",
+      native: null,
+    });
+    expect(await readFile(join(h.root, ".hack/hack.config.json"), "utf8")).toBe(
+      h.config
+    );
+    expect(h.effects).toEqual([]);
+  } finally {
+    clock.mockRestore();
+    Reflect.deleteProperty(h.hooks, "afterProbe");
+    await store.close();
+  }
+});
+
+test("publication repeats full volume authority after its observed-entry routing window", async () => {
+  const { store, generation } = await prepare();
+  let admins = 0;
+  let volumeReads = 0;
+  let reached = false;
+  try {
+    h.hooks.afterProbe = async (args) => {
+      const saved = await h.receipt();
+      if (
+        saved.publication?.phase !== "switching" ||
+        saved.publication.native !== null
+      ) {
+        return;
+      }
+      if (args[0] === "volume" && args[1] === "inspect") {
+        volumeReads += 1;
+      }
+      if (
+        args[0] === "exec" &&
+        args.at(-1) === "http://127.0.0.1:2019/config/apps/http/servers"
+      ) {
+        admins += 1;
+        if (admins === 2) {
+          expect(volumeReads).toBe(2);
+          reached = true;
+          h.model.volumeBirth = "2026-02-02T02:03:04Z";
+        }
+      }
+    };
+    await red(store.publish({ generation, binary: h.compiler }));
+    expect(reached).toBe(true);
+    expect((await h.receipt()).publication).toMatchObject({
+      phase: "switching",
+      native: null,
+    });
+    expect(await readFile(join(h.root, ".hack/hack.config.json"), "utf8")).toBe(
+      h.config
+    );
+    expect(h.effects).toEqual([]);
+  } finally {
+    Reflect.deleteProperty(h.hooks, "afterProbe");
+    await store.close();
+  }
+});

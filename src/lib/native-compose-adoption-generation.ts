@@ -815,13 +815,17 @@ async function assertRetainedRouteState(
   deadline: number,
   assertOwner: (
     current: Context
-  ) => Promise<Awaited<ReturnType<typeof readInputs>>>
+  ) => Promise<Awaited<ReturnType<typeof readInputs>>>,
+  entryObserved = false
 ): Promise<void> {
   const binding = loaded.inputs.binding;
   if (binding.binding_version !== 14 || retainedRouteObservations.has(ctx)) {
     refuse();
   }
-  const first = await assertOwner(ctx);
+  // Publication has just completed this full resource proof, followed only by
+  // candidate admission and stopped-state reads. Recheck source/receipt authority
+  // under the scoped observation; the exit still performs a full fresh binding.
+  const first = entryObserved ? loaded : await assertOwner(ctx);
   if (
     first.manifest.id !== loaded.manifest.id ||
     JSON.stringify(first.inputs.binding) !== JSON.stringify(binding)
@@ -849,6 +853,10 @@ async function assertRetainedRouteState(
     },
   });
   try {
+    if (entryObserved) {
+      await assertOwner(current);
+      assertActive();
+    }
     await assertLegacyComposeRetainedRoutingState({
       binding,
       routing: retainedRoutingIntent(loaded.inputs),
@@ -1965,7 +1973,14 @@ async function completePublication(
     stage = "publication-stopped";
     await requireStopped(ctx, loaded.inputs.binding);
     stage = "publication-routing";
-    await assertPublicationRoutingStopped(ctx, loaded, state, routingDeadline);
+    await assertPublicationRoutingStopped(
+      ctx,
+      loaded,
+      state,
+      routingDeadline,
+      false,
+      true
+    );
     stage = "publication-originals-directory";
     const held = await holdDirectory(
       join(ctx.generationsRoot, publication.generation.id, "originals"),
@@ -2208,7 +2223,8 @@ async function assertPublicationRoutingStopped(
   loaded: Awaited<ReturnType<typeof readInputs>>,
   state: Receipt,
   deadline: number,
-  restored = false
+  restored = false,
+  entryObserved = false
 ): Promise<void> {
   if (!loaded.inputs.retainedRouting) {
     return;
@@ -2236,7 +2252,8 @@ async function assertPublicationRoutingStopped(
         refuse();
       }
       return fresh;
-    }
+    },
+    entryObserved
   );
 }
 

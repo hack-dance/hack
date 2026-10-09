@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { constants, type Stats } from "node:fs";
 import {
   type FileHandle,
@@ -7,6 +7,7 @@ import {
   open,
   readdir,
   realpath,
+  rename,
   rmdir,
   unlink,
 } from "node:fs/promises";
@@ -15,6 +16,7 @@ import { isRecord } from "./guards.ts";
 import { beginNativeCpuChild } from "./native-cpu-diagnostics.ts";
 
 const TOKEN = /^[a-f0-9]{32}$/;
+const SHA256 = /^[a-f0-9]{64}$/;
 const BOOT_ID = /^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/;
 const BIRTH =
   /^(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun) (?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) \d{1,2} \d{2}:\d{2}:\d{2} \d{4}$/;
@@ -32,8 +34,12 @@ export type NativeComposeMutationLease = {
   readonly token: string;
   readonly directory: { readonly dev: number; readonly ino: number };
   readonly owner: { readonly dev: number; readonly ino: number };
+  /** Private copied owner/inode metadata; this snapshot alone is not a lease. */
+  readonly selection: NativeComposeInterruptedLockSelection;
+  readonly assertActive: () => undefined;
   readonly assertHeld: () => Promise<void>;
 };
+const mutationLeases = new WeakSet<NativeComposeMutationLease>();
 type LockOwner = {
   readonly version: 1;
   readonly token: string;
@@ -42,6 +48,102 @@ type LockOwner = {
   readonly bootId: string;
   readonly birth: string;
 };
+/** Private current snapshot, independently re-admitted before explicit unlink.
+ * This is neither a historical inode witness nor permission to take a live lock. */
+export type NativeComposeInterruptedLockSelection = {
+  readonly version: 1;
+  readonly kind: "native-private-interrupted-lock";
+  readonly directory: { readonly dev: number; readonly ino: number };
+  readonly file: {
+    readonly dev: number;
+    readonly ino: number;
+    readonly sha256: string;
+  };
+  readonly owner: LockOwner;
+};
+/** A bounded candidate publication, not an issued mutation lease. The callback
+ * must durably bind both selectors before this owner promotes the candidate. */
+export type NativeComposePreparedLockReservation = {
+  readonly previous: NativeComposeInterruptedLockSelection;
+  readonly previousAbsent: boolean;
+  readonly next: NativeComposeInterruptedLockSelection;
+  readonly assertHeld: () => Promise<void>;
+  readonly assertActive: () => undefined;
+};
+
+function fileIdentity(value: unknown): value is Record<string, unknown> & {
+  readonly dev: number;
+  readonly ino: number;
+} {
+  return (
+    isRecord(value) &&
+    typeof value.dev === "number" &&
+    Number.isSafeInteger(value.dev) &&
+    value.dev >= 0 &&
+    typeof value.ino === "number" &&
+    Number.isSafeInteger(value.ino) &&
+    value.ino > 0
+  );
+}
+export function parseNativeComposeInterruptedLockSelection(
+  value: unknown
+): NativeComposeInterruptedLockSelection {
+  if (
+    !(isRecord(value) && keys(value, "directory,file,kind,owner,version")) ||
+    value.version !== 1 ||
+    value.kind !== "native-private-interrupted-lock" ||
+    !fileIdentity(value.directory) ||
+    !keys(value.directory, "dev,ino") ||
+    !fileIdentity(value.file) ||
+    !keys(value.file, "dev,ino,sha256") ||
+    typeof value.file.sha256 !== "string" ||
+    !SHA256.test(value.file.sha256)
+  ) {
+    return refuse();
+  }
+  const owner = parseLockOwner(JSON.stringify(value.owner));
+  return Object.freeze({
+    version: 1,
+    kind: "native-private-interrupted-lock",
+    directory: Object.freeze({
+      dev: value.directory.dev,
+      ino: value.directory.ino,
+    }),
+    file: Object.freeze({
+      dev: value.file.dev,
+      ino: value.file.ino,
+      sha256: value.file.sha256,
+    }),
+    owner: Object.freeze(owner),
+  });
+}
+function interruptedSelection(
+  lock: HeldDirectory,
+  original: { readonly info: Stats; readonly text: string }
+): NativeComposeInterruptedLockSelection {
+  return parseNativeComposeInterruptedLockSelection({
+    version: 1,
+    kind: "native-private-interrupted-lock",
+    directory: { dev: lock.info.dev, ino: lock.info.ino },
+    file: {
+      dev: original.info.dev,
+      ino: original.info.ino,
+      sha256: createHash("sha256").update(original.text).digest("hex"),
+    },
+    owner: parseLockOwner(original.text),
+  });
+}
+function requireInterruptedSelection(
+  expected: NativeComposeInterruptedLockSelection | undefined,
+  current: NativeComposeInterruptedLockSelection
+): void {
+  if (
+    expected !== undefined &&
+    JSON.stringify(current) !== JSON.stringify(expected)
+  ) {
+    refuse();
+  }
+}
 
 async function inspection(
   command: readonly string[]
@@ -460,7 +562,8 @@ export function createNativeComposePrivateMutationLock(opts: {
 }) {
   const { lockPath, recoveryPath, parent, check } = opts;
   const withLock = async <T>(
-    run: (lease: NativeComposeMutationLease) => Promise<T>
+    run: (lease: NativeComposeMutationLease) => Promise<T>,
+    beforeRetire?: (lease: NativeComposeMutationLease) => Promise<void>
   ) => {
     await check();
     await requireAbsentGuard(recoveryPath);
@@ -477,6 +580,7 @@ export function createNativeComposePrivateMutationLock(opts: {
     const ownerPath = join(lockPath, "owner");
     const lockToken = JSON.stringify(lockOwner);
     let ownerInfo: Stats | undefined;
+    let issued: NativeComposeMutationLease | undefined;
     let active = true;
     const assertHeld = async () => {
       if (!active) {
@@ -499,16 +603,36 @@ export function createNativeComposePrivateMutationLock(opts: {
       ownerInfo = await writeExclusive(ownerPath, lockToken);
       await lock.file.sync();
       await assertHeld();
-      return await run(
-        Object.freeze({
-          token: lockOwner.token,
-          directory: Object.freeze({ dev: lock.info.dev, ino: lock.info.ino }),
-          owner: Object.freeze({ dev: ownerInfo.dev, ino: ownerInfo.ino }),
-          assertHeld,
-        })
-      );
+      const lease = Object.freeze({
+        token: lockOwner.token,
+        directory: Object.freeze({ dev: lock.info.dev, ino: lock.info.ino }),
+        owner: Object.freeze({ dev: ownerInfo.dev, ino: ownerInfo.ino }),
+        selection: interruptedSelection(lock, {
+          info: ownerInfo,
+          text: lockToken,
+        }),
+        assertActive: () => {
+          if (issued === undefined || !mutationLeases.has(issued) || !active) {
+            return refuse();
+          }
+          return undefined;
+        },
+        assertHeld,
+      });
+      mutationLeases.add(lease);
+      issued = lease;
+      return await run(lease);
     } finally {
       try {
+        try {
+          if (issued !== undefined && beforeRetire !== undefined) {
+            await beforeRetire(issued);
+          }
+        } finally {
+          if (issued !== undefined) {
+            mutationLeases.delete(issued);
+          }
+        }
         await assertHeld();
         await unlink(ownerPath);
         await rmdir(lockPath);
@@ -520,66 +644,496 @@ export function createNativeComposePrivateMutationLock(opts: {
     }
   };
 
+  const selectInterruptedLock = async () => {
+    await check();
+    await requireAbsentGuard(recoveryPath);
+    const lock = await holdDirectory(lockPath, true);
+    try {
+      const ownerPath = join(lockPath, "owner");
+      const original = await readPrivate(ownerPath, LOCK_OWNER_LIMIT);
+      const selected = interruptedSelection(lock, original);
+      await requireDeadOwner(selected.owner);
+      await check();
+      await requireAbsentGuard(recoveryPath);
+      await recheckDirectories([lock]);
+      const latest = await readPrivate(ownerPath, LOCK_OWNER_LIMIT);
+      if (
+        !sameFile(original.info, latest.info) ||
+        latest.text !== original.text ||
+        JSON.stringify(await readdir(lockPath)) !== '["owner"]'
+      ) {
+        return refuse();
+      }
+      await requireDeadOwner(selected.owner);
+      await recheckDirectories([lock]);
+      return selected;
+    } finally {
+      await lock.file.close();
+    }
+  };
+
+  const withPreparedRecoveryLock = async <T>(
+    input: {
+      readonly expected: unknown;
+      readonly successor?: unknown;
+      /** Only a pre-existing committed release phase may permit absence. */
+      readonly allowOwnerAbsent: boolean;
+      readonly reserve: (
+        reservation: NativeComposePreparedLockReservation
+      ) => Promise<void>;
+      readonly release: (lease: NativeComposeMutationLease) => Promise<void>;
+    },
+    run: (lease: NativeComposeMutationLease) => Promise<T>
+  ): Promise<T> => {
+    const expected = parseNativeComposeInterruptedLockSelection(input.expected);
+    const successor =
+      input.successor === undefined
+        ? undefined
+        : parseNativeComposeInterruptedLockSelection(input.successor);
+    const allowOwnerAbsent = input.allowOwnerAbsent;
+    const reserve = input.reserve;
+    const release = input.release;
+    if (typeof allowOwnerAbsent !== "boolean") {
+      return refuse();
+    }
+    await check();
+    await requireAbsentGuard(recoveryPath);
+    if ((await bootId()) !== expected.owner.bootId) {
+      return refuse();
+    }
+    const prepareDirectory = async () => {
+      try {
+        await lstat(lockPath);
+        return true;
+      } catch (error) {
+        if (
+          !(hasCode(error, "ENOENT") && allowOwnerAbsent) ||
+          successor !== undefined
+        ) {
+          throw error;
+        }
+        await mkdir(lockPath, { mode: 0o700 });
+        return false;
+      }
+    };
+    const directoryExists = await prepareDirectory();
+    const lock = await holdDirectory(lockPath, true);
+    const ownerPath = join(lockPath, "owner");
+    const pendingPath = join(lockPath, "owner.pending");
+    let active = true;
+    let reservationActive = false;
+    let issued: NativeComposeMutationLease | undefined;
+    const checkDirectory = async () => {
+      if (!active) {
+        return refuse();
+      }
+      await check();
+      await requireAbsentGuard(recoveryPath);
+      await recheckDirectories([lock]);
+      if (!active) {
+        return refuse();
+      }
+    };
+    const readOwner = async () => {
+      try {
+        return interruptedSelection(
+          lock,
+          await readPrivate(ownerPath, LOCK_OWNER_LIMIT)
+        );
+      } catch (error) {
+        if (hasCode(error, "ENOENT")) {
+          return undefined;
+        }
+        throw error;
+      }
+    };
+    const sameSelection = (
+      left: NativeComposeInterruptedLockSelection,
+      right: NativeComposeInterruptedLockSelection
+    ) => JSON.stringify(left) === JSON.stringify(right);
+    const matchesAdmitted = (value: NativeComposeInterruptedLockSelection) =>
+      sameSelection(value, expected) ||
+      (successor !== undefined && sameSelection(value, successor));
+    const promoteSavedCandidate = async (
+      current: NativeComposeInterruptedLockSelection | undefined
+    ) => {
+      if (
+        !successor ||
+        (current !== undefined && !sameSelection(current, expected))
+      ) {
+        return refuse();
+      }
+      const pending = interruptedSelection(
+        lock,
+        await readPrivate(pendingPath, LOCK_OWNER_LIMIT)
+      );
+      requireInterruptedSelection(successor, pending);
+      await requireDeadOwner(successor.owner);
+      await checkDirectory();
+      if (JSON.stringify(await readOwner()) !== JSON.stringify(current)) {
+        return refuse();
+      }
+      requireInterruptedSelection(
+        successor,
+        interruptedSelection(
+          lock,
+          await readPrivate(pendingPath, LOCK_OWNER_LIMIT)
+        )
+      );
+      if (!active) {
+        return refuse();
+      }
+      await rename(pendingPath, ownerPath);
+      await lock.file.sync();
+      const promoted = await readOwner();
+      if (!(promoted && sameSelection(promoted, successor))) {
+        return refuse();
+      }
+      return promoted;
+    };
+    const admitDirectory = async () => {
+      if (
+        directoryExists &&
+        !sameFile(lock.info, expected.directory) &&
+        !(successor && sameFile(lock.info, successor.directory))
+      ) {
+        return refuse();
+      }
+      const names = (await readdir(lockPath)).sort();
+      if (names.some((name) => name !== "owner" && name !== "owner.pending")) {
+        return refuse();
+      }
+      return names;
+    };
+    const admitOwner = async () => {
+      const names = await admitDirectory();
+      const current = await readOwner();
+      if (current && !matchesAdmitted(current)) {
+        return refuse();
+      }
+      if (!(current || allowOwnerAbsent)) {
+        return refuse();
+      }
+      if (current) {
+        await requireDeadOwner(current.owner);
+      }
+      if (names.includes("owner.pending")) {
+        return await promoteSavedCandidate(current);
+      }
+      if (successor && !(current && sameSelection(current, successor))) {
+        // A reserved candidate may neither disappear nor become an empty dir.
+        return refuse();
+      }
+      return current;
+    };
+    const runIssuedLease = async (lease: NativeComposeMutationLease) => {
+      const result = await run(lease).then(
+        (value) => ({ ok: true as const, value }),
+        (error: unknown) => ({ ok: false as const, error })
+      );
+      // Failed release publication retains this exact owner and directory.
+      // Issuance spans the awaited release callback, then ends synchronously.
+      try {
+        await release(lease);
+      } finally {
+        mutationLeases.delete(lease);
+      }
+      await lease.assertHeld();
+      if (!active) {
+        return refuse();
+      }
+      await unlink(ownerPath);
+      await checkDirectory();
+      if ((await readdir(lockPath)).length !== 0 || !active) {
+        return refuse();
+      }
+      await rmdir(lockPath);
+      await parent?.file.sync();
+      if (result.ok) {
+        return result.value;
+      }
+      throw result.error;
+    };
+    try {
+      const current = await admitOwner();
+      const previous = current ?? expected;
+      await checkDirectory();
+      if (JSON.stringify(await readOwner()) !== JSON.stringify(current)) {
+        return refuse();
+      }
+      const owner = await captureLockOwner();
+      const text = JSON.stringify(owner);
+      const info = await writeExclusive(pendingPath, text);
+      await lock.file.sync();
+      const next = interruptedSelection(lock, { info, text });
+      reservationActive = true;
+      const assertReserved = async () => {
+        if (!reservationActive) {
+          return refuse();
+        }
+        await checkDirectory();
+        if (JSON.stringify(await readOwner()) !== JSON.stringify(current)) {
+          return refuse();
+        }
+        const pending = await readPrivate(pendingPath, LOCK_OWNER_LIMIT);
+        if (
+          !sameFile(pending.info, info) ||
+          pending.text !== text ||
+          !reservationActive
+        ) {
+          return refuse();
+        }
+      };
+      await reserve(
+        Object.freeze({
+          previous,
+          previousAbsent: current === undefined,
+          next,
+          assertHeld: assertReserved,
+          assertActive: () => {
+            if (!(active && reservationActive)) {
+              return refuse();
+            }
+            return undefined;
+          },
+        })
+      );
+      await assertReserved();
+      if (current) {
+        await requireDeadOwner(current.owner);
+      }
+      await assertReserved();
+      if (!(active && reservationActive)) {
+        return refuse();
+      }
+      await rename(pendingPath, ownerPath);
+      reservationActive = false;
+      await lock.file.sync();
+      const assertHeld = async () => {
+        await checkDirectory();
+        if (JSON.stringify(await readdir(lockPath)) !== '["owner"]') {
+          return refuse();
+        }
+        const latest = await readPrivate(ownerPath, LOCK_OWNER_LIMIT);
+        if (!sameFile(latest.info, info) || latest.text !== text || !active) {
+          return refuse();
+        }
+      };
+      await assertHeld();
+      const lease: NativeComposeMutationLease = Object.freeze({
+        token: owner.token,
+        directory: Object.freeze({ dev: lock.info.dev, ino: lock.info.ino }),
+        owner: Object.freeze({ dev: info.dev, ino: info.ino }),
+        selection: next,
+        assertHeld,
+        assertActive: () => {
+          if (!active || issued === undefined || !mutationLeases.has(issued)) {
+            return refuse();
+          }
+          return undefined;
+        },
+      });
+      issued = lease;
+      mutationLeases.add(lease);
+      return await runIssuedLease(lease);
+    } finally {
+      if (issued) {
+        mutationLeases.delete(issued);
+      }
+      reservationActive = false;
+      active = false;
+      await lock.file.close();
+    }
+  };
+
+  const retireInterruptedLock = async (
+    recovery: HeldDirectory,
+    expected: NativeComposeInterruptedLockSelection | undefined
+  ) => {
+    const lock = await holdDirectory(lockPath, true);
+    try {
+      const ownerPath = join(lockPath, "owner");
+      const original = await readPrivate(ownerPath, LOCK_OWNER_LIMIT);
+      const owner = parseLockOwner(original.text);
+      if (expected !== undefined) {
+        requireInterruptedSelection(
+          expected,
+          interruptedSelection(lock, original)
+        );
+      }
+      await requireDeadOwner(owner);
+      await check();
+      await recheckDirectories([recovery, lock]);
+      const latest = await readPrivate(ownerPath, LOCK_OWNER_LIMIT);
+      if (
+        !sameFile(original.info, latest.info) ||
+        latest.text !== original.text ||
+        JSON.stringify(await readdir(lockPath)) !== '["owner"]'
+      ) {
+        return refuse();
+      }
+      await requireDeadOwner(owner);
+      await recheckDirectories([recovery, lock]);
+      if (expected !== undefined) {
+        await check();
+        await recheckDirectories([recovery, lock]);
+        const final = await readPrivate(ownerPath, LOCK_OWNER_LIMIT);
+        if (
+          !sameFile(original.info, final.info) ||
+          final.text !== original.text
+        ) {
+          return refuse();
+        }
+      }
+      await unlink(ownerPath);
+      await rmdir(lockPath);
+      await parent?.file.sync();
+    } finally {
+      await lock.file.close();
+    }
+  };
+
+  const recoverInterruptedLock = async (
+    expected?: NativeComposeInterruptedLockSelection
+  ) => {
+    await check();
+    await requireAbsentGuard(recoveryPath);
+    try {
+      await lstat(lockPath);
+    } catch (error) {
+      if (hasCode(error, "ENOENT") && expected === undefined) {
+        return;
+      }
+      throw error;
+    }
+    if (expected !== undefined) {
+      requireInterruptedSelection(expected, await selectInterruptedLock());
+    }
+    try {
+      await mkdir(recoveryPath, { mode: 0o700 });
+    } catch (error) {
+      if (hasCode(error, "EEXIST")) {
+        throw new NativeComposeGenerationError("E_NATIVE_COMPOSE_BUSY");
+      }
+      throw error;
+    }
+    const recovery = await holdDirectory(recoveryPath, true);
+    try {
+      await retireInterruptedLock(recovery, expected);
+    } finally {
+      try {
+        await check();
+        await recheckDirectories([recovery]);
+        await rmdir(recoveryPath);
+        await parent?.file.sync();
+      } finally {
+        await recovery.file.close();
+      }
+    }
+  };
+
   return {
-    withLock,
+    withLock: <T>(run: (lease: NativeComposeMutationLease) => Promise<T>) =>
+      withLock(run),
+    /** Fresh recovery issuance retains its exact owner if durable release fails.
+     * Existing generation callers keep the original unconditional finalizer. */
+    withFreshRecoveryLock: <T>(
+      opts: {
+        readonly release: (lease: NativeComposeMutationLease) => Promise<void>;
+      },
+      run: (lease: NativeComposeMutationLease) => Promise<T>
+    ) => withLock(run, opts.release),
+    /** Stable-directory takeover for an exact durable successor/release protocol.
+     * Unknown pending publications refuse; this never issues authority from data. */
+    withPreparedRecoveryLock,
     /** Native startup admission uses the same active lease without material authority. */
     withHeldLock: <T>(run: (assertHeld: () => Promise<void>) => Promise<T>) =>
       withLock((lease) => run(lease.assertHeld)),
-    async recoverInterruptedLock() {
-      await check();
-      await requireAbsentGuard(recoveryPath);
-      try {
-        await lstat(lockPath);
-      } catch (error) {
-        if (hasCode(error, "ENOENT")) {
-          return;
-        }
-        throw error;
+    recoverInterruptedLock: () => recoverInterruptedLock(),
+    /** Read-only current dead/same-host-boot snapshot; no lock is created or retired. */
+    selectInterruptedLock,
+    /** Capture caller input before any await; absence or a changed inode never grants retirement. */
+    recoverSelectedInterruptedLock(value: unknown) {
+      const expected = parseNativeComposeInterruptedLockSelection(value);
+      return recoverInterruptedLock(expected);
+    },
+    /** Retain the actual named recovery lease through caller-owned durable retirement.
+     * Expected owner absence is legal only after the caller committed its exact
+     * retirement intent. Neither a selector nor a fabricated lease grants this API. */
+    retireSelectedUnderRecoveryLease(opts: {
+      readonly selected: unknown;
+      readonly lease: NativeComposeMutationLease;
+      readonly allowOwnerAbsent?: boolean;
+    }) {
+      const expected = parseNativeComposeInterruptedLockSelection(
+        opts.selected
+      );
+      const lease = opts.lease;
+      const allowOwnerAbsent = opts.allowOwnerAbsent ?? false;
+      if (!mutationLeases.has(lease) || typeof allowOwnerAbsent !== "boolean") {
+        return refuse();
       }
-      try {
-        await mkdir(recoveryPath, { mode: 0o700 });
-      } catch (error) {
-        if (hasCode(error, "EEXIST")) {
-          throw new NativeComposeGenerationError("E_NATIVE_COMPOSE_BUSY");
-        }
-        throw error;
-      }
-      const recovery = await holdDirectory(recoveryPath, true);
-      try {
-        const lock = await holdDirectory(lockPath, true);
+      return (async () => {
+        await lease.assertHeld();
+        const recovery = await holdDirectory(recoveryPath, true);
         try {
-          const ownerPath = join(lockPath, "owner");
-          const original = await readPrivate(ownerPath, LOCK_OWNER_LIMIT);
-          const owner = parseLockOwner(original.text);
-          await requireDeadOwner(owner);
-          await check();
-          await recheckDirectories([recovery, lock]);
-          const latest = await readPrivate(ownerPath, LOCK_OWNER_LIMIT);
-          if (
-            !sameFile(original.info, latest.info) ||
-            latest.text !== original.text ||
-            JSON.stringify(await readdir(lockPath)) !== '["owner"]'
-          ) {
-            refuse();
+          if (!sameFile(recovery.info, lease.directory)) {
+            return refuse();
           }
-          await requireDeadOwner(owner);
-          await recheckDirectories([recovery, lock]);
-          await unlink(ownerPath);
-          await rmdir(lockPath);
-          await parent?.file.sync();
-        } finally {
-          await lock.file.close();
-        }
-      } finally {
-        try {
-          await check();
-          await recheckDirectories([recovery]);
-          await rmdir(recoveryPath);
-          await parent?.file.sync();
+          const verify = async () => {
+            await lease.assertHeld();
+            await check();
+            await recheckDirectories([recovery]);
+          };
+          await verify();
+          const lock = await holdDirectory(lockPath, true);
+          try {
+            if (!sameFile(lock.info, expected.directory)) {
+              return refuse();
+            }
+            const ownerPath = join(lockPath, "owner");
+            await requireDeadOwner(expected.owner);
+            await verify();
+            await recheckDirectories([lock]);
+            const names = await readdir(lockPath);
+            if (
+              JSON.stringify(names) !== '["owner"]' &&
+              !(allowOwnerAbsent && names.length === 0)
+            ) {
+              return refuse();
+            }
+            const current = await readPrivate(
+              ownerPath,
+              LOCK_OWNER_LIMIT
+            ).catch((error: unknown) => {
+              if (allowOwnerAbsent && hasCode(error, "ENOENT")) {
+                return undefined;
+              }
+              throw error;
+            });
+            if (current !== undefined) {
+              requireInterruptedSelection(
+                expected,
+                interruptedSelection(lock, current)
+              );
+              lease.assertActive();
+              await unlink(ownerPath);
+            }
+            await verify();
+            await recheckDirectories([lock]);
+            if ((await readdir(lockPath)).length !== 0) {
+              return refuse();
+            }
+            lease.assertActive();
+            await rmdir(lockPath);
+            await parent?.file.sync();
+          } finally {
+            await lock.file.close();
+          }
         } finally {
           await recovery.file.close();
         }
-      }
+      })();
     },
   };
 }

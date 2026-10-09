@@ -167,6 +167,13 @@ function selection<T>(value: unknown, parse: (value: unknown) => T) {
 function selectedFile(value: unknown): NativeAuthoredProjectRunSelection {
   return selection(value, selected);
 }
+/** Copied data selectors used by the separately tagged explicit recovery intent. */
+export function parseNativeAuthoredProjectRunSelection(value: unknown) {
+  return selectedFile(value);
+}
+export function parseNativeAuthoredProjectStartSelection(value: unknown) {
+  return selection(value, started);
+}
 function validBranch(branch: string | null): boolean {
   return (
     branch === null ||
@@ -313,6 +320,7 @@ async function storage<T>(
       root,
       held,
       file,
+      mutationPath: join(root.path, `${key}.lock`),
       startFile: join(root.path, `${key}.start.json`),
       admissionPath: join(root.path, `${key}.admission.lock`),
       admissionRecovery: join(root.path, `${key}.admission.recovery`),
@@ -340,6 +348,7 @@ type Store = {
   readonly root: HeldDirectory;
   readonly held: readonly HeldDirectory[];
   readonly file: string;
+  readonly mutationPath: string;
   readonly startFile: string;
   readonly admissionPath: string;
   readonly admissionRecovery: string;
@@ -349,6 +358,100 @@ type Store = {
     action: (assertHeld: () => Promise<void>) => Promise<T>
   ) => Promise<T>;
 };
+
+/** Internal frontend storage owner. The awaited callback retains the canonical
+ * directory handles; no Rust journal/publication path is reconstructed here. */
+export async function withNativeAuthoredProjectRecoveryStorage<T>(
+  opts: NativeAuthoredProjectRunScope,
+  action: (store: {
+    readonly scope: string;
+    readonly projectRoot: string;
+    readonly root: HeldDirectory;
+    readonly held: readonly HeldDirectory[];
+    readonly ready: string;
+    readonly start: string;
+    readonly admission: string;
+    readonly recovery: string;
+    readonly mutation: string;
+    readonly check: () => Promise<void>;
+    readonly readReady: () => Promise<NativeAuthoredProjectRunSelection>;
+    readonly readStart: () => Promise<NativeAuthoredProjectStartSelection>;
+    readonly sourcePath: (run: string) => string;
+    readonly readSource: (run: string) => Promise<{
+      readonly dev: number;
+      readonly ino: number;
+      readonly sha256: string;
+    }>;
+  }) => Promise<T>
+): Promise<T> {
+  return await storage(opts, false, async (store) => {
+    if (!store) {
+      return refused();
+    }
+    const sourcePath = (run: string) => {
+      if (!HEX32.test(run)) {
+        return refused();
+      }
+      return join(store.root.path, `${run}.source.json`);
+    };
+    return await action({
+      scope: JSON.stringify(store.identity),
+      projectRoot: store.identity.projectRoot,
+      root: store.root,
+      held: store.held,
+      ready: store.file,
+      start: store.startFile,
+      admission: store.admissionPath,
+      recovery: store.admissionRecovery,
+      mutation: store.mutationPath,
+      check: store.check,
+      readReady: () => read(store),
+      readStart: () => readRecord(store, store.startFile, started),
+      sourcePath,
+      async readSource(run) {
+        const current = await readPrivate(sourcePath(run), SOURCE_LIMIT);
+        const value: unknown = JSON.parse(current.text);
+        if (
+          !(
+            isRecord(value) &&
+            keys(
+              value,
+              "branch,env_metadata,kind,overlay,profiles,project,run,version"
+            )
+          ) ||
+          value.version !== 2 ||
+          value.kind !== "native-graph-source" ||
+          value.project !== store.identity.projectRoot ||
+          value.branch !== store.identity.branch ||
+          value.run !== run ||
+          !Array.isArray(value.profiles) ||
+          value.profiles.length > 64 ||
+          value.profiles.some(
+            (profile: unknown) =>
+              typeof profile !== "string" || !validBranch(profile)
+          ) ||
+          !(
+            value.overlay === "inherit" ||
+            value.overlay === "base" ||
+            (isRecord(value.overlay) &&
+              keys(value.overlay, "named") &&
+              typeof value.overlay.named === "string" &&
+              validBranch(value.overlay.named))
+          ) ||
+          !parseNativeEnvMetadata(value.env_metadata)
+        ) {
+          return refused();
+        }
+        await store.check();
+        return {
+          dev: current.info.dev,
+          ino: current.info.ino,
+          sha256: digest(current.text),
+        };
+      },
+    });
+  });
+}
 async function read(store: Store): Promise<NativeAuthoredProjectRunSelection> {
   return await readRecord(store, store.file, selected);
 }
@@ -561,7 +664,17 @@ export async function withNativeAuthoredProjectAdmission<T>(
       parent: store.root,
       check: store.check,
     });
-    return await admission.withHeldLock(async (verifyLock) => {
+    return await admission.withLock(async (admissionLease) => {
+      const verifyLock = admissionLease.assertHeld;
+      // A completed explicit recovery is history, while an incomplete or pending
+      // intent must block startup before compiler or private value acquisition.
+      const { archiveCompletedNativeAuthoredRecovery } = await import(
+        "./native-authored-project-recovery.ts"
+      );
+      await archiveCompletedNativeAuthoredRecovery({
+        scope: opts,
+        admission: admissionLease,
+      });
       let active = true;
       const assertHeld = async () => {
         if (!active) {

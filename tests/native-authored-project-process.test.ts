@@ -8,6 +8,7 @@ import {
   parseNativeAuthoredReview,
 } from "../src/backends/native-authored-graph-protocol.ts";
 import { serveNativeAuthoredProjectGraph } from "../src/backends/native-project-process.ts";
+import { NativeRuntimeRequestError } from "../src/backends/native-runtime-client.ts";
 
 const roots: string[] = [];
 const run = "a".repeat(32);
@@ -103,6 +104,8 @@ async function fixture(
     readonly ownerExits?: boolean;
     readonly splitReady?: boolean;
     readonly padding?: string;
+    /** Keep short deadline oracles independent of two interpreter startups. */
+    readonly fastControlBoundary?: true;
   } = {}
 ) {
   const root = await mkdtemp(join(tmpdir(), "native-authored-process-"));
@@ -159,7 +162,24 @@ async function fixture(
   );
   await writeFile(
     binary,
-    `#!/bin/sh\nexec ${quote(process.execPath)} ${quote(script)} "$@"\n`
+    opts.fastControlBoundary
+      ? `#!/bin/sh
+printf entered > fast-owner-entered
+case " $* " in
+  *" control "*)
+    printf status > authenticated-status-started
+    ${opts.controlKeeper ? `${quote(process.execPath)} -e ${quote('await Bun.sleep(2000); await Bun.write("keeper-complete", "exited");')} &\nprintf '%s' "$!" > keeper-pid\nprintf '%s\\n' synthetic-private-keeper-detail >&2` : ":"}
+    /bin/sleep ${(opts.controlDelayMs ?? 0) / 1000}
+    printf '%s\\n' ${quote(JSON.stringify(opts.control ?? status()))}
+    exit 0
+    ;;
+esac
+trap 'printf cleaned > cleanup-complete; exit 0' TERM
+printf '%s' ${quote(first)}
+while [ ! -f finish-request ]; do /bin/sleep 0.01; done
+printf exited > completion-observed
+`
+      : `#!/bin/sh\nexec ${quote(process.execPath)} ${quote(script)} "$@"\n`
   );
   await chmod(binary, 0o700);
   return {
@@ -409,74 +429,318 @@ test("safe status failure code does not expose private diagnostics or publish", 
   ).toBe("cleaned");
 });
 
-test("startup deadline cancels pending authentication before publication and awaits cleanup", async () => {
-  const opts = await fixture({ controlDelayMs: 3000 });
+test("startup deadline refuses publication and settles its observed startup prefix", async () => {
+  const opts = await fixture({
+    controlDelayMs: 3000,
+    fastControlBoundary: true,
+  });
+  // Preserve uncertain phase evidence even if the operation or test never settles.
+  roots.splice(roots.indexOf(opts.projectRoot), 1);
   let published = false;
+  let receiptObserved = false;
+  let ownedExitCode: number | undefined;
+  let nativeFailureObserved = false;
+  let failure: unknown;
   const start = performance.now();
-  await expect(
-    serveNativeAuthoredProjectGraph({
-      ...opts,
-      startupTimeoutMs: 200,
-      onReady: async () => {
-        published = true;
-      },
-    })
-  ).rejects.toThrow("canceled");
-  expect(performance.now() - start).toBeLessThan(1500);
-  expect(published).toBe(false);
-  expect(
-    await Bun.file(
-      join(opts.projectRoot, "authenticated-status-started")
-    ).text()
-  ).toBe("status");
-  expect(
-    await Bun.file(join(opts.projectRoot, "cleanup-complete")).text()
-  ).toBe("cleaned");
+  await serveNativeAuthoredProjectGraph({
+    ...opts,
+    startupTimeoutMs: 200,
+    onReceipt: () => {
+      receiptObserved = true;
+      return undefined;
+    },
+    onExitDiagnostic: (diagnostic) => {
+      ownedExitCode = diagnostic.exitCode;
+      nativeFailureObserved = diagnostic.nativeCode !== undefined;
+    },
+    onReady: async () => {
+      published = true;
+    },
+  }).catch((error: unknown) => {
+    failure = error;
+  });
+  const elapsedMs = performance.now() - start;
+  let ownerEntered = false;
+  let statusEntered = false;
+  let cleanupObserved = false;
+  const marker = async (name: string): Promise<string | undefined> =>
+    await Bun.file(join(opts.projectRoot, name))
+      .text()
+      .catch((error: unknown) => {
+        if (
+          error !== null &&
+          typeof error === "object" &&
+          "code" in error &&
+          error.code === "ENOENT"
+        ) {
+          return undefined;
+        }
+        throw error;
+      });
+  try {
+    const ownerMarker = await marker("fast-owner-entered");
+    const statusMarker = await marker("authenticated-status-started");
+    const cleanupMarker = await marker("cleanup-complete");
+    expect(ownerMarker === undefined || ownerMarker === "entered").toBe(true);
+    expect(statusMarker === undefined || statusMarker === "status").toBe(true);
+    expect(cleanupMarker === undefined || cleanupMarker === "cleaned").toBe(
+      true
+    );
+    ownerEntered = ownerMarker === "entered";
+    statusEntered = statusMarker === "status";
+    cleanupObserved = cleanupMarker === "cleaned";
+    if (process.env.HACK_NATIVE_STARTUP_FIXTURE_DIAGNOSTIC === "1") {
+      console.error(
+        JSON.stringify({
+          kind: "native-startup-fixture-observation",
+          elapsedMs,
+          receiptObserved,
+          ownedExitCode: ownedExitCode ?? null,
+          nativeFailureObserved,
+          ownerEntered,
+          statusEntered,
+          cleanupObserved,
+        })
+      );
+    }
+    expect(failure).toBeInstanceOf(Error);
+    if (!(failure instanceof Error)) {
+      throw new Error("Startup fixture requires its observed Error.");
+    }
+    const failureMessage = failure.message;
+    expect(elapsedMs).toBeLessThan(1500);
+    expect(published).toBe(false);
+    expect(nativeFailureObserved).toBe(false);
+    if (receiptObserved) {
+      // Ready is observed synchronously before status admission. The deadline
+      // can interrupt before or after the status child enters its first command.
+      expect(ownerEntered).toBe(true);
+      expect(cleanupObserved).toBe(true);
+      expect(ownedExitCode).toBe(0);
+      expect(failure).toBeInstanceOf(NativeRuntimeRequestError);
+      expect([
+        "Native runtime request was canceled before admission; no request was started.",
+        "Native runtime request was canceled; its outcome may be uncertain. No request was replayed.",
+      ]).toContain(failureMessage);
+    } else {
+      // The deadline also owns prefixes before Ready is consumed: no first
+      // command, owner-only, or a trapped owner whose Ready frame is unread.
+      // These cannot claim pending authentication or publication authority.
+      expect(statusEntered).toBe(false);
+      if (
+        failureMessage ===
+        "Native graph readiness identity is invalid or canceled."
+      ) {
+        // A complete buffered frame can cross the deadline before the
+        // pre-callback fence admits it to onReceipt. The TERM trap was installed
+        // before that frame, but no status or ready publication was admitted.
+        expect(ownerEntered).toBe(true);
+        expect(cleanupObserved).toBe(true);
+        expect(ownedExitCode).toBe(0);
+      } else {
+        expect(failureMessage).toBe(
+          "Native graph startup was interrupted or failed; inspect owned state before retrying."
+        );
+        expect(ownedExitCode).toBe(cleanupObserved ? 0 : 143);
+        if (cleanupObserved) {
+          expect(ownerEntered).toBe(true);
+        }
+      }
+    }
+  } finally {
+    if (
+      ownerEntered &&
+      statusEntered &&
+      cleanupObserved &&
+      receiptObserved &&
+      ownedExitCode === 0 &&
+      !nativeFailureObserved
+    ) {
+      roots.push(opts.projectRoot);
+    }
+  }
 });
 
 test("status descendant-held pipes cannot outlive startup admission or owned cleanup", async () => {
-  const opts = await fixture({ controlKeeper: true });
+  const opts = await fixture({
+    controlKeeper: true,
+    fastControlBoundary: true,
+  });
+  // Keep the fixture even if admission/settlement outlives the outer test.
+  // Cleanup becomes eligible only after its exact keeper completion+absence.
+  roots.splice(roots.indexOf(opts.projectRoot), 1);
   let published = false;
   let failure = "";
-  const start = performance.now();
-  try {
-    await serveNativeAuthoredProjectGraph({
-      ...opts,
-      startupTimeoutMs: 200,
-      onReady: async () => {
-        published = true;
-      },
+  let keeper: number | undefined;
+  let receiptObserved = false;
+  let ownedExitCode: number | undefined;
+  let nativeFailureObserved = false;
+  let operationSettled = false;
+  let admitted = false;
+  let cancellationRequested = false;
+  let cancellationStarted: number | undefined;
+  let cancellationTimer: ReturnType<typeof setTimeout> | undefined;
+  const controller = new AbortController();
+  const operation = serveNativeAuthoredProjectGraph({
+    ...opts,
+    // Admission is a precondition here; the independent 200ms startup test
+    // above retains that deadline. Cancel only an observed pending status.
+    startupTimeoutMs: 2000,
+    signal: controller.signal,
+    onReceipt: () => {
+      receiptObserved = true;
+      return undefined;
+    },
+    onExitDiagnostic: (diagnostic) => {
+      ownedExitCode = diagnostic.exitCode;
+      nativeFailureObserved = diagnostic.nativeCode !== undefined;
+    },
+    onReady: async () => {
+      published = true;
+    },
+  })
+    .catch((error: unknown) => {
+      failure = String(error);
+    })
+    .finally(() => {
+      operationSettled = true;
     });
-  } catch (error) {
-    failure = String(error);
-  }
   try {
-    expect(performance.now() - start).toBeLessThan(1500);
+    const admissionDeadline = performance.now() + 2000;
+    while (!operationSettled && performance.now() < admissionDeadline) {
+      const statusEntered = await Bun.file(
+        join(opts.projectRoot, "authenticated-status-started")
+      )
+        .text()
+        .catch(() => undefined);
+      const keeperText = await Bun.file(join(opts.projectRoot, "keeper-pid"))
+        .text()
+        .catch(() => undefined);
+      const selectedKeeper = Number(keeperText);
+      if (
+        receiptObserved &&
+        statusEntered === "status" &&
+        Number.isSafeInteger(selectedKeeper) &&
+        selectedKeeper > 1
+      ) {
+        keeper = selectedKeeper;
+        try {
+          process.kill(keeper, 0);
+          admitted = true;
+          break;
+        } catch {
+          // Unknown or already-dead keeper never supplies admission authority.
+        }
+      }
+      await Bun.sleep(5);
+    }
+    if (admitted) {
+      cancellationStarted = performance.now();
+      cancellationTimer = setTimeout(() => {
+        if (!operationSettled) {
+          cancellationRequested = true;
+          controller.abort();
+        }
+      }, 200);
+    } else {
+      controller.abort();
+    }
+    await operation;
+    const operationElapsedMs =
+      cancellationStarted === undefined
+        ? undefined
+        : performance.now() - cancellationStarted;
+    if (process.env.HACK_NATIVE_STATUS_FIXTURE_DIAGNOSTIC === "1") {
+      console.error(
+        JSON.stringify({
+          kind: "native-status-fixture-stages",
+          admitted,
+          cancellationRequested,
+          receiptObserved,
+          ownedExitCode: ownedExitCode ?? null,
+          nativeFailureObserved,
+          ownerEntered: await Bun.file(
+            join(opts.projectRoot, "fast-owner-entered")
+          ).exists(),
+          statusEntered: await Bun.file(
+            join(opts.projectRoot, "authenticated-status-started")
+          ).exists(),
+          keeperSelected: await Bun.file(
+            join(opts.projectRoot, "keeper-pid")
+          ).exists(),
+          cleanupObserved: await Bun.file(
+            join(opts.projectRoot, "cleanup-complete")
+          ).exists(),
+        })
+      );
+    }
+    expect(admitted).toBe(true);
+    expect(cancellationRequested).toBe(true);
+    if (keeper === undefined) {
+      throw new Error("Status keeper admission requires an observed live PID.");
+    }
+    const admittedKeeper = keeper;
+    expect(operationElapsedMs).toBeDefined();
+    expect(operationElapsedMs).toBeLessThan(1500);
     expect(failure).toContain("canceled");
     expect(failure).not.toContain("synthetic-private-keeper-detail");
     expect(published).toBe(false);
     expect(
       await Bun.file(join(opts.projectRoot, "cleanup-complete")).text()
     ).toBe("cleaned");
-    const keeper = Number(
-      await Bun.file(join(opts.projectRoot, "keeper-pid")).text()
+    expect(Number.isSafeInteger(admittedKeeper) && admittedKeeper > 1).toBe(
+      true
     );
-    expect(() => process.kill(keeper, 0)).not.toThrow();
+    expect(() => process.kill(admittedKeeper, 0)).not.toThrow();
     expect(
       await Bun.file(join(opts.projectRoot, "keeper-complete")).exists()
     ).toBe(false);
   } finally {
-    // The stand-in descendant exits itself; retain its fixture until completion.
-    const deadline = performance.now() + 4000;
-    while (
-      !(await Bun.file(join(opts.projectRoot, "keeper-complete")).exists()) &&
-      performance.now() < deadline
-    ) {
-      await Bun.sleep(25);
+    clearTimeout(cancellationTimer);
+    if (!operationSettled) {
+      controller.abort();
     }
-    expect(
-      await Bun.file(join(opts.projectRoot, "keeper-complete")).text()
-    ).toBe("exited");
+    await operation;
+    if (admitted && keeper !== undefined) {
+      const keeperPid = keeper;
+      const absent = () => {
+        try {
+          process.kill(keeperPid, 0);
+          return false;
+        } catch (error: unknown) {
+          return (
+            typeof error === "object" &&
+            error !== null &&
+            "code" in error &&
+            error.code === "ESRCH"
+          );
+        }
+      };
+      // A done file alone does not prove exit. Observe exact PID absence without
+      // signalling it; any live/reused/unknown PID retains the private fixture.
+      const deadline = performance.now() + 4000;
+      while (
+        !(
+          (await Bun.file(
+            join(opts.projectRoot, "keeper-complete")
+          ).exists()) && absent()
+        ) &&
+        performance.now() < deadline
+      ) {
+        await Bun.sleep(25);
+      }
+      const completion = await Bun.file(
+        join(opts.projectRoot, "keeper-complete")
+      )
+        .text()
+        .catch(() => undefined);
+      const keeperAbsent = absent();
+      if (completion === "exited" && keeperAbsent) {
+        roots.push(opts.projectRoot);
+      }
+      expect(completion).toBe("exited");
+      expect(keeperAbsent).toBe(true);
+    }
   }
 }, 6000);
 

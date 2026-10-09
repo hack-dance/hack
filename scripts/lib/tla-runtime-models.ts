@@ -41,6 +41,92 @@ const laterIncompleteMissingLockStages = [
 ] as const;
 const contracts: readonly ModelContract[] = [
   {
+    name: "native-frontend-recovery",
+    module: "Recovery",
+    states: 602,
+    invariant: "NoUnreservedPromotion",
+    action: "PromoteCandidate",
+    fields: [
+      "unsafePromotion = TRUE",
+      'stage = "promoted"',
+      "savedNext = 0",
+      "pending = 0",
+    ],
+    additionalControls: [
+      {
+        name: "uncommitted-release",
+        negative: true,
+        invariant: "NoUncommittedAbsence",
+        action: "RemoveOwner",
+        fields: [
+          "unsafeAbsence = TRUE",
+          'stage = "empty"',
+          "release = FALSE",
+          "owner = 0",
+        ],
+      },
+      {
+        name: "revoked-authority",
+        negative: true,
+        invariant: "NoUnissuedEffect",
+        action: "AdvanceResources",
+        fields: [
+          "unsafeEffect = TRUE",
+          "active = FALSE",
+          "binding = 1",
+          "progress = 1",
+        ],
+      },
+      {
+        name: "changed-binding",
+        negative: true,
+        invariant: "NoUnissuedEffect",
+        action: "AdvanceResources",
+        fields: ["unsafeEffect = TRUE", "binding = 2", "progress = 1"],
+      },
+      {
+        name: "reserved-crash-reachable",
+        negative: true,
+        invariant: "NeverReservedCrashCompletion",
+        action: "RemoveDirectory",
+        fields: ['crashStage = "reserved"', "progress = 3", 'stage = "done"'],
+      },
+      {
+        name: "promoted-crash-reachable",
+        negative: true,
+        invariant: "NeverPromotedCrashCompletion",
+        action: "RemoveDirectory",
+        fields: ['crashStage = "promoted"', "progress = 3", 'stage = "done"'],
+      },
+      {
+        name: "release-crash-reachable",
+        negative: true,
+        invariant: "NeverReleaseCrashCompletion",
+        action: "RemoveDirectory",
+        fields: ['crashStage = "empty"', "progress = 3", 'stage = "done"'],
+      },
+      {
+        name: "unknown-refusal-reachable",
+        negative: true,
+        invariant: "NeverUnknownRefusal",
+        action: "RefuseUnknown",
+        fields: ['stage = "unknown-retained"', "pending = 2", "savedNext = 0"],
+      },
+      {
+        name: "fresh-release-retention-reachable",
+        negative: true,
+        invariant: "NeverFreshReleaseRetention",
+        action: "FailFreshRelease",
+        fields: [
+          'stage = "release-failed"',
+          "owner = 1",
+          "directory = TRUE",
+          "release = FALSE",
+        ],
+      },
+    ],
+  },
+  {
     name: "native-storage-witness",
     module: "Witness",
     states: 352,

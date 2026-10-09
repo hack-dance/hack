@@ -1,4 +1,5 @@
 import { afterEach, expect, spyOn, test } from "bun:test";
+import * as fs from "node:fs/promises";
 import {
   mkdir,
   mkdtemp,
@@ -18,6 +19,7 @@ import {
 import {
   assertNativeComposeMaterialAuthority,
   type NativeComposeGeneration,
+  NativeComposeGenerationError,
   type NativeComposeGenerationStore,
   type NativeComposeMutation,
   openNativeComposeGenerationStore,
@@ -44,6 +46,8 @@ import { encodeNativeComposeStorageXattrResponse } from "../src/lib/native-compo
 import { runNativeComposeStorageXattrHelper } from "../src/lib/native-compose-storage-witness-xattr-helper.ts";
 
 const engineId = "d".repeat(64);
+const witnessRefusal =
+  "Native storage witness is missing, unsafe or changed; values omitted. No storage repair was attempted.";
 const volume = {
   name: "owned_data",
   storage: "data",
@@ -85,7 +89,10 @@ async function fixture() {
   stores.push(store);
   return store;
 }
-async function publish(mutation: NativeComposeMutation) {
+async function publish(
+  mutation: NativeComposeMutation,
+  options: { readonly build?: boolean } = {}
+) {
   const reservation = mutation.reserveGeneration();
   const labels = {
     "io.hack.native-config.version": "1",
@@ -102,6 +109,7 @@ async function publish(mutation: NativeComposeMutation) {
       services: {
         app: {
           image: "synthetic:1",
+          ...(options.build ? { build: { context: "." } } : {}),
           labels: {
             ...labels,
             "io.hack.native-config.generation": reservation.generationId,
@@ -333,6 +341,428 @@ function commandPorts(transport: ReturnType<typeof fake>) {
     },
   };
 }
+
+async function rememberedActive() {
+  const selected = await active();
+  const { store, generation, transport } = selected;
+  await store.withMutation(async (mutation) => {
+    await mutation.runEffect({
+      generation,
+      operation: "run",
+      assertOwned: async () => {},
+      assertFresh: async () => {},
+      captureStorage: () => [volume],
+      storageWitnesses: {
+        kind: "directory-xattr",
+        engineId,
+        carrier: transport.carrier,
+      },
+      effect: async () => ({ value: 0, outcome: "complete" }),
+    });
+  });
+  transport.calls.length = 0;
+  return selected;
+}
+
+function helperOperations(transport: ReturnType<typeof fake>) {
+  return transport.calls.filter((call) => call === "root" || call === "verify");
+}
+
+test.each([
+  "up",
+  "restart",
+] as const)("warm no-op %s keeps opening, two closing and all later witness proofs", async (operation) => {
+  const { store, transport } = await rememberedActive();
+  const command = commandPorts(transport);
+  let finalizers = 0;
+  await store.withMutation(async (mutation) => {
+    const storage = await prepareNativeComposeCommandStorage({
+      store,
+      mutation,
+      operation,
+      selected: [selection],
+      signal: transport.controller.signal,
+      ports: command.ports,
+    });
+    if (!storage) {
+      throw new Error("Expected retained storage");
+    }
+    expect(helperOperations(transport)).toEqual(["root", "verify", "root"]);
+    const generation = await publish(mutation);
+    transport.state.generation = generation;
+    const document = await store.readGenerationDocument(generation);
+    let owned = 0;
+    const result = await mutation.runEffect({
+      generation,
+      operation,
+      assertFresh: async () => {},
+      assertOwned: async () => {
+        owned++;
+      },
+      captureStorage: () => [volume],
+      storageWitnesses: storage.effectWitnesses,
+      beforeComplete: async () => {
+        finalizers++;
+        expect(
+          transport.calls.filter((call) => call === "verify")
+        ).toHaveLength(6);
+      },
+      effect: async () => {
+        expect(owned).toBe(2);
+        expect(helperOperations(transport)).toEqual(
+          Array.from(
+            { length: 3 },
+            () => ["root", "verify", "root"] as const
+          ).flat()
+        );
+        expect((await store.loadCurrent()).pending?.generationId).toBe(
+          generation.generationId
+        );
+        await storage.enroll(generation, document);
+        await storage.verify(generation);
+        transport.calls.push("workload");
+        return { value: 0, outcome: "complete" };
+      },
+    });
+    expect(result).toEqual({ value: 0, outcome: "complete" });
+  });
+  expect(finalizers).toBe(1);
+  expect(transport.calls.filter((call) => call === "verify")).toHaveLength(7);
+  expect(transport.calls).not.toContain("seed");
+  expect(transport.calls).not.toContain("provision");
+  expect((await store.loadCurrent()).pending).toBeNull();
+}, 30_000);
+
+test.each(
+  (["prepublication", "effect-entry"] as const).flatMap((phase) =>
+    (["ownership", "source-await"] as const).map((boundary) => ({
+      phase,
+      boundary,
+    }))
+  )
+)("warm proof refuses xattr drift at $phase $boundary before further publication/effect", async ({
+  phase,
+  boundary,
+}) => {
+  const { store, generation, transport } = await rememberedActive();
+  let owned = 0;
+  let armed = false;
+  let changed = false;
+  let effects = 0;
+  await store.withMutation(async (mutation) => {
+    await expect(
+      mutation.runEffect({
+        generation,
+        operation: "up",
+        captureStorage: () => [volume],
+        storageWitnesses: {
+          kind: "directory-xattr",
+          engineId,
+          carrier: transport.carrier,
+        },
+        assertOwned: async () => {
+          owned++;
+          if (owned === (phase === "prepublication" ? 1 : 2)) {
+            armed = true;
+            if (boundary === "ownership") {
+              transport.attributes.clear();
+              changed = true;
+            }
+          }
+        },
+        assertFresh: async () => {
+          if (armed && !changed && boundary === "source-await") {
+            await Promise.resolve();
+            transport.attributes.clear();
+            changed = true;
+          }
+        },
+        effect: async () => {
+          effects++;
+          return { value: 0, outcome: "complete" };
+        },
+      })
+    ).rejects.toMatchObject(
+      phase === "prepublication"
+        ? { message: witnessRefusal }
+        : { code: "E_NATIVE_COMPOSE_UNCERTAIN" }
+    );
+  });
+  expect(changed).toBe(true);
+  expect(effects).toBe(0);
+  expect((await store.loadCurrent()).pending === null).toBe(
+    phase === "prepublication"
+  );
+  expect(transport.calls).not.toContain("seed");
+}, 30_000);
+
+test("warm closing proof observes xattr drift during the preceding receipt await", async () => {
+  const { store, generation, transport } = await rememberedActive();
+  const receiptPath = join(
+    store.identity.checkoutRoot,
+    ".hack",
+    ".internal",
+    "native-compose",
+    store.identity.instanceId,
+    "receipt.json"
+  );
+  const originalOpen = fs.open;
+  let armed = false;
+  let changed = false;
+  let effects = 0;
+  const reading = spyOn(fs, "open").mockImplementation(
+    async (path, flags, mode) => {
+      if (armed && !changed && String(path) === receiptPath) {
+        await Promise.resolve();
+        transport.attributes.clear();
+        changed = true;
+      }
+      return await originalOpen(path, flags, mode);
+    }
+  );
+  try {
+    await store.withMutation(async (mutation) => {
+      await expect(
+        mutation.runEffect({
+          generation,
+          operation: "up",
+          captureStorage: () => [volume],
+          storageWitnesses: {
+            kind: "directory-xattr",
+            engineId,
+            carrier: transport.carrier,
+          },
+          assertFresh: async () => {},
+          assertOwned: async () => {
+            armed = true;
+          },
+          effect: async () => {
+            effects++;
+            return { value: 0, outcome: "complete" };
+          },
+        })
+      ).rejects.toMatchObject({ message: witnessRefusal });
+    });
+  } finally {
+    reading.mockRestore();
+  }
+  expect(changed).toBe(true);
+  expect(effects).toBe(0);
+  expect((await store.loadCurrent()).pending).toBeNull();
+}, 30_000);
+
+test.each([
+  "incarnation",
+  "reference",
+  "source",
+] as const)("closing witness proof cannot cover a later changed %s fence", async (change) => {
+  const { store, generation, transport, reference } = await rememberedActive();
+  const path = join(
+    store.identity.checkoutRoot,
+    ".hack",
+    ".internal",
+    "native-compose",
+    store.identity.instanceId,
+    "receipt.json"
+  );
+  let changed = false;
+  let effects = 0;
+  await store.withMutation(async (mutation) => {
+    await expect(
+      mutation.runEffect({
+        generation,
+        operation: "up",
+        captureStorage: () => [volume],
+        storageWitnesses: {
+          kind: "directory-xattr",
+          engineId,
+          carrier: transport.carrier,
+        },
+        assertOwned: async () => {},
+        assertFresh: async () => {
+          if (!changed && transport.calls.includes("verify")) {
+            changed = true;
+            if (change === "source") {
+              throw new Error("synthetic source replacement");
+            }
+            // Adversarial substitution in this owned synthetic store only.
+            const bytes = await readFile(path, "utf8");
+            const replacement =
+              change === "incarnation"
+                ? bytes
+                : bytes.replace(
+                    JSON.stringify(reference.completion),
+                    JSON.stringify({
+                      ...reference.completion,
+                      hash: "f".repeat(64),
+                    })
+                  );
+            expect(replacement === bytes).toBe(change === "incarnation");
+            await writeFile(`${path}.substitution`, replacement, {
+              mode: 0o600,
+              flag: "wx",
+            });
+            await rename(`${path}.substitution`, path);
+          }
+        },
+        effect: async () => {
+          effects++;
+          return { value: 0, outcome: "complete" };
+        },
+      })
+    ).rejects.toMatchObject({
+      code:
+        change === "source"
+          ? "E_NATIVE_COMPOSE_STALE"
+          : "E_NATIVE_COMPOSE_STATE",
+    });
+  });
+  expect(changed).toBe(true);
+  expect(effects).toBe(0);
+  expect(transport.calls.filter((call) => call === "verify")).toHaveLength(1);
+}, 30_000);
+
+test("a newly observed retained birth uses the original leading proof and writing path", async () => {
+  const { store, generation, transport } = await active();
+  const newlyObserved = {
+    ...volume,
+    name: "owned_archive",
+    storage: "archive",
+  };
+  const observed = [newlyObserved, volume];
+  expect((await store.loadCurrent()).retainedStorage).toEqual([volume]);
+  transport.calls.length = 0;
+  let owned = 0;
+  await store.withMutation(async (mutation) => {
+    await mutation.runEffect({
+      generation,
+      operation: "up",
+      assertFresh: async () => {},
+      assertOwned: async () => {
+        owned++;
+        if (owned <= 2) {
+          expect((await store.loadCurrent()).retainedStorage).toEqual([volume]);
+          expect(
+            transport.calls.filter((call) => call === "verify")
+          ).toHaveLength(owned - 1);
+        }
+      },
+      captureStorage: () => observed,
+      storageWitnesses: {
+        kind: "directory-xattr",
+        engineId,
+        carrier: transport.carrier,
+      },
+      effect: async () => {
+        expect(owned).toBe(3);
+        expect((await store.loadCurrent()).retainedStorage).toEqual(observed);
+        expect(
+          transport.calls.filter((call) => call === "verify")
+        ).toHaveLength(3);
+        return { value: 0, outcome: "complete" };
+      },
+    });
+  });
+  expect(transport.calls).not.toContain("seed");
+}, 30_000);
+
+test.each([
+  "run",
+  "build",
+  "after-hook",
+] as const)("warm %s stays on both original leading/closing phase proofs", async (excluded) => {
+  const {
+    store,
+    transport,
+    generation: currentGeneration,
+  } = await rememberedActive();
+  await store.withMutation(async (mutation) => {
+    const generation =
+      excluded === "run"
+        ? currentGeneration
+        : await publish(mutation, { build: excluded === "build" });
+    transport.state.generation = generation;
+    await mutation.runEffect({
+      generation,
+      operation: excluded === "run" ? "run" : "up",
+      assertFresh: async () => {},
+      assertOwned: async () => {},
+      captureStorage: () => [volume],
+      storageWitnesses: {
+        kind: "directory-xattr",
+        engineId,
+        carrier: transport.carrier,
+      },
+      ...(excluded === "after-hook"
+        ? {
+            afterHooks: {
+              prepare: async () => async () => ({
+                value: 0,
+                outcome: "complete" as const,
+                ready: true,
+              }),
+            },
+          }
+        : {}),
+      effect: async () => {
+        expect(
+          transport.calls.filter((call) => call === "verify")
+        ).toHaveLength(4);
+        return { value: 0, outcome: "uncertain" };
+      },
+    });
+  });
+}, 30_000);
+
+test.each([
+  "arbitrary",
+  "typed",
+] as const)("speculative ownership preserves the original %s error contract", async (kind) => {
+  const { store, transport, generation } = await rememberedActive();
+  const original =
+    kind === "typed"
+      ? new NativeComposeGenerationError("E_NATIVE_COMPOSE_STALE")
+      : new Error("synthetic-private-ownership-canary");
+  let caught: unknown;
+  let effects = 0;
+  await store.withMutation(async (mutation) => {
+    try {
+      await mutation.runEffect({
+        generation,
+        operation: "up",
+        assertFresh: async () => {},
+        assertOwned: async () => {
+          throw original;
+        },
+        captureStorage: () => [volume],
+        storageWitnesses: {
+          kind: "directory-xattr",
+          engineId,
+          carrier: transport.carrier,
+        },
+        effect: async () => {
+          effects++;
+          return { value: 0, outcome: "complete" };
+        },
+      });
+    } catch (error) {
+      caught = error;
+    }
+  });
+  expect(caught).toBeInstanceOf(NativeComposeGenerationError);
+  expect(caught).toMatchObject({
+    code:
+      kind === "typed" ? "E_NATIVE_COMPOSE_STALE" : "E_NATIVE_COMPOSE_STATE",
+  });
+  if (kind === "typed") {
+    expect(caught).toBe(original);
+  }
+  expect(caught instanceof Error ? caught.message : "").not.toContain(
+    "synthetic-private-ownership-canary"
+  );
+  expect(effects).toBe(0);
+  expect((await store.loadCurrent()).pending).toBeNull();
+}, 30_000);
 
 test.each([
   "up",

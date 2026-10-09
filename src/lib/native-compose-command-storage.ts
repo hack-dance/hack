@@ -288,7 +288,11 @@ export async function prepareNativeComposeCommandStorage(opts: {
         });
         await enrollNativeComposeStorageXattrWitness({ enrollment });
       }
-      await verify(generation);
+      // A one-off run immediately verifies through its pre-spawn ownership
+      // guard. Up and restart can arm other effects before that guard.
+      if (operation !== "run") {
+        await verify(generation);
+      }
     },
   };
 }

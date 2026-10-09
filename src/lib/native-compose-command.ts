@@ -1039,7 +1039,18 @@ async function finalizeNativeComposeStop(opts: {
   }
 }
 
-async function runOneOff(opts: {
+export async function assertNativeComposeEffectOwned(opts: {
+  readonly assertFresh: () => Promise<void>;
+  readonly assertOwned: () => Promise<void>;
+  readonly verifyStorage?: () => Promise<void>;
+}) {
+  await opts.assertFresh();
+  await opts.assertOwned();
+  await opts.verifyStorage?.();
+  await opts.assertFresh();
+}
+
+export async function runOneOff(opts: {
   readonly options: NativeComposeCommandOptions;
   readonly generation: NativeComposeGeneration;
   readonly document: PrivateDocument;
@@ -1049,6 +1060,7 @@ async function runOneOff(opts: {
   readonly observeStorage: (
     observed: NativeComposeOwnershipObservation
   ) => void;
+  readonly beforeSpawn?: () => void;
   readonly assertOwned: () => Promise<void>;
   readonly assertFresh: () => Promise<void>;
   readonly signal: AbortSignal;
@@ -1075,6 +1087,7 @@ async function runOneOff(opts: {
       stdin: "inherit",
       forwardSignals: true,
       signal: opts.signal,
+      beforeSpawn: opts.beforeSpawn,
       stdout: options.json ? "stderr" : "inherit",
     }
   );
@@ -1500,12 +1513,14 @@ async function executePreparedGeneration(opts: {
         signal,
         assertFresh,
         observeStorage: ownership.observeStorage,
-        assertOwned: async () => {
-          await assertFresh();
-          await ownership.assertOwned();
-          await storage?.verify(generation);
-          await assertFresh();
-        },
+        assertOwned: () =>
+          assertNativeComposeEffectOwned({
+            assertFresh,
+            assertOwned: ownership.assertOwned,
+            verifyStorage: storage
+              ? () => storage.verify(generation)
+              : undefined,
+          }),
       });
     },
   });

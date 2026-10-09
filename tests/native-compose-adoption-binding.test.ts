@@ -13,6 +13,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   acquireLegacyComposeAdoptionBinding,
+  inspectLegacyComposeSourceBindResources,
   LegacyComposeAdoptionBindingError,
 } from "../src/lib/native-compose-adoption-binding.ts";
 import { executeLegacyComposeRetainedPlan } from "../src/lib/native-compose-adoption-execution.ts";
@@ -20,6 +21,7 @@ import {
   type LegacyComposeJobState,
   legacyComposeFreshJobResult,
 } from "../src/lib/native-compose-adoption-jobs.ts";
+import { planLegacyComposeSourceBindAdoption } from "../src/lib/native-compose-adoption-plan.ts";
 import { legacyComposeRetainedPlan } from "../src/lib/native-compose-adoption-readiness.ts";
 import { acquireNativeConfigImportInputs } from "../src/lib/native-config-import-inputs.ts";
 import { mapLegacyNativeStorageAdoption } from "../src/lib/native-config-import-plan.ts";
@@ -140,6 +142,19 @@ if (fixture.mode === "snapshot-wrong-bridge" && networkOrdinal === 4) {
  fixture.container[0].running = false;
  for (const bridge of fixture.network) bridge.containers = bridge.containers.filter(id => id !== 'a'.repeat(64));
  fixture.network.find(row => row.logical === 'edge').containers.push('c'.repeat(64));
+}
+if (fixture.mode?.startsWith('source-bind-c2-') && kind === 'container' && action === 'inspect') {
+ const path = root+'/source-bind-container-ordinal';
+ const ordinal = existsSync(path) ? Number(readFileSync(path,'utf8')) + 1 : 1;
+ writeFileSync(path,String(ordinal));
+ if (ordinal === 2) {
+  const bind = fixture.container[0].mounts.find(row => row.type === 'bind');
+  if (!bind) process.exit(98);
+  if (fixture.mode === 'source-bind-c2-source') bind.source += '-replaced';
+  if (fixture.mode === 'source-bind-c2-target') bind.target = '/changed';
+  if (fixture.mode === 'source-bind-c2-access') bind.rw = false;
+  writeFileSync(root+'/fixture.json',JSON.stringify(fixture));
+ }
 }
 if (kind === "info") {console.log(JSON.stringify({id: fixture.engine, os: "linux"}));}
 else if (action === "ls") {for (const row of fixture[kind]) console.log(JSON.stringify({id: row.id, name: kind === 'container' ? row.name.slice(1) : row.name, project: row.project ?? ""}));}
@@ -311,6 +326,73 @@ async function commands(): Promise<string[][]> {
     .split("\n")
     .map((line) => JSON.parse(line));
 }
+
+test.each([
+  "unchanged",
+  "source",
+  "target",
+  "access",
+])("source-bind bracket keeps the exact original mount through C2 (%s)", async (change) => {
+  const composePath = join(projectRoot, ".hack/docker-compose.yml");
+  const composeText = (await readFile(composePath, "utf8")).replace(
+    "      - data:/var/lib/database",
+    "      - data:/var/lib/database\n      - ../source:/work:rw"
+  );
+  await writeFile(composePath, composeText);
+  await mkdir(join(projectRoot, "source"));
+  const declaredMounts = container().mounts;
+  if (!Array.isArray(declaredMounts)) {
+    throw new Error("Missing original mount rows");
+  }
+  container().mounts = [
+    ...declaredMounts,
+    {
+      type: "bind",
+      name: null,
+      source: join(projectRoot, "source"),
+      target: "/work",
+      rw: true,
+    },
+  ];
+  fixture.mode = `source-bind-c2-${change}`;
+  await save();
+  const plan = planLegacyComposeSourceBindAdoption({
+    configText: await readFile(
+      join(projectRoot, ".hack/hack.config.json"),
+      "utf8"
+    ),
+    composeText,
+  });
+  if (!(plan.intent && "sourceBinds" in plan.intent)) {
+    throw new Error("Missing source-bind candidate");
+  }
+  const observed = inspectLegacyComposeSourceBindResources({
+    root: projectRoot,
+    intent: plan.intent,
+  });
+  if (change === "unchanged") {
+    expect(await observed).toMatchObject({
+      binding_version: 12,
+      sourceBinds: [
+        { service: "db", source: "source", target: "/work", readOnly: false },
+      ],
+      containers: [{ id: ID, service: "db" }],
+    });
+  } else {
+    await expect(observed).rejects.toThrow();
+  }
+  expect(
+    await readFile(join(root, "source-bind-container-ordinal"), "utf8")
+  ).toBe("2");
+  const reads = (await commands()).filter(
+    (args) => args[0] === "container" && args[1] === "inspect"
+  );
+  expect(reads).toHaveLength(2);
+  expect(reads.every((args) => args[3]?.includes('index $m "Name"'))).toBe(
+    true
+  );
+  expect(await Bun.file(join(root, "mutation")).exists()).toBe(false);
+});
 
 test("stopped originals retain configured network identity without active endpoints", async () => {
   const acquired = await acquireLegacyComposeAdoptionBinding({ projectRoot });

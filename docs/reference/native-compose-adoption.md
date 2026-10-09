@@ -14,7 +14,8 @@ The owner shares the [import preview](native-config-import.md) source acquisitio
 the exact `.hack/hack.config.json` and `.hack/docker-compose.yml` pair, bounded
 regular files, strict maintained parsing and private original-byte freshness.
 Matching explicit canonical names in both documents are required. There is no
-caller-supplied resource name, branch override or directory-name fallback.
+caller-supplied resource name or directory-name fallback. The qualified branch
+selection below accepts `--branch` as a selector, never as a resource claim.
 Dotenv inputs, symlinks, competing input families and source changes refuse.
 Canonical managed-env layers require the version 3 path below; the bounded typed
 local mapping uses version 4 and preserves the effective legacy selection.
@@ -51,6 +52,25 @@ unqualified family intersections, still refuse. This version keeps the original
 containers and volumes; it does not silently replace either original bridge.
 Any later newly created native generation needs its own explicit topology and
 data acceptance. Earlier receipt versions retain their narrower authority.
+
+Private manifest, receipt and resource binding version 13 admits one existing
+branch instance per checkout. The authored config and Compose names remain the
+base name; the exact original physical project is `<base>--<selected-branch>`.
+In a linked Git worktree with `worktree.auto_branch` enabled, omission selects
+the existing effective branch using the ordinary read-only Git resolver,
+including its collision suffix. An explicit `--branch` selects the same saved
+slug. The owner binds the raw default Git branch, selected slug, physical
+project, both original input bytes, the sole canonical branch runtime fragment,
+its file and directory identities, complete original container/network IDs and
+volume creation identities. It verifies the fragment against the ordinary
+runtime-host metadata builder and the actual Compose config-file labels and
+hashes. It never creates a branch, writes an override, registers a project or
+recreates resources. A changed default Git selection refuses; the original
+explicit slug can still select the same saved receipt for recovery or rollback.
+One checkout cannot retarget a prepared branch generation. Branch routing,
+managed env, source binds, owned custom bridges, jobs, build, files, health
+dependencies and other mixed families remain unqualified in version 13.
+`--dry-run --branch` refuses until its selected preview has a separate owner.
 
 The static retained-container slice also inspects relevant filenames in the
 verified primary checkout when local inheritance is enabled. Managed-env,
@@ -503,3 +523,51 @@ static fixture's exact ownership and daemon checks for cleanup.
 Use the same prerequisites and flags as above with
 `--only=native-compose-adoption-managed-worktrees`. Registration and synthetic
 fixture controls do not establish a live pass.
+
+## Retained directory binds
+
+Version 12 is a distinct retained source-directory owner. It accepts literal
+checkout-relative bind sources in the canonical `.hack/docker-compose.yml`,
+including existing checkout-root and gitignored directories. Long syntax must
+explicitly set `bind.create_host_path: false`. Short syntax is conditional on an
+existing directory and exact original mount; it does not establish general
+missing-path conversion parity. Access stays exactly read-only or read-write as
+authored and observed. No path is created, repaired, chmodded or added to Git.
+
+The private proof binds held canonical checkout, ancestor and source directory
+identities to the original container's exact engine Source, Target and RW fields.
+Symlinked, missing, replaced or unsafe directories refuse. Explicit `.git`,
+`.hack/.internal` and `.hack/.branch` sources remain unsupported. Binding the
+whole checkout does not require excluding those descendants or reading their
+contents. Directory content, timestamps and tracked status are not integrity
+claims: legitimate writes within a retained RW directory may continue.
+
+This first family supports static image services, the default bridge and optional
+original named storage. Generated/managed/local projection, build, jobs,
+dependency readiness, file grants and custom networks refuse, including inactive
+declarations. Version 12 keeps the previous receipt meanings intact and older
+owners fail closed. Saved checks remain key-free and private; reports contain
+only field provenance and counts.
+
+Publication, explicit preparation stop, original-ID start/stop, pending repair and
+rollback reuse the existing transaction. Every effect checks the held source and
+original resources under one finite operation deadline. No container recreation,
+new bind allocation or empty replacement storage is accepted. Directory
+replacement after a partial effect retains the pending receipt; returning the
+same original directory may permit explicit repair. Rechecks cannot atomically
+freeze external editors, directory writers or Docker.
+
+Source/model controls are separate from actual two-worktree RO/RW access, SQL,
+directory identity and resource-birth qualification. Full NC04 still requires
+the mixed corpus and the unsupported feature intersections.
+
+The explicit `native-compose-adoption-source-bind-worktrees` Docker selector
+uses two linked legacy instances with distinct existing SQL rows and directory
+contents. It checks short and no-create long syntax, RO write refusal, persisted
+RW writes, a gitignored directory and the checkout-root mount. Every adoption
+CLI, including previews, uses a closed read/start/stop transport. A controlled
+partial start replaces one source directory; recovery must retain the exact
+pending receipt and leave both instances unchanged until that same original
+directory is restored. Independent rollbacks and exact owned cleanup retain the
+original resource and volume-birth checks. Registration and synthetic controls
+alone do not qualify live mounts or Docker behavior.

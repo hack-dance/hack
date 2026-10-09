@@ -121,6 +121,7 @@ async function fixture(
     const args = process.argv.slice(2);
     appendFileSync("calls", JSON.stringify(args) + "\\n");
     if (args.includes("control")) {
+      await Bun.sleep(${opts.controlDelayMs ?? 0});
       await Bun.write("authenticated-status-started", "status");
       if (${opts.controlKeeper ?? false}) {
         const keeper = Bun.spawn([process.execPath, "-e", 'await Bun.sleep(2000); await Bun.write("keeper-complete", "exited");'], {
@@ -130,7 +131,6 @@ async function fixture(
         await Bun.write("keeper-pid", String(keeper.pid));
         console.error("synthetic-private-keeper-detail");
       }
-      await Bun.sleep(${opts.controlDelayMs ?? 0});
       if (${opts.controlFailure ?? false}) {
         console.error(JSON.stringify({code:"graph_owner_recovery",message:"synthetic-private-control-detail"}));
         process.exit(2);

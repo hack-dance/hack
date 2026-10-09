@@ -6,8 +6,14 @@ import { isRecord } from "./guards.ts";
 import {
   acquireLegacyComposeAdoptionPreparationBinding,
   inspectLegacyComposeAdoptionResources,
+  inspectLegacyComposeSourceBindResources,
   type LegacyComposeVerifiedBinding,
 } from "./native-compose-adoption-binding.ts";
+import {
+  acquireLegacyComposeBranch,
+  type LegacyComposeBranchProof,
+  legacyComposeBranchProof,
+} from "./native-compose-adoption-branch.ts";
 import { assertSavedLegacyComposeBuildSource } from "./native-compose-adoption-build.ts";
 import { inspectLegacyComposeRetainedBuildImages } from "./native-compose-adoption-build-images.ts";
 import { acquireLegacyComposeAdoptionCheckout } from "./native-compose-adoption-checkout.ts";
@@ -31,6 +37,7 @@ import {
 import {
   planLegacyComposeAdoption,
   planLegacyComposeRetainedBasicBuildAdoption,
+  planLegacyComposeSourceBindAdoption,
 } from "./native-compose-adoption-plan.ts";
 import { readSavedLegacyComposeAdoptionProjection } from "./native-compose-adoption-projection.ts";
 import {
@@ -55,6 +62,7 @@ import {
   inspectLegacyComposeReadiness,
   inspectLegacyComposeRuntimeConfig,
 } from "./native-compose-adoption-runtime.ts";
+import { holdSavedLegacyComposeSourceBind } from "./native-compose-adoption-source-bind.ts";
 import {
   createNativeComposePrivateMutationLock,
   type HeldDirectory,
@@ -80,7 +88,9 @@ import {
 import { parseImportDocument } from "./native-config-import-parser.ts";
 import {
   freezeImportValue,
+  mapLegacyNativeBranchStorageAdoption,
   mapLegacyNativeRetainedBasicBuild,
+  mapLegacyNativeRetainedSourceBind,
   mapLegacyNativeStorageAdoption,
 } from "./native-config-import-plan.ts";
 import type { NativeProjectEnvMetadata } from "./project-env-config.ts";
@@ -100,7 +110,18 @@ const ROUTING = [
   "HACK_EXECUTION_MODE",
 ] as const;
 type SavedManifest = {
-  readonly adoption_generation_version: 1 | 3 | 4 | 5 | 6 | 7 | 9 | 10 | 11;
+  readonly adoption_generation_version:
+    | 1
+    | 3
+    | 4
+    | 5
+    | 6
+    | 7
+    | 9
+    | 10
+    | 11
+    | 12
+    | 13;
   readonly kind: typeof KIND;
   readonly projectRoot: string;
   readonly id: string;
@@ -108,6 +129,8 @@ type SavedManifest = {
   readonly runtimeConfig: unknown;
   readonly projectionProof?: unknown;
   readonly buildProof?: { readonly source: unknown; readonly images: unknown };
+  readonly sourceBindProof?: unknown;
+  readonly branchProof?: LegacyComposeBranchProof;
   readonly sourceFiles: {
     readonly config: NativeConfigImportSourceIdentity;
     readonly compose: NativeConfigImportSourceIdentity;
@@ -129,6 +152,7 @@ type PrivateInputs = {
   readonly projectionMetadata?: NativeProjectEnvMetadata;
   /** Private version9 policy; never serialized into a compiler report or receipt label. */
   readonly retainedBuild?: true;
+  readonly retainedSourceBind?: true;
 };
 type MutationInputs = PrivateInputs & {
   /** Issued while the journal and mutation lock are held; valid only during this callback. */
@@ -241,6 +265,12 @@ function sourceFileIdentity(
   );
 }
 function manifestFieldKeys(value: Record<string, unknown>) {
+  if (value.adoption_generation_version === 13) {
+    return "adoption_generation_version,binding,branchProof,files,id,kind,projectRoot,runtimeConfig,sourceFiles";
+  }
+  if (value.adoption_generation_version === 12) {
+    return "adoption_generation_version,binding,files,id,kind,projectRoot,runtimeConfig,sourceBindProof,sourceFiles";
+  }
   if (value.adoption_generation_version === 9) {
     return "adoption_generation_version,binding,buildProof,files,id,kind,projectRoot,runtimeConfig,sourceFiles";
   }
@@ -259,6 +289,10 @@ function manifest(value: unknown, root: string, id: string): SavedManifest {
       isRecord(value) &&
       keys(value, manifestFieldKeys(value)) &&
       (value.adoption_generation_version === 1 ||
+        (value.adoption_generation_version === 13 &&
+          legacyComposeBranchProof(value.branchProof)) ||
+        (value.adoption_generation_version === 12 &&
+          isRecord(value.sourceBindProof)) ||
         value.adoption_generation_version === 7 ||
         value.adoption_generation_version === 6 ||
         (value.adoption_generation_version === 9 &&
@@ -300,7 +334,14 @@ function manifest(value: unknown, root: string, id: string): SavedManifest {
     projectRoot: root,
     id,
     binding: value.binding,
+    ...(value.adoption_generation_version === 13 &&
+    legacyComposeBranchProof(value.branchProof)
+      ? { branchProof: value.branchProof }
+      : {}),
     runtimeConfig: value.runtimeConfig,
+    ...(value.adoption_generation_version === 12
+      ? { sourceBindProof: value.sourceBindProof }
+      : {}),
     ...(value.adoption_generation_version === 9 && isRecord(value.buildProof)
       ? {
           buildProof: {
@@ -436,7 +477,17 @@ type Context = {
   readonly receiptPath: string;
   readonly signal?: AbortSignal;
   readonly timeoutMs?: number;
+  readonly requestedBranch?: string;
   readonly check: () => Promise<void>;
+  /** Shared by bounded/transaction contexts; only authenticated saved v12 reads install a lease. */
+  readonly sourceBind: {
+    current?: {
+      readonly generation: Anchor;
+      readonly lease: Awaited<
+        ReturnType<typeof holdSavedLegacyComposeSourceBind>
+      >;
+    };
+  };
   readonly receiptSnapshots: WeakMap<
     Receipt,
     { readonly info: Stats; readonly text: string }
@@ -475,6 +526,8 @@ function requireRetainedGenerationVersion(
       retainedPlan.requiresV5 !==
         (meta.adoption_generation_version === 5 ||
           meta.adoption_generation_version === 10)) ||
+    (meta.adoption_generation_version === 13 &&
+      (retainedPlan.requiresV5 || retainedPlan.requiresV7)) ||
     (retainedPlan.requiresV7 &&
       (!isRecord(meta.binding) ||
         meta.binding.binding_version !== 1 ||
@@ -491,9 +544,11 @@ async function requireSelectedTopologyOwner(opts: {
   readonly custom: boolean;
   readonly plural: boolean;
   readonly requiresV5: boolean;
+  readonly branch: boolean;
   readonly preparing: boolean;
 }) {
-  const { ctx, selected, meta, custom, plural, requiresV5, preparing } = opts;
+  const { ctx, selected, meta, custom, plural, requiresV5, preparing, branch } =
+    opts;
   if (!isRecord(meta.binding)) {
     refuse();
   }
@@ -505,6 +560,13 @@ async function requireSelectedTopologyOwner(opts: {
     (meta.adoption_generation_version === 11) !== plural ||
     (meta.adoption_generation_version === 5) !== healthOnly ||
     (meta.adoption_generation_version === 10) !== bridgeAndHealth ||
+    (meta.adoption_generation_version === 13) !== branch ||
+    (branch &&
+      (custom ||
+        plural ||
+        requiresV5 ||
+        meta.binding.binding_version !== 13)) ||
+    (!branch && meta.binding.binding_version === 13) ||
     (plural && requiresV5) ||
     (custom && plural) ||
     (custom &&
@@ -522,7 +584,11 @@ async function requireSelectedTopologyOwner(opts: {
         requiresV5)) ||
     (!plural &&
       (meta.binding.binding_version === 5 ||
-        meta.binding.binding_version === 6))
+        meta.binding.binding_version === 6)) ||
+    (meta.adoption_generation_version === 12) !==
+      (meta.binding.binding_version === 12) ||
+    (meta.adoption_generation_version === 12 &&
+      (meta.projectionProof !== undefined || custom || plural || requiresV5))
   ) {
     refuse();
   }
@@ -535,8 +601,11 @@ async function requireSelectedTopologyOwner(opts: {
     (state.adoption_receipt_version === 11) !== plural ||
     (state.adoption_receipt_version === 5) !== healthOnly ||
     (state.adoption_receipt_version === 10) !== bridgeAndHealth ||
+    (state.adoption_receipt_version === 13) !== branch ||
     (state.adoption_receipt_version === 9) !==
       (meta.adoption_generation_version === 9) ||
+    (state.adoption_receipt_version === 12) !==
+      (meta.adoption_generation_version === 12) ||
     JSON.stringify(state.prepared) !== JSON.stringify(selected)
   ) {
     refuse();
@@ -553,6 +622,9 @@ async function readInputs(
   await ctx.check();
   const generationRoot = join(ctx.generationsRoot, selected.id);
   const held = await holdDirectory(generationRoot, true);
+  let sourceBindLease:
+    | Awaited<ReturnType<typeof holdSavedLegacyComposeSourceBind>>
+    | undefined;
   try {
     const saved = await json(join(generationRoot, "manifest.json"));
     if (
@@ -562,6 +634,12 @@ async function readInputs(
       refuse();
     }
     const meta = manifest(saved.value, ctx.root, selected.id);
+    if (
+      ctx.requestedBranch !== undefined &&
+      meta.adoption_generation_version !== 13
+    ) {
+      refuse();
+    }
     const configText = await readArtifact(
       join(generationRoot, "legacy-config.json"),
       meta.files.config
@@ -575,17 +653,50 @@ async function readInputs(
       meta.files.candidate
     );
     const basic = meta.adoption_generation_version === 9;
-    const mapped = (
-      basic ? mapLegacyNativeRetainedBasicBuild : mapLegacyNativeStorageAdoption
-    )({ configText, composeText });
-    const planned = (
-      basic
-        ? planLegacyComposeRetainedBasicBuildAdoption
-        : planLegacyComposeAdoption
-    )({ configText, composeText });
+    const sourceBind = meta.adoption_generation_version === 12;
+    const selectedBranch =
+      meta.adoption_generation_version === 13
+        ? await acquireLegacyComposeBranch({
+            root: ctx.root,
+            configText,
+            composeText,
+            requestedBranch: ctx.requestedBranch,
+            saved: meta.branchProof,
+            signal: ctx.signal,
+          })
+        : null;
+    if ((meta.adoption_generation_version === 13) !== Boolean(selectedBranch)) {
+      refuse();
+    }
+    let mapper = mapLegacyNativeStorageAdoption;
+    let planner = planLegacyComposeAdoption;
+    if (sourceBind) {
+      mapper = mapLegacyNativeRetainedSourceBind;
+      planner = planLegacyComposeSourceBindAdoption;
+    } else if (basic) {
+      mapper = mapLegacyNativeRetainedBasicBuild;
+      planner = planLegacyComposeRetainedBasicBuildAdoption;
+    } else if (selectedBranch) {
+      mapper = mapLegacyNativeBranchStorageAdoption;
+    }
+    const mapped = mapper({ configText, composeText });
+    const planned = planner({
+      configText,
+      composeText,
+      selectedComposeProject: selectedBranch?.proof.composeProject,
+    });
     const assertBuildSource = () =>
       assertRetainedBuildSource({ ctx, meta, configText, composeText });
     await assertBuildSource();
+    if (sourceBind) {
+      sourceBindLease = await holdSavedLegacyComposeSourceBind({
+        projectRoot: ctx.root,
+        configText,
+        composeText,
+        proof: meta.sourceBindProof,
+        signal: ctx.signal,
+      });
+    }
     const retainedPlan = legacyComposeRetainedPlan(JSON.parse(candidateText));
     await requireSelectedTopologyOwner({
       ctx,
@@ -594,6 +705,7 @@ async function readInputs(
       custom: planned.intent?.ownedNetwork !== undefined,
       plural: planned.intent?.ownedNetworks !== undefined,
       requiresV5: retainedPlan.requiresV5 && !retainedPlan.requiresV7,
+      branch: Boolean(selectedBranch),
       preparing,
     });
     const projectionOpts = {
@@ -637,13 +749,26 @@ async function readInputs(
         refuse();
       }
     }
-    const observed = await inspectLegacyComposeAdoptionResources({
+    const inspection = {
       root: ctx.root,
       intent: planned.intent,
       signal: ctx.signal,
       timeoutMs: ctx.timeoutMs,
       composeFiles: projection?.composeFiles,
-    });
+      ...(selectedBranch
+        ? {
+            composeFiles: selectedBranch.composeFiles,
+            selectedBranch: selectedBranch.proof.branch,
+          }
+        : {}),
+    };
+    const observed =
+      sourceBind && "sourceBinds" in planned.intent
+        ? await inspectLegacyComposeSourceBindResources({
+            ...inspection,
+            intent: planned.intent,
+          })
+        : await inspectLegacyComposeAdoptionResources(inspection);
     if (JSON.stringify(meta.binding) !== JSON.stringify(observed)) {
       refuse("E_LEGACY_ADOPTION_CHANGED");
     }
@@ -690,8 +815,28 @@ async function readInputs(
     if (projection) {
       await readSavedLegacyComposeAdoptionProjection(projectionOpts);
     }
+    if (selectedBranch) {
+      await acquireLegacyComposeBranch({
+        root: ctx.root,
+        configText,
+        composeText,
+        requestedBranch: ctx.requestedBranch,
+        saved: selectedBranch.proof,
+        signal: ctx.signal,
+      });
+    }
     await assertBuildSource();
     await ctx.check();
+    await sourceBindLease?.assertFresh();
+    if (sourceBindLease) {
+      const previous = ctx.sourceBind.current;
+      ctx.sourceBind.current = { generation: selected, lease: sourceBindLease };
+      sourceBindLease = undefined;
+      await previous?.lease.close();
+      // Mounted identities remain part of the outer owner, including later
+      // receipt, compiler and source awaits before a callback or publication.
+      await ctx.check();
+    }
     freezeImportValue(observed);
     return {
       manifest: { ...meta, binding: observed },
@@ -702,9 +847,11 @@ async function readInputs(
         binding: observed,
         ...(projection ? { projectionMetadata: projection.metadata } : {}),
         ...(basic ? { retainedBuild: true as const } : {}),
+        ...(sourceBind ? { retainedSourceBind: true as const } : {}),
       }),
     };
   } finally {
+    await sourceBindLease?.close();
     await held.file.close();
   }
 }
@@ -734,6 +881,11 @@ async function save(
   }
   if (opts) {
     await opts.beforeCommit();
+  }
+  if (ctx.sourceBind.current) {
+    // The receipt is still read after additional awaited work; its final
+    // context check revalidates the same generation's mounted directory lease.
+    await requireReceiptSnapshot(ctx, expected);
   }
   await rename(temporary, ctx.receiptPath);
   await ctx.directories.at(-2)?.file.sync();
@@ -776,6 +928,15 @@ function manifestVersion(
     readonly projectionProof: { readonly projection_version: number };
   }
 ): Manifest["adoption_generation_version"] {
+  if (binding.binding_version === 12) {
+    refuse("E_LEGACY_ADOPTION_UNSUPPORTED");
+  }
+  if (binding.binding_version === 13) {
+    if (requiresV5 || projection) {
+      refuse("E_LEGACY_ADOPTION_UNSUPPORTED");
+    }
+    return 13;
+  }
   if (binding.binding_version === 5) {
     if (requiresV5 || projection) {
       refuse("E_LEGACY_ADOPTION_UNSUPPORTED");
@@ -804,12 +965,16 @@ function manifestVersion(
 }
 function preparedManifestVersion(opts: {
   readonly build: boolean;
+  readonly sourceBind: boolean;
   readonly retainedPlan: LegacyComposeRetainedPlan;
   readonly binding: LegacyComposeVerifiedBinding;
   readonly projection?: {
     readonly projectionProof: { readonly projection_version: number };
   };
 }): Manifest["adoption_generation_version"] {
+  if (opts.sourceBind) {
+    return 12;
+  }
   if (opts.build) {
     return 9;
   }
@@ -828,6 +993,7 @@ async function prepare(
 ): Promise<Anchor> {
   const binding = await acquireLegacyComposeAdoptionPreparationBinding({
     projectRoot: ctx.root,
+    requestedBranch: ctx.requestedBranch,
     signal: ctx.signal,
     timeoutMs: ctx.timeoutMs,
     binary,
@@ -841,17 +1007,26 @@ async function prepare(
   if (
     acquired.binding.binding_version === 4 ||
     acquired.binding.binding_version === 6 ||
+    (acquired.binding.binding_version === 13 &&
+      (!acquired.branch ||
+        acquired.build ||
+        acquired.sourceBindProof ||
+        acquired.projection)) ||
     ((acquired.binding.binding_version === 3 ||
       acquired.binding.binding_version === 5) &&
       acquired.projection)
   ) {
     refuse("E_LEGACY_ADOPTION_UNSUPPORTED");
   }
-  const mapped = (
-    acquired.build
-      ? mapLegacyNativeRetainedBasicBuild
-      : mapLegacyNativeStorageAdoption
-  )(acquired);
+  let mapper = mapLegacyNativeStorageAdoption;
+  if (acquired.sourceBindProof) {
+    mapper = mapLegacyNativeRetainedSourceBind;
+  } else if (acquired.build) {
+    mapper = mapLegacyNativeRetainedBasicBuild;
+  } else if (acquired.branch) {
+    mapper = mapLegacyNativeBranchStorageAdoption;
+  }
+  const mapped = mapper(acquired);
   if (!mapped.candidate) {
     refuse("E_LEGACY_ADOPTION_UNSUPPORTED");
   }
@@ -860,6 +1035,13 @@ async function prepare(
   );
   const retainedPlan = legacyComposeRetainedPlan(JSON.parse(candidateText));
   if (
+    (acquired.sourceBindProof &&
+      (acquired.binding.binding_version !== 12 ||
+        acquired.projection !== undefined ||
+        acquired.build ||
+        acquired.branch ||
+        retainedPlan.requiresV5 ||
+        retainedPlan.requiresV7)) ||
     (acquired.build &&
       (acquired.binding.binding_version !== 1 ||
         acquired.projection !== undefined ||
@@ -873,6 +1055,9 @@ async function prepare(
     refuse("E_LEGACY_ADOPTION_UNSUPPORTED");
   }
   if (acquired.binding.binding_version === 5 && retainedPlan.requiresV5) {
+    refuse("E_LEGACY_ADOPTION_UNSUPPORTED");
+  }
+  if (acquired.branch && (retainedPlan.requiresV5 || retainedPlan.requiresV7)) {
     refuse("E_LEGACY_ADOPTION_UNSUPPORTED");
   }
   const admitted = await admitLegacyComposeCandidate({
@@ -911,6 +1096,7 @@ async function prepare(
     const meta: Manifest = {
       adoption_generation_version: preparedManifestVersion({
         build: Boolean(acquired.build),
+        sourceBind: Boolean(acquired.sourceBindProof),
         retainedPlan,
         binding: acquired.binding,
         projection: acquired.projection,
@@ -919,7 +1105,11 @@ async function prepare(
       projectRoot: ctx.root,
       id,
       binding: acquired.binding,
+      ...(acquired.branch ? { branchProof: acquired.branch } : {}),
       ...(acquired.build ? { buildProof: acquired.build } : {}),
+      ...(acquired.sourceBindProof
+        ? { sourceBindProof: acquired.sourceBindProof }
+        : {}),
       ...(acquired.projection
         ? { projectionProof: acquired.projection.projectionProof }
         : {}),
@@ -1398,6 +1588,9 @@ async function completePublication(
     check: async () => {
       await ctx.check();
       await recheckDirectories([held]);
+      await ctx.sourceBind.current?.lease.assertDirectoriesFresh({
+        signal: ctx.signal,
+      });
     },
   };
   try {
@@ -1467,6 +1660,9 @@ async function completeRollback(ctx: Context, state: Receipt) {
     check: async () => {
       await ctx.check();
       await recheckDirectories([held]);
+      await ctx.sourceBind.current?.lease.assertDirectoriesFresh({
+        signal: ctx.signal,
+      });
     },
   };
   try {
@@ -1530,7 +1726,8 @@ function requireMutationDeadline(
 ) {
   if (
     (legacyComposeRetainedOrdered(plan) ||
-      captured.generation.report.adoption_generation_version === 9) &&
+      captured.generation.report.adoption_generation_version === 9 ||
+      captured.generation.report.adoption_generation_version === 12) &&
     (captured.deadline === undefined ||
       !Number.isFinite(captured.deadline) ||
       captured.deadline <= Date.now())
@@ -1590,7 +1787,9 @@ function preparedReceiptVersion(
     prior.adoption_receipt_version === 9 ||
     prior.adoption_receipt_version === 7 ||
     prior.adoption_receipt_version === 10 ||
-    prior.adoption_receipt_version === 11
+    prior.adoption_receipt_version === 11 ||
+    prior.adoption_receipt_version === 12 ||
+    prior.adoption_receipt_version === 13
   ) {
     return "kind" in checkout.git ? 2 : 1;
   }
@@ -1664,7 +1863,7 @@ async function mutateRetainedContainers(
     refuse();
   }
   if (
-    ![5, 7, 9, 10].includes(
+    ![5, 7, 9, 10, 12].includes(
       captured.generation.report.adoption_generation_version
     )
   ) {
@@ -1752,7 +1951,8 @@ async function mutateRetainedContainersWithinBudget(
   );
   if (
     (legacyComposeRetainedOrdered(retainedPlan) ||
-      loaded.inputs.retainedBuild) &&
+      loaded.inputs.retainedBuild ||
+      loaded.inputs.retainedSourceBind) &&
     JSON.stringify([...selectedServices].sort()) !==
       JSON.stringify([...services].sort())
   ) {
@@ -1806,6 +2006,9 @@ async function mutateRetainedContainersWithinBudget(
       : {}),
     retainedPlan,
     ...(loaded.inputs.retainedBuild ? { retainedBuild: true as const } : {}),
+    ...(loaded.inputs.retainedSourceBind
+      ? { retainedSourceBind: true as const }
+      : {}),
     assertFresh: async () => {
       if (!callbackOpen) {
         refuse();
@@ -1968,6 +2171,7 @@ async function mutateRetainedContainersWithinBudget(
  */
 export async function openLegacyComposeAdoptedGenerationStore(input: {
   readonly projectRoot: string;
+  readonly requestedBranch?: string;
   readonly mode?: "prepare" | "saved";
   readonly signal?: AbortSignal;
   readonly timeoutMs?: number;
@@ -1981,7 +2185,12 @@ export async function openLegacyComposeAdoptedGenerationStore(input: {
       !input.projectRoot.length ||
       input.projectRoot.includes("\0") ||
       (input.signal !== undefined && !(input.signal instanceof AbortSignal)) ||
-      (input.mode !== undefined && !["prepare", "saved"].includes(input.mode))
+      (input.mode !== undefined &&
+        !["prepare", "saved"].includes(input.mode)) ||
+      (input.requestedBranch !== undefined &&
+        (typeof input.requestedBranch !== "string" ||
+          !input.requestedBranch.trim() ||
+          input.requestedBranch.includes("\0")))
     ) {
       refuse();
     }
@@ -2032,6 +2241,7 @@ export async function openLegacyComposeAdoptedGenerationStore(input: {
     directories.push(await owned(generationsRoot));
     const receiptPath = join(stateRoot, "receipt.json");
     let closed = false;
+    const sourceBind: Context["sourceBind"] = {};
     const check = async () => {
       cancelled(signal);
       if (closed || route() !== capturedRoute) {
@@ -2046,6 +2256,7 @@ export async function openLegacyComposeAdoptedGenerationStore(input: {
       ) {
         refuse();
       }
+      await sourceBind.current?.lease.assertDirectoriesFresh({ signal });
     };
     const ctx: Context = {
       root,
@@ -2056,7 +2267,9 @@ export async function openLegacyComposeAdoptedGenerationStore(input: {
       receiptPath,
       signal,
       timeoutMs,
+      requestedBranch: input.requestedBranch,
       check,
+      sourceBind,
       receiptSnapshots: new WeakMap(),
     };
     const lock = createNativeComposePrivateMutationLock({
@@ -2111,6 +2324,21 @@ export async function openLegacyComposeAdoptedGenerationStore(input: {
               prior.publication.phase !== "rolled-back"
             ) {
               refuse("E_LEGACY_ADOPTION_BUSY");
+            }
+            if (prior.adoption_receipt_version === 13 && prior.prepared) {
+              await readInputs(ctx, prior.prepared);
+            }
+            const previous = sourceBind.current;
+            if (previous) {
+              if (
+                !prior.prepared ||
+                JSON.stringify(previous.generation) !==
+                  JSON.stringify(prior.prepared)
+              ) {
+                refuse("E_LEGACY_ADOPTION_CHANGED");
+              }
+              await previous.lease.close();
+              sourceBind.current = undefined;
             }
             const generated = await prepare(ctx, binary);
             const loaded = await readInputs(ctx, generated, true);
@@ -2313,6 +2541,9 @@ export async function openLegacyComposeAdoptedGenerationStore(input: {
             ) {
               refuse();
             }
+            if (sourceBind.current) {
+              await requireReceiptSnapshot(ctx, publication);
+            }
             return value;
           });
         } catch (error: unknown) {
@@ -2353,6 +2584,8 @@ export async function openLegacyComposeAdoptedGenerationStore(input: {
       },
       async close() {
         closed = true;
+        await sourceBind.current?.lease.close();
+        sourceBind.current = undefined;
         await Promise.all(
           directories.map((directory) => directory.file.close())
         );

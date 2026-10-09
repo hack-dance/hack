@@ -64,6 +64,161 @@ function receipt() {
     },
   };
 }
+function sourceReceipt() {
+  const project = "/private/project";
+  const anchor = {
+    device: 1,
+    inode: 2,
+    mode: 0o04_0700,
+    uid: 502,
+    gid: 20,
+    kind: "directory",
+  };
+  return {
+    ...receipt(),
+    version: 3,
+    source: {
+      version: 1,
+      policy: "host-mounted",
+      share: {
+        project,
+        guest_path: `/mnt/hack-projects/${createHash("sha256").update(project).digest("hex")}`,
+        device: 1,
+        inode: 2,
+        unfiltered_source: true,
+      },
+      mounts: { "a.peer": { source: "src/main.js", target: "/app/main.js" } },
+      anchors: {
+        ".": anchor,
+        src: { ...anchor, inode: 3 },
+        "src/main.js": { ...anchor, inode: 4, mode: 0o10_0600, kind: "file" },
+      },
+    },
+  };
+}
+
+test("source-bearing native receipts bind host-mounted intent while retaining image-only v2", () => {
+  const old = parseNativeAuthoredReceipt(receipt());
+  expect(old.version).toBe(2);
+  expect(Object.hasOwn(old, "source")).toBe(false);
+  const raw = sourceReceipt();
+  const admitted = parseNativeAuthoredReceipt(raw);
+  expect(admitted.version).toBe(3);
+  expect(
+    parseNativeAuthoredReady(
+      {
+        version: 2,
+        kind: "native-graph-foreground-ready",
+        run,
+        review: raw.review.review_id,
+        receipt: raw,
+      },
+      parseNativeAuthoredReview(raw.review)
+    )
+  ).toEqual(admitted);
+  const changed = sourceReceipt();
+  changed.source.anchors["src/main.js"].inode += 1;
+  expect(
+    nativeAuthoredReceiptBinding(parseNativeAuthoredReceipt(changed))
+  ).not.toBe(nativeAuthoredReceiptBinding(admitted));
+  expect(() =>
+    parseNativeAuthoredSnapshot({
+      value: {
+        receipt: changed,
+        observations: { "a.peer": { state: "running", health: "healthy" } },
+      },
+      expectedReview: admitted.review,
+      admitted,
+    })
+  ).toThrow("invalid or changed");
+  expect(nativeAuthoredReceiptBinding(old)).toBe(
+    JSON.stringify({
+      owner: old.owner,
+      boot: old.boot,
+      review: old.review,
+      readiness: old.readiness,
+      resources: Object.fromEntries(
+        Object.entries(old.resources).map(([key, item]) => [
+          key,
+          {
+            kind: item.kind,
+            key: item.key,
+            name: item.name,
+            id: item.id,
+            image: item.image,
+            networks: item.networks,
+            outbound: item.outbound,
+          },
+        ])
+      ),
+    })
+  );
+});
+
+test("source receipt refuses version, policy, selection, permission and private-field drift", () => {
+  const cases = [
+    (value: ReturnType<typeof sourceReceipt>) => {
+      value.version = 2;
+    },
+    (value: ReturnType<typeof sourceReceipt>) => {
+      value.source.policy = "immutable";
+    },
+    (value: ReturnType<typeof sourceReceipt>) => {
+      value.source.share.inode += 1;
+    },
+    (value: ReturnType<typeof sourceReceipt>) => {
+      value.source.share.unfiltered_source = false;
+    },
+    (value: ReturnType<typeof sourceReceipt>) => {
+      value.source.share.guest_path = "/foreign";
+    },
+    (value: ReturnType<typeof sourceReceipt>) => {
+      value.source.mounts["a.peer"].source = "../other";
+    },
+    (value: ReturnType<typeof sourceReceipt>) => {
+      value.source.mounts["a.peer"].target = "/app/../foreign";
+    },
+    (value: ReturnType<typeof sourceReceipt>) => {
+      value.source.anchors.src.kind = "file";
+    },
+    (value: ReturnType<typeof sourceReceipt>) => {
+      value.source.anchors.src.mode |= 0o002;
+    },
+    (value: ReturnType<typeof sourceReceipt>) => {
+      value.source.anchors.src.uid += 1;
+    },
+    (value: ReturnType<typeof sourceReceipt>) => {
+      value.source.anchors.src.inode = Number.MAX_SAFE_INTEGER + 1;
+    },
+    (value: ReturnType<typeof sourceReceipt>) => {
+      Object.assign(value.source.mounts["a.peer"], { access: "read-write" });
+    },
+    (value: ReturnType<typeof sourceReceipt>) => {
+      Object.assign(value.source.anchors.src, {
+        content: "synthetic-private-canary",
+      });
+    },
+    (value: ReturnType<typeof sourceReceipt>) => {
+      Object.assign(value.source.anchors, { extra: value.source.anchors.src });
+    },
+  ];
+  for (const mutate of cases) {
+    const value = sourceReceipt();
+    mutate(value);
+    expect(() => parseNativeAuthoredReceipt(value)).toThrow(
+      "invalid or changed"
+    );
+  }
+  expect(() =>
+    parseNativeAuthoredReceipt({ ...receipt(), source: null })
+  ).toThrow("invalid or changed");
+  expect(() =>
+    parseNativeAuthoredReceipt({ ...sourceReceipt(), source: null })
+  ).toThrow("invalid or changed");
+  expect(() =>
+    parseNativeAuthoredReceipt({ ...receipt(), version: 3 })
+  ).toThrow("invalid or changed");
+});
 
 function persistentReceipt() {
   const base = receipt();
@@ -798,4 +953,32 @@ test("native profile names require scalar strings including valid surrogate pair
   for (const name of ["\uD800", "\uDC00"]) {
     expect(() => parseNativeAuthoredReview(review([name]))).toThrow("invalid");
   }
+});
+
+test("graph source and persistent families refuse every cross-family field", () => {
+  const source = sourceReceipt();
+  const persistent = persistentReceipt();
+  for (const fields of [
+    { data: {} },
+    { data_mounts: {} },
+    { data_tool: null },
+    { data: null },
+    { data_mounts: null },
+  ]) {
+    expect(() => parseNativeAuthoredReceipt({ ...source, ...fields })).toThrow(
+      "invalid or changed"
+    );
+  }
+  for (const value of [
+    { ...persistent, source: source.source },
+    { ...persistent, source: null },
+    { ...source, ...persistent, source: source.source },
+    { ...source, version: 4 },
+  ]) {
+    expect(() => parseNativeAuthoredReceipt(value)).toThrow(
+      "invalid or changed"
+    );
+  }
+  expect(parseNativeAuthoredReceipt(source).version).toBe(3);
+  expect(parseNativeAuthoredReceipt(persistent).version).toBe(4);
 });

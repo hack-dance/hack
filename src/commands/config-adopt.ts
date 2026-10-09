@@ -53,6 +53,12 @@ const spec = defineCommand({
       description:
         "Explicitly repair interrupted adoption or rollback using the saved original binding",
     } as const),
+    defineOption({
+      name: "branch",
+      type: "string",
+      long: "--branch",
+      description: "Select the exact existing branch instance",
+    } as const),
     optPath,
     optJson,
   ],
@@ -113,7 +119,8 @@ async function adoptPrepared(
         }
         if (
           legacyComposeRetainedOrdered(input.retainedPlan) ||
-          input.retainedBuild
+          input.retainedBuild ||
+          input.retainedSourceBind
         ) {
           return await runLegacyComposeRetainedOperation({
             input,
@@ -155,10 +162,12 @@ async function apply(opts: {
   readonly recover?: boolean;
   readonly json?: boolean;
   readonly stop?: boolean;
+  readonly branch?: string;
 }) {
   const saved = opts.rollback || opts.recover,
     store = await openLegacyComposeAdoptedGenerationStore({
       projectRoot: opts.projectRoot,
+      requestedBranch: opts.branch,
       mode: saved ? "saved" : "prepare",
       signal: opts.signal,
     });
@@ -204,6 +213,11 @@ export const configAdoptCommand = withHandler(spec, async ({ ctx, args }) => {
       "Use --dry-run separately from --rollback or --recover."
     );
   }
+  if (args.options.dryRun && args.options.branch !== undefined) {
+    throw new CliUsageError(
+      "Branch-selected adoption preview is unavailable; omit --dry-run for the saved owner."
+    );
+  }
   const projectRoot = resolve(ctx.cwd, args.options.path ?? "."),
     controller = new AbortController(),
     cancel = () => controller.abort();
@@ -225,6 +239,7 @@ export const configAdoptCommand = withHandler(spec, async ({ ctx, args }) => {
       recover: args.options.recover,
       json: args.options.json,
       stop: args.options.stop,
+      branch: args.options.branch,
     });
   } catch (error: unknown) {
     throw new HackCliError({

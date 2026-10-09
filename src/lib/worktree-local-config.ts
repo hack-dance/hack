@@ -206,11 +206,21 @@ export async function resolveVerifiedNativeBranch(opts: {
   readonly autoBranch: boolean;
   readonly signal?: AbortSignal;
 }): Promise<string | undefined> {
+  throwIfCancelled(opts.signal);
+  if (!shouldInheritPrimaryLocalInputs({ inheritLocal: opts.autoBranch })) {
+    return undefined;
+  }
+  const selected = await resolveVerifiedLegacyAdoptionBranch(opts);
+  return selected?.branch;
+}
+
+/** Bounded, exact-root Git selection for the retained branch owner. */
+export async function resolveVerifiedLegacyAdoptionBranch(opts: {
+  readonly projectRoot: string;
+  readonly signal?: AbortSignal;
+}): Promise<{ readonly branch: string; readonly gitBranch: string } | null> {
   try {
     throwIfCancelled(opts.signal);
-    if (!shouldInheritPrimaryLocalInputs({ inheritLocal: opts.autoBranch })) {
-      return undefined;
-    }
     const projectRoot = resolve(opts.projectRoot);
     if ((await realpath(projectRoot)) !== projectRoot) {
       throw worktreeVerificationError();
@@ -220,7 +230,7 @@ export async function resolveVerifiedNativeBranch(opts: {
       signal: opts.signal,
     });
     if (primary === null) {
-      return undefined;
+      return null;
     }
     const before = await readGitCheckoutIdentity({
       projectRoot,
@@ -309,7 +319,7 @@ export async function resolveVerifiedNativeBranch(opts: {
       throw worktreeVerificationError();
     }
     throwIfCancelled(opts.signal);
-    return slug;
+    return { branch: slug, gitBranch: raw };
   } catch (error: unknown) {
     if (error instanceof NativeConfigCompilerError) {
       throw error;

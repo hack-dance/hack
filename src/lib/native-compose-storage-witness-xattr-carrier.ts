@@ -123,7 +123,8 @@ export type NativeComposeStorageXattrPorts = {
     readonly runtimeIdentity: string;
     readonly ownerToken: string;
   }) => Promise<void>;
-  /** Fresh non-creating current-root mount; durable intent before effects and exact cleanup before return. */
+  /** Fresh selected-root identity fence; durable intent and exact cleanup.
+   * An implicit empty footprint cannot grant helper start, seed or enrollment. */
   readonly invoke: (
     input: NativeComposeStorageXattrInvocation
   ) => Promise<unknown>;

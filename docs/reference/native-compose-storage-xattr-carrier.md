@@ -119,16 +119,25 @@ anchor, report incomplete and skip dependent retirement. No automatic promotion,
 reseed, journal rewrite or volume deletion is authorized by a successful helper
 response.
 
-## Non-creating transport prerequisite
+## Fresh selected-volume transport
 
-A Docker named-volume mount can auto-create an absent name even when readonly
-and `volume-nocopy`; it is not an admitted resume transport. The candidate is a
-fresh non-creating `--mount type=bind` of the exact current qualified local
-volume's daemon-side Mountpoint, with `readonly,bind-recursive=disabled`, no
-`bind-create-src`, no `-v` and no fallback. Write access is permitted only for the
-original seed attempt. Local driver, empty options, canonical source/parent chain,
-engine support and exact volume-root correspondence must all be qualified. A
-missing source refuses without creating a volume or directory.
+The candidate mounts the exact selected existing named volume with
+`--mount type=volume,src=<name>,dst=/hack-storage-witness,volume-nocopy` and
+`readonly` for metadata and verification. Write access belongs only to the
+original seed attempt. The helper program remains a separate nonrecursive,
+read-only `rprivate` bind. The named-volume mount uses Docker's fixed private
+propagation; the carrier does not bind the daemon's internal data directory or
+broaden propagation. Configured `NoCopy`, selected name and read-only state must
+match, with no driver, label or subpath overrides. Physical name, canonical
+Mountpoint, local driver, read/write state and empty propagation must also match.
+
+Docker can implicitly create a missing named volume even with `volume-nocopy`.
+Complete fresh metadata checks precede carrier creation and repeat after its
+exact ID and birth are recorded, before start. Missing, foreign or rebound
+storage refuses before helper execution, seed or workload. An external removal
+racing the create API can leave an empty unqualified volume and carrier anchor;
+those effects remain uncertain and cannot grant enrollment, repair or readiness.
+This is an observed identity fence, not an atomic engine absence guarantee.
 
 Each proof must create a fresh carrier from a freshly checked current root. An
 old carrier can retain a removed root even when the replacement repeats its
@@ -178,9 +187,9 @@ unknown create/start outcome keeps the anchor. Cleanup must prove the exact help
 stopped before non-force removal and never remove data, witness, material or
 journals. The candidate Docker port now uses the shared bounded query and child
 owners, captures canonical stdin privately, and records the created helper before
-start. It inspects all selected-volume holders, binds the fresh canonical local
-Mountpoint with `bind-recursive=disabled`, and never uses a named-volume helper
-mount or requests bind source creation. Known completion requires an exact stopped
+start. It inspects all selected-volume holders, mounts only the exact selected
+named volume with `volume-nocopy`, and rechecks fresh metadata before start.
+It never requests bind source creation. Known completion requires an exact stopped
 helper, non-force removal and fresh empty helper inventory. Unknown disposition
 retains the private journal and input. Journal bytes do not replace these actual
 stop and absence observations. The CLI does not call this unactivated port.
@@ -219,7 +228,8 @@ They do not execute the Linux adapter or qualify kernel atomicity,
 permissions, xattr persistence, filesystem crash durability or Docker semantics.
 
 Before activation: qualify exact source/artifact/image/Bun/libc ABI and filesystem;
-non-creating current-root bind behavior; create-only existing/symlink/unsupported
+fresh named-volume/current-root correspondence and missing/rebound refusal before
+start; create-only existing/symlink/unsupported
 refusals; unchanged PostgreSQL root initialization, real SQL retention, chown and
 post-start proofs; same-metadata replacement including an old pinned carrier;
 crash/timeout/cancellation with exact helper absence and retained uncertainty;
@@ -239,4 +249,5 @@ Primary contracts: Linux [fsetxattr](https://man7.org/linux/man-pages/man2/fsetx
 [fsync](https://man7.org/linux/man-pages/man2/fsync.2.html),
 [arm64 open flags](https://github.com/torvalds/linux/blob/master/arch/arm64/include/uapi/asm/fcntl.h),
 [generic open flags](https://github.com/torvalds/linux/blob/master/include/uapi/asm-generic/fcntl.h),
-[Bun FFI](https://bun.sh/docs/runtime/ffi), and Docker [bind mounts](https://docs.docker.com/engine/storage/bind-mounts/).
+[Bun FFI](https://bun.sh/docs/runtime/ffi), Docker [volumes](https://docs.docker.com/engine/storage/volumes/),
+and tagged Moby [mount fields](https://github.com/moby/moby/blob/v28.5.1/api/types/mount/mount.go).

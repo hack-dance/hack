@@ -135,6 +135,33 @@ export async function inspectNativeComposeStorageDockerVolume(opts: {
   return value;
 }
 
+/** A named mount may recreate a missing name during container creation. Recheck
+ * its admitted metadata before start; a new footprint grants no seed or workload. */
+export async function assertNativeComposeStorageDockerCarrierVolume(opts: {
+  readonly probe: Probe;
+  readonly current: NativeComposeMaterialBinding;
+  readonly target: NativeComposeStorageXattrTarget;
+}): Promise<void> {
+  const { probe, current } = opts;
+  const selection = captureSelection(opts.target);
+  const createdAt = opts.target.volume?.createdAt;
+  const mountpoint = opts.target.mountpoint;
+  if (
+    !nativeComposeVolumeCreatedAt(createdAt) ||
+    typeof mountpoint !== "string"
+  ) {
+    return refuse();
+  }
+  const volume = await inspectNativeComposeStorageDockerVolume({
+    probe,
+    current,
+    selection,
+  });
+  if (volume.createdAt !== createdAt || volume.mountpoint !== mountpoint) {
+    return refuse();
+  }
+}
+
 /** Complete holder reads include foreign containers. The two inventories and selected
  * volume reread are observed fences; they do not claim an atomic daemon transaction. */
 export async function observeNativeComposeStorageDockerTarget(opts: {

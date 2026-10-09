@@ -15,6 +15,7 @@ import {
   nativeComposeStorageDockerHelper,
 } from "../src/lib/native-compose-storage-witness-docker-artifact.ts";
 import {
+  assertNativeComposeStorageDockerCarrierVolume,
   nativeComposeStorageDockerPathsOverlap,
   observeNativeComposeStorageDockerTarget,
 } from "../src/lib/native-compose-storage-witness-docker-inventory.ts";
@@ -163,6 +164,7 @@ function inventory(binding: NativeComposeMaterialBinding) {
     mounts: true,
     version: "1",
     volumeReads: 0,
+    volumeOwner: binding.identity.ownerToken,
     mountType: "volume",
     mountName: selection.name,
     mountSource: `/var/lib/docker/volumes/${selection.name}/_data`,
@@ -179,6 +181,9 @@ function inventory(binding: NativeComposeMaterialBinding) {
     }
     if (args[0] === "volume" && args[1] === "inspect") {
       state.volumeReads++;
+      if (!state.present) {
+        return "";
+      }
       return JSON.stringify({
         ...selection,
         createdAt:
@@ -190,7 +195,7 @@ function inventory(binding: NativeComposeMaterialBinding) {
         mountpoint: `/var/lib/docker/volumes/${selection.name}/_data`,
         project: binding.identity.composeProject,
         instance: binding.identity.composeProject,
-        owner: binding.identity.ownerToken,
+        owner: state.volumeOwner,
         version: state.version,
         provision: null,
       });
@@ -315,6 +320,74 @@ test("holder observation captures selection before the first probe await", async
     expect(target.storage).toBe(selection.storage);
     expect(target.volume).toEqual({ ...selection, createdAt });
     expect(fake.calls.some((args) => args.includes(mutable.name))).toBe(false);
+  });
+});
+
+test.each([
+  "missing",
+  "rebirth",
+  "foreign",
+] as const)("post-create %s storage cannot admit helper start", async (failure) => {
+  await withBinding(async (current) => {
+    const fake = inventory(current);
+    const target = await observeNativeComposeStorageDockerTarget({
+      current,
+      engineId,
+      selection,
+      stopped: true,
+      probe: fake.probe,
+    });
+    if (failure === "missing") {
+      fake.state.present = false;
+    }
+    if (failure === "rebirth") {
+      fake.state.drift = true;
+    }
+    if (failure === "foreign") {
+      fake.state.volumeOwner = "f".repeat(32);
+    }
+    let starts = 0;
+    await expect(
+      (async () => {
+        await assertNativeComposeStorageDockerCarrierVolume({
+          current,
+          target,
+          probe: fake.probe,
+        });
+        starts++;
+      })()
+    ).rejects.toThrow("values omitted");
+    expect(starts).toBe(0);
+  });
+});
+test("post-create storage proof preserves the full target snapshot across its read", async () => {
+  await withBinding(async (current) => {
+    const fake = inventory(current);
+    const observed = await observeNativeComposeStorageDockerTarget({
+      current,
+      engineId,
+      selection,
+      stopped: true,
+      probe: fake.probe,
+    });
+    const target = {
+      ...observed,
+      volume: observed.volume ? { ...observed.volume } : null,
+    };
+    await assertNativeComposeStorageDockerCarrierVolume({
+      current,
+      target,
+      probe: async (args) => {
+        target.name = "substituted_data";
+        target.storage = "substituted";
+        target.mountpoint = "/var/lib/docker/volumes/substituted_data/_data";
+        if (target.volume) {
+          target.volume.createdAt = "2026-10-08T13:00:00Z";
+        }
+        return await fake.probe(args);
+      },
+    });
+    expect(fake.calls.at(-1)?.at(-1)).toBe(selection.name);
   });
 });
 
@@ -470,16 +543,34 @@ function input(): NativeComposeStorageXattrInvocation {
 }
 function carrier(input: NativeComposeStorageXattrInvocation) {
   const program = "/private-owned/helper.mjs";
-  const mounts = [
-    [program, "/hack-storage-witness-helper.mjs"],
-    [input.target.mountpoint, "/hack-storage-witness"],
-  ].map(([source, target]) => ({
-    Type: "bind",
-    Source: source,
-    Destination: target,
-    RW: false,
-    Propagation: "rprivate",
-  }));
+  const rootMount = {
+    Type: "volume",
+    Name: input.target.name,
+    Source: input.target.mountpoint,
+    Destination: "/hack-storage-witness",
+    Driver: "local",
+    Mode: "",
+    RW: !input.readonly,
+    Propagation: "",
+  };
+  const volumeOptions: Record<string, unknown> = { NoCopy: true };
+  const rootConfig: Record<string, unknown> = {
+    Type: "volume",
+    Source: input.target.name,
+    Target: "/hack-storage-witness",
+    ...(input.readonly ? { ReadOnly: true } : {}),
+    VolumeOptions: volumeOptions,
+  };
+  const mounts: Record<string, unknown>[] = [
+    {
+      Type: "bind",
+      Source: program,
+      Destination: "/hack-storage-witness-helper.mjs",
+      RW: false,
+      Propagation: "rprivate",
+    },
+    rootMount,
+  ];
   const value = {
     id: "e".repeat(64),
     createdAt,
@@ -514,25 +605,28 @@ function carrier(input: NativeComposeStorageXattrInvocation) {
       DeviceRequests: null,
       PortBindings: {},
       OomKillDisable: false as false | null | true,
-      Mounts: mounts.map((mount) => ({
-        Type: mount.Type,
-        Source: mount.Source,
-        Target: mount.Destination,
-        ReadOnly: true,
-        BindOptions: {
-          NonRecursive: true,
-          Propagation: "rprivate",
-          CreateMountpoint: false,
+      Mounts: [
+        {
+          Type: "bind",
+          Source: program,
+          Target: "/hack-storage-witness-helper.mjs",
+          ReadOnly: true,
+          BindOptions: {
+            NonRecursive: true,
+            Propagation: "rprivate",
+            CreateMountpoint: false,
+          },
         },
-      })),
+        rootConfig,
+      ],
     },
     mounts,
     state: {},
     execIds: null as null | string[],
   };
-  return { program, value };
+  return { program, value, rootMount, rootConfig, volumeOptions };
 }
-test("helper args require explicit cached dependency/noncreating RO binds and contain no witness token", () => {
+test("helper args require the cached dependency, unchanged program bind and exact nocopy volume", () => {
   const selected = input(),
     fake = carrier(selected);
   expect(nativeComposeStorageDockerHelper().length).toBeGreaterThan(1000);
@@ -547,12 +641,13 @@ test("helper args require explicit cached dependency/noncreating RO binds and co
       .filter((value) => value.startsWith("type=bind,"))
       .every((value) => value.includes("readonly,bind-recursive=disabled"))
   ).toBe(true);
-  expect(
-    args.some(
-      (value) =>
-        value.includes("bind-create-src") || value.includes("type=volume")
-    )
-  ).toBe(false);
+  expect(args.filter((value) => value.startsWith("type=bind,"))).toHaveLength(
+    1
+  );
+  expect(args.filter((value) => value.startsWith("type=volume,"))).toEqual([
+    `type=volume,src=${selected.target.name},dst=/hack-storage-witness,volume-nocopy,readonly`,
+  ]);
+  expect(args.some((value) => value.includes("bind-create-src"))).toBe(false);
   checkNativeComposeStorageDockerCarrier({
     value: fake.value,
     input: selected,
@@ -565,7 +660,7 @@ test.each([
   "subset",
   "duplicate",
   "writable",
-  "creating",
+  "copying",
   "logging",
 ] as const)("physical/configured projection %s cannot qualify a helper", (failure) => {
   const selected = input(),
@@ -582,11 +677,85 @@ test.each([
   if (failure === "writable") {
     fake.value.mounts[1]!.RW = true;
   }
-  if (failure === "creating") {
-    fake.value.host.Mounts[1]!.BindOptions.CreateMountpoint = true;
+  if (failure === "copying") {
+    fake.volumeOptions.NoCopy = false;
   }
   if (failure === "logging") {
     fake.value.host.LogConfig.Type = "json-file";
+  }
+  expect(() =>
+    checkNativeComposeStorageDockerCarrier({
+      value: fake.value,
+      input: selected,
+      program: fake.program,
+      imageIds: [selected.artifact.imageId],
+    })
+  ).toThrow("values omitted");
+});
+test("cold seed accepts only the Engine's omitted or explicit false writable default", () => {
+  const selected = { ...input(), readonly: false };
+  const fake = carrier(selected);
+  const check = () =>
+    checkNativeComposeStorageDockerCarrier({
+      value: fake.value,
+      input: selected,
+      program: fake.program,
+      imageIds: [selected.artifact.imageId],
+    });
+  expect(check().id).toBe(fake.value.id);
+  fake.rootConfig.ReadOnly = false;
+  expect(check().id).toBe(fake.value.id);
+  fake.rootConfig.ReadOnly = null;
+  expect(check).toThrow("values omitted");
+  expect(
+    nativeComposeStorageDockerCreateArgs({
+      input: selected,
+      program: fake.program,
+    })
+  ).toContain(
+    `type=volume,src=${selected.target.name},dst=/hack-storage-witness,volume-nocopy`
+  );
+});
+test.each([
+  "bind",
+  "name",
+  "source",
+  "driver",
+  "propagation",
+  "subpath",
+  "driver-options",
+  "missing-nocopy",
+  "missing-ro",
+] as const)("named-volume projection %s cannot substitute the selected root", (failure) => {
+  const selected = input(),
+    fake = carrier(selected);
+  if (failure === "bind") {
+    fake.rootConfig.Type = "bind";
+    fake.rootMount.Type = "bind";
+  }
+  if (failure === "name") {
+    fake.rootMount.Name = "foreign_data";
+  }
+  if (failure === "source") {
+    fake.rootMount.Source = "/var/lib/docker/volumes/foreign_data/_data";
+  }
+  if (failure === "driver") {
+    fake.rootMount.Driver = "foreign";
+  }
+  if (failure === "propagation") {
+    fake.rootMount.Propagation = "rslave";
+  }
+  if (failure === "subpath") {
+    fake.volumeOptions.Subpath = "data";
+  }
+  if (failure === "driver-options") {
+    fake.volumeOptions.DriverConfig = { Name: "local", Options: {} };
+  }
+  if (failure === "missing-nocopy") {
+    Reflect.deleteProperty(fake.volumeOptions, "NoCopy");
+  }
+  if (failure === "missing-ro") {
+    Reflect.deleteProperty(fake.rootConfig, "ReadOnly");
   }
   expect(() =>
     checkNativeComposeStorageDockerCarrier({

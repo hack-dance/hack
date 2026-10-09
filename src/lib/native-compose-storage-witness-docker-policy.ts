@@ -5,6 +5,15 @@ import type { NativeComposeStorageXattrInvocation } from "./native-compose-stora
 import { refuseNativeComposeStorageXattr as refuse } from "./native-compose-storage-witness-xattr-codec.ts";
 
 const ID = /^[a-f0-9]{64}$/;
+function configuredReadOnly(
+  mount: Record<string, unknown>,
+  expected: boolean
+): boolean {
+  // The Engine API omits the false default. A present value must stay exact.
+  return Object.hasOwn(mount, "ReadOnly")
+    ? mount.ReadOnly === expected
+    : expected === false;
+}
 export const NATIVE_STORAGE_CARRIER_LABEL = "io.hack.storage-witness.carrier";
 export const NATIVE_STORAGE_CARRIER_FORMAT =
   '{"id":{{json .Id}},"createdAt":{{json .Created}},"image":{{json .Image}},"configImage":{{json .Config.Image}},"user":{{json .Config.User}},"entrypoint":{{json .Config.Entrypoint}},"cmd":{{json .Config.Cmd}},"openStdin":{{json .Config.OpenStdin}},"tty":{{json .Config.Tty}},"labels":{{json .Config.Labels}},"host":{{json .HostConfig}},"mounts":{{json .Mounts}},"state":{{json .State}},"execIds":{{json .ExecIDs}}}';
@@ -91,9 +100,9 @@ export function checkNativeComposeStorageDockerCarrier(opts: {
   ) {
     return refuse();
   }
-  for (const [source, target, readonly] of [
-    [program, "/hack-storage-witness-helper.mjs", true],
-    [input.target.mountpoint, "/hack-storage-witness", input.readonly],
+  for (const target of [
+    "/hack-storage-witness-helper.mjs",
+    "/hack-storage-witness",
   ] as const) {
     const configured = host.Mounts.filter(
       (mount) => isRecord(mount) && mount.Target === target
@@ -103,22 +112,49 @@ export function checkNativeComposeStorageDockerCarrier(opts: {
     );
     if (
       !(
-        typeof source === "string" &&
         configured.length === 1 &&
         physical.length === 1 &&
         isRecord(configured[0]) &&
-        configured[0].Type === "bind" &&
-        configured[0].Source === source &&
-        configured[0].ReadOnly === readonly &&
-        isRecord(configured[0].BindOptions) &&
-        configured[0].BindOptions.NonRecursive === true &&
-        configured[0].BindOptions.Propagation === "rprivate" &&
-        configured[0].BindOptions.CreateMountpoint !== true &&
-        isRecord(physical[0]) &&
-        physical[0].Type === "bind" &&
-        physical[0].Source === source &&
-        physical[0].RW === !readonly &&
-        physical[0].Propagation === "rprivate"
+        isRecord(physical[0])
+      )
+    ) {
+      return refuse();
+    }
+    const requested = configured[0],
+      observed = physical[0];
+    if (target === "/hack-storage-witness-helper.mjs") {
+      if (
+        !(
+          requested.Type === "bind" &&
+          requested.Source === program &&
+          configuredReadOnly(requested, true) &&
+          isRecord(requested.BindOptions) &&
+          requested.BindOptions.NonRecursive === true &&
+          requested.BindOptions.Propagation === "rprivate" &&
+          requested.BindOptions.CreateMountpoint !== true &&
+          observed.Type === "bind" &&
+          observed.Source === program &&
+          observed.RW === false &&
+          observed.Propagation === "rprivate"
+        )
+      ) {
+        return refuse();
+      }
+    } else if (
+      !(
+        requested.Type === "volume" &&
+        requested.Source === input.target.name &&
+        configuredReadOnly(requested, input.readonly) &&
+        !Object.hasOwn(requested, "BindOptions") &&
+        isRecord(requested.VolumeOptions) &&
+        Object.keys(requested.VolumeOptions).length === 1 &&
+        requested.VolumeOptions.NoCopy === true &&
+        observed.Type === "volume" &&
+        observed.Name === input.target.name &&
+        observed.Source === input.target.mountpoint &&
+        observed.Driver === "local" &&
+        observed.RW === !input.readonly &&
+        observed.Propagation === ""
       )
     ) {
       return refuse();
@@ -198,7 +234,7 @@ export function nativeComposeStorageDockerCreateArgs(opts: {
     "--mount",
     `type=bind,src=${program},dst=/hack-storage-witness-helper.mjs,readonly,bind-recursive=disabled,bind-propagation=rprivate`,
     "--mount",
-    `type=bind,src=${input.target.mountpoint},dst=/hack-storage-witness${input.readonly ? ",readonly" : ""},bind-recursive=disabled,bind-propagation=rprivate`,
+    `type=volume,src=${input.target.name},dst=/hack-storage-witness,volume-nocopy${input.readonly ? ",readonly" : ""}`,
     "--label",
     `${NATIVE_STORAGE_CARRIER_LABEL}=${input.invocationId}`,
     "--label",

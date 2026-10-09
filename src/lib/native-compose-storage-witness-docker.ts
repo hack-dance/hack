@@ -23,6 +23,7 @@ import {
   nativeComposeStorageDockerHelper,
 } from "./native-compose-storage-witness-docker-artifact.ts";
 import {
+  assertNativeComposeStorageDockerCarrierVolume,
   inspectNativeComposeStorageDockerVolume,
   observeNativeComposeStorageDockerTarget,
 } from "./native-compose-storage-witness-docker-inventory.ts";
@@ -739,20 +740,11 @@ export async function createNativeComposeDockerStorageXattrCarrier(
       await input.recordCreated({ id, createdAt: known.createdAt });
       await checkFiles(files);
       await image(probe());
-      const volume = await inspectNativeComposeStorageDockerVolume({
+      await assertNativeComposeStorageDockerCarrierVolume({
         probe: probe(),
         current: before,
-        selection: input.target,
+        target: input.target,
       });
-      if (
-        !(
-          input.target.volume &&
-          volume.createdAt === input.target.volume.createdAt &&
-          volume.mountpoint === input.target.mountpoint
-        )
-      ) {
-        return refuse();
-      }
       const holders = await observeNativeComposeStorageDockerTarget({
         probe: probe(),
         current: before,

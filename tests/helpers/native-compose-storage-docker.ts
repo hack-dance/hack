@@ -43,6 +43,13 @@ if(storageArgs[0]==="volume"&&storageArgs[1]==="inspect"&&argument("--format").i
   emit({name:row.name,createdAt:row.createdAt,driver:"local",options:null,mountpoint:"/var/lib/docker/volumes/"+row.name+"/_data",project:row.project,instance:row.instance,owner:row.owner,version:row.version,storage:row.storage,provision:row.provision??null});
  }process.exit(0);
 }
+if(storageArgs[0]==="volume"&&storageArgs[1]==="inspect"){
+ const rows=await readRows(storageVolumes);
+ for(const name of storageArgs.slice(storageArgs.indexOf("--format")+2)){
+  const row=rows.find(value=>value.name===name);if(!row)process.exit(1);
+  emit({id:row.name,name:row.name,project:row.project,version:row.version,instance:row.instance,owner:row.owner,storage:row.storage,createdAt:row.createdAt});
+ }process.exit(0);
+}
 if(storageArgs[0]==="create"){
  const mounts=storageArgs.flatMap((value,index)=>value==="--mount"?[storageArgs[index+1]]:[]).map(text=>Object.fromEntries(text.split(",").map(value=>value.includes("=")?value.split(/=(.*)/s).slice(0,2):[value,true])));
  const program=mounts.find(row=>row.type==="bind"),volume=mounts.find(row=>row.type==="volume");
@@ -64,6 +71,7 @@ if(storageArgs[0]==="start"){
   }else if(request.operation==="verify"&&volume.attributes?.[request.name]===request.valueHex)outcome="verified";
  }
  await appendFile(storageRoot+"/storage-operations",request.operation+"\\n");
+ await appendFile(storageRoot+"/storage-events",request.operation+"\\n");
  const exitCode=outcome==="refused"?1:0;row.state={...row.state,Status:"exited",ExitCode:exitCode};await writeRows(storageCarriers,rows);
  emit({kind:"directory-xattr",version:1,outcome,...(outcome!=="refused"?{root}:{}),...(outcome==="verified"?{valueHex:request.valueHex}:{})});process.exit(exitCode);
 }

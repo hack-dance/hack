@@ -12,15 +12,11 @@ import {
 import { captureNativeComposeStorageXattrCarrier } from "../src/lib/native-compose-storage-witness-xattr-carrier.ts";
 import { encodeNativeComposeStorageXattrResponse } from "../src/lib/native-compose-storage-witness-xattr-codec.ts";
 import { runNativeComposeStorageXattrHelper } from "../src/lib/native-compose-storage-witness-xattr-helper.ts";
-import { fixture, invoke } from "./helpers/native-compose-command.ts";
+import { invoke } from "./helpers/native-compose-command.ts";
+import { legacyStorageFixture } from "./helpers/native-compose-legacy-storage.ts";
 
 async function prepared(enroll: boolean) {
-  const root = await fixture("", false, {
-    noHooks: true,
-    storage: { data: { kind: "persistent", scope: "worktree" } },
-  });
-  expect((await invoke(root)).code).toBe(0);
-  expect((await invoke(root, ["down", "--json"])).code).toBe(0);
+  const root = await legacyStorageFixture();
   const store = await openNativeComposeGenerationStore({
     projectRoot: root,
     instance: null,
@@ -142,12 +138,7 @@ test("source-unavailable explicit saved recovery stops engine but retains Expect
 }, 30_000);
 
 test("source CLI reports and explicitly stops saved resources for unknown enrolled preflight helper with no main pending", async () => {
-  const root = await fixture("", false, {
-    noHooks: true,
-    storage: { data: { kind: "persistent", scope: "worktree" } },
-  });
-  expect((await invoke(root)).code).toBe(0);
-  expect((await invoke(root, ["down", "--json"])).code).toBe(0);
+  const root = await legacyStorageFixture();
   const store = await openNativeComposeGenerationStore({
     projectRoot: root,
     instance: null,

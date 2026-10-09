@@ -58,6 +58,9 @@ test("source CLI cold enrollment precedes workload and down/up only verifies ret
   expect(create).toBeGreaterThanOrEqual(0);
   expect(helper).toBeGreaterThan(create);
   expect(workload).toBeGreaterThan(helper);
+  const events = (await Bun.file(join(root, "storage-events")).text()).trim().split("\n");
+  expect(events.indexOf("seed")).toBeGreaterThanOrEqual(0);
+  expect(events.indexOf("workload")).toBeGreaterThan(events.indexOf("seed"));
   expect((await operations(root)).filter((op) => op === "seed")).toHaveLength(1);
   expect((await command(root, ["down", "--json"])).code).toBe(0);
   expect((await command(root)).code).toBe(0);
@@ -69,10 +72,11 @@ test("source CLI cold enrollment precedes workload and down/up only verifies ret
 }, 120_000);
 
 test("source CLI refuses SAME-birth empty replacement before hooks or another workload start", async () => {
-  const root = await fixture("", false, { storage, noHooks: true });
+  const root = await fixture("", false, { storage });
   expect((await command(root)).code).toBe(0);
   expect((await command(root, ["down", "--json"])).code).toBe(0);
   const before = await saved(root);
+  const order = await Bun.file(join(root, "order")).text();
   const volumes = await Bun.file(join(root, "volumes")).json();
   expect(volumes).toHaveLength(1);
   // Keep all metadata, birth and root facts; only content continuity disappears.
@@ -88,6 +92,7 @@ test("source CLI refuses SAME-birth empty replacement before hooks or another wo
   expect((await saved(root)).storageWitnesses).toEqual(before.storageWitnesses);
   expect((await saved(root)).pending).toBeNull();
   expect(await Bun.file(join(root, "engine")).exists()).toBe(false);
+  expect(await Bun.file(join(root, "order")).text()).toBe(order);
   expect(await Bun.file(join(root, "carriers")).json()).toEqual([]);
 }, 120_000);
 

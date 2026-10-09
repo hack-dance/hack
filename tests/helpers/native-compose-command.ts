@@ -158,7 +158,7 @@ if(args[0]==="compose") {
    }
    await Bun.write(volumes,JSON.stringify(retained));
   }
-  await Bun.write(engine,JSON.stringify(doc));await appendFile(root+"/order","engine-ready\\n");process.exit(0);
+  await Bun.write(engine,JSON.stringify(doc));${opts.storage ? 'await appendFile(root+"/storage-events","workload\\n");' : ""}await appendFile(root+"/order","engine-ready\\n");process.exit(0);
  }
  if(args.includes("down")) {await rm(engine,{force:true});await appendFile(root+"/order","engine-stopped\\n");process.exit(0);}
  process.exit(99);

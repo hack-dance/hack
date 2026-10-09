@@ -159,7 +159,7 @@ fn native_requests_and_replies_refuse_wrong_kind_version_scope_and_unknown_field
         "review":receipt.review.review_id(),"action":"status"});
     for (field, value) in [
         ("kind", json!("graph-control")),
-        ("action", json!("exec")),
+        ("action", json!("restart")),
         ("plan_id", json!("foreign")),
     ] {
         let mut bad = encoded.clone();

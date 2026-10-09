@@ -378,3 +378,6 @@ and retained; there is no general cache prune or cache
 reclamation claim. Failed exact cleanup retains the private fixture and recovery
 identities. Host DNS/trust, registry network denial and advanced builder features
 are separate gates.
+
+
+The protected-file selector admits Darwin's exact root-owned `/usr/bin/git` with positive shared system link count, while every private artifact and alternate Git selection remains single-link. It pins and rechecks that exact link count, owner IDs, physical path, mode, inode and bytes throughout the attempt. This prerequisite does not add engine authority or prove guest/lifecycle acceptance.

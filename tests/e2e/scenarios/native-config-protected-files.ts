@@ -30,7 +30,10 @@ import {
   type NativeFileFixtureCommandResult,
   runNativeFileFixtureCommand,
 } from "../native-file-permission-command.ts";
-import { nativeProtectedFileStateRefused } from "../native-file-permission-control.ts";
+import {
+  nativeProtectedFileStateRefused,
+  nativeProtectedFileToolAllowed,
+} from "../native-file-permission-control.ts";
 import {
   type NativeFileFixtureGrant,
   nativeFileFixtureAbsentProgram,
@@ -409,22 +412,38 @@ async function setup(ctx: ScenarioContext) {
     socketInfo = await lstat(socket);
   requireValue(socketInfo.isSocket());
   const artifacts = await Promise.all(
-    [cli, compiler, docker, git, process.execPath].map(async (path) => ({
-      path,
-      physical: await realpath(path),
-      info: await lstat(await realpath(path)),
-      hash: hash(await readFile(await realpath(path))),
-    }))
+    [
+      { path: cli, role: "artifact" as const },
+      { path: compiler, role: "artifact" as const },
+      { path: docker, role: "artifact" as const },
+      { path: git, role: "git" as const },
+      { path: process.execPath, role: "artifact" as const },
+    ].map(async ({ path, role }) => {
+      const physical = await realpath(path);
+      return {
+        path,
+        role,
+        physical,
+        info: await lstat(physical),
+        hash: hash(await readFile(physical)),
+      };
+    })
   );
   requireValue(
     artifacts[0]?.hash === expectedCli &&
       artifacts[1]?.hash === expectedCompiler &&
-      artifacts.every(
-        (pin) =>
-          pin.info.isFile() &&
-          !pin.info.isSymbolicLink() &&
-          pin.info.nlink === 1 &&
-          (pin.info.mode & 0o111) !== 0
+      artifacts.every((pin) =>
+        nativeProtectedFileToolAllowed({
+          role: pin.role,
+          platform: process.platform,
+          selected: pin.path,
+          physical: pin.physical,
+          regular: pin.info.isFile(),
+          symlink: pin.info.isSymbolicLink(),
+          uid: pin.info.uid,
+          mode: pin.info.mode,
+          nlink: pin.info.nlink,
+        })
       )
   );
   const home = join(ctx.tempRoot, "protected-home"),
@@ -518,6 +537,9 @@ async function setup(ctx: ScenarioContext) {
           latest.ino === pin.info.ino &&
           latest.size === pin.info.size &&
           latest.mode === pin.info.mode &&
+          latest.uid === pin.info.uid &&
+          latest.gid === pin.info.gid &&
+          latest.nlink === pin.info.nlink &&
           hash(await readFile(pin.physical)) === pin.hash
       );
     }

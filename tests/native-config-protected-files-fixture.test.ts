@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
 import {
+  lstat,
   mkdir,
   mkdtemp,
   readFile,
@@ -14,6 +15,7 @@ import {
   nativeProtectedFileReadAllowed,
   nativeProtectedFileStartAllowed,
   nativeProtectedFileStateRefused,
+  nativeProtectedFileToolAllowed,
 } from "./e2e/native-file-permission-control.ts";
 import {
   nativeFileFixtureNonowner,
@@ -446,3 +448,66 @@ test("pre-cancelled command refuses before spawning or publishing", async () => 
   ).rejects.toThrow();
   expect(await Bun.file(marker).exists()).toBe(false);
 });
+
+const systemGit = {
+  role: "git" as const,
+  platform: "darwin",
+  selected: "/usr/bin/git",
+  physical: "/usr/bin/git",
+  regular: true,
+  symlink: false,
+  uid: 0,
+  mode: 0o755,
+  nlink: 78,
+};
+test("canonical root-owned Darwin Git admits positive shared links while private and alternate tools stay single-link", () => {
+  expect(nativeProtectedFileToolAllowed(systemGit)).toBe(true);
+  expect(
+    nativeProtectedFileToolAllowed({ ...systemGit, role: "artifact", nlink: 1 })
+  ).toBe(true);
+  for (const changed of [
+    { role: "artifact" as const },
+    { platform: "linux" },
+    { selected: "/tmp/git" },
+    { physical: "/tmp/git" },
+    { uid: 123 },
+    { mode: 0o775 },
+    { mode: 0o777 },
+    { mode: 0o644 },
+    { nlink: 0 },
+    { nlink: -1 },
+    { nlink: Number.NaN },
+    { nlink: 1.5 },
+    { regular: false },
+    { symlink: true },
+  ]) {
+    expect(nativeProtectedFileToolAllowed({ ...systemGit, ...changed })).toBe(
+      false
+    );
+  }
+});
+test.skipIf(process.platform !== "darwin")(
+  "canonical OS Git filesystem correspondence preserves the old single-link RED",
+  async () => {
+    const info = await lstat("/usr/bin/git"),
+      physical = await realpath("/usr/bin/git");
+    expect(
+      nativeProtectedFileToolAllowed({
+        role: "git",
+        platform: process.platform,
+        selected: "/usr/bin/git",
+        physical,
+        regular: info.isFile(),
+        symlink: info.isSymbolicLink(),
+        uid: info.uid,
+        mode: info.mode,
+        nlink: info.nlink,
+      })
+    ).toBe(true);
+    expect(info.uid).toBe(0);
+    expect(info.mode & 0o022).toBe(0);
+    if (info.nlink > 1) {
+      expect(info.nlink === 1).toBe(false);
+    }
+  }
+);

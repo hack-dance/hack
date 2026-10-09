@@ -94,3 +94,39 @@ export function nativeProtectedFileStartAllowed(opts: {
     [...pending.services].sort().join() === "db,reader,ungranted"
   );
 }
+
+/** Only Darwin's canonical root-owned OS Git may have shared system hard links. Private copies remain single-link. */
+export function nativeProtectedFileToolAllowed(opts: {
+  readonly role: "artifact" | "git";
+  readonly platform: string;
+  readonly selected: string;
+  readonly physical: string;
+  readonly regular: boolean;
+  readonly symlink: boolean;
+  readonly uid: number;
+  readonly mode: number;
+  readonly nlink: number;
+}): boolean {
+  if (
+    !(
+      opts.regular &&
+      !opts.symlink &&
+      (opts.mode & 0o111) !== 0 &&
+      Number.isSafeInteger(opts.nlink) &&
+      opts.nlink > 0
+    )
+  ) {
+    return false;
+  }
+  if (opts.nlink === 1) {
+    return true;
+  }
+  return (
+    opts.role === "git" &&
+    opts.platform === "darwin" &&
+    opts.selected === "/usr/bin/git" &&
+    opts.physical === "/usr/bin/git" &&
+    opts.uid === 0 &&
+    (opts.mode & 0o022) === 0
+  );
+}

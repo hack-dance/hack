@@ -29,6 +29,35 @@ trait Backend {
         Err(refused())
     }
 }
+/// Recovery authority must survive every bounded engine call, including failed
+/// observations. Losing it stops this attempt before another engine operation.
+struct GuardedBackend<'a, B> {
+    backend: &'a B,
+    guard: Option<&'a dyn Fn() -> Result<(), CandidateError>>,
+}
+impl<B: Backend> Backend for GuardedBackend<'_, B> {
+    fn request(
+        &self,
+        method: Method,
+        path: &str,
+        body: Option<&Value>,
+    ) -> Result<Value, CandidateError> {
+        check_startup(self.guard)?;
+        let result = self.backend.request(method, path, body);
+        check_startup(self.guard)?;
+        result
+    }
+    fn stop(
+        &self,
+        selected: &[(String, u64)],
+        admitted: &BTreeMap<&str, &str>,
+    ) -> Result<(), CandidateError> {
+        check_startup(self.guard)?;
+        let result = self.backend.stop(selected, admitted);
+        check_startup(self.guard)?;
+        result
+    }
+}
 impl Backend for Engine<'_> {
     fn request(
         &self,
@@ -629,8 +658,41 @@ pub(super) fn cleanup_guarded(
     expected: Option<&Receipt>,
     guard: Option<&dyn Fn() -> Result<(), CandidateError>>,
 ) -> Result<Receipt, CandidateError> {
+    cleanup_inner(candidate, run, expected, guard, false, None, None)
+}
+#[cfg(target_os = "macos")]
+pub(super) fn cleanup_recovery(
+    candidate: &Candidate,
+    run: &str,
+    expected: &Receipt,
+    guard: &dyn Fn() -> Result<(), CandidateError>,
+    environment_retired: bool,
+    inventory: &native_environment::Inventory,
+    finish: &dyn Fn(&Snapshot) -> Result<(), CandidateError>,
+) -> Result<Receipt, CandidateError> {
+    cleanup_inner(
+        candidate,
+        run,
+        Some(expected),
+        Some(guard),
+        environment_retired,
+        Some(inventory),
+        Some(finish),
+    )
+}
+type CleanupFinish<'a> = dyn Fn(&Snapshot) -> Result<(), CandidateError> + 'a;
+fn cleanup_inner(
+    candidate: &Candidate,
+    run: &str,
+    expected: Option<&Receipt>,
+    guard: Option<&dyn Fn() -> Result<(), CandidateError>>,
+    environment_retired: bool,
+    inventory: Option<&native_environment::Inventory>,
+    finish: Option<&CleanupFinish<'_>>,
+) -> Result<Receipt, CandidateError> {
     check_startup(guard)?;
     let engine = Engine::connect_cleanup(candidate)?;
+    check_startup(guard)?;
     let (mut receipt, root) = journal::load(
         candidate,
         run,
@@ -640,14 +702,60 @@ pub(super) fn cleanup_guarded(
     if let Some(expected) = expected {
         receipt.check_binding(expected)?;
     }
+    check_startup(guard)?;
     let backend = OwnedBackend {
         engine,
         launcher: None,
         leases: BTreeMap::new(),
     };
+    #[cfg(target_os = "macos")]
+    if let Some(inventory) = inventory {
+        native_environment::verify_inventory(
+            candidate,
+            backend.engine.guest(),
+            &receipt,
+            inventory,
+            environment_retired,
+            guard,
+        )?;
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = inventory;
     cleanup_using_guarded(&backend, &mut receipt, &root, guard)?;
     check_startup(guard)?;
-    native_environment::retire_graph(candidate, backend.engine.guest(), &receipt)?;
+    if !environment_retired {
+        native_environment::retire_graph(candidate, backend.engine.guest(), &receipt, guard)?;
+    }
+    check_startup(guard)?;
+    if let Some(finish) = finish {
+        // Keep the cleanup provider lease through fresh absence and publication
+        // retirement; no second startup or cleanup connection supplies authority.
+        native_environment::verify_retired_graph(
+            candidate,
+            backend.engine.guest(),
+            &receipt,
+            guard,
+        )?;
+        #[cfg(target_os = "macos")]
+        if let Some(inventory) = inventory {
+            native_environment::verify_inventory(
+                candidate,
+                backend.engine.guest(),
+                &receipt,
+                inventory,
+                true,
+                guard,
+            )?;
+        }
+        let guarded = GuardedBackend {
+            backend: &backend,
+            guard,
+        };
+        let observed = snapshot(&guarded, receipt.clone())?;
+        check_startup(guard)?;
+        finish(&observed)?;
+        check_startup(guard)?;
+    }
     Ok(receipt)
 }
 #[cfg(test)]
@@ -665,6 +773,8 @@ fn cleanup_using_guarded<B: Backend>(
     guard: Option<&dyn Fn() -> Result<(), CandidateError>>,
 ) -> Result<(), CandidateError> {
     check_startup(guard)?;
+    let guarded = GuardedBackend { backend, guard };
+    let backend = &guarded;
     // A committed cleanup phase is retry authority for this same inventory, never
     // permission to move the receipt back to startup or stop an already retired run.
     let stopped = matches!(
@@ -712,6 +822,7 @@ fn cleanup_using_guarded<B: Backend>(
         return Ok(());
     }
     if !stopped {
+        check_startup(guard)?;
         receipt.phase = Phase::StopIntent;
         journal::save(root, receipt)?;
     }
@@ -743,8 +854,10 @@ fn cleanup_using_guarded<B: Backend>(
     }
     // A resumed removal still durably records each fresh terminal observation
     // before deletion, without moving its already committed phase backward.
+    check_startup(guard)?;
     journal::save(root, receipt)?;
     if !removing {
+        check_startup(guard)?;
         receipt.phase = Phase::RemovalIntent;
         journal::save(root, receipt)?;
     }
@@ -765,6 +878,7 @@ fn cleanup_using_guarded<B: Backend>(
         if inspected(backend, receipt, resource)?.is_some() {
             return Err(refused());
         }
+        check_startup(guard)?;
         receipt.resources.get_mut(key).ok_or_else(refused)?.phase = "removed".into();
         journal::save(root, receipt)?;
     }
@@ -781,6 +895,7 @@ fn cleanup_using_guarded<B: Backend>(
         {
             return Err(refused());
         }
+        check_startup(guard)?;
         receipt
             .resources
             .get_mut("network:default")
@@ -800,6 +915,7 @@ fn cleanup_using_guarded<B: Backend>(
             return Err(refused());
         }
     }
+    check_startup(guard)?;
     receipt
         .resources
         .get_mut("network:default")

@@ -31,6 +31,7 @@ import {
   qualifyRetainedBuildFixtureCopy,
   RETAINED_BUILD_BOOTSTRAP_ENV,
 } from "./native-compose-adoption-build-evidence.ts";
+import { observeRetainedBuildFixtureCli } from "./native-compose-adoption-build-diagnostics.ts";
 import {
   assertRetainedFixtureImageUnchanged,
   prepareRetainedBuildFixtureSources,
@@ -2578,7 +2579,8 @@ type BuildFixtureTransport = Pick<
   FixtureRuntime,
   "engine" | "engineId" | "baseImage" | "anchors" | "builtImages" | "cli"
 > & {
-  readonly ctx: Pick<ScenarioContext, "tempRoot">;
+  readonly ctx: Pick<ScenarioContext, "tempRoot"> &
+    Partial<Pick<ScenarioContext, "log">>;
 };
 function fixtureBuildScope(h: BuildFixtureTransport, instance: Instance) {
   const anchor = h.anchors.get(instance);
@@ -2606,14 +2608,15 @@ function fixtureBuildScope(h: BuildFixtureTransport, instance: Instance) {
 function buildMutationGuard(
   h: BuildFixtureTransport,
   instance: Instance,
-  receipt: string
+  receipt: string,
+  recoverPendingStartStop = false
 ) {
   const helper = fileURLToPath(
     new URL("./native-compose-adoption-build-inputs.ts", import.meta.url)
   );
   return `const {retainedBuildFixtureMutationAllowed}=await import(${JSON.stringify(helper)});
 const mutationReceipt=JSON.parse(await Bun.file(${JSON.stringify(receipt)}).text());
-if(!retainedBuildFixtureMutationAllowed({args,receipt:mutationReceipt,ids:${JSON.stringify(fixtureBuildScope(h, instance).containerIds)},services:['db','worker']})) {console.error('retained-build-refused stage=mutation-admission code=94');process.exit(94);}`;
+if(!retainedBuildFixtureMutationAllowed({args,receipt:mutationReceipt,ids:${JSON.stringify(fixtureBuildScope(h, instance).containerIds)},services:['db','worker']${recoverPendingStartStop ? ",recoverPendingStartStop:true" : ""}})) {console.error('retained-build-refused stage=mutation-admission code=94');process.exit(94);}`;
 }
 function buildReadGuard(
   h: BuildFixtureTransport,
@@ -2641,6 +2644,12 @@ export async function buildFixtureCli(
   args: readonly string[],
   driftAfterStart = false
 ) {
+  const invocation = Object.freeze([...args]);
+  const recoverPendingStartStop =
+    invocation.length === 3 &&
+    invocation[0] === "down" &&
+    invocation[1] === "--recover" &&
+    invocation[2] === "--json";
   if (!instance.basicBuild) {
     refused();
   }
@@ -2649,8 +2658,8 @@ export async function buildFixtureCli(
     ".hack/.internal/legacy-compose-adoption-v1/receipt.json"
   );
   const firstPrepare =
-    args[0] === "config" &&
-    args[1] === "adopt" &&
+    invocation[0] === "config" &&
+    invocation[1] === "adopt" &&
     !(await Bun.file(receipt).exists())
       ? await captureAdoptionDependencyFirstPrepare({
           projectRoot: instance.root,
@@ -2668,7 +2677,7 @@ export async function buildFixtureCli(
     `#!${process.execPath}
 const args=process.argv.slice(2); const engine=${JSON.stringify(h.engine)};
 if(args[0]==='container' && ['start','stop'].includes(args[1])) {
- ${buildMutationGuard(h, instance, receipt)}
+ ${buildMutationGuard(h, instance, receipt, recoverPendingStartStop)}
  ${dependencyEngineCheck(h)}
  const child=Bun.spawn([engine,...args],{stdin:'ignore',stdout:'ignore',stderr:'ignore'});
  const code=await child.exited;
@@ -2680,8 +2689,15 @@ const child=Bun.spawn([engine,...args],{stdin:'inherit',stdout:'inherit',stderr:
 `
   );
   await chmod(shim, 0o700);
-  const result = await h.cli(instance, args, {
-    PATH: `${shimRoot}:${process.env.PATH ?? "/usr/bin:/bin"}`,
+  const result = await observeRetainedBuildFixtureCli({
+    context: h.ctx,
+    mode: instance.basicBuild,
+    args: invocation,
+    driftAfterStart,
+    run: () =>
+      h.cli(instance, invocation, {
+        PATH: `${shimRoot}:${process.env.PATH ?? "/usr/bin:/bin"}`,
+      }),
   });
   if (driftAfterStart) {
     assertAdoptionDependencyControl({

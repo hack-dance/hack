@@ -558,6 +558,7 @@ export function retainedBuildFixtureMutationAllowed(opts: {
   readonly receipt: unknown;
   readonly ids: readonly string[];
   readonly services: readonly string[];
+  readonly recoverPendingStartStop?: true;
 }) {
   const { args, receipt, ids, services } = opts;
   if (
@@ -575,7 +576,12 @@ export function retainedBuildFixtureMutationAllowed(opts: {
       isRecord(receipt) &&
       receipt.adoption_receipt_version === 9 &&
       isRecord(receipt.pendingOperation) &&
-      receipt.pendingOperation.operation === args[1] &&
+      (receipt.pendingOperation.operation === args[1] ||
+        (opts.recoverPendingStartStop === true &&
+          args[1] === "stop" &&
+          receipt.pendingOperation.operation === "start" &&
+          isRecord(receipt.publication) &&
+          receipt.publication.phase === "active")) &&
       Array.isArray(receipt.pendingOperation.services) &&
       JSON.stringify([...receipt.pendingOperation.services].sort()) ===
         JSON.stringify([...services].sort()) &&

@@ -239,6 +239,12 @@ contexts, and then permits only captured metadata queries and journaled original
 starts/stops. Format switch and saved consumption cannot reach a builder. Its
 source and candidate drift controls retain pending ownership, preserve the other
 worktree's SQL row, and restore both original configurations through rollback.
+The fixture issues a recovery-stop transport capability only for the exact
+`down --recover --json` invocation. It can stop the original IDs while the active
+generation retains its interrupted start journal; publication, generation,
+complete service selection and daemon checks still precede each effect. Private
+per-invocation evidence records closed operation/substage names and CLI exit/code
+classifications before caller assertions, without reply values or arbitrary errors.
 Exact fixture image removal requires its captured new ID/birth, sole tag, fixture
 label, unchanged daemon and no remaining container references. A local final
 image may expose one digest for that exact repository and captured image ID;

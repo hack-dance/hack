@@ -518,6 +518,41 @@ fn partial_failed_missing_id_or_pending_state_never_creates_an_intent() {
 }
 
 #[test]
+fn valid_source_bearing_ready_receipt_refuses_recovery_without_provider_or_intent() {
+    let fixture = Fixture::new();
+    fixture.dead();
+    let project = fixture.root.join("project");
+    // An admitted project share requires a real project marker. The selector
+    // fixture otherwise contains only its authored input and is not shareable.
+    fs::write(project.join("package.json"), b"{}\n").unwrap();
+    let metadata = fs::symlink_metadata(&project).unwrap();
+    let share = crate::provider::ProjectShareIntent::approve(&project, true).unwrap();
+    let mut encoded = serde_json::to_value(fixture.receipt()).unwrap();
+    encoded["version"] = json!(3);
+    encoded["source"] = json!({
+        "version":1, "policy":"host-mounted", "share":share,
+        "mounts":{"web":{"source":".","target":"/app"}},
+        "anchors":{".":{"device":metadata.dev(),"inode":metadata.ino(),
+            "mode":metadata.mode(),"uid":metadata.uid(),"gid":metadata.gid(),"kind":"directory"}}
+    });
+    let receipt: Receipt = serde_json::from_value(encoded).unwrap();
+    // Establish a valid, complete v3 receipt before testing the specific
+    // recovery-version boundary; malformed source is not this oracle.
+    receipt.validate(RUN, OWNER).unwrap();
+    assert_eq!(receipt.phase, Phase::ReadyObserved);
+    assert!(
+        receipt
+            .resources
+            .values()
+            .all(|resource| resource.id.is_some())
+    );
+    assert!(receipt.require_recovery_ready().is_err());
+    state::write(&fixture.journal_root().join("state.json"), &receipt).unwrap();
+    fixture.assert_refused_unchanged();
+    assert!(!fixture.journal_root().join(FILE).exists());
+}
+
+#[test]
 fn replaced_selected_owner_or_published_socket_and_lock_refuse_without_repair() {
     for name in ["owner.json", "control.sock", "operation.lock"] {
         let fixture = Fixture::new();

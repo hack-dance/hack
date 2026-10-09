@@ -86,11 +86,28 @@ fn shared_paths(
     Ok(selected)
 }
 
+const VERIFY_SHARED_MOUNT: &str = "set -eu; test \"$(findmnt -n -o FSTYPE --mountpoint \"$1\")\" = virtiofs; case \",$(findmnt -n -o OPTIONS --mountpoint \"$1\"),\" in *,rw,*) ;; *) exit 1;; esac";
+
 pub(super) fn verify_shared_mount(
     engine: &Engine<'_>,
     share: &super::super::ProjectShareIntent,
 ) -> Result<(), CandidateError> {
-    engine.guest().execute("set -eu; test \"$(findmnt -n -o FSTYPE --mountpoint \"$1\")\" = virtiofs; case \",$(findmnt -n -o OPTIONS --mountpoint \"$1\"),\" in *,rw,*) ;; *) exit 1;; esac", &[&share.guest_path], None)?;
+    engine
+        .guest()
+        .execute(VERIFY_SHARED_MOUNT, &[&share.guest_path], None)?;
+    Ok(())
+}
+
+/// The same mount identity proof under the existing cleanup lease, without
+/// authorizing allocation or requiring the startup operating-resource budget.
+#[cfg(feature = "native-config-plan")]
+pub(super) fn verify_shared_mount_cleanup(
+    engine: &Engine<'_>,
+    share: &super::super::ProjectShareIntent,
+) -> Result<(), CandidateError> {
+    engine
+        .guest()
+        .execute_cleanup(VERIFY_SHARED_MOUNT, &[&share.guest_path])?;
     Ok(())
 }
 

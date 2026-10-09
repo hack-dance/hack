@@ -206,7 +206,6 @@ fn native_requests_and_replies_refuse_wrong_kind_version_scope_and_unknown_field
         ("/version", json!(1)),
         ("/review", json!("e".repeat(64))),
         ("/result/snapshot/observations", json!({})),
-        ("/result/snapshot/receipt/version", json!(1)),
     ] {
         let mut bad = encoded.clone();
         *bad.pointer_mut(pointer).unwrap() = value;
@@ -217,6 +216,9 @@ fn native_requests_and_replies_refuse_wrong_kind_version_scope_and_unknown_field
                 .is_err()
         );
     }
+    let mut bad = encoded.clone();
+    bad["result"]["snapshot"]["receipt"]["version"] = json!(1);
+    assert!(serde_json::from_value::<Reply>(bad).is_err());
     let mut cleaned = Reply {
         version: 2,
         kind: ReplyKind::NativeGraphControlReply,

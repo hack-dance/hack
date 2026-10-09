@@ -667,6 +667,7 @@ Qualifies a strict static legacy subset with exact existing data volumes. --dry-
 | `--dry-run` | Read-only field, compiler and existing-resource preview |
 | `--rollback` | Restore the exact held legacy inputs after the original containers are stopped |
 | `--recover` | Explicitly repair interrupted adoption or rollback using the saved original binding |
+| `--branch <value>` | Select the exact existing branch instance |
 | `--path, -p <dir>` | Run a project command against a repo path (overrides cwd search) |
 | `--json` | Output JSON (machine-readable) |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |

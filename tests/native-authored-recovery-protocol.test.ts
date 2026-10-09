@@ -76,6 +76,35 @@ function sessionSelection() {
     host_boot_uuid: "12345678-abcd-abcd-abcd-123456789abc",
   };
 }
+function sourceReceipt() {
+  const project = "/private/native-source-fixture";
+  return {
+    ...receipt(),
+    version: 3,
+    source: {
+      version: 1,
+      policy: "host-mounted",
+      share: {
+        project,
+        guest_path: `/mnt/hack-projects/${createHash("sha256").update(project).digest("hex")}`,
+        device: 1,
+        inode: 2,
+        unfiltered_source: true,
+      },
+      mounts: { web: { source: ".", target: "/app" } },
+      anchors: {
+        ".": {
+          device: 1,
+          inode: 2,
+          mode: 0o04_0700,
+          uid: 502,
+          gid: 20,
+          kind: "directory",
+        },
+      },
+    },
+  };
+}
 function result() {
   const removed = receipt();
   removed.phase = "removed";
@@ -106,6 +135,26 @@ test("native recovery copies original selectors and binds exact Removed to durab
     parseNativeAuthoredRecoveryResult({ value: result(), expected }).receipt
       .phase
   ).toBe("removed");
+});
+test("valid source-bearing v3 parsing grants no dead-owner recovery selection", () => {
+  const source = sourceReceipt();
+  const sourceAdmitted = parseNativeAuthoredReceipt(source);
+  const imageAdmitted = parseNativeAuthoredReceipt(receipt());
+  expect(sourceAdmitted.version).toBe(3);
+  for (const selector of [selection(), sessionSelection()]) {
+    for (const [selected, admitted] of [
+      [source, sourceAdmitted],
+      [source, imageAdmitted],
+      [receipt(), sourceAdmitted],
+    ] as const) {
+      const value = { ...selector, receipt: selected };
+      const before = structuredClone(value);
+      expect(() =>
+        parseNativeAuthoredRecoverySelection({ value, admitted })
+      ).toThrow("Native recovery response is invalid");
+      expect(value).toEqual(before);
+    }
+  }
 });
 test("session selection is closed version two and preserves original qualifier without migration", () => {
   const admitted = parseNativeAuthoredReceipt(receipt());

@@ -8,6 +8,7 @@ import {
 import { importPointer } from "./native-config-import-parser.ts";
 
 const NAME = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+const SELECTED_PROJECT = /^[a-z0-9]+(?:-+[a-z0-9]+)*$/;
 const VOLUME_NAME = /^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,254}$/;
 const TARGET = /^\/[a-zA-Z0-9_./-]+$/;
 
@@ -167,6 +168,8 @@ function mapMounts(source: Record<string, unknown>, mapping: StorageMapping) {
 export function mapLegacyComposeStorage(opts: {
   readonly config: Record<string, unknown> | undefined;
   readonly compose: Record<string, unknown> | undefined;
+  /** Adoption-only physical identity; authored names remain the base project. */
+  readonly selectedComposeProject?: string;
 }):
   | {
       readonly intent: LegacyComposeStorageIntent;
@@ -193,13 +196,21 @@ export function mapLegacyComposeStorage(opts: {
     volumes: [],
     mounts: [],
   };
-  mapVolumes(compose.volumes, config.name, mapping);
+  const composeProject = opts.selectedComposeProject ?? config.name;
+  if (
+    !(opts.selectedComposeProject ? SELECTED_PROJECT : NAME).test(
+      composeProject
+    )
+  ) {
+    return undefined;
+  }
+  mapVolumes(compose.volumes, composeProject, mapping);
   mapMounts(compose.services, mapping);
   if (!mapping.supported) {
     return undefined;
   }
   const network = mapLegacyOwnedNetwork({
-    project: config.name,
+    project: composeProject,
     compose,
   });
   if (network.kind === "refused") {
@@ -209,7 +220,7 @@ export function mapLegacyComposeStorage(opts: {
     accepted: mapping.accepted,
     mounts: [...mapping.mounts],
     intent: {
-      composeProject: config.name,
+      composeProject,
       services: Object.keys(compose.services).sort(),
       ...(network.kind === "owned" ? { ownedNetwork: network.intent } : {}),
       ...(network.kind === "multiple" ? { ownedNetworks: network.intent } : {}),

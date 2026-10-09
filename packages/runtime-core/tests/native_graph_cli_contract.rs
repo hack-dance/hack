@@ -8,6 +8,7 @@ use std::{
     path::PathBuf,
     process::{Command, Output, Stdio},
     sync::atomic::{AtomicU64, Ordering},
+    time::{Duration, Instant},
 };
 struct Fixture {
     root: PathBuf,
@@ -75,6 +76,28 @@ impl Fixture {
             .unwrap();
         child.wait_with_output().unwrap()
     }
+    fn invoke_before_stdin(&self, args: &[&str]) -> Output {
+        let mut child = self
+            .command(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let unread = child.stdin.take().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while child.try_wait().unwrap().is_none() {
+            if Instant::now() >= deadline {
+                child.kill().unwrap();
+                child.wait().unwrap();
+                panic!("argument refusal failed to settle before the owned fixture deadline");
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let output = child.wait_with_output().unwrap();
+        drop(unread);
+        output
+    }
     fn source_path(&self) -> &str {
         self.source.to_str().unwrap()
     }
@@ -131,6 +154,135 @@ fn public_native_private_pipe_refuses_legacy_and_changed_bindings_before_guest_a
 impl Drop for Fixture {
     fn drop(&mut self) {
         fs::remove_dir_all(&self.root).unwrap();
+    }
+}
+
+#[test]
+fn public_native_recovery_requires_exact_closed_selectors_and_refuses_absent_authority() {
+    let fixture = Fixture::new();
+    let run = "b".repeat(32);
+    let receipt = "c".repeat(64);
+    let owner = "d".repeat(64);
+    let selected = [
+        "graph",
+        "native",
+        "recover-live-owner",
+        "--run-id",
+        &run,
+        "--expect-receipt",
+        &receipt,
+        "--expect-owner",
+        &owner,
+        "--json",
+    ];
+    let output = fixture.invoke(&selected);
+    assert!(!output.status.success());
+    #[cfg(target_os = "macos")]
+    assert!(String::from_utf8_lossy(&output.stderr).contains("native_graph_live_owner_recovery"));
+    #[cfg(not(target_os = "macos"))]
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("native_graph_foreground_unsupported")
+    );
+    fixture.assert_no_state();
+    for extra in [
+        vec!["--environment-stdin"],
+        vec!["--json"],
+        vec!["--run-id", &run],
+        vec!["--source-file", fixture.source_path()],
+        vec!["--expect-review", &receipt],
+        vec!["--timeout-seconds", "1"],
+        vec!["--action", "cleanup"],
+    ] {
+        let mut args = selected.to_vec();
+        args.extend(extra);
+        // A held empty pipe distinguishes argument refusal from private delivery.
+        let output = fixture.invoke_before_stdin(&args);
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("native_graph_arguments"));
+        fixture.assert_no_state();
+    }
+    for bad in [
+        vec!["graph", "native", "recover-live-owner", "--run-id", &run],
+        vec![
+            "graph",
+            "native",
+            "recover-live-owner",
+            "--run-id",
+            &run,
+            "--expect-receipt",
+            &receipt,
+        ],
+        vec![
+            "graph",
+            "native",
+            "recover-live-owner",
+            "--run-id",
+            &run,
+            "--expect-receipt",
+            "private-recovery-cli-canary",
+            "--expect-owner",
+            &owner,
+        ],
+        vec![
+            "graph",
+            "native",
+            "recover-live-owner",
+            "--run-id",
+            "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+            "--expect-receipt",
+            &receipt,
+            "--expect-owner",
+            &owner,
+        ],
+    ] {
+        let output = fixture.invoke(&bad);
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("native_graph_arguments"));
+        assert!(!String::from_utf8_lossy(&output.stderr).contains("private-recovery-cli-canary"));
+        assert!(!String::from_utf8_lossy(&output.stdout).contains("private-recovery-cli-canary"));
+        fixture.assert_no_state();
+    }
+}
+
+#[test]
+fn recovery_hash_flags_never_widen_existing_native_actions() {
+    let fixture = Fixture::new();
+    let hash = "c".repeat(64);
+    for action in ["plan", "run", "serve"] {
+        for flag in ["--expect-receipt", "--expect-owner"] {
+            let output = fixture.invoke(&[
+                "graph",
+                "native",
+                action,
+                "--source-file",
+                fixture.source_path(),
+                flag,
+                &hash,
+                "--json",
+            ]);
+            assert!(!output.status.success());
+            assert!(String::from_utf8_lossy(&output.stderr).contains("native_graph_arguments"));
+            fixture.assert_no_state();
+        }
+    }
+    for action in ["inspect", "cleanup", "recovery-selection", "control"] {
+        let mut args = vec![
+            "graph",
+            "native",
+            action,
+            "--run-id",
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "--expect-owner",
+            &hash,
+            "--json",
+        ];
+        if action == "control" {
+            args.extend(["--action", "status"]);
+        }
+        let output = fixture.invoke(&args);
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("native_graph_arguments"));
+        fixture.assert_no_state();
     }
 }
 
@@ -416,6 +568,52 @@ fn public_native_control_requires_exact_action_and_never_adopts_absent_owner() {
         let output = fixture.invoke(&args);
         assert!(!output.status.success());
         assert!(String::from_utf8_lossy(&output.stderr).contains("native_graph_arguments"));
+        fixture.assert_no_state();
+    }
+}
+
+#[test]
+fn public_native_recovery_selection_is_closed_read_only_and_never_creates_missing_authority() {
+    let fixture = Fixture::new();
+    let run = "b".repeat(32);
+    let output = fixture.invoke(&[
+        "graph",
+        "native",
+        "recovery-selection",
+        "--run-id",
+        &run,
+        "--json",
+    ]);
+    assert!(!output.status.success());
+    #[cfg(target_os = "macos")]
+    assert!(String::from_utf8_lossy(&output.stderr).contains("native_graph_live_owner_recovery"));
+    #[cfg(not(target_os = "macos"))]
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("native_graph_foreground_unsupported")
+    );
+    fixture.assert_no_state();
+    for extra in [
+        vec!["--environment-stdin"],
+        vec!["--source-file", fixture.source_path()],
+        vec!["--action", "cleanup"],
+        vec!["--expect-review", "private-selection-canary"],
+        vec!["--timeout-seconds", "1"],
+        vec!["--run-id", &run],
+    ] {
+        let mut args = vec![
+            "graph",
+            "native",
+            "recovery-selection",
+            "--run-id",
+            &run,
+            "--json",
+        ];
+        args.extend(extra);
+        let output = fixture.invoke(&args);
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("native_graph_arguments"));
+        assert!(!String::from_utf8_lossy(&output.stderr).contains("private-selection-canary"));
+        assert!(!String::from_utf8_lossy(&output.stdout).contains("private-selection-canary"));
         fixture.assert_no_state();
     }
 }

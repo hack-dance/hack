@@ -118,7 +118,7 @@ function selectNativeComposeLifecycleHooks(
       }
       assert(Array.isArray(entries));
       for (const entry of entries) {
-        const hook = readHook(entry);
+        const hook = readNativeHostInvocation(entry);
         assert(!names.has(hook.name));
         names.add(hook.name);
         result[phase][order].push(hook);
@@ -128,7 +128,7 @@ function selectNativeComposeLifecycleHooks(
   return result;
 }
 
-function readHook(entry: unknown): NativeComposeHook {
+export function readNativeHostInvocation(entry: unknown): NativeComposeHook {
   assert(
     isRecord(entry) &&
       only(entry, ["name", "command", "cwd", "environment", "env_target"])

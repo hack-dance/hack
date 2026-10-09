@@ -21,6 +21,7 @@ import {
   serveNativeAuthoredProject,
 } from "../src/backends/native-authored-project-start.ts";
 import { restoreEnv } from "./helpers/env.ts";
+import { writeLifecycleMuxFixture } from "./helpers/lifecycle-mux-fixture.ts";
 
 const roots: string[] = [];
 const run = "a".repeat(32);
@@ -35,6 +36,9 @@ const KEYS = [
   "GIT_DIR",
   "GIT_WORK_TREE",
   "GIT_COMMON_DIR",
+  "PATH",
+  "HACK_SESSIONS_MUX",
+  "HACK_TEST_MUX_STATE",
 ] as const;
 let saved: Record<string, string | undefined> | undefined;
 let activeCases = 0;
@@ -91,6 +95,7 @@ type FixtureOptions = {
   readonly failDownAfter?: boolean;
   readonly changeHookOwnerAfter?: boolean;
   readonly persistent?: boolean;
+  readonly hostProcesses?: boolean;
   readonly semanticAfterHook?: boolean;
   readonly planFailure?: boolean;
   readonly foreignPlan?: boolean;
@@ -136,6 +141,14 @@ async function fixture(options: FixtureOptions = {}) {
   process.env.HACK_HOME = join(root, "home");
   process.env.CI = "1";
   process.env.HACK_EXECUTION_MODE = "ci";
+  if (options.hostProcesses) {
+    const bin = join(root, "bin");
+    await mkdir(bin, { mode: 0o700 });
+    await writeLifecycleMuxFixture(bin);
+    process.env.PATH = `${bin}:${saved.PATH ?? "/usr/bin:/bin"}`;
+    process.env.HACK_SESSIONS_MUX = "tmux";
+    process.env.HACK_TEST_MUX_STATE = join(root, "mux.json");
+  }
   const hook = (name: string) => ({
     name,
     env_target: { kind: "host" },
@@ -159,10 +172,23 @@ async function fixture(options: FixtureOptions = {}) {
               before: [hook("down-before")],
               after: [hook("down-after")],
             },
-            ...(options.persistent
+            ...(options.persistent || options.hostProcesses
               ? {
                   processes: {
-                    persistent: { command: { exec: ["sleep", "60"] } },
+                    persistent: options.hostProcesses
+                      ? {
+                          command: {
+                            exec: [
+                              process.execPath,
+                              "--no-env-file",
+                              "-e",
+                              'const {appendFileSync}=await import("node:fs");appendFileSync("process-order","started\\n");await Bun.write("process-value",process.env.PROCESS_TOKEN??"missing");const stop=()=>{appendFileSync("process-order","stopped\\n");process.exit(0)};process.on("SIGTERM",stop);process.on("SIGINT",stop);setInterval(()=>{},1000)',
+                            ],
+                          },
+                          env_target: { kind: "host" },
+                          environment: { PROCESS_TOKEN: { env_ref: "TOKEN" } },
+                        }
+                      : { command: { exec: ["sleep", "60"] } },
                   },
                 }
               : {}),
@@ -219,6 +245,7 @@ if(operation!=='compile'){
 }
 if(operation==='plan')result.environment_plan={plan_version:1,overlay:request.env_metadata.overlay,overlay_exists:request.env_metadata.overlay_exists,complete:true,workloads:{web:${options.noManaged === true ? "{PUBLIC:{kind:'literal',value:'$EXACT'}}" : "{RENAMED:{kind:'managed',key:'TOKEN',scope:'global',secret:false}}"}},warnings:[],diagnostics:[]};
 if(operation==='plan'&&source.host)result.environment_plan.host=Object.fromEntries(['up','down'].flatMap(phase=>['before','after'].flatMap(order=>source.host[phase][order].map(hook=>[hook.name,{env_target:hook.env_target,bindings:{}}]))));
+if(operation==='plan'&&${options.hostProcesses === true})result.environment_plan.host.persistent={env_target:{kind:'host'},bindings:{PROCESS_TOKEN:{kind:'managed',key:'TOKEN',scope:'global',secret:false}}};
 console.log(JSON.stringify(result));
 `
   );
@@ -868,7 +895,7 @@ macTest(
   30_000
 );
 macTest(
-  "persistent host processes refuse before any hook or native operation",
+  "malformed unnormalized host processes refuse before any hook or native operation",
   async () => {
     const selected = await fixture({ finiteHooks: true, persistent: true });
     await failure(
@@ -884,6 +911,108 @@ macTest(
     ).toBe(false);
     expect(await Bun.file(selected.calls).exists()).toBe(false);
   }
+);
+macTest(
+  "Source5 supervised persistent process spans ready and ordinary down without private argv values",
+  async () => {
+    const selected = await fixture({ finiteHooks: true, hostProcesses: true });
+    let stop: Promise<void> | undefined;
+    let readyValue: string | undefined;
+    const code = await serveNativeAuthoredProject({
+      ...selected,
+      run,
+      startupTimeoutMs: 20_000,
+      onReady: () => {
+        stop = (async () => {
+          readyValue = await Bun.file(
+            join(selected.scope.projectRoot, "process-value")
+          ).text();
+          await stopNativeAuthoredProject({
+            scope: selected.scope,
+            timeoutMs: 20_000,
+          });
+        })();
+        return undefined;
+      },
+    });
+    await stop;
+    expect(code).toBe(0);
+    expect(readyValue).toBe(CANARY);
+    expect(
+      await Bun.file(join(selected.scope.projectRoot, "process-order")).text()
+    ).toBe("started\nstopped\n");
+    expect(
+      await Bun.file(join(selected.scope.projectRoot, "hook-order")).text()
+    ).toBe("up-before\nup-after\ndown-before\ndown-after\n");
+    expect(await loadNativeAuthoredProjectRun(selected.scope)).toBeNull();
+    const files = await artifacts(selected.scope);
+    expect(
+      files.some((name) => name.endsWith(".host-process-owner.json"))
+    ).toBe(false);
+    expect(files.some((name) => name.endsWith(".hooks.json"))).toBe(false);
+    expect(
+      await Bun.file(join(selected.root, "mux.json.calls")).text()
+    ).not.toContain(CANARY);
+  },
+  40_000
+);
+macTest(
+  "Source5 failed up.before leaves no host intent or mux effect",
+  async () => {
+    const selected = await fixture({
+      finiteHooks: true,
+      hostProcesses: true,
+      failBefore: true,
+    });
+    const error = await failure(
+      serveNativeAuthoredProject({
+        ...selected,
+        run,
+        startupTimeoutMs: 20_000,
+      }),
+      "not-started"
+    );
+    expect(error).toHaveProperty("stage", "hook-up-before");
+    expect(await Bun.file(join(selected.root, "mux.json.calls")).exists()).toBe(
+      false
+    );
+    const files = await artifacts(selected.scope);
+    expect(
+      files.some((name) => name.endsWith(".host-process-intent.json"))
+    ).toBe(false);
+    expect(
+      files.some((name) => name.endsWith(".host-process-owner.json"))
+    ).toBe(false);
+  },
+  30_000
+);
+macTest(
+  "Source5 cancellation after readiness settles exact host processes before retiring hooks",
+  async () => {
+    const selected = await fixture({ finiteHooks: true, hostProcesses: true });
+    const signal = new AbortController();
+    expect(
+      await serveNativeAuthoredProject({
+        ...selected,
+        run,
+        signal: signal.signal,
+        startupTimeoutMs: 20_000,
+        onReady: () => {
+          signal.abort();
+          return undefined;
+        },
+      })
+    ).toBe(0);
+    expect(
+      await Bun.file(join(selected.scope.projectRoot, "process-order")).text()
+    ).toBe("started\nstopped\n");
+    const files = await artifacts(selected.scope);
+    expect(
+      files.some((name) => name.endsWith(".host-process-owner.json"))
+    ).toBe(false);
+    expect(files.some((name) => name.endsWith(".hooks.json"))).toBe(false);
+  },
+  40_000
 );
 macTest(
   "failed down.before retains the supervised runtime and cannot replay before explicit hard cancellation",

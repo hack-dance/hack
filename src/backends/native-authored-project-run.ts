@@ -34,9 +34,11 @@ import {
   type NativeAuthoredHookOwner,
   type NativeHookFilePin,
   nativeHookPermitIssued,
+  nativeHookPermitVersion,
   retireNativeAuthoredRecoveredHooks,
 } from "./native-authored-hook-journal.ts";
 import { requestNativeHookStop } from "./native-authored-hook-stop.ts";
+import { retireNativeAuthoredHostProcesses } from "./native-authored-host-processes.ts";
 
 const LIMIT = 64 * 1024;
 const SOURCE_LIMIT = 1024 * 1024;
@@ -249,7 +251,10 @@ function sourceText(store: Store, input: SourceOptions) {
     return refused();
   }
   const text = JSON.stringify({
-    version: input.hookPermit === undefined ? 2 : 3,
+    version:
+      input.hookPermit === undefined
+        ? 2
+        : (nativeHookPermitVersion(input.hookPermit) ?? refused()),
     kind: "native-graph-source",
     project: store.identity.projectRoot,
     branch: store.identity.branch,
@@ -445,8 +450,13 @@ export async function withNativeAuthoredProjectRecoveryStorage<T>(
       readReady: () => read(store),
       readStart: () => readRecord(store, store.startFile, started),
       sourcePath,
-      retireHooks: (run) =>
-        retireNativeAuthoredRecoveredHooks(
+      retireHooks: async (run) => {
+        await retireNativeAuthoredHostProcesses({
+          scope: opts,
+          run,
+          assertFresh: store.check,
+        });
+        await retireNativeAuthoredRecoveredHooks(
           {
             root: store.root,
             held: store.held,
@@ -456,7 +466,8 @@ export async function withNativeAuthoredProjectRecoveryStorage<T>(
             check: store.check,
           },
           run
-        ),
+        );
+      },
       async readSource(run) {
         const current = await readPrivate(sourcePath(run), SOURCE_LIMIT);
         const value: unknown = JSON.parse(current.text);
@@ -465,12 +476,13 @@ export async function withNativeAuthoredProjectRecoveryStorage<T>(
             isRecord(value) &&
             keys(
               value,
-              value.version === 3
+              value.version === 3 || value.version === 5
                 ? "branch,env_metadata,hook_permit,kind,overlay,profiles,project,run,version"
                 : "branch,env_metadata,kind,overlay,profiles,project,run,version"
             ) &&
             (value.version === 2 ||
-              (value.version === 3 && validHookPin(value.hook_permit)))
+              ((value.version === 3 || value.version === 5) &&
+                validHookPin(value.hook_permit)))
           ) ||
           value.kind !== "native-graph-source" ||
           value.project !== store.identity.projectRoot ||

@@ -197,6 +197,7 @@ export function createLifecycleProcessController(opts: {
   readonly installSignalCleanup?: (opts: {
     readonly cleanup: LifecycleOperationCleanup;
   }) => { readonly dispose: () => void };
+  readonly assertFresh?: () => Promise<void>;
 }): {
   readonly sessionName: string;
   startFromCommand: (opts: {
@@ -283,6 +284,7 @@ export function createLifecycleProcessController(opts: {
       return;
     }
     if (inspection.decision.kind === "replace") {
+      await opts.assertFresh?.();
       await replaceInspectedLifecycleSession({
         backend,
         inspection,
@@ -335,6 +337,7 @@ export function createLifecycleProcessController(opts: {
         projectDir: opts.project.projectDir,
         entry: pendingEntry,
       });
+      await opts.assertFresh?.();
       const created = await backend.createSession({
         name: sessionName,
         cwd: opts.project.projectRoot,
@@ -391,6 +394,7 @@ export function createLifecycleProcessController(opts: {
 
     const launch = await opts.prepareLaunch?.(process);
     await ensureSession();
+    await opts.assertFresh?.();
     const started = await startLifecycleProcess({
       backend: backendName as MuxBackendName,
       sessionName,
@@ -400,6 +404,7 @@ export function createLifecycleProcessController(opts: {
       process: launch ? { ...process, command: launch.command } : process,
       projectDir: opts.project.projectDir,
       composeProject: opts.composeProject,
+      assertFresh: opts.assertFresh,
     });
     nextIndex += 1;
     startedProcesses.push(started);
@@ -528,6 +533,7 @@ async function startLifecycleProcess(opts: {
   readonly process: ProjectLifecycleProcess;
   readonly projectDir: string;
   readonly composeProject: string;
+  readonly assertFresh?: () => Promise<void>;
 }): Promise<{
   readonly name: string;
   readonly windowName: string;
@@ -556,6 +562,7 @@ async function startLifecycleProcess(opts: {
       logPath,
       serviceName: opts.process.name,
     });
+    await opts.assertFresh?.();
     const result = await exec(
       [
         "tmux",
@@ -619,6 +626,7 @@ async function startLifecycleProcess(opts: {
     logPath,
     serviceName: opts.process.name,
   });
+  await opts.assertFresh?.();
   const result = await exec(
     [
       "zellij",
@@ -667,7 +675,10 @@ export async function stopLifecycleProcessController(opts: {
   readonly projectName: string;
   readonly branch: string | null;
   readonly composeProject: string;
+  /** Internal frontend fence. Legacy callers retain their original owner path. */
+  readonly assertFresh?: () => Promise<void>;
 }): Promise<void> {
+  await opts.assertFresh?.();
   const sessionName = resolveLifecycleSessionName({
     projectName: opts.projectName,
     branch: opts.branch,
@@ -705,13 +716,16 @@ export async function stopLifecycleProcessController(opts: {
   }
 
   const matchedLiveSession = inspection.classification !== "absent";
+  await opts.assertFresh?.();
   if (matchedLiveSession && backend.name === "tmux") {
     await interruptLifecycleTmuxProcesses({
       sessionName,
       lifecycleEntry,
+      assertFresh: opts.assertFresh,
     });
   }
   if (matchedLiveSession) {
+    await opts.assertFresh?.();
     const killed = lifecycleEntry.ownershipToken
       ? await killLifecycleSessionWithOwnership({
           backend,
@@ -724,13 +738,17 @@ export async function stopLifecycleProcessController(opts: {
     }
   }
 
+  const processGroupIds = await resolveLifecycleStopProcessGroupIdsForEntry({
+    matchedLiveSession,
+    lifecycleEntry,
+  });
+  await opts.assertFresh?.();
   await terminateLifecycleProcessGroups({
-    processGroupIds: await resolveLifecycleStopProcessGroupIdsForEntry({
-      matchedLiveSession,
-      lifecycleEntry,
-    }),
+    processGroupIds,
+    assertFresh: opts.assertFresh,
   });
 
+  await opts.assertFresh?.();
   if (lifecycleEntry.ownershipToken) {
     await removeLifecycleStateEntryIfOwned({
       projectDir: opts.project.projectDir,
@@ -748,6 +766,7 @@ export async function stopLifecycleProcessController(opts: {
 async function interruptLifecycleTmuxProcesses(opts: {
   readonly sessionName: string;
   readonly lifecycleEntry: LifecycleStateEntry | null;
+  readonly assertFresh?: () => Promise<void>;
 }): Promise<void> {
   const processWindows = opts.lifecycleEntry?.processes ?? [];
   if (processWindows.length === 0) {
@@ -755,6 +774,7 @@ async function interruptLifecycleTmuxProcesses(opts: {
   }
 
   for (const processInfo of processWindows) {
+    await opts.assertFresh?.();
     await exec(
       [
         "tmux",
@@ -768,11 +788,14 @@ async function interruptLifecycleTmuxProcesses(opts: {
   }
 
   await Bun.sleep(750);
+  const processGroupIds = await resolveLifecycleProcessGroupIds({
+    sessionName: opts.sessionName,
+    lifecycleEntry: opts.lifecycleEntry,
+  });
+  await opts.assertFresh?.();
   await terminateLifecycleProcessGroups({
-    processGroupIds: await resolveLifecycleProcessGroupIds({
-      sessionName: opts.sessionName,
-      lifecycleEntry: opts.lifecycleEntry,
-    }),
+    processGroupIds,
+    assertFresh: opts.assertFresh,
   });
 }
 

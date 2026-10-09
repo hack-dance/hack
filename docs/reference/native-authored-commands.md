@@ -28,8 +28,8 @@ but refuses replacement of its inode. Selected path/ancestor aliases, identity
 or permission changes refuse, while exact owned shutdown remains possible after
 the host source is moved or deleted and preserves host data.
 
-Writable/other mounts, source acquisition, storage, file inputs, routing, endpoints
-and persistent host processes remain outside this bounded frontend. The existing
+Writable/other mounts, source acquisition, storage, file inputs and routing
+remain outside this bounded frontend. The existing
 closed two-owned-bridge graph capability keeps its separate receipt and refuses
 source/storage intersections. Finite typed host lifecycle hooks use the supervised
 frontend owner described below. Unsupported intent must
@@ -103,8 +103,7 @@ corpus, actual dead-owner recovery or resource overhead; those remain separate g
 
 The experimental foreground frontend admits typed `host.up.before`, `host.up.after`,
 `host.down.before` and `host.down.after` commands. Every phase and selected host
-environment binding is checked before the first hook. Persistent `host.processes`,
-host endpoints and unsupported workload capabilities still refuse; no intent is
+environment binding is checked before the first hook. Unsupported workload capabilities still refuse; no intent is
 stripped to make the graph acceptable. Normal standalone `graph native plan`, `run`
 and `serve` continue to refuse host intent. The frontend alone uses an explicit
 version 3 private source envelope and immutable finite-hook permit. Existing graph
@@ -143,6 +142,36 @@ retains evidence and requires separate resolution; no automatic hook replay or
 inferred completion is supplied.
 
 Portable controls and synthetic runtime acceptance are distinct from live provider
-acceptance. In particular, the retained Event Agent corpus includes persistent host
-processes and remains outside this finite-only slice; full NC05 corpus acceptance is
-still required.
+acceptance. Full NC05 corpus acceptance is still required.
+
+## Supervised host processes
+
+The native foreground frontend also admits normalized `host.processes` with startup
+`up` and exit `stop_on_down`, using the same Hack lifecycle mux controller as the
+ordinary CLI. Processes start after successful `up.before` and remain owned through
+workload readiness. After exact native Removed, the frontend stops its captured
+process groups before `down.after` and retires their owner only after known stop.
+Startup keeps the configured startup deadline; a running process has no added
+duration ceiling. This slice requires tmux because its existing backend supplies
+the captured group identity needed for stop; zellij remains unsupported here.
+
+An explicit private source-version5 permit binds the frontend owner, run, project,
+branch, semantic selection and process-owner/ready documents. Ordinary standalone
+native graph commands still refuse host intent. Source version3 finite hooks and
+native receipt versions2–5 retain their meanings. This capability refuses live-source,
+persistent-storage and owned-topology intersections before effects.
+
+Commands, cwd and managed values reach the supervised client through a private
+one-use local socket. The mux command contains only the internal client and opaque
+socket path; managed values are not placed in argv, mux environment or journals.
+Compiler-verified HTTP(S) host-binding references resolve to loopback only for host
+context, or to an explicit external hostname. Workload/guest, routed and TCP
+references remain unsupported until their delivery owners are integrated.
+
+Dead-owner recovery first proves the exact native Removed result, then uses the
+saved complete process metadata and current controller token to stop only the
+captured groups. A missing session requires those groups already absent; a PID
+alone never authorizes a signal. Changed metadata, foreign tokens or an interrupted
+launch without a complete ready/state pair retain evidence and cannot replay the
+process or hooks. Portable real-child controls do not qualify the retained Event
+Agent's tunnels, guest access or routing; live corpus acceptance remains open.

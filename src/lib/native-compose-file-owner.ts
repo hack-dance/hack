@@ -45,6 +45,7 @@ import {
   holdDirectory,
   keys,
   parsePrivateJson,
+  privateDirectory,
   readPrivate,
   recheckDirectories,
   sameFile,
@@ -224,7 +225,7 @@ async function initializeRoot(root: string): Promise<{
   readonly receipt: StateAnchor;
   readonly rootToken: string;
 }> {
-  const parent = await holdDirectory(dirname(root), false);
+  const parent = await initializeRootParent(dirname(root));
   let held: HeldDirectory | undefined;
   try {
     let created = false;
@@ -266,6 +267,33 @@ async function initializeRoot(root: string): Promise<{
     await held?.file.close();
     await parent.file.close();
     throw error;
+  }
+}
+
+/** Create only the missing global-home leaf beneath a held owned parent. */
+async function initializeRootParent(path: string): Promise<HeldDirectory> {
+  try {
+    await lstat(path);
+    return await holdDirectory(path, false);
+  } catch (error) {
+    if (!hasCode(error, "ENOENT")) {
+      throw error;
+    }
+  }
+  const ancestor = await holdDirectory(dirname(path), false);
+  let held: HeldDirectory | undefined;
+  try {
+    await recheckDirectories([ancestor]);
+    held = await privateDirectory(path);
+    await recheckDirectories([ancestor, held]);
+    await held.file.sync();
+    await ancestor.file.sync();
+    return held;
+  } catch (error) {
+    await held?.file.close();
+    throw error;
+  } finally {
+    await ancestor.file.close();
   }
 }
 async function readOwnedDocument(

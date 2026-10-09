@@ -22,6 +22,7 @@ import type { Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  bindNativeComposeEngineSocketPath,
   createNativeComposeEngineIdentityObserver,
   NativeComposeEngineIdentityError,
 } from "../src/lib/native-compose-engine-identity.ts";
@@ -583,4 +584,76 @@ else console.log(JSON.stringify({id:${JSON.stringify(PROXY)}, project:"hack-dev-
       restoreEnv(key, before[index]);
     }
   }
+});
+
+test("pure socket path binding accepts a real Unix leaf without querying an engine or spawning", () => {
+  const spawn = spyOn(Bun, "spawn");
+  try {
+    const bound = bindNativeComposeEngineSocketPath(socket);
+    expect(bound.path).toBe(socket);
+    expect(() => bound.assertFresh()).not.toThrow();
+    expect(Object.isFrozen(bound)).toBe(true);
+    expect(Object.keys(bound)).toEqual(["path", "assertFresh"]);
+    expect(requests).toHaveLength(0);
+    expect(connections.size).toBe(0);
+    expect(spawn).not.toHaveBeenCalled();
+  } finally {
+    spawn.mockRestore();
+  }
+});
+test("pure socket path binding pins alias identity and refuses retargeting before a query", async () => {
+  const other = join(root, "other.sock"),
+    alias = join(root, "pure-alias.sock");
+  await listen(other);
+  await symlink("engine.sock", alias);
+  const bound = bindNativeComposeEngineSocketPath(alias);
+  expect(bound.path).toBe(socket);
+  await unlink(alias);
+  await symlink("other.sock", alias);
+  expect(() => bound.assertFresh()).toThrow(NativeComposeEngineIdentityError);
+  expect(requests).toHaveLength(0);
+});
+test("pure socket path binding refuses ancestor rebinding even to the same target", async () => {
+  const alias = join(root, "pure-parent");
+  await symlink(root, alias);
+  const bound = bindNativeComposeEngineSocketPath(join(alias, "engine.sock"));
+  await unlink(alias);
+  await symlink(root, alias);
+  expect(() => bound.assertFresh()).toThrow(NativeComposeEngineIdentityError);
+  expect(requests).toHaveLength(0);
+});
+test("pure socket path binding refuses physical replacement and unchanged-name wrong type", async () => {
+  const bound = bindNativeComposeEngineSocketPath(socket);
+  await rename(socket, join(root, "pure-original.sock"));
+  await listen(socket);
+  expect(() => bound.assertFresh()).toThrow(NativeComposeEngineIdentityError);
+  const replacement = bindNativeComposeEngineSocketPath(socket);
+  await rename(socket, join(root, "pure-replacement.sock"));
+  await writeFile(socket, "not a socket", { mode: 0o600 });
+  expect(() => replacement.assertFresh()).toThrow(
+    NativeComposeEngineIdentityError
+  );
+  expect(() => bindNativeComposeEngineSocketPath(socket)).toThrow(
+    NativeComposeEngineIdentityError
+  );
+  expect(requests).toHaveLength(0);
+});
+test("pure socket path binding pins mode and refuses ambiguous or relative selection", async () => {
+  const bound = bindNativeComposeEngineSocketPath(socket);
+  await chmod(socket, 0o600);
+  const changed = bindNativeComposeEngineSocketPath(socket);
+  await chmod(socket, 0o660);
+  expect(() => changed.assertFresh()).toThrow(NativeComposeEngineIdentityError);
+  for (const path of [
+    "engine.sock",
+    `${socket}?query`,
+    `${socket}\0`,
+    join(root, "missing.sock"),
+  ]) {
+    expect(() => bindNativeComposeEngineSocketPath(path)).toThrow(
+      NativeComposeEngineIdentityError
+    );
+  }
+  expect(bound.path).toBe(socket);
+  expect(requests).toHaveLength(0);
 });

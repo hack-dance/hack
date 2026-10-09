@@ -29,6 +29,7 @@ export type Receipt = {
     | 5
     | 6
     | 7
+    | 8
     | 9
     | 10
     | 11
@@ -116,6 +117,7 @@ export function parseLegacyComposeAdoptionReceipt(
         value.adoption_receipt_version === 9 ||
         value.adoption_receipt_version === 7 ||
         value.adoption_receipt_version === 6 ||
+        value.adoption_receipt_version === 8 ||
         value.adoption_receipt_version === 5 ||
         value.adoption_receipt_version === 4 ||
         value.adoption_receipt_version === 3 ||
@@ -227,6 +229,7 @@ export function parseLegacyComposeAdoptionReceipt(
       version === 10 ||
       version === 9 ||
       version === 7 ||
+      version === 8 ||
       version === 6 ||
       version === 5 ||
       version === 4 ||

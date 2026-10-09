@@ -4,6 +4,7 @@ use crate::{project::native::NativeInputs, provider::native_input};
 #[cfg(target_os = "macos")]
 pub mod foreground;
 mod journal;
+pub mod persistent_data;
 mod runtime;
 pub mod selection;
 mod source;
@@ -47,6 +48,9 @@ pub struct Configuration {
     configs: BTreeMap<String, Value>,
     resources: BTreeMap<String, Resource>,
     source: Option<source::Binding>,
+    storage: BTreeSet<String>,
+    data_mounts: BTreeMap<String, Vec<crate::project::native::StorageMount>>,
+    data: BTreeMap<String, persistent_data::engine::Reference>,
 }
 impl Configuration {
     pub fn graph(&self) -> &execution::Graph {
@@ -66,7 +70,7 @@ impl Configuration {
 fn refused() -> CandidateError {
     error(
         "native_graph_admission",
-        "Native consumption requires its exact compiler review, immutable images, bounded process/readiness and admitted live source binding; values omitted.",
+        "Native consumption requires its exact compiler review, immutable images, bounded process/readiness and a separately admitted live-source or persistent-storage contract; values omitted.",
     )
 }
 
@@ -117,6 +121,9 @@ fn configuration_with_source(
                 .map(|mount| (name.clone(), mount.clone()))
         })
         .collect();
+    if source.is_some() && !inputs.storage.is_empty() {
+        return Err(refused());
+    }
     match (&source, mounts.is_empty()) {
         (None, true) => {}
         (Some(source), false) if source.mounts == mounts => source.validate(
@@ -229,6 +236,14 @@ fn configuration_with_source(
         configs,
         resources,
         source,
+        storage: inputs.storage.clone(),
+        data_mounts: inputs
+            .workloads
+            .iter()
+            .filter(|(_, workload)| !workload.mounts.is_empty())
+            .map(|(name, workload)| (name.clone(), workload.mounts.clone()))
+            .collect(),
+        data: BTreeMap::new(),
     })
 }
 

@@ -120,6 +120,190 @@ fn basic() -> Value {
     json!({"schema_version":1,"name":"fixture","services":{"web":{"image":image(),"command":{"exec":["/bin/echo","$EXACT"]}}}})
 }
 
+fn persistent_reference(receipt: &Receipt) -> persistent_data::engine::Reference {
+    let namespace = receipt.review.scope().namespace;
+    let owner = "9".repeat(32);
+    serde_json::from_value(json!({"binding":{"scope":{"namespace":namespace,"storage":"database","owner":owner},"guest":{"owner":receipt.owner,"boot_id":receipt.boot,"storage":{"device":0,"inode":21,"bytes":128,"uuid":"11111111-2222-3333-4444-555555555555"}},"policy":{"driver":"local","scope":"local","options":{}}},"state":{"status":"enrolled","volume":{"name":format!("hkp-{namespace}-{owner}-database"),"created_at":"2026-10-08T00:00:01Z","directory":{"device":0,"inode":42}}}})).unwrap()
+}
+
+#[test]
+fn persistent_journal_has_distinct_version_and_exact_data_membership_without_volume_ids() {
+    let fixture = Fixture::new(basic());
+    let (_, session) = fixture.session(fixture.prepared(json!({"web":{}}), &BTreeMap::new()));
+    let mut receipt = session.receipt;
+    let image_only = serde_json::to_value(&receipt).unwrap();
+    for fields in [
+        json!({"data":{}}),
+        json!({"data_mounts":{}}),
+        json!({"data":{},"data_mounts":{}}),
+        json!({"data":null}),
+        json!({"data_mounts":null}),
+        json!({"data":null,"data_mounts":null}),
+        json!({"data_tool":null}),
+        json!({"data_tool":{"version":1,"artifact":"a".repeat(64),"bytes":8192,"root":null,"helper":null}}),
+    ] {
+        let mut wire = image_only.clone();
+        wire.as_object_mut()
+            .unwrap()
+            .extend(fields.as_object().unwrap().clone());
+        assert!(serde_json::from_value::<Receipt>(wire).is_err());
+    }
+    serde_json::from_value::<Receipt>(image_only)
+        .unwrap()
+        .validate(RUN, OWNER)
+        .unwrap();
+    receipt
+        .data
+        .insert("database".into(), persistent_reference(&receipt));
+    receipt.data_mounts.insert(
+        "web".into(),
+        vec![crate::project::native::StorageMount {
+            storage: "database".into(),
+            target: "/data".into(),
+            read_only: false,
+        }],
+    );
+    let mut persistent_wire = serde_json::to_value(&receipt).unwrap();
+    persistent_wire["version"] = json!(4);
+    receipt = serde_json::from_value(persistent_wire).unwrap();
+    receipt.validate(RUN, OWNER).unwrap();
+    let mut installed = serde_json::to_value(&receipt).unwrap();
+    installed["data_tool"] = json!({"version":1,"artifact":"a".repeat(64),"bytes":8192,"root":{"device":0,"inode":1},"helper":{"device":0,"inode":2}});
+    let with_tool: Receipt = serde_json::from_value(installed.clone()).unwrap();
+    with_tool.validate(RUN, OWNER).unwrap();
+    assert!(with_tool.check_binding(&receipt).is_err());
+    installed["data_tool"]["helper"]["inode"] = json!(0);
+    assert!(
+        serde_json::from_value::<Receipt>(installed)
+            .unwrap()
+            .validate(RUN, OWNER)
+            .is_err()
+    );
+    assert_eq!(receipt.resources.len(), 2);
+    assert!(
+        receipt
+            .resources
+            .values()
+            .all(|resource| resource.kind != Kind::Volume)
+    );
+    let observed = json!({"Mounts":[{"Type":"volume","Name":receipt.data["database"].name(),"Source":receipt.data["database"].mountpoint(),"Destination":"/data","RW":true,"Driver":"local"}]});
+    verify_data_mounts(&receipt, "web", &observed).unwrap();
+    for field in ["Name", "Source", "Destination", "Driver", "RW", "Type"] {
+        let mut wrong = observed.clone();
+        wrong["Mounts"][0][field] = json!("foreign");
+        assert!(verify_data_mounts(&receipt, "web", &wrong).is_err());
+    }
+    let mut extra = observed.clone();
+    extra["Mounts"]
+        .as_array_mut()
+        .unwrap()
+        .push(observed["Mounts"][0].clone());
+    assert!(verify_data_mounts(&receipt, "web", &extra).is_err());
+    for version in [2, 3, 5] {
+        let mut wrong = serde_json::to_value(&receipt).unwrap();
+        wrong["version"] = json!(version);
+        if let Ok(wrong) = serde_json::from_value::<Receipt>(wrong) {
+            assert!(wrong.validate(RUN, OWNER).is_err());
+        }
+    }
+    let mut omitted = receipt.clone();
+    omitted.data.clear();
+    assert!(omitted.validate(RUN, OWNER).is_err());
+    let encoded = serde_json::to_value(&receipt).unwrap();
+    let mut pending = encoded.clone();
+    pending["data"]["database"]["state"] = json!({"status":"reserved","intent":"8".repeat(32)});
+    let mut pending: Receipt = serde_json::from_value(pending).unwrap();
+    pending.resources.get_mut("container:web").unwrap().id = Some("6".repeat(64));
+    assert!(pending.validate(RUN, OWNER).is_err());
+    let mut independent = receipt.clone();
+    let run = "7".repeat(32);
+    independent.review = native_input::Review::new(
+        native_input::Scope {
+            namespace: receipt.review.scope().namespace,
+            run: &run,
+        },
+        receipt.review.compiler_identity().clone(),
+    )
+    .unwrap();
+    independent
+        .resources
+        .get_mut("network:default")
+        .unwrap()
+        .name = format!("hkn-{run}-network-0");
+    independent.resources.get_mut("container:web").unwrap().name = format!("hkn-{run}-container-0");
+    independent.validate(&run, OWNER).unwrap();
+    assert_eq!(independent.data, receipt.data);
+    assert!(independent.check_binding(&receipt).is_err());
+    assert!(verify_prior_data_retirement(&receipt, &independent.data).is_err());
+    receipt.phase = Phase::Removed;
+    verify_prior_data_retirement(&receipt, &independent.data).unwrap();
+    // Compute-only retirement cannot turn an uncertain original data create into
+    // authority for a second attempt, even if an enrolled pathname appeared late.
+    let mut reserved = encoded;
+    reserved["data"]["database"]["state"] = json!({"status":"reserved","intent":"8".repeat(32)});
+    let mut reserved: Receipt = serde_json::from_value(reserved).unwrap();
+    reserved.phase = Phase::Removed;
+    assert!(verify_prior_data_retirement(&reserved, &independent.data).is_err());
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn otherwise_valid_ready_graph4_refuses_dead_publication_recovery() {
+    let fixture = Fixture::new(basic());
+    let (_, session) = fixture.session(fixture.prepared(json!({"web":{}}), &BTreeMap::new()));
+    let mut receipt = session.receipt;
+    receipt.phase = Phase::ReadyObserved;
+    for resource in receipt.resources.values_mut() {
+        resource.id = Some(if resource.kind == Kind::Network {
+            "1".repeat(64)
+        } else {
+            "2".repeat(64)
+        });
+        resource.phase = if resource.kind == Kind::Network {
+            "created".into()
+        } else {
+            "started".into()
+        };
+    }
+    receipt.require_recovery_ready().unwrap();
+    receipt
+        .data
+        .insert("database".into(), persistent_reference(&receipt));
+    receipt.data_mounts.insert(
+        "web".into(),
+        vec![crate::project::native::StorageMount {
+            storage: "database".into(),
+            target: "/data".into(),
+            read_only: false,
+        }],
+    );
+    let mut persistent_wire = serde_json::to_value(&receipt).unwrap();
+    persistent_wire["version"] = json!(4);
+    receipt = serde_json::from_value(persistent_wire).unwrap();
+    receipt.validate(RUN, OWNER).unwrap();
+    assert!(receipt.require_recovery_ready().is_err());
+}
+
+#[test]
+fn ordinary_persistent_start_refuses_before_provider_or_any_owner_publication() {
+    let mut project = basic();
+    project["storage"] = json!({"database":{"kind":"persistent","scope":"worktree"}});
+    project["services"]["web"]["mounts"] =
+        json!([{"storage":"database","target":"/data","access":"read-write"}]);
+    let fixture = Fixture::new(project);
+    let prepared = fixture.prepared(json!({"web":{}}), &BTreeMap::new());
+    assert_eq!(
+        run_guarded(&fixture.candidate, prepared, None, None)
+            .unwrap_err()
+            .code,
+        "native_graph_storage_unqualified"
+    );
+    for path in ["run/smolvm", "run/native-graphs"] {
+        assert!(!fixture.candidate.state_root.join(path).exists());
+    }
+    assert!(!fixture.candidate.state_root.exists());
+}
+
 #[test]
 fn foreground_guard_refuses_before_provider_connection_or_graph_reservation() {
     let fixture = Fixture::new(basic());
@@ -463,6 +647,38 @@ fn source_fixture() -> Fixture {
         .unwrap();
     fs::write(fixture.project.join("src/main.js"), "initial live source").unwrap();
     fixture
+}
+
+#[test]
+fn source_and_storage_receipt_wire_families_refuse_cross_fields() {
+    let fixture = source_fixture();
+    let (_, session) = fixture.session(fixture.prepared(json!({"web":{}}), &BTreeMap::new()));
+    let source = serde_json::to_value(&session.receipt).unwrap();
+    serde_json::from_value::<Receipt>(source.clone())
+        .unwrap()
+        .validate(RUN, OWNER)
+        .unwrap();
+    for fields in [
+        json!({"data":{}}),
+        json!({"data_mounts":{}}),
+        json!({"data_tool":null}),
+    ] {
+        let mut wire = source.clone();
+        wire.as_object_mut()
+            .unwrap()
+            .extend(fields.as_object().unwrap().clone());
+        assert!(serde_json::from_value::<Receipt>(wire).is_err());
+    }
+    for version in [2, 4, 5] {
+        let mut wire = source.clone();
+        wire["version"] = json!(version);
+        assert!(serde_json::from_value::<Receipt>(wire).is_err());
+    }
+    let mut wire = source;
+    wire["version"] = json!(4);
+    wire["data"] = json!({});
+    wire["data_mounts"] = json!({});
+    assert!(serde_json::from_value::<Receipt>(wire).is_err());
 }
 
 #[test]

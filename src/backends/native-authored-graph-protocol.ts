@@ -1,5 +1,12 @@
 import { createHash } from "node:crypto";
 import { isRecord } from "../lib/guards.ts";
+import {
+  type NativePersistentMount,
+  type NativePersistentReference,
+  type NativePersistentTool,
+  parseNativePersistentData,
+  parseNativePersistentTool,
+} from "./native-authored-persistent-data-protocol.ts";
 
 const HEX32 = /^[a-f0-9]{32}$/;
 const HEX64 = /^[a-f0-9]{64}$/;
@@ -88,6 +95,11 @@ type NativeAuthoredInventory = {
   readonly phase: Phase;
   readonly readiness: Readonly<Record<string, Condition>>;
   readonly resources: Readonly<Record<string, Resource>>;
+  readonly data_tool?: NativePersistentTool;
+  readonly data?: Readonly<Record<string, NativePersistentReference>>;
+  readonly data_mounts?: Readonly<
+    Record<string, readonly NativePersistentMount[]>
+  >;
   readonly failure?: {
     readonly service: string;
     readonly observation: Observation;
@@ -98,6 +110,7 @@ export type NativeAuthoredReceipt = NativeAuthoredInventory &
   (
     | { readonly version: 2; readonly source?: never }
     | { readonly version: 3; readonly source: NativeSourceBinding }
+    | { readonly version: 4; readonly source?: never }
   );
 function refused(): never {
   throw new Error(
@@ -495,31 +508,29 @@ function resource(
   };
 }
 
-/** Image-only v2 and source-bearing v3 stay disjoint from legacy Compose receipts. */
+/** Closed image-only v2, live-source v3 and persistent-intent v4 remain distinct. */
 export function parseNativeAuthoredReceipt(
   value: unknown
 ): NativeAuthoredReceipt {
   if (
-    !(
-      fields(
-        value,
-        [
-          "version",
-          "kind",
-          "owner",
-          "boot",
-          "review",
-          "phase",
-          "readiness",
-          "resources",
-        ],
-        ["failure", "terminal", "source"]
-      ) &&
-      (value.version === 2 || value.version === 3)
+    !fields(
+      value,
+      [
+        "version",
+        "kind",
+        "owner",
+        "boot",
+        "review",
+        "phase",
+        "readiness",
+        "resources",
+      ],
+      ["failure", "terminal", "source", "data", "data_mounts", "data_tool"]
     ) ||
-    (value.version === 2
-      ? Object.hasOwn(value, "source")
-      : !Object.hasOwn(value, "source")) ||
+    (value.version !== 2 && value.version !== 3 && value.version !== 4) ||
+    (value.version === 3
+      ? !Object.hasOwn(value, "source")
+      : Object.hasOwn(value, "source")) ||
     value.kind !== "native-graph-runtime" ||
     typeof value.owner !== "string" ||
     !HEX32.test(value.owner) ||
@@ -592,6 +603,32 @@ export function parseNativeAuthoredReceipt(
   const terminal = Object.hasOwn(value, "terminal")
     ? parseTerminal(value.terminal, resources)
     : undefined;
+  const hasData =
+    Object.hasOwn(value, "data") || Object.hasOwn(value, "data_mounts");
+  if (
+    (value.version !== 4 && (hasData || Object.hasOwn(value, "data_tool"))) ||
+    (value.version === 4 && !hasData)
+  ) {
+    return refused();
+  }
+  const data =
+    value.version === 4
+      ? parseNativePersistentData({
+          data: value.data,
+          mounts: value.data_mounts,
+          namespace: review.provenance.namespace,
+          owner: value.owner,
+          boot: value.boot,
+          workloads: names,
+          enrolled:
+            value.phase === "ready-observed" ||
+            Object.values(resources).some(
+              (resource) =>
+                resource.kind === "container" && resource.id !== null
+            ),
+        })
+      : undefined;
+  const tool = parseReceiptTool({ value, resources });
   const common: NativeAuthoredInventory = {
     kind: "native-graph-runtime",
     owner: value.owner,
@@ -600,12 +637,38 @@ export function parseNativeAuthoredReceipt(
     phase: value.phase,
     readiness,
     resources,
+    ...data,
+    ...(tool ? { data_tool: tool } : {}),
     ...(failure ? { failure } : {}),
     ...(terminal ? { terminal } : {}),
   };
-  return value.version === 2
-    ? { version: 2, ...common }
-    : { version: 3, ...common, source: sourceBinding(value.source, names) };
+  if (value.version === 3) {
+    return {
+      version: 3,
+      ...common,
+      source: sourceBinding(value.source, names),
+    };
+  }
+  return { version: value.version, ...common };
+}
+function parseReceiptTool(opts: {
+  readonly value: Record<string, unknown>;
+  readonly resources: Readonly<Record<string, Resource>>;
+}): NativePersistentTool | undefined {
+  const tool = Object.hasOwn(opts.value, "data_tool")
+    ? parseNativePersistentTool(opts.value.data_tool)
+    : undefined;
+  if (
+    tool &&
+    (opts.value.phase === "ready-observed" ||
+      Object.values(opts.resources).some(
+        (item) => item.kind === "container" && item.id !== null
+      )) &&
+    tool.helper === null
+  ) {
+    return refused();
+  }
+  return tool;
 }
 function parseFailure(
   value: unknown,
@@ -677,6 +740,14 @@ export function nativeAuthoredReceiptBinding(
 ): string {
   return JSON.stringify({
     ...(receipt.version === 3 ? { version: 3, source: receipt.source } : {}),
+    ...(receipt.version === 4
+      ? {
+          version: 4,
+          data: receipt.data,
+          data_mounts: receipt.data_mounts,
+          ...(receipt.data_tool ? { data_tool: receipt.data_tool } : {}),
+        }
+      : {}),
     owner: receipt.owner,
     boot: receipt.boot,
     review: receipt.review,

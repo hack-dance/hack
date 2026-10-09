@@ -169,8 +169,10 @@ workload's `pull_policy: build` is a separate supported acquisition requirement.
 Combined `build` and `image` refuse because the native model requires exactly one
 source. Invalid builds cannot fall back to an authored image or a default policy.
 
-This expands read-only preview only. Retained-container adoption still uses its
-separate image-only mapping and refuses builds. The mapper runs no Compose
+This expands read-only preview only. The image-only retained baseline remains
+closed. A separate [proof-bearing basic-build owner](native-compose-adoption.md#retained-basic-builds)
+qualifies current included source and exact existing images before adoption; a
+complete pure preview never supplies that authority. The mapper runs no Compose
 normalization, builder or runtime command, and does not validate Dockerfile
 contents, path existence or filesystem identity. The authoritative compiler still
 must validate the whole private candidate before a complete CLI preview; actual

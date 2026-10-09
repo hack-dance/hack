@@ -25,18 +25,18 @@ import {
   prepareNativeComposeBuildExecution,
 } from "./native-compose-build.ts";
 import {
+  type NativeComposeCommandStorage,
+  nativeComposePlanStorage,
+  prepareNativeComposeCommandStorage,
+  runNativeComposeStorageVerifiedExec,
+  nativeComposeDocumentStorage as volumeSelections,
+} from "./native-compose-command-storage.ts";
+import {
   nativeComposeCompletedOneoff,
   nativeComposeOnFailureServices,
   nativeComposeRunDependenciesReady,
   nativeComposeWorkloadsReady as ready,
 } from "./native-compose-completion.ts";
-import {
-  nativeComposeDocumentStorage as volumeSelections,
-  nativeComposePlanStorage,
-  type NativeComposeCommandStorage,
-  prepareNativeComposeCommandStorage,
-  runNativeComposeStorageVerifiedExec,
-} from "./native-compose-command-storage.ts";
 import {
   bindNativeComposeDownHooks,
   prepareNativeComposeDownHooks,
@@ -765,16 +765,26 @@ async function savedCommand(opts: {
     return await store.withMutation(async (mutation) => {
       const before = await store.loadCurrent();
       assertStartupAvailable(before);
-      if (before.stopped || before.generation?.generationId !== generation.generationId) {
+      if (
+        before.stopped ||
+        before.generation?.generationId !== generation.generationId
+      ) {
         throw new NativeComposeGenerationError("E_NATIVE_COMPOSE_STATE");
       }
       const storage = await prepareNativeComposeCommandStorage({
-        store, mutation, operation: "exec", selected: volumeSelections(document), signal,
+        store,
+        mutation,
+        operation: "exec",
+        selected: volumeSelections(document),
+        signal,
       });
       const assertSaved = async () => {
         const latest = await store.loadCurrent();
         assertStartupAvailable(latest);
-        if (latest.stopped || latest.generation?.generationId !== generation.generationId) {
+        if (
+          latest.stopped ||
+          latest.generation?.generationId !== generation.generationId
+        ) {
           throw new NativeComposeGenerationError("E_NATIVE_COMPOSE_STATE");
         }
         await store.readGenerationDocument(generation);
@@ -782,8 +792,10 @@ async function savedCommand(opts: {
         await storage?.verify(generation);
       };
       return await runNativeComposeStorageVerifiedExec({
-        signal, assertSaved,
-        run: () => runSavedProcess({ options, generation, document, base, signal }),
+        signal,
+        assertSaved,
+        run: () =>
+          runSavedProcess({ options, generation, document, base, signal }),
       });
     });
   }
@@ -836,7 +848,13 @@ async function savedCommand(opts: {
           timeoutMs: 15_000,
         });
       }
-      return await runSavedProcess({ options, generation, document, base, signal });
+      return await runSavedProcess({
+        options,
+        generation,
+        document,
+        base,
+        signal,
+      });
     },
   });
 }
@@ -1662,16 +1680,25 @@ async function prepareCommand(opts: {
           inputs.result.plan.open !== undefined
       );
       const operation = options.operation;
-      if (operation !== "up" && operation !== "restart" && operation !== "run") {
+      if (
+        operation !== "up" &&
+        operation !== "restart" &&
+        operation !== "run"
+      ) {
         return invalid();
       }
       const storage = await prepareNativeComposeCommandStorage({
-        store, mutation, operation, signal,
+        store,
+        mutation,
+        operation,
+        signal,
         selected: nativeComposePlanStorage({
           storage: inputs.result.plan.storage,
           runtimeIdentity: store.identity.composeProject,
         }),
-        assertFresh: async () => { await inputs.assertFresh(); },
+        assertFresh: async () => {
+          await inputs.assertFresh();
+        },
       });
       const prepared = await prepareBeforeHooks({
         inputs,

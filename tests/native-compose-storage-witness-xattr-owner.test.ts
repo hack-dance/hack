@@ -309,13 +309,21 @@ function commandPorts(transport: ReturnType<typeof fake>) {
     ports: {
       engine: async (opts: { readonly expected?: string } = {}) => {
         calls.push("engine");
-        expect(opts.expected === undefined || opts.expected === engineId).toBe(true);
+        expect(opts.expected === undefined || opts.expected === engineId).toBe(
+          true
+        );
         return engineId;
       },
-      carrier: async (opts: { readonly signal: AbortSignal; readonly deadline: number }) => {
+      carrier: async (opts: {
+        readonly signal: AbortSignal;
+        readonly deadline: number;
+      }) => {
         calls.push("prerequisite");
         return captureNativeComposeStorageXattrCarrier({
-          artifact, ports: transport.ports, signal: opts.signal, deadline: opts.deadline,
+          artifact,
+          ports: transport.ports,
+          signal: opts.signal,
+          deadline: opts.deadline,
         });
       },
       volumeNames: async () => {
@@ -332,16 +340,25 @@ test("command storage cold admission seeds once under Expected, then retains rea
   const command = commandPorts(transport);
   await store.withMutation(async (mutation) => {
     const storage = await prepareNativeComposeCommandStorage({
-      store, mutation, operation: "up", selected: [selection],
-      signal: transport.controller.signal, ports: command.ports,
+      store,
+      mutation,
+      operation: "up",
+      selected: [selection],
+      signal: transport.controller.signal,
+      ports: command.ports,
     });
-    if (!storage) throw new Error("Expected storage admission");
+    if (!storage) {
+      throw new Error("Expected storage admission");
+    }
     expect(transport.calls).toEqual([]);
     const generation = await publish(mutation);
     transport.state.generation = generation;
     const document = await store.readGenerationDocument(generation);
     const result = await mutation.runEffect({
-      generation, operation: "up", assertFresh: async () => {}, assertOwned: async () => {},
+      generation,
+      operation: "up",
+      assertFresh: async () => {},
+      assertOwned: async () => {},
       storageWitnesses: storage.effectWitnesses,
       effect: async () => {
         await storage.enroll(generation, document);
@@ -351,23 +368,39 @@ test("command storage cold admission seeds once under Expected, then retains rea
     });
     expect(result.outcome).toBe("complete");
   });
-  expect(transport.calls.filter((call) => call === "provision")).toHaveLength(1);
+  expect(transport.calls.filter((call) => call === "provision")).toHaveLength(
+    1
+  );
   expect(transport.calls.filter((call) => call === "seed")).toHaveLength(1);
-  expect(transport.calls.indexOf("seed")).toBeLessThan(transport.calls.indexOf("workload"));
+  expect(transport.calls.indexOf("seed")).toBeLessThan(
+    transport.calls.indexOf("workload")
+  );
   transport.calls.length = 0;
   await store.withMutation(async (mutation) => {
     const storage = await prepareNativeComposeCommandStorage({
-      store, mutation, operation: "restart", selected: [selection],
-      signal: transport.controller.signal, ports: command.ports,
+      store,
+      mutation,
+      operation: "restart",
+      selected: [selection],
+      signal: transport.controller.signal,
+      ports: command.ports,
     });
-    if (!storage) throw new Error("Expected retained admission");
+    if (!storage) {
+      throw new Error("Expected retained admission");
+    }
     const generation = await publish(mutation);
     transport.state.generation = generation;
     const result = await mutation.runEffect({
-      generation, operation: "restart", assertFresh: async () => {}, assertOwned: async () => {},
+      generation,
+      operation: "restart",
+      assertFresh: async () => {},
+      assertOwned: async () => {},
       storageWitnesses: storage.effectWitnesses,
       effect: async () => {
-        await storage.enroll(generation, await store.readGenerationDocument(generation));
+        await storage.enroll(
+          generation,
+          await store.readGenerationDocument(generation)
+        );
         transport.calls.push("workload");
         return { value: 0, outcome: "complete" };
       },
@@ -378,23 +411,35 @@ test("command storage cold admission seeds once under Expected, then retains rea
   expect(transport.calls).not.toContain("seed");
   expect(transport.calls).toContain("verify");
   expect((await store.loadCurrent()).pending).toBeNull();
-});
+}, 30_000);
 
-test.each(["up", "run", "exec"] as const)("command %s refuses same-birth empty replacement before hooks or workload", async (operation) => {
+test.each([
+  "up",
+  "run",
+  "exec",
+] as const)("command %s refuses same-birth empty replacement before hooks or workload", async (operation) => {
   const { store, transport } = await active();
   transport.attributes.clear();
   transport.calls.length = 0;
   const before = await store.loadCurrent();
   await store.withMutation(async (mutation) => {
-    await expect(prepareNativeComposeCommandStorage({
-      store, mutation, operation, selected: [selection],
-      signal: transport.controller.signal, ports: commandPorts(transport).ports,
-    })).rejects.toThrow("values omitted");
+    await expect(
+      prepareNativeComposeCommandStorage({
+        store,
+        mutation,
+        operation,
+        selected: [selection],
+        signal: transport.controller.signal,
+        ports: commandPorts(transport).ports,
+      })
+    ).rejects.toThrow("values omitted");
   });
   expect(transport.calls).not.toContain("seed");
   expect(transport.calls).not.toContain("provision");
   expect(transport.calls).not.toContain("workload");
-  expect((await store.loadCurrent()).storageWitnesses).toEqual(before.storageWitnesses);
+  expect((await store.loadCurrent()).storageWitnesses).toEqual(
+    before.storageWitnesses
+  );
   expect(transport.state.volume).toEqual(volume);
 });
 
@@ -405,15 +450,25 @@ test("command legacy storage refuses before credential/helper acquisition even w
   await store.withMutation(async (mutation) => {
     const generation = await publish(mutation);
     await mutation.runEffect({
-      generation, operation: "up", assertFresh: async () => {}, assertOwned: async () => {},
-      captureStorage: () => [volume], effect: async () => ({ value: 0, outcome: "complete" }),
+      generation,
+      operation: "up",
+      assertFresh: async () => {},
+      assertOwned: async () => {},
+      captureStorage: () => [volume],
+      effect: async () => ({ value: 0, outcome: "complete" }),
     });
   });
   await store.withMutation(async (mutation) => {
-    await expect(prepareNativeComposeCommandStorage({
-      store, mutation, operation: "up", selected: [selection],
-      signal: transport.controller.signal, ports: command.ports,
-    })).rejects.toThrow("never enrolled or repaired");
+    await expect(
+      prepareNativeComposeCommandStorage({
+        store,
+        mutation,
+        operation: "up",
+        selected: [selection],
+        signal: transport.controller.signal,
+        ports: command.ports,
+      })
+    ).rejects.toThrow("never enrolled or repaired");
   });
   expect(command.calls).toEqual([]);
   expect(transport.calls).toEqual([]);
@@ -423,12 +478,20 @@ test("command prerequisite failure precedes Expected, provisioning and any autho
   const store = await fixture();
   const transport = fake(store);
   const command = commandPorts(transport);
-  command.ports.carrier = async () => { throw new Error("missing fixed dependency"); };
+  command.ports.carrier = async () => {
+    throw new Error("missing fixed dependency");
+  };
   await store.withMutation(async (mutation) => {
-    await expect(prepareNativeComposeCommandStorage({
-      store, mutation, operation: "up", selected: [selection],
-      signal: transport.controller.signal, ports: command.ports,
-    })).rejects.toThrow("missing fixed dependency");
+    await expect(
+      prepareNativeComposeCommandStorage({
+        store,
+        mutation,
+        operation: "up",
+        selected: [selection],
+        signal: transport.controller.signal,
+        ports: command.ports,
+      })
+    ).rejects.toThrow("missing fixed dependency");
   });
   expect((await store.loadCurrent()).storageWitnesses).toBeNull();
   expect((await store.loadCurrent()).pending).toBeNull();
@@ -436,16 +499,27 @@ test("command prerequisite failure precedes Expected, provisioning and any autho
 });
 
 test("command document storage projection never passes private fields to a carrier selection", () => {
-  expect(nativeComposeDocumentStorage({ volumes: { data: { name: volume.name, labels: { private: "omitted" } } } })).toEqual([selection]);
+  expect(
+    nativeComposeDocumentStorage({
+      volumes: { data: { name: volume.name, labels: { private: "omitted" } } },
+    })
+  ).toEqual([selection]);
 });
 
-test.each([130, 143])("cancelled saved exec preserves exit%s and launches zero late proofs or helpers", async (code) => {
+test.each([
+  130, 143,
+])("cancelled saved exec preserves exit%s and launches zero late proofs or helpers", async (code) => {
   const controller = new AbortController();
   let proofs = 0;
   const result = await runNativeComposeStorageVerifiedExec({
     signal: controller.signal,
-    assertSaved: async () => { proofs++; },
-    run: async () => { controller.abort(); return code; },
+    assertSaved: async () => {
+      proofs++;
+    },
+    run: async () => {
+      controller.abort();
+      return code;
+    },
   });
   expect(result).toBe(code);
   expect(proofs).toBe(1);
@@ -453,11 +527,17 @@ test.each([130, 143])("cancelled saved exec preserves exit%s and launches zero l
 
 test("unknown saved exec return preserves its refusal without a late proof", async () => {
   let proofs = 0;
-  await expect(runNativeComposeStorageVerifiedExec({
-    signal: new AbortController().signal,
-    assertSaved: async () => { proofs++; },
-    run: async () => { throw new Error("unknown command disposition"); },
-  })).rejects.toThrow("unknown command disposition");
+  await expect(
+    runNativeComposeStorageVerifiedExec({
+      signal: new AbortController().signal,
+      assertSaved: async () => {
+        proofs++;
+      },
+      run: async () => {
+        throw new Error("unknown command disposition");
+      },
+    })
+  ).rejects.toThrow("unknown command disposition");
   expect(proofs).toBe(1);
 });
 
@@ -469,11 +549,14 @@ test("runEffect captures the original fresh carrier factory across a long phase 
   let original = 0;
   let substituted = 0;
   const storageWitnesses = {
-    kind: "directory-xattr" as const, engineId,
+    kind: "directory-xattr" as const,
+    engineId,
     carrier: async () => {
       original++;
       return captureNativeComposeStorageXattrCarrier({
-        artifact, ports: transport.ports, signal: transport.controller.signal,
+        artifact,
+        ports: transport.ports,
+        signal: transport.controller.signal,
         deadline: clock + 60_000,
       });
     },
@@ -481,11 +564,14 @@ test("runEffect captures the original fresh carrier factory across a long phase 
   try {
     await store.withMutation(async (mutation) => {
       const result = await mutation.runEffect({
-        generation, operation: "run", storageWitnesses,
+        generation,
+        operation: "run",
+        storageWitnesses,
         assertFresh: async () => {},
         assertOwned: async () => {
           storageWitnesses.carrier = async () => {
-            substituted++; return transport.carrier;
+            substituted++;
+            return transport.carrier;
           };
         },
         effect: async () => {

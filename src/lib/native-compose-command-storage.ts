@@ -4,9 +4,9 @@ import { isRecord } from "./guards.ts";
 import { observeNativeComposeFileEngine } from "./native-compose-file-inventory.ts";
 import {
   type NativeComposeGeneration,
+  NativeComposeGenerationError,
   type NativeComposeGenerationStore,
   type NativeComposeMutation,
-  NativeComposeGenerationError,
 } from "./native-compose-generation.ts";
 import { createNativeComposeProbe } from "./native-compose-ownership.ts";
 import { nativeComposeStorageVolumeName } from "./native-compose-renderer.ts";
@@ -30,11 +30,14 @@ const VOLUME_NAME = /^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,254}$/;
 function refuse(): never {
   throw new HackCliError({
     code: "E_NATIVE_PROJECT_UNSUPPORTED",
-    message: "Native storage requires known enrolled content or an originally absent cold volume. Existing or interrupted storage is never enrolled or repaired automatically. Values omitted.",
+    message:
+      "Native storage requires known enrolled content or an originally absent cold volume. Existing or interrupted storage is never enrolled or repaired automatically. Values omitted.",
   });
 }
 
-export function nativeComposeDocumentStorage(document: Document): readonly Selection[] {
+export function nativeComposeDocumentStorage(
+  document: Document
+): readonly Selection[] {
   if (!isRecord(document.volumes)) {
     return refuse();
   }
@@ -56,18 +59,38 @@ export function nativeComposePlanStorage(opts: {
   if (!isRecord(opts.storage)) {
     return refuse();
   }
-  return Object.keys(opts.storage).sort().map((storage) => Object.freeze({
-    storage,
-    name: nativeComposeStorageVolumeName({ runtimeIdentity: opts.runtimeIdentity, storage }),
-  }));
+  return Object.keys(opts.storage)
+    .sort()
+    .map((storage) =>
+      Object.freeze({
+        storage,
+        name: nativeComposeStorageVolumeName({
+          runtimeIdentity: opts.runtimeIdentity,
+          storage,
+        }),
+      })
+    );
 }
 
 async function volumeNames(signal: AbortSignal): Promise<readonly string[]> {
-  const text = await createNativeComposeProbe({ signal })(["volume", "ls", "--format", "{{json .Name}}"]);
-  const names = text.trim() === "" ? [] : text.trim().split("\n").map((line) => {
-    const value: unknown = JSON.parse(line);
-    return typeof value === "string" && VOLUME_NAME.test(value) ? value : refuse();
-  });
+  const text = await createNativeComposeProbe({ signal })([
+    "volume",
+    "ls",
+    "--format",
+    "{{json .Name}}",
+  ]);
+  const names =
+    text.trim() === ""
+      ? []
+      : text
+          .trim()
+          .split("\n")
+          .map((line) => {
+            const value: unknown = JSON.parse(line);
+            return typeof value === "string" && VOLUME_NAME.test(value)
+              ? value
+              : refuse();
+          });
   if (new Set(names).size !== names.length) {
     return refuse();
   }
@@ -86,35 +109,69 @@ export async function prepareNativeComposeCommandStorage(opts: {
   readonly ports?: Ports;
 }) {
   const { store, mutation, operation, signal, assertFresh } = opts;
-  const selected = opts.selected.map((value) => Object.freeze({ name: value.name, storage: value.storage }));
+  const selected = opts.selected.map((value) =>
+    Object.freeze({ name: value.name, storage: value.storage })
+  );
   const engine = opts.ports?.engine ?? observeNativeComposeFileEngine;
-  const createCarrier = opts.ports?.carrier ?? createNativeComposeDockerStorageXattrCarrier;
+  const createCarrier =
+    opts.ports?.carrier ?? createNativeComposeDockerStorageXattrCarrier;
   const names = opts.ports?.volumeNames ?? volumeNames;
   const initial = await store.loadCurrent();
-  if (initial.pending !== null || initial.storageWitnessesPending || initial.beforeHooksPending) {
+  if (
+    initial.pending !== null ||
+    initial.storageWitnessesPending ||
+    initial.beforeHooksPending
+  ) {
     throw new NativeComposeGenerationError("E_NATIVE_COMPOSE_UNCERTAIN");
   }
   const history = [
     ...(initial.retainedStorage ?? []),
-    ...(initial.generation ? nativeComposeDocumentStorage(await store.readGenerationDocument(initial.generation)) : []),
+    ...(initial.generation
+      ? nativeComposeDocumentStorage(
+          await store.readGenerationDocument(initial.generation)
+        )
+      : []),
   ];
   const enrolled = initial.storageWitnesses ?? [];
   if (!(selected.length || history.length || enrolled.length)) {
     return null;
   }
-  if (enrolled.some((entry) => entry.state !== "enrolled" || entry.reference.version !== 3) ||
-      history.some((volume) => !enrolled.some((entry) => entry.name === volume.name && entry.storage === volume.storage))) {
+  if (
+    enrolled.some(
+      (entry) => entry.state !== "enrolled" || entry.reference.version !== 3
+    ) ||
+    history.some(
+      (volume) =>
+        !enrolled.some(
+          (entry) =>
+            entry.name === volume.name && entry.storage === volume.storage
+        )
+    )
+  ) {
     return refuse();
   }
   const engineId = await engine({ signal });
-  const carrier = (): Promise<NativeComposeStorageXattrCarrier> => createCarrier({
-    store, authority: mutation.materialAuthority, engineId, signal,
-    deadline: Date.now() + resolveComposeStartupTimeoutMs(),
-  });
+  const carrier = (): Promise<NativeComposeStorageXattrCarrier> =>
+    createCarrier({
+      store,
+      authority: mutation.materialAuthority,
+      engineId,
+      signal,
+      deadline: Date.now() + resolveComposeStartupTimeoutMs(),
+    });
   // Check the explicit dependency before any authored hook, intent or volume effect.
   await carrier();
-  const newVolumes = selected.filter((volume) => !enrolled.some((entry) => entry.name === volume.name && entry.storage === volume.storage));
-  if ((operation === "run" || operation === "exec") && (initial.stopped || newVolumes.length > 0)) {
+  const newVolumes = selected.filter(
+    (volume) =>
+      !enrolled.some(
+        (entry) =>
+          entry.name === volume.name && entry.storage === volume.storage
+      )
+  );
+  if (
+    (operation === "run" || operation === "exec") &&
+    (initial.stopped || newVolumes.length > 0)
+  ) {
     return refuse();
   }
   const assertColdAbsent = async () => {
@@ -137,16 +194,27 @@ export async function prepareNativeComposeCommandStorage(opts: {
       throw new NativeComposeGenerationError("E_NATIVE_COMPOSE_UNCERTAIN");
     }
     for (const entry of before.storageWitnesses ?? []) {
-      if (entry.state !== "enrolled" || entry.reference.version !== 3 || entry.engineId !== engineId) {
+      if (
+        entry.state !== "enrolled" ||
+        entry.reference.version !== 3 ||
+        entry.engineId !== engineId
+      ) {
         return refuse();
       }
       await verifyNativeComposeStorageXattrWitness({
-        authority: mutation.materialAuthority, generation, engineId,
-        reference: entry.reference, carrier: await carrier(),
+        authority: mutation.materialAuthority,
+        generation,
+        engineId,
+        reference: entry.reference,
+        carrier: await carrier(),
       });
     }
     const after = await store.loadCurrent();
-    if (after.storageWitnessesPending || JSON.stringify(before.storageWitnesses) !== JSON.stringify(after.storageWitnesses)) {
+    if (
+      after.storageWitnessesPending ||
+      JSON.stringify(before.storageWitnesses) !==
+        JSON.stringify(after.storageWitnesses)
+    ) {
       throw new NativeComposeGenerationError("E_NATIVE_COMPOSE_UNCERTAIN");
     }
     await assertFresh?.();
@@ -158,11 +226,22 @@ export async function prepareNativeComposeCommandStorage(opts: {
     return refuse();
   }
   return {
-    effectWitnesses: Object.freeze({ kind: "directory-xattr" as const, engineId, carrier }),
+    effectWitnesses: Object.freeze({
+      kind: "directory-xattr" as const,
+      engineId,
+      carrier,
+    }),
     verify,
     async enroll(generation: NativeComposeGeneration, document: Document) {
       const actual = nativeComposeDocumentStorage(document);
-      if (JSON.stringify(actual.slice().sort((a, b) => a.storage.localeCompare(b.storage))) !== JSON.stringify(selected.slice().sort((a, b) => a.storage.localeCompare(b.storage)))) {
+      if (
+        JSON.stringify(
+          actual.slice().sort((a, b) => a.storage.localeCompare(b.storage))
+        ) !==
+        JSON.stringify(
+          selected.slice().sort((a, b) => a.storage.localeCompare(b.storage))
+        )
+      ) {
         return refuse();
       }
       await assertColdAbsent();
@@ -171,8 +250,14 @@ export async function prepareNativeComposeCommandStorage(opts: {
       }
       for (const volume of newVolumes) {
         const enrollment = await prepareNativeComposeStorageXattrWitness({
-          authority: mutation.materialAuthority, generation, engineId, volume,
-          admission: "initial-create", assertAdmission: async () => { await assertFresh?.(); },
+          authority: mutation.materialAuthority,
+          generation,
+          engineId,
+          volume,
+          admission: "initial-create",
+          assertAdmission: async () => {
+            await assertFresh?.();
+          },
           carrier: await carrier(),
         });
         await enrollNativeComposeStorageXattrWitness({ enrollment });
@@ -182,7 +267,9 @@ export async function prepareNativeComposeCommandStorage(opts: {
   };
 }
 
-export type NativeComposeCommandStorage = Awaited<ReturnType<typeof prepareNativeComposeCommandStorage>>;
+export type NativeComposeCommandStorage = Awaited<
+  ReturnType<typeof prepareNativeComposeCommandStorage>
+>;
 
 /** Saved exec does not publish a ready receipt. Cancellation preserves its known
  * exit and starts no late helper; every future admission re-verifies content. */

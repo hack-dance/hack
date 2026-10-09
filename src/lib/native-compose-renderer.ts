@@ -206,7 +206,10 @@ export function renderNativeCompose(
       .map((name) => [
         name,
         {
-          name: nativeComposeStorageVolumeName({ runtimeIdentity: opts.runtimeIdentity, storage: name }),
+          name: nativeComposeStorageVolumeName({
+            runtimeIdentity: opts.runtimeIdentity,
+            storage: name,
+          }),
           labels: {
             ...resourceLabels,
             "io.hack.native-config.storage": name,

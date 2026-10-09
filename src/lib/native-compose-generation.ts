@@ -887,7 +887,9 @@ export type NativeComposeEffectOptions<T> = {
     | {
         readonly kind: "directory-xattr";
         readonly engineId: string;
-        readonly carrier: NativeComposeStorageXattrCarrier | (() => Promise<NativeComposeStorageXattrCarrier>);
+        readonly carrier:
+          | NativeComposeStorageXattrCarrier
+          | (() => Promise<NativeComposeStorageXattrCarrier>);
       };
   readonly recoverPending?: boolean;
   /** Store-derived immutable one-off delivery, verified before/after run effects. */

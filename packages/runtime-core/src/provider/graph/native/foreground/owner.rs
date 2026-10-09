@@ -48,7 +48,7 @@ struct BootQualifiedRecord {
     host_boot_micros: u64,
 }
 impl BootQualifiedRecord {
-    fn into_record(self) -> (Record, Option<u64>) {
+    fn into_record(self) -> (Record, Option<HostBoot>) {
         (
             Record {
                 version: self.version,
@@ -60,11 +60,52 @@ impl BootQualifiedRecord {
                 socket: self.socket,
                 lock: self.lock,
             },
-            Some(self.host_boot_micros),
+            Some(HostBoot::LegacyMicros(self.host_boot_micros)),
         )
     }
 }
-fn decode(bytes: &[u8]) -> Result<(Record, Option<u64>), CandidateError> {
+/// Version4 has no calendar qualifier: exact process incarnation remains a separate fence.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SessionQualifiedRecord {
+    version: u32,
+    kind: Kind,
+    candidate: PathBuf,
+    review: native_input::Review,
+    process: ProcessIdentity,
+    parent: (u64, u64),
+    socket: (u64, u64),
+    lock: (u64, u64),
+    host_boot_uuid: host_boot::Session,
+}
+#[derive(Clone, PartialEq, Eq)]
+pub(super) enum HostBoot {
+    LegacyMicros(u64),
+    Session(host_boot::Session),
+}
+impl HostBoot {
+    fn verify_with(
+        &self,
+        micros: impl FnOnce() -> Result<u64, CandidateError>,
+        session: impl FnOnce() -> Result<host_boot::Session, CandidateError>,
+    ) -> Result<(), CandidateError> {
+        let equal = match self {
+            Self::LegacyMicros(expected) => micros().ok() == Some(*expected),
+            Self::Session(expected) => session().ok().as_ref() == Some(expected),
+        };
+        if !equal {
+            return Err(refused());
+        }
+        Ok(())
+    }
+    fn verify(&self) -> Result<(), CandidateError> {
+        self.verify_with(
+            crate::provider::host_filesystem::host_boot_micros,
+            host_boot::read,
+        )
+    }
+}
+fn decode(bytes: &[u8]) -> Result<(Record, Option<HostBoot>), CandidateError> {
     let value: Value = serde_json::from_slice(bytes).map_err(|_| refused())?;
     match value.get("version").and_then(Value::as_u64) {
         Some(2) => {
@@ -79,6 +120,26 @@ fn decode(bytes: &[u8]) -> Result<(Record, Option<u64>), CandidateError> {
                 return Err(refused());
             }
             Ok(record.into_record())
+        }
+        Some(4) => {
+            let record: SessionQualifiedRecord =
+                serde_json::from_slice(bytes).map_err(|_| refused())?;
+            if record.process.start_micros == 0 {
+                return Err(refused());
+            }
+            Ok((
+                Record {
+                    version: record.version,
+                    kind: record.kind,
+                    candidate: record.candidate,
+                    review: record.review,
+                    process: record.process,
+                    parent: record.parent,
+                    socket: record.socket,
+                    lock: record.lock,
+                },
+                Some(HostBoot::Session(record.host_boot_uuid)),
+            ))
         }
         _ => Err(refused()),
     }
@@ -160,16 +221,14 @@ impl<'a> DirectGuard<'a> {
 pub(super) struct Pin {
     root: PathBuf,
     record: Record,
-    host_boot_micros: Option<u64>,
+    host_boot: Option<HostBoot>,
     bytes: Vec<u8>,
     file: (u64, u64),
 }
 impl Pin {
     fn verify_host_boot(&self) -> Result<(), CandidateError> {
-        if self.host_boot_micros.is_some_and(|boot| {
-            crate::provider::host_filesystem::host_boot_micros().ok() != Some(boot)
-        }) {
-            return Err(refused());
+        if let Some(boot) = &self.host_boot {
+            boot.verify()?;
         }
         Ok(())
     }
@@ -183,7 +242,7 @@ impl Pin {
         state::check_private_directory(&root).map_err(|_| refused())?;
         let file = fs::symlink_metadata(root.join("owner.json")).map_err(|_| refused())?;
         let bytes = native_input::read_file(&root.join("owner.json"), 8192)?;
-        let (record, host_boot_micros) = decode(&bytes)?;
+        let (record, host_boot) = decode(&bytes)?;
         record
             .review
             .validate(record.review.scope())
@@ -194,7 +253,7 @@ impl Pin {
         let pin = Self {
             root,
             record,
-            host_boot_micros,
+            host_boot,
             bytes,
             file: id(&file),
         };
@@ -284,7 +343,11 @@ impl RecoverySelection {
     pub(super) fn fingerprint(&self) -> String {
         format!("{:x}", Sha256::digest(self.bytes.as_bytes()))
     }
-    fn record(&self, candidate: &Candidate, run: &str) -> Result<(Record, u64), CandidateError> {
+    fn record(
+        &self,
+        candidate: &Candidate,
+        run: &str,
+    ) -> Result<(Record, HostBoot), CandidateError> {
         if self.bytes.is_empty() || self.bytes.len() > 8192 {
             return Err(refused());
         }
@@ -295,14 +358,14 @@ impl RecoverySelection {
             .validate(record.review.scope())
             .map_err(|_| refused())?;
         // SAFETY: geteuid has no preconditions; private state remains same-user.
-        if record.version != 3
+        if !matches!(record.version, 3 | 4)
             || record.candidate != candidate.checkout
             || record.review.scope().run != run
             || record.process.uid != unsafe { libc::geteuid() }
-            || crate::provider::host_filesystem::host_boot_micros().ok() != Some(boot)
         {
             return Err(refused());
         }
+        boot.verify()?;
         Ok((record, boot))
     }
 }
@@ -331,7 +394,7 @@ impl<'a> RecoveryLease<'a> {
             Some(value) => value,
             None => {
                 let pin = Pin::read(candidate, run)?;
-                if pin.host_boot_micros.is_none() {
+                if pin.host_boot.is_none() {
                     return Err(refused());
                 }
                 RecoverySelection {
@@ -359,7 +422,7 @@ impl<'a> RecoveryLease<'a> {
             .record(self.candidate, self.run)
             .map(|(record, _)| record.review)
     }
-    pub(super) fn host_boot_micros(&self) -> Result<u64, CandidateError> {
+    pub(super) fn host_boot(&self) -> Result<HostBoot, CandidateError> {
         self.selection
             .record(self.candidate, self.run)
             .map(|(_, boot)| boot)
@@ -484,8 +547,7 @@ impl Publication {
         review: &native_input::Review,
     ) -> Result<Self, CandidateError> {
         review.validate(review.scope()).map_err(|_| refused())?;
-        let host_boot_micros =
-            crate::provider::host_filesystem::host_boot_micros().map_err(|_| refused())?;
+        let host_boot_uuid = host_boot::read()?;
         let gate = super::super::super::publication_gate::Guard::acquire(candidate)?;
         let run = review.scope().run;
         if exists(&super::super::journal::directory(candidate, run)?)? {
@@ -501,8 +563,8 @@ impl Publication {
         fs::set_permissions(root.join("control.sock"), fs::Permissions::from_mode(0o600))
             .map_err(|_| refused())?;
         listener.set_nonblocking(true).map_err(|_| refused())?;
-        let record = BootQualifiedRecord {
-            version: 3,
+        let record = SessionQualifiedRecord {
+            version: 4,
             kind: Kind::NativeGraphOwner,
             candidate: candidate.checkout.clone(),
             review: review.clone(),
@@ -510,13 +572,13 @@ impl Publication {
             parent: id(&fs::symlink_metadata(&root).map_err(|_| refused())?),
             socket: id(&fs::symlink_metadata(root.join("control.sock")).map_err(|_| refused())?),
             lock: lock.identity().map_err(|_| refused())?,
-            host_boot_micros,
+            host_boot_uuid,
         };
         let bytes = serde_json::to_vec(&record).map_err(|_| refused())?;
         if bytes.len() > 8192 {
             return Err(refused());
         }
-        let (record, host_boot_micros) = decode(&bytes)?;
+        let (record, host_boot) = decode(&bytes)?;
         let mut file = OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -530,7 +592,7 @@ impl Publication {
         let pin = Pin {
             root,
             record,
-            host_boot_micros,
+            host_boot,
             bytes,
             file: id(&file.metadata().map_err(|_| refused())?),
         };
@@ -581,5 +643,36 @@ impl Publication {
         fs::File::open(&self.pin.root)
             .and_then(|file| file.sync_all())
             .map_err(|_| refused())
+    }
+}
+
+#[cfg(test)]
+mod boot_tests {
+    use super::*;
+    const UUID: &str = "12345678-abcd-abcd-abcd-123456789abc";
+    fn session(value: &str) -> host_boot::Session {
+        serde_json::from_value(json!(value)).unwrap()
+    }
+    #[test]
+    fn session_authority_ignores_calendar_adjustment_but_not_reboot_or_unavailability() {
+        let boot = HostBoot::Session(session(UUID));
+        for changed_wall in [1, u64::MAX] {
+            // Even an unavailable calendar reader cannot become V4 authority.
+            boot.verify_with(|| Ok(changed_wall), || Ok(session(UUID)))
+                .unwrap();
+            boot.verify_with(|| Err(refused()), || Ok(session(UUID)))
+                .unwrap();
+        }
+        assert!(
+            boot.verify_with(
+                || Ok(1),
+                || Ok(session("12345678-abcd-abcd-abcd-123456789abd"))
+            )
+            .is_err()
+        );
+        assert!(boot.verify_with(|| Ok(1), || Err(refused())).is_err());
+        let legacy = HostBoot::LegacyMicros(1);
+        legacy.verify_with(|| Ok(1), || Err(refused())).unwrap();
+        assert!(legacy.verify_with(|| Ok(2), || Ok(session(UUID))).is_err());
     }
 }

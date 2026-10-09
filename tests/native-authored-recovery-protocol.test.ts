@@ -68,6 +68,14 @@ function selection() {
     host_boot_micros: 1_791_000_000_000_000,
   };
 }
+function sessionSelection() {
+  const { host_boot_micros: _legacy, ...common } = selection();
+  return {
+    ...common,
+    version: 2,
+    host_boot_uuid: "12345678-abcd-abcd-abcd-123456789abc",
+  };
+}
 function result() {
   const removed = receipt();
   removed.phase = "removed";
@@ -98,6 +106,79 @@ test("native recovery copies original selectors and binds exact Removed to durab
     parseNativeAuthoredRecoveryResult({ value: result(), expected }).receipt
       .phase
   ).toBe("removed");
+});
+test("session selection is closed version two and preserves original qualifier without migration", () => {
+  const admitted = parseNativeAuthoredReceipt(receipt());
+  const expected = parseNativeAuthoredRecoverySelection({
+    value: sessionSelection(),
+    admitted,
+  });
+  expect(expected.version).toBe(2);
+  expect(expected).toHaveProperty(
+    "host_boot_uuid",
+    sessionSelection().host_boot_uuid
+  );
+  expect(expected).not.toHaveProperty("host_boot_micros");
+  expect(
+    parseNativeAuthoredRecoveryResult({ value: result(), expected }).version
+  ).toBe(1);
+  const canary = "private-boot-qualifier-canary";
+  const { host_boot_uuid: _missing, ...missing } = sessionSelection();
+  for (const value of [
+    missing,
+    { ...sessionSelection(), version: 1 },
+    { ...sessionSelection(), version: 3 },
+    { ...sessionSelection(), host_boot_micros: 1 },
+    { ...selection(), host_boot_uuid: sessionSelection().host_boot_uuid },
+    ...[
+      null,
+      1,
+      canary,
+      "12345678-ABCD-ABCD-ABCD-123456789ABC",
+      "00000000-0000-0000-0000-000000000000",
+      "12345678-abcd-abcd-abcd-123456789abg",
+      "12345678-abcd-abcd-abcd-123456789abc\n",
+      "12345678-abcd-abcd-abcd-123456789abc ",
+    ].map((host_boot_uuid) => ({ ...sessionSelection(), host_boot_uuid })),
+  ]) {
+    try {
+      parseNativeAuthoredRecoverySelection({ value, admitted });
+      throw new Error("fixture admitted forbidden qualifier");
+    } catch (error) {
+      expect(String(error)).toContain("invalid");
+      expect(String(error)).not.toContain(canary);
+    }
+  }
+});
+test("selector dispatch refuses missing own fields before reading version getters", () => {
+  const admitted = parseNativeAuthoredReceipt(receipt());
+  let calls = 0;
+  const prototype = {
+    get version() {
+      calls++;
+      return 2;
+    },
+  };
+  const ownPartial = Object.create(null);
+  Object.defineProperties(ownPartial, {
+    version: {
+      enumerable: true,
+      get() {
+        calls++;
+        return 2;
+      },
+    },
+    host_boot_uuid: {
+      enumerable: true,
+      value: sessionSelection().host_boot_uuid,
+    },
+  });
+  for (const value of [Object.create(prototype), ownPartial]) {
+    expect(() =>
+      parseNativeAuthoredRecoverySelection({ value, admitted })
+    ).toThrow("invalid");
+    expect(calls).toBe(0);
+  }
 });
 test("native recovery selection refuses inherited unknown private or invalid boot/hash fields", () => {
   const admitted = parseNativeAuthoredReceipt(receipt());

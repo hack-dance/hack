@@ -164,6 +164,106 @@ same-identity byte repair, separate rollback and
 exact owned cleanup. It requires the current compiled CLI and companion compiler;
 it does not qualify completed jobs or container recreation.
 
+## Retained basic builds
+
+The distinct version 9 owner handles existing basic build-only services with
+qualified named data volumes and the existing default bridge. Context, relative
+Dockerfile and target use the closed import mapping, with current local files
+additionally verified. A service must omit `pull_policy`: explicit `build`
+requires builder execution and cannot be satisfied by starting an old image.
+The owner never builds, pulls, creates a container or substitutes an image during
+the format switch or retained execution. Explicit rebuild/recreation requests
+refuse. Image-only binding APIs and versions 1–5 retain their prior contracts.
+Versions for custom networks, completed jobs and retained files are separate;
+their combinations with this first build proof refuse, as do profiles, readiness,
+managed/generated inputs, typed locals and literal-dollar build paths.
+Pure preview can map a qualified custom bridge alongside a basic build; retained
+build adoption refuses that intersection before opening context files, including
+inactive workloads.
+
+Included context files, the Dockerfile, optional root and Dockerfile-specific
+ignore files, and their safe filesystem identities are privately pinned. The
+names-only private env/local layout refusal precedes the context walk and is
+rechecked afterwards; known private material added mid-walk is never opened as
+an included file. A Dockerfile-specific ignore file takes precedence, while presence and bytes of
+both files remain bound. The pinned `@balena/dockerignore` Moby port handles only
+the qualified case-sensitive grammar: literal normalized paths, `!` negation,
+bare `**`, blank lines and comments. Other globs, escapes, BOMs and ambiguous
+paths refuse. Every possible adopted-owned path must be excluded by the effective
+rules, including Git markers, `.hack/.internal`, `.hack/.branch` and the switched
+authored files. Excluded subtrees are not read. Parent negations include
+descendants: `**` followed by `!.hack` does not isolate future private outputs.
+Such a context refuses unless later literal exclusions close those paths.
+Root and `.hack` contexts can qualify through these exact exclusions.
+
+The maintained `native-compose-adoption-build-worktrees` acceptance explicitly
+requires Buildx's default Docker driver, `DOCKER_BUILDKIT=1` and
+`compose build --builder default` for fixture bootstrap. It never creates or
+bootstraps a separate builder. Its private fixed-stage evidence retains the
+complete fatal-decoded synthetic COPY reply before applying the unchanged file
+and hash oracle. This separates builder qualification from source/image guards;
+it does not infer which builder caused an earlier failure or prove cache ownership.
+
+One acquisition is limited to 16 builds, depth 32, 256 captured entries, 4096
+directory names, 16 MiB of bytes and a 48 KiB private proof; the existing stable
+file owner also limits each file to 1 MiB. Included byte, identity or mode changes,
+included additions/removals, ignore presence changes and unsafe paths refuse.
+Same-inode exact byte repair can restore a saved proof; it does not repair a
+strict prepared authored-source timestamp or make editor races atomic.
+
+The selected read-only Compose query supplies each original image reference.
+Container IDs and birth, image IDs and birth, and current tag resolution must
+match the privately saved observation, along with the existing config hashes,
+mounts, network identity and volume creation identities. No image environment,
+command or layer contents are read. These facts attest the current retained
+image and current included source separately; they do not establish which source
+historically built that image. Missing images or retargeted tags refuse before
+effects. No image ownership for removal is granted by this proof.
+
+Preparation, dry-run and saved execution use the same closed owner. Public output
+contains field provenance and counts, never context hashes, image references or
+private capabilities. Version 9 requires a finite remaining mutation deadline,
+the whole original selection and the existing signal/process-group owner.
+Starts, stops and recovery consume original IDs; source or image drift retains
+pending evidence. Rollback restores the exact original authored inputs after
+verified stop and keeps their original data. Older upgraded owners that know
+only versions 1–5 refuse the new proof; this is not a universal old-launcher
+fence. Current Moby/BuildKit ignore parity and maintained two-worktree SQL,
+image/ID/birth, recovery and rollback acceptance qualify this slice separately
+from pure preview and synthetic model controls. Full NC04 remains open.
+
+The maintained `native-compose-adoption-build-worktrees` scenario requires
+explicit selection. It bootstraps two disposable Postgres images, checks the
+complete `COPY .` projection for root/Dockerfile-specific and default `.hack`
+contexts, and then permits only captured metadata queries and journaled original-ID
+starts/stops. Format switch and saved consumption cannot reach a builder. Its
+source and candidate drift controls retain pending ownership, preserve the other
+worktree's SQL row, and restore both original configurations through rollback.
+The fixture issues a recovery-stop transport capability only for the exact
+`down --recover --json` invocation. It can stop the original IDs while the active
+generation retains its interrupted start journal; publication, generation,
+complete service selection and daemon checks still precede each effect. Private
+per-invocation evidence records closed operation/substage names and CLI exit/code
+classifications before caller assertions, without reply values or arbitrary errors.
+Exact fixture image removal requires its captured new ID/birth, sole tag, fixture
+label, unchanged daemon and no remaining container references. A local final
+image may expose one digest for that exact repository and captured image ID;
+other digest aliases refuse. The fixture privately journals the exact new
+image graph after each bootstrap build. Only fixture-labelled, untagged parents
+on its complete chain to the captured original base qualify for disposal, in
+child-before-parent order with nonforce `image rm --no-prune`. A builder exposing
+no parent qualifies only its single final object. Unexplained new images, foreign
+labels or references retain the failed fixture. Only an absent `Parent` key
+defaults to empty; an explicit empty parent is preserved and malformed present
+values still refuse.
+The known Compose project, service and version labels must match the exact
+fixture project, `db` service and selected Compose release. Other label names
+remain refused. Full original image inventory
+and tags must be restored; inventory bounds are not relaxed for new objects.
+General builder cache is retained; cache reclamation and historical image-from-source provenance remain
+unqualified. Fixture source/model checks alone do not establish live builder or
+data-preservation acceptance.
+
 The version 4 typed-local slice reads optional `.hack/hack.local.json` at the
 selected checkout and verified inherited primary in the same issued private source
 acquisition. It accepts only `schema_version: 1` and an optional `environment`
@@ -227,7 +327,8 @@ shared network ID nor a partial member observation can stand in for the other
 bridge. Engine ID, resource inventories and source
 bytes are rechecked, and acquisition compares two complete private observations.
 The Docker routing environment is captured for later comparison. Queries never
-request container environment or image configuration. This retained-resource authority
+request container environment or full image configuration; version 9 additionally
+reads the minimal image reference, ID and birth described above. This retained-resource authority
 keeps the original bridge and container IDs through stop, saved restart,
 recovery and rollback; it does not authorize a later newly created native
 generation to take over those identities. That transition needs a separate

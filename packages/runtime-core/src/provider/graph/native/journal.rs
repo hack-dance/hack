@@ -51,8 +51,9 @@ fn decode_failure_observation<'de, D: serde::Deserializer<'de>>(
     WireObservation::deserialize(reader).map(Into::into)
 }
 
-/// Hash-only native provenance plus value-free resource ownership. No replay authority,
-/// compiler request, argv, environment values or renewable timestamp is persisted.
+/// Hash-only compiler provenance plus public source/resource ownership metadata.
+/// No replay authority, source contents, compiler request, argv, environment values
+/// or renewable timestamp is persisted.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(try_from = "ReceiptWire")]
 pub struct Receipt {
@@ -64,6 +65,8 @@ pub struct Receipt {
     pub(super) phase: Phase,
     pub(super) readiness: BTreeMap<String, Condition>,
     pub(super) resources: BTreeMap<String, Resource>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) source: Option<source::Binding>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub(super) data: BTreeMap<String, persistent_data::engine::Reference>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -90,6 +93,8 @@ struct ReceiptWire {
     readiness: BTreeMap<String, Condition>,
     resources: BTreeMap<String, Resource>,
     #[serde(default, deserialize_with = "present_map")]
+    source: Option<source::Binding>,
+    #[serde(default, deserialize_with = "present_map")]
     data: Option<BTreeMap<String, persistent_data::engine::Reference>>,
     #[serde(default, deserialize_with = "present_map")]
     data_mounts: Option<BTreeMap<String, Vec<crate::project::native::StorageMount>>>,
@@ -108,11 +113,16 @@ fn present_map<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(
 impl TryFrom<ReceiptWire> for Receipt {
     type Error = &'static str;
     fn try_from(wire: ReceiptWire) -> Result<Self, Self::Error> {
-        if (wire.version == 2
-            && (wire.data.is_some() || wire.data_mounts.is_some() || wire.data_tool.is_some()))
-            || (wire.version == 4 && (wire.data.is_none() || wire.data_mounts.is_none()))
-        {
-            return Err("Native receipt storage fields do not match its wire version.");
+        let storage_fields =
+            wire.data.is_some() || wire.data_mounts.is_some() || wire.data_tool.is_some();
+        let valid = match wire.version {
+            2 => wire.source.is_none() && !storage_fields,
+            3 => wire.source.is_some() && !storage_fields,
+            4 => wire.source.is_none() && wire.data.is_some() && wire.data_mounts.is_some(),
+            _ => false,
+        };
+        if !valid {
+            return Err("Native receipt source/storage fields do not match its wire version.");
         }
         Ok(Self {
             version: wire.version,
@@ -123,6 +133,7 @@ impl TryFrom<ReceiptWire> for Receipt {
             phase: wire.phase,
             readiness: wire.readiness,
             resources: wire.resources,
+            source: wire.source,
             data: wire.data.unwrap_or_default(),
             data_mounts: wire.data_mounts.unwrap_or_default(),
             data_tool: wire.data_tool,
@@ -136,6 +147,7 @@ impl Receipt {
     pub(super) fn check_binding(&self, expected: &Self) -> Result<(), CandidateError> {
         self.validate(expected.review.scope().run, &expected.owner)?;
         if self.review != expected.review
+            || self.source != expected.source
             || self.boot != expected.boot
             || self.readiness != expected.readiness
             || self.data != expected.data
@@ -179,6 +191,8 @@ impl Receipt {
     #[cfg(target_os = "macos")]
     pub(super) fn require_recovery_ready(&self) -> Result<(), CandidateError> {
         self.validate(self.review.scope().run, &self.owner)?;
+        // Image-only v2 is the qualified dead-owner recovery contract. Source
+        // v3 parsing and ordinary cleanup grant no publisher-recovery authority.
         if self.version != 2
             || self.phase != Phase::ReadyObserved
             || self.failure.is_some()
@@ -196,8 +210,17 @@ impl Receipt {
         owner: &str,
         boot: &str,
     ) -> Result<Self, CandidateError> {
+        if config.source.is_some() && !config.storage.is_empty() {
+            return Err(refused());
+        }
         let receipt = Self {
-            version: if config.storage.is_empty() { 2 } else { 4 },
+            version: if config.source.is_some() {
+                3
+            } else if config.storage.is_empty() {
+                2
+            } else {
+                4
+            },
             kind: InputKind::NativeGraphRuntime,
             owner: owner.into(),
             boot: boot.into(),
@@ -210,6 +233,7 @@ impl Receipt {
                 .map(|(name, service)| (name.clone(), service.ready))
                 .collect(),
             resources: config.resources.clone(),
+            source: config.source.clone(),
             data: config.data.clone(),
             data_mounts: config.data_mounts.clone(),
             data_tool: None,
@@ -228,7 +252,8 @@ impl Receipt {
     pub(super) fn validate(&self, run: &str, owner: &str) -> Result<(), CandidateError> {
         let scope = self.review.scope();
         self.review.validate(scope).map_err(|_| refused())?;
-        if ![2, 4].contains(&self.version)
+        if ![2, 3, 4].contains(&self.version)
+            || (self.version == 3) != self.source.is_some()
             || !hex(run, 32)
             || run != scope.run
             || !hex(owner, 32)
@@ -242,6 +267,9 @@ impl Receipt {
             })
         {
             return Err(refused());
+        }
+        if let Some(source) = &self.source {
+            source.validate(&self.readiness).map_err(|_| refused())?;
         }
         self.validate_data()?;
         let network = self.resources.get("network:default").ok_or_else(refused)?;
@@ -358,7 +386,7 @@ impl Receipt {
     }
 
     fn validate_data(&self) -> Result<(), CandidateError> {
-        if self.version == 2 {
+        if self.version != 4 {
             return if self.data.is_empty()
                 && self.data_mounts.is_empty()
                 && self.data_tool.is_none()

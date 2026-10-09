@@ -8,12 +8,14 @@ provider, image acquisition or receipt effects. This feature's compiler path
 dependency requires the repository's pinned Rust 1.97.1. The default runtime
 package keeps its declared Rust 1.85 minimum; enabling the adapter requires Rust 1.97.1.
 
-The adapter accepts at most 32 selected services/jobs with immutable images, exec readiness,
+The adapter accepts at most 32 selected pinned-image services/jobs, exec readiness,
 explicit exec/shell commands, entrypoint clearing, init, exact shutdown intent and
 working directories. Jobs require successful completion; services with readiness
 require health, and other services require startup. Workload names, including dots,
-remain exact. Omitted process fields preserve image/backend defaults. Source and
-worktree declarations and local resolution remain intent only.
+remain exact. Omitted process fields preserve image/backend defaults. One project-relative
+read-only live source bind per workload is supported through an already-approved
+pool share. Other source acquisition and worktree declarations and local resolution
+remain intent only.
 An explicit entrypoint requires an authored command, matching the bounded NC03
 renderer; image CMD inheritance under an entrypoint override remains unqualified.
 
@@ -68,6 +70,56 @@ lowerer retains logical storage mount intent without fabricating provider volume
 It checks owner shape and deadline, never real guest ownership, image presence,
 combined capacity, private staging or engine effects.
 
+The explicit native consumer additionally admits at most one compiler-normalized
+read-only project source bind per selected workload. The authored source mode is
+`host-mounted` with root `.`: content changes remain live, including atomic edits
+of descendants inside a selected directory. A selected regular file may change
+in place; replacing that file itself changes the selected identity and refuses.
+Writable source binds and custom source roots remain unsupported. Source-bearing
+projects cannot combine live source with persistent storage; the separate storage
+intent contract remains inactive before provider admission.
+This does not create an immutable snapshot or publish a new source revision.
+
+Source consumption requires the provider pool to already contain the exact
+explicitly approved unfiltered project share. The consumer never approves that
+whole-tree writable share, changes pool mounts or enrolls a project implicitly.
+Individual workload binds are read-only and `rprivate`. Selection pins the source
+root, every selected path and its ancestors by device, inode, type, UID and full
+mode; aliases, hardlinked selected files and permission changes refuse. Startup
+and active observations recheck those host paths, the existing provider share,
+virtiofs mapping and configured/runtime bind around engine work. Host editors are
+not locked: these are bounded replacement checks, not an atomic host filesystem
+fence. Descendant edits under a selected directory follow the approved live-share
+policy; its whole tree can include local configuration.
+
+Source-bearing native graph receipts use a closed v3 source binding; image-only
+v2 receipts keep their prior fields and serialization. This graph v3 is separate
+from the foreground publication-owner v3 and does not change the v2 ready/control
+envelopes. Retained inspection/startup cannot recapture or adopt a new selected
+path. Exact owned cleanup continues after the host source is moved or deleted:
+it verifies the original provider share and read-only container bind, stops and
+removes only the original resource inventory, and never deletes host source data.
+Dead-owner recovery of source-bearing graph v3 remains outside this increment;
+the separately qualified image-only recovery admission must refuse that version.
+
+The maintained macOS ignored control
+`native::runtime::tests::live_source::approved_live_source_preserves_host_edits_and_cleanup_after_selected_source_moves`
+requires a caller-created synthetic `live-fixture/project` and isolated sibling
+`native-home`. Prepare its provider through the existing explicit development
+`--project-share PROJECT --unfiltered-source` contract, then load a pinned Linux
+ARM64 Bun image. The fixture verifies a run-bound private inode/mode manifest and
+exclusively claims the invocation before graph effects; it does not enroll shares.
+Set `HACK_NATIVE_SOURCE_TEST_FIXTURE`, `HACK_NATIVE_SOURCE_TEST_PROJECT`,
+`HACK_LOCAL_TEST_ROOT`, `HACK_LOCAL_TEST_IMAGE` and a fresh 32-character hex
+`HACK_NATIVE_SOURCE_TEST_RUN`. Source files are public synthetic data under private
+ancestors. The control requires live HTTP reads after host edits and atomic
+descendant replacement, an `EROFS` container-write refusal, source-withdrawal
+inspection refusal and normal exact cleanup preserving host data. It publishes
+no host ports. Compile the exact test before the caller's 300-second watchdog;
+uncertain failures retain the graph/pool for inspection and never replay cleanup.
+Its filesystem admission controls run without a provider. This does not qualify
+whole frontend parity, dead-owner recovery or performance.
+
 `provider::graph::native::selection` selects only the exact absolute native project
 root and reads bounded, stable regular `.hack/hack.project.json` and optional
 `.hack/hack.local.json` files. It forwards raw authored text and owner-supplied
@@ -80,11 +132,13 @@ refuses until its primary-worktree verification is qualified; opted-out inherita
 preserves the owning compiler's checkout-local semantics. This is read-only input
 selection and private preparation, with no durable enrollment or runtime ownership.
 
-`provider::graph::native::run` is an explicit library consumer for the bounded
-image/process subset and the separate persistent-storage path. It retains the development guest mutation lease, requires an
+`provider::graph::native::run` is an explicit library consumer for pinned images
+with optional preapproved read-only live source; persistent-storage intent remains
+a separate, inactive path. It retains the development guest mutation lease, requires an
 admitted Internet or explicitly restricted outbound pool, verifies existing immutable
-images and shared graph/allocation capacity, and reserves a distinct v2
-`native-graph-runtime` journal in `run/native-graphs` before effects. Create/start
+images and shared graph/allocation capacity, and reserves a distinct
+`native-graph-runtime` journal in `run/native-graphs` before effects (v2 for image-only,
+v3 for source-bearing graphs; the separate inactive storage contract uses v4). Create/start
 intent is durable and never replayed or adopted. Network create intent precedes the
 first network effect; its immutable ID, labels, bridge driver and outbound policy
 are verified before container work. Containers bind the recorded network ID and exact
@@ -126,7 +180,8 @@ it does not compare process birth against mutable calendar boot time.
 The closed version2 live-owner decoder remains available without a boot qualifier.
 Version3 remains strictly qualified by its original `host_boot_micros`; it receives
 no inferred UUID or migration. Each version rejects the other versions' qualifiers.
-Native runtime receipts and the authenticated control/ready wire remain v2;
+Native runtime receipts are v2 for image-only graphs and v3 for source-bearing
+graphs; the authenticated control/ready wire remains v2;
 Compose receipt and owner formats remain unchanged. This provenance alone grants
 no dead-owner recovery authority.
 The inactive read-only recovery selector admits only a complete Ready journal and
@@ -198,8 +253,8 @@ ordinary frontend selection yet and does not implement reactive health or hooks.
 The optional feature exposes this bounded consumer through a distinct public CLI:
 `graph native plan --source-file FILE --json`, then
 `graph native run --source-file FILE --expect-review SHA --json`.
-`graph native inspect|cleanup --run-id RUN --json` use its v2 journal. These commands
-are explicit image-only prerequisites, not ordinary project startup. Their project
+`graph native inspect|cleanup --run-id RUN --json` use its versioned native journal. These commands
+are explicit bounded prerequisites, not full ordinary project parity. Their project
 network does not publish ports or grant host-service access. Normal native `hack up`
 continues to require the full source/storage/routing/host and foreground-owner contract.
 

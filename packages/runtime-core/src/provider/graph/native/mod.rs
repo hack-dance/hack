@@ -1,4 +1,4 @@
-//! Native image/process and persistent-mount lowering; effects are separately admitted.
+//! Native authored lowering; runtime ownership and effects are separately admitted.
 use super::*;
 use crate::{project::native::NativeInputs, provider::native_input};
 #[cfg(target_os = "macos")]
@@ -7,6 +7,7 @@ mod journal;
 pub mod persistent_data;
 mod runtime;
 pub mod selection;
+mod source;
 pub use journal::{Phase, Receipt};
 pub(super) use runtime::reservations;
 pub use runtime::{Snapshot, cleanup, inspect, run};
@@ -46,6 +47,7 @@ pub struct Configuration {
     review: native_input::Review,
     configs: BTreeMap<String, Value>,
     resources: BTreeMap<String, Resource>,
+    source: Option<source::Binding>,
     storage: BTreeSet<String>,
     data_mounts: BTreeMap<String, Vec<crate::project::native::StorageMount>>,
     data: BTreeMap<String, persistent_data::engine::Reference>,
@@ -68,7 +70,7 @@ impl Configuration {
 fn refused() -> CandidateError {
     error(
         "native_graph_admission",
-        "Native consumption requires its exact compiler review, immutable images, bounded process/readiness and separately enrolled persistent storage; values omitted.",
+        "Native consumption requires its exact compiler review, immutable images, bounded process/readiness and a separately admitted live-source or persistent-storage contract; values omitted.",
     )
 }
 
@@ -89,6 +91,13 @@ pub fn configuration(
     prepared: &native_input::Prepared,
     owner: &str,
 ) -> Result<Configuration, CandidateError> {
+    configuration_with_source(prepared, owner, None)
+}
+fn configuration_with_source(
+    prepared: &native_input::Prepared,
+    owner: &str,
+    source: Option<source::Binding>,
+) -> Result<Configuration, CandidateError> {
     prepared.remaining()?;
     let inputs: &NativeInputs = prepared.inputs();
     let review = prepared.review();
@@ -101,6 +110,31 @@ pub fn configuration(
         || inputs.workloads.keys().ne(inputs.graph.services.keys())
     {
         return Err(refused());
+    }
+    let mounts: BTreeMap<_, _> = inputs
+        .workloads
+        .iter()
+        .filter_map(|(name, workload)| {
+            workload
+                .source_mount
+                .as_ref()
+                .map(|mount| (name.clone(), mount.clone()))
+        })
+        .collect();
+    if source.is_some() && !inputs.storage.is_empty() {
+        return Err(refused());
+    }
+    match (&source, mounts.is_empty()) {
+        (None, true) => {}
+        (Some(source), false) if source.mounts == mounts => source.validate(
+            &inputs
+                .graph
+                .services
+                .iter()
+                .map(|(name, service)| (name.clone(), service.ready))
+                .collect(),
+        )?,
+        _ => return Err(refused()),
     }
     let mut configs = BTreeMap::new();
     let mut resources = BTreeMap::new();
@@ -139,6 +173,10 @@ pub fn configuration(
             phase: "reserved".into(),
         };
         let mut config = config::container_base(&workload.image, labels(owner, review, &resource));
+        if workload.source_mount.is_some() {
+            config["HostConfig"]["Mounts"] =
+                json!([source.as_ref().ok_or_else(refused)?.config(name)?]);
+        }
         let (primary, endpoints) = config::network_config(
             name,
             resource.networks.as_ref().ok_or_else(refused)?,
@@ -197,6 +235,7 @@ pub fn configuration(
         review: review.clone(),
         configs,
         resources,
+        source,
         storage: inputs.storage.clone(),
         data_mounts: inputs
             .workloads

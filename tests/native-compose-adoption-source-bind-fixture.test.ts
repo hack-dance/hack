@@ -3,6 +3,7 @@ import {
   chmod,
   mkdir,
   mkdtemp,
+  readdir,
   readFile,
   rename,
   rm,
@@ -16,11 +17,13 @@ import {
   assertSourceBindFixtureHostBytes,
   prepareSourceBindFixtureSources,
   SOURCE_BIND_FIXTURE_OWNER_FORMAT,
+  type SourceBindFixtureInterruption,
   sourceBindFixtureDirectorySnapshot,
   sourceBindFixtureMountObservation,
   sourceBindFixtureMutationAllowed,
   sourceBindFixtureReadAllowed,
 } from "./e2e/scenarios/native-compose-adoption-source-bind-inputs.ts";
+import { assertSourceBindFixtureControlledInterruption } from "./e2e/scenarios/native-compose-adoption-source-bind-worktrees.ts";
 import {
   cleanupOwnedAdoptionFixture,
   sourceBindFixtureCommand,
@@ -54,6 +57,8 @@ async function emitted(opts: {
   readonly effect?: readonly string[];
   readonly engineId?: string;
   readonly mutateCaller?: boolean;
+  readonly interruption?: SourceBindFixtureInterruption;
+  readonly effectExit?: number;
 }) {
   const outer = await mkdtemp(join(tmpdir(), "source-bind-guard-"));
   const root = join(outer, "checkout"),
@@ -77,6 +82,9 @@ async function emitted(opts: {
     });
     const before = JSON.stringify(opts.receipt ?? ACTIVE);
     await writeFile(saved, before, { mode: 0o600 });
+    if (opts.interruption === "replace-after-start") {
+      await mkdir(join(root, "bind-rw"), { mode: 0o700 });
+    }
     await writeFile(
       engine,
       [
@@ -85,7 +93,7 @@ async function emitted(opts: {
         "const args=process.argv.slice(2);",
         `await appendFile(${JSON.stringify(forwarded)},JSON.stringify(args)+'\\n');`,
         `if(JSON.stringify(args)===JSON.stringify(['info','--format','{{json .ID}}'])){console.log(${JSON.stringify(opts.engineId ?? ENGINE_ID)});process.exit(0);}`,
-        `if(JSON.stringify(args)===JSON.stringify(['container','stop',${JSON.stringify(ID)}]))process.exit(0);`,
+        `if(JSON.stringify(args)===${JSON.stringify(JSON.stringify(opts.effect ?? ["container", "stop", ID]))})process.exit(${opts.effectExit ?? 0});`,
         "process.exit(97);",
       ].join("\n"),
       { mode: 0o700 }
@@ -127,7 +135,8 @@ async function emitted(opts: {
         },
       },
       instance,
-      opts.args
+      opts.args,
+      opts.interruption
     );
     const calls: readonly unknown[] = (await Bun.file(forwarded).exists())
       ? (await readFile(forwarded, "utf8"))
@@ -135,16 +144,87 @@ async function emitted(opts: {
           .split("\n")
           .map((line): unknown => JSON.parse(line))
       : [];
+    const shimRoots = (await readdir(outer)).filter((name) =>
+      name.startsWith("source-bind-shim-")
+    );
+    expect(shimRoots).toHaveLength(1);
+    const control = Bun.file(join(outer, shimRoots[0] ?? "", "control"));
     return {
       result,
       calls,
       invocation,
       before,
       after: await readFile(saved, "utf8"),
+      control: (await control.exists()) ? await control.text() : null,
     };
   } finally {
     await rm(outer, { recursive: true, force: true });
   }
+}
+
+const PREPARED_STOP = {
+  ...ACTIVE,
+  publication: null,
+  pendingOperation: { ...ACTIVE.pendingOperation, operation: "stop" },
+};
+for (const [interruption, args, receipt, effect, marker] of [
+  [
+    "prepared-stop",
+    ["config", "adopt", "--stop", "--json"],
+    PREPARED_STOP,
+    ["container", "stop", OTHER],
+    "prepared-stop-original-worker",
+  ],
+  [
+    "replace-after-start",
+    ["up", "--detach", "--json"],
+    ACTIVE,
+    ["container", "start", ID],
+    "original-start-before-directory-replacement",
+  ],
+] as const) {
+  test(`emitted v12 ${interruption} reaches the maintained exact71 assertion after its original-ID marker`, async () => {
+    const observed = await emitted({
+      interruption,
+      args: [...args],
+      receipt,
+      effect,
+    });
+    expect(() =>
+      assertSourceBindFixtureControlledInterruption(observed.result)
+    ).not.toThrow();
+    expect(observed.result.exitCode).toBe(71);
+    expect(observed.result.timedOut).toBe(false);
+    expect(observed.control).toBe(marker);
+    expect(observed.calls).toEqual([
+      ["info", "--format", "{{json .ID}}"],
+      effect,
+    ]);
+    expect(observed.after).toBe(observed.before);
+    for (const changed of [
+      { ...observed.result, exitCode: 0 },
+      { ...observed.result, exitCode: 1 },
+      { ...observed.result, exitCode: 70 },
+      { ...observed.result, exitCode: 72 },
+      { ...observed.result, timedOut: true },
+    ]) {
+      expect(() =>
+        assertSourceBindFixtureControlledInterruption(changed)
+      ).toThrow("values omitted");
+    }
+  });
+
+  test(`emitted v12 ${interruption} cannot accept engine71 without the successful-effect marker`, async () => {
+    await expect(
+      emitted({
+        interruption,
+        args: [...args],
+        receipt,
+        effect,
+        effectExit: 71,
+      })
+    ).rejects.toThrow();
+  });
 }
 
 test("emitted v12 recovery stop uses the exact snapshotted capability and original ID", async () => {

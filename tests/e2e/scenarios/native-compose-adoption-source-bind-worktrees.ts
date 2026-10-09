@@ -29,6 +29,14 @@ function refused(result: CliResult) {
     refuse();
   }
 }
+/** The emitted guard has already required the exact successful-effect marker. */
+export function assertSourceBindFixtureControlledInterruption(
+  result: CliResult
+) {
+  if (result.exitCode !== 71 || result.timedOut) {
+    refuse();
+  }
+}
 function receipt(instance: Instance) {
   return join(
     instance.root,
@@ -90,7 +98,7 @@ async function directoryReplacementRecovery(h: Runtime) {
     ["up", "--detach", "--json"],
     "replace-after-start"
   );
-  refused(partial);
+  assertSourceBindFixtureControlledInterruption(partial);
   const pendingBytes = await pending(first, "start");
   const states = await running(h, first);
   const original = join(first.root, "bind-rw-original");
@@ -196,7 +204,7 @@ export const nativeComposeAdoptionSourceBindWorktreesScenario: Scenario = {
           });
           await h.assertNoState(instance);
         }
-        refused(
+        assertSourceBindFixtureControlledInterruption(
           await sourceBindFixtureCommand(
             h,
             h.first,

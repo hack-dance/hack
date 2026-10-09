@@ -416,6 +416,7 @@ pub struct Prepared {
     prepared: native_input::Prepared,
 }
 impl Prepared {
+    #[cfg(target_os = "macos")]
     pub(super) fn read_pin(&self) -> ReadPin {
         self.selected.read_pin()
     }

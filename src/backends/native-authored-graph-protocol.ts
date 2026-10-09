@@ -14,6 +14,7 @@ const IMAGE = /^sha256:[a-f0-9]{64}$/;
 const BOOT = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/;
 const CONTROL = /\p{Cc}/u;
 const SERVICE = /^[A-Za-z0-9_-][A-Za-z0-9_.-]{0,127}$/;
+const NETWORK = /^[a-z0-9][a-z0-9_.-]{0,62}$/;
 const PHASES = [
   "preparing",
   "ready-observed",
@@ -55,7 +56,7 @@ type Resource = {
   readonly id: string | null;
   readonly image: string | null;
   readonly phase: string;
-  readonly networks?: readonly ["default"];
+  readonly networks?: readonly string[];
   readonly outbound: boolean;
 };
 type Terminal = {
@@ -87,6 +88,12 @@ type NativeSourceBinding = {
   >;
   readonly anchors: Readonly<Record<string, NativeSourceAnchor>>;
 };
+type NativeTopology = {
+  readonly networks: Readonly<Record<string, boolean>>;
+  readonly attachments: Readonly<
+    Record<string, Readonly<Record<string, readonly string[]>>>
+  >;
+};
 type NativeAuthoredInventory = {
   readonly kind: "native-graph-runtime";
   readonly owner: string;
@@ -95,6 +102,7 @@ type NativeAuthoredInventory = {
   readonly phase: Phase;
   readonly readiness: Readonly<Record<string, Condition>>;
   readonly resources: Readonly<Record<string, Resource>>;
+  readonly topology?: NativeTopology;
   readonly data_tool?: NativePersistentTool;
   readonly data?: Readonly<Record<string, NativePersistentReference>>;
   readonly data_mounts?: Readonly<
@@ -111,6 +119,11 @@ export type NativeAuthoredReceipt = NativeAuthoredInventory &
     | { readonly version: 2; readonly source?: never }
     | { readonly version: 3; readonly source: NativeSourceBinding }
     | { readonly version: 4; readonly source?: never }
+    | {
+        readonly version: 5;
+        readonly source?: never;
+        readonly topology: NativeTopology;
+      }
   );
 function refused(): never {
   throw new Error(
@@ -415,7 +428,16 @@ function phase(value: unknown): value is Phase {
 function resource(
   value: unknown,
   run: string,
-  service?: { readonly name: string; readonly index: number }
+  service?: {
+    readonly name: string;
+    readonly index: number;
+    readonly networks: readonly string[];
+  },
+  network: {
+    readonly name: string;
+    readonly index: number;
+    readonly internal: boolean;
+  } = { name: "default", index: 0, internal: false }
 ): Resource {
   if (
     !fields(
@@ -439,8 +461,10 @@ function resource(
       typeof value.image !== "string" ||
       !IMAGE.test(value.image) ||
       !Array.isArray(value.networks) ||
-      value.networks.length !== 1 ||
-      value.networks[0] !== "default" ||
+      value.networks.length !== service.networks.length ||
+      !service.networks.every(
+        (name, index) => (value.networks as unknown[])[index] === name
+      ) ||
       (value.outbound !== undefined && value.outbound !== false) ||
       ![
         "reserved",
@@ -473,17 +497,19 @@ function resource(
       id: value.id,
       image: value.image,
       phase: value.phase,
-      networks: ["default"],
+      networks: [...service.networks],
       outbound: false,
     };
   }
   if (
     value.kind !== "network" ||
-    value.key !== "default" ||
-    value.name !== `hkn-${run}-network-0` ||
+    value.key !== network.name ||
+    value.name !== `hkn-${run}-network-${network.index}` ||
     value.image !== null ||
     (value.networks !== undefined && value.networks !== null) ||
-    value.outbound !== true ||
+    // Rust omits false on serialization; an omitted internal policy is false.
+    (value.outbound === undefined ? false : value.outbound) !==
+      !network.internal ||
     ![
       "reserved",
       "create-intent",
@@ -499,21 +525,110 @@ function resource(
   }
   return {
     kind: "network",
-    key: "default",
+    key: network.name,
     name: value.name,
     id: value.id,
     image: null,
     phase: value.phase,
-    outbound: true,
+    outbound: !network.internal,
   };
 }
 
-/** Closed image-only v2, live-source v3 and persistent-intent v4 remain distinct. */
-export function parseNativeAuthoredReceipt(
-  value: unknown
-): NativeAuthoredReceipt {
+function topology(value: unknown, services: readonly string[]): NativeTopology {
   if (
-    !fields(
+    !(
+      fields(value, ["networks", "attachments"]) &&
+      isRecord(value.networks) &&
+      isRecord(value.attachments)
+    )
+  ) {
+    return refused();
+  }
+  const declaredNetworks = value.networks as Record<string, unknown>;
+  const declaredAttachments = value.attachments as Record<string, unknown>;
+  const logical = Object.keys(declaredNetworks).sort(utf8Order);
+  if (
+    logical.length !== 2 ||
+    logical.some(
+      (name) =>
+        !NETWORK.test(name) ||
+        name === "default" ||
+        name === "ingress" ||
+        typeof declaredNetworks[name] !== "boolean"
+    ) ||
+    logical.filter((name) => declaredNetworks[name] === true).length !== 1 ||
+    Object.keys(declaredAttachments).length !== services.length ||
+    services.some((service) => !Object.hasOwn(declaredAttachments, service))
+  ) {
+    return refused();
+  }
+  const used = new Set<string>();
+  const aliases = new Set<string>();
+  const attachments = Object.fromEntries(
+    services.map((service) => {
+      const selected = declaredAttachments[service];
+      if (
+        !isRecord(selected) ||
+        Object.keys(selected).length === 0 ||
+        Object.keys(selected).some((name) => !logical.includes(name))
+      ) {
+        return refused();
+      }
+      return [
+        service,
+        Object.fromEntries(
+          Object.keys(selected)
+            .sort(utf8Order)
+            .map((name) => {
+              const raw = selected[name];
+              if (
+                !Array.isArray(raw) ||
+                raw.some(
+                  (alias) =>
+                    typeof alias !== "string" ||
+                    !NETWORK.test(alias) ||
+                    services.includes(alias) ||
+                    aliases.has(`${name}\0${alias}`)
+                ) ||
+                raw.some(
+                  (alias, index) =>
+                    index > 0 && utf8Order(raw[index - 1], alias) >= 0
+                )
+              ) {
+                return refused();
+              }
+              used.add(name);
+              for (const alias of raw) {
+                aliases.add(`${name}\0${alias}`);
+              }
+              return [name, [...raw]];
+            })
+        ),
+      ];
+    })
+  );
+  if (used.size !== 2) {
+    return refused();
+  }
+  return {
+    networks: Object.fromEntries(
+      logical.map((name) => [name, declaredNetworks[name] as boolean])
+    ),
+    attachments,
+  };
+}
+
+type ReceiptEnvelope = Record<string, unknown> & {
+  readonly version: 2 | 3 | 4 | 5;
+  readonly owner: string;
+  readonly boot: string;
+  readonly phase: Phase;
+  readonly readiness: Record<string, unknown>;
+  readonly resources: Record<string, unknown>;
+};
+function receiptEnvelope(value: unknown): value is ReceiptEnvelope {
+  return (
+    fields(
       value,
       [
         "version",
@@ -525,58 +640,81 @@ export function parseNativeAuthoredReceipt(
         "readiness",
         "resources",
       ],
-      ["failure", "terminal", "source", "data", "data_mounts", "data_tool"]
-    ) ||
-    (value.version !== 2 && value.version !== 3 && value.version !== 4) ||
+      [
+        "failure",
+        "terminal",
+        "source",
+        "data",
+        "data_mounts",
+        "data_tool",
+        "topology",
+      ]
+    ) &&
+    (value.version === 2 ||
+      value.version === 3 ||
+      value.version === 4 ||
+      value.version === 5) &&
     (value.version === 3
-      ? !Object.hasOwn(value, "source")
-      : Object.hasOwn(value, "source")) ||
-    value.kind !== "native-graph-runtime" ||
-    typeof value.owner !== "string" ||
-    !HEX32.test(value.owner) ||
-    typeof value.boot !== "string" ||
-    !BOOT.test(value.boot) ||
-    !phase(value.phase) ||
-    !isRecord(value.readiness) ||
-    !isRecord(value.resources)
-  ) {
-    return refused();
-  }
-  const review = parseNativeAuthoredReview(value.review);
-  const declaredReadiness = value.readiness;
-  const declaredResources = value.resources;
-  const names = Object.keys(declaredReadiness).sort(utf8Order);
+      ? Object.hasOwn(value, "source")
+      : !Object.hasOwn(value, "source")) &&
+    (value.version === 5) === Object.hasOwn(value, "topology") &&
+    value.kind === "native-graph-runtime" &&
+    typeof value.owner === "string" &&
+    HEX32.test(value.owner) &&
+    typeof value.boot === "string" &&
+    BOOT.test(value.boot) &&
+    phase(value.phase) &&
+    isRecord(value.readiness) &&
+    isRecord(value.resources)
+  );
+}
+
+function receiptResources(opts: {
+  readonly declared: Record<string, unknown>;
+  readonly names: readonly string[];
+  readonly selectedTopology: NativeTopology | undefined;
+  readonly run: string;
+  readonly phase: Phase;
+}): Readonly<Record<string, Resource>> {
+  const {
+    declared: declaredResources,
+    names,
+    selectedTopology,
+    run,
+    phase,
+  } = opts;
+  const networkNames = selectedTopology
+    ? Object.keys(selectedTopology.networks).sort(utf8Order)
+    : ["default"];
   const requiredResources = [
-    "network:default",
+    ...networkNames.map((name) => `network:${name}`),
     ...names.map((name) => `container:${name}`),
   ];
   if (
-    names.length === 0 ||
-    names.length > 32 ||
     requiredResources.length !== Object.keys(declaredResources).length ||
     !requiredResources.every((key) => Object.hasOwn(declaredResources, key))
   ) {
     return refused();
   }
-  const readiness = Object.fromEntries(
-    names.map((name): [string, Condition] => {
-      const selected = declaredReadiness[name];
-      if (!(SERVICE.test(name) && condition(selected))) {
-        return refused();
-      }
-      return [name, selected];
-    })
-  );
   const resourceEntries: [string, Resource][] = [
-    [
-      "network:default",
-      resource(declaredResources["network:default"], review.provenance.run),
-    ],
-    ...names.map((name, index): [string, Resource] => [
-      `container:${name}`,
-      resource(declaredResources[`container:${name}`], review.provenance.run, {
+    ...networkNames.map((name, index): [string, Resource] => [
+      `network:${name}`,
+      resource(declaredResources[`network:${name}`], run, undefined, {
         name,
         index,
+        internal: selectedTopology?.networks[name] ?? false,
+      }),
+    ]),
+    ...names.map((name, index): [string, Resource] => [
+      `container:${name}`,
+      resource(declaredResources[`container:${name}`], run, {
+        name,
+        index,
+        networks: selectedTopology
+          ? Object.keys(selectedTopology.attachments[name] ?? {}).sort(
+              utf8Order
+            )
+          : ["default"],
       }),
     ]),
   ];
@@ -586,23 +724,27 @@ export function parseNativeAuthoredReceipt(
   );
   if (
     new Set(ids).size !== ids.length ||
-    (value.phase === "ready-observed" &&
+    (phase === "ready-observed" &&
       Object.values(resources).some(
         (item) =>
           item.id === null ||
           item.phase !== (item.kind === "network" ? "created" : "started")
       )) ||
-    (value.phase === "removed" &&
+    (phase === "removed" &&
       Object.values(resources).some((item) => item.phase !== "removed"))
   ) {
     return refused();
   }
-  const failure = Object.hasOwn(value, "failure")
-    ? parseFailure(value.failure, readiness)
-    : undefined;
-  const terminal = Object.hasOwn(value, "terminal")
-    ? parseTerminal(value.terminal, resources)
-    : undefined;
+  return resources;
+}
+
+function receiptData(opts: {
+  readonly value: ReceiptEnvelope;
+  readonly review: NativeAuthoredReview;
+  readonly names: readonly string[];
+  readonly resources: Readonly<Record<string, Resource>>;
+}): ReturnType<typeof parseNativePersistentData> | undefined {
+  const { value, review, names, resources } = opts;
   const hasData =
     Object.hasOwn(value, "data") || Object.hasOwn(value, "data_mounts");
   if (
@@ -611,23 +753,61 @@ export function parseNativeAuthoredReceipt(
   ) {
     return refused();
   }
-  const data =
-    value.version === 4
-      ? parseNativePersistentData({
-          data: value.data,
-          mounts: value.data_mounts,
-          namespace: review.provenance.namespace,
-          owner: value.owner,
-          boot: value.boot,
-          workloads: names,
-          enrolled:
-            value.phase === "ready-observed" ||
-            Object.values(resources).some(
-              (resource) =>
-                resource.kind === "container" && resource.id !== null
-            ),
-        })
-      : undefined;
+  if (value.version !== 4) {
+    return undefined;
+  }
+  return parseNativePersistentData({
+    data: value.data,
+    mounts: value.data_mounts,
+    namespace: review.provenance.namespace,
+    owner: value.owner,
+    boot: value.boot,
+    workloads: names,
+    enrolled:
+      value.phase === "ready-observed" ||
+      Object.values(resources).some(
+        (resource) => resource.kind === "container" && resource.id !== null
+      ),
+  });
+}
+
+/** Closed image-only v2, live-source v3, persistent-intent v4 and two-bridge v5 remain distinct. */
+export function parseNativeAuthoredReceipt(
+  value: unknown
+): NativeAuthoredReceipt {
+  if (!receiptEnvelope(value)) {
+    return refused();
+  }
+  const review = parseNativeAuthoredReview(value.review);
+  const names = Object.keys(value.readiness).sort(utf8Order);
+  if (names.length === 0 || names.length > 32) {
+    return refused();
+  }
+  const readiness = Object.fromEntries(
+    names.map((name): [string, Condition] => {
+      const selected = value.readiness[name];
+      if (!(SERVICE.test(name) && condition(selected))) {
+        return refused();
+      }
+      return [name, selected];
+    })
+  );
+  const selectedTopology =
+    value.version === 5 ? topology(value.topology, names) : undefined;
+  const resources = receiptResources({
+    declared: value.resources,
+    names,
+    selectedTopology,
+    run: review.provenance.run,
+    phase: value.phase,
+  });
+  const failure = Object.hasOwn(value, "failure")
+    ? parseFailure(value.failure, readiness)
+    : undefined;
+  const terminal = Object.hasOwn(value, "terminal")
+    ? parseTerminal(value.terminal, resources)
+    : undefined;
+  const data = receiptData({ value, review, names, resources });
   const tool = parseReceiptTool({ value, resources });
   const common: NativeAuthoredInventory = {
     kind: "native-graph-runtime",
@@ -637,6 +817,7 @@ export function parseNativeAuthoredReceipt(
     phase: value.phase,
     readiness,
     resources,
+    ...(selectedTopology ? { topology: selectedTopology } : {}),
     ...data,
     ...(tool ? { data_tool: tool } : {}),
     ...(failure ? { failure } : {}),
@@ -649,7 +830,16 @@ export function parseNativeAuthoredReceipt(
       source: sourceBinding(value.source, names),
     };
   }
-  return { version: value.version, ...common };
+  if (value.version === 5 && selectedTopology) {
+    return { version: 5, ...common, topology: selectedTopology };
+  }
+  if (value.version === 2) {
+    return { version: 2, ...common };
+  }
+  if (value.version === 4) {
+    return { version: 4, ...common };
+  }
+  return refused();
 }
 function parseReceiptTool(opts: {
   readonly value: Record<string, unknown>;
@@ -747,6 +937,9 @@ export function nativeAuthoredReceiptBinding(
           data_mounts: receipt.data_mounts,
           ...(receipt.data_tool ? { data_tool: receipt.data_tool } : {}),
         }
+      : {}),
+    ...(receipt.version === 5
+      ? { version: 5, topology: receipt.topology }
       : {}),
     owner: receipt.owner,
     boot: receipt.boot,

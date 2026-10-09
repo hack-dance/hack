@@ -9,8 +9,13 @@ import {
   mapLegacyNativeAdoptionBaseline,
   mapLegacyNativeCompletedJobAdoptionBaseline,
   mapLegacyNativeRetainedBasicBuild,
+  mapLegacyNativeRetainedRouting,
   mapLegacyNativeStorageAdoption,
 } from "./native-config-import-plan.ts";
+import {
+  legacyRoutingStorageDocument,
+  mapLegacyComposeRouting,
+} from "./native-config-import-routing.ts";
 import {
   type LegacyComposeStorageIntent,
   mapLegacyComposeStorage,
@@ -90,9 +95,18 @@ export function planLegacyComposeRetainedBasicBuildAdoption(opts: {
   return plan(opts, mapLegacyNativeRetainedBasicBuild(opts));
 }
 
+/** Separate v14 authored contract; mixed bind/build/job/branch families remain refused. */
+export function planLegacyComposeRetainedRoutingAdoption(opts: {
+  readonly configText: string;
+  readonly composeText: string;
+}): LegacyComposeAdoptionPlan {
+  return plan(opts, mapLegacyNativeRetainedRouting(opts), true);
+}
+
 function plan(
   opts: { readonly configText: string; readonly composeText: string },
-  baseline: ReturnType<typeof mapLegacyNativeAdoptionBaseline>
+  baseline: ReturnType<typeof mapLegacyNativeAdoptionBaseline>,
+  routingFamily = false
 ): LegacyComposeAdoptionPlan {
   const config = parseImportDocument({
     text: opts.configText,
@@ -102,12 +116,22 @@ function plan(
     text: opts.composeText,
     document: "compose",
   }).value;
-  const qualified = mapLegacyComposeStorage({ config, compose });
+  const routing = routingFamily
+    ? mapLegacyComposeRouting({ config, compose })
+    : undefined;
+  const qualified = mapLegacyComposeStorage({
+    config,
+    compose:
+      routing && compose ? legacyRoutingStorageDocument(compose) : compose,
+  });
   const mapping = {
-    supported: qualified !== undefined,
+    supported:
+      qualified !== undefined && (!routingFamily || routing !== undefined),
     accepted: qualified?.accepted ?? new Map<string, string>(),
   };
-  const intent = qualified?.intent;
+  const intent = qualified
+    ? { ...qualified.intent, ...(routing ? { routing: routing.intent } : {}) }
+    : undefined;
   const fields = storageFields(baseline.report.fields, mapping);
   const supported =
     mapping.supported && !fields.some((field) => field.status === "refused");

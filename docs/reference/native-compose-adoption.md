@@ -497,3 +497,21 @@ static fixture's exact ownership and daemon checks for cleanup.
 Use the same prerequisites and flags as above with
 `--only=native-compose-adoption-managed-worktrees`. Registration and synthetic
 fixture controls do not establish a live pass.
+
+## Retained routing contract under implementation
+
+The separate private version 14 mapper admits literal legacy `dev_host`, its
+already configured OAuth alias and `open.prefer`, together with closed static
+Caddy HTTP upstream labels. It pins full HTTPS origins rather than deriving a
+new host from the project name or a global domain. Routed services must configure
+exactly the existing `hack-dev` attachment and the project default bridge; other
+services retain only the default bridge and existing local named storage.
+
+This mapper is not enabled by the ordinary import preview or adoption command.
+It supplies private intent and value-free field provenance only. Resource and
+ingress incarnation, hostname reservations, active proxy dispatch, typed local
+precedence, generated-source fidelity and stopped rollback must be admitted by
+the distinct retained routing owner before activation. Builds, jobs, readiness,
+source binds, files, branch overrides and custom bridges remain outside this
+initial routing family. Neither the map nor a synthetic control proves browser
+TLS, OAuth login or application acceptance; global DNS and trust are unchanged.

@@ -6,6 +6,7 @@ import {
   mapLegacyOwnedNetwork,
 } from "./native-config-import-network.ts";
 import { importPointer } from "./native-config-import-parser.ts";
+import type { LegacyComposeRoutingIntent } from "./native-config-import-routing.ts";
 
 const NAME = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const VOLUME_NAME = /^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,254}$/;
@@ -16,6 +17,8 @@ export type LegacyComposeStorageIntent = {
   readonly services: readonly string[];
   readonly ownedNetwork?: LegacyOwnedNetworkIntent;
   readonly ownedNetworks?: LegacyOwnedNetworksIntent;
+  /** Required only by the distinct private retained-routing owner. */
+  readonly routing?: LegacyComposeRoutingIntent;
   readonly volumes: readonly {
     readonly storage: string;
     readonly name: string;

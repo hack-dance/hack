@@ -22,6 +22,10 @@ import {
   mapLegacyComposeDependencies,
   mapLegacyComposeHealthcheck,
 } from "./native-config-import-readiness.ts";
+import {
+  legacyRoutingStorageDocument,
+  mapLegacyComposeRouting,
+} from "./native-config-import-routing.ts";
 import { mapLegacyComposeStorage } from "./native-config-import-storage.ts";
 import { normalizeEnvConfigName } from "./project.ts";
 
@@ -142,6 +146,7 @@ type NativeImportPurpose =
   | "adoption-baseline"
   | "completed-job-adoption"
   | "retained-basic-build"
+  | "retained-routing"
   | "storage-adoption";
 
 /**
@@ -189,6 +194,16 @@ function mapLegacyNativeInput(opts: {
     }
   }
   const context = { config: config.value, candidate, mark, refuse };
+  const routing =
+    opts.purpose === "retained-routing"
+      ? mapLegacyComposeRouting({
+          config: config.value,
+          compose: compose.value,
+        })
+      : undefined;
+  if (opts.purpose === "retained-routing" && !routing) {
+    refuse("config", "/dev_host", "explicit_retained_routing_required");
+  }
   mapOverlay(context);
   mapWorktree(context);
   mapServices({
@@ -200,26 +215,43 @@ function mapLegacyNativeInput(opts: {
       opts.purpose === "preview" || opts.purpose === "retained-basic-build",
     jobPreview:
       opts.purpose !== "adoption-baseline" &&
-      opts.purpose !== "retained-basic-build",
+      opts.purpose !== "retained-basic-build" &&
+      opts.purpose !== "retained-routing",
   });
-  mapOwnedNetwork({
-    project: name,
-    compose: compose.value,
-    candidate,
-    mark,
-    refuse,
-    purpose: opts.purpose,
-  });
+  if (routing) {
+    Object.assign(candidate, routing.candidate);
+    for (const pointer of routing.pointers) {
+      mark(
+        pointer.document,
+        pointer.source,
+        pointer.target,
+        "existing_routing_binding",
+        true
+      );
+    }
+  } else {
+    mapOwnedNetwork({
+      project: name,
+      compose: compose.value,
+      candidate,
+      mark,
+      refuse,
+      purpose: opts.purpose,
+    });
+  }
   if (opts.purpose === "preview") {
     mapFileCandidate({ compose: compose.value, candidate, mark, refuse });
   }
   if (
     opts.purpose === "storage-adoption" ||
-    opts.purpose === "retained-basic-build"
+    opts.purpose === "retained-basic-build" ||
+    opts.purpose === "retained-routing"
   ) {
     mapStorageCandidate({
       config: config.value,
-      compose: compose.value,
+      compose: routing
+        ? legacyRoutingStorageDocument(compose.value)
+        : compose.value,
       candidate,
       mark,
       refuse,
@@ -387,6 +419,18 @@ export function mapLegacyNativeRetainedBasicBuild(opts: {
     configText: opts.configText,
     composeText: opts.composeText,
     purpose: "retained-basic-build",
+  });
+}
+
+/** Literal legacy origins only. A complete map grants no ingress or retained resource authority. */
+export function mapLegacyNativeRetainedRouting(opts: {
+  readonly configText: string;
+  readonly composeText: string;
+}): NativeImportPlan {
+  return mapLegacyNativeInput({
+    configText: opts.configText,
+    composeText: opts.composeText,
+    purpose: "retained-routing",
   });
 }
 

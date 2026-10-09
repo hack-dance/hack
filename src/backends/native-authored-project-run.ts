@@ -40,6 +40,20 @@ export type NativeAuthoredProjectRunScope = {
   readonly nativeHome: string;
   readonly branch: string | null;
 };
+/** Match Candidate::plan_with_branch without acquiring or resolving authored inputs. */
+export function nativeAuthoredProjectNamespace(
+  scope: NativeAuthoredProjectRunScope
+): string {
+  const hash = createHash("sha256");
+  if (scope.branch !== null) {
+    hash.update("hack-native-branch-namespace-v1\0");
+  }
+  hash.update(scope.projectRoot);
+  if (scope.branch !== null) {
+    hash.update("\0").update(scope.branch);
+  }
+  return hash.digest("hex");
+}
 export type NativeAuthoredProjectRun = {
   readonly version: 2;
   readonly kind: "native-authored-project-run";
@@ -259,7 +273,10 @@ async function storeDirectory(
 async function storage<T>(
   input: NativeAuthoredProjectRunScope,
   create: boolean,
-  action: (store: Store | undefined) => Promise<T>
+  action: (
+    store: Store | undefined,
+    assertScope: () => Promise<void>
+  ) => Promise<T>
 ): Promise<T> {
   const opts = {
     projectRoot: input.projectRoot,
@@ -296,7 +313,10 @@ async function storage<T>(
       const directory = await storeDirectory(path, create, privateRoot);
       if (!directory) {
         await recheckDirectories(held);
-        return await action(undefined);
+        return await action(undefined, async () => {
+          await recheckDirectories(held);
+          await absent(path);
+        });
       }
       held.push(directory);
     }
@@ -315,19 +335,23 @@ async function storage<T>(
       check,
     });
     await check();
-    return await action({
-      identity,
-      root,
-      held,
-      file,
-      mutationPath: join(root.path, `${key}.lock`),
-      startFile: join(root.path, `${key}.start.json`),
-      admissionPath: join(root.path, `${key}.admission.lock`),
-      admissionRecovery: join(root.path, `${key}.admission.recovery`),
-      check,
-      withLock: lock.withLock,
-      withHeldLock: lock.withHeldLock,
-    });
+    return await action(
+      {
+        identity,
+        root,
+        held,
+        file,
+        mutationPath: join(root.path, `${key}.lock`),
+        mutationRecovery: join(root.path, `${key}.recovery`),
+        startFile: join(root.path, `${key}.start.json`),
+        admissionPath: join(root.path, `${key}.admission.lock`),
+        admissionRecovery: join(root.path, `${key}.admission.recovery`),
+        check,
+        withLock: lock.withLock,
+        withHeldLock: lock.withHeldLock,
+      },
+      check
+    );
   } catch {
     return refused();
   } finally {
@@ -349,6 +373,7 @@ type Store = {
   readonly held: readonly HeldDirectory[];
   readonly file: string;
   readonly mutationPath: string;
+  readonly mutationRecovery: string;
   readonly startFile: string;
   readonly admissionPath: string;
   readonly admissionRecovery: string;
@@ -559,6 +584,80 @@ export async function loadNativeAuthoredProjectRun(
       }
       throw error;
     }
+  });
+}
+
+/** Read-only status selection. Held directories and exact saved incarnations survive
+ * the awaited observation; no lock, source acquisition, publication or repair occurs. */
+export async function withNativeAuthoredProjectStatus<T>(
+  opts: NativeAuthoredProjectRunScope,
+  action: (selected: {
+    readonly ready: NativeAuthoredProjectRunSelection | null;
+    readonly pending: boolean;
+    readonly assertFresh: () => Promise<void>;
+  }) => Promise<T>
+): Promise<T> {
+  const scope = { ...opts };
+  const ready = await loadNativeAuthoredProjectRun(scope);
+  return await storage(scope, false, async (store, assertScope) => {
+    const readStart = async () => {
+      if (!store) {
+        return null;
+      }
+      try {
+        return await readRecord(store, store.startFile, started);
+      } catch (error) {
+        if (hasCode(error, "ENOENT")) {
+          return null;
+        }
+        throw error;
+      }
+    };
+    const start = await readStart();
+    if (
+      ready &&
+      start &&
+      JSON.stringify(ready.record.receipt.review) !==
+        JSON.stringify(start.record.review)
+    ) {
+      return refused();
+    }
+    const assertFresh = async () => {
+      await assertScope();
+      if (store) {
+        await store.check();
+        for (const path of [
+          store.mutationPath,
+          store.mutationRecovery,
+          `${store.mutationPath}.recovery`,
+          store.admissionRecovery,
+          `${store.admissionRecovery}.recovery`,
+          `${store.file}.recovery.json`,
+          `${store.file}.recovery.json.pending`,
+        ]) {
+          await absent(path);
+        }
+        if (!(ready || start)) {
+          await absent(store.admissionPath);
+        }
+      }
+      if (
+        JSON.stringify(await loadNativeAuthoredProjectRun(scope)) !==
+          JSON.stringify(ready) ||
+        JSON.stringify(await readStart()) !== JSON.stringify(start)
+      ) {
+        return refused();
+      }
+      await assertScope();
+    };
+    await assertFresh();
+    const result = await action({
+      ready,
+      pending: !ready && start !== null,
+      assertFresh,
+    });
+    await assertFresh();
+    return result;
   });
 }
 /** Publish the authenticated admitted owner once. Interrupted publication never replaces an existing run. */

@@ -1,6 +1,10 @@
 import { randomBytes } from "node:crypto";
 import { realpath } from "node:fs/promises";
 import { join } from "node:path";
+import {
+  type NativeAuthoredProjectStatus,
+  nativeAuthoredProjectPs,
+} from "../backends/native-authored-project-observe.ts";
 import { recoverNativeAuthoredProject } from "../backends/native-authored-project-recovery.ts";
 import {
   NativeAuthoredProjectStartError,
@@ -8,8 +12,9 @@ import {
 } from "../backends/native-authored-project-start.ts";
 import { resolveNativeRuntimeSelection } from "../backends/native-runtime-client.ts";
 import { CliUsageError } from "../cli/command.ts";
+import { display } from "../ui/display.ts";
 import { logger } from "../ui/logger.ts";
-import { HackCliError } from "./cli-result.ts";
+import { emitCliResult, HackCliError, okResult } from "./cli-result.ts";
 import { resolveComposeStartupTimeoutMs } from "./compose-startup-budget.ts";
 import type { NativeComposeCommandOptions } from "./native-compose-command.ts";
 import type { NativeComposeSelection } from "./native-compose-selection.ts";
@@ -18,8 +23,29 @@ function unsupported(): never {
   throw new HackCliError({
     code: "E_NATIVE_PROJECT_UNSUPPORTED",
     message:
-      "Native authored execution requires whole-project foreground up or explicit stored-generation down --recover on macOS. This request ran no input or runtime operation.",
+      "Native authored execution requires whole-project foreground up, ps, or explicit stored-generation down --recover on macOS. This request ran no input or runtime operation.",
   });
+}
+
+function assertStatusOptions(options: NativeComposeCommandOptions): void {
+  if (
+    process.platform !== "darwin" ||
+    options.operation !== "ps" ||
+    options.detach ||
+    options.recover ||
+    options.unsupportedOptions ||
+    options.services !== undefined ||
+    options.service !== undefined ||
+    options.command !== undefined ||
+    options.workdir !== undefined ||
+    options.follow !== undefined ||
+    options.tail !== undefined ||
+    options.logFormat !== undefined ||
+    options.profiles !== undefined ||
+    options.overlay !== undefined
+  ) {
+    unsupported();
+  }
 }
 
 function assertRecoveryOptions(options: NativeComposeCommandOptions): void {
@@ -90,12 +116,79 @@ function startupFailure(error: unknown): number {
   });
 }
 
+type Mode = "status" | "recovery" | "start";
+function commandMode(options: NativeComposeCommandOptions): Mode {
+  if (options.operation === "ps") {
+    assertStatusOptions(options);
+    return "status";
+  }
+  if (options.operation === "down" && options.recover === true) {
+    assertRecoveryOptions(options);
+    return "recovery";
+  }
+  assertForegroundOptions(options);
+  return "start";
+}
+
+async function showStatus(options: {
+  readonly result: NativeAuthoredProjectStatus;
+  readonly json?: boolean;
+}): Promise<void> {
+  const { result } = options;
+  if (options.json) {
+    emitCliResult({ result: okResult({ data: result }) });
+    return;
+  }
+  if (result.status !== "observed") {
+    logger.info({
+      message:
+        result.status === "pending"
+          ? "Native project startup is pending; no current service status is confirmed."
+          : "Native project has not been started.",
+    });
+  }
+  await display.table({
+    columns: ["NATIVE SERVICE", "CONTAINER", "STATE", "HEALTH"],
+    rows: result.items.map((item) => [
+      item.service,
+      item.container,
+      item.state,
+      item.health ?? "",
+    ]),
+  });
+}
+
+function commandFailure(options: {
+  readonly error: unknown;
+  readonly mode: Mode;
+  readonly signal: AbortSignal;
+}): number {
+  if (options.mode === "status") {
+    if (options.signal.aborted) {
+      return 130;
+    }
+    throw new HackCliError({
+      code: "E_LIFECYCLE_FAILED",
+      message:
+        "Native project status is unconfirmed or its ownership changed; values omitted. No request was replayed.",
+    });
+  }
+  if (options.mode === "recovery") {
+    throw new HackCliError({
+      code: "E_LIFECYCLE_FAILED",
+      message:
+        "Native project recovery is incomplete or its ownership changed; selected state is retained. Values omitted.",
+    });
+  }
+  return startupFailure(options.error);
+}
+
 /**
  * Explicit native dispatch after exact authored-family and adoption selection.
- * Compose and omitted selections retain their existing owner. Only foreground up
- * delegates to the tagged native lifetime owner. Explicit down --recover uses the
- * stored generation owner without input acquisition; unsupported requests never start
- * input acquisition or runtime work. The Rust planner owns capability refusal.
+ * Compose and omitted selections retain their existing owner. Foreground up delegates
+ * to the tagged lifetime owner. Whole-project ps observes its authenticated saved run;
+ * explicit down --recover uses the stored cleanup owner without input acquisition.
+ * Unsupported requests never start input acquisition or runtime work.
  */
 export async function tryNativeAuthoredCommand(opts: {
   readonly options: NativeComposeCommandOptions;
@@ -104,6 +197,7 @@ export async function tryNativeAuthoredCommand(opts: {
   /** Execution seam for command-selection controls; the CLI always uses the real owner. */
   readonly serve?: typeof serveNativeAuthoredProject;
   readonly recover?: typeof recoverNativeAuthoredProject;
+  readonly observe?: typeof nativeAuthoredProjectPs;
 }): Promise<number | null> {
   const sourceEnv = opts.env ?? process.env;
   const env = {
@@ -133,12 +227,7 @@ export async function tryNativeAuthoredCommand(opts: {
   const projectRoot = opts.selected.projectRoot;
   const serve = opts.serve ?? serveNativeAuthoredProject;
   const recover = opts.recover ?? recoverNativeAuthoredProject;
-  const recovering = options.operation === "down" && options.recover === true;
-  if (recovering) {
-    assertRecoveryOptions(options);
-  } else {
-    assertForegroundOptions(options);
-  }
+  const mode = commandMode(options);
   let runtime: ReturnType<typeof resolveNativeRuntimeSelection>;
   try {
     runtime = resolveNativeRuntimeSelection(env);
@@ -150,7 +239,8 @@ export async function tryNativeAuthoredCommand(opts: {
   if (!runtime) {
     return unsupported();
   }
-  const startupTimeoutMs = resolveComposeStartupTimeoutMs({ env });
+  const startupTimeoutMs =
+    mode === "status" ? 15_000 : resolveComposeStartupTimeoutMs({ env });
   if (startupTimeoutMs > 300_000) {
     throw new CliUsageError(
       "Native authored startup supports at most 300000 milliseconds (HACK_COMPOSE_STARTUP_TIMEOUT_MS)."
@@ -168,7 +258,19 @@ export async function tryNativeAuthoredCommand(opts: {
       nativeHome: runtime.home,
       branch: options.instance ?? null,
     };
-    if (recovering) {
+    if (mode === "status") {
+      const result = await (opts.observe ?? nativeAuthoredProjectPs)({
+        runtime,
+        scope,
+        signal: controller.signal,
+      });
+      if (controller.signal.aborted) {
+        return 130;
+      }
+      await showStatus({ result, json: options.json });
+      return 0;
+    }
+    if (mode === "recovery") {
       await recover({
         runtime,
         scope,
@@ -195,14 +297,7 @@ export async function tryNativeAuthoredCommand(opts: {
       },
     });
   } catch (error: unknown) {
-    if (recovering) {
-      throw new HackCliError({
-        code: "E_LIFECYCLE_FAILED",
-        message:
-          "Native project recovery is incomplete or its ownership changed; selected state is retained. Values omitted.",
-      });
-    }
-    return startupFailure(error);
+    return commandFailure({ error, mode, signal: controller.signal });
   } finally {
     process.off("SIGINT", cancel);
     process.off("SIGTERM", cancel);

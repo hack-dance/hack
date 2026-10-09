@@ -378,8 +378,11 @@ test("shared internal metadata permissions stay unchanged and branch scopes rema
   const opts = await fixture();
   const internal = join(opts.projectDir, ".internal");
   await mkdir(internal, { mode: 0o755 });
+  await chmod(internal, 0o755);
+  const originalMode = (await stat(internal)).mode & 0o777;
+  expect(originalMode).toBe(0o755);
   await prepare(opts);
-  expect((await stat(internal)).mode & 0o777).toBe(0o755);
+  expect((await stat(internal)).mode & 0o777).toBe(originalMode);
   const original = await save({ ...opts, record: record() });
   const branch = "feature/\u{1F408}";
   const other = await save({ ...opts, branch, record: record("9".repeat(32)) });

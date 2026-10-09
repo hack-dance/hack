@@ -2,7 +2,7 @@ use super::*;
 use crate::provider::{host_endpoint::HostEndpoint, relay_loop::Limits, relay_owner::OwnerLimits};
 use std::{
     net::TcpListener,
-    os::unix::net::UnixStream,
+    os::unix::{net::UnixStream, process::ExitStatusExt},
     process::{Child, Command, Stdio},
     sync::atomic::{AtomicU64, Ordering},
 };
@@ -292,7 +292,8 @@ fn dead_publication_recovery_requires_unchanged_receipt_and_socket() {
         #[cfg(target_os = "macos")]
         assert!(pin.verify_dead().is_err());
         child.0.kill().unwrap();
-        child.0.wait().unwrap();
+        let exit = child.0.wait().unwrap();
+        assert_eq!(exit.signal(), Some(libc::SIGKILL));
         let mut replacement = None;
         if replace_socket {
             fs::remove_file(&pin.paths.socket).unwrap();
@@ -307,7 +308,22 @@ fn dead_publication_recovery_requires_unchanged_receipt_and_socket() {
             assert!(pin.paths.receipt.exists());
         } else {
             #[cfg(target_os = "macos")]
-            pin.verify_dead().unwrap();
+            {
+                let dead = pin.verify_dead();
+                if dead.is_err() {
+                    let receipt_unchanged = pin.verify_receipt().is_ok();
+                    let socket_unchanged = pin.verify_socket().is_ok();
+                    let process_absent = match identity::alive(pin.receipt.process.pid) {
+                        Ok(false) => "true",
+                        Ok(true) => "false",
+                        Err(_) => "unknown",
+                    };
+                    panic!(
+                        "Dead relay publication refused: receipt_unchanged={receipt_unchanged} socket_unchanged={socket_unchanged} process_absent={process_absent} child_signal={:?}",
+                        exit.signal()
+                    );
+                }
+            }
             pin.recover().unwrap();
             pin.recover().unwrap();
             assert!(absent(&pin.paths.socket).unwrap());

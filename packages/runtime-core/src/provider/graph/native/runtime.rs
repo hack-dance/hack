@@ -8,7 +8,9 @@ mod exec;
 #[cfg(target_os = "macos")]
 pub(super) use exec::execute as service_exec;
 #[cfg(any(target_os = "macos", test))]
-pub(super) use exec::{ExecSelection, ServiceExec};
+pub(super) use exec::ExecSelection;
+#[cfg(target_os = "macos")]
+pub(super) use exec::ServiceExec;
 
 trait Backend {
     #[cfg(any(target_os = "macos", test))]

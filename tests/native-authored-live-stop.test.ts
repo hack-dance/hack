@@ -1,5 +1,6 @@
-import { afterEach, test as bunTest, expect } from "bun:test";
+import { afterEach, test as bunTest, expect, spyOn } from "bun:test";
 import { createHash } from "node:crypto";
+import * as files from "node:fs/promises";
 import {
   mkdir,
   mkdtemp,
@@ -12,6 +13,8 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseNativeAuthoredReceipt } from "../src/backends/native-authored-graph-protocol.ts";
+import { readNativeAuthoredLiveStopRecovery } from "../src/backends/native-authored-live-stop.ts";
+import { captureNativeAuthoredProcessIncarnation } from "../src/backends/native-authored-process-incarnation.ts";
 import {
   withNativeAuthoredProjectAdmission as admit,
   stopNativeAuthoredProject,
@@ -338,3 +341,131 @@ test("no-host wrong Removed binding and pre-cancellation retain all evidence", a
     }
   });
 });
+
+for (const outcome of [
+  "complete",
+  "live",
+  "proof-drift",
+  "last-proof-rebirth",
+  "forged",
+] as const) {
+  test(`new original settlement retains exact evidence on ${outcome}`, async () => {
+    const opts = await fixture();
+    await setup(opts, async (value) => {
+      const child = Bun.spawn(["/bin/sleep", "30"], {
+        detached: true,
+        stdin: "ignore",
+        stdout: "ignore",
+        stderr: "ignore",
+      });
+      let owner:
+        | Awaited<ReturnType<typeof value.admission.publishLiveStop>>
+        | undefined;
+      let openSpy: ReturnType<typeof spyOn<typeof files, "open">> | undefined;
+      try {
+        const original = await captureNativeAuthoredProcessIncarnation({
+          pid: child.pid,
+          selected: "/bin/sleep",
+        });
+        let retireArmed = false,
+          proofRead = false,
+          replaced = false;
+        const originalOpen = files.open;
+        openSpy = spyOn(files, "open").mockImplementation((...args) => {
+          if (retireArmed && args[0] === `${value.path}.settled`) {
+            proofRead = true;
+          }
+          return Reflect.apply(originalOpen, files, args);
+        });
+        const publication = {
+          expectedStart: value.start,
+          expectedRun: value.ready,
+          source: value.source,
+          original,
+          assertFresh: async () => {
+            if (
+              outcome === "last-proof-rebirth" &&
+              retireArmed &&
+              proofRead &&
+              !replaced
+            ) {
+              replaced = true;
+              const text = await Bun.file(`${value.path}.settled`).text();
+              await rename(
+                `${value.path}.settled`,
+                `${value.path}.original-settled`
+              );
+              await writeFile(`${value.path}.settled`, text, { mode: 0o600 });
+            }
+          },
+          stop: async () => false,
+        };
+        if (outcome === "forged") {
+          await expect(
+            value.admission.publishLiveStop({
+              ...publication,
+              original: structuredClone(original),
+            })
+          ).rejects.toThrow();
+          expect(await Bun.file(value.path).exists()).toBe(false);
+          return;
+        }
+        owner = await value.admission.publishLiveStop(publication);
+        if (outcome === "live") {
+          await expect(owner.settled()).rejects.toThrow();
+        }
+        child.kill("SIGKILL");
+        expect(await child.exited).toBeGreaterThan(0);
+        if (outcome === "live") {
+          await expect(owner.settled()).rejects.toThrow();
+          expect(await Bun.file(`${value.path}.settled`).exists()).toBe(false);
+          expect(await Bun.file(value.path).exists()).toBe(true);
+          return;
+        }
+        await owner.settled();
+        const record = await Bun.file(value.path).json();
+        expect(record.version).toBe(2);
+        expect(record.original).toEqual(original);
+        const observation = await readNativeAuthoredLiveStopRecovery({
+          scope: record.scope,
+          path: value.path,
+          ready: value.path.replace(".live-stop.json", ".json"),
+          start: value.path.replace(".live-stop.json", ".start.json"),
+          source: value.source.path,
+          run: "a".repeat(32),
+        });
+        expect(observation.settled).not.toBeNull();
+        await expect(owner.settled()).rejects.toThrow();
+        if (outcome === "proof-drift") {
+          await writeFile(`${value.path}.settled`, "{}", { mode: 0o600 });
+          await expect(owner.retire(cleaned())).rejects.toThrow();
+          expect(await Bun.file(value.path).exists()).toBe(true);
+          expect(await Bun.file(value.source.path).exists()).toBe(true);
+          return;
+        }
+        if (outcome === "last-proof-rebirth") {
+          retireArmed = true;
+          await expect(owner.retire(cleaned())).rejects.toThrow();
+          expect(replaced).toBe(true);
+          expect(await Bun.file(value.path).exists()).toBe(true);
+          expect(await Bun.file(`${value.path}.settled`).text()).toBe(
+            await Bun.file(`${value.path}.original-settled`).text()
+          );
+          return;
+        }
+        await owner.retire(cleaned());
+        expect(await Bun.file(value.path).exists()).toBe(false);
+        expect(await Bun.file(`${value.path}.settled`).exists()).toBe(false);
+      } finally {
+        if (child.exitCode === null) {
+          child.kill("SIGKILL");
+        }
+        await child.exited;
+        await owner?.close(true);
+        if (!unknown) {
+          openSpy?.mockRestore();
+        }
+      }
+    });
+  });
+}

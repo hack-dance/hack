@@ -10,6 +10,7 @@ import type { NativeAuthoredReceipt } from "./native-authored-graph-protocol.ts"
 import type { NativeAuthoredHookOwner } from "./native-authored-hook-journal.ts";
 import { serveNativeHookStop } from "./native-authored-hook-stop.ts";
 import type { NativeAuthoredLiveStop } from "./native-authored-live-stop.ts";
+import type { NativeAuthoredProcessIncarnation } from "./native-authored-process-incarnation.ts";
 import type {
   NativeAuthoredProjectAdmission,
   NativeAuthoredProjectRunSelection,
@@ -192,6 +193,7 @@ export async function publishAuthoredReady(
       readonly close: (force?: boolean) => Promise<void>;
     }) => void;
     readonly liveStop: (value: NativeAuthoredLiveStop) => void;
+    readonly original?: NativeAuthoredProcessIncarnation;
     readonly assertTool?: () => Promise<void>;
   },
   receipt: NativeAuthoredReceipt,
@@ -248,6 +250,7 @@ export async function publishAuthoredReady(
     await opts.hookOwner.publishStop(endpoint);
   } else {
     const endpoint = await opts.admission.publishLiveStop({
+      original: opts.original,
       expectedStart: opts.admitted.start,
       expectedRun: opts.admitted.ready,
       source: opts.admitted.source,

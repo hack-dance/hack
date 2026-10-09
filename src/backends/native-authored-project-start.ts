@@ -36,6 +36,10 @@ import {
 } from "./native-authored-host-processes.ts";
 import type { NativeAuthoredLiveStop } from "./native-authored-live-stop.ts";
 import {
+  captureNativeAuthoredProcessIncarnation,
+  type NativeAuthoredProcessIncarnation,
+} from "./native-authored-process-incarnation.ts";
+import {
   loadNativeAuthoredProjectRun,
   type NativeAuthoredProjectAdmission,
   type NativeAuthoredProjectRunScope,
@@ -471,6 +475,7 @@ async function runPreparedLifecycle(ctx: {
   let code = 1;
   let liveStop: NativeAuthoredLiveStop | undefined;
   let processSettled = false;
+  let original: NativeAuthoredProcessIncarnation | undefined;
   let liveStopRequested = false;
   try {
     code = await serveNativeAuthoredProjectGraph({
@@ -489,11 +494,19 @@ async function runPreparedLifecycle(ctx: {
         ctx.hookOwner === undefined
           ? { requested: () => liveStopRequested }
           : undefined,
-      onSettled: () => {
+      onSettled: async () => {
+        await liveStop?.settled();
         processSettled = true;
         return undefined;
       },
-      onGroup: ctx.hookOwner?.graphChild,
+      onGroup:
+        ctx.hookOwner?.graphChild ??
+        (async (pid) => {
+          original = await captureNativeAuthoredProcessIncarnation({
+            pid,
+            selected: ctx.options.runtime.binary,
+          });
+        }),
       beforeStop: ctx.hookOwner
         ? async () => {
             const result = await ctx.phase("down.before");
@@ -546,6 +559,7 @@ async function runPreparedLifecycle(ctx: {
             },
             stopped: ctx.stopped,
             endpoint: ctx.endpoint,
+            original,
             liveStop: (value) => {
               liveStop = value;
             },

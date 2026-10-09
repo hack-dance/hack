@@ -39,7 +39,7 @@ type ProcessOptions = {
   /** No-host frontend stop reuses this original foreground owner; no hook permit. */
   readonly liveStopOwner?: { readonly requested: () => boolean };
   /** Original owner only: emitted after captured exit/drain and group absence. */
-  readonly onSettled?: () => undefined;
+  readonly onSettled?: () => undefined | Promise<undefined>;
   readonly forceSignal?: AbortSignal;
   readonly onStopFailure?: () => void;
   /** Durable capture in the existing frontend owner, before private input delivery. */
@@ -459,7 +459,7 @@ async function serveGraphProcess(
     if (opts.beforeStop || opts.liveStopOwner) {
       await requireGroupAbsent(child.pid);
     }
-    opts.onSettled?.();
+    await opts.onSettled?.();
   }
 }
 

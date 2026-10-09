@@ -44,6 +44,7 @@ import {
   publishNativeAuthoredLiveStop,
   requestNativeAuthoredLiveStop,
 } from "./native-authored-live-stop.ts";
+import type { NativeAuthoredProcessIncarnation } from "./native-authored-process-incarnation.ts";
 
 const LIMIT = 64 * 1024;
 const SOURCE_LIMIT = 1024 * 1024;
@@ -111,6 +112,7 @@ export type NativeAuthoredProjectAdmission = {
   readonly hooksRetained: () => Promise<boolean>;
   readonly liveStopRetained: () => Promise<boolean>;
   readonly publishLiveStop: (opts: {
+    readonly original?: NativeAuthoredProcessIncarnation;
     readonly expectedStart: NativeAuthoredProjectStartSelection;
     readonly expectedRun: NativeAuthoredProjectRunSelection;
     readonly source: NativeAuthoredProjectSource;
@@ -970,6 +972,7 @@ export async function withNativeAuthoredProjectAdmission<T>(
             store: liveStopStore(store, run),
             run,
             receipt: ready.record.receipt,
+            original: input.original,
             assertOwner: check,
             stop: input.stop,
           });

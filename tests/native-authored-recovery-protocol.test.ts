@@ -345,3 +345,89 @@ test("native recovered result closes outcome flags unknown fields and nested pri
     }
   }
 });
+
+test("graph4 recovery mirrors enrolled data and installed tool admission without widening other receipt families", () => {
+  const base = receipt();
+  const namespace = base.review.provenance.namespace,
+    owner = "9".repeat(32);
+  const value = {
+    ...base,
+    version: 4,
+    data: {
+      database: {
+        binding: {
+          scope: { namespace, storage: "database", owner },
+          guest: {
+            owner: base.owner,
+            boot_id: base.boot,
+            storage: {
+              device: 0,
+              inode: 14,
+              bytes: 128,
+              uuid: "00000000-0000-0000-0000-000000000002",
+            },
+          },
+          policy: { driver: "local", scope: "local", options: {} },
+        },
+        state: {
+          status: "enrolled",
+          volume: {
+            name: `hkp-${namespace}-${owner}-database`,
+            created_at: "2026-10-08T00:00:01Z",
+            directory: { device: 0, inode: 15 },
+          },
+        },
+      },
+    },
+    data_mounts: {
+      web: [{ storage: "database", target: "/data", read_only: false }],
+    },
+    data_tool: {
+      version: 1,
+      artifact: "a".repeat(64),
+      bytes: 8192,
+      root: { device: 0, inode: 1 },
+      helper: { device: 0, inode: 2 },
+    },
+  };
+  const admitted = parseNativeAuthoredReceipt(value);
+  expect(
+    parseNativeAuthoredRecoverySelection({
+      value: { ...sessionSelection(), receipt: admitted },
+      admitted,
+    }).receipt
+  ).toEqual(admitted);
+  for (const candidate of [
+    { ...value, data_tool: undefined },
+    { ...value, data_tool: { ...value.data_tool, root: null, helper: null } },
+    {
+      ...value,
+      data: {
+        database: {
+          ...value.data.database,
+          state: { status: "reserved", intent: "1".repeat(32) },
+        },
+      },
+    },
+    { ...value, data_tool: { ...value.data_tool, helper: null } },
+    { ...value, version: 5 },
+  ]) {
+    expect(() => {
+      const other = parseNativeAuthoredReceipt(candidate);
+      parseNativeAuthoredRecoverySelection({
+        value: { ...sessionSelection(), receipt: other },
+        admitted: other,
+      });
+    }).toThrow();
+  }
+  const changed = parseNativeAuthoredReceipt({
+    ...value,
+    data_tool: { ...value.data_tool, artifact: "b".repeat(64) },
+  });
+  expect(() =>
+    parseNativeAuthoredRecoverySelection({
+      value: { ...sessionSelection(), receipt: changed },
+      admitted,
+    })
+  ).toThrow();
+});

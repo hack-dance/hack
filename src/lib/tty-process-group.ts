@@ -85,3 +85,29 @@ export function hasControllingTerminal(): boolean {
   closeSync(descriptor);
   return true;
 }
+
+/** Read-only POSIX session lookup. No process group or signal operation is
+ * exposed. A negative result is unknown, never evidence of absence. Darwin system
+ * processes can report session zero; original detached owners require a positive SID. */
+export function openProcessSessionInspector() {
+  if (process.platform !== "darwin" && process.platform !== "linux") {
+    throw new Error(
+      "Process session inspection is unavailable; values omitted."
+    );
+  }
+  const library =
+    process.platform === "darwin" ? "/usr/lib/libSystem.B.dylib" : "libc.so.6";
+  const libc = dlopen(library, {
+    getsid: { args: [FFIType.i32], returns: FFIType.i32 },
+  });
+  return {
+    session(pid: number): number | null {
+      if (!Number.isSafeInteger(pid) || pid < 1 || pid > 2_147_483_647) {
+        return null;
+      }
+      const value = libc.symbols.getsid(pid);
+      return Number.isSafeInteger(value) && value >= 0 ? value : null;
+    },
+    close: () => libc.close(),
+  };
+}

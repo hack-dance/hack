@@ -1,4 +1,4 @@
-import { afterEach, expect, spyOn, test } from "bun:test";
+import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
 import { createHash } from "node:crypto";
 import * as files from "node:fs/promises";
 import {
@@ -16,19 +16,49 @@ import {
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { parseNativeAuthoredReceipt } from "../src/backends/native-authored-graph-protocol.ts";
+import * as incarnation from "../src/backends/native-authored-process-incarnation.ts";
 import { recoverNativeAuthoredProject } from "../src/backends/native-authored-project-recovery.ts";
 import {
   loadNativeAuthoredProjectRun,
   withNativeAuthoredProjectAdmission,
 } from "../src/backends/native-authored-project-run.ts";
 import type { invokeNativeRuntime } from "../src/backends/native-runtime-client.ts";
+import { tryNativeAuthoredCommand } from "../src/lib/native-authored-command.ts";
 
-const fixtures: Array<{ root: string; child: ReturnType<typeof Bun.spawn> }> =
-  [];
+let activeOriginalCases = 0;
+let originalLifetimeUnknown = false;
+beforeEach(() => {
+  if (originalLifetimeUnknown) {
+    throw new Error("Original-owner fixture lifetime unknown; retained.");
+  }
+});
+function originalCase(name: string, body: () => Promise<void>) {
+  test(name, async () => {
+    activeOriginalCases++;
+    try {
+      await body();
+    } finally {
+      activeOriginalCases--;
+    }
+  }, 30_000);
+}
+const fixtures: Array<{
+  root: string;
+  child: ReturnType<typeof Bun.spawn>;
+  finish?: () => Promise<void>;
+}> = [];
 afterEach(async () => {
+  if (activeOriginalCases !== 0) {
+    originalLifetimeUnknown = true;
+  }
+  if (originalLifetimeUnknown) {
+    return;
+  }
   const retained = fixtures.splice(0);
   for (const current of retained) {
-    if (current.child.exitCode === null) {
+    if (current.finish) {
+      await current.finish();
+    } else if (current.child.exitCode === null) {
       current.child.kill("SIGKILL");
     }
     await current.child.exited;
@@ -100,7 +130,7 @@ function removed() {
     ),
   });
 }
-async function fixture(bootSession = false) {
+async function fixture(bootSession = false, liveStop = false) {
   const root = await realpath(
     await mkdtemp(join(tmpdir(), "native-frontend-recovery-"))
   );
@@ -116,12 +146,30 @@ async function fixture(bootSession = false) {
   const program = [
     `import { withNativeAuthoredProjectAdmission } from ${JSON.stringify(join(import.meta.dir, "../src/backends/native-authored-project-run.ts"))};`,
     `const scope = ${JSON.stringify(scope)}; const receipt = ${JSON.stringify(receipt())};`,
+    ...(liveStop ? ["let native, phase='admission'; try {"] : []),
     "await withNativeAuthoredProjectAdmission(scope, async admission => {",
-    "await admission.prepareSource({run:receipt.review.provenance.run,metadata:{metadata_version:1,overlay:null,overlay_exists:true,workloads:{web:{TOKEN:{scope:'global',secret:true}}},inactive_scopes:[]}});",
+    ...(liveStop ? ["phase='source';"] : []),
+    "const source=await admission.prepareSource({run:receipt.review.provenance.run,metadata:{metadata_version:1,overlay:null,overlay_exists:true,workloads:{web:{TOKEN:{scope:'global',secret:true}}},inactive_scopes:[]}});",
+    ...(liveStop ? ["phase='reserve';"] : []),
     "const start = await admission.reserve({review:receipt.review});",
-    "await admission.publish({expectedStart:start,record:{version:2,kind:'native-authored-project-run',receipt}});",
+    ...(liveStop ? ["phase='publish';"] : []),
+    "const ready=await admission.publish({expectedStart:start,record:{version:2,kind:'native-authored-project-run',receipt}});",
+    ...(liveStop
+      ? [
+          `const {captureNativeAuthoredProcessIncarnation}=await import(${JSON.stringify(join(import.meta.dir, "../src/backends/native-authored-process-incarnation.ts"))});`,
+          "phase='spawn';native=Bun.spawn(['/bin/sleep','120'],{detached:true,stdin:'ignore',stdout:'ignore',stderr:'ignore'});",
+          "phase='capture';const original=await captureNativeAuthoredProcessIncarnation({pid:native.pid,selected:'/bin/sleep'});",
+          "phase='endpoint';await admission.publishLiveStop({expectedStart:start,expectedRun:ready,source,original,assertFresh:async()=>undefined,stop:async()=>false});",
+          "void (async()=>{while(!(await Bun.file(scope.projectRoot+'/stop-original').exists()))await Bun.sleep(10);if(native.exitCode===null)native.kill('SIGKILL');await native.exited;await Bun.write(scope.projectRoot+'/native-settled','yes');process.exit(77)})();",
+        ]
+      : []),
     "await Bun.write(scope.projectRoot+'/witness','ready');",
     "await new Promise(resolve=>setTimeout(resolve,120000)); });",
+    ...(liveStop
+      ? [
+          "} catch {await Bun.write(scope.projectRoot+'/setup-failure',phase);throw new Error('Original fixture setup refused; values omitted.')} finally {if(native){if(native.exitCode===null)native.kill('SIGKILL');await native.exited;await Bun.write(scope.projectRoot+'/native-settled','yes');}}",
+        ]
+      : []),
   ].join("\n");
   const child = Bun.spawn([process.execPath, "--eval", program], {
     stdin: "ignore",
@@ -129,11 +177,50 @@ async function fixture(bootSession = false) {
     stderr: "ignore",
     env: { PATH: process.env.PATH, TMPDIR: process.env.TMPDIR },
   });
-  fixtures.push({ root, child });
+  const finish = liveStop
+    ? async () => {
+        if (child.exitCode === null) {
+          await Bun.write(join(root, "stop-original"), "yes");
+        }
+        const complete = child.exited.then(() => true);
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const known = await Promise.race([
+          complete,
+          new Promise<false>((resolve) => {
+            timer = setTimeout(() => resolve(false), 2000);
+          }),
+        ]);
+        clearTimeout(timer);
+        if (
+          !(known && (await Bun.file(join(root, "native-settled")).exists()))
+        ) {
+          originalLifetimeUnknown = true;
+          throw new Error("Original fixture settlement is unknown; retained.");
+        }
+      }
+    : undefined;
+  fixtures.push({ root, child, finish });
   const deadline = performance.now() + 5000;
   while (!(await Bun.file(join(root, "witness")).exists())) {
     if (child.exitCode !== null || performance.now() >= deadline) {
-      throw new Error("Owned frontend did not publish Ready.");
+      const captured =
+        liveStop && (await Bun.file(join(root, "setup-failure")).exists())
+          ? await Bun.file(join(root, "setup-failure")).text()
+          : "unknown";
+      const phase = [
+        "admission",
+        "source",
+        "reserve",
+        "publish",
+        "spawn",
+        "capture",
+        "endpoint",
+      ].includes(captured)
+        ? captured
+        : "unknown";
+      throw new Error(
+        `Owned frontend did not publish Ready (${phase}); values omitted.`
+      );
     }
     await Bun.sleep(10);
   }
@@ -218,7 +305,7 @@ async function fixture(bootSession = false) {
   const options = {
     scope,
     runtime: {
-      binary: join(root, "native-request-seam"),
+      binary: liveStop ? "/bin/sleep" : join(root, "native-request-seam"),
       home: scope.nativeHome,
     },
     timeoutMs: 30_000,
@@ -236,8 +323,12 @@ async function fixture(bootSession = false) {
     result,
     cleanupCalls: () => cleanupCalls,
     async kill() {
-      child.kill("SIGKILL");
-      expect(await child.exited).toBe(137);
+      if (liveStop) {
+        await Bun.write(join(root, "stop-original"), "yes");
+      } else {
+        child.kill("SIGKILL");
+      }
+      expect(await child.exited).toBe(liveStop ? 77 : 137);
     },
   };
 }
@@ -681,3 +772,192 @@ test("fresh recovery release failure retains each exact owner until a dead-owner
     expect(await Bun.file(owner).exists()).toBe(false);
   }
 }, 30_000);
+
+originalCase(
+  "new no-host death uses real read-only quiescence facts and retires only its exact bound record",
+  async () => {
+    const current = await fixture(true, true);
+    await expect(
+      recoverNativeAuthoredProject(current.options)
+    ).rejects.toThrow();
+    expect(current.calls).toEqual([]);
+    await current.kill();
+    let observedFailure: unknown;
+    const observe = incarnation.assertNativeAuthoredProcessQuiescent;
+    const observer = spyOn(
+      incarnation,
+      "assertNativeAuthoredProcessQuiescent"
+    ).mockImplementation(async (...args) => {
+      try {
+        return await observe(...args);
+      } catch (error) {
+        observedFailure = error;
+        throw error;
+      }
+    });
+    try {
+      if (process.platform === "darwin") {
+        let actualFailure: unknown;
+        const publicResult = tryNativeAuthoredCommand({
+          selected: { kind: "native", projectRoot: current.root },
+          options: {
+            cwd: current.root,
+            operation: "down",
+            recover: true,
+            instance: "qa",
+          },
+          env: {
+            HACK_RUNTIME_BACKEND: "native",
+            HACK_NATIVE_BINARY: "/bin/sleep",
+            HACK_NATIVE_HOME: current.scope.nativeHome,
+            HACK_COMPOSE_STARTUP_TIMEOUT_MS: "30000",
+          },
+          recover: async (options) => {
+            try {
+              return await recoverNativeAuthoredProject({
+                ...options,
+                request: current.request,
+              });
+            } catch (error) {
+              actualFailure = error;
+              throw error;
+            }
+          },
+          serve: () => {
+            throw new Error("Recovery must not start a generation.");
+          },
+        });
+        try {
+          expect(await publicResult).toBe(0);
+        } catch (error) {
+          throw observedFailure ?? actualFailure ?? error;
+        }
+      } else {
+        expect(
+          (await recoverNativeAuthoredProject(current.options)).receipt.phase
+        ).toBe("removed");
+      }
+    } finally {
+      if (!originalLifetimeUnknown) {
+        observer.mockRestore();
+      }
+    }
+    expect(current.cleanupCalls()).toBe(1);
+    expect((await readdir(current.paths.dir)).sort()).toEqual(
+      [".gitignore", basename(current.paths.intent)].sort()
+    );
+    const saved = JSON.parse(await Bun.file(current.paths.intent).text());
+    expect(saved.record.version).toBe(2);
+    expect(saved.record.live_stop_retired).toBe(true);
+    expect(saved.record.live_stop.original.parent).toBe(current.child.pid);
+  }
+);
+for (const attack of [
+  "legacy",
+  "foreign",
+  "replaced",
+  "occupied",
+  "last-await",
+] as const) {
+  originalCase(
+    `new no-host recovery retains original bindings on ${attack}`,
+    async () => {
+      const current = await fixture(true, true);
+      await current.kill();
+      const endpoint = (await readdir(current.paths.dir)).find((name) =>
+        name.endsWith(".live-stop.json")
+      );
+      if (!endpoint) {
+        throw new Error("Missing owned endpoint");
+      }
+      const path = join(current.paths.dir, endpoint);
+      const text = await Bun.file(path).text();
+      const value = JSON.parse(text);
+      if (attack === "legacy") {
+        value.version = 1;
+        value.original = undefined;
+        await files.writeFile(path, JSON.stringify(value));
+      }
+      if (attack === "foreign") {
+        value.original.parent++;
+        await files.writeFile(path, JSON.stringify(value));
+      }
+      if (attack === "replaced") {
+        await rename(path, `${path}.old`);
+        await files.writeFile(path, text, { mode: 0o600 });
+      }
+      if (attack === "occupied") {
+        value.original.pid = process.pid;
+        value.original.group = process.pid;
+        value.original.session = String(process.pid);
+        await files.writeFile(path, JSON.stringify(value));
+      }
+      const request: typeof invokeNativeRuntime = async (opts) => {
+        const reply = await current.request(opts);
+        if (attack === "last-await" && opts.args[2] === "recover-live-owner") {
+          await files.writeFile(path, `${text} `);
+        }
+        return reply;
+      };
+      // Rebirth before the first selection is not historical authority; pinning is
+      // performed under the recovery lease, so replace during the selected await.
+      if (attack === "replaced") {
+        const atSelection: typeof invokeNativeRuntime = async (opts) => {
+          const reply = await request(opts);
+          if (opts.args[2] === "recovery-selection") {
+            await rename(path, `${path}.again`);
+            await files.writeFile(path, text, { mode: 0o600 });
+          }
+          return reply;
+        };
+        await expect(
+          recoverNativeAuthoredProject({
+            ...current.options,
+            request: atSelection,
+          })
+        ).rejects.toThrow();
+      } else {
+        await expect(
+          recoverNativeAuthoredProject({ ...current.options, request })
+        ).rejects.toThrow();
+      }
+      expect(await Bun.file(current.paths.ready).exists()).toBe(true);
+      expect(await Bun.file(current.paths.start).exists()).toBe(true);
+      expect(await Bun.file(current.paths.source).exists()).toBe(true);
+      expect(await Bun.file(path).exists()).toBe(true);
+      expect(current.cleanupCalls()).toBe(attack === "last-await" ? 1 : 0);
+    }
+  );
+}
+
+originalCase(
+  "unknown original session census retains every binding before native selection",
+  async () => {
+    const current = await fixture(true, true);
+    await current.kill();
+    const spy = spyOn(
+      incarnation,
+      "assertNativeAuthoredProcessQuiescent"
+    ).mockRejectedValue(
+      new Error("Unknown complete session census; values omitted.")
+    );
+    try {
+      await expect(
+        recoverNativeAuthoredProject(current.options)
+      ).rejects.toThrow();
+      expect(current.calls).toEqual([]);
+      for (const path of [
+        current.paths.ready,
+        current.paths.start,
+        current.paths.source,
+      ]) {
+        expect(await Bun.file(path).exists()).toBe(true);
+      }
+      expect(await Bun.file(current.paths.intent).exists()).toBe(false);
+    } finally {
+      if (!originalLifetimeUnknown) {
+        spy.mockRestore();
+      }
+    }
+  }
+);

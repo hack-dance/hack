@@ -18,6 +18,12 @@ import {
   requestNativeHookStop,
   serveNativeHookStop,
 } from "./native-authored-hook-stop.ts";
+import {
+  assertNativeAuthoredOriginalGroupAbsent,
+  isCapturedNativeAuthoredProcess,
+  type NativeAuthoredProcessIncarnation,
+  parseNativeAuthoredProcessIncarnation,
+} from "./native-authored-process-incarnation.ts";
 
 const LIMIT = 64 * 1024;
 const SHA = /^[a-f0-9]{64}$/;
@@ -31,6 +37,7 @@ type Pin = {
 export type NativeAuthoredLiveStop = {
   readonly retire: (cleaned: NativeAuthoredReceipt) => Promise<void>;
   readonly close: (force?: boolean) => Promise<void>;
+  readonly settled: () => Promise<void>;
 };
 type Store = {
   readonly scope: string;
@@ -45,7 +52,8 @@ type Store = {
   readonly check: () => Promise<void>;
 };
 type Record = {
-  readonly version: 1;
+  readonly version: 1 | 2;
+  readonly original?: NativeAuthoredProcessIncarnation;
   readonly kind: "native-authored-live-stop";
   readonly mode: "no-host";
   readonly scope: string;
@@ -121,9 +129,14 @@ function parse(value: unknown, store: Store, run: string): Record {
   if (
     !(
       isRecord(value) &&
-      keys(value, "kind,mode,port,ready,run,scope,source,start,token,version")
+      keys(
+        value,
+        value.version === 2
+          ? "kind,mode,original,port,ready,run,scope,source,start,token,version"
+          : "kind,mode,port,ready,run,scope,source,start,token,version"
+      )
     ) ||
-    value.version !== 1 ||
+    (value.version !== 1 && value.version !== 2) ||
     value.kind !== "native-authored-live-stop" ||
     value.mode !== "no-host" ||
     value.scope !== store.scope ||
@@ -139,7 +152,10 @@ function parse(value: unknown, store: Store, run: string): Record {
     return refused();
   }
   return {
-    version: 1,
+    version: value.version,
+    ...(value.version === 2
+      ? { original: parseNativeAuthoredProcessIncarnation(value.original) }
+      : {}),
     kind: "native-authored-live-stop",
     mode: "no-host",
     scope: store.scope,
@@ -167,9 +183,18 @@ export async function publishNativeAuthoredLiveStop(input: {
   readonly receipt: NativeAuthoredReceipt;
   readonly assertOwner: () => Promise<void>;
   readonly stop: () => Promise<boolean>;
+  readonly original?: NativeAuthoredProcessIncarnation;
   readonly onRefusal?: (stage: "request" | "owner" | "stop") => void;
 }): Promise<NativeAuthoredLiveStop> {
   const { run, receipt, assertOwner, stop, onRefusal } = input;
+  const capturedOriginal = input.original;
+  if (capturedOriginal && !isCapturedNativeAuthoredProcess(capturedOriginal)) {
+    return refused();
+  }
+  const original =
+    capturedOriginal === undefined
+      ? undefined
+      : parseNativeAuthoredProcessIncarnation(capturedOriginal);
   const store = {
     ...input.store,
     blockers: [...input.store.blockers],
@@ -184,11 +209,13 @@ export async function publishNativeAuthoredLiveStop(input: {
   }
   await available(store);
   await absent(store.path);
+  await absent(`${store.path}.settled`);
   const ready = await capture(store.ready),
     start = await capture(store.start),
     source = await capture(store.source, 1024 * 1024);
   let selected: Captured | undefined;
   let active = false;
+  let settlementAttempted = false;
   const assertFresh = async () => {
     if (!(active && selected)) {
       return refused();
@@ -209,7 +236,8 @@ export async function publishNativeAuthoredLiveStop(input: {
   });
   try {
     const value: Record = {
-      version: 1,
+      version: original ? 2 : 1,
+      ...(original ? { original } : {}),
       kind: "native-authored-live-stop",
       mode: "no-host",
       scope: store.scope,
@@ -237,6 +265,30 @@ export async function publishNativeAuthoredLiveStop(input: {
     await assertFresh();
     return Object.freeze({
       close: endpoint.close,
+      async settled() {
+        if (!(original && selected)) {
+          return;
+        }
+        if (settlementAttempted || !capturedOriginal) {
+          return refused();
+        }
+        settlementAttempted = true;
+        await assertNativeAuthoredOriginalGroupAbsent(capturedOriginal);
+        await assertFresh();
+        const text = JSON.stringify({
+          version: 1,
+          kind: "native-authored-original-settled",
+          record: selected.pin,
+          original,
+        });
+        const written = await writeExclusive(`${store.path}.settled`, text);
+        await synchronizeDirectories(store.held);
+        const proof = await capture(`${store.path}.settled`);
+        if (!sameFile(written, proof.info) || proof.text !== text) {
+          return refused();
+        }
+        await assertFresh();
+      },
       async retire(cleaned: NativeAuthoredReceipt) {
         if (
           cleaned.phase !== "removed" ||
@@ -251,6 +303,30 @@ export async function publishNativeAuthoredLiveStop(input: {
         // Retire this endpoint first: a failed unlink/sync still leaves the exact
         // start/ready/source attempt blocking another startup. Its original graph
         // must already have settled and authenticated Removed before this call.
+        await assertFresh();
+        if (original) {
+          const proof = await readNativeAuthoredLiveStopRecovery({
+            scope: store.scope,
+            path: store.path,
+            ready: store.ready,
+            start: store.start,
+            source: store.source,
+            run,
+          });
+          if (!proof.settled) {
+            return refused();
+          }
+          await assertFresh();
+          const exact = await capture(`${store.path}.settled`);
+          if (
+            exact.info.dev !== proof.settled.dev ||
+            exact.info.ino !== proof.settled.ino ||
+            digest(exact.text) !== proof.settled.sha256
+          ) {
+            return refused();
+          }
+          await unlink(`${store.path}.settled`);
+        }
         await assertFresh();
         await unlink(store.path);
         await synchronizeDirectories(store.held);
@@ -324,4 +400,90 @@ export async function requestNativeAuthoredLiveStop(input: {
   }
   await store.check();
   return true;
+}
+
+export type NativeAuthoredLiveStopRecovery = {
+  readonly identity: {
+    readonly dev: number;
+    readonly ino: number;
+    readonly sha256: string;
+  };
+  readonly original: NativeAuthoredProcessIncarnation;
+  readonly settled: {
+    readonly dev: number;
+    readonly ino: number;
+    readonly sha256: string;
+  } | null;
+};
+/** Read-only selection. Neither this record nor its settlement observation is a
+ * recovery permit; the existing recovered mutation owner must recheck census,
+ * graph, source and file identities around every effect and retirement. */
+export async function readNativeAuthoredLiveStopRecovery(opts: {
+  readonly scope: string;
+  readonly path: string;
+  readonly ready: string;
+  readonly start: string;
+  readonly source: string;
+  readonly run: string;
+}): Promise<NativeAuthoredLiveStopRecovery> {
+  const current = await capture(opts.path);
+  const value = parse(
+    JSON.parse(current.text),
+    {
+      ...opts,
+      hookOwner: "",
+      hookStop: "",
+      blockers: [],
+      held: [],
+      check: async () => undefined,
+    },
+    opts.run
+  );
+  if (value.version !== 2 || !value.original) {
+    return refused();
+  }
+  for (const [expected, path, limit] of [
+    [value.ready, opts.ready, LIMIT],
+    [value.start, opts.start, LIMIT],
+    [value.source, opts.source, 1024 * 1024],
+  ] as const) {
+    const selected = await capture(path, limit);
+    if (JSON.stringify(expected) !== JSON.stringify(selected.pin)) {
+      return refused();
+    }
+  }
+  let settled: NativeAuthoredLiveStopRecovery["settled"] = null;
+  try {
+    const proof = await capture(`${opts.path}.settled`);
+    if (
+      proof.text !==
+      JSON.stringify({
+        version: 1,
+        kind: "native-authored-original-settled",
+        record: current.pin,
+        original: value.original,
+      })
+    ) {
+      return refused();
+    }
+    settled = {
+      dev: proof.info.dev,
+      ino: proof.info.ino,
+      sha256: digest(proof.text),
+    };
+  } catch (error) {
+    if (!hasCode(error, "ENOENT")) {
+      throw error;
+    }
+  }
+  await unchanged(current);
+  return {
+    identity: {
+      dev: current.info.dev,
+      ino: current.info.ino,
+      sha256: digest(current.text),
+    },
+    original: value.original,
+    settled,
+  };
 }

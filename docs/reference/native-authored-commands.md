@@ -85,8 +85,39 @@ created. Success requires authenticated Removed, the original child and detached
 group's settlement, and exact endpoint/start/Ready/source retirement. Compute
 shutdown retains persistent data; this command adds no volume deletion authority.
 A missing, changed or dead endpoint refuses. Partial publication or retirement
-keeps startup evidence blocked. New no-host records are deliberately ineligible
-for dead-owner recovery; a saved endpoint token is not cleanup authority.
+keeps startup evidence blocked. Legacy no-host version 1 records remain ineligible for dead-owner recovery.
+New version 2 records capture the original native child while its foreground
+owns it: PID, birth, executable identities, UID, host boot session, process group
+and session. Recovery uses two bounded complete process-metadata observations. It refuses
+any occupied original PID, including reuse or a zombie, and every live member of
+its former group or session. Unknown live membership refuses. Explicit zombie
+rows whose identity and state match both observations remain in the result, with
+unavailable session membership counted separately. This proves no live members
+at the observations; it does not prove the numeric group/session is absent.
+It never signals a saved numeric group. The original owner separately publishes
+one bound settlement observation only after its captured exit, drain and existing
+group-absence check. That observation cannot replace fresh recovery checks.
+A live SID lookup race permits one entirely fresh attempt only if a complete
+bounded reread positively observes that PID missing. Both earlier observations
+and their SID mappings are discarded; two new complete observations must fit the
+original monotonic budget. Reuse, state changes, still-live or unavailable rows,
+failed rereads and a second disappearance refuse. No individual row is skipped.
+
+Darwin's [ps state implementation](https://github.com/apple-oss-distributions/adv_cmds/blob/main/ps/print.c)
+maps `SZOMB` to `Z`. The [XNU exit path](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/kern_exit.c)
+waits active asynchronous I/O and invalidates open files before publishing that
+state. Zombie process-group metadata can persist until reap, so unavailable SID
+on a stable `Z` row is distinct from unknown live membership. Changed, disappeared
+or newly observed zombie identities refuse rather than borrowing stale state.
+
+The existing recovery owner retains its leases and exact Ready/start/source,
+native owner and receipt bindings before and after cleanup. It phase-retires only
+the admitted endpoint and optional settlement record after authenticated Removed
+and null observations. Replaced, malformed, live or unknown evidence stays retained.
+Graph4 recovery additionally requires all data enrolled and the exact installed
+tool root/helper assertion, matching the native owner; source and topology
+families remain separately refused. These source controls do not qualify installed
+kill/recover/up or retained SQL behavior.
 Portable private-filesystem and stand-in lifecycle controls cover this boundary;
 installed Source4 SQL retention through public down/up remains a separate runtime gate.
 

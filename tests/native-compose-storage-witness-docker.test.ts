@@ -13,6 +13,7 @@ import { assertNativeComposeStorageDockerImage } from "../src/lib/native-compose
 import {
   NATIVE_STORAGE_DOCKER_ARTIFACT,
   nativeComposeStorageDockerHelper,
+  nativeComposeStorageDockerImageReference,
 } from "../src/lib/native-compose-storage-witness-docker-artifact.ts";
 import {
   assertNativeComposeStorageDockerCarrierVolume,
@@ -47,7 +48,9 @@ test("cached image prerequisite emits complete sparse JSON before carrier effect
     requests.push([...args]);
     expect(args).toHaveLength(5);
     expect(args.slice(0, 3)).toEqual(["image", "inspect", "--format"]);
-    expect(args[4]).toBe(NATIVE_STORAGE_DOCKER_ARTIFACT.imageId);
+    expect(args[4]).toBe(
+      nativeComposeStorageDockerImageReference(NATIVE_STORAGE_DOCKER_ARTIFACT)
+    );
     const format = args[3];
     if (typeof format !== "string") {
       throw new Error("Missing fixed sparse image format");
@@ -576,7 +579,7 @@ function carrier(input: NativeComposeStorageXattrInvocation) {
     id: "e".repeat(64),
     createdAt,
     image: input.artifact.imageId,
-    configImage: input.artifact.imageId,
+    configImage: nativeComposeStorageDockerImageReference(input.artifact),
     user: "70:70",
     entrypoint: ["/usr/local/bin/bun"],
     cmd: ["--no-env-file", "/hack-storage-witness-helper.mjs"],
@@ -778,6 +781,24 @@ test.each([
   expect(policy.host.Mounts).toHaveLength(2);
 });
 test.each([
+  NATIVE_STORAGE_DOCKER_ARTIFACT.imageId,
+  "oven/bun:1.4.2-slim",
+  `foreign/bun@${NATIVE_STORAGE_DOCKER_ARTIFACT.imageId}`,
+  `oven/bun@sha256:${"f".repeat(64)}`,
+])("configured image must remain the exact immutable repository reference: %s", (configImage) => {
+  const selected = input(),
+    fake = carrier(selected);
+  fake.value.configImage = configImage;
+  expect(() =>
+    checkNativeComposeStorageDockerCarrier({
+      value: fake.value,
+      input: selected,
+      program: fake.program,
+      imageIds: [selected.artifact.imageId],
+    })
+  ).toThrow("values omitted");
+});
+test.each([
   { label: "mount", value: { "/extra": "rw" } },
   { label: "array", value: [] },
   { label: "string", value: "" },
@@ -807,6 +828,11 @@ test("helper args require the cached dependency, unchanged program bind and exac
     input: selected,
     program: fake.program,
   });
+  expect(args.slice(-3)).toEqual([
+    nativeComposeStorageDockerImageReference(selected.artifact),
+    "--no-env-file",
+    "/hack-storage-witness-helper.mjs",
+  ]);
   expect(args).toContain("never");
   expect(args).toContain("none");
   expect(

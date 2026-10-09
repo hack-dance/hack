@@ -11,6 +11,7 @@ const argument=key=>storageArgs[storageArgs.indexOf(key)+1];
 const emit=value=>console.log(JSON.stringify(value));
 const engineId="fixture-engine";
 const imageId="sha256:cb3bbbb08e13a4a2ff400f24c7a2a1d5efa83f6ef8544d52d95a519631e2fc61";
+const imageReference="oven/bun@"+imageId;
 const labels=()=>Object.fromEntries(storageArgs.flatMap((value,index)=>value==="--label"?[storageArgs[index+1].split(/=(.*)/s).slice(0,2)]:[]));
 const volumeMount=volume=>({Type:"volume",Name:volume.name,Source:"/var/lib/docker/volumes/"+volume.name+"/_data",Destination:"/storage/"+volume.storage,Driver:"local",RW:true,Propagation:""});
 const workload=async()=>{
@@ -22,6 +23,7 @@ if(storageArgs[0]==="info"){
  emit(argument("--format").includes(".OSType")?{id:engineId,os:"linux",arch:await Bun.file(storageRoot+"/helper-wrong-platform").exists()?"amd64":"arm64"}:engineId);process.exit(0);
 }
 if(storageArgs[0]==="image"&&storageArgs[1]==="inspect"){
+ if(storageArgs.at(-1)!==imageReference)process.exit(98);
  if(await Bun.file(storageRoot+"/helper-unavailable").exists())process.exit(1);
  emit({id:imageId,os:"linux",arch:"arm64",volumes:null});process.exit(0);
 }
@@ -51,13 +53,14 @@ if(storageArgs[0]==="volume"&&storageArgs[1]==="inspect"){
  }process.exit(0);
 }
 if(storageArgs[0]==="create"){
+ if(storageArgs[storageArgs.indexOf("--entrypoint")+2]!==imageReference)process.exit(98);
  const mounts=storageArgs.flatMap((value,index)=>value==="--mount"?[storageArgs[index+1]]:[]).map(text=>Object.fromEntries(text.split(",").map(value=>value.includes("=")?value.split(/=(.*)/s).slice(0,2):[value,true])));
  const program=mounts.find(row=>row.type==="bind"),volume=mounts.find(row=>row.type==="volume");
  const rows=await readRows(storageCarriers),sequence=Number(await Bun.file(storageRoot+"/carrier-sequence").exists()?await Bun.file(storageRoot+"/carrier-sequence").text():0)+1;
  await Bun.write(storageRoot+"/carrier-sequence",String(sequence));
  const id="e"+sequence.toString(16).padStart(63,"0"),readonly=volume.readonly===true;
  const host={Privileged:false,ReadonlyRootfs:true,NetworkMode:"none",Memory:268435456,NanoCpus:1000000000,PidsLimit:32,CapDrop:["ALL"],CapAdd:null,SecurityOpt:["no-new-privileges:true"],LogConfig:{Type:"none",Config:{}},RestartPolicy:{Name:"no"},Binds:null,Devices:null,DeviceRequests:null,PortBindings:{},OomKillDisable:false,Mounts:[{Type:"bind",Source:program.src,Target:program.dst,ReadOnly:true,BindOptions:{NonRecursive:true,Propagation:"rprivate"}},{Type:"volume",Source:volume.src,Target:volume.dst,ReadOnly:readonly,VolumeOptions:{NoCopy:true}}]};
- rows.push({id,createdAt:new Date().toISOString(),image:imageId,configImage:imageId,user:argument("--user"),entrypoint:["/usr/local/bin/bun"],cmd:["--no-env-file","/hack-storage-witness-helper.mjs"],openStdin:true,tty:false,labels:labels(),host,mounts:[{Type:"bind",Source:program.src,Destination:program.dst,RW:false,Propagation:"rprivate"},{Type:"volume",Name:volume.src,Source:"/var/lib/docker/volumes/"+volume.src+"/_data",Destination:volume.dst,Driver:"local",RW:!readonly,Propagation:""}],state:{Status:"created",Running:false,Pid:0,ExitCode:0,Paused:false,Restarting:false,OOMKilled:false,Dead:false,Error:""},execIds:null});
+ rows.push({id,createdAt:new Date().toISOString(),image:imageId,configImage:storageArgs[storageArgs.indexOf("--entrypoint")+2],user:argument("--user"),entrypoint:["/usr/local/bin/bun"],cmd:["--no-env-file","/hack-storage-witness-helper.mjs"],openStdin:true,tty:false,labels:labels(),host,mounts:[{Type:"bind",Source:program.src,Destination:program.dst,RW:false,Propagation:"rprivate"},{Type:"volume",Name:volume.src,Source:"/var/lib/docker/volumes/"+volume.src+"/_data",Destination:volume.dst,Driver:"local",RW:!readonly,Propagation:""}],state:{Status:"created",Running:false,Pid:0,ExitCode:0,Paused:false,Restarting:false,OOMKilled:false,Dead:false,Error:""},execIds:null});
  await writeRows(storageCarriers,rows);console.log(id);process.exit(0);
 }
 if(storageArgs[0]==="start"){

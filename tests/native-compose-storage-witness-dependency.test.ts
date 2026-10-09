@@ -3,11 +3,38 @@ import { assertNativeComposeStorageDockerImage } from "../src/lib/native-compose
 import {
   NATIVE_STORAGE_DOCKER_ARTIFACT,
   NATIVE_STORAGE_DOCKER_DEPENDENCIES,
+  nativeComposeStorageDockerImageReference,
   selectNativeComposeStorageDockerDependency,
 } from "../src/lib/native-compose-storage-witness-docker-artifact.ts";
 
 const engineId = "fixture-engine";
 const daemon = { id: engineId, os: "linux", arch: "arm64" };
+
+test("classic image store resolves the pinned repository digest without a bare index lookup", async () => {
+  const dependency = NATIVE_STORAGE_DOCKER_DEPENDENCIES["linux/amd64"];
+  if (!dependency) {
+    throw new Error("Missing qualified AMD record");
+  }
+  const reference = `oven/bun@${dependency.artifact.imageId}`;
+  const configId = dependency.imageIds[2];
+  const observed: string[][] = [];
+  await assertNativeComposeStorageDockerImage(async (args) => {
+    observed.push([...args]);
+    // Classic GetImage looks up a bare digest in the config store. The pulled
+    // repository digest instead resolves to this already-qualified config ID.
+    if (args.at(-1) !== reference || typeof configId !== "string") {
+      throw new Error("No such cached image");
+    }
+    return JSON.stringify({
+      id: configId,
+      os: "linux",
+      arch: "amd64",
+      volumes: null,
+    });
+  }, dependency);
+  expect(observed).toHaveLength(1);
+  expect(observed[0]?.at(-1)).toBe(reference);
+});
 
 test.each([
   "arm64",
@@ -122,7 +149,9 @@ test("matching index, manifest and config image identities retain exact platform
     let calls = 0;
     await assertNativeComposeStorageDockerImage(async (argv) => {
       calls++;
-      expect(argv.at(-1)).toBe(dependency.artifact.imageId);
+      expect(argv.at(-1)).toBe(
+        nativeComposeStorageDockerImageReference(dependency.artifact)
+      );
       return JSON.stringify({ id, os: "linux", arch: "arm64", volumes: null });
     });
     expect(calls).toBe(1);
@@ -160,7 +189,9 @@ test("AMD cached image admits only its three identities and exact architecture",
   }
   for (const id of dependency.imageIds) {
     await assertNativeComposeStorageDockerImage(async (args) => {
-      expect(args.at(-1)).toBe(dependency.artifact.imageId);
+      expect(args.at(-1)).toBe(
+        nativeComposeStorageDockerImageReference(dependency.artifact)
+      );
       return JSON.stringify({ id, os: "linux", arch: "amd64", volumes: null });
     }, dependency);
   }

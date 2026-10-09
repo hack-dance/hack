@@ -25,6 +25,17 @@ export const NATIVE_STORAGE_DOCKER_ARTIFACT: NativeComposeStorageXattrArtifact =
     kernelAbi: 1,
   });
 
+/** A bare index digest is not an image ID in the classic Engine config store.
+ * The immutable repository digest resolves locally in both Engine image stores. */
+export function nativeComposeStorageDockerImageReference(
+  artifact: Pick<NativeComposeStorageXattrArtifact, "imageId">
+): string {
+  if (artifact.imageId !== NATIVE_STORAGE_DOCKER_ARTIFACT.imageId) {
+    return refuse();
+  }
+  return `oven/bun@${NATIVE_STORAGE_DOCKER_ARTIFACT.imageId}`;
+}
+
 export type NativeComposeStorageDockerDependency = {
   readonly artifact: NativeComposeStorageXattrArtifact;
   /** Exact index, platform manifest and config identities from the byte receipt. */

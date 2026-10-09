@@ -233,6 +233,12 @@ The declared dependencies use the fixed Linux arm64 and amd64 Bun 1.4.2 image in
 The packaged helper pins its bytes and the qualified Bun/libc bytes separately.
 Dependency/platform checks precede volume effects; every helper uses `--pull never`.
 Each architecture has separate manifest/config identities and Bun/libc byte pins.
+Inspection and create use the immutable `oven/bun@sha256:cb3bbbb08e13a4a2ff400f24c7a2a1d5efa83f6ef8544d52d95a519631e2fc61`
+repository reference. Classic Engine stores resolve this reference to the selected
+config ID; containerd stores may expose the index or manifest ID. The response
+must retain one of the three qualified IDs and the exact selected platform.
+The carrier policy requires that same configured reference and `--pull never`;
+it never retries another image, tag or platform.
 There is no image download, emulation fallback or platform substitution. Uncached
 first installation remains outside this qualification.
 Maintain the packaged source with

@@ -1,3 +1,5 @@
+import { nativeAuthoredExecOptions } from "../backends/native-authored-exec-options.ts";
+import { nativeAuthoredProjectExec } from "../backends/native-authored-project-exec.ts";
 import { randomBytes } from "node:crypto";
 import { realpath } from "node:fs/promises";
 import { join } from "node:path";
@@ -202,8 +204,9 @@ function startupFailure(error: unknown): number {
   });
 }
 
-type Mode = "status" | "recovery" | "stop" | "start" | "logs";
+type Mode = "exec" | "status" | "recovery" | "stop" | "start" | "logs";
 function commandMode(options: NativeComposeCommandOptions): Mode {
+  if (options.operation === "exec") { assertExecOptions(options); return "exec"; }
   if (options.operation === "logs") {
     assertLogsOptions(options);
     return "logs";
@@ -303,6 +306,7 @@ export async function tryNativeAuthoredCommand(opts: {
   readonly stop?: typeof stopNativeAuthoredProject;
   readonly observe?: typeof nativeAuthoredProjectPs;
   readonly logs?: typeof nativeAuthoredProjectLogs;
+  readonly exec?: typeof nativeAuthoredProjectExec;
 }): Promise<number | null> {
   const sourceEnv = opts.env ?? process.env;
   const env = {
@@ -330,6 +334,7 @@ export async function tryNativeAuthoredCommand(opts: {
   if (!runtime) {
     return unsupported();
   }
+  if (mode === "exec") { return await runAuthoredExec({ options, projectRoot, runtime, exec: opts.exec ?? nativeAuthoredProjectExec }); }
   if (mode === "logs") {
     return await runAuthoredLogs({
       options,
@@ -427,4 +432,24 @@ export async function tryNativeAuthoredCommand(opts: {
     process.off("SIGINT", cancel);
     process.off("SIGTERM", cancel);
   }
+}
+
+function assertExecOptions(options: NativeComposeCommandOptions): void {
+  if (process.platform !== "darwin" || options.operation !== "exec" || !nativeAuthoredExecOptions(options.service, options.command, options.workdir) || options.json || options.follow !== undefined || options.tail !== undefined || options.logFormat !== undefined || options.recover || options.detach || options.unsupportedOptions || options.services !== undefined || options.profiles !== undefined || options.overlay !== undefined) { unsupported(); }
+}
+async function runAuthoredExec(input: { readonly options: NativeComposeCommandOptions; readonly projectRoot: string; readonly runtime: NonNullable<ReturnType<typeof resolveNativeRuntimeSelection>>; readonly exec: typeof nativeAuthoredProjectExec }): Promise<number> {
+  const controller = new AbortController();
+  const cancel = () => controller.abort();
+  process.on("SIGINT", cancel); process.on("SIGTERM", cancel);
+  try {
+    const root = await realpath(input.projectRoot);
+    const result = await input.exec({ runtime: input.runtime, scope: { projectRoot: root, projectDir: join(root, ".hack"), nativeHome: input.runtime.home, branch: input.options.instance ?? null }, service: input.options.service ?? "", command: input.options.command ?? [], workdir: input.options.workdir, signal: controller.signal });
+    if (controller.signal.aborted) { return 130; }
+    await Bun.write(Bun.stdout, result.stdout);
+    await Bun.write(Bun.stderr, result.stderr);
+    return result.exitCode;
+  } catch {
+    if (controller.signal.aborted) { return 130; }
+    throw new HackCliError({ code: "E_LIFECYCLE_FAILED", message: "Native authored exec completion is unconfirmed; command effects may have occurred. Values omitted. No request was replayed." });
+  } finally { process.off("SIGINT", cancel); process.off("SIGTERM", cancel); }
 }

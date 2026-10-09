@@ -181,7 +181,7 @@ fn native_requests_and_replies_refuse_wrong_kind_version_scope_and_unknown_field
         );
     }
     let reply = status(receipt.clone());
-    reply.validate(&receipt, Action::Status, None).unwrap();
+    reply.validate(&receipt, Action::Status, None, None).unwrap();
     let encoded = serde_json::to_value(reply).unwrap();
     for (field, value) in [
         ("kind", json!("graph-control-reply")),
@@ -200,7 +200,7 @@ fn native_requests_and_replies_refuse_wrong_kind_version_scope_and_unknown_field
         json!({"state":"running","health":"healthy"});
     serde_json::from_value::<Reply>(bad)
         .unwrap()
-        .validate(&receipt, Action::Status, None)
+        .validate(&receipt, Action::Status, None, None)
         .unwrap();
     for (pointer, value) in [
         ("/version", json!(1)),
@@ -212,7 +212,7 @@ fn native_requests_and_replies_refuse_wrong_kind_version_scope_and_unknown_field
         assert!(
             serde_json::from_value::<Reply>(bad)
                 .unwrap()
-                .validate(&receipt, Action::Status, None)
+                .validate(&receipt, Action::Status, None, None)
                 .is_err()
         );
     }
@@ -228,14 +228,14 @@ fn native_requests_and_replies_refuse_wrong_kind_version_scope_and_unknown_field
             receipt: receipt.clone(),
         },
     };
-    assert!(cleaned.validate(&receipt, Action::Cleanup, None).is_err());
+    assert!(cleaned.validate(&receipt, Action::Cleanup, None, None).is_err());
     if let Outcome::Cleaned { receipt } = &mut cleaned.result {
         receipt.phase = Phase::Removed;
         for resource in receipt.resources.values_mut() {
             resource.phase = "removed".into();
         }
     }
-    cleaned.validate(&receipt, Action::Cleanup, None).unwrap();
+    cleaned.validate(&receipt, Action::Cleanup, None, None).unwrap();
 }
 
 #[test]
@@ -251,7 +251,7 @@ fn native_stop_details_require_the_exact_journal_membership_and_closed_stage() {
         }}
     });
     let reply: Reply = serde_json::from_value(encoded.clone()).unwrap();
-    reply.validate(&receipt, Action::Cleanup, None).unwrap();
+    reply.validate(&receipt, Action::Cleanup, None, None).unwrap();
     for (pointer, value) in [
         ("/result/code", json!("native_graph_foreground")),
         ("/result/stop_failures/failures/0/service", json!("foreign")),
@@ -271,7 +271,7 @@ fn native_stop_details_require_the_exact_journal_membership_and_closed_stage() {
         assert!(
             serde_json::from_value::<Reply>(bad)
                 .unwrap()
-                .validate(&receipt, Action::Cleanup, None)
+                .validate(&receipt, Action::Cleanup, None, None)
                 .is_err(),
             "{pointer}"
         );
@@ -665,7 +665,7 @@ fn success_replies_bind_immutable_images_ids_readiness_membership_and_requested_
     for field in ["image", "id", "readiness", "membership", "namespace"] {
         let reply = status(changed(receipt.clone(), field));
         assert!(
-            reply.validate(&receipt, Action::Status, None).is_err(),
+            reply.validate(&receipt, Action::Status, None, None).is_err(),
             "{field}"
         );
         let actual = removed(changed(receipt.clone(), field));
@@ -677,13 +677,13 @@ fn success_replies_bind_immutable_images_ids_readiness_membership_and_requested_
             result: Outcome::Cleaned { receipt: actual },
         };
         assert!(
-            reply.validate(&receipt, Action::Cleanup, None).is_err(),
+            reply.validate(&receipt, Action::Cleanup, None, None).is_err(),
             "{field}"
         );
     }
     assert!(
         status(receipt.clone())
-            .validate(&receipt, Action::Cleanup, None)
+            .validate(&receipt, Action::Cleanup, None, None)
             .is_err()
     );
     let reply = Reply {
@@ -695,8 +695,8 @@ fn success_replies_bind_immutable_images_ids_readiness_membership_and_requested_
             receipt: removed(receipt.clone()),
         },
     };
-    reply.validate(&receipt, Action::Cleanup, None).unwrap();
-    assert!(reply.validate(&receipt, Action::Status, None).is_err());
+    reply.validate(&receipt, Action::Cleanup, None, None).unwrap();
+    assert!(reply.validate(&receipt, Action::Status, None, None).is_err());
 }
 
 #[test]
@@ -726,7 +726,7 @@ fn native_failure_observations_close_nested_fields_in_status_and_cleanup() {
         });
         serde_json::from_value::<Reply>(encoded.clone())
             .unwrap()
-            .validate(&receipt, action, None)
+            .validate(&receipt, action, None, None)
             .unwrap();
         encoded.pointer_mut(pointer).unwrap()["failure"]["observation"]["values"] =
             json!("private-canary");
@@ -850,7 +850,7 @@ fn stopped_failure_detail_refuses_changed_current_admission_after_request_captur
                     }),
                 },
             };
-            reply.validate(&receipt, Action::Cleanup, None).unwrap();
+            reply.validate(&receipt, Action::Cleanup, None, None).unwrap();
             transport::write(&mut stream, &reply, Duration::from_secs(1)).unwrap();
             let error = caller.join().unwrap().unwrap_err();
             assert!(error.stop_failures.is_none(), "{field}");
@@ -910,9 +910,9 @@ fn finite_logs_wire_authenticates_the_live_native_owner_and_exact_member() {
             },
         };
         reply
-            .validate(&receipt, Action::Logs, input.logs.as_ref())
+            .validate(&receipt, Action::Logs, input.logs.as_ref(), None)
             .unwrap();
-        assert!(reply.validate(&receipt, Action::Status, None).is_err());
+        assert!(reply.validate(&receipt, Action::Status, None, None).is_err());
         transport::write(&mut stream, &reply, Duration::from_secs(2)).unwrap();
         assert_eq!(caller.join().unwrap()["result"]["logs"]["stdout"], "line\n");
     });

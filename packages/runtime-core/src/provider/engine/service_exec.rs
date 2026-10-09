@@ -25,11 +25,17 @@ impl Engine<'_> {
         workdir: Option<&str>,
         timeout: Duration,
     ) -> Result<ExecOutput, CandidateError> {
+        self.service_exec_until(container, argv, workdir, Instant::now() + timeout, &|| Ok(()))
+    }
+    /// Caller-owned identity checks share the original observation deadline.
+    pub(in crate::provider) fn service_exec_until(
+        &self, container: &str, argv: &[String], workdir: Option<&str>, deadline: Instant, fresh: &dyn Fn() -> Result<(), CandidateError>,
+    ) -> Result<ExecOutput, CandidateError> {
         if self.cleanup_only {
             return Err(failure("A cleanup connection cannot execute commands."));
         }
-        let deadline = Instant::now() + timeout;
         execute(container, argv, workdir, |method, path, body| {
+            fresh()?;
             self.guest.verify()?;
             if method == Method::POST {
                 self.guest.before_effect()?;
@@ -43,6 +49,7 @@ impl Engine<'_> {
                 .request_bytes(method, path, body)
                 .map_err(|_| uncertain())?;
             self.guest.verify().map_err(|_| uncertain())?;
+            fresh().map_err(|_| uncertain())?;
             Ok(bytes)
         })
     }

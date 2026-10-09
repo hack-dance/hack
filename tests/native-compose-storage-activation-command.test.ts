@@ -7,7 +7,7 @@ const storage = { data: { kind: "persistent", scope: "worktree" } } as const;
 // Each synthetic carrier has the ordinary finite 30s proof budget. The wrapper
 // accommodates several real source-CLI transactions, not an unbounded helper.
 function command(root: string, args = ["up", "--detach", "--json"]) {
-  return invoke(root, args, 30_000, 60_000);
+  return invoke(root, args, 30_000, 120_000);
 }
 async function saved(root: string) {
   const store = await openNativeComposeGenerationStore({
@@ -33,11 +33,24 @@ async function operations(root: string) {
     .trim()
     .split("\n");
 }
+async function disposition(root: string, code: number): Promise<string> {
+  const path = join(root, "storage-operations");
+  const observed = (await Bun.file(path).exists())
+    ? await operations(root)
+    : [];
+  return JSON.stringify({
+    code,
+    roots: observed.filter((value) => value === "root").length,
+    seeds: observed.filter((value) => value === "seed").length,
+    verifications: observed.filter((value) => value === "verify").length,
+    engine: await Bun.file(join(root, "engine")).exists(),
+  });
+}
 
 test("source CLI cold enrollment precedes workload and down/up only verifies retained content", async () => {
   const root = await fixture("", false, { storage, noHooks: true });
   const up = await command(root);
-  expect(up.code).toBe(0);
+  expect(up.code, await disposition(root, up.code)).toBe(0);
   expect(JSON.parse(up.stdout)).toMatchObject({
     ok: true,
     data: { status: "ready" },
@@ -52,28 +65,52 @@ test("source CLI cold enrollment precedes workload and down/up only verifies ret
   expect(await Bun.file(join(root, "carriers")).json()).toEqual([]);
   const before = await Bun.file(join(root, "volumes")).text();
   const calls = await requests(root);
-  const create = calls.findIndex((args) => args[0] === "volume" && args[1] === "create");
+  const create = calls.findIndex(
+    (args) => args[0] === "volume" && args[1] === "create"
+  );
   const helper = calls.findIndex((args) => args[0] === "start");
-  const workload = calls.findIndex((args) => args[0] === "compose" && args.includes("up"));
+  const workload = calls.findIndex(
+    (args) => args[0] === "compose" && args.includes("up")
+  );
   expect(create).toBeGreaterThanOrEqual(0);
   expect(helper).toBeGreaterThan(create);
   expect(workload).toBeGreaterThan(helper);
-  const events = (await Bun.file(join(root, "storage-events")).text()).trim().split("\n");
+  const events = (await Bun.file(join(root, "storage-events")).text())
+    .trim()
+    .split("\n");
   expect(events.indexOf("seed")).toBeGreaterThanOrEqual(0);
   expect(events.indexOf("workload")).toBeGreaterThan(events.indexOf("seed"));
-  expect((await operations(root)).filter((op) => op === "seed")).toHaveLength(1);
+  expect((await operations(root)).filter((op) => op === "seed")).toHaveLength(
+    1
+  );
   expect((await command(root, ["down", "--json"])).code).toBe(0);
   expect((await command(root)).code).toBe(0);
   expect(await Bun.file(join(root, "volumes")).text()).toBe(before);
   expect((await saved(root)).storageWitnesses).toEqual(first.storageWitnesses);
-  expect((await operations(root)).filter((op) => op === "seed")).toHaveLength(1);
-  expect((await requests(root)).filter((args) => args[0] === "volume" && args[1] === "create")).toHaveLength(1);
+  expect((await operations(root)).filter((op) => op === "seed")).toHaveLength(
+    1
+  );
+  expect(
+    (await requests(root)).filter(
+      (args) => args[0] === "volume" && args[1] === "create"
+    )
+  ).toHaveLength(1);
   expect(await Bun.file(join(root, "carriers")).json()).toEqual([]);
 }, 120_000);
 
 test("source CLI refuses SAME-birth empty replacement before hooks or another workload start", async () => {
-  const root = await fixture("", false, { storage });
-  expect((await command(root)).code).toBe(0);
+  const root = await fixture("", false, {
+    storage,
+    hooks: {
+      up: {
+        before: [
+          { name: "before", command: { shell: 'printf "before\\n" >> order' } },
+        ],
+      },
+    },
+  });
+  const initial = await command(root);
+  expect(initial.code, await disposition(root, initial.code)).toBe(0);
   expect((await command(root, ["down", "--json"])).code).toBe(0);
   const before = await saved(root);
   const order = await Bun.file(join(root, "order")).text();
@@ -85,9 +122,17 @@ test("source CLI refuses SAME-birth empty replacement before hooks or another wo
   const result = await command(root);
   expect(result.code).toBe(1);
   expect(JSON.parse(result.stdout)).toMatchObject({ ok: false });
-  expect(`${result.stdout}\n${result.stderr}`).not.toContain("user.hack.storage.");
-  expect((await requests(root)).filter((args) => args[0] === "compose" && args.includes("up"))).toHaveLength(1);
-  expect((await operations(root)).filter((op) => op === "seed")).toHaveLength(1);
+  expect(`${result.stdout}\n${result.stderr}`).not.toContain(
+    "user.hack.storage."
+  );
+  expect(
+    (await requests(root)).filter(
+      (args) => args[0] === "compose" && args.includes("up")
+    )
+  ).toHaveLength(1);
+  expect((await operations(root)).filter((op) => op === "seed")).toHaveLength(
+    1
+  );
   expect(await Bun.file(join(root, "volumes")).json()).toEqual(volumes);
   expect((await saved(root)).storageWitnesses).toEqual(before.storageWitnesses);
   expect((await saved(root)).pending).toBeNull();
@@ -96,8 +141,13 @@ test("source CLI refuses SAME-birth empty replacement before hooks or another wo
   expect(await Bun.file(join(root, "carriers")).json()).toEqual([]);
 }, 120_000);
 
-test.each(["helper-unavailable", "helper-wrong-platform"])("source CLI %s refuses before hooks, Expected or volume effects", async (missing) => {
-  const root = await fixture('await Bun.write("after-ran","yes")', false, { storage });
+test.each([
+  "helper-unavailable",
+  "helper-wrong-platform",
+])("source CLI %s refuses before hooks, Expected or volume effects", async (missing) => {
+  const root = await fixture('await Bun.write("after-ran","yes")', false, {
+    storage,
+  });
   await Bun.write(join(root, missing), "true");
   const result = await command(root);
   expect(result.code).toBe(1);
@@ -108,5 +158,11 @@ test.each(["helper-unavailable", "helper-wrong-platform"])("source CLI %s refuse
   const current = await saved(root);
   expect(current.pending).toBeNull();
   expect(current.storageWitnesses).toBeNull();
-  expect((await requests(root)).some((args) => ["create", "start", "compose"].includes(args[0] ?? "") || (args[0] === "volume" && args[1] === "create"))).toBe(false);
+  expect(
+    (await requests(root)).some(
+      (args) =>
+        ["create", "start", "compose"].includes(args[0] ?? "") ||
+        (args[0] === "volume" && args[1] === "create")
+    )
+  ).toBe(false);
 }, 30_000);

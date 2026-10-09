@@ -55,7 +55,12 @@ export async function legacyStorageFixture(): Promise<string> {
               labels: { ...labels, "io.hack.native-config.storage": "data" },
             },
           },
-          networks: { default: { name: `${store.identity.composeProject}_default`, labels } },
+          networks: {
+            default: {
+              name: `${store.identity.composeProject}_default`,
+              labels,
+            },
+          },
         }),
       });
       await mutation.runEffect({
@@ -65,14 +70,19 @@ export async function legacyStorageFixture(): Promise<string> {
         assertOwned: async () => {},
         captureStorage: () => [volume],
         effect: async () => {
-          await Bun.write(join(root, "volumes"), JSON.stringify([{
-            ...volume,
-            id: name,
-            project: store.identity.composeProject,
-            version: "1",
-            instance: store.identity.composeProject,
-            owner: store.identity.ownerToken,
-          }]));
+          await Bun.write(
+            join(root, "volumes"),
+            JSON.stringify([
+              {
+                ...volume,
+                id: name,
+                project: store.identity.composeProject,
+                version: "1",
+                instance: store.identity.composeProject,
+                owner: store.identity.ownerToken,
+              },
+            ])
+          );
           return { value: 0, outcome: "complete" };
         },
       });

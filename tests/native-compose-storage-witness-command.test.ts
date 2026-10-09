@@ -96,7 +96,9 @@ test("source CLI cannot fall back to metadata for enrolled v3 startup, run or ex
   ]) {
     const result = await invoke(root, args);
     expect(result.code).toBe(1);
-    expect(`${result.stdout}\n${result.stderr}`).toContain("E_NATIVE_PROJECT_UNSUPPORTED");
+    expect(`${result.stdout}\n${result.stderr}`).toContain(
+      "E_NATIVE_PROJECT_UNSUPPORTED"
+    );
     expect(`${result.stdout}\n${result.stderr}`).not.toContain(
       ".hack-storage-"
     );

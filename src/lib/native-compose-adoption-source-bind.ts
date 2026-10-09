@@ -177,8 +177,16 @@ async function lease(opts: {
     }
     freezeImportValue(proof);
     let open = true;
-    const assertDirectoriesFresh = async () => {
-      check(opts.signal);
+    const assertDirectoriesFresh = async (current?: {
+      readonly signal?: AbortSignal;
+    }) => {
+      // Persisted directory identity is independent of a prior mutation's
+      // expired clock. The invoking outer owner supplies its current signal.
+      const signal = current?.signal;
+      if (signal !== undefined && !(signal instanceof AbortSignal)) {
+        refuse();
+      }
+      check(signal);
       if (!open) {
         refuse();
       }
@@ -197,7 +205,7 @@ async function lease(opts: {
         }
       }
       await recheckDirectories(held);
-      check(opts.signal);
+      check(signal);
       if (!open) {
         refuse();
       }
@@ -210,7 +218,7 @@ async function lease(opts: {
       // Layout checks can await unrelated input owners. Mounted pathname and
       // descriptor identities must be checked after that final async boundary.
       await requireLayout(opts.root, opts.candidate, opts.signal);
-      await assertDirectoriesFresh();
+      await assertDirectoriesFresh({ signal: opts.signal });
     };
     const close = async () => {
       if (open) {

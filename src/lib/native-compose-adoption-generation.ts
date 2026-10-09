@@ -1499,7 +1499,9 @@ async function completePublication(
     check: async () => {
       await ctx.check();
       await recheckDirectories([held]);
-      await ctx.sourceBind.current?.lease.assertDirectoriesFresh();
+      await ctx.sourceBind.current?.lease.assertDirectoriesFresh({
+        signal: ctx.signal,
+      });
     },
   };
   try {
@@ -1569,7 +1571,9 @@ async function completeRollback(ctx: Context, state: Receipt) {
     check: async () => {
       await ctx.check();
       await recheckDirectories([held]);
-      await ctx.sourceBind.current?.lease.assertDirectoriesFresh();
+      await ctx.sourceBind.current?.lease.assertDirectoriesFresh({
+        signal: ctx.signal,
+      });
     },
   };
   try {
@@ -2156,7 +2160,7 @@ export async function openLegacyComposeAdoptedGenerationStore(input: {
       ) {
         refuse();
       }
-      await sourceBind.current?.lease.assertDirectoriesFresh();
+      await sourceBind.current?.lease.assertDirectoriesFresh({ signal });
     };
     const ctx: Context = {
       root,

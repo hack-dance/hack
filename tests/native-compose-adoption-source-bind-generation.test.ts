@@ -120,6 +120,47 @@ test("read-only adoption preview remains symbolic and does not create a receipt"
   await noAllocation();
 });
 
+test("expired mutation clock retains pending proof but permits a fresh bounded saved recovery", async () => {
+  const { store, generation } = await prepared();
+  try {
+    await store.publish({ generation, binary: h.compiler });
+    const active = await store.loadActive();
+    if (!active) {
+      throw new Error("Synthetic active generation missing");
+    }
+    const deadline = Date.now() + 10_000;
+    let callbackReached = false;
+    await red(
+      store.withMutation({
+        generation: active,
+        operation: "start",
+        services: [],
+        binary: h.compiler,
+        deadline,
+        run: async (input) => {
+          await input.assertFresh();
+          callbackReached = true;
+          await Bun.sleep(Math.max(1, deadline - Date.now() + 25));
+          return 0;
+        },
+      })
+    );
+    expect(callbackReached).toBe(true);
+    expect((await h.receipt()).pendingOperation).not.toBeNull();
+    const recovery = await store.loadActive({ recoverOperation: true });
+    expect(recovery).not.toBeNull();
+    if (!recovery) {
+      throw new Error("Synthetic recovery generation missing");
+    }
+    expect(await h.operation(store, recovery, "stop", true)).toBe(0);
+    expect((await h.receipt()).pendingOperation).toBeNull();
+    await store.rollback();
+    await noAllocation();
+  } finally {
+    await store.close();
+  }
+});
+
 test("replacement during the final preparation receipt read refuses before publishing a prepared anchor", async () => {
   const store = await h.store();
   const prior = await h.receipt();

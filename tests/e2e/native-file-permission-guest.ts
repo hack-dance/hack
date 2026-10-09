@@ -50,15 +50,20 @@ try {
 } catch {process.exit(45)}
 `;
 
-/** The chosen non-root guest UID must differ from every observed protected file owner. */
+/** The chosen non-root guest UID must differ from every observed protected file owner. Refusal diagnostics contain fixed guard names only. */
 export const nativeFileFixtureDeniedProgram = `
 import {lstat,readFile} from "node:fs/promises";
 const deadline=setTimeout(()=>process.exit(89),5000);deadline.unref();
+const refuseMetadata=(guard)=>{try{process.stdout.write(JSON.stringify({version:1,stage:"nonowner-metadata-refused",guard}))}finally{process.exit(52)}};
 try {
   const raw=await Bun.stdin.arrayBuffer();if(raw.byteLength>8192)process.exit(88);const rows=JSON.parse(new TextDecoder().decode(raw));if(!Array.isArray(rows)||rows.length<1||rows.length>8||process.getuid()===0)process.exit(51);
   for(const row of rows){
     const info=await lstat(row.target);
-    if(!["0400","0600"].includes(row.mode)||(info.mode&4095)!==Number.parseInt(row.mode,8)||info.uid!==row.uid||info.gid!==row.gid||info.uid===process.getuid())process.exit(52);
+    if(!["0400","0600"].includes(row.mode))refuseMetadata("protected-mode");
+    if((info.mode&4095)!==Number.parseInt(row.mode,8))refuseMetadata("mode");
+    if(info.uid!==row.uid)refuseMetadata("owner-uid");
+    if(info.gid!==row.gid)refuseMetadata("owner-gid");
+    if(info.uid===process.getuid())refuseMetadata("nonowner-uid");
     try{await readFile(row.target);process.exit(53)}catch(error){if(error?.code!=="EACCES")process.exit(54)}
   }
   process.stdout.write("exact-nonowner-read-refused");

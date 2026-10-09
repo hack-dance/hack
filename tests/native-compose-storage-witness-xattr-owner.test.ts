@@ -1,4 +1,4 @@
-import { afterEach, expect, spyOn, test } from "bun:test";
+import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
 import { createHash } from "node:crypto";
 import * as fs from "node:fs/promises";
 import {
@@ -51,6 +51,7 @@ import {
 } from "../src/lib/native-compose-storage-witness-xattr-carrier.ts";
 import { encodeNativeComposeStorageXattrResponse } from "../src/lib/native-compose-storage-witness-xattr-codec.ts";
 import { runNativeComposeStorageXattrHelper } from "../src/lib/native-compose-storage-witness-xattr-helper.ts";
+import { commandReaderFixture } from "./helpers/native-compose-storage-command-fixture.ts";
 
 const engineId = "d".repeat(64);
 const witnessRefusal =
@@ -73,7 +74,20 @@ const artifact: NativeComposeStorageXattrArtifact = {
 };
 const roots: string[] = [];
 const stores: NativeComposeGenerationStore[] = [];
+let commandReaderCases = 0,
+  commandReaderUnknown = false;
+beforeEach(() => {
+  if (commandReaderUnknown) {
+    throw new Error(
+      "Private observation test lifetime unavailable; values omitted."
+    );
+  }
+});
 afterEach(async () => {
+  if (commandReaderCases || commandReaderUnknown) {
+    commandReaderUnknown = true;
+    return;
+  }
   await Promise.all(stores.splice(0).map((store) => store.close()));
   await Promise.all(
     roots.splice(0).map((path) => rm(path, { recursive: true, force: true }))
@@ -2299,6 +2313,81 @@ async function interruptedReadonlyVerification() {
   const info = await lstat(journal);
   owned.transport.calls.length = 0;
   return { ...owned, journal, text, info };
+}
+
+for (const evidence of ["issued", "copied"] as const) {
+  test(`readonly recovery consumes ${evidence} record observation without clearing intent or retiring resources`, async () => {
+    commandReaderCases++;
+    try {
+      const owned = await interruptedReadonlyVerification();
+      const before = await owned.store.loadCurrent();
+      let retired = 0;
+      await owned.store.withMutation(async (mutation) => {
+        const result = await mutation.runEffect({
+          generation: owned.generation,
+          operation: "down",
+          recoverPending: true,
+          assertOwned: async () => {},
+          beforeComplete: async () => {
+            retired++;
+          },
+          effect: async () => {
+            const value = await observeNativeComposeStorageWitnessCarrier({
+              authority: mutation.materialAuthority,
+              generation: owned.generation,
+              engineId,
+              reference: owned.reference,
+              observe: async ({ intent, request, assertUnchanged }) => {
+                await assertUnchanged();
+                const root = join(
+                  owned.store.identity.checkoutRoot,
+                  `record-observation-${evidence}`
+                );
+                await mkdir(root, { mode: 0o700 });
+                const f = await commandReaderFixture({
+                  root,
+                  invocationId: intent.invocationId,
+                  created: intent.created,
+                  request,
+                  helperState: "created",
+                });
+                try {
+                  const commands = await f.read();
+                  return {
+                    helperState: "created" as const,
+                    commands:
+                      evidence === "issued" ? commands : { ...commands },
+                  };
+                } finally {
+                  await f.directory.file.close();
+                }
+              },
+            });
+            expect(value).toEqual({
+              kind: "readonly-verification-retained",
+              helperState: "created",
+              hostCommandSettlement:
+                evidence === "issued" ? "records-settled" : "unknown",
+            });
+            return { value: 0, outcome: "complete" };
+          },
+        });
+        expect(result).toEqual({ value: 0, outcome: "uncertain" });
+      });
+      expect(retired).toBe(0);
+      expect(owned.transport.calls).toEqual([]);
+      expect(await readFile(owned.journal, "utf8")).toBe(owned.text);
+      const info = await lstat(owned.journal);
+      expect([info.dev, info.ino]).toEqual([owned.info.dev, owned.info.ino]);
+      const after = await owned.store.loadCurrent();
+      expect(after.storageWitnesses).toEqual(before.storageWitnesses);
+      expect(after.storageWitnessesPending).toBe(true);
+      expect(after.pending?.token).toBe(before.pending?.token);
+      expect(after.pending?.operation).toBe("up");
+    } finally {
+      commandReaderCases--;
+    }
+  }, 30_000);
 }
 
 test.each([

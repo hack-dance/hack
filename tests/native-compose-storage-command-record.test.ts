@@ -194,6 +194,8 @@ async function fixture() {
       helperHash: hash,
       requestHash: hash,
       invocationHash: hash,
+      sourceHash: hash,
+      fixedInvocationHash: hash,
       directory: { dev: directory.info.dev, ino: directory.info.ino },
     },
     check: async () => {

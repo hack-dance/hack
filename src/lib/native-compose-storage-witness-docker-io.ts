@@ -2,15 +2,57 @@ import { constants, fstatSync, lstatSync, readSync, type Stats } from "node:fs";
 import { type FileHandle, open } from "node:fs/promises";
 import {
   type HeldDirectory,
+  recheckDirectories,
   sameFile,
 } from "./native-compose-private-state.ts";
 import { refuseNativeComposeStorageXattr as refuse } from "./native-compose-storage-witness-xattr-codec.ts";
 
-type Leaf = { readonly path: string; readonly info: Stats };
+type Leaf = {
+  readonly path: string;
+  readonly info: { readonly dev: number; readonly ino: number };
+};
 type HeldLeaf = Leaf & { readonly file: FileHandle };
 // Unknown child disposition cannot authorize closing its inherited descriptors.
 // Retention is not a reaper or recovery authority; the private journal stays pending.
 const unsettledDescriptors = new Set<readonly HeldLeaf[]>();
+
+/** Existing capture only: O_RDONLY, no creation, repair, sync or publication. */
+export async function readNativeComposeStorageSavedCapture(opts: {
+  readonly directories: readonly HeldDirectory[];
+  readonly leaf: Leaf;
+  readonly limit?: number;
+}) {
+  const directories = [...opts.directories],
+    leaf = { ...opts.leaf };
+  const limit = opts.limit ?? 4096;
+  if (!Number.isSafeInteger(limit) || limit <= 0 || limit > 32_768) {
+    return refuse();
+  }
+  await recheckDirectories(directories);
+  const file = await open(
+    leaf.path,
+    constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK
+  );
+  try {
+    const held = { ...leaf, file };
+    const text = readLeaf(held, limit),
+      info = checkLeaf(held, limit);
+    await recheckDirectories(directories);
+    const final = checkLeaf(held, limit);
+    if (
+      final.mtimeMs !== info.mtimeMs ||
+      final.ctimeMs !== info.ctimeMs ||
+      final.size !== info.size
+    ) {
+      return refuse();
+    }
+    return { text, info };
+  } catch {
+    return refuse();
+  } finally {
+    await file.close();
+  }
+}
 
 function checkLeaf(leaf: HeldLeaf, limit: number): Stats {
   try {

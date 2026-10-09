@@ -21,6 +21,7 @@ import { createNativeComposeProbe } from "./native-compose-ownership.ts";
 import {
   type HeldDirectory,
   holdDirectory,
+  observeNativeComposePrivateHostSession,
   privateDirectory,
   readPrivate,
   recheckDirectories,
@@ -32,6 +33,10 @@ import {
   type NativeComposeStorageReadonlyCarrierIntent,
 } from "./native-compose-storage-carrier-journal.ts";
 import {
+  type NativeComposeStorageCommandObservation,
+  readNativeComposeStorageCommandObservation,
+} from "./native-compose-storage-command-reader.ts";
+import {
   armNativeComposeStorageCommand,
   createNativeComposeStorageCommandOwner,
   invalidateNativeComposeStorageCommandOwner,
@@ -40,8 +45,10 @@ import {
   type NativeComposeStorageCommandExecutable,
   type NativeComposeStorageCommandKind,
   type NativeComposeStorageCommandOwner,
+  nativeComposeStorageCommandFixedInvocationHash,
   nativeComposeStorageCommandHash,
   nativeComposeStorageCommandOwnerConfirmed,
+  nativeComposeStorageCommandSourceHash,
   publishNativeComposeStorageCommandChild,
   settleNativeComposeStorageCommand,
 } from "./native-compose-storage-command-record.ts";
@@ -381,7 +388,10 @@ export async function observeNativeComposeStorageDockerCarrierRecovery(opts: {
   readonly intent: NativeComposeStorageReadonlyCarrierIntent;
   readonly request: NativeComposeStorageXattrInvocation["request"];
   readonly assertUnchanged: () => Promise<void>;
-}): Promise<"created" | "exited"> {
+}): Promise<{
+  readonly helperState: "created" | "exited";
+  readonly commands: NativeComposeStorageCommandObservation | null;
+}> {
   const context = Object.freeze({ ...opts.context });
   const intent = captureNativeComposeStorageReadonlyCarrierIntent(opts.intent);
   const request = structuredClone(opts.request);
@@ -565,7 +575,89 @@ export async function observeNativeComposeStorageDockerCarrierRecovery(opts: {
     await engine(read, context);
     await guard();
     const state = second.state.Status;
-    return state === "created" || state === "exited" ? state : refuse();
+    if (state !== "created" && state !== "exited") {
+      return refuse();
+    }
+    // Missing or incomplete command evidence does not weaken the full saved
+    // helper/source/policy observation above or grant a new effect.
+    let commands: NativeComposeStorageCommandObservation | null = null;
+    try {
+      const directory = files.held.at(-1) ?? refuse();
+      const input: NativeComposeStorageXattrInvocation = {
+        recordCreated: async () => refuse(),
+        invocationId: intent.invocationId,
+        artifact: intent.artifact,
+        target: {
+          engineId: intent.engineId,
+          runtimeIdentity: intent.runtimeIdentity,
+          ownerToken: intent.ownerToken,
+          name: intent.volume.name,
+          storage: intent.volume.storage,
+          volume: intent.volume,
+          mountpoint: `/var/lib/docker/volumes/${intent.volume.name}/_data`,
+          driver: "local",
+          options: {},
+          holders: [],
+        },
+        readonly: true,
+        uid: intent.uid,
+        gid: intent.gid,
+        request,
+        scope: intent.scope,
+      };
+      const executable = await commandExecutable(docker),
+        wrapper = await commandExecutable("/bin/sh");
+      commands = await readNativeComposeStorageCommandObservation({
+        directory,
+        binding: {
+          invocationId: intent.invocationId,
+          engineId: context.engineId,
+          sourceHash: nativeComposeStorageCommandSourceHash(before),
+          fixedInvocationHash:
+            nativeComposeStorageCommandFixedInvocationHash(input),
+          helperHash: nativeComposeStorageCommandHash(
+            nativeComposeStorageDockerHelper()
+          ),
+          requestHash: nativeComposeStorageCommandHash(files.requestText),
+          directory: { dev: directory.info.dev, ino: directory.info.ino },
+        },
+        executable,
+        wrapper,
+        createArgumentsHash: nativeComposeStorageCommandHash(
+          JSON.stringify([
+            docker,
+            ...nativeComposeStorageDockerCreateArgs({
+              input,
+              program: files.program,
+            }),
+          ])
+        ),
+        startArgumentsHash: nativeComposeStorageCommandHash(
+          JSON.stringify([docker, "start", "-ai", intent.created.id])
+        ),
+        created: intent.created,
+        helperState: state,
+        helperExitCode: Number(second.state.ExitCode),
+        request,
+        hostSession: observeNativeComposePrivateHostSession,
+        check: async () => {
+          await guard();
+          if (
+            !(
+              same(executable, await commandExecutable(docker)) &&
+              same(wrapper, await commandExecutable("/bin/sh"))
+            )
+          ) {
+            return refuse();
+          }
+          tool();
+        },
+      });
+    } catch {
+      commands = null;
+    }
+    await guard();
+    return Object.freeze({ helperState: state, commands });
   } catch {
     return refuse();
   } finally {
@@ -1343,6 +1435,9 @@ export async function createNativeComposeDockerStorageXattrCarrier(
             invocationHash: nativeComposeStorageCommandHash(
               JSON.stringify({ ...input, recordCreated: undefined })
             ),
+            sourceHash: nativeComposeStorageCommandSourceHash(before),
+            fixedInvocationHash:
+              nativeComposeStorageCommandFixedInvocationHash(input),
             directory: { dev: directory.info.dev, ino: directory.info.ino },
           },
           check: async () => {

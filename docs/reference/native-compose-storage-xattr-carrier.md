@@ -290,15 +290,20 @@ before and after the observations. Running, missing, writable, changed or
 unrecorded work refuses. The original generation and pending scope must still
 match; observation does not rebind an old intent to a new command.
 
-The result says `readonly-verification-retained` and
-`hostCommandSettlement: "unknown"`. It does not prove the xattr value, successful
-verification, or settlement of the old host start/attach/remove command. Saved
-capture bytes, including empty captures, cannot establish that settlement.
+The result says `readonly-verification-retained`. Its host-command status is
+`unknown` for legacy, missing, malformed, incomplete or changed command records.
+It can report `records-settled` only after reading the complete matching version-2
+prefix and observing the recorded PID and group absent in the same host boot
+session. A created helper requires exactly the settled create command; an exited
+helper requires create and start. A remove record cannot match a retained helper.
+This status describes checked saved evidence, not successful return of the original
+owner, durable completion of a late publication, or a fresh xattr verification.
+Empty captures or a stopped helper alone cannot establish it.
 The API performs no helper start, exec, removal, volume effect, enrollment,
 journal completion or pending clear. It is not called automatically by ordinary
 `down --recover`; the existing incomplete-stop result and retained uncertainty
-remain until an independently reviewed original-command completion protocol is
-available. This observation seam has no live recovery acceptance yet.
+remain even with `records-settled` evidence. This observation seam has no live
+recovery acceptance yet.
 
 ## Original command records (inactive prerequisite)
 
@@ -335,11 +340,31 @@ Only the original in-memory writer can advance its exact sequence. Publication
 failure or deadline permanently invalidates that writer and retains its private
 files/descriptors. A rename or sync may finish after refusal, so a serialized
 settlement is an observation, not standalone successful-return, enrollment or
-cleanup authority. This slice has no recovery consumer, helper removal, intent
-clear, volume effect or automatic legacy upgrade. Linux process birth additionally
+cleanup authority. The observation-only consumer does not grant helper removal,
+intent clear, volume effects or automatic legacy upgrades. Linux process birth additionally
 binds kernel start ticks; macOS uses the existing `ps` birth representation while
 the captured subprocess remains the delivery owner. Future recovery must never
 use that representation to acquire or signal a replacement process.
+
+Writer and reader share two fixed projections. `sourceHash` binds the exact
+runtime/owner identity, generation ID, checkout and generation anchors, document
+hash, current and pending generation IDs, and original pending token. Receipt and
+lease incarnations are excluded because a saved recovery invocation has new ones;
+the recovery token does not replace the original pending token. `fixedInvocationHash`
+binds the artifact, volume birth and fixed target policy/ownership, readonly flag,
+UID/GID, exact request and generation scope. Only live holder inventory and the
+callback are excluded. The historical full material/invocation hashes remain in
+the record and are not compared to a newly reconstructed recovery context.
+Earlier version-2 shapes without these required projections stay unknown.
+
+The reader reopens existing private regular single-link captures and records,
+checks bounded UTF-8 bytes, inode/path identity and exact hashes, and repeats source,
+executable, boot and absence checks. It matches create output to the saved full
+helper ID and start output/exit to the closed response and observed helper exit.
+EPERM, EIO, live or reused PIDs, output mismatch and any missing evidence refuse
+settlement status. Its opaque result is bound to the observed invocation/helper
+selection; copied objects cannot carry it. It holds no resources after the read
+and cannot authorize a later effect. Carrier journal version 1 is unchanged.
 
 Focused private-filesystem and owned-child controls qualify only their tested
 writer/handshake boundaries. Installed carrier transport, interruption/recovery

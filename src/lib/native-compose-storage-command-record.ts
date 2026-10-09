@@ -2,6 +2,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { rename } from "node:fs/promises";
 import { join } from "node:path";
 import { isRecord } from "./guards.ts";
+import type { NativeComposeMaterialBinding } from "./native-compose-generation.ts";
 import {
   type HeldDirectory,
   keys,
@@ -11,6 +12,7 @@ import {
   sameFile,
   writeExclusive,
 } from "./native-compose-private-state.ts";
+import type { NativeComposeStorageXattrInvocation } from "./native-compose-storage-witness-xattr-carrier.ts";
 import { refuseNativeComposeStorageXattr as refuse } from "./native-compose-storage-witness-xattr-codec.ts";
 
 const HASH = /^[a-f0-9]{64}$/;
@@ -52,6 +54,8 @@ type Binding = {
   readonly helperHash: string;
   readonly requestHash: string;
   readonly invocationHash: string;
+  readonly sourceHash: string;
+  readonly fixedInvocationHash: string;
   readonly directory: Identity;
 };
 type Capture = Identity & { readonly name: string };
@@ -208,7 +212,7 @@ export function parseNativeComposeStorageCommandRecord(
       isRecord(record.binding) &&
       keys(
         record.binding,
-        "directory,engineId,helperHash,invocationHash,invocationId,materialHash,requestHash"
+        "directory,engineId,fixedInvocationHash,helperHash,invocationHash,invocationId,materialHash,requestHash,sourceHash"
       ) &&
       typeof record.binding.invocationId === "string" &&
       record.binding.invocationId.length === 32 &&
@@ -218,6 +222,8 @@ export function parseNativeComposeStorageCommandRecord(
       digest(record.binding.helperHash) &&
       digest(record.binding.requestHash) &&
       digest(record.binding.materialHash) &&
+      digest(record.binding.sourceHash) &&
+      digest(record.binding.fixedInvocationHash) &&
       identity(record.binding.directory) &&
       keys(record.binding.directory, "dev,ino") &&
       Array.isArray(record.commands) &&
@@ -274,6 +280,93 @@ export function parseNativeComposeStorageCommandRecord(
 }
 export function nativeComposeStorageCommandHash(value: string): string {
   return createHash("sha256").update(value).digest("hex");
+}
+/** Stable saved selection; receipt/lease incarnations and recoveryToken are not
+ * source identity. The original pending token and every selected anchor remain. */
+export function nativeComposeStorageCommandSourceHash(
+  binding: NativeComposeMaterialBinding
+): string {
+  return nativeComposeStorageCommandHash(
+    JSON.stringify({
+      identity: binding.identity,
+      generationId: binding.generationId,
+      checkout: binding.checkout,
+      generation: binding.generation,
+      documentHash: binding.documentHash,
+      currentGenerationId: binding.currentGenerationId,
+      pendingGenerationId: binding.pendingGenerationId,
+      pendingToken: binding.pendingToken,
+    })
+  );
+}
+/** Only live holders and the callback are excluded. All fixed target, request,
+ * helper, scope and operation inputs remain bound; historical hashes stay separate. */
+export function nativeComposeStorageCommandFixedInvocationHash(
+  input: NativeComposeStorageXattrInvocation
+): string {
+  const { target, artifact, request, scope } = input;
+  return nativeComposeStorageCommandHash(
+    JSON.stringify({
+      invocationId: input.invocationId,
+      artifact: {
+        version: artifact.version,
+        imageId: artifact.imageId,
+        platform: artifact.platform,
+        bunVersion: artifact.bunVersion,
+        bunHash: artifact.bunHash,
+        libcHash: artifact.libcHash,
+        helperHash: artifact.helperHash,
+        kernelAbi: artifact.kernelAbi,
+      },
+      target: {
+        engineId: target.engineId,
+        runtimeIdentity: target.runtimeIdentity,
+        ownerToken: target.ownerToken,
+        name: target.name,
+        storage: target.storage,
+        volume:
+          target.volume === null
+            ? null
+            : {
+                name: target.volume.name,
+                storage: target.volume.storage,
+                createdAt: target.volume.createdAt,
+              },
+        mountpoint: target.mountpoint,
+        driver: target.driver,
+        options: target.options,
+      },
+      readonly: input.readonly,
+      uid: input.uid,
+      gid: input.gid,
+      request:
+        request.operation === "root"
+          ? {
+              kind: request.kind,
+              version: request.version,
+              operation: request.operation,
+            }
+          : {
+              kind: request.kind,
+              version: request.version,
+              operation: request.operation,
+              name: request.name,
+              valueHex: request.valueHex,
+              root: {
+                device: request.root.device,
+                inode: request.root.inode,
+                uid: request.root.uid,
+                gid: request.root.gid,
+              },
+            },
+      scope: {
+        generationId: scope.generationId,
+        currentGenerationId: scope.currentGenerationId,
+        pendingGenerationId: scope.pendingGenerationId,
+        pendingToken: scope.pendingToken,
+      },
+    })
+  );
 }
 type OwnerState = {
   readonly directory: HeldDirectory;

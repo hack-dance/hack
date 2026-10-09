@@ -8,8 +8,8 @@ import { observeNativeComposeStorageDockerCarrierRecovery } from "./native-compo
 import type { NativeComposeStorageWitnessReference } from "./native-compose-storage-witness-state.ts";
 
 /** Internal saved down-recovery observation. Exact readonly verification work is
- * retained even on success: the old host command has no durable settlement
- * receipt. This API cannot clear pending, replay a helper, or retire resources. */
+ * retained even with matching v2 settled-record evidence. Legacy/missing/unknown
+ * records remain unknown. This API cannot clear pending, replay a helper, or retire resources. */
 export async function observeNativeComposeStorageCarrierRecovery(opts: {
   readonly store: NativeComposeGenerationStore;
   readonly authority: NativeComposeMaterialAuthority;

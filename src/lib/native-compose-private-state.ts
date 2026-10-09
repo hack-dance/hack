@@ -228,6 +228,17 @@ async function bootId(): Promise<string> {
   }
   return value;
 }
+/** Readonly host-session observation for private saved records, not lease authority. */
+export async function observeNativeComposePrivateHostSession(): Promise<{
+  readonly boot: string;
+  readonly uid: number;
+}> {
+  const uid = process.getuid?.();
+  if (uid === undefined) {
+    return refuse();
+  }
+  return Object.freeze({ boot: await bootId(), uid });
+}
 async function processBirth(
   pid: number
 ): Promise<{ readonly uid: number; readonly birth: string } | null> {

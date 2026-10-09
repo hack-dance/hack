@@ -27,6 +27,11 @@ import {
 } from "../native-compose-owned-fixture.ts";
 import { provisionNativeNetworkFixtureComposePlugin } from "../native-config-networks-acceptance.ts";
 import {
+  nativeFileBindExperimentProgram,
+  readBindExperiment,
+  selectBindExperimentNonowner,
+} from "../native-file-bind-experiment.ts";
+import {
   type NativeFileFixtureCommandResult,
   runNativeFileFixtureCommand,
 } from "../native-file-permission-command.ts";
@@ -2054,6 +2059,478 @@ export const nativeConfigProtectedFilesScenario: Scenario = {
       ctx.log(
         "Protected-file ordinary and retained access/lifecycle qualification passed"
       );
+    } finally {
+      h.stop();
+    }
+  },
+};
+
+/**
+ * Unregistered, explicitly selected diagnostic. Reuses this fixture's finite
+ * command/source/socket/artifact owner and exact saved down cleanup, while
+ * deliberately recording a synthetic read after a metadata mismatch. It cannot
+ * qualify the unchanged protected-file acceptance scenario.
+ */
+export const nativeProtectedFileBindExperimentScenario: Scenario = {
+  name: "native-protected-file-bind-experiment",
+  tier: "docker",
+  requiresExplicitSelection: true,
+  preserveFixtureOnFailure: true,
+  summary:
+    "compare the same protected snapshot binds and authored synthetic binds without secret output",
+  run: async (ctx) => {
+    const h = await setup(ctx);
+    const directName = `file-bind-experiment-${randomBytes(8).toString("hex")}`;
+    const label = "io.hack.fixture.permission-experiment";
+    let directPin: Row | undefined;
+    let directCreateIssued = false;
+    let noneNetwork: string | undefined;
+    const directPolicy = async (id: string) => {
+      const policy = object(
+        await h.probe([
+          "container",
+          "inspect",
+          id,
+          "--format",
+          '{"networkMode":{{json .HostConfig.NetworkMode}},"restart":{{json .HostConfig.RestartPolicy.Name}},"retries":{{json .RestartCount}},"user":{{json .Config.User}}}',
+        ])
+      );
+      requireValue(
+        policy.networkMode === "none" &&
+          policy.restart === "no" &&
+          policy.retries === 0 &&
+          ["", "0", "root"].includes(String(policy.user))
+      );
+    };
+    const immutableContainer = (row: Row) => {
+      const {
+        running: _running,
+        status: _status,
+        networks: _networks,
+        runtimePorts: _runtimePorts,
+        ...facts
+      } = row;
+      return facts;
+    };
+    const directFresh = async () => {
+      requireValue(directPin && typeof directPin.id === "string");
+      await h.fence();
+      const current = await h.inspect("container", directPin.id);
+      await directPolicy(directPin.id);
+      requireValue(noPorts(current));
+      requireValue(
+        Array.isArray(current.networks) &&
+          (current.networks.length === 0 ||
+            (current.networks.length === 1 &&
+              current.networks.every(
+                (raw: unknown) =>
+                  isRecord(raw) &&
+                  raw.name === "none" &&
+                  (raw.id === "" || raw.id === noneNetwork) &&
+                  raw.aliases === null
+              )))
+      );
+      requireValue(
+        canonical(immutableContainer(current)) ===
+          canonical(immutableContainer(directPin))
+      );
+      return current;
+    };
+    try {
+      await runWithOwnedCleanup({
+        run: async () => {
+          await writeFile(
+            join(ctx.tempRoot, "bind-experiment-intent.json"),
+            JSON.stringify({
+              version: 1,
+              source: process.env.HACK_E2E_SOURCE_REVISION,
+              scope:
+                "ordinary candidate plus one direct same-snapshot/authored-bind container",
+              replay: "refused",
+              permissionAcceptance: false,
+            }),
+            { mode: 0o600, flag: "wx" }
+          );
+          await h.fence();
+          h.successful(
+            await h.invoke(h.ordinary, ["up", "--detach", "--json"])
+          );
+          h.ordinary.bootstrapped = true;
+          await savedNative(h, h.ordinary);
+          const owned = await fixtureEnvironment(h, () =>
+            observeNativeComposeFixture(h.ordinary.root)
+          );
+          requireValue(
+            owned.pending === null &&
+              !owned.stopped &&
+              owned.observed.containers.length === 2 &&
+              owned.observed.volumes.length === 0
+          );
+          const reader = owned.observed.containers.find(
+            (row) => row.service === "reader"
+          );
+          requireValue(reader);
+          const nativePin = await h.inspect("container", reader.id);
+          requireValue(
+            nativePin.running === true && Array.isArray(nativePin.mounts)
+          );
+          const grants = h.ordinary.grants.filter(
+            (grant) => grant.mode !== "0444"
+          );
+          requireValue(grants.length === 2);
+          const snapshots = grants.map((grant) => {
+            const matches = (nativePin.mounts as unknown[]).filter(
+              (raw) => isRecord(raw) && raw.target === grant.target
+            );
+            requireValue(matches.length === 1);
+            const mount = matches[0];
+            requireValue(
+              isRecord(mount) &&
+                mount.type === "bind" &&
+                mount.name === "" &&
+                mount.rw === false &&
+                typeof mount.source === "string" &&
+                h.ordinary.privateMembers?.includes(mount.source)
+            );
+            return mount.source;
+          });
+          const snapshotPins = await Promise.all(snapshots.map(sourcePin));
+          requireValue(
+            snapshotPins.every(
+              (pin, index) =>
+                pin.mode === Number.parseInt(grants[index]!.mode, 8)
+            )
+          );
+          const image = h.baseline.tags[BUN_TAG];
+          requireValue(typeof image === "string" && IMAGE.test(image));
+          const imageVolumes = JSON.parse(
+            await h.probe([
+              "image",
+              "inspect",
+              image,
+              "--format",
+              "{{json .Config.Volumes}}",
+            ])
+          );
+          requireValue(
+            imageVolumes === null ||
+              (isRecord(imageVolumes) && Object.keys(imageVolumes).length === 0)
+          );
+          const rawPins = h.ordinary.material.filter(
+            (pin) => pin.mode !== 0o444
+          );
+          requireValue(rawPins.length === 2);
+          const directRows = [
+            ...grants.map((grant, index) => ({
+              ...grant,
+              slot: index,
+              target: `/experiment/snapshot-${index}`,
+              source: snapshots[index],
+            })),
+            ...grants.map((grant, index) => ({
+              ...grant,
+              slot: index + 2,
+              target: `/experiment/authored-${index}`,
+              source: rawPins.find(
+                (pin) => pin.mode === Number.parseInt(grant.mode, 8)
+              )?.path,
+            })),
+          ];
+          requireValue(
+            directRows.every(
+              (row) =>
+                typeof row.source === "string" &&
+                !row.source.includes(",") &&
+                !row.source.includes("$")
+            )
+          );
+          await h.fence();
+          noneNetwork = JSON.parse(
+            await h.probe([
+              "network",
+              "inspect",
+              "none",
+              "--format",
+              "{{json .Id}}",
+            ])
+          );
+          requireValue(typeof noneNetwork === "string" && ID.test(noneNetwork));
+          directCreateIssued = true;
+          const directId = h.successful(
+            await h.command([
+              h.docker,
+              "container",
+              "create",
+              "--pull",
+              "never",
+              "--name",
+              directName,
+              "--label",
+              `${label}=${directName}`,
+              "--network",
+              "none",
+              "--restart",
+              "no",
+              "--user",
+              "0",
+              ...directRows.flatMap((row) => [
+                "--mount",
+                `type=bind,source=${row.source},target=${row.target},readonly`,
+              ]),
+              image,
+              ...LOOP,
+            ])
+          );
+          requireValue(ID.test(directId));
+          const created = await h.inspect("container", directId);
+          requireValue(
+            created.id === directId &&
+              created.name === `/${directName}` &&
+              typeof created.createdAt === "string" &&
+              created.createdAt.length > 0 &&
+              created.image === image &&
+              created.running === false &&
+              created.status === "created" &&
+              isRecord(created.labels) &&
+              created.labels[label] === directName &&
+              Array.isArray(created.mounts) &&
+              created.mounts.length === 4 &&
+              Array.isArray(created.networks) &&
+              (created.networks.length === 0 ||
+                (created.networks.length === 1 &&
+                  created.networks.every(
+                    (raw: unknown) =>
+                      isRecord(raw) &&
+                      raw.name === "none" &&
+                      (raw.id === "" || raw.id === noneNetwork) &&
+                      raw.aliases === null
+                  ))) &&
+              canonical(created.command) === canonical(LOOP) &&
+              noPorts(created)
+          );
+          for (const row of directRows) {
+            requireValue(
+              (created.mounts as unknown[]).some(
+                (mount) =>
+                  isRecord(mount) &&
+                  mount.type === "bind" &&
+                  mount.name === "" &&
+                  mount.source === row.source &&
+                  mount.target === row.target &&
+                  mount.rw === false
+              )
+            );
+          }
+          await directPolicy(directId);
+          directPin = created;
+          await writeFile(
+            join(ctx.tempRoot, "bind-experiment-direct-pin.json"),
+            JSON.stringify(directPin),
+            { mode: 0o600, flag: "wx" }
+          );
+          await directFresh();
+          h.successful(
+            await h.command([h.docker, "container", "start", directId])
+          );
+          requireValue((await directFresh()).running === true);
+          const nativeRows = grants.map((grant, slot) => ({ ...grant, slot }));
+          const observe = async (
+            id: string,
+            uid: number,
+            input: readonly unknown[],
+            write: boolean
+          ) => {
+            await h.fence();
+            await checkSources([...h.ordinary.material, ...snapshotPins]);
+            const result = h.successful(
+              await h.command(
+                [
+                  h.docker,
+                  "container",
+                  "exec",
+                  "--interactive",
+                  "--user",
+                  String(uid),
+                  id,
+                  "bun",
+                  "-e",
+                  nativeFileBindExperimentProgram,
+                ],
+                h.ordinary.root,
+                { rows: input, write }
+              )
+            );
+            const observed = readBindExperiment(
+              result,
+              input.map((_, index) => index)
+            );
+            requireValue(
+              observed.observer ===
+                (uid === 0
+                  ? "root"
+                  : uid === 65_534
+                    ? "selected-a"
+                    : "selected-b")
+            );
+            return observed;
+          };
+          const nativeRoot = await observe(reader.id, 0, nativeRows, true);
+          const directRoot = await observe(directId, 0, directRows, true);
+          const nonowner = selectBindExperimentNonowner([
+            ...nativeRoot.rows,
+            ...directRoot.rows,
+          ]);
+          const nativeOther = await observe(
+            reader.id,
+            nonowner,
+            nativeRows,
+            false
+          );
+          const directOther = await observe(
+            directId,
+            nonowner,
+            directRows,
+            false
+          );
+          const rows = (root: typeof nativeRoot, other: typeof nativeOther) =>
+            root.rows.map((row, index) => ({
+              slot: row.slot,
+              rootOwner: row.owner,
+              rootGroup: row.group,
+              selectedGroup: other.rows[index]!.group,
+              selectedOwner: other.rows[index]!.owner,
+              selectedOwnerIsSelf: other.rows[index]!.ownerIsSelf,
+              rootSelectedIdentityEqual:
+                row.identity === other.rows[index]!.identity,
+              modeMatched: row.modeMatched && other.rows[index]!.modeMatched,
+              stable: row.stable && other.rows[index]!.stable,
+              rootRead: row.read,
+              rootBytesMatched: row.bytesMatched,
+              selectedRead: other.rows[index]!.read,
+              selectedBytesMatched: other.rows[index]!.bytesMatched,
+              readonlyWrite: row.write,
+            }));
+          const all = [
+            ...nativeRoot.rows,
+            ...directRoot.rows,
+            ...nativeOther.rows,
+            ...directOther.rows,
+          ];
+          await checkSources([...h.ordinary.material, ...snapshotPins]);
+          requireValue(
+            canonical(
+              immutableContainer(await h.inspect("container", reader.id))
+            ) === canonical(immutableContainer(nativePin))
+          );
+          await directFresh();
+          const finalNative = await fixtureEnvironment(h, () =>
+            observeNativeComposeFixture(h.ordinary.root)
+          );
+          requireValue(
+            finalNative.pending === null &&
+              !finalNative.stopped &&
+              canonical(finalNative.selection) === canonical(owned.selection) &&
+              canonical(finalNative.observed) === canonical(owned.observed)
+          );
+          await h.fence();
+          h.remaining();
+          const comparison = nativeRoot.rows.map((row, index) => ({
+            slot: index,
+            rootIdentityEqual:
+              row.identity === directRoot.rows[index]!.identity,
+            rootOwnerEqual: row.owner === directRoot.rows[index]!.owner,
+            selectedIdentityEqual:
+              nativeOther.rows[index]!.identity ===
+              directOther.rows[index]!.identity,
+            selectedOwnerEqual:
+              nativeOther.rows[index]!.owner === directOther.rows[index]!.owner,
+            selectedReadEqual:
+              nativeOther.rows[index]!.read === directOther.rows[index]!.read,
+          }));
+          await writeFile(
+            join(ctx.tempRoot, "bind-experiment-result.json"),
+            JSON.stringify({
+              version: 1,
+              diagnosticComplete: true,
+              permissionAcceptance: false,
+              native: rows(nativeRoot, nativeOther),
+              direct: rows(directRoot, directOther),
+              sameSnapshotComparison: comparison,
+              authoritativeOuterExitRequired: true,
+            }),
+            { mode: 0o600, flag: "wx" }
+          );
+          h.remaining();
+          requireValue(
+            all.every(
+              (row) =>
+                row.stable &&
+                row.modeMatched &&
+                row.read !== "unknown" &&
+                row.bytesMatched !== false &&
+                row.write !== "unknown"
+            ) &&
+              [...nativeRoot.rows, ...directRoot.rows].every(
+                (row) => row.read === "success" && row.write === "EROFS"
+              )
+          );
+          ctx.log(
+            "Synthetic candidate/direct bind read outcomes captured; protected permission acceptance remains separate"
+          );
+        },
+        cleanup: async () => {
+          if (directCreateIssued) {
+            requireValue(directPin && typeof directPin.id === "string");
+            const current = await directFresh();
+            requireValue(typeof current.running === "boolean");
+            if (current.running) {
+              h.successful(
+                await h.command([
+                  h.docker,
+                  "container",
+                  "stop",
+                  "--time",
+                  "1",
+                  directPin.id,
+                ])
+              );
+            }
+            const stopped = await directFresh();
+            requireValue(
+              stopped.running === false &&
+                ["created", "exited"].includes(String(stopped.status))
+            );
+            await h.fence();
+            h.successful(
+              await h.command([h.docker, "container", "rm", directPin.id])
+            );
+            const remaining = await h.probe([
+              "container",
+              "ls",
+              "--all",
+              "--no-trunc",
+              "--filter",
+              `label=${label}=${directName}`,
+              "--format",
+              "{{.ID}}",
+            ]);
+            requireValue(remaining.trim() === "");
+          }
+          await removeOrdinary(h);
+          await h.fence();
+          requireValue(
+            canonical(await h.inventory()) === canonical(h.baseline)
+          );
+          h.remaining();
+          ctx.log(
+            "Exact direct nonforce removal, native saved down and complete original baseline verified"
+          );
+        },
+        secondaryFailure: () =>
+          ctx.retainFixtures(
+            "Synthetic bind experiment cleanup uncertain; exact pins and captures retained"
+          ),
+      });
     } finally {
       h.stop();
     }

@@ -306,16 +306,17 @@ journal completion or pending clear. It is not called automatically by ordinary
 remain even with `records-settled` evidence. This observation seam has no live
 recovery acceptance yet.
 
-## Original command records (inactive prerequisite)
+## Original readonly command records
 
 The internal `originalCommandRecords: true` transport option creates a distinct
 private command-record version 2 beside the existing carrier journal version 1.
-Ordinary callers do not select this option. Old journals and missing command
-records retain unknown host-command settlement; no record is reconstructed from
+New ordinary readonly verify commands select this option. Root/seed keep the
+legacy transport/order and interrupted work remains unknown. Old journals and
+missing command records retain unknown host-command settlement; no record is reconstructed from
 an old PID, empty capture or stopped guest helper.
 
-For this option, each fixed carrier create/start/remove command first synchronizes
-its arm record and parent directory. The existing captured `run()` owner starts
+For each readonly verify invocation, the fixed create/start/remove commands
+synchronize their arm record and parent directory. The existing captured `run()` owner starts
 a fixed wrapper that stops itself before executing Docker. The original owner
 observes that stopped PID, owned group, process birth and shell executable,
 publishes and synchronizes that identity, then repeats identity, boot, executable
@@ -342,8 +343,8 @@ failure or deadline permanently invalidates that writer and retains its private
 files/descriptors. A rename or sync may finish after refusal, so a serialized
 settlement is an observation, not standalone successful-return, enrollment or
 cleanup authority. The observation-only consumer does not grant helper removal,
-intent clear, volume effects or automatic legacy upgrades. Linux process birth additionally
-binds kernel start ticks; macOS uses the existing `ps` birth representation while
+intent clear, volume effects or automatic legacy upgrades. Linux process birth
+additionally binds kernel start ticks; macOS uses the existing `ps` birth representation while
 the captured subprocess remains the delivery owner. Future recovery must never
 use that representation to acquire or signal a replacement process.
 
@@ -370,3 +371,30 @@ and cannot authorize a later effect. Carrier journal version 1 is unchanged.
 Focused private-filesystem and owned-child controls qualify only their tested
 writer/handshake boundaries. Installed carrier transport, interruption/recovery
 and persistent SQL acceptance remain separate runtime gates.
+
+### Removed readonly work recovery
+
+New original v2 transports retain their private command files until the witness
+owner has completed the exact journal intent. An original-only one-use finish
+capability then rechecks source, lifetime, completion and current helper absence
+before retiring those files. Failure after completion retains evidence and never
+recreates the intent or confers a second cleanup attempt. The default v1 port
+keeps its prior retirement order.
+
+Saved `down --recover`, after known compute removal, can complete one narrower
+postcondition: a readonly verification whose original create, successful start
+and successful remove records are complete, whose exact successful outputs and
+captures match, and whose original child and groups are currently absent. Fresh
+source, engine/artifact, complete invocation inventory and retained volume birth,
+labels, policy and holder checks are required under the current mutation lease.
+The journal is compared again after the last awaited proof and only its captured
+unchanged intent is cleared. Existing final receipt/source/kernel fences still
+precede ordinary completion. Recovery does not replay a helper command, remove a
+helper or volume, enroll storage, or retire the retained command evidence.
+
+Legacy or missing records, retained helpers, failed verification, incomplete
+publication, changed source or volume, and seed/root uncertainty remain refused.
+The settled-record observation API remains observation-only; it exposes no journal
+completion callback. Portable source-CLI tests use a stand-in daemon/kernel and
+real private files/children. They do not qualify installed interruption/recovery,
+Linux transport, SQL retention, or the discarded older disposable fixtures.

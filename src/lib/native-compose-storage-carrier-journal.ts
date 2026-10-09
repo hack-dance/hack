@@ -57,6 +57,28 @@ type Bound = {
   readonly token: string;
   readonly check: () => Promise<unknown>;
 };
+/** Original completion only. A reader observation can never issue this handle. */
+export type NativeComposeStorageCarrierCompletion = Readonly<
+  Record<never, never>
+>;
+const completions = new WeakMap<
+  NativeComposeStorageCarrierCompletion,
+  {
+    readonly invocationId: string;
+    readonly check: () => Promise<void>;
+  }
+>();
+export function consumeNativeComposeStorageCarrierCompletion(opts: {
+  readonly completion: NativeComposeStorageCarrierCompletion;
+  readonly invocationId: string;
+}): () => Promise<void> {
+  const selected = completions.get(opts.completion) ?? refuse();
+  completions.delete(opts.completion);
+  if (selected.invocationId !== opts.invocationId) {
+    return refuse();
+  }
+  return selected.check;
+}
 /** Saved observation only. Neither this snapshot nor its check grants retirement
  * or completion authority for an original host command. */
 export type NativeComposeStorageReadonlyCarrierIntent = Intent & {
@@ -183,8 +205,9 @@ async function read(bound: Bound) {
 async function save(
   bound: Bound,
   prior: Awaited<ReturnType<typeof read>>,
-  intent: Intent | null
-): Promise<void> {
+  intent: Intent | null,
+  beforeReplace?: () => Promise<void>
+) {
   if (prior.state.revision >= Number.MAX_SAFE_INTEGER) {
     return refuse();
   }
@@ -206,6 +229,15 @@ async function save(
     return refuse();
   }
   await bound.check();
+  if (beforeReplace) {
+    await beforeReplace();
+  }
+  // The authority check may await transport. Recheck the captured incarnation
+  // after it, immediately before replacing only that exact journal.
+  const final = await read(bound);
+  if (!sameFile(final.info, prior.info) || final.text !== prior.text) {
+    return refuse();
+  }
   await rename(temporary, path);
   await bound.directory.file.sync();
   const published = await read(bound);
@@ -213,6 +245,7 @@ async function save(
     return refuse();
   }
   await bound.check();
+  return published;
 }
 /** Required before any finite carrier effects. A missing or changed journal is never initialized on resume. */
 export async function initializeNativeComposeStorageCarrierJournal(
@@ -296,7 +329,9 @@ export async function beginNativeComposeStorageCarrierIntent(
       await save(bound, latest, { ...intent, created: selected });
       recorded = selected;
     },
-    async complete(value: Created): Promise<void> {
+    async complete(
+      value: Created
+    ): Promise<NativeComposeStorageCarrierCompletion> {
       if (completing) {
         return refuse();
       }
@@ -307,7 +342,22 @@ export async function beginNativeComposeStorageCarrierIntent(
       }
       await bound.check();
       const latest = await requireIntent();
-      await save(bound, latest, null);
+      const published = await save(bound, latest, null);
+      const completion = Object.freeze({});
+      completions.set(completion, {
+        invocationId: intent.invocationId,
+        check: async () => {
+          await bound.check();
+          const selected = await read(bound);
+          if (
+            !sameFile(selected.info, published.info) ||
+            selected.text !== published.text
+          ) {
+            return refuse();
+          }
+        },
+      });
+      return completion;
     },
   });
 }
@@ -363,7 +413,23 @@ export async function readNativeComposeStorageReadonlyCarrierIntent(
     await bound.check();
   };
   await assertUnchanged();
-  return Object.freeze({ intent, assertUnchanged });
+  let completing = false;
+  return Object.freeze({
+    intent,
+    assertUnchanged,
+    // Only the owning witness calls this after its fresh absent-work proof.
+    // This is exact journal completion, never helper retirement authority.
+    async completeRemoved(checkRemoved: () => Promise<void>): Promise<void> {
+      if (completing) {
+        return refuse();
+      }
+      completing = true;
+      await assertUnchanged();
+      await checkRemoved();
+      await assertUnchanged();
+      await save(bound, prior, null, checkRemoved);
+    },
+  });
 }
 
 /** Saved-only check. Broken anchors and unknown intent block admission/retirement but permit explicit saved stop. */

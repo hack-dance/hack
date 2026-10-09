@@ -44,7 +44,7 @@ export async function commandReaderFixture(opts: {
   readonly invocationId?: string;
   readonly created?: { readonly id: string; readonly createdAt: string };
   readonly request?: NativeComposeStorageXattrRequest;
-  readonly helperState?: "created" | "exited";
+  readonly helperState?: "created" | "exited" | "absent";
   readonly exitCode?: number;
 }) {
   const directory = await holdDirectory(opts.root, true);
@@ -87,14 +87,15 @@ export async function commandReaderFixture(opts: {
     for (const [index, kind] of (
       [
         "create",
-        ...(helperState === "exited" ? (["start"] as const) : []),
+        ...(helperState !== "created" ? (["start"] as const) : []),
+        ...(helperState === "absent" ? (["remove"] as const) : []),
       ] as const
     ).entries()) {
       const token = randomBytes(16).toString("hex");
       const stdout = `${token}.stdout`,
         stderr = `${token}.stderr`;
       const text =
-        kind === "create"
+        kind === "create" || kind === "remove"
           ? `${created.id}\n`
           : encodeNativeComposeStorageXattrResponse(
               exitCode === 1
@@ -131,7 +132,7 @@ export async function commandReaderFixture(opts: {
         wrapper: executable,
       });
       await settleNativeComposeStorageCommand(armed, {
-        exitCode: kind === "create" ? 0 : exitCode,
+        exitCode: kind === "start" ? exitCode : 0,
         timedOut: false,
         cancelled: false,
         groupAbsent: true,
@@ -148,6 +149,7 @@ export async function commandReaderFixture(opts: {
       wrapper: executable,
       createArgumentsHash: hash("create"),
       startArgumentsHash: hash("start"),
+      removeArgumentsHash: hash("remove"),
       created,
       helperState,
       helperExitCode: exitCode,

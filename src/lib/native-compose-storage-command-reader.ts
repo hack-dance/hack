@@ -24,14 +24,14 @@ type Binding = Omit<RecordV2["binding"], "materialHash" | "invocationHash">;
 type Selection = {
   readonly invocationId: string;
   readonly created: { readonly id: string; readonly createdAt: string };
-  readonly helperState: "created" | "exited";
+  readonly helperState: "created" | "exited" | "absent";
 };
 export type NativeComposeStorageCommandObservation = Readonly<
   Record<never, never>
 >;
 const observations = new WeakMap<
   NativeComposeStorageCommandObservation,
-  Selection
+  Selection & { readonly recheck?: () => Promise<void> }
 >();
 function sameExecutable(
   left: NativeComposeStorageCommandExecutable,
@@ -68,6 +68,7 @@ function checkedCommand(opts: {
     readonly wrapper: NativeComposeStorageCommandExecutable;
     readonly createArgumentsHash: string;
     readonly startArgumentsHash: string;
+    readonly removeArgumentsHash?: string;
     readonly created: Selection["created"];
     readonly helperExitCode: number;
   };
@@ -86,14 +87,17 @@ function checkedCommand(opts: {
     !sameExecutable(command.executable, expected.executable) ||
     !sameExecutable(child.wrapper, expected.wrapper) ||
     command.argumentsHash !==
-      (command.kind === "create"
-        ? expected.createArgumentsHash
-        : expected.startArgumentsHash) ||
+      {
+        create: expected.createArgumentsHash,
+        start: expected.startArgumentsHash,
+        remove: expected.removeArgumentsHash,
+      }[command.kind] ||
     (command.kind === "create"
       ? command.carrier !== null || settlement.exitCode !== 0
       : command.carrier?.id !== expected.created.id ||
         command.carrier.createdAt !== expected.created.createdAt ||
-        settlement.exitCode !== expected.helperExitCode)
+        settlement.exitCode !==
+          (command.kind === "start" ? expected.helperExitCode : 0))
   ) {
     return refuse();
   }
@@ -136,6 +140,7 @@ export async function readNativeComposeStorageCommandObservation(opts: {
   readonly wrapper: NativeComposeStorageCommandExecutable;
   readonly createArgumentsHash: string;
   readonly startArgumentsHash: string;
+  readonly removeArgumentsHash?: string;
   readonly created: Selection["created"];
   readonly helperState: Selection["helperState"];
   readonly helperExitCode: number;
@@ -153,6 +158,7 @@ export async function readNativeComposeStorageCommandObservation(opts: {
     wrapper: opts.wrapper,
     createArgumentsHash: opts.createArgumentsHash,
     startArgumentsHash: opts.startArgumentsHash,
+    removeArgumentsHash: opts.removeArgumentsHash,
     created: opts.created,
     helperState: opts.helperState,
     helperExitCode: opts.helperExitCode,
@@ -173,8 +179,11 @@ export async function readNativeComposeStorageCommandObservation(opts: {
     const request = expected.request;
     if (
       !sameBinding(record.binding, expected.binding) ||
-      record.commands.length !== (expected.helperState === "created" ? 1 : 2) ||
-      request.operation !== "verify"
+      record.commands.length !==
+        { created: 1, exited: 2, absent: 3 }[expected.helperState] ||
+      request.operation !== "verify" ||
+      (expected.helperState === "absent" &&
+        (expected.helperExitCode !== 0 || !expected.removeArgumentsHash))
     ) {
       return refuse();
     }
@@ -228,7 +237,7 @@ export async function readNativeComposeStorageCommandObservation(opts: {
         captures.push({ leaf, saved: observed });
         output.push(observed.text);
       }
-      if (command.kind === "create") {
+      if (command.kind === "create" || command.kind === "remove") {
         if (output[0]?.trim() !== expected.created.id) {
           return refuse();
         }
@@ -248,35 +257,38 @@ export async function readNativeComposeStorageCommandObservation(opts: {
         }
       }
     }
-    await check();
-    await session();
-    for (const capture of captures) {
-      const fresh = await readNativeComposeStorageSavedCapture({
-        directories: [directory],
-        leaf: capture.leaf,
-      });
+    const recheck = async () => {
+      await check();
+      await session();
+      for (const capture of captures) {
+        const fresh = await readNativeComposeStorageSavedCapture({
+          directories: [directory],
+          leaf: capture.leaf,
+        });
+        if (
+          fresh.text !== capture.saved.text ||
+          fresh.info.size !== capture.saved.info.size ||
+          fresh.info.mtimeMs !== capture.saved.info.mtimeMs ||
+          fresh.info.ctimeMs !== capture.saved.info.ctimeMs
+        ) {
+          return refuse();
+        }
+      }
+      await recheckDirectories([directory]);
+      const fresh = await readRecord();
       if (
-        fresh.text !== capture.saved.text ||
-        fresh.info.size !== capture.saved.info.size ||
-        fresh.info.mtimeMs !== capture.saved.info.mtimeMs ||
-        fresh.info.ctimeMs !== capture.saved.info.ctimeMs
+        !sameFile(fresh.info, saved.info) ||
+        fresh.text !== saved.text ||
+        fresh.info.mtimeMs !== saved.info.mtimeMs ||
+        fresh.info.ctimeMs !== saved.info.ctimeMs
       ) {
         return refuse();
       }
-    }
-    await recheckDirectories([directory]);
-    const fresh = await readRecord();
-    if (
-      !sameFile(fresh.info, saved.info) ||
-      fresh.text !== saved.text ||
-      fresh.info.mtimeMs !== saved.info.mtimeMs ||
-      fresh.info.ctimeMs !== saved.info.ctimeMs
-    ) {
-      return refuse();
-    }
-    await check();
-    await session();
-    await check();
+      await check();
+      await session();
+      await check();
+    };
+    await recheck();
     const observation = Object.freeze({});
     observations.set(
       observation,
@@ -284,6 +296,7 @@ export async function readNativeComposeStorageCommandObservation(opts: {
         invocationId: expected.binding.invocationId,
         created: Object.freeze(expected.created),
         helperState: expected.helperState,
+        recheck: expected.helperState === "absent" ? recheck : undefined,
       })
     );
     return observation;
@@ -309,4 +322,16 @@ export function observeNativeComposeStorageCommandSettlement(
     return refuse();
   }
   return "records-settled";
+}
+
+/** Held-scope fresh proof only, exclusively for the removed successful prefix.
+ * It does not issue journal, resource or file retirement authority. */
+export async function recheckNativeComposeStorageRemovedCommands(
+  observation: NativeComposeStorageCommandObservation
+): Promise<void> {
+  const selected = observations.get(observation) ?? refuse();
+  if (selected.helperState !== "absent" || !selected.recheck) {
+    return refuse();
+  }
+  await selected.recheck();
 }

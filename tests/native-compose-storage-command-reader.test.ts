@@ -17,6 +17,7 @@ import {
   assertNativeComposeStorageCommandAbsent,
   observeNativeComposeStorageCommandSettlement,
   readNativeComposeStorageCommandObservation,
+  recheckNativeComposeStorageRemovedCommands,
 } from "../src/lib/native-compose-storage-command-reader.ts";
 import {
   nativeComposeStorageCommandHash as hash,
@@ -681,6 +682,73 @@ for (const failure of [
           break;
       }
       await expect(f.read()).rejects.toThrow("values omitted");
+    })
+  );
+}
+
+for (const failure of [
+  "none",
+  "missing-remove",
+  "failed-start",
+  "failed-remove",
+  "remove-output",
+  "record-replaced",
+  "capture-drift",
+  "copied-proof",
+] as const) {
+  test(
+    `removed successful prefix ${failure} retains strict fresh evidence`,
+    owned(async () => {
+      const f = await fixture({
+        helperState: "absent",
+        exitCode: failure === "failed-start" ? 1 : 0,
+      });
+      if (failure === "missing-remove") {
+        await change(f, (r) => ({ ...r, commands: r.commands.slice(0, 2) }));
+      }
+      if (failure === "failed-remove") {
+        await change(f, (r) => ({
+          ...r,
+          commands: r.commands.map((c) =>
+            c.kind === "remove"
+              ? { ...c, settlement: { ...c.settlement, exitCode: 1 } }
+              : c
+          ),
+        }));
+      }
+      if (failure === "remove-output") {
+        await writeFile(f.outputs[2] ?? "", "foreign\n");
+      }
+      if (
+        [
+          "missing-remove",
+          "failed-start",
+          "failed-remove",
+          "remove-output",
+        ].includes(failure)
+      ) {
+        await expect(f.read()).rejects.toThrow("values omitted");
+        return;
+      }
+      const observed = await f.read();
+      if (failure === "record-replaced") {
+        const path = join(f.directory.path, "commands.json"),
+          text = await readFile(path);
+        await rename(path, `${path}.original`);
+        await writeFile(path, text, { mode: 0o600 });
+      }
+      if (failure === "capture-drift") {
+        await writeFile(f.outputs[0] ?? "", "foreign\n");
+      }
+      if (failure === "none") {
+        await recheckNativeComposeStorageRemovedCommands(observed);
+      } else {
+        await expect(
+          recheckNativeComposeStorageRemovedCommands(
+            failure === "copied-proof" ? { ...observed } : observed
+          )
+        ).rejects.toThrow("values omitted");
+      }
     })
   );
 }

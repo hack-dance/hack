@@ -30,11 +30,14 @@ import {
 } from "./native-compose-private-state.ts";
 import {
   captureNativeComposeStorageReadonlyCarrierIntent,
+  consumeNativeComposeStorageCarrierCompletion,
+  type NativeComposeStorageCarrierCompletion,
   type NativeComposeStorageReadonlyCarrierIntent,
 } from "./native-compose-storage-carrier-journal.ts";
 import {
   type NativeComposeStorageCommandObservation,
   readNativeComposeStorageCommandObservation,
+  recheckNativeComposeStorageRemovedCommands,
 } from "./native-compose-storage-command-reader.ts";
 import {
   armNativeComposeStorageCommand,
@@ -102,7 +105,7 @@ type Context = {
   readonly engineId: string;
   readonly signal: AbortSignal;
   readonly deadline: number;
-  /** Inactive until its original-owner handshake/transport is qualified. */
+  /** Original records for readonly verify only; root/seed retain legacy unknown recovery. */
   readonly originalCommandRecords?: true;
 };
 type Files = {
@@ -252,7 +255,11 @@ async function invocationFiles(
     return refuse();
   }
 }
-async function retireInvocationFiles(files: Files): Promise<void> {
+async function retireInvocationFiles(
+  files: Files,
+  check?: () => Promise<void>,
+  beforeRemove?: () => void
+): Promise<void> {
   await checkFiles(files);
   const owned = [
     { path: files.program, info: files.programInfo },
@@ -264,6 +271,9 @@ async function retireInvocationFiles(files: Files): Promise<void> {
     .sort();
   if (!same((await readdir(files.path)).sort(), names)) {
     return refuse();
+  }
+  if (check) {
+    await check();
   }
   for (const file of owned) {
     await recheckDirectories(files.held);
@@ -278,6 +288,7 @@ async function retireInvocationFiles(files: Files): Promise<void> {
     ) {
       return refuse();
     }
+    beforeRemove?.();
     await unlink(file.path);
   }
   await files.held.at(-1)?.file.sync();
@@ -383,19 +394,62 @@ async function savedInvocationFiles(opts: {
 /** Saved readonly verification observation only. No helper start/exec/removal,
  * kernel invocation, file retirement, journal completion or volume effect occurs.
  * A stopped guest helper does not establish original host-command settlement. */
-export async function observeNativeComposeStorageDockerCarrierRecovery(opts: {
+async function assertRemovedCarrier(
+  read: ReturnType<typeof createNativeComposeProbe>,
+  invocationId: string,
+  id: string
+): Promise<void> {
+  const text = await read([
+    "container",
+    "ls",
+    "-a",
+    "--no-trunc",
+    "--format",
+    "{{json .ID}}",
+  ]);
+  const rows: unknown[] =
+    text.trim() === ""
+      ? []
+      : text
+          .trim()
+          .split("\n")
+          .map((line) => JSON.parse(line));
+  if (
+    rows.some((row) => typeof row !== "string" || !ID.test(row)) ||
+    new Set(rows).size !== rows.length ||
+    rows.includes(id)
+  ) {
+    return refuse();
+  }
+  const selected = await read([
+    "container",
+    "ls",
+    "-a",
+    "--no-trunc",
+    "--filter",
+    `label=${NATIVE_STORAGE_CARRIER_LABEL}=${invocationId}`,
+    "--format",
+    "{{json .ID}}",
+  ]);
+  if (selected.trim() !== "") {
+    return refuse();
+  }
+}
+async function savedCarrierRecovery(opts: {
   readonly context: Context;
   readonly intent: NativeComposeStorageReadonlyCarrierIntent;
   readonly request: NativeComposeStorageXattrInvocation["request"];
   readonly assertUnchanged: () => Promise<void>;
+  readonly completeRemoved?: (check: () => Promise<void>) => Promise<void>;
 }): Promise<{
-  readonly helperState: "created" | "exited";
+  readonly helperState: "created" | "exited" | "absent";
   readonly commands: NativeComposeStorageCommandObservation | null;
 }> {
   const context = Object.freeze({ ...opts.context });
   const intent = captureNativeComposeStorageReadonlyCarrierIntent(opts.intent);
   const request = structuredClone(opts.request);
   const assertUnchanged = opts.assertUnchanged;
+  const completeRemoved = opts.completeRemoved;
   if (
     intent.operation !== "verify" ||
     intent.readonly !== true ||
@@ -432,7 +486,9 @@ export async function observeNativeComposeStorageDockerCarrierRecovery(opts: {
     return await assertNativeComposeMaterialAuthority({
       authority: context.authority,
       generation,
-      phase: "storage-recovery-observe",
+      phase: completeRemoved
+        ? "storage-recovery-finish"
+        : "storage-recovery-observe",
     });
   };
   const before = await binding();
@@ -558,30 +614,10 @@ export async function observeNativeComposeStorageDockerCarrierRecovery(opts: {
       }
       return selected;
     };
-    await invocation();
-    const first = await helper();
-    const firstTarget = await target();
-    const second = await helper();
-    const secondTarget = await target();
-    await invocation();
-    if (
-      !same(first.state, second.state) ||
-      nativeComposeStorageDockerCarrierPolicy(first) !==
-        nativeComposeStorageDockerCarrierPolicy(second) ||
-      !same(firstTarget, secondTarget)
-    ) {
-      return refuse();
-    }
-    await engine(read, context);
-    await guard();
-    const state = second.state.Status;
-    if (state !== "created" && state !== "exited") {
-      return refuse();
-    }
-    // Missing or incomplete command evidence does not weaken the full saved
-    // helper/source/policy observation above or grant a new effect.
-    let commands: NativeComposeStorageCommandObservation | null = null;
-    try {
+    const records = async (
+      state: "created" | "exited" | "absent",
+      helperExitCode: number
+    ) => {
       const directory = files.held.at(-1) ?? refuse();
       const input: NativeComposeStorageXattrInvocation = {
         recordCreated: async () => refuse(),
@@ -607,7 +643,7 @@ export async function observeNativeComposeStorageDockerCarrierRecovery(opts: {
       };
       const executable = await commandExecutable(docker),
         wrapper = await commandExecutable("/bin/sh");
-      commands = await readNativeComposeStorageCommandObservation({
+      return await readNativeComposeStorageCommandObservation({
         directory,
         binding: {
           invocationId: intent.invocationId,
@@ -632,12 +668,15 @@ export async function observeNativeComposeStorageDockerCarrierRecovery(opts: {
             }),
           ])
         ),
+        removeArgumentsHash: nativeComposeStorageCommandHash(
+          JSON.stringify([docker, "rm", intent.created.id])
+        ),
         startArgumentsHash: nativeComposeStorageCommandHash(
           JSON.stringify([docker, "start", "-ai", intent.created.id])
         ),
         created: intent.created,
         helperState: state,
-        helperExitCode: Number(second.state.ExitCode),
+        helperExitCode,
         request,
         hostSession: observeNativeComposePrivateHostSession,
         check: async () => {
@@ -653,6 +692,59 @@ export async function observeNativeComposeStorageDockerCarrierRecovery(opts: {
           tool();
         },
       });
+    };
+    if (completeRemoved) {
+      const original = await records("absent", 0);
+      const checkRemoved = async () => {
+        await engine(read, context);
+        await assertRemovedCarrier(
+          read,
+          intent.invocationId,
+          intent.created.id
+        );
+        const first = await target();
+        await recheckNativeComposeStorageRemovedCommands(original);
+        const second = await target();
+        await assertRemovedCarrier(
+          read,
+          intent.invocationId,
+          intent.created.id
+        );
+        await engine(read, context);
+        if (!same(first, second)) {
+          return refuse();
+        }
+        await recheckNativeComposeStorageRemovedCommands(original);
+        await guard();
+      };
+      await checkRemoved();
+      await completeRemoved(checkRemoved);
+      return Object.freeze({ helperState: "absent" as const, commands: null });
+    }
+    await invocation();
+    const first = await helper();
+    const firstTarget = await target();
+    const second = await helper();
+    const secondTarget = await target();
+    await invocation();
+    if (
+      !same(first.state, second.state) ||
+      nativeComposeStorageDockerCarrierPolicy(first) !==
+        nativeComposeStorageDockerCarrierPolicy(second) ||
+      !same(firstTarget, secondTarget)
+    ) {
+      return refuse();
+    }
+    await engine(read, context);
+    await guard();
+    const state = second.state.Status;
+    if (state !== "created" && state !== "exited") {
+      return refuse();
+    }
+    // Legacy/incomplete records remain an explicit unknown observation.
+    let commands: NativeComposeStorageCommandObservation | null = null;
+    try {
+      commands = await records(state, Number(second.state.ExitCode));
     } catch {
       commands = null;
     }
@@ -662,6 +754,31 @@ export async function observeNativeComposeStorageDockerCarrierRecovery(opts: {
     return refuse();
   } finally {
     await Promise.all(files.held.map((directory) => directory.file.close()));
+  }
+}
+/** Observation only: a retained helper never gains mutation authority. */
+export async function observeNativeComposeStorageDockerCarrierRecovery(
+  opts: Parameters<typeof savedCarrierRecovery>[0]
+) {
+  if (opts.completeRemoved !== undefined) {
+    return refuse();
+  }
+  const result = await savedCarrierRecovery(opts);
+  if (result.helperState === "absent") {
+    return refuse();
+  }
+  return { helperState: result.helperState, commands: result.commands };
+}
+/** Reconcile only independently absent readonly work with a complete successful
+ * original prefix. The owning witness supplies the exact intent CAS. No engine mutation. */
+export async function reconcileNativeComposeStorageDockerCarrierRecovery(
+  opts: Parameters<typeof savedCarrierRecovery>[0] & {
+    readonly completeRemoved: (check: () => Promise<void>) => Promise<void>;
+  }
+): Promise<void> {
+  const result = await savedCarrierRecovery(opts);
+  if (result.helperState !== "absent") {
+    return refuse();
   }
 }
 async function groupAbsent(
@@ -1396,6 +1513,12 @@ export async function createNativeComposeDockerStorageXattrCarrier(
       await Promise.allSettled(held.map((entry) => entry.file.close()));
     }
   };
+  // Original inputs alone can retire their evidence after journal completion.
+  // Reader statuses cannot mint or reacquire this closure.
+  const finalizers = new WeakMap<
+    NativeComposeStorageXattrInvocation,
+    (completion: NativeComposeStorageCarrierCompletion) => Promise<void>
+  >();
   const invoke = async (input: NativeComposeStorageXattrInvocation) => {
     const before = await current(context, input.target, !input.readonly);
     if (
@@ -1415,8 +1538,13 @@ export async function createNativeComposeDockerStorageXattrCarrier(
       readonly policy: string;
     } | null = null;
     let completed = false;
+    let deferred = false;
     try {
-      if (context.originalCommandRecords === true) {
+      if (
+        context.originalCommandRecords === true &&
+        input.readonly &&
+        input.request.operation === "verify"
+      ) {
         const directory = files.held.at(-1) ?? refuse();
         const recordPath = join(directory.path, "commands.json");
         const recordIndex = files.captures.length;
@@ -1695,7 +1823,10 @@ export async function createNativeComposeDockerStorageXattrCarrier(
           }
         },
       });
-      if (removed.exitCode !== 0) {
+      if (
+        removed.exitCode !== 0 ||
+        (commandOwner && removed.stdout.trim() !== id)
+      ) {
         return refuse();
       }
       const absent = probe(true);
@@ -1742,7 +1873,47 @@ export async function createNativeComposeDockerStorageXattrCarrier(
       if (!same(after, input.target)) {
         return refuse();
       }
-      await retireInvocationFiles(files);
+      if (commandOwner) {
+        const owner = commandOwner;
+        deferred = true;
+        finalizers.set(input, async (completion) => {
+          const checkCompletion = consumeNativeComposeStorageCarrierCompletion({
+            completion,
+            invocationId: input.invocationId,
+          });
+          const check = async () => {
+            await checkCompletion();
+            tool();
+            if (
+              !(
+                nativeComposeStorageCommandOwnerConfirmed(owner) &&
+                same(before, await current(context, input.target))
+              )
+            ) {
+              return refuse();
+            }
+          };
+          try {
+            await check();
+            await engine(probe(), context);
+            const target = await inspect(input.target);
+            if (!same(target, input.target)) {
+              return refuse();
+            }
+            // Original removal and all original command groups were already
+            // confirmed. Recheck complete current absence before file retirement.
+            await assertRemovedCarrier(probe(), input.invocationId, id);
+            await check();
+            await retireInvocationFiles(files, check, tool);
+          } finally {
+            await Promise.allSettled(
+              files.held.map((entry) => entry.file.close())
+            );
+          }
+        });
+      } else {
+        await retireInvocationFiles(files);
+      }
       completed = true;
       return {
         artifact: selectedArtifact,
@@ -1770,7 +1941,7 @@ export async function createNativeComposeDockerStorageXattrCarrier(
           !nativeComposeStorageCommandOwnerConfirmed(commandOwner))
       ) {
         unsettledCommandFiles.add(files.held);
-      } else {
+      } else if (!deferred) {
         await Promise.allSettled(files.held.map((entry) => entry.file.close()));
       }
       if (!completed && known) {
@@ -1780,7 +1951,19 @@ export async function createNativeComposeDockerStorageXattrCarrier(
   };
   return captureNativeComposeStorageXattrCarrier({
     artifact: selectedArtifact,
-    ports: { inspect, provision, invoke },
+    ports: {
+      inspect,
+      provision,
+      invoke,
+      finish:
+        context.originalCommandRecords === true
+          ? async ({ input, completion }) => {
+              const finish = finalizers.get(input) ?? refuse();
+              finalizers.delete(input);
+              await finish(completion);
+            }
+          : undefined,
+    },
     signal: context.signal,
     deadline: context.deadline,
   });

@@ -29,6 +29,7 @@ import {
   nativeComposePlanStorage,
   nativeComposeSavedExecUsesReadLease,
   prepareNativeComposeCommandStorage,
+  reconcileNativeComposeCommandStorage,
   runNativeComposeStorageVerifiedExec,
   nativeComposeDocumentStorage as volumeSelections,
 } from "./native-compose-command-storage.ts";
@@ -723,6 +724,20 @@ async function savedCommand(opts: {
                   observed.containers.length === 0 &&
                   observed.networks.length === 0
               );
+              if (
+                options.recover === true &&
+                code === 0 &&
+                (stopping.files === null || stopping.files.known()) &&
+                observed.containers.length === 0 &&
+                observed.networks.length === 0
+              ) {
+                await reconcileNativeComposeCommandStorage({
+                  store,
+                  mutation,
+                  generation,
+                  signal,
+                });
+              }
               return {
                 value: code,
                 outcome:

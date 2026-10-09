@@ -6,6 +6,7 @@ import {
   armNativeComposeStorageWitnessIntent,
   assertNativeComposeMaterialAuthority,
   type NativeComposeGeneration,
+  type NativeComposeGenerationStore,
   type NativeComposeMaterialAuthority,
   type NativeComposeMaterialBinding,
   publishNativeComposeStorageWitnessEnrollment,
@@ -528,9 +529,13 @@ async function invokeXattr(opts: {
   if (JSON.stringify(after) !== JSON.stringify(target)) {
     return refuse();
   }
-  await journal.complete(result.created);
+  const completed = await journal.complete(result.created);
   await opts.check();
   checkNativeComposeStorageXattrCarrierLifetime(opts.carrier);
+  const finish = nativeComposeStorageXattrCarrierPorts(opts.carrier).finish;
+  if (finish && request.operation === "verify") {
+    await finish({ input, completion: completed });
+  }
   const expectedOutcome = (
     { root: "root", seed: "seeded", verify: "verified" } as const
   )[request.operation];
@@ -1351,11 +1356,93 @@ export async function observeNativeComposeStorageWitnessCarrier(opts: {
   readonly helperState: "created" | "exited";
   readonly hostCommandSettlement: "unknown" | "records-settled";
 }> {
-  const { authority, generation, engineId, observe } = opts;
+  return await withSavedReadonlyCarrier({
+    ...opts,
+    phase: "storage-recovery-observe",
+    run: async (selected) => {
+      const observation = await opts.observe(
+        Object.freeze({
+          intent: selected.intent,
+          request: selected.request,
+          assertUnchanged: selected.assertUnchanged,
+        })
+      );
+      await selected.assertUnchanged();
+      const helperState =
+        typeof observation === "string" ? observation : observation.helperState;
+      if (helperState !== "created" && helperState !== "exited") {
+        return refuse();
+      }
+      let hostCommandSettlement: "unknown" | "records-settled" = "unknown";
+      if (typeof observation !== "string" && observation.commands !== null) {
+        try {
+          hostCommandSettlement = observeNativeComposeStorageCommandSettlement({
+            observation: observation.commands,
+            invocationId: selected.intent.invocationId,
+            created: selected.intent.created,
+            helperState,
+          });
+        } catch {
+          hostCommandSettlement = "unknown";
+        }
+      }
+      await selected.assertUnchanged();
+      return Object.freeze({
+        kind: "readonly-verification-retained" as const,
+        helperState,
+        hostCommandSettlement,
+      });
+    },
+  });
+}
+/** Complete only already removed readonly verification. No helper replay/removal,
+ * no witness promotion and no data deletion; old or ambiguous records refuse. */
+export async function reconcileNativeComposeStorageWitnessCarrier(opts: {
+  readonly store: NativeComposeGenerationStore;
+  readonly authority: NativeComposeMaterialAuthority;
+  readonly generation: NativeComposeGeneration;
+  readonly engineId: string;
+  readonly reference: NativeComposeStorageWitnessReference;
+  readonly signal: AbortSignal;
+  readonly deadline: number;
+}): Promise<void> {
+  await withSavedReadonlyCarrier({
+    ...opts,
+    phase: "storage-recovery-finish",
+    run: async (selected) => {
+      const { reconcileNativeComposeStorageDockerCarrierRecovery } =
+        await import("./native-compose-storage-witness-docker.ts");
+      await reconcileNativeComposeStorageDockerCarrierRecovery({
+        context: opts,
+        intent: selected.intent,
+        request: selected.request,
+        assertUnchanged: selected.assertUnchanged,
+        completeRemoved: selected.completeRemoved,
+      });
+    },
+  });
+}
+async function withSavedReadonlyCarrier<T>(opts: {
+  readonly authority: NativeComposeMaterialAuthority;
+  readonly generation: NativeComposeGeneration;
+  readonly engineId: string;
+  readonly reference: NativeComposeStorageWitnessReference;
+  readonly phase: "storage-recovery-observe" | "storage-recovery-finish";
+  readonly run: (
+    selected: Awaited<
+      ReturnType<typeof readNativeComposeStorageReadonlyCarrierIntent>
+    > & {
+      readonly request: ReturnType<
+        typeof decodeNativeComposeStorageXattrRequest
+      >;
+    }
+  ) => Promise<T>;
+}): Promise<T> {
+  const { authority, generation, engineId, phase, run } = opts;
   if (
     !nativeComposeStorageWitnessReferenceValid(opts.reference) ||
     opts.reference.version !== 3 ||
-    typeof observe !== "function"
+    typeof run !== "function"
   ) {
     return refuse();
   }
@@ -1366,7 +1453,7 @@ export async function observeNativeComposeStorageWitnessCarrier(opts: {
       const current = await assertNativeComposeMaterialAuthority({
         authority,
         generation,
-        phase: "storage-recovery-observe",
+        phase,
       });
       const held = await directories({
         binding: current,
@@ -1407,7 +1494,7 @@ export async function observeNativeComposeStorageWitnessCarrier(opts: {
           const latest = await assertNativeComposeMaterialAuthority({
             authority,
             generation,
-            phase: "storage-recovery-observe",
+            phase,
           });
           if (JSON.stringify(latest) !== JSON.stringify(current)) {
             return refuse();
@@ -1433,41 +1520,7 @@ export async function observeNativeComposeStorageWitnessCarrier(opts: {
         ) {
           return refuse();
         }
-        const observation = await observe(
-          Object.freeze({
-            intent: selected.intent,
-            request,
-            assertUnchanged: selected.assertUnchanged,
-          })
-        );
-        await selected.assertUnchanged();
-        const helperState =
-          typeof observation === "string"
-            ? observation
-            : observation.helperState;
-        if (helperState !== "created" && helperState !== "exited") {
-          return refuse();
-        }
-        let hostCommandSettlement: "unknown" | "records-settled" = "unknown";
-        if (typeof observation !== "string" && observation.commands !== null) {
-          try {
-            hostCommandSettlement =
-              observeNativeComposeStorageCommandSettlement({
-                observation: observation.commands,
-                invocationId: selected.intent.invocationId,
-                created: selected.intent.created,
-                helperState,
-              });
-          } catch {
-            hostCommandSettlement = "unknown";
-          }
-        }
-        await selected.assertUnchanged();
-        return Object.freeze({
-          kind: "readonly-verification-retained" as const,
-          helperState,
-          hostCommandSettlement,
-        });
+        return await run(Object.freeze({ ...selected, request }));
       } finally {
         await close(held);
       }

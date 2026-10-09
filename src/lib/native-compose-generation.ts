@@ -97,6 +97,7 @@ type MaterialSelection = {
     | "effect"
     | "storage-create"
     | "storage-recovery-observe"
+    | "storage-recovery-finish"
     | "stop"
     | "retire";
   readonly reservation?: NativeComposeReservation;
@@ -241,7 +242,10 @@ function materialEffectAllowed(
   if (phase === "stop") {
     return operation === "down" && state.pending !== null;
   }
-  if (phase === "storage-recovery-observe") {
+  if (
+    phase === "storage-recovery-observe" ||
+    phase === "storage-recovery-finish"
+  ) {
     return operation === "down" && state.pending !== null;
   }
   if (state.beforeHooks !== null || state.pending === null) {
@@ -1915,6 +1919,7 @@ export async function openNativeComposeGenerationStore(opts: {
                 "effect",
                 "storage-create",
                 "storage-recovery-observe",
+                "storage-recovery-finish",
                 "stop",
                 "retire",
               ].includes(selection.phase)
@@ -1949,7 +1954,8 @@ export async function openNativeComposeGenerationStore(opts: {
           materialAuthorities.set(materialAuthority, async (selection) => {
             requireActive();
             if (
-              selection.phase === "storage-recovery-observe" &&
+              (selection.phase === "storage-recovery-observe" ||
+                selection.phase === "storage-recovery-finish") &&
               !effectRecovery
             ) {
               return refuse();

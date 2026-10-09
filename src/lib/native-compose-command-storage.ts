@@ -13,6 +13,7 @@ import { nativeComposeStorageVolumeName } from "./native-compose-renderer.ts";
 import {
   enrollNativeComposeStorageXattrWitness,
   prepareNativeComposeStorageXattrWitness,
+  reconcileNativeComposeStorageWitnessCarrier,
   verifyNativeComposeStorageXattrWitness,
 } from "./native-compose-storage-witness.ts";
 import { createNativeComposeDockerStorageXattrCarrier } from "./native-compose-storage-witness-docker.ts";
@@ -182,6 +183,7 @@ export async function prepareNativeComposeCommandStorage(opts: {
       engineId,
       signal,
       deadline: Date.now() + resolveComposeStartupTimeoutMs(),
+      originalCommandRecords: true,
     });
   // Check the explicit dependency before any authored hook, intent or volume effect.
   await carrier();
@@ -315,4 +317,46 @@ export async function runNativeComposeStorageVerifiedExec(opts: {
     await assertSaved();
   }
   return code;
+}
+
+/** Saved down+recover only, after known compute absence. Reconciles only a
+ * complete removed readonly original attempt. No effect replay or data removal. */
+export async function reconcileNativeComposeCommandStorage(opts: {
+  readonly store: NativeComposeGenerationStore;
+  readonly mutation: NativeComposeMutation;
+  readonly generation: NativeComposeGeneration;
+  readonly signal: AbortSignal;
+}): Promise<void> {
+  const current = await opts.store.loadCurrent();
+  if (!current.storageWitnessesPending) {
+    return;
+  }
+  const engineId = await observeNativeComposeFileEngine({
+    signal: opts.signal,
+  });
+  const deadline = Date.now() + resolveComposeStartupTimeoutMs();
+  for (const state of current.storageWitnesses ?? []) {
+    if (state.state !== "enrolled" || state.reference.version !== 3) {
+      return refuse();
+    }
+    // A completed sibling journal is skipped without weakening the selected unknown one.
+    const { nativeComposeStorageCarriersPending } = await import(
+      "./native-compose-storage-carrier-journal.ts"
+    );
+    if (
+      !(await nativeComposeStorageCarriersPending({
+        identity: opts.store.identity,
+        states: [state],
+      }))
+    ) {
+      continue;
+    }
+    await reconcileNativeComposeStorageWitnessCarrier({
+      ...opts,
+      authority: opts.mutation.materialAuthority,
+      engineId,
+      reference: state.reference,
+      deadline,
+    });
+  }
 }

@@ -77,9 +77,22 @@ if(storageArgs[0]==="start"){
 }
 if(storageArgs[0]==="rm"){
  const rows=await readRows(storageCarriers),id=storageArgs.at(-1);if(!rows.some(row=>row.id===id))process.exit(99);
+ const removed=rows.find(row=>row.id===id);
+ if(await Bun.file(storageRoot+"/fault-removed-verify").exists()&&removed.host.Mounts[1].ReadOnly){
+  const program=removed.host.Mounts[0].Source,owner=program.slice(0,program.indexOf("/storage-carriers/"));
+  const hash=(await import("node:crypto")).createHash("sha256").update(removed.host.Mounts[1].Source).digest("hex");
+  const journal=await Bun.file(owner+"/storage-witnesses/"+hash+"/carrier.json").json();
+  if(journal.intent?.operation==="verify"&&journal.intent.scope.pendingToken!==null){
+   await (await import("node:fs/promises")).rename(storageRoot+"/fault-removed-verify",storageRoot+"/fault-consumed");
+   await Bun.write(storageRoot+"/fault-post-remove",id);
+  }
+ }
  await writeRows(storageCarriers,rows.filter(row=>row.id!==id));console.log(id);process.exit(0);
 }
 if(storageArgs[0]==="container"&&storageArgs[1]==="ls"&&argument("--format")==="{{json .ID}}"){
+ if(await Bun.file(storageRoot+"/fault-post-remove").exists()){
+  await (await import("node:fs/promises")).rename(storageRoot+"/fault-post-remove",storageRoot+"/fault-removed-evidence");process.exit(97);
+ }
  const rows=await readRows(storageCarriers),filter=argument("--filter");
  for(const row of rows)if(!storageArgs.includes("--filter")||filter==="label=io.hack.storage-witness.carrier="+row.labels["io.hack.storage-witness.carrier"])emit(row.id);
  const row=await workload();if(row&&!storageArgs.includes("--filter"))emit(row.id);process.exit(0);

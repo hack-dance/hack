@@ -247,8 +247,9 @@ image graph after each bootstrap build. Only fixture-labelled, untagged parents
 on its complete chain to the captured original base qualify for disposal, in
 child-before-parent order with nonforce `image rm --no-prune`. A builder exposing
 no parent qualifies only its single final object. Unexplained new images, foreign
-labels or references retain the failed fixture. The formatter treats only an
-absent `Parent` key as no exposed parent; malformed present values still refuse.
+labels or references retain the failed fixture. Only an absent `Parent` key
+defaults to empty; an explicit empty parent is preserved and malformed present
+values still refuse.
 The known Compose project, service and version labels must match the exact
 fixture project, `db` service and selected Compose release. Other label names
 remain refused. Full original image inventory

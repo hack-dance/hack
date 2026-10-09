@@ -56,7 +56,7 @@ function capture(value: unknown) {
 }
 
 test.skipIf(binary === undefined && sha256 === undefined)(
-  "real pinned Docker client qualifies only absent image Parent with exact Compose labels",
+  "real pinned Docker client accepts absent image Parent with exact Compose labels",
   async () => {
     if (!(binary && sha256)) {
       throw new Error("Explicit pinned Docker format client is required");

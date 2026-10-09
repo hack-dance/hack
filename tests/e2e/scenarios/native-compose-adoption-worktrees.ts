@@ -3114,6 +3114,9 @@ export async function cleanupRetainedBuildFixtureImages(h: BuildCleanupInputs) {
   }
   for (const [instance, objects] of h.builtImageObjects) {
     const selected = h.builtImages.get(instance);
+    const composeVersion = selected
+      ? objects.find((row) => row.id === selected.id)?.composeVersion
+      : undefined;
     if (
       !selected ||
       JSON.stringify(
@@ -3122,6 +3125,7 @@ export async function cleanupRetainedBuildFixtureImages(h: BuildCleanupInputs) {
           selected,
           originalImageIds: h.originalImageIds,
           baseImage: h.baseImage,
+          ...(typeof composeVersion === "string" ? { composeVersion } : {}),
         })
       ) !== JSON.stringify(objects)
     ) {

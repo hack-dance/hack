@@ -404,13 +404,15 @@ function capturedBuildGraph() {
   ] as const;
   const capture = (
     rows: readonly unknown[] = values,
-    originals = [baseBuildImage]
+    originals = [baseBuildImage],
+    composeVersion?: string
   ) =>
     retainedBuildFixtureObjectGraph({
       values: rows,
       selected,
       originalImageIds: originals,
       baseImage: baseBuildImage,
+      ...(composeVersion !== undefined ? { composeVersion } : {}),
     });
   return { selected, values, capture };
 }
@@ -535,10 +537,35 @@ test("captured Compose image labels require the exact project, service and selec
   }
 });
 
-function buildCleanupModel(opts?: { readonly withoutExposedParent: true }) {
+function buildCleanupModel(opts?: {
+  readonly withoutExposedParent?: true;
+  readonly composeVersion?: string;
+}) {
   const { selected, values, capture } = capturedBuildGraph();
   const objects = opts?.withoutExposedParent
-    ? capture([{ ...values[0], parent: "" }])
+    ? capture(
+        [
+          {
+            ...values[0],
+            parent: "",
+            ...(opts.composeVersion
+              ? {
+                  composeProject: "fixture",
+                  composeService: "db",
+                  composeVersion: opts.composeVersion,
+                  labelNames: [
+                    ...values[0].labelNames,
+                    "com.docker.compose.project",
+                    "com.docker.compose.service",
+                    "com.docker.compose.version",
+                  ],
+                }
+              : {}),
+          },
+        ],
+        [baseBuildImage],
+        opts.composeVersion
+      )
     : capture();
   const instance = {
     root: "/owned/fixture",
@@ -666,6 +693,45 @@ test("one final image without exposed Parent retains exact facts and only its ID
   ]);
   expect(model.current.get(image)?.parent).toBe("");
   expect(model.current.has(baseBuildImage)).toBe(false);
+});
+test("full captured Compose image triplet revalidates through exact nonforce cleanup", async () => {
+  const model = buildCleanupModel({
+    withoutExposedParent: true,
+    composeVersion: "2.40.3",
+  });
+  await cleanupRetainedBuildFixtureImages(model.opts);
+  expect([...model.remaining]).toEqual([]);
+  expect(model.events).toEqual([
+    { stage: "before-image-remove" },
+    { stage: "remove", id: image },
+    { stage: "after-image-remove" },
+  ]);
+  expect(model.current.get(image)).toMatchObject({
+    composeProject: "fixture",
+    composeService: "db",
+    composeVersion: "2.40.3",
+    id: image,
+    parent: "",
+  });
+  expect(model.current.has(baseBuildImage)).toBe(false);
+});
+test("full captured Compose image triplet drift after journal permits no cleanup effect", async () => {
+  const model = buildCleanupModel({
+    withoutExposedParent: true,
+    composeVersion: "2.40.3",
+  });
+  model.setAfterJournal(() => {
+    const row = model.current.get(image);
+    if (!row) {
+      throw new Error("Missing fixed image row");
+    }
+    model.current.set(image, { ...row, composeVersion: "2.40.4" });
+  });
+  await expect(cleanupRetainedBuildFixtureImages(model.opts)).rejects.toThrow(
+    "values omitted"
+  );
+  expect(model.events).toEqual([{ stage: "before-image-remove" }]);
+  expect([...model.remaining]).toEqual([image]);
 });
 for (const mode of [
   "reference-after-journal",

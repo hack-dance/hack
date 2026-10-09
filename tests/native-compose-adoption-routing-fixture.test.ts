@@ -73,6 +73,16 @@ test("maintained legacy HTTP fixture has a real apex, existing alias and lossles
   expect(retainedRoutingFixtureConfig(route).open.prefer).toBe("dev");
   expect(retainedRoutingFixtureService(route).image).toBe(IMAGE);
 });
+test("served legacy Caddy origins use separate address tokens", () => {
+  const route = selection();
+  const label = retainedRoutingFixtureService(route).labels.caddy;
+  const expected = [route.devHost, route.aliasHost];
+  expect(label).toBe(expected.join(", "));
+  expect(label.split(/,\s+/)).toEqual(expected);
+  // The retained actual RED used this one-token spelling and Caddy rejected it.
+  expect(expected.join(",").split(/,\s+/)).not.toEqual(expected);
+});
+
 test("alpha checkout alias differs from authored and primary-local dev selections", async () => {
   const root = await mkdtemp(join(tmpdir(), "retained-routing-locals-"));
   try {

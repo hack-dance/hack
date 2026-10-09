@@ -66,7 +66,7 @@ export function retainedRoutingFixtureService(
     environment: { RETAINED_ROUTE_MARKER: selection.marker },
     networks: ["default", "hack-dev"],
     labels: {
-      caddy: `${selection.devHost},${selection.aliasHost}`,
+      caddy: `${selection.devHost}, ${selection.aliasHost}`,
       "caddy.reverse_proxy": "{{upstreams 3000}}",
       "caddy.tls": "internal",
       caddy_ingress_network: "hack-dev",

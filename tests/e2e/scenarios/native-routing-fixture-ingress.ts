@@ -1,10 +1,13 @@
 import { randomBytes, X509Certificate } from "node:crypto";
+import { writeFile } from "node:fs/promises";
+import { isAbsolute, join } from "node:path";
 import { isRecord } from "../../../src/lib/guards.ts";
 import { observeNativeComposeIngress } from "../../../src/lib/native-compose-ingress.ts";
 import { nativeComposeProxyRoutesMatch } from "../../../src/lib/native-compose-proxy-routes.ts";
-import { expect, runCommand, type ScenarioContext } from "../harness.ts";
+import { findExecutableInPath } from "../../../src/lib/shell.ts";
+import { expect, type ScenarioContext } from "../harness.ts";
+import { runNativeNetworkFixtureCommand } from "../native-config-networks-acceptance.ts";
 
-const TIMEOUT = 180_000;
 const OBSERVATION_WINDOW = 30_000;
 const OBJECT_ID = /^[a-f0-9]{64}$/;
 const IMAGE_ID = /^sha256:[a-f0-9]{64}$/;
@@ -65,12 +68,95 @@ function ids(text: string): readonly string[] {
   return found;
 }
 
+/** Each exact TLS attempt retains private bounded streams even on failure. */
+export async function runNativeRoutingFixtureTlsAttempt(opts: {
+  readonly docker: string;
+  readonly proxyId: string;
+  readonly origin: string;
+  readonly cwd: string;
+  readonly captures: string;
+  readonly env: Readonly<Record<string, string>>;
+  readonly timeoutMs: number;
+}) {
+  const url = new URL(opts.origin);
+  expect({
+    that:
+      isAbsolute(opts.docker) &&
+      OBJECT_ID.test(opts.proxyId) &&
+      url.protocol === "https:" &&
+      url.port === "" &&
+      url.pathname === "/" &&
+      !url.username &&
+      !url.password &&
+      !url.search &&
+      !url.hash &&
+      opts.timeoutMs > 0 &&
+      opts.timeoutMs <= OBSERVATION_WINDOW,
+    message: "Fixture TLS capture admission refused; values omitted",
+  });
+  const result = await runNativeNetworkFixtureCommand({
+    argv: [
+      opts.docker,
+      "exec",
+      opts.proxyId,
+      "curl",
+      "--disable",
+      "--silent",
+      "--show-error",
+      "--fail",
+      "--proxy",
+      "",
+      "--noproxy",
+      "*",
+      "--proto",
+      "=https",
+      "--max-redirs",
+      "0",
+      "--connect-timeout",
+      "2",
+      "--max-time",
+      "5",
+      "--cacert",
+      ROOT_CA,
+      "--resolve",
+      `${url.hostname}:443:127.0.0.1`,
+      "--url",
+      `${opts.origin}/`,
+    ],
+    cwd: opts.cwd,
+    env: opts.env,
+    captures: opts.captures,
+    timeoutMs: opts.timeoutMs,
+    outputLimit: 64 * 1024,
+  });
+  await writeFile(
+    join(opts.captures, "attempt.json"),
+    `${JSON.stringify({
+      exitCode: result.exitCode,
+      timedOut: result.timedOut,
+      stdoutBytes: Buffer.byteLength(result.stdout),
+      stderrBytes: Buffer.byteLength(result.stderr),
+    })}\n`,
+    { flag: "wx", mode: 0o600 }
+  );
+  return result;
+}
+
 /** Shared same-engine fixture ingress: no host ports, DNS or trust writes. */
 export async function prepareNativeRoutingFixtureIngress(opts: {
   readonly ctx: ScenarioContext;
   readonly docker: (args: readonly string[]) => Promise<string>;
 }) {
   const { ctx, docker } = opts;
+  const executable = findExecutableInPath("docker");
+  const tlsEnv = Object.freeze({ ...process.env }) as Readonly<
+    Record<string, string>
+  >;
+  let tlsAttempt = 0;
+  expect({
+    that: Boolean(executable),
+    message: "Fixed fixture Docker executable is required",
+  });
   const selectors = [
     "--filter",
     `label=${PROJECT_LABEL}=${PROXY_PROJECT}`,
@@ -240,37 +326,25 @@ export async function prepareNativeRoutingFixtureIngress(opts: {
     const deadline = Date.now() + OBSERVATION_WINDOW;
     while (Date.now() < deadline) {
       await proxyOwned();
-      const result = await runCommand({
-        argv: [
-          "docker",
-          "exec",
-          currentProxy(),
-          "curl",
-          "--disable",
-          "--silent",
-          "--show-error",
-          "--fail",
-          "--proxy",
-          "",
-          "--noproxy",
-          "*",
-          "--proto",
-          "=https",
-          "--max-redirs",
-          "0",
-          "--connect-timeout",
-          "2",
-          "--max-time",
-          "5",
-          "--cacert",
-          ROOT_CA,
-          "--resolve",
-          `${url.hostname}:443:127.0.0.1`,
-          "--url",
-          `${origin}/`,
-        ],
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) {
+        break;
+      }
+      if (!executable) {
+        throw new Error("Fixed fixture Docker executable is required");
+      }
+      const result = await runNativeRoutingFixtureTlsAttempt({
+        docker: executable,
+        proxyId: currentProxy(),
+        origin,
         cwd: ctx.tempRoot,
-        timeoutMs: TIMEOUT,
+        env: tlsEnv,
+        captures: join(
+          ctx.tempRoot,
+          "routing-tls-attempts",
+          String(tlsAttempt++)
+        ),
+        timeoutMs: Math.min(OBSERVATION_WINDOW, remaining),
       });
       if (
         result.exitCode === 0 &&

@@ -103,6 +103,27 @@ test("persistent enrollment accepts both genuine changed-birth witnesses only", 
     ).toBe(false);
   }
 });
+test("persistent metadata-alias evidence requires a changed physical volume with unchanged reported identity", () => {
+  const control = runtimeModels
+    .find((model) => model.name === "native-persistent-enrollment")
+    ?.additionalControls.find((entry) => entry.name === "metadata-alias");
+  expect(control).toBeDefined();
+  if (!control) {
+    throw new Error("Missing persistent metadata-alias control.");
+  }
+  const output = tlaWitness(control);
+  expect(control.verify({ negative: true, exitCode: 12, output })).toBe(true);
+  for (const invalid of [
+    output.replace("actualVolume = 2", "actualVolume = 1"),
+    output.replace("reportedMetadata = 1", "reportedMetadata = 2"),
+    output.replace("witness = 0", "witness = 1"),
+    output.replace("<ReadRetained ", "<ReplaceWithAliasedMetadata "),
+  ]) {
+    expect(
+      control.verify({ negative: true, exitCode: 12, output: invalid })
+    ).toBe(false);
+  }
+});
 
 test("storage witness controls distinguish missing bytes from foreign metadata", () => {
   const model = runtimeModels.find(

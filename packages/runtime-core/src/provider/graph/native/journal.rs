@@ -54,7 +54,7 @@ fn decode_failure_observation<'de, D: serde::Deserializer<'de>>(
 /// Hash-only native provenance plus value-free resource ownership. No replay authority,
 /// compiler request, argv, environment values or renewable timestamp is persisted.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(try_from = "ReceiptWire")]
 pub struct Receipt {
     version: u32,
     kind: InputKind,
@@ -64,10 +64,66 @@ pub struct Receipt {
     pub(super) phase: Phase,
     pub(super) readiness: BTreeMap<String, Condition>,
     pub(super) resources: BTreeMap<String, Resource>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub(super) data: BTreeMap<String, persistent_data::engine::Reference>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub(super) data_mounts: BTreeMap<String, Vec<crate::project::native::StorageMount>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     failure: Option<Failure>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub(super) terminal: BTreeMap<String, super::super::shutdown::Terminal>,
+}
+
+// Presence is a wire-version boundary: an explicit empty storage field must not
+// become indistinguishable from an absent graph2 field. Present null also refuses.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReceiptWire {
+    version: u32,
+    kind: InputKind,
+    owner: String,
+    boot: String,
+    review: native_input::Review,
+    phase: Phase,
+    readiness: BTreeMap<String, Condition>,
+    resources: BTreeMap<String, Resource>,
+    #[serde(default, deserialize_with = "present_map")]
+    data: Option<BTreeMap<String, persistent_data::engine::Reference>>,
+    #[serde(default, deserialize_with = "present_map")]
+    data_mounts: Option<BTreeMap<String, Vec<crate::project::native::StorageMount>>>,
+    #[serde(default)]
+    failure: Option<Failure>,
+    #[serde(default)]
+    terminal: BTreeMap<String, super::super::shutdown::Terminal>,
+}
+fn present_map<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(
+    reader: D,
+) -> Result<Option<T>, D::Error> {
+    T::deserialize(reader).map(Some)
+}
+impl TryFrom<ReceiptWire> for Receipt {
+    type Error = &'static str;
+    fn try_from(wire: ReceiptWire) -> Result<Self, Self::Error> {
+        if (wire.version == 2 && (wire.data.is_some() || wire.data_mounts.is_some()))
+            || (wire.version == 4 && (wire.data.is_none() || wire.data_mounts.is_none()))
+        {
+            return Err("Native receipt storage fields do not match its wire version.");
+        }
+        Ok(Self {
+            version: wire.version,
+            kind: wire.kind,
+            owner: wire.owner,
+            boot: wire.boot,
+            review: wire.review,
+            phase: wire.phase,
+            readiness: wire.readiness,
+            resources: wire.resources,
+            data: wire.data.unwrap_or_default(),
+            data_mounts: wire.data_mounts.unwrap_or_default(),
+            failure: wire.failure,
+            terminal: wire.terminal,
+        })
+    }
 }
 impl Receipt {
     /// Mutable phases and terminal evidence may advance; admitted identity cannot.
@@ -76,6 +132,8 @@ impl Receipt {
         if self.review != expected.review
             || self.boot != expected.boot
             || self.readiness != expected.readiness
+            || self.data != expected.data
+            || self.data_mounts != expected.data_mounts
             || self.resources.keys().ne(expected.resources.keys())
             || self.resources.iter().any(|(key, resource)| {
                 let prior = &expected.resources[key];
@@ -111,7 +169,8 @@ impl Receipt {
     #[cfg(target_os = "macos")]
     pub(super) fn require_recovery_ready(&self) -> Result<(), CandidateError> {
         self.validate(self.review.scope().run, &self.owner)?;
-        if self.phase != Phase::ReadyObserved
+        if self.version != 2
+            || self.phase != Phase::ReadyObserved
             || self.failure.is_some()
             || self
                 .resources
@@ -128,7 +187,7 @@ impl Receipt {
         boot: &str,
     ) -> Result<Self, CandidateError> {
         let receipt = Self {
-            version: 2,
+            version: if config.storage.is_empty() { 2 } else { 4 },
             kind: InputKind::NativeGraphRuntime,
             owner: owner.into(),
             boot: boot.into(),
@@ -141,6 +200,8 @@ impl Receipt {
                 .map(|(name, service)| (name.clone(), service.ready))
                 .collect(),
             resources: config.resources.clone(),
+            data: config.data.clone(),
+            data_mounts: config.data_mounts.clone(),
             failure: None,
             terminal: BTreeMap::new(),
         };
@@ -156,7 +217,7 @@ impl Receipt {
     pub(super) fn validate(&self, run: &str, owner: &str) -> Result<(), CandidateError> {
         let scope = self.review.scope();
         self.review.validate(scope).map_err(|_| refused())?;
-        if self.version != 2
+        if ![2, 4].contains(&self.version)
             || !hex(run, 32)
             || run != scope.run
             || !hex(owner, 32)
@@ -171,6 +232,7 @@ impl Receipt {
         {
             return Err(refused());
         }
+        self.validate_data()?;
         let network = self.resources.get("network:default").ok_or_else(refused)?;
         if network.kind != Kind::Network
             || network.key != "default"
@@ -277,6 +339,63 @@ impl Receipt {
             if resource.kind != Kind::Container
                 || resource.id.as_deref() != Some(terminal.id.as_str())
                 || !hex(&terminal.id, 64)
+            {
+                return Err(refused());
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_data(&self) -> Result<(), CandidateError> {
+        if self.version == 2 {
+            return if self.data.is_empty() && self.data_mounts.is_empty() {
+                Ok(())
+            } else {
+                Err(refused())
+            };
+        }
+        if self.data.is_empty() || self.data_mounts.is_empty() {
+            return Err(refused());
+        }
+        let mut used = BTreeSet::new();
+        for (service, mounts) in &self.data_mounts {
+            if !self.readiness.contains_key(service) || mounts.is_empty() {
+                return Err(refused());
+            }
+            let mut targets = BTreeSet::new();
+            for mount in mounts {
+                if !self.data.contains_key(&mount.storage)
+                    || !targets.insert(&mount.target)
+                    || !mount.target.starts_with('/')
+                    || mount.target.contains(['\0', '\\'])
+                    || mount
+                        .target
+                        .split('/')
+                        .skip(1)
+                        .any(|part| part == "." || part == ".." || part.is_empty())
+                {
+                    return Err(refused());
+                }
+                used.insert(&mount.storage);
+            }
+        }
+        if used.into_iter().ne(self.data.keys()) {
+            return Err(refused());
+        }
+        for (logical, data) in &self.data {
+            data.validate(
+                self.review.scope().namespace,
+                logical,
+                &self.owner,
+                &self.boot,
+            )
+            .map_err(|_| refused())?;
+            if (self.phase == Phase::ReadyObserved
+                || self
+                    .resources
+                    .values()
+                    .any(|resource| resource.kind == Kind::Container && resource.id.is_some()))
+                && !data.enrolled()
             {
                 return Err(refused());
             }

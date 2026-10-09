@@ -58,13 +58,99 @@ impl Driver for Fake<'_> {
         Ok(())
     }
     fn observe(&mut self, service: &str) -> Result<Observation, CandidateError> {
-        Ok(if service == "z.seed" {
+        Ok(if matches!(service, "z.seed" | "z.check") {
             Observation::Exited { code: 0 }
         } else {
             Observation::Running {
                 health: Health::Healthy,
             }
         })
+    }
+}
+
+#[test]
+fn persistent_sqlite_corpus_preserves_source_commands_drop_all_and_fresh_job_starts() {
+    // This executes the real compiler/lowerer and scheduler with observations only.
+    // The SQL programs are source-pinned for the later real native acceptance; no
+    // test here claims that synthetic observations executed SQLite or Engine effects.
+    let project: Value = serde_json::from_str(include_str!(
+        "../../../../tests/fixtures/native-persistent-sqlite.json"
+    ))
+    .unwrap();
+    let prepared = prepare(
+        project.clone(),
+        json!({"a.db":{},"b.web":{},"z.seed":{},"z.check":{}}),
+        &ManagedValues::new(),
+    );
+    let config = configuration(&prepared, OWNER).unwrap();
+    assert_eq!(config.storage, BTreeSet::from(["database".into()]));
+    assert_eq!(
+        config.data_mounts.keys().collect::<Vec<_>>(),
+        vec!["a.db", "z.seed"]
+    );
+    assert_eq!(
+        config.graph.services["a.db"].dependencies["z.seed"],
+        Condition::Completed
+    );
+    assert_eq!(
+        config.graph.services["b.web"].dependencies["a.db"],
+        Condition::Healthy
+    );
+    assert_eq!(
+        config.graph.services["z.check"].dependencies["b.web"],
+        Condition::Healthy
+    );
+    assert_eq!(config.resources.len(), 5);
+    assert!(
+        config
+            .resources
+            .values()
+            .all(|resource| resource.kind != Kind::Volume)
+    );
+    for (name, value) in &config.configs {
+        let authored = project["services"]
+            .get(name)
+            .or_else(|| project["jobs"].get(name))
+            .unwrap();
+        assert_eq!(value["Cmd"], authored["command"]["exec"]);
+        assert_eq!(value["Entrypoint"], json!([]));
+        assert_eq!(value["HostConfig"]["CapDrop"], json!(["ALL"]));
+        assert_eq!(
+            value["HostConfig"]["SecurityOpt"],
+            json!(["no-new-privileges"])
+        );
+        assert!(value.get("User").is_none());
+        assert!(
+            value["HostConfig"]["PortBindings"]
+                .as_object()
+                .is_none_or(|bindings| bindings.is_empty())
+        );
+    }
+    for _compute_attempt in 0..2 {
+        let mut driver = Fake {
+            configs: &config.configs,
+            intents: vec![],
+            started: vec![],
+        };
+        execution::run(&config.graph, &mut driver, Duration::from_secs(2)).unwrap();
+        assert_eq!(
+            driver
+                .started
+                .iter()
+                .filter(|name| name.as_str() == "z.seed")
+                .count(),
+            1
+        );
+        let position = |name: &str| {
+            driver
+                .started
+                .iter()
+                .position(|started| started == name)
+                .unwrap()
+        };
+        assert!(position("z.seed") < position("a.db"));
+        assert!(position("a.db") < position("b.web"));
+        assert!(position("b.web") < position("z.check"));
     }
 }
 

@@ -358,6 +358,7 @@ pub(super) struct OwnedGuest<'a> {
     candidate: &'a Candidate,
     owner: Owner,
     _lock: state::Lock,
+    lease_root: (u64, u64),
     allocation_allowed: bool,
     guard: Option<operating_guard::OperatingGuard>,
 }
@@ -391,7 +392,33 @@ impl<'a> OwnedGuest<'a> {
     }
 
     pub(super) fn verify(&self) -> Result<(), CandidateError> {
+        let root = root(self.candidate);
+        self._lock.verify_path(&root)?;
+        let current = fs::symlink_metadata(&root).map_err(io)?;
+        if (current.dev(), current.ino()) != self.lease_root {
+            return Err(CandidateError::new(
+                "runtime_changed",
+                "Provider mutation root changed.",
+            ));
+        }
         verify_live(self.candidate, &self.owner)
+    }
+
+    #[cfg(feature = "native-config-plan")]
+    pub(in crate::provider) fn persistent_identity(
+        &self,
+    ) -> Result<super::graph::native::persistent_data::GuestIdentity, CandidateError> {
+        self.verify()?;
+        Ok(super::graph::native::persistent_data::GuestIdentity {
+            owner: self.owner.token.clone(),
+            boot_id: self.boot_id().into(),
+            storage: self.owner.storage.clone().ok_or_else(|| {
+                CandidateError::new(
+                    "disk_identity_mismatch",
+                    "Persistent storage requires an independently retained backing disk.",
+                )
+            })?,
+        })
     }
 
     pub(super) fn project_share(&self) -> Option<&super::ProjectShareIntent> {
@@ -468,10 +495,13 @@ impl<'a> OwnedGuest<'a> {
         } else {
             None
         };
+        lock.verify_path(&root(candidate))?;
+        let lease_root = fs::symlink_metadata(root(candidate)).map_err(io)?;
         Ok(Self {
             candidate,
             owner: current,
             _lock: lock,
+            lease_root: (lease_root.dev(), lease_root.ino()),
             allocation_allowed: enforce_budget,
             guard,
         })
@@ -520,6 +550,29 @@ impl<'a> OwnedGuest<'a> {
         self.execute_mode(script, arguments, input, true)
     }
 
+    #[cfg(feature = "native-config-plan")]
+    pub(in crate::provider) fn execute_until(
+        &self,
+        script: &str,
+        arguments: &[&str],
+        deadline: Instant,
+    ) -> Result<String, CandidateError> {
+        self.verify()?;
+        let script = format!(
+            "set -eu\ntest \"$(cat /proc/sys/kernel/random/boot_id)\" = \"$1\"\ntest \"$(cat /storage/.hack-local-owner)\" = \"$2\"\ntest \"$(findmnt -n -o FSTYPE --mountpoint /storage)\" = ext4\nshift 2\n{script}"
+        );
+        let mut args = vec![self.boot_id(), self.incarnation()];
+        args.extend_from_slice(arguments);
+        let result = agent::exec_until(
+            &socket(self.candidate, &self.owner, "agent.sock")?,
+            &script,
+            &args,
+            deadline,
+        );
+        self.verify()?;
+        result
+    }
+
     /// Retains the existing mutation lock and identity checks without allocation admission.
     pub(super) fn execute_cleanup(
         &self,
@@ -536,7 +589,7 @@ impl<'a> OwnedGuest<'a> {
         input: Option<&str>,
         allocation: bool,
     ) -> Result<String, CandidateError> {
-        verify_live(self.candidate, &self.owner)?;
+        self.verify()?;
         if allocation {
             self.before_effect()?;
         }
@@ -555,7 +608,7 @@ impl<'a> OwnedGuest<'a> {
             false,
             input,
         )?;
-        verify_live(self.candidate, &self.owner)?;
+        self.verify()?;
         Ok(result)
     }
 }

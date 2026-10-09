@@ -100,7 +100,7 @@ function removed() {
     ),
   });
 }
-async function fixture() {
+async function fixture(bootSession = false) {
   const root = await realpath(
     await mkdtemp(join(tmpdir(), "native-frontend-recovery-"))
   );
@@ -153,13 +153,15 @@ async function fixture() {
   const calls: string[][] = [];
   let cleanupCalls = 0;
   const selection = {
-    version: 1,
+    version: bootSession ? 2 : 1,
     kind: "native-graph-recovery-selection",
     run: "a".repeat(32),
     receipt: receipt(),
     receipt_sha256: "4".repeat(64),
     owner_sha256: "5".repeat(64),
-    host_boot_micros: 1_791_000_000_000_000,
+    ...(bootSession
+      ? { host_boot_uuid: "12345678-abcd-abcd-abcd-123456789abc" }
+      : { host_boot_micros: 1_791_000_000_000_000 }),
   };
   const result = {
     version: 1,
@@ -295,6 +297,21 @@ test("dead frontend recovery binds the stored run, holds startup, retires only a
       )
     ).nlink
   ).toBe(1);
+});
+
+test("frontend recovery preserves UUID selection through complete retry without changing Ready or control versions", async () => {
+  const current = await fixture(true);
+  await current.kill();
+  await recoverNativeAuthoredProject(current.options);
+  const saved = JSON.parse(await Bun.file(current.paths.intent).text());
+  expect(saved.record.native.version).toBe(2);
+  expect(saved.record.native.host_boot_uuid).toBe(
+    "12345678-abcd-abcd-abcd-123456789abc"
+  );
+  expect(saved.record.native).not.toHaveProperty("host_boot_micros");
+  expect(saved.record.native.receipt.version).toBe(2);
+  await recoverNativeAuthoredProject(current.options);
+  expect(current.cleanupCalls()).toBe(1);
 });
 
 test("recovery refuses foreign Removed membership or nonnull current observations and retains frontend authority", async () => {

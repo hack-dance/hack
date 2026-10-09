@@ -1,7 +1,10 @@
-//! Inactive durable enrollment owner. No production engine implements its transport.
+//! Durable enrollment owner. The native adapter separately supplies the cooperative
+//! guest lease and original-effect identity; deserialization grants no effect authority.
 //!
-//! The transport must atomically create a previously absent volume under its retained
-//! guest authority. Docker's idempotent volumes/create response, an absence probe, copied
+//! The transport must exclusively create a previously absent volume under its retained
+//! guest authority, including its continuously held common cooperative mutation lease.
+//! Unserialized direct same-user/guest writers are outside that authority. Docker's
+//! idempotent volumes/create response, an absence probe, copied
 //! labels or empty contents cannot meet that obligation. Errors never retry creation,
 //! adopt an observed volume, delete data or recover an interrupted enrollment.
 
@@ -16,14 +19,15 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 // Sealing prevents callers from passing an arbitrary observation callback as create
-// authority. A future crate-owned adapter requires its own effect qualification.
+// authority. Each crate-owned adapter requires its own effect qualification.
 pub(crate) mod sealed {
     pub trait Transport {}
 }
 
-/// Trusted bounded transport under the existing guest/effect owner. No production
-/// implementation exists. Each method must honor the supplied aggregate deadline;
-/// `create_new` must refuse existing names atomically, including competing creators.
+/// Trusted bounded transport under the existing guest/effect owner.
+/// Each method must honor the supplied aggregate deadline;
+/// `create_new` must refuse existing names within its closed supported-writer authority;
+/// all supported competing creators must hold the same continuously fenced lease.
 pub trait Transport: sealed::Transport {
     fn verify(&mut self, expected: &Binding, deadline: Instant) -> Result<(), CandidateError>;
     fn inspect(
@@ -143,18 +147,57 @@ fn refused() -> CandidateError {
         "Persistent data enrollment is incomplete, ambiguous or changed; retained data was not adopted or deleted.",
     )
 }
-fn volume_name(binding: &Binding) -> String {
+pub(super) fn volume_name(binding: &Binding) -> String {
     format!(
         "hkp-{}-{}-{}",
         binding.scope.namespace, binding.scope.owner, binding.scope.storage
     )
 }
 fn slot_name(binding: &Binding) -> String {
+    slot_key(&binding.scope.namespace, &binding.scope.storage)
+}
+fn slot_key(namespace: &str, storage: &str) -> String {
     let mut digest = Sha256::new();
-    digest.update(binding.scope.namespace.as_bytes());
+    digest.update(namespace.as_bytes());
     digest.update([0]);
-    digest.update(binding.scope.storage.as_bytes());
+    digest.update(storage.as_bytes());
     format!("persistent-{:x}", digest.finalize())
+}
+
+/// Read-only binding selection. It never turns pending/staging into enrollment and
+/// grants no observation authority. The consumer must call read_retained afterward.
+pub(super) fn existing_binding(
+    root: &Path,
+    namespace: &str,
+    storage: &str,
+) -> Result<Option<Binding>, CandidateError> {
+    if !super::super::super::hex(namespace, 64) || !super::logical_name(storage) {
+        return Err(refused());
+    }
+    let root = Directory::open(root)?;
+    let path = root.path.join(slot_key(namespace, storage));
+    match fs::symlink_metadata(&path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            root.verify()?;
+            return Ok(None);
+        }
+        Err(_) => return Err(refused()),
+        Ok(_) => {}
+    }
+    let slot = Directory::open(&path)?;
+    let lock = state::Lock::acquire_existing(&slot.path).map_err(|_| refused())?;
+    let files = Files { root, slot, lock };
+    files.verify(None)?;
+    let record = RecordPin::read(&files.slot.path.join("owner.json"))?;
+    let owner = super::decode(&record.bytes)?;
+    if owner.0.binding.scope.namespace != namespace
+        || owner.0.binding.scope.storage != storage
+        || !matches!(owner.0.enrollment, Enrollment::Enrolled { .. })
+    {
+        return Err(refused());
+    }
+    files.verify(Some(&record))?;
+    Ok(Some(owner.0.binding))
 }
 
 struct Guard<'a> {
@@ -226,7 +269,7 @@ fn enroll<T: Transport, S: Sync>(
         return Err(refused());
     }
     // The last absence observation grants no create authority: the sealed adapter must
-    // still refuse a competing existing name atomically inside create_new.
+    // still refuse a competing name within its continuously held common writer lease.
     fresh(&files, &pending, &request.binding, &guard, transport)?;
     let captured = transport
         .create_new(&request, guard.deadline)

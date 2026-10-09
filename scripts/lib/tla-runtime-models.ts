@@ -20,7 +20,7 @@ type ModelContract = {
   readonly alternativeWitnesses?: readonly ModelWitness[];
   readonly additionalControls?: readonly {
     readonly name: string;
-    readonly module?: "TerminalReuse";
+    readonly module?: "TerminalReuse" | "MetadataAliasing";
     readonly negative: boolean;
     readonly states?: number;
     readonly invariant?: string;
@@ -48,6 +48,21 @@ const contracts: readonly ModelContract[] = [
     action: "CreateOriginal",
     fields: ['phase = "created"', "volume = 2", "unsafeAdoption = TRUE"],
     additionalControls: [
+      {
+        name: "metadata-alias",
+        module: "MetadataAliasing",
+        negative: true,
+        invariant: "NoAliasedMatch",
+        action: "ReadRetained",
+        fields: [
+          "actualVolume = 2",
+          "reportedMetadata = 1",
+          "capturedMetadata = 1",
+          "witness = 0",
+          "expectedWitness = 1",
+          "matched = TRUE",
+        ],
+      },
       {
         name: "wrong-birth",
         negative: true,

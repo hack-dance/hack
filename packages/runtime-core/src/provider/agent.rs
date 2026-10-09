@@ -129,6 +129,36 @@ pub fn exec(
     exec_input(path, script, arguments, background, None)
 }
 
+/// Fixed noninteractive observation using the caller's original aggregate deadline.
+#[cfg(feature = "native-config-plan")]
+pub(super) fn exec_until(
+    path: &Path,
+    script: &str,
+    arguments: &[&str],
+    deadline: Instant,
+) -> Result<String, CandidateError> {
+    let mut stream = connect_until(path, deadline)?;
+    let remaining = deadline
+        .checked_duration_since(Instant::now())
+        .ok_or_else(|| failure("Guest observation deadline expired."))?;
+    let milliseconds = remaining.as_millis().min(40_000);
+    if milliseconds == 0 {
+        return Err(failure("Guest observation deadline expired."));
+    }
+    let mut command = vec!["/bin/sh", "-c", script, "hack-local"];
+    command.extend_from_slice(arguments);
+    let body = json!({"method":"vm_exec","command":command,"env":[["PATH","/opt/hack-engine:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"]],"workdir":"/","timeout_ms":milliseconds,"interactive":false,"tty":false,"background":false,"stdin_data":null});
+    let bytes = encode(&body)?;
+    let timeout = deadline
+        .checked_duration_since(Instant::now())
+        .ok_or_else(|| failure("Guest observation deadline expired."))?;
+    let response = exchange(&mut stream, &bytes, timeout)?;
+    if Instant::now() >= deadline {
+        return Err(failure("Guest observation deadline expired."));
+    }
+    decode_execution(response)
+}
+
 pub fn exec_input(
     path: &Path,
     script: &str,

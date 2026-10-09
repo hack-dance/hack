@@ -1,9 +1,10 @@
-//! Inactive, data-only persistent-volume identity codec for the private native candidate.
+//! Data-only persistent-volume identity codec for the private native candidate.
 //!
 //! A decoded enrolled record is an assertion to compare, not proof of durable enrollment,
 //! freshness, or permission to create, adopt, start, repair or delete anything. No runtime
 //! generation, graph run, plan, dependency-cache completion or application data is encoded.
-//! Future enrollment must own its commit point and obtain the original identities itself.
+//! Enrollment and the engine adapter separately own their commit/effect boundaries and
+//! obtain original identities themselves; parsing cannot replace those owners.
 
 use crate::CandidateError;
 use serde::{Deserialize, Serialize};
@@ -258,4 +259,5 @@ fn timestamp(value: &str) -> bool {
 #[cfg(test)]
 mod tests;
 
+pub(super) mod engine;
 pub mod enrollment;

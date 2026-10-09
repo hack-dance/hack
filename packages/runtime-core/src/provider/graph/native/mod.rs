@@ -1,4 +1,4 @@
-//! Native image-only lowering; runtime ownership and effects are separately admitted.
+//! Native image/process and persistent-mount lowering; effects are separately admitted.
 use super::*;
 use crate::{project::native::NativeInputs, provider::native_input};
 #[cfg(target_os = "macos")]
@@ -46,6 +46,9 @@ pub struct Configuration {
     review: native_input::Review,
     configs: BTreeMap<String, Value>,
     resources: BTreeMap<String, Resource>,
+    storage: BTreeSet<String>,
+    data_mounts: BTreeMap<String, Vec<crate::project::native::StorageMount>>,
+    data: BTreeMap<String, persistent_data::engine::Reference>,
 }
 impl Configuration {
     pub fn graph(&self) -> &execution::Graph {
@@ -65,7 +68,7 @@ impl Configuration {
 fn refused() -> CandidateError {
     error(
         "native_graph_admission",
-        "Native image-only consumption requires its exact compiler review, immutable images and bounded process/readiness; values omitted.",
+        "Native consumption requires its exact compiler review, immutable images, bounded process/readiness and separately enrolled persistent storage; values omitted.",
     )
 }
 
@@ -194,6 +197,14 @@ pub fn configuration(
         review: review.clone(),
         configs,
         resources,
+        storage: inputs.storage.clone(),
+        data_mounts: inputs
+            .workloads
+            .iter()
+            .filter(|(_, workload)| !workload.mounts.is_empty())
+            .map(|(name, workload)| (name.clone(), workload.mounts.clone()))
+            .collect(),
+        data: BTreeMap::new(),
     })
 }
 

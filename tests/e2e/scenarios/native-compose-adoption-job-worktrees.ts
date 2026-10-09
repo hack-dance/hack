@@ -16,6 +16,7 @@ import {
   type Scenario,
   type ScenarioContext,
 } from "../harness.ts";
+import { createCompletedJobFixtureStartDiagnostics } from "./native-compose-adoption-job-diagnostics.ts";
 import { completedJobFixtureSources } from "./native-compose-adoption-job-inputs.ts";
 import {
   createAdoptionFixtureProbe,
@@ -752,30 +753,48 @@ function runtime(input: Awaited<ReturnType<typeof prepare>>) {
     expected: readonly number[],
     restart = false
   ) => {
-    const previous = await state(instance, "seed");
-    requireValue(typeof previous.startedAt === "string");
-    successful(
-      await cli(
+    const diagnostics = createCompletedJobFixtureStartDiagnostics({
+      log: ctx.log,
+      operation: restart ? "restart" : "up",
+      scope: instance === input.first ? "alpha" : "beta",
+    });
+    const previous = await diagnostics.step("prior-state", async () => {
+      const value = await state(instance, "seed");
+      requireValue(typeof value.startedAt === "string");
+      return value;
+    });
+    await diagnostics.step("cli-result", async () => {
+      const result = await cli(
         instance,
         restart ? ["restart", "--json"] : ["up", "--detach", "--json"]
+      );
+      diagnostics.cliOutcome(result);
+      successful(result);
+    });
+    const current = await diagnostics.step("fresh-state", () =>
+      state(instance, "seed")
+    );
+    await diagnostics.step("fresh-exit", () => {
+      if (typeof previous.startedAt !== "string") {
+        refused();
+      }
+      completedJobFixtureFreshExit({
+        id: id(instance, "seed"),
+        priorStartedAt: previous.startedAt,
+        observed: current,
+      });
+    });
+    await diagnostics.step("pending-clear", () => pending(instance, null));
+    await diagnostics.step("sql-ready", () =>
+      waitSql(
+        instance,
+        "SELECT count(*) FROM app_starts",
+        String(expected.length)
       )
     );
-    const current = await state(instance, "seed");
-    if (typeof previous.startedAt !== "string") {
-      refused();
-    }
-    completedJobFixtureFreshExit({
-      id: id(instance, "seed"),
-      priorStartedAt: previous.startedAt,
-      observed: current,
-    });
-    await pending(instance, null);
-    await waitSql(
-      instance,
-      "SELECT count(*) FROM app_starts",
-      String(expected.length)
+    await diagnostics.step("sql-counts", () =>
+      counts(instance, attempts, expected)
     );
-    await counts(instance, attempts, expected);
   };
   const control = async (
     instance: Instance,
@@ -1397,7 +1416,11 @@ export const nativeComposeAdoptionJobWorktreesScenario: Scenario = {
       await h.freshUp(first, 3, [1, 2, 3]);
       phases.mark("alpha-restart-4");
       await h.freshUp(first, 4, [1, 2, 3, 4], true);
-      await h.counts(second, 1, [1]);
+      await createCompletedJobFixtureStartDiagnostics({
+        log: ctx.log,
+        operation: "restart",
+        scope: "alpha",
+      }).step("sibling-isolation", () => h.counts(second, 1, [1]));
       phases.mark("alpha-nonzero-job-5");
       await h.control(first, "fail");
       await stop(h, first);

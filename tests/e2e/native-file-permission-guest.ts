@@ -61,7 +61,7 @@ try {
     const info=await lstat(row.target);
     if(!["0400","0600"].includes(row.mode))refuseMetadata("protected-mode");
     if((info.mode&4095)!==Number.parseInt(row.mode,8))refuseMetadata("mode");
-    if(info.uid!==row.uid)refuseMetadata("owner-uid");
+    if(info.uid!==row.uid)refuseMetadata(info.uid===process.getuid()?"owner-uid-is-observer":"owner-uid-other");
     if(info.gid!==row.gid)refuseMetadata("owner-gid");
     if(info.uid===process.getuid())refuseMetadata("nonowner-uid");
     try{await readFile(row.target);process.exit(53)}catch(error){if(error?.code!=="EACCES")process.exit(54)}

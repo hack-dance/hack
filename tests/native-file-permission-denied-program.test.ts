@@ -25,6 +25,7 @@ type Observation = {
   readonly observerUid?: number;
   readonly readOutcome?: "EACCES" | "ENOENT" | "allowed";
   readonly forbidModeRead?: boolean;
+  readonly forbidGidRead?: boolean;
 };
 
 /** Execute the emitted body with only its filesystem import redirected to an owned synthetic module. */
@@ -54,6 +55,7 @@ async function observe(opts: Observation = {}) {
     observerUid: opts.observerUid ?? 3001,
     readOutcome: opts.readOutcome ?? "EACCES",
     forbidModeRead: opts.forbidModeRead ?? false,
+    forbidGidRead: opts.forbidGidRead ?? false,
   };
   const observation = `
 const selected=${JSON.stringify(selected)};
@@ -61,6 +63,7 @@ let statCalls=0,readCalls=0,forbiddenReads=0;
 process.on("exit",()=>process.stderr.write(JSON.stringify({statCalls,readCalls,forbiddenReads})));
 Object.defineProperty(process,"getuid",{value:()=>selected.observerUid});
 if(selected.forbidModeRead)Object.defineProperty(selected.info,"mode",{get(){forbiddenReads++;throw new Error("Later metadata access refused")}});
+if(selected.forbidGidRead)Object.defineProperty(selected.info,"gid",{get(){forbiddenReads++;throw new Error("Later metadata access refused")}});
 export async function lstat(target){if(target!==selected.row.target)throw new Error("Unexpected synthetic target");statCalls++;return selected.info}
 export async function readFile(target){if(target!==selected.row.target)throw new Error("Unexpected synthetic target");readCalls++;if(selected.readOutcome!=="allowed")throw Object.assign(new Error("Synthetic read refused"),{code:selected.readOutcome});return new Uint8Array()}
 `;
@@ -80,7 +83,18 @@ export async function readFile(target){if(target!==selected.row.target)throw new
 test.each([
   ["protected-mode", { row: { ...row, mode: "0444" }, forbidModeRead: true }],
   ["mode", { info: { ...info, mode: 0o10_0600, uid: 9001, gid: 9002 } }],
-  ["owner-uid", { info: { ...info, uid: 9001, gid: 9002 } }],
+  [
+    "owner-uid-other",
+    { info: { ...info, uid: 9001, gid: 9002 }, forbidGidRead: true },
+  ],
+  [
+    "owner-uid-is-observer",
+    {
+      info: { ...info, uid: 3001, gid: 9002 },
+      observerUid: 3001,
+      forbidGidRead: true,
+    },
+  ],
   ["owner-gid", { info: { ...info, gid: 9002 }, observerUid: row.uid }],
   ["nonowner-uid", { observerUid: row.uid }],
 ] as const)("nonowner metadata refuses at the first %s guard without reading content", async (guard, observation) => {

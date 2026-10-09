@@ -633,6 +633,39 @@ function carrier(input: NativeComposeStorageXattrInvocation) {
   };
   return { program, value, rootMount, rootConfig, volumeOptions };
 }
+test("carrier policy accepts the Docker 28 empty DriverConfig default beside NoCopy", () => {
+  const selected = input();
+  const fixture = carrier(selected);
+  fixture.volumeOptions.DriverConfig = {};
+  const checked = checkNativeComposeStorageDockerCarrier({
+    value: fixture.value,
+    input: selected,
+    program: fixture.program,
+    imageIds: [selected.artifact.imageId],
+  });
+  expect(typeof nativeComposeStorageDockerCarrierPolicy(checked)).toBe(
+    "string"
+  );
+  for (const extra of [{ Labels: {} }, { Subpath: "" }] as const) {
+    const refused = carrier(selected);
+    Object.assign(refused.volumeOptions, extra);
+    let caught: unknown;
+    try {
+      checkNativeComposeStorageDockerCarrier({
+        value: refused.value,
+        input: selected,
+        program: refused.program,
+        imageIds: [selected.artifact.imageId],
+      });
+    } catch (error) {
+      caught = error;
+    }
+    expect(nativeComposeEffectRefusal(caught)).toEqual({
+      stage: "storage-helper-policy",
+      reason: "helper-storage-request",
+    });
+  }
+});
 test.each([
   "helper-shape",
   "helper-command",
@@ -668,7 +701,7 @@ test.each([
       value.mounts[0] = { ...value.mounts[0], Source: "private-mount-canary" };
       break;
     case "helper-storage-request":
-      fixture.volumeOptions.Labels = {};
+      fixture.volumeOptions.DriverConfig = { Name: "private-driver-canary" };
       break;
     case "helper-storage-identity":
       fixture.rootMount.Driver = "private-driver-canary";

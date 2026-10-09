@@ -14,7 +14,7 @@ fn bind_pair(port: u16, wildcard: bool) -> Result<[std::os::fd::OwnedFd; 2], Can
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
     macro_rules! failure {
         ($stage:ident, $family:expr) => {{
-            #[cfg(test)]
+            #[cfg(all(test, target_os = "macos"))]
             observation_diagnostic::record(
                 observation_diagnostic::Stage::$stage,
                 wildcard,
@@ -119,7 +119,7 @@ fn bind_pair(port: u16, wildcard: bool) -> Result<[std::os::fd::OwnedFd; 2], Can
 
 // Test-only first-refusal facts distinguish bind contention from a failed socket
 // prerequisite. No port, address, descriptor or production diagnostic is exposed.
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 pub(super) mod observation_diagnostic {
     use std::cell::RefCell;
 

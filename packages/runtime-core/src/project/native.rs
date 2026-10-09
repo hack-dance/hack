@@ -6,8 +6,8 @@ use hack_config_compiler::{
     environment::{EnvironmentBinding, EnvironmentPlan, PlanResult},
     local::LocalResolution,
     model::{
-        Command, Dependency, EnvironmentValue, Plan, Readiness, ServiceCondition, Source, Workload,
-        WorktreePolicy,
+        Access, Command, Dependency, EnvironmentValue, Mount, Plan, Readiness, ServiceCondition,
+        Source, Workload, WorktreePolicy,
     },
     process::{Entrypoint, Restart, ShutdownSignal},
 };
@@ -39,6 +39,8 @@ pub struct NativeInputs {
     pub selected_profiles: Vec<String>,
     pub graph: Graph,
     pub workloads: BTreeMap<String, WorkloadInputs>,
+    /// Selected persistent/worktree logical storage names; no provider volume identity.
+    pub storage: BTreeSet<String>,
     /// Destination keys only; values cannot enter public engine configuration or receipts.
     pub managed_environment: ManagedValues,
 }
@@ -98,6 +100,15 @@ pub struct WorkloadInputs {
     pub working_directory: Option<String>,
     pub environment: BTreeMap<String, String>,
     pub readiness: Option<ExecReadiness>,
+    pub mounts: Vec<StorageMount>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StorageMount {
+    pub storage: String,
+    pub target: String,
+    pub read_only: bool,
 }
 
 /// Millisecond precision is retained; a future backend must qualify signal/timing delivery.
@@ -117,7 +128,7 @@ pub struct ExecReadiness {
 fn refused() -> CandidateError {
     CandidateError::new(
         "native_graph_subset",
-        "Native graph adapter requires image-only workloads, exec readiness and no acquisition, mounts, storage, custom networks, routing, endpoints, host effects or automatic restart; values omitted.",
+        "Native graph adapter requires image-only workloads, exec readiness and only persistent worktree storage mounts; acquisition, source/file mounts, custom networks, routing, endpoints, host effects and automatic restart remain refused. Values omitted.",
     )
 }
 
@@ -178,7 +189,6 @@ fn entrypoint(value: Entrypoint) -> Result<Vec<String>, CandidateError> {
 fn workload(value: Workload, kind: WorkloadKind) -> Result<WorkloadInputs, CandidateError> {
     if value.build.is_some()
         || value.pull_policy.is_some()
-        || !value.mounts.is_empty()
         || (value.entrypoint.is_some() && value.command.is_none())
         || value
             .restart
@@ -187,6 +197,32 @@ fn workload(value: Workload, kind: WorkloadKind) -> Result<WorkloadInputs, Candi
     {
         return Err(refused());
     }
+    let mounts = value
+        .mounts
+        .into_iter()
+        .map(|mount| match mount {
+            Mount::Storage {
+                storage,
+                target,
+                access,
+            } if !storage.is_empty()
+                && storage.len() <= 63
+                && storage.bytes().enumerate().all(|(index, byte)| {
+                    byte.is_ascii_lowercase()
+                        || byte.is_ascii_digit()
+                        || (index > 0 && matches!(byte, b'-' | b'_' | b'.'))
+                })
+                && target != "/" =>
+            {
+                Ok(StorageMount {
+                    storage,
+                    target,
+                    read_only: matches!(access, Access::ReadOnly),
+                })
+            }
+            _ => Err(refused()),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     let readiness = value
         .readiness
         .map(|check| match check {
@@ -228,6 +264,7 @@ fn workload(value: Workload, kind: WorkloadKind) -> Result<WorkloadInputs, Candi
         working_directory: value.working_directory,
         environment: BTreeMap::new(),
         readiness,
+        mounts,
     })
 }
 
@@ -310,7 +347,6 @@ fn compile_inputs(
     refuse_authored_network_intent(request)?;
     let environment_policy_hash = policy_hash(&plan, &environment_plan)?;
     if plan.source.root != "."
-        || !plan.storage.is_empty()
         || !plan.configs.is_empty()
         || !plan.secrets.is_empty()
         || plan.routes.is_some()
@@ -416,6 +452,10 @@ fn compile_inputs(
         return Err(private_refused());
     }
     let graph = Graph::from_services(graph)?;
+    let storage = workloads
+        .values()
+        .flat_map(|workload| workload.mounts.iter().map(|mount| mount.storage.clone()))
+        .collect();
     // No ordinary error path remains after the first copy. The borrowed source
     // map and owning compiler bindings cannot change between validation and copy.
     let mut managed_environment = BTreeMap::new();
@@ -444,6 +484,7 @@ fn compile_inputs(
         selected_profiles: plan.selected_profiles,
         graph,
         workloads,
+        storage,
         managed_environment,
     })
 }

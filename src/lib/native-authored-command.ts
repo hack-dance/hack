@@ -78,6 +78,8 @@ function startupFailure(error: unknown): number {
       detail: {
         outcome: error.outcome,
         canceled: error.canceled,
+        stage: error.stage,
+        ...(error.compilerCode ? { compilerCode: error.compilerCode } : {}),
         ...(error.nativeCode ? { nativeCode: error.nativeCode } : {}),
       },
     });

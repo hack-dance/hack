@@ -4,6 +4,12 @@ import { isRecord } from "../src/lib/guards.ts";
 import { openNativeComposeGenerationStore } from "../src/lib/native-compose-generation.ts";
 import { fixture, invoke, state } from "./helpers/native-compose-command.ts";
 
+// The source CLI now performs finite witness proofs as well as the workload
+// transaction. Keep the same proof/wrapper budgets as its activation controls.
+function command(root: string, args = ["up", "--detach", "--json"]) {
+  return invoke(root, args, 30_000, 120_000);
+}
+
 type Volume = {
   readonly id: string;
   readonly name: string;
@@ -93,9 +99,9 @@ async function storageFixture() {
 
 async function startAndStop() {
   const root = await storageFixture();
-  expect((await invoke(root)).code).toBe(0);
+  expect((await command(root)).code).toBe(0);
   const volume = await retainedVolume(root);
-  expect((await invoke(root, ["down", "--json"])).code).toBe(0);
+  expect((await command(root, ["down", "--json"])).code).toBe(0);
   expect(await state(root)).toMatchObject({ stopped: true, pending: false });
   expect(await retainedVolume(root)).toEqual(volume);
   expect(await composeStarts(root)).toHaveLength(1);
@@ -105,7 +111,7 @@ async function startAndStop() {
 test("genuinely cold source CLI startup may create its first persistent volume", async () => {
   const root = await storageFixture();
   expect(await Bun.file(join(root, "volumes")).exists()).toBe(false);
-  const result = await invoke(root);
+  const result = await command(root);
   expect(result.code).toBe(0);
   expect(JSON.parse(result.stdout)).toMatchObject({
     ok: true,
@@ -113,11 +119,11 @@ test("genuinely cold source CLI startup may create its first persistent volume",
   });
   await retainedVolume(root);
   expect(await composeStarts(root)).toHaveLength(1);
-}, 30_000);
+}, 120_000);
 
 test("source CLI down/up restores the unchanged physical volume birth", async () => {
   const { root, volume } = await startAndStop();
-  const result = await invoke(root);
+  const result = await command(root);
   expect(result.code).toBe(0);
   expect(JSON.parse(result.stdout)).toMatchObject({
     ok: true,
@@ -126,7 +132,7 @@ test("source CLI down/up restores the unchanged physical volume birth", async ()
   expect(await retainedVolume(root)).toEqual(volume);
   expect(await composeStarts(root)).toHaveLength(2);
   expect(await state(root)).toMatchObject({ stopped: false, pending: false });
-}, 30_000);
+}, 120_000);
 
 test.each([
   "missing",
@@ -134,19 +140,28 @@ test.each([
 ] as const)("source CLI refuses a %s retained volume before Compose can create or start", async (change) => {
   const { root, volume } = await startAndStop();
   const before = await savedState(root);
+  const original: unknown = await Bun.file(join(root, "volumes")).json();
+  if (
+    !Array.isArray(original) ||
+    original.length !== 1 ||
+    !isRecord(original[0])
+  ) {
+    throw new Error("Expected the retained synthetic volume row");
+  }
   const changed =
     change === "missing"
       ? []
       : [
           {
-            ...volume,
+            // Preserve provision/root/witness backing facts so only birth drifts.
+            ...original[0],
             createdAt: new Date(
               Date.parse(volume.createdAt) - 1000
             ).toISOString(),
           },
         ];
   await Bun.write(join(root, "volumes"), JSON.stringify(changed));
-  const result = await invoke(root);
+  const result = await command(root);
   // The effect count is the safety oracle even if a later readiness check fails.
   expect(await composeStarts(root)).toHaveLength(1);
   expect(result.code).toBe(1);
@@ -154,12 +169,12 @@ test.each([
   expect(await Bun.file(join(root, "engine")).exists()).toBe(false);
   expect(await Bun.file(join(root, "volumes")).json()).toEqual(changed);
   expect(await savedState(root)).toEqual(before);
-}, 30_000);
+}, 120_000);
 
 test("incomplete cold readiness retains observed storage and refuses data-loss recovery", async () => {
   const root = await storageFixture();
   await Bun.write(join(root, "unready"), "true");
-  const started = await invoke(root);
+  const started = await command(root);
   expect(started.code).toBe(1);
   const volume = await retainedVolume(root);
   const before = await savedState(root);
@@ -169,7 +184,7 @@ test("incomplete cold readiness retains observed storage and refuses data-loss r
     { name: volume.name, storage: volume.storage, createdAt: volume.createdAt },
   ]);
   await Bun.write(join(root, "volumes"), "[]");
-  const recovered = await invoke(root, ["down", "--recover", "--json"]);
+  const recovered = await command(root, ["down", "--recover", "--json"]);
   expect(recovered.code).toBe(1);
   const requests: string[][] = (await Bun.file(join(root, "requests")).text())
     .trim()
@@ -180,4 +195,4 @@ test("incomplete cold readiness retains observed storage and refuses data-loss r
   ).toHaveLength(0);
   expect(await savedState(root)).toEqual(before);
   expect(await Bun.file(join(root, "volumes")).json()).toEqual([]);
-}, 30_000);
+}, 120_000);

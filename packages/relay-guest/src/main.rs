@@ -5,6 +5,9 @@ mod error;
 pub use error::CandidateError;
 #[path = "../../runtime-core/src/provider/private_input.rs"]
 mod private_input;
+#[cfg(target_os = "linux")]
+#[path = "../../runtime-core/src/provider/storage_root_witness.rs"]
+mod storage_root_witness;
 // This shared module also supplies host-only authority/effect APIs. Keep them
 // compiled and checked by runtime-core without requiring guest-side callers.
 #[allow(dead_code)]
@@ -71,6 +74,54 @@ fn run(options: Options) -> Result<(), CandidateError> {
 }
 fn main() {
     let raw_args: Vec<_> = std::env::args_os().skip(1).collect();
+    if raw_args
+        .first()
+        .is_some_and(|arg| arg == "--storage-root-witness")
+    {
+        if raw_args.len() != 1 {
+            eprintln!("hack-relay-guest: persistent root witness refused");
+            std::process::exit(64);
+        }
+        #[cfg(target_os = "linux")]
+        {
+            if !storage_root_witness::arguments(&raw_args) {
+                eprintln!("hack-relay-guest: persistent root witness refused");
+                std::process::exit(64);
+            }
+            let result = (|| {
+                // SAFETY: F_GETFD observes FD0 before this branch takes its sole
+                // ownership. No Stdin handle or retained duplicate is created.
+                if unsafe { libc::fcntl(0, libc::F_GETFD) } < 0 {
+                    return Err(CandidateError::new(
+                        "storage_root_witness_refused",
+                        "Persistent root witness was refused; values omitted.",
+                    ));
+                }
+                // SAFETY: the invocation transfers this private pipe FD exactly once.
+                let fd = unsafe { OwnedFd::from_raw_fd(0) };
+                let bytes = private_input::receive(
+                    fd,
+                    Duration::from_secs(5),
+                    storage_root_witness::MAX_REQUEST,
+                )?;
+                let request = storage_root_witness::Request::parse(&bytes)?;
+                storage_root_witness::execute(request)
+            })();
+            match result {
+                Ok(observation) => print!("{}", observation.encode()),
+                Err(_) => {
+                    eprintln!("hack-relay-guest: persistent root witness refused");
+                    std::process::exit(1);
+                }
+            }
+            return;
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            eprintln!("hack-relay-guest: persistent root witness refused");
+            std::process::exit(1);
+        }
+    }
     if raw_args
         .first()
         .is_some_and(|arg| arg == "--await-release" || arg == "--check-release")

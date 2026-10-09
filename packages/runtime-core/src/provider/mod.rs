@@ -52,6 +52,8 @@ pub mod relay_owner;
 pub mod resources;
 #[cfg(target_os = "macos")]
 pub mod shared_https_recovery;
+#[cfg(test)]
+mod storage_root_witness;
 pub mod storage_usage;
 #[cfg(all(test, target_os = "macos"))]
 mod test_executable;

@@ -2,9 +2,9 @@
 
 An explicit `HACK_RUNTIME_BACKEND=native` selection delegates an authored
 `.hack/hack.project.json` project to the separate native foreground owner. The
-current command slice supports whole-project foreground `up` and saved-run `ps`
-on macOS with an
-absolute `HACK_NATIVE_BINARY` and private canonical `HACK_NATIVE_HOME`. It requires
+current command slice supports whole-project foreground `up`, saved-run `ps`,
+and finite service `logs` on macOS with an absolute `HACK_NATIVE_BINARY` and private
+canonical `HACK_NATIVE_HOME`. It requires
 the caller's separately prepared native provider pool and matching runtime binary.
 It does not install or select a runtime automatically. An omitted backend continues
 to use the [Compose command owner](native-compose-commands.md).
@@ -56,7 +56,7 @@ directories, saved record identities and the selected executable across its sing
 bounded request. It does not compile or read authored values, resolve env, run
 hooks, start workloads, repair state or perform cleanup. Cancellation waits for the
 owned request to settle. Profiles, env overrides, service subsets and other `ps`
-options are unsupported. Native `logs`, `exec`, `run` and `restart` remain separate
+options are unsupported. Native `exec`, `run` and `restart` remain separate
 unsupported command slices.
 
 Startup shares the configured `HACK_COMPOSE_STARTUP_TIMEOUT_MS` budget across

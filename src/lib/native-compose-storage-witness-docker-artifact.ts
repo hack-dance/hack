@@ -35,8 +35,8 @@ const IMAGE_ID = /^sha256:[a-f0-9]{64}$/;
 type Dependencies = Readonly<
   Partial<Record<Platform, NativeComposeStorageDockerDependency>>
 >;
-/** Only qualified byte records enter this catalog. The missing amd64 entry is a
- * deterministic prerequisite refusal until its separate artifact/ABI gate passes. */
+/** Only qualified byte, ABI and persistent-root records enter this catalog.
+ * A missing platform remains a deterministic refusal, never an emulation fallback. */
 export const NATIVE_STORAGE_DOCKER_DEPENDENCIES: Dependencies = Object.freeze({
   "linux/arm64": Object.freeze({
     artifact: NATIVE_STORAGE_DOCKER_ARTIFACT,
@@ -44,6 +44,27 @@ export const NATIVE_STORAGE_DOCKER_DEPENDENCIES: Dependencies = Object.freeze({
       NATIVE_STORAGE_DOCKER_ARTIFACT.imageId,
       "sha256:5c51cee225076d3c7db2150683141476298062489de4660f2d1729e522641f91",
       "sha256:1cb8f81099813a0ec61f99b69348f6594e188cf1689c20a0a53a5ddd23b37708",
+    ]),
+  }),
+  "linux/amd64": Object.freeze({
+    artifact: Object.freeze({
+      version: 1,
+      imageId:
+        "sha256:cb3bbbb08e13a4a2ff400f24c7a2a1d5efa83f6ef8544d52d95a519631e2fc61",
+      platform: "linux/amd64",
+      bunVersion: "1.4.2",
+      bunHash:
+        "a83d263767d839e4d2649ca8e35d07159c7afc99afdc96d731ced29e056dda0c",
+      libcHash:
+        "fa430b8f298f817a266046af84a77533185ad6fc4406c7d3787b5a0a0c207826",
+      helperHash:
+        "9d9c322ee35f43e047a41fd4901926789673a072c1e0bbf9030a106e7050ba5f",
+      kernelAbi: 1,
+    }),
+    imageIds: Object.freeze([
+      "sha256:cb3bbbb08e13a4a2ff400f24c7a2a1d5efa83f6ef8544d52d95a519631e2fc61",
+      "sha256:debbe76858f2e398d2937c1eceeb82c571ac1fcd78aadf00e9634578ac2b5ef7",
+      "sha256:808ae5d87c721a0c738c37d17ae4837367baa0c9c4353f5ea1762802b0fb6392",
     ]),
   }),
 });

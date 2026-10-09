@@ -247,6 +247,44 @@ test("source CLI refuses SAME-birth empty replacement before hooks or another wo
   expect(await Bun.file(join(root, "carriers")).json()).toEqual([]);
 }, 120_000);
 
+test("AMD daemon reaches its image guard and refuses a mismatched ARM image", async () => {
+  await ownedColdCase(async (owner) => {
+    const root = await fixture("", false, {
+      storage,
+      cleanupAllowed: owner.cleanupAllowed,
+    });
+    // This synthetic daemon reports amd64 but returns the existing ARM image.
+    await Bun.write(join(root, "helper-wrong-platform"), "true");
+    const result = await owner.invoke(root, ["up", "--detach", "--json"]);
+    const calls = await requests(root);
+    const current = await saved(root);
+    const imageInspections = calls.filter(
+      (args) => args[0] === "image" && args[1] === "inspect"
+    );
+    const effects = calls.filter(
+      (args) =>
+        ["create", "start", "compose"].includes(args[0] ?? "") ||
+        (args[0] === "volume" && args[1] === "create")
+    );
+    expect(result.code).toBe(1);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      ok: false,
+      error: { code: "E_COMPOSE_FAILED" },
+    });
+    expect(effects).toHaveLength(0);
+    expect(current.pending).toBeNull();
+    expect(current.storageWitnesses).toBeNull();
+    expect(await Bun.file(join(root, "order")).exists()).toBe(false);
+    expect(
+      calls.some(
+        (args) => args[0] === "info" && args[2]?.includes(".Architecture")
+      )
+    ).toBe(true);
+    // A qualified AMD catalog must pass platform selection and reach this image guard.
+    expect(imageInspections).toHaveLength(1);
+  });
+}, 120_000);
+
 test.each([
   "helper-unavailable",
   "helper-wrong-platform",

@@ -729,32 +729,92 @@ export async function inspectLegacyComposeAdoptionResources(opts: {
     }),
     opts.intent
   );
-  const networkFacts = await inspect({
-    kind: "network",
-    probe,
-    resources: selected.network,
-    project: opts.intent.composeProject,
-  });
-  const plural = opts.intent.ownedNetworks
-    ? pluralNetworkRows(networkFacts, opts.intent)
-    : undefined;
-  const single = plural ? undefined : networkRow(networkFacts, opts.intent);
-  const containerFacts = await inspect({
-    kind: "container",
-    probe,
-    resources: selected.container,
-    project: opts.intent.composeProject,
-    ownedNetwork:
-      opts.intent.ownedNetwork !== undefined ||
-      opts.intent.ownedNetworks !== undefined,
-  });
-  const containers = containerRows(containerFacts, {
-    ...opts,
-    composeFiles,
-    volumes,
-    network: single?.network,
-    networks: plural?.networks,
-  });
+  const selectedIds = new Set(selected.container.map((row) => row.id));
+  const readNetwork = async () => {
+    const facts = await inspect({
+      kind: "network",
+      probe,
+      resources: selected.network,
+      project: opts.intent.composeProject,
+    });
+    const plural = opts.intent.ownedNetworks
+      ? pluralNetworkRows(facts, opts.intent)
+      : undefined;
+    const single = plural ? undefined : networkRow(facts, opts.intent);
+    // A foreign endpoint never earns a retry, including in a discarded scan.
+    if (plural) {
+      for (const [logical, members] of plural.members) {
+        const allowedNames = new Set(
+          opts.intent.ownedNetworks?.attachments
+            .filter((entry) =>
+              entry.networks.some((attached) => attached.logical === logical)
+            )
+            .map((entry) => `${opts.intent.composeProject}-${entry.service}-1`)
+        );
+        const allowedIds = new Set(
+          selected.container
+            .filter((row) => allowedNames.has(row.name))
+            .map((row) => row.id)
+        );
+        requireValue(members.every((id) => allowedIds.has(id)));
+      }
+    } else {
+      requireValue(
+        single?.containerIds.every(
+          (id) => typeof id === "string" && selectedIds.has(id)
+        )
+      );
+    }
+    return { plural, single };
+  };
+  let { plural, single } = await readNetwork();
+  const networkIdentity = JSON.stringify(plural?.networks ?? single?.network);
+  const readContainers = async () => {
+    const facts = await inspect({
+      kind: "container",
+      probe,
+      resources: selected.container,
+      project: opts.intent.composeProject,
+      ownedNetwork:
+        opts.intent.ownedNetwork !== undefined ||
+        opts.intent.ownedNetworks !== undefined,
+    });
+    const containers = containerRows(facts, {
+      ...opts,
+      composeFiles,
+      volumes,
+      network: single?.network,
+      networks: plural?.networks,
+    });
+    return { facts, containers };
+  };
+  let before = await readContainers();
+  const containerIdentity = JSON.stringify(before.containers);
+  let containerFacts: readonly Record<string, unknown>[];
+  let containers: LegacyComposeVerifiedContainer[];
+  for (;;) {
+    ({ plural, single } = await readNetwork());
+    requireValue(
+      JSON.stringify(plural?.networks ?? single?.network) === networkIdentity
+    );
+    const after = await readContainers();
+    // Both scans validate all labels, mounts and configured attachments against
+    // the same originals. Only running state is transient; stopped aliases may
+    // be absent under the existing contract. No completion authority is granted.
+    requireValue(JSON.stringify(after.containers) === containerIdentity);
+    if (
+      JSON.stringify(before.facts.map((row) => [row.id, row.running])) !==
+      JSON.stringify(after.facts.map((row) => [row.id, row.running]))
+    ) {
+      // Reuse this aggregate probe's original deadline and output allowance.
+      // Never accept mixed membership, reset a timer, or retry an identity error.
+      before = after;
+      continue;
+    }
+    containerFacts = after.facts;
+    containers = after.containers;
+    break;
+  }
   // Docker drops stopped endpoints from network inspection. Each original must
   // still configure every declared NetworkID; live members are exact per bridge.
   if (plural) {
@@ -789,6 +849,19 @@ export async function inspectLegacyComposeAdoptionResources(opts: {
         )
     );
   }
+  requireValue(
+    JSON.stringify(
+      volumeRows(
+        await inspect({
+          kind: "volume",
+          probe,
+          resources: selected.volume,
+          project: opts.intent.composeProject,
+        }),
+        opts.intent
+      )
+    ) === JSON.stringify(volumes)
+  );
   for (const kind of ["container", "volume", "network"] as const) {
     requireValue(
       JSON.stringify(await inventory({ kind, probe, intent: opts.intent })) ===

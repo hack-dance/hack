@@ -2,6 +2,7 @@
 use super::*;
 mod jobs;
 mod rebind;
+use crate::provider::guest_tool::{APPEND, PREPARE, PUBLISH};
 use crate::provider::{
     host_endpoint::HostEndpoint,
     lifecycle::{RelayChild, RelayLaunch},
@@ -65,11 +66,7 @@ pub(super) fn retired_dependency_rebind_archive_complete(
     rebind::archive::retired_archive_complete(root, original, boot)
 }
 use sha2::{Digest, Sha256};
-use std::{
-    io::Read,
-    os::unix::fs::{MetadataExt, OpenOptionsExt},
-    time::Instant,
-};
+use std::{io::Read, time::Instant};
 
 /// One explicit host dependency for one service. The endpoint is a live captured
 /// generation, not a port number or implicit host-gateway route.
@@ -385,32 +382,7 @@ impl HostRelayRuntime {
         {
             return Err(stage_refused("graph_startup_input"));
         }
-        let bytes = if dependencies.is_empty() {
-            Vec::new()
-        } else {
-            let mut file = fs::OpenOptions::new()
-                .read(true)
-                .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-                .open(artifact)
-                .map_err(state::io)?;
-            let metadata = file.metadata().map_err(state::io)?;
-            if !metadata.is_file() || metadata.len() > 2 * 1024 * 1024 || metadata.nlink() != 1 {
-                return Err(stage_refused("graph_startup_artifact_file"));
-            }
-            let mut bytes = Vec::new();
-            file.by_ref()
-                .take(2 * 1024 * 1024 + 1)
-                .read_to_end(&mut bytes)
-                .map_err(state::io)?;
-            if bytes.len() as u64 != metadata.len()
-                || format!("{:x}", Sha256::digest(&bytes)) != expected_sha256
-                || bytes.get(..6) != Some(b"\x7fELF\x02\x01")
-                || bytes.get(18..20) != Some(&[183, 0])
-            {
-                return Err(stage_refused("graph_startup_artifact_identity"));
-            }
-            bytes
-        };
+        let bytes = relay_artifact(artifact, expected_sha256, !dependencies.is_empty())?;
         // The CLI constructs this relay before acquiring its foreground run
         // lock. Fence pending retirement before any new listener or reservation,
         // in the recovery path's gate-before-Engine order. This local guard is
@@ -1037,36 +1009,6 @@ impl Driver for HostRelayRuntime {
     }
 }
 // Arguments are validated receipt IDs/digests. Artifact chunks are non-secret.
-const PREPARE: &str = r#"
-umask 077
-base=/storage/hack-graph-startup
-test ! -L "$base"
-if test ! -e "$base"; then mkdir -m 700 "$base"; fi
-test "$(stat -c %u:%g:%a "$base")" = 0:0:700
-root="$base/$1"
-test ! -e "$root"; test ! -L "$root"
-mkdir -m 700 "$root"
-printf '%s\n' "$2" > "$root/owner"
-chmod 444 "$root/owner"
-: > "$root/helper.pending"
-stat -c %d:%i "$root"
-"#;
-const APPEND: &str = r#"
-root="/storage/hack-graph-startup/$1"
-test ! -L "$root"; test "$(stat -c %u:%g:%a "$root")" = 0:0:700
-test ! -L "$root/helper.pending"; test -f "$root/helper.pending"
-test "$(stat -c %u:%g:%h:%s "$root/helper.pending")" = "0:0:1:$2"
-base64 -d >> "$root/helper.pending"
-"#;
-const PUBLISH: &str = r#"
-root="/storage/hack-graph-startup/$1"
-test ! -L "$root"; test ! -L "$root/helper.pending"
-test -f "$root/helper.pending"; test "$(stat -c %u:%g:%h "$root/helper.pending")" = 0:0:1
-test "$(sha256sum "$root/helper.pending" | cut -d' ' -f1)" = "$2"
-test ! -e "$root/helper"; test ! -L "$root/helper"
-chmod 555 "$root/helper.pending"; mv "$root/helper.pending" "$root/helper"
-sync -f "$root"
-"#;
 const GATE: &str = r#"
 root="/storage/hack-graph-startup/$1"
 test ! -L "$root"; test "$(stat -c %u:%g:%a "$root")" = 0:0:700
@@ -1090,9 +1032,42 @@ chmod 444 "$root/pending"; sync -f "$root/pending"
 mv "$root/pending" "$root/release"; sync -f "$root"
 "#;
 
+fn relay_artifact(
+    artifact: &Path,
+    expected_sha256: &str,
+    required: bool,
+) -> Result<Vec<u8>, CandidateError> {
+    if required {
+        Ok(
+            crate::provider::guest_tool::Artifact::read(artifact, expected_sha256)?
+                .bytes()
+                .to_vec(),
+        )
+    } else {
+        Ok(Vec::new())
+    }
+}
+
 #[cfg(test)]
 mod route_tests {
     use super::*;
+    use std::os::unix::fs::MetadataExt;
+    #[test]
+    fn dependency_free_constructor_skips_artifact_but_required_artifact_uses_fixed_refusal() {
+        let fixture = super::super::super::tests::Fixture::new();
+        let absent = fixture.0.join("absent-guest-artifact");
+        assert_eq!(
+            relay_artifact(&absent, &"a".repeat(64), false).unwrap(),
+            Vec::<u8>::new()
+        );
+        assert_eq!(
+            relay_artifact(&absent, &"a".repeat(64), true)
+                .unwrap_err()
+                .code,
+            "guest_tool_artifact"
+        );
+        assert!(!absent.exists());
+    }
     #[test]
     fn exited_listener_accepts_only_successful_completed_service() {
         let exited = json!({"State":{"Running":false,"ExitCode":0,"OOMKilled":false}});

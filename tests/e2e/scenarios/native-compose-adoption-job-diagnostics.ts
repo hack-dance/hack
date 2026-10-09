@@ -1,4 +1,5 @@
 import { isRecord } from "../../../src/lib/guards.ts";
+import type { LegacyComposeOrderedRefusal } from "../../../src/lib/native-compose-adoption-diagnostics.ts";
 import type { CliResult } from "../harness.ts";
 
 const STAGES = [
@@ -21,38 +22,115 @@ const CODES = [
   "E_NATIVE_COMPOSE_PROBE",
   "E_NATIVE_COMPOSE_PROBE_TIMEOUT",
 ] as const;
+type ObservationReason = Extract<
+  LegacyComposeOrderedRefusal,
+  { stage: "ordered-observation" }
+>["reason"];
+type SchedulerReason = Extract<
+  LegacyComposeOrderedRefusal,
+  { stage: "ordered-scheduler" }
+>["reason"];
+const OBSERVATION_REASONS: readonly ObservationReason[] = [
+  "shape",
+  "timestamp",
+  "restart-policy",
+  "membership",
+  "probe",
+  "probe-operation",
+  "probe-child",
+  "probe-timeout",
+  "probe-cancel",
+  "probe-budget",
+  "probe-capture",
+  "probe-decode",
+  "probe-json",
+  "probe-row",
+  "probe-unknown",
+];
+const SCHEDULER_REASONS: readonly SchedulerReason[] = [
+  "selection",
+  "deadline",
+  "prior-attempt",
+  "missing-attempt",
+  "job-failed",
+  "job-refused",
+  "readiness",
+  "completion-authority",
+];
 const MAX_REPLY_BYTES = 64 * 1024;
 
 function isStage(value: unknown): value is Stage {
   return STAGES.some((stage) => stage === value);
 }
 
-function cliCode(stdout: string): string {
+function closedOrderedRefusal(
+  value: unknown
+): LegacyComposeOrderedRefusal | null {
+  if (
+    !isRecord(value) ||
+    Object.keys(value).length !== 1 ||
+    !Object.hasOwn(value, "legacy_adoption_refusal")
+  ) {
+    return null;
+  }
+  const row = value.legacy_adoption_refusal;
+  if (
+    !isRecord(row) ||
+    Object.keys(row).length !== 2 ||
+    !Object.hasOwn(row, "stage") ||
+    !Object.hasOwn(row, "reason")
+  ) {
+    return null;
+  }
+  if (row.stage === "ordered-observation") {
+    const reason = OBSERVATION_REASONS.find((item) => item === row.reason);
+    return reason ? { stage: row.stage, reason } : null;
+  }
+  if (row.stage === "ordered-scheduler") {
+    const reason = SCHEDULER_REASONS.find((item) => item === row.reason);
+    return reason ? { stage: row.stage, reason } : null;
+  }
+  return null;
+}
+
+function cliFacts(stdout: string) {
+  const unavailable = {
+    code: "unavailable",
+    orderedStage: "unavailable",
+    orderedReason: "unavailable",
+  } as const;
   if (Buffer.byteLength(stdout) > MAX_REPLY_BYTES) {
-    return "unavailable";
+    return unavailable;
   }
   try {
     const value: unknown = JSON.parse(stdout);
     if (!isRecord(value)) {
-      return "unavailable";
+      return unavailable;
     }
     if (value.ok === true) {
-      return "none";
+      return { ...unavailable, code: "none" };
     }
     if (value.ok === false && isRecord(value.error)) {
       const error = value.error;
-      return CODES.find((code) => code === error.code) ?? "unavailable";
+      const code = CODES.find((item) => item === error.code) ?? "unavailable";
+      const ordered =
+        code === "E_CONFIG_INVALID" ? closedOrderedRefusal(error.detail) : null;
+      return {
+        code,
+        orderedStage: ordered?.stage ?? "unavailable",
+        orderedReason: ordered?.reason ?? "unavailable",
+      };
     }
   } catch {
     // A diagnostic cannot replace the original command outcome.
   }
-  return "unavailable";
+  return unavailable;
 }
 
 /**
- * Record only closed start/restart substages and allowlisted CLI codes. No reply
- * values, paths, argv, identifiers, arbitrary errors or elapsed-budget claims are
- * emitted. Logging failure never replaces the original result or thrown error.
+ * Record only closed start/restart substages, CLI codes and exact ordered-refusal
+ * detail. No reply values, paths, argv, identifiers, arbitrary errors or
+ * elapsed-budget claims are emitted. Logging failure never replaces the result.
  */
 export function createCompletedJobFixtureStartDiagnostics(opts: {
   readonly log: (message: string) => void;
@@ -100,12 +178,13 @@ export function createCompletedJobFixtureStartDiagnostics(opts: {
       try {
         const exit = exitClass(result.exitCode);
         const timeout = result.timedOut ? "yes" : "no";
+        const facts = cliFacts(result.stdout);
         emit(
-          `stage=cli-result exit=${exit} timed-out=${timeout} code=${cliCode(result.stdout)}`
+          `stage=cli-result exit=${exit} timed-out=${timeout} code=${facts.code} ordered-stage=${facts.orderedStage} ordered-reason=${facts.orderedReason}`
         );
       } catch {
         emit(
-          "stage=cli-result exit=unavailable timed-out=unavailable code=unavailable"
+          "stage=cli-result exit=unavailable timed-out=unavailable code=unavailable ordered-stage=unavailable ordered-reason=unavailable"
         );
       }
     },

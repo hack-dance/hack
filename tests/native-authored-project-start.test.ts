@@ -49,6 +49,7 @@ afterEach(async () => {
 });
 
 type FixtureOptions = {
+  readonly compilerFailure?: boolean;
   readonly planFailure?: boolean;
   readonly foreignPlan?: boolean;
   readonly foreignNamespace?: boolean;
@@ -135,7 +136,7 @@ async function fixture(options: FixtureOptions = {}) {
     compiler,
     `#!${process.execPath}
 const protocol={transport_version:1,authored_version:1,plan_version:1,resolve_version:1,local_version:1,env_plan_version:1,routing_plan_version:1,host_env_plan_version:1};
-if(process.argv[2]==='--protocol'){console.log(JSON.stringify(protocol));process.exit(0)}
+if(process.argv[2]==='--protocol'){console.log(${options.compilerFailure === true ? JSON.stringify(CANARY) : "JSON.stringify(protocol)"});process.exit(0)}
 const operation=process.argv[2];const raw=await Bun.stdin.text();const request=operation==='compile'?{}:JSON.parse(raw);
 const source=${JSON.stringify(source)};
 const plan={plan_version:1,name:'fixture',selected_profiles:[],services:{web:source.services.web},jobs:{},worktree:{inherit_local:true,auto_branch:false}};
@@ -149,7 +150,8 @@ console.log(JSON.stringify(result));
 `
   );
   await chmod(compiler, 0o700);
-  process.env.HACK_CONFIG_COMPILER_BINARY = realCompiler ?? compiler;
+  process.env.HACK_CONFIG_COMPILER_BINARY =
+    options.compilerFailure === true ? compiler : (realCompiler ?? compiler);
   const binary = join(root, "native");
   const journal = join(root, "journal.json");
   const calls = join(root, "calls.jsonl");
@@ -263,6 +265,47 @@ async function failure(
 }
 const macTest = process.platform === "darwin" ? test : test.skip;
 
+test("startup diagnostics accept only closed compiler codes", () => {
+  const known = new NativeAuthoredProjectStartError({
+    outcome: "not-started",
+    canceled: false,
+    stage: "inputs",
+    compilerCode: "E_COMPILER_RESPONSE",
+  });
+  expect(known.stage).toBe("inputs");
+  expect(known.compilerCode).toBe("E_COMPILER_RESPONSE");
+  expect(known.message).toContain("stage inputs (E_COMPILER_RESPONSE)");
+  const unknown = new NativeAuthoredProjectStartError({
+    outcome: "not-started",
+    canceled: false,
+    stage: "inputs",
+    compilerCode: CANARY,
+  });
+  expect(unknown.compilerCode).toBeUndefined();
+  expect(String(unknown)).not.toContain(CANARY);
+  expect(JSON.stringify(unknown)).not.toContain(CANARY);
+});
+
+macTest(
+  "compiler input refusal retains a closed stage/code without reserving a runtime",
+  async () => {
+    const selected = await fixture({ compilerFailure: true });
+    const error = await failure(
+      serveNativeAuthoredProject({
+        ...selected,
+        run,
+        startupTimeoutMs: 10_000,
+      }),
+      "not-started"
+    );
+    expect(error).toHaveProperty("stage", "inputs");
+    expect(error).toHaveProperty("compilerCode", "E_COMPILER_RESPONSE");
+    expect(await artifacts(selected.scope)).toEqual([]);
+    expect(await Bun.file(selected.calls).exists()).toBe(false);
+    expect(await Bun.file(selected.delivery).exists()).toBe(false);
+  }
+);
+
 macTest(
   "native frontend holds admission through exact ready publication and Removed retirement",
   async () => {
@@ -307,13 +350,17 @@ for (const option of [
     `native frontend ${option} refuses before reservation or private delivery`,
     async () => {
       const selected = await fixture({ [option]: true });
-      await failure(
+      const error = await failure(
         serveNativeAuthoredProject({
           ...selected,
           run,
           startupTimeoutMs: 10_000,
         }),
         "not-started"
+      );
+      expect(error).toHaveProperty(
+        "stage",
+        option === "planFailure" ? "native-plan" : "review"
       );
       expect(await artifacts(selected.scope)).toEqual([]);
       expect(await Bun.file(selected.delivery).exists()).toBe(false);

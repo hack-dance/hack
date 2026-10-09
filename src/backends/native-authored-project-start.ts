@@ -32,21 +32,62 @@ const CODE = /^[a-z][a-z0-9_]{0,63}$/;
 const PRIVATE_LIMIT = 256 * 1024;
 type Inputs = Awaited<ReturnType<typeof acquireNativeExecutionInputs>>;
 type Outcome = "not-started" | "removed" | "retained";
+const STAGES = [
+  "selection",
+  "admission",
+  "retained-state",
+  "inputs",
+  "source",
+  "native-plan",
+  "review",
+  "source-freshness",
+  "reservation",
+  "runtime",
+] as const;
+type Stage = (typeof STAGES)[number];
+const COMPILER_CODES = new Set([
+  "E_COMPILER_BUDGET",
+  "E_COMPILER_CANCELLED",
+  "E_COMPILER_MISSING",
+  "E_COMPILER_PATH",
+  "E_COMPILER_RESPONSE",
+  "E_COMPILER_TIMEOUT",
+  "E_COMPILER_VERSION",
+  "E_CONFIG_INPUT",
+  "E_CONFIG_INVALID",
+  "E_CONFIG_METADATA",
+  "E_NATIVE_PROJECT_UNSUPPORTED",
+]);
+
+function compilerDiagnostic(error: unknown): string | undefined {
+  return error instanceof NativeConfigCompilerError ? error.code : undefined;
+}
 
 /** Fixed diagnostics only; neither values nor arbitrary child/callback errors escape. */
 export class NativeAuthoredProjectStartError extends Error {
   readonly outcome: Outcome;
   readonly canceled: boolean;
   readonly nativeCode?: string;
+  readonly stage: Stage;
+  readonly compilerCode?: string;
 
   constructor(opts: {
     readonly outcome: Outcome;
     readonly canceled: boolean;
     readonly nativeCode?: string;
+    readonly stage?: Stage;
+    readonly compilerCode?: string;
   }) {
     const nativeCode =
       opts.nativeCode && CODE.test(opts.nativeCode)
         ? opts.nativeCode
+        : undefined;
+    const stage = STAGES.includes(opts.stage ?? "selection")
+      ? (opts.stage ?? "selection")
+      : "selection";
+    const compilerCode =
+      opts.compilerCode && COMPILER_CODES.has(opts.compilerCode)
+        ? opts.compilerCode
         : undefined;
     const detail = {
       "not-started": "no native consumer was started",
@@ -55,11 +96,13 @@ export class NativeAuthoredProjectStartError extends Error {
         "startup evidence is retained; inspect owned state before retrying",
     }[opts.outcome];
     super(
-      `Native authored startup failed${nativeCode ? ` (${nativeCode})` : ""}; ${detail}. Values omitted.`
+      `Native authored startup failed${nativeCode ? ` (${nativeCode})` : ""}; stage ${stage}${compilerCode ? ` (${compilerCode})` : ""}; ${detail}. Values omitted.`
     );
     this.outcome = opts.outcome;
     this.canceled = opts.canceled;
     this.nativeCode = nativeCode;
+    this.stage = stage;
+    this.compilerCode = compilerCode;
   }
 }
 
@@ -317,6 +360,7 @@ export async function serveNativeAuthoredProject(
     abort();
   }
   const timer = setTimeout(abort, remaining());
+  let stage: Stage = "admission";
   try {
     const result = await withNativeAuthoredProjectAdmission(
       opts.scope,
@@ -328,6 +372,7 @@ export async function serveNativeAuthoredProject(
         let nativeCode: string | undefined;
         try {
           remaining();
+          stage = "retained-state";
           if (
             (await admission.loadStart()) ||
             (await loadNativeAuthoredProjectRun(opts.scope))
@@ -337,6 +382,7 @@ export async function serveNativeAuthoredProject(
               "Native startup evidence is retained; values omitted."
             );
           }
+          stage = "inputs";
           const inputs = await acquireNativeExecutionInputs({
             projectRoot: opts.scope.projectRoot,
             profiles: opts.profiles,
@@ -345,36 +391,38 @@ export async function serveNativeAuthoredProject(
             signal: controller.signal,
           });
           remaining();
+          stage = "source";
           source = await admission.prepareSource({
             run: opts.run,
             metadata: inputs.metadata,
             profiles: opts.profiles,
             overlay: opts.overlay,
           });
-          const review = matchingReview(
-            await invokeNativeRuntime({
-              runtime: opts.runtime,
-              cwd: opts.scope.projectRoot,
-              args: [
-                "graph",
-                "native",
-                "plan",
-                "--source-file",
-                source.path,
-                "--json",
-              ],
-              timeoutMs: remaining(),
-              signal: controller.signal,
-              boundNativeAuthoredReadDrain: true,
-            }),
-            inputs,
-            opts.run,
-            opts.scope
-          );
+          stage = "native-plan";
+          const planned = await invokeNativeRuntime({
+            runtime: opts.runtime,
+            cwd: opts.scope.projectRoot,
+            args: [
+              "graph",
+              "native",
+              "plan",
+              "--source-file",
+              source.path,
+              "--json",
+            ],
+            timeoutMs: remaining(),
+            signal: controller.signal,
+            boundNativeAuthoredReadDrain: true,
+          });
+          stage = "review";
+          const review = matchingReview(planned, inputs, opts.run, opts.scope);
+          stage = "source-freshness";
           await source.assertFresh();
           remaining();
+          stage = "reservation";
           attempt = { source, start: await admission.reserve({ review }) };
           outcome = "retained";
+          stage = "runtime";
           payload = await privateDelivery(inputs, review, remaining);
           await inputs.assertFresh();
           await source.assertFresh();
@@ -445,6 +493,9 @@ export async function serveNativeAuthoredProject(
           }
           return { ok: true as const, code };
         } catch (error) {
+          // Capture only closed owning stages/codes before cleanup can fail.
+          const failedStage = stage;
+          const compilerCode = compilerDiagnostic(error);
           outcome = await removeUnstartedSource(source, attempt, outcome);
           if (error instanceof NativeRuntimeRequestError) {
             nativeCode = error.nativeCode;
@@ -464,6 +515,8 @@ export async function serveNativeAuthoredProject(
               outcome,
               canceled: opts.signal?.aborted === true,
               nativeCode,
+              stage: failedStage,
+              compilerCode,
             }),
           };
         } finally {
@@ -482,6 +535,7 @@ export async function serveNativeAuthoredProject(
     throw new NativeAuthoredProjectStartError({
       outcome: "retained",
       canceled: opts.signal?.aborted === true,
+      stage,
     });
   } finally {
     clearTimeout(timer);

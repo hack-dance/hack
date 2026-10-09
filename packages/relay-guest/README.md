@@ -169,3 +169,23 @@ Argument validation has a standalone integration-test target, avoiding the share
 host modules' tests: `cargo test --locked --manifest-path packages/relay-guest/Cargo.toml --test options`.
 Its same-port address-isolation test runs only on Linux. Host argument tests do not
 qualify guest networking, authentication, TLS or owned cleanup.
+## Persistent root witness (inactive integration)
+
+The explicit `--storage-root-witness` mode accepts exactly one bounded private
+pipe record and no other arguments. It derives the root from a canonical native
+persistent volume name under `/var/lib/docker/volumes`; callers cannot supply an
+arbitrary path. Root, seed and verify are closed operations. The seed operation
+uses `XATTR_CREATE` for one random `user.hack.storage.<64hex>` name and a 32-byte
+value, synchronizes directory metadata, and rereads the exact value. Verify never
+creates or repairs a witness. Every ancestor is opened without following symlinks;
+retained descriptors and a fresh canonical traversal must agree before and after
+each observation. No permissions, ownership or capabilities are changed.
+
+This helper supplies an observation, not enrollment or cleanup authority. Only
+the invocation holding the durable original-create intent may authorize seed,
+and its expected witness must be committed independently before compute use.
+Pending or unknown completion cannot be promoted from helper output. Copying an
+entire root with its xattrs is outside this proof. The helper has not been built,
+installed or executed for persistence; graph control-only helper availability,
+durable witness enrollment and real SQL retention remain open. Ordinary persistent
+startup stays refused before provider connection.

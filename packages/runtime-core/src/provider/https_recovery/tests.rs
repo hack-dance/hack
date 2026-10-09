@@ -527,6 +527,15 @@ fn successful_port_guards_own_all_four_allocated_addresses_during_observation() 
         let peer =
             std::net::TcpStream::connect_timeout(&reachable, std::time::Duration::from_secs(1))
                 .unwrap();
+        let mut readiness = libc::pollfd {
+            fd: listener.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: readiness is one live pollfd holding our live listener. Observe
+        // its asynchronous accept readiness once with a finite timeout, no retry.
+        assert_eq!(unsafe { libc::poll(&raw mut readiness, 1, 1000) }, 1);
+        assert_eq!(readiness.revents, libc::POLLIN);
         let (accepted, peer_address) = listener.accept().unwrap();
         assert_eq!(peer_address, peer.local_addr().unwrap());
         assert_eq!(accepted.local_addr().unwrap(), reachable);

@@ -360,6 +360,39 @@ test("owned bridge mapping and explicit job file grants preserve both pipelines 
   expect(JSON.stringify(result)).not.toContain(CANARY);
 });
 
+test("combined advanced preview cannot become a retained adoption report", () => {
+  const source = networkJobFileSource();
+  const compose = {
+    ...source,
+    name: "fixture",
+    volumes: { data: {} },
+    services: {
+      ...source.services,
+      app: { ...source.services.app, volumes: ["data:/data"] },
+    },
+  };
+  const before = JSON.stringify(compose);
+  const result = planLegacyComposeAdoption({
+    configText: CONFIG,
+    composeText: before,
+  });
+  expect(result.report.supported).toBe(false);
+  expect(result.report.adoption).toBe("not_performed");
+  expect(result.intent).toBeUndefined();
+  expect(Object.keys(result)).toEqual(["report"]);
+  for (const [pointer, code] of [
+    ["/services/initialize", "completed_job_adoption_unqualified"],
+    ["/services/initialize/configs/0", "unsupported_field"],
+    ["/services/initialize/build", "unsupported_field"],
+  ]) {
+    expect(result.report.fields).toContainEqual(
+      expect.objectContaining({ pointer, code, status: "refused" })
+    );
+  }
+  expect(JSON.stringify(result)).not.toContain(CANARY);
+  expect(JSON.stringify(compose)).toBe(before);
+});
+
 test("inactive job grants and job restrictions remain closed across preview purposes", () => {
   const source = jobFileSource();
   refused(

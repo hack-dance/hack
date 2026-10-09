@@ -44,7 +44,7 @@ function hash(value: unknown): value is string {
 function ready(value: unknown): NativeAuthoredReceipt {
   const receipt = parseNativeAuthoredReceipt(value);
   if (
-    receipt.phase !== "ready-observed" ||
+    receipt.version !== 2 || receipt.phase !== "ready-observed" ||
     receipt.failure !== undefined ||
     Object.values(receipt.resources).some((resource) => resource.id === null)
   ) {

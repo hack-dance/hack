@@ -64,6 +64,10 @@ pub struct Receipt {
     pub(super) phase: Phase,
     pub(super) readiness: BTreeMap<String, Condition>,
     pub(super) resources: BTreeMap<String, Resource>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub(super) data: BTreeMap<String, persistent_data::engine::Reference>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub(super) data_mounts: BTreeMap<String, Vec<crate::project::native::StorageMount>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     failure: Option<Failure>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -76,6 +80,7 @@ impl Receipt {
         if self.review != expected.review
             || self.boot != expected.boot
             || self.readiness != expected.readiness
+            || self.data != expected.data || self.data_mounts != expected.data_mounts
             || self.resources.keys().ne(expected.resources.keys())
             || self.resources.iter().any(|(key, resource)| {
                 let prior = &expected.resources[key];
@@ -111,7 +116,7 @@ impl Receipt {
     #[cfg(target_os = "macos")]
     pub(super) fn require_recovery_ready(&self) -> Result<(), CandidateError> {
         self.validate(self.review.scope().run, &self.owner)?;
-        if self.phase != Phase::ReadyObserved
+        if self.version != 2 || self.phase != Phase::ReadyObserved
             || self.failure.is_some()
             || self
                 .resources
@@ -128,7 +133,7 @@ impl Receipt {
         boot: &str,
     ) -> Result<Self, CandidateError> {
         let receipt = Self {
-            version: 2,
+            version: if config.storage.is_empty() { 2 } else { 4 },
             kind: InputKind::NativeGraphRuntime,
             owner: owner.into(),
             boot: boot.into(),
@@ -141,6 +146,8 @@ impl Receipt {
                 .map(|(name, service)| (name.clone(), service.ready))
                 .collect(),
             resources: config.resources.clone(),
+            data: config.data.clone(),
+            data_mounts: config.data_mounts.clone(),
             failure: None,
             terminal: BTreeMap::new(),
         };
@@ -156,7 +163,7 @@ impl Receipt {
     pub(super) fn validate(&self, run: &str, owner: &str) -> Result<(), CandidateError> {
         let scope = self.review.scope();
         self.review.validate(scope).map_err(|_| refused())?;
-        if self.version != 2
+        if ![2, 4].contains(&self.version)
             || !hex(run, 32)
             || run != scope.run
             || !hex(owner, 32)
@@ -171,6 +178,7 @@ impl Receipt {
         {
             return Err(refused());
         }
+        self.validate_data()?;
         let network = self.resources.get("network:default").ok_or_else(refused)?;
         if network.kind != Kind::Network
             || network.key != "default"
@@ -278,6 +286,34 @@ impl Receipt {
                 || resource.id.as_deref() != Some(terminal.id.as_str())
                 || !hex(&terminal.id, 64)
             {
+                return Err(refused());
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_data(&self) -> Result<(), CandidateError> {
+        if self.version == 2 {
+            return if self.data.is_empty() && self.data_mounts.is_empty() { Ok(()) } else { Err(refused()) };
+        }
+        if self.data.is_empty() || self.data_mounts.is_empty() { return Err(refused()); }
+        let mut used = BTreeSet::new();
+        for (service, mounts) in &self.data_mounts {
+            if !self.readiness.contains_key(service) || mounts.is_empty() { return Err(refused()); }
+            let mut targets = BTreeSet::new();
+            for mount in mounts {
+                if !self.data.contains_key(&mount.storage) || !targets.insert(&mount.target)
+                    || !mount.target.starts_with('/') || mount.target.contains('\0')
+                    || mount.target.split('/').skip(1).any(|part| part == "." || part == ".." || part.is_empty()) {
+                    return Err(refused());
+                }
+                used.insert(&mount.storage);
+            }
+        }
+        if used.into_iter().ne(self.data.keys()) { return Err(refused()); }
+        for (logical, data) in &self.data {
+            data.validate(self.review.scope().namespace, logical, &self.owner, &self.boot).map_err(|_| refused())?;
+            if (self.phase == Phase::ReadyObserved || self.resources.values().any(|resource| resource.kind == Kind::Container && resource.id.is_some())) && !data.enrolled() {
                 return Err(refused());
             }
         }

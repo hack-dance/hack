@@ -1,6 +1,6 @@
 # Runtime state models
 
-`native-persistent-enrollment/Enrollment.tla` follows the inactive Rust
+`native-persistent-enrollment/Enrollment.tla` follows the Rust
 `provider::graph::native::persistent_data::enrollment` owner. Its finite domain is
 one storage slot, absent/original/replacement volume identities and two independent
 compute references. Pending publication, exclusive creation, captured original
@@ -13,10 +13,10 @@ original operation's successful return or runtime effect authority.
 | Model operation | Source boundary and qualification |
 | --- | --- |
 | `ReserveIntent` | Exclusive private slot/lock, `owner.json` pending write and file/parent sync precede `create_new`. Real filesystem sync-failure controls require create count zero. |
-| `CreateOriginal` / `CaptureBirth` | Sealed trusted transport requires atomic exclusive creation and returns its original identity directly to the invocation. No production adapter is implemented; a Docker absence check plus idempotent create is insufficient. The stand-in refuses existing names and retains ambiguous-create pending state. |
+| `CreateOriginal` / `CaptureBirth` | Sealed transport requires exclusive original creation relative to supported writers and returns its captured identity directly to the invocation. The native adapter holds the continuously fenced common guest mutation lease through absence, one POST and owner commit; Docker's idempotent create alone is insufficient. Real lock-owner and stand-in controls target contention, lease loss and ambiguous creation; their presence is not a passing run. |
 | `ReplaceVolume` / `PublishEnrollment` | Captured binding/birth/directory must equal fresh observations; root/lock/record/staged inode and bytes remain exact before rename. Copied-label replacement and post-effect file/lock/root controls refuse. |
 | `ConfirmDirectorySync` / `CrashOrFailure` | Commit return follows enrolled rename and parent sync, then final guest/observation/files/deadline fences. Failed final sync returns uncertainty even if the enrolled pathname is visible. No reopen recovers an original-create capability. |
-| `ReadRetained` / `RetireCompute` | Existing-only locked read never rewrites binding or stable identity when caller compute references change. `RetireCompute` expresses the future runtime obligation to retain data; no runtime teardown owner is activated or qualified here. |
+| `ReadRetained` / `RetireCompute` | Existing-only locked read never rewrites binding or stable identity when caller compute references change. Native receipt4 keeps data outside compute resources, and teardown has no data-delete effect. This unchanged model does not qualify the newly wired runtime or real SQL retention. |
 
 The positive exploration exhausts 38 distinct states. Four guard-removal
 controls must fail `NoExistingAdoption`, `OriginalBirthAtCommit`, `NoPendingMatch`

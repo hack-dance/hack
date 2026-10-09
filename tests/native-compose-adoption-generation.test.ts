@@ -2420,7 +2420,7 @@ test("a verified linked checkout adopts and rolls back using the original resour
   }
 });
 
-test("v13 linked default pins the physical branch originals and explicit selection recovers after Git drift", async () => {
+async function linkedBranchCheckout() {
   await linkedCheckout();
   const composeText = await readFile(
     join(projectRoot, ".hack/docker-compose.yml"),
@@ -2457,6 +2457,11 @@ test("v13 linked default pins the physical branch originals and explicit selecti
   fixture.network[0]!.project = physical;
   fixture.network[0]!.name = `${physical}_default`;
   await save();
+  return physical;
+}
+
+test("v13 linked default pins the physical branch originals and explicit selection recovers after Git drift", async () => {
+  const physical = await linkedBranchCheckout();
   const binary = await compiler();
   const verified = await acquireLegacyComposeAdoptionPreparationBinding({
     projectRoot,
@@ -2480,6 +2485,7 @@ test("v13 linked default pins the physical branch originals and explicit selecti
     expect(meta.binding.volumes[0]?.createdAt).toBe(CREATED);
     expect(meta.branchProof.branch).toBe("linked");
     expect(meta.branchProof.selection).toBe("worktree");
+    expect(Object.hasOwn(meta, "sourceBindProof")).toBe(false);
     await store.publish({ generation, binary });
   } finally {
     await store.close();
@@ -2531,6 +2537,31 @@ test("v13 linked default pins the physical branch originals and explicit selecti
     expect(fixture.volume[0]?.createdAt).toBe(CREATED);
   } finally {
     await saved.close();
+  }
+});
+
+test("version12 receipt cannot consume a saved version13 branch proof", async () => {
+  await linkedBranchCheckout();
+  const binary = await compiler();
+  const store = await openLegacyComposeAdoptedGenerationStore({ projectRoot });
+  try {
+    const generation = await store.prepare({ binary });
+    expect(generation.report.adoption_generation_version).toBe(13);
+    await store.publish({ generation, binary });
+    const receiptPath = join(stateRoot(), "receipt.json");
+    const state = JSON.parse(await readFile(receiptPath, "utf8"));
+    expect(state.adoption_receipt_version).toBe(13);
+    const changed = JSON.stringify({ ...state, adoption_receipt_version: 12 });
+    await writeFile(receiptPath, changed);
+    const commands = await readFile(join(root, "commands"));
+    await refusal(store.loadActive(), "E_LEGACY_ADOPTION_STATE");
+    expect(await readFile(receiptPath, "utf8")).toBe(changed);
+    expect(await readFile(join(root, "commands"))).toEqual(commands);
+    expect(await mutationCommands()).toEqual([]);
+    expect(fixture.container[0]?.id).toBe(ID);
+    expect(fixture.volume[0]?.createdAt).toBe(CREATED);
+  } finally {
+    await store.close();
   }
 });
 

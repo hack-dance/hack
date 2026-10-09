@@ -296,7 +296,8 @@ export async function tryLegacyComposeAdoptedCommand(
             cancelled(signal);
             if (
               legacyComposeRetainedOrdered(privateInput.retainedPlan) ||
-              privateInput.retainedBuild
+              privateInput.retainedBuild ||
+              privateInput.retainedSourceBind
             ) {
               return await runLegacyComposeRetainedOperation({
                 input: privateInput,

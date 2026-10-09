@@ -1,5 +1,9 @@
 import { isRecord } from "./guards.ts";
 import { literalComposeArg } from "./native-config-import-argv.ts";
+import {
+  legacyComposeMountTargetsOverlap,
+  mapLegacyComposeSourceBind,
+} from "./native-config-import-bind.ts";
 import { mapLegacyComposeBuild } from "./native-config-import-build.ts";
 import {
   mapLegacyComposeFileDeclaration,
@@ -22,7 +26,10 @@ import {
   mapLegacyComposeDependencies,
   mapLegacyComposeHealthcheck,
 } from "./native-config-import-readiness.ts";
-import { mapLegacyComposeStorage } from "./native-config-import-storage.ts";
+import {
+  mapLegacyComposeSourceBindStorage,
+  mapLegacyComposeStorage,
+} from "./native-config-import-storage.ts";
 import { normalizeEnvConfigName } from "./project.ts";
 
 const NAME = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
@@ -142,6 +149,7 @@ type NativeImportPurpose =
   | "adoption-baseline"
   | "completed-job-adoption"
   | "retained-basic-build"
+  | "retained-source-bind"
   | "storage-adoption"
   | "branch-storage-adoption";
 
@@ -211,6 +219,7 @@ function mapLegacyNativeInput(opts: {
       opts.purpose === "preview" || opts.purpose === "retained-basic-build",
     jobPreview:
       opts.purpose !== "adoption-baseline" &&
+      opts.purpose !== "retained-source-bind" &&
       opts.purpose !== "retained-basic-build",
   });
   mapOwnedNetwork({
@@ -223,6 +232,18 @@ function mapLegacyNativeInput(opts: {
   });
   if (opts.purpose === "preview") {
     mapFileCandidate({ compose: compose.value, candidate, mark, refuse });
+    mapSourceBindCandidate({
+      ...context,
+      compose: compose.value,
+      retainedExisting: false,
+    });
+  }
+  if (opts.purpose === "retained-source-bind") {
+    mapSourceBindCandidate({
+      ...context,
+      compose: compose.value,
+      retainedExisting: true,
+    });
   }
   if (
     opts.purpose === "storage-adoption" ||
@@ -261,7 +282,10 @@ function mapOwnedNetwork(
     opts.refuse("compose", mapping.pointer, mapping.code);
     return;
   }
-  if (opts.purpose === "retained-basic-build") {
+  if (
+    opts.purpose === "retained-basic-build" ||
+    opts.purpose === "retained-source-bind"
+  ) {
     opts.refuse(
       "compose",
       "/networks",
@@ -412,6 +436,176 @@ export function mapLegacyNativeRetainedBasicBuild(opts: {
     composeText: opts.composeText,
     purpose: "retained-basic-build",
   });
+}
+
+/** Private closed directory-plus-named-storage candidate; no path creation or ownership grant. */
+export function mapLegacyNativeRetainedSourceBind(opts: {
+  readonly configText: string;
+  readonly composeText: string;
+}): NativeImportPlan {
+  return mapLegacyNativeInput({
+    configText: opts.configText,
+    composeText: opts.composeText,
+    purpose: "retained-source-bind",
+  });
+}
+
+function mapSourceBindCandidate(
+  opts: MappingContext & {
+    readonly compose: Record<string, unknown>;
+    readonly retainedExisting: boolean;
+  }
+): void {
+  const storage = opts.retainedExisting
+    ? mapLegacyComposeSourceBindStorage({
+        config: opts.config,
+        compose: opts.compose,
+      })
+    : undefined;
+  if (opts.retainedExisting && !storage) {
+    opts.refuse(
+      "compose",
+      "/services",
+      "existing_source_bind_mapping_required"
+    );
+    return;
+  }
+  if (storage?.intent.volumes.length) {
+    opts.candidate.storage = Object.fromEntries(
+      storage.intent.volumes.map((volume) => [
+        volume.storage,
+        { kind: "persistent", scope: "worktree" },
+      ])
+    );
+    for (const [pointer, target] of storage.accepted) {
+      if (target.startsWith("/existing_storage")) {
+        opts.mark(
+          "compose",
+          pointer,
+          target.replace("/existing_storage", "/storage"),
+          "exact",
+          true
+        );
+      }
+    }
+  }
+  if (!isRecord(opts.compose.services)) {
+    return;
+  }
+  for (const [name, declaration] of Object.entries(opts.compose.services)) {
+    const service = candidateWorkload(opts.candidate, name);
+    if (
+      opts.retainedExisting &&
+      isRecord(declaration) &&
+      Object.hasOwn(declaration, "pull_policy") &&
+      declaration.pull_policy !== "never"
+    ) {
+      opts.refuse(
+        "compose",
+        importPointer(importPointer("/services", name), "pull_policy"),
+        "retained_bind_image_acquisition_unsupported"
+      );
+    }
+    if (
+      !(
+        isRecord(declaration) &&
+        isRecord(service) &&
+        Array.isArray(declaration.volumes) &&
+        declaration.volumes.length
+      )
+    ) {
+      continue;
+    }
+    // The first source-bind preview does not silently overwrite file-grant mounts.
+    if (Object.hasOwn(service, "mounts")) {
+      continue;
+    }
+    const targets: string[] = [];
+    const mapped = declaration.volumes.map((raw) => {
+      const bind = mapLegacyComposeSourceBind(raw, {
+        retainedExisting: opts.retainedExisting,
+      });
+      if (bind) {
+        return {
+          source: bind.source,
+          target: bind.target,
+          access: bind.readOnly ? "read-only" : "read-write",
+        };
+      }
+      let target: unknown;
+      if (typeof raw === "string") {
+        target = raw.split(":")[1];
+      } else if (isRecord(raw)) {
+        target = raw.target;
+      }
+      const named = storage?.intent.mounts.find(
+        (entry) => entry.service === name && entry.target === target
+      );
+      return named
+        ? {
+            storage: named.storage,
+            target: named.target,
+            access: named.readOnly ? "read-only" : "read-write",
+          }
+        : undefined;
+    });
+    let valid = true;
+    for (const entry of mapped) {
+      if (
+        !entry ||
+        targets.some((target) =>
+          legacyComposeMountTargetsOverlap(target, entry.target)
+        )
+      ) {
+        valid = false;
+        break;
+      }
+      targets.push(entry.target);
+    }
+    if (!valid) {
+      continue;
+    }
+    service.mounts = mapped;
+    const pointer = importPointer(importPointer("/services", name), "volumes");
+    const target = workloadTarget(opts.candidate, `/services/${name}/mounts`);
+    opts.mark("compose", pointer, target, "compose_bind_source_rebased", true);
+    declaration.volumes.forEach((raw, index) => {
+      const bind = mapLegacyComposeSourceBind(raw, {
+        retainedExisting: opts.retainedExisting,
+      });
+      if (bind && isRecord(raw)) {
+        opts.mark(
+          "compose",
+          `${pointer}/${index}/source`,
+          `${target}/${index}/source`,
+          "compose_bind_source_rebased"
+        );
+        opts.mark(
+          "compose",
+          `${pointer}/${index}/target`,
+          `${target}/${index}/target`
+        );
+        opts.mark(
+          "compose",
+          `${pointer}/${index}/read_only`,
+          `${target}/${index}/access`
+        );
+        opts.mark(
+          "compose",
+          `${pointer}/${index}/bind`,
+          `${target}/${index}`,
+          "no_host_path_creation",
+          true
+        );
+        opts.mark(
+          "compose",
+          `${pointer}/${index}/type`,
+          `${target}/${index}`,
+          "source_bind"
+        );
+      }
+    });
+  }
 }
 
 type FileMappingContext = Pick<MappingContext, "candidate" | "mark" | "refuse">;

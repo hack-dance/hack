@@ -167,6 +167,7 @@ export function consumeLegacyComposeJobCompletion(opts: {
 export async function executeLegacyComposeRetainedPlan(opts: {
   readonly plan: LegacyComposeRetainedPlan;
   readonly retainedBuild?: true;
+  readonly retainedSourceBind?: true;
   readonly binding: LegacyComposeVerifiedBinding;
   readonly operation: AdoptionOperation;
   readonly deadline: number;
@@ -181,7 +182,10 @@ export async function executeLegacyComposeRetainedPlan(opts: {
     remainingMs: number
   ) => Promise<number>;
 }): Promise<LegacyComposeRetainedOutcome> {
-  if (opts.retainedBuild && (opts.plan.requiresV5 || opts.plan.requiresV7)) {
+  if (
+    (opts.retainedBuild || opts.retainedSourceBind) &&
+    (opts.plan.requiresV5 || opts.plan.requiresV7)
+  ) {
     refuse();
   }
   if (opts.plan.requiresV7) {
@@ -197,12 +201,13 @@ export async function executeLegacyComposeRetainedPlan(opts: {
     observe,
     effect,
     retainedBuild,
+    retainedSourceBind,
   } = opts;
   const ids = new Map(
     binding.containers.map((container) => [container.service, container.id])
   );
   if (
-    !(plan.requiresV5 || retainedBuild) ||
+    !(plan.requiresV5 || retainedBuild || retainedSourceBind) ||
     ids.size !== binding.containers.length ||
     plan.ordered.length !== ids.size ||
     plan.ordered.some((service) => !ids.has(service.service)) ||
@@ -428,6 +433,7 @@ export async function runLegacyComposeRetainedOperation(opts: {
     readonly binding: LegacyComposeVerifiedBinding;
     readonly retainedPlan: LegacyComposeRetainedPlan;
     readonly retainedBuild?: true;
+    readonly retainedSourceBind?: true;
     readonly assertFresh: () => Promise<void>;
   };
   readonly operation: AdoptionOperation;
@@ -439,6 +445,7 @@ export async function runLegacyComposeRetainedOperation(opts: {
     Object.freeze({
       plan: input.retainedPlan,
       retainedBuild: input.retainedBuild,
+      retainedSourceBind: input.retainedSourceBind,
       binding: input.binding,
       operation,
       deadline,

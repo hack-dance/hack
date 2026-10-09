@@ -48,7 +48,16 @@ function hash(value: unknown): value is string {
 function ready(value: unknown): NativeAuthoredReceipt {
   const receipt = parseNativeAuthoredReceipt(value);
   if (
-    receipt.version !== 2 ||
+    !(
+      receipt.version === 2 ||
+      (receipt.version === 4 &&
+        receipt.data_tool?.root !== null &&
+        receipt.data_tool?.root !== undefined &&
+        receipt.data_tool.helper !== null &&
+        Object.values(receipt.data ?? {}).every(
+          (reference) => reference.state.status === "enrolled"
+        ))
+    ) ||
     receipt.phase !== "ready-observed" ||
     receipt.failure !== undefined ||
     Object.values(receipt.resources).some((resource) => resource.id === null)

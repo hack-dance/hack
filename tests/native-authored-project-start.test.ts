@@ -1,4 +1,4 @@
-import { afterEach, test as bunTest, expect } from "bun:test";
+import { afterEach, test as bunTest, expect, spyOn } from "bun:test";
 import { createHash } from "node:crypto";
 import {
   chmod,
@@ -20,6 +20,11 @@ import {
   NativeAuthoredProjectStartError,
   serveNativeAuthoredProject,
 } from "../src/backends/native-authored-project-start.ts";
+import {
+  NATIVE_STORAGE_TOOL_FILE,
+  NATIVE_STORAGE_TOOL_MANIFEST,
+  nativeStorageToolManifest,
+} from "../src/backends/native-authored-storage-tool.ts";
 import { restoreEnv } from "./helpers/env.ts";
 import { writeLifecycleMuxFixture } from "./helpers/lifecycle-mux-fixture.ts";
 
@@ -97,6 +102,7 @@ type FixtureOptions = {
   readonly persistent?: boolean;
   readonly hostProcesses?: boolean;
   readonly storage?: boolean;
+  readonly liveStop?: boolean;
   readonly semanticAfterHook?: boolean;
   readonly planFailure?: boolean;
   readonly foreignPlan?: boolean;
@@ -263,7 +269,26 @@ console.log(JSON.stringify(result));
   await chmod(compiler, 0o700);
   process.env.HACK_CONFIG_COMPILER_BINARY =
     options.compilerFailure === true ? compiler : (realCompiler ?? compiler);
-  const binary = join(root, "native");
+  const bundle =
+    options.storage && options.liveStop ? join(root, "bundle") : root;
+  if (bundle !== root) {
+    await mkdir(bundle, { mode: 0o700 });
+  }
+  const binary = join(bundle, "native");
+  if (options.storage && options.liveStop) {
+    // Byte-admission stand-in only. No guest installation or filesystem syscall.
+    const bytes = Buffer.alloc(128);
+    bytes.set([0x7f, 0x45, 0x4c, 0x46, 2, 1]);
+    bytes.writeUInt16LE(183, 18);
+    await writeFile(join(bundle, NATIVE_STORAGE_TOOL_FILE), bytes, {
+      mode: 0o500,
+    });
+    await writeFile(
+      join(bundle, NATIVE_STORAGE_TOOL_MANIFEST),
+      JSON.stringify(nativeStorageToolManifest(bytes, "a".repeat(40))),
+      { mode: 0o600 }
+    );
+  }
   const journal = join(root, "journal.json");
   const calls = join(root, "calls.jsonl");
   const delivery = join(root, "delivery.json");
@@ -316,6 +341,12 @@ if(['plan','serve','frontend-plan','frontend-serve'].includes(action)){
   await writeFile(${JSON.stringify(delivery)},JSON.stringify({version:input.version,kind:input.kind,review:input.review,run:input.run,lifetime_seconds:input.lifetime_seconds,keys,digests,expectedDigest:${JSON.stringify(digest)}}));
  }
  const receipt={version:2,kind:'native-graph-runtime',owner:'f'.repeat(32),boot:'00000000-0000-0000-0000-000000000001',review,phase:'ready-observed',readiness:{web:'started'},resources:{'network:default':{kind:'network',key:'default',name:'hkn-'+input.run+'-network-0',id:'1'.repeat(64),image:null,phase:'created',outbound:true},'container:web':{kind:'container',key:'web',name:'hkn-'+input.run+'-container-0',id:'2'.repeat(64),image:'sha256:'+ '3'.repeat(64),phase:'started',networks:['default']}}};
+ if(${options.storage === true && options.liveStop === true}){
+  const namespace=provenance.namespace, owner='9'.repeat(32);
+  receipt.version=4;
+  receipt.data={data:{binding:{scope:{namespace,storage:'data',owner},guest:{owner:receipt.owner,boot_id:receipt.boot,storage:{device:0,inode:14,bytes:128,uuid:'00000000-0000-0000-0000-000000000002'}},policy:{driver:'local',scope:'local',options:{}}},state:{status:'enrolled',volume:{name:'hkp-'+namespace+'-'+owner+'-data',created_at:'2026-10-08T00:00:01Z',directory:{device:0,inode:15}}}}};
+  receipt.data_mounts={web:[{storage:'data',target:'/data',read_only:false}]};
+ }
  const finish=async()=>{
   if(${JSON.stringify(options.cleanup ?? "removed")}!=='live'){
    receipt.phase='removed';for(const resource of Object.values(receipt.resources))resource.phase='removed';
@@ -326,7 +357,7 @@ if(['plan','serve','frontend-plan','frontend-serve'].includes(action)){
  };
  process.on('SIGTERM',finish);await writeFile(journal,JSON.stringify(receipt));
  console.log(JSON.stringify({version:2,kind:'native-graph-foreground-ready',run:input.run,review:review.review_id,receipt}));
- if(${options.finiteHooks === true}){ while(true)await Bun.sleep(50); }
+ if(${options.finiteHooks === true || options.liveStop === true}){ while(true)await Bun.sleep(50); }
  for(let index=0;index<200;index++){
   const mapping=(await readdir(root)).find(name=>name.endsWith('.json')&&!name.endsWith('.start.json')&&!name.endsWith('.source.json'));
   if(mapping){await Bun.sleep(30);await finish()}await Bun.sleep(10);
@@ -601,7 +632,11 @@ for (const cleanup of ["live", "missing", "foreign-id"] as const) {
         "retained"
       );
       expect(await loadNativeAuthoredProjectRun(selected.scope)).not.toBeNull();
-      expect(await artifacts(selected.scope)).toHaveLength(3);
+      const retained = await artifacts(selected.scope);
+      expect(retained).toHaveLength(4);
+      expect(retained.some((name) => name.endsWith(".live-stop.json"))).toBe(
+        true
+      );
       await failure(
         serveNativeAuthoredProject({
           ...selected,
@@ -1222,6 +1257,156 @@ macTest(
         .filter(Boolean)
         .map((line) => JSON.parse(line)[4])
     ).toEqual(["frontend-plan"]);
+  },
+  30_000
+);
+
+macTest(
+  "no-host storage generations use the live stop owner and preserve data across down/up",
+  async () => {
+    const selected = await fixture({ storage: true, liveStop: true });
+    const data = join(selected.root, "synthetic-retained-data");
+    await writeFile(data, "stand-in seed once", { mode: 0o600 });
+    const identities: string[] = [];
+    for (const currentRun of [run, "b".repeat(32)]) {
+      let stop: Promise<void> | undefined;
+      const code = await serveNativeAuthoredProject({
+        ...selected,
+        run: currentRun,
+        startupTimeoutMs: 15_000,
+        onReady: (mapping) => {
+          const data = mapping.record.receipt.data?.data;
+          if (!data || data.state.status !== "enrolled") {
+            throw new Error("Expected enrolled stand-in data.");
+          }
+          identities.push(data.state.volume.name);
+          stop = stopNativeAuthoredProject({
+            scope: selected.scope,
+            timeoutMs: 15_000,
+          });
+          return undefined;
+        },
+      });
+      await stop;
+      expect(code).toBe(0);
+      expect(await artifacts(selected.scope)).toEqual([]);
+      expect(await Bun.file(data).text()).toBe("stand-in seed once");
+    }
+    expect(identities[0]).toBe(identities[1]);
+    expect(identities[0]).toStartWith("hkp-");
+    const calls = await Bun.file(selected.calls).text();
+    expect(calls).not.toContain('"frontend-serve"');
+    expect(calls).not.toContain('"frontend-plan"');
+    expect(
+      await Bun.file(join(selected.scope.projectRoot, "hook-order")).exists()
+    ).toBe(false);
+  },
+  30_000
+);
+
+macTest(
+  "a retained no-host stop record blocks startup before compiler or provider work",
+  async () => {
+    const selected = await fixture();
+    await withNativeAuthoredProjectAdmission(
+      selected.scope,
+      async () => undefined
+    );
+    const root = join(
+      selected.scope.projectDir,
+      ".internal",
+      "native-authored-runs"
+    );
+    const key = createHash("sha256")
+      .update(JSON.stringify(selected.scope.branch))
+      .digest("hex");
+    await writeFile(join(root, `${key}.live-stop.json`), "{}", { mode: 0o600 });
+    const error = await failure(
+      serveNativeAuthoredProject({
+        ...selected,
+        run,
+        startupTimeoutMs: 10_000,
+      }),
+      "retained"
+    );
+    expect(error).toHaveProperty("stage", "retained-state");
+    expect(await Bun.file(selected.calls).exists()).toBe(false);
+    expect(await Bun.file(join(root, `${key}.live-stop.json`)).text()).toBe(
+      "{}"
+    );
+  },
+  15_000
+);
+
+function confirmTestGroupAbsent(
+  group: number | undefined,
+  original: typeof process.kill
+): void {
+  if (group === undefined || !Number.isSafeInteger(group) || group >= -1) {
+    throw new Error("No original group observation; retain fixture and spy.");
+  }
+  try {
+    original(group, 0);
+  } catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "ESRCH") {
+      return;
+    }
+    throw error;
+  }
+  throw new Error("Original test group remains present.");
+}
+
+macTest(
+  "no-host Removed with unconfirmed original group retains all frontend bindings",
+  async () => {
+    const selected = await fixture({ liveStop: true });
+    const original = process.kill.bind(process);
+    let stop: Promise<void> | undefined;
+    let group: number | undefined;
+    let spy: ReturnType<typeof spyOn<typeof process, "kill">> | undefined;
+    try {
+      const error = await failure(
+        serveNativeAuthoredProject({
+          ...selected,
+          run,
+          startupTimeoutMs: 15_000,
+          onReady: () => {
+            stop = stopNativeAuthoredProject({
+              scope: selected.scope,
+              timeoutMs: 15_000,
+            });
+            void stop.catch(() => undefined);
+            return undefined;
+          },
+          onExitDiagnostic: () => {
+            spy = spyOn(process, "kill").mockImplementation((pid, signal) => {
+              if (pid < 0 && signal === 0) {
+                group = pid;
+                throw Object.assign(new Error("synthetic group uncertainty"), {
+                  code: "EPERM",
+                });
+              }
+              return original(pid, signal);
+            });
+          },
+        }),
+        "retained"
+      );
+      expect(error).toHaveProperty("stage", "runtime");
+      const files = await artifacts(selected.scope);
+      expect(files).toContain(`${run}.source.json`);
+      expect(files.some((name) => name.endsWith(".start.json"))).toBe(true);
+      expect(files.some((name) => name.endsWith(".live-stop.json"))).toBe(true);
+      expect(await loadNativeAuthoredProjectRun(selected.scope)).not.toBeNull();
+      expect(
+        (await Bun.file(join(selected.root, "journal.json")).json()).phase
+      ).toBe("removed");
+    } finally {
+      // Independently settle the injected test uncertainty; no signal or reap.
+      await stop?.catch(() => undefined);
+      confirmTestGroupAbsent(group, original);
+      spy?.mockRestore();
+    }
   },
   30_000
 );

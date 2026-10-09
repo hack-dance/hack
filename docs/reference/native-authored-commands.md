@@ -43,6 +43,10 @@ the canonical project namespace without inferring a Git branch. Profile and env
 selection keep their compiler contracts. `--env base` bypasses inherited overlays
 with an explicit base selection; omitting `--env` retains the authored/local default.
 
+The separate persistent-storage capability requires the runtime's pinned sibling
+witness tool and retains its own ownership and recovery checks. It cannot be combined
+with the supervised host-process capability below.
+
 `ps` and `ps --json` issue one authenticated current status request for the exact
 saved project and explicit branch selection. Text output lists service, container,
 current state and current health. JSON uses the ordinary result envelope with
@@ -76,6 +80,52 @@ publication. The foreground owner remains attached until owned shutdown finishes
 Ctrl-C requests that shutdown. Exact durable Removed evidence retires the tagged
 native run and startup intent. Unknown, changed or live cleanup retains the attempt
 and refuses replay; a missing ready mapping does not authorize a fresh start.
+
+Ordinary whole-project `down` also supports a ready no-host generation, including
+persistent-storage plans. Its private no-host endpoint is issued by the original
+held startup admission before public Ready. It asks that same foreground owner to
+stop; no host declaration, hook permit, new controller or stored-PID signal is
+created. Success requires authenticated Removed, the original child and detached
+group's settlement, and exact endpoint/start/Ready/source retirement. Compute
+shutdown retains persistent data; this command adds no volume deletion authority.
+A missing, changed or dead endpoint refuses. Partial publication or retirement
+keeps startup evidence blocked. Legacy no-host version 1 records remain ineligible for dead-owner recovery.
+New version 2 records capture the original native child while its foreground
+owns it: PID, birth, executable identities, UID, host boot session, process group
+and session. Recovery uses two bounded complete process-metadata observations. It refuses
+any occupied original PID, including reuse or a zombie, and every live member of
+its former group or session. Unknown live membership refuses. Explicit zombie
+rows whose identity and state match both observations remain in the result, with
+unavailable session membership counted separately. This proves no live members
+at the observations; it does not prove the numeric group/session is absent.
+It never signals a saved numeric group. The original owner separately publishes
+one bound settlement observation only after its captured exit, drain and existing
+group-absence check. That observation cannot replace fresh recovery checks.
+A live SID lookup race permits an entirely fresh attempt only if a complete
+bounded reread positively observes that PID missing. Both earlier observations
+and their SID mappings are discarded; two new complete observations must fit the
+original monotonic budget, including any further proven disappearance. Disappeared
+PIDs remain only as denial facts: any reappearance in a later census or diagnostic
+reread refuses. State changes, still-live or unavailable rows, failed rereads and
+exhausted budget refuse. No individual row is skipped and no deadline is renewed.
+
+Darwin's [ps state implementation](https://github.com/apple-oss-distributions/adv_cmds/blob/main/ps/print.c)
+maps `SZOMB` to `Z`. The [XNU exit path](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/kern_exit.c)
+waits active asynchronous I/O and invalidates open files before publishing that
+state. Zombie process-group metadata can persist until reap, so unavailable SID
+on a stable `Z` row is distinct from unknown live membership. Changed, disappeared
+or newly observed zombie identities refuse rather than borrowing stale state.
+
+The existing recovery owner retains its leases and exact Ready/start/source,
+native owner and receipt bindings before and after cleanup. It phase-retires only
+the admitted endpoint and optional settlement record after authenticated Removed
+and null observations. Replaced, malformed, live or unknown evidence stays retained.
+Graph4 recovery additionally requires all data enrolled and the exact installed
+tool root/helper assertion, matching the native owner; source and topology
+families remain separately refused. These source controls do not qualify installed
+kill/recover/up or retained SQL behavior.
+Portable private-filesystem and stand-in lifecycle controls cover this boundary;
+installed Source4 SQL retention through public down/up remains a separate runtime gate.
 
 `down --recover` explicitly retires a complete stored native generation whose
 foreground publisher and frontend admission owner are both dead on the same host

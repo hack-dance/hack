@@ -17,7 +17,18 @@ export type Checkout = {
 };
 export type Anchor = { readonly id: string; readonly manifest: Artifact };
 export type Receipt = {
-  readonly adoption_receipt_version: 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 10 | 11;
+  readonly adoption_receipt_version:
+    | 1
+    | 2
+    | 3
+    | 4
+    | 5
+    | 6
+    | 7
+    | 8
+    | 9
+    | 10
+    | 11;
   readonly kind: typeof KIND;
   readonly checkout: Checkout;
   readonly prepared: Anchor | null;
@@ -79,6 +90,7 @@ export function parseLegacyComposeAdoptionReceipt(
       ) &&
       (value.adoption_receipt_version === 11 ||
         value.adoption_receipt_version === 10 ||
+        value.adoption_receipt_version === 9 ||
         value.adoption_receipt_version === 7 ||
         value.adoption_receipt_version === 6 ||
         value.adoption_receipt_version === 8 ||
@@ -123,6 +135,7 @@ export function parseLegacyComposeAdoptionReceipt(
     adoption_receipt_version:
       version === 11 ||
       version === 10 ||
+      version === 9 ||
       version === 7 ||
       version === 8 ||
       version === 6 ||

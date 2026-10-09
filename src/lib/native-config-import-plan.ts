@@ -153,6 +153,7 @@ type NativeImportPurpose =
   | "preview"
   | "adoption-baseline"
   | "completed-job-adoption"
+  | "retained-basic-build"
   | "storage-adoption"
   | "retained-file-baseline"
   | "retained-file-storage";
@@ -209,7 +210,8 @@ function mapLegacyNativeInput(opts: {
     candidate,
     mark,
     refuse,
-    buildPreview: opts.purpose === "preview",
+    buildPreview:
+      opts.purpose === "preview" || opts.purpose === "retained-basic-build",
     jobPreview:
       opts.purpose === "preview" ||
       opts.purpose === "storage-adoption" ||
@@ -225,6 +227,7 @@ function mapLegacyNativeInput(opts: {
   });
   if (
     opts.purpose === "storage-adoption" ||
+    opts.purpose === "retained-basic-build" ||
     opts.purpose === "retained-file-storage"
   ) {
     mapStorageCandidate({
@@ -281,6 +284,14 @@ function mapOwnedNetwork(
   }
   if (mapping.kind === "refused") {
     opts.refuse("compose", mapping.pointer, mapping.code);
+    return;
+  }
+  if (opts.purpose === "retained-basic-build") {
+    opts.refuse(
+      "compose",
+      "/networks",
+      "retained_build_network_adoption_unqualified"
+    );
     return;
   }
   if (
@@ -428,6 +439,18 @@ export function mapLegacyNativeRetainedFileStorage(opts: {
     configText: opts.configText,
     composeText: opts.composeText,
     purpose: "retained-file-storage",
+  });
+}
+
+/** Closed build/storage intent; its separate source/image owner still must admit it. */
+export function mapLegacyNativeRetainedBasicBuild(opts: {
+  readonly configText: string;
+  readonly composeText: string;
+}): NativeImportPlan {
+  return mapLegacyNativeInput({
+    configText: opts.configText,
+    composeText: opts.composeText,
+    purpose: "retained-basic-build",
   });
 }
 

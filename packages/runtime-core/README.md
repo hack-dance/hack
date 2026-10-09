@@ -114,16 +114,21 @@ this same subset. Its private `native-graph-owner` record and authenticated v2
 `native-graph-control` status/cleanup protocol bind the native review, exact
 process incarnation, directory, socket, file and retained per-run lock. Direct
 run/cleanup and foreground publication exclude each other under that lock.
-New publications use a closed version3 owner record with independently captured
-native host boot time. Live authentication rechecks that boot together with the
-existing exact process and filesystem identities. The closed version2 live-owner
-decoder remains available without inferring host boot from PID birth or guest
-receipt boot. Version2 records reject the new field, and version3 records require
-it. Native runtime receipts and the authenticated control/ready wire remain v2;
+New publications use a closed version4 owner with `host_boot_uuid`, captured by
+the native read-only `kern.bootsessionuuid` sysctl. Its fixed 37-byte response must
+contain a nonzero ASCII UUID and terminal NUL; the reader canonicalizes lowercase.
+Persisted UUIDs must already be lowercase. Unavailable or malformed readings refuse,
+without a timestamp or shell fallback. Live authentication rechecks the session
+together with the exact nonzero process incarnation and filesystem identities;
+it does not compare process birth against mutable calendar boot time.
+The closed version2 live-owner decoder remains available without a boot qualifier.
+Version3 remains strictly qualified by its original `host_boot_micros`; it receives
+no inferred UUID or migration. Each version rejects the other versions' qualifiers.
+Native runtime receipts and the authenticated control/ready wire remain v2;
 Compose receipt and owner formats remain unchanged. This provenance alone grants
 no dead-owner recovery authority.
 The inactive read-only recovery selector admits only a complete Ready journal and
-a dead version3 publication on the same native host boot. It captures the current
+a dead version3 or version4 publication on the same qualified native host boot. It captures the current
 private owner bytes and inode; its raw SHA is a selector for later independent
 admission, not an external identity anchor from before that capture. After a
 durable intent, the saved inode and digest refuse replacement. Cleanup progress
@@ -131,11 +136,23 @@ retains the original Ready selectors and exact inventory. Pending writes refuse;
 retired paths require the intent's preceding phase and unchanged archived inode.
 `graph native recovery-selection --run-id ID --json` exposes only the closed
 selection: run, original value-free Ready receipt, raw receipt/owner hashes and
-native host boot time. The receipt contains review hashes, workload readiness,
+the original boot qualifier. Version1 selections retain version3 calendar micros;
+version2 selections carry version4 `host_boot_uuid`. Neither rewrites original
+owner bytes, inode or digest. Version2 dead owners remain ineligible. Version3
+recovery conservatively refuses if its calendar qualifier has drifted.
+The receipt contains review hashes, workload readiness,
 resource IDs/images/networks and terminal observations; it contains no environment
 keys/values, command argv, source bytes or publication process/path metadata. The
 selector creates no intent and connects no provider. It grants no cleanup or
 frontend recovery authority.
+
+The UUID boundary addresses calendar correction without weakening reboot refusal.
+[XNU calendar updates adjust boot time](https://github.com/apple-oss-distributions/xnu/blob/main/osfmk/kern/clock.c#L674-L752),
+while the [read-only boot-session sysctl](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/kern_sysctl.c#L2735-L2762)
+is [generated at boot](https://github.com/apple-oss-distributions/xnu/blob/main/iokit/Kernel/IOPMrootDomain.cpp#L3846-L3861).
+Unrelated legacy filesystem chronology still uses its existing calendar helper.
+Injected-reader and codec regressions qualify the ownership fences without changing
+the host clock or rebooting. They do not establish actual provider recovery.
 
 The separate explicit library recovery entrypoint re-admits both raw selectors
 and commits a bounded 64 KiB recovery intent before cleanup. It retains the

@@ -8,6 +8,7 @@ import {
   freezeImportValue,
   mapLegacyNativeAdoptionBaseline,
   mapLegacyNativeCompletedJobAdoptionBaseline,
+  mapLegacyNativeRetainedBasicBuild,
   mapLegacyNativeRetainedFileAdoptionBaseline,
   mapLegacyNativeStorageAdoption,
   type NativeImportPlan,
@@ -91,6 +92,17 @@ export function planLegacyComposeRetainedFileAdoption(opts: {
   return planLegacyComposeStorageInput(
     opts,
     mapLegacyNativeRetainedFileAdoptionBaseline(opts)
+  );
+}
+
+/** Closed build/storage intent consumed by the distinct source/image owner. */
+export function planLegacyComposeRetainedBasicBuildAdoption(opts: {
+  readonly configText: string;
+  readonly composeText: string;
+}): LegacyComposeAdoptionPlan {
+  return planLegacyComposeStorageInput(
+    opts,
+    mapLegacyNativeRetainedBasicBuild(opts)
   );
 }
 

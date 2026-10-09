@@ -13,6 +13,7 @@ import {
 import type { ImportField } from "./native-config-import-parser.ts";
 import {
   freezeImportValue,
+  mapLegacyNativeRetainedBasicBuild,
   mapLegacyNativeRetainedFileStorage,
   mapLegacyNativeStorageAdoption,
 } from "./native-config-import-plan.ts";
@@ -43,9 +44,15 @@ export async function previewLegacyComposeAdoption(input: {
   try {
     const owner = await acquireLegacyComposeAdoptionPreparationBinding(opts),
       acquired = await owner.resolvePreparationInputs(opts);
-    const mapped = acquired.fileProof
-      ? mapLegacyNativeRetainedFileStorage(acquired)
-      : mapLegacyNativeStorageAdoption(acquired);
+    if (acquired.fileProof && acquired.build) {
+      throw new Error("Mixed retained proof families");
+    }
+    const mapper = acquired.fileProof
+      ? mapLegacyNativeRetainedFileStorage
+      : mapLegacyNativeStorageAdoption;
+    const mapped = (
+      acquired.build ? mapLegacyNativeRetainedBasicBuild : mapper
+    )(acquired);
     fields = [
       ...mapped.report.fields,
       ...(acquired.projection?.localFields ?? []),

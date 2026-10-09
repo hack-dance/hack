@@ -293,7 +293,10 @@ export async function tryLegacyComposeAdoptedCommand(
           deadline,
           run: async (privateInput) => {
             cancelled(signal);
-            if (legacyComposeRetainedOrdered(privateInput.retainedPlan)) {
+            if (
+              legacyComposeRetainedOrdered(privateInput.retainedPlan) ||
+              privateInput.retainedBuild
+            ) {
               return await runLegacyComposeRetainedOperation({
                 input: privateInput,
                 operation,

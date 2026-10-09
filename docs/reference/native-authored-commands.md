@@ -38,7 +38,8 @@ and refuses replay; a missing ready mapping does not authorize a fresh start.
 
 `down --recover` explicitly retires a complete stored native generation whose
 foreground publisher and frontend admission owner are both dead on the same host
-boot. It requires the current version 3 native publication, the exact stored Ready,
+boot. New version 4 native publications use the kernel boot-session UUID, which
+remains independent of calendar clock correction. Recovery requires the exact stored Ready,
 startup intent and private source envelope, and the original guest incarnation.
 Live owners, older version 2 dead publications, partial startup, pending writes,
 changed files and rebooted guests refuse. Env/profile changes, service subsets and
@@ -46,6 +47,12 @@ changed files and rebooted guests refuse. Env/profile changes, service subsets a
 nor acquires managed values or starts a provider.
 Omit `--profile` to recover the stored generation; explicit empty or named profile
 overrides both refuse.
+
+The closed version 3 publication and version 1 recovery selector remain supported
+with their original calendar boot qualifier; clock drift conservatively refuses
+that legacy recovery. New version 4 owners use version 2 UUID selectors. Missing,
+malformed or unavailable UUIDs refuse; no old record is migrated or given inferred
+session authority. PID birth/executable, peer, inode, gate and run-lock checks remain.
 
 Recovery commits a distinct private intent before calling the Rust cleanup owner.
 The original raw selectors and resource inventory remain fixed through retries;
@@ -69,4 +76,4 @@ this operation does not repair arbitrary partial lock or file publications.
 The native receipt and source paths are distinct from strict Compose v1 artifacts.
 No native hash substitutes for a normalized Compose hash. Source and fake-driver
 checks do not qualify an installed frontend, a live provider, the full authored
-corpus, actual version 3 dead-owner recovery or resource overhead; those remain separate gates.
+corpus, actual dead-owner recovery or resource overhead; those remain separate gates.

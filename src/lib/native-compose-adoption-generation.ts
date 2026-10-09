@@ -618,20 +618,17 @@ async function readInputs(
     );
     const basic = meta.adoption_generation_version === 9;
     const sourceBind = meta.adoption_generation_version === 12;
-    const mapped = (
-      sourceBind
-        ? mapLegacyNativeRetainedSourceBind
-        : basic
-          ? mapLegacyNativeRetainedBasicBuild
-          : mapLegacyNativeStorageAdoption
-    )({ configText, composeText });
-    const planned = (
-      sourceBind
-        ? planLegacyComposeSourceBindAdoption
-        : basic
-          ? planLegacyComposeRetainedBasicBuildAdoption
-          : planLegacyComposeAdoption
-    )({ configText, composeText });
+    let mapper = mapLegacyNativeStorageAdoption;
+    let planner = planLegacyComposeAdoption;
+    if (sourceBind) {
+      mapper = mapLegacyNativeRetainedSourceBind;
+      planner = planLegacyComposeSourceBindAdoption;
+    } else if (basic) {
+      mapper = mapLegacyNativeRetainedBasicBuild;
+      planner = planLegacyComposeRetainedBasicBuildAdoption;
+    }
+    const mapped = mapper({ configText, composeText });
+    const planned = planner({ configText, composeText });
     const assertBuildSource = () =>
       assertRetainedBuildSource({ ctx, meta, configText, composeText });
     await assertBuildSource();
@@ -936,13 +933,13 @@ async function prepare(
   ) {
     refuse("E_LEGACY_ADOPTION_UNSUPPORTED");
   }
-  const mapped = (
-    acquired.sourceBindProof
-      ? mapLegacyNativeRetainedSourceBind
-      : acquired.build
-        ? mapLegacyNativeRetainedBasicBuild
-        : mapLegacyNativeStorageAdoption
-  )(acquired);
+  let mapper = mapLegacyNativeStorageAdoption;
+  if (acquired.sourceBindProof) {
+    mapper = mapLegacyNativeRetainedSourceBind;
+  } else if (acquired.build) {
+    mapper = mapLegacyNativeRetainedBasicBuild;
+  }
+  const mapped = mapper(acquired);
   if (!mapped.candidate) {
     refuse("E_LEGACY_ADOPTION_UNSUPPORTED");
   }

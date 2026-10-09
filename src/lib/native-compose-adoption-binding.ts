@@ -243,7 +243,7 @@ async function inspect(opts: {
   readonly sourceBinds?: boolean;
 }) {
   const rows: Record<string, unknown>[] = [];
-  let format = formats[opts.kind].inspect;
+  let format: string = formats[opts.kind].inspect;
   if (opts.kind === "container" && opts.sourceBinds) {
     format = SOURCE_BIND_CONTAINER_FORMAT;
   } else if (opts.kind === "container" && opts.ownedNetwork) {

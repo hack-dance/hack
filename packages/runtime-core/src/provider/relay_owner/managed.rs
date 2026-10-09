@@ -2361,8 +2361,9 @@ mod tests {
             .unwrap();
         let canceled = Arc::clone(&retry.0.canceled);
         drop(retry);
-        assert!(canceled.load(Ordering::Acquire));
+        // The reactor may still hold the command clone after delivering its reply.
         fixture.owner.verify_alive().unwrap();
+        assert!(canceled.load(Ordering::Acquire));
         assert!(authenticate(&fixture.sockets[0], &fresh.credential).is_err());
         assert!(
             fixture

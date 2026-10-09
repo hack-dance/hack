@@ -306,11 +306,11 @@ fn accepted_stream_preserves_payload_and_half_close() {
             peer.write_all(b"reply").unwrap();
         });
         let mut stream = endpoint.connect(Duration::from_secs(2)).unwrap();
-        stream.write_all(b"synthetic endpoint payload").unwrap();
-        stream.shutdown(std::net::Shutdown::Write).unwrap();
         stream
             .set_read_timeout(Some(Duration::from_secs(2)))
             .unwrap();
+        stream.write_all(b"synthetic endpoint payload").unwrap();
+        stream.shutdown(std::net::Shutdown::Write).unwrap();
         let mut response = String::new();
         stream.read_to_string(&mut response).unwrap();
         assert_eq!(response, "reply");

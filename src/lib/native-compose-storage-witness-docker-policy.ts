@@ -1,6 +1,9 @@
 import { isRecord } from "./guards.ts";
 import { nativeComposeVolumeCreatedAt } from "./native-compose-retained-storage.ts";
-import { NATIVE_STORAGE_DOCKER_ARTIFACT } from "./native-compose-storage-witness-docker-artifact.ts";
+import {
+  NATIVE_STORAGE_DOCKER_ARTIFACT,
+  nativeComposeStorageDockerImageReference,
+} from "./native-compose-storage-witness-docker-artifact.ts";
 import type { NativeComposeStorageXattrInvocation } from "./native-compose-storage-witness-xattr-carrier.ts";
 import { refuseNativeComposeStorageXattr as refuse } from "./native-compose-storage-witness-xattr-codec.ts";
 
@@ -39,7 +42,8 @@ export function checkNativeComposeStorageDockerCarrier(opts: {
       isRecord(value.state) &&
       isRecord(value.labels) &&
       Array.isArray(value.mounts) &&
-      value.configImage === input.artifact.imageId &&
+      value.configImage ===
+        nativeComposeStorageDockerImageReference(input.artifact) &&
       typeof value.image === "string" &&
       imageIds.includes(value.image) &&
       value.user === `${input.uid}:${input.gid}` &&
@@ -246,7 +250,7 @@ export function nativeComposeStorageDockerCreateArgs(opts: {
     `io.hack.storage-witness.helper=${input.artifact.helperHash}`,
     "--entrypoint",
     "/usr/local/bin/bun",
-    input.artifact.imageId,
+    nativeComposeStorageDockerImageReference(input.artifact),
     "--no-env-file",
     "/hack-storage-witness-helper.mjs",
   ];

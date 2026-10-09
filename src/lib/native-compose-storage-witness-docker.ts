@@ -21,6 +21,7 @@ import {
 import {
   NATIVE_STORAGE_DOCKER_DEPENDENCIES,
   nativeComposeStorageDockerHelper,
+  nativeComposeStorageDockerImageReference,
   selectNativeComposeStorageDockerDependency,
 } from "./native-compose-storage-witness-docker-artifact.ts";
 import {
@@ -134,7 +135,7 @@ async function image(
       "inspect",
       "--format",
       '{"id":{{json .Id}},"os":{{json .Os}},"arch":{{json .Architecture}},"volumes":{{json (index .Config "Volumes")}}}',
-      dependency.artifact.imageId,
+      nativeComposeStorageDockerImageReference(dependency.artifact),
     ])
   );
   if (

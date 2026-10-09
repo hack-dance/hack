@@ -2,10 +2,12 @@ import { expect, test } from "bun:test";
 import {
   planLegacyComposeAdoption,
   planLegacyComposeRetainedRoutingAdoption,
+  planLegacyComposeSourceBindAdoption,
 } from "../src/lib/native-compose-adoption-plan.ts";
 import {
   mapLegacyNativeImport,
   mapLegacyNativeRetainedRouting,
+  mapLegacyNativeRetainedSourceBind,
   mapLegacyNativeStorageAdoption,
 } from "../src/lib/native-config-import-plan.ts";
 import { mapLegacyComposeRouting } from "../src/lib/native-config-import-routing.ts";
@@ -45,6 +47,76 @@ function inputs(config: unknown, compose: unknown) {
     composeText: JSON.stringify(compose),
   };
 }
+test("retained route and source-bind planners keep their separate positive families", () => {
+  const { config, compose } = fixture();
+  const routed = inputs(config, compose);
+  expect(
+    planLegacyComposeRetainedRoutingAdoption(routed).intent?.routing
+  ).toBeDefined();
+  expect(planLegacyComposeSourceBindAdoption(routed).intent).toBeUndefined();
+  expect(mapLegacyNativeRetainedSourceBind(routed).candidate).toBeUndefined();
+  const bound = inputs(
+    { name: "fixture", worktree: { auto_branch: false } },
+    {
+      name: "fixture",
+      services: {
+        db: {
+          image: "db:1",
+          volumes: [
+            "data:/data",
+            {
+              type: "bind",
+              source: "../src",
+              target: "/work",
+              read_only: true,
+              bind: { create_host_path: false },
+            },
+          ],
+        },
+      },
+      volumes: { data: {} },
+    }
+  );
+  expect(mapLegacyNativeRetainedSourceBind(bound).candidate).toBeDefined();
+  expect(planLegacyComposeSourceBindAdoption(bound).intent).toMatchObject({
+    sourceBinds: [
+      { service: "db", source: "src", target: "/work", readOnly: true },
+    ],
+  });
+  expect(
+    planLegacyComposeRetainedRoutingAdoption(bound).intent
+  ).toBeUndefined();
+  expect(mapLegacyNativeRetainedRouting(bound).candidate).toBeUndefined();
+});
+test("a routed source with a directory bind cannot collapse into either retained family", () => {
+  const { config, compose } = fixture();
+  const mixed = inputs(config, {
+    ...compose,
+    services: {
+      ...compose.services,
+      db: {
+        ...compose.services.db,
+        volumes: [
+          ...compose.services.db.volumes,
+          {
+            type: "bind",
+            source: "../src",
+            target: "/work",
+            read_only: true,
+            bind: { create_host_path: false },
+          },
+        ],
+      },
+    },
+  });
+  for (const planned of [
+    planLegacyComposeRetainedRoutingAdoption(mixed),
+    planLegacyComposeSourceBindAdoption(mixed),
+  ]) {
+    expect(planned.report.supported).toBe(false);
+    expect(planned.intent).toBeUndefined();
+  }
+});
 test("v14 preserves the literal legacy host, existing alias, open preference and named storage without changing old families", () => {
   const { config, compose } = fixture();
   const source = inputs(config, compose);

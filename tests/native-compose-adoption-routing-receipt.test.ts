@@ -137,7 +137,7 @@ test("rollback handoff is allowed only after pending clearance in rollback phase
 });
 test("older receipts do not silently ignore required v14 routing state", () => {
   const value = fixture();
-  for (const version of [1, 2, 3, 4, 5, 6, 7, 9, 10, 11]) {
+  for (const version of [1, 2, 3, 4, 5, 6, 7, 9, 10, 11, 12, 13]) {
     expect(() =>
       parseLegacyComposeAdoptionReceipt(
         { ...value, adoption_receipt_version: version },

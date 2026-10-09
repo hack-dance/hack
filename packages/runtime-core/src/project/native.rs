@@ -7,7 +7,7 @@ use hack_config_compiler::{
     local::LocalResolution,
     model::{
         Access, Command, Dependency, EnvironmentValue, Mount, Plan, Readiness, ServiceCondition,
-        Source, Workload, WorktreePolicy,
+        Source, SourceMode, Workload, WorktreePolicy,
     },
     process::{Entrypoint, Restart, ShutdownSignal},
 };
@@ -98,6 +98,7 @@ pub struct WorkloadInputs {
     pub shutdown: Option<Shutdown>,
     pub restart: Option<Restart>,
     pub working_directory: Option<String>,
+    pub source_mount: Option<SourceMount>,
     pub environment: BTreeMap<String, String>,
     pub readiness: Option<ExecReadiness>,
     pub mounts: Vec<StorageMount>,
@@ -109,6 +110,14 @@ pub struct StorageMount {
     pub storage: String,
     pub target: String,
     pub read_only: bool,
+}
+
+/// Compiler-normalized source and destination; live sharing is admitted separately.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SourceMount {
+    pub source: String,
+    pub target: String,
 }
 
 /// Millisecond precision is retained; a future backend must qualify signal/timing delivery.
@@ -128,7 +137,7 @@ pub struct ExecReadiness {
 fn refused() -> CandidateError {
     CandidateError::new(
         "native_graph_subset",
-        "Native graph adapter requires image-only workloads, exec readiness and only persistent worktree storage mounts; acquisition, source/file mounts, custom networks, routing, endpoints, host effects and automatic restart remain refused. Values omitted.",
+        "Native graph adapter requires images, exec readiness and either one read-only live project-source mount per workload or persistent worktree storage intent; mixed source/storage, acquisition, other mounts, custom networks, routing, endpoints, host effects and automatic restart remain unsupported; values omitted.",
     )
 }
 
@@ -197,10 +206,17 @@ fn workload(value: Workload, kind: WorkloadKind) -> Result<WorkloadInputs, Candi
     {
         return Err(refused());
     }
-    let mounts = value
-        .mounts
-        .into_iter()
-        .map(|mount| match mount {
+    let mut source_mount = None;
+    let mut mounts = Vec::new();
+    for mount in value.mounts {
+        match mount {
+            Mount::Source {
+                source,
+                target,
+                access: Access::ReadOnly,
+            } if source_mount.is_none() => {
+                source_mount = Some(SourceMount { source, target });
+            }
             Mount::Storage {
                 storage,
                 target,
@@ -214,15 +230,18 @@ fn workload(value: Workload, kind: WorkloadKind) -> Result<WorkloadInputs, Candi
                 })
                 && target != "/" =>
             {
-                Ok(StorageMount {
+                mounts.push(StorageMount {
                     storage,
                     target,
                     read_only: matches!(access, Access::ReadOnly),
-                })
+                });
             }
-            _ => Err(refused()),
-        })
-        .collect::<Result<Vec<_>, _>>()?;
+            _ => return Err(refused()),
+        }
+    }
+    if source_mount.is_some() && !mounts.is_empty() {
+        return Err(refused());
+    }
     let readiness = value
         .readiness
         .map(|check| match check {
@@ -262,6 +281,7 @@ fn workload(value: Workload, kind: WorkloadKind) -> Result<WorkloadInputs, Candi
         shutdown,
         restart: value.restart,
         working_directory: value.working_directory,
+        source_mount,
         environment: BTreeMap::new(),
         readiness,
         mounts,
@@ -346,6 +366,21 @@ fn compile_inputs(
     }
     refuse_authored_network_intent(request)?;
     let environment_policy_hash = policy_hash(&plan, &environment_plan)?;
+    let source_bearing = plan
+        .services
+        .values()
+        .chain(plan.jobs.values())
+        .any(|workload| {
+            workload
+                .mounts
+                .iter()
+                .any(|mount| matches!(mount, Mount::Source { .. }))
+        });
+    if source_bearing
+        && (!matches!(&plan.source.mode, SourceMode::HostMounted) || !plan.storage.is_empty())
+    {
+        return Err(refused());
+    }
     if plan.source.root != "."
         || !plan.configs.is_empty()
         || !plan.secrets.is_empty()

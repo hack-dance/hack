@@ -254,14 +254,69 @@ fn rejects_a_live_inherited_unix_listener_at_the_pinned_inode() {
 }
 #[test]
 fn wildcard_port_probe_refuses_ipv4_and_ipv6_listeners() {
+    use ports::observation_diagnostic as diagnostic;
+
     let ipv4 = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+    diagnostic::clear();
     assert!(port_absent(ipv4.local_addr().unwrap().port()).is_err());
     drop(ipv4);
     let ipv6 = std::net::TcpListener::bind((std::net::Ipv6Addr::LOCALHOST, 0)).unwrap();
     let port = ipv6.local_addr().unwrap().port();
+    diagnostic::clear();
     assert!(port_absent(port).is_err());
     drop(ipv6);
-    port_absent(port).unwrap();
+    diagnostic::clear();
+    port_absent(port).unwrap_or_else(|error| {
+        panic!("{error:?}; port_probe={:?}", diagnostic::take());
+    });
+}
+
+#[test]
+fn port_probe_diagnostic_reports_the_owned_ipv4_listener() {
+    use ports::observation_diagnostic as diagnostic;
+
+    let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+    diagnostic::clear();
+    assert!(port_absent(listener.local_addr().unwrap().port()).is_err());
+    assert_eq!(
+        diagnostic::take(),
+        Some(diagnostic::Facts {
+            stage: diagnostic::Stage::Bind,
+            wildcard: true,
+            family: libc::AF_INET,
+            errno: Some(libc::EADDRINUSE),
+        })
+    );
+}
+
+#[test]
+fn port_probe_diagnostic_keeps_only_the_first_refusal() {
+    use ports::observation_diagnostic as diagnostic;
+
+    diagnostic::clear();
+    assert!(diagnostic::take().is_none());
+    diagnostic::record(
+        diagnostic::Stage::Socket,
+        true,
+        libc::AF_INET,
+        Some(libc::EMFILE),
+    );
+    diagnostic::record(
+        diagnostic::Stage::Bind,
+        false,
+        libc::AF_INET6,
+        Some(libc::EADDRINUSE),
+    );
+    assert_eq!(
+        diagnostic::take(),
+        Some(diagnostic::Facts {
+            stage: diagnostic::Stage::Socket,
+            wildcard: true,
+            family: libc::AF_INET,
+            errno: Some(libc::EMFILE),
+        })
+    );
+    assert!(diagnostic::take().is_none());
 }
 #[test]
 fn symlinked_configuration_and_wrong_selectors_refuse_before_mutation() {

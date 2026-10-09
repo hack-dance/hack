@@ -99,7 +99,7 @@ export async function selectLegacyComposeAdoptedRoot(
 }
 function validate(options: NativeComposeCommandOptions) {
   if (
-    options.instance !== undefined ||
+    (options.project !== undefined && options.instance !== undefined) ||
     options.profiles?.length ||
     options.overlay !== undefined ||
     options.unsupportedOptions ||
@@ -271,6 +271,7 @@ export async function tryLegacyComposeAdoptedCommand(
       timeoutMs = resolveComposeStartupTimeoutMs(),
       store = await openLegacyComposeAdoptedGenerationStore({
         projectRoot,
+        requestedBranch: options.instance,
         mode: "saved",
         signal,
       });
@@ -306,7 +307,8 @@ export async function tryLegacyComposeAdoptedCommand(
             }
             if (
               legacyComposeRetainedOrdered(privateInput.retainedPlan) ||
-              privateInput.retainedBuild
+              privateInput.retainedBuild ||
+              privateInput.retainedSourceBind
             ) {
               return await runLegacyComposeRetainedOperation({
                 input: privateInput,

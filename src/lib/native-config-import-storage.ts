@@ -1,6 +1,10 @@
 import { posix } from "node:path";
 import { isRecord } from "./guards.ts";
 import {
+  legacyComposeMountTargetsOverlap,
+  mapLegacyComposeSourceBind,
+} from "./native-config-import-bind.ts";
+import {
   type LegacyOwnedNetworkIntent,
   type LegacyOwnedNetworksIntent,
   mapLegacyOwnedNetwork,
@@ -9,6 +13,7 @@ import { importPointer } from "./native-config-import-parser.ts";
 import type { LegacyComposeRoutingIntent } from "./native-config-import-routing.ts";
 
 const NAME = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+const SELECTED_PROJECT = /^[a-z0-9]+(?:-+[a-z0-9]+)*$/;
 const VOLUME_NAME = /^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,254}$/;
 const TARGET = /^\/[a-zA-Z0-9_./-]+$/;
 
@@ -26,6 +31,14 @@ export type LegacyComposeStorageIntent = {
   readonly mounts: readonly {
     readonly service: string;
     readonly storage: string;
+    readonly target: string;
+    readonly readOnly: boolean;
+  }[];
+};
+export type LegacyComposeSourceBindIntent = LegacyComposeStorageIntent & {
+  readonly sourceBinds: readonly {
+    readonly service: string;
+    readonly source: string;
     readonly target: string;
     readonly readOnly: boolean;
   }[];
@@ -83,6 +96,7 @@ type StorageMapping = {
     target: string;
     readOnly: boolean;
   }[];
+  readonly sourceBinds?: LegacyComposeSourceBindIntent["sourceBinds"][number][];
   supported: boolean;
 };
 function mapVolumes(source: unknown, project: string, mapping: StorageMapping) {
@@ -128,12 +142,37 @@ function serviceMounts(
   const targets = new Set<string>();
   for (const raw of source) {
     const mapped = mount(raw);
+    const bind =
+      mapping.sourceBinds &&
+      mapLegacyComposeSourceBind(raw, { retainedExisting: true });
+    if (bind) {
+      if (
+        [...targets].some((target) =>
+          legacyComposeMountTargetsOverlap(target, bind.target)
+        )
+      ) {
+        mapping.supported = false;
+        continue;
+      }
+      targets.add(bind.target);
+      mapping.sourceBinds?.push({
+        service,
+        source: bind.source,
+        target: bind.target,
+        readOnly: bind.readOnly,
+      });
+      continue;
+    }
     if (
       !(
         mapped &&
         mapping.volumes.some((volume) => volume.storage === mapped.storage)
       ) ||
-      targets.has(mapped.target)
+      (mapping.sourceBinds
+        ? [...targets].some((target) =>
+            legacyComposeMountTargetsOverlap(target, mapped.target)
+          )
+        : targets.has(mapped.target))
     ) {
       mapping.supported = false;
       continue;
@@ -145,6 +184,69 @@ function serviceMounts(
     importPointer(importPointer("/services", service), "volumes"),
     `/existing_mounts/${service}`
   );
+}
+
+/** Distinct retained directory family; the old named-only mapper keeps its refusals. */
+export function mapLegacyComposeSourceBindStorage(opts: {
+  readonly config: Record<string, unknown> | undefined;
+  readonly compose: Record<string, unknown> | undefined;
+}):
+  | {
+      readonly intent: LegacyComposeSourceBindIntent;
+      readonly accepted: ReadonlyMap<string, string>;
+    }
+  | undefined {
+  const { config, compose } = opts;
+  if (
+    !(
+      config &&
+      compose &&
+      typeof config.name === "string" &&
+      NAME.test(config.name) &&
+      compose.name === config.name &&
+      isRecord(compose.services)
+    )
+  ) {
+    return undefined;
+  }
+  const sourceBinds: LegacyComposeSourceBindIntent["sourceBinds"][number][] =
+    [];
+  const mapping: StorageMapping = {
+    supported: true,
+    accepted: new Map(),
+    volumes: [],
+    mounts: [],
+    sourceBinds,
+  };
+  if (Object.hasOwn(compose, "volumes")) {
+    mapVolumes(compose.volumes, config.name, mapping);
+  }
+  mapMounts(compose.services, mapping);
+  if (
+    !mapping.supported ||
+    sourceBinds.length === 0 ||
+    mapLegacyOwnedNetwork({ project: config.name, compose }).kind !== "omitted"
+  ) {
+    return undefined;
+  }
+  return {
+    accepted: mapping.accepted,
+    intent: {
+      composeProject: config.name,
+      services: Object.keys(compose.services).sort(),
+      volumes: mapping.volumes.sort((a, b) =>
+        a.storage.localeCompare(b.storage)
+      ),
+      mounts: mapping.mounts.sort(
+        (a, b) =>
+          a.service.localeCompare(b.service) || a.target.localeCompare(b.target)
+      ),
+      sourceBinds: sourceBinds.sort(
+        (a, b) =>
+          a.service.localeCompare(b.service) || a.target.localeCompare(b.target)
+      ),
+    },
+  };
 }
 function mapMounts(source: Record<string, unknown>, mapping: StorageMapping) {
   for (const [service, declaration] of Object.entries(source)) {
@@ -170,6 +272,8 @@ function mapMounts(source: Record<string, unknown>, mapping: StorageMapping) {
 export function mapLegacyComposeStorage(opts: {
   readonly config: Record<string, unknown> | undefined;
   readonly compose: Record<string, unknown> | undefined;
+  /** Adoption-only physical identity; authored names remain the base project. */
+  readonly selectedComposeProject?: string;
 }):
   | {
       readonly intent: LegacyComposeStorageIntent;
@@ -196,13 +300,21 @@ export function mapLegacyComposeStorage(opts: {
     volumes: [],
     mounts: [],
   };
-  mapVolumes(compose.volumes, config.name, mapping);
+  const composeProject = opts.selectedComposeProject ?? config.name;
+  if (
+    !(opts.selectedComposeProject ? SELECTED_PROJECT : NAME).test(
+      composeProject
+    )
+  ) {
+    return undefined;
+  }
+  mapVolumes(compose.volumes, composeProject, mapping);
   mapMounts(compose.services, mapping);
   if (!mapping.supported) {
     return undefined;
   }
   const network = mapLegacyOwnedNetwork({
-    project: config.name,
+    project: composeProject,
     compose,
   });
   if (network.kind === "refused") {
@@ -212,7 +324,7 @@ export function mapLegacyComposeStorage(opts: {
     accepted: mapping.accepted,
     mounts: [...mapping.mounts],
     intent: {
-      composeProject: config.name,
+      composeProject,
       services: Object.keys(compose.services).sort(),
       ...(network.kind === "owned" ? { ownedNetwork: network.intent } : {}),
       ...(network.kind === "multiple" ? { ownedNetworks: network.intent } : {}),

@@ -13,6 +13,7 @@ import type { ImportField } from "./native-config-import-parser.ts";
 import {
   freezeImportValue,
   mapLegacyNativeRetainedBasicBuild,
+  mapLegacyNativeRetainedSourceBind,
   mapLegacyNativeStorageAdoption,
 } from "./native-config-import-plan.ts";
 
@@ -42,11 +43,13 @@ export async function previewLegacyComposeAdoption(input: {
   try {
     const owner = await acquireLegacyComposeAdoptionPreparationBinding(opts),
       acquired = await owner.resolvePreparationInputs(opts);
-    const mapped = (
-      acquired.build
-        ? mapLegacyNativeRetainedBasicBuild
-        : mapLegacyNativeStorageAdoption
-    )(acquired);
+    let mapper = mapLegacyNativeStorageAdoption;
+    if (acquired.sourceBindProof) {
+      mapper = mapLegacyNativeRetainedSourceBind;
+    } else if (acquired.build) {
+      mapper = mapLegacyNativeRetainedBasicBuild;
+    }
+    const mapped = mapper(acquired);
     fields = [
       ...mapped.report.fields,
       ...(acquired.projection?.localFields ?? []),

@@ -283,6 +283,7 @@ pub struct Options<'a> {
 
 /// Opaque, ephemeral authored selection. No Debug/Serialize or raw request getter.
 pub struct Selected {
+    pub(super) project_source: Option<super::source::Selection>,
     source: Option<(PathBuf, Document)>,
     candidate_root: PathBuf,
     root: PathBuf,
@@ -316,6 +317,9 @@ impl Selected {
     /// Read-only recheck; no atomic multi-file snapshot or editor exclusion is claimed.
     pub fn assert_fresh(&self, candidate: &Candidate) -> Result<(), CandidateError> {
         self.remaining()?;
+        if let Some(source) = &self.project_source {
+            source.verify()?;
+        }
         if let Some((path, snapshot)) = &self.source {
             if document(path, true)?.0.as_ref() != Some(snapshot) {
                 return Err(refused());
@@ -458,6 +462,7 @@ pub fn select(candidate: &Candidate, options: Options<'_>) -> Result<Selected, C
         inputs.review_identity(),
     )?;
     let selected = Selected {
+        project_source: super::source::Selection::new(root, &inputs)?,
         source: None,
         candidate_root: candidate.state_root.clone(),
         root: root.to_owned(),

@@ -5,9 +5,16 @@ import { join, resolve } from "node:path";
 import { nativeComposeStorageDockerFixtureScript } from "./native-compose-storage-docker.ts";
 
 const roots: string[] = [];
+const cleanupGuards = new Map<string, () => boolean>();
 afterEach(async () => {
   await Promise.all(
-    roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))
+    roots.splice(0).map((root) => {
+      if (cleanupGuards.get(root)?.() === false) {
+        return Promise.resolve();
+      }
+      cleanupGuards.delete(root);
+      return rm(root, { recursive: true, force: true });
+    })
   );
 });
 const PROTOCOL = {
@@ -29,6 +36,8 @@ export async function fixture(
     readonly before?: string;
     readonly hooks?: unknown;
     readonly noHooks?: boolean;
+    readonly oneoff?: boolean;
+    readonly cleanupAllowed?: () => boolean;
     readonly storage?: Readonly<
       Record<
         string,
@@ -41,6 +50,9 @@ export async function fixture(
     await mkdtemp(join(tmpdir(), "native-after-command-"))
   );
   roots.push(root);
+  if (opts.cleanupAllowed) {
+    cleanupGuards.set(root, opts.cleanupAllowed);
+  }
   await mkdir(join(root, ".hack"));
   await Bun.write(
     join(root, ".hack/hack.project.json"),
@@ -145,6 +157,9 @@ await appendFile(root+"/requests",JSON.stringify(args)+"\\n");
 const engine=root+"/engine";
 const volumes=root+"/volumes";
 ${opts.storage ? nativeComposeStorageDockerFixtureScript(root) : ""}
+const oneoff=${opts.oneoff === true};
+const removed=oneoff && await Bun.file(root+"/oneoff-removed").exists();
+const oneoffName=oneoff && await Bun.file(root+"/oneoff-name").exists()?await Bun.file(root+"/oneoff-name").text():"";
 if(args[0]==="compose") {
  if(args.includes("up")) {
   if(${failedStartup}) process.exit(19);
@@ -160,15 +175,17 @@ if(args[0]==="compose") {
   }
   await Bun.write(engine,JSON.stringify(doc));${opts.storage ? 'await appendFile(root+"/storage-events","workload\\n");' : ""}await appendFile(root+"/order","engine-ready\\n");process.exit(0);
  }
+ if(oneoff && args.includes("run")) {const doc=await Bun.file(args[args.indexOf("-f")+1]).json();await Bun.write(engine,JSON.stringify(doc));await Bun.write(root+"/oneoff-name",args[args.indexOf("--name")+1]);process.exit(0);}
  if(args.includes("down")) {await rm(engine,{force:true});await appendFile(root+"/order","engine-stopped\\n");process.exit(0);}
  process.exit(99);
 }
+if(oneoff && args[0]==="container" && args[1]==="rm") {if(args.length!==3||args[2]!=="c".repeat(64))process.exit(96);await Bun.write(root+"/oneoff-removed","removed");process.exit(0);}
 if(args[1]==="ls") {
  if(args[0]==="volume" && await Bun.file(volumes).exists()) {
   for(const row of await Bun.file(volumes).json())console.log(JSON.stringify({id:row.name,name:row.name,project:row.project}));
  }
- if(args[0]==="container" && await Bun.file(engine).exists()) {
-  const doc=await Bun.file(engine).json();console.log(JSON.stringify({id:"c".repeat(64),name:doc.name+"-web-1",project:doc.name}));
+ if(args[0]==="container" && await Bun.file(engine).exists() && !removed) {
+  const doc=await Bun.file(engine).json();console.log(JSON.stringify({id:"c".repeat(64),name:oneoff?oneoffName:doc.name+"-web-1",project:doc.name}));
  }
  if(args[0]==="network" && await Bun.file(engine).exists()) {
   const doc=await Bun.file(engine).json();console.log(JSON.stringify({id:"d".repeat(64),name:doc.name+"_default",project:doc.name}));
@@ -187,13 +204,14 @@ if(args[0]==="volume" && args[1]==="inspect" && await Bun.file(volumes).exists()
 }
 if(args[0]==="container" && args[1]==="inspect" && await Bun.file(engine).exists()) {
  const doc=await Bun.file(engine).json();const labels=doc.services.web.labels;
+ if(oneoff) {console.log(JSON.stringify({id:"c".repeat(64),name:"/"+oneoffName,project:doc.name,version:"1",instance:doc.name,owner:labels["io.hack.native-config.owner"],generation:labels["io.hack.native-config.generation"],service:"web",oneoff:"True",state:"exited",exitCode:0,health:null,networks:{[doc.name+"_default"]:{NetworkID:"d".repeat(64),Aliases:[oneoffName]}}}));process.exit(0);}
  const transitional=await Bun.file(root+"/restart-transient").exists();const finalGap=await Bun.file(root+"/restart-finalization-gap").exists();const counter=root+"/restart-container-inspects";const count=(transitional||finalGap)&&await Bun.file(counter).exists()?Number(await Bun.file(counter).text()):0;if(transitional||finalGap)await Bun.write(counter,String(count+1));
  console.log(JSON.stringify({id:"c".repeat(64),name:"/"+doc.name+"-web-1",project:doc.name,version:"1",instance:doc.name,owner:labels["io.hack.native-config.owner"],generation:labels["io.hack.native-config.generation"],service:"web",oneoff:"False",state:await Bun.file(root+"/unready").exists()?"exited":transitional&&count<2||finalGap&&count>=2?"restarting":"running",exitCode:0,health:null,networks:{[doc.name+"_default"]:{NetworkID:"d".repeat(64),Aliases:[doc.name+"-web-1","web"]}}}));process.exit(0);
 }
 if(args[0]==="network" && args[1]==="inspect" && await Bun.file(engine).exists()) {
  const doc=await Bun.file(engine).json();const labels=doc.networks.default.labels;
  const transitional=await Bun.file(root+"/restart-transient").exists();const finalGap=await Bun.file(root+"/restart-finalization-gap").exists();const counter=root+"/restart-network-inspects";const count=(transitional||finalGap)&&await Bun.file(counter).exists()?Number(await Bun.file(counter).text()):0;if(transitional||finalGap)await Bun.write(counter,String(count+1));
- console.log(JSON.stringify({id:"d".repeat(64),name:doc.name+"_default",project:doc.name,version:"1",instance:doc.name,owner:labels["io.hack.native-config.owner"],driver:"bridge",internal:false,containers:transitional&&count<2||finalGap&&count>=2?{}:{["c".repeat(64)]:{}}}));process.exit(0);
+ console.log(JSON.stringify({id:"d".repeat(64),name:doc.name+"_default",project:doc.name,version:"1",instance:doc.name,owner:labels["io.hack.native-config.owner"],driver:removed&&await Bun.file(root+"/trace-post-remove-refusal").exists()?"foreign":"bridge",internal:false,containers:removed?{}:transitional&&count<2||finalGap&&count>=2?{}:{["c".repeat(64)]:{}}}));process.exit(0);
 }
 process.exit(99);
 `

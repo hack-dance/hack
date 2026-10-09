@@ -3,6 +3,7 @@ import { lstat, mkdir, rename, unlink } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { isRecord } from "./guards.ts";
 import { readNativeComposeNetworkTopology } from "./native-compose-network-topology.ts";
+import { measureNativeComposePhase } from "./native-compose-phase-trace.ts";
 import {
   createNativeComposePrivateMutationLock,
   type HeldDirectory,
@@ -1602,43 +1603,72 @@ export async function openNativeComposeGenerationStore(opts: {
       assertWitnesses: () => Promise<void>
     ) => {
       if (input.assertFresh) {
-        await assertFresh(input.assertFresh);
+        await measureNativeComposePhase("finalize.fresh", () =>
+          assertFresh(input.assertFresh ?? refuse())
+        );
       }
-      await verifyGeneration(input.generation);
-      if (input.projection) {
-        await verifyProjection(input.projection, input.generation);
-      }
-      await input.assertOwned();
-      await rememberStorage(input);
-      await assertWitnesses();
-      let latest = await receipt();
-      await requireFinalPending(
-        latest,
-        pending,
-        input.operation,
-        input.downHooks !== undefined
+      await measureNativeComposePhase("finalize.generation", () =>
+        verifyGeneration(input.generation)
       );
-      if (input.beforeComplete) {
-        await input.beforeComplete();
-        if (input.assertFresh) {
-          await assertFresh(input.assertFresh);
-        }
-        await verifyGeneration(input.generation);
-        if (input.projection) {
-          await verifyProjection(input.projection, input.generation);
-        }
-        await input.assertOwned();
-        await rememberStorage(input);
-        await assertWitnesses();
-        latest = await receipt();
-        await requireFinalPending(
+      if (input.projection) {
+        await measureNativeComposePhase("finalize.projection", () =>
+          verifyProjection(input.projection ?? refuse(), input.generation)
+        );
+      }
+      await measureNativeComposePhase("finalize.owned", () =>
+        input.assertOwned()
+      );
+      await measureNativeComposePhase("finalize.remember-storage", () =>
+        rememberStorage(input)
+      );
+      await measureNativeComposePhase("finalize.witnesses", assertWitnesses);
+      let latest = await measureNativeComposePhase("finalize.pending", receipt);
+      await measureNativeComposePhase("finalize.pending-check", () =>
+        requireFinalPending(
           latest,
           pending,
           input.operation,
           input.downHooks !== undefined
+        )
+      );
+      if (input.beforeComplete) {
+        const beforeComplete = input.beforeComplete;
+        await measureNativeComposePhase("finalize.before-complete", () =>
+          beforeComplete.call(input)
+        );
+        if (input.assertFresh) {
+          await measureNativeComposePhase("finalize.fresh", () =>
+            assertFresh(input.assertFresh ?? refuse())
+          );
+        }
+        await measureNativeComposePhase("finalize.generation", () =>
+          verifyGeneration(input.generation)
+        );
+        if (input.projection) {
+          await measureNativeComposePhase("finalize.projection", () =>
+            verifyProjection(input.projection ?? refuse(), input.generation)
+          );
+        }
+        await measureNativeComposePhase("finalize.owned", () =>
+          input.assertOwned()
+        );
+        await measureNativeComposePhase("finalize.remember-storage", () =>
+          rememberStorage(input)
+        );
+        await measureNativeComposePhase("finalize.witnesses", assertWitnesses);
+        latest = await measureNativeComposePhase("finalize.pending", receipt);
+        await measureNativeComposePhase("finalize.pending-check", () =>
+          requireFinalPending(
+            latest,
+            pending,
+            input.operation,
+            input.downHooks !== undefined
+          )
         );
       }
-      await save(completedReceipt(latest, anchor, input.operation));
+      await measureNativeComposePhase("finalize.save", () =>
+        save(completedReceipt(latest, anchor, input.operation))
+      );
     };
     const assertFresh = async (callback: () => Promise<void>) => {
       try {
@@ -2003,7 +2033,13 @@ export async function openNativeComposeGenerationStore(opts: {
           ) => {
             if (
               result.outcome !== "complete" ||
-              (await witnessWorkPending(await receipt()))
+              (await measureNativeComposePhase(
+                "finish.witness-work",
+                async () =>
+                  witnessWorkPending(
+                    await measureNativeComposePhase("finish.pending", receipt)
+                  )
+              ))
             ) {
               // Saved recovery may stop engine resources, but unresolved enrollment keeps its anchor.
               await rememberStorage(input);

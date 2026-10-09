@@ -85,6 +85,10 @@ import {
   observeNativeComposeStartupOwned,
   observeSavedNativeComposeOwned,
 } from "./native-compose-ownership.ts";
+import {
+  measureNativeComposePhase,
+  withNativeComposePhaseTrace,
+} from "./native-compose-phase-trace.ts";
 import { NativeComposeProxyAccessError } from "./native-compose-proxy-routes.ts";
 import {
   assertNativeComposeSupported,
@@ -1105,10 +1109,17 @@ async function runOneOff(opts: {
     timeoutMs: 15_000,
     stdout: "stderr",
   });
-  const after = await assertNativeComposeOwned(selection);
+  const after = await measureNativeComposePhase(
+    "oneoff.post-remove-owned",
+    () => assertNativeComposeOwned(selection)
+  );
   opts.observeStorage(after);
-  await opts.assertFresh();
-  await opts.assertOwned();
+  await measureNativeComposePhase("oneoff.post-remove-fresh", () =>
+    opts.assertFresh()
+  );
+  await measureNativeComposePhase("oneoff.post-remove-guard", () =>
+    opts.assertOwned()
+  );
   return {
     value: code,
     outcome:
@@ -1485,7 +1496,9 @@ async function executePreparedGeneration(opts: {
     afterHooks: after.afterHooks,
     storageWitnesses: storage?.effectWitnesses,
     effect: async () => {
-      await storage?.enroll(generation, document);
+      await measureNativeComposePhase("storage.enroll", async () =>
+        storage?.enroll(generation, document)
+      );
       return await executePreparedNativeWorkloads({
         options,
         generation,
@@ -1501,10 +1514,14 @@ async function executePreparedGeneration(opts: {
         assertFresh,
         observeStorage: ownership.observeStorage,
         assertOwned: async () => {
-          await assertFresh();
-          await ownership.assertOwned();
-          await storage?.verify(generation);
-          await assertFresh();
+          await measureNativeComposePhase("guard.fresh-before", assertFresh);
+          await measureNativeComposePhase("guard.ownership", () =>
+            ownership.assertOwned()
+          );
+          await measureNativeComposePhase("guard.storage", async () =>
+            storage?.verify(generation)
+          );
+          await measureNativeComposePhase("guard.fresh-after", assertFresh);
         },
       });
     },
@@ -2101,6 +2118,14 @@ function validateNativeOptions(options: NativeComposeCommandOptions): boolean {
 
 /** Dispatch native authored inputs before any legacy context or registry mutation. */
 export async function tryNativeComposeCommand(
+  input: NativeComposeCommandOptions
+): Promise<number | null> {
+  return await withNativeComposePhaseTrace(() =>
+    dispatchNativeComposeCommand(input)
+  );
+}
+
+async function dispatchNativeComposeCommand(
   input: NativeComposeCommandOptions
 ): Promise<number | null> {
   // Capture the CLI selection once: explicit base is null, omission inherits.

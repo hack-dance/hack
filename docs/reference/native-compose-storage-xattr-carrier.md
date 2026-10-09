@@ -398,8 +398,13 @@ unchanged intent is cleared. Existing final receipt/source/kernel fences still
 precede ordinary completion. Recovery does not replay a helper command, remove a
 helper or volume, enroll storage, or retire the retained command evidence.
 
-Legacy or missing records, retained helpers, failed verification, incomplete
-publication, changed source or volume, and seed/root uncertainty remain refused.
+Expected/non-v3 witnesses, uncreated verification and missing or incomplete
+original command prefixes remain ineligible for reconciliation. Known compute
+stop keeps its existing incomplete-stop result and every unresolved storage
+anchor; it does not probe or replay a helper for those cases. A selected complete
+prefix still needs every fresh proof above: malformed current records, changed
+source or volume and drift during that attempt refuse. Retained helpers, failed
+verification and seed/root uncertainty never gain completion authority.
 The settled-record observation API remains observation-only; it exposes no journal
 completion callback. Portable source-CLI tests use a stand-in daemon/kernel and
 real private files/children. They do not qualify installed interruption/recovery,

@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
 import {
+  mkdir,
   mkdtemp,
   readFile,
   realpath,
@@ -15,9 +16,11 @@ import {
   beginNativeComposeStorageCarrierIntent,
   consumeNativeComposeStorageCarrierCompletion,
   initializeNativeComposeStorageCarrierJournal,
+  nativeComposeStorageReadonlyCarrierRecoveryEligible,
   readNativeComposeStorageReadonlyCarrierIntent,
 } from "../src/lib/native-compose-storage-carrier-journal.ts";
 import type { NativeComposeStorageXattrInvocation } from "../src/lib/native-compose-storage-witness-xattr-carrier.ts";
+import { commandReaderFixture } from "./helpers/native-compose-storage-command-fixture.ts";
 
 let active = 0,
   unknown = false;
@@ -47,7 +50,7 @@ function whole(body: () => Promise<void>) {
     }
   };
 }
-async function fixture() {
+async function fixture(recordCreated = true) {
   const root = await realpath(
     await mkdtemp(join(tmpdir(), "carrier-completion-"))
   );
@@ -137,7 +140,9 @@ async function fixture() {
     input,
   });
   const created = { id: "e".repeat(64), createdAt: "2026-10-09T01:00:00Z" };
-  await intent.recordCreated(created);
+  if (recordCreated) {
+    await intent.recordCreated(created);
+  }
   const path = join(root, "carrier.json");
   const select = () =>
     readNativeComposeStorageReadonlyCarrierIntent({
@@ -160,6 +165,63 @@ async function fixture() {
     },
   };
 }
+
+test(
+  "readonly recovery eligibility retains uncreated and legacy work without command observation",
+  whole(async () => {
+    for (const created of [false, true]) {
+      const f = await fixture(created);
+      const prior = await readFile(f.path, "utf8");
+      expect(
+        await nativeComposeStorageReadonlyCarrierRecoveryEligible({
+          ...f.bound,
+          ownerDirectory: f.bound.directory,
+        })
+      ).toBe(false);
+      expect(await readFile(f.path, "utf8")).toBe(prior);
+    }
+  })
+);
+
+test(
+  "readonly recovery eligibility selects only complete successful current prefixes and rejects malformed records",
+  whole(async () => {
+    for (const helperState of ["created", "exited", "absent"] as const) {
+      const f = await fixture();
+      const root = join(f.root, "storage-carriers");
+      await mkdir(root, { mode: 0o700 });
+      const path = join(root, f.input.invocationId);
+      await mkdir(path, { mode: 0o700 });
+      const commands = await commandReaderFixture({
+        root: path,
+        invocationId: f.input.invocationId,
+        created: f.created,
+        helperState,
+      });
+      try {
+        const prior = await readFile(f.path, "utf8");
+        const eligible = () =>
+          nativeComposeStorageReadonlyCarrierRecoveryEligible({
+            ...f.bound,
+            ownerDirectory: f.bound.directory,
+          });
+        expect(await eligible()).toBe(helperState === "absent");
+        expect(await readFile(f.path, "utf8")).toBe(prior);
+        if (helperState === "absent") {
+          const record = await commands.record();
+          await writeFile(
+            join(path, "commands.json"),
+            JSON.stringify({ ...record, version: 99 })
+          );
+          await expect(eligible()).rejects.toThrow("values omitted");
+          expect(await readFile(f.path, "utf8")).toBe(prior);
+        }
+      } finally {
+        await commands.directory.file.close();
+      }
+    }
+  })
+);
 
 test(
   "transport-return crash preserves exact intent; removed proof clears once without claiming original finish",

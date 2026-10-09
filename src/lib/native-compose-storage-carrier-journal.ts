@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
-import { rename } from "node:fs/promises";
+import { lstat, rename } from "node:fs/promises";
 import { join } from "node:path";
 import { isRecord } from "./guards.ts";
 import type {
@@ -17,6 +17,7 @@ import {
   writeExclusive,
 } from "./native-compose-private-state.ts";
 import { nativeComposeRetainedVolumesValid } from "./native-compose-retained-storage.ts";
+import { parseNativeComposeStorageCommandRecord } from "./native-compose-storage-command-record.ts";
 import type { NativeComposeStorageWitnessState } from "./native-compose-storage-witness-state.ts";
 import {
   type NativeComposeStorageXattrInvocation,
@@ -430,6 +431,92 @@ export async function readNativeComposeStorageReadonlyCarrierIntent(
       await save(bound, prior, null, checkRemoved);
     },
   });
+}
+
+/** Eligibility only, never settlement or completion authority. Valid unsupported
+ * work remains pending; a selected current prefix still needs the full owner. */
+export async function nativeComposeStorageReadonlyCarrierRecoveryEligible(
+  opts: Bound & { readonly ownerDirectory: HeldDirectory }
+): Promise<boolean> {
+  const bound = Object.freeze({
+    directory: Object.freeze({ ...opts.directory }),
+    token: opts.token,
+    check: opts.check,
+  });
+  const owner = Object.freeze({ ...opts.ownerDirectory });
+  const held: HeldDirectory[] = [owner];
+  await bound.check();
+  const prior = await read(bound);
+  const unchanged = async () => {
+    await bound.check();
+    const latest = await read(bound);
+    if (!sameFile(latest.info, prior.info) || latest.text !== prior.text) {
+      return refuse();
+    }
+    await recheckDirectories(held);
+    await bound.check();
+  };
+  try {
+    const intent = prior.state.intent;
+    if (
+      !intent ||
+      intent.operation !== "verify" ||
+      !intent.readonly ||
+      intent.created === null
+    ) {
+      await unchanged();
+      return false;
+    }
+    for (const path of [
+      join(owner.path, "storage-carriers"),
+      join(owner.path, "storage-carriers", intent.invocationId),
+    ]) {
+      try {
+        await lstat(path);
+      } catch (error: unknown) {
+        if (!isRecord(error) || error.code !== "ENOENT") {
+          throw error;
+        }
+        await unchanged();
+        return false;
+      }
+      held.push(await holdDirectory(path, true));
+    }
+    const directory = held.at(-1) ?? refuse();
+    let saved: Awaited<ReturnType<typeof readPrivate>>;
+    try {
+      saved = await readPrivate(join(directory.path, "commands.json"), 32_768);
+    } catch (error: unknown) {
+      if (!isRecord(error) || error.code !== "ENOENT") {
+        throw error;
+      }
+      await unchanged();
+      return false;
+    }
+    const record = parseNativeComposeStorageCommandRecord(saved.text);
+    const eligible =
+      record.commands.length === 3 &&
+      record.commands.every(
+        (command) =>
+          command.child !== null &&
+          command.settlement !== null &&
+          command.settlement.exitCode === 0 &&
+          !command.settlement.timedOut &&
+          !command.settlement.cancelled
+      );
+    await unchanged();
+    const latest = await readPrivate(
+      join(directory.path, "commands.json"),
+      32_768
+    );
+    if (!sameFile(latest.info, saved.info) || latest.text !== saved.text) {
+      return refuse();
+    }
+    await unchanged();
+    return eligible;
+  } finally {
+    await Promise.allSettled(held.slice(1).map((entry) => entry.file.close()));
+  }
 }
 
 /** Saved-only check. Broken anchors and unknown intent block admission/retirement but permit explicit saved stop. */

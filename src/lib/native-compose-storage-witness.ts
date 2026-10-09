@@ -31,6 +31,7 @@ import {
   beginNativeComposeStorageCarrierIntent,
   initializeNativeComposeStorageCarrierJournal,
   type NativeComposeStorageReadonlyCarrierIntent,
+  nativeComposeStorageReadonlyCarrierRecoveryEligible,
   readNativeComposeStorageReadonlyCarrierIntent,
 } from "./native-compose-storage-carrier-journal.ts";
 import {
@@ -1356,44 +1357,49 @@ export async function observeNativeComposeStorageWitnessCarrier(opts: {
   readonly helperState: "created" | "exited";
   readonly hostCommandSettlement: "unknown" | "records-settled";
 }> {
-  return await withSavedReadonlyCarrier({
-    ...opts,
-    phase: "storage-recovery-observe",
-    run: async (selected) => {
-      const observation = await opts.observe(
-        Object.freeze({
-          intent: selected.intent,
-          request: selected.request,
-          assertUnchanged: selected.assertUnchanged,
-        })
-      );
-      await selected.assertUnchanged();
-      const helperState =
-        typeof observation === "string" ? observation : observation.helperState;
-      if (helperState !== "created" && helperState !== "exited") {
-        return refuse();
-      }
-      let hostCommandSettlement: "unknown" | "records-settled" = "unknown";
-      if (typeof observation !== "string" && observation.commands !== null) {
-        try {
-          hostCommandSettlement = observeNativeComposeStorageCommandSettlement({
-            observation: observation.commands,
-            invocationId: selected.intent.invocationId,
-            created: selected.intent.created,
-            helperState,
-          });
-        } catch {
-          hostCommandSettlement = "unknown";
+  return (
+    (await withSavedReadonlyCarrier({
+      ...opts,
+      phase: "storage-recovery-observe",
+      run: async (selected) => {
+        const observation = await opts.observe(
+          Object.freeze({
+            intent: selected.intent,
+            request: selected.request,
+            assertUnchanged: selected.assertUnchanged,
+          })
+        );
+        await selected.assertUnchanged();
+        const helperState =
+          typeof observation === "string"
+            ? observation
+            : observation.helperState;
+        if (helperState !== "created" && helperState !== "exited") {
+          return refuse();
         }
-      }
-      await selected.assertUnchanged();
-      return Object.freeze({
-        kind: "readonly-verification-retained" as const,
-        helperState,
-        hostCommandSettlement,
-      });
-    },
-  });
+        let hostCommandSettlement: "unknown" | "records-settled" = "unknown";
+        if (typeof observation !== "string" && observation.commands !== null) {
+          try {
+            hostCommandSettlement =
+              observeNativeComposeStorageCommandSettlement({
+                observation: observation.commands,
+                invocationId: selected.intent.invocationId,
+                created: selected.intent.created,
+                helperState,
+              });
+          } catch {
+            hostCommandSettlement = "unknown";
+          }
+        }
+        await selected.assertUnchanged();
+        return Object.freeze({
+          kind: "readonly-verification-retained" as const,
+          helperState,
+          hostCommandSettlement,
+        });
+      },
+    })) ?? refuse()
+  );
 }
 /** Complete only already removed readonly verification. No helper replay/removal,
  * no witness promotion and no data deletion; old or ambiguous records refuse. */
@@ -1437,7 +1443,7 @@ async function withSavedReadonlyCarrier<T>(opts: {
       >;
     }
   ) => Promise<T>;
-}): Promise<T> {
+}): Promise<T | undefined> {
   const { authority, generation, engineId, phase, run } = opts;
   if (
     !nativeComposeStorageWitnessReferenceValid(opts.reference) ||
@@ -1466,7 +1472,8 @@ async function withSavedReadonlyCarrier<T>(opts: {
         if (
           saved.version !== 3 ||
           !expectationMatchesReference({ saved, reference }) ||
-          !matchesBinding(saved.binding, current, engineId)
+          (phase !== "storage-recovery-finish" &&
+            !matchesBinding(saved.binding, current, engineId))
         ) {
           return refuse();
         }
@@ -1500,6 +1507,20 @@ async function withSavedReadonlyCarrier<T>(opts: {
             return refuse();
           }
         };
+        if (
+          phase === "storage-recovery-finish" &&
+          !(await nativeComposeStorageReadonlyCarrierRecoveryEligible({
+            directory: last(held),
+            ownerDirectory: held[0] ?? refuse(),
+            token: saved.carrierJournalToken,
+            check,
+          }))
+        ) {
+          return undefined;
+        }
+        if (!matchesBinding(saved.binding, current, engineId)) {
+          return refuse();
+        }
         const selected = await readNativeComposeStorageReadonlyCarrierIntent({
           directory: last(held),
           token: saved.carrierJournalToken,

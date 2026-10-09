@@ -331,13 +331,19 @@ export async function reconcileNativeComposeCommandStorage(opts: {
   if (!current.storageWitnessesPending) {
     return;
   }
+  const candidates = (current.storageWitnesses ?? []).filter(
+    (state) => state.state === "enrolled" && state.reference.version === 3
+  );
+  if (candidates.length === 0) {
+    return;
+  }
   const engineId = await observeNativeComposeFileEngine({
     signal: opts.signal,
   });
   const deadline = Date.now() + resolveComposeStartupTimeoutMs();
-  for (const state of current.storageWitnesses ?? []) {
+  for (const state of candidates) {
     if (state.state !== "enrolled" || state.reference.version !== 3) {
-      return refuse();
+      continue;
     }
     // A completed sibling journal is skipped without weakening the selected unknown one.
     const { nativeComposeStorageCarriersPending } = await import(

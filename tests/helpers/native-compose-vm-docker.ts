@@ -332,6 +332,24 @@ if (args[0] === "container" && args[1] === "create") {
     programs[role],
   ]);
   const id = (role === "writer" ? "c" : "d").repeat(64);
+  const observedCaps = (await has("prefixed-capabilities"))
+    ? caps.map((cap) => `CAP_${cap}`)
+    : [...caps];
+  if (await has("extra-capability")) {
+    observedCaps.push("CAP_SYS_ADMIN");
+  }
+  if (await has("duplicate-capability")) {
+    observedCaps[1] = observedCaps[0] ?? refuse();
+  }
+  if (await has("alias-duplicate-capability")) {
+    observedCaps[1] = `CAP_${caps[0]}`;
+  }
+  if (await has("wrong-capability")) {
+    observedCaps[0] = "CAP_DAC_READ_SEARCH";
+  }
+  if (await has("repeated-prefix-capability")) {
+    observedCaps[0] = "CAP_CAP_CHOWN";
+  }
   state.containers[id] = {
     id,
     name: `/${name}`,
@@ -348,9 +366,11 @@ if (args[0] === "container" && args[1] === "create") {
     restart: { Name: "no", MaximumRetryCount: 0 },
     readonly: true,
     privileged: false,
-    capAdd: caps,
+    capAdd: observedCaps,
     capDrop: ["ALL"],
-    security: ["no-new-privileges"],
+    security: (await has("wrong-helper-security"))
+      ? ["no-new-privileges=false"]
+      : ["no-new-privileges"],
     autoRemove: false,
     mounts: [
       {

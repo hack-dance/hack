@@ -409,7 +409,16 @@ function assertHelper(
       }) &&
       sameNativeComposeFileState(r.capDrop, ["ALL"]) &&
       Array.isArray(r.capAdd) &&
-      sameNativeComposeFileState([...r.capAdd].sort(), caps) &&
+      sameNativeComposeFileState(
+        r.capAdd
+          .map((capability) =>
+            typeof capability === "string" && capability.startsWith("CAP_")
+              ? capability.slice(4)
+              : capability
+          )
+          .sort(),
+        caps
+      ) &&
       sameNativeComposeFileState(r.security, ["no-new-privileges"]) &&
       Array.isArray(r.mounts) &&
       r.mounts.length ===

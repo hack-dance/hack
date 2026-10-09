@@ -173,6 +173,8 @@ copies and synchronizes them. Original sources and host copies keep their modes.
 A random witness, stat/hash/stat observations and selected-owner reads bind the
 private volume incarnation. Protected members must actually refuse a distinct
 UID's read with `EACCES`.
+Helper capability checks accept Docker's `CAP_` prefix and unprefixed names for
+the same exact capability set; extra, repeated or different capabilities refuse.
 
 One readonly observer container remains with the generation. It has no network,
 ports, restart policy or idle polling: it waits on stdin, and runs fixed commands

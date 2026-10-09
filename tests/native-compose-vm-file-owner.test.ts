@@ -204,6 +204,95 @@ test.each([
   });
 }, 45_000);
 
+test.each([
+  "unprefixed-capabilities",
+  "prefixed-capabilities",
+] as const)("VM helper %s preserve the exact capability set through known rollback", async (marker) => {
+  const fixture = await vmFileFixture();
+  await fixture.mark(marker);
+  await withStore(fixture, async (mutation) => {
+    const selected = await staged(fixture, mutation);
+    try {
+      const state = await fixture.state();
+      expect(
+        isRecord(state) &&
+          isRecord(state.containers) &&
+          state.containers["d".repeat(64)]
+      ).toMatchObject({
+        capAdd:
+          marker === "prefixed-capabilities"
+            ? ["CAP_DAC_OVERRIDE", "CAP_SETGID", "CAP_SETUID"]
+            : ["DAC_OVERRIDE", "SETGID", "SETUID"],
+        capDrop: ["ALL"],
+        security: ["no-new-privileges"],
+        readonly: true,
+        network: "none",
+      });
+      await selected.owner.rollback(selected.attempt);
+      expect(await fixture.state()).toMatchObject({
+        volume: null,
+        containers: {},
+      });
+      const commands = await fixture.commands();
+      expect(
+        commands.filter((args) => args[0] === "container" && args[1] === "rm")
+      ).toEqual([
+        ["container", "rm", "c".repeat(64)],
+        ["container", "rm", "d".repeat(64)],
+      ]);
+      expect(
+        commands.filter((args) => args[0] === "volume" && args[1] === "rm")
+      ).toHaveLength(1);
+      expect(
+        commands.some(
+          (args) => args.includes("--force") || args.includes("prune")
+        )
+      ).toBe(false);
+    } finally {
+      await selected.owner.close();
+      await closeNativeComposeFileSources(selected.sources);
+    }
+  });
+}, 45_000);
+
+test.each([
+  "extra-capability",
+  "duplicate-capability",
+  "alias-duplicate-capability",
+  "wrong-capability",
+  "repeated-prefix-capability",
+  "wrong-helper-security",
+] as const)("VM helper %s refuses before writer start and never retires partial resources", async (marker) => {
+  const fixture = await vmFileFixture();
+  await fixture.mark(marker);
+  await withStore(fixture, async (mutation) => {
+    await expect(staged(fixture, mutation)).rejects.toThrow();
+    const commands = await fixture.commands();
+    expect(
+      commands.filter((args) => args[0] === "container" && args[1] === "create")
+    ).toHaveLength(1);
+    expect(
+      commands.some(
+        (args) =>
+          args[1] === "start" ||
+          args[1] === "stop" ||
+          args[1] === "rm" ||
+          args[0] === "compose"
+      )
+    ).toBe(false);
+    const state = await fixture.state();
+    expect(isRecord(state) && state.volume).toMatchObject({
+      driver: "local",
+      scope: "local",
+    });
+    expect(
+      isRecord(state) &&
+        isRecord(state.containers) &&
+        Object.keys(state.containers)
+    ).toEqual(["c".repeat(64)]);
+  });
+}, 45_000);
+
 test("an unknown verification durably stays armed and cannot earn later rollback", async () => {
   const fixture = await vmFileFixture();
   await withStore(fixture, async (mutation) => {

@@ -15,7 +15,14 @@ import {
   acquireLegacyComposeAdoptionBinding,
   LegacyComposeAdoptionBindingError,
 } from "../src/lib/native-compose-adoption-binding.ts";
+import { executeLegacyComposeRetainedPlan } from "../src/lib/native-compose-adoption-execution.ts";
+import {
+  type LegacyComposeJobState,
+  legacyComposeFreshJobResult,
+} from "../src/lib/native-compose-adoption-jobs.ts";
+import { legacyComposeRetainedPlan } from "../src/lib/native-compose-adoption-readiness.ts";
 import { acquireNativeConfigImportInputs } from "../src/lib/native-config-import-inputs.ts";
+import { mapLegacyNativeStorageAdoption } from "../src/lib/native-config-import-plan.ts";
 import { restoreEnv } from "./helpers/env.ts";
 
 const CANARY = "synthetic-private-adoption-canary";
@@ -34,7 +41,12 @@ let root: string;
 let projectRoot: string;
 let priorPath: string | undefined;
 let fixture: Fixture;
+let snapshotCaseActive = false;
+let snapshotCaseUnconfirmed = false;
 beforeEach(async () => {
+  if (snapshotCaseUnconfirmed) {
+    throw new Error("Snapshot case lifetime unconfirmed; fixture retained.");
+  }
   priorPath = process.env.PATH;
   root = await realpath(
     await mkdtemp(join(tmpdir(), "native-adoption-binding-"))
@@ -129,6 +141,16 @@ else {
 if (fixture.mode === "replace-volume" && kind === "volume" && action === "inspect") {fixture.volume[0].createdAt = '2026-02-02T01:02:03Z';delete fixture.mode;writeFileSync(root + '/fixture.json',JSON.stringify(fixture));}
 if (fixture.mode === "source-change" && kind === "info") {appendFileSync(${JSON.stringify(join(projectRoot, ".hack/docker-compose.yml"))}, '\\n');}
 if (fixture.mode === "inventory-change" && kind === "container" && action === "ls") {fixture.container.push({...fixture.container[0],id:'c'.repeat(64),name:'/fixture-db-2'});delete fixture.mode;writeFileSync(root+'/fixture.json',JSON.stringify(fixture));}
+if (fixture.mode === "snapshot-job-exit" && kind === "network" && action === "inspect") {
+ const before = structuredClone(fixture);
+ const job = fixture.container.find(row => row.id === 'e'.repeat(64) && row.service === 'seed');
+ if (!job || job.running !== true) process.exit(98);
+ job.running = false;
+ fixture.network[0].containers = fixture.network[0].containers.filter(id => id !== job.id);
+ delete fixture.mode;
+ writeFileSync(root+'/snapshot-transition.json', JSON.stringify({before, after:fixture}));
+ writeFileSync(root+'/fixture.json', JSON.stringify(fixture));
+}
 `
   );
   await chmod(join(root, "docker"), 0o700);
@@ -136,6 +158,10 @@ if (fixture.mode === "inventory-change" && kind === "container" && action === "l
   await save();
 });
 afterEach(async () => {
+  if (snapshotCaseActive || snapshotCaseUnconfirmed) {
+    snapshotCaseUnconfirmed = true;
+    return;
+  }
   restoreEnv("PATH", priorPath);
   await rm(root, { recursive: true, force: true });
 });
@@ -268,6 +294,180 @@ test("stopped originals retain configured network identity without active endpoi
   expect(await acquired.resolveBinding({ projectRoot })).toEqual(original);
   expect(JSON.stringify(original)).not.toContain("running");
 });
+
+test("moving job snapshot counterexample retains identity but refuses an admitted exit", async () => {
+  snapshotCaseActive = true;
+  try {
+    const job = "e".repeat(64);
+    const web = "c".repeat(64);
+    const composeText = JSON.stringify({
+      name: "fixture",
+      services: {
+        db: {
+          image: CANARY,
+          volumes: ["data:/var/lib/database"],
+          healthcheck: {
+            test: ["CMD", "probe"],
+            interval: "1s",
+            timeout: "1s",
+            retries: 2,
+          },
+        },
+        seed: {
+          image: CANARY,
+          command: ["seed-once"],
+          labels: { "hack.service.one-shot": "true" },
+          depends_on: { db: { condition: "service_healthy" } },
+        },
+        web: {
+          image: CANARY,
+          depends_on: { seed: { condition: "service_completed_successfully" } },
+        },
+      },
+      volumes: { data: { name: VOLUME } },
+    });
+    await writeFile(join(projectRoot, ".hack/docker-compose.yml"), composeText);
+    fixture.container.push(
+      {
+        ...container(),
+        id: job,
+        name: "/fixture-seed-1",
+        service: "seed",
+        mounts: [],
+        running: false,
+      },
+      {
+        ...container(),
+        id: web,
+        name: "/fixture-web-1",
+        service: "web",
+        mounts: [],
+        running: false,
+      }
+    );
+    network().containers = [ID];
+    await save();
+    const mapped = mapLegacyNativeStorageAdoption({
+      configText: '{"name":"fixture"}',
+      composeText,
+    });
+    if (!mapped.candidate) {
+      throw new Error("Missing completed-job candidate");
+    }
+    const plan = legacyComposeRetainedPlan(mapped.candidate);
+    expect(plan.requiresV7).toBe(true);
+    expect(plan.ordered.find((item) => item.service === "seed")?.kind).toBe(
+      "job"
+    );
+    const acquired = await acquireLegacyComposeAdoptionBinding({ projectRoot });
+    const original = await acquired.resolveBinding({ projectRoot });
+    const effects: string[] = [];
+    let jobStarted = false;
+    const priorStartedAt = "2026-10-08T00:00:01Z";
+    async function observed(): Promise<LegacyComposeJobState[]> {
+      const current: Fixture = JSON.parse(
+        await readFile(join(root, "fixture.json"), "utf8")
+      );
+      return current.container.map((row) => ({
+        id: String(row.id),
+        running: row.running === true,
+        paused: false,
+        status: row.running ? "running" : "exited",
+        health: row.id === ID ? "healthy" : "",
+        exitCode: 0,
+        startedAt:
+          row.id === job && jobStarted
+            ? "2026-10-08T00:00:02Z"
+            : priorStartedAt,
+        finishedAt: row.running
+          ? "0001-01-01T00:00:00Z"
+          : "2026-10-08T00:00:03Z",
+        restartPolicy: "no",
+        maximumRetryCount: 0,
+      }));
+    }
+    // The maintained job fixture uses the same 20s operation / 30s case bounds.
+    const deadline = Date.now() + 20_000;
+    await refusal(
+      executeLegacyComposeRetainedPlan({
+        plan,
+        binding: original,
+        operation: "start",
+        deadline,
+        assertFresh: async () => {
+          await acquired.assertFresh({ projectRoot });
+        },
+        observe: observed,
+        effect: async (action, id) => {
+          effects.push(`${action}:${id}`);
+          if (action !== "start" || (id !== ID && id !== job)) {
+            throw new Error("Unexpected synthetic lifecycle call");
+          }
+          if (id === job) {
+            jobStarted = true;
+            const selected = fixture.container.find((row) => row.id === job);
+            if (!selected) {
+              throw new Error("Missing seed fixture");
+            }
+            selected.running = true;
+            network().containers = [ID, job];
+            fixture.mode = "snapshot-job-exit";
+            await save();
+          }
+          return 0;
+        },
+      }),
+      "E_LEGACY_COMPOSE_BINDING_IDENTITY"
+    );
+    expect(Date.now()).toBeLessThan(deadline);
+    expect(effects).toEqual([`start:${ID}`, `start:${job}`]);
+    const transition: { before: Fixture; after: Fixture } = JSON.parse(
+      await readFile(join(root, "snapshot-transition.json"), "utf8")
+    );
+    const expectedAfter = structuredClone(transition.before);
+    const selected = expectedAfter.container.find((row) => row.id === job);
+    if (!selected) {
+      throw new Error("Missing original seed transition");
+    }
+    selected.running = false;
+    expectedAfter.network[0]!.containers = [ID];
+    const { mode: _mode, ...expectedWithoutMode } = expectedAfter;
+    expect(transition.after).toEqual(expectedWithoutMode);
+    const completed = (await observed()).find((row) => row.id === job);
+    if (!completed) {
+      throw new Error("Missing completed seed observation");
+    }
+    expect(
+      legacyComposeFreshJobResult({
+        attempt: { id: job, priorStartedAt },
+        observed: completed,
+      })
+    ).toBe("ready");
+    expect(
+      legacyComposeFreshJobResult({
+        attempt: { id: job, priorStartedAt: completed.startedAt },
+        observed: completed,
+      })
+    ).toBe("waiting");
+    expect(
+      legacyComposeFreshJobResult({
+        attempt: { id: "f".repeat(64), priorStartedAt },
+        observed: completed,
+      })
+    ).toBe("refused");
+    expect(
+      legacyComposeFreshJobResult({
+        attempt: { id: job, priorStartedAt },
+        observed: { ...completed, finishedAt: "0001-01-01T00:00:00Z" },
+      })
+    ).toBe("refused");
+    await acquired.assertFresh({ projectRoot });
+    expect(await acquired.resolveBinding({ projectRoot })).toEqual(original);
+    expect(await Bun.file(join(root, "mutation")).exists()).toBe(false);
+  } finally {
+    snapshotCaseActive = false;
+  }
+}, 30_000);
 
 test("one authored bridge binds original physical ID, internal policy and exact live aliases", async () => {
   await customBridge();

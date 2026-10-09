@@ -8,12 +8,14 @@ provider, image acquisition or receipt effects. This feature's compiler path
 dependency requires the repository's pinned Rust 1.97.1. The default runtime
 package keeps its declared Rust 1.85 minimum; enabling the adapter requires Rust 1.97.1.
 
-The adapter accepts at most 32 selected image-only services/jobs, exec readiness,
+The adapter accepts at most 32 selected pinned-image services/jobs, exec readiness,
 explicit exec/shell commands, entrypoint clearing, init, exact shutdown intent and
 working directories. Jobs require successful completion; services with readiness
 require health, and other services require startup. Workload names, including dots,
-remain exact. Omitted process fields preserve image/backend defaults. Source and
-worktree declarations and local resolution remain intent only.
+remain exact. Omitted process fields preserve image/backend defaults. One project-relative
+read-only live source bind per workload is supported through an already-approved
+pool share. Other source acquisition and worktree declarations and local resolution
+remain intent only.
 An explicit entrypoint requires an authored command, matching the bounded NC03
 renderer; image CMD inheritance under an entrypoint override remains unqualified.
 
@@ -168,7 +170,8 @@ native host boot time. Live authentication rechecks that boot together with the
 existing exact process and filesystem identities. The closed version2 live-owner
 decoder remains available without inferring host boot from PID birth or guest
 receipt boot. Version2 records reject the new field, and version3 records require
-it. Native runtime receipts and the authenticated control/ready wire remain v2;
+it. Native runtime receipts are v2 for image-only graphs and v3 for source-bearing
+graphs; the authenticated control/ready wire remains v2;
 Compose receipt and owner formats remain unchanged. This provenance alone grants
 no dead-owner recovery authority.
 Cancellation fences startup before admission and subsequent effects. Cleanup

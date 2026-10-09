@@ -1,5 +1,6 @@
 import { join } from "node:path";
 import { HackCliError } from "./cli-result.ts";
+import { resolveComposeStartupTimeoutMs } from "./compose-startup-budget.ts";
 import { resolveGlobalHackDir } from "./config-paths.ts";
 import { isRecord } from "./guards.ts";
 import { refuseNativeComposeFile } from "./native-compose-file-bytes.ts";
@@ -33,6 +34,11 @@ import {
   assertNativeComposeOwned,
   type NativeComposeOwnershipOptions,
 } from "./native-compose-ownership.ts";
+import {
+  assertNativeComposeVmFiles,
+  stageNativeComposeVmFiles,
+} from "./native-compose-vm-file-owner.ts";
+import { NATIVE_COMPOSE_VM_FILES_EXTENSION } from "./native-compose-vm-file-protocol.ts";
 import { nativeFilePlanningRequired } from "./native-file-plan-protocol.ts";
 import { type RunOptions, run } from "./shell.ts";
 
@@ -264,6 +270,7 @@ export async function prepareNativeComposeCommandFiles(opts: {
   const { mutation, store, reservation, inputs, signal } = opts;
   const profiles = [...(opts.profiles ?? [])];
   const explicitOverlay = opts.explicitOverlay;
+  const deadline = Date.now() + resolveComposeStartupTimeoutMs();
   const root = join(resolveGlobalHackDir(), "compose-files");
   if (!nativeFilePlanningRequired(inputs.result.plan)) {
     return null;
@@ -278,6 +285,7 @@ export async function prepareNativeComposeCommandFiles(opts: {
   const owner = createNativeComposeFileOwner({
     root,
     authority: mutation.materialAuthority,
+    signal,
   });
   let armed = false;
   let reaped = false;
@@ -297,7 +305,29 @@ export async function prepareNativeComposeCommandFiles(opts: {
     const engineId = await observeNativeComposeFileEngine({ signal });
     await assertNativeComposeFileRootUnbound({ root, engineId, signal });
     const attempt = await owner.prepare({ reservation, sources });
-    const projection = await owner.projection(attempt);
+    let projection = await owner.projection(attempt);
+    const vmRequired = Object.values(
+      selected.result.file_plan?.workloads ?? {}
+    ).some((grants) =>
+      grants.some(
+        (grant) =>
+          grant.mode !== "0444" ||
+          grant.uid !== undefined ||
+          grant.gid !== undefined
+      )
+    );
+    if (vmRequired) {
+      projection = await stageNativeComposeVmFiles({
+        authority: mutation.materialAuthority,
+        reservation,
+        sources,
+        host: projection,
+        engineId,
+        signal,
+        deadline,
+      });
+      owner.selectVmProjection({ attempt, projection });
+    }
     return Object.freeze({
       inputs: selected,
       projection,
@@ -316,6 +346,16 @@ export async function prepareNativeComposeCommandFiles(opts: {
         };
         await assertProjection();
         await assertNativeComposeFileRootUnbound({ root, engineId, signal });
+        const document = await store.readGenerationDocument(generation);
+        if (Object.hasOwn(document, NATIVE_COMPOSE_VM_FILES_EXTENSION)) {
+          await assertNativeComposeVmFiles({
+            authority: mutation.materialAuthority,
+            generation,
+            document,
+            signal,
+            deadline,
+          });
+        }
         await assertProjection();
       },
       arm: async (generation: NativeComposeGeneration) => {
@@ -339,6 +379,16 @@ export async function prepareNativeComposeCommandFiles(opts: {
         await owner.assertSavedReady(generation);
         const document = await store.readGenerationDocument(generation);
         const before = await assertNativeComposeOwned(selection);
+        if (Object.hasOwn(document, NATIVE_COMPOSE_VM_FILES_EXTENSION)) {
+          await assertNativeComposeVmFiles({
+            authority: mutation.materialAuthority,
+            generation,
+            document,
+            signal,
+            deadline,
+            observed: before,
+          });
+        }
         await assertNativeComposeFileMounts({
           document,
           generationId: generation.generationId,
@@ -390,6 +440,7 @@ export async function retireNativeComposeSavedFiles(opts: {
     const owner = createNativeComposeFileOwner({
       root: value.root,
       authority: mutation.materialAuthority,
+      signal,
     });
     try {
       await owner.retire({

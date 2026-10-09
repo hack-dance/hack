@@ -60,11 +60,15 @@ managed owner and exact material projection. The native graph adapter continues 
 refuse raw file namespace presence, including empty definitions and inactive
 grants, before private value copies. Neither path falls back to another backend.
 
-The first private owner subset is read-only mode `0444` with no UID/GID override;
-custom permissions, writable access, one-off `run`, and projects combining builds
-with file inputs remain outside that subset. File-backed Compose config/secret
-mounts do not implement portable ownership remapping, so emitting ignored attributes
-would not satisfy this contract. See the [Compose long-syntax contract](https://docs.docker.com/reference/compose-file/services/#secrets).
+The host snapshot path remains read-only mode `0444` with no UID/GID override.
+New or explicitly recreated containers with read-only `0400`/`0600` grants or
+numeric ownership use a separate VM material owner. Other modes, writable access,
+one-off `run`, and builds combined with file inputs remain refused. File-backed
+Compose config/secret mounts do not implement portable ownership remapping, so
+emitting ignored attributes would not satisfy this contract. See the
+[Compose long-syntax contract](https://docs.docker.com/reference/compose-file/services/#secrets).
+This transport does not change retained adoption policy or permissions on an
+original config or secret file.
 Private snapshot ownership, freshness, exact bind
 projection, interruption recovery and verified cleanup have separate source and
 synthetic engine qualification boundaries. See the
@@ -143,3 +147,43 @@ After durable arming, cancellation and the configured deadline are checked again
 after fresh ownership checks and synchronously at the actual spawn boundary,
 including terminal setup. An interrupted arm retains its exact pending reference
 without launching a later child or inferring reaping from engine absence.
+
+The VM path requires an explicit eligible local Unix Docker selection and already
+cached workload images plus `oven/bun:1.4.2-slim`. It neither pulls nor builds an
+image. Images declaring volumes and workload pull policy `always` refuse. Hack
+pins each physical workload image and its original `Config.User`; it does not
+rewrite the app command or user. An omitted grant UID/GID defaults to `0:0` only
+when that pinned image has exactly empty `Config.User`. Other image users require
+both explicit numeric grant IDs; no passwd or group inference is performed.
+
+Under the existing material lease, Hack synchronizes a separate VM intent and
+creates one fresh local volume. A fixed short-lived writer receives bounded
+private stdin, exclusively creates opaque members, sets permissions on these new
+copies and synchronizes them. Original sources and host copies keep their modes.
+A random witness, stat/hash/stat observations and selected-owner reads bind the
+private volume incarnation. Protected members must actually refuse a distinct
+UID's read with `EACCES`.
+
+One readonly observer container remains with the generation. It has no network,
+ports, restart policy or idle polling: it waits on stdin, and runs fixed commands
+only for admission, readiness and retirement. Its readonly volume and exact
+daemon-native single-file binds must identify the same members. Before app
+creation, actual observer reads must satisfy ownership and distinct-UID denial,
+and a privileged write open on the projected file must return `EROFS`. Failure
+refuses app startup; there is no host-bind fallback. The app receives only its
+exact granted readonly files, never a mount of the material parent. This adds a
+private observer and volume per generation; it makes no resource-reduction claim.
+
+A separate fixed-inode journal arms every guest observation before exec. Unknown
+writer or observation results retain material and never earn deletion. Only the
+host owner's known-child or unarmed-rollback journal can issue VM retirement.
+Fresh same-engine checks bind the exact volume, observer, members and all current
+consumers. Retirement stops and nonforce-removes that exact observer, proves full
+consumer absence, then nonforce-removes the singleton owned volume. If interruption
+loses the observer witness while its volume remains, a later invocation retains
+the volume rather than deleting from its name and birth alone. Saved owned stop
+remains possible with a valid unknown-observation journal; retirement stays refused.
+
+Offline emitted-program and fake-engine controls do not establish provider support.
+Actual owner/nonowner access, readonly write refusal, ungranted isolation and full
+lifecycle/recovery qualification remain separate gates for this VM transport.

@@ -177,14 +177,11 @@ async function lease(opts: {
     }
     freezeImportValue(proof);
     let open = true;
-    const assertFresh = async () => {
+    const assertDirectoriesFresh = async () => {
       check(opts.signal);
       if (!open) {
         refuse();
       }
-      // Layout checks can await unrelated input owners. Mounted pathname and
-      // descriptor identities must be checked after that final async boundary.
-      await requireLayout(opts.root, opts.candidate, opts.signal);
       for (const item of held) {
         const current = await item.file.stat();
         if (
@@ -205,6 +202,16 @@ async function lease(opts: {
         refuse();
       }
     };
+    const assertFresh = async () => {
+      check(opts.signal);
+      if (!open) {
+        refuse();
+      }
+      // Layout checks can await unrelated input owners. Mounted pathname and
+      // descriptor identities must be checked after that final async boundary.
+      await requireLayout(opts.root, opts.candidate, opts.signal);
+      await assertDirectoriesFresh();
+    };
     const close = async () => {
       if (open) {
         open = false;
@@ -212,7 +219,7 @@ async function lease(opts: {
       }
     };
     await assertFresh();
-    const result = { proof, assertFresh, close };
+    const result = { proof, assertFresh, assertDirectoriesFresh, close };
     for (const key of Object.keys(result)) {
       Object.defineProperty(result, key, { enumerable: false });
     }

@@ -24,22 +24,21 @@ import { writeLifecycleMuxFixture } from "./helpers/lifecycle-mux-fixture.ts";
 const roots = new Set<string>();
 let unknown = false;
 let active = false;
+let unconfirmed = false;
 let restore: (() => void) | undefined;
 afterEach(async () => {
-  restore?.();
-  restore = undefined;
-  if (active || unknown) {
+  if (active || unknown || unconfirmed) {
+    unconfirmed = true;
     return;
   }
+  restore?.();
+  restore = undefined;
   for (const root of roots) {
     await rm(root, { recursive: true });
   }
   roots.clear();
 });
 async function fixture() {
-  if (active || unknown) {
-    throw new Error("Previous host process case is unresolved");
-  }
   const root = await realpath(
     await mkdtemp(join(tmpdir(), "native-host-owner-"))
   );
@@ -89,12 +88,15 @@ async function fixture() {
         process.execPath,
         "--no-env-file",
         "-e",
-        "await Bun.write('value-seen',process.env.HOST_VALUE??'missing');setInterval(()=>{},1000)",
+        "await Bun.write('value-seen',process.env.HOST_VALUE??'missing');await Bun.write('endpoint-seen',process.env.HOST_URL??'missing');setInterval(()=>{},1000)",
       ],
     },
     cwd: ".",
     env_target: { kind: "host" },
-    environment: { HOST_VALUE: { env_ref: "TOKEN" } },
+    environment: {
+      HOST_VALUE: { env_ref: "TOKEN" },
+      HOST_URL: { endpoint: { kind: "host_binding", name: "api" } },
+    },
   };
   const lifecycle = selectNativeHostLifecycle({
     host: { processes: { tunnel: invocation } },
@@ -114,6 +116,16 @@ async function fixture() {
             key: "TOKEN",
             scope: "host",
             secret: true,
+          },
+          HOST_URL: {
+            kind: "endpoint",
+            reference: { kind: "host_binding", name: "api" },
+            target: {
+              kind: "host",
+              context: "host",
+              protocol: "http",
+              port: 4321,
+            },
           },
         },
       },
@@ -140,14 +152,18 @@ function ownedCase(
   action: (f: Awaited<ReturnType<typeof fixture>>) => Promise<void>
 ) {
   test(name, async () => {
-    const f = await fixture();
+    if (active || unknown || unconfirmed) {
+      throw new Error("Previous host process case is unresolved");
+    }
     active = true;
     try {
+      const f = await fixture();
       await action(f);
-      active = false;
     } catch (error) {
-      unknown = true;
+      unconfirmed = true;
       throw error;
+    } finally {
+      active = false;
     }
   }, 20_000);
 }
@@ -182,6 +198,9 @@ ownedCase(
         await owner.start();
         await owner.assertReady();
         expect(await readFile(join(f.root, "value-seen"), "utf8")).toBe(canary);
+        expect(await readFile(join(f.root, "endpoint-seen"), "utf8")).toBe(
+          "http://127.0.0.1:4321"
+        );
         const calls = await readFile(`${f.state}.calls`, "utf8");
         expect(calls).not.toContain(canary);
         expect(calls).not.toContain("set-environment");

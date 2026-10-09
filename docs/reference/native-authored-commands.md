@@ -28,7 +28,7 @@ but refuses replacement of its inode. Selected path/ancestor aliases, identity
 or permission changes refuse, while exact owned shutdown remains possible after
 the host source is moved or deleted and preserves host data.
 
-Writable/other mounts, source acquisition, storage, file inputs and routing
+Writable source mounts, source acquisition, file inputs and routing
 remain outside this bounded frontend. The existing
 closed two-owned-bridge graph capability keeps its separate receipt and refuses
 source/storage intersections. Finite typed host lifecycle hooks use the supervised
@@ -41,6 +41,10 @@ compiler diagnostics or creating native source/start/run authority. `--detach`,
 the canonical project namespace without inferring a Git branch. Profile and env
 selection keep their compiler contracts. `--env base` bypasses inherited overlays
 with an explicit base selection; omitting `--env` retains the authored/local default.
+
+The separate persistent-storage capability requires the runtime's pinned sibling
+witness tool and retains its own ownership and recovery checks. It cannot be combined
+with the supervised host-process capability below.
 
 Startup shares the configured `HACK_COMPOSE_STARTUP_TIMEOUT_MS` budget across
 input preparation and native review, with a native maximum of 300000 milliseconds.

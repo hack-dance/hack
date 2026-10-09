@@ -1,4 +1,4 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, test as bunTest, expect } from "bun:test";
 import { mkdtemp, readdir, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
@@ -10,8 +10,31 @@ import { run } from "../src/lib/shell.ts";
 
 const roots = new Set<string>();
 let unknown = false;
+let active = false;
+let unconfirmed = false;
+function test(name: string, body: () => Promise<void>, timeout?: number) {
+  bunTest(
+    name,
+    async () => {
+      if (active || unknown || unconfirmed) {
+        throw new Error("Prior owned child is unconfirmed");
+      }
+      active = true;
+      try {
+        await body();
+      } catch (error) {
+        unconfirmed = true;
+        throw error;
+      } finally {
+        active = false;
+      }
+    },
+    timeout
+  );
+}
 afterEach(async () => {
-  if (unknown) {
+  if (active || unknown || unconfirmed) {
+    unconfirmed = true;
     return;
   }
   for (const root of roots) {
@@ -136,6 +159,7 @@ test("source drift at delivery claim refuses before the client command", async (
   });
   fresh = false;
   let settled = false;
+  let group: number | undefined;
   unknown = true;
   try {
     const code = await run(
@@ -152,6 +176,12 @@ test("source drift at delivery claim refuses before the client command", async (
         stderr: "ignore",
         timeoutMs: 5000,
         forwardSignals: true,
+        onSpawn: (event) => {
+          group = event.ownsProcessGroup
+            ? (event.processGroupId ?? event.pid)
+            : undefined;
+          return Promise.resolve();
+        },
         onExit: () => {
           settled = true;
           return Promise.resolve();
@@ -161,6 +191,15 @@ test("source drift at delivery claim refuses before the client command", async (
     expect(code).toBe(1);
     expect(settled).toBe(true);
     await expect(delivery.started()).rejects.toThrow("incomplete");
+    expect(group).toBeDefined();
+    let absent = false;
+    try {
+      process.kill(-(group ?? 0), 0);
+    } catch (error) {
+      absent =
+        error instanceof Error && "code" in error && error.code === "ESRCH";
+    }
+    expect(absent).toBe(true);
     unknown = false;
   } finally {
     await delivery.close();

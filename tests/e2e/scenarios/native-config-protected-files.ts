@@ -263,13 +263,28 @@ export function nativeProtectedFileRemovalMatches(opts: {
   }
   return canonical(opts.pin) === canonical(opts.current);
 }
-function legacy(instance: Checkout, bun: string, db: string) {
+/** Authored retained inputs stay inside the shipped file8 family; cached-image admission uses fixed --pull never. */
+export function nativeProtectedFileRetainedInputs(opts: {
+  readonly instance: Pick<Checkout, "name" | "grants">;
+  readonly bun: string;
+  readonly db: string;
+}) {
+  const { instance, bun, db } = opts;
+  return {
+    config: { name: instance.name },
+    compose: legacy(instance, bun, db),
+  };
+}
+function legacy(
+  instance: Pick<Checkout, "name" | "grants">,
+  bun: string,
+  db: string
+) {
   return {
     name: instance.name,
     services: {
       db: {
         image: db,
-        pull_policy: "never",
         environment: {
           POSTGRES_HOST_AUTH_METHOD: "trust",
           POSTGRES_DB: "fixture",
@@ -280,7 +295,6 @@ function legacy(instance: Checkout, bun: string, db: string) {
       },
       reader: {
         image: bun,
-        pull_policy: "never",
         command: LOOP,
         restart: "no",
         stop_grace_period: "1s",
@@ -302,7 +316,6 @@ function legacy(instance: Checkout, bun: string, db: string) {
       },
       ungranted: {
         image: bun,
-        pull_policy: "never",
         command: LOOP,
         restart: "no",
         stop_grace_period: "1s",
@@ -314,6 +327,40 @@ function legacy(instance: Checkout, bun: string, db: string) {
       private: { file: "../material/private" },
     },
     volumes: { data: { name: `${instance.name}_data` } },
+  };
+}
+/** Same controlled source for the mismatched-mode negative and legal0400 engine tripwire. */
+export function nativeProtectedFileModeRefusalInputs(opts: {
+  readonly name: string;
+  readonly bun: string;
+  readonly db: string;
+}) {
+  return {
+    config: { name: opts.name },
+    compose: {
+      name: opts.name,
+      services: {
+        db: {
+          image: opts.db,
+          environment: {
+            POSTGRES_HOST_AUTH_METHOD: "trust",
+            POSTGRES_DB: "fixture",
+          },
+          volumes: ["data:/var/lib/postgresql/data"],
+          restart: "no",
+          stop_grace_period: "1s",
+        },
+        reader: {
+          image: opts.bun,
+          command: LOOP,
+          restart: "no",
+          stop_grace_period: "1s",
+          secrets: [{ source: "private", mode: "0444" }],
+        },
+      },
+      secrets: { private: { file: "../material/private" } },
+      volumes: { data: { name: `${opts.name}_data` } },
+    },
   };
 }
 function native(instance: Checkout, bun: string) {
@@ -782,14 +829,19 @@ async function setup(ctx: ScenarioContext) {
   const first = await make(primaryRoot, `file-first-${suffix}`, "first"),
     second = await make(secondRoot, `file-second-${suffix}`, "second");
   for (const instance of [first, second]) {
+    const inputs = nativeProtectedFileRetainedInputs({
+      instance,
+      bun: tags[BUN_TAG],
+      db: tags[DB_TAG],
+    });
     await writeFile(
       join(instance.root, ".hack/hack.config.json"),
-      JSON.stringify({ name: instance.name, worktree: { inherit: false } }),
+      JSON.stringify(inputs.config),
       { mode: 0o600, flag: "wx" }
     );
     await writeFile(
       join(instance.root, ".hack/docker-compose.yml"),
-      JSON.stringify(legacy(instance, tags[BUN_TAG], tags[DB_TAG])),
+      JSON.stringify(inputs.compose),
       { mode: 0o600, flag: "wx" }
     );
     successful(
@@ -1842,37 +1894,19 @@ async function refusalBeforeEngine(h: Fixture) {
     Buffer.from("synthetic-private-refusal"),
     0o400
   );
+  const bun = h.baseline.tags[BUN_TAG],
+    db = h.baseline.tags[DB_TAG];
+  requireValue(typeof bun === "string" && typeof db === "string");
+  const { config, compose } = nativeProtectedFileModeRefusalInputs({
+    name,
+    bun,
+    db,
+  });
   await writeFile(
     join(root, ".hack/hack.config.json"),
-    JSON.stringify({ name, worktree: { inherit: false } }),
+    JSON.stringify(config),
     { flag: "wx", mode: 0o600 }
   );
-  const compose = {
-    name,
-    services: {
-      db: {
-        image: h.baseline.tags[DB_TAG],
-        pull_policy: "never",
-        environment: {
-          POSTGRES_HOST_AUTH_METHOD: "trust",
-          POSTGRES_DB: "fixture",
-        },
-        volumes: ["data:/var/lib/postgresql/data"],
-        restart: "no",
-        stop_grace_period: "1s",
-      },
-      reader: {
-        image: h.baseline.tags[BUN_TAG],
-        pull_policy: "never",
-        command: LOOP,
-        restart: "no",
-        stop_grace_period: "1s",
-        secrets: [{ source: "private", mode: "0444" }],
-      },
-    },
-    secrets: { private: { file: "../material/private" } },
-    volumes: { data: { name: `${name}_data` } },
-  };
   await writeFile(
     join(root, ".hack/docker-compose.yml"),
     JSON.stringify(compose),

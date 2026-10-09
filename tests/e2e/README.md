@@ -190,6 +190,14 @@ pins after source and artifact qualification; the selector does not manufacture
 the grant or use caller Docker credentials. It publishes no ports and performs no
 pulls, builds, DNS changes or trust changes.
 
+Retained fixture inputs use only the closed file8 source subset: no worktree
+policy or authored pull policy. Cached image selection is fenced independently,
+and the controlled Compose bootstrap keeps its fixed `--pull never` option.
+The pre-effect mode control first refuses an explicit 0444 grant on its owned
+0400 source, then changes only the declaration to 0400 and must reach the
+rejecting, never-forwarding Docker shim. Canonical mapper and shim controls cover
+this prerequisite separately from guest/runtime acceptance.
+
 The ordinary native fixture checks snapshot version 2. Two real linked retained
 checkouts then bind their original readonly sources, observed guest UID/GID and
 0400/0600 mode, original container/bridge/volume identities and distinct SQL

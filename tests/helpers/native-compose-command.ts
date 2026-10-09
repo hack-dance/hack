@@ -2,6 +2,7 @@ import { afterEach, expect } from "bun:test";
 import { chmod, mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { nativeComposeStorageDockerFixtureScript } from "./native-compose-storage-docker.ts";
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -143,6 +144,7 @@ const root=${JSON.stringify(root)};const args=process.argv.slice(2);
 await appendFile(root+"/requests",JSON.stringify(args)+"\\n");
 const engine=root+"/engine";
 const volumes=root+"/volumes";
+${opts.storage ? nativeComposeStorageDockerFixtureScript(root) : ""}
 if(args[0]==="compose") {
  if(args.includes("up")) {
   if(${failedStartup}) process.exit(19);
@@ -204,7 +206,8 @@ process.exit(99);
 export async function invoke(
   root: string,
   args = ["up", "--detach", "--json"],
-  startupTimeoutMs = 1000
+  startupTimeoutMs = 1000,
+  commandTimeoutMs = 15_000
 ) {
   const child = Bun.spawn(
     [
@@ -234,7 +237,7 @@ export async function invoke(
       stderr: "pipe",
     }
   );
-  const timer = setTimeout(() => child.kill("SIGKILL"), 15_000);
+  const timer = setTimeout(() => child.kill("SIGKILL"), commandTimeoutMs);
   try {
     const [code, stdout, stderr] = await Promise.all([
       child.exited,

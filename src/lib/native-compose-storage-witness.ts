@@ -129,6 +129,7 @@ export type NativeComposeStorageWitnessEnrollment = Readonly<
 type Enrollment = {
   readonly authority: NativeComposeMaterialAuthority;
   readonly generation: NativeComposeGeneration;
+  readonly phase: "effect" | "storage-create";
   readonly expectation: Expectation;
   readonly anchor: Anchor;
   readonly root: DirectoryAnchor;
@@ -846,6 +847,12 @@ export async function prepareNativeComposeStorageWitness(opts: {
   const artifact = input.xattrCarrier
     ? nativeComposeStorageXattrCarrierArtifact(input.xattrCarrier)
     : null;
+  // Initial xattr creation can use the original cold-run grant. Adoption and the
+  // older archive carrier retain their existing startup-only effect authority.
+  const phase =
+    input.admission === "initial-create" && input.xattrCarrier
+      ? "storage-create"
+      : "effect";
   if (input.xattrCarrier) {
     checkNativeComposeStorageXattrCarrierLifetime(input.xattrCarrier);
   }
@@ -855,7 +862,7 @@ export async function prepareNativeComposeStorageWitness(opts: {
       const current = await assertNativeComposeMaterialAuthority({
         authority: input.authority,
         generation: input.generation,
-        phase: "effect",
+        phase,
       });
       const binding: Binding = {
         ...input.volume,
@@ -902,7 +909,7 @@ export async function prepareNativeComposeStorageWitness(opts: {
             const latest = await assertNativeComposeMaterialAuthority({
               authority: input.authority,
               generation: input.generation,
-              phase: "effect",
+              phase,
             });
             if (!matchesAdmission(binding, latest)) {
               return refuse();
@@ -949,7 +956,7 @@ export async function prepareNativeComposeStorageWitness(opts: {
         const latest = await assertNativeComposeMaterialAuthority({
           authority: input.authority,
           generation: input.generation,
-          phase: "effect",
+          phase,
         });
         if (!matchesAdmission(binding, latest)) {
           return refuse();
@@ -963,7 +970,7 @@ export async function prepareNativeComposeStorageWitness(opts: {
               const live = await assertNativeComposeMaterialAuthority({
                 authority: input.authority,
                 generation: input.generation,
-                phase: "effect",
+                phase,
               });
               if (!matchesAdmission(binding, live)) {
                 return refuse();
@@ -983,6 +990,7 @@ export async function prepareNativeComposeStorageWitness(opts: {
         enrollments.set(capability, {
           authority: input.authority,
           generation: input.generation,
+          phase,
           expectation: record,
           anchor: anchor({ info, text }),
           root: directoryAnchor(held[1] ?? refuse()),
@@ -1026,7 +1034,7 @@ export async function enrollNativeComposeStorageWitness(opts: {
         const binding = await assertNativeComposeMaterialAuthority({
           authority: selected.authority,
           generation: selected.generation,
-          phase: "effect",
+          phase: selected.phase,
         });
         if (!matchesAdmission(selected.expectation.binding, binding)) {
           return refuse();

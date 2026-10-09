@@ -94,6 +94,7 @@ type MaterialSelection = {
     | "source"
     | "inspect"
     | "effect"
+    | "storage-create"
     | "stop"
     | "retire";
   readonly reservation?: NativeComposeReservation;
@@ -227,7 +228,8 @@ function materialEffectAllowed(
   phase: MaterialSelection["phase"],
   operation: NativeComposeOperation | null,
   state: Receipt,
-  generationId: string
+  generationId: string,
+  coldStoragePending: Receipt["pending"]
 ): boolean {
   if (phase === "inspect") {
     return true;
@@ -244,6 +246,16 @@ function materialEffectAllowed(
     return false;
   }
   const startup = operation === "up" || operation === "restart";
+  if (phase === "storage-create") {
+    return (
+      state.pending.generationId === generationId &&
+      (startup ||
+        (operation === "run" &&
+          state.current === null &&
+          coldStoragePending !== null &&
+          JSON.stringify(state.pending) === JSON.stringify(coldStoragePending)))
+    );
+  }
   if (phase === "effect") {
     return startup && state.pending.generationId === generationId;
   }
@@ -260,10 +272,17 @@ function requireMaterialEffectLive(opts: {
   readonly state: Receipt;
   readonly effectOperation: NativeComposeOperation | null;
   readonly activePending: Receipt["pending"];
+  readonly coldStoragePending: Receipt["pending"];
   readonly generationId: string;
 }): void {
-  const { selection, state, effectOperation, activePending, generationId } =
-    opts;
+  const {
+    selection,
+    state,
+    effectOperation,
+    activePending,
+    coldStoragePending,
+    generationId,
+  } = opts;
   if (["prepare", "source"].includes(selection.phase)) {
     return;
   }
@@ -272,7 +291,8 @@ function requireMaterialEffectLive(opts: {
       selection.phase,
       effectOperation,
       state,
-      generationId
+      generationId,
+      coldStoragePending
     )
   ) {
     refuse();
@@ -1691,6 +1711,9 @@ export async function openNativeComposeGenerationStore(opts: {
           let active = true;
           let effectOperation: NativeComposeOperation | null = null;
           let activePending: Receipt["pending"] = null;
+          // This owner-only grant exists solely during the original empty run.
+          // Returning revokes it; a retained failed pending token cannot reissue it.
+          let coldStoragePending: Receipt["pending"] = null;
           const materialReservations = new WeakSet<NativeComposeReservation>();
           const materialAuthority = Object.freeze({});
           const materialWork = new Set<Promise<unknown>>();
@@ -1759,7 +1782,13 @@ export async function openNativeComposeGenerationStore(opts: {
             if (
               !selection.generation ||
               selection.reservation !== undefined ||
-              !["inspect", "effect", "stop", "retire"].includes(selection.phase)
+              ![
+                "inspect",
+                "effect",
+                "storage-create",
+                "stop",
+                "retire",
+              ].includes(selection.phase)
             ) {
               return refuse();
             }
@@ -1772,7 +1801,8 @@ export async function openNativeComposeGenerationStore(opts: {
                   selection.phase,
                   effectOperation,
                   state,
-                  selection.generation.generationId
+                  selection.generation.generationId,
+                  coldStoragePending
                 )
               )
             ) {
@@ -1820,6 +1850,7 @@ export async function openNativeComposeGenerationStore(opts: {
               state,
               effectOperation,
               activePending,
+              coldStoragePending,
               generationId,
             });
             return Object.freeze({
@@ -1850,7 +1881,15 @@ export async function openNativeComposeGenerationStore(opts: {
             requireActive();
             if (
               !(
-                (effectOperation === "up" || effectOperation === "restart") &&
+                (effectOperation === "up" ||
+                  effectOperation === "restart" ||
+                  (effectOperation === "run" &&
+                    coldStoragePending !== null &&
+                    JSON.stringify(activePending) ===
+                      JSON.stringify(coldStoragePending) &&
+                    (!intent ||
+                      (intent.admission === "initial-create" &&
+                        intent.carrier === "directory-xattr")))) &&
                 activePending !== null &&
                 activePending.generationId === generation.generationId &&
                 (!intent ||
@@ -1872,7 +1911,7 @@ export async function openNativeComposeGenerationStore(opts: {
                 await assertNativeComposeMaterialAuthority({
                   authority: materialAuthority,
                   generation,
-                  phase: "effect",
+                  phase: "storage-create",
                 });
               },
               load: async (state) => {
@@ -2319,9 +2358,17 @@ export async function openNativeComposeGenerationStore(opts: {
                 await admit(state);
                 const anchor = knownAnchor(input.generation);
                 const pending = effectPending(state, input, anchor);
+                const coldStorage =
+                  input.operation === "run" &&
+                  state.current === null &&
+                  state.pending === null &&
+                  input.projection === undefined &&
+                  (state.storage?.length ?? 0) === 0 &&
+                  (state.storageWitnesses?.length ?? 0) === 0;
                 await save({ ...state, pending });
                 effectOperation = input.operation;
                 activePending = pending;
+                coldStoragePending = coldStorage ? pending : null;
                 try {
                   const before = await prepareEffectBoundary(input, pending);
                   if (before) {
@@ -2343,6 +2390,7 @@ export async function openNativeComposeGenerationStore(opts: {
                 } finally {
                   effectOperation = null;
                   activePending = null;
+                  coldStoragePending = null;
                 }
               });
             },

@@ -13,7 +13,12 @@ do not need the helper.
 
 Known enrolled storage is verified before hooks, workload admission and completion.
 Only an originally absent selected name with no retained history may enroll inside
-the original startup transaction. Existing unenrolled v1/v2 storage refuses even
+the original startup transaction or original cold storage-backed `run`. Cold run
+creation uses a separate `storage-create` authority bound to the same owner,
+pending run token and generation, with no current generation or prior storage.
+It cannot grant general material effects, explicit adoption, or another attempt
+after its effect returns. Warm and stopped runs verify enrolled content only;
+they cannot enroll newly selected storage. Existing unenrolled v1/v2 storage refuses even
 when its volume is missing; it is never treated as cold or silently adopted.
 Saved exec verifies under the existing mutation owner without parsing authored
 source or creating an exec pending operation. A fresh finite read carrier is used

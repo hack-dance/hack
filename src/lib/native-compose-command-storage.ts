@@ -169,8 +169,10 @@ export async function prepareNativeComposeCommandStorage(opts: {
       )
   );
   if (
-    (operation === "run" || operation === "exec") &&
-    (initial.stopped || newVolumes.length > 0)
+    (operation === "exec" && (initial.stopped || newVolumes.length > 0)) ||
+    (operation === "run" &&
+      newVolumes.length > 0 &&
+      initial.generation !== null)
   ) {
     return refuse();
   }
@@ -245,7 +247,7 @@ export async function prepareNativeComposeCommandStorage(opts: {
         return refuse();
       }
       await assertColdAbsent();
-      if (operation === "run" || operation === "exec") {
+      if (operation === "exec") {
         return;
       }
       for (const volume of newVolumes) {

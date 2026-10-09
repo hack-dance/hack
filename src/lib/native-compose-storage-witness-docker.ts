@@ -111,7 +111,7 @@ async function current(
   return await assertNativeComposeMaterialAuthority({
     authority: context.authority,
     generation,
-    phase: effect ? "effect" : "inspect",
+    phase: effect ? "storage-create" : "inspect",
   });
 }
 function engine(

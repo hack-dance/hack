@@ -88,6 +88,27 @@ const BINDING = {
 let root: string;
 let path: string | undefined;
 
+async function reportProbeDiagnostic(phase: "prepared" | "finished") {
+  if (process.env.HACK_PROXY_PROBE_DIAGNOSTIC !== "1") {
+    return;
+  }
+  try {
+    const binaryExact =
+      Bun.which("docker", { PATH: process.env.PATH ?? "" }) ===
+      join(root, "docker");
+    const [shimStarted, shimExited, commandsSeen] = await Promise.all([
+      Bun.file(join(root, "shim-started")).exists(),
+      Bun.file(join(root, "shim-exited")).exists(),
+      Bun.file(join(root, "commands")).exists(),
+    ]);
+    console.error(
+      `native_proxy_probe_diag phase=${phase} path_exact=${process.env.PATH === root} binary_exact=${binaryExact} shim_started=${shimStarted} shim_exited=${shimExited} commands_seen=${commandsSeen}`
+    );
+  } catch {
+    console.error(`native_proxy_probe_diag phase=${phase} capture=false`);
+  }
+}
+
 function workload() {
   return {
     id: WEB,
@@ -157,6 +178,10 @@ beforeEach(async () => {
 import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 const root = ${JSON.stringify(root)};
 const args = process.argv.slice(2);
+if (process.env.HACK_PROXY_PROBE_DIAGNOSTIC === "1") {
+ try { writeFileSync(root + "/shim-started", "1"); } catch {}
+ process.on("exit", () => { try { writeFileSync(root + "/shim-exited", "1"); } catch {} });
+}
 appendFileSync(root + "/commands", JSON.stringify(args) + "\\n");
 const f = JSON.parse(readFileSync(root + "/fixture.json", "utf8"));
 const [kind, action] = args;
@@ -209,8 +234,10 @@ else if (kind === "exec") {
 `
   );
   await chmod(join(root, "docker"), 0o700);
+  await reportProbeDiagnostic("prepared");
 });
 afterEach(async () => {
+  await reportProbeDiagnostic("finished");
   restoreEnv("PATH", path);
   await rm(root, { recursive: true, force: true });
 });
@@ -224,6 +251,12 @@ async function prepare(value: unknown): Promise<void> {
     "tls-count",
   ]) {
     await rm(join(root, counter), { force: true });
+  }
+  if (process.env.HACK_PROXY_PROBE_DIAGNOSTIC === "1") {
+    await Promise.all([
+      rm(join(root, "shim-started"), { force: true }),
+      rm(join(root, "shim-exited"), { force: true }),
+    ]);
   }
   await Bun.write(join(root, "fixture.json"), JSON.stringify(value));
 }

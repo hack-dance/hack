@@ -9,7 +9,10 @@ mod runtime;
 pub mod selection;
 mod source;
 pub use journal::{Phase, Receipt};
+pub use persistent_data::engine::StorageTool;
 pub(super) use runtime::reservations;
+pub(super) use runtime::reservations_except;
+pub use runtime::run_with_storage_tool;
 pub use runtime::{Snapshot, cleanup, inspect, run};
 
 pub(in crate::provider) fn environment_binding(

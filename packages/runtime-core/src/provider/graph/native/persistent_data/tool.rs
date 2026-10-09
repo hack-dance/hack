@@ -12,8 +12,13 @@ use crate::{
 use base64::Engine as _;
 use std::{path::Path, time::Instant};
 
+mod intent;
 pub(in crate::provider::graph::native) mod lifecycle;
 mod saved;
+
+pub(in crate::provider::graph::native) fn require_idle(root: &Path) -> Result<(), CandidateError> {
+    intent::absent(root)
+}
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -61,6 +66,23 @@ pub(in crate::provider::graph::native) struct Installed {
     reference: Reference,
     saved: saved::Saved,
     lifetime: guest_tool::Lifetime,
+}
+/// Pins the current target receipt even when a different same-lease run supplies
+/// the verifier. Anticipated phases may not change its material binding.
+pub(in crate::provider::graph::native) struct ReceiptAdmission(saved::Saved);
+impl ReceiptAdmission {
+    pub(in crate::provider::graph::native) fn capture(
+        candidate: &Candidate,
+        receipt: &Receipt,
+    ) -> Result<Self, CandidateError> {
+        let saved = saved::Saved::capture(candidate, receipt.review.scope().run)?;
+        saved.receipt()?.check_binding(receipt)?;
+        saved.verify()?;
+        Ok(Self(saved))
+    }
+    pub(in crate::provider::graph::native) fn verify(&self) -> Result<(), CandidateError> {
+        self.0.verify()
+    }
 }
 fn refused() -> CandidateError {
     super::enrollment::refused()
@@ -177,8 +199,14 @@ pub(in crate::provider::graph::native) fn install(
     reference.validate()?;
     receipt.data_tool = Some(reference.clone());
     journal::save(root, receipt)?; // durable intent before any guest installation effect
+    let mut admission = ReceiptAdmission::capture(candidate, receipt)?;
     check(engine, deadline, fresh)?;
     artifact.verify().map_err(|_| refused())?;
+    admission.verify()?;
+    let transport = intent::Intent::begin(root)?;
+    check(engine, deadline, fresh)?;
+    admission.verify()?;
+    transport.verify()?;
     let run = receipt.review.scope().run.to_owned();
     let owner = receipt.owner.clone();
     let prepared = engine
@@ -219,9 +247,12 @@ pub(in crate::provider::graph::native) fn install(
     });
     receipt.data_tool = Some(reference.clone());
     journal::save(root, receipt)?;
+    admission = ReceiptAdmission::capture(candidate, receipt)?;
     for (index, chunk) in artifact.bytes().chunks(24 * 1024).enumerate() {
         check(engine, deadline, fresh)?;
         artifact.verify().map_err(|_| refused())?;
+        admission.verify()?;
+        transport.verify()?;
         let script = format!(
             "test \"$(stat -c %d:%i /storage/hack-graph-startup/$1)\" = \"$3\"\n{}",
             guest_tool::APPEND
@@ -244,6 +275,8 @@ pub(in crate::provider::graph::native) fn install(
     }
     artifact.verify().map_err(|_| refused())?;
     check(engine, deadline, fresh)?;
+    admission.verify()?;
+    transport.verify()?;
     let script = format!(
         "test \"$(stat -c %d:%i /storage/hack-graph-startup/$1)\" = \"$3\"\n{}",
         guest_tool::PUBLISH
@@ -263,6 +296,8 @@ pub(in crate::provider::graph::native) fn install(
         )
         .map_err(|_| refused())?;
     check(engine, deadline, fresh)?;
+    admission.verify()?;
+    transport.verify()?;
     let observed = engine
         .guest()
         .execute_until(
@@ -272,10 +307,14 @@ pub(in crate::provider::graph::native) fn install(
         )
         .map_err(|_| refused())?;
     check(engine, deadline, fresh)?;
+    admission.verify()?;
     let actual = identity(&observed)?;
     if (actual.device, actual.inode) != (captured.device, captured.inode) {
         return Err(refused());
     }
+    // Every installation child has returned a completed response and the final
+    // identity matched. Failure before here retains the durable transport fence.
+    transport.complete()?;
     reference.root = Some(DirectoryIdentity {
         device: actual.device,
         inode: actual.inode,

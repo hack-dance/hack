@@ -1,5 +1,5 @@
-//! Installed tool + original Engine lease transport. No ordinary runtime caller is
-//! enabled. A helper observation never grants durable promotion by itself.
+//! Installed tool + original Engine lease transport. A helper observation never
+//! grants durable promotion by itself.
 use super::*;
 use crate::provider::graph::native::persistent_data::{
     tool::Installed,
@@ -7,6 +7,74 @@ use crate::provider::graph::native::persistent_data::{
 };
 use crate::provider::storage_root_witness::{Observation as Reply, Request};
 use enrollment::Transport as _;
+
+pub(in crate::provider::graph::native) fn enroll(
+    candidate: &Candidate,
+    engine: &Engine<'_>,
+    tool: &Installed,
+    reference: &mut Reference,
+    deadline: Instant,
+    fresh: &dyn Fn() -> Result<(), CandidateError>,
+) -> Result<(), CandidateError> {
+    let State::Reserved { intent } = &reference.state else {
+        return verify(candidate, engine, tool, reference, deadline, fresh);
+    };
+    let witness = ExpectedWitness {
+        name: format!("user.hack.storage.{}{}", nonce()?, nonce()?),
+        value: format!("{}{}", nonce()?, nonce()?),
+    };
+    let owner = enrollment::witnessed::enroll_new(
+        enrollment::witnessed::EnrollOptions {
+            base: enrollment::EnrollOptions {
+                state_root: &candidate.state_root,
+                binding: &reference.binding,
+                intent,
+                deadline,
+                cancelled: &AtomicBool::new(false),
+            },
+            witness: &witness,
+        },
+        &mut WitnessAdapter::new(engine, tool, fresh),
+    )?;
+    let super::super::witnessed::Enrollment::Enrolled { volume, .. } = &owner.0.enrollment else {
+        return Err(refused());
+    };
+    reference.state = State::Enrolled {
+        volume: volume.clone(),
+    };
+    Ok(())
+}
+pub(in crate::provider::graph::native) fn verify(
+    candidate: &Candidate,
+    engine: &Engine<'_>,
+    tool: &Installed,
+    reference: &Reference,
+    deadline: Instant,
+    fresh: &dyn Fn() -> Result<(), CandidateError>,
+) -> Result<(), CandidateError> {
+    let State::Enrolled { volume } = &reference.state else {
+        return Err(refused());
+    };
+    let owner = enrollment::witnessed::read_retained(
+        enrollment::ReadOptions {
+            state_root: &candidate.state_root,
+            binding: &reference.binding,
+            deadline,
+            cancelled: &AtomicBool::new(false),
+        },
+        &mut WitnessAdapter::new(engine, tool, fresh),
+    )?;
+    let super::super::witnessed::Enrollment::Enrolled {
+        volume: current, ..
+    } = &owner.0.enrollment
+    else {
+        return Err(refused());
+    };
+    if current != volume {
+        return Err(refused());
+    }
+    Ok(())
+}
 
 pub(in crate::provider::graph::native) struct WitnessAdapter<'a, 'guest> {
     base: Adapter<'a, 'guest>,

@@ -165,6 +165,13 @@ pub fn serve(
     candidate: &Candidate,
     prepared: selection::Prepared,
 ) -> Result<Receipt, CandidateError> {
+    serve_with_storage_tool(candidate, prepared, None)
+}
+pub fn serve_with_storage_tool(
+    candidate: &Candidate,
+    prepared: selection::Prepared,
+    storage_tool: Option<&StorageTool>,
+) -> Result<Receipt, CandidateError> {
     prepared.assert_fresh(candidate)?;
     let review = prepared.input().review().clone();
     let run = review.scope().run.to_owned();
@@ -188,7 +195,13 @@ pub fn serve(
             }
             Ok(())
         };
-        runtime::run_guarded(candidate, prepared, Some(&check), Some(&admitted))
+        runtime::run_guarded(
+            candidate,
+            prepared,
+            Some(&check),
+            Some(&admitted),
+            storage_tool,
+        )
     };
     let receipt = match attempt {
         Ok(receipt) => receipt,

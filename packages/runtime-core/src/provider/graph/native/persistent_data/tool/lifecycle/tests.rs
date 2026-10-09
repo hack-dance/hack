@@ -103,6 +103,7 @@ struct Fake {
     remove_error: bool,
     malformed_remove: bool,
     invoke_error: bool,
+    invalid_reply: bool,
     removed: bool,
     during_inspect: Option<Box<dyn FnOnce()>>,
     during_check: Option<(usize, Box<dyn FnOnce()>)>,
@@ -164,14 +165,29 @@ impl Port for Fake {
         }
         .into())
     }
-    fn invoke(&mut self, _: &Installed, input: &str, seed: bool) -> Result<String, CandidateError> {
+    fn invoke(
+        &mut self,
+        installed: &Installed,
+        input: &str,
+        seed: bool,
+    ) -> Result<String, CandidateError> {
         self.invocations += 1;
+        assert!(
+            installed
+                .saved
+                .root()
+                .join("storage-call.pending")
+                .is_file()
+        );
         assert_eq!(
             helper::Request::parse(input.as_bytes()).unwrap().is_seed(),
             seed
         );
         if self.invoke_error {
             return Err(refused());
+        }
+        if self.invalid_reply {
+            return Ok("unknown\n".into());
         }
         Ok(if seed { "seeded\n" } else { "verified\n" }.into())
     }
@@ -563,4 +579,70 @@ fn lease_binds_one_run_before_transport_without_a_cross_lease_run_budget() {
         lifetime.retire(&lifetime, &run).unwrap();
         assert!(lifetime.enter(&lifetime, &run).is_err());
     }
+}
+
+#[test]
+fn unknown_transport_retains_durable_fence_across_fresh_provider_leases() {
+    for case in 0..3 {
+        let f = Fixture::new();
+        let bytes = fs::read(f.root.join("state.json")).unwrap();
+        let mut original = Fake::default();
+        let installed = f.issued(&mut original);
+        assert!(require_idle(&f.root).is_ok());
+        match case {
+            0 => original.inspect_error = true,
+            1 => original.invoke_error = true,
+            _ => original.invalid_reply = true,
+        }
+        let result = if case == 0 {
+            verify(&installed, &mut original).map(|()| helper::Observation::Verified)
+        } else {
+            invoke(&installed, &mut original, request(true))
+        };
+        assert!(result.is_err());
+        assert!(require_idle(&f.root).is_err());
+        assert_eq!(fs::read(f.root.join("state.json")).unwrap(), bytes);
+        // Neither a new Engine lifetime nor exact retained bytes can resume an
+        // unknown call. No inspect, seed, repair or removal is dispatched.
+        let mut fresh = Fake::default();
+        assert!(reopen_with(&f.candidate, &f.receipt, &mut fresh).is_err());
+        assert_eq!((fresh.reads, fresh.invocations, fresh.removals), (0, 0, 0));
+    }
+}
+
+#[test]
+fn final_callback_cannot_replace_durable_transport_fence_before_seed() {
+    let f = Fixture::new();
+    let mut port = Fake::default();
+    let installed = f.issued(&mut port);
+    let path = f.root.join("storage-call.pending");
+    port.during_check = Some((
+        port.checks + 4,
+        Box::new(move || {
+            let bytes = fs::read(&path).unwrap();
+            let other = path.with_extension("substitute");
+            fs::write(&other, bytes).unwrap();
+            fs::set_permissions(&other, fs::Permissions::from_mode(0o600)).unwrap();
+            fs::rename(other, path).unwrap();
+        }),
+    ));
+    assert!(invoke(&installed, &mut port, request(true)).is_err());
+    assert_eq!(port.invocations, 0);
+    assert!(require_idle(&f.root).is_err());
+    assert!(reopen_with(&f.candidate, &f.receipt, &mut Fake::default()).is_err());
+}
+
+#[test]
+fn known_completed_calls_clear_only_their_own_durable_fence() {
+    let f = Fixture::new();
+    let mut port = Fake::default();
+    let installed = f.issued(&mut port);
+    for seed in [true, false] {
+        invoke(&installed, &mut port, request(seed)).unwrap();
+        assert!(require_idle(&f.root).is_ok());
+    }
+    assert_eq!(port.invocations, 2);
+    let mut next = Fake::default();
+    f.issued(&mut next);
+    assert_eq!(next.reads, 1);
 }

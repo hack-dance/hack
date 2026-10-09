@@ -54,10 +54,19 @@ pub mod relay_owner;
 pub mod resources;
 #[cfg(target_os = "macos")]
 pub mod shared_https_recovery;
-#[cfg(any(test, feature = "native-config-plan"))]
+#[cfg(any(
+    test,
+    feature = "native-config-plan",
+    feature = "storage-root-witness-tool"
+))]
 // Host clients and the guest executable use different parts of this shared codec.
 #[allow(dead_code)]
 mod storage_root_witness;
+#[cfg(feature = "storage-root-witness-tool")]
+#[doc(hidden)]
+pub fn storage_root_witness_tool() -> std::process::ExitCode {
+    storage_root_witness::entry()
+}
 pub mod storage_usage;
 #[cfg(all(test, target_os = "macos"))]
 mod test_executable;

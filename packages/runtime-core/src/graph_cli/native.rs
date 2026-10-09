@@ -9,7 +9,7 @@ use std::{
 fn refused() -> CandidateError {
     CandidateError::new(
         "native_graph_arguments",
-        "Use graph native plan --source-file FILE, run|serve --source-file FILE --expect-review SHA [--environment-stdin] [--timeout-seconds 1..300], inspect|cleanup|recovery-selection --run-id ID, recover-live-owner --run-id ID --expect-receipt SHA --expect-owner SHA, or control --run-id ID --action status|cleanup; optional --json. Foreground ownership and its recovery require macOS. Native source and private envelopes require their exact kind/version; values omitted.",
+        "Use graph native plan --source-file FILE, run|serve --source-file FILE --expect-review SHA [--environment-stdin] [--timeout-seconds 1..300] [--storage-witness-tool FILE --expect-storage-witness-tool SHA], inspect|cleanup|recovery-selection --run-id ID, recover-live-owner --run-id ID --expect-receipt SHA --expect-owner SHA, or control --run-id ID --action status|cleanup; optional --json. Foreground ownership and its recovery require macOS. Native source and private envelopes require their exact kind/version; values omitted.",
     )
 }
 fn hex(value: &str, len: usize) -> bool {
@@ -34,8 +34,15 @@ pub(super) fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, Can
                 private = true;
                 index += 1;
             }
-            key @ ("--source-file" | "--expect-review" | "--timeout-seconds" | "--run-id"
-            | "--action" | "--expect-receipt" | "--expect-owner") => {
+            key @ ("--source-file"
+            | "--expect-review"
+            | "--timeout-seconds"
+            | "--run-id"
+            | "--action"
+            | "--expect-receipt"
+            | "--expect-owner"
+            | "--storage-witness-tool"
+            | "--expect-storage-witness-tool") => {
                 let value = *args
                     .get(index + 1)
                     .filter(|value| !value.starts_with("--"))
@@ -167,10 +174,22 @@ pub(super) fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, Can
         || (*action == "plan"
             && (private
                 || singles.contains_key("--expect-review")
+                || singles.contains_key("--storage-witness-tool")
+                || singles.contains_key("--expect-storage-witness-tool")
                 || singles.contains_key("--timeout-seconds")))
     {
         return Err(refused());
     }
+    let storage_tool = match (
+        singles.get("--storage-witness-tool"),
+        singles.get("--expect-storage-witness-tool"),
+    ) {
+        (None, None) => None,
+        (Some(path), Some(digest)) if Path::new(path).is_absolute() && hex(digest, 64) => {
+            Some(native::StorageTool::read(Path::new(path), digest)?)
+        }
+        _ => return Err(refused()),
+    };
     #[cfg(not(target_os = "macos"))]
     if *action == "serve" {
         return Err(foreground_unavailable());
@@ -220,12 +239,24 @@ pub(super) fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, Can
         managed.as_ref().map_or(&empty, |managed| managed.values()),
     )?;
     drop(managed);
+    if storage_tool.is_some() && prepared.input().inputs().storage.is_empty() {
+        return Err(refused());
+    }
     #[cfg(target_os = "macos")]
     if *action == "serve" {
-        return serde_json::to_value(native::foreground::serve(candidate, prepared)?)
-            .map_err(|_| refused());
+        return serde_json::to_value(native::foreground::serve_with_storage_tool(
+            candidate,
+            prepared,
+            storage_tool.as_ref(),
+        )?)
+        .map_err(|_| refused());
     }
-    serde_json::to_value(native::run(candidate, prepared)?).map_err(|_| refused())
+    serde_json::to_value(native::run_with_storage_tool(
+        candidate,
+        prepared,
+        storage_tool.as_ref(),
+    )?)
+    .map_err(|_| refused())
 }
 
 #[cfg(not(target_os = "macos"))]

@@ -9,9 +9,7 @@ use reqwest::Method;
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, io::Read, sync::atomic::AtomicBool, time::Instant};
 
-// This installed transport is intentionally not called by the gated runtime yet.
-#[allow(dead_code)]
-mod witnessed;
+pub(in crate::provider::graph::native) mod witnessed;
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
@@ -75,6 +73,34 @@ fn nonce() -> Result<String, CandidateError> {
         .and_then(|mut file| file.read_exact(&mut bytes))
         .map_err(|_| refused())?;
     Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
+}
+
+/// Captured before provider admission; this is a caller-pinned candidate artifact,
+/// not a catalog lookup or a claim that its ABI has been qualified on this host.
+pub struct StorageTool(crate::provider::guest_tool::Artifact);
+impl StorageTool {
+    pub fn read(path: &std::path::Path, digest: &str) -> Result<Self, CandidateError> {
+        crate::provider::guest_tool::Artifact::read(path, digest).map(Self)
+    }
+    pub(in crate::provider::graph::native) fn verify(&self) -> Result<(), CandidateError> {
+        self.0.verify()
+    }
+    pub(in crate::provider::graph::native) fn install(
+        &self,
+        options: super::tool::InstallOptions<'_, '_>,
+    ) -> Result<super::tool::Installed, CandidateError> {
+        self.verify()?;
+        if options.artifact != self.0.path() || options.digest != self.0.digest() {
+            return Err(refused());
+        }
+        super::tool::install(options)
+    }
+    pub(in crate::provider::graph::native) fn path(&self) -> &std::path::Path {
+        self.0.path()
+    }
+    pub(in crate::provider::graph::native) fn digest(&self) -> &str {
+        self.0.digest()
+    }
 }
 
 pub(in crate::provider::graph::native) struct Adapter<'a, 'guest> {
@@ -301,8 +327,8 @@ test "$(stat -c %d:%i "$root")" = "$identity"
 printf '%s\n' "$identity"
 "#;
 
-/// Select stable ownership without creating any volume or pending/enrolled owner file.
-pub(in crate::provider::graph::native) fn select(
+/// Select owner2 metadata without creating volumes or asserting content continuity.
+pub(in crate::provider::graph::native) fn select_witnessed(
     candidate: &Candidate,
     engine: &Engine<'_>,
     namespace: &str,
@@ -340,7 +366,14 @@ pub(in crate::provider::graph::native) fn select(
         if Instant::now() >= deadline {
             return Err(refused());
         }
-        let existing = enrollment::existing_binding(&candidate.state_root, namespace, name)?;
+        let selected_owner = enrollment::witnessed::selected_owner(
+            enrollment::witnessed::BindingSelectionOptions {
+                state_root: &candidate.state_root,
+                namespace,
+                storage: name,
+            },
+        )?;
+        let existing = selected_owner.as_ref().map(|owner| owner.0.binding.clone());
         let retained = existing.is_some();
         let binding = match existing {
             Some(binding) => binding,
@@ -374,20 +407,15 @@ pub(in crate::provider::graph::native) fn select(
                 }
             }
         }
-        let state = if retained {
-            let owner = enrollment::read_retained(
-                enrollment::ReadOptions {
-                    state_root: &candidate.state_root,
-                    binding: &binding,
-                    deadline,
-                    cancelled: &AtomicBool::new(false),
-                },
-                &mut Adapter::new(engine, fresh),
-            )?;
-            let Enrollment::Enrolled { volume } = owner.0.enrollment else {
+        let state = if let Some(owner) = selected_owner {
+            // Selection alone grants no mount. The installed verifier is admitted
+            // after the run reservation, before the first volume/workload effect.
+            let super::witnessed::Enrollment::Enrolled { volume, .. } = &owner.0.enrollment else {
                 return Err(refused());
             };
-            State::Enrolled { volume }
+            State::Enrolled {
+                volume: volume.clone(),
+            }
         } else {
             State::Reserved { intent: nonce()? }
         };
@@ -395,61 +423,6 @@ pub(in crate::provider::graph::native) fn select(
     }
     fresh()?;
     Ok(references)
-}
-/// Called only after the graph reservation exists. Library enrollment owns the private
-/// synced pending-before-effect and final exact publication boundaries.
-pub(in crate::provider::graph::native) fn enroll(
-    candidate: &Candidate,
-    engine: &Engine<'_>,
-    reference: &mut Reference,
-    deadline: Instant,
-    fresh: &dyn Fn() -> Result<(), CandidateError>,
-) -> Result<(), CandidateError> {
-    let State::Reserved { intent } = &reference.state else {
-        return verify(candidate, engine, reference, deadline, fresh);
-    };
-    let owner = enrollment::enroll_new(
-        enrollment::EnrollOptions {
-            state_root: &candidate.state_root,
-            binding: &reference.binding,
-            intent,
-            deadline,
-            cancelled: &AtomicBool::new(false),
-        },
-        &mut Adapter::new(engine, fresh),
-    )?;
-    let Enrollment::Enrolled { volume } = owner.0.enrollment else {
-        return Err(refused());
-    };
-    reference.state = State::Enrolled { volume };
-    Ok(())
-}
-pub(in crate::provider::graph::native) fn verify(
-    candidate: &Candidate,
-    engine: &Engine<'_>,
-    reference: &Reference,
-    deadline: Instant,
-    fresh: &dyn Fn() -> Result<(), CandidateError>,
-) -> Result<(), CandidateError> {
-    let State::Enrolled { volume } = &reference.state else {
-        return Err(refused());
-    };
-    let owner = enrollment::read_retained(
-        enrollment::ReadOptions {
-            state_root: &candidate.state_root,
-            binding: &reference.binding,
-            deadline,
-            cancelled: &AtomicBool::new(false),
-        },
-        &mut Adapter::new(engine, fresh),
-    )?;
-    let Enrollment::Enrolled { volume: current } = owner.0.enrollment else {
-        return Err(refused());
-    };
-    if current != *volume {
-        return Err(refused());
-    }
-    Ok(())
 }
 
 #[cfg(test)]

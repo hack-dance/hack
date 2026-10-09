@@ -19,8 +19,9 @@ import {
   writeExclusive,
 } from "./native-compose-private-state.ts";
 import {
-  NATIVE_STORAGE_DOCKER_ARTIFACT as artifact,
+  NATIVE_STORAGE_DOCKER_DEPENDENCIES,
   nativeComposeStorageDockerHelper,
+  selectNativeComposeStorageDockerDependency,
 } from "./native-compose-storage-witness-docker-artifact.ts";
 import {
   assertNativeComposeStorageDockerCarrierVolume,
@@ -52,11 +53,6 @@ import {
 import { findExecutableInPath, type RunExitEvent, run } from "./shell.ts";
 
 const ID = /^[a-f0-9]{64}$/;
-const IMAGE_IDS = [
-  artifact.imageId,
-  "sha256:5c51cee225076d3c7db2150683141476298062489de4660f2d1729e522641f91",
-  "sha256:1cb8f81099813a0ec61f99b69348f6594e188cf1689c20a0a53a5ddd23b37708",
-] as const;
 const CAPTURE_LIMIT = 4096;
 type Selection = { readonly name: string; readonly storage: string };
 type Context = {
@@ -129,7 +125,8 @@ function engine(
   });
 }
 async function image(
-  probe: ReturnType<typeof createNativeComposeProbe>
+  probe: ReturnType<typeof createNativeComposeProbe>,
+  dependency = NATIVE_STORAGE_DOCKER_DEPENDENCIES["linux/arm64"] ?? refuse()
 ): Promise<void> {
   const value: unknown = JSON.parse(
     await probe([
@@ -137,15 +134,16 @@ async function image(
       "inspect",
       "--format",
       '{"id":{{json .Id}},"os":{{json .Os}},"arch":{{json .Architecture}},"volumes":{{json (index .Config "Volumes")}}}',
-      artifact.imageId,
+      dependency.artifact.imageId,
     ])
   );
   if (
     !(
       isRecord(value) &&
-      value.id === artifact.imageId &&
+      typeof value.id === "string" &&
+      dependency.imageIds.includes(value.id) &&
       value.os === "linux" &&
-      value.arch === "arm64" &&
+      value.arch === dependency.artifact.platform.slice(6) &&
       value.volumes === null
     )
   ) {
@@ -455,6 +453,7 @@ export async function createNativeComposeDockerStorageXattrCarrier(
         : Math.min(15_000, context.deadline - Date.now()),
     });
   };
+  let dependency: ReturnType<typeof selectNativeComposeStorageDockerDependency>;
   // Resolve the declared dependency before Expected, volume creation or any helper
   // footprint. This first platform remains explicit; emulation is not a fallback.
   try {
@@ -466,24 +465,19 @@ export async function createNativeComposeDockerStorageXattrCarrier(
         '{"id":{{json .ID}},"os":{{json .OSType}},"arch":{{json .Architecture}}}',
       ])
     );
-    if (
-      !(
-        isRecord(daemon) &&
-        daemon.id === context.engineId &&
-        daemon.os === "linux" &&
-        (daemon.arch === "arm64" || daemon.arch === "aarch64")
-      )
-    ) {
-      refuse();
-    }
-    await image(prerequisite);
+    dependency = selectNativeComposeStorageDockerDependency({
+      daemon,
+      engineId: context.engineId,
+    });
+    await image(prerequisite, dependency);
     nativeComposeStorageDockerHelper();
     lifetime(context);
   } catch {
     throw new Error(
-      "Native storage witnesses require a Linux arm64 daemon and the fixed cached Bun 1.4.2 helper image; no image is pulled automatically."
+      "Native storage witnesses require a matching pinned Linux helper dependency already cached for this daemon; no image is pulled or emulated automatically."
     );
   }
+  const selectedArtifact = dependency.artifact;
   const inspect = async (selection: Selection) => {
     const before = await current(context, selection);
     const target = await observeNativeComposeStorageDockerTarget({
@@ -527,7 +521,7 @@ export async function createNativeComposeDockerStorageXattrCarrier(
     if (absent.volume !== null) {
       return refuse();
     }
-    await image(probe());
+    await image(probe(), dependency);
     const nonce = randomBytes(16).toString("hex");
     const directory = await holdDirectory(
       join(
@@ -647,7 +641,9 @@ export async function createNativeComposeDockerStorageXattrCarrier(
   };
   const invoke = async (input: NativeComposeStorageXattrInvocation) => {
     const before = await current(context, input.target, !input.readonly);
-    if (!(matchesScope(input, before) && same(input.artifact, artifact))) {
+    if (
+      !(matchesScope(input, before) && same(input.artifact, selectedArtifact))
+    ) {
       return refuse();
     }
     const target = await inspect(input.target);
@@ -664,7 +660,7 @@ export async function createNativeComposeDockerStorageXattrCarrier(
     try {
       const read = probe();
       await engine(read, context);
-      await image(read);
+      await image(read, dependency);
       await checkFiles(files);
       tool();
       const admitted = await current(context, input.target, !input.readonly);
@@ -718,7 +714,7 @@ export async function createNativeComposeDockerStorageXattrCarrier(
           value,
           input,
           program: files.program,
-          imageIds: IMAGE_IDS,
+          imageIds: dependency.imageIds,
         });
       };
       const carrier = await inspectCarrier();
@@ -739,7 +735,7 @@ export async function createNativeComposeDockerStorageXattrCarrier(
       }
       await input.recordCreated({ id, createdAt: known.createdAt });
       await checkFiles(files);
-      await image(probe());
+      await image(probe(), dependency);
       await assertNativeComposeStorageDockerCarrierVolume({
         probe: probe(),
         current: before,
@@ -933,7 +929,7 @@ export async function createNativeComposeDockerStorageXattrCarrier(
       await retireInvocationFiles(files);
       completed = true;
       return {
-        artifact,
+        artifact: selectedArtifact,
         carrierId: id,
         carrierCreatedAt: known.createdAt,
         containersAfterCleanup: [],
@@ -959,7 +955,7 @@ export async function createNativeComposeDockerStorageXattrCarrier(
     }
   };
   return captureNativeComposeStorageXattrCarrier({
-    artifact,
+    artifact: selectedArtifact,
     ports: { inspect, provision, invoke },
     signal: context.signal,
     deadline: context.deadline,

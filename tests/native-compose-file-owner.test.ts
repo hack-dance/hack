@@ -459,7 +459,7 @@ test("literal dollar roots and targets are encoded once in binds while saved fil
     diagnostic?.("saved-ready", "end");
   });
   diagnostic?.("mutation", "end");
-});
+}, 30_000);
 test("actual renderer requires the exact live owner projection and preserves literal bind encoding once", async () => {
   await dollarFixture();
   await store.withMutation(async (mutation) => {

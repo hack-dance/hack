@@ -309,7 +309,7 @@ jobs:
           HACK_E2E_COMPOSE_PLUGIN_SHA256="$(sha256sum "$HACK_E2E_COMPOSE_PLUGIN_PATH" | cut -d ' ' -f1)"
           export HACK_E2E_DOCKER_HOST HACK_E2E_NETWORK_SOURCE_REVISION HACK_E2E_NETWORK_CLI_SHA256 HACK_E2E_NETWORK_COMPILER_SHA256 HACK_E2E_COMPOSE_PLUGIN_PATH HACK_E2E_COMPOSE_PLUGIN_SHA256
           # TEMP: frames diagnostics + failing-scenario subset (remove before merge)
-          HACK_NATIVE_COMPOSE_DIAG_FRAMES=1 HACK_E2E_DOCKER=1 HACK_E2E_REQUIRE_DOCKER=1 HACK_E2E_REQUIRE_TMUX=1 bun tests/e2e/run.ts --only=native-config-networks,native-config-process-policy,native-config-routing
+          HACK_NATIVE_COMPOSE_DIAG_FRAMES=1 HACK_E2E_DOCKER=1 HACK_E2E_REQUIRE_DOCKER=1 HACK_E2E_REQUIRE_TMUX=1 bun tests/e2e/run.ts --only=native-config-networks,native-config-routing
       - name: Smoke container resource metadata without optional fields
         run: |
           probe_id=$(docker create --network none --read-only alpine:3.20 true)

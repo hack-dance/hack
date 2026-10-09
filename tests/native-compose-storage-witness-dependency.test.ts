@@ -13,11 +13,15 @@ test.each([
   "arm64",
   "aarch64",
 ])("dependency selects the observed %s daemon and snapshots its pins", (arch) => {
+  const expected = NATIVE_STORAGE_DOCKER_DEPENDENCIES["linux/arm64"];
+  if (!expected) {
+    throw new Error("Missing qualified byte record");
+  }
   const selected = selectNativeComposeStorageDockerDependency({
     daemon: { ...daemon, arch },
     engineId,
   });
-  expect(selected).toEqual(NATIVE_STORAGE_DOCKER_DEPENDENCIES["linux/arm64"]);
+  expect(selected).toEqual(expected);
   expect(Object.isFrozen(selected.artifact)).toBe(true);
   expect(Object.isFrozen(selected.imageIds)).toBe(true);
 });

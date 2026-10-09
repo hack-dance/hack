@@ -21,6 +21,8 @@ afterEach(async () => {
 async function invoke(opts: {
   readonly network: "data" | "default";
   readonly operation: "up" | "run";
+  /** Declared persistent storage activates the engine dependency check before hooks. */
+  readonly storage?: boolean;
 }) {
   const root = await realpath(
     await mkdtemp(join(tmpdir(), "native-network-command-"))
@@ -33,6 +35,9 @@ async function invoke(opts: {
     source: { root: ".", mode: "host-mounted" },
     worktree: { auto_branch: false, inherit_local: false },
     networks: { data: { internal: true } },
+    ...(opts.storage
+      ? { storage: { data: { kind: "persistent", scope: "worktree" } } }
+      : {}),
     services: {
       web: { image: "fixture/web:1", networks: { [opts.network]: {} } },
     },
@@ -50,7 +55,7 @@ if(operation==="--protocol") console.log(JSON.stringify({transport_version:1,aut
 else {
  const raw=await Bun.stdin.text(), request=operation==="compile"?{}:JSON.parse(raw), text=operation==="compile"?raw:request.project, source=JSON.parse(text);
  const {schema_version,...fields}=source;
- const plan={...fields,plan_version:1,selected_profiles:[],jobs:{},environment:{},storage:{}};
+ const plan={...fields,plan_version:1,selected_profiles:[],jobs:{},environment:{},storage:source.storage??{}};
  const result={transport_version:1,ok:true,semantic_hash:createHash("sha256").update(text).digest("hex"),declared_workloads:{web:"service"},plan};
  if(operation!=="compile") result.local_resolution={overlay:null,origin:"project",auto_branch:false,inherit_local:false,resolution_hash:"b".repeat(64)};
  if(operation==="plan") result.environment_plan={plan_version:1,overlay:null,overlay_exists:false,complete:true,workloads:{web:{}},warnings:[],diagnostics:[]};
@@ -64,7 +69,7 @@ else {
 import {appendFileSync,writeFileSync} from "node:fs";
 const args=process.argv.slice(2);
 appendFileSync(${JSON.stringify(join(root, "commands"))},JSON.stringify(args)+"\\n");
-if(!(["container","volume","network"].includes(args[0])&&["ls","inspect"].includes(args[1]))) writeFileSync(${JSON.stringify(join(root, "engine-effect"))},"unexpected mutation");
+if(!(args[0]==="info"||(["container","volume","network"].includes(args[0])&&["ls","inspect"].includes(args[1])))) writeFileSync(${JSON.stringify(join(root, "engine-effect"))},"unexpected mutation");
 process.exit(23);
 `
   );
@@ -135,4 +140,28 @@ test.each([
     .map((line) => JSON.parse(line));
   expect(commands).toHaveLength(1);
   expect(commands[0]?.slice(0, 2)).toEqual(["container", "ls"]);
+}, 20_000);
+
+test("custom-network oneoff with declared storage refuses before the engine dependency check", async () => {
+  const { root, output } = await invoke({
+    network: "data",
+    operation: "run",
+    storage: true,
+  });
+  expect(output).toContain("qualified one-off attachment behavior");
+  expect(await Bun.file(join(root, "commands")).exists()).toBe(false);
+}, 20_000);
+
+test("default-network oneoff with declared storage reaches the engine dependency check", async () => {
+  const { root, output } = await invoke({
+    network: "default",
+    operation: "run",
+    storage: true,
+  });
+  expect(output).not.toContain("qualified one-off attachment behavior");
+  const commands: string[][] = (await Bun.file(join(root, "commands")).text())
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line));
+  expect(commands[0]?.[0]).toBe("info");
 }, 20_000);

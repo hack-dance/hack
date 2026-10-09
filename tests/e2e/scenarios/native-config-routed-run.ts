@@ -407,6 +407,8 @@ async function heldRun(
     }
     // Always reap the launched CLI before scenario ownership cleanup.
     const result = await running;
+    // TEMP diag: phase trace lines only; remove before merge.
+    process.stdout.write(`[diag routed-run cli stderr]\n${result.stderr}\n`);
     expectExit({
       result,
       codes: [17],

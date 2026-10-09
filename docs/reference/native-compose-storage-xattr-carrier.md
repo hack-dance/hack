@@ -5,11 +5,11 @@ The candidate Compose command path uses this Linux helper and the
 mutation. Persistent PostgreSQL and ordinary CLI acceptance remain required gates;
 source wiring and synthetic controls do not qualify that runtime behavior.
 
-Storage startup requires the exact cached Linux arm64 Bun 1.4.2 helper image before
-any authored hook, enrollment intent or volume effect. The command never pulls a
-dependency or falls back to emulation. Linux amd64 and uncached first-install
-dependency acquisition remain unsupported by this candidate. Image-only projects
-do not need the helper.
+Storage startup requires the exact cached Linux arm64 or amd64 Bun 1.4.2 helper
+image selected by the daemon architecture before any authored hook, enrollment
+intent or volume effect. The command never pulls a dependency or falls back to
+emulation. Uncached first-install dependency acquisition remains unsupported by
+this candidate. Image-only projects do not need the helper.
 
 Known enrolled storage is verified before hooks, workload admission and completion.
 Only an originally absent selected name with no retained history may enroll inside
@@ -228,12 +228,13 @@ on the admitted shell platforms; acceptance is at most 4096 bytes per stream.
 Unknown child disposition retains descriptors and the pending journal rather than
 starting competing cleanup. No child redirects through a reopened named path.
 
-The first declared dependency is the fixed Linux arm64 Bun 1.4.2 image
+The declared dependencies use the fixed Linux arm64 and amd64 Bun 1.4.2 image index
 `sha256:cb3bbbb08e13a4a2ff400f24c7a2a1d5efa83f6ef8544d52d95a519631e2fc61`.
 The packaged helper pins its bytes and the qualified Bun/libc bytes separately.
 Dependency/platform checks precede volume effects; every helper uses `--pull never`.
-There is no image download, emulation fallback or platform substitution. Linux
-amd64 and uncached first installation remain outside this qualification.
+Each architecture has separate manifest/config identities and Bun/libc byte pins.
+There is no image download, emulation fallback or platform substitution. Uncached
+first installation remains outside this qualification.
 Maintain the packaged source with
 `bun scripts/generate-native-storage-witness-helper.ts --check` or `--write`;
 the generator refuses a changed artifact pin rather than approving new bytes.

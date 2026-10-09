@@ -196,6 +196,14 @@ descendants: `**` followed by `!.hack` does not isolate future private outputs.
 Such a context refuses unless later literal exclusions close those paths.
 Root and `.hack` contexts can qualify through these exact exclusions.
 
+The maintained `native-compose-adoption-build-worktrees` acceptance explicitly
+requires Buildx's default Docker driver, `DOCKER_BUILDKIT=1` and
+`compose build --builder default` for fixture bootstrap. It never creates or
+bootstraps a separate builder. Its private fixed-stage evidence retains the
+complete fatal-decoded synthetic COPY reply before applying the unchanged file
+and hash oracle. This separates builder qualification from source/image guards;
+it does not infer which builder caused an earlier failure or prove cache ownership.
+
 One acquisition is limited to 16 builds, depth 32, 256 captured entries, 4096
 directory names, 16 MiB of bytes and a 48 KiB private proof; the existing stable
 file owner also limits each file to 1 MiB. Included byte, identity or mode changes,

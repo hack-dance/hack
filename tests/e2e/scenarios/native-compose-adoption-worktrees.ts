@@ -26,7 +26,6 @@ import {
   type ScenarioContext,
 } from "../harness.ts";
 import {
-  assertRetainedBuildFixtureCopy,
   assertRetainedFixtureImageUnchanged,
   prepareRetainedBuildFixtureSources,
   RETAINED_BUILD_BASE_TAG,
@@ -44,6 +43,12 @@ import {
   retainedBuildFixtureObjectGraph,
   retainedBuildFixtureSourceSnapshot,
 } from "./native-compose-adoption-build-inputs.ts";
+import {
+  createRetainedBuildFixtureEvidence,
+  qualifyRetainedBuildFixtureBuilder,
+  qualifyRetainedBuildFixtureCopy,
+  RETAINED_BUILD_BOOTSTRAP_ENV,
+} from "./native-compose-adoption-build-evidence.ts";
 import {
   adoptionDependencyHealthcheck,
   assertAdoptionDependencyControl,
@@ -931,6 +936,14 @@ function createFixtureRuntime(
   const managedAnchors = new Map<Instance, string>();
   const localAnchors = new Map<Instance, string>();
   const buildSourceAnchors = new Map<Instance, string>();
+  const buildEvidence = createRetainedBuildFixtureEvidence({
+    tempRoot: ctx.tempRoot,
+  });
+  const buildEnv = Object.freeze({
+    ...RETAINED_BUILD_BOOTSTRAP_ENV,
+    DOCKER_HOST: process.env.DOCKER_HOST,
+    DOCKER_CONTEXT: process.env.DOCKER_CONTEXT,
+  });
   const builtImages = new Map<Instance, RetainedFixtureImage>();
   const builtImageObjects = new Map<
     Instance,
@@ -1177,6 +1190,7 @@ function createFixtureRuntime(
     if (!instance.basicBuild) {
       refused();
     }
+    await buildEvidence(instance.basicBuild, "image-admission-begin");
     await assertFixtureBuildImages({
       probe,
       builtImages,
@@ -1184,11 +1198,19 @@ function createFixtureRuntime(
       originalImageIds,
       instance,
     });
+    await buildEvidence(instance.basicBuild, "image-admitted");
+    await buildEvidence(instance.basicBuild, "source-recheck-begin");
     if (
       (await retainedBuildFixtureSourceSnapshot({
         root: instance.root,
         mode: instance.basicBuild,
-      })) !== buildSourceAnchors.get(instance) ||
+      })) !== buildSourceAnchors.get(instance)
+    ) {
+      refused();
+    }
+    await buildEvidence(instance.basicBuild, "source-rechecked");
+    await buildEvidence(instance.basicBuild, "runtime-image-begin");
+    if (
       (await fixtureRuntimeImages({
         probe,
         instance,
@@ -1199,16 +1221,19 @@ function createFixtureRuntime(
     ) {
       refused();
     }
-    assertRetainedBuildFixtureCopy({
+    await buildEvidence(instance.basicBuild, "runtime-image-rechecked");
+    await qualifyRetainedBuildFixtureCopy({
       mode: instance.basicBuild,
-      text: await probe([
-        "container",
-        "exec",
-        container(instance, "db"),
-        "/bin/sh",
-        "-c",
-        RETAINED_BUILD_COPY_ORACLE,
-      ]),
+      record: buildEvidence,
+      read: () =>
+        createNativeComposeProbe({ timeoutMs: 30_000 })([
+          "container",
+          "exec",
+          container(instance, "db"),
+          "/bin/sh",
+          "-c",
+          RETAINED_BUILD_COPY_ORACLE,
+        ]),
     });
     await owned(instance, "container", container(instance, "db"));
   };
@@ -1342,6 +1367,8 @@ function createFixtureRuntime(
     managedAnchors,
     localAnchors,
     buildSourceAnchors,
+    buildEvidence,
+    buildEnv,
     buildImageAnchors,
     builtImages,
     builtImageObjects,
@@ -1634,12 +1661,29 @@ async function bootstrapFixtureBuildImage(
     reference,
     stage: "before-build",
   });
+  await qualifyRetainedBuildFixtureBuilder({
+    mode: instance.basicBuild,
+    env: h.buildEnv,
+    read: h.probe,
+    record: h.buildEvidence,
+  });
+  await h.buildEvidence(instance.basicBuild, "build-begin");
   await requirePreparedEngine(h);
   const built = await runCommand({
-    argv: [h.engine, ...fixtureComposePrefix(instance), "build", "db"],
+    argv: [
+      h.engine,
+      ...fixtureComposePrefix(instance),
+      "build",
+      "--builder",
+      "default",
+      "db",
+    ],
     cwd: h.fixtureRoot,
+    env: RETAINED_BUILD_BOOTSTRAP_ENV,
     timeoutMs: TIMEOUT,
   });
+  await h.buildEvidence(instance.basicBuild, "build-settled");
+  await h.buildEvidence(instance.basicBuild, "image-admission-begin");
   const observation = object(
     await h.probe([
       "image",
@@ -1661,6 +1705,7 @@ async function bootstrapFixtureBuildImage(
     owner: instance.name,
     originalImageIds: h.originalImageIds,
   });
+  await h.buildEvidence(instance.basicBuild, "image-admitted");
   const observedIds = await fixtureImageInventory(h.probe);
   if (!previousIds.every((id) => observedIds.includes(id))) {
     refused();
@@ -1698,6 +1743,7 @@ async function bootstrapFixtureBuildImage(
   h.builtImages.set(instance, image);
   h.builtImageObjects.set(instance, objects);
   await saveFixtureBuildRecovery(h);
+  await h.buildEvidence(instance.basicBuild, "graph-admitted");
   successful(built);
   await assertFixtureBuildImages({ ...h, instance });
   if (
@@ -1792,6 +1838,9 @@ async function bootstrapOriginal(h: FixtureRuntime, instance: Instance) {
       await typedLocalAdoptionFixtureSourceSnapshot({ primary, instance })
     );
   }
+  if (instance.basicBuild) {
+    await h.buildEvidence(instance.basicBuild, "original-start-begin");
+  }
   await requirePreparedEngine(h);
   const started = await runCommand({
     argv: [
@@ -1813,6 +1862,9 @@ async function bootstrapOriginal(h: FixtureRuntime, instance: Instance) {
     cwd: fixtureRoot,
     timeoutMs: TIMEOUT,
   });
+  if (instance.basicBuild) {
+    await h.buildEvidence(instance.basicBuild, "original-start-settled");
+  }
   const captured = await resources(instance);
   anchors.set(instance, {
     resources: captured,
@@ -1835,8 +1887,14 @@ async function bootstrapOriginal(h: FixtureRuntime, instance: Instance) {
         containers: captured.container,
       })
     );
+    await h.buildEvidence(instance.basicBuild, "original-ids-captured");
+    await h.buildEvidence(instance.basicBuild, "readiness-begin");
   }
   await waitReady(instance);
+  if (instance.basicBuild) {
+    await h.buildEvidence(instance.basicBuild, "readiness-qualified");
+    await h.buildEvidence(instance.basicBuild, "sql-begin");
+  }
   await waitForAdoptionFixtureSql({
     read: async () => {
       await sql(
@@ -1847,7 +1905,14 @@ async function bootstrapOriginal(h: FixtureRuntime, instance: Instance) {
     },
     expected: instance.marker,
   });
+  if (instance.basicBuild) {
+    await h.buildEvidence(instance.basicBuild, "sql-qualified");
+    await h.buildEvidence(instance.basicBuild, "full-check-begin");
+  }
   await check(instance);
+  if (instance.basicBuild) {
+    await h.buildEvidence(instance.basicBuild, "full-check-qualified");
+  }
 }
 async function checkInheritedRefusal(h: FixtureRuntime) {
   const { ctx, primary, first, second, env, cli, check, assertNoState } = h;

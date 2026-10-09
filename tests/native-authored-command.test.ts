@@ -2,6 +2,7 @@ import { afterEach, expect, test } from "bun:test";
 import { mkdir, mkdtemp, readdir, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { recoverNativeAuthoredProject } from "../src/backends/native-authored-project-recovery.ts";
 import {
   NativeAuthoredProjectStartError,
   type serveNativeAuthoredProject,
@@ -17,6 +18,7 @@ afterEach(async () => {
   );
 });
 type Startup = Parameters<typeof serveNativeAuthoredProject>[0];
+type Recovery = Parameters<typeof recoverNativeAuthoredProject>[0];
 async function fixture() {
   const root = await realpath(
     await mkdtemp(join(tmpdir(), "native-authored-command-"))
@@ -105,6 +107,119 @@ test.each([
 });
 
 const macTest = process.platform === "darwin" ? test : test.skip;
+macTest(
+  "explicit down recovery captures saved scope and never delegates to startup",
+  async () => {
+    const selected = await fixture();
+    const options = {
+      ...selected.options,
+      operation: "down" as const,
+      recover: true,
+      instance: "feature/$exact",
+    };
+    let calls = 0;
+    let recovery: Recovery | undefined;
+    const pending = tryNativeAuthoredCommand({
+      ...selected,
+      options,
+      serve: () => {
+        throw new Error("Recovery cannot invoke startup.");
+      },
+      recover: (value) => {
+        calls++;
+        recovery = value;
+        return Promise.reject(new Error("Private diagnostic must not escape."));
+      },
+    }).catch((error: unknown) => error);
+    options.instance = "replacement";
+    selected.env.HACK_NATIVE_HOME = "/replacement";
+    const result = await pending;
+    expect(calls).toBe(1);
+    expect(recovery?.scope).toEqual({
+      projectRoot: selected.root,
+      projectDir: join(selected.root, ".hack"),
+      nativeHome: join(selected.root, "candidate"),
+      branch: "feature/$exact",
+    });
+    expect(recovery?.timeoutMs).toBe(1500);
+    expect(result).toHaveProperty("code", "E_LIFECYCLE_FAILED");
+    expect(String(result)).not.toContain("Private diagnostic");
+    expect(await readdir(join(selected.root, ".hack"))).toEqual([]);
+  }
+);
+
+macTest(
+  "recovery refuses env/profile/effect overrides before runtime pin or stored owner selection",
+  async () => {
+    for (const extra of [
+      { overlay: null },
+      { overlay: "qa" },
+      { profiles: [] },
+      { profiles: ["dev"] },
+      { services: [] },
+      { json: true },
+      { detach: true },
+      { unsupportedOptions: true },
+    ]) {
+      const selected = await fixture();
+      let calls = 0;
+      const result = await tryNativeAuthoredCommand({
+        ...selected,
+        options: {
+          ...selected.options,
+          operation: "down",
+          recover: true,
+          ...extra,
+        },
+        env: { HACK_RUNTIME_BACKEND: "native" },
+        recover: () => {
+          calls++;
+          throw new Error("Owner must not run.");
+        },
+      }).catch((error: unknown) => error);
+      expect(result).toHaveProperty("code", "E_NATIVE_PROJECT_UNSUPPORTED");
+      expect(calls).toBe(0);
+      expect(await readdir(join(selected.root, ".hack"))).toEqual([]);
+    }
+  }
+);
+
+macTest(
+  "recovery cancellation awaits the selected owner and restores command signal listeners",
+  async () => {
+    const selected = await fixture();
+    const before = [
+      process.listenerCount("SIGINT"),
+      process.listenerCount("SIGTERM"),
+    ];
+    const entered = Promise.withResolvers<void>();
+    let aborted = false;
+    const pending = tryNativeAuthoredCommand({
+      ...selected,
+      options: { ...selected.options, operation: "down", recover: true },
+      recover: (value) =>
+        new Promise((_, reject) => {
+          value.signal?.addEventListener(
+            "abort",
+            () => {
+              aborted = true;
+              reject(new Error("Retained selected recovery."));
+            },
+            { once: true }
+          );
+          entered.resolve();
+        }),
+    }).catch((error: unknown) => error);
+    await entered.promise;
+    process.emit("SIGINT");
+    expect(await pending).toHaveProperty("code", "E_LIFECYCLE_FAILED");
+    expect(aborted).toBe(true);
+    expect([
+      process.listenerCount("SIGINT"),
+      process.listenerCount("SIGTERM"),
+    ]).toEqual(before);
+  }
+);
 macTest(
   "foreground dispatch captures exact selection and delegates to the lifetime owner",
   async () => {

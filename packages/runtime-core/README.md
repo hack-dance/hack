@@ -174,6 +174,50 @@ it. Native runtime receipts are v2 for image-only graphs and v3 for source-beari
 graphs; the authenticated control/ready wire remains v2;
 Compose receipt and owner formats remain unchanged. This provenance alone grants
 no dead-owner recovery authority.
+The inactive read-only recovery selector admits only a complete Ready journal and
+a dead version3 publication on the same native host boot. It captures the current
+private owner bytes and inode; its raw SHA is a selector for later independent
+admission, not an external identity anchor from before that capture. After a
+durable intent, the saved inode and digest refuse replacement. Cleanup progress
+retains the original Ready selectors and exact inventory. Pending writes refuse;
+retired paths require the intent's preceding phase and unchanged archived inode.
+`graph native recovery-selection --run-id ID --json` exposes only the closed
+selection: run, original value-free Ready receipt, raw receipt/owner hashes and
+native host boot time. The receipt contains review hashes, workload readiness,
+resource IDs/images/networks and terminal observations; it contains no environment
+keys/values, command argv, source bytes or publication process/path metadata. The
+selector creates no intent and connects no provider. It grants no cleanup or
+frontend recovery authority.
+
+The separate explicit library recovery entrypoint re-admits both raw selectors
+and commits a bounded 64 KiB recovery intent before cleanup. It retains the
+publication gate, original operation lock and cleanup provider lease through
+matching Removed resources, private-environment absence and publication
+retirement. A metadata-only current slot inventory is bound into the intent;
+changed or missing records refuse. Bounded read-only guest slot enumeration
+cross-checks the validated native and Compose host records before cleanup and
+again before publication retirement. Unknown guest slots refuse even when host
+records are empty; no payload contents are read or inferred from missing records.
+Durable phases precede each exclusive archive move; original Ready
+hashes and inventory remain fixed while cleanup phases advance. Completed retry
+checks absence rather than repeating retirement. Pending writes, unexpected
+replacements or missing original and archive paths retain a refusal. Public
+frontend recovery and actual dead-owner acceptance remain separate gates.
+The distinct macOS command `graph native recover-live-owner --run-id ID
+--expect-receipt SHA --expect-owner SHA --json` exposes only this explicit
+cleanup entrypoint. Both hashes select the original read-only recovery envelope;
+source, private stdin, review, action and timeout options refuse. Existing live
+control and direct-cleanup ownership gates remain strict. This command does not
+retire frontend start/ready/source artifacts or enable ordinary `up` takeover.
+
+Guarded native cleanup checks its retained authority before and after every
+engine observation, removal request and admitted stop batch, including failed
+calls. The existing stop batch retains its concurrent HTTP-stop semantics. Cleanup
+checks authority before each journal publication. It also
+checks each private-environment absence and retirement call. A lost guard refuses
+before the next request or journal transition; an already attempted effect remains
+durable evidence for an explicitly admitted retry. This prerequisite introduces
+no dead-publisher cleanup entrypoint.
 Cancellation fences startup before admission and subsequent effects. Cleanup
 retains stop failures by admitted workload name, and retires the publication only
 after exact cleanup succeeds. Replies bind their requested action and immutable

@@ -1,5 +1,32 @@
 # Runtime state models
 
+`native-persistent-enrollment/Enrollment.tla` follows the inactive Rust
+`provider::graph::native::persistent_data::enrollment` owner. Its finite domain is
+one storage slot, absent/original/replacement volume identities and two independent
+compute references. Pending publication, exclusive creation, captured original
+birth, enrolled rename, final directory synchronization and failure are distinct
+steps. Failure retains the intent or an uncertain enrolled pathname and loses the
+original invocation's promotion ability; read-only reopen cannot create or promote.
+An uncertain enrolled pathname may compare as data, but does not establish the
+original operation's successful return or runtime effect authority.
+
+| Model operation | Source boundary and qualification |
+| --- | --- |
+| `ReserveIntent` | Exclusive private slot/lock, `owner.json` pending write and file/parent sync precede `create_new`. Real filesystem sync-failure controls require create count zero. |
+| `CreateOriginal` / `CaptureBirth` | Sealed trusted transport requires atomic exclusive creation and returns its original identity directly to the invocation. No production adapter is implemented; a Docker absence check plus idempotent create is insufficient. The stand-in refuses existing names and retains ambiguous-create pending state. |
+| `ReplaceVolume` / `PublishEnrollment` | Captured binding/birth/directory must equal fresh observations; root/lock/record/staged inode and bytes remain exact before rename. Copied-label replacement and post-effect file/lock/root controls refuse. |
+| `ConfirmDirectorySync` / `CrashOrFailure` | Commit return follows enrolled rename and parent sync, then final guest/observation/files/deadline fences. Failed final sync returns uncertainty even if the enrolled pathname is visible. No reopen recovers an original-create capability. |
+| `ReadRetained` / `RetireCompute` | Existing-only locked read never rewrites binding or stable identity when caller compute references change. `RetireCompute` expresses the future runtime obligation to retain data; no runtime teardown owner is activated or qualified here. |
+
+The positive exploration exhausts 38 distinct states. Four guard-removal
+controls must fail `NoExistingAdoption`, `OriginalBirthAtCommit`, `NoPendingMatch`
+and `RetirementPreservesData` at their corresponding named action with the exact
+same-state witness. Registry/checker contracts reject incomplete exploration and
+unrelated failures. This model does not prove fsync/crash durability, real guest or
+volume observations, atomic ownership against unsynchronized external writers,
+transport cancellation, SQL contents/retention or NC05 application acceptance.
+No fairness or eventual recovery is asserted.
+
 Run `bun run test:models` with Java 17 available and `TLA2TOOLS_JAR` pointing to
 TLA+ 1.7.4's `tla2tools.jar`. The runner checks the SHA-256 before executing Java:
 

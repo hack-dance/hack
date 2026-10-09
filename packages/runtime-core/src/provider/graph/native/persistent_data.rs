@@ -257,3 +257,5 @@ fn timestamp(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests;
+
+pub mod enrollment;

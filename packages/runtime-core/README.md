@@ -1390,10 +1390,40 @@ and scope, guest, birth or directory changes refuse. Copied labels do not make a
 replacement volume match its original birth. Guest boot/disk rollover remains a
 refusal requiring a future separately owned handoff; no migration is inferred.
 
-This codec is inactive: no command reads or writes it and no create, adoption,
-promotion, repair or deletion path is added. Decoding an enrolled assertion does
+This codec alone is data-only: no command reads or writes it. Decoding an enrolled assertion does
 not prove a durable enrollment commit, fresh observation, contents or effect
 authority. It is separate from dependency-cache provenance and does not qualify
 persistent databases, initializer replay, SQL retention or the full NC05 corpus.
 Future enrollment and runtime owners must establish those commit/freshness and
 same-data lifecycle gates before activation.
+
+### Inactive persistent-data enrollment owner
+
+`persistent_data::enrollment` adds an inactive private-filesystem lifecycle with no
+production transport adapter. The owner uses a stable namespace/storage slot,
+independent of compute generations, under an explicitly supplied existing private
+host directory outside application data. An exclusive slot/lock and pending
+record are synchronized before the sole original-create attempt. Promotion
+requires that attempt's captured volume identity, matching fresh observations,
+and unchanged guest, root, lock and original record identities/bytes. Existing
+volume names, slots, incomplete staging and pending attempts refuse; no later
+invocation recreates or promotes an interrupted attempt.
+
+The sealed transport requires atomic exclusive creation under an existing guest
+effect owner. An absence probe followed by Docker's idempotent volume create API
+does not satisfy this contract. Only an atomic stand-in implements it here. No
+command, engine/provider adapter, adoption, repair, deletion or global default is
+activated. Existing-only retained reads acquire the existing lock, compare the
+exact binding/birth/directory, and leave record bytes and generation references
+unchanged. Pending or missing/foreign state cannot become enrollment by reading.
+
+Before rename, failures retain pending or incomplete staging. After rename, a
+publication/directory-sync failure is uncertain: the enrolled pathname may exist,
+but the operation returns no successful durable commit. A later retained read is
+a fresh data-only comparison and cannot retroactively prove that failed operation
+completed, or authorize runtime effects by itself. The lock coordinates these
+writers; unsynchronized same-user external mutations are not atomically frozen.
+Local synchronous filesystem I/O and trusted transport deadline obligations are
+not process cancellation or crash-durability proof. Real private-filesystem and
+stand-in tests qualify sequencing/refusal; persistent SQL and full NC05 runtime
+retention remain open.

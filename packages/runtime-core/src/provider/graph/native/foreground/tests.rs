@@ -332,9 +332,9 @@ fn publication_four_binds_session_and_preserves_closed_legacy_live_codecs() {
     let bytes = fs::read(&file).unwrap();
     let qualified: Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(qualified["version"], 4);
-    assert_eq!(
-        qualified["host_boot_uuid"],
-        serde_json::to_value(host_boot::read().unwrap()).unwrap()
+    assert!(
+        qualified["host_boot_uuid"] == serde_json::to_value(host_boot::read().unwrap()).unwrap(),
+        "Publication must retain the observed boot qualifier"
     );
     assert!(qualified.get("host_boot_micros").is_none());
     let boot = crate::provider::host_filesystem::host_boot_micros().unwrap();

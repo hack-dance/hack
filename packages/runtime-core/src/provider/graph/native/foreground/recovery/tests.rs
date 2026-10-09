@@ -245,9 +245,10 @@ fn dead_complete_publication_selects_original_raw_hash_without_creating_authorit
         selected.receipt_sha256,
         digest(&serde_json::to_vec(&selected.receipt).unwrap())
     );
-    assert_eq!(
-        serde_json::to_value(&selected).unwrap()["host_boot_uuid"],
-        serde_json::to_value(host_boot::read().unwrap()).unwrap()
+    assert!(
+        serde_json::to_value(&selected).unwrap()["host_boot_uuid"]
+            == serde_json::to_value(host_boot::read().unwrap()).unwrap(),
+        "Selection must retain the observed boot qualifier"
     );
     assert_eq!(fs::read(&state_path).unwrap(), original);
     assert_eq!(id(&state_path).unwrap(), state_id);
@@ -411,7 +412,7 @@ fn legacy_three_selection_remains_version_one_without_uuid_migration() {
 }
 
 #[test]
-fn recovery_session_is_rechecked_before_after_and_after_retirement() {
+fn recovery_session_entry_refusal_and_restoration_preserve_exact_evidence() {
     let fixture = Fixture::new();
     fixture.dead();
     let intent = fixture.intent();
@@ -433,6 +434,51 @@ fn recovery_session_is_rechecked_before_after_and_after_retirement() {
         assert!(select(&fixture.candidate, RUN).is_err());
         assert!(fixture.owner_root().join("owner.json").exists());
         assert!(fixture.owner_root().join("control.sock").exists());
+    }
+    lease.verify(false, false).unwrap();
+}
+
+#[test]
+fn recovery_session_final_observation_refuses_drift_without_changing_original_evidence() {
+    let fixture = Fixture::new();
+    fixture.dead();
+    let intent = fixture.intent();
+    fixture.store(&intent);
+    let lease = owner::RecoveryLease::acquire(
+        &fixture.candidate,
+        RUN,
+        Some(intent.publication.clone()),
+        false,
+        false,
+    )
+    .unwrap();
+    let current = serde_json::to_value(host_boot::read().unwrap())
+        .unwrap()
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let mut changed = current.clone();
+    changed.replace_range(0..1, if current.starts_with('f') { "e" } else { "f" });
+    let owner = fixture.owner_root().join("owner.json");
+    let socket = fixture.owner_root().join("control.sock");
+    let journal = fixture.journal_root().join("state.json");
+    let saved_intent = fixture.journal_root().join(FILE);
+    let paths = [&owner, &socket, &journal, &saved_intent];
+    let identities: Vec<_> = paths.iter().map(|path| id(path).unwrap()).collect();
+    let bytes = [&owner, &journal, &saved_intent].map(|path| fs::read(path).unwrap());
+    for last in [Some(changed.as_str()), None] {
+        let _drift = host_boot::test::Guard::sequence(&[Some(&current), last]);
+        // First record read admits the original boot; final read must refuse.
+        assert!(lease.verify(false, false).is_err());
+        for (path, expected) in paths.iter().zip(&identities) {
+            assert_eq!(id(path).unwrap(), *expected);
+        }
+        for (path, expected) in [&owner, &journal, &saved_intent].into_iter().zip(&bytes) {
+            assert!(
+                fs::read(path).unwrap() == *expected,
+                "Original evidence must remain unchanged"
+            );
+        }
     }
     lease.verify(false, false).unwrap();
 }

@@ -148,6 +148,36 @@ test("session selection is closed version two and preserves original qualifier w
     }
   }
 });
+test("selector dispatch refuses missing own fields before reading version getters", () => {
+  const admitted = parseNativeAuthoredReceipt(receipt());
+  let calls = 0;
+  const prototype = {
+    get version() {
+      calls++;
+      return 2;
+    },
+  };
+  const ownPartial = Object.create(null);
+  Object.defineProperties(ownPartial, {
+    version: {
+      enumerable: true,
+      get() {
+        calls++;
+        return 2;
+      },
+    },
+    host_boot_uuid: {
+      enumerable: true,
+      value: sessionSelection().host_boot_uuid,
+    },
+  });
+  for (const value of [Object.create(prototype), ownPartial]) {
+    expect(() =>
+      parseNativeAuthoredRecoverySelection({ value, admitted })
+    ).toThrow("invalid");
+    expect(calls).toBe(0);
+  }
+});
 test("native recovery selection refuses inherited unknown private or invalid boot/hash fields", () => {
   const admitted = parseNativeAuthoredReceipt(receipt());
   const canary = "private-recovery-wire-canary";

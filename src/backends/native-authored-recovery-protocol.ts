@@ -66,7 +66,7 @@ export function parseNativeAuthoredRecoverySelection(opts: {
   const admitted = ready(opts.admitted);
   const value = opts.value;
   const qualifier =
-    isRecord(value) && value.version === 2
+    isRecord(value) && Object.hasOwn(value, "host_boot_uuid")
       ? "host_boot_uuid"
       : "host_boot_micros";
   if (

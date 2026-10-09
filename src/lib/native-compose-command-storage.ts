@@ -27,6 +27,30 @@ type Ports = {
 };
 const VOLUME_NAME = /^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,254}$/;
 
+/** Image-only saved exec retains its read lease. Any content history or unknown
+ * storage intent requires the mutation owner; a missing declaration is insufficient. */
+export function nativeComposeSavedExecUsesReadLease(opts: {
+  readonly selected: readonly Selection[];
+  readonly current: Pick<
+    Awaited<ReturnType<NativeComposeGenerationStore["loadCurrent"]>>,
+    | "pending"
+    | "beforeHooksPending"
+    | "retainedStorage"
+    | "storageWitnesses"
+    | "storageWitnessesPending"
+  >;
+}): boolean {
+  const { current, selected } = opts;
+  return (
+    selected.length === 0 &&
+    (current.retainedStorage?.length ?? 0) === 0 &&
+    (current.storageWitnesses?.length ?? 0) === 0 &&
+    !current.storageWitnessesPending &&
+    !current.beforeHooksPending &&
+    current.pending === null
+  );
+}
+
 function refuse(): never {
   throw new HackCliError({
     code: "E_NATIVE_PROJECT_UNSUPPORTED",

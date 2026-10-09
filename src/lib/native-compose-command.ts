@@ -27,6 +27,7 @@ import {
 import {
   type NativeComposeCommandStorage,
   nativeComposePlanStorage,
+  nativeComposeSavedExecUsesReadLease,
   prepareNativeComposeCommandStorage,
   runNativeComposeStorageVerifiedExec,
   nativeComposeDocumentStorage as volumeSelections,
@@ -762,6 +763,36 @@ async function savedCommand(opts: {
     });
   }
   if (options.operation === "exec") {
+    const selected = volumeSelections(document);
+    if (nativeComposeSavedExecUsesReadLease({ selected, current: state })) {
+      return await store.withLease({
+        generation,
+        run: async () => {
+          const assertImageOnly = async () => {
+            const current = await store.loadCurrent();
+            assertStartupAvailable(current);
+            if (
+              current.stopped ||
+              current.generation?.generationId !== generation.generationId ||
+              !nativeComposeSavedExecUsesReadLease({ selected, current })
+            ) {
+              throw new NativeComposeGenerationError("E_NATIVE_COMPOSE_STATE");
+            }
+          };
+          await assertImageOnly();
+          await store.readGenerationDocument(generation);
+          await assertNativeComposeOwned(selection);
+          await assertImageOnly();
+          return await runSavedProcess({
+            options,
+            generation,
+            document,
+            base,
+            signal,
+          });
+        },
+      });
+    }
     return await store.withMutation(async (mutation) => {
       const before = await store.loadCurrent();
       assertStartupAvailable(before);
@@ -775,7 +806,7 @@ async function savedCommand(opts: {
         store,
         mutation,
         operation: "exec",
-        selected: volumeSelections(document),
+        selected,
         signal,
       });
       const assertSaved = async () => {

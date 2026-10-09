@@ -20,12 +20,14 @@ It cannot grant general material effects, explicit adoption, or another attempt
 after its effect returns. Warm and stopped runs verify enrolled content only;
 they cannot enroll newly selected storage. Existing unenrolled v1/v2 storage refuses even
 when its volume is missing; it is never treated as cold or silently adopted.
-Saved exec verifies under the existing mutation owner without parsing authored
-source or creating an exec pending operation. A fresh finite read carrier is used
+Storage-bearing saved exec verifies under the existing mutation owner without
+parsing authored source or creating an exec pending operation. A fresh finite read carrier is used
 after an arbitrary-duration known exec or run; the final proofs are retained.
 Cancelled saved exec preserves its known exit without starting a late helper or
 claiming post-return proof. An unknown exec return is refused, and future
 admission always re-verifies content.
+Image-only saved exec keeps its read lease only when the saved document and receipt
+have no selected or retained storage, witness, pending generation or unknown intent.
 Saved down and explicit down recovery do not require the helper dependency and
 never seed or replay enrollment. Expected or unknown helper intent remains an
 incomplete retained recovery anchor.

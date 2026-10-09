@@ -471,6 +471,16 @@ impl<'a> Engine<'a> {
         )
     }
 
+    /// One live-owner command keeps its original budget through every engine query.
+    #[cfg(all(target_os = "macos", feature = "native-config-plan"))]
+    pub(in crate::provider) fn connect_command_until(
+        candidate: &'a Candidate,
+        deadline: Instant,
+    ) -> Result<Self, CandidateError> {
+        super::managed_environment::remaining_until(deadline)?;
+        Self::from_guest_until(OwnedGuest::connect(candidate)?, false, Some(deadline))
+    }
+
     #[cfg(target_os = "macos")]
     pub(super) fn connect_cleanup_wait(candidate: &'a Candidate) -> Result<Self, CandidateError> {
         Self::from_guest(OwnedGuest::connect_cleanup_wait(candidate)?, true)

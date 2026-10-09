@@ -3,7 +3,7 @@
 An explicit `HACK_RUNTIME_BACKEND=native` selection delegates an authored
 `.hack/hack.project.json` project to the separate native foreground owner. The
 current command slice supports whole-project foreground `up`, saved-run `ps`,
-and finite service `logs` on macOS with an absolute `HACK_NATIVE_BINARY` and private
+finite service `logs` and noninteractive service `exec` on macOS with an absolute `HACK_NATIVE_BINARY` and private
 canonical `HACK_NATIVE_HOME`. It requires
 the caller's separately prepared native provider pool and matching runtime binary.
 It does not install or select a runtime automatically. An omitted backend continues
@@ -59,7 +59,7 @@ directories, saved record identities and the selected executable across its sing
 bounded request. It does not compile or read authored values, resolve env, run
 hooks, start workloads, repair state or perform cleanup. Cancellation waits for the
 owned request to settle. Profiles, env overrides, service subsets and other `ps`
-options are unsupported. Native `exec`, `run` and `restart` remain separate
+options are unsupported. Native `run` and `restart` remain separate
 unsupported command slices.
 
 Startup shares the configured `HACK_COMPOSE_STARTUP_TIMEOUT_MS` budget across
@@ -144,6 +144,31 @@ withholds the result; it never stops the foreground owner or retries a query. Lo
 may contain application values and are returned only to the requesting caller;
 they are never journaled or included in refusal diagnostics. Offline controls do
 not qualify a live provider or application log behavior.
+
+## Finite service exec
+
+`exec SERVICE -- COMMAND ARG...` sends one command to an already running authored
+service through its authenticated foreground owner. Arguments are literal, including
+empty arguments, spaces and shell characters. `--workdir` selects an absolute guest
+directory; the service's existing environment and user remain in force. Stdin is
+closed and no TTY is allocated. Interactive input, TTY control, env/profile overrides,
+multiple services and JSON formatting are unsupported. No shell is inserted.
+
+The owner verifies the admitted service, full resource ownership, guest boot, image,
+container start generation and current source/data bindings before each exec
+transport and after completion. The current input and hook permit remain pinned.
+A changed owner, member, source or container restart withholds the result. This does
+not start, restart or recover a project and does not acquire managed values.
+
+One 30-second observation budget includes identity proofs and the Engine's existing
+single exec create, attached start and completion inspection. Known completion
+preserves the command's exit code and binary stdout/stderr, with up to 1 MiB per
+stream and an explicit truncation notice. Cancellation or timeout settles the local
+request but cannot prove guest command termination. Failed or unknown completion
+returns no command output and warns that effects may have occurred; no request is
+replayed and the foreground project is not stopped. Inspect the service before
+deciding whether another command is appropriate. Offline controls do not qualify
+installed native exec or live application behavior.
 
 ## Finite host lifecycle hooks
 

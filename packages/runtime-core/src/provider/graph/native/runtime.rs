@@ -3,7 +3,24 @@ use super::*;
 use crate::provider::{environment::PendingEnvironment, managed_environment, native_environment};
 use std::{cell::Cell, path::Path, time::Instant};
 
+#[cfg(any(target_os = "macos", test))]
+mod exec;
+#[cfg(target_os = "macos")]
+pub(super) use exec::execute as service_exec;
+#[cfg(any(target_os = "macos", test))]
+pub(super) use exec::{ExecSelection, ServiceExec};
+
 trait Backend {
+    #[cfg(any(target_os = "macos", test))]
+    fn exec(
+        &self,
+        _id: &str,
+        _selected: &ExecSelection,
+        _deadline: Instant,
+        _fresh: &dyn Fn() -> Result<(), CandidateError>,
+    ) -> Result<(i32, Vec<u8>, Vec<u8>, bool), CandidateError> {
+        Err(refused())
+    }
     #[cfg(any(target_os = "macos", test))]
     fn logs(&self, _id: &str, _tail: u16) -> Result<(String, String, bool), CandidateError> {
         Err(refused())
@@ -68,6 +85,23 @@ struct GuardedBackend<'a, B> {
     guard: Option<&'a dyn Fn() -> Result<(), CandidateError>>,
 }
 impl<B: Backend> Backend for GuardedBackend<'_, B> {
+    #[cfg(any(target_os = "macos", test))]
+    fn exec(
+        &self,
+        id: &str,
+        selected: &ExecSelection,
+        deadline: Instant,
+        fresh: &dyn Fn() -> Result<(), CandidateError>,
+    ) -> Result<(i32, Vec<u8>, Vec<u8>, bool), CandidateError> {
+        let check = || {
+            check_startup(self.guard)?;
+            fresh()
+        };
+        check()?;
+        let result = self.backend.exec(id, selected, deadline, &check);
+        check()?;
+        result
+    }
     #[cfg(any(target_os = "macos", test))]
     fn logs(&self, id: &str, tail: u16) -> Result<(String, String, bool), CandidateError> {
         check_startup(self.guard)?;
@@ -155,6 +189,24 @@ struct OwnedBackend<'a> {
     leases: BTreeMap<String, crate::provider::environment::EnvironmentLease>,
 }
 impl Backend for OwnedBackend<'_> {
+    #[cfg(any(target_os = "macos", test))]
+    fn exec(
+        &self,
+        id: &str,
+        selected: &ExecSelection,
+        deadline: Instant,
+        fresh: &dyn Fn() -> Result<(), CandidateError>,
+    ) -> Result<(i32, Vec<u8>, Vec<u8>, bool), CandidateError> {
+        self.engine
+            .service_exec_until(
+                id,
+                &selected.argv,
+                selected.workdir.as_deref(),
+                deadline,
+                fresh,
+            )
+            .map(|v| (v.exit_code, v.stdout, v.stderr, v.truncated))
+    }
     #[cfg(any(target_os = "macos", test))]
     fn logs(&self, id: &str, tail: u16) -> Result<(String, String, bool), CandidateError> {
         self.engine.logs_tail(id, tail)

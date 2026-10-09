@@ -4,6 +4,10 @@ import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  nativeComposeEffectRefusal,
+  retainNativeComposeEffectRefusal,
+} from "../src/lib/native-compose-effect-diagnostics.ts";
+import {
   assertNativeComposeMaterialAuthority,
   type NativeComposeGenerationStore,
   type NativeComposeMaterialBinding,
@@ -749,6 +753,117 @@ test.each([
   expect(() =>
     checkNativeComposeStorageReadonlyCarrierRecovery(fixture)
   ).toThrow("values omitted");
+});
+
+test("carrier policy accepts the Docker 28 empty DriverConfig default beside NoCopy", () => {
+  const selected = input();
+  const fixture = carrier(selected);
+  fixture.volumeOptions.DriverConfig = {};
+  const checked = checkNativeComposeStorageDockerCarrier({
+    value: fixture.value,
+    input: selected,
+    program: fixture.program,
+    imageIds: [selected.artifact.imageId],
+  });
+  expect(typeof nativeComposeStorageDockerCarrierPolicy(checked)).toBe(
+    "string"
+  );
+  for (const extra of [{ Labels: {} }, { Subpath: "" }] as const) {
+    const refused = carrier(selected);
+    Object.assign(refused.volumeOptions, extra);
+    let caught: unknown;
+    try {
+      checkNativeComposeStorageDockerCarrier({
+        value: refused.value,
+        input: selected,
+        program: refused.program,
+        imageIds: [selected.artifact.imageId],
+      });
+    } catch (error) {
+      caught = error;
+    }
+    expect(nativeComposeEffectRefusal(caught)).toEqual({
+      stage: "storage-helper-policy",
+      reason: "helper-storage-request",
+    });
+  }
+});
+test.each([
+  "helper-shape",
+  "helper-command",
+  "helper-labels",
+  "helper-host-policy",
+  "helper-mount-cardinality",
+  "helper-program-mount",
+  "helper-storage-request",
+  "helper-storage-identity",
+  "helper-storage-mount",
+  "helper-policy-stability",
+] as const)("carrier policy identifies the closed %s conjunct without values", (reason) => {
+  const selected = input();
+  const fixture = carrier(selected);
+  const { value } = fixture;
+  switch (reason) {
+    case "helper-shape":
+      value.id = "private-shape-canary";
+      break;
+    case "helper-command":
+      value.user = "private-user-canary";
+      break;
+    case "helper-labels":
+      value.labels["io.hack.storage-witness.owner"] = "private-owner-canary";
+      break;
+    case "helper-host-policy":
+      value.host.NetworkMode = "private-network-canary";
+      break;
+    case "helper-mount-cardinality":
+      fixture.rootConfig.Target = "/hack-storage-witness-helper.mjs";
+      break;
+    case "helper-program-mount":
+      value.mounts[0] = { ...value.mounts[0], Source: "private-mount-canary" };
+      break;
+    case "helper-storage-request":
+      fixture.volumeOptions.DriverConfig = { Name: "private-driver-canary" };
+      break;
+    case "helper-storage-identity":
+      fixture.rootMount.Driver = "private-driver-canary";
+      break;
+    case "helper-storage-mount":
+      fixture.rootMount.RW = true;
+      break;
+    case "helper-policy-stability":
+      value.host.OomKillDisable = true;
+      break;
+    default:
+      throw new Error("Unknown fixed policy discriminator");
+  }
+  let caught: unknown;
+  try {
+    const checked = checkNativeComposeStorageDockerCarrier({
+      value,
+      input: selected,
+      program: fixture.program,
+      imageIds: [selected.artifact.imageId],
+    });
+    nativeComposeStorageDockerCarrierPolicy(checked);
+  } catch (error) {
+    caught = error;
+  }
+  expect(caught).toBeInstanceOf(Error);
+  expect(caught instanceof Error ? caught.message : null).toBe(
+    "Native storage xattr proof refused; values omitted."
+  );
+  retainNativeComposeEffectRefusal(caught, {
+    stage: "storage-enrollment",
+    reason: "unclassified",
+  });
+  expect(nativeComposeEffectRefusal(caught)).toEqual({
+    stage: "storage-helper-policy",
+    reason,
+  });
+  expect(JSON.stringify(nativeComposeEffectRefusal(caught))).not.toContain(
+    "canary"
+  );
 });
 test.each([
   "omitted",

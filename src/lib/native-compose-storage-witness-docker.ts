@@ -12,6 +12,12 @@ import {
 import { join } from "node:path";
 import { isRecord } from "./guards.ts";
 import {
+  copyNativeComposeEffectRefusal,
+  type NativeComposeEffectRefusal,
+  nativeComposeEffectReason,
+  retainNativeComposeEffectRefusal,
+} from "./native-compose-effect-diagnostics.ts";
+import {
   assertNativeComposeMaterialAuthority,
   type NativeComposeGenerationStore,
   type NativeComposeMaterialAuthority,
@@ -1347,27 +1353,42 @@ export async function createNativeComposeDockerStorageXattrCarrier(
     await image(prerequisite, dependency);
     nativeComposeStorageDockerHelper();
     lifetime(context);
-  } catch {
-    throw new Error(
+  } catch (error) {
+    const normalized = new Error(
       "Native storage witnesses require a matching pinned Linux helper dependency already cached for this daemon; no image is pulled or emulated automatically."
     );
+    copyNativeComposeEffectRefusal(error, normalized);
+    retainNativeComposeEffectRefusal(normalized, {
+      stage: "storage-dependency",
+      reason: nativeComposeEffectReason(error),
+    });
+    throw normalized;
   }
   const selectedArtifact = dependency.artifact;
   const inspect = async (selection: Selection) => {
-    const before = await current(context, selection);
-    const target = await observeNativeComposeStorageDockerTarget({
-      probe: probe(),
-      current: before,
-      selection,
-      engineId: context.engineId,
-      stopped: false,
-    });
-    const after = await current(context, selection);
-    if (!same(before, after)) {
-      return refuse();
+    const stage: NativeComposeEffectRefusal["stage"] = "storage-target";
+    try {
+      const before = await current(context, selection);
+      const target = await observeNativeComposeStorageDockerTarget({
+        probe: probe(),
+        current: before,
+        selection,
+        engineId: context.engineId,
+        stopped: false,
+      });
+      const after = await current(context, selection);
+      if (!same(before, after)) {
+        return refuse();
+      }
+      lifetime(context);
+      return target;
+    } catch (error) {
+      retainNativeComposeEffectRefusal(error, {
+        stage,
+        reason: nativeComposeEffectReason(error),
+      });
+      throw error;
     }
-    lifetime(context);
-    return target;
   };
   const provision = async (
     selection: Selection & {
@@ -1376,142 +1397,153 @@ export async function createNativeComposeDockerStorageXattrCarrier(
       readonly ownerToken: string;
     }
   ) => {
-    const before = await current(context, selection, true);
-    if (
-      !(
-        selection.engineId === context.engineId &&
-        selection.runtimeIdentity === before.identity.composeProject &&
-        selection.ownerToken === before.identity.ownerToken
-      )
-    ) {
-      return refuse();
-    }
-    const absent = await observeNativeComposeStorageDockerTarget({
-      probe: probe(),
-      current: before,
-      selection,
-      engineId: context.engineId,
-      stopped: true,
-    });
-    if (absent.volume !== null) {
-      return refuse();
-    }
-    await image(probe(), dependency);
-    const nonce = randomBytes(16).toString("hex");
-    const directory = await holdDirectory(
-      join(
-        context.store.identity.checkoutRoot,
-        ".hack",
-        ".internal",
-        "native-compose",
-        context.store.identity.instanceId
-      ),
-      true
-    );
-    const held: HeldDirectory[] = [directory];
-    let files: Files | null = null;
+    const stage: NativeComposeEffectRefusal["stage"] = "storage-provision";
     try {
-      const root = await privateDirectory(
-        join(directory.path, "storage-provisions")
-      );
-      held.push(root);
-      const path = join(root.path, nonce);
-      await mkdir(path, { mode: 0o700 });
-      await root.file.sync();
-      const leaf = await holdDirectory(path, true);
-      held.push(leaf);
-      const request = join(path, "request.json"),
-        program = join(path, "intent.json");
-      const inputInfo =
-        await createNativeComposeStorageDockerEmptyLeaf(request);
-      const programInfo = await writeExclusive(
-        program,
-        JSON.stringify({ ...selection, nonce })
-      );
-      await leaf.file.sync();
-      files = {
-        held,
-        path,
-        input: request,
-        program,
-        programInfo,
-        inputInfo,
-        requestText: "",
-        captures: [],
-      };
-      const read = probe();
-      await engine(read, context);
-      const finalAbsent = await observeNativeComposeStorageDockerTarget({
-        probe: read,
+      const before = await current(context, selection, true);
+      if (
+        !(
+          selection.engineId === context.engineId &&
+          selection.runtimeIdentity === before.identity.composeProject &&
+          selection.ownerToken === before.identity.ownerToken
+        )
+      ) {
+        return refuse();
+      }
+      const absent = await observeNativeComposeStorageDockerTarget({
+        probe: probe(),
         current: before,
         selection,
         engineId: context.engineId,
         stopped: true,
       });
-      if (finalAbsent.volume !== null) {
+      if (absent.volume !== null) {
         return refuse();
       }
-      tool();
-      await recheckDirectories(held);
-      const latest = await current(context, selection, true);
-      if (!same(before, latest)) {
-        return refuse();
+      await image(probe(), dependency);
+      const nonce = randomBytes(16).toString("hex");
+      const directory = await holdDirectory(
+        join(
+          context.store.identity.checkoutRoot,
+          ".hack",
+          ".internal",
+          "native-compose",
+          context.store.identity.instanceId
+        ),
+        true
+      );
+      const held: HeldDirectory[] = [directory];
+      let files: Files | null = null;
+      try {
+        const root = await privateDirectory(
+          join(directory.path, "storage-provisions")
+        );
+        held.push(root);
+        const path = join(root.path, nonce);
+        await mkdir(path, { mode: 0o700 });
+        await root.file.sync();
+        const leaf = await holdDirectory(path, true);
+        held.push(leaf);
+        const request = join(path, "request.json"),
+          program = join(path, "intent.json");
+        const inputInfo =
+          await createNativeComposeStorageDockerEmptyLeaf(request);
+        const programInfo = await writeExclusive(
+          program,
+          JSON.stringify({ ...selection, nonce })
+        );
+        await leaf.file.sync();
+        files = {
+          held,
+          path,
+          input: request,
+          program,
+          programInfo,
+          inputInfo,
+          requestText: "",
+          captures: [],
+        };
+        const read = probe();
+        await engine(read, context);
+        const finalAbsent = await observeNativeComposeStorageDockerTarget({
+          probe: read,
+          current: before,
+          selection,
+          engineId: context.engineId,
+          stopped: true,
+        });
+        if (finalAbsent.volume !== null) {
+          return refuse();
+        }
+        tool();
+        await recheckDirectories(held);
+        const latest = await current(context, selection, true);
+        if (!same(before, latest)) {
+          return refuse();
+        }
+        const result = await runNativeComposeStorageDockerCommand({
+          context,
+          files,
+          args: [
+            docker,
+            "volume",
+            "create",
+            "--driver",
+            "local",
+            "--label",
+            `com.docker.compose.project=${selection.runtimeIdentity}`,
+            "--label",
+            `com.docker.compose.volume=${selection.storage}`,
+            "--label",
+            "io.hack.native-config.version=1",
+            "--label",
+            `io.hack.native-config.instance=${selection.runtimeIdentity}`,
+            "--label",
+            `io.hack.native-config.owner=${selection.ownerToken}`,
+            "--label",
+            `io.hack.native-config.storage=${selection.storage}`,
+            "--label",
+            `io.hack.native-config.storage-provision=${nonce}`,
+            selection.name,
+          ],
+          timeoutMs: 15_000,
+          beforeSpawn: () => {
+            tool();
+            lifetime(context);
+          },
+          assertAdmitted: async () => {
+            await engine(probe(), context);
+            tool();
+            if (!same(before, await current(context, selection, true))) {
+              refuse();
+            }
+          },
+        });
+        if (
+          !(result.exitCode === 0 && result.stdout.trim() === selection.name)
+        ) {
+          return refuse();
+        }
+        const created = await inspectNativeComposeStorageDockerVolume({
+          probe: probe(),
+          current: latest,
+          selection,
+        });
+        if (created.provision !== nonce) {
+          return refuse();
+        }
+        const after = await current(context, selection, true);
+        if (!same(before, after)) {
+          return refuse();
+        }
+      } finally {
+        await Promise.allSettled(held.map((entry) => entry.file.close()));
       }
-      const result = await runNativeComposeStorageDockerCommand({
-        context,
-        files,
-        args: [
-          docker,
-          "volume",
-          "create",
-          "--driver",
-          "local",
-          "--label",
-          `com.docker.compose.project=${selection.runtimeIdentity}`,
-          "--label",
-          `com.docker.compose.volume=${selection.storage}`,
-          "--label",
-          "io.hack.native-config.version=1",
-          "--label",
-          `io.hack.native-config.instance=${selection.runtimeIdentity}`,
-          "--label",
-          `io.hack.native-config.owner=${selection.ownerToken}`,
-          "--label",
-          `io.hack.native-config.storage=${selection.storage}`,
-          "--label",
-          `io.hack.native-config.storage-provision=${nonce}`,
-          selection.name,
-        ],
-        timeoutMs: 15_000,
-        beforeSpawn: () => {
-          tool();
-          lifetime(context);
-        },
-        assertAdmitted: async () => {
-          await engine(probe(), context);
-          tool();
-          if (!same(before, await current(context, selection, true))) {
-            refuse();
-          }
-        },
+    } catch (error) {
+      retainNativeComposeEffectRefusal(error, {
+        stage,
+        reason: nativeComposeEffectReason(error),
       });
-      if (!(result.exitCode === 0 && result.stdout.trim() === selection.name)) {
-        return refuse();
-      }
-      const created = await inspectNativeComposeStorageDockerVolume({
-        probe: probe(),
-        current: latest,
-        selection,
-      });
-      if (created.provision !== nonce) {
-        return refuse();
-      }
-      const after = await current(context, selection, true);
-      if (!same(before, after)) {
-        return refuse();
-      }
-    } finally {
-      await Promise.allSettled(held.map((entry) => entry.file.close()));
+      throw error;
     }
   };
   // Original inputs alone can retire their evidence after journal completion.
@@ -1521,433 +1553,469 @@ export async function createNativeComposeDockerStorageXattrCarrier(
     (completion: NativeComposeStorageCarrierCompletion) => Promise<void>
   >();
   const invoke = async (input: NativeComposeStorageXattrInvocation) => {
-    const before = await current(context, input.target, !input.readonly);
-    if (
-      !(matchesScope(input, before) && same(input.artifact, selectedArtifact))
-    ) {
-      return refuse();
-    }
-    const target = await inspect(input.target);
-    if (!same(target, input.target)) {
-      return refuse();
-    }
-    const files = await invocationFiles(context, input);
-    let commandOwner: NativeComposeStorageCommandOwner | undefined;
-    let known: {
-      readonly id: string;
-      readonly createdAt: string;
-      readonly policy: string;
-    } | null = null;
-    let completed = false;
-    let deferred = false;
+    let stage: NativeComposeEffectRefusal["stage"] = "storage-target";
     try {
+      const before = await current(context, input.target, !input.readonly);
       if (
-        context.originalCommandRecords === true &&
-        input.readonly &&
-        input.request.operation === "verify"
+        !(matchesScope(input, before) && same(input.artifact, selectedArtifact))
       ) {
-        const directory = files.held.at(-1) ?? refuse();
-        const recordPath = join(directory.path, "commands.json");
-        const recordIndex = files.captures.length;
-        commandOwner = await createNativeComposeStorageCommandOwner({
-          directory,
-          binding: {
-            invocationId: input.invocationId,
-            engineId: context.engineId,
-            materialHash: nativeComposeStorageCommandHash(
-              JSON.stringify(before)
-            ),
-            helperHash: nativeComposeStorageCommandHash(
-              nativeComposeStorageDockerHelper()
-            ),
-            requestHash: nativeComposeStorageCommandHash(files.requestText),
-            invocationHash: nativeComposeStorageCommandHash(
-              JSON.stringify({ ...input, recordCreated: undefined })
-            ),
-            sourceHash: nativeComposeStorageCommandSourceHash(before),
-            fixedInvocationHash:
-              nativeComposeStorageCommandFixedInvocationHash(input),
-            directory: { dev: directory.info.dev, ino: directory.info.ino },
-          },
-          check: async () => {
+        return refuse();
+      }
+      const target = await inspect(input.target);
+      if (!same(target, input.target)) {
+        return refuse();
+      }
+      const files = await invocationFiles(context, input);
+      let commandOwner: NativeComposeStorageCommandOwner | undefined;
+      let known: {
+        readonly id: string;
+        readonly createdAt: string;
+        readonly policy: string;
+      } | null = null;
+      let completed = false;
+      let deferred = false;
+      try {
+        if (
+          context.originalCommandRecords === true &&
+          input.readonly &&
+          input.request.operation === "verify"
+        ) {
+          const directory = files.held.at(-1) ?? refuse();
+          const recordPath = join(directory.path, "commands.json");
+          const recordIndex = files.captures.length;
+          commandOwner = await createNativeComposeStorageCommandOwner({
+            directory,
+            binding: {
+              invocationId: input.invocationId,
+              engineId: context.engineId,
+              materialHash: nativeComposeStorageCommandHash(
+                JSON.stringify(before)
+              ),
+              helperHash: nativeComposeStorageCommandHash(
+                nativeComposeStorageDockerHelper()
+              ),
+              requestHash: nativeComposeStorageCommandHash(files.requestText),
+              invocationHash: nativeComposeStorageCommandHash(
+                JSON.stringify({ ...input, recordCreated: undefined })
+              ),
+              sourceHash: nativeComposeStorageCommandSourceHash(before),
+              fixedInvocationHash:
+                nativeComposeStorageCommandFixedInvocationHash(input),
+              directory: { dev: directory.info.dev, ino: directory.info.ino },
+            },
+            check: async () => {
+              tool();
+              await checkFiles(files);
+              if (
+                !same(
+                  before,
+                  await current(context, input.target, !input.readonly)
+                )
+              ) {
+                return refuse();
+              }
+            },
+            published: (info) => {
+              files.captures[recordIndex] = { path: recordPath, info };
+            },
+          });
+        }
+        const read = probe();
+        await engine(read, context);
+        await image(read, dependency);
+        await checkFiles(files);
+        tool();
+        const admitted = await current(context, input.target, !input.readonly);
+        if (!same(before, admitted)) {
+          return refuse();
+        }
+        stage = "storage-helper-create";
+        const created = await runNativeComposeStorageDockerCommand({
+          context,
+          files,
+          originalCommand: commandOwner
+            ? { owner: commandOwner, kind: "create", carrier: null }
+            : undefined,
+          args: [
+            docker,
+            ...nativeComposeStorageDockerCreateArgs({
+              input,
+              program: files.program,
+            }),
+          ],
+          timeoutMs: 15_000,
+          beforeSpawn: () => {
             tool();
-            await checkFiles(files);
+            lifetime(context);
+          },
+          assertAdmitted: async () => {
+            await engine(probe(), context);
+            tool();
             if (
               !same(
                 before,
                 await current(context, input.target, !input.readonly)
               )
             ) {
-              return refuse();
+              refuse();
             }
           },
-          published: (info) => {
-            files.captures[recordIndex] = { path: recordPath, info };
-          },
         });
-      }
-      const read = probe();
-      await engine(read, context);
-      await image(read, dependency);
-      await checkFiles(files);
-      tool();
-      const admitted = await current(context, input.target, !input.readonly);
-      if (!same(before, admitted)) {
-        return refuse();
-      }
-      const created = await runNativeComposeStorageDockerCommand({
-        context,
-        files,
-        originalCommand: commandOwner
-          ? { owner: commandOwner, kind: "create", carrier: null }
-          : undefined,
-        args: [
-          docker,
-          ...nativeComposeStorageDockerCreateArgs({
-            input,
-            program: files.program,
-          }),
-        ],
-        timeoutMs: 15_000,
-        beforeSpawn: () => {
-          tool();
-          lifetime(context);
-        },
-        assertAdmitted: async () => {
-          await engine(probe(), context);
-          tool();
-          if (
-            !same(before, await current(context, input.target, !input.readonly))
-          ) {
-            refuse();
+        const id = created.stdout.trim();
+        if (!(created.exitCode === 0 && ID.test(id))) {
+          return refuse();
+        }
+        const inspectCarrier = async (
+          cleanup = false
+        ): Promise<NativeComposeStorageDockerCarrier> => {
+          try {
+            const observed = probe(cleanup);
+            await engine(observed, context);
+            const value: unknown = JSON.parse(
+              await observed([
+                "container",
+                "inspect",
+                "--format",
+                NATIVE_STORAGE_CARRIER_FORMAT,
+                id,
+              ])
+            );
+            return checkNativeComposeStorageDockerCarrier({
+              value,
+              input,
+              program: files.program,
+              imageIds: dependency.imageIds,
+            });
+          } catch (error) {
+            retainNativeComposeEffectRefusal(error, {
+              stage: "storage-helper-policy",
+              reason: nativeComposeEffectReason(error),
+            });
+            throw error;
           }
-        },
-      });
-      const id = created.stdout.trim();
-      if (!(created.exitCode === 0 && ID.test(id))) {
-        return refuse();
-      }
-      const inspectCarrier = async (
-        cleanup = false
-      ): Promise<NativeComposeStorageDockerCarrier> => {
-        const observed = probe(cleanup);
-        await engine(observed, context);
-        const value: unknown = JSON.parse(
-          await observed([
-            "container",
-            "inspect",
-            "--format",
-            NATIVE_STORAGE_CARRIER_FORMAT,
-            id,
-          ])
-        );
-        return checkNativeComposeStorageDockerCarrier({
-          value,
-          input,
-          program: files.program,
-          imageIds: dependency.imageIds,
+        };
+        stage = "storage-helper-policy";
+        const carrier = await inspectCarrier();
+        known = {
+          id,
+          createdAt: carrier.createdAt,
+          policy: nativeComposeStorageDockerCarrierPolicy(carrier),
+        };
+        const owned = known;
+        if (
+          !(
+            carrier.state.Running === false &&
+            carrier.state.Pid === 0 &&
+            carrier.state.Status === "created"
+          )
+        ) {
+          return refuse();
+        }
+        stage = "storage-journal";
+        await input.recordCreated({ id, createdAt: known.createdAt });
+        stage = "storage-helper-policy";
+        await checkFiles(files);
+        await image(probe(), dependency);
+        await assertNativeComposeStorageDockerCarrierVolume({
+          probe: probe(),
+          current: before,
+          target: input.target,
         });
-      };
-      const carrier = await inspectCarrier();
-      known = {
-        id,
-        createdAt: carrier.createdAt,
-        policy: nativeComposeStorageDockerCarrierPolicy(carrier),
-      };
-      const owned = known;
-      if (
-        !(
-          carrier.state.Running === false &&
-          carrier.state.Pid === 0 &&
-          carrier.state.Status === "created"
-        )
-      ) {
-        return refuse();
-      }
-      await input.recordCreated({ id, createdAt: known.createdAt });
-      await checkFiles(files);
-      await image(probe(), dependency);
-      await assertNativeComposeStorageDockerCarrierVolume({
-        probe: probe(),
-        current: before,
-        target: input.target,
-      });
-      const holders = await observeNativeComposeStorageDockerTarget({
-        probe: probe(),
-        current: before,
-        selection: input.target,
-        engineId: context.engineId,
-        stopped: !input.readonly,
-        carrier: { ...known, invocationId: input.invocationId },
-      });
-      if (!same(holders, input.target)) {
-        return refuse();
-      }
-      const ready = await inspectCarrier();
-      if (
-        !(
-          ready.createdAt === known.createdAt &&
-          nativeComposeStorageDockerCarrierPolicy(ready) === known.policy &&
-          ready.state.Running === false &&
-          ready.state.Pid === 0 &&
-          ready.state.Status === "created"
-        )
-      ) {
-        return refuse();
-      }
-      tool();
-      const final = await current(context, input.target, !input.readonly);
-      if (!same(before, final)) {
-        return refuse();
-      }
-      const result = await runNativeComposeStorageDockerCommand({
-        context,
-        files,
-        originalCommand: commandOwner
-          ? {
-              owner: commandOwner,
-              kind: "start",
-              carrier: { id, createdAt: owned.createdAt },
-            }
-          : undefined,
-        args: [docker, "start", "-ai", id],
-        timeoutMs: 15_000,
-        beforeSpawn: () => {
-          tool();
-          lifetime(context);
-        },
-        assertAdmitted: async () => {
-          const selected = await observeNativeComposeStorageDockerTarget({
-            probe: probe(),
-            current: before,
-            selection: input.target,
-            engineId: context.engineId,
-            stopped: !input.readonly,
-            carrier: { ...owned, invocationId: input.invocationId },
-          });
-          if (!same(selected, input.target)) {
-            refuse();
-          }
-          await checkFiles(files);
-          const ready = await inspectCarrier();
-          if (
-            !(
-              ready.createdAt === owned.createdAt &&
-              nativeComposeStorageDockerCarrierPolicy(ready) === owned.policy &&
-              ready.state.Running === false &&
-              ready.state.Pid === 0 &&
-              ready.state.Status === "created"
-            )
-          ) {
-            refuse();
-          }
-          await engine(probe(), context);
-          tool();
-          if (
-            !same(before, await current(context, input.target, !input.readonly))
-          ) {
-            refuse();
-          }
-        },
-      });
-      if (result.exitCode !== 0 && result.exitCode !== 1) {
-        return refuse();
-      }
-      const response = parseNativeComposeStorageXattrResponse(result.stdout);
-      if ((response.outcome === "refused") !== (result.exitCode === 1)) {
-        return refuse();
-      }
-      const stopped = await inspectCarrier(true);
-      if (
-        !(
-          stopped.createdAt === known.createdAt &&
-          nativeComposeStorageDockerCarrierPolicy(stopped) === known.policy &&
-          stopped.state.Running === false &&
-          stopped.state.Pid === 0 &&
-          stopped.state.Status === "exited" &&
-          stopped.state.ExitCode === result.exitCode &&
-          stopped.state.Paused === false &&
-          stopped.state.Restarting === false &&
-          stopped.state.OOMKilled === false &&
-          stopped.state.Dead === false &&
-          stopped.state.Error === ""
-        )
-      ) {
-        return refuse();
-      }
-      const repeated = await inspectCarrier(true);
-      if (
-        !(
-          repeated.createdAt === known.createdAt &&
-          nativeComposeStorageDockerCarrierPolicy(repeated) === known.policy &&
-          same(repeated.state, stopped.state)
-        )
-      ) {
-        return refuse();
-      }
-      await checkFiles(files);
-      tool();
-      const cleanupAuthority = await current(context, input.target);
-      if (!same(before, cleanupAuthority)) {
-        return refuse();
-      }
-      const removed = await runNativeComposeStorageDockerCommand({
-        context,
-        files,
-        originalCommand: commandOwner
-          ? {
-              owner: commandOwner,
-              kind: "remove",
-              carrier: { id, createdAt: owned.createdAt },
-            }
-          : undefined,
-        cleanup: true,
-        args: [docker, "rm", id],
-        timeoutMs: 10_000,
-        beforeSpawn: tool,
-        assertAdmitted: async () => {
-          const finalCarrier = await inspectCarrier(true);
-          if (
-            !(
-              finalCarrier.createdAt === owned.createdAt &&
-              nativeComposeStorageDockerCarrierPolicy(finalCarrier) ===
-                owned.policy &&
-              same(finalCarrier.state, stopped.state)
-            )
-          ) {
-            refuse();
-          }
-          await engine(probe(true), context);
-          tool();
-          if (!same(before, await current(context, input.target))) {
-            refuse();
-          }
-        },
-      });
-      if (
-        removed.exitCode !== 0 ||
-        (commandOwner && removed.stdout.trim() !== id)
-      ) {
-        return refuse();
-      }
-      const absent = probe(true);
-      await engine(absent, context);
-      const inventory = (
-        await absent([
-          "container",
-          "ls",
-          "-a",
-          "--no-trunc",
-          "--format",
-          "{{json .ID}}",
-        ])
-      )
-        .trim()
-        .split("\n")
-        .filter(Boolean)
-        .map((line) => JSON.parse(line) as unknown);
-      if (
-        inventory.some(
-          (value) => typeof value !== "string" || !ID.test(value)
-        ) ||
-        inventory.includes(id) ||
-        new Set(inventory).size !== inventory.length
-      ) {
-        return refuse();
-      }
-      const selected = (
-        await absent([
-          "container",
-          "ls",
-          "-a",
-          "--no-trunc",
-          "--filter",
-          `label=${NATIVE_STORAGE_CARRIER_LABEL}=${input.invocationId}`,
-          "--format",
-          "{{json .ID}}",
-        ])
-      ).trim();
-      if (selected !== "") {
-        return refuse();
-      }
-      const after = await inspect(input.target);
-      if (!same(after, input.target)) {
-        return refuse();
-      }
-      if (commandOwner) {
-        const owner = commandOwner;
-        deferred = true;
-        finalizers.set(input, async (completion) => {
-          const checkCompletion = consumeNativeComposeStorageCarrierCompletion({
-            completion,
-            invocationId: input.invocationId,
-          });
-          const check = async () => {
-            await checkCompletion();
+        const holders = await observeNativeComposeStorageDockerTarget({
+          probe: probe(),
+          current: before,
+          selection: input.target,
+          engineId: context.engineId,
+          stopped: !input.readonly,
+          carrier: { ...known, invocationId: input.invocationId },
+        });
+        if (!same(holders, input.target)) {
+          return refuse();
+        }
+        const ready = await inspectCarrier();
+        if (
+          !(
+            ready.createdAt === known.createdAt &&
+            nativeComposeStorageDockerCarrierPolicy(ready) === known.policy &&
+            ready.state.Running === false &&
+            ready.state.Pid === 0 &&
+            ready.state.Status === "created"
+          )
+        ) {
+          return refuse();
+        }
+        tool();
+        const final = await current(context, input.target, !input.readonly);
+        if (!same(before, final)) {
+          return refuse();
+        }
+        stage = "storage-helper-start";
+        const result = await runNativeComposeStorageDockerCommand({
+          context,
+          files,
+          originalCommand: commandOwner
+            ? {
+                owner: commandOwner,
+                kind: "start",
+                carrier: { id, createdAt: owned.createdAt },
+              }
+            : undefined,
+          args: [docker, "start", "-ai", id],
+          timeoutMs: 15_000,
+          beforeSpawn: () => {
             tool();
+            lifetime(context);
+          },
+          assertAdmitted: async () => {
+            const selected = await observeNativeComposeStorageDockerTarget({
+              probe: probe(),
+              current: before,
+              selection: input.target,
+              engineId: context.engineId,
+              stopped: !input.readonly,
+              carrier: { ...owned, invocationId: input.invocationId },
+            });
+            if (!same(selected, input.target)) {
+              refuse();
+            }
+            await checkFiles(files);
+            const ready = await inspectCarrier();
             if (
               !(
-                nativeComposeStorageCommandOwnerConfirmed(owner) &&
-                same(before, await current(context, input.target))
+                ready.createdAt === owned.createdAt &&
+                nativeComposeStorageDockerCarrierPolicy(ready) ===
+                  owned.policy &&
+                ready.state.Running === false &&
+                ready.state.Pid === 0 &&
+                ready.state.Status === "created"
               )
             ) {
-              return refuse();
+              refuse();
             }
-          };
-          try {
-            await check();
             await engine(probe(), context);
-            const target = await inspect(input.target);
-            if (!same(target, input.target)) {
-              return refuse();
+            tool();
+            if (
+              !same(
+                before,
+                await current(context, input.target, !input.readonly)
+              )
+            ) {
+              refuse();
             }
-            // Original removal and all original command groups were already
-            // confirmed. Recheck complete current absence before file retirement.
-            await assertRemovedCarrier(probe(), input.invocationId, id);
-            await check();
-            await retireInvocationFiles(files, check, tool);
-          } finally {
-            await Promise.allSettled(
-              files.held.map((entry) => entry.file.close())
-            );
-          }
+          },
         });
-      } else {
-        await retireInvocationFiles(files);
+        stage = "storage-helper-response";
+        if (result.exitCode !== 0 && result.exitCode !== 1) {
+          return refuse();
+        }
+        const response = parseNativeComposeStorageXattrResponse(result.stdout);
+        if ((response.outcome === "refused") !== (result.exitCode === 1)) {
+          return refuse();
+        }
+        stage = "storage-helper-policy";
+        const stopped = await inspectCarrier(true);
+        if (
+          !(
+            stopped.createdAt === known.createdAt &&
+            nativeComposeStorageDockerCarrierPolicy(stopped) === known.policy &&
+            stopped.state.Running === false &&
+            stopped.state.Pid === 0 &&
+            stopped.state.Status === "exited" &&
+            stopped.state.ExitCode === result.exitCode &&
+            stopped.state.Paused === false &&
+            stopped.state.Restarting === false &&
+            stopped.state.OOMKilled === false &&
+            stopped.state.Dead === false &&
+            stopped.state.Error === ""
+          )
+        ) {
+          return refuse();
+        }
+        const repeated = await inspectCarrier(true);
+        if (
+          !(
+            repeated.createdAt === known.createdAt &&
+            nativeComposeStorageDockerCarrierPolicy(repeated) ===
+              known.policy &&
+            same(repeated.state, stopped.state)
+          )
+        ) {
+          return refuse();
+        }
+        stage = "storage-helper-cleanup";
+        await checkFiles(files);
+        tool();
+        const cleanupAuthority = await current(context, input.target);
+        if (!same(before, cleanupAuthority)) {
+          return refuse();
+        }
+        const removed = await runNativeComposeStorageDockerCommand({
+          context,
+          files,
+          originalCommand: commandOwner
+            ? {
+                owner: commandOwner,
+                kind: "remove",
+                carrier: { id, createdAt: owned.createdAt },
+              }
+            : undefined,
+          cleanup: true,
+          args: [docker, "rm", id],
+          timeoutMs: 10_000,
+          beforeSpawn: tool,
+          assertAdmitted: async () => {
+            const finalCarrier = await inspectCarrier(true);
+            if (
+              !(
+                finalCarrier.createdAt === owned.createdAt &&
+                nativeComposeStorageDockerCarrierPolicy(finalCarrier) ===
+                  owned.policy &&
+                same(finalCarrier.state, stopped.state)
+              )
+            ) {
+              refuse();
+            }
+            await engine(probe(true), context);
+            tool();
+            if (!same(before, await current(context, input.target))) {
+              refuse();
+            }
+          },
+        });
+        if (
+          removed.exitCode !== 0 ||
+          (commandOwner && removed.stdout.trim() !== id)
+        ) {
+          return refuse();
+        }
+        const absent = probe(true);
+        await engine(absent, context);
+        const inventory = (
+          await absent([
+            "container",
+            "ls",
+            "-a",
+            "--no-trunc",
+            "--format",
+            "{{json .ID}}",
+          ])
+        )
+          .trim()
+          .split("\n")
+          .filter(Boolean)
+          .map((line) => JSON.parse(line) as unknown);
+        if (
+          inventory.some(
+            (value) => typeof value !== "string" || !ID.test(value)
+          ) ||
+          inventory.includes(id) ||
+          new Set(inventory).size !== inventory.length
+        ) {
+          return refuse();
+        }
+        const selected = (
+          await absent([
+            "container",
+            "ls",
+            "-a",
+            "--no-trunc",
+            "--filter",
+            `label=${NATIVE_STORAGE_CARRIER_LABEL}=${input.invocationId}`,
+            "--format",
+            "{{json .ID}}",
+          ])
+        ).trim();
+        if (selected !== "") {
+          return refuse();
+        }
+        const after = await inspect(input.target);
+        if (!same(after, input.target)) {
+          return refuse();
+        }
+        if (commandOwner) {
+          const owner = commandOwner;
+          deferred = true;
+          finalizers.set(input, async (completion) => {
+            const checkCompletion =
+              consumeNativeComposeStorageCarrierCompletion({
+                completion,
+                invocationId: input.invocationId,
+              });
+            const check = async () => {
+              await checkCompletion();
+              tool();
+              if (
+                !(
+                  nativeComposeStorageCommandOwnerConfirmed(owner) &&
+                  same(before, await current(context, input.target))
+                )
+              ) {
+                return refuse();
+              }
+            };
+            try {
+              await check();
+              await engine(probe(), context);
+              const target = await inspect(input.target);
+              if (!same(target, input.target)) {
+                return refuse();
+              }
+              // Original removal and all original command groups were already
+              // confirmed. Recheck complete current absence before file retirement.
+              await assertRemovedCarrier(probe(), input.invocationId, id);
+              await check();
+              await retireInvocationFiles(files, check, tool);
+            } finally {
+              await Promise.allSettled(
+                files.held.map((entry) => entry.file.close())
+              );
+            }
+          });
+        } else {
+          await retireInvocationFiles(files);
+        }
+        completed = true;
+        return {
+          artifact: selectedArtifact,
+          carrierId: id,
+          carrierCreatedAt: known.createdAt,
+          containersAfterCleanup: [],
+          engineId: context.engineId,
+          invocationId: input.invocationId,
+          readonly: input.readonly,
+          uid: input.uid,
+          gid: input.gid,
+          scope: input.scope,
+          outcome: "complete",
+          exitCode: result.exitCode,
+          response: result.stdout,
+          target: after,
+          stopped: { id, running: false, pid: 0, exitCode: result.exitCode },
+        };
+      } finally {
+        // Failure never starts a competing stop/remove after unknown child disposition.
+        // The original prospective/created journal and private input remain authoritative.
+        if (
+          unsettledCommandFiles.has(files.held) ||
+          (commandOwner &&
+            !nativeComposeStorageCommandOwnerConfirmed(commandOwner))
+        ) {
+          unsettledCommandFiles.add(files.held);
+        } else if (!deferred) {
+          await Promise.allSettled(
+            files.held.map((entry) => entry.file.close())
+          );
+        }
+        if (!completed && known) {
+          // Exact retained ID/birth are already in the existing private finite journal.
+        }
       }
-      completed = true;
-      return {
-        artifact: selectedArtifact,
-        carrierId: id,
-        carrierCreatedAt: known.createdAt,
-        containersAfterCleanup: [],
-        engineId: context.engineId,
-        invocationId: input.invocationId,
-        readonly: input.readonly,
-        uid: input.uid,
-        gid: input.gid,
-        scope: input.scope,
-        outcome: "complete",
-        exitCode: result.exitCode,
-        response: result.stdout,
-        target: after,
-        stopped: { id, running: false, pid: 0, exitCode: result.exitCode },
-      };
-    } finally {
-      // Failure never starts a competing stop/remove after unknown child disposition.
-      // The original prospective/created journal and private input remain authoritative.
-      if (
-        unsettledCommandFiles.has(files.held) ||
-        (commandOwner &&
-          !nativeComposeStorageCommandOwnerConfirmed(commandOwner))
-      ) {
-        unsettledCommandFiles.add(files.held);
-      } else if (!deferred) {
-        await Promise.allSettled(files.held.map((entry) => entry.file.close()));
-      }
-      if (!completed && known) {
-        // Exact retained ID/birth are already in the existing private finite journal.
-      }
+    } catch (error) {
+      retainNativeComposeEffectRefusal(error, {
+        stage,
+        reason: nativeComposeEffectReason(error),
+      });
+      throw error;
     }
   };
   return captureNativeComposeStorageXattrCarrier({

@@ -22,6 +22,26 @@ export type NativeComposeEffectRefusal = {
     | "effect-execution"
     | "effect-finalization"
     | "storage-enrollment"
+    | "storage-selection"
+    | "storage-cold-absence"
+    | "storage-dependency"
+    | "storage-expectation-admission"
+    | "storage-expectation-write"
+    | "storage-journal"
+    | "storage-enrollment-read"
+    | "storage-provision"
+    | "storage-root"
+    | "storage-seed"
+    | "storage-verify"
+    | "storage-root-after"
+    | "storage-completion-write"
+    | "storage-publication"
+    | "storage-target"
+    | "storage-helper-create"
+    | "storage-helper-policy"
+    | "storage-helper-start"
+    | "storage-helper-response"
+    | "storage-helper-cleanup"
     | "workload-execution"
     | "guard-fresh-before"
     | "guard-ownership"
@@ -46,6 +66,16 @@ export type NativeComposeEffectRefusal = {
     | "probe-capture"
     | "probe-decode"
     | "probe-unclassified"
+    | "helper-shape"
+    | "helper-command"
+    | "helper-labels"
+    | "helper-host-policy"
+    | "helper-mount-cardinality"
+    | "helper-program-mount"
+    | "helper-storage-request"
+    | "helper-storage-identity"
+    | "helper-storage-mount"
+    | "helper-policy-stability"
     | "unclassified";
 };
 
@@ -66,6 +96,26 @@ const stages: readonly NativeComposeEffectRefusal["stage"][] = [
   "effect-execution",
   "effect-finalization",
   "storage-enrollment",
+  "storage-selection",
+  "storage-cold-absence",
+  "storage-dependency",
+  "storage-expectation-admission",
+  "storage-expectation-write",
+  "storage-journal",
+  "storage-enrollment-read",
+  "storage-provision",
+  "storage-root",
+  "storage-seed",
+  "storage-verify",
+  "storage-root-after",
+  "storage-completion-write",
+  "storage-publication",
+  "storage-target",
+  "storage-helper-create",
+  "storage-helper-policy",
+  "storage-helper-start",
+  "storage-helper-response",
+  "storage-helper-cleanup",
   "workload-execution",
   "guard-fresh-before",
   "guard-ownership",
@@ -91,6 +141,16 @@ const reasons: readonly NativeComposeEffectRefusal["reason"][] = [
   "probe-capture",
   "probe-decode",
   "probe-unclassified",
+  "helper-shape",
+  "helper-command",
+  "helper-labels",
+  "helper-host-policy",
+  "helper-mount-cardinality",
+  "helper-program-mount",
+  "helper-storage-request",
+  "helper-storage-identity",
+  "helper-storage-mount",
+  "helper-policy-stability",
   "unclassified",
 ];
 

@@ -1,4 +1,8 @@
 import { isRecord } from "./guards.ts";
+import {
+  type NativeComposeEffectRefusal,
+  retainNativeComposeEffectRefusal,
+} from "./native-compose-effect-diagnostics.ts";
 import { nativeComposeVolumeCreatedAt } from "./native-compose-retained-storage.ts";
 import {
   NATIVE_STORAGE_DOCKER_ARTIFACT,
@@ -8,6 +12,17 @@ import type { NativeComposeStorageXattrInvocation } from "./native-compose-stora
 import { refuseNativeComposeStorageXattr as refuse } from "./native-compose-storage-witness-xattr-codec.ts";
 
 const ID = /^[a-f0-9]{64}$/;
+function policyRefusal(reason: NativeComposeEffectRefusal["reason"]): never {
+  try {
+    return refuse();
+  } catch (error) {
+    retainNativeComposeEffectRefusal(error, {
+      stage: "storage-helper-policy",
+      reason,
+    });
+    throw error;
+  }
+}
 function configuredReadOnly(
   mount: Record<string, unknown>,
   expected: boolean
@@ -41,7 +56,13 @@ export function checkNativeComposeStorageDockerCarrier(opts: {
       isRecord(value.host) &&
       isRecord(value.state) &&
       isRecord(value.labels) &&
-      Array.isArray(value.mounts) &&
+      Array.isArray(value.mounts)
+    )
+  ) {
+    return policyRefusal("helper-shape");
+  }
+  if (
+    !(
       value.configImage ===
         nativeComposeStorageDockerImageReference(input.artifact) &&
       typeof value.image === "string" &&
@@ -51,7 +72,13 @@ export function checkNativeComposeStorageDockerCarrier(opts: {
       value.tty === false &&
       JSON.stringify(value.entrypoint) === '["/usr/local/bin/bun"]' &&
       JSON.stringify(value.cmd) ===
-        '["--no-env-file","/hack-storage-witness-helper.mjs"]' &&
+        '["--no-env-file","/hack-storage-witness-helper.mjs"]'
+    )
+  ) {
+    return policyRefusal("helper-command");
+  }
+  if (
+    !(
       value.labels[NATIVE_STORAGE_CARRIER_LABEL] === input.invocationId &&
       value.labels["io.hack.storage-witness.owner"] ===
         input.target.ownerToken &&
@@ -65,7 +92,7 @@ export function checkNativeComposeStorageDockerCarrier(opts: {
         (Array.isArray(value.execIds) && value.execIds.length === 0))
     )
   ) {
-    return refuse();
+    return policyRefusal("helper-labels");
   }
   const host = value.host;
   if (
@@ -103,7 +130,7 @@ export function checkNativeComposeStorageDockerCarrier(opts: {
       value.mounts.length === 2
     )
   ) {
-    return refuse();
+    return policyRefusal("helper-host-policy");
   }
   for (const target of [
     "/hack-storage-witness-helper.mjs",
@@ -123,7 +150,7 @@ export function checkNativeComposeStorageDockerCarrier(opts: {
         isRecord(physical[0])
       )
     ) {
-      return refuse();
+      return policyRefusal("helper-mount-cardinality");
     }
     const requested = configured[0],
       observed = physical[0];
@@ -143,7 +170,7 @@ export function checkNativeComposeStorageDockerCarrier(opts: {
           observed.Propagation === "rprivate"
         )
       ) {
-        return refuse();
+        return policyRefusal("helper-program-mount");
       }
     } else if (
       !(
@@ -151,21 +178,51 @@ export function checkNativeComposeStorageDockerCarrier(opts: {
         requested.Source === input.target.name &&
         configuredReadOnly(requested, input.readonly) &&
         !Object.hasOwn(requested, "BindOptions") &&
-        isRecord(requested.VolumeOptions) &&
-        Object.keys(requested.VolumeOptions).length === 1 &&
-        requested.VolumeOptions.NoCopy === true &&
+        volumeOptionsRequestNoCopyOnly(requested.VolumeOptions)
+      )
+    ) {
+      // Closed predicate groups keep the refusal value-free while identifying
+      // whether the request, the observed identity or the observed mode differed.
+      return policyRefusal("helper-storage-request");
+    } else if (
+      !(
         observed.Type === "volume" &&
         observed.Name === input.target.name &&
         observed.Source === input.target.mountpoint &&
-        observed.Driver === "local" &&
-        observed.RW === !input.readonly &&
-        observed.Propagation === ""
+        observed.Driver === "local"
       )
     ) {
-      return refuse();
+      return policyRefusal("helper-storage-identity");
+    } else if (
+      !(observed.RW === !input.readonly && observed.Propagation === "")
+    ) {
+      return policyRefusal("helper-storage-mount");
     }
   }
   return value as NativeComposeStorageDockerCarrier;
+}
+/** Docker 28 engines echo an empty `DriverConfig` default beside `NoCopy`; Docker 29
+ * omits it. Both describe the same no-copy request. Any other option, a named driver
+ * or driver options refuse. */
+function volumeOptionsRequestNoCopyOnly(options: unknown): boolean {
+  if (!(isRecord(options) && options.NoCopy === true)) {
+    return false;
+  }
+  for (const key of Object.keys(options)) {
+    if (key === "NoCopy") {
+      continue;
+    }
+    if (
+      !(
+        key === "DriverConfig" &&
+        isRecord(options.DriverConfig) &&
+        Object.keys(options.DriverConfig).length === 0
+      )
+    ) {
+      return false;
+    }
+  }
+  return true;
 }
 /** Preserve every static field and complete mount row. Only the two observed closed
  * optional defaults are normalized; no value, duplicate or projected field is dropped. */
@@ -184,7 +241,7 @@ export function nativeComposeStorageDockerCarrierPolicy(
         (Array.isArray(value.execIds) && value.execIds.length === 0))
     )
   ) {
-    return refuse();
+    return policyRefusal("helper-policy-stability");
   }
   const { state: _, ...fixed } = value;
   const mounts = [...value.mounts].sort((a, b) =>

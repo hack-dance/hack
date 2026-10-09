@@ -1,6 +1,11 @@
 import { HackCliError } from "./cli-result.ts";
 import { resolveComposeStartupTimeoutMs } from "./compose-startup-budget.ts";
 import { isRecord } from "./guards.ts";
+import {
+  type NativeComposeEffectRefusal,
+  nativeComposeEffectReason,
+  retainNativeComposeEffectRefusal,
+} from "./native-compose-effect-diagnostics.ts";
 import { observeNativeComposeFileEngine } from "./native-compose-file-inventory.ts";
 import {
   type NativeComposeGeneration,
@@ -261,39 +266,51 @@ export async function prepareNativeComposeCommandStorage(opts: {
     }),
     verify,
     async enroll(generation: NativeComposeGeneration, document: Document) {
-      const actual = nativeComposeDocumentStorage(document);
-      if (
-        JSON.stringify(
-          actual.slice().sort((a, b) => a.storage.localeCompare(b.storage))
-        ) !==
-        JSON.stringify(
-          selected.slice().sort((a, b) => a.storage.localeCompare(b.storage))
-        )
-      ) {
-        return refuse();
-      }
-      await assertColdAbsent();
-      if (operation === "exec") {
-        return;
-      }
-      for (const volume of newVolumes) {
-        const enrollment = await prepareNativeComposeStorageXattrWitness({
-          authority: mutation.materialAuthority,
-          generation,
-          engineId,
-          volume,
-          admission: "initial-create",
-          assertAdmission: async () => {
-            await assertFresh?.();
-          },
-          carrier: await carrier(),
+      let stage: NativeComposeEffectRefusal["stage"] = "storage-selection";
+      try {
+        const actual = nativeComposeDocumentStorage(document);
+        if (
+          JSON.stringify(
+            actual.slice().sort((a, b) => a.storage.localeCompare(b.storage))
+          ) !==
+          JSON.stringify(
+            selected.slice().sort((a, b) => a.storage.localeCompare(b.storage))
+          )
+        ) {
+          return refuse();
+        }
+        stage = "storage-cold-absence";
+        await assertColdAbsent();
+        if (operation === "exec") {
+          return;
+        }
+        for (const volume of newVolumes) {
+          stage = "storage-dependency";
+          const enrollment = await prepareNativeComposeStorageXattrWitness({
+            authority: mutation.materialAuthority,
+            generation,
+            engineId,
+            volume,
+            admission: "initial-create",
+            assertAdmission: async () => {
+              await assertFresh?.();
+            },
+            carrier: await carrier(),
+          });
+          await enrollNativeComposeStorageXattrWitness({ enrollment });
+        }
+        // A one-off run immediately verifies through its pre-spawn ownership
+        // guard. Up and restart can arm other effects before that guard.
+        if (operation !== "run") {
+          stage = "storage-verify";
+          await verify(generation);
+        }
+      } catch (error) {
+        retainNativeComposeEffectRefusal(error, {
+          stage,
+          reason: nativeComposeEffectReason(error),
         });
-        await enrollNativeComposeStorageXattrWitness({ enrollment });
-      }
-      // A one-off run immediately verifies through its pre-spawn ownership
-      // guard. Up and restart can arm other effects before that guard.
-      if (operation !== "run") {
-        await verify(generation);
+        throw error;
       }
     },
   };

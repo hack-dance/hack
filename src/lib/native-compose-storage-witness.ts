@@ -3,6 +3,12 @@ import { mkdir, opendir } from "node:fs/promises";
 import { join } from "node:path";
 import { isRecord } from "./guards.ts";
 import {
+  copyNativeComposeEffectRefusal,
+  type NativeComposeEffectRefusal,
+  nativeComposeEffectReason,
+  retainNativeComposeEffectRefusal,
+} from "./native-compose-effect-diagnostics.ts";
+import {
   armNativeComposeStorageWitnessIntent,
   assertNativeComposeMaterialAuthority,
   type NativeComposeGeneration,
@@ -74,6 +80,29 @@ import {
 } from "./native-compose-storage-witness-xattr-codec.ts";
 
 export type { NativeComposeStorageWitnessReference } from "./native-compose-storage-witness-state.ts";
+
+/** Preserve the fixed witness refusal while retaining only the first issued owner boundary. */
+function normalizedRefusal(
+  error: unknown,
+  stage: NativeComposeEffectRefusal["stage"]
+): never {
+  retainNativeComposeEffectRefusal(error, {
+    stage,
+    reason: nativeComposeEffectReason(error),
+  });
+  try {
+    return refuse();
+  } catch (normalized) {
+    if (typeof normalized === "object" && normalized !== null) {
+      copyNativeComposeEffectRefusal(error, normalized);
+      retainNativeComposeEffectRefusal(normalized, {
+        stage,
+        reason: nativeComposeEffectReason(error),
+      });
+    }
+    throw normalized;
+  }
+}
 
 const LIMIT = 16 * 1024;
 const SLOT_LIMIT = 4096;
@@ -562,50 +591,64 @@ async function observeXattr(opts: {
   readonly volume: NativeComposeRetainedVolume;
   readonly kernelProof: KernelProof;
 }> {
-  const discovered = await invokeXattr({
-    ...opts,
-    request: { kind: "directory-xattr", version: 1, operation: "root" },
-  });
-  if (discovered.response.outcome !== "root") {
-    return refuse();
+  let stage: NativeComposeEffectRefusal["stage"] = "storage-root";
+  try {
+    const discovered = await invokeXattr({
+      ...opts,
+      request: { kind: "directory-xattr", version: 1, operation: "root" },
+    });
+    if (discovered.response.outcome !== "root") {
+      return refuse();
+    }
+    stage = "storage-verify";
+    const proof = await invokeXattr({
+      ...opts,
+      request: {
+        ...opts.saved.marker,
+        operation: "verify",
+        root: discovered.response.root,
+      },
+    });
+    if (
+      proof.response.outcome !== "verified" ||
+      !nativeComposeStorageXattrValueMatches(
+        Buffer.from(proof.response.valueHex, "hex"),
+        opts.saved.marker.valueHex
+      )
+    ) {
+      return refuse();
+    }
+    // A bind reader may retain an unlinked root across its await. Observe the current
+    // namespace with another fresh non-creating carrier; Docker metadata alone cannot
+    // detect a replacement which repeats both name and birth. This remains a finite fence.
+    stage = "storage-root-after";
+    const after = await invokeXattr({
+      ...opts,
+      request: { kind: "directory-xattr", version: 1, operation: "root" },
+    });
+    if (
+      after.response.outcome !== "root" ||
+      !sameNativeComposeStorageXattrRoot(
+        after.response.root,
+        proof.response.root
+      )
+    ) {
+      return refuse();
+    }
+    return {
+      volume: opts.volume,
+      kernelProof: {
+        root: proof.response.root,
+        responseHash: proof.responseHash,
+      },
+    };
+  } catch (error) {
+    retainNativeComposeEffectRefusal(error, {
+      stage,
+      reason: nativeComposeEffectReason(error),
+    });
+    throw error;
   }
-  const proof = await invokeXattr({
-    ...opts,
-    request: {
-      ...opts.saved.marker,
-      operation: "verify",
-      root: discovered.response.root,
-    },
-  });
-  if (
-    proof.response.outcome !== "verified" ||
-    !nativeComposeStorageXattrValueMatches(
-      Buffer.from(proof.response.valueHex, "hex"),
-      opts.saved.marker.valueHex
-    )
-  ) {
-    return refuse();
-  }
-  // A bind reader may retain an unlinked root across its await. Observe the current
-  // namespace with another fresh non-creating carrier; Docker metadata alone cannot
-  // detect a replacement which repeats both name and birth. This remains a finite fence.
-  const after = await invokeXattr({
-    ...opts,
-    request: { kind: "directory-xattr", version: 1, operation: "root" },
-  });
-  if (
-    after.response.outcome !== "root" ||
-    !sameNativeComposeStorageXattrRoot(after.response.root, proof.response.root)
-  ) {
-    return refuse();
-  }
-  return {
-    volume: opts.volume,
-    kernelProof: {
-      root: proof.response.root,
-      responseHash: proof.responseHash,
-    },
-  };
 }
 async function seedXattr(opts: {
   readonly carrier: NativeComposeStorageXattrCarrier;
@@ -616,50 +659,65 @@ async function seedXattr(opts: {
   readonly volume: NativeComposeRetainedVolume;
   readonly kernelProof: KernelProof;
 }> {
-  const initial = await inspectXattr({ ...opts, stopped: true });
-  requireXattrAdmission(opts.saved, initial);
-  if (opts.saved.admission === "initial-create") {
-    const provision =
-      nativeComposeStorageXattrCarrierPorts(opts.carrier).provision ?? refuse();
-    const current = await opts.check();
-    checkNativeComposeStorageXattrCarrierLifetime(opts.carrier);
-    await provision(
-      Object.freeze({
-        name: opts.saved.binding.name,
-        storage: opts.saved.binding.storage,
-        engineId: opts.saved.binding.engineId,
-        runtimeIdentity: current.identity.composeProject,
-        ownerToken: opts.saved.binding.ownerToken,
-      })
-    );
-    await opts.check();
-    checkNativeComposeStorageXattrCarrierLifetime(opts.carrier);
+  let stage: NativeComposeEffectRefusal["stage"] =
+    "storage-expectation-admission";
+  try {
+    const initial = await inspectXattr({ ...opts, stopped: true });
+    requireXattrAdmission(opts.saved, initial);
+    if (opts.saved.admission === "initial-create") {
+      const provision =
+        nativeComposeStorageXattrCarrierPorts(opts.carrier).provision ??
+        refuse();
+      const current = await opts.check();
+      checkNativeComposeStorageXattrCarrierLifetime(opts.carrier);
+      stage = "storage-provision";
+      await provision(
+        Object.freeze({
+          name: opts.saved.binding.name,
+          storage: opts.saved.binding.storage,
+          engineId: opts.saved.binding.engineId,
+          runtimeIdentity: current.identity.composeProject,
+          ownerToken: opts.saved.binding.ownerToken,
+        })
+      );
+      await opts.check();
+      checkNativeComposeStorageXattrCarrierLifetime(opts.carrier);
+    }
+    const created = await inspectXattr({ ...opts, stopped: true });
+    const volume = created.volume ?? refuse();
+    if (
+      opts.saved.originalVolume &&
+      !sameVolume(volume, opts.saved.originalVolume)
+    ) {
+      return refuse();
+    }
+    const stopped = { ...opts, stopped: true, volume };
+    stage = "storage-root";
+    const discovered = await invokeXattr({
+      ...stopped,
+      request: { kind: "directory-xattr", version: 1, operation: "root" },
+    });
+    if (discovered.response.outcome !== "root") {
+      return refuse();
+    }
+    stage = "storage-seed";
+    await invokeXattr({
+      ...stopped,
+      request: {
+        ...opts.saved.marker,
+        operation: "seed",
+        root: discovered.response.root,
+      },
+    });
+    stage = "storage-verify";
+    return await observeXattr(stopped);
+  } catch (error) {
+    retainNativeComposeEffectRefusal(error, {
+      stage,
+      reason: nativeComposeEffectReason(error),
+    });
+    throw error;
   }
-  const created = await inspectXattr({ ...opts, stopped: true });
-  const volume = created.volume ?? refuse();
-  if (
-    opts.saved.originalVolume &&
-    !sameVolume(volume, opts.saved.originalVolume)
-  ) {
-    return refuse();
-  }
-  const stopped = { ...opts, stopped: true, volume };
-  const discovered = await invokeXattr({
-    ...stopped,
-    request: { kind: "directory-xattr", version: 1, operation: "root" },
-  });
-  if (discovered.response.outcome !== "root") {
-    return refuse();
-  }
-  await invokeXattr({
-    ...stopped,
-    request: {
-      ...opts.saved.marker,
-      operation: "seed",
-      root: discovered.response.root,
-    },
-  });
-  return await observeXattr(stopped);
 }
 async function directories(opts: {
   readonly binding: NativeComposeMaterialBinding;
@@ -868,6 +926,8 @@ export async function prepareNativeComposeStorageWitness(opts: {
   if (input.xattrCarrier) {
     checkNativeComposeStorageXattrCarrierLifetime(input.xattrCarrier);
   }
+  let stage: NativeComposeEffectRefusal["stage"] =
+    "storage-expectation-admission";
   return await runNativeComposeMaterialAction({
     authority: input.authority,
     run: async () => {
@@ -940,6 +1000,7 @@ export async function prepareNativeComposeStorageWitness(opts: {
         admission: record.admission,
         originalVolume: record.originalVolume,
       };
+      stage = "storage-expectation-write";
       await armNativeComposeStorageWitnessIntent({
         authority: input.authority,
         generation: input.generation,
@@ -974,6 +1035,7 @@ export async function prepareNativeComposeStorageWitness(opts: {
           return refuse();
         }
         if (record.version === 3) {
+          stage = "storage-journal";
           await initializeNativeComposeStorageCarrierJournal({
             directory: last(held),
             token: record.carrierJournalToken,
@@ -1016,7 +1078,7 @@ export async function prepareNativeComposeStorageWitness(opts: {
         await close(held);
       }
     },
-  }).catch(() => refuse());
+  }).catch((error) => normalizedRefusal(error, stage));
 }
 
 /**
@@ -1039,6 +1101,7 @@ export async function enrollNativeComposeStorageWitness(opts: {
     return refuse();
   }
   selected.consumed = true;
+  let stage: NativeComposeEffectRefusal["stage"] = "storage-enrollment-read";
   return await runNativeComposeMaterialAction({
     authority: selected.authority,
     run: async () => {
@@ -1071,6 +1134,7 @@ export async function enrollNativeComposeStorageWitness(opts: {
           await checkedExpectation(held, selected.anchor);
           return await check();
         };
+        stage = "storage-root";
         const observed = await observeEnrollment({
           saved,
           carrier: selected.carrier,
@@ -1089,6 +1153,7 @@ export async function enrollNativeComposeStorageWitness(opts: {
         }
         await checkedExpectation(held, selected.anchor);
         await check();
+        stage = "storage-completion-write";
         const completedRecord: Completion =
           saved.version === 1
             ? { version: 1, expectationHash: selected.anchor.hash, volume }
@@ -1153,6 +1218,7 @@ export async function enrollNativeComposeStorageWitness(opts: {
             });
           },
         });
+        stage = "storage-publication";
         await publishNativeComposeStorageWitnessEnrollment({
           authority: selected.authority,
           generation: selected.generation,
@@ -1163,7 +1229,7 @@ export async function enrollNativeComposeStorageWitness(opts: {
         await close(held);
       }
     },
-  }).catch(() => refuse());
+  }).catch((error) => normalizedRefusal(error, stage));
 }
 
 /** Read-only verification. No missing journal/marker, including interrupted enrollment, is seeded or repaired. */

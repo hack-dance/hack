@@ -23,6 +23,11 @@ import {
   runNativeComposeStorageVerifiedExec,
 } from "../src/lib/native-compose-command-storage.ts";
 import {
+  nativeComposeEffectRefusal,
+  retainNativeComposeEffectRefusal,
+} from "../src/lib/native-compose-effect-diagnostics.ts";
+import * as generationOwner from "../src/lib/native-compose-generation.ts";
+import {
   assertNativeComposeMaterialAuthority,
   type NativeComposeGeneration,
   NativeComposeGenerationError,
@@ -156,6 +161,7 @@ function fake(store: NativeComposeGenerationStore) {
     holders: [] as NativeComposeStorageXattrTarget["holders"],
     failure: null as
       | "provision"
+      | "root"
       | "seed"
       | "verify"
       | "cleanup"
@@ -388,6 +394,271 @@ async function rememberedActive() {
 function helperOperations(transport: ReturnType<typeof fake>) {
   return transport.calls.filter((call) => call === "root" || call === "verify");
 }
+
+test.each([
+  "selection",
+  "cold-absence",
+  "dependency",
+] as const)("enrollment diagnostic preserves the command %s boundary without a storage effect", async (failure) => {
+  const store = await fixture();
+  const transport = fake(store);
+  const command = commandPorts(transport);
+  let armed = false;
+  const originalCarrier = command.ports.carrier;
+  const originalNames = command.ports.volumeNames;
+  command.ports.carrier = async (opts) => {
+    if (armed && failure === "dependency") {
+      throw new Error("private-dependency-canary");
+    }
+    return await originalCarrier(opts);
+  };
+  command.ports.volumeNames = async () =>
+    armed && failure === "cold-absence" ? [volume.name] : await originalNames();
+  let caught: unknown;
+  await store.withMutation(async (mutation) => {
+    const storage = await prepareNativeComposeCommandStorage({
+      store,
+      mutation,
+      operation: "up",
+      selected: [selection],
+      signal: transport.controller.signal,
+      ports: command.ports,
+    });
+    if (!storage) {
+      throw new Error("Expected storage admission");
+    }
+    const generation = await publish(mutation);
+    transport.state.generation = generation;
+    const document = await store.readGenerationDocument(generation);
+    await expect(
+      mutation.runEffect({
+        generation,
+        operation: "up",
+        assertFresh: async () => {},
+        assertOwned: async () => {},
+        effect: async () => {
+          armed = true;
+          try {
+            await storage.enroll(
+              generation,
+              failure === "selection" ? { ...document, volumes: {} } : document
+            );
+            transport.calls.push("workload");
+            return { value: 0, outcome: "complete" };
+          } catch (error) {
+            caught = error;
+            throw error;
+          }
+        },
+      })
+    ).rejects.toMatchObject({ code: "E_NATIVE_COMPOSE_UNCERTAIN" });
+  });
+  expect(nativeComposeEffectRefusal(caught)).toEqual({
+    stage: `storage-${failure}`,
+    reason: "unclassified",
+  });
+  expect(transport.calls).toEqual([]);
+  const saved = await store.loadCurrent();
+  expect(saved.pending?.operation).toBe("up");
+  expect(saved.storageWitnessesPending).toBe(false);
+  expect(saved.storageWitnesses ?? []).toHaveLength(0);
+});
+
+test.each([
+  "provision",
+  "root",
+  "seed",
+  "verify",
+] as const)("first storage %s refusal survives witness and generation normalization without a later effect", async (failure) => {
+  const store = await fixture();
+  const transport = fake(store);
+  transport.state.failure = failure;
+  let caught: unknown;
+  let normalized: unknown;
+  await store.withMutation(async (mutation) => {
+    const generation = await publish(mutation);
+    transport.state.generation = generation;
+    await expect(
+      mutation
+        .runEffect({
+          generation,
+          operation: "up",
+          assertFresh: async () => {},
+          assertOwned: async () => {},
+          effect: async () => {
+            try {
+              const enrollment = await prepareNativeComposeStorageXattrWitness({
+                authority: mutation.materialAuthority,
+                generation,
+                engineId,
+                volume: selection,
+                admission: "initial-create",
+                assertAdmission: async () => {},
+                carrier: transport.carrier,
+              });
+              await enrollNativeComposeStorageXattrWitness({ enrollment });
+              transport.calls.push("workload");
+              return { value: 0, outcome: "complete" };
+            } catch (error) {
+              caught = error;
+              throw error;
+            }
+          },
+        })
+        .catch((error: unknown) => {
+          normalized = error;
+          throw error;
+        })
+    ).rejects.toMatchObject({ code: "E_NATIVE_COMPOSE_UNCERTAIN" });
+  });
+  expect(caught instanceof Error ? caught.message : null).toBe(witnessRefusal);
+  expect(nativeComposeEffectRefusal(caught)).toEqual({
+    stage: `storage-${failure}`,
+    reason: "unclassified",
+  });
+  expect(nativeComposeEffectRefusal(normalized)).toEqual(
+    nativeComposeEffectRefusal(caught)
+  );
+  expect(transport.calls).not.toContain("workload");
+  const effects = transport.calls.filter((call) =>
+    ["provision", "root", "seed", "verify"].includes(call)
+  );
+  const ordered = ["provision", "root", "seed", "root", "verify"];
+  expect(effects).toEqual(
+    ordered.slice(0, failure === "root" ? 2 : ordered.indexOf(failure) + 1)
+  );
+  const saved = await store.loadCurrent();
+  expect(saved.pending?.operation).toBe("up");
+  expect(saved.storageWitnessesPending).toBe(true);
+  expect(saved.storageWitnesses?.[0]?.state).toBe("expected");
+});
+
+test.each([
+  "unknown",
+  "issued",
+] as const)("witness preparation keeps %s first-cause provenance and never reads error values", async (kind) => {
+  const store = await fixture();
+  const transport = fake(store);
+  let reads = 0;
+  const original = new Error("private-source-value-canary");
+  Object.defineProperty(original, "code", {
+    get() {
+      reads++;
+      throw new Error("private-getter-canary");
+    },
+  });
+  if (kind === "issued") {
+    retainNativeComposeEffectRefusal(original, {
+      stage: "storage-helper-policy",
+      reason: "helper-host-policy",
+    });
+  }
+  let caught: unknown;
+  await store.withMutation(async (mutation) => {
+    const generation = await publish(mutation);
+    transport.state.generation = generation;
+    await expect(
+      mutation.runEffect({
+        generation,
+        operation: "up",
+        assertFresh: async () => {},
+        assertOwned: async () => {},
+        effect: async () => {
+          try {
+            await prepareNativeComposeStorageXattrWitness({
+              authority: mutation.materialAuthority,
+              generation,
+              engineId,
+              volume: selection,
+              admission: "initial-create",
+              assertAdmission: async () => {
+                throw original;
+              },
+              carrier: transport.carrier,
+            });
+            return { value: 0, outcome: "complete" };
+          } catch (error) {
+            caught = error;
+            throw error;
+          }
+        },
+      })
+    ).rejects.toMatchObject({ code: "E_NATIVE_COMPOSE_UNCERTAIN" });
+  });
+  expect(reads).toBe(0);
+  expect(caught instanceof Error ? caught.message : null).toBe(witnessRefusal);
+  expect(nativeComposeEffectRefusal(caught)).toEqual(
+    kind === "issued"
+      ? { stage: "storage-helper-policy", reason: "helper-host-policy" }
+      : { stage: "storage-expectation-admission", reason: "unclassified" }
+  );
+  expect(JSON.stringify(nativeComposeEffectRefusal(caught))).not.toContain(
+    "canary"
+  );
+  expect(transport.calls).toEqual([]);
+  expect((await store.loadCurrent()).storageWitnessesPending).toBe(false);
+});
+
+test("completion publication refusal retains its first boundary after complete helper proofs", async () => {
+  const store = await fixture();
+  const transport = fake(store);
+  let caught: unknown;
+  const publication = spyOn(
+    generationOwner,
+    "publishNativeComposeStorageWitnessEnrollment"
+  ).mockImplementation(async () => {
+    throw new Error("private-publication-canary");
+  });
+  try {
+    await store.withMutation(async (mutation) => {
+      const generation = await publish(mutation);
+      transport.state.generation = generation;
+      await expect(
+        mutation.runEffect({
+          generation,
+          operation: "up",
+          assertFresh: async () => {},
+          assertOwned: async () => {},
+          effect: async () => {
+            try {
+              const enrollment = await prepareNativeComposeStorageXattrWitness({
+                authority: mutation.materialAuthority,
+                generation,
+                engineId,
+                volume: selection,
+                admission: "initial-create",
+                assertAdmission: async () => {},
+                carrier: transport.carrier,
+              });
+              await enrollNativeComposeStorageXattrWitness({ enrollment });
+              transport.calls.push("workload");
+              return { value: 0, outcome: "complete" };
+            } catch (error) {
+              caught = error;
+              throw error;
+            }
+          },
+        })
+      ).rejects.toMatchObject({ code: "E_NATIVE_COMPOSE_UNCERTAIN" });
+    });
+  } finally {
+    publication.mockRestore();
+  }
+  expect(caught instanceof Error ? caught.message : null).toBe(witnessRefusal);
+  expect(nativeComposeEffectRefusal(caught)).toEqual({
+    stage: "storage-publication",
+    reason: "unclassified",
+  });
+  expect(transport.calls).not.toContain("workload");
+  expect(
+    transport.calls.filter((call) =>
+      ["provision", "root", "seed", "verify"].includes(call)
+    )
+  ).toEqual(["provision", "root", "seed", "root", "verify", "root"]);
+  const saved = await store.loadCurrent();
+  expect(saved.storageWitnessesPending).toBe(true);
+  expect(saved.storageWitnesses?.[0]?.state).toBe("expected");
+});
 
 test.each([
   "up",

@@ -94,8 +94,11 @@ extra binds into the private material root.
 Public plans, logs and CLI receipts contain no values, private paths or content
 digests. Copied identities, reservations or handles cannot mint mutation authority;
 closing the mutation revokes that authority and awaits its owned work.
-The material root is under the existing canonical global runtime directory, outside
-the checkout and build context. Hack does not create an authored source or an
+The material root is under the canonical global runtime directory, outside
+the checkout and build context. If that global home is missing, Hack creates only
+its 0700 leaf beneath an existing, held, owned and safe parent. Existing safe homes
+retain their mode; symlink, unsafe, foreign-owned or replaced directories refuse.
+Hack does not create an authored source or an
 absent bind path to make admission pass. The private generated document also binds
 the exact Docker engine. Before and after delivery, fixed bounded read-only queries
 verify that each file container has the exact source, target and read-only mount.

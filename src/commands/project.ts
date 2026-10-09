@@ -7580,7 +7580,10 @@ async function handleExec({
     project: args.options.project,
     operation: "exec",
     instance: args.options.branch,
-    profiles: parseCsvList(args.options.profile),
+    profiles:
+      args.options.profile === undefined
+        ? undefined
+        : parseCsvList(args.options.profile),
     overlay: args.options.env,
     service: args.positionals.service,
     command: args.positionals.cmd,

@@ -1,5 +1,6 @@
 import { isAbsolute } from "node:path";
 import { isRecord } from "../lib/guards.ts";
+import { nativeAuthoredExecOptions } from "./native-authored-exec-options.ts";
 import {
   type NativeStopFailure,
   nativeStopFailureSummary,
@@ -80,6 +81,8 @@ export async function invokeNativeRuntime(opts: {
   readonly boundNativeStatusDrain?: boolean;
   /** Finite authored logs bind output drains to their exact read child. */
   readonly boundNativeAuthoredLogsDrain?: boolean;
+  /** Finite authored exec closes stdin and binds output to its exact request child. */
+  readonly boundNativeAuthoredExecDrain?: boolean;
   /** Native source planning and journal inspection also bind pipe lifetime to their owned read child. */
   readonly boundNativeAuthoredReadDrain?: boolean;
   /** Explicit recovery requests have their own closed argv domain and never accept private input. */
@@ -96,6 +99,11 @@ export async function invokeNativeRuntime(opts: {
     !(
       validExecResponseSelection(opts.args, opts.serviceExecResponse) &&
       validNativeStatusDrainSelection(opts.args, opts.boundNativeStatusDrain) &&
+      validNativeAuthoredExecDrainSelection(
+        opts.args,
+        opts.boundNativeAuthoredExecDrain,
+        opts.privateInput !== undefined
+      ) &&
       validNativeAuthoredLogsDrainSelection(
         opts.args,
         opts.boundNativeAuthoredLogsDrain,
@@ -138,6 +146,7 @@ export async function invokeNativeRuntime(opts: {
   );
   const drain =
     opts.boundNativeStatusDrain ||
+    opts.boundNativeAuthoredExecDrain ||
     opts.boundNativeAuthoredLogsDrain ||
     opts.boundNativeAuthoredReadDrain ||
     opts.boundNativeAuthoredRecoveryDrain
@@ -180,10 +189,14 @@ export async function invokeNativeRuntime(opts: {
           "Native runtime request was canceled; its outcome may be uncertain. No request was replayed.",
       });
     }
-    if (opts.boundNativeAuthoredLogsDrain && drain?.signal.aborted) {
+    if (
+      (opts.boundNativeAuthoredLogsDrain ||
+        opts.boundNativeAuthoredExecDrain) &&
+      drain?.signal.aborted
+    ) {
       throw new NativeRuntimeRequestError({
         message:
-          "Native authored log output did not settle; no output was admitted.",
+          "Native authored command output did not settle; no output was admitted. Command effects may have occurred; no request was replayed.",
       });
     }
     rethrowNativeInputFailure(inputFailure, {
@@ -207,6 +220,9 @@ export async function invokeNativeRuntime(opts: {
     }
     clearTimeout(drainTimer);
     drain?.abort();
+    if (opts.boundNativeAuthoredExecDrain) {
+      await failureDetails;
+    }
   }
 }
 
@@ -515,4 +531,28 @@ export function rethrowNativeInputFailure(
   ) {
     throw failure.error;
   }
+}
+
+function validNativeAuthoredExecDrainSelection(
+  args: readonly string[],
+  selected: boolean | undefined,
+  privateInput: boolean
+): boolean {
+  if (!selected) {
+    return true;
+  }
+  const workdir = args[7] === "--workdir" ? args[8] : undefined;
+  const json = workdir === undefined ? 7 : 9;
+  return (
+    !privateInput &&
+    args[0] === "graph" &&
+    args[1] === "native" &&
+    args[2] === "exec" &&
+    args[3] === "--run-id" &&
+    NATIVE_RUN.test(args[4] ?? "") &&
+    args[5] === "--service" &&
+    args[json] === "--json" &&
+    args[json + 1] === "--" &&
+    nativeAuthoredExecOptions(args[6], args.slice(json + 2), workdir)
+  );
 }

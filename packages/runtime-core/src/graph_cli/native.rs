@@ -20,6 +20,9 @@ fn hex(value: &str, len: usize) -> bool {
 }
 pub(super) fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateError> {
     let (action, args) = args.split_first().ok_or_else(refused)?;
+    if *action == "exec" {
+        return exec_command(candidate, args);
+    }
     let mut singles = BTreeMap::new();
     let mut private = false;
     let mut json = false;
@@ -310,4 +313,61 @@ fn foreground_unavailable() -> CandidateError {
         "native_graph_foreground_unsupported",
         "Native foreground ownership requires the supported macOS provider; no private descriptor or provider was used.",
     )
+}
+
+fn exec_command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateError> {
+    let split = args.iter().position(|s| *s == "--").ok_or_else(refused)?;
+    let (options, command) = args.split_at(split);
+    let mut values = BTreeMap::new();
+    let mut json = false;
+    let mut i = 0;
+    while i < options.len() {
+        if options[i] == "--json" && !json {
+            json = true;
+            i += 1;
+            continue;
+        }
+        if !["--run-id", "--service", "--workdir"].contains(&options[i]) {
+            return Err(refused());
+        }
+        let value = *options.get(i + 1).ok_or_else(refused)?;
+        if values.insert(options[i], value).is_some() {
+            return Err(refused());
+        }
+        i += 2;
+    }
+    let run = *values
+        .get("--run-id")
+        .filter(|v| hex(v, 32))
+        .ok_or_else(refused)?;
+    let service = *values.get("--service").ok_or_else(refused)?;
+    let argv = command[1..]
+        .iter()
+        .map(|s| (*s).to_owned())
+        .collect::<Vec<_>>();
+    let workdir = values.get("--workdir").copied();
+    // The shared wire validator closes argv, service and cwd before any owner read.
+    if service.is_empty()
+        || service.len() > 128
+        || !service
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"_.-".contains(&b))
+        || argv.is_empty()
+        || argv.len() > 256
+        || argv[0].is_empty()
+        || argv.iter().any(|s| s.contains('\0') || s.len() > 16 * 1024)
+        || argv.iter().map(String::len).sum::<usize>() > 64 * 1024
+        || workdir.is_some_and(|p| !p.starts_with('/') || p.contains('\0') || p.len() > 4096)
+    {
+        return Err(refused());
+    }
+    #[cfg(target_os = "macos")]
+    {
+        native::foreground::exec(candidate, run, service, &argv, workdir)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (candidate, run, service, argv, workdir, json);
+        Err(foreground_unavailable())
+    }
 }

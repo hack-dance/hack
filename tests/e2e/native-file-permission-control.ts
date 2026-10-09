@@ -1,5 +1,107 @@
 import { isRecord } from "../../src/lib/guards.ts";
+import {
+  type Checkout,
+  parseLegacyComposeAdoptionReceipt,
+} from "../../src/lib/native-compose-adoption-receipt.ts";
+import { keys } from "../../src/lib/native-compose-private-state.ts";
 import { adoptionDependencyReadAllowed } from "./scenarios/native-compose-adoption-dependency-inputs.ts";
+
+function fixtureIdentity(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    Number.isSafeInteger(value.dev) &&
+    typeof value.dev === "number" &&
+    value.dev >= 0 &&
+    Number.isSafeInteger(value.ino) &&
+    typeof value.ino === "number" &&
+    value.ino > 0
+  );
+}
+function fixtureSource(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    keys(value, "dev,hash,ino") &&
+    fixtureIdentity(value) &&
+    typeof value.hash === "string" &&
+    /^[a-f0-9]{64}$/.test(value.hash)
+  );
+}
+function fixtureCheckout(value: unknown): value is Checkout {
+  const directory = (entry: unknown) =>
+    isRecord(entry) && keys(entry, "dev,ino") && fixtureIdentity(entry);
+  if (
+    !(
+      isRecord(value) &&
+      keys(value, "git,project,root") &&
+      directory(value.root) &&
+      directory(value.project)
+    )
+  ) {
+    return false;
+  }
+  const git = value.git;
+  return (
+    directory(git) ||
+    (isRecord(git) &&
+      keys(git, "admin,backlink,common,commonLink,kind,marker,primary") &&
+      git.kind === "linked-worktree" &&
+      directory(git.admin) &&
+      directory(git.common) &&
+      directory(git.primary) &&
+      fixtureSource(git.marker) &&
+      fixtureSource(git.backlink) &&
+      fixtureSource(git.commonLink))
+  );
+}
+function cleanupRefused(): never {
+  throw new Error(
+    "Protected fixture cleanup selection refused; values omitted."
+  );
+}
+function cleanupDownArgs(value: unknown): readonly string[] {
+  if (!(isRecord(value) && fixtureCheckout(value.checkout))) {
+    return cleanupRefused();
+  }
+  let receipt: ReturnType<typeof parseLegacyComposeAdoptionReceipt>;
+  try {
+    receipt = parseLegacyComposeAdoptionReceipt(value, value.checkout);
+  } catch {
+    return cleanupRefused();
+  }
+  if (
+    !(
+      receipt.adoption_receipt_version === 8 &&
+      receipt.prepared !== null &&
+      receipt.publication?.phase === "active"
+    )
+  ) {
+    return cleanupRefused();
+  }
+  if (receipt.pendingOperation === null) {
+    return Object.freeze(["down", "--json"]);
+  }
+  const pending = receipt.pendingOperation;
+  if (
+    !(
+      pending.services.length === 3 &&
+      [...pending.services].sort().join() === "db,reader,ungranted"
+    )
+  ) {
+    return cleanupRefused();
+  }
+  return Object.freeze(["down", "--recover", "--json"]);
+}
+
+/** Select only the fixture's validated active file8 receipt and whole pending
+ * selection. The production CLI still revalidates all receipt/effect authority. */
+export async function nativeProtectedFileCleanupDown<T>(opts: {
+  readonly receipt: unknown;
+  readonly invoke: (args: readonly string[]) => Promise<T>;
+}): Promise<T> {
+  const invoke = opts.invoke;
+  const args = cleanupDownArgs(opts.receipt);
+  return await invoke(args);
+}
 
 /** Current material admission has a fixed redacted generation-state diagnostic. */
 export function nativeProtectedFileStateRefused(value: unknown): boolean {

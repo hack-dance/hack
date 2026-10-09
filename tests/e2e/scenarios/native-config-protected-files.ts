@@ -26,6 +26,7 @@ import {
   runNativeFileFixtureCommand,
 } from "../native-file-permission-command.ts";
 import {
+  nativeProtectedFileCleanupDown,
   nativeProtectedFileStateRefused,
   nativeProtectedFileToolAllowed,
 } from "../native-file-permission-control.ts";
@@ -229,6 +230,32 @@ export function nativeProtectedFileContainerIdentity(value: unknown): string {
   } = value;
   return canonical({ ...identity, mounts: rows(value.mounts) });
 }
+/** Only a stopped original may lose its null-valued exposed-port keys. Configured
+ * publication and every other immutable field remain part of the comparison. */
+export function nativeProtectedFileContainerMatches(opts: {
+  readonly pin: Row;
+  readonly current: Row;
+}): boolean {
+  const { pin, current } = opts;
+  const stoppedPortKeysRemoved =
+    current.running === false &&
+    current.paused === false &&
+    current.status === "exited" &&
+    noPorts(pin) &&
+    noPorts(current) &&
+    isRecord(pin.runtimePorts) &&
+    Object.values(pin.runtimePorts).every((value) => value === null) &&
+    isRecord(current.runtimePorts) &&
+    Object.keys(current.runtimePorts).length === 0;
+  return (
+    nativeProtectedFileContainerIdentity(pin) ===
+    nativeProtectedFileContainerIdentity(
+      stoppedPortKeysRemoved
+        ? { ...current, runtimePorts: pin.runtimePorts }
+        : current
+    )
+  );
+}
 /** Fixture cleanup cannot target an added resource, changed creation birth, or a live container. */
 export function nativeProtectedFileRemovalMatches(opts: {
   readonly pin: Row;
@@ -244,8 +271,7 @@ export function nativeProtectedFileRemovalMatches(opts: {
       Array.isArray(opts.current.networks) &&
       canonical(rows(opts.pin.networks)) ===
         canonical(rows(opts.current.networks)) &&
-      nativeProtectedFileContainerIdentity(opts.pin) ===
-        nativeProtectedFileContainerIdentity(opts.current)
+      nativeProtectedFileContainerMatches(opts)
     );
   }
   if (opts.kind === "network") {
@@ -868,8 +894,7 @@ function containerTopology(entries: readonly unknown[]) {
 function requireOriginalResourceIdentity(kind: Kind, pin: Row, current: Row) {
   if (kind === "container") {
     requireValue(
-      nativeProtectedFileContainerIdentity(current) ===
-        nativeProtectedFileContainerIdentity(pin) &&
+      nativeProtectedFileContainerMatches({ pin, current }) &&
         Array.isArray(pin.networks) &&
         Array.isArray(current.networks)
     );
@@ -1611,8 +1636,12 @@ async function removeRetained(h: Fixture, instance: Checkout) {
   // reach this exact active file8 receipt. Unknown bootstrap/publication is
   // retained for explicit inspection instead of inferred or replayed.
   if (!instance.rolledBack) {
-    await retainedReceipt(instance);
-    h.successful(await h.invoke(instance, ["down", "--recover", "--json"]));
+    h.successful(
+      await nativeProtectedFileCleanupDown({
+        receipt: await retainedReceipt(instance),
+        invoke: (args) => h.invoke(instance, args),
+      })
+    );
     h.successful(
       await h.invoke(instance, ["config", "adopt", "--rollback", "--json"])
     );

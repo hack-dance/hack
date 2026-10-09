@@ -18,6 +18,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runNativeFileFixtureCommand as captureNativeFileFixtureCommand } from "./e2e/native-file-permission-command.ts";
 import {
+  nativeProtectedFileCleanupDown,
   nativeProtectedFileReadAllowed,
   nativeProtectedFileStartAllowed,
   nativeProtectedFileStateRefused,
@@ -30,6 +31,7 @@ import {
 import { createCompletedJobFixtureSettlement } from "./e2e/scenarios/native-compose-adoption-job-worktrees.ts";
 import {
   nativeProtectedFileContainerIdentity,
+  nativeProtectedFileContainerMatches,
   nativeProtectedFileRemovalMatches,
 } from "./e2e/scenarios/native-config-protected-files.ts";
 
@@ -316,6 +318,194 @@ test("stopped cleanup preserves full immutable facts and argv order", () => {
       mounts: [...pin.mounts].reverse(),
     })
   ).toBe(nativeProtectedFileContainerIdentity(pin));
+});
+const portPin = {
+  ...pin,
+  publishAll: false,
+  ports: null,
+  runtimePorts: { "5432/tcp": null },
+};
+const stoppedPortRow = {
+  ...portPin,
+  running: false,
+  status: "exited",
+  runtimePorts: {},
+};
+test("stopped original null runtime-port keys may become empty while full policy remains exact", () => {
+  expect(
+    nativeProtectedFileContainerMatches({
+      pin: portPin,
+      current: stoppedPortRow,
+    })
+  ).toBe(true);
+  expect(
+    nativeProtectedFileRemovalMatches({
+      kind: "container",
+      pin: portPin,
+      current: stoppedPortRow,
+    })
+  ).toBe(true);
+  expect(nativeProtectedFileContainerIdentity(stoppedPortRow)).not.toBe(
+    nativeProtectedFileContainerIdentity(portPin)
+  );
+});
+test("stopped runtime-port correspondence refuses foreign ports, publication and nonstopped state", () => {
+  for (const current of [
+    { ...stoppedPortRow, runtimePorts: { "9999/tcp": null } },
+    { ...stoppedPortRow, runtimePorts: null },
+    {
+      ...stoppedPortRow,
+      runtimePorts: {
+        "5432/tcp": [{ HostIp: "127.0.0.1", HostPort: "15432" }],
+      },
+    },
+    {
+      ...stoppedPortRow,
+      ports: { "5432/tcp": [{ HostIp: "127.0.0.1", HostPort: "15432" }] },
+    },
+    { ...stoppedPortRow, publishAll: true },
+    { ...stoppedPortRow, running: true, status: "running" },
+    { ...stoppedPortRow, paused: true },
+    { ...stoppedPortRow, status: "created" },
+    { ...stoppedPortRow, command: ["second", "first"] },
+    { ...stoppedPortRow, image: `sha256:${ids[1]}` },
+  ]) {
+    expect(nativeProtectedFileContainerMatches({ pin: portPin, current })).toBe(
+      false
+    );
+    expect(
+      nativeProtectedFileRemovalMatches({
+        kind: "container",
+        pin: portPin,
+        current,
+      })
+    ).toBe(false);
+  }
+  for (const runtimePorts of [
+    { "5432/tcp": [] },
+    { "5432/tcp": [{ HostIp: "127.0.0.1", HostPort: "15432" }] },
+  ]) {
+    expect(
+      nativeProtectedFileContainerMatches({
+        pin: { ...portPin, runtimePorts },
+        current: stoppedPortRow,
+      })
+    ).toBe(false);
+  }
+});
+const cleanupReceipt = {
+  adoption_receipt_version: 8,
+  kind: "legacy-compose-adopted",
+  checkout: {
+    root: { dev: 1, ino: 2 },
+    project: { dev: 1, ino: 3 },
+    git: { dev: 1, ino: 4 },
+  },
+  prepared,
+  publication: {
+    phase: "active",
+    generation: prepared,
+    native: { dev: 1, ino: 5, hash: "f".repeat(64) },
+  },
+  pendingOperation: null,
+};
+test("retained cleanup uses ordinary stop for clean active state and recovery only for a validated pending selection", async () => {
+  const calls: string[][] = [];
+  const invoke = async (args: readonly string[]) => {
+    calls.push([...args]);
+    return 17;
+  };
+  expect(
+    await nativeProtectedFileCleanupDown({ receipt: cleanupReceipt, invoke })
+  ).toBe(17);
+  for (const operation of ["start", "restart", "stop"]) {
+    expect(
+      await nativeProtectedFileCleanupDown({
+        receipt: {
+          ...cleanupReceipt,
+          pendingOperation: { ...receipt.pendingOperation, operation },
+        },
+        invoke,
+      })
+    ).toBe(17);
+  }
+  expect(calls).toEqual([
+    ["down", "--json"],
+    ["down", "--recover", "--json"],
+    ["down", "--recover", "--json"],
+    ["down", "--recover", "--json"],
+  ]);
+});
+test("retained cleanup refuses malformed or unknown selection before any invocation", async () => {
+  let calls = 0;
+  const invoke = async () => {
+    calls++;
+    return 0;
+  };
+  for (const value of [
+    null,
+    {},
+    { ...cleanupReceipt, pendingOperation: undefined },
+    { ...cleanupReceipt, pendingOperation: true },
+    { ...cleanupReceipt, pendingOperation: {} },
+    { ...cleanupReceipt, checkout: {} },
+    {
+      ...cleanupReceipt,
+      checkout: { ...cleanupReceipt.checkout, git: { dev: 1, ino: 0 } },
+    },
+    { ...cleanupReceipt, adoption_receipt_version: 14 },
+    {
+      ...cleanupReceipt,
+      publication: { ...cleanupReceipt.publication, phase: "switching" },
+    },
+    {
+      ...cleanupReceipt,
+      publication: { ...cleanupReceipt.publication, native: null },
+    },
+    { ...cleanupReceipt, prepared: { ...prepared, id: "invalid" } },
+    {
+      ...cleanupReceipt,
+      pendingOperation: { ...receipt.pendingOperation, operation: "unknown" },
+    },
+    {
+      ...cleanupReceipt,
+      pendingOperation: {
+        ...receipt.pendingOperation,
+        generation: { ...prepared, id: "f".repeat(32) },
+      },
+    },
+    {
+      ...cleanupReceipt,
+      pendingOperation: {
+        ...receipt.pendingOperation,
+        services: ["db", "reader", "foreign"],
+      },
+    },
+    {
+      ...cleanupReceipt,
+      pendingOperation: {
+        ...receipt.pendingOperation,
+        services: ["db", "reader", "reader"],
+      },
+    },
+    {
+      ...cleanupReceipt,
+      pendingOperation: {
+        ...receipt.pendingOperation,
+        services: ["db", "reader"],
+      },
+    },
+    {
+      ...cleanupReceipt,
+      pendingOperation: { ...receipt.pendingOperation, extra: true },
+    },
+    { ...cleanupReceipt, extra: true },
+  ]) {
+    await expect(
+      nativeProtectedFileCleanupDown({ receipt: value, invoke })
+    ).rejects.toThrow("selection refused; values omitted");
+  }
+  expect(calls).toBe(0);
 });
 let directory: string;
 beforeEach(async () => {

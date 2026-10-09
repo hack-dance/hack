@@ -45,7 +45,7 @@ test("source CLI cold enrollment precedes workload and down/up only verifies ret
   const first = await saved(root);
   expect(first.storageWitnesses?.[0]).toMatchObject({
     state: "enrolled",
-    reference: { version: 3, carrier: "directory-xattr" },
+    reference: { version: 3, kind: "directory-xattr" },
   });
   expect(first.pending).toBeNull();
   expect(first.storageWitnessesPending).toBe(false);

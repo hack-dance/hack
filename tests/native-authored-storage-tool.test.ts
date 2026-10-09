@@ -4,6 +4,7 @@ import {
   link,
   mkdtemp,
   readFile,
+  realpath,
   rename,
   rm,
   symlink,
@@ -28,7 +29,9 @@ afterEach(async () => {
   );
 });
 async function fixture() {
-  const root = await mkdtemp(join(tmpdir(), "native-storage-tool-"));
+  const root = await realpath(
+    await mkdtemp(join(tmpdir(), "native-storage-tool-"))
+  );
   roots.push(root);
   await chmod(root, 0o700);
   const bytes = Buffer.alloc(128);

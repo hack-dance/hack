@@ -626,6 +626,58 @@ function carrier(input: NativeComposeStorageXattrInvocation) {
   };
   return { program, value, rootMount, rootConfig, volumeOptions };
 }
+test.each([
+  "omitted",
+  "null",
+  "empty",
+] as const)("Engine empty Tmpfs representation %s preserves the exact carrier projection", (representation) => {
+  const selected = { ...input(), uid: 0, gid: 0 };
+  const fake = carrier(selected);
+  fake.value.user = "0:0";
+  const host: Record<string, unknown> = fake.value.host;
+  if (representation === "omitted") {
+    Reflect.deleteProperty(host, "Tmpfs");
+  } else {
+    host.Tmpfs = representation === "null" ? null : {};
+  }
+  // Exercise the serialized Engine shape, including both unchanged mount rows.
+  const value: unknown = JSON.parse(JSON.stringify(fake.value));
+  const checked = checkNativeComposeStorageDockerCarrier({
+    value,
+    input: selected,
+    program: fake.program,
+    imageIds: [selected.artifact.imageId],
+  });
+  expect(checked.id).toBe(fake.value.id);
+  const policy = JSON.parse(nativeComposeStorageDockerCarrierPolicy(checked));
+  expect(Object.hasOwn(policy.host, "Tmpfs")).toBe(
+    representation !== "omitted"
+  );
+  expect(policy.mounts).toHaveLength(2);
+  expect(policy.host.Mounts).toHaveLength(2);
+});
+test.each([
+  { label: "mount", value: { "/extra": "rw" } },
+  { label: "array", value: [] },
+  { label: "string", value: "" },
+  { label: "number", value: 0 },
+  { label: "boolean", value: false },
+  { label: "own undefined", value: undefined },
+])("Tmpfs $label cannot qualify a helper", ({ value }) => {
+  const selected = input(),
+    fake = carrier(selected);
+  const host: Record<string, unknown> = fake.value.host;
+  host.Tmpfs = value;
+  expect(() =>
+    checkNativeComposeStorageDockerCarrier({
+      value: fake.value,
+      input: selected,
+      program: fake.program,
+      imageIds: [selected.artifact.imageId],
+    })
+  ).toThrow("values omitted");
+});
+
 test("helper args require the cached dependency, unchanged program bind and exact nocopy volume", () => {
   const selected = input(),
     fake = carrier(selected);

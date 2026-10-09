@@ -84,7 +84,8 @@ export function checkNativeComposeStorageDockerCarrier(opts: {
       host.RestartPolicy.Name === "no" &&
       (host.Binds === null ||
         (Array.isArray(host.Binds) && host.Binds.length === 0)) &&
-      (host.Tmpfs === null ||
+      (!Object.hasOwn(host, "Tmpfs") ||
+        host.Tmpfs === null ||
         (isRecord(host.Tmpfs) && Object.keys(host.Tmpfs).length === 0)) &&
       (host.Devices === null ||
         (Array.isArray(host.Devices) && host.Devices.length === 0)) &&

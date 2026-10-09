@@ -182,7 +182,15 @@ pub struct Selection {
     receipt: Receipt,
     receipt_sha256: String,
     owner_sha256: String,
-    host_boot_micros: u64,
+    #[serde(flatten)]
+    host_boot: SelectionBoot,
+}
+/// Exactly one original qualifier; the output version is selected from it.
+#[derive(Serialize)]
+#[serde(untagged)]
+enum SelectionBoot {
+    Legacy { host_boot_micros: u64 },
+    Session { host_boot_uuid: host_boot::Session },
 }
 struct Admitted<'a> {
     candidate: &'a Candidate,
@@ -198,18 +206,26 @@ struct Admitted<'a> {
 }
 impl Admitted<'_> {
     fn selection(&self) -> Result<Selection, CandidateError> {
+        let (version, host_boot) = match self.lease.host_boot().map_err(|_| refused())? {
+            owner::HostBoot::LegacyMicros(host_boot_micros) => {
+                (1, SelectionBoot::Legacy { host_boot_micros })
+            }
+            owner::HostBoot::Session(host_boot_uuid) => {
+                (2, SelectionBoot::Session { host_boot_uuid })
+            }
+        };
         Ok(Selection {
-            version: 1,
+            version,
             kind: SelectionKind::NativeGraphRecoverySelection,
             run: self.run.into(),
             receipt: self.original.clone(),
             receipt_sha256: self.receipt_sha256.clone(),
             owner_sha256: self.lease.selected().fingerprint(),
-            host_boot_micros: self.lease.host_boot_micros().map_err(|_| refused())?,
+            host_boot,
         })
     }
 }
-/// Select only a dead version3 complete Ready publication, or its unchanged
+/// Select only a dead boot-qualified complete Ready publication, or its unchanged
 /// committed recovery intent. No file is created or repaired, and no provider
 /// operation, private acquisition, signal or cleanup is performed.
 pub fn select(candidate: &Candidate, run: &str) -> Result<Selection, CandidateError> {

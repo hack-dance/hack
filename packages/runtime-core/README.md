@@ -27,7 +27,7 @@ Outputs deliberately lack `Debug` and `Serialize`. Encoded private values are
 bounded to 32 KiB and 256 destination keys per workload; process argv is bounded
 to 4096 arguments and 64 KiB. Persistent worktree storage mounts are a separate
 receipt-v4 path described below. Build/acquisition policy, source/file mounts, routing,
-endpoints, host effects, HTTP/TCP readiness and automatic restart explicitly refuse.
+endpoints, standalone host effects, HTTP/TCP readiness and automatic restart explicitly refuse.
 
 `project::native::review` validates the same subset without acquiring private values.
 Its hash-only identity includes the authored semantic hash, local-resolution hash,
@@ -1672,3 +1672,18 @@ relay graphs with dependencies use that stricter reader and its fixed
 `guest_tool_artifact` refusal; dependency-free graphs do not read an artifact.
 Whole-root copies retaining the exact xattr remain outside this witness guarantee.
 Stock PostgreSQL remains a separate ownership/capability acceptance gate.
+
+### Frontend-owned finite hooks
+
+Normal native graph compile/review/plan/run/serve still refuse host intent. Explicit
+`frontend-plan`/`frontend-serve` accept a private source-v3 envelope only when its
+pinned finite-hook permit and active owner match the original frontend parent PID,
+UID, run, project/branch and compiler semantic hash. Permit/owner bytes, incarnations
+and canonical private parent are rechecked through preparation and effect fences.
+Finite normalized host intent stays ephemeral in `NativeInputs`; it is not discarded
+or serialized in graph receipts. Persistent host processes and host endpoint bindings
+remain unsupported. Source/storage/topology admission and receipt versions2–5 are
+unchanged. The TypeScript frontend owns phase intent/completion, managed hook values,
+supervised host children and owner-mediated stop; Rust owns workload readiness and
+exact native cleanup. See [finite hook lifecycle](../../docs/reference/native-authored-commands.md#finite-host-lifecycle-hooks)
+for uncertainty and recovery limits.

@@ -28,13 +28,16 @@ but refuses replacement of its inode. Selected path/ancestor aliases, identity
 or permission changes refuse, while exact owned shutdown remains possible after
 the host source is moved or deleted and preserves host data.
 
-Writable/other mounts, source acquisition, storage, authored networks, file inputs,
-routing, endpoints and host effects remain outside this bounded frontend. Unsupported intent must
+Writable/other mounts, source acquisition, storage, file inputs, routing, endpoints
+and persistent host processes remain outside this bounded frontend. The existing
+closed two-owned-bridge graph capability keeps its separate receipt and refuses
+source/storage intersections. Finite typed host lifecycle hooks use the supervised
+frontend owner described below. Unsupported intent must
 refuse before managed value resolution and provider work. Early typed input
 capability refusals retain `E_NATIVE_PROJECT_UNSUPPORTED` without exposing
 compiler diagnostics or creating native source/start/run authority. `--detach`,
-`--json`, service subsets and other lifecycle operations refuse before input
-acquisition. `--branch` supplies an explicit native namespace; its omission uses
+`--json`, service subsets and other lifecycle operations except owner-mediated
+`down` refuse before input acquisition. `--branch` supplies an explicit native namespace; its omission uses
 the canonical project namespace without inferring a Git branch. Profile and env
 selection keep their compiler contracts. `--env base` bypasses inherited overlays
 with an explicit base selection; omitting `--env` retains the authored/local default.
@@ -95,3 +98,51 @@ by the separately qualified image-only recovery path. No native hash substitutes
 for a normalized Compose hash. Source and fake-driver
 checks do not qualify an installed frontend, a live provider, the full authored
 corpus, actual dead-owner recovery or resource overhead; those remain separate gates.
+
+## Finite host lifecycle hooks
+
+The experimental foreground frontend admits typed `host.up.before`, `host.up.after`,
+`host.down.before` and `host.down.after` commands. Every phase and selected host
+environment binding is checked before the first hook. Persistent `host.processes`,
+host endpoints and unsupported workload capabilities still refuse; no intent is
+stripped to make the graph acceptable. Normal standalone `graph native plan`, `run`
+and `serve` continue to refuse host intent. The frontend alone uses an explicit
+version 3 private source envelope and immutable finite-hook permit. Existing graph
+receipts and source version 2 keep their meanings.
+
+`up.before` runs after pure native capability review. The frontend then reacquires
+input and managed environment selection and performs a fresh native review before
+starting workloads. Hook selection, project, source/worktree policy and selected
+profiles and authored semantic identity must remain identical. Managed bindings are
+reacquired without authorizing a changed workload declaration. `up.after` runs after authenticated native readiness;
+current readiness and inputs are checked again before publishing frontend readiness.
+The original configured startup budget includes both phases. Commands retain ordered
+exec/shell, cwd, environment target, unset and inherited-terminal semantics through
+the existing supervised shell owner.
+
+For a ready finite-hook generation, ordinary whole-project `down` contacts the live
+foreground owner using a private per-run capability. Ctrl-C makes the same stop
+request. `down.before` must succeed before native shutdown starts; a failed phase
+leaves the supervisor and runtime live and cannot be replayed. A second interrupt
+explicitly cancels the finite hook and requests exact native cleanup. `down.after`
+runs only after authenticated native Removed and successful `down.before`. Down
+hooks have no new arbitrary duration ceiling; the shell owner supervises cancellation
+and process-group settlement. A down client timeout does not replay or cancel the
+foreground operation. Detached startup, service subsets and restart remain unsupported.
+Known nonzero `down.after` completion reports failure after retiring the stopped
+generation. Unknown completion keeps the frontend bindings and hook intent together;
+it cannot silently make a new generation eligible.
+
+A distinct private hook owner records intent before each phase, captured child groups
+and known completion after child exit and group absence. Commands, values and raw
+errors are never journalled. Unknown completion blocks a new generation. Explicit
+dead-owner recovery performs no hooks or credential acquisition: the existing native
+owner first proves exact Removed, and only fully completed, unchanged hook records
+may retire. An interrupted host phase, pre-ready hook-only attempt or ambiguous child
+retains evidence and requires separate resolution; no automatic hook replay or
+inferred completion is supplied.
+
+Portable controls and synthetic runtime acceptance are distinct from live provider
+acceptance. In particular, the retained Event Agent corpus includes persistent host
+processes and remains outside this finite-only slice; full NC05 corpus acceptance is
+still required.

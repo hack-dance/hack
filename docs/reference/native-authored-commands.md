@@ -129,6 +129,9 @@ runs only after authenticated native Removed and successful `down.before`. Down
 hooks have no new arbitrary duration ceiling; the shell owner supervises cancellation
 and process-group settlement. A down client timeout does not replay or cancel the
 foreground operation. Detached startup, service subsets and restart remain unsupported.
+Known nonzero `down.after` completion reports failure after retiring the stopped
+generation. Unknown completion keeps the frontend bindings and hook intent together;
+it cannot silently make a new generation eligible.
 
 A distinct private hook owner records intent before each phase, captured child groups
 and known completion after child exit and group absence. Commands, values and raw

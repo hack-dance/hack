@@ -10,6 +10,7 @@ import {
   selectNativeFiniteHooks,
 } from "../lib/native-host-hook-runner.ts";
 import {
+  type NativeAuthoredReceipt,
   type NativeAuthoredReview,
   parseNativeAuthoredReview,
   parseNativeAuthoredSnapshot,
@@ -280,12 +281,12 @@ async function removeUnstartedSource(
   }
 }
 
-async function retireAttempt(opts: {
+async function confirmRemoved(opts: {
   readonly runtime: NativeRuntimeSelection;
   readonly scope: NativeAuthoredProjectRunScope;
   readonly admission: NativeAuthoredProjectAdmission;
   readonly attempt: Attempt;
-}): Promise<void> {
+}): Promise<NativeAuthoredReceipt> {
   const { attempt } = opts;
   // A canceled ingress must not prevent read-only authentication of completed
   // shutdown. This request has its own bounded drain; it never sends cleanup.
@@ -318,10 +319,21 @@ async function retireAttempt(opts: {
   ) {
     throw new Error("Native cleanup is unconfirmed; values omitted.");
   }
+  return snapshot.receipt;
+}
+
+async function retireAttempt(opts: {
+  readonly runtime: NativeRuntimeSelection;
+  readonly scope: NativeAuthoredProjectRunScope;
+  readonly admission: NativeAuthoredProjectAdmission;
+  readonly attempt: Attempt;
+}): Promise<void> {
+  const cleaned = await confirmRemoved(opts);
+  const { attempt } = opts;
   await opts.admission.retire({
     expectedStart: attempt.start,
     expectedRun: attempt.ready,
-    cleaned: snapshot.receipt,
+    cleaned,
   });
   await attempt.source.remove();
 }
@@ -438,22 +450,30 @@ async function runPreparedLifecycle(ctx: {
     failure = error;
   }
   ctx.hookOwner?.graphSettled();
-  await retireAttempt({
+  const retirement = {
     runtime: ctx.options.runtime,
     scope: ctx.options.scope,
     admission: ctx.admission,
     attempt: ctx.admitted,
-  });
-  ctx.removed();
+  };
   if (ctx.hookOwner) {
+    // Keep frontend bindings recoverable until every hook has known completion.
+    await confirmRemoved(retirement);
     await ctx.hookOwner.graphRemoved();
     if (downBefore) {
-      requireHookSuccess(await ctx.phase("down.after"));
+      const result = await ctx.phase("down.after");
+      try {
+        requireHookSuccess(result);
+      } catch (error) {
+        failure ??= error;
+      }
     }
     await ctx.hookOwner.retire();
     ctx.hookRetired();
   }
-  ctx.completeStop(true);
+  await retireAttempt(retirement);
+  ctx.removed();
+  ctx.completeStop(failure === undefined);
   if (failure) {
     throw failure;
   }

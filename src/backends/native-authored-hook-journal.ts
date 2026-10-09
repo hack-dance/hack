@@ -416,7 +416,7 @@ export async function createNativeAuthoredHookOwner(
       if (
         !(pending && Number.isSafeInteger(group)) ||
         group < 1 ||
-        pending.children >= 1024
+        !Number.isSafeInteger(pending.children + 1)
       ) {
         return refuse();
       }
@@ -468,7 +468,6 @@ function knownCompletion(
     typeof value.children !== "number" ||
     !Number.isSafeInteger(value.children) ||
     value.children < 0 ||
-    value.children > 1024 ||
     typeof value.result.exitCode !== "number" ||
     !Number.isInteger(value.result.exitCode) ||
     typeof value.result.canceled !== "boolean" ||

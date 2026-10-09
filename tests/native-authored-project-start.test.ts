@@ -1,4 +1,4 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, test as bunTest, expect } from "bun:test";
 import { createHash } from "node:crypto";
 import {
   chmod,
@@ -37,7 +37,41 @@ const KEYS = [
   "GIT_COMMON_DIR",
 ] as const;
 let saved: Record<string, string | undefined> | undefined;
+let activeCases = 0;
+let unconfirmed = false;
+function test(
+  name: string,
+  body: () => void | Promise<void>,
+  timeout?: number
+) {
+  bunTest(
+    name,
+    async () => {
+      if (unconfirmed) {
+        throw new Error(
+          "Startup fixture settlement unconfirmed; roots retained."
+        );
+      }
+      activeCases++;
+      try {
+        await body();
+      } catch (error) {
+        unconfirmed = true;
+        throw error;
+      } finally {
+        activeCases--;
+      }
+    },
+    timeout
+  );
+}
 afterEach(async () => {
+  if (activeCases !== 0) {
+    unconfirmed = true;
+  }
+  if (unconfirmed) {
+    return;
+  }
   if (saved) {
     for (const key of KEYS) {
       restoreEnv(key, saved[key]);
@@ -54,6 +88,8 @@ type FixtureOptions = {
   readonly finiteHooks?: boolean;
   readonly failBefore?: boolean;
   readonly failDownBefore?: boolean;
+  readonly failDownAfter?: boolean;
+  readonly changeHookOwnerAfter?: boolean;
   readonly persistent?: boolean;
   readonly semanticAfterHook?: boolean;
   readonly planFailure?: boolean;
@@ -107,7 +143,7 @@ async function fixture(options: FixtureOptions = {}) {
       exec: [
         process.execPath,
         "-e",
-        `const {appendFile}=await import("node:fs/promises"); await appendFile("hook-order", ${JSON.stringify(`${name}\n`)}); ${(name === "up-before" && options.failBefore) || (name === "down-before" && options.failDownBefore) ? "process.exit(7);" : ""}`,
+        `const {appendFile,readdir}=await import("node:fs/promises"); await appendFile("hook-order", ${JSON.stringify(`${name}\n`)}); ${name === "down-after" && options.changeHookOwnerAfter ? 'const root=".hack/.internal/native-authored-runs";const file=(await readdir(root)).find(name=>name.endsWith(".hooks.json"));if(!file)throw Error("missing synthetic hook owner");await appendFile(root+"/"+file,"\\n");' : ""} ${(name === "up-before" && options.failBefore) || (name === "down-before" && options.failDownBefore) || (name === "down-after" && options.failDownAfter) ? "process.exit(7);" : ""}`,
       ],
     },
   });
@@ -302,7 +338,7 @@ async function failure(
   expect(JSON.stringify(error)).not.toContain(CANARY);
   return error;
 }
-const macTest = process.platform === "darwin" ? test : test.skip;
+const macTest = process.platform === "darwin" ? test : bunTest.skip;
 
 test("startup diagnostics accept only closed compiler codes", () => {
   const known = new NativeAuthoredProjectStartError({
@@ -897,6 +933,95 @@ macTest(
     expect(
       await Bun.file(join(selected.scope.projectRoot, "hook-order")).text()
     ).toBe("up-before\nup-after\ndown-before\n");
+  },
+  30_000
+);
+
+macTest(
+  "known failed down.after retires the hook owner and bindings while preserving failure and permits a fresh run",
+  async () => {
+    const selected = await fixture({ finiteHooks: true, failDownAfter: true });
+    for (const currentRun of [run, "b".repeat(32)]) {
+      let stop: Promise<unknown> | undefined;
+      const error = await failure(
+        serveNativeAuthoredProject({
+          ...selected,
+          run: currentRun,
+          startupTimeoutMs: 15_000,
+          onReady: () => {
+            stop = stopNativeAuthoredProject({
+              scope: selected.scope,
+              timeoutMs: 15_000,
+            }).catch((caught: unknown) => caught);
+            return undefined;
+          },
+        }),
+        "removed"
+      );
+      expect(error).toHaveProperty("stage", "hook-down-after");
+      expect(await stop).toBeInstanceOf(Error);
+      expect(await loadNativeAuthoredProjectRun(selected.scope)).toBeNull();
+      await withNativeAuthoredProjectAdmission(
+        selected.scope,
+        async (admission) => {
+          expect(await admission.loadStart()).toBeNull();
+          expect(await admission.hooksRetained()).toBe(false);
+        }
+      );
+    }
+    expect(
+      await Bun.file(join(selected.scope.projectRoot, "hook-order")).text()
+    ).toBe("up-before\nup-after\ndown-before\ndown-after\n".repeat(2));
+    const calls = (await Bun.file(selected.calls).text())
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line)[4]);
+    expect(calls.filter((action) => action === "frontend-serve")).toHaveLength(
+      2
+    );
+  },
+  30_000
+);
+
+macTest(
+  "unknown down.after completion keeps frontend bindings and hook intent together without replay",
+  async () => {
+    const selected = await fixture({
+      finiteHooks: true,
+      changeHookOwnerAfter: true,
+    });
+    let stop: Promise<unknown> | undefined;
+    await failure(
+      serveNativeAuthoredProject({
+        ...selected,
+        run,
+        startupTimeoutMs: 15_000,
+        onReady: () => {
+          stop = stopNativeAuthoredProject({
+            scope: selected.scope,
+            timeoutMs: 15_000,
+          }).catch((caught: unknown) => caught);
+          return undefined;
+        },
+      }),
+      "retained"
+    );
+    expect(await stop).toBeInstanceOf(Error);
+    expect(await loadNativeAuthoredProjectRun(selected.scope)).not.toBeNull();
+    await withNativeAuthoredProjectAdmission(
+      selected.scope,
+      async (admission) => {
+        expect(await admission.loadStart()).not.toBeNull();
+        expect(await admission.hooksRetained()).toBe(true);
+      }
+    );
+    const files = await artifacts(selected.scope);
+    expect(files).toContain(`${run}.hook-down.after-intent.json`);
+    expect(files).not.toContain(`${run}.hook-down.after-complete.json`);
+    expect(files).toContain(`${run}.source.json`);
+    expect(
+      await Bun.file(join(selected.scope.projectRoot, "hook-order")).text()
+    ).toBe("up-before\nup-after\ndown-before\ndown-after\n");
   },
   30_000
 );

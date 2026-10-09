@@ -1,4 +1,4 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, test as bunTest, expect } from "bun:test";
 import {
   mkdir,
   mkdtemp,
@@ -17,7 +17,39 @@ import {
 } from "../src/lib/native-host-hook-runner.ts";
 
 const roots: string[] = [];
+let activeCases = 0;
+let unconfirmed = false;
+function test(
+  name: string,
+  body: () => void | Promise<void>,
+  timeout?: number
+) {
+  bunTest(
+    name,
+    async () => {
+      if (unconfirmed) {
+        throw new Error("Hook fixture settlement unconfirmed; roots retained.");
+      }
+      activeCases++;
+      try {
+        await body();
+      } catch (error) {
+        unconfirmed = true;
+        throw error;
+      } finally {
+        activeCases--;
+      }
+    },
+    timeout
+  );
+}
 afterEach(async () => {
+  if (activeCases !== 0) {
+    unconfirmed = true;
+  }
+  if (unconfirmed) {
+    return;
+  }
   await Promise.all(
     roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))
   );
@@ -149,6 +181,16 @@ test("persistent process intent refuses instead of being discarded", () => {
       host: { processes: { web: { command: { exec: ["true"] } } } },
     })
   ).toThrow();
+});
+test("finite hook admission preserves phases larger than the removed journal cap", () => {
+  const hooks = Array.from({ length: 1025 }, (_, index) => ({
+    name: `hook-${index}`,
+    command: { exec: ["true"] },
+    env_target: { kind: "host" },
+  }));
+  expect(
+    selectNativeFiniteHooks({ host: { up: { before: hooks } } })["up.before"]
+  ).toHaveLength(1025);
 });
 test("active cancellation settles resistant owned hook group before recording known completion", async () => {
   const scope = await fixture();

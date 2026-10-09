@@ -15,6 +15,7 @@ import { initScenario } from "./scenarios/init.ts";
 import { lifecycleHostProcessScenario } from "./scenarios/lifecycle-host-process.ts";
 import { lifecycleSessionRecoveryScenario } from "./scenarios/lifecycle-session-recovery.ts";
 import { nativeComposeAdoptionJobWorktreesScenario } from "./scenarios/native-compose-adoption-job-worktrees.ts";
+import { nativeComposeAdoptionRoutingWorktreesScenario } from "./scenarios/native-compose-adoption-routing-worktrees.ts";
 import { nativeComposeAdoptionSourceBindWorktreesScenario } from "./scenarios/native-compose-adoption-source-bind-worktrees.ts";
 import {
   nativeComposeAdoptionBranchWorktreesScenario,
@@ -37,6 +38,7 @@ import {
 } from "./scenarios/native-config-files.ts";
 import { nativeConfigProcessPolicyScenario } from "./scenarios/native-config-process-policy.ts";
 import { nativeConfigRoutingScenario } from "./scenarios/native-config-routing.ts";
+import { nativeConfigVmFilesScenario } from "./scenarios/native-config-vm-files.ts";
 import { portableMultiserviceScenario } from "./scenarios/portable-multiservice.ts";
 import { upDownScenario } from "./scenarios/up-down.ts";
 import { worktreeBranchDefaultScenario } from "./scenarios/worktree-branch-default.ts";
@@ -86,6 +88,7 @@ const ALL_SCENARIOS: readonly Scenario[] = [
   nativeConfigDownHooksScenario,
   nativeConfigFilesScenario,
   nativeConfigFileUnknownStopScenario,
+  nativeConfigVmFilesScenario,
   nativeConfigProcessPolicyScenario,
   nativeConfigRoutingScenario,
   nativeConfigNetworksScenario,
@@ -100,6 +103,7 @@ const ALL_SCENARIOS: readonly Scenario[] = [
   nativeComposeAdoptionDependencyWorktreesScenario,
   nativeComposeAdoptionBuildWorktreesScenario,
   nativeComposeAdoptionJobWorktreesScenario,
+  nativeComposeAdoptionRoutingWorktreesScenario,
   nativeComposeAdoptionSourceBindWorktreesScenario,
   lifecycleHostProcessScenario,
   worktreeParallelUpScenario,

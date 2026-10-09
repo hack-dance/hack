@@ -145,6 +145,7 @@ fn reopen_with(
     if !receipt.persistent() {
         return Err(refused());
     }
+    require_idle(&journal::directory(candidate, receipt.review.scope().run)?)?;
     receipt
         .validate(receipt.review.scope().run, &receipt.owner)
         .map_err(|_| refused())?;
@@ -189,15 +190,26 @@ fn reopen_with(
 }
 pub(super) fn verify(installed: &Installed, port: &mut impl Port) -> Result<(), CandidateError> {
     let admitted = installed.lifetime.enter(port.lifetime(), &installed.run)?;
+    installed.saved.verify()?;
+    let transport = intent::Intent::begin(installed.saved.root())?;
+    verify_inflight(installed, port, &transport)?;
+    transport.complete()?;
+    admitted.complete();
+    Ok(())
+}
+fn verify_inflight(
+    installed: &Installed,
+    port: &mut impl Port,
+    transport: &intent::Intent,
+) -> Result<(), CandidateError> {
     installed.reference.validate()?;
     installed.saved.verify()?;
-    observe(installed, port)?;
+    observe_inflight(installed, port, Some(transport))?;
     installed.saved.verify()?;
     port.check(&installed.guest)?;
     installed.saved.verify()?;
     installed.lifetime.check(port.lifetime(), &installed.run)?;
-    admitted.complete();
-    Ok(())
+    transport.verify()
 }
 pub(super) fn invoke(
     installed: &Installed,
@@ -208,10 +220,12 @@ pub(super) fn invoke(
     verify(installed, port)?;
     let seed = request.is_seed();
     let mut input = Zeroizing::new(String::from_utf8(request.encode()).map_err(|_| refused())?);
+    let transport = intent::Intent::begin(installed.saved.root())?;
     port.check(&installed.guest)?;
     // This is the final caller callback before transport, including a seed.
     installed.saved.verify()?;
     installed.lifetime.check(port.lifetime(), &installed.run)?;
+    transport.verify()?;
     let result = port.invoke(installed, &input, seed);
     input.zeroize();
     let output = result.map_err(|_| {
@@ -219,17 +233,29 @@ pub(super) fn invoke(
         refused()
     })?;
     port.check(&installed.guest)?;
-    verify(installed, port)?;
+    verify_inflight(installed, port, &transport)?;
     let observation = helper::Observation::decode(output.as_bytes()).map_err(|_| {
         installed.lifetime.uncertain(&installed.run);
         refused()
     })?;
+    transport.complete()?;
     admitted.complete();
     Ok(observation)
 }
 fn observe(installed: &Installed, port: &mut impl Port) -> Result<(), CandidateError> {
+    observe_inflight(installed, port, None)
+}
+fn observe_inflight(
+    installed: &Installed,
+    port: &mut impl Port,
+    transport: Option<&intent::Intent>,
+) -> Result<(), CandidateError> {
     installed.lifetime.check(port.lifetime(), &installed.run)?;
     port.check(&installed.guest)?;
+    if let Some(transport) = transport {
+        installed.saved.verify()?;
+        transport.verify()?;
+    }
     let output = port.inspect(installed).map_err(|_| {
         installed.lifetime.uncertain(&installed.run);
         refused()
@@ -309,6 +335,7 @@ impl Inventory {
                 return Err(refused());
             }
             let saved = saved::Saved::capture(candidate, &run)?;
+            require_idle(saved.root())?;
             let receipt = saved.receipt()?;
             if receipt.data_tool.as_ref().is_some_and(|tool| {
                 tool.root.is_none()

@@ -12,6 +12,7 @@ installed-candidate = []
 environment-launcher = []
 native-http-probe = []
 native-stream-relay = []
+storage-root-witness-tool = []
 shared-mcp = []
 
 [lib]
@@ -58,3 +59,8 @@ strip = true
 name = "hack-mcp-owner"
 path = "src/bin/hack-mcp-owner.rs"
 required-features = ["shared-mcp"]
+
+[[bin]]
+name = "hack-storage-root-witness"
+path = "src/bin/hack-storage-root-witness.rs"
+required-features = ["storage-root-witness-tool"]

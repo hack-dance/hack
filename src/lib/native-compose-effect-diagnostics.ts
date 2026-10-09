@@ -50,6 +50,13 @@ export type NativeComposeEffectRefusal = {
     | "compose-child"
     | "compose-readiness"
     | "compose-file-readiness"
+    | "vm-file-readiness"
+    | "vm-retirement-admission"
+    | "vm-retirement-observation"
+    | "vm-retirement-observer-stop"
+    | "vm-retirement-observer-removal"
+    | "vm-retirement-volume-policy"
+    | "vm-retirement-volume-removal"
     | "compose-routing-readiness";
   readonly reason:
     | "private-state"
@@ -124,6 +131,13 @@ const stages: readonly NativeComposeEffectRefusal["stage"][] = [
   "compose-child",
   "compose-readiness",
   "compose-file-readiness",
+  "vm-file-readiness",
+  "vm-retirement-admission",
+  "vm-retirement-observation",
+  "vm-retirement-observer-stop",
+  "vm-retirement-observer-removal",
+  "vm-retirement-volume-policy",
+  "vm-retirement-volume-removal",
   "compose-routing-readiness",
 ];
 const reasons: readonly NativeComposeEffectRefusal["reason"][] = [

@@ -1,4 +1,5 @@
 import { resolve } from "node:path";
+import { DEFAULT_INGRESS_NETWORK } from "../constants.ts";
 import { isRecord } from "./guards.ts";
 import {
   acquireLegacyComposeBranch,
@@ -21,6 +22,7 @@ import {
   type LegacyComposeStorageIntent,
   planLegacyComposeAdoption,
   planLegacyComposeRetainedBasicBuildAdoption,
+  planLegacyComposeRetainedRoutingAdoption,
   planLegacyComposeSourceBindAdoption,
 } from "./native-compose-adoption-plan.ts";
 import {
@@ -29,9 +31,17 @@ import {
 } from "./native-compose-adoption-projection.ts";
 import { legacyComposeRetainedPlan } from "./native-compose-adoption-readiness.ts";
 import {
+  inspectLegacyComposeRetainedRouting,
+  type LegacyComposeRetainedRoutingProof,
+} from "./native-compose-adoption-routing.ts";
+import {
   acquireLegacyComposeSourceBind,
   type LegacyComposeSourceBindProof,
 } from "./native-compose-adoption-source-bind.ts";
+import {
+  type NativeComposeIngressBinding,
+  observeNativeComposeIngress,
+} from "./native-compose-ingress.ts";
 import {
   createNativeComposeProbe,
   NativeComposeOwnershipError,
@@ -43,6 +53,7 @@ import {
 import {
   freezeImportValue,
   mapLegacyNativeBranchStorageAdoption,
+  mapLegacyNativeRetainedRouting,
   mapLegacyNativeStorageAdoption,
 } from "./native-config-import-plan.ts";
 import type { LegacyComposeSourceBindIntent } from "./native-config-import-storage.ts";
@@ -333,6 +344,12 @@ export type LegacyComposeVerifiedBinding = LegacyComposeVerifiedBindingBase &
         readonly networks: readonly LegacyComposeVerifiedNetwork[];
       }
     | {
+        readonly binding_version: 14;
+        readonly composeFiles: readonly string[];
+        readonly network: LegacyComposeOriginalNetwork;
+        readonly routing: LegacyComposeRetainedRoutingProof;
+      }
+    | {
         readonly binding_version: 13;
         readonly composeFiles: readonly string[];
         readonly network: LegacyComposeOriginalNetwork;
@@ -482,6 +499,7 @@ function containerRows(
     readonly network?: { readonly name: string; readonly id: string };
     readonly networks?: readonly LegacyComposeVerifiedNetwork[];
     readonly composeFiles: readonly string[];
+    readonly ingress?: NativeComposeIngressBinding;
     readonly sourceBinds?: LegacyComposeSourceBindIntent["sourceBinds"];
   }
 ): LegacyComposeVerifiedContainer[] {
@@ -576,8 +594,36 @@ function containerRows(
         }
         return { id: row.id, name: row.name.slice(1), service: row.service };
       }
-      requireValue(Array.isArray(row.networks) && row.networks.length === 1);
-      const network = row.networks[0];
+      requireValue(Array.isArray(row.networks));
+      const routed =
+        opts.intent.routing?.routes.some(
+          (route) => route.service === row.service
+        ) === true;
+      if (opts.intent.routing) {
+        requireValue(
+          opts.ingress &&
+            !opts.intent.ownedNetwork &&
+            !opts.intent.ownedNetworks &&
+            row.networks.length === (routed ? 2 : 1)
+        );
+        const shared = row.networks.filter(
+          (item) => isRecord(item) && item.name === DEFAULT_INGRESS_NETWORK
+        );
+        requireValue(routed ? shared.length === 1 : shared.length === 0);
+        if (routed) {
+          const item = shared[0];
+          requireValue(isRecord(item));
+          keys(item, ["id", "name"]);
+          requireValue(item.id === opts.ingress.networkId);
+        }
+      } else {
+        requireValue(row.networks.length === 1);
+      }
+      const local = row.networks.filter(
+        (item) => !isRecord(item) || item.name !== DEFAULT_INGRESS_NETWORK
+      );
+      requireValue(local.length === 1);
+      const network = local[0];
       requireValue(isRecord(network));
       keys(
         network,
@@ -863,6 +909,7 @@ async function inspectResources(
   };
   let { plural, single } = await readNetwork();
   const networkIdentity = JSON.stringify(plural?.networks ?? single?.network);
+  let ingress: NativeComposeIngressBinding | undefined;
   const readContainers = async () => {
     const facts = await inspect({
       kind: "container",
@@ -874,12 +921,19 @@ async function inspectResources(
         opts.intent.ownedNetworks !== undefined,
       sourceBinds: sourceBinds !== undefined,
     });
+    // Retain the original routed observation after the first container read.
+    // The complete routing proof below rechecks this same ingress incarnation.
+    if (opts.intent.routing && ingress === undefined) {
+      ingress = await observeNativeComposeIngress({ signal: opts.signal });
+      requireValue(ingress.engineId === engineId);
+    }
     const containers = containerRows(facts, {
       ...opts,
       composeFiles,
       volumes,
       network: single?.network,
       networks: plural?.networks,
+      ingress,
       sourceBinds,
     });
     return { facts, containers };
@@ -989,6 +1043,31 @@ async function inspectResources(
         };
   }
   requireValue(single);
+  if (opts.intent.routing) {
+    requireValue(
+      !(
+        plural ||
+        sourceBinds ||
+        opts.selectedBranch ||
+        opts.intent.ownedNetwork ||
+        opts.intent.ownedNetworks
+      ) && ingress
+    );
+    const routing = await inspectLegacyComposeRetainedRouting({
+      binding: common,
+      routing: opts.intent.routing,
+      signal: opts.signal,
+      timeoutMs: opts.timeoutMs,
+    });
+    requireValue(JSON.stringify(routing.ingress) === JSON.stringify(ingress));
+    return {
+      ...common,
+      binding_version: 14,
+      composeFiles: Object.freeze(composeFiles),
+      network: single.network,
+      routing,
+    };
+  }
   if (sourceBinds) {
     requireValue(
       !(
@@ -1158,25 +1237,36 @@ async function acquireBinding(
       composeText: source.composeText,
       selectedComposeProject: branch?.proof.composeProject,
     });
+    const routed =
+      purpose === "preparation" && !ordinary.intent && !branch
+        ? planLegacyComposeRetainedRoutingAdoption(source)
+        : undefined;
     const basicPlan =
       purpose === "basic-build" ||
-      (purpose === "preparation" && !ordinary.intent)
+      (purpose === "preparation" && !ordinary.intent && !routed?.intent)
         ? planLegacyComposeRetainedBasicBuildAdoption(source)
         : undefined;
     const basic =
       purpose === "basic-build" ||
       (purpose === "preparation" &&
         !ordinary.intent &&
+        !routed?.intent &&
         !branch &&
         Boolean(basicPlan?.intent));
     const sources =
       purpose === "source-bind" ||
-      (purpose === "preparation" && !ordinary.intent && !basic && !branch);
-    if (branch && (basic || sources || !ordinary.intent)) {
+      (purpose === "preparation" &&
+        !ordinary.intent &&
+        !routed?.intent &&
+        !basic &&
+        !branch);
+    if (branch && (basic || sources || routed?.intent || !ordinary.intent)) {
       refuse("E_LEGACY_COMPOSE_BINDING_UNSUPPORTED");
     }
     let planned = ordinary;
-    if (sources) {
+    if (routed?.intent) {
+      planned = routed;
+    } else if (sources) {
       planned = planLegacyComposeSourceBindAdoption(source);
     } else if (basic && basicPlan) {
       planned = basicPlan;
@@ -1191,11 +1281,13 @@ async function acquireBinding(
     const sourceBind = sources
       ? await acquireLegacyComposeSourceBind({ source, signal })
       : undefined;
-    const mapped = (
-      branch
-        ? mapLegacyNativeBranchStorageAdoption
-        : mapLegacyNativeStorageAdoption
-    )({
+    let mapper = mapLegacyNativeStorageAdoption;
+    if (intent.routing) {
+      mapper = mapLegacyNativeRetainedRouting;
+    } else if (branch) {
+      mapper = mapLegacyNativeBranchStorageAdoption;
+    }
+    const mapped = mapper({
       configText: source.configText,
       composeText: source.composeText,
     });
@@ -1227,7 +1319,8 @@ async function acquireBinding(
     );
     if (
       candidate &&
-      (generatedPresent ||
+      (intent.routing !== undefined ||
+        generatedPresent ||
         !(await legacyComposeAdoptionLayoutSupported({
           projectRoot: root,
           candidate,
@@ -1241,6 +1334,7 @@ async function acquireBinding(
         source,
         signal,
         binary,
+        retainedRouting: intent.routing !== undefined,
       });
       const resolved = await projection.resolve({ signal });
       projected = Object.freeze({

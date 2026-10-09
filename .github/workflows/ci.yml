@@ -52,6 +52,8 @@ jobs:
       - run: bun run check:config-compiler && bun run test:config-compiler
       - run: bun run build:config-compiler
       - name: Test private file sources and owner with the matching compiler
+        env:
+          HACK_TEST_NATIVE_FILE_OWNER_DIAGNOSTICS: "1"
         run: bun test tests/native-compose-file-sources.test.ts tests/native-compose-file-owner.test.ts
       - name: Test explicit imported jobs and readiness with the matching compiler
         run: HACK_TEST_NATIVE_COMPILER_BINARY="$PWD/dist/hack-config-compiler" bun test tests/native-config-import-jobs.test.ts tests/native-config-import-readiness.test.ts
@@ -283,6 +285,7 @@ jobs:
         run: HACK_TEST_COMPOSE_CONFIG=1 bun test tests/native-compose-renderer-config.test.ts --test-name-pattern '^one authored bridge keeps internal policy and static aliases through compiler and Compose normalization$'
       - name: Run local and Docker E2E
         env:
+          HACK_E2E_PROCESS_POLICY_REFUSAL_CAPSULE: "1"
           HACK_E2E_CLI_BIN: ${{ github.workspace }}/dist/hack
         run: |
           HACK_E2E_DOCKER_HOST="${DOCKER_HOST:-$(docker context inspect --format '{{.Endpoints.docker.Host}}')}"

@@ -524,6 +524,86 @@ Use the same prerequisites and flags as above with
 `--only=native-compose-adoption-managed-worktrees`. Registration and synthetic
 fixture controls do not establish a live pass.
 
+## Retained routing contract under implementation
+
+The separate private version 14 mapper admits literal legacy `dev_host`, its
+already configured OAuth alias and `open.prefer`, together with closed static
+Caddy HTTP upstream labels. It pins full HTTPS origins rather than deriving a
+new host from the project name or a global domain. Routed services must configure
+exactly the existing `hack-dev` attachment and the project default bridge; other
+services retain only the default bridge and existing local named storage.
+
+Ordinary import preview remains outside this private family. The retained routing
+owner binds the original resources and ingress incarnations, reserves the exact
+hostnames, and verifies current proxy dispatch before clearing a startup receipt.
+Saved reads preserve literal origins and typed local precedence without acquiring
+managed values. Every original-ID lifecycle child has a durable prospective
+record; only its one-use known-return and process-group-absence proof settles that
+record. Explicit recovery can contain an uncertain child but cannot clear its
+uncertainty merely because containers are stopped.
+
+Within one read-only dispatch proof, a private owner-issued context reuses its
+entry resource observation while checking source, receipt, claims and lease
+authority throughout. Routing, ingress and foreign-site observations remain
+fresh. A complete resource/runtime observation brackets the proof, including
+final volume and inventory rereads. The context is revoked before return and
+cannot cross a lifecycle effect, publication or another observation phase.
+This reduces nested inspection calls; it is not a measured runtime or CPU claim.
+Before moving originals, publication uses its just-completed resource observation
+as that proof's entry. Candidate admission and stopped-state reads do not extend
+the observation into an effect: source, receipt, claims and stopped state are
+rechecked inside the scoped context, and a complete fresh binding remains the
+exit gate before originals can move. The same absolute publication deadline
+applies; an already expired entry still refuses.
+
+At the final active-receipt boundary, publication captures the actual final
+resource read and reuses only its entry observation across the exclusive temporary
+receipt write. The authoritative switching receipt is still unchanged. Scoped
+source, manifest, claim, receipt, stopped-state and deadline checks continue;
+the full closing resource binding and final receipt snapshot run before rename.
+This reuse cannot cross an authoritative save, native installation, original
+move, lifecycle effect or another callback. Clock controls cover this installed
+native boundary separately from the earlier pre-move routing proof; they do not
+identify a historical runtime refusal by themselves.
+
+Publication refusals may include
+`legacy_adoption_publication_refusal: {stage, reason}` in the JSON error detail.
+The active-receipt save distinguishes its original context, receipt, staging,
+routing, commit and readback boundaries. Its explicit deadline guard may issue
+`proof-deadline`; other state refusals retain their owner code classification.
+An inner issued diagnostic survives the outer publication catch. These fixed
+labels contain no paths, identities, source text or error messages.
+The owner records the fixed boundary that rejected and a closed error category;
+it retains no source values, resource identities, compiler output or error text.
+The public error code, guard order, deadlines and recovery requirements remain
+unchanged. Copied details do not confer diagnostic or recovery authority. A
+category describes that future invocation, not the cause of an older refusal
+that did not record it.
+
+Rollback requires restored source bytes, stopped original resources and absent
+proxy dispatch before handing hostname claims back to the restored legacy source.
+It retains a durable handoff state across interrupted claim removal. Builds, jobs,
+readiness, source binds, files, branch overrides and custom bridges remain outside
+this initial routing family. The owner and private-store model do not prove live
+TLS, SQL fidelity, OAuth login or application acceptance. The maintained isolated
+ingress lifecycle fixture remains required; global DNS and trust are unchanged.
+
+The explicitly selected `native-compose-adoption-routing-worktrees` scenario
+adds an HTTP service to the original two-worktree PostgreSQL fixture. It requires
+both literal HTTPS origins and the existing OAuth alias to serve each checkout's
+marker, with no published proxy ports. Saved `open` must select alpha's
+checkout-local alias over the authored and primary-local dev preference. It also
+checks original SQL/IDs/births, a known partial-stop journal and explicit
+recovery, two retained up/down cycles, exact source rollback and claim handoff.
+Unknown child or cleanup disposition retains the fixture. The temporary Caddy
+owner is shared with `native-config-routing`; stopped user proxies and the
+existing `hack-dev` network stay intact. This scenario does not perform OAuth
+login, change host DNS/trust, or qualify combined unsupported families.
+
+With current compiled artifacts, cached fixture images and an exclusively
+coordinated Docker lane, select it using the same prerequisites above and
+`--only=native-compose-adoption-routing-worktrees`. Its source and pure controls
+are separate from a completed live TLS/SQL run.
 ## Retained directory binds
 
 Version 12 is a distinct retained source-directory owner. It accepts literal

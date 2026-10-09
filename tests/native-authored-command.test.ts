@@ -65,7 +65,14 @@ test.each([
 const unsupported: readonly Partial<NativeComposeCommandOptions>[] = [
   { operation: "restart" },
   { operation: "down", services: [] },
-  { operation: "ps" },
+  { operation: "ps", profiles: [] },
+  { operation: "ps", overlay: null },
+  { operation: "ps", services: [] },
+  { operation: "ps", service: "web" },
+  { operation: "ps", recover: true },
+  { operation: "ps", detach: true },
+  { operation: "ps", command: [] },
+  { operation: "ps", unsupportedOptions: true },
   { operation: "logs" },
   { operation: "exec" },
   { operation: "run" },
@@ -107,6 +114,44 @@ test.each([
 });
 
 const macTest = process.platform === "darwin" ? test : test.skip;
+macTest(
+  "public ps suppresses success after its completed status owner is canceled",
+  async () => {
+    const selected = await fixture();
+    const before = process.listenerCount("SIGINT");
+    let calls = 0;
+    const result = await tryNativeAuthoredCommand({
+      ...selected,
+      options: { ...selected.options, operation: "ps", json: true },
+      env: {
+        ...selected.env,
+        HACK_COMPOSE_STARTUP_TIMEOUT_MS: "not-a-startup-budget",
+      },
+      serve: () => {
+        throw new Error("No startup");
+      },
+      recover: () => {
+        throw new Error("No cleanup");
+      },
+      observe: async ({ signal }) => {
+        calls++;
+        process.emit("SIGINT");
+        expect(signal?.aborted).toBe(true);
+        return {
+          backend: "native",
+          status: "not_started",
+          run: null,
+          phase: null,
+          items: [],
+        };
+      },
+    });
+    expect(result).toBe(130);
+    expect(calls).toBe(1);
+    expect(process.listenerCount("SIGINT")).toBe(before);
+    expect(await readdir(join(selected.root, ".hack"))).toEqual([]);
+  }
+);
 macTest(
   "explicit down recovery captures saved scope and never delegates to startup",
   async () => {
@@ -421,7 +466,9 @@ if (process.platform !== "darwin") {
         ...selected,
         env: { HACK_RUNTIME_BACKEND: "native" },
       })
-    ).rejects.toThrow("requires whole-project foreground up on macOS");
+    ).rejects.toThrow(
+      "requires whole-project foreground up, ps, or explicit stored-generation down --recover on macOS"
+    );
     expect(await readdir(join(selected.root, ".hack"))).toEqual([]);
   });
 }

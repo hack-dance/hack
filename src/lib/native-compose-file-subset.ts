@@ -6,7 +6,7 @@ import { authoredFilePlanningRequired } from "./native-file-plan-protocol.ts";
 function unsupported(): never {
   throw new NativeConfigCompilerError(
     "E_NATIVE_PROJECT_UNSUPPORTED",
-    "Native file delivery requires read-only mode 0444, no UID/GID override and no builds. Values omitted."
+    "Native file delivery requires qualified read-only permission intent and no builds. Values omitted."
   );
 }
 function assertWorkloadSubset(workload: unknown): void {
@@ -30,9 +30,24 @@ function assertWorkloadSubset(workload: unknown): void {
     }
     if (
       mount.access !== "read-only" ||
-      (mount.mode !== undefined && mount.mode !== "0444") ||
-      Object.hasOwn(mount, "uid") ||
-      Object.hasOwn(mount, "gid")
+      (mount.mode !== undefined &&
+        mount.mode !== "0444" &&
+        mount.mode !== "0400" &&
+        mount.mode !== "0600") ||
+      (Object.hasOwn(mount, "uid") &&
+        !(
+          typeof mount.uid === "number" &&
+          Number.isSafeInteger(mount.uid) &&
+          mount.uid >= 0 &&
+          mount.uid < 0xff_ff_ff_ff
+        )) ||
+      (Object.hasOwn(mount, "gid") &&
+        !(
+          typeof mount.gid === "number" &&
+          Number.isSafeInteger(mount.gid) &&
+          mount.gid >= 0 &&
+          mount.gid < 0xff_ff_ff_ff
+        ))
     ) {
       unsupported();
     }

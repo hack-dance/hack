@@ -148,6 +148,55 @@ pub(super) mod observation_diagnostic {
         metadata: Option<&fs::Metadata>,
         errno: Option<i32>,
     ) {
+        record_with(stage, metadata, errno, None);
+    }
+    pub(in crate::provider::dependency_socket) fn fd_facts(
+        socket: &impl std::os::fd::AsRawFd,
+    ) -> Value {
+        let fd = socket.as_raw_fd();
+        let mut metadata = std::mem::MaybeUninit::<libc::stat>::uninit();
+        // The caller owns this descriptor throughout the synchronous observation.
+        if unsafe { libc::fstat(fd, metadata.as_mut_ptr()) } != 0 {
+            return json!({"fd":fd,"errno":std::io::Error::last_os_error().raw_os_error()});
+        }
+        let metadata = unsafe { metadata.assume_init() };
+        json!({"fd":fd,"errno":null,"device":metadata.st_dev,"inode":metadata.st_ino,
+            "mode":metadata.st_mode,"uid":metadata.st_uid,"nlink":metadata.st_nlink})
+    }
+    pub(in crate::provider::dependency_socket) fn record_connect(
+        target: &Path,
+        metadata: &fs::Metadata,
+        result: &std::io::Result<UnixStream>,
+    ) {
+        use std::{io::ErrorKind, os::unix::ffi::OsStrExt};
+        let (errno, facts) = match result {
+            Ok(stream) => (None, json!({"result":"connected","fd":fd_facts(stream)})),
+            Err(error) => (
+                error.raw_os_error(),
+                json!({"result":"error","kind":match error.kind() {
+                    ErrorKind::InvalidInput => "invalid-input",
+                    ErrorKind::TimedOut => "timed-out",
+                    ErrorKind::ConnectionRefused => "connection-refused",
+                    _ => "other",
+                }}),
+            ),
+        };
+        record_with(
+            Stage::SocketConnect,
+            Some(metadata),
+            errno,
+            Some(
+                json!({"outcome":facts,"path_bytes":target.as_os_str().as_bytes().len(),
+                "path_contains_nul":target.as_os_str().as_bytes().contains(&0)}),
+            ),
+        );
+    }
+    fn record_with(
+        stage: Stage,
+        metadata: Option<&fs::Metadata>,
+        errno: Option<i32>,
+        connect: Option<Value>,
+    ) {
         FIRST.with(|first| {
             let mut first = first.borrow_mut();
             if first.is_none() {
@@ -157,8 +206,11 @@ pub(super) mod observation_diagnostic {
                             else if metadata.file_type().is_symlink(){"symlink"}
                             else if metadata.is_file(){"file"}
                             else if metadata.is_dir(){"directory"}else{"other"},
-                        "mode":metadata.mode(),"uid":metadata.uid(),
+                        "device":metadata.dev(),"mode":metadata.mode(),"uid":metadata.uid(),
                         "nlink":metadata.nlink(),"inode":metadata.ino()}))}));
+                if let Some(connect) = connect {
+                    first.as_mut().unwrap()["connect"] = connect;
+                }
             }
         });
     }
@@ -197,11 +249,7 @@ pub(super) fn observed(directory: &Path, slot: u8) -> Result<Option<Socket>, Can
         Err(error) if error.raw_os_error() == Some(libc::ECONNREFUSED) => {}
         _result => {
             #[cfg(test)]
-            observation_diagnostic::record(
-                observation_diagnostic::Stage::SocketConnect,
-                Some(&metadata),
-                _result.err().and_then(|error| error.raw_os_error()),
-            );
+            observation_diagnostic::record_connect(&target, &metadata, &_result);
             return Err(refused());
         }
     }

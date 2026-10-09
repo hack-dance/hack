@@ -1,12 +1,12 @@
 use super::*;
 use std::{
-    cell::Cell,
+    cell::{Cell, RefCell},
     os::unix::{fs::PermissionsExt, net::UnixListener},
     sync::atomic::{AtomicU64, Ordering},
 };
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
-struct Fixture(PathBuf);
+struct Fixture(PathBuf, RefCell<Vec<Value>>);
 impl Fixture {
     fn new() -> Self {
         let base = if cfg!(target_os = "macos") {
@@ -21,7 +21,7 @@ impl Fixture {
         ));
         fs::create_dir(&root).unwrap();
         fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
-        Self(root)
+        Self(root, RefCell::new(Vec::new()))
     }
     fn journal(&self) -> PathBuf {
         self.0.join("journal")
@@ -40,17 +40,23 @@ impl Fixture {
         listener
     }
     fn stale(&self, slot: u8) {
-        drop(self.bind(slot));
+        let listener = self.bind(slot);
+        let fd = super::super::recovery::observation_diagnostic::fd_facts(&listener);
+        drop(listener);
+        self.1
+            .borrow_mut()
+            .push(json!({"slot":slot,"listener":fd,"drop_returned":true}));
     }
     fn selection(&self) -> Selection {
         super::super::recovery::observation_diagnostic::clear();
         current(self.scope(), &self.0).unwrap_or_else(|error| {
             panic!(
-                "Synthetic quiescent selection refused: code={}; closed_first_observation={}",
+                "Synthetic quiescent selection refused: code={}; closed_first_observation={}; owned_listener_drops={}",
                 error.code,
                 super::super::recovery::observation_diagnostic::take()
                     .map(|facts| serde_json::to_string(&facts).unwrap())
-                    .unwrap_or_else(|| "null".into())
+                    .unwrap_or_else(|| "null".into()),
+                serde_json::to_string(&*self.1.borrow()).unwrap(),
             )
         })
     }
@@ -72,16 +78,80 @@ fn first_socket_refusal_records_closed_live_listener_facts_without_removal() {
     let facts = diagnostic::take().unwrap();
     assert_eq!(facts["stage"], "socket-connect");
     assert!(facts["errno"].is_null());
+    assert_eq!(facts["connect"]["outcome"]["result"], "connected");
+    assert!(facts["connect"]["outcome"]["fd"]["errno"].is_null());
+    assert!(facts["connect"]["outcome"]["fd"]["fd"].as_i64().unwrap() >= 0);
+    assert_eq!(facts["connect"]["path_contains_nul"], false);
     assert_eq!(facts["metadata"]["type"], "socket");
     assert_eq!(facts["metadata"]["mode"].as_u64().unwrap() & 0o7777, 0o600);
     assert_eq!(facts["metadata"]["nlink"], 1);
     assert!(facts["metadata"]["inode"].as_u64().unwrap() > 0);
     let text = serde_json::to_string(&facts).unwrap();
-    assert!(text.len() < 512);
+    assert!(text.len() < 1024);
     assert!(!text.contains(fixture.0.to_str().unwrap()));
     assert!(path(&fixture.0, 0).exists());
     drop(listener);
     assert!(observed(&fixture.0, 0).unwrap().is_some());
+}
+
+#[test]
+fn dropped_original_with_owned_duplicate_is_connected_not_stale_authority() {
+    use super::super::recovery::observation_diagnostic as diagnostic;
+    let fixture = Fixture::new();
+    let original = fixture.bind(0);
+    let duplicate = original.try_clone().unwrap();
+    let original_facts = diagnostic::fd_facts(&original);
+    let duplicate_facts = diagnostic::fd_facts(&duplicate);
+    assert_ne!(original_facts["fd"], duplicate_facts["fd"]);
+    assert_eq!(original_facts["device"], duplicate_facts["device"]);
+    assert_eq!(original_facts["inode"], duplicate_facts["inode"]);
+    drop(original);
+    diagnostic::clear();
+    assert!(observed(&fixture.0, 0).is_err());
+    let facts = diagnostic::take().unwrap();
+    assert!(facts["errno"].is_null());
+    assert_eq!(facts["connect"]["outcome"]["result"], "connected");
+    assert!(path(&fixture.0, 0).exists());
+    drop(duplicate);
+    assert!(observed(&fixture.0, 0).unwrap().is_some());
+}
+
+#[test]
+fn closed_connect_capture_distinguishes_non_os_errors_from_connected() {
+    use super::super::recovery::observation_diagnostic as diagnostic;
+    use std::io::{Error, ErrorKind};
+    let fixture = Fixture::new();
+    fixture.stale(0);
+    let target = path(&fixture.0, 0);
+    let metadata = fs::symlink_metadata(&target).unwrap();
+    for (error, kind, errno) in [
+        (
+            Error::new(ErrorKind::InvalidInput, "private sentinel"),
+            "invalid-input",
+            None,
+        ),
+        (
+            Error::new(ErrorKind::TimedOut, "private sentinel"),
+            "timed-out",
+            None,
+        ),
+        (
+            Error::from_raw_os_error(libc::ECONNREFUSED),
+            "connection-refused",
+            Some(libc::ECONNREFUSED),
+        ),
+    ] {
+        diagnostic::clear();
+        diagnostic::record_connect(&target, &metadata, &Err(error));
+        let facts = diagnostic::take().unwrap();
+        assert_eq!(facts["connect"]["outcome"]["result"], "error");
+        assert_eq!(facts["connect"]["outcome"]["kind"], kind);
+        assert_eq!(facts["errno"], json!(errno));
+        let text = serde_json::to_string(&facts).unwrap();
+        assert!(!text.contains("private sentinel"));
+        assert!(!text.contains(fixture.0.to_str().unwrap()));
+        assert!(text.len() < 1024);
+    }
 }
 
 #[test]

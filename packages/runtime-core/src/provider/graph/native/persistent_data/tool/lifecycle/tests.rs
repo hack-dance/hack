@@ -92,19 +92,25 @@ impl Drop for Fixture {
 }
 #[derive(Default)]
 struct Fake {
+    lifetime: guest_tool::Lifetime,
     checks: usize,
     reads: usize,
     removals: usize,
+    invocations: usize,
     fail_check: Option<usize>,
     bad_identity: bool,
     inspect_error: bool,
     remove_error: bool,
     malformed_remove: bool,
+    invoke_error: bool,
     removed: bool,
     during_inspect: Option<Box<dyn FnOnce()>>,
     during_check: Option<(usize, Box<dyn FnOnce()>)>,
 }
 impl Port for Fake {
+    fn lifetime(&self) -> &guest_tool::Lifetime {
+        &self.lifetime
+    }
     fn check(&mut self, guest: &GuestIdentity) -> Result<(), CandidateError> {
         if guest.owner != OWNER || guest.boot_id != BOOT || guest.storage.inode != 21 {
             return Err(refused());
@@ -147,16 +153,27 @@ impl Port for Fake {
     }
     fn remove(&mut self, _: &Installed) -> Result<String, CandidateError> {
         self.removals += 1;
-        self.removed = true;
         if self.remove_error {
             return Err(refused());
         }
+        self.removed = true;
         Ok(if self.malformed_remove {
             "retired\n"
         } else {
             "0:1:0:2\nretired\n"
         }
         .into())
+    }
+    fn invoke(&mut self, _: &Installed, input: &str, seed: bool) -> Result<String, CandidateError> {
+        self.invocations += 1;
+        assert_eq!(
+            helper::Request::parse(input.as_bytes()).unwrap().is_seed(),
+            seed
+        );
+        if self.invoke_error {
+            return Err(refused());
+        }
+        Ok(if seed { "seeded\n" } else { "verified\n" }.into())
     }
 }
 #[test]
@@ -405,4 +422,101 @@ fn changed_guest_disk_and_second_issued_handle_cannot_authorize_retirement() {
     retire_with(first, &f.candidate, &mut port).unwrap();
     assert!(retire_with(second, &f.candidate, &mut port).is_err());
     assert_eq!(port.removals, 1);
+}
+
+fn request(seed: bool) -> helper::Request {
+    helper::Request::bound(
+        &format!("hkp-{}-{}-database", "a".repeat(64), "9".repeat(32)),
+        seed,
+        helper::Root {
+            device: 0,
+            inode: 42,
+            uid: 0,
+            gid: 0,
+        },
+        &format!("user.hack.storage.{}", "d".repeat(64)),
+        &"e".repeat(64),
+    )
+    .unwrap()
+}
+#[test]
+fn last_invoke_callback_cannot_change_saved_admission_before_read_or_seed() {
+    for seed in [false, true] {
+        let f = Fixture::new();
+        let mut port = Fake::default();
+        let installed = f.issued(&mut port);
+        invoke(&installed, &mut port, request(seed)).unwrap();
+        assert_eq!(port.invocations, 1);
+        let pending = f.root.join("state.pending");
+        port.during_check = Some((
+            port.checks + 4,
+            Box::new(move || fs::write(pending, b"uncertain").unwrap()),
+        ));
+        assert!(invoke(&installed, &mut port, request(seed)).is_err());
+        assert_eq!(port.invocations, 1);
+    }
+}
+#[test]
+fn ambiguous_retirement_without_guest_deletion_revokes_every_preissued_handle() {
+    let f = Fixture::new();
+    let mut port = Fake::default();
+    let first = f.issued(&mut port);
+    let second = f.issued(&mut port);
+    f.withdraw();
+    port.remove_error = true;
+    assert!(retire_with(first, &f.candidate, &mut port).is_err());
+    assert!(!port.removed); // exact reviewer counterexample: files never disappeared
+    let reads = port.reads;
+    assert!(retire_with(second, &f.candidate, &mut port).is_err());
+    assert_eq!((port.reads, port.removals), (reads, 1));
+}
+#[test]
+fn foreign_provider_lease_and_unknown_invocation_never_gain_late_admission() {
+    let f = Fixture::new();
+    let mut original = Fake::default();
+    let installed = f.issued(&mut original);
+    let mut foreign = Fake::default();
+    assert!(verify(&installed, &mut foreign).is_err());
+    assert!(invoke(&installed, &mut foreign, request(true)).is_err());
+    assert_eq!(
+        (foreign.reads, foreign.invocations, foreign.removals),
+        (0, 0, 0)
+    );
+    original.invoke_error = true;
+    let reads = original.reads;
+    assert!(invoke(&installed, &mut original, request(true)).is_err());
+    assert_eq!((original.reads, original.invocations), (reads + 1, 1));
+    assert!(verify(&installed, &mut original).is_err());
+    assert_eq!(original.reads, reads + 1);
+    f.withdraw();
+    assert!(retire_with(installed, &f.candidate, &mut foreign).is_err());
+    assert_eq!((foreign.reads, foreign.removals), (0, 0));
+}
+
+#[test]
+fn active_transport_use_prevents_retirement_and_capacity_never_evicts_revocation() {
+    let f = Fixture::new();
+    let mut port = Fake::default();
+    let first = f.issued(&mut port);
+    let second = f.issued(&mut port);
+    let active = first.lifetime.enter(port.lifetime(), RUN).unwrap();
+    f.withdraw();
+    assert!(retire_with(first, &f.candidate, &mut port).is_err());
+    assert_eq!(port.removals, 0);
+    active.complete();
+    retire_with(second, &f.candidate, &mut port).unwrap();
+    assert_eq!(port.removals, 1);
+
+    let lifetime = guest_tool::Lifetime::default();
+    for run in 0..64 {
+        lifetime.retire(&lifetime, &format!("{run:032x}")).unwrap();
+    }
+    let next = format!("{:032x}", 64);
+    assert!(lifetime.retire(&lifetime, &next).is_err());
+    assert!(lifetime.enter(&lifetime, &next).is_err());
+    assert!(lifetime.check(&lifetime, &format!("{:032x}", 0)).is_err());
+    let uncertain = guest_tool::Lifetime::default();
+    drop(uncertain.enter(&uncertain, RUN).unwrap());
+    assert!(uncertain.check(&uncertain, RUN).is_err());
+    assert!(uncertain.retire(&uncertain, RUN).is_err());
 }

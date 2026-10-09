@@ -9,6 +9,11 @@ use std::{
     path::{Path, PathBuf},
 };
 
+#[cfg(feature = "native-config-plan")]
+mod lifetime;
+#[cfg(feature = "native-config-plan")]
+pub(in crate::provider) use lifetime::Lifetime;
+
 pub(in crate::provider) struct Artifact {
     path: PathBuf,
     file: File,

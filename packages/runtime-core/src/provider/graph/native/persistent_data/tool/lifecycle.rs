@@ -2,6 +2,7 @@
 use super::*;
 use crate::provider::{graph::storage_inventory, state};
 use std::{fs, os::unix::fs::MetadataExt};
+use zeroize::{Zeroize, Zeroizing};
 
 pub(in crate::provider::graph::native) struct ReopenOptions<'a, 'guest> {
     pub candidate: &'a Candidate,
@@ -41,8 +42,15 @@ pub(in crate::provider::graph::native) fn reopen(
 // Private ports exercise the same sequencing as the original OwnedGuest transport.
 // Neither a decoded reference nor a caller-provided callback can issue a handle.
 pub(super) trait Port {
+    fn lifetime(&self) -> &guest_tool::Lifetime;
     fn check(&mut self, guest: &GuestIdentity) -> Result<(), CandidateError>;
     fn inspect(&mut self, installed: &Installed) -> Result<String, CandidateError>;
+    fn invoke(
+        &mut self,
+        installed: &Installed,
+        input: &str,
+        seed: bool,
+    ) -> Result<String, CandidateError>;
     fn remove(&mut self, installed: &Installed) -> Result<String, CandidateError>;
 }
 pub(super) struct Live<'a, 'guest> {
@@ -51,6 +59,9 @@ pub(super) struct Live<'a, 'guest> {
     pub fresh: &'a dyn Fn() -> Result<(), CandidateError>,
 }
 impl Port for Live<'_, '_> {
+    fn lifetime(&self) -> &guest_tool::Lifetime {
+        self.engine.tool_lifetime()
+    }
     fn check(&mut self, guest: &GuestIdentity) -> Result<(), CandidateError> {
         check(self.engine, self.deadline, self.fresh)?;
         if self
@@ -102,6 +113,29 @@ impl Port for Live<'_, '_> {
             )
             .map_err(|_| refused())
     }
+    fn invoke(
+        &mut self,
+        installed: &Installed,
+        input: &str,
+        seed: bool,
+    ) -> Result<String, CandidateError> {
+        self.engine
+            .guest()
+            .execute_input_until(
+                INVOKE,
+                &[
+                    &installed.run,
+                    &installed.owner,
+                    &installed.reference.artifact,
+                    &installed.reference.bytes.to_string(),
+                    &installed.identity_string()?,
+                ],
+                Some(input),
+                self.deadline,
+                seed,
+            )
+            .map_err(|_| refused())
+    }
 }
 fn reopen_with(
     candidate: &Candidate,
@@ -148,21 +182,58 @@ fn reopen_with(
         guest,
         reference,
         saved,
+        lifetime: port.lifetime().clone(),
     };
     verify(&installed, port)?;
     Ok(installed)
 }
 pub(super) fn verify(installed: &Installed, port: &mut impl Port) -> Result<(), CandidateError> {
+    let admitted = installed.lifetime.enter(port.lifetime(), &installed.run)?;
     installed.reference.validate()?;
     installed.saved.verify()?;
     observe(installed, port)?;
     installed.saved.verify()?;
     port.check(&installed.guest)?;
-    installed.saved.verify()
+    installed.saved.verify()?;
+    installed.lifetime.check(port.lifetime(), &installed.run)?;
+    admitted.complete();
+    Ok(())
+}
+pub(super) fn invoke(
+    installed: &Installed,
+    port: &mut impl Port,
+    request: helper::Request,
+) -> Result<helper::Observation, CandidateError> {
+    let admitted = installed.lifetime.enter(port.lifetime(), &installed.run)?;
+    verify(installed, port)?;
+    let seed = request.is_seed();
+    let mut input = Zeroizing::new(String::from_utf8(request.encode()).map_err(|_| refused())?);
+    port.check(&installed.guest)?;
+    // This is the final caller callback before transport, including a seed.
+    installed.saved.verify()?;
+    installed.lifetime.check(port.lifetime(), &installed.run)?;
+    let result = port.invoke(installed, &input, seed);
+    input.zeroize();
+    let output = result.map_err(|_| {
+        installed.lifetime.uncertain(&installed.run);
+        refused()
+    })?;
+    port.check(&installed.guest)?;
+    verify(installed, port)?;
+    let observation = helper::Observation::decode(output.as_bytes()).map_err(|_| {
+        installed.lifetime.uncertain(&installed.run);
+        refused()
+    })?;
+    admitted.complete();
+    Ok(observation)
 }
 fn observe(installed: &Installed, port: &mut impl Port) -> Result<(), CandidateError> {
+    installed.lifetime.check(port.lifetime(), &installed.run)?;
     port.check(&installed.guest)?;
-    let output = port.inspect(installed)?;
+    let output = port.inspect(installed).map_err(|_| {
+        installed.lifetime.uncertain(&installed.run);
+        refused()
+    })?;
     port.check(&installed.guest)?;
     if identity(&output)? != identity(&format!("{}\n", installed.identity_string()?))? {
         return Err(refused());
@@ -203,12 +274,17 @@ fn retire_with(
         return Err(refused());
     }
     let inventory = Inventory::capture(candidate, &installed)?;
-    observe(&installed, port)?;
+    {
+        let admitted = installed.lifetime.enter(port.lifetime(), &installed.run)?;
+        observe(&installed, port)?;
+        admitted.complete();
+    }
     inventory.verify(candidate, &installed)?;
     port.check(&installed.guest)?;
     // A caller freshness callback cannot publish a new dependency after the last
     // inventory read. The live remove independently rechecks OwnedGuest's lease.
     inventory.verify(candidate, &installed)?;
+    installed.lifetime.retire(port.lifetime(), &installed.run)?;
     let reply = port.remove(&installed)?; // unknown result consumes authority; no follow-up
     if reply != format!("{}\nretired\n", installed.identity_string()?) {
         return Err(refused());

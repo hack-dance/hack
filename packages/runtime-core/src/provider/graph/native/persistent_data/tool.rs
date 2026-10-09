@@ -11,7 +11,6 @@ use crate::{
 };
 use base64::Engine as _;
 use std::{path::Path, time::Instant};
-use zeroize::Zeroize;
 
 pub(in crate::provider::graph::native) mod lifecycle;
 mod saved;
@@ -61,6 +60,7 @@ pub(in crate::provider::graph::native) struct Installed {
     guest: GuestIdentity,
     reference: Reference,
     saved: saved::Saved,
+    lifetime: guest_tool::Lifetime,
 }
 fn refused() -> CandidateError {
     super::enrollment::refused()
@@ -137,6 +137,9 @@ pub(in crate::provider::graph::native) fn install(
     {
         return Err(refused());
     }
+    engine
+        .tool_lifetime()
+        .check(engine.tool_lifetime(), receipt.review.scope().run)?;
     check(engine, deadline, fresh)?;
     let guest = engine
         .guest()
@@ -297,6 +300,7 @@ pub(in crate::provider::graph::native) fn install(
         guest,
         reference,
         saved,
+        lifetime: engine.tool_lifetime().clone(),
     };
     installed.verify(engine, deadline, fresh)?;
     Ok(installed)
@@ -332,28 +336,15 @@ impl Installed {
         deadline: Instant,
         fresh: &dyn Fn() -> Result<(), CandidateError>,
     ) -> Result<helper::Observation, CandidateError> {
-        self.verify(engine, deadline, fresh)?;
-        let seed = request.is_seed();
-        let mut input = String::from_utf8(request.encode()).map_err(|_| refused())?;
-        check(engine, deadline, fresh)?;
-        let result = engine.guest().execute_input_until(
-            INVOKE,
-            &[
-                &self.run,
-                &self.owner,
-                &self.reference.artifact,
-                &self.reference.bytes.to_string(),
-                &self.identity_string()?,
-            ],
-            Some(&input),
-            deadline,
-            seed,
-        );
-        input.zeroize();
-        check(engine, deadline, fresh)?;
-        let output = result.map_err(|_| refused())?;
-        self.verify(engine, deadline, fresh)?;
-        helper::Observation::decode(output.as_bytes()).map_err(|_| refused())
+        lifecycle::invoke(
+            self,
+            &mut lifecycle::Live {
+                engine,
+                deadline,
+                fresh,
+            },
+            request,
+        )
     }
 }
 const INSPECT: &str = r#"

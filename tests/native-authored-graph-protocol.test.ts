@@ -99,6 +99,10 @@ function sourceReceipt() {
 
 function topologyReceipt() {
   const old = receipt();
+  // Rust Resource uses skip_serializing_if for false, so an internal bridge
+  // has no outbound field on the actual foreground-ready or journal wire.
+  const { outbound: _legacyOutbound, ...internalNetwork } =
+    old.resources["network:default"];
   return {
     ...old,
     version: 5,
@@ -110,9 +114,8 @@ function topologyReceipt() {
     },
     resources: {
       "network:inside": {
-        ...old.resources["network:default"],
+        ...internalNetwork,
         key: "inside",
-        outbound: false,
       },
       "network:outbound": {
         ...old.resources["network:default"],
@@ -145,6 +148,21 @@ test("two-bridge v5 topology binds exact policies, selected attachments and alia
     )
   ).toEqual(admitted);
   expect(admitted.resources["network:inside"]?.outbound).toBe(false);
+  expect(Object.hasOwn(raw.resources["network:inside"], "outbound")).toBe(
+    false
+  );
+  expect(
+    parseNativeAuthoredReceipt({
+      ...raw,
+      resources: {
+        ...raw.resources,
+        "network:inside": {
+          ...raw.resources["network:inside"],
+          outbound: false,
+        },
+      },
+    }).resources["network:inside"]?.outbound
+  ).toBe(false);
   expect(admitted.resources["container:a.peer"]?.networks).toEqual([
     "inside",
     "outbound",
@@ -183,6 +201,36 @@ test("two-bridge v5 topology binds exact policies, selected attachments and alia
       ...raw,
       resources: {
         ...raw.resources,
+        "network:inside": {
+          ...raw.resources["network:inside"],
+          outbound: true,
+        },
+      },
+    },
+    {
+      ...raw,
+      resources: {
+        ...raw.resources,
+        "network:inside": {
+          ...raw.resources["network:inside"],
+          outbound: null,
+        },
+      },
+    },
+    {
+      ...raw,
+      resources: {
+        ...raw.resources,
+        "network:inside": {
+          ...raw.resources["network:inside"],
+          outbound: "false",
+        },
+      },
+    },
+    {
+      ...raw,
+      resources: {
+        ...raw.resources,
         "network:outbound": {
           ...raw.resources["network:outbound"],
           outbound: false,
@@ -200,6 +248,14 @@ test("two-bridge v5 topology binds exact policies, selected attachments and alia
     nativeAuthoredReceiptBinding(parseNativeAuthoredReceipt(changed))
   ).not.toBe(nativeAuthoredReceiptBinding(admitted));
   expect(parseNativeAuthoredReceipt(receipt()).version).toBe(2);
+  const oldNetworkMissing = receipt();
+  const { outbound: _omitted, ...networkWithoutOutbound } =
+    oldNetworkMissing.resources["network:default"];
+  oldNetworkMissing.resources["network:default"] =
+    networkWithoutOutbound as (typeof oldNetworkMissing.resources)["network:default"];
+  expect(() => parseNativeAuthoredReceipt(oldNetworkMissing)).toThrow(
+    "invalid or changed"
+  );
 });
 
 test("source-bearing native receipts bind host-mounted intent while retaining image-only v2", () => {

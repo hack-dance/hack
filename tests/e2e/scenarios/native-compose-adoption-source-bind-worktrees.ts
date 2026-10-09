@@ -1,7 +1,7 @@
 import { lstat, readFile, rename } from "node:fs/promises";
 import { join } from "node:path";
 import { isRecord } from "../../../src/lib/guards.ts";
-import { expect, type CliResult, type Scenario } from "../harness.ts";
+import { type CliResult, expect, type Scenario } from "../harness.ts";
 import { sourceBindFixtureDirectorySnapshot } from "./native-compose-adoption-source-bind-inputs.ts";
 import {
   bootstrapOriginal,

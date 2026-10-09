@@ -1,9 +1,9 @@
 import {
   afterEach,
   beforeEach,
+  test as boundedTest,
   expect,
   spyOn,
-  test as boundedTest,
 } from "bun:test";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";

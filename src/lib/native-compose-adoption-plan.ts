@@ -13,8 +13,8 @@ import {
   mapLegacyNativeStorageAdoption,
 } from "./native-config-import-plan.ts";
 import {
-  type LegacyComposeStorageIntent,
   type LegacyComposeSourceBindIntent,
+  type LegacyComposeStorageIntent,
   mapLegacyComposeSourceBindStorage,
   mapLegacyComposeStorage,
 } from "./native-config-import-storage.ts";

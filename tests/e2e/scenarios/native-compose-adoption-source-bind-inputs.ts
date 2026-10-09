@@ -5,8 +5,8 @@ import { isRecord } from "../../../src/lib/guards.ts";
 import type { CliResult } from "../harness.ts";
 import { adoptionDependencyReadAllowed } from "./native-compose-adoption-dependency-inputs.ts";
 import {
-  captureAdoptionDependencyFirstPrepare,
   type AdoptionDependencyFirstPrepare,
+  captureAdoptionDependencyFirstPrepare,
 } from "./native-compose-adoption-dependency-staged-read.ts";
 
 const ID = /^[a-f0-9]{64}$/;
@@ -109,7 +109,13 @@ export function sourceBindFixtureMounts(second: boolean): readonly unknown[] {
 export async function sourceBindFixtureDirectorySnapshot(
   root: string
 ): Promise<string> {
-  const result = [];
+  const result: {
+    readonly path: string;
+    readonly dev: number;
+    readonly ino: number;
+    readonly mode: number;
+    readonly uid: number;
+  }[] = [];
   for (const path of [".", ...SOURCE_BIND_FIXTURE_DIRS]) {
     const info = await lstat(join(root, path));
     if (

@@ -508,15 +508,14 @@ function mapSourceBindCandidate(
           access: bind.readOnly ? "read-only" : "read-write",
         };
       }
+      let target: unknown;
+      if (typeof raw === "string") {
+        target = raw.split(":")[1];
+      } else if (isRecord(raw)) {
+        target = raw.target;
+      }
       const named = storage?.intent.mounts.find(
-        (entry) =>
-          entry.service === name &&
-          entry.target ===
-            (typeof raw === "string"
-              ? raw.split(":")[1]
-              : isRecord(raw)
-                ? raw.target
-                : undefined)
+        (entry) => entry.service === name && entry.target === target
       );
       return named
         ? {

@@ -4,6 +4,7 @@ import { literalComposeArg } from "./native-config-import-argv.ts";
 
 const UNSAFE_PATH = /[\\\0\r\n:]/;
 const TARGET = /^\/[a-zA-Z0-9_./-]+$/;
+const TRAILING_SLASH = /\/$/;
 const PRIVATE_DIRECTORIES = [".git", ".hack/.internal", ".hack/.branch"];
 
 export type LegacyComposeSourceBind = {
@@ -80,7 +81,9 @@ export function mapLegacyComposeSourceBind(
   ) {
     return undefined;
   }
-  const source = posix.normalize(`.hack/${decoded}`).replace(/\/$/, "");
+  const source = posix
+    .normalize(`.hack/${decoded}`)
+    .replace(TRAILING_SLASH, "");
   if (
     source === ".." ||
     source.startsWith("../") ||

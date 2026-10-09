@@ -43,13 +43,13 @@ export async function previewLegacyComposeAdoption(input: {
   try {
     const owner = await acquireLegacyComposeAdoptionPreparationBinding(opts),
       acquired = await owner.resolvePreparationInputs(opts);
-    const mapped = (
-      acquired.sourceBindProof
-        ? mapLegacyNativeRetainedSourceBind
-        : acquired.build
-          ? mapLegacyNativeRetainedBasicBuild
-          : mapLegacyNativeStorageAdoption
-    )(acquired);
+    let mapper = mapLegacyNativeStorageAdoption;
+    if (acquired.sourceBindProof) {
+      mapper = mapLegacyNativeRetainedSourceBind;
+    } else if (acquired.build) {
+      mapper = mapLegacyNativeRetainedBasicBuild;
+    }
+    const mapped = mapper(acquired);
     fields = [
       ...mapped.report.fields,
       ...(acquired.projection?.localFields ?? []),

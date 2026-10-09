@@ -236,6 +236,7 @@ test("the emitted read allowlist admits the actual shipping v12 preparation quer
     ) {
       throw new Error("Synthetic generation missing");
     }
+    const generationId = receipt.prepared.id;
     const commands = await h.commands();
     const inspect = commands.filter(
       (args) =>
@@ -256,7 +257,7 @@ test("the emitted read allowlist admits the actual shipping v12 preparation quer
           containerIds: [ID],
           networkId: OTHER,
           volumeName: "fixture_data",
-          generationId: receipt.prepared.id,
+          generationId,
         })
       )
     ).toBe(true);

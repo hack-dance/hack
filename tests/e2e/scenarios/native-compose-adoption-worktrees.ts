@@ -75,10 +75,10 @@ import {
   assertSourceBindFixtureHostBytes,
   prepareSourceBindFixtureSources,
   SOURCE_BIND_FIXTURE_INSPECT_FORMAT,
+  type SourceBindFixtureInterruption,
   sourceBindFixtureAccessScript,
   sourceBindFixtureCli,
   sourceBindFixtureDirectorySnapshot,
-  type SourceBindFixtureInterruption,
   sourceBindFixtureMountObservation,
   sourceBindFixtureMounts,
 } from "./native-compose-adoption-source-bind-inputs.ts";

@@ -20,15 +20,14 @@ import {
   planLegacyComposeSourceBindAdoption,
 } from "./native-compose-adoption-plan.ts";
 import {
-  acquireLegacyComposeSourceBind,
-  type LegacyComposeSourceBindProof,
-} from "./native-compose-adoption-source-bind.ts";
-import type { LegacyComposeSourceBindIntent } from "./native-config-import-storage.ts";
-import {
   hasLegacyComposeGeneratedSources,
   LegacyComposeAdoptionProjection,
 } from "./native-compose-adoption-projection.ts";
 import { legacyComposeRetainedPlan } from "./native-compose-adoption-readiness.ts";
+import {
+  acquireLegacyComposeSourceBind,
+  type LegacyComposeSourceBindProof,
+} from "./native-compose-adoption-source-bind.ts";
 import {
   createNativeComposeProbe,
   NativeComposeOwnershipError,
@@ -41,6 +40,7 @@ import {
   freezeImportValue,
   mapLegacyNativeStorageAdoption,
 } from "./native-config-import-plan.ts";
+import type { LegacyComposeSourceBindIntent } from "./native-config-import-storage.ts";
 
 const ID = /^[a-f0-9]{64}$/;
 const NAME = /^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,254}$/;
@@ -243,20 +243,16 @@ async function inspect(opts: {
   readonly sourceBinds?: boolean;
 }) {
   const rows: Record<string, unknown>[] = [];
+  let format = formats[opts.kind].inspect;
+  if (opts.kind === "container" && opts.sourceBinds) {
+    format = SOURCE_BIND_CONTAINER_FORMAT;
+  } else if (opts.kind === "container" && opts.ownedNetwork) {
+    format = CUSTOM_CONTAINER_NETWORK_FORMAT;
+  }
   // One name/ID per request gives a fixed argv bound; cumulative I/O/time is shared.
   for (const resource of opts.resources) {
     const output = lines(
-      await opts.probe([
-        opts.kind,
-        "inspect",
-        "--format",
-        opts.kind === "container" && opts.sourceBinds
-          ? SOURCE_BIND_CONTAINER_FORMAT
-          : opts.kind === "container" && opts.ownedNetwork
-            ? CUSTOM_CONTAINER_NETWORK_FORMAT
-            : formats[opts.kind].inspect,
-        resource.id,
-      ])
+      await opts.probe([opts.kind, "inspect", "--format", format, resource.id])
     );
     requireValue(output.length === 1);
     const row = output[0];
@@ -890,8 +886,11 @@ async function inspectResources(
   requireValue(single);
   if (sourceBinds) {
     requireValue(
-      !opts.composeFiles &&
-        !(opts.intent.ownedNetwork || opts.intent.ownedNetworks)
+      !(
+        opts.composeFiles ||
+        opts.intent.ownedNetwork ||
+        opts.intent.ownedNetworks
+      )
     );
     return {
       ...common,
@@ -1050,11 +1049,12 @@ async function acquireBinding(
     const sources =
       purpose === "source-bind" ||
       (purpose === "preparation" && !ordinary.intent && !basic);
-    const planned = sources
-      ? planLegacyComposeSourceBindAdoption(source)
-      : basic && basicPlan
-        ? basicPlan
-        : ordinary;
+    let planned = ordinary;
+    if (sources) {
+      planned = planLegacyComposeSourceBindAdoption(source);
+    } else if (basic && basicPlan) {
+      planned = basicPlan;
+    }
     const intent = planned.intent;
     if (!intent) {
       refuse("E_LEGACY_COMPOSE_BINDING_UNSUPPORTED");

@@ -11,12 +11,12 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { planLegacyComposeSourceBindAdoption } from "../src/lib/native-compose-adoption-plan.ts";
+import * as projection from "../src/lib/native-compose-adoption-projection.ts";
 import {
   acquireLegacyComposeSourceBind,
   holdSavedLegacyComposeSourceBind,
 } from "../src/lib/native-compose-adoption-source-bind.ts";
-import { planLegacyComposeSourceBindAdoption } from "../src/lib/native-compose-adoption-plan.ts";
-import * as projection from "../src/lib/native-compose-adoption-projection.ts";
 import * as privateState from "../src/lib/native-compose-private-state.ts";
 import { mapLegacyComposeSourceBind } from "../src/lib/native-config-import-bind.ts";
 import { acquireLegacyAdoptionSourceInputs } from "../src/lib/native-config-import-inputs.ts";

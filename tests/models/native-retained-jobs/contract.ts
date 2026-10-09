@@ -1,6 +1,6 @@
 /**
  * Offline draft only. This module is not a production receipt codec, writer or
- * mutation capability. Version 7 has no registered production consumer.
+ * mutation capability. Production authority lives in the generation owner.
  */
 const ID = /^[a-f0-9]{64}$/;
 const NAME = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;

@@ -149,6 +149,14 @@ function mappingFields(
   };
 }
 
+type NativeImportPurpose =
+  | "preview"
+  | "adoption-baseline"
+  | "completed-job-adoption"
+  | "storage-adoption"
+  | "retained-file-baseline"
+  | "retained-file-storage";
+
 /**
  * Closed, pure conversion. Every raw field starts refused until explicitly mapped.
  * Completeness here describes mapping coverage; the preview owner separately requires
@@ -157,12 +165,7 @@ function mappingFields(
 function mapLegacyNativeInput(opts: {
   readonly configText: string;
   readonly composeText: string;
-  readonly purpose:
-    | "preview"
-    | "adoption-baseline"
-    | "storage-adoption"
-    | "retained-file-baseline"
-    | "retained-file-storage";
+  readonly purpose: NativeImportPurpose;
 }): NativeImportPlan {
   const config = parseImportDocument({
     text: opts.configText,
@@ -208,7 +211,9 @@ function mapLegacyNativeInput(opts: {
     refuse,
     buildPreview: opts.purpose === "preview",
     jobPreview:
-      opts.purpose === "preview" || opts.purpose === "storage-adoption",
+      opts.purpose === "preview" ||
+      opts.purpose === "storage-adoption" ||
+      opts.purpose === "completed-job-adoption",
   });
   mapOwnedNetwork({
     project: name,
@@ -261,12 +266,7 @@ function mapOwnedNetwork(
   opts: Pick<MappingContext, "candidate" | "mark" | "refuse"> & {
     readonly project: unknown;
     readonly compose: Record<string, unknown>;
-    readonly purpose:
-      | "preview"
-      | "adoption-baseline"
-      | "storage-adoption"
-      | "retained-file-baseline"
-      | "retained-file-storage";
+    readonly purpose: NativeImportPurpose;
   }
 ): void {
   if (typeof opts.project !== "string") {
@@ -385,6 +385,14 @@ export function mapLegacyNativeAdoptionBaseline(opts: {
   readonly composeText: string;
 }): NativeImportPlan {
   return mapLegacyNativeInput({ ...opts, purpose: "adoption-baseline" });
+}
+
+/** Pure v7 baseline used only after the retained owner has selected its closed static job family. */
+export function mapLegacyNativeCompletedJobAdoptionBaseline(opts: {
+  readonly configText: string;
+  readonly composeText: string;
+}): NativeImportPlan {
+  return mapLegacyNativeInput({ ...opts, purpose: "completed-job-adoption" });
 }
 
 /** Private static candidate with the same closed mappings plus strictly qualified local named storage. No ownership grant. */

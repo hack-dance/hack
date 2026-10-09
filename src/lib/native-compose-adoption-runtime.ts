@@ -1,7 +1,18 @@
 import { isRecord } from "./guards.ts";
 import type { LegacyComposeVerifiedBinding } from "./native-compose-adoption-binding.ts";
+import {
+  legacyComposeOrderedError,
+  legacyComposeOrderedRefusal,
+} from "./native-compose-adoption-diagnostics.ts";
+import {
+  type LegacyComposeJobState,
+  legacyComposeJobStates,
+} from "./native-compose-adoption-jobs.ts";
 import type { LegacyComposeReadinessState } from "./native-compose-adoption-readiness.ts";
-import { createNativeComposeProbe } from "./native-compose-ownership.ts";
+import {
+  createNativeComposeProbe,
+  nativeComposeProbeFailure,
+} from "./native-compose-ownership.ts";
 
 const ID = /^[a-f0-9]{64}$/;
 const HASH_LINE = /^([a-z0-9]+(?:-[a-z0-9]+)*) ([a-f0-9]{64})$/;
@@ -245,4 +256,62 @@ export async function inspectLegacyComposeReadiness(opts: {
     );
   }
   return Object.freeze(result);
+}
+
+/** Fresh v7 job/service facts from exact original IDs. The strict codec closes the whole snapshot. */
+export async function inspectLegacyComposeJobStates(opts: {
+  readonly binding: LegacyComposeVerifiedBinding;
+  readonly signal?: AbortSignal;
+  readonly timeoutMs?: number;
+}): Promise<readonly LegacyComposeJobState[]> {
+  try {
+    const probe = createNativeComposeProbe(opts);
+    const result: unknown[] = [];
+    for (const container of opts.binding.containers) {
+      if (!ID.test(container.id)) {
+        throw legacyComposeOrderedError({
+          diagnostic: { stage: "ordered-observation", reason: "membership" },
+          message:
+            "Legacy adoption runtime inspection refused; values omitted.",
+        });
+      }
+      const output = await probe([
+        "container",
+        "inspect",
+        "--format",
+        '{"id":{{json .Id}},"running":{{json .State.Running}},"paused":{{json .State.Paused}},"status":{{json .State.Status}},"health":{{with (index .State "Health")}}{{json .Status}}{{else}}""{{end}},"exitCode":{{json .State.ExitCode}},"startedAt":{{json .State.StartedAt}},"finishedAt":{{json .State.FinishedAt}},"restartPolicy":{{json .HostConfig.RestartPolicy.Name}},"maximumRetryCount":{{json .HostConfig.RestartPolicy.MaximumRetryCount}}}',
+        container.id,
+      ]);
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(output);
+      } catch {
+        throw legacyComposeOrderedError({
+          diagnostic: { stage: "ordered-observation", reason: "probe-json" },
+          message:
+            "Legacy adoption runtime inspection refused; values omitted.",
+        });
+      }
+      if (!isRecord(parsed)) {
+        throw legacyComposeOrderedError({
+          diagnostic: { stage: "ordered-observation", reason: "probe-row" },
+          message:
+            "Legacy adoption runtime inspection refused; values omitted.",
+        });
+      }
+      result.push(parsed);
+    }
+    return legacyComposeJobStates({ binding: opts.binding, observed: result });
+  } catch (error: unknown) {
+    if (legacyComposeOrderedRefusal(error)) {
+      throw error;
+    }
+    throw legacyComposeOrderedError({
+      diagnostic: {
+        stage: "ordered-observation",
+        reason: `probe-${nativeComposeProbeFailure(error) ?? "unknown"}`,
+      },
+      message: "Legacy adoption runtime inspection refused; values omitted.",
+    });
+  }
 }

@@ -539,6 +539,18 @@ test("shared receipt decoder preserves closed file8 and plural bridge11 versions
       ).adoption_receipt_version
     ).toBe(version);
   }
+  for (const version of [7, 8] as const) {
+    const prepared = {
+      id: "b".repeat(32),
+      manifest: { dev: 1, ino: 5, hash: "c".repeat(64) },
+    };
+    expect(
+      parseLegacyComposeAdoptionReceipt(
+        { ...value, adoption_receipt_version: version, prepared },
+        checkout
+      ).adoption_receipt_version
+    ).toBe(version);
+  }
   for (const version of [2, 7, 9, 12, null, "8", "11"]) {
     expect(() =>
       parseLegacyComposeAdoptionReceipt(
@@ -553,4 +565,54 @@ test("shared receipt decoder preserves closed file8 and plural bridge11 versions
       checkout
     )
   ).toThrow();
+});
+
+test("current job7 and file8 purposes remain separate before any material or engine acquisition", () => {
+  const compose = {
+    name: "fixture",
+    services: {
+      initialize: { image: "fixture:1", command: ["true"], restart: "no" },
+      app: {
+        image: "fixture:1",
+        depends_on: {
+          initialize: { condition: "service_completed_successfully" },
+        },
+        volumes: ["data:/data"],
+      },
+    },
+    volumes: { data: { name: "fixture_data" } },
+  };
+  const source = {
+    configText: '{"name":"fixture"}',
+    composeText: JSON.stringify(compose),
+  };
+  const ordinary = planLegacyComposeAdoption(source);
+  expect(ordinary.report.supported).toBe(true);
+  expect(ordinary.intent).toBeDefined();
+  for (const mapped of [
+    mapLegacyNativeRetainedFileAdoptionBaseline(source),
+    mapLegacyNativeRetainedFileStorage(source),
+  ]) {
+    expect(mapped.report.complete).toBe(false);
+    expect(mapped.candidate).toBeUndefined();
+  }
+  const mixed = {
+    ...source,
+    composeText: JSON.stringify({
+      ...compose,
+      configs: { settings: { file: "../material/config" } },
+      services: {
+        ...compose.services,
+        app: { ...compose.services.app, configs: ["settings"] },
+      },
+    }),
+  };
+  for (const plan of [
+    planLegacyComposeAdoption(mixed),
+    planLegacyComposeRetainedFileAdoption(mixed),
+  ]) {
+    expect(plan.report.supported).toBe(false);
+    expect(plan.intent).toBeUndefined();
+    expect(JSON.stringify(plan)).not.toContain("material/config");
+  }
 });

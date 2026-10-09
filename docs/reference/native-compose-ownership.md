@@ -78,6 +78,15 @@ the in-flight probe's owned subprocess group once, including descendants retaini
 its pipes. A completed child with closed streams is never signalled by cleanup;
 its former process-group ID is no longer an owned target.
 
+The probe owner also issues private, closed failure metadata for admission or
+spawn, nonzero child exit, timeout, cancellation, I/O budget, capture and UTF-8
+decoding. Only the exact issued error carries this observation; copied errors,
+prototypes and arbitrary error properties cannot supply it. Defined probe error
+codes, budgets and cleanup obligations remain unchanged; internal capture and
+UTF-8 errors now normalize to the fixed `E_NATIVE_COMPOSE_PROBE` refusal. Ordered retained-job
+commands translate this metadata and their separate JSON/object boundaries into
+fixed redacted reasons; no argv, daemon output, IDs or exit values are retained.
+
 The closest regression suite is `tests/native-compose-ownership.test.ts`. Its
 isolated executable checks accepted resources, collisions, stale generations,
 inventory changes, redaction, and actual subprocess overflow/timeout/cancellation.

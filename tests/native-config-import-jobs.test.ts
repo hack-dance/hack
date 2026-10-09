@@ -8,6 +8,7 @@ import {
   legacyComposeOneShotMarker,
 } from "../src/lib/native-config-import-jobs.ts";
 import {
+  mapLegacyNativeAdoptionBaseline,
   mapLegacyNativeImport,
   mapLegacyNativeStorageAdoption,
 } from "../src/lib/native-config-import-plan.ts";
@@ -200,7 +201,7 @@ test("omitted job restart remains absent; empty image-default entrypoint/command
   });
 });
 
-test("job plus named-volume planning refuses before engine binding despite lossless symbolic conversion", () => {
+test("closed adoption baseline refuses jobs while the static v7 plan preserves them before effects", () => {
   const services = graph();
   const source = {
     name: "fixture",
@@ -217,10 +218,9 @@ test("job plus named-volume planning refuses before engine binding despite lossl
   const spawn = spyOn(Bun, "spawn");
   try {
     expect(mapLegacyNativeStorageAdoption(opts).report.complete).toBe(true);
-    const planned = planLegacyComposeAdoption(opts);
-    expect(planned.report.supported).toBe(false);
-    expect(planned.intent).toBeUndefined();
-    expect(planned.report.fields).toContainEqual(
+    const baseline = mapLegacyNativeAdoptionBaseline(opts);
+    expect(baseline.report.complete).toBe(false);
+    expect(baseline.report.fields).toContainEqual(
       expect.objectContaining({
         document: "compose",
         pointer: "/services/initialize",
@@ -228,6 +228,9 @@ test("job plus named-volume planning refuses before engine binding despite lossl
         code: "completed_job_adoption_unqualified",
       })
     );
+    const planned = planLegacyComposeAdoption(opts);
+    expect(planned.report.supported).toBe(true);
+    expect(planned.intent).toBeDefined();
     expect(JSON.stringify(planned)).not.toContain(CANARY);
     expect(spawn).not.toHaveBeenCalled();
   } finally {
@@ -639,12 +642,12 @@ test("parsed declarations do not acquire roles from Object.prototype getters", (
   expect(reads).toBe(0);
 });
 
-test("positive mapping does not activate retained-job adoption or change v5 meaning", () => {
+test("positive mapping selects the distinct job family rather than service-only v5", () => {
   const result = map(graph());
   expect(result.report.complete).toBe(true);
-  expect(() => legacyComposeRetainedPlan(result.candidate)).toThrow(
-    "retained dependency plan refused"
-  );
+  expect(legacyComposeRetainedPlan(result.candidate)).toMatchObject({
+    requiresV7: true,
+  });
 });
 
 test.skipIf(!BINARY)(

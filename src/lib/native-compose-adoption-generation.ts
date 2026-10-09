@@ -6,6 +6,7 @@ import { isRecord } from "./guards.ts";
 import {
   acquireLegacyComposeAdoptionPreparationBinding,
   inspectLegacyComposeAdoptionResources,
+  inspectLegacyComposeSourceBindResources,
   type LegacyComposeVerifiedBinding,
 } from "./native-compose-adoption-binding.ts";
 import { assertSavedLegacyComposeBuildSource } from "./native-compose-adoption-build.ts";
@@ -31,6 +32,7 @@ import {
 import {
   planLegacyComposeAdoption,
   planLegacyComposeRetainedBasicBuildAdoption,
+  planLegacyComposeSourceBindAdoption,
 } from "./native-compose-adoption-plan.ts";
 import { readSavedLegacyComposeAdoptionProjection } from "./native-compose-adoption-projection.ts";
 import {
@@ -55,6 +57,7 @@ import {
   inspectLegacyComposeReadiness,
   inspectLegacyComposeRuntimeConfig,
 } from "./native-compose-adoption-runtime.ts";
+import { holdSavedLegacyComposeSourceBind } from "./native-compose-adoption-source-bind.ts";
 import {
   createNativeComposePrivateMutationLock,
   type HeldDirectory,
@@ -81,6 +84,7 @@ import { parseImportDocument } from "./native-config-import-parser.ts";
 import {
   freezeImportValue,
   mapLegacyNativeRetainedBasicBuild,
+  mapLegacyNativeRetainedSourceBind,
   mapLegacyNativeStorageAdoption,
 } from "./native-config-import-plan.ts";
 import type { NativeProjectEnvMetadata } from "./project-env-config.ts";
@@ -100,7 +104,17 @@ const ROUTING = [
   "HACK_EXECUTION_MODE",
 ] as const;
 type SavedManifest = {
-  readonly adoption_generation_version: 1 | 3 | 4 | 5 | 6 | 7 | 9 | 10 | 11;
+  readonly adoption_generation_version:
+    | 1
+    | 3
+    | 4
+    | 5
+    | 6
+    | 7
+    | 9
+    | 10
+    | 11
+    | 12;
   readonly kind: typeof KIND;
   readonly projectRoot: string;
   readonly id: string;
@@ -108,6 +122,7 @@ type SavedManifest = {
   readonly runtimeConfig: unknown;
   readonly projectionProof?: unknown;
   readonly buildProof?: { readonly source: unknown; readonly images: unknown };
+  readonly sourceBindProof?: unknown;
   readonly sourceFiles: {
     readonly config: NativeConfigImportSourceIdentity;
     readonly compose: NativeConfigImportSourceIdentity;
@@ -129,6 +144,7 @@ type PrivateInputs = {
   readonly projectionMetadata?: NativeProjectEnvMetadata;
   /** Private version9 policy; never serialized into a compiler report or receipt label. */
   readonly retainedBuild?: true;
+  readonly retainedSourceBind?: true;
 };
 type MutationInputs = PrivateInputs & {
   /** Issued while the journal and mutation lock are held; valid only during this callback. */
@@ -241,6 +257,9 @@ function sourceFileIdentity(
   );
 }
 function manifestFieldKeys(value: Record<string, unknown>) {
+  if (value.adoption_generation_version === 12) {
+    return "adoption_generation_version,binding,files,id,kind,projectRoot,runtimeConfig,sourceBindProof,sourceFiles";
+  }
   if (value.adoption_generation_version === 9) {
     return "adoption_generation_version,binding,buildProof,files,id,kind,projectRoot,runtimeConfig,sourceFiles";
   }
@@ -259,6 +278,8 @@ function manifest(value: unknown, root: string, id: string): SavedManifest {
       isRecord(value) &&
       keys(value, manifestFieldKeys(value)) &&
       (value.adoption_generation_version === 1 ||
+        (value.adoption_generation_version === 12 &&
+          isRecord(value.sourceBindProof)) ||
         value.adoption_generation_version === 7 ||
         value.adoption_generation_version === 6 ||
         (value.adoption_generation_version === 9 &&
@@ -301,6 +322,9 @@ function manifest(value: unknown, root: string, id: string): SavedManifest {
     id,
     binding: value.binding,
     runtimeConfig: value.runtimeConfig,
+    ...(value.adoption_generation_version === 12
+      ? { sourceBindProof: value.sourceBindProof }
+      : {}),
     ...(value.adoption_generation_version === 9 && isRecord(value.buildProof)
       ? {
           buildProof: {
@@ -522,7 +546,11 @@ async function requireSelectedTopologyOwner(opts: {
         requiresV5)) ||
     (!plural &&
       (meta.binding.binding_version === 5 ||
-        meta.binding.binding_version === 6))
+        meta.binding.binding_version === 6)) ||
+    (meta.adoption_generation_version === 12) !==
+      (meta.binding.binding_version === 12) ||
+    (meta.adoption_generation_version === 12 &&
+      (meta.projectionProof !== undefined || custom || plural || requiresV5))
   ) {
     refuse();
   }
@@ -537,6 +565,8 @@ async function requireSelectedTopologyOwner(opts: {
     (state.adoption_receipt_version === 10) !== bridgeAndHealth ||
     (state.adoption_receipt_version === 9) !==
       (meta.adoption_generation_version === 9) ||
+    (state.adoption_receipt_version === 12) !==
+      (meta.adoption_generation_version === 12) ||
     JSON.stringify(state.prepared) !== JSON.stringify(selected)
   ) {
     refuse();
@@ -553,6 +583,9 @@ async function readInputs(
   await ctx.check();
   const generationRoot = join(ctx.generationsRoot, selected.id);
   const held = await holdDirectory(generationRoot, true);
+  let sourceBindLease:
+    | Awaited<ReturnType<typeof holdSavedLegacyComposeSourceBind>>
+    | undefined;
   try {
     const saved = await json(join(generationRoot, "manifest.json"));
     if (
@@ -575,17 +608,33 @@ async function readInputs(
       meta.files.candidate
     );
     const basic = meta.adoption_generation_version === 9;
+    const sourceBind = meta.adoption_generation_version === 12;
     const mapped = (
-      basic ? mapLegacyNativeRetainedBasicBuild : mapLegacyNativeStorageAdoption
+      sourceBind
+        ? mapLegacyNativeRetainedSourceBind
+        : basic
+          ? mapLegacyNativeRetainedBasicBuild
+          : mapLegacyNativeStorageAdoption
     )({ configText, composeText });
     const planned = (
-      basic
-        ? planLegacyComposeRetainedBasicBuildAdoption
-        : planLegacyComposeAdoption
+      sourceBind
+        ? planLegacyComposeSourceBindAdoption
+        : basic
+          ? planLegacyComposeRetainedBasicBuildAdoption
+          : planLegacyComposeAdoption
     )({ configText, composeText });
     const assertBuildSource = () =>
       assertRetainedBuildSource({ ctx, meta, configText, composeText });
     await assertBuildSource();
+    if (sourceBind) {
+      sourceBindLease = await holdSavedLegacyComposeSourceBind({
+        projectRoot: ctx.root,
+        configText,
+        composeText,
+        proof: meta.sourceBindProof,
+        signal: ctx.signal,
+      });
+    }
     const retainedPlan = legacyComposeRetainedPlan(JSON.parse(candidateText));
     await requireSelectedTopologyOwner({
       ctx,
@@ -637,13 +686,20 @@ async function readInputs(
         refuse();
       }
     }
-    const observed = await inspectLegacyComposeAdoptionResources({
+    const inspection = {
       root: ctx.root,
       intent: planned.intent,
       signal: ctx.signal,
       timeoutMs: ctx.timeoutMs,
       composeFiles: projection?.composeFiles,
-    });
+    };
+    const observed =
+      sourceBind && "sourceBinds" in planned.intent
+        ? await inspectLegacyComposeSourceBindResources({
+            ...inspection,
+            intent: planned.intent,
+          })
+        : await inspectLegacyComposeAdoptionResources(inspection);
     if (JSON.stringify(meta.binding) !== JSON.stringify(observed)) {
       refuse("E_LEGACY_ADOPTION_CHANGED");
     }
@@ -691,6 +747,7 @@ async function readInputs(
       await readSavedLegacyComposeAdoptionProjection(projectionOpts);
     }
     await assertBuildSource();
+    await sourceBindLease?.assertFresh();
     await ctx.check();
     freezeImportValue(observed);
     return {
@@ -702,9 +759,11 @@ async function readInputs(
         binding: observed,
         ...(projection ? { projectionMetadata: projection.metadata } : {}),
         ...(basic ? { retainedBuild: true as const } : {}),
+        ...(sourceBind ? { retainedSourceBind: true as const } : {}),
       }),
     };
   } finally {
+    await sourceBindLease?.close();
     await held.file.close();
   }
 }
@@ -776,6 +835,9 @@ function manifestVersion(
     readonly projectionProof: { readonly projection_version: number };
   }
 ): Manifest["adoption_generation_version"] {
+  if (binding.binding_version === 12) {
+    refuse("E_LEGACY_ADOPTION_UNSUPPORTED");
+  }
   if (binding.binding_version === 5) {
     if (requiresV5 || projection) {
       refuse("E_LEGACY_ADOPTION_UNSUPPORTED");
@@ -804,12 +866,16 @@ function manifestVersion(
 }
 function preparedManifestVersion(opts: {
   readonly build: boolean;
+  readonly sourceBind: boolean;
   readonly retainedPlan: LegacyComposeRetainedPlan;
   readonly binding: LegacyComposeVerifiedBinding;
   readonly projection?: {
     readonly projectionProof: { readonly projection_version: number };
   };
 }): Manifest["adoption_generation_version"] {
+  if (opts.sourceBind) {
+    return 12;
+  }
   if (opts.build) {
     return 9;
   }
@@ -848,9 +914,11 @@ async function prepare(
     refuse("E_LEGACY_ADOPTION_UNSUPPORTED");
   }
   const mapped = (
-    acquired.build
-      ? mapLegacyNativeRetainedBasicBuild
-      : mapLegacyNativeStorageAdoption
+    acquired.sourceBindProof
+      ? mapLegacyNativeRetainedSourceBind
+      : acquired.build
+        ? mapLegacyNativeRetainedBasicBuild
+        : mapLegacyNativeStorageAdoption
   )(acquired);
   if (!mapped.candidate) {
     refuse("E_LEGACY_ADOPTION_UNSUPPORTED");
@@ -860,6 +928,12 @@ async function prepare(
   );
   const retainedPlan = legacyComposeRetainedPlan(JSON.parse(candidateText));
   if (
+    (acquired.sourceBindProof &&
+      (acquired.binding.binding_version !== 12 ||
+        acquired.projection !== undefined ||
+        acquired.build ||
+        retainedPlan.requiresV5 ||
+        retainedPlan.requiresV7)) ||
     (acquired.build &&
       (acquired.binding.binding_version !== 1 ||
         acquired.projection !== undefined ||
@@ -911,6 +985,7 @@ async function prepare(
     const meta: Manifest = {
       adoption_generation_version: preparedManifestVersion({
         build: Boolean(acquired.build),
+        sourceBind: Boolean(acquired.sourceBindProof),
         retainedPlan,
         binding: acquired.binding,
         projection: acquired.projection,
@@ -920,6 +995,9 @@ async function prepare(
       id,
       binding: acquired.binding,
       ...(acquired.build ? { buildProof: acquired.build } : {}),
+      ...(acquired.sourceBindProof
+        ? { sourceBindProof: acquired.sourceBindProof }
+        : {}),
       ...(acquired.projection
         ? { projectionProof: acquired.projection.projectionProof }
         : {}),
@@ -1530,7 +1608,8 @@ function requireMutationDeadline(
 ) {
   if (
     (legacyComposeRetainedOrdered(plan) ||
-      captured.generation.report.adoption_generation_version === 9) &&
+      captured.generation.report.adoption_generation_version === 9 ||
+      captured.generation.report.adoption_generation_version === 12) &&
     (captured.deadline === undefined ||
       !Number.isFinite(captured.deadline) ||
       captured.deadline <= Date.now())
@@ -1590,7 +1669,8 @@ function preparedReceiptVersion(
     prior.adoption_receipt_version === 9 ||
     prior.adoption_receipt_version === 7 ||
     prior.adoption_receipt_version === 10 ||
-    prior.adoption_receipt_version === 11
+    prior.adoption_receipt_version === 11 ||
+    prior.adoption_receipt_version === 12
   ) {
     return "kind" in checkout.git ? 2 : 1;
   }
@@ -1664,7 +1744,7 @@ async function mutateRetainedContainers(
     refuse();
   }
   if (
-    ![5, 7, 9, 10].includes(
+    ![5, 7, 9, 10, 12].includes(
       captured.generation.report.adoption_generation_version
     )
   ) {
@@ -1752,7 +1832,8 @@ async function mutateRetainedContainersWithinBudget(
   );
   if (
     (legacyComposeRetainedOrdered(retainedPlan) ||
-      loaded.inputs.retainedBuild) &&
+      loaded.inputs.retainedBuild ||
+      loaded.inputs.retainedSourceBind) &&
     JSON.stringify([...selectedServices].sort()) !==
       JSON.stringify([...services].sort())
   ) {
@@ -1806,6 +1887,9 @@ async function mutateRetainedContainersWithinBudget(
       : {}),
     retainedPlan,
     ...(loaded.inputs.retainedBuild ? { retainedBuild: true as const } : {}),
+    ...(loaded.inputs.retainedSourceBind
+      ? { retainedSourceBind: true as const }
+      : {}),
     assertFresh: async () => {
       if (!callbackOpen) {
         refuse();

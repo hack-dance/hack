@@ -497,3 +497,40 @@ static fixture's exact ownership and daemon checks for cleanup.
 Use the same prerequisites and flags as above with
 `--only=native-compose-adoption-managed-worktrees`. Registration and synthetic
 fixture controls do not establish a live pass.
+
+## Retained directory binds
+
+Version 12 is a distinct retained source-directory owner. It accepts literal
+checkout-relative bind sources in the canonical `.hack/docker-compose.yml`,
+including existing checkout-root and gitignored directories. Long syntax must
+explicitly set `bind.create_host_path: false`. Short syntax is conditional on an
+existing directory and exact original mount; it does not establish general
+missing-path conversion parity. Access stays exactly read-only or read-write as
+authored and observed. No path is created, repaired, chmodded or added to Git.
+
+The private proof binds held canonical checkout, ancestor and source directory
+identities to the original container's exact engine Source, Target and RW fields.
+Symlinked, missing, replaced or unsafe directories refuse. Explicit `.git`,
+`.hack/.internal` and `.hack/.branch` sources remain unsupported. Binding the
+whole checkout does not require excluding those descendants or reading their
+contents. Directory content, timestamps and tracked status are not integrity
+claims: legitimate writes within a retained RW directory may continue.
+
+This first family supports static image services, the default bridge and optional
+original named storage. Generated/managed/local projection, build, jobs,
+dependency readiness, file grants and custom networks refuse, including inactive
+declarations. Version 12 keeps the previous receipt meanings intact and older
+owners fail closed. Saved checks remain key-free and private; reports contain
+only field provenance and counts.
+
+Publication, explicit preparation stop, original-ID start/stop, pending repair and
+rollback reuse the existing transaction. Every effect checks the held source and
+original resources under one finite operation deadline. No container recreation,
+new bind allocation or empty replacement storage is accepted. Directory
+replacement after a partial effect retains the pending receipt; returning the
+same original directory may permit explicit repair. Rechecks cannot atomically
+freeze external editors, directory writers or Docker.
+
+Source/model controls are separate from actual two-worktree RO/RW access, SQL,
+directory identity and resource-birth qualification. Full NC04 still requires
+the mixed corpus and the unsupported feature intersections.

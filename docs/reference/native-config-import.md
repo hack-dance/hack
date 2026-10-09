@@ -169,6 +169,22 @@ workload's `pull_policy: build` is a separate supported acquisition requirement.
 Combined `build` and `image` refuse because the native model requires exactly one
 source. Invalid builds cannot fall back to an authored image or a default policy.
 
+Long directory binds with explicit `bind.create_host_path: false` can map to
+native source mounts. Literal relative sources are resolved from the legacy
+`.hack/docker-compose.yml` directory, then expressed relative to the checkout;
+`../src` becomes `src`, and `..` becomes `.`. Read-only and read-write access are
+preserved. Absolute paths, checkout escapes, interpolation, propagation,
+consistency and SELinux options refuse. Explicit Git and managed-state source
+subdirectories also refuse; an existing whole-checkout bind remains possible.
+
+Short bind syntax has different missing-path behavior: Compose may create a host
+directory. It therefore remains refused by general conversion preview. The
+separate [retained directory owner](native-compose-adoption.md#retained-directory-binds)
+can qualify a short bind only after verifying that the exact authored directory
+already exists and is mounted by the original container with identical access.
+Neither path creates missing directories. Directory/file-grant and other retained
+feature intersections remain unqualified.
+
 This expands read-only preview only. The image-only retained baseline remains
 closed. A separate [proof-bearing basic-build owner](native-compose-adoption.md#retained-basic-builds)
 qualifies current included source and exact existing images before adoption; a

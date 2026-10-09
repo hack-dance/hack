@@ -113,7 +113,8 @@ async function adoptPrepared(
         }
         if (
           legacyComposeRetainedOrdered(input.retainedPlan) ||
-          input.retainedBuild
+          input.retainedBuild ||
+          input.retainedSourceBind
         ) {
           return await runLegacyComposeRetainedOperation({
             input,

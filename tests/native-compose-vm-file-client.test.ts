@@ -1,8 +1,14 @@
-import { expect, spyOn, test } from "bun:test";
+import { afterEach, expect, spyOn, test } from "bun:test";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { createNativeComposeVmFileClient } from "../src/lib/native-compose-vm-file-client.ts";
-import { VM_ENGINE, vmFileFixture } from "./helpers/native-compose-vm-files.ts";
+import {
+  cleanupVmFileFixtures,
+  VM_ENGINE,
+  vmFileFixture,
+} from "./helpers/native-compose-vm-files.ts";
+
+afterEach(cleanupVmFileFixtures);
 
 function absent(pid: number): boolean {
   try {

@@ -1,4 +1,3 @@
-import { afterEach } from "bun:test";
 import {
   chmod,
   mkdir,
@@ -14,11 +13,12 @@ import { join, resolve } from "node:path";
 import { restoreEnv } from "./env.ts";
 
 const cleanups: (() => Promise<void>)[] = [];
-afterEach(async () => {
+/** Register this in each test file; Bun caches imports but scopes test hooks. */
+export async function cleanupVmFileFixtures() {
   for (const cleanup of cleanups.splice(0).reverse()) {
     await cleanup();
   }
-});
+}
 const environmentKeys = [
   "PATH",
   "HOME",

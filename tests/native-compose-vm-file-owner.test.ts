@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { afterEach, expect, test } from "bun:test";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { isRecord } from "../src/lib/guards.ts";
@@ -27,10 +27,13 @@ import {
   vmFileJournalReady,
 } from "../src/lib/native-compose-vm-file-protocol.ts";
 import {
+  cleanupVmFileFixtures,
   VM_BYTES,
   VM_ENGINE,
   vmFileFixture,
 } from "./helpers/native-compose-vm-files.ts";
+
+afterEach(cleanupVmFileFixtures);
 
 async function staged(
   fixture: Awaited<ReturnType<typeof vmFileFixture>>,

@@ -1595,12 +1595,16 @@ export const nativeConfigNetworksScenario: Scenario = {
         receipt: createReceipt,
       });
       startedRoots.add(primary.root);
-      resultOk(
-        await raw(primary, ["up", "--detach", "--json"], {
-          PATH: `${shim}:${env.PATH}`,
-        }),
-        1
-      );
+      const controlledUp = await raw(primary, ["up", "--detach", "--json"], {
+        PATH: `${shim}:${env.PATH}`,
+      });
+      if (!(await Bun.file(createReceipt).exists())) {
+        // TEMP diag: closed CLI JSON and frames only; remove before merge.
+        process.stdout.write(
+          `[diag networks] exit=${controlledUp.exitCode} timedOut=${controlledUp.timedOut}\nstdout:\n${controlledUp.stdout}\nstderr:\n${controlledUp.stderr}\n`
+        );
+      }
+      resultOk(controlledUp, 1);
       requireValue(
         await Bun.file(createReceipt).exists(),
         "Controlled startup must reach actual Compose create"

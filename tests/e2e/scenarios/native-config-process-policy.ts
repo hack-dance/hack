@@ -198,6 +198,10 @@ export function verifyNativeProcessPolicyEvidence(opts: {
       "Failure policy must execute exactly two retries before its successful third start",
   });
   const events = opts.retryEvents;
+  // TEMP diag: closed action/exit sequence only; remove before merge.
+  process.stdout.write(
+    `[diag process-policy] events=${JSON.stringify(Array.isArray(events) ? events.map((event) => (isRecord(event) ? [event.action, event.exitCode] : null)) : null)}\n`
+  );
   expect({
     that:
       RESOURCE_ID.test(opts.retryContainer) &&

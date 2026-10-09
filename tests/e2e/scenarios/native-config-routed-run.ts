@@ -357,6 +357,18 @@ async function heldRun(
       await Bun.sleep(100);
     }
     if (!(observed && isRecord(observed.labels))) {
+      // TEMP diag: closed states and CLI JSON only; remove before merge.
+      const active = await containers(opts.docker, source);
+      const settled = await Promise.race([
+        running.then(
+          (value) =>
+            `exit=${value.exitCode} timedOut=${value.timedOut}\nstdout:\n${value.stdout}\nstderr:\n${value.stderr}`
+        ),
+        Bun.sleep(5000).then(() => "cli still running"),
+      ]);
+      process.stdout.write(
+        `[diag routed-run] containers=${JSON.stringify(active.map((value) => ({ state: value.state, oneOff: oneOff(value) })))}\n${settled}\n`
+      );
       throw new Error("Running owned one-off was not observed");
     }
     expect({

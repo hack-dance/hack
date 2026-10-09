@@ -2,6 +2,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { mkdir, opendir } from "node:fs/promises";
 import { join } from "node:path";
 import { isRecord } from "./guards.ts";
+import { nativeComposeDiagFrames } from "./native-compose-diag-frames.ts";
 import {
   copyNativeComposeEffectRefusal,
   type NativeComposeEffectRefusal,
@@ -78,6 +79,7 @@ function normalizedRefusal(
   error: unknown,
   stage: NativeComposeEffectRefusal["stage"]
 ): never {
+  nativeComposeDiagFrames("witness-enroll", error);
   retainNativeComposeEffectRefusal(error, {
     stage,
     reason: nativeComposeEffectReason(error),
@@ -1349,7 +1351,17 @@ export async function verifyNativeComposeStorageWitness(opts: {
         await close(held);
       }
     },
-  }).catch(() => refuse());
+  }).catch((error) => {
+    nativeComposeDiagFrames("witness-verify", error);
+    try {
+      return refuse();
+    } catch (normalized) {
+      if (typeof normalized === "object" && normalized !== null) {
+        copyNativeComposeEffectRefusal(error, normalized);
+      }
+      throw normalized;
+    }
+  });
 }
 
 /** Explicitly tagged, unactivated source-only xattr enrollment path. */

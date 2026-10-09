@@ -74,13 +74,13 @@ function candidatePaths(candidate: unknown): readonly string[] {
       !(isRecord(service) && typeof service.image === "string") ||
       [
         "build",
-        "pull_policy",
         "profiles",
         "depends_on",
         "readiness",
         "files",
         "networks",
-      ].some((key) => Object.hasOwn(service, key))
+      ].some((key) => Object.hasOwn(service, key)) ||
+      (Object.hasOwn(service, "pull_policy") && service.pull_policy !== "never")
     ) {
       refuse();
     }

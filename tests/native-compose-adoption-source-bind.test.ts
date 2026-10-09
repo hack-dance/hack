@@ -345,3 +345,65 @@ test("bind mapping keeps exact RO/RW and refuses missing creation fence, extra o
     }).candidate
   ).toBeUndefined();
 });
+
+test.each([
+  undefined,
+  "never",
+])("retained source bind preserves omitted/never pull policy (%s)", async (pullPolicy) => {
+  const compose = {
+    name: "fixture",
+    services: {
+      db: {
+        image: "fixture",
+        ...(pullPolicy === undefined ? {} : { pull_policy: pullPolicy }),
+        volumes: ["data:/data", declaration()],
+      },
+    },
+    volumes: { data: {} },
+  };
+  composeText = JSON.stringify(compose);
+  await writeFile(join(root, ".hack/docker-compose.yml"), composeText);
+  expect(
+    mapLegacyNativeRetainedSourceBind({ configText, composeText }).candidate
+  ).toBeDefined();
+  const owned = await acquire();
+  await owned.withFresh({}, async () => {});
+});
+
+test.each([
+  "always",
+  "missing",
+])("retained source bind refuses image acquisition (%s) before directory opens", async (pullPolicy) => {
+  composeText = JSON.stringify({
+    name: "fixture",
+    services: {
+      db: {
+        image: "fixture",
+        pull_policy: pullPolicy,
+        volumes: ["data:/data", declaration()],
+      },
+    },
+    volumes: { data: {} },
+  });
+  await writeFile(join(root, ".hack/docker-compose.yml"), composeText);
+  const planned = mapLegacyNativeRetainedSourceBind({
+    configText,
+    composeText,
+  });
+  expect(planned.candidate).toBeUndefined();
+  expect(planned.report.fields).toContainEqual(
+    expect.objectContaining({
+      pointer: "/services/db/pull_policy",
+      code: "retained_bind_image_acquisition_unsupported",
+    })
+  );
+  const hold = spyOn(privateState, "holdDirectory");
+  try {
+    await red(acquire());
+    expect(
+      hold.mock.calls.some(([path]) => path === join(root, "ignored"))
+    ).toBe(false);
+  } finally {
+    hold.mockRestore();
+  }
+});

@@ -467,6 +467,18 @@ function mapSourceBindCandidate(
   for (const [name, declaration] of Object.entries(opts.compose.services)) {
     const service = candidateWorkload(opts.candidate, name);
     if (
+      opts.retainedExisting &&
+      isRecord(declaration) &&
+      Object.hasOwn(declaration, "pull_policy") &&
+      declaration.pull_policy !== "never"
+    ) {
+      opts.refuse(
+        "compose",
+        importPointer(importPointer("/services", name), "pull_policy"),
+        "retained_bind_image_acquisition_unsupported"
+      );
+    }
+    if (
       !(
         isRecord(declaration) &&
         isRecord(service) &&

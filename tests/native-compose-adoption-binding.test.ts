@@ -363,7 +363,7 @@ test.each([
     ),
     composeText,
   });
-  if (!plan.intent) {
+  if (!(plan.intent && "sourceBinds" in plan.intent)) {
     throw new Error("Missing source-bind candidate");
   }
   const observed = inspectLegacyComposeSourceBindResources({

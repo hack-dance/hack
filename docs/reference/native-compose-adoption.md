@@ -522,6 +522,14 @@ record; only its one-use known-return and process-group-absence proof settles th
 record. Explicit recovery can contain an uncertain child but cannot clear its
 uncertainty merely because containers are stopped.
 
+Within one read-only dispatch proof, a private owner-issued context reuses its
+entry resource observation while checking source, receipt, claims and lease
+authority throughout. Routing, ingress and foreign-site observations remain
+fresh. A complete resource/runtime observation brackets the proof, including
+final volume and inventory rereads. The context is revoked before return and
+cannot cross a lifecycle effect, publication or another observation phase.
+This reduces nested inspection calls; it is not a measured runtime or CPU claim.
+
 Rollback requires restored source bytes, stopped original resources and absent
 proxy dispatch before handing hostname claims back to the restored legacy source.
 It retains a durable handoff state across interrupted claim removal. Builds, jobs,

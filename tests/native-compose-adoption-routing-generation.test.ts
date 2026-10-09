@@ -182,6 +182,12 @@ test(
             args.includes("rm")
         )
       ).toBe(false);
+      expect(h.commands.length).toBeLessThanOrEqual(9000);
+      expect(
+        h.commands.filter(
+          (args) => args[0] === "volume" && args[1] === "inspect"
+        ).length
+      ).toBeLessThanOrEqual(136);
       phase("assertions-complete");
     } finally {
       await store.close();
@@ -192,6 +198,169 @@ test(
   },
   { timeoutMs: 60_000 }
 );
+test("read-only routing phase refuses volume birth drift at its complete final binding", async () => {
+  const { store, generation } = await prepare();
+  let adminReads = 0;
+  let effectCommandOffset = 0;
+  let windowVolumeReads: number | undefined;
+  let changedAtVolumeRead: number | undefined;
+  try {
+    h.hooks.afterEffect = async () => {
+      effectCommandOffset = h.commands.length;
+    };
+    h.hooks.afterProbe = async (args) => {
+      if (
+        h.effects.length === 1 &&
+        args[0] === "exec" &&
+        args.at(-1) === "http://127.0.0.1:2019/config/apps/http/servers" &&
+        ++adminReads === 3
+      ) {
+        windowVolumeReads = h.commands
+          .slice(effectCommandOffset)
+          .filter(
+            (command) => command[0] === "volume" && command[1] === "inspect"
+          ).length;
+        changedAtVolumeRead = h.commands.filter(
+          (command) => command[0] === "volume" && command[1] === "inspect"
+        ).length;
+        h.model.volumeBirth = "2026-02-02T01:02:03Z";
+      }
+    };
+    await red(h.operation(store, generation, "stop", { preparation: true }));
+    expect(changedAtVolumeRead).toBeDefined();
+    expect(windowVolumeReads).toBe(4);
+    expect(
+      h.commands.filter((args) => args[0] === "volume" && args[1] === "inspect")
+        .length
+    ).toBeGreaterThan(changedAtVolumeRead ?? Number.POSITIVE_INFINITY);
+    expect(h.effects).toHaveLength(1);
+    expect((await h.receipt()).pendingOperation?.operation).toBe("stop");
+    expect((await h.receipt()).routingHandoff).toBe("held");
+  } finally {
+    h.hooks.afterEffect = undefined;
+    h.hooks.afterProbe = undefined;
+    await store.close();
+  }
+});
+test("read-only routing phase still inspects a newly introduced foreign site writer", async () => {
+  const { store, generation } = await prepare();
+  let adminReads = 0;
+  let effectCommandOffset = 0;
+  let windowVolumeReads: number | undefined;
+  let introduced = false;
+  let observed = false;
+  try {
+    h.hooks.afterEffect = async () => {
+      effectCommandOffset = h.commands.length;
+    };
+    h.hooks.afterProbe = async (args) => {
+      if (
+        h.effects.length === 1 &&
+        args[0] === "exec" &&
+        args.at(-1) === "http://127.0.0.1:2019/config/apps/http/servers" &&
+        ++adminReads === 3
+      ) {
+        windowVolumeReads = h.commands
+          .slice(effectCommandOffset)
+          .filter(
+            (command) => command[0] === "volume" && command[1] === "inspect"
+          ).length;
+        introduced = true;
+        h.model.foreign = true;
+      } else if (
+        introduced &&
+        args[0] === "container" &&
+        args[1] === "inspect" &&
+        args.includes(ROUTING_IDS.foreign)
+      ) {
+        observed = true;
+      }
+    };
+    await red(h.operation(store, generation, "stop", { preparation: true }));
+    expect(introduced).toBe(true);
+    expect(windowVolumeReads).toBe(4);
+    expect(observed).toBe(true);
+    expect(h.effects).toHaveLength(1);
+    expect((await h.receipt()).pendingOperation?.operation).toBe("stop");
+    expect((await h.receipt()).routingHandoff).toBe("held");
+  } finally {
+    h.hooks.afterEffect = undefined;
+    h.hooks.afterProbe = undefined;
+    await store.close();
+  }
+});
+test("completed routing observation cannot carry a resource proof into a later operation", async () => {
+  const { store, generation } = await prepare();
+  try {
+    expect(
+      await h.operation(store, generation, "stop", { preparation: true })
+    ).toBe(0);
+    expect((await h.receipt()).pendingOperation).toBeNull();
+    h.model.volumeBirth = "2026-02-02T01:02:03Z";
+    await red(h.operation(store, generation, "stop", { preparation: true }));
+    expect(h.effects).toHaveLength(1);
+    expect((await h.receipt()).pendingOperation).toBeNull();
+  } finally {
+    await store.close();
+  }
+});
+for (const changed of ["source", "receipt"] as const) {
+  test(`read-only routing phase rechecks ${changed} authority inside its observation window`, async () => {
+    const { store, generation } = await prepare();
+    let adminReads = 0;
+    let effectCommandOffset = 0;
+    let windowVolumeReads: number | undefined;
+    let changedAtVolumeRead: number | undefined;
+    try {
+      h.hooks.afterEffect = async () => {
+        effectCommandOffset = h.commands.length;
+      };
+      h.hooks.afterProbe = async (args) => {
+        if (
+          h.effects.length === 1 &&
+          args[0] === "exec" &&
+          args.at(-1) === "http://127.0.0.1:2019/config/apps/http/servers" &&
+          ++adminReads === 3
+        ) {
+          windowVolumeReads = h.commands
+            .slice(effectCommandOffset)
+            .filter(
+              (command) => command[0] === "volume" && command[1] === "inspect"
+            ).length;
+          const path =
+            changed === "source"
+              ? join(h.root, ".hack/hack.config.json")
+              : h.receiptPath;
+          const bytes = await readFile(path);
+          await fs.rename(path, join(h.outer, `replaced-${changed}`));
+          await fs.writeFile(path, bytes, { mode: 0o600, flag: "wx" });
+          changedAtVolumeRead = h.commands.filter(
+            (command) => command[0] === "volume" && command[1] === "inspect"
+          ).length;
+        }
+      };
+      await red(h.operation(store, generation, "stop", { preparation: true }));
+      expect(changedAtVolumeRead).toBeDefined();
+      expect(windowVolumeReads).toBe(4);
+      if (changedAtVolumeRead === undefined) {
+        throw new Error("Synthetic authority replacement was not reached");
+      }
+      // A cheap inner authority check must refuse before the final resource scan.
+      expect(
+        h.commands.filter(
+          (args) => args[0] === "volume" && args[1] === "inspect"
+        ).length
+      ).toBe(changedAtVolumeRead);
+      expect(h.effects).toHaveLength(1);
+      expect((await h.receipt()).pendingOperation?.operation).toBe("stop");
+      expect((await h.receipt()).routingHandoff).toBe("held");
+    } finally {
+      h.hooks.afterEffect = undefined;
+      h.hooks.afterProbe = undefined;
+      await store.close();
+    }
+  });
+}
 test("numeric callback cannot settle a prospective child; explicit stop containment retains original uncertainty", async () => {
   const { store, generation } = await prepare();
   try {

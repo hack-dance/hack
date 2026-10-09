@@ -492,6 +492,18 @@ type Context = {
     { readonly info: Stats; readonly text: string }
   >;
 };
+type RetainedRouteObservation = {
+  readonly binding: LegacyComposeVerifiedBinding;
+  readonly runtimeConfig: unknown;
+  readonly assertActive: () => void;
+  readonly assertManifest: (meta: SavedManifest) => void;
+};
+// Only the private read-only routing proof issues this context. Revoked entries
+// remain in the WeakMap so a late continuation refuses instead of reacquiring.
+const retainedRouteObservations = new WeakMap<
+  Context,
+  RetainedRouteObservation
+>();
 async function assertRetainedBuildSource(opts: {
   readonly ctx: Context;
   readonly meta: SavedManifest;
@@ -665,25 +677,65 @@ function requireRetainedClaimContext(opts: {
 }
 async function assertRetainedRouteState(
   ctx: Context,
-  loaded: { readonly inputs: PrivateInputs },
+  loaded: Awaited<ReturnType<typeof readInputs>>,
   phase: "active" | "stopped",
   deadline: number,
-  assertOwner: () => Promise<void>
+  assertOwner: (
+    current: Context
+  ) => Promise<Awaited<ReturnType<typeof readInputs>>>
 ): Promise<void> {
   const binding = loaded.inputs.binding;
-  if (binding.binding_version !== 14) {
+  if (binding.binding_version !== 14 || retainedRouteObservations.has(ctx)) {
     refuse();
   }
-  await assertLegacyComposeRetainedRoutingState({
-    binding,
-    routing: retainedRoutingIntent(loaded.inputs),
-    proof: binding.routing,
-    phase,
-    signal: ctx.signal,
-    timeoutMs: ctx.timeoutMs,
-    deadline,
-    assertOwner,
+  const first = await assertOwner(ctx);
+  if (
+    first.manifest.id !== loaded.manifest.id ||
+    JSON.stringify(first.inputs.binding) !== JSON.stringify(binding)
+  ) {
+    refuse();
+  }
+  const observedManifest = JSON.stringify(first.manifest);
+  const current: Context = { ...ctx };
+  let active = true;
+  const assertActive = () => {
+    cancelled(current.signal);
+    if (!(active && Number.isFinite(deadline)) || Date.now() >= deadline) {
+      refuse();
+    }
+  };
+  retainedRouteObservations.set(current, {
+    binding: first.inputs.binding,
+    runtimeConfig: first.manifest.runtimeConfig,
+    assertActive,
+    assertManifest: (meta) => {
+      assertActive();
+      if (JSON.stringify(meta) !== observedManifest) {
+        refuse();
+      }
+    },
   });
+  try {
+    await assertLegacyComposeRetainedRoutingState({
+      binding,
+      routing: retainedRoutingIntent(loaded.inputs),
+      proof: binding.routing,
+      phase,
+      signal: current.signal,
+      timeoutMs: current.timeoutMs,
+      deadline,
+      assertOwner: async () => {
+        assertActive();
+        await assertOwner(current);
+        assertActive();
+      },
+    });
+  } finally {
+    active = false;
+  }
+  // The original context performs a complete fresh binding/runtime proof again,
+  // including foreign resources, final volumes and inventories, before success.
+  await assertOwner(ctx);
 }
 function selectedMapper(routing: boolean, basic: boolean) {
   if (routing) {
@@ -711,6 +763,8 @@ async function readInputs(
   readonly manifest: Manifest;
   readonly inputs: Readonly<PrivateInputs>;
 }> {
+  const observation = retainedRouteObservations.get(ctx);
+  observation?.assertActive();
   await ctx.check();
   const generationRoot = join(ctx.generationsRoot, selected.id);
   const held = await holdDirectory(generationRoot, true);
@@ -723,6 +777,7 @@ async function readInputs(
       refuse();
     }
     const meta = manifest(saved.value, ctx.root, selected.id);
+    observation?.assertManifest(meta);
     const configText = await readArtifact(
       join(generationRoot, "legacy-config.json"),
       meta.files.config
@@ -800,13 +855,15 @@ async function readInputs(
         refuse();
       }
     }
-    const observed = await inspectLegacyComposeAdoptionResources({
-      root: ctx.root,
-      intent: planned.intent,
-      signal: ctx.signal,
-      timeoutMs: ctx.timeoutMs,
-      composeFiles: projection?.composeFiles,
-    });
+    const observed = observation
+      ? observation.binding
+      : await inspectLegacyComposeAdoptionResources({
+          root: ctx.root,
+          intent: planned.intent,
+          signal: ctx.signal,
+          timeoutMs: ctx.timeoutMs,
+          composeFiles: projection?.composeFiles,
+        });
     if (JSON.stringify(meta.binding) !== JSON.stringify(observed)) {
       refuse("E_LEGACY_ADOPTION_CHANGED");
     }
@@ -842,12 +899,14 @@ async function readInputs(
         await claims.close();
       }
     }
-    const runtimeConfig = await inspectLegacyComposeRuntimeConfig({
-      binding: observed,
-      composeFile: join(generationRoot, "legacy-compose.yml"),
-      signal: ctx.signal,
-      timeoutMs: ctx.timeoutMs,
-    });
+    const runtimeConfig = observation
+      ? observation.runtimeConfig
+      : await inspectLegacyComposeRuntimeConfig({
+          binding: observed,
+          composeFile: join(generationRoot, "legacy-compose.yml"),
+          signal: ctx.signal,
+          timeoutMs: ctx.timeoutMs,
+        });
     if (JSON.stringify(meta.runtimeConfig) !== JSON.stringify(runtimeConfig)) {
       refuse("E_LEGACY_ADOPTION_CHANGED");
     }
@@ -887,6 +946,7 @@ async function readInputs(
     }
     await assertBuildSource();
     await ctx.check();
+    observation?.assertManifest(meta);
     freezeImportValue(observed);
     return {
       manifest: { ...meta, binding: observed },
@@ -1869,18 +1929,25 @@ async function assertPublicationRoutingStopped(
   ) {
     refuse("E_LEGACY_ADOPTION_BUSY");
   }
-  await assertRetainedRouteState(ctx, loaded, "stopped", deadline, async () => {
-    await readInputs(ctx, state.prepared ?? refuse());
-    await requireStopped(ctx, loaded.inputs.binding);
-    if (restored) {
-      await requireRestoredRoutingSourceInputs(ctx, loaded);
+  await assertRetainedRouteState(
+    ctx,
+    loaded,
+    "stopped",
+    deadline,
+    async (current) => {
+      const fresh = await readInputs(current, state.prepared ?? refuse());
+      await requireStopped(current, fresh.inputs.binding);
+      if (restored) {
+        await requireRestoredRoutingSourceInputs(current, fresh);
+      }
+      await requireReceiptSnapshot(current, state);
+      cancelled(current.signal);
+      if (Date.now() >= deadline) {
+        refuse();
+      }
+      return fresh;
     }
-    await requireReceiptSnapshot(ctx, state);
-    cancelled(ctx.signal);
-    if (Date.now() >= deadline) {
-      refuse();
-    }
-  });
+  );
 }
 
 type MutationOptions = Parameters<
@@ -2440,11 +2507,12 @@ async function mutateRetainedContainersWithinBudget(
         loaded,
         captured.operation === "stop" ? "stopped" : "active",
         captured.deadline ?? 0,
-        async () => {
-          const fresh = await readInputs(ctx, owned);
-          await requireMutationInputs(ctx, activePublication, fresh);
-          await requireReceiptSnapshot(ctx, state);
+        async (current) => {
+          const fresh = await readInputs(current, owned);
+          await requireMutationInputs(current, activePublication, fresh);
+          await requireReceiptSnapshot(current, state);
           requireMutationDeadline(captured, retainedPlan);
+          return fresh;
         }
       );
       await requireReceiptSnapshot(ctx, state);

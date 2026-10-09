@@ -158,6 +158,78 @@ impl Drop for Fixture {
 }
 
 #[test]
+fn storage_tool_requires_a_complete_explicit_pair_before_private_input_or_provider_admission() {
+    let fixture = Fixture::new();
+    let digest = "a".repeat(64);
+    for extra in [
+        vec!["--storage-witness-tool", "/missing/tool"],
+        vec!["--expect-storage-witness-tool", &digest],
+        vec![
+            "--storage-witness-tool",
+            "relative",
+            "--expect-storage-witness-tool",
+            &digest,
+        ],
+        vec![
+            "--storage-witness-tool",
+            "/missing/tool",
+            "--expect-storage-witness-tool",
+            "private-tool-canary",
+        ],
+    ] {
+        let mut args = vec![
+            "graph",
+            "native",
+            "run",
+            "--source-file",
+            fixture.source_path(),
+            "--expect-review",
+            &digest,
+            "--environment-stdin",
+            "--json",
+        ];
+        args.extend(extra);
+        let output = fixture.invoke_before_stdin(&args);
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("native_graph_arguments"));
+        assert!(!String::from_utf8_lossy(&output.stderr).contains("private-tool-canary"));
+        fixture.assert_no_state();
+    }
+    let output = fixture.invoke(&[
+        "graph",
+        "native",
+        "plan",
+        "--source-file",
+        fixture.source_path(),
+        "--storage-witness-tool",
+        "/missing/tool",
+        "--expect-storage-witness-tool",
+        &digest,
+    ]);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("native_graph_arguments"));
+    fixture.assert_no_state();
+    // A complete pair admits no fallback or fetch when its selected file is absent.
+    let output = fixture.invoke_before_stdin(&[
+        "graph",
+        "native",
+        "run",
+        "--source-file",
+        fixture.source_path(),
+        "--expect-review",
+        &digest,
+        "--environment-stdin",
+        "--storage-witness-tool",
+        "/missing/tool",
+        "--expect-storage-witness-tool",
+        &digest,
+    ]);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("guest_tool_artifact"));
+    fixture.assert_no_state();
+}
+
+#[test]
 fn public_native_recovery_requires_exact_closed_selectors_and_refuses_absent_authority() {
     let fixture = Fixture::new();
     let run = "b".repeat(32);

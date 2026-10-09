@@ -28,7 +28,7 @@ function unsupported(): never {
   throw new HackCliError({
     code: "E_NATIVE_PROJECT_UNSUPPORTED",
     message:
-      "Native authored execution requires whole-project foreground up, ps, owner-mediated down, finite single-service logs --no-follow, or explicit stored-generation down --recover on macOS. This request ran no input or runtime operation.",
+      "Native authored execution requires whole-project foreground up, owner-mediated down, ps, finite single-service logs --no-follow, or explicit stored-generation down --recover on macOS. This request ran no input or runtime operation.",
   });
 }
 
@@ -202,7 +202,7 @@ function startupFailure(error: unknown): number {
   });
 }
 
-type Mode = "status" | "recovery" | "stop" | "start" | "logs";
+type Mode = "status" | "recovery" | "start" | "stop" | "logs";
 function commandMode(options: NativeComposeCommandOptions): Mode {
   if (options.operation === "logs") {
     assertLogsOptions(options);
@@ -289,7 +289,8 @@ function captureCommandOptions(
 /**
  * Explicit native dispatch after exact authored-family and adoption selection.
  * Compose and omitted selections retain their existing owner. Foreground up delegates
- * to the tagged lifetime owner. Ps and finite service logs observe its saved run;
+ * to the tagged lifetime owner; ordinary down uses its authenticated stop.
+ * Ps and finite service logs observe its saved run;
  * explicit down --recover uses the stored cleanup owner without input acquisition.
  * Unsupported requests never start input acquisition or runtime work.
  */
@@ -300,9 +301,9 @@ export async function tryNativeAuthoredCommand(opts: {
   /** Execution seam for command-selection controls; the CLI always uses the real owner. */
   readonly serve?: typeof serveNativeAuthoredProject;
   readonly recover?: typeof recoverNativeAuthoredProject;
-  readonly stop?: typeof stopNativeAuthoredProject;
   readonly observe?: typeof nativeAuthoredProjectPs;
   readonly logs?: typeof nativeAuthoredProjectLogs;
+  readonly stop?: typeof stopNativeAuthoredProject;
 }): Promise<number | null> {
   const sourceEnv = opts.env ?? process.env;
   const env = {

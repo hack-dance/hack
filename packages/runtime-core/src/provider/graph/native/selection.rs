@@ -321,6 +321,7 @@ pub struct Selected {
 /// Value-free authored input fence retained by the live owner for read-only control.
 /// Its lifetime is the owner lifetime; this does not renew a startup deadline.
 pub(super) struct ReadPin {
+    hooks: Option<hooks::Permit>,
     source: Option<(PathBuf, Document)>,
     candidate_root: PathBuf,
     root: PathBuf,
@@ -363,12 +364,16 @@ impl ReadPin {
         {
             return Err(refused());
         }
+        if let Some(hooks) = &self.hooks {
+            hooks.verify()?;
+        }
         Ok(())
     }
 }
 impl Selected {
     fn read_pin(&self) -> ReadPin {
         ReadPin {
+            hooks: self.hooks.clone(),
             source: self.source.clone(),
             candidate_root: self.candidate_root.clone(),
             root: self.root.clone(),
@@ -403,9 +408,6 @@ impl Selected {
             source.verify()?;
         }
         self.read_pin().verify(candidate)?;
-        if let Some(hooks) = &self.hooks {
-            hooks.verify()?;
-        }
         self.remaining()?;
         Ok(())
     }
@@ -444,6 +446,7 @@ pub struct Prepared {
     prepared: native_input::Prepared,
 }
 impl Prepared {
+    #[cfg(target_os = "macos")]
     pub(super) fn read_pin(&self) -> ReadPin {
         self.selected.read_pin()
     }

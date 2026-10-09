@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { realpath } from "node:fs/promises";
 import { join } from "node:path";
+import { recoverNativeAuthoredProject } from "../backends/native-authored-project-recovery.ts";
 import {
   NativeAuthoredProjectStartError,
   serveNativeAuthoredProject,
@@ -17,8 +18,30 @@ function unsupported(): never {
   throw new HackCliError({
     code: "E_NATIVE_PROJECT_UNSUPPORTED",
     message:
-      "Native authored execution currently requires whole-project foreground up on macOS. This request ran no input or runtime operation.",
+      "Native authored execution requires whole-project foreground up or explicit stored-generation down --recover on macOS. This request ran no input or runtime operation.",
   });
+}
+
+function assertRecoveryOptions(options: NativeComposeCommandOptions): void {
+  if (
+    process.platform !== "darwin" ||
+    options.operation !== "down" ||
+    !options.recover ||
+    options.detach ||
+    options.json ||
+    options.unsupportedOptions ||
+    options.services !== undefined ||
+    options.service !== undefined ||
+    options.command !== undefined ||
+    options.workdir !== undefined ||
+    options.follow !== undefined ||
+    options.tail !== undefined ||
+    options.logFormat !== undefined ||
+    options.profiles !== undefined ||
+    options.overlay !== undefined
+  ) {
+    unsupported();
+  }
 }
 
 function assertForegroundOptions(options: NativeComposeCommandOptions): void {
@@ -68,7 +91,8 @@ function startupFailure(error: unknown): number {
 /**
  * Explicit native dispatch after exact authored-family and adoption selection.
  * Compose and omitted selections retain their existing owner. Only foreground up
- * delegates to the tagged native lifetime owner; unsupported requests never start
+ * delegates to the tagged native lifetime owner. Explicit down --recover uses the
+ * stored generation owner without input acquisition; unsupported requests never start
  * input acquisition or runtime work. The Rust planner owns capability refusal.
  */
 export async function tryNativeAuthoredCommand(opts: {
@@ -77,6 +101,7 @@ export async function tryNativeAuthoredCommand(opts: {
   readonly env?: Readonly<Record<string, string | undefined>>;
   /** Execution seam for command-selection controls; the CLI always uses the real owner. */
   readonly serve?: typeof serveNativeAuthoredProject;
+  readonly recover?: typeof recoverNativeAuthoredProject;
 }): Promise<number | null> {
   const sourceEnv = opts.env ?? process.env;
   const env = {
@@ -105,7 +130,13 @@ export async function tryNativeAuthoredCommand(opts: {
   };
   const projectRoot = opts.selected.projectRoot;
   const serve = opts.serve ?? serveNativeAuthoredProject;
-  assertForegroundOptions(options);
+  const recover = opts.recover ?? recoverNativeAuthoredProject;
+  const recovering = options.operation === "down" && options.recover === true;
+  if (recovering) {
+    assertRecoveryOptions(options);
+  } else {
+    assertForegroundOptions(options);
+  }
   let runtime: ReturnType<typeof resolveNativeRuntimeSelection>;
   try {
     runtime = resolveNativeRuntimeSelection(env);
@@ -129,14 +160,28 @@ export async function tryNativeAuthoredCommand(opts: {
   process.on("SIGTERM", cancel);
   try {
     const root = await realpath(projectRoot);
+    const scope = {
+      projectRoot: root,
+      projectDir: join(root, ".hack"),
+      nativeHome: runtime.home,
+      branch: options.instance ?? null,
+    };
+    if (recovering) {
+      await recover({
+        runtime,
+        scope,
+        timeoutMs: startupTimeoutMs,
+        signal: controller.signal,
+      });
+      logger.info({
+        message:
+          "Selected native project recovered; persistent data is retained.",
+      });
+      return 0;
+    }
     return await serve({
       runtime,
-      scope: {
-        projectRoot: root,
-        projectDir: join(root, ".hack"),
-        nativeHome: runtime.home,
-        branch: options.instance ?? null,
-      },
+      scope,
       run: randomBytes(16).toString("hex"),
       profiles: options.profiles,
       overlay: options.overlay,
@@ -148,6 +193,13 @@ export async function tryNativeAuthoredCommand(opts: {
       },
     });
   } catch (error: unknown) {
+    if (recovering) {
+      throw new HackCliError({
+        code: "E_LIFECYCLE_FAILED",
+        message:
+          "Native project recovery is incomplete or its ownership changed; selected state is retained. Values omitted.",
+      });
+    }
     return startupFailure(error);
   } finally {
     process.off("SIGINT", cancel);

@@ -259,6 +259,28 @@ pub fn recorded_slots(candidate: &Candidate) -> Result<Vec<String>, CandidateErr
     }
     Ok(slots.into_iter().collect())
 }
+/// Read-only current-guest metadata for native recovery completeness. Pending
+/// records refuse rather than being promoted or used as missing-slot authority.
+#[cfg(all(target_os = "macos", feature = "native-config-plan"))]
+pub(super) fn known_current_slots(
+    candidate: &Candidate,
+    incarnation: &str,
+    boot: &str,
+) -> Result<std::collections::BTreeSet<String>, CandidateError> {
+    let mut known = std::collections::BTreeSet::new();
+    for slot in recorded_slots(candidate)? {
+        let path = root(candidate).join(format!("{slot}.pending"));
+        match fs::symlink_metadata(path) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            _ => return Err(error()),
+        }
+        let intent = read_mode(candidate, &slot, incarnation, None, false)?;
+        if intent.boot == boot {
+            known.insert(slot);
+        }
+    }
+    Ok(known)
+}
 /// Validates immutable records before associating them with graph cleanup.
 pub(super) fn graph_slots(
     candidate: &Candidate,

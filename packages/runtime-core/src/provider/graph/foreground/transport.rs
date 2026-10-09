@@ -191,7 +191,7 @@ fn metadata(path: &Path) -> Result<Option<fs::Metadata>, CandidateError> {
 
 /// A dead PID alone cannot prove that another process did not inherit the
 /// listener. A single nonblocking connect must report a refused socket.
-fn no_listener(path: &Path) -> Result<(), CandidateError> {
+pub(in crate::provider::graph) fn no_listener(path: &Path) -> Result<(), CandidateError> {
     let bytes = path.as_os_str().as_encoded_bytes();
     // SAFETY: sockaddr_un is plain C storage, populated before connect.
     let mut address: libc::sockaddr_un = unsafe { std::mem::zeroed() };

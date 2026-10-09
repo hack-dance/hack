@@ -39,6 +39,9 @@ type HostScope = {
 type ExpectedRoute = NativeComposeProxyRoute & {
   readonly dials: readonly string[];
 };
+
+/** Read-only route projection type; supplying it grants no resource or effect authority. */
+export type BoundNativeComposeProxyRoute = ExpectedRoute;
 const ADMIN_URL = "http://127.0.0.1:2019/config/apps/http/servers";
 async function readActiveProxy(opts: {
   readonly binding: NativeComposeIngressBinding;
@@ -706,6 +709,95 @@ export async function assertNativeComposeProxyRoutes(opts: {
       await Bun.sleep(
         Math.min(500, Math.max(0, selected.deadline - Date.now()))
       );
+    }
+    refused();
+  } catch {
+    refused();
+  }
+}
+
+/**
+ * Read-only dispatch/TLS check for a separately issued retained-resource owner.
+ * The callback must obtain current exact original IDs, labels and ingress IPs
+ * under its source/receipt lease. It is reread after each successful proxy proof;
+ * no native owner label or caller-provided old IP substitutes for that owner.
+ */
+export async function assertBoundNativeComposeProxyRoutes(opts: {
+  readonly binding: NativeComposeIngressBinding;
+  readonly observeExpected: () => Promise<
+    readonly BoundNativeComposeProxyRoute[]
+  >;
+  readonly absentHostnames: readonly string[];
+  readonly signal?: AbortSignal;
+  readonly deadline: number;
+}): Promise<void> {
+  try {
+    const binding = Object.freeze({ ...opts.binding });
+    const observeExpected = opts.observeExpected;
+    const absentHostnames = Object.freeze([...opts.absentHostnames]);
+    const deadline = opts.deadline;
+    const remaining = deadline - Date.now();
+    if (
+      !Number.isFinite(remaining) ||
+      remaining <= 0 ||
+      typeof observeExpected !== "function"
+    ) {
+      return refused();
+    }
+    const bounded = AbortSignal.timeout(Math.ceil(remaining));
+    const signal = opts.signal
+      ? AbortSignal.any([opts.signal, bounded])
+      : bounded;
+    const readExpected = async () => {
+      const value = await observeExpected();
+      return value.map((route) =>
+        Object.freeze({
+          ...route,
+          hostnames: Object.freeze([...route.hostnames]),
+          origins: Object.freeze([...route.origins]),
+          dials: Object.freeze([...route.dials]),
+        })
+      );
+    };
+    const readActive = async (
+      expected: readonly BoundNativeComposeProxyRoute[]
+    ) => {
+      const selected = { binding, signal };
+      const servers = await readActiveProxy(selected);
+      const projection = { servers, expected, absentHostnames };
+      if (!projectedRoutesMatch(projection, true)) {
+        return false;
+      }
+      const origins = automaticHttpsOrigins(servers, expected);
+      if (origins.length) {
+        try {
+          await verifyAutomaticHttps({ ...selected, origins });
+        } catch {
+          return false;
+        }
+      }
+      return projectedRoutesMatch(
+        { ...projection, servers: await readActiveProxy(selected) },
+        true
+      );
+    };
+    while (!signal.aborted && Date.now() < deadline) {
+      await observeNativeComposeIngress({ expected: binding, signal });
+      const expected = await readExpected();
+      if (await readActive(expected)) {
+        const after = await readExpected();
+        if (JSON.stringify(expected) !== JSON.stringify(after)) {
+          return refused();
+        }
+        await observeNativeComposeIngress({ expected: binding, signal });
+        if (await readActive(after)) {
+          if (signal.aborted || Date.now() >= deadline) {
+            return refused();
+          }
+          return;
+        }
+      }
+      await Bun.sleep(Math.min(500, Math.max(0, deadline - Date.now())));
     }
     refused();
   } catch {

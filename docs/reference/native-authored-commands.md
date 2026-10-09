@@ -37,8 +37,8 @@ frontend owner described below. Unsupported intent must
 refuse before managed value resolution and provider work. Early typed input
 capability refusals retain `E_NATIVE_PROJECT_UNSUPPORTED` without exposing
 compiler diagnostics or creating native source/start/run authority. `--detach`,
-`--json` for `up`, service subsets and unsupported lifecycle operations refuse before input
-acquisition. `--branch` supplies an explicit native namespace; its omission uses
+`--json` for `up`, service subsets and unsupported lifecycle operations except
+owner-mediated `down` refuse before input acquisition. `--branch` supplies an explicit native namespace; its omission uses
 the canonical project namespace without inferring a Git branch. Profile and env
 selection keep their compiler contracts. `--env base` bypasses inherited overlays
 with an explicit base selection; omitting `--env` retains the authored/local default.

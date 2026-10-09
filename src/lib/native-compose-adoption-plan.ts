@@ -10,9 +10,14 @@ import {
   mapLegacyNativeBranchStorageAdoption,
   mapLegacyNativeCompletedJobAdoptionBaseline,
   mapLegacyNativeRetainedBasicBuild,
+  mapLegacyNativeRetainedRouting,
   mapLegacyNativeRetainedSourceBind,
   mapLegacyNativeStorageAdoption,
 } from "./native-config-import-plan.ts";
+import {
+  legacyRoutingStorageDocument,
+  mapLegacyComposeRouting,
+} from "./native-config-import-routing.ts";
 import {
   type LegacyComposeSourceBindIntent,
   type LegacyComposeStorageIntent,
@@ -99,12 +104,20 @@ export function planLegacyComposeRetainedBasicBuildAdoption(opts: {
   return plan(opts, mapLegacyNativeRetainedBasicBuild(opts));
 }
 
+/** Separate v14 authored contract; mixed bind/build/job/branch families remain refused. */
+export function planLegacyComposeRetainedRoutingAdoption(opts: {
+  readonly configText: string;
+  readonly composeText: string;
+}): LegacyComposeAdoptionPlan {
+  return plan(opts, mapLegacyNativeRetainedRouting(opts), "routing");
+}
+
 /** Closed static directory-binding family; still requires the separate issued path and engine owner. */
 export function planLegacyComposeSourceBindAdoption(opts: {
   readonly configText: string;
   readonly composeText: string;
 }): LegacyComposeAdoptionPlan {
-  return plan(opts, mapLegacyNativeRetainedSourceBind(opts), true);
+  return plan(opts, mapLegacyNativeRetainedSourceBind(opts), "source-bind");
 }
 
 function plan(
@@ -114,7 +127,7 @@ function plan(
     readonly selectedComposeProject?: string;
   },
   baseline: ReturnType<typeof mapLegacyNativeAdoptionBaseline>,
-  sourceBind = false
+  family: "ordinary" | "routing" | "source-bind" = "ordinary"
 ): LegacyComposeAdoptionPlan {
   const config = parseImportDocument({
     text: opts.configText,
@@ -124,18 +137,27 @@ function plan(
     text: opts.composeText,
     document: "compose",
   }).value;
+  const routingFamily = family === "routing";
+  const sourceBind = family === "source-bind";
+  const routing = routingFamily
+    ? mapLegacyComposeRouting({ config, compose })
+    : undefined;
   const qualified = sourceBind
     ? mapLegacyComposeSourceBindStorage({ config, compose })
     : mapLegacyComposeStorage({
         config,
-        compose,
+        compose:
+          routing && compose ? legacyRoutingStorageDocument(compose) : compose,
         selectedComposeProject: opts.selectedComposeProject,
       });
   const mapping = {
-    supported: qualified !== undefined,
+    supported:
+      qualified !== undefined && (!routingFamily || routing !== undefined),
     accepted: qualified?.accepted ?? new Map<string, string>(),
   };
-  const intent = qualified?.intent;
+  const intent = qualified
+    ? { ...qualified.intent, ...(routing ? { routing: routing.intent } : {}) }
+    : undefined;
   const fields = storageFields(baseline.report.fields, mapping);
   const supported =
     mapping.supported && !fields.some((field) => field.status === "refused");

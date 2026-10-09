@@ -1696,3 +1696,39 @@ commands still refuse all host intent. Source5 refuses live-source/storage/topol
 intersections and guest/routed/TCP endpoint delivery. See
 [supervised host processes](../../docs/reference/native-authored-commands.md#supervised-host-processes)
 for stop/recovery and current qualification limits.
+
+
+### Native guest endpoint observations
+
+`provider::graph::native::endpoints::observe` adapts a decoded native receipt and
+captured Engine inspections to the existing `GuestEndpoint` representation. It
+requires a Ready receipt, the current boot, the selected started container's exact
+ID/name/image/native labels and readiness, and the complete ordered declared
+attachment set. Every network must match its recorded ID/name/labels/bridge policy;
+container and network must agree on endpoint ID, private IPv4 address and membership.
+Captured running/paused/restarting/dead/OOM flags must be explicit booleans proving
+running without pause, restart, death or OOM; missing or malformed flags refuse.
+The primary comes from the receipt, never from inspection order. A secondary
+attachment replacement also changes the generation. The native generation domain
+is separate from legacy graph generations and includes immutable receipt identity,
+boot, selected service/port, StartedAt and every attachment identity. Mutable
+lifecycle phases and terminal observations are excluded from the hash. Legacy
+generation encoding is unchanged.
+
+This is an observation-only foundation with no runtime or frontend caller. A parsed
+receipt, captured inspection or generation hash is not a source/ownership capability,
+bridge reservation, host publication or reachability proof. A later authenticated
+owner must bracket current source/data/receipt/boot and live observations across
+awaits under its original cancellation/deadline, then use the existing bridge and
+publication owner before private value delivery. No normalized Compose receipt is
+constructed. Source5 guest-service, routed and TCP delivery stays refused.
+
+The common-corpus acceptance still requires a guest-dependent persistent host
+consumer under the existing controller/private IPC, launched only after authoritative
+healthy publication. It must bind run/review/boot/member/start/attachment generation,
+slot and reservation; prove normal stop, cancellation, recovery, source/member drift
+and foreign-owner refusal; and retain unknown outcomes. Host providers must still
+start before their guest consumers, and unsupported cycles must refuse before effects.
+Routed HTTPS authority and a typed TCP projection remain separate gates. Portable
+captured-inspection tests qualify none of those live behaviors, installed execution,
+old-receipt recovery or full NC05 corpus acceptance.

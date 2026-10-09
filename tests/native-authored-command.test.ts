@@ -467,7 +467,7 @@ if (process.platform !== "darwin") {
         env: { HACK_RUNTIME_BACKEND: "native" },
       })
     ).rejects.toThrow(
-      "requires whole-project foreground up, ps, owner-mediated down, or explicit stored-generation down --recover on macOS"
+      "requires whole-project foreground up, ps, or explicit stored-generation down --recover on macOS"
     );
     expect(await readdir(join(selected.root, ".hack"))).toEqual([]);
   });

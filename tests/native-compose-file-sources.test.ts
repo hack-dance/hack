@@ -367,7 +367,7 @@ test.each([
     raw.services.off = { build: { context: "." }, profiles: ["inactive"] };
   } else {
     raw.services.reader.mounts[0][kind] =
-      kind === "uid" ? 0 : kind === "mode" ? "0600" : "read-write";
+      kind === "uid" ? 0xff_ff_ff_ff : kind === "mode" ? "0640" : "read-write";
   }
   await writeFile(join(root, ".hack/hack.project.json"), JSON.stringify(raw));
   await writeFile(join(root, ".hack/hack.env.json"), CANARY);
@@ -379,6 +379,40 @@ test.each([
     }).catch((error: unknown) => error);
     expect(error).toMatchObject({ code: "E_NATIVE_PROJECT_UNSUPPORTED" });
     expect(String(error)).not.toContain(CANARY);
+  });
+});
+test.each([
+  { uid: 0, gid: 0, mode: "0400" },
+  { uid: 10_001, gid: 10_002, mode: "0600" },
+] as const)("numeric ownership with protected $mode acquires through the current material lease", async (policy) => {
+  const source = structuredClone(SOURCE);
+  const mount = source.services.reader.mounts[0];
+  if (!mount) {
+    throw new Error("missing fixture grant");
+  }
+  Object.assign(mount, policy);
+  await writeFile(
+    join(root, ".hack/hack.project.json"),
+    JSON.stringify(source)
+  );
+  await store.withMutation(async (mutation) => {
+    const reservation = mutation.reserveGeneration();
+    const sources = await acquired({
+      authority: mutation.materialAuthority,
+      reservation,
+    });
+    expect(sources.result.file_plan?.workloads.reader?.[0]).toMatchObject(
+      policy
+    );
+    await withNativeComposeFileBytes({
+      sources,
+      authority: mutation.materialAuthority,
+      reservation,
+      run: async (members) => {
+        expect(members[0]?.binding).toMatchObject(policy);
+        expect(Buffer.from(members[0]?.bytes ?? [])).toEqual(binary);
+      },
+    });
   });
 });
 test("closed mutation and revoked acquisition cannot deliver previously acquired bytes", async () => {

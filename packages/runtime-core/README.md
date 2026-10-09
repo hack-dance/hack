@@ -96,6 +96,24 @@ removes only the original resource inventory, and never deletes host source data
 Dead-owner recovery of source-bearing graph v3 remains outside this increment;
 the separately qualified image-only recovery admission must refuse that version.
 
+The maintained macOS ignored control
+`native::runtime::tests::live_source::approved_live_source_preserves_host_edits_and_cleanup_after_selected_source_moves`
+requires a caller-created synthetic `live-fixture/project` and isolated sibling
+`native-home`. Prepare its provider through the existing explicit development
+`--project-share PROJECT --unfiltered-source` contract, then load a pinned Linux
+ARM64 Bun image. The fixture verifies a run-bound private inode/mode manifest and
+exclusively claims the invocation before graph effects; it does not enroll shares.
+Set `HACK_NATIVE_SOURCE_TEST_FIXTURE`, `HACK_NATIVE_SOURCE_TEST_PROJECT`,
+`HACK_LOCAL_TEST_ROOT`, `HACK_LOCAL_TEST_IMAGE` and a fresh 32-character hex
+`HACK_NATIVE_SOURCE_TEST_RUN`. Source files are public synthetic data under private
+ancestors. The control requires live HTTP reads after host edits and atomic
+descendant replacement, an `EROFS` container-write refusal, source-withdrawal
+inspection refusal and normal exact cleanup preserving host data. It publishes
+no host ports. Compile the exact test before the caller's 300-second watchdog;
+uncertain failures retain the graph/pool for inspection and never replay cleanup.
+Its filesystem admission controls run without a provider. This does not qualify
+whole frontend parity, dead-owner recovery or performance.
+
 `provider::graph::native::selection` selects only the exact absolute native project
 root and reads bounded, stable regular `.hack/hack.project.json` and optional
 `.hack/hack.local.json` files. It forwards raw authored text and owner-supplied
@@ -108,11 +126,12 @@ refuses until its primary-worktree verification is qualified; opted-out inherita
 preserves the owning compiler's checkout-local semantics. This is read-only input
 selection and private preparation, with no durable enrollment or runtime ownership.
 
-`provider::graph::native::run` is an explicit library consumer for the bounded
-image-only subset. It retains the development guest mutation lease, requires an
+`provider::graph::native::run` is an explicit library consumer for pinned images
+with optional preapproved read-only live source. It retains the development guest mutation lease, requires an
 admitted Internet or explicitly restricted outbound pool, verifies existing immutable
-images and shared graph/allocation capacity, and reserves a distinct v2
-`native-graph-runtime` journal in `run/native-graphs` before effects. Create/start
+images and shared graph/allocation capacity, and reserves a distinct
+`native-graph-runtime` journal in `run/native-graphs` before effects (v2 for image-only,
+v3 for source-bearing graphs). Create/start
 intent is durable and never replayed or adopted. Network create intent precedes the
 first network effect; its immutable ID, labels, bridge driver and outbound policy
 are verified before container work. Containers bind the recorded network ID and exact

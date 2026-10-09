@@ -6705,7 +6705,10 @@ async function handleDown({
     project: args.options.project,
     operation: "down",
     instance: args.options.branch,
-    profiles: parseCsvList(args.options.profile),
+    profiles:
+      args.options.profile === undefined
+        ? undefined
+        : parseCsvList(args.options.profile),
     overlay: args.options.env,
     json: args.options.json,
     recover: args.options.recoverNativeCompose,

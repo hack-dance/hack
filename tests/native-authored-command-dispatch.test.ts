@@ -154,6 +154,50 @@ test("source CLI mixed authored families refuse before native dispatch", async (
 });
 
 const macTest = process.platform === "darwin" ? test : test.skip;
+macTest.each([
+  { name: "omitted", args: [], code: "E_LIFECYCLE_FAILED" },
+  {
+    name: "explicit-empty",
+    args: ["--profile", ""],
+    code: "E_NATIVE_PROJECT_UNSUPPORTED",
+  },
+  {
+    name: "explicit-named",
+    args: ["--profile", "dev"],
+    code: "E_NATIVE_PROJECT_UNSUPPORTED",
+  },
+])(
+  "source CLI recovery keeps $name profile selection without input or runtime work",
+  async ({ args, code }) => {
+    const selected = await fixture();
+    await Bun.write(
+      join(selected.root, ".hack/hack.env.default.yaml"),
+      `values: [${PRIVATE}`
+    );
+    const value = await invoke({
+      selected,
+      args: ["down", "--recover", ...args],
+      backend: "native",
+      logger: "console",
+    });
+    expect(value.code).toBe(1);
+    expect(value.stdout + value.stderr).toMatch(
+      new RegExp(`(?:^|\\n)ERROR: ${code}\\b`)
+    );
+    expect(value.stdout + value.stderr).not.toContain(
+      code === "E_LIFECYCLE_FAILED"
+        ? "E_NATIVE_PROJECT_UNSUPPORTED"
+        : "E_LIFECYCLE_FAILED"
+    );
+    expect(
+      await Bun.file(join(selected.root, "compiler-called")).exists()
+    ).toBe(false);
+    expect(await readdir(join(selected.root, ".hack"))).toEqual([
+      "hack.env.default.yaml",
+      "hack.project.json",
+    ]);
+  }
+);
 const unsupportedFiles = [
   { name: "configs-empty", files: { configs: {} } },
   { name: "secrets-empty", files: { secrets: {} } },

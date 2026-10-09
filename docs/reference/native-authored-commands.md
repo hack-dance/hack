@@ -44,6 +44,8 @@ Live owners, older version 2 dead publications, partial startup, pending writes,
 changed files and rebooted guests refuse. Env/profile changes, service subsets and
 `--json` are unsupported for this operation. It neither recompiles authored input
 nor acquires managed values or starts a provider.
+Omit `--profile` to recover the stored generation; explicit empty or named profile
+overrides both refuse.
 
 Recovery commits a distinct private intent before calling the Rust cleanup owner.
 The original raw selectors and resource inventory remain fixed through retries;

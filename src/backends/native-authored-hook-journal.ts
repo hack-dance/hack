@@ -16,9 +16,16 @@ import {
   type NativeHookPhase,
   type NativeHookResult,
 } from "../lib/native-host-hook-runner.ts";
+import { nativeHostProcessProofIssued } from "./native-authored-host-processes.ts";
 
 const LIMIT = 8192;
 const issuedPermits = new WeakSet<object>();
+const permitVersions = new WeakMap<object, 3 | 5>();
+export function nativeHookPermitVersion(
+  value: NativeHookFilePin
+): 3 | 5 | undefined {
+  return permitVersions.get(value);
+}
 const pinMetadata = new WeakMap<
   object,
   Awaited<ReturnType<typeof readPrivate>>["info"]
@@ -158,6 +165,7 @@ export type NativeAuthoredHookOwner = {
   readonly permit: (opts: {
     readonly role: "preflight" | "execution";
     readonly semanticHash: string;
+    readonly processes?: NativeHookFilePin;
   }) => Promise<NativeHookFilePin>;
   readonly phase: (opts: {
     readonly phase: NativeHookPhase;
@@ -266,16 +274,20 @@ export async function createNativeAuthoredHookOwner(
     async permit(opts) {
       const role = opts.role;
       const semanticHash = opts.semanticHash;
+      const processes = opts.processes;
       if (
         !SHA.test(semanticHash) ||
         (role === "execution" && !succeeded.has("up.before")) ||
-        pending
+        pending ||
+        (processes !== undefined && !nativeHostProcessProofIssued(processes))
       ) {
         return refuse();
       }
       const permit = await append(`${role}-permit`, {
         version: 1,
-        kind: "native-authored-finite-hook-permit",
+        kind: processes
+          ? "native-authored-host-lifecycle-permit"
+          : "native-authored-finite-hook-permit",
         role,
         run,
         project: record.project,
@@ -284,9 +296,11 @@ export async function createNativeAuthoredHookOwner(
         owner,
         pid: record.pid,
         uid: record.uid,
+        ...(processes ? { processes } : {}),
       });
       Object.freeze(permit);
       issuedPermits.add(permit);
+      permitVersions.set(permit, processes ? 5 : 3);
       return permit;
     },
     async phase(opts) {
@@ -435,6 +449,7 @@ export async function createNativeAuthoredHookOwner(
       }
       capability.graphSettled();
       await assertFresh();
+      await absent(join(store.root.path, `${run}.host-process-owner.json`));
       await unchanged(owner);
       await store.check();
       capability.graphSettled();
@@ -629,6 +644,7 @@ export async function retireNativeAuthoredRecoveredHooks(
   if (!saved) {
     return;
   }
+  await absent(join(store.root.path, `${run}.host-process-owner.json`));
   const owner = parseOwner(JSON.parse(saved.text));
   if (
     owner.run !== run ||

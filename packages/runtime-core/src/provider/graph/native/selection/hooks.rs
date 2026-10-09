@@ -21,6 +21,8 @@ struct Input {
     owner: Pin,
     pid: u32,
     uid: u32,
+    #[serde(default)]
+    processes: Option<Pin>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -43,6 +45,90 @@ pub(super) struct Permit {
     owner_snapshot: Document,
     semantic: String,
     pid: u32,
+    processes: Option<Vec<String>>,
+    process_documents: Vec<(Pin, Document)>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProcessOwner {
+    version: u32,
+    kind: String,
+    run: String,
+    project: PathBuf,
+    branch: Option<String>,
+    semantic_hash: String,
+    pid: u32,
+    uid: u32,
+    names: Vec<String>,
+    compose_project: String,
+    project_name: String,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProcessReady {
+    version: u32,
+    kind: String,
+    run: String,
+    project: PathBuf,
+    branch: Option<String>,
+    semantic_hash: String,
+    owner: Pin,
+    pid: u32,
+    uid: u32,
+}
+type ProcessProof = (Vec<String>, Vec<(Pin, Document)>);
+
+fn process_proof(parent: &Path, input: &Input) -> Result<ProcessProof, CandidateError> {
+    let pin = input.processes.clone().ok_or_else(refused)?;
+    let mut documents = Vec::new();
+    let owner_pin = if input.role == "execution" {
+        if pin.path != parent.join(format!("{}.host-process-ready.json", input.run)) {
+            return Err(refused());
+        }
+        let (snapshot, text) = private(&pin.path, &pin)?;
+        let ready: ProcessReady = serde_json::from_str(&text).map_err(|_| refused())?;
+        if ready.version != 1
+            || ready.kind != "native-authored-host-process-ready"
+            || ready.run != input.run
+            || ready.project != input.project
+            || ready.branch != input.branch
+            || ready.semantic_hash != input.semantic_hash
+            || ready.pid != input.pid
+            || ready.uid != input.uid
+        {
+            return Err(refused());
+        }
+        documents.push((pin, snapshot));
+        ready.owner
+    } else {
+        pin
+    };
+    if owner_pin.path != parent.join(format!("{}.host-process-owner.json", input.run)) {
+        return Err(refused());
+    }
+    let (snapshot, text) = private(&owner_pin.path, &owner_pin)?;
+    let owner: ProcessOwner = serde_json::from_str(&text).map_err(|_| refused())?;
+    if owner.version != 1
+        || owner.kind != "native-authored-host-process-owner"
+        || owner.run != input.run
+        || owner.project != input.project
+        || owner.branch != input.branch
+        || owner.semantic_hash != input.semantic_hash
+        || owner.pid != input.pid
+        || owner.uid != input.uid
+        || owner.compose_project.is_empty()
+        || owner.project_name.is_empty()
+        || owner
+            .names
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len()
+            != owner.names.len()
+    {
+        return Err(refused());
+    }
+    documents.push((owner_pin, snapshot));
+    Ok((owner.names, documents))
 }
 fn uid() -> u32 {
     // SAFETY: getuid takes no pointers and returns the caller's kernel-owned identity.
@@ -120,8 +206,15 @@ impl Permit {
         let input: Input = serde_json::from_str(&text).map_err(|_| refused())?;
         let branch = serde_json::to_vec(&source_input.branch).map_err(|_| refused())?;
         let key = format!("{:x}", Sha256::digest(&branch));
+        let persistent = source_input.version == 5;
         if input.version != 1
-            || input.kind != "native-authored-finite-hook-permit"
+            || input.kind
+                != if persistent {
+                    "native-authored-host-lifecycle-permit"
+                } else {
+                    "native-authored-finite-hook-permit"
+                }
+            || (!persistent && input.processes.is_some())
             || (if execution {
                 input.role != "execution"
             } else {
@@ -155,6 +248,12 @@ impl Permit {
         {
             return Err(refused());
         }
+        let (processes, process_documents) = if persistent {
+            let (names, documents) = process_proof(&parent, &input)?;
+            (Some(names), documents)
+        } else {
+            (None, Vec::new())
+        };
         let permit = Self {
             pin,
             owner: input.owner,
@@ -164,6 +263,8 @@ impl Permit {
             owner_snapshot,
             semantic: input.semantic_hash,
             pid: input.pid,
+            processes,
+            process_documents,
         };
         permit.verify()?;
         Ok(permit)
@@ -184,9 +285,20 @@ impl Permit {
         {
             return Err(refused());
         }
+        for (pin, expected) in &self.process_documents {
+            if private(&pin.path, pin)?.0 != *expected {
+                return Err(refused());
+            }
+        }
         Ok(())
     }
     pub(super) fn capability(&self) -> native::FrontendHooks {
-        native::FrontendHooks::verified(self.semantic.clone())
+        match &self.processes {
+            None => native::FrontendHooks::verified(self.semantic.clone()),
+            Some(names) => native::FrontendHooks::verified_processes(
+                self.semantic.clone(),
+                Some(names.clone()),
+            ),
+        }
     }
 }

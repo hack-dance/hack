@@ -121,8 +121,11 @@ impl Source {
         let text = text.ok_or_else(refused)?;
         let raw: serde_json::Value = serde_json::from_str(&text).map_err(|_| refused())?;
         let input: SourceInput = serde_json::from_str(&text).map_err(|_| refused())?;
-        if input.version != if execution.is_some() { 3 } else { 2 }
-            || (execution.is_none() && raw.get("hook_permit").is_some())
+        if !(if execution.is_some() {
+            [3, 5].contains(&input.version)
+        } else {
+            input.version == 2
+        }) || (execution.is_none() && raw.get("hook_permit").is_some())
             || !matches!(input.kind, SourceKind::NativeGraphSource)
             || !super::hex(&input.run, 32)
         {

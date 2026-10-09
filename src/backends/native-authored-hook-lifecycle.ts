@@ -5,6 +5,7 @@ import {
   type NativeHookResult,
   prepareNativeFiniteHookPhase,
 } from "../lib/native-host-hook-runner.ts";
+import { resolveNativeHostInvocationEnvironment } from "../lib/native-host-lifecycle-contract.ts";
 import type { NativeAuthoredReceipt } from "./native-authored-graph-protocol.ts";
 import type { NativeAuthoredHookOwner } from "./native-authored-hook-journal.ts";
 import { serveNativeHookStop } from "./native-authored-hook-stop.ts";
@@ -83,6 +84,7 @@ export function hookPhaseRunner(opts: {
   readonly hard: AbortSignal;
   readonly remaining: () => number;
   readonly projectRoot: string;
+  readonly hostProcesses?: boolean;
   readonly diagnostic: (error: unknown) => string | undefined;
   readonly stage: (value: NativeHookPhase) => void;
   readonly observe: (event: NativeHookDiagnostic) => void;
@@ -150,6 +152,9 @@ export function hookPhaseRunner(opts: {
               budget();
             },
             onSpawn: owner.child,
+            resolveEnvironment: opts.hostProcesses
+              ? resolveNativeHostInvocationEnvironment
+              : undefined,
           }),
       });
       opts.observe({ phase: name, boundary: "complete" });
@@ -174,6 +179,7 @@ export async function publishAuthoredReady(
     readonly payload: () => Buffer | undefined;
     readonly admitted: NativeAuthoredStartupAttempt;
     readonly hookOwner: NativeAuthoredHookOwner | undefined;
+    readonly assertHostReady?: () => Promise<void>;
     readonly phase: (name: NativeHookPhase) => Promise<NativeHookResult>;
     readonly inputs: () => Inputs;
     readonly admission: NativeAuthoredProjectAdmission;
@@ -195,9 +201,11 @@ export async function publishAuthoredReady(
     throw new Error("Native runtime membership is unobserved; values omitted.");
   }
   if (opts.hookOwner) {
+    await opts.assertHostReady?.();
     requireHookSuccess(await opts.phase("up.after"));
     await refreshRunning();
   }
+  await opts.assertHostReady?.();
   await opts.inputs().assertFresh();
   await opts.admitted.source.assertFresh();
   await opts.admission.assertHeld();

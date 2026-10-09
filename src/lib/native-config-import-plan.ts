@@ -137,6 +137,12 @@ function mappingFields(
   };
 }
 
+type NativeImportPurpose =
+  | "preview"
+  | "adoption-baseline"
+  | "completed-job-adoption"
+  | "storage-adoption";
+
 /**
  * Closed, pure conversion. Every raw field starts refused until explicitly mapped.
  * Completeness here describes mapping coverage; the preview owner separately requires
@@ -145,7 +151,7 @@ function mappingFields(
 function mapLegacyNativeInput(opts: {
   readonly configText: string;
   readonly composeText: string;
-  readonly purpose: "preview" | "adoption-baseline" | "storage-adoption";
+  readonly purpose: NativeImportPurpose;
 }): NativeImportPlan {
   const config = parseImportDocument({
     text: opts.configText,
@@ -219,7 +225,7 @@ function mapOwnedNetwork(
   opts: Pick<MappingContext, "candidate" | "mark" | "refuse"> & {
     readonly project: unknown;
     readonly compose: Record<string, unknown>;
-    readonly purpose: "preview" | "adoption-baseline" | "storage-adoption";
+    readonly purpose: NativeImportPurpose;
   }
 ): void {
   if (typeof opts.project !== "string") {
@@ -244,12 +250,32 @@ function mapOwnedNetwork(
     opts.refuse("compose", "/networks", "owned_bridge_jobs_unsupported");
     return;
   }
-  const { logical, internal, attachments } = mapping.intent;
-  opts.candidate.networks = { [logical]: { internal } };
-  for (const { service, aliases } of attachments) {
-    const workload = candidateWorkload(opts.candidate, service);
-    if (isRecord(workload)) {
-      workload.networks = { [logical]: { aliases: [...aliases] } };
+  if (mapping.kind === "owned") {
+    const { logical, internal, attachments } = mapping.intent;
+    opts.candidate.networks = { [logical]: { internal } };
+    for (const { service, aliases } of attachments) {
+      const workload = candidateWorkload(opts.candidate, service);
+      if (isRecord(workload)) {
+        workload.networks = { [logical]: { aliases: [...aliases] } };
+      }
+    }
+  } else {
+    opts.candidate.networks = Object.fromEntries(
+      mapping.intent.networks.map(({ logical, internal }) => [
+        logical,
+        { internal },
+      ])
+    );
+    for (const { service, networks } of mapping.intent.attachments) {
+      const workload = candidateWorkload(opts.candidate, service);
+      if (isRecord(workload)) {
+        workload.networks = Object.fromEntries(
+          networks.map(({ logical, aliases }) => [
+            logical,
+            { aliases: [...aliases] },
+          ])
+        );
+      }
     }
   }
   for (const { source, target, code } of mapping.pointers) {
@@ -311,6 +337,14 @@ export function mapLegacyNativeAdoptionBaseline(opts: {
   readonly composeText: string;
 }): NativeImportPlan {
   return mapLegacyNativeInput({ ...opts, purpose: "adoption-baseline" });
+}
+
+/** Pure v7 baseline used only after the retained owner has selected its closed static job family. */
+export function mapLegacyNativeCompletedJobAdoptionBaseline(opts: {
+  readonly configText: string;
+  readonly composeText: string;
+}): NativeImportPlan {
+  return mapLegacyNativeInput({ ...opts, purpose: "completed-job-adoption" });
 }
 
 /** Private static candidate with the same closed mappings plus strictly qualified local named storage. No ownership grant. */

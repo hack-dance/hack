@@ -9,7 +9,6 @@ import {
   resolveRegisteredProjectByName,
   upsertProjectRegistration,
 } from "../lib/projects-registry.ts";
-import { runHackTui } from "../tui/hack-tui.ts";
 import { logger } from "../ui/logger.ts";
 
 const options = [optPath, optProject] as const;
@@ -47,6 +46,7 @@ async function handleTui({
     projectOpt: args.options.project,
   });
 
+  const { runHackTui } = await import("../tui/hack-tui.ts");
   return await runHackTui({ project });
 }
 

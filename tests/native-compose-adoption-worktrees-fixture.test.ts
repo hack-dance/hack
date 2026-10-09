@@ -7,6 +7,7 @@ import {
   assertAdoptionBridgeObservation,
   assertAdoptionEndpointObservation,
   assertAdoptionForeignCanaryObservation,
+  assertAdoptionPluralEndpointObservation,
   assertAdoptionWorkerArgv,
   cleanupOwnedAdoptionFixture,
   createAdoptionFixtureProbe,
@@ -503,6 +504,122 @@ test("owned bridge observation refuses foreign membership and policy", () => {
       })
     ).toThrow(REFUSAL);
   }
+});
+
+test("two owned bridges require distinct policies, full per-bridge members and exact endpoint aliases", () => {
+  const plural = { ...instance, ownedNetworks: true as const };
+  const ids = { private: id, edge: "b".repeat(64) };
+  const privateRow = {
+    id,
+    name: `${instance.name}_private`,
+    logical: "private",
+    driver: "bridge",
+    scope: "local",
+    internal: true,
+    members: [id],
+  };
+  const edgeRow = {
+    ...privateRow,
+    id: ids.edge,
+    name: `${instance.name}_edge`,
+    logical: "edge",
+    internal: false,
+  };
+  expect(() =>
+    assertAdoptionBridgeObservation({
+      instance: plural,
+      id,
+      members: [id],
+      row: privateRow,
+    })
+  ).not.toThrow();
+  expect(() =>
+    assertAdoptionBridgeObservation({
+      instance: plural,
+      id: ids.edge,
+      members: [id],
+      row: edgeRow,
+    })
+  ).not.toThrow();
+  for (const row of [
+    { ...edgeRow, internal: true },
+    { ...edgeRow, members: [id, "c".repeat(64)] },
+    { ...edgeRow, logical: "private" },
+  ]) {
+    expect(() =>
+      assertAdoptionBridgeObservation({
+        instance: plural,
+        id: ids.edge,
+        members: [id],
+        row,
+      })
+    ).toThrow(REFUSAL);
+  }
+  const selected = {
+    id,
+    running: true,
+    networks: [
+      {
+        name: `${instance.name}_edge`,
+        id: ids.edge,
+        aliases: [`${instance.name}-db-1`, "db", "db-edge"],
+      },
+      {
+        name: `${instance.name}_private`,
+        id,
+        aliases: [`${instance.name}-db-1`, "db", "db-reader"],
+      },
+    ],
+  };
+  const verify = (row: unknown, running = true) =>
+    assertAdoptionPluralEndpointObservation({
+      instance: plural,
+      networkIds: ids,
+      container: { id, service: "db" },
+      running,
+      row,
+    });
+  expect(() => verify(selected)).not.toThrow();
+  for (const row of [
+    { ...selected, networks: selected.networks.slice(0, 1) },
+    { ...selected, networks: [selected.networks[0], selected.networks[0]] },
+    {
+      ...selected,
+      networks: [
+        { ...selected.networks[0], id: "c".repeat(64) },
+        selected.networks[1],
+      ],
+    },
+    {
+      ...selected,
+      networks: [
+        { ...selected.networks[0], aliases: ["db", "db-edge"] },
+        selected.networks[1],
+      ],
+    },
+    {
+      ...selected,
+      networks: [
+        { ...selected.networks[0], aliases: null },
+        selected.networks[1],
+      ],
+    },
+  ]) {
+    expect(() => verify(row)).toThrow(REFUSAL);
+  }
+  expect(() =>
+    verify(
+      {
+        ...selected,
+        running: false,
+        networks: selected.networks.map((network) => ({
+          ...network,
+          aliases: null,
+        })),
+      },
+      false
+    )
+  ).not.toThrow();
 });
 
 test("owned bridge inspection requests the logical Compose label consumed by the policy oracle", async () => {

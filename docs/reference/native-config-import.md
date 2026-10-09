@@ -66,9 +66,10 @@ routes, host/lifecycle settings, `env_file`, deployment options and extensions
 are outside the first slice. They cannot be silently omitted from a complete
 conversion.
 
-The network mapping accepts one named non-default, non-ingress bridge only. It
-requires explicit `internal: true` or `false`, optional `driver: bridge`, and
-one explicit attachment per workload, including inactive jobs. Unknown
+The network mapping accepts one or exactly two named non-default, non-ingress
+bridges. Each requires explicit `internal: true` or `false` and optional
+`driver: bridge`; every workload, including inactive jobs, must explicitly
+attach to one or both declared bridges. Each declared bridge must be used. Unknown
 network/attachment fields, custom physical names, external networks, IPAM,
 driver options, implicit or mixed default attachments, and duplicate or
 workload-colliding aliases refuse. Import preview preserves the authored
@@ -87,19 +88,18 @@ one-shot labels, job health checks and non-`no` job restart policies refuse. Omi
 job restart stays omitted; no native default is invented. Supported profile fields
 remain authored selection, and unsupported fields in inactive jobs still refuse.
 
-This is pure conversion, not retained-job adoption. Existing retained adoption
-owners still refuse job candidates: their receipt versions do not qualify job
-ordering, completion, recovery or replay. A job import preview does not upgrade a
+This is pure conversion, not retained-job adoption. Versions 1–5 do not qualify job
+ordering, completion, recovery or replay. The distinct [version-7 retained owner](native-compose-adoption.md)
+qualifies only its closed static/default-network family. A job import preview does not upgrade a
 receipt, launch or recreate a container, transfer ownership, or qualify application
-migration. Job-aware retained lifecycle and two-worktree data acceptance remain
-separate work.
+migration. Two-worktree data acceptance remains a separate live gate.
 
-Retained resource planning uses its own closed adoption baseline and refuses jobs
-before acquiring existing engine resource bindings, even when pure conversion
-can preserve a job's named mounts. Symbolic conversion is not an ownership grant.
+The service-only adoption baseline continues to refuse jobs. Only the version-7
+owner selects its distinct completed-job baseline after verifying the closed
+static family. Symbolic conversion is not an ownership grant.
 
 Pure preview can preserve a completed job's explicit attachment and aliases on
-the same owned bridge. Retained storage/adoption still refuses custom-network
+these owned bridges. Retained storage/adoption still refuses custom-network
 job combinations: neither the job nor network receipt proves their combined
 ordering, endpoint ownership, recovery or replay.
 
@@ -110,7 +110,7 @@ that fit the compiler's positive u32 milliseconds. Missing or zero timings,
 and the native contract cannot express all of those options. Explicit `disable:
 false` is the default enabled setting. Optional edges and restart propagation
 refuse. Completed-job conversion is supported as described above; retained-job
-execution remains a separate slice. Unknown HTTP/TCP fields also refuse.
+execution has its own version and family boundary. Unknown HTTP/TCP fields also refuse.
 The compiler rejects missing, cyclic or inactive dependency targets and ready
 edges whose target has no explicit readiness. Refusals include inactive profiles.
 

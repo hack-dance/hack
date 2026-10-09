@@ -38,6 +38,19 @@ receipt version 6; the closed started/exec-health intersection selects version
 10. Both owners refuse generated managed sources, typed local inputs, jobs and
 unqualified network shapes. Other receipt versions do not gain this combined
 authority; older readers refuse version 10 rather than reinterpret its binding.
+Exactly two static project-owned named bridges select private manifest and
+receipt version 11 with resource binding version 5. Every bridge declares an
+explicit `internal` policy, uses the local bridge driver, and has at least one
+closed service attachment. The owner binds each original bridge ID, creation
+record, policy, configured bridge IDs and endpoint aliases, and complete live
+member inventory. It rechecks those identities before retained effects and
+final publication; stopped endpoints may omit aliases but must retain the exact
+configured bridge IDs. Default, external, ingress, third-party and additional
+bridges, as well as generated sources, health dependencies, jobs and other
+unqualified family intersections, still refuse. This version keeps the original
+containers and volumes; it does not silently replace either original bridge.
+Any later newly created native generation needs its own explicit topology and
+data acceptance. Earlier receipt versions retain their narrower authority.
 
 The static retained-container slice also inspects relevant filenames in the
 verified primary checkout when local inheritance is enabled. Managed-env,
@@ -104,8 +117,44 @@ the engine atomically. Public output remains field/count/status metadata;
 capabilities and authored probe arguments are private. Prior versions 1–4 keep
 their existing execution behavior, and older upgraded owners refuse version 5
 before engine/key reads. Unmodified older launchers still require the previously
-documented upgrade boundary. Completed-job dependencies and container recreation
-remain unsupported required follow-up work.
+documented upgrade boundary. Version 5 does not authorize completed jobs;
+container recreation remains unsupported.
+
+The distinct version 7 receipt and manifest support explicitly mapped completion
+jobs in a static authored pair with the original default bridge and binding version
+1. Names, full container IDs, source/configuration hashes and volume witnesses stay
+unchanged. Generated/managed inputs, typed locals, profiles, custom networks, routes
+and host hooks remain refused for this family before resource effects or value
+acquisition. Jobs require no health check and a disabled observed restart policy
+(`no` or the daemon's empty spelling), with zero retries; authored restart omission
+stays omitted. Version 6 is reserved for its
+separate static-network work and grants no job authority.
+
+Start and restart capture each job's prior daemon `StartedAt` immediately before
+an admitted exact-ID start. The successful child and a fresh nonzero UTC timestamp
+at nanosecond precision, followed by exited status and exit zero, are required
+before starting dependents. Fast jobs need not be observed running. Old exit zero,
+equivalent timestamp spellings, unknown facts or a fresh nonzero exit cannot satisfy
+completion. The real ordered adapter alone can issue a private one-use completion
+bound to this invocation's candidate, resource binding, source capability and
+deadline. Injected schedulers, numeric zero, cloned or replayed completions cannot
+clear the pending journal. Final publication reacquires all exact workload facts
+and rechecks source, receipt, original ownership and the same deadline.
+
+Stop and `down --recover` stop only the original IDs in reverse dependency order;
+they never replay jobs. A failed start, cancellation, changed inputs or uncertain
+postcondition preserves pending. Restart is an explicit new forward attempt on the
+same IDs. Stopped rollback retains data and restores the held legacy pair. These
+cooperative daemon observations do not prove hostile-engine resistance, clock
+authentication or exactly-once business effects. The finite offline job model and
+synthetic owner tests are separate from the required maintained two-worktree SQL,
+interruption and cleanup acceptance.
+
+An ordered observer or scheduler refusal can add a fixed
+`legacy_adoption_refusal: {stage, reason}` to the JSON error detail. The category
+identifies the rejecting boundary without exposing daemon output, resource IDs,
+SQL or environment values. It does not assert which effect occurred; other
+ownership failures keep the existing fixed generic error.
 
 The maintained `native-compose-adoption-dependency-worktrees` selector exercises
 an explicit exec-healthy edge and a short started edge whose target has no health
@@ -171,7 +220,11 @@ Stopped originals remain bound through their configured network IDs even though
 Docker removes their active endpoints. A stopped owned-bridge endpoint may expose
 no aliases, but cannot acquire a different configured network ID. This transient
 running state is not saved in the resource binding. Other authored network
-policies remain unsupported. Engine ID, resource inventories and source
+policies remain unsupported. Version 11 applies the same exact per-bridge proof
+to two distinct original named bridges, checking each complete live member set
+and each service's closed one-or-two-bridge attachment and aliases. Neither a
+shared network ID nor a partial member observation can stand in for the other
+bridge. Engine ID, resource inventories and source
 bytes are rechecked, and acquisition compares two complete private observations.
 The Docker routing environment is captured for later comparison. Queries never
 request container environment or image configuration. This retained-resource authority

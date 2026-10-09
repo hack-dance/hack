@@ -5,6 +5,7 @@ import {
   lstat,
   mkdir,
   mkdtemp,
+  readdir,
   readFile,
   realpath,
   rename,
@@ -18,9 +19,13 @@ import {
   resolveModernComposeEnvOverrides,
   resolveRuntimeHostMetadataOverride,
 } from "../src/commands/project.ts";
+import { HackCliError } from "../src/lib/cli-result.ts";
 import { renderManagedComposeEnvOverride } from "../src/lib/compose-managed-env.ts";
 import { tryLegacyComposeAdoptedCommand } from "../src/lib/native-compose-adoption-command.ts";
-import { runLegacyComposeRetainedOperation } from "../src/lib/native-compose-adoption-execution.ts";
+import {
+  type LegacyComposeRetainedOutcome,
+  runLegacyComposeRetainedOperation,
+} from "../src/lib/native-compose-adoption-execution.ts";
 import {
   LegacyComposeAdoptedGenerationError,
   openLegacyComposeAdoptedGenerationStore,
@@ -38,6 +43,8 @@ import {
 } from "../src/lib/project-input-selection.ts";
 import { buildRuntimeHostMetadataOverride } from "../src/lib/runtime-host-metadata.ts";
 import { captureAdoptionDependencyFirstPrepare } from "./e2e/scenarios/native-compose-adoption-dependency-staged-read.ts";
+import { completedJobFixtureSources } from "./e2e/scenarios/native-compose-adoption-job-inputs.ts";
+import { createCompletedJobFixtureSettlement } from "./e2e/scenarios/native-compose-adoption-job-worktrees.ts";
 import { restoreEnv } from "./helpers/env.ts";
 import { managedEnvCompilerFixture } from "./helpers/managed-env-compiler.ts";
 
@@ -61,6 +68,23 @@ type Fixture = {
   states?: Record<string, boolean>;
   health?: Record<string, string>;
   ordered?: boolean;
+  jobs?: Record<
+    string,
+    {
+      startedAt: string;
+      finishedAt: string;
+      exitCode: number;
+      attempts: number;
+    }
+  >;
+  jobFinalRace?: boolean;
+  jobObservation?:
+    | "shape"
+    | "timestamp"
+    | "restart-policy"
+    | "membership"
+    | "probe";
+  jobRestartPolicy?: "" | "no" | "always";
   aliases?: Record<string, string[]>;
   foreignAfterFirstStart?: boolean;
   sourceRace?: boolean;
@@ -79,7 +103,11 @@ let priorPath: string | undefined;
 let priorCI: string | undefined;
 let priorExecutionMode: string | undefined;
 let fixture: Fixture;
+let publicStatic7Commands = 0;
+const publicStatic7Settlement = createCompletedJobFixtureSettlement();
 beforeEach(async () => {
+  // An outer test timeout does not cancel an awaited owner. Never recycle its globals or roots.
+  publicStatic7Settlement.assertConfirmed();
   priorPath = process.env.PATH;
   priorCI = process.env.CI;
   priorExecutionMode = process.env.HACK_EXECUTION_MODE;
@@ -154,14 +182,14 @@ beforeEach(async () => {
     join(root, "docker"),
     `#!${process.execPath}
 import {appendFileSync, readFileSync, writeFileSync} from "node:fs";
-import {adoptionDependencyReadAllowed} from ${JSON.stringify(new URL("./e2e/scenarios/native-compose-adoption-dependency-inputs.ts", import.meta.url).pathname)};
-import {adoptionDependencyStagedReadAllowed} from ${JSON.stringify(new URL("./e2e/scenarios/native-compose-adoption-dependency-staged-read.ts", import.meta.url).pathname)};
 const root = ${JSON.stringify(root)};
 const args = process.argv.slice(2);
 appendFileSync(root + "/commands", JSON.stringify(args) + "\\n");
 const fixture = JSON.parse(readFileSync(root + "/fixture.json", "utf8"));
 const [kind, action] = args;
 if(fixture.dependencyReadScope && !(kind === 'container' && ['start','stop','restart'].includes(action))) {
+ const {adoptionDependencyReadAllowed}=await import(${JSON.stringify(new URL("./e2e/scenarios/native-compose-adoption-dependency-inputs.ts", import.meta.url).pathname)});
+ const {adoptionDependencyStagedReadAllowed}=await import(${JSON.stringify(new URL("./e2e/scenarios/native-compose-adoption-dependency-staged-read.ts", import.meta.url).pathname)});
  let saved=null;try {saved=JSON.parse(readFileSync(fixture.dependencyReadScope.projectRoot+'/.hack/.internal/legacy-compose-adoption-v1/receipt.json','utf8'));}catch{}
  const allowed=adoptionDependencyReadAllowed({args,projectRoot:fixture.dependencyReadScope.projectRoot,project:'fixture',containerIds:fixture.container.map(row=>row.id),networkId:fixture.network[0].id,volumeName:fixture.volume[0].id,generationId:saved?.prepared?.id ?? saved?.publication?.generation?.id}) || (fixture.dependencyReadScope.allowFirstPrepare && await adoptionDependencyStagedReadAllowed({args,project:'fixture',first:fixture.dependencyReadScope.first}));
  const stage=kind==='compose' && args[10]?.includes('/generations/') ? saved?.prepared ? 'published' : 'staged' : 'original';
@@ -173,6 +201,10 @@ if (kind === 'container' && ['start','restart','stop'].includes(action)) {
  if(fixture.hangMutation) {writeFileSync(root + '/effect-started', String(process.pid));await Bun.sleep(60_000);}
  if (fixture.ordered) {for(const id of args.slice(2)) fixture.states[id] = action !== 'stop';}
  else fixture.running = action !== 'stop';
+ if(fixture.jobs) for(const id of args.slice(2)) if(fixture.jobs[id]) {
+  fixture.states[id]=false;
+  if(action==='start') {fixture.jobs[id].attempts++;fixture.jobs[id].startedAt='2026-10-08T00:00:02.'+String(fixture.jobs[id].attempts).padStart(9,'0')+'Z';fixture.jobs[id].finishedAt='2026-10-08T00:00:03Z';}
+ }
  if (fixture.aliases) {for(const id of args.slice(2)) {const row=fixture.container.find(container=>container.id===id);if(row) row.networks[0].aliases=action==='stop'?[]:[row.name.slice(1),row.service,...(fixture.aliases[row.service]??[])];}}
  if (fixture.foreignAfterFirstStart && action==='start' && args.includes(${JSON.stringify(ID)})) {fixture.network[0].containers.push('e'.repeat(64));delete fixture.foreignAfterFirstStart;}
  if(fixture.sourceRace) { writeFileSync(${JSON.stringify(join(projectRoot, ".hack/hack.project.json"))}, 'synthetic-private-source-race'); }
@@ -194,7 +226,18 @@ else {
  const id = args.at(-1);const rows = fixture[kind].filter(row => row.id === id);
  if (!rows.length) process.exit(1);
  if (kind === "container" && args.join().includes('config-hash')) { console.log(JSON.stringify({id,hash:fixture.configHash ?? 'd'.repeat(64)})); process.exit(0); }
- if (kind === "container" && args.join().includes('.State.Running') && !args.join().includes('.Mounts')) { const running=fixture.states?.[id] ?? fixture.running ?? false;console.log(JSON.stringify({id,running,paused:false,status:running ? 'running' : 'exited', ...(args.join().includes('index .State "Health"') ? {health: fixture.health?.[id] ?? ''} : {})})); process.exit(0); }
+ if (kind === "container" && args.join().includes('.State.Running') && !args.join().includes('.Mounts')) { const running=fixture.states?.[id] ?? fixture.running ?? false;
+  if(args.join().includes('.State.ExitCode')) {
+   if(fixture.jobObservation==='probe') {console.error(${JSON.stringify(CANARY)});process.exit(29);}
+   if(fixture.jobFinalRace) writeFileSync(${JSON.stringify(join(projectRoot, ".hack/hack.project.json"))}, 'synthetic-private-final-job-race');
+   const observed={id,running,paused:false,status:running?'running':'exited',health:fixture.health?.[id]??'',exitCode:fixture.jobs?.[id]?.exitCode??0,startedAt:fixture.jobs?.[id]?.startedAt??'2026-10-08T00:00:01Z',finishedAt:fixture.jobs?.[id]?.finishedAt??'2026-10-08T00:00:03Z',restartPolicy:fixture.jobRestartPolicy??'no',maximumRetryCount:0};
+   if(fixture.jobObservation==='shape') delete observed.health;
+   if(fixture.jobObservation==='timestamp') observed.startedAt=${JSON.stringify(CANARY)};
+   if(fixture.jobObservation==='restart-policy') observed.restartPolicy=${JSON.stringify(CANARY)};
+   if(fixture.jobObservation==='membership') observed.id='f'.repeat(64);
+   console.log(JSON.stringify(observed)); process.exit(0);
+  }
+  console.log(JSON.stringify({id,running,paused:false,status:running ? 'running' : 'exited', ...(args.join().includes('index .State "Health"') ? {health: fixture.health?.[id] ?? ''} : {})})); process.exit(0); }
  for (const row of rows) {
   if (kind === 'container') console.log(JSON.stringify({...row,running:fixture.states?.[id] ?? fixture.running ?? false}));
   else if (kind === 'network') console.log(JSON.stringify({...row,containers:row.containers.filter(id=>!fixture.container.some(container=>container.id===id) || (fixture.states?.[id] ?? fixture.running ?? false))}));
@@ -212,6 +255,15 @@ if (fixture.mode === "inventory-change" && kind === "container" && action === "l
   await save();
 });
 afterEach(async () => {
+  if (publicStatic7Commands !== 0) {
+    publicStatic7Settlement.markUnconfirmed();
+  }
+  try {
+    publicStatic7Settlement.assertConfirmed();
+  } catch {
+    // Retain the still-owned fixture; a late callback cannot restore teardown authority.
+    return;
+  }
   restoreEnv("PATH", priorPath);
   restoreEnv("CI", priorCI);
   restoreEnv("HACK_EXECUTION_MODE", priorExecutionMode);
@@ -234,6 +286,30 @@ async function ownedBridge() {
     logical: "lab",
     internal: true,
   };
+  await save();
+}
+async function twoOwnedBridges() {
+  await writeFile(
+    join(projectRoot, ".hack/docker-compose.yml"),
+    `name: fixture\nservices:\n  db:\n    image: ${CANARY}\n    environment:\n      PRIVATE: ${CANARY}\n      EMPTY: ""\n    networks:\n      edge:\n        aliases: [writer]\n      lab:\n        aliases: [database]\n    volumes:\n      - data:/var/lib/database\nnetworks:\n  edge:\n    driver: bridge\n    internal: false\n  lab:\n    driver: bridge\n    internal: true\nvolumes:\n  data:\n    name: ${VOLUME}\n`
+  );
+  fixture.container[0]!.networks = [
+    { name: "fixture_edge", id: "e".repeat(64), aliases: [] },
+    { name: "fixture_lab", id: NETWORK, aliases: [] },
+  ];
+  fixture.network[0] = {
+    ...fixture.network[0],
+    name: "fixture_lab",
+    logical: "lab",
+    internal: true,
+  };
+  fixture.network.push({
+    ...fixture.network[0],
+    id: "e".repeat(64),
+    name: "fixture_edge",
+    logical: "edge",
+    internal: false,
+  });
   await save();
 }
 function container() {
@@ -274,10 +350,12 @@ else { const raw=await Bun.stdin.text(); await Bun.write(${JSON.stringify(join(r
 function stateRoot() {
   return join(projectRoot, ".hack/.internal/legacy-compose-adoption-v1");
 }
-async function prepared() {
+async function prepared(binary?: string) {
   const store = await openLegacyComposeAdoptedGenerationStore({ projectRoot });
   try {
-    const generation = await store.prepare({ binary: await compiler() });
+    const generation = await store.prepare({
+      binary: binary ?? (await compiler()),
+    });
     return { store, generation };
   } catch (error: unknown) {
     await store.close();
@@ -359,6 +437,728 @@ async function mutationCommands() {
         ["start", "stop", "restart"].includes(args[1])
     );
 }
+
+async function completedJobFixture() {
+  const app = await dependencyFixture(),
+    job = "e".repeat(64);
+  await writeFile(
+    join(projectRoot, ".hack/docker-compose.yml"),
+    JSON.stringify({
+      name: "fixture",
+      services: {
+        db: {
+          image: CANARY,
+          volumes: ["data:/var/lib/database"],
+          healthcheck: {
+            test: ["CMD", "probe"],
+            interval: "1s",
+            timeout: "1s",
+            retries: 2,
+          },
+        },
+        seed: {
+          image: CANARY,
+          command: ["seed-once"],
+          labels: { "hack.service.one-shot": "true" },
+          depends_on: { db: { condition: "service_healthy" } },
+        },
+        web: {
+          image: CANARY,
+          depends_on: { seed: { condition: "service_completed_successfully" } },
+        },
+      },
+      volumes: { data: { name: VOLUME } },
+    })
+  );
+  fixture.container.push({
+    ...container(),
+    id: job,
+    name: "/fixture-seed-1",
+    service: "seed",
+    mounts: [],
+  });
+  network().containers = [ID, app, job];
+  fixture.states = { [ID]: false, [app]: false, [job]: false };
+  fixture.jobs = {
+    [job]: {
+      startedAt: "2026-10-08T00:00:01Z",
+      finishedAt: "2026-10-08T00:00:01.5Z",
+      exitCode: 0,
+      attempts: 0,
+    },
+  };
+  await save();
+  return { app, job };
+}
+
+async function maintainedCompletedJobFixture() {
+  const ids = await completedJobFixture();
+  const authored = completedJobFixtureSources({
+    name: "fixture",
+    image: `sha256:${"d".repeat(64)}`,
+    marker: "retained-seed",
+  });
+  await writeFile(
+    join(projectRoot, ".hack/hack.config.json"),
+    JSON.stringify(authored.config)
+  );
+  await writeFile(
+    join(projectRoot, ".hack/docker-compose.yml"),
+    JSON.stringify(authored.compose)
+  );
+  const originalVolume = fixture.volume[0];
+  if (!originalVolume) {
+    throw new Error("missing original volume");
+  }
+  originalVolume.id = "fixture_data";
+  originalVolume.name = "fixture_data";
+  for (const row of fixture.container) {
+    if (row.id === ids.app) {
+      row.service = "app";
+      row.name = "/fixture-app-1";
+    }
+    row.mounts = [
+      {
+        type: "volume",
+        name: "fixture_data",
+        source: originalVolume.mountpoint,
+        target: "/var/lib/postgresql/data",
+        rw: row.service === "db",
+      },
+    ];
+  }
+  await save();
+  return ids;
+}
+
+/** Transport stand-in for the maintained authored family; compiler semantic qualification remains separate. */
+async function maintainedJobCompiler() {
+  const binary = join(root, "job-compiler");
+  await writeFile(
+    binary,
+    `#!${process.execPath}
+if(process.argv[2]==='--protocol') {console.log(JSON.stringify({transport_version:1, authored_version:1, plan_version:1, process_plan_version:1, acquisition_plan_version:1}));}
+else {
+ const raw=await Bun.stdin.text();const input=JSON.parse(raw);
+ const workloads=(values)=>Object.fromEntries(Object.entries(values??{}).map(([name,value])=>{
+  const next={...value};if(next.shutdown){if(next.shutdown.grace!=='3s') throw new Error('fixture shutdown mismatch');next.shutdown={...next.shutdown,grace:'3000ms'};}return[name,next];
+ }));
+ const plan={...input, plan_version:1, selected_profiles:[], services:workloads(input.services), jobs:workloads(input.jobs)};
+ const declared_workloads=Object.fromEntries([...Object.keys(input.services).map(name=>[name,'service']),...Object.keys(input.jobs).map(name=>[name,'job'])]);
+ console.log(JSON.stringify({transport_version:1,ok:true,plan,declared_workloads,semantic_hash:'a'.repeat(64)}));
+}`
+  );
+  await chmod(binary, 0o700);
+  return binary;
+}
+
+async function publicStatic7Case(run: () => Promise<void>) {
+  publicStatic7Commands += 1;
+  try {
+    await run();
+  } finally {
+    publicStatic7Commands -= 1;
+  }
+}
+
+function publicStatic7Stages() {
+  const started = Date.now();
+  return (
+    phase: "prepare" | "publish" | "start" | "stop",
+    status: "enter" | "settled"
+  ) => {
+    console.info(
+      `static7-public phase=${phase} status=${status} elapsedMs=${Date.now() - started}`
+    );
+  };
+}
+
+boundedTest.each(["no", ""] as const)(
+  "public retained up dispatches the maintained static7 family with disabled policy %j",
+  async (jobRestartPolicy) => {
+    await publicStatic7Case(async () => {
+      const stages = publicStatic7Stages();
+      stages("prepare", "enter");
+      const { app, job } = await maintainedCompletedJobFixture();
+      const binary = await maintainedJobCompiler();
+      const { store, generation } = await prepared(binary);
+      stages("prepare", "settled");
+      const priorCompiler = process.env.HACK_CONFIG_COMPILER_BINARY;
+      try {
+        process.env.HACK_CONFIG_COMPILER_BINARY = binary;
+        stages("publish", "enter");
+        await store.publish({ generation, binary });
+        stages("publish", "settled");
+        fixture.jobRestartPolicy = jobRestartPolicy;
+        await save();
+        expect(generation.report.adoption_generation_version).toBe(7);
+        stages("start", "enter");
+        expect(
+          await tryLegacyComposeAdoptedCommand({
+            cwd: projectRoot,
+            operation: "up",
+            detach: true,
+          })
+        ).toBe(0);
+        stages("start", "settled");
+        expect(await mutationCommands()).toEqual([
+          ["container", "start", ID],
+          ["container", "start", job],
+          ["container", "start", app],
+        ]);
+        expect((await readReceipt()).pendingOperation).toBeNull();
+        stages("stop", "enter");
+        expect(
+          await tryLegacyComposeAdoptedCommand({
+            cwd: projectRoot,
+            operation: "down",
+          })
+        ).toBe(0);
+        stages("stop", "settled");
+        expect((await mutationCommands()).slice(-3)).toEqual([
+          ["container", "stop", app],
+          ["container", "stop", job],
+          ["container", "stop", ID],
+        ]);
+      } finally {
+        restoreEnv("HACK_CONFIG_COMPILER_BINARY", priorCompiler);
+        await store.close();
+      }
+    });
+  },
+  30_000
+);
+
+boundedTest.each([
+  "shape",
+  "timestamp",
+  "restart-policy",
+  "membership",
+  "probe",
+] as const)(
+  "public static7 observer refuses %s with only closed diagnostics and keeps pending",
+  async (reason) => {
+    await publicStatic7Case(async () => {
+      await maintainedCompletedJobFixture();
+      const binary = await maintainedJobCompiler();
+      const { store, generation } = await prepared(binary);
+      const priorCompiler = process.env.HACK_CONFIG_COMPILER_BINARY;
+      try {
+        process.env.HACK_CONFIG_COMPILER_BINARY = binary;
+        await store.publish({ generation, binary });
+        fixture.jobObservation = reason;
+        await save();
+        let rejection: unknown;
+        try {
+          await tryLegacyComposeAdoptedCommand({
+            cwd: projectRoot,
+            operation: "up",
+            detach: true,
+          });
+        } catch (error: unknown) {
+          rejection = error;
+        }
+        expect(rejection).toBeInstanceOf(HackCliError);
+        if (!(rejection instanceof HackCliError)) {
+          throw new Error("missing public refusal");
+        }
+        expect(rejection.code).toBe("E_CONFIG_INVALID");
+        expect(rejection.detail).toEqual({
+          legacy_adoption_refusal: {
+            stage: "ordered-observation",
+            reason: reason === "probe" ? "probe-child" : reason,
+          },
+        });
+        expect(
+          JSON.stringify({
+            message: rejection.message,
+            detail: rejection.detail,
+          })
+        ).not.toContain(CANARY);
+        expect((await readReceipt()).pendingOperation.operation).toBe("start");
+        expect(
+          (await mutationCommands()).some(
+            (args) => args[2] === "e".repeat(64) || args[2] === "c".repeat(64)
+          )
+        ).toBe(false);
+      } finally {
+        restoreEnv("HACK_CONFIG_COMPILER_BINARY", priorCompiler);
+        await store.close();
+      }
+    });
+  },
+  30_000
+);
+
+boundedTest(
+  "public static7 scheduler classifies actual nonzero job exit without starting its dependent",
+  async () => {
+    await publicStatic7Case(async () => {
+      const { job, app } = await maintainedCompletedJobFixture();
+      const binary = await maintainedJobCompiler();
+      const { store, generation } = await prepared(binary);
+      const priorCompiler = process.env.HACK_CONFIG_COMPILER_BINARY;
+      try {
+        process.env.HACK_CONFIG_COMPILER_BINARY = binary;
+        await store.publish({ generation, binary });
+        const jobState = fixture.jobs?.[job];
+        if (!jobState) {
+          throw new Error("missing job state");
+        }
+        jobState.exitCode = 17;
+        await save();
+        let rejection: unknown;
+        try {
+          await tryLegacyComposeAdoptedCommand({
+            cwd: projectRoot,
+            operation: "up",
+            detach: true,
+          });
+        } catch (error: unknown) {
+          rejection = error;
+        }
+        expect(rejection).toBeInstanceOf(HackCliError);
+        if (!(rejection instanceof HackCliError)) {
+          throw new Error("missing public refusal");
+        }
+        expect(rejection.detail).toEqual({
+          legacy_adoption_refusal: {
+            stage: "ordered-scheduler",
+            reason: "job-failed",
+          },
+        });
+        expect(await mutationCommands()).toEqual([
+          ["container", "start", ID],
+          ["container", "start", job],
+        ]);
+        expect((await mutationCommands()).some((args) => args[2] === app)).toBe(
+          false
+        );
+        expect((await readReceipt()).pendingOperation.operation).toBe("start");
+      } finally {
+        restoreEnv("HACK_CONFIG_COMPILER_BINARY", priorCompiler);
+        await store.close();
+      }
+    });
+  },
+  30_000
+);
+
+boundedTest.each(["start", "restart", "stop"] as const)(
+  "v7 %s preserves original IDs, fresh job proof and stopped rollback",
+  async (operation) => {
+    const { app, job } = await completedJobFixture(),
+      { store, generation } = await prepared();
+    const signal = new AbortController().signal;
+    try {
+      const binary = await compiler();
+      expect(generation.report.adoption_generation_version).toBe(7);
+      await store.publish({ generation, binary });
+      expect((await readReceipt()).adoption_receipt_version).toBe(7);
+      // Restart/stop independently exercise retained running facts, not an inferred prior start effect.
+      if (operation !== "start") {
+        fixture.states = { [ID]: true, [app]: true, [job]: false };
+        await save();
+      }
+      const deadline = Date.now() + 20_000;
+      expect(
+        await store.withMutation({
+          generation,
+          binary,
+          operation,
+          services: [],
+          deadline,
+          run: (input) =>
+            runLegacyComposeRetainedOperation({
+              input,
+              operation,
+              deadline,
+              signal,
+            }),
+        })
+      ).toBe(0);
+      const forward = [
+        ["container", "start", ID],
+        ["container", "start", job],
+        ["container", "start", app],
+      ];
+      const reverse = [
+        ["container", "stop", app],
+        ["container", "stop", job],
+        ["container", "stop", ID],
+      ];
+      let expected = forward;
+      if (operation === "restart") {
+        expected = [...reverse, ...forward];
+      } else if (operation === "stop") {
+        expected = reverse;
+      }
+      expect(await mutationCommands()).toEqual(expected);
+      expect((await readReceipt()).pendingOperation).toBeNull();
+      const observed: unknown = JSON.parse(
+        await readFile(join(root, "fixture.json"), "utf8")
+      );
+      expect(observed).toMatchObject({
+        container: [{ id: ID }, { id: app }, { id: job }],
+        volume: [{ id: VOLUME, createdAt: CREATED }],
+        jobs: { [job]: { attempts: operation === "stop" ? 0 : 1 } },
+        states: {
+          [ID]: operation !== "stop",
+          [job]: false,
+          [app]: operation !== "stop",
+        },
+      });
+      if (operation === "stop") {
+        await store.rollback();
+        expect((await readReceipt()).publication.phase).toBe("rolled-back");
+        expect(
+          await Bun.file(join(projectRoot, ".hack/hack.project.json")).exists()
+        ).toBe(false);
+      }
+    } finally {
+      await store.close();
+    }
+  },
+  30_000
+);
+
+boundedTest(
+  "v7 old exit0 and callback numeric0 cannot clear the pending job attempt; recovery never starts jobs",
+  async () => {
+    const { app, job } = await completedJobFixture(),
+      { store, generation } = await prepared();
+    try {
+      const binary = await compiler();
+      await store.publish({ generation, binary });
+      await expect(
+        store.withMutation({
+          generation,
+          binary,
+          operation: "start",
+          services: [],
+          deadline: Date.now() + 20_000,
+          run: async () => {
+            fixture.states = { [ID]: true, [app]: true, [job]: false };
+            await save();
+            return 0;
+          },
+        })
+      ).rejects.toThrow("values omitted");
+      expect((await readReceipt()).pendingOperation.operation).toBe("start");
+      expect(await mutationCommands()).toEqual([]);
+      const deadline = Date.now() + 20_000;
+      expect(
+        await store.withMutation({
+          generation,
+          binary,
+          operation: "stop",
+          recover: true,
+          services: [],
+          deadline,
+          run: (input) =>
+            runLegacyComposeRetainedOperation({
+              input,
+              operation: "stop",
+              deadline,
+              signal: new AbortController().signal,
+            }),
+        })
+      ).toBe(0);
+      expect(await mutationCommands()).toEqual([
+        ["container", "stop", app],
+        ["container", "stop", job],
+        ["container", "stop", ID],
+      ]);
+      expect((await readReceipt()).pendingOperation).toBeNull();
+    } finally {
+      await store.close();
+    }
+  },
+  30_000
+);
+
+boundedTest(
+  "v7 immediate job exit17 keeps pending and prevents every dependent start",
+  async () => {
+    const { job } = await completedJobFixture();
+    if (!fixture.jobs?.[job]) {
+      throw new Error("missing job fixture");
+    }
+    fixture.jobs[job].exitCode = 17;
+    await save();
+    const { store, generation } = await prepared();
+    try {
+      const binary = await compiler();
+      await store.publish({ generation, binary });
+      const deadline = Date.now() + 20_000;
+      await expect(
+        store.withMutation({
+          generation,
+          binary,
+          operation: "start",
+          services: [],
+          deadline,
+          run: (input) =>
+            runLegacyComposeRetainedOperation({
+              input,
+              operation: "start",
+              deadline,
+              signal: new AbortController().signal,
+            }),
+        })
+      ).rejects.toThrow("values omitted");
+      expect(await mutationCommands()).toEqual([
+        ["container", "start", ID],
+        ["container", "start", job],
+      ]);
+      expect((await readReceipt()).pendingOperation.operation).toBe("start");
+      expect(fixture.volume[0]?.createdAt).toBe(CREATED);
+    } finally {
+      await store.close();
+    }
+  },
+  30_000
+);
+
+boundedTest(
+  "v7 consumed production completion cannot acknowledge a later invocation",
+  async () => {
+    await completedJobFixture();
+    const { store, generation } = await prepared();
+    try {
+      const binary = await compiler();
+      await store.publish({ generation, binary });
+      let previous: LegacyComposeRetainedOutcome | undefined;
+      const deadline = Date.now() + 20_000;
+      expect(
+        await store.withMutation({
+          generation,
+          binary,
+          operation: "start",
+          services: [],
+          deadline,
+          run: async (input) => {
+            previous = await runLegacyComposeRetainedOperation({
+              input,
+              operation: "start",
+              deadline,
+              signal: new AbortController().signal,
+            });
+            expect(JSON.stringify(previous)).toBe("{}");
+            return previous;
+          },
+        })
+      ).toBe(0);
+      const before = await mutationCommands();
+      await expect(
+        store.withMutation({
+          generation,
+          binary,
+          operation: "start",
+          services: [],
+          deadline: Date.now() + 20_000,
+          run: async () => {
+            if (!previous) {
+              throw new Error("missing completion");
+            }
+            return previous;
+          },
+        })
+      ).rejects.toThrow("values omitted");
+      expect(await mutationCommands()).toEqual(before);
+      expect((await readReceipt()).pendingOperation.operation).toBe("start");
+    } finally {
+      await store.close();
+    }
+  },
+  30_000
+);
+
+boundedTest(
+  "v7 cloned production completion cannot acknowledge otherwise ready original workloads",
+  async () => {
+    await completedJobFixture();
+    const { store, generation } = await prepared();
+    try {
+      const binary = await compiler();
+      await store.publish({ generation, binary });
+      const deadline = Date.now() + 20_000;
+      await expect(
+        store.withMutation({
+          generation,
+          binary,
+          operation: "start",
+          services: [],
+          deadline,
+          run: async (input) => {
+            const outcome = await runLegacyComposeRetainedOperation({
+              input,
+              operation: "start",
+              deadline,
+              signal: new AbortController().signal,
+            });
+            if (typeof outcome !== "object") {
+              throw new Error("missing completion");
+            }
+            return { ...outcome };
+          },
+        })
+      ).rejects.toThrow("values omitted");
+      expect(
+        (await mutationCommands()).filter((args) => args[1] === "start")
+      ).toHaveLength(3);
+      expect((await readReceipt()).pendingOperation.operation).toBe("start");
+    } finally {
+      await store.close();
+    }
+  },
+  30_000
+);
+
+boundedTest(
+  "v7 source drift in the final job probe prevents pending publication after successful children",
+  async () => {
+    const { app, job } = await completedJobFixture(),
+      { store, generation } = await prepared();
+    try {
+      const binary = await compiler();
+      await store.publish({ generation, binary });
+      const original = await readFile(
+        join(projectRoot, ".hack/hack.project.json"),
+        "utf8"
+      );
+      const deadline = Date.now() + 20_000;
+      await refusal(
+        store.withMutation({
+          generation,
+          binary,
+          operation: "start",
+          services: [],
+          deadline,
+          run: async (input) => {
+            const outcome = await runLegacyComposeRetainedOperation({
+              input,
+              operation: "start",
+              deadline,
+              signal: new AbortController().signal,
+            });
+            fixture = JSON.parse(
+              await readFile(join(root, "fixture.json"), "utf8")
+            );
+            fixture.jobFinalRace = true;
+            await save();
+            return outcome;
+          },
+        }),
+        "E_LEGACY_ADOPTION_STATE"
+      );
+      expect(await mutationCommands()).toEqual([
+        ["container", "start", ID],
+        ["container", "start", job],
+        ["container", "start", app],
+      ]);
+      expect((await readReceipt()).pendingOperation.operation).toBe("start");
+      fixture.jobFinalRace = false;
+      await save();
+      await writeFile(join(projectRoot, ".hack/hack.project.json"), original);
+      const recoveryDeadline = Date.now() + 20_000;
+      expect(
+        await store.withMutation({
+          generation,
+          binary,
+          operation: "stop",
+          recover: true,
+          services: [],
+          deadline: recoveryDeadline,
+          run: (input) =>
+            runLegacyComposeRetainedOperation({
+              input,
+              operation: "stop",
+              deadline: recoveryDeadline,
+              signal: new AbortController().signal,
+            }),
+        })
+      ).toBe(0);
+    } finally {
+      await store.close();
+    }
+  },
+  30_000
+);
+
+boundedTest(
+  "v7 final historical exit0 cannot clear pending even after a minted successful attempt",
+  async () => {
+    const { job } = await completedJobFixture(),
+      { store, generation } = await prepared();
+    try {
+      const binary = await compiler();
+      await store.publish({ generation, binary });
+      const deadline = Date.now() + 20_000;
+      await expect(
+        store.withMutation({
+          generation,
+          binary,
+          operation: "start",
+          services: [],
+          deadline,
+          run: async (input) => {
+            const outcome = await runLegacyComposeRetainedOperation({
+              input,
+              operation: "start",
+              deadline,
+              signal: new AbortController().signal,
+            });
+            fixture = JSON.parse(
+              await readFile(join(root, "fixture.json"), "utf8")
+            );
+            const state = fixture.jobs?.[job];
+            if (!state) {
+              throw new Error("missing job fixture");
+            }
+            state.startedAt = "2026-10-08T00:00:01.000Z";
+            await save();
+            return outcome;
+          },
+        })
+      ).rejects.toThrow("values omitted");
+      expect(
+        (await mutationCommands()).filter((args) => args[1] === "start")
+      ).toHaveLength(3);
+      expect((await readReceipt()).pendingOperation.operation).toBe("start");
+    } finally {
+      await store.close();
+    }
+  },
+  30_000
+);
+
+boundedTest(
+  "v7 managed layout refuses before compiler/value acquisition or engine probe",
+  async () => {
+    await completedJobFixture();
+    await writeFile(
+      join(projectRoot, ".hack/hack.env.prod.yaml"),
+      "synthetic-private-unqualified-managed-input"
+    );
+    const store = await openLegacyComposeAdoptedGenerationStore({
+      projectRoot,
+    });
+    try {
+      await expect(store.prepare({ binary: await compiler() })).rejects.toThrow(
+        "values omitted"
+      );
+      expect(await Bun.file(join(root, "commands")).exists()).toBe(false);
+      expect(await Bun.file(join(root, "candidate-received")).exists()).toBe(
+        false
+      );
+      expect((await readReceipt()).prepared).toBeNull();
+    } finally {
+      await store.close();
+    }
+  },
+  30_000
+);
 
 boundedTest(
   "v5 explicit preparation stop uses reverse original-ID order and can publish after verified completion",
@@ -1617,6 +2417,9 @@ test("v6 static owned bridge preserves the selected original IDs through saved p
         generation: active,
         run: async (input) => {
           expect(input.binding.containers[0]?.id).toBe(ID);
+          if (input.binding.binding_version !== 3) {
+            throw new Error("Expected one owned bridge binding");
+          }
           expect(input.binding.network.id).toBe(NETWORK);
           expect(input.binding.volumes[0]?.createdAt).toBe(CREATED);
           expect(JSON.stringify(input)).toBe("{}");
@@ -1631,6 +2434,191 @@ test("v6 static owned bridge preserves the selected original IDs through saved p
     } finally {
       await saved.close();
     }
+  } finally {
+    await store.close();
+  }
+});
+
+test("v11 two static bridges retain both original identities through publication and rollback", async () => {
+  await twoOwnedBridges();
+  const original = await readFile(
+    join(projectRoot, ".hack/docker-compose.yml"),
+    "utf8"
+  );
+  const binary = await compiler();
+  const store = await openLegacyComposeAdoptedGenerationStore({ projectRoot });
+  try {
+    const generation = await store.prepare({ binary });
+    expect(generation.report.adoption_generation_version).toBe(11);
+    expect((await readReceipt()).adoption_receipt_version).toBe(11);
+    const meta = JSON.parse(
+      await readFile(await artifactPath("manifest.json"), "utf8")
+    );
+    expect(meta.binding.binding_version).toBe(5);
+    expect(meta.binding.networks).toEqual([
+      {
+        id: "e".repeat(64),
+        name: "fixture_edge",
+        createdAt: CREATED,
+        logical: "edge",
+        internal: false,
+      },
+      {
+        id: NETWORK,
+        name: "fixture_lab",
+        createdAt: CREATED,
+        logical: "lab",
+        internal: true,
+      },
+    ]);
+    await store.publish({ generation, binary });
+    await store.withLease({
+      generation,
+      run: async (input) => {
+        expect(input.binding.containers[0]?.id).toBe(ID);
+        expect(input.binding.binding_version).toBe(5);
+        if (input.binding.binding_version !== 5) {
+          throw new Error("missing plural binding");
+        }
+        expect(input.binding.networks.map((network) => network.id)).toEqual([
+          "e".repeat(64),
+          NETWORK,
+        ]);
+      },
+    });
+    await store.rollback();
+    expect(
+      await readFile(join(projectRoot, ".hack/docker-compose.yml"), "utf8")
+    ).toBe(original);
+    expect(container().id).toBe(ID);
+    expect(fixture.network.map((network) => network.id).sort()).toEqual(
+      [NETWORK, "e".repeat(64)].sort()
+    );
+    expect(volume().createdAt).toBe(CREATED);
+  } finally {
+    await store.close();
+  }
+});
+
+test("v11 rejects crossed saved receipt and foreign bridge membership before callback", async () => {
+  await twoOwnedBridges();
+  const binary = await compiler();
+  const store = await openLegacyComposeAdoptedGenerationStore({ projectRoot });
+  try {
+    const generation = await store.prepare({ binary });
+    const original = await readReceipt();
+    for (const foreignVersion of [5, 6, 7, 8, 9, 10]) {
+      await writeReceipt({
+        ...original,
+        adoption_receipt_version: foreignVersion,
+      });
+      await refusal(store.loadPrepared());
+    }
+    await writeReceipt(original);
+    await store.publish({ generation, binary });
+    fixture.network[1]!.containers = ["f".repeat(64)];
+    await save();
+    let calls = 0;
+    await refusal(
+      store.withLease({
+        generation,
+        run: async () => {
+          calls++;
+        },
+      })
+    );
+    expect(calls).toBe(0);
+    expect((await readReceipt()).adoption_receipt_version).toBe(11);
+  } finally {
+    await store.close();
+  }
+});
+
+test("v11 saved source drift refuses before callback and rollback can prepare a plain owner", async () => {
+  const composePath = join(projectRoot, ".hack/docker-compose.yml");
+  const plainCompose = await readFile(composePath, "utf8");
+  await twoOwnedBridges();
+  const binary = await compiler();
+  const store = await openLegacyComposeAdoptedGenerationStore({ projectRoot });
+  try {
+    const generation = await store.prepare({ binary });
+    await store.publish({ generation, binary });
+    const activePath = join(projectRoot, ".hack/hack.project.json");
+    const active = await readFile(activePath, "utf8");
+    await writeFile(activePath, `${active}\n`);
+    let calls = 0;
+    await refusal(
+      store.withLease({
+        generation,
+        run: async () => {
+          calls++;
+        },
+      })
+    );
+    expect(calls).toBe(0);
+    // A byte-exact restoration permits only the selected old owner to roll back.
+    await writeFile(activePath, active);
+    await store.rollback();
+    fixture.container[0]!.networks = [{ name: "fixture_default", id: NETWORK }];
+    fixture.network = [
+      {
+        ...fixture.network[0],
+        id: NETWORK,
+        name: "fixture_default",
+        logical: "default",
+        internal: false,
+      },
+    ];
+    await writeFile(composePath, plainCompose);
+    await save();
+    const plain = await store.prepare({ binary });
+    expect(plain.report.adoption_generation_version).toBe(1);
+    expect((await readReceipt()).adoption_receipt_version).toBe(1);
+    expect(container().id).toBe(ID);
+    expect(volume().createdAt).toBe(CREATED);
+  } finally {
+    await store.close();
+  }
+});
+
+test("two bridges with health dependencies refuse before generation writes or effects", async () => {
+  const worker = await combinedBridgeHealthFixture();
+  const composePath = join(projectRoot, ".hack/docker-compose.yml");
+  const compose = JSON.parse(await readFile(composePath, "utf8"));
+  compose.networks.edge = { driver: "bridge", internal: false };
+  compose.services.db.networks.edge = { aliases: ["writer"] };
+  compose.services.web.networks.edge = { aliases: ["reader"] };
+  await writeFile(composePath, JSON.stringify(compose));
+  for (const row of fixture.container) {
+    if (!Array.isArray(row.networks)) {
+      throw new Error("fixture networks missing");
+    }
+    row.networks = [
+      ...row.networks,
+      { name: "fixture_edge", id: "e".repeat(64), aliases: [] },
+    ];
+  }
+  fixture.network.push({
+    ...network(),
+    id: "e".repeat(64),
+    name: "fixture_edge",
+    logical: "edge",
+    internal: false,
+  });
+  await save();
+  const binary = await compiler();
+  const store = await openLegacyComposeAdoptedGenerationStore({ projectRoot });
+  try {
+    const receipt = await readReceipt();
+    await refusal(store.prepare({ binary }), "E_LEGACY_ADOPTION_UNSUPPORTED");
+    expect(await readReceipt()).toEqual(receipt);
+    expect(await readdir(join(stateRoot(), "generations"))).toEqual([]);
+    expect(await mutationCommands()).toEqual([]);
+    expect(fixture.container.map((row) => row.id)).toEqual([ID, worker]);
+    expect(fixture.network.map((row) => row.id).sort()).toEqual(
+      [NETWORK, "e".repeat(64)].sort()
+    );
+    expect(volume().createdAt).toBe(CREATED);
   } finally {
     await store.close();
   }
@@ -1705,7 +2693,7 @@ test("v10 saved bridge and health owner rejects other contract receipts", async 
   try {
     expect(generation.report.adoption_generation_version).toBe(10);
     const current = await readReceipt();
-    for (const foreignVersion of [5, 6, 7, 8, 9]) {
+    for (const foreignVersion of [5, 6, 7, 8, 9, 11]) {
       await writeReceipt({
         ...current,
         adoption_receipt_version: foreignVersion,
@@ -1925,7 +2913,7 @@ test("v6 manifest and receipt must select the same saved topology owner", async 
   try {
     expect(generation.report.adoption_generation_version).toBe(6);
     const current = await readReceipt();
-    for (const foreignVersion of [4, 5]) {
+    for (const foreignVersion of [4, 5, 7]) {
       await writeReceipt({
         ...current,
         adoption_receipt_version: foreignVersion,
@@ -1965,6 +2953,32 @@ test("v5 retained health owner refuses a v6 topology receipt", async () => {
     await store.close();
   }
 });
+
+boundedTest(
+  "v7 retained completion owner refuses a v6 topology receipt",
+  async () => {
+    const { app, job } = await completedJobFixture();
+    const { store, generation } = await prepared();
+    try {
+      expect(generation.report.adoption_generation_version).toBe(7);
+      const current = await readReceipt();
+      expect(current.adoption_receipt_version).toBe(7);
+      await writeReceipt({ ...current, adoption_receipt_version: 6 });
+      await refusal(store.loadPrepared());
+      expect(await readReceipt()).toEqual({
+        ...current,
+        adoption_receipt_version: 6,
+      });
+      expect(await mutationCommands()).toEqual([]);
+      expect(fixture.container.map((row) => row.id)).toEqual([ID, app, job]);
+      expect(network().id).toBe(NETWORK);
+      expect(volume().createdAt).toBe(CREATED);
+    } finally {
+      await store.close();
+    }
+  },
+  30_000
+);
 
 test("v6 rollback permits a later plain owner without inheriting topology authority", async () => {
   const composePath = join(projectRoot, ".hack/docker-compose.yml");
@@ -2041,6 +3055,9 @@ test("v6 journals a running original stop before effect and retains the owned br
         generation,
         binary,
         run: async (input) => {
+          if (input.binding.binding_version !== 3) {
+            throw new Error("Expected one owned bridge binding");
+          }
           expect(input.binding.network.id).toBe(NETWORK);
           expect((await readReceipt()).adoption_receipt_version).toBe(6);
           expect((await readReceipt()).pendingOperation).toMatchObject({

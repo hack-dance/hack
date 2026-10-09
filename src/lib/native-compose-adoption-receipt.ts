@@ -17,7 +17,7 @@ export type Checkout = {
 };
 export type Anchor = { readonly id: string; readonly manifest: Artifact };
 export type Receipt = {
-  readonly adoption_receipt_version: 1 | 2 | 3 | 4 | 5 | 6 | 10;
+  readonly adoption_receipt_version: 1 | 2 | 3 | 4 | 5 | 6 | 7 | 10 | 11;
   readonly kind: typeof KIND;
   readonly checkout: Checkout;
   readonly prepared: Anchor | null;
@@ -77,7 +77,9 @@ export function parseLegacyComposeAdoptionReceipt(
         value,
         "adoption_receipt_version,checkout,kind,pendingOperation,prepared,publication"
       ) &&
-      (value.adoption_receipt_version === 10 ||
+      (value.adoption_receipt_version === 11 ||
+        value.adoption_receipt_version === 10 ||
+        value.adoption_receipt_version === 7 ||
         value.adoption_receipt_version === 6 ||
         value.adoption_receipt_version === 5 ||
         value.adoption_receipt_version === 4 ||
@@ -91,6 +93,10 @@ export function parseLegacyComposeAdoptionReceipt(
         pendingOperation(value.pendingOperation))
     )
   ) {
+    refuse();
+  }
+  // The distinct job family is issued with a prepared generation, never a bare version upgrade.
+  if (value.adoption_receipt_version === 7 && value.prepared === null) {
     refuse();
   }
   if (
@@ -114,7 +120,9 @@ export function parseLegacyComposeAdoptionReceipt(
   const version = value.adoption_receipt_version;
   return {
     adoption_receipt_version:
+      version === 11 ||
       version === 10 ||
+      version === 7 ||
       version === 6 ||
       version === 5 ||
       version === 4 ||

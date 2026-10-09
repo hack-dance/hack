@@ -1,6 +1,6 @@
 # Retained completed-job owner draft
 
-This is an executable **offline draft**, not production version-7 support. Run:
+This is an executable **offline model**, not live version-7 qualification. Run:
 
 ```sh
 bun test tests/native-retained-jobs-model.test.ts
@@ -8,7 +8,7 @@ bun test tests/native-retained-jobs-model.test.ts
 
 The test-only protocol projection and finite TypeScript model import no engine,
 filesystem, process runner or credential owner. The closest test also checks that
-the current production receipt codec still rejects version 7. These checks do not
+the production receipt codec rejects a bare version-7 upgrade without a prepared generation. These checks do not
 activate adoption, mutate receipts or qualify real Docker jobs. This is not a TLA+
 or TLC result.
 
@@ -19,7 +19,7 @@ Reserve both `adoption_receipt_version: 7` and
 existing receipt fields (`kind`, `checkout`, `prepared`, `publication`,
 `pendingOperation`) and manifest fields (`kind`, `projectRoot`, `id`, `binding`,
 `runtimeConfig`, `sourceFiles`, `files`) with their exact existing anchors and
-validators. No decoder or writer is changed here. The full saved wire remains
+validators. The model itself changes no decoder or writer. The full saved wire remains
 owned by the generation/receipt implementation; `contract.ts` validates only the
 proposed version, supported family and original-membership projection.
 

@@ -64,7 +64,7 @@ test.each([
 
 const unsupported: readonly Partial<NativeComposeCommandOptions>[] = [
   { operation: "restart" },
-  { operation: "down" },
+  { operation: "down", services: [] },
   { operation: "ps" },
   { operation: "logs" },
   { operation: "exec" },
@@ -425,3 +425,29 @@ if (process.platform !== "darwin") {
     expect(await readdir(join(selected.root, ".hack"))).toEqual([]);
   });
 }
+
+macTest(
+  "ordinary down delegates only to the live finite hook owner without reselecting input",
+  async () => {
+    const selected = await fixture();
+    let calls = 0;
+    const code = await tryNativeAuthoredCommand({
+      ...selected,
+      options: { ...selected.options, operation: "down" },
+      serve: () => {
+        throw new Error("Must not start");
+      },
+      recover: () => {
+        throw new Error("Must not recover");
+      },
+      stop: async (opts) => {
+        calls++;
+        expect(opts.scope.projectRoot).toBe(selected.root);
+        expect(opts.timeoutMs).toBe(1500);
+      },
+    });
+    expect(code).toBe(0);
+    expect(calls).toBe(1);
+    expect(await readdir(join(selected.root, ".hack"))).toEqual([]);
+  }
+);

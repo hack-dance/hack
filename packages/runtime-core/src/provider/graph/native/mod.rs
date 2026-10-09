@@ -1,11 +1,13 @@
-//! Native image-only lowering; runtime ownership and effects are separately admitted.
+//! Native authored lowering; runtime ownership and effects are separately admitted.
 use super::*;
 use crate::{project::native::NativeInputs, provider::native_input};
 #[cfg(target_os = "macos")]
 pub mod foreground;
 mod journal;
+pub mod persistent_data;
 mod runtime;
 pub mod selection;
+mod source;
 pub use journal::{Phase, Receipt};
 pub(super) use runtime::reservations;
 pub use runtime::{Snapshot, cleanup, inspect, run};
@@ -45,6 +47,11 @@ pub struct Configuration {
     review: native_input::Review,
     configs: BTreeMap<String, Value>,
     resources: BTreeMap<String, Resource>,
+    topology: Option<crate::project::native::NetworkTopology>,
+    source: Option<source::Binding>,
+    storage: BTreeSet<String>,
+    data_mounts: BTreeMap<String, Vec<crate::project::native::StorageMount>>,
+    data: BTreeMap<String, persistent_data::engine::Reference>,
 }
 impl Configuration {
     pub fn graph(&self) -> &execution::Graph {
@@ -64,7 +71,7 @@ impl Configuration {
 fn refused() -> CandidateError {
     error(
         "native_graph_admission",
-        "Native image-only consumption requires its exact compiler review, immutable images and bounded process/readiness; values omitted.",
+        "Native consumption requires its exact compiler review, immutable images, bounded process/readiness and a separately admitted live-source or persistent-storage contract; values omitted.",
     )
 }
 
@@ -85,6 +92,13 @@ pub fn configuration(
     prepared: &native_input::Prepared,
     owner: &str,
 ) -> Result<Configuration, CandidateError> {
+    configuration_with_source(prepared, owner, None)
+}
+fn configuration_with_source(
+    prepared: &native_input::Prepared,
+    owner: &str,
+    source: Option<source::Binding>,
+) -> Result<Configuration, CandidateError> {
     prepared.remaining()?;
     let inputs: &NativeInputs = prepared.inputs();
     let review = prepared.review();
@@ -98,32 +112,69 @@ pub fn configuration(
     {
         return Err(refused());
     }
+    let mounts: BTreeMap<_, _> = inputs
+        .workloads
+        .iter()
+        .filter_map(|(name, workload)| {
+            workload
+                .source_mount
+                .as_ref()
+                .map(|mount| (name.clone(), mount.clone()))
+        })
+        .collect();
+    if source.is_some() && !inputs.storage.is_empty() {
+        return Err(refused());
+    }
+    match (&source, mounts.is_empty()) {
+        (None, true) => {}
+        (Some(source), false) if source.mounts == mounts => source.validate(
+            &inputs
+                .graph
+                .services
+                .iter()
+                .map(|(name, service)| (name.clone(), service.ready))
+                .collect(),
+        )?,
+        _ => return Err(refused()),
+    }
     let mut configs = BTreeMap::new();
     let mut resources = BTreeMap::new();
-    // Native workload networking is an implicit project contract: ordinary outbound
-    // bridge access and exact service DNS aliases. Provider policy admission is separate.
-    let network = Resource {
-        routing: None,
-        networks: None,
-        outbound: true,
-        cache: None,
-        cache_provenance: None,
-        kind: Kind::Network,
-        key: "default".into(),
-        name: format!("hkn-{}-network-0", review.scope().run),
-        id: None,
-        image: None,
-        phase: "reserved".into(),
-    };
-    let network_names = BTreeMap::from([("default".into(), network.name.clone())]);
-    resources.insert("network:default".into(), network);
+    let policies = inputs.topology.as_ref().map_or_else(
+        || BTreeMap::from([("default".to_owned(), false)]),
+        |topology| topology.networks.clone(),
+    );
+    let mut network_names = BTreeMap::new();
+    for (index, (key, internal)) in policies.iter().enumerate() {
+        let network = Resource {
+            routing: None,
+            networks: None,
+            outbound: !internal,
+            cache: None,
+            cache_provenance: None,
+            kind: Kind::Network,
+            key: key.clone(),
+            name: format!("hkn-{}-network-{index}", review.scope().run),
+            id: None,
+            image: None,
+            phase: "reserved".into(),
+        };
+        network_names.insert(key.clone(), network.name.clone());
+        resources.insert(format!("network:{key}"), network);
+    }
     for (index, (name, workload)) in inputs.workloads.iter().enumerate() {
         if !image_id(&workload.image) {
             return Err(refused());
         }
+        let attachments = inputs.topology.as_ref().map_or_else(
+            || BTreeMap::from([("default".to_owned(), Vec::new())]),
+            |topology| topology.attachments.get(name).cloned().unwrap_or_default(),
+        );
+        if attachments.is_empty() || attachments.keys().any(|key| !policies.contains_key(key)) {
+            return Err(refused());
+        }
         let resource = Resource {
             routing: None,
-            networks: Some(vec!["default".into()]),
+            networks: Some(attachments.keys().cloned().collect()),
             outbound: false,
             cache: None,
             cache_provenance: None,
@@ -135,11 +186,24 @@ pub fn configuration(
             phase: "reserved".into(),
         };
         let mut config = config::container_base(&workload.image, labels(owner, review, &resource));
-        let (primary, endpoints) = config::network_config(
+        if workload.source_mount.is_some() {
+            config["HostConfig"]["Mounts"] =
+                json!([source.as_ref().ok_or_else(refused)?.config(name)?]);
+        }
+        let (primary, mut endpoints) = config::network_config(
             name,
             resource.networks.as_ref().ok_or_else(refused)?,
             &network_names,
         )?;
+        for (logical, aliases) in &attachments {
+            let physical = network_names.get(logical).ok_or_else(refused)?;
+            let entry = endpoints.get_mut(physical).ok_or_else(refused)?;
+            entry["Aliases"] = json!(
+                std::iter::once(name.clone())
+                    .chain(aliases.iter().cloned())
+                    .collect::<Vec<_>>()
+            );
+        }
         config["HostConfig"]["NetworkMode"] = json!(primary);
         config["NetworkingConfig"] = json!({"EndpointsConfig":endpoints});
         for (field, value) in [
@@ -193,6 +257,16 @@ pub fn configuration(
         review: review.clone(),
         configs,
         resources,
+        topology: inputs.topology.clone(),
+        source,
+        storage: inputs.storage.clone(),
+        data_mounts: inputs
+            .workloads
+            .iter()
+            .filter(|(_, workload)| !workload.mounts.is_empty())
+            .map(|(name, workload)| (name.clone(), workload.mounts.clone()))
+            .collect(),
+        data: BTreeMap::new(),
     })
 }
 

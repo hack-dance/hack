@@ -8,12 +8,14 @@ provider, image acquisition or receipt effects. This feature's compiler path
 dependency requires the repository's pinned Rust 1.97.1. The default runtime
 package keeps its declared Rust 1.85 minimum; enabling the adapter requires Rust 1.97.1.
 
-The adapter accepts at most 32 selected image-only services/jobs, exec readiness,
+The adapter accepts at most 32 selected pinned-image services/jobs, exec readiness,
 explicit exec/shell commands, entrypoint clearing, init, exact shutdown intent and
 working directories. Jobs require successful completion; services with readiness
 require health, and other services require startup. Workload names, including dots,
-remain exact. Omitted process fields preserve image/backend defaults. Source and
-worktree declarations and local resolution remain intent only.
+remain exact. Omitted process fields preserve image/backend defaults. One project-relative
+read-only live source bind per workload is supported through an already-approved
+pool share. Other source acquisition and worktree declarations and local resolution
+remain intent only.
 An explicit entrypoint requires an authored command, matching the bounded NC03
 renderer; image CMD inheritance under an entrypoint override remains unqualified.
 
@@ -23,8 +25,9 @@ The adapter remaps those values into a separate destination-keyed map. Public
 literals/defaults remain separate; private values never affect portable identities.
 Outputs deliberately lack `Debug` and `Serialize`. Encoded private values are
 bounded to 32 KiB and 256 destination keys per workload; process argv is bounded
-to 4096 arguments and 64 KiB. Build/acquisition policy, mounts, storage, routing,
-endpoints, host effects, HTTP/TCP readiness and automatic restart explicitly refuse.
+to 4096 arguments and 64 KiB. Persistent worktree storage mounts are a separate
+receipt-v4 path described below. Build/acquisition policy, source/file mounts, routing,
+endpoints, standalone host effects, HTTP/TCP readiness and automatic restart explicitly refuse.
 
 `project::native::review` validates the same subset without acquiring private values.
 Its hash-only identity includes the authored semantic hash, local-resolution hash,
@@ -54,17 +57,73 @@ namespace, image/source/provider admission and effect-time deadline, integrate a
 native runs into common capacity/inventory, and implement tagged native ownership and
 recovery. These preparation artifacts carry no resource ownership or replay authority.
 
-`provider::graph::native::configuration` lowers freshly prepared image-only input
+`provider::graph::native::configuration` lowers freshly prepared native input
 into public container configuration using the existing bounded container isolation.
 It preserves exact process/exec-readiness values and compiler job/dependency goals,
 requires immutable image IDs and the default source root, and adds distinct native
-input labels and resource names. One ordinary outbound project bridge supplies exact
-service/job DNS aliases, including dotted names, through the shared network lowerer.
+input labels and resource names. With omitted topology, one ordinary outbound
+project bridge supplies exact service/job DNS aliases, including dotted names,
+through the shared network lowerer.
 Omitted image process/environment defaults remain
 omitted; managed values remain in separate pending handles. Whole-second shutdown
 grace up to 30 seconds is represented exactly; fractional seconds refuse. This pure
-lowerer checks owner shape and deadline, never real guest ownership, image presence,
+lowerer retains logical storage mount intent without fabricating provider volume IDs.
+Explicit native topology currently admits two owned bridges, one internal and
+one outbound, with
+compiler-selected per-workload attachments and DNS aliases. External/default/
+ingress attachments and source/storage intersections refuse.
+It checks owner shape and deadline, never real guest ownership, image presence,
 combined capacity, private staging or engine effects.
+
+The explicit native consumer additionally admits at most one compiler-normalized
+read-only project source bind per selected workload. The authored source mode is
+`host-mounted` with root `.`: content changes remain live, including atomic edits
+of descendants inside a selected directory. A selected regular file may change
+in place; replacing that file itself changes the selected identity and refuses.
+Writable source binds and custom source roots remain unsupported. Source-bearing
+projects cannot combine live source with persistent storage; the separate storage
+intent contract remains inactive before provider admission.
+This does not create an immutable snapshot or publish a new source revision.
+
+Source consumption requires the provider pool to already contain the exact
+explicitly approved unfiltered project share. The consumer never approves that
+whole-tree writable share, changes pool mounts or enrolls a project implicitly.
+Individual workload binds are read-only and `rprivate`. Selection pins the source
+root, every selected path and its ancestors by device, inode, type, UID and full
+mode; aliases, hardlinked selected files and permission changes refuse. Startup
+and active observations recheck those host paths, the existing provider share,
+virtiofs mapping and configured/runtime bind around engine work. Host editors are
+not locked: these are bounded replacement checks, not an atomic host filesystem
+fence. Descendant edits under a selected directory follow the approved live-share
+policy; its whole tree can include local configuration.
+
+Source-bearing native graph receipts use a closed v3 source binding; image-only
+v2 receipts keep their prior fields and serialization. This graph v3 is separate
+from the foreground publication-owner v3 and does not change the v2 ready/control
+envelopes. Retained inspection/startup cannot recapture or adopt a new selected
+path. Exact owned cleanup continues after the host source is moved or deleted:
+it verifies the original provider share and read-only container bind, stops and
+removes only the original resource inventory, and never deletes host source data.
+Dead-owner recovery of source-bearing graph v3 remains outside this increment;
+the separately qualified image-only recovery admission must refuse that version.
+
+The maintained macOS ignored control
+`native::runtime::tests::live_source::approved_live_source_preserves_host_edits_and_cleanup_after_selected_source_moves`
+requires a caller-created synthetic `live-fixture/project` and isolated sibling
+`native-home`. Prepare its provider through the existing explicit development
+`--project-share PROJECT --unfiltered-source` contract, then load a pinned Linux
+ARM64 Bun image. The fixture verifies a run-bound private inode/mode manifest and
+exclusively claims the invocation before graph effects; it does not enroll shares.
+Set `HACK_NATIVE_SOURCE_TEST_FIXTURE`, `HACK_NATIVE_SOURCE_TEST_PROJECT`,
+`HACK_LOCAL_TEST_ROOT`, `HACK_LOCAL_TEST_IMAGE` and a fresh 32-character hex
+`HACK_NATIVE_SOURCE_TEST_RUN`. Source files are public synthetic data under private
+ancestors. The control requires live HTTP reads after host edits and atomic
+descendant replacement, an `EROFS` container-write refusal, source-withdrawal
+inspection refusal and normal exact cleanup preserving host data. It publishes
+no host ports. Compile the exact test before the caller's 300-second watchdog;
+uncertain failures retain the graph/pool for inspection and never replay cleanup.
+Its filesystem admission controls run without a provider. This does not qualify
+whole frontend parity, dead-owner recovery or performance.
 
 `provider::graph::native::selection` selects only the exact absolute native project
 root and reads bounded, stable regular `.hack/hack.project.json` and optional
@@ -78,15 +137,20 @@ refuses until its primary-worktree verification is qualified; opted-out inherita
 preserves the owning compiler's checkout-local semantics. This is read-only input
 selection and private preparation, with no durable enrollment or runtime ownership.
 
-`provider::graph::native::run` is an explicit library consumer for the bounded
-image-only subset. It retains the development guest mutation lease, requires an
+`provider::graph::native::run` is an explicit library consumer for pinned images
+with optional preapproved read-only live source; persistent-storage intent remains
+a separate, inactive path. It retains the development guest mutation lease, requires an
 admitted Internet or explicitly restricted outbound pool, verifies existing immutable
-images and shared graph/allocation capacity, and reserves a distinct v2
-`native-graph-runtime` journal in `run/native-graphs` before effects. Create/start
+images and shared graph/allocation capacity, and reserves a distinct
+`native-graph-runtime` journal in `run/native-graphs` before effects (v2 for
+implicit-bridge image-only graphs, v3 for source-bearing graphs, and v5 for the
+image-only two-bridge subset; the separate inactive storage contract uses v4).
+Create/start
 intent is durable and never replayed or adopted. Network create intent precedes the
-first network effect; its immutable ID, labels, bridge driver and outbound policy
-are verified before container work. Containers bind the recorded network ID and exact
-service alias; running endpoints must match the owned network membership. The same authored selection and
+first network effect; each immutable bridge ID, labels, driver and internal policy
+is verified before container work. Containers bind all selected bridge IDs and
+service/extra aliases; running endpoints must match each owned bridge membership.
+The same authored selection and
 ingress deadline are checked before staging, creates, starts and observations.
 Omitted shutdown grace uses a bounded ten-second runtime default. Optional private
 delivery uses the existing static launcher and tmpfs through separate v2
@@ -96,8 +160,8 @@ namespace, native review, run, workload and container without persisting values.
 Native `inspect` and `cleanup` require the original guest incarnation and boot,
 exact resource labels, immutable IDs, names and images. Foreign network members or
 changed network policy refuse before cleanup effects. Cleanup preflights every
-stop, retains terminal observations before deletes, removes the verified empty project
-network after containers, and retires private payloads
+stop, retains terminal observations before deletes, removes each verified empty owned
+bridge after containers, and retires private payloads
 only after the bound container is absent. Failed/uncertain attempts retain their
 reservations. Cleanup retries preserve committed stop/removal progress: terminal
 instances are not stopped again, and fully Removed inventories are inspected without
@@ -124,9 +188,13 @@ it does not compare process birth against mutable calendar boot time.
 The closed version2 live-owner decoder remains available without a boot qualifier.
 Version3 remains strictly qualified by its original `host_boot_micros`; it receives
 no inferred UUID or migration. Each version rejects the other versions' qualifiers.
-Native runtime receipts and the authenticated control/ready wire remain v2;
+Native runtime receipts are v2 for implicit-bridge image-only graphs, v3 for
+source-bearing graphs and v5 for the closed image-only two-bridge subset; the
+authenticated control/ready wire remains v2.
 Compose receipt and owner formats remain unchanged. This provenance alone grants
-no dead-owner recovery authority.
+no dead-owner recovery authority. V5 permits same-incarnation inspection and
+exact cleanup, while dead-owner recovery remains limited to the qualified v2
+implicit-bridge inventory.
 The inactive read-only recovery selector admits only a complete Ready journal and
 a dead version3 or version4 publication on the same qualified native host boot. It captures the current
 private owner bytes and inode; its raw SHA is a selector for later independent
@@ -196,8 +264,8 @@ ordinary frontend selection yet and does not implement reactive health or hooks.
 The optional feature exposes this bounded consumer through a distinct public CLI:
 `graph native plan --source-file FILE --json`, then
 `graph native run --source-file FILE --expect-review SHA --json`.
-`graph native inspect|cleanup --run-id RUN --json` use its v2 journal. These commands
-are explicit image-only prerequisites, not ordinary project startup. Their project
+`graph native inspect|cleanup --run-id RUN --json` use its versioned native journal. These commands
+are explicit bounded prerequisites, not full ordinary project parity. Their project
 network does not publish ports or grant host-service access. Normal native `hack up`
 continues to require the full source/storage/routing/host and foreground-owner contract.
 
@@ -1389,3 +1457,203 @@ machine name and both disks' current identities and declared sizes. Every sample
 and the acquired startup lease recheck the selected owner; changed ownership
 refuses, and a reserve-qualified request cannot enter VM create or boot. Stopped,
 missing or unproved capacity retains fresh-allocation requirements or refuses.
+
+### Native persistent-data identity codec
+
+`provider::graph::native::persistent_data` defines one closed, private-candidate
+version-1 owner record and a pure comparison. Its persistent binding contains a
+64-hex project namespace, logical storage name, 32-hex owner, exact guest owner,
+boot UUID and backing-disk identity, and the default local-volume policy. An
+enrolled record retains the exact volume name, UTC `CreatedAt` bytes and directory
+device/inode. Runtime run, plan and generation IDs are absent, so independent
+compute generations can compare the same explicitly selected data identity.
+
+Pending intent is distinct from enrolled observation and always refuses the
+comparison, even when supplied an exact volume observation. Missing observations,
+unknown/duplicate fields, malformed identities, unsupported versions/policies,
+and scope, guest, birth or directory changes refuse. Copied labels do not make a
+replacement volume match its original birth. Guest boot/disk rollover remains a
+refusal requiring a future separately owned handoff; no migration is inferred.
+
+This codec alone is data-only. Decoding an enrolled assertion does
+not prove a durable enrollment commit, fresh observation, contents or effect
+authority. It is separate from dependency-cache provenance and does not qualify
+persistent databases, initializer replay, SQL retention or the full NC05 corpus.
+The enrollment and adapter owners establish their separate commit and observation
+boundaries. Their presence does not qualify the real SQL/application gates below.
+
+### Persistent-data enrollment owner
+
+`persistent_data::enrollment` owns the private-filesystem lifecycle. The owner uses a stable namespace/storage slot,
+independent of compute generations, under an explicitly supplied existing private
+host directory outside application data. An exclusive slot/lock and pending
+record are synchronized before the sole original-create attempt. Promotion
+requires that attempt's captured volume identity, matching fresh observations,
+and unchanged guest, root, lock and original record identities/bytes. Existing
+volume names, slots, incomplete staging and pending attempts refuse; no later
+invocation recreates or promotes an interrupted attempt.
+
+The sealed transport requires exclusive creation relative to every supported writer
+under an existing guest effect owner. An absence probe followed by Docker's
+idempotent volume create API alone does not satisfy this contract. The native
+adapter supplies the continuously held common provider lease described below;
+unserialized direct guest/socket writers remain outside that authority. No
+adoption, repair, deletion or global default is introduced. Existing-only retained reads acquire the existing lock, compare the
+exact binding/birth/directory, and leave record bytes and generation references
+unchanged. Pending or missing/foreign state cannot become enrollment by reading.
+
+Before rename, failures retain pending or incomplete staging. After rename, a
+publication/directory-sync failure is uncertain: the enrolled pathname may exist,
+but the operation returns no successful durable commit. A later retained read is
+a fresh data-only comparison and cannot retroactively prove that failed operation
+completed, or authorize runtime effects by itself. The lock coordinates these
+writers; unsynchronized same-user external mutations are not atomically frozen.
+Local synchronous filesystem I/O and trusted transport deadline obligations are
+not process cancellation or crash-durability proof. Real private-filesystem and
+stand-in tests qualify sequencing/refusal; persistent SQL and full NC05 runtime
+retention remain open.
+
+### Native persistent-storage adapter and receipt v4
+
+Ordinary persistent startup is explicitly gated before provider connection or
+graph/data owner publication. The adapter and receipt v4 below are inactive
+groundwork until a durable root-continuity witness and its transport are qualified.
+Name, labels, `CreatedAt` and directory device/inode can all alias after an empty
+volume replacement; matching that tuple is insufficient. No metadata-only pass
+can enable storage or establish unique physical continuity.
+
+The inactive source implementation connects `persistent_data::engine` to the existing
+native graph Engine. Receipt v4 carries stable data references and exact workload
+mounts outside its run-owned container/network inventory. A persistent identity has
+no run, plan or generation ID. Graph2 image-only receipts retain their old binding
+bytes; graph3 is reserved for the separate source-bearing contract. Persistent
+graph4 is not eligible for the dead-publication recovery selector: its explicit
+qualification remains open. Ordinary authenticated compute teardown uses the
+original graph owner and never deletes, recreates or replays data or jobs.
+
+All supported mutation paths retain `OwnedGuest` and its original provider
+`operation.lock`. The adapter checks the held descriptor against the canonical
+private pathname and root incarnation, in addition to the existing process,
+guest boot and backing-disk checks. It holds that lease from authoritative absence
+through one volume POST and final private owner commit. Supported native workloads
+cannot mount a Docker socket or invoke arbitrary guest control; source/file mounts
+remain refused, and private-delivery binds combined with storage also refuse in
+this first slice. Existing provider Engine/guest writers use the same common lease.
+External same-user Docker/guest writers are not serialized by this cooperative
+contract. Docker's idempotent POST is not an exclusive creation primitive.
+
+The private graph reservation and synchronized data pending intent precede the
+sole original create. The returned name, local driver/default policy, exact labels,
+`CreatedAt` and guest directory device/inode are captured and freshly compared
+before enrollment. A timeout, lost lock, failed observation or changed identity
+returns uncertainty without adopting a later matching row, retrying POST or deleting
+data. A visible enrolled file after failed final sync is not successful completion.
+An earlier graph's unconfirmed reserved data reference blocks another compute
+attempt even after its compute-only retirement. Missing owner state with an
+existing volume for that logical namespace also refuses; copied labels or empty
+contents do not authorize enrollment.
+
+Retained startup validates the existing owner and physical volume under the same
+lease without rewriting its stable binding. Previous compute consumers must have
+completed exact retirement. Explicit mounts use `NoCopy`; every image-declared
+volume must be covered by exactly one admitted persistent mount, so no anonymous
+volume is created. Physical mount membership is exact. Startup/final readiness,
+inspection, shared active-run admission and final teardown publication recheck data.
+Startup uses the original ingress deadline; read-only data observation and cleanup
+validation use a bounded 40-second budget per observation group, without renewing
+it per volume; final teardown validation begins a separate group after compute stops.
+Compute teardown stops/deletes only recorded containers and their empty bridge.
+Persistent volume deletion, pending enrollment recovery and guest/disk rebinding
+are not implemented.
+
+`tests/fixtures/native-persistent-sqlite.json` pins the Bun/SQLite programs adapted
+from the existing graph SQL fixture. It separates initializer attempts from an
+`INSERT OR IGNORE` seed marker/nonce, adds an app-to-database HTTP write/readback,
+and keeps `CapDrop: ALL` and `no-new-privileges`. The compiler/lowerer/scheduler
+regression uses synthetic observations; it does not execute SQL or prove Engine
+behavior. The first real native acceptance must use a source-pinned cached Bun
+image ID and two independent compute generations of this same logical data slot:
+
+- First startup records the exact data owner/birth/directory and seed nonce, requires
+  a fresh successful initializer attempt, and proves the app HTTP SQL write/readback.
+- Authenticated down retires only its exact compute inventory. The volume identity,
+  SQL marker, seed nonce and written value must survive unchanged.
+- Fresh up uses new compute IDs and the same data identity. The initializer process
+  runs again and increments the attempt table once; the seed nonce stays unchanged.
+  SQL initialization is idempotent, not a cached completed-job result.
+- Known initializer failure prevents dependent starts. Pending or missing owner
+  state, lock loss, a copied-label replacement with changed birth/directory and
+  changed guest identity refuse before dependent effects; uncertainty retains
+  receipts/data without an automatic create/adoption/delete retry.
+
+The root-witness continuation must reuse the reviewed directory-xattr contract:
+an independently random name/value is persisted by the owner, then exclusively
+created only during the original enrollment with `XATTR_CREATE` on a retained
+nofollow root descriptor, synchronized, and independently reread with exact
+descriptor/path/root checks. Retained startup only reads; missing/changed witness
+refuses without repair. Whole-root/xattr copying remains outside the claimed
+guarantee. The metadata-only checkpoint does not implement or qualify that helper
+boundary; the inactive witnessed continuation below adds its source.
+
+These runtime/SQL gates and replacement safety are not yet qualified by this source implementation. Stock
+PostgreSQL parity remains a separate NC05 gate requiring authored ownership/user
+or a specifically qualified capability policy. This slice guesses no UID/GID,
+changes no volume permissions, and adds no capability to make a stock image work.
+# Witnessed enrollment continuation (inactive)
+
+The separate persistent owner version2 stores its expected root xattr in the private
+pending intent before the single original volume create. It captures the original
+volume and root UID/GID/device/inode, seeds with `XATTR_CREATE`, independently verifies
+the root, and only then publishes enrollment under the original private lock. A missing
+or changed witness refuses retained reads without repair. Version1 metadata records
+are not upgraded or treated as continuity proof. Ambiguous create/seed retains the
+intent; publication after rename can be uncertain even when an enrolled file is visible.
+
+Native receipt4 may describe a separate pinned guest tool installation, including the
+original directory and helper identities. This control path shares the existing relay
+artifact/upload boundary and uses private descriptor input under the original operation
+deadline. Dependency-free legacy graphs continue to install no guest artifact. Tool
+receipt parsing grants neither installation nor storage authority, and this continuation
+does not enable ordinary persistent startup. The Linux private-filesystem controls,
+installed helper/guest transport, and real Bun/SQLite retention still require qualification.
+
+Saved helper re-admission is read-only and requires the same complete tool reference,
+guest/boot/disk, canonical private directory chain, and receipt inode and bytes before
+and after transport. A receipt transition requires fresh re-admission; missing or partial
+installation never triggers upload, repair or seed. Retirement consumes the issued
+handle and checks the complete bounded native receipt inventory under the original
+provider lease. Every saved dependency, including a Removed receipt4 that still proves
+retained data, prevents deletion. No receipt archival or proof withdrawal is implemented,
+so ordinary workload removal cannot retire its verifier. A separately eligible handle
+can remove only its exact helper, owner file and empty original directory; an ambiguous
+result has no retry, follow-up cleanup or crash-resume authority. These source and
+stand-in transport controls do not qualify guest execution or enable storage startup.
+Tool handles are bound to one run on its original Engine/provider lease. The first
+admission binds that run for the lease's entire lifetime; another run on that lease
+refuses before transport. Its constant-size volatile state is shared by all sibling
+handles; claiming retirement before transport permanently revokes them, even if failure
+leaves guest files unchanged. A fresh lease cannot accept an older handle and has its own
+independent run authority. There is no count limit shared across operation leases.
+Active tool transport also prevents retirement; uncertain transport revokes sibling
+handles rather than treating guard destruction as proof that a guest command settled.
+The shared artifact reader now requires a current-UID regular file with one link,
+no group/world write permission, and matching held-FD/path identity and bytes. Legacy
+relay graphs with dependencies use that stricter reader and its fixed
+`guest_tool_artifact` refusal; dependency-free graphs do not read an artifact.
+Whole-root copies retaining the exact xattr remain outside this witness guarantee.
+Stock PostgreSQL remains a separate ownership/capability acceptance gate.
+
+### Frontend-owned finite hooks
+
+Normal native graph compile/review/plan/run/serve still refuse host intent. Explicit
+`frontend-plan`/`frontend-serve` accept a private source-v3 envelope only when its
+pinned finite-hook permit and active owner match the original frontend parent PID,
+UID, run, project/branch and compiler semantic hash. Permit/owner bytes, incarnations
+and canonical private parent are rechecked through preparation and effect fences.
+Finite normalized host intent stays ephemeral in `NativeInputs`; it is not discarded
+or serialized in graph receipts. Persistent host processes and host endpoint bindings
+remain unsupported. Source/storage/topology admission and receipt versions2–5 are
+unchanged. The TypeScript frontend owns phase intent/completion, managed hook values,
+supervised host children and owner-mediated stop; Rust owns workload readiness and
+exact native cleanup. See [finite hook lifecycle](../../docs/reference/native-authored-commands.md#finite-host-lifecycle-hooks)
+for uncertainty and recovery limits.

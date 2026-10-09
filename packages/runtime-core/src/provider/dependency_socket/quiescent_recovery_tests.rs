@@ -1,7 +1,10 @@
 use super::*;
 use std::{
     cell::Cell,
-    os::unix::{fs::PermissionsExt, net::UnixListener},
+    os::{
+        fd::{AsRawFd, FromRawFd, OwnedFd},
+        unix::{ffi::OsStrExt, fs::PermissionsExt, net::UnixListener},
+    },
     sync::atomic::{AtomicU64, Ordering},
 };
 
@@ -40,10 +43,55 @@ impl Fixture {
         listener
     }
     fn stale(&self, slot: u8) {
-        drop(self.bind(slot));
+        drop(self.unlistened(slot));
+    }
+    fn unlistened(&self, slot: u8) -> OwnedFd {
+        // A stale fixture needs a bound stream inode, never a transient listener.
+        // It stays unlistened even if a concurrent child inherits a descriptor.
+        let fd = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0) };
+        assert!(fd >= 0);
+        let socket = unsafe { OwnedFd::from_raw_fd(fd) };
+        assert_eq!(
+            unsafe { libc::fcntl(socket.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) },
+            0
+        );
+        let target = path(&self.0, slot);
+        let bytes = target.as_os_str().as_bytes();
+        let mut address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+        address.sun_family = libc::AF_UNIX as libc::sa_family_t;
+        assert!(!bytes.contains(&0) && bytes.len() < address.sun_path.len());
+        for (destination, byte) in address.sun_path.iter_mut().zip(bytes) {
+            *destination = *byte as libc::c_char;
+        }
+        let length = std::mem::offset_of!(libc::sockaddr_un, sun_path) + bytes.len() + 1;
+        #[cfg(target_vendor = "apple")]
+        {
+            address.sun_len = length.try_into().unwrap();
+        }
+        assert_eq!(
+            unsafe {
+                libc::bind(
+                    socket.as_raw_fd(),
+                    (&raw const address).cast(),
+                    length.try_into().unwrap(),
+                )
+            },
+            0
+        );
+        fs::set_permissions(target, fs::Permissions::from_mode(0o600)).unwrap();
+        socket
     }
     fn selection(&self) -> Selection {
-        current(self.scope(), &self.0).unwrap()
+        super::super::recovery::observation_diagnostic::clear();
+        current(self.scope(), &self.0).unwrap_or_else(|error| {
+            panic!(
+                "Synthetic quiescent selection refused: code={}; closed_first_observation={}",
+                error.code,
+                super::super::recovery::observation_diagnostic::take()
+                    .map(|facts| serde_json::to_string(&facts).unwrap())
+                    .unwrap_or_else(|| "null".into())
+            )
+        })
     }
     fn hash(&self) -> String {
         digest(&self.selection()).unwrap()
@@ -51,6 +99,66 @@ impl Fixture {
     fn recover(&self, hash: &str) -> Result<Value, CandidateError> {
         recover_scope(&self.journal(), &self.scope(), &self.0, hash, || Ok(()))
     }
+}
+
+#[test]
+fn stale_stream_inode_never_listens_even_while_an_owned_duplicate_survives() {
+    let fixture = Fixture::new();
+    let original = fixture.unlistened(0);
+    let duplicate = original.try_clone().unwrap();
+    drop(original);
+    let selected = observed(&fixture.0, 0).unwrap().unwrap();
+    let error = std::os::unix::net::UnixStream::connect(path(&fixture.0, 0)).unwrap_err();
+    assert_eq!(error.raw_os_error(), Some(libc::ECONNREFUSED));
+    assert!(path(&fixture.0, 0).exists());
+    drop(duplicate);
+    assert_eq!(observed(&fixture.0, 0).unwrap(), Some(selected));
+}
+
+#[test]
+fn first_socket_refusal_records_closed_live_listener_facts_without_removal() {
+    use super::super::recovery::observation_diagnostic as diagnostic;
+    let fixture = Fixture::new();
+    let listener = fixture.bind(0);
+    diagnostic::clear();
+    assert!(observed(&fixture.0, 0).is_err());
+    let facts = diagnostic::take().unwrap();
+    assert_eq!(facts["stage"], "socket-connect");
+    assert!(facts["errno"].is_null());
+    assert_eq!(facts["metadata"]["type"], "socket");
+    assert_eq!(facts["metadata"]["mode"].as_u64().unwrap() & 0o7777, 0o600);
+    assert_eq!(facts["metadata"]["nlink"], 1);
+    assert!(facts["metadata"]["inode"].as_u64().unwrap() > 0);
+    let text = serde_json::to_string(&facts).unwrap();
+    assert!(text.len() < 512);
+    assert!(!text.contains(fixture.0.to_str().unwrap()));
+    assert!(path(&fixture.0, 0).exists());
+    drop(listener);
+    assert!(observed(&fixture.0, 0).unwrap().is_some());
+}
+
+#[test]
+fn first_socket_refusal_precedes_later_facts_and_clear_starts_a_fresh_observation() {
+    use super::super::recovery::observation_diagnostic as diagnostic;
+    let fixture = Fixture::new();
+    let listener = fixture.bind(0);
+    fs::set_permissions(path(&fixture.0, 0), fs::Permissions::from_mode(0o644)).unwrap();
+    diagnostic::clear();
+    assert!(observed(&fixture.0, 0).is_err());
+    diagnostic::record(diagnostic::Stage::MetadataRead, None, Some(libc::EACCES));
+    let first = diagnostic::take().unwrap();
+    assert_eq!(first["stage"], "socket-metadata");
+    assert_eq!(first["metadata"]["mode"].as_u64().unwrap() & 0o7777, 0o644);
+    assert!(first["errno"].is_null());
+    diagnostic::clear();
+    assert!(diagnostic::take().is_none());
+    diagnostic::record(diagnostic::Stage::MetadataRead, None, Some(libc::EACCES));
+    assert_eq!(
+        diagnostic::take().unwrap(),
+        json!({"stage":"metadata-read","errno":libc::EACCES,"metadata":null})
+    );
+    assert!(path(&fixture.0, 0).exists());
+    drop(listener);
 }
 impl Drop for Fixture {
     fn drop(&mut self) {

@@ -254,14 +254,65 @@ fn rejects_a_live_inherited_unix_listener_at_the_pinned_inode() {
 }
 #[test]
 fn wildcard_port_probe_refuses_ipv4_and_ipv6_listeners() {
+    use ports::observation_diagnostic as diagnostic;
+
     let ipv4 = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+    diagnostic::clear();
     assert!(port_absent(ipv4.local_addr().unwrap().port()).is_err());
     drop(ipv4);
     let ipv6 = std::net::TcpListener::bind((std::net::Ipv6Addr::LOCALHOST, 0)).unwrap();
     let port = ipv6.local_addr().unwrap().port();
+    diagnostic::clear();
     assert!(port_absent(port).is_err());
     drop(ipv6);
-    port_absent(port).unwrap();
+}
+
+#[test]
+fn port_probe_diagnostic_reports_the_owned_ipv4_listener() {
+    use ports::observation_diagnostic as diagnostic;
+
+    let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+    diagnostic::clear();
+    assert!(port_absent(listener.local_addr().unwrap().port()).is_err());
+    assert_eq!(
+        diagnostic::take(),
+        Some(diagnostic::Facts {
+            stage: diagnostic::Stage::Bind,
+            wildcard: true,
+            family: libc::AF_INET,
+            errno: Some(libc::EADDRINUSE),
+        })
+    );
+}
+
+#[test]
+fn port_probe_diagnostic_keeps_only_the_first_refusal() {
+    use ports::observation_diagnostic as diagnostic;
+
+    diagnostic::clear();
+    assert!(diagnostic::take().is_none());
+    diagnostic::record(
+        diagnostic::Stage::Socket,
+        true,
+        libc::AF_INET,
+        Some(libc::EMFILE),
+    );
+    diagnostic::record(
+        diagnostic::Stage::Bind,
+        false,
+        libc::AF_INET6,
+        Some(libc::EADDRINUSE),
+    );
+    assert_eq!(
+        diagnostic::take(),
+        Some(diagnostic::Facts {
+            stage: diagnostic::Stage::Socket,
+            wildcard: true,
+            family: libc::AF_INET,
+            errno: Some(libc::EMFILE),
+        })
+    );
+    assert!(diagnostic::take().is_none());
 }
 #[test]
 fn symlinked_configuration_and_wrong_selectors_refuse_before_mutation() {
@@ -414,15 +465,83 @@ fn full_command_refuses_wrong_boot_foreign_authority_unknown_schema_and_live_fro
     }
 }
 #[test]
-fn exclusive_port_guards_retain_both_families_across_effects() {
-    let free = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
-    let port = free.local_addr().unwrap().port();
-    drop(free);
-    let guards = port_absent(port).unwrap();
-    assert!(std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port)).is_err());
-    assert!(std::net::TcpListener::bind((std::net::Ipv6Addr::LOCALHOST, port)).is_err());
-    drop(guards);
-    port_absent(port).unwrap();
+fn successful_port_guards_own_all_four_allocated_addresses_during_observation() {
+    use std::{net::IpAddr, os::fd::AsRawFd};
+
+    // Zero asks the kernel to allocate each guard independently. These ports can
+    // differ: this proves successful reservation/lifetime, not one common port.
+    // No released ephemeral port is presumed to remain globally unoccupied.
+    let guards = port_absent(0).unwrap();
+    assert_eq!(guards.len(), 4);
+    let expected = [
+        IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
+        IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED),
+        IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+        IpAddr::V6(std::net::Ipv6Addr::LOCALHOST),
+    ];
+    let descriptors = guards
+        .iter()
+        .map(AsRawFd::as_raw_fd)
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(descriptors.len(), 4);
+    for (guard, ip) in guards.iter().zip(expected) {
+        let listener = std::net::TcpListener::from(guard.try_clone().unwrap());
+        let address = listener.local_addr().unwrap();
+        assert_eq!(address.ip(), ip);
+        assert_ne!(address.port(), 0);
+        // SAFETY: this live owned descriptor is only inspected with a scalar command.
+        let flags = unsafe { libc::fcntl(guard.as_raw_fd(), libc::F_GETFD) };
+        assert!(flags >= 0);
+        assert_eq!(flags & libc::FD_CLOEXEC, libc::FD_CLOEXEC);
+        for (option, expected) in [(libc::SO_TYPE, libc::SOCK_STREAM), (libc::SO_REUSEPORT, 0)] {
+            let mut value: libc::c_int = -1;
+            let mut length = std::mem::size_of_val(&value) as libc::socklen_t;
+            assert_eq!(
+                // SAFETY: both output pointers refer to live, correctly sized values.
+                unsafe {
+                    libc::getsockopt(
+                        guard.as_raw_fd(),
+                        libc::SOL_SOCKET,
+                        option,
+                        (&raw mut value).cast(),
+                        &raw mut length,
+                    )
+                },
+                0
+            );
+            assert_eq!(length as usize, std::mem::size_of_val(&value));
+            assert_eq!(value, expected);
+        }
+        let error = std::net::TcpListener::bind(address).unwrap_err();
+        assert_eq!(error.raw_os_error(), Some(libc::EADDRINUSE));
+        assert!(port_absent(address.port()).is_err());
+        assert_eq!(listener.local_addr().unwrap(), address);
+        // Darwin does not expose SO_ACCEPTCONN through getsockopt. Exercise each
+        // listener instead, without waiting indefinitely for an accept result.
+        listener.set_nonblocking(true).unwrap();
+        let local_ip = match address.ip() {
+            IpAddr::V4(_) => IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+            IpAddr::V6(_) => IpAddr::V6(std::net::Ipv6Addr::LOCALHOST),
+        };
+        let reachable = std::net::SocketAddr::new(local_ip, address.port());
+        let peer =
+            std::net::TcpStream::connect_timeout(&reachable, std::time::Duration::from_secs(1))
+                .unwrap();
+        let mut readiness = libc::pollfd {
+            fd: listener.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: readiness is one live pollfd holding our live listener. Observe
+        // its asynchronous accept readiness once with a finite timeout, no retry.
+        assert_eq!(unsafe { libc::poll(&raw mut readiness, 1, 1000) }, 1);
+        assert_eq!(readiness.revents, libc::POLLIN);
+        let (accepted, peer_address) = listener.accept().unwrap();
+        assert_eq!(peer_address, peer.local_addr().unwrap());
+        assert_eq!(accepted.local_addr().unwrap(), reachable);
+        assert_eq!(peer.peer_addr().unwrap(), reachable);
+        assert_eq!(listener.local_addr().unwrap(), address);
+    }
 }
 
 #[test]

@@ -42,8 +42,8 @@ function row(text: string) {
 
 /**
  * Private ordered-source fidelity check. The strict importer and generated-source
- * owner have already refused interpolation, env files, source binds and unknown
- * options. Explicit selection
+ * owner have already refused interpolation, env files and unknown
+ * options. Source binds require their distinct held-directory owner. Explicit selection
  * and a null env file prevent Compose from discovering alternate inputs. Only
  * configuration hashes and engine-created hash labels are read, never container
  * environment/image values. This read-only observation grants no effect authority.
@@ -66,7 +66,8 @@ export async function inspectLegacyComposeRuntimeConfig(opts: {
     opts.composeFile,
     ...(opts.binding.binding_version === 2 ||
     opts.binding.binding_version === 4 ||
-    opts.binding.binding_version === 6
+    opts.binding.binding_version === 6 ||
+    opts.binding.binding_version === 13
       ? opts.binding.composeFiles.slice(1)
       : []),
   ];

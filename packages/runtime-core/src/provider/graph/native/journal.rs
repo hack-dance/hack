@@ -51,10 +51,11 @@ fn decode_failure_observation<'de, D: serde::Deserializer<'de>>(
     WireObservation::deserialize(reader).map(Into::into)
 }
 
-/// Hash-only native provenance plus value-free resource ownership. No replay authority,
-/// compiler request, argv, environment values or renewable timestamp is persisted.
+/// Hash-only compiler provenance plus public source/resource ownership metadata.
+/// No replay authority, source contents, compiler request, argv, environment values
+/// or renewable timestamp is persisted.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(try_from = "ReceiptWire")]
 pub struct Receipt {
     version: u32,
     kind: InputKind,
@@ -65,17 +66,106 @@ pub struct Receipt {
     pub(super) readiness: BTreeMap<String, Condition>,
     pub(super) resources: BTreeMap<String, Resource>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) topology: Option<crate::project::native::NetworkTopology>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) source: Option<source::Binding>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub(super) data: BTreeMap<String, persistent_data::engine::Reference>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub(super) data_mounts: BTreeMap<String, Vec<crate::project::native::StorageMount>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) data_tool: Option<persistent_data::tool::Reference>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     failure: Option<Failure>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub(super) terminal: BTreeMap<String, super::super::shutdown::Terminal>,
+}
+
+// Presence is a wire-version boundary: an explicit empty storage field must not
+// become indistinguishable from an absent graph2 field. Present null also refuses.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReceiptWire {
+    version: u32,
+    kind: InputKind,
+    owner: String,
+    boot: String,
+    review: native_input::Review,
+    phase: Phase,
+    readiness: BTreeMap<String, Condition>,
+    resources: BTreeMap<String, Resource>,
+    #[serde(default, deserialize_with = "present_map")]
+    topology: Option<crate::project::native::NetworkTopology>,
+    #[serde(default, deserialize_with = "present_map")]
+    source: Option<source::Binding>,
+    #[serde(default, deserialize_with = "present_map")]
+    data: Option<BTreeMap<String, persistent_data::engine::Reference>>,
+    #[serde(default, deserialize_with = "present_map")]
+    data_mounts: Option<BTreeMap<String, Vec<crate::project::native::StorageMount>>>,
+    #[serde(default, deserialize_with = "present_map")]
+    data_tool: Option<persistent_data::tool::Reference>,
+    #[serde(default)]
+    failure: Option<Failure>,
+    #[serde(default)]
+    terminal: BTreeMap<String, super::super::shutdown::Terminal>,
+}
+fn present_map<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(
+    reader: D,
+) -> Result<Option<T>, D::Error> {
+    T::deserialize(reader).map(Some)
+}
+impl TryFrom<ReceiptWire> for Receipt {
+    type Error = &'static str;
+    fn try_from(wire: ReceiptWire) -> Result<Self, Self::Error> {
+        let storage_fields =
+            wire.data.is_some() || wire.data_mounts.is_some() || wire.data_tool.is_some();
+        let valid = match wire.version {
+            2 => wire.source.is_none() && !storage_fields && wire.topology.is_none(),
+            3 => wire.source.is_some() && !storage_fields && wire.topology.is_none(),
+            4 => {
+                wire.source.is_none()
+                    && wire.data.is_some()
+                    && wire.data_mounts.is_some()
+                    && wire.topology.is_none()
+            }
+            5 => wire.source.is_none() && !storage_fields && wire.topology.is_some(),
+            _ => false,
+        };
+        if !valid {
+            return Err("Native receipt source/storage fields do not match its wire version.");
+        }
+        Ok(Self {
+            version: wire.version,
+            kind: wire.kind,
+            owner: wire.owner,
+            boot: wire.boot,
+            review: wire.review,
+            phase: wire.phase,
+            readiness: wire.readiness,
+            resources: wire.resources,
+            topology: wire.topology,
+            source: wire.source,
+            data: wire.data.unwrap_or_default(),
+            data_mounts: wire.data_mounts.unwrap_or_default(),
+            data_tool: wire.data_tool,
+            failure: wire.failure,
+            terminal: wire.terminal,
+        })
+    }
 }
 impl Receipt {
     /// Mutable phases and terminal evidence may advance; admitted identity cannot.
     pub(super) fn check_binding(&self, expected: &Self) -> Result<(), CandidateError> {
         self.validate(expected.review.scope().run, &expected.owner)?;
-        if self.review != expected.review
+        if self.version != expected.version
+            || self.review != expected.review
+            || self.source != expected.source
             || self.boot != expected.boot
             || self.readiness != expected.readiness
+            || self.topology != expected.topology
+            || self.data != expected.data
+            || self.data_mounts != expected.data_mounts
+            || self.data_tool != expected.data_tool
             || self.resources.keys().ne(expected.resources.keys())
             || self.resources.iter().any(|(key, resource)| {
                 let prior = &expected.resources[key];
@@ -91,6 +181,9 @@ impl Receipt {
             return Err(refused());
         }
         Ok(())
+    }
+    pub(in crate::provider::graph::native) fn persistent(&self) -> bool {
+        self.version == 4
     }
     pub fn phase(&self) -> &Phase {
         &self.phase
@@ -111,7 +204,10 @@ impl Receipt {
     #[cfg(target_os = "macos")]
     pub(super) fn require_recovery_ready(&self) -> Result<(), CandidateError> {
         self.validate(self.review.scope().run, &self.owner)?;
-        if self.phase != Phase::ReadyObserved
+        // Image-only v2 is the qualified dead-owner recovery contract. Source
+        // v3 parsing and ordinary cleanup grant no publisher-recovery authority.
+        if self.version != 2
+            || self.phase != Phase::ReadyObserved
             || self.failure.is_some()
             || self
                 .resources
@@ -127,8 +223,22 @@ impl Receipt {
         owner: &str,
         boot: &str,
     ) -> Result<Self, CandidateError> {
+        if (config.source.is_some() && !config.storage.is_empty())
+            || (config.topology.is_some()
+                && (config.source.is_some() || !config.storage.is_empty()))
+        {
+            return Err(refused());
+        }
         let receipt = Self {
-            version: 2,
+            version: if config.topology.is_some() {
+                5
+            } else if config.source.is_some() {
+                3
+            } else if config.storage.is_empty() {
+                2
+            } else {
+                4
+            },
             kind: InputKind::NativeGraphRuntime,
             owner: owner.into(),
             boot: boot.into(),
@@ -141,6 +251,11 @@ impl Receipt {
                 .map(|(name, service)| (name.clone(), service.ready))
                 .collect(),
             resources: config.resources.clone(),
+            topology: config.topology.clone(),
+            source: config.source.clone(),
+            data: config.data.clone(),
+            data_mounts: config.data_mounts.clone(),
+            data_tool: None,
             failure: None,
             terminal: BTreeMap::new(),
         };
@@ -156,14 +271,17 @@ impl Receipt {
     pub(super) fn validate(&self, run: &str, owner: &str) -> Result<(), CandidateError> {
         let scope = self.review.scope();
         self.review.validate(scope).map_err(|_| refused())?;
-        if self.version != 2
+        let network_count = if self.version == 5 { 2 } else { 1 };
+        if ![2, 3, 4, 5].contains(&self.version)
+            || (self.version == 3) != self.source.is_some()
+            || (self.version == 5) != self.topology.is_some()
             || !hex(run, 32)
             || run != scope.run
             || !hex(owner, 32)
             || self.owner != owner
             || !crate::provider::environment_recovery::uuid(&self.boot)
             || self.readiness.len() > MAX_SERVICES
-            || self.readiness.len() + 1 != self.resources.len()
+            || self.readiness.len() + network_count != self.resources.len()
             || self.terminal.len() > self.readiness.len()
             || self.failure.as_ref().is_some_and(|f| {
                 !self.readiness.contains_key(&f.service) || !f.observation.failed()
@@ -171,38 +289,95 @@ impl Receipt {
         {
             return Err(refused());
         }
-        let network = self.resources.get("network:default").ok_or_else(refused)?;
-        if network.kind != Kind::Network
-            || network.key != "default"
-            || network.name != format!("hkn-{run}-network-0")
-            || network.image.is_some()
-            || network.routing.is_some()
-            || network.networks.is_some()
-            || !network.outbound
-            || network.cache.is_some()
-            || network.cache_provenance.is_some()
-            || network.id.as_ref().is_some_and(|id| !hex(id, 64))
-            || ![
-                "reserved",
-                "create-intent",
-                "created",
-                "uncertain",
-                "remove-intent",
-                "removed",
-            ]
-            .contains(&network.phase.as_str())
-            || (network.phase == "created" && network.id.is_none())
-            || (network.phase == "reserved" && network.id.is_some())
+        if let Some(source) = &self.source {
+            source.validate(&self.readiness).map_err(|_| refused())?;
+        }
+        self.validate_data()?;
+        let policies = self.topology.as_ref().map_or_else(
+            || BTreeMap::from([("default".to_owned(), false)]),
+            |topology| topology.networks.clone(),
+        );
+        if self.version == 5
+            && (policies.len() != 2
+                || policies.values().filter(|internal| **internal).count() != 1
+                || policies.keys().any(|key| {
+                    !valid_network_name(key) || matches!(key.as_str(), "default" | "ingress")
+                }))
         {
             return Err(refused());
         }
         let mut ids = BTreeSet::new();
-        if let Some(id) = &network.id {
-            ids.insert(id);
+        for (index, (key, internal)) in policies.iter().enumerate() {
+            let network = self
+                .resources
+                .get(&format!("network:{key}"))
+                .ok_or_else(refused)?;
+            if network.kind != Kind::Network
+                || network.key != *key
+                || network.name != format!("hkn-{run}-network-{index}")
+                || network.image.is_some()
+                || network.routing.is_some()
+                || network.networks.is_some()
+                || network.outbound == *internal
+                || network.cache.is_some()
+                || network.cache_provenance.is_some()
+                || network.id.as_ref().is_some_and(|id| !hex(id, 64))
+                || ![
+                    "reserved",
+                    "create-intent",
+                    "created",
+                    "uncertain",
+                    "remove-intent",
+                    "removed",
+                ]
+                .contains(&network.phase.as_str())
+                || (network.phase == "created" && network.id.is_none())
+                || (network.phase == "reserved" && network.id.is_some())
+            {
+                return Err(refused());
+            }
+            if let Some(id) = &network.id {
+                if !ids.insert(id) {
+                    return Err(refused());
+                }
+            }
+        }
+        let mut used = BTreeSet::new();
+        let mut aliases = BTreeSet::new();
+        if let Some(topology) = &self.topology {
+            if topology.attachments.keys().ne(self.readiness.keys()) {
+                return Err(refused());
+            }
+            for selected in topology.attachments.values() {
+                if selected.is_empty() || selected.keys().any(|key| !policies.contains_key(key)) {
+                    return Err(refused());
+                }
+                for (key, names) in selected {
+                    used.insert(key);
+                    if names.windows(2).any(|pair| pair[0] >= pair[1]) {
+                        return Err(refused());
+                    }
+                    for alias in names {
+                        if !valid_network_name(alias)
+                            || self.readiness.contains_key(alias)
+                            || !aliases.insert((key, alias))
+                        {
+                            return Err(refused());
+                        }
+                    }
+                }
+            }
+            if used.into_iter().ne(policies.keys()) {
+                return Err(refused());
+            }
         }
         for (index, (name, _)) in self.readiness.iter().enumerate() {
             let key = format!("container:{name}");
             let resource = self.resources.get(&key).ok_or_else(refused)?;
+            let expected_networks = self.topology.as_ref().map_or_else(
+                || vec!["default".to_owned()],
+                |topology| topology.attachments[name].keys().cloned().collect(),
+            );
             if resource.kind != Kind::Container
                 || resource.key != *name
                 || resource.name != format!("hkn-{run}-container-{index}")
@@ -211,7 +386,7 @@ impl Receipt {
                     .as_deref()
                     .is_none_or(|image| !image_id(image))
                 || resource.routing.is_some()
-                || resource.networks.as_ref() != Some(&vec!["default".to_owned()])
+                || resource.networks.as_ref() != Some(&expected_networks)
                 || resource.outbound
                 || resource.cache.is_some()
                 || resource.cache_provenance.is_some()
@@ -283,12 +458,95 @@ impl Receipt {
         }
         Ok(())
     }
+
+    fn validate_data(&self) -> Result<(), CandidateError> {
+        if self.version != 4 {
+            return if self.data.is_empty()
+                && self.data_mounts.is_empty()
+                && self.data_tool.is_none()
+            {
+                Ok(())
+            } else {
+                Err(refused())
+            };
+        }
+        if self.data.is_empty() || self.data_mounts.is_empty() {
+            return Err(refused());
+        }
+        if let Some(tool) = &self.data_tool {
+            tool.validate()?;
+            if (self.phase == Phase::ReadyObserved
+                || self
+                    .resources
+                    .values()
+                    .any(|resource| resource.kind == Kind::Container && resource.id.is_some()))
+                && tool.helper.is_none()
+            {
+                return Err(refused());
+            }
+        }
+        let mut used = BTreeSet::new();
+        for (service, mounts) in &self.data_mounts {
+            if !self.readiness.contains_key(service) || mounts.is_empty() {
+                return Err(refused());
+            }
+            let mut targets = BTreeSet::new();
+            for mount in mounts {
+                if !self.data.contains_key(&mount.storage)
+                    || !targets.insert(&mount.target)
+                    || !mount.target.starts_with('/')
+                    || mount.target.contains(['\0', '\\'])
+                    || mount
+                        .target
+                        .split('/')
+                        .skip(1)
+                        .any(|part| part == "." || part == ".." || part.is_empty())
+                {
+                    return Err(refused());
+                }
+                used.insert(&mount.storage);
+            }
+        }
+        if used.into_iter().ne(self.data.keys()) {
+            return Err(refused());
+        }
+        for (logical, data) in &self.data {
+            data.validate(
+                self.review.scope().namespace,
+                logical,
+                &self.owner,
+                &self.boot,
+            )
+            .map_err(|_| refused())?;
+            if (self.phase == Phase::ReadyObserved
+                || self
+                    .resources
+                    .values()
+                    .any(|resource| resource.kind == Kind::Container && resource.id.is_some()))
+                && !data.enrolled()
+            {
+                return Err(refused());
+            }
+        }
+        Ok(())
+    }
 }
 fn refused() -> CandidateError {
     error(
         "native_graph_receipt",
         "Native runtime ownership requires its exact kind/version, owner, provenance and bounded journal; retained evidence was not repaired or adopted.",
     )
+}
+fn valid_network_name(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    !bytes.is_empty()
+        && bytes.len() <= 63
+        && (bytes[0].is_ascii_lowercase() || bytes[0].is_ascii_digit())
+        && bytes.iter().skip(1).all(|byte| {
+            byte.is_ascii_lowercase()
+                || byte.is_ascii_digit()
+                || matches!(*byte, b'-' | b'_' | b'.')
+        })
 }
 pub(super) fn directory(candidate: &Candidate, run: &str) -> Result<PathBuf, CandidateError> {
     if !hex(run, 32) {

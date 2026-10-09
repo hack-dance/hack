@@ -1,4 +1,4 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, test as bunTest, expect } from "bun:test";
 import { createHash } from "node:crypto";
 import {
   chmod,
@@ -13,6 +13,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   loadNativeAuthoredProjectRun,
+  stopNativeAuthoredProject,
   withNativeAuthoredProjectAdmission,
 } from "../src/backends/native-authored-project-run.ts";
 import {
@@ -36,7 +37,41 @@ const KEYS = [
   "GIT_COMMON_DIR",
 ] as const;
 let saved: Record<string, string | undefined> | undefined;
+let activeCases = 0;
+let unconfirmed = false;
+function test(
+  name: string,
+  body: () => void | Promise<void>,
+  timeout?: number
+) {
+  bunTest(
+    name,
+    async () => {
+      if (unconfirmed) {
+        throw new Error(
+          "Startup fixture settlement unconfirmed; roots retained."
+        );
+      }
+      activeCases++;
+      try {
+        await body();
+      } catch (error) {
+        unconfirmed = true;
+        throw error;
+      } finally {
+        activeCases--;
+      }
+    },
+    timeout
+  );
+}
 afterEach(async () => {
+  if (activeCases !== 0) {
+    unconfirmed = true;
+  }
+  if (unconfirmed) {
+    return;
+  }
   if (saved) {
     for (const key of KEYS) {
       restoreEnv(key, saved[key]);
@@ -49,6 +84,14 @@ afterEach(async () => {
 });
 
 type FixtureOptions = {
+  readonly compilerFailure?: boolean;
+  readonly finiteHooks?: boolean;
+  readonly failBefore?: boolean;
+  readonly failDownBefore?: boolean;
+  readonly failDownAfter?: boolean;
+  readonly changeHookOwnerAfter?: boolean;
+  readonly persistent?: boolean;
+  readonly semanticAfterHook?: boolean;
   readonly planFailure?: boolean;
   readonly foreignPlan?: boolean;
   readonly foreignNamespace?: boolean;
@@ -93,10 +136,39 @@ async function fixture(options: FixtureOptions = {}) {
   process.env.HACK_HOME = join(root, "home");
   process.env.CI = "1";
   process.env.HACK_EXECUTION_MODE = "ci";
+  const hook = (name: string) => ({
+    name,
+    env_target: { kind: "host" },
+    command: {
+      exec: [
+        process.execPath,
+        "-e",
+        `const {appendFile,readdir}=await import("node:fs/promises"); await appendFile("hook-order", ${JSON.stringify(`${name}\n`)}); ${name === "down-after" && options.changeHookOwnerAfter ? 'const root=".hack/.internal/native-authored-runs";const file=(await readdir(root)).find(name=>name.endsWith(".hooks.json"));if(!file)throw Error("missing synthetic hook owner");await appendFile(root+"/"+file,"\\n");' : ""} ${(name === "up-before" && options.failBefore) || (name === "down-before" && options.failDownBefore) || (name === "down-after" && options.failDownAfter) ? "process.exit(7);" : ""}`,
+      ],
+    },
+  });
   const source = {
     schema_version: 1,
     name: "fixture",
     profiles: ["debug"],
+    ...(options.finiteHooks
+      ? {
+          host: {
+            up: { before: [hook("up-before")], after: [hook("up-after")] },
+            down: {
+              before: [hook("down-before")],
+              after: [hook("down-after")],
+            },
+            ...(options.persistent
+              ? {
+                  processes: {
+                    persistent: { command: { exec: ["sleep", "60"] } },
+                  },
+                }
+              : {}),
+          },
+        }
+      : {}),
     services: {
       web: {
         image: `sha256:${"3".repeat(64)}`,
@@ -135,21 +207,24 @@ async function fixture(options: FixtureOptions = {}) {
     compiler,
     `#!${process.execPath}
 const protocol={transport_version:1,authored_version:1,plan_version:1,resolve_version:1,local_version:1,env_plan_version:1,routing_plan_version:1,host_env_plan_version:1};
-if(process.argv[2]==='--protocol'){console.log(JSON.stringify(protocol));process.exit(0)}
+if(process.argv[2]==='--protocol'){console.log(${options.compilerFailure === true ? JSON.stringify(CANARY) : "JSON.stringify(protocol)"});process.exit(0)}
 const operation=process.argv[2];const raw=await Bun.stdin.text();const request=operation==='compile'?{}:JSON.parse(raw);
 const source=${JSON.stringify(source)};
-const plan={plan_version:1,name:'fixture',selected_profiles:[],services:{web:source.services.web},jobs:{},worktree:{inherit_local:true,auto_branch:false}};
-const result={transport_version:1,ok:true,semantic_hash:'c'.repeat(64),declared_workloads:{web:'service',off:'service'},plan};
+const plan={plan_version:1,name:'fixture',selected_profiles:[],services:{web:source.services.web},jobs:{},worktree:{inherit_local:true,auto_branch:false},...(source.host?{host:source.host}:{})};
+const result={transport_version:1,ok:true,semantic_hash:'c'.repeat(64),declared_workloads:{web:'service',off:'service'},plan,...(source.host?{host_env_targets:{include_default:true,workloads:[]}}:{})};
+if(${options.semanticAfterHook === true} && await Bun.file(${JSON.stringify(join(projectRoot, "hook-order"))}).exists())result.semantic_hash='e'.repeat(64);
 if(operation!=='compile'){
  result.local_resolution={overlay:request.explicit_overlay??null,origin:request.explicit_overlay===undefined?'project':'explicit',auto_branch:false,inherit_local:true,resolution_hash:'d'.repeat(64)};
  if(request.branch!==undefined)result.routing_resolution={domain:'hack.local',domain_origin:'default',branch:request.branch,project_origin:'https://'+request.branch+'.fixture.hack.local',aliases:{},oauth_alias:null,open_preference:'auto',open_preference_origin:'default',open_origin:'https://'+request.branch+'.fixture.hack.local',routes:{}};
 }
 if(operation==='plan')result.environment_plan={plan_version:1,overlay:request.env_metadata.overlay,overlay_exists:request.env_metadata.overlay_exists,complete:true,workloads:{web:${options.noManaged === true ? "{PUBLIC:{kind:'literal',value:'$EXACT'}}" : "{RENAMED:{kind:'managed',key:'TOKEN',scope:'global',secret:false}}"}},warnings:[],diagnostics:[]};
+if(operation==='plan'&&source.host)result.environment_plan.host=Object.fromEntries(['up','down'].flatMap(phase=>['before','after'].flatMap(order=>source.host[phase][order].map(hook=>[hook.name,{env_target:hook.env_target,bindings:{}}]))));
 console.log(JSON.stringify(result));
 `
   );
   await chmod(compiler, 0o700);
-  process.env.HACK_CONFIG_COMPILER_BINARY = realCompiler ?? compiler;
+  process.env.HACK_CONFIG_COMPILER_BINARY =
+    options.compilerFailure === true ? compiler : (realCompiler ?? compiler);
   const binary = join(root, "native");
   const journal = join(root, "journal.json");
   const calls = join(root, "calls.jsonl");
@@ -163,7 +238,8 @@ import {createHash} from 'node:crypto';import {join} from 'node:path';
 const args=process.argv.slice(2);const action=args[4];await appendFile(${JSON.stringify(calls)},JSON.stringify(args)+'\\n');
 const journal=${JSON.stringify(journal)};
 const root=${JSON.stringify(join(projectDir, ".internal", "native-authored-runs"))};
-if(action==='plan'||action==='serve'){
+if(['plan','serve','frontend-plan','frontend-serve'].includes(action)){
+ const planning=action==='plan'||action==='frontend-plan';
  const path=args[args.indexOf('--source-file')+1];const input=JSON.parse(await readFile(path,'utf8'));
  const digest=createHash('sha256');
  if(input.branch!==null)digest.update('hack-native-branch-namespace-v1\\0');
@@ -180,15 +256,15 @@ if(action==='plan'||action==='serve'){
    const actual=JSON.parse(stdout);Object.assign(provenance,actual.provenance);review.review_id=actual.review_id;
  }finally{clearTimeout(timer);if(child.exitCode===null){child.kill('SIGKILL');await child.exited}}
  }
- if(${options.foreignPlan === true}&&action==='plan'){
+ if(${options.foreignPlan === true}&&planning){
   provenance.input.semantic_hash='9'.repeat(64);
   review.review_id=createHash('sha256').update('hack.native-graph-review/v1\\0').update(JSON.stringify(provenance)).digest('hex');
  }
- if(${options.foreignNamespace === true}&&action==='plan'){
+ if(${options.foreignNamespace === true}&&planning){
   provenance.namespace='9'.repeat(64);
   review.review_id=createHash('sha256').update('hack.native-graph-review/v1\\0').update(JSON.stringify(provenance)).digest('hex');
  }
- if(action==='plan'){
+ if(planning){
   if(${options.planFailure === true}){console.error(JSON.stringify({code:'native_graph_compile',message:'private-rejected-plan-detail'}));process.exit(2)}
   if(${options.changeDuringPlan === true})await appendFile(${JSON.stringify(envFile)},'\\n');
   console.log(JSON.stringify(review));process.exit(0);
@@ -212,6 +288,7 @@ if(action==='plan'||action==='serve'){
  };
  process.on('SIGTERM',finish);await writeFile(journal,JSON.stringify(receipt));
  console.log(JSON.stringify({version:2,kind:'native-graph-foreground-ready',run:input.run,review:review.review_id,receipt}));
+ if(${options.finiteHooks === true}){ while(true)await Bun.sleep(50); }
  for(let index=0;index<200;index++){
   const mapping=(await readdir(root)).find(name=>name.endsWith('.json')&&!name.endsWith('.start.json')&&!name.endsWith('.source.json'));
   if(mapping){await Bun.sleep(30);await finish()}await Bun.sleep(10);
@@ -261,7 +338,48 @@ async function failure(
   expect(JSON.stringify(error)).not.toContain(CANARY);
   return error;
 }
-const macTest = process.platform === "darwin" ? test : test.skip;
+const macTest = process.platform === "darwin" ? test : bunTest.skip;
+
+test("startup diagnostics accept only closed compiler codes", () => {
+  const known = new NativeAuthoredProjectStartError({
+    outcome: "not-started",
+    canceled: false,
+    stage: "inputs",
+    compilerCode: "E_COMPILER_RESPONSE",
+  });
+  expect(known.stage).toBe("inputs");
+  expect(known.compilerCode).toBe("E_COMPILER_RESPONSE");
+  expect(known.message).toContain("stage inputs (E_COMPILER_RESPONSE)");
+  const unknown = new NativeAuthoredProjectStartError({
+    outcome: "not-started",
+    canceled: false,
+    stage: "inputs",
+    compilerCode: CANARY,
+  });
+  expect(unknown.compilerCode).toBeUndefined();
+  expect(String(unknown)).not.toContain(CANARY);
+  expect(JSON.stringify(unknown)).not.toContain(CANARY);
+});
+
+macTest(
+  "compiler input refusal retains a closed stage/code without reserving a runtime",
+  async () => {
+    const selected = await fixture({ compilerFailure: true });
+    const error = await failure(
+      serveNativeAuthoredProject({
+        ...selected,
+        run,
+        startupTimeoutMs: 10_000,
+      }),
+      "not-started"
+    );
+    expect(error).toHaveProperty("stage", "inputs");
+    expect(error).toHaveProperty("compilerCode", "E_COMPILER_RESPONSE");
+    expect(await artifacts(selected.scope)).toEqual([]);
+    expect(await Bun.file(selected.calls).exists()).toBe(false);
+    expect(await Bun.file(selected.delivery).exists()).toBe(false);
+  }
+);
 
 macTest(
   "native frontend holds admission through exact ready publication and Removed retirement",
@@ -307,13 +425,17 @@ for (const option of [
     `native frontend ${option} refuses before reservation or private delivery`,
     async () => {
       const selected = await fixture({ [option]: true });
-      await failure(
+      const error = await failure(
         serveNativeAuthoredProject({
           ...selected,
           run,
           startupTimeoutMs: 10_000,
         }),
         "not-started"
+      );
+      expect(error).toHaveProperty(
+        "stage",
+        option === "planFailure" ? "native-plan" : "review"
       );
       expect(await artifacts(selected.scope)).toEqual([]);
       expect(await Bun.file(selected.delivery).exists()).toBe(false);
@@ -679,3 +801,261 @@ if (process.platform !== "darwin") {
     expect(await Bun.file(selected.calls).exists()).toBe(false);
   });
 }
+
+macTest(
+  "authored four-phase hooks execute once around ready/Removed and ordinary down uses the live owner",
+  async () => {
+    const selected = await fixture({ finiteHooks: true });
+    let stop: Promise<void> | undefined;
+    const code = await serveNativeAuthoredProject({
+      ...selected,
+      run,
+      startupTimeoutMs: 15_000,
+      onReady: () => {
+        stop = stopNativeAuthoredProject({
+          scope: selected.scope,
+          timeoutMs: 15_000,
+        });
+        return undefined;
+      },
+    });
+    await stop;
+    expect(code).toBe(0);
+    expect(
+      await Bun.file(join(selected.scope.projectRoot, "hook-order")).text()
+    ).toBe("up-before\nup-after\ndown-before\ndown-after\n");
+    expect(await loadNativeAuthoredProjectRun(selected.scope)).toBeNull();
+    const calls = await Bun.file(selected.calls).text();
+    expect(calls).toContain('"frontend-plan"');
+    expect(calls).toContain('"frontend-serve"');
+    expect(calls).not.toContain(CANARY);
+    const files = await artifacts(selected.scope);
+    expect(files.filter((name) => name.endsWith("-intent.json"))).toHaveLength(
+      4
+    );
+    expect(
+      files.filter((name) => name.endsWith("-complete.json"))
+    ).toHaveLength(4);
+    expect(files.some((name) => name.endsWith(".hooks.json"))).toBe(false);
+  },
+  30_000
+);
+macTest(
+  "failed up.before records known completion and starts no native consumer or later hook",
+  async () => {
+    const selected = await fixture({ finiteHooks: true, failBefore: true });
+    const error = await failure(
+      serveNativeAuthoredProject({
+        ...selected,
+        run,
+        startupTimeoutMs: 15_000,
+      }),
+      "not-started"
+    );
+    expect(error).toHaveProperty("stage", "hook-up-before");
+    expect(
+      await Bun.file(join(selected.scope.projectRoot, "hook-order")).text()
+    ).toBe("up-before\n");
+    expect(await Bun.file(selected.calls).text()).not.toContain(
+      '"frontend-serve"'
+    );
+    expect(
+      (await artifacts(selected.scope)).some((name) =>
+        name.endsWith(".hooks.json")
+      )
+    ).toBe(false);
+  },
+  30_000
+);
+macTest(
+  "persistent host processes refuse before any hook or native operation",
+  async () => {
+    const selected = await fixture({ finiteHooks: true, persistent: true });
+    await failure(
+      serveNativeAuthoredProject({
+        ...selected,
+        run,
+        startupTimeoutMs: 15_000,
+      }),
+      "not-started"
+    );
+    expect(
+      await Bun.file(join(selected.scope.projectRoot, "hook-order")).exists()
+    ).toBe(false);
+    expect(await Bun.file(selected.calls).exists()).toBe(false);
+  }
+);
+macTest(
+  "failed down.before retains the supervised runtime and cannot replay before explicit hard cancellation",
+  async () => {
+    const selected = await fixture({ finiteHooks: true, failDownBefore: true });
+    const force = new AbortController();
+    let stop: Promise<void> | undefined;
+    let retainedAtFailure = false;
+    const stages: unknown[] = [];
+    const code = await serveNativeAuthoredProject({
+      ...selected,
+      run,
+      startupTimeoutMs: 15_000,
+      forceSignal: force.signal,
+      onHookDiagnostic: (event) => stages.push(event),
+      onReady: () => {
+        stop = (async () => {
+          await expect(
+            stopNativeAuthoredProject({
+              scope: selected.scope,
+              timeoutMs: 15_000,
+            })
+          ).rejects.toThrow();
+          retainedAtFailure =
+            (await loadNativeAuthoredProjectRun(selected.scope)) !== null;
+          force.abort();
+        })();
+        return undefined;
+      },
+    }).catch((error: unknown) => error);
+    await stop;
+    expect(JSON.parse(JSON.stringify(stages))).toEqual([
+      { phase: "up.before", boundary: "acquire" },
+      { phase: "up.before", boundary: "prepare" },
+      { phase: "up.before", boundary: "complete" },
+      { phase: "up.after", boundary: "acquire" },
+      { phase: "up.after", boundary: "prepare" },
+      { phase: "up.after", boundary: "complete" },
+      { phase: "down.before", boundary: "stop-request" },
+      { phase: "down.before", boundary: "acquire" },
+      { phase: "down.before", boundary: "prepare" },
+      { phase: "down.before", boundary: "complete" },
+      { phase: "down.before", boundary: "stop-operation" },
+    ]);
+    expect(retainedAtFailure).toBe(true);
+    expect(code).toBeInstanceOf(NativeAuthoredProjectStartError);
+    expect(
+      await Bun.file(join(selected.scope.projectRoot, "hook-order")).text()
+    ).toBe("up-before\nup-after\ndown-before\n");
+  },
+  30_000
+);
+
+macTest(
+  "known failed down.after retires the hook owner and bindings while preserving failure and permits a fresh run",
+  async () => {
+    const selected = await fixture({ finiteHooks: true, failDownAfter: true });
+    for (const currentRun of [run, "b".repeat(32)]) {
+      let stop: Promise<unknown> | undefined;
+      const error = await failure(
+        serveNativeAuthoredProject({
+          ...selected,
+          run: currentRun,
+          startupTimeoutMs: 15_000,
+          onReady: () => {
+            stop = stopNativeAuthoredProject({
+              scope: selected.scope,
+              timeoutMs: 15_000,
+            }).catch((caught: unknown) => caught);
+            return undefined;
+          },
+        }),
+        "removed"
+      );
+      expect(error).toHaveProperty("stage", "hook-down-after");
+      expect(await stop).toBeInstanceOf(Error);
+      expect(await loadNativeAuthoredProjectRun(selected.scope)).toBeNull();
+      await withNativeAuthoredProjectAdmission(
+        selected.scope,
+        async (admission) => {
+          expect(await admission.loadStart()).toBeNull();
+          expect(await admission.hooksRetained()).toBe(false);
+        }
+      );
+    }
+    expect(
+      await Bun.file(join(selected.scope.projectRoot, "hook-order")).text()
+    ).toBe("up-before\nup-after\ndown-before\ndown-after\n".repeat(2));
+    const calls = (await Bun.file(selected.calls).text())
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line)[4]);
+    expect(calls.filter((action) => action === "frontend-serve")).toHaveLength(
+      2
+    );
+  },
+  30_000
+);
+
+macTest(
+  "unknown down.after completion keeps frontend bindings and hook intent together without replay",
+  async () => {
+    const selected = await fixture({
+      finiteHooks: true,
+      changeHookOwnerAfter: true,
+    });
+    let stop: Promise<unknown> | undefined;
+    await failure(
+      serveNativeAuthoredProject({
+        ...selected,
+        run,
+        startupTimeoutMs: 15_000,
+        onReady: () => {
+          stop = stopNativeAuthoredProject({
+            scope: selected.scope,
+            timeoutMs: 15_000,
+          }).catch((caught: unknown) => caught);
+          return undefined;
+        },
+      }),
+      "retained"
+    );
+    expect(await stop).toBeInstanceOf(Error);
+    expect(await loadNativeAuthoredProjectRun(selected.scope)).not.toBeNull();
+    await withNativeAuthoredProjectAdmission(
+      selected.scope,
+      async (admission) => {
+        expect(await admission.loadStart()).not.toBeNull();
+        expect(await admission.hooksRetained()).toBe(true);
+      }
+    );
+    const files = await artifacts(selected.scope);
+    expect(files).toContain(`${run}.hook-down.after-intent.json`);
+    expect(files).not.toContain(`${run}.hook-down.after-complete.json`);
+    expect(files).toContain(`${run}.source.json`);
+    expect(
+      await Bun.file(join(selected.scope.projectRoot, "hook-order")).text()
+    ).toBe("up-before\nup-after\ndown-before\ndown-after\n");
+  },
+  30_000
+);
+
+macTest(
+  "authored semantic drift after up.before refuses before reservation or native execution",
+  async () => {
+    const selected = await fixture({
+      finiteHooks: true,
+      semanticAfterHook: true,
+    });
+    await failure(
+      serveNativeAuthoredProject({
+        ...selected,
+        run,
+        startupTimeoutMs: 15_000,
+      }),
+      "not-started"
+    );
+    expect(
+      await Bun.file(join(selected.scope.projectRoot, "hook-order")).text()
+    ).toBe("up-before\n");
+    expect(await loadNativeAuthoredProjectRun(selected.scope)).toBe(null);
+    expect(
+      await withNativeAuthoredProjectAdmission(selected.scope, (admission) =>
+        admission.loadStart()
+      )
+    ).toBe(null);
+    expect(
+      (await Bun.file(selected.calls).text())
+        .split("\n")
+        .filter(Boolean)
+        .map((line) => JSON.parse(line)[4])
+    ).toEqual(["frontend-plan"]);
+  },
+  30_000
+);

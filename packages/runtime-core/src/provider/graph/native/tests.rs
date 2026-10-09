@@ -38,6 +38,70 @@ fn image() -> String {
 fn basic() -> Value {
     json!({"schema_version":1,"name":"fixture","services":{"web":{"image":image()}}})
 }
+fn two_bridges() -> Value {
+    json!({"schema_version":1,"name":"fixture","networks":{"outbound":{"internal":false},"inside":{"internal":true}},"services":{
+        "db":{"image":image(),"networks":{"inside":{"aliases":["db-reader"]}}},
+        "web":{"image":image(),"networks":{"inside":{},"outbound":{"aliases":["web-public"]}}}
+    }})
+}
+
+#[test]
+fn selected_two_bridge_aliases_lower_to_distinct_owned_resources_and_receipt_five() {
+    let prepared = prepare(
+        two_bridges(),
+        json!({"db":{},"web":{}}),
+        &ManagedValues::new(),
+    );
+    let config = configuration(&prepared, OWNER).unwrap();
+    let resources = config.resources();
+    assert_eq!(resources.len(), 4);
+    assert!(!resources["network:inside"].outbound);
+    assert!(resources["network:outbound"].outbound);
+    assert_ne!(
+        resources["network:inside"].name,
+        resources["network:outbound"].name
+    );
+    assert_eq!(
+        resources["container:db"].networks.as_ref().unwrap(),
+        &["inside"]
+    );
+    assert_eq!(
+        resources["container:web"].networks.as_ref().unwrap(),
+        &["inside", "outbound"]
+    );
+    let inside = &resources["network:inside"].name;
+    let outbound = &resources["network:outbound"].name;
+    assert_eq!(
+        config.containers()["db"]["NetworkingConfig"]["EndpointsConfig"][inside]["Aliases"],
+        json!(["db", "db-reader"])
+    );
+    assert_eq!(
+        config.containers()["web"]["NetworkingConfig"]["EndpointsConfig"][outbound]["Aliases"],
+        json!(["web", "web-public"])
+    );
+    let receipt =
+        Receipt::preparing(&config, OWNER, "12345678-abcd-abcd-abcd-123456789abc").unwrap();
+    let wire = serde_json::to_value(&receipt).unwrap();
+    assert_eq!(wire["version"], 5);
+    assert!(
+        wire["resources"]["network:inside"]
+            .as_object()
+            .unwrap()
+            .get("outbound")
+            .is_none()
+    );
+    assert_eq!(wire["resources"]["network:outbound"]["outbound"], true);
+    assert!(receipt.validate(receipt.review.scope().run, OWNER).is_ok());
+    #[cfg(target_os = "macos")]
+    assert!(receipt.require_recovery_ready().is_err());
+    let mut crossed = serde_json::to_value(&receipt).unwrap();
+    crossed["topology"]["attachments"]["db"]["inside"] = json!(["wrong"]);
+    let crossed: Receipt = serde_json::from_value(crossed).unwrap();
+    assert!(crossed.check_binding(&receipt).is_err());
+    let mut old = serde_json::to_value(&receipt).unwrap();
+    old["version"] = json!(2);
+    assert!(serde_json::from_value::<Receipt>(old).is_err());
+}
 
 struct Fake<'a> {
     configs: &'a BTreeMap<String, Value>,
@@ -58,13 +122,99 @@ impl Driver for Fake<'_> {
         Ok(())
     }
     fn observe(&mut self, service: &str) -> Result<Observation, CandidateError> {
-        Ok(if service == "z.seed" {
+        Ok(if matches!(service, "z.seed" | "z.check") {
             Observation::Exited { code: 0 }
         } else {
             Observation::Running {
                 health: Health::Healthy,
             }
         })
+    }
+}
+
+#[test]
+fn persistent_sqlite_corpus_preserves_source_commands_drop_all_and_fresh_job_starts() {
+    // This executes the real compiler/lowerer and scheduler with observations only.
+    // The SQL programs are source-pinned for the later real native acceptance; no
+    // test here claims that synthetic observations executed SQLite or Engine effects.
+    let project: Value = serde_json::from_str(include_str!(
+        "../../../../tests/fixtures/native-persistent-sqlite.json"
+    ))
+    .unwrap();
+    let prepared = prepare(
+        project.clone(),
+        json!({"a.db":{},"b.web":{},"z.seed":{},"z.check":{}}),
+        &ManagedValues::new(),
+    );
+    let config = configuration(&prepared, OWNER).unwrap();
+    assert_eq!(config.storage, BTreeSet::from(["database".into()]));
+    assert_eq!(
+        config.data_mounts.keys().collect::<Vec<_>>(),
+        vec!["a.db", "z.seed"]
+    );
+    assert_eq!(
+        config.graph.services["a.db"].dependencies["z.seed"],
+        Condition::Completed
+    );
+    assert_eq!(
+        config.graph.services["b.web"].dependencies["a.db"],
+        Condition::Healthy
+    );
+    assert_eq!(
+        config.graph.services["z.check"].dependencies["b.web"],
+        Condition::Healthy
+    );
+    assert_eq!(config.resources.len(), 5);
+    assert!(
+        config
+            .resources
+            .values()
+            .all(|resource| resource.kind != Kind::Volume)
+    );
+    for (name, value) in &config.configs {
+        let authored = project["services"]
+            .get(name)
+            .or_else(|| project["jobs"].get(name))
+            .unwrap();
+        assert_eq!(value["Cmd"], authored["command"]["exec"]);
+        assert_eq!(value["Entrypoint"], json!([]));
+        assert_eq!(value["HostConfig"]["CapDrop"], json!(["ALL"]));
+        assert_eq!(
+            value["HostConfig"]["SecurityOpt"],
+            json!(["no-new-privileges"])
+        );
+        assert!(value.get("User").is_none());
+        assert!(
+            value["HostConfig"]["PortBindings"]
+                .as_object()
+                .is_none_or(|bindings| bindings.is_empty())
+        );
+    }
+    for _compute_attempt in 0..2 {
+        let mut driver = Fake {
+            configs: &config.configs,
+            intents: vec![],
+            started: vec![],
+        };
+        execution::run(&config.graph, &mut driver, Duration::from_secs(2)).unwrap();
+        assert_eq!(
+            driver
+                .started
+                .iter()
+                .filter(|name| name.as_str() == "z.seed")
+                .count(),
+            1
+        );
+        let position = |name: &str| {
+            driver
+                .started
+                .iter()
+                .position(|started| started == name)
+                .unwrap()
+        };
+        assert!(position("z.seed") < position("a.db"));
+        assert!(position("a.db") < position("b.web"));
+        assert!(position("b.web") < position("z.check"));
     }
 }
 

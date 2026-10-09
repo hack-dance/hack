@@ -1,12 +1,15 @@
 import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import {
+  nativeAuthoredReceiptBinding,
   parseNativeAuthoredControl,
   parseNativeAuthoredReady,
   parseNativeAuthoredReceipt,
   parseNativeAuthoredReview,
   parseNativeAuthoredSnapshot,
 } from "../src/backends/native-authored-graph-protocol.ts";
+import { parseNativePersistentTool } from "../src/backends/native-authored-persistent-data-protocol.ts";
+import { parseNativeAuthoredRecoverySelection } from "../src/backends/native-authored-recovery-protocol.ts";
 
 const run = "a".repeat(32);
 function review(profiles: string[] = []) {
@@ -61,6 +64,669 @@ function receipt() {
     },
   };
 }
+function sourceReceipt() {
+  const project = "/private/project";
+  const anchor = {
+    device: 1,
+    inode: 2,
+    mode: 0o04_0700,
+    uid: 502,
+    gid: 20,
+    kind: "directory",
+  };
+  return {
+    ...receipt(),
+    version: 3,
+    source: {
+      version: 1,
+      policy: "host-mounted",
+      share: {
+        project,
+        guest_path: `/mnt/hack-projects/${createHash("sha256").update(project).digest("hex")}`,
+        device: 1,
+        inode: 2,
+        unfiltered_source: true,
+      },
+      mounts: { "a.peer": { source: "src/main.js", target: "/app/main.js" } },
+      anchors: {
+        ".": anchor,
+        src: { ...anchor, inode: 3 },
+        "src/main.js": { ...anchor, inode: 4, mode: 0o10_0600, kind: "file" },
+      },
+    },
+  };
+}
+
+function topologyReceipt() {
+  const old = receipt();
+  // Rust Resource uses skip_serializing_if for false, so an internal bridge
+  // has no outbound field on the actual foreground-ready or journal wire.
+  const { outbound: _legacyOutbound, ...internalNetwork } =
+    old.resources["network:default"];
+  return {
+    ...old,
+    version: 5,
+    topology: {
+      networks: { inside: true, outbound: false },
+      attachments: {
+        "a.peer": { inside: ["db-reader"], outbound: ["web-public"] },
+      },
+    },
+    resources: {
+      "network:inside": {
+        ...internalNetwork,
+        key: "inside",
+      },
+      "network:outbound": {
+        ...old.resources["network:default"],
+        key: "outbound",
+        name: `hkn-${run}-network-1`,
+        id: "4".repeat(64),
+      },
+      "container:a.peer": {
+        ...old.resources["container:a.peer"],
+        networks: ["inside", "outbound"],
+      },
+    },
+  };
+}
+
+test("two-bridge v5 topology binds exact policies, selected attachments and aliases", () => {
+  const raw = topologyReceipt();
+  const admitted = parseNativeAuthoredReceipt(raw);
+  expect(admitted.version).toBe(5);
+  expect(
+    parseNativeAuthoredReady(
+      {
+        version: 2,
+        kind: "native-graph-foreground-ready",
+        run,
+        review: raw.review.review_id,
+        receipt: raw,
+      },
+      parseNativeAuthoredReview(raw.review)
+    )
+  ).toEqual(admitted);
+  expect(admitted.resources["network:inside"]?.outbound).toBe(false);
+  expect(Object.hasOwn(raw.resources["network:inside"], "outbound")).toBe(
+    false
+  );
+  expect(
+    parseNativeAuthoredReceipt({
+      ...raw,
+      resources: {
+        ...raw.resources,
+        "network:inside": {
+          ...raw.resources["network:inside"],
+          outbound: false,
+        },
+      },
+    }).resources["network:inside"]?.outbound
+  ).toBe(false);
+  expect(admitted.resources["container:a.peer"]?.networks).toEqual([
+    "inside",
+    "outbound",
+  ]);
+  for (const changed of [
+    { ...raw, version: 2 },
+    { ...raw, source: sourceReceipt().source },
+    { ...raw, data: {}, data_mounts: {} },
+    {
+      ...raw,
+      topology: {
+        ...raw.topology,
+        networks: { inside: false, outbound: false },
+      },
+    },
+    {
+      ...raw,
+      topology: {
+        ...raw.topology,
+        attachments: { "a.peer": { inside: ["db-reader"] } },
+      },
+    },
+    {
+      ...raw,
+      topology: {
+        ...raw.topology,
+        attachments: {
+          "a.peer": {
+            inside: ["db-reader", "db-reader"],
+            outbound: ["web-public"],
+          },
+        },
+      },
+    },
+    {
+      ...raw,
+      resources: {
+        ...raw.resources,
+        "network:inside": {
+          ...raw.resources["network:inside"],
+          outbound: true,
+        },
+      },
+    },
+    {
+      ...raw,
+      resources: {
+        ...raw.resources,
+        "network:inside": {
+          ...raw.resources["network:inside"],
+          outbound: null,
+        },
+      },
+    },
+    {
+      ...raw,
+      resources: {
+        ...raw.resources,
+        "network:inside": {
+          ...raw.resources["network:inside"],
+          outbound: "false",
+        },
+      },
+    },
+    {
+      ...raw,
+      resources: {
+        ...raw.resources,
+        "network:outbound": {
+          ...raw.resources["network:outbound"],
+          outbound: false,
+        },
+      },
+    },
+  ]) {
+    expect(() => parseNativeAuthoredReceipt(changed)).toThrow(
+      "invalid or changed"
+    );
+  }
+  const changed = topologyReceipt();
+  changed.topology.attachments["a.peer"].inside[0] = "other-reader";
+  expect(
+    nativeAuthoredReceiptBinding(parseNativeAuthoredReceipt(changed))
+  ).not.toBe(nativeAuthoredReceiptBinding(admitted));
+  expect(parseNativeAuthoredReceipt(receipt()).version).toBe(2);
+  const oldNetworkMissing = receipt();
+  const { outbound: _omitted, ...networkWithoutOutbound } =
+    oldNetworkMissing.resources["network:default"];
+  oldNetworkMissing.resources["network:default"] =
+    networkWithoutOutbound as (typeof oldNetworkMissing.resources)["network:default"];
+  expect(() => parseNativeAuthoredReceipt(oldNetworkMissing)).toThrow(
+    "invalid or changed"
+  );
+});
+
+test("source-bearing native receipts bind host-mounted intent while retaining image-only v2", () => {
+  const old = parseNativeAuthoredReceipt(receipt());
+  expect(old.version).toBe(2);
+  expect(Object.hasOwn(old, "source")).toBe(false);
+  const raw = sourceReceipt();
+  const admitted = parseNativeAuthoredReceipt(raw);
+  expect(admitted.version).toBe(3);
+  expect(
+    parseNativeAuthoredReady(
+      {
+        version: 2,
+        kind: "native-graph-foreground-ready",
+        run,
+        review: raw.review.review_id,
+        receipt: raw,
+      },
+      parseNativeAuthoredReview(raw.review)
+    )
+  ).toEqual(admitted);
+  const changed = sourceReceipt();
+  changed.source.anchors["src/main.js"].inode += 1;
+  expect(
+    nativeAuthoredReceiptBinding(parseNativeAuthoredReceipt(changed))
+  ).not.toBe(nativeAuthoredReceiptBinding(admitted));
+  expect(() =>
+    parseNativeAuthoredSnapshot({
+      value: {
+        receipt: changed,
+        observations: { "a.peer": { state: "running", health: "healthy" } },
+      },
+      expectedReview: admitted.review,
+      admitted,
+    })
+  ).toThrow("invalid or changed");
+  expect(nativeAuthoredReceiptBinding(old)).toBe(
+    JSON.stringify({
+      owner: old.owner,
+      boot: old.boot,
+      review: old.review,
+      readiness: old.readiness,
+      resources: Object.fromEntries(
+        Object.entries(old.resources).map(([key, item]) => [
+          key,
+          {
+            kind: item.kind,
+            key: item.key,
+            name: item.name,
+            id: item.id,
+            image: item.image,
+            networks: item.networks,
+            outbound: item.outbound,
+          },
+        ])
+      ),
+    })
+  );
+});
+
+test("source receipt refuses version, policy, selection, permission and private-field drift", () => {
+  const cases = [
+    (value: ReturnType<typeof sourceReceipt>) => {
+      value.version = 2;
+    },
+    (value: ReturnType<typeof sourceReceipt>) => {
+      value.source.policy = "immutable";
+    },
+    (value: ReturnType<typeof sourceReceipt>) => {
+      value.source.share.inode += 1;
+    },
+    (value: ReturnType<typeof sourceReceipt>) => {
+      value.source.share.unfiltered_source = false;
+    },
+    (value: ReturnType<typeof sourceReceipt>) => {
+      value.source.share.guest_path = "/foreign";
+    },
+    (value: ReturnType<typeof sourceReceipt>) => {
+      value.source.mounts["a.peer"].source = "../other";
+    },
+    (value: ReturnType<typeof sourceReceipt>) => {
+      value.source.mounts["a.peer"].target = "/app/../foreign";
+    },
+    (value: ReturnType<typeof sourceReceipt>) => {
+      value.source.anchors.src.kind = "file";
+    },
+    (value: ReturnType<typeof sourceReceipt>) => {
+      value.source.anchors.src.mode |= 0o002;
+    },
+    (value: ReturnType<typeof sourceReceipt>) => {
+      value.source.anchors.src.uid += 1;
+    },
+    (value: ReturnType<typeof sourceReceipt>) => {
+      value.source.anchors.src.inode = Number.MAX_SAFE_INTEGER + 1;
+    },
+    (value: ReturnType<typeof sourceReceipt>) => {
+      Object.assign(value.source.mounts["a.peer"], { access: "read-write" });
+    },
+    (value: ReturnType<typeof sourceReceipt>) => {
+      Object.assign(value.source.anchors.src, {
+        content: "synthetic-private-canary",
+      });
+    },
+    (value: ReturnType<typeof sourceReceipt>) => {
+      Object.assign(value.source.anchors, { extra: value.source.anchors.src });
+    },
+  ];
+  for (const mutate of cases) {
+    const value = sourceReceipt();
+    mutate(value);
+    expect(() => parseNativeAuthoredReceipt(value)).toThrow(
+      "invalid or changed"
+    );
+  }
+  expect(() =>
+    parseNativeAuthoredReceipt({ ...receipt(), source: null })
+  ).toThrow("invalid or changed");
+  expect(() =>
+    parseNativeAuthoredReceipt({ ...sourceReceipt(), source: null })
+  ).toThrow("invalid or changed");
+  expect(() =>
+    parseNativeAuthoredReceipt({ ...receipt(), version: 3 })
+  ).toThrow("invalid or changed");
+});
+
+function persistentReceipt() {
+  const base = receipt();
+  const namespace = base.review.provenance.namespace;
+  const owner = "9".repeat(32);
+  return {
+    ...base,
+    version: 4,
+    data: {
+      database: {
+        binding: {
+          scope: { namespace, storage: "database", owner },
+          guest: {
+            owner: base.owner,
+            boot_id: base.boot,
+            storage: {
+              device: 0,
+              inode: 14,
+              bytes: 128,
+              uuid: "00000000-0000-0000-0000-000000000002",
+            },
+          },
+          policy: { driver: "local", scope: "local", options: {} },
+        },
+        state: {
+          status: "enrolled",
+          volume: {
+            name: `hkp-${namespace}-${owner}-database`,
+            created_at: "2026-10-08T00:00:01Z",
+            directory: { device: 0, inode: 15 },
+          },
+        },
+      },
+    },
+    data_mounts: {
+      "a.peer": [{ storage: "database", target: "/data", read_only: false }],
+    },
+  };
+}
+test("inactive storage tool codec is graph4-only and cannot claim readiness before installed identity", () => {
+  const pending = {
+    version: 1 as const,
+    artifact: "a".repeat(64),
+    bytes: 8192,
+    root: null,
+    helper: null,
+  };
+  expect(parseNativePersistentTool(pending)).toEqual(pending);
+  expect(() =>
+    parseNativeAuthoredReceipt({ ...receipt(), data_tool: pending })
+  ).toThrow();
+  expect(() =>
+    parseNativeAuthoredReceipt({ ...receipt(), data_tool: null })
+  ).toThrow();
+  expect(() =>
+    parseNativeAuthoredReceipt({ ...persistentReceipt(), data_tool: pending })
+  ).toThrow();
+  const installed = {
+    ...pending,
+    root: { device: 0, inode: 1 },
+    helper: { device: 0, inode: 2 },
+  };
+  const qualifiedAssertion = parseNativeAuthoredReceipt({
+    ...persistentReceipt(),
+    data_tool: installed,
+  });
+  expect(qualifiedAssertion.data_tool).toEqual(installed);
+  const changed = parseNativeAuthoredReceipt({
+    ...persistentReceipt(),
+    data_tool: { ...installed, artifact: "b".repeat(64) },
+  });
+  expect(nativeAuthoredReceiptBinding(changed)).not.toBe(
+    nativeAuthoredReceiptBinding(qualifiedAssertion)
+  );
+  for (const wrong of [
+    null,
+    { ...pending, version: 2 },
+    { ...pending, extra: true },
+    { ...pending, helper: { device: 0, inode: 2 } },
+    { ...pending, artifact: `${"a".repeat(64)}\n` },
+    { ...installed, helper: { device: 0, inode: 0 } },
+  ]) {
+    expect(() => parseNativePersistentTool(wrong)).toThrow();
+  }
+  let calls = 0;
+  const getter = Object.defineProperty({ ...pending }, "root", {
+    enumerable: true,
+    get() {
+      calls += 1;
+      return null;
+    },
+  });
+  expect(() => parseNativePersistentTool(getter)).toThrow();
+  expect(calls).toBe(0);
+});
+test("persistent graph4 keeps stable data across independent compute membership and excludes graph2/3 recovery", () => {
+  const first = parseNativeAuthoredReceipt(persistentReceipt());
+  const later = persistentReceipt();
+  const newRun = "8".repeat(32);
+  later.review.provenance.run = newRun;
+  later.review.review_id = createHash("sha256")
+    .update("hack.native-graph-review/v1\0")
+    .update(JSON.stringify(later.review.provenance))
+    .digest("hex");
+  later.resources["network:default"].name = `hkn-${newRun}-network-0`;
+  later.resources["container:a.peer"].name = `hkn-${newRun}-container-0`;
+  later.resources["network:default"].id = "7".repeat(64);
+  later.resources["container:a.peer"].id = "6".repeat(64);
+  const second = parseNativeAuthoredReceipt(later);
+  expect(second.data).toEqual(first.data);
+  expect(nativeAuthoredReceiptBinding(second)).not.toBe(
+    nativeAuthoredReceiptBinding(first)
+  );
+  const selector = {
+    version: 2,
+    kind: "native-graph-recovery-selection",
+    run,
+    receipt: first,
+    receipt_sha256: "1".repeat(64),
+    owner_sha256: "2".repeat(64),
+    host_boot_uuid: "00000000-0000-0000-0000-000000000003",
+  };
+  // An otherwise valid selector reaches the graph-family gate; shape refusal
+  // cannot disguise a missing graph4 recovery exclusion.
+  const imageOnly = parseNativeAuthoredReceipt(receipt());
+  expect(
+    parseNativeAuthoredRecoverySelection({
+      value: { ...selector, receipt: imageOnly },
+      admitted: imageOnly,
+    }).version
+  ).toBe(2);
+  expect(() =>
+    parseNativeAuthoredRecoverySelection({ value: selector, admitted: first })
+  ).toThrow();
+  expect(() =>
+    parseNativeAuthoredRecoverySelection({
+      value: selector,
+      admitted: imageOnly,
+    })
+  ).toThrow();
+  for (const version of [2, 3, 5]) {
+    expect(() =>
+      parseNativeAuthoredReceipt({ ...persistentReceipt(), version })
+    ).toThrow();
+  }
+  expect(() =>
+    parseNativeAuthoredReceipt({ ...receipt(), version: 4 })
+  ).toThrow();
+});
+test("persistent graph4 closes fields and retains exact birth, directory, guest and mount membership", () => {
+  const original = persistentReceipt();
+  const first = parseNativeAuthoredReceipt(original);
+  const changes: ((value: ReturnType<typeof persistentReceipt>) => void)[] = [
+    (value) => {
+      value.data.database.binding.scope.namespace = "1".repeat(64);
+    },
+    (value) => {
+      value.data.database.binding.guest.owner = "1".repeat(32);
+    },
+    (value) => {
+      value.data.database.binding.guest.boot_id =
+        "00000000-0000-0000-0000-000000000000";
+    },
+    (value) => {
+      value.data.database.binding.guest.storage.inode = 0;
+    },
+    (value) => {
+      value.data.database.state.volume.directory.inode = 0;
+    },
+    (value) => {
+      value.data.database.state.volume.created_at = "0001-01-01T00:00:00.000Z";
+    },
+    (value) => {
+      value.data.database.state.volume.created_at = "2026-02-30T00:00:01Z";
+    },
+    (value) => {
+      const mount = value.data_mounts["a.peer"][0];
+      if (!mount) {
+        throw new Error("Missing fixture mount.");
+      }
+      mount.storage = "missing";
+    },
+    (value) => {
+      const mount = value.data_mounts["a.peer"][0];
+      if (!mount) {
+        throw new Error("Missing fixture mount.");
+      }
+      mount.target = "/data/../other";
+    },
+  ];
+  for (const change of changes) {
+    const value = structuredClone(original);
+    change(value);
+    expect(() => parseNativeAuthoredReceipt(value)).toThrow();
+  }
+  for (const state of [
+    { status: "reserved", intent: "1".repeat(32) },
+    {
+      status: "enrolled",
+      volume: {
+        ...original.data.database.state.volume,
+        extra: "private-canary",
+      },
+    },
+  ]) {
+    expect(() =>
+      parseNativeAuthoredReceipt({
+        ...original,
+        data: { database: { ...original.data.database, state } },
+      })
+    ).toThrow();
+  }
+  const replaced = persistentReceipt();
+  replaced.data.database.state.volume.created_at = "2026-10-08T00:00:02Z";
+  const parsed = parseNativeAuthoredReceipt(replaced);
+  expect(nativeAuthoredReceiptBinding(parsed)).not.toBe(
+    nativeAuthoredReceiptBinding(first)
+  );
+  expect(() =>
+    parseNativeAuthoredControl(
+      {
+        ...status(),
+        result: {
+          outcome: "status",
+          snapshot: {
+            receipt: replaced,
+            observations: status().result.snapshot.observations,
+          },
+        },
+      },
+      first,
+      "status"
+    )
+  ).toThrow();
+  let calls = 0;
+  const accessor = { ...original.data.database.binding.scope };
+  Object.defineProperty(accessor, "owner", {
+    enumerable: true,
+    get() {
+      calls += 1;
+      return "1".repeat(32);
+    },
+  });
+  expect(() =>
+    parseNativeAuthoredReceipt({
+      ...original,
+      data: {
+        database: {
+          ...original.data.database,
+          binding: { ...original.data.database.binding, scope: accessor },
+        },
+      },
+    })
+  ).toThrow();
+  expect(calls).toBe(0);
+  const mounts = [...original.data_mounts["a.peer"]];
+  Object.defineProperty(mounts, "0", {
+    enumerable: true,
+    get() {
+      calls += 1;
+      return original.data_mounts["a.peer"][0];
+    },
+  });
+  expect(() =>
+    parseNativeAuthoredReceipt({
+      ...original,
+      data_mounts: { "a.peer": mounts },
+    })
+  ).toThrow();
+  expect(calls).toBe(0);
+  const extra = {
+    ...original.data.database.binding.scope,
+    [Symbol("extra")]: "private-canary",
+  };
+  expect(() =>
+    parseNativeAuthoredReceipt({
+      ...original,
+      data: {
+        database: {
+          ...original.data.database,
+          binding: { ...original.data.database.binding, scope: extra },
+        },
+      },
+    })
+  ).toThrow();
+  const interrupted = new Proxy(original.data.database.binding.scope, {
+    ownKeys() {
+      throw new Error("private-canary");
+    },
+  });
+  expect(() =>
+    parseNativeAuthoredReceipt({
+      ...original,
+      data: {
+        database: {
+          ...original.data.database,
+          binding: { ...original.data.database.binding, scope: interrupted },
+        },
+      },
+    })
+  ).toThrow("values omitted");
+});
+test("image-only graph2 receipt binding retains its pre-storage serialized bytes", () => {
+  const bound = parseNativeAuthoredReceipt(receipt());
+  expect(nativeAuthoredReceiptBinding(bound)).toBe(
+    JSON.stringify({
+      owner: bound.owner,
+      boot: bound.boot,
+      review: bound.review,
+      readiness: bound.readiness,
+      resources: {
+        "network:default": {
+          kind: "network",
+          key: "default",
+          name: `hkn-${run}-network-0`,
+          id: "1".repeat(64),
+          image: null,
+          outbound: true,
+        },
+        "container:a.peer": {
+          kind: "container",
+          key: "a.peer",
+          name: `hkn-${run}-container-0`,
+          id: "2".repeat(64),
+          image: `sha256:${"3".repeat(64)}`,
+          networks: ["default"],
+          outbound: false,
+        },
+      },
+    })
+  );
+});
+test("graph2 refuses every present storage field, including empty and null", () => {
+  for (const fields of [
+    { data: {} },
+    { data_mounts: {} },
+    { data: {}, data_mounts: {} },
+    { data: null },
+    { data_mounts: null },
+    { data: null, data_mounts: null },
+  ]) {
+    expect(() =>
+      parseNativeAuthoredReceipt({ ...receipt(), ...fields })
+    ).toThrow();
+  }
+  expect(parseNativeAuthoredReceipt(receipt()).version).toBe(2);
+});
 function status(bound = receipt()) {
   return {
     version: 2,
@@ -448,4 +1114,32 @@ test("native profile names require scalar strings including valid surrogate pair
   for (const name of ["\uD800", "\uDC00"]) {
     expect(() => parseNativeAuthoredReview(review([name]))).toThrow("invalid");
   }
+});
+
+test("graph source and persistent families refuse every cross-family field", () => {
+  const source = sourceReceipt();
+  const persistent = persistentReceipt();
+  for (const fields of [
+    { data: {} },
+    { data_mounts: {} },
+    { data_tool: null },
+    { data: null },
+    { data_mounts: null },
+  ]) {
+    expect(() => parseNativeAuthoredReceipt({ ...source, ...fields })).toThrow(
+      "invalid or changed"
+    );
+  }
+  for (const value of [
+    { ...persistent, source: source.source },
+    { ...persistent, source: null },
+    { ...source, ...persistent, source: source.source },
+    { ...source, version: 4 },
+  ]) {
+    expect(() => parseNativeAuthoredReceipt(value)).toThrow(
+      "invalid or changed"
+    );
+  }
+  expect(parseNativeAuthoredReceipt(source).version).toBe(3);
+  expect(parseNativeAuthoredReceipt(persistent).version).toBe(4);
 });

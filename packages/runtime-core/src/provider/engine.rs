@@ -75,6 +75,16 @@ impl Transport {
         path: &str,
         body: Option<&Value>,
     ) -> Result<Vec<u8>, CandidateError> {
+        self.request_bytes_until(method, path, body, None)
+    }
+
+    fn request_bytes_until(
+        &self,
+        method: Method,
+        path: &str,
+        body: Option<&Value>,
+        deadline: Option<Instant>,
+    ) -> Result<Vec<u8>, CandidateError> {
         if !path.starts_with('/')
             || path.starts_with("//")
             || path.contains('#')
@@ -100,13 +110,30 @@ impl Transport {
         // before dispatch. A connection wait cannot extend the original budget.
         // Cleanup observations and deletion remain possible after expiry; owned
         // stop has its separate cleanup-only batch transport and deadline.
-        if requires_admission && let Some(deadline) = self.admission_deadline {
-            let remaining = super::managed_environment::remaining_until(deadline)?;
-            request = request.timeout(remaining.min(self.timeout));
-        }
+        request = request.timeout(request_timeout(
+            self.timeout,
+            requires_admission
+                .then_some(self.admission_deadline)
+                .flatten(),
+            deadline,
+        )?);
         let response = request.send().map_err(|_| failure("Engine request failed or timed out; its effect may be uncertain. No request was replayed."))?;
         response_bytes(response)
     }
+}
+
+// One minimum budget reaches dispatch. A later explicit deadline cannot replace
+// an earlier mutation-admission deadline; cleanup admission exemptions stay above.
+fn request_timeout(
+    default: Duration,
+    admission: Option<Instant>,
+    explicit: Option<Instant>,
+) -> Result<Duration, CandidateError> {
+    let mut timeout = default;
+    for deadline in admission.into_iter().chain(explicit) {
+        timeout = timeout.min(super::managed_environment::remaining_until(deadline)?);
+    }
+    Ok(timeout)
 }
 
 fn response_bytes(mut response: reqwest::blocking::Response) -> Result<Vec<u8>, CandidateError> {
@@ -182,9 +209,48 @@ pub(super) struct Engine<'a> {
     guest: OwnedGuest<'a>,
     transport: Transport,
     cleanup_only: bool,
+    #[cfg(feature = "native-config-plan")]
+    tool_lifetime: super::guest_tool::Lifetime,
 }
 
 impl<'a> Engine<'a> {
+    #[cfg(feature = "native-config-plan")]
+    pub(in crate::provider) fn tool_lifetime(&self) -> &super::guest_tool::Lifetime {
+        &self.tool_lifetime
+    }
+    #[cfg(feature = "native-config-plan")]
+    pub(in crate::provider) fn request_until(
+        &self,
+        method: Method,
+        path: &str,
+        body: Option<&Value>,
+        deadline: Instant,
+    ) -> Result<Value, CandidateError> {
+        if self.cleanup_only && ![Method::GET, Method::HEAD, Method::DELETE].contains(&method) {
+            return Err(failure(
+                "A cleanup connection cannot allocate or start resources.",
+            ));
+        }
+        self.guest.verify()?;
+        if ![Method::GET, Method::HEAD, Method::DELETE].contains(&method) {
+            self.guest.before_effect()?;
+        }
+        let bytes = self
+            .transport
+            .request_bytes_until(method, path, body, Some(deadline));
+        self.guest.verify()?;
+        if Instant::now() >= deadline {
+            return Err(failure(
+                "Private engine deadline expired; outcome remains uncertain.",
+            ));
+        }
+        let bytes = bytes?;
+        if bytes.is_empty() {
+            return Ok(Value::Null);
+        }
+        serde_json::from_slice(&bytes)
+            .map_err(|_| failure("Malformed engine response; values omitted."))
+    }
     pub(super) fn load_image_archive(&self, archive: Vec<u8>) -> Result<(), CandidateError> {
         if self.cleanup_only {
             return Err(failure("A cleanup connection cannot load images."));
@@ -406,6 +472,8 @@ impl<'a> Engine<'a> {
             guest,
             transport,
             cleanup_only,
+            #[cfg(feature = "native-config-plan")]
+            tool_lifetime: super::guest_tool::Lifetime::default(),
         };
         engine.info()?;
         Ok(engine)
@@ -585,6 +653,25 @@ mod tests {
     use super::*;
     use std::io::Write;
     use std::os::unix::net::UnixListener;
+
+    #[test]
+    fn explicit_request_budget_never_extends_mutation_admission() {
+        let now = Instant::now();
+        let early = now + Duration::from_secs(1);
+        let late = now + Duration::from_secs(20);
+        let default = Duration::from_secs(40);
+        assert!(
+            request_timeout(default, Some(early), Some(late)).unwrap() <= Duration::from_secs(1)
+        );
+        assert!(
+            request_timeout(default, Some(late), Some(early)).unwrap() <= Duration::from_secs(1)
+        );
+        assert_eq!(request_timeout(default, None, None).unwrap(), default);
+        assert!(request_timeout(default, Some(now), Some(late)).is_err());
+        assert!(request_timeout(default, Some(late), Some(now)).is_err());
+        // GET/HEAD/DELETE omit admission but still honor an explicit cleanup budget.
+        assert!(request_timeout(default, None, Some(late)).unwrap() > Duration::from_secs(1));
+    }
 
     #[cfg(target_os = "macos")]
     #[test]

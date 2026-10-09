@@ -4,6 +4,12 @@ use crate::provider::{environment::PendingEnvironment, native_environment};
 use std::{cell::Cell, path::Path, time::Instant};
 
 trait Backend {
+    fn verify_source(&self, receipt: &Receipt, _active: bool) -> Result<(), CandidateError> {
+        if receipt.source.is_some() {
+            return Err(refused());
+        }
+        Ok(())
+    }
     fn request(
         &self,
         method: Method,
@@ -21,6 +27,18 @@ trait Backend {
     fn verify_private(&self, _service: &str) -> Result<(), CandidateError> {
         Ok(())
     }
+    fn verify_data(
+        &self,
+        receipt: &Receipt,
+        _deadline: Instant,
+        _fresh: &dyn Fn() -> Result<(), CandidateError>,
+    ) -> Result<(), CandidateError> {
+        if receipt.data.is_empty() {
+            Ok(())
+        } else {
+            Err(refused())
+        }
+    }
     fn stop(
         &self,
         _selected: &[(String, u64)],
@@ -36,6 +54,26 @@ struct GuardedBackend<'a, B> {
     guard: Option<&'a dyn Fn() -> Result<(), CandidateError>>,
 }
 impl<B: Backend> Backend for GuardedBackend<'_, B> {
+    fn verify_source(&self, receipt: &Receipt, active: bool) -> Result<(), CandidateError> {
+        check_startup(self.guard)?;
+        let result = self.backend.verify_source(receipt, active);
+        check_startup(self.guard)?;
+        result
+    }
+    fn verify_data(
+        &self,
+        receipt: &Receipt,
+        deadline: Instant,
+        fresh: &dyn Fn() -> Result<(), CandidateError>,
+    ) -> Result<(), CandidateError> {
+        let guard = || {
+            check_startup(self.guard)?;
+            fresh()
+        };
+        let result = self.backend.verify_data(receipt, deadline, &guard);
+        guard()?;
+        result
+    }
     fn request(
         &self,
         method: Method,
@@ -59,6 +97,14 @@ impl<B: Backend> Backend for GuardedBackend<'_, B> {
     }
 }
 impl Backend for Engine<'_> {
+    fn verify_data(
+        &self,
+        receipt: &Receipt,
+        deadline: Instant,
+        fresh: &dyn Fn() -> Result<(), CandidateError>,
+    ) -> Result<(), CandidateError> {
+        verify_data_using_engine(self, receipt, deadline, fresh)
+    }
     fn request(
         &self,
         method: Method,
@@ -74,6 +120,20 @@ struct OwnedBackend<'a> {
     leases: BTreeMap<String, crate::provider::environment::EnvironmentLease>,
 }
 impl Backend for OwnedBackend<'_> {
+    fn verify_source(&self, receipt: &Receipt, active: bool) -> Result<(), CandidateError> {
+        if let Some(binding) = &receipt.source {
+            source::verify(&self.engine, binding, active)?;
+        }
+        Ok(())
+    }
+    fn verify_data(
+        &self,
+        receipt: &Receipt,
+        deadline: Instant,
+        fresh: &dyn Fn() -> Result<(), CandidateError>,
+    ) -> Result<(), CandidateError> {
+        verify_data_using_engine(&self.engine, receipt, deadline, fresh)
+    }
     fn request(
         &self,
         method: Method,
@@ -114,6 +174,43 @@ impl Backend for OwnedBackend<'_> {
     }
 }
 
+fn verify_prior_data_retirement(
+    prior: &Receipt,
+    selected: &BTreeMap<String, persistent_data::engine::Reference>,
+) -> Result<(), CandidateError> {
+    if prior.data.values().any(|reference| {
+        selected
+            .values()
+            .any(|current| current.name() == reference.name())
+            && (prior.phase != Phase::Removed || !reference.enrolled())
+    }) {
+        return Err(refused());
+    }
+    Ok(())
+}
+
+fn verify_data_using_engine(
+    engine: &Engine<'_>,
+    receipt: &Receipt,
+    deadline: Instant,
+    fresh: &dyn Fn() -> Result<(), CandidateError>,
+) -> Result<(), CandidateError> {
+    for reference in receipt
+        .data
+        .values()
+        .filter(|reference| reference.enrolled())
+    {
+        persistent_data::engine::verify(
+            engine.guest().candidate(),
+            engine,
+            reference,
+            deadline,
+            fresh,
+        )?;
+    }
+    fresh()
+}
+
 fn ownership(receipt: &Receipt, resource: &Resource, value: &Value) -> Result<(), CandidateError> {
     let expected = labels(&receipt.owner, &receipt.review, resource);
     let id = value["Id"]
@@ -149,6 +246,11 @@ fn ownership(receipt: &Receipt, resource: &Resource, value: &Value) -> Result<()
         .all(|(key, expected)| observed_labels.get(key) == Some(expected))
     {
         return Err(refused());
+    }
+    if resource.kind == Kind::Container
+        && let Some(binding) = &receipt.source
+    {
+        binding.verify_container(&resource.key, value)?;
     }
     Ok(())
 }
@@ -211,24 +313,98 @@ fn verify_attachment(
     service: &str,
     actual: &Value,
 ) -> Result<(), CandidateError> {
-    let network = receipt
+    verify_data_mounts(receipt, service, actual)?;
+    let resource = receipt
         .resources
-        .get("network:default")
+        .get(&format!("container:{service}"))
         .ok_or_else(refused)?;
+    let selected = resource.networks.as_ref().ok_or_else(refused)?;
     let attachments = actual["NetworkSettings"]["Networks"]
         .as_object()
         .ok_or_else(refused)?;
-    let attached = attachments.get(&network.name).ok_or_else(refused)?;
-    let observed_id = attached["NetworkID"].as_str();
-    if attachments.len() != 1
-        || network.id.is_none()
-        || (observed_id != network.id.as_deref()
-            && !(actual["State"]["Running"] != true && observed_id == Some("")))
-        || !attached["Aliases"]
-            .as_array()
-            .is_some_and(|aliases| aliases.iter().any(|alias| alias == service))
-    {
+    if attachments.len() != selected.len() {
         return Err(refused());
+    }
+    for logical in selected {
+        let network = receipt
+            .resources
+            .get(&format!("network:{logical}"))
+            .ok_or_else(refused)?;
+        let attached = attachments.get(&network.name).ok_or_else(refused)?;
+        let observed_id = attached["NetworkID"].as_str();
+        let extras = receipt.topology.as_ref().map_or(&[][..], |topology| {
+            topology.attachments[service][logical].as_slice()
+        });
+        let aliases = attached["Aliases"].as_array().ok_or_else(refused)?;
+        if network.id.is_none()
+            || (observed_id != network.id.as_deref()
+                && !(actual["State"]["Running"] != true && observed_id == Some("")))
+            || !std::iter::once(service)
+                .chain(extras.iter().map(String::as_str))
+                .all(|name| aliases.iter().any(|alias| alias == name))
+        {
+            return Err(refused());
+        }
+        if receipt.topology.is_some() {
+            let expected = std::iter::once(service)
+                .chain(extras.iter().map(String::as_str))
+                .collect::<BTreeSet<_>>();
+            let observed = aliases
+                .iter()
+                .map(|alias| alias.as_str().ok_or_else(refused))
+                .collect::<Result<Vec<_>, _>>()?;
+            let short = resource.id.as_deref().and_then(|id| id.get(..12));
+            if observed.iter().collect::<BTreeSet<_>>().len() != observed.len()
+                || observed.iter().any(|alias| {
+                    !expected.contains(alias) && *alias != resource.name && Some(*alias) != short
+                })
+            {
+                return Err(refused());
+            }
+        }
+    }
+    Ok(())
+}
+
+fn verify_data_mounts(
+    receipt: &Receipt,
+    service: &str,
+    actual: &Value,
+) -> Result<(), CandidateError> {
+    if receipt.data.is_empty() {
+        return Ok(());
+    }
+    let expected = receipt
+        .data_mounts
+        .get(service)
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    let mounts = actual["Mounts"].as_array().ok_or_else(refused)?;
+    if mounts.len() != expected.len() {
+        return Err(refused());
+    }
+    for selected in expected {
+        let reference = receipt
+            .data
+            .get(&selected.storage)
+            .filter(|reference| reference.enrolled())
+            .ok_or_else(refused)?;
+        let matching = mounts
+            .iter()
+            .filter(|mount| mount["Destination"] == selected.target)
+            .collect::<Vec<_>>();
+        if matching.len() != 1 {
+            return Err(refused());
+        }
+        let mount = matching[0];
+        if mount["Type"] != "volume"
+            || mount["Name"] != reference.name()
+            || mount["Source"] != reference.mountpoint()
+            || mount["Driver"] != "local"
+            || mount["RW"].as_bool() != Some(!selected.read_only)
+        {
+            return Err(refused());
+        }
     }
     Ok(())
 }
@@ -238,34 +414,42 @@ fn verify_attachment(
 fn project_network<B: Backend>(
     backend: &B,
     receipt: &Receipt,
+    logical: &str,
     container: Option<&Value>,
 ) -> Result<Value, CandidateError> {
     let resource = receipt
         .resources
-        .get("network:default")
+        .get(&format!("network:{logical}"))
         .ok_or_else(refused)?;
     if resource.id.is_none() || !["created", "remove-intent"].contains(&resource.phase.as_str()) {
         return Err(refused());
     }
     let network = inspected(backend, receipt, resource)?.ok_or_else(refused)?;
-    network_members(receipt, &network, container)?;
+    network_members(receipt, logical, &network, container)?;
     Ok(network)
 }
 fn network_members(
     receipt: &Receipt,
+    logical: &str,
     network: &Value,
     container: Option<&Value>,
 ) -> Result<(), CandidateError> {
     let resource = receipt
         .resources
-        .get("network:default")
+        .get(&format!("network:{logical}"))
         .ok_or_else(refused)?;
     let members = network["Containers"].as_object().ok_or_else(refused)?;
     for (id, member) in members {
         let owned = receipt
             .resources
             .values()
-            .find(|r| r.kind == Kind::Container && r.id.as_deref() == Some(id.as_str()))
+            .find(|r| {
+                r.kind == Kind::Container
+                    && r.id.as_deref() == Some(id.as_str())
+                    && r.networks
+                        .as_ref()
+                        .is_some_and(|networks| networks.iter().any(|name| name == logical))
+            })
             .ok_or_else(refused)?;
         if member["Name"].as_str() != Some(owned.name.as_str()) {
             return Err(refused());
@@ -273,6 +457,25 @@ fn network_members(
     }
     if let Some(container) = container.filter(|value| value["State"]["Running"] == true) {
         let id = container["Id"].as_str().ok_or_else(refused)?;
+        let selected = receipt
+            .resources
+            .values()
+            .find(|r| r.kind == Kind::Container && r.id.as_deref() == Some(id))
+            .ok_or_else(refused)?;
+        if !selected
+            .networks
+            .as_ref()
+            .is_some_and(|networks| networks.iter().any(|name| name == logical))
+        {
+            if members.contains_key(id)
+                || container["NetworkSettings"]["Networks"]
+                    .get(&resource.name)
+                    .is_some()
+            {
+                return Err(refused());
+            }
+            return Ok(());
+        }
         let attachment = &container["NetworkSettings"]["Networks"][&resource.name];
         let endpoint = attachment["EndpointID"]
             .as_str()
@@ -293,6 +496,22 @@ fn network_members(
         {
             return Err(refused());
         }
+    }
+    Ok(())
+}
+fn network_keys(receipt: &Receipt) -> Vec<String> {
+    receipt.topology.as_ref().map_or_else(
+        || vec!["default".to_owned()],
+        |topology| topology.networks.keys().cloned().collect(),
+    )
+}
+fn project_networks<B: Backend>(
+    backend: &B,
+    receipt: &Receipt,
+    container: Option<&Value>,
+) -> Result<(), CandidateError> {
+    for logical in network_keys(receipt) {
+        project_network(backend, receipt, &logical, container)?;
     }
     Ok(())
 }
@@ -320,10 +539,15 @@ impl<B: Backend> Session<'_, B> {
             .phase = phase.into();
         self.save()
     }
-    fn prepare_network(&mut self) -> Result<(), CandidateError> {
+    fn prepare_network(&mut self, logical: &str) -> Result<(), CandidateError> {
         self.check_cancelled()?;
-        let key = "network:default";
-        let resource = self.receipt.resources.get(key).ok_or_else(refused)?.clone();
+        let key = format!("network:{logical}");
+        let resource = self
+            .receipt
+            .resources
+            .get(&key)
+            .ok_or_else(refused)?
+            .clone();
         if resource.phase != "reserved"
             || resource.id.is_some()
             || inspected(&self.backend, &self.receipt, &resource)?.is_some()
@@ -332,7 +556,7 @@ impl<B: Backend> Session<'_, B> {
         }
         self.receipt
             .resources
-            .get_mut(key)
+            .get_mut(&key)
             .ok_or_else(refused)?
             .phase = "create-intent".into();
         self.save()?;
@@ -343,11 +567,11 @@ impl<B: Backend> Session<'_, B> {
             .filter(|id| hex(id, 64))
             .ok_or_else(refused)?
             .to_owned();
-        let network = self.receipt.resources.get_mut(key).ok_or_else(refused)?;
+        let network = self.receipt.resources.get_mut(&key).ok_or_else(refused)?;
         network.id = Some(id);
         network.phase = "created".into();
         self.save()?;
-        if !project_network(&self.backend, &self.receipt, None)?["Containers"]
+        if !project_network(&self.backend, &self.receipt, logical, None)?["Containers"]
             .as_object()
             .is_some_and(|members| members.is_empty())
         {
@@ -359,15 +583,29 @@ impl<B: Backend> Session<'_, B> {
 impl<B: Backend> Driver for Session<'_, B> {
     fn check_cancelled(&self) -> Result<(), CandidateError> {
         check_startup(self.startup_guard)?;
+        self.selected.assert_fresh(self.candidate)?;
+        self.backend.verify_source(&self.receipt, true)?;
+        // Guest source checks can wait. They cannot renew the original authored
+        // selection/cancellation/deadline at the create or ready boundary.
+        check_startup(self.startup_guard)?;
+        self.selected.assert_fresh(self.candidate)?;
+        self.backend
+            .verify_data(&self.receipt, self.selected.remaining()?, &|| {
+                check_startup(self.startup_guard)?;
+                self.selected.assert_fresh(self.candidate)
+            })?;
+        check_startup(self.startup_guard)?;
         self.selected.assert_fresh(self.candidate)
     }
     fn record(&mut self, event: Event<'_>) -> Result<(), CandidateError> {
         match event {
             Event::StartIntent { service } => {
-                if self.receipt.resources["network:default"].phase == "reserved" {
-                    self.prepare_network()?;
-                } else {
-                    project_network(&self.backend, &self.receipt, None)?;
+                for logical in network_keys(&self.receipt) {
+                    if self.receipt.resources[&format!("network:{logical}")].phase == "reserved" {
+                        self.prepare_network(&logical)?;
+                    } else {
+                        project_network(&self.backend, &self.receipt, &logical, None)?;
+                    }
                 }
                 if self
                     .receipt
@@ -390,6 +628,7 @@ impl<B: Backend> Driver for Session<'_, B> {
             }
             Event::Observed { .. } => Ok(()),
             Event::Ready => {
+                self.check_cancelled()?;
                 self.receipt.phase = Phase::ReadyObserved;
                 self.save()
             }
@@ -397,7 +636,7 @@ impl<B: Backend> Driver for Session<'_, B> {
     }
     fn start(&mut self, service: &str) -> Result<(), CandidateError> {
         self.check_cancelled()?;
-        project_network(&self.backend, &self.receipt, None)?;
+        project_networks(&self.backend, &self.receipt, None)?;
         let key = format!("container:{service}");
         let resource = self.receipt.resources[&key].clone();
         if resource.phase != "create-intent"
@@ -428,6 +667,7 @@ impl<B: Backend> Driver for Session<'_, B> {
             .to_owned();
         self.receipt.resources.get_mut(&key).ok_or_else(refused)?.id = Some(id.clone());
         self.reserve(service, "created")?;
+        self.check_cancelled()?;
         let value = inspected(&self.backend, &self.receipt, &self.receipt.resources[&key])?
             .ok_or_else(refused)?;
         verify_config(
@@ -440,9 +680,10 @@ impl<B: Backend> Driver for Session<'_, B> {
         self.reserve(service, "start-intent")?;
         self.check_cancelled()?;
         self.backend.verify_private(service)?;
-        project_network(&self.backend, &self.receipt, None)?;
+        project_networks(&self.backend, &self.receipt, None)?;
         self.backend
             .request(Method::POST, &format!("/v1.53/containers/{id}/start"), None)?;
+        self.check_cancelled()?;
         Ok(())
     }
     fn observe(&mut self, service: &str) -> Result<Observation, CandidateError> {
@@ -457,7 +698,8 @@ impl<B: Backend> Driver for Session<'_, B> {
             &self.expected_environment[service],
             &value,
         )?;
-        project_network(&self.backend, &self.receipt, Some(&value))?;
+        project_networks(&self.backend, &self.receipt, Some(&value))?;
+        self.check_cancelled()?;
         observation(&value)
     }
 }
@@ -493,6 +735,15 @@ pub(super) fn run_guarded(
 ) -> Result<Receipt, CandidateError> {
     check_startup(startup_guard)?;
     let (selected, input) = prepared.into_parts(candidate)?;
+    // Birth/device/inode/labels can all alias after replacement. Until the native
+    // root-witness transport is qualified, no ordinary invocation may reach the
+    // provider or publish receipt4/create/enroll/use persistent data.
+    if !input.inputs().storage.is_empty() {
+        return Err(error(
+            "native_graph_storage_unqualified",
+            "Native persistent storage requires a qualified root continuity witness; no provider or data effects were authorized.",
+        ));
+    }
     let deadline = selected.remaining()?;
     #[cfg(target_os = "macos")]
     let engine = Engine::connect_until(candidate, deadline, || {
@@ -506,7 +757,43 @@ pub(super) fn run_guarded(
     }
     check_startup(startup_guard)?;
     selected.assert_fresh(candidate)?;
-    let mut config = configuration(&input, engine.guest().incarnation())?;
+    let source = selected
+        .project_source
+        .as_ref()
+        .map(|source| source::prepare(&engine, source))
+        .transpose()?;
+    check_startup(startup_guard)?;
+    selected.assert_fresh(candidate)?;
+    let mut config = configuration_with_source(&input, engine.guest().incarnation(), source)?;
+    config.data = persistent_data::engine::select(
+        candidate,
+        &engine,
+        config.review.scope().namespace,
+        &config.storage,
+        deadline,
+        &|| {
+            check_startup(startup_guard)?;
+            selected.assert_fresh(candidate)
+        },
+    )?;
+    // A new compute attempt may reuse data only after all earlier admitted consumers
+    // have completed exact retirement. Exited/uncertain containers still count.
+    if !config.data.is_empty() {
+        for run in storage_inventory::runs(&candidate.state_root.join("run/native-graphs"))? {
+            let (prior, _) = journal::load_admission(
+                candidate,
+                &run,
+                engine.guest().incarnation(),
+                engine.guest().boot_id(),
+            )?;
+            verify_prior_data_retirement(&prior, &config.data)?;
+        }
+    }
+    for (service, mounts) in &config.data_mounts {
+        config.configs.get_mut(service).ok_or_else(refused)?["HostConfig"]["Mounts"] = json!(mounts.iter().map(|mount| {
+            Ok(json!({"Type":"volume","Source":config.data.get(&mount.storage).ok_or_else(refused)?.name(),"Target":mount.target,"ReadOnly":mount.read_only,"VolumeOptions":{"NoCopy":true}}))
+        }).collect::<Result<Vec<_>, CandidateError>>()?);
+    }
     check_network_intent(&engine, &config.resources)?;
     let private = input.private_services();
     // Stop observations require a whole-second bounded timeout even when authored intent omits it.
@@ -522,13 +809,22 @@ pub(super) fn run_guarded(
     if !private.is_empty() {
         crate::provider::environment::preflight_capacity(engine.guest(), private.len())?;
     }
-    let expected = verify_images(&engine, &config.resources, &mut config.configs, &private)?;
+    if !config.data.is_empty() && !private.is_empty() {
+        // Delivery bind + persistent mount intersection needs its own saved physical
+        // mount membership proof. Refuse before any stable-volume or container effect.
+        return Err(refused());
+    }
+    let expected = if config.data.is_empty() {
+        verify_images(&engine, &config.resources, &mut config.configs, &private)?
+    } else {
+        verify_native_images(&engine, &config.resources, &mut config.configs, &private)?
+    };
     for name in &private {
         launcher::validate(&config.configs[name])?;
     }
     check_startup(startup_guard)?;
     selected.assert_fresh(candidate)?;
-    let receipt = Receipt::preparing(
+    let mut receipt = Receipt::preparing(
         &config,
         engine.guest().incarnation(),
         engine.guest().boot_id(),
@@ -541,6 +837,14 @@ pub(super) fn run_guarded(
     let execution = (|| {
         check_startup(startup_guard)?;
         selected.assert_fresh(candidate)?;
+        for logical in receipt.data.keys().cloned().collect::<Vec<_>>() {
+            let reference = receipt.data.get_mut(&logical).ok_or_else(refused)?;
+            persistent_data::engine::enroll(candidate, &engine, reference, deadline, &|| {
+                check_startup(startup_guard)?;
+                selected.assert_fresh(candidate)
+            })?;
+            journal::save(&root, &receipt)?;
+        }
         let launcher = if private.is_empty() {
             None
         } else {
@@ -563,13 +867,16 @@ pub(super) fn run_guarded(
             expected_environment: expected,
             environments,
         };
-        let result = session.prepare_network().and_then(|()| {
-            execution::run(
-                &graph,
-                &mut session,
-                deadline.saturating_duration_since(Instant::now()),
-            )
-        });
+        let result = network_keys(&session.receipt)
+            .into_iter()
+            .try_for_each(|logical| session.prepare_network(&logical))
+            .and_then(|()| {
+                execution::run(
+                    &graph,
+                    &mut session,
+                    deadline.saturating_duration_since(Instant::now()),
+                )
+            });
         if let Err(error) = result {
             session.receipt.phase = Phase::FailedRetained;
             session.save()?;
@@ -613,13 +920,24 @@ pub struct Snapshot {
     pub observations: BTreeMap<String, Option<Observation>>,
 }
 fn snapshot<B: Backend>(backend: &B, receipt: Receipt) -> Result<Snapshot, CandidateError> {
+    backend.verify_source(&receipt, receipt.phase != Phase::Removed)?;
+    let data_deadline = Instant::now() + Duration::from_secs(40);
+    backend.verify_data(&receipt, data_deadline, &|| Ok(()))?;
     let mut observations = BTreeMap::new();
     if receipt.phase == Phase::Removed {
-        if inspected(backend, &receipt, &receipt.resources["network:default"])?.is_some() {
-            return Err(refused());
+        for logical in network_keys(&receipt) {
+            if inspected(
+                backend,
+                &receipt,
+                &receipt.resources[&format!("network:{logical}")],
+            )?
+            .is_some()
+            {
+                return Err(refused());
+            }
         }
     } else {
-        project_network(backend, &receipt, None)?;
+        project_networks(backend, &receipt, None)?;
     }
     for resource in receipt
         .resources
@@ -629,13 +947,15 @@ fn snapshot<B: Backend>(backend: &B, receipt: Receipt) -> Result<Snapshot, Candi
         let observed = inspected(backend, &receipt, resource)?;
         if let Some(value) = &observed {
             verify_attachment(&receipt, &resource.key, value)?;
-            project_network(backend, &receipt, Some(value))?;
+            project_networks(backend, &receipt, Some(value))?;
         }
         observations.insert(
             resource.key.clone(),
             observed.as_ref().map(observation).transpose()?,
         );
     }
+    backend.verify_source(&receipt, receipt.phase != Phase::Removed)?;
+    backend.verify_data(&receipt, data_deadline, &|| Ok(()))?;
     Ok(Snapshot {
         receipt,
         observations,
@@ -775,6 +1095,10 @@ fn cleanup_using_guarded<B: Backend>(
     check_startup(guard)?;
     let guarded = GuardedBackend { backend, guard };
     let backend = &guarded;
+    backend.verify_source(receipt, false)?;
+    backend.verify_data(receipt, Instant::now() + Duration::from_secs(40), &|| {
+        check_startup(guard)
+    })?;
     // A committed cleanup phase is retry authority for this same inventory, never
     // permission to move the receipt back to startup or stop an already retired run.
     let stopped = matches!(
@@ -784,17 +1108,42 @@ fn cleanup_using_guarded<B: Backend>(
     let removing = matches!(receipt.phase, Phase::RemovalIntent | Phase::Removed);
     let removed = receipt.phase == Phase::Removed;
     let mut prepared = BTreeMap::new();
-    let network = receipt
-        .resources
-        .get("network:default")
-        .ok_or_else(refused)?
-        .clone();
-    let network_present = inspected(backend, receipt, &network)?.is_some();
-    if network_present {
-        if network.id.is_none() || removed || network.phase == "removed" {
-            return Err(refused());
-        }
-        project_network(backend, receipt, None)?;
+    let networks = network_keys(receipt)
+        .into_iter()
+        .map(|logical| {
+            let resource = receipt
+                .resources
+                .get(&format!("network:{logical}"))
+                .ok_or_else(refused)?
+                .clone();
+            let present = inspected(backend, receipt, &resource)?.is_some();
+            if present {
+                if resource.id.is_none() || removed || resource.phase == "removed" {
+                    return Err(refused());
+                }
+                project_network(backend, receipt, &logical, None)?;
+            }
+            Ok((logical, resource, present))
+        })
+        .collect::<Result<Vec<_>, CandidateError>>()?;
+    if receipt.topology.is_some()
+        && (networks.iter().any(|(_, resource, present)| {
+            !present
+                && !matches!(
+                    resource.phase.as_str(),
+                    "removed" | "reserved" | "remove-intent"
+                )
+        }) || (networks
+            .iter()
+            .any(|(_, resource, present)| !present && resource.phase == "reserved")
+            && receipt
+                .resources
+                .values()
+                .any(|resource| resource.kind == Kind::Container && resource.id.is_some())))
+    {
+        // A never-created bridge is safe only before any container creation;
+        // an uncertain create cannot be converted into absence authority.
+        return Err(refused());
     }
     // All ownership and stop-state preflights complete before the first stop effect.
     for (key, resource) in receipt
@@ -806,9 +1155,9 @@ fn cleanup_using_guarded<B: Backend>(
             if resource.id.is_none() || removed || resource.phase == "removed" {
                 return Err(refused());
             }
-            if network_present {
+            if networks.iter().all(|(_, _, present)| *present) {
                 verify_attachment(receipt, &resource.key, &value)?;
-                project_network(backend, receipt, Some(&value))?;
+                project_networks(backend, receipt, Some(&value))?;
             }
             let selected = super::super::shutdown::prepare(resource, &value)?;
             if stopped && selected.running {
@@ -817,7 +1166,14 @@ fn cleanup_using_guarded<B: Backend>(
             prepared.insert(key.clone(), selected);
         }
     }
+    if receipt.topology.is_some()
+        && !prepared.is_empty()
+        && networks.iter().any(|(_, _, present)| !present)
+    {
+        return Err(refused());
+    }
     check_startup(guard)?;
+    backend.verify_source(receipt, false)?;
     if removed {
         return Ok(());
     }
@@ -838,8 +1194,10 @@ fn cleanup_using_guarded<B: Backend>(
         .map(|(key, prepared)| (prepared.id.as_str(), receipt.resources[key].key.as_str()))
         .collect::<BTreeMap<_, _>>();
     if !stopped {
+        backend.verify_source(receipt, false)?;
         backend.stop(&stops, &admitted)?;
     }
+    backend.verify_source(receipt, false)?;
     for (key, prepared) in &prepared {
         let resource = &receipt.resources[key];
         let value = inspected(backend, receipt, resource)?.ok_or_else(refused)?;
@@ -863,10 +1221,12 @@ fn cleanup_using_guarded<B: Backend>(
     }
     for key in prepared.keys() {
         check_startup(guard)?;
+        backend.verify_source(receipt, false)?;
         let resource = &receipt.resources[key];
         let value = inspected(backend, receipt, resource)?.ok_or_else(refused)?;
         super::super::shutdown::terminal(resource, &value, false)?;
         check_startup(guard)?;
+        backend.verify_source(receipt, false)?;
         backend.request(
             Method::DELETE,
             &format!(
@@ -887,42 +1247,113 @@ fn cleanup_using_guarded<B: Backend>(
             resource.phase = "removed".into();
         }
     }
-    if inspected(backend, receipt, &network)?.is_some() {
-        let actual = project_network(backend, receipt, None)?;
-        if !actual["Containers"]
-            .as_object()
-            .is_some_and(|members| members.is_empty())
-        {
-            return Err(refused());
+    for (logical, network, _) in &networks {
+        if inspected(backend, receipt, network)?.is_some() {
+            let actual = project_network(backend, receipt, logical, None)?;
+            if !actual["Containers"]
+                .as_object()
+                .is_some_and(|members| members.is_empty())
+            {
+                return Err(refused());
+            }
+            check_startup(guard)?;
+            receipt
+                .resources
+                .get_mut(&format!("network:{logical}"))
+                .ok_or_else(refused)?
+                .phase = "remove-intent".into();
+            journal::save(root, receipt)?;
+            check_startup(guard)?;
+            backend.verify_source(receipt, false)?;
+            backend.request(
+                Method::DELETE,
+                &format!(
+                    "/v1.53/networks/{}",
+                    network.id.as_deref().ok_or_else(refused)?
+                ),
+                None,
+            )?;
+            if inspected(backend, receipt, network)?.is_some() {
+                return Err(refused());
+            }
         }
         check_startup(guard)?;
         receipt
             .resources
-            .get_mut("network:default")
+            .get_mut(&format!("network:{logical}"))
             .ok_or_else(refused)?
-            .phase = "remove-intent".into();
-        journal::save(root, receipt)?;
-        check_startup(guard)?;
-        backend.request(
-            Method::DELETE,
+            .phase = "removed".into();
+        if receipt.topology.is_some() {
+            // Each bridge's absence must be durable before the next delete.
+            journal::save(root, receipt)?;
+        }
+    }
+    receipt.phase = Phase::Removed;
+    backend.verify_source(receipt, false)?;
+    backend.verify_data(receipt, Instant::now() + Duration::from_secs(40), &|| {
+        check_startup(guard)
+    })?;
+    journal::save(root, receipt)
+}
+
+fn verify_native_images(
+    engine: &Engine<'_>,
+    resources: &BTreeMap<String, Resource>,
+    configs: &mut BTreeMap<String, Value>,
+    private: &BTreeSet<String>,
+) -> Result<BTreeMap<String, BTreeMap<String, String>>, CandidateError> {
+    let mut expected = BTreeMap::new();
+    for resource in resources
+        .values()
+        .filter(|resource| resource.kind == Kind::Container)
+    {
+        let image = engine.request(
+            Method::GET,
             &format!(
-                "/v1.53/networks/{}",
-                network.id.as_deref().ok_or_else(refused)?
+                "/v1.53/images/{}/json",
+                resource.image.as_deref().ok_or_else(refused)?
             ),
             None,
         )?;
-        if inspected(backend, receipt, &network)?.is_some() {
+        let config = configs.get_mut(&resource.key).ok_or_else(refused)?;
+        if image["Id"].as_str() != resource.image.as_deref()
+            || image["Os"] != "linux"
+            || image["Architecture"] != "arm64"
+        {
             return Err(refused());
         }
+        if !image["Config"]["Volumes"].is_null() {
+            let volumes = image["Config"]["Volumes"].as_object().ok_or_else(refused)?;
+            let mounts = config["HostConfig"]["Mounts"]
+                .as_array()
+                .ok_or_else(refused)?;
+            // Every image-declared volume must be overridden by exactly one admitted
+            // persistent mount; anonymous engine allocation is never allowed.
+            for (target, options) in volumes {
+                if !options.as_object().is_some_and(|object| object.is_empty())
+                    || mounts
+                        .iter()
+                        .filter(|mount| {
+                            mount["Type"] == "volume"
+                                && mount["Target"] == *target
+                                && mount["VolumeOptions"]["NoCopy"] == true
+                        })
+                        .count()
+                        != 1
+                {
+                    return Err(refused());
+                }
+            }
+        }
+        if private.contains(&resource.key) {
+            image_process::apply_private(config, &image["Config"])?;
+        }
+        expected.insert(
+            resource.key.clone(),
+            image_environment::compose(&image["Config"]["Env"], &config["Env"])?,
+        );
     }
-    check_startup(guard)?;
-    receipt
-        .resources
-        .get_mut("network:default")
-        .ok_or_else(refused)?
-        .phase = "removed".into();
-    receipt.phase = Phase::Removed;
-    journal::save(root, receipt)
+    Ok(expected)
 }
 
 #[cfg(test)]
@@ -934,12 +1365,22 @@ pub(in crate::provider::graph) fn reservations(
     new_attempt: bool,
     add: impl FnMut(&Value) -> Result<(), CandidateError>,
 ) -> Result<(), CandidateError> {
+    let mut verified_data = BTreeSet::new();
     reservations_using(
         candidate,
         engine.guest().incarnation(),
         engine.guest().boot_id(),
         new_attempt,
-        |receipt, resource| inspected(engine, receipt, resource),
+        |receipt, resource| {
+            if verified_data.insert(receipt.review.scope().run.to_owned()) {
+                engine.verify_data(
+                    receipt,
+                    Instant::now() + Duration::from_secs(40),
+                    &|| Ok(()),
+                )?;
+            }
+            inspected(engine, receipt, resource)
+        },
         add,
     )
 }
@@ -963,9 +1404,15 @@ fn reservations_using(
         if receipt.phase != Phase::ReadyObserved {
             return Err(refused());
         }
-        let network =
-            inspect(&receipt, &receipt.resources["network:default"])?.ok_or_else(refused)?;
-        network_members(&receipt, &network, None)?;
+        let networks = network_keys(&receipt)
+            .into_iter()
+            .map(|logical| {
+                let network = inspect(&receipt, &receipt.resources[&format!("network:{logical}")])?
+                    .ok_or_else(refused)?;
+                network_members(&receipt, &logical, &network, None)?;
+                Ok((logical, network))
+            })
+            .collect::<Result<Vec<_>, CandidateError>>()?;
         for resource in receipt
             .resources
             .values()
@@ -973,7 +1420,9 @@ fn reservations_using(
         {
             let value = inspect(&receipt, resource)?.ok_or_else(refused)?;
             verify_attachment(&receipt, &resource.key, &value)?;
-            network_members(&receipt, &network, Some(&value))?;
+            for (logical, network) in &networks {
+                network_members(&receipt, logical, network, Some(&value))?;
+            }
             add(&value)?;
         }
     }

@@ -1,5 +1,12 @@
 import { createHash } from "node:crypto";
 import { isRecord } from "../lib/guards.ts";
+import {
+  type NativePersistentMount,
+  type NativePersistentReference,
+  type NativePersistentTool,
+  parseNativePersistentData,
+  parseNativePersistentTool,
+} from "./native-authored-persistent-data-protocol.ts";
 
 const HEX32 = /^[a-f0-9]{32}$/;
 const HEX64 = /^[a-f0-9]{64}$/;
@@ -7,6 +14,7 @@ const IMAGE = /^sha256:[a-f0-9]{64}$/;
 const BOOT = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/;
 const CONTROL = /\p{Cc}/u;
 const SERVICE = /^[A-Za-z0-9_-][A-Za-z0-9_.-]{0,127}$/;
+const NETWORK = /^[a-z0-9][a-z0-9_.-]{0,62}$/;
 const PHASES = [
   "preparing",
   "ready-observed",
@@ -48,7 +56,7 @@ type Resource = {
   readonly id: string | null;
   readonly image: string | null;
   readonly phase: string;
-  readonly networks?: readonly ["default"];
+  readonly networks?: readonly string[];
   readonly outbound: boolean;
 };
 type Terminal = {
@@ -57,8 +65,36 @@ type Terminal = {
   readonly oom_killed: boolean;
   readonly stop_requested: boolean;
 };
-export type NativeAuthoredReceipt = {
-  readonly version: 2;
+type NativeSourceAnchor = {
+  readonly device: number;
+  readonly inode: number;
+  readonly mode: number;
+  readonly uid: number;
+  readonly gid: number;
+  readonly kind: "file" | "directory";
+};
+type NativeSourceBinding = {
+  readonly version: 1;
+  readonly policy: "host-mounted";
+  readonly share: {
+    readonly project: string;
+    readonly guest_path: string;
+    readonly device: number;
+    readonly inode: number;
+    readonly unfiltered_source: true;
+  };
+  readonly mounts: Readonly<
+    Record<string, { readonly source: string; readonly target: string }>
+  >;
+  readonly anchors: Readonly<Record<string, NativeSourceAnchor>>;
+};
+type NativeTopology = {
+  readonly networks: Readonly<Record<string, boolean>>;
+  readonly attachments: Readonly<
+    Record<string, Readonly<Record<string, readonly string[]>>>
+  >;
+};
+type NativeAuthoredInventory = {
   readonly kind: "native-graph-runtime";
   readonly owner: string;
   readonly boot: string;
@@ -66,12 +102,29 @@ export type NativeAuthoredReceipt = {
   readonly phase: Phase;
   readonly readiness: Readonly<Record<string, Condition>>;
   readonly resources: Readonly<Record<string, Resource>>;
+  readonly topology?: NativeTopology;
+  readonly data_tool?: NativePersistentTool;
+  readonly data?: Readonly<Record<string, NativePersistentReference>>;
+  readonly data_mounts?: Readonly<
+    Record<string, readonly NativePersistentMount[]>
+  >;
   readonly failure?: {
     readonly service: string;
     readonly observation: Observation;
   };
   readonly terminal?: Readonly<Record<string, Terminal>>;
 };
+export type NativeAuthoredReceipt = NativeAuthoredInventory &
+  (
+    | { readonly version: 2; readonly source?: never }
+    | { readonly version: 3; readonly source: NativeSourceBinding }
+    | { readonly version: 4; readonly source?: never }
+    | {
+        readonly version: 5;
+        readonly source?: never;
+        readonly topology: NativeTopology;
+      }
+  );
 function refused(): never {
   throw new Error(
     "Native authored graph response is invalid or changed; values omitted."
@@ -95,6 +148,174 @@ function hash(value: unknown): value is string {
 }
 function utf8Order(left: string, right: string): number {
   return Buffer.compare(Buffer.from(left), Buffer.from(right));
+}
+function unsigned(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+function relativeSource(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    value.isWellFormed() &&
+    Buffer.byteLength(value) <= 4096 &&
+    !CONTROL.test(value) &&
+    (value === "." ||
+      (value.length > 0 &&
+        value
+          .split("/")
+          .every((part) => part.length > 0 && part !== "." && part !== "..")))
+  );
+}
+function absoluteSource(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    value.isWellFormed() &&
+    value.startsWith("/") &&
+    Buffer.byteLength(value) <= 4096 &&
+    !CONTROL.test(value) &&
+    (value === "/" ||
+      value
+        .slice(1)
+        .split("/")
+        .every((part) => part.length > 0 && part !== "." && part !== ".."))
+  );
+}
+function sourceAnchor(value: unknown): NativeSourceAnchor {
+  if (
+    !(
+      fields(value, ["device", "inode", "mode", "uid", "gid", "kind"]) &&
+      unsigned(value.device) &&
+      unsigned(value.inode)
+    ) ||
+    value.inode === 0 ||
+    !unsigned(value.mode) ||
+    value.mode > 0xff_ff ||
+    !unsigned(value.uid) ||
+    value.uid > 0xff_ff_ff_ff ||
+    !unsigned(value.gid) ||
+    value.gid > 0xff_ff_ff_ff ||
+    (value.mode & 0o022) !== 0 ||
+    !(
+      (value.kind === "file" &&
+        (value.mode & 0o17_0000) === 0o10_0000 &&
+        (value.mode & 0o400) !== 0) ||
+      (value.kind === "directory" &&
+        (value.mode & 0o17_0000) === 0o04_0000 &&
+        (value.mode & 0o500) === 0o500)
+    )
+  ) {
+    return refused();
+  }
+  return {
+    device: value.device,
+    inode: value.inode,
+    mode: value.mode,
+    uid: value.uid,
+    gid: value.gid,
+    kind: value.kind,
+  };
+}
+function sourceBinding(
+  value: unknown,
+  services: readonly string[]
+): NativeSourceBinding {
+  if (
+    !fields(value, ["version", "policy", "share", "mounts", "anchors"]) ||
+    value.version !== 1 ||
+    value.policy !== "host-mounted" ||
+    !fields(value.share, [
+      "project",
+      "guest_path",
+      "device",
+      "inode",
+      "unfiltered_source",
+    ]) ||
+    !absoluteSource(value.share.project) ||
+    value.share.project.includes(":") ||
+    !unsigned(value.share.device) ||
+    !unsigned(value.share.inode) ||
+    value.share.inode === 0 ||
+    value.share.unfiltered_source !== true ||
+    value.share.guest_path !==
+      `/mnt/hack-projects/${createHash("sha256").update(value.share.project).digest("hex")}` ||
+    !isRecord(value.mounts) ||
+    !isRecord(value.anchors)
+  ) {
+    return refused();
+  }
+  const declared = Object.keys(value.mounts).sort(utf8Order);
+  const declaredMounts = value.mounts;
+  const declaredAnchors = value.anchors;
+  if (
+    declared.length === 0 ||
+    declared.length > services.length ||
+    declared.some((name) => !services.includes(name))
+  ) {
+    return refused();
+  }
+  const required = new Set(["."]);
+  const mounts = Object.fromEntries(
+    declared.map((name) => {
+      const mount = declaredMounts[name];
+      if (
+        !(
+          fields(mount, ["source", "target"]) &&
+          relativeSource(mount.source) &&
+          absoluteSource(mount.target)
+        )
+      ) {
+        return refused();
+      }
+      if (mount.source !== ".") {
+        const parts = mount.source.split("/");
+        for (let length = 1; length <= parts.length; length += 1) {
+          required.add(parts.slice(0, length).join("/"));
+        }
+      }
+      return [name, { source: mount.source, target: mount.target }];
+    })
+  );
+  const anchors = Object.fromEntries(
+    Object.keys(declaredAnchors)
+      .sort(utf8Order)
+      .map((name) => {
+        if (!required.has(name)) {
+          return refused();
+        }
+        return [name, sourceAnchor(declaredAnchors[name])];
+      })
+  );
+  const root = anchors["."];
+  if (
+    Object.keys(anchors).length !== required.size ||
+    root === undefined ||
+    root.kind !== "directory" ||
+    root.device !== value.share.device ||
+    root.inode !== value.share.inode ||
+    Object.values(anchors).some((anchor) => anchor.uid !== root.uid) ||
+    [...required].some(
+      (path) =>
+        path !== "." &&
+        Object.values(mounts).some((mount) =>
+          mount.source.startsWith(`${path}/`)
+        ) &&
+        anchors[path]?.kind !== "directory"
+    )
+  ) {
+    return refused();
+  }
+  return {
+    version: 1,
+    policy: "host-mounted",
+    share: {
+      project: value.share.project,
+      guest_path: value.share.guest_path,
+      device: value.share.device,
+      inode: value.share.inode,
+      unfiltered_source: true,
+    },
+    mounts,
+    anchors,
+  };
 }
 function profiles(value: unknown): value is readonly string[] {
   return (
@@ -207,7 +428,16 @@ function phase(value: unknown): value is Phase {
 function resource(
   value: unknown,
   run: string,
-  service?: { readonly name: string; readonly index: number }
+  service?: {
+    readonly name: string;
+    readonly index: number;
+    readonly networks: readonly string[];
+  },
+  network: {
+    readonly name: string;
+    readonly index: number;
+    readonly internal: boolean;
+  } = { name: "default", index: 0, internal: false }
 ): Resource {
   if (
     !fields(
@@ -231,8 +461,10 @@ function resource(
       typeof value.image !== "string" ||
       !IMAGE.test(value.image) ||
       !Array.isArray(value.networks) ||
-      value.networks.length !== 1 ||
-      value.networks[0] !== "default" ||
+      value.networks.length !== service.networks.length ||
+      !service.networks.every(
+        (name, index) => (value.networks as unknown[])[index] === name
+      ) ||
       (value.outbound !== undefined && value.outbound !== false) ||
       ![
         "reserved",
@@ -265,17 +497,19 @@ function resource(
       id: value.id,
       image: value.image,
       phase: value.phase,
-      networks: ["default"],
+      networks: [...service.networks],
       outbound: false,
     };
   }
   if (
     value.kind !== "network" ||
-    value.key !== "default" ||
-    value.name !== `hkn-${run}-network-0` ||
+    value.key !== network.name ||
+    value.name !== `hkn-${run}-network-${network.index}` ||
     value.image !== null ||
     (value.networks !== undefined && value.networks !== null) ||
-    value.outbound !== true ||
+    // Rust omits false on serialization; an omitted internal policy is false.
+    (value.outbound === undefined ? false : value.outbound) !==
+      !network.internal ||
     ![
       "reserved",
       "create-intent",
@@ -291,21 +525,110 @@ function resource(
   }
   return {
     kind: "network",
-    key: "default",
+    key: network.name,
     name: value.name,
     id: value.id,
     image: null,
     phase: value.phase,
-    outbound: true,
+    outbound: !network.internal,
   };
 }
 
-/** Native v2 remains disjoint from legacy Compose receipts and their plan IDs. */
-export function parseNativeAuthoredReceipt(
-  value: unknown
-): NativeAuthoredReceipt {
+function topology(value: unknown, services: readonly string[]): NativeTopology {
   if (
-    !fields(
+    !(
+      fields(value, ["networks", "attachments"]) &&
+      isRecord(value.networks) &&
+      isRecord(value.attachments)
+    )
+  ) {
+    return refused();
+  }
+  const declaredNetworks = value.networks as Record<string, unknown>;
+  const declaredAttachments = value.attachments as Record<string, unknown>;
+  const logical = Object.keys(declaredNetworks).sort(utf8Order);
+  if (
+    logical.length !== 2 ||
+    logical.some(
+      (name) =>
+        !NETWORK.test(name) ||
+        name === "default" ||
+        name === "ingress" ||
+        typeof declaredNetworks[name] !== "boolean"
+    ) ||
+    logical.filter((name) => declaredNetworks[name] === true).length !== 1 ||
+    Object.keys(declaredAttachments).length !== services.length ||
+    services.some((service) => !Object.hasOwn(declaredAttachments, service))
+  ) {
+    return refused();
+  }
+  const used = new Set<string>();
+  const aliases = new Set<string>();
+  const attachments = Object.fromEntries(
+    services.map((service) => {
+      const selected = declaredAttachments[service];
+      if (
+        !isRecord(selected) ||
+        Object.keys(selected).length === 0 ||
+        Object.keys(selected).some((name) => !logical.includes(name))
+      ) {
+        return refused();
+      }
+      return [
+        service,
+        Object.fromEntries(
+          Object.keys(selected)
+            .sort(utf8Order)
+            .map((name) => {
+              const raw = selected[name];
+              if (
+                !Array.isArray(raw) ||
+                raw.some(
+                  (alias) =>
+                    typeof alias !== "string" ||
+                    !NETWORK.test(alias) ||
+                    services.includes(alias) ||
+                    aliases.has(`${name}\0${alias}`)
+                ) ||
+                raw.some(
+                  (alias, index) =>
+                    index > 0 && utf8Order(raw[index - 1], alias) >= 0
+                )
+              ) {
+                return refused();
+              }
+              used.add(name);
+              for (const alias of raw) {
+                aliases.add(`${name}\0${alias}`);
+              }
+              return [name, [...raw]];
+            })
+        ),
+      ];
+    })
+  );
+  if (used.size !== 2) {
+    return refused();
+  }
+  return {
+    networks: Object.fromEntries(
+      logical.map((name) => [name, declaredNetworks[name] as boolean])
+    ),
+    attachments,
+  };
+}
+
+type ReceiptEnvelope = Record<string, unknown> & {
+  readonly version: 2 | 3 | 4 | 5;
+  readonly owner: string;
+  readonly boot: string;
+  readonly phase: Phase;
+  readonly readiness: Record<string, unknown>;
+  readonly resources: Record<string, unknown>;
+};
+function receiptEnvelope(value: unknown): value is ReceiptEnvelope {
+  return (
+    fields(
       value,
       [
         "version",
@@ -317,55 +640,81 @@ export function parseNativeAuthoredReceipt(
         "readiness",
         "resources",
       ],
-      ["failure", "terminal"]
-    ) ||
-    value.version !== 2 ||
-    value.kind !== "native-graph-runtime" ||
-    typeof value.owner !== "string" ||
-    !HEX32.test(value.owner) ||
-    typeof value.boot !== "string" ||
-    !BOOT.test(value.boot) ||
-    !phase(value.phase) ||
-    !isRecord(value.readiness) ||
-    !isRecord(value.resources)
-  ) {
-    return refused();
-  }
-  const review = parseNativeAuthoredReview(value.review);
-  const declaredReadiness = value.readiness;
-  const declaredResources = value.resources;
-  const names = Object.keys(declaredReadiness).sort(utf8Order);
+      [
+        "failure",
+        "terminal",
+        "source",
+        "data",
+        "data_mounts",
+        "data_tool",
+        "topology",
+      ]
+    ) &&
+    (value.version === 2 ||
+      value.version === 3 ||
+      value.version === 4 ||
+      value.version === 5) &&
+    (value.version === 3
+      ? Object.hasOwn(value, "source")
+      : !Object.hasOwn(value, "source")) &&
+    (value.version === 5) === Object.hasOwn(value, "topology") &&
+    value.kind === "native-graph-runtime" &&
+    typeof value.owner === "string" &&
+    HEX32.test(value.owner) &&
+    typeof value.boot === "string" &&
+    BOOT.test(value.boot) &&
+    phase(value.phase) &&
+    isRecord(value.readiness) &&
+    isRecord(value.resources)
+  );
+}
+
+function receiptResources(opts: {
+  readonly declared: Record<string, unknown>;
+  readonly names: readonly string[];
+  readonly selectedTopology: NativeTopology | undefined;
+  readonly run: string;
+  readonly phase: Phase;
+}): Readonly<Record<string, Resource>> {
+  const {
+    declared: declaredResources,
+    names,
+    selectedTopology,
+    run,
+    phase,
+  } = opts;
+  const networkNames = selectedTopology
+    ? Object.keys(selectedTopology.networks).sort(utf8Order)
+    : ["default"];
   const requiredResources = [
-    "network:default",
+    ...networkNames.map((name) => `network:${name}`),
     ...names.map((name) => `container:${name}`),
   ];
   if (
-    names.length === 0 ||
-    names.length > 32 ||
     requiredResources.length !== Object.keys(declaredResources).length ||
     !requiredResources.every((key) => Object.hasOwn(declaredResources, key))
   ) {
     return refused();
   }
-  const readiness = Object.fromEntries(
-    names.map((name): [string, Condition] => {
-      const selected = declaredReadiness[name];
-      if (!(SERVICE.test(name) && condition(selected))) {
-        return refused();
-      }
-      return [name, selected];
-    })
-  );
   const resourceEntries: [string, Resource][] = [
-    [
-      "network:default",
-      resource(declaredResources["network:default"], review.provenance.run),
-    ],
-    ...names.map((name, index): [string, Resource] => [
-      `container:${name}`,
-      resource(declaredResources[`container:${name}`], review.provenance.run, {
+    ...networkNames.map((name, index): [string, Resource] => [
+      `network:${name}`,
+      resource(declaredResources[`network:${name}`], run, undefined, {
         name,
         index,
+        internal: selectedTopology?.networks[name] ?? false,
+      }),
+    ]),
+    ...names.map((name, index): [string, Resource] => [
+      `container:${name}`,
+      resource(declaredResources[`container:${name}`], run, {
+        name,
+        index,
+        networks: selectedTopology
+          ? Object.keys(selectedTopology.attachments[name] ?? {}).sort(
+              utf8Order
+            )
+          : ["default"],
       }),
     ]),
   ];
@@ -375,25 +724,92 @@ export function parseNativeAuthoredReceipt(
   );
   if (
     new Set(ids).size !== ids.length ||
-    (value.phase === "ready-observed" &&
+    (phase === "ready-observed" &&
       Object.values(resources).some(
         (item) =>
           item.id === null ||
           item.phase !== (item.kind === "network" ? "created" : "started")
       )) ||
-    (value.phase === "removed" &&
+    (phase === "removed" &&
       Object.values(resources).some((item) => item.phase !== "removed"))
   ) {
     return refused();
   }
+  return resources;
+}
+
+function receiptData(opts: {
+  readonly value: ReceiptEnvelope;
+  readonly review: NativeAuthoredReview;
+  readonly names: readonly string[];
+  readonly resources: Readonly<Record<string, Resource>>;
+}): ReturnType<typeof parseNativePersistentData> | undefined {
+  const { value, review, names, resources } = opts;
+  const hasData =
+    Object.hasOwn(value, "data") || Object.hasOwn(value, "data_mounts");
+  if (
+    (value.version !== 4 && (hasData || Object.hasOwn(value, "data_tool"))) ||
+    (value.version === 4 && !hasData)
+  ) {
+    return refused();
+  }
+  if (value.version !== 4) {
+    return undefined;
+  }
+  return parseNativePersistentData({
+    data: value.data,
+    mounts: value.data_mounts,
+    namespace: review.provenance.namespace,
+    owner: value.owner,
+    boot: value.boot,
+    workloads: names,
+    enrolled:
+      value.phase === "ready-observed" ||
+      Object.values(resources).some(
+        (resource) => resource.kind === "container" && resource.id !== null
+      ),
+  });
+}
+
+/** Closed image-only v2, live-source v3, persistent-intent v4 and two-bridge v5 remain distinct. */
+export function parseNativeAuthoredReceipt(
+  value: unknown
+): NativeAuthoredReceipt {
+  if (!receiptEnvelope(value)) {
+    return refused();
+  }
+  const review = parseNativeAuthoredReview(value.review);
+  const names = Object.keys(value.readiness).sort(utf8Order);
+  if (names.length === 0 || names.length > 32) {
+    return refused();
+  }
+  const readiness = Object.fromEntries(
+    names.map((name): [string, Condition] => {
+      const selected = value.readiness[name];
+      if (!(SERVICE.test(name) && condition(selected))) {
+        return refused();
+      }
+      return [name, selected];
+    })
+  );
+  const selectedTopology =
+    value.version === 5 ? topology(value.topology, names) : undefined;
+  const resources = receiptResources({
+    declared: value.resources,
+    names,
+    selectedTopology,
+    run: review.provenance.run,
+    phase: value.phase,
+  });
   const failure = Object.hasOwn(value, "failure")
     ? parseFailure(value.failure, readiness)
     : undefined;
   const terminal = Object.hasOwn(value, "terminal")
     ? parseTerminal(value.terminal, resources)
     : undefined;
-  return {
-    version: 2,
+  const data = receiptData({ value, review, names, resources });
+  const tool = parseReceiptTool({ value, resources });
+  const common: NativeAuthoredInventory = {
     kind: "native-graph-runtime",
     owner: value.owner,
     boot: value.boot,
@@ -401,9 +817,48 @@ export function parseNativeAuthoredReceipt(
     phase: value.phase,
     readiness,
     resources,
+    ...(selectedTopology ? { topology: selectedTopology } : {}),
+    ...data,
+    ...(tool ? { data_tool: tool } : {}),
     ...(failure ? { failure } : {}),
     ...(terminal ? { terminal } : {}),
   };
+  if (value.version === 3) {
+    return {
+      version: 3,
+      ...common,
+      source: sourceBinding(value.source, names),
+    };
+  }
+  if (value.version === 5 && selectedTopology) {
+    return { version: 5, ...common, topology: selectedTopology };
+  }
+  if (value.version === 2) {
+    return { version: 2, ...common };
+  }
+  if (value.version === 4) {
+    return { version: 4, ...common };
+  }
+  return refused();
+}
+function parseReceiptTool(opts: {
+  readonly value: Record<string, unknown>;
+  readonly resources: Readonly<Record<string, Resource>>;
+}): NativePersistentTool | undefined {
+  const tool = Object.hasOwn(opts.value, "data_tool")
+    ? parseNativePersistentTool(opts.value.data_tool)
+    : undefined;
+  if (
+    tool &&
+    (opts.value.phase === "ready-observed" ||
+      Object.values(opts.resources).some(
+        (item) => item.kind === "container" && item.id !== null
+      )) &&
+    tool.helper === null
+  ) {
+    return refused();
+  }
+  return tool;
 }
 function parseFailure(
   value: unknown,
@@ -474,6 +929,18 @@ export function nativeAuthoredReceiptBinding(
   receipt: NativeAuthoredReceipt
 ): string {
   return JSON.stringify({
+    ...(receipt.version === 3 ? { version: 3, source: receipt.source } : {}),
+    ...(receipt.version === 4
+      ? {
+          version: 4,
+          data: receipt.data,
+          data_mounts: receipt.data_mounts,
+          ...(receipt.data_tool ? { data_tool: receipt.data_tool } : {}),
+        }
+      : {}),
+    ...(receipt.version === 5
+      ? { version: 5, topology: receipt.topology }
+      : {}),
     owner: receipt.owner,
     boot: receipt.boot,
     review: receipt.review,

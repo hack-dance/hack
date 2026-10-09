@@ -64,7 +64,7 @@ test.each([
 
 const unsupported: readonly Partial<NativeComposeCommandOptions>[] = [
   { operation: "restart" },
-  { operation: "down" },
+  { operation: "down", services: [] },
   { operation: "ps" },
   { operation: "logs" },
   { operation: "exec" },
@@ -360,6 +360,30 @@ macTest(
 );
 
 macTest(
+  "command retains only closed startup stage and compiler code",
+  async () => {
+    const selected = await fixture();
+    const value = await tryNativeAuthoredCommand({
+      ...selected,
+      serve: () =>
+        Promise.reject(
+          new NativeAuthoredProjectStartError({
+            outcome: "not-started",
+            canceled: false,
+            stage: "inputs",
+            compilerCode: "E_COMPILER_RESPONSE",
+          })
+        ),
+    }).catch((error: unknown) => error);
+    expect(value).toBeInstanceOf(HackCliError);
+    expect(value).toHaveProperty("code", "E_STARTUP_INCOMPLETE");
+    expect(value).toHaveProperty("detail.stage", "inputs");
+    expect(value).toHaveProperty("detail.compilerCode", "E_COMPILER_RESPONSE");
+    expect(value).toHaveProperty("detail.outcome", "not-started");
+  }
+);
+
+macTest(
   "command reports fixed owner outcomes and omits arbitrary failure details",
   async () => {
     const selected = await fixture();
@@ -401,3 +425,29 @@ if (process.platform !== "darwin") {
     expect(await readdir(join(selected.root, ".hack"))).toEqual([]);
   });
 }
+
+macTest(
+  "ordinary down delegates only to the live finite hook owner without reselecting input",
+  async () => {
+    const selected = await fixture();
+    let calls = 0;
+    const code = await tryNativeAuthoredCommand({
+      ...selected,
+      options: { ...selected.options, operation: "down" },
+      serve: () => {
+        throw new Error("Must not start");
+      },
+      recover: () => {
+        throw new Error("Must not recover");
+      },
+      stop: async (opts) => {
+        calls++;
+        expect(opts.scope.projectRoot).toBe(selected.root);
+        expect(opts.timeoutMs).toBe(1500);
+      },
+    });
+    expect(code).toBe(0);
+    expect(calls).toBe(1);
+    expect(await readdir(join(selected.root, ".hack"))).toEqual([]);
+  }
+);

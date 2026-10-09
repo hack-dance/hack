@@ -38,6 +38,7 @@ import {
 } from "./scenarios/native-config-files.ts";
 import { nativeConfigProcessPolicyScenario } from "./scenarios/native-config-process-policy.ts";
 import { nativeConfigRoutingScenario } from "./scenarios/native-config-routing.ts";
+import { nativeConfigVmFilesScenario } from "./scenarios/native-config-vm-files.ts";
 import { portableMultiserviceScenario } from "./scenarios/portable-multiservice.ts";
 import { upDownScenario } from "./scenarios/up-down.ts";
 import { worktreeBranchDefaultScenario } from "./scenarios/worktree-branch-default.ts";
@@ -87,6 +88,7 @@ const ALL_SCENARIOS: readonly Scenario[] = [
   nativeConfigDownHooksScenario,
   nativeConfigFilesScenario,
   nativeConfigFileUnknownStopScenario,
+  nativeConfigVmFilesScenario,
   nativeConfigProcessPolicyScenario,
   nativeConfigRoutingScenario,
   nativeConfigNetworksScenario,

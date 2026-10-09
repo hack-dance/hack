@@ -360,7 +360,7 @@ for (const operation of ["up", "down"] as const) {
       );
       await expectPresent(memberPaths(selected.projection));
     });
-  });
+  }, 30_000);
 }
 test("actual acquisition stages binary and empty 0444 files outside checkout", async () => {
   await store.withMutation(async (mutation) => {

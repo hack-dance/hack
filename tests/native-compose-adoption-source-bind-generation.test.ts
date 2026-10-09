@@ -1,7 +1,14 @@
-import { afterEach, beforeEach, expect, test as boundedTest } from "bun:test";
+import {
+  afterEach,
+  beforeEach,
+  expect,
+  spyOn,
+  test as boundedTest,
+} from "bun:test";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { previewLegacyComposeAdoption } from "../src/lib/native-compose-adoption-preview.ts";
+import * as privateState from "../src/lib/native-compose-private-state.ts";
 import {
   retainedSourceBindFixture,
   SOURCE_BIND_CANARY,
@@ -112,6 +119,119 @@ test("read-only adoption preview remains symbolic and does not create a receipt"
   ).toBe(false);
   await noAllocation();
 });
+
+test("replacement during the final preparation receipt read refuses before publishing a prepared anchor", async () => {
+  const store = await h.store();
+  const prior = await h.receipt();
+  const read = privateState.readPrivate;
+  let staged = false;
+  let replaced = false;
+  const capture = spyOn(privateState, "readPrivate").mockImplementation(
+    async (...args) => {
+      const result = await read(...args);
+      if (String(args[0]).endsWith(".receipt")) {
+        staged = true;
+      }
+      if (
+        staged &&
+        !replaced &&
+        args[0] ===
+          join(
+            h.root,
+            ".hack/.internal/legacy-compose-adoption-v1/receipt.json"
+          )
+      ) {
+        replaced = true;
+        await rename(join(h.root, "source"), join(h.root, "original"));
+        await mkdir(join(h.root, "source"));
+      }
+      return result;
+    }
+  );
+  try {
+    await red(store.prepare({ binary: h.compiler }));
+    expect(staged).toBe(true);
+    expect(replaced).toBe(true);
+    expect(await h.receipt()).toEqual(prior);
+    await noAllocation();
+  } finally {
+    capture.mockRestore();
+    await store.close();
+  }
+});
+
+boundedTest.each(["mutation freshness", "lease return"])(
+  "replacement during the last %s receipt await refuses at the outer boundary",
+  async (kind) => {
+    const { store, generation } = await prepared();
+    await store.publish({ generation, binary: h.compiler });
+    const active = await store.loadActive();
+    if (!active) {
+      throw new Error("Synthetic active generation missing");
+    }
+    const read = privateState.readPrivate;
+    let armed = false;
+    let replaced = false;
+    let effects = 0;
+    const capture = spyOn(privateState, "readPrivate").mockImplementation(
+      async (...args) => {
+        const result = await read(...args);
+        if (
+          armed &&
+          !replaced &&
+          args[0] ===
+            join(
+              h.root,
+              ".hack/.internal/legacy-compose-adoption-v1/receipt.json"
+            )
+        ) {
+          replaced = true;
+          await rename(join(h.root, "source"), join(h.root, "original"));
+          await mkdir(join(h.root, "source"));
+        }
+        return result;
+      }
+    );
+    try {
+      if (kind === "mutation freshness") {
+        await red(
+          store.withMutation({
+            generation: active,
+            operation: "start",
+            services: [],
+            binary: h.compiler,
+            deadline: Date.now() + 15_000,
+            run: async (input) => {
+              armed = true;
+              await input.assertFresh();
+              effects++;
+              return 0;
+            },
+          })
+        );
+        expect((await h.receipt()).pendingOperation).not.toBeNull();
+      } else {
+        await red(
+          store.withLease({
+            generation: active,
+            run: async () => {
+              armed = true;
+            },
+          })
+        );
+        expect((await h.receipt()).pendingOperation).toBeNull();
+      }
+      expect(armed).toBe(true);
+      expect(replaced).toBe(true);
+      expect(effects).toBe(0);
+      await noAllocation();
+    } finally {
+      capture.mockRestore();
+      await store.close();
+    }
+  },
+  30_000
+);
 boundedTest.each([
   "directory",
   "engine source",

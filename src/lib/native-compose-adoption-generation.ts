@@ -461,6 +461,15 @@ type Context = {
   readonly signal?: AbortSignal;
   readonly timeoutMs?: number;
   readonly check: () => Promise<void>;
+  /** Shared by bounded/transaction contexts; only authenticated saved v12 reads install a lease. */
+  readonly sourceBind: {
+    current?: {
+      readonly generation: Anchor;
+      readonly lease: Awaited<
+        ReturnType<typeof holdSavedLegacyComposeSourceBind>
+      >;
+    };
+  };
   readonly receiptSnapshots: WeakMap<
     Receipt,
     { readonly info: Stats; readonly text: string }
@@ -749,6 +758,15 @@ async function readInputs(
     await assertBuildSource();
     await ctx.check();
     await sourceBindLease?.assertFresh();
+    if (sourceBindLease) {
+      const previous = ctx.sourceBind.current;
+      ctx.sourceBind.current = { generation: selected, lease: sourceBindLease };
+      sourceBindLease = undefined;
+      await previous?.lease.close();
+      // Mounted identities remain part of the outer owner, including later
+      // receipt, compiler and source awaits before a callback or publication.
+      await ctx.check();
+    }
     freezeImportValue(observed);
     return {
       manifest: { ...meta, binding: observed },
@@ -793,6 +811,11 @@ async function save(
   }
   if (opts) {
     await opts.beforeCommit();
+  }
+  if (ctx.sourceBind.current) {
+    // The receipt is still read after additional awaited work; its final
+    // context check revalidates the same generation's mounted directory lease.
+    await requireReceiptSnapshot(ctx, expected);
   }
   await rename(temporary, ctx.receiptPath);
   await ctx.directories.at(-2)?.file.sync();
@@ -1476,6 +1499,7 @@ async function completePublication(
     check: async () => {
       await ctx.check();
       await recheckDirectories([held]);
+      await ctx.sourceBind.current?.lease.assertFresh();
     },
   };
   try {
@@ -1545,6 +1569,7 @@ async function completeRollback(ctx: Context, state: Receipt) {
     check: async () => {
       await ctx.check();
       await recheckDirectories([held]);
+      await ctx.sourceBind.current?.lease.assertFresh();
     },
   };
   try {
@@ -2116,6 +2141,7 @@ export async function openLegacyComposeAdoptedGenerationStore(input: {
     directories.push(await owned(generationsRoot));
     const receiptPath = join(stateRoot, "receipt.json");
     let closed = false;
+    const sourceBind: Context["sourceBind"] = {};
     const check = async () => {
       cancelled(signal);
       if (closed || route() !== capturedRoute) {
@@ -2130,6 +2156,7 @@ export async function openLegacyComposeAdoptedGenerationStore(input: {
       ) {
         refuse();
       }
+      await sourceBind.current?.lease.assertFresh();
     };
     const ctx: Context = {
       root,
@@ -2141,6 +2168,7 @@ export async function openLegacyComposeAdoptedGenerationStore(input: {
       signal,
       timeoutMs,
       check,
+      sourceBind,
       receiptSnapshots: new WeakMap(),
     };
     const lock = createNativeComposePrivateMutationLock({
@@ -2195,6 +2223,18 @@ export async function openLegacyComposeAdoptedGenerationStore(input: {
               prior.publication.phase !== "rolled-back"
             ) {
               refuse("E_LEGACY_ADOPTION_BUSY");
+            }
+            const previous = sourceBind.current;
+            if (previous) {
+              if (
+                !prior.prepared ||
+                JSON.stringify(previous.generation) !==
+                  JSON.stringify(prior.prepared)
+              ) {
+                refuse("E_LEGACY_ADOPTION_CHANGED");
+              }
+              await previous.lease.close();
+              sourceBind.current = undefined;
             }
             const generated = await prepare(ctx, binary);
             const loaded = await readInputs(ctx, generated, true);
@@ -2397,6 +2437,9 @@ export async function openLegacyComposeAdoptedGenerationStore(input: {
             ) {
               refuse();
             }
+            if (sourceBind.current) {
+              await requireReceiptSnapshot(ctx, publication);
+            }
             return value;
           });
         } catch (error: unknown) {
@@ -2437,6 +2480,8 @@ export async function openLegacyComposeAdoptedGenerationStore(input: {
       },
       async close() {
         closed = true;
+        await sourceBind.current?.lease.close();
+        sourceBind.current = undefined;
         await Promise.all(
           directories.map((directory) => directory.file.close())
         );

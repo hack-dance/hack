@@ -334,7 +334,10 @@ function commandPorts(transport: ReturnType<typeof fake>) {
   };
 }
 
-test.each(["up", "run"] as const)("command storage cold %s seeds once under Expected, then retains read-only restart proofs", async (operation) => {
+test.each([
+  "up",
+  "run",
+] as const)("command storage cold %s seeds once under Expected, then retains read-only restart proofs", async (operation) => {
   const store = await fixture();
   const transport = fake(store);
   const command = commandPorts(transport);
@@ -433,49 +436,66 @@ test("original cold run storage authority cannot grant general effects, adoption
         });
         expect(binding.currentGenerationId).toBeNull();
         expect(binding.pendingGenerationId).toBe(generation.generationId);
-        expect(binding.pendingToken).toBe((await store.loadCurrent()).pending?.token);
+        const pending = (await store.loadCurrent()).pending;
+        if (!pending) {
+          throw new Error("Expected original cold-run pending token");
+        }
+        expect(binding.pendingToken).toBe(pending.token);
         for (const phase of ["effect", "stop", "retire"] as const) {
-          await expect(assertNativeComposeMaterialAuthority({
+          await expect(
+            assertNativeComposeMaterialAuthority({
+              authority: mutation.materialAuthority,
+              generation,
+              phase,
+            })
+          ).rejects.toMatchObject({ code: "E_NATIVE_COMPOSE_STATE" });
+        }
+        await expect(
+          assertNativeComposeMaterialAuthority({
+            authority: mutation.materialAuthority,
+            generation: foreign,
+            phase: "storage-create",
+          })
+        ).rejects.toMatchObject({ code: "E_NATIVE_COMPOSE_STATE" });
+        await expect(
+          assertNativeComposeMaterialAuthority({
+            authority: { ...mutation.materialAuthority },
+            generation,
+            phase: "storage-create",
+          })
+        ).rejects.toMatchObject({ code: "E_NATIVE_COMPOSE_STATE" });
+        await expect(
+          prepareNativeComposeStorageXattrWitness({
             authority: mutation.materialAuthority,
             generation,
-            phase,
-          })).rejects.toMatchObject({ code: "E_NATIVE_COMPOSE_STATE" });
-        }
-        await expect(assertNativeComposeMaterialAuthority({
-          authority: mutation.materialAuthority,
-          generation: foreign,
-          phase: "storage-create",
-        })).rejects.toMatchObject({ code: "E_NATIVE_COMPOSE_STATE" });
-        await expect(assertNativeComposeMaterialAuthority({
-          authority: { ...mutation.materialAuthority },
-          generation,
-          phase: "storage-create",
-        })).rejects.toMatchObject({ code: "E_NATIVE_COMPOSE_STATE" });
-        await expect(prepareNativeComposeStorageXattrWitness({
-          authority: mutation.materialAuthority,
-          generation,
-          engineId,
-          volume: selection,
-          admission: "explicit-adoption",
-          originalVolume: volume,
-          assertAdmission: async () => {},
-          carrier: transport.carrier,
-        })).rejects.toThrow("values omitted");
+            engineId,
+            volume: selection,
+            admission: "explicit-adoption",
+            originalVolume: volume,
+            assertAdmission: async () => {},
+            carrier: transport.carrier,
+          })
+        ).rejects.toThrow("values omitted");
         expect(transport.calls).toEqual([]);
         expect((await store.loadCurrent()).storageWitnesses).toBeNull();
         return { value: 0, outcome: "complete" };
       },
     });
     expect(result.outcome).toBe("complete");
-    await expect(assertNativeComposeMaterialAuthority({
-      authority: mutation.materialAuthority,
-      generation,
-      phase: "storage-create",
-    })).rejects.toMatchObject({ code: "E_NATIVE_COMPOSE_STATE" });
+    await expect(
+      assertNativeComposeMaterialAuthority({
+        authority: mutation.materialAuthority,
+        generation,
+        phase: "storage-create",
+      })
+    ).rejects.toMatchObject({ code: "E_NATIVE_COMPOSE_STATE" });
   });
 });
 
-test.each(["warm", "stopped"] as const)("enrolled %s run remains verify-only and refuses newly selected storage", async (mode) => {
+test.each([
+  "warm",
+  "stopped",
+] as const)("enrolled %s run remains verify-only and refuses newly selected storage", async (mode) => {
   const { store, transport, generation } = await active();
   if (mode === "stopped") {
     await store.withMutation(async (mutation) => {
@@ -491,14 +511,16 @@ test.each(["warm", "stopped"] as const)("enrolled %s run remains verify-only and
   transport.calls.length = 0;
   const command = commandPorts(transport);
   await store.withMutation(async (mutation) => {
-    await expect(prepareNativeComposeCommandStorage({
-      store,
-      mutation,
-      operation: "run",
-      selected: [selection, { name: "owned_new", storage: "new" }],
-      signal: transport.controller.signal,
-      ports: command.ports,
-    })).rejects.toMatchObject({ code: "E_NATIVE_PROJECT_UNSUPPORTED" });
+    await expect(
+      prepareNativeComposeCommandStorage({
+        store,
+        mutation,
+        operation: "run",
+        selected: [selection, { name: "owned_new", storage: "new" }],
+        signal: transport.controller.signal,
+        ports: command.ports,
+      })
+    ).rejects.toMatchObject({ code: "E_NATIVE_PROJECT_UNSUPPORTED" });
     expect(transport.calls).toEqual([]);
     const storage = await prepareNativeComposeCommandStorage({
       store,
@@ -518,12 +540,17 @@ test.each(["warm", "stopped"] as const)("enrolled %s run remains verify-only and
       assertOwned: async () => {},
       storageWitnesses: storage.effectWitnesses,
       effect: async () => {
-        await expect(assertNativeComposeMaterialAuthority({
-          authority: mutation.materialAuthority,
+        await expect(
+          assertNativeComposeMaterialAuthority({
+            authority: mutation.materialAuthority,
+            generation,
+            phase: "storage-create",
+          })
+        ).rejects.toMatchObject({ code: "E_NATIVE_COMPOSE_STATE" });
+        await storage.enroll(
           generation,
-          phase: "storage-create",
-        })).rejects.toMatchObject({ code: "E_NATIVE_COMPOSE_STATE" });
-        await storage.enroll(generation, await store.readGenerationDocument(generation));
+          await store.readGenerationDocument(generation)
+        );
         transport.calls.push("workload");
         return { value: 0, outcome: "complete" };
       },
@@ -532,8 +559,12 @@ test.each(["warm", "stopped"] as const)("enrolled %s run remains verify-only and
   });
   expect(transport.calls).not.toContain("provision");
   expect(transport.calls).not.toContain("seed");
-  expect(transport.calls.indexOf("verify")).toBeLessThan(transport.calls.indexOf("workload"));
-  expect(transport.calls.lastIndexOf("verify")).toBeGreaterThan(transport.calls.indexOf("workload"));
+  expect(transport.calls.indexOf("verify")).toBeLessThan(
+    transport.calls.indexOf("workload")
+  );
+  expect(transport.calls.lastIndexOf("verify")).toBeGreaterThan(
+    transport.calls.indexOf("workload")
+  );
   expect((await store.loadCurrent()).pending).toBeNull();
 }, 30_000);
 
@@ -564,20 +595,26 @@ test("cold run enrollment authority expires when its original effect returns bef
     });
     expect(result.outcome).toBe("uncertain");
     const pending = (await store.loadCurrent()).pending;
-    await expect(enrollNativeComposeStorageXattrWitness({
-      enrollment: enrollment ?? {},
-    })).rejects.toThrow("values omitted");
-    await expect(mutation.runEffect({
-      generation,
-      operation: "run",
-      assertFresh: async () => {},
-      assertOwned: async () => {},
-      effect: async () => {
-        throw new Error("Pending run must not replay");
-      },
-    })).rejects.toMatchObject({ code: "E_NATIVE_COMPOSE_UNCERTAIN" });
+    await expect(
+      enrollNativeComposeStorageXattrWitness({
+        enrollment: enrollment ?? {},
+      })
+    ).rejects.toThrow("values omitted");
+    await expect(
+      mutation.runEffect({
+        generation,
+        operation: "run",
+        assertFresh: async () => {},
+        assertOwned: async () => {},
+        effect: async () => {
+          throw new Error("Pending run must not replay");
+        },
+      })
+    ).rejects.toMatchObject({ code: "E_NATIVE_COMPOSE_UNCERTAIN" });
     expect((await store.loadCurrent()).pending).toEqual(pending);
-    expect((await store.loadCurrent()).storageWitnesses?.[0]?.state).toBe("expected");
+    expect((await store.loadCurrent()).storageWitnesses?.[0]?.state).toBe(
+      "expected"
+    );
   });
   expect(transport.calls).toEqual(["inspect"]);
   expect(transport.calls).not.toContain("provision");
@@ -943,15 +980,13 @@ test("fresh readonly proofs tolerate observed UID change and exact owned running
   expect(transport.calls).not.toContain("seed");
 });
 
-test.each(([
-  "up",
-  "run",
-] as const).flatMap(operation => ([
-  "provision",
-  "seed",
-  "verify",
-  "cleanup",
-] as const).map(failure => [operation, failure] as const)))("cold %s %s uncertainty retains required Expected; saved stop never reenrolls", async (operation, failure) => {
+test.each(
+  (["up", "run"] as const).flatMap((operation) =>
+    (["provision", "seed", "verify", "cleanup"] as const).map(
+      (failure) => [operation, failure] as const
+    )
+  )
+)("cold %s %s uncertainty retains required Expected; saved stop never reenrolls", async (operation, failure) => {
   const store = await fixture();
   const transport = fake(store);
   transport.state.failure = failure;

@@ -3,6 +3,9 @@ import * as fs from "node:fs/promises";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { isRecord } from "../src/lib/guards.ts";
+import * as admission from "../src/lib/native-compose-adoption-compiler.ts";
+import { LegacyComposeAdoptedGenerationError } from "../src/lib/native-compose-adoption-generation.ts";
+import { legacyComposePublicationRefusal } from "../src/lib/native-compose-adoption-publication-diagnostics.ts";
 import { runLegacyComposeRetainedRoutingOperation } from "../src/lib/native-compose-adoption-routing-execution.ts";
 import * as privateState from "../src/lib/native-compose-private-state.ts";
 import {
@@ -101,6 +104,108 @@ async function red(value: Promise<unknown>) {
     expect(String(error)).not.toContain(h.root);
   }
 }
+test("publication diagnostics preserve a reached private input refusal after the switching receipt", async () => {
+  const { store, generation } = await prepare();
+  let reached = false;
+  let restoreRead: (() => void) | undefined;
+  try {
+    const originalRead = privateState.readPrivate;
+    const readSpy = spyOn(privateState, "readPrivate").mockImplementation(
+      async (...args) => {
+        const value = await originalRead(...args);
+        if (!reached && args[0].endsWith("/manifest.json")) {
+          const saved = await h.receipt();
+          if (saved.publication?.phase === "switching") {
+            reached = true;
+            throw new privateState.NativeComposeGenerationError(
+              "E_NATIVE_COMPOSE_STALE"
+            );
+          }
+        }
+        return value;
+      }
+    );
+    restoreRead = () => readSpy.mockRestore();
+    let caught: unknown;
+    try {
+      await store.publish({ generation, binary: h.compiler });
+    } catch (error: unknown) {
+      caught = error;
+    }
+    expect(reached).toBe(true);
+    expect(caught).toBeInstanceOf(LegacyComposeAdoptedGenerationError);
+    expect(legacyComposePublicationRefusal(caught)).toEqual({
+      stage: "publication-inputs",
+      reason: "private-stale",
+    });
+    const saved = await h.receipt();
+    expect(saved.publication?.phase).toBe("switching");
+    expect(saved.publication?.native).toBeNull();
+    expect(saved.routingHandoff).toBe("held");
+    expect(h.effects).toEqual([]);
+    expect(await readFile(join(h.root, ".hack/hack.config.json"), "utf8")).toBe(
+      h.config
+    );
+    expect(
+      await readFile(join(h.root, ".hack/docker-compose.yml"), "utf8")
+    ).toBe(h.compose);
+  } finally {
+    if (h.canRestore()) {
+      restoreRead?.();
+    }
+    await store.close();
+  }
+});
+test("publication diagnostics distinguish compiler refusal after switching from earlier admission", async () => {
+  const { store, generation } = await prepare();
+  let earlierAdmissions = 0;
+  let refusedAdmissions = 0;
+  let restoreCompiler: (() => void) | undefined;
+  try {
+    const originalAdmission = admission.admitLegacyComposeCandidate;
+    const compilerSpy = spyOn(
+      admission,
+      "admitLegacyComposeCandidate"
+    ).mockImplementation(async (opts) => {
+      if ((await h.receipt()).publication?.phase === "switching") {
+        refusedAdmissions += 1;
+        return false;
+      }
+      earlierAdmissions += 1;
+      return await originalAdmission(opts);
+    });
+    restoreCompiler = () => compilerSpy.mockRestore();
+    let caught: unknown;
+    try {
+      await store.publish({ generation, binary: h.compiler });
+    } catch (error: unknown) {
+      caught = error;
+    }
+    expect(earlierAdmissions).toBeGreaterThan(0);
+    expect(refusedAdmissions).toBe(1);
+    expect(caught).toBeInstanceOf(LegacyComposeAdoptedGenerationError);
+    expect(legacyComposePublicationRefusal(caught)).toEqual({
+      stage: "publication-compiler",
+      reason: "legacy-unsupported",
+    });
+    const saved = await h.receipt();
+    expect(saved.publication?.phase).toBe("switching");
+    expect(saved.publication?.native).toBeNull();
+    expect(saved.routingHandoff).toBe("held");
+    expect(h.effects).toEqual([]);
+    expect(await readFile(join(h.root, ".hack/hack.config.json"), "utf8")).toBe(
+      h.config
+    );
+    expect(
+      await readFile(join(h.root, ".hack/docker-compose.yml"), "utf8")
+    ).toBe(h.compose);
+  } finally {
+    if (h.canRestore()) {
+      restoreCompiler?.();
+    }
+    await store.close();
+  }
+});
 test(
   "v14 keeps original resources and data through stop/publication/up/down/up/rollback and saved open",
   async () => {

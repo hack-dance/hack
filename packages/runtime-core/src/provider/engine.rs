@@ -209,9 +209,15 @@ pub(super) struct Engine<'a> {
     guest: OwnedGuest<'a>,
     transport: Transport,
     cleanup_only: bool,
+    #[cfg(feature = "native-config-plan")]
+    tool_lifetime: super::guest_tool::Lifetime,
 }
 
 impl<'a> Engine<'a> {
+    #[cfg(feature = "native-config-plan")]
+    pub(in crate::provider) fn tool_lifetime(&self) -> &super::guest_tool::Lifetime {
+        &self.tool_lifetime
+    }
     #[cfg(feature = "native-config-plan")]
     pub(in crate::provider) fn request_until(
         &self,
@@ -466,6 +472,8 @@ impl<'a> Engine<'a> {
             guest,
             transport,
             cleanup_only,
+            #[cfg(feature = "native-config-plan")]
+            tool_lifetime: super::guest_tool::Lifetime::default(),
         };
         engine.info()?;
         Ok(engine)

@@ -550,6 +550,15 @@ final volume and inventory rereads. The context is revoked before return and
 cannot cross a lifecycle effect, publication or another observation phase.
 This reduces nested inspection calls; it is not a measured runtime or CPU claim.
 
+Publication refusals may include
+`legacy_adoption_publication_refusal: {stage, reason}` in the JSON error detail.
+The owner records the fixed boundary that rejected and a closed error category;
+it retains no source values, resource identities, compiler output or error text.
+The public error code, guard order, deadlines and recovery requirements remain
+unchanged. Copied details do not confer diagnostic or recovery authority. A
+category describes that future invocation, not the cause of an older refusal
+that did not record it.
+
 Rollback requires restored source bytes, stopped original resources and absent
 proxy dispatch before handing hostname claims back to the restored legacy source.
 It retains a durable handoff state across interrupted claim removal. Builds, jobs,

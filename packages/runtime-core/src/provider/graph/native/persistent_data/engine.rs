@@ -33,6 +33,9 @@ impl std::fmt::Debug for Reference {
     }
 }
 impl Reference {
+    pub(super) fn guest_identity(&self) -> &GuestIdentity {
+        &self.binding.guest
+    }
     pub(in crate::provider::graph::native) fn name(&self) -> String {
         enrollment::volume_name(&self.binding)
     }

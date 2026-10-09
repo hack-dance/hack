@@ -61,12 +61,17 @@ recovery. These preparation artifacts carry no resource ownership or replay auth
 into public container configuration using the existing bounded container isolation.
 It preserves exact process/exec-readiness values and compiler job/dependency goals,
 requires immutable image IDs and the default source root, and adds distinct native
-input labels and resource names. One ordinary outbound project bridge supplies exact
-service/job DNS aliases, including dotted names, through the shared network lowerer.
+input labels and resource names. With omitted topology, one ordinary outbound
+project bridge supplies exact service/job DNS aliases, including dotted names,
+through the shared network lowerer.
 Omitted image process/environment defaults remain
 omitted; managed values remain in separate pending handles. Whole-second shutdown
 grace up to 30 seconds is represented exactly; fractional seconds refuse. This pure
 lowerer retains logical storage mount intent without fabricating provider volume IDs.
+Explicit native topology currently admits two owned bridges, one internal and
+one outbound, with
+compiler-selected per-workload attachments and DNS aliases. External/default/
+ingress attachments and source/storage intersections refuse.
 It checks owner shape and deadline, never real guest ownership, image presence,
 combined capacity, private staging or engine effects.
 
@@ -137,12 +142,15 @@ with optional preapproved read-only live source; persistent-storage intent remai
 a separate, inactive path. It retains the development guest mutation lease, requires an
 admitted Internet or explicitly restricted outbound pool, verifies existing immutable
 images and shared graph/allocation capacity, and reserves a distinct
-`native-graph-runtime` journal in `run/native-graphs` before effects (v2 for image-only,
-v3 for source-bearing graphs; the separate inactive storage contract uses v4). Create/start
+`native-graph-runtime` journal in `run/native-graphs` before effects (v2 for
+implicit-bridge image-only graphs, v3 for source-bearing graphs, and v5 for the
+image-only two-bridge subset; the separate inactive storage contract uses v4).
+Create/start
 intent is durable and never replayed or adopted. Network create intent precedes the
-first network effect; its immutable ID, labels, bridge driver and outbound policy
-are verified before container work. Containers bind the recorded network ID and exact
-service alias; running endpoints must match the owned network membership. The same authored selection and
+first network effect; each immutable bridge ID, labels, driver and internal policy
+is verified before container work. Containers bind all selected bridge IDs and
+service/extra aliases; running endpoints must match each owned bridge membership.
+The same authored selection and
 ingress deadline are checked before staging, creates, starts and observations.
 Omitted shutdown grace uses a bounded ten-second runtime default. Optional private
 delivery uses the existing static launcher and tmpfs through separate v2
@@ -152,8 +160,8 @@ namespace, native review, run, workload and container without persisting values.
 Native `inspect` and `cleanup` require the original guest incarnation and boot,
 exact resource labels, immutable IDs, names and images. Foreign network members or
 changed network policy refuse before cleanup effects. Cleanup preflights every
-stop, retains terminal observations before deletes, removes the verified empty project
-network after containers, and retires private payloads
+stop, retains terminal observations before deletes, removes each verified empty owned
+bridge after containers, and retires private payloads
 only after the bound container is absent. Failed/uncertain attempts retain their
 reservations. Cleanup retries preserve committed stop/removal progress: terminal
 instances are not stopped again, and fully Removed inventories are inspected without
@@ -180,10 +188,13 @@ it does not compare process birth against mutable calendar boot time.
 The closed version2 live-owner decoder remains available without a boot qualifier.
 Version3 remains strictly qualified by its original `host_boot_micros`; it receives
 no inferred UUID or migration. Each version rejects the other versions' qualifiers.
-Native runtime receipts are v2 for image-only graphs and v3 for source-bearing
-graphs; the authenticated control/ready wire remains v2;
+Native runtime receipts are v2 for implicit-bridge image-only graphs, v3 for
+source-bearing graphs and v5 for the closed image-only two-bridge subset; the
+authenticated control/ready wire remains v2.
 Compose receipt and owner formats remain unchanged. This provenance alone grants
-no dead-owner recovery authority.
+no dead-owner recovery authority. V5 permits same-incarnation inspection and
+exact cleanup, while dead-owner recovery remains limited to the qualified v2
+implicit-bridge inventory.
 The inactive read-only recovery selector admits only a complete Ready journal and
 a dead version3 or version4 publication on the same qualified native host boot. It captures the current
 private owner bytes and inode; its raw SHA is a selector for later independent
@@ -1605,6 +1616,26 @@ deadline. Dependency-free legacy graphs continue to install no guest artifact. T
 receipt parsing grants neither installation nor storage authority, and this continuation
 does not enable ordinary persistent startup. The Linux private-filesystem controls,
 installed helper/guest transport, and real Bun/SQLite retention still require qualification.
+
+Saved helper re-admission is read-only and requires the same complete tool reference,
+guest/boot/disk, canonical private directory chain, and receipt inode and bytes before
+and after transport. A receipt transition requires fresh re-admission; missing or partial
+installation never triggers upload, repair or seed. Retirement consumes the issued
+handle and checks the complete bounded native receipt inventory under the original
+provider lease. Every saved dependency, including a Removed receipt4 that still proves
+retained data, prevents deletion. No receipt archival or proof withdrawal is implemented,
+so ordinary workload removal cannot retire its verifier. A separately eligible handle
+can remove only its exact helper, owner file and empty original directory; an ambiguous
+result has no retry, follow-up cleanup or crash-resume authority. These source and
+stand-in transport controls do not qualify guest execution or enable storage startup.
+Tool handles are bound to one run on its original Engine/provider lease. The first
+admission binds that run for the lease's entire lifetime; another run on that lease
+refuses before transport. Its constant-size volatile state is shared by all sibling
+handles; claiming retirement before transport permanently revokes them, even if failure
+leaves guest files unchanged. A fresh lease cannot accept an older handle and has its own
+independent run authority. There is no count limit shared across operation leases.
+Active tool transport also prevents retirement; uncertain transport revokes sibling
+handles rather than treating guard destruction as proof that a guest command settled.
 The shared artifact reader now requires a current-UID regular file with one link,
 no group/world write permission, and matching held-FD/path identity and bytes. Legacy
 relay graphs with dependencies use that stricter reader and its fixed

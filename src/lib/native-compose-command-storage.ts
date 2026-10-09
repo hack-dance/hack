@@ -1,0 +1,185 @@
+import { HackCliError } from "./cli-result.ts";
+import { resolveComposeStartupTimeoutMs } from "./compose-startup-budget.ts";
+import { isRecord } from "./guards.ts";
+import { observeNativeComposeFileEngine } from "./native-compose-file-inventory.ts";
+import {
+  type NativeComposeGeneration,
+  type NativeComposeGenerationStore,
+  type NativeComposeMutation,
+  NativeComposeGenerationError,
+} from "./native-compose-generation.ts";
+import { createNativeComposeProbe } from "./native-compose-ownership.ts";
+import { nativeComposeStorageVolumeName } from "./native-compose-renderer.ts";
+import {
+  enrollNativeComposeStorageXattrWitness,
+  prepareNativeComposeStorageXattrWitness,
+  verifyNativeComposeStorageXattrWitness,
+} from "./native-compose-storage-witness.ts";
+import { createNativeComposeDockerStorageXattrCarrier } from "./native-compose-storage-witness-docker.ts";
+import type { NativeComposeStorageXattrCarrier } from "./native-compose-storage-witness-xattr-carrier.ts";
+
+type Selection = { readonly name: string; readonly storage: string };
+type Document = Readonly<Record<string, unknown>>;
+type Ports = {
+  readonly engine: typeof observeNativeComposeFileEngine;
+  readonly carrier: typeof createNativeComposeDockerStorageXattrCarrier;
+  readonly volumeNames: (signal: AbortSignal) => Promise<readonly string[]>;
+};
+const VOLUME_NAME = /^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,254}$/;
+
+function refuse(): never {
+  throw new HackCliError({
+    code: "E_NATIVE_PROJECT_UNSUPPORTED",
+    message: "Native storage requires known enrolled content or an originally absent cold volume. Existing or interrupted storage is never enrolled or repaired automatically. Values omitted.",
+  });
+}
+
+export function nativeComposeDocumentStorage(document: Document): readonly Selection[] {
+  if (!isRecord(document.volumes)) {
+    return refuse();
+  }
+  return Object.entries(document.volumes).map(([storage, value]) => {
+    if (!(isRecord(value) && typeof value.name === "string")) {
+      return refuse();
+    }
+    return Object.freeze({ name: value.name, storage });
+  });
+}
+
+export function nativeComposePlanStorage(opts: {
+  readonly storage: unknown;
+  readonly runtimeIdentity: string;
+}): readonly Selection[] {
+  if (opts.storage === undefined) {
+    return [];
+  }
+  if (!isRecord(opts.storage)) {
+    return refuse();
+  }
+  return Object.keys(opts.storage).sort().map((storage) => Object.freeze({
+    storage,
+    name: nativeComposeStorageVolumeName({ runtimeIdentity: opts.runtimeIdentity, storage }),
+  }));
+}
+
+async function volumeNames(signal: AbortSignal): Promise<readonly string[]> {
+  const text = await createNativeComposeProbe({ signal })(["volume", "ls", "--format", "{{json .Name}}"]);
+  const names = text.trim() === "" ? [] : text.trim().split("\n").map((line) => {
+    const value: unknown = JSON.parse(line);
+    return typeof value === "string" && VOLUME_NAME.test(value) ? value : refuse();
+  });
+  if (new Set(names).size !== names.length) {
+    return refuse();
+  }
+  return names;
+}
+
+/** Command admission owns no helper process. Each proof gets a fresh finite carrier;
+ * only the original startup effect can publish Expected and consume cold enrollment. */
+export async function prepareNativeComposeCommandStorage(opts: {
+  readonly store: NativeComposeGenerationStore;
+  readonly mutation: NativeComposeMutation;
+  readonly operation: "up" | "restart" | "run" | "exec";
+  readonly selected: readonly Selection[];
+  readonly signal: AbortSignal;
+  readonly assertFresh?: () => Promise<void>;
+  readonly ports?: Ports;
+}) {
+  const { store, mutation, operation, signal, assertFresh } = opts;
+  const selected = opts.selected.map((value) => Object.freeze({ name: value.name, storage: value.storage }));
+  const engine = opts.ports?.engine ?? observeNativeComposeFileEngine;
+  const createCarrier = opts.ports?.carrier ?? createNativeComposeDockerStorageXattrCarrier;
+  const names = opts.ports?.volumeNames ?? volumeNames;
+  const initial = await store.loadCurrent();
+  if (initial.pending !== null || initial.storageWitnessesPending || initial.beforeHooksPending) {
+    throw new NativeComposeGenerationError("E_NATIVE_COMPOSE_UNCERTAIN");
+  }
+  const history = [
+    ...(initial.retainedStorage ?? []),
+    ...(initial.generation ? nativeComposeDocumentStorage(await store.readGenerationDocument(initial.generation)) : []),
+  ];
+  const enrolled = initial.storageWitnesses ?? [];
+  if (!(selected.length || history.length || enrolled.length)) {
+    return null;
+  }
+  if (enrolled.some((entry) => entry.state !== "enrolled" || entry.reference.version !== 3) ||
+      history.some((volume) => !enrolled.some((entry) => entry.name === volume.name && entry.storage === volume.storage))) {
+    return refuse();
+  }
+  const engineId = await engine({ signal });
+  const carrier = (): Promise<NativeComposeStorageXattrCarrier> => createCarrier({
+    store, authority: mutation.materialAuthority, engineId, signal,
+    deadline: Date.now() + resolveComposeStartupTimeoutMs(),
+  });
+  // Check the explicit dependency before any authored hook, intent or volume effect.
+  await carrier();
+  const newVolumes = selected.filter((volume) => !enrolled.some((entry) => entry.name === volume.name && entry.storage === volume.storage));
+  if ((operation === "run" || operation === "exec") && (initial.stopped || newVolumes.length > 0)) {
+    return refuse();
+  }
+  const assertColdAbsent = async () => {
+    if (newVolumes.length === 0) {
+      return;
+    }
+    await assertFresh?.();
+    await engine({ expected: engineId, signal });
+    const observedNames = await names(signal);
+    if (newVolumes.some((volume) => observedNames.includes(volume.name))) {
+      return refuse();
+    }
+    await engine({ expected: engineId, signal });
+    await assertFresh?.();
+  };
+  const verify = async (generation: NativeComposeGeneration) => {
+    await assertFresh?.();
+    const before = await store.loadCurrent();
+    if (before.storageWitnessesPending) {
+      throw new NativeComposeGenerationError("E_NATIVE_COMPOSE_UNCERTAIN");
+    }
+    for (const entry of before.storageWitnesses ?? []) {
+      if (entry.state !== "enrolled" || entry.reference.version !== 3 || entry.engineId !== engineId) {
+        return refuse();
+      }
+      await verifyNativeComposeStorageXattrWitness({
+        authority: mutation.materialAuthority, generation, engineId,
+        reference: entry.reference, carrier: await carrier(),
+      });
+    }
+    const after = await store.loadCurrent();
+    if (after.storageWitnessesPending || JSON.stringify(before.storageWitnesses) !== JSON.stringify(after.storageWitnesses)) {
+      throw new NativeComposeGenerationError("E_NATIVE_COMPOSE_UNCERTAIN");
+    }
+    await assertFresh?.();
+  };
+  await assertColdAbsent();
+  if (initial.generation) {
+    await verify(initial.generation);
+  } else if (enrolled.length > 0) {
+    return refuse();
+  }
+  return {
+    effectWitnesses: Object.freeze({ kind: "directory-xattr" as const, engineId, carrier }),
+    verify,
+    async enroll(generation: NativeComposeGeneration, document: Document) {
+      const actual = nativeComposeDocumentStorage(document);
+      if (JSON.stringify(actual.slice().sort((a, b) => a.storage.localeCompare(b.storage))) !== JSON.stringify(selected.slice().sort((a, b) => a.storage.localeCompare(b.storage)))) {
+        return refuse();
+      }
+      await assertColdAbsent();
+      if (operation === "run" || operation === "exec") {
+        return;
+      }
+      for (const volume of newVolumes) {
+        const enrollment = await prepareNativeComposeStorageXattrWitness({
+          authority: mutation.materialAuthority, generation, engineId, volume,
+          admission: "initial-create", assertAdmission: async () => { await assertFresh?.(); },
+          carrier: await carrier(),
+        });
+        await enrollNativeComposeStorageXattrWitness({ enrollment });
+      }
+      await verify(generation);
+    },
+  };
+}
+
+export type NativeComposeCommandStorage = Awaited<ReturnType<typeof prepareNativeComposeCommandStorage>>;

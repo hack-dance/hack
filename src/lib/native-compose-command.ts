@@ -31,6 +31,12 @@ import {
   nativeComposeWorkloadsReady as ready,
 } from "./native-compose-completion.ts";
 import {
+  nativeComposeDocumentStorage as volumeSelections,
+  nativeComposePlanStorage,
+  type NativeComposeCommandStorage,
+  prepareNativeComposeCommandStorage,
+} from "./native-compose-command-storage.ts";
+import {
   bindNativeComposeDownHooks,
   prepareNativeComposeDownHooks,
   readNativeComposeDownHookBinding,
@@ -145,17 +151,6 @@ function invalid(): never {
 }
 function serviceMap(document: PrivateDocument): Record<string, unknown> {
   return isRecord(document.services) ? document.services : invalid();
-}
-function volumeSelections(document: PrivateDocument) {
-  if (!isRecord(document.volumes)) {
-    return invalid();
-  }
-  return Object.entries(document.volumes).map(([storage, value]) => {
-    if (!isRecord(value) || typeof value.name !== "string") {
-      return invalid();
-    }
-    return { storage, name: value.name };
-  });
 }
 async function savedRouteDocuments(store: NativeComposeGenerationStore) {
   const state = await store.loadCurrent();
@@ -520,6 +515,7 @@ async function runSavedProcess(opts: {
   readonly generation: NativeComposeGeneration;
   readonly document: PrivateDocument;
   readonly base: RuntimeBaseOptions;
+  readonly signal: AbortSignal;
 }) {
   const { options, generation, document, base } = opts;
   if (options.operation === "exec") {
@@ -539,6 +535,7 @@ async function runSavedProcess(opts: {
         env: base.env,
         stdin: "inherit",
         forwardSignals: true,
+        signal: opts.signal,
       }
     );
   }
@@ -576,9 +573,6 @@ async function savedCommand(opts: {
     await store.recoverInterruptedLock();
   }
   const state = await store.loadCurrent();
-  if (options.operation === "exec" && state.storageWitnesses !== null) {
-    throw new NativeComposeGenerationError("E_NATIVE_COMPOSE_STATE");
-  }
   const pending = await store.loadPending();
   const generation =
     options.operation === "down" && options.recover && pending
@@ -766,6 +760,32 @@ async function savedCommand(opts: {
       return result.value;
     });
   }
+  if (options.operation === "exec") {
+    return await store.withMutation(async (mutation) => {
+      const before = await store.loadCurrent();
+      assertStartupAvailable(before);
+      if (before.stopped || before.generation?.generationId !== generation.generationId) {
+        throw new NativeComposeGenerationError("E_NATIVE_COMPOSE_STATE");
+      }
+      const storage = await prepareNativeComposeCommandStorage({
+        store, mutation, operation: "exec", selected: volumeSelections(document), signal,
+      });
+      const assertSaved = async () => {
+        const latest = await store.loadCurrent();
+        assertStartupAvailable(latest);
+        if (latest.stopped || latest.generation?.generationId !== generation.generationId) {
+          throw new NativeComposeGenerationError("E_NATIVE_COMPOSE_STATE");
+        }
+        await store.readGenerationDocument(generation);
+        await assertNativeComposeOwned(selection);
+        await storage?.verify(generation);
+      };
+      await assertSaved();
+      const code = await runSavedProcess({ options, generation, document, base, signal });
+      await assertSaved();
+      return code;
+    });
+  }
   return await store.withLease({
     generation,
     run: async () => {
@@ -815,7 +835,7 @@ async function savedCommand(opts: {
           timeoutMs: 15_000,
         });
       }
-      return await runSavedProcess({ options, generation, document, base });
+      return await runSavedProcess({ options, generation, document, base, signal });
     },
   });
 }
@@ -979,10 +999,15 @@ async function runOneOff(opts: {
   readonly observeStorage: (
     observed: NativeComposeOwnershipObservation
   ) => void;
+  readonly assertOwned: () => Promise<void>;
+  readonly assertFresh: () => Promise<void>;
+  readonly signal: AbortSignal;
 }) {
   const { options, generation, document, selection, base, projection } = opts;
   const service = requireService(document, options.service);
   const name = `${generation.identity.composeProject}-run-${projection?.projectionId ?? randomBytes(16).toString("hex")}`;
+  await opts.assertFresh();
+  await opts.assertOwned();
   const code = await run(
     [
       ...composeArgs(generation, projection),
@@ -999,6 +1024,7 @@ async function runOneOff(opts: {
       env: base.env,
       stdin: "inherit",
       forwardSignals: true,
+      signal: opts.signal,
       stdout: options.json ? "stderr" : "inherit",
     }
   );
@@ -1031,6 +1057,8 @@ async function runOneOff(opts: {
   });
   const after = await assertNativeComposeOwned(selection);
   opts.observeStorage(after);
+  await opts.assertFresh();
+  await opts.assertOwned();
   return {
     value: code,
     outcome:
@@ -1280,6 +1308,7 @@ async function executePreparedGeneration(opts: {
   readonly runRouting: NativeComposeSavedRunRouting | null;
   readonly files: NativeComposeCommandFiles;
   readonly signal: AbortSignal;
+  readonly storage: NativeComposeCommandStorage;
 }): Promise<number> {
   const {
     options,
@@ -1296,6 +1325,7 @@ async function executePreparedGeneration(opts: {
     runRouting,
     files,
     signal,
+    storage,
   } = opts;
   const selection = await ownershipSelection({
     store,
@@ -1403,8 +1433,10 @@ async function executePreparedGeneration(opts: {
     assertFresh,
     ...ownership,
     afterHooks: after.afterHooks,
-    effect: () =>
-      executePreparedNativeWorkloads({
+    storageWitnesses: storage?.effectWitnesses,
+    effect: async () => {
+      await storage?.enroll(generation, document);
+      return await executePreparedNativeWorkloads({
         options,
         generation,
         document,
@@ -1421,8 +1453,11 @@ async function executePreparedGeneration(opts: {
         assertOwned: async () => {
           await assertFresh();
           await ownership.assertOwned();
+          await storage?.verify(generation);
+          await assertFresh();
         },
-      }),
+      });
+    },
   });
   if (result.outcome === "uncertain") {
     return reportNativeStartupIncomplete({
@@ -1457,6 +1492,7 @@ async function prepareNativeComposeDelivery(opts: {
   readonly files: NativeComposeCommandFiles;
   readonly previous: SavedRouteDocuments;
   readonly signal: AbortSignal;
+  readonly storage: NativeComposeCommandStorage;
 }): Promise<number> {
   const {
     options,
@@ -1546,6 +1582,7 @@ async function prepareNativeComposeDelivery(opts: {
       runRouting,
       files,
       signal,
+      storage: opts.storage,
     });
   } finally {
     await runRouting?.close();
@@ -1623,6 +1660,18 @@ async function prepareCommand(opts: {
         inputs.result.plan.routes !== undefined ||
           inputs.result.plan.open !== undefined
       );
+      const operation = options.operation;
+      if (operation !== "up" && operation !== "restart" && operation !== "run") {
+        return invalid();
+      }
+      const storage = await prepareNativeComposeCommandStorage({
+        store, mutation, operation, signal,
+        selected: nativeComposePlanStorage({
+          storage: inputs.result.plan.storage,
+          runtimeIdentity: store.identity.composeProject,
+        }),
+        assertFresh: async () => { await inputs.assertFresh(); },
+      });
       const prepared = await prepareBeforeHooks({
         inputs,
         acquire,
@@ -1677,6 +1726,7 @@ async function prepareCommand(opts: {
           files,
           previous,
           signal,
+          storage,
         });
       } catch (error) {
         await files?.rollback().catch(() => {
@@ -1842,9 +1892,8 @@ function assertSelectedWorkloads(inputs: AcquiredComposeInputs): void {
 function assertStartupAvailable(
   current: Awaited<ReturnType<NativeComposeGenerationStore["loadCurrent"]>>
 ) {
-  // The content carrier is deliberately unactivated. Existing witness receipts cannot fall back to metadata.
-  if (current.storageWitnesses !== null) {
-    throw new NativeComposeGenerationError("E_NATIVE_COMPOSE_STATE");
+  if (current.storageWitnessesPending) {
+    throw new NativeComposeGenerationError("E_NATIVE_COMPOSE_UNCERTAIN");
   }
   if (current.beforeHooksPending) {
     throw new HackCliError({

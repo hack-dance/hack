@@ -1,11 +1,26 @@
 # Native Compose directory-xattr carrier source
 
-This is an unactivated Linux helper source, injectable owner protocol and offline
-controls. The [witness foundation](native-compose-storage-witness.md) accepts its
-distinct xattr expectation/reference format under the same opaque generation
-authority. A candidate Docker implementation of the carrier ports is unactivated;
-the CLI does not enroll volume witnesses. Ordinary CLI instances retain the metadata
-guard's same-metadata replacement limitation.
+The candidate Compose command path uses this Linux helper and the
+[witness foundation](native-compose-storage-witness.md) under the existing instance
+mutation. Persistent PostgreSQL and ordinary CLI acceptance remain required gates;
+source wiring and synthetic controls do not qualify that runtime behavior.
+
+Storage startup requires the exact cached Linux arm64 Bun 1.4.2 helper image before
+any authored hook, enrollment intent or volume effect. The command never pulls a
+dependency or falls back to emulation. Linux amd64 and uncached first-install
+dependency acquisition remain unsupported by this candidate. Image-only projects
+do not need the helper.
+
+Known enrolled storage is verified before hooks, workload admission and completion.
+Only an originally absent selected name with no retained history may enroll inside
+the original startup transaction. Existing unenrolled v1/v2 storage refuses even
+when its volume is missing; it is never treated as cold or silently adopted.
+Saved exec verifies under the existing mutation owner without parsing authored
+source or creating an exec pending operation. A fresh finite read carrier is used
+after an arbitrary-duration exec or run; the final proofs are retained.
+Saved down and explicit down recovery do not require the helper dependency and
+never seed or replay enrollment. Expected or unknown helper intent remains an
+incomplete retained recovery anchor.
 
 The proposed directory xattr avoids adding a directory entry to PostgreSQL's
 authored data root. It detects a replacement missing its enrolled random witness;
@@ -15,8 +30,8 @@ is part of this source.
 
 ## Fixed helper contract
 
-`scripts/native-storage-witness-helper.ts` is the future helper entry. The CLI
-does not invoke it. A qualified artifact must bundle this entry with its strict
+`scripts/native-storage-witness-helper.ts` is the helper entry. The candidate CLI
+uses its fixed bundled artifact. Qualification must bind this entry with its strict
 codec and kernel adapter; an exact declared local Linux image, Bun executable,
 libc and program digest must be checked before any carrier effect. The candidate
 dependency is an explicitly selected local `oven/bun:1.4.2-slim` image. A tag
@@ -73,10 +88,10 @@ qualification cells. There is no capability or ownership-changing fallback.
 
 ## Required cold provisioning and receipt order
 
-`startNativeComposeWorkloads` currently launches one Compose `up -d` child.
-The injectable owner implements the following order; activation must supply a
-qualified cold provisioning and carrier transport before that child, under the
-same existing instance mutation and generation effect authority:
+`startNativeComposeWorkloads` launches one Compose `up -d` child. The candidate
+command supplies the following provisioning order before that child, under the
+same existing instance mutation and generation effect authority. Actual artifact,
+filesystem and PostgreSQL qualification remain separate from this source order:
 
 1. Reacquire source, engine identity and exact owned inventory. Initial admission
    requires no retained storage history or earlier witness intent, the selected
@@ -192,7 +207,8 @@ named volume with `volume-nocopy`, and rechecks fresh metadata before start.
 It never requests bind source creation. Known completion requires an exact stopped
 helper, non-force removal and fresh empty helper inventory. Unknown disposition
 retains the private journal and input. Journal bytes do not replace these actual
-stop and absence observations. The CLI does not call this unactivated port.
+stop and absence observations. The candidate CLI calls this port; persistent
+runtime acceptance remains required before promoting support.
 
 Holder selection includes normalized ancestor and descendant bind paths; similarly
 named sibling roots stay independent. Command stdin and captures use held no-follow

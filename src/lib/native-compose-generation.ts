@@ -869,7 +869,8 @@ export type NativeComposeEffectOptions<T> = {
   readonly assertOwned: () => Promise<void>;
   /** Reuse the exact preceding ownership observation; never perform extra probes here. */
   readonly captureStorage?: () => readonly NativeComposeRetainedVolume[];
-  /** Required for previously enrolled v3 startup/run. Carrier remains unactivated in the CLI. */
+  /** Required for enrolled v3 startup/run. A captured factory renews only the finite
+   * read carrier budget; it grants no enrollment or repair authority. */
   readonly storageWitnesses?:
     | {
         readonly kind?: "file-ustar";
@@ -886,7 +887,7 @@ export type NativeComposeEffectOptions<T> = {
     | {
         readonly kind: "directory-xattr";
         readonly engineId: string;
-        readonly carrier: NativeComposeStorageXattrCarrier;
+        readonly carrier: NativeComposeStorageXattrCarrier | (() => Promise<NativeComposeStorageXattrCarrier>);
       };
   readonly recoverPending?: boolean;
   /** Store-derived immutable one-off delivery, verified before/after run effects. */

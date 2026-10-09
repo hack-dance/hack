@@ -82,7 +82,8 @@ uses a create-only token without a PostgreSQL data-root directory entry. Require
 version-three expectation/reference records and tagged artifact/journal-bound intent keep
 it distinct from USTAR under the same version-three receipt owner. It adds
 injectable cold provisioning and fresh read-only proof ports. The candidate Docker
-port remains unactivated pending its persistent-volume qualification; no CLI caller
-enrolls storage yet. Required finite carrier intent survives unknown
+port is wired into candidate ordinary Compose startup and saved exec. Persistent
+PostgreSQL and compiled CLI qualification remain required; source wiring is not
+runtime acceptance. Required finite carrier intent survives unknown
 helper outcomes even after enrollment; saved recovery stops resources without
 retiring that anchor. Its offline controls do not qualify a carrier.

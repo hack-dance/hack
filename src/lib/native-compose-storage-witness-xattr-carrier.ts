@@ -109,7 +109,7 @@ export type NativeComposeStorageXattrInvocation = {
     readonly pendingToken: string | null;
   };
 };
-/** Only a future qualified engine owner may implement these ports; the CLI supplies none. */
+/** Trusted engine transport. Shape-valid ports alone do not qualify artifacts or runtime behavior. */
 export type NativeComposeStorageXattrPorts = {
   readonly inspect: (selection: {
     readonly name: string;

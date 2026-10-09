@@ -40,6 +40,14 @@ import {
 import { nativeProcessPlanIsValid } from "./native-process-plan-protocol.ts";
 
 const NAME = /^[a-z0-9][a-z0-9._-]{0,62}$/;
+
+/** The renderer and pre-hook admission select the same physical storage name. */
+export function nativeComposeStorageVolumeName(opts: {
+  readonly runtimeIdentity: string;
+  readonly storage: string;
+}): string {
+  return `hack-${opts.runtimeIdentity.length}-${opts.runtimeIdentity}-${opts.storage.length}-${opts.storage}`;
+}
 const PROJECT_NAME = /^[a-z0-9][a-z0-9_-]*$/;
 const OWNER_TOKEN = /^[0-9a-f]{32}$/;
 const ENV_KEY = /^[A-Za-z_][A-Za-z0-9_]*$/;
@@ -198,7 +206,7 @@ export function renderNativeCompose(
       .map((name) => [
         name,
         {
-          name: `hack-${opts.runtimeIdentity.length}-${opts.runtimeIdentity}-${name.length}-${name}`,
+          name: nativeComposeStorageVolumeName({ runtimeIdentity: opts.runtimeIdentity, storage: name }),
           labels: {
             ...resourceLabels,
             "io.hack.native-config.storage": name,

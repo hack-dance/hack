@@ -141,7 +141,7 @@ export function createNativeComposeStorageWitnessReceiptProtocol<
       return refuse();
     }
     const local = verifiers.get(entry.name);
-    if (local) {
+    if (local && !(entry.reference.version === 3 && carrier?.kind === "directory-xattr")) {
       await local();
       return;
     }
@@ -161,7 +161,7 @@ export function createNativeComposeStorageWitnessReceiptProtocol<
         generation,
         engineId: carrier.engineId,
         reference: entry.reference,
-        xattrCarrier: carrier.carrier,
+        xattrCarrier: typeof carrier.carrier === "function" ? await carrier.carrier() : carrier.carrier,
       });
       return;
     }

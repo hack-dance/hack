@@ -87,7 +87,7 @@ impl<'a, 'guest> WitnessAdapter<'a, 'guest> {
         fresh: &'a dyn Fn() -> Result<(), CandidateError>,
     ) -> Self {
         Self {
-            base: Adapter::new(engine, fresh),
+            base: Adapter::new(engine, Some(tool), fresh),
             tool,
         }
     }

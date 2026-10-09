@@ -105,11 +105,20 @@ impl StorageTool {
 
 pub(in crate::provider::graph::native) struct Adapter<'a, 'guest> {
     engine: &'a Engine<'guest>,
+    tool: Option<&'a super::tool::Installed>,
     fresh: &'a dyn Fn() -> Result<(), CandidateError>,
 }
 impl<'a, 'guest> Adapter<'a, 'guest> {
-    fn new(engine: &'a Engine<'guest>, fresh: &'a dyn Fn() -> Result<(), CandidateError>) -> Self {
-        Self { engine, fresh }
+    fn new(
+        engine: &'a Engine<'guest>,
+        tool: Option<&'a super::tool::Installed>,
+        fresh: &'a dyn Fn() -> Result<(), CandidateError>,
+    ) -> Self {
+        Self {
+            engine,
+            tool,
+            fresh,
+        }
     }
     fn check(&self, deadline: Instant) -> Result<(), CandidateError> {
         (self.fresh)()?;
@@ -153,29 +162,25 @@ impl<'a, 'guest> Adapter<'a, 'guest> {
         }
         let created_at = value["CreatedAt"].as_str().ok_or_else(refused)?.to_owned();
         self.check(deadline)?;
-        let identity = self
-            .engine
-            .guest()
-            .execute_until(DIRECTORY, &[&mountpoint], deadline)
-            .map_err(|_| refused());
+        // Directory observation uses the same saved helper and durable transport
+        // fence as witness reads. An ambiguous metadata read cannot be retried
+        // through a fresh provider lease while its guest command is unqualified.
+        let identity = self.tool.ok_or_else(refused)?.invoke(
+            self.engine,
+            crate::provider::storage_root_witness::Request::root(name)?,
+            deadline,
+            self.fresh,
+        );
         self.check(deadline)?;
-        let identity = identity?;
-        let (device, inode) = identity
-            .strip_suffix('\n')
-            .and_then(|value| value.split_once(':'))
-            .ok_or_else(refused)?;
-        let number = |value: &str| {
-            if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
-                return Err(refused());
-            }
-            value.parse::<u64>().map_err(|_| refused())
+        let crate::provider::storage_root_witness::Observation::Root(root) = identity? else {
+            return Err(refused());
         };
         let volume = VolumeIdentity {
             name: name.into(),
             created_at,
             directory: DirectoryIdentity {
-                device: number(device)?,
-                inode: number(inode)?,
+                device: root.device,
+                inode: root.inode,
             },
         };
         if !volume_valid(&volume) {
@@ -317,16 +322,6 @@ fn create_original<C: Creation>(
 fn labels(binding: &Binding) -> Value {
     json!({"io.hack-local.kind":"native-persistent-data","io.hack-local.namespace":binding.scope.namespace,"io.hack-local.storage":binding.scope.storage,"io.hack-local.data-owner":binding.scope.owner,"io.hack-local.provider-owner":binding.guest.owner})
 }
-const DIRECTORY: &str = r#"set -efu
-root=$1
-parent=$root
-while test "$parent" != /; do test ! -L "$parent"; test -d "$parent"; parent=${parent%/*}; test -n "$parent" || parent=/; done
-exec 9<"$root"
-identity=$(stat -Lc %d:%i /proc/self/fd/9)
-test "$(stat -c %d:%i "$root")" = "$identity"
-printf '%s\n' "$identity"
-"#;
-
 /// Select owner2 metadata without creating volumes or asserting content continuity.
 pub(in crate::provider::graph::native) fn select_witnessed(
     candidate: &Candidate,
@@ -342,7 +337,7 @@ pub(in crate::provider::graph::native) fn select_witnessed(
     }
     let guest = engine.guest().persistent_identity()?;
     let inventory =
-        Adapter::new(engine, fresh).request(Method::GET, "/v1.53/volumes", None, deadline)?;
+        Adapter::new(engine, None, fresh).request(Method::GET, "/v1.53/volumes", None, deadline)?;
     let volumes = inventory["Volumes"].as_array().ok_or_else(refused)?;
     if !inventory["Warnings"].is_null()
         && !inventory["Warnings"]

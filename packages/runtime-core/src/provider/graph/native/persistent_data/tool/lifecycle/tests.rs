@@ -583,7 +583,7 @@ fn lease_binds_one_run_before_transport_without_a_cross_lease_run_budget() {
 
 #[test]
 fn unknown_transport_retains_durable_fence_across_fresh_provider_leases() {
-    for case in 0..3 {
+    for case in 0..4 {
         let f = Fixture::new();
         let bytes = fs::read(f.root.join("state.json")).unwrap();
         let mut original = Fake::default();
@@ -591,11 +591,19 @@ fn unknown_transport_retains_durable_fence_across_fresh_provider_leases() {
         assert!(require_idle(&f.root).is_ok());
         match case {
             0 => original.inspect_error = true,
-            1 => original.invoke_error = true,
+            1 | 3 => original.invoke_error = true,
             _ => original.invalid_reply = true,
         }
         let result = if case == 0 {
             verify(&installed, &mut original).map(|()| helper::Observation::Verified)
+        } else if case == 3 {
+            // The first retained volume directory observation is also a root
+            // invocation; it cannot bypass the durable unknown-work fence.
+            invoke(
+                &installed,
+                &mut original,
+                helper::Request::root(&f.receipt.data["database"].name()).unwrap(),
+            )
         } else {
             invoke(&installed, &mut original, request(true))
         };

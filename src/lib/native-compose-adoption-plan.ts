@@ -7,6 +7,7 @@ import {
 import {
   freezeImportValue,
   mapLegacyNativeAdoptionBaseline,
+  mapLegacyNativeBranchStorageAdoption,
   mapLegacyNativeCompletedJobAdoptionBaseline,
   mapLegacyNativeRetainedBasicBuild,
   mapLegacyNativeRetainedSourceBind,
@@ -70,6 +71,7 @@ function storageFields(
 export function planLegacyComposeAdoption(opts: {
   readonly configText: string;
   readonly composeText: string;
+  readonly selectedComposeProject?: string;
 }): LegacyComposeAdoptionPlan {
   const converted = mapLegacyNativeStorageAdoption(opts);
   let jobs = false;
@@ -79,9 +81,13 @@ export function planLegacyComposeAdoption(opts: {
   ) {
     jobs = legacyComposeRetainedPlan(converted.candidate).requiresV7 === true;
   }
-  const baseline = jobs
-    ? mapLegacyNativeCompletedJobAdoptionBaseline(opts)
-    : mapLegacyNativeAdoptionBaseline(opts);
+  let mapper = mapLegacyNativeAdoptionBaseline;
+  if (jobs) {
+    mapper = mapLegacyNativeCompletedJobAdoptionBaseline;
+  } else if (opts.selectedComposeProject) {
+    mapper = mapLegacyNativeBranchStorageAdoption;
+  }
+  const baseline = mapper(opts);
   return plan(opts, baseline);
 }
 
@@ -102,7 +108,11 @@ export function planLegacyComposeSourceBindAdoption(opts: {
 }
 
 function plan(
-  opts: { readonly configText: string; readonly composeText: string },
+  opts: {
+    readonly configText: string;
+    readonly composeText: string;
+    readonly selectedComposeProject?: string;
+  },
   baseline: ReturnType<typeof mapLegacyNativeAdoptionBaseline>,
   sourceBind = false
 ): LegacyComposeAdoptionPlan {
@@ -114,9 +124,13 @@ function plan(
     text: opts.composeText,
     document: "compose",
   }).value;
-  const qualified = (
-    sourceBind ? mapLegacyComposeSourceBindStorage : mapLegacyComposeStorage
-  )({ config, compose });
+  const qualified = sourceBind
+    ? mapLegacyComposeSourceBindStorage({ config, compose })
+    : mapLegacyComposeStorage({
+        config,
+        compose,
+        selectedComposeProject: opts.selectedComposeProject,
+      });
   const mapping = {
     supported: qualified !== undefined,
     accepted: qualified?.accepted ?? new Map<string, string>(),

@@ -17,6 +17,7 @@ import { lifecycleSessionRecoveryScenario } from "./scenarios/lifecycle-session-
 import { nativeComposeAdoptionJobWorktreesScenario } from "./scenarios/native-compose-adoption-job-worktrees.ts";
 import { nativeComposeAdoptionSourceBindWorktreesScenario } from "./scenarios/native-compose-adoption-source-bind-worktrees.ts";
 import {
+  nativeComposeAdoptionBranchWorktreesScenario,
   nativeComposeAdoptionBuildWorktreesScenario,
   nativeComposeAdoptionDependencyWorktreesScenario,
   nativeComposeAdoptionLocalWorktreesScenario,
@@ -89,6 +90,7 @@ const ALL_SCENARIOS: readonly Scenario[] = [
   nativeConfigRoutingScenario,
   nativeConfigNetworksScenario,
   nativeComposeAdoptionWorktreesScenario,
+  nativeComposeAdoptionBranchWorktreesScenario,
   nativeComposeAdoptionStringWorktreesScenario,
   nativeComposeAdoptionNetworkWorktreesScenario,
   nativeComposeAdoptionPluralNetworkWorktreesScenario,

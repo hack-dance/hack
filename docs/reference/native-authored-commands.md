@@ -30,6 +30,9 @@ with an explicit base selection; omitting `--env` retains the authored/local def
 
 Startup shares the configured `HACK_COMPOSE_STARTUP_TIMEOUT_MS` budget across
 input preparation and native review, with a native maximum of 300000 milliseconds.
+Startup refusals identify a fixed owning stage and, when available, a closed
+compiler or native error code. They omit arbitrary errors, child output, paths and
+values. These diagnostics do not grant retry or cleanup authority.
 Readiness requires authenticated current observations and unchanged input before
 publication. The foreground owner remains attached until owned shutdown finishes;
 Ctrl-C requests that shutdown. Exact durable Removed evidence retires the tagged

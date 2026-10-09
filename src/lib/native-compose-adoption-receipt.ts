@@ -28,7 +28,8 @@ export type Receipt = {
     | 9
     | 10
     | 11
-    | 12;
+    | 12
+    | 13;
   readonly kind: typeof KIND;
   readonly checkout: Checkout;
   readonly prepared: Anchor | null;
@@ -88,7 +89,8 @@ export function parseLegacyComposeAdoptionReceipt(
         value,
         "adoption_receipt_version,checkout,kind,pendingOperation,prepared,publication"
       ) &&
-      (value.adoption_receipt_version === 12 ||
+      (value.adoption_receipt_version === 13 ||
+        value.adoption_receipt_version === 12 ||
         value.adoption_receipt_version === 11 ||
         value.adoption_receipt_version === 10 ||
         value.adoption_receipt_version === 9 ||
@@ -137,6 +139,7 @@ export function parseLegacyComposeAdoptionReceipt(
   const version = value.adoption_receipt_version;
   return {
     adoption_receipt_version:
+      version === 13 ||
       version === 12 ||
       version === 11 ||
       version === 10 ||

@@ -460,16 +460,18 @@ async function acquireGenerated(opts: {
 /** Alternate generated authority remains outside this ordered branch-free slice. */
 export async function hasLegacyComposeGeneratedSources(
   root: string,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  allowSelectedBranch = false
 ): Promise<boolean> {
   check(signal);
   if (
-    await lstat(join(root, ".hack/.branch")).catch((error: unknown) => {
+    !allowSelectedBranch &&
+    (await lstat(join(root, ".hack/.branch")).catch((error: unknown) => {
       if (hasCode(error, "ENOENT")) {
         return null;
       }
       refuse();
-    })
+    }))
   ) {
     refuse();
   }

@@ -7,9 +7,11 @@ import {
 } from "bun:test";
 import { lstat, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { acquireLegacyComposeAdoptionPreparationBinding } from "../src/lib/native-compose-adoption-binding.ts";
 import { openLegacyComposeAdoptedGenerationStore } from "../src/lib/native-compose-adoption-generation.ts";
 import { previewLegacyComposeAdoption } from "../src/lib/native-compose-adoption-preview.ts";
 import * as privateState from "../src/lib/native-compose-private-state.ts";
+import { buildRuntimeHostMetadataOverride } from "../src/lib/runtime-host-metadata.ts";
 import { run } from "../src/lib/shell.ts";
 import {
   retainedSourceBindFixture,
@@ -78,6 +80,7 @@ test("version12 prepares, publishes, resumes originals, stops and rolls back wit
         expect(Object.keys(input)).toEqual([]);
         expect(JSON.stringify(input)).toBe("{}");
         expect(input.binding.binding_version).toBe(12);
+        expect(Object.hasOwn(input.binding, "composeFiles")).toBe(false);
       },
     });
     expect(await h.operation(store, active, "start")).toBe(0);
@@ -566,5 +569,74 @@ test("replaced directory after a completed original start overrides shim71 and r
     if (!storeClosed) {
       await store.close();
     }
+  }
+});
+
+test("branch plus source-bind preparation refuses before mounted directories or engine observations", async () => {
+  const configText = JSON.stringify({
+    name: "fixture",
+    dev_host: "fixture.test",
+    worktree: { auto_branch: false },
+  });
+  await writeFile(join(h.root, ".hack/hack.config.json"), configText);
+  const fragment = buildRuntimeHostMetadataOverride({
+    composeYamls: [h.compose],
+    branch: "feature",
+    devHost: "fixture.test",
+    aliasHost: null,
+    composeProject: "fixture--feature",
+  });
+  expect(fragment).toBeTruthy();
+  await mkdir(join(h.root, ".hack/.branch"));
+  await writeFile(
+    join(h.root, ".hack/.branch/compose.feature.runtime.override.yml"),
+    fragment ?? ""
+  );
+  const hold = spyOn(privateState, "holdDirectory");
+  try {
+    await red(
+      acquireLegacyComposeAdoptionPreparationBinding({
+        projectRoot: h.root,
+        requestedBranch: "feature",
+        binary: h.compiler,
+      })
+    );
+    expect(
+      hold.mock.calls.some(([path]) => path === join(h.root, "source"))
+    ).toBe(false);
+    expect(await Bun.file(join(h.outer, "commands")).exists()).toBe(false);
+    expect(await Bun.file(join(h.outer, "unexpected")).exists()).toBe(false);
+  } finally {
+    hold.mockRestore();
+  }
+});
+
+test("version12 saved directory proof rejects branch retargeting before observations or mutation", async () => {
+  const { store, generation } = await prepared();
+  try {
+    await store.publish({ generation, binary: h.compiler });
+    const receiptPath = join(
+      h.root,
+      ".hack/.internal/legacy-compose-adoption-v1/receipt.json"
+    );
+    const receipt = await readFile(receiptPath);
+    const commands = await readFile(join(h.outer, "commands"));
+    const selected = await openLegacyComposeAdoptedGenerationStore({
+      projectRoot: h.root,
+      mode: "saved",
+      requestedBranch: "feature",
+    });
+    try {
+      await red(selected.loadActive());
+      await red(selected.loadActive({ recoverOperation: true }));
+      await red(selected.rollback());
+    } finally {
+      await selected.close();
+    }
+    expect(await readFile(receiptPath)).toEqual(receipt);
+    expect(await readFile(join(h.outer, "commands"))).toEqual(commands);
+    await noAllocation();
+  } finally {
+    await store.close();
   }
 });

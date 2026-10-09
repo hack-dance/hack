@@ -150,7 +150,8 @@ type NativeImportPurpose =
   | "completed-job-adoption"
   | "retained-basic-build"
   | "retained-source-bind"
-  | "storage-adoption";
+  | "storage-adoption"
+  | "branch-storage-adoption";
 
 /**
  * Closed, pure conversion. Every raw field starts refused until explicitly mapped.
@@ -199,6 +200,16 @@ function mapLegacyNativeInput(opts: {
   const context = { config: config.value, candidate, mark, refuse };
   mapOverlay(context);
   mapWorktree(context);
+  if (opts.purpose === "branch-storage-adoption") {
+    if (
+      typeof config.value.dev_host === "string" &&
+      config.value.dev_host.length > 0
+    ) {
+      mark("config", "/dev_host", "", "retained_branch_host_metadata");
+    } else {
+      refuse("config", "/dev_host", "branch_host_required");
+    }
+  }
   mapServices({
     source: compose.value.services,
     candidate,
@@ -236,6 +247,7 @@ function mapLegacyNativeInput(opts: {
   }
   if (
     opts.purpose === "storage-adoption" ||
+    opts.purpose === "branch-storage-adoption" ||
     opts.purpose === "retained-basic-build"
   ) {
     mapStorageCandidate({
@@ -395,6 +407,18 @@ export function mapLegacyNativeStorageAdoption(opts: {
     configText: opts.configText,
     composeText: opts.composeText,
     purpose: "storage-adoption",
+  });
+}
+
+/** Branch-selected original resources; only the authored host marker differs from the base candidate. */
+export function mapLegacyNativeBranchStorageAdoption(opts: {
+  readonly configText: string;
+  readonly composeText: string;
+}): NativeImportPlan {
+  return mapLegacyNativeInput({
+    configText: opts.configText,
+    composeText: opts.composeText,
+    purpose: "branch-storage-adoption",
   });
 }
 

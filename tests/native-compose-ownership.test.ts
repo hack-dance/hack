@@ -8,7 +8,9 @@ import {
   NativeComposeOwnershipError,
   type NativeComposeOwnershipOptions,
   type NativeComposeOwnershipRefusal,
+  type NativeComposeTopologyPredicate,
   nativeComposeOwnershipRefusal,
+  nativeComposeTopologyPredicate,
   observeNativeComposeStartupOwned,
   observeSavedNativeComposeOwned,
 } from "../src/lib/native-compose-ownership.ts";
@@ -175,21 +177,28 @@ async function commands(): Promise<string[][]> {
 async function expectRefusal(
   opts = options,
   code = "E_NATIVE_COMPOSE_OWNERSHIP",
-  reason?: NativeComposeOwnershipRefusal
+  reason?: NativeComposeOwnershipRefusal,
+  topologyPredicate?: NativeComposeTopologyPredicate
 ) {
+  let captured: unknown;
   try {
     await assertNativeComposeOwned(opts);
     throw new Error("unexpected probe success");
   } catch (error: unknown) {
+    captured = error;
     expect(error).toBeInstanceOf(NativeComposeOwnershipError);
     expect(error).toMatchObject({ code });
     if (reason !== undefined) {
       expect(nativeComposeOwnershipRefusal(error)).toBe(reason);
     }
+    if (topologyPredicate !== undefined) {
+      expect(nativeComposeTopologyPredicate(error)).toBe(topologyPredicate);
+    }
     expect(String(error)).not.toContain(CANARY);
     expect(JSON.stringify(error)).not.toContain(CANARY);
   }
   expect(await Bun.file(join(root, "mutated")).exists()).toBe(false);
+  return captured;
 }
 
 test("ownership refusal diagnostics cannot be forged, copied or obtained through getters", () => {
@@ -246,8 +255,137 @@ test("ownership refusal diagnostics cannot be forged, copied or obtained through
     1,
   ]) {
     expect(nativeComposeOwnershipRefusal(candidate)).toBeUndefined();
+    expect(nativeComposeTopologyPredicate(candidate)).toBeUndefined();
   }
   expect(getters).toBe(0);
+});
+
+test("topology predicates distinguish original refusal sites and preserve the first failure", async () => {
+  const predicates: NativeComposeTopologyPredicate[] = [
+    "network-members-shape",
+    "network-member-id",
+    "member-container-endpoint",
+    "workload-policy",
+    "workload-endpoint-keyset",
+    "created-endpoint-membership",
+    "live-endpoint-membership",
+  ];
+  for (const predicate of predicates) {
+    const fixture = owned();
+    const container = fixture.container?.[0];
+    const network = fixture.network?.[0];
+    if (!(container && network)) {
+      throw new Error("Missing topology fixture");
+    }
+    let selection = options;
+    if (predicate === "network-members-shape") {
+      network.containers = null;
+      // A later keyset failure must not replace the first refused predicate.
+      container.networks = {};
+    } else if (predicate === "network-member-id") {
+      network.containers = { invalid: {} };
+    } else if (predicate === "member-container-endpoint") {
+      network.containers = { ["f".repeat(64)]: {} };
+    } else if (predicate === "workload-policy") {
+      selection = { ...options, expectedWorkloadNetworks: [] };
+    } else if (predicate === "workload-endpoint-keyset") {
+      (container.networks as Record<string, unknown>).foreign = {};
+    } else if (predicate === "created-endpoint-membership") {
+      container.state = "created";
+      container.networks = {
+        [`${PROJECT}_default`]: { NetworkID: "", Aliases: null },
+      };
+    } else {
+      network.containers = {};
+    }
+    await prepare(fixture);
+    let error: unknown;
+    if (predicate === "created-endpoint-membership") {
+      try {
+        await observeSavedNativeComposeOwned(selection);
+      } catch (caught) {
+        error = caught;
+      }
+      expect(nativeComposeOwnershipRefusal(error)).toBe("topology");
+      expect(nativeComposeTopologyPredicate(error)).toBe(predicate);
+    } else {
+      error = await expectRefusal(
+        selection,
+        "E_NATIVE_COMPOSE_OWNERSHIP",
+        "topology",
+        predicate
+      );
+    }
+    const serialized = JSON.stringify(error);
+    expect(serialized).not.toContain(predicate);
+    expect(serialized).not.toContain(CANARY);
+    expect(await Bun.file(join(root, "mutated")).exists()).toBe(false);
+  }
+}, 30_000);
+
+test("topology predicate evidence rejects hostile fields and cannot be copied or forged", async () => {
+  const fixture = owned();
+  const network = fixture.network?.[0];
+  if (!network) {
+    throw new Error("Missing topology fixture");
+  }
+  network.containers = {};
+  await prepare(fixture);
+  const issued = await expectRefusal(
+    options,
+    "E_NATIVE_COMPOSE_OWNERSHIP",
+    "topology",
+    "live-endpoint-membership"
+  );
+  expect(nativeComposeTopologyPredicate(issued)).toBe(
+    "live-endpoint-membership"
+  );
+  let reads = 0;
+  const hostile = new Proxy(
+    {},
+    {
+      get() {
+        reads++;
+        throw new Error(CANARY);
+      },
+      has() {
+        reads++;
+        throw new Error(CANARY);
+      },
+    }
+  );
+  const accessor = Object.defineProperty({}, "topologyPredicate", {
+    get() {
+      reads++;
+      throw new Error(CANARY);
+    },
+  });
+  for (const candidate of [
+    { topologyPredicate: "live-endpoint-membership" },
+    { ...(issued as object), topologyPredicate: "live-endpoint-membership" },
+    Object.create(issued as object),
+    new NativeComposeOwnershipError("E_NATIVE_COMPOSE_OWNERSHIP"),
+    hostile,
+    accessor,
+    null,
+    undefined,
+    CANARY,
+  ]) {
+    expect(nativeComposeTopologyPredicate(candidate)).toBeUndefined();
+  }
+  expect(reads).toBe(0);
+  // A later independent refusal cannot relabel the exact first issued error.
+  network.containers = null;
+  await prepare(fixture);
+  await expectRefusal(
+    options,
+    "E_NATIVE_COMPOSE_OWNERSHIP",
+    "topology",
+    "network-members-shape"
+  );
+  expect(nativeComposeTopologyPredicate(issued)).toBe(
+    "live-endpoint-membership"
+  );
 });
 
 test("selected on-failure restart is unready until two stable owned scans", async () => {

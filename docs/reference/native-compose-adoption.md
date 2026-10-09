@@ -421,6 +421,63 @@ it does not independently terminate a caller-owned engine callback.
 
 ## Rollback and interruption recovery
 
+### Original file grants: private version 8
+
+The distinct retained-file preparation owner supports a closed subset:
+static image services, the original default bridge, already-bound local named
+volumes and explicit file-backed config grants with a verified read-only `0444`
+target, plus protected original secret grants with verified `0400` or `0600`
+source and guest permissions. The ordinary adoption baseline remains closed; pure import preview
+alone never authorizes retained files. Builds, jobs, profiles, routes, custom
+networks, readiness/dependency intersections, managed/generated inputs and typed
+locals remain refused by this file family before material or engine acquisition.
+Unused declarations do not grant access or authorize material reads.
+
+Preparation checks every original bind's exact source path, target and read-only
+flag alongside the existing original resource identities. Docker may omit a
+bind's `Name` field; its observation projects that absence as the exact empty
+name. Named volumes still require their literal verified name. Descriptor-held reads
+require canonical owned directories and regular, single-link source files; no
+symlink, hardlink, path escape, source replacement or unsafe writable material is
+adopted. It never rewrites or chmods the original. Private source facts retain
+device/inode, owner, mode, size, timestamps and a content digest. Fixed original-ID
+guest `stat`/`sha256sum` queries must agree with the host content and selected
+permission policy; effective guest UID/GID and file identity are observed, not inferred as
+root. Repeated observations fence drift, but do not atomically freeze the guest,
+host filesystem or Docker.
+
+Private manifest and receipt version 8 retain that proof. Material bytes, paths,
+identities and digests never enter public plans, reports or diagnostics. Current
+material and guest proof are reacquired before retained start/restart or exec,
+after effects and immediately before successful journal publication. The file
+owner requires one finite mutation deadline. Failure, uncertainty, permission or
+content drift leaves pending ownership for explicit stop recovery.
+
+Saved ps/logs, stop/recovery and rollback validate the saved closed proof and exact
+original bind/resource identities without acquiring current material. They can
+settle stopped originals even after a material source disappears; missing or
+changed material still refuses a new start or exec. Rollback restores only the
+exact held authored pair and never edits a material file or deletes retained data.
+
+Private file proof version 1 preserves the config-only `0444` contract. Version 2
+adds protected original secret binds with exact `0400` or `0600` source and guest
+permissions. The strict retained-purpose mapper preserves whether a permission
+was omitted or explicitly declared. An omitted secret permission can normalize
+only to the verified original effective permission; an explicit permission must
+agree with that same source and guest. Explicit `0444` over a protected source
+refuses. Config grants remain `0444`, and pure import preview keeps its existing
+declarative defaults. The private candidate is normalized only after the original
+proof, then compiled. Saved reads derive the same candidate from the immutable
+proof and raw authored intent without material reads. Unknown proof versions,
+policy-presence swaps, changed source mode and changed guest UID/GID refuse.
+
+This source contract is not complete file/secret or NC04 parity. No original
+permission is changed, no guest owner is inferred, and UID/GID overrides remain
+refused. Original mount and material ownership, granted and ungranted reads,
+read-only write refusal, linked-checkout isolation, retained lifecycle, recovery
+and rollback remain required live gates. Mixed build, job, custom-network,
+routing, generated, managed and typed-local families stay outside this owner.
+
 After the original containers are stopped, `hack config adopt --rollback`
 journals `rolling-back`, holds the installed candidate and restores both exact
 legacy originals. Link-before-unlink restoration cannot overwrite another file;
@@ -549,36 +606,6 @@ fresh. A complete resource/runtime observation brackets the proof, including
 final volume and inventory rereads. The context is revoked before return and
 cannot cross a lifecycle effect, publication or another observation phase.
 This reduces nested inspection calls; it is not a measured runtime or CPU claim.
-Before moving originals, publication uses its just-completed resource observation
-as that proof's entry. Candidate admission and stopped-state reads do not extend
-the observation into an effect: source, receipt, claims and stopped state are
-rechecked inside the scoped context, and a complete fresh binding remains the
-exit gate before originals can move. The same absolute publication deadline
-applies; an already expired entry still refuses.
-
-At the final active-receipt boundary, publication captures the actual final
-resource read and reuses only its entry observation across the exclusive temporary
-receipt write. The authoritative switching receipt is still unchanged. Scoped
-source, manifest, claim, receipt, stopped-state and deadline checks continue;
-the full closing resource binding and final receipt snapshot run before rename.
-This reuse cannot cross an authoritative save, native installation, original
-move, lifecycle effect or another callback. Clock controls cover this installed
-native boundary separately from the earlier pre-move routing proof; they do not
-identify a historical runtime refusal by themselves.
-
-Publication refusals may include
-`legacy_adoption_publication_refusal: {stage, reason}` in the JSON error detail.
-The active-receipt save distinguishes its original context, receipt, staging,
-routing, commit and readback boundaries. Its explicit deadline guard may issue
-`proof-deadline`; other state refusals retain their owner code classification.
-An inner issued diagnostic survives the outer publication catch. These fixed
-labels contain no paths, identities, source text or error messages.
-The owner records the fixed boundary that rejected and a closed error category;
-it retains no source values, resource identities, compiler output or error text.
-The public error code, guard order, deadlines and recovery requirements remain
-unchanged. Copied details do not confer diagnostic or recovery authority. A
-category describes that future invocation, not the cause of an older refusal
-that did not record it.
 
 Rollback requires restored source bytes, stopped original resources and absent
 proxy dispatch before handing hostname claims back to the restored legacy source.

@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import { readFile } from "node:fs/promises";
+import { legacyComposeAdoptionContainerInspectFormat } from "../src/lib/native-compose-adoption-binding.ts";
 import {
   adoptionDependencyHealthcheck,
   adoptionDependencyReadAllowed,
@@ -114,6 +115,8 @@ const originalCompose = "/synthetic/nc04-checkout/.hack/docker-compose.yml";
 const savedCompose = `/synthetic/nc04-checkout/.hack/.internal/legacy-compose-adoption-v1/generations/${readScope.generationId}/legacy-compose.yml`;
 const statesFormat =
   '{"id":{{json .Id}},"running":{{json .State.Running}},"paused":{{json .State.Paused}},"status":{{json .State.Status}}}';
+const configHashFormat =
+  '{"id":{{json .Id}},"hash":{{json (index .Config.Labels "com.docker.compose.config-hash")}}}';
 
 test("dependency forwarder accepts only canonical original or receipt-anchored saved config hashes", () => {
   for (const file of [originalCompose, savedCompose]) {
@@ -145,6 +148,44 @@ test("dependency forwarder accepts only canonical original or receipt-anchored s
   ).toBe(true);
 });
 
+test("dependency forwarder preserves the separate shipping config-hash observation", async () => {
+  const source = await readFile(
+    new URL("../src/lib/native-compose-adoption-runtime.ts", import.meta.url),
+    "utf8"
+  );
+  expect(source).toContain(`'${configHashFormat}'`);
+  expect(
+    adoptionDependencyReadAllowed({
+      ...readScope,
+      args: ["container", "inspect", "--format", configHashFormat, db],
+    })
+  ).toBe(true);
+  expect(
+    adoptionDependencyReadAllowed({
+      ...readScope,
+      args: [
+        "container",
+        "inspect",
+        "--format",
+        configHashFormat,
+        "e".repeat(64),
+      ],
+    })
+  ).toBe(false);
+  expect(
+    adoptionDependencyReadAllowed({
+      ...readScope,
+      args: [
+        "container",
+        "inspect",
+        "--format",
+        configHashFormat.replace("config-hash", "PRIVATE"),
+        db,
+      ],
+    })
+  ).toBe(false);
+});
+
 test("combined bridge and health forwarder accepts only the binding owner's exact alias inspection", async () => {
   const source = await readFile(
     new URL("../src/lib/native-compose-adoption-binding.ts", import.meta.url),
@@ -157,12 +198,19 @@ test("combined bridge and health forwarder accepts only the binding owner's exac
   const ordinary = template
     ?.replaceAll("${PROJECT}", "com.docker.compose.project")
     .replaceAll("${VERSION}", "io.hack.native-config.version");
+  expect(ordinary).toBe(legacyComposeAdoptionContainerInspectFormat);
   const custom = ordinary?.replace(
     '"id":{{json $n.NetworkID}}}',
     '"id":{{json $n.NetworkID}},"aliases":{{json $n.Aliases}}}'
   );
   expect(custom).toBeDefined();
   expect(custom).not.toBe(ordinary);
+  expect(
+    adoptionDependencyReadAllowed({
+      ...readScope,
+      args: ["container", "inspect", "--format", ordinary ?? "", db],
+    })
+  ).toBe(true);
   expect(
     adoptionDependencyReadAllowed({
       ...readScope,
@@ -179,6 +227,34 @@ test("combined bridge and health forwarder accepts only the binding owner's exac
     adoptionDependencyReadAllowed({
       ...readScope,
       args: ["container", "inspect", "--format", `${custom}PRIVATE`, db],
+    })
+  ).toBe(false);
+  const missingFieldPredecessor = ordinary?.replace(
+    '{{$name := ""}}{{range $key, $value := $m}}{{if eq $key "Name"}}{{$name = $value}}{{end}}{{end}}{{json $name}}',
+    "{{json $m.Name}}"
+  );
+  expect(missingFieldPredecessor).not.toBe(ordinary);
+  expect(
+    adoptionDependencyReadAllowed({
+      ...readScope,
+      args: [
+        "container",
+        "inspect",
+        "--format",
+        missingFieldPredecessor ?? "",
+        db,
+      ],
+    })
+  ).toBe(false);
+  const truthinessDefault = ordinary?.replace(
+    '{{$name := ""}}{{range $key, $value := $m}}{{if eq $key "Name"}}{{$name = $value}}{{end}}{{end}}{{json $name}}',
+    '{{with (index $m "Name")}}{{json .}}{{else}}""{{end}}'
+  );
+  expect(truthinessDefault).not.toBe(ordinary);
+  expect(
+    adoptionDependencyReadAllowed({
+      ...readScope,
+      args: ["container", "inspect", "--format", truthinessDefault ?? "", db],
     })
   ).toBe(false);
 });

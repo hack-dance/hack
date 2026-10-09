@@ -419,7 +419,11 @@ export function mapLegacyNativeRetainedSourceBind(opts: {
   readonly configText: string;
   readonly composeText: string;
 }): NativeImportPlan {
-  return mapLegacyNativeInput({ ...opts, purpose: "retained-source-bind" });
+  return mapLegacyNativeInput({
+    configText: opts.configText,
+    composeText: opts.composeText,
+    purpose: "retained-source-bind",
+  });
 }
 
 function mapSourceBindCandidate(

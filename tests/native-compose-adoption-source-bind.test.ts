@@ -15,6 +15,8 @@ import {
   acquireLegacyComposeSourceBind,
   holdSavedLegacyComposeSourceBind,
 } from "../src/lib/native-compose-adoption-source-bind.ts";
+import { planLegacyComposeSourceBindAdoption } from "../src/lib/native-compose-adoption-plan.ts";
+import * as projection from "../src/lib/native-compose-adoption-projection.ts";
 import * as privateState from "../src/lib/native-compose-private-state.ts";
 import { mapLegacyComposeSourceBind } from "../src/lib/native-config-import-bind.ts";
 import { acquireLegacyAdoptionSourceInputs } from "../src/lib/native-config-import-inputs.ts";
@@ -25,6 +27,7 @@ import {
   mapLegacyNativeRetainedSourceBind,
   mapLegacyNativeStorageAdoption,
 } from "../src/lib/native-config-import-plan.ts";
+import * as selection from "../src/lib/project-input-selection.ts";
 import { restoreEnv } from "./helpers/env.ts";
 
 const CANARY = "synthetic-private-source-directory";
@@ -140,6 +143,27 @@ test.each([
   expect(JSON.stringify(owned)).toBe("{}");
   await owned.withFresh({}, async () => {});
 });
+
+test("issued non-enumerable source bytes reach both retained mapper and planner", async () => {
+  const issued = await acquireLegacyAdoptionSourceInputs({ projectRoot: root });
+  if (!issued.ok) {
+    throw new Error("Synthetic source refused; values omitted.");
+  }
+  expect(Object.keys(issued)).not.toContain("configText");
+  expect(Object.keys(issued)).not.toContain("composeText");
+  const candidate = mapLegacyNativeRetainedSourceBind(issued).candidate;
+  expect(candidate).toBeDefined();
+  expect(candidate).toMatchObject({
+    services: { db: { mounts: [{ storage: "data" }, { source: "ignored" }] } },
+  });
+  const planned = planLegacyComposeSourceBindAdoption(issued);
+  expect(planned.report.supported).toBe(true);
+  expect(planned.intent).toMatchObject({
+    sourceBinds: [
+      { service: "db", source: "ignored", target: "/work", readOnly: true },
+    ],
+  });
+});
 test.each([
   "/outside",
   "../../outside",
@@ -238,6 +262,80 @@ test("saved proof remains key-free and rejects forged, absent, changed or replac
   await rename(join(root, "ignored"), join(root, "original"));
   await mkdir(join(root, "ignored"));
   await red(holdSavedLegacyComposeSourceBind(opts));
+});
+
+test.each([
+  "fresh",
+  "saved",
+])("replacement during the last %s layout await refuses before returning", async (kind) => {
+  const owned = await acquire();
+  const saved =
+    kind === "saved"
+      ? await holdSavedLegacyComposeSourceBind({
+          projectRoot: root,
+          configText,
+          composeText,
+          proof: owned.proof,
+        })
+      : undefined;
+  const original = projection.hasLegacyComposeGeneratedSources;
+  let armed = kind === "saved";
+  let replaced = false;
+  const read = spyOn(
+    projection,
+    "hasLegacyComposeGeneratedSources"
+  ).mockImplementation(async (...args) => {
+    const result = await original(...args);
+    if (armed && !replaced) {
+      replaced = true;
+      await rename(join(root, "ignored"), join(root, "original"));
+      await mkdir(join(root, "ignored"));
+    }
+    return result;
+  });
+  try {
+    await red(
+      saved
+        ? saved.assertFresh()
+        : owned.withFresh({}, async () => {
+            armed = true;
+          })
+    );
+    expect(armed).toBe(true);
+    expect(replaced).toBe(true);
+  } finally {
+    read.mockRestore();
+    await saved?.close();
+  }
+});
+
+test("replacement during the final issued-source await is rechecked by mounted-directory owner", async () => {
+  const owned = await acquire();
+  const original = selection.inspectProjectInputsAtRoot;
+  let observed = false;
+  let replaced = false;
+  const read = spyOn(
+    selection,
+    "inspectProjectInputsAtRoot"
+  ).mockImplementation(async (...args) => {
+    const result = await original(...args);
+    if (observed && !replaced) {
+      replaced = true;
+      await rename(join(root, "ignored"), join(root, "original"));
+      await mkdir(join(root, "ignored"));
+    }
+    return result;
+  });
+  try {
+    await red(
+      owned.withFresh({}, async () => {
+        observed = true;
+      })
+    );
+    expect(replaced).toBe(true);
+  } finally {
+    read.mockRestore();
+  }
 });
 test("original cancellation cannot be replaced and callback does not run", async () => {
   const controller = new AbortController();

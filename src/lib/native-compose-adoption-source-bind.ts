@@ -182,7 +182,9 @@ async function lease(opts: {
       if (!open) {
         refuse();
       }
-      await recheckDirectories(held);
+      // Layout checks can await unrelated input owners. Mounted pathname and
+      // descriptor identities must be checked after that final async boundary.
+      await requireLayout(opts.root, opts.candidate, opts.signal);
       for (const item of held) {
         const current = await item.file.stat();
         if (
@@ -197,7 +199,11 @@ async function lease(opts: {
           refuse();
         }
       }
-      await requireLayout(opts.root, opts.candidate, opts.signal);
+      await recheckDirectories(held);
+      check(opts.signal);
+      if (!open) {
+        refuse();
+      }
     };
     const close = async () => {
       if (open) {
@@ -253,8 +259,8 @@ export async function acquireLegacyComposeSourceBind(opts: {
         const held = await lease({ root, candidate, proof, signal: selected });
         try {
           const result = await action();
-          await held.assertFresh();
           await source.assertFresh({ signal: selected });
+          await held.assertFresh();
           check(signal);
           return result;
         } finally {

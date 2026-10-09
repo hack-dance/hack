@@ -747,8 +747,8 @@ async function readInputs(
       await readSavedLegacyComposeAdoptionProjection(projectionOpts);
     }
     await assertBuildSource();
-    await sourceBindLease?.assertFresh();
     await ctx.check();
+    await sourceBindLease?.assertFresh();
     freezeImportValue(observed);
     return {
       manifest: { ...meta, binding: observed },

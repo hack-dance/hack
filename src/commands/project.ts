@@ -9127,6 +9127,30 @@ async function handleNativeLogs({
   return 0;
 }
 
+function logsHaveUnsupportedNativeOptions(
+  options: LogsArgs["options"]
+): boolean {
+  if (process.env.HACK_RUNTIME_BACKEND === "native") {
+    return Boolean(
+      options.loki ||
+        options.compose ||
+        options.pretty ||
+        options.query !== undefined ||
+        options.services !== undefined ||
+        options.since !== undefined ||
+        options.until !== undefined ||
+        (options.follow && options.noFollow)
+    );
+  }
+  return Boolean(
+    options.loki ||
+      options.query ||
+      options.services ||
+      options.since ||
+      options.until
+  );
+}
+
 async function handleLogs({
   ctx,
   args,
@@ -9140,7 +9164,10 @@ async function handleLogs({
     project: args.options.project,
     operation: "logs",
     instance: args.options.branch,
-    profiles: parseCsvList(args.options.profile),
+    profiles:
+      args.options.profile === undefined
+        ? undefined
+        : parseCsvList(args.options.profile),
     service: args.positionals.service,
     json: args.options.json,
     follow: !args.options.noFollow,
@@ -9149,13 +9176,7 @@ async function handleLogs({
       json: args.options.json,
       pretty: args.options.pretty,
     }),
-    unsupportedOptions: Boolean(
-      args.options.loki ||
-        args.options.query ||
-        args.options.services ||
-        args.options.since ||
-        args.options.until
-    ),
+    unsupportedOptions: logsHaveUnsupportedNativeOptions(args.options),
   });
   if (authored !== null) {
     return authored;

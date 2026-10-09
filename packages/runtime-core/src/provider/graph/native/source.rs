@@ -11,6 +11,7 @@ use std::{
         unix::fs::{MetadataExt, OpenOptionsExt},
     },
     path::{Component, Path},
+    time::Instant,
 };
 
 // Fixed POSIX stat-mode fields in the Darwin/Linux receipt wire. The host libc
@@ -378,13 +379,36 @@ pub(super) fn verify(
     binding: &Binding,
     active: bool,
 ) -> Result<(), CandidateError> {
+    verify_using(engine, binding, active, None)
+}
+
+/// Finite observations share their original deadline with every guest query.
+pub(super) fn verify_until(
+    engine: &Engine<'_>,
+    binding: &Binding,
+    deadline: Instant,
+) -> Result<(), CandidateError> {
+    verify_using(engine, binding, true, Some(deadline))
+}
+
+fn verify_using(
+    engine: &Engine<'_>,
+    binding: &Binding,
+    active: bool,
+    deadline: Option<Instant>,
+) -> Result<(), CandidateError> {
+    if let Some(deadline) = deadline {
+        crate::provider::managed_environment::remaining_until(deadline)?;
+    }
     if engine.guest().project_share() != Some(&binding.share) {
         return Err(refused());
     }
     if active {
         binding.verify_host()?;
     }
-    if active {
+    if let Some(deadline) = deadline {
+        super::super::source::verify_shared_mount_until(engine, &binding.share, deadline)?;
+    } else if active {
         super::super::source::verify_shared_mount(engine, &binding.share)?;
     } else {
         super::super::source::verify_shared_mount_cleanup(engine, &binding.share)?;
@@ -393,11 +417,22 @@ pub(super) fn verify(
         for name in binding.mounts.keys() {
             let path = binding.path(name)?;
             let kind = &binding.anchors[&binding.mounts[name].source].kind;
-            engine.guest().execute("set -eu; test \"$(realpath -e -- \"$1\")\" = \"$1\"; if test \"$2\" = directory; then test -d \"$1\"; else test \"$2\" = file; test -f \"$1\"; fi", &[&path, kind], None)?;
+            let script = "set -eu; test \"$(realpath -e -- \"$1\")\" = \"$1\"; if test \"$2\" = directory; then test -d \"$1\"; else test \"$2\" = file; test -f \"$1\"; fi";
+            if let Some(deadline) = deadline {
+                engine
+                    .guest()
+                    .execute_until(script, &[&path, kind], deadline)?;
+            } else {
+                engine.guest().execute(script, &[&path, kind], None)?;
+            }
         }
         binding.verify_host()?;
     }
-    engine.guest().verify()
+    engine.guest().verify()?;
+    if let Some(deadline) = deadline {
+        crate::provider::managed_environment::remaining_until(deadline)?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]

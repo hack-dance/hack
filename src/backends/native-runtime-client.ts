@@ -7,6 +7,8 @@ import {
 } from "./native-stop-diagnostics.ts";
 
 const ERROR_CODE = /^[a-z][a-z0-9_]{0,63}$/;
+const NATIVE_SERVICE = /^[A-Za-z0-9_.-]{1,128}$/;
+const NATIVE_TAIL = /^[1-9][0-9]{0,3}$/;
 const NATIVE_RUN = /^[a-f0-9]{32}$/;
 const NATIVE_HASH = /^[a-f0-9]{64}$/;
 interface NativeFailure {
@@ -76,6 +78,8 @@ export async function invokeNativeRuntime(opts: {
   readonly serviceExecResponse?: boolean;
   /** Native authored status must finish when its owned child exits or admission is canceled. */
   readonly boundNativeStatusDrain?: boolean;
+  /** Finite authored logs bind output drains to their exact read child. */
+  readonly boundNativeAuthoredLogsDrain?: boolean;
   /** Native source planning and journal inspection also bind pipe lifetime to their owned read child. */
   readonly boundNativeAuthoredReadDrain?: boolean;
   /** Explicit recovery requests have their own closed argv domain and never accept private input. */
@@ -92,6 +96,11 @@ export async function invokeNativeRuntime(opts: {
     !(
       validExecResponseSelection(opts.args, opts.serviceExecResponse) &&
       validNativeStatusDrainSelection(opts.args, opts.boundNativeStatusDrain) &&
+      validNativeAuthoredLogsDrainSelection(
+        opts.args,
+        opts.boundNativeAuthoredLogsDrain,
+        opts.privateInput !== undefined
+      ) &&
       validNativeAuthoredReadDrainSelection(
         opts.args,
         opts.boundNativeAuthoredReadDrain,
@@ -129,6 +138,7 @@ export async function invokeNativeRuntime(opts: {
   );
   const drain =
     opts.boundNativeStatusDrain ||
+    opts.boundNativeAuthoredLogsDrain ||
     opts.boundNativeAuthoredReadDrain ||
     opts.boundNativeAuthoredRecoveryDrain
       ? new AbortController()
@@ -170,6 +180,12 @@ export async function invokeNativeRuntime(opts: {
           "Native runtime request was canceled; its outcome may be uncertain. No request was replayed.",
       });
     }
+    if (opts.boundNativeAuthoredLogsDrain && drain?.signal.aborted) {
+      throw new NativeRuntimeRequestError({
+        message:
+          "Native authored log output did not settle; no output was admitted.",
+      });
+    }
     rethrowNativeInputFailure(inputFailure, {
       interrupted: timedOut,
       code,
@@ -192,6 +208,32 @@ export async function invokeNativeRuntime(opts: {
     clearTimeout(drainTimer);
     drain?.abort();
   }
+}
+
+function validNativeAuthoredLogsDrainSelection(
+  args: readonly string[],
+  selected: boolean | undefined,
+  privateInput: boolean
+): boolean {
+  if (!selected) {
+    return true;
+  }
+  const tail = args[8] ?? "";
+  return (
+    !privateInput &&
+    args.length === 10 &&
+    args[0] === "graph" &&
+    args[1] === "native" &&
+    args[2] === "logs" &&
+    args[3] === "--run-id" &&
+    NATIVE_RUN.test(args[4] ?? "") &&
+    args[5] === "--service" &&
+    NATIVE_SERVICE.test(args[6] ?? "") &&
+    args[7] === "--tail" &&
+    NATIVE_TAIL.test(tail) &&
+    Number(tail) <= 1000 &&
+    args[9] === "--json"
+  );
 }
 
 function validNativeStatusDrainSelection(

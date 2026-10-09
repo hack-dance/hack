@@ -98,6 +98,18 @@ pub(super) fn verify_shared_mount(
     Ok(())
 }
 
+#[cfg(feature = "native-config-plan")]
+pub(super) fn verify_shared_mount_until(
+    engine: &Engine<'_>,
+    share: &super::super::ProjectShareIntent,
+    deadline: std::time::Instant,
+) -> Result<(), CandidateError> {
+    engine
+        .guest()
+        .execute_until(VERIFY_SHARED_MOUNT, &[&share.guest_path], deadline)?;
+    Ok(())
+}
+
 /// The same mount identity proof under the existing cleanup lease, without
 /// authorizing allocation or requiring the startup operating-resource budget.
 #[cfg(feature = "native-config-plan")]

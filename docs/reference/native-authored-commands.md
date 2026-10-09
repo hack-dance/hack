@@ -2,9 +2,9 @@
 
 An explicit `HACK_RUNTIME_BACKEND=native` selection delegates an authored
 `.hack/hack.project.json` project to the separate native foreground owner. The
-current command slice supports whole-project foreground `up` and saved-run `ps`
-on macOS with an
-absolute `HACK_NATIVE_BINARY` and private canonical `HACK_NATIVE_HOME`. It requires
+current command slice supports whole-project foreground `up`, saved-run `ps`,
+and finite service `logs` on macOS with an absolute `HACK_NATIVE_BINARY` and private
+canonical `HACK_NATIVE_HOME`. It requires
 the caller's separately prepared native provider pool and matching runtime binary.
 It does not install or select a runtime automatically. An omitted backend continues
 to use the [Compose command owner](native-compose-commands.md).
@@ -59,7 +59,7 @@ directories, saved record identities and the selected executable across its sing
 bounded request. It does not compile or read authored values, resolve env, run
 hooks, start workloads, repair state or perform cleanup. Cancellation waits for the
 owned request to settle. Profiles, env overrides, service subsets and other `ps`
-options are unsupported. Native `logs`, `exec`, `run` and `restart` remain separate
+options are unsupported. Native `exec`, `run` and `restart` remain separate
 unsupported command slices.
 
 Startup shares the configured `HACK_COMPOSE_STARTUP_TIMEOUT_MS` budget across
@@ -118,6 +118,32 @@ by the separately qualified image-only recovery path. No native hash substitutes
 for a normalized Compose hash. Source and fake-driver
 checks do not qualify an installed frontend, a live provider, the full authored
 corpus, actual dead-owner recovery or resource overhead; those remain separate gates.
+
+## Finite service logs
+
+An already running authored foreground owner supports `logs SERVICE --no-follow`
+on macOS. `--tail` defaults to 200 and accepts integers from 1 through 1000;
+`--json` returns separate stdout/stderr strings and a truncation flag. Plain output
+preserves those two streams. Follow mode, pretty formatting, time/query filters,
+profiles, environment overrides and multiple service selections refuse before any
+input or runtime operation. This is a finite log-read capability, not full logs parity.
+
+The read uses the existing authenticated native control socket and exact admitted
+service/container, guest boot and run receipt. It refuses a dead/wrong owner,
+changed authored project/local/source-envelope files, changed frontend mapping,
+resource replacement or a container restart during the read. The live owner keeps
+value-free input identity/hash pins; it does not reacquire managed values. Source
+mounts and persistent-data bindings retain their existing current ownership checks.
+
+Log tails use the Engine's existing limits: at most 1000 lines, a 4 MiB response
+transport bound, and 16 KiB of JSON-encoded text per output stream with explicit
+truncation. One 15-second observation budget covers the Engine, source and storage
+guest checks, within the existing bounded control reply. Cancellation or incomplete
+child/output settlement
+withholds the result; it never stops the foreground owner or retries a query. Logs
+may contain application values and are returned only to the requesting caller;
+they are never journaled or included in refusal diagnostics. Offline controls do
+not qualify a live provider or application log behavior.
 
 ## Finite host lifecycle hooks
 

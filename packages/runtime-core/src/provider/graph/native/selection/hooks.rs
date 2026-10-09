@@ -34,6 +34,7 @@ struct Owner {
     pid: u32,
     uid: u32,
 }
+#[derive(Clone)]
 pub(super) struct Permit {
     pin: Pin,
     owner: Pin,

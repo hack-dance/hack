@@ -22,11 +22,48 @@ import {
 import {
   nativeComposeAdoptionRoutingWorktreesScenario,
   retainedRoutingPartialStopScript,
+  retainRoutingAdoptStopResult,
 } from "./e2e/scenarios/native-compose-adoption-routing-worktrees.ts";
 import { ownedAdoptionFixtureObservation } from "./e2e/scenarios/native-compose-adoption-worktrees.ts";
 
 const IMAGE = `sha256:${"a".repeat(64)}`;
 const IDS = ["b".repeat(64), "c".repeat(64), "d".repeat(64)] as const;
+test("first adoption refusal preserves bounded private result before the stop oracle", async () => {
+  const root = await mkdtemp(join(tmpdir(), "retained-routing-result-"));
+  try {
+    const result = {
+      command: "not-persisted",
+      exitCode: 1,
+      timedOut: false,
+      stdout: '{"ok":false,"error":{"code":"E_CONFIG_INVALID"}}',
+      stderr: "synthetic refusal detail",
+      combined: "not-persisted",
+      durationMs: 1,
+    };
+    const path = join(root, "adopt-stop-result.json");
+    await expect(
+      retainRoutingAdoptStopResult({
+        root,
+        result: { ...result, stdout: "x".repeat(64 * 1024 + 1) },
+      })
+    ).rejects.toThrow();
+    await expect(lstat(path)).rejects.toMatchObject({ code: "ENOENT" });
+    await retainRoutingAdoptStopResult({ root, result });
+    expect(JSON.parse((await readPrivate(path, 256 * 1024)).text)).toEqual({
+      phase: "adopt-stop-return",
+      exitCode: 1,
+      timedOut: false,
+      stdout: result.stdout,
+      stderr: result.stderr,
+    });
+    expect((await lstat(path)).mode & 0o777).toBe(0o600);
+    await expect(
+      retainRoutingAdoptStopResult({ root, result })
+    ).rejects.toThrow();
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
 function selection(prefer: "alias" | "dev" = "alias") {
   return retainedRoutingFixtureSelection({
     image: IMAGE,

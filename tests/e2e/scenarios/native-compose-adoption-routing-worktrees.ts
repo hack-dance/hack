@@ -2,7 +2,10 @@ import { createHash } from "node:crypto";
 import { chmod, mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { isRecord } from "../../../src/lib/guards.ts";
-import { readPrivate } from "../../../src/lib/native-compose-private-state.ts";
+import {
+  readPrivate,
+  writeExclusive,
+} from "../../../src/lib/native-compose-private-state.ts";
 import { nativeComposeProxyRoutesMatch } from "../../../src/lib/native-compose-proxy-routes.ts";
 import type { CliResult, Scenario } from "../harness.ts";
 import {
@@ -122,6 +125,7 @@ async function partialStop(h: Runtime) {
   const result = await h.cli(h.first, ["config", "adopt", "--stop", "--json"], {
     PATH: `${root}:${process.env.PATH ?? "/usr/bin:/bin"}`,
   });
+  await retainRoutingAdoptStopResult({ root, result });
   if (
     result.timedOut ||
     result.exitCode !== 71 ||
@@ -173,6 +177,29 @@ async function partialStop(h: Runtime) {
     await h.cli(h.first, ["config", "adopt", "--recover", "--stop", "--json"])
   );
   await h.assertStopped(h.first);
+}
+
+/** Preserve the known CLI return before the fixture's stop oracle can refuse.
+ * These private streams are evidence only; they grant no cleanup authority. */
+export async function retainRoutingAdoptStopResult(opts: {
+  readonly root: string;
+  readonly result: CliResult;
+}): Promise<void> {
+  const { exitCode, timedOut, stdout, stderr } = opts.result;
+  if (
+    !Number.isInteger(exitCode) ||
+    exitCode < 0 ||
+    exitCode > 255 ||
+    typeof timedOut !== "boolean" ||
+    Buffer.byteLength(stdout) > 64 * 1024 ||
+    Buffer.byteLength(stderr) > 64 * 1024
+  ) {
+    return refuse();
+  }
+  await writeExclusive(
+    join(opts.root, "adopt-stop-result.json"),
+    `${JSON.stringify({ phase: "adopt-stop-return", exitCode, timedOut, stdout, stderr })}\n`
+  );
 }
 
 async function savedOpen(h: Runtime, instance: Instance) {

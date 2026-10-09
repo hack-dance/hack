@@ -1,7 +1,8 @@
 import type { LegacyComposeRoutingIntent } from "./native-config-import-routing.ts";
 import type { NativeRoutingResolution } from "./native-routing-plan-protocol.ts";
 
-/** Effective typed-local precedence may qualify only the already served origins. */
+/** Effective typed-local preference selects among the already served origins.
+ * It may differ from the raw project preference without changing any route. */
 export function legacyComposeRoutingResolutionMatches(opts: {
   readonly routing: LegacyComposeRoutingIntent;
   readonly resolution: NativeRoutingResolution | null | undefined;
@@ -10,9 +11,23 @@ export function legacyComposeRoutingResolutionMatches(opts: {
   if (
     !resolution ||
     resolution.branch !== undefined ||
-    resolution.project_origin !== `https://${routing.devHost}` ||
-    resolution.open_origin !== routing.openOrigin
+    resolution.project_origin !== `https://${routing.devHost}`
   ) {
+    return false;
+  }
+  const devOrigin = `https://${routing.devHost}`;
+  const aliasOrigin = routing.aliasHost ? `https://${routing.aliasHost}` : null;
+  let openOrigin: string;
+  if (resolution.open_preference === "dev") {
+    openOrigin = devOrigin;
+  } else if (resolution.open_preference === "auto") {
+    openOrigin = aliasOrigin ?? devOrigin;
+  } else if (resolution.open_preference === "alias" && aliasOrigin) {
+    openOrigin = aliasOrigin;
+  } else {
+    return false;
+  }
+  if (resolution.open_origin !== openOrigin) {
     return false;
   }
   const aliases = routing.aliasHost

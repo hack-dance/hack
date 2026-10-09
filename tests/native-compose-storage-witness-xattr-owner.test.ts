@@ -12,6 +12,10 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  assertNativeComposeEffectOwned,
+  runOneOff,
+} from "../src/lib/native-compose-command.ts";
+import {
   nativeComposeDocumentStorage,
   prepareNativeComposeCommandStorage,
   runNativeComposeStorageVerifiedExec,
@@ -766,6 +770,7 @@ test.each([
 
 test.each([
   "up",
+  "restart",
   "run",
 ] as const)("command storage cold %s seeds once under Expected, then retains read-only restart proofs", async (operation) => {
   const store = await fixture();
@@ -795,6 +800,9 @@ test.each([
       storageWitnesses: storage.effectWitnesses,
       effect: async () => {
         await storage.enroll(generation, document);
+        expect(
+          transport.calls.filter((call) => call === "verify")
+        ).toHaveLength(operation === "run" ? 2 : 3);
         transport.calls.push("workload");
         return { value: 0, outcome: "complete" };
       },
@@ -844,6 +852,185 @@ test.each([
   expect(transport.calls).not.toContain("seed");
   expect(transport.calls).toContain("verify");
   expect((await store.loadCurrent()).pending).toBeNull();
+}, 30_000);
+
+test.each([
+  "up",
+  "restart",
+  "run",
+] as const)("cold %s refuses changed xattr after enrollment before workload spawn", async (operation) => {
+  const store = await fixture();
+  const transport = fake(store);
+  const command = commandPorts(transport);
+  let verified = 0;
+  let spawned = false;
+  transport.state.afterInvoke = (input) => {
+    if (input.request.operation === "verify") {
+      verified += 1;
+      if (verified === 2) {
+        // The enrollment publication has read the marker. Change the real
+        // fake-kernel xattr before the next delivery-boundary proof.
+        transport.attributes.clear();
+      }
+    }
+  };
+  await store.withMutation(async (mutation) => {
+    const storage = await prepareNativeComposeCommandStorage({
+      store,
+      mutation,
+      operation,
+      selected: [selection],
+      signal: transport.controller.signal,
+      ports: command.ports,
+    });
+    if (!storage) {
+      throw new Error("Expected storage admission");
+    }
+    const generation = await publish(mutation);
+    transport.state.generation = generation;
+    const document = await store.readGenerationDocument(generation);
+    await expect(
+      mutation.runEffect({
+        generation,
+        operation,
+        assertFresh: async () => {},
+        assertOwned: async () => {},
+        storageWitnesses: storage.effectWitnesses,
+        effect: async () => {
+          await storage.enroll(generation, document);
+          if (operation !== "run") {
+            spawned = true;
+            return { value: 0, outcome: "complete" };
+          }
+          return await runOneOff({
+            options: {
+              cwd: generation.identity.checkoutRoot,
+              operation: "run",
+              service: "app",
+            },
+            generation,
+            document,
+            selection: {
+              composeProject: generation.identity.composeProject,
+              runtimeIdentity: generation.identity.composeProject,
+              ownerToken: generation.identity.ownerToken,
+              generationIds: [generation.generationId],
+              expectedServices: ["app"],
+              expectedVolumes: [selection],
+            },
+            base: {
+              composeFiles: [generation.composeFile],
+              composeProject: generation.identity.composeProject,
+              cwd: generation.identity.checkoutRoot,
+              env: { PATH: "/no-task-docker" },
+            },
+            signal: transport.controller.signal,
+            beforeSpawn: () => {
+              spawned = true;
+              throw new Error("Run child intercepted before spawn");
+            },
+            assertFresh: async () => {},
+            assertOwned: () =>
+              assertNativeComposeEffectOwned({
+                assertFresh: async () => {},
+                assertOwned: async () => {},
+                verifyStorage: () => storage.verify(generation),
+              }),
+            observeStorage: () => {},
+          });
+        },
+      })
+    ).rejects.toMatchObject({ code: "E_NATIVE_COMPOSE_UNCERTAIN" });
+    const retained = await store.loadCurrent();
+    expect(retained.pending?.operation).toBe(operation);
+    expect(retained.storageWitnesses?.[0]?.state).toBe("enrolled");
+  });
+  expect(verified).toBeGreaterThanOrEqual(3);
+  expect(spawned).toBe(false);
+  expect(transport.calls).toContain("seed");
+}, 30_000);
+
+test("cold run reaches the real pre-spawn guard with exactly eleven helper calls", async () => {
+  const store = await fixture();
+  const transport = fake(store);
+  const command = commandPorts(transport);
+  let boundaries = 0;
+  let boundaryCalls: readonly string[] = [];
+  await store.withMutation(async (mutation) => {
+    const storage = await prepareNativeComposeCommandStorage({
+      store,
+      mutation,
+      operation: "run",
+      selected: [selection],
+      signal: transport.controller.signal,
+      ports: command.ports,
+    });
+    if (!storage) {
+      throw new Error("Expected storage admission");
+    }
+    const generation = await publish(mutation);
+    transport.state.generation = generation;
+    const document = await store.readGenerationDocument(generation);
+    await expect(
+      mutation.runEffect({
+        generation,
+        operation: "run",
+        assertFresh: async () => {},
+        assertOwned: async () => {},
+        storageWitnesses: storage.effectWitnesses,
+        effect: async () => {
+          await storage.enroll(generation, document);
+          return await runOneOff({
+            options: {
+              cwd: generation.identity.checkoutRoot,
+              operation: "run",
+              service: "app",
+            },
+            generation,
+            document,
+            selection: {
+              composeProject: generation.identity.composeProject,
+              runtimeIdentity: generation.identity.composeProject,
+              ownerToken: generation.identity.ownerToken,
+              generationIds: [generation.generationId],
+              expectedServices: ["app"],
+              expectedVolumes: [selection],
+            },
+            base: {
+              composeFiles: [generation.composeFile],
+              composeProject: generation.identity.composeProject,
+              cwd: generation.identity.checkoutRoot,
+              env: { PATH: "/no-task-docker" },
+            },
+            signal: transport.controller.signal,
+            beforeSpawn: () => {
+              boundaries++;
+              boundaryCalls = transport.calls.slice();
+              throw new Error("Run child intercepted before spawn");
+            },
+            assertFresh: async () => {},
+            assertOwned: () =>
+              assertNativeComposeEffectOwned({
+                assertFresh: async () => {},
+                assertOwned: async () => {},
+                verifyStorage: () => storage.verify(generation),
+              }),
+            observeStorage: () => {},
+          });
+        },
+      })
+    ).rejects.toMatchObject({ code: "E_NATIVE_COMPOSE_UNCERTAIN" });
+    expect((await store.loadCurrent()).pending?.operation).toBe("run");
+  });
+  expect(boundaries).toBe(1);
+  expect(
+    boundaryCalls.filter((call) => ["root", "seed", "verify"].includes(call))
+  ).toHaveLength(11);
+  expect(boundaryCalls.filter((call) => call === "verify")).toHaveLength(3);
+  expect(transport.calls.filter((call) => call === "seed")).toHaveLength(1);
+  expect(transport.calls.filter((call) => call === "provision")).toHaveLength(
+    1
+  );
 }, 30_000);
 
 test("original cold run storage authority cannot grant general effects, adoption or another generation", async () => {

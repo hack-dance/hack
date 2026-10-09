@@ -101,3 +101,11 @@ both final receipt proofs remain separate. The one-volume offline counter is
 three full proofs before effect entry rather than five; it establishes call
 ordering and count, not CPU savings or atomic observation across the daemon and
 private filesystem.
+
+The candidate one-off `run` path separately omits the enrollment-tail read that
+would immediately repeat its mandatory pre-spawn witness read. `up` and `restart`
+keep that tail read. Cold enrollment still seeds once and verifies before
+publishing its enrolled reference. The one-volume cold-run control reaches the
+actual pre-spawn boundary after eleven helper calls rather than fourteen; it
+intercepts the workload there and does not qualify Docker execution or timing.
+Post-effect generation and final receipt proofs remain separate.

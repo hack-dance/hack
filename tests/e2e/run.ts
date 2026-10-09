@@ -14,6 +14,7 @@ import { envSecretsScenario } from "./scenarios/env-secrets.ts";
 import { initScenario } from "./scenarios/init.ts";
 import { lifecycleHostProcessScenario } from "./scenarios/lifecycle-host-process.ts";
 import { lifecycleSessionRecoveryScenario } from "./scenarios/lifecycle-session-recovery.ts";
+import { nativeComposeAdoptionJobWorktreesScenario } from "./scenarios/native-compose-adoption-job-worktrees.ts";
 import {
   nativeComposeAdoptionBuildWorktreesScenario,
   nativeComposeAdoptionDependencyWorktreesScenario,
@@ -95,6 +96,7 @@ const ALL_SCENARIOS: readonly Scenario[] = [
   nativeComposeAdoptionLocalWorktreesScenario,
   nativeComposeAdoptionDependencyWorktreesScenario,
   nativeComposeAdoptionBuildWorktreesScenario,
+  nativeComposeAdoptionJobWorktreesScenario,
   lifecycleHostProcessScenario,
   worktreeParallelUpScenario,
 ];

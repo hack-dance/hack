@@ -15,6 +15,7 @@ import {
   openLegacyComposeAdoptedGenerationStore,
 } from "../lib/native-compose-adoption-generation.ts";
 import { previewLegacyComposeAdoption } from "../lib/native-compose-adoption-preview.ts";
+import { legacyComposeRetainedOrdered } from "../lib/native-compose-adoption-readiness.ts";
 import { requireNativeComposeBackend } from "../lib/native-compose-selection.ts";
 import { run } from "../lib/shell.ts";
 
@@ -110,7 +111,10 @@ async function adoptPrepared(
         if (opts.signal.aborted) {
           throw new Error("Legacy adoption cancelled; values omitted.");
         }
-        if (input.retainedPlan.requiresV5 || input.retainedBuild) {
+        if (
+          legacyComposeRetainedOrdered(input.retainedPlan) ||
+          input.retainedBuild
+        ) {
           return await runLegacyComposeRetainedOperation({
             input,
             operation: "stop",

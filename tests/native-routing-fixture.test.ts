@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { proxyHasNoPublishedPorts } from "./e2e/scenarios/native-config-routing.ts";
+import { proxyHasNoPublishedPorts } from "./e2e/scenarios/native-routing-fixture-ingress.ts";
 
 test("unpublished exposed and stopped ports are safe for the isolated proxy", () => {
   for (const runtimePorts of [null, {}, { "80/tcp": null, "443/tcp": null }]) {

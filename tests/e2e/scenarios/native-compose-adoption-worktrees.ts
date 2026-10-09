@@ -72,6 +72,14 @@ import {
   prepareManagedAdoptionFixtureSources,
 } from "./native-compose-adoption-managed-inputs.ts";
 
+import {
+  prepareRetainedRoutingFixtureLocals,
+  type RetainedRoutingFixtureSelection,
+  retainedRoutingFixtureConfig,
+  retainedRoutingFixtureSelection,
+  retainedRoutingFixtureService,
+} from "./native-compose-adoption-routing-inputs.ts";
+
 const TIMEOUT = 180_000;
 const PROJECT_LABEL = "com.docker.compose.project";
 const NATIVE_PREFIX = "io.hack.native-config.";
@@ -125,6 +133,7 @@ type Instance = {
   readonly ownedNetworks?: true;
   readonly dependency?: "service_started" | "service_healthy";
   readonly basicBuild?: RetainedBuildFixtureMode;
+  readonly routing?: RetainedRoutingFixtureSelection;
 };
 type Observation = {
   readonly id: string;
@@ -471,23 +480,43 @@ function validateOwnedObservation(opts: {
       typeof row.id !== "string" ||
       !ID.test(row.id) ||
       typeof row.service !== "string" ||
-      !["db", "worker"].includes(row.service) ||
+      !(
+        opts.instance.routing ? ["db", "worker", "web"] : ["db", "worker"]
+      ).includes(row.service) ||
       row.name !== `/${opts.instance.name}-${row.service}-1` ||
       row.workingDir !== join(opts.instance.root, ".hack") ||
       row.configFiles !== fixtureComposeFiles(opts.instance).join(",") ||
       JSON.stringify(row.mounts) !==
-        JSON.stringify([
-          {
-            type: "volume",
-            name: `${opts.instance.name}_data`,
-            target: "/var/lib/postgresql/data",
-            rw: row.service === "db",
-          },
-        ])
+        JSON.stringify(
+          row.service === "web" && opts.instance.routing
+            ? []
+            : [
+                {
+                  type: "volume",
+                  name: `${opts.instance.name}_data`,
+                  target: "/var/lib/postgresql/data",
+                  rw: row.service === "db",
+                },
+              ]
+        )
     ) {
       refused();
     }
-    return { id: row.id, service: row.service };
+    if (
+      opts.instance.routing &&
+      !(
+        typeof row.createdAt === "string" &&
+        CREATED.test(row.createdAt) &&
+        Number.isFinite(Date.parse(row.createdAt))
+      )
+    ) {
+      refused();
+    }
+    return {
+      id: row.id,
+      service: row.service,
+      ...(opts.instance.routing ? { createdAt: String(row.createdAt) } : {}),
+    };
   }
   if (
     typeof row.createdAt !== "string" ||
@@ -559,6 +588,9 @@ async function writeLegacy(instance: Instance, image: string) {
     join(instance.root, ".hack/hack.config.json"),
     JSON.stringify({
       name: instance.name,
+      ...(instance.routing
+        ? retainedRoutingFixtureConfig(instance.routing)
+        : {}),
       worktree: { auto_branch: false, inherit_local: true },
       ...(instance.sourceMode ? { env: { default_overlay: "qa" } } : {}),
     })
@@ -568,6 +600,9 @@ async function writeLegacy(instance: Instance, image: string) {
     JSON.stringify({
       name: instance.name,
       services: {
+        ...(instance.routing
+          ? { web: retainedRoutingFixtureService(instance.routing) }
+          : {}),
         db: {
           ...(instance.basicBuild
             ? { build: retainedBuildFixtureDefinition(instance.basicBuild) }
@@ -625,6 +660,9 @@ async function writeLegacy(instance: Instance, image: string) {
         },
       },
       volumes: { data: { name: `${instance.name}_data` } },
+      ...(instance.routing
+        ? { networks: { "hack-dev": { external: true } } }
+        : {}),
       ...(instance.ownedNetworks
         ? {
             networks: {
@@ -638,9 +676,9 @@ async function writeLegacy(instance: Instance, image: string) {
     })
   );
 }
-function formats(kind: Kind): string {
+function formats(kind: Kind, routing = false): string {
   if (kind === "container") {
-    return `{"id":{{json .Id}},"name":{{json .Name}},"project":{{json (index .Config.Labels "${PROJECT_LABEL}")}},"nativeNames":[{{$first := true}}{{range $name,$value := .Config.Labels}}{{if not $first}},{{end}}{{$first = false}}{{json $name}}{{end}}],"service":{{json (index .Config.Labels "com.docker.compose.service")}},"workingDir":{{json (index .Config.Labels "com.docker.compose.project.working_dir")}},"configFiles":{{json (index .Config.Labels "com.docker.compose.project.config_files")}},"mounts":[{{range $i,$m := .Mounts}}{{if $i}},{{end}}{"type":{{json $m.Type}},"name":{{json $m.Name}},"target":{{json $m.Destination}},"rw":{{json $m.RW}}}{{end}}]}`;
+    return `{"id":{{json .Id}},${routing ? '"createdAt":{{json .Created}},' : ""}"name":{{json .Name}},"project":{{json (index .Config.Labels "${PROJECT_LABEL}")}},"nativeNames":[{{$first := true}}{{range $name,$value := .Config.Labels}}{{if not $first}},{{end}}{{$first = false}}{{json $name}}{{end}}],"service":{{json (index .Config.Labels "com.docker.compose.service")}},"workingDir":{{json (index .Config.Labels "com.docker.compose.project.working_dir")}},"configFiles":{{json (index .Config.Labels "com.docker.compose.project.config_files")}},"mounts":[{{range $i,$m := .Mounts}}{{if $i}},{{end}}{"type":{{json $m.Type}},"name":{{json $m.Name}},"target":{{json $m.Destination}},"rw":{{json $m.RW}}}{{end}}]}`;
   }
   if (kind === "network") {
     return `{"id":{{json .Id}},"name":{{json .Name}},"createdAt":{{json .Created}},"project":{{json (index .Labels "${PROJECT_LABEL}")}},"nativeNames":[{{$first := true}}{{range $name,$value := .Labels}}{{if not $first}},{{end}}{{$first = false}}{{json $name}}{{end}}],"logical":{{json (index .Labels "com.docker.compose.network")}},"driver":{{json .Driver}},"scope":{{json .Scope}},"internal":{{json .Internal}}}`;
@@ -691,7 +729,7 @@ function authoredFixtureFeatures(opts: {
   };
 }
 
-async function prepareFixtureInputs(
+export async function prepareFixtureInputs(
   ctx: ScenarioContext,
   options: {
     readonly generated?: boolean;
@@ -701,6 +739,7 @@ async function prepareFixtureInputs(
     readonly ownedNetworks?: boolean;
     readonly dependencies?: boolean;
     readonly basicBuild?: boolean;
+    readonly routing?: boolean;
   } = {}
 ) {
   const {
@@ -711,7 +750,20 @@ async function prepareFixtureInputs(
     ownedNetworks = false,
     dependencies = false,
     basicBuild = false,
+    routing = false,
   } = options;
+  if (
+    routing &&
+    (generated ||
+      typedLocal ||
+      stringArgv ||
+      ownedNetwork ||
+      ownedNetworks ||
+      dependencies ||
+      basicBuild)
+  ) {
+    refused();
+  }
   if (
     basicBuild &&
     (generated ||
@@ -749,6 +801,18 @@ async function prepareFixtureInputs(
     ctx.skip("Docker executable unavailable");
   }
   const engineId = await probe(["info", "--format", "{{json .ID}}"]);
+  const routingImage = routing
+    ? await probe([
+        "image",
+        "inspect",
+        "oven/bun:1.4.2-slim",
+        "--format",
+        "{{.Id}}",
+      ])
+    : null;
+  if (routingImage !== null && !IMAGE.test(routingImage)) {
+    refused();
+  }
   const fixture = await createMonorepoFixture({
     parentDir: ctx.tempRoot,
     withHackConfig: false,
@@ -757,6 +821,16 @@ async function prepareFixtureInputs(
     root: fixture.root,
     name: `${fixture.name}-main`,
     marker: "unused-primary",
+    ...(routingImage
+      ? {
+          routing: retainedRoutingFixtureSelection({
+            image: routingImage,
+            name: `${fixture.name}-main`,
+            marker: "unused-primary",
+            prefer: "alias",
+          }),
+        }
+      : {}),
     ...authoredFixtureFeatures({
       generated,
       stringArgv,
@@ -798,6 +872,16 @@ async function prepareFixtureInputs(
     root: await addLinkedWorktree({ fixture, branch: "adoption-alpha" }),
     name: `${fixture.name}-alpha`,
     marker: "alpha-existing-sql-row",
+    ...(routingImage
+      ? {
+          routing: retainedRoutingFixtureSelection({
+            image: routingImage,
+            name: `${fixture.name}-alpha`,
+            marker: "alpha-existing-http-marker",
+            prefer: "alias",
+          }),
+        }
+      : {}),
     ...authoredFixtureFeatures({
       generated,
       stringArgv,
@@ -811,6 +895,16 @@ async function prepareFixtureInputs(
     root: await addLinkedWorktree({ fixture, branch: "adoption-beta" }),
     name: `${fixture.name}-beta`,
     marker: "beta-existing-sql-row",
+    ...(routingImage
+      ? {
+          routing: retainedRoutingFixtureSelection({
+            image: routingImage,
+            name: `${fixture.name}-beta`,
+            marker: "beta-existing-http-marker",
+            prefer: "dev",
+          }),
+        }
+      : {}),
     ...authoredFixtureFeatures({
       generated,
       stringArgv,
@@ -849,6 +943,13 @@ async function prepareFixtureInputs(
     });
   }
 
+  if (routing) {
+    await prepareRetainedRoutingFixtureLocals({
+      primary,
+      instances: [first, second],
+    });
+  }
+
   return {
     ctx,
     engine,
@@ -863,7 +964,7 @@ async function prepareFixtureInputs(
   };
 }
 
-function createFixtureRuntime(
+export function createFixtureRuntime(
   opts: Awaited<ReturnType<typeof prepareFixtureInputs>>
 ) {
   const {
@@ -902,7 +1003,13 @@ function createFixtureRuntime(
       instance,
       kind,
       row: object(
-        await probe([kind, "inspect", "--format", formats(kind), id])
+        await probe([
+          kind,
+          "inspect",
+          "--format",
+          formats(kind, instance.routing !== undefined),
+          id,
+        ])
       ),
     });
   const list = async (instance: Instance, kind: Kind) =>
@@ -1789,6 +1896,9 @@ async function requireFixtureNamesAbsent(
     ...fixtureNetworkNames(instance).map((name) => ["network", name] as const),
     ["container", `${instance.name}-db-1`],
     ["container", `${instance.name}-worker-1`],
+    ...(instance.routing
+      ? [["container", `${instance.name}-web-1`] as const]
+      : []),
   ] as const) {
     if (
       (
@@ -1808,7 +1918,7 @@ async function requireFixtureNamesAbsent(
     }
   }
 }
-async function bootstrapOriginal(h: FixtureRuntime, instance: Instance) {
+export async function bootstrapOriginal(h: FixtureRuntime, instance: Instance) {
   const {
     engine,
     fixtureRoot,
@@ -1881,7 +1991,7 @@ async function bootstrapOriginal(h: FixtureRuntime, instance: Instance) {
   });
   successful(started);
   if (
-    captured.container.length !== 2 ||
+    captured.container.length !== (instance.routing ? 3 : 2) ||
     captured.volume.length !== 1 ||
     captured.network.length !== (instance.ownedNetworks ? 2 : 1)
   ) {

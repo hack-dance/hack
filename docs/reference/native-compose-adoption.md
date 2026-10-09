@@ -523,3 +523,20 @@ readiness, source binds, files, branch overrides and custom bridges remain outsi
 this initial routing family. The owner and private-store model do not prove live
 TLS, SQL fidelity, OAuth login or application acceptance. The maintained isolated
 ingress lifecycle fixture remains required; global DNS and trust are unchanged.
+
+The explicitly selected `native-compose-adoption-routing-worktrees` scenario
+adds an HTTP service to the original two-worktree PostgreSQL fixture. It requires
+both literal HTTPS origins and the existing OAuth alias to serve each checkout's
+marker, with no published proxy ports. Saved `open` must select alpha's
+checkout-local alias over the authored and primary-local dev preference. It also
+checks original SQL/IDs/births, a known partial-stop journal and explicit
+recovery, two retained up/down cycles, exact source rollback and claim handoff.
+Unknown child or cleanup disposition retains the fixture. The temporary Caddy
+owner is shared with `native-config-routing`; stopped user proxies and the
+existing `hack-dev` network stay intact. This scenario does not perform OAuth
+login, change host DNS/trust, or qualify combined unsupported families.
+
+With current compiled artifacts, cached fixture images and an exclusively
+coordinated Docker lane, select it using the same prerequisites above and
+`--only=native-compose-adoption-routing-worktrees`. Its source and pure controls
+are separate from a completed live TLS/SQL run.

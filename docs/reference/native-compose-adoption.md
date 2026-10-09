@@ -534,3 +534,14 @@ freeze external editors, directory writers or Docker.
 Source/model controls are separate from actual two-worktree RO/RW access, SQL,
 directory identity and resource-birth qualification. Full NC04 still requires
 the mixed corpus and the unsupported feature intersections.
+
+The explicit `native-compose-adoption-source-bind-worktrees` Docker selector
+uses two linked legacy instances with distinct existing SQL rows and directory
+contents. It checks short and no-create long syntax, RO write refusal, persisted
+RW writes, a gitignored directory and the checkout-root mount. Every adoption
+CLI, including previews, uses a closed read/start/stop transport. A controlled
+partial start replaces one source directory; recovery must retain the exact
+pending receipt and leave both instances unchanged until that same original
+directory is restored. Independent rollbacks and exact owned cleanup retain the
+original resource and volume-birth checks. Registration and synthetic controls
+alone do not qualify live mounts or Docker behavior.

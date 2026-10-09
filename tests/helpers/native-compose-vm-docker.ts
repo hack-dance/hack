@@ -106,6 +106,85 @@ function exact(expected: unknown) {
 }
 const helper = `sha256:${"a".repeat(64)}`,
   app = `sha256:${"b".repeat(64)}`;
+const ownershipSource = await readFile(
+  resolve(import.meta.dir, "../../src/lib/native-compose-ownership.ts"),
+  "utf8"
+);
+function ownershipFormat(kind: string, operation: string) {
+  const block = ownershipSource.match(
+    new RegExp(`${kind}: \\{([\\s\\S]*?)\\n  \\}`)
+  )?.[1];
+  const value = block?.match(
+    new RegExp(`${operation}: \\x60([^\\x60]+)\\x60`)
+  )?.[1];
+  if (!value) {
+    return refuse();
+  }
+  return value
+    .replaceAll("${PROJECT_LABEL}", "com.docker.compose.project")
+    .replaceAll("${PREFIX}", "io.hack.native-config");
+}
+const appOwnership = (await has("app-ownership.json"))
+  ? ((await Bun.file(`${root}/app-ownership.json`).json()) as {
+      project: string;
+      instance: string;
+      owner: string;
+      generation: string;
+    })
+  : null;
+if (
+  ["container", "volume", "network"].includes(args[0] ?? "") &&
+  args[1] === "ls" &&
+  same(args, [
+    args[0],
+    "ls",
+    ...(args[0] === "container" ? ["--all"] : []),
+    ...(args[0] === "volume" ? [] : ["--no-trunc"]),
+    "--format",
+    ownershipFormat(args[0] ?? "", "list"),
+  ])
+) {
+  if (args[0] === "container" && appOwnership && (await has("app-present"))) {
+    console.log(
+      JSON.stringify({
+        id: "f".repeat(64),
+        name: `${appOwnership.project}-reader-1`,
+        project: appOwnership.project,
+      })
+    );
+  }
+  process.exit(0);
+}
+if (
+  same(args, [
+    "container",
+    "inspect",
+    "--format",
+    ownershipFormat("container", "inspect"),
+    "f".repeat(64),
+  ]) &&
+  appOwnership &&
+  (await has("app-present"))
+) {
+  console.log(
+    JSON.stringify({
+      id: "f".repeat(64),
+      name: `/${appOwnership.project}-reader-1`,
+      project: appOwnership.project,
+      version: "1",
+      instance: appOwnership.instance,
+      owner: appOwnership.owner,
+      generation: appOwnership.generation,
+      service: "reader",
+      oneoff: "False",
+      state: "running",
+      exitCode: 0,
+      health: null,
+      networks: {},
+    })
+  );
+  process.exit(0);
+}
 if (same(args, ["info", "--format", "{{json .ID}}"])) {
   console.log(JSON.stringify("synthetic-vm-file-engine:1"));
   process.exit(0);
@@ -255,7 +334,9 @@ if (args[0] === "volume" && args[1] === "inspect") {
   console.log(
     JSON.stringify({
       ...state.volume,
-      ...((await has("birth-drift"))
+      ...((await has("birth-drift")) ||
+      ((await has("retirement-volume-drift")) &&
+        !state.containers["d".repeat(64)])
         ? { created: "2026-10-09T00:01:00Z" }
         : {}),
     })
@@ -433,6 +514,25 @@ if (args[0] === "container" && args[1] === "inspect") {
       refuse();
     }
     for (const id of args.slice(4)) {
+      if (
+        id === "f".repeat(64) &&
+        (await has("app-present")) &&
+        state.facts &&
+        state.volume
+      ) {
+        console.log(
+          JSON.stringify({
+            id,
+            mounts: state.facts.members.map((member) => ({
+              Type: "bind",
+              Source: `${state.volume?.mountpoint}/${member.id}`,
+              Destination: member.target,
+              RW: false,
+            })),
+          })
+        );
+        continue;
+      }
       const row = state.containers[id];
       if (!row) {
         refuse();

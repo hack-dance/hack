@@ -3,6 +3,10 @@ import { HackCliError } from "./cli-result.ts";
 import { resolveComposeStartupTimeoutMs } from "./compose-startup-budget.ts";
 import { resolveGlobalHackDir } from "./config-paths.ts";
 import { isRecord } from "./guards.ts";
+import {
+  nativeComposeEffectReason,
+  retainNativeComposeEffectRefusal,
+} from "./native-compose-effect-diagnostics.ts";
 import { refuseNativeComposeFile } from "./native-compose-file-bytes.ts";
 import {
   assertNativeComposeFileMounts,
@@ -290,6 +294,10 @@ export async function prepareNativeComposeCommandFiles(opts: {
   });
   let armed = false;
   let reaped = false;
+  let ready: {
+    selection: NativeComposeOwnershipOptions;
+    generation: NativeComposeGeneration;
+  } | null = null;
   try {
     const selected = await acquireNativeComposeFileDeliveryInputs({
       sources,
@@ -329,6 +337,48 @@ export async function prepareNativeComposeCommandFiles(opts: {
       });
       owner.selectVmProjection({ attempt, projection });
     }
+    const assertReady = async (
+      selection: NativeComposeOwnershipOptions,
+      generation: NativeComposeGeneration
+    ) => {
+      try {
+        await owner.assertSavedReady(generation);
+        const document = await store.readGenerationDocument(generation);
+        const before = await assertNativeComposeOwned(selection);
+        if (Object.hasOwn(document, NATIVE_COMPOSE_VM_FILES_EXTENSION)) {
+          await assertNativeComposeVmFiles({
+            authority: mutation.materialAuthority,
+            generation,
+            document,
+            signal,
+            deadline,
+            observed: before,
+          });
+        }
+        await assertNativeComposeFileMounts({
+          document,
+          generationId: generation.generationId,
+          observed: before,
+          signal,
+        });
+        const after = await assertNativeComposeOwned(selection);
+        if (JSON.stringify(before) !== JSON.stringify(after)) {
+          refuseNativeComposeFile();
+        }
+        await owner.assertSavedReady(generation);
+        if (Object.hasOwn(document, NATIVE_COMPOSE_VM_FILES_EXTENSION)) {
+          ready = { selection, generation };
+        }
+      } catch (error) {
+        if (projection.vm) {
+          retainNativeComposeEffectRefusal(error, {
+            stage: "vm-file-readiness",
+            reason: nativeComposeEffectReason(error),
+          });
+        }
+        throw error;
+      }
+    };
     return Object.freeze({
       inputs: selected,
       projection,
@@ -347,6 +397,13 @@ export async function prepareNativeComposeCommandFiles(opts: {
         };
         await assertProjection();
         await assertNativeComposeFileRootUnbound({ root, engineId, signal });
+        // Earned readiness changes only the file phase. Reobserve the exact app
+        // grants at every final ownership fence; routing completion stays separate.
+        if (ready?.generation === generation) {
+          await assertReady(ready.selection, generation);
+          await assertProjection();
+          return;
+        }
         const document = await store.readGenerationDocument(generation);
         if (Object.hasOwn(document, NATIVE_COMPOSE_VM_FILES_EXTENSION)) {
           const pending = await store.loadPending();
@@ -388,35 +445,7 @@ export async function prepareNativeComposeCommandFiles(opts: {
         }).hooks;
       },
       childReaped: () => reaped,
-      assertReady: async (
-        selection: NativeComposeOwnershipOptions,
-        generation: NativeComposeGeneration
-      ) => {
-        await owner.assertSavedReady(generation);
-        const document = await store.readGenerationDocument(generation);
-        const before = await assertNativeComposeOwned(selection);
-        if (Object.hasOwn(document, NATIVE_COMPOSE_VM_FILES_EXTENSION)) {
-          await assertNativeComposeVmFiles({
-            authority: mutation.materialAuthority,
-            generation,
-            document,
-            signal,
-            deadline,
-            observed: before,
-          });
-        }
-        await assertNativeComposeFileMounts({
-          document,
-          generationId: generation.generationId,
-          observed: before,
-          signal,
-        });
-        const after = await assertNativeComposeOwned(selection);
-        if (JSON.stringify(before) !== JSON.stringify(after)) {
-          refuseNativeComposeFile();
-        }
-        await owner.assertSavedReady(generation);
-      },
+      assertReady,
       rollback: async () => {
         if (!armed) {
           await owner.rollback(attempt);

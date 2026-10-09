@@ -2,6 +2,7 @@ import { constants } from "node:fs";
 import { type FileHandle, lstat, mkdir, open, unlink } from "node:fs/promises";
 import { dirname, join, relative, resolve } from "node:path";
 import { isRecord } from "./guards.ts";
+import { copyNativeComposeEffectRefusal } from "./native-compose-effect-diagnostics.ts";
 import {
   holdNativeComposeFile,
   nativeComposeFileDigest,
@@ -43,6 +44,7 @@ import {
   hasCode,
   holdDirectory,
   keys,
+  NativeComposeGenerationError,
   parsePrivateJson,
   privateDirectory,
   readPrivate,
@@ -700,8 +702,12 @@ export function createNativeComposeFileOwner(opts: {
       run: async () => {
         try {
           return await action();
-        } catch {
-          return refuseNativeComposeFile();
+        } catch (error) {
+          const failure = new NativeComposeGenerationError(
+            "E_NATIVE_COMPOSE_STATE"
+          );
+          copyNativeComposeEffectRefusal(error, failure);
+          throw failure;
         }
       },
     });

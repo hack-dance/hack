@@ -4,6 +4,11 @@ import { join, posix } from "node:path";
 import { resolveComposeStartupTimeoutMs } from "./compose-startup-budget.ts";
 import { isRecord } from "./guards.ts";
 import {
+  type NativeComposeEffectRefusal,
+  nativeComposeEffectReason,
+  retainNativeComposeEffectRefusal,
+} from "./native-compose-effect-diagnostics.ts";
+import {
   nativeComposeFileDigest,
   refuseNativeComposeFile,
 } from "./native-compose-file-bytes.ts";
@@ -1706,159 +1711,173 @@ export async function retireNativeComposeVmFiles(opts: {
   if (!Object.hasOwn(document, NATIVE_COMPOSE_VM_FILES_EXTENSION)) {
     return;
   }
-  const ref = reference(document[NATIVE_COMPOSE_VM_FILES_EXTENSION]);
-  const granted = consumeNativeComposeFileRetirementProof({
-    proof: opts.proof,
-    authority,
-    reference: ref.host,
-  });
-  const signal = granted.signal;
-  const deadline = Date.now() + resolveComposeStartupTimeoutMs();
-  await runNativeComposeMaterialAction({
-    authority,
-    run: async () => {
-      const check = async () => {
-        requireValue(!signal.aborted && Date.now() < deadline);
-        await granted.check();
-        await assertNativeComposeMaterialAuthority(granted.selection);
-      };
-      await check();
-      const selected = await state(document);
-      try {
-        sameOwner(
-          selected.binding,
-          await assertNativeComposeMaterialAuthority(granted.selection)
-        );
-        const m = selected.manifest;
-        const client = createNativeComposeVmFileClient({
-          engineId: m.engineId,
-          signal,
-          deadline,
-          assertFresh: async () => {
-            await check();
-            await selected.check();
-          },
-        });
-        const last = selected.phases.at(-1);
-        if (last === "retired") {
+  let stage: NativeComposeEffectRefusal["stage"] = "vm-retirement-admission";
+  try {
+    const ref = reference(document[NATIVE_COMPOSE_VM_FILES_EXTENSION]);
+    const granted = consumeNativeComposeFileRetirementProof({
+      proof: opts.proof,
+      authority,
+      reference: ref.host,
+    });
+    const signal = granted.signal;
+    const deadline = Date.now() + resolveComposeStartupTimeoutMs();
+    await runNativeComposeMaterialAction({
+      authority,
+      run: async () => {
+        const check = async () => {
+          requireValue(!signal.aborted && Date.now() < deadline);
+          await granted.check();
+          await assertNativeComposeMaterialAuthority(granted.selection);
+        };
+        await check();
+        const selected = await state(document);
+        try {
+          sameOwner(
+            selected.binding,
+            await assertNativeComposeMaterialAuthority(granted.selection)
+          );
+          const m = selected.manifest;
+          const client = createNativeComposeVmFileClient({
+            engineId: m.engineId,
+            signal,
+            deadline,
+            assertFresh: async () => {
+              await check();
+              await selected.check();
+            },
+          });
+          const last = selected.phases.at(-1);
+          if (last === "retired") {
+            requireValue(
+              !(await allContainers(client)).some(
+                (row) => row.id === m.observer.id
+              )
+            );
+            requireValue(!(await volumeNames(client)).includes(m.volume.name));
+            return;
+          }
+          requireValue(vmFileJournalReady(selected.phases));
+          stage = "vm-retirement-observation";
+          await consumers(client, m);
+          const observerId = m.observer.id;
+          requireValue(typeof observerId === "string");
+          const live = await inspect(client, observerId);
           requireValue(
-            !(await allContainers(client)).some(
-              (row) => row.id === m.observer.id
+            sameNativeComposeFileState(live.immutable, m.observer) &&
+              live.running &&
+              live.status === "running" &&
+              live.execs.length === 0
+          );
+          requireValue(
+            sameNativeComposeFileState(
+              volume(
+                await client.call([
+                  "volume",
+                  "inspect",
+                  "--format",
+                  VOLUME_FORMAT,
+                  m.volume.name,
+                ]),
+                m.volume.name,
+                m.volume.labels
+              ),
+              m.volume
             )
           );
-          requireValue(!(await volumeNames(client)).includes(m.volume.name));
-          return;
-        }
-        requireValue(vmFileJournalReady(selected.phases));
-        await consumers(client, m);
-        const observerId = m.observer.id;
-        requireValue(typeof observerId === "string");
-        const live = await inspect(client, observerId);
-        requireValue(
-          sameNativeComposeFileState(live.immutable, m.observer) &&
-            live.running &&
-            live.status === "running" &&
-            live.execs.length === 0
-        );
-        requireValue(
-          sameNativeComposeFileState(
-            volume(
-              await client.call([
-                "volume",
-                "inspect",
-                "--format",
-                VOLUME_FORMAT,
-                m.volume.name,
-              ]),
-              m.volume.name,
-              m.volume.labels
-            ),
-            m.volume
-          )
-        );
-        await selected.append("observe-armed");
-        requireValue(
-          sameNativeComposeFileState(
-            parseVmFileFacts(
-              await client.call(
-                [
-                  "container",
-                  "exec",
-                  "--interactive",
-                  observerId,
-                  "/usr/local/bin/bun",
-                  "-e",
-                  VM_FILE_VERIFY_PROGRAM,
-                ],
-                Buffer.from(JSON.stringify(m.facts))
-              )
-            ),
-            m.facts
-          )
-        );
-        requireValue((await inspect(client, observerId)).execs.length === 0);
-        await selected.append("observe-complete");
-        await selected.append("retiring");
-        await check();
-        await client.call(["container", "stop", "--time", "2", observerId]);
-        const stopped = await inspect(client, observerId);
-        requireValue(
-          sameNativeComposeFileState(stopped.immutable, m.observer) &&
-            !stopped.running &&
-            stopped.status === "exited" &&
-            stopped.exitCode === 0 &&
-            stopped.execs.length === 0
-        );
-        await selected.append("observer-stopped");
-        await check();
-        await consumers(client, m);
-        await client.call(["container", "rm", observerId]);
-        await selected.append("observer-removed");
-        requireValue(
-          !(await allContainers(client)).some((row) => row.id === observerId)
-        );
-        // Recheck full volume/bind absence after removing the only permitted
-        // consumer. The live preceding VM witness is never reconstructed on retry.
-        const rows = await allContainers(client);
-        requireValue(
-          rows.every((row) =>
-            row.mounts.every(
-              (raw) =>
-                isRecord(raw) &&
-                !(raw.Type === "volume" && raw.Name === m.volume.name) &&
-                !(
-                  typeof raw.Source === "string" &&
-                  raw.Source.startsWith("/") &&
-                  overlaps(posix.normalize(raw.Source), m.volume.mountpoint)
+          await selected.append("observe-armed");
+          requireValue(
+            sameNativeComposeFileState(
+              parseVmFileFacts(
+                await client.call(
+                  [
+                    "container",
+                    "exec",
+                    "--interactive",
+                    observerId,
+                    "/usr/local/bin/bun",
+                    "-e",
+                    VM_FILE_VERIFY_PROGRAM,
+                  ],
+                  Buffer.from(JSON.stringify(m.facts))
                 )
+              ),
+              m.facts
             )
-          )
-        );
-        requireValue(
-          sameNativeComposeFileState(
-            volume(
-              await client.call([
-                "volume",
-                "inspect",
-                "--format",
-                VOLUME_FORMAT,
+          );
+          requireValue((await inspect(client, observerId)).execs.length === 0);
+          await selected.append("observe-complete");
+          await selected.append("retiring");
+          stage = "vm-retirement-observer-stop";
+          await check();
+          await client.call(["container", "stop", "--time", "2", observerId]);
+          const stopped = await inspect(client, observerId);
+          requireValue(
+            sameNativeComposeFileState(stopped.immutable, m.observer) &&
+              !stopped.running &&
+              stopped.status === "exited" &&
+              stopped.exitCode === 0 &&
+              stopped.execs.length === 0
+          );
+          await selected.append("observer-stopped");
+          stage = "vm-retirement-observer-removal";
+          await check();
+          await consumers(client, m);
+          await client.call(["container", "rm", observerId]);
+          await selected.append("observer-removed");
+          stage = "vm-retirement-volume-policy";
+          requireValue(
+            !(await allContainers(client)).some((row) => row.id === observerId)
+          );
+          // Recheck full volume/bind absence after removing the only permitted
+          // consumer. The live preceding VM witness is never reconstructed on retry.
+          const rows = await allContainers(client);
+          requireValue(
+            rows.every((row) =>
+              row.mounts.every(
+                (raw) =>
+                  isRecord(raw) &&
+                  !(raw.Type === "volume" && raw.Name === m.volume.name) &&
+                  !(
+                    typeof raw.Source === "string" &&
+                    raw.Source.startsWith("/") &&
+                    overlaps(posix.normalize(raw.Source), m.volume.mountpoint)
+                  )
+              )
+            )
+          );
+          requireValue(
+            sameNativeComposeFileState(
+              volume(
+                await client.call([
+                  "volume",
+                  "inspect",
+                  "--format",
+                  VOLUME_FORMAT,
+                  m.volume.name,
+                ]),
                 m.volume.name,
-              ]),
-              m.volume.name,
-              m.volume.labels
-            ),
-            m.volume
-          )
-        );
-        await selected.check();
-        await check();
-        await client.call(["volume", "rm", m.volume.name]);
-        requireValue(!(await volumeNames(client)).includes(m.volume.name));
-        await selected.append("retired");
-        await check();
-      } finally {
-        await selected.close();
-      }
-    },
-  });
+                m.volume.labels
+              ),
+              m.volume
+            )
+          );
+          await selected.check();
+          await check();
+          stage = "vm-retirement-volume-removal";
+          await client.call(["volume", "rm", m.volume.name]);
+          requireValue(!(await volumeNames(client)).includes(m.volume.name));
+          await selected.append("retired");
+          await check();
+        } finally {
+          await selected.close();
+        }
+      },
+    });
+  } catch (error) {
+    retainNativeComposeEffectRefusal(error, {
+      stage,
+      reason: nativeComposeEffectReason(error),
+    });
+    throw error;
+  }
 }

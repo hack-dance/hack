@@ -203,6 +203,18 @@ pending publication, admission requires the saved generation reference. Generic
 inspection never accepts an unpublished generation, and copying a reservation or
 projection does not grant preparation authority.
 
+After the original file preparation earns complete app readiness, its final
+ownership checks repeat the same full app, material and source proof. This
+command-local phase permits only those exact app grants; generic inspection
+without app observations still refuses bound consumers. Routing completion keeps
+its separate ordering and authority.
+
+VM readiness and retirement refusals may include a fixed stage and reason in
+`native_compose_effect_refusal`. Only the owner's first issued failure survives
+error normalization; copied public details cannot supply it. The diagnostic
+contains no paths, identities, guest values or content and grants no recovery or
+cleanup authority.
+
 Offline emitted-program and fake-engine controls do not establish provider support.
 Actual owner/nonowner access, readonly write refusal, ungranted isolation and full
 lifecycle/recovery qualification remain separate gates for this VM transport.

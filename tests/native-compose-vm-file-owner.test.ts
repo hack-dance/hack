@@ -2,6 +2,7 @@ import { afterEach, expect, test } from "bun:test";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { isRecord } from "../src/lib/guards.ts";
+import { nativeComposeEffectRefusal } from "../src/lib/native-compose-effect-diagnostics.ts";
 import {
   consumeNativeComposeFileRetirementProof,
   createNativeComposeFileOwner,
@@ -413,6 +414,7 @@ async function knownChild(fixture: Awaited<ReturnType<typeof vmFileFixture>>) {
 test.each([
   "absent",
   "bound",
+  "volume-policy",
 ] as const)("published VM generation reopens under a saved lease and retires only with app %s", async (app) => {
   const fixture = await vmFileFixture();
   const published = await withStore(fixture, async (mutation) => {
@@ -519,8 +521,11 @@ test.each([
           }
           const assertReaped = await knownChild(fixture);
           await owner.recordStopReaped({ attempt, assertReaped });
-          if (app === "absent") {
+          if (app !== "bound") {
             await fixture.unmark("app-present");
+          }
+          if (app === "volume-policy") {
+            await fixture.mark("retirement-volume-drift");
           }
           return { outcome: "complete", value: 0 };
         },
@@ -538,8 +543,16 @@ test.each([
         expect(isRecord(state) && state.volume).toBeNull();
         expect(isRecord(state) && state.containers).toEqual({});
       } else {
-        await expect(down).rejects.toMatchObject({
+        const failure = await down.catch((error: unknown) => error);
+        expect(failure).toMatchObject({
           code: "E_NATIVE_COMPOSE_UNCERTAIN",
+        });
+        expect(nativeComposeEffectRefusal(failure)).toEqual({
+          stage:
+            app === "bound"
+              ? "vm-retirement-observation"
+              : "vm-retirement-volume-policy",
+          reason: "private-state",
         });
         expect((await store.loadPending())?.generationId).toBe(
           generation.generationId
@@ -547,14 +560,26 @@ test.each([
         const commands = await fixture.commands();
         expect(commands.filter((args) => args[1] === "rm")).toEqual([
           ["container", "rm", "c".repeat(64)],
+          ...(app === "volume-policy"
+            ? [["container", "rm", "d".repeat(64)]]
+            : []),
         ]);
-        expect(commands.some((args) => args[1] === "stop")).toBe(false);
+        expect(commands.filter((args) => args[1] === "stop")).toEqual(
+          app === "bound"
+            ? []
+            : [["container", "stop", "--time", "2", "d".repeat(64)]]
+        );
         const state = await fixture.state();
-        expect(
-          isRecord(state) &&
-            isRecord(state.containers) &&
-            state.containers["d".repeat(64)]
-        ).toMatchObject({ running: true });
+        if (app === "bound") {
+          expect(
+            isRecord(state) &&
+              isRecord(state.containers) &&
+              state.containers["d".repeat(64)]
+          ).toMatchObject({ running: true });
+        } else {
+          expect(isRecord(state) && state.containers).toEqual({});
+          expect(isRecord(state) && state.volume).not.toBeNull();
+        }
       }
       expect(await readFile(join(fixture.checkout, "settings"))).toEqual(
         VM_BYTES

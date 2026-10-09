@@ -1,4 +1,4 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, spyOn, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -118,6 +118,7 @@ async function fixture(
     const args = process.argv.slice(2);
     appendFileSync("calls", JSON.stringify(args) + "\\n");
     if (args.includes("control")) {
+      await Bun.sleep(${opts.controlDelayMs ?? 0});
       await Bun.write("authenticated-status-started", "status");
       if (${opts.controlKeeper ?? false}) {
         const keeper = Bun.spawn([process.execPath, "-e", 'await Bun.sleep(2000); await Bun.write("keeper-complete", "exited");'], {
@@ -127,7 +128,6 @@ async function fixture(
         await Bun.write("keeper-pid", String(keeper.pid));
         console.error("synthetic-private-keeper-detail");
       }
-      await Bun.sleep(${opts.controlDelayMs ?? 0});
       if (${opts.controlFailure ?? false}) {
         console.error(JSON.stringify({code:"graph_owner_recovery",message:"synthetic-private-control-detail"}));
         process.exit(2);
@@ -411,27 +411,87 @@ test("safe status failure code does not expose private diagnostics or publish", 
 
 test("startup deadline cancels pending authentication before publication and awaits cleanup", async () => {
   const opts = await fixture({ controlDelayMs: 3000 });
+  const children: Bun.Subprocess[] = [];
+  const commands: unknown[][] = [];
+  const exits = new Map<Bun.Subprocess, number>();
+  const spawn = Bun.spawn.bind(Bun);
+  const observed = spyOn(Bun, "spawn").mockImplementation(((
+    ...args: unknown[]
+  ) => {
+    const child = Reflect.apply(spawn, Bun, args);
+    if (
+      Array.isArray(args[0]) &&
+      args[0][0] === opts.runtime.binary &&
+      args[0][5] === "control"
+    ) {
+      commands.push(args[0].slice(3));
+      children.push(child);
+      // Observe the real promise the product awaits; never reap in the test.
+      void child.exited.then(
+        (code: number) => exits.set(child, code),
+        () => undefined
+      );
+    }
+    return child;
+  }) as typeof Bun.spawn);
   let published = false;
   const start = performance.now();
-  await expect(
-    serveNativeAuthoredProjectGraph({
-      ...opts,
-      startupTimeoutMs: 200,
-      onReady: async () => {
-        published = true;
-      },
-    })
-  ).rejects.toThrow("canceled");
-  expect(performance.now() - start).toBeLessThan(1500);
-  expect(published).toBe(false);
-  expect(
-    await Bun.file(
-      join(opts.projectRoot, "authenticated-status-started")
-    ).text()
-  ).toBe("status");
-  expect(
-    await Bun.file(join(opts.projectRoot, "cleanup-complete")).text()
-  ).toBe("cleaned");
+  try {
+    await expect(
+      serveNativeAuthoredProjectGraph({
+        ...opts,
+        startupTimeoutMs: 200,
+        onReady: async () => {
+          published = true;
+        },
+      })
+    ).rejects.toThrow("canceled");
+    expect(performance.now() - start).toBeLessThan(1500);
+    expect(published).toBe(false);
+    expect(children).toHaveLength(1);
+    expect(commands).toEqual([
+      [
+        "graph",
+        "native",
+        "control",
+        "--run-id",
+        run,
+        "--action",
+        "status",
+        "--json",
+      ],
+    ]);
+    const child = children[0];
+    if (!child) {
+      throw new Error("Missing real status subprocess");
+    }
+    expect(exits.has(child)).toBe(true);
+    expect(Number.isInteger(exits.get(child))).toBe(true);
+    expect(exits.get(child)).not.toBe(0);
+    expect(child.signalCode).toBe("SIGKILL");
+    let absent = false;
+    try {
+      process.kill(child.pid, 0);
+    } catch (error: unknown) {
+      absent =
+        typeof error === "object" &&
+        error !== null &&
+        "code" in error &&
+        error.code === "ESRCH";
+    }
+    expect(absent).toBe(true);
+    // The delayed synthetic authentication body has not published its marker.
+    expect(
+      await Bun.file(
+        join(opts.projectRoot, "authenticated-status-started")
+      ).exists()
+    ).toBe(false);
+    expect(
+      await Bun.file(join(opts.projectRoot, "cleanup-complete")).text()
+    ).toBe("cleaned");
+  } finally {
+    observed.mockRestore();
+  }
 });
 
 test("status descendant-held pipes cannot outlive startup admission or owned cleanup", async () => {

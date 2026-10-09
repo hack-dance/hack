@@ -23,7 +23,10 @@ import {
   sourceBindFixtureMutationAllowed,
   sourceBindFixtureReadAllowed,
 } from "./e2e/scenarios/native-compose-adoption-source-bind-inputs.ts";
-import { assertSourceBindFixtureControlledInterruption } from "./e2e/scenarios/native-compose-adoption-source-bind-worktrees.ts";
+import {
+  assertSourceBindFixtureControlledInterruption,
+  assertSourceBindFixtureReplacementRefusal,
+} from "./e2e/scenarios/native-compose-adoption-source-bind-worktrees.ts";
 import {
   cleanupOwnedAdoptionFixture,
   sourceBindFixtureCommand,
@@ -183,7 +186,7 @@ for (const [interruption, args, receipt, effect, marker] of [
     "original-start-before-directory-replacement",
   ],
 ] as const) {
-  test(`emitted v12 ${interruption} reaches the maintained exact71 assertion after its original-ID marker`, async () => {
+  test(`emitted v12 ${interruption} exits71 at the transport boundary after its original-ID marker`, async () => {
     const observed = await emitted({
       interruption,
       args: [...args],
@@ -530,3 +533,35 @@ const dockerHash = process.env.HACK_TEST_DOCKER_FORMAT_SHA256;
   },
   30_000
 );
+
+test("replacement refusal requires exact public config error while ordinary controlled stop keeps71", () => {
+  const result = {
+    command: "synthetic",
+    exitCode: 1,
+    stdout: JSON.stringify({ ok: false, error: { code: "E_CONFIG_INVALID" } }),
+    stderr: "",
+    combined: "",
+    timedOut: false,
+    durationMs: 1,
+  };
+  expect(() => assertSourceBindFixtureReplacementRefusal(result)).not.toThrow();
+  for (const changed of [
+    { ...result, exitCode: 0 },
+    { ...result, exitCode: 71 },
+    { ...result, timedOut: true },
+    { ...result, stdout: "unparseable" },
+    { ...result, stdout: JSON.stringify({ ok: true }) },
+    {
+      ...result,
+      stdout: JSON.stringify({ ok: false, error: { code: "E_STATE" } }),
+    },
+    { ...result, stdout: " ".repeat(65_537) },
+  ]) {
+    expect(() => assertSourceBindFixtureReplacementRefusal(changed)).toThrow(
+      "values omitted"
+    );
+  }
+  expect(() => assertSourceBindFixtureControlledInterruption(result)).toThrow(
+    "values omitted"
+  );
+});

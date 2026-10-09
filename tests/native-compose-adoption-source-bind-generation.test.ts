@@ -5,10 +5,12 @@ import {
   expect,
   spyOn,
 } from "bun:test";
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { openLegacyComposeAdoptedGenerationStore } from "../src/lib/native-compose-adoption-generation.ts";
 import { previewLegacyComposeAdoption } from "../src/lib/native-compose-adoption-preview.ts";
 import * as privateState from "../src/lib/native-compose-private-state.ts";
+import { run } from "../src/lib/shell.ts";
 import {
   retainedSourceBindFixture,
   SOURCE_BIND_CANARY,
@@ -402,3 +404,167 @@ boundedTest.each([1, 9, 10, 11, 13])(
   },
   30_000
 );
+
+test("replaced directory after a completed original start overrides shim71 and retains exact pending recovery", async () => {
+  const { store, generation } = await prepared();
+  let storeClosed = false;
+  let recoveryStore:
+    | Awaited<ReturnType<typeof openLegacyComposeAdoptedGenerationStore>>
+    | undefined;
+  try {
+    await store.publish({ generation, binary: h.compiler });
+    const active = await store.loadActive();
+    if (!active) {
+      throw new Error("Synthetic active generation missing");
+    }
+    const original = await lstat(join(h.root, "source"));
+    const childPath = join(h.outer, "replacement-owner.ts");
+    const resultPath = join(h.outer, "replacement-owner-result.json");
+    const generationModule = join(
+      import.meta.dir,
+      "../src/lib/native-compose-adoption-generation.ts"
+    );
+    const executionModule = join(
+      import.meta.dir,
+      "../src/lib/native-compose-adoption-execution.ts"
+    );
+    // The failed CLI's owner exits before --recover may retire its retained lock.
+    // A same-process test would correctly leave a live owner and refuse BUSY.
+    await writeFile(
+      childPath,
+      [
+        'import {mkdir,rename,writeFile} from "node:fs/promises";',
+        "import {openLegacyComposeAdoptedGenerationStore} from " +
+          JSON.stringify(generationModule) +
+          ";",
+        "import {runLegacyComposeRetainedOperation} from " +
+          JSON.stringify(executionModule) +
+          ";",
+        "const root=" +
+          JSON.stringify(h.root) +
+          ",binary=" +
+          JSON.stringify(h.compiler) +
+          ";",
+        'const store=await openLegacyComposeAdoptedGenerationStore({projectRoot:root,mode:"saved"});',
+        "let started=false,rejected=false;",
+        'try { const generation=await store.loadActive(); if(!generation)throw Error("missing");',
+        " const deadline=Date.now()+15000;",
+        ' try { await store.withMutation({generation,operation:"start",services:[],binary,deadline,run:async input=>{',
+        '  const code=await runLegacyComposeRetainedOperation({input,operation:"start",deadline,signal:new AbortController().signal});if(code!==0)throw Error("start");started=true;',
+        '  await rename(root+"/source",root+"/original");await mkdir(root+"/source");return 71;',
+        ' }}); } catch(error) {rejected=error?.code==="E_LEGACY_ADOPTION_STATE";}',
+        " await writeFile(" +
+          JSON.stringify(resultPath) +
+          ',JSON.stringify({started,rejected}),{mode:0o600,flag:"wx"});',
+        "} finally {await store.close();}",
+        "process.exitCode=started&&rejected?0:1;",
+      ].join("\n"),
+      { flag: "wx", mode: 0o600 }
+    );
+    let group: number | undefined;
+    let childExit:
+      | {
+          readonly exitCode: number;
+          readonly timedOut: boolean;
+          readonly cancelled: boolean;
+        }
+      | undefined;
+    const exitCode = await run([process.execPath, "--no-env-file", childPath], {
+      cwd: h.root,
+      stdin: "ignore",
+      stdout: "ignore",
+      stderr: "ignore",
+      timeoutMs: 20_000,
+      onSpawn: async (event) => {
+        expect(event.ownsProcessGroup).toBe(true);
+        group = event.processGroupId ?? event.pid;
+      },
+      onExit: async (event) => {
+        childExit = event;
+      },
+    });
+    expect(exitCode).toBe(0);
+    expect(childExit).toMatchObject({
+      exitCode: 0,
+      timedOut: false,
+      cancelled: false,
+    });
+    if (!group) {
+      throw new Error("Synthetic child group missing");
+    }
+    let groupAbsent = false;
+    try {
+      process.kill(-group, 0);
+    } catch (error) {
+      expect((error as NodeJS.ErrnoException).code).toBe("ESRCH");
+      groupAbsent = true;
+    }
+    expect(groupAbsent).toBe(true);
+    expect(JSON.parse(await readFile(resultPath, "utf8"))).toEqual({
+      started: true,
+      rejected: true,
+    });
+    const pending = await h.receipt();
+    expect(pending.pendingOperation).toMatchObject({
+      operation: "start",
+      services: ["db"],
+    });
+    const receiptPath = join(
+      h.root,
+      ".hack/.internal/legacy-compose-adoption-v1/receipt.json"
+    );
+    const pendingBytes = await readFile(receiptPath);
+    const states = await h.readModel();
+    expect(states).toMatchObject({
+      running: true,
+      row: SOURCE_BIND_CANARY,
+      volumeBirth: h.model.volumeBirth,
+    });
+    let recoveryEffects = 0;
+    await red(
+      store.withMutation({
+        generation: active,
+        operation: "stop",
+        services: [],
+        recover: true,
+        binary: h.compiler,
+        deadline: Date.now() + 15_000,
+        run: async () => {
+          recoveryEffects++;
+          return 0;
+        },
+      })
+    );
+    expect(recoveryEffects).toBe(0);
+    expect(await readFile(receiptPath)).toEqual(pendingBytes);
+    expect(await h.readModel()).toEqual(states);
+    await rename(join(h.root, "source"), join(h.root, "refused-replacement"));
+    await rename(join(h.root, "original"), join(h.root, "source"));
+    expect((await lstat(join(h.root, "source"))).ino).toBe(original.ino);
+    await store.close();
+    storeClosed = true;
+    recoveryStore = await openLegacyComposeAdoptedGenerationStore({
+      projectRoot: h.root,
+      mode: "saved",
+    });
+    await recoveryStore.recoverInterruptedLock();
+    const recovery = await recoveryStore.loadActive({ recoverOperation: true });
+    if (!recovery) {
+      throw new Error("Synthetic recovery generation missing");
+    }
+    expect(await h.operation(recoveryStore, recovery, "stop", true)).toBe(0);
+    expect((await h.receipt()).pendingOperation).toBeNull();
+    expect(await h.readModel()).toMatchObject({
+      running: false,
+      row: SOURCE_BIND_CANARY,
+      volumeBirth: h.model.volumeBirth,
+    });
+    await recoveryStore.rollback();
+    await noAllocation();
+  } finally {
+    await recoveryStore?.close();
+    if (!storeClosed) {
+      await store.close();
+    }
+  }
+});

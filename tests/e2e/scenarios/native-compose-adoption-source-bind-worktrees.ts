@@ -37,6 +37,33 @@ export function assertSourceBindFixtureControlledInterruption(
     refuse();
   }
 }
+/** The emitted guard validated the exact original-start marker. The shipping
+ * store then rejects the replaced directory before returning the shim's 71. */
+export function assertSourceBindFixtureReplacementRefusal(result: CliResult) {
+  if (
+    result.exitCode !== 1 ||
+    result.timedOut ||
+    Buffer.byteLength(result.stdout) > 65_536
+  ) {
+    refuse();
+  }
+  let report: unknown;
+  try {
+    report = JSON.parse(result.stdout);
+  } catch {
+    refuse();
+  }
+  if (
+    !(
+      isRecord(report) &&
+      report.ok === false &&
+      isRecord(report.error) &&
+      report.error.code === "E_CONFIG_INVALID"
+    )
+  ) {
+    refuse();
+  }
+}
 function receipt(instance: Instance) {
   return join(
     instance.root,
@@ -98,7 +125,7 @@ async function directoryReplacementRecovery(h: Runtime) {
     ["up", "--detach", "--json"],
     "replace-after-start"
   );
-  assertSourceBindFixtureControlledInterruption(partial);
+  assertSourceBindFixtureReplacementRefusal(partial);
   const pendingBytes = await pending(first, "start");
   const states = await running(h, first);
   const original = join(first.root, "bind-rw-original");

@@ -1,56 +1,6 @@
 //! MacOS wildcard and loopback claims held across HTTPS recovery effects.
 use super::{CandidateError, refused};
 
-// Test-only first-refusal facts distinguish bind contention from a failed socket
-// prerequisite. No port, address, descriptor or production diagnostic is exposed.
-#[cfg(test)]
-pub(super) mod observation_diagnostic {
-    use std::cell::RefCell;
-
-    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-    pub(in crate::provider::https_recovery) enum Stage {
-        Socket,
-        Cloexec,
-        Ipv6Only,
-        ReuseAddress,
-        Bind,
-        Listen,
-    }
-    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-    pub(in crate::provider::https_recovery) struct Facts {
-        pub stage: Stage,
-        pub wildcard: bool,
-        pub family: i32,
-        pub errno: Option<i32>,
-    }
-    thread_local! {
-        static FIRST: RefCell<Option<Facts>> = const { RefCell::new(None) };
-    }
-    pub(in crate::provider::https_recovery) fn clear() {
-        FIRST.with(|first| *first.borrow_mut() = None);
-    }
-    pub(in crate::provider::https_recovery) fn take() -> Option<Facts> {
-        FIRST.with(|first| first.borrow_mut().take())
-    }
-    pub(in crate::provider::https_recovery) fn record(
-        stage: Stage,
-        wildcard: bool,
-        family: i32,
-        errno: Option<i32>,
-    ) {
-        FIRST.with(|first| {
-            let mut first = first.borrow_mut();
-            if first.is_none() {
-                *first = Some(Facts {
-                    stage,
-                    wildcard,
-                    family,
-                    errno,
-                });
-            }
-        });
-    }
-}
 pub(in crate::provider) fn port_absent(
     port: u16,
 ) -> Result<Vec<std::os::fd::OwnedFd>, CandidateError> {
@@ -165,4 +115,55 @@ fn bind_pair(port: u16, wildcard: bool) -> Result<[std::os::fd::OwnedFd; 2], Can
     }
     // Retain these listeners across archival; never accept a connection.
     Ok([v4, v6])
+}
+
+// Test-only first-refusal facts distinguish bind contention from a failed socket
+// prerequisite. No port, address, descriptor or production diagnostic is exposed.
+#[cfg(test)]
+pub(super) mod observation_diagnostic {
+    use std::cell::RefCell;
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(in crate::provider::https_recovery) enum Stage {
+        Socket,
+        Cloexec,
+        Ipv6Only,
+        ReuseAddress,
+        Bind,
+        Listen,
+    }
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(in crate::provider::https_recovery) struct Facts {
+        pub stage: Stage,
+        pub wildcard: bool,
+        pub family: i32,
+        pub errno: Option<i32>,
+    }
+    thread_local! {
+        static FIRST: RefCell<Option<Facts>> = const { RefCell::new(None) };
+    }
+    pub(in crate::provider::https_recovery) fn clear() {
+        FIRST.with(|first| *first.borrow_mut() = None);
+    }
+    pub(in crate::provider::https_recovery) fn take() -> Option<Facts> {
+        FIRST.with(|first| first.borrow_mut().take())
+    }
+    pub(in crate::provider::https_recovery) fn record(
+        stage: Stage,
+        wildcard: bool,
+        family: i32,
+        errno: Option<i32>,
+    ) {
+        FIRST.with(|first| {
+            let mut first = first.borrow_mut();
+            if first.is_none() {
+                *first = Some(Facts {
+                    stage,
+                    wildcard,
+                    family,
+                    errno,
+                });
+            }
+        });
+    }
 }

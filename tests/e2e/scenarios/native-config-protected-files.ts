@@ -39,6 +39,8 @@ import {
   readNativeFileFixtureGuest,
 } from "../native-file-permission-guest.ts";
 
+import { createCompletedJobFixtureSettlement } from "./native-compose-adoption-job-worktrees.ts";
+
 const ID = /^[a-f0-9]{64}$/;
 const HASH = /^[a-f0-9]{64}$/;
 const IMAGE = /^sha256:[a-f0-9]{64}$/;
@@ -468,6 +470,7 @@ async function setup(ctx: ScenarioContext) {
       HACK_COMPOSE_STARTUP_TIMEOUT_MS: "45000",
     },
   });
+  const settlement = createCompletedJobFixtureSettlement();
   let serial = 0,
     remainingOutput = 16 * 1024 * 1024;
   const command = async (
@@ -476,6 +479,7 @@ async function setup(ctx: ScenarioContext) {
     stdin?: unknown,
     extra?: Readonly<Record<string, string>>
   ) => {
+    settlement.assertConfirmed();
     requireValue(serial < 1000 && remainingOutput > 0);
     const result = await runNativeFileFixtureCommand({
       argv,
@@ -486,6 +490,7 @@ async function setup(ctx: ScenarioContext) {
       stdin:
         stdin === undefined ? undefined : Buffer.from(JSON.stringify(stdin)),
       capturePrefix: join(captures, String(++serial).padStart(5, "0")),
+      onUnconfirmed: settlement.markUnconfirmed,
     });
     remainingOutput -=
       Buffer.byteLength(result.stdout) + Buffer.byteLength(result.stderr);
@@ -513,6 +518,7 @@ async function setup(ctx: ScenarioContext) {
     );
   };
   const fence = async () => {
+    settlement.assertConfirmed();
     remaining();
     socketBinding.assertFresh();
     const currentSocket = await lstat(socket);
@@ -828,6 +834,7 @@ async function setup(ctx: ScenarioContext) {
     first,
     second,
     stop,
+    assertChildrenSettled: settlement.assertConfirmed,
   };
 }
 type Fixture = Awaited<ReturnType<typeof setup>>;
@@ -1426,6 +1433,7 @@ async function activeSourceRefusal(h: Fixture) {
       }
     }
   } finally {
+    h.assertChildrenSettled();
     await rename(withheld, join(instance.root, "material"));
   }
   await checkSources(instance.material);
@@ -1524,6 +1532,7 @@ async function interruptedStart(h: Fixture) {
       canonical(await resources(h, sibling)) === canonical(siblingBefore)
     );
   } finally {
+    h.assertChildrenSettled();
     await rename(withheld, join(instance.root, "material"));
   }
   await checkSources(instance.material);
@@ -1846,6 +1855,7 @@ export const nativeConfigProtectedFilesScenario: Scenario = {
           await retainedFlow(h);
         },
         cleanup: async () => {
+          h.assertChildrenSettled();
           await removeRetained(h, h.first);
           await removeRetained(h, h.second);
           await h.fence();

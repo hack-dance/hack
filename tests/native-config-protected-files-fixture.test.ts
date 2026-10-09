@@ -1,4 +1,10 @@
-import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
+import {
+  afterEach,
+  beforeEach,
+  test as boundedTest,
+  expect,
+  spyOn,
+} from "bun:test";
 import {
   lstat,
   mkdir,
@@ -10,7 +16,7 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { runNativeFileFixtureCommand } from "./e2e/native-file-permission-command.ts";
+import { runNativeFileFixtureCommand as captureNativeFileFixtureCommand } from "./e2e/native-file-permission-command.ts";
 import {
   nativeProtectedFileReadAllowed,
   nativeProtectedFileStartAllowed,
@@ -21,10 +27,55 @@ import {
   nativeFileFixtureNonowner,
   readNativeFileFixtureGuest,
 } from "./e2e/native-file-permission-guest.ts";
+import { createCompletedJobFixtureSettlement } from "./e2e/scenarios/native-compose-adoption-job-worktrees.ts";
 import {
   nativeProtectedFileContainerIdentity,
   nativeProtectedFileRemovalMatches,
 } from "./e2e/scenarios/native-config-protected-files.ts";
+
+import { retainedRoutingFixtureLifetime } from "./helpers/retained-routing-adoption.ts";
+
+let lifetime: ReturnType<typeof retainedRoutingFixtureLifetime> | undefined;
+let uncertain = false;
+let expectedUnknown = false;
+let restorers: (() => void)[] = [];
+function ownedTest(name: string, run: () => unknown, timeoutMs = 5000) {
+  boundedTest(
+    name,
+    async () => {
+      lifetime = retainedRoutingFixtureLifetime(Date.now() + timeoutMs);
+      await lifetime.track(Promise.resolve().then(run));
+    },
+    timeoutMs
+  );
+}
+const test = Object.assign(ownedTest, {
+  each:
+    <T>(rows: readonly T[]) =>
+    (name: string, run: (value: T) => unknown) => {
+      for (const value of rows) {
+        ownedTest(name.replace("%s", String(value)), () => run(value));
+      }
+    },
+  skipIf: (skip: boolean) => (skip ? boundedTest.skip : ownedTest),
+});
+function runNativeFileFixtureCommand(
+  opts: Parameters<typeof captureNativeFileFixtureCommand>[0]
+) {
+  if (!lifetime) {
+    throw new Error("Fixture lifetime missing; values omitted.");
+  }
+  const owner = lifetime;
+  return owner.track(
+    captureNativeFileFixtureCommand({
+      ...opts,
+      onUnconfirmed: () => {
+        owner.retain();
+        opts.onUnconfirmed?.();
+      },
+    })
+  );
+}
 
 const grants = [
   { target: "/settings", mode: "0444" as const, bytes: [1] },
@@ -268,11 +319,30 @@ test("stopped cleanup preserves full immutable facts and argv order", () => {
 });
 let directory: string;
 beforeEach(async () => {
+  if (uncertain) {
+    throw new Error("Prior fixture lifetime is unknown; values omitted.");
+  }
+  lifetime = undefined;
+  expectedUnknown = false;
+  restorers = [];
   directory = await realpath(
     await mkdtemp(join(tmpdir(), "protected-command-"))
   );
 });
 afterEach(async () => {
+  if (!lifetime?.canRestore()) {
+    uncertain = true;
+    if (expectedUnknown) {
+      // The last intentional-unknown case asserts retention; it never releases teardown.
+      return;
+    }
+    throw new Error(
+      "Fixture callback/child is unsettled; root and globals retained, values omitted."
+    );
+  }
+  for (const restore of restorers) {
+    restore();
+  }
   await rm(directory, { recursive: true, force: true });
 });
 test("bounded command privately delivers stdin and captures a known nonzero unchanged", async () => {
@@ -335,46 +405,47 @@ test("caller mutation cannot retarget capture or change an admitted invocation",
   );
   expect(await Bun.file(wrong).exists()).toBe(false);
 });
-test("leader exit does not disarm an owned descendant holding capture pipes", async () => {
-  const pidPath = join(directory, "descendant"),
-    late = join(directory, "late"),
-    child = join(directory, "child.ts");
-  await writeFile(
-    child,
-    `await Bun.write(${JSON.stringify(pidPath)},String(process.pid));process.on('SIGTERM',()=>{});await Bun.sleep(2000);await Bun.write(${JSON.stringify(late)},'late');`
-  );
-  const controller = new AbortController(),
-    timer = setTimeout(() => controller.abort(), 300);
+test("external cancellation settles a live leader within the existing owner and cannot qualify a late success", async () => {
+  const pidPath = join(directory, "cancelled-leader"),
+    controller = new AbortController();
+  const prefix = join(directory, "cancelled");
+  const pending = runNativeFileFixtureCommand({
+    argv: [
+      process.execPath,
+      "-e",
+      `await Bun.write(${JSON.stringify(pidPath)},String(process.pid));await Bun.sleep(5000)`,
+    ],
+    cwd: directory,
+    env: {},
+    timeoutMs: 1000,
+    signal: controller.signal,
+    capturePrefix: prefix,
+  });
   try {
-    await expect(
-      runNativeFileFixtureCommand({
-        argv: [
-          process.execPath,
-          "-e",
-          `Bun.spawn([${JSON.stringify(process.execPath)},${JSON.stringify(child)}],{stdin:'ignore',stdout:'inherit',stderr:'inherit'});await Bun.sleep(150);process.exit(0)`,
-        ],
-        cwd: directory,
-        env: { PATH: process.env.PATH ?? "" },
-        timeoutMs: 1000,
-        signal: controller.signal,
-      })
-    ).rejects.toThrow();
-  } finally {
-    clearTimeout(timer);
-  }
-  const pid = Number(await readFile(pidPath, "utf8"));
-  const deadline = Date.now() + 2000;
-  while (true) {
+    const deadline = Date.now() + 500;
+    while (!(await Bun.file(pidPath).exists())) {
+      expect(Date.now()).toBeLessThan(deadline);
+      await Bun.sleep(5);
+    }
+    controller.abort();
+    await expect(pending).rejects.toThrow();
+    const pid = Number(await readFile(pidPath, "utf8"));
     try {
       process.kill(pid, 0);
+      throw new Error("captured leader remains");
     } catch (error: unknown) {
       expect((error as { code: string }).code).toBe("ESRCH");
-      break;
     }
-    expect(Date.now()).toBeLessThan(deadline);
-    await Bun.sleep(10);
+    const receipt = JSON.parse(
+      await readFile(`${prefix}.settlement.json`, "utf8")
+    );
+    expect(receipt.interrupted).toBe(true);
+    expect(receipt.capturedGroupAbsent).toBe(true);
+    expect(await Bun.file(`${prefix}.json`).exists()).toBe(false);
+  } finally {
+    controller.abort();
+    await pending.catch(() => undefined);
   }
-  expect(await Bun.file(late).exists()).toBe(false);
 });
 test("capture overflow cancels and reaps an owned sleeping leader", async () => {
   const pidPath = join(directory, "leader");
@@ -398,7 +469,7 @@ test("capture overflow cancels and reaps an owned sleeping leader", async () => 
     expect((error as { code: string }).code).toBe("ESRCH");
   }
 });
-test("publication refusal after leader and both captures settle never signals a former group", async () => {
+test("capture publication conflict refuses before spawn without any group signal", async () => {
   const prefix = join(directory, "publication");
   await writeFile(`${prefix}.stdout`, "keep-existing", {
     flag: "wx",
@@ -407,24 +478,21 @@ test("publication refusal after leader and both captures settle never signals a 
   const original = process.kill,
     groups: number[] = [];
   const signal = spyOn(process, "kill").mockImplementation((pid, kind) => {
-    if (pid < 0) {
+    if (pid < 0 && kind !== 0) {
       groups.push(pid);
     }
     return original.call(process, pid, kind);
   });
-  try {
-    await expect(
-      runNativeFileFixtureCommand({
-        argv: [process.execPath, "-e", 'console.log("complete")'],
-        cwd: directory,
-        env: { PATH: process.env.PATH ?? "" },
-        timeoutMs: 1000,
-        capturePrefix: prefix,
-      })
-    ).rejects.toThrow();
-  } finally {
-    signal.mockRestore();
-  }
+  restorers.push(() => signal.mockRestore());
+  await expect(
+    runNativeFileFixtureCommand({
+      argv: [process.execPath, "-e", 'console.log("complete")'],
+      cwd: directory,
+      env: { PATH: process.env.PATH ?? "" },
+      timeoutMs: 1000,
+      capturePrefix: prefix,
+    })
+  ).rejects.toThrow();
   expect(groups).toEqual([]);
   expect(await readFile(`${prefix}.stdout`, "utf8")).toBe("keep-existing");
   expect(await Bun.file(`${prefix}.json`).exists()).toBe(false);
@@ -511,3 +579,82 @@ test.skipIf(process.platform !== "darwin")(
     }
   }
 );
+
+// This intentional-unknown negative is last: its root and global spy remain retained until process exit.
+test("closed-pipe survivor refuses completion and permanently vetoes restoration without a former-group signal", async () => {
+  const pidPath = join(directory, "descendant"),
+    child = join(directory, "child.ts"),
+    prefix = join(directory, "survivor");
+  await writeFile(
+    child,
+    `await Bun.write(${JSON.stringify(pidPath)},String(process.pid));await Bun.sleep(1500);`
+  );
+  const settlement = createCompletedJobFixtureSettlement();
+  const original = process.kill.bind(process),
+    groups: number[] = [];
+  const signal = spyOn(process, "kill").mockImplementation((pid, kind) => {
+    if (pid < 0 && kind !== 0) {
+      groups.push(pid);
+    }
+    return original(pid, kind);
+  });
+  restorers.push(() => signal.mockRestore());
+  let descendant: number | undefined;
+  let descendantJoined = false;
+  const waitForDescendant = async () => {
+    descendant = Number(await readFile(pidPath, "utf8"));
+    expect(Number.isSafeInteger(descendant) && descendant > 0).toBe(true);
+    const deadline = Date.now() + 2500;
+    while (true) {
+      try {
+        original(descendant, 0);
+      } catch (error: unknown) {
+        expect((error as { code: string }).code).toBe("ESRCH");
+        return;
+      }
+      expect(Date.now()).toBeLessThan(deadline);
+      await Bun.sleep(10);
+    }
+  };
+  try {
+    await expect(
+      runNativeFileFixtureCommand({
+        argv: [
+          process.execPath,
+          "-e",
+          `Bun.spawn([${JSON.stringify(process.execPath)},${JSON.stringify(child)}],{stdin:'ignore',stdout:'ignore',stderr:'ignore'});while(!await Bun.file(${JSON.stringify(pidPath)}).exists())await Bun.sleep(5);process.exit(0)`,
+        ],
+        cwd: directory,
+        env: { PATH: process.env.PATH ?? "" },
+        timeoutMs: 1000,
+        capturePrefix: prefix,
+        onUnconfirmed: settlement.markUnconfirmed,
+      })
+    ).rejects.toThrow();
+    descendant = Number(await readFile(pidPath, "utf8"));
+    expect(original(descendant, 0)).toBe(true);
+    expect(await Bun.file(`${prefix}.json`).exists()).toBe(false);
+    expect(await Bun.file(`${prefix}.settlement.json`).exists()).toBe(false);
+    let restoration = 0;
+    expect(() => {
+      settlement.assertConfirmed();
+      restoration += 1;
+    }).toThrow();
+    expect(restoration).toBe(0);
+    expect(groups).toEqual([]);
+    await waitForDescendant();
+    expect(() => settlement.assertConfirmed()).toThrow();
+    expect(groups).toEqual([]);
+  } finally {
+    // Only an exact finite self-join can release this test's root/global teardown.
+    await lifetime!.track(waitForDescendant()).then(
+      () => {
+        descendantJoined = true;
+      },
+      () => lifetime!.retain()
+    );
+  }
+  expect(descendantJoined).toBe(true);
+  expect(lifetime!.canRestore()).toBe(false);
+  expectedUnknown = true;
+});

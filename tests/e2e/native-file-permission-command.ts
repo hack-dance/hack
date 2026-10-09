@@ -1,48 +1,20 @@
-import { lstat, realpath, writeFile } from "node:fs/promises";
+import {
+  lstat,
+  mkdtemp,
+  readFile,
+  realpath,
+  rm,
+  writeFile,
+} from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, resolve } from "node:path";
-import { isRecord } from "../../src/lib/guards.ts";
+import { captureCompletedJobFixtureCommand } from "./scenarios/native-compose-adoption-job-worktrees.ts";
 
 const LIMIT = 256 * 1024;
 function refuse(): never {
   throw new Error(
     "Owned file fixture command did not settle within its contract; values omitted."
   );
-}
-function capture(stream: ReadableStream<Uint8Array>, stop: () => void) {
-  const reader = stream.getReader();
-  const value = (async () => {
-    const parts: Uint8Array[] = [];
-    let size = 0;
-    try {
-      while (true) {
-        const next = await reader.read();
-        if (next.done) {
-          break;
-        }
-        size += next.value.length;
-        if (size > LIMIT) {
-          refuse();
-        }
-        parts.push(next.value);
-      }
-      return Buffer.concat(parts);
-    } catch {
-      stop();
-      refuse();
-    } finally {
-      reader.releaseLock();
-    }
-  })();
-  return {
-    value,
-    cancel: async () => {
-      try {
-        await reader.cancel();
-      } catch {
-        /* Settled readers have released their lock. */
-      }
-    },
-  };
 }
 export type NativeFileFixtureCommandResult = {
   readonly exitCode: number;
@@ -57,6 +29,7 @@ type NativeFileFixtureCommandOptions = {
   readonly signal?: AbortSignal;
   readonly stdin?: Uint8Array;
   readonly capturePrefix?: string;
+  readonly onUnconfirmed?: () => void;
 };
 function captureCommandInputs(opts: NativeFileFixtureCommandOptions) {
   // Freeze selection before the first await. In particular, the validated
@@ -70,6 +43,7 @@ function captureCommandInputs(opts: NativeFileFixtureCommandOptions) {
     signal: opts.signal,
     stdin: privateInput === undefined ? undefined : Buffer.from(privateInput),
     capturePrefix: opts.capturePrefix,
+    onUnconfirmed: opts.onUnconfirmed,
   };
   const binary = captured.argv[0];
   if (
@@ -88,27 +62,26 @@ function captureCommandInputs(opts: NativeFileFixtureCommandOptions) {
   }
   return captured;
 }
-/**
- * Uses the compiler/config-only owner pattern: leader AND both pipes must settle
- * before group authority disarms. Private stdin is bounded and never captured.
- * Failure/cancellation kills once, cancels inherited pipes and reaps the leader;
- * publication errors after settlement never signal a former process group.
- */
+/** Reuses the maintained finite exit/EOF/group-absence owner; unknown settlement retains the fixture. */
 export async function runNativeFileFixtureCommand(
   opts: NativeFileFixtureCommandOptions
 ): Promise<NativeFileFixtureCommandResult> {
   const captured = captureCommandInputs(opts);
   const deadline = Date.now() + captured.timeoutMs;
-  const captureDirectory =
+  const temporary =
     captured.capturePrefix === undefined
-      ? undefined
-      : dirname(captured.capturePrefix);
+      ? await realpath(
+          await mkdtemp(resolve(tmpdir(), "protected-file-command-"))
+        )
+      : undefined;
+  const prefix = captured.capturePrefix ?? resolve(temporary!, "capture");
+  const captureDirectory = dirname(prefix);
   let captureIdentity: Awaited<ReturnType<typeof lstat>> | undefined;
   if (captureDirectory !== undefined) {
     if (
-      !(captured.capturePrefix && isAbsolute(captured.capturePrefix)) ||
-      resolve(captured.capturePrefix) !== captured.capturePrefix ||
-      !/^[a-z0-9-]+$/.test(basename(captured.capturePrefix)) ||
+      !isAbsolute(prefix) ||
+      resolve(prefix) !== prefix ||
+      !/^[a-z0-9-]+$/.test(basename(prefix)) ||
       (await realpath(captureDirectory)) !== captureDirectory
     ) {
       refuse();
@@ -140,86 +113,60 @@ export async function runNativeFileFixtureCommand(
       refuse();
     }
   };
-  if (captured.signal?.aborted || Date.now() >= deadline) {
-    refuse();
-  }
-  const child = Bun.spawn(captured.argv, {
-    cwd: captured.cwd,
-    env: captured.env,
-    stdin: captured.stdin === undefined ? "ignore" : new Blob([captured.stdin]),
-    stdout: "pipe",
-    stderr: "pipe",
-    detached: true,
-  });
-  let complete = false,
-    stopped = false;
-  let stdout: ReturnType<typeof capture> | undefined,
-    stderr: ReturnType<typeof capture> | undefined;
-  const stop = () => {
-    if (!(complete || stopped)) {
-      stopped = true;
-      try {
-        process.kill(-child.pid, "SIGKILL");
-      } catch (error: unknown) {
-        if (!(isRecord(error) && error.code === "ESRCH")) {
-          try {
-            child.kill("SIGKILL");
-          } catch {
-            /* Failure cannot pass; leader is still awaited. */
-          }
-        }
-      }
-    }
-    void stdout?.cancel();
-    void stderr?.cancel();
+  let unconfirmed = false;
+  const onUnconfirmed = () => {
+    unconfirmed = true;
+    captured.onUnconfirmed?.();
   };
-  const timer = setTimeout(stop, Math.max(1, deadline - Date.now()));
-  captured.signal?.addEventListener("abort", stop, { once: true });
-  stdout = capture(child.stdout, stop);
-  stderr = capture(child.stderr, stop);
-  const pending = [child.exited, stdout.value, stderr.value] as const;
   try {
-    const [exitCode, output, diagnostics] = await Promise.all(pending);
-    complete = true;
-    if (captured.capturePrefix !== undefined) {
-      await checkCapture();
-      await writeFile(`${captured.capturePrefix}.stdout`, output, {
-        mode: 0o600,
-        flag: "wx",
-      });
-      await writeFile(`${captured.capturePrefix}.stderr`, diagnostics, {
-        mode: 0o600,
-        flag: "wx",
-      });
-      await writeFile(
-        `${captured.capturePrefix}.json`,
-        JSON.stringify({
-          exitCode,
-          outputBytes: output.length,
-          diagnosticBytes: diagnostics.length,
-          settled: true,
-          stopRequested: stopped,
-          aborted: captured.signal?.aborted === true,
-        }),
-        { mode: 0o600, flag: "wx" }
-      );
-    }
     await checkCapture();
-    if (stopped || captured.signal?.aborted || Date.now() >= deadline) {
+    const remaining = deadline - Date.now();
+    if (captured.signal?.aborted || remaining <= 0) {
       refuse();
     }
+    const result = await captureCompletedJobFixtureCommand({
+      argv: captured.argv,
+      cwd: captured.cwd,
+      env: captured.env,
+      stdin: captured.stdin,
+      signal: captured.signal,
+      captures: prefix,
+      timeoutMs: remaining,
+      maxStreamBytes: LIMIT,
+      onUnconfirmed,
+    });
+    await checkCapture();
+    if (captured.signal?.aborted || Date.now() >= deadline) {
+      refuse();
+    }
+    const output = await readFile(`${prefix}.stdout`);
+    const diagnostics = await readFile(`${prefix}.stderr`);
     const decoder = new TextDecoder("utf-8", { fatal: true });
-    return {
-      exitCode,
-      stdout: decoder.decode(output),
-      stderr: decoder.decode(diagnostics),
-    };
+    const stdout = decoder.decode(output),
+      stderr = decoder.decode(diagnostics);
+    await writeFile(
+      `${prefix}.json`,
+      JSON.stringify({
+        exitCode: result.exitCode,
+        outputBytes: output.byteLength,
+        diagnosticBytes: diagnostics.byteLength,
+        settled: true,
+        stopRequested: false,
+        aborted: false,
+      }),
+      { mode: 0o600, flag: "wx" }
+    );
+    await checkCapture();
+    if (captured.signal?.aborted || Date.now() >= deadline) {
+      refuse();
+    }
+    return { exitCode: result.exitCode, stdout, stderr };
   } catch {
-    stop();
-    await Promise.allSettled(pending);
     return refuse();
   } finally {
-    clearTimeout(timer);
-    captured.signal?.removeEventListener("abort", stop);
+    if (temporary !== undefined && !unconfirmed) {
+      await checkCapture();
+      await rm(temporary, { recursive: true });
+    }
   }
 }

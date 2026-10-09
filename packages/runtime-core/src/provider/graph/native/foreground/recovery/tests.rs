@@ -246,8 +246,8 @@ fn dead_complete_publication_selects_original_raw_hash_without_creating_authorit
         digest(&serde_json::to_vec(&selected.receipt).unwrap())
     );
     assert_eq!(
-        selected.host_boot_micros,
-        crate::provider::host_filesystem::host_boot_micros().unwrap()
+        serde_json::to_value(&selected).unwrap()["host_boot_uuid"],
+        serde_json::to_value(host_boot::read().unwrap()).unwrap()
     );
     assert_eq!(fs::read(&state_path).unwrap(), original);
     assert_eq!(id(&state_path).unwrap(), state_id);
@@ -328,7 +328,7 @@ fn selection_json_excludes_real_compiler_argv_environment_keys_values_and_owner_
             .map(String::as_str)
             .collect::<Vec<_>>(),
         [
-            "host_boot_micros",
+            "host_boot_uuid",
             "kind",
             "owner_sha256",
             "receipt",
@@ -377,17 +377,64 @@ fn dead_old_two_wrong_boot_and_unknown_publication_fields_refuse() {
         match case {
             "old-two" => {
                 owner["version"] = json!(2);
-                owner.as_object_mut().unwrap().remove("host_boot_micros");
+                owner.as_object_mut().unwrap().remove("host_boot_uuid");
             }
-            "wrong-boot" => {
-                owner["host_boot_micros"] = json!(owner["host_boot_micros"].as_u64().unwrap() + 1)
-            }
+            "wrong-boot" => owner["host_boot_uuid"] = json!("00000000-0000-0000-0000-000000000001"),
             "unknown" => owner["cleanup_authority"] = json!(true),
             _ => unreachable!(),
         }
         fs::write(&path, owner.to_string()).unwrap();
         fixture.assert_refused_unchanged();
     }
+}
+
+#[test]
+fn legacy_three_selection_remains_version_one_without_uuid_migration() {
+    let fixture = Fixture::new();
+    fixture.dead();
+    let path = fixture.owner_root().join("owner.json");
+    let mut legacy: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    legacy["version"] = json!(3);
+    legacy.as_object_mut().unwrap().remove("host_boot_uuid");
+    let micros = crate::provider::host_filesystem::host_boot_micros().unwrap();
+    legacy["host_boot_micros"] = json!(micros);
+    fs::write(&path, legacy.to_string()).unwrap();
+    let original = fs::read(&path).unwrap();
+    let selected = serde_json::to_value(select(&fixture.candidate, RUN).unwrap()).unwrap();
+    assert_eq!(selected["version"], 1);
+    assert_eq!(selected["host_boot_micros"], micros);
+    assert!(selected.get("host_boot_uuid").is_none());
+    assert_eq!(fs::read(&path).unwrap(), original);
+    legacy["host_boot_micros"] = json!(micros + 1);
+    fs::write(&path, legacy.to_string()).unwrap();
+    fixture.assert_refused_unchanged();
+}
+
+#[test]
+fn recovery_session_is_rechecked_before_after_and_after_retirement() {
+    let fixture = Fixture::new();
+    fixture.dead();
+    let intent = fixture.intent();
+    fixture.store(&intent);
+    let lease = owner::RecoveryLease::acquire(
+        &fixture.candidate,
+        RUN,
+        Some(intent.publication.clone()),
+        false,
+        false,
+    )
+    .unwrap();
+    lease.verify(false, false).unwrap();
+    for changed in [Some("12345678-abcd-abcd-abcd-123456789abc"), None] {
+        let _drift = host_boot::test::Guard::set(changed);
+        assert!(lease.verify(false, false).is_err());
+        assert!(lease.review().is_err());
+        assert!(lease.archive(true).is_err());
+        assert!(select(&fixture.candidate, RUN).is_err());
+        assert!(fixture.owner_root().join("owner.json").exists());
+        assert!(fixture.owner_root().join("control.sock").exists());
+    }
+    lease.verify(false, false).unwrap();
 }
 
 #[test]
@@ -430,7 +477,7 @@ fn replaced_selected_owner_or_published_socket_and_lock_refuse_without_repair() 
         let fixture = Fixture::new();
         fixture.dead();
         if name == "owner.json" {
-            // Publication3 carries no original owner-file inode. Its first
+            // Publication4 carries no original owner-file inode. Its first
             // private snapshot becomes the saved intent's later inode anchor.
             fixture.store(&fixture.intent());
         }

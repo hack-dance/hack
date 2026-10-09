@@ -291,9 +291,15 @@ fn owner_codec_refuses_legacy_kind_unknown_fields_and_wrong_process_incarnation(
         ("/candidate", json!("/foreign")),
         ("/process/start_micros", json!(0)),
         ("/process/pid", json!(2_000_000)),
-        ("/host_boot_micros", json!(0)),
-        ("/host_boot_micros", json!(1)),
-        ("/host_boot_micros", json!(u64::MAX)),
+        ("/host_boot_uuid", json!(0)),
+        (
+            "/host_boot_uuid",
+            json!("00000000-0000-0000-0000-000000000000"),
+        ),
+        (
+            "/host_boot_uuid",
+            json!("00000000-0000-0000-0000-000000000001"),
+        ),
         ("/values", json!("private-canary")),
     ] {
         let fixture = Fixture::new();
@@ -318,24 +324,46 @@ fn owner_codec_refuses_legacy_kind_unknown_fields_and_wrong_process_incarnation(
 }
 
 #[test]
-fn publication_three_binds_independent_host_boot_and_keeps_closed_live_version_two() {
+fn publication_four_binds_session_and_preserves_closed_legacy_live_codecs() {
     let fixture = Fixture::new();
     let review = fixture.receipt().review;
     let publication = owner::Publication::bind(&fixture.candidate, &review).unwrap();
     let file = fixture.owner_root().join("owner.json");
     let bytes = fs::read(&file).unwrap();
     let qualified: Value = serde_json::from_slice(&bytes).unwrap();
-    assert_eq!(qualified["version"], 3);
+    assert_eq!(qualified["version"], 4);
+    assert_eq!(
+        qualified["host_boot_uuid"],
+        serde_json::to_value(host_boot::read().unwrap()).unwrap()
+    );
+    assert!(qualified.get("host_boot_micros").is_none());
     let boot = crate::provider::host_filesystem::host_boot_micros().unwrap();
-    assert_eq!(qualified["host_boot_micros"], boot);
-    assert!(qualified["process"]["start_micros"].as_u64().unwrap() >= boot);
+
     owner::Pin::load(&fixture.candidate, RUN).unwrap();
     publication.verify().unwrap();
     assert!(DirectGuard::acquire(&fixture.candidate, RUN).is_err());
 
+    let mut legacy_three = qualified.clone();
+    legacy_three["version"] = json!(3);
+    legacy_three
+        .as_object_mut()
+        .unwrap()
+        .remove("host_boot_uuid");
+    legacy_three["host_boot_micros"] = json!(boot);
+    fs::write(&file, serde_json::to_vec(&legacy_three).unwrap()).unwrap();
+    owner::Pin::load(&fixture.candidate, RUN)
+        .unwrap()
+        .connect()
+        .unwrap();
+    assert!(publication.verify().is_err());
+    // V3 remains strictly calendar-qualified rather than acquiring inferred UUID authority.
+    legacy_three["host_boot_micros"] = json!(boot + 1);
+    fs::write(&file, serde_json::to_vec(&legacy_three).unwrap()).unwrap();
+    assert!(owner::Pin::load(&fixture.candidate, RUN).is_err());
+
     let mut old = qualified.clone();
     old["version"] = json!(2);
-    old.as_object_mut().unwrap().remove("host_boot_micros");
+    old.as_object_mut().unwrap().remove("host_boot_uuid");
     fs::write(&file, serde_json::to_vec(&old).unwrap()).unwrap();
     // Exact legacy live authentication remains available without inventing host boot.
     let legacy = owner::Pin::load(&fixture.candidate, RUN).unwrap();
@@ -355,6 +383,84 @@ fn publication_three_binds_independent_host_boot_and_keeps_closed_live_version_t
     assert!(owner::Pin::load(&fixture.candidate, RUN).is_err());
     assert!(file.exists());
     assert!(!fixture.candidate.state_root.join("run/smolvm").exists());
+}
+
+#[test]
+fn session_change_or_unavailable_reader_refuses_live_and_retired_fences() {
+    let fixture = Fixture::new();
+    let review = fixture.receipt().review;
+    let first = "12345678-abcd-abcd-abcd-123456789abc";
+    let _boot = host_boot::test::Guard::set(Some(first));
+    let mut publication = owner::Publication::bind(&fixture.candidate, &review).unwrap();
+    let pin = owner::Pin::load(&fixture.candidate, RUN).unwrap();
+    pin.connect().unwrap();
+    for changed in [Some("12345678-abcd-abcd-abcd-123456789abd"), None] {
+        let _drift = host_boot::test::Guard::set(changed);
+        assert!(pin.verify().is_err());
+        assert!(pin.connect().is_err());
+        assert!(publication.verify().is_err());
+        assert!(publication.finish().is_err());
+        assert!(fixture.owner_root().join("owner.json").exists());
+    }
+    publication.finish().unwrap();
+    pin.verify_retired().unwrap();
+    let _drift = host_boot::test::Guard::set(None);
+    assert!(pin.verify_retired().is_err());
+}
+
+#[test]
+fn session_codec_refuses_missing_mixed_downgraded_and_unknown_qualifiers() {
+    let fixture = Fixture::new();
+    let publication =
+        owner::Publication::bind(&fixture.candidate, &fixture.receipt().review).unwrap();
+    let file = fixture.owner_root().join("owner.json");
+    let original: Value = serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
+    for case in [
+        "missing",
+        "null",
+        "uppercase",
+        "micros",
+        "v3",
+        "v2",
+        "future",
+    ] {
+        let mut bad = original.clone();
+        match case {
+            "missing" => {
+                bad.as_object_mut().unwrap().remove("host_boot_uuid");
+            }
+            "null" => bad["host_boot_uuid"] = Value::Null,
+            "uppercase" => bad["host_boot_uuid"] = json!("12345678-ABCD-ABCD-ABCD-123456789ABC"),
+            "micros" => bad["host_boot_micros"] = json!(1),
+            "v3" => bad["version"] = json!(3),
+            "v2" => bad["version"] = json!(2),
+            "future" => bad["version"] = json!(5),
+            _ => unreachable!(),
+        }
+        fs::write(&file, serde_json::to_vec(&bad).unwrap()).unwrap();
+        assert!(owner::Pin::load(&fixture.candidate, RUN).is_err(), "{case}");
+        assert!(publication.verify().is_err(), "{case}");
+    }
+}
+
+#[test]
+fn uuid_drift_during_publication_and_peer_connect_refuses_final_fence() {
+    let first = "12345678-abcd-abcd-abcd-123456789abc";
+    let changed = "12345678-abcd-abcd-abcd-123456789abd";
+    let fixture = Fixture::new();
+    {
+        let _drift = host_boot::test::Guard::sequence(&[Some(first), Some(changed)]);
+        assert!(owner::Publication::bind(&fixture.candidate, &fixture.receipt().review).is_err());
+        assert!(fixture.owner_root().join("owner.json").exists());
+    }
+    // Separate owned fixture keeps failed publication evidence intact.
+    let other = Fixture::new();
+    let _boot = host_boot::test::Guard::set(Some(first));
+    let _publication = owner::Publication::bind(&other.candidate, &other.receipt().review).unwrap();
+    let pin = owner::Pin::load(&other.candidate, RUN).unwrap();
+    let _drift = host_boot::test::Guard::sequence(&[Some(first), Some(changed)]);
+    assert!(pin.connect().is_err());
+    assert!(other.owner_root().join("owner.json").exists());
 }
 
 #[test]

@@ -119,7 +119,7 @@ beforeEach(async () => {
   await writeFile(
     join(root, "docker"),
     `#!${process.execPath}
-import {appendFileSync, readFileSync, writeFileSync} from "node:fs";
+import {appendFileSync, existsSync, readFileSync, writeFileSync} from "node:fs";
 const root = ${JSON.stringify(root)};
 const args = process.argv.slice(2);
 appendFileSync(root + "/commands", JSON.stringify(args) + "\\n");
@@ -131,6 +131,16 @@ if (fixture.mode === "malformed") {console.log(${JSON.stringify(CANARY)});proces
 if (fixture.mode === "hang") {writeFileSync(root + "/started", String(process.pid));await Bun.sleep(60_000);}
 if (fixture.mode === "overflow") {await Bun.write(Bun.stdout, "x".repeat(9 * 1024 * 1024));process.exit(0);}
 if (fixture.mode === "stderr-overflow") {await Bun.write(Bun.stderr, "x".repeat(17 * 1024));process.exit(0);}
+let networkOrdinal = 0;
+if (kind === "network" && action === "inspect" && existsSync(root+'/snapshot-network-ordinal')) {
+ networkOrdinal = Number(readFileSync(root+'/snapshot-network-ordinal','utf8')) + 1;
+ writeFileSync(root+'/snapshot-network-ordinal',String(networkOrdinal));
+}
+if (fixture.mode === "snapshot-wrong-bridge" && networkOrdinal === 4) {
+ fixture.container[0].running = false;
+ for (const bridge of fixture.network) bridge.containers = bridge.containers.filter(id => id !== 'a'.repeat(64));
+ fixture.network.find(row => row.logical === 'edge').containers.push('c'.repeat(64));
+}
 if (kind === "info") {console.log(JSON.stringify({id: fixture.engine, os: "linux"}));}
 else if (action === "ls") {for (const row of fixture[kind]) console.log(JSON.stringify({id: row.id, name: kind === 'container' ? row.name.slice(1) : row.name, project: row.project ?? ""}));}
 else {
@@ -141,14 +151,32 @@ else {
 if (fixture.mode === "replace-volume" && kind === "volume" && action === "inspect") {fixture.volume[0].createdAt = '2026-02-02T01:02:03Z';delete fixture.mode;writeFileSync(root + '/fixture.json',JSON.stringify(fixture));}
 if (fixture.mode === "source-change" && kind === "info") {appendFileSync(${JSON.stringify(join(projectRoot, ".hack/docker-compose.yml"))}, '\\n');}
 if (fixture.mode === "inventory-change" && kind === "container" && action === "ls") {fixture.container.push({...fixture.container[0],id:'c'.repeat(64),name:'/fixture-db-2'});delete fixture.mode;writeFileSync(root+'/fixture.json',JSON.stringify(fixture));}
-if (fixture.mode === "snapshot-job-exit" && kind === "network" && action === "inspect") {
+if (fixture.mode === "snapshot-job-exit" && networkOrdinal === 2) {
  const before = structuredClone(fixture);
  const job = fixture.container.find(row => row.id === 'e'.repeat(64) && row.service === 'seed');
  if (!job || job.running !== true) process.exit(98);
  job.running = false;
  fixture.network[0].containers = fixture.network[0].containers.filter(id => id !== job.id);
  delete fixture.mode;
- writeFileSync(root+'/snapshot-transition.json', JSON.stringify({before, after:fixture}));
+ writeFileSync(root+'/snapshot-transition.json', JSON.stringify({before, after:fixture, ordinal:networkOrdinal}));
+ writeFileSync(root+'/fixture.json', JSON.stringify(fixture));
+}
+if (fixture.mode?.startsWith("snapshot-guard-") && kind === "network" && action === "inspect") {
+ const current = fixture.container[0];
+ current.running = !current.running;
+ fixture.network[0].containers = current.running ? [current.id] : [];
+ if (fixture.mode === "snapshot-guard-foreign") fixture.network[0].containers.push('f'.repeat(64));
+ if (fixture.mode === "snapshot-guard-container") current.id = 'f'.repeat(64);
+ if (fixture.mode === "snapshot-guard-network") fixture.network[0].createdAt = '2026-02-02T01:02:03Z';
+ if (fixture.mode === "snapshot-guard-volume") {
+  fixture.volume[0].createdAt = '2026-02-02T01:02:03Z';
+  delete fixture.mode;
+ }
+ writeFileSync(root+'/fixture.json', JSON.stringify(fixture));
+}
+if (fixture.mode === "snapshot-wrong-bridge" && networkOrdinal === 4) {
+ fixture.network.find(row => row.logical === 'edge').containers = [];
+ delete fixture.mode;
  writeFileSync(root+'/fixture.json', JSON.stringify(fixture));
 }
 `
@@ -295,7 +323,7 @@ test("stopped originals retain configured network identity without active endpoi
   expect(JSON.stringify(original)).not.toContain("running");
 });
 
-test("moving job snapshot counterexample retains identity but refuses an admitted exit", async () => {
+test("moving job snapshot counterexample retains identity and admits a fresh completed exit", async () => {
   snapshotCaseActive = true;
   try {
     const job = "e".repeat(64);
@@ -363,6 +391,8 @@ test("moving job snapshot counterexample retains identity but refuses an admitte
     const original = await acquired.resolveBinding({ projectRoot });
     const effects: string[] = [];
     let jobStarted = false;
+    let jobArmCommandCursor = 0;
+    let bracketTrace: string[][] = [];
     const priorStartedAt = "2026-10-08T00:00:01Z";
     async function observed(): Promise<LegacyComposeJobState[]> {
       const current: Fixture = JSON.parse(
@@ -388,42 +418,69 @@ test("moving job snapshot counterexample retains identity but refuses an admitte
     }
     // The maintained job fixture uses the same 20s operation / 30s case bounds.
     const deadline = Date.now() + 20_000;
-    await refusal(
-      executeLegacyComposeRetainedPlan({
-        plan,
-        binding: original,
-        operation: "start",
-        deadline,
-        assertFresh: async () => {
-          await acquired.assertFresh({ projectRoot });
-        },
-        observe: observed,
-        effect: async (action, id) => {
-          effects.push(`${action}:${id}`);
-          if (action !== "start" || (id !== ID && id !== job)) {
-            throw new Error("Unexpected synthetic lifecycle call");
+    await executeLegacyComposeRetainedPlan({
+      plan,
+      binding: original,
+      operation: "start",
+      deadline,
+      assertFresh: async () => {
+        await acquired.assertFresh({ projectRoot });
+      },
+      observe: observed,
+      effect: async (action, id) => {
+        effects.push(`${action}:${id}`);
+        if (action !== "start" || ![ID, job, web].includes(id)) {
+          throw new Error("Unexpected synthetic lifecycle call");
+        }
+        if (id === job) {
+          jobStarted = true;
+          const selected = fixture.container.find((row) => row.id === job);
+          if (!selected) {
+            throw new Error("Missing seed fixture");
           }
-          if (id === job) {
-            jobStarted = true;
-            const selected = fixture.container.find((row) => row.id === job);
-            if (!selected) {
-              throw new Error("Missing seed fixture");
-            }
-            selected.running = true;
-            network().containers = [ID, job];
-            fixture.mode = "snapshot-job-exit";
-            await save();
+          selected.running = true;
+          network().containers = [ID, job];
+          fixture.mode = "snapshot-job-exit";
+          await writeFile(join(root, "snapshot-network-ordinal"), "0");
+          jobArmCommandCursor = (await commands()).length;
+          await save();
+        }
+        if (id === web) {
+          bracketTrace = (await commands()).slice(jobArmCommandCursor);
+          // Read the stand-in's persisted terminal seed state before changing
+          // only the newly admitted dependent's own running endpoint.
+          fixture = JSON.parse(
+            await readFile(join(root, "fixture.json"), "utf8")
+          );
+          const selected = fixture.container.find((row) => row.id === web);
+          if (!selected) {
+            throw new Error("Missing web fixture");
           }
-          return 0;
-        },
-      }),
-      "E_LEGACY_COMPOSE_BINDING_IDENTITY"
-    );
+          selected.running = true;
+          network().containers = [ID, web];
+          await save();
+        }
+        return 0;
+      },
+    });
     expect(Date.now()).toBeLessThan(deadline);
-    expect(effects).toEqual([`start:${ID}`, `start:${job}`]);
-    const transition: { before: Fixture; after: Fixture } = JSON.parse(
-      await readFile(join(root, "snapshot-transition.json"), "utf8")
+    expect(effects).toEqual([`start:${ID}`, `start:${job}`, `start:${web}`]);
+    const networkOffsets = bracketTrace.flatMap((args, index) =>
+      args[0] === "network" && args[1] === "inspect" ? [index] : []
     );
+    expect(networkOffsets.length).toBeGreaterThanOrEqual(3);
+    for (const offset of [0, 1]) {
+      expect(
+        bracketTrace
+          .slice(networkOffsets[offset]! + 1, networkOffsets[offset + 1]!)
+          .map((args) => args.slice(0, 2))
+      ).toEqual(Array.from({ length: 3 }, () => ["container", "inspect"]));
+    }
+    const transition: { before: Fixture; after: Fixture; ordinal: number } =
+      JSON.parse(
+        await readFile(join(root, "snapshot-transition.json"), "utf8")
+      );
+    expect(transition.ordinal).toBe(2);
     const expectedAfter = structuredClone(transition.before);
     const selected = expectedAfter.container.find((row) => row.id === job);
     if (!selected) {
@@ -468,6 +525,67 @@ test("moving job snapshot counterexample retains identity but refuses an admitte
     snapshotCaseActive = false;
   }
 }, 30_000);
+
+test.each([
+  "foreign",
+  "container",
+  "network",
+  "volume",
+])("moving snapshot guard refuses %s drift without mutation", async (kind) => {
+  fixture.mode = `snapshot-guard-${kind}`;
+  await save();
+  await refusal(
+    acquireLegacyComposeAdoptionBinding({ projectRoot }),
+    kind === "container"
+      ? "E_LEGACY_COMPOSE_BINDING_PROBE"
+      : "E_LEGACY_COMPOSE_BINDING_IDENTITY"
+  );
+  expect(await Bun.file(join(root, "mutation")).exists()).toBe(false);
+}, 20_000);
+
+test("moving snapshot guard exhausts the original shared deadline", async () => {
+  fixture.mode = "snapshot-guard-unstable";
+  await save();
+  const started = Date.now();
+  await refusal(
+    acquireLegacyComposeAdoptionBinding({ projectRoot, timeoutMs: 3000 }),
+    "E_LEGACY_COMPOSE_BINDING_PROBE"
+  );
+  expect(Date.now() - started).toBeLessThan(5000);
+  const commands = (await readFile(join(root, "commands"), "utf8"))
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line) as string[]);
+  expect(
+    commands.filter(
+      ([kind, action]) => kind === "network" && action === "inspect"
+    ).length
+  ).toBeGreaterThan(2);
+  expect(await Bun.file(join(root, "mutation")).exists()).toBe(false);
+}, 10_000);
+
+test("moving snapshot guard rejects a selected ID on its undeclared bridge before retry", async () => {
+  await twoBridges();
+  fixture.mode = "snapshot-wrong-bridge";
+  await writeFile(join(root, "snapshot-network-ordinal"), "0");
+  await save();
+  await refusal(
+    acquireLegacyComposeAdoptionBinding({ projectRoot }),
+    "E_LEGACY_COMPOSE_BINDING_IDENTITY"
+  );
+  const observed = await commands();
+  expect(
+    observed.filter(
+      ([kind, action]) => kind === "network" && action === "inspect"
+    )
+  ).toHaveLength(4);
+  expect(
+    observed.filter(
+      ([kind, action]) => kind === "container" && action === "inspect"
+    )
+  ).toHaveLength(2);
+  expect(await Bun.file(join(root, "mutation")).exists()).toBe(false);
+}, 20_000);
 
 test("one authored bridge binds original physical ID, internal policy and exact live aliases", async () => {
   await customBridge();

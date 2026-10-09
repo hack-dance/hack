@@ -531,7 +531,7 @@ test("shared receipt decoder preserves closed file8 and plural bridge11 versions
     publication: null,
     pendingOperation: null,
   };
-  for (const version of [1, 3, 4, 5, 6, 8, 10, 11] as const) {
+  for (const version of [1, 3, 4, 5, 6, 8, 9, 10, 11] as const) {
     expect(
       parseLegacyComposeAdoptionReceipt(
         { ...value, adoption_receipt_version: version },
@@ -551,7 +551,7 @@ test("shared receipt decoder preserves closed file8 and plural bridge11 versions
       ).adoption_receipt_version
     ).toBe(version);
   }
-  for (const version of [2, 7, 9, 12, null, "8", "11"]) {
+  for (const version of [2, 7, 12, null, "8", "9", "11"]) {
     expect(() =>
       parseLegacyComposeAdoptionReceipt(
         { ...value, adoption_receipt_version: version },

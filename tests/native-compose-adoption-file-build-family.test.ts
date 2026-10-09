@@ -37,11 +37,23 @@ const declarations = { configs: { settings: { file: "../settings" } } };
 test("retained file intent remains distinct from the basic-build owner", () => {
   const input = source(file, declarations);
   const mapped = mapLegacyNativeRetainedFileStorage(input);
-  expect(mapped.candidate).toMatchObject({
+  expect(mapped.candidate).toEqual({
+    schema_version: 1,
+    name: "fixture",
+    configs: { settings: { file: "settings" } },
+    storage: { data: { kind: "persistent", scope: "worktree" } },
     services: {
       app: {
         image: "synthetic/app:1",
-        mounts: [{ volume: "data" }, { config: "settings" }],
+        mounts: [
+          { storage: "data", target: "/data", access: "read-write" },
+          {
+            config: "settings",
+            target: "/settings",
+            access: "read-only",
+            mode: "0444",
+          },
+        ],
       },
     },
   });
@@ -55,9 +67,15 @@ test("retained file intent remains distinct from the basic-build owner", () => {
 
 test("retained build intent remains distinct from the file owner", () => {
   const input = source({ build: ".." });
-  expect(mapLegacyNativeRetainedBasicBuild(input).candidate).toMatchObject({
+  expect(mapLegacyNativeRetainedBasicBuild(input).candidate).toEqual({
+    schema_version: 1,
+    name: "fixture",
+    storage: { data: { kind: "persistent", scope: "worktree" } },
     services: {
-      app: { build: { context: "." }, mounts: [{ volume: "data" }] },
+      app: {
+        build: { context: "." },
+        mounts: [{ storage: "data", target: "/data", access: "read-write" }],
+      },
     },
   });
   expect(

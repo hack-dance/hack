@@ -8,6 +8,7 @@ import {
 
 const ERROR_CODE = /^[a-z][a-z0-9_]{0,63}$/;
 const NATIVE_RUN = /^[a-f0-9]{32}$/;
+const NATIVE_HASH = /^[a-f0-9]{64}$/;
 interface NativeFailure {
   readonly code: string;
   readonly causeCode?: string;
@@ -77,6 +78,8 @@ export async function invokeNativeRuntime(opts: {
   readonly boundNativeStatusDrain?: boolean;
   /** Native source planning and journal inspection also bind pipe lifetime to their owned read child. */
   readonly boundNativeAuthoredReadDrain?: boolean;
+  /** Explicit recovery requests have their own closed argv domain and never accept private input. */
+  readonly boundNativeAuthoredRecoveryDrain?: "selection" | "cleanup";
 }): Promise<unknown> {
   if (opts.signal?.aborted) {
     throw new NativeRuntimeRequestError({
@@ -92,6 +95,11 @@ export async function invokeNativeRuntime(opts: {
       validNativeAuthoredReadDrainSelection(
         opts.args,
         opts.boundNativeAuthoredReadDrain,
+        opts.privateInput !== undefined
+      ) &&
+      validNativeAuthoredRecoveryDrainSelection(
+        opts.args,
+        opts.boundNativeAuthoredRecoveryDrain,
         opts.privateInput !== undefined
       ) &&
       Number.isSafeInteger(timeoutMs)
@@ -120,7 +128,9 @@ export async function invokeNativeRuntime(opts: {
     }
   );
   const drain =
-    opts.boundNativeStatusDrain || opts.boundNativeAuthoredReadDrain
+    opts.boundNativeStatusDrain ||
+    opts.boundNativeAuthoredReadDrain ||
+    opts.boundNativeAuthoredRecoveryDrain
       ? new AbortController()
       : undefined;
   let drainTimer: ReturnType<typeof setTimeout> | undefined;
@@ -220,6 +230,33 @@ function validNativeAuthoredReadDrainSelection(
         (args[2] === "inspect" &&
           args[3] === "--run-id" &&
           NATIVE_RUN.test(args[4] ?? ""))))
+  );
+}
+
+function validNativeAuthoredRecoveryDrainSelection(
+  args: readonly string[],
+  selected: "selection" | "cleanup" | undefined,
+  privateInput: boolean
+): boolean {
+  return (
+    selected === undefined ||
+    (!privateInput &&
+      args[0] === "graph" &&
+      args[1] === "native" &&
+      args[3] === "--run-id" &&
+      NATIVE_RUN.test(args[4] ?? "") &&
+      ((selected === "selection" &&
+        args.length === 6 &&
+        args[2] === "recovery-selection" &&
+        args[5] === "--json") ||
+        (selected === "cleanup" &&
+          args.length === 10 &&
+          args[2] === "recover-live-owner" &&
+          args[5] === "--expect-receipt" &&
+          NATIVE_HASH.test(args[6] ?? "") &&
+          args[7] === "--expect-owner" &&
+          NATIVE_HASH.test(args[8] ?? "") &&
+          args[9] === "--json")))
   );
 }
 

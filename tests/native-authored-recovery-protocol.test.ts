@@ -137,6 +137,8 @@ test("session selection is closed version two and preserves original qualifier w
       "12345678-ABCD-ABCD-ABCD-123456789ABC",
       "00000000-0000-0000-0000-000000000000",
       "12345678-abcd-abcd-abcd-123456789abg",
+      "12345678-abcd-abcd-abcd-123456789abc\n",
+      "12345678-abcd-abcd-abcd-123456789abc ",
     ].map((host_boot_uuid) => ({ ...sessionSelection(), host_boot_uuid })),
   ]) {
     try {

@@ -113,6 +113,7 @@ export function parseNativeAuthoredRecoverySelection(opts: {
   }
   if (
     typeof value.host_boot_uuid !== "string" ||
+    value.host_boot_uuid.length !== 36 ||
     !UUID.test(value.host_boot_uuid) ||
     value.host_boot_uuid === "00000000-0000-0000-0000-000000000000"
   ) {

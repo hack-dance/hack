@@ -290,6 +290,7 @@ fn owner_codec_refuses_legacy_kind_unknown_fields_and_wrong_process_incarnation(
         ("/kind", json!("compose")),
         ("/candidate", json!("/foreign")),
         ("/process/start_micros", json!(0)),
+        ("/process/start_micros", json!(1)),
         ("/process/pid", json!(2_000_000)),
         ("/host_boot_uuid", json!(0)),
         (

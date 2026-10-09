@@ -1,7 +1,10 @@
 use super::*;
 use std::{
     cell::Cell,
-    os::unix::{fs::PermissionsExt, net::UnixListener},
+    os::{
+        fd::{AsRawFd, FromRawFd, OwnedFd},
+        unix::{ffi::OsStrExt, fs::PermissionsExt, net::UnixListener},
+    },
     sync::atomic::{AtomicU64, Ordering},
 };
 
@@ -40,7 +43,43 @@ impl Fixture {
         listener
     }
     fn stale(&self, slot: u8) {
-        drop(self.bind(slot));
+        drop(self.unlistened(slot));
+    }
+    fn unlistened(&self, slot: u8) -> OwnedFd {
+        // A stale fixture needs a bound stream inode, never a transient listener.
+        // It stays unlistened even if a concurrent child inherits a descriptor.
+        let fd = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0) };
+        assert!(fd >= 0);
+        let socket = unsafe { OwnedFd::from_raw_fd(fd) };
+        assert_eq!(
+            unsafe { libc::fcntl(socket.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) },
+            0
+        );
+        let target = path(&self.0, slot);
+        let bytes = target.as_os_str().as_bytes();
+        let mut address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+        address.sun_family = libc::AF_UNIX as libc::sa_family_t;
+        assert!(!bytes.contains(&0) && bytes.len() < address.sun_path.len());
+        for (destination, byte) in address.sun_path.iter_mut().zip(bytes) {
+            *destination = *byte as libc::c_char;
+        }
+        let length = std::mem::offset_of!(libc::sockaddr_un, sun_path) + bytes.len() + 1;
+        #[cfg(target_vendor = "apple")]
+        {
+            address.sun_len = length.try_into().unwrap();
+        }
+        assert_eq!(
+            unsafe {
+                libc::bind(
+                    socket.as_raw_fd(),
+                    (&raw const address).cast(),
+                    length.try_into().unwrap(),
+                )
+            },
+            0
+        );
+        fs::set_permissions(target, fs::Permissions::from_mode(0o600)).unwrap();
+        socket
     }
     fn selection(&self) -> Selection {
         super::super::recovery::observation_diagnostic::clear();
@@ -60,6 +99,20 @@ impl Fixture {
     fn recover(&self, hash: &str) -> Result<Value, CandidateError> {
         recover_scope(&self.journal(), &self.scope(), &self.0, hash, || Ok(()))
     }
+}
+
+#[test]
+fn stale_stream_inode_never_listens_even_while_an_owned_duplicate_survives() {
+    let fixture = Fixture::new();
+    let original = fixture.unlistened(0);
+    let duplicate = original.try_clone().unwrap();
+    drop(original);
+    let selected = observed(&fixture.0, 0).unwrap().unwrap();
+    let error = std::os::unix::net::UnixStream::connect(path(&fixture.0, 0)).unwrap_err();
+    assert_eq!(error.raw_os_error(), Some(libc::ECONNREFUSED));
+    assert!(path(&fixture.0, 0).exists());
+    drop(duplicate);
+    assert_eq!(observed(&fixture.0, 0).unwrap(), Some(selected));
 }
 
 #[test]

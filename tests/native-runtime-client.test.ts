@@ -176,10 +176,97 @@ test("native authored read draining admits only exact public plan and inspect re
   ).rejects.toThrow("budget");
 });
 
+test("native recovery draining requires exact independent selectors and refuses private stdin before spawn", async () => {
+  const runtime = await fixture();
+  const run = "a".repeat(32);
+  const selection = [
+    "graph",
+    "native",
+    "recovery-selection",
+    "--run-id",
+    run,
+    "--json",
+  ];
+  const cleanup = [
+    "graph",
+    "native",
+    "recover-live-owner",
+    "--run-id",
+    run,
+    "--expect-receipt",
+    "b".repeat(64),
+    "--expect-owner",
+    "c".repeat(64),
+    "--json",
+  ];
+  for (const [mode, args] of [
+    ["selection", selection],
+    ["cleanup", cleanup],
+  ] as const) {
+    expect(
+      await invokeNativeRuntime({
+        runtime,
+        cwd: runtime.home,
+        args,
+        boundNativeAuthoredRecoveryDrain: mode,
+      })
+    ).toMatchObject({
+      args: ["--candidate-root", runtime.home, ...args],
+      inputBytes: 0,
+    });
+  }
+  const absent = {
+    home: "/absent-native-recovery-home",
+    binary: "/absent-native-recovery-binary",
+  };
+  for (const [mode, args] of [
+    ["cleanup", selection],
+    ["selection", cleanup],
+    ["selection", [...selection, "--json"]],
+    ["selection", ["graph", "recovery-selection", "--run-id", run, "--json"]],
+    [
+      "cleanup",
+      cleanup.map((arg) => (arg === "--expect-owner" ? "--source-file" : arg)),
+    ],
+    [
+      "cleanup",
+      cleanup.map((arg) => (arg === "c".repeat(64) ? "../foreign" : arg)),
+    ],
+    ["cleanup", cleanup.map((arg) => (arg === run ? run.toUpperCase() : arg))],
+  ] as const) {
+    await expect(
+      invokeNativeRuntime({
+        runtime: absent,
+        cwd: absent.home,
+        args,
+        boundNativeAuthoredRecoveryDrain: mode,
+      })
+    ).rejects.toThrow("budget");
+  }
+  for (const [mode, args] of [
+    ["selection", selection],
+    ["cleanup", cleanup],
+  ] as const) {
+    await expect(
+      invokeNativeRuntime({
+        runtime: absent,
+        cwd: absent.home,
+        args,
+        privateInput: new Uint8Array(),
+        boundNativeAuthoredRecoveryDrain: mode,
+      })
+    ).rejects.toThrow("budget");
+  }
+});
+
 test.each([
-  "exit",
-  "abort",
-] as const)("authored read %s finishes while a descendant retains stdout and stderr", async (mode) => {
+  ["read", "exit"],
+  ["read", "abort"],
+  ["selection", "exit"],
+  ["selection", "abort"],
+  ["cleanup", "exit"],
+  ["cleanup", "abort"],
+] as const)("authored %s %s finishes while a descendant retains stdout and stderr", async (selection, mode) => {
   const runtime = await fixture();
   const holding = join(runtime.home, "holding");
   const heartbeat = join(runtime.home, "heartbeat");
@@ -202,13 +289,33 @@ ${mode === "abort" ? "await Bun.sleep(60_000);" : "process.exit(0);"}
   );
   const controller = new AbortController();
   const started = performance.now();
+  const run = "a".repeat(32);
+  const args =
+    selection === "read"
+      ? ["graph", "native", "inspect", "--run-id", run, "--json"]
+      : selection === "selection"
+        ? ["graph", "native", "recovery-selection", "--run-id", run, "--json"]
+        : [
+            "graph",
+            "native",
+            "recover-live-owner",
+            "--run-id",
+            run,
+            "--expect-receipt",
+            "b".repeat(64),
+            "--expect-owner",
+            "c".repeat(64),
+            "--json",
+          ];
   const request = invokeNativeRuntime({
     runtime,
     cwd: runtime.home,
-    args: ["graph", "native", "inspect", "--run-id", "a".repeat(32), "--json"],
+    args,
     timeoutMs: 5000,
     signal: controller.signal,
-    boundNativeAuthoredReadDrain: true,
+    boundNativeAuthoredReadDrain: selection === "read",
+    boundNativeAuthoredRecoveryDrain:
+      selection === "read" ? undefined : selection,
   });
   void request.catch(() => undefined);
   let failed: unknown;

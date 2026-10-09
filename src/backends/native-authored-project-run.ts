@@ -39,6 +39,11 @@ import {
 } from "./native-authored-hook-journal.ts";
 import { requestNativeHookStop } from "./native-authored-hook-stop.ts";
 import { retireNativeAuthoredHostProcesses } from "./native-authored-host-processes.ts";
+import {
+  type NativeAuthoredLiveStop,
+  publishNativeAuthoredLiveStop,
+  requestNativeAuthoredLiveStop,
+} from "./native-authored-live-stop.ts";
 
 const LIMIT = 64 * 1024;
 const SOURCE_LIMIT = 1024 * 1024;
@@ -104,6 +109,14 @@ export type NativeAuthoredProjectAdmission = {
   readonly assertHeld: () => Promise<void>;
   readonly loadStart: () => Promise<NativeAuthoredProjectStartSelection | null>;
   readonly hooksRetained: () => Promise<boolean>;
+  readonly liveStopRetained: () => Promise<boolean>;
+  readonly publishLiveStop: (opts: {
+    readonly expectedStart: NativeAuthoredProjectStartSelection;
+    readonly expectedRun: NativeAuthoredProjectRunSelection;
+    readonly source: NativeAuthoredProjectSource;
+    readonly assertFresh: () => Promise<void>;
+    readonly stop: () => Promise<boolean>;
+  }) => Promise<NativeAuthoredLiveStop>;
   readonly createHooks: (opts: {
     readonly run: string;
     readonly selectionHash: string;
@@ -425,6 +438,33 @@ type Store = {
   ) => Promise<T>;
 };
 
+function liveStopPath(store: Store): string {
+  return join(
+    store.root.path,
+    `${digest(JSON.stringify(store.identity.branch))}.live-stop.json`
+  );
+}
+function liveStopStore(store: Store, run: string) {
+  const key = digest(JSON.stringify(store.identity.branch));
+  return {
+    scope: JSON.stringify(store.identity),
+    path: liveStopPath(store),
+    ready: store.file,
+    start: store.startFile,
+    source: join(store.root.path, `${run}.source.json`),
+    hookOwner: join(store.root.path, `${key}.hooks.json`),
+    hookStop: join(store.root.path, `${run}.hook-stop.json`),
+    blockers: [
+      store.admissionRecovery,
+      store.mutationPath,
+      store.mutationRecovery,
+      `${store.mutationPath}.recovery`,
+    ],
+    held: store.held,
+    check: store.check,
+  };
+}
+
 /** Internal frontend storage owner. The awaited callback retains the canonical
  * directory handles; no Rust journal/publication path is reconstructed here. */
 export async function withNativeAuthoredProjectRecoveryStorage<T>(
@@ -439,6 +479,8 @@ export async function withNativeAuthoredProjectRecoveryStorage<T>(
     readonly admission: string;
     readonly recovery: string;
     readonly mutation: string;
+    readonly mutationRecovery: string;
+    readonly liveStop: string;
     readonly check: () => Promise<void>;
     readonly readReady: () => Promise<NativeAuthoredProjectRunSelection>;
     readonly readStart: () => Promise<NativeAuthoredProjectStartSelection>;
@@ -471,6 +513,8 @@ export async function withNativeAuthoredProjectRecoveryStorage<T>(
       admission: store.admissionPath,
       recovery: store.admissionRecovery,
       mutation: store.mutationPath,
+      mutationRecovery: store.mutationRecovery,
+      liveStop: liveStopPath(store),
       check: store.check,
       readReady: () => read(store),
       readStart: () => readRecord(store, store.startFile, started),
@@ -890,6 +934,46 @@ export async function withNativeAuthoredProjectAdmission<T>(
         async hooksRetained() {
           return (await loadNativeAuthoredHookOwner(hookStore)) !== null;
         },
+        async liveStopRetained() {
+          await assertHeld();
+          try {
+            await lstat(liveStopPath(store));
+            return true;
+          } catch (error) {
+            if (hasCode(error, "ENOENT")) {
+              return false;
+            }
+            return refused();
+          }
+        },
+        async publishLiveStop(input) {
+          const start = selection(input.expectedStart, started);
+          const ready = selectedFile(input.expectedRun);
+          const run = ready.record.receipt.review.provenance.run;
+          if (
+            JSON.stringify(start.record.review) !==
+              JSON.stringify(ready.record.receipt.review) ||
+            input.source.path !== join(store.root.path, `${run}.source.json`)
+          ) {
+            return refused();
+          }
+          const check = async () => {
+            await assertHeld();
+            await unchanged(store, store.startFile, start, started);
+            await unchanged(store, store.file, ready, selected);
+            await input.source.assertFresh();
+            await input.assertFresh();
+            await assertHeld();
+          };
+          await check();
+          return await publishNativeAuthoredLiveStop({
+            store: liveStopStore(store, run),
+            run,
+            receipt: ready.record.receipt,
+            assertOwner: check,
+            stop: input.stop,
+          });
+        },
         createHooks: (input) => createNativeAuthoredHookOwner(hookStore, input),
         async prepareSource(input) {
           const { run, text } = sourceText(store, input);
@@ -1021,6 +1105,33 @@ export async function withNativeAuthoredProjectAdmission<T>(
 }
 
 /** Read-only client of the still-live foreground owner. Does not acquire/replay inputs. */
+function stopSelectionMatches(
+  file: Awaited<ReturnType<typeof readPrivate>>,
+  identity: NativeAuthoredProjectRunSelection["identity"]
+): boolean {
+  return (
+    file.info.dev === identity.dev &&
+    file.info.ino === identity.ino &&
+    digest(file.text) === identity.sha256
+  );
+}
+
+async function assertStopFiles(
+  files: readonly (readonly [string, Awaited<ReturnType<typeof readPrivate>>])[]
+): Promise<void> {
+  for (const [target, captured] of files) {
+    const fresh = await readPrivate(target, LIMIT);
+    if (
+      !sameFile(captured.info, fresh.info) ||
+      captured.info.mtimeMs !== fresh.info.mtimeMs ||
+      captured.info.ctimeMs !== fresh.info.ctimeMs ||
+      captured.text !== fresh.text
+    ) {
+      return refused();
+    }
+  }
+}
+
 export async function stopNativeAuthoredProject(input: {
   readonly scope: NativeAuthoredProjectRunScope;
   readonly timeoutMs: number;
@@ -1047,12 +1158,10 @@ export async function stopNativeAuthoredProject(input: {
     const readyFile = await readPrivate(store.ready, LIMIT);
     const startFile = await readPrivate(store.start, LIMIT);
     if (
-      readyFile.info.dev !== ready.identity.dev ||
-      readyFile.info.ino !== ready.identity.ino ||
-      digest(readyFile.text) !== ready.identity.sha256 ||
-      startFile.info.dev !== start.identity.dev ||
-      startFile.info.ino !== start.identity.ino ||
-      digest(startFile.text) !== start.identity.sha256
+      !(
+        stopSelectionMatches(readyFile, ready.identity) &&
+        stopSelectionMatches(startFile, start.identity)
+      )
     ) {
       return refused();
     }
@@ -1060,6 +1169,33 @@ export async function stopNativeAuthoredProject(input: {
       start.record.review.review_id !== ready.record.receipt.review.review_id
     ) {
       return refused();
+    }
+    const key = digest(JSON.stringify(opts.scope.branch));
+    if (
+      await requestNativeAuthoredLiveStop({
+        store: {
+          scope: store.scope,
+          path: store.liveStop,
+          ready: store.ready,
+          start: store.start,
+          source: store.sourcePath(run),
+          hookOwner: join(store.root.path, `${key}.hooks.json`),
+          hookStop: join(store.root.path, `${run}.hook-stop.json`),
+          blockers: [
+            store.recovery,
+            store.mutation,
+            store.mutationRecovery,
+            `${store.mutation}.recovery`,
+          ],
+          held: store.held,
+          check: store.check,
+        },
+        run,
+        remaining,
+        signal: opts.signal,
+      })
+    ) {
+      return;
     }
     const path = join(store.root.path, `${run}.hook-stop.json`);
     const current = await readPrivate(path, 8192);
@@ -1089,22 +1225,12 @@ export async function stopNativeAuthoredProject(input: {
       return refused();
     }
     await store.check();
-    for (const [target, captured] of [
+    await assertStopFiles([
       [store.ready, readyFile],
       [store.start, startFile],
       [path, current],
       [value.owner.path, owner],
-    ] as const) {
-      const fresh = await readPrivate(target, LIMIT);
-      if (
-        !sameFile(captured.info, fresh.info) ||
-        captured.info.mtimeMs !== fresh.info.mtimeMs ||
-        captured.info.ctimeMs !== fresh.info.ctimeMs ||
-        captured.text !== fresh.text
-      ) {
-        return refused();
-      }
-    }
+    ]);
     await store.check();
     await requestNativeHookStop({
       run,

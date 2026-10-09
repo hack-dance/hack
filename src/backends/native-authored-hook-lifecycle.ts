@@ -9,6 +9,7 @@ import { resolveNativeHostInvocationEnvironment } from "../lib/native-host-lifec
 import type { NativeAuthoredReceipt } from "./native-authored-graph-protocol.ts";
 import type { NativeAuthoredHookOwner } from "./native-authored-hook-journal.ts";
 import { serveNativeHookStop } from "./native-authored-hook-stop.ts";
+import type { NativeAuthoredLiveStop } from "./native-authored-live-stop.ts";
 import type {
   NativeAuthoredProjectAdmission,
   NativeAuthoredProjectRunSelection,
@@ -187,9 +188,11 @@ export async function publishAuthoredReady(
     readonly published: () => void;
     readonly stop: () => void;
     readonly stopped: Promise<boolean>;
-    readonly endpoint: (
-      value: Awaited<ReturnType<typeof serveNativeHookStop>>
-    ) => void;
+    readonly endpoint: (value: {
+      readonly close: (force?: boolean) => Promise<void>;
+    }) => void;
+    readonly liveStop: (value: NativeAuthoredLiveStop) => void;
+    readonly assertTool?: () => Promise<void>;
   },
   receipt: NativeAuthoredReceipt,
   assertRunning: () => void,
@@ -243,6 +246,21 @@ export async function publishAuthoredReady(
     });
     opts.endpoint(endpoint);
     await opts.hookOwner.publishStop(endpoint);
+  } else {
+    const endpoint = await opts.admission.publishLiveStop({
+      expectedStart: opts.admitted.start,
+      expectedRun: opts.admitted.ready,
+      source: opts.admitted.source,
+      assertFresh: async () => {
+        await opts.assertTool?.();
+      },
+      stop: () => {
+        opts.stop();
+        return opts.stopped;
+      },
+    });
+    opts.endpoint(endpoint);
+    opts.liveStop(endpoint);
   }
   publishReady();
   opts.published();

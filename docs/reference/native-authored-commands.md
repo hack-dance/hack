@@ -77,6 +77,19 @@ Ctrl-C requests that shutdown. Exact durable Removed evidence retires the tagged
 native run and startup intent. Unknown, changed or live cleanup retains the attempt
 and refuses replay; a missing ready mapping does not authorize a fresh start.
 
+Ordinary whole-project `down` also supports a ready no-host generation, including
+persistent-storage plans. Its private no-host endpoint is issued by the original
+held startup admission before public Ready. It asks that same foreground owner to
+stop; no host declaration, hook permit, new controller or stored-PID signal is
+created. Success requires authenticated Removed, the original child and detached
+group's settlement, and exact endpoint/start/Ready/source retirement. Compute
+shutdown retains persistent data; this command adds no volume deletion authority.
+A missing, changed or dead endpoint refuses. Partial publication or retirement
+keeps startup evidence blocked. New no-host records are deliberately ineligible
+for dead-owner recovery; a saved endpoint token is not cleanup authority.
+Portable private-filesystem and stand-in lifecycle controls cover this boundary;
+installed Source4 SQL retention through public down/up remains a separate runtime gate.
+
 `down --recover` explicitly retires a complete stored native generation whose
 foreground publisher and frontend admission owner are both dead on the same host
 boot. New version 4 native publications use the kernel boot-session UUID, which

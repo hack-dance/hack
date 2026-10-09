@@ -36,6 +36,10 @@ type ProcessOptions = {
   readonly onExitDiagnostic?: (diagnostic: NativeExitDiagnostic) => void;
   /** Finite frontend hooks intercept the first stop; failed hooks retain the live owner. */
   readonly beforeStop?: () => Promise<boolean>;
+  /** No-host frontend stop reuses this original foreground owner; no hook permit. */
+  readonly liveStopOwner?: { readonly requested: () => boolean };
+  /** Original owner only: emitted after captured exit/drain and group absence. */
+  readonly onSettled?: () => undefined;
   readonly forceSignal?: AbortSignal;
   readonly onStopFailure?: () => void;
   /** Durable capture in the existing frontend owner, before private input delivery. */
@@ -303,7 +307,8 @@ async function serveGraphProcess(
       stdin: opts.privateInput ? "pipe" : "ignore",
       stdout: "pipe",
       stderr: "pipe",
-      detached: opts.beforeStop !== undefined,
+      detached:
+        opts.beforeStop !== undefined || opts.liveStopOwner !== undefined,
     }
   );
   // Descendants may inherit a pipe after the owned receiver exits. Its exit,
@@ -348,7 +353,7 @@ async function serveGraphProcess(
     terminate();
   };
   const abort = () => {
-    if (!(ready && opts.beforeStop)) {
+    if (!(ready && (opts.beforeStop || opts.liveStopOwner?.requested()))) {
       force();
       return;
     }
@@ -357,7 +362,11 @@ async function serveGraphProcess(
     }
     stopping = (async () => {
       try {
-        if (await opts.beforeStop?.()) {
+        if (
+          opts.beforeStop
+            ? await opts.beforeStop()
+            : opts.liveStopOwner?.requested()
+        ) {
           terminate();
         } else {
           stopFailure();
@@ -447,9 +456,10 @@ async function serveGraphProcess(
     } catch {
       // Observation must never replace the startup result or cleanup authority.
     }
-    if (opts.beforeStop) {
+    if (opts.beforeStop || opts.liveStopOwner) {
       await requireGroupAbsent(child.pid);
     }
+    opts.onSettled?.();
   }
 }
 

@@ -496,6 +496,11 @@ export async function recoverNativeAuthoredProject(opts: {
   return await withNativeAuthoredProjectRecoveryStorage(
     opts.scope,
     async (store) => {
+      // A live no-host endpoint is not a dead-owner recovery permit. Its
+      // original foreground must complete authenticated stop and retirement.
+      if (!(await absent(store.liveStop))) {
+        return refused();
+      }
       let saved = await readIntent(store);
       const record = () => saved?.record ?? refused();
       const update = async (

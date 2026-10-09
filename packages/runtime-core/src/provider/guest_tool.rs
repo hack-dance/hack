@@ -141,6 +141,10 @@ impl Artifact {
         &self.bytes
     }
     #[cfg(feature = "native-config-plan")]
+    pub(in crate::provider) fn path(&self) -> &Path {
+        &self.path
+    }
+    #[cfg(feature = "native-config-plan")]
     pub(in crate::provider) fn digest(&self) -> &str {
         &self.digest
     }

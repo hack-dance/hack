@@ -1,11 +1,9 @@
-import { createHash, randomBytes, X509Certificate } from "node:crypto";
+import { createHash } from "node:crypto";
 import { chmod, lstat, mkdir, realpath } from "node:fs/promises";
 import { join } from "node:path";
 import type { Project } from "../../../packages/config-compiler/generated/native-config.ts";
 import { isRecord } from "../../../src/lib/guards.ts";
 import { openNativeComposeGenerationStore } from "../../../src/lib/native-compose-generation.ts";
-import { observeNativeComposeIngress } from "../../../src/lib/native-compose-ingress.ts";
-import { nativeComposeProxyRoutesMatch } from "../../../src/lib/native-compose-proxy-routes.ts";
 import {
   type NativeRoutingResolution,
   parseNativeRoutingResolution,
@@ -33,45 +31,20 @@ import {
   ROUTED_RUN_LITERAL,
 } from "./native-config-routed-run.ts";
 
+import {
+  NATIVE_ROUTING_FIXTURE_TMPFS as PRIVATE_TMPFS,
+  prepareNativeRoutingFixtureIngress,
+} from "./native-routing-fixture-ingress.ts";
+
 const TIMEOUT = 180_000;
-const OBSERVATION_WINDOW = 30_000;
 const OBJECT_ID = /^[a-f0-9]{64}$/;
-const IMAGE_ID = /^sha256:[a-f0-9]{64}$/;
 const TOKEN = /^[a-f0-9]{32}$/;
 const PROJECT_LABEL = "com.docker.compose.project";
-const SERVICE_LABEL = "com.docker.compose.service";
 const OWNER_LABEL = "io.hack.native-config.owner";
 const INSTANCE_LABEL = "io.hack.native-config.instance";
 const STORAGE_LABEL = "io.hack.native-config.storage";
-const FIXTURE_LABEL = "hack.e2e.native-config-routing-owner";
-const ROOT_CA = "/data/caddy/pki/authorities/local/root.crt";
-const PROXY_PROJECT = "hack-dev-proxy";
-const PROXY_SERVICE = "caddy";
-const NETWORK = "hack-dev";
-const ADMIN_URL = "http://127.0.0.1:2019/config/apps/http/servers";
-const CADDY_IMAGE = "lucaslorentz/caddy-docker-proxy:2.10.0-alpine";
-const PRIVATE_TMPFS = "rw,noexec,nosuid,nodev,mode=700";
 const APP =
   "Bun.serve({hostname:'0.0.0.0',port:3000,fetch(){return new Response(process.env.BRANCH_MARKER)}})";
-const PRESERVED_FORMAT =
-  '{"id":{{json .Id}},"name":{{json .Name}},"running":{{json .State.Running}},"status":{{json .State.Status}},"started":{{json .State.StartedAt}},"finished":{{json .State.FinishedAt}}}';
-const PROXY_FORMAT =
-  '{"id":{{json .Id}},"name":{{json .Name}},"owner":{{json (index .Config.Labels "hack.e2e.native-config-routing-owner")}},"project":{{json (index .Config.Labels "com.docker.compose.project")}},"service":{{json (index .Config.Labels "com.docker.compose.service")}},"network":{{with (index .NetworkSettings.Networks "hack-dev")}}{{json .NetworkID}}{{else}}null{{end}},"networkMode":{{json .HostConfig.NetworkMode}},"running":{{json .State.Running}},"ports":{{json .HostConfig.PortBindings}},"publishAll":{{json .HostConfig.PublishAllPorts}},"runtimePorts":{{json .NetworkSettings.Ports}},"mounts":{{json .Mounts}},"tmpfs":{{json .HostConfig.Tmpfs}}}';
-
-/** Explicit bindings alone miss Docker's dynamically published `-P` ports. */
-export function proxyHasNoPublishedPorts(
-  info: Readonly<Record<string, unknown>>
-): boolean {
-  return (
-    info.publishAll === false &&
-    (info.ports === null ||
-      (isRecord(info.ports) && Object.keys(info.ports).length === 0)) &&
-    (info.runtimePorts === null ||
-      (isRecord(info.runtimePorts) &&
-        Object.values(info.runtimePorts).every((value) => value === null)))
-  );
-}
-
 type Docker = (args: readonly string[]) => Promise<string>;
 type Runtime = {
   readonly composeProject: string;
@@ -362,58 +335,19 @@ export const nativeConfigRoutingScenario: Scenario = {
       });
       return result.stdout.trim();
     };
-    const selectors = [
-      "--filter",
-      `label=${PROJECT_LABEL}=${PROXY_PROJECT}`,
-      "--filter",
-      `label=${SERVICE_LABEL}=${PROXY_SERVICE}`,
-    ];
-    // Stopped user selectors are not ingress candidates. Snapshot them; never adopt,
-    // start, rename or remove them merely to make this scenario runnable.
-    expect({
-      that: (await docker(["ps", "--no-trunc", "-q", ...selectors])) === "",
-      message:
-        "Refuse native routing fixture while any global Caddy selector is running",
-    });
-    const preserved = ids(
-      await docker(["ps", "--no-trunc", "-aq", ...selectors])
-    );
-    const preservedSnapshots = new Map<string, string>();
-    for (const id of preserved) {
-      const text = await docker(["inspect", "--format", PRESERVED_FORMAT, id]);
-      expect({
-        that: object(text).running === false,
-        message: "Pre-existing proxy must be stopped",
-      });
-      preservedSnapshots.set(id, text);
-    }
-    expect({
-      that: (await docker(["info", "--format", "{{.OSType}}"])) === "linux",
-      message: "Native routing fixture requires a Linux Docker daemon",
-    });
-    await docker(["compose", "version"]);
-    const networkId = await docker([
-      "network",
-      "inspect",
-      NETWORK,
-      "--format",
-      "{{.Id}}",
-    ]);
-    expect({
-      that: OBJECT_ID.test(networkId),
-      message: "Existing hack-dev network identity is required",
-    });
-    const image = async (tag: string): Promise<string> => {
-      const id = await docker(["image", "inspect", tag, "--format", "{{.Id}}"]);
-      expect({
-        that: IMAGE_ID.test(id),
-        message:
-          "Fixture images must already be cached; never pull during acceptance",
-      });
-      return id;
-    };
-    const bunImage = await image("oven/bun:1.4.2-slim");
-    const caddyImage = await image(CADDY_IMAGE);
+    const ingress = await prepareNativeRoutingFixtureIngress({ ctx, docker });
+    const {
+      token,
+      proxyName,
+      canaryHost,
+      canaryMarker,
+      networkId,
+      bunImage,
+      admin,
+      tls,
+      absent,
+      preservedUnchanged,
+    } = ingress;
     const nativeInventory = async (): Promise<string> =>
       ids(
         await docker([
@@ -425,12 +359,7 @@ export const nativeConfigRoutingScenario: Scenario = {
         ])
       ).join("\n");
     const nativeBefore = await nativeInventory();
-    const token = randomBytes(16).toString("hex");
-    const proxyName = `e2e-native-routing-proxy-${token}`;
-    const canaryHost = `canary-${token}.test`;
-    const canaryMarker = `proxy-canary-${token}`;
     const privateRoot = await realpath(ctx.tempRoot);
-    let proxyId: string | null = null;
     let claimsRoot: string | null = null;
     const attempted = new Set<string>();
     const successfulStarts = new Set<string>();
@@ -468,163 +397,6 @@ export const nativeConfigRoutingScenario: Scenario = {
         message: `Native hack ${args[0]} must succeed`,
       });
       return result;
-    };
-    const currentProxy = (): string => {
-      if (!(proxyId && OBJECT_ID.test(proxyId))) {
-        throw new Error("Exact owned fixture proxy ID is unavailable");
-      }
-      return proxyId;
-    };
-    const preservedUnchanged = async (): Promise<void> => {
-      expect({
-        that:
-          (await docker([
-            "network",
-            "inspect",
-            NETWORK,
-            "--format",
-            "{{.Id}}",
-          ])) === networkId,
-        message: "External hack-dev network must retain its exact identity",
-      });
-      for (const [id, before] of preservedSnapshots) {
-        expect({
-          that:
-            (await docker(["inspect", "--format", PRESERVED_FORMAT, id])) ===
-            before,
-          message: "Stopped user Caddy selectors must remain unchanged",
-        });
-      }
-    };
-    const proxyOwned = async (): Promise<void> => {
-      const info = object(
-        await docker(["inspect", "--format", PROXY_FORMAT, currentProxy()])
-      );
-      expect({
-        that:
-          info.id === currentProxy() &&
-          info.name === `/${proxyName}` &&
-          info.owner === token &&
-          info.project === PROXY_PROJECT &&
-          info.service === PROXY_SERVICE &&
-          info.networkMode === networkId &&
-          (info.running === false || info.network === networkId) &&
-          proxyHasNoPublishedPorts(info) &&
-          Array.isArray(info.mounts) &&
-          info.mounts.length === 1 &&
-          info.mounts.every(
-            (mount: unknown) =>
-              isRecord(mount) &&
-              mount.Type === "bind" &&
-              mount.Destination === "/var/run/docker.sock" &&
-              mount.Source === "/var/run/docker.sock" &&
-              mount.RW === false
-          ) &&
-          isRecord(info.tmpfs) &&
-          Object.keys(info.tmpfs).length === 2 &&
-          info.tmpfs["/data"] === PRIVATE_TMPFS &&
-          info.tmpfs["/config"] === PRIVATE_TMPFS,
-        message:
-          "Proxy effects require exact fixture ownership/network, no published ports or anonymous volumes",
-      });
-    };
-    const admin = async (): Promise<unknown> => {
-      await proxyOwned();
-      const text = await docker([
-        "exec",
-        currentProxy(),
-        "curl",
-        "--disable",
-        "--silent",
-        "--show-error",
-        "--fail",
-        "--proxy",
-        "",
-        "--noproxy",
-        "*",
-        "--proto",
-        "=http",
-        "--max-time",
-        "10",
-        "--max-redirs",
-        "0",
-        "--write-out",
-        "\n%{http_code}",
-        "--url",
-        ADMIN_URL,
-      ]);
-      expect({
-        that: text.endsWith("\n200"),
-        message:
-          "Read-only live Caddy configuration probe must return HTTP 200",
-      });
-      return JSON.parse(text.slice(0, -4));
-    };
-    const absent = async (hosts: readonly string[]): Promise<void> => {
-      expect({
-        that: nativeComposeProxyRoutesMatch({
-          servers: await admin(),
-          expected: [],
-          absentHostnames: hosts,
-        }),
-        message:
-          "Retired exact fixture origins must be absent from active Caddy routing",
-      });
-    };
-    const tls = async (origin: string, marker: string): Promise<void> => {
-      const url = new URL(origin);
-      expect({
-        that:
-          url.protocol === "https:" && url.port === "" && url.pathname === "/",
-        message: "Fixture TLS probes require exact standard HTTPS origins",
-      });
-      const deadline = Date.now() + OBSERVATION_WINDOW;
-      while (Date.now() < deadline) {
-        await proxyOwned();
-        const result = await runCommand({
-          argv: [
-            "docker",
-            "exec",
-            currentProxy(),
-            "curl",
-            "--disable",
-            "--silent",
-            "--show-error",
-            "--fail",
-            "--proxy",
-            "",
-            "--noproxy",
-            "*",
-            "--proto",
-            "=https",
-            "--max-redirs",
-            "0",
-            "--connect-timeout",
-            "2",
-            "--max-time",
-            "5",
-            "--cacert",
-            ROOT_CA,
-            "--resolve",
-            `${url.hostname}:443:127.0.0.1`,
-            "--url",
-            `${origin}/`,
-          ],
-          cwd: ctx.tempRoot,
-          timeoutMs: TIMEOUT,
-        });
-        if (
-          result.exitCode === 0 &&
-          !result.timedOut &&
-          result.stdout === marker
-        ) {
-          return;
-        }
-        await Bun.sleep(250);
-      }
-      throw new Error(
-        "Exact routed TLS marker was not observed; no insecure or app-local fallback permitted"
-      );
     };
     const plan = async (root: string): Promise<NativeRoutingResolution> => {
       const payload = object(
@@ -801,99 +573,17 @@ export const nativeConfigRoutingScenario: Scenario = {
             "Native hostname claims must be absent before fixture ingress removal",
         });
       }
-      if (proxyId) {
-        await proxyOwned();
-        await docker(["container", "stop", currentProxy()]);
-        await proxyOwned();
-        await docker(["container", "rm", currentProxy()]);
-        proxyId = null;
-      }
-      expect({
-        that:
-          (await docker([
-            "ps",
-            "--no-trunc",
-            "-aq",
-            "--filter",
-            `label=${FIXTURE_LABEL}=${token}`,
-          ])) === "",
-        message:
-          "Exact proxy fixture and its ephemeral filesystem must be absent after cleanup",
-      });
-      await preservedUnchanged();
+      await ingress.cleanup();
     };
     await runWithOwnedCleanup({
       run: async () => {
-        // Repeat ingress absence at the only fixture-global creation boundary.
-        expect({
-          that: (await docker(["ps", "--no-trunc", "-q", ...selectors])) === "",
-          message:
-            "Refuse a newly appeared running global Caddy before fixture creation",
-        });
-        proxyId = await docker([
-          "create",
-          "--pull=never",
-          "--name",
-          proxyName,
-          "--network",
-          networkId,
-          "--label",
-          `${FIXTURE_LABEL}=${token}`,
-          "--label",
-          `${PROJECT_LABEL}=${PROXY_PROJECT}`,
-          "--label",
-          `${SERVICE_LABEL}=${PROXY_SERVICE}`,
-          "--label",
-          `caddy=https://${canaryHost}`,
-          "--label",
-          `caddy.respond=${canaryMarker} 200`,
-          "--label",
-          "caddy.tls=internal",
-          "--env",
-          `CADDY_INGRESS_NETWORKS=${NETWORK}`,
-          "--mount",
-          "type=bind,source=/var/run/docker.sock,target=/var/run/docker.sock,readonly",
-          // Caddy writes private root-owned files. Keep these in the disposable
-          // container so Linux cleanup never needs host chown or sudo.
-          "--tmpfs",
-          `/data:${PRIVATE_TMPFS}`,
-          "--tmpfs",
-          `/config:${PRIVATE_TMPFS}`,
-          caddyImage,
-          "docker-proxy",
-          "--polling-interval",
-          "1s",
-        ]);
-        await proxyOwned();
-        await docker(["container", "start", currentProxy()]);
-        await tls(`https://${canaryHost}`, canaryMarker);
-        const binding = await observeNativeComposeIngress();
-        expect({
-          that:
-            binding.proxyId === currentProxy() &&
-            binding.networkId === networkId,
-          message:
-            "Product ingress observer must select exactly the new fixture proxy/network",
-        });
+        const binding = await ingress.start();
         claimsRoot = join(
           ctx.hackHome,
           "compose-routing",
           createHash("sha256").update(binding.engineId).digest("hex"),
           "claims"
         );
-        await admin();
-        const certificate = new X509Certificate(
-          await docker(["exec", currentProxy(), "cat", ROOT_CA])
-        );
-        expect({
-          that:
-            certificate.ca &&
-            certificate.verify(certificate.publicKey) &&
-            Date.parse(certificate.validFrom) <= Date.now() &&
-            Date.parse(certificate.validTo) > Date.now(),
-          message:
-            "Only the current valid self-signed fixture CA may validate routed HTTPS",
-        });
         stage(
           "isolated Caddy has no host ports and serves a verified TLS canary"
         );
@@ -1135,7 +825,12 @@ export const nativeConfigRoutingScenario: Scenario = {
             JSON.stringify(
               {
                 version: 1,
-                proxy: { id: proxyId, name: proxyName, token, networkId },
+                proxy: {
+                  id: ingress.proxyId,
+                  name: proxyName,
+                  token,
+                  networkId,
+                },
                 privateTmpfs: {
                   "/data": PRIVATE_TMPFS,
                   "/config": PRIVATE_TMPFS,

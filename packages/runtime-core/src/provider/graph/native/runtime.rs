@@ -245,20 +245,96 @@ fn verify_data_using_engine(
     deadline: Instant,
     fresh: &dyn Fn() -> Result<(), CandidateError>,
 ) -> Result<(), CandidateError> {
+    if receipt.data.is_empty() {
+        return fresh();
+    }
+    // A lease owns one verifier run. Its exact saved helper can read another
+    // owner's data, but never enroll it: every reference still passes owner2,
+    // current root/xattr and guest identity checks independently.
+    require_data_tool(receipt)?;
+    let candidate = engine.guest().candidate();
+    let admission = persistent_data::tool::ReceiptAdmission::capture(candidate, receipt)?;
+    let fresh = || {
+        fresh()?;
+        admission.verify()
+    };
+    let run = engine
+        .tool_lifetime()
+        .bound_run()?
+        .unwrap_or_else(|| receipt.review.scope().run.into());
+    let (saved, root) = journal::load(candidate, &run, &receipt.owner, &receipt.boot)?;
+    if run == receipt.review.scope().run {
+        saved.check_binding(receipt)?;
+    }
+    let tool = persistent_data::tool::lifecycle::reopen(
+        persistent_data::tool::lifecycle::ReopenOptions {
+            candidate,
+            engine,
+            receipt: &saved,
+            root: &root,
+            deadline,
+            fresh: &fresh,
+        },
+    )?;
     for reference in receipt
         .data
         .values()
         .filter(|reference| reference.enrolled())
     {
-        persistent_data::engine::verify(
-            engine.guest().candidate(),
-            engine,
-            reference,
-            deadline,
-            fresh,
+        persistent_data::engine::witnessed::verify(
+            candidate, engine, &tool, reference, deadline, &fresh,
         )?;
     }
     fresh()
+}
+
+fn require_data_tool(receipt: &Receipt) -> Result<(), CandidateError> {
+    let tool = receipt.data_tool.as_ref().ok_or_else(refused)?;
+    tool.validate()?;
+    if !receipt.persistent()
+        || receipt.data.is_empty()
+        || tool.root.is_none()
+        || tool.helper.is_none()
+    {
+        return Err(refused());
+    }
+    Ok(())
+}
+
+fn reserved_data_admission(current: &Receipt, receipt: &Receipt) -> Result<(), CandidateError> {
+    require_data_tool(receipt)?;
+    if serde_json::to_vec(current).map_err(|_| refused())?
+        != serde_json::to_vec(receipt).map_err(|_| refused())?
+        || receipt.phase != Phase::Preparing
+        || receipt
+            .resources
+            .values()
+            .any(|resource| resource.id.is_some() || resource.phase != "reserved")
+    {
+        return Err(refused());
+    }
+    Ok(())
+}
+
+// A new verifier may be installed only after every prior run has known saved
+// state. The later reservation pass still proves live workloads and content;
+// this read-only pass cannot grant capacity or skip a pending helper call.
+fn storage_attempt_preflight(
+    candidate: &Candidate,
+    owner: &str,
+    boot: &str,
+) -> Result<(), CandidateError> {
+    for run in storage_inventory::runs(&candidate.state_root.join("run/native-graphs"))? {
+        let (receipt, root) = journal::load_admission(candidate, &run, owner, boot)?;
+        persistent_data::tool::require_idle(&root)?;
+        if !matches!(receipt.phase, Phase::ReadyObserved | Phase::Removed) {
+            return Err(refused());
+        }
+        if !receipt.data.is_empty() {
+            require_data_tool(&receipt)?;
+        }
+    }
+    Ok(())
 }
 
 fn ownership(receipt: &Receipt, resource: &Resource, value: &Value) -> Result<(), CandidateError> {
@@ -759,14 +835,29 @@ pub fn run(
     candidate: &Candidate,
     prepared: selection::Prepared,
 ) -> Result<Receipt, CandidateError> {
+    run_with_storage_tool(candidate, prepared, None)
+}
+/// Explicit caller-pinned helper selection. Absence preserves the pre-provider
+/// storage refusal; an artifact is never discovered, downloaded or rebuilt here.
+pub fn run_with_storage_tool(
+    candidate: &Candidate,
+    prepared: selection::Prepared,
+    storage_tool: Option<&StorageTool>,
+) -> Result<Receipt, CandidateError> {
     #[cfg(target_os = "macos")]
     {
         let run = prepared.input().review().scope().run.to_owned();
         let guard = super::foreground::DirectGuard::acquire(candidate, &run)?;
-        run_guarded(candidate, prepared, Some(&|| guard.verify()), None)
+        run_guarded(
+            candidate,
+            prepared,
+            Some(&|| guard.verify()),
+            None,
+            storage_tool,
+        )
     }
     #[cfg(not(target_os = "macos"))]
-    run_guarded(candidate, prepared, None, None)
+    run_guarded(candidate, prepared, None, None, storage_tool)
 }
 
 fn check_startup(
@@ -782,17 +873,20 @@ pub(super) fn run_guarded(
     prepared: selection::Prepared,
     startup_guard: Option<&dyn Fn() -> Result<(), CandidateError>>,
     admitted: Option<&Cell<bool>>,
+    storage_tool: Option<&StorageTool>,
 ) -> Result<Receipt, CandidateError> {
     check_startup(startup_guard)?;
     let (selected, input) = prepared.into_parts(candidate)?;
-    // Birth/device/inode/labels can all alias after replacement. Until the native
-    // root-witness transport is qualified, no ordinary invocation may reach the
-    // provider or publish receipt4/create/enroll/use persistent data.
-    if !input.inputs().storage.is_empty() {
+    // Metadata is not continuity proof. Storage requires an explicitly pinned
+    // verifier before provider admission; no discovery or fallback is performed.
+    if !input.inputs().storage.is_empty() && storage_tool.is_none() {
         return Err(error(
             "native_graph_storage_unqualified",
             "Native persistent storage requires a qualified root continuity witness; no provider or data effects were authorized.",
         ));
+    }
+    if let Some(tool) = storage_tool {
+        tool.verify()?;
     }
     let deadline = selected.remaining()?;
     #[cfg(target_os = "macos")]
@@ -807,6 +901,13 @@ pub(super) fn run_guarded(
     }
     check_startup(startup_guard)?;
     selected.assert_fresh(candidate)?;
+    if !input.inputs().storage.is_empty() {
+        storage_attempt_preflight(
+            candidate,
+            engine.guest().incarnation(),
+            engine.guest().boot_id(),
+        )?;
+    }
     let source = selected
         .project_source
         .as_ref()
@@ -815,7 +916,7 @@ pub(super) fn run_guarded(
     check_startup(startup_guard)?;
     selected.assert_fresh(candidate)?;
     let mut config = configuration_with_source(&input, engine.guest().incarnation(), source)?;
-    config.data = persistent_data::engine::select(
+    config.data = persistent_data::engine::select_witnessed(
         candidate,
         &engine,
         config.review.scope().namespace,
@@ -855,7 +956,9 @@ pub(super) fn run_guarded(
             .or_insert(json!(10));
     }
     crate::provider::source_job::check_reservations(&engine)?;
-    admission::check(candidate, &engine, None, &config.configs)?;
+    if config.data.is_empty() {
+        admission::check(candidate, &engine, None, &config.configs)?;
+    }
     if !private.is_empty() {
         crate::provider::environment::preflight_capacity(engine.guest(), private.len())?;
     }
@@ -867,6 +970,9 @@ pub(super) fn run_guarded(
     let expected = if config.data.is_empty() {
         verify_images(&engine, &config.resources, &mut config.configs, &private)?
     } else {
+        for service in config.data_mounts.keys() {
+            storage_process_policy(&config.configs[service])?;
+        }
         verify_native_images(&engine, &config.resources, &mut config.configs, &private)?
     };
     for name in &private {
@@ -887,12 +993,48 @@ pub(super) fn run_guarded(
     let execution = (|| {
         check_startup(startup_guard)?;
         selected.assert_fresh(candidate)?;
-        for logical in receipt.data.keys().cloned().collect::<Vec<_>>() {
-            let reference = receipt.data.get_mut(&logical).ok_or_else(refused)?;
-            persistent_data::engine::enroll(candidate, &engine, reference, deadline, &|| {
+        if !receipt.data.is_empty() {
+            let artifact = storage_tool.ok_or_else(refused)?;
+            let fresh = || {
                 check_startup(startup_guard)?;
-                selected.assert_fresh(candidate)
+                selected.assert_fresh(candidate)?;
+                artifact.verify()
+            };
+            artifact.install(persistent_data::tool::InstallOptions {
+                candidate,
+                engine: &engine,
+                receipt: &mut receipt,
+                root: &root,
+                artifact: artifact.path(),
+                digest: artifact.digest(),
+                deadline,
+                fresh: &fresh,
             })?;
+            // The current run's verifier is now durable, allowing complete
+            // reservation continuity proofs before volume or workload creation.
+            admission::check_native_reserved(candidate, &engine, &receipt, &config.configs)?;
+            fresh()?;
+        }
+        for logical in receipt.data.keys().cloned().collect::<Vec<_>>() {
+            let fresh = || {
+                check_startup(startup_guard)?;
+                selected.assert_fresh(candidate)?;
+                storage_tool.ok_or_else(refused)?.verify()
+            };
+            let tool = persistent_data::tool::lifecycle::reopen(
+                persistent_data::tool::lifecycle::ReopenOptions {
+                    candidate,
+                    engine: &engine,
+                    receipt: &receipt,
+                    root: &root,
+                    deadline,
+                    fresh: &fresh,
+                },
+            )?;
+            let reference = receipt.data.get_mut(&logical).ok_or_else(refused)?;
+            persistent_data::engine::witnessed::enroll(
+                candidate, &engine, &tool, reference, deadline, &fresh,
+            )?;
             journal::save(&root, &receipt)?;
         }
         let launcher = if private.is_empty() {
@@ -1345,6 +1487,9 @@ fn cleanup_using_guarded<B: Backend>(
         .collect::<BTreeMap<_, _>>();
     if !stopped {
         backend.verify_source(receipt, false)?;
+        backend.verify_data(receipt, Instant::now() + Duration::from_secs(40), &|| {
+            check_startup(guard)
+        })?;
         backend.stop(&stops, &admitted)?;
     }
     backend.verify_source(receipt, false)?;
@@ -1377,6 +1522,9 @@ fn cleanup_using_guarded<B: Backend>(
         super::super::shutdown::terminal(resource, &value, false)?;
         check_startup(guard)?;
         backend.verify_source(receipt, false)?;
+        backend.verify_data(receipt, Instant::now() + Duration::from_secs(40), &|| {
+            check_startup(guard)
+        })?;
         backend.request(
             Method::DELETE,
             &format!(
@@ -1415,6 +1563,9 @@ fn cleanup_using_guarded<B: Backend>(
             journal::save(root, receipt)?;
             check_startup(guard)?;
             backend.verify_source(receipt, false)?;
+            backend.verify_data(receipt, Instant::now() + Duration::from_secs(40), &|| {
+                check_startup(guard)
+            })?;
             backend.request(
                 Method::DELETE,
                 &format!(
@@ -1472,6 +1623,22 @@ fn verify_native_images(
         {
             return Err(refused());
         }
+        if config["HostConfig"]["Mounts"]
+            .as_array()
+            .is_some_and(|mounts| !mounts.is_empty())
+        {
+            // The initial SQLite corpus uses an explicit Bun program as root;
+            // an image entrypoint cannot introduce an unqualified chown handoff.
+            storage_process_policy(config)?;
+            if !matches!(
+                image["Config"]["User"].as_str(),
+                None | Some("" | "0" | "0:0")
+            ) || !(image["Config"]["User"].is_null() || image["Config"]["User"].is_string())
+            {
+                return Err(refused());
+            }
+            config["User"] = json!("0:0");
+        }
         if !image["Config"]["Volumes"].is_null() {
             let volumes = image["Config"]["Volumes"].as_object().ok_or_else(refused)?;
             let mounts = config["HostConfig"]["Mounts"]
@@ -1506,6 +1673,25 @@ fn verify_native_images(
     Ok(expected)
 }
 
+fn storage_process_policy(config: &Value) -> Result<(), CandidateError> {
+    if config["Entrypoint"] != json!([])
+        || config["Cmd"]
+            .as_array()
+            .and_then(|args| args.first())
+            .and_then(Value::as_str)
+            != Some("/usr/local/bin/bun")
+        || config["HostConfig"]["CapDrop"] != json!(["ALL"])
+        || config["HostConfig"]["SecurityOpt"] != json!(["no-new-privileges"])
+        || !(config["User"].is_null() || config["User"] == "0:0")
+    {
+        return Err(error(
+            "native_graph_storage_process_unqualified",
+            "Persistent startup currently requires the explicit unchanged-owner Bun/SQLite process policy; image entrypoints and PostgreSQL ownership handoff are unqualified.",
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests;
 
@@ -1515,12 +1701,31 @@ pub(in crate::provider::graph) fn reservations(
     new_attempt: bool,
     add: impl FnMut(&Value) -> Result<(), CandidateError>,
 ) -> Result<(), CandidateError> {
+    reservations_except(candidate, engine, new_attempt, None, add)
+}
+pub(in crate::provider::graph) fn reservations_except(
+    candidate: &Candidate,
+    engine: &Engine<'_>,
+    new_attempt: bool,
+    except: Option<&Receipt>,
+    add: impl FnMut(&Value) -> Result<(), CandidateError>,
+) -> Result<(), CandidateError> {
+    if let Some(receipt) = except {
+        let (current, _) = journal::load(
+            candidate,
+            receipt.review.scope().run,
+            &receipt.owner,
+            &receipt.boot,
+        )?;
+        reserved_data_admission(&current, receipt)?;
+    }
     let mut verified_data = BTreeSet::new();
-    reservations_using(
+    reservations_using_except(
         candidate,
         engine.guest().incarnation(),
         engine.guest().boot_id(),
         new_attempt,
+        except.map(|receipt| receipt.review.scope().run),
         |receipt, resource| {
             if verified_data.insert(receipt.review.scope().run.to_owned()) {
                 engine.verify_data(
@@ -1534,11 +1739,23 @@ pub(in crate::provider::graph) fn reservations(
         add,
     )
 }
+#[cfg(test)]
 fn reservations_using(
     candidate: &Candidate,
     owner: &str,
     boot: &str,
     new_attempt: bool,
+    inspect: impl FnMut(&Receipt, &Resource) -> Result<Option<Value>, CandidateError>,
+    add: impl FnMut(&Value) -> Result<(), CandidateError>,
+) -> Result<(), CandidateError> {
+    reservations_using_except(candidate, owner, boot, new_attempt, None, inspect, add)
+}
+fn reservations_using_except(
+    candidate: &Candidate,
+    owner: &str,
+    boot: &str,
+    new_attempt: bool,
+    except: Option<&str>,
     mut inspect: impl FnMut(&Receipt, &Resource) -> Result<Option<Value>, CandidateError>,
     mut add: impl FnMut(&Value) -> Result<(), CandidateError>,
 ) -> Result<(), CandidateError> {
@@ -1547,7 +1764,11 @@ fn reservations_using(
         return Err(refused());
     }
     for run in runs {
-        let (receipt, _) = journal::load_admission(candidate, &run, owner, boot)?;
+        if except == Some(run.as_str()) {
+            continue;
+        }
+        let (receipt, root) = journal::load_admission(candidate, &run, owner, boot)?;
+        persistent_data::tool::require_idle(&root)?;
         if receipt.phase == Phase::Removed {
             continue;
         }

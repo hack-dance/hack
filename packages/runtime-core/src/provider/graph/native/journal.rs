@@ -204,9 +204,16 @@ impl Receipt {
     #[cfg(target_os = "macos")]
     pub(super) fn require_recovery_ready(&self) -> Result<(), CandidateError> {
         self.validate(self.review.scope().run, &self.owner)?;
-        // Image-only v2 is the qualified dead-owner recovery contract. Source
-        // v3 parsing and ordinary cleanup grant no publisher-recovery authority.
-        if self.version != 2
+        // Source/topology recovery remains separate. Storage recovery may stop
+        // compute only with complete saved verifier and independently enrolled
+        // references; cleanup re-proves owner2/root/xattr before its effects.
+        let storage = self.version == 4
+            && self
+                .data_tool
+                .as_ref()
+                .is_some_and(|tool| tool.root.is_some() && tool.helper.is_some())
+            && self.data.values().all(|reference| reference.enrolled());
+        if !(self.version == 2 || storage)
             || self.phase != Phase::ReadyObserved
             || self.failure.is_some()
             || self

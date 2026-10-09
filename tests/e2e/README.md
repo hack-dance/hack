@@ -83,6 +83,32 @@ and its pinned Moby API
 [v1.54.1 disabled-policy contract](https://github.com/moby/moby/blob/api/v1.54.1/api/types/container/hostconfig.go#L267-L270)
 define those two spellings.
 
+## VM-native protected files
+
+The explicitly selected `native-config-vm-files` scenario exercises ordinary new
+containers with protected VM-native material; it does not adopt existing binds.
+It uses only cached `oven/bun:1.4.2-slim`, two linked worktrees, no published ports
+and no image build or pull. Application-side checks independently require exact
+0400/default-root and 0600/explicit-numeric owner identity, actual owner reads,
+distinct-UID `EACCES`, privileged write-open `EROFS`, exact single-file mounts and
+absence from an ungranted service. Restart, saved stop with unavailable authored
+material, recreation and sibling isolation retain their own assertions.
+
+The shipping saved-stop owner retires the exact observer and singleton volume;
+the fixture adds no raw removal authority. Every CLI/guest command reuses the
+bounded completed-job child/EOF/absence owner. An uncertain child or failed
+whole-owner observation permanently withholds teardown. The 16 MiB
+successful-result threshold is not a strict disk quota: the last refused command
+can already have its bounded private capture.
+Full original IDs, stopped states, volume births, image IDs/tags and daemon must
+match after cleanup. Unknown VM material can remain retained and fails this gate.
+This maintained source is not a recorded provider pass or retained-adoption
+permission qualification.
+
+```sh
+HACK_E2E_CLI_BIN=./dist/hack HACK_CONFIG_COMPILER_BINARY=./dist/hack-config-compiler HACK_E2E_DOCKER=1 HACK_E2E_REQUIRE_DOCKER=1 bun tests/e2e/run.ts --only=native-config-vm-files
+```
+
 ## Command-path cache regressions
 
 `bun test tests/e2e/run-dependency-cache.test.ts` runs the real source CLI in

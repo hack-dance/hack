@@ -8,6 +8,7 @@ import {
   parseNativeAuthoredReceipt,
   parseNativeAuthoredReview,
 } from "./native-authored-graph-protocol.ts";
+import type { NativeAuthoredStorageTool } from "./native-authored-storage-tool.ts";
 import {
   invokeNativeRuntime,
   type NativeRuntimeSelection,
@@ -91,6 +92,7 @@ export async function serveNativeAuthoredProjectGraph(
   opts: ProcessOptions & {
     readonly sourceFile: string;
     readonly frontendHooks?: boolean;
+    readonly storageTool?: NativeAuthoredStorageTool;
     readonly review: NativeAuthoredReview;
     /** Synchronous first-receipt observation before status; grants no publication authority. */
     readonly onReceipt?: (receipt: NativeAuthoredReceipt) => undefined;
@@ -104,6 +106,15 @@ export async function serveNativeAuthoredProjectGraph(
 ): Promise<number> {
   const expected = parseNativeAuthoredReview(opts.review);
   const onReceipt = opts.onReceipt;
+  const tool = opts.storageTool;
+  const toolArgs = tool
+    ? [
+        "--storage-witness-tool",
+        tool.path,
+        "--expect-storage-witness-tool",
+        tool.digest,
+      ]
+    : [];
   if (
     !isAbsolute(opts.sourceFile) ||
     expected.provenance.run !== opts.run ||
@@ -112,6 +123,11 @@ export async function serveNativeAuthoredProjectGraph(
     throw new Error(
       "Native authored source selection is invalid; values omitted."
     );
+  }
+  // Capture the pair before awaiting freshness. Rust independently opens and
+  // admits these exact bytes before provider state or a storage effect.
+  if (tool) {
+    await tool.assertFresh();
   }
   return await serveGraphProcess({
     ...opts,
@@ -126,6 +142,7 @@ export async function serveNativeAuthoredProjectGraph(
       "--timeout-seconds",
       String(Math.ceil(opts.startupTimeoutMs / 1000)),
       ...(opts.privateInput ? ["--environment-stdin"] : []),
+      ...toolArgs,
       "--json",
     ],
     readyLimit: 64 * 1024,

@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { lstat } from "node:fs/promises";
 import { join } from "node:path";
 import { isRecord } from "./guards.ts";
+import { legacyComposeRoutingResolutionMatches } from "./native-compose-adoption-routing-resolution.ts";
 import { hasCode } from "./native-compose-private-state.ts";
 import {
   NativeConfigCompilerError,
@@ -17,6 +18,8 @@ import {
   parseImportDocument,
 } from "./native-config-import-parser.ts";
 import { freezeImportValue } from "./native-config-import-plan.ts";
+import type { LegacyComposeRoutingIntent } from "./native-config-import-routing.ts";
+import type { NativeRoutingResolution } from "./native-routing-plan-protocol.ts";
 
 type Source = Extract<NativeConfigImportInputs, { readonly ok: true }>;
 type Role = "primary_local" | "checkout_local";
@@ -66,6 +69,7 @@ function check(signal?: AbortSignal) {
 export function mapLegacyAdoptionLocalInput(opts: {
   readonly text: string;
   readonly document: Role;
+  readonly retainedRouting?: boolean;
 }) {
   const parsed = parseImportDocument(opts);
   const value = parsed.value;
@@ -77,14 +81,29 @@ export function mapLegacyAdoptionLocalInput(opts: {
     value !== undefined &&
     value.schema_version === 1 &&
     Object.keys(value).every(
-      (key) => key === "schema_version" || key === "environment"
+      (key) =>
+        key === "schema_version" ||
+        key === "environment" ||
+        (opts.retainedRouting === true && (key === "routes" || key === "open"))
     ) &&
     (environment === undefined ||
       (isRecord(environment) &&
         Object.keys(environment).every((key) => key === "default_overlay") &&
         (!Object.hasOwn(environment, "default_overlay") ||
           environment.default_overlay === null ||
-          typeof environment.default_overlay === "string")));
+          typeof environment.default_overlay === "string"))) &&
+    (!Object.hasOwn(value, "routes") ||
+      (opts.retainedRouting === true &&
+        isRecord(value.routes) &&
+        Object.keys(value.routes).every((key) => key === "domain") &&
+        (!Object.hasOwn(value.routes, "domain") ||
+          typeof value.routes.domain === "string"))) &&
+    (!Object.hasOwn(value, "open") ||
+      (opts.retainedRouting === true &&
+        isRecord(value.open) &&
+        Object.keys(value.open).every((key) => key === "prefer") &&
+        (!Object.hasOwn(value.open, "prefer") ||
+          ["auto", "alias", "dev"].includes(String(value.open.prefer)))));
   const fields: readonly ImportField[] = parsed.fields.map((field) => ({
     ...field,
     status: valid ? "exact" : "refused",
@@ -116,7 +135,9 @@ export async function resolveLegacyAdoptionLocalInputs(opts: {
   readonly overlay: string | null;
   readonly binary?: string;
   readonly signal?: AbortSignal;
+  readonly routing?: LegacyComposeRoutingIntent;
 }) {
+  const routing = opts.routing;
   check(opts.signal);
   const checkout = privateNativeConfigImportLocalInput(opts.source);
   const primary = opts.primary
@@ -131,6 +152,7 @@ export async function resolveLegacyAdoptionLocalInputs(opts: {
       const mapped = mapLegacyAdoptionLocalInput({
         text: input.text,
         document,
+        retainedRouting: routing !== undefined,
       });
       if (!mapped.complete) {
         refuseFields(mapped.fields);
@@ -139,15 +161,25 @@ export async function resolveLegacyAdoptionLocalInputs(opts: {
     }
   }
   const present = checkout?.text != null || primary?.text != null;
-  if (present) {
+  let routingResolution: NativeRoutingResolution | undefined;
+  if (present || routing) {
     const resolved = await resolveNativeConfig({
       input: new TextEncoder().encode(JSON.stringify(opts.candidate)),
       primaryLocal: encodedLocal(primary?.text),
       checkoutLocal: encodedLocal(checkout?.text),
       binary: opts.binary,
       signal: opts.signal,
+      requireRoutingPlanning: routing !== undefined,
     });
-    if (!resolved.ok || resolved.local_resolution.overlay !== opts.overlay) {
+    if (
+      !resolved.ok ||
+      resolved.local_resolution.overlay !== opts.overlay ||
+      (routing &&
+        !legacyComposeRoutingResolutionMatches({
+          routing,
+          resolution: resolved.routing_resolution,
+        }))
+    ) {
       refuseFields(
         fields.map((field) => ({
           ...field,
@@ -156,12 +188,16 @@ export async function resolveLegacyAdoptionLocalInputs(opts: {
         }))
       );
     }
+    if (resolved.ok) {
+      routingResolution = resolved.routing_resolution;
+    }
   }
   await opts.source.assertFresh({ signal: opts.signal });
   await opts.primary?.assertFresh({ signal: opts.signal });
   check(opts.signal);
   const result = {
     fields,
+    routingResolution,
     proof: present
       ? { checkout: checkout?.proof ?? null, primary: primary?.proof ?? null }
       : undefined,
@@ -178,6 +214,7 @@ async function assertCheckoutLocal(opts: {
   readonly projectRoot: string;
   readonly proof: unknown;
   readonly signal?: AbortSignal;
+  readonly retainedRouting?: boolean;
 }) {
   const proof = opts.proof;
   const path = join(opts.projectRoot, ".hack/hack.local.json");
@@ -223,6 +260,7 @@ async function assertCheckoutLocal(opts: {
       !mapLegacyAdoptionLocalInput({
         text: new TextDecoder("utf-8", { fatal: true }).decode(current.bytes),
         document: "checkout_local",
+        retainedRouting: opts.retainedRouting,
       }).complete
     ) {
       refuse();
@@ -237,6 +275,7 @@ export async function assertSavedLegacyAdoptionLocalInputs(opts: {
   readonly proof: unknown;
   readonly signal?: AbortSignal;
   readonly checkOwner: () => Promise<void>;
+  readonly retainedRouting?: boolean;
 }) {
   check(opts.signal);
   const proof = opts.proof;
@@ -252,6 +291,7 @@ export async function assertSavedLegacyAdoptionLocalInputs(opts: {
     projectRoot: opts.projectRoot,
     proof: proof.checkout,
     signal: opts.signal,
+    retainedRouting: opts.retainedRouting,
   });
   const primary = opts.primary
     ? privateNativeConfigImportLocalInput(opts.primary)
@@ -261,6 +301,7 @@ export async function assertSavedLegacyAdoptionLocalInputs(opts: {
     !mapLegacyAdoptionLocalInput({
       text: primary.text,
       document: "primary_local",
+      retainedRouting: opts.retainedRouting,
     }).complete
   ) {
     refuse();

@@ -385,7 +385,7 @@ fn persistent_journal_has_distinct_version_and_exact_data_membership_without_vol
 
 #[cfg(target_os = "macos")]
 #[test]
-fn otherwise_valid_ready_graph4_refuses_dead_publication_recovery() {
+fn ready_graph4_recovery_requires_complete_saved_helper_and_enrolled_data() {
     let fixture = Fixture::new(basic());
     let (_, session) = fixture.session(fixture.prepared(json!({"web":{}}), &BTreeMap::new()));
     let mut receipt = session.receipt;
@@ -419,6 +419,17 @@ fn otherwise_valid_ready_graph4_refuses_dead_publication_recovery() {
     receipt = serde_json::from_value(persistent_wire).unwrap();
     receipt.validate(RUN, OWNER).unwrap();
     assert!(receipt.require_recovery_ready().is_err());
+    let mut wire = serde_json::to_value(&receipt).unwrap();
+    wire["data_tool"] = json!({"version":1,"artifact":"a".repeat(64),"bytes":8192,"root":{"device":0,"inode":1},"helper":{"device":0,"inode":2}});
+    let ready: Receipt = serde_json::from_value(wire.clone()).unwrap();
+    ready.require_recovery_ready().unwrap();
+    wire["data_tool"]["helper"] = Value::Null;
+    assert!(
+        serde_json::from_value::<Receipt>(wire)
+            .unwrap()
+            .require_recovery_ready()
+            .is_err()
+    );
 }
 
 #[test]
@@ -430,7 +441,7 @@ fn ordinary_persistent_start_refuses_before_provider_or_any_owner_publication() 
     let fixture = Fixture::new(project);
     let prepared = fixture.prepared(json!({"web":{}}), &BTreeMap::new());
     assert_eq!(
-        run_guarded(&fixture.candidate, prepared, None, None)
+        run_guarded(&fixture.candidate, prepared, None, None, None)
             .unwrap_err()
             .code,
         "native_graph_storage_unqualified"
@@ -441,13 +452,167 @@ fn ordinary_persistent_start_refuses_before_provider_or_any_owner_publication() 
     assert!(!fixture.candidate.state_root.exists());
 }
 
+fn witnessed_receipt(fixture: &Fixture) -> Receipt {
+    let (_, session) = fixture.session(fixture.prepared(json!({"web":{}}), &BTreeMap::new()));
+    let mut wire = serde_json::to_value(&session.receipt).unwrap();
+    wire["version"] = json!(4);
+    wire["data"] = json!({"database":persistent_reference(&session.receipt)});
+    wire["data_mounts"] =
+        json!({"web":[{"storage":"database","target":"/data","read_only":false}]});
+    wire["data_tool"] = json!({"version":1,"artifact":"a".repeat(64),"bytes":8192,"root":{"device":0,"inode":1},"helper":{"device":0,"inode":2}});
+    let receipt: Receipt = serde_json::from_value(wire).unwrap();
+    receipt.validate(RUN, OWNER).unwrap();
+    journal::save(&session.root, &receipt).unwrap();
+    receipt
+}
+
+#[test]
+fn storage_reservation_exception_requires_exact_current_complete_pre_effect_receipt() {
+    let fixture = Fixture::new(basic());
+    let receipt = witnessed_receipt(&fixture);
+    reserved_data_admission(&receipt, &receipt).unwrap();
+    for changed in 0..7 {
+        let mut other = receipt.clone();
+        match changed {
+            0 => other.phase = Phase::ReadyObserved,
+            1 => other.resources.get_mut("container:web").unwrap().id = Some("4".repeat(64)),
+            2 => other.resources.get_mut("network:default").unwrap().phase = "create-intent".into(),
+            3 => other.data_tool = None,
+            4 => other.data_tool.as_mut().unwrap().helper = None,
+            5 => other.data_tool.as_mut().unwrap().artifact = "5".repeat(64),
+            6 => other.data.clear(),
+            _ => unreachable!(),
+        }
+        assert!(reserved_data_admission(&receipt, &other).is_err());
+    }
+    let mut incomplete = receipt.clone();
+    incomplete.data_tool.as_mut().unwrap().helper = None;
+    assert!(reserved_data_admission(&incomplete, &incomplete).is_err());
+    // Without the exact exception, this durable Preparing reservation continues
+    // to block ordinary admission; no unknown intent is silently skipped.
+    assert!(
+        reservations_using(
+            &fixture.candidate,
+            OWNER,
+            BOOT,
+            true,
+            |_, _| unreachable!(),
+            |_| unreachable!()
+        )
+        .is_err()
+    );
+    reservations_using_except(
+        &fixture.candidate,
+        OWNER,
+        BOOT,
+        false,
+        Some(RUN),
+        |_, _| unreachable!(),
+        |_| unreachable!(),
+    )
+    .unwrap();
+}
+
+#[test]
+fn target_receipt_pin_survives_no_transition_and_requires_fresh_admission_after_save() {
+    let fixture = Fixture::new(basic());
+    let mut receipt = witnessed_receipt(&fixture);
+    let pin =
+        persistent_data::tool::ReceiptAdmission::capture(&fixture.candidate, &receipt).unwrap();
+    pin.verify().unwrap();
+    let root = journal::directory(&fixture.candidate, RUN).unwrap();
+    receipt.phase = Phase::FailedRetained;
+    journal::save(&root, &receipt).unwrap();
+    let effects = Cell::new(0);
+    let admitted = || {
+        pin.verify()?;
+        effects.set(effects.get() + 1);
+        Ok::<_, CandidateError>(())
+    };
+    assert!(admitted().is_err());
+    assert_eq!(effects.get(), 0);
+    let fresh =
+        persistent_data::tool::ReceiptAdmission::capture(&fixture.candidate, &receipt).unwrap();
+    fresh.verify().unwrap();
+    // Pending publication is never a settled receipt, even with identical data.
+    fs::write(root.join("state.pending"), b"pending").unwrap();
+    assert!(fresh.verify().is_err());
+    assert!(
+        persistent_data::tool::ReceiptAdmission::capture(&fixture.candidate, &receipt).is_err()
+    );
+}
+
+#[test]
+fn sqlite_process_policy_refuses_image_entrypoints_and_unqualified_owner_handoffs() {
+    let mut config = config::container_base(&image(), json!({}));
+    config["Entrypoint"] = json!([]);
+    config["Cmd"] = json!(["/usr/local/bin/bun", "-e", "explicit program"]);
+    storage_process_policy(&config).unwrap();
+    config["User"] = json!("0:0");
+    storage_process_policy(&config).unwrap();
+    for (field, value) in [
+        ("Entrypoint", json!(["docker-entrypoint.sh"])),
+        ("Entrypoint", Value::Null),
+        ("Cmd", json!(["postgres"])),
+        ("User", json!("70:70")),
+        ("User", json!(70)),
+    ] {
+        let mut other = config.clone();
+        other[field] = value;
+        assert_eq!(
+            storage_process_policy(&other).unwrap_err().code,
+            "native_graph_storage_process_unqualified"
+        );
+    }
+}
+
+#[test]
+fn new_storage_attempt_refuses_pending_prior_work_before_another_tool_installation() {
+    let fixture = Fixture::new(basic());
+    let mut receipt = witnessed_receipt(&fixture);
+    let root = journal::directory(&fixture.candidate, RUN).unwrap();
+    assert!(storage_attempt_preflight(&fixture.candidate, OWNER, BOOT).is_err());
+    receipt.phase = Phase::Removed;
+    for resource in receipt.resources.values_mut() {
+        resource.phase = "removed".into();
+    }
+    journal::save(&root, &receipt).unwrap();
+    storage_attempt_preflight(&fixture.candidate, OWNER, BOOT).unwrap();
+    // Even otherwise valid Removed history may retain an unknown verifier.
+    // The new run must not create a second helper or attempt data enrollment.
+    let effects = Cell::new(0);
+    fs::write(
+        root.join("storage-call.pending"),
+        b"native-storage-call-v1\n",
+    )
+    .unwrap();
+    let install = || {
+        storage_attempt_preflight(&fixture.candidate, OWNER, BOOT)?;
+        effects.set(effects.get() + 1);
+        Ok::<_, CandidateError>(())
+    };
+    assert!(install().is_err());
+    assert_eq!(effects.get(), 0);
+    assert!(
+        reservations_using(
+            &fixture.candidate,
+            OWNER,
+            BOOT,
+            true,
+            |_, _| unreachable!(),
+            |_| unreachable!()
+        )
+        .is_err()
+    );
+}
+
 #[test]
 fn foreground_guard_refuses_before_provider_connection_or_graph_reservation() {
     let fixture = Fixture::new(basic());
     let prepared = fixture.prepared(json!({"web":{}}), &BTreeMap::new());
     let guard = || Err(error("native_graph_canceled", "canceled"));
     assert_eq!(
-        run_guarded(&fixture.candidate, prepared, Some(&guard), None)
+        run_guarded(&fixture.candidate, prepared, Some(&guard), None, None)
             .unwrap_err()
             .code,
         "native_graph_canceled"

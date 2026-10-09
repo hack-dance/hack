@@ -12,7 +12,11 @@ import {
   privateNativeConfigImportSourceProof,
 } from "./native-config-import-inputs.ts";
 import { parseImportDocument } from "./native-config-import-parser.ts";
-import { mapLegacyNativeStorageAdoption } from "./native-config-import-plan.ts";
+import {
+  mapLegacyNativeRetainedRouting,
+  mapLegacyNativeStorageAdoption,
+} from "./native-config-import-plan.ts";
+import { mapLegacyComposeRouting } from "./native-config-import-routing.ts";
 import { acquireManagedProjectEnvFile } from "./native-project-inputs.ts";
 import type { NativeProjectEnvSelectionOptions } from "./project-env-config.ts";
 import {
@@ -76,6 +80,7 @@ export class LegacyAdoptionManagedEnvAdmission {
     readonly source: NativeConfigImportInputs;
     readonly signal?: AbortSignal;
     readonly binary?: string;
+    readonly retainedRouting?: boolean;
   }): Promise<LegacyAdoptionManagedEnvAdmission> {
     try {
       if (
@@ -86,11 +91,31 @@ export class LegacyAdoptionManagedEnvAdmission {
       const source = opts.source;
       const signal = opts.signal;
       const binary = opts.binary;
+      const retainedRouting = opts.retainedRouting === true;
       if (signal !== undefined && !(signal instanceof AbortSignal)) {
         refuse();
       }
       await source.assertFresh({ signal });
-      const mapped = mapLegacyNativeStorageAdoption(source);
+      const mapped = (
+        retainedRouting
+          ? mapLegacyNativeRetainedRouting
+          : mapLegacyNativeStorageAdoption
+      )(source);
+      const routing = retainedRouting
+        ? mapLegacyComposeRouting({
+            config: parseImportDocument({
+              text: source.configText,
+              document: "config",
+            }).value,
+            compose: parseImportDocument({
+              text: source.composeText,
+              document: "compose",
+            }).value,
+          })?.intent
+        : undefined;
+      if (retainedRouting && !routing) {
+        refuse();
+      }
       const candidate = mapped.candidate;
       if (!(candidate && isRecord(candidate.services))) {
         refuse();
@@ -132,6 +157,7 @@ export class LegacyAdoptionManagedEnvAdmission {
         overlay,
         binary,
         signal,
+        routing,
       });
       const context = {
         source,
@@ -165,6 +191,13 @@ export class LegacyAdoptionManagedEnvAdmission {
       refuse();
     }
     return this.#context.local.fields;
+  }
+
+  get routingResolution() {
+    if (!ownedAdmissions.has(this)) {
+      refuse();
+    }
+    return this.#context.local.routingResolution;
   }
 
   /** Private manifest provenance; captured sources are factory-issued and still fresh. No key or layer reread. */

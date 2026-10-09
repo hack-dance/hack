@@ -19,23 +19,13 @@ function stack(caller: string): string {
   return `${header}\n    at refuse (${sourcePath}:200:9)\n    at requireValue (${sourcePath}:204:5)\n    at ${caller}\n    at synthetic (private-canary:1:1)`;
 }
 
-test("replay source pin verifies the actual canonical owner and refuses changed identity correspondence", () => {
+test("historical stack classifier refuses the superseding owner source", () => {
+  // The replay now uses owner-issued reasons; the old line/hash classifier stays unavailable.
   const before = captureProcessPolicyOwnershipSource();
   const after = captureProcessPolicyOwnershipSource();
-  expect(before?.sha256).toBe(sourceSha256);
-  expect(before?.path).toBe(sourcePath);
-  expect(sameProcessPolicyOwnershipSource(before, after)).toBe(true);
-  if (!before) {
-    throw new Error("Missing canonical source pin");
-  }
-  expect(
-    sameProcessPolicyOwnershipSource(before, {
-      ...before,
-      identity: "replaced",
-    })
-  ).toBe(false);
-  expect(sameProcessPolicyOwnershipSource(before, null)).toBe(false);
-  expect(sameProcessPolicyOwnershipSource(null, after)).toBe(false);
+  expect(before).toBeNull();
+  expect(after).toBeNull();
+  expect(sameProcessPolicyOwnershipSource(before, after)).toBe(false);
 });
 
 test("only fixed immediate owning callsites can name a replay reason", () => {

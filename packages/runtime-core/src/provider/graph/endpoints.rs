@@ -20,11 +20,45 @@ pub(super) struct EndpointScope<'a> {
     pub service: &'a str,
 }
 
+/// Private generation inputs shared by the receipt-specific observation adapters.
+/// These strings do not grant ownership or publication authority.
+pub(super) struct EndpointIdentity<'a> {
+    pub domain: &'a str,
+    pub owner: &'a str,
+    pub run: &'a str,
+    pub review: &'a str,
+    pub boot: &'a str,
+    pub service: &'a str,
+}
+
+impl<'a> From<&EndpointScope<'a>> for EndpointIdentity<'a> {
+    fn from(scope: &EndpointScope<'a>) -> Self {
+        Self {
+            domain: "hack-endpoint-v1",
+            owner: &scope.receipt.owner,
+            run: &scope.receipt.run,
+            review: &scope.receipt.plan_id,
+            boot: scope.boot,
+            service: scope.service,
+        }
+    }
+}
+
+#[cfg(test)]
 pub(super) fn resolve(
     container: &Value,
     network: &Value,
     port: u16,
     scope: &EndpointScope<'_>,
+) -> Result<GuestEndpoint, CandidateError> {
+    resolve_identity(container, network, port, &EndpointIdentity::from(scope))
+}
+
+fn resolve_identity(
+    container: &Value,
+    network: &Value,
+    port: u16,
+    identity: &EndpointIdentity<'_>,
 ) -> Result<GuestEndpoint, CandidateError> {
     let invalid = || {
         error(
@@ -82,12 +116,12 @@ pub(super) fn resolve(
         "{:x}",
         Sha256::digest(
             serde_json::to_vec(&json!([
-                "hack-endpoint-v1",
-                scope.receipt.owner,
-                scope.receipt.run,
-                scope.receipt.plan_id,
-                scope.boot,
-                scope.service,
+                identity.domain,
+                identity.owner,
+                identity.run,
+                identity.review,
+                identity.boot,
+                identity.service,
                 container_id,
                 network_id,
                 endpoint_id,
@@ -119,16 +153,32 @@ pub(super) fn resolve_attached(
     port: u16,
     scope: &EndpointScope<'_>,
 ) -> Result<GuestEndpoint, CandidateError> {
+    resolve_owned_attached(
+        container,
+        networks,
+        port,
+        &scope.receipt.resources,
+        &EndpointIdentity::from(scope),
+        |resource| expected_labels(scope.receipt, resource),
+    )
+}
+
+pub(super) fn resolve_owned_attached(
+    container: &Value,
+    networks: &BTreeMap<String, Option<Value>>,
+    port: u16,
+    resources: &BTreeMap<String, Resource>,
+    identity: &EndpointIdentity<'_>,
+    expected: impl Fn(&Resource) -> Value,
+) -> Result<GuestEndpoint, CandidateError> {
     let invalid = || {
         error(
             "graph_endpoint_identity",
             "Declared graph network attachments are missing, foreign or inconsistent.",
         )
     };
-    let resource = scope
-        .receipt
-        .resources
-        .get(&format!("container:{}", scope.service))
+    let resource = resources
+        .get(&format!("container:{}", identity.service))
         .ok_or_else(invalid)?;
     let container_id = resource
         .id
@@ -136,19 +186,17 @@ pub(super) fn resolve_attached(
         .filter(|id| hex(id, 64))
         .ok_or_else(invalid)?;
     if resource.kind != Kind::Container
-        || resource.key != scope.service
+        || resource.key != identity.service
         || Some(container_id) != container["Id"].as_str()
     {
         return Err(invalid());
     }
     let labels_match = |resource: &Resource, labels: &Value| {
-        expected_labels(scope.receipt, resource)
-            .as_object()
-            .is_some_and(|expected| {
-                expected
-                    .iter()
-                    .all(|(key, value)| labels.get(key) == Some(value))
-            })
+        expected(resource).as_object().is_some_and(|expected| {
+            expected
+                .iter()
+                .all(|(key, value)| labels.get(key) == Some(value))
+        })
     };
     if !labels_match(resource, &container["Config"]["Labels"]) {
         return Err(invalid());
@@ -165,9 +213,7 @@ pub(super) fn resolve_attached(
             if attachments.len() != 1 {
                 return Err(invalid());
             }
-            let mut found = scope
-                .receipt
-                .resources
+            let mut found = resources
                 .values()
                 .filter(|r| r.kind == Kind::Network && r.name == mode);
             let selected = found.next().ok_or_else(invalid)?;
@@ -187,7 +233,7 @@ pub(super) fn resolve_attached(
     let mut view = container.clone();
     for (index, logical) in declared.iter().enumerate() {
         let key = format!("network:{logical}");
-        let owned = scope.receipt.resources.get(&key).ok_or_else(invalid)?;
+        let owned = resources.get(&key).ok_or_else(invalid)?;
         let network = networks
             .get(&key)
             .and_then(Option::as_ref)
@@ -211,7 +257,7 @@ pub(super) fn resolve_attached(
         }
         let attachment = attachments.get(&owned.name).ok_or_else(invalid)?;
         view["NetworkSettings"]["Networks"] = json!({owned.name.clone():attachment});
-        let endpoint = resolve(&view, network, port, scope)?;
+        let endpoint = resolve_identity(&view, network, port, identity)?;
         let member = &network["Containers"][&endpoint.container_id];
         if identities
             .insert(
@@ -329,6 +375,37 @@ mod tests {
         assert_ne!(before.generation, after.generation);
         container["State"]["Running"] = json!(false);
         assert!(scoped(&container, &network, 3000).is_err());
+    }
+    #[test]
+    fn legacy_generation_encoding_remains_literal_and_native_domain_is_distinct() {
+        let (container, network) = fixture();
+        let legacy = scoped(&container, &network, 3000).unwrap();
+        assert_eq!(
+            legacy.generation,
+            "9885d177a022b3dc7dd5a81d49d0f5c87bed7b506d6d874ee61e80e81f3b0fec"
+        );
+        let native = resolve_identity(
+            &container,
+            &network,
+            3000,
+            &EndpointIdentity {
+                domain: "hack-native-endpoint-v1",
+                owner: &"b".repeat(32),
+                run: &"a".repeat(32),
+                review: &"d".repeat(64),
+                boot: "boot",
+                service: "web",
+            },
+        )
+        .unwrap();
+        assert_ne!(legacy.generation, native.generation);
+        let (receipt, container, networks) = attached_fixture();
+        assert_eq!(
+            attached(&receipt, &container, &networks)
+                .unwrap()
+                .generation,
+            "b18bc9429647251dcd5efd7c3d788bfc63044dd246058943d0b87422862ddd6d"
+        );
     }
     #[test]
     fn endpoint_requires_matching_membership_in_both_directions() {

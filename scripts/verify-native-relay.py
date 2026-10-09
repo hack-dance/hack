@@ -44,11 +44,12 @@ def validate(data: bytes) -> None:
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 2:
-        sys.exit("Usage: verify-native-relay.py /path/to/hack-relay-guest")
+    if len(sys.argv) not in (2, 3) or (len(sys.argv) == 3 and sys.argv[2] != "--storage-witness"):
+        sys.exit("Usage: verify-native-relay.py /path/to/guest-ELF [--storage-witness]")
+    label = "storage witness" if len(sys.argv) == 3 else "dependency relay"
     try:
         with Path(sys.argv[1]).open("rb") as source:
             validate(source.read(2 * 1024 * 1024 + 1))
     except (OSError, ValueError, struct.error) as error:
-        sys.exit(f"Invalid native guest relay: {error}")
-    print("Verified static Linux ARM64 dependency relay")
+        sys.exit(f"Invalid native guest {label}: {error}")
+    print(f"Verified static Linux ARM64 {label}")

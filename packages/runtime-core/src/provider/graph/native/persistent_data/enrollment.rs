@@ -164,42 +164,6 @@ fn slot_key(namespace: &str, storage: &str) -> String {
     format!("persistent-{:x}", digest.finalize())
 }
 
-/// Read-only binding selection. It never turns pending/staging into enrollment and
-/// grants no observation authority. The consumer must call read_retained afterward.
-pub(super) fn existing_binding(
-    root: &Path,
-    namespace: &str,
-    storage: &str,
-) -> Result<Option<Binding>, CandidateError> {
-    if !super::super::super::hex(namespace, 64) || !super::logical_name(storage) {
-        return Err(refused());
-    }
-    let root = Directory::open(root)?;
-    let path = root.path.join(slot_key(namespace, storage));
-    match fs::symlink_metadata(&path) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            root.verify()?;
-            return Ok(None);
-        }
-        Err(_) => return Err(refused()),
-        Ok(_) => {}
-    }
-    let slot = Directory::open(&path)?;
-    let lock = state::Lock::acquire_existing(&slot.path).map_err(|_| refused())?;
-    let files = Files { root, slot, lock };
-    files.verify(None)?;
-    let record = RecordPin::read(&files.slot.path.join("owner.json"))?;
-    let owner = super::decode(&record.bytes)?;
-    if owner.0.binding.scope.namespace != namespace
-        || owner.0.binding.scope.storage != storage
-        || !matches!(owner.0.enrollment, Enrollment::Enrolled { .. })
-    {
-        return Err(refused());
-    }
-    files.verify(Some(&record))?;
-    Ok(Some(owner.0.binding))
-}
-
 struct Guard<'a> {
     deadline: Instant,
     cancelled: &'a AtomicBool,

@@ -201,6 +201,13 @@ impl Store {
                 return Err(error("Unrecognized unversioned database."));
             }
             let mut nonce = [0u8; 32];
+            // musl does not expose getentropy through libc; use the same kernel
+            // entropy device as the other Linux candidate identity owners.
+            #[cfg(target_os = "linux")]
+            std::fs::File::open("/dev/urandom")
+                .and_then(|mut file| std::io::Read::read_exact(&mut file, &mut nonce))
+                .map_err(|_| error("Node identity entropy unavailable."))?;
+            #[cfg(not(target_os = "linux"))]
             // SAFETY: getentropy writes exactly this writable 32-byte buffer.
             if unsafe { libc::getentropy(nonce.as_mut_ptr().cast(), nonce.len()) } != 0 {
                 return Err(error("Node identity entropy unavailable."));

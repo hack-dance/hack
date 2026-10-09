@@ -35,6 +35,7 @@ import {
   prepareNativeComposeDownHooks,
   readNativeComposeDownHookBinding,
 } from "./native-compose-down-hooks.ts";
+import { nativeComposeEffectRefusal } from "./native-compose-effect-diagnostics.ts";
 import {
   assertNativeComposeFileRunSupported,
   assertNativeComposeSavedFileEngines,
@@ -2078,9 +2079,13 @@ function throwNativeComposeCommandError(error: unknown): never {
     error instanceof NativeComposeOwnershipError ||
     error instanceof NativeComposeBuildError
   ) {
+    const diagnostic = nativeComposeEffectRefusal(error);
     throw new HackCliError({
       code: "E_CONFIG_INVALID",
       message: error.message,
+      ...(diagnostic
+        ? { detail: { native_compose_effect_refusal: diagnostic } }
+        : {}),
     });
   }
   if (error instanceof NativeComposeRenderError) {

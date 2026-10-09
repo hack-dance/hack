@@ -13,10 +13,12 @@ import {
 import { tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import { createNativeComposeProbe } from "../../src/lib/native-compose-ownership.ts";
+import { createNativeComposeVmFileClient } from "../../src/lib/native-compose-vm-file-client.ts";
 
 export const DOCKER_FORMAT_IMAGE_ID = `sha256:${"c".repeat(64)}`;
 const HASH = /^[a-f0-9]{64}$/;
 const INSPECT_PATH = `/v1.41/images/${DOCKER_FORMAT_IMAGE_ID}/json`;
+const ENGINE_ID = "synthetic-docker-format-engine";
 function refuse(): never {
   throw new Error("Synthetic Docker formatting fixture is unsafe or changed.");
 }
@@ -88,7 +90,10 @@ export async function withDockerImageFormatFixture<T>(opts: {
   readonly binary: string;
   readonly sha256: string;
   readonly image: Readonly<Record<string, unknown>>;
-  readonly observe: (probe: (format: string) => Promise<string>) => Promise<T>;
+  readonly observe: (
+    probe: (format: string) => Promise<string>,
+    vmProbe: (format: string) => Promise<string>
+  ) => Promise<T>;
 }): Promise<T> {
   const binary = opts.binary,
     sha256 = opts.sha256,
@@ -120,6 +125,7 @@ export async function withDockerImageFormatFixture<T>(opts: {
   };
   let server: ReturnType<typeof Bun.serve> | undefined;
   let unexpected = false;
+  let vmFailed = false;
   try {
     await mkdir(config, { mode: 0o700 });
     await writeFile(join(config, "config.json"), "{}", {
@@ -131,6 +137,9 @@ export async function withDockerImageFormatFixture<T>(opts: {
       unix: socket,
       fetch(request) {
         const url = new URL(request.url);
+        if (request.method === "GET" && url.pathname === "/info") {
+          return Response.json({ ID: ENGINE_ID });
+        }
         if (
           url.pathname === "/_ping" &&
           ["HEAD", "GET"].includes(request.method)
@@ -153,6 +162,7 @@ export async function withDockerImageFormatFixture<T>(opts: {
     const socketIdentity = await lstat(socket),
       environment = process.env;
     let owner: ReturnType<typeof createNativeComposeProbe>;
+    let vm: ReturnType<typeof createNativeComposeVmFileClient>;
     try {
       // The owner captures this selection synchronously before returning.
       process.env = {
@@ -163,10 +173,17 @@ export async function withDockerImageFormatFixture<T>(opts: {
         DOCKER_API_VERSION: "1.41",
       };
       owner = createNativeComposeProbe({ timeoutMs: 15_000 });
+      Reflect.deleteProperty(process.env, "DOCKER_API_VERSION");
+      vm = createNativeComposeVmFileClient({
+        engineId: ENGINE_ID,
+        signal: new AbortController().signal,
+        deadline: Date.now() + 15_000,
+        assertFresh: assertRoot,
+      });
     } finally {
       process.env = environment;
     }
-    const result = await observe(async (format) => {
+    const checkSelection = async () => {
       await assertRoot();
       const selected = await lstat(socket);
       if (
@@ -177,14 +194,30 @@ export async function withDockerImageFormatFixture<T>(opts: {
       ) {
         refuse();
       }
-      return await owner([
-        "image",
-        "inspect",
-        "--format",
-        format,
-        DOCKER_FORMAT_IMAGE_ID,
-      ]);
-    });
+    };
+    const args = (format: string) => [
+      "image",
+      "inspect",
+      "--format",
+      format,
+      DOCKER_FORMAT_IMAGE_ID,
+    ];
+    const result = await observe(
+      async (format) => {
+        await checkSelection();
+        return await owner(args(format));
+      },
+      async (format) => {
+        try {
+          await checkSelection();
+          return await vm.call(args(format));
+        } catch (error) {
+          // An unknown VM child lifetime must never authorize fixture removal.
+          vmFailed = true;
+          throw error;
+        }
+      }
+    );
     await assertRoot();
     if (
       unexpected ||
@@ -196,6 +229,8 @@ export async function withDockerImageFormatFixture<T>(opts: {
   } finally {
     await server?.stop(true);
     await assertRoot();
-    await rm(root, { recursive: true });
+    if (!vmFailed) {
+      await rm(root, { recursive: true });
+    }
   }
 }

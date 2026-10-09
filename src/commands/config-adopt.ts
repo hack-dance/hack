@@ -15,6 +15,7 @@ import {
   openLegacyComposeAdoptedGenerationStore,
 } from "../lib/native-compose-adoption-generation.ts";
 import { previewLegacyComposeAdoption } from "../lib/native-compose-adoption-preview.ts";
+import { legacyComposePublicationRefusal } from "../lib/native-compose-adoption-publication-diagnostics.ts";
 import { legacyComposeRetainedOrdered } from "../lib/native-compose-adoption-readiness.ts";
 import { runLegacyComposeRetainedRoutingOperation } from "../lib/native-compose-adoption-routing-execution.ts";
 import { requireNativeComposeBackend } from "../lib/native-compose-selection.ts";
@@ -251,12 +252,16 @@ export const configAdoptCommand = withHandler(spec, async ({ ctx, args }) => {
       branch: args.options.branch,
     });
   } catch (error: unknown) {
+    const diagnostic = legacyComposePublicationRefusal(error);
     throw new HackCliError({
       code: "E_CONFIG_INVALID",
       message:
         error instanceof LegacyComposeAdoptedGenerationError
           ? error.message
           : "Legacy adoption refused; original data and recovery evidence retained. Values omitted.",
+      ...(diagnostic
+        ? { detail: { legacy_adoption_publication_refusal: diagnostic } }
+        : {}),
     });
   } finally {
     process.off("SIGINT", cancel);

@@ -1,7 +1,8 @@
 //! Receipt4 tool installation under the original provider lease. It uses the same
 //! artifact/upload boundary as relay startup, but requires no host dependency or
 //! authored Compose. No ordinary caller is enabled until persistence qualification.
-//! Ambiguous upload leaves the native intent; this module has no delete or retry path.
+//! Ambiguous transport retains intent. Saved admission never uploads or repairs;
+//! retirement consumes an issued handle and refuses every retained data dependency.
 use super::super::{Phase, Receipt, journal};
 use super::*;
 use crate::{
@@ -11,6 +12,9 @@ use crate::{
 use base64::Engine as _;
 use std::{path::Path, time::Instant};
 use zeroize::Zeroize;
+
+pub(in crate::provider::graph::native) mod lifecycle;
+mod saved;
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -56,6 +60,7 @@ pub(in crate::provider::graph::native) struct Installed {
     owner: String,
     guest: GuestIdentity,
     reference: Reference,
+    saved: saved::Saved,
 }
 fn refused() -> CandidateError {
     super::enrollment::refused()
@@ -137,7 +142,13 @@ pub(in crate::provider::graph::native) fn install(
         .guest()
         .persistent_identity()
         .map_err(|_| refused())?;
-    if receipt.owner != guest.owner || receipt.boot != guest.boot_id {
+    if receipt.owner != guest.owner
+        || receipt.boot != guest.boot_id
+        || receipt
+            .data
+            .values()
+            .any(|data| data.guest_identity() != &guest)
+    {
         return Err(refused());
     }
     let (saved, saved_root) = journal::load(
@@ -274,11 +285,18 @@ pub(in crate::provider::graph::native) fn install(
     journal::save(root, receipt)?;
     check(engine, deadline, fresh)?;
     artifact.verify().map_err(|_| refused())?;
+    let saved = saved::Saved::capture(candidate, &run)?;
+    if serde_json::to_vec(&saved.receipt()?).map_err(|_| refused())?
+        != serde_json::to_vec(receipt).map_err(|_| refused())?
+    {
+        return Err(refused());
+    }
     let installed = Installed {
         run,
         owner,
         guest,
         reference,
+        saved,
     };
     installed.verify(engine, deadline, fresh)?;
     Ok(installed)
@@ -290,45 +308,14 @@ impl Installed {
         deadline: Instant,
         fresh: &dyn Fn() -> Result<(), CandidateError>,
     ) -> Result<(), CandidateError> {
-        self.reference.validate()?;
-        check(engine, deadline, fresh)?;
-        if engine
-            .guest()
-            .persistent_identity()
-            .map_err(|_| refused())?
-            != self.guest
-        {
-            return Err(refused());
-        }
-        let output = engine
-            .guest()
-            .execute_until(
-                INSPECT,
-                &[
-                    &self.run,
-                    &self.owner,
-                    &self.reference.artifact,
-                    &self.reference.bytes.to_string(),
-                ],
+        lifecycle::verify(
+            self,
+            &mut lifecycle::Live {
+                engine,
                 deadline,
-            )
-            .map_err(|_| refused())?;
-        check(engine, deadline, fresh)?;
-        let identity = identity(&output)?;
-        if self.reference.root
-            != Some(DirectoryIdentity {
-                device: identity.device,
-                inode: identity.inode,
-            })
-            || self.reference.helper
-                != Some(DirectoryIdentity {
-                    device: identity.helper_device,
-                    inode: identity.helper_inode,
-                })
-        {
-            return Err(refused());
-        }
-        Ok(())
+                fresh,
+            },
+        )
     }
     fn identity_string(&self) -> Result<String, CandidateError> {
         let root = self.reference.root.as_ref().ok_or_else(refused)?;

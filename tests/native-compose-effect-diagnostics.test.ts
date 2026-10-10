@@ -19,6 +19,7 @@ import {
   createNativeComposeProbe,
   NativeComposeOwnershipError,
 } from "../src/lib/native-compose-ownership.ts";
+import { restoreEnv } from "./helpers/env.ts";
 
 const DIAGNOSTIC = {
   stage: "effect-witness",
@@ -207,7 +208,7 @@ test.each([
     });
   } finally {
     opened.mockRestore();
-    process.env.HACK_RUNTIME_BACKEND = oldBackend;
+    restoreEnv("HACK_RUNTIME_BACKEND", oldBackend);
     await rm(root, { recursive: true, force: true });
   }
 });

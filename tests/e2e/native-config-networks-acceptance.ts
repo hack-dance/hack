@@ -41,7 +41,9 @@ const GLOBAL_PROJECT = "hack-dev-proxy";
 const FIXTURE = "hack.e2e.native-config-networks";
 const OUTPUT_LIMIT = 2 * 1024 * 1024;
 const COMMAND_TIMEOUT = 180_000;
-const SCENARIO_TIMEOUT = 20 * 60_000; // TEMP measurement; restore after sizing
+// Witness-bearing exec/up verification runs three fresh helper carriers per proof; on the
+// hosted Linux engine that is ~12-15 s per exec and ~35 s per up across three checkouts.
+const SCENARIO_TIMEOUT = 60 * 60_000;
 const CLEANUP_TIMEOUT = 3 * 60_000;
 const BUN_TAG = "oven/bun:1.4.2-slim";
 const CADDY_TAG = "lucaslorentz/caddy-docker-proxy:2.10.0-alpine";
@@ -1176,19 +1178,13 @@ export const nativeConfigNetworksScenario: Scenario = {
         remaining > 0,
         "Network scenario exceeded its whole-run budget"
       );
-      // TEMP diag: closed command head and elapsed only; remove before merge.
-      const startedAt = Date.now();
-      const result = await runNativeNetworkFixtureCommand({
+      return await runNativeNetworkFixtureCommand({
         argv,
         cwd,
         env: { ...env, ...extra },
         captures,
         timeoutMs: Math.min(COMMAND_TIMEOUT, remaining),
       });
-      process.stdout.write(
-        `[diag networks cmd] ${argv.slice(1, 4).join(" ")} elapsed=${Date.now() - startedAt} exit=${result.exitCode} timedOut=${result.timedOut} budgetLeft=${remaining}\n`
-      );
-      return result;
     };
     const manifest = await qualifyArtifacts(ctx, execute);
     const composePlugin = await provisionNativeNetworkFixtureComposePlugin({
@@ -1603,14 +1599,7 @@ export const nativeConfigNetworksScenario: Scenario = {
       startedRoots.add(primary.root);
       const controlledUp = await raw(primary, ["up", "--detach", "--json"], {
         PATH: `${shim}:${env.PATH}`,
-        HACK_NATIVE_COMPOSE_DIAG_FRAMES: "1", // TEMP diag; remove before merge
       });
-      if (!(await Bun.file(createReceipt).exists())) {
-        // TEMP diag: closed CLI JSON and frames only; remove before merge.
-        process.stdout.write(
-          `[diag networks] exit=${controlledUp.exitCode} timedOut=${controlledUp.timedOut}\nstdout:\n${controlledUp.stdout}\nstderr:\n${controlledUp.stderr}\n`
-        );
-      }
       resultOk(controlledUp, 1);
       requireValue(
         await Bun.file(createReceipt).exists(),

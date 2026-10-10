@@ -38,7 +38,6 @@ import {
   nativeComposeRunDependenciesReady,
   nativeComposeWorkloadsReady as ready,
 } from "./native-compose-completion.ts";
-import { nativeComposeDiagFrames } from "./native-compose-diag-frames.ts";
 import {
   bindNativeComposeDownHooks,
   prepareNativeComposeDownHooks,
@@ -2296,7 +2295,6 @@ async function dispatchNativeComposeCommand(
 }
 
 function throwNativeComposeCommandError(error: unknown): never {
-  nativeComposeDiagFrames("command", error);
   if (error instanceof NativeConfigCompilerError) {
     throw new HackCliError({
       code:

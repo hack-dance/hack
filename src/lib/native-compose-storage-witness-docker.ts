@@ -3,7 +3,6 @@ import { constants } from "node:fs";
 import { lstat, mkdir, open, readdir, rmdir, unlink } from "node:fs/promises";
 import { join } from "node:path";
 import { isRecord } from "./guards.ts";
-import { nativeComposeDiagFrames } from "./native-compose-diag-frames.ts";
 import {
   copyNativeComposeEffectRefusal,
   type NativeComposeEffectRefusal,
@@ -510,7 +509,6 @@ export async function createNativeComposeDockerStorageXattrCarrier(
       lifetime(context);
       return target;
     } catch (error) {
-      nativeComposeDiagFrames("docker-carrier", error);
       retainNativeComposeEffectRefusal(error, {
         stage,
         reason: nativeComposeEffectReason(error),
@@ -667,7 +665,6 @@ export async function createNativeComposeDockerStorageXattrCarrier(
         await Promise.allSettled(held.map((entry) => entry.file.close()));
       }
     } catch (error) {
-      nativeComposeDiagFrames("docker-carrier", error);
       retainNativeComposeEffectRefusal(error, {
         stage,
         reason: nativeComposeEffectReason(error),
@@ -760,7 +757,6 @@ export async function createNativeComposeDockerStorageXattrCarrier(
               imageIds: dependency.imageIds,
             });
           } catch (error) {
-            nativeComposeDiagFrames("docker-carrier", error);
             retainNativeComposeEffectRefusal(error, {
               stage: "storage-helper-policy",
               reason: nativeComposeEffectReason(error),
@@ -1017,7 +1013,6 @@ export async function createNativeComposeDockerStorageXattrCarrier(
         }
       }
     } catch (error) {
-      nativeComposeDiagFrames("docker-carrier", error);
       retainNativeComposeEffectRefusal(error, {
         stage,
         reason: nativeComposeEffectReason(error),

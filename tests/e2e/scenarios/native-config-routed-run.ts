@@ -337,12 +337,7 @@ async function heldRun(
   const running = opts.raw(
     opts.root,
     ["run", "web", "--", "bun", "-e", script, "--", "space arg", "$HOME"],
-    {
-      ...shim.env,
-      // TEMP diag; remove before merge
-      HACK_NATIVE_COMPOSE_DIAG_FRAMES: "1",
-      HACK_NATIVE_COMPOSE_PHASE_TRACE: "1",
-    }
+    shim.env
   );
   let observed: Record<string, unknown> | null = null;
   try {
@@ -364,18 +359,6 @@ async function heldRun(
       await Bun.sleep(100);
     }
     if (!(observed && isRecord(observed.labels))) {
-      // TEMP diag: closed states and CLI JSON only; remove before merge.
-      const active = await containers(opts.docker, source);
-      const settled = await Promise.race([
-        running.then(
-          (value) =>
-            `exit=${value.exitCode} timedOut=${value.timedOut}\nstdout:\n${value.stdout}\nstderr:\n${value.stderr}`
-        ),
-        Bun.sleep(150_000).then(() => "cli still running"),
-      ]);
-      process.stdout.write(
-        `[diag routed-run] containers=${JSON.stringify(active.map((value) => ({ state: value.state, oneOff: oneOff(value) })))}\n${settled}\n`
-      );
       throw new Error("Running owned one-off was not observed");
     }
     expect({
@@ -409,8 +392,6 @@ async function heldRun(
     }
     // Always reap the launched CLI before scenario ownership cleanup.
     const result = await running;
-    // TEMP diag: phase trace lines only; remove before merge.
-    process.stdout.write(`[diag routed-run cli stderr]\n${result.stderr}\n`);
     expectExit({
       result,
       codes: [17],

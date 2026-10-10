@@ -43,7 +43,7 @@ const OUTPUT_LIMIT = 2 * 1024 * 1024;
 const COMMAND_TIMEOUT = 180_000;
 // Witness-bearing exec/up verification runs three fresh helper carriers per proof; on the
 // hosted Linux engine that is ~12-15 s per exec and ~35 s per up across three checkouts.
-const SCENARIO_TIMEOUT = 60 * 60_000;
+const SCENARIO_TIMEOUT = 80 * 60_000;
 const CLEANUP_TIMEOUT = 3 * 60_000;
 const BUN_TAG = "oven/bun:1.4.2-slim";
 const CADDY_TAG = "lucaslorentz/caddy-docker-proxy:2.10.0-alpine";

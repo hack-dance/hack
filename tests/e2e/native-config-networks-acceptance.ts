@@ -1178,24 +1178,13 @@ export const nativeConfigNetworksScenario: Scenario = {
         remaining > 0,
         "Network scenario exceeded its whole-run budget"
       );
-      // TEMP diag: closed command head, elapsed and failure output; remove before merge.
-      const startedAt = Date.now();
-      const result = await runNativeNetworkFixtureCommand({
+      return await runNativeNetworkFixtureCommand({
         argv,
         cwd,
         env: { ...env, ...extra },
         captures,
         timeoutMs: Math.min(COMMAND_TIMEOUT, remaining),
       });
-      process.stdout.write(
-        `[diag networks cmd] ${argv.slice(1, 4).join(" ")} elapsed=${Date.now() - startedAt} exit=${result.exitCode} timedOut=${result.timedOut}\n`
-      );
-      if (result.exitCode !== 0 || result.timedOut) {
-        process.stdout.write(
-          `[diag networks cmd failure] stdout:\n${result.stdout.slice(0, 2000)}\nstderr:\n${result.stderr.slice(0, 3000)}\n`
-        );
-      }
-      return result;
     };
     const manifest = await qualifyArtifacts(ctx, execute);
     const composePlugin = await provisionNativeNetworkFixtureComposePlugin({

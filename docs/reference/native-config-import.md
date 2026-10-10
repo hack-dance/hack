@@ -138,8 +138,12 @@ grant does not authorize retained adoption of any of those feature families.
 
 These are Linux declaration defaults. Compose's file-backed binds can ignore
 permission options, so this preview does not establish original file modes or
-runtime binding equivalence. Retained adoption still refuses these declarations
-and grants before private values, keys or engine probes. See Docker's
+runtime binding equivalence. The ordinary retained-adoption baseline still refuses
+file declarations and grants before private values, keys or engine probes. The
+separate [retained-file owner](native-compose-adoption.md) requires original bind
+and material proof for its closed config-0444 and protected secret-0400/0600 subset;
+preview completeness does not provide that authority or qualify ordinary secret
+permissions. See Docker's
 [config grants](https://docs.docker.com/reference/compose-file/services/#configs)
 and [secret grants](https://docs.docker.com/reference/compose-file/services/#secrets).
 

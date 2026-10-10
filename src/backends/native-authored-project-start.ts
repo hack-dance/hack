@@ -5,10 +5,16 @@ import { NativeConfigCompilerError } from "../lib/native-config-compiler.ts";
 import { acquireNativeExecutionInputs } from "../lib/native-execution-inputs.ts";
 import {
   assertNativeFiniteHookBindings,
+  type NativeFiniteHooks,
   type NativeHookPhase,
   type NativeHookResult,
   selectNativeFiniteHooks,
 } from "../lib/native-host-hook-runner.ts";
+import {
+  assertNativeHostLifecycleBindings,
+  type NativeHostLifecycle,
+  selectNativeHostLifecycle,
+} from "../lib/native-host-lifecycle-contract.ts";
 import {
   type NativeAuthoredReceipt,
   type NativeAuthoredReview,
@@ -24,7 +30,15 @@ import {
   publishAuthoredReady,
   requireHookSuccess,
 } from "./native-authored-hook-lifecycle.ts";
-import type { serveNativeHookStop } from "./native-authored-hook-stop.ts";
+import {
+  createNativeAuthoredHostProcesses,
+  type NativeAuthoredHostProcesses,
+} from "./native-authored-host-processes.ts";
+import type { NativeAuthoredLiveStop } from "./native-authored-live-stop.ts";
+import {
+  captureNativeAuthoredProcessIncarnation,
+  type NativeAuthoredProcessIncarnation,
+} from "./native-authored-process-incarnation.ts";
 import {
   loadNativeAuthoredProjectRun,
   type NativeAuthoredProjectAdmission,
@@ -333,8 +347,10 @@ async function retireAttempt(opts: {
   readonly scope: NativeAuthoredProjectRunScope;
   readonly admission: NativeAuthoredProjectAdmission;
   readonly attempt: Attempt;
+  readonly beforeRetire?: (cleaned: NativeAuthoredReceipt) => Promise<void>;
 }): Promise<void> {
   const cleaned = await confirmRemoved(opts);
+  await opts.beforeRetire?.(cleaned);
   const { attempt } = opts;
   await opts.admission.retire({
     expectedStart: attempt.start,
@@ -358,6 +374,76 @@ function observeHook(opts: Options, event: NativeHookDiagnostic): void {
   }
 }
 
+type HostSelection = {
+  readonly hooks?: NativeFiniteHooks;
+  readonly lifecycle?: NativeHostLifecycle;
+  readonly persistent: boolean;
+  readonly owner?: NativeAuthoredHookOwner;
+  readonly processes?: NativeAuthoredHostProcesses;
+};
+function assertHostBindings(selected: HostSelection, inputs: Inputs): void {
+  if (selected.persistent && selected.lifecycle) {
+    assertNativeHostLifecycleBindings(
+      selected.lifecycle,
+      inputs.result.environment_plan
+    );
+  } else if (selected.hooks) {
+    assertNativeFiniteHookBindings({
+      hooks: selected.hooks,
+      report: inputs.result.environment_plan,
+    });
+  }
+}
+async function prepareHostSelection(opts: {
+  readonly inputs: () => Inputs;
+  readonly options: Options;
+  readonly admission: NativeAuthoredProjectAdmission;
+  readonly identity: string;
+  readonly signal: AbortSignal;
+  readonly remaining: () => number;
+}): Promise<HostSelection> {
+  const inputs = opts.inputs();
+  if (inputs.result.plan.host === undefined) {
+    return { persistent: false };
+  }
+  const lifecycle = selectNativeHostLifecycle(inputs.result.plan);
+  const persistent =
+    lifecycle.processes.length !== 0 ||
+    inputs.result.plan.host_bindings !== undefined;
+  const hooks = persistent
+    ? lifecycle.hooks
+    : selectNativeFiniteHooks(inputs.result.plan);
+  assertHostBindings({ hooks, lifecycle, persistent }, inputs);
+  const owner = await opts.admission.createHooks({
+    run: opts.options.run,
+    selectionHash: createHash("sha256").update(opts.identity).digest("hex"),
+  });
+  if (!persistent) {
+    return { hooks, lifecycle, persistent, owner };
+  }
+  const name = inputs.result.plan.name;
+  if (typeof name !== "string") {
+    throw new NativeComposeHostHookError();
+  }
+  const processes = await createNativeAuthoredHostProcesses({
+    scope: opts.options.scope,
+    run: opts.options.run,
+    semanticHash: inputs.result.semantic_hash,
+    projectName: name,
+    lifecycle,
+    report: () => opts.inputs().result.environment_plan,
+    resolveValues: (name) => opts.inputs().resolveHostValues(name),
+    signal: opts.signal,
+    remaining: opts.remaining,
+    assertFresh: async () => {
+      await opts.inputs().assertFresh();
+      await opts.admission.assertHeld();
+      await owner.assertFresh();
+    },
+  });
+  return { hooks, lifecycle, persistent, owner, processes };
+}
+
 async function runPreparedLifecycle(ctx: {
   readonly options: Options;
   readonly admitted: Attempt;
@@ -366,6 +452,8 @@ async function runPreparedLifecycle(ctx: {
   readonly inputs: () => Inputs;
   readonly storageTool: NativeAuthoredStorageTool | undefined;
   readonly hookOwner: NativeAuthoredHookOwner | undefined;
+  readonly hostProcesses: NativeAuthoredHostProcesses | undefined;
+  readonly hostRetired: () => void;
   readonly phase: (name: NativeHookPhase) => Promise<NativeHookResult>;
   readonly graph: AbortController;
   readonly hard: AbortController;
@@ -373,9 +461,9 @@ async function runPreparedLifecycle(ctx: {
   readonly admission: NativeAuthoredProjectAdmission;
   readonly stopped: Promise<boolean>;
   readonly completeStop: (removed: boolean) => void;
-  readonly endpoint: (
-    value: Awaited<ReturnType<typeof serveNativeHookStop>>
-  ) => void;
+  readonly endpoint: (value: {
+    readonly close: (force?: boolean) => Promise<void>;
+  }) => void;
   readonly published: () => void;
   readonly removed: () => void;
   readonly hookRetired: () => void;
@@ -385,6 +473,10 @@ async function runPreparedLifecycle(ctx: {
   let downBefore = false;
   let failure: unknown;
   let code = 1;
+  let liveStop: NativeAuthoredLiveStop | undefined;
+  let processSettled = false;
+  let original: NativeAuthoredProcessIncarnation | undefined;
+  let liveStopRequested = false;
   try {
     code = await serveNativeAuthoredProjectGraph({
       runtime: ctx.options.runtime,
@@ -398,7 +490,23 @@ async function runPreparedLifecycle(ctx: {
       signal: ctx.graph.signal,
       forceSignal: ctx.hard.signal,
       frontendHooks: ctx.hookOwner !== undefined,
-      onGroup: ctx.hookOwner?.graphChild,
+      liveStopOwner:
+        ctx.hookOwner === undefined
+          ? { requested: () => liveStopRequested }
+          : undefined,
+      onSettled: async () => {
+        await liveStop?.settled();
+        processSettled = true;
+        return undefined;
+      },
+      onGroup:
+        ctx.hookOwner?.graphChild ??
+        (async (pid) => {
+          original = await captureNativeAuthoredProcessIncarnation({
+            pid,
+            selected: ctx.options.runtime.binary,
+          });
+        }),
       beforeStop: ctx.hookOwner
         ? async () => {
             const result = await ctx.phase("down.before");
@@ -439,14 +547,23 @@ async function runPreparedLifecycle(ctx: {
             payload: () => ctx.payload,
             admitted: ctx.admitted,
             hookOwner: ctx.hookOwner,
+            assertHostReady: ctx.hostProcesses?.assertReady,
             phase: ctx.phase,
             inputs: ctx.inputs,
             admission: ctx.admission,
             remaining: ctx.remaining,
             published: ctx.published,
-            stop: () => ctx.graph.abort(),
+            stop: () => {
+              liveStopRequested = true;
+              ctx.graph.abort();
+            },
             stopped: ctx.stopped,
             endpoint: ctx.endpoint,
+            original,
+            liveStop: (value) => {
+              liveStop = value;
+            },
+            assertTool: ctx.storageTool?.assertFresh,
           },
           receipt,
           assertRunning,
@@ -456,6 +573,14 @@ async function runPreparedLifecycle(ctx: {
     });
   } catch (error) {
     failure = error;
+  }
+  if (ctx.hookOwner === undefined && !processSettled) {
+    // Removed guest resources cannot prove this original host group is absent.
+    // Keep every frontend binding and endpoint for unknown settlement.
+    throw (
+      failure ??
+      new Error("Native foreground settlement is unconfirmed; values omitted.")
+    );
   }
   ctx.hookOwner?.graphSettled();
   const retirement = {
@@ -467,6 +592,11 @@ async function runPreparedLifecycle(ctx: {
   if (ctx.hookOwner) {
     // Keep frontend bindings recoverable until every hook has known completion.
     await confirmRemoved(retirement);
+    if (ctx.hostProcesses) {
+      await ctx.hostProcesses.stop();
+      await ctx.hostProcesses.close();
+      ctx.hostRetired();
+    }
     await ctx.hookOwner.graphRemoved();
     if (downBefore) {
       const result = await ctx.phase("down.after");
@@ -479,7 +609,7 @@ async function runPreparedLifecycle(ctx: {
     await ctx.hookOwner.retire();
     ctx.hookRetired();
   }
-  await retireAttempt(retirement);
+  await retireAttempt({ ...retirement, beforeRetire: liveStop?.retire });
   ctx.removed();
   ctx.completeStop(failure === undefined);
   if (failure) {
@@ -529,6 +659,47 @@ async function failedAdmission(opts: {
     stage: opts.stage,
     compilerCode: compilerDiagnostic(error),
   });
+}
+
+async function stopUnstartedHostProcesses(opts: {
+  readonly processes: NativeAuthoredHostProcesses | undefined;
+  readonly attempt: Attempt | undefined;
+  readonly outcome: Outcome;
+}): Promise<{
+  readonly processes: NativeAuthoredHostProcesses | undefined;
+  readonly outcome: Outcome;
+}> {
+  if (!opts.processes || opts.attempt) {
+    return opts;
+  }
+  try {
+    await opts.processes.stop();
+    await opts.processes.close();
+    return { processes: undefined, outcome: opts.outcome };
+  } catch {
+    return { processes: opts.processes, outcome: "retained" };
+  }
+}
+
+async function closeAttemptOwners(opts: {
+  readonly host: NativeAuthoredHostProcesses | undefined;
+  readonly hookStop:
+    | { readonly close: (force?: boolean) => Promise<void> }
+    | undefined;
+  readonly storageTool: NativeAuthoredStorageTool | undefined;
+  readonly retained: boolean;
+}): Promise<void> {
+  try {
+    await opts.hookStop?.close(opts.retained);
+  } finally {
+    try {
+      await opts.host?.close();
+    } catch {
+      /* retained durable owner, no replay */
+    } finally {
+      await opts.storageTool?.close();
+    }
+  }
 }
 
 /**
@@ -609,9 +780,10 @@ export async function serveNativeAuthoredProject(
         let outcome: Outcome = "not-started";
         let nativeCode: string | undefined;
         let hookOwner: NativeAuthoredHookOwner | undefined;
+        let hostProcesses: NativeAuthoredHostProcesses | undefined;
         let storageTool: NativeAuthoredStorageTool | undefined;
         let hookStop:
-          | Awaited<ReturnType<typeof serveNativeHookStop>>
+          | { readonly close: (force?: boolean) => Promise<void> }
           | undefined;
         let stopCompleted: ((removed: boolean) => void) | undefined;
         const stopped = new Promise<boolean>((resolve) => {
@@ -623,6 +795,7 @@ export async function serveNativeAuthoredProject(
           if (
             (await admission.loadStart()) ||
             (await admission.hooksRetained()) ||
+            (await admission.liveStopRetained()) ||
             (await loadNativeAuthoredProjectRun(opts.scope))
           ) {
             outcome = "retained";
@@ -648,22 +821,17 @@ export async function serveNativeAuthoredProject(
             remaining();
           }
           const identity = hookSelection(inputs);
-          const hooks =
-            inputs.result.plan.host === undefined
-              ? undefined
-              : selectNativeFiniteHooks(inputs.result.plan);
-          if (hooks) {
-            assertNativeFiniteHookBindings({
-              hooks,
-              report: inputs.result.environment_plan,
-            });
-            hookOwner = await admission.createHooks({
-              run: opts.run,
-              selectionHash: createHash("sha256")
-                .update(identity)
-                .digest("hex"),
-            });
-          }
+          const selectedHost = await prepareHostSelection({
+            inputs: () => inputs,
+            options: opts,
+            admission,
+            identity,
+            signal: controller.signal,
+            remaining,
+          });
+          const { hooks, persistent } = selectedHost;
+          hookOwner = selectedHost.owner;
+          hostProcesses = selectedHost.processes;
           const phase = hookPhaseRunner({
             owner: hookOwner,
             hooks,
@@ -678,6 +846,7 @@ export async function serveNativeAuthoredProject(
             hard: hardSignal.signal,
             remaining,
             projectRoot: opts.scope.projectRoot,
+            hostProcesses: persistent,
             stage: (value) => {
               stage = HOOK_STAGES[value];
             },
@@ -697,6 +866,7 @@ export async function serveNativeAuthoredProject(
             hookPermit: await hookOwner?.permit({
               role: "preflight",
               semanticHash: inputs.result.semantic_hash,
+              processes: await hostProcesses?.proof(false),
             }),
           });
           stage = "native-plan";
@@ -729,10 +899,8 @@ export async function serveNativeAuthoredProject(
             ) {
               throw new Error("Native hook source changed; values omitted.");
             }
-            assertNativeFiniteHookBindings({
-              hooks,
-              report: inputs.result.environment_plan,
-            });
+            assertHostBindings(selectedHost, inputs);
+            await hostProcesses?.start();
             source = await admission.prepareSource({
               run: opts.run,
               metadata: inputs.metadata,
@@ -741,6 +909,7 @@ export async function serveNativeAuthoredProject(
               hookPermit: await hookOwner.permit({
                 role: "execution",
                 semanticHash: inputs.result.semantic_hash,
+                processes: await hostProcesses?.proof(true),
               }),
             });
             review = matchingReview(
@@ -776,6 +945,7 @@ export async function serveNativeAuthoredProject(
           await storageTool?.assertFresh();
           await source.assertFresh();
           await admission.assertHeld();
+          await hostProcesses?.assertReady();
           const admitted = attempt;
           await hookOwner?.graphEntered();
           const code = await runPreparedLifecycle({
@@ -786,6 +956,10 @@ export async function serveNativeAuthoredProject(
             inputs: () => inputs,
             storageTool,
             hookOwner,
+            hostProcesses,
+            hostRetired: () => {
+              hostProcesses = undefined;
+            },
             phase,
             graph: graphSignal,
             hard: hardSignal,
@@ -814,6 +988,13 @@ export async function serveNativeAuthoredProject(
           return { ok: true as const, code };
         } catch (error) {
           const failedStage = stage;
+          const host = await stopUnstartedHostProcesses({
+            processes: hostProcesses,
+            attempt,
+            outcome,
+          });
+          hostProcesses = host.processes;
+          outcome = host.outcome;
           stopCompleted?.(false);
           const failure = await failedAdmission({
             error,
@@ -829,11 +1010,12 @@ export async function serveNativeAuthoredProject(
           return { ok: false as const, error: failure };
         } finally {
           payload?.fill(0);
-          try {
-            await hookStop?.close(outcome !== "removed");
-          } finally {
-            await storageTool?.close();
-          }
+          await closeAttemptOwners({
+            host: hostProcesses,
+            hookStop,
+            storageTool,
+            retained: outcome !== "removed",
+          });
         }
       }
     );

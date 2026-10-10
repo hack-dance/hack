@@ -2,9 +2,9 @@
 
 An explicit `HACK_RUNTIME_BACKEND=native` selection delegates an authored
 `.hack/hack.project.json` project to the separate native foreground owner. The
-current command slice supports whole-project foreground `up` and saved-run `ps`
-on macOS with an
-absolute `HACK_NATIVE_BINARY` and private canonical `HACK_NATIVE_HOME`. It requires
+current command slice supports whole-project foreground `up`, saved-run `ps`,
+finite service `logs` and noninteractive service `exec` on macOS with an absolute `HACK_NATIVE_BINARY` and private
+canonical `HACK_NATIVE_HOME`. It requires
 the caller's separately prepared native provider pool and matching runtime binary.
 It does not install or select a runtime automatically. An omitted backend continues
 to use the [Compose command owner](native-compose-commands.md).
@@ -29,8 +29,8 @@ but refuses replacement of its inode. Selected path/ancestor aliases, identity
 or permission changes refuse, while exact owned shutdown remains possible after
 the host source is moved or deleted and preserves host data.
 
-Writable/other mounts, source acquisition, storage, file inputs, routing, endpoints
-and persistent host processes remain outside this bounded frontend. The existing
+Writable source mounts, source acquisition, file inputs and routing
+remain outside this bounded frontend. The existing
 closed two-owned-bridge graph capability keeps its separate receipt and refuses
 source/storage intersections. Finite typed host lifecycle hooks use the supervised
 frontend owner described below. Unsupported intent must
@@ -42,6 +42,10 @@ owner-mediated `down` refuse before input acquisition. `--branch` supplies an ex
 the canonical project namespace without inferring a Git branch. Profile and env
 selection keep their compiler contracts. `--env base` bypasses inherited overlays
 with an explicit base selection; omitting `--env` retains the authored/local default.
+
+The separate persistent-storage capability requires the runtime's pinned sibling
+witness tool and retains its own ownership and recovery checks. It cannot be combined
+with the supervised host-process capability below.
 
 `ps` and `ps --json` issue one authenticated current status request for the exact
 saved project and explicit branch selection. Text output lists service, container,
@@ -59,8 +63,12 @@ directories, saved record identities and the selected executable across its sing
 bounded request. It does not compile or read authored values, resolve env, run
 hooks, start workloads, repair state or perform cleanup. Cancellation waits for the
 owned request to settle. Profiles, env overrides, service subsets and other `ps`
-options are unsupported. Native `logs`, `exec`, `run` and `restart` remain separate
+options are unsupported. Native `run` and `restart` remain separate
 unsupported command slices.
+
+The separate persistent-storage capability requires the runtime's pinned sibling
+witness tool and retains its own ownership and recovery checks. It cannot be combined
+with the supervised host-process capability below.
 
 Startup shares the configured `HACK_COMPOSE_STARTUP_TIMEOUT_MS` budget across
 input preparation and native review, with a native maximum of 300000 milliseconds.
@@ -72,6 +80,52 @@ publication. The foreground owner remains attached until owned shutdown finishes
 Ctrl-C requests that shutdown. Exact durable Removed evidence retires the tagged
 native run and startup intent. Unknown, changed or live cleanup retains the attempt
 and refuses replay; a missing ready mapping does not authorize a fresh start.
+
+Ordinary whole-project `down` also supports a ready no-host generation, including
+persistent-storage plans. Its private no-host endpoint is issued by the original
+held startup admission before public Ready. It asks that same foreground owner to
+stop; no host declaration, hook permit, new controller or stored-PID signal is
+created. Success requires authenticated Removed, the original child and detached
+group's settlement, and exact endpoint/start/Ready/source retirement. Compute
+shutdown retains persistent data; this command adds no volume deletion authority.
+A missing, changed or dead endpoint refuses. Partial publication or retirement
+keeps startup evidence blocked. Legacy no-host version 1 records remain ineligible for dead-owner recovery.
+New version 2 records capture the original native child while its foreground
+owns it: PID, birth, executable identities, UID, host boot session, process group
+and session. Recovery uses two bounded complete process-metadata observations. It refuses
+any occupied original PID, including reuse or a zombie, and every live member of
+its former group or session. Unknown live membership refuses. Explicit zombie
+rows whose identity and state match both observations remain in the result, with
+unavailable session membership counted separately. This proves no live members
+at the observations; it does not prove the numeric group/session is absent.
+It never signals a saved numeric group. The original owner separately publishes
+one bound settlement observation only after its captured exit, drain and existing
+group-absence check. That observation cannot replace fresh recovery checks.
+A live SID lookup race permits an entirely fresh attempt only if a complete
+bounded reread positively observes that PID missing. Both earlier observations
+and their SID mappings are discarded; two new complete observations must fit the
+original monotonic budget, including any further proven disappearance. Disappeared
+PIDs remain only as denial facts: any reappearance in a later census or diagnostic
+reread refuses. State changes, still-live or unavailable rows, failed rereads and
+exhausted budget refuse. No individual row is skipped and no deadline is renewed.
+
+Darwin's [ps state implementation](https://github.com/apple-oss-distributions/adv_cmds/blob/main/ps/print.c)
+maps `SZOMB` to `Z`. The [XNU exit path](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/kern_exit.c)
+waits active asynchronous I/O and invalidates open files before publishing that
+state. Zombie process-group metadata can persist until reap, so unavailable SID
+on a stable `Z` row is distinct from unknown live membership. Changed, disappeared
+or newly observed zombie identities refuse rather than borrowing stale state.
+
+The existing recovery owner retains its leases and exact Ready/start/source,
+native owner and receipt bindings before and after cleanup. It phase-retires only
+the admitted endpoint and optional settlement record after authenticated Removed
+and null observations. Replaced, malformed, live or unknown evidence stays retained.
+Graph4 recovery additionally requires all data enrolled and the exact installed
+tool root/helper assertion, matching the native owner; source and topology
+families remain separately refused. These source controls do not qualify installed
+kill/recover/up or retained SQL behavior.
+Portable private-filesystem and stand-in lifecycle controls cover this boundary;
+installed Source4 SQL retention through public down/up remains a separate runtime gate.
 
 `down --recover` explicitly retires a complete stored native generation whose
 foreground publisher and frontend admission owner are both dead on the same host
@@ -119,12 +173,64 @@ for a normalized Compose hash. Source and fake-driver
 checks do not qualify an installed frontend, a live provider, the full authored
 corpus, actual dead-owner recovery or resource overhead; those remain separate gates.
 
+## Finite service logs
+
+An already running authored foreground owner supports `logs SERVICE --no-follow`
+on macOS. `--tail` defaults to 200 and accepts integers from 1 through 1000;
+`--json` returns separate stdout/stderr strings and a truncation flag. Plain output
+preserves those two streams. Follow mode, pretty formatting, time/query filters,
+profiles, environment overrides and multiple service selections refuse before any
+input or runtime operation. This is a finite log-read capability, not full logs parity.
+
+The read uses the existing authenticated native control socket and exact admitted
+service/container, guest boot and run receipt. It refuses a dead/wrong owner,
+changed authored project/local/source-envelope files, changed frontend mapping,
+resource replacement or a container restart during the read. The live owner keeps
+value-free input identity/hash pins; it does not reacquire managed values. Source
+mounts and persistent-data bindings retain their existing current ownership checks.
+
+Log tails use the Engine's existing limits: at most 1000 lines, a 4 MiB response
+transport bound, and 16 KiB of JSON-encoded text per output stream with explicit
+truncation. One 15-second observation budget covers the Engine, source and storage
+guest checks, within the existing bounded control reply. Cancellation or incomplete
+child/output settlement
+withholds the result; it never stops the foreground owner or retries a query. Logs
+may contain application values and are returned only to the requesting caller;
+they are never journaled or included in refusal diagnostics. Offline controls do
+not qualify a live provider or application log behavior.
+
+## Finite service exec
+
+`exec SERVICE -- COMMAND ARG...` sends one command to an already running authored
+service through its authenticated foreground owner. Arguments are literal, including
+empty arguments, spaces and shell characters. `--workdir` selects an absolute guest
+directory; the service's existing environment and user remain in force. Stdin is
+closed and no TTY is allocated. Interactive input, TTY control, env/profile overrides,
+multiple services and JSON formatting are unsupported. No shell is inserted.
+
+The owner verifies the admitted service, full resource ownership, guest boot, image,
+container start generation and current source/data bindings before each exec
+transport and after completion. The current input and hook permit remain pinned.
+A changed owner, member, source or container restart withholds the result. This does
+not start, restart or recover a project and does not acquire managed values.
+
+One 30-second observation budget includes identity proofs and the Engine's existing
+single exec create, attached start and completion inspection. Known completion
+preserves the command's exit code and binary stdout/stderr, with up to 1 MiB per
+stream and an explicit truncation notice. Cancellation or timeout settles the local
+request but cannot prove guest command termination. Unknown guest completion
+admits no command output and warns that effects may have occurred. Once a validated
+completion is being written, cancellation returns 130 and prevents remaining writes;
+already-written bytes cannot be retracted. No request is replayed and the foreground
+project is not stopped. Inspect the service before
+deciding whether another command is appropriate. Offline controls do not qualify
+installed native exec or live application behavior.
+
 ## Finite host lifecycle hooks
 
 The experimental foreground frontend admits typed `host.up.before`, `host.up.after`,
 `host.down.before` and `host.down.after` commands. Every phase and selected host
-environment binding is checked before the first hook. Persistent `host.processes`,
-host endpoints and unsupported workload capabilities still refuse; no intent is
+environment binding is checked before the first hook. Unsupported workload capabilities still refuse; no intent is
 stripped to make the graph acceptable. Normal standalone `graph native plan`, `run`
 and `serve` continue to refuse host intent. The frontend alone uses an explicit
 version 3 private source envelope and immutable finite-hook permit. Existing graph
@@ -163,6 +269,36 @@ retains evidence and requires separate resolution; no automatic hook replay or
 inferred completion is supplied.
 
 Portable controls and synthetic runtime acceptance are distinct from live provider
-acceptance. In particular, the retained Event Agent corpus includes persistent host
-processes and remains outside this finite-only slice; full NC05 corpus acceptance is
-still required.
+acceptance. Full NC05 corpus acceptance is still required.
+
+## Supervised host processes
+
+The native foreground frontend also admits normalized `host.processes` with startup
+`up` and exit `stop_on_down`, using the same Hack lifecycle mux controller as the
+ordinary CLI. Processes start after successful `up.before` and remain owned through
+workload readiness. After exact native Removed, the frontend stops its captured
+process groups before `down.after` and retires their owner only after known stop.
+Startup keeps the configured startup deadline; a running process has no added
+duration ceiling. This slice requires tmux because its existing backend supplies
+the captured group identity needed for stop; zellij remains unsupported here.
+
+An explicit private source-version5 permit binds the frontend owner, run, project,
+branch, semantic selection and process-owner/ready documents. Ordinary standalone
+native graph commands still refuse host intent. Source version3 finite hooks and
+native receipt versions2–5 retain their meanings. This capability refuses live-source,
+persistent-storage and owned-topology intersections before effects.
+
+Commands, cwd and managed values reach the supervised client through a private
+one-use local socket. The mux command contains only the internal client and opaque
+socket path; managed values are not placed in argv, mux environment or journals.
+Compiler-verified HTTP(S) host-binding references resolve to loopback only for host
+context, or to an explicit external hostname. Workload/guest, routed and TCP
+references remain unsupported until their delivery owners are integrated.
+
+Dead-owner recovery first proves the exact native Removed result, then uses the
+saved complete process metadata and current controller token to stop only the
+captured groups. A missing session requires those groups already absent; a PID
+alone never authorizes a signal. Changed metadata, foreign tokens or an interrupted
+launch without a complete ready/state pair retain evidence and cannot replay the
+process or hooks. Portable real-child controls do not qualify the retained Event
+Agent's tunnels, guest access or routing; live corpus acceptance remains open.

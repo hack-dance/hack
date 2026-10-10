@@ -166,15 +166,47 @@ export type NativeComposeOwnershipRefusal =
   | "endpoint"
   | "cross-scan-drift"
   | "unknown";
-const ownershipRefusals = new WeakMap<object, NativeComposeOwnershipRefusal>();
+const TOPOLOGY_PREDICATES = [
+  "network-members-shape",
+  "network-member-id",
+  "member-container-endpoint",
+  "workload-policy",
+  "workload-endpoint-keyset",
+  "created-endpoint-membership",
+  "live-endpoint-membership",
+] as const;
+export type NativeComposeTopologyPredicate =
+  (typeof TOPOLOGY_PREDICATES)[number];
+const ownershipRefusals = new WeakMap<
+  object,
+  Readonly<{
+    reason: NativeComposeOwnershipRefusal;
+    topologyPredicate: NativeComposeTopologyPredicate | null;
+  }>
+>();
 
 /** Only captured-reply replay reads this diagnostic; callers cannot mint it from error properties. */
 export function nativeComposeOwnershipRefusal(
   error: unknown
 ): NativeComposeOwnershipRefusal | undefined {
   return typeof error === "object" && error !== null
-    ? ownershipRefusals.get(error)
+    ? ownershipRefusals.get(error)?.reason
     : undefined;
+}
+
+/** Exact first topology predicate from this owner, without reading untrusted error fields. */
+export function nativeComposeTopologyPredicate(
+  error: unknown
+): NativeComposeTopologyPredicate | undefined {
+  return typeof error === "object" && error !== null
+    ? (ownershipRefusals.get(error)?.topologyPredicate ?? undefined)
+    : undefined;
+}
+
+export function isNativeComposeTopologyPredicate(
+  value: unknown
+): value is NativeComposeTopologyPredicate {
+  return TOPOLOGY_PREDICATES.some((predicate) => predicate === value);
 }
 
 /** Copies, prototypes and caller-created errors cannot acquire an observed probe classification. */
@@ -220,18 +252,20 @@ export class NativeComposeOwnershipError extends Error {
 }
 function refuse(
   code: FailureCode = "E_NATIVE_COMPOSE_OWNERSHIP",
-  reason: NativeComposeOwnershipRefusal = "unknown"
+  reason: NativeComposeOwnershipRefusal = "unknown",
+  topologyPredicate: NativeComposeTopologyPredicate | null = null
 ): never {
   const error = new NativeComposeOwnershipError(code);
-  ownershipRefusals.set(error, reason);
+  ownershipRefusals.set(error, Object.freeze({ reason, topologyPredicate }));
   throw error;
 }
 function requireValue(
   value: unknown,
-  reason: NativeComposeOwnershipRefusal = "unknown"
+  reason: NativeComposeOwnershipRefusal = "unknown",
+  topologyPredicate: NativeComposeTopologyPredicate | null = null
 ): asserts value {
   if (!value) {
-    refuse("E_NATIVE_COMPOSE_OWNERSHIP", reason);
+    refuse("E_NATIVE_COMPOSE_OWNERSHIP", reason, topologyPredicate);
   }
 }
 
@@ -708,11 +742,16 @@ async function collectInspections(input: {
             row.internal === expected.internal,
           "bridge-policy"
         );
-        requireValue(isRecord(row.containers), "topology");
+        requireValue(
+          isRecord(row.containers),
+          "topology",
+          "network-members-shape"
+        );
         const members = Object.keys(row.containers);
         requireValue(
           members.every((id) => ID.test(id)),
-          "topology"
+          "topology",
+          "network-member-id"
         );
         observations.members.set(resource.name, members.sort());
         networks.push({ id: resource.id, name: resource.name });
@@ -931,7 +970,8 @@ function requireLiveMember(opts: {
       networkPolicies(selection)[0]?.internal === false &&
       networkId !== undefined &&
       endpoint.NetworkID === networkId,
-    "topology"
+    "topology",
+    "live-endpoint-membership"
   );
   return true;
 }
@@ -957,7 +997,8 @@ function validateTopology(
           containers.has(id) &&
           Object.hasOwn(observations.endpoints.get(id) ?? {}, name)
       ),
-      "topology"
+      "topology",
+      "member-container-endpoint"
     );
   }
   for (const container of observations.containers) {
@@ -966,7 +1007,7 @@ function validateTopology(
         workload.generationId === container.generationId &&
         workload.service === container.service
     );
-    requireValue(policy !== undefined, "topology");
+    requireValue(policy !== undefined, "topology", "workload-policy");
     const endpoints = observations.endpoints.get(container.id);
     requireValue(
       endpoints !== undefined &&
@@ -974,7 +1015,8 @@ function validateTopology(
           endpoints,
           policy.networks.map((network) => network.name)
         ),
-      "topology"
+      "topology",
+      "workload-endpoint-keyset"
     );
     for (const attachment of policy.networks) {
       const endpoint = endpoints[attachment.name];
@@ -995,7 +1037,8 @@ function validateTopology(
       if (unrealizedCreatedEndpoint) {
         requireValue(
           !observations.members.get(attachment.name)?.includes(container.id),
-          "topology"
+          "topology",
+          "created-endpoint-membership"
         );
       }
       const expected = container.oneoff

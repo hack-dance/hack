@@ -29,6 +29,25 @@ pub(super) fn require_unpublished(candidate: &Candidate, run: &str) -> Result<()
 pub enum Action {
     Status,
     Cleanup,
+    Logs,
+    Exec,
+}
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LogsSelection {
+    service: String,
+    tail: u16,
+}
+impl LogsSelection {
+    fn valid(&self) -> bool {
+        !self.service.is_empty()
+            && self.service.len() <= 128
+            && self
+                .service
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.'))
+            && (1..=1000).contains(&self.tail)
+    }
 }
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -43,10 +62,22 @@ struct Request {
     run: String,
     review: String,
     action: Action,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    logs: Option<LogsSelection>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    exec: Option<runtime::ExecSelection>,
 }
 impl Request {
     fn validate(&self, review: &native_input::Review) -> Result<(), CandidateError> {
-        if self.version != 2 || self.run != review.scope().run || self.review != review.review_id()
+        if self.version != 2
+            || self.run != review.scope().run
+            || self.review != review.review_id()
+            || match (&self.action, &self.logs, &self.exec) {
+                (Action::Logs, Some(logs), None) => !logs.valid(),
+                (Action::Exec, None, Some(exec)) => !exec.valid(),
+                (Action::Status | Action::Cleanup, None, None) => false,
+                _ => true,
+            }
         {
             return Err(refused());
         }
@@ -70,6 +101,12 @@ struct Reply {
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "outcome", rename_all = "kebab-case", deny_unknown_fields)]
 enum Outcome {
+    Exec {
+        exec: runtime::ServiceExec,
+    },
+    Logs {
+        logs: runtime::ServiceLogs,
+    },
     Status {
         #[serde(deserialize_with = "decode_snapshot")]
         snapshot: Snapshot,
@@ -104,13 +141,51 @@ fn decode_snapshot<'de, D: serde::Deserializer<'de>>(reader: D) -> Result<Snapsh
     })
 }
 impl Reply {
-    fn validate(&self, expected: &Receipt, action: Action) -> Result<(), CandidateError> {
+    fn validate(
+        &self,
+        expected: &Receipt,
+        action: Action,
+        selected: Option<&LogsSelection>,
+        exec_selected: Option<&runtime::ExecSelection>,
+    ) -> Result<(), CandidateError> {
         let review = &expected.review;
         if self.version != 2 || self.run != review.scope().run || self.review != review.review_id()
         {
             return Err(refused());
         }
         let receipt = match &self.result {
+            Outcome::Exec { exec } => {
+                if action != Action::Exec || !exec.valid(exec_selected.ok_or_else(refused)?) {
+                    return Err(refused());
+                }
+                &exec.receipt
+            }
+            Outcome::Logs { logs } => {
+                let selected = selected.ok_or_else(refused)?;
+                if action != Action::Logs
+                    || !selected.valid()
+                    || logs.service != selected.service
+                    || logs.receipt.phase != Phase::ReadyObserved
+                    || logs
+                        .receipt
+                        .resources
+                        .get(&format!("container:{}", selected.service))
+                        .and_then(|r| r.id.as_deref())
+                        != Some(logs.container.as_str())
+                    || !logs.receipt.readiness.contains_key(&selected.service)
+                    || serde_json::to_vec(&logs.stdout)
+                        .map_err(|_| refused())?
+                        .len()
+                        > 16386
+                    || serde_json::to_vec(&logs.stderr)
+                        .map_err(|_| refused())?
+                        .len()
+                        > 16386
+                {
+                    return Err(refused());
+                }
+                &logs.receipt
+            }
             Outcome::Status { snapshot } => {
                 if action != Action::Status
                     || snapshot
@@ -173,6 +248,7 @@ pub fn serve_with_storage_tool(
     storage_tool: Option<&StorageTool>,
 ) -> Result<Receipt, CandidateError> {
     prepared.assert_fresh(candidate)?;
+    let read_pin = prepared.read_pin();
     let review = prepared.input().review().clone();
     let run = review.scope().run.to_owned();
     let mut publication = owner::Publication::bind(candidate, &review)?;
@@ -259,10 +335,11 @@ pub fn serve_with_storage_tool(
         let Some(mut stream) = publication.accept()? else {
             continue;
         };
-        let request: Request = match transport::read(&mut stream, Duration::from_secs(5), 4096) {
-            Ok(request) => request,
-            Err(_) => continue,
-        };
+        let request: Request =
+            match transport::read(&mut stream, Duration::from_secs(5), 512 * 1024) {
+                Ok(request) => request,
+                Err(_) => continue,
+            };
         if request.validate(&review).is_err() {
             continue;
         }
@@ -270,6 +347,27 @@ pub fn serve_with_storage_tool(
         let result = match request.action {
             Action::Status => inspect(candidate, &run).map(|snapshot| Outcome::Status { snapshot }),
             Action::Cleanup => clean().map(|receipt| Outcome::Cleaned { receipt }),
+            Action::Exec => {
+                let selected = request.exec.as_ref().ok_or_else(refused)?;
+                let check = || {
+                    publication.verify()?;
+                    if signals.pending() {
+                        return Err(refused());
+                    }
+                    read_pin.verify(candidate)
+                };
+                runtime::service_exec(candidate, &receipt, selected, &check)
+                    .map(|exec| Outcome::Exec { exec })
+            }
+            Action::Logs => {
+                let logs = request.logs.as_ref().ok_or_else(refused)?;
+                let check = || {
+                    publication.verify()?;
+                    read_pin.verify(candidate)
+                };
+                runtime::logs(candidate, &receipt, &logs.service, logs.tail, &check)
+                    .map(|logs| Outcome::Logs { logs })
+            }
         };
         let result = result.unwrap_or_else(|error| Outcome::Refused {
             code: error.code.into(),
@@ -283,7 +381,12 @@ pub fn serve_with_storage_tool(
             review: review.review_id().into(),
             result,
         };
-        reply.validate(&receipt, request.action)?;
+        reply.validate(
+            &receipt,
+            request.action,
+            request.logs.as_ref(),
+            request.exec.as_ref(),
+        )?;
         if cleaned {
             // Retire before writing on the retained authenticated stream. Clients
             // verify both absent publication paths and the exact durable Removed journal.
@@ -307,20 +410,82 @@ pub fn request(
     candidate: &Candidate,
     options: RequestOptions<'_>,
 ) -> Result<Value, CandidateError> {
-    let pin = owner::Pin::load(candidate, options.run)?;
+    if matches!(options.action, Action::Logs | Action::Exec) {
+        return Err(refused());
+    }
+    request_selected(candidate, options.run, options.action, None, None)
+}
+/// Finite authored logs require a live authenticated owner; no direct Engine fallback.
+pub fn logs(
+    candidate: &Candidate,
+    run: &str,
+    service: &str,
+    tail: u16,
+) -> Result<Value, CandidateError> {
+    let selected = LogsSelection {
+        service: service.into(),
+        tail,
+    };
+    if !selected.valid() {
+        return Err(refused());
+    }
+    request_selected(candidate, run, Action::Logs, Some(selected), None)
+}
+/// Exactly one finite noninteractive authored command; no direct Engine fallback.
+pub fn exec(
+    candidate: &Candidate,
+    run: &str,
+    service: &str,
+    argv: &[String],
+    workdir: Option<&str>,
+) -> Result<Value, CandidateError> {
+    let selected = runtime::ExecSelection {
+        service: service.into(),
+        argv: argv.to_vec(),
+        workdir: workdir.map(str::to_owned),
+    };
+    if !selected.valid() {
+        return Err(refused());
+    }
+    request_selected(candidate, run, Action::Exec, None, Some(selected))
+}
+fn request_selected(
+    candidate: &Candidate,
+    run: &str,
+    action: Action,
+    selected: Option<LogsSelection>,
+    exec_selected: Option<runtime::ExecSelection>,
+) -> Result<Value, CandidateError> {
+    let pin = owner::Pin::load(candidate, run)?;
     let review = pin.review();
     let expected = journal::read_control(candidate, review)?;
     let mut stream = pin.connect()?;
     let input = Request {
         version: 2,
         kind: RequestKind::NativeGraphControl,
-        run: options.run.into(),
+        run: run.into(),
         review: review.review_id().into(),
-        action: options.action,
+        action,
+        logs: selected.clone(),
+        exec: exec_selected.clone(),
     };
     transport::write(&mut stream, &input, Duration::from_secs(5))?;
-    let reply: Reply = transport::read(&mut stream, Duration::from_secs(30), LIMIT)?;
-    reply.validate(&expected, options.action)?;
+    let reply: Reply = transport::read(
+        &mut stream,
+        if action == Action::Exec {
+            Duration::from_secs(40)
+        } else {
+            Duration::from_secs(30)
+        },
+        if action == Action::Exec {
+            4 * 1024 * 1024
+        } else if action == Action::Logs {
+            128 * 1024
+        } else {
+            LIMIT
+        },
+    )?;
+    reply.validate(&expected, action, selected.as_ref(), exec_selected.as_ref())?;
     let current = journal::read_control(candidate, review)?;
     current.check_binding(&expected)?;
     if let Outcome::Cleaned { receipt } = &reply.result {

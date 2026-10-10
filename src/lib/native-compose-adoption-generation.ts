@@ -7,6 +7,7 @@ import { isRecord } from "./guards.ts";
 import {
   acquireLegacyComposeAdoptionPreparationBinding,
   inspectLegacyComposeAdoptionResources,
+  inspectLegacyComposeRetainedFileResources,
   inspectLegacyComposeSourceBindResources,
   type LegacyComposeVerifiedBinding,
 } from "./native-compose-adoption-binding.ts";
@@ -32,21 +33,24 @@ import {
   type LegacyComposeRetainedOutcome,
 } from "./native-compose-adoption-execution.ts";
 import {
+  type LegacyComposeRetainedFileProof,
+  normalizeLegacyComposeRetainedFileCandidate,
+  observeLegacyComposeRetainedFileProof,
+  readLegacyComposeRetainedFileProof,
+} from "./native-compose-adoption-files.ts";
+import {
   legacyComposeFreshJobResult,
   legacyComposeJobStates,
 } from "./native-compose-adoption-jobs.ts";
 import {
+  type LegacyComposeStorageIntent,
   planLegacyComposeAdoption,
   planLegacyComposeRetainedBasicBuildAdoption,
+  planLegacyComposeRetainedFileAdoption,
   planLegacyComposeRetainedRoutingAdoption,
   planLegacyComposeSourceBindAdoption,
 } from "./native-compose-adoption-plan.ts";
 import { readSavedLegacyComposeAdoptionProjection } from "./native-compose-adoption-projection.ts";
-import {
-  type LegacyComposePublicationRefusal,
-  legacyComposePublicationRefusal,
-  retainLegacyComposePublicationRefusal,
-} from "./native-compose-adoption-publication-diagnostics.ts";
 import {
   type LegacyComposeRetainedPlan,
   legacyComposeRetainedOrdered,
@@ -70,8 +74,10 @@ import {
   inspectLegacyComposeJobStates,
   inspectLegacyComposeReadiness,
   inspectLegacyComposeRuntimeConfig,
+  type LegacyComposeContainerState,
 } from "./native-compose-adoption-runtime.ts";
 import { holdSavedLegacyComposeSourceBind } from "./native-compose-adoption-source-bind.ts";
+import { createNativeComposeProbe } from "./native-compose-ownership.ts";
 import {
   createNativeComposePrivateMutationLock,
   type HeldDirectory,
@@ -95,10 +101,7 @@ import {
   openNativeComposeRouteClaims,
   parseNativeComposeRouteReference,
 } from "./native-compose-route-claims.ts";
-import {
-  NATIVE_CONFIG_INPUT_LIMIT,
-  NativeConfigCompilerError,
-} from "./native-config-compiler.ts";
+import { NATIVE_CONFIG_INPUT_LIMIT } from "./native-config-compiler.ts";
 import {
   type NativeConfigImportSourceIdentity,
   readNativeConfigImportSourceFile,
@@ -109,6 +112,7 @@ import {
   freezeImportValue,
   mapLegacyNativeBranchStorageAdoption,
   mapLegacyNativeRetainedBasicBuild,
+  mapLegacyNativeRetainedFileStorage,
   mapLegacyNativeRetainedRouting,
   mapLegacyNativeRetainedSourceBind,
   mapLegacyNativeStorageAdoption,
@@ -142,6 +146,7 @@ type SavedManifest = {
     | 5
     | 6
     | 7
+    | 8
     | 9
     | 10
     | 11
@@ -154,6 +159,7 @@ type SavedManifest = {
   readonly binding: unknown;
   readonly runtimeConfig: unknown;
   readonly projectionProof?: unknown;
+  readonly fileProof?: unknown;
   readonly routingClaims?: NativeComposeRouteReference;
   readonly routingRoot?: string;
   readonly buildProof?: { readonly source: unknown; readonly images: unknown };
@@ -223,113 +229,30 @@ export class LegacyComposeAdoptedGenerationError extends Error {
 function refuse(code: Code = "E_LEGACY_ADOPTION_STATE"): never {
   throw new LegacyComposeAdoptedGenerationError(code);
 }
-/** Only the original deadline guards may issue this value-free reason. */
-function refuseRoutingProofDeadline(
-  stage?: LegacyComposePublicationRefusal["stage"]
-): never {
-  const error = new LegacyComposeAdoptedGenerationError(
-    "E_LEGACY_ADOPTION_STATE"
-  );
-  if (stage) {
-    retainLegacyComposePublicationRefusal(error, {
-      stage,
-      reason: "proof-deadline",
-    });
-  }
-  throw error;
-}
 function cancelled(signal?: AbortSignal) {
   if (signal?.aborted) {
     refuse("E_LEGACY_ADOPTION_CANCELLED");
   }
 }
 function translate(error: unknown, signal?: AbortSignal): never {
-  try {
-    cancelled(signal);
-    if (error instanceof LegacyComposeAdoptedGenerationError) {
-      throw error;
-    }
-    if (
-      error instanceof NativeComposeGenerationError &&
-      error.code === "E_NATIVE_COMPOSE_BUSY"
-    ) {
-      refuse("E_LEGACY_ADOPTION_BUSY");
-    }
-    const translated = new LegacyComposeAdoptedGenerationError(
-      "E_LEGACY_ADOPTION_STATE"
-    );
-    const diagnostic = legacyComposeOrderedRefusal(error);
-    if (diagnostic) {
-      attachLegacyComposeOrderedRefusal(translated, diagnostic);
-    }
-    throw translated;
-  } catch (translated: unknown) {
-    const diagnostic = legacyComposePublicationRefusal(error);
-    if (diagnostic) {
-      retainLegacyComposePublicationRefusal(translated, diagnostic);
-    }
-    throw translated;
+  cancelled(signal);
+  if (error instanceof LegacyComposeAdoptedGenerationError) {
+    throw error;
   }
-}
-
-/** Read only known owners' closed codes, never arbitrary error properties or text. */
-function recordPublicationRefusal(
-  error: unknown,
-  stage: LegacyComposePublicationRefusal["stage"]
-): void {
-  try {
-    if (legacyComposePublicationRefusal(error)) {
-      return;
-    }
-    let reason: LegacyComposePublicationRefusal["reason"] = "unclassified";
-    const code: unknown =
-      typeof error === "object" && error !== null
-        ? Object.getOwnPropertyDescriptor(error, "code")?.value
-        : undefined;
-    if (error instanceof LegacyComposeAdoptedGenerationError) {
-      switch (code) {
-        case "E_LEGACY_ADOPTION_STATE":
-          reason = "legacy-state";
-          break;
-        case "E_LEGACY_ADOPTION_BUSY":
-          reason = "legacy-busy";
-          break;
-        case "E_LEGACY_ADOPTION_CHANGED":
-          reason = "legacy-changed";
-          break;
-        case "E_LEGACY_ADOPTION_UNSUPPORTED":
-          reason = "legacy-unsupported";
-          break;
-        case "E_LEGACY_ADOPTION_CANCELLED":
-          reason = "legacy-cancelled";
-          break;
-        default:
-          break;
-      }
-    } else if (error instanceof NativeComposeGenerationError) {
-      switch (code) {
-        case "E_NATIVE_COMPOSE_STATE":
-          reason = "private-state";
-          break;
-        case "E_NATIVE_COMPOSE_BUSY":
-          reason = "private-busy";
-          break;
-        case "E_NATIVE_COMPOSE_UNCERTAIN":
-          reason = "private-uncertain";
-          break;
-        case "E_NATIVE_COMPOSE_STALE":
-          reason = "private-stale";
-          break;
-        default:
-          break;
-      }
-    } else if (error instanceof NativeConfigCompilerError) {
-      reason = "compiler-transport";
-    }
-    retainLegacyComposePublicationRefusal(error, { stage, reason });
-  } catch {
-    // Classification is optional and must not replace the original rejection.
+  if (
+    error instanceof NativeComposeGenerationError &&
+    error.code === "E_NATIVE_COMPOSE_BUSY"
+  ) {
+    refuse("E_LEGACY_ADOPTION_BUSY");
   }
+  const translated = new LegacyComposeAdoptedGenerationError(
+    "E_LEGACY_ADOPTION_STATE"
+  );
+  const diagnostic = legacyComposeOrderedRefusal(error);
+  if (diagnostic) {
+    attachLegacyComposeOrderedRefusal(translated, diagnostic);
+  }
+  throw translated;
 }
 function hash(text: string) {
   return createHash("sha256").update(text).digest("hex");
@@ -380,6 +303,9 @@ function sourceFileIdentity(
   );
 }
 function manifestFieldKeys(value: Record<string, unknown>) {
+  if (value.adoption_generation_version === 8) {
+    return "adoption_generation_version,binding,fileProof,files,id,kind,projectRoot,runtimeConfig,sourceFiles";
+  }
   if (value.adoption_generation_version === 14) {
     return "adoption_generation_version,binding,files,id,kind,projectRoot,projectionProof,routingClaims,routingRoot,runtimeConfig,sourceFiles";
   }
@@ -426,6 +352,7 @@ function manifest(value: unknown, root: string, id: string): SavedManifest {
           Array.isArray(value.buildProof.images)) ||
         value.adoption_generation_version === 11 ||
         value.adoption_generation_version === 10 ||
+        value.adoption_generation_version === 8 ||
         (value.adoption_generation_version === 5 &&
           (!Object.hasOwn(value, "projectionProof") ||
             (isRecord(value.projectionProof) &&
@@ -463,6 +390,9 @@ function manifest(value: unknown, root: string, id: string): SavedManifest {
       ? { branchProof: value.branchProof }
       : {}),
     runtimeConfig: value.runtimeConfig,
+    ...(value.adoption_generation_version === 8
+      ? { fileProof: value.fileProof }
+      : {}),
     ...(value.adoption_generation_version === 14
       ? {
           routingClaims: parseNativeComposeRouteReference(value.routingClaims),
@@ -572,6 +502,8 @@ export type LegacyComposeAdoptedGenerationStore = {
   readonly withLease: <T>(opts: {
     readonly generation: LegacyComposeAdoptedGeneration;
     readonly run: (input: Readonly<PrivateInputs>) => Promise<T>;
+    /** Saved observation only; exec and mutations always reacquire current material. */
+    readonly material?: "verify" | "saved";
   }) => Promise<T>;
   /** Journal retained-container effects before spawning. Failed or uncertain completion fences ordinary replay. */
   readonly withMutation: (opts: {
@@ -637,6 +569,85 @@ const retainedRouteObservations = new WeakMap<
   Context,
   RetainedRouteObservation
 >();
+function savedRetainedFileContainers(
+  meta: SavedManifest
+): readonly { readonly id: string; readonly service: string }[] {
+  if (!(isRecord(meta.binding) && Array.isArray(meta.binding.containers))) {
+    refuse();
+  }
+  return meta.binding.containers.map((value: unknown) => {
+    if (
+      !(
+        isRecord(value) &&
+        keys(value, "id,name,service") &&
+        typeof value.id === "string" &&
+        typeof value.name === "string" &&
+        typeof value.service === "string"
+      )
+    ) {
+      refuse();
+    }
+    return { id: value.id, service: value.service };
+  });
+}
+function savedRetainedFileProof(
+  meta: SavedManifest,
+  candidate: unknown
+): LegacyComposeRetainedFileProof {
+  return readLegacyComposeRetainedFileProof({
+    proof: meta.fileProof,
+    candidate,
+    containers: savedRetainedFileContainers(meta),
+  });
+}
+async function verifyRetainedFileMaterial(opts: {
+  readonly ctx: Context;
+  readonly candidate: unknown;
+  readonly intent: LegacyComposeStorageIntent;
+  readonly binding: LegacyComposeVerifiedBinding;
+  readonly proof: LegacyComposeRetainedFileProof;
+}): Promise<void> {
+  const { ctx, candidate, intent, binding, proof } = opts;
+  const states = await inspectLegacyComposeContainerStates({
+    binding,
+    signal: ctx.signal,
+    timeoutMs: ctx.timeoutMs,
+  });
+  const materialProbe = createNativeComposeProbe({
+    signal: ctx.signal,
+    timeoutMs: ctx.timeoutMs,
+  });
+  await observeLegacyComposeRetainedFileProof({
+    projectRoot: ctx.root,
+    candidate,
+    containers: binding.containers.map((container) => ({
+      ...container,
+      running:
+        states.find((state) => state.id === container.id)?.running === true,
+    })),
+    saved: proof,
+    signal: ctx.signal,
+    probe: async (args) => {
+      await ctx.check();
+      const output = await materialProbe(args);
+      await ctx.check();
+      return output;
+    },
+  });
+  if (
+    JSON.stringify(
+      await inspectLegacyComposeRetainedFileResources({
+        root: ctx.root,
+        intent,
+        candidate,
+        signal: ctx.signal,
+        timeoutMs: ctx.timeoutMs,
+      })
+    ) !== JSON.stringify(binding)
+  ) {
+    refuse("E_LEGACY_ADOPTION_CHANGED");
+  }
+}
 async function assertRetainedBuildSource(opts: {
   readonly ctx: Context;
   readonly meta: SavedManifest;
@@ -689,6 +700,7 @@ async function requireSelectedTopologyOwner(opts: {
   readonly plural: boolean;
   readonly requiresV5: boolean;
   readonly branch: boolean;
+  readonly fileFamily: boolean;
   readonly preparing: boolean;
 }) {
   const { ctx, selected, meta, custom, plural, requiresV5, preparing, branch } =
@@ -704,6 +716,14 @@ async function requireSelectedTopologyOwner(opts: {
     (meta.adoption_generation_version === 11) !== plural ||
     (meta.adoption_generation_version === 5) !== healthOnly ||
     (meta.adoption_generation_version === 10) !== bridgeAndHealth ||
+    (meta.adoption_generation_version === 8) !== opts.fileFamily ||
+    (opts.fileFamily &&
+      (custom ||
+        plural ||
+        requiresV5 ||
+        branch ||
+        meta.binding.binding_version !== 1 ||
+        meta.projectionProof !== undefined)) ||
     (meta.adoption_generation_version === 13) !== branch ||
     (branch &&
       (custom ||
@@ -753,6 +773,7 @@ async function requireSelectedTopologyOwner(opts: {
     (state.adoption_receipt_version === 11) !== plural ||
     (state.adoption_receipt_version === 5) !== healthOnly ||
     (state.adoption_receipt_version === 10) !== bridgeAndHealth ||
+    (state.adoption_receipt_version === 8) !== opts.fileFamily ||
     (state.adoption_receipt_version === 13) !== branch ||
     (state.adoption_receipt_version === 9) !==
       (meta.adoption_generation_version === 9) ||
@@ -833,18 +854,13 @@ async function assertRetainedRouteState(
   deadline: number,
   assertOwner: (
     current: Context
-  ) => Promise<Awaited<ReturnType<typeof readInputs>>>,
-  entryObserved = false,
-  refusalStage?: LegacyComposePublicationRefusal["stage"]
+  ) => Promise<Awaited<ReturnType<typeof readInputs>>>
 ): Promise<void> {
   const binding = loaded.inputs.binding;
   if (binding.binding_version !== 14 || retainedRouteObservations.has(ctx)) {
     refuse();
   }
-  // The caller just completed this full resource proof. Only read-only admission
-  // or an uncommitted receipt staging write may intervene. Scoped observations
-  // recheck source/receipt authority; exit still performs a full fresh binding.
-  const first = entryObserved ? loaded : await assertOwner(ctx);
+  const first = await assertOwner(ctx);
   if (
     first.manifest.id !== loaded.manifest.id ||
     JSON.stringify(first.inputs.binding) !== JSON.stringify(binding)
@@ -856,11 +872,8 @@ async function assertRetainedRouteState(
   let active = true;
   const assertActive = () => {
     cancelled(current.signal);
-    if (!(active && Number.isFinite(deadline))) {
+    if (!(active && Number.isFinite(deadline)) || Date.now() >= deadline) {
       refuse();
-    }
-    if (Date.now() >= deadline) {
-      refuseRoutingProofDeadline(refusalStage);
     }
   };
   retainedRouteObservations.set(current, {
@@ -875,10 +888,6 @@ async function assertRetainedRouteState(
     },
   });
   try {
-    if (entryObserved) {
-      await assertOwner(current);
-      assertActive();
-    }
     await assertLegacyComposeRetainedRoutingState({
       binding,
       routing: retainedRoutingIntent(loaded.inputs),
@@ -921,7 +930,8 @@ function selectedPlanner(routing: boolean, basic: boolean) {
 async function readInputs(
   ctx: Context,
   selected: Anchor,
-  preparing = false
+  preparing = false,
+  material: "verify" | "saved" = "verify"
 ): Promise<{
   readonly manifest: Manifest;
   readonly inputs: Readonly<PrivateInputs>;
@@ -962,6 +972,7 @@ async function readInputs(
       join(generationRoot, "candidate.json"),
       meta.files.candidate
     );
+    const fileFamily = meta.adoption_generation_version === 8;
     const basic = meta.adoption_generation_version === 9;
     const routing = meta.adoption_generation_version === 14;
     if (routing && meta.routingRoot !== ctx.routingRoot) {
@@ -984,7 +995,10 @@ async function readInputs(
     }
     let mapper = selectedMapper(routing, basic);
     let planner = selectedPlanner(routing, basic);
-    if (sourceBind) {
+    if (fileFamily) {
+      mapper = mapLegacyNativeRetainedFileStorage;
+      planner = planLegacyComposeRetainedFileAdoption;
+    } else if (sourceBind) {
       mapper = mapLegacyNativeRetainedSourceBind;
       planner = planLegacyComposeSourceBindAdoption;
     } else if (basic) {
@@ -1020,6 +1034,7 @@ async function readInputs(
       plural: planned.intent?.ownedNetworks !== undefined,
       requiresV5: retainedPlan.requiresV5 && !retainedPlan.requiresV7,
       branch: Boolean(selectedBranch),
+      fileFamily,
       preparing,
     });
     const projectionOpts = {
@@ -1038,14 +1053,20 @@ async function readInputs(
       meta.adoption_generation_version === 4
         ? await readSavedLegacyComposeAdoptionProjection(projectionOpts)
         : undefined;
-    if (
-      !(
-        mapped.candidate &&
-        planned.intent &&
-        candidateText ===
-          JSON.stringify(projection?.candidate ?? mapped.candidate)
-      )
-    ) {
+    if (!(mapped.candidate && planned.intent)) {
+      refuse();
+    }
+    const fileProof = fileFamily
+      ? savedRetainedFileProof(meta, mapped.candidate)
+      : undefined;
+    const preparedCandidate = fileProof
+      ? normalizeLegacyComposeRetainedFileCandidate({
+          candidate: mapped.candidate,
+          proof: fileProof,
+          containers: savedRetainedFileContainers(meta),
+        })
+      : (projection?.candidate ?? mapped.candidate);
+    if (candidateText !== JSON.stringify(preparedCandidate)) {
       refuse();
     }
     requireRetainedGenerationVersion(
@@ -1080,6 +1101,11 @@ async function readInputs(
     let observed: LegacyComposeVerifiedBinding;
     if (observation) {
       observed = observation.binding;
+    } else if (fileFamily) {
+      observed = await inspectLegacyComposeRetainedFileResources({
+        ...inspection,
+        candidate: mapped.candidate,
+      });
     } else if (sourceBind && "sourceBinds" in planned.intent) {
       observed = await inspectLegacyComposeSourceBindResources({
         ...inspection,
@@ -1090,6 +1116,18 @@ async function readInputs(
     }
     if (JSON.stringify(meta.binding) !== JSON.stringify(observed)) {
       refuse("E_LEGACY_ADOPTION_CHANGED");
+    }
+    if (fileFamily && material === "verify") {
+      if (!fileProof) {
+        refuse();
+      }
+      await verifyRetainedFileMaterial({
+        ctx,
+        candidate: mapped.candidate,
+        intent: planned.intent,
+        binding: observed,
+        proof: fileProof,
+      });
     }
     if (routing) {
       if (!meta.routingClaims || observed.binding_version !== 14) {
@@ -1217,77 +1255,52 @@ async function save(
   ctx: Context,
   value: Receipt,
   expected: Receipt,
-  opts?: {
-    readonly beforeCommit?: () => Promise<void>;
-    readonly publication?: true;
-  }
+  opts?: { readonly beforeCommit: () => Promise<void> }
 ): Promise<Receipt> {
-  const beforeCommit = opts?.beforeCommit;
-  const publication = opts?.publication === true;
-  let stage: LegacyComposePublicationRefusal["stage"] =
-    "publication-save-active-context";
-  try {
-    await ctx.check();
-    stage = "publication-save-active-previous";
-    const previous = await json(ctx.receiptPath);
-    receipt(previous.value, ctx.checkout);
-    const snapshot = ctx.receiptSnapshots.get(expected);
-    if (
-      !(snapshot && sameFile(previous.info, snapshot.info)) ||
-      previous.text !== snapshot.text
-    ) {
-      refuse();
-    }
-    const temporary = join(ctx.stateRoot, `${token()}.receipt`);
-    stage = "publication-save-active-staging";
-    await writeExclusive(temporary, JSON.stringify(value));
-    const staged = await readPrivate(temporary, STATE_LIMIT);
-    stage = "publication-save-active-staged-context";
-    await ctx.check();
-    stage = "publication-save-active-latest";
-    const latest = await json(ctx.receiptPath);
-    if (
-      !sameFile(previous.info, latest.info) ||
-      previous.text !== latest.text
-    ) {
-      refuse();
-    }
-    if (beforeCommit) {
-      stage = "publication-save-active-routing";
-      await beforeCommit();
-    }
-    if (value.adoption_receipt_version === 14 || ctx.sourceBind.current) {
-      // Both owners await fresh source proofs; preserve receipt incarnation and
-      // revalidate mounted directories after that last admission boundary.
-      stage = "publication-save-active-receipt";
-      await requireReceiptSnapshot(ctx, expected);
-    }
-    stage = "publication-save-active-rename";
-    await rename(temporary, ctx.receiptPath);
-    stage = "publication-save-active-sync";
-    await ctx.directories.at(-2)?.file.sync();
-    stage = "publication-save-active-published";
-    const published = await json(ctx.receiptPath);
-    if (
-      !sameFile(staged.info, published.info) ||
-      staged.text !== published.text
-    ) {
-      refuse();
-    }
-    stage = "publication-save-active-final-context";
-    await ctx.check();
-    stage = "publication-save-active-decode";
-    const result = receipt(published.value, ctx.checkout);
-    ctx.receiptSnapshots.set(result, published);
-    return result;
-  } catch (error: unknown) {
-    if (publication) {
-      recordPublicationRefusal(error, stage);
-    }
-    throw error;
+  await ctx.check();
+  const previous = await json(ctx.receiptPath);
+  receipt(previous.value, ctx.checkout);
+  const snapshot = ctx.receiptSnapshots.get(expected);
+  if (
+    !(snapshot && sameFile(previous.info, snapshot.info)) ||
+    previous.text !== snapshot.text
+  ) {
+    refuse();
   }
+  const temporary = join(ctx.stateRoot, `${token()}.receipt`);
+  await writeExclusive(temporary, JSON.stringify(value));
+  const staged = await readPrivate(temporary, STATE_LIMIT);
+  await ctx.check();
+  const latest = await json(ctx.receiptPath);
+  if (!sameFile(previous.info, latest.info) || previous.text !== latest.text) {
+    refuse();
+  }
+  if (opts) {
+    await opts.beforeCommit();
+  }
+  if (
+    value.adoption_receipt_version === 8 ||
+    value.adoption_receipt_version === 14 ||
+    ctx.sourceBind.current
+  ) {
+    // Both owners await fresh source proofs; preserve receipt incarnation and
+    // revalidate mounted directories after that last admission boundary.
+    await requireReceiptSnapshot(ctx, expected);
+  }
+  await rename(temporary, ctx.receiptPath);
+  await ctx.directories.at(-2)?.file.sync();
+  const published = await json(ctx.receiptPath);
+  if (
+    !sameFile(staged.info, published.info) ||
+    staged.text !== published.text
+  ) {
+    refuse();
+  }
+  await ctx.check();
+  const result = receipt(published.value, ctx.checkout);
+  ctx.receiptSnapshots.set(result, published);
+  return result;
 }
-
 function claim(
   selected: Anchor,
   known: WeakMap<LegacyComposeAdoptedGeneration, Anchor>,
@@ -1313,8 +1326,15 @@ function manifestVersion(
   requiresV5: boolean,
   projection?: {
     readonly projectionProof: { readonly projection_version: number };
-  }
+  },
+  fileFamily = false
 ): Manifest["adoption_generation_version"] {
+  if (fileFamily) {
+    if (requiresV5 || binding.binding_version !== 1 || projection) {
+      refuse("E_LEGACY_ADOPTION_UNSUPPORTED");
+    }
+    return 8;
+  }
   if (binding.binding_version === 14) {
     if (requiresV5 || projection?.projectionProof.projection_version !== 3) {
       refuse("E_LEGACY_ADOPTION_UNSUPPORTED");
@@ -1359,6 +1379,7 @@ function manifestVersion(
 function preparedManifestVersion(opts: {
   readonly build: boolean;
   readonly sourceBind: boolean;
+  readonly files: boolean;
   readonly retainedPlan: LegacyComposeRetainedPlan;
   readonly binding: LegacyComposeVerifiedBinding;
   readonly projection?: {
@@ -1377,7 +1398,8 @@ function preparedManifestVersion(opts: {
   return manifestVersion(
     opts.binding,
     opts.retainedPlan.requiresV5,
-    opts.projection
+    opts.projection,
+    opts.files
   );
 }
 async function prepare(
@@ -1415,7 +1437,9 @@ async function prepare(
     acquired.binding.binding_version === 14,
     Boolean(acquired.build)
   );
-  if (acquired.sourceBindProof) {
+  if (acquired.fileProof) {
+    mapper = mapLegacyNativeRetainedFileStorage;
+  } else if (acquired.sourceBindProof) {
     mapper = mapLegacyNativeRetainedSourceBind;
   } else if (acquired.build) {
     mapper = mapLegacyNativeRetainedBasicBuild;
@@ -1426,11 +1450,24 @@ async function prepare(
   if (!mapped.candidate) {
     refuse("E_LEGACY_ADOPTION_UNSUPPORTED");
   }
-  const candidateText = JSON.stringify(
-    acquired.projection?.candidate ?? mapped.candidate
-  );
+  const preparedCandidate = acquired.fileProof
+    ? normalizeLegacyComposeRetainedFileCandidate({
+        candidate: mapped.candidate,
+        proof: acquired.fileProof,
+        containers: acquired.binding.containers,
+      })
+    : (acquired.projection?.candidate ?? mapped.candidate);
+  const candidateText = JSON.stringify(preparedCandidate);
   const retainedPlan = legacyComposeRetainedPlan(JSON.parse(candidateText));
   if (
+    (acquired.fileProof &&
+      (acquired.binding.binding_version !== 1 ||
+        acquired.projection ||
+        acquired.branch ||
+        acquired.build ||
+        acquired.sourceBindProof ||
+        retainedPlan.requiresV5 ||
+        retainedPlan.requiresV7)) ||
     (acquired.sourceBindProof &&
       (acquired.binding.binding_version !== 12 ||
         acquired.projection !== undefined ||
@@ -1505,6 +1542,7 @@ async function prepare(
       adoption_generation_version: preparedManifestVersion({
         build: Boolean(acquired.build),
         sourceBind: Boolean(acquired.sourceBindProof),
+        files: Boolean(acquired.fileProof),
         retainedPlan,
         binding: acquired.binding,
         projection: acquired.projection,
@@ -1513,6 +1551,7 @@ async function prepare(
       projectRoot: ctx.root,
       id,
       binding: acquired.binding,
+      ...(acquired.fileProof ? { fileProof: acquired.fileProof } : {}),
       ...(routeAttempt
         ? {
             routingClaims: routeAttempt.reference,
@@ -2001,136 +2040,100 @@ async function completePublication(
   state: Receipt,
   binary?: string
 ) {
-  let stage: LegacyComposePublicationRefusal["stage"] = "publication-state";
-  try {
-    const publication = state.publication;
-    if (!publication || publication.phase !== "switching") {
-      refuse();
-    }
-    if (
-      state.adoption_receipt_version === 14 &&
-      state.routingHandoff !== "held"
-    ) {
-      refuse();
-    }
-    const routingDeadline =
-      Date.now() + Math.min(ctx.timeoutMs ?? 15_000, 60_000);
-    stage = "publication-inputs";
-    const loaded = await readInputs(ctx, publication.generation);
-    stage = "publication-layout";
-    await requireFirstSliceLayout(ctx, loaded.inputs);
-    stage = "publication-compiler";
-    await admitCandidate(ctx, loaded.inputs, binary);
-    stage = "publication-stopped";
-    await requireStopped(ctx, loaded.inputs.binding);
-    stage = "publication-routing";
-    await assertPublicationRoutingStopped(
-      ctx,
-      loaded,
-      state,
-      routingDeadline,
-      false,
-      true
-    );
-    stage = "publication-originals-directory";
-    const held = await holdDirectory(
-      join(ctx.generationsRoot, publication.generation.id, "originals"),
-      true
-    );
-    const transaction: Context = {
-      ...ctx,
-      check: async () => {
-        await ctx.check();
-        await recheckDirectories([held]);
-        await ctx.sourceBind.current?.lease.assertDirectoriesFresh({
-          signal: ctx.signal,
-        });
-      },
-    };
-    try {
-      stage = "publication-hold-original";
-      for (const location of originalLocations(
-        transaction,
-        publication.generation,
-        loaded.manifest,
-        loaded.inputs
-      )) {
-        await holdOriginal(transaction, location);
-        await held.file.sync();
-        await transaction.directories[1]?.file.sync();
-      }
-      stage = "publication-install-native";
-      const native = await installCandidate(
-        transaction,
-        publication.generation,
-        loaded.inputs,
-        publication.native
-      );
-      const installed: Publication = { ...publication, native };
-      stage = "publication-sync";
-      await held.file.sync();
-      await transaction.directories[1]?.file.sync();
-      let current = state;
-      if (publication.native === null) {
-        stage = "publication-save-native";
-        current = await save(
-          transaction,
-          { ...state, publication: installed },
-          state
-        );
-      }
-      stage = "publication-finish-native";
-      await finishCandidatePublication(
-        transaction,
-        publication.generation,
-        native
-      );
-      stage = "publication-active-candidate";
-      await requireActiveCandidate(transaction, installed, loaded.inputs);
-      stage = "publication-sync";
-      await held.file.sync();
-      await transaction.directories[1]?.file.sync();
-      stage = "publication-final-inputs";
-      const finalInputs = await readInputs(transaction, publication.generation);
-      stage = "publication-final-stopped";
-      await requireStopped(transaction, loaded.inputs.binding);
-      stage = "publication-final-directories";
+  const publication = state.publication;
+  if (!publication || publication.phase !== "switching") {
+    refuse();
+  }
+  if (
+    state.adoption_receipt_version === 14 &&
+    state.routingHandoff !== "held"
+  ) {
+    refuse();
+  }
+  const routingDeadline =
+    Date.now() + Math.min(ctx.timeoutMs ?? 15_000, 60_000);
+  const loaded = await readInputs(ctx, publication.generation);
+  await requireFirstSliceLayout(ctx, loaded.inputs);
+  await admitCandidate(ctx, loaded.inputs, binary);
+  await requireStopped(ctx, loaded.inputs.binding);
+  await assertPublicationRoutingStopped(ctx, loaded, state, routingDeadline);
+  const held = await holdDirectory(
+    join(ctx.generationsRoot, publication.generation.id, "originals"),
+    true
+  );
+  const transaction: Context = {
+    ...ctx,
+    check: async () => {
+      await ctx.check();
       await recheckDirectories([held]);
-      stage = "publication-save-active";
-      await save(
-        transaction,
-        {
-          ...current,
-          publication: { ...installed, phase: "active" },
-        },
-        current,
-        {
-          publication: true,
-          ...(loaded.inputs.retainedRouting
-            ? {
-                beforeCommit: () =>
-                  assertPublicationRoutingStopped(
-                    transaction,
-                    finalInputs,
-                    current,
-                    routingDeadline,
-                    false,
-                    true,
-                    "publication-save-active-routing"
-                  ),
-              }
-            : {}),
-        }
-      );
-    } finally {
-      const bodyStage = stage;
-      stage = "publication-close-originals";
-      await held.file.close();
-      stage = bodyStage;
+      await ctx.sourceBind.current?.lease.assertDirectoriesFresh({
+        signal: ctx.signal,
+      });
+    },
+  };
+  try {
+    for (const location of originalLocations(
+      transaction,
+      publication.generation,
+      loaded.manifest,
+      loaded.inputs
+    )) {
+      await holdOriginal(transaction, location);
+      await held.file.sync();
+      await transaction.directories[1]?.file.sync();
     }
-  } catch (error: unknown) {
-    recordPublicationRefusal(error, stage);
-    throw error;
+    const native = await installCandidate(
+      transaction,
+      publication.generation,
+      loaded.inputs,
+      publication.native
+    );
+    const installed: Publication = { ...publication, native };
+    await held.file.sync();
+    await transaction.directories[1]?.file.sync();
+    let current = state;
+    if (publication.native === null) {
+      current = await save(
+        transaction,
+        { ...state, publication: installed },
+        state
+      );
+    }
+    await finishCandidatePublication(
+      transaction,
+      publication.generation,
+      native
+    );
+    await requireActiveCandidate(transaction, installed, loaded.inputs);
+    await held.file.sync();
+    await transaction.directories[1]?.file.sync();
+    await readInputs(transaction, publication.generation);
+    await requireStopped(transaction, loaded.inputs.binding);
+    await recheckDirectories([held]);
+    let beforeCommit: (() => Promise<void>) | undefined;
+    if (loaded.inputs.retainedRouting) {
+      beforeCommit = () =>
+        assertPublicationRoutingStopped(
+          transaction,
+          loaded,
+          current,
+          routingDeadline
+        );
+    } else if (loaded.manifest.adoption_generation_version === 8) {
+      beforeCommit = async () => {
+        await readInputs(transaction, publication.generation);
+        await requireStopped(transaction, loaded.inputs.binding);
+        await requireActiveCandidate(transaction, installed, loaded.inputs);
+      };
+    }
+    await save(
+      transaction,
+      { ...current, publication: { ...installed, phase: "active" } },
+      current,
+      beforeCommit ? { beforeCommit } : undefined
+    );
+  } finally {
+    await held.file.close();
   }
 }
 async function completeRollback(ctx: Context, state: Receipt) {
@@ -2140,7 +2143,7 @@ async function completeRollback(ctx: Context, state: Receipt) {
   }
   const routingDeadline =
     Date.now() + Math.min(ctx.timeoutMs ?? 15_000, 60_000);
-  const loaded = await readInputs(ctx, publication.generation);
+  const loaded = await readInputs(ctx, publication.generation, false, "saved");
   await requireStopped(ctx, loaded.inputs.binding);
   const held = await holdDirectory(
     join(ctx.generationsRoot, publication.generation.id, "originals"),
@@ -2192,7 +2195,7 @@ async function completeRollback(ctx: Context, state: Receipt) {
     if (!(await absent(join(transaction.root, ".hack/hack.project.json")))) {
       refuse();
     }
-    await readInputs(transaction, publication.generation);
+    await readInputs(transaction, publication.generation, false, "saved");
     await requireStopped(transaction, loaded.inputs.binding);
     await recheckDirectories([held]);
     if (loaded.inputs.retainedRouting) {
@@ -2280,9 +2283,7 @@ async function assertPublicationRoutingStopped(
   loaded: Awaited<ReturnType<typeof readInputs>>,
   state: Receipt,
   deadline: number,
-  restored = false,
-  entryObserved = false,
-  refusalStage?: LegacyComposePublicationRefusal["stage"]
+  restored = false
 ): Promise<void> {
   if (!loaded.inputs.retainedRouting) {
     return;
@@ -2307,12 +2308,10 @@ async function assertPublicationRoutingStopped(
       await requireReceiptSnapshot(current, state);
       cancelled(current.signal);
       if (Date.now() >= deadline) {
-        refuseRoutingProofDeadline(refusalStage);
+        refuse();
       }
       return fresh;
-    },
-    entryObserved,
-    refusalStage
+    }
   );
 }
 
@@ -2325,6 +2324,7 @@ function requireMutationDeadline(
 ) {
   if (
     (legacyComposeRetainedOrdered(plan) ||
+      captured.generation.report.adoption_generation_version === 8 ||
       captured.generation.report.adoption_generation_version === 9 ||
       captured.generation.report.adoption_generation_version === 12 ||
       captured.generation.report.adoption_generation_version === 14) &&
@@ -2386,6 +2386,7 @@ function preparedReceiptVersion(
     prior.adoption_receipt_version === 6 ||
     prior.adoption_receipt_version === 9 ||
     prior.adoption_receipt_version === 7 ||
+    prior.adoption_receipt_version === 8 ||
     prior.adoption_receipt_version === 10 ||
     prior.adoption_receipt_version === 11 ||
     prior.adoption_receipt_version === 12 ||
@@ -2490,7 +2491,7 @@ async function mutateRetainedContainers(
     refuse();
   }
   if (
-    ![5, 7, 9, 10, 12, 14].includes(
+    ![5, 7, 8, 9, 10, 12, 14].includes(
       captured.generation.report.adoption_generation_version
     )
   ) {
@@ -2551,6 +2552,47 @@ function requireRetainedCompletionState(opts: {
   }
 }
 
+function retainedMutationCommitFence(opts: {
+  readonly ctx: Context;
+  readonly owned: Anchor;
+  readonly material: "verify" | "saved";
+  readonly activePublication: ReturnType<typeof mutationPublication>;
+  readonly state: Receipt;
+  readonly ids: ReadonlySet<string>;
+  readonly operation: AdoptionOperation;
+  readonly requiresV7: boolean;
+  readonly version: Manifest["adoption_generation_version"];
+  readonly confirmV7Commit: () => Promise<void>;
+}): { readonly beforeCommit: () => Promise<void> } | undefined {
+  if (opts.requiresV7) {
+    return { beforeCommit: opts.confirmV7Commit };
+  }
+  if (opts.version !== 8) {
+    return undefined;
+  }
+  return {
+    beforeCommit: async () => {
+      const final = await readInputs(
+        opts.ctx,
+        opts.owned,
+        false,
+        opts.material
+      );
+      await requireMutationInputs(opts.ctx, opts.activePublication, final);
+      requireRetainedCompletion({
+        observed: await inspectLegacyComposeContainerStates({
+          binding: final.inputs.binding,
+          signal: opts.ctx.signal,
+          timeoutMs: opts.ctx.timeoutMs,
+        }),
+        ids: opts.ids,
+        operation: opts.operation,
+      });
+      await requireReceiptSnapshot(opts.ctx, opts.state);
+    },
+  };
+}
+
 async function mutateRetainedContainersWithinBudget(
   ctx: Context,
   known: WeakMap<LegacyComposeAdoptedGeneration, Anchor>,
@@ -2564,7 +2606,8 @@ async function mutateRetainedContainersWithinBudget(
   if (!owned) {
     refuse();
   }
-  const loaded = await readInputs(ctx, owned);
+  const material = captured.operation === "stop" ? "saved" : "verify";
+  const loaded = await readInputs(ctx, owned, false, material);
   await requireMutationInputs(ctx, activePublication, loaded);
   const routing = loaded.inputs.retainedRouting === true;
   if (routing && state.routingHandoff !== "held") {
@@ -2593,6 +2636,7 @@ async function mutateRetainedContainersWithinBudget(
       (legacyComposeRetainedOrdered(retainedPlan) ||
         loaded.inputs.retainedBuild ||
         loaded.inputs.retainedSourceBind ||
+        loaded.manifest.adoption_generation_version === 8 ||
         routing) &&
       JSON.stringify([...selectedServices].sort()) !==
         JSON.stringify([...services].sort())
@@ -2680,7 +2724,7 @@ async function mutateRetainedContainersWithinBudget(
     if (routeClaims && routeAttempt && !captured.recover) {
       await routeClaims.markEffectsPossible(routeAttempt);
     }
-    await readInputs(ctx, owned);
+    await readInputs(ctx, owned, false, material);
     await requireMutationInputs(ctx, activePublication, loaded);
     await requireReceiptSnapshot(ctx, state);
     requireMutationDeadline(captured, retainedPlan);
@@ -2709,7 +2753,7 @@ async function mutateRetainedContainersWithinBudget(
       assertActive,
       assertFresh: async () => {
         assertActive();
-        const current = await readInputs(ctx, owned);
+        const current = await readInputs(ctx, owned, false, material);
         await requireMutationInputs(ctx, activePublication, current);
         await requireReceiptSnapshot(ctx, state);
         assertActive();
@@ -2748,7 +2792,7 @@ async function mutateRetainedContainersWithinBudget(
       outcome = code;
     }
     await ctx.check();
-    await readInputs(ctx, owned);
+    await readInputs(ctx, owned, false, material);
     await requireMutationInputs(ctx, activePublication, loaded);
     const completed = await inspectLegacyComposeContainerStates({
       binding: loaded.inputs.binding,
@@ -2794,7 +2838,7 @@ async function mutateRetainedContainersWithinBudget(
       operation: captured.operation,
     });
     const confirmV7Commit = async () => {
-      await readInputs(ctx, owned);
+      await readInputs(ctx, owned, false, material);
       await requireMutationInputs(ctx, activePublication, loaded);
       await requireReceiptSnapshot(ctx, state);
       if (jobAttempts) {
@@ -2839,7 +2883,7 @@ async function mutateRetainedContainersWithinBudget(
       } else {
         await requireStopped(ctx, loaded.inputs.binding);
       }
-      await readInputs(ctx, owned);
+      await readInputs(ctx, owned, false, material);
       await requireMutationInputs(ctx, activePublication, loaded);
       await requireReceiptSnapshot(ctx, state);
       await ctx.check();
@@ -2870,7 +2914,7 @@ async function mutateRetainedContainersWithinBudget(
       ) {
         refuse("E_LEGACY_ADOPTION_CHANGED");
       }
-      await readInputs(ctx, owned);
+      await readInputs(ctx, owned, false, material);
       await requireMutationInputs(ctx, activePublication, loaded);
     }
     requireMutationDeadline(captured, retainedPlan);
@@ -2914,8 +2958,19 @@ async function mutateRetainedContainersWithinBudget(
     let beforeCommit: (() => Promise<void>) | undefined;
     if (routing) {
       beforeCommit = confirmRoutingCommit;
-    } else if (retainedPlan.requiresV7) {
-      beforeCommit = confirmV7Commit;
+    } else {
+      beforeCommit = retainedMutationCommitFence({
+        ctx,
+        owned,
+        material,
+        activePublication,
+        state,
+        ids,
+        operation: captured.operation,
+        requiresV7: retainedPlan.requiresV7 === true,
+        version: loaded.manifest.adoption_generation_version,
+        confirmV7Commit,
+      })?.beforeCommit;
     }
     await save(
       ctx,
@@ -2926,6 +2981,24 @@ async function mutateRetainedContainersWithinBudget(
     return 0;
   } finally {
     await routeClaims?.close();
+  }
+}
+
+function requireRetainedCompletion(opts: {
+  readonly observed: readonly LegacyComposeContainerState[];
+  readonly ids: ReadonlySet<string>;
+  readonly operation: AdoptionOperation;
+}): void {
+  if (
+    opts.observed.some(
+      (value) =>
+        opts.ids.has(value.id) &&
+        (value.paused ||
+          value.running !== (opts.operation !== "stop") ||
+          !["created", "running", "exited"].includes(value.status))
+    )
+  ) {
+    refuse("E_LEGACY_ADOPTION_CHANGED");
   }
 }
 
@@ -3130,7 +3203,14 @@ export async function openLegacyComposeAdoptedGenerationStore(input: {
                   ? { routingOperation: null, routingHandoff: "held" as const }
                   : {}),
               },
-              prior
+              prior,
+              loaded.manifest.adoption_generation_version === 8
+                ? {
+                    beforeCommit: async () => {
+                      await readInputs(ctx, generated, true);
+                    },
+                  }
+                : undefined
             );
             return claim(
               generated,
@@ -3155,7 +3235,7 @@ export async function openLegacyComposeAdoptedGenerationStore(input: {
           if (!current) {
             return null;
           }
-          const loaded = await readInputs(ctx, current);
+          const loaded = await readInputs(ctx, current, false, "saved");
           return claim(
             current,
             known,
@@ -3177,7 +3257,12 @@ export async function openLegacyComposeAdoptedGenerationStore(input: {
           if (state.publication?.phase !== "active") {
             return null;
           }
-          const loaded = await readInputs(ctx, state.publication.generation);
+          const loaded = await readInputs(
+            ctx,
+            state.publication.generation,
+            false,
+            "saved"
+          );
           await requireActiveCandidate(ctx, state.publication, loaded.inputs);
           return claim(
             state.publication.generation,
@@ -3236,7 +3321,12 @@ export async function openLegacyComposeAdoptedGenerationStore(input: {
             if (state.publication?.phase !== "active") {
               refuse();
             }
-            const loaded = await readInputs(ctx, state.publication.generation);
+            const loaded = await readInputs(
+              ctx,
+              state.publication.generation,
+              false,
+              "saved"
+            );
             await requireActiveCandidate(ctx, state.publication, loaded.inputs);
             await requireStopped(ctx, loaded.inputs.binding);
             const next: Receipt = {
@@ -3286,6 +3376,13 @@ export async function openLegacyComposeAdoptedGenerationStore(input: {
         try {
           const captured = { ...opts };
           return await lock.withLock(async () => {
+            if (
+              captured.material !== undefined &&
+              captured.material !== "verify" &&
+              captured.material !== "saved"
+            ) {
+              refuse();
+            }
             const publication = await publicationState(ctx);
             requireStablePublication(publication);
             requireNoPendingOperation(publication);
@@ -3297,7 +3394,12 @@ export async function openLegacyComposeAdoptedGenerationStore(input: {
             ) {
               refuse();
             }
-            const loaded = await readInputs(ctx, current);
+            const loaded = await readInputs(
+              ctx,
+              current,
+              false,
+              captured.material ?? "verify"
+            );
             if (publication.publication?.phase === "active") {
               await requireActiveCandidate(
                 ctx,
@@ -3307,7 +3409,12 @@ export async function openLegacyComposeAdoptedGenerationStore(input: {
             }
             await requireReceiptSnapshot(ctx, publication);
             const value = await captured.run(loaded.inputs);
-            await readInputs(ctx, current);
+            await readInputs(
+              ctx,
+              current,
+              false,
+              captured.material ?? "verify"
+            );
             if (publication.publication?.phase === "active") {
               await requireActiveCandidate(
                 ctx,

@@ -852,6 +852,9 @@ type CompletedJobCaptureOptions = {
   readonly env: Readonly<Record<string, string>>;
   readonly captures: string;
   readonly timeoutMs: number;
+  readonly stdin?: Uint8Array;
+  readonly signal?: AbortSignal;
+  readonly maxStreamBytes?: number;
   readonly beforeInterrupt?: (
     admission: InterruptReadAdmission
   ) => Promise<void>;
@@ -888,6 +891,9 @@ async function captureCompletedJobFixtureChild(
     env: Object.freeze({ ...opts.env }),
     captures: opts.captures,
     timeoutMs: opts.timeoutMs,
+    stdin: opts.stdin === undefined ? undefined : Buffer.from(opts.stdin),
+    signal: opts.signal,
+    maxStreamBytes: opts.maxStreamBytes,
     beforeInterrupt: opts.beforeInterrupt,
     onUnconfirmed: opts.onUnconfirmed,
     deadline: Date.now() + opts.timeoutMs,
@@ -898,14 +904,20 @@ async function captureCompletedJobFixtureChild(
       executable.startsWith("/") &&
       Number.isSafeInteger(snapshot.timeoutMs) &&
       snapshot.timeoutMs > 0 &&
-      snapshot.timeoutMs <= TIMEOUT
+      snapshot.timeoutMs <= TIMEOUT &&
+      !snapshot.signal?.aborted &&
+      (snapshot.stdin === undefined || snapshot.stdin.byteLength <= 8192) &&
+      (snapshot.maxStreamBytes === undefined ||
+        (Number.isSafeInteger(snapshot.maxStreamBytes) &&
+          snapshot.maxStreamBytes > 0 &&
+          snapshot.maxStreamBytes <= 524_288))
   );
   let ownerStarted = false;
   const output = await open(`${snapshot.captures}.stdout`, "wx", 0o600);
   try {
     const errors = await open(`${snapshot.captures}.stderr`, "wx", 0o600);
     try {
-      requireValue(snapshot.deadline > Date.now());
+      requireValue(snapshot.deadline > Date.now() && !snapshot.signal?.aborted);
       ownerStarted = true;
       const exitCode = await captureInterruptedPipes({
         ...snapshot,
@@ -951,7 +963,7 @@ async function captureInterruptedPipes(
     cwd: opts.cwd,
     env: { ...opts.env },
     detached: true,
-    stdio: ["ignore", "pipe", "pipe"],
+    stdio: [opts.stdin === undefined ? "ignore" : "pipe", "pipe", "pipe"],
   });
   const stdoutStream = child.stdout,
     stderrStream = child.stderr;
@@ -962,6 +974,7 @@ async function captureInterruptedPipes(
   let openPipes = 2;
   let settled = false;
   let timedOut = false;
+  let cancelled = false;
   let oversized = false;
   let groupFailure = false;
   let captureFailure = false;
@@ -1000,15 +1013,31 @@ async function captureInterruptedPipes(
       resolveExit(code ?? 128);
     });
   });
+  const input = new Promise<void>((resolveInput, reject) => {
+    if (opts.stdin === undefined) {
+      resolveInput();
+      return;
+    }
+    const stream = child.stdin;
+    requireValue(stream !== null);
+    stream.once("error", () => {
+      captureFailure = true;
+      stopOwned();
+      reject(new Error("Completed-job input refused; values omitted."));
+    });
+    stream.end(opts.stdin, resolveInput);
+  });
   const capture = async (
     stream: NonNullable<typeof child.stdout>,
     file: Awaited<ReturnType<typeof open>>
   ) => {
+    let streamRemaining = opts.maxStreamBytes ?? 524_288;
     try {
       for await (const raw of stream) {
         requireValue(Buffer.isBuffer(raw));
-        const count = Math.min(raw.length, remaining);
+        const count = Math.min(raw.length, remaining, streamRemaining);
         remaining -= count;
+        streamRemaining -= count;
         if (count < raw.length) {
           oversized = true;
           stopOwned();
@@ -1029,7 +1058,7 @@ async function captureInterruptedPipes(
   };
   const stdout = capture(stdoutStream, opts.output);
   const stderr = capture(stderrStream, opts.errors);
-  const all = Promise.all([exited, stdout, stderr]).then(([code]) => {
+  const all = Promise.all([exited, stdout, stderr, input]).then(([code]) => {
     settled = true;
     return code;
   });
@@ -1044,6 +1073,16 @@ async function captureInterruptedPipes(
       );
   });
   expired.catch(() => undefined);
+  const cancel = () => {
+    cancelled = true;
+    admission.abort();
+    stopOwned();
+    expire?.();
+  };
+  opts.signal?.addEventListener("abort", cancel, { once: true });
+  if (opts.signal?.aborted) {
+    cancel();
+  }
   const timer = setTimeout(
     () => {
       timedOut = true;
@@ -1079,7 +1118,7 @@ async function captureInterruptedPipes(
     try {
       await Promise.race([
         (async () => {
-          await Promise.allSettled([exited, stdout, stderr]);
+          await Promise.allSettled([exited, stdout, stderr, input]);
           requireValue(settlementDeadline > Date.now());
           requireValue(
             leaderExited && openPipes === 0 && !captureFailure && !groupFailure
@@ -1117,7 +1156,7 @@ async function captureInterruptedPipes(
               capturedLeaderAbsent: true,
               capturedGroupAbsent: true,
               scope: "captured-child-group",
-              interrupted: timedOut || oversized,
+              interrupted: timedOut || oversized || cancelled,
               callbackSettled: outstandingPhase === 0,
             })
           );
@@ -1137,6 +1176,7 @@ async function captureInterruptedPipes(
       opts.onUnconfirmed();
       stdoutStream.destroy();
       stderrStream.destroy();
+      child.stdin?.destroy();
       // A FileHandle.write already in progress cannot be canceled by destroying its stream.
       // Keep its rejection handled, but never extend this settlement deadline to await it.
       Promise.allSettled([stdout, stderr])
@@ -1187,7 +1227,9 @@ async function captureInterruptedPipes(
       child.kill("SIGINT");
     }
     code = await Promise.race([all, expired]);
-    requireValue((!beforeInterrupt || code !== 0) && !timedOut && !oversized);
+    requireValue(
+      (!beforeInterrupt || code !== 0) && !timedOut && !oversized && !cancelled
+    );
   } finally {
     if (outstandingPhase > 0) {
       opts.onUnconfirmed();
@@ -1198,10 +1240,16 @@ async function captureInterruptedPipes(
     } finally {
       admission.abort();
       clearTimeout(timer);
+      opts.signal?.removeEventListener("abort", cancel);
     }
   }
   requireValue(
-    code !== undefined && !timedOut && !oversized && opts.deadline > Date.now()
+    code !== undefined &&
+      !timedOut &&
+      !oversized &&
+      !cancelled &&
+      !opts.signal?.aborted &&
+      opts.deadline > Date.now()
   );
   return code;
 }

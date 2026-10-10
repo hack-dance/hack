@@ -239,6 +239,12 @@ export async function observeNativeComposePrivateHostSession(): Promise<{
   }
   return Object.freeze({ boot: await bootId(), uid });
 }
+
+/** Same host-session reader used by private mutation owners. This observation
+ * alone grants no lock, process or recovery authority. */
+export async function readNativeComposeHostBootId(): Promise<string> {
+  return await bootId();
+}
 async function processBirth(
   pid: number
 ): Promise<{ readonly uid: number; readonly birth: string } | null> {

@@ -20,6 +20,15 @@ import {
   parseNativeAuthoredSnapshot,
 } from "./native-authored-graph-protocol.ts";
 import {
+  type NativeAuthoredLiveStopRecovery,
+  readNativeAuthoredLiveStopRecovery,
+} from "./native-authored-live-stop.ts";
+import {
+  assertNativeAuthoredProcessQuiescent,
+  assertNativeAuthoredProcessRuntime,
+  parseNativeAuthoredProcessIncarnation,
+} from "./native-authored-process-incarnation.ts";
+import {
   type NativeAuthoredProjectRunScope,
   type NativeAuthoredProjectRunSelection,
   type NativeAuthoredProjectStartSelection,
@@ -54,8 +63,7 @@ const PHASES = [
 ] as const;
 type Phase = (typeof PHASES)[number];
 type Identity = NativeAuthoredProjectRunSelection["identity"];
-type Intent = {
-  readonly version: 1;
+type IntentFields = {
   readonly kind: "native-authored-project-recovery";
   readonly phase: Phase;
   readonly ready: NativeAuthoredProjectRunSelection;
@@ -70,6 +78,21 @@ type Intent = {
   readonly next_lease: NativeComposeInterruptedLockSelection | null;
   readonly next_mutation: NativeComposeInterruptedLockSelection | null;
 };
+type Intent = IntentFields &
+  (
+    | {
+        readonly version: 1;
+        readonly live_stop?: never;
+        readonly live_stop_retiring?: never;
+        readonly live_stop_retired?: never;
+      }
+    | {
+        readonly version: 2;
+        readonly live_stop: NativeAuthoredLiveStopRecovery;
+        readonly live_stop_retiring: boolean;
+        readonly live_stop_retired: boolean;
+      }
+  );
 type Store = Parameters<
   Parameters<typeof withNativeAuthoredProjectRecoveryStorage>[1]
 >[0];
@@ -113,10 +136,12 @@ function parseIntent(value: unknown): Intent {
       isRecord(value) &&
       keys(
         value,
-        "admission,kind,lease,lease_releasing,mutation,mutation_releasing,native,next_lease,next_mutation,phase,ready,source,start,version"
+        value.version === 2
+          ? "admission,kind,lease,lease_releasing,live_stop,live_stop_retired,live_stop_retiring,mutation,mutation_releasing,native,next_lease,next_mutation,phase,ready,source,start,version"
+          : "admission,kind,lease,lease_releasing,mutation,mutation_releasing,native,next_lease,next_mutation,phase,ready,source,start,version"
       )
     ) ||
-    value.version !== 1 ||
+    (value.version !== 1 && value.version !== 2) ||
     value.kind !== "native-authored-project-recovery" ||
     typeof value.phase !== "string" ||
     !PHASES.includes(value.phase as Phase) ||
@@ -149,8 +174,41 @@ function parseIntent(value: unknown): Intent {
   ) {
     return refused();
   }
+  const extra =
+    value.version === 2
+      ? (() => {
+          const stop = value.live_stop;
+          if (
+            !(isRecord(stop) && keys(stop, "identity,original,settled")) ||
+            typeof value.live_stop_retiring !== "boolean" ||
+            typeof value.live_stop_retired !== "boolean" ||
+            (value.live_stop_retired && !value.live_stop_retiring)
+          ) {
+            return refused();
+          }
+          const original = parseNativeAuthoredProcessIncarnation(stop.original);
+          if (
+            original.boot !== admission.owner.bootId ||
+            original.parent !== admission.owner.pid ||
+            original.uid !== admission.owner.uid
+          ) {
+            return refused();
+          }
+          return {
+            version: 2 as const,
+            live_stop: {
+              identity: copyIdentity(stop.identity),
+              original,
+              settled:
+                stop.settled === null ? null : copyIdentity(stop.settled),
+            },
+            live_stop_retiring: value.live_stop_retiring,
+            live_stop_retired: value.live_stop_retired,
+          };
+        })()
+      : { version: 1 as const };
   return freeze({
-    version: 1,
+    ...extra,
     kind: "native-authored-project-recovery",
     phase: value.phase as Phase,
     ready,
@@ -357,7 +415,83 @@ async function expectedFile(
   }
   return true;
 }
-async function bindings(store: Store, record: Intent): Promise<void> {
+async function selectLiveStop(opts: {
+  readonly store: Store;
+  readonly ready: NativeAuthoredProjectRunSelection;
+  readonly admission: NativeComposeInterruptedLockSelection;
+  readonly runtime: NativeRuntimeSelection;
+  readonly remaining: () => number;
+}): Promise<NativeAuthoredLiveStopRecovery | null> {
+  const { store, ready, admission, runtime, remaining } = opts;
+  if (await absent(store.liveStop)) {
+    return null;
+  }
+  const run = ready.record.receipt.review.provenance.run;
+  const selected = await readNativeAuthoredLiveStopRecovery({
+    scope: store.scope,
+    path: store.liveStop,
+    ready: store.ready,
+    start: store.start,
+    source: store.sourcePath(run),
+    run,
+  });
+  if (
+    selected.original.parent !== admission.owner.pid ||
+    selected.original.boot !== admission.owner.bootId ||
+    selected.original.uid !== admission.owner.uid
+  ) {
+    return refused();
+  }
+  await assertNativeAuthoredProcessRuntime(selected.original, runtime.binary);
+  await assertNativeAuthoredProcessQuiescent(selected.original, remaining);
+  return selected;
+}
+
+async function stopBindings(
+  store: Store,
+  record: Intent,
+  remaining: () => number
+): Promise<void> {
+  if (record.version === 2) {
+    await assertNativeAuthoredProcessQuiescent(
+      record.live_stop.original,
+      remaining
+    );
+    if (record.live_stop_retired) {
+      if (
+        !(
+          (await absent(store.liveStop)) &&
+          (await absent(`${store.liveStop}.settled`))
+        )
+      ) {
+        return refused();
+      }
+    } else {
+      await expectedFile(
+        store.liveStop,
+        record.live_stop.identity,
+        record.live_stop_retiring
+      );
+      if (record.live_stop.settled) {
+        await expectedFile(
+          `${store.liveStop}.settled`,
+          record.live_stop.settled,
+          record.live_stop_retiring
+        );
+      } else if (!(await absent(`${store.liveStop}.settled`))) {
+        return refused();
+      }
+    }
+  } else if (!(await absent(store.liveStop))) {
+    return refused();
+  }
+}
+async function bindings(
+  store: Store,
+  record: Intent,
+  remaining: () => number
+): Promise<void> {
+  await stopBindings(store, record, remaining);
   const phase = rank(record);
   for (const [path, expected, retirement] of [
     [store.ready, record.ready.identity, 2],
@@ -428,6 +562,42 @@ async function retireFiles(
     });
   }
 }
+async function retireLiveStop(
+  store: Store,
+  retirement: Retirement,
+  remaining: () => number
+): Promise<void> {
+  const current = retirement.record();
+  if (current.version !== 2) {
+    return;
+  }
+  if (!current.live_stop_retiring) {
+    await retirement.commit({ ...current, live_stop_retiring: true });
+  }
+  const pending = retirement.record();
+  if (pending.version !== 2) {
+    return refused();
+  }
+  if (pending.live_stop_retired) {
+    return;
+  }
+  await retirement.inspect();
+  for (const [path, identity] of [
+    [`${store.liveStop}.settled`, pending.live_stop.settled],
+    [store.liveStop, pending.live_stop.identity],
+  ] as const) {
+    await retirement.check();
+    await bindings(store, retirement.record(), remaining);
+    if (identity && (await expectedFile(path, identity, true))) {
+      retirement.active();
+      await unlink(path);
+      await synchronizeDirectories(store.held);
+    }
+  }
+  await retirement.check();
+  await bindings(store, retirement.record(), remaining);
+  await retirement.commit({ ...pending, live_stop_retired: true });
+}
 async function retireAdmission(
   store: Store,
   retirement: Retirement,
@@ -497,6 +667,9 @@ export async function recoverNativeAuthoredProject(opts: {
     opts.scope,
     async (store) => {
       let saved = await readIntent(store);
+      if (saved?.record.version === 1 && !(await absent(store.liveStop))) {
+        return refused();
+      }
       const record = () => saved?.record ?? refused();
       const update = async (
         value: Intent,
@@ -539,6 +712,19 @@ export async function recoverNativeAuthoredProject(opts: {
             remaining();
             await check();
             await mutationLease.assertHeld();
+            if (saved?.record.version === 2) {
+              await assertNativeAuthoredProcessRuntime(
+                saved.record.live_stop.original,
+                runtime.binary
+              );
+              await assertNativeAuthoredProcessQuiescent(
+                saved.record.live_stop.original,
+                remaining
+              );
+              remaining();
+              await check();
+              await mutationLease.assertHeld();
+            }
           };
           {
             if (saved) {
@@ -565,6 +751,13 @@ export async function recoverNativeAuthoredProject(opts: {
                 store.admission,
                 `${store.admission}.verification`
               ).selectInterruptedLock();
+              const liveStop = await selectLiveStop({
+                store,
+                ready,
+                admission,
+                runtime,
+                remaining,
+              });
               const native = parseNativeAuthoredRecoverySelection({
                 value: await request({
                   runtime,
@@ -586,7 +779,14 @@ export async function recoverNativeAuthoredProject(opts: {
               remaining();
               await commit(
                 {
-                  version: 1,
+                  ...(liveStop
+                    ? {
+                        version: 2 as const,
+                        live_stop: liveStop,
+                        live_stop_retiring: false,
+                        live_stop_retired: false,
+                      }
+                    : { version: 1 as const }),
                   kind: "native-authored-project-recovery",
                   phase: "prepared",
                   ready,
@@ -608,7 +808,7 @@ export async function recoverNativeAuthoredProject(opts: {
               return refused();
             }
             await both();
-            await bindings(store, saved.record);
+            await bindings(store, saved.record, remaining);
             await both();
             const selected = saved.record.native;
             if (saved.record.phase === "prepared") {
@@ -635,7 +835,7 @@ export async function recoverNativeAuthoredProject(opts: {
                 }),
               });
               await both();
-              await bindings(store, saved.record);
+              await bindings(store, saved.record, remaining);
               await both();
               await commit(
                 { ...saved.record, phase: "native-removed" },
@@ -671,7 +871,7 @@ export async function recoverNativeAuthoredProject(opts: {
                 return refused();
               }
               await both();
-              await bindings(store, record());
+              await bindings(store, record(), remaining);
               await both();
               return snapshot.receipt;
             };
@@ -689,10 +889,11 @@ export async function recoverNativeAuthoredProject(opts: {
               inspect,
             };
             await store.retireHooks(selected.run);
+            await retireLiveStop(store, retirement, remaining);
             await retireFiles(store, retirement);
             await retireAdmission(store, retirement, lease);
             const removed = await inspect();
-            await bindings(store, saved.record);
+            await bindings(store, saved.record, remaining);
             await both();
             return {
               version: 1,

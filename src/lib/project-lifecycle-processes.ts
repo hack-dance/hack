@@ -196,6 +196,7 @@ export async function readProcessSnapshot(): Promise<ProcessSnapshotRow[]> {
 /** Terminate ownership-proven lifecycle groups with a bounded TERM/KILL sequence. */
 export async function terminateLifecycleProcessGroups(opts: {
   readonly processGroupIds: readonly number[];
+  readonly assertFresh?: () => Promise<void>;
 }): Promise<void> {
   const groups = [...new Set(opts.processGroupIds)].filter(
     (processGroupId) => processGroupId > 1
@@ -205,6 +206,7 @@ export async function terminateLifecycleProcessGroups(opts: {
   }
 
   for (const processGroupId of groups) {
+    await opts.assertFresh?.();
     try {
       process.kill(-processGroupId, "SIGTERM");
     } catch {
@@ -215,6 +217,7 @@ export async function terminateLifecycleProcessGroups(opts: {
   await Bun.sleep(500);
 
   for (const processGroupId of groups) {
+    await opts.assertFresh?.();
     try {
       process.kill(-processGroupId, 0);
     } catch {

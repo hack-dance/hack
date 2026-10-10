@@ -207,6 +207,50 @@ HACK_E2E_KEEP=1 HACK_E2E_CLI_BIN=./dist/hack HACK_E2E_DOCKER=1 HACK_E2E_REQUIRE_
 These maintained scenarios are prepared source, not evidence of a successful live
 run. Source/whole/CI and compiled synthetic engine acceptance remain separate.
 
+`native-config-protected-files` is a separate explicit selector for synthetic
+0444 configs and protected 0400/0600 file secrets. It requires kept fixture roots,
+the exact current compiled CLI/compiler and source hashes, an explicitly pinned
+Compose plugin, cached Bun/PostgreSQL images and an inherited exact-source
+`HACK_E2E_PROTECTED_FILES_SLOT_RELEASED` grant. A private launcher must supply those
+pins after source and artifact qualification; the selector does not manufacture
+the grant or use caller Docker credentials. It publishes no ports and performs no
+pulls, builds, DNS changes or trust changes.
+
+Retained fixture inputs use only the closed file8 source subset: no worktree
+policy or authored pull policy. Cached image selection is fenced independently,
+and the controlled Compose bootstrap keeps its fixed `--pull never` option.
+The pre-effect mode control first refuses an explicit 0444 grant on its owned
+0400 source, then changes only the declaration to 0400 and must reach the
+rejecting, never-forwarding Docker shim. Canonical mapper and shim controls cover
+this prerequisite separately from guest/runtime acceptance.
+
+This selector runs only retained adoption. Ordinary new-material delivery uses
+`native-config-vm-files`; no host snapshot-version oracle is applied here.
+Two real linked retained checkouts bind their original readonly sources, observed guest UID/GID and
+0400/0600 mode, original container/bridge/volume identities and distinct SQL
+markers. Guest checks compare exact synthetic bytes through private stdin, prove
+access by the observed owner, EACCES for a different non-root UID, ENOENT in an
+ungranted workload and EROFS for an explicitly privileged write. No original file
+is chmodded; only newly created synthetic files receive their initial modes.
+
+A closed Docker forwarder refuses the exact whole-ID start only after the real
+pending receipt is durable. Source material is then withheld while shipping saved
+down recovery and rollback settle the original resources. This finite interrupted
+operation control does not claim guest cancellation after arbitrary parent death.
+An earlier active-source control withholds only the synthetic material directory:
+restart and exec must refuse with the exact state diagnostic before effects or
+journal changes, then restored source incarnation must permit normal exec.
+Each SQL marker is seeded once, reads survive restart, and stopping/rolling back
+one checkout preserves its sibling. Saved stop/rollback precedes exact non-force
+removal: every original ID, creation birth, label, mount, policy and endpoint is
+rechecked; volumes also require zero consumers. Final inventory compares the
+original daemon, stopped containers, networks, volume births, image IDs and tags.
+Unknown effects or cleanup failures retain private captures and fail the selector.
+
+This selector is maintained acceptance source, with live guest/adoption evidence
+still required. It does not replace the existing version-1/0444 managed-file
+fixtures or admit file/build/job/health/custom-network intersections.
+
 ## Native config process-policy qualification
 
 `native-config-process-policy` is registered in required Docker CI. It needs the
@@ -430,3 +474,9 @@ and retained; there is no general cache prune or cache
 reclamation claim. Failed exact cleanup retains the private fixture and recovery
 identities. Host DNS/trust, registry network denial and advanced builder features
 are separate gates.
+
+The protected-file selector admits Darwin's exact root-owned `/usr/bin/git` with
+positive shared system link count, while every private artifact and alternate Git
+selection remains single-link. It pins and rechecks that exact link count, owner
+IDs, physical path, mode, inode and bytes throughout the attempt. This prerequisite
+does not add engine authority or prove guest/lifecycle acceptance.

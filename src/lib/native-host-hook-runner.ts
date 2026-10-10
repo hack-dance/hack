@@ -197,6 +197,12 @@ export async function prepareNativeFiniteHookPhase(input: {
   ) => Promise<Readonly<Record<string, string>>>;
   readonly beforeSpawn: () => void;
   readonly onSpawn: (group: number) => Promise<void>;
+  /** Only an admitted frontend owner supplies a qualified host endpoint policy. */
+  readonly resolveEnvironment?: (opts: {
+    readonly invocation: NativeComposeHook;
+    readonly report: NativeEnvironmentPlan;
+    readonly values: Readonly<Record<string, string>>;
+  }) => Record<string, string>;
 }): Promise<() => Promise<NativeHookResult>> {
   const opts = { ...input, hooks: structuredClone(input.hooks) };
   const prepared: {
@@ -210,7 +216,13 @@ export async function prepareNativeFiniteHookPhase(input: {
     opts.remaining();
     prepared.push({
       hook,
-      env: environment({ hook, report: opts.report, values }),
+      env: opts.resolveEnvironment
+        ? opts.resolveEnvironment({
+            invocation: hook,
+            report: opts.report,
+            values,
+          })
+        : environment({ hook, report: opts.report, values }),
     });
   }
   let used = false;

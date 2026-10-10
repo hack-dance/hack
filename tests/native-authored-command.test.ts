@@ -467,7 +467,7 @@ if (process.platform !== "darwin") {
         env: { HACK_RUNTIME_BACKEND: "native" },
       })
     ).rejects.toThrow(
-      "requires whole-project foreground up, ps, or explicit stored-generation down --recover on macOS"
+      "requires whole-project foreground up, owner-mediated down, ps, finite single-service logs --no-follow, noninteractive single-service exec, or explicit stored-generation down --recover on macOS"
     );
     expect(await readdir(join(selected.root, ".hack"))).toEqual([]);
   });
@@ -495,6 +495,24 @@ macTest(
     });
     expect(code).toBe(0);
     expect(calls).toBe(1);
+    expect(await readdir(join(selected.root, ".hack"))).toEqual([]);
+  }
+);
+
+macTest(
+  "ordinary down preserves the fixed lifecycle failure contract",
+  async () => {
+    const selected = await fixture();
+    const privateDetail = "private-stop-control-canary";
+    const result = await tryNativeAuthoredCommand({
+      ...selected,
+      options: { ...selected.options, operation: "down" },
+      stop: () => Promise.reject(new Error(privateDetail)),
+    }).catch((error: unknown) => error);
+    expect(result).toBeInstanceOf(HackCliError);
+    expect(result).toHaveProperty("code", "E_LIFECYCLE_FAILED");
+    expect(String(result)).not.toContain(privateDetail);
+    expect(JSON.stringify(result)).not.toContain(privateDetail);
     expect(await readdir(join(selected.root, ".hack"))).toEqual([]);
   }
 );

@@ -10,6 +10,7 @@ import {
   mapLegacyNativeBranchStorageAdoption,
   mapLegacyNativeCompletedJobAdoptionBaseline,
   mapLegacyNativeRetainedBasicBuild,
+  mapLegacyNativeRetainedFileAdoptionBaseline,
   mapLegacyNativeRetainedRouting,
   mapLegacyNativeRetainedSourceBind,
   mapLegacyNativeStorageAdoption,
@@ -118,6 +119,14 @@ export function planLegacyComposeSourceBindAdoption(opts: {
   readonly composeText: string;
 }): LegacyComposeAdoptionPlan {
   return plan(opts, mapLegacyNativeRetainedSourceBind(opts), "source-bind");
+}
+
+/** Separate proof-bearing retained host-file family; no material or effect authority. */
+export function planLegacyComposeRetainedFileAdoption(opts: {
+  readonly configText: string;
+  readonly composeText: string;
+}): LegacyComposeAdoptionPlan {
+  return plan(opts, mapLegacyNativeRetainedFileAdoptionBaseline(opts));
 }
 
 function plan(

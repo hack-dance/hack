@@ -582,6 +582,55 @@ function assertRunNetworkPlanSupported(opts: {
   }
 }
 
+/** Saved bridge policies meet the authored plan before any engine probe; the verified
+ * document selection repeats the same merge after rendering. */
+function assertNetworkPolicyPlanTransition(opts: {
+  readonly plan: Readonly<Record<string, unknown>>;
+  readonly identity: NativeComposeGenerationStore["identity"];
+  readonly previous: SavedRouteDocuments;
+}): void {
+  if (opts.previous.length === 0) {
+    return;
+  }
+  const workloads: Record<string, Readonly<Record<string, unknown>>> = {};
+  for (const group of [opts.plan.services, opts.plan.jobs]) {
+    if (isRecord(group)) {
+      for (const [name, workload] of Object.entries(group)) {
+        if (isRecord(workload)) {
+          workloads[name] = workload;
+        }
+      }
+    }
+  }
+  let networks: NativeComposeNetworks;
+  try {
+    networks = prepareNativeComposeNetworks({
+      plan: opts.plan,
+      workloads,
+      runtimeIdentity: opts.identity.composeProject,
+      labels: {},
+    });
+  } catch (error: unknown) {
+    if (error instanceof NativeComposeNetworkError) {
+      // The renderer owns authored network refusals; it runs before any engine probe too.
+      return;
+    }
+    throw error;
+  }
+  mergeNativeComposeNetworkPolicies({
+    proposed: Object.values(networks.definitions).map((definition) => ({
+      name: definition.name,
+      driver: "bridge" as const,
+      internal: definition.internal ?? false,
+    })),
+    retained: opts.previous.map(
+      ({ document }) =>
+        readNativeComposeNetworkTopology(document, opts.identity).networks
+    ),
+    retiring: false,
+  });
+}
+
 async function runSavedProcess(opts: {
   readonly options: NativeComposeCommandOptions;
   readonly generation: NativeComposeGeneration;
@@ -1864,6 +1913,13 @@ async function prepareCommand(opts: {
       const operation = options.operation;
       if (!startupOperation(operation)) {
         return invalid();
+      }
+      if (operation !== "run") {
+        assertNetworkPolicyPlanTransition({
+          plan: inputs.result.plan,
+          identity: store.identity,
+          previous,
+        });
       }
       const storage = await prepareNativeComposeCommandStorage({
         store,

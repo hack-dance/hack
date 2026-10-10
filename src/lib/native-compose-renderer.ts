@@ -22,6 +22,7 @@ import {
   type NativeComposeRouting,
   planNativeComposeRouting,
 } from "./native-compose-routing.ts";
+import { NATIVE_COMPOSE_VM_FILES_EXTENSION } from "./native-compose-vm-file-protocol.ts";
 import type { NativeConfigDiagnostic } from "./native-config-compiler.ts";
 import {
   parseNativeEndpointReference,
@@ -232,6 +233,11 @@ export function renderNativeCompose(
             ...(selected.volumes ?? []),
             ...binds.map((bind) => ({ ...bind, bind: { ...bind.bind } })),
           ];
+          const image = opts.fileProjection?.images?.[name];
+          if (image !== undefined) {
+            selected.image = image;
+            selected.pull_policy = "never";
+          }
         }
         return [name, selected];
       })
@@ -247,6 +253,9 @@ export function renderNativeCompose(
     },
     ...(opts.fileProjection
       ? { [NATIVE_COMPOSE_FILES_EXTENSION]: opts.fileProjection.reference }
+      : {}),
+    ...(opts.fileProjection?.vm
+      ? { [NATIVE_COMPOSE_VM_FILES_EXTENSION]: opts.fileProjection.vm }
       : {}),
   };
   return {
@@ -845,9 +854,13 @@ function renderMounts(opts: {
     targets.add(mount.target);
     if (Object.hasOwn(mount, "config") || Object.hasOwn(mount, "secret")) {
       const kind = Object.hasOwn(mount, "config") ? "config" : "secret";
-      closed(mount, [kind, "target", "access", "mode"]);
+      closed(mount, [kind, "target", "access", "mode", "uid", "gid"]);
       assert(
-        context.files && mount.access === "read-only" && mount.mode === "0444",
+        context.files &&
+          mount.access === "read-only" &&
+          (mount.mode === "0444" ||
+            mount.mode === "0400" ||
+            mount.mode === "0600"),
         "E_COMPOSE_FILE_OWNER"
       );
       assert(
@@ -856,9 +869,9 @@ function renderMounts(opts: {
             file.kind === kind &&
             file.name === mount[kind] &&
             file.target === mount.target &&
-            file.mode === "0444" &&
-            file.uid === undefined &&
-            file.gid === undefined
+            file.mode === mount.mode &&
+            file.uid === mount.uid &&
+            file.gid === mount.gid
         ),
         "E_COMPOSE_FILE_OWNER"
       );

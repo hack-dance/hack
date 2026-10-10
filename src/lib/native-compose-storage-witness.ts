@@ -1361,7 +1361,16 @@ export async function verifyNativeComposeStorageWitness(opts: {
         await close(held);
       }
     },
-  }).catch(() => refuse());
+  }).catch((error) => {
+    try {
+      return refuse();
+    } catch (normalized) {
+      if (typeof normalized === "object" && normalized !== null) {
+        copyNativeComposeEffectRefusal(error, normalized);
+      }
+      throw normalized;
+    }
+  });
 }
 
 /** Explicitly tagged, unactivated source-only xattr enrollment path. */

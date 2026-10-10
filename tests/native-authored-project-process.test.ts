@@ -255,6 +255,70 @@ test("native owner authenticates exact admitted status before publication and se
   expect(JSON.stringify(calls)).not.toContain("synthetic-private-input");
 });
 
+test("storage foreground captures the exact helper pair before final asynchronous admission", async () => {
+  const opts = await fixture();
+  const tool = {
+    path: join(opts.projectRoot, "original-helper"),
+    digest: "a".repeat(64),
+    assertFresh: async () => {
+      tool.path = join(opts.projectRoot, "substituted-helper");
+      tool.digest = "b".repeat(64);
+    },
+    close: async () => undefined,
+  };
+  expect(
+    await serveNativeAuthoredProjectGraph({
+      ...opts,
+      storageTool: tool,
+      onReady: async (_receipt, assertRunning) => {
+        assertRunning();
+        await Bun.write(join(opts.projectRoot, "finish-request"), "finish");
+      },
+    })
+  ).toBe(0);
+  const calls: unknown[] = (
+    await Bun.file(join(opts.projectRoot, "calls")).text()
+  )
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line));
+  expect(calls[0]).toContain("--storage-witness-tool");
+  expect(calls[0]).toContain(join(opts.projectRoot, "original-helper"));
+  expect(calls[0]).toContain("a".repeat(64));
+  expect(JSON.stringify(calls)).not.toContain("substituted-helper");
+  expect(calls[1]).not.toContain("--storage-witness-tool");
+});
+
+test.each([
+  "refused",
+  "canceled",
+])("storage helper %s at final admission launches no native child", async (mode) => {
+  const opts = await fixture();
+  const abort = new AbortController();
+  await expect(
+    serveNativeAuthoredProjectGraph({
+      ...opts,
+      signal: abort.signal,
+      storageTool: {
+        path: join(opts.projectRoot, "helper"),
+        digest: "a".repeat(64),
+        close: async () => undefined,
+        assertFresh: async () => {
+          if (mode === "canceled") {
+            abort.abort();
+          } else {
+            throw new Error("synthetic refused admission");
+          }
+        },
+      },
+      onReady: async () => {
+        throw new Error("unreachable readiness");
+      },
+    })
+  ).rejects.toThrow();
+  expect(await Bun.file(join(opts.projectRoot, "calls")).exists()).toBe(false);
+});
+
 test.each([
   { kind: "graph_foreground_ready", run },
   { ...ready(), review: "9".repeat(64) },

@@ -1,5 +1,14 @@
 import { expect, test } from "bun:test";
-import { chmod, mkdtemp, readdir, rm, symlink, unlink } from "node:fs/promises";
+import {
+  chmod,
+  mkdtemp,
+  readdir,
+  readFile,
+  rm,
+  stat,
+  symlink,
+  unlink,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -7,7 +16,10 @@ import {
   type NativeComposeOwnershipOptions,
 } from "../src/lib/native-compose-ownership.ts";
 import { exec } from "../src/lib/shell.ts";
-import { replayProcessPolicyInitialOwnership } from "./e2e/native-process-policy-initial-replay.ts";
+import {
+  persistProcessPolicyFirstAfterComposeRefusal,
+  replayProcessPolicyInitialOwnership,
+} from "./e2e/native-process-policy-initial-replay.ts";
 import {
   type ProcessPolicyInitialTraceQuery,
   prepareProcessPolicyInitialTrace,
@@ -404,7 +416,7 @@ test("trace replay exposes startup vs strict ownership without accepting a trunc
     expect(strict).toEqual({
       outcome: "refused",
       code: "E_NATIVE_COMPOSE_OWNERSHIP",
-      reason: "live-network-membership",
+      reason: "topology",
       consumed: 6,
       protocolMatched: true,
     });
@@ -430,7 +442,7 @@ test("trace replay exposes startup vs strict ownership without accepting a trunc
     expect(policy).toEqual({
       outcome: "refused",
       code: "E_NATIVE_COMPOSE_OWNERSHIP",
-      reason: "network-policy",
+      reason: "bridge-policy",
       consumed: 6,
       protocolMatched: true,
     });
@@ -453,13 +465,91 @@ test("trace replay exposes startup vs strict ownership without accepting a trunc
     expect(aliases).toEqual({
       outcome: "refused",
       code: "E_NATIVE_COMPOSE_OWNERSHIP",
-      reason: "endpoint-aliases",
+      reason: "endpoint",
       consumed: 6,
       protocolMatched: true,
     });
     expect(JSON.stringify({ policy, aliases })).not.toContain(owner);
     expect(JSON.stringify({ policy, aliases })).not.toContain(id);
     expect(JSON.stringify({ policy, aliases })).not.toContain(import.meta.dir);
+    const summary: Parameters<
+      typeof persistProcessPolicyFirstAfterComposeRefusal
+    >[0]["summary"] = {
+      status: "captured",
+      replayUsesRecordedReplies: true,
+      replaysWallTiming: false,
+      originalCallerModeKnown: false,
+      queryCount: queries.length,
+      consumedQueries: queries.length,
+      complete: true,
+      observations: [
+        { index: 0, phase: "before-compose", startup: strict, strict },
+        { index: 1, phase: "after-compose", startup, strict },
+        { index: 2, phase: "after-compose", startup: strict, strict },
+      ],
+    };
+    // Disabled and malformed opt-ins cannot create a capsule, even for a matching refusal.
+    for (const enabled of [undefined, "", "0", "true", "1\n"]) {
+      expect(
+        await persistProcessPolicyFirstAfterComposeRefusal({
+          directory: root,
+          enabled,
+          summary,
+        })
+      ).toBeNull();
+      expect(
+        await Bun.file(
+          join(root, "first-after-compose-replay-refusal.json")
+        ).exists()
+      ).toBe(false);
+    }
+    const capsule = await persistProcessPolicyFirstAfterComposeRefusal({
+      directory: root,
+      enabled: "1",
+      summary,
+    });
+    expect(capsule).toEqual({
+      version: 1,
+      kind: "native-process-policy-after-compose-replay-refusal",
+      observationIndex: 1,
+      replayUsesRecordedReplies: true,
+      replaysWallTiming: false,
+      originalCallerModeKnown: false,
+      startupReason: null,
+      strictReason: "topology",
+    });
+    const capsulePath = join(root, "first-after-compose-replay-refusal.json");
+    const capsuleBytes = await readFile(capsulePath, "utf8");
+    expect(JSON.parse(capsuleBytes)).toEqual(capsule);
+    expect((await stat(capsulePath)).mode & 0o777).toBe(0o600);
+    expect(capsuleBytes).not.toContain(owner);
+    expect(capsuleBytes).not.toContain(id);
+    expect(capsuleBytes).not.toContain(CANARY);
+    await expect(
+      persistProcessPolicyFirstAfterComposeRefusal({
+        directory: root,
+        enabled: "1",
+        summary,
+      })
+    ).rejects.toThrow();
+    expect(await readFile(capsulePath, "utf8")).toBe(capsuleBytes);
+    expect(
+      await persistProcessPolicyFirstAfterComposeRefusal({
+        directory: join(root, "unmatched"),
+        enabled: "1",
+        summary: {
+          ...summary,
+          observations: [
+            {
+              index: 1,
+              phase: "after-compose",
+              startup,
+              strict: { ...strict, protocolMatched: false },
+            },
+          ],
+        },
+      })
+    ).toBeNull();
     const missing = await replayProcessPolicyInitialOwnership({
       directory: join(root, "missing"),
       queries: queries.slice(0, 1),
@@ -468,7 +558,7 @@ test("trace replay exposes startup vs strict ownership without accepting a trunc
     });
     expect(missing.protocolMatched).toBe(false);
     expect(missing.outcome).toBe("refused");
-    expect(missing.reason).toBe("unavailable");
+    expect(missing.reason).toBeNull();
     const first = queries[0];
     if (!first) {
       throw new Error("Missing synthetic query");
@@ -481,7 +571,7 @@ test("trace replay exposes startup vs strict ownership without accepting a trunc
     });
     expect(changed.protocolMatched).toBe(false);
     expect(changed.outcome).toBe("refused");
-    expect(changed.reason).toBe("unavailable");
+    expect(changed.reason).toBeNull();
   } finally {
     await rm(root, { recursive: true, force: true });
   }

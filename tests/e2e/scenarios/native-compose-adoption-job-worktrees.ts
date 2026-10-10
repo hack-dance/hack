@@ -22,7 +22,7 @@ import {
   createAdoptionFixtureProbe,
   waitForAdoptionFixtureSql,
 } from "./native-compose-adoption-worktrees.ts";
-import { proxyHasNoPublishedPorts } from "./native-config-routing.ts";
+import { proxyHasNoPublishedPorts } from "./native-routing-fixture-ingress.ts";
 
 const TIMEOUT = 180_000;
 const FULL_ID = /^[a-f0-9]{64}$/;

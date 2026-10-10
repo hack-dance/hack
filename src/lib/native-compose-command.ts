@@ -84,6 +84,11 @@ import {
   type NativeComposeExecutionInputs,
 } from "./native-compose-inputs.ts";
 import {
+  NativeComposeNetworkError,
+  type NativeComposeNetworks,
+  prepareNativeComposeNetworks,
+} from "./native-compose-networks.ts";
+import {
   assertNativeComposeOwned,
   mergeNativeComposeNetworkPolicies,
   NativeComposeOwnershipError,
@@ -517,8 +522,62 @@ function assertRunNetworkSupported(opts: {
   ) {
     throw new HackCliError({
       code: "E_NATIVE_PROJECT_UNSUPPORTED",
-      message:
-        "Native Compose run with custom networks requires qualified one-off attachment behavior. Use up or restart for this project; no engine operation ran. Values omitted.",
+      message: RUN_CUSTOM_NETWORK_UNSUPPORTED,
+    });
+  }
+}
+
+const RUN_CUSTOM_NETWORK_UNSUPPORTED =
+  "Native Compose run with custom networks requires qualified one-off attachment behavior. Use up or restart for this project; no engine operation ran. Values omitted.";
+
+/** The plan-level one-off refusal precedes every engine probe, including the storage
+ * dependency check; the saved-document check keeps refusing after rendering. */
+function assertRunNetworkPlanSupported(opts: {
+  readonly options: NativeComposeCommandOptions;
+  readonly plan: Readonly<Record<string, unknown>>;
+}): void {
+  const service = opts.options.service;
+  if (opts.options.operation !== "run" || !service) {
+    return;
+  }
+  const workloads: Record<string, Readonly<Record<string, unknown>>> = {};
+  for (const group of [opts.plan.services, opts.plan.jobs]) {
+    if (isRecord(group)) {
+      for (const [name, workload] of Object.entries(group)) {
+        if (isRecord(workload)) {
+          workloads[name] = workload;
+        }
+      }
+    }
+  }
+  if (!Object.hasOwn(workloads, service)) {
+    return;
+  }
+  let networks: NativeComposeNetworks;
+  try {
+    networks = prepareNativeComposeNetworks({
+      plan: opts.plan,
+      workloads,
+      runtimeIdentity: "native-preflight",
+      labels: {},
+    });
+  } catch (error: unknown) {
+    if (error instanceof NativeComposeNetworkError) {
+      // The renderer owns authored network refusals; it runs before any engine probe too.
+      return;
+    }
+    throw error;
+  }
+  const attachments = networks.workloads[service];
+  if (
+    attachments &&
+    Object.keys(attachments).some(
+      (name) => name !== "default" && name !== "ingress"
+    )
+  ) {
+    throw new HackCliError({
+      code: "E_NATIVE_PROJECT_UNSUPPORTED",
+      message: RUN_CUSTOM_NETWORK_UNSUPPORTED,
     });
   }
 }
@@ -1779,6 +1838,7 @@ async function prepareCommand(opts: {
         "Native Compose run with authored host hooks is not supported in this slice. No hook or engine operation ran. Values omitted.",
     });
   }
+  assertRunNetworkPlanSupported({ options, plan: inputs.result.plan });
   const store = await openNativeComposeGenerationStore({
     projectRoot,
     instance: options.instance ?? null,

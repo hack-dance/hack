@@ -67,7 +67,8 @@ export async function inspectLegacyComposeRuntimeConfig(opts: {
     ...(opts.binding.binding_version === 2 ||
     opts.binding.binding_version === 4 ||
     opts.binding.binding_version === 6 ||
-    opts.binding.binding_version === 13
+    opts.binding.binding_version === 13 ||
+    opts.binding.binding_version === 14
       ? opts.binding.composeFiles.slice(1)
       : []),
   ];

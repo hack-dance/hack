@@ -4,9 +4,15 @@ import { writeSync } from "node:fs";
 export const NATIVE_COMPOSE_PHASE_TRACE = "HACK_NATIVE_COMPOSE_PHASE_TRACE";
 const PHASES = [
   "oneoff.post-remove-owned",
+  "oneoff.post-remove-fresh",
+  "oneoff.post-remove-guard",
+  "storage.enroll",
   "guard.fresh-before",
   "guard.ownership",
+  "guard.storage",
+  "guard.fresh-after",
   "finish.pending",
+  "finish.witness-work",
   "finalize.fresh",
   "finalize.generation",
   "finalize.projection",
@@ -14,6 +20,7 @@ const PHASES = [
   "finalize.remember-storage",
   "finalize.witnesses",
   "finalize.pending",
+  "finalize.pending-check",
   "finalize.before-complete",
   "finalize.save",
 ] as const;

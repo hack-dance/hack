@@ -1,0 +1,380 @@
+import { afterEach, expect, test } from "bun:test";
+import { join, resolve } from "node:path";
+import { openNativeComposeGenerationStore } from "../src/lib/native-compose-generation.ts";
+import { captureCompletedJobFixtureCommand } from "./e2e/scenarios/native-compose-adoption-job-worktrees.ts";
+import { fixture, invoke } from "./helpers/native-compose-command.ts";
+
+const storage = { data: { kind: "persistent", scope: "worktree" } } as const;
+// Each synthetic carrier has the ordinary finite 30s proof budget. The wrapper
+// accommodates several real source-CLI transactions, not an unbounded helper.
+function command(root: string, args = ["up", "--detach", "--json"]) {
+  return invoke(root, args, 30_000, 120_000);
+}
+// The cold case owns three separate 120s CLI transactions. A whole-callback
+// timeout or unconfirmed child retains its fixture and refuses further calls.
+let coldLifetimeUnknown = false;
+let activeColdCases = 0;
+afterEach(() => {
+  if (activeColdCases > 0) {
+    coldLifetimeUnknown = true;
+  }
+});
+async function ownedColdCase(
+  body: (owner: {
+    readonly cleanupAllowed: () => boolean;
+    readonly retain: () => void;
+    readonly invoke: (
+      root: string,
+      args: readonly string[]
+    ) => Promise<{ code: number; stdout: string; stderr: string }>;
+  }) => Promise<void>
+) {
+  if (coldLifetimeUnknown) {
+    throw new Error(
+      "Prior cold storage case lifetime is unconfirmed; fixture retained."
+    );
+  }
+  let active = true;
+  activeColdCases++;
+  let capture = 0;
+  const retain = () => {
+    coldLifetimeUnknown = true;
+  };
+  const cleanupAllowed = () => {
+    if (active) {
+      retain();
+    }
+    return !coldLifetimeUnknown;
+  };
+  try {
+    await body({
+      cleanupAllowed,
+      retain,
+      invoke: async (root, args) => {
+        if (coldLifetimeUnknown || !active) {
+          throw new Error(
+            "Cold storage case lifetime is unconfirmed; fixture retained."
+          );
+        }
+        let result: Awaited<
+          ReturnType<typeof captureCompletedJobFixtureCommand>
+        >;
+        try {
+          result = await captureCompletedJobFixtureCommand({
+            argv: [
+              process.execPath,
+              resolve(import.meta.dir, "../index.ts"),
+              "--path",
+              root,
+              ...args,
+            ],
+            cwd: root,
+            env: {
+              HOME: process.env.HOME ?? root,
+              LANG: "C",
+              PATH: `${root}:/usr/bin:/bin`,
+              HACK_HOME: join(root, "home"),
+              HACK_GLOBAL_CONFIG_PATH: join(root, "global.json"),
+              HACK_CONFIG_COMPILER_BINARY: join(root, "compiler"),
+              HACK_RUNTIME_BACKEND: "compose",
+              HACK_LOGGER: "console",
+              HACK_NATIVE_COMPOSE_PHASE_TRACE: "1",
+              HACK_COMPOSE_STARTUP_TIMEOUT_MS: "30000",
+              CI: "1",
+              HACK_EXECUTION_MODE: "non_interactive",
+            },
+            captures: join(root, `storage-capture-${capture++}`),
+            timeoutMs: 120_000,
+            onUnconfirmed: retain,
+          });
+        } catch (error) {
+          retain();
+          throw error;
+        }
+        return {
+          code: result.exitCode,
+          stdout: result.stdout,
+          stderr: result.stderr,
+        };
+      },
+    });
+  } finally {
+    active = false;
+    activeColdCases--;
+  }
+}
+async function saved(root: string) {
+  const store = await openNativeComposeGenerationStore({
+    projectRoot: root,
+    instance: null,
+    mode: "saved",
+  });
+  try {
+    return await store.loadCurrent();
+  } finally {
+    await store.close();
+  }
+}
+async function requests(root: string): Promise<string[][]> {
+  return (await Bun.file(join(root, "requests")).text())
+    .trim()
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => JSON.parse(line));
+}
+async function operations(root: string) {
+  return (await Bun.file(join(root, "storage-operations")).text())
+    .trim()
+    .split("\n");
+}
+async function disposition(root: string, code: number): Promise<string> {
+  const path = join(root, "storage-operations");
+  const observed = (await Bun.file(path).exists())
+    ? await operations(root)
+    : [];
+  return JSON.stringify({
+    code,
+    roots: observed.filter((value) => value === "root").length,
+    seeds: observed.filter((value) => value === "seed").length,
+    verifications: observed.filter((value) => value === "verify").length,
+    engine: await Bun.file(join(root, "engine")).exists(),
+  });
+}
+
+test(
+  "source CLI cold enrollment precedes workload and down/up only verifies retained content",
+  async () =>
+    await ownedColdCase(async (owner) => {
+      const root = await fixture("", false, {
+        storage,
+        noHooks: true,
+        cleanupAllowed: owner.cleanupAllowed,
+      });
+      const up = await owner.invoke(root, ["up", "--detach", "--json"]);
+      expect(up.code, await disposition(root, up.code)).toBe(0);
+      expect(JSON.parse(up.stdout)).toMatchObject({
+        ok: true,
+        data: { status: "ready" },
+      });
+      const first = await saved(root);
+      expect(first.storageWitnesses?.[0]).toMatchObject({
+        state: "enrolled",
+        reference: { version: 3, kind: "directory-xattr" },
+      });
+      expect(first.pending).toBeNull();
+      expect(first.storageWitnessesPending).toBe(false);
+      expect(await Bun.file(join(root, "carriers")).json()).toEqual([]);
+      const before = await Bun.file(join(root, "volumes")).text();
+      const calls = await requests(root);
+      const create = calls.findIndex(
+        (args) => args[0] === "volume" && args[1] === "create"
+      );
+      const helper = calls.findIndex((args) => args[0] === "start");
+      const workload = calls.findIndex(
+        (args) => args[0] === "compose" && args.includes("up")
+      );
+      expect(create).toBeGreaterThanOrEqual(0);
+      expect(helper).toBeGreaterThan(create);
+      expect(workload).toBeGreaterThan(helper);
+      const events = (await Bun.file(join(root, "storage-events")).text())
+        .trim()
+        .split("\n");
+      expect(events.indexOf("seed")).toBeGreaterThanOrEqual(0);
+      expect(events.indexOf("workload")).toBeGreaterThan(
+        events.indexOf("seed")
+      );
+      expect(
+        (await operations(root)).filter((op) => op === "seed")
+      ).toHaveLength(1);
+      expect((await owner.invoke(root, ["down", "--json"])).code).toBe(0);
+      expect(
+        (await owner.invoke(root, ["up", "--detach", "--json"])).code
+      ).toBe(0);
+      expect(await Bun.file(join(root, "volumes")).text()).toBe(before);
+      expect((await saved(root)).storageWitnesses).toEqual(
+        first.storageWitnesses
+      );
+      expect(
+        (await operations(root)).filter((op) => op === "seed")
+      ).toHaveLength(1);
+      expect(
+        (await requests(root)).filter(
+          (args) => args[0] === "volume" && args[1] === "create"
+        )
+      ).toHaveLength(1);
+      expect(await Bun.file(join(root, "carriers")).json()).toEqual([]);
+    }),
+  390_000
+);
+
+test("source CLI refuses SAME-birth empty replacement before hooks or another workload start", async () => {
+  const root = await fixture("", false, {
+    storage,
+    hooks: {
+      up: {
+        before: [
+          { name: "before", command: { shell: 'printf "before\\n" >> order' } },
+        ],
+      },
+    },
+  });
+  const initial = await command(root);
+  expect(initial.code, await disposition(root, initial.code)).toBe(0);
+  expect((await command(root, ["down", "--json"])).code).toBe(0);
+  const before = await saved(root);
+  const order = await Bun.file(join(root, "order")).text();
+  const volumes = await Bun.file(join(root, "volumes")).json();
+  expect(volumes).toHaveLength(1);
+  // Keep all metadata, birth and root facts; only content continuity disappears.
+  volumes[0].attributes = {};
+  await Bun.write(join(root, "volumes"), JSON.stringify(volumes));
+  const result = await command(root);
+  expect(result.code).toBe(1);
+  expect(JSON.parse(result.stdout)).toMatchObject({ ok: false });
+  expect(`${result.stdout}\n${result.stderr}`).not.toContain(
+    "user.hack.storage."
+  );
+  expect(
+    (await requests(root)).filter(
+      (args) => args[0] === "compose" && args.includes("up")
+    )
+  ).toHaveLength(1);
+  expect((await operations(root)).filter((op) => op === "seed")).toHaveLength(
+    1
+  );
+  expect(await Bun.file(join(root, "volumes")).json()).toEqual(volumes);
+  expect((await saved(root)).storageWitnesses).toEqual(before.storageWitnesses);
+  expect((await saved(root)).pending).toBeNull();
+  expect(await Bun.file(join(root, "engine")).exists()).toBe(false);
+  expect(await Bun.file(join(root, "order")).text()).toBe(order);
+  expect(await Bun.file(join(root, "carriers")).json()).toEqual([]);
+}, 120_000);
+
+test("AMD daemon reaches its image guard and refuses a mismatched ARM image", async () => {
+  await ownedColdCase(async (owner) => {
+    const root = await fixture("", false, {
+      storage,
+      cleanupAllowed: owner.cleanupAllowed,
+    });
+    // This synthetic daemon reports amd64 but returns the existing ARM image.
+    await Bun.write(join(root, "helper-wrong-platform"), "true");
+    const result = await owner.invoke(root, ["up", "--detach", "--json"]);
+    const calls = await requests(root);
+    const current = await saved(root);
+    const imageInspections = calls.filter(
+      (args) => args[0] === "image" && args[1] === "inspect"
+    );
+    const effects = calls.filter(
+      (args) =>
+        ["create", "start", "compose"].includes(args[0] ?? "") ||
+        (args[0] === "volume" && args[1] === "create")
+    );
+    expect(result.code).toBe(1);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      ok: false,
+      error: { code: "E_COMPOSE_FAILED" },
+    });
+    expect(effects).toHaveLength(0);
+    expect(current.pending).toBeNull();
+    expect(current.storageWitnesses).toBeNull();
+    expect(await Bun.file(join(root, "order")).exists()).toBe(false);
+    expect(
+      calls.some(
+        (args) => args[0] === "info" && args[2]?.includes(".Architecture")
+      )
+    ).toBe(true);
+    // A qualified AMD catalog must pass platform selection and reach this image guard.
+    expect(imageInspections).toHaveLength(1);
+  });
+}, 120_000);
+
+test.each([
+  "helper-unavailable",
+  "helper-wrong-platform",
+])("source CLI %s refuses before hooks, Expected or volume effects", async (missing) => {
+  const root = await fixture('await Bun.write("after-ran","yes")', false, {
+    storage,
+  });
+  await Bun.write(join(root, missing), "true");
+  const result = await command(root);
+  expect(result.code).toBe(1);
+  expect(JSON.parse(result.stdout)).toMatchObject({ ok: false });
+  expect(await Bun.file(join(root, "order")).exists()).toBe(false);
+  expect(await Bun.file(join(root, "volumes")).exists()).toBe(false);
+  expect(await Bun.file(join(root, "carriers")).exists()).toBe(false);
+  const current = await saved(root);
+  expect(current.pending).toBeNull();
+  expect(current.storageWitnesses).toBeNull();
+  expect(
+    (await requests(root)).some(
+      (args) =>
+        ["create", "start", "compose"].includes(args[0] ?? "") ||
+        (args[0] === "volume" && args[1] === "create")
+    )
+  ).toBe(false);
+}, 30_000);
+
+test("public down recover completes only removed readonly original work and next up retains the same volume", async () => {
+  await ownedColdCase(async (owner) => {
+    const root = await fixture("", false, {
+      storage,
+      noHooks: true,
+      cleanupAllowed: owner.cleanupAllowed,
+    });
+    let passed = false;
+    try {
+      const initial = await owner.invoke(root, ["up", "--detach", "--json"]);
+      if (initial.code !== 0) {
+        owner.retain();
+      }
+      const trace = initial.stderr
+        .split("\n")
+        .filter((line) => line.includes('"diagnostic":"native-compose-phase"'));
+      expect(initial.code, JSON.stringify({ code: initial.code, trace })).toBe(
+        0
+      );
+      const volumes = await Bun.file(join(root, "volumes")).text();
+      await Bun.write(join(root, "fault-removed-verify"), "1");
+      const interrupted = await owner.invoke(root, ["restart", "--json"]);
+      expect(interrupted.code).not.toBe(0);
+      expect(
+        await Bun.file(join(root, "fault-removed-evidence")).exists()
+      ).toBe(true);
+      const pending = await saved(root);
+      expect(pending.storageWitnessesPending).toBe(true);
+      expect(pending.pending).not.toBeNull();
+      expect(await Bun.file(join(root, "carriers")).json()).toEqual([]);
+      const calls = await requests(root),
+        attempts = (await operations(root)).length;
+      const recovered = await owner.invoke(root, [
+        "down",
+        "--recover",
+        "--json",
+      ]);
+      expect(recovered.code).toBe(0);
+      const after = await saved(root);
+      expect(after.pending).toBeNull();
+      expect(after.storageWitnessesPending).toBe(false);
+      expect(after.storageWitnesses).toEqual(pending.storageWitnesses);
+      expect((await operations(root)).length).toBe(attempts);
+      expect(
+        (await requests(root))
+          .slice(calls.length)
+          .some((a) => ["create", "start", "rm", "exec"].includes(a[0] ?? ""))
+      ).toBe(false);
+      expect(await Bun.file(join(root, "volumes")).text()).toBe(volumes);
+      expect(
+        (await owner.invoke(root, ["up", "--detach", "--json"])).code
+      ).toBe(0);
+      expect(await Bun.file(join(root, "volumes")).text()).toBe(volumes);
+      expect(
+        (await operations(root)).filter((op) => op === "seed")
+      ).toHaveLength(1);
+      passed = true;
+    } finally {
+      if (!passed) {
+        owner.retain();
+      }
+    }
+  });
+}, 500_000);

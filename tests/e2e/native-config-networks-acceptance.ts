@@ -41,7 +41,9 @@ const GLOBAL_PROJECT = "hack-dev-proxy";
 const FIXTURE = "hack.e2e.native-config-networks";
 const OUTPUT_LIMIT = 2 * 1024 * 1024;
 const COMMAND_TIMEOUT = 180_000;
-const SCENARIO_TIMEOUT = 12 * 60_000;
+// Witness-bearing exec/up verification runs three fresh helper carriers per proof; on the
+// hosted Linux engine that is ~12-15 s per exec and ~35 s per up across three checkouts.
+const SCENARIO_TIMEOUT = 80 * 60_000;
 const CLEANUP_TIMEOUT = 3 * 60_000;
 const BUN_TAG = "oven/bun:1.4.2-slim";
 const CADDY_TAG = "lucaslorentz/caddy-docker-proxy:2.10.0-alpine";
@@ -1026,7 +1028,7 @@ export async function nativeNetworkFixtureShim(opts: {
         'const d=await Bun.file(a[4]).json();if(!d.services||Object.keys(d.services).length!==4||Object.values(d.services).some(s=>s.labels?.["io.hack.native-config.owner"]!==owner||s.labels?.["io.hack.native-config.instance"]!==project))process.exit(98);',
         'await Bun.write(receipt,"create-admitted");const p=Bun.spawn([engine,...a.slice(0,5),"create","--no-build","--pull","never"],{stdin:"ignore",stdout:"inherit",stderr:"inherit"});const code=await p.exited;process.exit(code===0?71:code);',
         "}",
-        `const p=Bun.spawn([engine,...a],{stdin:"ignore",stdout:"inherit",stderr:"inherit"});process.exit(await p.exited);`,
+        `const p=Bun.spawn([engine,...a],{stdin:"inherit",stdout:"inherit",stderr:"inherit"});process.exit(await p.exited);`,
         "",
       ].join("\n")
     : [
@@ -1595,12 +1597,10 @@ export const nativeConfigNetworksScenario: Scenario = {
         receipt: createReceipt,
       });
       startedRoots.add(primary.root);
-      resultOk(
-        await raw(primary, ["up", "--detach", "--json"], {
-          PATH: `${shim}:${env.PATH}`,
-        }),
-        1
-      );
+      const controlledUp = await raw(primary, ["up", "--detach", "--json"], {
+        PATH: `${shim}:${env.PATH}`,
+      });
+      resultOk(controlledUp, 1);
       requireValue(
         await Bun.file(createReceipt).exists(),
         "Controlled startup must reach actual Compose create"

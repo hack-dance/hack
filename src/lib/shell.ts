@@ -86,6 +86,13 @@ export interface RunOptions {
    */
   readonly stdout?: "inherit" | "stderr" | "ignore";
   readonly stderr?: "inherit" | "ignore";
+  /** Non-TTY owner-supplied descriptors. The caller holds them through settlement;
+   * run captures numbers synchronously and never reopens names or closes the FDs. */
+  readonly privateIo?: {
+    readonly stdin: number;
+    readonly stdout: number;
+    readonly stderr: number;
+  };
   readonly timeoutMs?: number;
   /** Forward cancellation to an owned command process group, preserving TTY input. */
   readonly forwardSignals?: boolean;
@@ -100,6 +107,9 @@ export interface RunOptions {
     readonly pid: number;
     readonly ownsProcessGroup: boolean;
     readonly processGroupId?: number;
+    /** One-use continuation for a caller's fixed pre-exec STOP handshake.
+     * Uses only the captured live child; never signals a former process group. */
+    readonly resumeSuspended?: () => boolean;
   }) => Promise<void>;
   readonly onExit?: (event: RunExitEvent) => Promise<void>;
 }
@@ -121,8 +131,27 @@ export async function run(
     ...opts,
     env: opts.env ? { ...opts.env } : undefined,
     unsetEnvKeys: opts.unsetEnvKeys ? [...opts.unsetEnvKeys] : undefined,
+    privateIo: opts.privateIo ? { ...opts.privateIo } : undefined,
   };
   const command = [...cmd];
+  if (
+    options.privateIo &&
+    (options.forwardSignals === true ||
+      !(
+        typeof options.timeoutMs === "number" &&
+        Number.isFinite(options.timeoutMs) &&
+        options.timeoutMs > 0
+      ) ||
+      ![
+        options.privateIo.stdin,
+        options.privateIo.stdout,
+        options.privateIo.stderr,
+      ].every((fd) => Number.isInteger(fd) && fd >= 0 && fd <= 2_147_483_647))
+  ) {
+    throw new Error(
+      "Private subprocess descriptors require a non-TTY owned invocation."
+    );
+  }
   const signal = options.signal;
   if (signal?.aborted) {
     return 143;
@@ -158,9 +187,11 @@ export async function run(
   const proc = Bun.spawn(command, {
     cwd: options.cwd,
     env: buildSpawnEnv(options.env, options.unsetEnvKeys),
-    stdin: options.stdin ?? "inherit",
-    stdout: options.stdout === "stderr" ? 2 : (options.stdout ?? "inherit"),
-    stderr: options.stderr ?? "inherit",
+    stdin: options.privateIo?.stdin ?? options.stdin ?? "inherit",
+    stdout:
+      options.privateIo?.stdout ??
+      (options.stdout === "stderr" ? 2 : (options.stdout ?? "inherit")),
+    stderr: options.privateIo?.stderr ?? options.stderr ?? "inherit",
     detached: ownsProcessGroup,
   });
   const observeCpu = beginNativeCpuChild(
@@ -181,9 +212,11 @@ export async function run(
       : null;
   // Observe completion immediately: diagnostic setup must not keep deadlines armed
   // after the command has exited. Record callbacks still finish in spawn/exit order.
+  let originalExited = false;
   const completion = (async (): Promise<RunExitEvent> => {
     try {
       const exitCode = await proc.exited;
+      originalExited = true;
       const diagnosticUsage = observeCpu(exitCode);
       const code =
         cancellation?.exitCode() ?? (timeout.didTimeout() ? 124 : exitCode);
@@ -198,13 +231,35 @@ export async function run(
         ...usage,
       };
     } finally {
+      originalExited = true;
       timeout.dispose();
       cancellation?.dispose();
     }
   })();
+  let resumed = false;
+  const resumeSuspended = () => {
+    if (
+      !options.privateIo ||
+      resumed ||
+      originalExited ||
+      proc.exitCode !== null
+    ) {
+      return false;
+    }
+    resumed = true;
+    try {
+      // Bun 1.4.2's Subprocess.kill(SIGCONT) does not resume a stopped child on
+      // macOS. Delivery remains inside this original owner, to its captured PID
+      // before observed completion; no saved/reacquired PID or group is used.
+      process.kill(proc.pid, "SIGCONT");
+      return true;
+    } catch {
+      return false;
+    }
+  };
   const [result] = await Promise.all([
     completion,
-    options.onSpawn?.({ pid: proc.pid, ownsProcessGroup }),
+    options.onSpawn?.({ pid: proc.pid, ownsProcessGroup, resumeSuspended }),
   ]);
   await options.onExit?.(result);
   return result.exitCode;

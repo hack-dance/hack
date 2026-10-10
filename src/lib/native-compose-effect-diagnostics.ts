@@ -79,6 +79,8 @@ export type NativeComposeEffectRefusal = {
     | "helper-host-policy"
     | "helper-mount-cardinality"
     | "helper-program-mount"
+    | "helper-storage-request"
+    | "helper-storage-identity"
     | "helper-storage-mount"
     | "helper-policy-stability"
     | "unclassified";
@@ -159,6 +161,8 @@ const reasons: readonly NativeComposeEffectRefusal["reason"][] = [
   "helper-host-policy",
   "helper-mount-cardinality",
   "helper-program-mount",
+  "helper-storage-request",
+  "helper-storage-identity",
   "helper-storage-mount",
   "helper-policy-stability",
   "unclassified",

@@ -17,6 +17,10 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import {
+  nativeComposeEffectRefusal,
+  retainNativeComposeEffectRefusal,
+} from "../src/lib/native-compose-effect-diagnostics.ts";
+import {
   type NativeComposeGeneration,
   type NativeComposeGenerationStore,
   type NativeComposeMutation,
@@ -24,6 +28,7 @@ import {
   openNativeComposeGenerationStore,
   readNativeComposeNetworkTopology,
 } from "../src/lib/native-compose-generation.ts";
+import { NativeComposeGenerationError } from "../src/lib/native-compose-private-state.ts";
 import type { NativeComposeRetainedVolume } from "../src/lib/native-compose-retained-storage.ts";
 import {
   type NativeComposeRouteClaims,
@@ -2874,4 +2879,274 @@ test("finite down callbacks refuse a saved generation that is no longer current"
   expect((await owner.loadCurrent()).generation?.generationId).not.toBe(
     old.generationId
   );
+});
+
+test.each([
+  "ownership",
+  "freshness",
+] as const)("effect diagnostic reaches original pre-intent %s refusal without executing or journaling", async (boundary) => {
+  const owner = await store(await fixture());
+  let effects = 0;
+  let ownershipChecks = 0;
+  await owner.withMutation(async (mutation) => {
+    const generation = await publish(mutation);
+    const before = await Bun.file(receiptPath(owner)).text();
+    let caught: unknown;
+    try {
+      await mutation.runEffect({
+        generation,
+        operation: "up",
+        assertFresh: async () => {
+          if (boundary === "freshness") {
+            throw new Error("private-fresh-canary");
+          }
+        },
+        assertOwned: async () => {
+          ownershipChecks += 1;
+          throw new Error("private-owner-canary");
+        },
+        effect: async () => {
+          effects += 1;
+          return { outcome: "complete", value: 0 };
+        },
+      });
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toMatchObject({
+      code:
+        boundary === "ownership"
+          ? "E_NATIVE_COMPOSE_STATE"
+          : "E_NATIVE_COMPOSE_STALE",
+    });
+    expect(nativeComposeEffectRefusal(caught)).toEqual({
+      stage: boundary === "ownership" ? "effect-ownership" : "effect-freshness",
+      reason: boundary === "ownership" ? "unclassified" : "private-stale",
+    });
+    expect(await Bun.file(receiptPath(owner)).text()).toBe(before);
+    expect(JSON.stringify(nativeComposeEffectRefusal(caught))).not.toContain(
+      "canary"
+    );
+  });
+  expect(effects).toBe(0);
+  expect(ownershipChecks).toBe(boundary === "ownership" ? 1 : 0);
+});
+
+test.each([
+  "object",
+  "primitive",
+  "inner-issued",
+] as const)("effect diagnostic retains first %s failure across uncertain translation and cleanup failure", async (kind) => {
+  const owner = await store(await fixture());
+  let effects = 0;
+  let captures = 0;
+  let entered = false;
+  const original = new Error("private-original-canary");
+  if (kind === "inner-issued") {
+    retainNativeComposeEffectRefusal(original, {
+      stage: "storage-enrollment",
+      reason: "private-state",
+    });
+  }
+  let caught: unknown;
+  await owner.withMutation(async (mutation) => {
+    const generation = await publish(mutation);
+    try {
+      await mutation.runEffect({
+        generation,
+        operation: "up",
+        assertFresh: async () => {},
+        assertOwned: async () => {},
+        captureStorage: () => {
+          captures += 1;
+          if (entered) {
+            throw new Error("private-secondary-cleanup-canary");
+          }
+          return [];
+        },
+        effect: async () => {
+          effects += 1;
+          entered = true;
+          return await Promise.reject(
+            kind === "primitive" ? "private-primitive-canary" : original
+          );
+        },
+      });
+    } catch (error) {
+      caught = error;
+    }
+  });
+  expect(effects).toBe(1);
+  expect(captures).toBeGreaterThan(1);
+  expect(caught).toBeInstanceOf(NativeComposeGenerationError);
+  expect(caught).toMatchObject({ code: "E_NATIVE_COMPOSE_UNCERTAIN" });
+  expect(nativeComposeEffectRefusal(caught)).toEqual(
+    kind === "inner-issued"
+      ? { stage: "storage-enrollment", reason: "private-state" }
+      : { stage: "effect-execution", reason: "unclassified" }
+  );
+  expect((await owner.loadCurrent()).pending).not.toBeNull();
+  expect(await Bun.file(receiptPath(owner)).text()).not.toContain("canary");
+  expect(JSON.stringify(nativeComposeEffectRefusal(caught))).not.toContain(
+    "canary"
+  );
+});
+
+test("effect diagnostic isolates overlapping and inactive calls from an entered action stage", async () => {
+  const owner = await store(await fixture());
+  let escaped: NativeComposeMutation | undefined;
+  let savedGeneration: NativeComposeGeneration | undefined;
+  await owner.withMutation(async (mutation) => {
+    escaped = mutation;
+    const generation = await publish(mutation);
+    savedGeneration = generation;
+    let release = () => {};
+    let entered = () => {};
+    const held = new Promise<void>((done) => {
+      release = done;
+    });
+    const started = new Promise<void>((done) => {
+      entered = done;
+    });
+    const first = mutation.runEffect({
+      generation,
+      operation: "up",
+      assertFresh: async () => {},
+      assertOwned: async () => {},
+      effect: async () => {
+        entered();
+        await held;
+        return { outcome: "complete", value: 0 };
+      },
+    });
+    try {
+      await started;
+      let caught: unknown;
+      try {
+        await mutation.runEffect({
+          generation,
+          operation: "up",
+          assertFresh: async () => {},
+          assertOwned: async () => {},
+          effect: async () => {
+            throw new Error("Second effect must not execute");
+          },
+        });
+      } catch (error) {
+        caught = error;
+      }
+      expect(caught).toMatchObject({ code: "E_NATIVE_COMPOSE_BUSY" });
+      expect(nativeComposeEffectRefusal(caught)).toEqual({
+        stage: "effect-entry",
+        reason: "private-busy",
+      });
+    } finally {
+      release();
+      await first;
+    }
+  });
+  if (!(escaped && savedGeneration)) {
+    throw new Error(
+      "Expected retained callback only for inactive-call negative"
+    );
+  }
+  let inactive: unknown;
+  try {
+    await escaped.runEffect({
+      generation: savedGeneration,
+      operation: "up",
+      assertFresh: async () => {},
+      assertOwned: async () => {},
+      effect: async () => {
+        throw new Error("Inactive effect must not execute");
+      },
+    });
+  } catch (error) {
+    inactive = error;
+  }
+  expect(inactive).toMatchObject({ code: "E_NATIVE_COMPOSE_STATE" });
+  expect(nativeComposeEffectRefusal(inactive)).toEqual({
+    stage: "effect-entry",
+    reason: "private-state",
+  });
+});
+
+test("effect diagnostic restores finalization after a successful nested witness guard", async () => {
+  const owner = await store(await fixture());
+  let completions = 0;
+  let caught: unknown;
+  await owner.withMutation(async (mutation) => {
+    const generation = await publish(mutation);
+    try {
+      await mutation.runEffect({
+        generation,
+        operation: "up",
+        assertFresh: async () => {},
+        assertOwned: async () => {},
+        effect: async () => ({ outcome: "complete", value: 0 }),
+        beforeComplete: async () => {
+          completions += 1;
+          throw new Error("private-finalizer-canary");
+        },
+      });
+    } catch (error) {
+      caught = error;
+    }
+  });
+  expect(completions).toBe(1);
+  expect(caught).toMatchObject({ code: "E_NATIVE_COMPOSE_UNCERTAIN" });
+  expect(nativeComposeEffectRefusal(caught)).toEqual({
+    stage: "effect-finalization",
+    reason: "unclassified",
+  });
+  expect((await owner.loadCurrent()).pending).not.toBeNull();
+});
+
+test.each([
+  "prepare",
+  "execute",
+] as const)("effect diagnostic restores finalization for a bound hook %s refusal", async (boundary) => {
+  const owner = await store(await fixture());
+  const order: string[] = [];
+  let caught: unknown;
+  await owner.withMutation(async (mutation) => {
+    const generation = await publish(mutation);
+    try {
+      await mutation.runEffect({
+        generation,
+        operation: "up",
+        assertFresh: async () => {},
+        assertOwned: async () => {},
+        effect: async () => {
+          order.push("effect");
+          return { outcome: "complete", value: 0 };
+        },
+        afterHooks: {
+          prepare: async () => {
+            order.push("prepare");
+            if (boundary === "prepare") {
+              throw new Error("private-hook-prepare-canary");
+            }
+            return async () => {
+              order.push("execute");
+              throw new Error("private-hook-execute-canary");
+            };
+          },
+        },
+      });
+    } catch (error) {
+      caught = error;
+    }
+  });
+  expect(order).toEqual(
+    boundary === "prepare"
+      ? ["effect", "prepare"]
+      : ["effect", "prepare", "execute"]
+  );
+  expect(caught).toMatchObject({ code: "E_NATIVE_COMPOSE_UNCERTAIN" });
+  expect(nativeComposeEffectRefusal(caught)).toEqual({
+    stage: "effect-finalization",
+    reason: "unclassified",
+  });
+  expect((await owner.loadCurrent()).pending).not.toBeNull();
 });

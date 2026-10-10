@@ -86,6 +86,13 @@ export interface RunOptions {
    */
   readonly stdout?: "inherit" | "stderr" | "ignore";
   readonly stderr?: "inherit" | "ignore";
+  /** Non-TTY owner-supplied descriptors. The caller holds them through settlement;
+   * run captures numbers synchronously and never reopens names or closes the FDs. */
+  readonly privateIo?: {
+    readonly stdin: number;
+    readonly stdout: number;
+    readonly stderr: number;
+  };
   readonly timeoutMs?: number;
   /** Forward cancellation to an owned command process group, preserving TTY input. */
   readonly forwardSignals?: boolean;
@@ -121,8 +128,27 @@ export async function run(
     ...opts,
     env: opts.env ? { ...opts.env } : undefined,
     unsetEnvKeys: opts.unsetEnvKeys ? [...opts.unsetEnvKeys] : undefined,
+    privateIo: opts.privateIo ? { ...opts.privateIo } : undefined,
   };
   const command = [...cmd];
+  if (
+    options.privateIo &&
+    (options.forwardSignals === true ||
+      !(
+        typeof options.timeoutMs === "number" &&
+        Number.isFinite(options.timeoutMs) &&
+        options.timeoutMs > 0
+      ) ||
+      ![
+        options.privateIo.stdin,
+        options.privateIo.stdout,
+        options.privateIo.stderr,
+      ].every((fd) => Number.isInteger(fd) && fd >= 0 && fd <= 2_147_483_647))
+  ) {
+    throw new Error(
+      "Private subprocess descriptors require a non-TTY owned invocation."
+    );
+  }
   const signal = options.signal;
   if (signal?.aborted) {
     return 143;
@@ -158,9 +184,11 @@ export async function run(
   const proc = Bun.spawn(command, {
     cwd: options.cwd,
     env: buildSpawnEnv(options.env, options.unsetEnvKeys),
-    stdin: options.stdin ?? "inherit",
-    stdout: options.stdout === "stderr" ? 2 : (options.stdout ?? "inherit"),
-    stderr: options.stderr ?? "inherit",
+    stdin: options.privateIo?.stdin ?? options.stdin ?? "inherit",
+    stdout:
+      options.privateIo?.stdout ??
+      (options.stdout === "stderr" ? 2 : (options.stdout ?? "inherit")),
+    stderr: options.privateIo?.stderr ?? options.stderr ?? "inherit",
     detached: ownsProcessGroup,
   });
   const observeCpu = beginNativeCpuChild(

@@ -32,15 +32,17 @@ proven timeout cause. Records contain no resource IDs, paths, arguments,
 environment values, subprocess output or exception text.
 
 The canonical call sites cover `oneoff.post-remove-owned`,
-`guard.fresh-before`, `guard.ownership`, `finish.pending`, and the finalization
+`oneoff.post-remove-fresh`, `oneoff.post-remove-guard`, `storage.enroll`,
+`guard.fresh-before`, `guard.ownership`, `guard.storage`, `guard.fresh-after`,
+`finish.pending`, `finish.witness-work`, and the finalization
 phases `finalize.fresh`, `finalize.generation`, `finalize.projection`,
 `finalize.owned`, `finalize.remember-storage`, `finalize.witnesses`,
-`finalize.pending`, `finalize.before-complete` and `finalize.save`. A finalization
+`finalize.pending`, `finalize.pending-check`, `finalize.before-complete` and `finalize.save`. A finalization
 recheck repeats the phase with a new span. Conditional phases appear only when the
-existing command takes that path. The canonical trace does not yet distinguish
-the unmerged ordinary-storage activation's `storage.verify` await. That
-integration must add a span at its actual call site before claiming storage
-attribution.
+existing command takes that path. `guard.storage` measures the ordinary storage
+verification await inside the workload ownership guard; `storage.enroll` measures
+its preceding enrollment phase. Nested spans describe nested awaits, so their
+durations must not be added as independent CPU time.
 
 Output stops after 256 records or 64 KiB, or if the clock or sink fails. Diagnostic
 failure preserves the original result or rejection and starts no retry. An

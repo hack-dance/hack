@@ -2,6 +2,7 @@ import { afterEach, expect } from "bun:test";
 import { chmod, mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { nativeComposeStorageDockerFixtureScript } from "./native-compose-storage-docker.ts";
 
 const roots: string[] = [];
 const cleanupGuards = new Map<string, () => boolean>();
@@ -155,6 +156,7 @@ const root=${JSON.stringify(root)};const args=process.argv.slice(2);
 await appendFile(root+"/requests",JSON.stringify(args)+"\\n");
 const engine=root+"/engine";
 const volumes=root+"/volumes";
+${opts.storage ? nativeComposeStorageDockerFixtureScript(root) : ""}
 const oneoff=${opts.oneoff === true};
 const removed=oneoff && await Bun.file(root+"/oneoff-removed").exists();
 const oneoffName=oneoff && await Bun.file(root+"/oneoff-name").exists()?await Bun.file(root+"/oneoff-name").text():"";
@@ -171,7 +173,7 @@ if(args[0]==="compose") {
    }
    await Bun.write(volumes,JSON.stringify(retained));
   }
-  await Bun.write(engine,JSON.stringify(doc));await appendFile(root+"/order","engine-ready\\n");process.exit(0);
+  await Bun.write(engine,JSON.stringify(doc));${opts.storage ? 'await appendFile(root+"/storage-events","workload\\n");' : ""}await appendFile(root+"/order","engine-ready\\n");process.exit(0);
  }
  if(oneoff && args.includes("run")) {const doc=await Bun.file(args[args.indexOf("-f")+1]).json();await Bun.write(engine,JSON.stringify(doc));await Bun.write(root+"/oneoff-name",args[args.indexOf("--name")+1]);process.exit(0);}
  if(args.includes("down")) {await rm(engine,{force:true});await appendFile(root+"/order","engine-stopped\\n");process.exit(0);}
@@ -222,7 +224,8 @@ process.exit(99);
 export async function invoke(
   root: string,
   args = ["up", "--detach", "--json"],
-  startupTimeoutMs = 1000
+  startupTimeoutMs = 1000,
+  commandTimeoutMs = 15_000
 ) {
   const child = Bun.spawn(
     [
@@ -252,7 +255,7 @@ export async function invoke(
       stderr: "pipe",
     }
   );
-  const timer = setTimeout(() => child.kill("SIGKILL"), 15_000);
+  const timer = setTimeout(() => child.kill("SIGKILL"), commandTimeoutMs);
   try {
     const [code, stdout, stderr] = await Promise.all([
       child.exited,

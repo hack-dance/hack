@@ -3,12 +3,11 @@ import { chmod, mkdir, mkdtemp, readdir, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { isRecord } from "../src/lib/guards.ts";
+import { requireTestConfigCompiler } from "./helpers/test-config-compiler.ts";
 
 const roots: string[] = [];
 const PRIVATE = "synthetic-private-dispatch-diagnostic";
-const realCompiler = resolve(
-  process.env.HACK_CONFIG_COMPILER_BINARY ?? "dist/hack-config-compiler"
-);
+const realCompiler = requireTestConfigCompiler();
 afterEach(async () => {
   await Promise.all(
     roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))

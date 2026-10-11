@@ -92,6 +92,17 @@ if (action === "ls") {
  if (fixture.mode === "restart-member-transition" && kind === "network" && count > 0) {
    rows[0].containers[${JSON.stringify(ID)}] = {};
  }
+ if (fixture.mode === "restart-placeholder-transition" && kind === "container" && count > 0) {
+   for (const row of rows) if (row.state === "restarting") row.state = "running";
+ }
+ if (fixture.mode === "restart-placeholder-transition" && kind === "network" && count > 0) {
+   for (const row of rows) for (const [key, member] of Object.entries(row.containers)) {
+     if (!key.startsWith("ep-")) continue;
+     const owner = fixture.container.find(container => container.name === "/" + member.Name);
+     delete row.containers[key];
+     row.containers[owner.id] = member;
+   }
+ }
  const order = fixture.mode === "volume-order" && kind === "volume" && count > 0 ? [...selected].reverse() : selected;
  for (const id of order) { const row = rows.find(row => row.id === id); if (!row) process.exit(1); console.log(JSON.stringify(row)); }
  if (fixture.mode === "volume-rebirth" && kind === "volume" && count === 0) {
@@ -415,6 +426,162 @@ test("selected on-failure restart is unready until two stable owned scans", asyn
       state: "running",
     }
   );
+  expect(await Bun.file(join(root, "mutated")).exists()).toBe(false);
+});
+
+const PLACEHOLDER_KEY = `ep-${"9".repeat(64)}`;
+async function inspectCount(): Promise<number> {
+  return (await Bun.file(join(root, "commands")).exists())
+    ? (await commands()).filter(([, action]) => action === "inspect").length
+    : 0;
+}
+const RETRY_ID = "3".repeat(64);
+const placeholderOptions: NativeComposeOwnershipOptions = {
+  ...options,
+  expectedServices: ["web", "install", "worker", "retry"],
+};
+/** Captured docker-e2e shape: three container-ID members plus one `ep-` key for the restarting retry service. */
+function restartingPlaceholder(): Fixture {
+  const fixture = owned();
+  const web = fixture.container?.[0];
+  const network = fixture.network?.[0];
+  if (!(web && network)) {
+    throw new Error("Missing owned placeholder fixture");
+  }
+  const service = (id: string, name: string, state: string) => ({
+    ...web,
+    id,
+    name: `/${PROJECT}-${name}-1`,
+    service: name,
+    state,
+    exitCode: state === "restarting" ? 17 : 0,
+    health: null,
+    networks: {
+      [`${PROJECT}_default`]: {
+        NetworkID: NETWORK_ID,
+        Aliases: [`${PROJECT}-${name}-1`, name],
+      },
+    },
+  });
+  fixture.container = [
+    web,
+    service("1".repeat(64), "install", "running"),
+    service("2".repeat(64), "worker", "running"),
+    service(RETRY_ID, "retry", "restarting"),
+  ];
+  network.containers = {
+    [ID]: { Name: `${PROJECT}-web-1` },
+    ["1".repeat(64)]: { Name: `${PROJECT}-install-1` },
+    ["2".repeat(64)]: { Name: `${PROJECT}-worker-1` },
+    [PLACEHOLDER_KEY]: { Name: `${PROJECT}-retry-1` },
+  };
+  return fixture;
+}
+
+test("a restarting endpoint placeholder member must resolve to a container ID in the recheck scan", async () => {
+  const fixture = restartingPlaceholder();
+  // Unresolved past the scan budget: the placeholder persists into the recheck scan.
+  await prepare(fixture);
+  const before = await inspectCount();
+  const unresolved = await observeNativeComposeStartupOwned(
+    placeholderOptions,
+    ["retry"]
+  ).catch((error: unknown) => error);
+  expect(unresolved).toBeInstanceOf(NativeComposeOwnershipError);
+  expect(nativeComposeOwnershipRefusal(unresolved)).toBe("topology");
+  expect(nativeComposeTopologyPredicate(unresolved)).toBe("network-member-id");
+  expect((await inspectCount()) - before).toBe(6);
+  expect(JSON.stringify(unresolved)).not.toContain("ep-");
+  expect(String(unresolved)).not.toContain(PLACEHOLDER_KEY);
+  await prepare(fixture);
+  await expectRefusal(
+    placeholderOptions,
+    "E_NATIVE_COMPOSE_OWNERSHIP",
+    "topology",
+    "network-member-id"
+  );
+  // Resolved within the budget: the recheck observes the retry container ID instead.
+  fixture.mode = "restart-placeholder-transition";
+  await prepare(fixture);
+  expect(
+    await observeNativeComposeStartupOwned(placeholderOptions, ["retry"])
+  ).toBeNull();
+  expect(
+    (await observeNativeComposeStartupOwned(placeholderOptions, ["retry"]))
+      ?.containers
+  ).toMatchObject([
+    { id: "1".repeat(64), state: "running" },
+    { id: "2".repeat(64), state: "running" },
+    { id: RETRY_ID, service: "retry", state: "running" },
+    { id: ID, state: "running" },
+  ]);
+  expect(
+    (await assertNativeComposeOwned(placeholderOptions)).containers
+  ).toHaveLength(4);
+  // The placeholder never grants effect authority while its container restarts.
+  await prepare(fixture);
+  await expectRefusal(
+    placeholderOptions,
+    "E_NATIVE_COMPOSE_OWNERSHIP",
+    "topology"
+  );
+  expect(await Bun.file(join(root, "mutated")).exists()).toBe(false);
+});
+
+test("endpoint placeholders for non-restarting, unknown, duplicate or memberless containers refuse", async () => {
+  for (const change of [
+    "running",
+    "created",
+    "exited",
+    "unknown-name",
+    "missing-name",
+    "non-record",
+    "also-member",
+    "duplicate",
+    "other-prefix",
+    "no-endpoint",
+    "unselected",
+    "oneoff",
+  ]) {
+    const fixture = restartingPlaceholder();
+    const network = fixture.network?.[0];
+    const retry = fixture.container?.[3];
+    if (!(network && retry)) {
+      throw new Error("Missing owned placeholder fixture");
+    }
+    const members = network.containers as Record<string, unknown>;
+    if (change === "running" || change === "created" || change === "exited") {
+      retry.state = change;
+    } else if (change === "unknown-name") {
+      members[PLACEHOLDER_KEY] = { Name: `${PROJECT}-foreign-1` };
+    } else if (change === "missing-name") {
+      members[PLACEHOLDER_KEY] = {};
+    } else if (change === "non-record") {
+      members[PLACEHOLDER_KEY] = `${PROJECT}-retry-1`;
+    } else if (change === "also-member") {
+      members[RETRY_ID] = { Name: `${PROJECT}-retry-1` };
+    } else if (change === "duplicate") {
+      members[`ep-${"8".repeat(64)}`] = { Name: `${PROJECT}-retry-1` };
+    } else if (change === "other-prefix") {
+      delete members[PLACEHOLDER_KEY];
+      members[`endpoint-${"9".repeat(64)}`] = { Name: `${PROJECT}-retry-1` };
+    } else if (change === "no-endpoint") {
+      retry.networks = {};
+    } else if (change === "oneoff") {
+      retry.oneoff = "True";
+    }
+    fixture.mode = "restart-placeholder-transition";
+    await prepare(fixture);
+    const before = await inspectCount();
+    const error = await observeNativeComposeStartupOwned(
+      placeholderOptions,
+      change === "unselected" ? ["web"] : ["retry"]
+    ).catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(NativeComposeOwnershipError);
+    expect(nativeComposeOwnershipRefusal(error)).toBe("topology");
+    expect(nativeComposeTopologyPredicate(error)).toBe("network-member-id");
+    expect((await inspectCount()) - before).toBe(3);
+  }
   expect(await Bun.file(join(root, "mutated")).exists()).toBe(false);
 });
 

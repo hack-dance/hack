@@ -1030,28 +1030,45 @@ fn control_startup_refuses_occupied_and_nonprivate_paths_without_retaining_publi
     fs::write(&control, b"foreign").unwrap();
     let control_identity = fs::symlink_metadata(&control).unwrap();
     let frontend = root.join("frontend");
+    // The TCP leg publishes on a port that free_loopback_port() has already
+    // released, so a parallel test may re-take it before the relay binds and the
+    // relay then exits 73 at bind instead of reaching the control path. Retry a
+    // bounded number of times on a fresh port; the 70/78 expectations stay exact.
+    const PORT_ATTEMPTS: u32 = 3;
     for unix in [false, true] {
         for (mode, expected_exit) in [(0o700, 70), (0o755, 78)] {
             fs::set_permissions(&root, fs::Permissions::from_mode(mode)).unwrap();
-            let mut command = Command::new(BINARY);
-            command
-                .arg(if unix { "--publish-unix" } else { "--publish" })
-                .arg(if unix {
-                    frontend.as_os_str().to_owned()
-                } else {
-                    free_loopback_port().to_string().into()
-                })
-                .arg(&upstream)
-                .args(["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "10000", "--control"])
-                .arg(&control)
-                .arg("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
-                .stdin(Stdio::null())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped());
-            let child = command.spawn().unwrap();
-            let pid = child.id();
-            let output = child.wait_with_output().unwrap();
-            assert_eq!(output.status.code(), Some(expected_exit));
+            let mut attempt = 1;
+            let (pid, output) = loop {
+                let mut command = Command::new(BINARY);
+                command
+                    .arg(if unix { "--publish-unix" } else { "--publish" })
+                    .arg(if unix {
+                        frontend.as_os_str().to_owned()
+                    } else {
+                        free_loopback_port().to_string().into()
+                    })
+                    .arg(&upstream)
+                    .args(["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "10000", "--control"])
+                    .arg(&control)
+                    .arg("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped());
+                let child = command.spawn().unwrap();
+                let pid = child.id();
+                let output = child.wait_with_output().unwrap();
+                if !unix && output.status.code() == Some(73) && attempt < PORT_ATTEMPTS {
+                    attempt += 1;
+                    continue;
+                }
+                break (pid, output);
+            };
+            assert_eq!(
+                output.status.code(),
+                Some(expected_exit),
+                "unix={unix} mode={mode:o} attempt={attempt}"
+            );
             assert!(output.stdout.is_empty());
             let mut status = 0;
             // The publisher is one C process with no fork/thread/exec path. Exact

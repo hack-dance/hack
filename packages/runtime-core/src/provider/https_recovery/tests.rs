@@ -2,7 +2,7 @@ use super::*;
 use std::{
     cell::Cell,
     os::unix::{fs::PermissionsExt, net::UnixListener},
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 struct Fixture {
@@ -250,7 +250,24 @@ fn rejects_a_live_inherited_unix_listener_at_the_pinned_inode() {
     fs::set_permissions(&stale, fs::Permissions::from_mode(0o600)).unwrap();
     assert!(socket_absent(&stale).is_err());
     drop(live);
-    socket_absent(&stale).unwrap();
+    // The kernel may briefly report the dropped listener as something other than
+    // ConnectionRefused. Poll the unchanged classifier for a bounded time and
+    // record the raw observation on the final attempt so a consistent platform
+    // errno can be identified later without relaxing the product classifier.
+    let deadline = Instant::now() + Duration::from_secs(1);
+    while socket_absent(&stale).is_err() {
+        if Instant::now() >= deadline {
+            let observed = UnixStream::connect(&stale)
+                .err()
+                .map(|error| (error.kind(), error.raw_os_error()));
+            panic!(
+                "dropped inherited listener was never classified absent; \
+                 last connect observation (kind, raw_os_error): {observed:?} \
+                 (None means the connect unexpectedly succeeded)"
+            );
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
 }
 #[test]
 fn wildcard_port_probe_refuses_ipv4_and_ipv6_listeners() {

@@ -44,6 +44,8 @@ const settlement = createNativeAuthoredSettlement();
 let uncertain = false;
 let active = 0;
 let caseDeadline = 0;
+/** The case currently holding the fixture; named by poisoning from inside its body. */
+let current: { readonly name: string; readonly startedAt: number } | undefined;
 let poisoned:
   | {
       readonly name: string;
@@ -59,6 +61,14 @@ function poison(name: string, startedAt: number, reason: string): void {
     elapsedMs: Math.round(performance.now() - startedAt),
     reason,
   };
+}
+/** Poison from inside a case body; the case holding the fixture stays named. */
+function poisonCurrent(reason: string): void {
+  poison(
+    current?.name ?? "(no active case)",
+    current?.startedAt ?? performance.now(),
+    reason
+  );
 }
 function unconfirmed(prefix: string): Error {
   const detail = poisoned
@@ -96,6 +106,7 @@ async function owned(
   }
   const deadline = started + budgetMs;
   caseDeadline = deadline;
+  current = { name, startedAt: started };
   active++;
   try {
     await body();
@@ -672,9 +683,8 @@ macTest.each([
           },
           captures: join(f.scope.projectRoot, "captures"),
           timeoutMs: 15_000,
-          onUnconfirmed: () => {
-            uncertain = true;
-          },
+          onUnconfirmed: () =>
+            poisonCurrent("source CLI capture lifetime unconfirmed"),
         });
         expect({
           code: result.exitCode,

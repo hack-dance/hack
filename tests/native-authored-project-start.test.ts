@@ -33,10 +33,12 @@ import { createNativeAuthoredSettlement } from "./helpers/native-authored-settle
 const roots: string[] = [];
 const run = "a".repeat(32);
 const CANARY = "synthetic-private-native-start-canary";
-/** Startup budget the fixture grants its stand-in compiler and owner transports. */
-const STARTUP_TIMEOUT_MS = 10_000;
 /** Allowance for a case's owners, groups and stop endpoints to be absent afterwards. */
 const SETTLEMENT_BUDGET_MS = 5000;
+/** A caller's 50 ms startup deadline must return the frontend well inside this wall bound. */
+const DEADLINE_WALL_BOUND_MS = 1000;
+/** Fixture creation (compiler and owner scripts) before the deadline case's measured call. */
+const DEADLINE_FIXTURE_SETUP_MS = 2000;
 const settlement = createNativeAuthoredSettlement();
 let observationFailure: unknown;
 
@@ -483,8 +485,6 @@ if(['plan','serve','frontend-plan','frontend-serve'].includes(action)){
     runtime: { binary, home: nativeHome },
     calls,
     delivery,
-    /** Monotonic moment by which this fixture's full startup budget would elapse. */
-    startupDeadline: performance.now() + STARTUP_TIMEOUT_MS,
   };
 }
 
@@ -872,16 +872,19 @@ macTest(
   "native frontend keeps the original startup deadline through input acquisition",
   async () => {
     const selected = await fixture();
+    const started = performance.now();
     await failure(
       serveNativeAuthoredProject({ ...selected, run, startupTimeoutMs: 50 }),
       "not-started"
     );
-    // The caller's 50 ms deadline is kept; it is never replaced by the
-    // fixture's own startup budget while inputs are acquired.
-    expect(performance.now()).toBeLessThan(selected.startupDeadline);
+    // The caller's 50 ms deadline is kept while inputs are acquired; it is
+    // never replaced by a fixture or source startup budget.
+    expect(performance.now() - started).toBeLessThan(DEADLINE_WALL_BOUND_MS);
     expect(await Bun.file(selected.calls).exists()).toBe(false);
     expect(await Bun.file(selected.delivery).exists()).toBe(false);
-  }
+  },
+  // Larger than the wall bound: fixture setup, the bounded call, then settlement.
+  DEADLINE_FIXTURE_SETUP_MS + DEADLINE_WALL_BOUND_MS + SETTLEMENT_BUDGET_MS
 );
 
 macTest(

@@ -6,6 +6,7 @@ import {
   type NativeComposeRetainedVolume,
   nativeComposeRetainedVolumesValid,
 } from "./native-compose-retained-storage.ts";
+import type { NativeComposeStorageCarrierCompletion } from "./native-compose-storage-carrier-journal.ts";
 import {
   type NativeComposeStorageXattrRequest,
   type NativeComposeStorageXattrResponse,
@@ -128,6 +129,11 @@ export type NativeComposeStorageXattrPorts = {
   readonly invoke: (
     input: NativeComposeStorageXattrInvocation
   ) => Promise<unknown>;
+  /** Original-only evidence retirement after the exact journal completion. */
+  readonly finish?: (opts: {
+    readonly input: NativeComposeStorageXattrInvocation;
+    readonly completion: NativeComposeStorageCarrierCompletion;
+  }) => Promise<void>;
 };
 export type NativeComposeStorageXattrCarrier = Readonly<Record<never, never>>;
 type Captured = {
@@ -154,18 +160,19 @@ export function captureNativeComposeStorageXattrCarrier(opts: {
   ) {
     return refuse();
   }
-  const { inspect, provision, invoke } = opts.ports;
+  const { inspect, provision, invoke, finish } = opts.ports;
   if (
     typeof inspect !== "function" ||
     typeof invoke !== "function" ||
-    (provision !== undefined && typeof provision !== "function")
+    (provision !== undefined && typeof provision !== "function") ||
+    (finish !== undefined && typeof finish !== "function")
   ) {
     return refuse();
   }
   const handle = Object.freeze({});
   carriers.set(handle, {
     artifact,
-    ports: Object.freeze({ inspect, provision, invoke }),
+    ports: Object.freeze({ inspect, provision, invoke, finish }),
     invocationIds: new Set(),
     carrierIds: new Set(),
     signal,

@@ -102,6 +102,8 @@ type MaterialSelection = {
     | "inspect"
     | "effect"
     | "storage-create"
+    | "storage-recovery-observe"
+    | "storage-recovery-finish"
     | "stop"
     | "retire";
   readonly reservation?: NativeComposeReservation;
@@ -244,6 +246,12 @@ function materialEffectAllowed(
   // Stopping owned resources remains allowed with unknown hooks. This phase only
   // journals a stop child; it cannot authorize material retirement.
   if (phase === "stop") {
+    return operation === "down" && state.pending !== null;
+  }
+  if (
+    phase === "storage-recovery-observe" ||
+    phase === "storage-recovery-finish"
+  ) {
     return operation === "down" && state.pending !== null;
   }
   if (state.beforeHooks !== null || state.pending === null) {
@@ -1859,6 +1867,7 @@ export async function openNativeComposeGenerationStore(opts: {
           };
           let active = true;
           let effectOperation: NativeComposeOperation | null = null;
+          let effectRecovery = false;
           let activePending: Receipt["pending"] = null;
           // This owner-only grant exists solely during the original empty run.
           // Returning revokes it; a retained failed pending token cannot reissue it.
@@ -1935,6 +1944,8 @@ export async function openNativeComposeGenerationStore(opts: {
                 "inspect",
                 "effect",
                 "storage-create",
+                "storage-recovery-observe",
+                "storage-recovery-finish",
                 "stop",
                 "retire",
               ].includes(selection.phase)
@@ -1968,6 +1979,13 @@ export async function openNativeComposeGenerationStore(opts: {
           };
           materialAuthorities.set(materialAuthority, async (selection) => {
             requireActive();
+            if (
+              (selection.phase === "storage-recovery-observe" ||
+                selection.phase === "storage-recovery-finish") &&
+              !effectRecovery
+            ) {
+              return refuse();
+            }
             await lease.assertHeld();
             const read = await readPrivate(receiptPath, RECEIPT_LIMIT);
             if (!matchesMutationReceipt(read)) {
@@ -2713,6 +2731,7 @@ export async function openNativeComposeGenerationStore(opts: {
                     effectRefusalStage = "effect-intent";
                     await save({ ...state, pending });
                     effectOperation = input.operation;
+                    effectRecovery = input.recoverPending === true;
                     activePending = pending;
                     coldStoragePending = coldStorage ? pending : null;
                     try {
@@ -2732,6 +2751,7 @@ export async function openNativeComposeGenerationStore(opts: {
                       return await retainUncertainEffect(input, error);
                     } finally {
                       effectOperation = null;
+                      effectRecovery = false;
                       activePending = null;
                       coldStoragePending = null;
                     }

@@ -12,6 +12,7 @@ import {
   armNativeComposeStorageWitnessIntent,
   assertNativeComposeMaterialAuthority,
   type NativeComposeGeneration,
+  type NativeComposeGenerationStore,
   type NativeComposeMaterialAuthority,
   type NativeComposeMaterialBinding,
   publishNativeComposeStorageWitnessEnrollment,
@@ -35,7 +36,14 @@ import {
 import {
   beginNativeComposeStorageCarrierIntent,
   initializeNativeComposeStorageCarrierJournal,
+  type NativeComposeStorageReadonlyCarrierIntent,
+  nativeComposeStorageReadonlyCarrierRecoveryEligible,
+  readNativeComposeStorageReadonlyCarrierIntent,
 } from "./native-compose-storage-carrier-journal.ts";
+import {
+  type NativeComposeStorageCommandObservation,
+  observeNativeComposeStorageCommandSettlement,
+} from "./native-compose-storage-command-reader.ts";
 import {
   encodeNativeComposeStorageWitnessArchive,
   type NativeComposeStorageWitnessMarker,
@@ -551,9 +559,13 @@ async function invokeXattr(opts: {
   if (JSON.stringify(after) !== JSON.stringify(target)) {
     return refuse();
   }
-  await journal.complete(result.created);
+  const completed = await journal.complete(result.created);
   await opts.check();
   checkNativeComposeStorageXattrCarrierLifetime(opts.carrier);
+  const finish = nativeComposeStorageXattrCarrierPorts(opts.carrier).finish;
+  if (finish && request.operation === "verify") {
+    await finish({ input, completion: completed });
+  }
   const expectedOutcome = (
     { root: "root", seed: "seeded", verify: "verified" } as const
   )[request.operation];
@@ -1393,4 +1405,221 @@ export async function verifyNativeComposeStorageXattrWitness(
 ): Promise<void> {
   const { carrier, ...input } = opts;
   await verifyNativeComposeStorageWitness({ ...input, xattrCarrier: carrier });
+}
+
+/** Private saved observation seam. It never performs a kernel read, repairs an
+ * expectation, enrolls storage or clears uncertain carrier work. The callback is
+ * a trusted readonly transport, not a completion/retirement proof issuer. */
+export async function observeNativeComposeStorageWitnessCarrier(opts: {
+  readonly authority: NativeComposeMaterialAuthority;
+  readonly generation: NativeComposeGeneration;
+  readonly engineId: string;
+  readonly reference: NativeComposeStorageWitnessReference;
+  readonly observe: (input: {
+    readonly intent: NativeComposeStorageReadonlyCarrierIntent;
+    readonly request: ReturnType<typeof decodeNativeComposeStorageXattrRequest>;
+    readonly assertUnchanged: () => Promise<void>;
+  }) => Promise<
+    | "created"
+    | "exited"
+    | {
+        readonly helperState: "created" | "exited";
+        readonly commands: NativeComposeStorageCommandObservation | null;
+      }
+  >;
+}): Promise<{
+  readonly kind: "readonly-verification-retained";
+  readonly helperState: "created" | "exited";
+  readonly hostCommandSettlement: "unknown" | "records-settled";
+}> {
+  return (
+    (await withSavedReadonlyCarrier({
+      ...opts,
+      phase: "storage-recovery-observe",
+      run: async (selected) => {
+        const observation = await opts.observe(
+          Object.freeze({
+            intent: selected.intent,
+            request: selected.request,
+            assertUnchanged: selected.assertUnchanged,
+          })
+        );
+        await selected.assertUnchanged();
+        const helperState =
+          typeof observation === "string"
+            ? observation
+            : observation.helperState;
+        if (helperState !== "created" && helperState !== "exited") {
+          return refuse();
+        }
+        let hostCommandSettlement: "unknown" | "records-settled" = "unknown";
+        if (typeof observation !== "string" && observation.commands !== null) {
+          try {
+            hostCommandSettlement =
+              observeNativeComposeStorageCommandSettlement({
+                observation: observation.commands,
+                invocationId: selected.intent.invocationId,
+                created: selected.intent.created,
+                helperState,
+              });
+          } catch {
+            hostCommandSettlement = "unknown";
+          }
+        }
+        await selected.assertUnchanged();
+        return Object.freeze({
+          kind: "readonly-verification-retained" as const,
+          helperState,
+          hostCommandSettlement,
+        });
+      },
+    })) ?? refuse()
+  );
+}
+/** Complete only already removed readonly verification. No helper replay/removal,
+ * no witness promotion and no data deletion; old or ambiguous records refuse. */
+export async function reconcileNativeComposeStorageWitnessCarrier(opts: {
+  readonly store: NativeComposeGenerationStore;
+  readonly authority: NativeComposeMaterialAuthority;
+  readonly generation: NativeComposeGeneration;
+  readonly engineId: string;
+  readonly reference: NativeComposeStorageWitnessReference;
+  readonly signal: AbortSignal;
+  readonly deadline: number;
+}): Promise<void> {
+  await withSavedReadonlyCarrier({
+    ...opts,
+    phase: "storage-recovery-finish",
+    run: async (selected) => {
+      const { reconcileNativeComposeStorageDockerCarrierRecovery } =
+        await import("./native-compose-storage-witness-docker.ts");
+      await reconcileNativeComposeStorageDockerCarrierRecovery({
+        context: opts,
+        intent: selected.intent,
+        request: selected.request,
+        assertUnchanged: selected.assertUnchanged,
+        completeRemoved: selected.completeRemoved,
+      });
+    },
+  });
+}
+async function withSavedReadonlyCarrier<T>(opts: {
+  readonly authority: NativeComposeMaterialAuthority;
+  readonly generation: NativeComposeGeneration;
+  readonly engineId: string;
+  readonly reference: NativeComposeStorageWitnessReference;
+  readonly phase: "storage-recovery-observe" | "storage-recovery-finish";
+  readonly run: (
+    selected: Awaited<
+      ReturnType<typeof readNativeComposeStorageReadonlyCarrierIntent>
+    > & {
+      readonly request: ReturnType<
+        typeof decodeNativeComposeStorageXattrRequest
+      >;
+    }
+  ) => Promise<T>;
+}): Promise<T | undefined> {
+  const { authority, generation, engineId, phase, run } = opts;
+  if (
+    !nativeComposeStorageWitnessReferenceValid(opts.reference) ||
+    opts.reference.version !== 3 ||
+    typeof run !== "function"
+  ) {
+    return refuse();
+  }
+  const reference = structuredClone(opts.reference);
+  return await runNativeComposeMaterialAction({
+    authority,
+    run: async () => {
+      const current = await assertNativeComposeMaterialAuthority({
+        authority,
+        generation,
+        phase,
+      });
+      const held = await directories({
+        binding: current,
+        name: reference.volume.name,
+        create: false,
+      });
+      try {
+        checkDirectoryAnchors(held, reference);
+        const saved = await checkedExpectation(held, reference.expectation);
+        if (
+          saved.version !== 3 ||
+          !expectationMatchesReference({ saved, reference }) ||
+          (phase !== "storage-recovery-finish" &&
+            !matchesBinding(saved.binding, current, engineId))
+        ) {
+          return refuse();
+        }
+        const readCompletion = async () => {
+          const read = await readPrivate(
+            join(last(held).path, "enrolled.json"),
+            LIMIT
+          );
+          const record = completion(read.text);
+          if (
+            record.version !== 3 ||
+            !sameFile(read.info, reference.completion) ||
+            hash(read.text) !== reference.completion.hash ||
+            !completionMatches({ record, reference, saved })
+          ) {
+            return refuse();
+          }
+          return record;
+        };
+        const completed = await readCompletion();
+        const check = async () => {
+          await checkedExpectation(held, reference.expectation);
+          await readCompletion();
+          await recheckDirectories(held);
+          const latest = await assertNativeComposeMaterialAuthority({
+            authority,
+            generation,
+            phase,
+          });
+          if (JSON.stringify(latest) !== JSON.stringify(current)) {
+            return refuse();
+          }
+        };
+        if (
+          phase === "storage-recovery-finish" &&
+          !(await nativeComposeStorageReadonlyCarrierRecoveryEligible({
+            directory: last(held),
+            ownerDirectory: held[0] ?? refuse(),
+            token: saved.carrierJournalToken,
+            check,
+          }))
+        ) {
+          return undefined;
+        }
+        if (!matchesBinding(saved.binding, current, engineId)) {
+          return refuse();
+        }
+        const selected = await readNativeComposeStorageReadonlyCarrierIntent({
+          directory: last(held),
+          token: saved.carrierJournalToken,
+          check,
+          current,
+          engineId,
+          volume: reference.volume,
+          artifact: saved.artifact,
+        });
+        const request = decodeNativeComposeStorageXattrRequest({
+          ...saved.marker,
+          operation: "verify",
+          root: completed.kernelProof.root,
+        });
+        if (
+          selected.intent.uid !== completed.kernelProof.root.uid ||
+          selected.intent.gid !== completed.kernelProof.root.gid
+        ) {
+          return refuse();
+        }
+        return await run(Object.freeze({ ...selected, request }));
+      } finally {
+        await close(held);
+      }
+    },
+  }).catch(() => refuse());
 }

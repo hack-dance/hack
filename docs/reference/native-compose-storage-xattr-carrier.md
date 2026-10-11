@@ -284,3 +284,128 @@ Primary contracts: Linux [fsetxattr](https://man7.org/linux/man-pages/man2/fsetx
 [generic open flags](https://github.com/torvalds/linux/blob/master/include/uapi/asm-generic/fcntl.h),
 [Bun FFI](https://bun.sh/docs/runtime/ffi), Docker [volumes](https://docs.docker.com/engine/storage/volumes/),
 and tagged Moby [mount fields](https://github.com/moby/moby/blob/v28.5.1/api/types/mount/mount.go).
+
+## Saved readonly carrier observation
+
+The internal `observeNativeComposeStorageCarrierRecovery` API requires a live,
+explicit saved down-recovery mutation. It reads an already enrolled v3 witness
+and its exact readonly `verify` intent, including the recorded full helper ID and
+birth. It reopens the original helper and request without creating or repairing
+files, then checks the selected daemon, cached artifact, complete helper policy,
+empty selected-volume holder set, volume birth, and unchanged private ownership
+before and after the observations. Running, missing, writable, changed or
+unrecorded work refuses. The original generation and pending scope must still
+match; observation does not rebind an old intent to a new command.
+
+The result says `readonly-verification-retained`. Its host-command status is
+`unknown` for legacy, missing, malformed, incomplete or changed command records.
+It can report `records-settled` only after reading the complete matching version-2
+prefix and observing the recorded PID and group absent in the same host boot
+session. A created helper requires exactly the settled create command; an exited
+helper requires create and start. A remove record cannot match a retained helper.
+This status describes checked saved evidence, not successful return of the original
+owner, durable completion of a late publication, or a fresh xattr verification.
+Empty captures or a stopped helper alone cannot establish it.
+The API performs no helper start, exec, removal, volume effect, enrollment,
+journal completion or pending clear. It is not called automatically by ordinary
+`down --recover`; the existing incomplete-stop result and retained uncertainty
+remain even with `records-settled` evidence. This observation seam has no live
+recovery acceptance yet.
+
+## Original readonly command records
+
+The internal `originalCommandRecords: true` transport option creates a distinct
+private command-record version 2 beside the existing carrier journal version 1.
+New ordinary readonly verify commands select this option. Root/seed keep the
+legacy transport/order and interrupted work remains unknown. Old journals and
+missing command records retain unknown host-command settlement; no record is reconstructed from
+an old PID, empty capture or stopped guest helper.
+
+For each readonly verify invocation, the fixed create/start/remove commands
+synchronize their arm record and parent directory. The existing captured `run()` owner starts
+a fixed wrapper that stops itself before executing Docker. The original owner
+observes that stopped PID, owned group, process birth and shell executable,
+publishes and synchronizes that identity, then repeats identity, boot, executable
+and admission checks before a one-use continuation of the captured child. A
+missing or failed publication cancels that original invocation; an armed record
+alone proves neither spawn nor absence. The command's original budget includes
+the handshake. No guessed PID or retry is used to rescue a fast command.
+Live handshake and settlement budgets use a captured monotonic deadline; the
+saved wall deadline is a record field only. Executable device/inode identities
+use exact decimal strings from bigint metadata, including sealed macOS binaries.
+The one-use continuation uses the original owner's captured PID and checks its
+original completion state. It does not acquire a PID from the durable record.
+
+The carrier uses held regular capture files, not pipes. Version 2 therefore names
+its capture evidence `held-files-quiescent`, never EOF. The original exit callback,
+strict ESRCH group absence, held file/path identity, both synchronized bounded
+captures and their hashes precede settlement publication. EPERM/EIO and unknown
+exit or capture disposition refuse. Settlement publication shares the existing
+three-second post-command group-observation budget; timeout/cancellation remain
+refused results and cannot grant a subsequent daemon command.
+
+Only the original in-memory writer can advance its exact sequence. Publication
+failure or deadline permanently invalidates that writer and retains its private
+files/descriptors. A rename or sync may finish after refusal, so a serialized
+settlement is an observation, not standalone successful-return, enrollment or
+cleanup authority. The observation-only consumer does not grant helper removal,
+intent clear, volume effects or automatic legacy upgrades. Linux process birth
+additionally binds kernel start ticks; macOS uses the existing `ps` birth representation while
+the captured subprocess remains the delivery owner. Future recovery must never
+use that representation to acquire or signal a replacement process.
+
+Writer and reader share two fixed projections. `sourceHash` binds the exact
+runtime/owner identity, generation ID, checkout and generation anchors, document
+hash, current and pending generation IDs, and original pending token. Receipt and
+lease incarnations are excluded because a saved recovery invocation has new ones;
+the recovery token does not replace the original pending token. `fixedInvocationHash`
+binds the artifact, volume birth and fixed target policy/ownership, readonly flag,
+UID/GID, exact request and generation scope. Only live holder inventory and the
+callback are excluded. The historical full material/invocation hashes remain in
+the record and are not compared to a newly reconstructed recovery context.
+Earlier version-2 shapes without these required projections stay unknown.
+
+The reader reopens existing private regular single-link captures and records,
+checks bounded UTF-8 bytes, inode/path identity and exact hashes, and repeats source,
+executable, boot and absence checks. It matches create output to the saved full
+helper ID and start output/exit to the closed response and observed helper exit.
+EPERM, EIO, live or reused PIDs, output mismatch and any missing evidence refuse
+settlement status. Its opaque result is bound to the observed invocation/helper
+selection; copied objects cannot carry it. It holds no resources after the read
+and cannot authorize a later effect. Carrier journal version 1 is unchanged.
+
+Focused private-filesystem and owned-child controls qualify only their tested
+writer/handshake boundaries. Installed carrier transport, interruption/recovery
+and persistent SQL acceptance remain separate runtime gates.
+
+### Removed readonly work recovery
+
+New original v2 transports retain their private command files until the witness
+owner has completed the exact journal intent. An original-only one-use finish
+capability then rechecks source, lifetime, completion and current helper absence
+before retiring those files. Failure after completion retains evidence and never
+recreates the intent or confers a second cleanup attempt. The default v1 port
+keeps its prior retirement order.
+
+Saved `down --recover`, after known compute removal, can complete one narrower
+postcondition: a readonly verification whose original create, successful start
+and successful remove records are complete, whose exact successful outputs and
+captures match, and whose original child and groups are currently absent. Fresh
+source, engine/artifact, complete invocation inventory and retained volume birth,
+labels, policy and holder checks are required under the current mutation lease.
+The journal is compared again after the last awaited proof and only its captured
+unchanged intent is cleared. Existing final receipt/source/kernel fences still
+precede ordinary completion. Recovery does not replay a helper command, remove a
+helper or volume, enroll storage, or retire the retained command evidence.
+
+Expected/non-v3 witnesses, uncreated verification and missing or incomplete
+original command prefixes remain ineligible for reconciliation. Known compute
+stop keeps its existing incomplete-stop result and every unresolved storage
+anchor; it does not probe or replay a helper for those cases. A selected complete
+prefix still needs every fresh proof above: malformed current records, changed
+source or volume and drift during that attempt refuse. Retained helpers, failed
+verification and seed/root uncertainty never gain completion authority.
+The settled-record observation API remains observation-only; it exposes no journal
+completion callback. Portable source-CLI tests use a stand-in daemon/kernel and
+real private files/children. They do not qualify installed interruption/recovery,
+Linux transport, SQL retention, or the discarded older disposable fixtures.

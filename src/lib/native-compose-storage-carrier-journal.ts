@@ -1,8 +1,11 @@
 import { createHash, randomBytes } from "node:crypto";
-import { rename } from "node:fs/promises";
+import { lstat, rename } from "node:fs/promises";
 import { join } from "node:path";
 import { isRecord } from "./guards.ts";
-import type { NativeComposeIdentity } from "./native-compose-generation.ts";
+import type {
+  NativeComposeIdentity,
+  NativeComposeMaterialBinding,
+} from "./native-compose-generation.ts";
 import {
   type HeldDirectory,
   holdDirectory,
@@ -14,6 +17,7 @@ import {
   writeExclusive,
 } from "./native-compose-private-state.ts";
 import { nativeComposeRetainedVolumesValid } from "./native-compose-retained-storage.ts";
+import { parseNativeComposeStorageCommandRecord } from "./native-compose-storage-command-record.ts";
 import type { NativeComposeStorageWitnessState } from "./native-compose-storage-witness-state.ts";
 import {
   type NativeComposeStorageXattrInvocation,
@@ -32,7 +36,9 @@ type Intent = {
   readonly engineId: string;
   readonly runtimeIdentity: string;
   readonly ownerToken: string;
-  readonly volume: NativeComposeStorageXattrInvocation["target"]["volume"];
+  readonly volume: NonNullable<
+    NativeComposeStorageXattrInvocation["target"]["volume"]
+  >;
   readonly artifact: NativeComposeStorageXattrInvocation["artifact"];
   readonly scope: NativeComposeStorageXattrInvocation["scope"];
   readonly operation: NativeComposeStorageXattrInvocation["request"]["operation"];
@@ -52,6 +58,53 @@ type Bound = {
   readonly token: string;
   readonly check: () => Promise<unknown>;
 };
+/** Original completion only. A reader observation can never issue this handle. */
+export type NativeComposeStorageCarrierCompletion = Readonly<
+  Record<never, never>
+>;
+const completions = new WeakMap<
+  NativeComposeStorageCarrierCompletion,
+  {
+    readonly invocationId: string;
+    readonly check: () => Promise<void>;
+  }
+>();
+export function consumeNativeComposeStorageCarrierCompletion(opts: {
+  readonly completion: NativeComposeStorageCarrierCompletion;
+  readonly invocationId: string;
+}): () => Promise<void> {
+  const selected = completions.get(opts.completion) ?? refuse();
+  completions.delete(opts.completion);
+  if (selected.invocationId !== opts.invocationId) {
+    return refuse();
+  }
+  return selected.check;
+}
+/** Saved observation only. Neither this snapshot nor its check grants retirement
+ * or completion authority for an original host command. */
+export type NativeComposeStorageReadonlyCarrierIntent = Intent & {
+  readonly operation: "verify";
+  readonly readonly: true;
+  readonly created: Created;
+};
+export function captureNativeComposeStorageReadonlyCarrierIntent(
+  value: unknown
+): NativeComposeStorageReadonlyCarrierIntent {
+  if (
+    !intentValid(value) ||
+    value.operation !== "verify" ||
+    value.readonly !== true ||
+    value.created === null
+  ) {
+    return refuse();
+  }
+  return Object.freeze({
+    ...structuredClone(value),
+    operation: "verify",
+    readonly: true,
+    created: Object.freeze({ ...value.created }),
+  });
+}
 function created(value: unknown): Created {
   if (
     !(
@@ -153,8 +206,9 @@ async function read(bound: Bound) {
 async function save(
   bound: Bound,
   prior: Awaited<ReturnType<typeof read>>,
-  intent: Intent | null
-): Promise<void> {
+  intent: Intent | null,
+  beforeReplace?: () => Promise<void>
+) {
   if (prior.state.revision >= Number.MAX_SAFE_INTEGER) {
     return refuse();
   }
@@ -176,6 +230,15 @@ async function save(
     return refuse();
   }
   await bound.check();
+  if (beforeReplace) {
+    await beforeReplace();
+  }
+  // The authority check may await transport. Recheck the captured incarnation
+  // after it, immediately before replacing only that exact journal.
+  const final = await read(bound);
+  if (!sameFile(final.info, prior.info) || final.text !== prior.text) {
+    return refuse();
+  }
   await rename(temporary, path);
   await bound.directory.file.sync();
   const published = await read(bound);
@@ -183,6 +246,7 @@ async function save(
     return refuse();
   }
   await bound.check();
+  return published;
 }
 /** Required before any finite carrier effects. A missing or changed journal is never initialized on resume. */
 export async function initializeNativeComposeStorageCarrierJournal(
@@ -266,7 +330,9 @@ export async function beginNativeComposeStorageCarrierIntent(
       await save(bound, latest, { ...intent, created: selected });
       recorded = selected;
     },
-    async complete(value: Created): Promise<void> {
+    async complete(
+      value: Created
+    ): Promise<NativeComposeStorageCarrierCompletion> {
       if (completing) {
         return refuse();
       }
@@ -277,9 +343,180 @@ export async function beginNativeComposeStorageCarrierIntent(
       }
       await bound.check();
       const latest = await requireIntent();
-      await save(bound, latest, null);
+      const published = await save(bound, latest, null);
+      const completion = Object.freeze({});
+      completions.set(completion, {
+        invocationId: intent.invocationId,
+        check: async () => {
+          await bound.check();
+          const selected = await read(bound);
+          if (
+            !sameFile(selected.info, published.info) ||
+            selected.text !== published.text
+          ) {
+            return refuse();
+          }
+        },
+      });
+      return completion;
     },
   });
+}
+
+/** Read an already recorded readonly verification without initializing, changing,
+ * completing or replaying any journal. Exact original scope remains required. */
+export async function readNativeComposeStorageReadonlyCarrierIntent(
+  opts: Bound & {
+    readonly current: NativeComposeMaterialBinding;
+    readonly engineId: string;
+    readonly volume: NativeComposeStorageXattrInvocation["target"]["volume"];
+    readonly artifact: NativeComposeStorageXattrInvocation["artifact"];
+  }
+) {
+  const bound = Object.freeze({
+    directory: Object.freeze({ ...opts.directory }),
+    token: opts.token,
+    check: opts.check,
+  });
+  const expected = structuredClone({
+    current: opts.current,
+    engineId: opts.engineId,
+    volume: opts.volume,
+    artifact: opts.artifact,
+  });
+  await bound.check();
+  const prior = await read(bound);
+  const value = prior.state.intent;
+  if (
+    !value ||
+    value.operation !== "verify" ||
+    value.readonly !== true ||
+    value.created === null ||
+    value.engineId !== expected.engineId ||
+    value.runtimeIdentity !== expected.current.identity.composeProject ||
+    value.ownerToken !== expected.current.identity.ownerToken ||
+    JSON.stringify(value.volume) !== JSON.stringify(expected.volume) ||
+    JSON.stringify(value.artifact) !== JSON.stringify(expected.artifact) ||
+    value.scope.generationId !== expected.current.generationId ||
+    value.scope.currentGenerationId !== expected.current.currentGenerationId ||
+    value.scope.pendingGenerationId !== expected.current.pendingGenerationId ||
+    value.scope.pendingToken !== expected.current.pendingToken
+  ) {
+    return refuse();
+  }
+  const intent = captureNativeComposeStorageReadonlyCarrierIntent(value);
+  const assertUnchanged = async () => {
+    await bound.check();
+    const latest = await read(bound);
+    if (!sameFile(latest.info, prior.info) || latest.text !== prior.text) {
+      return refuse();
+    }
+    await bound.check();
+  };
+  await assertUnchanged();
+  let completing = false;
+  return Object.freeze({
+    intent,
+    assertUnchanged,
+    // Only the owning witness calls this after its fresh absent-work proof.
+    // This is exact journal completion, never helper retirement authority.
+    async completeRemoved(checkRemoved: () => Promise<void>): Promise<void> {
+      if (completing) {
+        return refuse();
+      }
+      completing = true;
+      await assertUnchanged();
+      await checkRemoved();
+      await assertUnchanged();
+      await save(bound, prior, null, checkRemoved);
+    },
+  });
+}
+
+/** Eligibility only, never settlement or completion authority. Valid unsupported
+ * work remains pending; a selected current prefix still needs the full owner. */
+export async function nativeComposeStorageReadonlyCarrierRecoveryEligible(
+  opts: Bound & { readonly ownerDirectory: HeldDirectory }
+): Promise<boolean> {
+  const bound = Object.freeze({
+    directory: Object.freeze({ ...opts.directory }),
+    token: opts.token,
+    check: opts.check,
+  });
+  const owner = Object.freeze({ ...opts.ownerDirectory });
+  const held: HeldDirectory[] = [owner];
+  await bound.check();
+  const prior = await read(bound);
+  const unchanged = async () => {
+    await bound.check();
+    const latest = await read(bound);
+    if (!sameFile(latest.info, prior.info) || latest.text !== prior.text) {
+      return refuse();
+    }
+    await recheckDirectories(held);
+    await bound.check();
+  };
+  try {
+    const intent = prior.state.intent;
+    if (
+      !intent ||
+      intent.operation !== "verify" ||
+      !intent.readonly ||
+      intent.created === null
+    ) {
+      await unchanged();
+      return false;
+    }
+    for (const path of [
+      join(owner.path, "storage-carriers"),
+      join(owner.path, "storage-carriers", intent.invocationId),
+    ]) {
+      try {
+        await lstat(path);
+      } catch (error: unknown) {
+        if (!isRecord(error) || error.code !== "ENOENT") {
+          throw error;
+        }
+        await unchanged();
+        return false;
+      }
+      held.push(await holdDirectory(path, true));
+    }
+    const directory = held.at(-1) ?? refuse();
+    let saved: Awaited<ReturnType<typeof readPrivate>>;
+    try {
+      saved = await readPrivate(join(directory.path, "commands.json"), 32_768);
+    } catch (error: unknown) {
+      if (!isRecord(error) || error.code !== "ENOENT") {
+        throw error;
+      }
+      await unchanged();
+      return false;
+    }
+    const record = parseNativeComposeStorageCommandRecord(saved.text);
+    const eligible =
+      record.commands.length === 3 &&
+      record.commands.every(
+        (command) =>
+          command.child !== null &&
+          command.settlement !== null &&
+          command.settlement.exitCode === 0 &&
+          !command.settlement.timedOut &&
+          !command.settlement.cancelled
+      );
+    await unchanged();
+    const latest = await readPrivate(
+      join(directory.path, "commands.json"),
+      32_768
+    );
+    if (!sameFile(latest.info, saved.info) || latest.text !== saved.text) {
+      return refuse();
+    }
+    await unchanged();
+    return eligible;
+  } finally {
+    await Promise.allSettled(held.slice(1).map((entry) => entry.file.close()));
+  }
 }
 
 /** Saved-only check. Broken anchors and unknown intent block admission/retirement but permit explicit saved stop. */

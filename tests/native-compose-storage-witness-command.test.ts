@@ -85,6 +85,25 @@ async function saved(root: string) {
   }
 }
 
+async function noRecoveryHelperRequests(root: string, before: string) {
+  const after = await Bun.file(join(root, "requests")).text();
+  expect(after.startsWith(before)).toBe(true);
+  const requests: string[][] = after
+    .slice(before.length)
+    .trim()
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => JSON.parse(line));
+  expect(
+    requests.some((args) => args[0] === "compose" && args.includes("down"))
+  ).toBe(true);
+  expect(
+    requests.some((args) =>
+      ["image", "create", "start"].includes(args[0] ?? "")
+    )
+  ).toBe(false);
+}
+
 test("source CLI cannot fall back to metadata for enrolled v3 startup, run or exec", async () => {
   const { root, witnesses } = await prepared(true);
   const requests = await Bun.file(join(root, "requests")).text();
@@ -130,6 +149,7 @@ test("source-unavailable explicit saved recovery stops engine but retains Expect
     error: { code: "E_COMPOSE_FAILED" },
   });
   expect(await Bun.file(join(root, "engine")).exists()).toBe(false);
+  await noRecoveryHelperRequests(root, requests);
   expect(await Bun.file(join(root, "compiler-requests")).text()).toBe(compiler);
   const current = await saved(root);
   expect(current.storageWitnesses).toEqual(witnesses);
@@ -314,6 +334,7 @@ test("source CLI reports and explicitly stops saved resources for unknown enroll
     error: { code: "E_COMPOSE_FAILED" },
   });
   expect(await Bun.file(join(root, "engine")).exists()).toBe(false);
+  await noRecoveryHelperRequests(root, requests);
   expect(await Bun.file(join(root, "compiler-requests")).text()).toBe(compiler);
   const retained = await saved(root);
   expect(retained.pending?.generationId).toBe(generationId);

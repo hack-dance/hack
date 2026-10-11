@@ -67,6 +67,7 @@ untracked candidate additions. Keep private artifacts excluded from the index.
 | Rust state/recovery | `packages/runtime-core/tests/` plus module tests; malformed/stale ownership, crash window, resume and data preservation |
 | TLA models | `test:models`, [model mappings](../../../tests/models/tla/README.md), [runner](../../../scripts/check-tla-models.ts) and expected positive/negative controls |
 | Consumer instructions | [ownership](../../../docs/agent-guidance.md), `bun run generate:agent-plugins`, affected examples and source/render tests |
+| Native authored command slices | `tests/native-authored-command.test.ts` (unsupported matrix), `tests/native-authored-command-dispatch.test.ts`, `tests/native-authored-project-{start,run,observe,logs,exec,recovery}.test.ts` and the [command contract](../../../docs/reference/native-authored-commands.md); the dispatch "source CLI" cases need the prepared compiler (`bun run build:config-compiler` or absolute `HACK_CONFIG_COMPILER_BINARY`) and fail without it; `native-authored-project-start` and `native-authored-project-exec` are nondeterministic on a local macOS host, so a single local pass or failure is not proof; live acceptance runs host-serialized on one prepared macOS provider slot |
 | Native VM/routing/reclamation | [candidate guide](../../../docs/guides/native-candidate.md), relevant acceptance gate and isolated host fixture; Linux checks cannot qualify macOS effects |
 | Resource/performance claims | [performance skill](../hack-repo-performance/SKILL.md), matched workload and measured boundaries |
 

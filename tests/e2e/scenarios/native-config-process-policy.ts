@@ -1,5 +1,5 @@
 import { mkdir, open, realpath } from "node:fs/promises";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 import type {
   Project,
   Workload,
@@ -97,6 +97,28 @@ const RETRY = [
   'await record("retry-result", { attempts }); await ready("retry"); setInterval(() => {}, 1000);',
 ].join("\n");
 const READ_RECORDS = `const names = ${JSON.stringify(RECORDS)}; const records = {}; for (const name of names) records[name] = await Bun.file("/evidence/" + name + ".json").json(); process.stdout.write(JSON.stringify(records));`;
+
+/**
+ * Capsule and startup-diagnostic files outlive the fixture root so a failed CI
+ * job can attach them. HACK_E2E_CAPSULE_DIR wins, then the runner temp, then
+ * the disposable fixture root. Only a closed source token is logged.
+ */
+async function resolveCapsuleDirectory(ctx: {
+  readonly tempRoot: string;
+  readonly log: (message: string) => void;
+}): Promise<string> {
+  const configured = process.env.HACK_E2E_CAPSULE_DIR;
+  const runnerTemp = process.env.RUNNER_TEMP;
+  const [source, directory] =
+    configured && isAbsolute(configured)
+      ? ["configured", configured]
+      : runnerTemp && isAbsolute(runnerTemp)
+        ? ["runner-temp", join(runnerTemp, "process-policy-capsules")]
+        : ["fixture", ctx.tempRoot];
+  await mkdir(directory, { recursive: true, mode: 0o700 });
+  ctx.log(`capsule directory source=${source}`);
+  return directory;
+}
 
 function object(text: string): Record<string, unknown> {
   const value: unknown = JSON.parse(text);
@@ -430,6 +452,9 @@ export const nativeConfigProcessPolicyScenario: Scenario = {
   tier: "docker",
   summary:
     "actual stop signal/grace, init orphan reaping, failure retries and unsupported-resource refusal",
+  // A failed run keeps its fixture and isolated home so the retained trace,
+  // replay and diagnostic evidence can be inspected or uploaded.
+  preserveFixtureOnFailure: true,
   run: async (ctx) => {
     expect({
       that: resolveCliSpawnArgs([]).length === 1,
@@ -750,6 +775,7 @@ export const nativeConfigProcessPolicyScenario: Scenario = {
         return await eventOutput;
       };
       const expectedEngineId = await docker(["info", "--format", "{{.ID}}"]);
+      const capsuleDirectory = await resolveCapsuleDirectory(ctx);
       const initialTrace = await prepareProcessPolicyInitialTrace({
         directory: join(ctx.tempRoot, "initial-process-policy-trace"),
       });
@@ -768,7 +794,7 @@ export const nativeConfigProcessPolicyScenario: Scenario = {
             `fixed-field original-query replay: ${JSON.stringify(replay)}`
           );
           const capsule = await persistProcessPolicyFirstAfterComposeRefusal({
-            directory: ctx.tempRoot,
+            directory: capsuleDirectory,
             enabled: process.env.HACK_E2E_PROCESS_POLICY_REFUSAL_CAPSULE,
             summary: replay,
           });
@@ -787,7 +813,10 @@ export const nativeConfigProcessPolicyScenario: Scenario = {
         expectedEngineId,
         record: async (summary) => {
           const handle = await open(
-            join(ctx.tempRoot, "native-process-policy-startup-diagnostic.json"),
+            join(
+              capsuleDirectory,
+              "native-process-policy-startup-diagnostic.json"
+            ),
             "wx",
             0o600
           );

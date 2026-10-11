@@ -1597,10 +1597,12 @@ export const nativeConfigNetworksScenario: Scenario = {
         receipt: createReceipt,
       });
       startedRoots.add(primary.root);
-      const controlledUp = await raw(primary, ["up", "--detach", "--json"], {
-        PATH: `${shim}:${env.PATH}`,
-      });
-      resultOk(controlledUp, 1);
+      resultOk(
+        await raw(primary, ["up", "--detach", "--json"], {
+          PATH: `${shim}:${env.PATH}`,
+        }),
+        1
+      );
       requireValue(
         await Bun.file(createReceipt).exists(),
         "Controlled startup must reach actual Compose create"

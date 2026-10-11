@@ -16,6 +16,14 @@ type Row = Record<string, unknown>;
 type Endpoint = { name: string; networkId: unknown; aliases: unknown };
 type Container = Row & { id: string; name: string; endpoints: Endpoint[] };
 type Network = Row & { id: string; name: string; members: string[] };
+/** Closed classes of `docker network inspect` member keys; counts only, never the keys. */
+export type ProcessPolicyMemberKeyClasses = {
+  readonly hex64: number;
+  readonly epPrefixed: number;
+  readonly other: number;
+};
+const MEMBER_KEY = /^[\x21-\x7e]{1,128}$/;
+const EP_PREFIX = /^ep-/;
 type Scan = { containers: Container[]; bridge: Network | null };
 type Context = {
   project: string;
@@ -156,6 +164,7 @@ function container(value: Row): Container {
   }
   return value as Container;
 }
+/** Member keys stay bounded printable strings so a refused placeholder (`ep-`) key is classified instead of hiding the capture. */
 function network(value: Row): Network {
   if (
     !(
@@ -165,13 +174,32 @@ function network(value: Row): Network {
       Array.isArray(value.members) &&
       value.members.length <= 16 &&
       value.members.every(
-        (id: unknown) => typeof id === "string" && ID.test(id)
+        (key: unknown) => typeof key === "string" && MEMBER_KEY.test(key)
       )
     )
   ) {
     refuse("diagnostic_shape");
   }
   return value as Network;
+}
+
+/** Count the member-key classes the ownership `network-member-id` predicate sees; values are never returned. */
+export function classifyProcessPolicyMemberKeys(
+  keys: readonly unknown[]
+): ProcessPolicyMemberKeyClasses {
+  let hex64 = 0;
+  let epPrefixed = 0;
+  let other = 0;
+  for (const key of keys) {
+    if (typeof key === "string" && ID.test(key)) {
+      hex64 += 1;
+    } else if (typeof key === "string" && EP_PREFIX.test(key)) {
+      epPrefixed += 1;
+    } else {
+      other += 1;
+    }
+  }
+  return { hex64, epPrefixed, other };
 }
 async function scan(
   ctx: Context,
@@ -345,6 +373,12 @@ function safeScan(ctx: Context, value: Scan) {
       value.bridge.version === "1",
     bridgeMembersSelected:
       value.bridge?.members.every((id) => selectedIds.has(id)) ?? false,
+    bridgeMemberKeyClasses: classifyProcessPolicyMemberKeys(
+      value.bridge?.members ?? []
+    ),
+    restartingServices: services
+      .filter((item) => item.state === "restarting")
+      .map((item) => item.service),
     services,
   };
 }

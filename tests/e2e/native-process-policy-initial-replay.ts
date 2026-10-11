@@ -14,6 +14,10 @@ import {
   type ProcessPolicyInitialTraceQuery,
   readProcessPolicyInitialTrace,
 } from "./native-process-policy-initial-trace.ts";
+import {
+  classifyProcessPolicyMemberKeys,
+  type ProcessPolicyMemberKeyClasses,
+} from "./native-process-policy-startup-diagnostic.ts";
 
 const REFUSAL = "Initial process-policy replay unavailable; values omitted";
 const SERVICES = ["forced", "graceful", "reaper", "retry"] as const;
@@ -32,6 +36,10 @@ type Replay = {
   readonly topologyPredicate: NativeComposeTopologyPredicate | null;
   readonly consumed: number;
   readonly protocolMatched: boolean;
+  /** Member-key classes of the last consumed network reply (what `network-member-id` saw); null when none was consumed. */
+  readonly memberKeyClasses: ProcessPolicyMemberKeyClasses | null;
+  /** Fixed service names whose last consumed container reply reported state `restarting`. */
+  readonly restartingServices: readonly (typeof SERVICES)[number][];
 };
 function replayCode(value: unknown): value is Replay["code"] {
   return value === null || CODES.some((code) => code === value);
@@ -49,6 +57,62 @@ function replayReason(value: unknown): value is Replay["reason"] {
     value === "cross-scan-drift" ||
     value === "unknown"
   );
+}
+
+function recordedRows(
+  query: ProcessPolicyInitialTraceQuery | undefined
+): Record<string, unknown>[] {
+  if (!query || query.stdout.length > 65_536) {
+    return [];
+  }
+  const lines = query.stdout.trim() ? query.stdout.trim().split("\n") : [];
+  if (lines.length > 64) {
+    return [];
+  }
+  return lines.flatMap((line) => {
+    try {
+      const value: unknown = JSON.parse(line);
+      return isRecord(value) ? [value] : [];
+    } catch {
+      return [];
+    }
+  });
+}
+function lastConsumed(
+  queries: readonly ProcessPolicyInitialTraceQuery[],
+  kind: "container" | "network"
+): ProcessPolicyInitialTraceQuery | undefined {
+  for (let index = queries.length - 1; index >= 0; index--) {
+    const query = queries[index];
+    if (query && query.args[0] === kind && query.args[1] === "inspect") {
+      return query;
+    }
+  }
+  return undefined;
+}
+/** Counts and fixed service names from the consumed recorded replies only; no key, id or label value leaves this function. */
+export function summarizeConsumedProcessPolicyReplies(
+  queries: readonly ProcessPolicyInitialTraceQuery[],
+  consumed: number
+): Pick<Replay, "memberKeyClasses" | "restartingServices"> {
+  const window = queries.slice(
+    0,
+    Math.max(0, Math.min(consumed, queries.length))
+  );
+  const network = lastConsumed(window, "network");
+  const container = lastConsumed(window, "container");
+  const keys = recordedRows(network).flatMap((row) =>
+    isRecord(row.containers) ? Object.keys(row.containers) : []
+  );
+  const restarting = new Set(
+    recordedRows(container)
+      .filter((row) => row.state === "restarting")
+      .map((row) => row.service)
+  );
+  return {
+    memberKeyClasses: network ? classifyProcessPolicyMemberKeys(keys) : null,
+    restartingServices: SERVICES.filter((service) => restarting.has(service)),
+  };
 }
 
 /** Run the real ownership policy against original recorded replies, with no engine access. */
@@ -140,6 +204,7 @@ process.stdout.write(JSON.stringify({outcome,code,reason,topologyPredicate,consu
     topologyPredicate: value.topologyPredicate,
     consumed: value.consumed,
     protocolMatched: value.protocolMatched,
+    ...summarizeConsumedProcessPolicyReplies(opts.queries, value.consumed),
   };
 }
 
@@ -337,6 +402,10 @@ export async function persistProcessPolicyFirstAfterComposeRefusal(opts: {
         : null,
     startupTopologyPredicate: row.startup.topologyPredicate,
     strictTopologyPredicate: row.strict.topologyPredicate,
+    startupMemberKeyClasses: row.startup.memberKeyClasses,
+    strictMemberKeyClasses: row.strict.memberKeyClasses,
+    startupRestartingServices: row.startup.restartingServices,
+    strictRestartingServices: row.strict.restartingServices,
   };
   const handle = await open(
     join(opts.directory, "first-after-compose-replay-refusal.json"),

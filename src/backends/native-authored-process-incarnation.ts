@@ -10,13 +10,16 @@ import { openProcessSessionInspector } from "../lib/tty-process-group.ts";
 
 const LIMIT = 4 * 1024 * 1024;
 const ROW =
-  /^\s*(\d+)\s+(\d+)\s+(\d+)\s+([a-fA-F0-9x]+)\s+(-?\d+)\s+([A-Za-z<+]+)\s+((?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}\s+\d{4})\s+(.+)$/;
+  /^\s*(\d+)\s+(\d+)\s+(\d+)\s+([a-fA-F0-9x]+)\s+(-?\d+)\s+([A-Za-z<+?]+)\s+((?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}\s+\d{4})\s+(.+)$/;
 const BIRTH =
   /^(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun) (?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) \d{1,2} \d{2}:\d{2}:\d{2} \d{4}$(?![\s\S])/;
 const UUID = /^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/;
 const DECIMAL = /^(?:0|[1-9][0-9]*)$(?![\s\S])/;
 const ZERO = /^0+$/;
-const STATE = /^[DIRSTtUWXZ][<NXEVLsl+]*$(?![\s\S])/;
+/** macOS ps prints `?` (optionally flagged, e.g. `?N`) while a process state is
+ * momentarily undeterminable under load. Such a row is transient: it is never
+ * refused as malformed, never admitted as an owner, and vetoes like a live row. */
+const STATE = /^(?:[DIRSTtUWXZ]|\?)[<NXEVLsl+]*$(?![\s\S])/;
 const CONTROL = /[\r\n\0]/;
 const SESSION = /^(?:[a-f0-9]+|0x[a-f0-9]+)$(?![\s\S])/;
 export type NativeAuthoredProcessRow = {
@@ -25,7 +28,8 @@ export type NativeAuthoredProcessRow = {
   readonly group: number;
   /** Positive POSIX getsid result, observed independently of ps sess. */
   readonly session: string | null;
-  readonly state: "live" | "zombie";
+  /** `transient` is an undeterminable momentary state: possibly live, never an owner. */
+  readonly state: "live" | "zombie" | "transient";
   readonly uid: number;
   readonly birth: string;
   readonly executable: string;
@@ -52,6 +56,12 @@ function refused(): never {
   throw new Error(
     "Native original process identity is unknown or occupied; values omitted."
   );
+}
+function classify(token: string): NativeAuthoredProcessRow["state"] {
+  if (token.startsWith("Z")) {
+    return "zombie";
+  }
+  return token.startsWith("?") ? "transient" : "live";
 }
 function integer(value: unknown, minimum = 1): number {
   if (
@@ -139,7 +149,9 @@ export function parseNativeAuthoredProcessIncarnation(
   }
   return Object.freeze(result);
 }
-/** Strict complete census: malformed, duplicate or truncated output is never absence. */
+/** Strict complete census: malformed, duplicate or truncated output is never absence.
+ * A `?`-state row is admitted as transient so one momentarily undeterminable
+ * foreign process cannot refuse the whole host-wide observation. */
 export function parseNativeAuthoredProcessCensus(
   text: string
 ): readonly NativeAuthoredProcessRow[] {
@@ -159,9 +171,7 @@ export function parseNativeAuthoredProcessCensus(
       group: integer(Number(match[3]), 0),
       session: (match[4] ?? "").toLowerCase(),
       uid: integer(Number(match[5]), -2_147_483_648),
-      state: (match[6]?.startsWith("Z") ? "zombie" : "live") as
-        | "zombie"
-        | "live",
+      state: classify(match[6] ?? ""),
       birth: (match[7] ?? "").replace(/\s+/g, " "),
       executable: match[8] ?? "",
     };
@@ -321,7 +331,7 @@ export function mergeNativeAuthoredProcessCensuses(
 ): readonly NativeAuthoredProcessRow[] {
   const merged = new Map<number, NativeAuthoredProcessRow>();
   for (const row of [...before, ...after]) {
-    if (row.state === "live" && row.session === null) {
+    if (row.state !== "zombie" && row.session === null) {
       return refused();
     }
     const prior = merged.get(row.pid);
@@ -474,19 +484,29 @@ export async function readNativeAuthoredProcessCensus(
   return refused();
 }
 
+/** One complete census per observation. Absence refuses at once; a transient
+ * row of interest is re-observed within the same monotonic budget and refuses
+ * if it never settles. Foreign rows, transient or not, decide nothing here. */
 async function originalRow(pid: number): Promise<NativeAuthoredProcessRow> {
-  const { rows } = await readRows(performance.now() + 3000);
-  const row = rows.find((item) => item.pid === pid) ?? refused();
-  const inspector = openProcessSessionInspector();
-  try {
-    const session = inspector.session(pid);
-    if (session === null) {
-      return refused();
+  const end = performance.now() + 3000;
+  while (performance.now() < end) {
+    const { rows } = await readRows(end);
+    const row = rows.find((item) => item.pid === pid) ?? refused();
+    if (row.state === "transient") {
+      continue;
     }
-    return { ...row, session: String(session) };
-  } finally {
-    inspector.close();
+    const inspector = openProcessSessionInspector();
+    try {
+      const session = inspector.session(pid);
+      if (session === null) {
+        return refused();
+      }
+      return { ...row, session: String(session) };
+    } finally {
+      inspector.close();
+    }
   }
+  return refused();
 }
 
 async function image(path: string): Promise<Executable> {
@@ -562,7 +582,7 @@ export function requireNativeAuthoredProcessQuiescent(
     rows.some(
       (row) =>
         row.pid === original.pid ||
-        (row.state === "live" &&
+        (row.state !== "zombie" &&
           (row.session === null ||
             row.group === original.group ||
             row.session === original.session))

@@ -2,9 +2,11 @@
 
 An explicit `HACK_RUNTIME_BACKEND=native` selection delegates an authored
 `.hack/hack.project.json` project to the separate native foreground owner. The
-current command slice supports whole-project foreground `up` and `restart`, saved-run `ps`,
-finite service `logs`, noninteractive service `exec` and one-off service `run` on macOS with an absolute `HACK_NATIVE_BINARY` and private
-canonical `HACK_NATIVE_HOME`. It requires
+current command slice supports whole-project foreground `up` and `restart`,
+owner-mediated `down` and explicit stored-generation `down --recover`, saved-run
+`ps`, finite service `logs --no-follow`, noninteractive service `exec` and one-off
+service `run` on macOS with an absolute `HACK_NATIVE_BINARY` and private canonical
+`HACK_NATIVE_HOME`. It requires
 the caller's separately prepared native provider pool and matching runtime binary.
 It does not install or select a runtime automatically. An omitted backend continues
 to use the [Compose command owner](native-compose-commands.md).
@@ -47,6 +49,43 @@ The separate persistent-storage capability requires the runtime's pinned sibling
 witness tool and retains its own ownership and recovery checks. It cannot be combined
 with the supervised host-process capability below.
 
+## Support matrix
+
+Every slice requires macOS; any other host refuses before input acquisition. Each
+row lists the admitted form and the requests that refuse with
+`E_NATIVE_PROJECT_UNSUPPORTED` before managed value resolution, compiler work or
+provider contact. A refusal names no option value, path or project detail.
+
+| Command | Supported form | Refuses before input acquisition |
+| --- | --- | --- |
+| `up` | Whole-project foreground; `--branch`, `--profile` and `--env` (including `--env base`) keep their compiler contracts | `--detach`, `--json`, `--recover`, service subsets, single-service, command, workdir, follow, tail and format options, other unsupported options |
+| `down` | Whole-project owner-mediated stop of a ready generation through its live foreground owner or private no-host endpoint | `--json`, `--detach`, `--profile` and `--env` overrides, service subsets including an empty selection, single-service, command, workdir, follow, tail and format options |
+| `down --recover` | Explicit retirement of a complete stored generation whose owners are dead; omit `--profile` | `--json`, `--detach`, explicit empty or named `--profile`, `--env` overrides, service subsets, single-service, command, workdir, follow, tail and format options |
+| `ps` | `ps` and `ps --json` for the exact saved project and explicit `--branch` | `--profile`, `--env`, service subsets or a single service, `--recover`, `--detach`, command, workdir, follow, tail and format options |
+| `logs` | `logs SERVICE --no-follow` with `--tail` from 1 through 1000 (default 200), plain or `--json` | Follow mode (the default), omitted, multiple or malformed service selection, non-integer or out-of-range `--tail`, pretty format, time and query filters, `--profile`, `--env`, `--recover`, `--detach`, command and workdir options |
+| `exec` | `exec SERVICE -- COMMAND ARG...` with closed stdin, no TTY and an optional absolute `--workdir` | Empty command or empty first argument, NUL bytes, more than 256 arguments, an argument over 16 KiB or 64 KiB in total, relative `--workdir`, interactive or TTY input, `--json`, `--profile`, `--env`, service subsets, follow, tail and format options, `--recover`, `--detach` |
+| `run` | Not supported | Every request |
+| `restart` | Not supported | Every request |
+
+Both backends remain experimental. This table records the refusal boundary of the
+current slices; it is not a parity claim against the Compose owner and does not
+report installed live acceptance.
+
+## Foreground `up`
+
+Startup shares the configured `HACK_COMPOSE_STARTUP_TIMEOUT_MS` budget across
+input preparation and native review, with a native maximum of 300000 milliseconds.
+Startup refusals identify a fixed owning stage and, when available, a closed
+compiler or native error code. They omit arbitrary errors, child output, paths and
+values. These diagnostics do not grant retry or cleanup authority.
+Readiness requires authenticated current observations and unchanged input before
+publication. The foreground owner remains attached until owned shutdown finishes;
+Ctrl-C requests that shutdown. Exact durable Removed evidence retires the tagged
+native run and startup intent. Unknown, changed or live cleanup retains the attempt
+and refuses replay; a missing ready mapping does not authorize a fresh start.
+
+## Saved-run `ps`
+
 `ps` and `ps --json` issue one authenticated current status request for the exact
 saved project and explicit branch selection. Text output lists service, container,
 current state and current health. JSON uses the ordinary result envelope with
@@ -66,22 +105,11 @@ owned request to settle. Profiles, env overrides, service subsets and other `ps`
 options are unsupported. Finite one-off `run` and whole-project `restart` are
 described below.
 
-The separate persistent-storage capability requires the runtime's pinned sibling
-witness tool and retains its own ownership and recovery checks. It cannot be combined
-with the supervised host-process capability below.
+## Owner-mediated `down` and `down --recover`
 
-Startup shares the configured `HACK_COMPOSE_STARTUP_TIMEOUT_MS` budget across
-input preparation and native review, with a native maximum of 300000 milliseconds.
-Startup refusals identify a fixed owning stage and, when available, a closed
-compiler or native error code. They omit arbitrary errors, child output, paths and
-values. These diagnostics do not grant retry or cleanup authority.
-Readiness requires authenticated current observations and unchanged input before
-publication. The foreground owner remains attached until owned shutdown finishes;
-Ctrl-C requests that shutdown. Exact durable Removed evidence retires the tagged
-native run and startup intent. Unknown, changed or live cleanup retains the attempt
-and refuses replay; a missing ready mapping does not authorize a fresh start.
-
-Ordinary whole-project `down` also supports a ready no-host generation, including
+Ordinary whole-project `down` asks the live foreground owner of a ready generation
+to stop. A finite-hook generation uses the private per-run capability described
+under host lifecycle hooks below. `down` also supports a ready no-host generation, including
 persistent-storage plans. Its private no-host endpoint is issued by the original
 held startup admission before public Ready. It asks that same foreground owner to
 stop; no host declaration, hook permit, new controller or stored-PID signal is

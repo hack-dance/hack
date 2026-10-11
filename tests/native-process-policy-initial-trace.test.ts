@@ -582,3 +582,236 @@ test("trace replay exposes startup vs strict ownership without accepting a trunc
     await rm(root, { recursive: true, force: true });
   }
 }, 30_000);
+
+/** The captured docker-e2e after-compose shape: three container-ID members and one `ep-` placeholder for the restarting retry service. */
+test("trace replay re-observes a restarting endpoint placeholder member and refuses an unresolved or non-restarting one", async () => {
+  const root = await mkdtemp(join(tmpdir(), "process-initial-placeholder-"));
+  const services = ["forced", "graceful", "reaper", "retry"] as const;
+  const ids = {
+    forced: "1".repeat(64),
+    graceful: "2".repeat(64),
+    reaper: "3".repeat(64),
+    retry: id,
+  } as const;
+  const placeholder = `ep-${"9".repeat(64)}`;
+  const fleet: NativeComposeOwnershipOptions = {
+    ...selection,
+    expectedServices: [...services],
+  };
+  const container = (
+    service: (typeof services)[number],
+    state: "running" | "restarting"
+  ) => ({
+    id: ids[service],
+    name: `/${project}-${service}-1`,
+    project,
+    version: "1",
+    instance: project,
+    owner,
+    generation,
+    service,
+    oneoff: "False",
+    state,
+    exitCode: state === "restarting" ? 17 : 0,
+    health: null,
+    networks: {
+      [`${project}_default`]: {
+        NetworkID: networkId,
+        Aliases: [`${project}-${service}-1`, service],
+      },
+    },
+  });
+  const members = (retryKey: string) =>
+    Object.fromEntries(
+      services.map((service) => [
+        service === "retry" ? retryKey : ids[service],
+        { Name: `${project}-${service}-1` },
+      ])
+    );
+  const network = (retryKey: string) =>
+    JSON.stringify({
+      id: networkId,
+      name: `${project}_default`,
+      project,
+      version: "1",
+      instance: project,
+      owner,
+      driver: "bridge",
+      internal: false,
+      containers: members(retryKey),
+    });
+  const sorted = [...services].sort((left, right) =>
+    ids[left].localeCompare(ids[right])
+  );
+  const containerList = sorted
+    .map((service) =>
+      JSON.stringify({
+        id: ids[service],
+        name: `${project}-${service}-1`,
+        project,
+      })
+    )
+    .join("\n");
+  const containers = (retryState: "running" | "restarting") =>
+    sorted
+      .map((service) =>
+        JSON.stringify(
+          container(service, service === "retry" ? retryState : "running")
+        )
+      )
+      .join("\n");
+  const inspectContainers = [
+    "container",
+    "inspect",
+    "--format",
+    processPolicyInitialTraceFormats.container.inspect,
+    ...sorted.map((service) => ids[service]),
+  ];
+  const volume = JSON.stringify({
+    id: "process-fixture_evidence",
+    name: "process-fixture_evidence",
+    project,
+    version: "1",
+    instance: project,
+    owner,
+    storage: "evidence",
+    createdAt: "2026-10-08T12:00:00Z",
+  });
+  const volumeList = JSON.stringify({
+    id: "process-fixture_evidence",
+    name: "process-fixture_evidence",
+    project,
+  });
+  const networkList = JSON.stringify({
+    id: networkId,
+    name: `${project}_default`,
+    project,
+  });
+  const queries = (
+    first: { retryKey: string; retryState: "running" | "restarting" },
+    recheck: { retryKey: string; retryState: "running" | "restarting" }
+  ): ProcessPolicyInitialTraceQuery[] => {
+    const calls: [string[], string][] = [
+      [list("container"), containerList],
+      [inspectContainers, containers(first.retryState)],
+      [list("volume"), volumeList],
+      [inspect("volume"), volume],
+      [list("network"), networkList],
+      [inspect("network"), network(first.retryKey)],
+      [inspectContainers, containers(recheck.retryState)],
+      [inspect("volume"), volume],
+      [inspect("network"), network(recheck.retryKey)],
+      [list("container"), containerList],
+      [list("volume"), volumeList],
+      [list("network"), networkList],
+    ];
+    return calls.map(([args, stdout], index) => ({
+      token: index.toString(16).padStart(32, "0"),
+      startedAt: index,
+      startOrder: index * 2,
+      reapOrder: index * 2 + 1,
+      reapedAt: index + 1,
+      args,
+      stdout,
+      exitCode: 0,
+    }));
+  };
+  const resolved = queries(
+    { retryKey: placeholder, retryState: "restarting" },
+    { retryKey: ids.retry, retryState: "running" }
+  );
+  try {
+    const startup = await replayProcessPolicyInitialOwnership({
+      directory: join(root, "startup"),
+      queries: resolved,
+      selection: fleet,
+      mode: "startup",
+    });
+    expect(startup).toEqual({
+      outcome: "unready",
+      code: null,
+      reason: null,
+      topologyPredicate: null,
+      consumed: resolved.length,
+      protocolMatched: true,
+    });
+    const strict = await replayProcessPolicyInitialOwnership({
+      directory: join(root, "strict"),
+      queries: resolved,
+      selection: fleet,
+      mode: "strict",
+    });
+    expect(strict).toEqual({
+      outcome: "refused",
+      code: "E_NATIVE_COMPOSE_OWNERSHIP",
+      reason: "topology",
+      topologyPredicate: "network-member-id",
+      consumed: 6,
+      protocolMatched: true,
+    });
+    const settled = queries(
+      { retryKey: ids.retry, retryState: "running" },
+      { retryKey: ids.retry, retryState: "running" }
+    );
+    const owned = await replayProcessPolicyInitialOwnership({
+      directory: join(root, "owned"),
+      queries: settled,
+      selection: fleet,
+      mode: "startup",
+    });
+    expect(owned).toEqual({
+      outcome: "owned",
+      code: null,
+      reason: null,
+      topologyPredicate: null,
+      consumed: settled.length,
+      protocolMatched: true,
+    });
+    const unresolved = await replayProcessPolicyInitialOwnership({
+      directory: join(root, "unresolved"),
+      queries: queries(
+        { retryKey: placeholder, retryState: "restarting" },
+        { retryKey: placeholder, retryState: "restarting" }
+      ),
+      selection: fleet,
+      mode: "startup",
+    });
+    expect(unresolved).toEqual({
+      outcome: "refused",
+      code: "E_NATIVE_COMPOSE_OWNERSHIP",
+      reason: "topology",
+      topologyPredicate: "network-member-id",
+      consumed: 9,
+      protocolMatched: true,
+    });
+    const running = await replayProcessPolicyInitialOwnership({
+      directory: join(root, "running"),
+      queries: queries(
+        { retryKey: placeholder, retryState: "running" },
+        { retryKey: ids.retry, retryState: "running" }
+      ),
+      selection: fleet,
+      mode: "startup",
+    });
+    expect(running).toEqual({
+      outcome: "refused",
+      code: "E_NATIVE_COMPOSE_OWNERSHIP",
+      reason: "topology",
+      topologyPredicate: "network-member-id",
+      consumed: 6,
+      protocolMatched: true,
+    });
+    const serialized = JSON.stringify({
+      startup,
+      strict,
+      owned,
+      unresolved,
+      running,
+    });
+    expect(serialized).not.toContain(owner);
+    expect(serialized).not.toContain(placeholder);
+    expect(serialized).not.toContain(id);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+}, 30_000);

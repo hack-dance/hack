@@ -25,15 +25,53 @@ import { invokeNativeRuntime } from "../src/backends/native-runtime-client.ts";
 import { tryNativeAuthoredCommand } from "../src/lib/native-authored-command.ts";
 import type { NativeComposeCommandOptions } from "../src/lib/native-compose-command.ts";
 import { captureCompletedJobFixtureCommand } from "./e2e/scenarios/native-compose-adoption-job-worktrees.ts";
+import {
+  awaitPidFile,
+  createNativeAuthoredSettlement,
+} from "./helpers/native-authored-settlement.ts";
+
+/** Fixture-owner rule: a case that spawns children passes its own budget. */
+const DEFAULT_BUDGET_MS = 4000;
+/** The cancelled request child sleeps this long after writing its identity. */
+const REQUEST_SLEEP_MS = 3000;
+/** The inherited-stream keeper child lives this long after its parent exits. */
+const KEEPER_SLEEP_MS = 800;
+/** Explicit keeper join allowance on top of its own lifetime. */
+const KEEPER_JOIN_MS = 3000;
 
 const roots: string[] = [];
+const settlement = createNativeAuthoredSettlement();
 let uncertain = false;
 let active = 0;
 let caseDeadline = 0;
+let poisoned:
+  | {
+      readonly name: string;
+      readonly elapsedMs: number;
+      readonly reason: string;
+    }
+  | undefined;
+/** Poison the suite once; the first poisoned case stays named for every later refusal. */
+function poison(name: string, startedAt: number, reason: string): void {
+  uncertain = true;
+  poisoned ??= {
+    name,
+    elapsedMs: Math.round(performance.now() - startedAt),
+    reason,
+  };
+}
+function unconfirmed(prefix: string): Error {
+  const detail = poisoned
+    ? ` (first poisoned case ${JSON.stringify(poisoned.name)}: ${poisoned.reason} after ${poisoned.elapsedMs} ms)`
+    : "";
+  return new Error(`${prefix}${detail}; evidence retained.`);
+}
 function caseAdmission() {
   if (uncertain || !active || performance.now() >= caseDeadline) {
     uncertain = true;
-    throw new Error("Synthetic exec case expired/unknown; refuse child spawn.");
+    throw unconfirmed(
+      "Synthetic exec case expired/unknown; refuse child spawn"
+    );
   }
 }
 afterEach(async () => {
@@ -46,22 +84,31 @@ afterEach(async () => {
     );
   }
 });
-async function owned(body: () => Promise<void>, budgetMs = 4000) {
+async function owned(
+  name: string,
+  body: () => Promise<void>,
+  budgetMs = DEFAULT_BUDGET_MS
+) {
+  const started = performance.now();
   if (uncertain || active) {
-    uncertain = true;
-    throw new Error("Prior exec lifetime is unconfirmed; evidence retained.");
+    poison(name, started, "entered while a prior lifetime was unconfirmed");
+    throw unconfirmed("Prior exec lifetime is unconfirmed");
   }
-  const deadline = performance.now() + budgetMs;
+  const deadline = started + budgetMs;
   caseDeadline = deadline;
   active++;
   try {
     await body();
+    // Captured children must be absent before the next case may spawn.
+    await settlement.settle({
+      budgetMs: Math.max(0, deadline - performance.now()),
+    });
   } catch (error: unknown) {
-    uncertain = true;
+    poison(name, started, "case failed");
     throw error;
   } finally {
     if (performance.now() >= deadline) {
-      uncertain = true;
+      poison(name, started, `exceeded its ${budgetMs} ms budget`);
     }
     if (!uncertain) {
       active--;
@@ -70,9 +117,7 @@ async function owned(body: () => Promise<void>, budgetMs = 4000) {
 }
 async function fixture(saved = true) {
   if (uncertain) {
-    throw new Error(
-      "Prior synthetic lifetime is unconfirmed; evidence retained."
-    );
+    throw unconfirmed("Prior synthetic lifetime is unconfirmed");
   }
   const projectRoot = await realpath(
     await mkdtemp(join(tmpdir(), "native-authored-exec-"))
@@ -156,11 +201,23 @@ async function fixture(saved = true) {
     },
   };
   if (uncertain) {
-    throw new Error(
-      "Prior exec lifetime is unconfirmed; refuse fixture setup."
+    throw unconfirmed(
+      "Prior exec lifetime is unconfirmed; refuse fixture setup"
     );
   }
   const runtime = { binary: join(nativeHome, "native"), home: nativeHome };
+  // Cases that capture a child identity write it here; absence is settled before the next case.
+  for (const [name, file] of [
+    ["exec request child", "request.pid"],
+    ["exec finite keeper", "keeper.pid"],
+  ] as const) {
+    settlement.record({
+      kind: "pid-file",
+      name,
+      path: join(nativeHome, file),
+      group: false,
+    });
+  }
   await Bun.write(
     runtime.binary,
     `#!${process.execPath}\nconsole.log(${JSON.stringify(JSON.stringify(reply))});\n`
@@ -226,7 +283,7 @@ test.each<Partial<NativeComposeCommandOptions>>([
   expect(calls).toBe(0);
 });
 test("finite authored exec preserves literal argv, binary streams and nonzero exit through the saved owner", async () =>
-  owned(async () => {
+  owned("finite authored exec", async () => {
     const f = await fixture();
     let calls = 0;
     const result = await nativeAuthoredProjectExec({
@@ -264,7 +321,7 @@ test.each([
   "foreign",
   "cancelled",
 ])("exec %s admission makes zero runtime calls", async (kind) =>
-  owned(async () => {
+  owned(`exec ${kind} admission`, async () => {
     const f = await fixture(kind !== "absent"),
       controller = new AbortController();
     if (kind === "cancelled") {
@@ -290,7 +347,7 @@ test.each([
   "mapping",
   "executable",
 ])("exec %s incarnation replacement after dispatch withholds output without replay", async (kind) =>
-  owned(async () => {
+  owned(`exec ${kind} incarnation replacement`, async () => {
     const f = await fixture();
     let calls = 0;
     await expect(
@@ -315,7 +372,7 @@ test.each([
   }));
 
 test("exec cancellation after the real held owner closes admits no output", async () =>
-  owned(async () => {
+  owned("exec cancellation after held owner closes", async () => {
     const f = await fixture(),
       controller = new AbortController();
     let closed = false;
@@ -338,7 +395,7 @@ test("exec cancellation after the real held owner closes admits no output", asyn
   }));
 
 test("runtime replacement during the last saved-owner assertion refuses before dispatch", async () =>
-  owned(async () => {
+  owned("runtime replacement during last assertion", async () => {
     const f = await fixture();
     let invokes = 0,
       assertions = 0;
@@ -383,7 +440,7 @@ test.each([
   "exit",
   "phase",
 ])("exec reply %s cannot replace authority or completion", async (kind) =>
-  owned(async () => {
+  owned(`exec reply ${kind}`, async () => {
     const f = await fixture(),
       value = structuredClone(f.reply);
     if (kind === "container") {
@@ -471,17 +528,29 @@ test("exec drain refuses unrelated action, private input and malformed selection
 test(
   "exec cancellation joins the runtime request child and never admits captured bytes",
   async () =>
-    owned(async () => {
-      const f = await fixture(),
-        controller = new AbortController(),
-        marker = join(f.runtime.home, "request.pid");
-      await Bun.write(
-        f.runtime.binary,
-        `#!${process.execPath}\nawait Bun.write(${JSON.stringify(marker)},String(process.pid));console.log('private-command-output');await Bun.sleep(3000);\n`
-      );
-      caseAdmission();
-      const timer = setTimeout(() => controller.abort(), 100);
-      try {
+    owned(
+      "exec cancellation joins request child",
+      async () => {
+        const f = await fixture(),
+          controller = new AbortController(),
+          marker = join(f.runtime.home, "request.pid");
+        await Bun.write(
+          f.runtime.binary,
+          `#!${process.execPath}\nawait Bun.write(${JSON.stringify(marker)},String(process.pid));console.log('private-command-output');await Bun.sleep(${REQUEST_SLEEP_MS});\n`
+        );
+        caseAdmission();
+        // Cancel once the child has published its identity, not after a fixed delay:
+        // under load the child may not have started within a small timer.
+        let identityFailure: unknown;
+        const cancel = awaitPidFile(marker, {
+          budgetMs: REQUEST_SLEEP_MS,
+        }).then(
+          () => controller.abort(),
+          (error: unknown) => {
+            identityFailure = error;
+            controller.abort();
+          }
+        );
         await expect(
           invokeNativeRuntime({
             runtime: f.runtime,
@@ -491,6 +560,8 @@ test(
             boundNativeAuthoredExecDrain: true,
           })
         ).rejects.toThrow("canceled");
+        await cancel;
+        expect(identityFailure).toBeUndefined();
         const pid = Number(await readFile(marker, "utf8"));
         expect(Number.isSafeInteger(pid) && pid > 0).toBe(true);
         let absent = false;
@@ -500,62 +571,44 @@ test(
           absent = (error as NodeJS.ErrnoException).code === "ESRCH";
         }
         expect(absent).toBe(true);
-      } finally {
-        clearTimeout(timer);
-      }
-    }),
+      },
+      REQUEST_SLEEP_MS + DEFAULT_BUDGET_MS
+    ),
   10_000
 );
 
 const macTest = process.platform === "darwin" ? test : test.skip;
-async function joinKeeper(marker: string) {
-  const pid = Number(await readFile(marker, "utf8")),
-    deadline = performance.now() + 3000;
-  if (!Number.isSafeInteger(pid) || pid < 1) {
-    throw new Error("Invalid exact keeper identity");
-  }
-  while (true) {
-    try {
-      process.kill(pid, 0);
-    } catch (error: unknown) {
-      if (
-        typeof error === "object" &&
-        error !== null &&
-        "code" in error &&
-        error.code === "ESRCH"
-      ) {
-        return;
-      }
-      throw error;
-    }
-    if (performance.now() >= deadline) {
-      throw new Error("Exact synthetic keeper remains unconfirmed");
-    }
-    await Bun.sleep(10);
-  }
-}
-test("exited exec request with inherited streams refuses bytes and joins its exact finite keeper", async () =>
-  owned(async () => {
-    const f = await fixture(),
-      marker = join(f.runtime.home, "keeper.pid");
-    await Bun.write(
-      f.runtime.binary,
-      `#!${process.execPath}\nconst child=Bun.spawn([process.execPath,'--eval','await Bun.sleep(800)'],{stdin:'ignore',stdout:'inherit',stderr:'inherit'});await Bun.write(${JSON.stringify(marker)},String(child.pid));console.log('{}');process.exit(0);\n`
-    );
-    caseAdmission();
-    try {
-      await expect(
-        invokeNativeRuntime({
-          runtime: f.runtime,
-          cwd: f.scope.projectRoot,
-          args: f.args,
-          boundNativeAuthoredExecDrain: true,
-        })
-      ).rejects.toThrow("did not settle");
-    } finally {
-      await joinKeeper(marker);
-    }
-  }));
+test(
+  "exited exec request with inherited streams refuses bytes and joins its exact finite keeper",
+  async () =>
+    owned(
+      "exited exec request joins finite keeper",
+      async () => {
+        const f = await fixture(),
+          marker = join(f.runtime.home, "keeper.pid");
+        await Bun.write(
+          f.runtime.binary,
+          `#!${process.execPath}\nconst child=Bun.spawn([process.execPath,'--eval','await Bun.sleep(${KEEPER_SLEEP_MS})'],{stdin:'ignore',stdout:'inherit',stderr:'inherit'});await Bun.write(${JSON.stringify(marker)},String(child.pid));console.log('{}');process.exit(0);\n`
+        );
+        caseAdmission();
+        try {
+          await expect(
+            invokeNativeRuntime({
+              runtime: f.runtime,
+              cwd: f.scope.projectRoot,
+              args: f.args,
+              boundNativeAuthoredExecDrain: true,
+            })
+          ).rejects.toThrow("did not settle");
+        } finally {
+          // The keeper identity was registered by the fixture; join it explicitly.
+          await settlement.settle({ budgetMs: KEEPER_JOIN_MS });
+        }
+      },
+      KEEPER_SLEEP_MS + KEEPER_JOIN_MS + DEFAULT_BUDGET_MS
+    ),
+  10_000
+);
 macTest.each([
   { extra: [], code: 17 },
   ...[
@@ -566,80 +619,87 @@ macTest.each([
 ])(
   "source CLI exec %j preserves omitted options and exact completion",
   async ({ extra, code }) =>
-    owned(async () => {
-      const f = await fixture(),
-        attempts = join(f.runtime.home, "exec-attempts");
-      await Bun.write(
-        join(f.scope.projectDir, "hack.project.json"),
-        JSON.stringify({
-          version: 1,
-          services: { web: { image: "synthetic:test" } },
-        })
-      );
-      f.reply.result.exec.stdout_base64 =
-        Buffer.from("literal stdout\n").toString("base64");
-      f.reply.result.exec.truncated = false;
-      const expected = ["--candidate-root", f.runtime.home, ...f.args];
-      await Bun.write(
-        f.runtime.binary,
-        `#!${process.execPath}\nimport {appendFileSync} from 'node:fs';if(JSON.stringify(process.argv.slice(2))!==${JSON.stringify(JSON.stringify(expected))})process.exit(97);appendFileSync(${JSON.stringify(attempts)},'exec\\n');console.log(${JSON.stringify(JSON.stringify(f.reply))});\n`
-      );
-      caseAdmission();
-      const result = await captureCompletedJobFixtureCommand({
-        argv: [
-          process.execPath,
-          "--no-env-file",
-          resolve(import.meta.dir, "../index.ts"),
-          "--path",
-          f.scope.projectRoot,
-          "exec",
-          ...extra,
-          "--workdir",
-          "/app",
-          "web",
-          "--",
-          ...command,
-        ],
-        cwd: f.scope.projectRoot,
-        env: {
-          PATH: "/usr/bin:/bin",
-          HOME: f.scope.projectRoot,
-          HACK_HOME: join(f.scope.projectRoot, "home"),
-          HACK_RUNTIME_BACKEND: "native",
-          HACK_NATIVE_BINARY: f.runtime.binary,
-          HACK_NATIVE_HOME: f.runtime.home,
-          HACK_CONFIG_COMPILER_BINARY:
-            process.env.HACK_CONFIG_COMPILER_BINARY ??
-            resolve(import.meta.dir, "../dist/hack-config-compiler"),
-          HACK_LOGGER: "console",
-          HACK_EXECUTION_MODE: "non_interactive",
-          CI: "1",
-        },
-        captures: join(f.scope.projectRoot, "captures"),
-        timeoutMs: 15_000,
-        onUnconfirmed: () => {
-          uncertain = true;
-        },
-      });
-      expect({ code: result.exitCode, output: result.combined }).toMatchObject({
-        code,
-      });
-      if (extra.length) {
-        expect(result.combined).toContain("E_NATIVE_PROJECT_UNSUPPORTED");
-        expect(await Bun.file(attempts).exists()).toBe(false);
-      } else {
-        expect(await Bun.file(attempts).text()).toBe("exec\n");
-        expect(result.stdout).toBe("literal stdout\n");
-        expect(result.stderr).toBe("literal stderr\n");
-      }
-    }, 19_000),
+    owned(
+      `source CLI exec ${JSON.stringify(extra)}`,
+      async () => {
+        const f = await fixture(),
+          attempts = join(f.runtime.home, "exec-attempts");
+        await Bun.write(
+          join(f.scope.projectDir, "hack.project.json"),
+          JSON.stringify({
+            version: 1,
+            services: { web: { image: "synthetic:test" } },
+          })
+        );
+        f.reply.result.exec.stdout_base64 =
+          Buffer.from("literal stdout\n").toString("base64");
+        f.reply.result.exec.truncated = false;
+        const expected = ["--candidate-root", f.runtime.home, ...f.args];
+        await Bun.write(
+          f.runtime.binary,
+          `#!${process.execPath}\nimport {appendFileSync} from 'node:fs';if(JSON.stringify(process.argv.slice(2))!==${JSON.stringify(JSON.stringify(expected))})process.exit(97);appendFileSync(${JSON.stringify(attempts)},'exec\\n');console.log(${JSON.stringify(JSON.stringify(f.reply))});\n`
+        );
+        caseAdmission();
+        const result = await captureCompletedJobFixtureCommand({
+          argv: [
+            process.execPath,
+            "--no-env-file",
+            resolve(import.meta.dir, "../index.ts"),
+            "--path",
+            f.scope.projectRoot,
+            "exec",
+            ...extra,
+            "--workdir",
+            "/app",
+            "web",
+            "--",
+            ...command,
+          ],
+          cwd: f.scope.projectRoot,
+          env: {
+            PATH: "/usr/bin:/bin",
+            HOME: f.scope.projectRoot,
+            HACK_HOME: join(f.scope.projectRoot, "home"),
+            HACK_RUNTIME_BACKEND: "native",
+            HACK_NATIVE_BINARY: f.runtime.binary,
+            HACK_NATIVE_HOME: f.runtime.home,
+            HACK_CONFIG_COMPILER_BINARY:
+              process.env.HACK_CONFIG_COMPILER_BINARY ??
+              resolve(import.meta.dir, "../dist/hack-config-compiler"),
+            HACK_LOGGER: "console",
+            HACK_EXECUTION_MODE: "non_interactive",
+            CI: "1",
+          },
+          captures: join(f.scope.projectRoot, "captures"),
+          timeoutMs: 15_000,
+          onUnconfirmed: () => {
+            uncertain = true;
+          },
+        });
+        expect({
+          code: result.exitCode,
+          output: result.combined,
+        }).toMatchObject({
+          code,
+        });
+        if (extra.length) {
+          expect(result.combined).toContain("E_NATIVE_PROJECT_UNSUPPORTED");
+          expect(await Bun.file(attempts).exists()).toBe(false);
+        } else {
+          expect(await Bun.file(attempts).text()).toBe("exec\n");
+          expect(result.stdout).toBe("literal stdout\n");
+          expect(result.stderr).toBe("literal stderr\n");
+        }
+      },
+      19_000
+    ),
   20_000
 );
 
 macTest(
   "public cancellation after exec completion returns130 without rendering or replay",
   async () =>
-    owned(async () => {
+    owned("public cancellation after exec completion", async () => {
       const f = await fixture(),
         write = spyOn(Bun, "write").mockResolvedValue(0);
       let calls = 0;
@@ -685,7 +745,7 @@ macTest(
 macTest.each([1, 2])(
   "cancellation during admitted local output write%d returns130 without later writes",
   async (cancelAt) =>
-    owned(async () => {
+    owned(`cancellation during output write${cancelAt}`, async () => {
       const f = await fixture();
       let writes = 0;
       const writer = spyOn(Bun, "write").mockImplementation(async () => {

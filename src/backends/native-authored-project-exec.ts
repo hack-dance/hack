@@ -1,7 +1,5 @@
-import { constants, fstatSync, lstatSync, realpathSync } from "node:fs";
-import { open, realpath } from "node:fs/promises";
 import { isRecord } from "../lib/guards.ts";
-import { keys, sameFile } from "../lib/native-compose-private-state.ts";
+import { keys } from "../lib/native-compose-private-state.ts";
 import { nativeAuthoredExecOptions } from "./native-authored-exec-options.ts";
 import {
   type NativeAuthoredReceipt,
@@ -10,9 +8,12 @@ import {
 } from "./native-authored-graph-protocol.ts";
 import {
   type NativeAuthoredProjectRunScope,
-  nativeAuthoredProjectNamespace,
   withNativeAuthoredProjectStatus,
 } from "./native-authored-project-run.ts";
+import {
+  requireReadyServiceReceipt,
+  withPinnedRuntimeBinary,
+} from "./native-authored-runtime-binary.ts";
 import {
   invokeNativeRuntime,
   type NativeRuntimeSelection,
@@ -136,91 +137,46 @@ export async function nativeAuthoredProjectExec(input: {
   }
   const result = await withStatus(scope, async (saved) => {
     active();
-    if (!saved.ready) {
-      return refused();
-    }
-    const receipt = saved.ready.record.receipt;
-    if (
-      receipt.review.provenance.namespace !==
-        nativeAuthoredProjectNamespace(scope) ||
-      !Object.hasOwn(receipt.readiness, service) ||
-      !receipt.resources[`container:${service}`]?.id
-    ) {
-      return refused();
-    }
-    if ((await realpath(runtime.binary)) !== runtime.binary) {
-      return refused();
-    }
-    const file = await open(
-      runtime.binary,
-      constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK
+    const receipt =
+      requireReadyServiceReceipt(saved, scope, service) ?? refused();
+    return await withPinnedRuntimeBinary(
+      { binary: runtime.binary, signal, refused },
+      async (pin) => {
+        const check = async () => {
+          pin.checkSync();
+          await saved.assertFresh();
+          // Recheck the executable after any awaited saved-owner admission.
+          pin.checkSync();
+        };
+        await check();
+        // No await separates this final path/descriptor admission from real spawn.
+        pin.checkSync();
+        const value = await invoke({
+          runtime,
+          cwd: scope.projectRoot,
+          args: [
+            "graph",
+            "native",
+            "exec",
+            "--run-id",
+            receipt.review.provenance.run,
+            "--service",
+            service,
+            ...(workdir === undefined ? [] : ["--workdir", workdir]),
+            "--json",
+            "--",
+            ...command,
+          ],
+          timeoutMs: 45_000,
+          signal,
+          boundNativeAuthoredExecDrain: true,
+        });
+        await check();
+        const result = parseNativeAuthoredExec(value, receipt, service);
+        await check();
+        return result;
+      }
     );
-    try {
-      const original = await file.stat();
-      const executableFresh = () => {
-        active();
-        const named = lstatSync(runtime.binary),
-          held = fstatSync(file.fd);
-        if (
-          !original.isFile() ||
-          original.nlink !== 1 ||
-          (original.mode & 0o022) !== 0 ||
-          (original.mode & 0o111) === 0 ||
-          !named.isFile() ||
-          !sameFile(original, named) ||
-          !sameFile(original, held) ||
-          [named, held].some(
-            (info) =>
-              info.size !== original.size ||
-              info.mtimeMs !== original.mtimeMs ||
-              info.ctimeMs !== original.ctimeMs ||
-              info.mode !== original.mode ||
-              info.uid !== original.uid ||
-              info.gid !== original.gid ||
-              info.nlink !== 1
-          ) ||
-          realpathSync(runtime.binary) !== runtime.binary
-        ) {
-          return refused();
-        }
-        active();
-      };
-      const check = async () => {
-        executableFresh();
-        await saved.assertFresh();
-        // Recheck the executable after any awaited saved-owner admission.
-        executableFresh();
-      };
-      await check();
-      // No await separates this final path/descriptor admission from real spawn.
-      executableFresh();
-      const value = await invoke({
-        runtime,
-        cwd: scope.projectRoot,
-        args: [
-          "graph",
-          "native",
-          "exec",
-          "--run-id",
-          receipt.review.provenance.run,
-          "--service",
-          service,
-          ...(workdir === undefined ? [] : ["--workdir", workdir]),
-          "--json",
-          "--",
-          ...command,
-        ],
-        timeoutMs: 45_000,
-        signal,
-        boundNativeAuthoredExecDrain: true,
-      });
-      await check();
-      const result = parseNativeAuthoredExec(value, receipt, service);
-      await check();
-      return result;
-    } finally {
-      await file.close();
-    }
   });
   active();
   return result;

@@ -1307,6 +1307,10 @@ test("a replacement member after partial retirement is never deleted on retry", 
   });
 }, 30_000);
 
+// Budget: two owned mutations (acquire ~0.5 s, prepare ~0.5 s, publish/assert-fresh
+// ~1.5 s, arm/reap ~0.8 s, then the refused recovery stop) measured 5113 ms on the
+// macos-15-intel compiler job, past Bun's 5 s default; ~3x headroom, no product
+// deadline inside the case changes.
 test("armed startup without durable reaped evidence cannot retire from container absence or a fresh public ticket", async () => {
   const selected = await store.withMutation(async (mutation) => {
     const selected = await staged(mutation);
@@ -1376,7 +1380,7 @@ test("armed startup without durable reaped evidence cannot retire from container
     );
     await expectPresent(memberPaths(selected.projection));
   });
-});
+}, 15_000);
 test("known reaped readiness failure retains pending material until a separate verified stop retires it", async () => {
   const selected = await store.withMutation(async (mutation) => {
     const selected = await staged(mutation);

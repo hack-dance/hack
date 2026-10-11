@@ -87,3 +87,47 @@ test("readBoundedStream cancels an already aborted or later aborted read", async
   expect(cancelled).toBe(2);
   expect(pending.locked).toBe(false);
 });
+
+test("readBoundedStream admits output exactly at the limit and refuses one byte past it", async () => {
+  const exact = await readBoundedStream(
+    stream([bytes("abc"), bytes("de")]),
+    5,
+    undefined,
+    overflow
+  );
+  expect(new TextDecoder().decode(exact)).toBe("abcde");
+
+  let cancelled = 0;
+  const past = stream([bytes("abc"), bytes("def")], () => {
+    cancelled += 1;
+  });
+  const failure = await readBoundedStream(past, 5, undefined, overflow).then(
+    () => undefined,
+    (error: unknown) => error
+  );
+  expect(failure).toBeInstanceOf(Overflow);
+  expect(cancelled).toBe(1);
+});
+
+test("readBoundedStream propagates a stream error and releases the lock", async () => {
+  class SourceFailure extends Error {}
+  const source = new ReadableStream<Uint8Array>({
+    pull(controller) {
+      controller.error(new SourceFailure("source"));
+    },
+  });
+  const controller = new AbortController();
+  const failure = await readBoundedStream(
+    source,
+    16,
+    controller.signal,
+    overflow
+  ).then(
+    () => undefined,
+    (error: unknown) => error
+  );
+  expect(failure).toBeInstanceOf(SourceFailure);
+  expect(source.locked).toBe(false);
+  // A later abort must not throw once the listener has been removed.
+  controller.abort();
+});

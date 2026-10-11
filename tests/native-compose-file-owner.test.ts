@@ -11,7 +11,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { basename, join, resolve } from "node:path";
+import { basename, join } from "node:path";
 import { isRecord } from "../src/lib/guards.ts";
 import { runNativeComposeOwnedFileChild } from "../src/lib/native-compose-file-command.ts";
 import {
@@ -36,6 +36,7 @@ import {
   renderNativeCompose,
 } from "../src/lib/native-compose-renderer.ts";
 import { restoreEnv } from "./helpers/env.ts";
+import { requireTestConfigCompiler } from "./helpers/test-config-compiler.ts";
 
 const KEYS = [
   "HACK_HOME",
@@ -63,9 +64,7 @@ const SOURCE = {
   },
 };
 const BYTES = Buffer.from([0, 255, 10]);
-const compiler = resolve(
-  process.env.HACK_CONFIG_COMPILER_BINARY ?? "dist/hack-config-compiler"
-);
+const compiler = requireTestConfigCompiler();
 let parent = "";
 let root = "";
 let materialRoot = "";

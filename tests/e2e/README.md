@@ -36,6 +36,23 @@ writes its fixed-field capsule and startup diagnostic under `HACK_E2E_CAPSULE_DI
 as the `process-policy-capsules` artifact. Those files hold counts, enums and
 booleans only.
 
+
+## Compiler fixture prerequisite
+
+Suites that drive the actual config compiler need a built sidecar before they
+run. `bun run test` runs `test:preflight` first, which checks an explicit
+absolute `HACK_CONFIG_COMPILER_BINARY` or the checkout's
+`dist/hack-config-compiler` and stops before the suite with a fixed setup
+message. Prepare a checkout with `bun run build:config-compiler` (the hosted
+test job already does this). When a compiler-dependent suite is run directly
+with `bun test`, `tests/helpers/test-config-compiler.ts` applies the same
+selection once per file: an absent or non-executable fixture fails that file
+immediately with the same setup text, never a silent pass or one opaque
+`E_COMPILER_MISSING` refusal per case. Current users are
+`native-authored-command-dispatch`, `native-compose-file-owner` and
+`native-compose-file-sources`; add the helper when a new suite depends on the
+real compiler.
+
 The `native-compose-adoption-dependency-worktrees` Docker selector uses a closed
 forwarder for original-ID effects and fixed metadata/config-hash reads. First
 preparation hashes its saved Compose copy before publishing `receipt.prepared`.

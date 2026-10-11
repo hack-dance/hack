@@ -1,7 +1,5 @@
-import { constants } from "node:fs";
-import { lstat, open, realpath } from "node:fs/promises";
 import { isRecord } from "../lib/guards.ts";
-import { keys, sameFile } from "../lib/native-compose-private-state.ts";
+import { keys } from "../lib/native-compose-private-state.ts";
 import {
   type NativeAuthoredReceipt,
   nativeAuthoredReceiptBinding,
@@ -9,9 +7,12 @@ import {
 } from "./native-authored-graph-protocol.ts";
 import {
   type NativeAuthoredProjectRunScope,
-  nativeAuthoredProjectNamespace,
   withNativeAuthoredProjectStatus,
 } from "./native-authored-project-run.ts";
+import {
+  requireReadyServiceReceipt,
+  withPinnedRuntimeBinary,
+} from "./native-authored-runtime-binary.ts";
 import {
   invokeNativeRuntime,
   type NativeRuntimeSelection,
@@ -134,82 +135,42 @@ export async function nativeAuthoredProjectLogs(input: {
   }
   const result = await withStatus(scope, async (saved) => {
     active();
-    if (!saved.ready) {
-      return refused();
-    }
-    const receipt = saved.ready.record.receipt;
-    if (
-      receipt.review.provenance.namespace !==
-        nativeAuthoredProjectNamespace(scope) ||
-      !Object.hasOwn(receipt.readiness, service) ||
-      !receipt.resources[`container:${service}`]?.id
-    ) {
-      return refused();
-    }
-    if ((await realpath(runtime.binary)) !== runtime.binary) {
-      return refused();
-    }
-    const file = await open(
-      runtime.binary,
-      constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK
+    const receipt =
+      requireReadyServiceReceipt(saved, scope, service) ?? refused();
+    return await withPinnedRuntimeBinary(
+      { binary: runtime.binary, signal, refused },
+      async (pin) => {
+        const check = async () => {
+          await pin.check();
+          await saved.assertFresh();
+          active();
+        };
+        await check();
+        const value = await invoke({
+          runtime,
+          cwd: scope.projectRoot,
+          args: [
+            "graph",
+            "native",
+            "logs",
+            "--run-id",
+            receipt.review.provenance.run,
+            "--service",
+            service,
+            "--tail",
+            String(tail),
+            "--json",
+          ],
+          timeoutMs: 15_000,
+          signal,
+          boundNativeAuthoredLogsDrain: true,
+        });
+        await check();
+        const logs = parseNativeAuthoredLogs(value, receipt, service);
+        await check();
+        return logs;
+      }
     );
-    try {
-      const original = await file.stat();
-      const check = async () => {
-        active();
-        const named = await lstat(runtime.binary),
-          held = await file.stat();
-        if (
-          !original.isFile() ||
-          original.nlink !== 1 ||
-          (original.mode & 0o022) !== 0 ||
-          (original.mode & 0o111) === 0 ||
-          !named.isFile() ||
-          !sameFile(original, named) ||
-          !sameFile(original, held) ||
-          [named, held].some(
-            (info) =>
-              info.size !== original.size ||
-              info.mtimeMs !== original.mtimeMs ||
-              info.ctimeMs !== original.ctimeMs ||
-              info.mode !== original.mode ||
-              info.uid !== original.uid ||
-              info.nlink !== 1
-          ) ||
-          (await realpath(runtime.binary)) !== runtime.binary
-        ) {
-          return refused();
-        }
-        await saved.assertFresh();
-        active();
-      };
-      await check();
-      const value = await invoke({
-        runtime,
-        cwd: scope.projectRoot,
-        args: [
-          "graph",
-          "native",
-          "logs",
-          "--run-id",
-          receipt.review.provenance.run,
-          "--service",
-          service,
-          "--tail",
-          String(tail),
-          "--json",
-        ],
-        timeoutMs: 15_000,
-        signal,
-        boundNativeAuthoredLogsDrain: true,
-      });
-      await check();
-      const logs = parseNativeAuthoredLogs(value, receipt, service);
-      await check();
-      return logs;
-    } finally {
-      await file.close();
-    }
   });
   active();
   return result;

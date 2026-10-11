@@ -1,15 +1,20 @@
 # Native Compose directory-xattr carrier source
 
-The candidate Compose command path uses this Linux helper and the
-[witness foundation](native-compose-storage-witness.md) under the existing instance
-mutation. Persistent PostgreSQL and ordinary CLI acceptance remain required gates;
-source wiring and synthetic controls do not qualify that runtime behavior.
+Ordinary native Compose `up`, `restart`, `run` and storage-bearing saved `exec`
+use this Linux helper and the [witness foundation](native-compose-storage-witness.md)
+under the existing instance mutation, through the Docker carrier described below.
+The carrier is active on linux/arm64 and linux/amd64 daemons that already hold the
+exact cataloged helper image; any other daemon, or an uncached image, refuses
+before hooks, intent or volume effects. PostgreSQL data roots, filesystem crash
+durability and fresh-install acquisition of the pinned image remain unqualified
+gates; synthetic controls do not qualify that runtime behavior.
 
 Storage startup requires the exact cached Linux arm64 or amd64 Bun 1.4.2 helper
 image selected by the daemon architecture before any authored hook, enrollment
 intent or volume effect. The command never pulls a dependency or falls back to
-emulation. Uncached first-install dependency acquisition remains unsupported by
-this candidate. Image-only projects do not need the helper.
+emulation. Uncached first-install dependency acquisition remains unsupported; the
+user pulls the image once, as the [file input requirements](native-config-files.md#requirements)
+describe. Image-only projects do not need the helper.
 
 Known enrolled storage is verified before hooks, workload admission and completion.
 Only an originally absent selected name with no retained history may enroll inside
@@ -40,10 +45,10 @@ is part of this source.
 
 ## Fixed helper contract
 
-`scripts/native-storage-witness-helper.ts` is the helper entry. The candidate CLI
-uses its fixed bundled artifact. Qualification must bind this entry with its strict
+`scripts/native-storage-witness-helper.ts` is the helper entry. The CLI uses its
+fixed bundled artifact. Qualification must bind this entry with its strict
 codec and kernel adapter; an exact declared local Linux image, Bun executable,
-libc and program digest must be checked before any carrier effect. The candidate
+libc and program digest must be checked before any carrier effect. The
 dependency is an explicitly selected local `oven/bun:1.4.2-slim` image. A tag
 alone is not an artifact pin. Bun FFI remains experimental; source inspection and
 mocked ports do not qualify its behavior.
@@ -98,7 +103,7 @@ qualification cells. There is no capability or ownership-changing fallback.
 
 ## Required cold provisioning and receipt order
 
-`startNativeComposeWorkloads` launches one Compose `up -d` child. The candidate
+`startNativeComposeWorkloads` launches one Compose `up -d` child. The
 command supplies the following provisioning order before that child, under the
 same existing instance mutation and generation effect authority. Actual artifact,
 filesystem and PostgreSQL qualification remain separate from this source order:
@@ -146,7 +151,7 @@ response.
 
 ## Fresh selected-volume transport
 
-The candidate mounts the exact selected existing named volume with
+The carrier mounts the exact selected existing named volume with
 `--mount type=volume,src=<name>,dst=/hack-storage-witness,volume-nocopy` and
 `readonly` for metadata and verification. Write access belongs only to the
 original seed attempt. The helper program remains a separate nonrecursive,
@@ -210,15 +215,15 @@ readonly root filesystem, finite CPU/memory/PID limits and absolute deadline/gro
 reaping are mandatory before implementing the engine owner. Cancellation or an
 unknown create/start outcome keeps the anchor. Cleanup must prove the exact helper
 stopped before non-force removal and never remove data, witness, material or
-journals. The candidate Docker port now uses the shared bounded query and child
+journals. The Docker port uses the shared bounded query and child
 owners, captures canonical stdin privately, and records the created helper before
 start. It inspects all selected-volume holders, mounts only the exact selected
 named volume with `volume-nocopy`, and rechecks fresh metadata before start.
 It never requests bind source creation. Known completion requires an exact stopped
 helper, non-force removal and fresh empty helper inventory. Unknown disposition
 retains the private journal and input. Journal bytes do not replace these actual
-stop and absence observations. The candidate CLI calls this port; persistent
-runtime acceptance remains required before promoting support.
+stop and absence observations. Ordinary command admission calls this port on the
+cataloged platforms; PostgreSQL data roots and crash durability remain unqualified.
 
 Holder selection includes normalized ancestor and descendant bind paths; similarly
 named sibling roots stay independent. Command stdin and captures use held no-follow
@@ -260,13 +265,16 @@ synthetic successful response.
 They do not execute the Linux adapter or qualify kernel atomicity,
 permissions, xattr persistence, filesystem crash durability or Docker semantics.
 
-Before activation: qualify exact source/artifact/image/Bun/libc ABI and filesystem;
-fresh named-volume/current-root correspondence and missing/rebound refusal before
-start; create-only existing/symlink/unsupported
-refusals; unchanged PostgreSQL root initialization, real SQL retention, chown and
-post-start proofs; same-metadata replacement including an old pinned carrier;
-crash/timeout/cancellation with exact helper absence and retained uncertainty;
-no daemon-log token persistence; full original engine/resource restoration.
+The carrier is active for ordinary commands on linux/arm64 and linux/amd64 with
+the exact cached image. Remaining gates: unchanged PostgreSQL root initialization,
+real SQL retention, chown and post-start proofs; filesystem crash durability of
+the seeded attribute; fresh-install acquisition of the pinned helper image, which
+the owner never pulls; and daemons outside the two cataloged platforms, which
+refuse until their own artifact, ABI and volume behavior are qualified.
+Same-metadata replacement including an old pinned carrier,
+crash/timeout/cancellation with exact helper absence and retained uncertainty,
+no daemon-log token persistence and full original engine/resource restoration
+remain live qualification cells rather than source-control claims.
 
 Count every helper process, container and query. The first straightforward proof
 needs metadata discovery, a matching-UID read and a fresh metadata observation
@@ -274,8 +282,9 @@ after that read. Initial enrollment adds a discovery and write helper before its
 separate three-invocation read-only proof. Required pre/post/final proofs
 therefore have a real startup cost. Each finite invocation adds three synchronized
 private journal publications (intent, created pin and idle), without weakening the
-existing main receipt comparison. No performance improvement or production
-activation is claimed, and no persistent helper is proposed.
+existing main receipt comparison. Every ordinary command pays that fresh-carrier
+cost on each proof. No performance improvement is claimed, and no persistent
+helper is proposed.
 
 Primary contracts: Linux [fsetxattr](https://man7.org/linux/man-pages/man2/fsetxattr.2.html),
 [fgetxattr](https://man7.org/linux/man-pages/man2/getxattr.2.html),

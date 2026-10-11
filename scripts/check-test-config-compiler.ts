@@ -12,7 +12,11 @@ const NAME = "hack-test-preflight";
 const INPUT = new TextEncoder().encode(
   JSON.stringify({ schema_version: 1, name: NAME })
 );
-const SETUP =
+/**
+ * Fixed, value-free setup message shared by the preflight and the per-file
+ * compiler fixture guard in tests/helpers/test-config-compiler.ts.
+ */
+export const TEST_CONFIG_COMPILER_SETUP =
   "Compiler prerequisite failed; the CLI suite has not started. " +
   `Select a compatible compiler executable for ${process.platform}/${process.arch}. ` +
   "Prepare this checkout with bun run build:config-compiler, or run the toolchain config-compiler task for Linux container tests. " +
@@ -76,7 +80,7 @@ export async function assertTestConfigCompiler(
       throw new Error("Invalid synthetic compilation");
     }
   } catch {
-    throw new Error(SETUP);
+    throw new Error(TEST_CONFIG_COMPILER_SETUP);
   }
 }
 
@@ -97,7 +101,7 @@ async function main(): Promise<void> {
       process.exitCode = cancelledExit || 1;
     }
   } catch {
-    process.stderr.write(`${SETUP}\n`);
+    process.stderr.write(`${TEST_CONFIG_COMPILER_SETUP}\n`);
     process.exitCode = cancelledExit || 1;
   } finally {
     process.removeListener("SIGINT", interrupt);

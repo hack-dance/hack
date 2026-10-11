@@ -218,3 +218,20 @@ cleanup authority.
 Offline emitted-program and fake-engine controls do not establish provider support.
 Actual owner/nonowner access, readonly write refusal, ungranted isolation and full
 lifecycle/recovery qualification remain separate gates for this VM transport.
+
+## Requirements
+
+The file material VM path and native Compose storage witness verification both
+run a fixed helper from the cataloged `oven/bun:1.4.2-slim` image. That exact
+image must already be in the selected daemon's local image store: the owner
+never pulls, builds, emulates or substitutes another tag or platform, and
+storage admission inspects and creates with `--pull never`. Before the first
+file-bearing or storage-bearing native command on a daemon, pull it once:
+
+```sh
+docker pull oven/bun:1.4.2-slim
+```
+
+The daemon's own architecture selects the cataloged linux/arm64 or linux/amd64
+artifact; other daemons refuse. A tag is not a pin: storage admission checks the
+exact cataloged image identity and refuses a tag that resolves to other bytes.

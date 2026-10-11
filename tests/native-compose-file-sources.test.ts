@@ -13,7 +13,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import { YAML } from "bun";
 import { PROJECT_ENV_KEY_FILENAME } from "../src/constants.ts";
 import { isRecord } from "../src/lib/guards.ts";
@@ -36,6 +36,7 @@ import {
 import { setProjectEnvValue } from "../src/lib/project-env-config.ts";
 import { resolveVerifiedPrimaryWorktreeRoot } from "../src/lib/worktree-local-config.ts";
 import { restoreEnv } from "./helpers/env.ts";
+import { requireTestConfigCompiler } from "./helpers/test-config-compiler.ts";
 
 const KEYS = [
   "CI",
@@ -48,9 +49,7 @@ const KEYS = [
   "GIT_WORK_TREE",
   "GIT_COMMON_DIR",
 ] as const;
-const compiler = resolve(
-  process.env.HACK_CONFIG_COMPILER_BINARY ?? "dist/hack-config-compiler"
-);
+const compiler = requireTestConfigCompiler();
 const CANARY = "synthetic-private-file-value-$-no-newline";
 const binary = Buffer.from([0, 255, 4, 10]);
 let parent = "";

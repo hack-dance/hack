@@ -5,6 +5,12 @@ import { join, resolve } from "node:path";
 
 let directory = "";
 const root = resolve(import.meta.dir, "..");
+/**
+ * Every case spawns the source CLI, which compiles index.ts before it answers.
+ * That cold start alone can exceed bun's 5000 ms default on the slower hosted
+ * macOS Intel runner, so each case carries an explicit budget.
+ */
+const CLI_TIMEOUT_MS = 30_000;
 beforeEach(async () => {
   directory = await mkdtemp(join(tmpdir(), "hack-native-config-command-"));
 });
@@ -59,96 +65,109 @@ async function startCli(opts: {
   );
 }
 
-test("project diagnostics preserve the document role and escaped pointer", async () => {
-  const child = await startCli({
-    project: true,
-    compilerBody: `console.log(JSON.stringify({transport_version:1,ok:false,diagnostics:[{code:"duplicate_key",pointer:"/name\\u001b[2J",message:"Duplicate JSON object keys are not allowed.",line:2,column:3}]})); process.exitCode=1;`,
-  });
-  const [stdout, stderr, exit] = await Promise.all([
-    new Response(child.stdout).text(),
-    new Response(child.stderr).text(),
-    child.exited,
-  ]);
-  expect(exit).toBe(1);
-  expect(stdout).toBe("");
-  expect(stderr).toContain('project duplicate_key "/name\\u001b[2J" (2:3)');
-  expect(stderr).not.toContain("\u001b[2J");
-});
+test(
+  "project diagnostics preserve the document role and escaped pointer",
+  async () => {
+    const child = await startCli({
+      project: true,
+      compilerBody: `console.log(JSON.stringify({transport_version:1,ok:false,diagnostics:[{code:"duplicate_key",pointer:"/name\\u001b[2J",message:"Duplicate JSON object keys are not allowed.",line:2,column:3}]})); process.exitCode=1;`,
+    });
+    const [stdout, stderr, exit] = await Promise.all([
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+      child.exited,
+    ]);
+    expect(exit).toBe(1);
+    expect(stdout).toBe("");
+    expect(stderr).toContain('project duplicate_key "/name\\u001b[2J" (2:3)');
+    expect(stderr).not.toContain("\u001b[2J");
+  },
+  CLI_TIMEOUT_MS
+);
 
 test.each([
   ["--env", "base"],
   ["--path", "."],
-])("explicit-file mode refuses project-selection flags %s", async (flag, value) => {
-  const child = await startCli({
-    compilerBody: "throw new Error('compiler must not run');",
-    args: [flag, value],
-  });
-  const [stderr, exit] = await Promise.all([
-    new Response(child.stderr).text(),
-    child.exited,
-  ]);
-  expect(exit).not.toBe(0);
-  expect(stderr).toContain("cannot be combined with --path or --env");
-});
+])(
+  "explicit-file mode refuses project-selection flags %s",
+  async (flag, value) => {
+    const child = await startCli({
+      compilerBody: "throw new Error('compiler must not run');",
+      args: [flag, value],
+    });
+    const [stderr, exit] = await Promise.all([
+      new Response(child.stderr).text(),
+      child.exited,
+    ]);
+    expect(exit).not.toBe(0);
+    expect(stderr).toContain("cannot be combined with --path or --env");
+  },
+  CLI_TIMEOUT_MS
+);
 
-test("human diagnostics escape authored control characters", async () => {
-  const response = {
-    transport_version: 1,
-    ok: false,
-    diagnostics: [
-      {
-        code: "invalid_name",
-        pointer: "/services/\u001b[2J\nforged",
-        message: "Invalid name.",
-        line: 1,
-        column: 1,
-      },
-    ],
-  };
-  const child = await startCli({
-    compilerBody: `console.log(${JSON.stringify(JSON.stringify(response))}); process.exitCode = 1;`,
-  });
-  const [stderr, exit] = await Promise.all([
-    new Response(child.stderr).text(),
-    child.exited,
-  ]);
-  expect(exit).toBe(1);
-  expect(stderr).toContain('"/services/\\u001b[2J\\nforged"');
-  expect(stderr).not.toContain("\u001b[2J");
-  expect(stderr).not.toContain("\nforged");
-});
-
-test.each([
-  "SIGINT",
-  "SIGTERM",
-] as const)("CLI %s reaps its owned compiler", async (signal) => {
-  const pidPath = join(directory, "pid");
-  const child = await startCli({
-    json: true,
-    compilerBody: `await Bun.write(${JSON.stringify(pidPath)}, String(process.pid)); await Bun.sleep(10000);`,
-  });
-  try {
-    const deadline = Date.now() + 4000;
-    while (!(await Bun.file(pidPath).exists()) && Date.now() < deadline) {
-      await Bun.sleep(20);
-    }
-    expect(await Bun.file(pidPath).exists()).toBe(true);
-    const compilerPid = Number(await Bun.file(pidPath).text());
-    child.kill(signal);
-    const [stdout, exit] = await Promise.all([
-      new Response(child.stdout).text(),
+test(
+  "human diagnostics escape authored control characters",
+  async () => {
+    const response = {
+      transport_version: 1,
+      ok: false,
+      diagnostics: [
+        {
+          code: "invalid_name",
+          pointer: "/services/\u001b[2J\nforged",
+          message: "Invalid name.",
+          line: 1,
+          column: 1,
+        },
+      ],
+    };
+    const child = await startCli({
+      compilerBody: `console.log(${JSON.stringify(JSON.stringify(response))}); process.exitCode = 1;`,
+    });
+    const [stderr, exit] = await Promise.all([
+      new Response(child.stderr).text(),
       child.exited,
     ]);
     expect(exit).toBe(1);
-    expect(JSON.parse(stdout).error.code).toBe("E_COMPILER_CANCELLED");
-    expect(() => process.kill(compilerPid, 0)).toThrow();
-  } finally {
-    if (child.exitCode === null) {
-      child.kill("SIGKILL");
-      await child.exited;
+    expect(stderr).toContain('"/services/\\u001b[2J\\nforged"');
+    expect(stderr).not.toContain("\u001b[2J");
+    expect(stderr).not.toContain("\nforged");
+  },
+  CLI_TIMEOUT_MS
+);
+
+test.each(["SIGINT", "SIGTERM"] as const)(
+  "CLI %s reaps its owned compiler",
+  async (signal) => {
+    const pidPath = join(directory, "pid");
+    const child = await startCli({
+      json: true,
+      compilerBody: `await Bun.write(${JSON.stringify(pidPath)}, String(process.pid)); await Bun.sleep(10000);`,
+    });
+    try {
+      const deadline = Date.now() + 4000;
+      while (!(await Bun.file(pidPath).exists()) && Date.now() < deadline) {
+        await Bun.sleep(20);
+      }
+      expect(await Bun.file(pidPath).exists()).toBe(true);
+      const compilerPid = Number(await Bun.file(pidPath).text());
+      child.kill(signal);
+      const [stdout, exit] = await Promise.all([
+        new Response(child.stdout).text(),
+        child.exited,
+      ]);
+      expect(exit).toBe(1);
+      expect(JSON.parse(stdout).error.code).toBe("E_COMPILER_CANCELLED");
+      expect(() => process.kill(compilerPid, 0)).toThrow();
+    } finally {
+      if (child.exitCode === null) {
+        child.kill("SIGKILL");
+        await child.exited;
+      }
     }
-  }
-});
+  },
+  CLI_TIMEOUT_MS
+);
 
 const PLAN_SUCCESS = {
   transport_version: 1,
@@ -170,78 +189,83 @@ const PLAN_SUCCESS = {
   },
 };
 
-test("plan human report identifies incomplete bindings and escapes diagnostic pointers", async () => {
-  const response = {
-    ...PLAN_SUCCESS,
-    environment_plan: {
-      plan_version: 1,
-      overlay: null,
-      overlay_exists: false,
-      complete: false,
-      workloads: {},
-      warnings: [],
-      diagnostics: [
-        {
-          document: "project",
-          code: "missing_env_reference",
-          pointer: "/services/\u001b[2J\nforged",
-          message: "Required managed env reference is absent.",
-          line: 2,
-          column: 3,
-        },
-      ],
-    },
-  };
-  const child = await startCli({
-    operation: "plan",
-    project: true,
-    compilerBody: `const planning=process.argv[2]==='plan'; console.log(JSON.stringify(planning ? ${JSON.stringify(response)} : ${JSON.stringify(PLAN_SUCCESS)})); process.exitCode=planning ? 1 : 0;`,
-  });
-  const [stdout, stderr, exit] = await Promise.all([
-    new Response(child.stdout).text(),
-    new Response(child.stderr).text(),
-    child.exited,
-  ]);
-  expect(exit).toBe(1);
-  expect(stdout).toContain("bindings are incomplete");
-  expect(stdout).toContain("does not establish runtime admission");
-  expect(stderr).toContain(
-    'project missing_env_reference "/services/\\u001b[2J\\nforged" (2:3)'
-  );
-  expect(stderr).not.toContain("\u001b[2J");
-  expect(stderr).not.toContain("\nforged");
-});
-
-test.each([
-  "SIGINT",
-  "SIGTERM",
-] as const)("plan CLI %s reaps its owned planning child", async (signal) => {
-  const pidPath = join(directory, "plan-pid");
-  const child = await startCli({
-    operation: "plan",
-    project: true,
-    json: true,
-    compilerBody: `if(process.argv[2]==='plan') { await Bun.write(${JSON.stringify(pidPath)},String(process.pid)); await Bun.sleep(10000); } else { console.log(${JSON.stringify(JSON.stringify(PLAN_SUCCESS))}); }`,
-  });
-  try {
-    const deadline = Date.now() + 4000;
-    while (!(await Bun.file(pidPath).exists()) && Date.now() < deadline) {
-      await Bun.sleep(20);
-    }
-    expect(await Bun.file(pidPath).exists()).toBe(true);
-    const compilerPid = Number(await Bun.file(pidPath).text());
-    child.kill(signal);
-    const [stdout, exit] = await Promise.all([
+test(
+  "plan human report identifies incomplete bindings and escapes diagnostic pointers",
+  async () => {
+    const response = {
+      ...PLAN_SUCCESS,
+      environment_plan: {
+        plan_version: 1,
+        overlay: null,
+        overlay_exists: false,
+        complete: false,
+        workloads: {},
+        warnings: [],
+        diagnostics: [
+          {
+            document: "project",
+            code: "missing_env_reference",
+            pointer: "/services/\u001b[2J\nforged",
+            message: "Required managed env reference is absent.",
+            line: 2,
+            column: 3,
+          },
+        ],
+      },
+    };
+    const child = await startCli({
+      operation: "plan",
+      project: true,
+      compilerBody: `const planning=process.argv[2]==='plan'; console.log(JSON.stringify(planning ? ${JSON.stringify(response)} : ${JSON.stringify(PLAN_SUCCESS)})); process.exitCode=planning ? 1 : 0;`,
+    });
+    const [stdout, stderr, exit] = await Promise.all([
       new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
       child.exited,
     ]);
     expect(exit).toBe(1);
-    expect(JSON.parse(stdout).error.code).toBe("E_COMPILER_CANCELLED");
-    expect(() => process.kill(compilerPid, 0)).toThrow();
-  } finally {
-    if (child.exitCode === null) {
-      child.kill("SIGKILL");
-      await child.exited;
+    expect(stdout).toContain("bindings are incomplete");
+    expect(stdout).toContain("does not establish runtime admission");
+    expect(stderr).toContain(
+      'project missing_env_reference "/services/\\u001b[2J\\nforged" (2:3)'
+    );
+    expect(stderr).not.toContain("\u001b[2J");
+    expect(stderr).not.toContain("\nforged");
+  },
+  CLI_TIMEOUT_MS
+);
+
+test.each(["SIGINT", "SIGTERM"] as const)(
+  "plan CLI %s reaps its owned planning child",
+  async (signal) => {
+    const pidPath = join(directory, "plan-pid");
+    const child = await startCli({
+      operation: "plan",
+      project: true,
+      json: true,
+      compilerBody: `if(process.argv[2]==='plan') { await Bun.write(${JSON.stringify(pidPath)},String(process.pid)); await Bun.sleep(10000); } else { console.log(${JSON.stringify(JSON.stringify(PLAN_SUCCESS))}); }`,
+    });
+    try {
+      const deadline = Date.now() + 4000;
+      while (!(await Bun.file(pidPath).exists()) && Date.now() < deadline) {
+        await Bun.sleep(20);
+      }
+      expect(await Bun.file(pidPath).exists()).toBe(true);
+      const compilerPid = Number(await Bun.file(pidPath).text());
+      child.kill(signal);
+      const [stdout, exit] = await Promise.all([
+        new Response(child.stdout).text(),
+        child.exited,
+      ]);
+      expect(exit).toBe(1);
+      expect(JSON.parse(stdout).error.code).toBe("E_COMPILER_CANCELLED");
+      expect(() => process.kill(compilerPid, 0)).toThrow();
+    } finally {
+      if (child.exitCode === null) {
+        child.kill("SIGKILL");
+        await child.exited;
+      }
     }
-  }
-});
+  },
+  CLI_TIMEOUT_MS
+);

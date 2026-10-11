@@ -297,7 +297,10 @@ it and refuse a new start, including after ready-file retirement. Only a caller
 that authenticated the exact durable Removed journal can retire the intent;
 missing ready files, expired timeouts and dead processes do not grant cleanup or
 replay. The strict Compose v1 reader and its artifact path remain unchanged.
-Command integration and live frontend acceptance remain gates.
+The macOS Bun frontend selects these owners through explicit native backend
+foreground `up`, owner-mediated `down` and `down --recover`, saved-run `ps`,
+finite `logs --no-follow` and noninteractive `exec`; installed live provider
+acceptance remains the gate.
 
 Held startup admission can also publish the exact public source envelope in that
 excluded storage. It captures profiles, overlay and closed names-only metadata
@@ -350,9 +353,12 @@ and review comparison happen before reading this descriptor. The old private v1
 Compose codec remains strict and cannot decode this envelope. Values never enter
 source files, arguments, stdout or journal records.
 
-The Bun project frontend does not select this consumer yet. Actual installed
-native execution, frontend ownership/cancellation, interrupted recovery and full
-network acceptance, source/storage/routing/host contracts remain separate qualification gates.
+The Bun project frontend selects this consumer only through the explicit native
+backend macOS slices: foreground `up`, owner-mediated `down` and `down --recover`,
+saved-run `ps`, finite `logs --no-follow` and noninteractive `exec`; `run`,
+`restart`, detached startup and service subsets still refuse. Installed live
+provider acceptance of those slices remains the gate, and full network acceptance
+and the source/storage/routing/host contracts remain separate qualification gates.
 
 Run its pure regressions with
 `cargo test --locked --manifest-path packages/runtime-core/Cargo.toml --features native-config-plan project::native::tests`.

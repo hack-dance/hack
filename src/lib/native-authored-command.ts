@@ -13,6 +13,10 @@ import {
 } from "../backends/native-authored-project-observe.ts";
 import { recoverNativeAuthoredProject } from "../backends/native-authored-project-recovery.ts";
 import {
+  NativeAuthoredProjectRestartError,
+  restartNativeAuthoredProject,
+} from "../backends/native-authored-project-restart.ts";
+import {
   type NativeAuthoredProjectRunScope,
   stopNativeAuthoredProject,
 } from "../backends/native-authored-project-run.ts";
@@ -33,7 +37,7 @@ function unsupported(): never {
   throw new HackCliError({
     code: "E_NATIVE_PROJECT_UNSUPPORTED",
     message:
-      "Native authored execution requires whole-project foreground up, owner-mediated down, ps, finite single-service logs --no-follow, noninteractive single-service exec, or explicit stored-generation down --recover on macOS. This request ran no input or runtime operation.",
+      "Native authored execution requires whole-project foreground up or restart, owner-mediated down, ps, finite single-service logs --no-follow, noninteractive single-service exec, or explicit stored-generation down --recover on macOS. This request ran no input or runtime operation.",
   });
 }
 
@@ -160,7 +164,7 @@ function assertRecoveryOptions(options: NativeComposeCommandOptions): void {
 function assertForegroundOptions(options: NativeComposeCommandOptions): void {
   if (
     process.platform !== "darwin" ||
-    !["up", "down"].includes(options.operation) ||
+    !["up", "down", "restart"].includes(options.operation) ||
     options.detach ||
     options.json ||
     options.recover ||
@@ -207,7 +211,46 @@ function startupFailure(error: unknown): number {
   });
 }
 
-type Mode = "exec" | "status" | "recovery" | "stop" | "start" | "logs";
+/** Stop refusals keep the generation; start refusals keep the foreground up contract. */
+function restartFailure(error: unknown): number {
+  if (
+    error instanceof NativeAuthoredProjectRestartError &&
+    error.phase === "start"
+  ) {
+    if (error.startup) {
+      return startupFailure(error.startup);
+    }
+    if (error.canceled) {
+      logger.info({
+        message:
+          "Native project restart was canceled after its proven stop; nothing was restarted and persistent data is retained.",
+      });
+      return 130;
+    }
+    return startupFailure(error);
+  }
+  throw new HackCliError({
+    code: "E_LIFECYCLE_FAILED",
+    message:
+      "Native project restart could not prove the current generation stopped or its ownership changed; nothing was restarted and selected state is retained. Values omitted.",
+  });
+}
+
+type Mode =
+  | "exec"
+  | "status"
+  | "recovery"
+  | "stop"
+  | "start"
+  | "restart"
+  | "logs";
+const FOREGROUND_MODES: Readonly<
+  Partial<Record<NativeComposeCommandOptions["operation"], Mode>>
+> = {
+  up: "start",
+  down: "stop",
+  restart: "restart",
+};
 function commandMode(options: NativeComposeCommandOptions): Mode {
   if (options.operation === "exec") {
     assertExecOptions(options);
@@ -226,7 +269,7 @@ function commandMode(options: NativeComposeCommandOptions): Mode {
     return "recovery";
   }
   assertForegroundOptions(options);
-  return options.operation === "down" ? "stop" : "start";
+  return FOREGROUND_MODES[options.operation] ?? unsupported();
 }
 
 async function showStatus(options: {
@@ -278,6 +321,9 @@ function commandFailure(options: {
       message:
         "Native project recovery is incomplete or its ownership changed; selected state is retained. Values omitted.",
     });
+  }
+  if (options.mode === "restart") {
+    return restartFailure(options.error);
   }
   return startupFailure(options.error);
 }
@@ -357,8 +403,11 @@ async function runStop(input: LifecycleInput): Promise<number> {
   return 0;
 }
 
-function runStart(input: LifecycleInput): Promise<number> {
-  return (input.seams.serve ?? serveNativeAuthoredProject)({
+/** Fresh foreground selection shared by up and the start half of restart. */
+function startupSelection(
+  input: LifecycleInput
+): Parameters<typeof serveNativeAuthoredProject>[0] {
+  return {
     runtime: input.runtime,
     scope: input.scope,
     run: randomBytes(16).toString("hex"),
@@ -379,6 +428,26 @@ function runStart(input: LifecycleInput): Promise<number> {
       logger.info({ message: "Project is ready. Press Ctrl-C to stop." });
       return undefined;
     },
+  };
+}
+
+function runStart(input: LifecycleInput): Promise<number> {
+  return (input.seams.serve ?? serveNativeAuthoredProject)(
+    startupSelection(input)
+  );
+}
+
+function runRestart(input: LifecycleInput): Promise<number> {
+  return restartNativeAuthoredProject({
+    ...startupSelection(input),
+    onStopped: () => {
+      logger.info({
+        message:
+          "Selected native project stopped; persistent data is retained. Starting a fresh foreground generation.",
+      });
+      return undefined;
+    },
+    dependencies: { stop: input.seams.stop, serve: input.seams.serve },
   });
 }
 
@@ -445,13 +514,15 @@ const RUNNERS: Readonly<Record<Mode, (input: RunnerInput) => Promise<number>>> =
     recovery: (input) => runAuthoredLifecycle(input, "recovery", runRecovery),
     stop: (input) => runAuthoredLifecycle(input, "stop", runStop),
     start: (input) => runAuthoredLifecycle(input, "start", runStart),
+    restart: (input) => runAuthoredLifecycle(input, "restart", runRestart),
   };
 
 /**
  * Explicit native dispatch after exact authored-family and adoption selection.
  * Compose and omitted selections retain their existing owner. Foreground up delegates
- * to the tagged lifetime owner; ordinary down uses its authenticated stop.
- * Ps and finite service logs observe its saved run;
+ * to the tagged lifetime owner; ordinary down uses its authenticated stop. Foreground
+ * restart sequences that same stop before a fresh foreground up with the given
+ * selection. Ps and finite service logs observe its saved run;
  * explicit down --recover uses the stored cleanup owner without input acquisition.
  * Unsupported requests never start input acquisition or runtime work.
  */

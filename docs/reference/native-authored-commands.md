@@ -2,10 +2,10 @@
 
 An explicit `HACK_RUNTIME_BACKEND=native` selection delegates an authored
 `.hack/hack.project.json` project to the separate native foreground owner. The
-current command slice supports whole-project foreground `up`, owner-mediated
-`down` and explicit stored-generation `down --recover`, saved-run `ps`, finite
-service `logs --no-follow` and noninteractive service `exec` on macOS with an
-absolute `HACK_NATIVE_BINARY` and private canonical `HACK_NATIVE_HOME`. It requires
+current command slice supports whole-project foreground `up` and `restart`,
+owner-mediated `down` and explicit stored-generation `down --recover`, saved-run
+`ps`, finite service `logs --no-follow` and noninteractive service `exec` on macOS
+with an absolute `HACK_NATIVE_BINARY` and private canonical `HACK_NATIVE_HOME`. It requires
 the caller's separately prepared native provider pool and matching runtime binary.
 It does not install or select a runtime automatically. An omitted backend continues
 to use the [Compose command owner](native-compose-commands.md).
@@ -38,7 +38,7 @@ frontend owner described below. Unsupported intent must
 refuse before managed value resolution and provider work. Early typed input
 capability refusals retain `E_NATIVE_PROJECT_UNSUPPORTED` without exposing
 compiler diagnostics or creating native source/start/run authority. `--detach`,
-`--json` for `up`, service subsets and unsupported lifecycle operations except
+`--json` for `up` and `restart`, service subsets and unsupported lifecycle operations except
 owner-mediated `down` refuse before input acquisition. `--branch` supplies an explicit native namespace; its omission uses
 the canonical project namespace without inferring a Git branch. Profile and env
 selection keep their compiler contracts. `--env base` bypasses inherited overlays
@@ -101,8 +101,8 @@ directories, saved record identities and the selected executable across its sing
 bounded request. It does not compile or read authored values, resolve env, run
 hooks, start workloads, repair state or perform cleanup. Cancellation waits for the
 owned request to settle. Profiles, env overrides, service subsets and other `ps`
-options are unsupported. Native `run` and `restart` remain separate
-unsupported command slices.
+options are unsupported. Native `run` remains a separate unsupported command
+slice; whole-project `restart` is described below.
 
 ## Owner-mediated `down` and `down --recover`
 
@@ -200,6 +200,41 @@ for a normalized Compose hash. Source and fake-driver
 checks do not qualify an installed frontend, a live provider, the full authored
 corpus, actual dead-owner recovery or resource overhead; those remain separate gates.
 
+## Whole-project `restart`
+
+`restart` with `HACK_RUNTIME_BACKEND=native` stops the current authored generation
+and then starts a fresh foreground generation in one command. The stop half is the
+same owner-mediated whole-project `down`: it asks the live foreground owner, or the
+private no-host endpoint of a ready no-host generation, to stop and requires
+authenticated Removed with exact endpoint/start/Ready/source retirement. Nothing
+starts until that proof completes. A missing, changed or dead owner, an uncertain
+stop or a cancellation during the stop refuses with `E_LIFECYCLE_FAILED`, restarts
+nothing and retains the selected state; a project with no running generation
+refuses here, so use `up`. Compute shutdown retains persistent data, and the fresh
+generation reuses the same project and `--branch` namespace, so persistent-data
+identity is unchanged across the cycle. This command adds no volume deletion,
+data migration or dead-owner recovery authority.
+
+The start half is the ordinary foreground `up`. It reacquires input and managed
+values, performs a fresh native review and remains attached until owned shutdown.
+`--profile` and `--env` (including `--env base`) select the fresh generation exactly
+as on `up`; the stopped generation's selection is not reused. Because the start
+half is `up`, `host.up.before`, `host.up.after` and `host.processes` run again
+exactly as on `up`, after the stopped generation's `host.down.before`,
+`host.down.after` and process stop completed. Startup refusals keep the `up`
+contract: a fixed owning stage, a closed compiler or native code and
+`E_STARTUP_INCOMPLETE` or `E_NATIVE_PROJECT_UNSUPPORTED`. Retained startup evidence
+from an incomplete retirement refuses the fresh start without replay. A Ctrl-C that
+arrives after the proven stop and before the fresh start returns 130 with nothing
+restarted. Each half uses the configured `HACK_COMPOSE_STARTUP_TIMEOUT_MS` budget
+separately; neither renews the other.
+
+Service subsets, `--json`, detached restart, `--target` and the frontend recovery
+options refuse with `E_NATIVE_PROJECT_UNSUPPORTED` before input acquisition or any
+stop request. Portable stand-in controls cover the stop-then-start ordering,
+failed-stop retention and cancellation between the halves; installed live restart
+acceptance remains a separate host-serialized gate.
+
 ## Finite service logs
 
 An already running authored foreground owner supports `logs SERVICE --no-follow`
@@ -281,7 +316,8 @@ explicitly cancels the finite hook and requests exact native cleanup. `down.afte
 runs only after authenticated native Removed and successful `down.before`. Down
 hooks have no new arbitrary duration ceiling; the shell owner supervises cancellation
 and process-group settlement. A down client timeout does not replay or cancel the
-foreground operation. Detached startup, service subsets and restart remain unsupported.
+foreground operation. Detached startup and service subsets remain unsupported;
+whole-project `restart` issues this same stop request before its fresh start.
 Known nonzero `down.after` completion reports failure after retiring the stopped
 generation. Unknown completion keeps the frontend bindings and hook intent together;
 it cannot silently make a new generation eligible.

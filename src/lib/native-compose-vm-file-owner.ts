@@ -54,6 +54,7 @@ import {
   NATIVE_COMPOSE_VM_FILES_EXTENSION,
   parseVmFileFacts,
   parseVmFileJournal,
+  parseVmFileJson,
   resolveVmFileOwnership,
   VM_FILE_IMAGE_FORMAT,
   VM_FILE_OBSERVER_PROGRAM,
@@ -142,13 +143,6 @@ function anchored(
 function requireValue(value: unknown): asserts value {
   if (!value) {
     refuseNativeComposeFile();
-  }
-}
-function json(text: string): unknown {
-  try {
-    return JSON.parse(text);
-  } catch {
-    return refuseNativeComposeFile();
   }
 }
 function ordered(value: unknown): unknown {
@@ -258,7 +252,7 @@ async function image(
   reference: string,
   workload: string
 ): Promise<Image> {
-  const row = json(
+  const row = parseVmFileJson(
     await client.call([
       "image",
       "inspect",
@@ -295,7 +289,7 @@ function volume(
   expectedName: string,
   expectedLabels: Readonly<Record<string, string>>
 ): Volume {
-  const row = json(text);
+  const row = parseVmFileJson(text);
   requireValue(
     isRecord(row) &&
       typeof row.mountpoint === "string" &&
@@ -330,7 +324,7 @@ function volume(
 }
 async function inspect(client: Client, id: string): Promise<Container> {
   requireValue(ID.test(id));
-  const row = json(
+  const row = parseVmFileJson(
     await client.call([
       "container",
       "inspect",
@@ -478,7 +472,8 @@ async function allContainers(client: Client): Promise<
     "--format",
     "{{json .ID}}",
   ]);
-  const ids = text.trim() === "" ? [] : text.trim().split("\n").map(json);
+  const ids =
+    text.trim() === "" ? [] : text.trim().split("\n").map(parseVmFileJson);
   requireValue(
     ids.every((id) => typeof id === "string" && ID.test(id)) &&
       new Set(ids).size === ids.length
@@ -491,7 +486,7 @@ async function allContainers(client: Client): Promise<
   }[] = [];
   for (const id of ids) {
     requireValue(typeof id === "string");
-    const row = json(
+    const row = parseVmFileJson(
       await client.call([
         "container",
         "inspect",
@@ -520,7 +515,8 @@ async function volumeNames(client: Client): Promise<readonly string[]> {
     "--format",
     "{{json .Name}}",
   ]);
-  const names = text.trim() === "" ? [] : text.trim().split("\n").map(json);
+  const names =
+    text.trim() === "" ? [] : text.trim().split("\n").map(parseVmFileJson);
   requireValue(
     names.every((name) => typeof name === "string" && VOLUME_NAME.test(name)) &&
       new Set(names).size === names.length
@@ -786,7 +782,7 @@ async function state(document: Document) {
       sameFile(read.info, ref.manifest) &&
         digest(read.text) === ref.manifest.digest
     );
-    const raw = json(read.text);
+    const raw = parseVmFileJson(read.text);
     requireValue(
       isRecord(raw) &&
         keys(
@@ -813,7 +809,7 @@ async function state(document: Document) {
       sameFile(intent.info, ref.intent) &&
         digest(intent.text) === ref.intent.digest
     );
-    const intended = json(intent.text);
+    const intended = parseVmFileJson(intent.text);
     requireValue(
       isRecord(intended) &&
         keys(intended, "binding,engineId,helper,host,name,token,version") &&

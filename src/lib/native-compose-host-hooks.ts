@@ -2,23 +2,17 @@ import { posix } from "node:path";
 import type { EnvironmentBinding } from "../../packages/config-compiler/generated/native-config.ts";
 import { isRecord } from "./guards.ts";
 import {
+  assertHostHookContract,
   type NativeComposeHook,
-  NativeComposeHostHookError,
 } from "./native-compose-host-contract.ts";
 import { resolveNativeComposeEnvironment } from "./native-compose-renderer.ts";
 import type { NativeEnvironmentPlan } from "./native-env-plan-protocol.ts";
 import { run } from "./shell.ts";
 
-function assert(value: unknown): asserts value {
-  if (!value) {
-    throw new NativeComposeHostHookError();
-  }
-}
-
 function externalEndpoint(
   binding: Extract<EnvironmentBinding, { kind: "endpoint" }>
 ): string {
-  assert(
+  assertHostHookContract(
     binding.reference.kind === "host_binding" &&
       binding.target.kind === "external" &&
       binding.target.protocol !== "tcp"
@@ -37,7 +31,9 @@ export function assertNativeComposeBeforeHookBindings(opts: {
 }): void {
   for (const hook of opts.hooks) {
     const values = opts.managedValues?.get(hook.name);
-    assert(opts.managedValues === undefined || values !== undefined);
+    assertHostHookContract(
+      opts.managedValues === undefined || values !== undefined
+    );
     hookEnvironment({ ...opts, hook, values });
   }
 }
@@ -49,10 +45,10 @@ function hookEnvironment(opts: {
 }) {
   const { hook } = opts;
   const reports = opts.environmentPlan.host;
-  assert(reports && Object.hasOwn(reports, hook.name));
+  assertHostHookContract(reports && Object.hasOwn(reports, hook.name));
   const report = reports[hook.name];
   const target = hook.env_target;
-  assert(
+  assertHostHookContract(
     report &&
       target &&
       report.env_target.kind === target.kind &&
@@ -151,7 +147,7 @@ async function runPreparedHook(opts: {
       forwardSignals: true,
       timeoutMs: Math.max(1, opts.deadline - Date.now()),
       onSpawn: (event) => {
-        assert(event.ownsProcessGroup);
+        assertHostHookContract(event.ownsProcessGroup);
         group = event.processGroupId ?? event.pid;
         return Promise.resolve();
       },

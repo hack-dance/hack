@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { join } from "node:path";
 import type { FileBinding } from "../../packages/config-compiler/generated/native-config.ts";
+import { deepFreeze } from "./guards.ts";
 import {
   type HeldNativeComposeFile,
   holdNativeComposeFile,
@@ -56,14 +57,6 @@ type SourceState = {
   readonly close: () => Promise<void>;
 };
 const acquisitions = new WeakMap<NativeComposeFileSources, SourceState>();
-function freeze(value: unknown): void {
-  if (typeof value === "object" && value !== null) {
-    for (const child of Object.values(value)) {
-      freeze(child);
-    }
-    Object.freeze(value);
-  }
-}
 const RELATIVE_FORBIDDEN = /[\\\0:]/;
 function relativeParts(path: string): readonly string[] {
   const parts = path.split("/");
@@ -317,7 +310,7 @@ export async function acquireNativeComposeFileSources(opts: {
       checkAuthority,
     });
     await assertFresh();
-    freeze(planned);
+    deepFreeze(planned);
     const digest = createHash("sha256").update(revision);
     for (const member of members) {
       digest.update(

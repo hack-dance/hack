@@ -2,7 +2,7 @@ import { DEFAULT_INGRESS_NETWORK } from "../constants.ts";
 import { isRecord } from "./guards.ts";
 import { nativeComposeVolumeCreatedAt } from "./native-compose-retained-storage.ts";
 import { beginNativeCpuChild } from "./native-cpu-diagnostics.ts";
-import { findExecutableInPath } from "./shell.ts";
+import { findExecutableInPath, readBoundedStream } from "./shell.ts";
 
 const PROJECT = /^[a-z0-9][a-z0-9_-]*$/;
 const SERVICE = /^[a-z0-9][a-z0-9._-]{0,62}$/;
@@ -1271,8 +1271,18 @@ export function createNativeComposeProbe(
     if (opts.signal?.aborted) {
       stop();
     }
-    const output = readBounded(child.stdout, remainingOutput, io.signal);
-    const diagnostics = readBounded(child.stderr, STDERR_LIMIT, io.signal);
+    const output = readBoundedStream(
+      child.stdout,
+      remainingOutput,
+      io.signal,
+      refuseProbeBudget
+    );
+    const diagnostics = readBoundedStream(
+      child.stderr,
+      STDERR_LIMIT,
+      io.signal,
+      refuseProbeBudget
+    );
     try {
       const [bytes, , exitCode] = await Promise.all([
         output,
@@ -1312,6 +1322,10 @@ export function createNativeComposeProbe(
   };
 }
 
+function refuseProbeBudget(): never {
+  probeRefused("E_NATIVE_COMPOSE_PROBE_BUDGET", "budget");
+}
+
 function probeExitCode(
   result: PromiseSettledResult<number>
 ): number | undefined {
@@ -1348,39 +1362,4 @@ function killProbe(opts: {
       // Exit may race cancellation.
     }
   }
-}
-
-async function readBounded(
-  stream: ReadableStream<Uint8Array>,
-  limit: number,
-  signal: AbortSignal
-): Promise<Uint8Array> {
-  const reader = stream.getReader();
-  const chunks: Uint8Array[] = [];
-  let size = 0;
-  const cancel = () => {
-    void reader.cancel().catch(() => undefined);
-  };
-  signal.addEventListener("abort", cancel, { once: true });
-  if (signal.aborted) {
-    cancel();
-  }
-  try {
-    while (true) {
-      const chunk = await reader.read();
-      if (chunk.done) {
-        break;
-      }
-      size += chunk.value.byteLength;
-      if (size > limit) {
-        probeRefused("E_NATIVE_COMPOSE_PROBE_BUDGET", "budget");
-      }
-      chunks.push(chunk.value);
-    }
-  } finally {
-    signal.removeEventListener("abort", cancel);
-    void reader.cancel().catch(() => undefined);
-    reader.releaseLock();
-  }
-  return Buffer.concat(chunks, size);
 }

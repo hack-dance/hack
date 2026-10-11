@@ -55,6 +55,7 @@ import {
   nativeRoutingSelectionMatches,
   parseNativeRoutingResolution,
 } from "./native-routing-plan-protocol.ts";
+import { readBoundedStream } from "./shell.ts";
 
 export const NATIVE_CONFIG_INPUT_LIMIT = 1024 * 1024;
 const OUTPUT_LIMIT = 8 * 1024 * 1024;
@@ -162,9 +163,11 @@ export async function readNativeConfigInput(opts: {
         "Native configuration must be a bounded regular file."
       );
     }
-    return await readBounded(
+    return await readBoundedStream(
       Bun.file(opts.path).stream(),
-      NATIVE_CONFIG_INPUT_LIMIT
+      NATIVE_CONFIG_INPUT_LIMIT,
+      undefined,
+      refuseCompilerBudget
     );
   } catch (error: unknown) {
     if (error instanceof NativeConfigCompilerError) {
@@ -995,8 +998,18 @@ async function invokeCompiler(opts: {
   if (opts.signal?.aborted) {
     cancel();
   }
-  const outputRead = readBounded(child.stdout, OUTPUT_LIMIT, io.signal);
-  const errorRead = readBounded(child.stderr, STDERR_LIMIT, io.signal);
+  const outputRead = readBoundedStream(
+    child.stdout,
+    OUTPUT_LIMIT,
+    io.signal,
+    refuseCompilerBudget
+  );
+  const errorRead = readBoundedStream(
+    child.stderr,
+    STDERR_LIMIT,
+    io.signal,
+    refuseCompilerBudget
+  );
   try {
     const [output, , exitCode] = await Promise.all([
       outputRead,
@@ -1066,50 +1079,11 @@ function killOwnedCompiler(opts: {
   }
 }
 
-async function readBounded(
-  stream: ReadableStream<Uint8Array>,
-  limit: number,
-  signal?: AbortSignal
-): Promise<Uint8Array> {
-  const reader = stream.getReader();
-  const chunks: Uint8Array[] = [];
-  let size = 0;
-  const cancel = () => {
-    reader.cancel().catch(() => {
-      // A concurrently closed stream already satisfies cancellation.
-    });
-  };
-  signal?.addEventListener("abort", cancel, { once: true });
-  if (signal?.aborted) {
-    cancel();
-  }
-  try {
-    while (true) {
-      const next = await reader.read();
-      if (next.done) {
-        break;
-      }
-      size += next.value.byteLength;
-      if (size > limit) {
-        cancel();
-        throw failure(
-          "E_COMPILER_BUDGET",
-          "Native configuration I/O exceeds its budget."
-        );
-      }
-      chunks.push(next.value);
-    }
-  } finally {
-    signal?.removeEventListener("abort", cancel);
-    reader.releaseLock();
-  }
-  const output = new Uint8Array(size);
-  let offset = 0;
-  for (const chunk of chunks) {
-    output.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-  return output;
+function refuseCompilerBudget(): never {
+  throw failure(
+    "E_COMPILER_BUDGET",
+    "Native configuration I/O exceeds its budget."
+  );
 }
 
 function parseControlJson(bytes: Uint8Array): unknown {

@@ -3,6 +3,7 @@ import { mkdir, mkdtemp, readdir, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { recoverNativeAuthoredProject } from "../src/backends/native-authored-project-recovery.ts";
+import type { stopNativeAuthoredProject } from "../src/backends/native-authored-project-run.ts";
 import {
   NativeAuthoredProjectStartError,
   type serveNativeAuthoredProject,
@@ -63,7 +64,17 @@ test.each([
 });
 
 const unsupported: readonly Partial<NativeComposeCommandOptions>[] = [
-  { operation: "restart" },
+  { operation: "restart", services: ["web"] },
+  { operation: "restart", detach: true },
+  { operation: "restart", json: true },
+  { operation: "restart", recover: true },
+  { operation: "restart", unsupportedOptions: true },
+  { operation: "restart", service: "web" },
+  { operation: "restart", command: [] },
+  { operation: "restart", workdir: "/app" },
+  { operation: "restart", follow: false },
+  { operation: "restart", tail: 0 },
+  { operation: "restart", logFormat: "plain" },
   { operation: "down", services: [] },
   { operation: "ps", profiles: [] },
   { operation: "ps", overlay: null },
@@ -75,7 +86,24 @@ const unsupported: readonly Partial<NativeComposeCommandOptions>[] = [
   { operation: "ps", unsupportedOptions: true },
   { operation: "logs" },
   { operation: "exec" },
-  { operation: "run" },
+  { operation: "run", service: "web" },
+  { operation: "run", service: "web", command: [] },
+  { operation: "run", service: "web", command: ["true"], json: true },
+  { operation: "run", service: "web", command: ["true"], detach: true },
+  { operation: "run", service: "web", command: ["true"], profiles: [] },
+  { operation: "run", service: "web", command: ["true"], overlay: null },
+  { operation: "run", service: "web", command: ["true"], services: [] },
+  { operation: "run", service: "web", command: ["true"], follow: false },
+  { operation: "run", service: "web", command: ["true"], tail: 10 },
+  { operation: "run", service: "web", command: ["true"], logFormat: "json" },
+  { operation: "run", service: "web", command: ["true"], recover: true },
+  { operation: "run", service: "web", command: ["true"], workdir: "app" },
+  {
+    operation: "run",
+    service: "web",
+    command: ["true"],
+    unsupportedOptions: true,
+  },
   { detach: true },
   { json: true },
   { recover: true },
@@ -105,6 +133,10 @@ test.each([
     serve: () => {
       calls++;
       return Promise.resolve(0);
+    },
+    stop: () => {
+      calls++;
+      return Promise.resolve();
     },
   }).catch((error: unknown) => error);
   expect(result).toBeInstanceOf(HackCliError);
@@ -467,7 +499,7 @@ if (process.platform !== "darwin") {
         env: { HACK_RUNTIME_BACKEND: "native" },
       })
     ).rejects.toThrow(
-      "requires whole-project foreground up, owner-mediated down, ps, finite single-service logs --no-follow, noninteractive single-service exec, or explicit stored-generation down --recover on macOS"
+      "requires whole-project foreground up or restart, owner-mediated down, ps, finite single-service logs --no-follow, noninteractive single-service exec, or explicit stored-generation down --recover on macOS"
     );
     expect(await readdir(join(selected.root, ".hack"))).toEqual([]);
   });
@@ -495,6 +527,176 @@ macTest(
     });
     expect(code).toBe(0);
     expect(calls).toBe(1);
+    expect(await readdir(join(selected.root, ".hack"))).toEqual([]);
+  }
+);
+
+macTest(
+  "foreground restart proves the owner-mediated stop before delegating a fresh startup with the exact selection",
+  async () => {
+    const selected = await fixture();
+    const options = {
+      ...selected.options,
+      operation: "restart" as const,
+      instance: "feature/$exact",
+      profiles: ["b", "a"],
+      overlay: "dev",
+      services: [] as string[],
+    };
+    const events: string[] = [];
+    const observed: Startup[] = [];
+    let stop: Parameters<typeof stopNativeAuthoredProject>[0] | undefined;
+    const result = tryNativeAuthoredCommand({
+      ...selected,
+      options,
+      recover: () => {
+        throw new Error("Must not recover");
+      },
+      stop: (value) => {
+        events.push("stop");
+        stop = value;
+        return Promise.resolve();
+      },
+      serve: (startup) => {
+        events.push("serve");
+        observed.push(startup);
+        return Promise.resolve(19);
+      },
+    });
+    options.instance = "replacement";
+    options.profiles.push("replacement");
+    options.overlay = "replacement";
+    expect(await result).toBe(19);
+    expect(events).toEqual(["stop", "serve"]);
+    const scope = {
+      projectRoot: selected.root,
+      projectDir: join(selected.root, ".hack"),
+      nativeHome: join(selected.root, "candidate"),
+      branch: "feature/$exact",
+    };
+    expect(stop?.scope).toEqual(scope);
+    expect(stop?.timeoutMs).toBe(1500);
+    const startup = observed[0];
+    if (!startup) {
+      throw new Error("fixture requires the delegated startup");
+    }
+    expect(startup.scope).toEqual(scope);
+    expect(startup.runtime).toEqual({
+      binary: selected.env.HACK_NATIVE_BINARY,
+      home: selected.env.HACK_NATIVE_HOME,
+    });
+    expect(startup.profiles).toEqual(["b", "a"]);
+    expect(startup.overlay).toBe("dev");
+    expect(startup.startupTimeoutMs).toBe(1500);
+    expect(startup.run).toMatch(/^[a-f0-9]{32}$/);
+    expect(startup.signal?.aborted).toBe(false);
+    expect(await readdir(join(selected.root, ".hack"))).toEqual([]);
+  }
+);
+
+macTest(
+  "restart after an unproven stop refuses with the fixed lifecycle contract and never starts",
+  async () => {
+    const selected = await fixture();
+    const privateDetail = "private-restart-stop-canary";
+    let calls = 0;
+    const result = await tryNativeAuthoredCommand({
+      ...selected,
+      options: { ...selected.options, operation: "restart" },
+      stop: () => Promise.reject(new Error(privateDetail)),
+      serve: () => {
+        calls++;
+        return Promise.resolve(0);
+      },
+    }).catch((error: unknown) => error);
+    expect(result).toBeInstanceOf(HackCliError);
+    expect(result).toHaveProperty("code", "E_LIFECYCLE_FAILED");
+    expect(String(result)).toContain("nothing was restarted");
+    expect(String(result)).not.toContain(privateDetail);
+    expect(JSON.stringify(result)).not.toContain(privateDetail);
+    expect(calls).toBe(0);
+    expect(await readdir(join(selected.root, ".hack"))).toEqual([]);
+  }
+);
+
+macTest(
+  "restart cancellation after the proven stop returns 130 without a fresh start",
+  async () => {
+    const selected = await fixture();
+    const before = [
+      process.listenerCount("SIGINT"),
+      process.listenerCount("SIGTERM"),
+    ];
+    let calls = 0;
+    const result = await tryNativeAuthoredCommand({
+      ...selected,
+      options: { ...selected.options, operation: "restart" },
+      stop: ({ signal }) => {
+        process.emit("SIGINT");
+        expect(signal?.aborted).toBe(true);
+        return Promise.resolve();
+      },
+      serve: () => {
+        calls++;
+        return Promise.resolve(0);
+      },
+    });
+    expect(result).toBe(130);
+    expect(calls).toBe(0);
+    expect([
+      process.listenerCount("SIGINT"),
+      process.listenerCount("SIGTERM"),
+    ]).toEqual(before);
+    expect(await readdir(join(selected.root, ".hack"))).toEqual([]);
+  }
+);
+
+macTest(
+  "restart startup refusals after the proven stop keep the foreground up contract",
+  async () => {
+    const selected = await fixture();
+    for (const startup of [
+      new NativeAuthoredProjectStartError({
+        outcome: "not-started",
+        canceled: false,
+        stage: "inputs",
+        compilerCode: "E_COMPILER_RESPONSE",
+      }),
+      new NativeAuthoredProjectStartError({
+        outcome: "not-started",
+        canceled: false,
+        nativeCode: "native_graph_subset",
+      }),
+      new NativeAuthoredProjectStartError({
+        outcome: "removed",
+        canceled: true,
+      }),
+    ]) {
+      let stops = 0;
+      const value = await tryNativeAuthoredCommand({
+        ...selected,
+        options: { ...selected.options, operation: "restart" },
+        stop: () => {
+          stops++;
+          return Promise.resolve();
+        },
+        serve: () => Promise.reject(startup),
+      }).catch((error: unknown) => error);
+      expect(stops).toBe(1);
+      if (startup.canceled) {
+        expect(value).toBe(130);
+        continue;
+      }
+      expect(value).toBeInstanceOf(HackCliError);
+      expect(value).toHaveProperty(
+        "code",
+        startup.nativeCode === "native_graph_subset"
+          ? "E_NATIVE_PROJECT_UNSUPPORTED"
+          : "E_STARTUP_INCOMPLETE"
+      );
+      expect(value).toHaveProperty("detail.stage", startup.stage);
+      expect(value).toHaveProperty("detail.outcome", "not-started");
+    }
     expect(await readdir(join(selected.root, ".hack"))).toEqual([]);
   }
 );

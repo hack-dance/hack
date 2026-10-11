@@ -22,6 +22,8 @@ import * as shell from "../../src/lib/shell.ts";
 import { restoreEnv } from "./env.ts";
 
 export const ROUTING_CANARY = "synthetic-retained-sql-row";
+/** Closed set: the product's 15 s default proof deadline or its 60 s cap. */
+export type RetainedRoutingStoreTimeoutMs = 15_000 | 60_000;
 export const ROUTING_IDS = {
   db: "a".repeat(64),
   web: "b".repeat(64),
@@ -555,10 +557,15 @@ else {
         git: identity(value.checkout.git),
       });
     },
-    store: () =>
+    /** The store's proof deadline. Deadline-refusal controls keep the 15 s default;
+     * a compound lifecycle test may ask for the 60 s product cap so suite load cannot
+     * expire its rollback proof. Both values are well-known product bounds. */
+    store: (
+      opts: { readonly timeoutMs?: RetainedRoutingStoreTimeoutMs } = {}
+    ) =>
       openLegacyComposeAdoptedGenerationStore({
         projectRoot: root,
-        timeoutMs: 15_000,
+        timeoutMs: opts.timeoutMs ?? 15_000,
       }),
     operation: async (
       store: Awaited<

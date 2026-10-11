@@ -1,11 +1,14 @@
 # Native Compose storage witness foundation
 
-This is an internal protocol foundation. Ordinary CLI instances still use the
-metadata guard described in [ownership](native-compose-ownership.md). The CLI does
-not enroll volume witnesses. Identical volume labels, name and `CreatedAt` remain
-insufficient to detect an empty replacement in that shipping path.
+This protocol foundation sits beneath the
+[directory-xattr carrier](native-compose-storage-xattr-carrier.md) that ordinary
+native Compose `up`, `restart`, `run` and storage-bearing saved `exec` use. It
+adds content proof to the metadata guard described in
+[ownership](native-compose-ownership.md): identical volume labels, name and
+`CreatedAt` alone cannot detect an empty replacement, so the CLI enrolls and
+verifies volume witnesses through that carrier.
 
-The candidate protocol binds a random marker leaf and independent 256-bit token
+The protocol binds a random marker leaf and independent 256-bit token
 to the engine, instance owner, physical volume name, logical storage, admitting
 generation and pending operation token. Marker names, contents, hashes and private
 paths must stay out of public receipts, errors, argv and logs. A marker detects a
@@ -60,35 +63,39 @@ The required version-three decoder rejects missing, unknown or duplicate witness
 entries, mismatched retained births and detached `Expected` bindings. Existing
 v1/v2 readers refuse that format. An enrolled store requires fresh marker proof
 before and after startup/run, including both final receipt boundaries. Missing
-carrier authority refuses before a workload effect. The CLI deliberately refuses
-witness-bearing startup, run and exec until the carrier is qualified. Resume
+carrier authority refuses before a workload effect. Ordinary startup, run and
+storage-bearing exec supply the Docker directory-xattr carrier; a daemon outside
+the cataloged linux/arm64 and linux/amd64 platforms, or a missing cached helper
+image, refuses before any hook, intent or volume effect. Resume
 never infers enrollment from metadata, scans arbitrary marker names or auto-enrolls
 a legacy volume. Failed, pending and completed witness state remains monotonic
 through stop and recovery; storage capture never downgrades a v3 receipt.
 
-A stopped, unstarted owned carrier with a read-only volume mount is a possible
-Docker read transport. It would need an exact already-selected local image ID,
-no pull or start, `volume-nocopy`, complete accounting for image-declared volumes,
-bounded output and deadlines, exact carrier ownership and saved cleanup. Docker
-copy alone does not provide an exclusive marker write. That enrollment boundary,
-carrier creation uncertainty, explicit interrupted-enrollment reconciliation,
-compiled CLI coverage and real engine acceptance remain required gates. No carrier
-or helper download is implemented by this foundation. Store and source-CLI tests
-use synthetic observation ports and engine transports; they do not qualify Docker
-write or archive semantics.
+The Docker directory-xattr carrier is the implemented transport: one fresh owned
+helper container per proof, an exact cataloged local image ID, `--pull never`,
+`volume-nocopy`, no image-declared volumes, bounded output and deadlines, exact
+carrier ownership and saved cleanup. Docker copy alone does not provide an
+exclusive marker write, so the archive codec below has no CLI carrier. Remaining
+gates are PostgreSQL data roots, filesystem crash durability of the seeded
+attribute, fresh-install acquisition of the pinned helper image, and daemons
+other than linux/arm64 and linux/amd64, which refuse until their own artifact is
+qualified. Explicit interrupted-enrollment reconciliation remains a separate
+recovery contract. This foundation never downloads a carrier or helper. Store
+and source-CLI tests use synthetic observation ports and engine transports; they
+do not qualify Docker write or archive semantics.
 
 The separate [directory-xattr owner and helper source](native-compose-storage-xattr-carrier.md)
 uses a create-only token without a PostgreSQL data-root directory entry. Required
 version-three expectation/reference records and tagged artifact/journal-bound intent keep
 it distinct from USTAR under the same version-three receipt owner. It adds
-injectable cold provisioning and fresh read-only proof ports. The candidate Docker
-port is wired into candidate ordinary Compose startup and saved exec. Persistent
-PostgreSQL and compiled CLI qualification remain required; source wiring is not
-runtime acceptance. Required finite carrier intent survives unknown
+injectable cold provisioning and fresh read-only proof ports. The Docker port
+serves ordinary Compose startup, run and saved exec on the cataloged platforms.
+PostgreSQL data roots and crash durability remain unqualified; a passing source
+control is not runtime acceptance for them. Required finite carrier intent survives unknown
 helper outcomes even after enrollment; saved recovery stops resources without
 retiring that anchor. Its offline controls do not qualify a carrier.
 
-Candidate ordinary image-only `up` and `restart` can coalesce the opening and
+Ordinary image-only `up` and `restart` can coalesce the opening and
 closing witness checks within each of the two read phases immediately before
 pending publication and effect entry. This applies only to already enrolled
 directory-xattr storage with an exact unchanged storage merge, no hooks, build,
@@ -102,7 +109,7 @@ three full proofs before effect entry rather than five; it establishes call
 ordering and count, not CPU savings or atomic observation across the daemon and
 private filesystem.
 
-The candidate one-off `run` path separately omits the enrollment-tail read that
+The one-off `run` path separately omits the enrollment-tail read that
 would immediately repeat its mandatory pre-spawn witness read. `up` and `restart`
 keep that tail read. Cold enrollment still seeds once and verifies before
 publishing its enrolled reference. The one-volume cold-run control reaches the

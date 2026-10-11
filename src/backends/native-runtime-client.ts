@@ -83,6 +83,8 @@ export async function invokeNativeRuntime(opts: {
   readonly boundNativeAuthoredLogsDrain?: boolean;
   /** Finite authored exec closes stdin and binds output to its exact request child. */
   readonly boundNativeAuthoredExecDrain?: boolean;
+  /** Finite authored one-off run shares exec's closed argv domain under the one-off action. */
+  readonly boundNativeAuthoredOneOffDrain?: boolean;
   /** Native source planning and journal inspection also bind pipe lifetime to their owned read child. */
   readonly boundNativeAuthoredReadDrain?: boolean;
   /** Explicit recovery requests have their own closed argv domain and never accept private input. */
@@ -95,28 +97,13 @@ export async function invokeNativeRuntime(opts: {
     });
   }
   const timeoutMs = opts.timeoutMs ?? 180_000;
+  const bound = boundDrainSelection(opts);
   if (
     !(
       validExecResponseSelection(opts.args, opts.serviceExecResponse) &&
-      validNativeStatusDrainSelection(opts.args, opts.boundNativeStatusDrain) &&
-      validNativeAuthoredExecDrainSelection(
+      validBoundDrainSelection(
         opts.args,
-        opts.boundNativeAuthoredExecDrain,
-        opts.privateInput !== undefined
-      ) &&
-      validNativeAuthoredLogsDrainSelection(
-        opts.args,
-        opts.boundNativeAuthoredLogsDrain,
-        opts.privateInput !== undefined
-      ) &&
-      validNativeAuthoredReadDrainSelection(
-        opts.args,
-        opts.boundNativeAuthoredReadDrain,
-        opts.privateInput !== undefined
-      ) &&
-      validNativeAuthoredRecoveryDrainSelection(
-        opts.args,
-        opts.boundNativeAuthoredRecoveryDrain,
+        bound,
         opts.privateInput !== undefined
       ) &&
       Number.isSafeInteger(timeoutMs)
@@ -144,14 +131,7 @@ export async function invokeNativeRuntime(opts: {
       stderr: "pipe",
     }
   );
-  const drain =
-    opts.boundNativeStatusDrain ||
-    opts.boundNativeAuthoredExecDrain ||
-    opts.boundNativeAuthoredLogsDrain ||
-    opts.boundNativeAuthoredReadDrain ||
-    opts.boundNativeAuthoredRecoveryDrain
-      ? new AbortController()
-      : undefined;
+  const drain = bound === undefined ? undefined : new AbortController();
   let drainTimer: ReturnType<typeof setTimeout> | undefined;
   if (drain) {
     void child.exited.then(() => {
@@ -189,11 +169,7 @@ export async function invokeNativeRuntime(opts: {
           "Native runtime request was canceled; its outcome may be uncertain. No request was replayed.",
       });
     }
-    if (
-      (opts.boundNativeAuthoredLogsDrain ||
-        opts.boundNativeAuthoredExecDrain) &&
-      drain?.signal.aborted
-    ) {
+    if (outputBound(bound) && drain?.signal.aborted) {
       throw new NativeRuntimeRequestError({
         message:
           "Native authored command output did not settle; no output was admitted. Command effects may have occurred; no request was replayed.",
@@ -220,20 +196,111 @@ export async function invokeNativeRuntime(opts: {
     }
     clearTimeout(drainTimer);
     drain?.abort();
-    if (opts.boundNativeAuthoredExecDrain) {
+    if (commandBound(bound)) {
       await failureDetails;
     }
   }
 }
 
-function validNativeAuthoredLogsDrainSelection(
+/** One bound output drain per request; the public flags remain the callers' contract. */
+type BoundDrain =
+  | "status"
+  | "exec"
+  | "one-off"
+  | "logs"
+  | "read"
+  | "recovery-selection"
+  | "recovery-cleanup";
+/** Exec and one-off run carry command output and join their failure reader after settlement. */
+function commandBound(bound: BoundDrain | "conflict" | undefined): boolean {
+  return bound === "exec" || bound === "one-off";
+}
+/** Logs and command drains must settle before any captured bytes are admitted. */
+function outputBound(bound: BoundDrain | "conflict" | undefined): boolean {
+  return bound === "logs" || commandBound(bound);
+}
+
+/**
+ * Fold the drain flags into one selection. More than one selected flag is a
+ * conflict that no argv shape can satisfy, so it reports a reserved value that
+ * the validator refuses.
+ */
+function boundDrainSelection(opts: {
+  readonly boundNativeStatusDrain?: boolean;
+  readonly boundNativeAuthoredExecDrain?: boolean;
+  readonly boundNativeAuthoredOneOffDrain?: boolean;
+  readonly boundNativeAuthoredLogsDrain?: boolean;
+  readonly boundNativeAuthoredReadDrain?: boolean;
+  readonly boundNativeAuthoredRecoveryDrain?: "selection" | "cleanup";
+}): BoundDrain | "conflict" | undefined {
+  const selected: BoundDrain[] = [];
+  if (opts.boundNativeStatusDrain) {
+    selected.push("status");
+  }
+  if (opts.boundNativeAuthoredExecDrain) {
+    selected.push("exec");
+  }
+  if (opts.boundNativeAuthoredOneOffDrain) {
+    selected.push("one-off");
+  }
+  if (opts.boundNativeAuthoredLogsDrain) {
+    selected.push("logs");
+  }
+  if (opts.boundNativeAuthoredReadDrain) {
+    selected.push("read");
+  }
+  if (opts.boundNativeAuthoredRecoveryDrain !== undefined) {
+    selected.push(`recovery-${opts.boundNativeAuthoredRecoveryDrain}`);
+  }
+  if (selected.length > 1) {
+    return "conflict";
+  }
+  return selected[0];
+}
+
+function validBoundDrainSelection(
   args: readonly string[],
-  selected: boolean | undefined,
+  bound: BoundDrain | "conflict" | undefined,
   privateInput: boolean
 ): boolean {
-  if (!selected) {
-    return true;
+  switch (bound) {
+    case undefined:
+      return true;
+    case "status":
+      return validNativeStatusDrainSelection(args);
+    case "exec":
+      return validNativeAuthoredExecDrainSelection(args, privateInput, "exec");
+    case "one-off":
+      return validNativeAuthoredExecDrainSelection(
+        args,
+        privateInput,
+        "one-off"
+      );
+    case "logs":
+      return validNativeAuthoredLogsDrainSelection(args, privateInput);
+    case "read":
+      return validNativeAuthoredReadDrainSelection(args, privateInput);
+    case "recovery-selection":
+      return validNativeAuthoredRecoveryDrainSelection(
+        args,
+        "selection",
+        privateInput
+      );
+    case "recovery-cleanup":
+      return validNativeAuthoredRecoveryDrainSelection(
+        args,
+        "cleanup",
+        privateInput
+      );
+    default:
+      return false;
   }
+}
+
+function validNativeAuthoredLogsDrainSelection(
+  args: readonly string[],
+  privateInput: boolean
+): boolean {
   const tail = args[8] ?? "";
   return (
     !privateInput &&
@@ -252,69 +319,62 @@ function validNativeAuthoredLogsDrainSelection(
   );
 }
 
-function validNativeStatusDrainSelection(
-  args: readonly string[],
-  selected?: boolean
-): boolean {
+function validNativeStatusDrainSelection(args: readonly string[]): boolean {
   return (
-    !selected ||
-    (args.length === 8 &&
-      args[0] === "graph" &&
-      args[1] === "native" &&
-      args[2] === "control" &&
-      args[3] === "--run-id" &&
-      NATIVE_RUN.test(args[4] ?? "") &&
-      args[5] === "--action" &&
-      args[6] === "status" &&
-      args[7] === "--json")
+    args.length === 8 &&
+    args[0] === "graph" &&
+    args[1] === "native" &&
+    args[2] === "control" &&
+    args[3] === "--run-id" &&
+    NATIVE_RUN.test(args[4] ?? "") &&
+    args[5] === "--action" &&
+    args[6] === "status" &&
+    args[7] === "--json"
   );
 }
 
 function validNativeAuthoredReadDrainSelection(
   args: readonly string[],
-  selected: boolean | undefined,
   privateInput: boolean
 ): boolean {
   return (
-    !selected ||
-    (!privateInput &&
-      args.length === 6 &&
-      args[0] === "graph" &&
-      args[1] === "native" &&
-      args[5] === "--json" &&
-      ((["plan", "frontend-plan"].includes(args[2] ?? "") &&
-        args[3] === "--source-file" &&
-        isAbsolute(args[4] ?? "")) ||
-        (args[2] === "inspect" &&
-          args[3] === "--run-id" &&
-          NATIVE_RUN.test(args[4] ?? ""))))
+    !privateInput &&
+    args.length === 6 &&
+    args[0] === "graph" &&
+    args[1] === "native" &&
+    args[5] === "--json" &&
+    ((["plan", "frontend-plan"].includes(args[2] ?? "") &&
+      args[3] === "--source-file" &&
+      isAbsolute(args[4] ?? "")) ||
+      (args[2] === "inspect" &&
+        args[3] === "--run-id" &&
+        NATIVE_RUN.test(args[4] ?? "")))
   );
 }
 
 function validNativeAuthoredRecoveryDrainSelection(
   args: readonly string[],
-  selected: "selection" | "cleanup" | undefined,
+  selected: "selection" | "cleanup",
   privateInput: boolean
 ): boolean {
   return (
-    selected === undefined ||
-    (!privateInput &&
-      args[0] === "graph" &&
-      args[1] === "native" &&
-      args[3] === "--run-id" &&
-      NATIVE_RUN.test(args[4] ?? "") &&
-      ((selected === "selection" &&
-        args.length === 6 &&
-        args[2] === "recovery-selection" &&
-        args[5] === "--json") ||
-        (selected === "cleanup" &&
-          args.length === 10 &&
-          args[2] === "recover-live-owner" &&
-          args[5] === "--expect-receipt" &&
-          NATIVE_HASH.test(args[6] ?? "") &&
-          args[7] === "--expect-owner" &&
-          NATIVE_HASH.test(args[8] ?? "") &&
-          args[9] === "--json")))
+    !privateInput &&
+    args[0] === "graph" &&
+    args[1] === "native" &&
+    args[3] === "--run-id" &&
+    NATIVE_RUN.test(args[4] ?? "") &&
+    ((selected === "selection" &&
+      args.length === 6 &&
+      args[2] === "recovery-selection" &&
+      args[5] === "--json") ||
+      (selected === "cleanup" &&
+        args.length === 10 &&
+        args[2] === "recover-live-owner" &&
+        args[5] === "--expect-receipt" &&
+        NATIVE_HASH.test(args[6] ?? "") &&
+        args[7] === "--expect-owner" &&
+        NATIVE_HASH.test(args[8] ?? "") &&
+        args[9] === "--json"))
   );
 }
 
@@ -535,19 +595,16 @@ export function rethrowNativeInputFailure(
 
 function validNativeAuthoredExecDrainSelection(
   args: readonly string[],
-  selected: boolean | undefined,
-  privateInput: boolean
+  privateInput: boolean,
+  action: "exec" | "one-off"
 ): boolean {
-  if (!selected) {
-    return true;
-  }
   const workdir = args[7] === "--workdir" ? args[8] : undefined;
   const json = workdir === undefined ? 7 : 9;
   return (
     !privateInput &&
     args[0] === "graph" &&
     args[1] === "native" &&
-    args[2] === "exec" &&
+    args[2] === action &&
     args[3] === "--run-id" &&
     NATIVE_RUN.test(args[4] ?? "") &&
     args[5] === "--service" &&

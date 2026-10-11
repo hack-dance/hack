@@ -1300,8 +1300,11 @@ function matchesScope(
   );
 }
 
-/** SOURCE-only transport until its persistent-volume/PGDATA qualification and CLI
- * admission are complete. No module initialization executes Docker or the helper. */
+/** Docker transport for ordinary native Compose command admission. It requires a
+ * linux/arm64 or linux/amd64 daemon holding the exact cataloged cached helper
+ * image; other daemons and uncached images refuse rather than pull or emulate.
+ * PostgreSQL data roots and crash durability remain unqualified. No module
+ * initialization executes Docker or the helper. */
 export async function createNativeComposeDockerStorageXattrCarrier(
   opts: Context
 ): Promise<NativeComposeStorageXattrCarrier> {

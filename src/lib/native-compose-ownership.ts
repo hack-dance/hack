@@ -9,6 +9,8 @@ const SERVICE = /^[a-z0-9][a-z0-9._-]{0,62}$/;
 const NAME = /^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/;
 const GENERATION = /^[a-f0-9]{32}$/;
 const ID = /^[a-f0-9]{64}$/;
+/** Docker keys a network member whose endpoint has no live sandbox as `ep-<endpoint>`. */
+const ENDPOINT_PLACEHOLDER = /^ep-/;
 const OUTPUT_LIMIT = 8 * 1024 * 1024;
 const STDERR_LIMIT = 16 * 1024;
 const ARGUMENT_LIMIT = 16 * 1024;
@@ -531,6 +533,9 @@ async function queryNativeComposeOwned(
         selection: opts,
         probe,
         observations,
+        scan: "first",
+        mode,
+        restartingServices,
       });
     }
     const firstRestarting = validateTopology(
@@ -569,6 +574,9 @@ async function queryNativeComposeOwned(
         selection: opts,
         probe,
         observations: rechecked,
+        scan: "recheck",
+        mode,
+        restartingServices,
       });
     }
     const secondRestarting = validateTopology(
@@ -642,6 +650,10 @@ async function collectInspections(input: {
   readonly selection: NativeComposeOwnershipOptions;
   readonly probe: (args: readonly string[]) => Promise<string>;
   readonly observations: MutableObservation;
+  /** Only the first startup scan may admit a restarting endpoint placeholder; the recheck must resolve it. */
+  readonly scan: "first" | "recheck";
+  readonly mode: "saved" | "startup" | "strict";
+  readonly restartingServices: ReadonlySet<string>;
 }): Promise<void> {
   const { kind, resources, selection: opts, probe, observations } = input;
   const { containers, volumes, networks } = observations;
@@ -747,17 +759,75 @@ async function collectInspections(input: {
           "topology",
           "network-members-shape"
         );
-        const members = Object.keys(row.containers);
-        requireValue(
-          members.every((id) => ID.test(id)),
-          "topology",
-          "network-member-id"
-        );
-        observations.members.set(resource.name, members.sort());
+        const members = networkMembers({
+          members: row.containers,
+          network: resource.name,
+          observations,
+          admitRestartingPlaceholders:
+            input.scan === "first" && input.mode === "startup",
+          restartingServices: input.restartingServices,
+        });
+        observations.members.set(resource.name, members);
         networks.push({ id: resource.id, name: resource.name });
       }
     }
   }
+}
+
+/**
+ * Member keys are immutable container IDs. While a restarting container's endpoint
+ * exists without its sandbox, Docker keys it `ep-<endpoint>` instead; that placeholder
+ * is never a member identity. Only the first startup scan tolerates one such key per
+ * selected on-failure container whose same-scan inspect reports state `restarting` and
+ * an endpoint on this network, exactly the container the live-endpoint admission keeps
+ * unready; the recheck scan must observe only container IDs, so an unresolved,
+ * non-restarting or unselected placeholder refuses with the unchanged
+ * `network-member-id` predicate. Key and name values are compared only, never
+ * retained or disclosed.
+ */
+function networkMembers(opts: {
+  readonly members: Record<string, unknown>;
+  readonly network: string;
+  readonly observations: MutableObservation;
+  readonly admitRestartingPlaceholders: boolean;
+  readonly restartingServices: ReadonlySet<string>;
+}): readonly string[] {
+  const members = Object.keys(opts.members).filter((key) => ID.test(key));
+  const claimed = new Set<string>();
+  for (const [key, member] of Object.entries(opts.members)) {
+    if (ID.test(key)) {
+      continue;
+    }
+    requireValue(
+      opts.admitRestartingPlaceholders &&
+        ENDPOINT_PLACEHOLDER.test(key) &&
+        isRecord(member) &&
+        typeof member.Name === "string",
+      "topology",
+      "network-member-id"
+    );
+    const owners = opts.observations.containers.filter(
+      (container) => container.name === member.Name
+    );
+    const owner = owners[0];
+    requireValue(
+      owners.length === 1 &&
+        owner !== undefined &&
+        owner.state === "restarting" &&
+        !owner.oneoff &&
+        opts.restartingServices.has(owner.service) &&
+        !members.includes(owner.id) &&
+        !claimed.has(owner.id) &&
+        Object.hasOwn(
+          opts.observations.endpoints.get(owner.id) ?? {},
+          opts.network
+        ),
+      "topology",
+      "network-member-id"
+    );
+    claimed.add(owner.id);
+  }
+  return members.sort();
 }
 
 function containerObservation(

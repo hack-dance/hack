@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { isAbsolute } from "node:path";
+import { deepFreeze } from "../lib/guards.ts";
 import { NativeComposeHostHookError } from "../lib/native-compose-host-contract.ts";
 import { NativeConfigCompilerError } from "../lib/native-config-compiler.ts";
 import { acquireNativeExecutionInputs } from "../lib/native-execution-inputs.ts";
@@ -163,14 +164,6 @@ type Options = {
   readonly onHookDiagnostic?: (event: NativeHookDiagnostic) => void;
 };
 
-function freeze(value: unknown): void {
-  if (typeof value === "object" && value !== null) {
-    for (const child of Object.values(value)) {
-      freeze(child);
-    }
-    Object.freeze(value);
-  }
-}
 function observedReady(
   opts: Options,
   ready: NativeAuthoredProjectRunSelection
@@ -534,7 +527,7 @@ async function runPreparedLifecycle(ctx: {
         void Promise.resolve(observed).catch(() => undefined);
       },
       onReceipt: (receipt) => {
-        freeze(receipt);
+        deepFreeze(receipt);
         ctx.admitted.observed = receipt;
         return undefined;
       },

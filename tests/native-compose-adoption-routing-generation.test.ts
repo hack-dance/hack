@@ -3,15 +3,22 @@ import * as fs from "node:fs/promises";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { isRecord } from "../src/lib/guards.ts";
+import * as admission from "../src/lib/native-compose-adoption-compiler.ts";
+import { LegacyComposeAdoptedGenerationError } from "../src/lib/native-compose-adoption-generation.ts";
+import { legacyComposePublicationRefusal } from "../src/lib/native-compose-adoption-publication-diagnostics.ts";
 import { runLegacyComposeRetainedRoutingOperation } from "../src/lib/native-compose-adoption-routing-execution.ts";
 import * as privateState from "../src/lib/native-compose-private-state.ts";
 import {
+  type RetainedRoutingStoreTimeoutMs,
   ROUTING_CANARY,
   ROUTING_IDS,
   retainedRoutingFixture,
   retainedRoutingFixtureLifetime,
 } from "./helpers/retained-routing-adoption.ts";
 
+/** The compound lifecycle test's per-test budget and its store proof deadline:
+ * the product's 60 s cap. */
+const COMPOUND_BUDGET_MS = 60_000;
 let h: Awaited<ReturnType<typeof retainedRoutingFixture>>;
 let fixtureActive = false;
 let fixtureUncertain = false;
@@ -82,8 +89,10 @@ const test = (
     timeoutMs
   );
 };
-async function prepare() {
-  const store = await h.store();
+async function prepare(
+  opts: { readonly timeoutMs?: RetainedRoutingStoreTimeoutMs } = {}
+) {
+  const store = await h.store(opts);
   try {
     return { store, generation: await store.prepare({ binary: h.compiler }) };
   } catch (error: unknown) {
@@ -101,18 +110,129 @@ async function red(value: Promise<unknown>) {
     expect(String(error)).not.toContain(h.root);
   }
 }
-test(
-  "v14 keeps original resources and data through stop/publication/up/down/up/rollback and saved open",
-  async () => {
-    const phase = (value: string) => {
+test("publication diagnostics preserve a reached private input refusal after the switching receipt", async () => {
+  const { store, generation } = await prepare();
+  let reached = false;
+  let restoreRead: (() => void) | undefined;
+  try {
+    const originalRead = privateState.readPrivate;
+    const readSpy = spyOn(privateState, "readPrivate").mockImplementation(
+      async (...args) => {
+        const value = await originalRead(...args);
+        if (!reached && args[0].endsWith("/manifest.json")) {
+          const saved = await h.receipt();
+          if (saved.publication?.phase === "switching") {
+            reached = true;
+            throw new privateState.NativeComposeGenerationError(
+              "E_NATIVE_COMPOSE_STALE"
+            );
+          }
+        }
+        return value;
+      }
+    );
+    restoreRead = () => readSpy.mockRestore();
+    let caught: unknown;
+    try {
+      await store.publish({ generation, binary: h.compiler });
+    } catch (error: unknown) {
+      caught = error;
+    }
+    expect(reached).toBe(true);
+    expect(caught).toBeInstanceOf(LegacyComposeAdoptedGenerationError);
+    expect(legacyComposePublicationRefusal(caught)).toEqual({
+      stage: "publication-inputs",
+      reason: "private-stale",
+    });
+    const saved = await h.receipt();
+    expect(saved.publication?.phase).toBe("switching");
+    expect(saved.publication?.native).toBeNull();
+    expect(saved.routingHandoff).toBe("held");
+    expect(h.effects).toEqual([]);
+    expect(await readFile(join(h.root, ".hack/hack.config.json"), "utf8")).toBe(
+      h.config
+    );
+    expect(
+      await readFile(join(h.root, ".hack/docker-compose.yml"), "utf8")
+    ).toBe(h.compose);
+  } finally {
+    if (h.canRestore()) {
+      restoreRead?.();
+    }
+    await store.close();
+  }
+});
+test("publication diagnostics distinguish compiler refusal after switching from earlier admission", async () => {
+  const { store, generation } = await prepare();
+  let earlierAdmissions = 0;
+  let refusedAdmissions = 0;
+  let restoreCompiler: (() => void) | undefined;
+  try {
+    const originalAdmission = admission.admitLegacyComposeCandidate;
+    const compilerSpy = spyOn(
+      admission,
+      "admitLegacyComposeCandidate"
+    ).mockImplementation(async (opts) => {
+      if ((await h.receipt()).publication?.phase === "switching") {
+        refusedAdmissions += 1;
+        return false;
+      }
+      earlierAdmissions += 1;
+      return await originalAdmission(opts);
+    });
+    restoreCompiler = () => compilerSpy.mockRestore();
+    let caught: unknown;
+    try {
+      await store.publish({ generation, binary: h.compiler });
+    } catch (error: unknown) {
+      caught = error;
+    }
+    expect(earlierAdmissions).toBeGreaterThan(0);
+    expect(refusedAdmissions).toBe(1);
+    expect(caught).toBeInstanceOf(LegacyComposeAdoptedGenerationError);
+    expect(legacyComposePublicationRefusal(caught)).toEqual({
+      stage: "publication-compiler",
+      reason: "legacy-unsupported",
+    });
+    const saved = await h.receipt();
+    expect(saved.publication?.phase).toBe("switching");
+    expect(saved.publication?.native).toBeNull();
+    expect(saved.routingHandoff).toBe("held");
+    expect(h.effects).toEqual([]);
+    expect(await readFile(join(h.root, ".hack/hack.config.json"), "utf8")).toBe(
+      h.config
+    );
+    expect(
+      await readFile(join(h.root, ".hack/docker-compose.yml"), "utf8")
+    ).toBe(h.compose);
+  } finally {
+    if (h.canRestore()) {
+      restoreCompiler?.();
+    }
+    await store.close();
+  }
+});
+/** Per-phase timing for the compound lifecycle tests. Each marker logs the elapsed
+ * and per-phase ms with the probe counts, and `attribute` names the phase in
+ * progress when a failure (such as a proof-deadline overrun) surfaces. Only timings
+ * and counts are added to the already value-free diagnostic; values stay omitted. */
+function compoundPhases(fixture: string) {
+  const started = Date.now();
+  let lastPhase = "enter";
+  let lastPhaseAt = started;
+  return {
+    phase: (value: string) => {
+      const now = Date.now();
       try {
         const inspections = (kind: string) =>
           h.commands.filter((args) => args[0] === kind && args[1] === "inspect")
             .length;
         console.info(
           JSON.stringify({
-            fixture: "retained-routing-compound",
+            fixture,
             phase: value,
+            elapsedMs: now - started,
+            phaseMs: now - lastPhaseAt,
             probes: h.commands.length,
             containerInspections: inspections("container"),
             networkInspections: inspections("network"),
@@ -123,24 +243,87 @@ test(
       } catch {
         // Diagnostic failure must not skip close or replace an original test error.
       }
-    };
+      lastPhase = value;
+      lastPhaseAt = now;
+    },
+    attribute: (error: unknown) => {
+      const now = Date.now();
+      return new Error(
+        `${fixture} failed ${now - lastPhaseAt} ms after phase "${lastPhase}" (${now - started} ms elapsed of ${COMPOUND_BUDGET_MS} ms budget): ${String(error)}`,
+        { cause: error }
+      );
+    },
+  };
+}
+/** Cold v14 preparation stop and publication, returning the active generation. */
+async function publishStoppedV14(
+  phase: (value: string) => void,
+  store: Awaited<ReturnType<typeof prepare>>["store"],
+  generation: Awaited<ReturnType<typeof prepare>>["generation"]
+) {
+  expect(generation.report.adoption_generation_version).toBe(14);
+  expect((await h.receipt()).routingHandoff).toBe("held");
+  expect(
+    await h.operation(store, generation, "stop", { preparation: true })
+  ).toBe(0);
+  phase("preparation-stop-return");
+  await store.publish({ generation, binary: h.compiler });
+  phase("publication-return");
+  expect((await h.receipt()).publication?.phase).toBe("active");
+  const active = await store.loadActive();
+  if (!active) {
+    throw new Error("Synthetic active generation missing");
+  }
+  phase("active-load-return");
+  return active;
+}
+/** Retained data survives, every child effect names only the retained db/web
+ * containers, and no probe pulls, builds, creates or removes a resource. */
+function expectRetainedResourcesOnly() {
+  expect(h.model.sqlRow).toBe(ROUTING_CANARY);
+  expect(
+    h.effects.every(
+      (args) =>
+        args.length === 5 &&
+        args[3] === ROUTING_IDS.db &&
+        args[4] === ROUTING_IDS.web
+    )
+  ).toBe(true);
+  expect(
+    h.commands.some(
+      (args) =>
+        args.includes("pull") ||
+        args.includes("build") ||
+        args.includes("create") ||
+        args.includes("rm")
+    )
+  ).toBe(false);
+}
+function volumeInspections() {
+  return h.commands.filter(
+    (args) => args[0] === "volume" && args[1] === "inspect"
+  ).length;
+}
+// The former single compound run (cold preparation/publication, four lifecycle
+// operations, the saved lease and rollback through one store) reached 46 s under
+// suite load and overran its 15 s rollback routing proof in hosted CI (run
+// 37999833592). It is split into the two tests below, each on a fresh fixture: the
+// first covers publication, the lifecycle operations and the saved lease; the
+// second covers rollback after a lifecycle cycle. Both open their store at the 60 s
+// product cap. The deadline-refusal controls in this file keep the 15 s default.
+test(
+  "v14 keeps original resources and data through stop/publication/up/down/up and saved open",
+  async () => {
+    const { phase, attribute } = compoundPhases(
+      "retained-routing-compound-lifecycle"
+    );
     phase("prepare-enter");
-    const { store, generation } = await prepare();
+    const { store, generation } = await prepare({
+      timeoutMs: COMPOUND_BUDGET_MS,
+    });
     phase("prepare-return");
     try {
-      expect(generation.report.adoption_generation_version).toBe(14);
-      expect((await h.receipt()).routingHandoff).toBe("held");
-      expect(
-        await h.operation(store, generation, "stop", { preparation: true })
-      ).toBe(0);
-      phase("preparation-stop-return");
-      await store.publish({ generation, binary: h.compiler });
-      phase("publication-return");
-      const active = await store.loadActive();
-      if (!active) {
-        throw new Error("Synthetic active generation missing");
-      }
-      phase("active-load-return");
+      const active = await publishStoppedV14(phase, store, generation);
       for (const operation of ["start", "stop", "start", "stop"] as const) {
         expect(await h.operation(store, active, operation)).toBe(0);
       }
@@ -154,6 +337,39 @@ test(
         },
       });
       phase("saved-lease-return");
+      expect((await h.receipt()).publication?.phase).toBe("active");
+      expectRetainedResourcesOnly();
+      expect(h.commands.length).toBeLessThanOrEqual(7300);
+      expect(volumeInspections()).toBeLessThanOrEqual(114);
+      phase("assertions-complete");
+    } catch (error: unknown) {
+      throw attribute(error);
+    } finally {
+      await store.close();
+      phase("store-close-return");
+    }
+    // One full cold preparation/publication, four lifecycle operations and a saved lease.
+    // Canonical bracketed scans add four probes per stable binding observation.
+  },
+  { timeoutMs: COMPOUND_BUDGET_MS }
+);
+test(
+  "v14 rollback after publication and one up/down restores originals and keeps data and the routing hold",
+  async () => {
+    const { phase, attribute } = compoundPhases(
+      "retained-routing-compound-rollback"
+    );
+    phase("prepare-enter");
+    const { store, generation } = await prepare({
+      timeoutMs: COMPOUND_BUDGET_MS,
+    });
+    phase("prepare-return");
+    try {
+      const active = await publishStoppedV14(phase, store, generation);
+      for (const operation of ["start", "stop"] as const) {
+        expect(await h.operation(store, active, operation)).toBe(0);
+      }
+      phase("lifecycle-cycle-return");
       await store.rollback();
       phase("rollback-return");
       expect(
@@ -164,39 +380,20 @@ test(
       ).toBe(h.compose);
       expect((await h.receipt()).publication?.phase).toBe("rolled-back");
       expect((await h.receipt()).routingHandoff).toBe("releasing");
-      expect(h.model.sqlRow).toBe(ROUTING_CANARY);
-      expect(
-        h.effects.every(
-          (args) =>
-            args.length === 5 &&
-            args[3] === ROUTING_IDS.db &&
-            args[4] === ROUTING_IDS.web
-        )
-      ).toBe(true);
-      expect(
-        h.commands.some(
-          (args) =>
-            args.includes("pull") ||
-            args.includes("build") ||
-            args.includes("create") ||
-            args.includes("rm")
-        )
-      ).toBe(false);
-      expect(h.commands.length).toBeLessThanOrEqual(9000);
-      expect(
-        h.commands.filter(
-          (args) => args[0] === "volume" && args[1] === "inspect"
-        ).length
-      ).toBeLessThanOrEqual(136);
+      expectRetainedResourcesOnly();
+      expect(h.commands.length).toBeLessThanOrEqual(6600);
+      expect(volumeInspections()).toBeLessThanOrEqual(99);
       phase("assertions-complete");
+    } catch (error: unknown) {
+      throw attribute(error);
     } finally {
       await store.close();
       phase("store-close-return");
     }
-    // One full cold preparation/publication, four lifecycle operations and rollback.
+    // One full cold preparation/publication, one lifecycle cycle and rollback.
     // Canonical bracketed scans add four probes per stable binding observation.
   },
-  { timeoutMs: 60_000 }
+  { timeoutMs: COMPOUND_BUDGET_MS }
 );
 test("read-only routing phase refuses volume birth drift at its complete final binding", async () => {
   const { store, generation } = await prepare();
@@ -693,6 +890,329 @@ test("interrupted claim handoff retries from durable releasing state after exact
   } finally {
     if (h.canRestore()) {
       restoreUnlink?.();
+    }
+    await store.close();
+  }
+});
+
+test("publication uses its just-observed entry binding within the unchanged proof deadline", async () => {
+  const { store, generation } = await prepare();
+  const originalNow = Date.now;
+  let virtualNow: number | undefined;
+  let charged = 0;
+  const clock = spyOn(Date, "now").mockImplementation(
+    () => virtualNow ?? originalNow()
+  );
+  try {
+    h.hooks.afterProbe = async (args) => {
+      const saved = await h.receipt();
+      if (
+        args[0] === "volume" &&
+        args[1] === "inspect" &&
+        saved.publication?.phase === "switching" &&
+        saved.publication.native === null
+      ) {
+        charged += 1;
+        virtualNow ??= originalNow();
+        virtualNow += 2600;
+      }
+    };
+    await store.publish({ generation, binary: h.compiler });
+    expect(charged).toBe(4);
+    expect((await h.receipt()).publication?.phase).toBe("active");
+    expect(h.effects).toEqual([]);
+  } finally {
+    clock.mockRestore();
+    Reflect.deleteProperty(h.hooks, "afterProbe");
+    await store.close();
+  }
+});
+
+test("publication keeps the fixed deadline when its first full proof already expires", async () => {
+  const { store, generation } = await prepare();
+  const originalNow = Date.now;
+  let virtualNow: number | undefined;
+  let reached = false;
+  const clock = spyOn(Date, "now").mockImplementation(
+    () => virtualNow ?? originalNow()
+  );
+  try {
+    h.hooks.afterProbe = async (args) => {
+      if (
+        !reached &&
+        args[0] === "volume" &&
+        args[1] === "inspect" &&
+        (await h.receipt()).publication?.phase === "switching"
+      ) {
+        reached = true;
+        virtualNow = originalNow() + 16_000;
+      }
+    };
+    let error: unknown;
+    try {
+      await store.publish({ generation, binary: h.compiler });
+    } catch (caught: unknown) {
+      error = caught;
+    }
+    expect(reached).toBe(true);
+    expect(legacyComposePublicationRefusal(error)).toEqual({
+      stage: "publication-routing",
+      reason: "legacy-state",
+    });
+    expect((await h.receipt()).publication).toMatchObject({
+      phase: "switching",
+      native: null,
+    });
+    expect(await readFile(join(h.root, ".hack/hack.config.json"), "utf8")).toBe(
+      h.config
+    );
+    expect(h.effects).toEqual([]);
+  } finally {
+    clock.mockRestore();
+    Reflect.deleteProperty(h.hooks, "afterProbe");
+    await store.close();
+  }
+});
+
+test("publication repeats full volume authority after its observed-entry routing window", async () => {
+  const { store, generation } = await prepare();
+  let admins = 0;
+  let volumeReads = 0;
+  let reached = false;
+  try {
+    h.hooks.afterProbe = async (args) => {
+      const saved = await h.receipt();
+      if (
+        saved.publication?.phase !== "switching" ||
+        saved.publication.native !== null
+      ) {
+        return;
+      }
+      if (args[0] === "volume" && args[1] === "inspect") {
+        volumeReads += 1;
+      }
+      if (
+        args[0] === "exec" &&
+        args.at(-1) === "http://127.0.0.1:2019/config/apps/http/servers"
+      ) {
+        admins += 1;
+        if (admins === 2) {
+          expect(volumeReads).toBe(2);
+          reached = true;
+          h.model.volumeBirth = "2026-02-02T02:03:04Z";
+        }
+      }
+    };
+    await red(store.publish({ generation, binary: h.compiler }));
+    expect(reached).toBe(true);
+    expect((await h.receipt()).publication).toMatchObject({
+      phase: "switching",
+      native: null,
+    });
+    expect(await readFile(join(h.root, ".hack/hack.config.json"), "utf8")).toBe(
+      h.config
+    );
+    expect(h.effects).toEqual([]);
+  } finally {
+    Reflect.deleteProperty(h.hooks, "afterProbe");
+    await store.close();
+  }
+});
+
+test("save-active uses its newly observed binding within the unchanged publication deadline", async () => {
+  const { store, generation } = await prepare();
+  const originalNow = Date.now;
+  let virtualNow = originalNow();
+  let charged = 0;
+  const clock = spyOn(Date, "now").mockImplementation(() => virtualNow);
+  try {
+    h.hooks.afterProbe = async (args) => {
+      const saved = await h.receipt();
+      if (
+        args[0] === "volume" &&
+        args[1] === "inspect" &&
+        saved.publication?.phase === "switching" &&
+        saved.publication.native !== null
+      ) {
+        charged += 1;
+        virtualNow += 2600;
+      }
+    };
+    await store.publish({ generation, binary: h.compiler });
+    expect(charged).toBe(4);
+    expect((await h.receipt()).publication?.phase).toBe("active");
+    expect(h.effects).toEqual([]);
+  } finally {
+    if (h.canRestore()) {
+      clock.mockRestore();
+      Reflect.deleteProperty(h.hooks, "afterProbe");
+    }
+    await store.close();
+  }
+});
+
+test("save-active classifies its original deadline guard after staging without active rename", async () => {
+  const { store, generation } = await prepare();
+  const originalNow = Date.now;
+  let virtualNow = originalNow();
+  let reached = false;
+  const clock = spyOn(Date, "now").mockImplementation(() => virtualNow);
+  let restoreRead: (() => void) | undefined;
+  try {
+    const originalRead = privateState.readPrivate;
+    const readSpy = spyOn(privateState, "readPrivate").mockImplementation(
+      async (...args) => {
+        const value = await originalRead(...args);
+        if (!reached && args[0].endsWith(".receipt")) {
+          const staged: unknown = JSON.parse(value.text);
+          if (
+            isRecord(staged) &&
+            isRecord(staged.publication) &&
+            staged.publication.phase === "active"
+          ) {
+            expect((await h.receipt()).publication).toMatchObject({
+              phase: "switching",
+            });
+            reached = true;
+            virtualNow += 16_000;
+          }
+        }
+        return value;
+      }
+    );
+    restoreRead = () => readSpy.mockRestore();
+    let error: unknown;
+    try {
+      await store.publish({ generation, binary: h.compiler });
+    } catch (caught: unknown) {
+      error = caught;
+    }
+    expect(reached).toBe(true);
+    expect(legacyComposePublicationRefusal(error)).toEqual({
+      stage: "publication-save-active-routing",
+      reason: "proof-deadline",
+    });
+    const saved = await h.receipt();
+    expect(saved.publication?.phase).toBe("switching");
+    expect(saved.publication?.native).not.toBeNull();
+    expect(saved.routingHandoff).toBe("held");
+    expect(h.effects).toEqual([]);
+  } finally {
+    if (h.canRestore()) {
+      clock.mockRestore();
+      restoreRead?.();
+    }
+    await store.close();
+  }
+});
+
+test("save-active rechecks receipt incarnation after the staged-write await", async () => {
+  const { store, generation } = await prepare();
+  let reached = false;
+  let restoreRead: (() => void) | undefined;
+  try {
+    const originalRead = privateState.readPrivate;
+    const readSpy = spyOn(privateState, "readPrivate").mockImplementation(
+      async (...args) => {
+        const value = await originalRead(...args);
+        if (!reached && args[0].endsWith(".receipt")) {
+          const staged: unknown = JSON.parse(value.text);
+          if (
+            isRecord(staged) &&
+            isRecord(staged.publication) &&
+            staged.publication.phase === "active"
+          ) {
+            const path = join(
+              h.root,
+              ".hack/.internal/legacy-compose-adoption-v1/receipt.json"
+            );
+            const previous = await readFile(path, "utf8");
+            await fs.rename(
+              path,
+              join(h.outer, "receipt-before-save-active-rebirth")
+            );
+            await fs.writeFile(path, previous, { flag: "wx", mode: 0o600 });
+            reached = true;
+          }
+        }
+        return value;
+      }
+    );
+    restoreRead = () => readSpy.mockRestore();
+    let error: unknown;
+    try {
+      await store.publish({ generation, binary: h.compiler });
+    } catch (caught: unknown) {
+      error = caught;
+    }
+    expect(reached).toBe(true);
+    expect(legacyComposePublicationRefusal(error)).toEqual({
+      stage: "publication-save-active-latest",
+      reason: "legacy-state",
+    });
+    const saved = await h.receipt();
+    expect(saved.publication?.phase).toBe("switching");
+    expect(saved.publication?.native).not.toBeNull();
+    expect(saved.routingHandoff).toBe("held");
+    expect(h.effects).toEqual([]);
+  } finally {
+    if (h.canRestore()) {
+      restoreRead?.();
+    }
+    await store.close();
+  }
+});
+
+test("save-active repeats full volume authority after its scoped routing observations", async () => {
+  const { store, generation } = await prepare();
+  let admins = 0;
+  let volumeReads = 0;
+  let readsAtInjection: number | undefined;
+  let reached = false;
+  try {
+    h.hooks.afterProbe = async (args) => {
+      const saved = await h.receipt();
+      if (
+        saved.publication?.phase !== "switching" ||
+        saved.publication.native === null
+      ) {
+        return;
+      }
+      if (args[0] === "volume" && args[1] === "inspect") {
+        volumeReads += 1;
+      }
+      if (
+        args[0] === "exec" &&
+        args.at(-1) === "http://127.0.0.1:2019/config/apps/http/servers"
+      ) {
+        admins += 1;
+        if (admins === 2) {
+          readsAtInjection = volumeReads;
+          reached = true;
+          h.model.volumeBirth = "2026-02-02T02:03:04Z";
+        }
+      }
+    };
+    let error: unknown;
+    try {
+      await store.publish({ generation, binary: h.compiler });
+    } catch (caught: unknown) {
+      error = caught;
+    }
+    expect(reached).toBe(true);
+    expect(readsAtInjection).toBe(2);
+    expect(legacyComposePublicationRefusal(error)).toEqual({
+      stage: "publication-save-active-routing",
+      reason: "legacy-changed",
+    });
+    const saved = await h.receipt();
+    expect(saved.publication?.phase).toBe("switching");
+    expect(saved.publication?.native).not.toBeNull();
+    expect(saved.routingHandoff).toBe("held");
+    expect(h.effects).toEqual([]);
+  } finally {
+    if (h.canRestore()) {
+      Reflect.deleteProperty(h.hooks, "afterProbe");
     }
     await store.close();
   }

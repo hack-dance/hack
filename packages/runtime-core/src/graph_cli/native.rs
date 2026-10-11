@@ -9,7 +9,7 @@ use std::{
 fn refused() -> CandidateError {
     CandidateError::new(
         "native_graph_arguments",
-        "Use graph native plan --source-file FILE, run|serve --source-file FILE --expect-review SHA [--environment-stdin] [--timeout-seconds 1..300] [--storage-witness-tool FILE --expect-storage-witness-tool SHA], inspect|cleanup|recovery-selection --run-id ID, recover-live-owner --run-id ID --expect-receipt SHA --expect-owner SHA, or logs --run-id ID --service SERVICE [--tail 1..1000], or control --run-id ID --action status|cleanup; optional --json. Foreground ownership and its recovery require macOS. Native source and private envelopes require their exact kind/version; values omitted.",
+        "Use graph native plan --source-file FILE, run|serve --source-file FILE --expect-review SHA [--environment-stdin] [--timeout-seconds 1..300] [--storage-witness-tool FILE --expect-storage-witness-tool SHA], inspect|cleanup|recovery-selection --run-id ID, recover-live-owner --run-id ID --expect-receipt SHA --expect-owner SHA, or logs --run-id ID --service SERVICE [--tail 1..1000], exec|one-off --run-id ID --service SERVICE [--workdir DIR] -- CMD..., or control --run-id ID --action status|cleanup; optional --json. Foreground ownership and its recovery require macOS. Native source and private envelopes require their exact kind/version; values omitted.",
     )
 }
 fn hex(value: &str, len: usize) -> bool {
@@ -20,8 +20,8 @@ fn hex(value: &str, len: usize) -> bool {
 }
 pub(super) fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateError> {
     let (action, args) = args.split_first().ok_or_else(refused)?;
-    if *action == "exec" {
-        return exec_command(candidate, args);
+    if ["exec", "one-off"].contains(action) {
+        return command_argv(candidate, args, *action == "one-off");
     }
     let mut singles = BTreeMap::new();
     let mut private = false;
@@ -315,7 +315,13 @@ fn foreground_unavailable() -> CandidateError {
     )
 }
 
-fn exec_command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateError> {
+/// `exec` runs inside the live member; `one-off` runs the same closed argv domain in
+/// a fresh container that the owner creates from the member and reaps afterwards.
+fn command_argv(
+    candidate: &Candidate,
+    args: &[&str],
+    one_off: bool,
+) -> Result<Value, CandidateError> {
     let split = args.iter().position(|s| *s == "--").ok_or_else(refused)?;
     let (options, command) = args.split_at(split);
     let mut values = BTreeMap::new();
@@ -363,11 +369,15 @@ fn exec_command(candidate: &Candidate, args: &[&str]) -> Result<Value, Candidate
     }
     #[cfg(target_os = "macos")]
     {
-        native::foreground::exec(candidate, run, service, &argv, workdir)
+        if one_off {
+            native::foreground::one_off(candidate, run, service, &argv, workdir)
+        } else {
+            native::foreground::exec(candidate, run, service, &argv, workdir)
+        }
     }
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = (candidate, run, service, argv, workdir, json);
+        let _ = (candidate, run, service, argv, workdir, json, one_off);
         Err(foreground_unavailable())
     }
 }

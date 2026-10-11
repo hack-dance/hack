@@ -3,42 +3,7 @@ import { createNativeComposeEngineIdentityObserver } from "./native-compose-engi
 import { refuseNativeComposeFile } from "./native-compose-file-bytes.ts";
 import { NATIVE_COMPOSE_VM_FILE_LIMIT } from "./native-compose-vm-file-protocol.ts";
 import { beginNativeCpuChild } from "./native-cpu-diagnostics.ts";
-import { findExecutableInPath } from "./shell.ts";
-
-async function capture(
-  stream: ReadableStream<Uint8Array>,
-  limit: number,
-  signal: AbortSignal
-): Promise<Uint8Array> {
-  const reader = stream.getReader();
-  const chunks: Uint8Array[] = [];
-  let size = 0;
-  const cancel = () => {
-    void reader.cancel().catch(() => undefined);
-  };
-  signal.addEventListener("abort", cancel, { once: true });
-  if (signal.aborted) {
-    cancel();
-  }
-  try {
-    while (true) {
-      const next = await reader.read();
-      if (next.done) {
-        break;
-      }
-      size += next.value.byteLength;
-      if (size > limit) {
-        refuseNativeComposeFile();
-      }
-      chunks.push(next.value);
-    }
-    return Buffer.concat(chunks, size);
-  } finally {
-    signal.removeEventListener("abort", cancel);
-    cancel();
-    reader.releaseLock();
-  }
-}
+import { findExecutableInPath, readBoundedStream } from "./shell.ts";
 
 function groupAbsent(pid: number): boolean {
   try {
@@ -271,15 +236,17 @@ export function createNativeComposeVmFileClient(opts: {
             unknown = true;
           },
         });
-        const output = capture(
+        const output = readBoundedStream(
           child.stdout,
           Math.min(remaining, NATIVE_COMPOSE_VM_FILE_LIMIT),
-          lifetime.io.signal
+          lifetime.io.signal,
+          refuseNativeComposeFile
         );
-        const diagnostics = capture(
+        const diagnostics = readBoundedStream(
           child.stderr,
           64 * 1024,
-          lifetime.io.signal
+          lifetime.io.signal,
+          refuseNativeComposeFile
         );
         try {
           const result = await Promise.race([

@@ -1,7 +1,7 @@
 import { isRecord } from "./guards.ts";
 import {
+  assertHostHookContract,
   type NativeComposeHook,
-  NativeComposeHostHookError,
   readNativeHostInvocation,
 } from "./native-compose-host-contract.ts";
 import { resolveNativeComposeEnvironment } from "./native-compose-renderer.ts";
@@ -22,11 +22,6 @@ export type NativeHostLifecycle = {
   readonly hooks: NativeFiniteHooks;
   readonly processes: readonly NativeHostProcess[];
 };
-function assert(value: unknown): asserts value {
-  if (!value) {
-    throw new NativeComposeHostHookError();
-  }
-}
 function only(
   value: Record<string, unknown>,
   names: readonly string[]
@@ -52,16 +47,18 @@ function hooksFor(
     if (sequence === undefined) {
       continue;
     }
-    assert(isRecord(sequence) && only(sequence, ["before", "after"]));
+    assertHostHookContract(
+      isRecord(sequence) && only(sequence, ["before", "after"])
+    );
     for (const order of ["before", "after"] as const) {
       const entries = sequence[order];
       if (entries === undefined) {
         continue;
       }
-      assert(Array.isArray(entries));
+      assertHostHookContract(Array.isArray(entries));
       for (const entry of entries) {
         const hook = readNativeHostInvocation(entry);
-        assert(!names.has(hook.name));
+        assertHostHookContract(!names.has(hook.name));
         names.add(hook.name);
         hooks[`${phase}.${order}`].push(hook);
       }
@@ -72,7 +69,7 @@ function hooksFor(
 function singletonFor(
   value: unknown
 ): NonNullable<NativeHostProcess["singleton"]> {
-  assert(
+  assertHostHookContract(
     isRecord(value) &&
       only(value, ["ports", "on_conflict"]) &&
       Array.isArray(value.ports) &&
@@ -82,7 +79,7 @@ function singletonFor(
       ) &&
       new Set(value.ports).size === value.ports.length
   );
-  assert(
+  assertHostHookContract(
     value.on_conflict === undefined ||
       value.on_conflict === "fail" ||
       value.on_conflict === "adopt"
@@ -90,7 +87,7 @@ function singletonFor(
   return { ports: [...value.ports], onConflict: value.on_conflict ?? "fail" };
 }
 function processFor(name: string, entry: unknown): NativeHostProcess {
-  assert(
+  assertHostHookContract(
     isRecord(entry) &&
       only(entry, [
         "command",
@@ -102,7 +99,7 @@ function processFor(name: string, entry: unknown): NativeHostProcess {
         "singleton",
       ])
   );
-  assert(
+  assertHostHookContract(
     (entry.startup === undefined || entry.startup === "up") &&
       (entry.exit === undefined || entry.exit === "stop_on_down")
   );
@@ -129,14 +126,16 @@ export function selectNativeHostLifecycle(
   plan: Readonly<Record<string, unknown>>
 ): NativeHostLifecycle {
   const host = plan.host;
-  assert(isRecord(host) && only(host, ["up", "down", "processes"]));
+  assertHostHookContract(
+    isRecord(host) && only(host, ["up", "down", "processes"])
+  );
   const names = new Set<string>();
   const hooks = hooksFor(host, names);
   const processes: NativeHostProcess[] = [];
   if (host.processes !== undefined) {
-    assert(isRecord(host.processes));
+    assertHostHookContract(isRecord(host.processes));
     for (const name of Object.keys(host.processes).sort()) {
-      assert(!names.has(name));
+      assertHostHookContract(!names.has(name));
       names.add(name);
       processes.push(processFor(name, host.processes[name]));
     }
@@ -151,13 +150,13 @@ export function nativeHostEndpointValue(
   binding: NativeEndpointBinding
 ): string {
   const { reference, target } = binding;
-  assert(
+  assertHostHookContract(
     reference.kind === "host_binding" &&
       (target.kind === "host" || target.kind === "external") &&
       target.protocol !== "tcp"
   );
   if (target.kind === "host") {
-    assert(target.context === "host");
+    assertHostHookContract(target.context === "host");
     return `${target.protocol}://127.0.0.1:${target.port}`;
   }
   return `${target.protocol}://${target.hostname}:${target.port}`;
@@ -170,7 +169,7 @@ export function resolveNativeHostInvocationEnvironment(opts: {
 }): Record<string, string> {
   const { invocation, report } = opts;
   const binding = report.host?.[invocation.name];
-  assert(
+  assertHostHookContract(
     report.complete &&
       report.diagnostics.length === 0 &&
       binding &&

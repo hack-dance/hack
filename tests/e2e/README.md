@@ -20,6 +20,39 @@ HACK_E2E_REQUIRE_TMUX=1 bun tests/e2e/run.ts --only=lifecycle-session-recovery
 Exit codes: `0` all pass/skip, `1` any scenario failed, `2` isolation canary
 failed (nothing ran).
 
+## CI tiering
+
+Only the `test` job (typecheck, lint, unit tests, build) is a required status
+check on `next` and `main`. `docker-e2e`, `Config compiler`, `Candidate core`,
+`Runtime state models`, `secret-scan`, `runtime-images` and
+`linux-process-lifetime` run on every push and pull request but are optional
+checks: a red result is a signal to triage, not a merge block. "Registered in
+Docker CI" below therefore means the optional `docker-e2e` job. Every job has a
+`timeout-minutes` budget so a hung engine or runner cannot hold a slot open.
+
+When `docker-e2e` fails, the process-policy scenario keeps its fixture roots and
+writes its fixed-field capsule and startup diagnostic under `HACK_E2E_CAPSULE_DIR`
+(`$RUNNER_TEMP/process-policy-capsules` in CI); the job uploads that directory
+as the `process-policy-capsules` artifact. Those files hold counts, enums and
+booleans only.
+
+
+## Compiler fixture prerequisite
+
+Suites that drive the actual config compiler need a built sidecar before they
+run. `bun run test` runs `test:preflight` first, which checks an explicit
+absolute `HACK_CONFIG_COMPILER_BINARY` or the checkout's
+`dist/hack-config-compiler` and stops before the suite with a fixed setup
+message. Prepare a checkout with `bun run build:config-compiler` (the hosted
+test job already does this). When a compiler-dependent suite is run directly
+with `bun test`, `tests/helpers/test-config-compiler.ts` applies the same
+selection once per file: an absent or non-executable fixture fails that file
+immediately with the same setup text, never a silent pass or one opaque
+`E_COMPILER_MISSING` refusal per case. Current users are
+`native-authored-command-dispatch`, `native-compose-file-owner` and
+`native-compose-file-sources`; add the helper when a new suite depends on the
+real compiler.
+
 The `native-compose-adoption-dependency-worktrees` Docker selector uses a closed
 forwarder for original-ID effects and fixed metadata/config-hash reads. First
 preparation hashes its saved Compose copy before publishing `receipt.prepared`.
@@ -253,7 +286,7 @@ fixtures or admit file/build/job/health/custom-network intersections.
 
 ## Native config process-policy qualification
 
-`native-config-process-policy` is registered in required Docker CI. It needs the
+`native-config-process-policy` is registered in the optional `docker-e2e` CI job. It needs the
 current compiled CLI, matching compiler and cached `oven/bun:1.4.2-slim`; it resolves
 the immutable image ID and never pulls, publishes ports, or activates DNS/trust.
 
@@ -283,9 +316,15 @@ This diagnostic emits no stack, source path, identifiers, labels or reply values
 and changes no ownership decision, query or budget. It does not reproduce wall
 timing, establish the original caller mode, or recover replies that were not saved.
 
+Each replay and the startup diagnostic also report a closed member-key histogram
+for the bridge the `network-member-id` predicate inspected: counts of `hex64`,
+`epPrefixed` (Docker `ep-` placeholder endpoints) and `other` keys, plus the fixed
+service names observed in the `restarting` state. The keys themselves are never
+emitted. This evidence is for classifying the flake; the ownership guard is unchanged.
+
 ## Native config routing qualification
 
-`native-config-routing` is a required Docker CI scenario using the current compiled
+`native-config-routing` is an optional `docker-e2e` CI scenario using the current compiled
 CLI and matching config compiler. Prepare `oven/bun:1.4.2-slim` and
 `lucaslorentz/caddy-docker-proxy:2.10.0-alpine` locally first; the scenario resolves
 cached immutable image IDs and never pulls. It requires the existing `hack-dev`
@@ -444,7 +483,7 @@ any e2e result.
 
 ## Native build acceptance
 
-`native-config-build` is a required Docker scenario using the cached
+`native-config-build` is an optional `docker-e2e` CI scenario using the cached
 `oven/bun:1.4.2-slim` base and the current compiled CLI/compiler. Its native-only
 project builds a selected multistage target through a checkout-anchored context
 with literal dollar characters and a context-relative nested Dockerfile. A second

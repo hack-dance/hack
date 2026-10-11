@@ -3,12 +3,11 @@ import { chmod, mkdir, mkdtemp, readdir, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { isRecord } from "../src/lib/guards.ts";
+import { requireTestConfigCompiler } from "./helpers/test-config-compiler.ts";
 
 const roots: string[] = [];
 const PRIVATE = "synthetic-private-dispatch-diagnostic";
-const realCompiler = resolve(
-  process.env.HACK_CONFIG_COMPILER_BINARY ?? "dist/hack-config-compiler"
-);
+const realCompiler = requireTestConfigCompiler();
 afterEach(async () => {
   await Promise.all(
     roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))
@@ -105,6 +104,12 @@ async function invoke(opts: {
 test.each([
   { args: ["up", "--detach"] },
   { args: ["up", "--json"] },
+  { args: ["restart", "--json"] },
+  { args: ["restart", "web"] },
+  { args: ["run", "web"] },
+  { args: ["run", "--profile", "dev", "web", "--", "true"] },
+  { args: ["run", "--env", "base", "web", "--", "true"] },
+  { args: ["run", "--workdir", "relative", "web", "--", "true"] },
 ])("source CLI native %j refuses before compiler or runtime work", async ({
   args,
 }) => {
@@ -113,7 +118,7 @@ test.each([
   expect(value.code).toBe(1);
   expect(value.stdout + value.stderr).toContain("E_NATIVE_PROJECT_UNSUPPORTED");
   expect(value.stdout + value.stderr).toContain(
-    "whole-project foreground up, owner-mediated down, ps, finite single-service logs --no-follow, noninteractive single-service exec, or explicit stored-generation down --recover on macOS"
+    "whole-project foreground up or restart, owner-mediated down, ps, finite single-service logs --no-follow, noninteractive single-service exec or run, or explicit stored-generation down --recover on macOS"
   );
   expect(await Bun.file(join(selected.root, "compiler-called")).exists()).toBe(
     false
@@ -160,6 +165,28 @@ macTest(
     const value = await invoke({ selected, args: ["down"], backend: "native" });
     expect(value.code).toBe(1);
     expect(value.stdout + value.stderr).toContain("E_LIFECYCLE_FAILED");
+    expect(
+      await Bun.file(join(selected.root, "compiler-called")).exists()
+    ).toBe(false);
+    expect(await readdir(join(selected.root, ".hack"))).toEqual([
+      "hack.project.json",
+    ]);
+  }
+);
+
+macTest(
+  "source CLI restart with no live hook owner refuses the stop half without compiler or runtime work",
+  async () => {
+    const selected = await fixture();
+    const value = await invoke({
+      selected,
+      args: ["restart"],
+      backend: "native",
+    });
+    expect(value.code).toBe(1);
+    expect(value.stdout + value.stderr).toContain("E_LIFECYCLE_FAILED");
+    expect(value.stdout + value.stderr).toContain("nothing was restarted");
+    expect(value.stdout + value.stderr).not.toContain("E_STARTUP_INCOMPLETE");
     expect(
       await Bun.file(join(selected.root, "compiler-called")).exists()
     ).toBe(false);

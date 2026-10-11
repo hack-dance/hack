@@ -322,7 +322,10 @@ fn cancellation_kills_term_resistant_tree_but_preserves_sentinel() {
 #[test]
 fn queue_cancellation_deadline_and_stale_generation_do_not_start_jobs() {
     let n = Node::new();
-    let active = n.ask(&n.submit("active", "tree", 10_000, 1000));
+    // The active job must still hold the slot when "expired" is queued, so the
+    // expiry below is forced by state rather than by the wall clock: a short
+    // execution budget would let slow polling free the slot and start the job.
+    let active = n.ask(&n.submit("active", "tree", 10_000, 10_000));
     let active_id = active["job_id"].as_str().unwrap();
     n.until(|| n.receipt(active_id).child_pid.is_some());
     let stale = n.submit("stale", "success", 1000, 1000);
@@ -339,11 +342,21 @@ fn queue_cancellation_deadline_and_stale_generation_do_not_start_jobs() {
     };
     n.ask(&cancel);
     assert_eq!(n.terminal(queued_id).starts, 0);
+    assert!(
+        !n.receipt(active_id).terminal(),
+        "active job must occupy the slot while the expiring job waits"
+    );
     let expired = n.ask(&n.submit("expired", "success", 100, 1000));
     let result = n.terminal(expired["job_id"].as_str().unwrap());
-    assert_eq!(result.state, "queue_expired");
+    assert_eq!(result.state, "queue_expired", "{result:?}");
     assert_eq!(result.starts, 0);
-    n.terminal(active_id);
+    let cancel_active = Request::Cancel {
+        version: 1,
+        mutation: n.mutation("cancel-active"),
+        job_id: active_id.into(),
+    };
+    n.ask(&cancel_active);
+    assert_eq!(n.terminal(active_id).state, "cancelled");
 }
 #[test]
 fn output_is_drained_beyond_retention_limit_and_failure_is_distinct() {

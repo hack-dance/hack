@@ -61,7 +61,7 @@ impl Engine<'_> {
 }
 
 /// Known completion of one reaped one-off container.
-#[cfg(any(feature = "native-config-plan", test))]
+#[cfg(any(all(feature = "native-config-plan", target_os = "macos"), test))]
 pub(in crate::provider) struct OneOffOutput {
     pub container: String,
     pub exit_code: i32,
@@ -70,7 +70,7 @@ pub(in crate::provider) struct OneOffOutput {
     pub truncated: bool,
 }
 
-#[cfg(any(feature = "native-config-plan", test))]
+#[cfg(any(all(feature = "native-config-plan", target_os = "macos"), test))]
 fn one_off_uncertain() -> CandidateError {
     CandidateError::new(
         "graph_service_one_off_uncertain",
@@ -78,7 +78,7 @@ fn one_off_uncertain() -> CandidateError {
     )
 }
 
-#[cfg(feature = "native-config-plan")]
+#[cfg(all(feature = "native-config-plan", any(target_os = "macos", test)))]
 impl Engine<'_> {
     /// One create, start, wait, completion inspection, bounded log read and forced
     /// removal of a named one-off container. Caller-owned identity checks share the
@@ -118,7 +118,7 @@ impl Engine<'_> {
     }
 }
 
-#[cfg(any(feature = "native-config-plan", test))]
+#[cfg(any(all(feature = "native-config-plan", target_os = "macos"), test))]
 fn one_off_guarded(
     name: &str,
     config: &Value,
@@ -133,7 +133,7 @@ fn one_off_guarded(
     })
 }
 
-#[cfg(any(feature = "native-config-plan", test))]
+#[cfg(any(all(feature = "native-config-plan", target_os = "macos"), test))]
 fn one_off(
     name: &str,
     config: &Value,

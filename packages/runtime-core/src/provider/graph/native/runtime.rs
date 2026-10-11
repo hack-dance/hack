@@ -13,7 +13,7 @@ pub(super) use exec::ServiceExec;
 pub(super) use exec::execute as service_exec;
 #[cfg(any(target_os = "macos", test))]
 mod run;
-#[cfg(any(target_os = "macos", test))]
+#[cfg(target_os = "macos")]
 pub(super) use run::RunSelection;
 #[cfg(target_os = "macos")]
 pub(super) use run::ServiceRun;

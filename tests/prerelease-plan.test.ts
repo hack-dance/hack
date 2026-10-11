@@ -721,7 +721,7 @@ test("packages complete metadata-bound archive and refuses replacement, tamperin
   }
 });
 
-test("packages exactly eight native payload members despite macOS source extended attributes", async () => {
+test("packages exactly the native payload members despite macOS source extended attributes", async () => {
   const root = await mkdtemp(join(tmpdir(), "hack-prerelease-xattr-"));
   try {
     const bundle = await fixture(root);
@@ -752,14 +752,14 @@ test("packages exactly eight native payload members despite macOS source extende
       expect(controlMembers.map((member) => member.name)).toContain(
         "._hack-native"
       );
-      expect(controlMembers).toHaveLength(16);
+      expect(controlMembers).toHaveLength(names.length * 2);
     }
     const output = join(root, "assets");
     await packagePrerelease({ plan, bundle, output });
     await verifyReleaseAssets({ plan, output });
     const members = await archiveMembers(join(output, plan.archive));
     expect(members.map((member) => member.name).sort()).toEqual(names.sort());
-    expect(members).toHaveLength(8);
+    expect(members).toHaveLength(names.length);
     expect(members.every((member) => member.file)).toBe(true);
     if (process.platform === "darwin") {
       const preserved = Bun.spawn(
@@ -1056,4 +1056,16 @@ test("stable CLI writes only validated version and tag outputs on manual input",
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("packager payload names every artifact the native candidate bundle script copies", async () => {
+  const script = await Bun.file(
+    new URL("../scripts/build-native-candidate.sh", import.meta.url)
+  ).text();
+  const copied = new Set(
+    [...script.matchAll(/"\$out\/([A-Za-z0-9._-]+)"/g)].map((match) => match[1])
+  );
+  copied.delete("mcp");
+  const expected = new Set([...PRERELEASE_PAYLOAD, ...CONFIG_COMPILER_PAYLOAD]);
+  expect([...copied].sort()).toEqual([...expected].sort());
 });

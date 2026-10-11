@@ -7,6 +7,7 @@ export const PRERELEASE_ENVIRONMENT = "v5-prerelease";
 export const PRERELEASE_PAYLOAD = [
   "hack-native",
   "hack-relay-guest",
+  "hack-storage-root-witness",
   "hack-cli",
   "hack-v5",
   "provider-pins.json",

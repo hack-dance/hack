@@ -328,6 +328,19 @@ leaves the pending generation; retry proves absence again and preserves any late
 foreign claim. A receipt already lost by an older version cannot be reconstructed
 from orphan generation files by this recovery path.
 
+Storage startup diagnostics retain the first closed owner boundary through witness
+error normalization. The stage distinguishes selection, cold absence, dependency,
+expectation admission/write, journal, enrollment read, provision, root discovery,
+seed, verification, closing root proof, completion write and publication. Carrier
+transport additionally distinguishes target, create, policy, start, response and
+cleanup; policy reasons identify shape, command, labels, host policy, mount
+cardinality, program/storage mounts and policy stability. Unknown errors remain
+`unclassified`. Diagnostics contain no paths, resource names, helper replies,
+error messages or causes. They add no observation, retry, repair or cleanup and
+do not change pending-state, deadline or effect admission rules. A stage names
+the first captured boundary; it does not establish the cause of older failures
+that did not retain that boundary.
+
 ## Remaining coverage
 
 This slice explicitly refuses foreground or partial-service startup, non-plain

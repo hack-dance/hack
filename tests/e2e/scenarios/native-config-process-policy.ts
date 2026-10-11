@@ -711,6 +711,7 @@ export const nativeConfigProcessPolicyScenario: Scenario = {
     };
     let failure: unknown;
     let failed = false;
+    let stopEvents: (() => Promise<string>) | null = null;
     try {
       const eventStart = await docker(["info", "--format", "{{.SystemTime}}"]);
       expect({
@@ -718,6 +719,36 @@ export const nativeConfigProcessPolicyScenario: Scenario = {
           eventStart.length <= 64 && Number.isFinite(Date.parse(eventStart)),
         message: "Retry event history requires the exact engine clock",
       });
+      // The daemon keeps only a bounded buffer of past events; helper carriers and
+      // readiness execs can evict the first retry start before a later `--until`
+      // read. Stream the owned retry events live from the engine clock instead.
+      const eventStream = Bun.spawn(
+        [
+          "docker",
+          "events",
+          "--since",
+          eventStart,
+          "--filter",
+          "type=container",
+          "--filter",
+          `label=${COMPOSE_SERVICE}=retry`,
+          "--filter",
+          "event=start",
+          "--filter",
+          "event=die",
+          "--format",
+          "{{json .}}",
+        ],
+        { cwd: ctx.tempRoot, stdin: "ignore", stdout: "pipe", stderr: "ignore" }
+      );
+      const eventOutput = new Response(eventStream.stdout).text();
+      stopEvents = async () => {
+        if (eventStream.exitCode === null) {
+          eventStream.kill();
+        }
+        await eventStream.exited;
+        return await eventOutput;
+      };
       const expectedEngineId = await docker(["info", "--format", "{{.ID}}"]);
       const initialTrace = await prepareProcessPolicyInitialTrace({
         directory: join(ctx.tempRoot, "initial-process-policy-trace"),
@@ -806,30 +837,8 @@ export const nativeConfigProcessPolicyScenario: Scenario = {
           '{"name":{{json .HostConfig.RestartPolicy.Name}},"maximumRetryCount":{{json .HostConfig.RestartPolicy.MaximumRetryCount}},"restartCount":{{json .RestartCount}}}',
         ])
       );
-      const eventEnd = await docker(["info", "--format", "{{.SystemTime}}"]);
-      expect({
-        that: eventEnd.length <= 64 && Number.isFinite(Date.parse(eventEnd)),
-        message: "Retry event history must have a finite engine-time endpoint",
-      });
-      const eventText = await docker([
-        "events",
-        "--since",
-        eventStart,
-        "--until",
-        eventEnd,
-        "--filter",
-        "type=container",
-        "--filter",
-        `container=${retryId}`,
-        "--filter",
-        `label=${OWNER}=${owner().ownerToken}`,
-        "--filter",
-        "event=start",
-        "--filter",
-        "event=die",
-        "--format",
-        "{{json .}}",
-      ]);
+      // The retry workload has settled (RestartCount 2, running); stop the live stream.
+      const eventText = await stopEvents();
       expect({
         that: eventText.length <= 65_536,
         message: "Exact retry event proof must remain bounded",
@@ -1096,6 +1105,7 @@ export const nativeConfigProcessPolicyScenario: Scenario = {
       failed = true;
       failure = error;
     }
+    await stopEvents?.().catch(() => "");
     try {
       await cleanup();
     } catch (error: unknown) {

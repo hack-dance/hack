@@ -341,7 +341,9 @@ async function heldRun(
   );
   let observed: Record<string, unknown> | null = null;
   try {
-    const deadline = Date.now() + 30_000;
+    // Witness-bearing one-offs verify storage carriers before the workload starts; allow the
+    // slower hosted engine to reach the running one-off well inside its own release wait.
+    const deadline = Date.now() + 90_000;
     while (Date.now() < deadline) {
       const active = await containers(opts.docker, source);
       expect({

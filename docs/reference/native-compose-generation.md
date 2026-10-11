@@ -64,6 +64,17 @@ stop. A run using the current saved generation preserves that anchor; the store
 refuses another generation while a current anchor exists. The adapter requires
 the exact saved document and explicit `up`/`restart` for input changes.
 
+An original `runEffect` refusal can carry `detail.native_compose_effect_refusal`
+in the CLI error. This contains only fixed stage and reason enums issued by the
+owner that caught it. The first issued boundary survives the existing uncertainty
+translation; a later storage-retention failure cannot replace that diagnostic.
+Raw error text, inspect replies, arguments, paths, resource identities and values
+are never diagnostic fields. Copied error properties do not acquire provenance.
+The diagnostic does not grant recovery, clear intent or change the original error
+code, checks, child lifetime or deadline. Missing detail leaves the cause unknown;
+returned incomplete outcomes retain their existing reporting contract. Historical
+failures without this detail remain unexplained.
+
 `publishRunProjection` derives a one-off document from the verified saved artifact
 inside the mutation lock. It accepts a target service, never caller-supplied JSON.
 The projection removes routing keys on that target and the saved route extension;

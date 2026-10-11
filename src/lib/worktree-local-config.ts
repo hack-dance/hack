@@ -438,13 +438,19 @@ async function readGitCheckoutIdentity(opts: {
   };
 }
 
-/** Ignore caller Git redirection and never surface repository paths or child output. */
-async function readGitInspection(opts: {
+/** Bounded read-only Git acquisition, separate from engine command file quotas.
+ * Ignore caller Git redirection and never surface repository paths or child output.
+ * An owner may supply a synchronous final admission and observe the owned child. */
+export async function readGitInspection(opts: {
   readonly projectRoot: string;
   readonly args: readonly string[];
   readonly signal?: AbortSignal;
+  readonly beforeSpawn?: () => undefined;
+  readonly onSpawn?: (pid: number) => undefined;
 }): Promise<string | null> {
-  throwIfCancelled(opts.signal);
+  const { projectRoot, signal, beforeSpawn, onSpawn } = opts;
+  const args = [...opts.args];
+  throwIfCancelled(signal);
   const env: Record<string, string> = {
     GIT_OPTIONAL_LOCKS: "0",
     GIT_CONFIG_NOSYSTEM: "1",
@@ -467,7 +473,12 @@ async function readGitInspection(opts: {
     }
   }
   try {
-    const child = Bun.spawn(["git", "-C", opts.projectRoot, ...opts.args], {
+    const admitted: unknown = beforeSpawn?.();
+    if (admitted !== undefined) {
+      throw worktreeVerificationError();
+    }
+    throwIfCancelled(signal);
+    const child = Bun.spawn(["git", "-C", projectRoot, ...args], {
       env,
       stdin: "ignore",
       stdout: "pipe",
@@ -491,29 +502,34 @@ async function readGitInspection(opts: {
       timedOut = true;
       kill();
     }, 10_000);
-    opts.signal?.addEventListener("abort", cancel, { once: true });
-    if (opts.signal?.aborted) {
+    signal?.addEventListener("abort", cancel, { once: true });
+    if (signal?.aborted) {
       cancel();
     }
     try {
-      const [output, code] = await Promise.all([
-        readGitOutput(child.stdout),
-        child.exited,
-      ]);
-      if (cancelled) {
-        throwIfCancelled(opts.signal);
+      const reading = readGitOutput(child.stdout);
+      let observationFailed = false;
+      try {
+        const observed: unknown = onSpawn?.(child.pid);
+        observationFailed = observed !== undefined;
+      } catch {
+        observationFailed = true;
       }
-      return code === 0 && !timedOut ? output : null;
+      const [output, code] = await Promise.all([reading, child.exited]);
+      if (cancelled) {
+        throwIfCancelled(signal);
+      }
+      return code === 0 && !timedOut && !observationFailed ? output : null;
     } finally {
       clearTimeout(timer);
-      opts.signal?.removeEventListener("abort", cancel);
+      signal?.removeEventListener("abort", cancel);
       if (child.exitCode === null) {
         kill();
       }
       await child.exited;
     }
   } catch (error: unknown) {
-    throwIfCancelled(opts.signal);
+    throwIfCancelled(signal);
     if (error instanceof NativeConfigCompilerError) {
       throw error;
     }

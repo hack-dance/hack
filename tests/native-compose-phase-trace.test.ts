@@ -324,6 +324,13 @@ test(
       expect(removal).toBeGreaterThanOrEqual(0);
       expect(phases.slice(removal)).toEqual([
         "oneoff.post-remove-owned",
+        "oneoff.post-remove-fresh",
+        "oneoff.post-remove-guard",
+        "guard.fresh-before",
+        "guard.ownership",
+        "guard.storage",
+        "guard.fresh-after",
+        "finish.witness-work",
         "finish.pending",
         "finalize.fresh",
         "finalize.generation",
@@ -331,6 +338,7 @@ test(
         "finalize.remember-storage",
         "finalize.witnesses",
         "finalize.pending",
+        "finalize.pending-check",
         "finalize.before-complete",
         "finalize.fresh",
         "finalize.generation",
@@ -338,6 +346,7 @@ test(
         "finalize.remember-storage",
         "finalize.witnesses",
         "finalize.pending",
+        "finalize.pending-check",
         "finalize.save",
       ]);
       expect(rows.every((row, index) => row.sequence === index + 1)).toBe(true);

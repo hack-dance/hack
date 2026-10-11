@@ -46,7 +46,6 @@ import {
   nativeDownEnvironment,
   nativeProjectDown,
 } from "../backends/native-project-down.ts";
-import { nativeProjectExec } from "../backends/native-project-exec.ts";
 import { adoptNativeLifecycleCleanup } from "../backends/native-project-lifecycle.ts";
 import { parseNativeAllowedHosts } from "../backends/native-project-network.ts";
 import {
@@ -292,6 +291,7 @@ import {
   prepareDisposableCachePrune,
   reconcileImplicitDownBranch,
 } from "./project-down-safety.ts";
+import { runNativeProjectExec } from "./project-exec-native.ts";
 
 /** Regex for valid TLD/service/subdomain labels (lowercase alphanumeric with hyphens). */
 const SLUG_LABEL_PATTERN = /^[a-z0-9][a-z0-9-]*$/;
@@ -7612,7 +7612,7 @@ async function handleExec({
     noticeToStderr: true,
   });
   if (native) {
-    const result = await nativeProjectExec({
+    return await runNativeProjectExec({
       runtime: native,
       scope: {
         projectRoot: project.projectRoot,
@@ -7620,17 +7620,11 @@ async function handleExec({
         nativeHome: native.home,
         branch,
       },
-      service: args.positionals.service ?? "",
+      service: args.positionals.service,
       argv: args.positionals.cmd,
       workdir: args.options.workdir,
       composeFile: project.composeFile,
     });
-    process.stdout.write(result.stdout);
-    process.stderr.write(result.stderr);
-    if (result.truncated) {
-      process.stderr.write("Native exec output was truncated.\n");
-    }
-    return result.exitCode;
   }
   const envName = resolveRequestedEnvName({
     envOption: args.options.env,

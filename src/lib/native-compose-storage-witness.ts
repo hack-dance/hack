@@ -890,7 +890,9 @@ function expectationMatchesReference(opts: {
 }
 
 /**
- * Internal foundation: the CLI refuses witness-bearing workload admission until its carrier is qualified.
+ * Ordinary native Compose `up`, `restart` and cold storage-backed `run` enroll
+ * through this path with the Docker directory-xattr carrier supplied by command
+ * admission; a missing carrier refuses before any workload effect.
  * The owning generation mutation must prove a genuinely absent new volume or
  * explicit stopped adoption. It must publish a required new receipt version
  * before creating this extension; v1/v2 migration cannot establish past continuity.
@@ -904,7 +906,8 @@ export async function prepareNativeComposeStorageWitness(opts: {
   readonly admission: "initial-create" | "explicit-adoption";
   readonly originalVolume?: NativeComposeRetainedVolume;
   readonly assertAdmission: () => Promise<void>;
-  /** Explicit internal xattr path; no CLI caller supplies this unactivated carrier. */
+  /** Directory-xattr carrier from ordinary command admission. Omitting it keeps
+   * the archive foundation, which no CLI command supplies. */
   readonly xattrCarrier?: NativeComposeStorageXattrCarrier;
 }): Promise<NativeComposeStorageWitnessEnrollment> {
   const input = Object.freeze({
@@ -1373,7 +1376,8 @@ export async function verifyNativeComposeStorageWitness(opts: {
   });
 }
 
-/** Explicitly tagged, unactivated source-only xattr enrollment path. */
+/** Explicitly tagged xattr enrollment path. Ordinary command admission uses it
+ * for an originally absent selected volume on the cataloged carrier platforms. */
 export async function prepareNativeComposeStorageXattrWitness(
   opts: Omit<
     Parameters<typeof prepareNativeComposeStorageWitness>[0],

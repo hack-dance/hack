@@ -11,6 +11,7 @@ import {
   type NativeAuthoredProjectStatus,
   nativeAuthoredProjectPs,
 } from "../backends/native-authored-project-observe.ts";
+import { nativeAuthoredProjectRun } from "../backends/native-authored-project-oneoff.ts";
 import { recoverNativeAuthoredProject } from "../backends/native-authored-project-recovery.ts";
 import {
   NativeAuthoredProjectRestartError,
@@ -37,7 +38,7 @@ function unsupported(): never {
   throw new HackCliError({
     code: "E_NATIVE_PROJECT_UNSUPPORTED",
     message:
-      "Native authored execution requires whole-project foreground up or restart, owner-mediated down, ps, finite single-service logs --no-follow, noninteractive single-service exec, or explicit stored-generation down --recover on macOS. This request ran no input or runtime operation.",
+      "Native authored execution requires whole-project foreground up or restart, owner-mediated down, ps, finite single-service logs --no-follow, noninteractive single-service exec or run, or explicit stored-generation down --recover on macOS. This request ran no input or runtime operation.",
   });
 }
 
@@ -238,6 +239,7 @@ function restartFailure(error: unknown): number {
 
 type Mode =
   | "exec"
+  | "run"
   | "status"
   | "recovery"
   | "stop"
@@ -252,9 +254,9 @@ const FOREGROUND_MODES: Readonly<
   restart: "restart",
 };
 function commandMode(options: NativeComposeCommandOptions): Mode {
-  if (options.operation === "exec") {
-    assertExecOptions(options);
-    return "exec";
+  if (options.operation === "exec" || options.operation === "run") {
+    assertCommandOptions(options, options.operation);
+    return options.operation;
   }
   if (options.operation === "logs") {
     assertLogsOptions(options);
@@ -349,6 +351,7 @@ type Seams = {
   readonly logs?: typeof nativeAuthoredProjectLogs;
   readonly stop?: typeof stopNativeAuthoredProject;
   readonly exec?: typeof nativeAuthoredProjectExec;
+  readonly run?: typeof nativeAuthoredProjectRun;
 };
 type Runtime = NonNullable<ReturnType<typeof resolveNativeRuntimeSelection>>;
 type RunnerInput = {
@@ -454,7 +457,7 @@ function runRestart(input: LifecycleInput): Promise<number> {
 /** Two-stage cancellation and the bounded startup budget shared by the lifecycle modes. */
 async function runAuthoredLifecycle(
   input: RunnerInput,
-  mode: Exclude<Mode, "exec" | "logs">,
+  mode: Exclude<Mode, "exec" | "run" | "logs">,
   action: (lifecycle: LifecycleInput) => Promise<number>
 ): Promise<number> {
   const startupTimeoutMs =
@@ -497,11 +500,20 @@ async function runAuthoredLifecycle(
 const RUNNERS: Readonly<Record<Mode, (input: RunnerInput) => Promise<number>>> =
   {
     exec: (input) =>
-      runAuthoredExec({
+      runAuthoredCommand({
         options: input.options,
         projectRoot: input.projectRoot,
         runtime: input.runtime,
-        exec: input.seams.exec ?? nativeAuthoredProjectExec,
+        perform: input.seams.exec ?? nativeAuthoredProjectExec,
+        contract: COMMAND_CONTRACTS.exec,
+      }),
+    run: (input) =>
+      runAuthoredCommand({
+        options: input.options,
+        projectRoot: input.projectRoot,
+        runtime: input.runtime,
+        perform: input.seams.run ?? nativeAuthoredProjectRun,
+        contract: COMMAND_CONTRACTS.run,
       }),
     logs: (input) =>
       runAuthoredLogs({
@@ -522,7 +534,8 @@ const RUNNERS: Readonly<Record<Mode, (input: RunnerInput) => Promise<number>>> =
  * Compose and omitted selections retain their existing owner. Foreground up delegates
  * to the tagged lifetime owner; ordinary down uses its authenticated stop. Foreground
  * restart sequences that same stop before a fresh foreground up with the given
- * selection. Ps and finite service logs observe its saved run;
+ * selection. Ps and finite service logs observe its saved run; finite exec and
+ * one-off run send one command through its live owner;
  * explicit down --recover uses the stored cleanup owner without input acquisition.
  * Unsupported requests never start input acquisition or runtime work.
  */
@@ -565,10 +578,18 @@ export async function tryNativeAuthoredCommand(
   });
 }
 
-function assertExecOptions(options: NativeComposeCommandOptions): void {
+/**
+ * Exec and one-off run share the closed noninteractive command domain: one
+ * service, a literal argv, an optional absolute workdir, no TTY/stdin, no
+ * profile/env/service-list/JSON/detach/log options.
+ */
+function assertCommandOptions(
+  options: NativeComposeCommandOptions,
+  operation: "exec" | "run"
+): void {
   if (
     process.platform !== "darwin" ||
-    options.operation !== "exec" ||
+    options.operation !== operation ||
     !nativeAuthoredExecOptions(
       options.service,
       options.command,
@@ -588,13 +609,44 @@ function assertExecOptions(options: NativeComposeCommandOptions): void {
     unsupported();
   }
 }
-async function runAuthoredExec(input: {
+type CommandContract = {
+  readonly truncated: string;
+  readonly unconfirmed: string;
+};
+const COMMAND_CONTRACTS: Readonly<Record<"exec" | "run", CommandContract>> = {
+  exec: {
+    truncated: "Native exec output was truncated.\n",
+    unconfirmed:
+      "Native authored exec completion is unconfirmed; command effects may have occurred. Values omitted. No request was replayed.",
+  },
+  run: {
+    truncated: "Native run output was truncated.\n",
+    unconfirmed:
+      "Native authored run completion is unconfirmed; command effects may have occurred and its one-off container may remain until down. Values omitted. No request was replayed.",
+  },
+};
+type CommandCompletion = {
+  readonly exitCode: number;
+  readonly stdout: Uint8Array;
+  readonly stderr: Uint8Array;
+  readonly truncated: boolean;
+};
+/** One owner-mediated command whose validated completion is written in order; cancellation stops further writes. */
+async function runAuthoredCommand(input: {
   readonly options: NativeComposeCommandOptions;
   readonly projectRoot: string;
   readonly runtime: NonNullable<
     ReturnType<typeof resolveNativeRuntimeSelection>
   >;
-  readonly exec: typeof nativeAuthoredProjectExec;
+  readonly perform: (request: {
+    readonly runtime: Runtime;
+    readonly scope: NativeAuthoredProjectRunScope;
+    readonly service: string;
+    readonly command: readonly string[];
+    readonly workdir?: string;
+    readonly signal: AbortSignal;
+  }) => Promise<CommandCompletion>;
+  readonly contract: CommandContract;
 }): Promise<number> {
   const controller = new AbortController();
   const cancel = () => controller.abort();
@@ -602,7 +654,7 @@ async function runAuthoredExec(input: {
   process.on("SIGTERM", cancel);
   try {
     const root = await realpath(input.projectRoot);
-    const result = await input.exec({
+    const result = await input.perform({
       runtime: input.runtime,
       scope: {
         projectRoot: root,
@@ -627,7 +679,7 @@ async function runAuthoredExec(input: {
       return 130;
     }
     if (result.truncated) {
-      process.stderr.write("Native exec output was truncated.\n");
+      process.stderr.write(input.contract.truncated);
     }
     return controller.signal.aborted ? 130 : result.exitCode;
   } catch {
@@ -636,8 +688,7 @@ async function runAuthoredExec(input: {
     }
     throw new HackCliError({
       code: "E_LIFECYCLE_FAILED",
-      message:
-        "Native authored exec completion is unconfirmed; command effects may have occurred. Values omitted. No request was replayed.",
+      message: input.contract.unconfirmed,
     });
   } finally {
     process.off("SIGINT", cancel);

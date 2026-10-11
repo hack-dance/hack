@@ -3,7 +3,7 @@
 An explicit `HACK_RUNTIME_BACKEND=native` selection delegates an authored
 `.hack/hack.project.json` project to the separate native foreground owner. The
 current command slice supports whole-project foreground `up` and `restart`, saved-run `ps`,
-finite service `logs` and noninteractive service `exec` on macOS with an absolute `HACK_NATIVE_BINARY` and private
+finite service `logs`, noninteractive service `exec` and one-off service `run` on macOS with an absolute `HACK_NATIVE_BINARY` and private
 canonical `HACK_NATIVE_HOME`. It requires
 the caller's separately prepared native provider pool and matching runtime binary.
 It does not install or select a runtime automatically. An omitted backend continues
@@ -63,8 +63,8 @@ directories, saved record identities and the selected executable across its sing
 bounded request. It does not compile or read authored values, resolve env, run
 hooks, start workloads, repair state or perform cleanup. Cancellation waits for the
 owned request to settle. Profiles, env overrides, service subsets and other `ps`
-options are unsupported. Native `run` remains a separate unsupported command
-slice; whole-project `restart` is described below.
+options are unsupported. Finite one-off `run` and whole-project `restart` are
+described below.
 
 The separate persistent-storage capability requires the runtime's pinned sibling
 witness tool and retains its own ownership and recovery checks. It cannot be combined
@@ -260,6 +260,48 @@ already-written bytes cannot be retracted. No request is replayed and the foregr
 project is not stopped. Inspect the service before
 deciding whether another command is appropriate. Offline controls do not qualify
 installed native exec or live application behavior.
+
+## Finite one-off service run
+
+`run SERVICE -- COMMAND ARG...` sends one command to the authenticated foreground
+owner of a running authored project, which runs it in a fresh one-off container
+rather than inside the service's running member. The owner derives the container
+from the exact admitted member it inspects: the same immutable image, the member's
+effective environment, entrypoint, user and working directory (`--workdir` selects
+an absolute guest directory instead), the same dropped capabilities and process
+policy, and the member's network namespace, so the command reaches the project's
+other services exactly as the member does. The one-off never joins a project
+network as its own endpoint, never carries the service alias or canonical member
+name, and never registers as the service's member; `ps`, `logs` and `exec`
+continue to observe the original member. Arguments are literal, including empty
+arguments, spaces and shell characters; no shell is inserted. Stdin is closed and
+no TTY is allocated.
+
+The owner verifies the admitted service, full resource ownership, guest boot, image,
+container start generation and current source/data bindings before each create,
+start, wait, log read and removal transport and after completion. It publishes a
+value-free pending record for the one-off before the create effect and discards it
+only after the one-off's proven removal. A one-off whose member carries mounts
+(live source, persistent data or private environment delivery) refuses before any
+effect; its container would otherwise need its own admitted bindings. An omitted
+command, `--profile`, `--env`, service subsets, `--json`, detached execution, TTY or
+interactive input refuse before input acquisition or any owner request. This does
+not start, restart or recover a project and does not acquire managed values.
+
+One 30-second observation budget covers the identity proofs, the create, start and
+completion wait, a bounded log read and the forced removal. Known completion
+preserves the command's exit code and binary stdout/stderr, with up to 1 MiB per
+stream and an explicit truncation notice. A timed-out, interrupted or unproven step
+withholds output and keeps the one-off container and its pending record; the next
+whole-project `down`, or `down --recover` for a dead owner, removes every recorded
+one-off before it stops the canonical members, and a record whose container is
+already absent is discarded without effects. A recorded container whose labels do
+not match the exact run, review, owner and token is never removed. Cancellation
+settles the local request but cannot prove guest completion; once a validated
+completion is being written, cancellation returns 130 and prevents remaining writes.
+No request is replayed and the foreground project is not stopped. Portable
+stand-in and fake-engine controls cover the derivation, record lifecycle and reap
+ordering; installed native run and live application behavior remain separate gates.
 
 ## Finite host lifecycle hooks
 

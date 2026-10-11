@@ -11,25 +11,34 @@ pub(in crate::provider::graph::native) struct ExecSelection {
 }
 impl ExecSelection {
     pub(in crate::provider::graph::native) fn valid(&self) -> bool {
-        !self.service.is_empty()
-            && self.service.len() <= 128
-            && self
-                .service
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b"_.-".contains(&b))
-            && !self.argv.is_empty()
-            && self.argv.len() <= 256
-            && !self.argv[0].is_empty()
-            && self
-                .argv
-                .iter()
-                .all(|s| !s.contains('\0') && s.len() <= 16 * 1024)
-            && self.argv.iter().map(String::len).sum::<usize>() <= 64 * 1024
-            && self
-                .workdir
-                .as_deref()
-                .is_none_or(|p| p.starts_with('/') && !p.contains('\0') && p.len() <= 4096)
+        valid_selection(&self.service, &self.argv, self.workdir.as_deref())
     }
+}
+/// The closed noninteractive command domain shared by exec and one-off run.
+pub(super) fn valid_selection(service: &str, argv: &[String], workdir: Option<&str>) -> bool {
+    !service.is_empty()
+        && service.len() <= 128
+        && service
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"_.-".contains(&b))
+        && !argv.is_empty()
+        && argv.len() <= 256
+        && !argv[0].is_empty()
+        && argv
+            .iter()
+            .all(|s| !s.contains('\0') && s.len() <= 16 * 1024)
+        && argv.iter().map(String::len).sum::<usize>() <= 64 * 1024
+        && workdir.is_none_or(|p| p.starts_with('/') && !p.contains('\0') && p.len() <= 4096)
+}
+/// One finite base64 stream of at most 1 MiB in canonical encoding.
+pub(super) fn valid_stream(text: &str) -> bool {
+    text.len() <= 1_398_104
+        && base64::engine::general_purpose::STANDARD
+            .decode(text)
+            .is_ok_and(|bytes| {
+                bytes.len() <= 1024 * 1024
+                    && base64::engine::general_purpose::STANDARD.encode(bytes) == *text
+            })
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -54,18 +63,8 @@ impl ServiceExec {
                 .and_then(|r| r.id.as_deref())
                 == Some(self.container.as_str())
             && (0..=255).contains(&self.exit_code)
-            && [&self.stdout_base64, &self.stderr_base64]
-                .iter()
-                .all(|text| {
-                    text.len() <= 1_398_104
-                        && base64::engine::general_purpose::STANDARD
-                            .decode(text)
-                            .is_ok_and(|bytes| {
-                                bytes.len() <= 1024 * 1024
-                                    && base64::engine::general_purpose::STANDARD.encode(bytes)
-                                        == **text
-                            })
-                })
+            && valid_stream(&self.stdout_base64)
+            && valid_stream(&self.stderr_base64)
     }
 }
 #[cfg(target_os = "macos")]
@@ -103,12 +102,8 @@ pub(in crate::provider::graph::native) fn execute(
     managed_environment::remaining_until(deadline)?;
     Ok(result)
 }
-fn member<B: Backend>(
-    backend: &B,
-    receipt: &Receipt,
-    resource: &Resource,
-) -> Result<String, CandidateError> {
-    let value = inspected(backend, receipt, resource)?.ok_or_else(refused)?;
+/// The exact running member's start generation; a restart changes it.
+pub(super) fn generation(value: &Value) -> Result<String, CandidateError> {
     if value["State"]["Running"] != true
         || value["State"]["Paused"] != false
         || value["State"]["Restarting"] != false
@@ -120,6 +115,13 @@ fn member<B: Backend>(
         .filter(|s| !s.is_empty() && s.len() <= 64)
         .map(str::to_owned)
         .ok_or_else(refused)
+}
+pub(super) fn member<B: Backend>(
+    backend: &B,
+    receipt: &Receipt,
+    resource: &Resource,
+) -> Result<String, CandidateError> {
+    generation(&inspected(backend, receipt, resource)?.ok_or_else(refused)?)
 }
 pub(super) fn execute_with<B: Backend>(
     backend: &B,

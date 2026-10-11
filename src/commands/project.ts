@@ -7399,7 +7399,7 @@ async function handleRun({
     project: args.options.project,
     operation: "run",
     instance: args.options.branch,
-    profiles: parseCsvList(args.options.profile),
+    profiles: optionalCsvList(args.options.profile),
     overlay: args.options.env,
     service: args.positionals.service,
     command: args.positionals.cmd,
@@ -7580,10 +7580,7 @@ async function handleExec({
     project: args.options.project,
     operation: "exec",
     instance: args.options.branch,
-    profiles:
-      args.options.profile === undefined
-        ? undefined
-        : parseCsvList(args.options.profile),
+    profiles: optionalCsvList(args.options.profile),
     overlay: args.options.env,
     service: args.positionals.service,
     command: args.positionals.cmd,
@@ -8357,6 +8354,10 @@ async function handleLogs({
   });
 }
 
+/** An omitted option stays omitted so native dispatch can distinguish it from an explicit empty list. */
+function optionalCsvList(value: string | undefined): string[] | undefined {
+  return value === undefined ? undefined : parseCsvList(value);
+}
 function parseCsvList(value: string | undefined): string[] {
   const raw = (value ?? "").trim();
   if (raw.length === 0) {

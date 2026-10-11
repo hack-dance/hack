@@ -83,6 +83,8 @@ export async function invokeNativeRuntime(opts: {
   readonly boundNativeAuthoredLogsDrain?: boolean;
   /** Finite authored exec closes stdin and binds output to its exact request child. */
   readonly boundNativeAuthoredExecDrain?: boolean;
+  /** Finite authored one-off run shares exec's closed argv domain under the one-off action. */
+  readonly boundNativeAuthoredOneOffDrain?: boolean;
   /** Native source planning and journal inspection also bind pipe lifetime to their owned read child. */
   readonly boundNativeAuthoredReadDrain?: boolean;
   /** Explicit recovery requests have their own closed argv domain and never accept private input. */
@@ -167,7 +169,7 @@ export async function invokeNativeRuntime(opts: {
           "Native runtime request was canceled; its outcome may be uncertain. No request was replayed.",
       });
     }
-    if ((bound === "logs" || bound === "exec") && drain?.signal.aborted) {
+    if (outputBound(bound) && drain?.signal.aborted) {
       throw new NativeRuntimeRequestError({
         message:
           "Native authored command output did not settle; no output was admitted. Command effects may have occurred; no request was replayed.",
@@ -194,7 +196,7 @@ export async function invokeNativeRuntime(opts: {
     }
     clearTimeout(drainTimer);
     drain?.abort();
-    if (bound === "exec") {
+    if (commandBound(bound)) {
       await failureDetails;
     }
   }
@@ -204,10 +206,19 @@ export async function invokeNativeRuntime(opts: {
 type BoundDrain =
   | "status"
   | "exec"
+  | "one-off"
   | "logs"
   | "read"
   | "recovery-selection"
   | "recovery-cleanup";
+/** Exec and one-off run carry command output and join their failure reader after settlement. */
+function commandBound(bound: BoundDrain | "conflict" | undefined): boolean {
+  return bound === "exec" || bound === "one-off";
+}
+/** Logs and command drains must settle before any captured bytes are admitted. */
+function outputBound(bound: BoundDrain | "conflict" | undefined): boolean {
+  return bound === "logs" || commandBound(bound);
+}
 
 /**
  * Fold the drain flags into one selection. More than one selected flag is a
@@ -217,6 +228,7 @@ type BoundDrain =
 function boundDrainSelection(opts: {
   readonly boundNativeStatusDrain?: boolean;
   readonly boundNativeAuthoredExecDrain?: boolean;
+  readonly boundNativeAuthoredOneOffDrain?: boolean;
   readonly boundNativeAuthoredLogsDrain?: boolean;
   readonly boundNativeAuthoredReadDrain?: boolean;
   readonly boundNativeAuthoredRecoveryDrain?: "selection" | "cleanup";
@@ -227,6 +239,9 @@ function boundDrainSelection(opts: {
   }
   if (opts.boundNativeAuthoredExecDrain) {
     selected.push("exec");
+  }
+  if (opts.boundNativeAuthoredOneOffDrain) {
+    selected.push("one-off");
   }
   if (opts.boundNativeAuthoredLogsDrain) {
     selected.push("logs");
@@ -254,7 +269,13 @@ function validBoundDrainSelection(
     case "status":
       return validNativeStatusDrainSelection(args);
     case "exec":
-      return validNativeAuthoredExecDrainSelection(args, privateInput);
+      return validNativeAuthoredExecDrainSelection(args, privateInput, "exec");
+    case "one-off":
+      return validNativeAuthoredExecDrainSelection(
+        args,
+        privateInput,
+        "one-off"
+      );
     case "logs":
       return validNativeAuthoredLogsDrainSelection(args, privateInput);
     case "read":
@@ -574,7 +595,8 @@ export function rethrowNativeInputFailure(
 
 function validNativeAuthoredExecDrainSelection(
   args: readonly string[],
-  privateInput: boolean
+  privateInput: boolean,
+  action: "exec" | "one-off"
 ): boolean {
   const workdir = args[7] === "--workdir" ? args[8] : undefined;
   const json = workdir === undefined ? 7 : 9;
@@ -582,7 +604,7 @@ function validNativeAuthoredExecDrainSelection(
     !privateInput &&
     args[0] === "graph" &&
     args[1] === "native" &&
-    args[2] === "exec" &&
+    args[2] === action &&
     args[3] === "--run-id" &&
     NATIVE_RUN.test(args[4] ?? "") &&
     args[5] === "--service" &&

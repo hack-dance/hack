@@ -1,3 +1,4 @@
+import { deepFreeze } from "../lib/guards.ts";
 import type { acquireNativeExecutionInputs } from "../lib/native-execution-inputs.ts";
 import {
   type NativeFiniteHooks,
@@ -38,14 +39,6 @@ export type NativeAuthoredStartupAttempt = {
   observed?: NativeAuthoredReceipt;
   ready?: NativeAuthoredProjectRunSelection;
 };
-function freeze(value: unknown): void {
-  if (typeof value === "object" && value !== null) {
-    for (const child of Object.values(value)) {
-      freeze(child);
-    }
-    Object.freeze(value);
-  }
-}
 export function hookSelection(inputs: Inputs): string {
   const plan = inputs.result.plan;
   return JSON.stringify({
@@ -227,7 +220,7 @@ export async function publishAuthoredReady(
       return undefined;
     },
   });
-  freeze(opts.admitted.ready);
+  deepFreeze(opts.admitted.ready);
   if (opts.hookOwner) {
     const endpoint = await serveNativeHookStop({
       run: opts.run,

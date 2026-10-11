@@ -14,7 +14,8 @@ const DIGEST = /^[a-f0-9]{64}$/;
 const WORKLOAD = /^[a-z0-9][a-z0-9._-]{0,62}$/;
 const UNSAFE_TARGET = /[\\\0]/;
 const DECIMAL = /^(0|[1-9][0-9]{0,24})$/;
-function json(text: string): unknown {
+/** Parse owner-issued VM file JSON; any syntax failure is the closed file refusal. */
+export function parseVmFileJson(text: string): unknown {
   try {
     return JSON.parse(text);
   } catch {
@@ -84,7 +85,7 @@ export function parseVmFileFacts(text: string): VmFileFacts {
   if (Buffer.byteLength(text) > NATIVE_COMPOSE_VM_FILE_LIMIT) {
     return refuseNativeComposeFile();
   }
-  const value = json(text);
+  const value = parseVmFileJson(text);
   if (
     !(
       isRecord(value) &&
@@ -216,7 +217,7 @@ export function parseVmFileJournal(opts: {
     .trim()
     .split("\n")
     .filter(Boolean)) {
-    const row = json(line);
+    const row = parseVmFileJson(line);
     if (
       !(isRecord(row) && keys(row, "phase") && typeof row.phase === "string")
     ) {

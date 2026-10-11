@@ -18,7 +18,8 @@ export class NativeComposeHostHookError extends Error {
   }
 }
 
-function assert(value: unknown): asserts value {
+/** Shared host hook contract guard: every violation is the same value-free refusal. */
+export function assertHostHookContract(value: unknown): asserts value {
   if (!value) {
     throw new NativeComposeHostHookError();
   }
@@ -92,8 +93,10 @@ function selectNativeComposeLifecycleHooks(
     return { up: { before: [], after: [] }, down: { before: [], after: [] } };
   }
   const host = plan.host;
-  assert(isRecord(host) && only(host, ["up", "down", "processes"]));
-  assert(
+  assertHostHookContract(
+    isRecord(host) && only(host, ["up", "down", "processes"])
+  );
+  assertHostHookContract(
     host.processes === undefined ||
       (isRecord(host.processes) && Object.keys(host.processes).length === 0)
   );
@@ -110,16 +113,16 @@ function selectNativeComposeLifecycleHooks(
     if (hooks === undefined) {
       continue;
     }
-    assert(isRecord(hooks) && only(hooks, ["before", "after"]));
+    assertHostHookContract(isRecord(hooks) && only(hooks, ["before", "after"]));
     for (const order of ["before", "after"] as const) {
       const entries = hooks[order];
       if (entries === undefined) {
         continue;
       }
-      assert(Array.isArray(entries));
+      assertHostHookContract(Array.isArray(entries));
       for (const entry of entries) {
         const hook = readNativeHostInvocation(entry);
-        assert(!names.has(hook.name));
+        assertHostHookContract(!names.has(hook.name));
         names.add(hook.name);
         result[phase][order].push(hook);
       }
@@ -129,17 +132,21 @@ function selectNativeComposeLifecycleHooks(
 }
 
 export function readNativeHostInvocation(entry: unknown): NativeComposeHook {
-  assert(
+  assertHostHookContract(
     isRecord(entry) &&
       only(entry, ["name", "command", "cwd", "environment", "env_target"])
   );
-  assert(typeof entry.name === "string" && NAME.test(entry.name));
-  assert(
+  assertHostHookContract(
+    typeof entry.name === "string" && NAME.test(entry.name)
+  );
+  assertHostHookContract(
     command(entry.command) && (entry.cwd === undefined || relative(entry.cwd))
   );
   const target = parseNativeHostTarget(entry.env_target);
-  assert(target);
-  assert(entry.environment === undefined || isRecord(entry.environment));
+  assertHostHookContract(target);
+  assertHostHookContract(
+    entry.environment === undefined || isRecord(entry.environment)
+  );
   return {
     name: entry.name,
     command: entry.command,

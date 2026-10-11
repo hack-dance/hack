@@ -379,6 +379,49 @@ async function streamToText(
 }
 
 /**
+ * Collect a readable stream into memory under a byte budget. `onOverflow` is
+ * the caller's own closed refusal and must throw once `limit` is exceeded; it
+ * never receives stream content. The reader is cancelled on abort, on overflow
+ * and after completion so a stopped child never blocks on a full pipe, and the
+ * stream lock is always released. The returned bytes are a fresh copy.
+ */
+export async function readBoundedStream(
+  stream: ReadableStream<Uint8Array>,
+  limit: number,
+  signal: AbortSignal | undefined,
+  onOverflow: () => never
+): Promise<Uint8Array> {
+  const reader = stream.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  const cancel = () => {
+    void reader.cancel().catch(() => undefined);
+  };
+  signal?.addEventListener("abort", cancel, { once: true });
+  if (signal?.aborted) {
+    cancel();
+  }
+  try {
+    while (true) {
+      const next = await reader.read();
+      if (next.done) {
+        break;
+      }
+      size += next.value.byteLength;
+      if (size > limit) {
+        onOverflow();
+      }
+      chunks.push(next.value);
+    }
+    return Buffer.concat(chunks, size);
+  } finally {
+    signal?.removeEventListener("abort", cancel);
+    cancel();
+    reader.releaseLock();
+  }
+}
+
+/**
  * Resolve an executable from the CURRENT `process.env.PATH`.
  *
  * `Bun.which(name)` consults the PATH snapshot captured at process startup,

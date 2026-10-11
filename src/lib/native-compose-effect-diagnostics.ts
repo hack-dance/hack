@@ -1,3 +1,4 @@
+import { createClosedRefusalRegistry } from "./closed-refusal-registry.ts";
 import {
   NativeComposeOwnershipError,
   nativeComposeProbeFailure,
@@ -86,7 +87,6 @@ export type NativeComposeEffectRefusal = {
     | "unclassified";
 };
 
-const issued = new WeakMap<object, NativeComposeEffectRefusal>();
 const stages: readonly NativeComposeEffectRefusal["stage"][] = [
   "effect-boundary",
   "effect-receipt",
@@ -168,13 +168,22 @@ const reasons: readonly NativeComposeEffectRefusal["reason"][] = [
   "unclassified",
 ];
 
+/** First attach wins: the first failing owner boundary is the one reported. */
+const registry = createClosedRefusalRegistry<
+  NativeComposeEffectRefusal["stage"],
+  NativeComposeEffectRefusal["reason"]
+>({
+  stages,
+  reasons,
+  firstWins: true,
+  label: "Native Compose effect diagnostic",
+});
+
 /** Ignores error properties, getters, prototypes and copied public detail. */
 export function nativeComposeEffectRefusal(
   error: unknown
 ): NativeComposeEffectRefusal | undefined {
-  return typeof error === "object" && error !== null
-    ? issued.get(error)
-    : undefined;
+  return registry.lookup(error);
 }
 
 /** Accepts only closed data fields; it never retains the error message or cause. */
@@ -182,37 +191,7 @@ export function attachNativeComposeEffectRefusal(
   error: object,
   diagnostic: unknown
 ): void {
-  if (
-    typeof diagnostic === "object" &&
-    diagnostic !== null &&
-    Reflect.ownKeys(diagnostic).length === 2
-  ) {
-    const descriptors = Object.getOwnPropertyDescriptors(diagnostic);
-    const stage = descriptors.stage;
-    const reason = descriptors.reason;
-    if (
-      stage &&
-      reason &&
-      Object.hasOwn(descriptors, "stage") &&
-      Object.hasOwn(descriptors, "reason") &&
-      Object.hasOwn(stage, "value") &&
-      Object.hasOwn(reason, "value")
-    ) {
-      const selectedStage = stages.find((value) => value === stage.value);
-      const selectedReason = reasons.find((value) => value === reason.value);
-      if (selectedStage && selectedReason) {
-        if (issued.has(error)) {
-          return;
-        }
-        issued.set(
-          error,
-          Object.freeze({ stage: selectedStage, reason: selectedReason })
-        );
-        return;
-      }
-    }
-  }
-  throw new Error("Native Compose effect diagnostic refused; values omitted.");
+  registry.attach(error, diagnostic);
 }
 
 /** Diagnostic failure cannot replace the original rejection, including primitive throws. */
@@ -220,13 +199,7 @@ export function retainNativeComposeEffectRefusal(
   error: unknown,
   diagnostic: NativeComposeEffectRefusal
 ): void {
-  try {
-    if (typeof error === "object" && error !== null) {
-      attachNativeComposeEffectRefusal(error, diagnostic);
-    }
-  } catch {
-    // Preserve the original error and its lifetime; diagnostic publication is optional.
-  }
+  registry.retain(error, diagnostic);
 }
 
 /** Classify only a trusted error class's own closed data property; never invoke error getters. */

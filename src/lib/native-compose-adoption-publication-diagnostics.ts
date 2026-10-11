@@ -1,3 +1,5 @@
+import { createClosedRefusalRegistry } from "./closed-refusal-registry.ts";
+
 /** Fixed owner-issued boundaries. A diagnostic confers no recovery or execution authority. */
 export type LegacyComposePublicationRefusal = {
   readonly stage:
@@ -46,7 +48,6 @@ export type LegacyComposePublicationRefusal = {
     | "unclassified";
 };
 
-const issued = new WeakMap<object, LegacyComposePublicationRefusal>();
 const stages: readonly LegacyComposePublicationRefusal["stage"][] = [
   "publication-state",
   "publication-inputs",
@@ -94,13 +95,22 @@ const reasons: readonly LegacyComposePublicationRefusal["reason"][] = [
   "unclassified",
 ];
 
+/** Latest attach overwrites: publication reports the last boundary it reached. */
+const registry = createClosedRefusalRegistry<
+  LegacyComposePublicationRefusal["stage"],
+  LegacyComposePublicationRefusal["reason"]
+>({
+  stages,
+  reasons,
+  firstWins: false,
+  label: "Legacy publication diagnostic",
+});
+
 /** Ignores error properties, getters, prototypes and copied public detail. */
 export function legacyComposePublicationRefusal(
   error: unknown
 ): LegacyComposePublicationRefusal | undefined {
-  return typeof error === "object" && error !== null
-    ? issued.get(error)
-    : undefined;
+  return registry.lookup(error);
 }
 
 /** Accepts only closed data fields; it never retains the error message or cause. */
@@ -108,34 +118,7 @@ export function attachLegacyComposePublicationRefusal(
   error: object,
   diagnostic: unknown
 ): void {
-  if (
-    typeof diagnostic === "object" &&
-    diagnostic !== null &&
-    Reflect.ownKeys(diagnostic).length === 2
-  ) {
-    const descriptors = Object.getOwnPropertyDescriptors(diagnostic);
-    const stage = descriptors.stage;
-    const reason = descriptors.reason;
-    if (
-      stage &&
-      reason &&
-      Object.hasOwn(descriptors, "stage") &&
-      Object.hasOwn(descriptors, "reason") &&
-      Object.hasOwn(stage, "value") &&
-      Object.hasOwn(reason, "value")
-    ) {
-      const selectedStage = stages.find((value) => value === stage.value);
-      const selectedReason = reasons.find((value) => value === reason.value);
-      if (selectedStage && selectedReason) {
-        issued.set(
-          error,
-          Object.freeze({ stage: selectedStage, reason: selectedReason })
-        );
-        return;
-      }
-    }
-  }
-  throw new Error("Legacy publication diagnostic refused; values omitted.");
+  registry.attach(error, diagnostic);
 }
 
 /** Diagnostic failure cannot replace the original rejection, including primitive throws. */
@@ -143,11 +126,5 @@ export function retainLegacyComposePublicationRefusal(
   error: unknown,
   diagnostic: LegacyComposePublicationRefusal
 ): void {
-  try {
-    if (typeof error === "object" && error !== null) {
-      attachLegacyComposePublicationRefusal(error, diagnostic);
-    }
-  } catch {
-    // Preserve the original error and its lifetime; diagnostic publication is optional.
-  }
+  registry.retain(error, diagnostic);
 }

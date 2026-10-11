@@ -12,7 +12,8 @@ The CLI recognizes this filename as a project boundary. The experimental
 for new disposable projects. The separate explicit [legacy Compose adoption owner](native-compose-adoption.md)
 can switch qualified stopped instances and roll back while retaining their original
 resources. Its receipt and upgraded selector guard adopted execution; an unmodified
-older launcher is outside that guard. Native graph execution remains unsupported;
+older launcher is outside that guard. An explicit native backend selection runs
+the bounded [authored command slices](native-authored-commands.md) on macOS;
 commands outside the supported command subsets refuse with
 `E_NATIVE_PROJECT_UNSUPPORTED`. If active `.hack/` or `.dev/` Compose, JSON or TOML
 inputs also exist, they refuse with `E_NATIVE_PROJECT_CONFLICT`. The marker still

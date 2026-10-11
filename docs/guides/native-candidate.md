@@ -576,6 +576,15 @@ performance guarantee or claim about fairness between workloads.
 
 ### Frontend integration status
 
+Two native frontends exist. An authored `.hack/hack.project.json` project is owned
+by `src/lib/native-authored-command.ts`, which admits only the bounded macOS slices
+in the [authored command contract](../reference/native-authored-commands.md):
+foreground `up`, owner-mediated `down` and `down --recover`, saved-run `ps`, finite
+`logs --no-follow` and noninteractive `exec`; `run` and `restart` refuse there. The
+rest of this section describes the older Compose-file native frontend for
+`.hack/hack.config.json` projects with a Compose file, which keeps its own
+command coverage below.
+
 Explicit `HACK_RUNTIME_BACKEND=native` with absolute `HACK_NATIVE_BINARY` and
 `HACK_NATIVE_HOME` selects native observations for normal `hack ps` and bounded
 `hack logs SERVICE --no-follow`. They verify the project/branch run mapping

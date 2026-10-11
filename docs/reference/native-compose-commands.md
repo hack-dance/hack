@@ -6,7 +6,10 @@ configuration; Hack privately renders one backend document. No authored Compose
 file or legacy `.hack/hack.config.json` is required. See the
 [compiler contract](native-config-compiler.md) and
 [supported translation](native-compose-renderer.md) before using this experimental
-path. Existing-project import and native graph execution are separate work.
+path. The read-only [import preview](native-config-import.md), the explicit
+[legacy Compose adoption owner](native-compose-adoption.md) and the explicit native
+backend [authored command slices](native-authored-commands.md) are separate owners
+with their own contracts.
 
 Run these commands with the current branch CLI and its matching bundled compiler:
 

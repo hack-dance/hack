@@ -15,6 +15,13 @@
 - [Sessions](./sessions.md)
 - [Agent-first setup](./guides/agent-first-setup.md)
 
+## Native runtime (experimental)
+
+- [Native candidate guide](./guides/native-candidate.md)
+- [Native configuration validation](./reference/native-config-compiler.md) — the authored `.hack/hack.project.json` compiler contract
+- [Native configuration with Compose](./reference/native-compose-commands.md) — the Compose command owner for authored projects
+- [Authored configuration with the native runtime](./reference/native-authored-commands.md) — the explicit native backend command slices and their support matrix
+
 ## Extensions
 
 - [Extensions](./extensions.md)

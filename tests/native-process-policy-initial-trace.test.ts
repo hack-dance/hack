@@ -999,6 +999,8 @@ test("trace replay re-observes a restarting endpoint placeholder member and refu
       topologyPredicate: null,
       consumed: resolved.length,
       protocolMatched: true,
+      memberKeyClasses: { hex64: 4, epPrefixed: 0, other: 0 },
+      restartingServices: [],
     });
     const strict = await replayProcessPolicyInitialOwnership({
       directory: join(root, "strict"),
@@ -1013,6 +1015,8 @@ test("trace replay re-observes a restarting endpoint placeholder member and refu
       topologyPredicate: "network-member-id",
       consumed: 6,
       protocolMatched: true,
+      memberKeyClasses: { hex64: 3, epPrefixed: 1, other: 0 },
+      restartingServices: ["retry"],
     });
     const settled = queries(
       { retryKey: ids.retry, retryState: "running" },
@@ -1031,6 +1035,8 @@ test("trace replay re-observes a restarting endpoint placeholder member and refu
       topologyPredicate: null,
       consumed: settled.length,
       protocolMatched: true,
+      memberKeyClasses: { hex64: 4, epPrefixed: 0, other: 0 },
+      restartingServices: [],
     });
     const unresolved = await replayProcessPolicyInitialOwnership({
       directory: join(root, "unresolved"),
@@ -1048,6 +1054,8 @@ test("trace replay re-observes a restarting endpoint placeholder member and refu
       topologyPredicate: "network-member-id",
       consumed: 9,
       protocolMatched: true,
+      memberKeyClasses: { hex64: 3, epPrefixed: 1, other: 0 },
+      restartingServices: ["retry"],
     });
     const running = await replayProcessPolicyInitialOwnership({
       directory: join(root, "running"),
@@ -1065,6 +1073,8 @@ test("trace replay re-observes a restarting endpoint placeholder member and refu
       topologyPredicate: "network-member-id",
       consumed: 6,
       protocolMatched: true,
+      memberKeyClasses: { hex64: 3, epPrefixed: 1, other: 0 },
+      restartingServices: [],
     });
     const serialized = JSON.stringify({
       startup,

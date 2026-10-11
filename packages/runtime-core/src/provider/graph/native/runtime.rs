@@ -11,6 +11,17 @@ pub(super) use exec::ExecSelection;
 pub(super) use exec::ServiceExec;
 #[cfg(target_os = "macos")]
 pub(super) use exec::execute as service_exec;
+#[cfg(any(target_os = "macos", test))]
+mod run;
+#[cfg(target_os = "macos")]
+pub(super) use run::RunSelection;
+#[cfg(target_os = "macos")]
+pub(super) use run::ServiceRun;
+#[cfg(target_os = "macos")]
+pub(super) use run::execute as service_run;
+/// Engine identity, exit code, bounded stdout/stderr and truncation of one reaped one-off.
+#[cfg(any(target_os = "macos", test))]
+type OneOffCompletion = (String, i32, Vec<u8>, Vec<u8>, bool);
 
 trait Backend {
     #[cfg(any(target_os = "macos", test))]
@@ -21,6 +32,18 @@ trait Backend {
         _deadline: Instant,
         _fresh: &dyn Fn() -> Result<(), CandidateError>,
     ) -> Result<(i32, Vec<u8>, Vec<u8>, bool), CandidateError> {
+        Err(refused())
+    }
+    /// Create, start, await, read and remove one named one-off container; the
+    /// result carries its engine identity, exit code and bounded binary streams.
+    #[cfg(any(target_os = "macos", test))]
+    fn one_off(
+        &self,
+        _name: &str,
+        _config: &Value,
+        _deadline: Instant,
+        _fresh: &dyn Fn() -> Result<(), CandidateError>,
+    ) -> Result<OneOffCompletion, CandidateError> {
         Err(refused())
     }
     #[cfg(any(target_os = "macos", test))]
@@ -101,6 +124,23 @@ impl<B: Backend> Backend for GuardedBackend<'_, B> {
         };
         check()?;
         let result = self.backend.exec(id, selected, deadline, &check);
+        check()?;
+        result
+    }
+    #[cfg(any(target_os = "macos", test))]
+    fn one_off(
+        &self,
+        name: &str,
+        config: &Value,
+        deadline: Instant,
+        fresh: &dyn Fn() -> Result<(), CandidateError>,
+    ) -> Result<OneOffCompletion, CandidateError> {
+        let check = || {
+            check_startup(self.guard)?;
+            fresh()
+        };
+        check()?;
+        let result = self.backend.one_off(name, config, deadline, &check);
         check()?;
         result
     }
@@ -208,6 +248,18 @@ impl Backend for OwnedBackend<'_> {
                 fresh,
             )
             .map(|v| (v.exit_code, v.stdout, v.stderr, v.truncated))
+    }
+    #[cfg(any(target_os = "macos", test))]
+    fn one_off(
+        &self,
+        name: &str,
+        config: &Value,
+        deadline: Instant,
+        fresh: &dyn Fn() -> Result<(), CandidateError>,
+    ) -> Result<OneOffCompletion, CandidateError> {
+        self.engine
+            .service_one_off_until(name, config, deadline, fresh)
+            .map(|v| (v.container, v.exit_code, v.stdout, v.stderr, v.truncated))
     }
     #[cfg(any(target_os = "macos", test))]
     fn logs(&self, id: &str, tail: u16) -> Result<(String, String, bool), CandidateError> {
@@ -1445,6 +1497,11 @@ fn cleanup_using_guarded<B: Backend>(
     backend.verify_data(receipt, Instant::now() + Duration::from_secs(40), &|| {
         check_startup(guard)
     })?;
+    // Recorded one-off containers share a member's network namespace and are
+    // reaped before any canonical member is stopped or removed.
+    #[cfg(any(target_os = "macos", test))]
+    run::reap(backend, receipt, root)?;
+    check_startup(guard)?;
     // A committed cleanup phase is retry authority for this same inventory, never
     // permission to move the receipt back to startup or stop an already retired run.
     let stopped = matches!(

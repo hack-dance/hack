@@ -1,6 +1,8 @@
 use super::*;
 #[path = "exec_tests.rs"]
 mod authored_exec;
+#[path = "run_tests.rs"]
+mod authored_run;
 use hack_config_compiler::environment::EnvMetadata;
 use std::{
     cell::{Cell, RefCell},

@@ -60,6 +60,145 @@ impl Engine<'_> {
     }
 }
 
+/// Known completion of one reaped one-off container.
+#[cfg(any(all(feature = "native-config-plan", target_os = "macos"), test))]
+pub(in crate::provider) struct OneOffOutput {
+    pub container: String,
+    pub exit_code: i32,
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
+    pub truncated: bool,
+}
+
+#[cfg(any(all(feature = "native-config-plan", target_os = "macos"), test))]
+fn one_off_uncertain() -> CandidateError {
+    CandidateError::new(
+        "graph_service_one_off_uncertain",
+        "One-off service command completion or removal is uncertain; its container may remain. No request was replayed. Inspect the project before retrying.",
+    )
+}
+
+#[cfg(all(feature = "native-config-plan", any(target_os = "macos", test)))]
+impl Engine<'_> {
+    /// One create, start, wait, completion inspection, bounded log read and forced
+    /// removal of a named one-off container. Caller-owned identity checks share the
+    /// original observation deadline; nothing is replayed after an uncertain step.
+    pub(in crate::provider) fn service_one_off_until(
+        &self,
+        name: &str,
+        config: &Value,
+        deadline: Instant,
+        fresh: &dyn Fn() -> Result<(), CandidateError>,
+    ) -> Result<OneOffOutput, CandidateError> {
+        if self.cleanup_only {
+            return Err(failure("A cleanup connection cannot execute commands."));
+        }
+        one_off_guarded(name, config, fresh, |method, path, body| {
+            self.guest.verify()?;
+            if method == Method::POST {
+                self.guest.before_effect()?;
+            }
+            let remaining = deadline
+                .checked_duration_since(Instant::now())
+                .filter(|d| !d.is_zero())
+                .ok_or_else(one_off_uncertain)?;
+            let transport = Transport::new(&self.guest.engine_socket()?, remaining)?;
+            let bytes = transport
+                .request_bytes(method, path, body)
+                .map_err(|error| {
+                    if error.code == "engine_not_found" {
+                        error
+                    } else {
+                        one_off_uncertain()
+                    }
+                })?;
+            self.guest.verify().map_err(|_| one_off_uncertain())?;
+            Ok(bytes)
+        })
+    }
+}
+
+#[cfg(any(all(feature = "native-config-plan", target_os = "macos"), test))]
+fn one_off_guarded(
+    name: &str,
+    config: &Value,
+    fresh: &dyn Fn() -> Result<(), CandidateError>,
+    mut request: impl FnMut(Method, &str, Option<&Value>) -> Result<Vec<u8>, CandidateError>,
+) -> Result<OneOffOutput, CandidateError> {
+    one_off(name, config, |method, path, body| {
+        fresh()?;
+        let result = request(method, path, body)?;
+        fresh().map_err(|_| one_off_uncertain())?;
+        Ok(result)
+    })
+}
+
+#[cfg(any(all(feature = "native-config-plan", target_os = "macos"), test))]
+fn one_off(
+    name: &str,
+    config: &Value,
+    mut request: impl FnMut(Method, &str, Option<&Value>) -> Result<Vec<u8>, CandidateError>,
+) -> Result<OneOffOutput, CandidateError> {
+    if name.is_empty()
+        || name.len() > 128
+        || !name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+        || config["HostConfig"]["AutoRemove"] != false
+    {
+        return Err(failure("Invalid one-off container selection."));
+    }
+    let created = request(
+        Method::POST,
+        &format!("/v1.53/containers/create?name={name}"),
+        Some(config),
+    )?;
+    let created: Value = serde_json::from_slice(&created).map_err(|_| one_off_uncertain())?;
+    let id = created["Id"]
+        .as_str()
+        .filter(|s| s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit()))
+        .ok_or_else(one_off_uncertain)?
+        .to_owned();
+    request(Method::POST, &format!("/v1.53/containers/{id}/start"), None)?;
+    let waited = request(Method::POST, &format!("/v1.53/containers/{id}/wait"), None)?;
+    let waited: Value = serde_json::from_slice(&waited).map_err(|_| one_off_uncertain())?;
+    let status = waited["StatusCode"]
+        .as_i64()
+        .filter(|n| (0..=255).contains(n))
+        .ok_or_else(one_off_uncertain)?;
+    let inspected = request(Method::GET, &format!("/v1.53/containers/{id}/json"), None)?;
+    let inspected: Value = serde_json::from_slice(&inspected).map_err(|_| one_off_uncertain())?;
+    if inspected["Id"] != id.as_str()
+        || inspected["Name"]
+            .as_str()
+            .is_none_or(|observed| observed.trim_start_matches('/') != name)
+        || inspected["State"]["Running"] != false
+        || inspected["State"]["ExitCode"] != status
+    {
+        return Err(one_off_uncertain());
+    }
+    let stream = request(
+        Method::GET,
+        &format!("/v1.53/containers/{id}/logs?stdout=true&stderr=true&tail=all"),
+        None,
+    )?;
+    let (stdout, stderr, truncated) = decode(&stream).map_err(|_| one_off_uncertain())?;
+    request(
+        Method::DELETE,
+        &format!("/v1.53/containers/{id}?force=true&v=true"),
+        None,
+    )?;
+    match request(Method::GET, &format!("/v1.53/containers/{id}/json"), None) {
+        Err(error) if error.code == "engine_not_found" => {}
+        _ => return Err(one_off_uncertain()),
+    }
+    Ok(OneOffOutput {
+        container: id,
+        exit_code: status as i32,
+        stdout,
+        stderr,
+        truncated,
+    })
+}
+
 /// The caller's original selection spans each transport, including create/start.
 fn execute_guarded(
     container: &str,
@@ -295,6 +434,151 @@ mod tests {
             );
             assert_eq!(calls, 3);
         }
+    }
+    fn one_off_config() -> Value {
+        json!({"Image":format!("sha256:{}", "d".repeat(64)),"Cmd":["tool"],"HostConfig":{"NetworkMode":format!("container:{}", "a".repeat(64)),"AutoRemove":false}})
+    }
+    #[test]
+    fn one_off_creates_starts_waits_inspects_reads_and_removes_once_with_nonzero_exit() {
+        let name = format!("hkn-{}-oneoff-{}", "b".repeat(32), "c".repeat(32));
+        let id = "e".repeat(64);
+        let config = one_off_config();
+        let mut calls = 0;
+        let result = one_off(&name, &config, |method, path, body| {
+            calls += 1;
+            match calls {
+                1 => {
+                    assert_eq!(method, Method::POST);
+                    assert_eq!(path, format!("/v1.53/containers/create?name={name}"));
+                    assert_eq!(body.unwrap(), &config);
+                    Ok(serde_json::to_vec(&json!({"Id":id})).unwrap())
+                }
+                2 => {
+                    assert_eq!(method, Method::POST);
+                    assert_eq!(path, format!("/v1.53/containers/{id}/start"));
+                    assert!(body.is_none());
+                    Ok(vec![])
+                }
+                3 => {
+                    assert_eq!(method, Method::POST);
+                    assert_eq!(path, format!("/v1.53/containers/{id}/wait"));
+                    Ok(serde_json::to_vec(&json!({"StatusCode":3,"Error":null})).unwrap())
+                }
+                4 => {
+                    assert_eq!(method, Method::GET);
+                    assert_eq!(path, format!("/v1.53/containers/{id}/json"));
+                    Ok(serde_json::to_vec(&json!({"Id":id,"Name":format!("/{name}"),"State":{"Running":false,"ExitCode":3}})).unwrap())
+                }
+                5 => {
+                    assert_eq!(method, Method::GET);
+                    assert_eq!(
+                        path,
+                        format!("/v1.53/containers/{id}/logs?stdout=true&stderr=true&tail=all")
+                    );
+                    Ok([frame(1, b"ok\n\xff"), frame(2, b"\0warn")].concat())
+                }
+                6 => {
+                    assert_eq!(method, Method::DELETE);
+                    assert_eq!(path, format!("/v1.53/containers/{id}?force=true&v=true"));
+                    Ok(vec![])
+                }
+                7 => {
+                    assert_eq!(method, Method::GET);
+                    Err(CandidateError::new("engine_not_found", "absent"))
+                }
+                _ => panic!("request replayed"),
+            }
+        })
+        .unwrap();
+        assert_eq!(calls, 7);
+        assert_eq!(result.container, id);
+        assert_eq!(result.exit_code, 3);
+        assert_eq!(result.stdout, b"ok\n\xff");
+        assert_eq!(result.stderr, b"\0warn");
+        assert!(!result.truncated);
+    }
+    #[test]
+    fn one_off_caller_selection_loss_never_starts_or_replays() {
+        use std::cell::Cell;
+        let name = format!("hkn-{}-oneoff-{}", "b".repeat(32), "c".repeat(32));
+        for lose_at in [1, 2, 3] {
+            let checks = Cell::new(0);
+            let mut calls = 0;
+            let result = one_off_guarded(
+                &name,
+                &one_off_config(),
+                &|| {
+                    checks.set(checks.get() + 1);
+                    if checks.get() == lose_at {
+                        Err(uncertain())
+                    } else {
+                        Ok(())
+                    }
+                },
+                |_, path, _| {
+                    calls += 1;
+                    assert!(path.contains("/create?name="));
+                    Ok(serde_json::to_vec(&json!({"Id":"e".repeat(64)})).unwrap())
+                },
+            );
+            assert!(result.is_err());
+            assert_eq!(calls, if lose_at == 1 { 0 } else { 1 });
+        }
+    }
+    #[test]
+    fn one_off_refuses_changed_identity_unfinished_process_unproven_removal_and_auto_remove() {
+        let name = format!("hkn-{}-oneoff-{}", "b".repeat(32), "c".repeat(32));
+        let id = "e".repeat(64);
+        let inspected =
+            json!({"Id":id,"Name":format!("/{name}"),"State":{"Running":false,"ExitCode":0}});
+        for (stage, changed) in [
+            (
+                4,
+                json!({"Id":"f".repeat(64),"Name":format!("/{name}"),"State":{"Running":false,"ExitCode":0}}),
+            ),
+            (
+                4,
+                json!({"Id":id,"Name":"/foreign","State":{"Running":false,"ExitCode":0}}),
+            ),
+            (
+                4,
+                json!({"Id":id,"Name":format!("/{name}"),"State":{"Running":true,"ExitCode":0}}),
+            ),
+            (
+                4,
+                json!({"Id":id,"Name":format!("/{name}"),"State":{"Running":false,"ExitCode":1}}),
+            ),
+            (7, inspected.clone()),
+        ] {
+            let mut calls = 0;
+            let error = one_off(&name, &one_off_config(), |_, _, _| {
+                calls += 1;
+                Ok(match calls {
+                    1 => serde_json::to_vec(&json!({"Id":id})).unwrap(),
+                    2 | 6 => vec![],
+                    3 => serde_json::to_vec(&json!({"StatusCode":0})).unwrap(),
+                    4 if stage == 4 => serde_json::to_vec(&changed).unwrap(),
+                    4 => serde_json::to_vec(&inspected).unwrap(),
+                    5 => vec![],
+                    _ => serde_json::to_vec(&changed).unwrap(),
+                })
+            })
+            .err()
+            .unwrap();
+            assert_eq!(calls, stage);
+            assert_eq!(error.code, "graph_service_one_off_uncertain");
+        }
+        let mut config = one_off_config();
+        config["HostConfig"]["AutoRemove"] = json!(true);
+        let mut calls = 0;
+        assert!(
+            one_off(&name, &config, |_, _, _| {
+                calls += 1;
+                Ok(vec![])
+            })
+            .is_err()
+        );
+        assert_eq!(calls, 0);
     }
     #[test]
     fn real_unix_transport_delivers_multiplexed_binary_command_output() {

@@ -182,7 +182,7 @@ fn native_requests_and_replies_refuse_wrong_kind_version_scope_and_unknown_field
     }
     let reply = status(receipt.clone());
     reply
-        .validate(&receipt, Action::Status, None, None)
+        .validate(&receipt, Action::Status, None, None, None)
         .unwrap();
     let encoded = serde_json::to_value(reply).unwrap();
     for (field, value) in [
@@ -202,7 +202,7 @@ fn native_requests_and_replies_refuse_wrong_kind_version_scope_and_unknown_field
         json!({"state":"running","health":"healthy"});
     serde_json::from_value::<Reply>(bad)
         .unwrap()
-        .validate(&receipt, Action::Status, None, None)
+        .validate(&receipt, Action::Status, None, None, None)
         .unwrap();
     for (pointer, value) in [
         ("/version", json!(1)),
@@ -214,7 +214,7 @@ fn native_requests_and_replies_refuse_wrong_kind_version_scope_and_unknown_field
         assert!(
             serde_json::from_value::<Reply>(bad)
                 .unwrap()
-                .validate(&receipt, Action::Status, None, None)
+                .validate(&receipt, Action::Status, None, None, None)
                 .is_err()
         );
     }
@@ -232,7 +232,7 @@ fn native_requests_and_replies_refuse_wrong_kind_version_scope_and_unknown_field
     };
     assert!(
         cleaned
-            .validate(&receipt, Action::Cleanup, None, None)
+            .validate(&receipt, Action::Cleanup, None, None, None)
             .is_err()
     );
     if let Outcome::Cleaned { receipt } = &mut cleaned.result {
@@ -242,7 +242,7 @@ fn native_requests_and_replies_refuse_wrong_kind_version_scope_and_unknown_field
         }
     }
     cleaned
-        .validate(&receipt, Action::Cleanup, None, None)
+        .validate(&receipt, Action::Cleanup, None, None, None)
         .unwrap();
 }
 
@@ -260,7 +260,7 @@ fn native_stop_details_require_the_exact_journal_membership_and_closed_stage() {
     });
     let reply: Reply = serde_json::from_value(encoded.clone()).unwrap();
     reply
-        .validate(&receipt, Action::Cleanup, None, None)
+        .validate(&receipt, Action::Cleanup, None, None, None)
         .unwrap();
     for (pointer, value) in [
         ("/result/code", json!("native_graph_foreground")),
@@ -281,7 +281,7 @@ fn native_stop_details_require_the_exact_journal_membership_and_closed_stage() {
         assert!(
             serde_json::from_value::<Reply>(bad)
                 .unwrap()
-                .validate(&receipt, Action::Cleanup, None, None)
+                .validate(&receipt, Action::Cleanup, None, None, None)
                 .is_err(),
             "{pointer}"
         );
@@ -676,7 +676,7 @@ fn success_replies_bind_immutable_images_ids_readiness_membership_and_requested_
         let reply = status(changed(receipt.clone(), field));
         assert!(
             reply
-                .validate(&receipt, Action::Status, None, None)
+                .validate(&receipt, Action::Status, None, None, None)
                 .is_err(),
             "{field}"
         );
@@ -690,14 +690,14 @@ fn success_replies_bind_immutable_images_ids_readiness_membership_and_requested_
         };
         assert!(
             reply
-                .validate(&receipt, Action::Cleanup, None, None)
+                .validate(&receipt, Action::Cleanup, None, None, None)
                 .is_err(),
             "{field}"
         );
     }
     assert!(
         status(receipt.clone())
-            .validate(&receipt, Action::Cleanup, None, None)
+            .validate(&receipt, Action::Cleanup, None, None, None)
             .is_err()
     );
     let reply = Reply {
@@ -710,11 +710,11 @@ fn success_replies_bind_immutable_images_ids_readiness_membership_and_requested_
         },
     };
     reply
-        .validate(&receipt, Action::Cleanup, None, None)
+        .validate(&receipt, Action::Cleanup, None, None, None)
         .unwrap();
     assert!(
         reply
-            .validate(&receipt, Action::Status, None, None)
+            .validate(&receipt, Action::Status, None, None, None)
             .is_err()
     );
 }
@@ -746,7 +746,7 @@ fn native_failure_observations_close_nested_fields_in_status_and_cleanup() {
         });
         serde_json::from_value::<Reply>(encoded.clone())
             .unwrap()
-            .validate(&receipt, action, None, None)
+            .validate(&receipt, action, None, None, None)
             .unwrap();
         encoded.pointer_mut(pointer).unwrap()["failure"]["observation"]["values"] =
             json!("private-canary");
@@ -871,7 +871,7 @@ fn stopped_failure_detail_refuses_changed_current_admission_after_request_captur
                 },
             };
             reply
-                .validate(&receipt, Action::Cleanup, None, None)
+                .validate(&receipt, Action::Cleanup, None, None, None)
                 .unwrap();
             transport::write(&mut stream, &reply, Duration::from_secs(1)).unwrap();
             let error = caller.join().unwrap().unwrap_err();
@@ -932,11 +932,11 @@ fn finite_logs_wire_authenticates_the_live_native_owner_and_exact_member() {
             },
         };
         reply
-            .validate(&receipt, Action::Logs, input.logs.as_ref(), None)
+            .validate(&receipt, Action::Logs, input.logs.as_ref(), None, None)
             .unwrap();
         assert!(
             reply
-                .validate(&receipt, Action::Status, None, None)
+                .validate(&receipt, Action::Status, None, None, None)
                 .is_err()
         );
         transport::write(&mut stream, &reply, Duration::from_secs(2)).unwrap();
@@ -1009,18 +1009,18 @@ fn finite_exec_wire_authenticates_owner_member_and_binary_nonzero_completion() {
             },
         };
         reply
-            .validate(&receipt, Action::Exec, None, Some(selected))
+            .validate(&receipt, Action::Exec, None, Some(selected), None)
             .unwrap();
         assert!(
             reply
-                .validate(&receipt, Action::Status, None, None)
+                .validate(&receipt, Action::Status, None, None, None)
                 .is_err()
         );
         let mut foreign = selected.clone();
         foreign.service = "other".into();
         assert!(
             reply
-                .validate(&receipt, Action::Exec, None, Some(&foreign))
+                .validate(&receipt, Action::Exec, None, Some(&foreign), None)
                 .is_err()
         );
         transport::write(&mut stream, &reply, Duration::from_secs(2)).unwrap();
@@ -1030,6 +1030,167 @@ fn finite_exec_wire_authenticates_owner_member_and_binary_nonzero_completion() {
     });
     publication.finish().unwrap();
     assert!(exec(&fixture.candidate, RUN, "web", &["true".into()], None).is_err());
+}
+
+#[test]
+fn finite_one_off_wire_authenticates_owner_member_fresh_container_and_binary_nonzero_completion() {
+    let fixture = Fixture::new();
+    let mut receipt = fixture.receipt();
+    receipt.phase = Phase::ReadyObserved;
+    for (index, resource) in receipt.resources.values_mut().enumerate() {
+        resource.id = Some(format!("{:064x}", index + 1));
+        resource.phase = if resource.kind == Kind::Container {
+            "started"
+        } else {
+            "created"
+        }
+        .into();
+    }
+    let mut publication = owner::Publication::bind(&fixture.candidate, &receipt.review).unwrap();
+    journal::reserve(&fixture.candidate, &receipt).unwrap();
+    std::thread::scope(|scope| {
+        let caller = scope.spawn(|| {
+            one_off(
+                &fixture.candidate,
+                RUN,
+                "web",
+                &["tool".into(), "$literal; space".into(), "".into()],
+                Some("/app"),
+            )
+            .unwrap()
+        });
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        let mut stream = loop {
+            if let Some(stream) = publication.accept().unwrap() {
+                break stream;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "one-off caller did not connect"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        };
+        let input: Request = transport::read(&mut stream, Duration::from_secs(2), 4096).unwrap();
+        input.validate(&receipt.review).unwrap();
+        assert!(input.action == Action::Run);
+        assert!(input.logs.is_none());
+        assert!(input.exec.is_none());
+        let selected = input.one_off.as_ref().unwrap();
+        assert_eq!(selected.service, "web");
+        assert_eq!(selected.argv, ["tool", "$literal; space", ""]);
+        assert_eq!(selected.workdir.as_deref(), Some("/app"));
+        let member = receipt.resources["container:web"].id.clone().unwrap();
+        let completed = |container: String, name: String| runtime::ServiceRun {
+            receipt: receipt.clone(),
+            service: "web".into(),
+            member: member.clone(),
+            container,
+            name,
+            exit_code: 17,
+            stdout_base64: "AP9B".into(),
+            stderr_base64: "ZXJyCg==".into(),
+            truncated: false,
+        };
+        let name = format!("hkn-{RUN}-oneoff-{}", "a".repeat(32));
+        let reply = |one_off: runtime::ServiceRun| Reply {
+            version: 2,
+            kind: ReplyKind::NativeGraphControlReply,
+            run: RUN.into(),
+            review: receipt.review.review_id().into(),
+            result: Outcome::OneOff { one_off },
+        };
+        // The one-off is never the canonical member and never carries a member name.
+        assert!(
+            reply(completed(member.clone(), name.clone()))
+                .validate(&receipt, Action::Run, None, None, Some(selected))
+                .is_err()
+        );
+        assert!(
+            reply(completed(
+                "f".repeat(64),
+                receipt.resources["container:web"].name.clone()
+            ))
+            .validate(&receipt, Action::Run, None, None, Some(selected))
+            .is_err()
+        );
+        let reply = reply(completed("f".repeat(64), name.clone()));
+        reply
+            .validate(&receipt, Action::Run, None, None, Some(selected))
+            .unwrap();
+        assert!(
+            reply
+                .validate(&receipt, Action::Exec, None, None, None)
+                .is_err()
+        );
+        let mut foreign = selected.clone();
+        foreign.service = "other".into();
+        assert!(
+            reply
+                .validate(&receipt, Action::Run, None, None, Some(&foreign))
+                .is_err()
+        );
+        transport::write(&mut stream, &reply, Duration::from_secs(2)).unwrap();
+        let value = caller.join().unwrap();
+        assert_eq!(value["result"]["outcome"], "one-off");
+        assert_eq!(value["result"]["one_off"]["exit_code"], 17);
+        assert_eq!(value["result"]["one_off"]["stdout_base64"], "AP9B");
+        assert_eq!(value["result"]["one_off"]["container"], "f".repeat(64));
+        assert_eq!(value["result"]["one_off"]["name"], name);
+    });
+    publication.finish().unwrap();
+    assert!(one_off(&fixture.candidate, RUN, "web", &["true".into()], None).is_err());
+}
+
+#[test]
+fn finite_one_off_request_closes_argv_workdir_and_action_without_reusing_exec_authority() {
+    let fixture = Fixture::new();
+    let receipt = fixture.receipt();
+    let valid = json!({"version":2,"kind":"native-graph-control","run":RUN,"review":receipt.review.review_id(),"action":"run","one_off":{"service":"web","argv":["tool","$literal; value",""],"workdir":"/app"}});
+    serde_json::from_value::<Request>(valid.clone())
+        .unwrap()
+        .validate(&receipt.review)
+        .unwrap();
+    for (pointer, value) in [
+        ("/action", json!("exec")),
+        ("/action", json!("status")),
+        ("/one_off/argv", json!([])),
+        ("/one_off/argv", json!([""])),
+        ("/one_off/service", json!("../web")),
+        ("/one_off/workdir", json!("relative")),
+    ] {
+        let mut bad = valid.clone();
+        *bad.pointer_mut(pointer).unwrap() = value;
+        assert!(
+            serde_json::from_value::<Request>(bad)
+                .unwrap()
+                .validate(&receipt.review)
+                .is_err(),
+            "{pointer}"
+        );
+    }
+    for field in ["stdin", "tty", "environment", "image", "mounts"] {
+        let mut bad = valid.clone();
+        bad["one_off"][field] = json!(true);
+        assert!(serde_json::from_value::<Request>(bad).is_err(), "{field}");
+    }
+    let mut bad = valid;
+    bad["exec"] = json!({"service":"web","argv":["true"],"workdir":null});
+    assert!(
+        serde_json::from_value::<Request>(bad)
+            .unwrap()
+            .validate(&receipt.review)
+            .is_err()
+    );
+    assert!(
+        request(
+            &fixture.candidate,
+            RequestOptions {
+                run: RUN,
+                action: Action::Run
+            }
+        )
+        .is_err()
+    );
 }
 
 #[test]

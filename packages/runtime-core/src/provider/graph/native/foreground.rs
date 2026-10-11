@@ -31,6 +31,7 @@ pub enum Action {
     Cleanup,
     Logs,
     Exec,
+    Run,
 }
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -66,16 +67,19 @@ struct Request {
     logs: Option<LogsSelection>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     exec: Option<runtime::ExecSelection>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    one_off: Option<runtime::RunSelection>,
 }
 impl Request {
     fn validate(&self, review: &native_input::Review) -> Result<(), CandidateError> {
         if self.version != 2
             || self.run != review.scope().run
             || self.review != review.review_id()
-            || match (&self.action, &self.logs, &self.exec) {
-                (Action::Logs, Some(logs), None) => !logs.valid(),
-                (Action::Exec, None, Some(exec)) => !exec.valid(),
-                (Action::Status | Action::Cleanup, None, None) => false,
+            || match (&self.action, &self.logs, &self.exec, &self.one_off) {
+                (Action::Logs, Some(logs), None, None) => !logs.valid(),
+                (Action::Exec, None, Some(exec), None) => !exec.valid(),
+                (Action::Run, None, None, Some(one_off)) => !one_off.valid(),
+                (Action::Status | Action::Cleanup, None, None, None) => false,
                 _ => true,
             }
         {
@@ -103,6 +107,9 @@ struct Reply {
 enum Outcome {
     Exec {
         exec: runtime::ServiceExec,
+    },
+    OneOff {
+        one_off: runtime::ServiceRun,
     },
     Logs {
         logs: runtime::ServiceLogs,
@@ -147,6 +154,7 @@ impl Reply {
         action: Action,
         selected: Option<&LogsSelection>,
         exec_selected: Option<&runtime::ExecSelection>,
+        one_off_selected: Option<&runtime::RunSelection>,
     ) -> Result<(), CandidateError> {
         let review = &expected.review;
         if self.version != 2 || self.run != review.scope().run || self.review != review.review_id()
@@ -159,6 +167,12 @@ impl Reply {
                     return Err(refused());
                 }
                 &exec.receipt
+            }
+            Outcome::OneOff { one_off } => {
+                if action != Action::Run || !one_off.valid(one_off_selected.ok_or_else(refused)?) {
+                    return Err(refused());
+                }
+                &one_off.receipt
             }
             Outcome::Logs { logs } => {
                 let selected = selected.ok_or_else(refused)?;
@@ -359,6 +373,18 @@ pub fn serve_with_storage_tool(
                 runtime::service_exec(candidate, &receipt, selected, &check)
                     .map(|exec| Outcome::Exec { exec })
             }
+            Action::Run => {
+                let selected = request.one_off.as_ref().ok_or_else(refused)?;
+                let check = || {
+                    publication.verify()?;
+                    if signals.pending() {
+                        return Err(refused());
+                    }
+                    read_pin.verify(candidate)
+                };
+                runtime::service_run(candidate, &receipt, selected, &check)
+                    .map(|one_off| Outcome::OneOff { one_off })
+            }
             Action::Logs => {
                 let logs = request.logs.as_ref().ok_or_else(refused)?;
                 let check = || {
@@ -386,6 +412,7 @@ pub fn serve_with_storage_tool(
             request.action,
             request.logs.as_ref(),
             request.exec.as_ref(),
+            request.one_off.as_ref(),
         )?;
         if cleaned {
             // Retire before writing on the retained authenticated stream. Clients
@@ -410,10 +437,10 @@ pub fn request(
     candidate: &Candidate,
     options: RequestOptions<'_>,
 ) -> Result<Value, CandidateError> {
-    if matches!(options.action, Action::Logs | Action::Exec) {
+    if matches!(options.action, Action::Logs | Action::Exec | Action::Run) {
         return Err(refused());
     }
-    request_selected(candidate, options.run, options.action, None, None)
+    request_selected(candidate, options.run, options.action, None, None, None)
 }
 /// Finite authored logs require a live authenticated owner; no direct Engine fallback.
 pub fn logs(
@@ -429,7 +456,7 @@ pub fn logs(
     if !selected.valid() {
         return Err(refused());
     }
-    request_selected(candidate, run, Action::Logs, Some(selected), None)
+    request_selected(candidate, run, Action::Logs, Some(selected), None, None)
 }
 /// Exactly one finite noninteractive authored command; no direct Engine fallback.
 pub fn exec(
@@ -447,7 +474,26 @@ pub fn exec(
     if !selected.valid() {
         return Err(refused());
     }
-    request_selected(candidate, run, Action::Exec, None, Some(selected))
+    request_selected(candidate, run, Action::Exec, None, Some(selected), None)
+}
+/// Exactly one finite noninteractive one-off service command in a fresh container
+/// created and reaped by the live owner; no direct Engine fallback.
+pub fn one_off(
+    candidate: &Candidate,
+    run: &str,
+    service: &str,
+    argv: &[String],
+    workdir: Option<&str>,
+) -> Result<Value, CandidateError> {
+    let selected = runtime::RunSelection {
+        service: service.into(),
+        argv: argv.to_vec(),
+        workdir: workdir.map(str::to_owned),
+    };
+    if !selected.valid() {
+        return Err(refused());
+    }
+    request_selected(candidate, run, Action::Run, None, None, Some(selected))
 }
 fn request_selected(
     candidate: &Candidate,
@@ -455,6 +501,7 @@ fn request_selected(
     action: Action,
     selected: Option<LogsSelection>,
     exec_selected: Option<runtime::ExecSelection>,
+    one_off_selected: Option<runtime::RunSelection>,
 ) -> Result<Value, CandidateError> {
     let pin = owner::Pin::load(candidate, run)?;
     let review = pin.review();
@@ -468,16 +515,18 @@ fn request_selected(
         action,
         logs: selected.clone(),
         exec: exec_selected.clone(),
+        one_off: one_off_selected.clone(),
     };
     transport::write(&mut stream, &input, Duration::from_secs(5))?;
+    let command = matches!(action, Action::Exec | Action::Run);
     let reply: Reply = transport::read(
         &mut stream,
-        if action == Action::Exec {
+        if command {
             Duration::from_secs(40)
         } else {
             Duration::from_secs(30)
         },
-        if action == Action::Exec {
+        if command {
             4 * 1024 * 1024
         } else if action == Action::Logs {
             128 * 1024
@@ -485,7 +534,13 @@ fn request_selected(
             LIMIT
         },
     )?;
-    reply.validate(&expected, action, selected.as_ref(), exec_selected.as_ref())?;
+    reply.validate(
+        &expected,
+        action,
+        selected.as_ref(),
+        exec_selected.as_ref(),
+        one_off_selected.as_ref(),
+    )?;
     let current = journal::read_control(candidate, review)?;
     current.check_binding(&expected)?;
     if let Outcome::Cleaned { receipt } = &reply.result {

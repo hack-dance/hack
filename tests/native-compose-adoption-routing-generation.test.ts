@@ -9,12 +9,16 @@ import { legacyComposePublicationRefusal } from "../src/lib/native-compose-adopt
 import { runLegacyComposeRetainedRoutingOperation } from "../src/lib/native-compose-adoption-routing-execution.ts";
 import * as privateState from "../src/lib/native-compose-private-state.ts";
 import {
+  type RetainedRoutingStoreTimeoutMs,
   ROUTING_CANARY,
   ROUTING_IDS,
   retainedRoutingFixture,
   retainedRoutingFixtureLifetime,
 } from "./helpers/retained-routing-adoption.ts";
 
+/** The compound lifecycle test's per-test budget and its store proof deadline:
+ * the product's 60 s cap. */
+const COMPOUND_BUDGET_MS = 60_000;
 let h: Awaited<ReturnType<typeof retainedRoutingFixture>>;
 let fixtureActive = false;
 let fixtureUncertain = false;
@@ -85,8 +89,10 @@ const test = (
     timeoutMs
   );
 };
-async function prepare() {
-  const store = await h.store();
+async function prepare(
+  opts: { readonly timeoutMs?: RetainedRoutingStoreTimeoutMs } = {}
+) {
+  const store = await h.store(opts);
   try {
     return { store, generation: await store.prepare({ binary: h.compiler }) };
   } catch (error: unknown) {
@@ -206,18 +212,27 @@ test("publication diagnostics distinguish compiler refusal after switching from 
     await store.close();
   }
 });
-test(
-  "v14 keeps original resources and data through stop/publication/up/down/up/rollback and saved open",
-  async () => {
-    const phase = (value: string) => {
+/** Per-phase timing for the compound lifecycle tests. Each marker logs the elapsed
+ * and per-phase ms with the probe counts, and `attribute` names the phase in
+ * progress when a failure (such as a proof-deadline overrun) surfaces. Only timings
+ * and counts are added to the already value-free diagnostic; values stay omitted. */
+function compoundPhases(fixture: string) {
+  const started = Date.now();
+  let lastPhase = "enter";
+  let lastPhaseAt = started;
+  return {
+    phase: (value: string) => {
+      const now = Date.now();
       try {
         const inspections = (kind: string) =>
           h.commands.filter((args) => args[0] === kind && args[1] === "inspect")
             .length;
         console.info(
           JSON.stringify({
-            fixture: "retained-routing-compound",
+            fixture,
             phase: value,
+            elapsedMs: now - started,
+            phaseMs: now - lastPhaseAt,
             probes: h.commands.length,
             containerInspections: inspections("container"),
             networkInspections: inspections("network"),
@@ -228,24 +243,87 @@ test(
       } catch {
         // Diagnostic failure must not skip close or replace an original test error.
       }
-    };
+      lastPhase = value;
+      lastPhaseAt = now;
+    },
+    attribute: (error: unknown) => {
+      const now = Date.now();
+      return new Error(
+        `${fixture} failed ${now - lastPhaseAt} ms after phase "${lastPhase}" (${now - started} ms elapsed of ${COMPOUND_BUDGET_MS} ms budget): ${String(error)}`,
+        { cause: error }
+      );
+    },
+  };
+}
+/** Cold v14 preparation stop and publication, returning the active generation. */
+async function publishStoppedV14(
+  phase: (value: string) => void,
+  store: Awaited<ReturnType<typeof prepare>>["store"],
+  generation: Awaited<ReturnType<typeof prepare>>["generation"]
+) {
+  expect(generation.report.adoption_generation_version).toBe(14);
+  expect((await h.receipt()).routingHandoff).toBe("held");
+  expect(
+    await h.operation(store, generation, "stop", { preparation: true })
+  ).toBe(0);
+  phase("preparation-stop-return");
+  await store.publish({ generation, binary: h.compiler });
+  phase("publication-return");
+  expect((await h.receipt()).publication?.phase).toBe("active");
+  const active = await store.loadActive();
+  if (!active) {
+    throw new Error("Synthetic active generation missing");
+  }
+  phase("active-load-return");
+  return active;
+}
+/** Retained data survives, every child effect names only the retained db/web
+ * containers, and no probe pulls, builds, creates or removes a resource. */
+function expectRetainedResourcesOnly() {
+  expect(h.model.sqlRow).toBe(ROUTING_CANARY);
+  expect(
+    h.effects.every(
+      (args) =>
+        args.length === 5 &&
+        args[3] === ROUTING_IDS.db &&
+        args[4] === ROUTING_IDS.web
+    )
+  ).toBe(true);
+  expect(
+    h.commands.some(
+      (args) =>
+        args.includes("pull") ||
+        args.includes("build") ||
+        args.includes("create") ||
+        args.includes("rm")
+    )
+  ).toBe(false);
+}
+function volumeInspections() {
+  return h.commands.filter(
+    (args) => args[0] === "volume" && args[1] === "inspect"
+  ).length;
+}
+// The former single compound run (cold preparation/publication, four lifecycle
+// operations, the saved lease and rollback through one store) reached 46 s under
+// suite load and overran its 15 s rollback routing proof in hosted CI (run
+// 37999833592). It is split into the two tests below, each on a fresh fixture: the
+// first covers publication, the lifecycle operations and the saved lease; the
+// second covers rollback after a lifecycle cycle. Both open their store at the 60 s
+// product cap. The deadline-refusal controls in this file keep the 15 s default.
+test(
+  "v14 keeps original resources and data through stop/publication/up/down/up and saved open",
+  async () => {
+    const { phase, attribute } = compoundPhases(
+      "retained-routing-compound-lifecycle"
+    );
     phase("prepare-enter");
-    const { store, generation } = await prepare();
+    const { store, generation } = await prepare({
+      timeoutMs: COMPOUND_BUDGET_MS,
+    });
     phase("prepare-return");
     try {
-      expect(generation.report.adoption_generation_version).toBe(14);
-      expect((await h.receipt()).routingHandoff).toBe("held");
-      expect(
-        await h.operation(store, generation, "stop", { preparation: true })
-      ).toBe(0);
-      phase("preparation-stop-return");
-      await store.publish({ generation, binary: h.compiler });
-      phase("publication-return");
-      const active = await store.loadActive();
-      if (!active) {
-        throw new Error("Synthetic active generation missing");
-      }
-      phase("active-load-return");
+      const active = await publishStoppedV14(phase, store, generation);
       for (const operation of ["start", "stop", "start", "stop"] as const) {
         expect(await h.operation(store, active, operation)).toBe(0);
       }
@@ -259,6 +337,39 @@ test(
         },
       });
       phase("saved-lease-return");
+      expect((await h.receipt()).publication?.phase).toBe("active");
+      expectRetainedResourcesOnly();
+      expect(h.commands.length).toBeLessThanOrEqual(7300);
+      expect(volumeInspections()).toBeLessThanOrEqual(114);
+      phase("assertions-complete");
+    } catch (error: unknown) {
+      throw attribute(error);
+    } finally {
+      await store.close();
+      phase("store-close-return");
+    }
+    // One full cold preparation/publication, four lifecycle operations and a saved lease.
+    // Canonical bracketed scans add four probes per stable binding observation.
+  },
+  { timeoutMs: COMPOUND_BUDGET_MS }
+);
+test(
+  "v14 rollback after publication and one up/down restores originals and keeps data and the routing hold",
+  async () => {
+    const { phase, attribute } = compoundPhases(
+      "retained-routing-compound-rollback"
+    );
+    phase("prepare-enter");
+    const { store, generation } = await prepare({
+      timeoutMs: COMPOUND_BUDGET_MS,
+    });
+    phase("prepare-return");
+    try {
+      const active = await publishStoppedV14(phase, store, generation);
+      for (const operation of ["start", "stop"] as const) {
+        expect(await h.operation(store, active, operation)).toBe(0);
+      }
+      phase("lifecycle-cycle-return");
       await store.rollback();
       phase("rollback-return");
       expect(
@@ -269,39 +380,20 @@ test(
       ).toBe(h.compose);
       expect((await h.receipt()).publication?.phase).toBe("rolled-back");
       expect((await h.receipt()).routingHandoff).toBe("releasing");
-      expect(h.model.sqlRow).toBe(ROUTING_CANARY);
-      expect(
-        h.effects.every(
-          (args) =>
-            args.length === 5 &&
-            args[3] === ROUTING_IDS.db &&
-            args[4] === ROUTING_IDS.web
-        )
-      ).toBe(true);
-      expect(
-        h.commands.some(
-          (args) =>
-            args.includes("pull") ||
-            args.includes("build") ||
-            args.includes("create") ||
-            args.includes("rm")
-        )
-      ).toBe(false);
-      expect(h.commands.length).toBeLessThanOrEqual(9000);
-      expect(
-        h.commands.filter(
-          (args) => args[0] === "volume" && args[1] === "inspect"
-        ).length
-      ).toBeLessThanOrEqual(136);
+      expectRetainedResourcesOnly();
+      expect(h.commands.length).toBeLessThanOrEqual(6600);
+      expect(volumeInspections()).toBeLessThanOrEqual(99);
       phase("assertions-complete");
+    } catch (error: unknown) {
+      throw attribute(error);
     } finally {
       await store.close();
       phase("store-close-return");
     }
-    // One full cold preparation/publication, four lifecycle operations and rollback.
+    // One full cold preparation/publication, one lifecycle cycle and rollback.
     // Canonical bracketed scans add four probes per stable binding observation.
   },
-  { timeoutMs: 60_000 }
+  { timeoutMs: COMPOUND_BUDGET_MS }
 );
 test("read-only routing phase refuses volume birth drift at its complete final binding", async () => {
   const { store, generation } = await prepare();

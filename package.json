@@ -71,6 +71,7 @@
     "test:e2e:gateway": "bun run scripts/gateway-e2e.ts",
     "test:e2e:dispatch": "bun run scripts/dispatch-e2e.ts",
     "test:e2e:railway": "bun run scripts/railway-node-e2e.ts",
+    "ci:bun-crash-census": "bun scripts/ci-bun-crash-census.ts",
     "docs:cli-reference": "bun run scripts/generate-cli-reference.ts",
     "docs:agent-client-capabilities": "bun run scripts/generate-agent-client-capabilities.ts",
     "generate:agent-plugins": "bun run scripts/generate-agent-plugins.ts"

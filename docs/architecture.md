@@ -254,7 +254,9 @@ maintenance. It is outside the supported local CLI contract and default onboardi
 
 `--branch <name>` generates a per-branch Compose override that:
 
-- prefixes hostnames (e.g. `api.myapp.hack` → `api.<branch>.myapp.hack`)
+- prefixes hostnames (e.g. `api.myapp.hack.local` → `api.<branch>.myapp.hack.local` for the
+  new-project `.hack.local` default; existing `.hack` names and `.hack.gy` OAuth aliases keep
+  working and are prefixed the same way)
 - prefixes the Compose project name
 
 This enables parallel worktrees without port or hostname collisions.

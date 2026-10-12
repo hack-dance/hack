@@ -34,11 +34,17 @@ create duplicate supervisors, partial port conflicts, or aggressive cleanup/rest
 `singleton` exists to make those fixed-port helpers explicit. It gives Hack a conservative rule:
 
 - start the helper when none of its expected listeners exist
-- adopt the existing helper when the full listener set is already healthy and the config opts into reuse
+- adopt the existing helper when every expected port is already occupied and the config opts into reuse
 - fail fast on partial occupancy instead of trying to replace part of a live tunnel stack
 
 That keeps Hack local-first and predictable. It avoids turning "something equivalent is already running"
 into "kill and recreate it", which is especially important for brittle port-forwarding workflows.
+
+Adoption only checks that every configured port is occupied. It is not a health, identity, or readiness
+check: an unrelated service that happens to hold the same ports is adopted too, and an adopted tunnel may
+still be reconnecting. When the wrong listener would matter, pair `onConflict: "adopt"` with a
+`lifecycle.up.before` hook that verifies the listener's identity (for example, a request to a known
+endpoint) and fails when it does not match.
 
 ## Config
 
@@ -157,7 +163,7 @@ Commands inherit the CLI process environment (including PATH), plus resolved pro
 - If all configured ports already have listeners and `onConflict` is omitted or `"fail"`, Hack stops with an explicit error so the operator can decide whether to stop or reuse the existing process.
 
 Important boundaries:
-- `singleton` is a listener-level guard, not a deep process identity check.
+- `singleton` is a listener-level guard, not a health, identity, or readiness check. Adopt only checks that every configured port is occupied; pair it with a `lifecycle.up.before` identity check when a foreign listener on the same port would cause harm.
 - Adoption means "Hack observed the full expected local listener set and will not start another copy". It does not mean Hack now owns or can safely tear down that external process.
 - `hack down` only stops processes Hack actually launched inside the lifecycle session. Adopted external listeners are intentionally left alone.
 
@@ -284,7 +290,7 @@ Notes:
 ## Tips
 
 - For long-running setup commands, use either `lifecycle.processes` or `lifecycle.up.before` with `persistent: true`.
-- For local proxy/tunnel helpers that bind fixed ports, prefer `singleton.ports` with `onConflict: "adopt"` so `hack up` can reuse an already-running external tunnel instead of racing it.
+- For local proxy/tunnel helpers that bind fixed ports, prefer `singleton.ports` with `onConflict: "adopt"` so `hack up` can reuse an already-running external tunnel instead of racing it. Adopt only checks that every configured port is occupied, not health, identity, or readiness; pair it with a `lifecycle.up.before` identity check.
 - Keep non-persistent hooks short and deterministic.
 - Store lifecycle secrets in `hack.env.*.yaml` as encrypted `secure:` values and prefer runtime injection over relying on `.hack/.env`.
 - If a hook requires interactive auth (e.g. browser-based SSO), it will still work; it runs with `stdin: inherit`.

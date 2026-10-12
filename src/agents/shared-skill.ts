@@ -1,14 +1,13 @@
-import { rm } from "node:fs/promises";
-import { dirname, resolve } from "node:path";
+import { resolve } from "node:path";
 
-import {
-  ensureDir,
-  pathExists,
-  readTextFile,
-  writeTextFileIfChanged,
-} from "../lib/fs.ts";
+import { readTextFile } from "../lib/fs.ts";
 import { renderCodexSkill } from "./codex-skill.ts";
 import { normalizeInstructionText } from "./instruction-source.ts";
+import {
+  type IntegrationPreservedReason,
+  installOwnedIntegrationFile,
+  removeOwnedIntegrationFile,
+} from "./integration-ownership.ts";
 
 export type SharedSkillResult = {
   readonly status:
@@ -19,9 +18,12 @@ export type SharedSkillResult = {
     | "stale"
     | "removed"
     | "missing"
+    | "preserved"
     | "error";
   readonly path: string;
   readonly message?: string;
+  /** Set with `preserved`: why an existing file was left unchanged. */
+  readonly reason?: IntegrationPreservedReason;
 };
 
 const SHARED_SKILLS_DIR = ".ai/skills";
@@ -29,24 +31,32 @@ const HACK_CLI_SKILL_NAME = "hack-cli";
 const SKILL_FILENAME = "SKILL.md";
 const HACK_CLI_MARKER = /name:\s*hack-cli\b/i;
 
-/** Install the canonical Hack skill in the shared agent skill root. */
+/**
+ * Install the canonical Hack skill in the shared agent skill root.
+ *
+ * Overwrites only Hack-owned content; an edited or foreign SKILL.md is
+ * reported as `preserved` and left unchanged.
+ */
 export async function installSharedHackSkill(): Promise<SharedSkillResult> {
   const resolved = resolveSharedSkillPath({ skillName: HACK_CLI_SKILL_NAME });
   if (!resolved.ok) {
     return { status: "error", path: SKILL_FILENAME, message: resolved.message };
   }
 
-  await ensureDir(dirname(resolved.path));
-  const existed = await pathExists(resolved.path);
-  const result = await writeTextFileIfChanged(
-    resolved.path,
-    renderCodexSkill()
-  );
-  let status: SharedSkillResult["status"] = "noop";
-  if (result.changed) {
-    status = existed ? "updated" : "created";
+  const outcome = await installOwnedIntegrationFile({
+    surface: "hack-cli-skill",
+    path: resolved.path,
+    render: renderCodexSkill(),
+  });
+  if (outcome.status === "preserved") {
+    return {
+      status: "preserved",
+      path: resolved.path,
+      reason: outcome.reason,
+      message: outcome.message,
+    };
   }
-  return { status, path: resolved.path };
+  return { status: outcome.status, path: resolved.path };
 }
 
 /** Check the shared Hack skill against the same canonical render used by Codex. */
@@ -80,16 +90,33 @@ export async function checkSharedHackSkill(): Promise<SharedSkillResult> {
   return { status: "noop", path: resolved.path };
 }
 
+/**
+ * Remove the shared Hack skill. Deletes only a Hack-owned SKILL.md and removes
+ * the skill directory only when it is empty afterwards.
+ */
 export async function removeSharedHackSkill(): Promise<SharedSkillResult> {
   const resolved = resolveSharedSkillPath({ skillName: HACK_CLI_SKILL_NAME });
   if (!resolved.ok) {
     return { status: "error", path: SKILL_FILENAME, message: resolved.message };
   }
-  if (!(await pathExists(resolved.path))) {
-    return { status: "missing", path: resolved.path };
+  const outcome = await removeOwnedIntegrationFile({
+    surface: "hack-cli-skill",
+    path: resolved.path,
+    currentRender: renderCodexSkill(),
+    removeEmptyDirectory: true,
+  });
+  if (outcome.status === "preserved") {
+    return {
+      status: "preserved",
+      path: resolved.path,
+      reason: outcome.reason,
+      message: outcome.message,
+    };
   }
-  await rm(dirname(resolved.path), { recursive: true, force: true });
-  return { status: "removed", path: resolved.path };
+  if (outcome.status === "removed" && outcome.message) {
+    return { status: "removed", path: resolved.path, message: outcome.message };
+  }
+  return { status: outcome.status, path: resolved.path };
 }
 
 function resolveSharedSkillPath(opts: {

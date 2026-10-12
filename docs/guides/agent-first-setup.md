@@ -74,15 +74,42 @@ entry still starts one process per connected client.
 
 1. Inventory — package manager, services, ports, backing services, and required
    variable names. Preserve the existing credential flow without copying secrets.
-2. Setup — configure the requested container or host workflow, routing, and managed
-   env injection. Verify replacements before removing any old env files.
+   Lockfiles (`bun.lock`, legacy `bun.lockb`, pnpm, yarn, npm) are checked at the
+   root and in workspace packages; lockfiles from different package managers are a
+   conflict to resolve, not something to delete. Non-JS manifests (Cargo, Go,
+   Python, Ruby, Elixir, .NET) and runtime pins (`.nvmrc`, `.tool-versions`,
+   `mise.toml`, `engines`, `packageManager`) are noted by name.
+2. Setup — resume from an existing `.hack/` config at the first failing phase, then
+   configure the requested container or host workflow, routing, and managed env
+   injection. Full containerization, backing-services-only, and toolchain-only are
+   all valid shapes; none requires an always-on app service. Verify replacements
+   before removing any old env files.
 3. Platform nuances — isolate Linux native dependencies from host installs when
-   needed. Reuse existing tooling; add an ops container only when justified.
+   needed, using the locked install for the repo's package manager
+   (`bun install --frozen-lockfile`, `pnpm install --frozen-lockfile`,
+   `yarn install --immutable`, `npm ci`). A lockfile failure is diagnosed, not
+   bypassed. The optional `hack.dependencies.cache-volume` /
+   `hack.dependencies.lockfiles` labels and the opt-in
+   [`locked-v1` protocol](dependency-cache-protocol.md) cover cache sharing. Reuse
+   existing tooling; add an ops container only when justified.
 4. Running things — choose `hack run`, `hack exec`, or `hack host exec` for the target.
 5. Verification — check expected long-running services, successful one-shot exits,
    actual routed URLs with normal TLS verification, and the requested host workflow.
+   Confirm persistent data survives `hack down` / `hack up` and setup reruns.
    Preserve native trust approvals, ownership, and destructive-cleanup gates.
    Unrelated optional integration warnings do not block completion.
+
+The ground rules tell the agent not to create or modify `AGENTS.md`, `CLAUDE.md`,
+rule files, or repository skill copies unless asked. Onboarding configures the
+runtime; it does not install agent instructions. The agent also reports the
+discovery limits it hit: a missing agent client (the prompt was printed instead of
+launched), a non-interactive run, or the no-shell `hack-init` MCP prompt, which
+defaults to existing-project mode without a repo inventory.
+
+`hack agent init` adds a pre-computed inventory before the same prompt. It reads
+file names and manifest keys only, never env-file contents, lockfile contents or
+pin values. It ends with a list of discovery limitations, such as conflicting
+package managers or non-JS services whose entrypoints were not inferred.
 
 ## Partial adoption (backing services only)
 
@@ -127,6 +154,14 @@ dev`, `dotnet watch`, `vite`) stay on the host.
 Partial adoption is a valid end state, not an incomplete migration — do not treat it
 as something to "finish" into full containerization unless the tradeoffs above
 actually bite.
+
+## Toolchain-only adoption
+
+Hack can also manage only pinned tools and dependency caches. Define one-shot tool
+services behind a Compose profile and run them with
+`hack run --profile <profile> <service> -- <cmd>`. No app service needs to stay up.
+This repository's own `toolchain` service is an example: see
+[Develop Hack using Hack](../../.hack/README.md).
 
 ## Copy-paste bootstrap
 

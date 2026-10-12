@@ -3,6 +3,7 @@ import { request } from "node:http";
 import { dirname, isAbsolute, join, normalize, parse } from "node:path";
 import { isRecord } from "./guards.ts";
 import { bindNativeComposeEngineConfig } from "./native-compose-engine-config.ts";
+import { x01Mark, x01Time } from "./x01-cost-probe.ts";
 
 const ENGINE_ID = /^[A-Za-z0-9:-]{1,128}$/;
 const AMBIGUOUS_PATH = /[%?#\0\r\n]/;
@@ -411,18 +412,22 @@ export function createNativeComposeEngineIdentityAdmissions(): (opts: {
       return await opts.cli();
     }
     const state = admitted.get(bound.key);
+    const direct = bound.read;
     if (state === true) {
-      return `${JSON.stringify(await bound.read())}\n`;
+      return `${JSON.stringify(await x01Time("ident", "direct", direct))}\n`;
     }
     const text = await opts.cli();
     if (state === undefined) {
       let equal = false;
       try {
         const value: unknown = JSON.parse(text);
-        equal = typeof value === "string" && value === (await bound.read());
+        equal =
+          typeof value === "string" &&
+          value === (await x01Time("ident", "admission", direct));
       } catch {
         equal = false;
       }
+      x01Mark("ident-admit", equal ? "admitted" : "refused");
       admitted.set(bound.key, equal);
     }
     return text;

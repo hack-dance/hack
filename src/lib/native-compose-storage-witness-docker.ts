@@ -98,6 +98,7 @@ import {
   refuseNativeComposeStorageXattr as refuse,
 } from "./native-compose-storage-witness-xattr-codec.ts";
 import { findExecutableInPath, type RunExitEvent, run } from "./shell.ts";
+import { x01Label, x01Mark, x01Scope, x01Time } from "./x01-cost-probe.ts";
 
 const ID = /^[a-f0-9]{64}$/;
 const PROCESS =
@@ -817,7 +818,10 @@ async function groupAbsent(
 }
 /** Every identity check runs per call; only an unchanged stat identity skips the
  * content read for the rest of this command. */
-const commandExecutable = readNativeComposeStorageCommandExecutable;
+const commandExecutable = (path: string) =>
+  x01Time("hash", x01Label([path]), () =>
+    readNativeComposeStorageCommandExecutable(path)
+  );
 async function boundedHostFile(path: string): Promise<string> {
   const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
   try {
@@ -903,7 +907,14 @@ async function commandBoot(
 }
 /** No callback can reject before the shared owner awaits exit. A rejected owner or
  * unproven group retains the journal; daemon effects are never inferred from exit. */
-export async function runNativeComposeStorageDockerCommand(supplied: {
+export function runNativeComposeStorageDockerCommand(
+  supplied: Parameters<typeof x01RunCommandInner>[0]
+): ReturnType<typeof x01RunCommandInner> {
+  return x01Scope(`cmd:${x01Label(supplied.args)}`, () =>
+    x01RunCommandInner(supplied)
+  );
+}
+async function x01RunCommandInner(supplied: {
   readonly context: Pick<Context, "signal" | "deadline">;
   readonly files: Pick<
     Files,
@@ -1248,7 +1259,12 @@ function matchesScope(
  * image; other daemons and uncached images refuse rather than pull or emulate.
  * PostgreSQL data roots and crash durability remain unqualified. No module
  * initialization executes Docker or the helper. */
-export async function createNativeComposeDockerStorageXattrCarrier(
+export function createNativeComposeDockerStorageXattrCarrier(
+  opts: Context
+): Promise<NativeComposeStorageXattrCarrier> {
+  return x01Scope("carrier-new", () => x01CreateCarrier(opts));
+}
+async function x01CreateCarrier(
   opts: Context
 ): Promise<NativeComposeStorageXattrCarrier> {
   const context: Context = Object.freeze({ ...opts });
@@ -1370,6 +1386,7 @@ export async function createNativeComposeDockerStorageXattrCarrier(
         const binding = await current(context, selection);
         if (same(binding, closed.binding)) {
           lifetime(context);
+          x01Mark("target-reused", "closing");
           return closed.target;
         }
       } catch (error) {
@@ -2034,17 +2051,21 @@ export async function createNativeComposeDockerStorageXattrCarrier(
   return captureNativeComposeStorageXattrCarrier({
     artifact: selectedArtifact,
     ports: {
-      inspect: inspectPort,
-      provision,
-      invoke,
+      inspect: (selection, options) =>
+        x01Scope("inspect", () => inspectPort(selection, options)),
+      provision: (selection) =>
+        x01Scope("provision", () => provision(selection)),
+      invoke: (input) =>
+        x01Scope(`invoke:${input.request.operation}`, () => invoke(input)),
       finish:
         context.originalCommandRecords === true
-          ? async ({ input, completion }) => {
-              closing = null;
-              const finish = finalizers.get(input) ?? refuse();
-              finalizers.delete(input);
-              await finish(completion);
-            }
+          ? ({ input, completion }) =>
+              x01Scope("finish", async () => {
+                closing = null;
+                const finish = finalizers.get(input) ?? refuse();
+                finalizers.delete(input);
+                await finish(completion);
+              })
           : undefined,
     },
     signal: context.signal,

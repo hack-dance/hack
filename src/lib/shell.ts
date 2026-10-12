@@ -4,6 +4,7 @@ import {
 } from "./native-cpu-diagnostics.ts";
 import { readSubprocessResourceUsage } from "./process-resource-usage.ts";
 import { hasControllingTerminal } from "./tty-process-group.ts";
+import { x01Label, x01Time } from "./x01-cost-probe.ts";
 
 export interface ExecResult {
   readonly exitCode: number;
@@ -40,7 +41,13 @@ function buildSpawnEnv(
   return override ? { ...base, ...override } : base;
 }
 
-export async function exec(
+export function exec(
+  cmd: readonly string[],
+  opts: ExecOptions = {}
+): Promise<ExecResult> {
+  return x01Time("exec", x01Label(cmd), () => x01ExecInner(cmd, opts));
+}
+async function x01ExecInner(
   cmd: readonly string[],
   opts: ExecOptions = {}
 ): Promise<ExecResult> {
@@ -123,7 +130,13 @@ export type RunExitEvent = {
   readonly maxRssBytes: number | null;
 };
 
-export async function run(
+export function run(
+  cmd: readonly string[],
+  opts: RunOptions = {}
+): Promise<number> {
+  return x01Time("run", x01Label(cmd), () => x01RunInner(cmd, opts));
+}
+async function x01RunInner(
   cmd: readonly string[],
   opts: RunOptions = {}
 ): Promise<number> {

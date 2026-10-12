@@ -17,7 +17,13 @@ The installer needs Python 3.9 or newer and macOS `codesign`; it does not need B
 Rust, Zig, or a source checkout at runtime. The bundle includes the compiled normal
 CLI, native executor, Linux guest relay, launcher, provider pins, documentation,
 version metadata, and checksums. Newer bundles also include an optional shared MCP
-adapter, owner, backend and content-addressed manifest. A reviewed source checkout can instead use
+adapter, owner, backend and content-addressed manifest, the config compiler and its
+schemas, and the Linux ARM64 storage root witness with its byte manifest. The
+installer requires each of these groups to be complete or absent. It installs the
+witness `0500` and its manifest `0600` beside `hack-native`, which is where authored
+persistent mounts resolve them, and checks that the manifest matches the witness
+bytes and the bundle's source revision. The witness runs only inside the Linux guest,
+so it has no macOS signature; its checksums pin it. A reviewed source checkout can instead use
 `python3 scripts/install-prerelease.py install --version 5.0.0-next.1`. There is no
 latest-version lookup or automatic updater.
 
@@ -61,18 +67,26 @@ retains the existing refusal; use the channel manager's explicit upgrade command
 
 ## Upgrade and return to a retained candidate
 
-Shared MCP packages need the matching retained installation manager. Older channels
+Shared MCP, config compiler and storage witness packages need the matching
+retained installation manager. Older channels
 keep their original `manager.py`; running a newer installer against that root does
-not update it. The newer installer refuses an MCP upgrade when its own bytes differ
-from the retained manager, before publishing a version or changing selection.
+not update it. The newer installer refuses such an upgrade when its own bytes differ
+from the retained manager, before publishing a version or changing selection. The
+older manager itself refuses the newer layout as foreign files.
 
-To update a reviewed predecessor manager, including the original flat-layout
-manager shipped with `5.0.0-next.1`, review a newer installer containing
-`upgrade-manager`, then run that saved file explicitly:
+To update a reviewed predecessor manager, including the managers shipped with
+`5.0.0-next.1` and `5.0.0-next.2`, review the newer installer from the tag you are
+upgrading to, then run that saved file explicitly. For example, before upgrading a
+`5.0.0-next.2` channel to `5.0.0-next.3`:
 
 ```sh
-python3 /absolute/reviewed/install-prerelease.py --root "$HOME/.hack-next" upgrade-manager
+curl --fail --location --proto '=https' --proto-redir '=https' --tlsv1.2 \
+  https://raw.githubusercontent.com/hack-dance/hack/v5.0.0-next.3/scripts/install-prerelease.py \
+  --output hack-next-install.py
+less hack-next-install.py
+python3 hack-next-install.py --root "$HOME/.hack-next" upgrade-manager
 python3 "$HOME/.hack-next/manager.py" --root "$HOME/.hack-next" status
+python3 "$HOME/.hack-next/manager.py" --root "$HOME/.hack-next" upgrade --version 5.0.0-next.3
 ```
 
 Stop every retained version's graphs and runtime first, using the commands below
@@ -86,7 +100,8 @@ remain in a private staging directory for inspection. Repeating the command with
 the already installed manager is a no-op.
 
 After this step, use the retained manager for ordinary bundle upgrades and rollback.
-It accepts both old flat bundles and new MCP bundles. This operation does not
+It accepts old flat bundles, MCP and compiler bundles, and new storage witness
+bundles, so rollback to an earlier retained version still works. This operation does not
 enroll MCP clients or migrate application data. For an unsupported manager, keep
 the existing channel and use a fresh root such as `--root "$HOME/.hack-next-mcp"`;
 do not edit its receipt to force adoption.

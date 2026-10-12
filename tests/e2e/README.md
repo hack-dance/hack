@@ -13,6 +13,7 @@ bun run test:e2e:local:docker       # tier 1 + tier 2 (docker + real global infr
 
 bun tests/e2e/run.ts --list         # list scenarios
 bun tests/e2e/run.ts --only=init    # run a subset by name
+bun tests/e2e/run.ts --shard=2/4    # run one deterministic CI shard of the default set
 HACK_E2E_KEEP=1 bun tests/e2e/run.ts --only=doctor   # keep temp dirs for debugging
 HACK_E2E_REQUIRE_TMUX=1 bun tests/e2e/run.ts --only=lifecycle-session-recovery
 ```
@@ -30,11 +31,24 @@ checks: a red result is a signal to triage, not a merge block. "Registered in
 Docker CI" below therefore means the optional `docker-e2e` job. Every job has a
 `timeout-minutes` budget so a hung engine or runner cannot hold a slot open.
 
-When `docker-e2e` fails, the process-policy scenario keeps its fixture roots and
+`docker-e2e` is a fan-in job. The scenarios run on four parallel
+`docker-e2e shard i/4` runners, each with `bun tests/e2e/run.ts --shard=i/4`.
+`tests/e2e/shard.ts` splits the default scenario set deterministically: it puts
+each scenario in the lightest shard, longest first, using the checked-in
+duration hints. Every scenario runs in exactly one shard, and
+`tests/e2e-shard.test.ts` proves that for the current list. The long native
+scenarios (`native-config-networks`, `-compose`, `-routing`) each get their own
+shard, so the slowest single scenario sets the wall time. `docker-e2e` always
+runs and passes only when every shard succeeded. The prerelease exact-head gate
+also requires each shard job by name. To reproduce one CI shard locally, run
+`bun tests/e2e/run.ts --list --shard=i/4`, then rerun its names with `--only`.
+`--shard` and `--only` cannot be combined.
+
+When a shard fails, the process-policy scenario keeps its fixture roots and
 writes its fixed-field capsule and startup diagnostic under `HACK_E2E_CAPSULE_DIR`
-(`$RUNNER_TEMP/process-policy-capsules` in CI); the job uploads that directory
-as the `process-policy-capsules` artifact. Those files hold counts, enums and
-booleans only.
+(`$RUNNER_TEMP/process-policy-capsules` in CI). The shard uploads that directory
+as the `process-policy-capsules-shard-<i>` artifact. Those files hold counts,
+enums and booleans only.
 
 
 ## Compiler fixture prerequisite

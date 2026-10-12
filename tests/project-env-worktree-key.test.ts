@@ -255,7 +255,14 @@ type CliResult = {
   readonly stderr: string;
 };
 
-/** Runs the current-branch CLI with an isolated HOME and global config. */
+/**
+ * Runs the current-branch CLI with an isolated HOME and global config.
+ *
+ * The logger backend is pinned to `console` (plain stderr). Without the pin
+ * the backend depends on the host: `gum` writes to stderr when installed, but
+ * hosted runners lack gum and fall back to clack, which writes to stdout, so
+ * refusal text would leave stderr empty only in CI.
+ */
 async function runHackCli(opts: {
   readonly sandbox: string;
   readonly args: readonly string[];
@@ -266,6 +273,7 @@ async function runHackCli(opts: {
     ...process.env,
     HOME: home,
     HACK_GLOBAL_CONFIG_PATH: resolve(home, "hack.config.json"),
+    HACK_LOGGER: "console",
   };
   Reflect.deleteProperty(env, "HACK_ENV_SECRET_KEY");
   const proc = Bun.spawn(

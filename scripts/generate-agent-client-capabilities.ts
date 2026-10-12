@@ -107,11 +107,11 @@ export function renderAgentClientCapabilitySection({
     "",
     "### Clients",
     "",
-    "| Client | Manifest |",
-    "| --- | --- |",
+    "| Client | `hack` plugin manifest | `hack-mcp` plugin manifest |",
+    "| --- | --- | --- |",
     ...AGENT_CLIENT_DEFINITIONS.map(
       (definition) =>
-        `| ${escapeCell(definition.label)} | \`${definition.manifestPath}\` |`
+        `| ${escapeCell(definition.label)} | \`${definition.manifestPath}\` | \`${definition.mcpManifestPath}\` |`
     ),
     "",
     "### Capabilities",

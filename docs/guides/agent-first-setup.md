@@ -11,8 +11,8 @@ your installed version.
 | --- | --- |
 | A fresh repo + an agent CLI installed | `hack init --with claude\|codex\|both` |
 | An existing hack project | `hack agent onboard` (prints the prompt) |
-| An agent session with the hack skills installed | `/hack-init` |
-| A no-shell MCP client | the `hack-init` MCP prompt (`hack setup mcp`) |
+| An agent session with the `hack` plugin installed | `/hack-init` |
+| A no-shell client with Hack MCP explicitly installed (`hack-mcp` plugin or `hack setup mcp`) | the `hack-init` MCP prompt |
 
 ## New repo: `hack init --with`
 
@@ -42,11 +42,18 @@ when present.
 
 ## Agent-side skill: `/hack-init`
 
-`hack setup claude` and `hack setup codex` install a thin `hack-init` skill
-(`.claude/skills/hack-init/SKILL.md` / `.codex/skills/hack-init/SKILL.md`).
-The skill tells the agent to run `hack agent onboard` (or fetch the `hack-init`
-MCP prompt) and follow it — the content stays in the CLI, so installed skills
-fetch guidance matching the installed CLI.
+The optional `hack` plugin ships a thin `hack-init` skill; install the plugin
+through your client's plugin manager (see
+[Optional native plugins](../integrations.md#optional-native-plugins)). The skill
+tells the agent to run `hack agent onboard` and follow the printed prompt. Without
+shell access it fetches the `hack-init` MCP prompt only when a Hack MCP server, such
+as the opt-in `hack-mcp` plugin, is installed; otherwise it reports that blocker.
+The content stays in the CLI, so the skill fetches guidance matching the installed
+CLI.
+
+A client that cannot use the plugin can export the same skill into a chosen scope as
+an explicit opt-in (`hack setup claude` or `hack setup codex`). Onboarding itself
+never installs it.
 
 ## MCP request lifetime
 

@@ -65,35 +65,207 @@ export async function generateAgentPlugins({
   }
   await writeSkillReferences({ pluginRoot });
 
-  const manifestPaths = [
-    resolve(pluginRoot, ".codex-plugin", "plugin.json"),
-    resolve(pluginRoot, ".claude-plugin", "plugin.json"),
-    resolve(pluginRoot, ".cursor-plugin", "plugin.json"),
-  ] as const;
-
-  for (const manifestPath of manifestPaths) {
-    const manifest = (await Bun.file(manifestPath).json()) as Record<
-      string,
-      unknown
-    >;
+  for (const relative of SKILLS_PACKAGE_MANIFESTS) {
+    const manifestPath = resolve(pluginRoot, relative);
+    const manifest: unknown = await Bun.file(manifestPath).json();
+    if (!isRecord(manifest)) {
+      throw new Error("Expected a hack plugin client manifest object");
+    }
+    if ("mcpServers" in manifest) {
+      throw new Error(
+        "The hack plugin is skills-only; declare MCP in the hack-mcp package"
+      );
+    }
     manifest.version = version;
-    await Bun.write(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
-    await Bun.$`${process.execPath} x --no-install biome format --write ${manifestPath}`.quiet();
+    await writeFormattedJson({ path: manifestPath, value: manifest });
   }
 
-  // Keep legacy clients working while deriving portable files from the same source.
-  const codexManifest: unknown = await Bun.file(manifestPaths[0]).json();
-  const mcpManifest: unknown = await Bun.file(
-    resolve(pluginRoot, ".mcp.json")
+  // The portable manifest derives from the Codex overlay. MCP is not part of
+  // the skills package; remove copies a pre-hack-mcp checkout still carries.
+  const codexManifest: unknown = await Bun.file(
+    resolve(pluginRoot, SKILLS_PACKAGE_MANIFESTS[0])
   ).json();
-  for (const [name, manifest] of [
-    ["plugin.json", portablePluginManifest(codexManifest)],
-    ["mcp.json", portableMcpManifest(mcpManifest)],
-  ] as const) {
-    const path = resolve(pluginRoot, name);
-    await Bun.write(path, `${JSON.stringify(manifest, null, 2)}\n`);
-    await Bun.$`${process.execPath} x --no-install biome format --write ${path}`.quiet();
+  await writeFormattedJson({
+    path: resolve(pluginRoot, "plugin.json"),
+    value: portablePluginManifest(codexManifest),
+  });
+  for (const retired of RETIRED_SKILLS_PACKAGE_FILES) {
+    await rm(resolve(pluginRoot, retired), { force: true });
   }
+
+  await generateMcpPlugin({
+    pluginRoot: resolve(repoRoot, "plugins", HACK_MCP_PLUGIN_NAME),
+    version,
+  });
+}
+
+/** Default plugin: skills, Claude primer hooks and a Cursor rule; no MCP. */
+export const HACK_PLUGIN_NAME = "hack";
+
+/** Opt-in companion plugin that only declares the Hack MCP server. */
+export const HACK_MCP_PLUGIN_NAME = "hack-mcp";
+
+/** Client manifests of the skills package; Codex first as the portable source. */
+const SKILLS_PACKAGE_MANIFESTS = [
+  ".codex-plugin/plugin.json",
+  ".claude-plugin/plugin.json",
+  ".cursor-plugin/plugin.json",
+] as const;
+
+/** MCP declarations the skills package shipped before hack-mcp existed. */
+const RETIRED_SKILLS_PACKAGE_FILES = [".mcp.json", "mcp.json"] as const;
+
+/**
+ * The single source of truth for the MCP launch Hack packages as a plugin:
+ * the `hack` executable from the client's PATH, serving stdio. Every hack-mcp
+ * client manifest and both MCP files render from this value.
+ */
+export const HACK_MCP_SERVER = {
+  name: "hack",
+  command: "hack",
+  args: ["mcp", "serve"],
+} as const;
+
+/** Every file the generator owns in plugins/hack-mcp, relative to its root. */
+export const HACK_MCP_PLUGIN_FILES = [
+  ".claude-plugin/plugin.json",
+  ".codex-plugin/plugin.json",
+  ".cursor-plugin/plugin.json",
+  ".mcp.json",
+  "README.md",
+  "mcp.json",
+  "plugin.json",
+] as const;
+
+const HACK_MCP_DESCRIPTION =
+  "Opt-in Hack MCP server (`hack mcp serve`) for agent clients without shell access.";
+const HACK_MCP_KEYWORDS = [
+  "local-development",
+  "developer-tools",
+  "agents",
+  "mcp",
+] as const;
+const HACK_HOMEPAGE = "https://github.com/hack-dance/hack";
+const HACK_AUTHOR = {
+  name: "Hack Dance LLC",
+  url: "https://github.com/hack-dance",
+} as const;
+const MCP_DECLARATION = "./.mcp.json";
+
+/** Client-compatible `.mcp.json` rendered from {@link HACK_MCP_SERVER}. */
+export function renderMcpServers(): Record<string, unknown> {
+  return {
+    mcpServers: {
+      [HACK_MCP_SERVER.name]: {
+        command: HACK_MCP_SERVER.command,
+        args: [...HACK_MCP_SERVER.args],
+      },
+    },
+  };
+}
+
+/** Client manifests of the hack-mcp package for one release version. */
+export function renderMcpPluginManifests({
+  version,
+}: {
+  readonly version: string;
+}): Readonly<Record<"codex" | "claude" | "cursor", Record<string, unknown>>> {
+  const identity = {
+    name: HACK_MCP_PLUGIN_NAME,
+    version,
+    description: HACK_MCP_DESCRIPTION,
+    author: { ...HACK_AUTHOR },
+    homepage: HACK_HOMEPAGE,
+    repository: HACK_HOMEPAGE,
+    license: "MIT",
+    keywords: [...HACK_MCP_KEYWORDS],
+  };
+  return {
+    codex: {
+      ...identity,
+      interface: {
+        displayName: "Hack MCP",
+        shortDescription: "Hack tools over MCP",
+        longDescription:
+          "Opt-in MCP server for Codex sessions without shell access. Install the hack plugin for skills; prefer the Hack CLI whenever shell access is available.",
+        developerName: HACK_AUTHOR.name,
+        category: "Developer Tools",
+        capabilities: ["MCP tools"],
+        websiteURL: HACK_HOMEPAGE,
+        defaultPrompt: ["List my Hack projects and their status."],
+        brandColor: "#FF5C35",
+      },
+      mcpServers: MCP_DECLARATION,
+    },
+    claude: { ...identity, mcpServers: MCP_DECLARATION },
+    cursor: {
+      ...identity,
+      author: { name: HACK_AUTHOR.name },
+      mcpServers: MCP_DECLARATION,
+    },
+  };
+}
+
+/** README of the hack-mcp package. */
+export function renderMcpPluginReadme(): string {
+  const launch = [HACK_MCP_SERVER.command, ...HACK_MCP_SERVER.args].join(" ");
+  return `# Hack MCP plugin
+
+Opt-in companion to the \`hack\` plugin. It declares one stdio MCP server,
+\`${launch}\`, for Codex, Claude Code and Cursor sessions without shell
+access. It ships no skills, hooks or rules; those stay in the \`hack\` plugin.
+
+Install it only when MCP is wanted. With shell access, the \`hack\` plugin and the
+Hack CLI cover the same workflows without a server process. Install the \`hack\`
+executable first; the server resolves \`hack\` from the client's PATH. Keep one
+Hack MCP registration per client: do not add this plugin next to an existing
+\`hack mcp install\` entry for the same client and scope.
+
+Portable clients read \`plugin.json\` and \`mcp.json\`; other clients read their
+\`.<client>-plugin/plugin.json\` and \`.mcp.json\`. Verify in a fresh session that
+the server initializes and lists Hack tools. A marketplace listing alone does not
+prove that it loaded.
+
+Generated by \`bun run generate:agent-plugins\` from
+\`scripts/generate-agent-plugins.ts\`; do not edit these files directly. See
+[integration setup](../../docs/integrations.md#optional-native-plugins).
+`;
+}
+
+/** Write the complete hack-mcp package; every file renders from code. */
+async function generateMcpPlugin({
+  pluginRoot,
+  version,
+}: {
+  readonly pluginRoot: string;
+  readonly version: string;
+}): Promise<void> {
+  const manifests = renderMcpPluginManifests({ version });
+  const servers = renderMcpServers();
+  const files: readonly (readonly [string, unknown])[] = [
+    [".codex-plugin/plugin.json", manifests.codex],
+    [".claude-plugin/plugin.json", manifests.claude],
+    [".cursor-plugin/plugin.json", manifests.cursor],
+    [".mcp.json", servers],
+    ["plugin.json", portablePluginManifest(manifests.codex)],
+    ["mcp.json", portableMcpManifest(servers)],
+  ];
+  for (const [relative, value] of files) {
+    await writeFormattedJson({ path: resolve(pluginRoot, relative), value });
+  }
+  await Bun.write(resolve(pluginRoot, "README.md"), renderMcpPluginReadme());
+}
+
+async function writeFormattedJson({
+  path,
+  value,
+}: {
+  readonly path: string;
+  readonly value: unknown;
+}): Promise<void> {
+  await Bun.$`mkdir -p ${dirname(path)}`;
+  await Bun.write(path, `${JSON.stringify(value, null, 2)}\n`);
+  await Bun.$`${process.execPath} x --no-install biome format --write ${path}`.quiet();
 }
 
 /** Preserve effective OpenAI settings: an inline extension replaces the overlay. */

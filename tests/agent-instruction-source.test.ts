@@ -257,6 +257,43 @@ test("all surfaces contain the canonical bullets for their tagged sections", () 
   expect(misses).toEqual([]);
 });
 
+test("agent setup guidance keeps the plugin default and the no-write rule", () => {
+  const agentSetup = INSTRUCTION_SECTIONS.find(
+    (section) => section.id === "agent-setup"
+  );
+  expect(agentSetup).toBeDefined();
+  const bullets = agentSetup?.bullets ?? [];
+  const pluginDefault = bullets.find((bullet) =>
+    /^Default integration: the optional `hack` plugin\b/.test(bullet)
+  );
+  expect(pluginDefault, "agent-setup lacks the plugin default").toBeDefined();
+  expect(pluginDefault).toContain("ships no MCP server");
+  expect(pluginDefault).toContain("Hack commands never install plugins");
+
+  const noWrite = bullets.find((bullet) =>
+    /^Setup and onboarding never write\b/.test(bullet)
+  );
+  expect(noWrite, "agent-setup lacks the no-write rule").toBeDefined();
+  for (const target of [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "rule files",
+    "repository skill copies",
+  ]) {
+    expect(noWrite).toContain(target);
+  }
+  expect(noWrite).toMatch(/unless the user asks for them\.$/);
+
+  for (const surface of agentSetup?.surfaces ?? []) {
+    const rendered = RENDERED_SURFACES[surface];
+    expect(rendered, `surface "${surface}"`).toContain(pluginDefault ?? "");
+    expect(rendered, `surface "${surface}"`).toContain(noWrite ?? "");
+  }
+  expect(agentSetup?.surfaces).toEqual(
+    expect.arrayContaining(["docs", "skill", "primer"])
+  );
+});
+
 test("linked worktree guidance is present in every surface", () => {
   for (const rendered of Object.values(RENDERED_SURFACES)) {
     expect(rendered).toContain("Linked git worktrees");

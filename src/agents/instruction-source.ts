@@ -351,17 +351,16 @@ export const INSTRUCTION_SECTIONS: readonly InstructionSection[] = [
   },
   {
     id: "agent-setup",
-    title: "Agent setup (CLI-first)",
+    title: "Agent setup (plugin-first)",
     surfaces: ["docs", "skill", "primer"],
     bullets: [
-      "Cursor rules: `hack setup cursor`",
-      "Claude hooks: `hack setup claude`",
-      "Codex skill: `hack setup codex`",
+      "Default integration: the optional `hack` plugin, installed through the client's plugin manager, ships skills, Claude primer hooks and a Cursor rule. It ships no MCP server, and Hack commands never install plugins.",
+      "MCP is opt-in, only for clients without shell access and only when explicitly selected: add the separate `hack-mcp` plugin, or use `hack setup mcp` (client and scope via `hack mcp install --help`). Do not configure other clients as a side effect.",
+      "Standalone export is an opt-in alternative to the plugin: `hack setup cursor` (rules), `hack setup claude` (hooks and skill), `hack setup codex` (skills) or `hack setup agents` (AGENTS.md/CLAUDE.md snippets). Use one integration path per client.",
+      "Setup and onboarding never write AGENTS.md, CLAUDE.md, rule files, or repository skill copies unless the user asks for them.",
       "Agent-assisted onboarding: `hack init --with claude|codex` (new repos) or `hack agent onboard` (existing projects) print/hand off the full setup prompt; the `/hack-init` skill and the `hack-init` MCP prompt return the same content.",
       "Init prompt: `hack agent init` (use --client cursor|claude|codex to open)",
       "Init patterns: `hack agent patterns`",
-      "MCP (no-shell only): `hack setup mcp`",
-      "MCP install: choose the requested client and scope with `hack mcp install --help`; do not configure other clients as a side effect.",
     ],
   },
 ];

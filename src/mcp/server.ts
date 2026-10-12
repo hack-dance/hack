@@ -28,12 +28,21 @@ import {
 } from "../lib/project-name.ts";
 import {
   AmbiguousProjectIdError,
+  type RegisteredProject,
   readProjectsRegistry,
   resolveRegisteredProjectByName,
+  selectRegisteredProjectByName,
 } from "../lib/projects-registry.ts";
 import { readLinesFromStream } from "../ui/lines.ts";
 import type { McpCommandAdmission } from "./command-admission.ts";
 import { superviseMcpCommand } from "./command-lifetime.ts";
+import {
+  MCP_ENV_KEY_PATTERN,
+  MCP_ENV_OUTPUT_WITHHELD_MESSAGE,
+  projectEnvExplain,
+  projectEnvKeys,
+  projectInstances,
+} from "./inspect-projections.ts";
 import {
   classifyLogCollection,
   MCP_LOG_BACKEND_ERROR,
@@ -161,6 +170,10 @@ type ProjectArgsResolution =
   | { readonly ok: true; readonly args: string[] }
   | { readonly ok: false; readonly reason: FixedRefusalReason };
 
+type ProjectNameResolution =
+  | { readonly ok: true; readonly name: string }
+  | { readonly ok: false; readonly reason: FixedRefusalReason };
+
 const DEFAULT_CMD_TIMEOUT_MS = 120_000;
 const DEFAULT_LOG_TAIL_EVENTS = 200;
 const DEFAULT_LOG_TAIL_MS = 5000;
@@ -231,6 +244,14 @@ function composeIdentifierInput(description: string) {
     .string()
     .max(IDENTIFIER_MAX_LENGTH)
     .regex(COMPOSE_IDENTIFIER_PATTERN)
+    .describe(description);
+}
+
+function envKeyInput(description: string) {
+  return z
+    .string()
+    .max(IDENTIFIER_MAX_LENGTH)
+    .regex(MCP_ENV_KEY_PATTERN)
     .describe(description);
 }
 
@@ -431,6 +452,15 @@ function registerTools(opts: {
     }).optional(),
     since: z.string().describe("Start time (RFC3339 or duration)").optional(),
     until: z.string().describe("End time (RFC3339 or duration)").optional(),
+  };
+
+  const envSelectionInput = {
+    env: composeIdentifierInput(
+      "Env overlay name; 'base' or 'default' selects base layers only"
+    ).optional(),
+    service: composeIdentifierInput(
+      "Env scope: 'global' or a compose service name"
+    ).optional(),
   };
 
   register({
@@ -900,6 +930,221 @@ function registerTools(opts: {
     },
   });
 
+  register({
+    name: "hack.project.exec",
+    title: "Exec command in running service",
+    description:
+      "Run a command inside an already-running service container (hack exec). Unlike hack.project.run it never starts a new container. Command arguments are passed to the child after `--` and are never parsed as hack options. Output is bounded by the shared 8 MiB capture limit and timeoutMs.",
+    annotations: DESTRUCTIVE_TOOL_ANNOTATIONS,
+    inputSchema: {
+      ...projectSelectorInput,
+      ...branchInput,
+      ...profileInput,
+      service: composeIdentifierInput("Running compose service name"),
+      cmd: z
+        .array(z.string())
+        .min(1)
+        .describe("Command and arguments (at least one entry)"),
+      workdir: z
+        .string()
+        .describe("Working directory inside container")
+        .optional(),
+      timeoutMs: boundedLimitInput({
+        ceiling: MCP_INPUT_CEILINGS.timeoutMs,
+        description: "Command timeout in ms",
+      }).optional(),
+    },
+    handler: async (input, extra) => {
+      const resolved = await resolveProjectArgs({
+        selection: toProjectSelection(input),
+        cwd: opts.context.cwd,
+        registryPath: opts.context.registryPath,
+      });
+      if (!resolved.ok) {
+        return buildToolError(resolved);
+      }
+
+      const timeoutMs = input.timeoutMs ?? DEFAULT_CMD_TIMEOUT_MS;
+      const result = await runHackCommand({
+        context: opts.context,
+        signal: extra.signal,
+        tool: "hack.project.exec",
+        args: buildExecArgs({
+          projectArgs: resolved.args,
+          branch: input.branch,
+          profiles: input.profiles,
+          workdir: input.workdir,
+          service: input.service,
+          cmd: input.cmd,
+        }),
+        timeoutMs,
+      });
+
+      return buildToolResult({
+        result,
+        data: {
+          limits: { timeoutMs, outputBytes: MCP_OUTPUT_LIMIT_BYTES },
+        },
+      });
+    },
+  });
+
+  register({
+    name: "hack.project.doctor",
+    title: "Diagnose project setup",
+    description:
+      "Run read-only setup diagnostics (hack doctor --json). Never applies repairs: --fix and the migration or recovery modes are not reachable from MCP.",
+    annotations: READ_ONLY_TOOL_ANNOTATIONS,
+    inputSchema: {
+      ...projectSelectorInput,
+      ...branchInput,
+    },
+    handler: async (input, extra) => {
+      const resolved = await resolveProjectArgs({
+        selection: toProjectSelection(input),
+        cwd: opts.context.cwd,
+        registryPath: opts.context.registryPath,
+        selectByPath: true,
+      });
+      if (!resolved.ok) {
+        return buildToolError(resolved);
+      }
+
+      const result = await runHackCommand({
+        context: opts.context,
+        signal: extra.signal,
+        tool: "hack.project.doctor",
+        args: buildDoctorArgs({
+          projectArgs: resolved.args,
+          branch: input.branch,
+        }),
+      });
+
+      return buildToolResult({ result, data: parseJson(result.stdout) });
+    },
+  });
+
+  register({
+    name: "hack.project.env.explain",
+    title: "Explain env key",
+    description:
+      "Explain where one env key comes from: availability, secret flag, scope, source and precedence. Never returns the value; child stdout and stderr are withheld.",
+    annotations: READ_ONLY_TOOL_ANNOTATIONS,
+    inputSchema: {
+      ...projectSelectorInput,
+      ...envSelectionInput,
+      key: envKeyInput("Env key name (letters, digits and _)"),
+      target: z
+        .enum(["host", "compose"])
+        .describe("Env view: host (default) or compose")
+        .optional(),
+    },
+    handler: async (input, extra) => {
+      const resolved = await resolveProjectArgs({
+        selection: toProjectSelection(input),
+        cwd: opts.context.cwd,
+        registryPath: opts.context.registryPath,
+      });
+      if (!resolved.ok) {
+        return buildToolError(resolved);
+      }
+
+      const result = await runHackCommand({
+        context: opts.context,
+        signal: extra.signal,
+        tool: "hack.project.env.explain",
+        args: buildEnvExplainArgs({
+          projectArgs: resolved.args,
+          env: input.env,
+          service: input.service,
+          target: input.target,
+          key: input.key,
+        }),
+      });
+
+      return buildValueFreeToolResult({
+        result,
+        data: projectEnvExplain(parseJson(result.stdout)),
+      });
+    },
+  });
+
+  register({
+    name: "hack.project.env.keys",
+    title: "List env keys",
+    description:
+      "List env key names with secret flag, source and scope metadata. Never returns values (never --show-secrets); child stdout and stderr are withheld.",
+    annotations: READ_ONLY_TOOL_ANNOTATIONS,
+    inputSchema: {
+      ...projectSelectorInput,
+      ...envSelectionInput,
+    },
+    handler: async (input, extra) => {
+      const resolved = await resolveProjectArgs({
+        selection: toProjectSelection(input),
+        cwd: opts.context.cwd,
+        registryPath: opts.context.registryPath,
+      });
+      if (!resolved.ok) {
+        return buildToolError(resolved);
+      }
+
+      const result = await runHackCommand({
+        context: opts.context,
+        signal: extra.signal,
+        tool: "hack.project.env.keys",
+        args: buildEnvKeysArgs({
+          projectArgs: resolved.args,
+          env: input.env,
+          service: input.service,
+        }),
+      });
+
+      return buildValueFreeToolResult({
+        result,
+        data: projectEnvKeys(parseJson(result.stdout)),
+      });
+    },
+  });
+
+  register({
+    name: "hack.project.instances",
+    title: "List project instances",
+    description:
+      "List a registered project's runtime instances: the default instance and each branch instance, with per-service container counts.",
+    annotations: READ_ONLY_TOOL_ANNOTATIONS,
+    inputSchema: {
+      ...projectSelectorInput,
+    },
+    handler: async (input, extra) => {
+      const resolved = await resolveRegisteredProjectName({
+        selection: toProjectSelection(input),
+        cwd: opts.context.cwd,
+        registryPath: opts.context.registryPath,
+      });
+      if (!resolved.ok) {
+        return buildToolError(resolved);
+      }
+
+      const result = await runHackCommand({
+        context: opts.context,
+        signal: extra.signal,
+        tool: "hack.project.instances",
+        args: ["projects", "--json", `--project=${resolved.name}`],
+      });
+
+      // `data` replaces stdout: the raw listing covers every matching
+      // project and carries container inspect data the projection omits.
+      return buildToolResult({
+        result: { ...result, stdout: "" },
+        data: projectInstances({
+          payload: parseJson(result.stdout),
+          project: resolved.name,
+        }),
+      });
+    },
+  });
+
   installTypedToolDispatch({ server: opts.server, tools });
 }
 
@@ -1070,6 +1315,30 @@ function buildToolResult(opts: {
 }
 
 /**
+ * Result for the env tools. The child's stdout and stderr are never returned:
+ * `stdout` is always empty, and `stderr` is empty on success or the fixed
+ * {@link MCP_ENV_OUTPUT_WITHHELD_MESSAGE} on failure. Only `data`, already
+ * projected onto allowlisted metadata, carries the child's answer. Exit status,
+ * `outputTruncated` and the argv in `command` follow {@link buildToolResult}.
+ */
+function buildValueFreeToolResult(opts: {
+  readonly result: HackCommandResult;
+  readonly data: unknown;
+}): CallToolResult {
+  const ok = opts.result.exitCode === 0;
+  return buildToolResult({
+    result: {
+      command: opts.result.command,
+      exitCode: opts.result.exitCode,
+      stdout: "",
+      stderr: ok ? "" : MCP_ENV_OUTPUT_WITHHELD_MESSAGE,
+      ...(opts.result.outputTruncated ? { outputTruncated: true } : {}),
+    },
+    data: opts.data,
+  });
+}
+
+/**
  * Logs tools result. Unlike {@link buildToolResult}, success follows the
  * collection outcome rather than the child's exit status: a cutoff is `ok`
  * with `data.cutoff` set (the server stopped the child, so `exitCode` may be
@@ -1167,6 +1436,93 @@ export function buildRunArgs(opts: {
   ];
 }
 
+/**
+ * `hack exec` argv: same boundary as {@link buildRunArgs}. Every option value
+ * is fused and `--` precedes the service, so `cmd` entries such as `--branch`
+ * or `--help` reach the container command, never hack's parser.
+ */
+export function buildExecArgs(opts: {
+  readonly projectArgs: readonly string[];
+  readonly branch?: string;
+  readonly profiles?: readonly string[];
+  readonly workdir?: string;
+  readonly service: string;
+  readonly cmd: readonly string[];
+}): string[] {
+  return [
+    "exec",
+    ...opts.projectArgs,
+    ...buildBranchArgs({ branch: opts.branch }),
+    ...buildProfileArgs({ profiles: opts.profiles }),
+    ...(opts.workdir ? [`--workdir=${opts.workdir}`] : []),
+    "--",
+    opts.service,
+    ...opts.cmd,
+  ];
+}
+
+/**
+ * `hack doctor` argv. The set is closed: project path, branch and `--json`.
+ * `--fix`, `--migrate-env-config` and the migration and recovery modes are
+ * never emitted, and the CLI also refuses `--json` with `--fix`.
+ */
+export function buildDoctorArgs(opts: {
+  readonly projectArgs: readonly string[];
+  readonly branch?: string;
+}): string[] {
+  return [
+    "doctor",
+    ...opts.projectArgs,
+    ...buildBranchArgs({ branch: opts.branch }),
+    "--json",
+  ];
+}
+
+/** `hack env explain --json` argv; the validated key follows `--`. */
+export function buildEnvExplainArgs(opts: {
+  readonly projectArgs: readonly string[];
+  readonly env?: string;
+  readonly service?: string;
+  readonly target?: "host" | "compose";
+  readonly key: string;
+}): string[] {
+  return [
+    "env",
+    "explain",
+    ...opts.projectArgs,
+    ...buildEnvScopeArgs(opts),
+    ...(opts.target ? [`--target=${opts.target}`] : []),
+    "--json",
+    "--",
+    opts.key,
+  ];
+}
+
+/** `hack env list --json` argv. `--show-secrets` is never emitted. */
+export function buildEnvKeysArgs(opts: {
+  readonly projectArgs: readonly string[];
+  readonly env?: string;
+  readonly service?: string;
+}): string[] {
+  return [
+    "env",
+    "list",
+    ...opts.projectArgs,
+    ...buildEnvScopeArgs(opts),
+    "--json",
+  ];
+}
+
+function buildEnvScopeArgs(opts: {
+  readonly env?: string;
+  readonly service?: string;
+}): string[] {
+  return [
+    ...(opts.env ? [`--env=${opts.env}`] : []),
+    ...(opts.service ? [`--service=${opts.service}`] : []),
+  ];
+}
+
 function buildLogSelectionArgs(input: {
   readonly loki?: boolean;
   readonly compose?: boolean;
@@ -1225,6 +1581,11 @@ async function resolveProjectArgs(opts: {
   readonly selection: ProjectSelection;
   readonly cwd: string;
   readonly allowUnregistered?: boolean;
+  /**
+   * Emit `--path=<repo root>` for a projectName selection, for commands
+   * (doctor) that accept `--path` but not `--project`.
+   */
+  readonly selectByPath?: boolean;
 }): Promise<ProjectArgsResolution> {
   const selection = opts.selection;
   const picked = [
@@ -1240,6 +1601,7 @@ async function resolveProjectArgs(opts: {
     return await resolveProjectNameArgs({
       projectName: selection.projectName,
       registryPath: opts.registryPath,
+      selectByPath: opts.selectByPath === true,
     });
   }
 
@@ -1282,6 +1644,7 @@ async function resolveProjectArgs(opts: {
 async function resolveProjectNameArgs(opts: {
   readonly projectName: string;
   readonly registryPath: string;
+  readonly selectByPath: boolean;
 }): Promise<ProjectArgsResolution> {
   const name = normalizeProjectName(opts.projectName);
   if (!name) {
@@ -1295,7 +1658,14 @@ async function resolveProjectNameArgs(opts: {
     if (!project) {
       return { ok: false, reason: "project_not_found" };
     }
-    return { ok: true, args: [`--project=${name}`] };
+    return {
+      ok: true,
+      args: [
+        opts.selectByPath
+          ? `--path=${project.projectRoot}`
+          : `--project=${name}`,
+      ],
+    };
   } catch (error) {
     if (
       error instanceof AmbiguousProjectNameError ||
@@ -1305,6 +1675,102 @@ async function resolveProjectNameArgs(opts: {
     }
     throw error;
   }
+}
+
+/**
+ * Resolve a selection to one registered project name, for commands that select
+ * by name only (`hack projects --project`). A path (or, with no selection, the
+ * session cwd) selects the registered project whose repo root or project dir
+ * contains it; the deepest root wins, and two distinct registrations at that
+ * depth are ambiguous. Unregistered paths are refused rather than guessed.
+ */
+async function resolveRegisteredProjectName(opts: {
+  readonly registryPath: string;
+  readonly selection: ProjectSelection;
+  readonly cwd: string;
+}): Promise<ProjectNameResolution> {
+  const selection = opts.selection;
+  const picked = [
+    selection.projectName,
+    selection.repoRoot,
+    selection.path,
+  ].filter((value) => value !== undefined);
+  if (picked.length > 1) {
+    return { ok: false, reason: "conflicting_project_selection" };
+  }
+
+  const registry = await readProjectsRegistry({
+    registryPath: opts.registryPath,
+  });
+  if (selection.projectName !== undefined) {
+    const name = normalizeProjectName(selection.projectName);
+    if (!name) {
+      return { ok: false, reason: "invalid_project_name" };
+    }
+    try {
+      const match = selectRegisteredProjectByName({
+        projects: registry.projects,
+        name,
+      });
+      return match
+        ? { ok: true, name }
+        : { ok: false, reason: "project_not_found" };
+    } catch (error) {
+      if (
+        error instanceof AmbiguousProjectNameError ||
+        error instanceof AmbiguousProjectIdError
+      ) {
+        return { ok: false, reason: "ambiguous_project" };
+      }
+      throw error;
+    }
+  }
+
+  const pathLike = selection.repoRoot ?? selection.path;
+  const absPath = resolve(opts.cwd, pathLike ?? ".");
+  if (pathLike && !(await pathExists(absPath))) {
+    return { ok: false, reason: "path_not_found" };
+  }
+  const notFound: FixedRefusalReason = pathLike
+    ? "path_not_registered"
+    : "no_project_context";
+  const containing = selectContainingRegistrations({
+    projects: registry.projects,
+    absPath,
+  });
+  const names = new Set(
+    containing.map((project) => normalizeProjectName(project.name))
+  );
+  if (names.size > 1) {
+    return { ok: false, reason: "ambiguous_project" };
+  }
+  const [name] = [...names];
+  return name ? { ok: true, name } : { ok: false, reason: notFound };
+}
+
+/** Registrations at the deepest root that contains `absPath`. */
+function selectContainingRegistrations(opts: {
+  readonly projects: readonly RegisteredProject[];
+  readonly absPath: string;
+}): RegisteredProject[] {
+  let best: RegisteredProject[] = [];
+  let bestDepth = -1;
+  for (const project of opts.projects) {
+    for (const root of [project.repoRoot, project.projectDir]) {
+      const resolvedRoot = resolve(root);
+      if (!isPathWithin({ parent: resolvedRoot, child: opts.absPath })) {
+        continue;
+      }
+      const depth = resolvedRoot.length;
+      if (depth > bestDepth) {
+        best = [project];
+        bestDepth = depth;
+      } else if (depth === bestDepth && !best.includes(project)) {
+        best.push(project);
+      }
+    }
+  }
+  return best;
 }
 
 async function isPathAllowed(opts: {

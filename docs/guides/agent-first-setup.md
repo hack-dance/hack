@@ -69,6 +69,9 @@ but reaching it is a cutoff: the result is `ok: true` with `outputTruncated: tru
 full output is needed. The budget bounds captured bytes, not total process memory
 or JSON response size.
 
+The [MCP tool contract](../reference/mcp-tools.md) lists every tool with its
+annotations, inputs, the CLI command it runs and its result shape.
+
 Each MCP session captures its launch working directory and environment. Project
 registry selection, command execution and audit-file locations use that snapshot;
 later sessions do not replace the state of an existing session. The standard stdio

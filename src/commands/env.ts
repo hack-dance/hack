@@ -9,6 +9,13 @@ import {
   defineOption,
   withHandler,
 } from "../cli/command.ts";
+import {
+  parseApplyServiceOption,
+  parseEnvGetArguments,
+  parseEnvScopeOption,
+  parseExecutionScopeOptions,
+  parseMaterializeScopeOption,
+} from "../cli/env-arguments.ts";
 import { resolveRequestedEnvName } from "../cli/env-selection.ts";
 import { optEnv, optJson, optPath, optProject } from "../cli/options.ts";
 import { readControlPlaneConfig } from "../control-plane/sdk/config.ts";
@@ -59,7 +66,6 @@ import {
   sanitizeProjectSlug,
 } from "../lib/project.ts";
 import {
-  assertValidProjectEnvScopeName,
   discoverComposeServiceNames,
   ENV_KEY_INVALID_MESSAGE,
   materializeProjectEnv,
@@ -1017,12 +1023,9 @@ const handleEnvGet: CommandHandlerFor<typeof getSpec> = async ({
   ctx,
   args,
 }) => {
-  const key = args.positionals.key;
-  if (!ENV_KEY_PATTERN.test(key)) {
-    throw new CliUsageError(ENV_KEY_INVALID_MESSAGE);
-  }
-  const scope = assertValidProjectEnvScopeName({
-    scopeName: args.options.service,
+  const { key, scope } = parseEnvGetArguments({
+    key: args.positionals.key,
+    serviceName: args.options.service,
   });
   const project = await resolveProjectForEnv({
     ctx,
@@ -1084,17 +1087,9 @@ const handleEnvList: CommandHandlerFor<typeof listSpec> = async ({
     envName,
   });
   if (modern) {
-    const selectedScope = (() => {
-      try {
-        return assertValidProjectEnvScopeName({
-          scopeName: args.options.service,
-        });
-      } catch (error: unknown) {
-        throw new CliUsageError(
-          error instanceof Error ? error.message : "Invalid env scope."
-        );
-      }
-    })();
+    const selectedScope = parseEnvScopeOption({
+      scopeName: args.options.service,
+    });
     const envValues = selectProjectEnvValues({
       resolved: modern,
       scopeName: selectedScope,
@@ -1367,10 +1362,9 @@ const handleEnvApply: CommandHandlerFor<typeof applySpec> = async ({
   ctx,
   args,
 }): Promise<number> => {
-  const service = args.options.service?.trim() ?? "";
-  if (service.length === 0 || service === "global") {
-    throw new CliUsageError("--service <compose-service> is required.");
-  }
+  const service = parseApplyServiceOption({
+    serviceName: args.options.service,
+  });
   const project = await resolveProjectForEnv({
     ctx,
     pathOpt: args.options.path,
@@ -1934,6 +1928,10 @@ const handleEnvMaterialize: CommandHandlerFor<typeof materializeSpec> = async ({
   ctx,
   args,
 }): Promise<number> => {
+  // Validate before migration or file access so a refused scope changes nothing.
+  const serviceName = parseMaterializeScopeOption({
+    serviceName: args.options.service,
+  });
   const project = await resolveProjectForEnv({
     ctx,
     pathOpt: args.options.path,
@@ -1955,7 +1953,7 @@ const handleEnvMaterialize: CommandHandlerFor<typeof materializeSpec> = async ({
     projectRoot: project.projectRoot,
     projectDir: project.projectDir,
     envName,
-    serviceName: args.options.service?.trim() || null,
+    serviceName,
     serviceNames,
   });
   logger.success({
@@ -1975,18 +1973,6 @@ function resolveShellCommandCommand(input: {
   return ["/bin/sh", "-lc", input.command];
 }
 
-function resolveExecutionScopeName(input: {
-  readonly scopeName?: string;
-  readonly serviceName?: string;
-}): string | null {
-  const scopeName = input.scopeName?.trim();
-  const serviceName = input.serviceName?.trim();
-  if (scopeName && serviceName) {
-    throw new CliUsageError("Use either --scope or --service, not both.");
-  }
-  return scopeName || serviceName || null;
-}
-
 async function runHostCommandWithInjectedEnv(input: {
   readonly ctx: CliContext;
   readonly pathOpt: string | undefined;
@@ -2000,6 +1986,10 @@ async function runHostCommandWithInjectedEnv(input: {
   readonly timeout?: number;
   readonly lifetime?: string;
 }): Promise<number> {
+  const executionScope = parseExecutionScopeOptions({
+    scopeName: input.scopeName,
+    serviceName: input.serviceName,
+  });
   if (
     input.timeout !== undefined &&
     (!Number.isFinite(input.timeout) ||
@@ -2051,10 +2041,7 @@ async function runHostCommandWithInjectedEnv(input: {
     project,
     projectName,
     envName,
-    serviceName: resolveExecutionScopeName({
-      scopeName: input.scopeName,
-      serviceName: input.serviceName,
-    }),
+    serviceName: executionScope,
     target,
   });
   const declaredLifetime =
@@ -2085,6 +2072,10 @@ async function openHostShellWithInjectedEnv(input: {
   readonly serviceName?: string;
   readonly targetOpt: string | undefined;
 }): Promise<number> {
+  const executionScope = parseExecutionScopeOptions({
+    scopeName: input.scopeName,
+    serviceName: input.serviceName,
+  });
   const project = await resolveProjectForEnv({
     ctx: input.ctx,
     pathOpt: input.pathOpt,
@@ -2101,10 +2092,7 @@ async function openHostShellWithInjectedEnv(input: {
     project,
     projectName,
     envName,
-    serviceName: resolveExecutionScopeName({
-      scopeName: input.scopeName,
-      serviceName: input.serviceName,
-    }),
+    serviceName: executionScope,
     target,
   });
 

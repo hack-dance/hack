@@ -95,6 +95,9 @@ export const ENV_KEY_ASSIGNMENT_MESSAGE =
   'Invalid env key: the key argument cannot contain "=". Pass only the key (matching ^[A-Z_][A-Z0-9_]*$) and supply secret values with --value-stdin or the hidden prompt. The argument is not shown because it may contain a value.';
 export const ENV_SCOPE_INVALID_MESSAGE =
   'Invalid env scope: scopes must be "global" or match ^[a-z0-9][a-z0-9._-]*$ (usually a compose service name). The argument is not shown because it may contain a value.';
+export const ENV_SCOPE_UNKNOWN_MESSAGE =
+  "Unknown env scope: the requested scope is not global, a compose service, or a scope in the project env files. The argument is not shown because it may contain a value.";
+const UNKNOWN_SCOPE_LIST_LIMIT = 20;
 const PROJECT_ENV_SECRET_PREFIX = "v1" as const;
 const PROJECT_ENV_ALGORITHM = "aes-256-gcm";
 const PROJECT_ENV_IV_BYTES = 12;
@@ -185,12 +188,40 @@ export function selectProjectEnvValues(opts: {
     return { ...opts.resolved.globalEnv };
   }
 
-  const scoped = opts.resolved.serviceEnv[scopeName];
+  const scoped = Object.hasOwn(opts.resolved.serviceEnv, scopeName)
+    ? opts.resolved.serviceEnv[scopeName]
+    : undefined;
   if (!scoped) {
-    throw new Error(`Unknown env scope: ${scopeName}`);
+    throw new Error(
+      unknownProjectEnvScopeMessage({
+        configuredScopes: Object.keys(opts.resolved.serviceEnv),
+      })
+    );
   }
 
   return { ...scoped };
+}
+
+/**
+ * Fixed refusal for a scope that is not configured. It may list scope names
+ * taken from the project's compose and env files, but never the requested
+ * argument: a mistyped `--service KEY=value` must not be echoed.
+ */
+export function unknownProjectEnvScopeMessage(opts: {
+  readonly configuredScopes: readonly string[];
+}): string {
+  const configured = [
+    "global",
+    ...[...new Set(opts.configuredScopes)]
+      .filter((scope) => scope !== "global")
+      .sort(),
+  ];
+  const shown = configured.slice(0, UNKNOWN_SCOPE_LIST_LIMIT);
+  const more =
+    configured.length > shown.length
+      ? ` (and ${configured.length - shown.length} more)`
+      : "";
+  return `${ENV_SCOPE_UNKNOWN_MESSAGE} Configured scopes: ${shown.join(", ")}${more}.`;
 }
 
 export function selectProjectEnvValuesForExecutionTarget(opts: {
@@ -208,7 +239,10 @@ export function selectProjectEnvValuesForExecutionTarget(opts: {
   const scopeName = normalizeProjectEnvScopeName({
     scopeName: opts.scopeName,
   });
-  return { ...(opts.resolved.hostTargetEnv[scopeName] ?? selected) };
+  const hostTarget = Object.hasOwn(opts.resolved.hostTargetEnv, scopeName)
+    ? opts.resolved.hostTargetEnv[scopeName]
+    : undefined;
+  return { ...(hostTarget ?? selected) };
 }
 
 export function isValidProjectEnvScopeName(opts: {
@@ -947,7 +981,14 @@ export async function resolveProjectEnvValue(opts: {
     !opts.serviceNames.includes(scope) &&
     !Object.hasOwn(layers.merged.values, scope)
   ) {
-    throw new Error("Unknown env scope");
+    throw new Error(
+      unknownProjectEnvScopeMessage({
+        configuredScopes: [
+          ...opts.serviceNames,
+          ...Object.keys(layers.merged.values),
+        ],
+      })
+    );
   }
   const entries = resolveEffectiveStoredEntries({
     layers: layers.envLayers,

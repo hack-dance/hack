@@ -25,6 +25,7 @@ import { upsertDotEnvValue } from "../src/lib/hack-env.ts";
 import { readProjectDefaultEnvConfig } from "../src/lib/project.ts";
 import {
   assertValidProjectEnvScopeName,
+  ENV_SCOPE_UNKNOWN_MESSAGE,
   ensureHackDirGitignore,
   ensureProjectEnvSecretKey,
   inspectLegacyComposeEnvFileReferences,
@@ -38,8 +39,10 @@ import {
   resolveProjectEnvConfig,
   resolveProjectEnvLocalConfigPath,
   resolveProjectEnvSharedKeyPath,
+  selectProjectEnvValues,
   selectProjectEnvValuesForExecutionTarget,
   setProjectEnvValue,
+  unknownProjectEnvScopeMessage,
   unsetProjectEnvValue,
 } from "../src/lib/project-env-config.ts";
 import { resolveSecretStore } from "../src/lib/secret-store.ts";
@@ -378,15 +381,50 @@ test("materializeProjectEnv rejects unknown service scopes", async () => {
     secret: false,
   });
 
-  await expect(
-    materializeProjectEnv({
-      projectRoot: repo.projectRoot,
-      projectDir: repo.projectDir,
-      envName: null,
-      serviceName: "typo_service",
-      serviceNames: ["api", "web"],
-    })
-  ).rejects.toThrow("Unknown env scope: typo_service");
+  const error = await materializeProjectEnv({
+    projectRoot: repo.projectRoot,
+    projectDir: repo.projectDir,
+    envName: null,
+    serviceName: "typo_service",
+    serviceNames: ["api", "web"],
+  }).then(
+    () => null,
+    (caught: unknown) => caught
+  );
+  expect(error).toBeInstanceOf(Error);
+  const message = (error as Error).message;
+  // Configured scope names come from compose/env files and may be listed;
+  // the requested argument never is.
+  expect(message).toBe(
+    `${ENV_SCOPE_UNKNOWN_MESSAGE} Configured scopes: global, api, web.`
+  );
+  expect(message).not.toContain("typo_service");
+});
+
+test("unknown-scope refusals list configured scopes but never the request", () => {
+  const canary = "api_token=unknown-scope-canary-7c2e";
+  const resolved = {
+    globalEnv: {},
+    serviceEnv: { web: {}, api: {} },
+    hostTargetEnv: {},
+  } as unknown as Parameters<typeof selectProjectEnvValues>[0]["resolved"];
+  for (const scopeName of [canary, "constructor", "__proto__", "toString"]) {
+    let message = "";
+    try {
+      selectProjectEnvValues({ resolved, scopeName });
+    } catch (error: unknown) {
+      message = error instanceof Error ? error.message : String(error);
+    }
+    expect(message).toBe(
+      `${ENV_SCOPE_UNKNOWN_MESSAGE} Configured scopes: global, api, web.`
+    );
+    expect(message).not.toContain(scopeName);
+  }
+
+  const many = unknownProjectEnvScopeMessage({
+    configuredScopes: Array.from({ length: 30 }, (_, i) => `svc${i + 100}`),
+  });
+  expect(many).toContain("(and 11 more)");
 });
 
 test("project env scopes accept compose-compatible underscores and dots", () => {

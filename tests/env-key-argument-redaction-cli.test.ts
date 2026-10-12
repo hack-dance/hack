@@ -2,12 +2,23 @@ import { afterEach, beforeEach, expect, test } from "bun:test";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { CliUsageError } from "../src/cli/command.ts";
+import {
+  parseEnvGetArguments,
+  parseExecutionScopeOptions,
+} from "../src/cli/env-arguments.ts";
+import {
+  ENV_KEY_ASSIGNMENT_MESSAGE,
+  ENV_KEY_INVALID_MESSAGE,
+  ENV_SCOPE_INVALID_MESSAGE,
+} from "../src/lib/project-env-config.ts";
 
 /**
- * Key-argument refusals in `hack env` must never echo the rejected argument.
+ * Key- and scope-argument refusals in `hack env` and `hack host` must never
+ * echo the rejected argument.
  *
- * A key argument is often a mistyped `KEY=value` or a value pasted into the
- * key position. Each case runs the real CLI in a fresh subprocess with a
+ * A key or `--service`/`--scope` argument is often a mistyped `KEY=value` or
+ * a value pasted into the wrong position. Each case runs the real CLI in a fresh subprocess with a
  * distinctive canary inside the argument and proves the canary is absent from
  * stdout, stderr, and the argv/env of every child process the CLI spawns.
  *
@@ -359,3 +370,179 @@ test(
   },
   { timeout: 30_000 }
 );
+
+const UNKNOWN_SCOPE = "Unknown env scope: the requested scope is not global";
+
+/** Program names (argv[0]) of every recorded child process. */
+function spawnedPrograms(spawnLog: string): readonly string[] {
+  return spawnLog
+    .split("\n")
+    .filter((line) => line.trim().length > 0)
+    .map((line) => {
+      const record: unknown = JSON.parse(line);
+      const argv =
+        typeof record === "object" && record !== null && "argv" in record
+          ? record.argv
+          : null;
+      return Array.isArray(argv) ? String(argv[0]) : "<unknown>";
+    });
+}
+
+/**
+ * Every command that accepts a scope through --service or --scope. Options
+ * precede `--`, after which everything is the host command's own argv.
+ */
+function scopeOptionCases(input: {
+  readonly scope: string;
+  readonly projectRoot: string;
+}): readonly (readonly string[])[] {
+  const path = ["--path", input.projectRoot];
+  return [
+    ["env", "materialize", "--service", input.scope, ...path],
+    ["env", "exec", "--service", input.scope, ...path, "--", "true"],
+    ["env", "shell", "--service", input.scope, ...path],
+    ["env", "list", "--service", input.scope, ...path],
+    ["env", "apply", "--service", input.scope, ...path],
+    ["host", "exec", "--scope", input.scope, ...path, "--", "true"],
+    ["host", "shell", "--scope", input.scope, ...path],
+  ];
+}
+
+test(
+  "scope options refuse a malformed scope without echoing it or touching files",
+  async () => {
+    const projectRoot = await createModernProject();
+    const before = await readTree(modernFiles(projectRoot));
+    for (const scope of [`API_TOKEN=${CANARY}`, SCOPE_CANARY]) {
+      const canary = scope === SCOPE_CANARY ? SCOPE_CANARY : CANARY;
+      for (const args of scopeOptionCases({ scope, projectRoot })) {
+        const result = await runHack({ args });
+        expectRefusedWithoutEcho({
+          result,
+          message: INVALID_SCOPE,
+          canary,
+          rawArgument: scope,
+        });
+        // Refused before any shell, command, or restart child starts.
+        expect(
+          spawnedPrograms(result.spawnLog).filter((name) => name !== "git")
+        ).toEqual([]);
+      }
+    }
+    expect(await readTree(modernFiles(projectRoot))).toBe(before);
+  },
+  { timeout: 180_000 }
+);
+
+test(
+  "a well-formed but unknown scope is refused without echoing it",
+  async () => {
+    const projectRoot = await createModernProject();
+    const before = await readTree(modernFiles(projectRoot));
+    // CANARY matches the scope pattern, so it reaches scope resolution. The
+    // refusal may list configured scopes from project files, never the request.
+    const cases = scopeOptionCases({ scope: CANARY, projectRoot }).filter(
+      (args) => args[1] !== "apply"
+    );
+    for (const args of cases) {
+      const result = await runHack({ args });
+      expectRefusedWithoutEcho({
+        result,
+        message: UNKNOWN_SCOPE,
+        canary: CANARY,
+        rawArgument: CANARY,
+      });
+      expect(result.stderr).toContain("Configured scopes: global, api.");
+      expect(
+        spawnedPrograms(result.spawnLog).filter((name) => name !== "git")
+      ).toEqual([]);
+    }
+    const get = await runHack({
+      args: ["env", "get", "GLOBAL_FLAG", "--service", CANARY],
+      cwd: projectRoot,
+    });
+    expectRefusedWithoutEcho({
+      result: get,
+      message: GET_REFUSAL,
+      canary: CANARY,
+      rawArgument: CANARY,
+    });
+    expect(await readTree(modernFiles(projectRoot))).toBe(before);
+  },
+  { timeout: 120_000 }
+);
+
+test("env get argument refusals are value-free before the generic wrapper", () => {
+  // The CLI replaces every `env get` failure with one generic message, which
+  // would hide a regression in the handler's own refusals. Assert the parse
+  // layer the handler uses so a re-echo of the key or scope is still caught.
+  const cases: readonly {
+    readonly key: string;
+    readonly serviceName?: string;
+    readonly message: string;
+    readonly canary: string;
+  }[] = [
+    { key: CANARY, message: ENV_KEY_INVALID_MESSAGE, canary: CANARY },
+    {
+      key: `API_TOKEN=${CANARY}`,
+      message: ENV_KEY_ASSIGNMENT_MESSAGE,
+      canary: CANARY,
+    },
+    {
+      key: "API_TOKEN",
+      serviceName: SCOPE_CANARY,
+      message: ENV_SCOPE_INVALID_MESSAGE,
+      canary: SCOPE_CANARY,
+    },
+    {
+      key: "API_TOKEN",
+      serviceName: `api=${CANARY}`,
+      message: ENV_SCOPE_INVALID_MESSAGE,
+      canary: CANARY,
+    },
+  ];
+  for (const entry of cases) {
+    let thrown: unknown = null;
+    try {
+      parseEnvGetArguments({
+        key: entry.key,
+        serviceName: entry.serviceName,
+      });
+    } catch (error: unknown) {
+      thrown = error;
+    }
+    expect(thrown).toBeInstanceOf(CliUsageError);
+    const message = (thrown as Error).message;
+    expect(message).toBe(entry.message);
+    expect(message).not.toContain(entry.canary);
+  }
+  expect(
+    parseEnvGetArguments({ key: "API_TOKEN", serviceName: " api " })
+  ).toEqual({ key: "API_TOKEN", scope: "api" });
+  expect(
+    parseEnvGetArguments({ key: "API_TOKEN", serviceName: undefined })
+  ).toEqual({ key: "API_TOKEN", scope: "global" });
+});
+
+test("execution scope parsing refuses conflicts and malformed scopes value-free", () => {
+  expect(
+    parseExecutionScopeOptions({ scopeName: undefined, serviceName: " " })
+  ).toBeNull();
+  expect(
+    parseExecutionScopeOptions({ scopeName: "api", serviceName: undefined })
+  ).toBe("api");
+  for (const input of [
+    { scopeName: `API_TOKEN=${CANARY}`, serviceName: undefined },
+    { scopeName: undefined, serviceName: `API_TOKEN=${CANARY}` },
+    { scopeName: "api", serviceName: CANARY },
+  ]) {
+    let message = "";
+    try {
+      parseExecutionScopeOptions(input);
+    } catch (error: unknown) {
+      message = error instanceof Error ? error.message : String(error);
+    }
+    expect(message.length).toBeGreaterThan(0);
+    expect(message).not.toContain(CANARY);
+  }
+});

@@ -27,3 +27,4 @@
 - [Extensions](./extensions.md)
 - [Creating an extension](./guides/create-extension.md)
 - [Integrations](./integrations.md)
+- [MCP logs contract](./reference/mcp-logs.md) — cutoff versus backend failure for the MCP log tools, and the cursor/handle decision

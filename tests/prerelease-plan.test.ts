@@ -15,8 +15,11 @@ import {
   CONFIG_COMPILER_PAYLOAD,
   createPrereleasePlan,
   PRERELEASE_PAYLOAD,
+  PRERELEASE_PLATFORM,
+  PRERELEASE_SUPPORT_ANCHOR,
   packagePrerelease,
   prereleaseMetadata,
+  prereleaseNotes,
   renderChecksums,
   requireExactHeadCi,
   requireHumanApproval,
@@ -70,6 +73,10 @@ const jobNames = [
   "Candidate core (macos-latest)",
   "secret-scan",
   "runtime-images",
+  "docker-e2e shard 1/4",
+  "docker-e2e shard 2/4",
+  "docker-e2e shard 3/4",
+  "docker-e2e shard 4/4",
   "docker-e2e",
   "test",
   "linux-process-lifetime",
@@ -291,6 +298,14 @@ describe("prerelease decision boundary", () => {
         sourceRevision: sha,
       })
     ).toThrow();
+    // The docker-e2e fan-in alone is not enough: every shard must have succeeded.
+    expect(() =>
+      requireExactHeadCi({
+        run: ciRun,
+        jobs: jobs.filter((job) => job.name !== "docker-e2e shard 3/4"),
+        sourceRevision: sha,
+      })
+    ).toThrow("Exact-head CI job did not succeed: docker-e2e shard 3/4");
     expect(() =>
       requireExactHeadCi({
         run: ciRun,
@@ -1068,4 +1083,137 @@ test("packager payload names every artifact the native candidate bundle script c
   copied.delete("mcp");
   const expected = new Set([...PRERELEASE_PAYLOAD, ...CONFIG_COMPILER_PAYLOAD]);
   expect([...copied].sort()).toEqual([...expected].sort());
+});
+
+/** GitHub's heading anchor: lowercase, punctuation removed, spaces as hyphens. */
+function headingAnchor(heading: string) {
+  return heading
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9 _-]/g, "")
+    .replaceAll(" ", "-");
+}
+
+/** Body of one Markdown section, up to the next heading at the same or a higher level. */
+function markdownSection(markdown: string, heading: string) {
+  const lines = markdown.split("\n");
+  const start = lines.indexOf(heading);
+  if (start < 0) {
+    throw new Error(`Missing heading ${heading}`);
+  }
+  const level = heading.indexOf(" ");
+  const end = lines.findIndex(
+    (line, index) =>
+      index > start && /^#+ /.test(line) && line.indexOf(" ") <= level
+  );
+  return lines.slice(start + 1, end < 0 ? undefined : end).join("\n");
+}
+
+const SUPPORT_HEADING = "## Supported platforms and capabilities";
+
+function prereleaseGuide() {
+  return Bun.file(
+    new URL("../docs/guides/prereleases.md", import.meta.url)
+  ).text();
+}
+
+describe("published support list", () => {
+  test("release notes link to the support list pinned at the candidate tag", () => {
+    const published = createPrereleasePlan({
+      ...input,
+      version: "5.0.0-next.7",
+      publish: "true",
+    });
+    const notes = prereleaseNotes(published);
+    expect(notes).toContain(published.source_revision);
+    expect(notes).toContain(
+      "https://github.com/hack-dance/hack/blob/v5.0.0-next.7/docs/guides/prereleases.md#supported-platforms-and-capabilities"
+    );
+    const links = [...notes.matchAll(/https:\/\/\S+/g)].map(
+      (match) => match[0]
+    );
+    expect(links).toHaveLength(1);
+    expect(links[0]).not.toMatch(/\/blob\/(?:next|main)\//);
+    expect(prereleaseNotes(plan)).toContain(
+      "/blob/v5.0.0-next.1/docs/guides/prereleases.md#"
+    );
+  });
+
+  test("the linked anchor is the guide's support section heading", async () => {
+    const anchors = (await prereleaseGuide())
+      .split("\n")
+      .filter((line) => line.startsWith("## "))
+      .map((line) => headingAnchor(line.slice(3)));
+    expect(headingAnchor(SUPPORT_HEADING.slice(3))).toBe(
+      PRERELEASE_SUPPORT_ANCHOR
+    );
+    expect(
+      anchors.filter((anchor) => anchor === PRERELEASE_SUPPORT_ANCHOR)
+    ).toHaveLength(1);
+  });
+
+  test("documented supported platform equals the planned platform constant", async () => {
+    const supported = markdownSection(
+      markdownSection(await prereleaseGuide(), SUPPORT_HEADING),
+      "### Supported platform"
+    );
+    const documented = [...supported.matchAll(/^- `([^`]+)`/gm)].map(
+      (match) => match[1]
+    );
+    expect(documented).toEqual([PRERELEASE_PLATFORM]);
+    expect(prereleaseMetadata(input).platform).toBe(PRERELEASE_PLATFORM);
+    expect(plan.archive).toBe(
+      `hack-5.0.0-next.1-${PRERELEASE_PLATFORM}-native.tar.gz`
+    );
+  });
+
+  test("lists unsupported platforms, retired surfaces and linked capability limits", async () => {
+    const section = markdownSection(await prereleaseGuide(), SUPPORT_HEADING);
+    const unsupported = markdownSection(
+      section,
+      "### Unsupported platforms and surfaces"
+    );
+    for (const term of [
+      "Intel",
+      "Linux",
+      "Windows",
+      "Remote",
+      "gateway",
+      "node",
+      "dispatch",
+      "hosted",
+    ]) {
+      expect(unsupported).toContain(term);
+    }
+    const limits = markdownSection(section, "### Candidate capability limits");
+    for (const term of [
+      "environment overlay, profiles or target",
+      "pruning dependency caches",
+      "modify source files",
+      "Named users or groups",
+      "registries other than public Docker Hub",
+      "Copied or relocated",
+      "Downgrading onto newer state",
+    ]) {
+      expect(limits).toContain(term);
+    }
+    const candidate = await Bun.file(
+      new URL("../docs/guides/native-candidate.md", import.meta.url)
+    ).text();
+    const anchors = new Set(
+      candidate
+        .split("\n")
+        .filter((line) => /^#{1,6} /.test(line))
+        .map((line) => headingAnchor(line.replace(/^#+ /, "")))
+    );
+    const items = limits.split("\n- ").slice(1);
+    expect(items).toHaveLength(6);
+    for (const item of items) {
+      const linked = [
+        ...item.matchAll(/\(native-candidate\.md#([a-z0-9_-]+)\)/g),
+      ].map((match) => match[1]);
+      expect(linked).toHaveLength(1);
+      expect(anchors.has(linked[0] ?? "")).toBe(true);
+    }
+  });
 });

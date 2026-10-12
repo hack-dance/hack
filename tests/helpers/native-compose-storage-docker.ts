@@ -36,7 +36,17 @@ if(storageArgs[0]==="volume"&&storageArgs[1]==="create"){
  console.log(name);process.exit(0);
 }
 if(storageArgs[0]==="volume"&&storageArgs[1]==="ls"&&argument("--format")==="{{json .Name}}"){
- for(const row of await readRows(storageVolumes))emit(row.name);process.exit(0);
+ for(const row of await readRows(storageVolumes))emit(row.name);
+ // The verify carrier's closing observation lists twice; then the target changes.
+ if(await Bun.file(storageRoot+"/fault-close-armed").exists()){
+  const listed=Number(await Bun.file(storageRoot+"/fault-close-armed").text()||0)+1;
+  if(listed<2)await Bun.write(storageRoot+"/fault-close-armed",String(listed));
+  else{
+   const rows=await readRows(storageVolumes);rows[0].createdAt="2026-01-01T00:00:00Z";await writeRows(storageVolumes,rows);
+   await (await import("node:fs/promises")).rename(storageRoot+"/fault-close-armed",storageRoot+"/fault-target-changed");
+  }
+ }
+ process.exit(0);
 }
 if(storageArgs[0]==="volume"&&storageArgs[1]==="inspect"&&argument("--format").includes(".Mountpoint")){
  const rows=await readRows(storageVolumes);
@@ -89,6 +99,12 @@ if(storageArgs[0]==="rm"){
    await (await import("node:fs/promises")).rename(storageRoot+"/fault-removed-verify",storageRoot+"/fault-consumed");
    await Bun.write(storageRoot+"/fault-post-remove",id);
   }
+ }
+ if(await Bun.file(storageRoot+"/fault-after-verify-close").exists()&&removed.host.Mounts[1].ReadOnly){
+  const program=removed.host.Mounts[0].Source,owner=program.slice(0,program.indexOf("/storage-carriers/"));
+  const hash=(await import("node:crypto")).createHash("sha256").update(removed.host.Mounts[1].Source).digest("hex");
+  const journal=await Bun.file(owner+"/storage-witnesses/"+hash+"/carrier.json").json();
+  if(journal.intent?.operation==="verify")await (await import("node:fs/promises")).rename(storageRoot+"/fault-after-verify-close",storageRoot+"/fault-close-armed");
  }
  await writeRows(storageCarriers,rows.filter(row=>row.id!==id));console.log(id);process.exit(0);
 }

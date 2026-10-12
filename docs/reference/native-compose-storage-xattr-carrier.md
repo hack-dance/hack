@@ -225,6 +225,46 @@ retains the private journal and input. Journal bytes do not replace these actual
 stop and absence observations. Ordinary command admission calls this port on the
 cataloged platforms; PostgreSQL data roots and crash durability remain unqualified.
 
+### Fence cost within one command
+
+Every engine-ID fence, target observation and executable identity check still
+runs; three exact costs are removed. Each change is local to one CLI process,
+which runs exactly one native command.
+
+- Engine-ID fences (`docker info --format '{{json .ID}}'`) in the Docker
+  carrier use command-scoped admission for an explicit `DOCKER_HOST=unix:///...`
+  selection that the ingress transport also admits (see
+  [ownership](native-compose-ownership.md#ingress-daemon-identity-transport)).
+  The first fence under one exact binding (selection values, `docker`
+  executable, client config and socket identities) is the Docker CLI read and
+  must equal one direct `GET /info` on that socket. Only then does each later
+  fence under the unchanged binding make one fresh direct request instead of a
+  CLI process that also lists every client plugin. A different or failed
+  admission read keeps the CLI for that binding; a moved binding is admitted
+  through the CLI again; an admitted direct failure refuses without fallback.
+  No ID is cached. Saved recovery observation keeps its CLI probes.
+- Two identical engine-ID reads with nothing awaited between them are one fence:
+  the holder observation's closing read also fences the carrier inspect that
+  immediately follows it, and the cold-provision target observation's opening
+  read is the provision fence.
+- The recorded command executables (Docker CLI and `/bin/sh`) are opened and
+  checked on every call (type, link count, size, write mode, before/after stat,
+  named path, canonical path). Only their content digest is reused, keyed by the
+  canonical path and the complete stat identity (device, inode, size, mtime and
+  ctime in nanoseconds, mode, owner); any change re-reads the content, and a
+  file changed within two seconds of the read is never reused.
+- After a readonly verify invocation with deferred finish, the carrier performs
+  no effect after its own closing target observation. The witness's immediate
+  re-observation of the same query, with only reads between, is answered with
+  that observation when the rechecked material binding is unchanged. Every other
+  observation, including the finisher's before file retirement and the opening
+  observation of the next invocation, stays fresh: each effect is still
+  immediately preceded and followed by a fresh target observation.
+
+On the synthetic engine a proof keeps 81 of 86 engine-ID fences and 20 of 21
+target observations; `tests/native-compose-storage-fence-cost.test.ts` pins the
+per-command counts and the refusal controls.
+
 Holder selection includes normalized ancestor and descendant bind paths; similarly
 named sibling roots stay independent. Command stdin and captures use held no-follow
 descriptors, checked after the final admission await and held until owned group

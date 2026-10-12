@@ -127,6 +127,16 @@ falls back to the CLI after a failure. Ambient HTTP proxy variables do not chang
 the Unix destination. Its deadline and cumulative 8 MiB response limit remain
 control-channel budgets; cancellation or failure closes only its owned connection.
 
+Storage-witness fences in the Docker carrier repeat the engine-ID read hundreds
+of times per command, so they use the same direct transport through
+command-scoped admission instead of a fixed observer. Each fence still makes one
+fresh read. The first fence under one exact binding (the selection values,
+`docker` executable, config and socket identities above) is the existing Docker
+CLI read and must equal one direct `GET /info`; only an equal ID admits that
+binding for the rest of the command. A different or failed admission read keeps
+the CLI for that binding, a changed binding is admitted through the CLI again,
+and an admitted direct failure refuses without fallback.
+
 Real Unix-server controls live in `tests/native-compose-engine-identity.test.ts`;
 existing CLI-transport and proxy ownership controls remain in
 `tests/native-compose-ingress.test.ts`. These tests establish the bounded transport

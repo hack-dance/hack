@@ -1,5 +1,12 @@
 import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
-import { existsSync, readFileSync } from "node:fs";
+import {
+  existsSync,
+  readFileSync,
+  renameSync,
+  statSync,
+  utimesSync,
+  writeFileSync,
+} from "node:fs";
 import {
   mkdtemp,
   readFile,
@@ -409,6 +416,63 @@ async function transport(
     }
   }
 }
+test.each(["unchanged", "replaced", "tampered"] as const)(
+  "a recorded executable %s after its digest was cached: only unchanged runs the target",
+  (change) =>
+    ownedCase(async () => {
+      const f = await fixture(),
+        marker = join(f.root, "effect");
+      const bin = await realpath(
+        await mkdtemp(join(tmpdir(), "native-command-executable-"))
+      );
+      roots.push(bin);
+      const program = join(bin, "program");
+      const text = '#!/bin/sh\nprintf complete > "$1"; printf value\n';
+      await writeFile(program, text, { mode: 0o700 });
+      // Settle past the racy window so the arming digest is cached for this command.
+      await new Promise((resolve) => setTimeout(resolve, 2100));
+      try {
+        const run = runNativeComposeStorageDockerCommand({
+          context: {
+            signal: new AbortController().signal,
+            deadline: Date.now() + 5000,
+          },
+          files: f.files,
+          args: [program, marker],
+          timeoutMs: 5000,
+          // After the record is armed with the cached digest, before spawn.
+          beforeSpawn: () => {
+            if (change === "replaced") {
+              renameSync(program, join(bin, "original"));
+              writeFileSync(program, text, { mode: 0o700 });
+            } else if (change === "tampered") {
+              const before = statSync(program);
+              writeFileSync(program, text.replace("value", "VALUE"));
+              utimesSync(program, before.atime, before.mtime);
+            }
+          },
+          assertAdmitted: async () => {},
+          originalCommand: { owner: f.owner, kind: "create", carrier: null },
+        });
+        if (change === "unchanged") {
+          expect(await run).toEqual({ exitCode: 0, stdout: "value" });
+          expect(await readFile(marker, "utf8")).toBe("complete");
+          expect((await f.read()).commands[0]?.settlement).toMatchObject({
+            exitCode: 0,
+          });
+          return;
+        }
+        await expect(run).rejects.toThrow("values omitted");
+        expect(existsSync(marker)).toBe(false);
+        expect((await f.read()).commands[0]?.settlement).toBeNull();
+      } finally {
+        if (!nativeComposeStorageCommandOwnerConfirmed(f.owner)) {
+          retained.add(f.root);
+        }
+      }
+    })(),
+  30_000
+);
 test(
   "real fast command cannot execute before its durable stopped-child publication",
   ownedCase(async () => {

@@ -442,6 +442,47 @@ test("up records value-free env digests and a targeted restart refreshes only it
   }
 });
 
+test("failed targeted restart does not record its service's env as applied", async () => {
+  const projectRoot = await createProject();
+  const projectDir = resolve(projectRoot, ".hack");
+  psRows.push(
+    JSON.stringify({ Service: "api", State: "running", ExitCode: 0 }),
+    JSON.stringify({ Service: "migrate", State: "exited", ExitCode: 0 })
+  );
+  const readEntry = () =>
+    readProjectRuntimeStateEntry({
+      projectDir,
+      composeProject: "startup-state-test",
+    });
+  expect(await runDetachedUp({ projectRoot })).toBe(0);
+  const atUp = (await readEntry())?.envFingerprint;
+  expect(atUp?.services.api).toBeDefined();
+
+  const envPath = resolve(projectDir, "hack.env.default.yaml");
+  await writeFile(
+    envPath,
+    (await readFile(envPath, "utf8")).replace(
+      '    SHARED_MODE: "compose"',
+      '    SHARED_MODE: "rotated"'
+    )
+  );
+  upExitCode = 1;
+  expect(await runRestart({ projectRoot, services: ["api"] })).not.toBe(0);
+
+  const afterFailure = (await readEntry())?.envFingerprint;
+  // The delivered env is unknown, so api's digest is dropped rather than
+  // refreshed to the rotated env; exec then reports nothing for api.
+  expect(
+    evaluateComposeServiceEnvFreshness({
+      record: afterFailure,
+      service: "api",
+      currentEnv: { SHARED_MODE: "rotated" },
+    })
+  ).toBe("unknown");
+  expect(afterFailure?.salt).toBe(atUp?.salt);
+  expect(afterFailure?.services.migrate).toBe(atUp?.services.migrate);
+});
+
 test("up --json emits E_STARTUP_INCOMPLETE for a created service", async () => {
   const projectRoot = await createProject();
   psRows.push(

@@ -37,9 +37,9 @@ export function renderHackRemoteSkill(): string {
     "",
     "Request `HACK_ENV_SECRET_KEY` through the target's approved secret manager or direct process injection. The user enters the value in its native secret UI, never in chat. Hack needs the real key bytes locally to decrypt the committed env; an HTTPS proxy placeholder cannot replace them. Do not print the key, pass it as a command argument, write it into a plugin, image, shell profile, or cached file, or export decrypted values for later reuse. Use non-production credentials and review the chosen command's own logging.",
     "",
-    "Current Codex Cloud uses an Install script and Start skill. Request the key as a direct environment variable, preferably a personal value scoped to the chosen environment; it is available to the task. Network secrets substitute HTTPS credentials and cannot decrypt Hack env. Keep prepared files free of keys and plaintext secrets. After approved publication, verify a fresh task. See [current Cloud environments](https://learn.chatgpt.com/docs/environments/cloud-environments).",
+    "Current Codex Cloud uses an Install script and Start skill. Request the key as a direct environment variable, preferably a personal value scoped to the chosen environment; it is available to the task. Network secrets substitute HTTPS credentials and cannot decrypt Hack env. Keep prepared files free of keys and plaintext secrets. After approved publication, verify a fresh task. See current Cloud environments under Further reading.",
     "",
-    "Legacy Codex Cloud secrets are setup-only and removed before the agent phase; a setup export does not persist. Do not bypass that boundary by saving the key or decrypted env in cached files. Runtime decryption needs a separately authorized injection mechanism, or the task must use a secret-free workflow. See [legacy Cloud environments](https://learn.chatgpt.com/docs/environments/cloud-environment).",
+    "Legacy Codex Cloud secrets are setup-only and removed before the agent phase; a setup export does not persist. Do not bypass that boundary by saving the key or decrypted env in cached files. Runtime decryption needs a separately authorized injection mechanism, or the task must use a secret-free workflow. See legacy Cloud environments under Further reading.",
     "",
     "Cloud tasks must have this skill in their repository or supported cloud environment; a personal plugin installed on a local computer is not proof it is loaded remotely. Confirm the available skills in the target task.",
     "",
@@ -62,6 +62,11 @@ export function renderHackRemoteSkill(): string {
     "```",
     "",
     "Check an actual application endpoint or repository health command with a bounded timeout, then perform one meaningful development operation. Follow the project's approved network access and authentication flow; do not bypass provider restrictions. Report the CLI version/path, target, workflow, env overlay name, readiness result, and remaining blocker without secrets. Installation, a listed MCP server, or a running container alone does not prove the app works. Stop only resources created and owned by this task when cleanup is requested; preserve reusable caches and application data.",
+    "",
+    "## Further reading",
+    "",
+    "- [Current Cloud environments](https://learn.chatgpt.com/docs/environments/cloud-environments)",
+    "- [Legacy Cloud environments](https://learn.chatgpt.com/docs/environments/cloud-environment)",
     "",
   ].join("\n");
 }

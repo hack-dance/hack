@@ -74,3 +74,32 @@ belong to their client adapters; shared behavior belongs to the canonical source
   preserve customized files. See [integration setup](integrations.md).
 - Historical Factory validation artifacts describe past runs; they are evidence, not
   current contributor policy. Do not rewrite history to resemble the current workflow.
+
+## Packaged references and skill candidates
+
+Plugin skills can ship markdown references at `skills/<skill>/references/*.md`.
+Register each one in `src/agents/skill-references.ts` (skill, file, render); the
+generator writes it with a recomputable content revision and links it from the
+plugin's SKILL.md. Standalone `hack setup` installs ship no references, so their
+`hack-cli` render stays unlinked. References must resolve inside the installed
+package and work offline: relative links stay inside `plugins/hack`, never point
+at repository `docs/` or absolute paths, and external URLs appear only under a
+"Further reading" heading. `tests/skill-references.test.ts` enforces this.
+
+The first reference is the `hack-cli` pattern catalogue, rendered from the typed
+register in `src/agents/pattern-catalogue.ts`. It keeps all twelve HACK-P cards
+(HACK-1145..HACK-1156). A card that is not supported names its missing contract
+and domain owner; the disposition does not waive that owner's runtime gates.
+`tests/pattern-catalogue.test.ts` checks completeness, CLI_SPEC command
+resolution and the banned-recipe scan.
+
+Skill candidates and where their patterns live now:
+
+| Candidate | Decision | Patterns live in | Promotion owner and missing contract |
+| --- | --- | --- | --- |
+| lifecycle | Defer | `hack-cli` "Lifecycle + startup"; catalogue HACK-P01, P04, P05, P06 | WU29: identity-aware adoption and ownership-safe shared host lifecycles |
+| cleanup | Defer | `hack-cli` "Lifecycle + startup" (`--prune-caches`); catalogue HACK-P09, P10 | WU12/WU30: reference-aware retention and cache provenance |
+| checks | Defer | `hack-cli` "Running things"; catalogue HACK-P02, P10, P11 | WU11: qualified portable toolchain fixture with a distinct trigger |
+| sessions | Defer | `hack-cli` "Workspaces" and [sessions](sessions.md) | WU18: trigger evaluations showing `hack-cli` misroutes session work |
+| hack-run | Defer | `hack-cli` "Running things" | WU26: decides between a hack-run skill and references |
+| hack-feedback | Defer | Not shipped | WU25: privacy-reviewed feedback drafts |

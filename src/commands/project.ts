@@ -149,6 +149,7 @@ import {
   HackCliError,
   okResult,
 } from "../lib/cli-result.ts";
+import { withComposeServiceEnvFingerprints } from "../lib/compose-env-fingerprint.ts";
 import { renderManagedComposeEnvOverride } from "../lib/compose-managed-env.ts";
 import {
   DEFAULT_COMPOSE_STARTUP_TIMEOUT_MS,
@@ -243,6 +244,8 @@ import { normalizeProjectName } from "../lib/project-name.ts";
 import {
   readProjectRuntimeStateEntry,
   removeProjectRuntimeStateEntry,
+  resolveComposeExecStaleEnvWarning,
+  updateProjectRuntimeServiceEnvFingerprints,
   upsertProjectRuntimeStateEntry,
 } from "../lib/project-runtime-state.ts";
 import {
@@ -5260,11 +5263,22 @@ async function runUpCommand({
     envByService: envOverrides.preflightEnvByService,
   });
 
-  if (!serviceScoped) {
+  if (serviceScoped) {
+    await updateProjectRuntimeServiceEnvFingerprints({
+      projectDir: project.projectDir,
+      composeProject: lifecycleComposeProject,
+      effectiveEnvName: envOverrides.effectiveEnvName,
+      services: targetServices,
+      envByService: envOverrides.preflightEnvByService,
+      outcome: "applied",
+    });
+  } else {
     await persistProjectRuntimeEnvSelection({
       projectDir: project.projectDir,
       composeProject: lifecycleComposeProject,
       envName: envOverrides.effectiveEnvName,
+      services: preparedServices,
+      envByService: envOverrides.preflightEnvByService,
     });
   }
 
@@ -6163,6 +6177,8 @@ async function runRestartUpPhase(opts: {
     projectDir: opts.project.projectDir,
     composeProject: opts.lifecycleComposeProject,
     envName: envOverrides.effectiveEnvName,
+    services: targetServices,
+    envByService: envOverrides.preflightEnvByService,
   });
 
   let lifecycleCleanup: LifecycleOperationCleanup | null = null;
@@ -6481,6 +6497,19 @@ async function runTargetedServiceRestart(opts: {
     cwd: dirname(opts.project.composeFile),
     env: envOverrides.env,
     routeStdoutToStderr: opts.routeStdoutToStderr,
+  });
+  // Force-recreate applies the env resolved above; after a failure the
+  // services' delivered env is unknown, so their digests are dropped.
+  await updateProjectRuntimeServiceEnvFingerprints({
+    projectDir: opts.project.projectDir,
+    composeProject: resolveLifecycleComposeProjectName({
+      projectName: opts.projectName,
+      branch: opts.branch,
+    }),
+    effectiveEnvName: envOverrides.effectiveEnvName,
+    services: opts.services,
+    envByService: envOverrides.preflightEnvByService,
+    outcome: code === 0 ? "applied" : "unknown",
   });
   if (code !== 0) {
     const failure = composeStartupFailure(
@@ -6956,10 +6985,19 @@ export function resolveRestartTarget(opts: {
   };
 }
 
+/**
+ * Record the env selection of a full-stack up/restart together with fresh,
+ * value-free digests of the env set delivered to each prepared service, so
+ * `hack exec` can warn when the resolved env later changes.
+ */
 async function persistProjectRuntimeEnvSelection(opts: {
   readonly projectDir: string;
   readonly composeProject: string;
   readonly envName: string | null;
+  readonly services: readonly string[];
+  readonly envByService: Readonly<
+    Record<string, Readonly<Record<string, string>>>
+  >;
 }): Promise<void> {
   await upsertProjectRuntimeStateEntry({
     projectDir: opts.projectDir,
@@ -6967,6 +7005,11 @@ async function persistProjectRuntimeEnvSelection(opts: {
       composeProject: opts.composeProject,
       envName: opts.envName,
       updatedAt: new Date().toISOString(),
+      envFingerprint: withComposeServiceEnvFingerprints({
+        existing: undefined,
+        services: opts.services,
+        envByService: opts.envByService,
+      }),
     },
   });
 }
@@ -7551,6 +7594,16 @@ async function handleExec({
   });
   if (!execReady.ok) {
     throw new CliUsageError(execReady.message);
+  }
+  // exec stdout is the target command's output; keep the warning on stderr.
+  const staleEnvWarning = await resolveComposeExecStaleEnvWarning({
+    projectDir: project.projectDir,
+    composeProject: lifecycleComposeProject,
+    service,
+    currentEnv: envOverrides.preflightEnvByService[service] ?? {},
+  });
+  if (staleEnvWarning) {
+    process.stderr.write(`WARNING: ${staleEnvWarning}\n`);
   }
 
   return await composeRuntimeBackend.exec({

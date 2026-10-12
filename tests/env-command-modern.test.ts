@@ -88,7 +88,9 @@ test("modern env list rejects unknown service scopes", async () => {
   ]);
 
   expect(result.exitCode).toBe(1);
-  expect(result.stderr).toContain("Unknown env scope: typo_service");
+  expect(result.stderr).toContain("Unknown env scope:");
+  expect(result.stderr).toContain("Configured scopes: global, api");
+  expect(result.stderr).not.toContain("typo_service");
 });
 
 test("env explain reports precedence and delivery without revealing values", async () => {

@@ -783,6 +783,34 @@ test("tools/list publishes names, annotations and required inputs for every tool
       annotations: { title: "Initialize project", ...DESTRUCTIVE },
       required: [],
     },
+    {
+      name: "hack.project.exec",
+      annotations: {
+        title: "Exec command in running service",
+        ...DESTRUCTIVE,
+      },
+      required: ["service", "cmd"],
+    },
+    {
+      name: "hack.project.doctor",
+      annotations: { title: "Diagnose project setup", ...READ_ONLY },
+      required: [],
+    },
+    {
+      name: "hack.project.env.explain",
+      annotations: { title: "Explain env key", ...READ_ONLY },
+      required: ["key"],
+    },
+    {
+      name: "hack.project.env.keys",
+      annotations: { title: "List env keys", ...READ_ONLY },
+      required: [],
+    },
+    {
+      name: "hack.project.instances",
+      annotations: { title: "List project instances", ...READ_ONLY },
+      required: [],
+    },
   ]);
   const run = listed.tools.find((tool) => tool.name === "hack.project.run");
   expect(run?.inputSchema.properties?.timeoutMs).toMatchObject({

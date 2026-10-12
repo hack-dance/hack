@@ -11,6 +11,5 @@
   "license": "MIT",
   "keywords": ["local-development", "docker", "developer-tools", "agents"],
   "skills": "./skills/",
-  "hooks": "./hooks/claude-hooks.json",
-  "mcpServers": "./.mcp.json"
+  "hooks": "./hooks/claude-hooks.json"
 }

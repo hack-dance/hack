@@ -39,7 +39,14 @@ type IssueCode =
   | "verified-below-fixture"
   | "verified-on-manifest-or-listing"
   | "verified-with-open-gate"
-  | "manifest-disagreement";
+  | "manifest-disagreement"
+  | "skills-package-declares-mcp";
+
+/** A client's default `hack` (skills) and opt-in `hack-mcp` manifests. */
+interface ClientManifests {
+  readonly skills: Record<string, unknown>;
+  readonly mcp: Record<string, unknown>;
+}
 
 interface ClassificationIssue {
   readonly client: AgentClient;
@@ -88,10 +95,19 @@ function classificationIssues({
   exists,
 }: {
   readonly cells: readonly ClientCapabilityCell[];
-  readonly manifests: Readonly<Record<string, Record<string, unknown>>>;
+  readonly manifests: Readonly<Record<string, ClientManifests>>;
   readonly exists: (repoRelativePath: string) => boolean;
 }): ClassificationIssue[] {
   const issues: ClassificationIssue[] = [];
+  for (const client of NATIVE_PLUGIN_CLIENTS) {
+    if ("mcpServers" in (manifests[client]?.skills ?? {})) {
+      issues.push({
+        client,
+        capability: "pluginMcp",
+        code: "skills-package-declares-mcp",
+      });
+    }
+  }
   for (const client of AGENT_CLIENTS) {
     for (const capability of AGENT_CLIENT_CAPABILITIES) {
       const matches = cells.filter(
@@ -148,7 +164,11 @@ function classificationIssues({
       }
     }
     if (NATIVE_PLUGIN_CLIENTS.includes(cell.client)) {
-      const manifest = manifests[cell.client] ?? {};
+      const packages = manifests[cell.client];
+      // Plugin MCP ships only in the opt-in hack-mcp package.
+      const manifest =
+        (cell.capability === "pluginMcp" ? packages?.mcp : packages?.skills) ??
+        {};
       const key = MANIFEST_COMPONENT_KEYS[cell.capability];
       const declared =
         cell.capability === "packaging"
@@ -165,18 +185,21 @@ function classificationIssues({
   return issues;
 }
 
-async function loadManifests(): Promise<
-  Record<string, Record<string, unknown>>
-> {
-  const manifests: Record<string, Record<string, unknown>> = {};
+async function readManifest(path: string): Promise<Record<string, unknown>> {
+  const parsed: unknown = await Bun.file(join(repoRoot, path)).json();
+  if (!isRecord(parsed)) {
+    throw new Error(`Expected a manifest object: ${path}`);
+  }
+  return parsed;
+}
+
+async function loadManifests(): Promise<Record<string, ClientManifests>> {
+  const manifests: Record<string, ClientManifests> = {};
   for (const definition of AGENT_CLIENT_DEFINITIONS) {
-    const parsed: unknown = await Bun.file(
-      join(repoRoot, definition.manifestPath)
-    ).json();
-    if (!isRecord(parsed)) {
-      throw new Error(`Expected a manifest object: ${definition.manifestPath}`);
-    }
-    manifests[definition.client] = parsed;
+    manifests[definition.client] = {
+      skills: await readManifest(definition.manifestPath),
+      mcp: await readManifest(definition.mcpManifestPath),
+    };
   }
   return manifests;
 }
@@ -301,7 +324,7 @@ test("negative control: plugin skills verified on manifest-only evidence fail", 
 
 test("manifest-declared components agree with the matrix", async () => {
   const manifests = await loadManifests();
-  expect("hooks" in (manifests.codex ?? {})).toBe(false);
+  expect("hooks" in (manifests.codex?.skills ?? {})).toBe(false);
   const codexHooks = replaceCell("codex", "hooks", {
     status: "verified",
     evidenceClass: "isolated-fixture",
@@ -355,6 +378,51 @@ test("manifest-declared components agree with the matrix", async () => {
       "hooks"
     )
   ).toEqual(["open-gate-missing"]);
+});
+
+test("negative control: plugin MCP is classified from hack-mcp, never the skills package", async () => {
+  const manifests = await loadManifests();
+  for (const client of NATIVE_PLUGIN_CLIENTS) {
+    expect("mcpServers" in (manifests[client]?.skills ?? {})).toBe(false);
+    expect(manifests[client]?.mcp.mcpServers).toBe("./.mcp.json");
+  }
+
+  const claude = manifests.claude;
+  if (!claude) {
+    throw new Error("expected Claude manifests");
+  }
+  const readded = {
+    ...manifests,
+    claude: {
+      ...claude,
+      skills: { ...claude.skills, mcpServers: "./.mcp.json" },
+    },
+  };
+  expect(
+    codesFor(
+      classificationIssues({
+        cells: AGENT_CLIENT_CAPABILITY_MATRIX,
+        manifests: readded,
+        exists: repoExists,
+      }),
+      "claude",
+      "pluginMcp"
+    )
+  ).toEqual(["skills-package-declares-mcp"]);
+
+  const { mcpServers: _removed, ...withoutServer } = claude.mcp;
+  const emptied = { ...manifests, claude: { ...claude, mcp: withoutServer } };
+  expect(
+    codesFor(
+      classificationIssues({
+        cells: AGENT_CLIENT_CAPABILITY_MATRIX,
+        manifests: emptied,
+        exists: repoExists,
+      }),
+      "claude",
+      "pluginMcp"
+    )
+  ).toEqual(["manifest-disagreement"]);
 });
 
 test("committed reference section matches the generator output", async () => {

@@ -8,8 +8,9 @@ description: Install, upgrade, or roll back Hack; diagnose a missing CLI or plug
 # Install and select Hack
 
 Complete the requested installation and verify the exact executable. The plugin
-provides instructions and a local MCP connection; installing it does not install
-Hack, Docker, a native provider, DNS, or certificate trust.
+provides instructions; the separate, opt-in \`hack-mcp\` plugin provides a local MCP
+connection. Installing either does not install Hack, Docker, a native provider,
+DNS, or certificate trust.
 
 ## Identify the target
 
@@ -60,7 +61,7 @@ After rollback, verify the application's retained data through the restored runt
 
 ## Plugin and MCP selection
 
-The bundled MCP server and Claude hook run \`hack\` from the client process's PATH.
+The \`hack-mcp\` server and the Claude hook run \`hack\` from the client process's PATH.
 They do not automatically follow \`hack-next\`. Prefer the explicit selected CLI
 when shell access is available. Never use a stable MCP tool to mutate a candidate
 project, or infer channel selection from the skill/plugin version.

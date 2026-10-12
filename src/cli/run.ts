@@ -18,7 +18,9 @@ import {
   parsePositionalsForCommand,
   resolveCommand,
 } from "./command.ts";
+import { resolveRequestedEnvName } from "./env-selection.ts";
 import { printHelpForPath } from "./help.ts";
+import { optEnv } from "./options.ts";
 import { CLI_SPEC } from "./spec.ts";
 
 function isTruthyEnv(value: string | undefined): boolean {
@@ -80,6 +82,10 @@ export async function runCli(argv: readonly string[]): Promise<number> {
       resolved.command.options,
       parsed.values
     );
+    validateSharedEnvSelection({
+      command: resolved.command,
+      parsedValues: parsed.values,
+    });
     const pos = parsePositionalsForCommand(
       resolved.command.positionals,
       resolved.remainingPositionals
@@ -257,6 +263,24 @@ function validateResolvedCommandOptions(opts: {
     throw new CliUsageError(
       `Option(s) not valid for "${opts.command.name}": ${disallowed.map((option) => `--${option}`).join(", ")}`
     );
+  }
+}
+
+/**
+ * Refuse an unusable shared `--env` value before the handler runs, so no
+ * command discovers a project, migrates or reads files, or starts a child
+ * process with it. The refusal is fixed text that never includes the value.
+ */
+function validateSharedEnvSelection(opts: {
+  readonly command: AnyCommandSpec;
+  readonly parsedValues: Record<string, unknown>;
+}): void {
+  if (!opts.command.options.includes(optEnv)) {
+    return;
+  }
+  const value = opts.parsedValues[optEnv.name];
+  if (typeof value === "string") {
+    resolveRequestedEnvName({ envOption: value });
   }
 }
 

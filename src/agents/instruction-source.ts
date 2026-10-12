@@ -344,7 +344,7 @@ export const INSTRUCTION_SECTIONS: readonly InstructionSection[] = [
     surfaces: ALL_SURFACES,
     bullets: [
       "Ordinary Hack commands, `hack update`, `hack doctor --fix`, and primer hooks never install plugins or mutate agent integration files.",
-      "Use the matching `hack setup` command only for the affected client and authorized project scope; add `--global` only when user-scope changes are authorized. Use `--check` for read-only inspection. Reserve `hack setup sync --all-scopes` for an explicitly requested full refresh.",
+      "Use the matching `hack setup` command only for the affected client and authorized project scope; add `--global` only when user-scope changes are authorized. Use `--check` for read-only inspection. Reserve `hack setup sync --all-scopes` for an explicitly requested full refresh; it refreshes only installed Hack-owned files and creates missing integrations only with `--install-missing`.",
       "Standalone setup and optional native plugins are alternative integration paths. A missing optional integration does not require installation. Verify the replacement loads before explicitly removing duplicate Hack-owned entries; preserve customizations.",
       "CLI upgrades do not authorize integration changes. Edit guidance at its generator source and render the affected targets; restart only if the client cannot reload the changed hooks or skills.",
     ],

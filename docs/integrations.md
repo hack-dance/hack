@@ -12,9 +12,10 @@ What remains:
   export commands
 
 `hack setup sync` keeps interactive output compact: it summarizes each scope and only expands the
-path and reason for stale, missing, or failed artifacts. Exit status remains the automation contract,
-and the individual `hack setup cursor|claude|codex|agents|mcp --check` commands remain available when
-you need per-artifact detail.
+path and reason for preserved or failed artifacts (and, with `--check`, the ones sync would change).
+Exit status remains the automation contract, `--json` lists every target, and the individual
+`hack setup cursor|claude|codex|agents|mcp --check` commands remain available when you need
+per-client detail.
 
 What does not ship: Hack Tickets, built-in GitHub or Linear integrations, hosted
 auth/account/org/team surfaces, and the web dashboard control plane.
@@ -48,7 +49,38 @@ files Hack owns: the current render or an unedited render from an earlier releas
 unrecognized `SKILL.md` or `hack.mdc` is reported as `preserved` with a reason and left unchanged;
 move or delete it yourself to reinstall. Removal deletes only the owned `SKILL.md` and removes its
 skill directory only when nothing else is in it. Claude hook removal drops only the
-`hack agent prime` entries and keeps other commands. Preserved files do not change the exit status.
+`hack agent prime` entries and keeps other commands. Preserved files do not change the exit status
+of an install, sync, or remove.
+
+### Refresh-only `hack setup sync`
+
+`hack setup sync` refreshes only integrations that are already installed and Hack-owned. It never
+creates a missing one. Per target, in the selected scope (project by default, `--global`, or
+`--all-scopes`):
+
+| Status | Meaning |
+| --- | --- |
+| `refreshed` | An installed Hack-owned target was rewritten to the current render |
+| `unchanged` | The target already matches the current render |
+| `preserved` | The file is customized or unrecognized; it is left byte-identical and the closed reason is reported |
+| `missing` | The target is not installed; sync skipped it |
+| `installed` | Created only with `--install-missing` |
+| `removed` | A recognized retired Hack artifact was deleted (or, with `--remove`, a Hack-owned target) |
+| `error` | The target could not be read or parsed; it is left unchanged |
+
+Hack-owned means: a current or known earlier render of a standalone skill or rule file; the
+marker-delimited section of `AGENTS.md`/`CLAUDE.md`; the `hack agent prime` entries of the Claude
+settings file; and the `hack` entry of an MCP config. A doc, settings file, or MCP config without
+the Hack section counts as `missing`, so the file is not modified. Existing MCP entries are
+never replaced.
+
+Add `--install-missing` to also create missing integrations in the selected scope; customized
+files stay `preserved`. `--check` is read-only: it reports what sync would do with the same flags
+and exits non-zero when sync would refresh, install, or remove something, a file is preserved,
+or a target errors. A missing target fails `--check` only together with `--install-missing`.
+`--json` prints `{ok, data: {action, dryRun, installMissing, counts, targets}}`, where each
+target carries `scope`, `target`, `path`, `status`, and, when preserved, `reason`. Messages are
+fixed text and never include file contents.
 
 ## Standalone MCP configuration
 

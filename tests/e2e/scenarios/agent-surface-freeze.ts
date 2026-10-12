@@ -42,8 +42,10 @@ type FreezeCommand = {
  * onboarding prompt for the existing setup (exit 0). `doctor` exits 1 for the
  * unreachable Docker and missing global install, and `--fix` runs only its
  * Docker-free remediations (see `freezeEnv`). `setup sync --check` exits 1
- * because the customized guidance differs from Hack's render; it reports the
- * drift and must not repair it.
+ * because the customized guidance is reported as preserved; it must not
+ * repair it. Refresh-only `setup sync --all-scopes` (HACK-1132) exits 0: every
+ * seeded file is customized or lacks a Hack section, so nothing is refreshed
+ * and nothing missing is created.
  */
 const FREEZE_COMMANDS: readonly FreezeCommand[] = [
   {
@@ -105,6 +107,12 @@ const FREEZE_COMMANDS: readonly FreezeCommand[] = [
     fixture: "project",
     args: ["setup", "sync", "--check"],
     codes: [[1], [1]],
+  },
+  {
+    label: "setup sync --all-scopes",
+    fixture: "project",
+    args: ["setup", "sync", "--all-scopes"],
+    codes: [[0], [0]],
   },
 ];
 

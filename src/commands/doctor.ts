@@ -114,6 +114,7 @@ import {
   type HackLocalRouteDependencies,
   type HackLocalRouteReport,
   inspectHackLocalRoute,
+  printable,
   repairHackLocalRoute,
   reportHackLocalRoute,
 } from "../lib/native-hack-local-route.ts";
@@ -1131,7 +1132,9 @@ export async function checkNativeHackLocalRoute(opts: {
       {
         name: HACK_LOCAL_ROUTE_CHECK,
         status: "warn",
-        message: `Unable to inspect the hack.local route: ${error instanceof Error ? error.message : String(error)}`,
+        message: printable(
+          `Unable to inspect the hack.local route: ${error instanceof Error ? error.message : String(error)}`
+        ),
         durationMs: 0,
       },
     ];
@@ -1144,11 +1147,13 @@ export async function checkNativeHackLocalRoute(opts: {
           return {
             name: HACK_LOCAL_REPAIR_CHECK,
             status: "ok",
-            message: `Rewrote "${repaired.receipt.oldLine}" to "${repaired.receipt.newLine}"${
-              repaired.receipt.resolverAction === "create"
-                ? ` and created ${repaired.receipt.resolverPath}`
-                : ""
-            }; live DNS verified. Receipt: ${deps.paths.receiptPath}. Undo with: ${HACK_LOCAL_ROLLBACK_COMMAND}`,
+            message: printable(
+              `Rewrote "${repaired.receipt.oldLine}" to "${repaired.receipt.newLine}"${
+                repaired.receipt.resolverAction === "create"
+                  ? ` and created ${repaired.receipt.resolverPath}`
+                  : ""
+              }; live DNS verified. Receipt: ${deps.paths.receiptPath}. Undo with: ${HACK_LOCAL_ROLLBACK_COMMAND}`
+            ),
           };
         }
         if (repaired.outcome === "current") {
@@ -1162,7 +1167,9 @@ export async function checkNativeHackLocalRoute(opts: {
         return {
           name: HACK_LOCAL_REPAIR_CHECK,
           status: "warn",
-          message: `Repair refused (${repaired.reason}): ${repaired.detail}`,
+          message: printable(
+            `Repair refused (${repaired.reason}): ${repaired.detail}`
+          ),
         };
       })
     );

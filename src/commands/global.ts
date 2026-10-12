@@ -113,6 +113,7 @@ import {
   readStableNativeDnsFile,
 } from "../lib/native-domain-dns-snapshot.ts";
 import {
+  describeHackLocalRollback,
   describeHackLocalRoute,
   inspectHackLocalRoute,
   reportHackLocalRoute,
@@ -600,19 +601,12 @@ async function handleGlobalDnsDeactivate({
     const result = await rollbackHackLocalRoute(
       await createNativeHackLocalRouteDependencies({ runtime })
     );
+    const message = describeHackLocalRollback(result);
     if (result.outcome === "refused") {
-      logger.error({
-        message: `hack.local rollback refused (${result.reason}): ${result.detail}`,
-      });
+      logger.error({ message });
       return 1;
     }
-    logger.success({
-      message: `Restored "${result.receipt.oldLine}"; the dnsmasq file hash matches the receipt.${
-        result.retainedResolver
-          ? ` ${result.retainedResolver} was retained because its ownership is unproven.`
-          : ""
-      }`,
-    });
+    logger.success({ message });
     return 0;
   }
   const { domain } = selected;

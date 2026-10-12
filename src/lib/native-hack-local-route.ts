@@ -26,7 +26,15 @@ import { isRecord } from "./guards.ts";
  *   inspection after authorization. Every unmet precondition is a closed
  *   refusal reason, never a best-effort change.
  * - A pending receipt is published before any host effect. An interrupted run
- *   leaves it for explicit recovery through the rollback command.
+ *   leaves it for explicit recovery through the rollback command. When the
+ *   recorded file has changed since, that command releases the receipt after
+ *   confirmation instead of writing, so recovery can never get stuck.
+ * - Repair and rollback hold an exclusive lock for their whole mutation, so an
+ *   automatic restore never mistakes another run's write for its own.
+ * - Strings are lossless decodings of the file bytes (BOM included), so every
+ *   hash equals the SHA-256 of the raw file.
+ * - Diagnostics never echo free-form file contents. Lines appear only in the
+ *   validated managed form, and every interpolated value is control-free.
  */
 
 export const HACK_LOCAL_DOMAIN = DEFAULT_NEW_PROJECT_TLD;
@@ -41,9 +49,17 @@ const REPLACEABLE_TARGETS: ReadonlySet<string> = new Set([
   DEFAULT_CADDY_IP,
   "::1",
 ]);
+/** Every line a repair can record as the earlier line. */
+const RECORDABLE_OLD_LINES: ReadonlySet<string> = new Set(
+  [DEFAULT_HOST_DNS_IP, ...REPLACEABLE_TARGETS].map(
+    (target) => `${LINE_PREFIX}${target}`
+  )
+);
 const TARGET_FORMAT = /^[0-9a-f:.]+$/i;
 const DOMAIN_TOKEN = /[a-z0-9-]+(?:\.[a-z0-9-]+)*/gi;
 const SHA256 = /^[0-9a-f]{64}$/;
+const RESOLVER_IDENTITY = /^\d+:\d+$/;
+const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f-\u009f]/g;
 const BUILT_IN_ROOTS: ReadonlySet<string> = new Set([
   DEFAULT_PROJECT_TLD,
   DEFAULT_NEW_PROJECT_TLD,
@@ -63,14 +79,19 @@ export type HackLocalRouteRefusal =
   | "old-target-live"
   | "non-interactive"
   | "declined"
+  | "busy"
+  | "restart-unavailable"
   | "inputs-changed"
-  | "no-receipt"
-  | "rollback-drift";
+  | "no-receipt";
 
 export interface HackLocalRouteReceipt {
   readonly version: 1;
   readonly kind: "hack-local-route-repair";
-  readonly state: "pending" | "applied" | "rolled-back";
+  /**
+   * `released`: the recorded file changed after the repair, and the user
+   * chose to keep the current bytes instead of restoring the earlier line.
+   */
+  readonly state: "pending" | "applied" | "rolled-back" | "released";
   readonly domain: typeof HACK_LOCAL_DOMAIN;
   readonly dnsmasqPath: string;
   readonly resolverPath: string;
@@ -124,6 +145,13 @@ export interface HackLocalRouteDependencies {
   readonly canPrompt: () => boolean;
   /** Human confirmation plus the native administrator prompt. */
   readonly authorize: (message: string) => Promise<boolean>;
+  /** Human confirmation only, for a change limited to the private receipt. */
+  readonly confirm: (message: string) => Promise<boolean>;
+  /**
+   * Take the exclusive repair/rollback lock. Returns its release, or null
+   * when another live run holds it.
+   */
+  readonly acquireLock: () => Promise<(() => Promise<void>) | null>;
   /** Validate the dnsmasq service before effects; return its restart. */
   readonly prepareRestart: () => Promise<() => Promise<void>>;
   readonly flushDnsCache: () => Promise<void>;
@@ -185,6 +213,17 @@ export type HackLocalRouteRollbackResult =
       readonly receipt: HackLocalRouteReceipt;
       /** A resolver this repair created but could not prove it still owns. */
       readonly retainedResolver: string | null;
+      /**
+       * Null when dnsmasq was restarted. Otherwise why the restored file
+       * was not loaded (for example dnsmasq is not running).
+       */
+      readonly restartSkipped: string | null;
+    }
+  | {
+      /** The file changed after the repair; nothing but the receipt changed. */
+      readonly outcome: "released";
+      readonly receipt: HackLocalRouteReceipt;
+      readonly detail: string;
     }
   | {
       readonly outcome: "refused";
@@ -193,7 +232,11 @@ export type HackLocalRouteRollbackResult =
       readonly command?: string;
     };
 
-/** JSON-safe summary for doctor and preview; never includes file contents. */
+/**
+ * JSON-safe summary for doctor and preview. It never includes free-form file
+ * contents: `oldLine` and `newLine` appear only in the validated managed form,
+ * and `detail` names lines by number.
+ */
 export interface HackLocalRouteReport {
   readonly status: "current" | "repairable" | "refused";
   readonly reason?: HackLocalRouteRefusal;
@@ -209,8 +252,17 @@ export interface HackLocalRouteReport {
   readonly command?: string;
 }
 
+/**
+ * SHA-256 of the UTF-8 encoding. File strings come from a fatal decoder that
+ * keeps a leading BOM, so this equals the hash of the raw file bytes.
+ */
 export function sha256(content: string): string {
   return createHash("sha256").update(content, "utf8").digest("hex");
+}
+
+/** Replace control characters so a value cannot drive the terminal. */
+export function printable(value: string): string {
+  return value.replace(CONTROL_CHARACTERS, "?");
 }
 
 interface ConfigLine {
@@ -302,12 +354,12 @@ export function analyzeHackLocalDnsmasq(opts: {
     return {
       kind: "refused",
       reason: "unmanaged-line",
-      detail: `${included.path} also claims .${HACK_LOCAL_DOMAIN}; Hack manages only the main configuration line.`,
+      detail: `${printable(included.path)} also claims .${HACK_LOCAL_DOMAIN}; Hack manages only the main configuration line.`,
     };
   }
-  const claims = configLines(opts.content).filter((line) =>
-    claimsHackLocal(line.text)
-  );
+  const claims = configLines(opts.content)
+    .map((line, index) => ({ ...line, number: index + 1 }))
+    .filter((line) => claimsHackLocal(line.text));
   if (claims.length === 0) {
     return {
       kind: "refused",
@@ -322,7 +374,8 @@ export function analyzeHackLocalDnsmasq(opts: {
       detail: `${claims.length} lines claim .${HACK_LOCAL_DOMAIN}; only a single Hack-managed line can be rewritten.`,
     };
   }
-  const line = (claims[0] as ConfigLine).text;
+  const claim = claims[0] as ConfigLine & { readonly number: number };
+  const line = claim.text;
   const target = line.startsWith(LINE_PREFIX)
     ? line.slice(LINE_PREFIX.length)
     : "";
@@ -330,14 +383,14 @@ export function analyzeHackLocalDnsmasq(opts: {
     return {
       kind: "refused",
       reason: "unmanaged-line",
-      detail: `"${line.slice(0, 200)}" is not in the Hack-managed ${LINE_PREFIX}<address> form.`,
+      detail: `Line ${claim.number} claims .${HACK_LOCAL_DOMAIN} but is not in the Hack-managed ${LINE_PREFIX}<address> form.`,
     };
   }
   if (target !== DEFAULT_HOST_DNS_IP && !REPLACEABLE_TARGETS.has(target)) {
     return {
       kind: "refused",
       reason: "foreign-target",
-      detail: `.${HACK_LOCAL_DOMAIN} routes to ${target}, which Hack never wrote; refusing to replace it.`,
+      detail: `Line ${claim.number} routes .${HACK_LOCAL_DOMAIN} to an address Hack never wrote; refusing to replace it.`,
     };
   }
   return { kind: "line", line, target };
@@ -358,6 +411,13 @@ function nonEmptyString(value: unknown): value is string {
   return typeof value === "string" && value.length > 0 && value.length < 4096;
 }
 
+/** A single-line absolute path; receipts never carry control characters. */
+function receiptPathValue(value: unknown): value is string {
+  return (
+    nonEmptyString(value) && value.startsWith("/") && printable(value) === value
+  );
+}
+
 /** Strict receipt parsing; any unknown shape refuses rather than guessing ownership. */
 export function parseHackLocalRouteReceipt(raw: string): HackLocalRouteReceipt {
   let value: unknown;
@@ -372,12 +432,13 @@ export function parseHackLocalRouteReceipt(raw: string): HackLocalRouteReceipt {
     value.kind === "hack-local-route-repair" &&
     (value.state === "pending" ||
       value.state === "applied" ||
-      value.state === "rolled-back") &&
+      value.state === "rolled-back" ||
+      value.state === "released") &&
     value.domain === HACK_LOCAL_DOMAIN &&
-    nonEmptyString(value.dnsmasqPath) &&
-    nonEmptyString(value.resolverPath) &&
-    nonEmptyString(value.oldLine) &&
-    value.oldLine.startsWith(LINE_PREFIX) &&
+    receiptPathValue(value.dnsmasqPath) &&
+    receiptPathValue(value.resolverPath) &&
+    typeof value.oldLine === "string" &&
+    RECORDABLE_OLD_LINES.has(value.oldLine) &&
     value.newLine === HACK_LOCAL_RELAY_LINE &&
     typeof value.beforeSha256 === "string" &&
     SHA256.test(value.beforeSha256) &&
@@ -387,7 +448,8 @@ export function parseHackLocalRouteReceipt(raw: string): HackLocalRouteReceipt {
     typeof value.resolverSha256 === "string" &&
     SHA256.test(value.resolverSha256) &&
     (value.resolverIdentity === null ||
-      nonEmptyString(value.resolverIdentity)) &&
+      (typeof value.resolverIdentity === "string" &&
+        RESOLVER_IDENTITY.test(value.resolverIdentity))) &&
     typeof value.relayPort === "number" &&
     Number.isInteger(value.relayPort) &&
     value.relayPort > 0 &&
@@ -443,7 +505,9 @@ export async function inspectHackLocalRoute(
   if ("invalid" in stored) {
     return refused({
       reason: "invalid-receipt",
-      detail: `${stored.invalid}; refusing to infer ownership of ${paths.receiptPath}.`,
+      detail: printable(
+        `${stored.invalid}; refusing to infer ownership of ${paths.receiptPath}.`
+      ),
       paths,
       receipt: null,
     });
@@ -452,7 +516,7 @@ export async function inspectHackLocalRoute(
   if (receipt?.state === "pending") {
     return refused({
       reason: "pending-receipt",
-      detail: `An interrupted hack.local repair left a pending receipt. Restore the recorded earlier line with: ${HACK_LOCAL_ROLLBACK_COMMAND}`,
+      detail: `An interrupted hack.local repair left a pending receipt. Run ${HACK_LOCAL_ROLLBACK_COMMAND} to restore the recorded earlier line, or, if dnsmasq.conf changed since, to release the receipt without writing.`,
       paths,
       receipt,
     });
@@ -480,7 +544,9 @@ export async function inspectHackLocalRoute(
   if (resolverAction === "foreign") {
     return refused({
       reason: "foreign-resolver",
-      detail: `${paths.resolverPath} exists with content Hack did not write; refusing to change it.`,
+      detail: printable(
+        `${paths.resolverPath} exists with content Hack did not write; refusing to change it.`
+      ),
       paths,
       receipt,
     });
@@ -595,14 +661,16 @@ export function reportHackLocalRoute(
   };
 }
 
-/** One-line human message for a report. */
+/** One-line human message for a report; control characters are replaced. */
 export function describeHackLocalRoute(report: HackLocalRouteReport): string {
   if (report.status === "current") {
-    return `*.${HACK_LOCAL_DOMAIN} routes to the native relay on 127.0.0.1:${report.relayPort}.${
-      report.receiptState === "applied"
-        ? ` Undo the native repair with: ${HACK_LOCAL_ROLLBACK_COMMAND}`
-        : ""
-    }`;
+    return printable(
+      `*.${HACK_LOCAL_DOMAIN} routes to the native relay on 127.0.0.1:${report.relayPort}.${
+        report.receiptState === "applied"
+          ? ` Undo the native repair with: ${HACK_LOCAL_ROLLBACK_COMMAND}`
+          : ""
+      }`
+    );
   }
   if (report.status === "repairable") {
     const resolver =
@@ -614,9 +682,11 @@ export function describeHackLocalRoute(report: HackLocalRouteReport): string {
         ? ""
         : `rewrite "${report.oldLine}" to "${report.newLine}" in ${report.dnsmasqPath}`;
     const change = [rewrite, resolver].filter(Boolean).join(" and ");
-    return `Proposed: ${change}. Apply with: ${HACK_LOCAL_REPAIR_COMMAND}`;
+    return printable(
+      `Proposed: ${change}. Apply with: ${HACK_LOCAL_REPAIR_COMMAND}`
+    );
   }
-  return `Not repairable (${report.reason}): ${report.detail}`;
+  return printable(`Not repairable (${report.reason}): ${report.detail}`);
 }
 
 function samePlan(
@@ -637,45 +707,85 @@ function samePlan(
 }
 
 function errorMessage(error: unknown): string {
-  return (error instanceof Error ? error.message : String(error))
-    .replaceAll("\n", " ")
-    .slice(0, 512);
+  return printable(
+    error instanceof Error ? error.message : String(error)
+  ).slice(0, 512);
+}
+
+/** How the recorded earlier bytes relate to the current file. */
+export type HackLocalRestoreStep =
+  /** The file holds the repaired bytes; `next` reproduces the earlier hash. */
+  | { readonly kind: "write"; readonly next: string }
+  /** The file already holds the earlier bytes. */
+  | { readonly kind: "unchanged" }
+  /** The file matches neither recorded hash, or is missing. */
+  | { readonly kind: "drift" }
+  /** The receipt's lines do not reproduce its own recorded hashes. */
+  | { readonly kind: "mismatch" };
+
+/** Pure restore decision shared by the precheck and the effect. */
+export function planHackLocalRestore(opts: {
+  readonly current: string | null;
+  readonly receipt: HackLocalRouteReceipt;
+}): HackLocalRestoreStep {
+  const { current, receipt } = opts;
+  if (current === null) {
+    return { kind: "drift" };
+  }
+  const currentSha = sha256(current);
+  if (currentSha === receipt.beforeSha256) {
+    return { kind: "unchanged" };
+  }
+  if (currentSha !== receipt.afterSha256) {
+    return { kind: "drift" };
+  }
+  const next = replaceManagedLine({
+    content: current,
+    from: receipt.newLine,
+    to: receipt.oldLine,
+  });
+  if (next === null || sha256(next) !== receipt.beforeSha256) {
+    return { kind: "mismatch" };
+  }
+  return { kind: "write", next };
+}
+
+interface RestoreOutcome {
+  readonly retainedResolver: string | null;
+  /** True when restore wrote dnsmasq.conf or removed the resolver. */
+  readonly changed: boolean;
+  readonly restarted: boolean;
 }
 
 /**
  * Restore the recorded earlier state. Shared by explicit rollback and by
- * automatic cleanup when a repair fails after its first effect.
+ * automatic cleanup when a repair fails. dnsmasq restarts only when this
+ * restore changed something or `forceRestart` says the running service may
+ * hold the repaired configuration; `restart` null skips it.
  */
 async function restoreFromReceipt(opts: {
   readonly deps: HackLocalRouteDependencies;
   readonly receipt: HackLocalRouteReceipt;
-  readonly restart: () => Promise<void>;
-}): Promise<{ readonly retainedResolver: string | null }> {
+  readonly restart: (() => Promise<void>) | null;
+  readonly forceRestart: boolean;
+}): Promise<RestoreOutcome> {
   const { deps, receipt } = opts;
   const current = await deps.readDnsmasq();
-  if (current === null) {
-    throw new Error("dnsmasq configuration disappeared during rollback");
-  }
-  const currentSha = sha256(current);
-  if (
-    currentSha === receipt.afterSha256 &&
-    currentSha !== receipt.beforeSha256
-  ) {
-    const restored = replaceManagedLine({
-      content: current,
-      from: receipt.newLine,
-      to: receipt.oldLine,
-    });
-    if (restored === null || sha256(restored) !== receipt.beforeSha256) {
-      throw new Error("Restored dnsmasq bytes would not match the receipt");
+  const step = planHackLocalRestore({ current, receipt });
+  let changed = false;
+  if (step.kind === "write") {
+    await deps.replaceDnsmasq({ expected: current as string, next: step.next });
+    const verified = await deps.readDnsmasq();
+    if (verified === null || sha256(verified) !== receipt.beforeSha256) {
+      throw new Error("Restored dnsmasq configuration hash does not match");
     }
-    await deps.replaceDnsmasq({ expected: current, next: restored });
-  } else if (currentSha !== receipt.beforeSha256) {
-    throw new Error("dnsmasq configuration changed since the repair");
-  }
-  const verified = await deps.readDnsmasq();
-  if (verified === null || sha256(verified) !== receipt.beforeSha256) {
-    throw new Error("Restored dnsmasq configuration hash does not match");
+    changed = true;
+  } else if (step.kind !== "unchanged") {
+    throw new Error(
+      step.kind === "drift"
+        ? "dnsmasq configuration changed since the repair"
+        : "Restored dnsmasq bytes would not match the receipt"
+    );
   }
   let retainedResolver: string | null = null;
   if (receipt.resolverAction === "create") {
@@ -687,14 +797,20 @@ async function restoreFromReceipt(opts: {
           identity: receipt.resolverIdentity,
           content: HACK_LOCAL_RESOLVER_CONTENT,
         }));
-      if (!removed) {
+      if (removed) {
+        changed = true;
+      } else {
         retainedResolver = receipt.resolverPath;
       }
     }
   }
-  await opts.restart();
-  await deps.flushDnsCache();
-  return { retainedResolver };
+  let restarted = false;
+  if ((changed || opts.forceRestart) && opts.restart) {
+    await opts.restart();
+    await deps.flushDnsCache();
+    restarted = true;
+  }
+  return { retainedResolver, changed, restarted };
 }
 
 function stamp(
@@ -703,6 +819,19 @@ function stamp(
   now: Date
 ): HackLocalRouteReceipt {
   return Object.freeze({ ...receipt, ...patch, updatedAt: now.toISOString() });
+}
+
+function busy(): {
+  readonly outcome: "refused";
+  readonly reason: "busy";
+  readonly detail: string;
+} {
+  return {
+    outcome: "refused",
+    reason: "busy",
+    detail:
+      "Another hack.local repair or rollback is running; nothing changed. Retry when it finishes.",
+  };
 }
 
 /**
@@ -737,6 +866,21 @@ export async function repairHackLocalRoute(
       command: HACK_LOCAL_REPAIR_COMMAND,
     };
   }
+  const release = await deps.acquireLock();
+  if (!release) {
+    return busy();
+  }
+  try {
+    return await repairUnderLock(deps, plan);
+  } finally {
+    await release();
+  }
+}
+
+async function repairUnderLock(
+  deps: HackLocalRouteDependencies,
+  plan: HackLocalRoutePlan
+): Promise<HackLocalRouteRepairResult> {
   const changes = [
     plan.oldLine === plan.newLine
       ? ""
@@ -750,7 +894,9 @@ export async function repairHackLocalRoute(
       ? ""
       : `${plan.oldTarget}:443 did not answer; `;
   const approved = await deps.authorize(
-    `Native hack.local repair: ${changes.join(" and ")}? ${probe}the native relay listens on 127.0.0.1:${plan.relayPort}. This restarts dnsmasq. Undo: ${HACK_LOCAL_ROLLBACK_COMMAND}`
+    printable(
+      `Native hack.local repair: ${changes.join(" and ")}? ${probe}the native relay listens on 127.0.0.1:${plan.relayPort}. This restarts dnsmasq. Undo: ${HACK_LOCAL_ROLLBACK_COMMAND}`
+    )
   );
   if (!approved) {
     return {
@@ -759,7 +905,16 @@ export async function repairHackLocalRoute(
       detail: "The hack.local repair was not authorized; nothing changed.",
     };
   }
-  const restart = await deps.prepareRestart();
+  let restart: () => Promise<void>;
+  try {
+    restart = await deps.prepareRestart();
+  } catch (error) {
+    return {
+      outcome: "refused",
+      reason: "restart-unavailable",
+      detail: `The dnsmasq service cannot be restarted safely (${errorMessage(error)}); nothing changed.`,
+    };
+  }
   const after = await inspectHackLocalRoute(deps);
   if (after.status !== "repairable" || !samePlan(plan, after.plan)) {
     return {
@@ -792,6 +947,7 @@ export async function repairHackLocalRoute(
   await deps.writeReceipt(receipt);
 
   let phase = "dnsmasq rewrite";
+  let restartAttempted = false;
   try {
     if (plan.afterContent !== plan.beforeContent) {
       await deps.replaceDnsmasq({
@@ -806,6 +962,7 @@ export async function repairHackLocalRoute(
       await deps.writeReceipt(receipt);
     }
     phase = "dnsmasq restart";
+    restartAttempted = true;
     await restart();
     phase = "DNS cache flush";
     await deps.flushDnsCache();
@@ -816,13 +973,14 @@ export async function repairHackLocalRoute(
     await deps.writeReceipt(receipt);
     return { outcome: "repaired", plan, receipt };
   } catch (cause) {
-    let retained: string | null = null;
+    let restored: RestoreOutcome;
     try {
-      ({ retainedResolver: retained } = await restoreFromReceipt({
+      restored = await restoreFromReceipt({
         deps,
         receipt,
         restart,
-      }));
+        forceRestart: restartAttempted,
+      });
       await deps.writeReceipt(
         stamp(receipt, { state: "rolled-back" }, deps.now())
       );
@@ -832,12 +990,18 @@ export async function repairHackLocalRoute(
         { cause }
       );
     }
+    const state =
+      restored.changed || restored.restarted
+        ? "the earlier dnsmasq line was restored"
+        : "nothing was changed";
     throw new Error(
-      `hack.local repair failed during ${phase}: ${errorMessage(cause)}; the earlier dnsmasq line was restored${
-        retained
-          ? `; ${retained} was retained because its ownership is unproven`
-          : ""
-      }.`,
+      printable(
+        `hack.local repair failed during ${phase}: ${errorMessage(cause)}; ${state}${
+          restored.retainedResolver
+            ? `; ${restored.retainedResolver} was retained because its ownership is unproven`
+            : ""
+        }.`
+      ),
       { cause }
     );
   }
@@ -845,7 +1009,10 @@ export async function repairHackLocalRoute(
 
 /**
  * Restore the exact earlier line recorded by an applied or interrupted repair
- * and verify the whole-file hash. A file changed since the repair refuses.
+ * and verify the whole-file hash. When the file changed since the repair (or
+ * the receipt names another file), restoring would overwrite someone else's
+ * bytes, so the command instead offers to release the receipt: after a plain
+ * confirmation it marks the receipt `released` and changes nothing else.
  */
 export async function rollbackHackLocalRoute(
   deps: HackLocalRouteDependencies
@@ -855,53 +1022,76 @@ export async function rollbackHackLocalRoute(
     return {
       outcome: "refused",
       reason: "invalid-receipt",
-      detail: `${stored.invalid}; refusing to infer ownership of ${deps.paths.receiptPath}.`,
+      detail: printable(
+        `${stored.invalid}; refusing to infer ownership of ${deps.paths.receiptPath}.`
+      ),
     };
   }
-  const { receipt } = stored;
-  if (!receipt || receipt.state === "rolled-back") {
+  const { receipt, raw } = stored;
+  if (
+    !receipt ||
+    receipt.state === "rolled-back" ||
+    receipt.state === "released"
+  ) {
     return {
       outcome: "refused",
       reason: "no-receipt",
-      detail: `No applied or interrupted hack.local repair is recorded at ${deps.paths.receiptPath}; nothing to roll back.`,
+      detail: printable(
+        `No applied or interrupted hack.local repair is recorded at ${deps.paths.receiptPath}; nothing to roll back.`
+      ),
     };
   }
-  if (
-    receipt.dnsmasqPath !== deps.paths.dnsmasqPath ||
-    receipt.resolverPath !== deps.paths.resolverPath
-  ) {
-    return {
-      outcome: "refused",
-      reason: "rollback-drift",
-      detail: `The receipt names ${receipt.dnsmasqPath}, not the current ${deps.paths.dnsmasqPath}.`,
-    };
+  const release = await deps.acquireLock();
+  if (!release) {
+    return busy();
   }
+  try {
+    return await rollbackUnderLock({ deps, receipt, raw });
+  } finally {
+    await release();
+  }
+}
+
+async function rollbackUnderLock(opts: {
+  readonly deps: HackLocalRouteDependencies;
+  readonly receipt: HackLocalRouteReceipt;
+  readonly raw: string | null;
+}): Promise<HackLocalRouteRollbackResult> {
+  const { deps, receipt } = opts;
   const current = await deps.readDnsmasq();
-  const currentSha = current === null ? null : sha256(current);
-  if (
-    currentSha === null ||
-    (currentSha !== receipt.afterSha256 && currentSha !== receipt.beforeSha256)
-  ) {
+  const samePaths =
+    receipt.dnsmasqPath === deps.paths.dnsmasqPath &&
+    receipt.resolverPath === deps.paths.resolverPath;
+  const step: HackLocalRestoreStep = samePaths
+    ? planHackLocalRestore({ current, receipt })
+    : { kind: "drift" };
+  if (step.kind === "mismatch") {
     return {
       outcome: "refused",
-      reason: "rollback-drift",
-      detail: `${receipt.dnsmasqPath} changed since the repair (hash differs from the receipt); restore "${receipt.oldLine}" manually.`,
+      reason: "invalid-receipt",
+      detail:
+        "The receipt's recorded line does not reproduce its recorded file hash; refusing to write it.",
     };
   }
   if (!deps.canPrompt()) {
     return {
       outcome: "refused",
       reason: "non-interactive",
-      detail: `Rollback needs interactive confirmation and a macOS administrator prompt. Run it in a terminal: ${HACK_LOCAL_ROLLBACK_COMMAND}`,
+      detail: `Rollback needs interactive confirmation. Run it in a terminal: ${HACK_LOCAL_ROLLBACK_COMMAND}`,
       command: HACK_LOCAL_ROLLBACK_COMMAND,
     };
   }
+  if (step.kind === "drift") {
+    return await releaseReceipt({ ...opts, samePaths });
+  }
   const approved = await deps.authorize(
-    `Restore "${receipt.oldLine}" in ${receipt.dnsmasqPath}${
-      receipt.resolverAction === "create"
-        ? ` and remove the ${receipt.resolverPath} this repair created`
-        : ""
-    }? This restarts dnsmasq.`
+    printable(
+      `Restore "${receipt.oldLine}" in ${receipt.dnsmasqPath}${
+        receipt.resolverAction === "create"
+          ? ` and remove the ${receipt.resolverPath} this repair created`
+          : ""
+      }? This restarts dnsmasq.`
+    )
   );
   if (!approved) {
     return {
@@ -910,10 +1100,18 @@ export async function rollbackHackLocalRoute(
       detail: "The hack.local rollback was not authorized; nothing changed.",
     };
   }
-  const restart = await deps.prepareRestart();
+  // Restoring the file needs no service; a missing or ambiguous dnsmasq only
+  // means the restored line loads on its next start.
+  let restart: (() => Promise<void>) | null = null;
+  let restartSkipped: string | null = null;
+  try {
+    restart = await deps.prepareRestart();
+  } catch (error) {
+    restartSkipped = errorMessage(error);
+  }
   const again = await deps.readReceipt();
   const recheck = await deps.readDnsmasq();
-  if (again !== stored.raw || recheck !== current) {
+  if (again !== opts.raw || recheck !== current) {
     return {
       outcome: "refused",
       reason: "inputs-changed",
@@ -921,14 +1119,89 @@ export async function rollbackHackLocalRoute(
         "The receipt or dnsmasq configuration changed during authorization; nothing changed.",
     };
   }
-  const { retainedResolver } = await restoreFromReceipt({
+  const restored = await restoreFromReceipt({
     deps,
     receipt,
     restart,
+    forceRestart: true,
   });
   const rolledBack = stamp(receipt, { state: "rolled-back" }, deps.now());
   await deps.writeReceipt(rolledBack);
-  return { outcome: "rolled-back", receipt: rolledBack, retainedResolver };
+  return {
+    outcome: "rolled-back",
+    receipt: rolledBack,
+    retainedResolver: restored.retainedResolver,
+    restartSkipped,
+  };
+}
+
+async function releaseReceipt(opts: {
+  readonly deps: HackLocalRouteDependencies;
+  readonly receipt: HackLocalRouteReceipt;
+  readonly raw: string | null;
+  readonly samePaths: boolean;
+}): Promise<HackLocalRouteRollbackResult> {
+  const { deps, receipt } = opts;
+  const why = opts.samePaths
+    ? `${receipt.dnsmasqPath} changed after the hack.local repair`
+    : `The receipt names ${receipt.dnsmasqPath}, not the current ${deps.paths.dnsmasqPath}`;
+  const kept =
+    receipt.resolverAction === "create" ? ` and ${receipt.resolverPath}` : "";
+  const approved = await deps.confirm(
+    printable(
+      `${why}, so restoring "${receipt.oldLine}" would overwrite other changes. Release the ${receipt.state} receipt and leave the dnsmasq configuration${kept} exactly as they are?`
+    )
+  );
+  if (!approved) {
+    return {
+      outcome: "refused",
+      reason: "declined",
+      detail: "The hack.local receipt was not released; nothing changed.",
+    };
+  }
+  if ((await deps.readReceipt()) !== opts.raw) {
+    return {
+      outcome: "refused",
+      reason: "inputs-changed",
+      detail: "The receipt changed during confirmation; nothing changed.",
+    };
+  }
+  const released = stamp(receipt, { state: "released" }, deps.now());
+  await deps.writeReceipt(released);
+  return {
+    outcome: "released",
+    receipt: released,
+    detail: printable(
+      `${why}. Hack released the receipt and left the dnsmasq configuration${kept} unchanged. Restore "${receipt.oldLine}" yourself if you still want the earlier route.`
+    ),
+  };
+}
+
+/** One-line human message for a rollback result; control-free. */
+export function describeHackLocalRollback(
+  result: HackLocalRouteRollbackResult
+): string {
+  if (result.outcome === "refused") {
+    return printable(
+      `hack.local rollback refused (${result.reason}): ${result.detail}`
+    );
+  }
+  if (result.outcome === "released") {
+    return printable(
+      `Released the hack.local repair receipt. ${result.detail}`
+    );
+  }
+  return printable(
+    `Restored "${result.receipt.oldLine}"; the dnsmasq file hash matches the receipt.${
+      result.retainedResolver
+        ? ` ${result.retainedResolver} was retained because its ownership is unproven.`
+        : ""
+    }${
+      result.restartSkipped
+        ? ` dnsmasq was not restarted (${result.restartSkipped}); the restored line loads when dnsmasq next starts.`
+        : ""
+    }`
+  );
 }
 
 export type NativeDnsCommandDomain =

@@ -1,6 +1,14 @@
 import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
-import { lstat, mkdir, open, readdir, rename, unlink } from "node:fs/promises";
+import {
+  link,
+  lstat,
+  mkdir,
+  open,
+  readdir,
+  rename,
+  unlink,
+} from "node:fs/promises";
 import { createConnection } from "node:net";
 import { basename, dirname, join, resolve } from "node:path";
 import { inspectActiveNativeHttpsOwner } from "../backends/native-project-https.ts";
@@ -28,6 +36,7 @@ const IDENTITY = /^\d+:\d+$/;
 const IP_ADDRESS_LINE = /^ip_address:\s*(\S+)\s*$/gm;
 const PROBE_TIMEOUT_MS = 1500;
 const RECEIPT_FILENAME = "hack-local-route.json";
+const LOCK_HOLDER = /^(\d+)\n$/;
 
 /** Private receipt location under the native runtime home. */
 export function hackLocalRouteReceiptPath(runtimeHome: string): string {
@@ -62,6 +71,26 @@ async function unlinkIfPresent(path: string): Promise<void> {
     if (!isErrno(error, "ENOENT")) {
       throw error;
     }
+  }
+}
+
+/** Read a small lock file without following links; null when it is gone. */
+async function readLockFile(path: string): Promise<string | null> {
+  let handle: Awaited<ReturnType<typeof open>>;
+  try {
+    handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  } catch (error) {
+    if (isErrno(error, "ENOENT")) {
+      return null;
+    }
+    throw error;
+  }
+  try {
+    const buffer = Buffer.alloc(32);
+    const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+    return buffer.subarray(0, bytesRead).toString("utf8");
+  } finally {
+    await handle.close();
   }
 }
 
@@ -104,7 +133,10 @@ async function replaceAtomically(opts: {
   }
 }
 
-async function ensurePrivateDirectory(path: string): Promise<void> {
+async function ensurePrivateDirectory(
+  path: string,
+  ownerUid: number | undefined
+): Promise<void> {
   try {
     await mkdir(path, { mode: 0o700 });
   } catch (error) {
@@ -116,7 +148,7 @@ async function ensurePrivateDirectory(path: string): Promise<void> {
   if (
     !details.isDirectory() ||
     (details.mode & 0o077) !== 0 ||
-    details.uid !== process.getuid?.()
+    details.uid !== ownerUid
   ) {
     throw new Error("hack.local repair receipt directory is not private");
   }
@@ -129,6 +161,70 @@ export interface HackLocalRouteFileOptions {
   readonly receiptPath: string;
   /** Testing seam; production runs the bounded resolver script with sudo -n. */
   readonly runPrivileged?: NativeDnsCommandRunner;
+  /** Testing seam for the required owner; defaults to the current user. */
+  readonly ownerUid?: number;
+}
+
+/** True when a process with this pid exists (possibly another user's). */
+function processExists(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return isErrno(error, "EPERM");
+  }
+}
+
+/**
+ * Exclusive lock beside the receipt. The holder pid is written to a private
+ * sibling first and published with link(), which never replaces an existing
+ * lock, so a lock file is always complete. A lock whose holder no longer
+ * exists is stale and is taken over once. Two runs that both find the same
+ * stale lock could race; each run also needs an interactive prompt, so that
+ * window is not reachable in practice.
+ */
+async function acquireRouteLock(opts: {
+  readonly receiptPath: string;
+  readonly ownerUid: number | undefined;
+}): Promise<(() => Promise<void>) | null> {
+  const directory = dirname(opts.receiptPath);
+  await ensurePrivateDirectory(directory, opts.ownerUid);
+  const lockPath = `${opts.receiptPath}.lock`;
+  const staged = join(directory, `.${RECEIPT_FILENAME}.lock-${randomUUID()}`);
+  const handle = await open(
+    staged,
+    constants.O_WRONLY |
+      constants.O_CREAT |
+      constants.O_EXCL |
+      constants.O_NOFOLLOW,
+    0o600
+  );
+  try {
+    await handle.writeFile(`${process.pid}\n`, "utf8");
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+  try {
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        await link(staged, lockPath);
+        return async () => await unlinkIfPresent(lockPath);
+      } catch (error) {
+        if (!isErrno(error, "EEXIST")) {
+          throw error;
+        }
+      }
+      const holder = LOCK_HOLDER.exec((await readLockFile(lockPath)) ?? "");
+      if (holder && processExists(Number(holder[1]))) {
+        return null;
+      }
+      await unlinkIfPresent(lockPath);
+    }
+    return null;
+  } finally {
+    await unlinkIfPresent(staged);
+  }
 }
 
 type FileDependencies = Pick<
@@ -142,6 +238,7 @@ type FileDependencies = Pick<
   | "replaceDnsmasq"
   | "createResolver"
   | "removeResolverIfOwned"
+  | "acquireLock"
 >;
 
 /**
@@ -152,6 +249,7 @@ type FileDependencies = Pick<
 export function createHackLocalRouteFileDependencies(
   opts: HackLocalRouteFileOptions
 ): FileDependencies {
+  const ownerUid = opts.ownerUid ?? process.getuid?.();
   return {
     paths: {
       dnsmasqPath: opts.dnsmasqPath,
@@ -160,7 +258,7 @@ export function createHackLocalRouteFileDependencies(
     },
     readReceipt: async () => await readStableNativeDnsFile(opts.receiptPath),
     async writeReceipt(receipt: HackLocalRouteReceipt) {
-      await ensurePrivateDirectory(dirname(opts.receiptPath));
+      await ensurePrivateDirectory(dirname(opts.receiptPath), ownerUid);
       await replaceAtomically({
         path: opts.receiptPath,
         content: `${JSON.stringify(receipt, null, 2)}\n`,
@@ -197,7 +295,7 @@ export function createHackLocalRouteFileDependencies(
       if (
         !details.isFile() ||
         details.nlink !== 1 ||
-        details.uid !== process.getuid?.()
+        details.uid !== ownerUid
       ) {
         throw new Error(
           `${opts.dnsmasqPath} is not a regular file owned by the current user; refusing to rewrite it`
@@ -233,6 +331,8 @@ export function createHackLocalRouteFileDependencies(
       }
       return identity;
     },
+    acquireLock: async () =>
+      await acquireRouteLock({ receiptPath: opts.receiptPath, ownerUid }),
     async removeResolverIfOwned({ identity, content }) {
       const result = await runPrivilegedResolverOperation({
         action: "remove",
@@ -374,6 +474,12 @@ export async function createNativeHackLocalRouteDependencies(opts: {
         })) === 0
       );
     },
+    confirm: async (message) =>
+      await confirmSafe({
+        message,
+        initialValue: false,
+        nonInteractive: "decline",
+      }),
     async prepareRestart() {
       const host = await inspectNativeDnsHost({ brewPrefix: prefix });
       if (host.mainConfig.path !== dnsmasqPath) {

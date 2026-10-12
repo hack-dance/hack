@@ -23,6 +23,7 @@ import {
 } from "./native-compose-storage-witness.ts";
 import { createNativeComposeDockerStorageXattrCarrier } from "./native-compose-storage-witness-docker.ts";
 import type { NativeComposeStorageXattrCarrier } from "./native-compose-storage-witness-xattr-carrier.ts";
+import { x01Scope } from "./x01-cost-probe.ts";
 
 type Selection = { readonly name: string; readonly storage: string };
 type Document = Readonly<Record<string, unknown>>;
@@ -129,7 +130,12 @@ async function volumeNames(signal: AbortSignal): Promise<readonly string[]> {
 
 /** Command admission owns no helper process. Each proof gets a fresh finite carrier;
  * only the original startup effect can publish Expected and consume cold enrollment. */
-export async function prepareNativeComposeCommandStorage(opts: {
+export function prepareNativeComposeCommandStorage(
+  opts: Parameters<typeof x01Prepare>[0]
+): ReturnType<typeof x01Prepare> {
+  return x01Scope("storage-prepare", () => x01Prepare(opts));
+}
+async function x01Prepare(opts: {
   readonly store: NativeComposeGenerationStore;
   readonly mutation: NativeComposeMutation;
   readonly operation: "up" | "restart" | "run" | "exec";
@@ -220,7 +226,9 @@ export async function prepareNativeComposeCommandStorage(opts: {
     await engine({ expected: engineId, signal });
     await assertFresh?.();
   };
-  const verify = async (generation: NativeComposeGeneration) => {
+  const verify = (generation: NativeComposeGeneration) =>
+    x01Scope("storage-verify", () => x01Verify(generation));
+  const x01Verify = async (generation: NativeComposeGeneration) => {
     await assertFresh?.();
     const before = await store.loadCurrent();
     if (before.storageWitnessesPending) {

@@ -1153,6 +1153,10 @@ export const nativeConfigNetworksScenario: Scenario = {
       NO_COLOR: "1",
       HACK_RUNTIME_BACKEND: "compose",
       HACK_DAEMON_DISABLE_DOCKER_EVENTS: "1",
+      // TEMPORARY X01 measurement passthrough; reverted before the final commit.
+      ...(process.env.HACK_X01_TRACE_FILE
+        ? { HACK_X01_TRACE_FILE: process.env.HACK_X01_TRACE_FILE }
+        : {}),
     };
     const engine = Bun.which("docker");
     const git = Bun.which("git");

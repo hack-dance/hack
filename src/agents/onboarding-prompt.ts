@@ -6,8 +6,8 @@ import { INSTRUCTION_SECTIONS } from "./instruction-source.ts";
  * Consumers (keep this list current — the content must never fork):
  * - `hack init --with claude|codex` (CLI handoff for new repos),
  * - `hack agent onboard` (CLI print for existing projects),
- * - the `/hack-init` agent-side skill (thin pointer installed by
- *   `hack setup claude|codex`),
+ * - the `/hack-init` agent-side skill (thin pointer shipped by the default
+ *   `hack` plugin, or exported by opt-in standalone `hack setup claude|codex`),
  * - the `hack-init` MCP prompt (no-shell clients),
  * - the copy-paste bootstrap block in `docs/guides/agent-first-setup.md`.
  */

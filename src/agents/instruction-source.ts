@@ -241,7 +241,7 @@ export const INSTRUCTION_SECTIONS: readonly InstructionSection[] = [
       "Omit `--env` to use the configured default overlay; `--env base` (or `default`/`none`) selects base layers only, the same on every command. An overlay name grants no production authority and no network or instance isolation.",
       "Use `hack env explain <KEY> --env <overlay> --service <service>` for provenance without the value; use `hack env get <KEY>` only when a plaintext value is explicitly needed, and treat its output as secret.",
       "Running containers keep the env they were created with; after an env change, refresh with `hack env apply --service <service>` or `hack restart`.",
-      "Accepted flags, injection timing and refresh path per command: https://github.com/hack-dance/hack/blob/next/docs/env.md#command-and-delivery-matrix",
+      "Accepted flags, injection timing and refresh path per command: the command and delivery matrix in Hack's env guide (`docs/env.md` in the Hack repository).",
     ],
   },
 

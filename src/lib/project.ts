@@ -122,6 +122,17 @@ export function normalizeEnvConfigName(input: string): string | null {
   return normalized.length > 0 ? normalized : null;
 }
 
+/**
+ * `--env` spellings (case-insensitive) that select the base layers and bypass
+ * the configured default overlay. An overlay file named for one of these
+ * spellings is never selected by name.
+ */
+export const ENV_BASE_SELECTION_ALIASES: ReadonlySet<string> = new Set([
+  "base",
+  "default",
+  "none",
+]);
+
 export function parseEnvConfigSelection(
   input: string | undefined
 ): string | null | undefined {
@@ -134,8 +145,7 @@ export function parseEnvConfigSelection(
     return null;
   }
 
-  const lowered = trimmed.toLowerCase();
-  if (lowered === "base" || lowered === "default" || lowered === "none") {
+  if (ENV_BASE_SELECTION_ALIASES.has(trimmed.toLowerCase())) {
     return null;
   }
 

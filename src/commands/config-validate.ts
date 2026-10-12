@@ -5,6 +5,7 @@ import {
   defineOption,
   withHandler,
 } from "../cli/command.ts";
+import { resolveRequestedEnvName } from "../cli/env-selection.ts";
 import { optEnv, optJson, optPath } from "../cli/options.ts";
 import { HackCliError } from "../lib/cli-result.ts";
 import {
@@ -77,6 +78,9 @@ export const configValidateCommand = withHandler(
     if (profiles?.some((name) => name.length === 0)) {
       throw new CliUsageError("Native profile names must not be empty.");
     }
+    const explicitOverlay = resolveRequestedEnvName({
+      envOption: args.options.env,
+    });
     const controller = new AbortController();
     const cancel = () => controller.abort();
     process.once("SIGINT", cancel);
@@ -88,8 +92,7 @@ export const configValidateCommand = withHandler(
               startDir: resolve(ctx.cwd, args.options.path ?? "."),
               profiles,
               explicitDomain: args.options.domain,
-              explicitOverlay:
-                args.options.env === "base" ? null : args.options.env,
+              explicitOverlay,
               signal: controller.signal,
             })
           : await compileNativeConfig({

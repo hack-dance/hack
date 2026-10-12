@@ -11,6 +11,7 @@ import {
   defineOption,
   withHandler,
 } from "../cli/command.ts";
+import { resolveRequestedEnvName } from "../cli/env-selection.ts";
 import { optEnv, optJson, optPretty } from "../cli/options.ts";
 import {
   readHackEnvContract,
@@ -22,7 +23,6 @@ import {
   defaultProjectSlugFromPath,
   findProjectContext,
   type ProjectContext,
-  parseEnvConfigSelection,
   readProjectConfig,
 } from "../lib/project.ts";
 import {
@@ -878,16 +878,6 @@ function resolveRunUpCwd(opts: {
   readonly project: RegisteredProject;
 }): string {
   return opts.project.repoRoot;
-}
-
-function resolveRequestedEnvName(opts: {
-  readonly envOption: string | undefined;
-}): string | null | undefined {
-  const envName = parseEnvConfigSelection(opts.envOption);
-  if (opts.envOption !== undefined && envName === undefined) {
-    throw new CliUsageError("Invalid --env value.");
-  }
-  return envName;
 }
 
 function resolveRequestedServiceName(opts: {

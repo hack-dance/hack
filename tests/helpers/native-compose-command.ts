@@ -2,6 +2,7 @@ import { afterEach, expect } from "bun:test";
 import { chmod, mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { isolatedDockerClientEnv } from "./docker-client.ts";
 import { nativeComposeStorageDockerFixtureScript } from "./native-compose-storage-docker.ts";
 
 const roots: string[] = [];
@@ -177,6 +178,7 @@ if(args[0]==="compose") {
  }
  if(oneoff && args.includes("run")) {const doc=await Bun.file(args[args.indexOf("-f")+1]).json();await Bun.write(engine,JSON.stringify(doc));await Bun.write(root+"/oneoff-name",args[args.indexOf("--name")+1]);process.exit(0);}
  if(args.includes("down")) {await rm(engine,{force:true});await appendFile(root+"/order","engine-stopped\\n");process.exit(0);}
+ if(args.includes("exec") && await Bun.file(engine).exists()) {${opts.storage ? 'await appendFile(root+"/storage-events","exec\\n");' : ""}process.exit(0);}
  process.exit(99);
 }
 if(oneoff && args[0]==="container" && args[1]==="rm") {if(args.length!==3||args[2]!=="c".repeat(64))process.exit(96);await Bun.write(root+"/oneoff-removed","removed");process.exit(0);}
@@ -225,7 +227,13 @@ export async function invoke(
   root: string,
   args = ["up", "--detach", "--json"],
   startupTimeoutMs = 1000,
-  commandTimeoutMs = 15_000
+  commandTimeoutMs = 15_000,
+  /**
+   * Docker client selection only (for example an explicit Unix DOCKER_HOST).
+   * Without one, the command uses an isolated client config that selects no
+   * real engine.
+   */
+  extraEnv: Readonly<Record<string, string>> = {}
 ) {
   const child = Bun.spawn(
     [
@@ -249,6 +257,8 @@ export async function invoke(
         HACK_COMPOSE_STARTUP_TIMEOUT_MS: String(startupTimeoutMs),
         CI: "1",
         HACK_EXECUTION_MODE: "non_interactive",
+        ...isolatedDockerClientEnv(root),
+        ...extraEnv,
       },
       stdin: "ignore",
       stdout: "pipe",

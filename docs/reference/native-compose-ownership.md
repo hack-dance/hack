@@ -127,7 +127,37 @@ falls back to the CLI after a failure. Ambient HTTP proxy variables do not chang
 the Unix destination. Its deadline and cumulative 8 MiB response limit remain
 control-channel budgets; cancellation or failure closes only its owned connection.
 
-Real Unix-server controls live in `tests/native-compose-engine-identity.test.ts`;
+Storage-witness fences in the Docker carrier repeat the engine-ID read hundreds
+of times per command, so they use the same direct transport through
+command-scoped admission instead of a fixed observer. Each fence still makes one
+fresh read. The first fence under one exact binding (the selection values,
+`docker` executable, config and socket identities above) is the existing Docker
+CLI read and must equal one direct `GET /info`; only an equal ID admits that
+binding for the rest of the command. A different or failed admission read keeps
+the CLI for that binding, a changed binding is admitted through the CLI again,
+and an admitted direct failure refuses without fallback.
+
+Because each admission is checked against the CLI's own read, storage fences
+also accept Docker context selections, which is how Docker Desktop and OrbStack
+select their engine. The endpoint is resolved in the Docker CLI's order: a
+nonempty `DOCKER_HOST`, then `DOCKER_CONTEXT`, then the client config's
+`currentContext` (field names matched without case, like the CLI's decoder),
+then the `default` context at `unix:///var/run/docker.sock`. A named context is
+read from `contexts/meta/<sha256 of the name>/meta.json` under the config
+directory; its `docker` endpoint must be a plain `unix:///` host with no TLS
+option, no unknown or duplicate field, and no entry at the context's
+`contexts/tls/<sha256>` path. That TLS path is only checked for absence by name;
+key material is never opened or listed. Missing, malformed, linked, TCP, SSH,
+TLS or header-bearing contexts, and `DOCKER_HOST` together with
+`DOCKER_CONTEXT`, keep the CLI. The binding adds the context store entry's path
+identities and content digest and the absent TLS path, so any change to the
+config, that entry, the socket path or the CLI executable is admitted through
+the CLI again. The ingress and VM-file observers, which are trusted without a
+CLI comparison, still accept only an explicit Unix `DOCKER_HOST`.
+
+Real Unix-server controls live in `tests/native-compose-engine-identity.test.ts`
+and `tests/docker-context.test.ts` (with `HACK_TEST_DOCKER_CLI=1`, it also runs
+the installed Docker CLI against two fake Unix engines for every selection);
 existing CLI-transport and proxy ownership controls remain in
 `tests/native-compose-ingress.test.ts`. These tests establish the bounded transport
 and refusal behavior. Actual Docker compatibility and performance require separate

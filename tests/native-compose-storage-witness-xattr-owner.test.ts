@@ -2869,3 +2869,111 @@ test("ordinary inspection authority cannot enter saved carrier recovery observat
   });
   expect(observed).toBe(0);
 }, 30_000);
+
+function adjacentVerifier(opts: {
+  readonly transport: ReturnType<typeof fake>;
+  readonly generation: NativeComposeGeneration;
+  readonly reference: Parameters<
+    typeof verifyNativeComposeStorageXattrWitness
+  >[0]["reference"];
+}) {
+  return (mutation: NativeComposeMutation, adjacent: boolean) =>
+    verifyNativeComposeStorageXattrWitness({
+      authority: mutation.materialAuthority,
+      generation: opts.generation,
+      engineId,
+      reference: opts.reference,
+      carrier: opts.transport.carrier,
+      ...(adjacent ? { adjacentProof: true as const } : {}),
+    });
+}
+
+test("adjacent storage proof is reused only within its own lease", async () => {
+  const { store, transport, generation, reference } = await active();
+  const verify = adjacentVerifier({ transport, generation, reference });
+  transport.calls.length = 0;
+  await store.withMutation(async (mutation) => {
+    // Nothing to reuse yet: the first adjacent request performs the proof.
+    await verify(mutation, true);
+    expect(helperOperations(transport)).toEqual(["root", "verify", "root"]);
+    await verify(mutation, true);
+    await verify(mutation, true);
+    expect(helperOperations(transport)).toHaveLength(3);
+    // Ordinary verification always performs a fresh proof.
+    await verify(mutation, false);
+    expect(helperOperations(transport)).toHaveLength(6);
+  });
+  await store.withMutation(async (mutation) => {
+    await verify(mutation, true);
+    expect(helperOperations(transport)).toHaveLength(9);
+  });
+  expect(transport.calls).not.toContain("seed");
+  expect(transport.calls).not.toContain("provision");
+}, 30_000);
+
+test("adjacent storage proof still runs every host check and never replaces the next fresh proof", async () => {
+  const { store, transport, generation, reference } = await active();
+  const verify = adjacentVerifier({ transport, generation, reference });
+  const slot = join(
+    store.identity.checkoutRoot,
+    ".hack",
+    ".internal",
+    "native-compose",
+    store.identity.instanceId,
+    "storage-witnesses",
+    createHash("sha256").update(volume.name).digest("hex")
+  );
+  transport.calls.length = 0;
+  await store.withMutation(async (mutation) => {
+    await verify(mutation, false);
+    // Host evidence is rechecked on reuse; a missing completion record refuses.
+    await rename(join(slot, "enrolled.json"), join(slot, "moved.json"));
+    await expect(verify(mutation, true)).rejects.toThrow("values omitted");
+    await rename(join(slot, "moved.json"), join(slot, "enrolled.json"));
+    // The refusal cleared the lease record, so the repeat proves again.
+    await verify(mutation, true);
+    expect(helperOperations(transport)).toHaveLength(6);
+    // A reused kernel proof stands only for its adjacent caller.
+    transport.attributes.clear();
+    await verify(mutation, true);
+    expect(helperOperations(transport)).toHaveLength(6);
+    await expect(verify(mutation, false)).rejects.toThrow("values omitted");
+    await expect(verify(mutation, true)).rejects.toThrow("values omitted");
+  });
+  expect(transport.calls).not.toContain("seed");
+}, 30_000);
+
+test("adjacent storage proof is not reused across a changed material binding", async () => {
+  const { store, transport, generation, reference } = await active();
+  const verify = adjacentVerifier({ transport, generation, reference });
+  transport.calls.length = 0;
+  await store.withMutation(async (mutation) => {
+    await verify(mutation, false);
+    expect(helperOperations(transport)).toHaveLength(3);
+    // Intent publication changes the receipt before the effect body runs.
+    const result = await mutation.runEffect({
+      generation,
+      operation: "up",
+      assertFresh: async () => {},
+      assertOwned: async () => {},
+      captureStorage: () => [volume],
+      storageWitnesses: {
+        kind: "directory-xattr",
+        engineId,
+        carrier: transport.carrier,
+      },
+      effect: async () => {
+        const entry = helperOperations(transport).length;
+        // The effect-entry proof under the published intent is adjacent.
+        await verify(mutation, true);
+        expect(helperOperations(transport)).toHaveLength(entry);
+        return { value: 0, outcome: "complete" };
+      },
+    });
+    expect(result).toEqual({ value: 0, outcome: "complete" });
+    // After completion the receipt moved again; nothing earlier is reusable.
+    const finished = helperOperations(transport).length;
+    await verify(mutation, true);
+    expect(helperOperations(transport)).toHaveLength(finished + 3);
+  });
+}, 30_000);

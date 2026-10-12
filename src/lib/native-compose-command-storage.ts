@@ -127,6 +127,11 @@ async function volumeNames(signal: AbortSignal): Promise<readonly string[]> {
   return names;
 }
 
+export type NativeComposeCommandStorageVerifyOptions = {
+  /** Only when nothing but read-only checks ran since this lease's previous proof. */
+  readonly adjacentProof?: true;
+};
+
 /** Command admission owns no helper process. Each proof gets a fresh finite carrier;
  * only the original startup effect can publish Expected and consume cold enrollment. */
 export async function prepareNativeComposeCommandStorage(opts: {
@@ -220,7 +225,10 @@ export async function prepareNativeComposeCommandStorage(opts: {
     await engine({ expected: engineId, signal });
     await assertFresh?.();
   };
-  const verify = async (generation: NativeComposeGeneration) => {
+  const verify = async (
+    generation: NativeComposeGeneration,
+    options: NativeComposeCommandStorageVerifyOptions = {}
+  ) => {
     await assertFresh?.();
     const before = await store.loadCurrent();
     if (before.storageWitnessesPending) {
@@ -240,6 +248,9 @@ export async function prepareNativeComposeCommandStorage(opts: {
         engineId,
         reference: entry.reference,
         carrier: await carrier(),
+        ...(options.adjacentProof === true
+          ? { adjacentProof: true as const }
+          : {}),
       });
     }
     const after = await store.loadCurrent();
@@ -320,18 +331,24 @@ export type NativeComposeCommandStorage = Awaited<
   ReturnType<typeof prepareNativeComposeCommandStorage>
 >;
 
-/** Saved exec does not publish a ready receipt. Cancellation preserves its known
- * exit and starts no late helper; every future admission re-verifies content. */
+/** Saved exec does not publish a ready receipt. The opening check directly
+ * follows command storage preparation under the same lease, with only read-only
+ * source and ownership checks between, so it may reuse that adjacent proof. The
+ * closing check after the process always performs a fresh proof. Cancellation
+ * preserves its known exit and starts no late helper; every future admission
+ * re-verifies content. */
 export async function runNativeComposeStorageVerifiedExec(opts: {
   readonly signal: AbortSignal;
-  readonly assertSaved: () => Promise<void>;
+  readonly assertSaved: (
+    options: NativeComposeCommandStorageVerifyOptions
+  ) => Promise<void>;
   readonly run: () => Promise<number>;
 }): Promise<number> {
   const { signal, assertSaved, run } = opts;
-  await assertSaved();
+  await assertSaved({ adjacentProof: true });
   const code = await run();
   if (!signal.aborted) {
-    await assertSaved();
+    await assertSaved({});
   }
   return code;
 }

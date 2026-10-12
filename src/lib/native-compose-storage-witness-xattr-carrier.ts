@@ -112,10 +112,18 @@ export type NativeComposeStorageXattrInvocation = {
 };
 /** Trusted engine transport. Shape-valid ports alone do not qualify artifacts or runtime behavior. */
 export type NativeComposeStorageXattrPorts = {
-  readonly inspect: (selection: {
-    readonly name: string;
-    readonly storage: string;
-  }) => Promise<unknown>;
+  /** `afterInvocation` attests that the caller performed only reads since that
+   * invocation of this carrier returned. A carrier whose invocation performed no
+   * effect after its own closing observation of the same selection may answer
+   * with that observation when the material binding is unchanged; any other
+   * call observes again. */
+  readonly inspect: (
+    selection: {
+      readonly name: string;
+      readonly storage: string;
+    },
+    options?: { readonly afterInvocation?: string }
+  ) => Promise<unknown>;
   /** Exactly one original cold attempt. Idempotent create alone cannot establish admission. */
   readonly provision?: (selection: {
     readonly name: string;

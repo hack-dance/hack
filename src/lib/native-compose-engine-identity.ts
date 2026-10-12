@@ -1,6 +1,11 @@
 import { lstatSync, readlinkSync, type Stats } from "node:fs";
 import { request } from "node:http";
 import { dirname, isAbsolute, join, normalize, parse } from "node:path";
+import {
+  DOCKER_DEFAULT_UNIX_SOCKET,
+  dockerUnixHostPath,
+  resolveDockerContextEndpoint,
+} from "./docker-context.ts";
 import { isRecord } from "./guards.ts";
 import { bindNativeComposeEngineConfig } from "./native-compose-engine-config.ts";
 
@@ -150,29 +155,47 @@ export function bindNativeComposeEngineSocketPath(path: string): {
 function check(signal: AbortSignal | undefined, deadline: number): void {
   requireValue(!signal?.aborted && Date.now() < deadline);
 }
-function localEndpoint(environment: Environment): string | null {
-  if (
+/** TLS, certificate, header and API-version selections always keep the CLI. */
+function transportSelected(environment: Environment): boolean {
+  return Boolean(
     process.platform === "win32" ||
-    environment.DOCKER_CONTEXT ||
-    environment.DOCKER_TLS ||
-    environment.DOCKER_TLS_VERIFY ||
-    environment.DOCKER_CUSTOM_HEADERS ||
-    environment.DOCKER_CERT_PATH ||
-    environment.DOCKER_API_VERSION
-  ) {
-    return null;
-  }
+      environment.DOCKER_TLS ||
+      environment.DOCKER_TLS_VERIFY ||
+      environment.DOCKER_CUSTOM_HEADERS ||
+      environment.DOCKER_CERT_PATH ||
+      environment.DOCKER_API_VERSION
+  );
+}
+/** An explicit Unix DOCKER_HOST with no context selection, else null. */
+function explicitEndpoint(environment: Environment): string | null {
   const host = environment.DOCKER_HOST;
-  if (!host?.startsWith("unix:///")) {
-    return null;
-  }
-  const path = host.slice("unix://".length);
   // Ambiguous URL spelling keeps the existing Docker CLI selection semantics.
-  return AMBIGUOUS_PATH.test(path) ||
-    !isAbsolute(path) ||
-    normalize(path) !== path
+  return transportSelected(environment) || environment.DOCKER_CONTEXT || !host
     ? null
-    : path;
+    : dockerUnixHostPath(host);
+}
+type Contexts = { readonly defaultSocketPath: string } | null;
+/**
+ * Endpoint selection under one config binding. Explicit observers accept only an
+ * explicit Unix DOCKER_HOST; admissions resolve the CLI's full context
+ * selection. Both return null for every other selection.
+ */
+function selectEndpoint(opts: {
+  readonly environment: Environment;
+  readonly currentContext: string | null;
+  readonly contexts: Contexts;
+}): { readonly socketPath: string; readonly binding: unknown } | null {
+  if (opts.contexts === null) {
+    const path = explicitEndpoint(opts.environment);
+    return path === null ? null : { socketPath: path, binding: ["host"] };
+  }
+  return transportSelected(opts.environment)
+    ? null
+    : resolveDockerContextEndpoint({
+        environment: opts.environment,
+        currentContext: opts.currentContext,
+        defaultSocketPath: opts.contexts.defaultSocketPath,
+      });
 }
 
 function readId(opts: {
@@ -273,25 +296,25 @@ function readId(opts: {
   });
 }
 
-/**
- * Replace only `docker info` transport for an explicit local Unix selection.
- * Every call makes a fresh bounded daemon-ID request; no result is cached. Other
- * selections return null before admission and retain their existing CLI path.
- * Admitted errors never fall back. Socket, executable and selection bindings are
- * checked before and after each request under the caller's existing time budget.
- */
-export function createNativeComposeEngineIdentityObserver(
-  opts: {
-    readonly signal?: AbortSignal;
-    readonly timeoutMs?: number;
-    readonly environment?: Environment;
-  } = {}
-): (() => Promise<string>) | null {
+type BoundObserver = {
+  /** Opaque digest of the exact selection, executable, config and socket binding. */
+  readonly key: string;
+  readonly read: () => Promise<string>;
+};
+function bindObserver(opts: {
+  readonly signal?: AbortSignal;
+  readonly timeoutMs?: number;
+  readonly environment?: Environment;
+  readonly contexts: Contexts;
+}): BoundObserver | null {
   const environment = opts.environment ?? process.env;
   const signal = opts.signal;
   const selected = selection(environment);
-  const path = localEndpoint(environment);
-  if (path === null) {
+  if (
+    opts.contexts === null
+      ? explicitEndpoint(environment) === null
+      : transportSelected(environment)
+  ) {
     return null;
   }
   try {
@@ -305,6 +328,17 @@ export function createNativeComposeEngineIdentityObserver(
     if (config === null) {
       return null;
     }
+    const select = () =>
+      selectEndpoint({
+        environment,
+        currentContext: config.currentContext,
+        contexts: opts.contexts,
+      });
+    const endpoint = select();
+    if (endpoint === null) {
+      return null;
+    }
+    const path = endpoint.socketPath;
     const binary = Bun.which("docker", { PATH: environment.PATH ?? "" });
     requireValue(binary);
     const socket = bindPath(path, "socket");
@@ -323,34 +357,132 @@ export function createNativeComposeEngineIdentityObserver(
         JSON.stringify(config) ===
           JSON.stringify(bindNativeComposeEngineConfig(environment))
       );
+      // An unchanged config can still name another socket through a changed
+      // context store entry or a newly created context TLS directory.
+      requireValue(JSON.stringify(endpoint) === JSON.stringify(select()));
       requireValue(sameBinding(socket, bindPath(path, "socket")));
       requireValue(sameBinding(executable, bindPath(binary, "executable")));
       check(signal, deadline);
     };
     recheck();
-    return async () => {
-      if (reading) {
-        return refuse();
-      }
-      reading = true;
-      try {
-        recheck();
-        const result = await readId({
-          socketPath: socket.canonical,
-          signal,
-          deadline,
-          limit: remaining,
-        });
-        remaining -= result.bytes;
-        recheck();
-        return result.id;
-      } catch {
-        return refuse();
-      } finally {
-        reading = false;
-      }
-    };
+    const key = new Bun.CryptoHasher("sha256")
+      .update(
+        JSON.stringify([selected, binary, config, endpoint, socket, executable])
+      )
+      .digest("hex");
+    return Object.freeze({
+      key,
+      read: async () => {
+        if (reading) {
+          return refuse();
+        }
+        reading = true;
+        try {
+          recheck();
+          const result = await readId({
+            socketPath: socket.canonical,
+            signal,
+            deadline,
+            limit: remaining,
+          });
+          remaining -= result.bytes;
+          recheck();
+          return result.id;
+        } catch {
+          return refuse();
+        } finally {
+          reading = false;
+        }
+      },
+    });
   } catch {
     return refuse();
   }
+}
+
+/**
+ * Replace only `docker info` transport for an explicit local Unix selection.
+ * Every call makes a fresh bounded daemon-ID request; no result is cached. Other
+ * selections, including every Docker context selection, return null before
+ * admission and retain their existing CLI path: this observer is trusted
+ * without a CLI comparison. Admitted errors never fall back. Socket, executable
+ * and selection bindings are checked before and after each request under the
+ * caller's existing time budget.
+ */
+export function createNativeComposeEngineIdentityObserver(
+  opts: {
+    readonly signal?: AbortSignal;
+    readonly timeoutMs?: number;
+    readonly environment?: Environment;
+  } = {}
+): (() => Promise<string>) | null {
+  return bindObserver({ ...opts, contexts: null })?.read ?? null;
+}
+
+/**
+ * Command-scoped transport for repeated `docker info --format '{{json .ID}}'`
+ * fences. Each fence still makes exactly one fresh engine-ID read; no ID is cached.
+ *
+ * Eligible selections are those the Docker CLI resolves to a plain Unix socket:
+ * an explicit Unix DOCKER_HOST, DOCKER_CONTEXT, the client config's
+ * `currentContext`, or the `default` context (`resolveDockerContextEndpoint`).
+ * Admission is per exact binding: the selection values, `docker` executable path
+ * and identity, client-config path/content, the selected context store entry
+ * and absent TLS directory, and socket path identities. The first fence under
+ * an eligible binding returns the caller's own Docker CLI read and compares it
+ * with one direct `GET /info` on the socket that selection names. Only an equal
+ * ID admits that binding; a direct failure or a different ID keeps the CLI for
+ * that binding for the rest of the command. Later fences under an admitted
+ * binding use one fresh direct request each, and its failures refuse without
+ * CLI fallback. A changed binding is a new binding and is admitted through the
+ * CLI again. Ineligible selections, and bindings that cannot be established,
+ * always use the CLI. The returned text has the CLI's `{{json .ID}}` line shape.
+ *
+ * `defaultSocketPath` is the `default` context's endpoint; only tests replace
+ * the CLI's built-in default.
+ */
+export function createNativeComposeEngineIdentityAdmissions(
+  options: { readonly defaultSocketPath?: string } = {}
+): (opts: {
+  readonly cli: () => Promise<string>;
+  readonly signal?: AbortSignal;
+  readonly timeoutMs: number;
+  readonly environment: Environment;
+}) => Promise<string> {
+  const admitted = new Map<string, boolean>();
+  const contexts = {
+    defaultSocketPath: options.defaultSocketPath ?? DOCKER_DEFAULT_UNIX_SOCKET,
+  };
+  return async (opts) => {
+    let bound: BoundObserver | null;
+    try {
+      bound = bindObserver({
+        signal: opts.signal,
+        timeoutMs: opts.timeoutMs,
+        environment: opts.environment,
+        contexts,
+      });
+    } catch {
+      bound = null;
+    }
+    if (bound === null) {
+      return await opts.cli();
+    }
+    const state = admitted.get(bound.key);
+    if (state === true) {
+      return `${JSON.stringify(await bound.read())}\n`;
+    }
+    const text = await opts.cli();
+    if (state === undefined) {
+      let equal = false;
+      try {
+        const value: unknown = JSON.parse(text);
+        equal = typeof value === "string" && value === (await bound.read());
+      } catch {
+        equal = false;
+      }
+      admitted.set(bound.key, equal);
+    }
+    return text;
+  };
 }

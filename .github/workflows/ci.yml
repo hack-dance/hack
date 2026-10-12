@@ -300,6 +300,10 @@ jobs:
       - name: Verify owned bridge policy and aliases through real compiler and Compose normalization
         if: matrix.shard == 4
         run: HACK_TEST_COMPOSE_CONFIG=1 bun test tests/native-compose-renderer-config.test.ts --test-name-pattern '^one authored bridge keeps internal policy and static aliases through compiler and Compose normalization$'
+      # Real Docker CLI against two fake Unix engines (isolated HOME and config; no real engine).
+      - name: Verify Docker context endpoint selection against the real Docker CLI
+        if: matrix.shard == 4
+        run: HACK_TEST_DOCKER_CLI=1 bun test tests/docker-context.test.ts
       - name: Run local and Docker E2E shard
         env:
           HACK_E2E_PROCESS_POLICY_REFUSAL_CAPSULE: "1"

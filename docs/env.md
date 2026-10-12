@@ -136,7 +136,13 @@ Projects can set a default overlay in `.hack/hack.config.json`:
 }
 ```
 
-Use `--env=base` to bypass that default and read only `.hack/hack.env.default.yaml`.
+Use `--env=base` to bypass that default and read only `.hack/hack.env.default.yaml`
+(plus local overrides). `default` and `none` are aliases for `base`, in any case, on every
+command that accepts `--env`; an overlay file named after one of those spellings is never
+selected by name. Other names are normalized (for example ` QA ` selects `qa`), and a
+non-empty value with no usable name characters is refused with `Invalid --env value.`
+See the [command and delivery matrix](#command-and-delivery-matrix) for what each command
+does with the selection.
 
 ## Metadata-only planning API
 
@@ -205,6 +211,53 @@ Use `--target compose` if you explicitly want the container-oriented compose vie
 
 For host execution, `--scope` means "which env scope should Hack inject", not "where should this run."
 For example, `hack host exec --scope api -- bun db:migrate` still runs on the host.
+
+## Command and delivery matrix
+
+Every command that accepts `--env` resolves it with the same rule: omitted selects
+the configured default overlay (`env.defaultOverlay`); `base`, `default` or `none`
+selects base layers only; any other value selects that normalized overlay name. The
+table lists every such command; `tests/env-command-matrix.test.ts` fails when a
+command gains or loses `--env` without a matching row, or when a row's selectors
+drift from the CLI. Commands not listed here refuse `--env` as an option that is not
+valid for them (arguments after a standalone `--` belong to the child command).
+
+The **Selectors** column lists the env-related flags each command accepts.
+`--service` selects a Compose service scope, `--scope` selects the env scope injected
+into a host command, and `--target` on env and host commands chooses the `host` or
+`compose` env view. On `up`, `down` and `restart`, `--target` is execution routing
+(`auto|local|remote`), not an env view.
+
+| Command | Selectors | Resolution timing | Refresh path | Native and compose limits |
+| --- | --- | --- | --- | --- |
+| `hack up` | `--env`, `--target` | Once, when services are created; values go into Compose containers and lifecycle hooks/processes, and the selection is recorded for the running stack. | `hack restart` or `hack env apply --service <service>`; editing env files does not change running containers. | Authored native projects receive the same selection before dispatch. |
+| `hack down` | `--env`, `--target` | At teardown, for lifecycle down hooks only; omitted reuses a named overlay recorded for the running stack, else the configured default. | None; nothing is delivered to containers. | The native runtime backend refuses `--env`. |
+| `hack restart` | `--env`, `--target` | When services are recreated; omitted reuses a named overlay recorded for the running stack, else the configured default, and an explicit `--env` (including `base`) wins. | This is the refresh path for the whole stack or the named services. | Authored native projects receive the same selection before dispatch. |
+| `hack run` | `--env` | Per invocation, for the new one-off container. | Each run resolves again. | The native runtime backend refuses `--env`; restart with the selection first. |
+| `hack exec` | `--env` | Checked at invocation against the env recorded for the running stack; the command runs with the env the container was created with. | `hack restart --env <name>` | Compose refuses when the requested env differs from the env recorded for the running stack; the native runtime backend refuses `--env`. |
+| `hack env list` | `--env`, `--service` | Per invocation, read-only; secret values are masked unless `--show-secrets`. | Not needed. | Reads files; no runtime required. |
+| `hack env get` | `--env`, `--service` | Per invocation; prints exactly one plaintext value to stdout. | Not needed. | Reads files; refuses native project inputs. |
+| `hack env explain` | `--env`, `--service`, `--target` | Per invocation; reports source, precedence and delivery without the value. | Not needed. | Reads files; no runtime required. |
+| `hack env apply` | `--env`, `--service` | Runs `hack restart <service>` with the same `--env`, recreating one service. | This is the refresh path for one service. | `--service` is required. |
+| `hack env add` | `--env`, `--service` | Selects the file written (`hack.env.<name>.yaml`, or the base file for `base`/`default`/`none`; `--local` writes the local variant). | Running workloads keep old values until `hack env apply` or `hack restart`. | Mutates only env files. |
+| `hack env set` | `--env`, `--service` | Alias for `hack env add`. | Same as `hack env add`. | Mutates only env files. |
+| `hack env unset` | `--env`, `--service` | Selects the file the key is removed from, as for `hack env add`. | Same as `hack env add`. | Mutates only env files. |
+| `hack env materialize` | `--env`, `--service` | Writes `.hack/.env` once, at invocation. | Rerun `hack env materialize`. | Compatibility output for external tools; runtime injection does not depend on it. |
+| `hack env exec` | `--env`, `--service`, `--target` | Per invocation, into one host command (host view by default). | Each invocation resolves again. | Runs on the host, not in a container. |
+| `hack env shell` | `--env`, `--service`, `--target` | When the shell starts. | Start a new shell. | Runs on the host, not in a container. |
+| `hack host exec` | `--env`, `--scope`, `--target` | Per invocation, into one host command (host view by default). | Each invocation resolves again. | Runs on the host, not in a container. |
+| `hack host shell` | `--env`, `--scope`, `--target` | When the shell starts. | Start a new shell. | Runs on the host, not in a container. |
+| `hack config validate` | `--env` | Per invocation; resolves the native selection without reading managed env documents. | Not needed. | Authored native projects only; cannot be combined with `--file`. |
+| `hack config plan` | `--env` | Per invocation; metadata only (names, scopes, secret flags), never decrypted. | Not needed. | Authored native projects only. |
+| `hack session start` | `--env`, `--service` | When the workspace is created; the name gains `.env-<name>` (`.env-base` for base spellings), and `--up` runs `hack up -d` with the same selection. | Start a new workspace or pass `--env` to `hack session exec`. | Injects into the workspace shell, not into containers. |
+| `hack session exec` | `--env`, `--service` | Per command; omitted reuses the selection encoded in the workspace name. | Each command resolves again. | Injects into the workspace command, not into containers. |
+
+MCP tools accept no env selector. They run the CLI without `--env`, so each row's
+omitted-`--env` behavior applies.
+
+An overlay name is a label for a set of env files. It implies no production authority
+and no network or instance isolation: a `prod` overlay still runs on the local stack,
+and two overlays share the same instance unless you choose a separate branch instance.
 
 ## Common commands
 

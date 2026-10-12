@@ -232,6 +232,18 @@ export const INSTRUCTION_SECTIONS: readonly InstructionSection[] = [
       "Stop workspace: `hack session stop <workspace>`",
     ],
   },
+  {
+    id: "env-composition",
+    title: "Env composition",
+    surfaces: ALL_SURFACES,
+    bullets: [
+      "Layer order: `.hack/hack.env.default.yaml`, the selected `.hack/hack.env.<overlay>.yaml`, then worktree-local `.hack/hack.env.local.yaml` and `.hack/hack.env.<overlay>.local.yaml`; service values override `global`, and host commands apply `host` values last.",
+      "Omit `--env` to use the configured default overlay; `--env base` (or `default`/`none`) selects base layers only, the same on every command. An overlay name grants no production authority and no network or instance isolation.",
+      "Use `hack env explain <KEY> --env <overlay> --service <service>` for provenance without the value; use `hack env get <KEY>` only when a plaintext value is explicitly needed, and treat its output as secret.",
+      "Running containers keep the env they were created with; after an env change, refresh with `hack env apply --service <service>` or `hack restart`.",
+      "Accepted flags, injection timing and refresh path per command: https://github.com/hack-dance/hack/blob/next/docs/env.md#command-and-delivery-matrix",
+    ],
+  },
 
   {
     id: "branch-instances",

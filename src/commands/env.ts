@@ -9,6 +9,7 @@ import {
   defineOption,
   withHandler,
 } from "../cli/command.ts";
+import { resolveRequestedEnvName } from "../cli/env-selection.ts";
 import { optEnv, optJson, optPath, optProject } from "../cli/options.ts";
 import { readControlPlaneConfig } from "../control-plane/sdk/config.ts";
 import { updateGlobalConfig } from "../lib/config.ts";
@@ -50,7 +51,6 @@ import type { ProjectContext } from "../lib/project.ts";
 import {
   defaultProjectSlugFromPath,
   findProjectContext,
-  parseEnvConfigSelection,
   readProjectConfig,
   sanitizeProjectSlug,
 } from "../lib/project.ts";
@@ -626,16 +626,6 @@ async function resolveProjectName(project: ProjectContext): Promise<string> {
   const derived = defaultProjectSlugFromPath(project.projectRoot);
   const raw = (cfg.name ?? derived).trim();
   return sanitizeProjectSlug(raw.length > 0 ? raw : derived);
-}
-
-function resolveRequestedEnvName(input: {
-  readonly envOption: string | undefined;
-}): string | null | undefined {
-  const envName = parseEnvConfigSelection(input.envOption);
-  if (input.envOption !== undefined && envName === undefined) {
-    throw new CliUsageError("Invalid --env value.");
-  }
-  return envName;
 }
 
 async function resolveConfiguredSecretStore(input: {

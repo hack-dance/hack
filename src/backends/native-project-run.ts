@@ -42,6 +42,11 @@ export type NativeProjectRun = {
   readonly profiles?: readonly string[];
   /** Public startup selector only; null means no AWS adaptation. Never credentials. */
   readonly aws?: { readonly profile: string; readonly region?: string } | null;
+  /**
+   * Present when startup reviewed public runtime host metadata into this graph.
+   * Retained restores must add it again; absent legacy graphs never gain it.
+   */
+  readonly runtimeMetadata?: true;
 };
 export type NativeProjectRunScope = {
   readonly projectRoot: string;
@@ -109,7 +114,10 @@ function valid(value: unknown): value is NativeProjectRun {
       "effectiveEnvName,namespace,owner,planId,run",
       "aws,effectiveEnvName,namespace,owner,planId,run",
       "aws,effectiveEnvName,namespace,owner,planId,profiles,run",
+      "aws,effectiveEnvName,namespace,owner,planId,profiles,run,runtimeMetadata",
     ].includes(Object.keys(value).sort().join()) &&
+    (!Object.hasOwn(value, "runtimeMetadata") ||
+      value.runtimeMetadata === true) &&
     (!Object.hasOwn(value, "aws") || validAws(value.aws)) &&
     (!Object.hasOwn(value, "profiles") || validProfiles(value.profiles)) &&
     (!Object.hasOwn(value, "effectiveEnvName") ||

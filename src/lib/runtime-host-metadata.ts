@@ -29,6 +29,43 @@ export type RuntimeHostMetadata = {
   >;
 };
 
+/** One service's public route hosts and the environment keys its author already owns. */
+export type RuntimeHostMetadataService = {
+  /** Effective public hostnames in declaration order; empty when unrouted. */
+  readonly hosts: readonly string[];
+  readonly declaredEnvironmentKeys: ReadonlySet<string>;
+};
+
+/** Every environment key Hack reserves for runtime host metadata. */
+export const RUNTIME_HOST_METADATA_KEY_NAMES: readonly string[] = Object.values(
+  RUNTIME_HOST_METADATA_KEYS
+);
+
+/** Compose project name reported for an instance; branches use `<project>--<branch>`. */
+export function runtimeHostMetadataComposeProject(opts: {
+  readonly projectName: string;
+  readonly branch: string | null;
+}): string {
+  return opts.branch ? `${opts.projectName}--${opts.branch}` : opts.projectName;
+}
+
+/**
+ * Browser-facing HTTPS URL for a public host. The default HTTPS port stays
+ * implicit; any other ingress port (such as a native HTTPS frontend) is explicit.
+ */
+export function runtimeHostUrl(opts: {
+  readonly host: string;
+  readonly httpsPort?: number | null;
+}): string {
+  const port =
+    opts.httpsPort === undefined ||
+    opts.httpsPort === null ||
+    opts.httpsPort === 443
+      ? ""
+      : `:${opts.httpsPort}`;
+  return `https://${opts.host}${port}`;
+}
+
 /**
  * Builds the generated Compose fragment that exposes non-secret runtime
  * identity to every service. Keys already declared by a service are omitted;
@@ -48,6 +85,51 @@ export function buildRuntimeHostMetadataOverride(opts: {
     return null;
   }
 
+  const environments = buildRuntimeHostMetadataEnvironments({
+    services: new Map(
+      [...effectiveServices].map(([serviceName, service]) => [
+        serviceName,
+        {
+          hosts: service.caddy
+            ? extractCaddyHosts({ value: service.caddy })
+            : [],
+          declaredEnvironmentKeys: service.declaredEnvironmentKeys,
+        },
+      ])
+    ),
+    branch: opts.branch,
+    devHost: opts.devHost,
+    aliasHost: opts.aliasHost,
+    composeProject: opts.composeProject,
+  });
+  if (environments.size === 0) {
+    return null;
+  }
+  const services: Record<string, { environment: Record<string, string> }> = {};
+  for (const [serviceName, environment] of environments) {
+    services[serviceName] = { environment };
+  }
+  return ensureTrailingNewline(
+    cleanupYaml(YAML.stringify({ services }, null, 2))
+  );
+}
+
+/**
+ * Computes the non-secret runtime identity each service receives. The Compose
+ * override and the native backend both use it, so both emit the same keys and
+ * document shape. Keys a service already declares are omitted (explicit project
+ * values win) and services left without keys are absent from the result. The
+ * iteration order of `services` defines the metadata document's service order.
+ */
+export function buildRuntimeHostMetadataEnvironments(opts: {
+  readonly services: ReadonlyMap<string, RuntimeHostMetadataService>;
+  readonly branch: string | null;
+  readonly devHost: string;
+  readonly aliasHost: string | null;
+  readonly composeProject: string;
+  /** Public HTTPS ingress port; omitted, null or 443 keeps URLs portless. */
+  readonly httpsPort?: number | null;
+}): Map<string, Record<string, string>> {
   const baseHosts = [opts.devHost, opts.aliasHost].filter(
     (host): host is string => typeof host === "string" && host.length > 0
   );
@@ -63,12 +145,12 @@ export function buildRuntimeHostMetadataOverride(opts: {
         baseHosts,
       })
     : null;
+  const url = (host: string) =>
+    runtimeHostUrl({ host, httpsPort: opts.httpsPort });
   const publicServices: Record<string, { readonly urls: readonly string[] }> =
     {};
-  for (const [serviceName, service] of effectiveServices) {
-    const urls = resolveServiceUrls({
-      caddy: service.caddy,
-    });
+  for (const [serviceName, service] of opts.services) {
+    const urls = resolveServiceUrls({ hosts: service.hosts, url });
     if (urls.length > 0) {
       publicServices[serviceName] = { urls };
     }
@@ -86,20 +168,19 @@ export function buildRuntimeHostMetadataOverride(opts: {
   const sharedMetadata: Record<string, string> = {
     [RUNTIME_HOST_METADATA_KEYS.branch]: opts.branch ?? "",
     [RUNTIME_HOST_METADATA_KEYS.devHost]: effectiveDevHost,
-    [RUNTIME_HOST_METADATA_KEYS.devUrl]: `https://${effectiveDevHost}`,
+    [RUNTIME_HOST_METADATA_KEYS.devUrl]: url(effectiveDevHost),
     [RUNTIME_HOST_METADATA_KEYS.composeProject]: opts.composeProject,
     [RUNTIME_HOST_METADATA_KEYS.runtimeMetadata]:
       JSON.stringify(runtimeMetadata),
     ...(effectiveAliasHost
       ? {
           [RUNTIME_HOST_METADATA_KEYS.aliasHost]: effectiveAliasHost,
-          [RUNTIME_HOST_METADATA_KEYS.aliasUrl]: `https://${effectiveAliasHost}`,
+          [RUNTIME_HOST_METADATA_KEYS.aliasUrl]: url(effectiveAliasHost),
         }
       : {}),
   };
-  const services: Record<string, { environment: Record<string, string> }> = {};
-
-  for (const [serviceName, service] of effectiveServices) {
+  const environments = new Map<string, Record<string, string>>();
+  for (const [serviceName, service] of opts.services) {
     const urls = publicServices[serviceName]?.urls ?? [];
     const metadata: Record<string, string> = {
       ...sharedMetadata,
@@ -113,16 +194,10 @@ export function buildRuntimeHostMetadataOverride(opts: {
       )
     );
     if (Object.keys(environment).length > 0) {
-      services[serviceName] = { environment };
+      environments.set(serviceName, environment);
     }
   }
-
-  if (Object.keys(services).length === 0) {
-    return null;
-  }
-  return ensureTrailingNewline(
-    cleanupYaml(YAML.stringify({ services }, null, 2))
-  );
+  return environments;
 }
 
 function parseComposeYaml(opts: {
@@ -188,16 +263,13 @@ function applyBranchIfNeeded(opts: {
 }
 
 function resolveServiceUrls(opts: {
-  readonly caddy: string | null;
+  readonly hosts: readonly string[];
+  readonly url: (host: string) => string;
 }): readonly string[] {
-  if (!opts.caddy) {
-    return [];
-  }
-
   const urls: string[] = [];
   const seen = new Set<string>();
-  for (const host of extractCaddyHosts({ value: opts.caddy })) {
-    const url = `https://${host}`;
+  for (const host of opts.hosts) {
+    const url = opts.url(host);
     if (!seen.has(url)) {
       seen.add(url);
       urls.push(url);
@@ -206,7 +278,10 @@ function resolveServiceUrls(opts: {
   return urls;
 }
 
-function readCaddyLabel(opts: { readonly labels: unknown }): string | null {
+/** The public `caddy` route label value from map or list Compose labels. */
+export function readCaddyLabel(opts: {
+  readonly labels: unknown;
+}): string | null {
   if (isRecord(opts.labels)) {
     const value = opts.labels.caddy;
     return typeof value === "string" && value.trim().length > 0 ? value : null;
@@ -256,7 +331,8 @@ function extractCaddyHosts(opts: {
   return hosts;
 }
 
-function readDeclaredEnvironmentKeys(opts: {
+/** Environment keys a Compose service declares, from map or list form. */
+export function readDeclaredEnvironmentKeys(opts: {
   readonly environment: unknown;
 }): Set<string> {
   if (isRecord(opts.environment)) {

@@ -74,6 +74,11 @@ import {
   invokeNativeRuntime,
   type NativeRuntimeSelection,
 } from "./native-runtime-client.ts";
+import {
+  applyNativeRuntimeMetadata,
+  type NativeRuntimeMetadataSelection,
+  verifyNativeRuntimeMetadataRoutes,
+} from "./native-runtime-metadata.ts";
 
 const SHA = /^[a-f0-9]{64}$/;
 const OWNER = /^[a-f0-9]{32}$/;
@@ -733,6 +738,7 @@ function selectedMapping(opts: {
   readonly effectiveEnvName: string | null;
   readonly profiles: readonly string[];
   readonly aws?: { readonly profile: string; readonly region?: string };
+  readonly runtimeMetadata: boolean;
 }): NativeProjectRun {
   return {
     ...opts.ready,
@@ -744,7 +750,27 @@ function selectedMapping(opts: {
           ...(opts.aws.region ? { region: opts.aws.region } : {}),
         }
       : null,
+    ...(opts.runtimeMetadata ? { runtimeMetadata: true as const } : {}),
   };
+}
+/**
+ * Fresh graphs receive runtime host metadata when the caller selects it. A
+ * retained graph is restored exactly as admitted: only graphs that recorded
+ * metadata get it again, so legacy retained data stays restorable.
+ */
+export function nativeRuntimeMetadataSelected(opts: {
+  readonly selection?: NativeRuntimeMetadataSelection;
+  readonly restore?: NativeProjectRun;
+}): NativeRuntimeMetadataSelection | undefined {
+  if (opts.restore && opts.restore.runtimeMetadata !== true) {
+    return undefined;
+  }
+  if (opts.restore && !opts.selection) {
+    throw new Error(
+      "Native retained graph requires its runtime metadata selection; no hooks, runtime start or HTTPS owner were requested."
+    );
+  }
+  return opts.selection;
 }
 async function retireRemovedMapping(opts: {
   readonly final: unknown;
@@ -826,6 +852,8 @@ export async function startNativeProject(opts: {
   readonly preparedBase?: NativePreparedBase;
   readonly https?: NativeHttpsSelection;
   readonly aws?: { readonly profile: string; readonly region?: string };
+  /** Public instance identity delivered as runtime host metadata; omitted delivers none. */
+  readonly runtimeMetadata?: NativeRuntimeMetadataSelection;
   readonly before: (input: NativeProjectInput) => Promise<Hooks>;
   readonly signal?: AbortSignal;
   readonly dependencies?: Partial<Dependencies>;
@@ -855,6 +883,10 @@ export async function startNativeProject(opts: {
       signal: opts.signal,
     });
   requireActiveStartup(opts.signal);
+  const runtimeMetadata = nativeRuntimeMetadataSelected({
+    selection: opts.runtimeMetadata,
+    restore,
+  });
   if (retained) {
     await requireAcknowledgedRetainedFinalization({
       scope: opts.scope,
@@ -1033,6 +1065,15 @@ export async function startNativeProject(opts: {
     });
     input = reviewedBranch.input;
     const reviewIdentity = reviewedBranch.identity;
+    const metadata = runtimeMetadata
+      ? applyNativeRuntimeMetadata({
+          input,
+          selection: runtimeMetadata,
+          branch: reviewIdentity ? reviewIdentity.branch : opts.scope.branch,
+          httpsPort: opts.https?.httpsPort ?? null,
+        })
+      : undefined;
+    input = metadata?.input ?? input;
     requireActiveStartup(controller.signal);
     specs = prepareNativeProjectServices(
       input,
@@ -1072,6 +1113,12 @@ export async function startNativeProject(opts: {
       input: pinned,
       run: async (review) => {
         requireEnrollmentCompatible(review.report.plan);
+        if (metadata) {
+          verifyNativeRuntimeMetadataRoutes({
+            plan: review.report.plan,
+            routes: metadata.routes,
+          });
+        }
         const routes = reviewedNativeRoutes({
           plan: review.report.plan,
           specs,
@@ -1194,6 +1241,7 @@ export async function startNativeProject(opts: {
                   effectiveEnvName: input.effectiveEnvName,
                   profiles,
                   aws: selection.aws,
+                  runtimeMetadata: metadata !== undefined,
                 });
                 // Enrollment must exist before taking a shared lease: release
                 // requires independent proof of this exact graph's cleanup.

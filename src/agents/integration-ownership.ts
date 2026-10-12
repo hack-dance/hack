@@ -107,6 +107,7 @@ const KNOWN_RENDER_FINGERPRINTS: Readonly<
     "6449442a8f230412d4e5f9e7", // v5.0.0-next.4..next
     "c60f1fc7b1f6579fac892a54", // next: plugin-first agent setup (hack-mcp split)
     "d83da046cf7541ba30950880", // v5.0.0-next.4..next (offline env-matrix pointer)
+    "0406c99877ff104fd57b4a14", // v5.0.0-next.4..next (runtime metadata backend scope)
     "08f0db2d0a1889e5b3ef707f", // v5.0.0-next.4..next (refresh-only setup sync)
     "257e3019713e8358981fd1af", // next: plugin-first agent setup + offline env-matrix pointer
     "e620e980660f0443df7732fe", // next: focused plugin skills (HACK-1131)
@@ -114,6 +115,7 @@ const KNOWN_RENDER_FINGERPRINTS: Readonly<
     "680a52ef6737d979ed2d384b", // next: focused plugin skills + --value-stdin
     "eba974f66328605864507beb", // next: focused plugin skills + plugin-first agent setup
     "cf91ca873a00ad4743198e11", // next: plugin-first agent setup + refresh-only setup sync
+    "0e99791aa0edfd1895e31748", // next: runtime metadata backend scope + refresh-only setup sync
   ]),
   "hack-init-skill": new Set([
     "cd15fb6d8ed8e25071d05e75", // v3.1.0..v4.0.3
@@ -143,6 +145,7 @@ const KNOWN_RENDER_FINGERPRINTS: Readonly<
     "cf0a31e197f9034485413674", // v5.0.0-next.4..next
     "77f4258cf2570443aee021fd", // next: plugin-first agent setup (hack-mcp split)
     "3a99c9097855f93808e482cb", // v5.0.0-next.4..next (offline env-matrix pointer)
+    "e449b8956a07989244762940", // v5.0.0-next.4..next (runtime metadata backend scope)
     "19099625646d196aa0e8a0c0", // v5.0.0-next.4..next (refresh-only setup sync)
     "d70a44aea4651314956b48f2", // next: plugin-first agent setup + offline env-matrix pointer
     "ea46c0d85989de79dba95fd4", // next: focused plugin skills (HACK-1131)
@@ -150,6 +153,7 @@ const KNOWN_RENDER_FINGERPRINTS: Readonly<
     "afa91b84e719bd416b9dfea3", // next: focused plugin skills + --value-stdin
     "270cd2b3fdcc325e04c76d43", // next: focused plugin skills + plugin-first agent setup
     "92ca4aa8f28ba1c93093c04a", // next: plugin-first agent setup + refresh-only setup sync
+    "0b82281933af514de8a1b8b8", // next: runtime metadata backend scope + refresh-only setup sync
   ]),
 };
 

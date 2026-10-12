@@ -68,8 +68,11 @@ trust and approval rules.
 ## Optional native plugins
 
 Hack also ships an optional native plugin for Codex, Claude Code, and Cursor in
-`plugins/hack`. It bundles the `hack-cli` and `hack-init` skills, the `hack mcp serve`
-server, Claude primer hooks, and a Cursor rule that the agent can select when relevant.
+`plugins/hack`. It bundles four skills (`hack-cli`, `hack-init`, `hack-install`, and
+`hack-remote`), the `hack mcp serve` server, Claude primer hooks, and a Cursor rule
+that the agent can select when relevant. The
+[agent client capability matrix](reference/agent-client-capabilities.md) records
+which of these components have been observed loading in each client.
 Install the Hack CLI first and make `hack` available on the client's PATH.
 
 Choose either the native plugin or the existing standalone setup for each client.
@@ -102,7 +105,7 @@ outside its local-plugin root; use a copy rather than weakening that boundary. S
 [Cursor's plugin documentation](https://cursor.com/docs/plugins) for marketplace
 and local development support in the installed client version.
 
-After installing, verify in a fresh session that both skills are discoverable,
+After installing, verify in a fresh session that all four skills are discoverable,
 `hack mcp serve` can initialize, and the client's hooks or rule load. A successful
 marketplace registration alone does not prove those components loaded. The plugin's
 MCP fallback is for clients without shell access; use the Hack CLI when shell is available.

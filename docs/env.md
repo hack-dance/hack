@@ -195,6 +195,16 @@ That means `.hack/.env` is no longer the primary runtime source of truth.
 
 `hack env materialize` is manual by design. Use it only when you need a compatibility file for an external tool that expects `.env` on disk.
 
+Hack writes `.hack/.env` and `.hack/.env.<overlay>` (from `materialize`, legacy
+`hack env set`, and the daemon env route) with mode `0600` by atomic replace: a
+private temporary file in `.hack/` is written, fsynced and renamed over the target,
+so readers never see a partial file. An existing file with group or other access is
+tightened to `0600` even when its contents are unchanged. These write and update paths
+refuse, with a fixed message that names no file or value, an env file that is a symlink
+(including a dangling one) or not a regular file, or one whose `.hack` directory is a
+symlink. Replace the link with a regular file or directory to continue. Code paths
+that only read an env file do not apply this check and still follow a symlink.
+
 For host execution, `hack host exec`, `hack host shell`, and lifecycle hooks/processes use a host-local view.
 That means Hack prefers host-usable values when it can:
 
@@ -497,6 +507,35 @@ Write-path guarantees in a linked worktree (first secret added from any checkout
 - if the shared location cannot be resolved (git unavailable) or written, Hack falls back to a checkout-local key and prints a loud divergence warning
 - `hack doctor` flags divergent `.hack.secret.key` contents across checkouts with the exact paths
 
+Key strength and exposure (`hack doctor` "env key" check):
+
+`hack doctor` and `hack doctor --json` audit the checkout-local key, the shared key
+under the git common dir and, in a linked worktree, the primary checkout's key. When
+no key file exists, the check classifies `HACK_ENV_SECRET_KEY` instead. The check is
+read-only. It never prints key bytes or absolute paths, and `--fix` does not act on it.
+Each finding names a project-relative subject and the exact command to run from the
+project root. `--json` adds an `envKey` object to the check with `status` and
+`findings` (`code`, `status`, `subject`, `remedy`).
+
+| Code | Status | Meaning |
+| --- | --- | --- |
+| `env-key-ok` | ok | key material is a regular, private, 256-bit-class file |
+| `env-key-absent` | ok | no key file and no `HACK_ENV_SECRET_KEY` |
+| `env-key-weak-permissions` | warn | group or others have access; suggests `chmod 600` |
+| `env-key-wrong-owner` | warn | the file is not owned by the current user |
+| `env-key-wrong-length` | warn | shorter than the 43-character base64url form of a 256-bit key, or empty |
+| `env-key-low-entropy` | warn | long enough but repetitive (estimated under 128 bits) |
+| `env-key-symlink` | error | the key path is a symlink; Hack refuses symlinked keys |
+| `env-key-not-regular` | error | the key path is a directory or another non-file entry |
+| `env-key-unreadable` | error | unreadable, oversized or not UTF-8 |
+| `env-key-tracked` | error | a file named `.hack.secret.key` is tracked by git at any depth |
+| `env-key-public-path` | error | a key copy sits in `public/`, `static/`, `dist/`, `build/`, `out/`, `www/`, `_site/`, `.next/` or `.output/` |
+
+Hack derives the AES-256-GCM key by hashing the key text with SHA-256, so key
+strength is the entropy of that text. Generated keys are 32 random bytes in base64url.
+For a weak, tracked or published key, the remedy is rotation: move the key aside, then
+re-add each secret with `hack env add --secret KEY VALUE` so Hack generates a new key.
+
 CI and managed container fallback:
 
 - if `.hack.secret.key` is missing, Hack falls back to `HACK_ENV_SECRET_KEY`
@@ -544,7 +583,14 @@ The modern YAML env model is the canonical repo format today.
 
 Some older surfaces are still compatibility-oriented:
 
-- `hack env backend ...` remains relevant for legacy repos and older secret-store configurations
+- `hack env backend ...` remains relevant for legacy repos and older secret-store configurations.
+  The `encrypted_file` store (also used by the `cloud` shim) is replaced atomically
+  with mode `0600`, and set/delete hold an in-process queue plus a cooperative
+  `<store>.lock` so concurrent writers, including separate processes, do not lose
+  updates. A store path that is a symlink is refused for writes. The v1 store
+  envelope and legacy `v1:` values authenticate no associated data: they are not
+  bound to a path, project or variable name beyond the scoped key inside the
+  encrypted store plaintext
 - the daemon's env HTTP route (used by the macOS app) reads and writes the legacy dotenv-shaped
   contract (`source: 'plain_env'|'keychain'`, `resolvedFrom: 'dotenv'/'process'/'keychain'/'portable_backend'`),
   not the modern YAML `hack env list --json` shape; there is no web dashboard surface anymore

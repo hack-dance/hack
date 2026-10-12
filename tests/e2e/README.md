@@ -205,6 +205,32 @@ data survive that cleanup. The canary is then removed separately. PostgreSQL use
 fixture-only trust on this unexposed network. This qualifies the actual execution
 host, not Codex Cloud capabilities, browser access or native VM support elsewhere.
 
+## Compose config-hash drift (F03)
+
+`compose-config-hash-drift` (HACK-1124) checks that `hack run` and `hack exec`
+leave running containers alone after a dependency's Compose config changes.
+It uses cached `alpine:3.20` with `pull_policy: never`, a private internal
+network, no published ports, and Hack internal DNS/TLS turned off. `app`
+depends on `dep`. After `hack up --detach`, the scenario changes only `dep`'s
+environment, so only `dep`'s config hash drifts. It then runs `hack run app`,
+`hack run dep`, `hack exec app` and `hack exec dep`. After each command, both
+services must keep the same full container ID, `State.StartedAt`,
+`RestartCount` and config-hash label, and no one-off container may remain.
+
+`hack run` has no user `--no-deps` flag. The legacy Compose path adds
+`--no-deps` when the target service is already running, and `hack exec` maps
+to `docker compose exec`, which never converges services. Two positive
+controls keep the check from passing vacuously. The `hack run dep` one-off
+must print the drifted value while the running `dep` still prints the old
+one. A final `hack up --detach` must recreate `dep` with a new ID and config
+hash. Whether that converging `up` also restarts `app` is logged, not
+asserted. The scenario covers the legacy Compose backend only, not the
+authored native-config path or `HACK_RUNTIME_BACKEND=native`.
+
+```sh
+HACK_E2E_CLI_BIN=./dist/hack HACK_E2E_DOCKER=1 HACK_E2E_REQUIRE_DOCKER=1 bun tests/e2e/run.ts --only=compose-config-hash-drift
+```
+
 For a managed cloud environment, repeat acceptance in a fresh task restored from
 the published environment. Setup-session access does not prove task access: local
 listeners and the Docker socket may be restricted even when the tools restore.

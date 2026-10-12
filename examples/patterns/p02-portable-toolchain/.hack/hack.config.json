@@ -1,0 +1,5 @@
+{
+  "$schema": "https://schemas.hack/hack.config.schema.json",
+  "name": "pattern-p02",
+  "dev_host": "pattern-p02.hack.local"
+}

@@ -1,4 +1,4 @@
-import { mkdir, stat } from "node:fs/promises";
+import { lstat, mkdir, stat } from "node:fs/promises";
 
 export async function pathExists(absolutePath: string): Promise<boolean> {
   try {
@@ -26,6 +26,48 @@ export async function readTextFile(
   } catch {
     return null;
   }
+}
+
+/**
+ * Result of reading an optional file that distinguishes a path that does not
+ * exist from one that exists but cannot be read.
+ */
+export type OptionalTextFile =
+  | { readonly kind: "absent" }
+  | { readonly kind: "unreadable" }
+  | { readonly kind: "text"; readonly text: string };
+
+/**
+ * Read an optional text file without collapsing "present but unreadable" into
+ * "absent".
+ *
+ * Existence is decided with `lstat` before reading, so a path is `absent` only
+ * when it (or a parent component) does not exist. Any other lstat failure
+ * (for example a parent directory without search permission), a dangling
+ * symlink, or a read failure (for example mode 000) is `unreadable`. Callers
+ * that check Hack-managed files must treat `unreadable` as drift rather than
+ * as an optional integration that was never installed.
+ */
+export async function readOptionalTextFile(
+  absolutePath: string
+): Promise<OptionalTextFile> {
+  try {
+    await lstat(absolutePath);
+  } catch (error: unknown) {
+    return isMissingPathError(error)
+      ? { kind: "absent" }
+      : { kind: "unreadable" };
+  }
+  const text = await readTextFile(absolutePath);
+  return text === null ? { kind: "unreadable" } : { kind: "text", text };
+}
+
+function isMissingPathError(error: unknown): boolean {
+  if (typeof error !== "object" || error === null || !("code" in error)) {
+    return false;
+  }
+  const code = (error as { readonly code: unknown }).code;
+  return code === "ENOENT" || code === "ENOTDIR";
 }
 
 export async function writeTextFile(

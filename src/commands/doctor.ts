@@ -80,6 +80,7 @@ import {
   ensureDir,
   ensureGitignoreEntry,
   pathExists,
+  readOptionalTextFile,
   readTextFile,
   writeTextFileIfChanged,
 } from "../lib/fs.ts";
@@ -3572,42 +3573,104 @@ async function maybeRepairHackd(): Promise<void> {
   }
 }
 
+/**
+ * Optional integrations are current when absent: a path is stale only when it
+ * exists and lacks the current revision marker, or exists but cannot be read.
+ * AGENTS.md/CLAUDE.md are user-owned, so they count only when they carry a
+ * Hack start or end marker; a section with only one of the two markers is
+ * corrupted and stale. Retained legacy artifacts are always stale.
+ */
 export async function inspectDoctorAgentIntegrations(opts: {
   readonly projectRoot: string | null;
   readonly homeDir?: string;
 }): Promise<{ readonly status: "current" | "stale" }> {
   const home = (opts.homeDir ?? process.env.HOME ?? homedir()).trim();
-  const paths = [
+  const hackOwnedPaths = [
     ...(opts.projectRoot
       ? [
           resolve(opts.projectRoot, ".cursor", "rules", "hack.mdc"),
           resolve(opts.projectRoot, ".codex", "skills", "hack-cli", "SKILL.md"),
-          resolve(opts.projectRoot, "AGENTS.md"),
-          resolve(opts.projectRoot, "CLAUDE.md"),
         ]
       : []),
     resolve(home, ".cursor", "rules", "hack.mdc"),
     resolve(home, ".codex", "skills", "hack-cli", "SKILL.md"),
     resolve(home, ".ai", "skills", "hack-cli", "SKILL.md"),
   ];
+  const sharedDocPaths = opts.projectRoot
+    ? [
+        resolve(opts.projectRoot, "AGENTS.md"),
+        resolve(opts.projectRoot, "CLAUDE.md"),
+      ]
+    : [];
   const marker = `Content revision: \`${HACK_AGENT_INTEGRATION_CONTENT_REVISION}\``;
-  const [contents, legacyProject, legacyUser] = await Promise.all([
-    Promise.all(paths.map((path) => readTextFile(path))),
-    opts.projectRoot
-      ? checkLegacyProjectAgentArtifacts({ projectRoot: opts.projectRoot })
-      : Promise.resolve([]),
-    checkLegacyUserAgentArtifacts({ home }),
-  ]);
+  const [ownedContents, docContents, legacyProject, legacyUser] =
+    await Promise.all([
+      Promise.all(
+        hackOwnedPaths.map((path) => readOptionalIntegrationText(path))
+      ),
+      Promise.all(
+        sharedDocPaths.map((path) => readOptionalIntegrationText(path))
+      ),
+      opts.projectRoot
+        ? checkLegacyProjectAgentArtifacts({ projectRoot: opts.projectRoot })
+        : Promise.resolve([]),
+      checkLegacyUserAgentArtifacts({ home }),
+    ]);
   const hasLegacyArtifacts = [...legacyProject, ...legacyUser].some(
     (check) => check.status !== "absent"
   );
+  // Present but unreadable paths are treated as stale rather than absent.
+  const hasStalePath =
+    ownedContents.some(
+      (content) =>
+        content.present &&
+        (content.text === null || !content.text.includes(marker))
+    ) ||
+    docContents.some(
+      (content) =>
+        content.present &&
+        (content.text === null ||
+          isStaleAgentDocSection({ text: content.text, marker }))
+    );
   return {
-    status:
-      contents.every((content) => content?.includes(marker)) &&
-      !hasLegacyArtifacts
-        ? "current"
-        : "stale",
+    status: hasStalePath || hasLegacyArtifacts ? "stale" : "current",
   };
+}
+
+const HACK_AGENT_DOCS_SECTION_START = "<!-- hack:agent-docs:start -->";
+const HACK_AGENT_DOCS_SECTION_END = "<!-- hack:agent-docs:end -->";
+
+/**
+ * A user-owned doc with neither Hack marker is not stale. A doc with only one
+ * marker is a corrupted managed section; a complete section is stale when it
+ * lacks the current revision marker.
+ */
+function isStaleAgentDocSection(opts: {
+  readonly text: string;
+  readonly marker: string;
+}): boolean {
+  const hasStart = opts.text.includes(HACK_AGENT_DOCS_SECTION_START);
+  const hasEnd = opts.text.includes(HACK_AGENT_DOCS_SECTION_END);
+  if (!(hasStart || hasEnd)) {
+    return false;
+  }
+  if (!(hasStart && hasEnd)) {
+    return true;
+  }
+  return !opts.text.includes(opts.marker);
+}
+
+async function readOptionalIntegrationText(
+  path: string
+): Promise<
+  | { readonly present: false }
+  | { readonly present: true; readonly text: string | null }
+> {
+  const file = await readOptionalTextFile(path);
+  if (file.kind === "absent") {
+    return { present: false };
+  }
+  return { present: true, text: file.kind === "text" ? file.text : null };
 }
 
 async function resolveDaemonReportForDoctorFix(): Promise<

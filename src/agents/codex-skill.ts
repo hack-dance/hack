@@ -1,6 +1,6 @@
 import { resolve } from "node:path";
 
-import { readTextFile } from "../lib/fs.ts";
+import { readOptionalTextFile } from "../lib/fs.ts";
 import {
   checkHackInitSkill,
   installHackInitSkill,
@@ -135,7 +135,16 @@ export async function checkCodexSkill(opts: {
   }
 
   const path = resolved.path;
-  const content = await readTextFile(path);
+  const file = await readOptionalTextFile(path);
+  if (file.kind === "unreadable") {
+    return {
+      scope: opts.scope,
+      status: "error",
+      path,
+      message: "Hack-managed file exists but could not be read.",
+    };
+  }
+  const content = file.kind === "text" ? file.text : "";
   if (!content) {
     return { scope: opts.scope, status: "missing", path };
   }

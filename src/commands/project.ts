@@ -21,16 +21,13 @@ import {
   autocompleteMultiselect,
   confirm,
   isCancel,
-  multiselect,
   note,
   password,
   select,
   text,
 } from "@clack/prompts";
 import { YAML } from "bun";
-import { installClaudeHooks } from "../agents/claude.ts";
-import { installCodexSkill } from "../agents/codex-skill.ts";
-import { installCursorRules } from "../agents/cursor.ts";
+import { runInitAgentIntegrations } from "../agents/init-agent-integrations.ts";
 import {
   type OnboardingWith,
   parseOnboardingWith,
@@ -274,9 +271,6 @@ import {
   buildWorktreeRetargetWarning,
   findSameCheckoutRetargetConflicts,
 } from "../lib/worktree-runtime-target.ts";
-import { upsertAgentDocs } from "../mcp/agent-docs.ts";
-import type { McpTarget } from "../mcp/install.ts";
-import { installMcpConfig } from "../mcp/install.ts";
 import { resolveMux } from "../mux/mux-resolver.ts";
 import {
   renderProjectConfigJson,
@@ -3160,7 +3154,11 @@ async function handleInit({
     );
   }
 
-  await maybeSetupAgentIntegrations({ repoRoot });
+  await runInitAgentIntegrations({
+    repoRoot,
+    interactive: canPrompt(),
+    guard: assertLegacyProjectInputFamily,
+  });
 
   note(
     [
@@ -3501,147 +3499,6 @@ function validateOauthTld(opts: { readonly value: string }): string | null {
     return "Invalid TLD label";
   }
   return null;
-}
-
-type SetupIntegration = "cursor" | "claude" | "codex" | "agents" | "mcp";
-
-async function maybeSetupAgentIntegrations(opts: {
-  readonly repoRoot: string;
-}): Promise<void> {
-  await assertLegacyProjectInputFamily({ projectRoot: opts.repoRoot });
-  if (!canPrompt()) {
-    return;
-  }
-  const shouldSetup = await confirm({
-    message: "Set up coding agent integrations? (Cursor/Claude/Codex)",
-    initialValue: true,
-  });
-  if (isCancel(shouldSetup) || !shouldSetup) {
-    return;
-  }
-
-  const selected = await multiselect<SetupIntegration>({
-    message: "Select integrations to install:",
-    required: true,
-    options: [
-      { value: "cursor", label: "Cursor rules (.cursor/rules/hack.mdc)" },
-      {
-        value: "claude",
-        label: "Claude Code hooks (.claude/settings.local.json)",
-      },
-      { value: "codex", label: "Codex skill (.codex/skills/hack-cli)" },
-      { value: "agents", label: "AGENTS.md / CLAUDE.md snippets" },
-      { value: "mcp", label: "MCP config (no-shell clients)" },
-    ],
-    initialValues: ["cursor", "claude", "codex"],
-  });
-  if (isCancel(selected) || selected.length === 0) {
-    return;
-  }
-
-  const selection = new Set(selected);
-
-  if (selection.has("cursor")) {
-    await assertLegacyProjectInputFamily({ projectRoot: opts.repoRoot });
-    const result = await installCursorRules({
-      scope: "project",
-      projectRoot: opts.repoRoot,
-    });
-    logInstallResult({
-      label: "Cursor rules",
-      status: result.status,
-      path: result.path,
-      message: result.message,
-    });
-  }
-
-  if (selection.has("claude")) {
-    await assertLegacyProjectInputFamily({ projectRoot: opts.repoRoot });
-    const result = await installClaudeHooks({
-      scope: "project",
-      projectRoot: opts.repoRoot,
-    });
-    logInstallResult({
-      label: "Claude hooks",
-      status: result.status,
-      path: result.path,
-      message: result.message,
-    });
-  }
-
-  if (selection.has("codex")) {
-    await assertLegacyProjectInputFamily({ projectRoot: opts.repoRoot });
-    const result = await installCodexSkill({
-      scope: "project",
-      projectRoot: opts.repoRoot,
-    });
-    logInstallResult({
-      label: "Codex skill",
-      status: result.status,
-      path: result.path,
-      message: result.message,
-    });
-  }
-
-  if (selection.has("agents")) {
-    await assertLegacyProjectInputFamily({ projectRoot: opts.repoRoot });
-    const results = await upsertAgentDocs({
-      projectRoot: opts.repoRoot,
-      targets: ["agents", "claude"],
-    });
-    for (const result of results) {
-      logInstallResult({
-        label: "Agent docs",
-        status: result.status,
-        path: result.path,
-        message: result.message,
-      });
-    }
-  }
-
-  if (selection.has("mcp")) {
-    await assertLegacyProjectInputFamily({ projectRoot: opts.repoRoot });
-    const targetHints = selected.filter(
-      (value) => value === "cursor" || value === "claude" || value === "codex"
-    );
-    const targets = (
-      targetHints.length > 0 ? targetHints : ["cursor", "claude", "codex"]
-    ) as McpTarget[];
-
-    const results = await installMcpConfig({
-      targets,
-      scope: "project",
-      projectRoot: opts.repoRoot,
-    });
-
-    for (const result of results) {
-      logInstallResult({
-        label: "MCP config",
-        status: result.status,
-        path: result.path ?? "unknown path",
-        message: result.message,
-      });
-    }
-  }
-}
-
-function logInstallResult(opts: {
-  readonly label: string;
-  readonly status: string;
-  readonly path: string;
-  readonly message?: string;
-}): void {
-  if (opts.status === "error") {
-    logger.warn({ message: opts.message ?? `Failed to update ${opts.label}` });
-    return;
-  }
-
-  if (opts.status === "noop") {
-    logger.info({ message: `No changes for ${opts.label} (${opts.path})` });
-    return;
-  }
-
-  logger.success({ message: `Updated ${opts.label} at ${opts.path}` });
 }
 
 // Exported for direct unit-testing of the auto (non-interactive) discovery

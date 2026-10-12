@@ -40,6 +40,7 @@ import {
   type NativeComposeStorageCarrierCompletion,
   type NativeComposeStorageReadonlyCarrierIntent,
 } from "./native-compose-storage-carrier-journal.ts";
+import { readNativeComposeStorageCommandExecutable } from "./native-compose-storage-command-executable.ts";
 import {
   type NativeComposeStorageCommandObservation,
   readNativeComposeStorageCommandObservation,
@@ -67,6 +68,7 @@ import {
   nativeComposeStorageDockerImageReference,
   selectNativeComposeStorageDockerDependency,
 } from "./native-compose-storage-witness-docker-artifact.ts";
+import { nativeComposeStorageIdentityProbe } from "./native-compose-storage-witness-docker-identity.ts";
 import {
   assertNativeComposeStorageDockerCarrierVolume,
   inspectNativeComposeStorageDockerVolume,
@@ -813,68 +815,9 @@ async function groupAbsent(
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
 }
-async function commandExecutable(
-  path: string
-): Promise<NativeComposeStorageCommandExecutable> {
-  const canonical = await realpath(path);
-  const file = await open(canonical, constants.O_RDONLY | constants.O_NOFOLLOW);
-  try {
-    const before = await file.stat({ bigint: true });
-    if (
-      !before.isFile() ||
-      before.nlink !== 1n ||
-      before.size <= 0n ||
-      before.size > 268_435_456n ||
-      (before.mode & 0o022n) !== 0n
-    ) {
-      return refuse();
-    }
-    const hash = new Bun.CryptoHasher("sha256");
-    const bytes = Buffer.alloc(65_536);
-    let position = 0;
-    const size = Number(before.size);
-    while (position < size) {
-      const read = await file.read(
-        bytes,
-        0,
-        Math.min(bytes.length, size - position),
-        position
-      );
-      if (read.bytesRead <= 0) {
-        return refuse();
-      }
-      hash.update(bytes.subarray(0, read.bytesRead));
-      position += read.bytesRead;
-    }
-    const after = await file.stat({ bigint: true }),
-      named = await lstat(canonical, { bigint: true });
-    if (
-      !(
-        before.dev === after.dev &&
-        before.ino === after.ino &&
-        before.dev === named.dev &&
-        before.ino === named.ino
-      ) ||
-      before.size !== after.size ||
-      before.mtimeNs !== after.mtimeNs ||
-      before.ctimeNs !== after.ctimeNs ||
-      (await realpath(path)) !== canonical
-    ) {
-      return refuse();
-    }
-    return {
-      path: canonical,
-      dev: before.dev.toString(),
-      ino: before.ino.toString(),
-      uid: Number(before.uid),
-      mode: Number(before.mode),
-      size,
-      hash: hash.digest("hex"),
-    };
-  } finally {
-    await file.close();
-  }
-}
+/** Every identity check runs per call; only an unchanged stat identity skips the
+ * content read for the rest of this command. */
+const commandExecutable = readNativeComposeStorageCommandExecutable;
 async function boundedHostFile(path: string): Promise<string> {
   const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
   try {
@@ -1330,11 +1273,14 @@ export async function createNativeComposeDockerStorageXattrCarrier(
     if (!cleanup) {
       lifetime(context);
     }
-    return createNativeComposeProbe({
-      signal: cleanup ? undefined : context.signal,
-      timeoutMs: cleanup
-        ? 10_000
-        : Math.min(15_000, context.deadline - Date.now()),
+    const signal = cleanup ? undefined : context.signal;
+    const timeoutMs = cleanup
+      ? 10_000
+      : Math.min(15_000, context.deadline - Date.now());
+    return nativeComposeStorageIdentityProbe({
+      probe: createNativeComposeProbe({ signal, timeoutMs }),
+      signal,
+      timeoutMs,
     });
   };
   let dependency: ReturnType<typeof selectNativeComposeStorageDockerDependency>;
@@ -1368,7 +1314,7 @@ export async function createNativeComposeDockerStorageXattrCarrier(
     throw normalized;
   }
   const selectedArtifact = dependency.artifact;
-  const inspect = async (selection: Selection) => {
+  const observe = async (selection: Selection) => {
     const stage: NativeComposeEffectRefusal["stage"] = "storage-target";
     try {
       const before = await current(context, selection);
@@ -1384,7 +1330,7 @@ export async function createNativeComposeDockerStorageXattrCarrier(
         return refuse();
       }
       lifetime(context);
-      return target;
+      return { binding: after, target };
     } catch (error) {
       retainNativeComposeEffectRefusal(error, {
         stage,
@@ -1393,6 +1339,49 @@ export async function createNativeComposeDockerStorageXattrCarrier(
       throw error;
     }
   };
+  const inspect = async (selection: Selection) =>
+    (await observe(selection)).target;
+  // The closing target observation of the latest deferred-finish verify
+  // invocation, after which that invocation performed no effect. Every port
+  // entry consumes it, so it can answer only the next port call.
+  let closing: {
+    readonly invocationId: string;
+    readonly name: string;
+    readonly storage: string;
+    readonly binding: NativeComposeMaterialBinding;
+    readonly target: unknown;
+  } | null = null;
+  /** An exact repeat (same query, same rechecked material binding, no effect
+   * since: the caller attests reads only) answers with that closing observation. */
+  const inspectPort = async (
+    selection: Selection,
+    options?: { readonly afterInvocation?: string }
+  ) => {
+    const closed = closing;
+    closing = null;
+    if (
+      closed &&
+      options?.afterInvocation === closed.invocationId &&
+      selection.name === closed.name &&
+      selection.storage === closed.storage
+    ) {
+      try {
+        tool();
+        const binding = await current(context, selection);
+        if (same(binding, closed.binding)) {
+          lifetime(context);
+          return closed.target;
+        }
+      } catch (error) {
+        retainNativeComposeEffectRefusal(error, {
+          stage: "storage-target",
+          reason: nativeComposeEffectReason(error),
+        });
+        throw error;
+      }
+    }
+    return await inspect(selection);
+  };
   const provision = async (
     selection: Selection & {
       readonly engineId: string;
@@ -1400,6 +1389,7 @@ export async function createNativeComposeDockerStorageXattrCarrier(
       readonly ownerToken: string;
     }
   ) => {
+    closing = null;
     const stage: NativeComposeEffectRefusal["stage"] = "storage-provision";
     try {
       const before = await current(context, selection, true);
@@ -1465,8 +1455,9 @@ export async function createNativeComposeDockerStorageXattrCarrier(
           requestText: "",
           captures: [],
         };
+        // The target observation opens with this same engine-ID fence; nothing
+        // runs between, so a separate identical read here would be a duplicate.
         const read = probe();
-        await engine(read, context);
         const finalAbsent = await observeNativeComposeStorageDockerTarget({
           probe: read,
           current: before,
@@ -1556,6 +1547,7 @@ export async function createNativeComposeDockerStorageXattrCarrier(
     (completion: NativeComposeStorageCarrierCompletion) => Promise<void>
   >();
   const invoke = async (input: NativeComposeStorageXattrInvocation) => {
+    closing = null;
     let stage: NativeComposeEffectRefusal["stage"] = "storage-target";
     try {
       const before = await current(context, input.target, !input.readonly);
@@ -1668,12 +1660,17 @@ export async function createNativeComposeDockerStorageXattrCarrier(
         if (!(created.exitCode === 0 && ID.test(id))) {
           return refuse();
         }
+        /** `engineFenced` only when the caller's immediately preceding step, with no
+         * await between, ended with the identical engine-ID fence. */
         const inspectCarrier = async (
-          cleanup = false
+          cleanup = false,
+          engineFenced = false
         ): Promise<NativeComposeStorageDockerCarrier> => {
           try {
             const observed = probe(cleanup);
-            await engine(observed, context);
+            if (!engineFenced) {
+              await engine(observed, context);
+            }
             const value: unknown = JSON.parse(
               await observed([
                 "container",
@@ -1735,7 +1732,8 @@ export async function createNativeComposeDockerStorageXattrCarrier(
         if (!same(holders, input.target)) {
           return refuse();
         }
-        const ready = await inspectCarrier();
+        // The holder observation just closed with the same engine-ID fence.
+        const ready = await inspectCarrier(false, true);
         if (
           !(
             ready.createdAt === known.createdAt &&
@@ -1931,7 +1929,8 @@ export async function createNativeComposeDockerStorageXattrCarrier(
         if (selected !== "") {
           return refuse();
         }
-        const after = await inspect(input.target);
+        const closed = await observe(input.target);
+        const after = closed.target;
         if (!same(after, input.target)) {
           return refuse();
         }
@@ -1978,6 +1977,17 @@ export async function createNativeComposeDockerStorageXattrCarrier(
           await retireInvocationFiles(files);
         }
         completed = true;
+        if (deferred) {
+          // No effect follows this closing observation before return: retirement
+          // waits for the journal completion and finish().
+          closing = {
+            invocationId: input.invocationId,
+            name: input.target.name,
+            storage: input.target.storage,
+            binding: closed.binding,
+            target: after,
+          };
+        }
         return {
           artifact: selectedArtifact,
           carrierId: id,
@@ -2024,12 +2034,13 @@ export async function createNativeComposeDockerStorageXattrCarrier(
   return captureNativeComposeStorageXattrCarrier({
     artifact: selectedArtifact,
     ports: {
-      inspect,
+      inspect: inspectPort,
       provision,
       invoke,
       finish:
         context.originalCommandRecords === true
           ? async ({ input, completion }) => {
+              closing = null;
               const finish = finalizers.get(input) ?? refuse();
               finalizers.delete(input);
               await finish(completion);

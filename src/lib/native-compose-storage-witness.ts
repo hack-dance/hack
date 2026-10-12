@@ -450,18 +450,23 @@ async function inspectXattr(opts: {
   readonly saved: XattrExpectation;
   readonly stopped: boolean;
   readonly check: XattrCheck;
+  /** Only when nothing but reads ran since this carrier invocation returned. */
+  readonly afterInvocation?: string;
 }): Promise<NativeComposeStorageXattrTarget> {
   checkXattrArtifact(opts.saved, opts.carrier);
   const before = await opts.check();
   checkNativeComposeStorageXattrCarrierLifetime(opts.carrier);
-  const value = await nativeComposeStorageXattrCarrierPorts(
-    opts.carrier
-  ).inspect(
-    Object.freeze({
-      name: opts.saved.binding.name,
-      storage: opts.saved.binding.storage,
-    })
-  );
+  const selection = Object.freeze({
+    name: opts.saved.binding.name,
+    storage: opts.saved.binding.storage,
+  });
+  const ports = nativeComposeStorageXattrCarrierPorts(opts.carrier);
+  const value = await (opts.afterInvocation === undefined
+    ? ports.inspect(selection)
+    : ports.inspect(
+        selection,
+        Object.freeze({ afterInvocation: opts.afterInvocation })
+      ));
   const current = await opts.check();
   checkNativeComposeStorageXattrCarrierLifetime(opts.carrier);
   if (JSON.stringify(before) !== JSON.stringify(current)) {
@@ -555,7 +560,11 @@ async function invokeXattr(opts: {
     carrier: opts.carrier,
     current: latest,
   });
-  const after = await inspectXattr(opts);
+  // Only reads ran since invoke returned (binding check and result validation).
+  const after = await inspectXattr({
+    ...opts,
+    afterInvocation: input.invocationId,
+  });
   if (JSON.stringify(after) !== JSON.stringify(target)) {
     return refuse();
   }

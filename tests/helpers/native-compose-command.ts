@@ -226,7 +226,9 @@ export async function invoke(
   root: string,
   args = ["up", "--detach", "--json"],
   startupTimeoutMs = 1000,
-  commandTimeoutMs = 15_000
+  commandTimeoutMs = 15_000,
+  /** Docker client selection only (for example an explicit Unix DOCKER_HOST). */
+  extraEnv: Readonly<Record<string, string>> = {}
 ) {
   const child = Bun.spawn(
     [
@@ -250,6 +252,7 @@ export async function invoke(
         HACK_COMPOSE_STARTUP_TIMEOUT_MS: String(startupTimeoutMs),
         CI: "1",
         HACK_EXECUTION_MODE: "non_interactive",
+        ...extraEnv,
       },
       stdin: "ignore",
       stdout: "pipe",

@@ -273,20 +273,16 @@ function readId(opts: {
   });
 }
 
-/**
- * Replace only `docker info` transport for an explicit local Unix selection.
- * Every call makes a fresh bounded daemon-ID request; no result is cached. Other
- * selections return null before admission and retain their existing CLI path.
- * Admitted errors never fall back. Socket, executable and selection bindings are
- * checked before and after each request under the caller's existing time budget.
- */
-export function createNativeComposeEngineIdentityObserver(
-  opts: {
-    readonly signal?: AbortSignal;
-    readonly timeoutMs?: number;
-    readonly environment?: Environment;
-  } = {}
-): (() => Promise<string>) | null {
+type BoundObserver = {
+  /** Opaque digest of the exact selection, executable, config and socket binding. */
+  readonly key: string;
+  readonly read: () => Promise<string>;
+};
+function bindObserver(opts: {
+  readonly signal?: AbortSignal;
+  readonly timeoutMs?: number;
+  readonly environment?: Environment;
+}): BoundObserver | null {
   const environment = opts.environment ?? process.env;
   const signal = opts.signal;
   const selected = selection(environment);
@@ -328,29 +324,107 @@ export function createNativeComposeEngineIdentityObserver(
       check(signal, deadline);
     };
     recheck();
-    return async () => {
-      if (reading) {
-        return refuse();
-      }
-      reading = true;
-      try {
-        recheck();
-        const result = await readId({
-          socketPath: socket.canonical,
-          signal,
-          deadline,
-          limit: remaining,
-        });
-        remaining -= result.bytes;
-        recheck();
-        return result.id;
-      } catch {
-        return refuse();
-      } finally {
-        reading = false;
-      }
-    };
+    const key = new Bun.CryptoHasher("sha256")
+      .update(JSON.stringify([selected, binary, config, socket, executable]))
+      .digest("hex");
+    return Object.freeze({
+      key,
+      read: async () => {
+        if (reading) {
+          return refuse();
+        }
+        reading = true;
+        try {
+          recheck();
+          const result = await readId({
+            socketPath: socket.canonical,
+            signal,
+            deadline,
+            limit: remaining,
+          });
+          remaining -= result.bytes;
+          recheck();
+          return result.id;
+        } catch {
+          return refuse();
+        } finally {
+          reading = false;
+        }
+      },
+    });
   } catch {
     return refuse();
   }
+}
+
+/**
+ * Replace only `docker info` transport for an explicit local Unix selection.
+ * Every call makes a fresh bounded daemon-ID request; no result is cached. Other
+ * selections return null before admission and retain their existing CLI path.
+ * Admitted errors never fall back. Socket, executable and selection bindings are
+ * checked before and after each request under the caller's existing time budget.
+ */
+export function createNativeComposeEngineIdentityObserver(
+  opts: {
+    readonly signal?: AbortSignal;
+    readonly timeoutMs?: number;
+    readonly environment?: Environment;
+  } = {}
+): (() => Promise<string>) | null {
+  return bindObserver(opts)?.read ?? null;
+}
+
+/**
+ * Command-scoped transport for repeated `docker info --format '{{json .ID}}'`
+ * fences. Each fence still makes exactly one fresh engine-ID read; no ID is cached.
+ *
+ * Admission is per exact binding: the selection values, `docker` executable path
+ * and identity, client-config path/content and socket path identities. The first
+ * fence under an eligible binding returns the caller's own Docker CLI read and
+ * compares it with one direct `GET /info` on the same explicit Unix socket. Only
+ * an equal ID admits that binding; a direct failure or a different ID keeps the
+ * CLI for that binding for the rest of the command. Later fences under an admitted
+ * binding use one fresh direct request each, and its failures refuse without CLI
+ * fallback. A changed binding is a new binding and is admitted through the CLI
+ * again. Ineligible selections, and bindings that cannot be established, always
+ * use the CLI. The returned text has the CLI's `{{json .ID}}` line shape.
+ */
+export function createNativeComposeEngineIdentityAdmissions(): (opts: {
+  readonly cli: () => Promise<string>;
+  readonly signal?: AbortSignal;
+  readonly timeoutMs: number;
+  readonly environment: Environment;
+}) => Promise<string> {
+  const admitted = new Map<string, boolean>();
+  return async (opts) => {
+    let bound: BoundObserver | null;
+    try {
+      bound = bindObserver({
+        signal: opts.signal,
+        timeoutMs: opts.timeoutMs,
+        environment: opts.environment,
+      });
+    } catch {
+      bound = null;
+    }
+    if (bound === null) {
+      return await opts.cli();
+    }
+    const state = admitted.get(bound.key);
+    if (state === true) {
+      return `${JSON.stringify(await bound.read())}\n`;
+    }
+    const text = await opts.cli();
+    if (state === undefined) {
+      let equal = false;
+      try {
+        const value: unknown = JSON.parse(text);
+        equal = typeof value === "string" && value === (await bound.read());
+      } catch {
+        equal = false;
+      }
+      admitted.set(bound.key, equal);
+    }
+    return text;
+  };
 }

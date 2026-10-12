@@ -1022,9 +1022,9 @@ hack global dns <subcommand> [options]
 
 | Command | Summary |
 | --- | --- |
-| `hack global dns preview` | Preview a scoped native custom-domain DNS claim without changing the host |
+| `hack global dns preview` | Preview a scoped native custom-domain DNS claim or the hack.local relay repair without changing the host |
 | `hack global dns activate` | Activate only the selected native custom-domain DNS suffix |
-| `hack global dns deactivate` | Remove only an owned native custom-domain DNS suffix |
+| `hack global dns deactivate` | Remove an owned native custom-domain DNS suffix, or undo the hack.local relay repair |
 
 ### Options
 
@@ -1801,7 +1801,7 @@ hack setup <subcommand> [options]
 | `hack setup claude` | Install Claude Code hooks for hack CLI usage |
 | `hack setup codex` | Install Codex skill for hack CLI usage |
 | `hack setup agents` | Install AGENTS.md / CLAUDE.md snippets for hack CLI usage |
-| `hack setup sync` | Refresh project/global agent guidance |
+| `hack setup sync` | Refresh installed Hack-owned agent integrations |
 | `hack setup mcp` | Install MCP configs for hack CLI usage (no-shell only) |
 
 ### Options
@@ -1924,7 +1924,7 @@ hack setup agents [options]
 
 ## `hack setup sync`
 
-Refresh project/global agent guidance
+Refresh installed Hack-owned agent integrations
 
 ### Usage
 
@@ -1939,8 +1939,10 @@ hack setup sync [options]
 | `--path, -p <dir>` | Run a project command against a repo path (overrides cwd search) |
 | `--global` | Use global (user) scope instead of project scope |
 | `--all-scopes` | Target both project and global (user) scopes |
+| `--install-missing` | Also create missing integrations in the selected scope (default: refresh only installed Hack-owned files) |
 | `--check` | Check whether integration is installed |
 | `--remove` | Remove integration files/config |
+| `--json` | Output JSON (machine-readable) |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |
 | `--version, -v` | Show version |
@@ -2334,6 +2336,8 @@ Add or update an env value
 hack env add [key] [value] [options]
 ```
 
+Non-secret values may be passed as arguments. For secrets, pipe the value with --value-stdin (for example `<secret-source> \| hack env add API_TOKEN --secret --value-stdin`) or omit the value in a terminal to use the hidden prompt, so the value never appears in argv, shell history, or process listings.
+
 ### Arguments
 
 | Arg | Description |
@@ -2349,6 +2353,7 @@ hack env add [key] [value] [options]
 | `--project <name>` | Target a registered project by name (from ~/.hack/projects.json) |
 | `--env <name|base|default>` | Select an env overlay by name; omit for the configured default overlay, or use 'base' or 'default' for base layers only |
 | `--secret` | Store value as an encrypted secure entry |
+| `--value-stdin` | Read the value from piped stdin (max 64 KiB, one trailing newline stripped) so it never appears in argv or shell history |
 | `--local` | Write to the worktree-local env override file instead of the shared repo env file |
 | `--service <global|service>` | Target scope (global or a discovered service name) |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
@@ -2365,6 +2370,8 @@ Alias for env add
 hack env set [key] [value] [options]
 ```
 
+Same value rules as `hack env add`: pipe secrets with --value-stdin or use the hidden prompt instead of passing them as arguments.
+
 ### Arguments
 
 | Arg | Description |
@@ -2380,6 +2387,7 @@ hack env set [key] [value] [options]
 | `--project <name>` | Target a registered project by name (from ~/.hack/projects.json) |
 | `--env <name|base|default>` | Select an env overlay by name; omit for the configured default overlay, or use 'base' or 'default' for base layers only |
 | `--secret` | Store value as an encrypted secure entry |
+| `--value-stdin` | Read the value from piped stdin (max 64 KiB, one trailing newline stripped) so it never appears in argv or shell history |
 | `--local` | Write to the worktree-local env override file instead of the shared repo env file |
 | `--service <global|service>` | Target scope (global or a discovered service name) |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |

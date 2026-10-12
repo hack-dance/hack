@@ -10,7 +10,10 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { CliUsageError } from "../src/cli/command.ts";
-import { resolveRequestedEnvName } from "../src/cli/env-selection.ts";
+import {
+  INVALID_ENV_SELECTION_MESSAGE,
+  resolveRequestedEnvName,
+} from "../src/cli/env-selection.ts";
 import { optEnv } from "../src/cli/options.ts";
 import { runCli } from "../src/cli/run.ts";
 import { __testOnlySessionCommand } from "../src/commands/session.ts";
@@ -216,7 +219,7 @@ test("an unusable --env name is refused by every surface without reading values"
   for (const result of [plan, list]) {
     expect(JSON.parse(result.stdout)).toEqual({
       ok: false,
-      error: { code: "E_USAGE", message: "Invalid --env value." },
+      error: { code: "E_USAGE", message: INVALID_ENV_SELECTION_MESSAGE },
     });
   }
   expect(get.stdout).toBe("");
@@ -262,16 +265,21 @@ test("authored native dispatch refuses an unusable --env before selecting a proj
     overlay: INVALID_NAME,
   }).catch((value: unknown) => value);
   expect(error).toBeInstanceOf(CliUsageError);
-  expect(error).toHaveProperty("message", "Invalid --env value.");
+  expect(error).toHaveProperty("message", INVALID_ENV_SELECTION_MESSAGE);
 });
 
 test("the shared resolver maps base spellings to null and keeps workspace names env-base", () => {
   const { buildScopedWorkspaceBaseName } = __testOnlySessionCommand;
   expect(resolveRequestedEnvName({ envOption: undefined })).toBeUndefined();
-  expect(resolveRequestedEnvName({ envOption: " QA " })).toBe("qa");
-  expect(() => resolveRequestedEnvName({ envOption: INVALID_NAME })).toThrow(
-    "Invalid --env value."
-  );
+  expect(resolveRequestedEnvName({ envOption: " qa " })).toBe("qa");
+  expect(resolveRequestedEnvName({ envOption: "qa-2" })).toBe("qa-2");
+  // Names are never slugged: a non-canonical spelling is refused, not
+  // rewritten into a different overlay name.
+  for (const spelling of [INVALID_NAME, "QA", "q_a", "q a", "qa.", "X=qa"]) {
+    expect(() => resolveRequestedEnvName({ envOption: spelling })).toThrow(
+      INVALID_ENV_SELECTION_MESSAGE
+    );
+  }
   for (const spelling of BASE_SPELLINGS) {
     const envName = resolveRequestedEnvName({ envOption: spelling });
     expect(envName).toBeNull();

@@ -18,12 +18,20 @@ Notes:
   entire suffix, so do not select a domain used by unrelated sites.
   The global installer configures the Docker-backed host stack. An explicitly
   selected native candidate refuses it to preserve the installed v4 stack.
-  On macOS, use `hack global dns preview` and then the separately confirmed
-  `hack global dns activate` for a dedicated custom native suffix. This leaves
-  the v4 wildcard rules untouched. Verify the exact app origin with
-  `hack doctor --browser-url`; DNS setup alone does not validate HTTPS or OAuth.
+  On macOS, use `hack global dns preview --domain <suffix>` and then the
+  separately confirmed `hack global dns activate --domain <suffix>` for a
+  dedicated custom native suffix. This leaves the v4 wildcard rules untouched.
+  To point the default `*.hack.local` root at the native relay, run
+  `hack doctor --fix`; after confirmation it rewrites only the Hack-managed
+  `.hack.local` dnsmasq line, and `hack global dns deactivate --domain hack.local`
+  restores it. Verify the exact app origin with `hack doctor --browser-url`;
+  DNS setup alone does not validate HTTPS or OAuth.
   Pass `--dev-host` for a per-project hostname; it takes precedence over the
   global default. Existing project hosts and Compose routes are not migrated.
+- On macOS, Safari opens `.hack.local` names directly. Chrome, Firefox and other
+  browsers need the macOS Local Network permission once. See
+  [macOS browser connectivity](macos-browser-network.md) for the reason and for
+  alternatives that avoid `.local`.
 - `hack init` also scaffolds `.hack/hack.env.default.yaml`. See `docs/env.md`.
 - `hack up` starts the stack on an isolated network.
 - `hack open` resolves the routed URL via the global proxy and prefers the OAuth alias when
@@ -117,6 +125,8 @@ Use Doctor to check for missing resolver configuration before starting a new pro
 review the proposed global setup changes rather than removing existing resolver files.
 `.local` has special multicast DNS semantics ([RFC 6762, section 3](https://www.rfc-editor.org/rfc/rfc6762.html#section-3)),
 so generated configuration alone does not establish host or browser reachability.
+On macOS, browsers other than Safari need a one-time Local Network grant for
+`.local` names; see [macOS browser connectivity](macos-browser-network.md).
 Live DNS, route and TLS qualification remains a prerelease acceptance gate.
 
 ## What discovery checks (and what it can't)

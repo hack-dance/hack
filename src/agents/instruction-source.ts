@@ -35,6 +35,10 @@ export const HACK_AGENT_INTEGRATION_CLI_VERSION = (
  * - `skill`: Codex SKILL.md (full content).
  * - `rules`: Cursor `.mdc` rules (lean operational subset).
  * - `primer`: `hack agent prime` session primer (concise subset).
+ *
+ * A section with no surface tags renders only where a focused plugin skill
+ * names its id (see `src/agents/focused-skills.ts`); the broad surfaces never
+ * include it, but it still counts toward the content revision.
  */
 export const INSTRUCTION_SECTIONS: readonly InstructionSection[] = [
   {
@@ -197,6 +201,21 @@ export const INSTRUCTION_SECTIONS: readonly InstructionSection[] = [
     ],
   },
   {
+    id: "diagnose",
+    title: "Read-first diagnosis",
+    surfaces: [],
+    bullets: [
+      "Read before changing anything, in this order, and stop once the cause is clear:",
+      "Step 1, `hack ps --json`: which services exist and their state.",
+      "Step 2, `hack doctor --json`: findings and stable E_* codes.",
+      "Step 3, `hack logs --json --no-follow --tail 200`: a finite snapshot; add a service name to narrow it.",
+      "Step 4, `hack env explain <key> --service <service>`: only when a value is suspect; it reports provenance without the value.",
+      "Step 5, `hack global status`: shared proxy, DNS and logging infrastructure.",
+      "Branch on `error.code`, not on message text; the code is the stable contract and the message may change.",
+      "Report what each read showed before proposing a repair.",
+    ],
+  },
+  {
     id: "lifecycle",
     title: "Lifecycle + startup",
     surfaces: ["docs", "skill"],
@@ -240,8 +259,29 @@ export const INSTRUCTION_SECTIONS: readonly InstructionSection[] = [
       "Layer order: `.hack/hack.env.default.yaml`, the selected `.hack/hack.env.<overlay>.yaml`, then worktree-local `.hack/hack.env.local.yaml` and `.hack/hack.env.<overlay>.local.yaml`; service values override `global`, and host commands apply `host` values last.",
       "Omit `--env` to use the configured default overlay; `--env base` (or `default`/`none`) selects base layers only, the same on every command. An overlay name grants no production authority and no network or instance isolation.",
       "Use `hack env explain <KEY> --env <overlay> --service <service>` for provenance without the value; use `hack env get <KEY>` only when a plaintext value is explicitly needed, and treat its output as secret.",
+      "Store a secret by piping it: `<secret-source> | hack env add <KEY> --service <service> --secret --value-stdin` (or the hidden prompt in a terminal); never pass secret values as command arguments, where shell history and process listings expose them.",
       "Running containers keep the env they were created with; after an env change, refresh with `hack env apply --service <service>` or `hack restart`.",
       "Accepted flags, injection timing and refresh path per command: the command and delivery matrix in Hack's env guide (`docs/env.md` in the Hack repository).",
+    ],
+  },
+  {
+    id: "env-commands",
+    title: "Env commands",
+    surfaces: [],
+    bullets: [
+      "`hack env list --env <overlay> --service <service>` shows the resolved values for one overlay and scope with secret values masked; add `--json` for a machine-readable view.",
+      "`hack env set <key> <value> --local` writes a non-secret value to the worktree-local override file for the selected overlay; drop `--local` only when the request covers the shared, committed overlay.",
+      "`hack env exec --env <overlay> --service <service> -- <cmd...>` runs one host command with the resolved env injected; use `hack env exec --env <overlay> --shell '<command>'` when `$VAR` must expand inside the child shell, and add `--timeout <seconds>` to bound a non-TTY job.",
+      "`hack env apply --env <overlay> --service <service>` recreates that one service so it picks up changed values.",
+    ],
+  },
+  {
+    id: "env-safety",
+    title: "Env safety",
+    surfaces: [],
+    bullets: [
+      "A secret value never goes in command arguments or agent prompts. Store one with `hack env set <key> --secret` and no value, which the user runs in their own terminal and answers at its hidden prompt.",
+      "`hack env get` and `hack env list --show-secrets` are plaintext sinks: run them only when the user asks for the value itself, never to check that a key exists, and do not repeat their output in replies, logs or files.",
     ],
   },
 
@@ -254,6 +294,17 @@ export const INSTRUCTION_SECTIONS: readonly InstructionSection[] = [
       "Target one with `--branch <name>` on up/open/logs/down (for example: `hack up --branch <name> --detach`).",
       "Linked worktrees pick a branch instance automatically (see Linked git worktrees).",
       "Containers in Compose-backed and native image projects receive `HACK_RUNTIME_METADATA` plus `HACK_DEV_URL`, `HACK_ALIAS_URL`, and current-service URL fields derived from effective Caddy routes; authored `.hack/hack.project.json` projects do not receive them yet. Use Compose DNS for internal traffic and this metadata for browser-facing links, OAuth callbacks, and webhooks.",
+    ],
+  },
+  {
+    id: "branch-aliases",
+    title: "Branch aliases",
+    surfaces: [],
+    bullets: [
+      "Aliases are entries in `.hack/hack.branches.json`; `hack up --branch <name>` records or refreshes its entry automatically.",
+      "`hack branch add <name> --note <text>` registers one ahead of time, and `hack branch list` shows each alias with its note and last use.",
+      "`hack branch open <name>` opens that branch's routed host; `hack branch open <name> --prefer <auto|alias|dev>` selects which host.",
+      "`hack branch remove <name>` deletes only the alias entry and leaves any running instance alone; stop the instance with `hack down --branch <name>`.",
     ],
   },
 
@@ -293,24 +344,23 @@ export const INSTRUCTION_SECTIONS: readonly InstructionSection[] = [
     surfaces: ALL_SURFACES,
     bullets: [
       "Ordinary Hack commands, `hack update`, `hack doctor --fix`, and primer hooks never install plugins or mutate agent integration files.",
-      "Use the matching `hack setup` command only for the affected client and authorized project scope; add `--global` only when user-scope changes are authorized. Use `--check` for read-only inspection. Reserve `hack setup sync --all-scopes` for an explicitly requested full refresh.",
+      "Use the matching `hack setup` command only for the affected client and authorized project scope; add `--global` only when user-scope changes are authorized. Use `--check` for read-only inspection. Reserve `hack setup sync --all-scopes` for an explicitly requested full refresh; it refreshes only installed Hack-owned files and creates missing integrations only with `--install-missing`.",
       "Standalone setup and optional native plugins are alternative integration paths. A missing optional integration does not require installation. Verify the replacement loads before explicitly removing duplicate Hack-owned entries; preserve customizations.",
       "CLI upgrades do not authorize integration changes. Edit guidance at its generator source and render the affected targets; restart only if the client cannot reload the changed hooks or skills.",
     ],
   },
   {
     id: "agent-setup",
-    title: "Agent setup (CLI-first)",
+    title: "Agent setup (plugin-first)",
     surfaces: ["docs", "skill", "primer"],
     bullets: [
-      "Cursor rules: `hack setup cursor`",
-      "Claude hooks: `hack setup claude`",
-      "Codex skill: `hack setup codex`",
+      "Default integration: the optional `hack` plugin, installed through the client's plugin manager, ships skills, Claude primer hooks and a Cursor rule. It ships no MCP server, and Hack commands never install plugins.",
+      "MCP is opt-in, only for clients without shell access and only when explicitly selected: add the separate `hack-mcp` plugin, or use `hack setup mcp` (client and scope via `hack mcp install --help`). Do not configure other clients as a side effect.",
+      "Standalone export is an opt-in alternative to the plugin: `hack setup cursor` (rules), `hack setup claude` (hooks and skill), `hack setup codex` (skills) or `hack setup agents` (AGENTS.md/CLAUDE.md snippets). Use one integration path per client.",
+      "Setup and onboarding never write AGENTS.md, CLAUDE.md, rule files, or repository skill copies unless the user asks for them.",
       "Agent-assisted onboarding: `hack init --with claude|codex` (new repos) or `hack agent onboard` (existing projects) print/hand off the full setup prompt; the `/hack-init` skill and the `hack-init` MCP prompt return the same content.",
       "Init prompt: `hack agent init` (use --client cursor|claude|codex to open)",
       "Init patterns: `hack agent patterns`",
-      "MCP (no-shell only): `hack setup mcp`",
-      "MCP install: choose the requested client and scope with `hack mcp install --help`; do not configure other clients as a side effect.",
     ],
   },
 ];
@@ -340,7 +390,7 @@ export function renderInstructionSections(opts: {
   readonly headingStyle: InstructionHeadingStyle;
 }): string {
   const blocks = sectionsForSurface({ surface: opts.surface }).map((section) =>
-    renderSection({ section, headingStyle: opts.headingStyle })
+    renderInstructionSection({ section, headingStyle: opts.headingStyle })
   );
   return blocks.join("\n\n");
 }
@@ -361,7 +411,12 @@ export function normalizeInstructionText(opts: {
     .trim();
 }
 
-function renderSection(opts: {
+/**
+ * Render one canonical section. The `freshness` section also carries the
+ * content revision line, so any render that includes it can be checked for
+ * drift against the canonical source.
+ */
+export function renderInstructionSection(opts: {
   readonly section: InstructionSection;
   readonly headingStyle: InstructionHeadingStyle;
 }): string {

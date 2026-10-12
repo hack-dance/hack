@@ -31,7 +31,10 @@ function missing(error: unknown): boolean {
   );
 }
 
-/** Read a bounded regular file through a non-following descriptor. */
+/**
+ * Read a bounded regular file through a non-following descriptor. The result
+ * is a lossless decoding of strictly valid UTF-8, including any BOM.
+ */
 export async function readStableNativeDnsFile(
   path: string
 ): Promise<string | null> {
@@ -68,7 +71,11 @@ export async function readStableNativeDnsFile(
     ) {
       throw new Error("DNS configuration changed during inspection");
     }
-    return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    // Keep a leading BOM: the string must re-encode to exactly these bytes,
+    // so a rewrite preserves them and hashes of it equal the raw file hash.
+    return new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(
+      bytes
+    );
   } finally {
     await file.close();
   }

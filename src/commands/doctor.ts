@@ -67,6 +67,13 @@ import {
   parseBrowserNetworkOptions,
 } from "../lib/doctor-browser-network.ts";
 import {
+  describeEnvKeyInspection,
+  type EnvKeyInspection,
+  gitListTrackedKeyPaths,
+  inspectProjectEnvKey,
+  resolveEnvKeyCandidates,
+} from "../lib/doctor-env-key.ts";
+import {
   inspectTrackedGeneratedFiles,
   untrackGeneratedFiles,
 } from "../lib/doctor-generated-files.ts";
@@ -93,6 +100,7 @@ import {
   isExplicitlyNonInteractive,
 } from "../lib/interactivity.ts";
 import { findHackLocalCaCertPath } from "../lib/local-ca.ts";
+import { noteBrowserTargetsForLocalNetworkHint } from "../lib/local-network-hint.ts";
 import {
   describeSupersededRoots,
   inspectSupersededMacRoots,
@@ -108,6 +116,17 @@ import {
   inspectNativeCaTrust,
   repairNativeCaTrust,
 } from "../lib/native-ca-doctor.ts";
+import {
+  describeHackLocalRoute,
+  HACK_LOCAL_ROLLBACK_COMMAND,
+  type HackLocalRouteDependencies,
+  type HackLocalRouteReport,
+  inspectHackLocalRoute,
+  printable,
+  repairHackLocalRoute,
+  reportHackLocalRoute,
+} from "../lib/native-hack-local-route.ts";
+import { createNativeHackLocalRouteDependencies } from "../lib/native-hack-local-route-host.ts";
 import { isMac } from "../lib/os.ts";
 import {
   defaultProjectSlugFromPath,
@@ -170,7 +189,14 @@ interface CheckResult {
   readonly message: string;
   /** Counts and public fingerprints only; never paths or keychain contents. */
   readonly supersededRoots?: SupersededRootInventory;
+  /** Native hack.local route state; lines and paths only, never file contents. */
+  readonly hackLocalRoute?: HackLocalRouteReport;
+  /** Closed, value-free env key findings; project-relative subjects only. */
+  readonly envKey?: EnvKeyInspection;
 }
+
+const HACK_LOCAL_ROUTE_CHECK = "native hack.local route";
+const HACK_LOCAL_REPAIR_CHECK = "native hack.local repair";
 
 const SUPERSEDED_ROOTS_CHECK = "superseded caddy roots";
 
@@ -344,6 +370,8 @@ const DOCTOR_SUMMARY_GROUPS = [
       `dnsmasq.conf:${DEFAULT_NEW_PROJECT_TLD}`,
       `dnsmasq.conf:${DEFAULT_OAUTH_ALIAS_ROOT}`,
       "dnsmasq:53",
+      HACK_LOCAL_REPAIR_CHECK,
+      HACK_LOCAL_ROUTE_CHECK,
       "native host dns",
       `dns:${DEFAULT_PROJECT_TLD}`,
       `dns:${DEFAULT_NEW_PROJECT_TLD}`,
@@ -847,6 +875,11 @@ const handleDoctor: CommandHandlerFor<typeof doctorSpec> = async ({
       )
     );
     results.push(
+      await runCheck(s, ENV_KEY_CHECK, () => checkProjectEnvKey({ startDir }), {
+        timeoutMs: 5000,
+      })
+    );
+    results.push(
       await runCheck(
         s,
         "generated files",
@@ -901,16 +934,23 @@ const handleDoctor: CommandHandlerFor<typeof doctorSpec> = async ({
 
   const hasError = results.some((r) => r.status === "error");
 
-  if (json) {
-    return finishDoctorJson({
-      results,
-      hasError,
-    });
+  const reported = await reportDoctorResults({
+    results,
+    hasError,
+    json,
+    browserHintTargets: composeDoctorBrowserHintTargets({
+      url: browser.url,
+      defaultDomain,
+    }),
+    renderHuman: async () => {
+      await renderDoctorSummary(results);
+      emitSlowChecksNote(results);
+      await renderMacNote(results);
+    },
+  });
+  if (reported !== null) {
+    return reported;
   }
-
-  await renderDoctorSummary(results);
-  emitSlowChecksNote(results);
-  await renderMacNote(results);
   if (!args.options.fix) {
     await renderRecoveryGuidance(results);
   }
@@ -930,6 +970,53 @@ const handleDoctor: CommandHandlerFor<typeof doctorSpec> = async ({
 
   return 0;
 };
+
+/**
+ * Compose doctor's browser check concerns the reported origin, else the
+ * default domain.
+ */
+export function composeDoctorBrowserHintTargets(opts: {
+  readonly url: string | null;
+  readonly defaultDomain: string;
+}): readonly string[] {
+  return [opts.url ?? opts.defaultDomain];
+}
+
+/** Native doctor names a browser target only through `--browser-url`. */
+export function nativeDoctorBrowserHintTargets(
+  url: string | null
+): readonly string[] {
+  return url ? [url] : [];
+}
+
+/**
+ * Writes the doctor report, then the macOS Local Network hint for the
+ * browser targets. JSON mode writes the envelope to stdout and returns its
+ * exit code; the hint goes to stderr afterwards, so the payload is unchanged.
+ * Human mode runs `renderHuman` and returns null so the caller continues.
+ * `noteHint` defaults to the process-wide hint; tests inject an emitter.
+ */
+export async function reportDoctorResults(opts: {
+  readonly results: readonly TimedCheckResult[];
+  readonly hasError: boolean;
+  readonly json: boolean;
+  readonly browserHintTargets: readonly string[];
+  readonly renderHuman: () => Promise<void>;
+  readonly noteHint?: (targets: readonly string[]) => boolean;
+}): Promise<number | null> {
+  const noteHint = opts.noteHint ?? noteBrowserTargetsForLocalNetworkHint;
+  if (opts.json) {
+    const code = finishDoctorJson({
+      results: opts.results,
+      hasError: opts.hasError,
+    });
+    noteHint(opts.browserHintTargets);
+    return code;
+  }
+  await opts.renderHuman();
+  noteHint(opts.browserHintTargets);
+  return null;
+}
 
 function resolveDoctorStartDir(pathOption: string | undefined): string {
   return resolve(process.cwd(), pathOption ?? ".");
@@ -1046,6 +1133,16 @@ async function handleNativeDoctor(opts: {
       durationMs: 0,
     });
   }
+  if (isMac()) {
+    results.push(
+      ...(await checkNativeHackLocalRoute({
+        progress,
+        fix: opts.fix,
+        dependencies: () =>
+          createNativeHackLocalRouteDependencies({ runtime: opts.runtime }),
+      }))
+    );
+  }
   if (hostname) {
     results.push(
       await runCheck(
@@ -1072,10 +1169,16 @@ async function handleNativeDoctor(opts: {
   }
   progress.stop(`Native doctor checks complete (${results.length} checks)`);
   const hasError = results.some((result) => result.status === "error");
-  if (opts.json) {
-    return finishDoctorJson({ results, hasError });
+  const reported = await reportDoctorResults({
+    results,
+    hasError,
+    json: opts.json,
+    browserHintTargets: nativeDoctorBrowserHintTargets(opts.browser.url),
+    renderHuman: () => renderDoctorSummary(results),
+  });
+  if (reported !== null) {
+    return reported;
   }
-  await renderDoctorSummary(results);
   if (!opts.browser.url) {
     note(
       "Pass --browser-url https://your-app.hack.local --browser-result works|fails|permission-denied to check an exact app route and record a separate browser observation.",
@@ -1085,6 +1188,81 @@ async function handleNativeDoctor(opts: {
   return hasError ? 1 : 0;
 }
 
+/**
+ * Report, and with --fix authorize and apply, the native hack.local route
+ * repair. Refusals are warnings with a closed reason; only an unexpected
+ * failure is an error.
+ */
+export async function checkNativeHackLocalRoute(opts: {
+  readonly progress: DoctorProgress;
+  readonly fix: boolean;
+  readonly dependencies: () => Promise<HackLocalRouteDependencies>;
+}): Promise<readonly TimedCheckResult[]> {
+  const results: TimedCheckResult[] = [];
+  let deps: HackLocalRouteDependencies;
+  try {
+    deps = await opts.dependencies();
+  } catch (error) {
+    return [
+      {
+        name: HACK_LOCAL_ROUTE_CHECK,
+        status: "warn",
+        message: printable(
+          `Unable to inspect the hack.local route: ${error instanceof Error ? error.message : String(error)}`
+        ),
+        durationMs: 0,
+      },
+    ];
+  }
+  if (opts.fix) {
+    results.push(
+      await runCheck(opts.progress, HACK_LOCAL_REPAIR_CHECK, async () => {
+        const repaired = await repairHackLocalRoute(deps);
+        if (repaired.outcome === "repaired") {
+          return {
+            name: HACK_LOCAL_REPAIR_CHECK,
+            status: "ok",
+            message: printable(
+              `Rewrote "${repaired.receipt.oldLine}" to "${repaired.receipt.newLine}"${
+                repaired.receipt.resolverAction === "create"
+                  ? ` and created ${repaired.receipt.resolverPath}`
+                  : ""
+              }; live DNS verified. Receipt: ${deps.paths.receiptPath}. Undo with: ${HACK_LOCAL_ROLLBACK_COMMAND}`
+            ),
+          };
+        }
+        if (repaired.outcome === "current") {
+          return {
+            name: HACK_LOCAL_REPAIR_CHECK,
+            status: "ok",
+            message:
+              "No repair needed; *.hack.local already routes to the native relay.",
+          };
+        }
+        return {
+          name: HACK_LOCAL_REPAIR_CHECK,
+          status: "warn",
+          message: printable(
+            `Repair refused (${repaired.reason}): ${repaired.detail}`
+          ),
+        };
+      })
+    );
+  }
+  results.push(
+    await runCheck(opts.progress, HACK_LOCAL_ROUTE_CHECK, async () => {
+      const report = reportHackLocalRoute(await inspectHackLocalRoute(deps));
+      return {
+        name: HACK_LOCAL_ROUTE_CHECK,
+        status: report.status === "current" ? "ok" : "warn",
+        message: describeHackLocalRoute(report),
+        hackLocalRoute: report,
+      };
+    })
+  );
+  return results;
+}
+
 export type DoctorJsonCheck = {
   readonly id: string;
   readonly status: CheckStatus;
@@ -1092,6 +1270,10 @@ export type DoctorJsonCheck = {
   readonly durationMs: number;
   /** Present only on the superseded Caddy roots check. */
   readonly supersededRoots?: SupersededRootInventory;
+  /** Present only on the native hack.local route check. */
+  readonly hackLocalRoute?: HackLocalRouteReport;
+  /** Present only on the env key check: closed codes, no key bytes or absolute paths. */
+  readonly envKey?: EnvKeyInspection;
 };
 
 export type DoctorJsonData = {
@@ -1123,6 +1305,10 @@ export function buildDoctorJsonData(opts: {
       ...(result.supersededRoots
         ? { supersededRoots: result.supersededRoots }
         : {}),
+      ...(result.hackLocalRoute
+        ? { hackLocalRoute: result.hackLocalRoute }
+        : {}),
+      ...(result.envKey ? { envKey: result.envKey } : {}),
     })),
     summary: buildDoctorSummaryLines({ results: opts.results }),
     counts,
@@ -2702,6 +2888,47 @@ async function checkWorktreeSecretKeys({
     status: "ok",
     message: `Env key consistent across ${inspection.checkouts.length} checkouts`,
   };
+}
+
+const ENV_KEY_CHECK = "env key";
+
+/** Doctor check result for an env key inspection; message and data stay value-free. */
+export function envKeyCheckResult(inspection: EnvKeyInspection): CheckResult {
+  return {
+    name: ENV_KEY_CHECK,
+    status: inspection.status,
+    message: describeEnvKeyInspection(inspection),
+    envKey: inspection,
+  };
+}
+
+/**
+ * Read-only key-strength and exposure audit (HACK-1127). `--fix` never acts on
+ * it; each finding suggests the exact command instead.
+ */
+async function checkProjectEnvKey({
+  startDir,
+}: {
+  readonly startDir: string;
+}): Promise<CheckResult> {
+  const ctx = await findProjectContext(startDir);
+  if (!ctx) {
+    return {
+      name: ENV_KEY_CHECK,
+      status: "warn",
+      message: `Skipped (no ${HACK_PROJECT_DIR_PRIMARY}/ found)`,
+    };
+  }
+  const inspection = await inspectProjectEnvKey({
+    projectRoot: ctx.projectRoot,
+    candidates: await resolveEnvKeyCandidates({
+      projectRoot: ctx.projectRoot,
+    }),
+    env: process.env,
+    uid: typeof process.getuid === "function" ? process.getuid() : null,
+    listTrackedKeyPaths: gitListTrackedKeyPaths,
+  });
+  return envKeyCheckResult(inspection);
 }
 
 /**

@@ -54,6 +54,7 @@ import {
   acquireNativeManagedEnvFile,
   assertNativeProjectInputRoot,
 } from "./native-project-inputs.ts";
+import { writePrivateEnvFileIfChanged } from "./private-env-file.ts";
 import {
   createPrivateFileExclusive,
   decodeCanonicalBase64,
@@ -80,6 +81,24 @@ const NATIVE_ENV_WORKLOAD_PATTERN = /^[a-z0-9][a-z0-9._-]{0,62}$/;
 const NATIVE_ENV_OVERLAY_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const PROJECT_ENV_KEY_PATTERN = /^[A-Z_][A-Z0-9_]*$/;
 const PROJECT_ENV_SCOPE_PATTERN = /^[a-z0-9][a-z0-9._-]*$/;
+
+/**
+ * Fixed refusals for env key and scope arguments.
+ *
+ * Invariant: these messages never interpolate the rejected argument. A key
+ * argument is often a mistyped `KEY=value` or a value pasted into the key
+ * position, so echoing any part of it could disclose a secret in terminal
+ * output, logs, or CI transcripts.
+ */
+export const ENV_KEY_INVALID_MESSAGE =
+  "Invalid env key: keys must match ^[A-Z_][A-Z0-9_]*$ (for example API_TOKEN). The argument is not shown because it may contain a value.";
+export const ENV_KEY_ASSIGNMENT_MESSAGE =
+  'Invalid env key: the key argument cannot contain "=". Pass only the key (matching ^[A-Z_][A-Z0-9_]*$) and supply secret values with --value-stdin or the hidden prompt. The argument is not shown because it may contain a value.';
+export const ENV_SCOPE_INVALID_MESSAGE =
+  'Invalid env scope: scopes must be "global" or match ^[a-z0-9][a-z0-9._-]*$ (usually a compose service name). The argument is not shown because it may contain a value.';
+export const ENV_SCOPE_UNKNOWN_MESSAGE =
+  "Unknown env scope: the requested scope is not global, a compose service, or a scope in the project env files. The argument is not shown because it may contain a value.";
+const UNKNOWN_SCOPE_LIST_LIMIT = 20;
 const PROJECT_ENV_SECRET_PREFIX = "v1" as const;
 const PROJECT_ENV_ALGORITHM = "aes-256-gcm";
 const PROJECT_ENV_IV_BYTES = 12;
@@ -170,12 +189,40 @@ export function selectProjectEnvValues(opts: {
     return { ...opts.resolved.globalEnv };
   }
 
-  const scoped = opts.resolved.serviceEnv[scopeName];
+  const scoped = Object.hasOwn(opts.resolved.serviceEnv, scopeName)
+    ? opts.resolved.serviceEnv[scopeName]
+    : undefined;
   if (!scoped) {
-    throw new Error(`Unknown env scope: ${scopeName}`);
+    throw new Error(
+      unknownProjectEnvScopeMessage({
+        configuredScopes: Object.keys(opts.resolved.serviceEnv),
+      })
+    );
   }
 
   return { ...scoped };
+}
+
+/**
+ * Fixed refusal for a scope that is not configured. It may list scope names
+ * taken from the project's compose and env files, but never the requested
+ * argument: a mistyped `--service KEY=value` must not be echoed.
+ */
+export function unknownProjectEnvScopeMessage(opts: {
+  readonly configuredScopes: readonly string[];
+}): string {
+  const configured = [
+    "global",
+    ...[...new Set(opts.configuredScopes)]
+      .filter((scope) => scope !== "global")
+      .sort(),
+  ];
+  const shown = configured.slice(0, UNKNOWN_SCOPE_LIST_LIMIT);
+  const more =
+    configured.length > shown.length
+      ? ` (and ${configured.length - shown.length} more)`
+      : "";
+  return `${ENV_SCOPE_UNKNOWN_MESSAGE} Configured scopes: ${shown.join(", ")}${more}.`;
 }
 
 export function selectProjectEnvValuesForExecutionTarget(opts: {
@@ -193,7 +240,10 @@ export function selectProjectEnvValuesForExecutionTarget(opts: {
   const scopeName = normalizeProjectEnvScopeName({
     scopeName: opts.scopeName,
   });
-  return { ...(opts.resolved.hostTargetEnv[scopeName] ?? selected) };
+  const hostTarget = Object.hasOwn(opts.resolved.hostTargetEnv, scopeName)
+    ? opts.resolved.hostTargetEnv[scopeName]
+    : undefined;
+  return { ...(hostTarget ?? selected) };
 }
 
 export function isValidProjectEnvScopeName(opts: {
@@ -219,7 +269,7 @@ export function assertValidProjectEnvScopeName(opts: {
     scopeName: opts.scopeName,
   });
   if (!isValidProjectEnvScopeName({ scopeName })) {
-    throw new Error(`Invalid env scope: ${scopeName}`);
+    throw new Error(ENV_SCOPE_INVALID_MESSAGE);
   }
   return scopeName;
 }
@@ -690,7 +740,9 @@ function parseProjectEnvConfig(opts: {
       if (!PROJECT_ENV_KEY_PATTERN.test(key)) {
         return {
           ok: false,
-          error: `Invalid env key "${key}" in scope "${scope}".`,
+          // The scope is validated above; the key is not echoed because a
+          // malformed entry may hold a pasted value.
+          error: `Invalid env key in scope "${scope}"; keys must match ^[A-Z_][A-Z0-9_]*$.`,
         };
       }
       const normalizedValue = parseProjectEnvStoredValue({ valueRaw });
@@ -930,7 +982,14 @@ export async function resolveProjectEnvValue(opts: {
     !opts.serviceNames.includes(scope) &&
     !Object.hasOwn(layers.merged.values, scope)
   ) {
-    throw new Error("Unknown env scope");
+    throw new Error(
+      unknownProjectEnvScopeMessage({
+        configuredScopes: [
+          ...opts.serviceNames,
+          ...Object.keys(layers.merged.values),
+        ],
+      })
+    );
   }
   const entries = resolveEffectiveStoredEntries({
     layers: layers.envLayers,
@@ -2213,7 +2272,7 @@ export async function setProjectEnvValue(opts: {
   await assertLegacyProjectDirectory({ projectDir: opts.projectDir });
   await assertLegacyProjectInputFamily({ projectRoot: opts.projectRoot });
   if (!PROJECT_ENV_KEY_PATTERN.test(opts.key)) {
-    throw new Error(`Invalid env key: ${opts.key}`);
+    throw new Error(ENV_KEY_INVALID_MESSAGE);
   }
   const scope = assertValidProjectEnvScopeName({
     scopeName: opts.scope,
@@ -2398,7 +2457,10 @@ export async function materializeProjectEnv(opts: {
   const envPath = resolve(opts.projectDir, PROJECT_ENV_FILENAME);
   const text = serializeDotEnv(selectedEnv);
   await assertLegacyProjectDirectory({ projectDir: opts.projectDir });
-  const changed = (await writeTextFileIfChanged(envPath, text)).changed;
+  // Mode 0600, atomic replace; a symlinked .env or .hack is refused.
+  const changed = (
+    await writePrivateEnvFileIfChanged({ envFile: envPath, text })
+  ).changed;
   await ensureDir(
     dirname(resolveProjectEnvStatePath({ projectDir: opts.projectDir }))
   );
@@ -4074,6 +4136,11 @@ export function parseProjectEnvTarget(input: {
   if (trimmed.length === 0) {
     throw new Error("Env key is required.");
   }
+  // Refuse `KEY=value` before any dotted-scope split, so no fragment of the
+  // value can reach a scope or key error. Every refusal below is fixed text.
+  if (trimmed.includes("=")) {
+    throw new Error(ENV_KEY_ASSIGNMENT_MESSAGE);
+  }
 
   const dotIndex = trimmed.lastIndexOf(".");
   if (dotIndex > 0) {
@@ -4084,13 +4151,13 @@ export function parseProjectEnvTarget(input: {
     const key = trimmed.slice(dotIndex + 1).trim();
     assertValidProjectEnvScopeName({ scopeName: scope });
     if (!PROJECT_ENV_KEY_PATTERN.test(key)) {
-      throw new Error(`Invalid env key: ${key}`);
+      throw new Error(ENV_KEY_INVALID_MESSAGE);
     }
     return { scope, key };
   }
 
   if (!PROJECT_ENV_KEY_PATTERN.test(trimmed)) {
-    throw new Error(`Invalid env key: ${trimmed}`);
+    throw new Error(ENV_KEY_INVALID_MESSAGE);
   }
   return {
     scope: assertValidProjectEnvScopeName({

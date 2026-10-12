@@ -8,8 +8,15 @@ name: Bun crash experiment
 # go-ahead.
 #
 # A labeled pull request runs the matched pair on the pull request's head: the
-# 1.3.9 baseline and the 1.4.2 candidate pinned on next, with the same job and
-# budget. A dispatch runs one Bun version at a chosen source revision.
+# 1.3.9 baseline and the 1.4.2 candidate pinned on next, with the same job,
+# budget and the default `focused` mode. A dispatch runs one Bun version at a
+# chosen source revision and mode.
+#
+# Modes: `focused` loops tests/native-https-owner.test.ts, the file in which both
+# original segfaults happened (about 16 s per run); `full` loops the full
+# `bun test` (about 30-35 min per run on hosted macOS); `alternate` alternates
+# the two. The loop never starts a run whose estimate exceeds the remaining
+# budget; it records the command as skipped for budget instead.
 on:
   workflow_dispatch:
     inputs:
@@ -22,9 +29,17 @@ on:
         type: string
         default: ""
       budget_minutes:
-        description: Loop budget in minutes (5-240); the job timeout is budget + 15
+        description: Loop budget in minutes (5-240; full mode needs at least 40); the job timeout is budget + 15
         type: number
         default: 30
+      mode:
+        description: focused loops the owner test file, full loops the full suite, alternate alternates them
+        type: choice
+        options:
+          - focused
+          - full
+          - alternate
+        default: focused
   pull_request:
     types: [labeled]
 
@@ -46,7 +61,8 @@ jobs:
     permissions:
       contents: read
     outputs:
-      bun_versions: ${{ steps.plan.outputs.bun_versions }}
+      runs: ${{ steps.plan.outputs.runs }}
+      mode: ${{ steps.plan.outputs.mode }}
       source_revision: ${{ steps.plan.outputs.source_revision }}
       budget_seconds: ${{ steps.plan.outputs.budget_seconds }}
       timeout_minutes: ${{ steps.plan.outputs.timeout_minutes }}
@@ -58,6 +74,7 @@ jobs:
           INPUT_BUN_VERSION: ${{ inputs.bun_version }}
           INPUT_SOURCE_REVISION: ${{ inputs.source_revision }}
           INPUT_BUDGET_MINUTES: ${{ inputs.budget_minutes }}
+          INPUT_MODE: ${{ inputs.mode }}
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           EVENT_SHA: ${{ github.sha }}
         run: |
@@ -67,13 +84,15 @@ jobs:
               echo "Invalid bun_version"
               exit 1
             fi
-            versions="[\"$INPUT_BUN_VERSION\"]"
+            runs="[{\"bun_version\":\"$INPUT_BUN_VERSION\",\"role\":\"\"}]"
             revision="${INPUT_SOURCE_REVISION:-$EVENT_SHA}"
             budget="$INPUT_BUDGET_MINUTES"
+            mode="$INPUT_MODE"
           else
-            versions='["1.3.9","1.4.2"]'
+            runs='[{"bun_version":"1.3.9","role":"baseline"},{"bun_version":"1.4.2","role":"candidate"}]'
             revision="$PR_HEAD_SHA"
             budget=30
+            mode=focused
           fi
           if ! [[ "$revision" =~ ^[0-9a-f]{40}$ ]]; then
             echo "Invalid source_revision"
@@ -83,20 +102,35 @@ jobs:
             echo "Invalid budget_minutes"
             exit 1
           fi
+          case "$mode" in
+            focused | full | alternate) ;;
+            *)
+              echo "Invalid mode"
+              exit 1
+              ;;
+          esac
+          # The loop's full-suite prior is 40 minutes (DEFAULT_FULL_ESTIMATE_SECONDS
+          # in scripts/bun-crash-loop.ts); a smaller full-mode budget could never
+          # start a run and would only spend hosted macOS minutes on setup.
+          if [ "$mode" = "full" ] && [ "$budget" -lt 40 ]; then
+            echo "full mode needs budget_minutes of at least 40"
+            exit 1
+          fi
           {
-            echo "bun_versions=$versions"
+            echo "runs=$runs"
+            echo "mode=$mode"
             echo "source_revision=$revision"
             echo "budget_seconds=$((budget * 60))"
             echo "timeout_minutes=$((budget + 15))"
           } >> "$GITHUB_OUTPUT"
 
   loop:
-    name: Bun crash loop (${{ matrix.bun_version }})
+    name: Bun crash loop (${{ matrix.bun_version }}, ${{ needs.plan.outputs.mode }})
     needs: plan
     strategy:
       fail-fast: false
       matrix:
-        bun_version: ${{ fromJSON(needs.plan.outputs.bun_versions) }}
+        include: ${{ fromJSON(needs.plan.outputs.runs) }}
     runs-on: blacksmith-6vcpu-macos-15
     timeout-minutes: ${{ fromJSON(needs.plan.outputs.timeout_minutes) }}
     permissions:
@@ -144,15 +178,19 @@ jobs:
           else
             echo "Source revision has no test preflight"
           fi
-      - name: Loop the owner test and the full suite within the budget
+      - name: Loop the selected tests within the budget
         env:
           BUN_ENABLE_CRASH_REPORTING: "0"
           EXPECTED_BUN_VERSION: ${{ matrix.bun_version }}
           SOURCE_REVISION: ${{ needs.plan.outputs.source_revision }}
           BUDGET_SECONDS: ${{ needs.plan.outputs.budget_seconds }}
+          LOOP_MODE: ${{ needs.plan.outputs.mode }}
+          LOOP_ROLE: ${{ matrix.role }}
         run: >-
           bun "$RUNNER_TEMP/bun-crash-instrument/scripts/bun-crash-loop.ts"
           --budget-seconds="$BUDGET_SECONDS"
+          --mode="$LOOP_MODE"
+          ${LOOP_ROLE:+"--role=$LOOP_ROLE"}
           --expect-bun-version="$EXPECTED_BUN_VERSION"
           --source-revision="$SOURCE_REVISION"
           --out-dir="$RUNNER_TEMP/bun-crash-loop"

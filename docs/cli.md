@@ -131,7 +131,9 @@ the Hack CLI version that generated them. Plain `hack agent prime` prints curren
 an integration scan. Use `hack agent prime --check` for an explicit project/global inventory or a
 targeted `hack setup ... --check` when diagnosing drift. Missing optional integrations do not
 require installation. Repair only affected targets within the authorized scope; use
-`hack setup sync --all-scopes` for an explicitly requested full refresh. Read updated guidance after
+`hack setup sync --all-scopes` for an explicitly requested full refresh. Sync refreshes only installed
+Hack-owned integrations; add `--install-missing` to create missing ones (see
+[integration setup](integrations.md#refresh-only-hack-setup-sync)). Read updated guidance after
 repair; restart only if the client cannot reload changed hooks or skills.
 Ordinary commands, `hack update`, and `hack doctor --fix` never render, repair, remove, or otherwise
 mutate integration files. CLI upgrades do not trigger integration updates.

@@ -339,18 +339,36 @@ async function pinNativeProjectImages(opts: {
     spec.image = ensured.image_id;
   }
 }
-function readiness(
-  specs: Record<string, Record<string, unknown>>,
-  initializers: ReadonlySet<string>,
-  routed: ReadonlySet<string>
-): string[] {
+/**
+ * Build `--ready` goals for exactly the services the reviewed plan marks active.
+ *
+ * Compose services outside the selected profiles stay in the normalized specs (they are
+ * still reviewed and pinned), but the runtime does not schedule them and refuses readiness
+ * goals for inactive or unknown services. Dependency edges declared by inactive services
+ * are ignored so they cannot raise an active service's readiness goal.
+ */
+export function nativeReadinessArgs(opts: {
+  readonly specs: Readonly<Record<string, Readonly<Record<string, unknown>>>>;
+  readonly plan: unknown;
+  readonly initializers: ReadonlySet<string>;
+  readonly routed: ReadonlySet<string>;
+}): string[] {
+  const reviewed =
+    isRecord(opts.plan) && isRecord(opts.plan.services)
+      ? opts.plan.services
+      : {};
+  const active = (name: string): boolean => {
+    const service = reviewed[name];
+    return isRecord(service) && service.active === true;
+  };
+  const specs = Object.entries(opts.specs).filter(([name]) => active(name));
   const ready: Record<string, string> = Object.fromEntries(
-    Object.entries(specs).map(([name, spec]) => [
+    specs.map(([name, spec]) => [
       name,
       spec.healthcheck ? "healthy" : "started",
     ])
   );
-  for (const spec of Object.values(specs)) {
+  for (const [, spec] of specs) {
     if (!isRecord(spec.depends_on)) {
       continue;
     }
@@ -366,16 +384,15 @@ function readiness(
       }
     }
   }
-  for (const name of initializers) {
+  for (const name of opts.initializers) {
     ready[name] = "completed";
   }
-  for (const name of routed) {
+  for (const name of opts.routed) {
     ready[name] = "healthy";
   }
-  return Object.entries(ready).flatMap(([name, condition]) => [
-    "--ready",
-    `${name}=${condition}`,
-  ]);
+  return Object.entries(ready)
+    .filter(([name]) => active(name))
+    .flatMap(([name, condition]) => ["--ready", `${name}=${condition}`]);
 }
 function authoritative(
   value: unknown,
@@ -1185,7 +1202,12 @@ export async function startNativeProject(opts: {
                 review.planId,
                 ...nativeSharedSourceFlags(review.report.plan),
                 ...cache.flags,
-                ...readiness(specs, cache.initializers, routes.services),
+                ...nativeReadinessArgs({
+                  specs,
+                  plan: review.report.plan,
+                  initializers: cache.initializers,
+                  routed: routes.services,
+                }),
                 ...routes.flags,
                 "--dependencies",
                 dependencyFile,

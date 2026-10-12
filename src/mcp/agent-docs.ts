@@ -31,6 +31,11 @@ export type AgentDocCheckResult = {
    * marker is a corrupted managed section and is never `unmanaged`.
    */
   readonly unmanaged?: true;
+  /**
+   * Set only when the Hack markers are present but do not form one
+   * start-before-end pair, so the managed section cannot be located safely.
+   */
+  readonly malformed?: true;
 };
 
 export type AgentDocRemoveResult = {
@@ -171,6 +176,7 @@ async function checkAgentDocTarget(opts: {
       path,
       message:
         "Malformed hack agent-docs markers: only one of the start/end markers is present.",
+      malformed: true,
     };
   }
 
@@ -181,6 +187,7 @@ async function checkAgentDocTarget(opts: {
       status: "error",
       path,
       message: "Malformed hack agent-docs markers.",
+      malformed: true,
     };
   }
   if (normalizeInstructionText({ text: region }) !== opts.expected) {

@@ -314,7 +314,16 @@ export async function prepareNativeComposeCommandStorage(opts: {
         // guard. Up and restart can arm other effects before that guard.
         if (operation !== "run") {
           stage = "storage-verify";
-          await verify(generation);
+          // Warm enrollment (no new volume) performs only the read-only
+          // selection compare and cold-absence check above, after the
+          // effect-entry proof of this same generation under this lease. It
+          // may reuse that proof; a receipt write since then changes the
+          // material binding and forces a full proof. A new volume seeds and
+          // always proves in full.
+          await verify(
+            generation,
+            newVolumes.length === 0 ? { adjacentProof: true } : {}
+          );
         }
       } catch (error) {
         retainNativeComposeEffectRefusal(error, {

@@ -18,6 +18,7 @@ import {
   publishNativeComposeStorageWitnessEnrollment,
   runNativeComposeMaterialAction,
 } from "./native-compose-generation.ts";
+import { measureNativeComposePhase } from "./native-compose-phase-trace.ts";
 import {
   type HeldDirectory,
   holdDirectory,
@@ -1274,10 +1275,11 @@ function takeLeaseProof(opts: {
   const recorded = proofs.get(key);
   proofs.delete(key);
   return {
-    /** Run the kernel proof unless an adjacent caller opens with the recorded binding. */
+    /** Run the kernel proof unless an adjacent caller opens with the recorded
+     * binding. Only a performed proof emits the passive `storage.proof` span. */
     async prove(opening: string, run: () => Promise<unknown>): Promise<void> {
       if (!(opts.adjacent && recorded === opening)) {
-        await run();
+        await measureNativeComposePhase("storage.proof", run);
       }
     },
     /** Record a completed proof only when its binding never moved. */

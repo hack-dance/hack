@@ -1261,7 +1261,10 @@ normal browser access.
 With the native backend selected, `hack doctor --json` inspects the active
 frontend owner, the exact Caddy listener and root certificate, and macOS
 System-keychain trust. A retained root file or an older same-name certificate
-does not count as current trust. To check a real app route, pass an exact HTTPS
+does not count as current trust. Doctor also lists superseded Caddy roots still
+in the System keychain, by count and SHA-256 fingerprint. It never removes them;
+see [Superseded Caddy roots](macos-certificate-trust.md#superseded-caddy-roots)
+for the removal steps you run yourself. To check a real app route, pass an exact HTTPS
 origin with `--browser-url`; Doctor verifies that hostname over loopback with
 the live root, checks that every host DNS answer points at its IPv4 loopback
 relay, and reports normal macOS TLS separately. `--browser-result` records

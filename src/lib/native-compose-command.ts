@@ -2,6 +2,7 @@ import { randomBytes } from "node:crypto";
 import type { LogOutputFormat } from "../backends/log-backend.ts";
 import type { RuntimeBaseOptions } from "../backends/runtime-backend.ts";
 import { CliUsageError } from "../cli/command.ts";
+import { resolveRequestedEnvName } from "../cli/env-selection.ts";
 import {
   emitCliResult,
   errorResult,
@@ -135,7 +136,6 @@ import {
 import { waitNativeComposeReady } from "./native-compose-wait-ready.ts";
 import { NativeConfigCompilerError } from "./native-config-compiler.ts";
 import { nativeFilePlanningRequired } from "./native-file-plan-protocol.ts";
-import { parseEnvConfigSelection } from "./project.ts";
 import { run } from "./shell.ts";
 
 type Operation = "up" | "restart" | "down" | "ps" | "logs" | "exec" | "run";
@@ -2319,7 +2319,9 @@ async function dispatchNativeComposeCommand(
   const options = {
     ...input,
     overlay:
-      input.overlay === null ? null : parseEnvConfigSelection(input.overlay),
+      input.overlay === null
+        ? null
+        : resolveRequestedEnvName({ envOption: input.overlay }),
   };
   const adopted = await tryLegacyComposeAdoptedCommand(input);
   if (adopted !== null) {

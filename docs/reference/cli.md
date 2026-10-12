@@ -107,7 +107,7 @@ hack up [services...] [options]
 | --- | --- |
 | `--path, -p <dir>` | Run a project command against a repo path (overrides cwd search) |
 | `--project <name>` | Target a registered project by name (from ~/.hack/projects.json) |
-| `--env <name|base>` | Apply an optional env overlay by name (use 'base' to bypass overlays) |
+| `--env <name|base|default>` | Select an env overlay by name; omit for the configured default overlay, or use 'base' or 'default' for base layers only |
 | `--branch <name>` | Run against a branch-specific instance (compose name + hostnames) |
 | `--detach, -d` | Run in background (docker compose up -d) |
 | `--profile <name[,name...]>` | Enable one or more compose profiles (comma-separated) |
@@ -134,7 +134,7 @@ hack down [options]
 | --- | --- |
 | `--path, -p <dir>` | Run a project command against a repo path (overrides cwd search) |
 | `--project <name>` | Target a registered project by name (from ~/.hack/projects.json) |
-| `--env <name|base>` | Apply an optional env overlay by name (use 'base' to bypass overlays) |
+| `--env <name|base|default>` | Select an env overlay by name; omit for the configured default overlay, or use 'base' or 'default' for base layers only |
 | `--branch <name>` | Run against a branch-specific instance (compose name + hostnames) |
 | `--profile <name[,name...]>` | Enable one or more compose profiles (comma-separated) |
 | `--target <auto|local|remote>` | Execution target routing (auto routes to remote when project execution mode requires it) |
@@ -169,7 +169,7 @@ hack restart [services...] [options]
 | --- | --- |
 | `--path, -p <dir>` | Run a project command against a repo path (overrides cwd search) |
 | `--project <name>` | Target a registered project by name (from ~/.hack/projects.json) |
-| `--env <name|base>` | Apply an optional env overlay by name (use 'base' to bypass overlays) |
+| `--env <name|base|default>` | Select an env overlay by name; omit for the configured default overlay, or use 'base' or 'default' for base layers only |
 | `--branch <name>` | Run against a branch-specific instance (compose name + hostnames) |
 | `--profile <name[,name...]>` | Enable one or more compose profiles (comma-separated) |
 | `--target <auto|local|remote>` | Execution target routing (auto routes to remote when project execution mode requires it) |
@@ -250,7 +250,7 @@ hack run <service> [cmd...] [options]
 | --- | --- |
 | `--path, -p <dir>` | Run a project command against a repo path (overrides cwd search) |
 | `--project <name>` | Target a registered project by name (from ~/.hack/projects.json) |
-| `--env <name|base>` | Apply an optional env overlay by name (use 'base' to bypass overlays) |
+| `--env <name|base|default>` | Select an env overlay by name; omit for the configured default overlay, or use 'base' or 'default' for base layers only |
 | `--branch <name>` | Run against a branch-specific instance (compose name + hostnames) |
 | `--workdir <path>` | Working directory inside the container (docker compose run -w) |
 | `--profile <name[,name...]>` | Enable one or more compose profiles (comma-separated) |
@@ -282,7 +282,7 @@ hack exec <service> [cmd...] [options]
 | --- | --- |
 | `--path, -p <dir>` | Run a project command against a repo path (overrides cwd search) |
 | `--project <name>` | Target a registered project by name (from ~/.hack/projects.json) |
-| `--env <name|base>` | Apply an optional env overlay by name (use 'base' to bypass overlays) |
+| `--env <name|base|default>` | Select an env overlay by name; omit for the configured default overlay, or use 'base' or 'default' for base layers only |
 | `--branch <name>` | Run against a branch-specific instance (compose name + hostnames) |
 | `--workdir <path>` | Working directory inside the container (docker compose run -w) |
 | `--profile <name[,name...]>` | Enable one or more compose profiles (comma-separated) |
@@ -593,7 +593,7 @@ Uses the matching bundled Rust compiler. Without --file, discovers a native proj
 | `--profile <names>` | Comma-separated declared native profiles |
 | `--domain <suffix>` | Select the generated native routing domain suffix |
 | `--path, -p <dir>` | Run a project command against a repo path (overrides cwd search) |
-| `--env <name|base>` | Apply an optional env overlay by name (use 'base' to bypass overlays) |
+| `--env <name|base|default>` | Select an env overlay by name; omit for the configured default overlay, or use 'base' or 'default' for base layers only |
 | `--json` | Output JSON (machine-readable) |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |
@@ -618,7 +618,7 @@ Resolves the native project, permitted local env selection and routing preview, 
 | `--profile <names>` | Comma-separated declared native profiles |
 | `--domain <suffix>` | Select the generated native routing domain suffix |
 | `--path, -p <dir>` | Run a project command against a repo path (overrides cwd search) |
-| `--env <name|base>` | Apply an optional env overlay by name (use 'base' to bypass overlays) |
+| `--env <name|base|default>` | Select an env overlay by name; omit for the configured default overlay, or use 'base' or 'default' for base layers only |
 | `--json` | Output JSON (machine-readable) |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |
@@ -752,7 +752,7 @@ Reuse the default project workspace when it already exists, or create an isolate
 | `--new` | Create an isolated workspace instead of reusing the default project workspace |
 | `--name <value>` | Suffix for an isolated workspace name (for example: agent-1 -> project--agent-1) |
 | `--detach, -d` | Create or reuse the workspace without attaching (for GUI/non-TTY use) |
-| `--env <name|base>` | Apply an optional env overlay by name (use 'base' to bypass overlays) |
+| `--env <name|base|default>` | Select an env overlay by name; omit for the configured default overlay, or use 'base' or 'default' for base layers only |
 | `--service <global|service>` | Inject env for the selected scope (global or a service name) |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |
@@ -831,7 +831,7 @@ Queue a command in the workspace without opening a new interactive attach flow. 
 
 | Option | Description |
 | --- | --- |
-| `--env <name|base>` | Apply an optional env overlay by name (use 'base' to bypass overlays) |
+| `--env <name|base|default>` | Select an env overlay by name; omit for the configured default overlay, or use 'base' or 'default' for base layers only |
 | `--service <global|service>` | Inject env for the selected scope (global or a service name) |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |
@@ -2233,7 +2233,7 @@ hack env list [options]
 | --- | --- |
 | `--path, -p <dir>` | Run a project command against a repo path (overrides cwd search) |
 | `--project <name>` | Target a registered project by name (from ~/.hack/projects.json) |
-| `--env <name|base>` | Apply an optional env overlay by name (use 'base' to bypass overlays) |
+| `--env <name|base|default>` | Select an env overlay by name; omit for the configured default overlay, or use 'base' or 'default' for base layers only |
 | `--json` | Output JSON (machine-readable) |
 | `--show-secrets` | Print secret values (keychain) in plaintext |
 | `--service <global|service>` | Target scope (global or a discovered service name) |
@@ -2265,7 +2265,7 @@ Read one global or service value without starting a runtime. Empty values succee
 | --- | --- |
 | `--path, -p <dir>` | Run a project command against a repo path (overrides cwd search) |
 | `--project <name>` | Target a registered project by name (from ~/.hack/projects.json) |
-| `--env <name|base>` | Apply an optional env overlay by name (use 'base' to bypass overlays) |
+| `--env <name|base|default>` | Select an env overlay by name; omit for the configured default overlay, or use 'base' or 'default' for base layers only |
 | `--service <global|service>` | Target scope (global or a discovered service name) |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |
@@ -2293,7 +2293,7 @@ hack env explain <key> [options]
 | --- | --- |
 | `--path, -p <dir>` | Run a project command against a repo path (overrides cwd search) |
 | `--project <name>` | Target a registered project by name (from ~/.hack/projects.json) |
-| `--env <name|base>` | Apply an optional env overlay by name (use 'base' to bypass overlays) |
+| `--env <name|base|default>` | Select an env overlay by name; omit for the configured default overlay, or use 'base' or 'default' for base layers only |
 | `--json` | Output JSON (machine-readable) |
 | `--service <global|service>` | Target scope (global or a discovered service name) |
 | `--target <host|compose>` | Env view for host commands (default: host rewrites container-oriented addresses for local host execution) |
@@ -2317,7 +2317,7 @@ hack env apply [options]
 | --- | --- |
 | `--path, -p <dir>` | Run a project command against a repo path (overrides cwd search) |
 | `--project <name>` | Target a registered project by name (from ~/.hack/projects.json) |
-| `--env <name|base>` | Apply an optional env overlay by name (use 'base' to bypass overlays) |
+| `--env <name|base|default>` | Select an env overlay by name; omit for the configured default overlay, or use 'base' or 'default' for base layers only |
 | `--json` | Output JSON (machine-readable) |
 | `--service <global|service>` | Target scope (global or a discovered service name) |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
@@ -2347,7 +2347,7 @@ hack env add [key] [value] [options]
 | --- | --- |
 | `--path, -p <dir>` | Run a project command against a repo path (overrides cwd search) |
 | `--project <name>` | Target a registered project by name (from ~/.hack/projects.json) |
-| `--env <name|base>` | Apply an optional env overlay by name (use 'base' to bypass overlays) |
+| `--env <name|base|default>` | Select an env overlay by name; omit for the configured default overlay, or use 'base' or 'default' for base layers only |
 | `--secret` | Store value as an encrypted secure entry |
 | `--local` | Write to the worktree-local env override file instead of the shared repo env file |
 | `--service <global|service>` | Target scope (global or a discovered service name) |
@@ -2378,7 +2378,7 @@ hack env set [key] [value] [options]
 | --- | --- |
 | `--path, -p <dir>` | Run a project command against a repo path (overrides cwd search) |
 | `--project <name>` | Target a registered project by name (from ~/.hack/projects.json) |
-| `--env <name|base>` | Apply an optional env overlay by name (use 'base' to bypass overlays) |
+| `--env <name|base|default>` | Select an env overlay by name; omit for the configured default overlay, or use 'base' or 'default' for base layers only |
 | `--secret` | Store value as an encrypted secure entry |
 | `--local` | Write to the worktree-local env override file instead of the shared repo env file |
 | `--service <global|service>` | Target scope (global or a discovered service name) |
@@ -2402,7 +2402,7 @@ hack env materialize [options]
 | --- | --- |
 | `--path, -p <dir>` | Run a project command against a repo path (overrides cwd search) |
 | `--project <name>` | Target a registered project by name (from ~/.hack/projects.json) |
-| `--env <name|base>` | Apply an optional env overlay by name (use 'base' to bypass overlays) |
+| `--env <name|base|default>` | Select an env overlay by name; omit for the configured default overlay, or use 'base' or 'default' for base layers only |
 | `--service <global|service>` | Target scope (global or a discovered service name) |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |
@@ -2432,7 +2432,7 @@ Inject the selected Hack env overlay directly into a one-off host command withou
 | --- | --- |
 | `--path, -p <dir>` | Run a project command against a repo path (overrides cwd search) |
 | `--project <name>` | Target a registered project by name (from ~/.hack/projects.json) |
-| `--env <name|base>` | Apply an optional env overlay by name (use 'base' to bypass overlays) |
+| `--env <name|base|default>` | Select an env overlay by name; omit for the configured default overlay, or use 'base' or 'default' for base layers only |
 | `--service <global|service>` | Target scope (global or a discovered service name) |
 | `--target <host|compose>` | Env view for host commands (default: host rewrites container-oriented addresses for local host execution) |
 | `--shell <command>` | Run a shell command string via /bin/sh -lc after env injection so `$VAR` expansion happens inside the child shell |
@@ -2460,7 +2460,7 @@ Start an interactive host shell with the selected Hack env overlay injected into
 | --- | --- |
 | `--path, -p <dir>` | Run a project command against a repo path (overrides cwd search) |
 | `--project <name>` | Target a registered project by name (from ~/.hack/projects.json) |
-| `--env <name|base>` | Apply an optional env overlay by name (use 'base' to bypass overlays) |
+| `--env <name|base|default>` | Select an env overlay by name; omit for the configured default overlay, or use 'base' or 'default' for base layers only |
 | `--service <global|service>` | Target scope (global or a discovered service name) |
 | `--target <host|compose>` | Env view for host commands (default: host rewrites container-oriented addresses for local host execution) |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
@@ -2489,7 +2489,7 @@ hack env unset [key] [options]
 | --- | --- |
 | `--path, -p <dir>` | Run a project command against a repo path (overrides cwd search) |
 | `--project <name>` | Target a registered project by name (from ~/.hack/projects.json) |
-| `--env <name|base>` | Apply an optional env overlay by name (use 'base' to bypass overlays) |
+| `--env <name|base|default>` | Select an env overlay by name; omit for the configured default overlay, or use 'base' or 'default' for base layers only |
 | `--local` | Write to the worktree-local env override file instead of the shared repo env file |
 | `--service <global|service>` | Target scope (global or a discovered service name) |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
@@ -2594,7 +2594,7 @@ Run a one-off command on the host with the selected Hack env overlay injected. U
 | --- | --- |
 | `--path, -p <dir>` | Run a project command against a repo path (overrides cwd search) |
 | `--project <name>` | Target a registered project by name (from ~/.hack/projects.json) |
-| `--env <name|base>` | Apply an optional env overlay by name (use 'base' to bypass overlays) |
+| `--env <name|base|default>` | Select an env overlay by name; omit for the configured default overlay, or use 'base' or 'default' for base layers only |
 | `--scope <global|service>` | Resolve values for one env scope while still running the command on the host |
 | `--target <host|compose>` | Env view for host commands (default: host rewrites container-oriented addresses for local host execution) |
 | `--shell <command>` | Run a shell command string via /bin/sh -lc after env injection so `$VAR` expansion happens inside the child shell |
@@ -2622,7 +2622,7 @@ Start an interactive host shell with the selected Hack env overlay injected. Use
 | --- | --- |
 | `--path, -p <dir>` | Run a project command against a repo path (overrides cwd search) |
 | `--project <name>` | Target a registered project by name (from ~/.hack/projects.json) |
-| `--env <name|base>` | Apply an optional env overlay by name (use 'base' to bypass overlays) |
+| `--env <name|base|default>` | Select an env overlay by name; omit for the configured default overlay, or use 'base' or 'default' for base layers only |
 | `--scope <global|service>` | Resolve values for one env scope while still running the command on the host |
 | `--target <host|compose>` | Env view for host commands (default: host rewrites container-oriented addresses for local host execution) |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |

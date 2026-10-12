@@ -77,6 +77,7 @@ import {
   defineOption,
   withHandler,
 } from "../cli/command.ts";
+import { resolveRequestedEnvName } from "../cli/env-selection.ts";
 import {
   optBranch,
   optDetach,
@@ -219,7 +220,6 @@ import {
   findProjectContext,
   findRepoRootForInit,
   type ProjectLifecycleCommand,
-  parseEnvConfigSelection,
   readProjectConfig,
   readProjectDevHost,
   resolveProjectOauthAliasHost,
@@ -674,16 +674,6 @@ export const openCommand = withHandler(openSpec, handleOpen);
 
 function resolveStartDir(ctx: CliContext, pathOpt: string | undefined): string {
   return pathOpt ? resolve(ctx.cwd, pathOpt) : ctx.cwd;
-}
-
-function resolveRequestedEnvName(input: {
-  readonly envOption: string | undefined;
-}): string | null | undefined {
-  const envName = parseEnvConfigSelection(input.envOption);
-  if (input.envOption !== undefined && envName === undefined) {
-    throw new CliUsageError("Invalid --env value.");
-  }
-  return envName;
 }
 
 export function resolveRequestedComposeServices(opts: {

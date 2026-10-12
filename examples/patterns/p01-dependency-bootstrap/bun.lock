@@ -1,0 +1,15 @@
+{
+  "lockfileVersion": 2,
+  "configVersion": 1,
+  "workspaces": {
+    "": {
+      "name": "pattern-p01",
+      "dependencies": {
+        "greeting": "file:./packages/greeting",
+      },
+    },
+  },
+  "packages": {
+    "greeting": ["greeting@file:packages/greeting", {}],
+  }
+}

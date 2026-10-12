@@ -199,10 +199,11 @@ Hack writes `.hack/.env` and `.hack/.env.<overlay>` (from `materialize`, legacy
 `hack env set`, and the daemon env route) with mode `0600` by atomic replace: a
 private temporary file in `.hack/` is written, fsynced and renamed over the target,
 so readers never see a partial file. An existing file with group or other access is
-tightened to `0600` even when its contents are unchanged. Hack refuses, with a fixed
-message that names no file or value, to read or write an env file that is a symlink
+tightened to `0600` even when its contents are unchanged. These write and update paths
+refuse, with a fixed message that names no file or value, an env file that is a symlink
 (including a dangling one) or not a regular file, or one whose `.hack` directory is a
-symlink. Replace the link with a regular file or directory to continue.
+symlink. Replace the link with a regular file or directory to continue. Code paths
+that only read an env file do not apply this check and still follow a symlink.
 
 For host execution, `hack host exec`, `hack host shell`, and lifecycle hooks/processes use a host-local view.
 That means Hack prefers host-usable values when it can:

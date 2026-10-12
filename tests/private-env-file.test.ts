@@ -22,6 +22,7 @@ import {
 } from "../src/constants.ts";
 import { removeDotEnvKey, upsertDotEnvValue } from "../src/lib/hack-env.ts";
 import { PRIVATE_ENV_FILE_REFUSAL } from "../src/lib/private-env-file.ts";
+import { replacePrivateFileAtomic } from "../src/lib/private-file.ts";
 import {
   materializeProjectEnv,
   setProjectEnvValue,
@@ -355,4 +356,36 @@ test("negative control: materializeProjectEnv refuses a symlinked .hack/.env tar
   );
   expect(await readFile(project.outsideFile, "utf8")).toBe(OUTSIDE_TEXT);
   expect((await lstat(project.envFile)).isSymbolicLink()).toBe(true);
+});
+
+test("negative control: replacePrivateFileAtomic itself refuses a symlinked target without the read guard", async () => {
+  const project = await createProject();
+  const danglingTarget = resolve(
+    project.projectRoot,
+    "..",
+    "never-created.env"
+  );
+  const danglingLink = `${project.envFile}.dangling`;
+  await symlink(project.outsideFile, project.envFile);
+  await symlink(danglingTarget, danglingLink);
+
+  // Called directly, so the earlier O_NOFOLLOW read in the env-file callers
+  // cannot mask a missing check in the replace step.
+  for (const path of [project.envFile, danglingLink]) {
+    expectClosedRefusal(
+      await caught(
+        replacePrivateFileAtomic({
+          path,
+          directories: [project.projectDir],
+          text: `${SENTINEL_KEY}=${SENTINEL_VALUE}\n`,
+          refusal: () => new Error(PRIVATE_ENV_FILE_REFUSAL),
+        })
+      ),
+      [path, project.outsideFile, danglingTarget]
+    );
+    expect((await lstat(path)).isSymbolicLink()).toBe(true);
+  }
+  expect(await readFile(project.outsideFile, "utf8")).toBe(OUTSIDE_TEXT);
+  await expect(lstat(danglingTarget)).rejects.toThrow();
+  expect(await stagingLeftovers(project.projectDir)).toEqual([]);
 });

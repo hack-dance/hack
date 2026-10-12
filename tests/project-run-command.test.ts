@@ -12,6 +12,9 @@ import { registerScopedModuleMock } from "./helpers/scoped-module-mock.ts";
 
 const runCalls: Array<{
   readonly composeFiles: readonly string[];
+  readonly composeProject: string | null | undefined;
+  readonly service: string;
+  readonly cmdArgs: readonly string[];
   readonly env: Record<string, string> | undefined;
   readonly noDeps: boolean | undefined;
 }> = [];
@@ -36,11 +39,17 @@ const runtimeBackendMock = await registerScopedModuleMock({
       ps: async () => 0,
       run: async (opts: {
         readonly composeFiles: readonly string[];
+        readonly composeProject?: string | null;
+        readonly service: string;
+        readonly cmdArgs: readonly string[];
         readonly env?: Record<string, string>;
         readonly noDeps?: boolean;
       }) => {
         runCalls.push({
           composeFiles: [...opts.composeFiles],
+          composeProject: opts.composeProject,
+          service: opts.service,
+          cmdArgs: [...opts.cmdArgs],
           env: opts.env ? { ...opts.env } : undefined,
           noDeps: opts.noDeps,
         });
@@ -68,6 +77,7 @@ const loggerMock = await registerScopedModuleMock({
 });
 
 const { runCommand } = await import("../src/commands/project.ts");
+const { runCli } = await import("../src/cli/run.ts");
 
 beforeAll(() => {
   runtimeBackendMock.activate();
@@ -115,6 +125,33 @@ test("run reaches the runtime without writing a contended registry", async () =>
   expect(await Bun.file(resolve(registryRoot, "projects.json")).exists()).toBe(
     false
   );
+});
+
+test("hack run -- passes child flags intact and keeps the default compose project", async () => {
+  const projectRoot = await createProject();
+  // Without `--`, hack would consume --version (print and exit) and --branch
+  // (retarget the instance); the MCP run tool relies on this boundary.
+  const exitCode = await runCli([
+    "run",
+    `--path=${projectRoot}`,
+    "--",
+    "api",
+    "node",
+    "--version",
+    "--branch",
+    "other",
+  ]);
+
+  expect(exitCode).toBe(0);
+  expect(runCalls).toHaveLength(1);
+  expect(runCalls[0]?.service).toBe("api");
+  expect(runCalls[0]?.cmdArgs).toEqual([
+    "node",
+    "--version",
+    "--branch",
+    "other",
+  ]);
+  expect(runCalls[0]?.composeProject).toBeNull();
 });
 
 async function runPrintenv({

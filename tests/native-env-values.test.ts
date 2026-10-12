@@ -508,6 +508,29 @@ for (const kind of [
   });
 }
 
+// GCM verifies a truncated tag unless the tag length is pinned; both owners pin 16 bytes.
+for (const kind of ["truncated-tag", "noncanonical-base64"] as const) {
+  test(`authentic ciphertext with a ${kind} refuses with fixed redacted diagnostics`, async () => {
+    const p = await project();
+    await fs.writeFile(join(p, PROJECT_ENV_KEY_FILENAME), KEY);
+    const authentic = await encrypted();
+    if (!(isRecord(authentic) && typeof authentic.secure === "string")) {
+      throw new Error("Synthetic ciphertext absent");
+    }
+    const [prefix, iv, tag = "", ciphertext] = authentic.secure.split(":");
+    const changedTag =
+      kind === "truncated-tag"
+        ? Buffer.from(tag, "base64").subarray(0, 12).toString("base64")
+        : ` ${tag}`;
+    await layer(p, "hack.env.default.yaml", {
+      global: {
+        SECRET: { secure: [prefix, iv, changedTag, ciphertext].join(":") },
+      },
+    });
+    await refuses(() => values(p));
+  });
+}
+
 test("an encrypted empty value preserves presence", async () => {
   const p = await project();
   await fs.writeFile(join(p, PROJECT_ENV_KEY_FILENAME), KEY);

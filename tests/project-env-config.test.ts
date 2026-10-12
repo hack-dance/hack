@@ -10,6 +10,7 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { YAML } from "bun";
 
 import {
   PROJECT_COMPOSE_FILENAME,
@@ -1547,4 +1548,208 @@ test("Compose env repair rechecks native selection after reading the repair inpu
     })
   ).rejects.toThrow("E_NATIVE_PROJECT_CONFLICT");
   expect(await readFile(repo.composeFile, "utf8")).toBe(contents);
+});
+
+const ENVELOPE_KEY = "synthetic-envelope-key-for-tests-only";
+const ENVELOPE_SENTINEL = "synthetic-envelope-plaintext-never-in-errors";
+
+type EnvelopeParts = {
+  readonly iv: Buffer;
+  readonly tag: Buffer;
+  readonly ciphertext: Buffer;
+};
+
+/** Encrypts the sentinel with the real mutation owner and returns the v1 value. */
+async function encryptedEnvelopeFixture(): Promise<{
+  readonly repo: Awaited<ReturnType<typeof createRepo>>;
+  readonly secure: string;
+}> {
+  const repo = await createRepo();
+  await writeFile(
+    resolve(repo.projectRoot, PROJECT_ENV_KEY_FILENAME),
+    `${ENVELOPE_KEY}\n`
+  );
+  await setProjectEnvValue({
+    projectRoot: repo.projectRoot,
+    projectDir: repo.projectDir,
+    envName: null,
+    scope: "global",
+    key: "TOKEN",
+    value: ENVELOPE_SENTINEL,
+    secret: true,
+  });
+  const parsed: unknown = YAML.parse(
+    await readFile(resolve(repo.projectDir, "hack.env.default.yaml"), "utf8")
+  );
+  const secure = (
+    parsed as { values?: { global?: { TOKEN?: { secure?: unknown } } } }
+  ).values?.global?.TOKEN?.secure;
+  if (typeof secure !== "string") {
+    throw new Error("missing synthetic envelope");
+  }
+  return { repo, secure };
+}
+
+function envelopeParts(secure: string): EnvelopeParts {
+  const [, iv = "", tag = "", ciphertext = ""] = secure.split(":");
+  return {
+    iv: Buffer.from(iv, "base64"),
+    tag: Buffer.from(tag, "base64"),
+    ciphertext: Buffer.from(ciphertext, "base64"),
+  };
+}
+
+function envelope(parts: EnvelopeParts): string {
+  return [
+    "v1",
+    parts.iv.toString("base64"),
+    parts.tag.toString("base64"),
+    parts.ciphertext.toString("base64"),
+  ].join(":");
+}
+
+async function writeSecureValue(opts: {
+  readonly repo: Awaited<ReturnType<typeof createRepo>>;
+  readonly secure: string;
+}): Promise<void> {
+  await writeFile(
+    resolve(opts.repo.projectDir, "hack.env.default.yaml"),
+    JSON.stringify({
+      version: 1,
+      environment: "default",
+      secretsprovider: "project_key",
+      values: { global: { TOKEN: { secure: opts.secure } } },
+    })
+  );
+}
+
+const ENVELOPE_MUTATIONS: ReadonlyArray<
+  readonly [string, (secure: string) => string]
+> = [
+  ...[4, 8, 12].map(
+    (bytes) =>
+      [
+        `${bytes}-byte tag`,
+        (secure: string) => {
+          const parts = envelopeParts(secure);
+          return envelope({ ...parts, tag: parts.tag.subarray(0, bytes) });
+        },
+      ] as const
+  ),
+  [
+    "16-byte IV",
+    (secure) => {
+      const parts = envelopeParts(secure);
+      return envelope({
+        ...parts,
+        iv: Buffer.concat([parts.iv, Buffer.alloc(4)]),
+      });
+    },
+  ],
+  [
+    "base64 with !",
+    (secure) => {
+      const [prefix, iv, tag, ciphertext = ""] = secure.split(":");
+      return [prefix, iv, tag, `!${ciphertext.slice(1)}`].join(":");
+    },
+  ],
+  [
+    "base64 with whitespace",
+    (secure) => {
+      const [prefix, iv = "", tag, ciphertext] = secure.split(":");
+      return [prefix, `${iv.slice(0, 4)} ${iv.slice(4)}`, tag, ciphertext].join(
+        ":"
+      );
+    },
+  ],
+  [
+    "truncated ciphertext",
+    (secure) => {
+      const parts = envelopeParts(secure);
+      return envelope({
+        ...parts,
+        ciphertext: parts.ciphertext.subarray(0, -1),
+      });
+    },
+  ],
+  [
+    "bit-flipped ciphertext",
+    (secure) => {
+      const parts = envelopeParts(secure);
+      const ciphertext = Buffer.from(parts.ciphertext);
+      ciphertext[0] = (ciphertext[0] ?? 0) ^ 1;
+      return envelope({ ...parts, ciphertext });
+    },
+  ],
+  [
+    "oversized ciphertext",
+    (secure) =>
+      envelope({
+        ...envelopeParts(secure),
+        ciphertext: Buffer.alloc(1024 * 1024 + 1, 7),
+      }),
+  ],
+];
+
+for (const [name, mutate] of ENVELOPE_MUTATIONS) {
+  test(`legacy secure env value with ${name} refuses with a fixed redacted error`, async () => {
+    const { repo, secure } = await encryptedEnvelopeFixture();
+    const mutated = mutate(secure);
+    expect(mutated).not.toBe(secure);
+    await writeSecureValue({ repo, secure: mutated });
+
+    const error = await resolveProjectEnvConfig({
+      projectRoot: repo.projectRoot,
+      projectDir: repo.projectDir,
+      envName: null,
+      serviceNames: ["api"],
+    }).then(
+      () => null,
+      (caught: unknown) => caught
+    );
+
+    expect(error).toBeInstanceOf(Error);
+    const message = error instanceof Error ? error.message : "";
+    expect(message).toBe("Invalid secure env value.");
+    for (const privateText of [ENVELOPE_SENTINEL, ENVELOPE_KEY]) {
+      expect(String(error)).not.toContain(privateText);
+    }
+  });
+}
+
+test("legacy secure env value with the wrong key refuses with the same fixed error", async () => {
+  const { repo } = await encryptedEnvelopeFixture();
+  await writeFile(
+    resolve(repo.projectRoot, PROJECT_ENV_KEY_FILENAME),
+    "synthetic-wrong-key\n"
+  );
+  await expect(
+    resolveProjectEnvConfig({
+      projectRoot: repo.projectRoot,
+      projectDir: repo.projectDir,
+      envName: null,
+      serviceNames: ["api"],
+    })
+  ).rejects.toThrow("Invalid secure env value.");
+});
+
+test("legacy v1 secure values round-trip, including the empty value", async () => {
+  const { repo } = await encryptedEnvelopeFixture();
+  await setProjectEnvValue({
+    projectRoot: repo.projectRoot,
+    projectDir: repo.projectDir,
+    envName: null,
+    scope: "global",
+    key: "EMPTY",
+    value: "",
+    secret: true,
+  });
+  const resolved = await resolveProjectEnvConfig({
+    projectRoot: repo.projectRoot,
+    projectDir: repo.projectDir,
+    envName: null,
+    serviceNames: ["api"],
+  });
+  expect(resolved?.globalEnv.TOKEN).toBe(ENVELOPE_SENTINEL);
+  expect(resolved?.globalEnv.EMPTY).toBe("");
 });

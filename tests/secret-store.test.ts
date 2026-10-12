@@ -300,6 +300,158 @@ test("encrypted_file backend returns recovery guidance when key material is miss
   await expect(access(keyPath)).rejects.toThrow();
 });
 
+const STORE_KEY = "synthetic-store-key-for-tests-only";
+const STORE_SENTINEL = "synthetic-store-value-never-in-errors";
+
+type StoreEnvelope = {
+  readonly version: number;
+  readonly algorithm: string;
+  readonly iv: string;
+  readonly tag: string;
+  readonly ciphertext: string;
+};
+
+/** Writes one sentinel entry through the real store and returns its envelope. */
+async function encryptedStoreFixture(): Promise<{
+  readonly storePath: string;
+  readonly envelope: StoreEnvelope;
+}> {
+  if (!tempDir) {
+    throw new Error("Missing temp dir");
+  }
+  process.env.HACK_SECRETS_FILE_KEY = STORE_KEY;
+  const storePath = join(tempDir, "secrets.enc.json");
+  await writeGlobalConfig({
+    value: {
+      controlPlane: {
+        secrets: {
+          backend: "encrypted_file",
+          encryptedFile: { path: storePath },
+        },
+      },
+    },
+  });
+  const store = await resolveSecretStore({ projectName: "app" });
+  await store.set({ key: "TOKEN", value: STORE_SENTINEL });
+  await store.set({ key: "EMPTY", value: "" });
+  const envelope = JSON.parse(
+    await readFile(storePath, "utf8")
+  ) as StoreEnvelope;
+  return { storePath, envelope };
+}
+
+function reencode(
+  envelope: StoreEnvelope,
+  field: "iv" | "tag" | "ciphertext",
+  change: (bytes: Buffer) => Buffer
+): StoreEnvelope {
+  return {
+    ...envelope,
+    [field]: change(Buffer.from(envelope[field], "base64")).toString("base64"),
+  };
+}
+
+const STORE_MUTATIONS: ReadonlyArray<
+  readonly [string, (envelope: StoreEnvelope) => StoreEnvelope]
+> = [
+  ...[4, 8, 12].map(
+    (bytes) =>
+      [
+        `${bytes}-byte tag`,
+        (envelope: StoreEnvelope) =>
+          reencode(envelope, "tag", (tag) => tag.subarray(0, bytes)),
+      ] as const
+  ),
+  [
+    "16-byte IV",
+    (envelope) =>
+      reencode(envelope, "iv", (iv) => Buffer.concat([iv, Buffer.alloc(4)])),
+  ],
+  [
+    "base64 with !",
+    (envelope) => ({
+      ...envelope,
+      ciphertext: `!${envelope.ciphertext.slice(1)}`,
+    }),
+  ],
+  [
+    "base64 with whitespace",
+    (envelope) => ({
+      ...envelope,
+      tag: `${envelope.tag.slice(0, 4)}\n${envelope.tag.slice(4)}`,
+    }),
+  ],
+  [
+    "truncated ciphertext",
+    (envelope) =>
+      reencode(envelope, "ciphertext", (ciphertext) =>
+        ciphertext.subarray(0, -1)
+      ),
+  ],
+  [
+    "bit-flipped ciphertext",
+    (envelope) =>
+      reencode(envelope, "ciphertext", (ciphertext) => {
+        const flipped = Buffer.from(ciphertext);
+        flipped[0] = (flipped[0] ?? 0) ^ 1;
+        return flipped;
+      }),
+  ],
+  [
+    "oversized ciphertext",
+    (envelope) => ({
+      ...envelope,
+      ciphertext: Buffer.alloc(16 * 1024 * 1024 + 1, 7).toString("base64"),
+    }),
+  ],
+];
+
+for (const [name, mutate] of STORE_MUTATIONS) {
+  test(`encrypted_file envelope with ${name} refuses with a fixed redacted error`, async () => {
+    const { storePath, envelope } = await encryptedStoreFixture();
+    const mutated = mutate(envelope);
+    expect(mutated).not.toEqual(envelope);
+    await writeFile(storePath, `${JSON.stringify(mutated)}\n`);
+
+    const store = await resolveSecretStore({ projectName: "app" });
+    const error = await store.get({ key: "TOKEN" }).then(
+      () => null,
+      (caught: unknown) => caught
+    );
+
+    expect(error).toBeInstanceOf(Error);
+    const message = error instanceof Error ? error.message : "";
+    expect(message).toMatch(
+      /^(Invalid encrypted secret store payload|Cannot decrypt encrypted secret store) at /
+    );
+    for (const privateText of [STORE_SENTINEL, STORE_KEY]) {
+      expect(String(error)).not.toContain(privateText);
+    }
+  });
+}
+
+test("encrypted_file envelope with the wrong key refuses with a fixed redacted error", async () => {
+  await encryptedStoreFixture();
+  process.env.HACK_SECRETS_FILE_KEY = "synthetic-wrong-store-key";
+  const store = await resolveSecretStore({ projectName: "app" });
+  const error = await store.get({ key: "TOKEN" }).then(
+    () => null,
+    (caught: unknown) => caught
+  );
+  expect(error).toBeInstanceOf(Error);
+  expect(String(error)).toContain("Cannot decrypt encrypted secret store at ");
+  expect(String(error)).not.toContain(STORE_SENTINEL);
+});
+
+test("encrypted_file v1 envelope round-trips, including the empty value", async () => {
+  const { envelope } = await encryptedStoreFixture();
+  expect(Buffer.from(envelope.iv, "base64").length).toBe(12);
+  expect(Buffer.from(envelope.tag, "base64").length).toBe(16);
+  const store = await resolveSecretStore({ projectName: "app" });
+  expect(await store.get({ key: "TOKEN" })).toBe(STORE_SENTINEL);
+  expect(await store.get({ key: "EMPTY" })).toBe("");
+});
+
 async function writeGlobalConfig(input: {
   readonly value: Record<string, unknown>;
 }): Promise<void> {

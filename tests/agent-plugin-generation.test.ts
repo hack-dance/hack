@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { cp, mkdir, mkdtemp, rm, symlink } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readdir, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -13,6 +13,7 @@ import { renderCodexSkill } from "../src/agents/codex-skill.ts";
 import { renderHackInitSkill } from "../src/agents/hack-init-skill.ts";
 import { renderHackInstallSkill } from "../src/agents/install-skill.ts";
 import { renderHackRemoteSkill } from "../src/agents/remote-bootstrap-skill.ts";
+import { isRecord } from "../src/lib/guards.ts";
 
 const repoRoot = join(import.meta.dir, "..");
 
@@ -216,4 +217,263 @@ test("release preparation updates both manifests and rendered guidance after bum
   ).text();
   expect(skill).toContain("hack CLI v9.8.7");
   expect(skill).not.toContain("hack CLI v0.0.1");
+}, 15_000);
+
+interface PolicyFinding {
+  readonly file: string;
+  readonly code:
+    | "model-setting"
+    | "permission-setting"
+    | "output-style-setting"
+    | "frontmatter-hooks"
+    | "hook-command";
+}
+
+const HOOK_COMMAND = "hack agent prime";
+
+/** Model, permission and output-style policy belongs to the user's provider
+ * configuration, never to Hack-shipped artifacts. */
+function forbiddenSettingCode(key: string): PolicyFinding["code"] | null {
+  const normalized = key.toLowerCase().replace(/[^a-z]/g, "");
+  if (normalized.startsWith("model") || normalized.endsWith("model")) {
+    return "model-setting";
+  }
+  if (
+    normalized.includes("permission") ||
+    normalized.includes("approval") ||
+    normalized.startsWith("sandbox") ||
+    normalized === "allowedtools" ||
+    normalized === "disallowedtools" ||
+    normalized === "yolo"
+  ) {
+    return "permission-setting";
+  }
+  if (normalized.includes("outputstyle")) {
+    return "output-style-setting";
+  }
+  return null;
+}
+
+/** Hook entries may only run the session primer as a plain command. */
+function hasDisallowedHook(value: unknown): boolean {
+  if (Array.isArray(value)) {
+    return value.some(hasDisallowedHook);
+  }
+  if (!isRecord(value)) {
+    return false;
+  }
+  if (
+    ("type" in value || "command" in value) &&
+    !(value.type === "command" && value.command === HOOK_COMMAND)
+  ) {
+    return true;
+  }
+  return Object.values(value).some(hasDisallowedHook);
+}
+
+function structuredPolicyFindings(
+  file: string,
+  value: unknown
+): PolicyFinding[] {
+  if (Array.isArray(value)) {
+    return value.flatMap((item) => structuredPolicyFindings(file, item));
+  }
+  if (!isRecord(value)) {
+    return [];
+  }
+  const findings: PolicyFinding[] = [];
+  for (const [key, nested] of Object.entries(value)) {
+    const code = forbiddenSettingCode(key);
+    if (code) {
+      findings.push({ file, code });
+    }
+    if (key === "hooks" && hasDisallowedHook(nested)) {
+      findings.push({ file, code: "hook-command" });
+    }
+    findings.push(...structuredPolicyFindings(file, nested));
+  }
+  return findings;
+}
+
+function frontmatterKeys(text: string): string[] {
+  const match = /^---\n([\s\S]*?)\n---/.exec(text);
+  if (!match?.[1]) {
+    return [];
+  }
+  return match[1]
+    .split("\n")
+    .map((line) => /^([A-Za-z0-9_-]+):/.exec(line)?.[1])
+    .filter((key): key is string => key !== undefined);
+}
+
+/** Classify one shipped file with closed codes; never report file content. */
+function policyFindings(file: string, text: string): PolicyFinding[] {
+  const findings: PolicyFinding[] = [];
+  const name = file.split("/").at(-1) ?? file;
+  if (file.split("/").some((part) => /^output[-_]?styles?$/i.test(part))) {
+    findings.push({ file, code: "output-style-setting" });
+  }
+  if (name.endsWith(".json")) {
+    findings.push(...structuredPolicyFindings(file, JSON.parse(text)));
+  } else if (name.endsWith(".jsonl")) {
+    for (const line of text.split("\n").filter((entry) => entry.trim())) {
+      findings.push(...structuredPolicyFindings(file, JSON.parse(line)));
+    }
+  } else if (name.endsWith(".toml")) {
+    findings.push(...structuredPolicyFindings(file, Bun.TOML.parse(text)));
+  } else if (name.endsWith(".md") || name.endsWith(".mdc")) {
+    for (const key of frontmatterKeys(text)) {
+      const code = forbiddenSettingCode(key);
+      if (code) {
+        findings.push({ file, code });
+      }
+      if (key.toLowerCase() === "hooks") {
+        findings.push({ file, code: "frontmatter-hooks" });
+      }
+    }
+  }
+  return findings;
+}
+
+test("plugin bundle and examples never pin models, override permissions or run other hooks", async () => {
+  const findings: PolicyFinding[] = [];
+  let scanned = 0;
+  for (const root of ["plugins/hack", "examples/basic"]) {
+    const glob = new Bun.Glob("**/*");
+    for await (const relative of glob.scan({
+      cwd: join(repoRoot, root),
+      dot: true,
+      onlyFiles: true,
+    })) {
+      const file = `${root}/${relative}`;
+      findings.push(
+        ...policyFindings(file, await Bun.file(join(repoRoot, file)).text())
+      );
+      scanned += 1;
+    }
+  }
+  expect(scanned).toBeGreaterThan(10);
+  expect(findings).toEqual([]);
+  expect(
+    await Bun.file(
+      join(repoRoot, "plugins/hack/hooks/claude-hooks.json")
+    ).text()
+  ).toContain(HOOK_COMMAND);
+});
+
+test("negative control: the policy scan rejects each forbidden setting", () => {
+  const cases: readonly (readonly [string, string, PolicyFinding["code"]])[] = [
+    ["plugin.json", JSON.stringify({ model: "opus" }), "model-setting"],
+    [
+      "settings.json",
+      JSON.stringify({ env: { x: "1" }, modelOverride: "x" }),
+      "model-setting",
+    ],
+    ["config.toml", 'model = "gpt-5"\n', "model-setting"],
+    ["config.toml", 'model_reasoning_effort = "high"\n', "model-setting"],
+    ["config.toml", 'approval_policy = "never"\n', "permission-setting"],
+    [
+      "config.toml",
+      'sandbox_mode = "danger-full-access"\n',
+      "permission-setting",
+    ],
+    [
+      "settings.json",
+      JSON.stringify({ permissions: { defaultMode: "bypassPermissions" } }),
+      "permission-setting",
+    ],
+    [
+      "settings.json",
+      JSON.stringify({ outputStyle: "Explanatory" }),
+      "output-style-setting",
+    ],
+    ["output-styles/hack.md", "# Style\n", "output-style-setting"],
+    ["skills/x/SKILL.md", "---\nname: x\nmodel: opus\n---\n", "model-setting"],
+    [
+      "skills/x/SKILL.md",
+      "---\nname: x\nallowed-tools: Bash\n---\n",
+      "permission-setting",
+    ],
+    [
+      "skills/x/SKILL.md",
+      "---\nname: x\nhooks:\n  Stop: []\n---\n",
+      "frontmatter-hooks",
+    ],
+    [
+      "hooks/claude-hooks.json",
+      JSON.stringify({
+        hooks: {
+          SessionStart: [
+            {
+              hooks: [
+                { type: "command", command: `${HOOK_COMMAND}; curl example` },
+              ],
+            },
+          ],
+        },
+      }),
+      "hook-command",
+    ],
+    [
+      "hooks/claude-hooks.json",
+      JSON.stringify({
+        hooks: { Stop: [{ hooks: [{ type: "prompt", prompt: "x" }] }] },
+      }),
+      "hook-command",
+    ],
+  ];
+  for (const [file, text, code] of cases) {
+    expect(policyFindings(file, text).map((finding) => finding.code)).toContain(
+      code
+    );
+  }
+  expect(
+    policyFindings(
+      "hooks/claude-hooks.json",
+      JSON.stringify({
+        hooks: {
+          SessionStart: [
+            {
+              matcher: "",
+              hooks: [{ type: "command", command: HOOK_COMMAND }],
+            },
+          ],
+        },
+      })
+    )
+  ).toEqual([]);
+});
+
+test("shipped skill inventory matches the generator and the integration doc", async () => {
+  tempDir = await mkdtemp(join(tmpdir(), "hack-agent-skills-"));
+  const pluginRoot = join(tempDir, "plugins", "hack");
+  for (const directory of [
+    ".codex-plugin",
+    ".claude-plugin",
+    ".cursor-plugin",
+  ]) {
+    await mkdir(join(pluginRoot, directory), { recursive: true });
+    await cp(
+      join(repoRoot, "plugins/hack", directory, "plugin.json"),
+      join(pluginRoot, directory, "plugin.json")
+    );
+  }
+  await cp(
+    join(repoRoot, "plugins/hack/.mcp.json"),
+    join(pluginRoot, ".mcp.json")
+  );
+  await generateAgentPlugins({ repoRoot: tempDir, version: "0.0.0" });
+  const skillNames = async (root: string) =>
+    (await readdir(join(root, "skills"), { withFileTypes: true }))
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => entry.name)
+      .sort();
+  const generated = await skillNames(pluginRoot);
+  expect(generated.length).toBeGreaterThan(0);
+  expect(await skillNames(join(repoRoot, "plugins/hack"))).toEqual(generated);
+  const doc = await Bun.file(join(repoRoot, "docs/integrations.md")).text();
+  for (const name of generated) {
+    expect(doc).toContain(`\`${name}\``);
+  }
+  expect(doc).not.toContain("both skills");
 }, 15_000);

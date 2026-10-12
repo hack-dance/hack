@@ -66,11 +66,18 @@ completed operations or delete persistent project data. These controls do not re
 the number of servers for clients that remain connected.
 
 MCP command results capture at most 8 MiB of combined stdout/stderr bytes before
-text decoding. This also bounds log tails with oversized or newline-free messages.
-Exceeding the budget stops the command and returns an error with
-`outputTruncated: true`; parsed `data` is omitted so a prefix cannot masquerade as
-a complete result. Run the equivalent CLI command when full output is needed.
-The budget bounds captured bytes, not total process memory or JSON response size.
+text decoding. For tools other than the log tools, exceeding the budget stops the
+command and returns an error with `outputTruncated: true`; parsed `data` is omitted
+so a prefix cannot masquerade as a complete result. The log tools
+(`hack.project.logs.tail` and `hack.project.logs.snapshot`) use the same budget,
+but reaching it is a cutoff: the result is `ok: true` with `outputTruncated: true`,
+`data.cutoff` set to the `bytes` bound, and the events parsed before the cut. See
+[MCP logs contract](../reference/mcp-logs.md). Run the equivalent CLI command when
+full output is needed. The budget bounds captured bytes, not total process memory
+or JSON response size.
+
+The [MCP tool contract](../reference/mcp-tools.md) lists every tool with its
+annotations, inputs, the CLI command it runs and its result shape.
 
 Each MCP session captures its launch working directory and environment. Project
 registry selection, command execution and audit-file locations use that snapshot;

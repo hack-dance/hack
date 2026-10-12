@@ -132,7 +132,7 @@ export const AGENT_CLIENT_CAPABILITY_DEFINITIONS: readonly AgentClientCapability
       capability: "skillDiscovery",
       label: "Skill discovery",
       meaning:
-        "A fresh session discovers the plugin's bundled skills (hack-cli, hack-init, hack-install, hack-remote).",
+        "A fresh session discovers the plugin's bundled skills (hack-cli, hack-branches, hack-env, hack-diagnose, hack-init, hack-install, hack-remote).",
     },
     {
       capability: "hooks",

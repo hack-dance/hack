@@ -74,8 +74,11 @@ plugins for Codex, Claude Code, and Cursor from this repository's marketplace:
 
 | Plugin | Contents | Install when |
 | --- | --- | --- |
-| `hack` (`plugins/hack`) | Four skills (`hack-cli`, `hack-init`, `hack-install`, and `hack-remote`), Claude primer hooks, and a Cursor rule that the agent can select when relevant. No MCP server. | You want Hack guidance in a client. This is the default. |
+| `hack` (`plugins/hack`) | Seven skills (`hack-cli`, the focused `hack-branches`, `hack-env` and `hack-diagnose`, `hack-init`, `hack-install`, and `hack-remote`), Claude primer hooks, and a Cursor rule that the agent can select when relevant. No MCP server. | You want Hack guidance in a client. This is the default. |
 | `hack-mcp` (`plugins/hack-mcp`) | Only the stdio `hack mcp serve` server. No skills, hooks, or rules. | You explicitly want MCP, usually for a client without shell access. |
+
+The plugin's `hack-cli` routes branch-instance, env and diagnosis requests to the
+focused skills; standalone `hack setup` installs keep the broad `hack-cli` skill only.
 
 With shell access, the `hack` plugin and the Hack CLI cover every workflow without a
 server process. Install the Hack CLI first and make `hack` available on the client's
@@ -149,7 +152,7 @@ weakening that boundary. See
 [Cursor's plugin documentation](https://cursor.com/docs/plugins) for marketplace
 and local development support in the installed client version.
 
-After installing, verify in a fresh session that all four skills are discoverable
+After installing, verify in a fresh session that all seven skills are discoverable
 and the client's hooks or rule load. With `hack-mcp`, also verify that
 `hack mcp serve` initializes and lists Hack tools. A successful marketplace
 registration alone does not prove those components loaded.

@@ -56,7 +56,7 @@ Matrix version 2, observed 2026-10-11.
 | Capability | Meaning |
 | --- | --- |
 | Packaging | The client accepts, installs and enables the default `hack` plugin package in a session. |
-| Skill discovery | A fresh session discovers the plugin's bundled skills (hack-cli, hack-init, hack-install, hack-remote). |
+| Skill discovery | A fresh session discovers the plugin's bundled skills (hack-cli, hack-branches, hack-env, hack-diagnose, hack-init, hack-install, hack-remote). |
 | Hooks | The client runs plugin-shipped hooks; Hack hooks may only run `hack agent prime`. |
 | Plugin MCP | The client starts the `hack mcp serve` server declared by the opt-in `hack-mcp` plugin and lists its tools. The default `hack` plugin ships no MCP. |
 | Standalone MCP | The client loads an MCP entry written by `hack mcp install` (stdio or a selected MCP bundle) without the plugin. |
@@ -112,15 +112,12 @@ Matrix version 2, observed 2026-10-11.
 
 ## Companion-package layout decision
 
-Hack keeps four separate companion layouts. Each layout has one authoritative
-owner, and none of them replaces the others. The default is the skills-only `hack`
-plugin; users choose one integration path per client and add MCP only by explicit
-selection.
+Hack keeps three separate companion layouts. Each layout has one authoritative
+owner, and none of them replaces the others. Users choose one per client.
 
 | Layout | What it contains | Authoritative owner | Installed and updated by |
 | --- | --- | --- | --- |
-| Native plugin (`plugins/hack`, default) | Client manifests, four skills, Claude primer hooks, Cursor rule; no MCP | `scripts/generate-agent-plugins.ts`, rendering from `src/agents/instruction-source.ts` and the skill renderers in `src/agents/` | The client's plugin manager. Hack commands never install or update it. |
-| MCP plugin (`plugins/hack-mcp`, opt-in) | Client manifests and the stdio `hack mcp serve` declaration only | `scripts/generate-agent-plugins.ts` (`HACK_MCP_SERVER` is the single launch source) | The client's plugin manager, only when MCP is selected. Hack commands never install or update it. |
+| Native plugin (`plugins/hack`) | Client manifests, seven skills, Claude primer hooks, Cursor rule, `hack mcp serve` declaration | `scripts/generate-agent-plugins.ts`, rendering from `src/agents/instruction-source.ts` and the skill renderers in `src/agents/` | The client's plugin manager. Hack commands never install or update it. |
 | Standalone setup | Project AGENTS.md/CLAUDE.md snippets, Cursor rules, shared skills, Claude primer hooks, MCP entries | `src/agents/instruction-source.ts` and its renderers, written by `hack setup` and `hack mcp install` | Explicit `hack setup` and `hack mcp install` commands in a chosen scope |
 | MCP bundle | Native MCP adapter, owner and backend executables with a content-derived identity | `src/mcp/bundle.ts` (packaging and verification) | `hack mcp install --bundle ... --cli ...` writes the client entry; the bundle is never modified after selection |
 
@@ -128,9 +125,7 @@ Decisions:
 
 - Shared guidance has one canonical source, `src/agents/instruction-source.ts`. The
   plugin and the standalone setup are renderings of it, not separate sources.
-- The `hack` plugin never declares MCP. Plugin MCP ships only in `hack-mcp`, so a
-  client gets a Hack MCP server only when someone selects it.
-- Installing a plugin does not migrate or remove standalone guidance. See
+- Installing the plugin does not migrate or remove standalone guidance. See
   [integration setup](../integrations.md).
 - The MCP bundle is an alternative launch for MCP only. It does not carry skills,
   hooks or rules.
@@ -149,7 +144,7 @@ artifacts must not set them:
 
 Hack-shipped hooks may run only `hack agent prime`.
 `tests/agent-plugin-generation.test.ts` enforces this for the generated guidance
-surfaces: `plugins/hack`, `plugins/hack-mcp`, `.claude-plugin`, `.cursor-plugin`, `.agents` (including
+surfaces: `plugins/hack`, `.claude-plugin`, `.cursor-plugin`, `.agents` (including
 the skills it links to), and the agent configuration in `examples/basic/.claude`,
 `.codex` and `.cursor`. It parses JSON, JSON Lines, TOML, YAML and markdown
 frontmatter. It fails on structured-config formats it cannot parse, such as INI,

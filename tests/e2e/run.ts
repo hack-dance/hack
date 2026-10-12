@@ -9,6 +9,7 @@ import { agentDocsSyncScenario } from "./scenarios/agent-docs-sync.ts";
 import { agentSurfaceFreezeScenario } from "./scenarios/agent-surface-freeze.ts";
 import { automationCheckScenario } from "./scenarios/automation-check.ts";
 import { cachePruneScenario } from "./scenarios/cache-prune.ts";
+import { composeConfigHashDriftScenario } from "./scenarios/compose-config-hash-drift.ts";
 import { dependencyCacheScenario } from "./scenarios/dependency-cache.ts";
 import { dependencyCacheBootstrapScenario } from "./scenarios/dependency-cache-bootstrap.ts";
 import { dependencyCachePackageScenario } from "./scenarios/dependency-cache-package.ts";
@@ -94,6 +95,7 @@ export const ALL_SCENARIOS: readonly Scenario[] = [
   domainMigrationScenario,
   upDownScenario,
   portableMultiserviceScenario,
+  composeConfigHashDriftScenario,
   nativeConfigComposeScenario,
   nativeConfigBuildScenario,
   nativeConfigDownHooksScenario,

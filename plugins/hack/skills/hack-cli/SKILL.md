@@ -187,3 +187,7 @@ Use `hack` as the primary interface for local-first development.
 - Init patterns: `hack agent patterns`
 - MCP (no-shell only): `hack setup mcp`
 - MCP install: choose the requested client and scope with `hack mcp install --help`; do not configure other clients as a side effect.
+
+## References
+
+- [Pattern catalogue](references/patterns.md): reusable project patterns with what Hack supports today, the missing contract and its owner.

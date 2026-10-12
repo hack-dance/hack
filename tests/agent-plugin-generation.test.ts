@@ -7,9 +7,10 @@ import {
   generateAgentPlugins,
   portableMcpManifest,
   portablePluginManifest,
+  renderPluginReferences,
   renderPluginRule,
+  renderPluginSkill,
 } from "../scripts/generate-agent-plugins.ts";
-import { renderCodexSkill } from "../src/agents/codex-skill.ts";
 import { renderHackInitSkill } from "../src/agents/hack-init-skill.ts";
 import { renderHackInstallSkill } from "../src/agents/install-skill.ts";
 import { renderHackRemoteSkill } from "../src/agents/remote-bootstrap-skill.ts";
@@ -84,8 +85,13 @@ test("semantic-release commits all generated client manifests", async () => {
 test("bundled skills and rule match current canonical guidance", async () => {
   const root = join(repoRoot, "plugins", "hack");
   expect(await Bun.file(join(root, "skills/hack-cli/SKILL.md")).text()).toBe(
-    renderCodexSkill()
+    renderPluginSkill("hack-cli")
   );
+  const references = renderPluginReferences();
+  expect(references.size).toBeGreaterThan(0);
+  for (const [path, content] of references) {
+    expect(await Bun.file(join(root, path)).text()).toBe(content);
+  }
   expect(await Bun.file(join(root, "skills/hack-init/SKILL.md")).text()).toBe(
     renderHackInitSkill()
   );

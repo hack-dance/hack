@@ -1,3 +1,4 @@
+import { readdir, rm } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 
 import { renderCodexSkill } from "../src/agents/codex-skill.ts";
@@ -5,6 +6,13 @@ import { renderCursorRules } from "../src/agents/cursor.ts";
 import { renderHackInitSkill } from "../src/agents/hack-init-skill.ts";
 import { renderHackInstallSkill } from "../src/agents/install-skill.ts";
 import { renderHackRemoteSkill } from "../src/agents/remote-bootstrap-skill.ts";
+import {
+  type PluginSkillName,
+  referencesForSkill,
+  renderSkillReference,
+  skillReferencePath,
+  withSkillReferenceLinks,
+} from "../src/agents/skill-references.ts";
 import { isRecord } from "../src/lib/guards.ts";
 
 export async function generateAgentPlugins({
@@ -19,7 +27,7 @@ export async function generateAgentPlugins({
   const generatedSkills = [
     {
       path: resolve(pluginRoot, "skills", "hack-cli", "SKILL.md"),
-      content: renderCodexSkill(),
+      content: renderPluginSkill("hack-cli"),
     },
     {
       path: resolve(pluginRoot, "skills", "hack-init", "SKILL.md"),
@@ -43,6 +51,7 @@ export async function generateAgentPlugins({
     await Bun.$`mkdir -p ${dirname(skill.path)}`;
     await Bun.write(skill.path, skill.content);
   }
+  await writeSkillReferences({ pluginRoot });
 
   const manifestPaths = [
     resolve(pluginRoot, ".codex-plugin", "plugin.json"),
@@ -135,6 +144,66 @@ export function portableMcpManifest(
     $schema: "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
     mcpServers,
   };
+}
+
+/**
+ * Render a plugin skill's SKILL.md. The plugin variant of `hack-cli` adds
+ * links to its packaged references; standalone installs keep
+ * {@link renderCodexSkill} because they ship no references.
+ */
+export function renderPluginSkill(skill: "hack-cli"): string {
+  return withSkillReferenceLinks({ skill, content: renderCodexSkill() });
+}
+
+const PLUGIN_SKILLS: readonly PluginSkillName[] = [
+  "hack-cli",
+  "hack-init",
+  "hack-install",
+  "hack-remote",
+];
+
+/** Every packaged skill reference keyed by its plugin-relative path. */
+export function renderPluginReferences(): ReadonlyMap<string, string> {
+  return new Map(
+    PLUGIN_SKILLS.flatMap((skill) =>
+      referencesForSkill(skill).map(
+        (reference) =>
+          [
+            skillReferencePath(reference),
+            renderSkillReference(reference),
+          ] as const
+      )
+    )
+  );
+}
+
+/**
+ * Write every registered reference and remove stale generated ones, so each
+ * bundled `references/` directory holds exactly the registry's markdown files.
+ */
+async function writeSkillReferences({
+  pluginRoot,
+}: {
+  readonly pluginRoot: string;
+}): Promise<void> {
+  const references = renderPluginReferences();
+  for (const skill of PLUGIN_SKILLS) {
+    const directory = resolve(pluginRoot, "skills", skill, "references");
+    const existing = await readdir(directory).catch((): string[] => []);
+    for (const name of existing) {
+      if (
+        name.endsWith(".md") &&
+        !references.has(`skills/${skill}/references/${name}`)
+      ) {
+        await rm(resolve(directory, name));
+      }
+    }
+  }
+  for (const [relativePath, content] of references) {
+    const path = resolve(pluginRoot, relativePath);
+    await Bun.$`mkdir -p ${dirname(path)}`;
+    await Bun.write(path, content);
+  }
 }
 
 export function renderPluginRule(): string {

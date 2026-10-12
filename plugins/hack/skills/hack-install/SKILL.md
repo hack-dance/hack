@@ -25,8 +25,8 @@ On a Homebrew host, use the official formula `hack-dance/tap/hack`. Inspect
 `brew install hack-dance/tap/hack` or `brew upgrade hack-dance/tap/hack` as
 appropriate. Run Homebrew as the user, never with sudo.
 
-For another supported host, read the installation instructions at
-https://github.com/hack-dance/hack and inspect the official release's platform
+For another supported host, read the installation instructions in the Hack
+repository (see Further reading) and inspect the official release's platform
 assets. Pin a release for reproducible setup, save and review its installer,
 and follow its documented verification. Do not guess asset names or run an
 unreviewed download through a shell. Managed containers use the slim path in
@@ -34,7 +34,7 @@ unreviewed download through a shell. Managed containers use the slim path in
 
 ## Native prerelease alongside stable
 
-Read https://github.com/hack-dance/hack/blob/next/docs/guides/candidate-install.md
+Read the candidate installation guide (see Further reading)
 and verify the selected release exists. The current packaged native installer
 supports Apple Silicon macOS, not arbitrary Linux cloud hosts. Use an explicit
 published `5.0.0-next.N` tag and its reviewed `scripts/install-prerelease.py`.
@@ -79,3 +79,8 @@ Report the executable, version, channel and target. Inspect project status and
 an actual app request, and an appropriate log check. A successful install or MCP
 listing alone does not prove app readiness. Keep local HTTPS trust prompts native;
 browser access is a separate check from a successful CLI HTTPS request.
+
+## Further reading
+
+- [Hack repository and releases](https://github.com/hack-dance/hack)
+- [Candidate installation guide](https://github.com/hack-dance/hack/blob/next/docs/guides/candidate-install.md)

@@ -10,8 +10,9 @@ import {
 
 /**
  * Agent-side `/hack-init` skill: a thin pointer that tells the agent to fetch
- * the canonical onboarding prompt from the CLI (`hack agent onboard`) or the
- * `hack-init` MCP prompt and follow it. The onboarding content itself lives in
+ * the canonical onboarding prompt from the CLI (`hack agent onboard`) or, only
+ * when a Hack MCP server such as the opt-in `hack-mcp` plugin is installed, the
+ * `hack-init` MCP prompt, and follow it. The onboarding content itself lives in
  * `src/agents/onboarding-prompt.ts` — never in the installed skill file.
  *
  * Installed for both Claude Code (`.claude/skills/hack-init/SKILL.md`) and
@@ -73,7 +74,7 @@ export function renderHackInitSkill(): string {
     "",
     "1. Fetch the canonical onboarding prompt:",
     "   - With shell access: run `hack agent onboard` (works for new and existing projects).",
-    "   - Without shell access: fetch the `hack-init` MCP prompt from the hack MCP server.",
+    "   - Without shell access: only if the `hack-mcp` plugin or another Hack MCP server is installed, fetch the `hack-init` MCP prompt from it; otherwise report that onboarding needs shell access or an explicitly selected Hack MCP server.",
     "2. Apply the relevant phases to the authorized workflow; preserve native approvals, credential safety, and runtime ownership.",
     "3. Verify the requested services and host workflows. Report remaining blockers; unrelated optional integration warnings do not prevent completion.",
     "",

@@ -28,13 +28,34 @@ import {
 } from "../lib/project-name.ts";
 import {
   AmbiguousProjectIdError,
+  type RegisteredProject,
   readProjectsRegistry,
   resolveRegisteredProjectByName,
+  selectRegisteredProjectByName,
 } from "../lib/projects-registry.ts";
 import { readLinesFromStream } from "../ui/lines.ts";
 import type { McpCommandAdmission } from "./command-admission.ts";
 import { superviseMcpCommand } from "./command-lifetime.ts";
-import { createMcpOutputBudget } from "./output-budget.ts";
+import {
+  MCP_ENV_KEY_PATTERN,
+  MCP_ENV_OUTPUT_WITHHELD_MESSAGE,
+  projectEnvExplain,
+  projectEnvKeys,
+  projectInstances,
+} from "./inspect-projections.ts";
+import {
+  classifyLogCollection,
+  MCP_LOG_BACKEND_ERROR,
+  type McpLogCutoff,
+  type McpLogOutcome,
+  type McpLogStopReason,
+  observeLogStreamEvent,
+  toLogStopReason,
+} from "./logs-contract.ts";
+import {
+  createMcpOutputBudget,
+  MCP_OUTPUT_LIMIT_BYTES,
+} from "./output-budget.ts";
 import {
   captureMcpSessionContext,
   type McpSessionContext,
@@ -136,15 +157,21 @@ type ToolResultPayload = HackCommandResult & {
   readonly data?: unknown;
   /** Present (and false) only on refusals returned before any child spawned. */
   readonly spawned?: false;
-  readonly error?: {
-    readonly code: McpRefusalCode;
-    readonly reason: McpRefusalReason;
-    readonly message: string;
-  };
+  readonly error?:
+    | {
+        readonly code: McpRefusalCode;
+        readonly reason: McpRefusalReason;
+        readonly message: string;
+      }
+    | typeof MCP_LOG_BACKEND_ERROR;
 };
 
 type ProjectArgsResolution =
   | { readonly ok: true; readonly args: string[] }
+  | { readonly ok: false; readonly reason: FixedRefusalReason };
+
+type ProjectNameResolution =
+  | { readonly ok: true; readonly name: string }
   | { readonly ok: false; readonly reason: FixedRefusalReason };
 
 const DEFAULT_CMD_TIMEOUT_MS = 120_000;
@@ -205,8 +232,8 @@ const toolOutputSchema = {
   spawned: z.literal(false).optional(),
   error: z
     .object({
-      code: z.enum(["E_USAGE", "E_PROJECT_NOT_FOUND"]),
-      reason: z.enum(MCP_REFUSAL_REASONS),
+      code: z.enum(["E_USAGE", "E_PROJECT_NOT_FOUND", "E_UNEXPECTED"]),
+      reason: z.enum([...MCP_REFUSAL_REASONS, MCP_LOG_BACKEND_ERROR.reason]),
       message: z.string(),
     })
     .optional(),
@@ -217,6 +244,14 @@ function composeIdentifierInput(description: string) {
     .string()
     .max(IDENTIFIER_MAX_LENGTH)
     .regex(COMPOSE_IDENTIFIER_PATTERN)
+    .describe(description);
+}
+
+function envKeyInput(description: string) {
+  return z
+    .string()
+    .max(IDENTIFIER_MAX_LENGTH)
+    .regex(MCP_ENV_KEY_PATTERN)
     .describe(description);
 }
 
@@ -417,6 +452,15 @@ function registerTools(opts: {
     }).optional(),
     since: z.string().describe("Start time (RFC3339 or duration)").optional(),
     until: z.string().describe("End time (RFC3339 or duration)").optional(),
+  };
+
+  const envSelectionInput = {
+    env: composeIdentifierInput(
+      "Env overlay name; 'base' or 'default' selects base layers only"
+    ).optional(),
+    service: composeIdentifierInput(
+      "Env scope: 'global' or a compose service name"
+    ).optional(),
   };
 
   register({
@@ -700,18 +744,20 @@ function registerTools(opts: {
         ...buildLogSelectionArgs(input),
       ];
 
-      const result = await runHackCommand({
+      const result = await runHackLogCollect({
         context: opts.context,
         signal: extra.signal,
         tool: "hack.project.logs.snapshot",
         args,
+        timeoutMs: DEFAULT_CMD_TIMEOUT_MS,
       });
 
-      return buildToolResult({
+      return buildLogToolResult({
         result,
         data: {
-          events: parseJsonLines(result.stdout),
-          count: countJsonLines(result.stdout),
+          events: result.events,
+          count: result.events.length,
+          cutoff: cutoffOf(result.outcome),
           limits: { tail: input.tail ?? null },
         },
       });
@@ -730,7 +776,8 @@ function registerTools(opts: {
       ...logSelectionInput,
       maxEvents: boundedLimitInput({
         ceiling: MCP_INPUT_CEILINGS.maxEvents,
-        description: "Max events to collect",
+        description:
+          "Max type:log events to collect; start, heartbeat, error and end events do not count",
       }).optional(),
       maxMs: boundedLimitInput({
         ceiling: MCP_INPUT_CEILINGS.maxMs,
@@ -758,26 +805,21 @@ function registerTools(opts: {
 
       const maxEvents = input.maxEvents ?? DEFAULT_LOG_TAIL_EVENTS;
       const maxMs = input.maxMs ?? DEFAULT_LOG_TAIL_MS;
-      const result = await runHackLogTail({
+      const result = await runHackLogCollect({
         context: opts.context,
         signal: extra.signal,
         tool: "hack.project.logs.tail",
         args,
         maxEvents,
-        maxMs,
+        timeoutMs: maxMs,
       });
 
-      return buildToolResult({
-        result: {
-          ...(result.outputTruncated ? { outputTruncated: true } : {}),
-          command: result.command,
-          exitCode: result.exitCode,
-          stdout: result.stdout,
-          stderr: result.stderr,
-        },
+      return buildLogToolResult({
+        result,
         data: {
           events: result.events,
           count: result.events.length,
+          cutoff: cutoffOf(result.outcome),
           stop_reason: result.stopReason,
           duration_ms: result.durationMs,
           limits: { tail: input.tail ?? null, maxEvents, maxMs },
@@ -885,6 +927,221 @@ function registerTools(opts: {
       });
 
       return buildToolResult({ result });
+    },
+  });
+
+  register({
+    name: "hack.project.exec",
+    title: "Exec command in running service",
+    description:
+      "Run a command inside an already-running service container (hack exec). Unlike hack.project.run it never starts a new container. Command arguments are passed to the child after `--` and are never parsed as hack options. Output is bounded by the shared 8 MiB capture limit and timeoutMs.",
+    annotations: DESTRUCTIVE_TOOL_ANNOTATIONS,
+    inputSchema: {
+      ...projectSelectorInput,
+      ...branchInput,
+      ...profileInput,
+      service: composeIdentifierInput("Running compose service name"),
+      cmd: z
+        .array(z.string())
+        .min(1)
+        .describe("Command and arguments (at least one entry)"),
+      workdir: z
+        .string()
+        .describe("Working directory inside container")
+        .optional(),
+      timeoutMs: boundedLimitInput({
+        ceiling: MCP_INPUT_CEILINGS.timeoutMs,
+        description: "Command timeout in ms",
+      }).optional(),
+    },
+    handler: async (input, extra) => {
+      const resolved = await resolveProjectArgs({
+        selection: toProjectSelection(input),
+        cwd: opts.context.cwd,
+        registryPath: opts.context.registryPath,
+      });
+      if (!resolved.ok) {
+        return buildToolError(resolved);
+      }
+
+      const timeoutMs = input.timeoutMs ?? DEFAULT_CMD_TIMEOUT_MS;
+      const result = await runHackCommand({
+        context: opts.context,
+        signal: extra.signal,
+        tool: "hack.project.exec",
+        args: buildExecArgs({
+          projectArgs: resolved.args,
+          branch: input.branch,
+          profiles: input.profiles,
+          workdir: input.workdir,
+          service: input.service,
+          cmd: input.cmd,
+        }),
+        timeoutMs,
+      });
+
+      return buildToolResult({
+        result,
+        data: {
+          limits: { timeoutMs, outputBytes: MCP_OUTPUT_LIMIT_BYTES },
+        },
+      });
+    },
+  });
+
+  register({
+    name: "hack.project.doctor",
+    title: "Diagnose project setup",
+    description:
+      "Run read-only setup diagnostics (hack doctor --json). Never applies repairs: --fix and the migration or recovery modes are not reachable from MCP.",
+    annotations: READ_ONLY_TOOL_ANNOTATIONS,
+    inputSchema: {
+      ...projectSelectorInput,
+      ...branchInput,
+    },
+    handler: async (input, extra) => {
+      const resolved = await resolveProjectArgs({
+        selection: toProjectSelection(input),
+        cwd: opts.context.cwd,
+        registryPath: opts.context.registryPath,
+        selectByPath: true,
+      });
+      if (!resolved.ok) {
+        return buildToolError(resolved);
+      }
+
+      const result = await runHackCommand({
+        context: opts.context,
+        signal: extra.signal,
+        tool: "hack.project.doctor",
+        args: buildDoctorArgs({
+          projectArgs: resolved.args,
+          branch: input.branch,
+        }),
+      });
+
+      return buildToolResult({ result, data: parseJson(result.stdout) });
+    },
+  });
+
+  register({
+    name: "hack.project.env.explain",
+    title: "Explain env key",
+    description:
+      "Explain where one env key comes from: availability, secret flag, scope, source and precedence. Never returns the value; child stdout and stderr are withheld.",
+    annotations: READ_ONLY_TOOL_ANNOTATIONS,
+    inputSchema: {
+      ...projectSelectorInput,
+      ...envSelectionInput,
+      key: envKeyInput("Env key name (letters, digits and _)"),
+      target: z
+        .enum(["host", "compose"])
+        .describe("Env view: host (default) or compose")
+        .optional(),
+    },
+    handler: async (input, extra) => {
+      const resolved = await resolveProjectArgs({
+        selection: toProjectSelection(input),
+        cwd: opts.context.cwd,
+        registryPath: opts.context.registryPath,
+      });
+      if (!resolved.ok) {
+        return buildToolError(resolved);
+      }
+
+      const result = await runHackCommand({
+        context: opts.context,
+        signal: extra.signal,
+        tool: "hack.project.env.explain",
+        args: buildEnvExplainArgs({
+          projectArgs: resolved.args,
+          env: input.env,
+          service: input.service,
+          target: input.target,
+          key: input.key,
+        }),
+      });
+
+      return buildValueFreeToolResult({
+        result,
+        data: projectEnvExplain(parseJson(result.stdout)),
+      });
+    },
+  });
+
+  register({
+    name: "hack.project.env.keys",
+    title: "List env keys",
+    description:
+      "List env key names with secret flag, source and scope metadata. Never returns values (never --show-secrets); child stdout and stderr are withheld.",
+    annotations: READ_ONLY_TOOL_ANNOTATIONS,
+    inputSchema: {
+      ...projectSelectorInput,
+      ...envSelectionInput,
+    },
+    handler: async (input, extra) => {
+      const resolved = await resolveProjectArgs({
+        selection: toProjectSelection(input),
+        cwd: opts.context.cwd,
+        registryPath: opts.context.registryPath,
+      });
+      if (!resolved.ok) {
+        return buildToolError(resolved);
+      }
+
+      const result = await runHackCommand({
+        context: opts.context,
+        signal: extra.signal,
+        tool: "hack.project.env.keys",
+        args: buildEnvKeysArgs({
+          projectArgs: resolved.args,
+          env: input.env,
+          service: input.service,
+        }),
+      });
+
+      return buildValueFreeToolResult({
+        result,
+        data: projectEnvKeys(parseJson(result.stdout)),
+      });
+    },
+  });
+
+  register({
+    name: "hack.project.instances",
+    title: "List project instances",
+    description:
+      "List a registered project's runtime instances from `hack projects --json`: only the default and branch instances that currently have containers (running or stopped); a branch that was never started is not listed. Per-service `containers` and `running` counts include lifecycle-process containers.",
+    annotations: READ_ONLY_TOOL_ANNOTATIONS,
+    inputSchema: {
+      ...projectSelectorInput,
+    },
+    handler: async (input, extra) => {
+      const resolved = await resolveRegisteredProjectName({
+        selection: toProjectSelection(input),
+        cwd: opts.context.cwd,
+        registryPath: opts.context.registryPath,
+      });
+      if (!resolved.ok) {
+        return buildToolError(resolved);
+      }
+
+      const result = await runHackCommand({
+        context: opts.context,
+        signal: extra.signal,
+        tool: "hack.project.instances",
+        args: ["projects", "--json", `--project=${resolved.name}`],
+      });
+
+      // `data` replaces stdout: the raw listing covers every matching
+      // project and carries container inspect data the projection omits.
+      return buildToolResult({
+        result: { ...result, stdout: "" },
+        data: projectInstances({
+          payload: parseJson(result.stdout),
+          project: resolved.name,
+        }),
+      });
     },
   });
 
@@ -1058,9 +1315,71 @@ function buildToolResult(opts: {
 }
 
 /**
+ * Result for the env tools. The child's stdout and stderr are never returned:
+ * `stdout` is always empty, and `stderr` is empty on success or the fixed
+ * {@link MCP_ENV_OUTPUT_WITHHELD_MESSAGE} on failure. Only `data`, already
+ * projected onto allowlisted metadata, carries the child's answer. Exit status,
+ * `outputTruncated` and the argv in `command` follow {@link buildToolResult}.
+ */
+function buildValueFreeToolResult(opts: {
+  readonly result: HackCommandResult;
+  readonly data: unknown;
+}): CallToolResult {
+  const ok = opts.result.exitCode === 0;
+  return buildToolResult({
+    result: {
+      command: opts.result.command,
+      exitCode: opts.result.exitCode,
+      stdout: "",
+      stderr: ok ? "" : MCP_ENV_OUTPUT_WITHHELD_MESSAGE,
+      ...(opts.result.outputTruncated ? { outputTruncated: true } : {}),
+    },
+    data: opts.data,
+  });
+}
+
+/**
+ * Logs tools result. Unlike {@link buildToolResult}, success follows the
+ * collection outcome rather than the child's exit status: a cutoff is `ok`
+ * with `data.cutoff` set (the server stopped the child, so `exitCode` may be
+ * non-zero), and `data` is kept after the byte bound so partial events
+ * survive. A backend failure is `ok: false` with the closed `backend_error`.
+ */
+function buildLogToolResult(opts: {
+  readonly result: HackLogCollection;
+  readonly data: Record<string, unknown>;
+}): CallToolResult {
+  const { result } = opts;
+  const ok =
+    result.outcome.kind === "complete" || result.outcome.kind === "cutoff";
+  const payload: ToolResultPayload = {
+    ok,
+    command: result.command,
+    exitCode: result.exitCode,
+    stdout: result.stdout,
+    stderr: result.stderr,
+    ...(result.outputTruncated ? { outputTruncated: true } : {}),
+    data: opts.data,
+    ...(result.outcome.kind === "backend_error"
+      ? { error: MCP_LOG_BACKEND_ERROR }
+      : {}),
+  };
+
+  return {
+    content: [{ type: "text", text: JSON.stringify(payload, null, 2) }],
+    structuredContent: payload,
+    ...(ok ? {} : { isError: true }),
+  };
+}
+
+function cutoffOf(outcome: McpLogOutcome): McpLogCutoff | null {
+  return outcome.kind === "cutoff" ? outcome.cutoff : null;
+}
+
+/**
  * Typed refusal for a request rejected before any child process exists.
  * `spawned: false` is a guarantee: every caller returns before
- * `runHackCommand`/`runHackLogTail`, so no argv, audit line or mutation occurs.
+ * `runHackCommand`/`runHackLogCollect`, so no argv, audit line or mutation occurs.
  * `stderr` repeats the message for clients reading the earlier contract.
  * The message is the reason's fixed text from {@link MCP_REFUSALS}; only
  * `invalid_arguments` may pass its schema-key-only summary instead.
@@ -1114,6 +1433,93 @@ export function buildRunArgs(opts: {
     "--",
     opts.service,
     ...opts.cmd,
+  ];
+}
+
+/**
+ * `hack exec` argv: same boundary as {@link buildRunArgs}. Every option value
+ * is fused and `--` precedes the service, so `cmd` entries such as `--branch`
+ * or `--help` reach the container command, never hack's parser.
+ */
+export function buildExecArgs(opts: {
+  readonly projectArgs: readonly string[];
+  readonly branch?: string;
+  readonly profiles?: readonly string[];
+  readonly workdir?: string;
+  readonly service: string;
+  readonly cmd: readonly string[];
+}): string[] {
+  return [
+    "exec",
+    ...opts.projectArgs,
+    ...buildBranchArgs({ branch: opts.branch }),
+    ...buildProfileArgs({ profiles: opts.profiles }),
+    ...(opts.workdir ? [`--workdir=${opts.workdir}`] : []),
+    "--",
+    opts.service,
+    ...opts.cmd,
+  ];
+}
+
+/**
+ * `hack doctor` argv. The set is closed: project path, branch and `--json`.
+ * `--fix`, `--migrate-env-config` and the migration and recovery modes are
+ * never emitted, and the CLI also refuses `--json` with `--fix`.
+ */
+export function buildDoctorArgs(opts: {
+  readonly projectArgs: readonly string[];
+  readonly branch?: string;
+}): string[] {
+  return [
+    "doctor",
+    ...opts.projectArgs,
+    ...buildBranchArgs({ branch: opts.branch }),
+    "--json",
+  ];
+}
+
+/** `hack env explain --json` argv; the validated key follows `--`. */
+export function buildEnvExplainArgs(opts: {
+  readonly projectArgs: readonly string[];
+  readonly env?: string;
+  readonly service?: string;
+  readonly target?: "host" | "compose";
+  readonly key: string;
+}): string[] {
+  return [
+    "env",
+    "explain",
+    ...opts.projectArgs,
+    ...buildEnvScopeArgs(opts),
+    ...(opts.target ? [`--target=${opts.target}`] : []),
+    "--json",
+    "--",
+    opts.key,
+  ];
+}
+
+/** `hack env list --json` argv. `--show-secrets` is never emitted. */
+export function buildEnvKeysArgs(opts: {
+  readonly projectArgs: readonly string[];
+  readonly env?: string;
+  readonly service?: string;
+}): string[] {
+  return [
+    "env",
+    "list",
+    ...opts.projectArgs,
+    ...buildEnvScopeArgs(opts),
+    "--json",
+  ];
+}
+
+function buildEnvScopeArgs(opts: {
+  readonly env?: string;
+  readonly service?: string;
+}): string[] {
+  return [
+    ...(opts.env ? [`--env=${opts.env}`] : []),
+    ...(opts.service ? [`--service=${opts.service}`] : []),
   ];
 }
 
@@ -1175,6 +1581,11 @@ async function resolveProjectArgs(opts: {
   readonly selection: ProjectSelection;
   readonly cwd: string;
   readonly allowUnregistered?: boolean;
+  /**
+   * Emit `--path=<repo root>` for a projectName selection, for commands
+   * (doctor) that accept `--path` but not `--project`.
+   */
+  readonly selectByPath?: boolean;
 }): Promise<ProjectArgsResolution> {
   const selection = opts.selection;
   const picked = [
@@ -1190,6 +1601,7 @@ async function resolveProjectArgs(opts: {
     return await resolveProjectNameArgs({
       projectName: selection.projectName,
       registryPath: opts.registryPath,
+      selectByPath: opts.selectByPath === true,
     });
   }
 
@@ -1232,6 +1644,7 @@ async function resolveProjectArgs(opts: {
 async function resolveProjectNameArgs(opts: {
   readonly projectName: string;
   readonly registryPath: string;
+  readonly selectByPath: boolean;
 }): Promise<ProjectArgsResolution> {
   const name = normalizeProjectName(opts.projectName);
   if (!name) {
@@ -1245,7 +1658,14 @@ async function resolveProjectNameArgs(opts: {
     if (!project) {
       return { ok: false, reason: "project_not_found" };
     }
-    return { ok: true, args: [`--project=${name}`] };
+    return {
+      ok: true,
+      args: [
+        opts.selectByPath
+          ? `--path=${project.projectRoot}`
+          : `--project=${name}`,
+      ],
+    };
   } catch (error) {
     if (
       error instanceof AmbiguousProjectNameError ||
@@ -1255,6 +1675,102 @@ async function resolveProjectNameArgs(opts: {
     }
     throw error;
   }
+}
+
+/**
+ * Resolve a selection to one registered project name, for commands that select
+ * by name only (`hack projects --project`). A path (or, with no selection, the
+ * session cwd) selects the registered project whose repo root or project dir
+ * contains it; the deepest root wins, and two distinct registrations at that
+ * depth are ambiguous. Unregistered paths are refused rather than guessed.
+ */
+async function resolveRegisteredProjectName(opts: {
+  readonly registryPath: string;
+  readonly selection: ProjectSelection;
+  readonly cwd: string;
+}): Promise<ProjectNameResolution> {
+  const selection = opts.selection;
+  const picked = [
+    selection.projectName,
+    selection.repoRoot,
+    selection.path,
+  ].filter((value) => value !== undefined);
+  if (picked.length > 1) {
+    return { ok: false, reason: "conflicting_project_selection" };
+  }
+
+  const registry = await readProjectsRegistry({
+    registryPath: opts.registryPath,
+  });
+  if (selection.projectName !== undefined) {
+    const name = normalizeProjectName(selection.projectName);
+    if (!name) {
+      return { ok: false, reason: "invalid_project_name" };
+    }
+    try {
+      const match = selectRegisteredProjectByName({
+        projects: registry.projects,
+        name,
+      });
+      return match
+        ? { ok: true, name }
+        : { ok: false, reason: "project_not_found" };
+    } catch (error) {
+      if (
+        error instanceof AmbiguousProjectNameError ||
+        error instanceof AmbiguousProjectIdError
+      ) {
+        return { ok: false, reason: "ambiguous_project" };
+      }
+      throw error;
+    }
+  }
+
+  const pathLike = selection.repoRoot ?? selection.path;
+  const absPath = resolve(opts.cwd, pathLike ?? ".");
+  if (pathLike && !(await pathExists(absPath))) {
+    return { ok: false, reason: "path_not_found" };
+  }
+  const notFound: FixedRefusalReason = pathLike
+    ? "path_not_registered"
+    : "no_project_context";
+  const containing = selectContainingRegistrations({
+    projects: registry.projects,
+    absPath,
+  });
+  const names = new Set(
+    containing.map((project) => normalizeProjectName(project.name))
+  );
+  if (names.size > 1) {
+    return { ok: false, reason: "ambiguous_project" };
+  }
+  const [name] = [...names];
+  return name ? { ok: true, name } : { ok: false, reason: notFound };
+}
+
+/** Registrations at the deepest root that contains `absPath`. */
+function selectContainingRegistrations(opts: {
+  readonly projects: readonly RegisteredProject[];
+  readonly absPath: string;
+}): RegisteredProject[] {
+  let best: RegisteredProject[] = [];
+  let bestDepth = -1;
+  for (const project of opts.projects) {
+    for (const root of [project.repoRoot, project.projectDir]) {
+      const resolvedRoot = resolve(root);
+      if (!isPathWithin({ parent: resolvedRoot, child: opts.absPath })) {
+        continue;
+      }
+      const depth = resolvedRoot.length;
+      if (depth > bestDepth) {
+        best = [project];
+        bestDepth = depth;
+      } else if (depth === bestDepth && !best.includes(project)) {
+        best.push(project);
+      }
+    }
+  }
+  return best;
 }
 
 async function isPathAllowed(opts: {
@@ -1360,24 +1876,34 @@ async function runHackCommand(opts: {
     : await work();
 }
 
-async function runHackLogTail(opts: {
-  readonly context: McpSessionContext;
-  readonly signal: AbortSignal;
-  readonly tool: string;
-  readonly args: readonly string[];
-  readonly maxEvents: number;
-  readonly maxMs: number;
-}): Promise<{
+type HackLogCollection = {
   readonly outputTruncated?: boolean;
   readonly command: string;
   readonly exitCode: number;
   readonly stdout: string;
   readonly stderr: string;
   readonly events: readonly Record<string, unknown>[];
-  readonly stopReason: string;
+  readonly stopReason: McpLogStopReason;
   readonly durationMs: number;
-}> {
-  const work = async () => {
+  readonly outcome: McpLogOutcome;
+};
+
+/**
+ * Run `hack logs --json` and collect its stream events under the contract in
+ * `logs-contract.ts`. `maxEvents` counts `type: "log"` events only; `timeoutMs`
+ * bounds the whole collection; the shared byte budget cuts on a UTF-8 code
+ * point boundary. Nothing outlives the call: a later call, in this session or
+ * a reconnected one, starts a new backend stream (no cursor, no replay).
+ */
+async function runHackLogCollect(opts: {
+  readonly context: McpSessionContext;
+  readonly signal: AbortSignal;
+  readonly tool: string;
+  readonly args: readonly string[];
+  readonly maxEvents?: number;
+  readonly timeoutMs: number;
+}): Promise<HackLogCollection> {
+  const work = async (): Promise<HackLogCollection> => {
     const invocation = await resolveHackInvocation(opts.context);
     opts.signal.throwIfAborted();
     const cmd = [invocation.bin, ...invocation.args, ...opts.args];
@@ -1390,39 +1916,55 @@ async function runHackLogTail(opts: {
       stderr: "pipe",
     });
 
-    const { maxEvents, maxMs } = opts;
+    const { maxEvents } = opts;
     const start = Date.now();
 
     const events: Record<string, unknown>[] = [];
     const stdoutLines: string[] = [];
     const stderrLines: string[] = [];
 
-    let stopReason = "eof";
+    let stopReason: McpLogStopReason = "eof";
+    // Set once a server stop can have reached the child. Later failure events
+    // may describe that stop. A byte cut is the exception: the retained prefix
+    // was written before the child was signalled, and nothing is retained after
+    // it, so failure evidence in that prefix still counts.
+    let failureEvidenceClosed = false;
+    let logCount = 0;
+    let backendFailureObserved = false;
 
     const lifetime = superviseMcpCommand({
       proc,
       signal: opts.signal,
-      timeoutMs: maxMs,
+      timeoutMs: opts.timeoutMs,
       onStop: (reason) => {
-        stopReason = reason;
+        stopReason = toLogStopReason(reason);
+        if (stopReason !== "output_limit") {
+          failureEvidenceClosed = true;
+        }
       },
     });
 
     const output = createMcpOutputBudget({
+      codePointSafe: true,
       onLimit: () => lifetime.stop("output_limit"),
     });
+    /** Record one stream event; true once the log-event bound is reached. */
+    const recordEvent = (event: Record<string, unknown>): boolean => {
+      events.push(event);
+      const observed = observeLogStreamEvent(event);
+      if (observed.backendFailure && !failureEvidenceClosed) {
+        backendFailureObserved = true;
+      }
+      if (observed.isLog) {
+        logCount += 1;
+      }
+      return maxEvents !== undefined && logCount >= maxEvents;
+    };
     const stdoutTask = (async () => {
       for await (const line of readLinesFromStream(output.wrap(proc.stdout))) {
         stdoutLines.push(line);
-        const trimmed = line.trim();
-        if (trimmed.length === 0) {
-          continue;
-        }
-        const parsed = parseJsonLine(trimmed);
-        if (parsed) {
-          events.push(parsed);
-        }
-        if (events.length >= maxEvents) {
+        const parsed = parseJsonLine(line.trim());
+        if (parsed && recordEvent(parsed)) {
           lifetime.stop("max_events");
           break;
         }
@@ -1443,7 +1985,6 @@ async function runHackLogTail(opts: {
     }
 
     if (output.exceeded()) {
-      exitCode = 1;
       stderrLines.push(
         "MCP output exceeded the 8 MiB capture limit; use the CLI for full output."
       );
@@ -1465,6 +2006,16 @@ async function runHackLogTail(opts: {
       ...(output.exceeded() ? { outputTruncated: true } : {}),
       stopReason,
       durationMs: Date.now() - start,
+      outcome: classifyLogCollection({
+        stopReason,
+        exitCode,
+        backendFailureObserved,
+        limits: {
+          ...(maxEvents === undefined ? {} : { maxEvents }),
+          timeMs: opts.timeoutMs,
+          bytes: MCP_OUTPUT_LIMIT_BYTES,
+        },
+      }),
     };
   };
   return opts.context.admission
@@ -1491,17 +2042,6 @@ function parseJson(text: string): Record<string, unknown> | null {
   }
 }
 
-function parseJsonLines(text: string): Record<string, unknown>[] {
-  const events: Record<string, unknown>[] = [];
-  for (const line of text.split("\n")) {
-    const parsed = parseJsonLine(line.trim());
-    if (parsed) {
-      events.push(parsed);
-    }
-  }
-  return events;
-}
-
 function parseJsonLine(line: string): Record<string, unknown> | null {
   if (line.length === 0) {
     return null;
@@ -1512,16 +2052,6 @@ function parseJsonLine(line: string): Record<string, unknown> | null {
   } catch {
     return null;
   }
-}
-
-function countJsonLines(text: string): number {
-  let count = 0;
-  for (const line of text.split("\n")) {
-    if (parseJsonLine(line.trim())) {
-      count += 1;
-    }
-  }
-  return count;
 }
 
 function joinLines(lines: readonly string[]): string {

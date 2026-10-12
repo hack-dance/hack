@@ -11,6 +11,11 @@
       "name": "hack",
       "source": "plugins/hack",
       "description": "Operate and onboard Hack-managed local development environments."
+    },
+    {
+      "name": "hack-mcp",
+      "source": "plugins/hack-mcp",
+      "description": "Opt-in Hack MCP server (`hack mcp serve`) for agent clients without shell access."
     }
   ]
 }

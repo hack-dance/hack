@@ -22,3 +22,10 @@ condition = "AND"
 paths = ['''^packages/runtime-core/tests/stream_relay_contract\.rs$''']
 regexTarget = "line"
 regexes = ['''^\s*let token = "0123456789abcdef0123456789abcdef";\s*$''']
+
+[[rules.allowlists]]
+description = "MCP inspect-tool tests use a fixed synthetic canary to prove values are never echoed"
+condition = "AND"
+paths = ['''^tests/mcp-inspect-tools\.test\.ts$''']
+regexTarget = "line"
+regexes = ['''(?m)^\s*const SECRET_CANARY = "zqx-secret-canary-7731";\s*$''']

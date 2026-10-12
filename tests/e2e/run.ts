@@ -9,6 +9,7 @@ import { agentDocsSyncScenario } from "./scenarios/agent-docs-sync.ts";
 import { agentSurfaceFreezeScenario } from "./scenarios/agent-surface-freeze.ts";
 import { automationCheckScenario } from "./scenarios/automation-check.ts";
 import { cachePruneScenario } from "./scenarios/cache-prune.ts";
+import { composeConfigHashDriftScenario } from "./scenarios/compose-config-hash-drift.ts";
 import { dependencyCacheScenario } from "./scenarios/dependency-cache.ts";
 import { dependencyCacheBootstrapScenario } from "./scenarios/dependency-cache-bootstrap.ts";
 import { dependencyCachePackageScenario } from "./scenarios/dependency-cache-package.ts";
@@ -17,6 +18,7 @@ import { doctorScenario } from "./scenarios/doctor.ts";
 import { domainMigrationScenario } from "./scenarios/domain-migration.ts";
 import { domainMigrationFilesScenario } from "./scenarios/domain-migration-files.ts";
 import { envSecretsScenario } from "./scenarios/env-secrets.ts";
+import { execStaleEnvScenario } from "./scenarios/exec-stale-env.ts";
 import { initScenario } from "./scenarios/init.ts";
 import { lifecycleHostProcessScenario } from "./scenarios/lifecycle-host-process.ts";
 import { lifecycleSessionRecoveryScenario } from "./scenarios/lifecycle-session-recovery.ts";
@@ -93,7 +95,9 @@ export const ALL_SCENARIOS: readonly Scenario[] = [
   dependencyCachePackageScenario,
   domainMigrationScenario,
   upDownScenario,
+  execStaleEnvScenario,
   portableMultiserviceScenario,
+  composeConfigHashDriftScenario,
   nativeConfigComposeScenario,
   nativeConfigBuildScenario,
   nativeConfigDownHooksScenario,

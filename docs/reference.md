@@ -27,4 +27,5 @@
 - [Extensions](./extensions.md)
 - [Creating an extension](./guides/create-extension.md)
 - [Integrations](./integrations.md)
+- [MCP tool contract](./reference/mcp-tools.md) — every MCP tool: annotations, inputs, argv, results, and the value-free env tools
 - [MCP logs contract](./reference/mcp-logs.md) — cutoff versus backend failure for the MCP log tools, and the cursor/handle decision

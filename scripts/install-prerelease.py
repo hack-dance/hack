@@ -29,6 +29,13 @@ PAYLOAD = frozenset(("hack-native", "hack-relay-guest", "hack-cli", "hack-v5",
                      "provider-pins.json", "README.md", "prerelease.json"))
 LEGACY_COMPILER_PAYLOAD = frozenset(("hack-config-compiler", "hack.project.schema.json"))
 COMPILER_PAYLOAD = LEGACY_COMPILER_PAYLOAD | {"hack.local.schema.json"}
+# Guest-only Linux ARM64 witness for authored persistent mounts and its byte
+# manifest. The CLI resolves both as siblings of hack-native; older bundles omit both.
+STORAGE_TOOL = "hack-storage-root-witness"
+STORAGE_TOOL_MANIFEST = "native-storage-tool.json"
+STORAGE_TOOL_PAYLOAD = frozenset((STORAGE_TOOL, STORAGE_TOOL_MANIFEST))
+STORAGE_TOOL_KEYS = {"version", "kind", "platform", "architecture", "file", "sha256", "bytes",
+                     "sourceRevision"}
 EXECUTABLES = frozenset(("hack-native", "hack-relay-guest", "hack-cli", "hack-v5",
                          "hack-config-compiler"))
 BUNDLE_FILES = PAYLOAD | {"SHA256SUMS"}
@@ -40,11 +47,12 @@ METADATA_KEYS = {"schema", "version", "tag", "source_revision", "platform"}
 REPOSITORY = "hack-dance/hack"
 DOWNLOAD_HOSTS = {"api.github.com", "github.com", "release-assets.githubusercontent.com",
                   "objects.githubusercontent.com"}
-# Reviewed flat-layout, shared-MCP, and compiler managers.
+# Reviewed flat-layout, shared-MCP, compiler, and batched-signature managers.
 # Keep this an explicit allowlist; a matching user-written receipt is not provenance.
 MANAGER_PREDECESSORS = frozenset({
     "b459ffc4f227482119b48e357c91e4607aa4f7d1f88c7ccf5b7d684f66f2c0cd",
     "b7c49e3fec6b06790e833db1d2dcb441d2223c283b792713be46826aa2eef877",
+    "c7562953361b6b37141e126df31edefabc05e4441e3c6e0a38b1c3cda6b645da",
     "ca432b7fc6562bb091d17d3217f5d1daf9f91621a6919c8964ca51bee2111d0c",
     "d39e77623be1876567e9db66c468e8da96067aeac0d88089df28efc11f850ef8",
 })
@@ -181,13 +189,15 @@ def checksums(raw, expected):
 
 
 def payload_inventory(names):
-    """Accept complete optional compiler and MCP groups alongside the original payload."""
+    """Accept complete optional compiler, storage tool and MCP groups beside the original payload."""
     names = set(names)
     require(BUNDLE_FILES <= names, "Incomplete candidate bundle.")
     compiler = names & COMPILER_PAYLOAD
     require(not compiler or compiler in (LEGACY_COMPILER_PAYLOAD, COMPILER_PAYLOAD),
             "Incomplete config compiler payload.")
-    extra = names - BUNDLE_FILES - COMPILER_PAYLOAD
+    storage = names & STORAGE_TOOL_PAYLOAD
+    require(not storage or storage == STORAGE_TOOL_PAYLOAD, "Incomplete storage tool payload.")
+    extra = names - BUNDLE_FILES - COMPILER_PAYLOAD - STORAGE_TOOL_PAYLOAD
     if extra:
         matches = [MCP_MEMBER.fullmatch(name) for name in extra]
         require(all(matches), "Foreign candidate MCP payload.")
@@ -216,7 +226,35 @@ def bundle_inventory(bundle):
 def payload_mode(name):
     if MCP_MEMBER.fullmatch(name):
         return 0o400 if name.endswith("/manifest.json") else 0o500
+    if name == STORAGE_TOOL:
+        return 0o500
     return 0o755 if name in EXECUTABLES else 0o600
+
+
+def verify_storage_tool(bundle, payload, verified_digests, identity):
+    """Bind the witness manifest to bytes hashed in this verification and to provenance.
+
+    Runtime admission parses the same fields and refuses any mismatch; checking here
+    keeps an unusable pair from being selected. The ELF itself never runs on macOS.
+    """
+    if STORAGE_TOOL not in payload:
+        return
+    path = bundle / STORAGE_TOOL_MANIFEST
+    require(path.stat().st_size <= 4096, "Oversized storage tool manifest.")
+    manifest = parse_json(path.read_bytes())
+    require(set(manifest) == STORAGE_TOOL_KEYS, "Invalid storage tool manifest fields.")
+    require(type(manifest["version"]) is int and manifest["version"] == 1
+            and manifest["kind"] == "native-storage-root-witness"
+            and manifest["platform"] == "linux" and manifest["architecture"] == "arm64"
+            and manifest["file"] == STORAGE_TOOL, "Incompatible storage tool manifest.")
+    size = (bundle / STORAGE_TOOL).stat().st_size
+    require(type(manifest["bytes"]) is int and 64 <= manifest["bytes"] <= 2 * 1024 * 1024
+            and manifest["bytes"] == size
+            and isinstance(manifest["sha256"], str) and SHA256.fullmatch(manifest["sha256"])
+            and manifest["sha256"] == verified_digests[STORAGE_TOOL],
+            "Storage tool fingerprint mismatch.")
+    require(manifest["sourceRevision"] == identity["source_revision"],
+            "Storage tool source revision mismatch.")
 
 
 def verify_mcp_bundle(bundle, payload, verified_digests):
@@ -273,10 +311,13 @@ def verify_bundle(bundle, version):
         verified_digests[name] = actual
     identity = metadata((bundle / "prerelease.json").read_bytes(), version)
     verify_mcp_bundle(bundle, payload, verified_digests)
+    verify_storage_tool(bundle, payload, verified_digests, identity)
     return identity, manifest
 
 
 def verify_signatures(bundle):
+    # Linux guest ELFs (hack-relay-guest, the storage witness) carry no macOS code
+    # signature; checksums and, for the witness, its bound manifest pin them.
     names = ["hack-native", "hack-cli"]
     payload = bundle_inventory(bundle)
     if "hack-config-compiler" in payload:
@@ -308,8 +349,10 @@ def extract_archive(archive, checksum, destination, version, release_metadata=No
             seen = set()
             total = 0
             for entry in source:
-                require(len(entries) < len(BUNDLE_FILES) + len(COMPILER_PAYLOAD) + 4, "Incomplete or duplicate archive entries.")
-                require((entry.name in BUNDLE_FILES | COMPILER_PAYLOAD or MCP_MEMBER.fullmatch(entry.name)) and entry.name not in seen,
+                require(len(entries) < len(BUNDLE_FILES) + len(COMPILER_PAYLOAD)
+                        + len(STORAGE_TOOL_PAYLOAD) + 4, "Incomplete or duplicate archive entries.")
+                require((entry.name in BUNDLE_FILES | COMPILER_PAYLOAD | STORAGE_TOOL_PAYLOAD
+                         or MCP_MEMBER.fullmatch(entry.name)) and entry.name not in seen,
                         "Foreign, duplicate or traversing archive entry.")
                 require(entry.isfile() and not entry.issparse() and entry.size > 0
                         and entry.size <= MAX_ARCHIVE, "Only bounded regular archive files are accepted.")

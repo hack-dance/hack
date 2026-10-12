@@ -68,7 +68,7 @@ export const execStaleEnvScenario: Scenario = {
         service: "web",
       });
       expect({
-        that: fresh.stdout.trim() === VALUE_AT_UP,
+        that: execProbeValue({ stdout: fresh.stdout }) === VALUE_AT_UP,
         message: "web should receive the env value resolved at up",
         result: fresh,
       });
@@ -82,7 +82,7 @@ export const execStaleEnvScenario: Scenario = {
       for (const service of ["web", "api"]) {
         const stale = await execProbe({ ctx, root: fixture.root, service });
         expect({
-          that: stale.stdout.trim() === VALUE_AT_UP,
+          that: execProbeValue({ stdout: stale.stdout }) === VALUE_AT_UP,
           message: `${service} keeps its start-time env until recreated`,
           result: stale,
         });
@@ -106,7 +106,7 @@ export const execStaleEnvScenario: Scenario = {
         service: "web",
       });
       expect({
-        that: refreshed.stdout.trim() === VALUE_AFTER_EDIT,
+        that: execProbeValue({ stdout: refreshed.stdout }) === VALUE_AFTER_EDIT,
         message: "restarted web should receive the edited env value",
         result: refreshed,
       });
@@ -144,9 +144,13 @@ async function execProbe(opts: {
   readonly root: string;
   readonly service: string;
 }): Promise<CliResult> {
+  // Hack's own diagnostics (for example CoreDNS/Caddy reachability warnings)
+  // go through the logger; the console backend writes them to stderr so
+  // stdout carries only the child command's output.
   const result = await opts.ctx.cli({
     args: ["exec", opts.service, "--", "printenv", PROBE_KEY],
     cwd: opts.root,
+    env: { HACK_LOGGER: "console" },
     timeoutMs: EXEC_TIMEOUT_MS,
   });
   expectExit({
@@ -155,6 +159,21 @@ async function execProbe(opts: {
     message: `hack exec ${opts.service} printenv should succeed`,
   });
   return result;
+}
+
+/**
+ * The value printed by the exec'd `printenv`: the last non-empty stdout line,
+ * trimmed. Returns null when stdout has no non-empty line, so a missing value
+ * never equals an expected one.
+ */
+export function execProbeValue(opts: {
+  readonly stdout: string;
+}): string | null {
+  const lines = opts.stdout
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+  return lines.at(-1) ?? null;
 }
 
 function expectValueFreeWarning(opts: {

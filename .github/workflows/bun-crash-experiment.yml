@@ -31,8 +31,11 @@ on:
 permissions:
   contents: read
 
+# Only experiment events contend. A label other than `bun-crash-experiment` gets a
+# group of its own (keyed by run id), so its no-op run can never queue behind,
+# replace or cancel a pending experiment run on the same pull request.
 concurrency:
-  group: bun-crash-experiment-${{ github.event.pull_request.number || github.ref }}
+  group: bun-crash-experiment-${{ github.event_name == 'workflow_dispatch' && format('dispatch-{0}', github.ref) || github.event.label.name == 'bun-crash-experiment' && format('pr-{0}', github.event.pull_request.number) || format('ignored-label-{0}', github.run_id) }}
   cancel-in-progress: false
 
 jobs:

@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtemp, readdir, rm, utimes, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   collectDiagnosticReports,
@@ -64,6 +64,29 @@ describe("classifyBunRun", () => {
     expect(
       classifyBunRun({ exitCode: null, signal: "SIGSEGV", output: "" })
     ).toEqual({ outcome: "crash", reason: "signal" });
+  });
+
+  test("every signal shape Bun.spawn reports is a crash, whatever the signal", () => {
+    // Bun.spawn reports a signal death as exitCode null plus the signal name.
+    // These shapes are fed directly, so no test process ever receives a crash
+    // signal (which would make macOS write a real crash report).
+    for (const signal of [
+      "SIGSEGV",
+      "SIGABRT",
+      "SIGBUS",
+      "SIGILL",
+      "SIGTRAP",
+      "SIGTERM",
+      "SIGKILL",
+    ]) {
+      expect(classifyBunRun({ exitCode: null, signal, output: "" })).toEqual({
+        outcome: "crash",
+        reason: "signal",
+      });
+      expect(
+        classifyBunRun({ exitCode: null, signal, output: " 3 pass\n 0 fail\n" })
+      ).toEqual({ outcome: "crash", reason: "signal" });
+    }
   });
 
   test("(fail) with exit 1 is a non-crash test failure", () => {
@@ -257,6 +280,58 @@ describe("runBunCrashLoop", () => {
     });
   });
 
+  test("a signal death from the executor is recorded as a crash with its closed signal name", async () => {
+    let clock = 0;
+    const runs: ExecutedRun[] = [
+      {
+        exitCode: null,
+        signal: "SIGSEGV",
+        output: "",
+        stoppedAtDeadline: false,
+      },
+      {
+        exitCode: null,
+        signal: "SIGABRT",
+        output: "",
+        stoppedAtDeadline: false,
+      },
+      {
+        exitCode: null,
+        signal: "not a signal name",
+        output: "",
+        stoppedAtDeadline: false,
+      },
+    ];
+    const result = await runBunCrashLoop({
+      budgetMs: 300_000,
+      commands: [commands[0] as LoopCommand],
+      now: () => clock,
+      execute: async () => {
+        clock += 100_000;
+        return (
+          runs.shift() ?? {
+            exitCode: 0,
+            signal: null,
+            output: "",
+            stoppedAtDeadline: false,
+          }
+        );
+      },
+    });
+    expect(
+      result.iterations.map((record) => [
+        record.outcome,
+        record.reason,
+        record.exitCode,
+        record.signal,
+      ])
+    ).toEqual([
+      ["crash", "signal", null, "SIGSEGV"],
+      ["crash", "signal", null, "SIGABRT"],
+      ["crash", "signal", null, null],
+    ]);
+  });
+
   test("the summary is closed and value-free", async () => {
     let clock = 0;
     const result = await runBunCrashLoop({
@@ -287,8 +362,26 @@ describe("runBunCrashLoop", () => {
   });
 });
 
+const BUN_CRASH_REPORT = /^bun.*\.ips$/i;
+
+/** The `bun*.ips` names in the user's crash-report directory (read-only; empty when absent). */
+async function bunCrashReportNames(): Promise<string[]> {
+  try {
+    const names = await readdir(
+      join(homedir(), "Library", "Logs", "DiagnosticReports")
+    );
+    return names.filter((name) => BUN_CRASH_REPORT.test(name)).sort();
+  } catch {
+    return [];
+  }
+}
+
 describe("executeWithLog", () => {
   test("keeps each run's log, reports signals and stops a run at the deadline", async () => {
+    // Real children here must never die from a crash signal (SIGSEGV, SIGABRT,
+    // SIGBUS, SIGILL, SIGTRAP): macOS ReportCrash would write a bun-*.ips into
+    // the user's real DiagnosticReports, whatever HOME is set to.
+    const reportsBefore = await bunCrashReportNames();
     const root = await tempRoot();
     const execute = executeWithLog({ cwd: root, logDir: root });
     const far = Date.now() + 60_000;
@@ -303,16 +396,25 @@ describe("executeWithLog", () => {
     expect(pass).toMatchObject({ exitCode: 0, stoppedAtDeadline: false });
     expect(pass.output).toContain("ok");
 
-    const crashed = await execute(
+    // SIGTERM is a non-crash signal, so no crash report is written; it still
+    // exercises the path where a run dies from a signal the harness did not send.
+    const signaled = await execute(
       {
         id: "focused",
-        argv: [process.execPath, "-e", "process.kill(process.pid, 'SIGSEGV')"],
+        argv: [process.execPath, "-e", "process.kill(process.pid, 'SIGTERM')"],
         initialEstimateMs: 1000,
       },
       { index: 2, deadlineMs: far }
     );
-    expect(crashed.signal).toBe("SIGSEGV");
-    expect(classifyBunRun(crashed).outcome).toBe("crash");
+    expect(signaled).toMatchObject({
+      exitCode: null,
+      signal: "SIGTERM",
+      stoppedAtDeadline: false,
+    });
+    expect(classifyBunRun(signaled)).toEqual({
+      outcome: "crash",
+      reason: "signal",
+    });
 
     const stopped = await execute(
       {
@@ -328,6 +430,7 @@ describe("executeWithLog", () => {
       "iteration-002-focused.log",
       "iteration-003-full.log",
     ]);
+    expect(await bunCrashReportNames()).toEqual(reportsBefore);
   });
 });
 

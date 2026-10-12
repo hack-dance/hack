@@ -1,6 +1,6 @@
 import { resolve } from "node:path";
 
-import { readTextFile } from "../lib/fs.ts";
+import { readOptionalTextFile } from "../lib/fs.ts";
 import { renderCodexSkill } from "./codex-skill.ts";
 import { normalizeInstructionText } from "./instruction-source.ts";
 import {
@@ -66,7 +66,15 @@ export async function checkSharedHackSkill(): Promise<SharedSkillResult> {
     return { status: "error", path: SKILL_FILENAME, message: resolved.message };
   }
 
-  const content = await readTextFile(resolved.path);
+  const file = await readOptionalTextFile(resolved.path);
+  if (file.kind === "unreadable") {
+    return {
+      status: "error",
+      path: resolved.path,
+      message: "Hack-managed file exists but could not be read.",
+    };
+  }
+  const content = file.kind === "text" ? file.text : "";
   if (!content) {
     return { status: "missing", path: resolved.path };
   }

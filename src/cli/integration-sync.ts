@@ -44,7 +44,7 @@ export function renderAgentIntegrationFreshnessNotice(opts: {
   }
   return [
     `Hack integration inventory: review needed (CLI v${opts.report.cliVersion}).`,
-    "Some integrations are missing, stale, or could not be checked. Missing optional integrations need not be installed.",
+    "Some installed integrations are stale, retired, or could not be checked. Missing optional integrations need not be installed.",
     `Inspect affected paths: ${opts.report.verifyCommand}`,
     "Repair only the affected integration and scope authorized for this task.",
     `For an explicitly requested full refresh: ${opts.report.fixCommand}`,
@@ -101,18 +101,30 @@ async function detectIntegrationDrift(opts: {
   };
 }
 
+// Optional integrations are not required: an absent ("missing") integration is
+// current. Only present-but-stale or unverifiable ("error") checks are drift.
+// A Hack-owned file that exists but cannot be read is reported as "error" by
+// its check, so it counts as drift (matching doctor). Retired legacy
+// artifacts are drift whenever they are present.
 function hasSingleCheckDrift(status: string): boolean {
-  return status !== "noop" && status !== "absent";
+  return status === "stale" || status === "error";
 }
 
 function hasMcpDrift(opts: {
   readonly checks: readonly McpCheckResult[];
 }): boolean {
-  return opts.checks.some((check) => check.status !== "present");
+  // MCP config has no revision marker, so only unreadable configs count.
+  return opts.checks.some((check) => check.status === "error");
 }
 
 function hasDocDrift(opts: {
   readonly checks: readonly AgentDocCheckResult[];
 }): boolean {
-  return opts.checks.some((check) => check.status !== "present");
+  // A user-owned AGENTS.md/CLAUDE.md with neither Hack marker is not drift.
+  // A doc with only one marker (corrupted section) or an unreadable doc is.
+  return opts.checks.some(
+    (check) =>
+      check.status === "stale" ||
+      (check.status === "error" && check.unmanaged !== true)
+  );
 }

@@ -1,6 +1,6 @@
 import { resolve } from "node:path";
 
-import { readTextFile } from "../lib/fs.ts";
+import { readOptionalTextFile } from "../lib/fs.ts";
 import { normalizeInstructionText } from "./instruction-source.ts";
 import {
   type IntegrationPreservedReason,
@@ -149,7 +149,17 @@ export async function checkHackInitSkill(opts: {
   }
 
   const path = resolved.path;
-  const content = await readTextFile(path);
+  const file = await readOptionalTextFile(path);
+  if (file.kind === "unreadable") {
+    return {
+      client: opts.client,
+      scope: opts.scope,
+      status: "error",
+      path,
+      message: "Hack-managed file exists but could not be read.",
+    };
+  }
+  const content = file.kind === "text" ? file.text : "";
   if (!content) {
     return { client: opts.client, scope: opts.scope, status: "missing", path };
   }

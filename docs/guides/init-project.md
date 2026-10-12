@@ -41,6 +41,24 @@ Note:
   - HTTP services via `https://*.hack.local` hostnames (matching your Caddy labels)
   - non-HTTP services via Compose service hostnames (e.g. `db`, `redis`)
 
+## Coding agents
+
+Interactive `hack init` does not write coding-agent files by default. It prints a
+note recommending the optional Hack plugin for your client (see
+[Integrations](../integrations.md#optional-native-plugins)) and
+`hack agent onboard` for agent-assisted project setup. Non-interactive runs neither
+prompt nor write agent files.
+
+Repository-local export is a separate opt-in for clients that cannot use the plugin.
+Its confirm defaults to "no" and its target list starts empty. Only the targets you
+select are written into the repository: `.cursor/rules/hack.mdc`,
+`.claude/settings.local.json` plus the `hack-init` skill, `.codex/skills/hack-cli`,
+the managed section of `AGENTS.md`/`CLAUDE.md`, or project MCP config.
+
+`hack doctor` and `hack agent prime --check` treat absent optional integrations as
+current. They report review needed only for an installed integration that is stale
+or unreadable, or for a retired legacy artifact.
+
 ## Local domain compatibility
 
 For new projects using the default `hack.local`, `--oauth` adds

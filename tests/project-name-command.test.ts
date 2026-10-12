@@ -3,7 +3,11 @@ import { chmod, readFile, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { createMcpServer } from "../src/mcp/server.ts";
+import {
+  createMcpServer,
+  MCP_REFUSALS,
+  type McpRefusalReason,
+} from "../src/mcp/server.ts";
 import { projectNameFixture } from "./helpers/project-name-fixture.ts";
 
 // The same boundary suite can qualify the current branch's compiled binary.
@@ -127,6 +131,37 @@ for (const selector of selectors) {
   }, 15_000);
 }
 
+/**
+ * Asserts the closed pre-spawn refusal contract: fixed catalogue code and
+ * message, no child spawned, and none of the given caller or registry values
+ * anywhere in the serialized result.
+ */
+function expectClosedRefusal(opts: {
+  readonly result: Awaited<ReturnType<Client["callTool"]>>;
+  readonly reason: McpRefusalReason;
+  readonly absent: readonly string[];
+}) {
+  const expected = MCP_REFUSALS[opts.reason];
+  expect(opts.result.isError).toBe(true);
+  expect(opts.result.structuredContent).toEqual({
+    ok: false,
+    command: "",
+    exitCode: 1,
+    stdout: "",
+    stderr: expected.message,
+    spawned: false,
+    error: {
+      code: expected.code,
+      reason: opts.reason,
+      message: expected.message,
+    },
+  });
+  const serialized = JSON.stringify(opts.result);
+  for (const value of opts.absent) {
+    expect(serialized).not.toContain(value);
+  }
+}
+
 async function connectMcp() {
   const command = join(fixture.root, "fixture-cli");
   // Spawn the actual current-source CLI (or explicitly selected current build).
@@ -165,19 +200,25 @@ test("MCP selectors survive real CLI forwarding and reject aliases with multiple
   const contender = await fixture.createProject("other", "my-app");
   await fixture.writeRegistry([target.entry, contender.entry]);
   const before = await readFile(fixture.registryPath, "utf8");
+  const registered = [
+    "my_app",
+    "my-app",
+    target.entry.id,
+    contender.entry.id,
+    fixture.root,
+  ];
   for (const projectName of ["my_app", "my-app", "", "!!!"]) {
     const result = await client.callTool({
       name: "hack.project.open",
       arguments: { projectName },
     });
-    expect(result.isError).toBe(true);
-    expect(result.structuredContent).toMatchObject({
-      ok: false,
-      stderr: expect.stringContaining(
+    expectClosedRefusal({
+      result,
+      reason:
         projectName === "" || projectName === "!!!"
-          ? "Invalid projectName"
-          : "Ambiguous project name"
-      ),
+          ? "invalid_project_name"
+          : "ambiguous_project",
+      absent: projectName === "" ? registered : [...registered, projectName],
     });
   }
   expect(await readFile(fixture.registryPath, "utf8")).toBe(before);
@@ -195,12 +236,17 @@ for (const reversed of [false, true]) {
         name: "hack.project.open",
         arguments: { projectName },
       });
-      expect(result.isError).toBe(true);
-      expect(result.structuredContent).toMatchObject({
-        ok: false,
-        exitCode: 1,
-        stdout: "",
-        stderr: expect.stringContaining("Ambiguous project ID"),
+      expectClosedRefusal({
+        result,
+        reason: "ambiguous_project",
+        absent: [
+          projectName,
+          "my_app",
+          "my-app",
+          contender.entry.name,
+          target.entry.id,
+          fixture.root,
+        ],
       });
     }
     expect(await readFile(fixture.registryPath, "utf8")).toBe(before);

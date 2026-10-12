@@ -42,6 +42,13 @@ remain readable aliases; a later registration of that checkout canonicalizes the
 name while preserving its project ID. This does not rename Compose projects,
 volumes, hosts or the name in project configuration.
 
+Because a `--project` argument is sometimes a pasted value, Hack never prints the
+argument or a slug derived from it. A value containing `=` or other characters
+outside a project name is refused with fixed text. An alias spelling that matches
+no registered project is not named either: errors say "Unknown project", and
+`hack projects --json`/`hack status --json` report `"filter": null` with
+`"filter_redacted": true` (and filter without the daemon).
+
 If multiple registrations share a canonical name, selection refuses all aliases,
 including an exact spelling. Inspect `hack projects` and use `--path` to address a
 specific checkout before renaming or pruning the conflicting registration. A

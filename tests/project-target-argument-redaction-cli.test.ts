@@ -10,6 +10,7 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import packageJson from "../package.json";
 import type { AnyCommandSpec } from "../src/cli/command.ts";
 import { optProject } from "../src/cli/options.ts";
 import {
@@ -86,6 +87,8 @@ function requireRoot(): string {
 async function runHack(input: {
   readonly args: readonly string[];
   readonly cwd?: string;
+  /** Global state dir (daemon socket); the registry stays under the temp HOME. */
+  readonly hackHome?: string;
 }): Promise<RunResult> {
   const base = requireRoot();
   const home = join(base, "home");
@@ -98,7 +101,7 @@ async function runHack(input: {
         PATH: join(base, "bin"),
         ...isolatedDockerClientEnv(home),
         HOME: home,
-        HACK_HOME: join(home, ".hack"),
+        HACK_HOME: input.hackHome ?? join(home, ".hack"),
         TMPDIR: home,
         // The project registry lives next to the global config.
         HACK_GLOBAL_CONFIG_PATH: join(home, ".hack", "hack.config.json"),
@@ -183,6 +186,52 @@ async function expectNoCanaryFileNames(canary: string): Promise<void> {
       .map((name) => String(name))
       .filter((name) => folded(name).includes(folded(canary)))
   ).toEqual([]);
+}
+
+/** Register a `my-app` project (no runtime) in the temp HOME's registry. */
+async function registerMyApp(): Promise<void> {
+  const base = requireRoot();
+  const projectRoot = join(base, "my-app-repo");
+  const projectDir = join(projectRoot, ".hack");
+  await mkdir(projectDir, { recursive: true });
+  await writeFile(
+    join(projectDir, "docker-compose.yml"),
+    "services:\n  api:\n    image: alpine:3.20\n"
+  );
+  await writeFile(
+    join(projectDir, "hack.config.json"),
+    `${JSON.stringify({ name: "my-app" }, null, 2)}\n`
+  );
+  const registry = join(base, "home", ".hack", "projects.json");
+  await mkdir(join(base, "home", ".hack"), { recursive: true });
+  await writeFile(
+    registry,
+    JSON.stringify({
+      version: 1,
+      projects: [
+        {
+          id: "my-app-id",
+          name: "my-app",
+          repoRoot: projectRoot,
+          projectDir,
+          projectDirName: ".hack",
+          createdAt: "2026-10-12T00:00:00Z",
+        },
+      ],
+    })
+  );
+}
+
+/** Parse a `--json` listing into an object, or fail with the label. */
+function parseListing(input: {
+  readonly label: string;
+  readonly stdout: string;
+}): Record<string, unknown> {
+  const parsed: unknown = JSON.parse(input.stdout);
+  if (typeof parsed !== "object" || parsed === null) {
+    throw new Error(`${input.label}: --json output is not an object`);
+  }
+  return parsed as Record<string, unknown>;
 }
 
 /** Command paths (e.g. ["branch", "add"]) whose spec includes `option`. */
@@ -348,6 +397,11 @@ test(
       ["status"],
       ["projects"],
       ["projects", "prune", "--dry-run"],
+      // --json previously echoed the slug as "filter".
+      ["status", "--json"],
+      ["projects", "--json"],
+      ["projects", "--json", "--summary"],
+      ["projects", "prune", "--dry-run", "--json"],
     ];
     await runAll(paths, async (path) => {
       const label = path.join(" ");
@@ -381,6 +435,122 @@ test(
       args: ["projects", "--project", CANARY],
     });
     expect(canonical.stdout).toContain(`No projects matched: ${CANARY}`);
+
+    // JSON keeps the filter field: null and flagged when it may not be named.
+    for (const command of ["status", "projects"]) {
+      const aliasedJson = parseListing({
+        label: command,
+        stdout: (
+          await runHack({
+            args: [command, "--json", "--project", ALIAS_CANARY],
+          })
+        ).stdout,
+      });
+      expect({
+        command,
+        filter: aliasedJson.filter,
+        redacted: aliasedJson.filter_redacted,
+        projects: aliasedJson.projects,
+      }).toEqual({ command, filter: null, redacted: true, projects: [] });
+      const canonicalJson = parseListing({
+        label: command,
+        stdout: (
+          await runHack({ args: [command, "--json", "--project", CANARY] })
+        ).stdout,
+      });
+      expect({
+        command,
+        filter: canonicalJson.filter,
+        redacted: canonicalJson.filter_redacted,
+      }).toEqual({ command, filter: CANARY, redacted: undefined });
+    }
+
+    // An alias of a registered project may be named: the listing shows it.
+    await registerMyApp();
+    const registered = parseListing({
+      label: "registered alias",
+      stdout: (
+        await runHack({ args: ["projects", "--json", "--project", "My_App"] })
+      ).stdout,
+    });
+    expect({
+      filter: registered.filter,
+      redacted: registered.filter_redacted,
+      names: (registered.projects as { name?: unknown }[]).map((p) => p.name),
+    }).toEqual({ filter: "my-app", redacted: undefined, names: ["my-app"] });
+  },
+  { timeout: 120_000 }
+);
+
+test(
+  "projects --json never sends an unnameable --project filter to the daemon",
+  async () => {
+    // A short state dir keeps the socket path under the platform limit.
+    const hackHome = await mkdtemp(join(tmpdir(), "hkd-"));
+    const socketPath = join(hackHome, "daemon", "hackd.sock");
+    await mkdir(join(hackHome, "daemon"), { recursive: true });
+    const requests: string[] = [];
+    // Stands in for hackd: same version, and it echoes `filter` like the real
+    // /v1/projects payload does.
+    const daemon = Bun.serve({
+      unix: socketPath,
+      fetch(request) {
+        const url = new URL(request.url);
+        requests.push(`${url.pathname}${url.search}`);
+        if (url.pathname === "/v1/status") {
+          return Response.json({ version: packageJson.version });
+        }
+        if (url.pathname === "/v1/projects") {
+          return Response.json({
+            source: "fake-daemon",
+            filter: url.searchParams.get("filter"),
+            projects: [],
+          });
+        }
+        return Response.json({ error: "not_found" }, { status: 404 });
+      },
+    });
+    try {
+      await registerMyApp();
+      const run = async (project: string) => {
+        const result = await runHack({
+          args: ["projects", "--json", "--project", project],
+          hackHome,
+        });
+        expect({ project, exitCode: result.exitCode }).toEqual({
+          project,
+          exitCode: 0,
+        });
+        return parseListing({ label: project, stdout: result.stdout });
+      };
+
+      const aliased = await run(ALIAS_CANARY);
+      expect({ source: aliased.source, filter: aliased.filter }).toEqual({
+        source: undefined,
+        filter: null,
+      });
+      expect(
+        requests.filter((entry) => folded(entry).includes(folded(ALIAS_CANARY)))
+      ).toEqual([]);
+      expect(
+        requests.filter((entry) => entry.startsWith("/v1/projects"))
+      ).toEqual([]);
+
+      // The daemon is reachable: a nameable filter still goes to it.
+      const canonical = await run(CANARY);
+      expect({ source: canonical.source, filter: canonical.filter }).toEqual({
+        source: "fake-daemon",
+        filter: CANARY,
+      });
+      const registered = await run("My_App");
+      expect({ source: registered.source, filter: registered.filter }).toEqual({
+        source: "fake-daemon",
+        filter: "my-app",
+      });
+    } finally {
+      daemon.stop(true);
+      await rm(hackHome, { recursive: true, force: true });
+    }
   },
   { timeout: 120_000 }
 );
@@ -388,36 +558,7 @@ test(
 test(
   "legacy alias spellings of a registered project keep selecting it",
   async () => {
-    const base = requireRoot();
-    const projectRoot = join(base, "my-app-repo");
-    const projectDir = join(projectRoot, ".hack");
-    await mkdir(projectDir, { recursive: true });
-    await writeFile(
-      join(projectDir, "docker-compose.yml"),
-      "services:\n  api:\n    image: alpine:3.20\n"
-    );
-    await writeFile(
-      join(projectDir, "hack.config.json"),
-      `${JSON.stringify({ name: "my-app" }, null, 2)}\n`
-    );
-    const registry = join(base, "home", ".hack", "projects.json");
-    await mkdir(join(base, "home", ".hack"), { recursive: true });
-    await writeFile(
-      registry,
-      JSON.stringify({
-        version: 1,
-        projects: [
-          {
-            id: "my-app-id",
-            name: "my-app",
-            repoRoot: projectRoot,
-            projectDir,
-            projectDirName: ".hack",
-            createdAt: "2026-10-12T00:00:00Z",
-          },
-        ],
-      })
-    );
+    await registerMyApp();
     for (const alias of ["my-app", "My_App", "my_app", "MY-APP", "my app"]) {
       const result = await runHack({
         args: ["config", "get", "--project", alias, "name"],

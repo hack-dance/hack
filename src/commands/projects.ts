@@ -201,8 +201,7 @@ const handleProjects: CommandHandlerFor<typeof spec> = async ({
     summary: args.options.summary === true,
     timings: args.options.timings === true,
     noDaemon: args.options.noDaemon === true,
-    filter: selector?.name ?? null,
-    filterCanonical: selector?.canonical === true,
+    selector,
     includeGlobal: args.options.includeGlobal === true,
     includeUnregistered: args.options.all === true,
     details: args.options.details === true || args.options.meta === true,
@@ -448,8 +447,7 @@ const handleStatus: CommandHandlerFor<typeof statusSpec> = async ({
   const selector = parseProjectFilter(args.options.project);
   await touchCwdProjectRegistration({ cwd: ctx.cwd });
   return await runProjects({
-    filter: selector?.name ?? null,
-    filterCanonical: selector?.canonical === true,
+    selector,
     includeGlobal: args.options.includeGlobal === true,
     includeUnregistered: args.options.all === true,
     details: true,
@@ -461,9 +459,11 @@ const handleStatus: CommandHandlerFor<typeof statusSpec> = async ({
 export const statusCommand = withHandler(statusSpec, handleStatus);
 
 async function runProjects(opts: {
-  readonly filter: string | null;
-  /** Whether `filter` was typed canonically, so the empty-result notice may name it. */
-  readonly filterCanonical?: boolean;
+  /**
+   * Parsed `--project` filter. Its `name` is used only for in-process
+   * matching; output and the daemon query see `resolveListingFilter` instead.
+   */
+  readonly selector: ProjectSelector | null;
   readonly includeGlobal: boolean;
   readonly includeUnregistered: boolean;
   readonly details: boolean;
@@ -477,19 +477,19 @@ async function runProjects(opts: {
 }): Promise<number> {
   const profiler = opts.profiler ?? createOperationTimings();
   const started = opts.started ?? performance.now();
-  if (opts.filter) {
-    selectRegisteredProjectByName({
-      projects: (await readProjectsRegistry()).projects,
-      name: opts.filter,
-    });
-  }
+  const { filter, filterLabel, filterRedacted } = await resolveListingFilter(
+    opts.selector
+  );
   const daemonRuntimeMeta =
     opts.json || opts.noDaemon ? null : await readDaemonRuntimeRecoveryMeta();
 
+  // The daemon echoes its `filter` query back, so a filter that may not be
+  // named is matched in process only and never sent to it.
   if (
     opts.json &&
     !opts.noDaemon &&
-    (await outputDaemonProjects({ opts, profiler, started }))
+    !filterRedacted &&
+    (await outputDaemonProjects({ opts, filterLabel, profiler, started }))
   ) {
     return 0;
   }
@@ -511,7 +511,7 @@ async function runProjects(opts: {
       registryProjects: registry.projects,
       runtime: runtime.runtime,
       runtimeOk: runtime.ok,
-      filter: opts.filter,
+      filter,
       includeUnregistered: opts.includeUnregistered,
     })
   );
@@ -526,7 +526,8 @@ async function runProjects(opts: {
       profiler,
       started,
       timings: opts.timings === true,
-      filter: opts.filter,
+      filterLabel,
+      filterRedacted,
       includeGlobal: opts.includeGlobal,
       includeUnregistered: opts.includeUnregistered,
       includeMeta: opts.meta,
@@ -546,7 +547,7 @@ async function runProjects(opts: {
     await display.panel({
       title: "Projects",
       tone: "warn",
-      lines: [noProjectsMessage(opts)],
+      lines: [noProjectsMessage({ filtered: filter !== null, filterLabel })],
     });
     return 0;
   }
@@ -611,10 +612,13 @@ async function renderProjectInputDiagnostics(
 
 async function outputDaemonProjects({
   opts,
+  filterLabel,
   profiler,
   started,
 }: {
   readonly opts: Parameters<typeof runProjects>[0];
+  /** Filter safe to send (and have echoed back); see `resolveListingFilter`. */
+  readonly filterLabel: string | null;
   readonly profiler: OperationTimings;
   readonly started: number;
 }): Promise<boolean> {
@@ -622,7 +626,7 @@ async function outputDaemonProjects({
     requestDaemonJson({
       path: "/v1/projects",
       query: {
-        filter: opts.filter ?? null,
+        filter: filterLabel,
         include_global: opts.includeGlobal,
         include_unregistered: opts.includeUnregistered,
         include_meta: opts.meta,
@@ -669,7 +673,10 @@ function outputProjectsJson(opts: {
   readonly profiler: OperationTimings;
   readonly started: number;
   readonly timings: boolean;
-  readonly filter: string | null;
+  /** Filter safe to echo; see `resolveListingFilter`. */
+  readonly filterLabel: string | null;
+  /** A filter was applied but may not be named. */
+  readonly filterRedacted: boolean;
   readonly includeGlobal: boolean;
   readonly includeUnregistered: boolean;
   readonly includeMeta: boolean;
@@ -681,7 +688,8 @@ function outputProjectsJson(opts: {
   const payload = {
     ...(opts.summary ? { detail_level: "summary" } : {}),
     generated_at: new Date().toISOString(),
-    filter: opts.filter,
+    filter: opts.filterLabel,
+    ...(opts.filterRedacted ? { filter_redacted: true } : {}),
     include_global: opts.includeGlobal,
     include_unregistered: opts.includeUnregistered,
     include_meta: opts.includeMeta,
@@ -1308,16 +1316,44 @@ function parseProjectFilter(value: unknown): ProjectSelector | null {
     : null;
 }
 
-/** Name the filter only when it was typed canonically; never a derived slug. */
-function noProjectsMessage(opts: {
+/**
+ * Split a `--project` listing filter into the name used for in-process
+ * matching and the label that may appear in output or the daemon query.
+ * The label is the name when it was typed canonically or selects a
+ * registered project (whose name the listing shows anyway). Otherwise it is
+ * null and `filterRedacted` is set: a slug derived from a non-canonical
+ * argument is never echoed. Ambiguous registry names still throw here.
+ */
+async function resolveListingFilter(selector: ProjectSelector | null): Promise<{
   readonly filter: string | null;
-  readonly filterCanonical?: boolean;
+  readonly filterLabel: string | null;
+  readonly filterRedacted: boolean;
+}> {
+  if (!selector) {
+    return { filter: null, filterLabel: null, filterRedacted: false };
+  }
+  const registered = selectRegisteredProjectByName({
+    projects: (await readProjectsRegistry()).projects,
+    name: selector.name,
+  });
+  const nameable = selector.canonical || registered !== null;
+  return {
+    filter: selector.name,
+    filterLabel: nameable ? selector.name : null,
+    filterRedacted: !nameable,
+  };
+}
+
+/** Name the filter only through `resolveListingFilter`; never a derived slug. */
+function noProjectsMessage(opts: {
+  readonly filtered: boolean;
+  readonly filterLabel: string | null;
 }): string {
-  if (!opts.filter) {
+  if (!opts.filtered) {
     return "No projects found.";
   }
-  return opts.filterCanonical === true
-    ? `No projects matched: ${opts.filter}`
+  return opts.filterLabel
+    ? `No projects matched: ${opts.filterLabel}`
     : "No projects matched the --project filter.";
 }
 

@@ -48,7 +48,7 @@ source provenance. Raw `bun test <paths>` remains available for focused tests;
 it bypasses the suite preflight and does not prepare compiler-dependent fixtures.
 
 For release workflow edits, run the pinned syntax/context check also enforced by CI:
-`mise x actionlint@1.7.12 -- actionlint -shellcheck= -pyflakes= .github/workflows/ci.yml .github/workflows/release.yml .github/workflows/prerelease.yml`.
+`mise x actionlint@1.7.12 -- actionlint -shellcheck= -pyflakes= .github/workflows/ci.yml .github/workflows/release.yml .github/workflows/prerelease.yml .github/workflows/bun-crash-experiment.yml`.
 This validates event globs and reusable workflow contexts; Bun YAML parsing alone does not.
 
 `bun run privacy:check` scans Git-tracked files. Stage reviewed new source/tests
@@ -70,6 +70,7 @@ untracked candidate additions. Keep private artifacts excluded from the index.
 | Native authored command slices | `tests/native-authored-command.test.ts` (unsupported matrix), `tests/native-authored-command-dispatch.test.ts`, `tests/native-authored-project-{start,run,observe,logs,exec,recovery}.test.ts` and the [command contract](../../../docs/reference/native-authored-commands.md); the dispatch "source CLI" cases need the prepared compiler (`bun run build:config-compiler` or absolute `HACK_CONFIG_COMPILER_BINARY`) and fail without it; `native-authored-project-start` and `native-authored-project-exec` are nondeterministic on a local macOS host, so a single local pass or failure is not proof; live acceptance runs host-serialized on one prepared macOS provider slot |
 | Native VM/routing/reclamation | [candidate guide](../../../docs/guides/native-candidate.md), relevant acceptance gate and isolated host fixture; Linux checks cannot qualify macOS effects |
 | Resource/performance claims | [performance skill](../hack-repo-performance/SKILL.md), matched workload and measured boundaries |
+| Bun runtime crashes | Read-only history: `bun run ci:bun-crash-census -- --since <UTC> --until <UTC>` (failed `test` job logs; `--scan-passing` for all). Matched reproduction: the gated [experiment](../../../.github/workflows/bun-crash-experiment.yml), which spends hosted macOS minutes and needs an explicit go-ahead; never loop on a shared host. Both share [the classifier](../../../scripts/lib/bun-crash-classify.ts) |
 
 Read [CI](../../../.github/workflows/ci.yml) for current hosted gates. A local pass
 does not mean CI ran. Existing unsupported remote/gateway/native-app checks are

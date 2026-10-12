@@ -443,10 +443,11 @@ any e2e result.
 - **Tier 1 (`local`)** — runs everywhere; no docker needed:
   `automation-check`, `init`, `env-secrets`, `worktree-secrets`,
   `worktree-registry`, `worktree-branch-default`, `agent-docs-sync`,
-  `doctor` (doctor tolerates missing docker — it must report, not crash), and
-  `lifecycle-session-recovery`. The lifecycle recovery scenario skips when
-  tmux is unavailable unless `HACK_E2E_REQUIRE_TMUX=1` makes that capability
-  mandatory (as it is in the dedicated Docker/tmux CI job).
+  `agent-surface-freeze`, `doctor` (doctor tolerates missing docker — it must
+  report, not crash), and `lifecycle-session-recovery`. The lifecycle recovery
+  scenario skips when tmux is unavailable unless `HACK_E2E_REQUIRE_TMUX=1`
+  makes that capability mandatory (as it is in the dedicated Docker/tmux CI
+  job).
 - **Tier 2 (`docker`)** — opt-in via `HACK_E2E_DOCKER=1`; requires a running
   docker daemon, the machine's global `hack-dev` network (`hack global
   install`), and pulls `oven/bun:1`: `cache-prune`, `up-down`,
@@ -454,6 +455,31 @@ any e2e result.
   is missing these SKIP with a reason instead of failing. Lifecycle host
   processes only start via `hack up` (no standalone lifecycle command), which
   is why that scenario is tier 2.
+
+## Agent surface freeze
+
+`agent-surface-freeze` is the negative control for surprise agent config
+writes (HACK-1124, HACK-1132, HACK-1155). It seeds a scenario-owned HOME with
+sentinel client config (`~/.claude/settings.json`, `~/.claude.json`,
+`~/.claude/skills/`, `~/.codex/config.toml`, `~/.codex/skills/`,
+`~/.cursor/mcp.json`, `~/.cursor/rules/`, `~/.ai/skills/`, including stale
+`hack-cli` copies). It also commits customized `AGENTS.md`, `CLAUDE.md`,
+`.cursor/rules/hack.mdc`, `.codex/skills/hack-cli/SKILL.md`,
+`.claude/settings.local.json` and `.mcp.json` into two fixtures. It then runs
+`init --auto`, `init --auto --with codex`, `agent prime`,
+`agent prime --check`, `agent onboard`, `agent patterns`, `doctor --json`,
+`doctor --fix --no-interactive` and `setup sync --check` twice each. After
+every run it requires byte-identical hashes for those trees, no new entries
+under them, and `git status` changes only under `.hack/`. Each command must
+also exit with its expected code, so a usage error cannot pass as "no write".
+
+Every call sets `HOME` and `HACK_HOME` to scenario temp dirs, so the
+contributor's real HOME is never read or written. `DOCKER_HOST` points at a
+missing socket and `HACK_MUTAGEN_PATH` at a stub. This keeps
+`doctor --fix` free of Docker and network effects even on a Docker CI shard.
+The scenario stops the isolated hackd that `doctor --fix` starts. The positive
+control, an explicit `setup agents --agents-md`, must change exactly
+`AGENTS.md`.
 
 ## Fixture
 

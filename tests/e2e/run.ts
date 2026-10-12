@@ -6,6 +6,7 @@ import {
 } from "./harness.ts";
 import { nativeConfigNetworksScenario } from "./native-config-networks-acceptance.ts";
 import { agentDocsSyncScenario } from "./scenarios/agent-docs-sync.ts";
+import { agentSurfaceFreezeScenario } from "./scenarios/agent-surface-freeze.ts";
 import { automationCheckScenario } from "./scenarios/automation-check.ts";
 import { cachePruneScenario } from "./scenarios/cache-prune.ts";
 import { dependencyCacheScenario } from "./scenarios/dependency-cache.ts";
@@ -81,6 +82,7 @@ export const ALL_SCENARIOS: readonly Scenario[] = [
   worktreeRegistryScenario,
   worktreeBranchDefaultScenario,
   agentDocsSyncScenario,
+  agentSurfaceFreezeScenario,
   doctorScenario,
   domainMigrationFilesScenario,
   lifecycleSessionRecoveryScenario,

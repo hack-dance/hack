@@ -41,6 +41,13 @@ report freshness findings. Repair only the affected integration and scope covere
 Existing authorization for that action and scope is sufficient. After repair, read the updated
 guidance; restart only if the client cannot reload changed hooks or skills.
 
+Standalone install and remove (`hack setup cursor|claude|codex` and `hack setup sync`) change only
+files Hack owns: the current render or an unedited render from an earlier release. An edited or
+unrecognized `SKILL.md` or `hack.mdc` is reported as `preserved` with a reason and left unchanged;
+move or delete it yourself to reinstall. Removal deletes only the owned `SKILL.md` and removes its
+skill directory only when nothing else is in it. Claude hook removal drops only the
+`hack agent prime` entries and keeps other commands. Preserved files do not change the exit status.
+
 ## Standalone MCP configuration
 
 `hack mcp print --claude --scope project` previews a project entry;

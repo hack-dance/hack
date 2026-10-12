@@ -1,5 +1,6 @@
 import { afterEach, test as bunTest, expect, spyOn } from "bun:test";
 import { createHash } from "node:crypto";
+import { readdirSync, readFileSync } from "node:fs";
 import {
   chmod,
   mkdir,
@@ -18,7 +19,7 @@ import {
 } from "../src/backends/native-authored-project-run.ts";
 import {
   NativeAuthoredProjectStartError,
-  serveNativeAuthoredProject,
+  serveNativeAuthoredProject as serveStart,
 } from "../src/backends/native-authored-project-start.ts";
 import {
   NATIVE_STORAGE_TOOL_FILE,
@@ -27,10 +28,91 @@ import {
 } from "../src/backends/native-authored-storage-tool.ts";
 import { restoreEnv } from "./helpers/env.ts";
 import { writeLifecycleMuxFixture } from "./helpers/lifecycle-mux-fixture.ts";
+import { createNativeAuthoredSettlement } from "./helpers/native-authored-settlement.ts";
 
 const roots: string[] = [];
 const run = "a".repeat(32);
 const CANARY = "synthetic-private-native-start-canary";
+/** Allowance for a case's owners, groups and stop endpoints to be absent afterwards. */
+const SETTLEMENT_BUDGET_MS = 5000;
+/** A caller's 50 ms startup deadline must return the frontend well inside this wall bound. */
+const DEADLINE_WALL_BOUND_MS = 1000;
+/** Fixture creation (compiler and owner scripts) before the deadline case's measured call. */
+const DEADLINE_FIXTURE_SETUP_MS = 2000;
+const settlement = createNativeAuthoredSettlement();
+let observationFailure: unknown;
+
+/** Record what a published generation may leave behind: the stop owner's loopback
+ * endpoint and any detached host process groups. Synchronous, as `onReady` requires. */
+function observeOwners(
+  input: Parameters<typeof serveStart>[0] & { readonly root: string }
+): void {
+  try {
+    const runs = join(
+      input.scope.projectDir,
+      ".internal",
+      "native-authored-runs"
+    );
+    for (const name of readdirSync(runs)) {
+      if (
+        !(name.endsWith(".live-stop.json") || name.endsWith(".hook-stop.json"))
+      ) {
+        continue;
+      }
+      const value: unknown = JSON.parse(readFileSync(join(runs, name), "utf8"));
+      if (
+        typeof value === "object" &&
+        value !== null &&
+        "port" in value &&
+        typeof value.port === "number"
+      ) {
+        settlement.record({
+          kind: "endpoint",
+          name: `stop owner endpoint (${name.replace(/^[0-9a-f]+\./, "")})`,
+          port: value.port,
+        });
+      }
+    }
+    let state: unknown;
+    try {
+      state = JSON.parse(readFileSync(join(input.root, "mux.json"), "utf8"));
+    } catch {
+      state = undefined;
+    }
+    if (typeof state === "object" && state !== null && "windows" in state) {
+      for (const [window, row] of Object.entries(
+        state.windows as Record<string, unknown>
+      )) {
+        if (
+          typeof row === "object" &&
+          row !== null &&
+          "pid" in row &&
+          typeof row.pid === "number"
+        ) {
+          settlement.record({
+            kind: "process",
+            name: `host process group (${window})`,
+            pid: row.pid,
+            group: true,
+          });
+        }
+      }
+    }
+  } catch (error) {
+    observationFailure ??= error;
+  }
+}
+/** Every case serves through this observer; one case below deliberately uses `serveStart`. */
+const serveNativeAuthoredProject = (
+  input: Parameters<typeof serveStart>[0] & { readonly root: string }
+) =>
+  serveStart({
+    ...input,
+    onReady: (selection) => {
+      observeOwners(input);
+      return input.onReady?.(selection);
+    },
+  });
 const KEYS = [
   "HACK_HOME",
   "HACK_GLOBAL_CONFIG_PATH",
@@ -64,6 +146,12 @@ function test(
       activeCases++;
       try {
         await body();
+        if (observationFailure !== undefined) {
+          throw observationFailure;
+        }
+        // The next case must not start while this case's owner, its detached
+        // group or its stop endpoint is still present.
+        await settlement.settle({ budgetMs: SETTLEMENT_BUDGET_MS });
       } catch (error) {
         unconfirmed = true;
         throw error;
@@ -292,6 +380,14 @@ console.log(JSON.stringify(result));
   const journal = join(root, "journal.json");
   const calls = join(root, "calls.jsonl");
   const delivery = join(root, "delivery.json");
+  const ownerPid = join(root, "owner.pid");
+  // Each stand-in owner appends its PID; a detached owner leads its own group.
+  settlement.record({
+    kind: "pid-file",
+    name: "stand-in native owner",
+    path: ownerPid,
+    group: true,
+  });
   const digest = createHash("sha256").update(CANARY).digest("hex");
   await writeFile(
     binary,
@@ -303,6 +399,7 @@ const journal=${JSON.stringify(journal)};
 const root=${JSON.stringify(join(projectDir, ".internal", "native-authored-runs"))};
 if(['plan','serve','frontend-plan','frontend-serve'].includes(action)){
  const planning=action==='plan'||action==='frontend-plan';
+ if(!planning)await appendFile(${JSON.stringify(ownerPid)},process.pid+'\\n');
  const path=args[args.indexOf('--source-file')+1];const input=JSON.parse(await readFile(path,'utf8'));
  const digest=createHash('sha256');
  if(input.branch!==null)digest.update('hack-native-branch-namespace-v1\\0');
@@ -780,10 +877,14 @@ macTest(
       serveNativeAuthoredProject({ ...selected, run, startupTimeoutMs: 50 }),
       "not-started"
     );
-    expect(performance.now() - started).toBeLessThan(1000);
+    // The caller's 50 ms deadline is kept while inputs are acquired; it is
+    // never replaced by a fixture or source startup budget.
+    expect(performance.now() - started).toBeLessThan(DEADLINE_WALL_BOUND_MS);
     expect(await Bun.file(selected.calls).exists()).toBe(false);
     expect(await Bun.file(selected.delivery).exists()).toBe(false);
-  }
+  },
+  // Larger than the wall bound: fixture setup, the bounded call, then settlement.
+  DEADLINE_FIXTURE_SETUP_MS + DEADLINE_WALL_BOUND_MS + SETTLEMENT_BUDGET_MS
 );
 
 macTest(
@@ -797,7 +898,9 @@ macTest(
       run,
       startupTimeoutMs: 10_000,
     };
-    const pending = serveNativeAuthoredProject(input);
+    // Unwrapped on purpose: the observer's copy must not mask the source's own
+    // selection snapshot. The owner PID file still settles this case.
+    const pending = serveStart(input);
     input.runtime.binary = join(selected.root, "missing");
     input.runtime.home = join(selected.root, "different");
     input.scope.nativeHome = input.runtime.home;

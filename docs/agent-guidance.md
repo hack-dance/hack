@@ -93,6 +93,17 @@ and domain owner; the disposition does not waive that owner's runtime gates.
 `tests/pattern-catalogue.test.ts` checks completeness, CLI_SPEC command
 resolution and the banned-recipe scan.
 
+A card's `example` field names a static example project under
+`examples/patterns/` (today HACK-P01 and HACK-P02). The field is contributor
+reference only and is not rendered, because the plugin ships without the
+repository's `examples/` tree. `tests/pattern-examples.test.ts` checks that each
+reference resolves and every fixture belongs to one card. It also validates
+each fixture's `hack.config.json` against the project schema and parser, the
+P01 Compose file against the `locked-v1` dependency cache contract, and the P02
+toolchain service against its card. Every `hack` command in a fixture README
+must resolve in CLI_SPEC and name a declared service and profile. These checks
+are static: they do not start containers or qualify the runtime gates.
+
 Skill candidates and where their patterns live now:
 
 | Candidate | Decision | Patterns live in | Promotion owner and missing contract |

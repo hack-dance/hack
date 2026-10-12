@@ -200,8 +200,8 @@ function projectRuntime(opts: {
 
 /**
  * Select `project` from a `hack projects --json` payload and list its runtime
- * instances: the default instance first (when running), then each branch
- * instance in the order the CLI reported them.
+ * instances: the default instance first (when it has containers), then each
+ * branch instance in the order the CLI reported them.
  */
 export function projectInstances(opts: {
   readonly payload: unknown;

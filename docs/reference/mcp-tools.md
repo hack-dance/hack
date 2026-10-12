@@ -181,13 +181,16 @@ MCP audit log records the same argv.
 ## `hack.project.instances`
 
 Lists a registered project's runtime instances: `hack projects --json
---project=<name>`.
+--project=<name>`. It reads the project's `runtime` and `branch_runtime`
+entries, so it lists only instances that currently have containers, running or
+stopped. A configured branch that was never started is not listed.
 
 `data` is `{ project, found, runtime_ok, instances }`. `instances` lists the
-default instance first, when it is running, as `branch: null`. Each branch
+default instance first, when it has containers, as `branch: null`. Each branch
 instance follows, in CLI order. Each instance is `{ branch, compose_project,
 working_dir, services }`, and each service is `{ service, containers, running }`
-with container counts. `stdout` is always `""`: the raw listing can cover other
+with container counts. Both counts include lifecycle-process containers, which
+the CLI adds to the service with the process name. `stdout` is always `""`: the raw listing can cover other
 projects and carries container labels, mounts and networks, which `data` omits.
 `stderr` is returned as captured. `found` is `false` when the project is
 registered but the CLI listing does not include it.

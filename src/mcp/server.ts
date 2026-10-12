@@ -1111,7 +1111,7 @@ function registerTools(opts: {
     name: "hack.project.instances",
     title: "List project instances",
     description:
-      "List a registered project's runtime instances: the default instance and each branch instance, with per-service container counts.",
+      "List a registered project's runtime instances from `hack projects --json`: only the default and branch instances that currently have containers (running or stopped); a branch that was never started is not listed. Per-service `containers` and `running` counts include lifecycle-process containers.",
     annotations: READ_ONLY_TOOL_ANNOTATIONS,
     inputSchema: {
       ...projectSelectorInput,

@@ -61,6 +61,8 @@ export const E2E_DURATION_HINTS_SECONDS: Readonly<Record<string, number>> = {
   doctor: 18,
   "lifecycle-host-process": 13,
   "up-down": 12,
+  // Estimate until a hosted docker-e2e summary measures it.
+  "exec-stale-env": 20,
   "cache-prune": 12,
   "dependency-cache-protocol": 11,
   "worktree-branch-default": 2,

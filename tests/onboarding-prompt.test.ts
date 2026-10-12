@@ -3,6 +3,10 @@ import { expect, test } from "bun:test";
 import { INSTRUCTION_SECTIONS } from "../src/agents/instruction-source.ts";
 import { renderOnboardingPrompt } from "../src/agents/onboarding-prompt.ts";
 import { CLI_SPEC } from "../src/cli/spec.ts";
+import {
+  extractHackInvocations,
+  findGuidanceCommandIssues,
+} from "./helpers/cli-guidance-commands.ts";
 
 const NEW_PROJECT_PROMPT = renderOnboardingPrompt({ mode: "new-project" });
 const EXISTING_PROJECT_PROMPT = renderOnboardingPrompt({
@@ -15,32 +19,6 @@ const ALL_PROMPTS = {
   "new-project": NEW_PROJECT_PROMPT,
   "existing-project": EXISTING_PROJECT_PROMPT,
 } as const;
-
-const TOP_LEVEL_COMMANDS: ReadonlySet<string> = new Set(
-  CLI_SPEC.commands.map((command) => command.name)
-);
-
-const BACKTICK_SEGMENT_PATTERN = /`([^`]+)`/g;
-
-function extractHackSubcommandTokens(rendered: string): string[] {
-  const tokens: string[] = [];
-  for (const match of rendered.matchAll(BACKTICK_SEGMENT_PATTERN)) {
-    const segment = (match[1] ?? "").trim();
-    if (!(segment === "hack" || segment.startsWith("hack "))) {
-      continue;
-    }
-    const first = segment.slice("hack ".length).trim().split(/\s+/)[0] ?? "";
-    if (first.length === 0 || first.startsWith("-") || first.startsWith("<")) {
-      continue;
-    }
-    for (const part of first.split("/")) {
-      if (part.length > 0) {
-        tokens.push(part);
-      }
-    }
-  }
-  return tokens;
-}
 
 test("onboarding prompt renders all phases in both modes", () => {
   for (const prompt of Object.values(ALL_PROMPTS)) {
@@ -125,14 +103,15 @@ test("known dev_host is threaded into hostname and verification guidance", () =>
   expect(NEW_PROJECT_PROMPT).toContain("api.<project>.hack");
 });
 
-test("every hack subcommand referenced by the prompt exists in CLI_SPEC", () => {
+test("every hack command path and long flag referenced by the prompt exists in CLI_SPEC", () => {
   for (const [mode, prompt] of Object.entries(ALL_PROMPTS)) {
-    const unknown = extractHackSubcommandTokens(prompt).filter(
-      (token) => !TOP_LEVEL_COMMANDS.has(token)
-    );
     expect(
-      unknown,
-      `mode "${mode}" references unknown hack subcommands`
+      extractHackInvocations(prompt).length,
+      `mode "${mode}" has no hack invocations to validate`
+    ).toBeGreaterThan(0);
+    expect(
+      findGuidanceCommandIssues({ cli: CLI_SPEC, rendered: prompt }),
+      `mode "${mode}" references unknown hack commands or flags`
     ).toEqual([]);
   }
 });

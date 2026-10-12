@@ -9,7 +9,7 @@ local HTTPS URL. Every project on your machine, all at once, none of them collid
 
 ```bash
 cd any-repo && hack up
-# → https://myapp.hack is live, TLS trusted, env injected
+# → https://myapp.hack.local is live, TLS trusted, env injected
 ```
 
 Local development breaks down when one machine runs many things. Two projects fight
@@ -25,9 +25,11 @@ trusted TLS. Nothing is hosted. Your machine is the platform.
 
 ## What you get
 
-**A real URL for every project.** `https://myapp.hack`, with per-service subdomains
-like `api.myapp.hack` and locally-trusted certificates. No ports to remember, no
-collisions, and OAuth-friendly alias hosts when a provider rejects `.hack`.
+**A real URL for every project.** New projects get `https://myapp.hack.local`, with
+per-service subdomains like `api.myapp.hack.local` and locally-trusted certificates.
+No ports to remember, no collisions, and OAuth-friendly `.hack.gy` alias hosts when a
+provider rejects `.hack.local` (or legacy `.hack`). Existing `.hack` names, `.hack.gy`
+aliases, and custom domains keep working in parallel.
 
 **`hack up` is the whole answer to "how do I run this repo".** Services, env,
 lifecycle hooks, and host-side helpers (tunnels, SSO, proxies) are declared in
@@ -58,7 +60,7 @@ URL usually means another tool, another script, another README section:
 
 | The job | The usual duct tape | With hack |
 | --- | --- | --- |
-| Local domains + trusted TLS | portless, mkcert, `/etc/hosts` edits | `https://myapp.hack`, CA trusted once |
+| Local domains + trusted TLS | portless, mkcert, `/etc/hosts` edits | `https://myapp.hack.local`, CA trusted once |
 | Secrets & env | Doppler, `.env` files in Slack | encrypted values committed with the repo |
 | "How do I run this" | README + Makefile + tribal knowledge | `.hack/` config + `hack up` |
 | Tunnels, SSO, proxies | ad-hoc shell scripts in a terminal tab | declared lifecycle processes, cleaned up on `down` |
@@ -68,7 +70,7 @@ URL usually means another tool, another script, another README section:
 
 Each row is a tool you don't install or a script you don't maintain. And the
 pieces compose because they share one model of the project: the same identity that
-routes `api.myapp.hack` also decrypts its secrets, starts its tunnels, labels its
+routes `api.myapp.hack.local` also decrypts its secrets, starts its tunnels, labels its
 logs, and namespaces its branch instances. That's why none of it needs glue code.
 
 ## Your environment, anywhere

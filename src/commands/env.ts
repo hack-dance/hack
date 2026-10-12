@@ -15,6 +15,7 @@ import {
   parseEnvScopeOption,
   parseExecutionScopeOptions,
   parseMaterializeScopeOption,
+  parseProjectSelectorOption,
 } from "../cli/env-arguments.ts";
 import { resolveRequestedEnvName } from "../cli/env-selection.ts";
 import { optEnv, optJson, optPath, optProject } from "../cli/options.ts";
@@ -80,7 +81,6 @@ import {
   setProjectEnvValue,
   unsetProjectEnvValue,
 } from "../lib/project-env-config.ts";
-import { normalizeProjectName } from "../lib/project-name.ts";
 import { resolveRegisteredProjectByName } from "../lib/projects-registry.ts";
 import {
   formatSecretStoreDescriptor,
@@ -627,6 +627,9 @@ function normalizeGlobalEncryptedFileConfigPath(input: {
   return resolvedPath;
 }
 
+const UNKNOWN_PROJECT_HINT =
+  "Run 'hack init' in that repo (or run 'hack projects' to see registered projects).";
+
 async function resolveProjectForEnv(opts: {
   readonly ctx: CliContext;
   readonly pathOpt: string | undefined;
@@ -637,14 +640,19 @@ async function resolveProjectForEnv(opts: {
   }
 
   if (opts.projectOpt !== undefined) {
-    const name = normalizeProjectName(opts.projectOpt);
-    if (!name) {
-      throw new CliUsageError("Invalid --project value.");
-    }
-    const project = await resolveRegisteredProjectByName({ name });
+    const selector = parseProjectSelectorOption({
+      projectOpt: opts.projectOpt,
+    });
+    const project = await resolveRegisteredProjectByName({
+      name: selector.name,
+    });
     if (!project) {
+      // Echo only a name the user typed in canonical form; never a slug
+      // derived from their input.
       throw new CliUsageError(
-        `Unknown project "${name}". Run 'hack init' in that repo (or run 'hack projects' to see registered projects).`
+        selector.canonical
+          ? `Unknown project "${selector.name}". ${UNKNOWN_PROJECT_HINT}`
+          : `Unknown project. ${UNKNOWN_PROJECT_HINT}`
       );
     }
     return project;
@@ -775,8 +783,9 @@ function resolveHostEnvTarget(input: {
   ) {
     return target as (typeof HOST_ENV_TARGET_VALUES)[number];
   }
+  // Fixed text: the rejected argument may be a pasted value.
   throw new CliUsageError(
-    `Invalid --target "${target}". Expected one of: ${HOST_ENV_TARGET_VALUES.join(", ")}`
+    `Invalid --target value. Expected one of: ${HOST_ENV_TARGET_VALUES.join(", ")}.`
   );
 }
 
@@ -1293,18 +1302,19 @@ const handleEnvExplain: CommandHandlerFor<typeof explainSpec> = async ({
   ctx,
   args,
 }): Promise<number> => {
-  const project = await resolveProjectForEnv({
-    ctx,
-    pathOpt: args.options.path,
-    projectOpt: args.options.project,
-  });
-  const projectName = await resolveProjectName(project);
+  // Refuse malformed arguments with fixed text before any project file is read.
   const envName = resolveRequestedEnvName({ envOption: args.options.env });
   const parsed = parseProjectEnvTarget({
     keyOrPath: args.positionals.key,
     scopeOverride: args.options.service,
   });
   const target = resolveHostEnvTarget({ targetOption: args.options.target });
+  const project = await resolveProjectForEnv({
+    ctx,
+    pathOpt: args.options.path,
+    projectOpt: args.options.project,
+  });
+  const projectName = await resolveProjectName(project);
   const modern = await loadModernProjectEnv({ project, envName });
   if (modern) {
     renderEnvExplain(
@@ -1365,6 +1375,7 @@ const handleEnvApply: CommandHandlerFor<typeof applySpec> = async ({
   const service = parseApplyServiceOption({
     serviceName: args.options.service,
   });
+  const envName = resolveRequestedEnvName({ envOption: args.options.env });
   const project = await resolveProjectForEnv({
     ctx,
     pathOpt: args.options.path,
@@ -1379,8 +1390,9 @@ const handleEnvApply: CommandHandlerFor<typeof applySpec> = async ({
     "--path",
     project.projectRoot,
   ];
-  if (args.options.env) {
-    command.push("--env", args.options.env);
+  // Forward only the validated selection, never the raw argument.
+  if (envName !== undefined) {
+    command.push("--env", envName ?? "base");
   }
   if (args.options.json) {
     command.push("--json");
@@ -1747,6 +1759,9 @@ const handleEnvAdd: CommandHandlerFor<typeof addSpec> = async ({
         keyOrPath: keyArg ?? "",
         scopeOverride: args.options.service,
       });
+  const envName = resolveRequestedEnvName({
+    envOption: args.options.env,
+  });
   const stdinValue = valueStdin ? await readEnvValueFromStdin() : null;
 
   const project = await resolveProjectForEnv({
@@ -1755,9 +1770,6 @@ const handleEnvAdd: CommandHandlerFor<typeof addSpec> = async ({
     projectOpt: args.options.project,
   });
   const projectName = await resolveProjectName(project);
-  const envName = resolveRequestedEnvName({
-    envOption: args.options.env,
-  });
   await maybeMigrateLegacyProjectEnv({
     project,
     projectName,
@@ -2016,18 +2028,18 @@ async function runHostCommandWithInjectedEnv(input: {
       "--timeout requires non-TTY stdin; pipe input or redirect from /dev/null for a finite job."
     );
   }
-  const project = await resolveProjectForEnv({
-    ctx: input.ctx,
-    pathOpt: input.pathOpt,
-    projectOpt: input.projectOpt,
-  });
-  const projectName = await resolveProjectName(project);
   const envName = resolveRequestedEnvName({
     envOption: input.envOpt,
   });
   const target = resolveHostEnvTarget({
     targetOption: input.targetOpt,
   });
+  const project = await resolveProjectForEnv({
+    ctx: input.ctx,
+    pathOpt: input.pathOpt,
+    projectOpt: input.projectOpt,
+  });
+  const projectName = await resolveProjectName(project);
   const shellCommand = input.shellCommandOpt?.trim();
   const positionalCommand = input.command;
   if (shellCommand && positionalCommand.length > 0) {
@@ -2076,18 +2088,18 @@ async function openHostShellWithInjectedEnv(input: {
     scopeName: input.scopeName,
     serviceName: input.serviceName,
   });
-  const project = await resolveProjectForEnv({
-    ctx: input.ctx,
-    pathOpt: input.pathOpt,
-    projectOpt: input.projectOpt,
-  });
-  const projectName = await resolveProjectName(project);
   const envName = resolveRequestedEnvName({
     envOption: input.envOpt,
   });
   const target = resolveHostEnvTarget({
     targetOption: input.targetOpt,
   });
+  const project = await resolveProjectForEnv({
+    ctx: input.ctx,
+    pathOpt: input.pathOpt,
+    projectOpt: input.projectOpt,
+  });
+  const projectName = await resolveProjectName(project);
   const envState = await resolveEnvInjection({
     project,
     projectName,

@@ -4,12 +4,19 @@ import {
   ENV_KEY_INVALID_MESSAGE,
   ENV_SCOPE_INVALID_MESSAGE,
 } from "../lib/project-env-config.ts";
+import {
+  normalizeProjectName,
+  PROJECT_NAME_PATTERN,
+  PROJECT_SELECTOR_PATTERN,
+} from "../lib/project-name.ts";
 import { CliUsageError } from "./command.ts";
 
 const ENV_KEY_PATTERN = /^[A-Z_][A-Z0-9_]*$/;
 const SCOPE_CONFLICT_MESSAGE = "Use either --scope or --service, not both.";
 const APPLY_SERVICE_REQUIRED_MESSAGE =
   "--service <compose-service> is required.";
+export const INVALID_PROJECT_OPTION_MESSAGE =
+  "Invalid --project value. Project names use ASCII letters, digits, hyphens, underscores, spaces or slashes; run 'hack projects' to see registered projects.";
 
 /**
  * Parsers for the env-scope and env-key arguments of `hack env` and
@@ -98,4 +105,24 @@ export function parseEnvGetArguments(input: {
     key: input.key,
     scope: parseEnvScopeOption({ scopeName: input.serviceName }),
   };
+}
+
+/**
+ * Parse `--project` for `hack env` and `hack host` commands. An argument
+ * containing `=` or any character outside `PROJECT_SELECTOR_PATTERN` may be a
+ * pasted value, so it is refused with fixed text before the registry is read
+ * and is never slugged into a name. `canonical` reports whether the argument
+ * was typed in canonical form, the only form an error may echo.
+ */
+export function parseProjectSelectorOption(input: {
+  readonly projectOpt: string;
+}): { readonly name: string; readonly canonical: boolean } {
+  const trimmed = input.projectOpt.trim();
+  const name = PROJECT_SELECTOR_PATTERN.test(trimmed)
+    ? normalizeProjectName(trimmed)
+    : null;
+  if (!name) {
+    throw new CliUsageError(INVALID_PROJECT_OPTION_MESSAGE);
+  }
+  return { name, canonical: PROJECT_NAME_PATTERN.test(trimmed) };
 }

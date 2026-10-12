@@ -139,8 +139,11 @@ Projects can set a default overlay in `.hack/hack.config.json`:
 Use `--env=base` to bypass that default and read only `.hack/hack.env.default.yaml`
 (plus local overrides). `default` and `none` are aliases for `base`, in any case, on every
 command that accepts `--env`; an overlay file named after one of those spellings is never
-selected by name. Other names are normalized (for example ` QA ` selects `qa`), and a
-non-empty value with no usable name characters is refused with `Invalid --env value.`
+selected by name. Any other value must already be a canonical overlay name: lowercase
+letters and digits joined by single hyphens (`^[a-z0-9]+(-[a-z0-9]+)*$`, for example
+`qa` or `qa-2`); surrounding whitespace is ignored. Hack never rewrites a requested name,
+so `QA`, `q_a` or `X=1` is refused with a fixed `Invalid --env value.` message that does
+not repeat the argument, before any project file is read or any child process starts.
 See the [command and delivery matrix](#command-and-delivery-matrix) for what each command
 does with the selection.
 
@@ -216,9 +219,9 @@ For example, `hack host exec --scope api -- bun db:migrate` still runs on the ho
 
 Every command that accepts `--env` resolves it with the same rule: omitted selects
 the configured default overlay (`env.defaultOverlay`); `base`, `default` or `none`
-selects base layers only; any other value selects that normalized overlay name. The
-table lists every such command; `tests/env-command-matrix.test.ts` fails when a
-command gains or loses `--env` without a matching row, or when a row's selectors
+selects base layers only; any other value must be a canonical overlay name and selects
+that overlay. The table lists every such command; `tests/env-command-matrix.test.ts`
+fails when a command gains or loses `--env` without a matching row, or when a row's selectors
 drift from the CLI. Commands not listed here refuse `--env` as an option that is not
 valid for them (arguments after a standalone `--` belong to the child command).
 

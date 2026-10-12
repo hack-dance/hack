@@ -1,12 +1,25 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readdir,
+  readFile,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { CliUsageError } from "../src/cli/command.ts";
+import { type AnyCommandSpec, CliUsageError } from "../src/cli/command.ts";
 import {
+  INVALID_PROJECT_OPTION_MESSAGE,
   parseEnvGetArguments,
   parseExecutionScopeOptions,
+  parseProjectSelectorOption,
 } from "../src/cli/env-arguments.ts";
+import { INVALID_ENV_SELECTION_MESSAGE } from "../src/cli/env-selection.ts";
+import { optEnv, optProject } from "../src/cli/options.ts";
+import { CLI_SPEC } from "../src/cli/spec.ts";
+import { parseEnvConfigSelection } from "../src/lib/project.ts";
 import {
   ENV_KEY_ASSIGNMENT_MESSAGE,
   ENV_KEY_INVALID_MESSAGE,
@@ -119,6 +132,8 @@ function expectRefusedWithoutEcho(input: {
   for (const stream of [result.stdout, result.stderr, result.spawnLog]) {
     expect(stream).not.toContain(input.canary);
     expect(stream).not.toContain(input.rawArgument);
+    // A slugged echo (case-folded, punctuation stripped) is still an echo.
+    expect(stream.toLowerCase()).not.toContain(input.canary.toLowerCase());
   }
 }
 
@@ -544,5 +559,338 @@ test("execution scope parsing refuses conflicts and malformed scopes value-free"
     }
     expect(message.length).toBeGreaterThan(0);
     expect(message).not.toContain(CANARY);
+  }
+});
+
+/** Every file or directory name under `dir`, recursively. */
+async function listNames(dir: string): Promise<readonly string[]> {
+  const entries = await readdir(dir, { recursive: true });
+  return entries.map((entry) => String(entry));
+}
+
+/** No file anywhere under the temp root may carry the canary in its name. */
+async function expectNoCanaryFileNames(canary: string): Promise<void> {
+  const names = await listNames(requireRoot());
+  expect(
+    names.filter((name) => name.toLowerCase().includes(canary.toLowerCase()))
+  ).toEqual([]);
+}
+
+function expectNoNonGitChild(result: RunResult): void {
+  expect(
+    spawnedPrograms(result.spawnLog).filter((name) => name !== "git")
+  ).toEqual([]);
+}
+
+/** Command paths (e.g. ["env", "get"]) whose spec includes `option`. */
+function commandPathsWithOption(option: unknown): readonly string[][] {
+  const out: string[][] = [];
+  const walk = (
+    commands: readonly AnyCommandSpec[],
+    prefix: readonly string[]
+  ): void => {
+    for (const command of commands) {
+      const path = [...prefix, command.name];
+      if (command.options.some((entry) => entry === option)) {
+        out.push(path);
+      }
+      walk(command.subcommands, path);
+    }
+  };
+  walk(CLI_SPEC.commands, []);
+  return out;
+}
+
+/** Arguments that let each env/host command reach its handler. */
+function handlerArguments(path: readonly string[]): readonly string[] {
+  switch (path.join(" ")) {
+    case "env get":
+    case "env explain":
+    case "env unset":
+      return ["API_TOKEN"];
+    case "env add":
+    case "env set":
+      return ["API_TOKEN", "value"];
+    case "env apply":
+      return ["--service", "api"];
+    case "env exec":
+    case "host exec":
+      return ["--", "true"];
+    default:
+      return [];
+  }
+}
+
+/** `env get` replaces every failure with one fixed message. */
+function expectedRefusal(path: readonly string[], message: string): string {
+  return path.join(" ") === "env get" ? GET_REFUSAL : message;
+}
+
+/** Value-bearing --env spellings: assignments and non-canonical names. */
+const ENV_CANARY_VALUES: readonly {
+  readonly value: string;
+  readonly canary: string;
+}[] = [
+  // Previously slugged to "xecho-canary-...", printed, and used as a file name.
+  { value: `X=${CANARY}`, canary: CANARY },
+  // Previously case-folded to "echo-scope-canary-...".
+  { value: SCOPE_CANARY, canary: SCOPE_CANARY },
+  { value: `${CANARY}.yaml`, canary: CANARY },
+];
+
+test(
+  "every command accepting --env refuses a value-bearing --env before any project work",
+  async () => {
+    const paths = commandPathsWithOption(optEnv);
+    // Guard against the enumeration silently finding nothing.
+    expect(paths.map((path) => path.join(" "))).toEqual(
+      expect.arrayContaining([
+        "up",
+        "down",
+        "restart",
+        "run",
+        "exec",
+        "env add",
+        "env apply",
+        "env get",
+        "host exec",
+        "config plan",
+        "session start",
+      ])
+    );
+    // No .hack/ here: any refusal other than the --env one would mean the
+    // command discovered (or failed to discover) a project before --env.
+    const empty = join(requireRoot(), "empty");
+    await mkdir(empty, { recursive: true });
+    for (const path of paths) {
+      for (const entry of ENV_CANARY_VALUES) {
+        const result = await runHack({
+          args: [...path, "--env", entry.value],
+          cwd: empty,
+        });
+        expectRefusedWithoutEcho({
+          result,
+          message: expectedRefusal(path, INVALID_ENV_SELECTION_MESSAGE),
+          canary: entry.canary,
+          rawArgument: entry.value,
+        });
+        expectNoNonGitChild(result);
+      }
+    }
+    await expectNoCanaryFileNames(CANARY);
+    await expectNoCanaryFileNames(SCOPE_CANARY);
+  },
+  { timeout: 300_000 }
+);
+
+test(
+  "env and host commands refuse a value-bearing --env in a real project without creating overlay files",
+  async () => {
+    const projectRoot = await createModernProject();
+    const before = await readTree(modernFiles(projectRoot));
+    const beforeNames = await listNames(join(projectRoot, ".hack"));
+    const paths = commandPathsWithOption(optEnv).filter(
+      (path) => path[0] === "env" || path[0] === "host"
+    );
+    for (const path of paths) {
+      for (const entry of ENV_CANARY_VALUES) {
+        const result = await runHack({
+          args: [
+            ...path,
+            "--env",
+            entry.value,
+            "--path",
+            projectRoot,
+            ...handlerArguments(path),
+          ],
+        });
+        expectRefusedWithoutEcho({
+          result,
+          message: expectedRefusal(path, INVALID_ENV_SELECTION_MESSAGE),
+          canary: entry.canary,
+          rawArgument: entry.value,
+        });
+        expectNoNonGitChild(result);
+      }
+    }
+    // `env add --value-stdin` refuses before reading stdin: an empty stdin
+    // would otherwise be refused as an empty value.
+    const stdinResult = await runHack({
+      args: [
+        "env",
+        "add",
+        "API_TOKEN",
+        "--secret",
+        "--value-stdin",
+        "--env",
+        `X=${CANARY}`,
+      ],
+      cwd: projectRoot,
+      stdin: "",
+    });
+    expectRefusedWithoutEcho({
+      result: stdinResult,
+      message: INVALID_ENV_SELECTION_MESSAGE,
+      canary: CANARY,
+      rawArgument: `X=${CANARY}`,
+    });
+    expect(stdinResult.stderr).not.toContain("empty value");
+    expect(await readTree(modernFiles(projectRoot))).toBe(before);
+    expect(await listNames(join(projectRoot, ".hack"))).toEqual(beforeNames);
+    await expectNoCanaryFileNames(CANARY);
+    await expectNoCanaryFileNames(SCOPE_CANARY);
+
+    // The documented base aliases keep working.
+    for (const alias of ["base", "DEFAULT", "none", ""]) {
+      const result = await runHack({
+        args: ["env", "list", "--env", alias, "--json", "--path", projectRoot],
+      });
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toContain("GLOBAL_FLAG");
+    }
+  },
+  { timeout: 300_000 }
+);
+
+test(
+  "env and host commands refuse a value-bearing --project without echoing it",
+  async () => {
+    const paths = commandPathsWithOption(optProject).filter(
+      // `host ps` only filters its listing by name and never echoes it.
+      (path) =>
+        (path[0] === "env" || path[0] === "host") &&
+        path.join(" ") !== "host ps"
+    );
+    expect(paths.length).toBeGreaterThanOrEqual(12);
+    const cases: readonly {
+      readonly value: string;
+      readonly canary: string;
+      readonly message: string;
+    }[] = [
+      // Previously printed as Unknown project "xecho-canary-...".
+      {
+        value: `x=${CANARY}`,
+        canary: CANARY,
+        message: INVALID_PROJECT_OPTION_MESSAGE,
+      },
+      {
+        value: `${CANARY}.x`,
+        canary: CANARY,
+        message: INVALID_PROJECT_OPTION_MESSAGE,
+      },
+      // A legacy alias spelling still selects by its slug, but an unknown
+      // non-canonical selector is not echoed back in slugged form.
+      {
+        value: SCOPE_CANARY,
+        canary: SCOPE_CANARY,
+        message: "Unknown project. Run 'hack init'",
+      },
+    ];
+    const cwd = join(requireRoot(), "empty");
+    await mkdir(cwd, { recursive: true });
+    for (const path of paths) {
+      for (const entry of cases) {
+        const result = await runHack({
+          args: [...path, "--project", entry.value, ...handlerArguments(path)],
+          cwd,
+        });
+        expectRefusedWithoutEcho({
+          result,
+          message: expectedRefusal(path, entry.message),
+          canary: entry.canary,
+          rawArgument: entry.value,
+        });
+        expectNoNonGitChild(result);
+      }
+    }
+    await expectNoCanaryFileNames(CANARY);
+    await expectNoCanaryFileNames(SCOPE_CANARY);
+  },
+  { timeout: 300_000 }
+);
+
+test(
+  "env and host commands refuse a value-bearing --target without echoing it",
+  async () => {
+    const projectRoot = await createModernProject();
+    const before = await readTree(modernFiles(projectRoot));
+    const paths = [
+      ["env", "explain"],
+      ["env", "exec"],
+      ["env", "shell"],
+      ["host", "exec"],
+      ["host", "shell"],
+    ];
+    for (const path of paths) {
+      for (const entry of [
+        { value: `x=${CANARY}`, canary: CANARY },
+        { value: SCOPE_CANARY, canary: SCOPE_CANARY },
+      ]) {
+        const result = await runHack({
+          args: [
+            ...path,
+            "--target",
+            entry.value,
+            "--path",
+            projectRoot,
+            ...handlerArguments(path),
+          ],
+        });
+        expectRefusedWithoutEcho({
+          result,
+          message: "Invalid --target value. Expected one of: host, compose.",
+          canary: entry.canary,
+          rawArgument: entry.value,
+        });
+        expectNoNonGitChild(result);
+      }
+    }
+    expect(await readTree(modernFiles(projectRoot))).toBe(before);
+    await expectNoCanaryFileNames(CANARY);
+    await expectNoCanaryFileNames(SCOPE_CANARY);
+  },
+  { timeout: 120_000 }
+);
+
+test("overlay and project selectors are never slugged from user input", () => {
+  // Shared by the CLI and the daemon env routes (which map undefined to a
+  // fixed `invalid_env` error).
+  expect(parseEnvConfigSelection(undefined)).toBeUndefined();
+  expect(parseEnvConfigSelection(" ")).toBeNull();
+  expect(parseEnvConfigSelection("NONE")).toBeNull();
+  expect(parseEnvConfigSelection(" qa ")).toBe("qa");
+  expect(parseEnvConfigSelection("qa-2")).toBe("qa-2");
+  for (const value of [
+    `X=${CANARY}`,
+    SCOPE_CANARY,
+    "QA",
+    "q_a",
+    "q a",
+    "q--a",
+    "-qa",
+    `${CANARY}.yaml`,
+    "../qa",
+  ]) {
+    expect(parseEnvConfigSelection(value)).toBeUndefined();
+  }
+
+  expect(parseProjectSelectorOption({ projectOpt: " my-app " })).toEqual({
+    name: "my-app",
+    canonical: true,
+  });
+  // Legacy alias spellings still select their canonical slug.
+  expect(parseProjectSelectorOption({ projectOpt: "My_App" })).toEqual({
+    name: "my-app",
+    canonical: false,
+  });
+  for (const value of [`x=${CANARY}`, `${CANARY}.x`, "a:b", "", "---"]) {
+    let message = "";
+    try {
+      parseProjectSelectorOption({ projectOpt: value });
+    } catch (error: unknown) {
+      expect(error).toBeInstanceOf(CliUsageError);
+      message = error instanceof Error ? error.message : String(error);
+    }
+    expect(message).toBe(INVALID_PROJECT_OPTION_MESSAGE);
   }
 });

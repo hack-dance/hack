@@ -1,13 +1,12 @@
-import { rm } from "node:fs/promises";
-import { dirname, resolve } from "node:path";
+import { resolve } from "node:path";
 
-import {
-  ensureDir,
-  pathExists,
-  readOptionalTextFile,
-  writeTextFileIfChanged,
-} from "../lib/fs.ts";
+import { readOptionalTextFile } from "../lib/fs.ts";
 import { normalizeInstructionText } from "./instruction-source.ts";
+import {
+  type IntegrationPreservedReason,
+  installOwnedIntegrationFile,
+  removeOwnedIntegrationFile,
+} from "./integration-ownership.ts";
 
 /**
  * Agent-side `/hack-init` skill: a thin pointer that tells the agent to fetch
@@ -33,9 +32,12 @@ export type HackInitSkillResult = {
     | "stale"
     | "removed"
     | "missing"
+    | "preserved"
     | "error";
   readonly path: string;
   readonly message?: string;
+  /** Set with `preserved`: why an existing file was left unchanged. */
+  readonly reason?: IntegrationPreservedReason;
 };
 
 const SKILL_NAME = "hack-init";
@@ -80,6 +82,9 @@ export function renderHackInitSkill(): string {
 
 /**
  * Install or update the `/hack-init` skill for a client at a scope.
+ *
+ * Overwrites only Hack-owned content; an edited or foreign SKILL.md is
+ * reported as `preserved` and left unchanged.
  */
 export async function installHackInitSkill(opts: {
   readonly client: HackInitSkillClient;
@@ -98,12 +103,27 @@ export async function installHackInitSkill(opts: {
   }
 
   const path = resolved.path;
-  await ensureDir(dirname(path));
-  const existed = await pathExists(path);
-  const result = await writeTextFileIfChanged(path, renderHackInitSkill());
-
-  const status = resolveInstallStatus({ changed: result.changed, existed });
-  return { client: opts.client, scope: opts.scope, status, path };
+  const outcome = await installOwnedIntegrationFile({
+    surface: "hack-init-skill",
+    path,
+    render: renderHackInitSkill(),
+  });
+  if (outcome.status === "preserved") {
+    return {
+      client: opts.client,
+      scope: opts.scope,
+      status: "preserved",
+      path,
+      reason: outcome.reason,
+      message: outcome.message,
+    };
+  }
+  return {
+    client: opts.client,
+    scope: opts.scope,
+    status: outcome.status,
+    path,
+  };
 }
 
 /**
@@ -160,6 +180,9 @@ export async function checkHackInitSkill(opts: {
 
 /**
  * Remove the `/hack-init` skill for a client at a scope.
+ *
+ * Deletes only a Hack-owned SKILL.md, then removes the skill directory only
+ * when it is empty. Edited or foreign content is reported as `preserved`.
  */
 export async function removeHackInitSkill(opts: {
   readonly client: HackInitSkillClient;
@@ -178,12 +201,31 @@ export async function removeHackInitSkill(opts: {
   }
 
   const path = resolved.path;
-  if (!(await pathExists(path))) {
-    return { client: opts.client, scope: opts.scope, status: "missing", path };
+  const outcome = await removeOwnedIntegrationFile({
+    surface: "hack-init-skill",
+    path,
+    currentRender: renderHackInitSkill(),
+    removeEmptyDirectory: true,
+  });
+  if (outcome.status === "preserved") {
+    return {
+      client: opts.client,
+      scope: opts.scope,
+      status: "preserved",
+      path,
+      reason: outcome.reason,
+      message: outcome.message,
+    };
   }
-
-  await rm(resolve(path, ".."), { recursive: true, force: true });
-  return { client: opts.client, scope: opts.scope, status: "removed", path };
+  return {
+    client: opts.client,
+    scope: opts.scope,
+    status: outcome.status,
+    path,
+    ...(outcome.status === "removed" && outcome.message
+      ? { message: outcome.message }
+      : {}),
+  };
 }
 
 function resolveHackInitSkillPath(opts: {
@@ -217,14 +259,4 @@ function resolveHackInitSkillPath(opts: {
 function resolveHomeDir(): string | null {
   const home = (process.env.HOME ?? "").trim();
   return home.length > 0 ? home : null;
-}
-
-function resolveInstallStatus(opts: {
-  readonly changed: boolean;
-  readonly existed: boolean;
-}): "created" | "updated" | "noop" {
-  if (!opts.changed) {
-    return "noop";
-  }
-  return opts.existed ? "updated" : "created";
 }

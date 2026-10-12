@@ -688,10 +688,12 @@ export function buildSetupSyncScopeResult(input: {
   const errorCount = failures.filter(
     (entry) => entry.status === "error"
   ).length;
+  // Preserved files are reported but do not fail an install or remove.
+  const preserved = entries.filter((entry) => entry.status === "preserved");
   let status: DisplayStatusItem["status"] = "ok";
   if (errorCount > 0) {
     status = "error";
-  } else if (failures.length > 0) {
+  } else if (failures.length > 0 || preserved.length > 0) {
     status = "warn";
   }
   const meta = (() => {
@@ -700,23 +702,31 @@ export function buildSetupSyncScopeResult(input: {
         ? `${entries.length} current`
         : `${entries.length - failures.length}/${entries.length} current`;
     }
+    const preservedSuffix =
+      preserved.length > 0 ? `, ${preserved.length} preserved` : "";
     if (input.action === "remove") {
       const removed = entries.filter(
         (entry) => entry.status === "removed"
       ).length;
-      return `${removed} removed`;
+      return `${removed} removed${preservedSuffix}`;
     }
     const changed = entries.filter((entry) =>
       ["created", "updated", "removed"].includes(entry.status)
     ).length;
-    return changed === 0 ? "already current" : `${changed} updated`;
+    return changed === 0
+      ? `already current${preservedSuffix}`
+      : `${changed} updated${preservedSuffix}`;
   })();
-  const detail = failures
+  const detail = [...failures, ...preserved]
     .map((entry) => {
+      const location = entry.path ? ` at ${entry.path}` : "";
+      if (entry.status === "preserved") {
+        const reason = entry.message ? ` ${entry.message}` : "";
+        return `${entry.label}: preserved${location}.${reason}`;
+      }
       if (entry.message) {
         return `${entry.label}: ${entry.message}`;
       }
-      const location = entry.path ? ` at ${entry.path}` : "";
       return `${entry.label}: ${entry.status}${location}`;
     })
     .join("\n");
@@ -1078,11 +1088,22 @@ function logSingleResult(opts: {
     });
   }
 
+  if (opts.result.status === "preserved") {
+    // Preserving edited or foreign content is the safe outcome, not a failure.
+    logger.warn({
+      message: `Preserved ${opts.okMessage} at ${opts.result.path}: ${opts.result.message ?? "not owned by Hack"}`,
+    });
+    return 0;
+  }
+
   if (opts.action === "remove") {
     if (opts.result.status === "removed") {
       logger.success({
         message: `Removed ${opts.okMessage} at ${opts.result.path}`,
       });
+      if (opts.result.message) {
+        logger.info({ message: opts.result.message });
+      }
       return 0;
     }
     logger.info({

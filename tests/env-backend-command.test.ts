@@ -918,7 +918,7 @@ test(
 );
 
 test(
-  "env set preserves multiline plain_env values through .env round-trip",
+  "env set keeps plain_env values lossless and stable across set/list/set cycles",
   async () => {
     if (!tempDir) {
       throw new Error("Missing temp dir");
@@ -931,6 +931,9 @@ test(
       'line"with"quotes',
       "-----END PUBLIC KEY-----",
     ].join("\n");
+    // Leading tab plus a leading quote: unquoted output used to be trimmed
+    // and then re-read as a quoted value, losing both edges.
+    const edgeValue = "\t'quoted'";
     await mkdir(projectDir, { recursive: true });
     await writeFile(
       resolve(projectDir, "docker-compose.yml"),
@@ -947,49 +950,69 @@ test(
               required: false,
               source: "plain_env",
             },
+            {
+              key: "EDGE_VALUE",
+              required: false,
+              source: "plain_env",
+            },
           ],
         },
         null,
         2
       )}\n`
     );
-
-    const setResult = await runHack({
-      args: ["env", "set", `PUBLIC_CERT=${multilineValue}`],
-      env: {
-        ...process.env,
-        HACK_GLOBAL_CONFIG_PATH: tempGlobalConfigPath ?? "",
-      },
-      cwd: projectRoot,
-    });
-    expect(setResult.exitCode).toBe(0);
-
-    const envText = await readFile(resolve(projectDir, ".env"), "utf8");
-    expect(envText).toContain("PUBLIC_CERT=");
-    expect(envText).toContain("\\\\");
-    expect(envText).toContain('\\"');
-
-    const listResult = await runHack({
-      args: ["env", "list", "--show-secrets", "--json"],
-      env: {
-        ...process.env,
-        HACK_GLOBAL_CONFIG_PATH: tempGlobalConfigPath ?? "",
-      },
-      cwd: projectRoot,
-    });
-    expect(listResult.exitCode).toBe(0);
-    const listJson = JSON.parse(listResult.stdout) as {
-      readonly vars: ReadonlyArray<{
-        readonly key: string;
-        readonly value: string | null;
-        readonly source: string;
-      }>;
+    const hackEnv = {
+      ...process.env,
+      HACK_GLOBAL_CONFIG_PATH: tempGlobalConfigPath ?? "",
     };
-    const publicCert = listJson.vars.find(
-      (entry) => entry.key === "PUBLIC_CERT"
-    );
-    expect(publicCert?.source).toBe("plain_env");
-    expect(publicCert?.value).toBe(multilineValue);
+
+    const setAndList = async (): Promise<string> => {
+      const setCertResult = await runHack({
+        args: ["env", "set", `PUBLIC_CERT=${multilineValue}`],
+        env: hackEnv,
+        cwd: projectRoot,
+      });
+      expect(setCertResult.exitCode).toBe(0);
+      const setEdgeResult = await runHack({
+        args: ["env", "set", "EDGE_VALUE", edgeValue],
+        env: hackEnv,
+        cwd: projectRoot,
+      });
+      expect(setEdgeResult.exitCode).toBe(0);
+
+      const envText = await readFile(resolve(projectDir, ".env"), "utf8");
+
+      const listResult = await runHack({
+        args: ["env", "list", "--show-secrets", "--json"],
+        env: hackEnv,
+        cwd: projectRoot,
+      });
+      expect(listResult.exitCode).toBe(0);
+      const listJson = JSON.parse(listResult.stdout) as {
+        readonly vars: ReadonlyArray<{
+          readonly key: string;
+          readonly value: string | null;
+          readonly source: string;
+        }>;
+      };
+      const publicCert = listJson.vars.find(
+        (entry) => entry.key === "PUBLIC_CERT"
+      );
+      const edge = listJson.vars.find((entry) => entry.key === "EDGE_VALUE");
+      expect(publicCert?.source).toBe("plain_env");
+      expect(publicCert?.value).toBe(multilineValue);
+      expect(edge?.source).toBe("plain_env");
+      expect(edge?.value).toBe(edgeValue);
+      return envText;
+    };
+
+    const firstEnvText = await setAndList();
+    expect(firstEnvText).toContain("PUBLIC_CERT=");
+    expect(firstEnvText).toContain("\\\\");
+    expect(firstEnvText).toContain('\\"');
+
+    const secondEnvText = await setAndList();
+    expect(secondEnvText).toBe(firstEnvText);
   },
   { timeout: 40_000 }
 );

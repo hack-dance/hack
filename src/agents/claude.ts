@@ -12,6 +12,7 @@ import {
   installHackInitSkill,
   removeHackInitSkill,
 } from "./hack-init-skill.ts";
+import type { IntegrationPreservedReason } from "./integration-ownership.ts";
 
 export type ClaudeScope = "project" | "user";
 
@@ -23,9 +24,12 @@ export type ClaudeHookResult = {
     | "stale"
     | "removed"
     | "missing"
+    | "preserved"
     | "error";
   readonly path: string;
   readonly message?: string;
+  /** Set with `preserved`: why an existing file was left unchanged. */
+  readonly reason?: IntegrationPreservedReason;
 };
 
 const HOOK_COMMAND = "hack agent prime";
@@ -37,6 +41,10 @@ const HOOK_EVENTS = ["SessionStart", "PreCompact"] as const;
  *
  * The returned path points at the settings file; the status reflects both
  * artifacts (any change reports as updated).
+ *
+ * Settings are merged: only the Hack primer hook entries are added, and other
+ * settings and hooks are kept. An edited or foreign `/hack-init` SKILL.md is
+ * left unchanged and reported as `preserved` with that file's path.
  */
 export async function installClaudeHooks(opts: {
   readonly scope: ClaudeScope;
@@ -82,6 +90,15 @@ export async function installClaudeHooks(opts: {
       scope: opts.scope,
       status: "error",
       path: initResult.path,
+      message: initResult.message,
+    };
+  }
+  if (initResult.status === "preserved") {
+    return {
+      scope: opts.scope,
+      status: "preserved",
+      path: initResult.path,
+      reason: initResult.reason,
       message: initResult.message,
     };
   }
@@ -153,6 +170,10 @@ export async function checkClaudeHooks(opts: {
 
 /**
  * Remove Claude Code hooks for the hack agent primer.
+ *
+ * Removes only the Hack primer hook entries; other commands that share a hook
+ * group are kept. The `/hack-init` skill is removed only when Hack owns it;
+ * otherwise the result is `preserved` with that file's path.
  */
 export async function removeClaudeHooks(opts: {
   readonly scope: ClaudeScope;
@@ -175,10 +196,20 @@ export async function removeClaudeHooks(opts: {
     projectRoot: opts.projectRoot,
   });
   const initRemoved = initResult.status === "removed";
+  const preserved: ClaudeHookResult | null =
+    initResult.status === "preserved"
+      ? {
+          scope: opts.scope,
+          status: "preserved",
+          path: initResult.path,
+          reason: initResult.reason,
+          message: initResult.message,
+        }
+      : null;
 
   if (!(await pathExists(path))) {
     const status = initRemoved ? "removed" : "missing";
-    return { scope: opts.scope, status, path };
+    return preserved ?? { scope: opts.scope, status, path };
   }
 
   const settings = await readSettingsFile({ path });
@@ -196,16 +227,18 @@ export async function removeClaudeHooks(opts: {
     command: HOOK_COMMAND,
   });
   if (!changed) {
-    return {
-      scope: opts.scope,
-      status: initRemoved ? "removed" : "noop",
-      path,
-    };
+    return (
+      preserved ?? {
+        scope: opts.scope,
+        status: initRemoved ? "removed" : "noop",
+        path,
+      }
+    );
   }
 
   const nextText = `${JSON.stringify(settings.value, null, 2)}\n`;
   await writeTextFileIfChanged(path, nextText);
-  return { scope: opts.scope, status: "removed", path };
+  return preserved ?? { scope: opts.scope, status: "removed", path };
 }
 
 function resolveClaudeSettingsPath(opts: {
@@ -307,11 +340,21 @@ function removeHooks(opts: {
 
   for (const event of HOOK_EVENTS) {
     const eventHooks = resolveEventHooks({ hooks, event });
-    const filtered = eventHooks.filter(
-      (hook) => !hookHasCommand({ hook, command: opts.command })
-    );
-    if (filtered.length !== eventHooks.length) {
-      hooks[event] = filtered;
+    const next: unknown[] = [];
+    let eventChanged = false;
+    for (const hook of eventHooks) {
+      const stripped = stripHookCommand({ hook, command: opts.command });
+      if (stripped === hook) {
+        next.push(hook);
+        continue;
+      }
+      eventChanged = true;
+      if (stripped !== null) {
+        next.push(stripped);
+      }
+    }
+    if (eventChanged) {
+      hooks[event] = next;
       changed = true;
     }
   }
@@ -367,6 +410,31 @@ function hookHasCommand(opts: {
     }
     return entry.command === opts.command;
   });
+}
+
+/**
+ * Remove only the Hack command entries from one hook group. Returns the same
+ * group when it has no Hack entry, `null` when nothing else remains, and a
+ * copy holding the other entries otherwise.
+ */
+function stripHookCommand(opts: {
+  readonly hook: unknown;
+  readonly command: string;
+}): unknown {
+  if (!(isRecord(opts.hook) && Array.isArray(opts.hook.hooks))) {
+    return opts.hook;
+  }
+  const entries: readonly unknown[] = opts.hook.hooks;
+  const kept = entries.filter(
+    (entry) => !(isRecord(entry) && entry.command === opts.command)
+  );
+  if (kept.length === entries.length) {
+    return opts.hook;
+  }
+  if (kept.length === 0) {
+    return null;
+  }
+  return { ...opts.hook, hooks: kept };
 }
 
 function createHook(opts: {

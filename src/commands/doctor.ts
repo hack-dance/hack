@@ -92,6 +92,12 @@ import {
   confirmSafe,
   isExplicitlyNonInteractive,
 } from "../lib/interactivity.ts";
+import { findHackLocalCaCertPath } from "../lib/local-ca.ts";
+import {
+  describeSupersededRoots,
+  inspectSupersededMacRoots,
+  type SupersededRootInventory,
+} from "../lib/mac-ca-trust.ts";
 import {
   ensureBundledMutagenInstalled,
   getManagedMutagenAgentBundlePath,
@@ -162,6 +168,28 @@ interface CheckResult {
   readonly name: string;
   readonly status: CheckStatus;
   readonly message: string;
+  /** Counts and public fingerprints only; never paths or keychain contents. */
+  readonly supersededRoots?: SupersededRootInventory;
+}
+
+const SUPERSEDED_ROOTS_CHECK = "superseded caddy roots";
+
+/** Informational inventory: Doctor and --fix never remove a keychain root. */
+function supersededRootsCheck(
+  inventory: SupersededRootInventory | undefined
+): CheckResult {
+  return {
+    name: SUPERSEDED_ROOTS_CHECK,
+    ...describeSupersededRoots(inventory),
+    ...(inventory ? { supersededRoots: inventory } : {}),
+  };
+}
+
+async function checkSupersededCaddyRoots(): Promise<CheckResult> {
+  const certPath = await findHackLocalCaCertPath();
+  return supersededRootsCheck(
+    certPath ? await inspectSupersededMacRoots({ certPath }) : undefined
+  );
 }
 
 interface TimedCheckResult extends CheckResult {
@@ -294,6 +322,7 @@ const DOCTOR_SUMMARY_GROUPS = [
       "proxy ports",
       "caddy local ca",
       "host tls trust",
+      SUPERSEDED_ROOTS_CHECK,
       "native https owner",
       "native root trust",
       "native ca repair",
@@ -729,6 +758,14 @@ const handleDoctor: CommandHandlerFor<typeof doctorSpec> = async ({
         timeoutMs: 1500,
       })
     );
+    results.push(
+      await runCheck(
+        s,
+        SUPERSEDED_ROOTS_CHECK,
+        () => checkSupersededCaddyRoots(),
+        { timeoutMs: 1500 }
+      )
+    );
   }
 
   // Project (if in a repo or --path)
@@ -973,6 +1010,10 @@ async function handleNativeDoctor(opts: {
           "Exact live root is not trusted in the macOS System keychain."),
       durationMs: 0,
     });
+    results.push({
+      ...supersededRootsCheck(inspected.trust.supersededRoots),
+      durationMs: 0,
+    });
     if (hostname) {
       results.push(
         await runCheck(progress, "native https route", async () => {
@@ -1049,6 +1090,8 @@ export type DoctorJsonCheck = {
   readonly status: CheckStatus;
   readonly detail: string;
   readonly durationMs: number;
+  /** Present only on the superseded Caddy roots check. */
+  readonly supersededRoots?: SupersededRootInventory;
 };
 
 export type DoctorJsonData = {
@@ -1077,6 +1120,9 @@ export function buildDoctorJsonData(opts: {
       status: result.status,
       detail: result.message,
       durationMs: result.durationMs,
+      ...(result.supersededRoots
+        ? { supersededRoots: result.supersededRoots }
+        : {}),
     })),
     summary: buildDoctorSummaryLines({ results: opts.results }),
     counts,

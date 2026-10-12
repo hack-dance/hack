@@ -127,7 +127,8 @@ const KNOWN_RENDER_FINGERPRINTS: Readonly<
     "868c6a1f6c0d9487fd8390cc", // v4.0.0..v4.0.2
     "592f8677dcb0ba2ea2ee0476", // v4.0.3
     "8e610ffc85d7e24490195be5", // v4.1.0..v4.2.1
-    "01d7431b9a5caaba3ffd3463", // v5.0.0-next.1..next
+    "01d7431b9a5caaba3ffd3463", // v5.0.0-next.1..v5.0.0-next.2
+    "06cf6d0920afc1780b9946ba", // v5.0.0-next.3..next
   ]),
 };
 

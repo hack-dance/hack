@@ -10,6 +10,7 @@ import {
   readFile,
   rm,
   stat,
+  symlink,
   unlink,
   writeFile,
 } from "node:fs/promises";
@@ -30,6 +31,7 @@ import {
   inspectHackLocalRoute,
   parseHackLocalRouteReceipt,
   repairHackLocalRoute,
+  replaceManagedLine,
   reportHackLocalRoute,
   rollbackHackLocalRoute,
   selectNativeDnsCommandDomain,
@@ -48,6 +50,10 @@ const ORIGINAL = [
   "# trailing user comment",
   "",
 ].join("\n");
+
+/** Paths for pure analysis calls only; nothing reads or writes them. */
+const MAIN = "/brew/etc/dnsmasq.conf";
+const INCLUDE_DIR = "/brew/etc/dnsmasq.d";
 
 const roots: string[] = [];
 
@@ -408,7 +414,12 @@ test("a foreign target refuses", async () => {
   expect(f.calls.probes).toEqual([]);
   expect(await readFile(f.dnsmasqPath, "utf8")).toBe(dnsmasq);
   expect(
-    analyzeHackLocalDnsmasq({ content: dnsmasq, includeFiles: [] })
+    analyzeHackLocalDnsmasq({
+      content: dnsmasq,
+      path: MAIN,
+      includeDir: INCLUDE_DIR,
+      includeFiles: [],
+    })
   ).toMatchObject({ kind: "refused", reason: "foreign-target" });
 });
 
@@ -1088,6 +1099,8 @@ test("diagnostics never echo raw line contents or control characters", async () 
       "address=/.hack.local/172.30.0.2",
       "address=/.hack.local/10.1.2.3"
     ),
+    path: MAIN,
+    includeDir: INCLUDE_DIR,
     includeFiles: [],
   });
   expect(foreign).toMatchObject({ kind: "refused", reason: "foreign-target" });
@@ -1095,6 +1108,8 @@ test("diagnostics never echo raw line contents or control characters", async () 
 
   const included = analyzeHackLocalDnsmasq({
     content: ORIGINAL,
+    path: MAIN,
+    includeDir: INCLUDE_DIR,
     includeFiles: [
       {
         path: "/x/\u001b]0;title\u0007.conf",
@@ -1104,4 +1119,218 @@ test("diagnostics never echo raw line contents or control characters", async () 
   });
   expect(JSON.stringify(included)).not.toContain("\\u001b");
   expect(JSON.stringify(included)).not.toContain("1.2.3.4");
+});
+
+test("a main configuration that loads an uninspected file refuses and changes nothing", async () => {
+  const f = await fixture();
+  const other = join(f.root, "other.conf");
+  await writeFile(other, "address=/.hack.local/10.9.9.9\n");
+  await writeFile(f.dnsmasqPath, `${ORIGINAL}conf-file=${other}\n`);
+  const before = await snapshotTree(f.root, []);
+
+  const report = reportHackLocalRoute(await inspectHackLocalRoute(f.deps));
+  expect(report).toMatchObject({
+    status: "refused",
+    reason: "uninspected-config-source",
+  });
+  expect(report.detail).toBe(
+    `${f.dnsmasqPath} line 9 uses conf-file, which loads DNS data Hack did not inspect; refusing to change the hack.local route.`
+  );
+  expect(report.detail).not.toContain("other.conf");
+  expect(report.detail).not.toContain("10.9.9.9");
+
+  expect(await repairHackLocalRoute(f.deps)).toMatchObject({
+    outcome: "refused",
+    reason: "uninspected-config-source",
+  });
+  expect(f.calls.authorize).toHaveLength(0);
+  expect(f.calls.probes).toEqual([]);
+  expect(await snapshotTree(f.root, [])).toEqual(before);
+});
+
+test("every uninspected dnsmasq source refuses, in the main file or an include", () => {
+  const analyze = (
+    content: string,
+    includeFiles: readonly { path: string; content: string }[] = []
+  ) =>
+    analyzeHackLocalDnsmasq({
+      content,
+      path: MAIN,
+      includeDir: INCLUDE_DIR,
+      includeFiles,
+    });
+  const sources = [
+    "conf-file=/tmp/other.conf",
+    "conf-file = /tmp/other.conf",
+    "CONF-FILE=/tmp/other.conf",
+    "conf-script=/tmp/emit-config",
+    "addn-hosts=/tmp/hosts",
+    "hostsdir=/tmp/hosts.d",
+    "servers-file=/tmp/servers",
+    "conf-dir=/tmp/dnsmasq.d,*.conf",
+    `conf-dir=${INCLUDE_DIR}`,
+    `conf-dir=${INCLUDE_DIR}/,*.conf`,
+  ];
+  for (const source of sources) {
+    expect(analyze(`${ORIGINAL}${source}\n`)).toMatchObject({
+      kind: "refused",
+      reason: "uninspected-config-source",
+    });
+    const included = analyze(ORIGINAL, [
+      { path: `${INCLUDE_DIR}/user.conf`, content: `${source}\n` },
+    ]);
+    expect(included).toMatchObject({
+      kind: "refused",
+      reason: "uninspected-config-source",
+    });
+    expect(JSON.stringify(included)).not.toContain("/tmp/");
+  }
+  // The inspected include directory and commented directives are allowed.
+  for (const allowed of [
+    `conf-dir=${INCLUDE_DIR},*.conf`,
+    "#conf-file=/tmp/other.conf",
+    "  # servers-file=/tmp/servers",
+  ]) {
+    expect(analyze(`${ORIGINAL}${allowed}\n`)).toMatchObject({
+      kind: "line",
+      target: "172.30.0.2",
+    });
+  }
+});
+
+test("unreadable DNS files refuse with a closed reason and no file content", async () => {
+  const marker = "SECRET-MARKER";
+  const invalidUtf8 = Buffer.concat([
+    Buffer.from(`${ORIGINAL}# ${marker} `),
+    Buffer.from([0xff, 0xfe, 0x0a]),
+  ]);
+  const expectRefusal = async (
+    f: Awaited<ReturnType<typeof fixture>>
+  ): Promise<void> => {
+    const before = await snapshotTree(f.root, []);
+    const report = reportHackLocalRoute(await inspectHackLocalRoute(f.deps));
+    expect(report).toMatchObject({
+      status: "refused",
+      reason: "unreadable-config",
+    });
+    const result = await repairHackLocalRoute(f.deps);
+    expect(result).toMatchObject({
+      outcome: "refused",
+      reason: "unreadable-config",
+    });
+    for (const text of [JSON.stringify(report), JSON.stringify(result)]) {
+      expect(text).not.toContain(marker);
+      expect(text).not.toContain("10.9.9.9");
+    }
+    expect(f.calls.authorize).toHaveLength(0);
+    expect(await snapshotTree(f.root, [])).toEqual(before);
+  };
+
+  const main = await fixture();
+  await writeFile(main.dnsmasqPath, invalidUtf8);
+  await expectRefusal(main);
+
+  const include = await fixture();
+  await writeFile(
+    join(include.root, "etc", "dnsmasq.d", "bad.conf"),
+    invalidUtf8
+  );
+  await expectRefusal(include);
+
+  const linked = await fixture();
+  const target = join(linked.root, "elsewhere.conf");
+  await writeFile(target, `# ${marker}\naddress=/.hack.local/10.9.9.9\n`);
+  await symlink(target, join(linked.root, "etc", "dnsmasq.d", "linked.conf"));
+  await expectRefusal(linked);
+});
+
+test("rollback refuses an unreadable dnsmasq configuration without writing", async () => {
+  const f = await fixture({ resolver: HACK_LOCAL_RESOLVER_CONTENT });
+  expect((await repairHackLocalRoute(f.deps)).outcome).toBe("repaired");
+  const invalid = Buffer.concat([
+    Buffer.from("# SECRET-MARKER "),
+    Buffer.from([0xc3, 0x28, 0x0a]),
+  ]);
+  await writeFile(f.dnsmasqPath, invalid);
+  const receipt = await readFile(f.deps.paths.receiptPath, "utf8");
+  const result = await rollbackHackLocalRoute(f.deps);
+  expect(result).toMatchObject({
+    outcome: "refused",
+    reason: "unreadable-config",
+  });
+  expect(JSON.stringify(result)).not.toContain("SECRET-MARKER");
+  expect(await readFile(f.dnsmasqPath)).toEqual(invalid);
+  expect(await readFile(f.deps.paths.receiptPath, "utf8")).toBe(receipt);
+  expect(f.calls.authorize).toHaveLength(1);
+});
+
+test("replaceManagedLine replaces exactly one whole line or nothing", () => {
+  const from = "address=/.hack.local/172.30.0.2";
+  const to = "address=/.hack.local/127.0.0.1";
+  expect(replaceManagedLine({ content: ORIGINAL, from, to })).toBe(REWRITTEN);
+  expect(
+    replaceManagedLine({ content: ORIGINAL.replace(`${from}\n`, ""), from, to })
+  ).toBeNull();
+  expect(
+    replaceManagedLine({
+      content: ORIGINAL.replace(from, `${from}\n${from}`),
+      from,
+      to,
+    })
+  ).toBeNull();
+  // A longer line that merely starts with the managed text is not a match.
+  expect(
+    replaceManagedLine({
+      content: ORIGINAL.replace(from, `${from}0`),
+      from,
+      to,
+    })
+  ).toBeNull();
+});
+
+test("rollback refuses when the restored file does not hash to the receipt", async () => {
+  const f = await fixture({ resolver: HACK_LOCAL_RESOLVER_CONTENT });
+  expect((await repairHackLocalRoute(f.deps)).outcome).toBe("repaired");
+  const restartsAfterRepair = f.calls.restart;
+  // The write reports success but lands bytes other than the receipt's.
+  const deps: HackLocalRouteDependencies = {
+    ...f.deps,
+    replaceDnsmasq: async ({ expected, next }) =>
+      await f.deps.replaceDnsmasq({ expected, next: `${next}# extra\n` }),
+  };
+  await expect(rollbackHackLocalRoute(deps)).rejects.toThrow(
+    "Restored dnsmasq configuration hash does not match"
+  );
+  expect((await readReceipt(f.deps)).state).toBe("applied");
+  expect(f.calls.restart).toBe(restartsAfterRepair);
+});
+
+test("a created resolver without a recorded identity is never removed", async () => {
+  const f = await fixture();
+  const removals: unknown[] = [];
+  const deps: HackLocalRouteDependencies = {
+    ...f.deps,
+    // The resolver is created, but its identity never reaches the receipt.
+    createResolver: async (content) => {
+      await f.deps.createResolver(content);
+      throw new Error("identity lost");
+    },
+    removeResolverIfOwned: async (request) => {
+      removals.push(request);
+      return true;
+    },
+  };
+  await expect(repairHackLocalRoute(deps)).rejects.toThrow(
+    `${f.resolverPath} was retained because its ownership is unproven`
+  );
+  expect(removals).toEqual([]);
+  expect(await readFile(f.resolverPath, "utf8")).toBe(
+    HACK_LOCAL_RESOLVER_CONTENT
+  );
+  expect(await readFile(f.dnsmasqPath, "utf8")).toBe(ORIGINAL);
+  expect(await readReceipt(f.deps)).toMatchObject({
+    state: "rolled-back",
+    resolverAction: "create",
+    resolverIdentity: null,
+  });
 });

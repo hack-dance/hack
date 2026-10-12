@@ -253,6 +253,7 @@ export function createHackLocalRouteFileDependencies(
   return {
     paths: {
       dnsmasqPath: opts.dnsmasqPath,
+      includeDir: opts.includeDir,
       resolverPath: opts.resolverPath,
       receiptPath: opts.receiptPath,
     },

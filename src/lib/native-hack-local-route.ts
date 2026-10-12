@@ -8,6 +8,7 @@ import {
   DEFAULT_PROJECT_TLD,
 } from "../constants.ts";
 import { isRecord } from "./guards.ts";
+import { findUninspectedDnsmasqSource } from "./native-domain-dns-plan.ts";
 
 /**
  * Native repair of the built-in `*.hack.local` route.
@@ -72,6 +73,10 @@ export type HackLocalRouteRefusal =
   | "pending-receipt"
   | "relay-not-verified"
   | "dnsmasq-config-missing"
+  /** A DNS file is not a bounded, unlinked regular UTF-8 file. */
+  | "unreadable-config"
+  /** dnsmasq loads a file, directory or program Hack did not inspect. */
+  | "uninspected-config-source"
   | "no-managed-line"
   | "unmanaged-line"
   | "foreign-target"
@@ -111,6 +116,8 @@ export interface HackLocalRouteReceipt {
 
 export interface HackLocalRoutePaths {
   readonly dnsmasqPath: string;
+  /** The include directory dnsmasq loads as `<includeDir>,*.conf`. */
+  readonly includeDir: string;
   readonly resolverPath: string;
   readonly receiptPath: string;
 }
@@ -335,6 +342,9 @@ type DnsmasqAnalysis =
 /** Pure classification of the managed line; exported for focused tests. */
 export function analyzeHackLocalDnsmasq(opts: {
   readonly content: string | null;
+  /** Path of the main configuration, named in diagnostics only. */
+  readonly path: string;
+  readonly includeDir: string;
   readonly includeFiles: readonly {
     readonly path: string;
     readonly content: string;
@@ -346,6 +356,26 @@ export function analyzeHackLocalDnsmasq(opts: {
       reason: "dnsmasq-config-missing",
       detail: "The dnsmasq configuration does not exist.",
     };
+  }
+  // Any file dnsmasq would also load could claim hack.local out of sight, so
+  // the main file and every inspected include must load nothing else.
+  for (const file of [
+    { path: opts.path, content: opts.content },
+    ...opts.includeFiles,
+  ]) {
+    const source = findUninspectedDnsmasqSource({
+      content: file.content,
+      includeDir: opts.includeDir,
+    });
+    if (source) {
+      return {
+        kind: "refused",
+        reason: "uninspected-config-source",
+        detail: printable(
+          `${file.path} line ${source.line} uses ${source.directive}, which loads DNS data Hack did not inspect; refusing to change the hack.local route.`
+        ),
+      };
+    }
   }
   const included = opts.includeFiles.find((file) =>
     configLines(file.content).some((line) => claimsHackLocal(line.text))
@@ -492,6 +522,35 @@ function refused(opts: {
   return { status: "refused", ...opts };
 }
 
+const UNREADABLE_DETAIL =
+  "The dnsmasq configuration, an included .conf file or the resolver is not a bounded, unlinked regular UTF-8 file (for example a symlink or invalid UTF-8); refusing to change it.";
+
+/**
+ * Read the DNS files an inspection needs. A file that cannot be read safely
+ * (a symlink rejected by O_NOFOLLOW, invalid UTF-8, a linked or oversized
+ * file) yields null so the caller refuses with a closed reason. The read
+ * error itself is dropped: it is never needed and must not leak content.
+ */
+async function readDnsFiles(deps: HackLocalRouteDependencies): Promise<{
+  readonly content: string | null;
+  readonly includeFiles: readonly {
+    readonly path: string;
+    readonly content: string;
+  }[];
+  readonly resolver: string | null;
+} | null> {
+  try {
+    const [content, includeFiles, resolver] = await Promise.all([
+      deps.readDnsmasq(),
+      deps.readIncludeFiles(),
+      deps.readResolver(),
+    ]);
+    return { content, includeFiles, resolver };
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Read-only inspection. Preconditions are checked in a fixed order so that a
  * missing relay never reads host DNS files and a live old target is never
@@ -531,12 +590,22 @@ export async function inspectHackLocalRoute(
       receipt,
     });
   }
-  const [content, includeFiles, resolver] = await Promise.all([
-    deps.readDnsmasq(),
-    deps.readIncludeFiles(),
-    deps.readResolver(),
-  ]);
-  const analysis = analyzeHackLocalDnsmasq({ content, includeFiles });
+  const files = await readDnsFiles(deps);
+  if (!files) {
+    return refused({
+      reason: "unreadable-config",
+      detail: UNREADABLE_DETAIL,
+      paths,
+      receipt,
+    });
+  }
+  const { content, includeFiles, resolver } = files;
+  const analysis = analyzeHackLocalDnsmasq({
+    content,
+    path: paths.dnsmasqPath,
+    includeDir: paths.includeDir,
+    includeFiles,
+  });
   if (analysis.kind === "refused") {
     return refused({ ...analysis, paths, receipt });
   }
@@ -701,6 +770,7 @@ function samePlan(
     left.resolverAction === right.resolverAction &&
     left.relayPort === right.relayPort &&
     left.paths.dnsmasqPath === right.paths.dnsmasqPath &&
+    left.paths.includeDir === right.paths.includeDir &&
     left.paths.resolverPath === right.paths.resolverPath &&
     left.paths.receiptPath === right.paths.receiptPath
   );
@@ -1058,7 +1128,17 @@ async function rollbackUnderLock(opts: {
   readonly raw: string | null;
 }): Promise<HackLocalRouteRollbackResult> {
   const { deps, receipt } = opts;
-  const current = await deps.readDnsmasq();
+  let current: string | null;
+  try {
+    current = await deps.readDnsmasq();
+  } catch {
+    return {
+      outcome: "refused",
+      reason: "unreadable-config",
+      detail:
+        "The dnsmasq configuration is not a bounded, unlinked regular UTF-8 file; nothing changed.",
+    };
+  }
   const samePaths =
     receipt.dnsmasqPath === deps.paths.dnsmasqPath &&
     receipt.resolverPath === deps.paths.resolverPath;

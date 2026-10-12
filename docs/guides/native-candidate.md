@@ -1331,6 +1331,11 @@ in place. It never adds a second line for the suffix, and the `.hack` and
 `nameserver 127.0.0.1`. The repair proceeds only when all of these hold:
 
 - The native relay owner is verified and listening on 127.0.0.1 at its receipted port.
+- `dnsmasq.conf`, every `dnsmasq.d/*.conf` include file and the resolver file
+  are bounded regular UTF-8 files with one link and are not symlinks.
+- Neither `dnsmasq.conf` nor an include file loads a DNS source Hack did not
+  inspect: `conf-file`, `conf-script`, `addn-hosts`, `hostsdir`, `servers-file`,
+  or a `conf-dir` other than `<brew>/etc/dnsmasq.d,*.conf`.
 - The line has the exact Hack-managed form and is the only `.hack.local` claim,
   including `dnsmasq.d` include files.
 - The target is one Hack wrote (`172.30.0.2` or `::1`).
@@ -1339,11 +1344,11 @@ in place. It never adds a second line for the suffix, and the `.hack` and
 - Any existing resolver file contains only `nameserver 127.0.0.1`.
 
 Each unmet condition is a closed refusal reason: `relay-not-verified`,
-`dnsmasq-config-missing`, `no-managed-line`, `unmanaged-line`, `foreign-target`,
-`foreign-resolver`, `old-target-live`, `pending-receipt`, `invalid-receipt`,
-`non-interactive`, `declined`, `busy`, `restart-unavailable` or
-`inputs-changed`. Refusal details name lines by number and never repeat file
-contents. The repair needs interactive confirmation and the native macOS
+`dnsmasq-config-missing`, `unreadable-config`, `uninspected-config-source`,
+`no-managed-line`, `unmanaged-line`, `foreign-target`, `foreign-resolver`,
+`old-target-live`, `pending-receipt`, `invalid-receipt`, `non-interactive`,
+`declined`, `busy`, `restart-unavailable` or `inputs-changed`. Refusal details
+name files and lines by number and never repeat file contents. The repair needs interactive confirmation and the native macOS
 administrator prompt; without a terminal it refuses and names `hack doctor --fix`
 to run in one. Only one repair or rollback runs at a time; a second one refuses
 with `busy`. After the prompt the repair checks that the dnsmasq launchd job can
@@ -1365,7 +1370,8 @@ the relay port.
 
 To undo the repair, run `hack global dns deactivate --domain hack.local`. It
 needs a terminal and refuses with `non-interactive` and the same command
-otherwise. It restores the exact earlier line and verifies the whole-file hash
+otherwise. It refuses with `unreadable-config` and changes nothing when
+`dnsmasq.conf` is not a bounded regular UTF-8 file. It restores the exact earlier line and verifies the whole-file hash
 against the receipt. It removes the resolver file only if the repair created it
 and its identity still matches, then restarts dnsmasq. If dnsmasq is not
 running, or the job cannot be restarted safely, the rollback still restores the

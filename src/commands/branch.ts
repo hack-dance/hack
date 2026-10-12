@@ -9,6 +9,7 @@ import {
 import { optOpenPreference, optPath, optProject } from "../cli/options.ts";
 import { DEFAULT_PROJECT_TLD, HACK_PROJECT_DIR_PRIMARY } from "../constants.ts";
 import { readBranchesFile, writeBranchesFile } from "../lib/branches.ts";
+import { noteBrowserTargetsForLocalNetworkHint } from "../lib/local-network-hint.ts";
 import {
   parseOpenHostPreference,
   resolvePreferredOpenHost,
@@ -325,6 +326,7 @@ const handleBranchOpen: CommandHandlerFor<typeof branchOpenSpec> = async ({
   const url = `https://${resolvedHost}`;
 
   logger.step({ message: `Opening ${url}` });
+  noteBrowserTargetsForLocalNetworkHint([url]);
   return await openUrl(url);
 };
 

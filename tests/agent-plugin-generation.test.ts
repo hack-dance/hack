@@ -6,8 +6,14 @@ import { parse as parseYaml } from "yaml";
 
 import {
   generateAgentPlugins,
+  HACK_MCP_PLUGIN_FILES,
+  HACK_MCP_PLUGIN_NAME,
+  HACK_MCP_SERVER,
+  HACK_PLUGIN_NAME,
   portableMcpManifest,
   portablePluginManifest,
+  renderMcpPluginManifests,
+  renderMcpServers,
   renderPluginReferences,
   renderPluginRule,
   renderPluginSkill,
@@ -50,30 +56,276 @@ async function seedPluginManifests(pluginRoot: string): Promise<void> {
       })
     );
   }
-  await Bun.write(
-    join(pluginRoot, ".mcp.json"),
-    JSON.stringify({
-      mcpServers: { hack: { command: "hack", args: ["mcp", "serve"] } },
-    })
-  );
 }
 
-test("release generation applies the requested version to every client manifest", async () => {
+/** Every file under a directory, keyed by its relative path. */
+async function snapshotTree(root: string): Promise<Record<string, string>> {
+  const files: Record<string, string> = {};
+  const glob = new Bun.Glob("**/*");
+  for await (const relative of glob.scan({
+    cwd: root,
+    dot: true,
+    onlyFiles: true,
+  })) {
+    files[relative] = await Bun.file(join(root, relative)).text();
+  }
+  return files;
+}
+
+async function readJsonObject(path: string): Promise<Record<string, unknown>> {
+  const parsed: unknown = await Bun.file(path).json();
+  if (!isRecord(parsed)) {
+    throw new Error("Expected a JSON object");
+  }
+  return parsed;
+}
+
+const sameJson = (left: unknown, right: unknown): boolean =>
+  JSON.stringify(left) === JSON.stringify(right);
+
+/** Shape findings for the skills package: no MCP declaration or MCP file. */
+async function skillsPackageShapeIssues(root: string): Promise<string[]> {
+  const issues: string[] = [];
+  for (const relative of [
+    ...manifestDirectories.map((directory) => `${directory}/plugin.json`),
+    "plugin.json",
+  ]) {
+    const manifest = await readJsonObject(join(root, relative));
+    if (manifest.name !== HACK_PLUGIN_NAME) {
+      issues.push(`hack:${relative}:name`);
+    }
+    if ("mcpServers" in manifest) {
+      issues.push(`hack:${relative}:declares-mcp`);
+    }
+  }
+  for (const retired of [".mcp.json", "mcp.json"]) {
+    if (await Bun.file(join(root, retired)).exists()) {
+      issues.push(`hack:${retired}:ships-mcp`);
+    }
+  }
+  return issues;
+}
+
+/** Shape findings for hack-mcp: exactly the generated MCP declaration. */
+async function mcpPackageShapeIssues(root: string): Promise<string[]> {
+  const issues: string[] = [];
+  const files = Object.keys(await snapshotTree(root)).sort();
+  if (!sameJson(files, [...HACK_MCP_PLUGIN_FILES].sort())) {
+    issues.push("hack-mcp:files");
+  }
+  const codex = await readJsonObject(join(root, ".codex-plugin/plugin.json"));
+  for (const directory of manifestDirectories) {
+    const relative = `${directory}/plugin.json`;
+    const manifest = await readJsonObject(join(root, relative));
+    if (manifest.name !== HACK_MCP_PLUGIN_NAME) {
+      issues.push(`hack-mcp:${relative}:name`);
+    }
+    if (manifest.mcpServers !== "./.mcp.json") {
+      issues.push(`hack-mcp:${relative}:mcp`);
+    }
+    for (const key of ["skills", "hooks", "rules"]) {
+      if (key in manifest) {
+        issues.push(`hack-mcp:${relative}:${key}`);
+      }
+    }
+  }
+  const servers = await readJsonObject(join(root, ".mcp.json"));
+  if (!sameJson(servers, renderMcpServers())) {
+    issues.push("hack-mcp:.mcp.json:server");
+  }
+  if (
+    !sameJson(
+      await readJsonObject(join(root, "mcp.json")),
+      portableMcpManifest(servers)
+    )
+  ) {
+    issues.push("hack-mcp:mcp.json:derived");
+  }
+  if (
+    !sameJson(
+      await readJsonObject(join(root, "plugin.json")),
+      portablePluginManifest(codex)
+    )
+  ) {
+    issues.push("hack-mcp:plugin.json:derived");
+  }
+  return issues;
+}
+
+/**
+ * Closed findings for both packages: `hack` ships skills, hooks and rules but
+ * no MCP; `hack-mcp` ships exactly the generated MCP declaration. Findings
+ * name a package-relative file and a fixed code, never file content.
+ */
+async function pluginPackageShapeIssues(
+  pluginsRoot: string
+): Promise<string[]> {
+  return [
+    ...(await skillsPackageShapeIssues(join(pluginsRoot, HACK_PLUGIN_NAME))),
+    ...(await mcpPackageShapeIssues(join(pluginsRoot, HACK_MCP_PLUGIN_NAME))),
+  ];
+}
+
+test("the hack package is skills-only and hack-mcp carries the only MCP declaration", async () => {
+  expect(await pluginPackageShapeIssues(join(repoRoot, "plugins"))).toEqual([]);
+  expect(renderMcpServers()).toEqual({
+    mcpServers: {
+      [HACK_MCP_SERVER.name]: { command: "hack", args: ["mcp", "serve"] },
+    },
+  });
+  const claude = await readJsonObject(
+    join(repoRoot, "plugins/hack/.claude-plugin/plugin.json")
+  );
+  expect(claude.skills).toBe("./skills/");
+  expect(claude.hooks).toBe("./hooks/claude-hooks.json");
+  const cursor = await readJsonObject(
+    join(repoRoot, "plugins/hack/.cursor-plugin/plugin.json")
+  );
+  expect(cursor.rules).toBe("./rules/");
+});
+
+test("negative control: re-adding MCP to the skills package fails the shape check and generation", async () => {
+  tempDir = await mkdtemp(join(tmpdir(), "hack-plugin-shape-"));
+  const pluginsRoot = join(tempDir, "plugins");
+  await cp(join(repoRoot, "plugins"), pluginsRoot, { recursive: true });
+  const manifestPath = join(pluginsRoot, "hack/.claude-plugin/plugin.json");
+  await Bun.write(
+    manifestPath,
+    JSON.stringify({
+      ...(await readJsonObject(manifestPath)),
+      mcpServers: "./.mcp.json",
+    })
+  );
+  await Bun.write(
+    join(pluginsRoot, "hack/.mcp.json"),
+    JSON.stringify(renderMcpServers())
+  );
+  expect(await pluginPackageShapeIssues(pluginsRoot)).toEqual([
+    "hack:.claude-plugin/plugin.json:declares-mcp",
+    "hack:.mcp.json:ships-mcp",
+  ]);
+  await expect(
+    generateAgentPlugins({ repoRoot: tempDir, version: "9.8.7" })
+  ).rejects.toThrow("skills-only");
+
+  await Bun.write(
+    join(pluginsRoot, "hack-mcp/.cursor-plugin/plugin.json"),
+    JSON.stringify({ name: HACK_MCP_PLUGIN_NAME, skills: "./skills/" })
+  );
+  expect(
+    await mcpPackageShapeIssues(join(pluginsRoot, HACK_MCP_PLUGIN_NAME))
+  ).toEqual([
+    "hack-mcp:.cursor-plugin/plugin.json:mcp",
+    "hack-mcp:.cursor-plugin/plugin.json:skills",
+  ]);
+});
+
+test("release generation applies the requested version to both packages", async () => {
   tempDir = await mkdtemp(join(tmpdir(), "hack-agent-plugins-"));
-  const pluginRoot = join(tempDir, "plugins", "hack");
+  const pluginRoot = join(tempDir, "plugins", HACK_PLUGIN_NAME);
   await seedPluginManifests(pluginRoot);
+  // A checkout from before hack-mcp still carries the skills package's MCP files.
+  await Bun.write(join(pluginRoot, ".mcp.json"), "{}\n");
+  await Bun.write(join(pluginRoot, "mcp.json"), "{}\n");
 
   await generateAgentPlugins({ repoRoot: tempDir, version: "9.8.7" });
 
-  for (const manifestDirectory of manifestDirectories) {
-    const manifest = await Bun.file(
-      join(pluginRoot, manifestDirectory, "plugin.json")
-    ).json();
-    expect(manifest.version).toBe("9.8.7");
+  for (const name of [HACK_PLUGIN_NAME, HACK_MCP_PLUGIN_NAME]) {
+    for (const manifestDirectory of manifestDirectories) {
+      const manifest = await Bun.file(
+        join(tempDir, "plugins", name, manifestDirectory, "plugin.json")
+      ).json();
+      expect(manifest.version).toBe("9.8.7");
+    }
+    expect(
+      (await Bun.file(join(tempDir, "plugins", name, "plugin.json")).json())
+        .version
+    ).toBe("9.8.7");
   }
-  expect((await Bun.file(join(pluginRoot, "plugin.json")).json()).version).toBe(
-    "9.8.7"
+  expect(await Bun.file(join(pluginRoot, ".mcp.json")).exists()).toBe(false);
+  expect(await Bun.file(join(pluginRoot, "mcp.json")).exists()).toBe(false);
+  expect(
+    await mcpPackageShapeIssues(join(tempDir, "plugins", HACK_MCP_PLUGIN_NAME))
+  ).toEqual([]);
+  expect(
+    await Bun.file(
+      join(tempDir, "plugins/hack-mcp/.claude-plugin/plugin.json")
+    ).json()
+  ).toEqual(renderMcpPluginManifests({ version: "9.8.7" }).claude);
+});
+
+test("generating twice is a no-op and reproduces the committed packages", async () => {
+  tempDir = await mkdtemp(join(tmpdir(), "hack-plugin-idempotent-"));
+  const pluginsRoot = join(tempDir, "plugins");
+  await cp(join(repoRoot, "plugins"), pluginsRoot, { recursive: true });
+  const committed = await snapshotTree(join(repoRoot, "plugins"));
+  const pkg = await readJsonObject(join(repoRoot, "package.json"));
+  const version = String(pkg.version);
+
+  await generateAgentPlugins({ repoRoot: tempDir, version });
+  const first = await snapshotTree(pluginsRoot);
+  await generateAgentPlugins({ repoRoot: tempDir, version });
+  const second = await snapshotTree(pluginsRoot);
+
+  expect(first).toEqual(committed);
+  expect(second).toEqual(first);
+}, 15_000);
+
+test("docs present the skills-only plugin as default and hack-mcp as opt-in", async () => {
+  const read = (path: string) => Bun.file(join(repoRoot, path)).text();
+  const readme = await read("README.md");
+  expect(readme).not.toContain("sync themselves into");
+  expect(readme).toContain("claude plugin install hack@hack-dance");
+  expect(readme).toContain("`hack-mcp`");
+
+  const integrations = await read("docs/integrations.md");
+  for (const phrase of [
+    "`hack-mcp` (`plugins/hack-mcp`)",
+    "### One integration path per client",
+    "even when the plugin manifest omits",
+    "### Upgrading from a plugin that bundled MCP",
+    "--sparse .claude-plugin plugins/hack plugins/hack-mcp",
+  ]) {
+    expect(integrations).toContain(phrase);
+  }
+
+  const guide = await read("docs/guides/agent-first-setup.md");
+  expect(guide).not.toContain(
+    "`hack setup claude` and `hack setup codex` install a thin `hack-init` skill"
   );
+  expect(guide).toContain(
+    "The optional `hack` plugin ships a thin `hack-init`"
+  );
+
+  const pluginReadme = await read("plugins/hack/README.md");
+  expect(pluginReadme).not.toContain("mcp_servers.hack");
+  expect(pluginReadme).toContain("only when MCP is\nwanted");
+});
+
+test("each marketplace lists the hack and hack-mcp packages separately", async () => {
+  const sourcePath = (entry: Record<string, unknown>): string =>
+    String(isRecord(entry.source) ? entry.source.path : entry.source).replace(
+      /^\.\//,
+      ""
+    );
+  for (const path of [
+    ".claude-plugin/marketplace.json",
+    ".agents/plugins/marketplace.json",
+    ".cursor-plugin/marketplace.json",
+  ]) {
+    const marketplace = await readJsonObject(join(repoRoot, path));
+    const entries = Array.isArray(marketplace.plugins)
+      ? marketplace.plugins.filter(isRecord)
+      : [];
+    expect(entries.map((entry) => entry.name)).toEqual([
+      HACK_PLUGIN_NAME,
+      HACK_MCP_PLUGIN_NAME,
+    ]);
+    expect(entries.map(sourcePath)).toEqual([
+      "plugins/hack",
+      "plugins/hack-mcp",
+    ]);
+  }
 });
 
 test("generation writes every registered reference and prunes only stale reference markdown", async () => {
@@ -132,6 +384,7 @@ test("semantic-release commits all generated client manifests", async () => {
   expect(gitPlugin).toBeDefined();
   const assets = gitPlugin?.[1]?.assets as string[];
   expect(assets).toContain("plugins/hack");
+  expect(assets).toContain("plugins/hack-mcp");
 });
 
 test("bundled skills and rule match current canonical guidance", async () => {
@@ -170,8 +423,15 @@ test("bundled skills and rule match current canonical guidance", async () => {
   ).json();
   expect(portable.version).toBe(pkg.version);
   expect(portable).toEqual(portablePluginManifest(overlay));
-  expect(await Bun.file(join(root, "mcp.json")).json()).toEqual(
-    portableMcpManifest(await Bun.file(join(root, ".mcp.json")).json())
+  const mcpRoot = join(repoRoot, "plugins", HACK_MCP_PLUGIN_NAME);
+  const mcpManifests = renderMcpPluginManifests({ version: pkg.version });
+  for (const client of ["codex", "claude", "cursor"] as const) {
+    expect(
+      await Bun.file(join(mcpRoot, `.${client}-plugin/plugin.json`)).json()
+    ).toEqual(mcpManifests[client]);
+  }
+  expect(await Bun.file(join(mcpRoot, "mcp.json")).json()).toEqual(
+    portableMcpManifest(await Bun.file(join(mcpRoot, ".mcp.json")).json())
   );
 });
 
@@ -260,15 +520,18 @@ test("release preparation updates both manifests and rendered guidance after bum
     new Response(child.stderr).text(),
   ]);
   expect(exitCode, stdout + stderr).toBe(0);
-  for (const client of ["codex", "claude", "cursor"]) {
-    const manifest = await Bun.file(
-      join(tempDir, "plugins/hack", `.${client}-plugin/plugin.json`)
-    ).json();
-    expect(manifest.version).toBe("9.8.7");
+  for (const name of [HACK_PLUGIN_NAME, HACK_MCP_PLUGIN_NAME]) {
+    for (const client of ["codex", "claude", "cursor"]) {
+      const manifest = await Bun.file(
+        join(tempDir, "plugins", name, `.${client}-plugin/plugin.json`)
+      ).json();
+      expect(manifest.version).toBe("9.8.7");
+    }
+    expect(
+      (await Bun.file(join(tempDir, "plugins", name, "plugin.json")).json())
+        .version
+    ).toBe("9.8.7");
   }
-  expect(
-    (await Bun.file(join(tempDir, "plugins/hack/plugin.json")).json()).version
-  ).toBe("9.8.7");
   const skill = await Bun.file(
     join(tempDir, "plugins/hack/skills/hack-cli/SKILL.md")
   ).text();
@@ -298,13 +561,15 @@ interface PolicyScan {
 const HOOK_COMMAND = "hack agent prime";
 
 /**
- * Generated agent guidance surfaces: the native plugin bundle, the client
- * marketplace manifests, the shared `.agents` tree (skills reach it through
- * symlinks) and the agent configuration in the basic example. Example compose
- * and runtime files are application configuration, not agent guidance.
+ * Generated agent guidance surfaces: the native skills and MCP plugin
+ * packages, the client marketplace manifests, the shared `.agents` tree
+ * (skills reach it through symlinks) and the agent configuration in the basic
+ * example. Example compose and runtime files are application configuration,
+ * not agent guidance.
  */
 const GUIDANCE_SURFACES = [
   "plugins/hack",
+  "plugins/hack-mcp",
   ".claude-plugin",
   ".cursor-plugin",
   ".agents",
@@ -481,7 +746,12 @@ test("generated guidance surfaces never pin models, override permissions or run 
   // YAML and markdown frontmatter reached through the `.agents` symlinks.
   for (const file of [
     "plugins/hack/plugin.json",
-    "plugins/hack/.mcp.json",
+    "plugins/hack-mcp/plugin.json",
+    "plugins/hack-mcp/.mcp.json",
+    "plugins/hack-mcp/mcp.json",
+    "plugins/hack-mcp/.codex-plugin/plugin.json",
+    "plugins/hack-mcp/.claude-plugin/plugin.json",
+    "plugins/hack-mcp/.cursor-plugin/plugin.json",
     "plugins/hack/.codex-plugin/plugin.json",
     "plugins/hack/.claude-plugin/plugin.json",
     "plugins/hack/.cursor-plugin/plugin.json",
@@ -668,10 +938,6 @@ test("shipped skill inventory matches the generator and the integration doc", as
       join(pluginRoot, directory, "plugin.json")
     );
   }
-  await cp(
-    join(repoRoot, "plugins/hack/.mcp.json"),
-    join(pluginRoot, ".mcp.json")
-  );
   await generateAgentPlugins({ repoRoot: tempDir, version: "0.0.0" });
   const skillNames = async (root: string) =>
     (await readdir(join(root, "skills"), { withFileTypes: true }))

@@ -105,10 +105,12 @@ const KNOWN_RENDER_FINGERPRINTS: Readonly<
     "b6465c18c6d4f41b30a600b8", // v5.0.0-next.1..v5.0.0-next.2
     "121d8f26374d24f2a09890a3", // v5.0.0-next.3..next
     "6449442a8f230412d4e5f9e7", // v5.0.0-next.4..next
+    "c60f1fc7b1f6579fac892a54", // next: plugin-first agent setup (hack-mcp split)
   ]),
   "hack-init-skill": new Set([
     "cd15fb6d8ed8e25071d05e75", // v3.1.0..v4.0.3
     "f8e3018bcb8546e802dfa19c", // v4.1.0..next
+    "dde7ffb2975e3257395f9506", // next: conditional hack-mcp fallback
   ]),
   "cursor-rules": new Set([
     "6acabe0f41a9785374970d6c", // v1.1.0..v1.10.2
@@ -131,6 +133,7 @@ const KNOWN_RENDER_FINGERPRINTS: Readonly<
     "01d7431b9a5caaba3ffd3463", // v5.0.0-next.1..v5.0.0-next.2
     "06cf6d0920afc1780b9946ba", // v5.0.0-next.3..next
     "cf0a31e197f9034485413674", // v5.0.0-next.4..next
+    "77f4258cf2570443aee021fd", // next: plugin-first agent setup (hack-mcp split)
   ]),
 };
 

@@ -8,7 +8,9 @@
  *   `isolated-fixture` or stronger. A manifest parse, schema check or
  *   marketplace listing is never component-loading evidence.
  * - For the named native-plugin clients, a component is `unsupported` exactly
- *   when that client's plugin manifest does not declare it.
+ *   when that client's plugin manifest does not declare it. Plugin MCP is read
+ *   from the opt-in `hack-mcp` manifest; the default `hack` skills manifest
+ *   never declares MCP.
  * - docs/reference/agent-client-capabilities.md matches this data; rewrite its
  *   generated section with `bun run docs:agent-client-capabilities`.
  *
@@ -19,7 +21,7 @@
  */
 
 /** Increment when cells are reclassified or the cell shape changes. */
-export const AGENT_CLIENT_CAPABILITY_MATRIX_VERSION = 1;
+export const AGENT_CLIENT_CAPABILITY_MATRIX_VERSION = 2;
 
 /** Date (UTC) of the observations recorded below. */
 export const AGENT_CLIENT_CAPABILITY_OBSERVED_ON = "2026-10-11";
@@ -61,8 +63,10 @@ export type EvidenceClass = (typeof EVIDENCE_CLASSES)[number];
 export interface AgentClientDefinition {
   readonly client: AgentClient;
   readonly label: string;
-  /** Repository-relative plugin manifest Hack ships for this client. */
+  /** Repository-relative manifest of the default `hack` (skills) plugin. */
   readonly manifestPath: string;
+  /** Repository-relative manifest of the opt-in `hack-mcp` plugin. */
+  readonly mcpManifestPath: string;
 }
 
 export interface AgentClientCapabilityDefinition {
@@ -94,21 +98,25 @@ export const AGENT_CLIENT_DEFINITIONS: readonly AgentClientDefinition[] = [
     client: "codex",
     label: "Codex",
     manifestPath: "plugins/hack/.codex-plugin/plugin.json",
+    mcpManifestPath: "plugins/hack-mcp/.codex-plugin/plugin.json",
   },
   {
     client: "claude",
     label: "Claude Code",
     manifestPath: "plugins/hack/.claude-plugin/plugin.json",
+    mcpManifestPath: "plugins/hack-mcp/.claude-plugin/plugin.json",
   },
   {
     client: "cursor",
     label: "Cursor",
     manifestPath: "plugins/hack/.cursor-plugin/plugin.json",
+    mcpManifestPath: "plugins/hack-mcp/.cursor-plugin/plugin.json",
   },
   {
     client: "standalone",
     label: "Standalone (portable manifest or generic stdio MCP client)",
     manifestPath: "plugins/hack/plugin.json",
+    mcpManifestPath: "plugins/hack-mcp/plugin.json",
   },
 ];
 
@@ -118,7 +126,7 @@ export const AGENT_CLIENT_CAPABILITY_DEFINITIONS: readonly AgentClientCapability
       capability: "packaging",
       label: "Packaging",
       meaning:
-        "The client accepts, installs and enables the Hack plugin package in a session.",
+        "The client accepts, installs and enables the default `hack` plugin package in a session.",
     },
     {
       capability: "skillDiscovery",
@@ -136,7 +144,7 @@ export const AGENT_CLIENT_CAPABILITY_DEFINITIONS: readonly AgentClientCapability
       capability: "pluginMcp",
       label: "Plugin MCP",
       meaning:
-        "The client starts the plugin-declared `hack mcp serve` server and lists its tools.",
+        "The client starts the `hack mcp serve` server declared by the opt-in `hack-mcp` plugin and lists its tools. The default `hack` plugin ships no MCP.",
     },
     {
       capability: "standaloneMcp",
@@ -158,6 +166,10 @@ export const AGENT_CLIENT_CAPABILITY_DEFINITIONS: readonly AgentClientCapability
   ];
 
 const SOURCE_SHA = "ec56769bdc046f5b64e621eb04613cfb00a65ced";
+/** Base of the change that moved plugin MCP into the `hack-mcp` package. */
+const MCP_PACKAGE_SOURCE_SHA = "3e261d517ed78fbf55c786682ee95291021cba63";
+const MCP_PACKAGE_NOTE =
+  "The opt-in `hack-mcp` manifest points `mcpServers` at `.mcp.json` (`hack mcp serve`); the default `hack` plugin declares no MCP. No plugin session started the server.";
 const HOST = "macos-arm64-contributor";
 const CODEX_VERSION = "codex-cli 0.162.1";
 const CLAUDE_VERSION = "Claude Code 2.1.296";
@@ -210,11 +222,11 @@ export const AGENT_CLIENT_CAPABILITY_MATRIX: readonly ClientCapabilityCell[] = [
     capability: "pluginMcp",
     status: "untested",
     evidenceClass: "schema",
-    evidenceRef: "plugins/hack/.mcp.json",
+    evidenceRef: "plugins/hack-mcp/.mcp.json",
     observedClientVersion: CODEX_VERSION,
-    sourceSha: SOURCE_SHA,
+    sourceSha: MCP_PACKAGE_SOURCE_SHA,
     hostLabel: HOST,
-    note: "Manifest points `mcpServers` at `.mcp.json` (`hack mcp serve`); no plugin session started it.",
+    note: MCP_PACKAGE_NOTE,
     openGate: PLUGIN_LOAD_GATE,
   },
   {
@@ -297,11 +309,11 @@ export const AGENT_CLIENT_CAPABILITY_MATRIX: readonly ClientCapabilityCell[] = [
     capability: "pluginMcp",
     status: "untested",
     evidenceClass: "schema",
-    evidenceRef: "plugins/hack/.mcp.json",
+    evidenceRef: "plugins/hack-mcp/.mcp.json",
     observedClientVersion: CLAUDE_VERSION,
-    sourceSha: SOURCE_SHA,
+    sourceSha: MCP_PACKAGE_SOURCE_SHA,
     hostLabel: HOST,
-    note: "Manifest points `mcpServers` at `.mcp.json` (`hack mcp serve`); no plugin session started it.",
+    note: MCP_PACKAGE_NOTE,
     openGate: PLUGIN_LOAD_GATE,
   },
   {
@@ -383,11 +395,11 @@ export const AGENT_CLIENT_CAPABILITY_MATRIX: readonly ClientCapabilityCell[] = [
     capability: "pluginMcp",
     status: "untested",
     evidenceClass: "schema",
-    evidenceRef: "plugins/hack/.mcp.json",
+    evidenceRef: "plugins/hack-mcp/.mcp.json",
     observedClientVersion: CURSOR_VERSION,
-    sourceSha: SOURCE_SHA,
+    sourceSha: MCP_PACKAGE_SOURCE_SHA,
     hostLabel: HOST,
-    note: "Manifest points `mcpServers` at `.mcp.json` (`hack mcp serve`); no plugin session started it.",
+    note: MCP_PACKAGE_NOTE,
     openGate: PLUGIN_LOAD_GATE,
   },
   {
@@ -470,11 +482,11 @@ export const AGENT_CLIENT_CAPABILITY_MATRIX: readonly ClientCapabilityCell[] = [
     capability: "pluginMcp",
     status: "untested",
     evidenceClass: "schema",
-    evidenceRef: "plugins/hack/mcp.json",
+    evidenceRef: "plugins/hack-mcp/mcp.json",
     observedClientVersion: null,
-    sourceSha: SOURCE_SHA,
+    sourceSha: MCP_PACKAGE_SOURCE_SHA,
     hostLabel: HOST,
-    note: "Portable MCP manifest adds an explicit stdio transport to the same launch as `.mcp.json`.",
+    note: "The opt-in `hack-mcp` portable MCP manifest adds an explicit stdio transport to the same launch as its `.mcp.json`; the default `hack` package ships no MCP file.",
     openGate:
       "Name a portable consumer and observe it start the declared server.",
   },

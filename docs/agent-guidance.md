@@ -4,7 +4,7 @@ Hack owns Hack-specific instructions. User and project policy continues to own m
 selection, general coding standards, work-unit planning, evolution, and writeback.
 Do not ship provider model pins or copy global instruction packs into this plugin.
 `tests/agent-plugin-generation.test.ts` enforces this for the generated guidance
-surfaces (`plugins/hack`, the client marketplace manifests, `.agents`, and the
+surfaces (`plugins/hack`, `plugins/hack-mcp`, the client marketplace manifests, `.agents`, and the
 example agent configuration): no model, model-override or reasoning-effort keys, no
 permission, approval or sandbox overrides, no output-style settings, and hooks that
 run only `hack agent prime`. See [model-policy ownership](reference/agent-client-capabilities.md#model-policy-ownership).
@@ -21,11 +21,14 @@ run only `hack agent prime`. See [model-policy ownership](reference/agent-client
 | `src/agents/hack-init-skill.ts` | Thin Claude/Codex/plugin adapter that fetches onboarding guidance |
 | `src/agents/init-patterns.ts`, `init-assistant.ts` | Optional init inventory and pattern hints |
 | `src/agents/install-skill.ts`, `remote-bootstrap-skill.ts` | Plugin installation/channel selection and fresh-host/cloud setup skills |
-| `scripts/generate-agent-plugins.ts` | Portable plugin/MCP manifests, three client compatibility manifests, four skills, and Cursor rule |
+| `scripts/generate-agent-plugins.ts` | Skills-only `hack` plugin (portable manifest, three client compatibility manifests, four skills, Cursor rule) and the complete opt-in `hack-mcp` plugin |
 
-The portable plugin manifest derives identity and effective OpenAI presentation
-from `.codex-plugin/plugin.json`; portable MCP derives from `.mcp.json` with an
-explicit transport. Keep launch selection identical across both formats. These
+The `hack` plugin is skills-only: the generator refuses a client manifest that
+declares `mcpServers` and removes stale `.mcp.json`/`mcp.json` files from it. Each
+portable plugin manifest derives identity and effective OpenAI presentation from
+its package's `.codex-plugin/plugin.json`. Every `hack-mcp` file renders from
+code; its `.mcp.json` and portable `mcp.json` (with an explicit transport) both
+come from `HACK_MCP_SERVER`, so launch selection stays identical. These
 plugin workflow skills complement the existing standalone setup; personal local
 plugin installation does not synchronize skills into a cloud repository.
 

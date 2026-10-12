@@ -58,7 +58,7 @@ async function fixture(marker: string, delayMs = 20) {
   const command = join(project, "command");
   await writeFile(
     command,
-    `#!${process.execPath}\nawait Bun.write("request-started", String(process.pid));\nawait Bun.sleep(${delayMs});\nconsole.log(JSON.stringify({ marker: process.env.SYNTHETIC_SESSION_MARKER, cwd: process.cwd(), args: Bun.argv.slice(2) }));\n`
+    `#!${process.execPath}\nawait Bun.write("request-started", String(process.pid));\nawait Bun.sleep(${delayMs});\nconsole.log(JSON.stringify({ marker: process.env.SYNTHETIC_SESSION_MARKER, noInteractive: process.env.HACK_NO_INTERACTIVE ?? null, cwd: process.cwd(), args: Bun.argv.slice(2) }));\n`
   );
   await chmod(command, 0o755);
   const env = {
@@ -67,6 +67,9 @@ async function fixture(marker: string, delayMs = 20) {
     HACK_HOME: state,
     HACK_GLOBAL_CONFIG_PATH: join(registryDir, "config.json"),
     HACK_MCP_COMMAND: "./command",
+    // Children must still see HACK_NO_INTERACTIVE=1: the server overrides
+    // this per spawn on a copy, never on the frozen session env.
+    HACK_NO_INTERACTIVE: "0",
     SYNTHETIC_SESSION_MARKER: marker,
   };
   const server = createMcpServer({ cwd: project, env });
@@ -106,8 +109,9 @@ test("MCP sessions preserve independent cwd, environment, registry selection and
       ok: true,
       data: {
         marker: index === 0 ? "first" : "second",
+        noInteractive: "1",
         cwd: await realpath(item.project),
-        args: ["ps", "--project", "shared-name", "--json"],
+        args: ["ps", "--project=shared-name", "--json"],
       },
     });
     const audit = await readFile(join(item.state, "mcp-audit.log"), "utf8");
@@ -131,6 +135,12 @@ test("MCP path authorization uses only that session's registry", async () => {
   expect(denied.isError).toBe(true);
   expect(denied.structuredContent).toMatchObject({
     stderr: "Path is outside registered hack projects.",
+    spawned: false,
+    error: {
+      code: "E_PROJECT_NOT_FOUND",
+      reason: "path_not_registered",
+      message: "Path is outside registered hack projects.",
+    },
   });
   const accepted = await second.client.callTool({
     name: "hack.project.status",

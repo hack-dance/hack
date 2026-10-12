@@ -67,6 +67,13 @@ import {
   parseBrowserNetworkOptions,
 } from "../lib/doctor-browser-network.ts";
 import {
+  describeEnvKeyInspection,
+  type EnvKeyInspection,
+  gitListTrackedKeyPaths,
+  inspectProjectEnvKey,
+  resolveEnvKeyCandidates,
+} from "../lib/doctor-env-key.ts";
+import {
   inspectTrackedGeneratedFiles,
   untrackGeneratedFiles,
 } from "../lib/doctor-generated-files.ts";
@@ -183,6 +190,8 @@ interface CheckResult {
   readonly supersededRoots?: SupersededRootInventory;
   /** Native hack.local route state; lines and paths only, never file contents. */
   readonly hackLocalRoute?: HackLocalRouteReport;
+  /** Closed, value-free env key findings; project-relative subjects only. */
+  readonly envKey?: EnvKeyInspection;
 }
 
 const HACK_LOCAL_ROUTE_CHECK = "native hack.local route";
@@ -865,6 +874,11 @@ const handleDoctor: CommandHandlerFor<typeof doctorSpec> = async ({
       )
     );
     results.push(
+      await runCheck(s, ENV_KEY_CHECK, () => checkProjectEnvKey({ startDir }), {
+        timeoutMs: 5000,
+      })
+    );
+    results.push(
       await runCheck(
         s,
         "generated files",
@@ -1197,6 +1211,8 @@ export type DoctorJsonCheck = {
   readonly supersededRoots?: SupersededRootInventory;
   /** Present only on the native hack.local route check. */
   readonly hackLocalRoute?: HackLocalRouteReport;
+  /** Present only on the env key check: closed codes, no key bytes or absolute paths. */
+  readonly envKey?: EnvKeyInspection;
 };
 
 export type DoctorJsonData = {
@@ -1231,6 +1247,7 @@ export function buildDoctorJsonData(opts: {
       ...(result.hackLocalRoute
         ? { hackLocalRoute: result.hackLocalRoute }
         : {}),
+      ...(result.envKey ? { envKey: result.envKey } : {}),
     })),
     summary: buildDoctorSummaryLines({ results: opts.results }),
     counts,
@@ -2810,6 +2827,47 @@ async function checkWorktreeSecretKeys({
     status: "ok",
     message: `Env key consistent across ${inspection.checkouts.length} checkouts`,
   };
+}
+
+const ENV_KEY_CHECK = "env key";
+
+/** Doctor check result for an env key inspection; message and data stay value-free. */
+export function envKeyCheckResult(inspection: EnvKeyInspection): CheckResult {
+  return {
+    name: ENV_KEY_CHECK,
+    status: inspection.status,
+    message: describeEnvKeyInspection(inspection),
+    envKey: inspection,
+  };
+}
+
+/**
+ * Read-only key-strength and exposure audit (HACK-1127). `--fix` never acts on
+ * it; each finding suggests the exact command instead.
+ */
+async function checkProjectEnvKey({
+  startDir,
+}: {
+  readonly startDir: string;
+}): Promise<CheckResult> {
+  const ctx = await findProjectContext(startDir);
+  if (!ctx) {
+    return {
+      name: ENV_KEY_CHECK,
+      status: "warn",
+      message: `Skipped (no ${HACK_PROJECT_DIR_PRIMARY}/ found)`,
+    };
+  }
+  const inspection = await inspectProjectEnvKey({
+    projectRoot: ctx.projectRoot,
+    candidates: await resolveEnvKeyCandidates({
+      projectRoot: ctx.projectRoot,
+    }),
+    env: process.env,
+    uid: typeof process.getuid === "function" ? process.getuid() : null,
+    listTrackedKeyPaths: gitListTrackedKeyPaths,
+  });
+  return envKeyCheckResult(inspection);
 }
 
 /**

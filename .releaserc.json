@@ -24,7 +24,8 @@
           "packages/db/package.json",
           "services/auth-broker/package.json",
           "bun.lock",
-          "plugins/hack"
+          "plugins/hack",
+          "plugins/hack-mcp"
         ],
         "message": "chore(release): ${nextRelease.version}\n\n${nextRelease.notes}"
       }

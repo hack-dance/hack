@@ -147,15 +147,43 @@ export const agentDocsSyncScenario: Scenario = {
       message: "check after repair should report clean (exit 0)",
     });
 
-    const fullSync = await ctx.cli({
+    const globalSkillPath = join(
+      ctx.hackHome,
+      ".codex",
+      "skills",
+      "hack-cli",
+      "SKILL.md"
+    );
+    // Refresh-only by default (HACK-1132): sync must not create missing
+    // integrations in either scope.
+    const refreshOnly = await ctx.cli({
       args: ["setup", "sync", "--all-scopes"],
+      cwd: fixture.root,
+      env: isolatedUserEnv,
+    });
+    expectExit({
+      result: refreshOnly,
+      codes: [0],
+      message: "refresh-only hack setup sync should succeed",
+    });
+    expect({
+      that: !(
+        (await Bun.file(globalSkillPath).exists()) ||
+        (await Bun.file(join(fixture.root, "CLAUDE.md")).exists())
+      ),
+      message: "refresh-only hack setup sync must not create missing targets",
+      result: refreshOnly,
+    });
+
+    const fullSync = await ctx.cli({
+      args: ["setup", "sync", "--all-scopes", "--install-missing"],
       cwd: fixture.root,
       env: isolatedUserEnv,
     });
     expectExit({
       result: fullSync,
       codes: [0],
-      message: "hack setup sync (project scope) should succeed",
+      message: "hack setup sync --install-missing should succeed",
     });
     const fullSyncCheck = await ctx.cli({
       args: ["setup", "sync", "--all-scopes", "--check"],
@@ -187,13 +215,6 @@ export const agentDocsSyncScenario: Scenario = {
         "outside-project inventory must inspect installed global integrations",
       result: globalPrime,
     });
-    const globalSkillPath = join(
-      ctx.hackHome,
-      ".codex",
-      "skills",
-      "hack-cli",
-      "SKILL.md"
-    );
     const globalSkill = await Bun.file(globalSkillPath).text();
     await Bun.write(globalSkillPath, `${globalSkill}\nSTALE-GLOBAL-PROBE\n`);
     const staleGlobalPrime = await ctx.cli({

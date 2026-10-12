@@ -132,12 +132,25 @@ export function serializeDotEnv(env: EnvMap): string {
   return `${lines.join("\n")}\n`;
 }
 
+const EDGE_WHITESPACE_PATTERN = /^\s|\s$/;
+
+/**
+ * Serializes one value so `parseDotEnv` reads it back exactly.
+ *
+ * Unquoted values are trimmed on read, and a value that starts with a quote is
+ * read as a quoted value, so those cases (plus carriage returns, which line
+ * splitting and trimming would otherwise mangle) are double-quoted. Values
+ * that were already safe stay unquoted, keeping existing output byte-identical.
+ */
 function escapeEnvValue(value: string): string {
   const needsQuotes =
     value.includes(" ") ||
     value.includes("\n") ||
+    value.includes("\r") ||
     value.includes('"') ||
-    value.includes("\\");
+    value.includes("\\") ||
+    value.startsWith("'") ||
+    EDGE_WHITESPACE_PATTERN.test(value);
   if (!needsQuotes) {
     return value;
   }

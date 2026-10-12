@@ -902,23 +902,23 @@ const handleDoctor: CommandHandlerFor<typeof doctorSpec> = async ({
 
   const hasError = results.some((r) => r.status === "error");
 
-  const browserHintTargets = doctorBrowserHintTargets({
-    url: browser.url,
-    defaultDomain,
+  const reported = await reportDoctorResults({
+    results,
+    hasError,
+    json,
+    browserHintTargets: composeDoctorBrowserHintTargets({
+      url: browser.url,
+      defaultDomain,
+    }),
+    renderHuman: async () => {
+      await renderDoctorSummary(results);
+      emitSlowChecksNote(results);
+      await renderMacNote(results);
+    },
   });
-  if (json) {
-    const code = finishDoctorJson({
-      results,
-      hasError,
-    });
-    noteBrowserTargetsForLocalNetworkHint(browserHintTargets);
-    return code;
+  if (reported !== null) {
+    return reported;
   }
-
-  await renderDoctorSummary(results);
-  emitSlowChecksNote(results);
-  await renderMacNote(results);
-  noteBrowserTargetsForLocalNetworkHint(browserHintTargets);
   if (!args.options.fix) {
     await renderRecoveryGuidance(results);
   }
@@ -939,12 +939,51 @@ const handleDoctor: CommandHandlerFor<typeof doctorSpec> = async ({
   return 0;
 };
 
-/** The browser check concerns the reported origin, else the default domain. */
-function doctorBrowserHintTargets(opts: {
+/**
+ * Compose doctor's browser check concerns the reported origin, else the
+ * default domain.
+ */
+export function composeDoctorBrowserHintTargets(opts: {
   readonly url: string | null;
   readonly defaultDomain: string;
 }): readonly string[] {
   return [opts.url ?? opts.defaultDomain];
+}
+
+/** Native doctor names a browser target only through `--browser-url`. */
+export function nativeDoctorBrowserHintTargets(
+  url: string | null
+): readonly string[] {
+  return url ? [url] : [];
+}
+
+/**
+ * Writes the doctor report, then the macOS Local Network hint for the
+ * browser targets. JSON mode writes the envelope to stdout and returns its
+ * exit code; the hint goes to stderr afterwards, so the payload is unchanged.
+ * Human mode runs `renderHuman` and returns null so the caller continues.
+ * `noteHint` defaults to the process-wide hint; tests inject an emitter.
+ */
+export async function reportDoctorResults(opts: {
+  readonly results: readonly TimedCheckResult[];
+  readonly hasError: boolean;
+  readonly json: boolean;
+  readonly browserHintTargets: readonly string[];
+  readonly renderHuman: () => Promise<void>;
+  readonly noteHint?: (targets: readonly string[]) => boolean;
+}): Promise<number | null> {
+  const noteHint = opts.noteHint ?? noteBrowserTargetsForLocalNetworkHint;
+  if (opts.json) {
+    const code = finishDoctorJson({
+      results: opts.results,
+      hasError: opts.hasError,
+    });
+    noteHint(opts.browserHintTargets);
+    return code;
+  }
+  await opts.renderHuman();
+  noteHint(opts.browserHintTargets);
+  return null;
 }
 
 function resolveDoctorStartDir(pathOption: string | undefined): string {
@@ -1088,14 +1127,16 @@ async function handleNativeDoctor(opts: {
   }
   progress.stop(`Native doctor checks complete (${results.length} checks)`);
   const hasError = results.some((result) => result.status === "error");
-  const browserHintTargets = opts.browser.url ? [opts.browser.url] : [];
-  if (opts.json) {
-    const code = finishDoctorJson({ results, hasError });
-    noteBrowserTargetsForLocalNetworkHint(browserHintTargets);
-    return code;
+  const reported = await reportDoctorResults({
+    results,
+    hasError,
+    json: opts.json,
+    browserHintTargets: nativeDoctorBrowserHintTargets(opts.browser.url),
+    renderHuman: () => renderDoctorSummary(results),
+  });
+  if (reported !== null) {
+    return reported;
   }
-  await renderDoctorSummary(results);
-  noteBrowserTargetsForLocalNetworkHint(browserHintTargets);
   if (!opts.browser.url) {
     note(
       "Pass --browser-url https://your-app.hack.local --browser-result works|fails|permission-denied to check an exact app route and record a separate browser observation.",

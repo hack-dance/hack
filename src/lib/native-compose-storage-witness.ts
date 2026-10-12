@@ -1245,7 +1245,62 @@ export async function enrollNativeComposeStorageWitness(opts: {
   }).catch((error) => normalizedRefusal(error, stage));
 }
 
-/** Read-only verification. No missing journal/marker, including interrupted enrollment, is seeded or repaired. */
+/**
+ * Completed directory-xattr kernel proofs of one mutation lease. A proof is keyed
+ * by its exact engine, generation and reference and holds the material binding
+ * that opened and closed it unchanged. The lease's authority object is the
+ * WeakMap key, so a later command, lease or revoked authority never sees it.
+ */
+const leaseProofs = new WeakMap<
+  NativeComposeMaterialAuthority,
+  Map<string, string>
+>();
+/** Take (and clear) this verification's lease record before any check, so a
+ * failed or refused verification never leaves an older proof reusable. */
+function takeLeaseProof(opts: {
+  readonly authority: NativeComposeMaterialAuthority;
+  readonly engineId: string;
+  readonly generation: NativeComposeGeneration;
+  readonly reference: NativeComposeStorageWitnessReference;
+  readonly adjacent: boolean;
+}) {
+  const proofs = leaseProofs.get(opts.authority) ?? new Map<string, string>();
+  leaseProofs.set(opts.authority, proofs);
+  const key = JSON.stringify([
+    opts.engineId,
+    opts.generation.generationId,
+    opts.generation.inputRevision,
+    opts.reference,
+  ]);
+  const recorded = proofs.get(key);
+  proofs.delete(key);
+  return {
+    /** Run the kernel proof unless an adjacent caller opens with the recorded binding. */
+    async prove(opening: string, run: () => Promise<unknown>): Promise<void> {
+      if (!(opts.adjacent && recorded === opening)) {
+        await run();
+      }
+    },
+    /** Record a completed proof only when its binding never moved. */
+    record(opening: string, closing: string): void {
+      if (opening === closing) {
+        proofs.set(key, opening);
+      }
+    },
+  };
+}
+
+/**
+ * Read-only verification. No missing journal/marker, including interrupted enrollment, is seeded or repaired.
+ *
+ * `adjacentProof` is only for a caller whose code since its previous storage
+ * proof under this same lease performed no hook, workload, engine or storage
+ * effect. Such a repeat runs every host check (anchors, expectation, completion,
+ * binding) but reuses the completed kernel proof instead of three new helper
+ * carriers, and only when its opening material binding is byte-identical to the
+ * binding that opened and closed that proof. Any other verification, and any
+ * mismatch, performs the full proof and replaces the lease record.
+ */
 export async function verifyNativeComposeStorageWitness(opts: {
   readonly authority: NativeComposeMaterialAuthority;
   readonly generation: NativeComposeGeneration;
@@ -1256,6 +1311,7 @@ export async function verifyNativeComposeStorageWitness(opts: {
     readonly archive: Uint8Array;
   }>;
   readonly xattrCarrier?: NativeComposeStorageXattrCarrier;
+  readonly adjacentProof?: true;
 }): Promise<void> {
   const { authority, generation, engineId, observe, xattrCarrier } = opts;
   if (!nativeComposeStorageWitnessReferenceValid(opts.reference)) {
@@ -1284,11 +1340,19 @@ export async function verifyNativeComposeStorageWitness(opts: {
   return await runNativeComposeMaterialAction({
     authority,
     run: async () => {
+      const lease = takeLeaseProof({
+        authority,
+        engineId,
+        generation,
+        reference,
+        adjacent: opts.adjacentProof === true,
+      });
       const current = await assertNativeComposeMaterialAuthority({
         authority,
         generation,
         phase: "inspect",
       });
+      const opening = JSON.stringify(current);
       const held = await directories({
         binding: current,
         name: reference.volume.name,
@@ -1334,27 +1398,29 @@ export async function verifyNativeComposeStorageWitness(opts: {
           if (!xattrCarrier) {
             return refuse();
           }
-          await observeXattr({
-            carrier: xattrCarrier,
-            saved,
-            volume: reference.volume,
-            stopped: false,
-            journal: last(held),
-            check: async () => {
-              await checkedExpectation(held, reference.expectation);
-              await readCompletion();
-              await recheckDirectories(held);
-              const latest = await assertNativeComposeMaterialAuthority({
-                authority,
-                generation,
-                phase: "inspect",
-              });
-              if (!matchesBinding(saved.binding, latest, engineId)) {
-                return refuse();
-              }
-              return latest;
-            },
-          });
+          await lease.prove(opening, () =>
+            observeXattr({
+              carrier: xattrCarrier,
+              saved,
+              volume: reference.volume,
+              stopped: false,
+              journal: last(held),
+              check: async () => {
+                await checkedExpectation(held, reference.expectation);
+                await readCompletion();
+                await recheckDirectories(held);
+                const latest = await assertNativeComposeMaterialAuthority({
+                  authority,
+                  generation,
+                  phase: "inspect",
+                });
+                if (!matchesBinding(saved.binding, latest, engineId)) {
+                  return refuse();
+                }
+                return latest;
+              },
+            })
+          );
         }
         await checkedExpectation(held, reference.expectation);
         await readCompletion();
@@ -1369,6 +1435,8 @@ export async function verifyNativeComposeStorageWitness(opts: {
         }
         if (xattrCarrier) {
           checkNativeComposeStorageXattrCarrierLifetime(xattrCarrier);
+          // A v3 reference with a carrier always reached the kernel proof above.
+          lease.record(opening, JSON.stringify(latest));
         }
       } finally {
         await close(held);

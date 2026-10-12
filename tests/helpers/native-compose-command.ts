@@ -177,6 +177,7 @@ if(args[0]==="compose") {
  }
  if(oneoff && args.includes("run")) {const doc=await Bun.file(args[args.indexOf("-f")+1]).json();await Bun.write(engine,JSON.stringify(doc));await Bun.write(root+"/oneoff-name",args[args.indexOf("--name")+1]);process.exit(0);}
  if(args.includes("down")) {await rm(engine,{force:true});await appendFile(root+"/order","engine-stopped\\n");process.exit(0);}
+ if(args.includes("exec") && await Bun.file(engine).exists()) {${opts.storage ? 'await appendFile(root+"/storage-events","exec\\n");' : ""}process.exit(0);}
  process.exit(99);
 }
 if(oneoff && args[0]==="container" && args[1]==="rm") {if(args.length!==3||args[2]!=="c".repeat(64))process.exit(96);await Bun.write(root+"/oneoff-removed","removed");process.exit(0);}

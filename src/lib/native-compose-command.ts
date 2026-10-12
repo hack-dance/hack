@@ -26,6 +26,7 @@ import {
 } from "./native-compose-build.ts";
 import {
   type NativeComposeCommandStorage,
+  type NativeComposeCommandStorageVerifyOptions,
   nativeComposePlanStorage,
   nativeComposeSavedExecUsesReadLease,
   prepareNativeComposeCommandStorage,
@@ -943,8 +944,11 @@ async function savedCommand(opts: {
         selected,
         signal,
       });
-      const assertSaved = () => x01Scope("exec-assert-saved", x01AssertSaved);
-      const x01AssertSaved = async () => {
+      const assertSaved = (proof: NativeComposeCommandStorageVerifyOptions) =>
+        x01Scope("exec-assert-saved", () => x01AssertSaved(proof));
+      const x01AssertSaved = async (
+        proof: NativeComposeCommandStorageVerifyOptions
+      ) => {
         const latest = await store.loadCurrent();
         assertStartupAvailable(latest);
         if (
@@ -955,7 +959,7 @@ async function savedCommand(opts: {
         }
         await store.readGenerationDocument(generation);
         await assertNativeComposeOwned(selection);
-        await storage?.verify(generation);
+        await storage?.verify(generation, proof);
       };
       return await runNativeComposeStorageVerifiedExec({
         signal,
@@ -1665,6 +1669,15 @@ async function executePreparedGeneration(opts: {
           });
         },
       });
+  // Up/restart enrollment ends with a storage proof. With no build, routing or
+  // file material, the first pre-spawn guard follows it with only read-only
+  // source and ownership checks (arming is a no-op), so that guard may reuse the
+  // adjacent proof. Every later guard and finalization proof stays fresh.
+  let adjacentGuardProof =
+    (operation === "up" || operation === "restart") &&
+    builds.length === 0 &&
+    routing === null &&
+    files === null;
   const result = await mutation.runEffect({
     generation,
     operation,
@@ -1699,7 +1712,14 @@ async function executePreparedGeneration(opts: {
               assertFresh,
               assertOwned: () => ownership.assertOwned(),
               verifyStorage: storage
-                ? () => storage.verify(generation)
+                ? () => {
+                    const adjacentProof = adjacentGuardProof;
+                    adjacentGuardProof = false;
+                    return storage.verify(
+                      generation,
+                      adjacentProof ? { adjacentProof } : {}
+                    );
+                  }
                 : undefined,
             }),
         });

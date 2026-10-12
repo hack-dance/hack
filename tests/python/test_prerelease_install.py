@@ -81,6 +81,39 @@ def with_current_payload(entries):
     return with_storage_tool(with_mcp(with_compiler(entries)))
 
 
+class OfficialResponse:
+    """One HTTP response read through the installer's real download loop.
+
+    `declared` is the Content-Length header. `step` bounds each read so a `fault`
+    can interrupt the stream after the first bytes were delivered.
+    """
+
+    def __init__(self, url, body, declared=None, step=None, fault=None):
+        self.url = url
+        self.body = body
+        self.headers = {} if declared is None else {"Content-Length": str(declared)}
+        self.step = step
+        self.fault = fault
+        self.offset = 0
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_error):
+        return False
+
+    def geturl(self):
+        return self.url
+
+    def read(self, amount):
+        if self.fault is not None and self.offset:
+            raise self.fault
+        amount = min(amount, self.step or amount)
+        chunk = self.body[self.offset:self.offset + amount]
+        self.offset += len(chunk)
+        return chunk
+
+
 class ChannelTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix="hack-prerelease-")
@@ -1400,6 +1433,7 @@ print(json.dumps(stages))
         response = mock.MagicMock()
         response.__enter__.return_value = response
         response.geturl.return_value = "https://release-assets.githubusercontent.com/fixture"
+        response.headers = {"Content-Length": str(len(b"verified transport fixture"))}
         response.read.side_effect = [b"verified transport fixture", b""]
         opener = mock.Mock()
         opener.open.return_value = response
@@ -1502,6 +1536,189 @@ print(json.dumps(stages))
                     with self.assertRaises(installer.Refusal):
                         installer.official_archive(stage, version)
                 self.assertEqual(download.call_count, 1)
+
+    def official_release(self, version):
+        """Intact official responses for one pinned version, keyed by exact URL."""
+        tag = "v" + version
+        archive_name = "hack-" + version + "-darwin-arm64-native.tar.gz"
+        archive, checksum = self.archive(version)
+        identity = {"schema": "hack.prerelease/v1", "version": version, "tag": tag,
+                    "source_revision": "a" * 40, "platform": "darwin-arm64"}
+        base = "https://github.com/hack-dance/hack/releases/download/" + tag + "/"
+        release = {"tag_name": tag, "prerelease": True, "draft": False,
+                   "assets": [{"name": name, "browser_download_url": base + name}
+                              for name in (archive_name, "prerelease.json", "SHA256SUMS")]}
+        api = "https://api.github.com/repos/hack-dance/hack/"
+        return {
+            api + "releases/tags/" + tag: json.dumps(release).encode(),
+            api + "git/ref/tags/" + tag: json.dumps({
+                "ref": "refs/tags/" + tag,
+                "object": {"type": "commit", "sha": identity["source_revision"]}}).encode(),
+            base + "prerelease.json": json.dumps(identity).encode(),
+            base + "SHA256SUMS": (checksum + "  " + archive_name + "\n").encode(),
+            base + archive_name: archive.read_bytes(),
+        }
+
+    def official_install(self, version, responses, faults=None):
+        """Install through the real download loop; only the HTTP opener is substituted."""
+        import urllib.request
+
+        faults = faults or {}
+        opened = []
+
+        def respond(request, timeout):
+            self.assertEqual(timeout, 30)
+            url = request.full_url
+            opened.append(url)
+            body = responses[url]
+            if url in faults:
+                return faults[url](url, body)
+            # Release assets declare their length; API responses may be chunked.
+            declared = len(body) if "/releases/download/" in url else None
+            return OfficialResponse(url, body, declared)
+
+        def build_opener(*handlers):
+            self.assertEqual(len(handlers), 1)
+            self.assertIsInstance(handlers[0], urllib.request.HTTPRedirectHandler)
+            opener = mock.Mock()
+            opener.open.side_effect = respond
+            return opener
+
+        with mock.patch.object(urllib.request, "build_opener", side_effect=build_opener):
+            with self.channel.lock():
+                self.channel.install(version, upgrade=True)
+        return opened
+
+    def test_truncated_reset_and_oversized_official_downloads_refuse_then_clean_retry_succeeds(self):
+        import http.client
+
+        version = "5.0.0-next.2"
+        tag = "v" + version
+        base = "https://github.com/hack-dance/hack/releases/download/" + tag + "/"
+        archive_url = base + "hack-" + version + "-darwin-arm64-native.tar.gz"
+        budget = 64 * 1024
+        cases = {
+            "short body": (archive_url, "incomplete", lambda url, body: OfficialResponse(
+                url, body[:len(body) // 2], declared=len(body))),
+            "incomplete read": (archive_url, "interrupted", lambda url, body: OfficialResponse(
+                url, body, declared=len(body), step=len(body) // 2,
+                fault=http.client.IncompleteRead(body[:len(body) // 2], len(body) - len(body) // 2))),
+            "connection reset": (archive_url, "interrupted", lambda url, body: OfficialResponse(
+                url, body, declared=len(body), step=len(body) // 2,
+                fault=ConnectionResetError(54, "Connection reset by peer"))),
+            "streamed past budget": (base + "SHA256SUMS", "size budget", lambda url, _body: OfficialResponse(
+                url, b"0" * (budget + 1), step=16 * 1024)),
+            "declared past budget": (base + "prerelease.json", "size budget", lambda url, body: OfficialResponse(
+                url, body, declared=budget + 1)),
+        }
+        for index, (case, (url, message, fault)) in enumerate(cases.items()):
+            with self.subTest(case=case):
+                self.channel = installer.Channel(self.root / ("download-channel-" + str(index)))
+                self.channel.initialize()
+                self.install()
+                (self.channel.root / "versions/5.0.0-next.1/native-home/marker").write_bytes(b"retained")
+                # An earlier interrupted stage is not this call's to remove.
+                other = self.channel.root / (".stage-" + "e" * 32)
+                other.mkdir(mode=0o700)
+                (other / "evidence").write_bytes(b"earlier attempt")
+                other_identity = (other.stat().st_ino, (other / "evidence").stat().st_ino)
+                responses = self.official_release(version)
+                before = self.retained_snapshot()
+                selection = (self.channel.root / ".selection.json").read_bytes()
+
+                with self.assertRaisesRegex(installer.Refusal, message):
+                    self.official_install(version, responses, {url: fault})
+
+                self.assertEqual((self.channel.root / ".selection.json").read_bytes(), selection)
+                self.assertEqual(self.retained_snapshot(), before)
+                self.assertFalse((self.channel.root / "versions" / version).exists())
+                self.assertEqual(sorted(path.name for path in self.channel.root.glob(".stage-*")),
+                                 [other.name])
+                self.assertEqual((other.stat().st_ino, (other / "evidence").stat().st_ino), other_identity)
+                self.assertEqual((other / "evidence").read_bytes(), b"earlier attempt")
+                installer.Channel(self.channel.root).validate()
+
+                opened = self.official_install(version, responses)
+                self.assertEqual(opened[-1], archive_url)
+                self.assertEqual(self.selection()["selected"], version)
+                self.assertEqual(self.selection()["previous"], "5.0.0-next.1")
+                self.assertEqual((self.channel.root / "versions" / version / "bundle/hack-cli").read_bytes(),
+                                 b"reviewed CLI fixture")
+                self.assertEqual((self.channel.root / "versions/5.0.0-next.1/native-home/marker").read_bytes(),
+                                 b"retained")
+                self.assertEqual(sorted(path.name for path in self.channel.root.glob(".stage-*")),
+                                 [other.name])
+                installer.Channel(self.channel.root).validate()
+
+    def test_download_refuses_short_interrupted_and_oversized_bodies(self):
+        import http.client
+        import urllib.request
+
+        origin = "https://github.com/hack-dance/hack/releases/download/v5.0.0-next.1/artifact"
+        body = b"complete official body"
+        cases = [
+            ("short", OfficialResponse(origin, body[:5], declared=len(body)), "incomplete"),
+            ("incomplete read", OfficialResponse(origin, body, declared=len(body), step=5,
+                                                 fault=http.client.IncompleteRead(b"", 1)), "interrupted"),
+            ("reset", OfficialResponse(origin, body, step=5, fault=ConnectionResetError()), "interrupted"),
+            ("timeout", OfficialResponse(origin, body, step=5, fault=TimeoutError()), "interrupted"),
+            ("streamed budget", OfficialResponse(origin, body, step=5), "size budget"),
+            ("declared budget", OfficialResponse(origin, body, declared=len(body) + 1), "size budget"),
+            ("malformed length", OfficialResponse(origin, body, declared="-1"), "Malformed"),
+            ("past declared length", OfficialResponse(origin, body, declared=5, step=10), "declared length"),
+        ]
+        for index, (case, response, message) in enumerate(cases):
+            with self.subTest(case=case):
+                limit = 10 if case == "streamed budget" else len(body)
+                opener = mock.Mock()
+                opener.open.return_value = response
+                target = self.root / ("refused-body-" + str(index))
+                with mock.patch.object(urllib.request, "build_opener", return_value=opener):
+                    with self.assertRaisesRegex(installer.Refusal, message):
+                        installer.download(origin, target, limit)
+                if case in ("declared budget", "malformed length"):
+                    self.assertFalse(target.exists())
+                    self.assertEqual(response.offset, 0)
+
+    def test_failed_install_removes_only_the_stage_it_created(self):
+        self.install()
+        version = "5.0.0-next.2"
+        responses = self.official_release(version)
+        before = self.retained_snapshot()
+        moved = self.channel.root / (".stage-" + "d" * 32)
+        created = []
+
+        def replace_stage(url, path, limit):
+            # Simulate an unexpected replacement: the original stage is moved aside
+            # and an unrelated directory appears at its path before the failure.
+            stage = path.parent
+            created.append(stage)
+            installer.write_file(path, responses[url][:limit])
+            os.rename(str(stage), str(moved))
+            stage.mkdir(mode=0o700)
+            (stage / "replacement").write_bytes(b"not created by this install")
+            raise installer.Refusal("Release download was interrupted.")
+
+        with mock.patch.object(installer, "download", side_effect=replace_stage):
+            with self.channel.lock():
+                with self.assertRaisesRegex(installer.Refusal, "interrupted"):
+                    self.channel.install(version, upgrade=True)
+        self.assertEqual(len(created), 1)
+        self.assertEqual((created[0] / "replacement").read_bytes(), b"not created by this install")
+        self.assertEqual({path.name for path in moved.iterdir()}, {"release-api.json"})
+        self.assertEqual(self.retained_snapshot(), before)
+        installer.Channel(self.channel.root).validate()
+
+        # The local-archive path removes its own stage too, on failure and success.
+        archive, checksum = self.archive(version)
+        with self.channel.lock():
+            with self.assertRaisesRegex(installer.Refusal, "checksum or size mismatch"):
+                self.channel.install(version, archive, "0" * 64, True)
+        self.assertEqual(sorted(self.channel.root.glob(".stage-*")), sorted([created[0], moved]))
+        with self.channel.lock():
+            self.channel.install(version, archive, checksum, True)
+        self.assertEqual(sorted(self.channel.root.glob(".stage-*")), sorted([created[0], moved]))
+        self.assertEqual(self.selection()["selected"], version)
 
 
 if __name__ == "__main__":

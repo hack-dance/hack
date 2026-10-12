@@ -47,7 +47,7 @@ METADATA_KEYS = {"schema", "version", "tag", "source_revision", "platform"}
 REPOSITORY = "hack-dance/hack"
 DOWNLOAD_HOSTS = {"api.github.com", "github.com", "release-assets.githubusercontent.com",
                   "objects.githubusercontent.com"}
-# Reviewed flat-layout, shared-MCP, compiler, and batched-signature managers.
+# Reviewed flat-layout, shared-MCP, compiler, batched-signature, and verified-launcher managers.
 # Keep this an explicit allowlist; a matching user-written receipt is not provenance.
 MANAGER_PREDECESSORS = frozenset({
     "b459ffc4f227482119b48e357c91e4607aa4f7d1f88c7ccf5b7d684f66f2c0cd",
@@ -438,6 +438,13 @@ def official_redirect_handler():
 
 
 def download(url, target, limit):
+    """Write one complete official response, or refuse.
+
+    A short body, a stream interrupted by the transport, or bytes past the budget
+    refuse. The caller owns `target` and its staging directory; this function never
+    publishes or selects what it wrote.
+    """
+    import http.client
     import urllib.request
 
     secure_url(url)
@@ -446,16 +453,29 @@ def download(url, target, limit):
     opener = urllib.request.build_opener(official_redirect_handler())
     with opener.open(request, timeout=30) as response:
         secure_url(response.geturl())
+        # http.client returns a short body as an ordinary end of stream, so the
+        # declared length is checked here rather than trusted to the transport.
+        declared = response.headers.get("Content-Length")
+        require(declared is None or isinstance(declared, str) and re.fullmatch(r"[0-9]{1,12}", declared),
+                "Malformed release download length.")
+        expected = None if declared is None else int(declared)
+        require(expected is None or expected <= limit, "Release download exceeds its size budget.")
         descriptor = os.open(str(target), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         with os.fdopen(descriptor, "wb") as output:
             size = 0
             while True:
-                chunk = response.read(1024 * 1024)
+                try:
+                    chunk = response.read(1024 * 1024)
+                except (http.client.HTTPException, OSError) as error:
+                    raise Refusal("Release download was interrupted.") from error
                 if not chunk:
                     break
                 size += len(chunk)
                 require(size <= limit, "Release download exceeds its size budget.")
+                require(expected is None or size <= expected,
+                        "Release download exceeds its declared length.")
                 output.write(chunk)
+            require(expected is None or size == expected, "Release download is incomplete.")
             output.flush()
             os.fsync(output.fileno())
 
@@ -497,6 +517,24 @@ def official_archive(stage, version):
     archive = stage / archive_name
     download(selected[archive_name], archive, MAX_ARCHIVE)
     return archive, checksum, identity
+
+
+def remove_created_stage(stage, created):
+    """Remove the one install stage whose identity this call recorded at creation.
+
+    A missing, replaced or foreign path is left for inspection. Other stages,
+    including a manager upgrade's journaled stage, are never touched.
+    """
+    import shutil
+
+    try:
+        info = stage.lstat()
+    except FileNotFoundError:
+        return
+    if (stat.S_ISDIR(info.st_mode) and info.st_uid == os.getuid()
+            and (info.st_dev, info.st_ino) == (created.st_dev, created.st_ino)):
+        shutil.rmtree(str(stage))
+        sync_directory(stage.parent)
 
 
 class Channel:
@@ -803,45 +841,54 @@ class Channel:
         self.require_quiescent(current)
         stage = self.root / (".stage-" + uuid.uuid4().hex)
         stage.mkdir(mode=0o700)
-        if archive is None:
-            archive, checksum, release_metadata = official_archive(stage, version)
-        else:
-            archive = canonical(archive)
-            release_metadata = None
-        installation = stage / "installation"
-        installation.mkdir(mode=0o700)
-        identity, manifest = extract_archive(archive, checksum, installation / "bundle", version,
-                                             release_metadata)
-        # The retained launcher always executes its recorded manager. Never select
-        # a new layout that an older manager cannot subsequently validate/rollback.
-        # Manager replacement is a separate explicit, recoverable operation.
-        require(set(manifest) <= PAYLOAD
-                or digest(self.root / "manager.py") == digest(Path(__file__)),
-                "Optional candidate payloads require this channel's retained manager to match the installer. "
-                "Run upgrade-manager with this reviewed installer, or use a fresh --root; "
-                "the existing channel and its selection are unchanged.")
-        homes = {}
-        for name in ("native-home", "cli-home"):
-            (installation / name).mkdir(mode=0o700)
-            info = (installation / name).stat()
-            homes[name] = {"device": info.st_dev, "inode": info.st_ino}
-        write_file(installation / ".receipt.json", json_bytes({
-            "schema": "hack.prerelease-version/v1", "metadata": identity,
-            "archive_sha256": checksum, "checksums": manifest, "homes": homes}))
-        sync_directory(installation)
-        # Final refusal happens before publication. A power loss after rename retains
-        # an uncommitted directory for inspection, while the old selection stays valid.
-        self.require_quiescent(current)
-        self.validate()
-        destination = self.root / "versions" / version
-        require(not destination.exists(), "Refusing to overwrite a candidate version.")
-        os.rename(str(installation), str(destination))
-        sync_directory(destination.parent)
-        installed = dict(self.state["installed"])
-        installed[version] = digest(destination / ".receipt.json")
-        state = dict(self.state, installed=installed, selected=version, previous=current)
-        atomic_json(self.root / ".selection.json", state)
-        self.state = state
+        created = stage.lstat()
+        try:
+            if archive is None:
+                archive, checksum, release_metadata = official_archive(stage, version)
+            else:
+                archive = canonical(archive)
+                release_metadata = None
+            installation = stage / "installation"
+            installation.mkdir(mode=0o700)
+            identity, manifest = extract_archive(archive, checksum, installation / "bundle", version,
+                                                 release_metadata)
+            # The retained launcher always executes its recorded manager. Never select
+            # a new layout that an older manager cannot subsequently validate/rollback.
+            # Manager replacement is a separate explicit, recoverable operation.
+            require(set(manifest) <= PAYLOAD
+                    or digest(self.root / "manager.py") == digest(Path(__file__)),
+                    "Optional candidate payloads require this channel's retained manager to match the installer. "
+                    "Run upgrade-manager with this reviewed installer, or use a fresh --root; "
+                    "the existing channel and its selection are unchanged.")
+            homes = {}
+            for name in ("native-home", "cli-home"):
+                (installation / name).mkdir(mode=0o700)
+                info = (installation / name).stat()
+                homes[name] = {"device": info.st_dev, "inode": info.st_ino}
+            write_file(installation / ".receipt.json", json_bytes({
+                "schema": "hack.prerelease-version/v1", "metadata": identity,
+                "archive_sha256": checksum, "checksums": manifest, "homes": homes}))
+            sync_directory(installation)
+            # Final refusal happens before publication. A power loss after rename retains
+            # an uncommitted directory for inspection, while the old selection stays valid.
+            self.require_quiescent(current)
+            self.validate()
+            destination = self.root / "versions" / version
+            require(not destination.exists(), "Refusing to overwrite a candidate version.")
+            os.rename(str(installation), str(destination))
+            sync_directory(destination.parent)
+            installed = dict(self.state["installed"])
+            installed[version] = digest(destination / ".receipt.json")
+            state = dict(self.state, installed=installed, selected=version, previous=current)
+            atomic_json(self.root / ".selection.json", state)
+            self.state = state
+        finally:
+            # Downloads, partial extraction and an unpublished installation live only
+            # in this call's stage. Cleanup never decides the outcome: validate()
+            # tolerates a stage that could not be removed, and the selection above
+            # is either committed or unchanged.
+            with contextlib.suppress(OSError):
+                remove_created_stage(stage, created)
 
     def run(self, arguments):
         version = self.state["selected"]

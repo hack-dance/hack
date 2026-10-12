@@ -43,6 +43,10 @@ export const PAYLOAD_MODES: Readonly<Record<string, number>> = {
   "hack.project.schema.json": 0o600,
   "hack.local.schema.json": 0o600,
 };
+/** The only packaged and installable candidate platform. */
+export const PRERELEASE_PLATFORM = "darwin-arm64";
+/** GitHub heading anchor of the consolidated support list in the prerelease guide. */
+export const PRERELEASE_SUPPORT_ANCHOR = "supported-platforms-and-capabilities";
 const VERSION = /^5\.0\.0-next\.[1-9][0-9]*$/;
 const REVISION = /^[0-9a-f]{40}$/;
 const STABLE_TAG = /^v(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)$/;
@@ -69,7 +73,7 @@ export function prereleaseMetadata({
     version,
     tag: `v${version}`,
     source_revision: sourceRevision,
-    platform: "darwin-arm64",
+    platform: PRERELEASE_PLATFORM,
   } as const;
 }
 
@@ -103,11 +107,11 @@ export function createPrereleasePlan({
   }
   return {
     ...metadata,
-    archive: `hack-${version}-darwin-arm64-native.tar.gz`,
+    archive: `hack-${version}-${PRERELEASE_PLATFORM}-native.tar.gz`,
     publish: publish === "true",
     environment: PRERELEASE_ENVIRONMENT,
     assets: [
-      `hack-${version}-darwin-arm64-native.tar.gz`,
+      `hack-${version}-${PRERELEASE_PLATFORM}-native.tar.gz`,
       "prerelease.json",
       "SHA256SUMS",
     ],
@@ -115,6 +119,21 @@ export function createPrereleasePlan({
 }
 
 export type PrereleasePlan = ReturnType<typeof createPrereleasePlan>;
+
+/**
+ * Release notes for a published candidate. The support link is pinned to the
+ * candidate's own immutable tag, so later guide edits cannot change what the
+ * published notes describe.
+ */
+export function prereleaseNotes({
+  tag,
+  source_revision: sourceRevision,
+}: Pick<PrereleasePlan, "tag" | "source_revision">) {
+  return [
+    `Native macOS ARM64 candidate from ${sourceRevision}. Requires explicit opt-in; stable installation is unchanged.`,
+    `Supported platform, unsupported platforms and capability limits: https://github.com/hack-dance/hack/blob/${tag}/docs/guides/prereleases.md#${PRERELEASE_SUPPORT_ANCHOR}`,
+  ].join("\n\n");
+}
 
 export function stableReleaseVersion({
   channel,
@@ -204,12 +223,17 @@ export function requireHumanApproval({
   }
 }
 
-const CI_JOBS = [
+/** Jobs that must each succeed on the exact-head CI run; `docker-e2e` is the shard fan-in. */
+export const CI_JOBS = [
   "Runtime state models",
   "Candidate core (ubuntu-latest)",
   "Candidate core (macos-latest)",
   "secret-scan",
   "runtime-images",
+  "docker-e2e shard 1/4",
+  "docker-e2e shard 2/4",
+  "docker-e2e shard 3/4",
+  "docker-e2e shard 4/4",
   "docker-e2e",
   "test",
   "linux-process-lifetime",
@@ -774,7 +798,7 @@ async function main() {
         "--title",
         `Hack ${plan.version}`,
         "--notes",
-        `Native macOS ARM64 candidate from ${plan.source_revision}. Requires explicit opt-in; stable installation is unchanged.`,
+        prereleaseNotes(plan),
       ]);
     }
   } else if (mode !== "plan") {

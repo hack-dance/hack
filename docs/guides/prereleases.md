@@ -10,6 +10,49 @@ native project adaptations and host routing remain explicit prerequisites in the
 [native candidate guide](native-candidate.md). A packaged candidate is not a claim
 of full Compose parity, lower resource use, or compatibility with every project.
 
+## Supported platforms and capabilities
+
+Published candidate release notes link to this section at the candidate's own tag.
+It lists what a candidate package covers. It does not list every project the
+candidate can run.
+
+### Supported platform
+
+- `darwin-arm64`: the native candidate archive for Apple Silicon macOS. This is
+  the only platform recorded in `prerelease.json` and accepted by the installer.
+
+### Unsupported platforms and surfaces
+
+- Intel (x86_64) macOS. The installer refuses before it changes a channel.
+- Linux and Windows packages. The bundled Linux guest relay runs inside the
+  candidate VM; it is not a Linux host package.
+- Homebrew installation of a candidate. Candidate releases never update the
+  stable Homebrew formula.
+- Remote, gateway, node and dispatch workflows, and the retained macOS app.
+- Retired hosted account, team and dashboard flows, Hack Tickets, and the built-in
+  GitHub and Linear integrations.
+
+### Candidate capability limits
+
+The [native candidate guide](native-candidate.md) qualifies a bounded subset.
+These limits still apply to a packaged candidate:
+
+- Changing the environment overlay, profiles or target of a retained native graph,
+  and pruning dependency caches. See
+  [frontend integration status](native-candidate.md#frontend-integration-status).
+- Installers that modify source files in the writable development source mode. See
+  [explicit writable development source](native-candidate.md#explicit-writable-development-source).
+- Named users or groups for private environment delivery. They refuse instead of
+  running as root. See the private delivery notes at the end of
+  [explicit cleanup after a dead foreground owner](native-candidate.md#explicit-cleanup-after-a-dead-foreground-owner).
+- Private registries, registries other than public Docker Hub, mutable tags passed
+  directly to `fetch-image`, and images without a Linux ARM64 variant. See
+  [public image acquisition without Docker](native-candidate.md#public-image-acquisition-without-docker).
+- Copied or relocated candidate pools. See
+  [manual candidate upgrade and rollback](native-candidate.md#manual-candidate-upgrade-and-rollback).
+- Downgrading onto newer state: an older candidate that refuses state written by
+  a newer one is not a rollback. See [manual candidate upgrade and rollback](native-candidate.md#manual-candidate-upgrade-and-rollback).
+
 ## Versions and artifacts
 
 Candidate versions have the form `5.0.0-next.N`, where `N` is a positive integer
@@ -111,6 +154,11 @@ runtimes, download and review the newer tag's installer, run its `upgrade-manage
 against the existing root, then run `upgrade`. See
 [upgrade and return to a retained candidate](candidate-install.md#upgrade-and-return-to-a-retained-candidate).
 A fresh `--root` does not need this step.
+
+A truncated, interrupted or oversized official download is a refused installation.
+The installer removes only the staging directory that attempt created. It leaves
+the current selection, retained bundles and homes unchanged. Retry the same version
+after the network problem is resolved.
 
 An upgrade retains the previous bundle and home. Selection changes require the
 owning candidate CLI to confirm quiescence. A running runtime, timeout, malformed

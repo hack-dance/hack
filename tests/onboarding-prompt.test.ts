@@ -157,3 +157,93 @@ test("new-project guidance uses hack.local without rewriting existing host examp
   expect(EXISTING_PROJECT_PROMPT).toContain("dev_host (myapp.hack)");
   expect(NEW_PROJECT_PROMPT).toContain("public-resolvable `*.hack.gy`");
 });
+
+test("deps guidance uses a locked install and treats lockfile failure as a diagnosis", () => {
+  for (const prompt of Object.values(ALL_PROMPTS)) {
+    expect(prompt).toContain(
+      'command: ["bun", "install", "--frozen-lockfile"]'
+    );
+    expect(prompt).not.toContain('command: ["bun", "install"]');
+    expect(prompt).toContain("pnpm install --frozen-lockfile");
+    expect(prompt).toContain("yarn install --immutable");
+    expect(prompt).toContain("npm ci");
+    expect(prompt).toContain("A lockfile mismatch is something to diagnose");
+    expect(prompt).toContain(
+      "do not drop the flag or regenerate the lockfile to get a green run"
+    );
+  }
+});
+
+test("deps guidance references the dependency cache labels and optional locked-v1 protocol", () => {
+  for (const prompt of Object.values(ALL_PROMPTS)) {
+    expect(prompt).toContain("hack.dependencies.cache-volume: node_modules");
+    expect(prompt).toContain("hack.dependencies.lockfiles: bun.lock");
+    expect(prompt).toContain("hack.dependencies.cache-protocol: locked-v1");
+    expect(prompt).toContain("they select a volume but do not serialize");
+  }
+});
+
+test("inventory guidance covers bun.lock, nested lockfiles, non-JS runtimes and pins", () => {
+  for (const prompt of Object.values(ALL_PROMPTS)) {
+    expect(prompt).toContain("`bun.lock` or legacy `bun.lockb`");
+    expect(prompt).toContain("in each workspace package");
+    expect(prompt).toContain("do not delete or regenerate a lockfile");
+    for (const manifest of [
+      "Cargo.toml",
+      "go.mod",
+      "pyproject.toml",
+      "uv.lock",
+      "poetry.lock",
+      "requirements.txt",
+      "Gemfile.lock",
+      "mix.exs",
+      "*.csproj",
+      "*.sln",
+    ]) {
+      expect(prompt).toContain(manifest);
+    }
+    for (const pin of ["`.nvmrc`", "`.tool-versions`", "`mise.toml`"]) {
+      expect(prompt).toContain(pin);
+    }
+  }
+});
+
+test("setup guidance resumes from existing config and offers toolchain-only adoption", () => {
+  for (const prompt of Object.values(ALL_PROMPTS)) {
+    expect(prompt).toContain("Resume before starting over");
+    expect(prompt).toContain(
+      "continue from there instead of re-scaffolding or redoing finished phases"
+    );
+    expect(prompt).toContain("backing-services-only, or toolchain-only");
+    expect(prompt).toContain(
+      "`hack run --profile <profile> <service> -- <cmd>`"
+    );
+    expect(prompt).toContain(
+      "Neither partial shape needs an always-on app service"
+    );
+  }
+});
+
+test("verification covers persistent data across down/up and reruns", () => {
+  for (const prompt of Object.values(ALL_PROMPTS)) {
+    expect(prompt).toContain(
+      "survives `hack down` followed by `hack up --detach --json`"
+    );
+    expect(prompt).toContain("rerunning setup steps");
+    expect(prompt).toContain("Do not delete volumes to get a clean pass");
+  }
+});
+
+test("ground rules forbid instruction-file injection and require reporting discovery limits", () => {
+  for (const prompt of Object.values(ALL_PROMPTS)) {
+    const groundRules = prompt.slice(prompt.indexOf("## Ground rules"));
+    expect(groundRules).toContain(
+      "Never create or modify AGENTS.md, CLAUDE.md, editor or agent rule files, or repository copies of agent skills unless the user asks."
+    );
+    expect(groundRules).toContain("Report discovery limits you hit");
+    expect(groundRules).toContain("the agent client CLI was missing");
+    expect(groundRules).toContain("a non-interactive run");
+    expect(groundRules).toContain("no-shell `hack-init` MCP prompt");
+    expect(groundRules).toContain("defaults to existing-project mode");
+  }
+});

@@ -304,13 +304,22 @@ jobs:
       - name: Verify Docker context endpoint selection against the real Docker CLI
         if: matrix.shard == 4
         run: HACK_TEST_DOCKER_CLI=1 bun test tests/docker-context.test.ts
+      # TEMPORARY X04 measurement; reverted before the final commit.
+      - name: X04 runner Docker client selection
+        run: |
+          docker context inspect --format 'context={{.Name}} host={{.Endpoints.docker.Host}}' || true
+          if [ -f "$HOME/.docker/config.json" ]; then echo "client-config=present"; else echo "client-config=absent"; fi
+          echo "DOCKER_HOST set=${DOCKER_HOST:+yes} DOCKER_CONTEXT set=${DOCKER_CONTEXT:+yes} DOCKER_CONFIG set=${DOCKER_CONFIG:+yes}"
       - name: Run local and Docker E2E shard
         env:
           HACK_E2E_PROCESS_POLICY_REFUSAL_CAPSULE: "1"
           HACK_E2E_CAPSULE_DIR: ${{ runner.temp }}/process-policy-capsules
           HACK_E2E_CLI_BIN: ${{ github.workspace }}/dist/hack
           HACK_E2E_SHARD: ${{ matrix.shard }}/4
+          # TEMPORARY X01 measurement; reverted before the final commit.
+          HACK_X01_TRACE_DIR: ${{ runner.temp }}/x01-trace
         run: |
+          mkdir -p "$HACK_X01_TRACE_DIR"
           HACK_E2E_DOCKER_HOST="${DOCKER_HOST:-$(docker context inspect --format '{{.Endpoints.docker.Host}}')}"
           HACK_E2E_NETWORK_SOURCE_REVISION="$(git rev-parse HEAD)"
           HACK_E2E_NETWORK_CLI_SHA256="$(sha256sum dist/hack | cut -d ' ' -f1)"
@@ -319,6 +328,22 @@ jobs:
           HACK_E2E_COMPOSE_PLUGIN_SHA256="$(sha256sum "$HACK_E2E_COMPOSE_PLUGIN_PATH" | cut -d ' ' -f1)"
           export HACK_E2E_DOCKER_HOST HACK_E2E_NETWORK_SOURCE_REVISION HACK_E2E_NETWORK_CLI_SHA256 HACK_E2E_NETWORK_COMPILER_SHA256 HACK_E2E_COMPOSE_PLUGIN_PATH HACK_E2E_COMPOSE_PLUGIN_SHA256
           HACK_E2E_REQUIRE_DOCKER=1 HACK_E2E_REQUIRE_TMUX=1 bun run test:e2e:local:docker --shard="$HACK_E2E_SHARD"
+      # TEMPORARY X01 measurement; reverted before the final commit.
+      - name: X01 witness cost summary
+        if: always()
+        run: |
+          for f in "$RUNNER_TEMP"/x01-trace/*.jsonl; do
+            [ -f "$f" ] || continue
+            bun scripts/x01-trace-summary.ts "$f" "$(basename "$f" .jsonl)" || true
+          done
+      - name: X01 witness cost trace artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: x01-trace-shard-${{ matrix.shard }}
+          path: ${{ runner.temp }}/x01-trace
+          if-no-files-found: ignore
+          retention-days: 7
       - name: Preserve process-policy capsule and startup diagnostic
         # Closed fixed-field JSON only (counts, enums, booleans); the gh log viewer truncates it inline.
         if: failure()

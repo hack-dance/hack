@@ -43,6 +43,8 @@ const PASSTHROUGH_ENV_KEYS = [
   "LC_ALL",
   "DOCKER_HOST",
   "DOCKER_CONFIG",
+  // TEMPORARY X01 measurement passthrough; reverted before the final commit.
+  "HACK_X01_TRACE_FILE",
 ] as const;
 
 export type CliResult = {
@@ -768,6 +770,13 @@ export async function runScenarios(
     };
 
     process.stdout.write(`-- ${scenario.name} (${scenario.tier}) --\n`);
+    // TEMPORARY X01 measurement: one trace file per scenario.
+    if (process.env.HACK_X01_TRACE_DIR?.startsWith("/")) {
+      process.env.HACK_X01_TRACE_FILE = join(
+        process.env.HACK_X01_TRACE_DIR,
+        `${scenario.name}.jsonl`
+      );
+    }
     let outcome: ScenarioOutcome;
     let preserveFailedFixture = false;
     try {

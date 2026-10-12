@@ -138,6 +138,7 @@ import { NativeConfigCompilerError } from "./native-config-compiler.ts";
 import { nativeFilePlanningRequired } from "./native-file-plan-protocol.ts";
 import { parseEnvConfigSelection } from "./project.ts";
 import { run } from "./shell.ts";
+import { x01Scope } from "./x01-cost-probe.ts";
 
 type Operation = "up" | "restart" | "down" | "ps" | "logs" | "exec" | "run";
 export type NativeComposeCommandOptions = {
@@ -943,7 +944,9 @@ async function savedCommand(opts: {
         selected,
         signal,
       });
-      const assertSaved = async (
+      const assertSaved = (proof: NativeComposeCommandStorageVerifyOptions) =>
+        x01Scope("exec-assert-saved", () => x01AssertSaved(proof));
+      const x01AssertSaved = async (
         proof: NativeComposeCommandStorageVerifyOptions
       ) => {
         const latest = await store.loadCurrent();
@@ -962,7 +965,9 @@ async function savedCommand(opts: {
         signal,
         assertSaved,
         run: () =>
-          runSavedProcess({ options, generation, document, base, signal }),
+          x01Scope("exec-process", () =>
+            runSavedProcess({ options, generation, document, base, signal })
+          ),
       });
     });
   }

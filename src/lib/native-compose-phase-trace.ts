@@ -1,5 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { writeSync } from "node:fs";
+import { x01Enabled, x01Phase, x01Scope } from "./x01-cost-probe.ts";
 
 export const NATIVE_COMPOSE_PHASE_TRACE = "HACK_NATIVE_COMPOSE_PHASE_TRACE";
 const PHASES = [
@@ -135,6 +136,8 @@ export function withNativeComposePhaseTrace<T>(operation: () => Promise<T>) {
           writeSync(2, line);
         },
       });
+    } else if (x01Enabled()) {
+      trace = createNativeComposePhaseTrace({ write: x01Phase });
     }
   } catch {
     // Diagnostic setup never changes selection, results or effect authority.
@@ -147,5 +150,8 @@ export function measureNativeComposePhase<T>(
   phase: Phase,
   operation: () => Promise<T>
 ): Promise<T> {
-  return context.getStore()?.measure(phase, operation) ?? operation();
+  return x01Scope(
+    phase,
+    () => context.getStore()?.measure(phase, operation) ?? operation()
+  );
 }

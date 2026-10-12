@@ -8,6 +8,7 @@ import {
   type NativeComposeStorageXattrTarget,
 } from "./native-compose-storage-witness-xattr-carrier.ts";
 import { refuseNativeComposeStorageXattr as refuse } from "./native-compose-storage-witness-xattr-codec.ts";
+import { x01Scope } from "./x01-cost-probe.ts";
 
 const ID = /^[a-f0-9]{64}$/;
 const NAME = /^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,254}$/;
@@ -164,7 +165,12 @@ export async function assertNativeComposeStorageDockerCarrierVolume(opts: {
 
 /** Complete holder reads include foreign containers. The two inventories and selected
  * volume reread are observed fences; they do not claim an atomic daemon transaction. */
-export async function observeNativeComposeStorageDockerTarget(opts: {
+export function observeNativeComposeStorageDockerTarget(
+  opts: Parameters<typeof x01ObserveTarget>[0]
+): ReturnType<typeof x01ObserveTarget> {
+  return x01Scope("target", () => x01ObserveTarget(opts));
+}
+async function x01ObserveTarget(opts: {
   readonly probe: Probe;
   readonly selection: Selection;
   readonly current: NativeComposeMaterialBinding;

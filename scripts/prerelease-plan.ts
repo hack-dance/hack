@@ -180,12 +180,17 @@ export function requireHumanApproval({
   }
 }
 
-const CI_JOBS = [
+/** Jobs that must each succeed on the exact-head CI run; `docker-e2e` is the shard fan-in. */
+export const CI_JOBS = [
   "Runtime state models",
   "Candidate core (ubuntu-latest)",
   "Candidate core (macos-latest)",
   "secret-scan",
   "runtime-images",
+  "docker-e2e shard 1/4",
+  "docker-e2e shard 2/4",
+  "docker-e2e shard 3/4",
+  "docker-e2e shard 4/4",
   "docker-e2e",
   "test",
   "linux-process-lifetime",

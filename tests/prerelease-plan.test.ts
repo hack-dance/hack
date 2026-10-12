@@ -70,6 +70,10 @@ const jobNames = [
   "Candidate core (macos-latest)",
   "secret-scan",
   "runtime-images",
+  "docker-e2e shard 1/4",
+  "docker-e2e shard 2/4",
+  "docker-e2e shard 3/4",
+  "docker-e2e shard 4/4",
   "docker-e2e",
   "test",
   "linux-process-lifetime",
@@ -291,6 +295,14 @@ describe("prerelease decision boundary", () => {
         sourceRevision: sha,
       })
     ).toThrow();
+    // The docker-e2e fan-in alone is not enough: every shard must have succeeded.
+    expect(() =>
+      requireExactHeadCi({
+        run: ciRun,
+        jobs: jobs.filter((job) => job.name !== "docker-e2e shard 3/4"),
+        sourceRevision: sha,
+      })
+    ).toThrow("Exact-head CI job did not succeed: docker-e2e shard 3/4");
     expect(() =>
       requireExactHeadCi({
         run: ciRun,

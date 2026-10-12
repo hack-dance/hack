@@ -14,6 +14,10 @@ import { optEnv, optJson, optPath, optProject } from "../cli/options.ts";
 import { readControlPlaneConfig } from "../control-plane/sdk/config.ts";
 import { updateGlobalConfig } from "../lib/config.ts";
 import { resolveGlobalConfigPath } from "../lib/config-paths.ts";
+import {
+  assertEnvValueStdinUsage,
+  readEnvValueFromStdin,
+} from "../lib/env-value-stdin.ts";
 import { readTextFile } from "../lib/fs.ts";
 import { isRecord } from "../lib/guards.ts";
 import { resolveHackInvocation } from "../lib/hack-cli.ts";
@@ -93,6 +97,14 @@ const optSecret = defineOption({
   type: "boolean",
   long: "--secret",
   description: "Store value as an encrypted secure entry",
+} as const);
+
+const optValueStdin = defineOption({
+  name: "valueStdin",
+  type: "boolean",
+  long: "--value-stdin",
+  description:
+    "Read the value from piped stdin (max 64 KiB, one trailing newline stripped) so it never appears in argv or shell history",
 } as const);
 
 const optLocal = defineOption({
@@ -230,8 +242,18 @@ const applySpec = defineCommand({
 const addSpec = defineCommand({
   name: "add",
   summary: "Add or update an env value",
+  description:
+    "Non-secret values may be passed as arguments. For secrets, pipe the value with --value-stdin (for example `<secret-source> | hack env add API_TOKEN --secret --value-stdin`) or omit the value in a terminal to use the hidden prompt, so the value never appears in argv, shell history, or process listings.",
   group: "Project",
-  options: [optPath, optProject, optEnv, optSecret, optLocal, optService],
+  options: [
+    optPath,
+    optProject,
+    optEnv,
+    optSecret,
+    optValueStdin,
+    optLocal,
+    optService,
+  ],
   positionals: [
     { name: "key", required: false },
     { name: "value", required: false },
@@ -242,8 +264,18 @@ const addSpec = defineCommand({
 const setSpec = defineCommand({
   name: "set",
   summary: "Alias for env add",
+  description:
+    "Same value rules as `hack env add`: pipe secrets with --value-stdin or use the hidden prompt instead of passing them as arguments.",
   group: "Project",
-  options: [optPath, optProject, optEnv, optSecret, optLocal, optService],
+  options: [
+    optPath,
+    optProject,
+    optEnv,
+    optSecret,
+    optValueStdin,
+    optLocal,
+    optService,
+  ],
   positionals: [
     { name: "key", required: false },
     { name: "value", required: false },
@@ -901,7 +933,7 @@ async function promptForEnvAddInput(input: {
   if (!canPrompt()) {
     requireInteractive({
       what: "hack env add needs a key and value",
-      hint: "Pass them as arguments: `hack env add <scope>/<KEY> <value>` (or `hack env add KEY VALUE --service <scope>`, with --secret for secrets).",
+      hint: "Pass the key as an argument and pipe the value on stdin: `<value-source> | hack env add <scope>/<KEY> --value-stdin` (add --secret for secrets). Non-secret values may also be passed as `hack env add <scope>/<KEY> <value>`; never pass secret values as arguments.",
     });
   }
 
@@ -1699,6 +1731,20 @@ const handleEnvAdd: CommandHandlerFor<typeof addSpec> = async ({
   ctx,
   args,
 }): Promise<number> => {
+  const keyArg = args.positionals.key?.trim();
+  const valueArg = args.positionals.value;
+  // --value-stdin: refuse bad combinations and read the bounded value before
+  // any project file is migrated or written, so a refusal stores nothing.
+  let stdinValue: string | null = null;
+  if (args.options.valueStdin === true) {
+    assertEnvValueStdinUsage({
+      hasKey: Boolean(keyArg),
+      hasPositionalValue:
+        valueArg !== undefined || keyArg?.includes("=") === true,
+    });
+    stdinValue = await readEnvValueFromStdin();
+  }
+
   const project = await resolveProjectForEnv({
     ctx,
     pathOpt: args.options.path,
@@ -1714,9 +1760,7 @@ const handleEnvAdd: CommandHandlerFor<typeof addSpec> = async ({
     reason: "mutation",
   });
 
-  const keyArg = args.positionals.key?.trim();
-  const valueArg = args.positionals.value;
-  const interactive = !(keyArg || valueArg);
+  const interactive = stdinValue === null && !(keyArg || valueArg);
   const prompted = interactive
     ? await promptForEnvAddInput({
         project,
@@ -1730,13 +1774,14 @@ const handleEnvAdd: CommandHandlerFor<typeof addSpec> = async ({
         keyOrPath: keyArg ?? "",
         scopeOverride: args.options.service,
       });
-  const value = prompted
-    ? prompted.value
-    : await resolveEnvValue({
-        key: parsedTarget.key,
-        value: valueArg ?? null,
-        secret: args.options.secret === true,
-      });
+  const value =
+    prompted?.value ??
+    stdinValue ??
+    (await resolveEnvValue({
+      key: parsedTarget.key,
+      value: valueArg ?? null,
+      secret: args.options.secret === true,
+    }));
   const secret = prompted ? prompted.secret : args.options.secret === true;
 
   const result = await setProjectEnvValue({
@@ -1769,6 +1814,19 @@ const handleEnvSet: CommandHandlerFor<typeof setSpec> = async ({
   ctx,
   args,
 }): Promise<number> => {
+  const rawKey = (args.positionals.key ?? "").trim();
+  const rawValue = args.positionals.value;
+  const [keyFromSpec, valueFromSpec] = parseKeyValueSpec(
+    rawValue === undefined ? rawKey : `${rawKey}=${rawValue}`
+  );
+  const valueFromStdin = args.options.valueStdin === true;
+  if (valueFromStdin) {
+    assertEnvValueStdinUsage({
+      hasKey: keyFromSpec.length > 0,
+      hasPositionalValue: valueFromSpec !== null,
+    });
+  }
+
   const project = await resolveProjectForEnv({
     ctx,
     pathOpt: args.options.path,
@@ -1799,11 +1857,6 @@ const handleEnvSet: CommandHandlerFor<typeof setSpec> = async ({
   const runtimeConfig = await readHackEnvRuntimeConfig({
     projectDir: project.projectDir,
   });
-  const rawKey = (args.positionals.key ?? "").trim();
-  const rawValue = args.positionals.value;
-  const [keyFromSpec, valueFromSpec] = parseKeyValueSpec(
-    rawValue === undefined ? rawKey : `${rawKey}=${rawValue}`
-  );
   const key = await resolveEnvKey({ key: keyFromSpec });
   const mutationSource = storeSecret ? "keychain" : "plain_env";
   const sourceValidation = await validateHackEnvMutationSource({
@@ -1815,11 +1868,13 @@ const handleEnvSet: CommandHandlerFor<typeof setSpec> = async ({
     logger.error({ message: sourceValidation.message });
     return 1;
   }
-  const value = await resolveEnvValue({
-    key,
-    value: valueFromSpec,
-    secret: storeSecret,
-  });
+  const value = valueFromStdin
+    ? await readEnvValueFromStdin()
+    : await resolveEnvValue({
+        key,
+        value: valueFromSpec,
+        secret: storeSecret,
+      });
 
   if (storeSecret) {
     const store = await resolveConfiguredSecretStore({ project, projectName });
@@ -2422,7 +2477,7 @@ async function resolveEnvValue(opts: {
   if (!canPrompt()) {
     requireInteractive({
       what: `a value for "${opts.key}" is required`,
-      hint: "Pass the value as an argument (e.g. `hack env set KEY value` or `hack env add KEY value --secret`).",
+      hint: "Pipe the value on stdin with --value-stdin (e.g. `<secret-source> | hack env add KEY --secret --value-stdin`), or run in a terminal to use the hidden prompt. Never pass secret values as arguments.",
     });
   }
 

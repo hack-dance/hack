@@ -325,12 +325,36 @@ Add or update values:
 
 ```bash
 hack env add API_BASE_URL https://api.example.com
-hack env add SERVICE_TOKEN abc123 --service api --secret
 hack env add --env qa API_BASE_URL https://qa.example.com
 hack env add API_BASE_URL https://api.example.com --local
 ```
 
 `hack env set` still works as a compatibility alias for `hack env add`, but `add` is the primary UX now.
+
+### Entering secret values
+
+Never pass a secret value as a command argument: arguments land in shell history and are
+visible to other local users and tools through process listings. Use one of these instead:
+
+```bash
+# Pipe the value from a secret manager or file; it never appears in argv.
+<secret-source> | hack env add SERVICE_TOKEN --service api --secret --value-stdin
+hack env add SERVICE_TOKEN --service api --secret --value-stdin < token.txt
+
+# In an interactive terminal, omit the value to use the hidden prompt.
+hack env add SERVICE_TOKEN --service api --secret
+```
+
+`--value-stdin` works on `hack env add` and `hack env set`, with or without `--secret`.
+It reads all of stdin, up to 64 KiB, and strips exactly one trailing newline (`\n` or
+`\r\n`), so `printf '%s\n' "$value"` and `printf '%s' "$value"` store the same value; any
+further trailing newlines are kept. It refuses, with a fixed message that never repeats the
+input and without writing anything:
+
+- an interactive terminal on stdin (pipe the value, or drop `--value-stdin` for the hidden prompt)
+- a value argument alongside the flag, including `KEY=value`
+- a missing key argument
+- empty input, input over 64 KiB, invalid UTF-8, or a NUL byte
 
 `--local` writes to the worktree-local override file (`.hack/hack.env.local.yaml` or
 `.hack/hack.env.<overlay>.local.yaml`) instead of the shared repo env file — use it for
@@ -339,7 +363,8 @@ per-checkout values you don't want to commit.
 If you omit `key`, `value`, or `--service`, `hack env add` prompts for them interactively.
 Pass `--no-interactive` (or set `HACK_NO_INTERACTIVE=1`) for scripted/agent usage: the
 command applies documented defaults or fails fast with `E_INTERACTIVE_REQUIRED` instead of
-blocking on a prompt. `hack env unset` and `hack env set` accept `--local` and
+blocking on a prompt. In scripts, supply secret values with `--value-stdin` rather than as
+arguments. `hack env unset` and `hack env set` accept `--local` and
 `--no-interactive` too.
 
 Remove a value:
@@ -542,6 +567,7 @@ If you are writing new docs or new project setup flows, document the YAML overla
 - Commit `.hack/hack.env.<overlay>.yaml` when the overlay is team-shared
 - Never commit `.hack.secret.key`
 - Prefer `hack env add` over hand-editing encrypted values
+- Enter secrets with `--value-stdin` or the hidden prompt, never as command arguments
 - Prefer direct runtime injection over materializing `.hack/.env`
 - Use `hack host exec` or env-aware sessions for host-side scripts like migrations, generators, and admin tasks
 

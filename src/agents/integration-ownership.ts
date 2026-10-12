@@ -106,6 +106,7 @@ const KNOWN_RENDER_FINGERPRINTS: Readonly<
     "121d8f26374d24f2a09890a3", // v5.0.0-next.3..next
     "6449442a8f230412d4e5f9e7", // v5.0.0-next.4..next
     "d83da046cf7541ba30950880", // v5.0.0-next.4..next (offline env-matrix pointer)
+    "c75c5f5eb9fdcf6842ed1eda", // v5.0.0-next.4..next (--value-stdin secret entry)
   ]),
   "hack-init-skill": new Set([
     "cd15fb6d8ed8e25071d05e75", // v3.1.0..v4.0.3
@@ -133,6 +134,7 @@ const KNOWN_RENDER_FINGERPRINTS: Readonly<
     "06cf6d0920afc1780b9946ba", // v5.0.0-next.3..next
     "cf0a31e197f9034485413674", // v5.0.0-next.4..next
     "3a99c9097855f93808e482cb", // v5.0.0-next.4..next (offline env-matrix pointer)
+    "29499060cad876931810b458", // v5.0.0-next.4..next (--value-stdin secret entry)
   ]),
 };
 

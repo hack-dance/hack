@@ -78,7 +78,6 @@ import {
   nativeComposeStorageXattrValueMatches,
   sameNativeComposeStorageXattrRoot,
 } from "./native-compose-storage-witness-xattr-codec.ts";
-import { x01Scope } from "./x01-cost-probe.ts";
 
 export type { NativeComposeStorageWitnessReference } from "./native-compose-storage-witness-state.ts";
 
@@ -494,16 +493,7 @@ function requireXattrAdmission(
     refuse();
   }
 }
-function invokeXattr(
-  opts: Parameters<typeof x01InvokeXattr>[0]
-): ReturnType<typeof x01InvokeXattr> {
-  const operation =
-    isRecord(opts.request) && typeof opts.request.operation === "string"
-      ? opts.request.operation
-      : "unknown";
-  return x01Scope(`xattr:${operation}`, () => x01InvokeXattr(opts));
-}
-async function x01InvokeXattr(opts: {
+async function invokeXattr(opts: {
   readonly carrier: NativeComposeStorageXattrCarrier;
   readonly saved: XattrExpectation;
   readonly volume: NativeComposeRetainedVolume;
@@ -1465,21 +1455,17 @@ export async function prepareNativeComposeStorageXattrWitness(
   }
 ): Promise<NativeComposeStorageWitnessEnrollment> {
   const { carrier, ...input } = opts;
-  return await x01Scope("witness-prepare", () =>
-    prepareNativeComposeStorageWitness({
-      ...input,
-      xattrCarrier: carrier,
-    })
-  );
+  return await prepareNativeComposeStorageWitness({
+    ...input,
+    xattrCarrier: carrier,
+  });
 }
 export async function enrollNativeComposeStorageXattrWitness(opts: {
   readonly enrollment: NativeComposeStorageWitnessEnrollment;
 }): Promise<NativeComposeStorageWitnessReference> {
-  return await x01Scope("witness-enroll", () =>
-    enrollNativeComposeStorageWitness({
-      enrollment: opts.enrollment,
-    })
-  );
+  return await enrollNativeComposeStorageWitness({
+    enrollment: opts.enrollment,
+  });
 }
 export async function verifyNativeComposeStorageXattrWitness(
   opts: Omit<
@@ -1490,9 +1476,7 @@ export async function verifyNativeComposeStorageXattrWitness(
   }
 ): Promise<void> {
   const { carrier, ...input } = opts;
-  await x01Scope("witness-verify", () =>
-    verifyNativeComposeStorageWitness({ ...input, xattrCarrier: carrier })
-  );
+  await verifyNativeComposeStorageWitness({ ...input, xattrCarrier: carrier });
 }
 
 /** Private saved observation seam. It never performs a kernel read, repairs an

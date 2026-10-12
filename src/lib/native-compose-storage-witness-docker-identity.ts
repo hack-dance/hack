@@ -46,6 +46,13 @@ export function nativeComposeStorageIdentityProbe(opts: {
       signal,
       timeoutMs: remaining,
       environment,
+    }).catch((error: unknown) => {
+      // Admitted failures never fall back. Cancellation and expiry keep the CLI
+      // probe's closed classification: that probe refuses them before spawning.
+      if (signal?.aborted || Date.now() >= deadline) {
+        return probe(args);
+      }
+      throw error;
     });
   };
 }

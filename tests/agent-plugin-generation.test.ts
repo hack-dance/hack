@@ -12,6 +12,7 @@ import {
   renderPluginRule,
   renderPluginSkill,
 } from "../scripts/generate-agent-plugins.ts";
+import { FOCUSED_SKILLS } from "../src/agents/focused-skills.ts";
 import { renderHackInitSkill } from "../src/agents/hack-init-skill.ts";
 import { renderHackInstallSkill } from "../src/agents/install-skill.ts";
 import { renderHackRemoteSkill } from "../src/agents/remote-bootstrap-skill.ts";
@@ -139,6 +140,12 @@ test("bundled skills and rule match current canonical guidance", async () => {
   expect(await Bun.file(join(root, "skills/hack-cli/SKILL.md")).text()).toBe(
     renderPluginSkill("hack-cli")
   );
+  expect(FOCUSED_SKILLS.length).toBeGreaterThan(0);
+  for (const skill of FOCUSED_SKILLS) {
+    expect(
+      await Bun.file(join(root, "skills", skill.name, "SKILL.md")).text()
+    ).toBe(renderPluginSkill(skill.name));
+  }
   const references = renderPluginReferences();
   expect(references.size).toBeGreaterThan(0);
   for (const [path, content] of references) {

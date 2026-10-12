@@ -251,16 +251,32 @@ export async function removeCodexSkill(opts: {
  * Render the Codex skill template for hack CLI usage.
  *
  * Frontmatter and top-level framing live here; the instructional content is
- * the `skill`-tagged sections from the shared instruction source.
+ * the `skill`-tagged sections from the shared instruction source. Standalone
+ * installs ship no focused skills, so this variant keeps broad routing.
  */
 export function renderCodexSkill(): string {
+  return renderHackCliSkill({
+    descriptionLines: [
+      "description: >",
+      "  Use the hack CLI for local runtime orchestration (compose, DNS/TLS, logs, env, persistent project workspaces) and agent setup.",
+      "  Trigger when asked to run/start/stop services, inspect logs, manage lifecycle/workspace workflows, or update",
+      "  agent integrations. Prefer CLI over MCP when shell access is available.",
+    ],
+  });
+}
+
+/**
+ * Render the `hack-cli` SKILL.md with the given frontmatter description
+ * lines. The standalone and plugin variants share the body; only routing
+ * differs.
+ */
+export function renderHackCliSkill(opts: {
+  readonly descriptionLines: readonly string[];
+}): string {
   const lines = [
     "---",
     "name: hack-cli",
-    "description: >",
-    "  Use the hack CLI for local runtime orchestration (compose, DNS/TLS, logs, env, persistent project workspaces) and agent setup.",
-    "  Trigger when asked to run/start/stop services, inspect logs, manage lifecycle/workspace workflows, or update",
-    "  agent integrations. Prefer CLI over MCP when shell access is available.",
+    ...opts.descriptionLines,
     "---",
     "",
     "# hack CLI",

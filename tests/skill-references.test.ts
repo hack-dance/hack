@@ -63,8 +63,12 @@ test("every packaged reference is linked and carries a recomputable revision", a
 test("only the plugin skill links references; standalone renders stay unchanged", () => {
   expect(renderCodexSkill()).not.toContain("references/");
   const plugin = renderPluginSkill("hack-cli");
-  expect(plugin.startsWith(renderCodexSkill().trimEnd())).toBe(true);
-  expect(plugin.slice(renderCodexSkill().trimEnd().length)).toBe(
+  // The plugin variant differs only in its routing description and the
+  // appended references; the instruction body is the standalone body.
+  const body = (text: string) => text.slice(text.indexOf("\n---\n") + 5);
+  const standaloneBody = body(renderCodexSkill()).trimEnd();
+  expect(body(plugin).startsWith(standaloneBody)).toBe(true);
+  expect(body(plugin).slice(standaloneBody.length)).toBe(
     "\n\n## References\n\n- [Pattern catalogue](references/patterns.md): reusable project patterns with what Hack supports today, the missing contract and its owner.\n"
   );
   const unchanged = "---\nname: hack-init\n---\n";

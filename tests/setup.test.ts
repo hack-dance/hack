@@ -109,6 +109,25 @@ test("renderAgentInitPatterns includes dependency signals", () => {
   expect(patterns).toContain("docker-compose.yml");
 });
 
+test("renderAgentInitPatterns presents hack.local as the new-project default", () => {
+  const patterns = renderAgentInitPatterns();
+  expect(patterns).toContain("`<name>.hack.local`");
+  expect(patterns).toContain(
+    "when provider rules reject `.hack.local` (or legacy `.hack`)"
+  );
+  expect(patterns).not.toMatch(/reject `\.hack`\./);
+  const defaultHostLines = patterns
+    .split("\n")
+    .filter((line) => /\bdefault/.test(line) && line.includes(".hack"));
+  expect(defaultHostLines.length).toBeGreaterThan(0);
+  for (const line of defaultHostLines) {
+    expect(line).toContain(".hack.local");
+    expect(line).not.toMatch(/`<[^>]+>\.hack`/);
+    expect(line).toContain("existing `.hack` names keep working");
+    expect(line).toContain("`.hack.gy` OAuth aliases");
+  }
+});
+
 test("setup sync collapses healthy artifacts into one scope row", () => {
   const result = buildSetupSyncScopeResult({
     action: "check",

@@ -25,15 +25,19 @@ test("native Doctor reports unknown owner without consulting Docker-era CA state
   const result = await invoke(["doctor", "--json"]);
   expect(result.code).toBe(0);
   const envelope: unknown = JSON.parse(result.stdout);
-  expect(envelope).toMatchObject({
-    ok: true,
-    data: {
-      checks: [
-        { id: "native https owner", status: "warn" },
-        { id: "native root trust", status: "warn" },
-      ],
-    },
-  });
+  const checks: Record<string, unknown>[] = [
+    { id: "native https owner", status: "warn" },
+    { id: "native root trust", status: "warn" },
+  ];
+  if (process.platform === "darwin") {
+    // The hack.local route check refuses before reading any host DNS file.
+    checks.push({
+      id: "native hack.local route",
+      status: "warn",
+      hackLocalRoute: { status: "refused", reason: "relay-not-verified" },
+    });
+  }
+  expect(envelope).toMatchObject({ ok: true, data: { checks } });
   expect(result.stdout).not.toContain("caddy local ca");
   expect(result.stdout).not.toContain("docker daemon");
 });

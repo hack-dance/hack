@@ -112,6 +112,14 @@ import {
   inspectNativeDnsHost,
   readStableNativeDnsFile,
 } from "../lib/native-domain-dns-snapshot.ts";
+import {
+  describeHackLocalRoute,
+  inspectHackLocalRoute,
+  reportHackLocalRoute,
+  rollbackHackLocalRoute,
+  selectNativeDnsCommandDomain,
+} from "../lib/native-hack-local-route.ts";
+import { createNativeHackLocalRouteDependencies } from "../lib/native-hack-local-route-host.ts";
 import { isLinux, isMac } from "../lib/os.ts";
 import {
   reconcileRemoteCaddyRoutesStack,
@@ -222,7 +230,7 @@ const globalInstallSpec = defineCommand({
 const globalDnsPreviewSpec = defineCommand({
   name: "preview",
   summary:
-    "Preview a scoped native custom-domain DNS claim without changing the host",
+    "Preview a scoped native custom-domain DNS claim or the hack.local relay repair without changing the host",
   group: "Global",
   options: [
     optJson,
@@ -231,7 +239,8 @@ const globalDnsPreviewSpec = defineCommand({
       type: "string",
       long: "--domain",
       valueHint: "v5.hack.gy",
-      description: "Custom suffix to inspect (default: global default_domain)",
+      description:
+        "Suffix to inspect: a custom suffix, or hack.local for the native relay repair (default: a custom global default_domain)",
     } as const),
   ] as const,
   positionals: [],
@@ -248,7 +257,8 @@ const globalDnsActivateSpec = defineCommand({
       type: "string",
       long: "--domain",
       valueHint: "v5.hack.gy",
-      description: "Custom suffix to activate (default: global default_domain)",
+      description:
+        "Custom suffix to activate (default: a custom global default_domain)",
     } as const),
   ] as const,
   positionals: [],
@@ -257,7 +267,8 @@ const globalDnsActivateSpec = defineCommand({
 
 const globalDnsDeactivateSpec = defineCommand({
   name: "deactivate",
-  summary: "Remove only an owned native custom-domain DNS suffix",
+  summary:
+    "Remove an owned native custom-domain DNS suffix, or undo the hack.local relay repair",
   group: "Global",
   options: [
     defineOption({
@@ -266,7 +277,7 @@ const globalDnsDeactivateSpec = defineCommand({
       long: "--domain",
       valueHint: "v5.hack.gy",
       description:
-        "Custom suffix to deactivate (default: global default_domain)",
+        "Custom suffix to deactivate, or hack.local to undo the native relay repair (default: a custom global default_domain)",
     } as const),
   ] as const,
   positionals: [],
@@ -391,11 +402,28 @@ export const globalCommand = defineCommand({
   ],
 } as const);
 
+async function selectGlobalDnsDomain(opts: {
+  readonly verb: "preview" | "activate" | "deactivate";
+  readonly option: string | undefined;
+}) {
+  const explicit =
+    opts.option === undefined ? undefined : parseDefaultDomain(opts.option);
+  return selectNativeDnsCommandDomain({
+    verb: opts.verb,
+    explicit,
+    configuredDefault: explicit ?? (await resolveDefaultDomain()),
+  });
+}
+
 async function handleGlobalDnsPreview({
   args,
 }: Parameters<
   CommandHandlerFor<typeof globalDnsPreviewSpec>
 >[0]): Promise<number> {
+  const selected = await selectGlobalDnsDomain({
+    verb: "preview",
+    option: args.options.domain,
+  });
   const runtime = resolveNativeRuntimeSelection();
   if (!(runtime && isMac())) {
     logger.error({
@@ -404,9 +432,20 @@ async function handleGlobalDnsPreview({
     });
     return 1;
   }
-  const domain = parseDefaultDomain(
-    args.options.domain ?? (await resolveDefaultDomain())
-  );
+  if (selected.kind === "hack-local") {
+    const report = reportHackLocalRoute(
+      await inspectHackLocalRoute(
+        await createNativeHackLocalRouteDependencies({ runtime })
+      )
+    );
+    if (args.options.json) {
+      console.log(JSON.stringify({ ok: true, data: report }));
+    } else {
+      logger.info({ message: describeHackLocalRoute(report) });
+    }
+    return 0;
+  }
+  const { domain } = selected;
   const { inspection, receiptPath } = await inspectNativeDnsPlan({
     runtime,
     domain,
@@ -442,6 +481,10 @@ async function handleGlobalDnsActivate({
 }: Parameters<
   CommandHandlerFor<typeof globalDnsActivateSpec>
 >[0]): Promise<number> {
+  const selected = await selectGlobalDnsDomain({
+    verb: "activate",
+    option: args.options.domain,
+  });
   const runtime = resolveNativeRuntimeSelection();
   if (!(runtime && isMac())) {
     logger.error({
@@ -450,9 +493,13 @@ async function handleGlobalDnsActivate({
     });
     return 1;
   }
-  const domain = parseDefaultDomain(
-    args.options.domain ?? (await resolveDefaultDomain())
-  );
+  if (selected.kind !== "custom") {
+    logger.error({
+      message: "hack.local is repaired with hack doctor --fix, not activated.",
+    });
+    return 1;
+  }
+  const { domain } = selected;
   const initial = await inspectNativeDnsPlan({ runtime, domain });
   if (
     initial.inspection.plan.status === "available" &&
@@ -537,6 +584,10 @@ async function handleGlobalDnsDeactivate({
 }: Parameters<
   CommandHandlerFor<typeof globalDnsDeactivateSpec>
 >[0]): Promise<number> {
+  const selected = await selectGlobalDnsDomain({
+    verb: "deactivate",
+    option: args.options.domain,
+  });
   const runtime = resolveNativeRuntimeSelection();
   if (!(runtime && isMac())) {
     logger.error({
@@ -545,9 +596,26 @@ async function handleGlobalDnsDeactivate({
     });
     return 1;
   }
-  const domain = parseDefaultDomain(
-    args.options.domain ?? (await resolveDefaultDomain())
-  );
+  if (selected.kind === "hack-local") {
+    const result = await rollbackHackLocalRoute(
+      await createNativeHackLocalRouteDependencies({ runtime })
+    );
+    if (result.outcome === "refused") {
+      logger.error({
+        message: `hack.local rollback refused (${result.reason}): ${result.detail}`,
+      });
+      return 1;
+    }
+    logger.success({
+      message: `Restored "${result.receipt.oldLine}"; the dnsmasq file hash matches the receipt.${
+        result.retainedResolver
+          ? ` ${result.retainedResolver} was retained because its ownership is unproven.`
+          : ""
+      }`,
+    });
+    return 0;
+  }
+  const { domain } = selected;
   const initial = await inspectNativeDnsPlan({ runtime, domain });
   if (initial.inspection.plan.status === "available") {
     if (initial.receipt?.state === "inactive") {

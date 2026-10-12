@@ -15,6 +15,7 @@ import type {
 import { readControlPlaneConfig } from "../control-plane/sdk/config.ts";
 import { resolveGlobalHackDir } from "./config-paths.ts";
 import { ensureDir, readTextFile } from "./fs.ts";
+import { decodeCanonicalBase64 } from "./private-file.ts";
 
 const ENCRYPTED_FILE_KEY_ENV = "HACK_SECRETS_FILE_KEY";
 const DISABLE_ENCRYPTED_FILE_KEYCHAIN_FALLBACK_ENV =
@@ -27,6 +28,9 @@ const ENCRYPTED_STORE_VERSION = 1 as const;
 const PLAINTEXT_STORE_VERSION = 1 as const;
 const ENCRYPTED_ALGORITHM = "aes-256-gcm";
 const ENCRYPTED_IV_BYTES = 12;
+const ENCRYPTED_TAG_BYTES = 16;
+/** Decoded ciphertext bound for the whole encrypted store. */
+const ENCRYPTED_CIPHERTEXT_LIMIT = 16 * 1024 * 1024;
 let cachedEncryptedFileKey: string | null = null;
 let encryptedFileKeyFailureCooldownUntilMs = 0;
 
@@ -36,6 +40,13 @@ type EncryptedStorePayload = {
   readonly iv: string;
   readonly tag: string;
   readonly ciphertext: string;
+};
+
+/** Envelope fields decoded and size-checked; the bytes are not yet authenticated. */
+type ParsedEncryptedEnvelope = {
+  readonly iv: Buffer;
+  readonly tag: Buffer;
+  readonly ciphertext: Buffer;
 };
 
 type PlaintextStore = {
@@ -712,10 +723,17 @@ async function readEncryptedEntries(input: {
       `Invalid encrypted secret store payload at ${input.filePath}.`
     );
   }
-  const plaintext = decryptStore({
-    envelope,
-    encryptionKey: input.encryptionKey,
-  });
+  let plaintext: string;
+  try {
+    plaintext = decryptStore({
+      envelope,
+      encryptionKey: input.encryptionKey,
+    });
+  } catch {
+    throw new Error(
+      `Cannot decrypt encrypted secret store at ${input.filePath}: the key does not match or the payload was modified.`
+    );
+  }
   return parsePlaintextStore(plaintext).entries;
 }
 
@@ -736,7 +754,14 @@ async function writeEncryptedEntries(input: {
   await Bun.write(input.filePath, `${JSON.stringify(envelope, null, 2)}\n`);
 }
 
-function parseEncryptedEnvelope(value: unknown): EncryptedStorePayload | null {
+/**
+ * Accepts only the v1 envelope with canonical padded base64 fields, a 12-byte
+ * IV, a 16-byte tag and a bounded ciphertext. Anything else returns null so the
+ * caller reports a fixed, value-free error.
+ */
+function parseEncryptedEnvelope(
+  value: unknown
+): ParsedEncryptedEnvelope | null {
   if (!(value && typeof value === "object")) {
     return null;
   }
@@ -750,13 +775,26 @@ function parseEncryptedEnvelope(value: unknown): EncryptedStorePayload | null {
   ) {
     return null;
   }
-  return {
-    version: ENCRYPTED_STORE_VERSION,
-    algorithm: ENCRYPTED_ALGORITHM,
-    iv: maybe.iv,
-    tag: maybe.tag,
-    ciphertext: maybe.ciphertext,
-  };
+  const iv = decodeCanonicalBase64({
+    text: maybe.iv,
+    maxBytes: ENCRYPTED_IV_BYTES,
+  });
+  const tag = decodeCanonicalBase64({
+    text: maybe.tag,
+    maxBytes: ENCRYPTED_TAG_BYTES,
+  });
+  const ciphertext = decodeCanonicalBase64({
+    text: maybe.ciphertext,
+    maxBytes: ENCRYPTED_CIPHERTEXT_LIMIT,
+  });
+  if (
+    iv?.length !== ENCRYPTED_IV_BYTES ||
+    tag?.length !== ENCRYPTED_TAG_BYTES ||
+    ciphertext === null
+  ) {
+    return null;
+  }
+  return { iv, tag, ciphertext };
 }
 
 function parsePlaintextStore(value: string): PlaintextStore {
@@ -797,7 +835,9 @@ function encryptStore(input: {
 }): EncryptedStorePayload {
   const iv = randomBytes(ENCRYPTED_IV_BYTES);
   const key = deriveEncryptionKey({ source: input.encryptionKey });
-  const cipher = createCipheriv(ENCRYPTED_ALGORITHM, key, iv);
+  const cipher = createCipheriv(ENCRYPTED_ALGORITHM, key, iv, {
+    authTagLength: ENCRYPTED_TAG_BYTES,
+  });
   const ciphertext = Buffer.concat([
     cipher.update(input.plaintext, "utf8"),
     cipher.final(),
@@ -813,17 +853,19 @@ function encryptStore(input: {
 }
 
 function decryptStore(input: {
-  readonly envelope: EncryptedStorePayload;
+  readonly envelope: ParsedEncryptedEnvelope;
   readonly encryptionKey: string;
 }): string {
   const key = deriveEncryptionKey({ source: input.encryptionKey });
-  const iv = Buffer.from(input.envelope.iv, "base64");
-  const tag = Buffer.from(input.envelope.tag, "base64");
-  const ciphertext = Buffer.from(input.envelope.ciphertext, "base64");
-  const decipher = createDecipheriv(ENCRYPTED_ALGORITHM, key, iv);
-  decipher.setAuthTag(tag);
+  const decipher = createDecipheriv(
+    ENCRYPTED_ALGORITHM,
+    key,
+    input.envelope.iv,
+    { authTagLength: ENCRYPTED_TAG_BYTES }
+  );
+  decipher.setAuthTag(input.envelope.tag);
   const plaintext = Buffer.concat([
-    decipher.update(ciphertext),
+    decipher.update(input.envelope.ciphertext),
     decipher.final(),
   ]);
   return plaintext.toString("utf8");

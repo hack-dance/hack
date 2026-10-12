@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, expect, mock, spyOn, test } from "bun:test";
+import * as nodeCrypto from "node:crypto";
 import * as fs from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -507,6 +508,126 @@ for (const kind of [
     await refuses(() => values(p));
   });
 }
+
+// GCM verifies a truncated tag unless the tag length is pinned; both owners pin 16 bytes.
+for (const kind of ["truncated-tag", "noncanonical-base64"] as const) {
+  test(`authentic ciphertext with a ${kind} refuses with fixed redacted diagnostics`, async () => {
+    const p = await project();
+    await fs.writeFile(join(p, PROJECT_ENV_KEY_FILENAME), KEY);
+    const authentic = await encrypted();
+    if (!(isRecord(authentic) && typeof authentic.secure === "string")) {
+      throw new Error("Synthetic ciphertext absent");
+    }
+    const [prefix, iv, tag = "", ciphertext] = authentic.secure.split(":");
+    const changedTag =
+      kind === "truncated-tag"
+        ? Buffer.from(tag, "base64").subarray(0, 12).toString("base64")
+        : ` ${tag}`;
+    await layer(p, "hack.env.default.yaml", {
+      global: {
+        SECRET: { secure: [prefix, iv, changedTag, ciphertext].join(":") },
+      },
+    });
+    await refuses(() => values(p));
+  });
+}
+
+/**
+ * Seals plaintext exactly as the v1 owner does but with a caller-chosen IV
+ * length. GCM accepts any non-empty IV, so refusing these authentic values can
+ * only come from the parser's own IV guard, not from GCM authentication.
+ */
+function sealed(opts: {
+  readonly plaintext: string;
+  readonly ivBytes: number;
+}): ProjectEnvStoredValue {
+  const key = nodeCrypto.createHash("sha256").update(KEY, "utf8").digest();
+  const iv = nodeCrypto.randomBytes(opts.ivBytes);
+  const cipher = nodeCrypto.createCipheriv("aes-256-gcm", key, iv, {
+    authTagLength: 16,
+  });
+  const ciphertext = Buffer.concat([
+    cipher.update(opts.plaintext, "utf8"),
+    cipher.final(),
+  ]);
+  return {
+    secure: [
+      "v1",
+      iv.toString("base64"),
+      cipher.getAuthTag().toString("base64"),
+      ciphertext.toString("base64"),
+    ].join(":"),
+  };
+}
+
+test("a test-sealed 12-byte-IV value decrypts with the tag length pinned (control)", async () => {
+  const p = await project();
+  await fs.writeFile(join(p, PROJECT_ENV_KEY_FILENAME), KEY);
+  await layer(p, "hack.env.default.yaml", {
+    global: { SECRET: sealed({ plaintext: SENTINEL, ivBytes: 12 }) },
+  });
+  const decipher = spyOn(nodeCrypto, "createDecipheriv");
+  expect((await values(p)).globalEnv).toEqual({ SECRET: SENTINEL });
+  expect(decipher).toHaveBeenCalled();
+  for (const call of decipher.mock.calls) {
+    const options: unknown = call[3];
+    expect(options).toEqual({ authTagLength: 16 });
+  }
+});
+
+for (const ivBytes of [8, 16]) {
+  test(`an authentic value sealed with a ${ivBytes}-byte IV refuses before decipher`, async () => {
+    const p = await project();
+    await fs.writeFile(join(p, PROJECT_ENV_KEY_FILENAME), KEY);
+    await layer(p, "hack.env.default.yaml", {
+      global: { SECRET: sealed({ plaintext: SENTINEL, ivBytes }) },
+    });
+    const decipher = spyOn(nodeCrypto, "createDecipheriv");
+    await refuses(() => values(p));
+    expect(decipher).not.toHaveBeenCalled();
+  });
+}
+
+test("a truncated tag refuses before decipher on the native path", async () => {
+  const p = await project();
+  await fs.writeFile(join(p, PROJECT_ENV_KEY_FILENAME), KEY);
+  const authentic = sealed({ plaintext: SENTINEL, ivBytes: 12 });
+  if (!(isRecord(authentic) && typeof authentic.secure === "string")) {
+    throw new Error("Synthetic ciphertext absent");
+  }
+  const [prefix, iv, tag = "", ciphertext] = authentic.secure.split(":");
+  await layer(p, "hack.env.default.yaml", {
+    global: {
+      SECRET: {
+        secure: [
+          prefix,
+          iv,
+          Buffer.from(tag, "base64").subarray(0, 12).toString("base64"),
+          ciphertext,
+        ].join(":"),
+      },
+    },
+  });
+  const decipher = spyOn(nodeCrypto, "createDecipheriv");
+  await refuses(() => values(p));
+  expect(decipher).not.toHaveBeenCalled();
+});
+
+// The native layer read is bounded at 1 MiB, below the encoded size of a
+// ciphertext over the 1 MiB parser bound, so this refusal comes from the
+// bounded read; the shared parser bound is discriminated on the legacy path.
+test("an authentic value over the ciphertext bound refuses without decipher", async () => {
+  const p = await project();
+  await fs.writeFile(join(p, PROJECT_ENV_KEY_FILENAME), KEY);
+  await layer(p, "hack.env.default.yaml", {
+    global: {
+      SECRET: sealed({ plaintext: "a".repeat(1024 * 1024 + 1), ivBytes: 12 }),
+    },
+  });
+  const decipher = spyOn(nodeCrypto, "createDecipheriv");
+  await refuses(() => values(p));
+  expect(decipher).not.toHaveBeenCalled();
+});
 
 test("an encrypted empty value preserves presence", async () => {
   const p = await project();

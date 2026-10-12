@@ -7,6 +7,10 @@ import {
   withHandler,
 } from "../cli/command.ts";
 import { optJson, optProject } from "../cli/options.ts";
+import {
+  type ProjectSelector,
+  parseProjectSelectorOption,
+} from "../cli/project-selector.ts";
 import { PROJECT_COMPOSE_FILENAME } from "../constants.ts";
 import { requestDaemonJson } from "../daemon/client.ts";
 import {
@@ -187,11 +191,7 @@ const handleProjects: CommandHandlerFor<typeof spec> = async ({
   }
   const profiler = createOperationTimings();
   const started = performance.now();
-  const requestedProject =
-    typeof args.options.project === "string"
-      ? sanitizeName(args.options.project)
-      : "";
-  const filter = requestedProject.length > 0 ? requestedProject : null;
+  const selector = parseProjectFilter(args.options.project);
   await profiler.measure("cwd_registration_ms", () =>
     touchCwdProjectRegistration({ cwd: ctx.cwd })
   );
@@ -201,7 +201,8 @@ const handleProjects: CommandHandlerFor<typeof spec> = async ({
     summary: args.options.summary === true,
     timings: args.options.timings === true,
     noDaemon: args.options.noDaemon === true,
-    filter,
+    filter: selector?.name ?? null,
+    filterCanonical: selector?.canonical === true,
     includeGlobal: args.options.includeGlobal === true,
     includeUnregistered: args.options.all === true,
     details: args.options.details === true || args.options.meta === true,
@@ -287,10 +288,7 @@ async function applyPrune(opts: {
 const handlePrune: CommandHandlerFor<typeof pruneSpec> = async ({
   args,
 }): Promise<number> => {
-  const filter =
-    typeof args.options.project === "string"
-      ? sanitizeName(args.options.project)
-      : null;
+  const filter = parseProjectFilter(args.options.project)?.name ?? null;
   const includeGlobal = args.options.includeGlobal === true;
   const json = args.options.json === true;
   const registry = await readProjectsRegistry();
@@ -447,13 +445,11 @@ const handleStatus: CommandHandlerFor<typeof statusSpec> = async ({
   ctx,
   args,
 }): Promise<number> => {
-  const filter =
-    typeof args.options.project === "string"
-      ? sanitizeName(args.options.project)
-      : null;
+  const selector = parseProjectFilter(args.options.project);
   await touchCwdProjectRegistration({ cwd: ctx.cwd });
   return await runProjects({
-    filter,
+    filter: selector?.name ?? null,
+    filterCanonical: selector?.canonical === true,
     includeGlobal: args.options.includeGlobal === true,
     includeUnregistered: args.options.all === true,
     details: true,
@@ -466,6 +462,8 @@ export const statusCommand = withHandler(statusSpec, handleStatus);
 
 async function runProjects(opts: {
   readonly filter: string | null;
+  /** Whether `filter` was typed canonically, so the empty-result notice may name it. */
+  readonly filterCanonical?: boolean;
   readonly includeGlobal: boolean;
   readonly includeUnregistered: boolean;
   readonly details: boolean;
@@ -548,11 +546,7 @@ async function runProjects(opts: {
     await display.panel({
       title: "Projects",
       tone: "warn",
-      lines: [
-        opts.filter
-          ? `No projects matched: ${opts.filter}`
-          : "No projects found.",
-      ],
+      lines: [noProjectsMessage(opts)],
     });
     return 0;
   }
@@ -1307,12 +1301,24 @@ function formatRuntimeMeta(opts: {
   };
 }
 
-function sanitizeName(value: string): string {
-  const name = normalizeProjectName(value);
-  if (!name) {
-    throw new CliUsageError("Invalid --project value.");
+/** `--project` filter: refused value-free when malformed, never slugged from a value. */
+function parseProjectFilter(value: unknown): ProjectSelector | null {
+  return typeof value === "string"
+    ? parseProjectSelectorOption({ projectOpt: value })
+    : null;
+}
+
+/** Name the filter only when it was typed canonically; never a derived slug. */
+function noProjectsMessage(opts: {
+  readonly filter: string | null;
+  readonly filterCanonical?: boolean;
+}): string {
+  if (!opts.filter) {
+    return "No projects found.";
   }
-  return name;
+  return opts.filterCanonical === true
+    ? `No projects matched: ${opts.filter}`
+    : "No projects matched the --project filter.";
 }
 
 function filterPruneRegistryProjects(opts: {

@@ -11,13 +11,15 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { type AnyCommandSpec, CliUsageError } from "../src/cli/command.ts";
 import {
-  INVALID_PROJECT_OPTION_MESSAGE,
   parseEnvGetArguments,
   parseExecutionScopeOptions,
-  parseProjectSelectorOption,
 } from "../src/cli/env-arguments.ts";
 import { INVALID_ENV_SELECTION_MESSAGE } from "../src/cli/env-selection.ts";
 import { optEnv, optProject } from "../src/cli/options.ts";
+import {
+  INVALID_PROJECT_OPTION_MESSAGE,
+  parseProjectSelectorOption,
+} from "../src/cli/project-selector.ts";
 import { CLI_SPEC } from "../src/cli/spec.ts";
 import { parseEnvConfigSelection } from "../src/lib/project.ts";
 import {

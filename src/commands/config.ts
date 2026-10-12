@@ -7,6 +7,7 @@ import {
   withHandler,
 } from "../cli/command.ts";
 import { optPath, optProject } from "../cli/options.ts";
+import { resolveRegisteredProjectOption } from "../cli/project-selector.ts";
 import {
   GLOBAL_ONLY_EXTENSION_IDS,
   HACK_PROJECT_DIR_PRIMARY,
@@ -23,11 +24,7 @@ import { isRecord } from "../lib/guards.ts";
 import type { ProjectContext } from "../lib/project.ts";
 import { findProjectContext } from "../lib/project.ts";
 import { assertLegacyProjectDirectory } from "../lib/project-input-selection.ts";
-import { normalizeProjectName } from "../lib/project-name.ts";
-import {
-  resolveRegisteredProjectByName,
-  upsertProjectRegistration,
-} from "../lib/projects-registry.ts";
+import { upsertProjectRegistration } from "../lib/projects-registry.ts";
 import { logger } from "../ui/logger.ts";
 import { configAdoptCommand } from "./config-adopt.ts";
 import { configImportCommand } from "./config-import.ts";
@@ -265,16 +262,9 @@ async function resolveProjectForArgs(opts: {
   }
 
   if (opts.projectOpt !== undefined) {
-    const name = normalizeProjectName(opts.projectOpt);
-    if (!name) {
-      throw new CliUsageError("Invalid --project value.");
-    }
-    const fromRegistry = await resolveRegisteredProjectByName({ name });
-    if (!fromRegistry) {
-      throw new CliUsageError(
-        `Unknown project "${name}". Run 'hack init' in that repo (or run 'hack projects' to see registered projects).`
-      );
-    }
+    const fromRegistry = await resolveRegisteredProjectOption({
+      projectOpt: opts.projectOpt,
+    });
     if (opts.touchRegistration) {
       await touchProjectRegistration(fromRegistry);
     }

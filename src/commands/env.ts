@@ -15,10 +15,10 @@ import {
   parseEnvScopeOption,
   parseExecutionScopeOptions,
   parseMaterializeScopeOption,
-  parseProjectSelectorOption,
 } from "../cli/env-arguments.ts";
 import { resolveRequestedEnvName } from "../cli/env-selection.ts";
 import { optEnv, optJson, optPath, optProject } from "../cli/options.ts";
+import { resolveRegisteredProjectOption } from "../cli/project-selector.ts";
 import { readControlPlaneConfig } from "../control-plane/sdk/config.ts";
 import { updateGlobalConfig } from "../lib/config.ts";
 import { resolveGlobalConfigPath } from "../lib/config-paths.ts";
@@ -81,7 +81,6 @@ import {
   setProjectEnvValue,
   unsetProjectEnvValue,
 } from "../lib/project-env-config.ts";
-import { resolveRegisteredProjectByName } from "../lib/projects-registry.ts";
 import {
   formatSecretStoreDescriptor,
   provisionEncryptedFileKey,
@@ -627,9 +626,6 @@ function normalizeGlobalEncryptedFileConfigPath(input: {
   return resolvedPath;
 }
 
-const UNKNOWN_PROJECT_HINT =
-  "Run 'hack init' in that repo (or run 'hack projects' to see registered projects).";
-
 async function resolveProjectForEnv(opts: {
   readonly ctx: CliContext;
   readonly pathOpt: string | undefined;
@@ -640,22 +636,9 @@ async function resolveProjectForEnv(opts: {
   }
 
   if (opts.projectOpt !== undefined) {
-    const selector = parseProjectSelectorOption({
+    return await resolveRegisteredProjectOption({
       projectOpt: opts.projectOpt,
     });
-    const project = await resolveRegisteredProjectByName({
-      name: selector.name,
-    });
-    if (!project) {
-      // Echo only a name the user typed in canonical form; never a slug
-      // derived from their input.
-      throw new CliUsageError(
-        selector.canonical
-          ? `Unknown project "${selector.name}". ${UNKNOWN_PROJECT_HINT}`
-          : `Unknown project. ${UNKNOWN_PROJECT_HINT}`
-      );
-    }
-    return project;
   }
 
   const startDir = opts.pathOpt

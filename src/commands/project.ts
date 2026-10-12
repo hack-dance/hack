@@ -91,6 +91,7 @@ import {
   optTail,
   optUntil,
 } from "../cli/options.ts";
+import { resolveRegisteredProjectOption } from "../cli/project-selector.ts";
 import { globalUp } from "../commands/global.ts";
 import {
   DEFAULT_GRAFANA_HOST,
@@ -235,12 +236,14 @@ import {
   resolveProjectEnvConfig,
   selectProjectEnvValuesForExecutionTarget,
 } from "../lib/project-env-config.ts";
-import { resolveProjectExecutionTarget } from "../lib/project-execution.ts";
+import {
+  parseRequestedTarget,
+  resolveProjectExecutionTarget,
+} from "../lib/project-execution.ts";
 import {
   assertLegacyProjectDiscovery,
   assertLegacyProjectInputFamily,
 } from "../lib/project-input-selection.ts";
-import { normalizeProjectName } from "../lib/project-name.ts";
 import {
   readProjectRuntimeStateEntry,
   removeProjectRuntimeStateEntry,
@@ -250,7 +253,6 @@ import {
 } from "../lib/project-runtime-state.ts";
 import {
   readProjectsRegistry,
-  resolveRegisteredProjectByName,
   upsertProjectRegistration,
 } from "../lib/projects-registry.ts";
 import {
@@ -708,16 +710,9 @@ async function resolveProjectForArgs(opts: {
   }
 
   if (opts.projectOpt !== undefined) {
-    const name = normalizeProjectName(opts.projectOpt);
-    if (!name) {
-      throw new CliUsageError("Invalid --project value.");
-    }
-    const fromRegistry = await resolveRegisteredProjectByName({ name });
-    if (!fromRegistry) {
-      throw new CliUsageError(
-        `Unknown project "${name}". Run 'hack init' in that repo (or run 'hack projects' to see registered projects).`
-      );
-    }
+    const fromRegistry = await resolveRegisteredProjectOption({
+      projectOpt: opts.projectOpt,
+    });
     if (opts.touchRegistration !== false) {
       await touchProjectRegistration(fromRegistry);
     }
@@ -5085,6 +5080,8 @@ async function handleUp({
   readonly ctx: CliContext;
   readonly args: UpArgs;
 }): Promise<number> {
+  // Refuse a malformed --target before any project or runtime work.
+  parseRequestedTarget({ raw: args.options.target });
   const authored = await tryNativeComposeCommand({
     cwd: ctx.cwd,
     path: args.options.path,
@@ -5639,6 +5636,8 @@ async function handleDown({
   readonly args: DownArgs;
   readonly deferFinalization?: boolean;
 }): Promise<number> {
+  // Refuse a malformed --target before any project or runtime work.
+  parseRequestedTarget({ raw: args.options.target });
   const authored = await tryNativeComposeCommand({
     cwd: ctx.cwd,
     path: args.options.path,
@@ -6610,6 +6609,8 @@ async function handleRestart({
   const expectAttempt = args.options.expectFinalizationAttempt;
   const legacyPid = args.options.expectFrontendPid;
   validateFrontendRecoveryOptions({ recover, expectAttempt, legacyPid });
+  // Refuse a malformed --target before any project or runtime work.
+  parseRequestedTarget({ raw: args.options.target });
   const authored = await tryNativeComposeCommand({
     cwd: ctx.cwd,
     path: args.options.path,

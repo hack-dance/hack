@@ -34,7 +34,19 @@ import {
 import { readLinesFromStream } from "../ui/lines.ts";
 import type { McpCommandAdmission } from "./command-admission.ts";
 import { superviseMcpCommand } from "./command-lifetime.ts";
-import { createMcpOutputBudget } from "./output-budget.ts";
+import {
+  classifyLogCollection,
+  MCP_LOG_BACKEND_ERROR,
+  type McpLogCutoff,
+  type McpLogOutcome,
+  type McpLogStopReason,
+  observeLogStreamEvent,
+  toLogStopReason,
+} from "./logs-contract.ts";
+import {
+  createMcpOutputBudget,
+  MCP_OUTPUT_LIMIT_BYTES,
+} from "./output-budget.ts";
 import {
   captureMcpSessionContext,
   type McpSessionContext,
@@ -136,11 +148,13 @@ type ToolResultPayload = HackCommandResult & {
   readonly data?: unknown;
   /** Present (and false) only on refusals returned before any child spawned. */
   readonly spawned?: false;
-  readonly error?: {
-    readonly code: McpRefusalCode;
-    readonly reason: McpRefusalReason;
-    readonly message: string;
-  };
+  readonly error?:
+    | {
+        readonly code: McpRefusalCode;
+        readonly reason: McpRefusalReason;
+        readonly message: string;
+      }
+    | typeof MCP_LOG_BACKEND_ERROR;
 };
 
 type ProjectArgsResolution =
@@ -205,8 +219,8 @@ const toolOutputSchema = {
   spawned: z.literal(false).optional(),
   error: z
     .object({
-      code: z.enum(["E_USAGE", "E_PROJECT_NOT_FOUND"]),
-      reason: z.enum(MCP_REFUSAL_REASONS),
+      code: z.enum(["E_USAGE", "E_PROJECT_NOT_FOUND", "E_UNEXPECTED"]),
+      reason: z.enum([...MCP_REFUSAL_REASONS, MCP_LOG_BACKEND_ERROR.reason]),
       message: z.string(),
     })
     .optional(),
@@ -700,18 +714,20 @@ function registerTools(opts: {
         ...buildLogSelectionArgs(input),
       ];
 
-      const result = await runHackCommand({
+      const result = await runHackLogCollect({
         context: opts.context,
         signal: extra.signal,
         tool: "hack.project.logs.snapshot",
         args,
+        timeoutMs: DEFAULT_CMD_TIMEOUT_MS,
       });
 
-      return buildToolResult({
+      return buildLogToolResult({
         result,
         data: {
-          events: parseJsonLines(result.stdout),
-          count: countJsonLines(result.stdout),
+          events: result.events,
+          count: result.events.length,
+          cutoff: cutoffOf(result.outcome),
           limits: { tail: input.tail ?? null },
         },
       });
@@ -758,26 +774,21 @@ function registerTools(opts: {
 
       const maxEvents = input.maxEvents ?? DEFAULT_LOG_TAIL_EVENTS;
       const maxMs = input.maxMs ?? DEFAULT_LOG_TAIL_MS;
-      const result = await runHackLogTail({
+      const result = await runHackLogCollect({
         context: opts.context,
         signal: extra.signal,
         tool: "hack.project.logs.tail",
         args,
         maxEvents,
-        maxMs,
+        timeoutMs: maxMs,
       });
 
-      return buildToolResult({
-        result: {
-          ...(result.outputTruncated ? { outputTruncated: true } : {}),
-          command: result.command,
-          exitCode: result.exitCode,
-          stdout: result.stdout,
-          stderr: result.stderr,
-        },
+      return buildLogToolResult({
+        result,
         data: {
           events: result.events,
           count: result.events.length,
+          cutoff: cutoffOf(result.outcome),
           stop_reason: result.stopReason,
           duration_ms: result.durationMs,
           limits: { tail: input.tail ?? null, maxEvents, maxMs },
@@ -1058,9 +1069,47 @@ function buildToolResult(opts: {
 }
 
 /**
+ * Logs tools result. Unlike {@link buildToolResult}, success follows the
+ * collection outcome rather than the child's exit status: a cutoff is `ok`
+ * with `data.cutoff` set (the server stopped the child, so `exitCode` may be
+ * non-zero), and `data` is kept after the byte bound so partial events
+ * survive. A backend failure is `ok: false` with the closed `backend_error`.
+ */
+function buildLogToolResult(opts: {
+  readonly result: HackLogCollection;
+  readonly data: Record<string, unknown>;
+}): CallToolResult {
+  const { result } = opts;
+  const ok =
+    result.outcome.kind === "complete" || result.outcome.kind === "cutoff";
+  const payload: ToolResultPayload = {
+    ok,
+    command: result.command,
+    exitCode: result.exitCode,
+    stdout: result.stdout,
+    stderr: result.stderr,
+    ...(result.outputTruncated ? { outputTruncated: true } : {}),
+    data: opts.data,
+    ...(result.outcome.kind === "backend_error"
+      ? { error: MCP_LOG_BACKEND_ERROR }
+      : {}),
+  };
+
+  return {
+    content: [{ type: "text", text: JSON.stringify(payload, null, 2) }],
+    structuredContent: payload,
+    ...(ok ? {} : { isError: true }),
+  };
+}
+
+function cutoffOf(outcome: McpLogOutcome): McpLogCutoff | null {
+  return outcome.kind === "cutoff" ? outcome.cutoff : null;
+}
+
+/**
  * Typed refusal for a request rejected before any child process exists.
  * `spawned: false` is a guarantee: every caller returns before
- * `runHackCommand`/`runHackLogTail`, so no argv, audit line or mutation occurs.
+ * `runHackCommand`/`runHackLogCollect`, so no argv, audit line or mutation occurs.
  * `stderr` repeats the message for clients reading the earlier contract.
  * The message is the reason's fixed text from {@link MCP_REFUSALS}; only
  * `invalid_arguments` may pass its schema-key-only summary instead.
@@ -1360,24 +1409,34 @@ async function runHackCommand(opts: {
     : await work();
 }
 
-async function runHackLogTail(opts: {
-  readonly context: McpSessionContext;
-  readonly signal: AbortSignal;
-  readonly tool: string;
-  readonly args: readonly string[];
-  readonly maxEvents: number;
-  readonly maxMs: number;
-}): Promise<{
+type HackLogCollection = {
   readonly outputTruncated?: boolean;
   readonly command: string;
   readonly exitCode: number;
   readonly stdout: string;
   readonly stderr: string;
   readonly events: readonly Record<string, unknown>[];
-  readonly stopReason: string;
+  readonly stopReason: McpLogStopReason;
   readonly durationMs: number;
-}> {
-  const work = async () => {
+  readonly outcome: McpLogOutcome;
+};
+
+/**
+ * Run `hack logs --json` and collect its stream events under the contract in
+ * `logs-contract.ts`. `maxEvents` counts `type: "log"` events only; `timeoutMs`
+ * bounds the whole collection; the shared byte budget cuts on a UTF-8 code
+ * point boundary. Nothing outlives the call: a later call, in this session or
+ * a reconnected one, starts a new backend stream (no cursor, no replay).
+ */
+async function runHackLogCollect(opts: {
+  readonly context: McpSessionContext;
+  readonly signal: AbortSignal;
+  readonly tool: string;
+  readonly args: readonly string[];
+  readonly maxEvents?: number;
+  readonly timeoutMs: number;
+}): Promise<HackLogCollection> {
+  const work = async (): Promise<HackLogCollection> => {
     const invocation = await resolveHackInvocation(opts.context);
     opts.signal.throwIfAborted();
     const cmd = [invocation.bin, ...invocation.args, ...opts.args];
@@ -1390,39 +1449,50 @@ async function runHackLogTail(opts: {
       stderr: "pipe",
     });
 
-    const { maxEvents, maxMs } = opts;
+    const { maxEvents } = opts;
     const start = Date.now();
 
     const events: Record<string, unknown>[] = [];
     const stdoutLines: string[] = [];
     const stderrLines: string[] = [];
 
-    let stopReason = "eof";
+    let stopReason: McpLogStopReason = "eof";
+    let stopped = false;
+    let logCount = 0;
+    let backendFailureObserved = false;
 
     const lifetime = superviseMcpCommand({
       proc,
       signal: opts.signal,
-      timeoutMs: maxMs,
+      timeoutMs: opts.timeoutMs,
       onStop: (reason) => {
-        stopReason = reason;
+        stopped = true;
+        stopReason = toLogStopReason(reason);
       },
     });
 
     const output = createMcpOutputBudget({
+      codePointSafe: true,
       onLimit: () => lifetime.stop("output_limit"),
     });
+    /** Record one stream event; true once the log-event bound is reached. */
+    const recordEvent = (event: Record<string, unknown>): boolean => {
+      events.push(event);
+      const observed = observeLogStreamEvent(event);
+      // Events after a server-initiated stop describe that stop.
+      if (observed.backendFailure && !stopped) {
+        backendFailureObserved = true;
+      }
+      if (observed.isLog) {
+        logCount += 1;
+      }
+      return maxEvents !== undefined && logCount >= maxEvents;
+    };
     const stdoutTask = (async () => {
       for await (const line of readLinesFromStream(output.wrap(proc.stdout))) {
         stdoutLines.push(line);
-        const trimmed = line.trim();
-        if (trimmed.length === 0) {
-          continue;
-        }
-        const parsed = parseJsonLine(trimmed);
-        if (parsed) {
-          events.push(parsed);
-        }
-        if (events.length >= maxEvents) {
+        const parsed = parseJsonLine(line.trim());
+        if (parsed && recordEvent(parsed)) {
           lifetime.stop("max_events");
           break;
         }
@@ -1443,7 +1513,6 @@ async function runHackLogTail(opts: {
     }
 
     if (output.exceeded()) {
-      exitCode = 1;
       stderrLines.push(
         "MCP output exceeded the 8 MiB capture limit; use the CLI for full output."
       );
@@ -1465,6 +1534,16 @@ async function runHackLogTail(opts: {
       ...(output.exceeded() ? { outputTruncated: true } : {}),
       stopReason,
       durationMs: Date.now() - start,
+      outcome: classifyLogCollection({
+        stopReason,
+        exitCode,
+        backendFailureObserved,
+        limits: {
+          ...(maxEvents === undefined ? {} : { maxEvents }),
+          timeMs: opts.timeoutMs,
+          bytes: MCP_OUTPUT_LIMIT_BYTES,
+        },
+      }),
     };
   };
   return opts.context.admission
@@ -1491,17 +1570,6 @@ function parseJson(text: string): Record<string, unknown> | null {
   }
 }
 
-function parseJsonLines(text: string): Record<string, unknown>[] {
-  const events: Record<string, unknown>[] = [];
-  for (const line of text.split("\n")) {
-    const parsed = parseJsonLine(line.trim());
-    if (parsed) {
-      events.push(parsed);
-    }
-  }
-  return events;
-}
-
 function parseJsonLine(line: string): Record<string, unknown> | null {
   if (line.length === 0) {
     return null;
@@ -1512,16 +1580,6 @@ function parseJsonLine(line: string): Record<string, unknown> | null {
   } catch {
     return null;
   }
-}
-
-function countJsonLines(text: string): number {
-  let count = 0;
-  for (const line of text.split("\n")) {
-    if (parseJsonLine(line.trim())) {
-      count += 1;
-    }
-  }
-  return count;
 }
 
 function joinLines(lines: readonly string[]): string {

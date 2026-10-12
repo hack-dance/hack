@@ -4,11 +4,42 @@ use super::{compose, yaml};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
+/// Hack-owned public runtime host metadata keys (the CLI's runtime host metadata
+/// contract). Their values are derived from the effective route hostnames, branch and
+/// HTTPS ingress port, so a hostname change necessarily changes them. Like the route
+/// hostnames they are excluded from the fingerprint; every other literal still counts.
+const RUNTIME_METADATA_KEYS: [&str; 10] = [
+    "HACK_ALIAS_HOST",
+    "HACK_ALIAS_URL",
+    "HACK_BRANCH",
+    "HACK_COMPOSE_PROJECT",
+    "HACK_DEV_HOST",
+    "HACK_DEV_URL",
+    "HACK_RUNTIME_METADATA",
+    "HACK_SERVICE_NAME",
+    "HACK_SERVICE_URL",
+    "HACK_SERVICE_URLS",
+];
+
+fn without_runtime_metadata(service: &mut Value) {
+    let reserved = |key: &str| RUNTIME_METADATA_KEYS.contains(&key);
+    match service.get_mut("environment") {
+        Some(Value::Object(environment)) => environment.retain(|key, _| !reserved(key)),
+        Some(Value::Array(environment)) => environment.retain(|entry| {
+            !entry
+                .as_str()
+                .is_some_and(|text| reserved(text.split_once('=').map_or(text, |(key, _)| key)))
+        }),
+        _ => {}
+    }
+}
+
 fn masked(bytes: &[u8]) -> Option<Value> {
     let mut value = yaml::parse(bytes).ok()?;
     let services = value.get_mut("services")?.as_object_mut()?;
     let mut routed = false;
     for service in services.values_mut() {
+        without_runtime_metadata(service);
         let Some(labels) = service.get_mut("labels") else {
             continue;
         };
@@ -90,5 +121,58 @@ mod tests {
         let after = b"services: {web: {labels: ['caddy=b.hack', 'caddy.reverse_proxy={{upstreams 80}}', 'caddy.tls=internal']}}";
         assert_eq!(fingerprint(before, before), fingerprint(after, after));
         assert!(fingerprint(b"services: {web: {image: alpine}}", after).is_none());
+    }
+
+    #[test]
+    fn runtime_metadata_follows_hostnames_but_other_environment_still_counts() {
+        let expected = fingerprint(BASE.as_bytes(), BASE.as_bytes()).unwrap();
+        let metadata = |host: &str, port: &str| {
+            BASE.replace("caddy: web.hack", &format!("caddy: {host}"))
+                .replace(
+                    "environment: {TOKEN: literal}",
+                    &format!(
+                        "environment: {{TOKEN: literal, HACK_DEV_URL: 'https://{host}{port}', HACK_SERVICE_URLS: '[\"https://{host}{port}\"]', HACK_RUNTIME_METADATA: '{{\"version\":1}}', HACK_BRANCH: ''}}"
+                    ),
+                )
+        };
+        for normalized in [
+            metadata("web.hack", ""),
+            metadata("web.v5.hack.gy", ""),
+            metadata("web.hack", ":8443"),
+        ] {
+            assert_eq!(
+                fingerprint(BASE.as_bytes(), normalized.as_bytes()),
+                Some(expected.clone())
+            );
+        }
+        let list = |url: &str| {
+            format!(
+                "services: {{web: {{environment: ['TOKEN=literal', 'HACK_DEV_URL={url}', HACK_SERVICE_NAME], labels: ['caddy=a.hack', 'caddy.reverse_proxy={{{{upstreams 80}}}}', 'caddy.tls=internal']}}}}"
+            )
+        };
+        let plain = list("https://a.hack");
+        assert_eq!(
+            fingerprint(plain.as_bytes(), plain.as_bytes()),
+            fingerprint(
+                plain.as_bytes(),
+                list("https://b.hack:8443")
+                    .replace("caddy=a.hack", "caddy=b.hack")
+                    .as_bytes()
+            )
+        );
+        for changed in [
+            metadata("web.hack", "").replace("TOKEN: literal", "TOKEN: different"),
+            metadata("web.hack", "").replace("HACK_BRANCH", "HACK_OTHER"),
+            plain.replace("TOKEN=literal", "TOKEN=different"),
+        ] {
+            assert_ne!(
+                fingerprint(BASE.as_bytes(), changed.as_bytes()),
+                Some(expected.clone())
+            );
+            assert_ne!(
+                fingerprint(plain.as_bytes(), changed.as_bytes()),
+                fingerprint(plain.as_bytes(), plain.as_bytes())
+            );
+        }
     }
 }

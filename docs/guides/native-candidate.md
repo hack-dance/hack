@@ -470,6 +470,11 @@ New normalized shared-source graphs also capture a separate hostname-change
 contract. A retaining restart can change only the literal hostnames of already
 routed services: the service set, upstream ports, TLS settings, probes, commands,
 environment declarations, images, mounts, networks and volumes must stay the same.
+The one exception is Hack's reserved
+[runtime host metadata](../cli.md#runtime-host-metadata) keys (`HACK_BRANCH`,
+`HACK_COMPOSE_PROJECT`, `HACK_DEV_*`, `HACK_ALIAS_*`, `HACK_SERVICE_*` and
+`HACK_RUNTIME_METADATA`): their public values are derived from the hostnames, so
+the fingerprint ignores them. A metadata change without a hostname change still refuses.
 Both original and normalized Compose declarations are checked; only fingerprints
 are retained. Changed dependency-cache inputs still refuse. The old ownership
 plan and named data identities remain fixed, while normalized input provenance and

@@ -3,6 +3,7 @@ import { YAML } from "bun";
 
 import { isRecord } from "../src/lib/guards.ts";
 import {
+  buildRuntimeHostMetadataEnvironments,
   buildRuntimeHostMetadataOverride,
   type RuntimeHostMetadata,
 } from "../src/lib/runtime-host-metadata.ts";
@@ -108,6 +109,94 @@ test("runtime metadata uses every effective public URL for a branch instance", (
     "https://feature-x.demo.hack",
     "https://feature-x.demo.hack.gy",
   ]);
+});
+
+test("Compose runtime metadata override bytes stay portless and unchanged", () => {
+  const override = buildRuntimeHostMetadataOverride({
+    composeYamls: [
+      [
+        "services:",
+        "  web:",
+        "    image: app",
+        "    labels:",
+        '      caddy: "demo.hack"',
+        "  worker:",
+        "    image: app",
+        "    environment: [HACK_BRANCH]",
+        "",
+      ].join("\n"),
+    ],
+    branch: null,
+    devHost: "demo.hack",
+    aliasHost: null,
+    composeProject: "demo",
+  });
+  const document =
+    '"{\\"version\\":1,\\"branch\\":null,\\"composeProject\\":\\"demo\\",\\"hosts\\":{\\"dev\\":\\"demo.hack\\",\\"alias\\":null},\\"services\\":{\\"web\\":{\\"urls\\":[\\"https://demo.hack\\"]}}}"';
+  expect(override).toBe(
+    [
+      "services:",
+      "  web:",
+      "    environment:",
+      '      HACK_BRANCH: ""',
+      "      HACK_DEV_HOST: demo.hack",
+      "      HACK_DEV_URL: https://demo.hack",
+      "      HACK_COMPOSE_PROJECT: demo",
+      `      HACK_RUNTIME_METADATA: ${document}`,
+      "      HACK_SERVICE_NAME: web",
+      '      HACK_SERVICE_URLS: "[\\"https://demo.hack\\"]"',
+      "      HACK_SERVICE_URL: https://demo.hack",
+      "  worker:",
+      "    environment:",
+      "      HACK_DEV_HOST: demo.hack",
+      "      HACK_DEV_URL: https://demo.hack",
+      "      HACK_COMPOSE_PROJECT: demo",
+      `      HACK_RUNTIME_METADATA: ${document}`,
+      "      HACK_SERVICE_NAME: worker",
+      '      HACK_SERVICE_URLS: "[]"',
+      "",
+    ].join("\n")
+  );
+});
+
+test("shared metadata URLs carry a non-default HTTPS port", () => {
+  const services = new Map([
+    [
+      "web",
+      {
+        hosts: ["feature-x.demo.hack", "feature-x.demo.hack"],
+        declaredEnvironmentKeys: new Set<string>(),
+      },
+    ],
+  ]);
+  for (const [httpsPort, suffix] of [
+    [undefined, ""],
+    [null, ""],
+    [443, ""],
+    [8443, ":8443"],
+  ] as const) {
+    const web = buildRuntimeHostMetadataEnvironments({
+      services,
+      branch: "feature-x",
+      devHost: "demo.hack",
+      aliasHost: "demo.hack.gy",
+      composeProject: "demo--feature-x",
+      httpsPort,
+    }).get("web");
+    expect(web).toMatchObject({
+      HACK_DEV_HOST: "feature-x.demo.hack",
+      HACK_DEV_URL: `https://feature-x.demo.hack${suffix}`,
+      HACK_ALIAS_HOST: "feature-x.demo.hack.gy",
+      HACK_ALIAS_URL: `https://feature-x.demo.hack.gy${suffix}`,
+      HACK_SERVICE_URL: `https://feature-x.demo.hack${suffix}`,
+      HACK_SERVICE_URLS: JSON.stringify([
+        `https://feature-x.demo.hack${suffix}`,
+      ]),
+    });
+    expect(
+      readRuntimeMetadata({ environment: web ?? {} }).services.web?.urls
+    ).toEqual([`https://feature-x.demo.hack${suffix}`]);
+  }
 });
 
 function readServiceEnvironment(opts: {

@@ -2192,6 +2192,60 @@ test("startup prepares mapping storage before input and plan review", async () =
   expect(await startNativeProject(opts)).toBe(0);
 });
 
+/** Read-only native answers for a branch restart preflight of the run 1…1. */
+async function restartPreflightInvoke({
+  args,
+}: {
+  readonly args: readonly string[];
+}): Promise<unknown> {
+  if (args[0] === "project") {
+    expect(args).toContain("--branch");
+    return {
+      plan: { namespace: "b".repeat(64), compose_sha256: "d".repeat(64) },
+    };
+  }
+  if (args[1] === "status") {
+    return { network: "internet" };
+  }
+  if (args[1] === "probe") {
+    return { admitted: true };
+  }
+  if (args[1] === "inspect") {
+    return {
+      journal_incomplete: false,
+      receipt: {
+        run: "1".repeat(32),
+        owner: "c".repeat(32),
+        namespace: "b".repeat(64),
+        plan_id: "a".repeat(64),
+        phase: "ready-observed",
+        resources: {
+          "container:web": {
+            kind: "container",
+            key: "web",
+            id: "f".repeat(64),
+          },
+        },
+      },
+    };
+  }
+  if (args[1] === "run-selection") {
+    expect(args[args.indexOf("--service") + 1]).toBe("web");
+    return {
+      ok: true,
+      run: "1".repeat(32),
+      owner: "c".repeat(32),
+      namespace: "b".repeat(64),
+      plan: "a".repeat(64),
+      service: "web",
+      container: "f".repeat(64),
+      boot: "owned-boot",
+      generation: "e".repeat(64),
+    };
+  }
+  throw new Error("unexpected preflight effect");
+}
+
 test("startup and restart review use identical branch routes after adaptation", async () => {
   const { opts } = await fixture(false);
   const prepare = opts.dependencies.prepare!;
@@ -2253,54 +2307,7 @@ test("startup and restart review use identical branch routes after adaptation", 
       prepare: opts.dependencies.prepare,
       review: opts.dependencies.review,
       dependencies: async () => [],
-      invoke: async ({ args }) => {
-        if (args[0] === "project") {
-          expect(args).toContain("--branch");
-          return {
-            plan: { namespace: "b".repeat(64), compose_sha256: "d".repeat(64) },
-          };
-        }
-        if (args[1] === "status") {
-          return { network: "internet" };
-        }
-        if (args[1] === "probe") {
-          return { admitted: true };
-        }
-        if (args[1] === "inspect") {
-          return {
-            journal_incomplete: false,
-            receipt: {
-              run: "1".repeat(32),
-              owner: "c".repeat(32),
-              namespace: "b".repeat(64),
-              plan_id: "a".repeat(64),
-              phase: "ready-observed",
-              resources: {
-                "container:web": {
-                  kind: "container",
-                  key: "web",
-                  id: "f".repeat(64),
-                },
-              },
-            },
-          };
-        }
-        if (args[1] === "run-selection") {
-          expect(args[args.indexOf("--service") + 1]).toBe("web");
-          return {
-            ok: true,
-            run: "1".repeat(32),
-            owner: "c".repeat(32),
-            namespace: "b".repeat(64),
-            plan: "a".repeat(64),
-            service: "web",
-            container: "f".repeat(64),
-            boot: "owned-boot",
-            generation: "e".repeat(64),
-          };
-        }
-        throw new Error("unexpected preflight effect");
-      },
+      invoke: restartPreflightInvoke,
     },
   });
   expect(observed).toHaveLength(2);
@@ -2311,6 +2318,72 @@ test("startup and restart review use identical branch routes after adaptation", 
     JSON.parse(observed[0]?.normalizedComposeJson ?? "{}").services.web.labels
       .caddy
   ).toBe("feature-a.app.hack.local, feature-a.app.hack.gy");
+});
+
+test("startup and restart review identical branch runtime metadata; legacy runs get none", async () => {
+  const { opts } = await fixture(false);
+  const review = opts.dependencies.review!;
+  const scope = { ...opts.scope, branch: "feature-a" };
+  await writeFile(opts.composeFile, "services: {}\n");
+  await writeFile(
+    join(scope.projectDir, "hack.config.json"),
+    JSON.stringify({ dev_host: "app.hack.local" })
+  );
+  const selection = {
+    devHost: "app.hack.local",
+    aliasHost: null,
+    projectName: "app",
+  };
+  const observed: string[] = [];
+  opts.dependencies.review = async (request) => {
+    observed.push(request.input.normalizedComposeJson);
+    return await review(request);
+  };
+  expect(
+    await startNativeProject({
+      ...opts,
+      scope,
+      https: httpsSelection,
+      runtimeMetadata: selection,
+    })
+  ).toBe(0);
+  const run: NativeProjectRun = {
+    run: "1".repeat(32),
+    owner: "c".repeat(32),
+    namespace: "b".repeat(64),
+    planId: "a".repeat(64),
+    effectiveEnvName: null,
+    profiles: [],
+    aws: null,
+  };
+  for (const recorded of [{ ...run, runtimeMetadata: true as const }, run]) {
+    await preflightNativeRestart({
+      runtime: opts.runtime,
+      scope,
+      composeFile: opts.composeFile,
+      runtimeMetadata: selection,
+      httpsPort: httpsSelection.httpsPort,
+      run: recorded,
+      dependencies: {
+        prepare: opts.dependencies.prepare,
+        review: opts.dependencies.review,
+        dependencies: async () => [],
+        invoke: restartPreflightInvoke,
+      },
+    });
+  }
+  expect(observed).toHaveLength(3);
+  expect(observed[1]).toBe(observed[0]);
+  const web = JSON.parse(observed[0] ?? "{}").services.web.environment;
+  expect(web).toMatchObject({
+    HACK_BRANCH: "feature-a",
+    HACK_COMPOSE_PROJECT: "app--feature-a",
+    HACK_DEV_HOST: "feature-a.app.hack.local",
+    HACK_DEV_URL: "https://feature-a.app.hack.local:8443",
+    HACK_SERVICE_NAME: "web",
+    HACK_SERVICE_URLS: "[]",
+  });
+  expect(observed[2]).not.toContain("HACK_");
 });
 
 test("retained startup selects legacy labels only after runtime admission and before review", async () => {
@@ -2589,4 +2662,101 @@ test("later graph, temporary, hook and acknowledgement failures cannot mask HTTP
     expect(acknowledged).toBe(phase === "temporary");
     expect(events).not.toContain("ready");
   }
+});
+
+const runtimeMetadata = {
+  devHost: "example.com",
+  aliasHost: null,
+  projectName: "demo",
+};
+function stubHttpsLease(
+  opts: Awaited<ReturnType<typeof httpsFixture>>["opts"]
+) {
+  opts.dependencies.https = async (selection) => ({
+    identity: leaseIdentity(selection),
+    caPath: "/synthetic/root.crt",
+    httpsPort: 8443,
+    exited: new Promise(() => {}),
+    verifyHostname: async () => ({ statusCode: 200 }),
+    releaseAfterCleanup: async () => {},
+  });
+}
+test("native up reviews runtime host metadata with the HTTPS port and records it", async () => {
+  const { opts } = await httpsFixture();
+  stubHttpsLease(opts);
+  const review = opts.dependencies.review!;
+  let reviewed: Record<string, unknown> | undefined;
+  opts.dependencies.review = async (request) => {
+    reviewed = JSON.parse(request.input.normalizedComposeJson).services.web
+      .environment;
+    return await review(request);
+  };
+  let saved: NativeProjectRun | undefined;
+  opts.dependencies.save = async ({ run }) => {
+    saved = run;
+  };
+  expect(
+    await startNativeProject({
+      ...opts,
+      https: httpsSelection,
+      runtimeMetadata,
+    })
+  ).toBe(0);
+  expect(reviewed).toMatchObject({
+    HACK_BRANCH: "",
+    HACK_COMPOSE_PROJECT: "demo",
+    HACK_DEV_HOST: "example.com",
+    HACK_DEV_URL: "https://example.com:8443",
+    HACK_SERVICE_NAME: "web",
+    HACK_SERVICE_URL: "https://web.example.com:8443",
+    HACK_SERVICE_URLS: JSON.stringify(["https://web.example.com:8443"]),
+  });
+  expect(JSON.parse(String(reviewed?.HACK_RUNTIME_METADATA))).toEqual({
+    version: 1,
+    branch: null,
+    composeProject: "demo",
+    hosts: { dev: "example.com", alias: null },
+    services: { web: { urls: ["https://web.example.com:8443"] } },
+  });
+  expect(saved?.runtimeMetadata).toBe(true);
+});
+test("runtime host metadata that differs from reviewed routes refuses before serving", async () => {
+  const { opts, events } = await httpsFixture();
+  stubHttpsLease(opts);
+  const prepare = opts.dependencies.prepare!;
+  opts.dependencies.prepare = async (request) => {
+    const input = await prepare(request);
+    return {
+      ...input,
+      normalizedComposeJson: input.normalizedComposeJson.replace(
+        "web.example.com",
+        "other.example.com"
+      ),
+    };
+  };
+  opts.dependencies.serve = async () => {
+    events.push("serve");
+    return 0;
+  };
+  await expect(
+    startNativeProject({ ...opts, https: httpsSelection, runtimeMetadata })
+  ).rejects.toThrow("Native runtime metadata");
+  expect(events).not.toContain("serve");
+  expect(events).toContain("cleanup");
+});
+test("startup without a runtime metadata selection leaves the reviewed graph unchanged", async () => {
+  const { opts } = await fixture(false);
+  const review = opts.dependencies.review!;
+  let reviewed = "";
+  opts.dependencies.review = async (request) => {
+    reviewed = request.input.normalizedComposeJson;
+    return await review(request);
+  };
+  let saved: NativeProjectRun | undefined;
+  opts.dependencies.save = async ({ run }) => {
+    saved = run;
+  };
+  expect(await startNativeProject(opts)).toBe(0);
+  expect(reviewed).not.toContain("HACK_");
+  expect(saved && Object.hasOwn(saved, "runtimeMetadata")).toBe(false);
 });

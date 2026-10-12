@@ -4908,6 +4908,7 @@ async function handleNativeUp({
     projectName,
     branch,
   });
+  const devHost = await resolveRuntimeDevHost({ project, branch });
   const startup: Parameters<typeof startNativeProject>[0] = {
     runtime: native,
     scope: {
@@ -4931,6 +4932,11 @@ async function handleNativeUp({
           region: process.env.HACK_NATIVE_AWS_REGION,
         }
       : undefined,
+    runtimeMetadata: {
+      devHost,
+      aliasHost: resolveBranchAliasHost({ devHost, cfg }),
+      projectName,
+    },
     before: async (input) => {
       const lifecycle = await runLifecycleUpBeforeAndProcesses({
         title: "Lifecycle (native up before)",
@@ -5024,6 +5030,8 @@ async function handleNativeUp({
         adaptationFile: startup.adaptationFile,
         dependencyFile: startup.dependencyFile,
         allowedHosts: startup.allowedHosts,
+        runtimeMetadata: startup.runtimeMetadata,
+        httpsPort: startup.https?.httpsPort ?? null,
         run,
         cleanedRetry,
         recoverStopped: recovery !== undefined,

@@ -36,11 +36,19 @@ import {
   normalizeNativeProfiles,
 } from "./native-project-run.ts";
 import { readNativeSelection } from "./native-project-selection.ts";
-import { prepareNativeProjectServices } from "./native-project-start.ts";
+import {
+  nativeRuntimeMetadataSelected,
+  prepareNativeProjectServices,
+} from "./native-project-start.ts";
 import {
   invokeNativeRuntime,
   type NativeRuntimeSelection,
 } from "./native-runtime-client.ts";
+import {
+  applyNativeRuntimeMetadata,
+  type NativeRuntimeMetadataSelection,
+  verifyNativeRuntimeMetadataRoutes,
+} from "./native-runtime-metadata.ts";
 
 const DEFAULTS = {
   prepare: prepareNativeProjectInput,
@@ -312,10 +320,17 @@ export async function preflightNativeRestart(opts: {
   readonly adaptationFile?: string;
   readonly dependencyFile?: string;
   readonly allowedHosts?: readonly string[];
+  /** Same public metadata selection the replacement startup will review. */
+  readonly runtimeMetadata?: NativeRuntimeMetadataSelection;
+  readonly httpsPort?: number | null;
   readonly dependencies?: Partial<typeof DEFAULTS>;
 }) {
   const deps = { ...DEFAULTS, ...opts.dependencies };
   const selected = nativeRestartSelection({ run: opts.run });
+  const runtimeMetadata = nativeRuntimeMetadataSelected({
+    selection: opts.runtimeMetadata,
+    restore: opts.run,
+  });
   const stoppedRetry = await stoppedRestartMode({
     ...opts,
     invoke: deps.invoke,
@@ -363,6 +378,15 @@ export async function preflightNativeRestart(opts: {
   if (selected.aws) {
     input = (await deps.aws({ input, ...selected.aws })).input;
   }
+  const metadata = runtimeMetadata
+    ? applyNativeRuntimeMetadata({
+        input,
+        selection: runtimeMetadata,
+        branch: reviewIdentity ? reviewIdentity.branch : opts.scope.branch,
+        httpsPort: opts.httpsPort ?? null,
+      })
+    : undefined;
+  input = metadata?.input ?? input;
   const specs = prepareNativeProjectServices(
     input,
     opts.dependencyFile !== undefined
@@ -428,6 +452,12 @@ export async function preflightNativeRestart(opts: {
         throw new Error(
           "Native restart configuration changed; the current graph was not stopped."
         );
+      }
+      if (metadata) {
+        verifyNativeRuntimeMetadataRoutes({
+          plan: review.report.plan,
+          routes: metadata.routes,
+        });
       }
       if (nativeReviewNeedsCompatibility({ saved: opts.run, review })) {
         await verifyNativeSourceCompatibility({

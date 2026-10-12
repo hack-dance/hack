@@ -388,9 +388,11 @@ deliberately marks that exact Compose volume disposable. Hack deliberately does 
 
 ### Runtime host metadata
 
-Containers started by `hack up`, `hack restart`, and `hack run` receive the effective instance and
-public-route metadata. This keeps server-generated links, OAuth callbacks, webhooks, and other
-browser-facing URLs isolated when the same project runs in multiple worktrees.
+Containers started by `hack up`, `hack restart`, and `hack run` for a `.hack/docker-compose.yml`
+project receive the effective instance and public-route metadata. This applies to the default
+Compose backend and to the native backend (`HACK_RUNTIME_BACKEND=native`). It keeps
+server-generated links, OAuth callbacks, webhooks, and other browser-facing URLs isolated when the
+same project runs in multiple worktrees. Both backends emit the same keys and document shape.
 
 | Variable | Value |
 | --- | --- |
@@ -432,10 +434,28 @@ over generated metadata for backward compatibility. Existing containers receive 
 their next `hack up` or `hack restart`; `hack exec` observes the values already stored in the running
 container.
 
-Hack materializes this contract in generated, machine-local Compose overrides. Do not edit or
-commit `.hack/.internal/compose.runtime.override.yml` or
+With the Compose backend, Hack materializes this contract in generated, machine-local Compose
+overrides. Do not edit or commit `.hack/.internal/compose.runtime.override.yml` or
 `.hack/.branch/compose.<branch>.runtime.override.yml`; runtime commands refresh them and Hack's
 managed `.hack/.gitignore` covers them.
+
+With the native backend, foreground `hack up` and `hack restart` add the same values to the
+normalized Compose input that native review checks. They are public container environment, not
+private managed values, so `hack exec` and native `hack run` see them too. The service URLs come
+from the reviewed route labels, and startup refuses before serving if they differ from the reviewed
+route plan. When a native HTTPS frontend is selected with a port other than 443
+(`HACK_NATIVE_HTTPS_PORT`), `HACK_DEV_URL`, `HACK_ALIAS_URL` and every service URL include that
+port; host variables never do. Native-specific limits:
+
+- A graph whose data was retained by an earlier release is restored exactly as it was admitted and
+  does not gain these variables. It receives them after it is next started without retained data.
+- These values are part of the retained graph's reviewed input. A retaining restart that changes
+  only route hostnames (for example a domain migration) remains supported, because the metadata
+  keys are excluded from the hostname-change fingerprint. Changing the native HTTPS port alone
+  changes the metadata without a hostname change, so the retained graph refuses to start with the
+  new port; start it with its original port.
+- Authored `.hack/hack.project.json` configuration does not deliver these variables yet, on either
+  backend.
 
 Linked worktrees also inherit the project secret key automatically from the primary checkout
 through the shared git common dir, so you don't need to copy `.hack.secret.key` by hand. Set

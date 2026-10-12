@@ -1310,6 +1310,33 @@ fn execution_dependency_compiler_preserves_review_conditions_and_refuses_invalid
 }
 
 #[test]
+fn execution_dependency_compiler_refuses_readiness_for_inactive_or_unknown_services() {
+    use project::execution::{Condition, Graph};
+    use std::collections::BTreeMap;
+    let fixture = Fixture::new(
+        "services:\n  web:\n    image: alpine:3.21\n  tools:\n    image: alpine:3.21\n    profiles: [debug]\n",
+    );
+    let plan = fixture.plan().plan;
+    assert!(plan.enrollment_compatible);
+    assert!(plan.services["web"].active);
+    assert!(!plan.services["tools"].active);
+    let active = BTreeMap::from([("web".into(), Condition::Started)]);
+    let graph = Graph::from_plan(&plan, &active).unwrap();
+    assert_eq!(graph.services.keys().collect::<Vec<_>>(), ["web"]);
+    for extra in ["tools", "ghost"] {
+        let mut goals = active.clone();
+        goals.insert(extra.into(), Condition::Started);
+        let refusal = Graph::from_plan(&plan, &goals).unwrap_err();
+        assert_eq!(refusal.code, "graph_readiness", "{extra}");
+        assert!(
+            refusal.message.contains("inactive or unknown"),
+            "{extra}: {}",
+            refusal.message
+        );
+    }
+}
+
+#[test]
 fn executable_inputs_preserve_argv_and_resolve_only_explicit_values() {
     use project::inputs;
     use std::collections::BTreeMap;

@@ -16,6 +16,17 @@ export function normalizeProjectName(input: string): string | null {
   return name.length > 0 ? name : null;
 }
 
+/** A canonical project name: the fixed point of `normalizeProjectName`. */
+export const PROJECT_NAME_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+
+/**
+ * A project selector a user may type: a canonical name or a legacy alias
+ * spelling (ASCII letters, digits, `-`, `_`, space and `/`). Anything else,
+ * including any argument containing `=`, may be a pasted value and must be
+ * refused with text that does not include it.
+ */
+export const PROJECT_SELECTOR_PATTERN = /^[A-Za-z0-9_ /-]+$/;
+
 export class AmbiguousProjectNameError extends Error {
   constructor(name: string) {
     super(

@@ -442,6 +442,36 @@ function assertReceiptState(opts: {
 }
 
 /**
+ * Run one bounded resolver create/remove through the caller's existing sudo
+ * ticket. The script accepts only direct children of /etc/resolver, creates
+ * without clobbering and removes only an exact identity and content match.
+ * Create returns the new file's "dev:ino" identity; remove returns "1" or "0".
+ */
+export async function runPrivilegedResolverOperation(opts: {
+  readonly action: "create" | "remove";
+  readonly file:
+    | NativeDnsOwnedFile
+    | { readonly path: string; readonly content: string };
+  readonly runPrivileged?: NativeDnsCommandRunner;
+}): Promise<string> {
+  const runPrivileged = opts.runPrivileged ?? defaultPrivilegedRunner;
+  const result = await runPrivileged([
+    "sudo",
+    "-n",
+    "/usr/bin/python3",
+    "-I",
+    "-S",
+    "-c",
+    PRIVILEGED_RESOLVER_SCRIPT,
+    opts.action,
+    opts.file.path,
+    opts.file.content,
+    "identity" in opts.file ? opts.file.identity : "",
+  ]);
+  return assertSuccess(result, `Resolver ${opts.action}`);
+}
+
+/**
  * Build the effect boundary for a previously validated native DNS plan. The
  * caller owns authorization, fresh inspection, service restart and cache flush.
  */
@@ -458,20 +488,11 @@ export function createNativeDnsHostDependencies(
       | NativeDnsOwnedFile
       | { readonly path: string; readonly content: string }
   ): Promise<string> {
-    const result = await runPrivileged([
-      "sudo",
-      "-n",
-      "/usr/bin/python3",
-      "-I",
-      "-S",
-      "-c",
-      PRIVILEGED_RESOLVER_SCRIPT,
+    return await runPrivilegedResolverOperation({
       action,
-      file.path,
-      file.content,
-      "identity" in file ? file.identity : "",
-    ]);
-    return assertSuccess(result, `Resolver ${action}`);
+      file,
+      runPrivileged,
+    });
   }
 
   return {

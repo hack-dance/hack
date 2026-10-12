@@ -1274,9 +1274,11 @@ browser session works.
 The native candidate refuses `hack global install`: that command owns the
 Docker global stack and could change installed v4 routing. For a dedicated
 custom suffix alongside v4, run `hack global dns preview --domain v5.hack.gy`
-and then `hack global dns activate --domain v5.hack.gy`. Omit `--domain` to use
-the configured global `default_domain`; changing that shared setting also
-changes the installed v4 CLI's default. Preview is read-only;
+and then `hack global dns activate --domain v5.hack.gy`. Without `--domain`,
+these commands use the global `default_domain` only when it is a custom suffix;
+changing that shared setting also changes the installed v4 CLI's default. With a
+built-in default such as `hack.local`, they stop with a usage message that names
+`hack doctor --fix` and the rollback command below. Preview is read-only;
 activation shows the exact scoped claim and requires interactive confirmation
 and a native administrator prompt. Run it from a terminal; the bounded privileged
 steps preserve that terminal's sudo authorization and report the underlying
@@ -1316,9 +1318,80 @@ administrator prompt. It checks the owner, root and route again after that
 prompt and verifies trust after installation. A missing, stale or changed owner
 refuses repair. The native `hack global trust` path directs you to this scoped
 Doctor command instead of falling back to Docker's exported CA. The native
-repair does not set up DNS or a browser's Local Network permission.
+trust repair does not set up DNS or a browser's Local Network permission.
 Both authorization and installation retain the caller's controlling terminal,
 so terminal-scoped sudo authorization remains valid during the bounded repair.
+
+`hack.local` stays the default dev-host root. An older Docker-era install routes
+it to Docker Caddy with `address=/.hack.local/172.30.0.2` in Homebrew's
+`dnsmasq.conf`, which the native loopback relay cannot serve. On macOS, native
+`hack doctor` reports a `native hack.local route` check (JSON field
+`hackLocalRoute`), and `hack doctor --fix` proposes a separate DNS repair. It
+rewrites only that one Hack-managed line to `address=/.hack.local/127.0.0.1`,
+in place. It never adds a second line for the suffix, and the `.hack` and
+`.hack.gy` lines and every other byte stay unchanged. If
+`/etc/resolver/hack.local` is missing, the repair creates it with
+`nameserver 127.0.0.1`. The repair proceeds only when all of these hold:
+
+- The native relay owner is verified and listening on 127.0.0.1 at its receipted port.
+- `dnsmasq.conf`, every `dnsmasq.d/*.conf` include file and the resolver file
+  are bounded regular UTF-8 files with one link and are not symlinks.
+- Neither `dnsmasq.conf` nor an include file loads a DNS source Hack did not
+  inspect: `conf-file`, `conf-script`, `addn-hosts`, `hostsdir`, `servers-file`,
+  or a `conf-dir` other than `<brew>/etc/dnsmasq.d,*.conf`.
+- The line has the exact Hack-managed form and is the only `.hack.local` claim,
+  including `dnsmasq.d` include files.
+- The target is one Hack wrote (`172.30.0.2` or `::1`).
+- The old target does not answer on port 443 within 1.5 seconds, so a running
+  Docker Caddy is never broken.
+- Any existing resolver file contains only `nameserver 127.0.0.1`.
+
+Each unmet condition is a closed refusal reason: `relay-not-verified`,
+`dnsmasq-config-missing`, `unreadable-config`, `uninspected-config-source`,
+`no-managed-line`, `unmanaged-line`, `foreign-target`, `foreign-resolver`,
+`old-target-live`, `pending-receipt`, `invalid-receipt`, `non-interactive`,
+`declined`, `busy`, `restart-unavailable` or `inputs-changed`. Refusal details
+name files and lines by number and never repeat file contents. The repair needs interactive confirmation and the native macOS
+administrator prompt; without a terminal it refuses and names `hack doctor --fix`
+to run in one. Only one repair or rollback runs at a time; a second one refuses
+with `busy`. After the prompt the repair checks that the dnsmasq launchd job can
+be restarted (`restart-unavailable` otherwise), then inspects everything again
+and refuses if anything changed. Before changing files it writes a private
+receipt to `<native-home>/native-dns/hack-local-route.json` with the old line,
+new line, SHA-256 hashes of the exact file bytes and timestamps. It replaces the
+file atomically and keeps every other byte, including a leading byte-order mark.
+It then restarts the verified dnsmasq launchd job, flushes the DNS cache and
+verifies live resolution. If a later step fails, it restores the earlier line
+automatically; when the failure came before any change, it reports that nothing
+changed. `hack global dns preview --domain hack.local` shows the same proposal
+without changing anything.
+
+The repair routes names to 127.0.0.1 but does not change ports. With a
+`HACK_NATIVE_HTTPS_PORT` other than 443, such as 18443, URLs still need that
+port, for example `https://app.hack.local:18443`. The confirmation prompt names
+the relay port.
+
+To undo the repair, run `hack global dns deactivate --domain hack.local`. It
+needs a terminal and refuses with `non-interactive` and the same command
+otherwise. It refuses with `unreadable-config` and changes nothing when
+`dnsmasq.conf` is not a bounded regular UTF-8 file. It restores the exact earlier line and verifies the whole-file hash
+against the receipt. It removes the resolver file only if the repair created it
+and its identity still matches, then restarts dnsmasq. If dnsmasq is not
+running, or the job cannot be restarted safely, the rollback still restores the
+file and says that dnsmasq was not restarted; the line loads on its next start.
+
+An interrupted repair leaves a `pending` receipt, and Doctor refuses another
+repair until the same rollback command handles it. Sometimes `dnsmasq.conf`
+changed after the repair, for example when a Docker-era `hack doctor --fix` or
+`hack global install` rewrote the built-in roots. In that case, or when the
+receipt names another `dnsmasq.conf` path, restoring would overwrite those
+changes. The rollback command then never writes the file. Instead, after a
+plain confirmation, it marks the receipt `released` and leaves `dnsmasq.conf`
+and any resolver file as they are. Doctor then inspects the current file again.
+Restore the recorded line yourself only if you still want the earlier route. A
+Docker-era `hack doctor --fix` or `hack global install` still rewrites all
+three built-in roots to whichever target answers, which can undo the native
+repair.
 
 The runtime's read-only `runtime inspect-host-listener --pid PID --port PORT
 --executable /absolute/caddy --json` reports the selected same-user loopback

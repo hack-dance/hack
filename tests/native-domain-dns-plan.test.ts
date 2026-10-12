@@ -249,6 +249,15 @@ test("refuses uninspected dnsmasq configuration sources", () => {
       })
     )
   ).toThrow("uninspected DNS files");
+  for (const directive of ["servers-file", "conf-script"]) {
+    expect(() =>
+      planNativeDomainDns(
+        options({
+          mainConfig: file(MAIN_CONFIG, `${V4_CONFIG}${directive}=/tmp/x\n`),
+        })
+      )
+    ).toThrow("uninspected DNS files");
+  }
   for (const directive of ["addn-hosts", "hostsdir"]) {
     expect(() =>
       planNativeDomainDns(

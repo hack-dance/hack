@@ -116,6 +116,17 @@ import {
   inspectNativeCaTrust,
   repairNativeCaTrust,
 } from "../lib/native-ca-doctor.ts";
+import {
+  describeHackLocalRoute,
+  HACK_LOCAL_ROLLBACK_COMMAND,
+  type HackLocalRouteDependencies,
+  type HackLocalRouteReport,
+  inspectHackLocalRoute,
+  printable,
+  repairHackLocalRoute,
+  reportHackLocalRoute,
+} from "../lib/native-hack-local-route.ts";
+import { createNativeHackLocalRouteDependencies } from "../lib/native-hack-local-route-host.ts";
 import { isMac } from "../lib/os.ts";
 import {
   defaultProjectSlugFromPath,
@@ -178,9 +189,14 @@ interface CheckResult {
   readonly message: string;
   /** Counts and public fingerprints only; never paths or keychain contents. */
   readonly supersededRoots?: SupersededRootInventory;
+  /** Native hack.local route state; lines and paths only, never file contents. */
+  readonly hackLocalRoute?: HackLocalRouteReport;
   /** Closed, value-free env key findings; project-relative subjects only. */
   readonly envKey?: EnvKeyInspection;
 }
+
+const HACK_LOCAL_ROUTE_CHECK = "native hack.local route";
+const HACK_LOCAL_REPAIR_CHECK = "native hack.local repair";
 
 const SUPERSEDED_ROOTS_CHECK = "superseded caddy roots";
 
@@ -354,6 +370,8 @@ const DOCTOR_SUMMARY_GROUPS = [
       `dnsmasq.conf:${DEFAULT_NEW_PROJECT_TLD}`,
       `dnsmasq.conf:${DEFAULT_OAUTH_ALIAS_ROOT}`,
       "dnsmasq:53",
+      HACK_LOCAL_REPAIR_CHECK,
+      HACK_LOCAL_ROUTE_CHECK,
       "native host dns",
       `dns:${DEFAULT_PROJECT_TLD}`,
       `dns:${DEFAULT_NEW_PROJECT_TLD}`,
@@ -1115,6 +1133,16 @@ async function handleNativeDoctor(opts: {
       durationMs: 0,
     });
   }
+  if (isMac()) {
+    results.push(
+      ...(await checkNativeHackLocalRoute({
+        progress,
+        fix: opts.fix,
+        dependencies: () =>
+          createNativeHackLocalRouteDependencies({ runtime: opts.runtime }),
+      }))
+    );
+  }
   if (hostname) {
     results.push(
       await runCheck(
@@ -1160,6 +1188,81 @@ async function handleNativeDoctor(opts: {
   return hasError ? 1 : 0;
 }
 
+/**
+ * Report, and with --fix authorize and apply, the native hack.local route
+ * repair. Refusals are warnings with a closed reason; only an unexpected
+ * failure is an error.
+ */
+export async function checkNativeHackLocalRoute(opts: {
+  readonly progress: DoctorProgress;
+  readonly fix: boolean;
+  readonly dependencies: () => Promise<HackLocalRouteDependencies>;
+}): Promise<readonly TimedCheckResult[]> {
+  const results: TimedCheckResult[] = [];
+  let deps: HackLocalRouteDependencies;
+  try {
+    deps = await opts.dependencies();
+  } catch (error) {
+    return [
+      {
+        name: HACK_LOCAL_ROUTE_CHECK,
+        status: "warn",
+        message: printable(
+          `Unable to inspect the hack.local route: ${error instanceof Error ? error.message : String(error)}`
+        ),
+        durationMs: 0,
+      },
+    ];
+  }
+  if (opts.fix) {
+    results.push(
+      await runCheck(opts.progress, HACK_LOCAL_REPAIR_CHECK, async () => {
+        const repaired = await repairHackLocalRoute(deps);
+        if (repaired.outcome === "repaired") {
+          return {
+            name: HACK_LOCAL_REPAIR_CHECK,
+            status: "ok",
+            message: printable(
+              `Rewrote "${repaired.receipt.oldLine}" to "${repaired.receipt.newLine}"${
+                repaired.receipt.resolverAction === "create"
+                  ? ` and created ${repaired.receipt.resolverPath}`
+                  : ""
+              }; live DNS verified. Receipt: ${deps.paths.receiptPath}. Undo with: ${HACK_LOCAL_ROLLBACK_COMMAND}`
+            ),
+          };
+        }
+        if (repaired.outcome === "current") {
+          return {
+            name: HACK_LOCAL_REPAIR_CHECK,
+            status: "ok",
+            message:
+              "No repair needed; *.hack.local already routes to the native relay.",
+          };
+        }
+        return {
+          name: HACK_LOCAL_REPAIR_CHECK,
+          status: "warn",
+          message: printable(
+            `Repair refused (${repaired.reason}): ${repaired.detail}`
+          ),
+        };
+      })
+    );
+  }
+  results.push(
+    await runCheck(opts.progress, HACK_LOCAL_ROUTE_CHECK, async () => {
+      const report = reportHackLocalRoute(await inspectHackLocalRoute(deps));
+      return {
+        name: HACK_LOCAL_ROUTE_CHECK,
+        status: report.status === "current" ? "ok" : "warn",
+        message: describeHackLocalRoute(report),
+        hackLocalRoute: report,
+      };
+    })
+  );
+  return results;
+}
+
 export type DoctorJsonCheck = {
   readonly id: string;
   readonly status: CheckStatus;
@@ -1167,6 +1270,8 @@ export type DoctorJsonCheck = {
   readonly durationMs: number;
   /** Present only on the superseded Caddy roots check. */
   readonly supersededRoots?: SupersededRootInventory;
+  /** Present only on the native hack.local route check. */
+  readonly hackLocalRoute?: HackLocalRouteReport;
   /** Present only on the env key check: closed codes, no key bytes or absolute paths. */
   readonly envKey?: EnvKeyInspection;
 };
@@ -1199,6 +1304,9 @@ export function buildDoctorJsonData(opts: {
       durationMs: result.durationMs,
       ...(result.supersededRoots
         ? { supersededRoots: result.supersededRoots }
+        : {}),
+      ...(result.hackLocalRoute
+        ? { hackLocalRoute: result.hackLocalRoute }
         : {}),
       ...(result.envKey ? { envKey: result.envKey } : {}),
     })),

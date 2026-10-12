@@ -18,10 +18,14 @@ Notes:
   entire suffix, so do not select a domain used by unrelated sites.
   The global installer configures the Docker-backed host stack. An explicitly
   selected native candidate refuses it to preserve the installed v4 stack.
-  On macOS, use `hack global dns preview` and then the separately confirmed
-  `hack global dns activate` for a dedicated custom native suffix. This leaves
-  the v4 wildcard rules untouched. Verify the exact app origin with
-  `hack doctor --browser-url`; DNS setup alone does not validate HTTPS or OAuth.
+  On macOS, use `hack global dns preview --domain <suffix>` and then the
+  separately confirmed `hack global dns activate --domain <suffix>` for a
+  dedicated custom native suffix. This leaves the v4 wildcard rules untouched.
+  To point the default `*.hack.local` root at the native relay, run
+  `hack doctor --fix`; after confirmation it rewrites only the Hack-managed
+  `.hack.local` dnsmasq line, and `hack global dns deactivate --domain hack.local`
+  restores it. Verify the exact app origin with `hack doctor --browser-url`;
+  DNS setup alone does not validate HTTPS or OAuth.
   Pass `--dev-host` for a per-project hostname; it takes precedence over the
   global default. Existing project hosts and Compose routes are not migrated.
 - On macOS, Safari opens `.hack.local` names directly. Chrome, Firefox and other

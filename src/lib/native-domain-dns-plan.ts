@@ -204,17 +204,40 @@ function checkRuntimeConfigSource(opts: {
   }
 }
 
-function checkConfigSources(opts: NativeDnsPlanOptions): void {
+/** A config line that makes dnsmasq load DNS data Hack did not inspect. */
+export interface UninspectedDnsmasqSource {
+  /** One-based line number in the scanned content. */
+  readonly line: number;
+  /** Lowercased directive name; always `conf-dir` or a SOURCE_DIRECTIVES entry. */
+  readonly directive: string;
+}
+
+/**
+ * Directives that read DNS data from another file, directory or program.
+ * `conf-dir` is handled separately because the inspected include directory
+ * itself is allowed.
+ */
+const SOURCE_DIRECTIVES: ReadonlySet<string> = new Set([
+  "conf-file",
+  "conf-script",
+  "addn-hosts",
+  "hostsdir",
+  "servers-file",
+]);
+
+/**
+ * Pure scan of one dnsmasq configuration for sources Hack never inspected:
+ * `conf-file`, `conf-script`, `addn-hosts`, `hostsdir`, `servers-file`, and
+ * any `conf-dir` other than exactly `<includeDir>,*.conf`. Returns the first
+ * such line, or null. The result never carries the directive's value, so a
+ * caller can report it without echoing file contents.
+ */
+export function findUninspectedDnsmasqSource(opts: {
+  readonly content: string;
+  readonly includeDir: string;
+}): UninspectedDnsmasqSource | null {
   const included = `${opts.includeDir},*.conf`;
-  for (const [index, arg] of opts.dnsmasqArgs.entries()) {
-    checkRuntimeConfigSource({
-      arg,
-      next: opts.dnsmasqArgs[index + 1],
-      included,
-      mainPath: opts.mainConfig.path,
-    });
-  }
-  for (const rawLine of (opts.mainConfig.content ?? "").split(LINE_BREAK)) {
+  for (const [index, rawLine] of opts.content.split(LINE_BREAK).entries()) {
     const line = rawLine.trim();
     if (line.startsWith("#")) {
       continue;
@@ -227,12 +250,31 @@ function checkConfigSources(opts: NativeDnsPlanOptions): void {
     const value = equal < 0 ? "" : line.slice(equal + 1).trim();
     if (
       (directive === "conf-dir" && value !== included) ||
-      directive === "conf-file" ||
-      directive === "addn-hosts" ||
-      directive === "hostsdir"
+      SOURCE_DIRECTIVES.has(directive)
     ) {
-      refuse("the main configuration loads uninspected DNS files");
+      return { line: index + 1, directive };
     }
+  }
+  return null;
+}
+
+function checkConfigSources(opts: NativeDnsPlanOptions): void {
+  const included = `${opts.includeDir},*.conf`;
+  for (const [index, arg] of opts.dnsmasqArgs.entries()) {
+    checkRuntimeConfigSource({
+      arg,
+      next: opts.dnsmasqArgs[index + 1],
+      included,
+      mainPath: opts.mainConfig.path,
+    });
+  }
+  if (
+    findUninspectedDnsmasqSource({
+      content: opts.mainConfig.content ?? "",
+      includeDir: opts.includeDir,
+    })
+  ) {
+    refuse("the main configuration loads uninspected DNS files");
   }
 }
 

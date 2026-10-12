@@ -1022,9 +1022,9 @@ hack global dns <subcommand> [options]
 
 | Command | Summary |
 | --- | --- |
-| `hack global dns preview` | Preview a scoped native custom-domain DNS claim without changing the host |
+| `hack global dns preview` | Preview a scoped native custom-domain DNS claim or the hack.local relay repair without changing the host |
 | `hack global dns activate` | Activate only the selected native custom-domain DNS suffix |
-| `hack global dns deactivate` | Remove only an owned native custom-domain DNS suffix |
+| `hack global dns deactivate` | Remove an owned native custom-domain DNS suffix, or undo the hack.local relay repair |
 
 ### Options
 

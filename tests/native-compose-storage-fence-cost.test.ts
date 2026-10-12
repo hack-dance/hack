@@ -1,4 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
 import type { Socket } from "node:net";
@@ -33,15 +34,46 @@ afterEach(async () => {
     await new Promise<void>((resolve) => server.close(() => resolve()));
   }
 });
-/** A real Unix `GET /info` endpoint for the same engine the synthetic CLI reports. */
+/**
+ * A real Unix `GET /info` endpoint for the same engine the synthetic CLI reports,
+ * selected by an explicit DOCKER_HOST or, with `context`, by the client config's
+ * currentContext naming a context store entry for that socket.
+ */
 async function engine(
   root: string,
-  id: (request: number) => string = () => "fixture-engine"
+  id: (request: number) => string = () => "fixture-engine",
+  selection: "host" | "context" = "host"
 ) {
-  const socket = join(root, "engine.sock");
-  const client = join(root, "client");
+  const socket = join(root, `${selection}-engine.sock`);
+  const client = join(root, `${selection}-client`);
   await mkdir(client, { mode: 0o700 });
-  await writeFile(join(client, "config.json"), "{}\n", { mode: 0o600 });
+  await writeFile(
+    join(client, "config.json"),
+    selection === "host"
+      ? "{}\n"
+      : `${JSON.stringify({ currentContext: "fixture-context" })}\n`,
+    { mode: 0o600 }
+  );
+  if (selection === "context") {
+    const meta = join(
+      client,
+      "contexts",
+      "meta",
+      createHash("sha256").update("fixture-context").digest("hex")
+    );
+    await mkdir(meta, { recursive: true, mode: 0o755 });
+    await writeFile(
+      join(meta, "meta.json"),
+      JSON.stringify({
+        Name: "fixture-context",
+        Metadata: {},
+        Endpoints: {
+          docker: { Host: `unix://${socket}`, SkipTLSVerify: false },
+        },
+      }),
+      { mode: 0o644 }
+    );
+  }
   let served = 0;
   const server = createServer((req, res) => {
     const request = served++;
@@ -58,10 +90,11 @@ async function engine(
     server.once("error", reject);
     server.listen(socket, resolve);
   });
-  return {
-    env: { DOCKER_HOST: `unix://${socket}`, DOCKER_CONFIG: client },
-    served: () => served,
-  };
+  const env: Readonly<Record<string, string>> =
+    selection === "host"
+      ? { DOCKER_HOST: `unix://${socket}`, DOCKER_CONFIG: client }
+      : { DOCKER_CONFIG: client };
+  return { env, served: () => served };
 }
 async function lines(root: string, name: string): Promise<string[]> {
   const file = Bun.file(join(root, name));
@@ -111,7 +144,8 @@ async function enrolled() {
 
 test("storage fence count per command: every proof kept, exact duplicates gone, one CLI admission", async () => {
   const root = await enrolled();
-  // CLI transport (no explicit Unix selection): every fence is a `docker info`.
+  // CLI transport (the isolated client selects a context with no store entry):
+  // every fence is a `docker info`.
   expect(await counted(root, ["exec", "web", "--", "true"])).toEqual({
     code: 0,
     cli: FILE_ENGINE_FENCES + 2 * PROOF_FENCES,
@@ -138,6 +172,17 @@ test("storage fence count per command: every proof kept, exact duplicates gone, 
     cli: FILE_ENGINE_FENCES + 1,
     direct: 6 * PROOF_FENCES,
     observations: 6 * PROOF_OBSERVATIONS,
+  });
+  // Admitted context selection (DOCKER_HOST unset; the client config's current
+  // context names the socket): the same counts as an explicit Unix host.
+  const contextual = await engine(root, undefined, "context");
+  expect(
+    await counted(root, ["exec", "web", "--", "true"], contextual)
+  ).toEqual({
+    code: 0,
+    cli: FILE_ENGINE_FENCES + 1,
+    direct: 2 * PROOF_FENCES,
+    observations: 2 * PROOF_OBSERVATIONS,
   });
 }, 390_000);
 

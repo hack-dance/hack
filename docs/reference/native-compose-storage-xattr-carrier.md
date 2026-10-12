@@ -232,11 +232,14 @@ runs; three exact costs are removed. Each change is local to one CLI process,
 which runs exactly one native command.
 
 - Engine-ID fences (`docker info --format '{{json .ID}}'`) in the Docker
-  carrier use command-scoped admission for an explicit `DOCKER_HOST=unix:///...`
-  selection that the ingress transport also admits (see
+  carrier use command-scoped admission for a selection the Docker CLI resolves
+  to a plain Unix socket: an explicit `DOCKER_HOST=unix:///...`,
+  `DOCKER_CONTEXT`, the client config's current context, or the `default`
+  context (see
   [ownership](native-compose-ownership.md#ingress-daemon-identity-transport)).
   The first fence under one exact binding (selection values, `docker`
-  executable, client config and socket identities) is the Docker CLI read and
+  executable, client config, context store entry and socket identities) is the
+  Docker CLI read and
   must equal one direct `GET /info` on that socket. Only then does each later
   fence under the unchanged binding make one fresh direct request instead of a
   CLI process that also lists every client plugin. A different or failed

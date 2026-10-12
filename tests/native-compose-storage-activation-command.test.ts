@@ -2,6 +2,7 @@ import { afterEach, expect, test } from "bun:test";
 import { join, resolve } from "node:path";
 import { openNativeComposeGenerationStore } from "../src/lib/native-compose-generation.ts";
 import { captureCompletedJobFixtureCommand } from "./e2e/scenarios/native-compose-adoption-job-worktrees.ts";
+import { isolatedDockerClientEnv } from "./helpers/docker-client.ts";
 import { fixture, invoke } from "./helpers/native-compose-command.ts";
 
 const storage = { data: { kind: "persistent", scope: "worktree" } } as const;
@@ -82,6 +83,7 @@ async function ownedColdCase(
               HACK_COMPOSE_STARTUP_TIMEOUT_MS: "30000",
               CI: "1",
               HACK_EXECUTION_MODE: "non_interactive",
+              ...isolatedDockerClientEnv(root),
             },
             captures: join(root, `storage-capture-${capture++}`),
             timeoutMs: 120_000,

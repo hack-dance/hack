@@ -17,11 +17,13 @@ function identityQuery(args: readonly string[]): boolean {
 /**
  * Storage-witness probe whose exact engine-ID query keeps one fresh read per
  * fence but may use the command's admitted direct Unix transport
- * (`createNativeComposeEngineIdentityAdmissions`). Every other query, every
- * ineligible selection and every unadmitted binding goes to the supplied CLI
- * probe unchanged. The direct read shares this probe's signal and deadline, and
- * the same environment snapshot the CLI probe captured. Recovery observation
- * keeps its own CLI probes.
+ * (`createNativeComposeEngineIdentityAdmissions`): an explicit Unix DOCKER_HOST
+ * or a Docker context selection (DOCKER_CONTEXT, the client config's current
+ * context, or the default context) that the CLI resolves to a Unix socket.
+ * Every other query, every ineligible selection and every unadmitted binding
+ * goes to the supplied CLI probe unchanged. The direct read shares this probe's
+ * signal and deadline, and the same environment snapshot the CLI probe
+ * captured. Recovery observation keeps its own CLI probes.
  */
 export function nativeComposeStorageIdentityProbe(opts: {
   readonly probe: Probe;

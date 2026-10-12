@@ -9,11 +9,23 @@ import {
   defineOption,
   withHandler,
 } from "../cli/command.ts";
+import {
+  parseApplyServiceOption,
+  parseEnvGetArguments,
+  parseEnvScopeOption,
+  parseExecutionScopeOptions,
+  parseMaterializeScopeOption,
+  parseProjectSelectorOption,
+} from "../cli/env-arguments.ts";
 import { resolveRequestedEnvName } from "../cli/env-selection.ts";
 import { optEnv, optJson, optPath, optProject } from "../cli/options.ts";
 import { readControlPlaneConfig } from "../control-plane/sdk/config.ts";
 import { updateGlobalConfig } from "../lib/config.ts";
 import { resolveGlobalConfigPath } from "../lib/config-paths.ts";
+import {
+  assertEnvValueStdinUsage,
+  readEnvValueFromStdin,
+} from "../lib/env-value-stdin.ts";
 import { readTextFile } from "../lib/fs.ts";
 import { isRecord } from "../lib/guards.ts";
 import { resolveHackInvocation } from "../lib/hack-cli.ts";
@@ -55,8 +67,8 @@ import {
   sanitizeProjectSlug,
 } from "../lib/project.ts";
 import {
-  assertValidProjectEnvScopeName,
   discoverComposeServiceNames,
+  ENV_KEY_INVALID_MESSAGE,
   materializeProjectEnv,
   migrateLegacyProjectEnv,
   parseProjectEnvTarget,
@@ -69,7 +81,6 @@ import {
   setProjectEnvValue,
   unsetProjectEnvValue,
 } from "../lib/project-env-config.ts";
-import { normalizeProjectName } from "../lib/project-name.ts";
 import { resolveRegisteredProjectByName } from "../lib/projects-registry.ts";
 import {
   formatSecretStoreDescriptor,
@@ -93,6 +104,14 @@ const optSecret = defineOption({
   type: "boolean",
   long: "--secret",
   description: "Store value as an encrypted secure entry",
+} as const);
+
+const optValueStdin = defineOption({
+  name: "valueStdin",
+  type: "boolean",
+  long: "--value-stdin",
+  description:
+    "Read the value from piped stdin (max 64 KiB, one trailing newline stripped) so it never appears in argv or shell history",
 } as const);
 
 const optLocal = defineOption({
@@ -230,8 +249,18 @@ const applySpec = defineCommand({
 const addSpec = defineCommand({
   name: "add",
   summary: "Add or update an env value",
+  description:
+    "Non-secret values may be passed as arguments. For secrets, pipe the value with --value-stdin (for example `<secret-source> | hack env add API_TOKEN --secret --value-stdin`) or omit the value in a terminal to use the hidden prompt, so the value never appears in argv, shell history, or process listings.",
   group: "Project",
-  options: [optPath, optProject, optEnv, optSecret, optLocal, optService],
+  options: [
+    optPath,
+    optProject,
+    optEnv,
+    optSecret,
+    optValueStdin,
+    optLocal,
+    optService,
+  ],
   positionals: [
     { name: "key", required: false },
     { name: "value", required: false },
@@ -242,8 +271,18 @@ const addSpec = defineCommand({
 const setSpec = defineCommand({
   name: "set",
   summary: "Alias for env add",
+  description:
+    "Same value rules as `hack env add`: pipe secrets with --value-stdin or use the hidden prompt instead of passing them as arguments.",
   group: "Project",
-  options: [optPath, optProject, optEnv, optSecret, optLocal, optService],
+  options: [
+    optPath,
+    optProject,
+    optEnv,
+    optSecret,
+    optValueStdin,
+    optLocal,
+    optService,
+  ],
   positionals: [
     { name: "key", required: false },
     { name: "value", required: false },
@@ -588,6 +627,9 @@ function normalizeGlobalEncryptedFileConfigPath(input: {
   return resolvedPath;
 }
 
+const UNKNOWN_PROJECT_HINT =
+  "Run 'hack init' in that repo (or run 'hack projects' to see registered projects).";
+
 async function resolveProjectForEnv(opts: {
   readonly ctx: CliContext;
   readonly pathOpt: string | undefined;
@@ -598,14 +640,19 @@ async function resolveProjectForEnv(opts: {
   }
 
   if (opts.projectOpt !== undefined) {
-    const name = normalizeProjectName(opts.projectOpt);
-    if (!name) {
-      throw new CliUsageError("Invalid --project value.");
-    }
-    const project = await resolveRegisteredProjectByName({ name });
+    const selector = parseProjectSelectorOption({
+      projectOpt: opts.projectOpt,
+    });
+    const project = await resolveRegisteredProjectByName({
+      name: selector.name,
+    });
     if (!project) {
+      // Echo only a name the user typed in canonical form; never a slug
+      // derived from their input.
       throw new CliUsageError(
-        `Unknown project "${name}". Run 'hack init' in that repo (or run 'hack projects' to see registered projects).`
+        selector.canonical
+          ? `Unknown project "${selector.name}". ${UNKNOWN_PROJECT_HINT}`
+          : `Unknown project. ${UNKNOWN_PROJECT_HINT}`
       );
     }
     return project;
@@ -736,8 +783,9 @@ function resolveHostEnvTarget(input: {
   ) {
     return target as (typeof HOST_ENV_TARGET_VALUES)[number];
   }
+  // Fixed text: the rejected argument may be a pasted value.
   throw new CliUsageError(
-    `Invalid --target "${target}". Expected one of: ${HOST_ENV_TARGET_VALUES.join(", ")}`
+    `Invalid --target value. Expected one of: ${HOST_ENV_TARGET_VALUES.join(", ")}.`
   );
 }
 
@@ -901,7 +949,7 @@ async function promptForEnvAddInput(input: {
   if (!canPrompt()) {
     requireInteractive({
       what: "hack env add needs a key and value",
-      hint: "Pass them as arguments: `hack env add <scope>/<KEY> <value>` (or `hack env add KEY VALUE --service <scope>`, with --secret for secrets).",
+      hint: "Pass the key as an argument and pipe the value on stdin: `<value-source> | hack env add <scope>/<KEY> --value-stdin` (add --secret for secrets). Non-secret values may also be passed as `hack env add <scope>/<KEY> <value>`; never pass secret values as arguments.",
     });
   }
 
@@ -984,12 +1032,9 @@ const handleEnvGet: CommandHandlerFor<typeof getSpec> = async ({
   ctx,
   args,
 }) => {
-  const key = args.positionals.key;
-  if (!ENV_KEY_PATTERN.test(key)) {
-    throw new CliUsageError("Invalid env key");
-  }
-  const scope = assertValidProjectEnvScopeName({
-    scopeName: args.options.service,
+  const { key, scope } = parseEnvGetArguments({
+    key: args.positionals.key,
+    serviceName: args.options.service,
   });
   const project = await resolveProjectForEnv({
     ctx,
@@ -1051,17 +1096,9 @@ const handleEnvList: CommandHandlerFor<typeof listSpec> = async ({
     envName,
   });
   if (modern) {
-    const selectedScope = (() => {
-      try {
-        return assertValidProjectEnvScopeName({
-          scopeName: args.options.service,
-        });
-      } catch (error: unknown) {
-        throw new CliUsageError(
-          error instanceof Error ? error.message : "Invalid env scope."
-        );
-      }
-    })();
+    const selectedScope = parseEnvScopeOption({
+      scopeName: args.options.service,
+    });
     const envValues = selectProjectEnvValues({
       resolved: modern,
       scopeName: selectedScope,
@@ -1265,18 +1302,19 @@ const handleEnvExplain: CommandHandlerFor<typeof explainSpec> = async ({
   ctx,
   args,
 }): Promise<number> => {
-  const project = await resolveProjectForEnv({
-    ctx,
-    pathOpt: args.options.path,
-    projectOpt: args.options.project,
-  });
-  const projectName = await resolveProjectName(project);
+  // Refuse malformed arguments with fixed text before any project file is read.
   const envName = resolveRequestedEnvName({ envOption: args.options.env });
   const parsed = parseProjectEnvTarget({
     keyOrPath: args.positionals.key,
     scopeOverride: args.options.service,
   });
   const target = resolveHostEnvTarget({ targetOption: args.options.target });
+  const project = await resolveProjectForEnv({
+    ctx,
+    pathOpt: args.options.path,
+    projectOpt: args.options.project,
+  });
+  const projectName = await resolveProjectName(project);
   const modern = await loadModernProjectEnv({ project, envName });
   if (modern) {
     renderEnvExplain(
@@ -1334,10 +1372,10 @@ const handleEnvApply: CommandHandlerFor<typeof applySpec> = async ({
   ctx,
   args,
 }): Promise<number> => {
-  const service = args.options.service?.trim() ?? "";
-  if (service.length === 0 || service === "global") {
-    throw new CliUsageError("--service <compose-service> is required.");
-  }
+  const service = parseApplyServiceOption({
+    serviceName: args.options.service,
+  });
+  const envName = resolveRequestedEnvName({ envOption: args.options.env });
   const project = await resolveProjectForEnv({
     ctx,
     pathOpt: args.options.path,
@@ -1352,8 +1390,9 @@ const handleEnvApply: CommandHandlerFor<typeof applySpec> = async ({
     "--path",
     project.projectRoot,
   ];
-  if (args.options.env) {
-    command.push("--env", args.options.env);
+  // Forward only the validated selection, never the raw argument.
+  if (envName !== undefined) {
+    command.push("--env", envName ?? "base");
   }
   if (args.options.json) {
     command.push("--json");
@@ -1699,24 +1738,44 @@ const handleEnvAdd: CommandHandlerFor<typeof addSpec> = async ({
   ctx,
   args,
 }): Promise<number> => {
+  const keyArg = args.positionals.key?.trim();
+  const valueArg = args.positionals.value;
+  const valueStdin = args.options.valueStdin === true;
+  // --value-stdin: refuse bad combinations and read the bounded value before
+  // any project file is migrated or written, so a refusal stores nothing.
+  if (valueStdin) {
+    assertEnvValueStdinUsage({
+      hasKey: Boolean(keyArg),
+      hasPositionalValue:
+        valueArg !== undefined || keyArg?.includes("=") === true,
+    });
+  }
+  // Validate a key argument with fixed, value-free refusals before stdin is
+  // read or any project file is migrated or written.
+  const interactive = !(valueStdin || keyArg || valueArg);
+  const argTarget = interactive
+    ? null
+    : parseProjectEnvTarget({
+        keyOrPath: keyArg ?? "",
+        scopeOverride: args.options.service,
+      });
+  const envName = resolveRequestedEnvName({
+    envOption: args.options.env,
+  });
+  const stdinValue = valueStdin ? await readEnvValueFromStdin() : null;
+
   const project = await resolveProjectForEnv({
     ctx,
     pathOpt: args.options.path,
     projectOpt: args.options.project,
   });
   const projectName = await resolveProjectName(project);
-  const envName = resolveRequestedEnvName({
-    envOption: args.options.env,
-  });
   await maybeMigrateLegacyProjectEnv({
     project,
     projectName,
     reason: "mutation",
   });
 
-  const keyArg = args.positionals.key?.trim();
-  const valueArg = args.positionals.value;
-  const interactive = !(keyArg || valueArg);
   const prompted = interactive
     ? await promptForEnvAddInput({
         project,
@@ -1726,17 +1785,18 @@ const handleEnvAdd: CommandHandlerFor<typeof addSpec> = async ({
 
   const parsedTarget = prompted
     ? { scope: prompted.scope, key: prompted.key }
-    : parseProjectEnvTarget({
-        keyOrPath: keyArg ?? "",
-        scopeOverride: args.options.service,
-      });
-  const value = prompted
-    ? prompted.value
-    : await resolveEnvValue({
-        key: parsedTarget.key,
-        value: valueArg ?? null,
-        secret: args.options.secret === true,
-      });
+    : argTarget;
+  if (!parsedTarget) {
+    throw new CliUsageError("Env key is required.");
+  }
+  const value =
+    prompted?.value ??
+    stdinValue ??
+    (await resolveEnvValue({
+      key: parsedTarget.key,
+      value: valueArg ?? null,
+      secret: args.options.secret === true,
+    }));
   const secret = prompted ? prompted.secret : args.options.secret === true;
 
   const result = await setProjectEnvValue({
@@ -1769,6 +1829,19 @@ const handleEnvSet: CommandHandlerFor<typeof setSpec> = async ({
   ctx,
   args,
 }): Promise<number> => {
+  const rawKey = (args.positionals.key ?? "").trim();
+  const rawValue = args.positionals.value;
+  const [keyFromSpec, valueFromSpec] = parseKeyValueSpec(
+    rawValue === undefined ? rawKey : `${rawKey}=${rawValue}`
+  );
+  const valueFromStdin = args.options.valueStdin === true;
+  if (valueFromStdin) {
+    assertEnvValueStdinUsage({
+      hasKey: keyFromSpec.length > 0,
+      hasPositionalValue: valueFromSpec !== null,
+    });
+  }
+
   const project = await resolveProjectForEnv({
     ctx,
     pathOpt: args.options.path,
@@ -1799,11 +1872,6 @@ const handleEnvSet: CommandHandlerFor<typeof setSpec> = async ({
   const runtimeConfig = await readHackEnvRuntimeConfig({
     projectDir: project.projectDir,
   });
-  const rawKey = (args.positionals.key ?? "").trim();
-  const rawValue = args.positionals.value;
-  const [keyFromSpec, valueFromSpec] = parseKeyValueSpec(
-    rawValue === undefined ? rawKey : `${rawKey}=${rawValue}`
-  );
   const key = await resolveEnvKey({ key: keyFromSpec });
   const mutationSource = storeSecret ? "keychain" : "plain_env";
   const sourceValidation = await validateHackEnvMutationSource({
@@ -1815,11 +1883,13 @@ const handleEnvSet: CommandHandlerFor<typeof setSpec> = async ({
     logger.error({ message: sourceValidation.message });
     return 1;
   }
-  const value = await resolveEnvValue({
-    key,
-    value: valueFromSpec,
-    secret: storeSecret,
-  });
+  const value = valueFromStdin
+    ? await readEnvValueFromStdin()
+    : await resolveEnvValue({
+        key,
+        value: valueFromSpec,
+        secret: storeSecret,
+      });
 
   if (storeSecret) {
     const store = await resolveConfiguredSecretStore({ project, projectName });
@@ -1870,6 +1940,10 @@ const handleEnvMaterialize: CommandHandlerFor<typeof materializeSpec> = async ({
   ctx,
   args,
 }): Promise<number> => {
+  // Validate before migration or file access so a refused scope changes nothing.
+  const serviceName = parseMaterializeScopeOption({
+    serviceName: args.options.service,
+  });
   const project = await resolveProjectForEnv({
     ctx,
     pathOpt: args.options.path,
@@ -1891,7 +1965,7 @@ const handleEnvMaterialize: CommandHandlerFor<typeof materializeSpec> = async ({
     projectRoot: project.projectRoot,
     projectDir: project.projectDir,
     envName,
-    serviceName: args.options.service?.trim() || null,
+    serviceName,
     serviceNames,
   });
   logger.success({
@@ -1911,18 +1985,6 @@ function resolveShellCommandCommand(input: {
   return ["/bin/sh", "-lc", input.command];
 }
 
-function resolveExecutionScopeName(input: {
-  readonly scopeName?: string;
-  readonly serviceName?: string;
-}): string | null {
-  const scopeName = input.scopeName?.trim();
-  const serviceName = input.serviceName?.trim();
-  if (scopeName && serviceName) {
-    throw new CliUsageError("Use either --scope or --service, not both.");
-  }
-  return scopeName || serviceName || null;
-}
-
 async function runHostCommandWithInjectedEnv(input: {
   readonly ctx: CliContext;
   readonly pathOpt: string | undefined;
@@ -1936,6 +1998,10 @@ async function runHostCommandWithInjectedEnv(input: {
   readonly timeout?: number;
   readonly lifetime?: string;
 }): Promise<number> {
+  const executionScope = parseExecutionScopeOptions({
+    scopeName: input.scopeName,
+    serviceName: input.serviceName,
+  });
   if (
     input.timeout !== undefined &&
     (!Number.isFinite(input.timeout) ||
@@ -1962,18 +2028,18 @@ async function runHostCommandWithInjectedEnv(input: {
       "--timeout requires non-TTY stdin; pipe input or redirect from /dev/null for a finite job."
     );
   }
-  const project = await resolveProjectForEnv({
-    ctx: input.ctx,
-    pathOpt: input.pathOpt,
-    projectOpt: input.projectOpt,
-  });
-  const projectName = await resolveProjectName(project);
   const envName = resolveRequestedEnvName({
     envOption: input.envOpt,
   });
   const target = resolveHostEnvTarget({
     targetOption: input.targetOpt,
   });
+  const project = await resolveProjectForEnv({
+    ctx: input.ctx,
+    pathOpt: input.pathOpt,
+    projectOpt: input.projectOpt,
+  });
+  const projectName = await resolveProjectName(project);
   const shellCommand = input.shellCommandOpt?.trim();
   const positionalCommand = input.command;
   if (shellCommand && positionalCommand.length > 0) {
@@ -1987,10 +2053,7 @@ async function runHostCommandWithInjectedEnv(input: {
     project,
     projectName,
     envName,
-    serviceName: resolveExecutionScopeName({
-      scopeName: input.scopeName,
-      serviceName: input.serviceName,
-    }),
+    serviceName: executionScope,
     target,
   });
   const declaredLifetime =
@@ -2021,26 +2084,27 @@ async function openHostShellWithInjectedEnv(input: {
   readonly serviceName?: string;
   readonly targetOpt: string | undefined;
 }): Promise<number> {
-  const project = await resolveProjectForEnv({
-    ctx: input.ctx,
-    pathOpt: input.pathOpt,
-    projectOpt: input.projectOpt,
+  const executionScope = parseExecutionScopeOptions({
+    scopeName: input.scopeName,
+    serviceName: input.serviceName,
   });
-  const projectName = await resolveProjectName(project);
   const envName = resolveRequestedEnvName({
     envOption: input.envOpt,
   });
   const target = resolveHostEnvTarget({
     targetOption: input.targetOpt,
   });
+  const project = await resolveProjectForEnv({
+    ctx: input.ctx,
+    pathOpt: input.pathOpt,
+    projectOpt: input.projectOpt,
+  });
+  const projectName = await resolveProjectName(project);
   const envState = await resolveEnvInjection({
     project,
     projectName,
     envName,
-    serviceName: resolveExecutionScopeName({
-      scopeName: input.scopeName,
-      serviceName: input.serviceName,
-    }),
+    serviceName: executionScope,
     target,
   });
 
@@ -2133,10 +2197,12 @@ const handleEnvUnset: CommandHandlerFor<typeof unsetSpec> = async ({
     projectDir: project.projectDir,
   });
   if (!modernExists) {
-    const store = await resolveConfiguredSecretStore({ project, projectName });
+    // Validate the key before resolving a secret store, so a refused key
+    // never reaches a backend.
     const key = await resolveEnvKey({
       key: (args.positionals.key ?? "").trim(),
     });
+    const store = await resolveConfiguredSecretStore({ project, projectName });
 
     const okLegacy = await confirmSafe({
       message: `Unset "${key}" from ${resolveEnvFilePath({ projectDir: project.projectDir, envName })} and ${formatSecretStoreDescriptor({ descriptor: store.descriptor })}${envName ? ` (env ${envName})` : ""}?`,
@@ -2378,7 +2444,7 @@ async function resolveEnvKey(opts: { readonly key: string }): Promise<string> {
   const fromPos = opts.key.trim();
   if (fromPos.length > 0) {
     if (!ENV_KEY_PATTERN.test(fromPos)) {
-      throw new CliUsageError(`Invalid env key: ${fromPos}`);
+      throw new CliUsageError(ENV_KEY_INVALID_MESSAGE);
     }
     return fromPos;
   }
@@ -2422,7 +2488,7 @@ async function resolveEnvValue(opts: {
   if (!canPrompt()) {
     requireInteractive({
       what: `a value for "${opts.key}" is required`,
-      hint: "Pass the value as an argument (e.g. `hack env set KEY value` or `hack env add KEY value --secret`).",
+      hint: "Pipe the value on stdin with --value-stdin (e.g. `<secret-source> | hack env add KEY --secret --value-stdin`), or run in a terminal to use the hidden prompt. Never pass secret values as arguments.",
     });
   }
 

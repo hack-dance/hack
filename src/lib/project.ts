@@ -133,6 +133,24 @@ export const ENV_BASE_SELECTION_ALIASES: ReadonlySet<string> = new Set([
   "none",
 ]);
 
+/**
+ * Canonical overlay name: the fixed point of `normalizeEnvConfigName`
+ * (lowercase letters and digits joined by single hyphens).
+ */
+export const ENV_CONFIG_NAME_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+
+/**
+ * Parse a requested overlay selection (CLI `--env`, daemon `env`).
+ *
+ * - `undefined` input: no selection.
+ * - `null`: base layers only (empty, or a base alias in any case).
+ * - `string`: the overlay name, exactly as given apart from surrounding
+ *   whitespace.
+ * - `undefined` for a non-empty input: refused. A requested name is never
+ *   slugged, so `X=secret` or `QA` cannot silently become `xsecret` or `qa`
+ *   and then be printed or written into an overlay file name. Callers must
+ *   refuse with fixed text that does not include the input.
+ */
 export function parseEnvConfigSelection(
   input: string | undefined
 ): string | null | undefined {
@@ -149,7 +167,7 @@ export function parseEnvConfigSelection(
     return null;
   }
 
-  return normalizeEnvConfigName(trimmed);
+  return ENV_CONFIG_NAME_PATTERN.test(trimmed) ? trimmed : undefined;
 }
 
 export function sanitizeBranchSlug(input: string): string {

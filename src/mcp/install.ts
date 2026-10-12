@@ -84,6 +84,8 @@ export async function installMcpConfig(opts: {
   readonly targets: readonly McpTarget[];
   readonly scope: McpInstallScope;
   readonly projectRoot?: string;
+  /** User-scope root; defaults to `HOME`. */
+  readonly home?: string;
   readonly bundle?: McpBundleSelection;
 }): Promise<McpInstallResult[]> {
   const launch = opts.bundle
@@ -99,6 +101,7 @@ export async function installMcpConfig(opts: {
       target,
       scope: opts.scope,
       projectRoot: opts.projectRoot,
+      home: opts.home,
     });
     if (!resolved.ok) {
       results.push({
@@ -132,6 +135,8 @@ export async function checkMcpConfig(opts: {
   readonly targets: readonly McpTarget[];
   readonly scope: McpInstallScope;
   readonly projectRoot?: string;
+  /** User-scope root; defaults to `HOME`. */
+  readonly home?: string;
 }): Promise<McpCheckResult[]> {
   const results: McpCheckResult[] = [];
 
@@ -140,6 +145,7 @@ export async function checkMcpConfig(opts: {
       target,
       scope: opts.scope,
       projectRoot: opts.projectRoot,
+      home: opts.home,
     });
     if (!resolved.ok) {
       results.push({
@@ -211,6 +217,8 @@ export async function removeMcpConfig(opts: {
   readonly targets: readonly McpTarget[];
   readonly scope: McpInstallScope;
   readonly projectRoot?: string;
+  /** User-scope root; defaults to `HOME`. */
+  readonly home?: string;
 }): Promise<McpRemoveResult[]> {
   const results: McpRemoveResult[] = [];
 
@@ -219,6 +227,7 @@ export async function removeMcpConfig(opts: {
       target,
       scope: opts.scope,
       projectRoot: opts.projectRoot,
+      home: opts.home,
     });
     if (!resolved.ok) {
       results.push({
@@ -471,6 +480,7 @@ function resolveConfigPath(opts: {
   readonly target: McpTarget;
   readonly scope: McpInstallScope;
   readonly projectRoot?: string;
+  readonly home?: string;
 }):
   | { readonly ok: true; readonly path: string }
   | { readonly ok: false; readonly message: string } {
@@ -481,7 +491,7 @@ function resolveConfigPath(opts: {
     };
   }
 
-  const home = resolveHomeDir();
+  const home = opts.home === undefined ? resolveHomeDir() : opts.home.trim();
   if (opts.scope === "user" && !home) {
     return {
       ok: false,

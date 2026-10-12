@@ -308,7 +308,7 @@ macTest.each(
 macTest.each([
   { option: "base", overlay: "base", metadata: null },
   { option: undefined, overlay: "inherit", metadata: "qa" },
-  { option: " QA ", overlay: { named: "qa" }, metadata: "qa" },
+  { option: " qa ", overlay: { named: "qa" }, metadata: "qa" },
 ])(
   "source CLI env $option binds the documented selection into the native source before values",
   async ({ option, overlay, metadata }) => {

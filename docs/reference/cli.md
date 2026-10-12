@@ -1801,7 +1801,7 @@ hack setup <subcommand> [options]
 | `hack setup claude` | Install Claude Code hooks for hack CLI usage |
 | `hack setup codex` | Install Codex skill for hack CLI usage |
 | `hack setup agents` | Install AGENTS.md / CLAUDE.md snippets for hack CLI usage |
-| `hack setup sync` | Refresh project/global agent guidance |
+| `hack setup sync` | Refresh installed Hack-owned agent integrations |
 | `hack setup mcp` | Install MCP configs for hack CLI usage (no-shell only) |
 
 ### Options
@@ -1924,7 +1924,7 @@ hack setup agents [options]
 
 ## `hack setup sync`
 
-Refresh project/global agent guidance
+Refresh installed Hack-owned agent integrations
 
 ### Usage
 
@@ -1939,8 +1939,10 @@ hack setup sync [options]
 | `--path, -p <dir>` | Run a project command against a repo path (overrides cwd search) |
 | `--global` | Use global (user) scope instead of project scope |
 | `--all-scopes` | Target both project and global (user) scopes |
+| `--install-missing` | Also create missing integrations in the selected scope (default: refresh only installed Hack-owned files) |
 | `--check` | Check whether integration is installed |
 | `--remove` | Remove integration files/config |
+| `--json` | Output JSON (machine-readable) |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |
 | `--version, -v` | Show version |

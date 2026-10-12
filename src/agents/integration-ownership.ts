@@ -106,6 +106,7 @@ const KNOWN_RENDER_FINGERPRINTS: Readonly<
     "121d8f26374d24f2a09890a3", // v5.0.0-next.3..next
     "6449442a8f230412d4e5f9e7", // v5.0.0-next.4..next
     "d83da046cf7541ba30950880", // v5.0.0-next.4..next (offline env-matrix pointer)
+    "08f0db2d0a1889e5b3ef707f", // v5.0.0-next.4..next (refresh-only setup sync)
   ]),
   "hack-init-skill": new Set([
     "cd15fb6d8ed8e25071d05e75", // v3.1.0..v4.0.3
@@ -133,6 +134,7 @@ const KNOWN_RENDER_FINGERPRINTS: Readonly<
     "06cf6d0920afc1780b9946ba", // v5.0.0-next.3..next
     "cf0a31e197f9034485413674", // v5.0.0-next.4..next
     "3a99c9097855f93808e482cb", // v5.0.0-next.4..next (offline env-matrix pointer)
+    "19099625646d196aa0e8a0c0", // v5.0.0-next.4..next (refresh-only setup sync)
   ]),
 };
 
@@ -232,7 +234,7 @@ export function describePreservedReason({
   action,
 }: {
   readonly reason: IntegrationPreservedReason;
-  readonly action: "install" | "remove";
+  readonly action: "install" | "remove" | "sync";
 }): string {
   const cause: Readonly<Record<IntegrationPreservedReason, string>> = {
     "customized-content":
@@ -241,10 +243,13 @@ export function describePreservedReason({
     "not-a-regular-file": "it is not a regular file",
     unreadable: "it could not be read",
   };
-  const next =
-    action === "install"
-      ? "Move or delete it, then rerun setup to install the current version."
-      : "Delete it yourself if it is no longer needed.";
+  const nextSteps: Readonly<Record<typeof action, string>> = {
+    install:
+      "Move or delete it, then rerun setup to install the current version.",
+    sync: "Move or delete it, then run `hack setup sync --install-missing` or the client's `hack setup` command to install the current version.",
+    remove: "Delete it yourself if it is no longer needed.",
+  };
+  const next = nextSteps[action];
   return `Hack left this path unchanged because ${cause[reason]}. ${next}`;
 }
 

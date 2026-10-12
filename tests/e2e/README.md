@@ -468,7 +468,9 @@ sentinel client config (`~/.claude/settings.json`, `~/.claude.json`,
 `.claude/settings.local.json` and `.mcp.json` into two fixtures. It then runs
 `init --auto`, `init --auto --with codex`, `agent prime`,
 `agent prime --check`, `agent onboard`, `agent patterns`, `doctor --json`,
-`doctor --fix --no-interactive` and `setup sync --check` twice each. After
+`doctor --fix --no-interactive`, `setup sync --check`, and refresh-only
+`setup sync --all-scopes` twice each (`setup sync --check` exits 1 because the
+customized files are reported as preserved). After
 every run it requires byte-identical hashes for those trees, no new entries
 under them, and `git status` changes only under `.hack/`. Each command must
 also exit with its expected code, so a usage error cannot pass as "no write".

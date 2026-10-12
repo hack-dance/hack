@@ -13,6 +13,7 @@ import {
   installCursorRules,
   renderCursorRules,
 } from "../src/agents/cursor.ts";
+import { renderAgentInitPatterns } from "../src/agents/init-patterns.ts";
 import {
   INSTRUCTION_SECTIONS,
   type InstructionSurface,
@@ -25,6 +26,10 @@ import {
   renderAgentDocsSnippet,
   upsertAgentDocs,
 } from "../src/mcp/agent-docs.ts";
+import {
+  extractHackInvocations,
+  findGuidanceCommandIssues,
+} from "./helpers/cli-guidance-commands.ts";
 
 const RENDERED_SURFACES: Readonly<Record<InstructionSurface, string>> = {
   docs: renderAgentDocsSnippet(),
@@ -33,39 +38,10 @@ const RENDERED_SURFACES: Readonly<Record<InstructionSurface, string>> = {
   primer: renderAgentPrimer(),
 };
 
-const TOP_LEVEL_COMMANDS: ReadonlySet<string> = new Set(
-  CLI_SPEC.commands.map((command) => command.name)
-);
-
-/** Subcommand tokens allowed even though they are not top-level CLI commands. */
-const COMMAND_TOKEN_ALLOWLIST: ReadonlySet<string> = new Set([]);
-
-const BACKTICK_SEGMENT_PATTERN = /`([^`]+)`/g;
-
-/**
- * Extract the first subcommand token of every backtick-quoted `hack ...`
- * invocation in a rendered surface. Composite tokens like `up/down` are split
- * so each part is validated individually.
- */
-function extractHackSubcommandTokens(rendered: string): string[] {
-  const tokens: string[] = [];
-  for (const match of rendered.matchAll(BACKTICK_SEGMENT_PATTERN)) {
-    const segment = (match[1] ?? "").trim();
-    if (!(segment === "hack" || segment.startsWith("hack "))) {
-      continue;
-    }
-    const first = segment.slice("hack ".length).trim().split(/\s+/)[0] ?? "";
-    if (first.length === 0 || first.startsWith("-") || first.startsWith("<")) {
-      continue;
-    }
-    for (const part of first.split("/")) {
-      if (part.length > 0) {
-        tokens.push(part);
-      }
-    }
-  }
-  return tokens;
-}
+/** Rendered guidance outside the canonical sections that agents also execute. */
+const SUPPLEMENTAL_SURFACES: Readonly<Record<string, string>> = {
+  "agent patterns": renderAgentInitPatterns(),
+};
 
 let tempDir: string | null = null;
 
@@ -81,17 +57,79 @@ async function setupTempRepo(): Promise<string> {
   return tempDir;
 }
 
-test("every documented hack subcommand exists in CLI_SPEC", () => {
-  for (const [surface, rendered] of Object.entries(RENDERED_SURFACES)) {
-    const unknown = extractHackSubcommandTokens(rendered).filter(
-      (token) =>
-        !(TOP_LEVEL_COMMANDS.has(token) || COMMAND_TOKEN_ALLOWLIST.has(token))
-    );
+test("every documented hack command path and long flag exists in CLI_SPEC", () => {
+  for (const [surface, rendered] of Object.entries({
+    ...RENDERED_SURFACES,
+    ...SUPPLEMENTAL_SURFACES,
+  })) {
     expect(
-      unknown,
-      `surface "${surface}" references unknown hack subcommands`
+      extractHackInvocations(rendered).length,
+      `surface "${surface}" has no hack invocations to validate`
+    ).toBeGreaterThan(0);
+    expect(
+      findGuidanceCommandIssues({ cli: CLI_SPEC, rendered }),
+      `surface "${surface}" references unknown hack commands or flags`
     ).toEqual([]);
   }
+});
+
+test("guidance command validator rejects unknown nested subcommands and flags", () => {
+  for (const fixture of [
+    "`hack env bogus`",
+    "`hack up --no-such-flag`",
+    "`hack agent patterns --json`",
+    "`hack setup claude|bogus`",
+    "`hack up/down --json`",
+    "`hack bogus`",
+  ]) {
+    expect(
+      findGuidanceCommandIssues({ cli: CLI_SPEC, rendered: fixture }),
+      `validator accepted ${fixture}`
+    ).not.toEqual([]);
+  }
+  for (const fixture of [
+    "`hack up/down/restart/doctor --json`",
+    "`hack init --with claude|codex`",
+    "`hack setup claude|codex`",
+    "`hack run <service> -- <cmd...> --child-flag`",
+    "```sh\nhack logs --no-follow --tail 100\n```",
+  ]) {
+    expect(
+      findGuidanceCommandIssues({ cli: CLI_SPEC, rendered: fixture }),
+      `validator rejected ${fixture}`
+    ).toEqual([]);
+  }
+  expect(
+    findGuidanceCommandIssues({
+      cli: CLI_SPEC,
+      rendered: "```sh\nhack env bogus\n```",
+    })
+  ).not.toEqual([]);
+});
+
+test("canonical guidance states run separators, adopt limits, and pipe hazards", () => {
+  for (const [surface, rendered] of Object.entries(RENDERED_SURFACES)) {
+    expect(rendered, `surface "${surface}"`).toContain(
+      "`hack run <service> -- <cmd...>`"
+    );
+    expect(rendered, `surface "${surface}"`).not.toContain(
+      "`hack run <service> <cmd...>`"
+    );
+    expect(rendered, `surface "${surface}"`).toContain(
+      "do not pipe `hack` output through `| tail` or `| grep`"
+    );
+  }
+  for (const surface of ["docs", "skill"] as const) {
+    const rendered = RENDERED_SURFACES[surface];
+    expect(rendered).toContain(
+      "Adopt only checks that every configured singleton port is already occupied; that is not a health, identity, or readiness check"
+    );
+    expect(rendered).toContain("`lifecycle.up.before` identity check");
+    expect(rendered).not.toContain("reuses a healthy existing listener");
+  }
+  expect(renderAgentInitPatterns()).toContain(
+    "`hack run <service> -- <cmd...>`"
+  );
 });
 
 test("no stale command patterns in any surface", () => {

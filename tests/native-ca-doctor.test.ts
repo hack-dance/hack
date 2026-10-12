@@ -3,6 +3,7 @@ import { createHash, X509Certificate } from "node:crypto";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { checkMacCaTrust } from "../src/lib/mac-ca-trust.ts";
 import {
   inspectNativeCaTrust,
   type NativeCaDoctorDependencies,
@@ -10,7 +11,12 @@ import {
 } from "../src/lib/native-ca-doctor.ts";
 import { run } from "../src/lib/shell.ts";
 import { hasControllingTerminal } from "../src/lib/tty-process-group.ts";
-import { CURRENT_CA_PEM, OLD_CA_PEM } from "./helpers/ca-certificates.ts";
+import {
+  CURRENT_CA_PEM,
+  EXPIRED_SAME_SUBJECT_CA_PEM,
+  OLD_CA_PEM,
+  UNRELATED_CA_PEM,
+} from "./helpers/ca-certificates.ts";
 
 const sha = (pem: string) =>
   createHash("sha256").update(new X509Certificate(pem).raw).digest("hex");
@@ -138,6 +144,54 @@ test("a rotated live owner during inspection refuses a current-trust claim", asy
         },
       })
     ).rejects.toThrow("changed during trust verification");
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("live native inspection inventories superseded same-subject roots from the one keychain read", async () => {
+  const f = await fixture();
+  const commands: string[][] = [];
+  const current = new X509Certificate(CURRENT_CA_PEM);
+  try {
+    const result = await inspectNativeCaTrust({
+      runtime: f.runtime,
+      dependencies: {
+        ...f.dependencies,
+        trust: (input) =>
+          checkMacCaTrust({
+            ...input,
+            now: Date.parse(current.validFrom) + 1000,
+            exec: async (cmd) => {
+              commands.push([...cmd]);
+              return {
+                exitCode: 0,
+                stdout:
+                  OLD_CA_PEM +
+                  CURRENT_CA_PEM +
+                  EXPIRED_SAME_SUBJECT_CA_PEM +
+                  UNRELATED_CA_PEM,
+                stderr: "",
+              };
+            },
+          }),
+      },
+    });
+    expect(result.trust.trusted).toBe(true);
+    expect(result.trust.supersededRoots).toMatchObject({
+      count: 2,
+      expired: 1,
+      notYetValid: 0,
+    });
+    expect(result.trust.supersededRoots?.sha256).toEqual(
+      [sha(OLD_CA_PEM), sha(EXPIRED_SAME_SUBJECT_CA_PEM)]
+        .map((value) => value.toUpperCase())
+        .sort()
+    );
+    expect(commands.map((cmd) => cmd[1])).toEqual([
+      "find-certificate",
+      "verify-cert",
+    ]);
   } finally {
     await f.cleanup();
   }

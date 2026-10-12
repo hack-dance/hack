@@ -249,9 +249,17 @@ jobs:
       - name: Smoke slim runtime mounted-project env flow
         run: bash scripts/portable-container-smoke.sh hack-runtime-ci:slim linux/amd64
 
-  docker-e2e:
+  docker-e2e-shard:
+    # One deterministic slice of the default e2e set per runner (tests/e2e/shard.ts).
+    name: docker-e2e shard ${{ matrix.shard }}/4
+    strategy:
+      # Let every shard finish so one failure still reports the other scenarios.
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
     runs-on: blacksmith-4vcpu-ubuntu-2404
-    # Measured 85-125 min on the shared Blacksmith engine; the budget bounds a hung engine, not a slow pass.
+    # The serial job measured 85-125 min on the shared Blacksmith engine. Each shard
+    # keeps that whole budget, so it bounds a hung engine, not a slow pass.
     timeout-minutes: 150
     permissions:
       contents: read
@@ -277,21 +285,27 @@ jobs:
           docker pull postgres:17.6-alpine
           docker pull lucaslorentz/caddy-docker-proxy:2.10.0-alpine
       - uses: dtolnay/rust-toolchain@1.97.1
+      # Each shard builds its own binaries (about 20 s), so the hashes it records match what it runs.
       - name: Build current-branch CLI and native config compiler
         run: |
           bun run build
           bun run build:config-compiler
+      # The one-off compiler checks run once, on the last shard, off the longest shard's path.
       - name: Verify literal argv through real compiler and Compose normalization
+        if: matrix.shard == 4
         run: HACK_TEST_COMPOSE_CONFIG=1 bun test tests/native-compose-renderer-config.test.ts --test-name-pattern '^legacy dollar-pair argv matches real compiler plan and Compose normalization$'
       - name: Verify Compose string argv through real compiler and Compose normalization
+        if: matrix.shard == 4
         run: HACK_TEST_COMPOSE_CONFIG=1 bun test tests/native-compose-renderer-config.test.ts --test-name-pattern '^(Compose string words match real compiler and renderer exec argv for selected profiles|raw unpaired dollars cannot become accepted pairs after Compose word splitting)$'
       - name: Verify owned bridge policy and aliases through real compiler and Compose normalization
+        if: matrix.shard == 4
         run: HACK_TEST_COMPOSE_CONFIG=1 bun test tests/native-compose-renderer-config.test.ts --test-name-pattern '^one authored bridge keeps internal policy and static aliases through compiler and Compose normalization$'
-      - name: Run local and Docker E2E
+      - name: Run local and Docker E2E shard
         env:
           HACK_E2E_PROCESS_POLICY_REFUSAL_CAPSULE: "1"
           HACK_E2E_CAPSULE_DIR: ${{ runner.temp }}/process-policy-capsules
           HACK_E2E_CLI_BIN: ${{ github.workspace }}/dist/hack
+          HACK_E2E_SHARD: ${{ matrix.shard }}/4
         run: |
           HACK_E2E_DOCKER_HOST="${DOCKER_HOST:-$(docker context inspect --format '{{.Endpoints.docker.Host}}')}"
           HACK_E2E_NETWORK_SOURCE_REVISION="$(git rev-parse HEAD)"
@@ -300,17 +314,18 @@ jobs:
           HACK_E2E_COMPOSE_PLUGIN_PATH="$(docker info --format '{{json .ClientInfo.Plugins}}' | bun -e 'import { realpath } from "node:fs/promises"; const value = await Bun.stdin.json(); const plugin = Array.isArray(value) ? value.find((entry) => entry && Object.hasOwn(entry, "Name") && entry.Name === "compose") : null; if (!(plugin && Object.hasOwn(plugin, "Path") && typeof plugin.Path === "string" && plugin.Path.startsWith("/"))) throw new Error("Installed Compose plugin path is unavailable"); process.stdout.write(await realpath(plugin.Path));')"
           HACK_E2E_COMPOSE_PLUGIN_SHA256="$(sha256sum "$HACK_E2E_COMPOSE_PLUGIN_PATH" | cut -d ' ' -f1)"
           export HACK_E2E_DOCKER_HOST HACK_E2E_NETWORK_SOURCE_REVISION HACK_E2E_NETWORK_CLI_SHA256 HACK_E2E_NETWORK_COMPILER_SHA256 HACK_E2E_COMPOSE_PLUGIN_PATH HACK_E2E_COMPOSE_PLUGIN_SHA256
-          HACK_E2E_REQUIRE_DOCKER=1 HACK_E2E_REQUIRE_TMUX=1 bun run test:e2e:local:docker
+          HACK_E2E_REQUIRE_DOCKER=1 HACK_E2E_REQUIRE_TMUX=1 bun run test:e2e:local:docker --shard="$HACK_E2E_SHARD"
       - name: Preserve process-policy capsule and startup diagnostic
         # Closed fixed-field JSON only (counts, enums, booleans); the gh log viewer truncates it inline.
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: process-policy-capsules
+          name: process-policy-capsules-shard-${{ matrix.shard }}
           path: ${{ runner.temp }}/process-policy-capsules
           if-no-files-found: ignore
           retention-days: 14
       - name: Smoke container resource metadata without optional fields
+        if: matrix.shard == 4
         run: |
           probe_id=$(docker create --network none --read-only alpine:3.20 true)
           trap 'docker rm -f "$probe_id" >/dev/null' EXIT
@@ -318,6 +333,25 @@ jobs:
           bun -e 'const r = await Bun.stdin.json(); if (r.probeStatus !== "not_running" || r.container.healthcheckIntervalNs !== null || r.container.writableLayerBytes !== null) throw new Error("Invalid optional resource metadata");' < "$RUNNER_TEMP/resource-probe.json"
           bun scripts/inspect-container-resources.ts --container "$probe_id" --storage > "$RUNNER_TEMP/resource-probe.json"
           bun -e 'const r = await Bun.stdin.json(); if (typeof r.container.writableLayerBytes !== "number") throw new Error("Missing writable-layer accounting");' < "$RUNNER_TEMP/resource-probe.json"
+
+  docker-e2e:
+    # The single docker-e2e signal for the prerelease exact-head gate and branch checks.
+    # It runs even when a shard fails or is cancelled and passes only when every shard
+    # succeeded, so a failed shard can never surface as a skipped docker-e2e check.
+    needs: docker-e2e-shard
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Require every docker-e2e shard to succeed
+        env:
+          SHARD_RESULT: ${{ needs.docker-e2e-shard.result }}
+        run: |
+          if [ "$SHARD_RESULT" != "success" ]; then
+            echo "docker-e2e shards did not all succeed (result: $SHARD_RESULT)"
+            exit 1
+          fi
 
   test:
     runs-on: blacksmith-6vcpu-macos-15

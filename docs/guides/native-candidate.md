@@ -470,11 +470,17 @@ New normalized shared-source graphs also capture a separate hostname-change
 contract. A retaining restart can change only the literal hostnames of already
 routed services: the service set, upstream ports, TLS settings, probes, commands,
 environment declarations, images, mounts, networks and volumes must stay the same.
-The one exception is Hack's reserved
+The one exception is the reserved
 [runtime host metadata](../cli.md#runtime-host-metadata) keys (`HACK_BRANCH`,
 `HACK_COMPOSE_PROJECT`, `HACK_DEV_*`, `HACK_ALIAS_*`, `HACK_SERVICE_*` and
-`HACK_RUNTIME_METADATA`): their public values are derived from the hostnames, so
-the fingerprint ignores them. A metadata change without a hostname change still refuses.
+`HACK_RUNTIME_METADATA`) that Hack generates into the normalized Compose: their
+public values are derived from the hostnames, so the normalized fingerprint ignores
+them. A value you declare for one of these keys in `.hack/docker-compose.yml` is an
+ordinary literal, so changing it still refuses. A metadata change without a hostname
+change also still refuses. This includes changing `HACK_NATIVE_HTTPS_PORT`, and also
+selecting or removing the native HTTPS frontend when its port is not 443, because the
+advertised URLs gain or lose that port. Start the retained graph with the HTTPS
+frontend selection and port it was admitted with.
 Both original and normalized Compose declarations are checked; only fingerprints
 are retained. Changed dependency-cache inputs still refuse. The old ownership
 plan and named data identities remain fixed, while normalized input provenance and

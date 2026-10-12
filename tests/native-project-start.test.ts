@@ -2760,3 +2760,51 @@ test("startup without a runtime metadata selection leaves the reviewed graph unc
   expect(reviewed).not.toContain("HACK_");
   expect(saved && Object.hasOwn(saved, "runtimeMetadata")).toBe(false);
 });
+test("restart preflight refuses runtime host metadata that differs from reviewed routes", async () => {
+  const { opts } = await httpsFixture();
+  const review = opts.dependencies.review!;
+  const run: NativeProjectRun = {
+    run: "1".repeat(32),
+    owner: "c".repeat(32),
+    namespace: "b".repeat(64),
+    planId: "a".repeat(64),
+    effectiveEnvName: null,
+    profiles: [],
+    aws: null,
+    runtimeMetadata: true,
+  };
+  const preflight = (hostnames: readonly string[]) =>
+    preflightNativeRestart({
+      runtime: opts.runtime,
+      scope: opts.scope,
+      composeFile: opts.composeFile,
+      runtimeMetadata,
+      httpsPort: httpsSelection.httpsPort,
+      run,
+      dependencies: {
+        prepare: opts.dependencies.prepare,
+        review: async (request) =>
+          await review({
+            ...request,
+            run: async (checked) =>
+              await request.run({
+                ...checked,
+                report: {
+                  plan: {
+                    enrollment_compatible: true,
+                    services: {
+                      web: { active: true, routing: { port: 3000, hostnames } },
+                    },
+                  },
+                },
+              }),
+          }),
+        dependencies: async () => [],
+        invoke: restartPreflightInvoke,
+      },
+    });
+  await preflight(["web.example.com"]);
+  await expect(preflight(["other.example.com"])).rejects.toThrow(
+    "Native runtime metadata"
+  );
+});

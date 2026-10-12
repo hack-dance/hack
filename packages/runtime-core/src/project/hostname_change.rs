@@ -5,9 +5,11 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 /// Hack-owned public runtime host metadata keys (the CLI's runtime host metadata
-/// contract). Their values are derived from the effective route hostnames, branch and
-/// HTTPS ingress port, so a hostname change necessarily changes them. Like the route
-/// hostnames they are excluded from the fingerprint; every other literal still counts.
+/// contract). Hack generates them only into the normalized document, with values derived
+/// from the effective route hostnames, branch and HTTPS ingress port, so a hostname
+/// change necessarily changes them. They are excluded from the normalized document's
+/// fingerprint only: a value the user declares in the original Compose file is a literal
+/// like any other and still counts (Hack never overrides a declared key).
 const RUNTIME_METADATA_KEYS: [&str; 10] = [
     "HACK_ALIAS_HOST",
     "HACK_ALIAS_URL",
@@ -34,12 +36,14 @@ fn without_runtime_metadata(service: &mut Value) {
     }
 }
 
-fn masked(bytes: &[u8]) -> Option<Value> {
+fn masked(bytes: &[u8], generated_metadata: bool) -> Option<Value> {
     let mut value = yaml::parse(bytes).ok()?;
     let services = value.get_mut("services")?.as_object_mut()?;
     let mut routed = false;
     for service in services.values_mut() {
-        without_runtime_metadata(service);
+        if generated_metadata {
+            without_runtime_metadata(service);
+        }
         let Some(labels) = service.get_mut("labels") else {
             continue;
         };
@@ -68,8 +72,8 @@ fn masked(bytes: &[u8]) -> Option<Value> {
 /// Unsupported original routing simply cannot opt into future hostname changes.
 /// Both documents matter: normalization must not conceal unrelated original edits.
 pub(super) fn fingerprint(original: &[u8], normalized: &[u8]) -> Option<String> {
-    let original = masked(original)?;
-    let normalized = masked(normalized)?;
+    let original = masked(original, false)?;
+    let normalized = masked(normalized, true)?;
     let bytes = zeroize::Zeroizing::new(
         serde_json::to_vec(&("hack-hostname-raw-v1", original, normalized)).ok()?,
     );
@@ -172,6 +176,56 @@ mod tests {
             assert_ne!(
                 fingerprint(plain.as_bytes(), changed.as_bytes()),
                 fingerprint(plain.as_bytes(), plain.as_bytes())
+            );
+        }
+    }
+
+    #[test]
+    fn user_declared_metadata_keys_still_count_in_the_original() {
+        let declared = |host: &str, url: &str| {
+            BASE.replace("caddy: web.hack", &format!("caddy: {host}"))
+                .replace(
+                    "environment: {TOKEN: literal}",
+                    &format!("environment: {{TOKEN: literal, HACK_DEV_URL: '{url}'}}"),
+                )
+        };
+        // Hack skips a declared key, so the normalized document carries the user's value.
+        let before = declared("web.hack", "https://custom.example");
+        let expected = fingerprint(before.as_bytes(), before.as_bytes()).unwrap();
+        let moved = declared("web.v5.hack.gy", "https://custom.example");
+        assert_eq!(
+            fingerprint(moved.as_bytes(), moved.as_bytes()),
+            Some(expected.clone())
+        );
+        let edited = declared("web.v5.hack.gy", "https://other.example");
+        assert_ne!(
+            fingerprint(edited.as_bytes(), edited.as_bytes()),
+            Some(expected)
+        );
+        let list = |url: &str| {
+            format!(
+                "services: {{web: {{environment: ['HACK_DEV_URL={url}'], labels: ['caddy=a.hack', 'caddy.reverse_proxy={{{{upstreams 80}}}}', 'caddy.tls=internal']}}}}"
+            )
+        };
+        let plain = list("https://custom.example");
+        let edited = list("https://other.example");
+        assert_ne!(
+            fingerprint(plain.as_bytes(), plain.as_bytes()),
+            fingerprint(edited.as_bytes(), edited.as_bytes())
+        );
+        // Generated metadata differences in the normalized document still do not count.
+        let base = fingerprint(BASE.as_bytes(), BASE.as_bytes()).unwrap();
+        for (host, port) in [("web.hack", ""), ("web.v5.hack.gy", ":8443")] {
+            let original = BASE.replace("caddy: web.hack", &format!("caddy: {host}"));
+            let generated = original.replace(
+                "environment: {TOKEN: literal}",
+                &format!(
+                    "environment: {{TOKEN: literal, HACK_DEV_URL: 'https://{host}{port}', HACK_DEV_HOST: {host}}}"
+                ),
+            );
+            assert_eq!(
+                fingerprint(original.as_bytes(), generated.as_bytes()),
+                Some(base.clone())
             );
         }
     }

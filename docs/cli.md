@@ -450,10 +450,12 @@ port; host variables never do. Native-specific limits:
 - A graph whose data was retained by an earlier release is restored exactly as it was admitted and
   does not gain these variables. It receives them after it is next started without retained data.
 - These values are part of the retained graph's reviewed input. A retaining restart that changes
-  only route hostnames (for example a domain migration) remains supported, because the metadata
-  keys are excluded from the hostname-change fingerprint. Changing the native HTTPS port alone
-  changes the metadata without a hostname change, so the retained graph refuses to start with the
-  new port; start it with its original port.
+  only route hostnames (for example a domain migration) remains supported, because the generated
+  metadata keys are excluded from the hostname-change fingerprint. Values you declare for these
+  keys in `.hack/docker-compose.yml` still count. Changing the native HTTPS port, or selecting or
+  removing the native HTTPS frontend when its port is not 443, changes the metadata without a
+  hostname change, so the retained graph refuses to start. Start it with its original HTTPS
+  frontend selection and port.
 - Authored `.hack/hack.project.json` configuration does not deliver these variables yet, on either
   backend.
 

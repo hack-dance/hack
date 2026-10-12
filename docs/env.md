@@ -195,6 +195,15 @@ That means `.hack/.env` is no longer the primary runtime source of truth.
 
 `hack env materialize` is manual by design. Use it only when you need a compatibility file for an external tool that expects `.env` on disk.
 
+Hack writes `.hack/.env` and `.hack/.env.<overlay>` (from `materialize`, legacy
+`hack env set`, and the daemon env route) with mode `0600` by atomic replace: a
+private temporary file in `.hack/` is written, fsynced and renamed over the target,
+so readers never see a partial file. An existing file with group or other access is
+tightened to `0600` even when its contents are unchanged. Hack refuses, with a fixed
+message that names no file or value, to read or write an env file that is a symlink
+(including a dangling one) or not a regular file, or one whose `.hack` directory is a
+symlink. Replace the link with a regular file or directory to continue.
+
 For host execution, `hack host exec`, `hack host shell`, and lifecycle hooks/processes use a host-local view.
 That means Hack prefers host-usable values when it can:
 
@@ -529,7 +538,14 @@ The modern YAML env model is the canonical repo format today.
 
 Some older surfaces are still compatibility-oriented:
 
-- `hack env backend ...` remains relevant for legacy repos and older secret-store configurations
+- `hack env backend ...` remains relevant for legacy repos and older secret-store configurations.
+  The `encrypted_file` store (also used by the `cloud` shim) is replaced atomically
+  with mode `0600`, and set/delete hold an in-process queue plus a cooperative
+  `<store>.lock` so concurrent writers, including separate processes, do not lose
+  updates. A store path that is a symlink is refused for writes. The v1 store
+  envelope and legacy `v1:` values authenticate no associated data: they are not
+  bound to a path, project or variable name beyond the scoped key inside the
+  encrypted store plaintext
 - the daemon's env HTTP route (used by the macOS app) reads and writes the legacy dotenv-shaped
   contract (`source: 'plain_env'|'keychain'`, `resolvedFrom: 'dotenv'/'process'/'keychain'/'portable_backend'`),
   not the modern YAML `hack env list --json` shape; there is no web dashboard surface anymore

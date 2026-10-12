@@ -54,6 +54,7 @@ import {
   acquireNativeManagedEnvFile,
   assertNativeProjectInputRoot,
 } from "./native-project-inputs.ts";
+import { writePrivateEnvFileIfChanged } from "./private-env-file.ts";
 import {
   createPrivateFileExclusive,
   decodeCanonicalBase64,
@@ -2398,7 +2399,10 @@ export async function materializeProjectEnv(opts: {
   const envPath = resolve(opts.projectDir, PROJECT_ENV_FILENAME);
   const text = serializeDotEnv(selectedEnv);
   await assertLegacyProjectDirectory({ projectDir: opts.projectDir });
-  const changed = (await writeTextFileIfChanged(envPath, text)).changed;
+  // Mode 0600, atomic replace; a symlinked .env or .hack is refused.
+  const changed = (
+    await writePrivateEnvFileIfChanged({ envFile: envPath, text })
+  ).changed;
   await ensureDir(
     dirname(resolveProjectEnvStatePath({ projectDir: opts.projectDir }))
   );

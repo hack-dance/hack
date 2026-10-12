@@ -15,7 +15,11 @@ import type {
 import { readControlPlaneConfig } from "../control-plane/sdk/config.ts";
 import { resolveGlobalHackDir } from "./config-paths.ts";
 import { ensureDir, readTextFile } from "./fs.ts";
-import { decodeCanonicalBase64 } from "./private-file.ts";
+import {
+  decodeCanonicalBase64,
+  replacePrivateFileAtomic,
+} from "./private-file.ts";
+import { withProjectsRegistryLock } from "./projects-registry-lock.ts";
 
 const ENCRYPTED_FILE_KEY_ENV = "HACK_SECRETS_FILE_KEY";
 const DISABLE_ENCRYPTED_FILE_KEYCHAIN_FALLBACK_ENV =
@@ -31,7 +35,11 @@ const ENCRYPTED_IV_BYTES = 12;
 const ENCRYPTED_TAG_BYTES = 16;
 /** Decoded ciphertext bound for the whole encrypted store. */
 const ENCRYPTED_CIPHERTEXT_LIMIT = 16 * 1024 * 1024;
+const ENCRYPTED_STORE_WRITE_REFUSAL =
+  "Refused encrypted secret store write: the store path is a symlink or not a regular file. Replace it with a regular file and retry; values omitted.";
 let cachedEncryptedFileKey: string | null = null;
+/** Per-path tail of the in-process mutation queue; see withEncryptedStoreMutation. */
+const encryptedStoreMutationTails = new Map<string, Promise<void>>();
 let encryptedFileKeyFailureCooldownUntilMs = 0;
 
 type EncryptedStorePayload = {
@@ -388,43 +396,89 @@ function createEncryptedScopedStore(input: {
       });
       return entries[scopedKey] ?? null;
     },
-    set: async ({ key, value }) => {
-      const entries = await readEncryptedEntries({
+    set: async ({ key, value }) =>
+      await withEncryptedStoreMutation({
         filePath: input.filePath,
-        encryptionKey: input.encryptionKey,
-      });
-      const scopedKey = buildScopedSecretKey({
-        scope: input.scope,
-        key,
-      });
-      entries[scopedKey] = value;
-      await writeEncryptedEntries({
+        run: async () => {
+          const entries = await readEncryptedEntries({
+            filePath: input.filePath,
+            encryptionKey: input.encryptionKey,
+          });
+          const scopedKey = buildScopedSecretKey({
+            scope: input.scope,
+            key,
+          });
+          entries[scopedKey] = value;
+          await writeEncryptedEntries({
+            filePath: input.filePath,
+            encryptionKey: input.encryptionKey,
+            entries,
+          });
+        },
+      }),
+    delete: async ({ key }) =>
+      await withEncryptedStoreMutation({
         filePath: input.filePath,
-        encryptionKey: input.encryptionKey,
-        entries,
-      });
-    },
-    delete: async ({ key }) => {
-      const entries = await readEncryptedEntries({
-        filePath: input.filePath,
-        encryptionKey: input.encryptionKey,
-      });
-      const scopedKey = buildScopedSecretKey({
-        scope: input.scope,
-        key,
-      });
-      if (!(scopedKey in entries)) {
-        return false;
-      }
-      delete entries[scopedKey];
-      await writeEncryptedEntries({
-        filePath: input.filePath,
-        encryptionKey: input.encryptionKey,
-        entries,
-      });
-      return true;
-    },
+        run: async () => {
+          const entries = await readEncryptedEntries({
+            filePath: input.filePath,
+            encryptionKey: input.encryptionKey,
+          });
+          const scopedKey = buildScopedSecretKey({
+            scope: input.scope,
+            key,
+          });
+          if (!(scopedKey in entries)) {
+            return false;
+          }
+          delete entries[scopedKey];
+          await writeEncryptedEntries({
+            filePath: input.filePath,
+            encryptionKey: input.encryptionKey,
+            entries,
+          });
+          return true;
+        },
+      }),
   };
+}
+
+/**
+ * Serializes read-modify-write of one encrypted store file.
+ *
+ * Writers in this process queue per configured path, so they never poll each
+ * other; across processes the cooperative `<store>.lock` (the same exclusive
+ * hard-link owner protocol as the projects registry, with dead-owner recovery)
+ * admits one writer at a time. Every set/delete re-reads the store inside the
+ * lock, so a concurrent writer's update is never lost. Reads take no lock:
+ * writes replace the file atomically, so a reader sees a whole envelope.
+ */
+async function withEncryptedStoreMutation<T>(input: {
+  readonly filePath: string;
+  readonly run: () => Promise<T>;
+}): Promise<T> {
+  const previous =
+    encryptedStoreMutationTails.get(input.filePath) ?? Promise.resolve();
+  let release = (): void => undefined;
+  const turn = new Promise<void>((resolveTurn) => {
+    release = resolveTurn;
+  });
+  const tail = previous.then(() => turn);
+  encryptedStoreMutationTails.set(input.filePath, tail);
+  await previous;
+  try {
+    await ensureDir(dirname(input.filePath));
+    return await withProjectsRegistryLock({
+      lockPath: `${input.filePath}.lock`,
+      label: "encrypted secret store",
+      run: input.run,
+    });
+  } finally {
+    release();
+    if (encryptedStoreMutationTails.get(input.filePath) === tail) {
+      encryptedStoreMutationTails.delete(input.filePath);
+    }
+  }
 }
 
 function buildScopedSecretKey(input: {
@@ -751,7 +805,14 @@ async function writeEncryptedEntries(input: {
     encryptionKey: input.encryptionKey,
   });
   await ensureDir(dirname(input.filePath));
-  await Bun.write(input.filePath, `${JSON.stringify(envelope, null, 2)}\n`);
+  // Atomic same-directory replace with mode 0600. The configured store
+  // location's ancestors are the user's choice and are not inspected.
+  await replacePrivateFileAtomic({
+    path: input.filePath,
+    directories: [],
+    text: `${JSON.stringify(envelope, null, 2)}\n`,
+    refusal: () => new Error(ENCRYPTED_STORE_WRITE_REFUSAL),
+  });
 }
 
 /**

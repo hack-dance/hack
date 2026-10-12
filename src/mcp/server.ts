@@ -7,7 +7,6 @@ import {
   CallToolRequestSchema,
   type CallToolResult,
   ErrorCode,
-  McpError,
   type ServerNotification,
   type ServerRequest,
   type ToolAnnotations,
@@ -65,6 +64,73 @@ type HackCommandResult = {
 /** Existing CLI error codes reused for pre-spawn MCP refusals (no new codes). */
 type McpRefusalCode = Extract<HackErrorCode, "E_USAGE" | "E_PROJECT_NOT_FOUND">;
 
+/**
+ * Closed catalogue of pre-spawn refusals. Each reason maps to one existing
+ * error code and one fixed message. Messages are value-free: they never repeat
+ * caller-supplied project names, ids, paths, services or argv, nor registry
+ * values derived from them. `invalid_arguments` may append the rejected schema
+ * field names, which are drawn only from the tool's own input schema keys.
+ */
+export const MCP_REFUSALS = Object.freeze({
+  invalid_arguments: {
+    code: "E_USAGE",
+    message: "Invalid arguments.",
+  },
+  conflicting_project_selection: {
+    code: "E_USAGE",
+    message: "Use only one of projectName, repoRoot, or path.",
+  },
+  invalid_project_name: {
+    code: "E_USAGE",
+    message: "Invalid projectName: use a name containing letters or digits.",
+  },
+  ambiguous_project: {
+    code: "E_USAGE",
+    message:
+      "Ambiguous project selection: multiple registrations match. Select by path and inspect 'hack projects' before renaming or pruning an entry.",
+  },
+  project_not_found: {
+    code: "E_PROJECT_NOT_FOUND",
+    message: "Unknown project. Run 'hack init' or 'hack projects' first.",
+  },
+  path_not_found: {
+    code: "E_PROJECT_NOT_FOUND",
+    message: "Path not found.",
+  },
+  path_not_registered: {
+    code: "E_PROJECT_NOT_FOUND",
+    message: "Path is outside registered hack projects.",
+  },
+  no_project_context: {
+    code: "E_PROJECT_NOT_FOUND",
+    message: "No project context found. Provide projectName or path.",
+  },
+  init_path_required: {
+    code: "E_USAGE",
+    message: "Provide repoRoot or path for initialization.",
+  },
+} as const satisfies Record<
+  string,
+  { readonly code: McpRefusalCode; readonly message: string }
+>);
+
+export type McpRefusalReason = keyof typeof MCP_REFUSALS;
+
+/** Reasons whose message is exactly the catalogue text. */
+type FixedRefusalReason = Exclude<McpRefusalReason, "invalid_arguments">;
+
+const MCP_REFUSAL_REASONS = Object.keys(MCP_REFUSALS) as [
+  McpRefusalReason,
+  ...McpRefusalReason[],
+];
+
+/**
+ * In-band result for a `tools/call` naming an unregistered tool. Matches the
+ * SDK dispatcher's earlier shape (untyped `isError` text carrying the
+ * InvalidParams code) but never repeats the requested tool name.
+ */
+export const MCP_UNKNOWN_TOOL_MESSAGE = `MCP error ${ErrorCode.InvalidParams}: Tool not found`;
+
 type ToolResultPayload = HackCommandResult & {
   readonly ok: boolean;
   readonly data?: unknown;
@@ -72,17 +138,14 @@ type ToolResultPayload = HackCommandResult & {
   readonly spawned?: false;
   readonly error?: {
     readonly code: McpRefusalCode;
+    readonly reason: McpRefusalReason;
     readonly message: string;
   };
 };
 
 type ProjectArgsResolution =
   | { readonly ok: true; readonly args: string[] }
-  | {
-      readonly ok: false;
-      readonly code: McpRefusalCode;
-      readonly message: string;
-    };
+  | { readonly ok: false; readonly reason: FixedRefusalReason };
 
 const DEFAULT_CMD_TIMEOUT_MS = 120_000;
 const DEFAULT_LOG_TAIL_EVENTS = 200;
@@ -143,6 +206,7 @@ const toolOutputSchema = {
   error: z
     .object({
       code: z.enum(["E_USAGE", "E_PROJECT_NOT_FOUND"]),
+      reason: z.enum(MCP_REFUSAL_REASONS),
       message: z.string(),
     })
     .optional(),
@@ -787,10 +851,7 @@ function registerTools(opts: {
     handler: async (input, extra) => {
       const selection = toProjectSelection(input);
       if (!(selection.path || selection.repoRoot)) {
-        return buildToolError({
-          code: "E_USAGE",
-          message: "Provide repoRoot or path for initialization.",
-        });
+        return buildToolError({ reason: "init_path_required" });
       }
 
       const resolved = await resolveProjectArgs({
@@ -863,13 +924,19 @@ function registerHackTool<const Shape extends z.ZodRawShape>(opts: {
 }): void {
   const { tool } = opts;
   const schema = z.object(tool.inputSchema);
+  const schemaKeys: ReadonlySet<string> = new Set(
+    Object.keys(tool.inputSchema)
+  );
   const entry: HackToolEntry = {
     call: async (args, extra) => {
       const parsed = await schema.safeParseAsync(args ?? {});
       if (!parsed.success) {
         return buildToolError({
-          code: "E_USAGE",
-          message: describeInvalidArguments(parsed.error),
+          reason: "invalid_arguments",
+          message: describeInvalidArguments({
+            error: parsed.error,
+            schemaKeys,
+          }),
         });
       }
       return await tool.handler(parsed.data, extra);
@@ -897,6 +964,10 @@ function registerHackTool<const Shape extends z.ZodRawShape>(opts: {
  * `{error, spawned: false}` refusal. Thrown handler failures and output-schema
  * mismatches keep the SDK's untyped `isError` text result, because they may
  * occur after a child was spawned.
+ *
+ * An unknown tool name keeps the SDK 1.26 contract: an in-band `isError` text
+ * result (not a JSON-RPC protocol error), with the fixed
+ * {@link MCP_UNKNOWN_TOOL_MESSAGE} that omits the requested name.
  */
 function installTypedToolDispatch(opts: {
   readonly server: McpServer;
@@ -908,10 +979,7 @@ function installTypedToolDispatch(opts: {
     async (request, extra): Promise<CallToolResult> => {
       const entry = opts.tools.get(request.params.name);
       if (!entry) {
-        throw new McpError(
-          ErrorCode.InvalidParams,
-          `Tool ${request.params.name} not found`
-        );
+        return buildUntypedToolError(MCP_UNKNOWN_TOOL_MESSAGE);
       }
       try {
         const result = await entry.call(request.params.arguments, extra);
@@ -935,19 +1003,29 @@ function installTypedToolDispatch(opts: {
   );
 }
 
-/** Closed, value-free summary: names the rejected fields, never echoes input. */
-function describeInvalidArguments(error: z.ZodError): string {
+/**
+ * Closed, value-free summary: names the rejected fields, never echoes input.
+ * Field names are kept only when they are keys of the tool's own schema, so a
+ * caller-chosen key can never reach the message.
+ */
+function describeInvalidArguments(opts: {
+  readonly error: z.ZodError;
+  readonly schemaKeys: ReadonlySet<string>;
+}): string {
   const fields = [
     ...new Set(
-      error.issues
+      opts.error.issues
         .map((issue) => issue.path[0])
-        .filter((key): key is string => typeof key === "string")
+        .filter(
+          (key): key is string =>
+            typeof key === "string" && opts.schemaKeys.has(key)
+        )
     ),
   ];
   const subject =
     fields.length > 0
       ? `Invalid arguments: ${fields.join(", ")}.`
-      : "Invalid arguments.";
+      : MCP_REFUSALS.invalid_arguments.message;
   return `${subject} Identifiers must match ${COMPOSE_IDENTIFIER_PATTERN.source} (branches may also contain "/"); limits must be positive integers within their documented ceiling.`;
 }
 
@@ -984,19 +1062,27 @@ function buildToolResult(opts: {
  * `spawned: false` is a guarantee: every caller returns before
  * `runHackCommand`/`runHackLogTail`, so no argv, audit line or mutation occurs.
  * `stderr` repeats the message for clients reading the earlier contract.
+ * The message is the reason's fixed text from {@link MCP_REFUSALS}; only
+ * `invalid_arguments` may pass its schema-key-only summary instead.
  */
-function buildToolError(opts: {
-  readonly code: McpRefusalCode;
-  readonly message: string;
-}): CallToolResult {
+function buildToolError(
+  opts:
+    | { readonly reason: FixedRefusalReason }
+    | { readonly reason: "invalid_arguments"; readonly message: string }
+): CallToolResult {
+  const { code } = MCP_REFUSALS[opts.reason];
+  const message =
+    opts.reason === "invalid_arguments"
+      ? opts.message
+      : MCP_REFUSALS[opts.reason].message;
   const payload: ToolResultPayload = {
     ok: false,
     command: "",
     exitCode: 1,
     stdout: "",
-    stderr: opts.message,
+    stderr: message,
     spawned: false,
-    error: { code: opts.code, message: opts.message },
+    error: { code, reason: opts.reason, message },
   };
 
   return {
@@ -1097,11 +1183,7 @@ async function resolveProjectArgs(opts: {
     selection.path,
   ].filter((value) => value !== undefined);
   if (picked.length > 1) {
-    return {
-      ok: false,
-      code: "E_USAGE",
-      message: "Use only one of projectName, repoRoot, or path.",
-    };
+    return { ok: false, reason: "conflicting_project_selection" };
   }
 
   if (selection.projectName !== undefined) {
@@ -1115,11 +1197,7 @@ async function resolveProjectArgs(opts: {
   if (pathLike) {
     const absPath = resolve(opts.cwd, pathLike);
     if (!(await pathExists(absPath))) {
-      return {
-        ok: false,
-        code: "E_PROJECT_NOT_FOUND",
-        message: `Path not found: ${absPath}`,
-      };
+      return { ok: false, reason: "path_not_found" };
     }
     if (!opts.allowUnregistered) {
       const allowed = await isPathAllowed({
@@ -1127,11 +1205,7 @@ async function resolveProjectArgs(opts: {
         registryPath: opts.registryPath,
       });
       if (!allowed) {
-        return {
-          ok: false,
-          code: "E_PROJECT_NOT_FOUND",
-          message: "Path is outside registered hack projects.",
-        };
+        return { ok: false, reason: "path_not_registered" };
       }
     }
     return { ok: true, args: [`--path=${absPath}`] };
@@ -1148,11 +1222,7 @@ async function resolveProjectArgs(opts: {
       registryPath: opts.registryPath,
     });
     if (!allowed) {
-      return {
-        ok: false,
-        code: "E_PROJECT_NOT_FOUND",
-        message: "No project context found. Provide projectName or path.",
-      };
+      return { ok: false, reason: "no_project_context" };
     }
   }
 
@@ -1165,11 +1235,7 @@ async function resolveProjectNameArgs(opts: {
 }): Promise<ProjectArgsResolution> {
   const name = normalizeProjectName(opts.projectName);
   if (!name) {
-    return {
-      ok: false,
-      code: "E_USAGE",
-      message: "Invalid projectName: use a name containing letters or digits.",
-    };
+    return { ok: false, reason: "invalid_project_name" };
   }
   try {
     const project = await resolveRegisteredProjectByName({
@@ -1177,11 +1243,7 @@ async function resolveProjectNameArgs(opts: {
       registryPath: opts.registryPath,
     });
     if (!project) {
-      return {
-        ok: false,
-        code: "E_PROJECT_NOT_FOUND",
-        message: `Unknown project "${opts.projectName}". Run 'hack init' or 'hack projects' first.`,
-      };
+      return { ok: false, reason: "project_not_found" };
     }
     return { ok: true, args: [`--project=${name}`] };
   } catch (error) {
@@ -1189,7 +1251,7 @@ async function resolveProjectNameArgs(opts: {
       error instanceof AmbiguousProjectNameError ||
       error instanceof AmbiguousProjectIdError
     ) {
-      return { ok: false, code: "E_USAGE", message: error.message };
+      return { ok: false, reason: "ambiguous_project" };
     }
     throw error;
   }

@@ -20,6 +20,9 @@ import {
   buildRunArgs,
   createMcpServer,
   MCP_INPUT_CEILINGS,
+  MCP_REFUSALS,
+  MCP_UNKNOWN_TOOL_MESSAGE,
+  type McpRefusalReason,
 } from "../src/mcp/server.ts";
 import { testIntegration } from "./helpers/ci.ts";
 
@@ -187,12 +190,27 @@ type ContractFixture = {
   readonly auditLog: string;
 };
 
+type RegistryEntryFixture = {
+  readonly id: string;
+  readonly name: string;
+  readonly repoRoot: string;
+};
+
+type ContractFixtureOptions = {
+  /** Extra registry rows beside the registered `demo` project. */
+  readonly extraProjects?: readonly RegistryEntryFixture[];
+  /** Session cwd relative to the fixture root (default: the demo repo). */
+  readonly cwdName?: string;
+};
+
 type StubInvocation = {
   readonly args: readonly string[];
   readonly noInteractive: string | null;
 };
 
-async function startContractFixture(): Promise<ContractFixture> {
+async function startContractFixture(
+  opts: ContractFixtureOptions = {}
+): Promise<ContractFixture & { readonly root: string }> {
   const root = await mkdtemp(join(tmpdir(), "hack-mcp-contract-"));
   contractRoots.push(root);
   const project = join(root, "repo");
@@ -219,9 +237,22 @@ async function startContractFixture(): Promise<ContractFixture> {
           projectDirName: ".hack",
           projectDir,
         },
+        ...(opts.extraProjects ?? []).map((entry) => ({
+          id: entry.id,
+          createdAt: "2026-01-01T00:00:00Z",
+          name: entry.name,
+          repoRoot: join(root, entry.repoRoot),
+          projectDirName: ".hack",
+          projectDir: join(root, entry.repoRoot, ".hack"),
+        })),
       ],
     })
   );
+  let cwd = project;
+  if (opts.cwdName !== undefined) {
+    cwd = join(root, opts.cwdName);
+    await mkdir(cwd, { recursive: true });
+  }
   const argvLog = join(root, "argv.jsonl");
   const stub = join(root, "hack-stub");
   await writeFile(
@@ -243,14 +274,14 @@ async function startContractFixture(): Promise<ContractFixture> {
     HACK_MCP_COMMAND: stub,
   };
   Reflect.deleteProperty(env, "HACK_NO_INTERACTIVE");
-  const server = createMcpServer({ cwd: project, env });
+  const server = createMcpServer({ cwd, env });
   const client = new Client({ name: "hack-mcp-contract", version: "1" });
   contractClients.push(client);
   const [clientTransport, serverTransport] =
     InMemoryTransport.createLinkedPair();
   await server.connect(serverTransport);
   await client.connect(clientTransport);
-  return { client, argvLog, auditLog: join(state, "mcp-audit.log") };
+  return { client, argvLog, auditLog: join(state, "mcp-audit.log"), root };
 }
 
 async function readStubInvocations(
@@ -516,7 +547,7 @@ test("project resolution refusals carry existing codes and never spawn", async (
   expect(unknown.structuredContent).toMatchObject({
     ok: false,
     spawned: false,
-    error: { code: "E_PROJECT_NOT_FOUND" },
+    error: { code: "E_PROJECT_NOT_FOUND", reason: "project_not_found" },
   });
   const ambiguous = await fixture.client.callTool({
     name: "hack.project.run",
@@ -528,11 +559,151 @@ test("project resolution refusals carry existing codes and never spawn", async (
     stderr: "Use only one of projectName, repoRoot, or path.",
     error: {
       code: "E_USAGE",
+      reason: "conflicting_project_selection",
       message: "Use only one of projectName, repoRoot, or path.",
     },
   });
   expect(await readStubInvocations(fixture.argvLog)).toEqual([]);
   expect(await Bun.file(fixture.auditLog).exists()).toBe(false);
+});
+
+/**
+ * Lowercase alphanumeric so project-name normalization keeps it intact; any
+ * echo of caller input (or of registry values it selected) would expose it.
+ */
+const CANARY = "zqxcanary4821";
+
+type CanaryRefusal = {
+  readonly reason: McpRefusalReason;
+  readonly name: string;
+  readonly arguments: Record<string, unknown>;
+  readonly fixture?: ContractFixtureOptions;
+};
+
+const canaryRefusals: readonly CanaryRefusal[] = [
+  {
+    reason: "invalid_arguments",
+    name: "hack.project.run",
+    arguments: { projectName: "demo", service: `-${CANARY}`, cmd: [CANARY] },
+  },
+  {
+    reason: "conflicting_project_selection",
+    name: "hack.project.status",
+    arguments: { projectName: CANARY, path: `/nonexistent/${CANARY}` },
+  },
+  {
+    reason: "invalid_project_name",
+    name: "hack.project.status",
+    arguments: { projectName: `%%%${"!".repeat(3)}%%%` },
+  },
+  {
+    reason: "project_not_found",
+    name: "hack.project.status",
+    arguments: { projectName: CANARY },
+  },
+  {
+    reason: "ambiguous_project",
+    name: "hack.project.status",
+    arguments: { projectName: CANARY },
+    fixture: {
+      extraProjects: [
+        { id: `${CANARY}-a`, name: CANARY, repoRoot: `${CANARY}-a` },
+        { id: `${CANARY}-b`, name: CANARY, repoRoot: `${CANARY}-b` },
+      ],
+    },
+  },
+  {
+    reason: "ambiguous_project",
+    name: "hack.project.status",
+    arguments: { projectName: "idclash" },
+    fixture: {
+      extraProjects: [
+        { id: CANARY, name: "idclash", repoRoot: `${CANARY}-a` },
+        { id: CANARY, name: "idclash-twin", repoRoot: `${CANARY}-b` },
+      ],
+    },
+  },
+  {
+    reason: "path_not_found",
+    name: "hack.project.status",
+    arguments: { path: `/nonexistent/${CANARY}` },
+  },
+  {
+    reason: "path_not_registered",
+    name: "hack.project.logs.snapshot",
+    arguments: { path: ".", service: "api" },
+    fixture: { cwdName: CANARY },
+  },
+  {
+    reason: "no_project_context",
+    name: "hack.project.status",
+    arguments: {},
+    fixture: { cwdName: CANARY },
+  },
+  {
+    reason: "init_path_required",
+    name: "hack.project.init",
+    arguments: { name: CANARY, devHost: `${CANARY}.hack` },
+  },
+];
+
+test("every typed refusal is value-free: fixed message, closed reason, no canary", async () => {
+  const covered = new Set<McpRefusalReason>();
+  for (const refusal of canaryRefusals) {
+    const fixture = await startContractFixture(refusal.fixture);
+    const result = await fixture.client.callTool({
+      name: refusal.name,
+      arguments: refusal.arguments,
+    });
+    const expected = MCP_REFUSALS[refusal.reason];
+    const structured = result.structuredContent as {
+      readonly stderr: string;
+      readonly error: { readonly message: string };
+    };
+    expect({ reason: refusal.reason, isError: result.isError }).toEqual({
+      reason: refusal.reason,
+      isError: true,
+    });
+    expect(structured).toMatchObject({
+      ok: false,
+      spawned: false,
+      command: "",
+      stdout: "",
+      error: { code: expected.code, reason: refusal.reason },
+    });
+    if (refusal.reason === "invalid_arguments") {
+      expect(structured.error.message).toStartWith(
+        "Invalid arguments: service."
+      );
+    } else {
+      expect(structured.error.message).toBe(expected.message);
+    }
+    expect(structured.stderr).toBe(structured.error.message);
+    const serialized = JSON.stringify(result);
+    expect(serialized).not.toContain(CANARY);
+    expect(serialized).not.toContain("%%%");
+    expect(serialized).not.toContain(fixture.root);
+    expect(await readStubInvocations(fixture.argvLog)).toEqual([]);
+    expect(await Bun.file(fixture.auditLog).exists()).toBe(false);
+    covered.add(refusal.reason);
+  }
+  const coveredReasons: readonly string[] = [...covered].sort();
+  expect(coveredReasons).toEqual(Object.keys(MCP_REFUSALS).sort());
+});
+
+test("an unknown tool keeps the in-band isError shape without echoing its name", async () => {
+  const fixture = await startContractFixture();
+  const result = await fixture.client.callTool({
+    name: `hack.${CANARY}`,
+    arguments: { projectName: CANARY },
+  });
+  expect(result).toEqual({
+    content: [{ type: "text", text: MCP_UNKNOWN_TOOL_MESSAGE }],
+    isError: true,
+  });
+  expect(MCP_UNKNOWN_TOOL_MESSAGE).toBe("MCP error -32602: Tool not found");
+  expect(JSON.stringify(result)).not.toContain(CANARY);
+  expect(await readStubInvocations(fixture.argvLog)).toEqual([]);
 });
 
 const READ_ONLY = { readOnlyHint: true, openWorldHint: false };

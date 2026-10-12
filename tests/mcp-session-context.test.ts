@@ -138,6 +138,7 @@ test("MCP path authorization uses only that session's registry", async () => {
     spawned: false,
     error: {
       code: "E_PROJECT_NOT_FOUND",
+      reason: "path_not_registered",
       message: "Path is outside registered hack projects.",
     },
   });

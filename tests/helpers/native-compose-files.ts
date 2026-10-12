@@ -70,6 +70,8 @@ export async function fileCommandFixture(source: unknown = FILE_SOURCE) {
   const root = join(parent, "checkout");
   await mkdir(join(root, ".hack"), { recursive: true });
   await mkdir(join(parent, "home"), { mode: 0o700 });
+  // Private HOME for child CLIs; the contributor's home is never selected.
+  await mkdir(join(parent, "user-home"), { mode: 0o700 });
   await Bun.write(
     join(root, ".hack/hack.project.json"),
     JSON.stringify(source)
@@ -152,7 +154,9 @@ await fail();
 }
 export function spawnFiles(
   fixture: { readonly parent: string; readonly root: string },
-  args = ["up", "--detach", "--json"]
+  args = ["up", "--detach", "--json"],
+  /** Diagnostics only, such as the passive phase trace. */
+  extraEnv: Readonly<Record<string, string>> = {}
 ) {
   const child = Bun.spawn(
     [
@@ -165,7 +169,7 @@ export function spawnFiles(
     {
       cwd: fixture.root,
       env: {
-        HOME: process.env.HOME,
+        HOME: join(fixture.parent, "user-home"),
         LANG: "C",
         PATH: `${fixture.parent}:/usr/bin:/bin`,
         HACK_HOME: join(fixture.parent, "home"),
@@ -176,6 +180,7 @@ export function spawnFiles(
         HACK_COMPOSE_STARTUP_TIMEOUT_MS: "3000",
         CI: "1",
         HACK_EXECUTION_MODE: "non_interactive",
+        ...extraEnv,
       },
       stdin: "ignore",
       stdout: "pipe",
@@ -187,9 +192,10 @@ export function spawnFiles(
 }
 export async function invokeFiles(
   fixture: { readonly parent: string; readonly root: string },
-  args = ["up", "--detach", "--json"]
+  args = ["up", "--detach", "--json"],
+  extraEnv: Readonly<Record<string, string>> = {}
 ) {
-  const child = spawnFiles(fixture, args);
+  const child = spawnFiles(fixture, args, extraEnv);
   const timer = setTimeout(() => child.kill("SIGKILL"), 45_000);
   try {
     const [code, stdout, stderr] = await Promise.all([

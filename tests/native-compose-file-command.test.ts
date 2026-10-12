@@ -166,6 +166,59 @@ test("source CLI delivers actual acquired binary, managed and empty files with e
   expect(await fileJournal(ready.document)).toContain('"phase":"retired"');
   await assertFileTransport(fixture);
 }, 120_000);
+// Finalization may take its single proof pass only when the file retirement
+// step would merely read. A first up has new file material and no saved file
+// material: its completion step must still run, so the post-completion
+// ownership pass re-observes the exact file mounts (files.assertReady) and the
+// second finalize witness pass follows it.
+test("first file up without saved file material keeps the completion step, post-completion file check and second finalize pass", async () => {
+  const fixture = await fileCommandFixture();
+  const up = await invokeFiles(fixture, undefined, {
+    HACK_NATIVE_COMPOSE_PHASE_TRACE: "1",
+  });
+  expect(up.code).toBe(0);
+  const phases = up.stderr
+    .split("\n")
+    .filter((line) => line.startsWith('{"diagnostic":"native-compose-phase",'))
+    .map((line) => JSON.parse(line) as { phase: string; boundary: string })
+    .filter((row) => row.boundary === "begin")
+    .map((row) => row.phase);
+  const pass = [
+    "finalize.fresh",
+    "finalize.generation",
+    "finalize.owned",
+    "finalize.remember-storage",
+    "finalize.witnesses",
+    "finalize.pending",
+    "finalize.pending-check",
+  ];
+  expect(phases.slice(phases.indexOf("finalize.fresh"))).toEqual([
+    ...pass,
+    "finalize.before-complete",
+    ...pass,
+    "finalize.save",
+  ]);
+  // Exact file-mount observations after the engine start: workload readiness,
+  // the first finalize pass's unbound-root check, the completion step's
+  // readiness check and the post-completion ownership pass's readiness check.
+  // Without the completion step only the first two remain.
+  const requests = await assertFileTransport(fixture);
+  const started = requests.findIndex((args) => args[0] === "compose");
+  expect(started).toBeGreaterThanOrEqual(0);
+  expect(
+    requests
+      .slice(started)
+      .filter(
+        (args) =>
+          args[0] === "container" &&
+          args[1] === "inspect" &&
+          String(args[3]).includes('"mounts":{{json .Mounts}}')
+      )
+  ).toHaveLength(4);
+  const ready = await fileCommandState(fixture.root);
+  expect(ready.pending).toBeNull();
+  expect(ready.current.stopped).toBe(false);
+}, 120_000);
 test("unchanged authored file up acquires new bytes and retires its prior snapshot instead of reusing a warm generation", async () => {
   const fixture = await fileCommandFixture();
   expect((await invokeFiles(fixture)).code).toBe(0);

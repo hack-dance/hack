@@ -71,7 +71,8 @@ async function ownedColdCase(
             ],
             cwd: root,
             env: {
-              HOME: process.env.HOME ?? root,
+              // A private HOME under the fixture, never the contributor's.
+              HOME: join(root, "user-home"),
               LANG: "C",
               PATH: `${root}:/usr/bin:/bin`,
               HACK_HOME: join(root, "home"),

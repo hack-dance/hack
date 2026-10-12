@@ -1,4 +1,5 @@
-import { afterEach, beforeEach, expect, test } from "bun:test";
+import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
+import * as nodeCrypto from "node:crypto";
 import {
   access,
   mkdir,
@@ -450,6 +451,215 @@ test("encrypted_file v1 envelope round-trips, including the empty value", async 
   const store = await resolveSecretStore({ projectName: "app" });
   expect(await store.get({ key: "TOKEN" })).toBe(STORE_SENTINEL);
   expect(await store.get({ key: "EMPTY" })).toBe("");
+});
+
+/** Byte bound of the encrypted_file ciphertext parser. */
+const STORE_CIPHERTEXT_LIMIT = 16 * 1024 * 1024;
+
+function storeKey(): Buffer {
+  return nodeCrypto.createHash("sha256").update(STORE_KEY, "utf8").digest();
+}
+
+/** Opens a store envelope the way the v1 owner does, to reuse its plaintext. */
+function openStoreEnvelope(envelope: StoreEnvelope): string {
+  const decipher = nodeCrypto.createDecipheriv(
+    "aes-256-gcm",
+    storeKey(),
+    Buffer.from(envelope.iv, "base64"),
+    { authTagLength: 16 }
+  );
+  decipher.setAuthTag(Buffer.from(envelope.tag, "base64"));
+  return Buffer.concat([
+    decipher.update(Buffer.from(envelope.ciphertext, "base64")),
+    decipher.final(),
+  ]).toString("utf8");
+}
+
+/**
+ * Seals a store plaintext exactly as the v1 owner does but with a caller-chosen
+ * IV length. GCM accepts any non-empty IV, so a refusal of these authentic
+ * envelopes can only come from the parser's own IV and size guards.
+ */
+function sealStoreEnvelope(opts: {
+  readonly plaintext: string;
+  readonly ivBytes: number;
+}): StoreEnvelope {
+  const iv = nodeCrypto.randomBytes(opts.ivBytes);
+  const cipher = nodeCrypto.createCipheriv("aes-256-gcm", storeKey(), iv, {
+    authTagLength: 16,
+  });
+  const ciphertext = Buffer.concat([
+    cipher.update(opts.plaintext, "utf8"),
+    cipher.final(),
+  ]);
+  return {
+    version: 1,
+    algorithm: "aes-256-gcm",
+    iv: iv.toString("base64"),
+    tag: cipher.getAuthTag().toString("base64"),
+    ciphertext: ciphertext.toString("base64"),
+  };
+}
+
+/** Pads the real store plaintext with an extra entry to exactly `bytes` bytes. */
+function storePlaintextOfLength(opts: {
+  readonly envelope: StoreEnvelope;
+  readonly bytes: number;
+}): string {
+  const parsed = JSON.parse(openStoreEnvelope(opts.envelope)) as {
+    readonly version: number;
+    readonly entries: Record<string, string>;
+  };
+  const base = JSON.stringify({
+    ...parsed,
+    entries: { ...parsed.entries, PAD: "" },
+  });
+  const padded = JSON.stringify({
+    ...parsed,
+    entries: { ...parsed.entries, PAD: "a".repeat(opts.bytes - base.length) },
+  });
+  expect(Buffer.byteLength(padded, "utf8")).toBe(opts.bytes);
+  return padded;
+}
+
+async function readStoreToken(): Promise<
+  { readonly value: string | null } | { readonly error: unknown }
+> {
+  try {
+    const store = await resolveSecretStore({ projectName: "app" });
+    return { value: await store.get({ key: "TOKEN" }) };
+  } catch (error: unknown) {
+    return { error };
+  }
+}
+
+function expectFixedStoreRefusal(
+  outcome: { readonly value: string | null } | { readonly error: unknown }
+): void {
+  const error = "error" in outcome ? outcome.error : null;
+  expect(error).toBeInstanceOf(Error);
+  expect(error instanceof Error ? error.message : "").toMatch(
+    /^Invalid encrypted secret store payload at /
+  );
+  for (const privateText of [STORE_SENTINEL, STORE_KEY]) {
+    expect(String(error)).not.toContain(privateText);
+  }
+}
+
+test("encrypted_file test-sealed 12-byte-IV envelope at the ciphertext bound opens with the tag length pinned (control)", async () => {
+  const { storePath, envelope } = await encryptedStoreFixture();
+  await writeFile(
+    storePath,
+    `${JSON.stringify(
+      sealStoreEnvelope({
+        plaintext: storePlaintextOfLength({
+          envelope,
+          bytes: STORE_CIPHERTEXT_LIMIT,
+        }),
+        ivBytes: 12,
+      })
+    )}\n`
+  );
+  const decipher = spyOn(nodeCrypto, "createDecipheriv");
+  try {
+    const outcome = await readStoreToken();
+    expect("value" in outcome ? outcome.value : null).toBe(STORE_SENTINEL);
+    // The tag length is pinned by option rather than left to the runtime default.
+    expect(decipher).toHaveBeenCalled();
+    for (const call of decipher.mock.calls) {
+      const options: unknown = call[3];
+      expect(options).toEqual({ authTagLength: 16 });
+    }
+  } finally {
+    decipher.mockRestore();
+  }
+});
+
+for (const ivBytes of [8, 16]) {
+  test(`encrypted_file authentic envelope sealed with a ${ivBytes}-byte IV refuses before decipher`, async () => {
+    const { storePath, envelope } = await encryptedStoreFixture();
+    await writeFile(
+      storePath,
+      `${JSON.stringify(
+        sealStoreEnvelope({ plaintext: openStoreEnvelope(envelope), ivBytes })
+      )}\n`
+    );
+    const decipher = spyOn(nodeCrypto, "createDecipheriv");
+    try {
+      expectFixedStoreRefusal(await readStoreToken());
+      expect(decipher).not.toHaveBeenCalled();
+    } finally {
+      decipher.mockRestore();
+    }
+  });
+}
+
+test("encrypted_file authentic envelope one byte over the ciphertext bound refuses before decipher", async () => {
+  const { storePath, envelope } = await encryptedStoreFixture();
+  await writeFile(
+    storePath,
+    `${JSON.stringify(
+      sealStoreEnvelope({
+        plaintext: storePlaintextOfLength({
+          envelope,
+          bytes: STORE_CIPHERTEXT_LIMIT + 1,
+        }),
+        ivBytes: 12,
+      })
+    )}\n`
+  );
+  const decipher = spyOn(nodeCrypto, "createDecipheriv");
+  try {
+    expectFixedStoreRefusal(await readStoreToken());
+    expect(decipher).not.toHaveBeenCalled();
+  } finally {
+    decipher.mockRestore();
+  }
+});
+
+// Structural mutations must be refused by the explicit parser guards before any
+// decipher exists, so the refusal does not depend on runtime GCM defaults.
+for (const name of [
+  "4-byte tag",
+  "8-byte tag",
+  "12-byte tag",
+  "16-byte IV",
+  "base64 with !",
+  "base64 with whitespace",
+  "oversized ciphertext",
+]) {
+  test(`encrypted_file envelope with ${name} refuses before decipher`, async () => {
+    const mutate = STORE_MUTATIONS.find(([label]) => label === name)?.[1];
+    if (!mutate) {
+      throw new Error("missing store mutation");
+    }
+    const { storePath, envelope } = await encryptedStoreFixture();
+    await writeFile(storePath, `${JSON.stringify(mutate(envelope))}\n`);
+    const decipher = spyOn(nodeCrypto, "createDecipheriv");
+    try {
+      expectFixedStoreRefusal(await readStoreToken());
+      expect(decipher).not.toHaveBeenCalled();
+    } finally {
+      decipher.mockRestore();
+    }
+  });
+}
+
+test("encrypted_file envelope with a 16-byte tag of the wrong value refuses", async () => {
+  const { storePath, envelope } = await encryptedStoreFixture();
+  const tag = Buffer.from(envelope.tag, "base64");
+  tag[15] = (tag[15] ?? 0) ^ 1;
+  await writeFile(
+    storePath,
+    `${JSON.stringify({ ...envelope, tag: tag.toString("base64") })}\n`
+  );
+  const outcome = await readStoreToken();
+  const error = "error" in outcome ? outcome.error : null;
+  expect(error).toBeInstanceOf(Error);
+  expect(String(error)).toContain("Cannot decrypt encrypted secret store at ");
+  for (const privateText of [STORE_SENTINEL, STORE_KEY]) {
+    expect(String(error)).not.toContain(privateText);
+  }
 });
 
 async function writeGlobalConfig(input: {

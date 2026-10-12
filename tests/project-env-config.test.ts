@@ -1,4 +1,5 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, spyOn, test } from "bun:test";
+import * as nodeCrypto from "node:crypto";
 import { writeFileSync } from "node:fs";
 import {
   mkdir,
@@ -1752,4 +1753,160 @@ test("legacy v1 secure values round-trip, including the empty value", async () =
   });
   expect(resolved?.globalEnv.TOKEN).toBe(ENVELOPE_SENTINEL);
   expect(resolved?.globalEnv.EMPTY).toBe("");
+});
+
+/** Byte bound shared by the legacy and native v1 ciphertext parsers. */
+const ENVELOPE_CIPHERTEXT_LIMIT = 1024 * 1024;
+
+/**
+ * Seals plaintext exactly as the v1 owner does (AES-256-GCM, SHA-256 of the
+ * trimmed key text, 16-byte tag) but with a caller-chosen IV length. Node and
+ * Bun accept any non-empty GCM IV, so a refusal of these authentic envelopes
+ * can only come from the parser's own IV and size guards, not from GCM
+ * authentication.
+ */
+function sealProjectEnvValue(opts: {
+  readonly plaintext: string;
+  readonly ivBytes: number;
+}): string {
+  const key = nodeCrypto
+    .createHash("sha256")
+    .update(ENVELOPE_KEY, "utf8")
+    .digest();
+  const iv = nodeCrypto.randomBytes(opts.ivBytes);
+  const cipher = nodeCrypto.createCipheriv("aes-256-gcm", key, iv, {
+    authTagLength: 16,
+  });
+  const ciphertext = Buffer.concat([
+    cipher.update(opts.plaintext, "utf8"),
+    cipher.final(),
+  ]);
+  return envelope({ iv, tag: cipher.getAuthTag(), ciphertext });
+}
+
+type LegacyTokenOutcome =
+  | { readonly value: string | undefined }
+  | { readonly error: unknown };
+
+async function resolveLegacyToken(opts: {
+  readonly repo: Awaited<ReturnType<typeof createRepo>>;
+}): Promise<LegacyTokenOutcome> {
+  try {
+    const resolved = await resolveProjectEnvConfig({
+      projectRoot: opts.repo.projectRoot,
+      projectDir: opts.repo.projectDir,
+      envName: null,
+      serviceNames: ["api"],
+    });
+    return { value: resolved?.globalEnv.TOKEN };
+  } catch (error: unknown) {
+    return { error };
+  }
+}
+
+function expectFixedEnvelopeRefusal(outcome: LegacyTokenOutcome): void {
+  const error = "error" in outcome ? outcome.error : null;
+  expect(error).toBeInstanceOf(Error);
+  expect(error instanceof Error ? error.message : "").toBe(
+    "Invalid secure env value."
+  );
+  for (const privateText of [ENVELOPE_SENTINEL, ENVELOPE_KEY]) {
+    expect(String(error)).not.toContain(privateText);
+  }
+}
+
+test("legacy test-sealed 12-byte-IV value at the ciphertext bound decrypts with the tag length pinned (control)", async () => {
+  const { repo } = await encryptedEnvelopeFixture();
+  const plaintext = `${ENVELOPE_SENTINEL}${"a".repeat(
+    ENVELOPE_CIPHERTEXT_LIMIT - ENVELOPE_SENTINEL.length
+  )}`;
+  await writeSecureValue({
+    repo,
+    secure: sealProjectEnvValue({ plaintext, ivBytes: 12 }),
+  });
+  const decipher = spyOn(nodeCrypto, "createDecipheriv");
+  try {
+    const outcome = await resolveLegacyToken({ repo });
+    expect("value" in outcome ? outcome.value : null).toBe(plaintext);
+    // The tag length is pinned by option rather than left to the runtime default.
+    expect(decipher).toHaveBeenCalled();
+    for (const call of decipher.mock.calls) {
+      const options: unknown = call[3];
+      expect(options).toEqual({ authTagLength: 16 });
+    }
+  } finally {
+    decipher.mockRestore();
+  }
+});
+
+for (const ivBytes of [8, 16]) {
+  test(`legacy authentic value sealed with a ${ivBytes}-byte IV refuses before decipher`, async () => {
+    const { repo } = await encryptedEnvelopeFixture();
+    await writeSecureValue({
+      repo,
+      secure: sealProjectEnvValue({ plaintext: ENVELOPE_SENTINEL, ivBytes }),
+    });
+    const decipher = spyOn(nodeCrypto, "createDecipheriv");
+    try {
+      expectFixedEnvelopeRefusal(await resolveLegacyToken({ repo }));
+      expect(decipher).not.toHaveBeenCalled();
+    } finally {
+      decipher.mockRestore();
+    }
+  });
+}
+
+test("legacy authentic value one byte over the ciphertext bound refuses before decipher", async () => {
+  const { repo } = await encryptedEnvelopeFixture();
+  await writeSecureValue({
+    repo,
+    secure: sealProjectEnvValue({
+      plaintext: "a".repeat(ENVELOPE_CIPHERTEXT_LIMIT + 1),
+      ivBytes: 12,
+    }),
+  });
+  const decipher = spyOn(nodeCrypto, "createDecipheriv");
+  try {
+    expectFixedEnvelopeRefusal(await resolveLegacyToken({ repo }));
+    expect(decipher).not.toHaveBeenCalled();
+  } finally {
+    decipher.mockRestore();
+  }
+});
+
+// Structural mutations must be refused by the explicit parser guards before any
+// decipher exists, so the refusal does not depend on runtime GCM defaults.
+for (const name of [
+  "4-byte tag",
+  "8-byte tag",
+  "12-byte tag",
+  "16-byte IV",
+  "base64 with !",
+  "base64 with whitespace",
+  "oversized ciphertext",
+]) {
+  test(`legacy secure env value with ${name} refuses before decipher`, async () => {
+    const mutate = ENVELOPE_MUTATIONS.find(([label]) => label === name)?.[1];
+    if (!mutate) {
+      throw new Error("missing envelope mutation");
+    }
+    const { repo, secure } = await encryptedEnvelopeFixture();
+    await writeSecureValue({ repo, secure: mutate(secure) });
+    const decipher = spyOn(nodeCrypto, "createDecipheriv");
+    try {
+      expectFixedEnvelopeRefusal(await resolveLegacyToken({ repo }));
+      expect(decipher).not.toHaveBeenCalled();
+    } finally {
+      decipher.mockRestore();
+    }
+  });
+}
+
+test("legacy secure env value with a 16-byte tag of the wrong value refuses", async () => {
+  const { repo, secure } = await encryptedEnvelopeFixture();
+  const parts = envelopeParts(secure);
+  const tag = Buffer.from(parts.tag);
+  tag[15] = (tag[15] ?? 0) ^ 1;
+  await writeSecureValue({ repo, secure: envelope({ ...parts, tag }) });
+  expectFixedEnvelopeRefusal(await resolveLegacyToken({ repo }));
 });

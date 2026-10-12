@@ -3,14 +3,18 @@ import { mkdtemp, readdir, rm, utimes, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  buildLoopSummary,
   collectDiagnosticReports,
+  countIterations,
   type ExecutedRun,
   executeWithLog,
   type LoopCommand,
   loopCommands,
+  nextEstimateMs,
   parseLoopArguments,
-  planNextCommand,
+  planNextIteration,
   renderLoopSummary,
+  renderVerdict,
   runBunCrashLoop,
 } from "../scripts/bun-crash-loop.ts";
 import {
@@ -51,8 +55,8 @@ describe("classifyBunRun", () => {
     ).toEqual({ outcome: "crash", reason: "banner" });
   });
 
-  test("exit 133 or 139 without a banner is a signal crash", () => {
-    for (const exitCode of [133, 139]) {
+  test("a trap, abort, bus-error or segfault exit status without a banner is a signal crash", () => {
+    for (const exitCode of [133, 134, 138, 139]) {
       expect(classifyBunRun({ exitCode, signal: null, output: "" })).toEqual({
         outcome: "crash",
         reason: "signal_exit",
@@ -148,78 +152,188 @@ const commands: readonly LoopCommand[] = [
   { id: "full", argv: ["full"], initialEstimateMs: 300_000 },
 ];
 
-describe("planNextCommand deadline arithmetic", () => {
+const PASS: ExecutedRun = {
+  exitCode: 0,
+  signal: null,
+  output: " 3 pass\n 0 fail\n",
+  stoppedAtDeadline: false,
+};
+
+/**
+ * An injected executor on an injected clock. A run that would end past the
+ * deadline is stopped at the deadline, as the real executor does, so starting an
+ * iteration that cannot fit shows up as an overrun.
+ */
+function simulatedExecutor(opts: {
+  readonly clock: { now: number };
+  readonly durationMs: (command: LoopCommand) => number;
+  readonly run?: (command: LoopCommand, index: number) => ExecutedRun;
+  readonly starts?: { id: string; at: number; argv: readonly string[] }[];
+}) {
+  return async (
+    command: LoopCommand,
+    context: { readonly index: number; readonly deadlineMs: number }
+  ): Promise<ExecutedRun> => {
+    opts.starts?.push({
+      id: command.id,
+      at: opts.clock.now,
+      argv: command.argv,
+    });
+    const end = opts.clock.now + opts.durationMs(command);
+    if (end > context.deadlineMs) {
+      opts.clock.now = context.deadlineMs;
+      return {
+        exitCode: null,
+        signal: "SIGTERM",
+        output: "",
+        stoppedAtDeadline: true,
+      };
+    }
+    opts.clock.now = end;
+    return opts.run?.(command, context.index) ?? PASS;
+  };
+}
+
+describe("planNextIteration deadline arithmetic", () => {
   const estimatesMs = { focused: 100_000, full: 300_000 };
 
   test("a command that ends exactly at the deadline may start", () => {
     expect(
-      planNextCommand({
+      planNextIteration({
         nowMs: 700_000,
         deadlineMs: 1_000_000,
-        commands,
+        active: commands,
         cursor: 1,
         estimatesMs,
-      })?.command.id
-    ).toBe("full");
+      })
+    ).toMatchObject({ action: "run", position: 1, command: { id: "full" } });
   });
 
-  test("a command that would end past the deadline falls back to one that fits", () => {
-    const next = planNextCommand({
-      nowMs: 700_001,
-      deadlineMs: 1_000_000,
-      commands,
-      cursor: 1,
-      estimatesMs,
-    });
-    expect(next?.command.id).toBe("focused");
-    expect(next?.cursor).toBe(2);
-  });
-
-  test("nothing starts when no command fits or the deadline has passed", () => {
+  test("a command that would end past the deadline is skipped, not started", () => {
     expect(
-      planNextCommand({
-        nowMs: 900_001,
+      planNextIteration({
+        nowMs: 700_001,
         deadlineMs: 1_000_000,
-        commands,
+        active: commands,
+        cursor: 1,
+        estimatesMs,
+      })
+    ).toMatchObject({ action: "skip", position: 1, command: { id: "full" } });
+  });
+
+  test("nothing starts once the deadline is reached, and an empty rotation ends", () => {
+    expect(
+      planNextIteration({
+        nowMs: 1_000_000,
+        deadlineMs: 1_000_000,
+        active: commands,
+        cursor: 0,
+        estimatesMs: { focused: 0, full: 0 },
+      })?.action
+    ).toBe("skip");
+    expect(
+      planNextIteration({
+        nowMs: 0,
+        deadlineMs: 1_000_000,
+        active: [],
         cursor: 0,
         estimatesMs,
       })
     ).toBeNull();
+  });
+
+  test("the estimate is the prior until a run completes, then the longest run with headroom", () => {
     expect(
-      planNextCommand({
-        nowMs: 1_000_000,
-        deadlineMs: 1_000_000,
-        commands,
-        cursor: 0,
-        estimatesMs: { focused: 0, full: 0 },
-      })
-    ).toBeNull();
+      nextEstimateMs({ priorMs: 2_400_000, longestCompletedMs: null })
+    ).toBe(2_400_000);
+    expect(
+      nextEstimateMs({ priorMs: 120_000, longestCompletedMs: 16_500 })
+    ).toBe(19_800);
   });
 });
 
 describe("runBunCrashLoop", () => {
-  test("no iteration starts past the budget and estimates grow to observed durations", async () => {
-    let clock = 0;
-    const durations = { focused: 90_000, full: 500_000 };
-    const starts: { id: string; at: number }[] = [];
+  test("a 30-minute alternating budget never starts the 35-minute suite and records the skip", async () => {
+    // The hosted shape: focused ~16.5 s, full suite ~35 min, 30-minute budget.
+    const clock = { now: 0 };
+    const starts: { id: string; at: number; argv: readonly string[] }[] = [];
+    const budgetMs = 1_800_000;
+    const result = await runBunCrashLoop({
+      budgetMs,
+      commands: loopCommands({
+        bunExecutable: "/bin/bun",
+        mode: "alternate",
+        focusedEstimateSeconds: 120,
+        fullEstimateSeconds: 2400,
+      }),
+      now: () => clock.now,
+      execute: simulatedExecutor({
+        clock,
+        starts,
+        durationMs: (command) => (command.id === "full" ? 2_100_000 : 16_500),
+      }),
+    });
+    expect(starts.some((start) => start.id === "full")).toBe(false);
+    expect(starts).toHaveLength(108);
+    for (const start of starts) {
+      expect(start.at + 16_500).toBeLessThanOrEqual(budgetMs);
+    }
+    expect(result.iterations.every((record) => record.outcome === "pass")).toBe(
+      true
+    );
+    expect(result.skippedForBudget).toEqual([
+      {
+        command: "full",
+        reason: "budget",
+        atMs: 16_500,
+        remainingMs: 1_783_500,
+        estimateMs: 2_400_000,
+      },
+      {
+        command: "focused",
+        reason: "budget",
+        atMs: 1_782_000,
+        remainingMs: 18_000,
+        estimateMs: 19_800,
+      },
+    ]);
+    expect(countIterations(result)).toEqual({
+      focused: {
+        iterations: 108,
+        passes: 108,
+        crashes: 0,
+        failures: 0,
+        overruns: 0,
+        skippedForBudget: 1,
+      },
+      full: {
+        iterations: 0,
+        passes: 0,
+        crashes: 0,
+        failures: 0,
+        overruns: 0,
+        skippedForBudget: 1,
+      },
+    });
+  });
+
+  test("estimates follow measured durations and no start overruns the deadline", async () => {
+    const clock = { now: 0 };
+    const starts: { id: string; at: number; argv: readonly string[] }[] = [];
     const result = await runBunCrashLoop({
       budgetMs: 1_000_000,
       commands,
-      now: () => clock,
-      execute: async (command) => {
-        starts.push({ id: command.id, at: clock });
-        clock += durations[command.id];
-        return {
-          exitCode: 0,
-          signal: null,
-          output: "",
-          stoppedAtDeadline: false,
-        };
-      },
+      now: () => clock.now,
+      execute: simulatedExecutor({
+        clock,
+        starts,
+        durationMs: (command) => (command.id === "full" ? 500_000 : 90_000),
+      }),
     });
-    // After the full suite takes 500 s, its estimate is 500 s and it no longer
-    // fits; focused runs (estimate 100 s) continue until 950 s + 100 s > 1000 s.
-    expect(starts).toEqual([
+    // The full suite fits its 300 s prior once; measured at 500 s (600 s with
+    // headroom) it no longer fits at 680 s and leaves the rotation. Focused runs
+    // (108 s estimate after the first) continue until 950 s + 108 s > 1000 s.
+    expect(starts.map(({ id, at }) => ({ id, at }))).toEqual([
       { id: "focused", at: 0 },
       { id: "full", at: 90_000 },
       { id: "focused", at: 590_000 },
@@ -227,14 +341,139 @@ describe("runBunCrashLoop", () => {
       { id: "focused", at: 770_000 },
       { id: "focused", at: 860_000 },
     ]);
-    for (const start of starts) {
-      const estimate = start.id === "full" ? 300_000 : 100_000;
-      expect(start.at + estimate).toBeLessThanOrEqual(1_000_000);
-    }
-    expect(result.estimatesMs).toEqual({ focused: 100_000, full: 500_000 });
+    expect(result.estimatesMs).toEqual({ focused: 108_000, full: 600_000 });
+    expect(
+      result.skippedForBudget.map(({ command, atMs }) => [command, atMs])
+    ).toEqual([
+      ["full", 680_000],
+      ["focused", 950_000],
+    ]);
     expect(result.iterations.map((record) => record.outcome)).toEqual(
       new Array(6).fill("pass")
     );
+  });
+
+  test("focused mode only ever runs the owner test file", async () => {
+    const clock = { now: 0 };
+    const starts: { id: string; at: number; argv: readonly string[] }[] = [];
+    const result = await runBunCrashLoop({
+      budgetMs: 600_000,
+      commands: loopCommands({
+        bunExecutable: "/bin/bun",
+        mode: "focused",
+        focusedEstimateSeconds: 120,
+        fullEstimateSeconds: 2400,
+      }),
+      now: () => clock.now,
+      execute: simulatedExecutor({ clock, starts, durationMs: () => 20_000 }),
+    });
+    expect(starts.length).toBeGreaterThan(20);
+    for (const start of starts) {
+      expect(start.argv).toEqual([
+        "/bin/bun",
+        "test",
+        "tests/native-https-owner.test.ts",
+      ]);
+    }
+    expect(result.commands).toEqual(["focused"]);
+    expect(Object.keys(countIterations(result))).toEqual(["focused"]);
+    expect(result.skippedForBudget.map((skip) => skip.command)).toEqual([
+      "focused",
+    ]);
+  });
+
+  test("full mode with a budget below the prior starts nothing and says so", async () => {
+    const clock = { now: 0 };
+    const starts: { id: string; at: number; argv: readonly string[] }[] = [];
+    const result = await runBunCrashLoop({
+      budgetMs: 1_800_000,
+      commands: loopCommands({
+        bunExecutable: "/bin/bun",
+        mode: "full",
+        focusedEstimateSeconds: 120,
+        fullEstimateSeconds: 2400,
+      }),
+      now: () => clock.now,
+      execute: simulatedExecutor({ clock, starts, durationMs: () => 1 }),
+    });
+    expect(starts).toEqual([]);
+    expect(result.skippedForBudget).toHaveLength(1);
+    expect(
+      renderVerdict({ result, role: "candidate", bunVersion: "1.4.2" })
+    ).toBe("candidate 0/0 full crashes; no iteration fit the budget");
+  });
+
+  test("injected crashes count as crashes, other non-zero exits as other failures", async () => {
+    const clock = { now: 0 };
+    const injected: ExecutedRun[] = [
+      PASS,
+      // Bun's own banner, whatever the exit status.
+      {
+        exitCode: 0,
+        signal: null,
+        output: CRASH_TRANSCRIPT,
+        stoppedAtDeadline: false,
+      },
+      // Signal deaths as Bun.spawn reports them; no real process gets a signal.
+      {
+        exitCode: null,
+        signal: "SIGSEGV",
+        output: "",
+        stoppedAtDeadline: false,
+      },
+      {
+        exitCode: null,
+        signal: "SIGBUS",
+        output: "",
+        stoppedAtDeadline: false,
+      },
+      // Shell-style abort exit status without a banner.
+      { exitCode: 134, signal: null, output: "", stoppedAtDeadline: false },
+      {
+        exitCode: 1,
+        signal: null,
+        output: "(fail) owner starts [5.00ms]\n 3 pass\n 1 fail\n",
+        stoppedAtDeadline: false,
+      },
+      { exitCode: 2, signal: null, output: "", stoppedAtDeadline: false },
+    ];
+    const result = await runBunCrashLoop({
+      budgetMs: 200_000,
+      commands: [commands[0] as LoopCommand],
+      now: () => clock.now,
+      execute: simulatedExecutor({
+        clock,
+        durationMs: () => 10_000,
+        run: (_command, index) => injected[index - 1] ?? PASS,
+      }),
+    });
+    expect(
+      result.iterations
+        .slice(0, 7)
+        .map((record) => [record.outcome, record.reason])
+    ).toEqual([
+      ["pass", "exit_zero"],
+      ["crash", "banner"],
+      ["crash", "signal"],
+      ["crash", "signal"],
+      ["crash", "signal_exit"],
+      ["failure", "test_failure"],
+      ["failure", "exit_code"],
+    ]);
+    // 10 s runs, 12 s estimate after the first: starts at 0..180 s, then 190 s + 12 s > 200 s.
+    expect(countIterations(result)).toEqual({
+      focused: {
+        iterations: 19,
+        passes: 13,
+        crashes: 4,
+        failures: 2,
+        overruns: 0,
+        skippedForBudget: 1,
+      },
+    });
+    expect(
+      renderVerdict({ result, role: "baseline", bunVersion: "1.3.9" })
+    ).toBe("baseline 4/19 focused crashes");
   });
 
   test("a run stopped at the deadline is an overrun unless it printed the crash banner", async () => {
@@ -254,21 +493,15 @@ describe("runBunCrashLoop", () => {
       },
     ];
     const result = await runBunCrashLoop({
-      budgetMs: 1_000_000,
+      budgetMs: 250_000,
       commands: [commands[0] as LoopCommand],
       now: () => clock,
       execute: async () => {
         clock += 100_000;
-        return (
-          runs.shift() ?? {
-            exitCode: 0,
-            signal: null,
-            output: "",
-            stoppedAtDeadline: false,
-          }
-        );
+        return runs.shift() ?? PASS;
       },
     });
+    expect(result.iterations).toHaveLength(2);
     expect(result.iterations[0]).toMatchObject({
       outcome: "overrun",
       reason: "deadline",
@@ -278,6 +511,12 @@ describe("runBunCrashLoop", () => {
       outcome: "crash",
       reason: "banner",
     });
+    // A stopped run is not a measured duration, so the prior stays in force.
+    expect(result.estimatesMs.focused).toBe(100_000);
+    expect(countIterations(result).focused?.overruns).toBe(1);
+    expect(renderVerdict({ result, role: null, bunVersion: "1.3.9" })).toBe(
+      "Bun 1.3.9 1/2 focused crashes; 1 overrun"
+    );
   });
 
   test("a signal death from the executor is recorded as a crash with its closed signal name", async () => {
@@ -303,19 +542,12 @@ describe("runBunCrashLoop", () => {
       },
     ];
     const result = await runBunCrashLoop({
-      budgetMs: 300_000,
+      budgetMs: 400_000,
       commands: [commands[0] as LoopCommand],
       now: () => clock,
       execute: async () => {
         clock += 100_000;
-        return (
-          runs.shift() ?? {
-            exitCode: 0,
-            signal: null,
-            output: "",
-            stoppedAtDeadline: false,
-          }
-        );
+        return runs.shift() ?? PASS;
       },
     });
     expect(
@@ -332,7 +564,7 @@ describe("runBunCrashLoop", () => {
     ]);
   });
 
-  test("the summary is closed and value-free", async () => {
+  test("the summaries are closed and value-free", async () => {
     let clock = 0;
     const result = await runBunCrashLoop({
       budgetMs: 250_000,
@@ -348,17 +580,37 @@ describe("runBunCrashLoop", () => {
         };
       },
     });
-    const summary = renderLoopSummary({
+    const report = {
       result,
+      mode: "alternate" as const,
+      role: null,
       bunVersion: "1.3.9",
       sourceRevision: "2b8057c1ae6f4311150b6e139a9a919bbc7788d4",
       diagnosticReports: 1,
-    });
-    expect(summary).toContain("| focused | 2 | 0 | 0 | 2 | 0 |");
+    };
+    const summary = renderLoopSummary(report);
+    expect(summary).toContain(
+      "Verdict: Bun 1.3.9 2/2 focused crashes, 0/0 full crashes"
+    );
+    expect(summary).toContain("| focused | 2 | 0 | 2 | 0 | 0 | 1 | 120.0 |");
+    expect(summary).toContain("| full | 0 | 0 | 0 | 0 | 0 | 1 | 300.0 |");
     expect(summary).toContain("| 1 | focused | crash | banner | 133 | - |");
-    expect(summary).not.toContain("do-not-print");
-    expect(summary).not.toContain("bun.report");
-    expect(summary).not.toContain("native-https-owner");
+    expect(summary).toContain("| - | full | skipped | budget |");
+    const json = JSON.stringify(buildLoopSummary(report));
+    expect(JSON.parse(json)).toMatchObject({
+      verdict: "Bun 1.3.9 2/2 focused crashes, 0/0 full crashes",
+      mode: "alternate",
+      role: null,
+      counts: {
+        focused: { iterations: 2, crashes: 2, skippedForBudget: 1 },
+        full: { iterations: 0, skippedForBudget: 1 },
+      },
+    });
+    for (const text of [summary, json]) {
+      expect(text).not.toContain("do-not-print");
+      expect(text).not.toContain("bun.report");
+      expect(text).not.toContain("native-https-owner");
+    }
   });
 });
 
@@ -434,21 +686,27 @@ describe("executeWithLog", () => {
   });
 });
 
-test("loop commands run the focused owner test and then the full suite", () => {
-  expect(
+test("each mode selects its commands, and focused is the owner test file alone", () => {
+  const ids = (mode: "focused" | "full" | "alternate") =>
     loopCommands({
       bunExecutable: "/bin/bun",
+      mode,
       focusedEstimateSeconds: 60,
-      fullEstimateSeconds: 600,
-    }).map((command) => [command.id, command.argv, command.initialEstimateMs])
-  ).toEqual([
-    [
-      "focused",
-      ["/bin/bun", "test", "tests/native-https-owner.test.ts"],
-      60_000,
-    ],
-    ["full", ["/bin/bun", "test"], 600_000],
-  ]);
+      fullEstimateSeconds: 2400,
+    }).map((command): unknown[] => [
+      command.id,
+      command.argv,
+      command.initialEstimateMs,
+    ]);
+  const focused = [
+    "focused",
+    ["/bin/bun", "test", "tests/native-https-owner.test.ts"],
+    60_000,
+  ];
+  const full = ["full", ["/bin/bun", "test"], 2_400_000];
+  expect(ids("focused")).toEqual([focused]);
+  expect(ids("full")).toEqual([full]);
+  expect(ids("alternate")).toEqual([focused, full]);
 });
 
 test("loop arguments are validated and closed", () => {
@@ -462,10 +720,19 @@ test("loop arguments are validated and closed", () => {
   ).toMatchObject({
     budgetSeconds: 1800,
     outDir: "/tmp/x",
+    mode: "focused",
+    role: null,
     expectBunVersion: "1.3.9",
     focusedEstimateSeconds: 120,
-    fullEstimateSeconds: 600,
+    fullEstimateSeconds: 2400,
   });
+  expect(
+    parseLoopArguments([
+      "--budget-seconds=1800",
+      "--mode=alternate",
+      "--role=baseline",
+    ])
+  ).toMatchObject({ mode: "alternate", role: "baseline" });
   for (const argv of [
     [],
     ["--budget-seconds=10"],
@@ -474,6 +741,10 @@ test("loop arguments are validated and closed", () => {
     ["--budget-seconds=1800", "--unknown=1"],
     ["--budget-seconds=1800", "--expect-bun-version=latest"],
     ["--budget-seconds=1800", "--source-revision=main"],
+    ["--budget-seconds=1800", "--mode=both"],
+    ["--budget-seconds=1800", "--mode="],
+    ["--budget-seconds=1800", "--role=dispatch"],
+    ["--budget-seconds=1800", "--role="],
   ]) {
     expect(() => parseLoopArguments(argv)).toThrow();
   }

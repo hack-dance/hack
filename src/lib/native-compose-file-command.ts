@@ -463,6 +463,17 @@ export async function prepareNativeComposeCommandFiles(opts: {
   }
 }
 
+/** Whether any saved generation carries file material that
+ * `retireNativeComposeSavedFiles` would retire. With none, that retirement
+ * performs only read-only document loads and no file or engine effect. */
+export function nativeComposeSavedFilesPresent(
+  saved: readonly Saved[]
+): boolean {
+  return saved.some((selected) =>
+    Object.hasOwn(selected.document, NATIVE_COMPOSE_FILES_EXTENSION)
+  );
+}
+
 /** Saved cleanup acquires neither authored inputs nor credentials and never infers child reaping. */
 export async function retireNativeComposeSavedFiles(opts: {
   readonly mutation: NativeComposeMutation;

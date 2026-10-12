@@ -46,9 +46,11 @@ linked git worktree, `hack up` automatically becomes a separate instance named a
 the branch — review a PR while your main checkout keeps running.
 
 **Built for agents.** `hack init --with claude|codex` hands setup to an agent.
-Machine surfaces are first-class: `--json` envelopes with stable error codes,
-`--no-interactive`, and agent instructions that sync themselves into
-AGENTS.md/CLAUDE.md, Cursor rules, and Codex skills.
+Machine surfaces are first-class: `--json` envelopes with stable error codes and
+`--no-interactive`. The optional `hack` plugin for Codex, Claude Code, and Cursor
+gives agents Hack skills through the client's plugin manager, without writing into
+your repository. Clients without shell access can add the separate `hack-mcp`
+plugin. See [agent plugin setup](docs/integrations.md#optional-native-plugins).
 
 ## More than ports
 
@@ -114,6 +116,18 @@ hack up --detach
 hack open
 ```
 
+Using a coding agent? Install the optional `hack` plugin for its skills:
+
+```bash
+codex plugin marketplace add hack-dance/hack && codex plugin add hack@hack-dance
+# or, in Claude Code:
+claude plugin marketplace add hack-dance/hack --sparse .claude-plugin plugins/hack plugins/hack-mcp
+claude plugin install hack@hack-dance
+```
+
+In Cursor, install Hack from Customize. Add `hack-mcp` only for a client without
+shell access.
+
 When something looks wrong:
 
 ```bash
@@ -151,6 +165,3 @@ experimental — hidden behind `hack help --all`.
 ## License
 
 See [LICENSE](./LICENSE).
-
-Optional native plugins for Codex, Claude Code, and Cursor bundle Hack skills and MCP.
-See [agent plugin setup](docs/integrations.md#optional-native-plugins). Existing standalone setup remains supported.

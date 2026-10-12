@@ -139,17 +139,24 @@ test("setup sync collapses healthy artifacts into one scope row", () => {
   const result = buildSetupSyncScopeResult({
     action: "check",
     scope: "Project",
-    groups: [
+    results: [
       {
-        label: "Cursor",
-        results: [{ status: "noop", path: "/repo/.cursor/rules/hack.mdc" }],
+        scope: "project",
+        target: "cursor-rules",
+        status: "unchanged",
+        path: "/repo/.cursor/rules/hack.mdc",
       },
       {
-        label: "MCP config",
-        results: [
-          { status: "present", path: "/repo/.cursor/mcp.json" },
-          { status: "present", path: "/repo/.codex/config.toml" },
-        ],
+        scope: "project",
+        target: "cursor-mcp",
+        status: "unchanged",
+        path: "/repo/.cursor/mcp.json",
+      },
+      {
+        scope: "project",
+        target: "codex-mcp",
+        status: "unchanged",
+        path: "/repo/.codex/config.toml",
       },
     ],
   });
@@ -169,14 +176,18 @@ test("setup sync keeps failing artifact paths visible", () => {
   const result = buildSetupSyncScopeResult({
     action: "check",
     scope: "Global",
-    groups: [
+    results: [
       {
-        label: "Codex",
-        results: [{ status: "stale", path: "<home>/.codex/skill.md" }],
+        scope: "global",
+        target: "codex-hack-cli-skill",
+        status: "refreshed",
+        path: "<home>/.codex/skills/hack-cli/SKILL.md",
       },
       {
-        label: "Claude",
-        results: [{ status: "noop", path: "<home>/.claude/settings.json" }],
+        scope: "global",
+        target: "claude-hooks",
+        status: "unchanged",
+        path: "<home>/.claude/settings.json",
       },
     ],
   });
@@ -186,7 +197,8 @@ test("setup sync keeps failing artifact paths visible", () => {
     label: "Global",
     status: "warn",
     meta: "1/2 current",
-    detail: "Codex: stale at <home>/.codex/skill.md",
+    detail:
+      "Codex hack-cli skill: stale at <home>/.codex/skills/hack-cli/SKILL.md",
   });
 });
 
@@ -194,15 +206,12 @@ test("setup sync check reports retired agent artifacts as stale", () => {
   const result = buildSetupSyncScopeResult({
     action: "check",
     scope: "Project",
-    groups: [
+    results: [
       {
-        label: "Retired agent artifacts",
-        results: [
-          {
-            status: "deprecated",
-            path: "/repo/.codex/skills/hack-tickets/SKILL.md",
-          },
-        ],
+        scope: "project",
+        target: "retired-artifact",
+        status: "removed",
+        path: "/repo/.codex/skills/hack-tickets/SKILL.md",
       },
     ],
   });
@@ -210,6 +219,42 @@ test("setup sync check reports retired agent artifacts as stale", () => {
   expect(result.exitCode).toBe(1);
   expect(result.item.status).toBe("warn");
   expect(result.item.meta).toBe("0/1 current");
+});
+
+test("setup sync check counts missing targets without failing", () => {
+  const missing = {
+    scope: "project",
+    target: "agents-md",
+    status: "missing",
+    path: "/repo/AGENTS.md",
+  } as const;
+  const result = buildSetupSyncScopeResult({
+    action: "check",
+    scope: "Project",
+    results: [
+      missing,
+      {
+        scope: "project",
+        target: "cursor-rules",
+        status: "unchanged",
+        path: "/repo/.cursor/rules/hack.mdc",
+      },
+    ],
+  });
+  expect(result.exitCode).toBe(0);
+  expect(result.item.status).toBe("ok");
+  expect(result.item.meta).toBe("1 current, 1 not installed");
+
+  // With --install-missing, check plans an install and fails like a stale file.
+  const planned = buildSetupSyncScopeResult({
+    action: "check",
+    scope: "Project",
+    results: [{ ...missing, status: "installed" }],
+  });
+  expect(planned.exitCode).toBe(1);
+  expect(planned.item.detail).toBe(
+    "AGENTS.md: not installed (would install) at /repo/AGENTS.md"
+  );
 });
 
 test("buildInitAssistantReport captures repo signals", async () => {
@@ -388,22 +433,22 @@ test("Codex project and user duplicates keep separate ownership", async () => {
 
 test("setup sync reports preserved files without failing the action", () => {
   const result = buildSetupSyncScopeResult({
-    action: "install",
+    action: "sync",
     scope: "Global",
-    groups: [
+    results: [
       {
-        label: "Codex",
-        results: [
-          {
-            status: "preserved",
-            path: "<home>/.codex/skills/hack-cli/SKILL.md",
-            message: "Hack left this path unchanged because it was edited.",
-          },
-        ],
+        scope: "global",
+        target: "codex-hack-cli-skill",
+        status: "preserved",
+        reason: "customized-content",
+        path: "<home>/.codex/skills/hack-cli/SKILL.md",
+        message: "Hack left this path unchanged because it was edited.",
       },
       {
-        label: "Cursor",
-        results: [{ status: "updated", path: "<home>/.cursor/rules/hack.mdc" }],
+        scope: "global",
+        target: "cursor-rules",
+        status: "refreshed",
+        path: "<home>/.cursor/rules/hack.mdc",
       },
     ],
   });
@@ -412,28 +457,72 @@ test("setup sync reports preserved files without failing the action", () => {
   expect(result.item).toEqual({
     label: "Global",
     status: "warn",
-    meta: "1 updated, 1 preserved",
+    meta: "1 refreshed, 1 preserved",
     detail:
-      "Codex: preserved at <home>/.codex/skills/hack-cli/SKILL.md. Hack left this path unchanged because it was edited.",
+      "Codex hack-cli skill: preserved at <home>/.codex/skills/hack-cli/SKILL.md. Hack left this path unchanged because it was edited.",
   });
 
   const removed = buildSetupSyncScopeResult({
     action: "remove",
     scope: "Project",
-    groups: [
+    results: [
       {
-        label: "Cursor",
-        results: [
-          { status: "preserved", path: "/repo/.cursor/rules/hack.mdc" },
-        ],
+        scope: "project",
+        target: "cursor-rules",
+        status: "preserved",
+        path: "/repo/.cursor/rules/hack.mdc",
       },
     ],
   });
   expect(removed.exitCode).toBe(0);
   expect(removed.item.meta).toBe("0 removed, 1 preserved");
   expect(removed.item.detail).toBe(
-    "Cursor: preserved at /repo/.cursor/rules/hack.mdc."
+    "Cursor rules: preserved at /repo/.cursor/rules/hack.mdc."
   );
+
+  // A preserved file means sync cannot make it current, so check fails.
+  const checked = buildSetupSyncScopeResult({
+    action: "check",
+    scope: "Project",
+    results: [
+      {
+        scope: "project",
+        target: "cursor-rules",
+        status: "preserved",
+        path: "/repo/.cursor/rules/hack.mdc",
+      },
+    ],
+  });
+  expect(checked.exitCode).toBe(1);
+});
+
+test("setup sync summarizes skipped missing targets", () => {
+  const result = buildSetupSyncScopeResult({
+    action: "sync",
+    scope: "Global",
+    results: [
+      {
+        scope: "global",
+        target: "cursor-rules",
+        status: "unchanged",
+        path: "<home>/.cursor/rules/hack.mdc",
+      },
+      {
+        scope: "global",
+        target: "codex-mcp",
+        status: "missing",
+        path: "<home>/.codex/config.toml",
+      },
+    ],
+  });
+  expect(result.exitCode).toBe(0);
+  expect(result.item).toEqual({
+    label: "Global",
+    status: "ok",
+    meta: "already current, 1 missing (skipped)",
+    detail:
+      "Missing integrations were skipped; add --install-missing to create them.",
+  });
 });
 
 async function setupTempRepo(): Promise<string> {

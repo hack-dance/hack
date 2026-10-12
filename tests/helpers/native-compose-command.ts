@@ -55,6 +55,8 @@ export async function fixture(
     cleanupGuards.set(root, opts.cleanupAllowed);
   }
   await mkdir(join(root, ".hack"));
+  // Private HOME for child CLIs; the contributor's home is never selected.
+  await mkdir(join(root, "user-home"), { mode: 0o700 });
   await Bun.write(
     join(root, ".hack/hack.project.json"),
     JSON.stringify({
@@ -246,7 +248,7 @@ export async function invoke(
     {
       cwd: root,
       env: {
-        HOME: process.env.HOME,
+        HOME: join(root, "user-home"),
         LANG: "C",
         PATH: `${root}:/usr/bin:/bin`,
         HACK_HOME: join(root, "home"),

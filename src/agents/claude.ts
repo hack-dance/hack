@@ -241,6 +241,46 @@ export async function removeClaudeHooks(opts: {
   return preserved ?? { scope: opts.scope, status: "removed", path };
 }
 
+/**
+ * Coverage of the Hack primer hooks in a parsed Claude settings object:
+ * `none` (no Hack primer entry), `partial` (some events), or `complete`.
+ */
+export function inspectClaudePrimerHooks({
+  settings,
+}: {
+  readonly settings: Record<string, unknown>;
+}): "none" | "partial" | "complete" {
+  const hooks = resolveHooksMap(settings);
+  const present = HOOK_EVENTS.filter((event) =>
+    eventHasCommand({
+      eventHooks: resolveEventHooks({ hooks, event }),
+      command: HOOK_COMMAND,
+    })
+  ).length;
+  if (present === 0) {
+    return "none";
+  }
+  return present === HOOK_EVENTS.length ? "complete" : "partial";
+}
+
+/** Add any missing Hack primer hook entries in place; returns whether it changed. */
+export function ensureClaudePrimerHooks({
+  settings,
+}: {
+  readonly settings: Record<string, unknown>;
+}): boolean {
+  return upsertHooks({ settings, command: HOOK_COMMAND });
+}
+
+/** Remove only the Hack primer hook entries in place; returns whether it changed. */
+export function stripClaudePrimerHooks({
+  settings,
+}: {
+  readonly settings: Record<string, unknown>;
+}): boolean {
+  return removeHooks({ settings, command: HOOK_COMMAND });
+}
+
 function resolveClaudeSettingsPath(opts: {
   readonly scope: ClaudeScope;
   readonly projectRoot?: string;

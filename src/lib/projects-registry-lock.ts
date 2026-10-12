@@ -39,6 +39,8 @@ export async function withProjectsRegistryLock<T>(opts: {
   readonly waitForLock?: boolean;
   readonly signal?: AbortSignal;
   readonly timeoutMs?: number;
+  /** Fixed resource name for the timeout message; defaults to the registry. */
+  readonly label?: string;
 }): Promise<T> {
   opts.signal?.throwIfAborted();
   if (opts.waitForLock === false) {
@@ -102,6 +104,7 @@ async function acquire(opts: {
   readonly waitForLock?: boolean;
   readonly signal?: AbortSignal;
   readonly timeoutMs?: number;
+  readonly label?: string;
 }): Promise<void> {
   const started = performance.now();
   const timeout = opts.timeoutMs ?? WAIT_MS;
@@ -121,7 +124,7 @@ async function acquire(opts: {
         ? "; recovery guard is busy (interrupted recovery requires offline inspection)"
         : "";
       throw new Error(
-        `Timed out waiting for projects registry lock${recovery}`
+        `Timed out waiting for ${opts.label ?? "projects registry"} lock${recovery}`
       );
     }
     // Jitter prevents a burst of CLI clients from retrying in lockstep.

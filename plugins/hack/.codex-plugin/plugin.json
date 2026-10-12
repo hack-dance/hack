@@ -17,7 +17,7 @@
     "longDescription": "Operate Hack-managed services, logs, environments, workspaces, and agent-assisted project onboarding from Codex.",
     "developerName": "Hack Dance LLC",
     "category": "Developer Tools",
-    "capabilities": ["Local development", "Project onboarding", "MCP tools"],
+    "capabilities": ["Local development", "Project onboarding"],
     "websiteURL": "https://github.com/hack-dance/hack",
     "defaultPrompt": [
       "Start this Hack project and verify its services.",
@@ -25,6 +25,5 @@
       "Diagnose this Hack project's local runtime."
     ],
     "brandColor": "#FF5C35"
-  },
-  "mcpServers": "./.mcp.json"
+  }
 }

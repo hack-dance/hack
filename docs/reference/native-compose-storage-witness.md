@@ -103,15 +103,44 @@ projection, recovery or newly declared volume. A speculative ownership read can
 preview that merge but cannot publish it. A birth addition repeats the original
 fully fenced path. Each qualifying phase keeps a fresh closing kernel proof and
 exact source, generation and receipt-incarnation checks. No proof is reused across
-pending publication or effects. Opening preparation, enrollment, pre-spawn and
-both final receipt proofs remain separate. The one-volume offline counter is
+pending publication or effects. The opening preparation proof and the
+post-workload receipt proof remain separate. The one-volume offline counter is
 three full proofs before effect entry rather than five; it establishes call
 ordering and count, not CPU savings or atomic observation across the daemon and
 private filesystem.
 
+Within one command and one mutation lease, a verification whose code since the
+previous proof performed only reads may reuse that completed kernel proof. It
+still runs every host check (anchors, expectation, completion and binding). It
+skips the three helper carriers only when the engine, generation and reference
+are the same and its opening material binding (receipt identity and hash, lease
+token, checkout anchor and generation) is byte-identical to the binding that
+opened and closed the recorded proof. A receipt publication in between, such as
+pending intent, a storage birth or completion, changes that binding and forces a
+full proof. A refused or failed verification clears the record. Nothing is
+persisted: every later command or lease, including the first after an engine
+restart, opens with a full proof. Callers claim adjacency from code structure,
+never from timing:
+
+- the warm `up`/`restart` enrollment tail (no newly declared volume) reuses the
+  effect-entry proof of the same generation; a new volume seeds and proves in
+  full;
+- the first pre-spawn guard of an `up`/`restart` without build, routing or file
+  material reuses the enrollment-tail record;
+- saved `exec` reuses its opening proof before the process. Its closing proof
+  after the process stays fresh.
+
+Final receipt verification proves once after the workload when no route, after
+hook, or new or saved file material needs a completion step. Otherwise it proves
+again after that step. A warm image-only, unrouted `up` without hooks therefore
+proves four times (opening, prepublication, effect-entry and post-workload)
+rather than six. With `HACK_NATIVE_COMPOSE_PHASE_TRACE=1`, each performed
+verification proof emits one `storage.proof` span; a reused proof emits none.
+These counts establish call ordering and helper invocations, not wall time.
+
 The one-off `run` path separately omits the enrollment-tail read that
 would immediately repeat its mandatory pre-spawn witness read. `up` and `restart`
-keep that tail read. Cold enrollment still seeds once and verifies before
+keep that tail read; when warm it is the adjacent reuse above. Cold enrollment still seeds once and verifies before
 publishing its enrolled reference. The one-volume cold-run control reaches the
 actual pre-spawn boundary after eleven helper calls rather than fourteen; it
 intercepts the workload there and does not qualify Docker execution or timing.

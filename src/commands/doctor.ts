@@ -3526,42 +3526,85 @@ async function maybeRepairHackd(): Promise<void> {
   }
 }
 
+/**
+ * Optional integrations are current when absent: a path is stale only when it
+ * exists and lacks the current revision marker. AGENTS.md/CLAUDE.md are
+ * user-owned, so they count only when they carry a Hack-managed section.
+ * Retained legacy artifacts are always stale.
+ */
 export async function inspectDoctorAgentIntegrations(opts: {
   readonly projectRoot: string | null;
   readonly homeDir?: string;
 }): Promise<{ readonly status: "current" | "stale" }> {
   const home = (opts.homeDir ?? process.env.HOME ?? homedir()).trim();
-  const paths = [
+  const hackOwnedPaths = [
     ...(opts.projectRoot
       ? [
           resolve(opts.projectRoot, ".cursor", "rules", "hack.mdc"),
           resolve(opts.projectRoot, ".codex", "skills", "hack-cli", "SKILL.md"),
-          resolve(opts.projectRoot, "AGENTS.md"),
-          resolve(opts.projectRoot, "CLAUDE.md"),
         ]
       : []),
     resolve(home, ".cursor", "rules", "hack.mdc"),
     resolve(home, ".codex", "skills", "hack-cli", "SKILL.md"),
     resolve(home, ".ai", "skills", "hack-cli", "SKILL.md"),
   ];
+  const sharedDocPaths = opts.projectRoot
+    ? [
+        resolve(opts.projectRoot, "AGENTS.md"),
+        resolve(opts.projectRoot, "CLAUDE.md"),
+      ]
+    : [];
   const marker = `Content revision: \`${HACK_AGENT_INTEGRATION_CONTENT_REVISION}\``;
-  const [contents, legacyProject, legacyUser] = await Promise.all([
-    Promise.all(paths.map((path) => readTextFile(path))),
-    opts.projectRoot
-      ? checkLegacyProjectAgentArtifacts({ projectRoot: opts.projectRoot })
-      : Promise.resolve([]),
-    checkLegacyUserAgentArtifacts({ home }),
-  ]);
+  const [ownedContents, docContents, legacyProject, legacyUser] =
+    await Promise.all([
+      Promise.all(
+        hackOwnedPaths.map((path) => readOptionalIntegrationText(path))
+      ),
+      Promise.all(
+        sharedDocPaths.map((path) => readOptionalIntegrationText(path))
+      ),
+      opts.projectRoot
+        ? checkLegacyProjectAgentArtifacts({ projectRoot: opts.projectRoot })
+        : Promise.resolve([]),
+      checkLegacyUserAgentArtifacts({ home }),
+    ]);
   const hasLegacyArtifacts = [...legacyProject, ...legacyUser].some(
     (check) => check.status !== "absent"
   );
+  // Present but unreadable paths are treated as stale rather than absent.
+  const hasStalePath =
+    ownedContents.some(
+      (content) =>
+        content.present &&
+        (content.text === null || !content.text.includes(marker))
+    ) ||
+    docContents.some(
+      (content) =>
+        content.present &&
+        (content.text === null ||
+          (content.text.includes(HACK_AGENT_DOCS_SECTION_MARKER) &&
+            !content.text.includes(marker)))
+    );
   return {
-    status:
-      contents.every((content) => content?.includes(marker)) &&
-      !hasLegacyArtifacts
-        ? "current"
-        : "stale",
+    status: hasStalePath || hasLegacyArtifacts ? "stale" : "current",
   };
+}
+
+const HACK_AGENT_DOCS_SECTION_MARKER = "<!-- hack:agent-docs:start -->";
+
+async function readOptionalIntegrationText(
+  path: string
+): Promise<
+  | { readonly present: false }
+  | { readonly present: true; readonly text: string | null }
+> {
+  const text = await readTextFile(path);
+  if (text !== null) {
+    return { present: true, text };
+  }
+  return (await pathExists(path))
+    ? { present: true, text: null }
+    : { present: false };
 }
 
 async function resolveDaemonReportForDoctorFix(): Promise<

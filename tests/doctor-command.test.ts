@@ -300,6 +300,75 @@ test("doctor audits global agent guidance without a project", async () => {
   }
 });
 
+test("doctor treats absent optional agent integrations as current", async () => {
+  const root = await mkdtemp(join(tmpdir(), "hack-doctor-absent-agents-"));
+  const home = join(root, "home");
+  const project = join(root, "repo");
+  const marker = `Content revision: \`${HACK_AGENT_INTEGRATION_CONTENT_REVISION}\``;
+  try {
+    await mkdir(home, { recursive: true });
+    await mkdir(project, { recursive: true });
+
+    // Empty project plus empty HOME.
+    await expect(
+      inspectDoctorAgentIntegrations({ projectRoot: project, homeDir: home })
+    ).resolves.toEqual({ status: "current" });
+
+    // Plugin-only: client plugin state and user-authored docs, but no
+    // standalone Hack rules, skills or managed doc sections.
+    const pluginDir = join(home, ".claude", "plugins", "hack");
+    await mkdir(pluginDir, { recursive: true });
+    await writeFile(join(pluginDir, "plugin.json"), "{}\n");
+    await writeFile(join(project, "AGENTS.md"), "# Team notes\n");
+    await writeFile(join(project, "CLAUDE.md"), "Use bun.\n");
+    await expect(
+      inspectDoctorAgentIntegrations({ projectRoot: project, homeDir: home })
+    ).resolves.toEqual({ status: "current" });
+
+    // A current Hack-managed section stays current.
+    await writeFile(
+      join(project, "AGENTS.md"),
+      `# Team notes\n<!-- hack:agent-docs:start -->\n${marker}\n<!-- hack:agent-docs:end -->\n`
+    );
+    await expect(
+      inspectDoctorAgentIntegrations({ projectRoot: project, homeDir: home })
+    ).resolves.toEqual({ status: "current" });
+
+    // One present Hack-managed section without the current revision is stale.
+    await writeFile(
+      join(project, "AGENTS.md"),
+      "# Team notes\n<!-- hack:agent-docs:start -->\nold\n<!-- hack:agent-docs:end -->\n"
+    );
+    await expect(
+      inspectDoctorAgentIntegrations({ projectRoot: project, homeDir: home })
+    ).resolves.toEqual({ status: "stale" });
+    await writeFile(join(project, "AGENTS.md"), "# Team notes\n");
+
+    // One present Hack-owned file without the current revision is stale.
+    const projectRules = join(project, ".cursor", "rules", "hack.mdc");
+    await mkdir(join(projectRules, ".."), { recursive: true });
+    await writeFile(projectRules, "stale\n");
+    await expect(
+      inspectDoctorAgentIntegrations({ projectRoot: project, homeDir: home })
+    ).resolves.toEqual({ status: "stale" });
+    await writeFile(projectRules, `${marker}\n`);
+    await expect(
+      inspectDoctorAgentIntegrations({ projectRoot: project, homeDir: home })
+    ).resolves.toEqual({ status: "current" });
+
+    // A retired legacy project artifact is stale even when nothing else is.
+    await writeFile(
+      join(project, "CLAUDE.md"),
+      "<!-- hack:tickets:start -->\nRetired\n<!-- hack:tickets:end -->\n"
+    );
+    await expect(
+      inspectDoctorAgentIntegrations({ projectRoot: project, homeDir: home })
+    ).resolves.toEqual({ status: "stale" });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("doctor guidance routes runtime hygiene drift to projects prune", () => {
   const guidance = buildDoctorRecoveryGuidance({
     results: [

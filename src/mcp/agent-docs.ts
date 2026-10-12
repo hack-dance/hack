@@ -20,6 +20,8 @@ export type AgentDocCheckResult = {
   readonly status: "present" | "stale" | "missing" | "error";
   readonly path: string;
   readonly message?: string;
+  /** Set when the file exists but has no Hack-managed section at all. */
+  readonly unmanaged?: true;
 };
 
 export type AgentDocRemoveResult = {
@@ -118,6 +120,7 @@ export async function checkAgentDocs(opts: {
           status: "error",
           path,
           message: "Missing hack agent-docs markers.",
+          unmanaged: true,
         });
         continue;
       }

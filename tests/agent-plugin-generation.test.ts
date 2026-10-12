@@ -2,6 +2,7 @@ import { afterEach, expect, test } from "bun:test";
 import { cp, mkdir, mkdtemp, readdir, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { parse as parseYaml } from "yaml";
 
 import {
   generateAgentPlugins,
@@ -226,16 +227,60 @@ interface PolicyFinding {
     | "permission-setting"
     | "output-style-setting"
     | "frontmatter-hooks"
-    | "hook-command";
+    | "hook-command"
+    | "unparsed-config";
+}
+
+/** How the scan treated one file. Only `parsed` files count as scanned. */
+type PolicyScanKind = "parsed" | "not-config";
+
+interface PolicyScan {
+  readonly kind: PolicyScanKind;
+  readonly findings: readonly PolicyFinding[];
 }
 
 const HOOK_COMMAND = "hack agent prime";
 
-/** Model, permission and output-style policy belongs to the user's provider
- * configuration, never to Hack-shipped artifacts. */
+/**
+ * Generated agent guidance surfaces: the native plugin bundle, the client
+ * marketplace manifests, the shared `.agents` tree (skills reach it through
+ * symlinks) and the agent configuration in the basic example. Example compose
+ * and runtime files are application configuration, not agent guidance.
+ */
+const GUIDANCE_SURFACES = [
+  "plugins/hack",
+  ".claude-plugin",
+  ".cursor-plugin",
+  ".agents",
+  "examples/basic/.claude",
+  "examples/basic/.codex",
+  "examples/basic/.cursor",
+] as const;
+
+/** Structured-config formats the scan cannot parse. Shipping one fails the
+ * scan instead of counting it as inspected. */
+const UNPARSED_CONFIG_EXTENSIONS = new Set([
+  "cfg",
+  "conf",
+  "env",
+  "ini",
+  "json5",
+  "jsonc",
+  "plist",
+  "properties",
+  "xml",
+]);
+
+/** Model, reasoning-effort, permission and output-style policy belongs to the
+ * user's provider configuration, never to Hack-shipped artifacts. */
 function forbiddenSettingCode(key: string): PolicyFinding["code"] | null {
   const normalized = key.toLowerCase().replace(/[^a-z]/g, "");
-  if (normalized.startsWith("model") || normalized.endsWith("model")) {
+  if (
+    normalized.startsWith("model") ||
+    normalized.endsWith("model") ||
+    normalized.includes("effort") ||
+    normalized.startsWith("reasoning")
+  ) {
     return "model-setting";
   }
   if (
@@ -295,70 +340,144 @@ function structuredPolicyFindings(
   return findings;
 }
 
-function frontmatterKeys(text: string): string[] {
-  const match = /^---\n([\s\S]*?)\n---/.exec(text);
-  if (!match?.[1]) {
-    return [];
-  }
-  return match[1]
-    .split("\n")
-    .map((line) => /^([A-Za-z0-9_-]+):/.exec(line)?.[1])
-    .filter((key): key is string => key !== undefined);
+const FRONTMATTER = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/;
+
+/** Parses markdown frontmatter as YAML; returns null when there is none. */
+function frontmatter(text: string): unknown {
+  const match = FRONTMATTER.exec(text);
+  return match ? parseYaml(match[1] ?? "") : null;
+}
+
+function extensionOf(name: string): string {
+  const dot = name.lastIndexOf(".");
+  return dot > 0 ? name.slice(dot + 1).toLowerCase() : "";
 }
 
 /** Classify one shipped file with closed codes; never report file content. */
-function policyFindings(file: string, text: string): PolicyFinding[] {
+function policyScan(file: string, text: string): PolicyScan {
   const findings: PolicyFinding[] = [];
   const name = file.split("/").at(-1) ?? file;
   if (file.split("/").some((part) => /^output[-_]?styles?$/i.test(part))) {
     findings.push({ file, code: "output-style-setting" });
   }
-  if (name.endsWith(".json")) {
-    findings.push(...structuredPolicyFindings(file, JSON.parse(text)));
-  } else if (name.endsWith(".jsonl")) {
-    for (const line of text.split("\n").filter((entry) => entry.trim())) {
-      findings.push(...structuredPolicyFindings(file, JSON.parse(line)));
+  const extension = extensionOf(name);
+  let parsed: unknown = null;
+  let kind: PolicyScanKind = "parsed";
+  if (extension === "json") {
+    parsed = JSON.parse(text);
+  } else if (extension === "jsonl") {
+    parsed = text
+      .split("\n")
+      .filter((line) => line.trim())
+      .map((line): unknown => JSON.parse(line));
+  } else if (extension === "toml") {
+    parsed = Bun.TOML.parse(text);
+  } else if (extension === "yaml" || extension === "yml") {
+    parsed = parseYaml(text);
+  } else if (extension === "md" || extension === "mdc") {
+    parsed = frontmatter(text);
+    if (parsed === null) {
+      kind = "not-config";
+    } else if (isRecord(parsed) && "hooks" in parsed) {
+      findings.push({ file, code: "frontmatter-hooks" });
     }
-  } else if (name.endsWith(".toml")) {
-    findings.push(...structuredPolicyFindings(file, Bun.TOML.parse(text)));
-  } else if (name.endsWith(".md") || name.endsWith(".mdc")) {
-    for (const key of frontmatterKeys(text)) {
-      const code = forbiddenSettingCode(key);
-      if (code) {
-        findings.push({ file, code });
-      }
-      if (key.toLowerCase() === "hooks") {
-        findings.push({ file, code: "frontmatter-hooks" });
-      }
+  } else {
+    kind = "not-config";
+    if (
+      UNPARSED_CONFIG_EXTENSIONS.has(extension) ||
+      name.toLowerCase().startsWith(".env")
+    ) {
+      findings.push({ file, code: "unparsed-config" });
     }
   }
-  return findings;
+  findings.push(...structuredPolicyFindings(file, parsed));
+  return { kind, findings };
 }
 
-test("plugin bundle and examples never pin models, override permissions or run other hooks", async () => {
+function policyFindings(file: string, text: string): PolicyFinding[] {
+  return [...policyScan(file, text).findings];
+}
+
+test("generated guidance surfaces never pin models, override permissions or run other hooks", async () => {
   const findings: PolicyFinding[] = [];
-  let scanned = 0;
-  for (const root of ["plugins/hack", "examples/basic"]) {
+  const parsedFiles: string[] = [];
+  for (const root of GUIDANCE_SURFACES) {
     const glob = new Bun.Glob("**/*");
     for await (const relative of glob.scan({
       cwd: join(repoRoot, root),
       dot: true,
       onlyFiles: true,
+      followSymlinks: true,
     })) {
       const file = `${root}/${relative}`;
-      findings.push(
-        ...policyFindings(file, await Bun.file(join(repoRoot, file)).text())
+      const scan = policyScan(
+        file,
+        await Bun.file(join(repoRoot, file)).text()
       );
-      scanned += 1;
+      findings.push(...scan.findings);
+      if (scan.kind === "parsed") {
+        parsedFiles.push(file);
+      }
     }
   }
-  expect(scanned).toBeGreaterThan(10);
   expect(findings).toEqual([]);
+  // Scope guard: every known config surface was actually parsed, including
+  // YAML and markdown frontmatter reached through the `.agents` symlinks.
+  for (const file of [
+    "plugins/hack/plugin.json",
+    "plugins/hack/.mcp.json",
+    "plugins/hack/.codex-plugin/plugin.json",
+    "plugins/hack/.claude-plugin/plugin.json",
+    "plugins/hack/.cursor-plugin/plugin.json",
+    "plugins/hack/hooks/claude-hooks.json",
+    "plugins/hack/rules/hack.mdc",
+    "plugins/hack/skills/hack-cli/SKILL.md",
+    ".claude-plugin/marketplace.json",
+    ".cursor-plugin/marketplace.json",
+    ".agents/plugins/marketplace.json",
+    ".agents/skills/hack-repo-tla/SKILL.md",
+    ".agents/skills/hack-repo-tla/agents/openai.yaml",
+    "examples/basic/.claude/settings.json",
+    "examples/basic/.codex/config.toml",
+    "examples/basic/.cursor/mcp.json",
+  ]) {
+    expect(parsedFiles).toContain(file);
+  }
+  expect(parsedFiles.some((file) => file.includes("compose"))).toBe(false);
   expect(
     await Bun.file(
       join(repoRoot, "plugins/hack/hooks/claude-hooks.json")
     ).text()
   ).toContain(HOOK_COMMAND);
+});
+
+test("policy scan counts only parsed files and fails closed on unparsed config", () => {
+  expect(policyScan("plugins/hack/README.md", "# Hack\n").kind).toBe(
+    "not-config"
+  );
+  expect(policyScan("skills/x/scripts/run", "#!/bin/sh\n").kind).toBe(
+    "not-config"
+  );
+  expect(policyScan("skills/x/SKILL.md", "---\nname: x\n---\n").kind).toBe(
+    "parsed"
+  );
+  expect(policyScan("skills/x/agents/openai.yaml", "a: 1\n").kind).toBe(
+    "parsed"
+  );
+  for (const file of [
+    "plugins/hack/settings.ini",
+    "plugins/hack/client.conf",
+    "plugins/hack/config.jsonc",
+    "plugins/hack/.env",
+    "plugins/hack/.env.local",
+  ]) {
+    const scan = policyScan(file, "model=x\n");
+    expect(scan.kind).toBe("not-config");
+    expect(scan.findings.map((finding) => finding.code)).toEqual([
+      "unparsed-config",
+    ]);
+  }
+  expect(() => policyScan("skills/x/agents/openai.yaml", "a: [\n")).toThrow();
 });
 
 test("negative control: the policy scan rejects each forbidden setting", () => {
@@ -371,6 +490,41 @@ test("negative control: the policy scan rejects each forbidden setting", () => {
     ],
     ["config.toml", 'model = "gpt-5"\n', "model-setting"],
     ["config.toml", 'model_reasoning_effort = "high"\n', "model-setting"],
+    ["config.toml", 'reasoning_effort = "high"\n', "model-setting"],
+    ["config.toml", 'plan_mode_reasoning_effort = "low"\n', "model-setting"],
+    [
+      "settings.json",
+      JSON.stringify({ env: { CLAUDE_CODE_EFFORT_LEVEL: "high" } }),
+      "model-setting",
+    ],
+    [
+      "settings.json",
+      JSON.stringify({ reasoning: { effort: "high" } }),
+      "model-setting",
+    ],
+    ["skills/x/SKILL.md", "---\nname: x\neffort: high\n---\n", "model-setting"],
+    [
+      "skills/x/SKILL.md",
+      "---\nname: x\nmetadata:\n  reasoningEffort: high\n---\n",
+      "model-setting",
+    ],
+    ["agents/openai.yaml", "model: gpt-5\n", "model-setting"],
+    ["agents/openai.yaml", "model_reasoning_effort: high\n", "model-setting"],
+    [
+      "agents/openai.yaml",
+      "policy:\n  approval_policy: never\n",
+      "permission-setting",
+    ],
+    [
+      "agents/openai.yml",
+      "sandbox_mode: danger-full-access\n",
+      "permission-setting",
+    ],
+    [
+      "hooks/hooks.yaml",
+      "hooks:\n  Stop:\n    - type: command\n      command: curl example\n",
+      "hook-command",
+    ],
     ["config.toml", 'approval_policy = "never"\n', "permission-setting"],
     [
       "config.toml",

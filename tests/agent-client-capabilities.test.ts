@@ -3,11 +3,17 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 
 import {
+  AGENT_CLIENT_CAPABILITIES_REFERENCE_PATH,
+  extractGeneratedSection,
+  GENERATED_BEGIN,
+  GENERATED_END,
+  GeneratedSectionMarkerError,
+  renderAgentClientCapabilitySection,
+  replaceGeneratedSection,
+} from "../scripts/generate-agent-client-capabilities.ts";
+import {
   AGENT_CLIENT_CAPABILITIES,
-  AGENT_CLIENT_CAPABILITY_DEFINITIONS,
   AGENT_CLIENT_CAPABILITY_MATRIX,
-  AGENT_CLIENT_CAPABILITY_MATRIX_VERSION,
-  AGENT_CLIENT_CAPABILITY_OBSERVED_ON,
   AGENT_CLIENT_DEFINITIONS,
   AGENT_CLIENTS,
   type AgentClient,
@@ -19,12 +25,7 @@ import {
 import { isRecord } from "../src/lib/guards.ts";
 
 const repoRoot = join(import.meta.dir, "..");
-const referencePath = join(
-  repoRoot,
-  "docs",
-  "reference",
-  "agent-client-capabilities.md"
-);
+const referencePath = join(repoRoot, AGENT_CLIENT_CAPABILITIES_REFERENCE_PATH);
 
 type IssueCode =
   | "missing-cell"
@@ -206,94 +207,6 @@ function codesFor(
     .map((issue) => issue.code);
 }
 
-function escapeCell(value: string): string {
-  return value.replaceAll("|", "\\|").replaceAll("\n", " ");
-}
-
-function clientLabel(client: AgentClient): string {
-  return (
-    AGENT_CLIENT_DEFINITIONS.find((definition) => definition.client === client)
-      ?.label ?? client
-  );
-}
-
-function capabilityLabel(capability: AgentClientCapability): string {
-  return (
-    AGENT_CLIENT_CAPABILITY_DEFINITIONS.find(
-      (definition) => definition.capability === capability
-    )?.label ?? capability
-  );
-}
-
-const GENERATED_BEGIN = "<!-- BEGIN GENERATED: agent-client-capabilities -->";
-const GENERATED_END = "<!-- END GENERATED: agent-client-capabilities -->";
-
-function renderGeneratedSection(): string {
-  const lines = [
-    GENERATED_BEGIN,
-    "",
-    `Matrix version ${AGENT_CLIENT_CAPABILITY_MATRIX_VERSION}, observed ${AGENT_CLIENT_CAPABILITY_OBSERVED_ON}.`,
-    "",
-    "### Clients",
-    "",
-    "| Client | Manifest |",
-    "| --- | --- |",
-    ...AGENT_CLIENT_DEFINITIONS.map(
-      (definition) =>
-        `| ${escapeCell(definition.label)} | \`${definition.manifestPath}\` |`
-    ),
-    "",
-    "### Capabilities",
-    "",
-    "| Capability | Meaning |",
-    "| --- | --- |",
-    ...AGENT_CLIENT_CAPABILITY_DEFINITIONS.map(
-      (definition) =>
-        `| ${definition.label} | ${escapeCell(definition.meaning)} |`
-    ),
-    "",
-    "### Status summary",
-    "",
-    `| Capability | ${AGENT_CLIENTS.map(clientLabel).map(escapeCell).join(" | ")} |`,
-    `| --- | ${AGENT_CLIENTS.map(() => "---").join(" | ")} |`,
-    ...AGENT_CLIENT_CAPABILITIES.map((capability) => {
-      const statuses = AGENT_CLIENTS.map(
-        (client) =>
-          AGENT_CLIENT_CAPABILITY_MATRIX.find(
-            (cell) => cell.client === client && cell.capability === capability
-          )?.status ?? "missing"
-      );
-      return `| ${capabilityLabel(capability)} | ${statuses.join(" | ")} |`;
-    }),
-    "",
-    "### Cells",
-    "",
-    "| Client | Capability | Status | Evidence class | Evidence | Client version | Host | Source | Note | Open gate |",
-    "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
-    ...AGENT_CLIENT_CAPABILITY_MATRIX.map((cell) =>
-      [
-        "",
-        cell.client,
-        capabilityLabel(cell.capability),
-        cell.status,
-        cell.evidenceClass,
-        `\`${cell.evidenceRef}\``,
-        escapeCell(cell.observedClientVersion ?? "none"),
-        `\`${cell.hostLabel}\``,
-        `\`${cell.sourceSha.slice(0, 12)}\``,
-        escapeCell(cell.note),
-        escapeCell(cell.openGate ?? "none"),
-        "",
-      ]
-        .join(" | ")
-        .trim()
-    ),
-    "",
-    GENERATED_END,
-  ];
-  return lines.join("\n");
-}
-
 test("every client and capability pair is classified with complete evidence", async () => {
   expect(AGENT_CLIENT_CAPABILITY_MATRIX).toHaveLength(
     AGENT_CLIENTS.length * AGENT_CLIENT_CAPABILITIES.length
@@ -444,15 +357,18 @@ test("manifest-declared components agree with the matrix", async () => {
   ).toEqual(["open-gate-missing"]);
 });
 
-test("reference doc matches the matrix and records ownership decisions", async () => {
+test("committed reference section matches the generator output", async () => {
   const doc = await Bun.file(referencePath).text();
-  const start = doc.indexOf(GENERATED_BEGIN);
-  const end = doc.indexOf(GENERATED_END);
-  expect(start).toBeGreaterThanOrEqual(0);
-  expect(end).toBeGreaterThan(start);
-  expect(doc.slice(start, end + GENERATED_END.length)).toBe(
-    renderGeneratedSection()
+  expect(extractGeneratedSection(doc)).toBe(
+    renderAgentClientCapabilitySection()
   );
+  expect(
+    replaceGeneratedSection({
+      document: doc,
+      section: renderAgentClientCapabilitySection(),
+    })
+  ).toBe(doc);
+  expect(doc).toContain("bun run docs:agent-client-capabilities");
   expect(doc).toContain("## Companion-package layout decision");
   expect(doc).toContain("## Model-policy ownership");
   for (const owner of [
@@ -462,4 +378,59 @@ test("reference doc matches the matrix and records ownership decisions", async (
   ]) {
     expect(doc).toContain(owner);
   }
+  const packageJson: unknown = await Bun.file(
+    join(repoRoot, "package.json")
+  ).json();
+  const scripts = isRecord(packageJson) ? packageJson.scripts : undefined;
+  expect(
+    isRecord(scripts) ? scripts["docs:agent-client-capabilities"] : undefined
+  ).toBe("bun run scripts/generate-agent-client-capabilities.ts");
+});
+
+test("negative control: a reclassified cell makes the committed section stale", async () => {
+  const doc = await Bun.file(referencePath).text();
+  const reclassified = replaceCell("claude", "skillDiscovery", {
+    status: "verified",
+    openGate: null,
+  });
+  const rendered = renderAgentClientCapabilitySection({ cells: reclassified });
+  expect(extractGeneratedSection(doc)).not.toBe(rendered);
+  const rewritten = replaceGeneratedSection({
+    document: doc,
+    section: rendered,
+  });
+  expect(extractGeneratedSection(rewritten)).toBe(rendered);
+  expect(rewritten.slice(0, doc.indexOf(GENERATED_BEGIN))).toBe(
+    doc.slice(0, doc.indexOf(GENERATED_BEGIN))
+  );
+  expect(rewritten.slice(rewritten.indexOf(GENERATED_END))).toBe(
+    doc.slice(doc.indexOf(GENERATED_END))
+  );
+});
+
+test("generator refuses documents without exactly one ordered marker pair", () => {
+  const section = renderAgentClientCapabilitySection();
+  const codeFor = (document: string): string | null => {
+    try {
+      replaceGeneratedSection({ document, section });
+      return null;
+    } catch (error) {
+      return error instanceof GeneratedSectionMarkerError
+        ? error.code
+        : "other";
+    }
+  };
+  expect(codeFor("# Title\n")).toBe("missing-markers");
+  expect(codeFor(`${GENERATED_BEGIN}\n`)).toBe("missing-markers");
+  expect(
+    codeFor(
+      `${GENERATED_BEGIN}\n${GENERATED_END}\n${GENERATED_BEGIN}\n${GENERATED_END}\n`
+    )
+  ).toBe("duplicate-markers");
+  expect(codeFor(`${GENERATED_END}\n${GENERATED_BEGIN}\n`)).toBe(
+    "markers-out-of-order"
+  );
+  expect(codeFor(`a\n${GENERATED_BEGIN}\nold\n${GENERATED_END}\nb\n`)).toBe(
+    null
+  );
 });

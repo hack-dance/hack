@@ -9,7 +9,8 @@
  *   marketplace listing is never component-loading evidence.
  * - For the named native-plugin clients, a component is `unsupported` exactly
  *   when that client's plugin manifest does not declare it.
- * - docs/reference/agent-client-capabilities.md matches this data.
+ * - docs/reference/agent-client-capabilities.md matches this data; rewrite its
+ *   generated section with `bun run docs:agent-client-capabilities`.
  *
  * Each cell records the client version, host label and source revision at
  * which it was classified. Those values describe one observation on one host;

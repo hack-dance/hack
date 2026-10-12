@@ -3,10 +3,11 @@
 Hack owns Hack-specific instructions. User and project policy continues to own model
 selection, general coding standards, work-unit planning, evolution, and writeback.
 Do not ship provider model pins or copy global instruction packs into this plugin.
-`tests/agent-plugin-generation.test.ts` enforces this for every file under
-`plugins/hack` and `examples/basic`: no model or model-override keys, no permission,
-approval or sandbox overrides, no output-style settings, and hooks that run only
-`hack agent prime`. See [model-policy ownership](reference/agent-client-capabilities.md#model-policy-ownership).
+`tests/agent-plugin-generation.test.ts` enforces this for the generated guidance
+surfaces (`plugins/hack`, the client marketplace manifests, `.agents`, and the
+example agent configuration): no model, model-override or reasoning-effort keys, no
+permission, approval or sandbox overrides, no output-style settings, and hooks that
+run only `hack agent prime`. See [model-policy ownership](reference/agent-client-capabilities.md#model-policy-ownership).
 
 ## Sources and installed surfaces
 
@@ -48,7 +49,8 @@ belong to their client adapters; shared behavior belongs to the canonical source
    generation tests. Run normal typecheck/check/test gates for behavior changes. New
    packaging needs fresh client loading proof beyond a successful marketplace listing.
    Record that proof, or the open gate, in `src/agents/client-capabilities.ts` and
-   regenerate the [capability matrix](reference/agent-client-capabilities.md).
+   run `bun run docs:agent-client-capabilities` to regenerate the
+   [capability matrix](reference/agent-client-capabilities.md).
 5. Release preparation regenerates plugin assets after the version bump. Verify the
    published bundle and installed executable separately.
 

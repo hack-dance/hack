@@ -2,8 +2,10 @@
 
 This page classifies what Hack's optional agent integrations are known to do in
 each client. The data lives in `src/agents/client-capabilities.ts`.
-`tests/agent-client-capabilities.test.ts` checks the generated section below
-against that data and enforces the classification rules.
+`scripts/generate-agent-client-capabilities.ts` renders the generated section
+below from that data. `tests/agent-client-capabilities.test.ts` fails when the
+committed section differs from the rendered one, and enforces the classification
+rules.
 
 ## Classification rules
 
@@ -30,9 +32,11 @@ cover other machines or later client versions. A status for one client implies
 nothing about another client, including UI parity.
 
 To reclassify a cell, update the data, increment
-`AGENT_CLIENT_CAPABILITY_MATRIX_VERSION`, and regenerate the section below so the
-test passes. Promote a cell to `verified` only after its named test passes against
-the recorded client version.
+`AGENT_CLIENT_CAPABILITY_MATRIX_VERSION`, and run
+`bun run docs:agent-client-capabilities` to rewrite the section below. Add
+`-- --check` to report a stale section without writing. Edit only the prose
+outside the generated markers by hand. Promote a cell to `verified` only after its
+named test passes against the recorded client version.
 
 <!-- BEGIN GENERATED: agent-client-capabilities -->
 
@@ -133,11 +137,17 @@ Decisions:
 The user's own provider configuration and project policy own these settings. Hack
 artifacts must not set them:
 
-- model selection, model overrides and reasoning effort
+- model selection, model overrides and reasoning effort (for example
+  `model_reasoning_effort`, `reasoning_effort`, or `effort` in skill frontmatter)
 - permission modes, tool allowlists, approval policies and sandbox modes
 - output styles
 
 Hack-shipped hooks may run only `hack agent prime`.
-`tests/agent-plugin-generation.test.ts` enforces this for every file under
-`plugins/hack` and `examples/basic`. It includes a negative control that proves the
-check rejects each forbidden setting. See [maintaining agent guidance](../agent-guidance.md).
+`tests/agent-plugin-generation.test.ts` enforces this for the generated guidance
+surfaces: `plugins/hack`, `.claude-plugin`, `.cursor-plugin`, `.agents` (including
+the skills it links to), and the agent configuration in `examples/basic/.claude`,
+`.codex` and `.cursor`. It parses JSON, JSON Lines, TOML, YAML and markdown
+frontmatter. It fails on structured-config formats it cannot parse, such as INI,
+JSONC, XML or `.env`, and counts a file as scanned only when it parsed it.
+A negative control proves the check rejects each forbidden setting. See
+[maintaining agent guidance](../agent-guidance.md).

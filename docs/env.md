@@ -492,6 +492,35 @@ Write-path guarantees in a linked worktree (first secret added from any checkout
 - if the shared location cannot be resolved (git unavailable) or written, Hack falls back to a checkout-local key and prints a loud divergence warning
 - `hack doctor` flags divergent `.hack.secret.key` contents across checkouts with the exact paths
 
+Key strength and exposure (`hack doctor` "env key" check):
+
+`hack doctor` and `hack doctor --json` audit the checkout-local key, the shared key
+under the git common dir and, in a linked worktree, the primary checkout's key. When
+no key file exists, the check classifies `HACK_ENV_SECRET_KEY` instead. The check is
+read-only. It never prints key bytes or absolute paths, and `--fix` does not act on it.
+Each finding names a project-relative subject and the exact command to run from the
+project root. `--json` adds an `envKey` object to the check with `status` and
+`findings` (`code`, `status`, `subject`, `remedy`).
+
+| Code | Status | Meaning |
+| --- | --- | --- |
+| `env-key-ok` | ok | key material is a regular, private, 256-bit-class file |
+| `env-key-absent` | ok | no key file and no `HACK_ENV_SECRET_KEY` |
+| `env-key-weak-permissions` | warn | group or others have access; suggests `chmod 600` |
+| `env-key-wrong-owner` | warn | the file is not owned by the current user |
+| `env-key-wrong-length` | warn | shorter than the 43-character base64url form of a 256-bit key, or empty |
+| `env-key-low-entropy` | warn | long enough but repetitive (estimated under 128 bits) |
+| `env-key-symlink` | error | the key path is a symlink; Hack refuses symlinked keys |
+| `env-key-not-regular` | error | the key path is a directory or another non-file entry |
+| `env-key-unreadable` | error | unreadable, oversized or not UTF-8 |
+| `env-key-tracked` | error | a file named `.hack.secret.key` is tracked by git at any depth |
+| `env-key-public-path` | error | a key copy sits in `public/`, `static/`, `dist/`, `build/`, `out/`, `www/`, `_site/`, `.next/` or `.output/` |
+
+Hack derives the AES-256-GCM key by hashing the key text with SHA-256, so key
+strength is the entropy of that text. Generated keys are 32 random bytes in base64url.
+For a weak, tracked or published key, the remedy is rotation: move the key aside, then
+re-add each secret with `hack env add --secret KEY VALUE` so Hack generates a new key.
+
 CI and managed container fallback:
 
 - if `.hack.secret.key` is missing, Hack falls back to `HACK_ENV_SECRET_KEY`

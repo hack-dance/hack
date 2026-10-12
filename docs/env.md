@@ -198,6 +198,16 @@ That means `.hack/.env` is no longer the primary runtime source of truth.
 
 `hack env materialize` is manual by design. Use it only when you need a compatibility file for an external tool that expects `.env` on disk.
 
+Hack writes `.hack/.env` and `.hack/.env.<overlay>` (from `materialize`, legacy
+`hack env set`, and the daemon env route) with mode `0600` by atomic replace: a
+private temporary file in `.hack/` is written, fsynced and renamed over the target,
+so readers never see a partial file. An existing file with group or other access is
+tightened to `0600` even when its contents are unchanged. These write and update paths
+refuse, with a fixed message that names no file or value, an env file that is a symlink
+(including a dangling one) or not a regular file, or one whose `.hack` directory is a
+symlink. Replace the link with a regular file or directory to continue. Code paths
+that only read an env file do not apply this check and still follow a symlink.
+
 For host execution, `hack host exec`, `hack host shell`, and lifecycle hooks/processes use a host-local view.
 That means Hack prefers host-usable values when it can:
 
@@ -237,7 +247,7 @@ into a host command, and `--target` on env and host commands chooses the `host` 
 | `hack down` | `--env`, `--target` | At teardown, for lifecycle down hooks only; omitted reuses a named overlay recorded for the running stack, else the configured default. | None; nothing is delivered to containers. | The native runtime backend refuses `--env`. |
 | `hack restart` | `--env`, `--target` | When services are recreated; omitted reuses a named overlay recorded for the running stack, else the configured default, and an explicit `--env` (including `base`) wins. | This is the refresh path for the whole stack or the named services. | Authored native projects receive the same selection before dispatch. |
 | `hack run` | `--env` | Per invocation, for the new one-off container. | Each run resolves again. | The native runtime backend refuses `--env`; restart with the selection first. |
-| `hack exec` | `--env` | Checked at invocation against the env recorded for the running stack; the command runs with the env the container was created with. | `hack restart --env <name>` | Compose refuses when the requested env differs from the env recorded for the running stack; the native runtime backend refuses `--env`. |
+| `hack exec` | `--env` | Checked at invocation against the env recorded for the running stack; the command runs with the env the container was created with. Compose warns on stderr when the service's resolved env changed since it started. | `hack restart <service>` (or `hack restart --env <name>`) | Compose refuses when the requested env differs from the env recorded for the running stack; the native runtime backend refuses `--env`. |
 | `hack env list` | `--env`, `--service` | Per invocation, read-only; secret values are masked unless `--show-secrets`. | Not needed. | Reads files; no runtime required. |
 | `hack env get` | `--env`, `--service` | Per invocation; prints exactly one plaintext value to stdout. | Not needed. | Reads files; refuses native project inputs. |
 | `hack env explain` | `--env`, `--service`, `--target` | Per invocation; reports source, precedence and delivery without the value. | Not needed. | Reads files; no runtime required. |
@@ -254,6 +264,21 @@ into a host command, and `--target` on env and host commands chooses the `host` 
 | `hack config plan` | `--env` | Per invocation; metadata only (names, scopes, secret flags), never decrypted. | Not needed. | Authored native projects only. |
 | `hack session start` | `--env`, `--service` | When the workspace is created; the name gains `.env-<name>` (`.env-base` for base spellings), and `--up` runs `hack up -d` with the same selection. | Start a new workspace or pass `--env` to `hack session exec`. | Injects into the workspace shell, not into containers. |
 | `hack session exec` | `--env`, `--service` | Per command; omitted reuses the selection encoded in the workspace name. | Each command resolves again. | Injects into the workspace command, not into containers. |
+
+### Stale env warning on `hack exec`
+
+`hack up` and `hack restart` record, for each Compose service they create, a keyed
+digest of the env set delivered to it. The digest lives in Hack-managed runtime state
+(`.hack/.internal/runtime-state.json`) and holds no key name or value. `hack exec`
+resolves the same env set again and, when the digest differs, prints one fixed warning
+to stderr that names the service and suggests `hack restart <service>`. The command
+still runs with the env the container was created with, and stdout stays the target
+command's output. The warning never prints a key or value.
+
+The check is advisory. Identical env, state written before this check existed, and a
+service whose last targeted restart failed produce no warning. `hack up <service>`,
+`hack restart <service>` and `hack env apply --service <service>` refresh only the
+named services' digests. The native runtime backend does not run this check.
 
 MCP tools accept no env selector. They run the CLI without `--env`, so each row's
 omitted-`--env` behavior applies.
@@ -510,6 +535,35 @@ Write-path guarantees in a linked worktree (first secret added from any checkout
 - if the shared location cannot be resolved (git unavailable) or written, Hack falls back to a checkout-local key and prints a loud divergence warning
 - `hack doctor` flags divergent `.hack.secret.key` contents across checkouts with the exact paths
 
+Key strength and exposure (`hack doctor` "env key" check):
+
+`hack doctor` and `hack doctor --json` audit the checkout-local key, the shared key
+under the git common dir and, in a linked worktree, the primary checkout's key. When
+no key file exists, the check classifies `HACK_ENV_SECRET_KEY` instead. The check is
+read-only. It never prints key bytes or absolute paths, and `--fix` does not act on it.
+Each finding names a project-relative subject and the exact command to run from the
+project root. `--json` adds an `envKey` object to the check with `status` and
+`findings` (`code`, `status`, `subject`, `remedy`).
+
+| Code | Status | Meaning |
+| --- | --- | --- |
+| `env-key-ok` | ok | key material is a regular, private, 256-bit-class file |
+| `env-key-absent` | ok | no key file and no `HACK_ENV_SECRET_KEY` |
+| `env-key-weak-permissions` | warn | group or others have access; suggests `chmod 600` |
+| `env-key-wrong-owner` | warn | the file is not owned by the current user |
+| `env-key-wrong-length` | warn | shorter than the 43-character base64url form of a 256-bit key, or empty |
+| `env-key-low-entropy` | warn | long enough but repetitive (estimated under 128 bits) |
+| `env-key-symlink` | error | the key path is a symlink; Hack refuses symlinked keys |
+| `env-key-not-regular` | error | the key path is a directory or another non-file entry |
+| `env-key-unreadable` | error | unreadable, oversized or not UTF-8 |
+| `env-key-tracked` | error | a file named `.hack.secret.key` is tracked by git at any depth |
+| `env-key-public-path` | error | a key copy sits in `public/`, `static/`, `dist/`, `build/`, `out/`, `www/`, `_site/`, `.next/` or `.output/` |
+
+Hack derives the AES-256-GCM key by hashing the key text with SHA-256, so key
+strength is the entropy of that text. Generated keys are 32 random bytes in base64url.
+For a weak, tracked or published key, the remedy is rotation: move the key aside, then
+re-add each secret with `hack env add --secret KEY VALUE` so Hack generates a new key.
+
 CI and managed container fallback:
 
 - if `.hack.secret.key` is missing, Hack falls back to `HACK_ENV_SECRET_KEY`
@@ -557,7 +611,14 @@ The modern YAML env model is the canonical repo format today.
 
 Some older surfaces are still compatibility-oriented:
 
-- `hack env backend ...` remains relevant for legacy repos and older secret-store configurations
+- `hack env backend ...` remains relevant for legacy repos and older secret-store configurations.
+  The `encrypted_file` store (also used by the `cloud` shim) is replaced atomically
+  with mode `0600`, and set/delete hold an in-process queue plus a cooperative
+  `<store>.lock` so concurrent writers, including separate processes, do not lose
+  updates. A store path that is a symlink is refused for writes. The v1 store
+  envelope and legacy `v1:` values authenticate no associated data: they are not
+  bound to a path, project or variable name beyond the scoped key inside the
+  encrypted store plaintext
 - the daemon's env HTTP route (used by the macOS app) reads and writes the legacy dotenv-shaped
   contract (`source: 'plain_env'|'keychain'`, `resolvedFrom: 'dotenv'/'process'/'keychain'/'portable_backend'`),
   not the modern YAML `hack env list --json` shape; there is no web dashboard surface anymore

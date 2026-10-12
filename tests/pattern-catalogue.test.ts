@@ -14,6 +14,7 @@ import {
   extractHackInvocations,
   findGuidanceCommandIssues,
 } from "./helpers/cli-guidance-commands.ts";
+import { bannedRecipeFindings } from "./helpers/pattern-recipes.ts";
 
 const EXPECTED_IDS = Array.from(
   { length: 12 },
@@ -35,48 +36,6 @@ function catalogueIdIssues(cards: readonly PatternCard[]): string[] {
       .filter((id) => !EXPECTED_IDS.includes(id))
       .map((id) => `unexpected ${id}`),
   ];
-}
-
-/** Recipes that must never appear outside a negative-example block. */
-const BANNED_RECIPES: readonly (readonly [string, RegExp])[] = [
-  ["broad-process-kill", /\b(?:pkill|killall)\b/],
-  ["kill-by-port", /\blsof\b[^\n|]*-t[^\n|]*\|\s*xargs\s+(?:-\S+\s+)*kill\b/],
-  ["placeholder-liveness-tail", /\btail\s+-f\s+\/dev\/null\b/],
-  ["placeholder-liveness-sleep", /\bsleep\s+infinity\b/],
-  [
-    "argv-secret-flag",
-    /--(?:password|passwd|token|secret|api-key|apikey|access-key)(?:=|\s+)\S/i,
-  ],
-  [
-    "argv-secret-assignment",
-    /\b[A-Z][A-Z0-9_]*(?:TOKEN|SECRET|PASSWORD|PASSWD|API_KEY)=\S/,
-  ],
-  ["argv-env-value", /\bhack\s+env\s+(?:set|add)\s+\S+\s+\S+/],
-];
-
-function stripNegativeExamples(text: string): string {
-  let result = "";
-  let rest = text;
-  for (;;) {
-    const start = rest.indexOf(NEGATIVE_EXAMPLE_START);
-    if (start === -1) {
-      return result + rest;
-    }
-    const end = rest.indexOf(NEGATIVE_EXAMPLE_END, start);
-    if (end === -1) {
-      // An unterminated block exempts nothing.
-      return result + rest;
-    }
-    result += rest.slice(0, start);
-    rest = rest.slice(end + NEGATIVE_EXAMPLE_END.length);
-  }
-}
-
-function bannedRecipeFindings(text: string): string[] {
-  const scanned = stripNegativeExamples(text);
-  return BANNED_RECIPES.filter(([, pattern]) => pattern.test(scanned)).map(
-    ([code]) => code
-  );
 }
 
 test("the catalogue holds exactly the twelve HACK-P cards in order", () => {

@@ -1,0 +1,8 @@
+{
+  "name": "pattern-p01",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "greeting": "file:./packages/greeting"
+  }
+}

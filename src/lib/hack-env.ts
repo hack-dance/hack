@@ -6,8 +6,12 @@ import {
 } from "../constants.ts";
 import { readControlPlaneConfig } from "../control-plane/sdk/config.ts";
 import { parseDotEnv, serializeDotEnv } from "./env.ts";
-import { readTextFile, writeTextFileIfChanged } from "./fs.ts";
+import { readTextFile } from "./fs.ts";
 import { getString, isRecord } from "./guards.ts";
+import {
+  readPrivateEnvFile,
+  writePrivateEnvFileIfChanged,
+} from "./private-env-file.ts";
 import { readProjectDefaultEnvConfig } from "./project.ts";
 import type { SecretStoreDescriptor } from "./secret-store.ts";
 import {
@@ -502,19 +506,23 @@ export async function upsertDotEnvValue(opts: {
   readonly key: string;
   readonly value: string;
 }): Promise<{ readonly changed: boolean }> {
-  const existingText = (await readTextFile(opts.envFile)) ?? "";
+  const existingText =
+    (await readPrivateEnvFile({ envFile: opts.envFile })) ?? "";
   const env = parseDotEnv(existingText);
   const nextEnv: Record<string, string> = { ...env, [opts.key]: opts.value };
   const nextText = serializeDotEnvStable(nextEnv);
-  const result = await writeTextFileIfChanged(opts.envFile, nextText);
-  return { changed: result.changed };
+  return await writePrivateEnvFileIfChanged({
+    envFile: opts.envFile,
+    text: nextText,
+  });
 }
 
 export async function removeDotEnvKey(opts: {
   readonly envFile: string;
   readonly key: string;
 }): Promise<{ readonly changed: boolean }> {
-  const existingText = (await readTextFile(opts.envFile)) ?? "";
+  const existingText =
+    (await readPrivateEnvFile({ envFile: opts.envFile })) ?? "";
   const env = parseDotEnv(existingText);
   if (!(opts.key in env)) {
     return { changed: false };
@@ -527,8 +535,10 @@ export async function removeDotEnvKey(opts: {
     nextEnv[key] = value;
   }
   const nextText = serializeDotEnvStable(nextEnv);
-  const result = await writeTextFileIfChanged(opts.envFile, nextText);
-  return { changed: result.changed };
+  return await writePrivateEnvFileIfChanged({
+    envFile: opts.envFile,
+    text: nextText,
+  });
 }
 
 export function resolveKeychainServiceName(opts: {

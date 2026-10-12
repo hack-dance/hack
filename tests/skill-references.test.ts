@@ -115,6 +115,64 @@ test("negative control: absolute, missing, external and unlinked references fail
   ]);
 });
 
+test("negative control: reference-style and HTML links into repository docs or external hosts fail", async () => {
+  const root = await fixturePlugin({
+    "skills/x/SKILL.md": [
+      "# X",
+      "",
+      "See [env][env-doc], [guide][guide] and [up][up].",
+      "",
+      "[env-doc]: ../../docs/env.md",
+      "[guide]: https://example.com/guide",
+      '[up]: <../../../../docs/env.md> "Repository env"',
+      "",
+      '<a href="../../docs/env.md">env</a>',
+      "<a class='x' href='https://example.com/a'>a</a>",
+      '<img alt="logo" src="../../../../docs/logo.png">',
+      "<img",
+      '  src="https://cdn.example.com/x.png"',
+      '  alt="multi-line tag">',
+      "",
+      "[^1]: A footnote definition is prose, not a link target.",
+      "",
+    ].join("\n"),
+  });
+  expect(await findSkillLinkIssues({ pluginRoot: root })).toEqual([
+    { file: "skills/x/SKILL.md", code: "repo-docs-link" },
+    { file: "skills/x/SKILL.md", code: "external-outside-further-reading" },
+    { file: "skills/x/SKILL.md", code: "escapes-plugin" },
+    { file: "skills/x/SKILL.md", code: "repo-docs-link" },
+    { file: "skills/x/SKILL.md", code: "external-outside-further-reading" },
+    { file: "skills/x/SKILL.md", code: "escapes-plugin" },
+    { file: "skills/x/SKILL.md", code: "external-outside-further-reading" },
+  ]);
+});
+
+test("reference-style and HTML links to in-plugin targets pass and count as reference links", async () => {
+  const root = await fixturePlugin({
+    "skills/y/SKILL.md": [
+      "# Y",
+      "",
+      'Read the [patterns][patterns] and the <a href="references/lifecycle.md#start">lifecycle notes</a>.',
+      "",
+      "[patterns]: references/patterns.md",
+      "",
+      '<img src="assets/diagram.svg" alt="diagram">',
+      "",
+      "## Further reading",
+      "",
+      "- [Site][site] or <a href='https://example.com/ok'>the site</a>.",
+      "",
+      "[site]: <https://example.com/ok>",
+      "",
+    ].join("\n"),
+    "skills/y/references/patterns.md": "# Patterns\n",
+    "skills/y/references/lifecycle.md": "# Lifecycle\n",
+    "skills/y/assets/diagram.svg": "<svg/>\n",
+  });
+  expect(await findSkillLinkIssues({ pluginRoot: root })).toEqual([]);
+});
+
 test("reference file names are constrained to plain markdown names", () => {
   for (const file of ["../escape.md", "nested/x.md", "x.txt", "X.md"]) {
     expect(() =>

@@ -26,15 +26,14 @@ afterEach(async () => {
   }
 });
 
-test("release generation applies the requested version to every client manifest", async () => {
-  tempDir = await mkdtemp(join(tmpdir(), "hack-agent-plugins-"));
-  const pluginRoot = join(tempDir, "plugins", "hack");
-  const manifestDirectories = [
-    ".codex-plugin",
-    ".claude-plugin",
-    ".cursor-plugin",
-  ] as const;
+const manifestDirectories = [
+  ".codex-plugin",
+  ".claude-plugin",
+  ".cursor-plugin",
+] as const;
 
+/** Seed the client manifests the generator rewrites into a temp plugin root. */
+async function seedPluginManifests(pluginRoot: string): Promise<void> {
   for (const manifestDirectory of manifestDirectories) {
     const directory = join(pluginRoot, manifestDirectory);
     await mkdir(directory, { recursive: true });
@@ -55,6 +54,12 @@ test("release generation applies the requested version to every client manifest"
       mcpServers: { hack: { command: "hack", args: ["mcp", "serve"] } },
     })
   );
+}
+
+test("release generation applies the requested version to every client manifest", async () => {
+  tempDir = await mkdtemp(join(tmpdir(), "hack-agent-plugins-"));
+  const pluginRoot = join(tempDir, "plugins", "hack");
+  await seedPluginManifests(pluginRoot);
 
   await generateAgentPlugins({ repoRoot: tempDir, version: "9.8.7" });
 
@@ -67,6 +72,51 @@ test("release generation applies the requested version to every client manifest"
   expect((await Bun.file(join(pluginRoot, "plugin.json")).json()).version).toBe(
     "9.8.7"
   );
+});
+
+test("generation writes every registered reference and prunes only stale reference markdown", async () => {
+  tempDir = await mkdtemp(join(tmpdir(), "hack-agent-plugin-references-"));
+  const pluginRoot = join(tempDir, "plugins", "hack");
+  await seedPluginManifests(pluginRoot);
+  const references = renderPluginReferences();
+  expect(references.size).toBeGreaterThan(0);
+  const [firstReference] = references.keys();
+  if (!firstReference) {
+    throw new Error("expected at least one registered reference");
+  }
+  // Generated references are rewritten in place, not left with stale bytes.
+  await Bun.write(join(pluginRoot, firstReference), "outdated\n");
+  const stale = [
+    "skills/hack-cli/references/retired.md",
+    "skills/hack-init/references/retired.md",
+  ] as const;
+  const kept = {
+    "skills/hack-cli/references/notes.txt": "not a reference\n",
+    "skills/hack-cli/references/diagram.svg": "<svg/>\n",
+    "skills/hack-cli/notes.md": "outside references\n",
+  } as const;
+  for (const path of stale) {
+    await Bun.write(join(pluginRoot, path), "# Retired\n");
+  }
+  for (const [path, content] of Object.entries(kept)) {
+    await Bun.write(join(pluginRoot, path), content);
+  }
+
+  await generateAgentPlugins({ repoRoot: tempDir, version: "9.8.7" });
+
+  for (const [path, content] of references) {
+    const file = Bun.file(join(pluginRoot, path));
+    expect(await file.exists()).toBe(true);
+    expect(new Uint8Array(await file.arrayBuffer())).toEqual(
+      new TextEncoder().encode(content)
+    );
+  }
+  for (const path of stale) {
+    expect(await Bun.file(join(pluginRoot, path)).exists()).toBe(false);
+  }
+  for (const [path, content] of Object.entries(kept)) {
+    expect(await Bun.file(join(pluginRoot, path)).text()).toBe(content);
+  }
 });
 
 test("semantic-release commits all generated client manifests", async () => {

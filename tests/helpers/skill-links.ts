@@ -13,8 +13,11 @@ import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
  * - every `skills/<skill>/references/*.md` file is linked from that skill's
  *   SKILL.md.
  *
- * Inline code and fenced blocks are literals (commands, schema ids), not
- * links, and are ignored. Issues carry closed codes and plugin-relative paths.
+ * Links are inline Markdown links and images (`[x](target)`), reference-style
+ * definitions (`[x]: target`), HTML `href`/`src` attributes (`<a href>`,
+ * `<img src>`), and bare URLs. Inline code and fenced blocks are literals
+ * (commands, schema ids), not links, and are ignored. Issues carry closed codes
+ * and plugin-relative paths.
  */
 export type SkillLinkIssueCode =
   | "absolute-link"
@@ -32,8 +35,14 @@ export type SkillLinkIssue = {
 
 const FENCED_BLOCK = /```[\s\S]*?```/g;
 const INLINE_CODE = /`[^`\n]*`/g;
-const HEADING = /^#{1,6}\s+(.+?)\s*#*\s*$/;
+const HEADING = /^#{1,6}[ \t]+(.+?)[ \t]*#*[ \t]*$/gm;
 const MARKDOWN_LINK = /\]\(\s*<?([^)\s>]+)>?(?:\s+"[^"]*")?\s*\)/g;
+/** `[label]: target` or `[label]: <target>`; `[^n]:` footnotes are not links. */
+const REFERENCE_DEFINITION =
+  /^[ \t>]*\[(?!\^)(?:[^\]\\\n]|\\.)+\]:[ \t]*\n?[ \t]*(?:<([^>\n]*)>|([^\s<]\S*))/gm;
+const HTML_TAG = /<[a-z][a-z0-9-]*(?:\s[^<>]*)?>/gi;
+const HTML_LINK_ATTRIBUTE =
+  /(?:^|\s)(?:href|src)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+))/gi;
 const URL = /\b[a-z][a-z0-9+.-]*:\/\/[^\s)>\]]+/gi;
 const SCHEME = /^[a-z][a-z0-9+.-]*:/i;
 const FURTHER_READING = /^further reading$/i;
@@ -143,30 +152,63 @@ function referenceLinkIssue(opts: {
     : "unlinked-reference";
 }
 
-/** Yield link targets and URLs with whether they sit under "Further reading". */
-function* scanLinks(
-  text: string
-): Generator<{ readonly target: string; readonly furtherReading: boolean }> {
+type ScannedLink = {
+  readonly target: string;
+  readonly furtherReading: boolean;
+};
+
+type Located = { readonly start: number; readonly end: number };
+
+/**
+ * Yield link targets and URLs in document order, each with whether it sits
+ * under a "Further reading" heading. A bare URL inside an explicit link is not
+ * yielded twice.
+ */
+function* scanLinks(text: string): Generator<ScannedLink> {
   const prose = text
     .replace(FENCED_BLOCK, (block) => block.replace(/[^\n]/g, " "))
     .replace(INLINE_CODE, (code) => " ".repeat(code.length));
-  let furtherReading = false;
-  for (const line of prose.split("\n")) {
-    const heading = HEADING.exec(line);
-    if (heading) {
-      furtherReading = FURTHER_READING.test(heading[1] ?? "");
-      continue;
+  const headings = [...prose.matchAll(HEADING)].map((match) => ({
+    start: match.index,
+    furtherReading: FURTHER_READING.test(match[1] ?? ""),
+  }));
+  const furtherReadingAt = (offset: number): boolean =>
+    headings.findLast((heading) => heading.start <= offset)?.furtherReading ??
+    false;
+
+  const explicit: (Located & { readonly target: string })[] = [];
+  const add = (match: RegExpMatchArray, target: string | undefined): void => {
+    const start = match.index ?? 0;
+    explicit.push({
+      start,
+      end: start + match[0].length,
+      target: target ?? "",
+    });
+  };
+  for (const match of prose.matchAll(MARKDOWN_LINK)) {
+    add(match, match[1]);
+  }
+  for (const match of prose.matchAll(REFERENCE_DEFINITION)) {
+    add(match, match[1] ?? match[2]);
+  }
+  for (const tag of prose.matchAll(HTML_TAG)) {
+    for (const attribute of tag[0].matchAll(HTML_LINK_ATTRIBUTE)) {
+      add(tag, (attribute[1] ?? attribute[2] ?? attribute[3] ?? "").trim());
     }
-    const seen = new Set<string>();
-    for (const match of line.matchAll(MARKDOWN_LINK)) {
-      const target = match[1] ?? "";
-      seen.add(target);
-      yield { target, furtherReading };
+  }
+
+  const links: (Located & { readonly target: string })[] = [...explicit];
+  for (const match of prose.matchAll(URL)) {
+    const start = match.index;
+    if (!explicit.some((link) => link.start <= start && start < link.end)) {
+      links.push({ start, end: start + match[0].length, target: match[0] });
     }
-    for (const match of line.matchAll(URL)) {
-      if (!seen.has(match[0])) {
-        yield { target: match[0], furtherReading };
-      }
-    }
+  }
+  links.sort((a, b) => a.start - b.start);
+  for (const link of links) {
+    yield {
+      target: link.target,
+      furtherReading: furtherReadingAt(link.start),
+    };
   }
 }

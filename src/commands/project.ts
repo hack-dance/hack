@@ -199,6 +199,7 @@ import {
   appendHackHostTrustEnvironment,
   findHackHostTrustBundlePath,
 } from "../lib/local-ca.ts";
+import { noteBrowserTargetsForLocalNetworkHint } from "../lib/local-network-hint.ts";
 import {
   buildLogSelector,
   resolveShouldTryLoki,
@@ -8378,9 +8379,11 @@ async function emitOpenOrigin(opts: {
 }): Promise<number> {
   if (opts.json) {
     process.stdout.write(`${JSON.stringify({ url: opts.url }, null, 2)}\n`);
+    noteBrowserTargetsForLocalNetworkHint([opts.url]);
     return 0;
   }
   logger.step({ message: `Opening ${opts.url}` });
+  noteBrowserTargetsForLocalNetworkHint([opts.url]);
   return await openUrl(opts.url);
 }
 

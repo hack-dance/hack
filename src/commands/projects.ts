@@ -15,6 +15,7 @@ import {
 } from "../lib/caddy-hosts.ts";
 import { emitCliResult, okResult } from "../lib/cli-result.ts";
 import { confirmSafe } from "../lib/interactivity.ts";
+import { noteBrowserTargetsForLocalNetworkHint } from "../lib/local-network-hint.ts";
 import {
   createOperationTimings,
   type OperationTimings,
@@ -590,6 +591,9 @@ async function runProjects(opts: {
       });
     }
   }
+  noteBrowserTargetsForLocalNetworkHint(
+    views.flatMap((p) => (p.devHost ? [p.devHost] : []))
+  );
 
   return 0;
 }

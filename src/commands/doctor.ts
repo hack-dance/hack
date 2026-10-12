@@ -93,6 +93,7 @@ import {
   isExplicitlyNonInteractive,
 } from "../lib/interactivity.ts";
 import { findHackLocalCaCertPath } from "../lib/local-ca.ts";
+import { noteBrowserTargetsForLocalNetworkHint } from "../lib/local-network-hint.ts";
 import {
   describeSupersededRoots,
   inspectSupersededMacRoots,
@@ -901,16 +902,23 @@ const handleDoctor: CommandHandlerFor<typeof doctorSpec> = async ({
 
   const hasError = results.some((r) => r.status === "error");
 
+  const browserHintTargets = doctorBrowserHintTargets({
+    url: browser.url,
+    defaultDomain,
+  });
   if (json) {
-    return finishDoctorJson({
+    const code = finishDoctorJson({
       results,
       hasError,
     });
+    noteBrowserTargetsForLocalNetworkHint(browserHintTargets);
+    return code;
   }
 
   await renderDoctorSummary(results);
   emitSlowChecksNote(results);
   await renderMacNote(results);
+  noteBrowserTargetsForLocalNetworkHint(browserHintTargets);
   if (!args.options.fix) {
     await renderRecoveryGuidance(results);
   }
@@ -930,6 +938,14 @@ const handleDoctor: CommandHandlerFor<typeof doctorSpec> = async ({
 
   return 0;
 };
+
+/** The browser check concerns the reported origin, else the default domain. */
+function doctorBrowserHintTargets(opts: {
+  readonly url: string | null;
+  readonly defaultDomain: string;
+}): readonly string[] {
+  return [opts.url ?? opts.defaultDomain];
+}
 
 function resolveDoctorStartDir(pathOption: string | undefined): string {
   return resolve(process.cwd(), pathOption ?? ".");
@@ -1072,10 +1088,14 @@ async function handleNativeDoctor(opts: {
   }
   progress.stop(`Native doctor checks complete (${results.length} checks)`);
   const hasError = results.some((result) => result.status === "error");
+  const browserHintTargets = opts.browser.url ? [opts.browser.url] : [];
   if (opts.json) {
-    return finishDoctorJson({ results, hasError });
+    const code = finishDoctorJson({ results, hasError });
+    noteBrowserTargetsForLocalNetworkHint(browserHintTargets);
+    return code;
   }
   await renderDoctorSummary(results);
+  noteBrowserTargetsForLocalNetworkHint(browserHintTargets);
   if (!opts.browser.url) {
     note(
       "Pass --browser-url https://your-app.hack.local --browser-result works|fails|permission-denied to check an exact app route and record a separate browser observation.",

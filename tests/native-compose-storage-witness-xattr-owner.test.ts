@@ -663,7 +663,7 @@ test("completion publication refusal retains its first boundary after complete h
 test.each([
   "up",
   "restart",
-] as const)("warm no-op %s keeps opening, two closing and all later witness proofs", async (operation) => {
+] as const)("warm no-op %s reuses the effect-entry proof for enrollment and keeps every other proof", async (operation) => {
   const { store, transport } = await rememberedActive();
   const command = commandPorts(transport);
   let finalizers = 0;
@@ -697,7 +697,7 @@ test.each([
         finalizers++;
         expect(
           transport.calls.filter((call) => call === "verify")
-        ).toHaveLength(6);
+        ).toHaveLength(5);
       },
       effect: async () => {
         expect(owned).toBe(2);
@@ -710,8 +710,17 @@ test.each([
         expect((await store.loadCurrent()).pending?.generationId).toBe(
           generation.generationId
         );
+        // Warm enrollment (no new volume) reuses the effect-entry proof of
+        // this generation: only read-only checks ran since it.
         await storage.enroll(generation, document);
+        expect(
+          transport.calls.filter((call) => call === "verify")
+        ).toHaveLength(3);
+        // An ordinary (non-adjacent) verification always proves in full.
         await storage.verify(generation);
+        expect(
+          transport.calls.filter((call) => call === "verify")
+        ).toHaveLength(4);
         transport.calls.push("workload");
         return { value: 0, outcome: "complete" };
       },
@@ -719,10 +728,138 @@ test.each([
     expect(result).toEqual({ value: 0, outcome: "complete" });
   });
   expect(finalizers).toBe(1);
-  expect(transport.calls.filter((call) => call === "verify")).toHaveLength(7);
+  expect(transport.calls.filter((call) => call === "verify")).toHaveLength(6);
   expect(transport.calls).not.toContain("seed");
   expect(transport.calls).not.toContain("provision");
   expect((await store.loadCurrent()).pending).toBeNull();
+}, 30_000);
+
+test("warm enrollment proves in full when the material binding moved since the effect-entry proof", async () => {
+  const { store, transport } = await rememberedActive();
+  const command = commandPorts(transport);
+  const original = generationOwner.assertNativeComposeMaterialAuthority;
+  let moved = false;
+  // Stand-in for a receipt publication (for example a storage birth) between
+  // the effect-entry proof and the enrollment tail: the next opening binding
+  // carries a different receipt hash than the one the lease recorded.
+  const authority = spyOn(
+    generationOwner,
+    "assertNativeComposeMaterialAuthority"
+  ).mockImplementation(async (input) => {
+    const binding = await original(input);
+    if (moved) {
+      moved = false;
+      return {
+        ...binding,
+        receipt: { ...binding.receipt, hash: "0".repeat(64) },
+      };
+    }
+    return binding;
+  });
+  try {
+    await store.withMutation(async (mutation) => {
+      const storage = await prepareNativeComposeCommandStorage({
+        store,
+        mutation,
+        operation: "up",
+        selected: [selection],
+        signal: transport.controller.signal,
+        ports: command.ports,
+      });
+      if (!storage) {
+        throw new Error("Expected retained storage");
+      }
+      const generation = await publish(mutation);
+      transport.state.generation = generation;
+      const document = await store.readGenerationDocument(generation);
+      await mutation.runEffect({
+        generation,
+        operation: "up",
+        assertFresh: async () => {},
+        assertOwned: async () => {},
+        captureStorage: () => [volume],
+        storageWitnesses: storage.effectWitnesses,
+        effect: async () => {
+          expect(helperOperations(transport)).toHaveLength(9);
+          moved = true;
+          await storage.enroll(generation, document);
+          expect(moved).toBe(false);
+          expect(helperOperations(transport)).toHaveLength(12);
+          transport.calls.push("workload");
+          return { value: 0, outcome: "complete" };
+        },
+      });
+    });
+  } finally {
+    authority.mockRestore();
+  }
+  expect(transport.calls).toContain("workload");
+  expect(transport.calls).not.toContain("seed");
+}, 30_000);
+
+test("an adjacent verification never reuses a proof across a receipt publication or a later lease", async () => {
+  const { store, transport, generation, reference } = await rememberedActive();
+  const command = commandPorts(transport);
+  const proofs = () =>
+    transport.calls.filter((call) => call === "verify").length;
+  await store.withMutation(async (mutation) => {
+    const storage = await prepareNativeComposeCommandStorage({
+      store,
+      mutation,
+      operation: "up",
+      selected: [selection],
+      signal: transport.controller.signal,
+      ports: command.ports,
+    });
+    if (!storage) {
+      throw new Error("Expected retained storage");
+    }
+    expect(proofs()).toBe(1);
+    // Positive control: only reads since the opening proof.
+    await storage.verify(generation, { adjacentProof: true });
+    expect(proofs()).toBe(1);
+    // The effect publishes pending and then the completed receipt. Its last
+    // recorded proof precedes that completion publication.
+    const result = await mutation.runEffect({
+      generation,
+      operation: "up",
+      assertFresh: async () => {},
+      assertOwned: async () => {},
+      captureStorage: () => [volume],
+      storageWitnesses: storage.effectWitnesses,
+      effect: async () => ({ value: 0, outcome: "complete" }),
+    });
+    expect(result.outcome).toBe("complete");
+    const published = proofs();
+    await storage.verify(generation, { adjacentProof: true });
+    expect(proofs()).toBe(published + 1);
+  });
+  // A later command holds a new lease (as after an engine restart): nothing
+  // recorded in the previous one is visible, so an adjacent claim still proves.
+  await store.withMutation(async (mutation) => {
+    const before = proofs();
+    await verifyNativeComposeStorageXattrWitness({
+      authority: mutation.materialAuthority,
+      generation,
+      engineId,
+      reference,
+      carrier: transport.carrier,
+      adjacentProof: true,
+    });
+    expect(proofs()).toBe(before + 1);
+    // A different engine never matches the recorded proof or the binding.
+    await expect(
+      verifyNativeComposeStorageXattrWitness({
+        authority: mutation.materialAuthority,
+        generation,
+        engineId: "e".repeat(64),
+        reference,
+        carrier: transport.carrier,
+        adjacentProof: true,
+      })
+    ).rejects.toThrow(witnessRefusal);
+    expect(proofs()).toBe(before + 1);
+  });
 }, 30_000);
 
 test.each(

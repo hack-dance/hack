@@ -146,6 +146,36 @@ function object(text: string): Record<string, unknown> {
   return value;
 }
 
+/**
+ * Storage verification proof counts from one CLI's phase trace. Each performed
+ * kernel proof (three helper carriers) emits one `storage.proof` span; a proof
+ * reused within the command's lease emits none.
+ */
+function storageProofTrace(stderr: string): {
+  readonly proofs: number;
+  readonly unfinished: number;
+  readonly proofMs: number;
+  readonly finalizations: number;
+} {
+  const rows = stderr
+    .split("\n")
+    .filter((line) => line.startsWith('{"diagnostic":"native-compose-phase",'))
+    .map((line) => object(line));
+  const spans = (phase: string, boundary: string) =>
+    rows.filter((row) => row.phase === phase && row.boundary === boundary);
+  const ended = spans("storage.proof", "end");
+  return {
+    proofs: spans("storage.proof", "begin").length,
+    unfinished: spans("storage.proof", "begin").length - ended.length,
+    proofMs: ended.reduce(
+      (total, row) =>
+        total + (typeof row.durationMs === "number" ? row.durationMs : 0),
+      0
+    ),
+    finalizations: spans("finalize.witnesses", "begin").length,
+  };
+}
+
 function shellQuote(value: string): string {
   return `'${value.replaceAll("'", "'\\''")}'`;
 }
@@ -1280,6 +1310,38 @@ export const nativeConfigComposeScenario: Scenario = {
         await checkSql(marker);
         await Bun.write(projectPath, projectText);
         await cli(["up", "--detach", "--json"]);
+        // HACK-1123: two consecutive unchanged warm ups each prove storage four
+        // times (opening, prepublication, effect-entry, post-workload); the
+        // enrollment tail and first guard reuse the effect-entry proof, and with
+        // no route, hook or file material finalization proves once.
+        const warmUps: (ReturnType<typeof storageProofTrace> & {
+          readonly totalMs: number;
+        })[] = [];
+        for (const attempt of [1, 2]) {
+          const warm = await raw(["up", "--detach", "--json"], {
+            HACK_NATIVE_COMPOSE_PHASE_TRACE: "1",
+          });
+          expectExit({
+            result: warm,
+            codes: [0],
+            message: `Traced unchanged warm up ${attempt} must succeed`,
+          });
+          warmUps.push({
+            ...storageProofTrace(warm.stderr),
+            totalMs: Math.round(warm.durationMs),
+          });
+        }
+        ctx.log(`warm up storage proofs: ${JSON.stringify(warmUps)}`);
+        expect({
+          that: warmUps.every(
+            (warm) =>
+              warm.proofs === 4 &&
+              warm.unfinished === 0 &&
+              warm.finalizations === 1
+          ),
+          message:
+            "Unchanged warm up must perform exactly four storage proofs and one finalization witness check",
+        });
         const beforeRestart = await snapshot();
         const beforeRestartBoot = await probe("exec", marker);
         stage("owned workload removal/rename and retained SQL data verified");

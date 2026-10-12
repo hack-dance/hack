@@ -4,16 +4,7 @@ import {
   createHash,
   randomBytes,
 } from "node:crypto";
-import { constants, type Stats } from "node:fs";
-import {
-  chmod,
-  lstat,
-  open,
-  readdir,
-  realpath,
-  rm,
-  stat,
-} from "node:fs/promises";
+import { lstat, readdir, rm, stat } from "node:fs/promises";
 import { basename, dirname, relative, resolve } from "node:path";
 import { YAML } from "bun";
 import {
@@ -63,6 +54,11 @@ import {
   acquireNativeManagedEnvFile,
   assertNativeProjectInputRoot,
 } from "./native-project-inputs.ts";
+import {
+  createPrivateFileExclusive,
+  decodeCanonicalBase64,
+  readBoundedPrivateFile,
+} from "./private-file.ts";
 import { readProjectDefaultEnvConfig } from "./project.ts";
 import {
   assertLegacyProjectDirectory,
@@ -87,6 +83,9 @@ const PROJECT_ENV_SCOPE_PATTERN = /^[a-z0-9][a-z0-9._-]*$/;
 const PROJECT_ENV_SECRET_PREFIX = "v1" as const;
 const PROJECT_ENV_ALGORITHM = "aes-256-gcm";
 const PROJECT_ENV_IV_BYTES = 12;
+const PROJECT_ENV_TAG_BYTES = 16;
+/** Decoded ciphertext bound; a value never exceeds its 1 MiB env layer. */
+const PROJECT_ENV_CIPHERTEXT_LIMIT = NATIVE_CONFIG_INPUT_LIMIT;
 const PROJECT_ENV_SECRET_KEY_ENV = "HACK_ENV_SECRET_KEY";
 export const PROJECT_ENV_HOST_SCOPE = "host" as const;
 
@@ -2699,28 +2698,29 @@ async function resolveProjectEnvKey(opts: {
       signal: opts.nativeSelection.signal,
     });
   }
+  // Priority: checkout-local, shared common-dir, primary checkout, environment.
   const keyPath = resolveProjectEnvKeyPath({ projectRoot: opts.projectRoot });
+  const localKey = await readLegacyProjectEnvKeyFile({ path: keyPath });
+  if (localKey) {
+    return localKey;
+  }
   const sharedKeyPath = await resolveProjectEnvSharedKeyPath({
     projectRoot: opts.projectRoot,
   });
-  const text = await readTextFile(keyPath);
-  const sharedText =
-    sharedKeyPath === null ? null : await readTextFile(sharedKeyPath);
-  const envFallback = process.env[PROJECT_ENV_SECRET_KEY_ENV]?.trim() ?? "";
+  const sharedKey =
+    sharedKeyPath === null
+      ? null
+      : await readLegacyProjectEnvKeyFile({ path: sharedKeyPath });
+  if (sharedKey) {
+    return sharedKey;
+  }
   const inheritedKey = await resolveInheritedProjectEnvKey({
     projectRoot: opts.projectRoot,
   });
-  const trimmed = text?.trim() ?? "";
-  if (trimmed.length > 0) {
-    return trimmed;
-  }
-  const sharedTrimmed = sharedText?.trim() ?? "";
-  if (sharedTrimmed.length > 0) {
-    return sharedTrimmed;
-  }
   if (inheritedKey) {
     return inheritedKey.keyText;
   }
+  const envFallback = process.env[PROJECT_ENV_SECRET_KEY_ENV]?.trim() ?? "";
   if (envFallback.length > 0) {
     return envFallback;
   }
@@ -2787,108 +2787,80 @@ async function resolveNativeProjectEnvKey(opts: {
   return null;
 }
 
-function sameNativeKeyFile(before: Stats, after: Stats): boolean {
-  return (
-    before.dev === after.dev &&
-    before.ino === after.ino &&
-    before.size === after.size &&
-    before.mtimeMs === after.mtimeMs &&
-    before.ctimeMs === after.ctimeMs
-  );
-}
-
 /** Keys stay inside their existing owner; reject redirected, oversized or changing descriptor reads. */
 async function readNativeProjectEnvKeyFile(opts: {
   readonly path: string;
   readonly directories: readonly string[];
   readonly signal?: AbortSignal;
 }): Promise<string | null> {
-  checkNativeEnvCancellation(opts.signal);
-  const directories = await Promise.all(
-    opts.directories.map(async (path) => {
-      const stats = await lstat(path);
-      if (!stats.isDirectory() || (await realpath(path)) !== path) {
-        throw nativeEnvValuesError();
-      }
-      return { path, stats };
-    })
-  );
-  const recheckDirectories = async () => {
-    for (const { path, stats } of directories) {
-      const current = await lstat(path);
-      if (
-        !current.isDirectory() ||
-        current.dev !== stats.dev ||
-        current.ino !== stats.ino ||
-        (await realpath(path)) !== path
-      ) {
-        throw nativeEnvValuesError();
-      }
-    }
-    checkNativeEnvCancellation(opts.signal);
-  };
-  const observed = await lstat(opts.path).catch((error: unknown) => {
-    if (isRecord(error) && error.code === "ENOENT") {
-      return null;
-    }
-    throw error;
+  return await readBoundedPrivateFile({
+    path: opts.path,
+    directories: opts.directories,
+    canonical: true,
+    maxBytes: NATIVE_CONFIG_INPUT_LIMIT,
+    refusal: nativeEnvValuesError,
+    checkpoint: () => checkNativeEnvCancellation(opts.signal),
   });
-  if (!observed) {
-    await recheckDirectories();
-    return null;
-  }
-  if (
-    !observed.isFile() ||
-    observed.size > NATIVE_CONFIG_INPUT_LIMIT ||
-    (observed.mode & 0o444) === 0 ||
-    (await realpath(opts.path)) !== opts.path
-  ) {
-    throw nativeEnvValuesError();
-  }
-  const file = await open(
-    opts.path,
-    constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK
-  );
+}
+
+/**
+ * Legacy key files are refused unless they are regular, non-symlink, bounded
+ * UTF-8 files, so a committed `.hack.secret.key` symlink never selects another
+ * file as the key. Directory components keep their legacy spelling (temporary
+ * and home directories are often reached through symlinks); only the final
+ * component is pinned. Absent and whitespace-only files return null.
+ */
+async function readLegacyProjectEnvKeyFile(opts: {
+  readonly path: string;
+}): Promise<string | null> {
   try {
-    checkNativeEnvCancellation(opts.signal);
-    const before = await file.stat();
-    if (!(before.isFile() && sameNativeKeyFile(observed, before))) {
-      throw nativeEnvValuesError();
-    }
-    const buffer = Buffer.alloc(before.size + 1);
-    let size = 0;
-    while (size < buffer.length) {
-      checkNativeEnvCancellation(opts.signal);
-      const { bytesRead } = await file.read(
-        buffer,
-        size,
-        buffer.length - size,
-        size
-      );
-      if (bytesRead === 0) {
-        break;
-      }
-      size += bytesRead;
-    }
-    const after = await file.stat();
-    const current = await lstat(opts.path);
-    if (
-      size !== before.size ||
-      !current.isFile() ||
-      !sameNativeKeyFile(before, after) ||
-      !sameNativeKeyFile(before, current) ||
-      (await realpath(opts.path)) !== opts.path
-    ) {
-      throw nativeEnvValuesError();
-    }
-    await recheckDirectories();
-    return (
-      new TextDecoder("utf-8", { fatal: true })
-        .decode(buffer.subarray(0, size))
-        .trim() || null
-    );
-  } finally {
-    await file.close();
+    return await readBoundedPrivateFile({
+      path: opts.path,
+      directories: [],
+      canonical: false,
+      maxBytes: NATIVE_CONFIG_INPUT_LIMIT,
+      refusal: projectEnvKeyFileError,
+    });
+  } catch {
+    throw projectEnvKeyFileError();
+  }
+}
+
+/** Fixed, value-free refusal for legacy key selection, creation and encryption. */
+export class ProjectEnvKeyRefusalError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ProjectEnvKeyRefusalError";
+  }
+}
+
+function projectEnvKeyFileError(): ProjectEnvKeyRefusalError {
+  return new ProjectEnvKeyRefusalError(
+    `Refusing project env key: ${PROJECT_ENV_KEY_FILENAME} must be a regular, readable, non-symlink, non-empty UTF-8 file of at most 1 MiB. Remove or replace it; key contents are never included in this message.`
+  );
+}
+
+function projectEnvTrackedKeyError(): ProjectEnvKeyRefusalError {
+  return new ProjectEnvKeyRefusalError(
+    `Refusing to encrypt with a git-tracked ${PROJECT_ENV_KEY_FILENAME}: a committed key is not secret. Run 'hack doctor --fix' to untrack it, rotate the key, and re-encrypt existing secrets.`
+  );
+}
+
+/**
+ * Encryption refuses a key file that git tracks. Decryption with such a key
+ * stays allowed for v4 compatibility; `hack doctor` reports the tracked key.
+ * An undeterminable status (git unavailable, path outside a work tree) is not
+ * treated as tracked.
+ */
+async function assertProjectEnvKeyUntracked(opts: {
+  readonly keyPath: string;
+}): Promise<void> {
+  const tracked = await isGitTrackedProjectEnvPath({
+    projectRoot: dirname(opts.keyPath),
+    path: opts.keyPath,
+  });
+  if (tracked === true) {
+    throw projectEnvTrackedKeyError();
   }
 }
 
@@ -2913,6 +2885,11 @@ export type EnsureProjectEnvSecretKeyResult = {
  * A checkout-local key is never silently created in a linked worktree: if the
  * shared location cannot be resolved (degraded git) or written, the fallback
  * local write carries a loud divergence warning (also returned in `warnings`).
+ *
+ * This is the encryption-side key owner. Key files are read without following
+ * symlinks, a git-tracked selected or adopted key is refused before any write,
+ * and new key files are created exclusively with mode 0600 (an existing entry,
+ * including a dangling symlink, is never replaced or followed).
  */
 export async function ensureProjectEnvSecretKey(opts: {
   readonly projectRoot: string;
@@ -2923,25 +2900,25 @@ export async function ensureProjectEnvSecretKey(opts: {
     projectRoot: opts.projectRoot,
   });
   const sharedKeyPath = await resolveSharedKeyPathFromLocation(sharedLocation);
-  const existing = await readTextFile(keyPath);
-  if (existing !== null && existing.trim().length > 0) {
+  const existing = await readLegacyProjectEnvKeyFile({ path: keyPath });
+  if (existing !== null) {
+    await assertProjectEnvKeyUntracked({ keyPath });
     return {
       keyPath,
-      keyText: existing.trim(),
+      keyText: existing,
       created: false,
       warnings: [],
     };
   }
   const sharedExisting =
-    sharedKeyPath === null ? null : await readTextFile(sharedKeyPath);
-  if (
-    sharedKeyPath !== null &&
-    sharedExisting !== null &&
-    sharedExisting.trim().length > 0
-  ) {
+    sharedKeyPath === null
+      ? null
+      : await readLegacyProjectEnvKeyFile({ path: sharedKeyPath });
+  if (sharedKeyPath !== null && sharedExisting !== null) {
+    await assertProjectEnvKeyUntracked({ keyPath: sharedKeyPath });
     return {
       keyPath: sharedKeyPath,
-      keyText: sharedExisting.trim(),
+      keyText: sharedExisting,
       created: false,
       warnings: [],
     };
@@ -2951,6 +2928,8 @@ export async function ensureProjectEnvSecretKey(opts: {
     projectRoot: opts.projectRoot,
   });
   if (inheritedKey) {
+    // Refuse before copying a committed key into the shared location.
+    await assertProjectEnvKeyUntracked({ keyPath: inheritedKey.keyPath });
     const written = await writeProjectEnvKeyWithFallback({
       projectRoot: opts.projectRoot,
       preferredKeyPath: sharedKeyPath,
@@ -2960,7 +2939,7 @@ export async function ensureProjectEnvSecretKey(opts: {
     });
     return {
       keyPath: written.keyPath,
-      keyText: inheritedKey.keyText,
+      keyText: written.keyText,
       created: false,
       warnings: written.warnings,
     };
@@ -2976,8 +2955,9 @@ export async function ensureProjectEnvSecretKey(opts: {
   });
   return {
     keyPath: written.keyPath,
-    keyText,
-    created: true,
+    keyText: written.keyText,
+    // A concurrent writer's key is adopted rather than replaced.
+    created: written.keyText === keyText,
     warnings: written.warnings,
   };
 }
@@ -3005,19 +2985,26 @@ async function writeProjectEnvKeyWithFallback(opts: {
   readonly localKeyPath: string;
   readonly keyText: string;
   readonly sharedLocation: ProjectEnvSharedKeyLocation | null;
-}): Promise<{ readonly keyPath: string; readonly warnings: string[] }> {
+}): Promise<{
+  readonly keyPath: string;
+  readonly keyText: string;
+  readonly warnings: string[];
+}> {
   const warnings: string[] = [];
 
   if (opts.preferredKeyPath !== null) {
     try {
-      await writeProjectEnvKeyFile({
+      const keyText = await writeProjectEnvKeyFile({
         projectRoot: opts.projectRoot,
         path: opts.preferredKeyPath,
         keyText: opts.keyText,
       });
-      return { keyPath: opts.preferredKeyPath, warnings };
+      return { keyPath: opts.preferredKeyPath, keyText, warnings };
     } catch (error: unknown) {
-      if (error instanceof ProjectInputSelectionError) {
+      if (
+        error instanceof ProjectInputSelectionError ||
+        error instanceof ProjectEnvKeyRefusalError
+      ) {
         throw error;
       }
       const message = error instanceof Error ? error.message : String(error);
@@ -3034,7 +3021,7 @@ async function writeProjectEnvKeyWithFallback(opts: {
     );
   }
 
-  await writeProjectEnvKeyFile({
+  const keyText = await writeProjectEnvKeyFile({
     projectRoot: opts.projectRoot,
     path: opts.localKeyPath,
     keyText: opts.keyText,
@@ -3046,19 +3033,68 @@ async function writeProjectEnvKeyWithFallback(opts: {
     comment: "# project env key",
   });
   emitProjectEnvKeyWarnings({ warnings });
-  return { keyPath: opts.localKeyPath, warnings };
+  return { keyPath: opts.localKeyPath, keyText, warnings };
 }
 
+/**
+ * Creates the key file exclusively (O_CREAT|O_EXCL|O_NOFOLLOW, mode 0600,
+ * fsync) and returns the key text now stored at `path`. When the path is
+ * already occupied, a valid untracked regular key file (e.g. a concurrent
+ * writer's) is adopted; anything else, including a symlink, is refused.
+ */
 async function writeProjectEnvKeyFile(opts: {
   readonly projectRoot: string;
   readonly path: string;
   readonly keyText: string;
-}): Promise<void> {
+}): Promise<string> {
   await assertLegacyProjectInputFamily({ projectRoot: opts.projectRoot });
   await ensureDir(dirname(opts.path));
   await assertLegacyProjectInputFamily({ projectRoot: opts.projectRoot });
-  await writeTextFile(opts.path, `${opts.keyText}\n`);
-  await chmod(opts.path, 0o600);
+  try {
+    await createPrivateFileExclusive({
+      path: opts.path,
+      text: `${opts.keyText}\n`,
+    });
+    return opts.keyText;
+  } catch (error: unknown) {
+    if (!(isRecord(error) && error.code === "EEXIST")) {
+      throw error;
+    }
+  }
+  return await adoptExistingProjectEnvKeyFile({ path: opts.path });
+}
+
+const PROJECT_ENV_KEY_ADOPTION_ATTEMPTS = 20;
+const PROJECT_ENV_KEY_ADOPTION_DELAY_MS = 25;
+
+/**
+ * A concurrent creator may expose its key file before writing the key, so a
+ * regular file is re-read for a bounded period (about half a second). A
+ * symlink or other entry, or a file still empty or invalid afterwards, is
+ * refused; it is never replaced.
+ */
+async function adoptExistingProjectEnvKeyFile(opts: {
+  readonly path: string;
+}): Promise<string> {
+  for (
+    let attempt = 0;
+    attempt < PROJECT_ENV_KEY_ADOPTION_ATTEMPTS;
+    attempt += 1
+  ) {
+    const entry = await lstat(opts.path).catch(() => null);
+    if (!entry?.isFile()) {
+      break;
+    }
+    const existing = await readLegacyProjectEnvKeyFile({
+      path: opts.path,
+    }).catch(() => null);
+    if (existing !== null) {
+      await assertProjectEnvKeyUntracked({ keyPath: opts.path });
+      return existing;
+    }
+    await Bun.sleep(PROJECT_ENV_KEY_ADOPTION_DELAY_MS);
+  }
+  throw projectEnvKeyFileError();
 }
 
 function emitProjectEnvKeyWarnings(opts: {
@@ -3080,8 +3116,8 @@ async function resolveInheritedProjectEnvKey(opts: {
   }
 
   const keyPath = resolveProjectEnvKeyPath({ projectRoot: primaryRoot });
-  const keyText = (await readTextFile(keyPath))?.trim() ?? "";
-  if (keyText.length === 0) {
+  const keyText = await readLegacyProjectEnvKeyFile({ path: keyPath });
+  if (keyText === null) {
     return null;
   }
 
@@ -3097,7 +3133,9 @@ function encryptProjectEnvValue(opts: {
 }): string {
   const iv = randomBytes(PROJECT_ENV_IV_BYTES);
   const key = deriveProjectEnvKey({ keyText: opts.keyText });
-  const cipher = createCipheriv(PROJECT_ENV_ALGORITHM, key, iv);
+  const cipher = createCipheriv(PROJECT_ENV_ALGORITHM, key, iv, {
+    authTagLength: PROJECT_ENV_TAG_BYTES,
+  });
   const ciphertext = Buffer.concat([
     cipher.update(opts.plaintext, "utf8"),
     cipher.final(),
@@ -3111,34 +3149,65 @@ function encryptProjectEnvValue(opts: {
   ].join(":");
 }
 
+function invalidSecureEnvValueError(): Error {
+  return new Error("Invalid secure env value.");
+}
+
+/**
+ * Parses and opens a v1 value `v1:<iv>:<tag>:<ciphertext>`. Each segment must
+ * be canonical padded base64; the IV must be 12 bytes, the tag 16 bytes and the
+ * ciphertext at most the env input bound. An empty ciphertext segment is the
+ * authenticated empty plaintext. Malformed, oversized, truncated, tampered and
+ * wrong-key inputs all throw the same fixed, value-free error.
+ */
 function decryptProjectEnvValue(opts: {
   readonly ciphertext: string;
   readonly keyText: string;
 }): string {
   const parts = opts.ciphertext.split(":");
   const [prefix, ivText, tagText, ciphertextText] = parts;
-  // AES-GCM authenticates an empty plaintext with an empty ciphertext segment.
   if (
     parts.length !== 4 ||
     prefix !== PROJECT_ENV_SECRET_PREFIX ||
-    !ivText ||
-    !tagText ||
+    ivText === undefined ||
+    tagText === undefined ||
     ciphertextText === undefined
   ) {
-    throw new Error("Invalid secure env value.");
+    throw invalidSecureEnvValueError();
   }
-  const key = deriveProjectEnvKey({ keyText: opts.keyText });
-  const decipher = createDecipheriv(
-    PROJECT_ENV_ALGORITHM,
-    key,
-    Buffer.from(ivText, "base64")
-  );
-  decipher.setAuthTag(Buffer.from(tagText, "base64"));
-  const plaintext = Buffer.concat([
-    decipher.update(Buffer.from(ciphertextText, "base64")),
-    decipher.final(),
-  ]);
-  return plaintext.toString("utf8");
+  const iv = decodeCanonicalBase64({
+    text: ivText,
+    maxBytes: PROJECT_ENV_IV_BYTES,
+  });
+  const tag = decodeCanonicalBase64({
+    text: tagText,
+    maxBytes: PROJECT_ENV_TAG_BYTES,
+  });
+  const ciphertext = decodeCanonicalBase64({
+    text: ciphertextText,
+    maxBytes: PROJECT_ENV_CIPHERTEXT_LIMIT,
+  });
+  if (
+    iv?.length !== PROJECT_ENV_IV_BYTES ||
+    tag?.length !== PROJECT_ENV_TAG_BYTES ||
+    ciphertext === null
+  ) {
+    throw invalidSecureEnvValueError();
+  }
+  try {
+    const key = deriveProjectEnvKey({ keyText: opts.keyText });
+    const decipher = createDecipheriv(PROJECT_ENV_ALGORITHM, key, iv, {
+      authTagLength: PROJECT_ENV_TAG_BYTES,
+    });
+    decipher.setAuthTag(tag);
+    const plaintext = Buffer.concat([
+      decipher.update(ciphertext),
+      decipher.final(),
+    ]);
+    return plaintext.toString("utf8");
+  } catch {
+    throw invalidSecureEnvValueError();
+  }
 }
 
 function deriveProjectEnvKey(opts: { readonly keyText: string }): Buffer {

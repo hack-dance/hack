@@ -30,7 +30,13 @@ export function hasOnlyNativeSupportedLabels(labels: unknown): boolean {
     ) ?? false
   );
 }
-/** Count all declared routes, including inactive profiles, before allocating the pool. */
+/**
+ * Count all declared routes, including inactive profiles, before allocating the pool.
+ *
+ * This runs before the profile-aware review, so it is a conservative upper bound: profile
+ * activation stays the reviewed plan's decision, and `reviewedNativeRoutes` must never find
+ * more active routes than this floor. Unlike readiness goals, an unused slot is harmless.
+ */
 export function nativeBridgeCapacity(
   specs: Readonly<Record<string, Readonly<Record<string, unknown>>>>
 ): number {

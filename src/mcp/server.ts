@@ -746,7 +746,8 @@ function registerTools(opts: {
       ...logSelectionInput,
       maxEvents: boundedLimitInput({
         ceiling: MCP_INPUT_CEILINGS.maxEvents,
-        description: "Max events to collect",
+        description:
+          "Max type:log events to collect; start, heartbeat, error and end events do not count",
       }).optional(),
       maxMs: boundedLimitInput({
         ceiling: MCP_INPUT_CEILINGS.maxMs,
@@ -1457,7 +1458,11 @@ async function runHackLogCollect(opts: {
     const stderrLines: string[] = [];
 
     let stopReason: McpLogStopReason = "eof";
-    let stopped = false;
+    // Set once a server stop can have reached the child. Later failure events
+    // may describe that stop. A byte cut is the exception: the retained prefix
+    // was written before the child was signalled, and nothing is retained after
+    // it, so failure evidence in that prefix still counts.
+    let failureEvidenceClosed = false;
     let logCount = 0;
     let backendFailureObserved = false;
 
@@ -1466,8 +1471,10 @@ async function runHackLogCollect(opts: {
       signal: opts.signal,
       timeoutMs: opts.timeoutMs,
       onStop: (reason) => {
-        stopped = true;
         stopReason = toLogStopReason(reason);
+        if (stopReason !== "output_limit") {
+          failureEvidenceClosed = true;
+        }
       },
     });
 
@@ -1479,8 +1486,7 @@ async function runHackLogCollect(opts: {
     const recordEvent = (event: Record<string, unknown>): boolean => {
       events.push(event);
       const observed = observeLogStreamEvent(event);
-      // Events after a server-initiated stop describe that stop.
-      if (observed.backendFailure && !stopped) {
+      if (observed.backendFailure && !failureEvidenceClosed) {
         backendFailureObserved = true;
       }
       if (observed.isLog) {

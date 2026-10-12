@@ -15,6 +15,9 @@
  * Failure evidence counts only while collection is still running. Once the
  * server stops the command for a bound, a later `error`/`end` event or a
  * signal exit status is a consequence of that stop, not a backend failure.
+ * The byte bound is the exception for events: the retained prefix was written
+ * before the child was signalled and nothing after the cut is parsed, so an
+ * `error` or failing `end` event inside that prefix is still a failure.
  */
 
 /** Why collection stopped, as reported in `data.stop_reason`. */

@@ -41,7 +41,13 @@ Raw `stdout` and `stderr` are still returned, as they are for other tools.
 
 Failure evidence counts only before the server stops the child. A child that
 writes `error` or `end` events, or exits non-zero, in response to the server's
-own stop signal still produces a cutoff.
+own stop signal still produces a cutoff. The byte bound is an exception for
+events: every retained byte was written before the child was signalled, and
+nothing after the cut is parsed, so an `error` or failing `end` event in the
+returned prefix is still a backend failure. For the `events` and `time` bounds,
+an `error` event that the backend wrote just before the stop but that the server
+read after it is reported as a cutoff. The server cannot tell it apart from an
+event written in response to the stop.
 
 ## Reconnects and repeated calls
 

@@ -215,6 +215,7 @@ type Scenario =
   | "nonzero-exit"
   | "error-after-stop"
   | "bytes-utf8"
+  | "error-in-byte-cut"
   | "sequenced";
 
 type LogsFixture = {
@@ -317,6 +318,19 @@ switch (scenario) {
     // Pad so the 8 MiB cut lands three bytes into a four-byte code point.
     const pad = (5 - (written % 4)) % 4;
     process.stdout.write("a".repeat(pad) + "😀".repeat(2_400_000));
+    hang();
+    break;
+  }
+  case "error-in-byte-cut": {
+    log("one");
+    const limit = 8 * 1024 * 1024;
+    const written = Buffer.byteLength(line({ type: "start", follow: true })) +
+      Buffer.byteLength(line({ type: "log", entry: { message: "one" } }));
+    const failure = line({ type: "error", message: "backend failed" });
+    // One write: filler, an error event ending 8 bytes before the limit, and
+    // bytes past the limit. The error is read in the same chunk as the cut.
+    const filler = "x".repeat(limit - written - Buffer.byteLength(failure) - 9);
+    process.stdout.write(filler + "\n" + failure + "z".repeat(1024 * 1024));
     hang();
     break;
   }
@@ -518,18 +532,22 @@ test("maxEvents counts log events only and its cutoff is a success", async () =>
   }
 });
 
+// The stub must start and emit its first log before the window closes. Bun
+// startup is far below this even on a loaded host; a shorter window flakes.
+const TIME_WINDOW_MS = 2000;
+
 test("the collection window cutoff is a success even though the child is signalled", async () => {
   const fixture = await startLogsFixture("follow");
   const client = await fixture.connect();
   const { isError, payload } = await callLogs({
     client,
     tool: "hack.project.logs.tail",
-    args: { maxMs: 300 },
+    args: { maxMs: TIME_WINDOW_MS },
   });
   expect(isError).toBe(false);
   expect(payload.ok).toBe(true);
   expect(payload.exitCode).not.toBe(0);
-  expect(payload.data.cutoff).toEqual({ bound: "time", limit: 300 });
+  expect(payload.data.cutoff).toEqual({ bound: "time", limit: TIME_WINDOW_MS });
   expect(logMessages(payload.data.events)).toEqual(["one"]);
 });
 
@@ -539,7 +557,7 @@ test("failure events after a server-initiated stop do not turn a cutoff into an 
   const { isError, payload } = await callLogs({
     client,
     tool: "hack.project.logs.tail",
-    args: { maxMs: 300 },
+    args: { maxMs: TIME_WINDOW_MS },
   });
   // The stub did report error/end(error) in response to SIGTERM ...
   expect(payload.data.events.map((event) => event.type)).toEqual([
@@ -551,7 +569,7 @@ test("failure events after a server-initiated stop do not turn a cutoff into an 
   // ... yet the outcome is the time cutoff the server caused.
   expect(isError).toBe(false);
   expect(payload.ok).toBe(true);
-  expect(payload.data.cutoff).toEqual({ bound: "time", limit: 300 });
+  expect(payload.data.cutoff).toEqual({ bound: "time", limit: TIME_WINDOW_MS });
 });
 
 for (const [scenario, label] of [
@@ -607,6 +625,36 @@ test("the byte cutoff returns earlier events and never splits a code point", asy
     MCP_OUTPUT_LIMIT_BYTES - 3 + 1
   );
   expect(payload.stderr).toContain("8 MiB capture limit");
+  for (const pid of await readStubPids(fixture.stubDir)) {
+    await waitFor(() => !alive(pid));
+  }
+}, 30_000);
+
+test("an error event read in the same chunk as the byte cut is still a backend_error", async () => {
+  const fixture = await startLogsFixture("error-in-byte-cut");
+  const client = await fixture.connect();
+  const { isError, payload } = await callLogs({
+    client,
+    tool: "hack.project.logs.tail",
+    args: { maxMs: 30_000 },
+  });
+  // The error event sits inside the retained prefix, which the child wrote
+  // before it was signalled, so it is real failure evidence, not a cutoff.
+  expect(payload.outputTruncated).toBe(true);
+  expect(payload.data.stop_reason).toBe("output_limit");
+  expect(payload.data.events.map((event) => event.type)).toEqual([
+    "start",
+    "log",
+    "error",
+  ]);
+  expect(isError).toBe(true);
+  expect(payload.ok).toBe(false);
+  expect(payload.error).toEqual({
+    code: "E_UNEXPECTED",
+    reason: "backend_error",
+    message: MCP_LOG_BACKEND_ERROR.message,
+  });
+  expect(payload.data.cutoff).toBeNull();
   for (const pid of await readStubPids(fixture.stubDir)) {
     await waitFor(() => !alive(pid));
   }

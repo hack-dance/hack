@@ -12,7 +12,6 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-
 import {
   PROJECT_COMPOSE_FILENAME,
   PROJECT_CONFIG_FILENAME,
@@ -26,6 +25,7 @@ import {
   resolveProjectEnvSharedKeyLocation,
   setProjectEnvValue,
 } from "../src/lib/project-env-config.ts";
+import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
 const tempDirs = new Set<string>();
 const restorePermissions: Array<() => Promise<void>> = [];
@@ -269,13 +269,15 @@ async function runHackCli(opts: {
 }): Promise<CliResult> {
   const home = resolve(opts.sandbox, "home");
   await mkdir(home, { recursive: true });
-  const env: Record<string, string | undefined> = {
-    ...process.env,
-    HOME: home,
-    HACK_GLOBAL_CONFIG_PATH: resolve(home, "hack.config.json"),
-    HACK_LOGGER: "console",
-  };
-  Reflect.deleteProperty(env, "HACK_ENV_SECRET_KEY");
+  // No runner variable such as HACK_ENV_SECRET_KEY reaches the child.
+  const env = privateCliEnv({
+    root: opts.sandbox,
+    home,
+    env: {
+      HACK_GLOBAL_CONFIG_PATH: resolve(home, "hack.config.json"),
+      HACK_LOGGER: "console",
+    },
+  });
   const proc = Bun.spawn(
     ["bun", resolve(import.meta.dir, "../index.ts"), ...opts.args],
     {

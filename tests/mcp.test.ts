@@ -9,11 +9,9 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-
 import { parseCliArgv, resolveCommand } from "../src/cli/command.ts";
 import { CLI_SPEC } from "../src/cli/spec.ts";
 import {
@@ -25,6 +23,7 @@ import {
   type McpRefusalReason,
 } from "../src/mcp/server.ts";
 import { testIntegration } from "./helpers/ci.ts";
+import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
 let tempDir: string | null = null;
 let client: Client | null = null;
@@ -122,11 +121,11 @@ async function startMcpClient(): Promise<Client> {
     command: "bun",
     args: ["index.ts", "mcp", "serve"],
     cwd: repoRoot,
-    env: {
-      ...process.env,
-      HACK_MCP_COMMAND: stubPath,
-      HOME: homeDir,
-    },
+    env: privateCliEnv({
+      root: tempDir,
+      home: homeDir,
+      env: { HACK_MCP_COMMAND: stubPath },
+    }),
     stderr: "pipe",
   });
 

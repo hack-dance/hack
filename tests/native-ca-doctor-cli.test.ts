@@ -1,14 +1,30 @@
-import { expect, test } from "bun:test";
+import { afterEach, expect, test } from "bun:test";
+import { mkdtemp, realpath, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { privateCliEnv } from "./helpers/private-cli-env.ts";
+
+const roots: string[] = [];
+afterEach(async () => {
+  await Promise.all(
+    roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))
+  );
+});
 
 async function invoke(args: string[]) {
+  const root = await realpath(await mkdtemp(join(tmpdir(), "native-ca-cli-")));
+  roots.push(root);
   const child = Bun.spawn([process.execPath, "index.ts", ...args], {
-    env: {
-      ...process.env,
-      HACK_RUNTIME_BACKEND: "native",
-      HACK_NATIVE_BINARY: "/nonexistent/hack-native",
-      HACK_NATIVE_HOME: "/nonexistent/native-home",
-      HACK_NO_INTERACTIVE: "1",
-    },
+    env: privateCliEnv({
+      root,
+      env: {
+        HACK_HOME: join(root, "home"),
+        HACK_RUNTIME_BACKEND: "native",
+        HACK_NATIVE_BINARY: "/nonexistent/hack-native",
+        HACK_NATIVE_HOME: "/nonexistent/native-home",
+        HACK_NO_INTERACTIVE: "1",
+      },
+    }),
     stdout: "pipe",
     stderr: "pipe",
     timeout: 5000,

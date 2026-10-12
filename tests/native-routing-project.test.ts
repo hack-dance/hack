@@ -15,6 +15,7 @@ import {
   validateNativeProject,
 } from "../src/lib/native-project-validation.ts";
 import { restoreEnv } from "./helpers/env.ts";
+import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
 const PROTOCOL = {
   transport_version: 1,
@@ -224,7 +225,15 @@ async function cli(args: readonly string[]) {
     ],
     {
       cwd: projectRoot,
-      env: { ...process.env, HACK_LOGGER: "console" },
+      // HACK_HOME and the compiler are this fixture's in-process settings.
+      env: privateCliEnv({
+        root,
+        env: {
+          HACK_HOME: process.env.HACK_HOME,
+          HACK_CONFIG_COMPILER_BINARY: process.env.HACK_CONFIG_COMPILER_BINARY,
+          HACK_LOGGER: "console",
+        },
+      }),
       stdin: "ignore",
       stdout: "pipe",
       stderr: "pipe",

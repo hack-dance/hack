@@ -17,6 +17,7 @@ import {
   removeNativeProjectRun,
   saveNativeProjectRun,
 } from "../src/backends/native-project-run.ts";
+import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -431,6 +432,10 @@ test("foreign owner refuses before hooks or cleanup", async () => {
 });
 
 test("native down rejects unsupported flags before project or runtime access", async () => {
+  const root = await realpath(
+    await mkdtemp(join(tmpdir(), "native-down-flags-"))
+  );
+  roots.push(root);
   for (const args of [
     ["--env", "qa"],
     ["--profile", "web"],
@@ -439,12 +444,14 @@ test("native down rejects unsupported flags before project or runtime access", a
     ["--target", "remote"],
   ]) {
     const child = Bun.spawn([process.execPath, "index.ts", "down", ...args], {
-      env: {
-        ...process.env,
-        HACK_RUNTIME_BACKEND: "native",
-        HACK_NATIVE_HOME: "/nonexistent-native-home",
-        HACK_NATIVE_BINARY: "/nonexistent-native-binary",
-      },
+      env: privateCliEnv({
+        root,
+        env: {
+          HACK_RUNTIME_BACKEND: "native",
+          HACK_NATIVE_HOME: "/nonexistent-native-home",
+          HACK_NATIVE_BINARY: "/nonexistent-native-binary",
+        },
+      }),
       stdout: "pipe",
       stderr: "pipe",
     });
@@ -479,12 +486,14 @@ test("not-started native down does not run configured hooks", async () => {
   const child = Bun.spawn(
     [process.execPath, "index.ts", "down", "--path", opts.scope.projectRoot],
     {
-      env: {
-        ...process.env,
-        HACK_RUNTIME_BACKEND: "native",
-        HACK_NATIVE_HOME: opts.scope.nativeHome,
-        HACK_NATIVE_BINARY: "/nonexistent-native-binary",
-      },
+      env: privateCliEnv({
+        root: opts.scope.projectRoot,
+        env: {
+          HACK_RUNTIME_BACKEND: "native",
+          HACK_NATIVE_HOME: opts.scope.nativeHome,
+          HACK_NATIVE_BINARY: "/nonexistent-native-binary",
+        },
+      }),
       stdout: "pipe",
       stderr: "pipe",
     }
@@ -641,12 +650,14 @@ test("native down JSON isolates hook output and uses saved overlay through real 
       opts.scope.projectRoot,
     ],
     {
-      env: {
-        ...process.env,
-        HACK_RUNTIME_BACKEND: "native",
-        HACK_NATIVE_HOME: opts.scope.nativeHome,
-        HACK_NATIVE_BINARY: binary,
-      },
+      env: privateCliEnv({
+        root: opts.scope.projectRoot,
+        env: {
+          HACK_RUNTIME_BACKEND: "native",
+          HACK_NATIVE_HOME: opts.scope.nativeHome,
+          HACK_NATIVE_BINARY: binary,
+        },
+      }),
       stdout: "pipe",
       stderr: "pipe",
     }

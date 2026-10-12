@@ -15,6 +15,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { previewNativeConfigImport } from "../src/lib/native-config-import-preview.ts";
 import { restoreEnv } from "./helpers/env.ts";
+import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
 const CANARY = "synthetic-private-import-owner";
 const PROTOCOL = { transport_version: 1, authored_version: 1, plan_version: 1 };
@@ -311,11 +312,17 @@ test("CLI requires dry-run, reports values-free mappings and preserves files", a
       ],
       {
         cwd,
-        env: {
-          ...process.env,
-          HACK_CONFIG_COMPILER_BINARY: binary,
-          FORCE_COLOR: "0",
-        },
+        env: privateCliEnv({
+          root,
+          env: {
+            HACK_HOME: process.env.HACK_HOME,
+            HACK_GLOBAL_CONFIG_PATH: process.env.HACK_GLOBAL_CONFIG_PATH,
+            HACK_ENV_SECRET_KEY: process.env.HACK_ENV_SECRET_KEY,
+
+            HACK_CONFIG_COMPILER_BINARY: binary,
+            FORCE_COLOR: "0",
+          },
+        }),
         stdout: "pipe",
         stderr: "pipe",
       }

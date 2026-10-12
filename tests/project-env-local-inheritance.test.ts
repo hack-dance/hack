@@ -17,6 +17,7 @@ import {
   unsetProjectEnvValue,
 } from "../src/lib/project-env-config.ts";
 import { restoreEnv } from "./helpers/env.ts";
+import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
 const roots: string[] = [];
 const originalCI = process.env.CI;
@@ -97,7 +98,7 @@ async function fixture() {
       envName: "qa",
       serviceNames: ["api"],
     });
-  return { primary, primaryRoot, linkedRoot, linked, resolve };
+  return { root, primary, primaryRoot, linkedRoot, linked, resolve };
 }
 
 test("linked env layers observe primary updates without copying or inheriting primary tracked state", async () => {
@@ -283,7 +284,7 @@ test("actual CLI masks inherited global secret overriding tracked service plaint
       ],
       {
         cwd: process.cwd(),
-        env: { ...process.env, HACK_LOGGER: "console" },
+        env: privateCliEnv({ root: f.root, env: { HACK_LOGGER: "console" } }),
         stdout: "pipe",
         stderr: "pipe",
       }

@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { nativeProjectExec } from "../src/backends/native-project-exec.ts";
 import { saveNativeProjectRun } from "../src/backends/native-project-run.ts";
+import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -194,16 +195,22 @@ test("foreign receipt refuses before exec and changed container after exec is un
 });
 
 test("native exec rejects env and profile before project lookup or runtime effects", async () => {
+  const root = await realpath(
+    await mkdtemp(join(tmpdir(), "native-exec-flags-"))
+  );
+  roots.push(root);
   for (const flag of ["--env", "--profile"]) {
     const child = Bun.spawn(
       [process.execPath, "index.ts", "exec", flag, "qa", "web", "true"],
       {
-        env: {
-          ...process.env,
-          HACK_RUNTIME_BACKEND: "native",
-          HACK_NATIVE_HOME: "/nonexistent-native-home",
-          HACK_NATIVE_BINARY: "/nonexistent-native-binary",
-        },
+        env: privateCliEnv({
+          root,
+          env: {
+            HACK_RUNTIME_BACKEND: "native",
+            HACK_NATIVE_HOME: "/nonexistent-native-home",
+            HACK_NATIVE_BINARY: "/nonexistent-native-binary",
+          },
+        }),
         stdout: "pipe",
         stderr: "pipe",
       }

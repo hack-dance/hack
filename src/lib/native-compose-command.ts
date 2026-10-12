@@ -56,6 +56,7 @@ import {
   assertNativeComposeFileRunSupported,
   assertNativeComposeSavedFileEngines,
   type NativeComposeCommandFiles,
+  nativeComposeSavedFilesPresent,
   prepareNativeComposeCommandFiles,
   prepareNativeComposeSavedFileStop,
   retireNativeComposeSavedFiles,
@@ -1653,21 +1654,30 @@ async function executePreparedGeneration(opts: {
             signal,
           });
         },
-        retireFiles: async () => {
-          await files?.assertReady(selection, generation);
-          await retireNativeComposeSavedFiles({
-            mutation,
-            store,
-            saved: previous,
-            selection,
-            signal,
-          });
-        },
+        // Without new or saved file material the retirement only reads, so
+        // leaving it out lets finalization take its single proof pass when no
+        // route or after hook needs a completion step either.
+        ...(files !== null || nativeComposeSavedFilesPresent(previous)
+          ? {
+              retireFiles: async () => {
+                await files?.assertReady(selection, generation);
+                await retireNativeComposeSavedFiles({
+                  mutation,
+                  store,
+                  saved: previous,
+                  selection,
+                  signal,
+                });
+              },
+            }
+          : {}),
       });
-  // Up/restart enrollment ends with a storage proof. With no build, routing or
-  // file material, the first pre-spawn guard follows it with only read-only
-  // source and ownership checks (arming is a no-op), so that guard may reuse the
-  // adjacent proof. Every later guard and finalization proof stays fresh.
+  // Up/restart enrollment ends with a storage proof (a warm enrollment reuses
+  // the effect-entry proof; a new volume proves in full). With no build,
+  // routing or file material, the first pre-spawn guard follows it with only
+  // read-only source and ownership checks (arming is a no-op), so that guard
+  // may reuse the adjacent proof. Every later guard and the post-workload
+  // finalization proof stay fresh.
   let adjacentGuardProof =
     (operation === "up" || operation === "restart") &&
     builds.length === 0 &&

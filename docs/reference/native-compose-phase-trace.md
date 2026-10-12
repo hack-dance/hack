@@ -33,7 +33,7 @@ environment values, subprocess output or exception text.
 
 The canonical call sites cover `oneoff.post-remove-owned`,
 `oneoff.post-remove-fresh`, `oneoff.post-remove-guard`, `storage.enroll`,
-`guard.fresh-before`, `guard.ownership`, `guard.storage`, `guard.fresh-after`,
+`storage.proof`, `guard.fresh-before`, `guard.ownership`, `guard.storage`, `guard.fresh-after`,
 `finish.pending`, `finish.witness-work`, and the finalization
 phases `finalize.fresh`, `finalize.generation`, `finalize.projection`,
 `finalize.owned`, `finalize.remember-storage`, `finalize.witnesses`,
@@ -41,7 +41,10 @@ phases `finalize.fresh`, `finalize.generation`, `finalize.projection`,
 recheck repeats the phase with a new span. Conditional phases appear only when the
 existing command takes that path. `guard.storage` measures the ordinary storage
 verification await inside the workload ownership guard; `storage.enroll` measures
-its preceding enrollment phase. Nested spans describe nested awaits, so their
+its preceding enrollment phase. `storage.proof` measures one performed
+directory-xattr verification kernel proof (three helper carriers) and nests inside
+whichever phase requested it; a verification that reuses an adjacent proof under
+the same lease emits no `storage.proof` span. Nested spans describe nested awaits, so their
 durations must not be added as independent CPU time.
 
 Output stops after 256 records or 64 KiB, or if the clock or sink fails. Diagnostic

@@ -152,11 +152,14 @@ test("storage fence count per command: every proof kept, exact duplicates gone, 
     direct: 0,
     observations: 2 * PROOF_OBSERVATIONS,
   });
+  // Warm up proves four times: opening, prepublication, effect-entry (reused
+  // by the enrollment tail and first guard) and one post-workload finalization.
+  // A reused proof makes no engine fence or target observation.
   expect(await counted(root, ["up", "--detach", "--json"])).toEqual({
     code: 0,
-    cli: FILE_ENGINE_FENCES + 6 * PROOF_FENCES,
+    cli: FILE_ENGINE_FENCES + 4 * PROOF_FENCES,
     direct: 0,
-    observations: 6 * PROOF_OBSERVATIONS,
+    observations: 4 * PROOF_OBSERVATIONS,
   });
   // Admitted Unix selection: the same fences, one fresh read each. Only the
   // first storage fence is a CLI read, checked against one extra direct read.
@@ -170,8 +173,8 @@ test("storage fence count per command: every proof kept, exact duplicates gone, 
   expect(await counted(root, ["up", "--detach", "--json"], selected)).toEqual({
     code: 0,
     cli: FILE_ENGINE_FENCES + 1,
-    direct: 6 * PROOF_FENCES,
-    observations: 6 * PROOF_OBSERVATIONS,
+    direct: 4 * PROOF_FENCES,
+    observations: 4 * PROOF_OBSERVATIONS,
   });
   // Admitted context selection (DOCKER_HOST unset; the client config's current
   // context names the socket): the same counts as an explicit Unix host.

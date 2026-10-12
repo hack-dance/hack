@@ -9,8 +9,11 @@
  * crash-report links or values) is ever returned.
  */
 
-/** Exit statuses a shell reports for Bun's crash signals: SIGTRAP (133) and SIGSEGV (139). */
-export const BUN_CRASH_EXIT_CODES: readonly number[] = [133, 139];
+/**
+ * Exit statuses a shell reports for Bun's crash signals: SIGTRAP (133), SIGABRT
+ * (134), SIGBUS (138) and SIGSEGV (139).
+ */
+export const BUN_CRASH_EXIT_CODES: readonly number[] = [133, 134, 138, 139];
 
 export type BunRunOutcome = "crash" | "failure" | "pass";
 
@@ -19,7 +22,7 @@ export type BunRunReason =
   | "banner"
   /** The process was ended by a signal it did not get from the harness. */
   | "signal"
-  /** The exit status encodes a crash signal (133 or 139). */
+  /** The exit status encodes a crash signal (133, 134, 138 or 139). */
   | "signal_exit"
   /** Exit 0 and no crash banner. */
   | "exit_zero"

@@ -1303,6 +1303,9 @@ not delete these files or receipts blindly. The built-in `hack`,
 `hack.local`, and `hack.gy` roots cannot be claimed wholesale by this command;
 a dedicated `v5.hack.gy` subtree is supported when its v4 parent is verified.
 Existing project hosts and reviewed routes are not migrated.
+A suffix outside `.local`, such as `v5.hack.gy`, also avoids the macOS
+Local Network grant that browsers other than Safari need for `.local` names;
+see [macOS browser connectivity](macos-browser-network.md).
 
 DNS activation alone does not prove that an app route, certificate, port 443,
 or OAuth redirect is ready. Use `hack doctor --browser-url` for the exact app

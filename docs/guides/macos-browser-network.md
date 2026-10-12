@@ -6,6 +6,45 @@ Apple exempts command-line tools launched from Terminal or SSH. See Apple's
 [Local Network privacy explanation](https://developer.apple.com/documentation/technotes/tn3179-understanding-local-network-privacy)
 and [permission settings guide](https://support.apple.com/guide/mac-help/mchla4f49138/mac).
 
+## `.local` names need a one-time grant outside Safari
+
+New projects use `<project>.hack.local` by default. macOS applies Local Network
+privacy by name as well as by address: Apple's TN3179 treats a `.local` lookup
+as local network activity because `.local` is the multicast DNS (Bonjour)
+namespace. A browser that opens `https://my-app.hack.local` therefore needs
+Local Network access, even though Hack's resolver answers with a loopback
+address.
+
+- **Safari** opens `.local` names without this permission.
+- **Chrome, Firefox and other browsers** need it once per app. macOS asks the
+  first time; if you declined, enable it in **System Settings → Privacy &
+  Security → Local Network**, then fully quit and reopen the browser.
+
+On macOS, Hack prints one hint line on stderr when a command opens or prints a
+`.local` browser URL (`hack open`, `hack branch open`, `hack status` and
+`hack projects`, and Doctor's browser check). The hint is shown at most once per
+command and never appears inside `--json` output. Hack does not read, request or
+change this permission for you.
+
+If you prefer not to grant the permission, use a name outside `.local`:
+
+- **OAuth alias:** enable `oauth.enabled` (or `hack init --oauth`) and open the
+  project's `<project>.hack.gy` alias. `hack open` prefers it automatically;
+  `hack open --prefer alias` requires it.
+- **Custom suffix:** choose a dedicated suffix under `hack.gy`, for example
+  `dev.hack.gy`. With the native candidate, run
+  `hack global dns preview --domain dev.hack.gy` and then
+  `hack global dns activate --domain dev.hack.gy`
+  (see [native candidate DNS](native-candidate.md)). With the Docker-backed
+  stack, set `hack config set --global default_domain <suffix>` and run
+  `hack global install` (see [Initialize a project](init-project.md)).
+  Existing project hosts are not migrated automatically.
+
+Avoiding `.local` avoids only the name-based rule. Address-based checks still
+apply, so verify the exact origin in the browser as described below.
+
+## Diagnose a browser failure
+
 Run `hack doctor` first. DNS, resolver, Caddy, project services and certificate trust
 have separate checks. The browser check remains unverified until you report an
 observation; Doctor does not read the browser's permissions or its private data.

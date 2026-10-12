@@ -24,6 +24,7 @@ import { preflightNativeRestart } from "../src/backends/native-project-restart-p
 import { selectNativeRetainedImages } from "../src/backends/native-project-retained-images.ts";
 import type { NativeProjectRun } from "../src/backends/native-project-run.ts";
 import {
+  nativeReadinessArgs,
   parseNativeHttpsSelection,
   reviewedNativeHttpsRoutes,
   startNativeProject,
@@ -1016,6 +1017,166 @@ test("routed startup reserves bridges and enrolls reviewed healthy services with
     return await serve(call);
   };
   expect(await startNativeProject(opts)).toBe(0);
+});
+
+const profileProbe = {
+  port: 3000,
+  path: "/health",
+  interval_ms: 100,
+  timeout_ms: 500,
+  retries: 3,
+  start_period_ms: 0,
+};
+/** One active service plus a routed and an unrouted service in the `debug` profile. */
+function profileSpecs(): Record<string, Record<string, unknown>> {
+  return {
+    web: { image: `sha256:${"e".repeat(64)}` },
+    admin: {
+      image: `sha256:${"e".repeat(64)}`,
+      profiles: ["debug"],
+      labels: {
+        caddy: "admin.example.com",
+        "caddy.reverse_proxy": "{{upstreams 3000}}",
+        "caddy.tls": "internal",
+      },
+      healthcheck: { "x-hack-http": profileProbe },
+    },
+    worker: {
+      image: `sha256:${"e".repeat(64)}`,
+      profiles: ["debug"],
+      depends_on: { web: { condition: "service_healthy" } },
+    },
+  };
+}
+function profilePlan(debug: boolean) {
+  return {
+    enrollment_compatible: true,
+    services: {
+      web: { active: true },
+      admin: {
+        active: debug,
+        routing: { port: 3000, hostnames: ["admin.example.com"] },
+        healthcheck: { native_http: profileProbe, disabled: false },
+      },
+      worker: { active: debug },
+    },
+  };
+}
+function readyGoals(args: readonly string[]): string[] {
+  return args.flatMap((arg, index) =>
+    args[index - 1] === "--ready" ? [arg] : []
+  );
+}
+
+test("readiness goals cover only services the reviewed plan marks active", () => {
+  expect(
+    nativeReadinessArgs({
+      specs: profileSpecs(),
+      plan: profilePlan(false),
+      initializers: new Set(),
+      routed: new Set(),
+    })
+  ).toEqual(["--ready", "web=started"]);
+  expect(
+    readyGoals(
+      nativeReadinessArgs({
+        specs: profileSpecs(),
+        plan: profilePlan(true),
+        initializers: new Set(),
+        routed: new Set(["admin"]),
+      })
+    ).sort()
+  ).toEqual(["admin=healthy", "web=healthy", "worker=started"]);
+  // Services absent from the plan are unknown, and a missing plan admits nothing.
+  expect(
+    nativeReadinessArgs({
+      specs: profileSpecs(),
+      plan: {
+        enrollment_compatible: true,
+        services: { web: { active: true } },
+      },
+      initializers: new Set(["worker"]),
+      routed: new Set(["admin"]),
+    })
+  ).toEqual(["--ready", "web=started"]);
+  expect(
+    nativeReadinessArgs({
+      specs: profileSpecs(),
+      plan: undefined,
+      initializers: new Set(),
+      routed: new Set(),
+    })
+  ).toEqual([]);
+});
+
+async function profileStartup(profiles: readonly string[] | undefined) {
+  const { opts } = await fixture(false);
+  const prepare = opts.dependencies.prepare!;
+  const review = opts.dependencies.review!;
+  const invoke = opts.dependencies.invoke!;
+  const serve = opts.dependencies.serve!;
+  const seen: { reviewed?: readonly string[]; serve?: readonly string[] } = {};
+  let bridges: string | undefined;
+  opts.dependencies.prepare = async (call) => ({
+    ...(await prepare(call)),
+    normalizedComposeJson: JSON.stringify({ services: profileSpecs() }),
+    serviceNames: ["web", "admin", "worker"],
+  });
+  opts.dependencies.review = async (call) => {
+    seen.reviewed = call.profiles;
+    return await review({
+      ...call,
+      run: async (checked) =>
+        call.run({
+          ...checked,
+          report: {
+            plan: profilePlan(call.profiles?.includes("debug") === true),
+          },
+        }),
+    });
+  };
+  opts.dependencies.invoke = async (call) => {
+    if (call.args[0] === "runtime" && call.args[1] === "up") {
+      const index = call.args.indexOf("--minimum-bridge-sockets");
+      bridges = index < 0 ? undefined : call.args[index + 1];
+    }
+    return await invoke(call);
+  };
+  opts.dependencies.serve = async (call) => {
+    seen.serve = call.args;
+    return await serve(call);
+  };
+  expect(
+    await startNativeProject(profiles ? { ...opts, profiles } : opts)
+  ).toBe(0);
+  return {
+    reviewed: seen.reviewed,
+    goals: readyGoals(seen.serve ?? []).sort(),
+    serveArgs: seen.serve ?? [],
+    bridges,
+  };
+}
+
+test("native up omits routed and unrouted inactive-profile services from readiness", async () => {
+  const started = await profileStartup(undefined);
+  expect(started.reviewed).not.toContain("debug");
+  // An inactive worker's healthy edge must not raise the active web goal.
+  expect(started.goals).toEqual(["web=started"]);
+  expect(started.serveArgs).not.toContain("admin=auto");
+  // Pool capacity still counts the inactive routed service on purpose.
+  expect(started.bridges).toBe("1");
+});
+
+test("an explicit profile activates its services' readiness and routes", async () => {
+  const started = await profileStartup(["debug"]);
+  expect(started.reviewed).toContain("debug");
+  expect(started.goals).toEqual([
+    "admin=healthy",
+    "web=healthy",
+    "worker=started",
+  ]);
+  expect(started.serveArgs).toContain("admin=auto");
+  expect(started.bridges).toBe("1");
 });
 
 function leaseIdentity(

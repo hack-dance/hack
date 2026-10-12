@@ -19,6 +19,8 @@ import {
   PROJECT_COMPOSE_FILENAME,
   PROJECT_CONFIG_FILENAME,
 } from "../src/constants.ts";
+import { evaluateComposeServiceEnvFreshness } from "../src/lib/compose-env-fingerprint.ts";
+import { readProjectRuntimeStateEntry } from "../src/lib/project-runtime-state.ts";
 import { restoreEnv } from "./helpers/env.ts";
 import { registerScopedModuleMock } from "./helpers/scoped-module-mock.ts";
 
@@ -382,6 +384,62 @@ test("targeted restart preserves delivered Compose environment", async () => {
   expect(psEnvs).toEqual([
     { COMPOSE_PROFILES: "benchmark", SHARED_MODE: "compose" },
   ]);
+});
+
+test("up records value-free env digests and a targeted restart refreshes only its service", async () => {
+  const projectRoot = await createProject();
+  const projectDir = resolve(projectRoot, ".hack");
+  psRows.push(
+    JSON.stringify({ Service: "api", State: "running", ExitCode: 0 }),
+    JSON.stringify({ Service: "migrate", State: "exited", ExitCode: 0 })
+  );
+  const readEntry = () =>
+    readProjectRuntimeStateEntry({
+      projectDir,
+      composeProject: "startup-state-test",
+    });
+
+  expect(await runDetachedUp({ projectRoot })).toBe(0);
+  const atUp = (await readEntry())?.envFingerprint;
+  expect(Object.keys(atUp?.services ?? {})).toEqual([
+    "api",
+    "migrate",
+    "profiled-worker",
+  ]);
+  const freshness = (
+    record: typeof atUp,
+    service: string,
+    mode: string
+  ): string =>
+    evaluateComposeServiceEnvFreshness({
+      record,
+      service,
+      currentEnv: { SHARED_MODE: mode },
+    });
+  expect(freshness(atUp, "api", "compose")).toBe("unchanged");
+  expect(freshness(atUp, "api", "rotated")).toBe("changed");
+
+  const envPath = resolve(projectDir, "hack.env.default.yaml");
+  await writeFile(
+    envPath,
+    (await readFile(envPath, "utf8")).replace(
+      '    SHARED_MODE: "compose"',
+      '    SHARED_MODE: "rotated"'
+    )
+  );
+  expect(await runRestart({ projectRoot, services: ["api"] })).toBe(0);
+  const afterRestart = (await readEntry())?.envFingerprint;
+  expect(afterRestart?.salt).toBe(atUp?.salt);
+  expect(freshness(afterRestart, "api", "rotated")).toBe("unchanged");
+  expect(freshness(afterRestart, "migrate", "rotated")).toBe("changed");
+  expect(afterRestart?.services.migrate).toBe(atUp?.services.migrate);
+  const stored = await readFile(
+    resolve(projectDir, ".internal/runtime-state.json"),
+    "utf8"
+  );
+  for (const text of ["SHARED_MODE", "rotated", '"compose"']) {
+    expect(stored).not.toContain(text);
+  }
 });
 
 test("up --json emits E_STARTUP_INCOMPLETE for a created service", async () => {

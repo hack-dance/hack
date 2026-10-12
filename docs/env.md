@@ -234,7 +234,7 @@ into a host command, and `--target` on env and host commands chooses the `host` 
 | `hack down` | `--env`, `--target` | At teardown, for lifecycle down hooks only; omitted reuses a named overlay recorded for the running stack, else the configured default. | None; nothing is delivered to containers. | The native runtime backend refuses `--env`. |
 | `hack restart` | `--env`, `--target` | When services are recreated; omitted reuses a named overlay recorded for the running stack, else the configured default, and an explicit `--env` (including `base`) wins. | This is the refresh path for the whole stack or the named services. | Authored native projects receive the same selection before dispatch. |
 | `hack run` | `--env` | Per invocation, for the new one-off container. | Each run resolves again. | The native runtime backend refuses `--env`; restart with the selection first. |
-| `hack exec` | `--env` | Checked at invocation against the env recorded for the running stack; the command runs with the env the container was created with. | `hack restart --env <name>` | Compose refuses when the requested env differs from the env recorded for the running stack; the native runtime backend refuses `--env`. |
+| `hack exec` | `--env` | Checked at invocation against the env recorded for the running stack; the command runs with the env the container was created with. Compose warns on stderr when the service's resolved env changed since it started. | `hack restart <service>` (or `hack restart --env <name>`) | Compose refuses when the requested env differs from the env recorded for the running stack; the native runtime backend refuses `--env`. |
 | `hack env list` | `--env`, `--service` | Per invocation, read-only; secret values are masked unless `--show-secrets`. | Not needed. | Reads files; no runtime required. |
 | `hack env get` | `--env`, `--service` | Per invocation; prints exactly one plaintext value to stdout. | Not needed. | Reads files; refuses native project inputs. |
 | `hack env explain` | `--env`, `--service`, `--target` | Per invocation; reports source, precedence and delivery without the value. | Not needed. | Reads files; no runtime required. |
@@ -251,6 +251,21 @@ into a host command, and `--target` on env and host commands chooses the `host` 
 | `hack config plan` | `--env` | Per invocation; metadata only (names, scopes, secret flags), never decrypted. | Not needed. | Authored native projects only. |
 | `hack session start` | `--env`, `--service` | When the workspace is created; the name gains `.env-<name>` (`.env-base` for base spellings), and `--up` runs `hack up -d` with the same selection. | Start a new workspace or pass `--env` to `hack session exec`. | Injects into the workspace shell, not into containers. |
 | `hack session exec` | `--env`, `--service` | Per command; omitted reuses the selection encoded in the workspace name. | Each command resolves again. | Injects into the workspace command, not into containers. |
+
+### Stale env warning on `hack exec`
+
+`hack up` and `hack restart` record, for each Compose service they create, a keyed
+digest of the env set delivered to it. The digest lives in Hack-managed runtime state
+(`.hack/.internal/runtime-state.json`) and holds no key name or value. `hack exec`
+resolves the same env set again and, when the digest differs, prints one fixed warning
+to stderr that names the service and suggests `hack restart <service>`. The command
+still runs with the env the container was created with, and stdout stays the target
+command's output. The warning never prints a key or value.
+
+The check is advisory. Identical env, state written before this check existed, and a
+service whose last targeted restart failed produce no warning. `hack up <service>`,
+`hack restart <service>` and `hack env apply --service <service>` refresh only the
+named services' digests. The native runtime backend does not run this check.
 
 MCP tools accept no env selector. They run the CLI without `--env`, so each row's
 omitted-`--env` behavior applies.

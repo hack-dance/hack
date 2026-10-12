@@ -102,7 +102,8 @@ const KNOWN_RENDER_FINGERPRINTS: Readonly<
     "9d5224d684b357b261c6a488", // v4.0.0..v4.0.2
     "4d58c2a166cdf6c14e32dc40", // v4.0.3
     "ac48ce815ba7efccc3f40e80", // v4.1.0..v4.2.1
-    "b6465c18c6d4f41b30a600b8", // v5.0.0-next.1..next
+    "b6465c18c6d4f41b30a600b8", // v5.0.0-next.1..v5.0.0-next.2
+    "121d8f26374d24f2a09890a3", // v5.0.0-next.3..next
   ]),
   "hack-init-skill": new Set([
     "cd15fb6d8ed8e25071d05e75", // v3.1.0..v4.0.3
@@ -126,7 +127,8 @@ const KNOWN_RENDER_FINGERPRINTS: Readonly<
     "868c6a1f6c0d9487fd8390cc", // v4.0.0..v4.0.2
     "592f8677dcb0ba2ea2ee0476", // v4.0.3
     "8e610ffc85d7e24490195be5", // v4.1.0..v4.2.1
-    "01d7431b9a5caaba3ffd3463", // v5.0.0-next.1..next
+    "01d7431b9a5caaba3ffd3463", // v5.0.0-next.1..v5.0.0-next.2
+    "06cf6d0920afc1780b9946ba", // v5.0.0-next.3..next
   ]),
 };
 

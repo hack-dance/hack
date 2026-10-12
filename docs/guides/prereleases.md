@@ -61,10 +61,16 @@ immutable: a failed or superseded release gets a new number rather than replacin
 its tag or assets.
 
 The native archive is named `hack-5.0.0-next.N-darwin-arm64-native.tar.gz`. It
-contains the complete frontend, executor, guest relay, launcher, provider pins,
-guide, checksums and `prerelease.json` provenance. The compiled frontend reports
-the candidate version. The provenance records the exact source commit and
+contains the complete frontend, executor, guest relay, storage root witness and its
+byte manifest, config compiler and schemas, shared MCP bundle, launcher, provider
+pins, guide, checksums and `prerelease.json` provenance. The compiled frontend
+reports the candidate version. The provenance records the exact source commit and
 platform; filenames alone do not establish either.
+
+Packaging accepts exactly the files and order that `scripts/build-native-candidate.sh`
+checksums for a versioned build, with fixed modes for the storage witness (`0500`),
+its manifest and schemas (`0600`), and the config compiler (`0755`). The witness
+manifest must match the witness bytes and the planned source revision.
 
 Verify the archive checksum and every bundled file before executing the candidate.
 The macOS executable signatures are ad-hoc code-integrity checks. They do not
@@ -139,6 +145,15 @@ Use the [candidate installer guide](candidate-install.md) for the explicit
 version-pinned installation commands and lifecycle controls. The installer keeps
 candidate bundles and homes separate from stable `hack` and `~/.hack`; it does not
 change shell configuration or silently select a candidate.
+
+Bundles from `5.0.0-next.3` onward add the storage root witness and its manifest.
+A channel created by the `5.0.0-next.1` or `5.0.0-next.2` installer keeps that
+release's `manager.py`, which refuses the new layout by design rather than
+selecting files it cannot verify. Before upgrading such a channel, stop its
+runtimes, download and review the newer tag's installer, run its `upgrade-manager`
+against the existing root, then run `upgrade`. See
+[upgrade and return to a retained candidate](candidate-install.md#upgrade-and-return-to-a-retained-candidate).
+A fresh `--root` does not need this step.
 
 A truncated, interrupted or oversized official download is a refused installation.
 The installer removes only the staging directory that attempt created. It leaves

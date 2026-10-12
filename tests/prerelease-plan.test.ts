@@ -11,9 +11,11 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { packageNativeStorageTool } from "../scripts/package-native-storage-tool.ts";
 import {
   CONFIG_COMPILER_PAYLOAD,
   createPrereleasePlan,
+  PAYLOAD_MODES,
   PRERELEASE_PAYLOAD,
   PRERELEASE_PLATFORM,
   PRERELEASE_SUPPORT_ANCHOR,
@@ -28,6 +30,11 @@ import {
   verifyPublishGate,
   verifyReleaseAssets,
 } from "../scripts/prerelease-plan.ts";
+import {
+  NATIVE_STORAGE_TOOL_FILE,
+  NATIVE_STORAGE_TOOL_MANIFEST,
+  nativeStorageToolManifest,
+} from "../src/backends/native-authored-storage-tool.ts";
 import { packageMcpBundle } from "../src/mcp/bundle.ts";
 import { nativeCandidateMcpPayload } from "../src/mcp/candidate-payload.ts";
 
@@ -501,16 +508,43 @@ describe("prerelease decision boundary", () => {
   });
 });
 
+/** Smallest Linux ARM64 ELF header the storage tool byte contract accepts. */
+function storageToolBytes() {
+  const bytes = Buffer.alloc(64);
+  bytes.set([0x7f, 0x45, 0x4c, 0x46, 2, 1, 1]);
+  bytes.writeUInt16LE(183, 18);
+  return bytes;
+}
+
+const STORAGE_TOOL_PAYLOAD = [
+  NATIVE_STORAGE_TOOL_FILE,
+  NATIVE_STORAGE_TOOL_MANIFEST,
+] as const;
+
 async function fixture(root: string) {
   const bundle = join(root, "bundle");
-  await mkdir(bundle);
+  // The storage tool packager requires the builder's private bundle directory.
+  await mkdir(bundle, { mode: 0o700 });
+  await chmod(bundle, 0o700);
   for (const name of PRERELEASE_PAYLOAD) {
+    if ((STORAGE_TOOL_PAYLOAD as readonly string[]).includes(name)) {
+      continue;
+    }
     const value =
       name === "prerelease.json"
         ? JSON.stringify(prereleaseMetadata(input))
         : `fixture ${name}\n`;
     await Bun.write(join(bundle, name), value);
   }
+  // Mirror scripts/build-native-candidate.sh: chmod 500, then the real manifest writer.
+  await writeFile(join(bundle, NATIVE_STORAGE_TOOL_FILE), storageToolBytes(), {
+    mode: 0o500,
+  });
+  await chmod(join(bundle, NATIVE_STORAGE_TOOL_FILE), 0o500);
+  await packageNativeStorageTool({
+    directory: bundle,
+    sourceRevision: input.sourceRevision,
+  });
   await Bun.write(
     join(bundle, "SHA256SUMS"),
     await renderChecksums({ root: bundle, names: PRERELEASE_PAYLOAD })
@@ -667,6 +701,122 @@ for (const name of CONFIG_COMPILER_PAYLOAD) {
   }
 }
 
+for (const name of STORAGE_TOOL_PAYLOAD) {
+  for (const [corruption, message] of [
+    ["missing", "exactly the complete payload"],
+    ["tampered", "Native storage tool"],
+    ["symlink", "regular file"],
+    ["hardlink", "regular file"],
+    ["mode", "unsafe permissions"],
+    ["not-executable", "unsafe permissions"],
+  ] as const) {
+    test(`refuses ${corruption} storage tool payload ${name}`, async () => {
+      const root = await mkdtemp(join(tmpdir(), "hack-storage-tool-refusal-"));
+      try {
+        const bundle = await fixture(root);
+        const path = join(bundle, name);
+        const mode = PAYLOAD_MODES[name] ?? 0o600;
+        if (corruption === "missing") {
+          await rm(path);
+        } else if (corruption === "tampered") {
+          await chmod(path, 0o600);
+          const bytes = Buffer.from(await Bun.file(path).arrayBuffer());
+          bytes[bytes.length - 1] = (bytes.at(-1) ?? 0) ^ 1;
+          await writeFile(path, bytes);
+          await chmod(path, mode);
+        } else if (corruption === "mode") {
+          await chmod(path, 0o755);
+        } else if (corruption === "not-executable") {
+          await chmod(path, mode === 0o500 ? 0o400 : 0o700);
+        } else if (corruption === "symlink") {
+          await rm(path);
+          await symlink("hack-cli", path);
+        } else {
+          await link(path, join(root, "alias"));
+        }
+        await expect(
+          packagePrerelease({
+            plan: createPrereleasePlan(input),
+            bundle,
+            output: join(root, "refused"),
+          })
+        ).rejects.toThrow(message);
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+  }
+}
+
+test("refuses a storage tool manifest not bound to the witness or planned source despite matching checksums", async () => {
+  const cases: Array<{
+    readonly label: string;
+    readonly manifest: (bytes: Buffer) => string;
+    readonly message: string;
+  }> = [
+    {
+      label: "other source revision",
+      manifest: (bytes) =>
+        JSON.stringify(nativeStorageToolManifest(bytes, "b".repeat(40))),
+      message: "witness bytes and source revision",
+    },
+    {
+      label: "other bytes",
+      manifest: (bytes) =>
+        JSON.stringify(
+          nativeStorageToolManifest(
+            Buffer.concat([bytes, Buffer.from([0])]),
+            sha
+          )
+        ),
+      message: "witness bytes and source revision",
+    },
+    {
+      label: "extra field",
+      manifest: (bytes) =>
+        JSON.stringify({
+          ...nativeStorageToolManifest(bytes, sha),
+          extra: true,
+        }),
+      message: "manifest is malformed",
+    },
+    {
+      label: "not JSON",
+      manifest: () => "not json",
+      message: "manifest is malformed",
+    },
+    {
+      label: "oversized",
+      manifest: () => " ".repeat(4097),
+      message: "manifest is malformed",
+    },
+  ];
+  for (const { label, manifest, message } of cases) {
+    const root = await mkdtemp(join(tmpdir(), "hack-storage-tool-binding-"));
+    try {
+      const bundle = await fixture(root);
+      await writeFile(
+        join(bundle, NATIVE_STORAGE_TOOL_MANIFEST),
+        `${manifest(storageToolBytes())}\n`
+      );
+      await Bun.write(
+        join(bundle, "SHA256SUMS"),
+        await renderChecksums({ root: bundle, names: PRERELEASE_PAYLOAD })
+      );
+      await expect(
+        packagePrerelease({
+          plan: createPrereleasePlan(input),
+          bundle,
+          output: join(root, "refused"),
+        }),
+        label
+      ).rejects.toThrow(message);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }
+});
+
 /** Python exposes AppleDouble entries that macOS tar's own listing hides. */
 async function archiveMembers(archive: string) {
   const listing = Bun.spawn(
@@ -742,6 +892,9 @@ test("packages exactly the native payload members despite macOS source extended 
     const bundle = await fixture(root);
     const names = [...PRERELEASE_PAYLOAD, "SHA256SUMS"];
     if (process.platform === "darwin") {
+      // Setting an attribute needs write access; restore the witness's packaged mode.
+      const witness = join(bundle, NATIVE_STORAGE_TOOL_FILE);
+      await chmod(witness, 0o700);
       const attribute = Bun.spawn(
         [
           "/usr/bin/xattr",
@@ -754,6 +907,7 @@ test("packages exactly the native payload members despite macOS source extended 
       );
       expect(await new Response(attribute.stderr).text()).toBe("");
       expect(await attribute.exited).toBe(0);
+      await chmod(witness, 0o500);
       const controlPath = join(root, "with-metadata.tar.gz");
       const { COPYFILE_DISABLE: _copyfileDisabled, ...controlEnv } =
         process.env;
@@ -1073,16 +1227,156 @@ test("stable CLI writes only validated version and tag outputs on manual input",
   }
 });
 
-test("packager payload names every artifact the native candidate bundle script copies", async () => {
+/**
+ * Parse the bundle builder's checksum subshell: the authoritative list of files a
+ * versioned bundle contains, in `SHA256SUMS` order. Unknown shapes refuse, so a
+ * restructured script fails this control instead of silently passing it.
+ */
+function bundleChecksumContract(script: string) {
+  const block = /\n\(\n {2}cd "\$out"\n([\s\S]*?)\n\)\n/.exec(script)?.[1];
+  if (!block) {
+    throw new Error("Bundle checksum block not found");
+  }
+  const versioned: string[] = [];
+  const unversioned: string[] = [];
+  let branch: "both" | "versioned" | "unversioned" = "both";
+  for (const line of block.split("\n").map((value) => value.trim())) {
+    if (line === 'if [ -n "$version" ]; then' && branch === "both") {
+      branch = "versioned";
+      continue;
+    }
+    if (line === "else" && branch === "versioned") {
+      branch = "unversioned";
+      continue;
+    }
+    if (line === "fi" && branch === "unversioned") {
+      branch = "both";
+      continue;
+    }
+    const command =
+      /^shasum -a 256 ([\w.*/-]+(?: [\w.*/-]+)*) (>>?) SHA256SUMS$/.exec(line);
+    if (!command?.[1]) {
+      throw new Error(`Unrecognized bundle checksum line: ${line}`);
+    }
+    const names = command[1].split(" ");
+    for (const [target, active] of [
+      [versioned, branch !== "unversioned"],
+      [unversioned, branch !== "versioned"],
+    ] as const) {
+      if (!active) {
+        continue;
+      }
+      if ((command[2] === ">") !== (target.length === 0)) {
+        throw new Error("SHA256SUMS must be created once, then appended");
+      }
+      target.push(...names);
+    }
+  }
+  if (branch !== "both") {
+    throw new Error("Unterminated versioned checksum branch");
+  }
+  return { versioned, unversioned };
+}
+
+test("packager payload is exactly the versioned bundle the builder checksums, in order", async () => {
   const script = await Bun.file(
     new URL("../scripts/build-native-candidate.sh", import.meta.url)
   ).text();
-  const copied = new Set(
-    [...script.matchAll(/"\$out\/([A-Za-z0-9._-]+)"/g)].map((match) => match[1])
+  const { versioned, unversioned } = bundleChecksumContract(script);
+  expect(unversioned).toEqual(
+    versioned.filter((name) => name !== "prerelease.json")
   );
-  copied.delete("mcp");
-  const expected = new Set([...PRERELEASE_PAYLOAD, ...CONFIG_COMPILER_PAYLOAD]);
-  expect([...copied].sort()).toEqual([...expected].sort());
+  // Packaging compares SHA256SUMS byte for byte, so order is part of the contract.
+  expect(versioned.filter((name) => !name.startsWith("mcp/"))).toEqual([
+    ...PRERELEASE_PAYLOAD,
+    ...CONFIG_COMPILER_PAYLOAD,
+  ]);
+  // nativeCandidateMcpPayload owns this group and returns it in this order.
+  expect(versioned.filter((name) => name.startsWith("mcp/"))).toEqual([
+    "mcp/*/manifest.json",
+    "mcp/*/hack-mcp-adapter",
+    "mcp/*/hack-mcp-owner",
+    "mcp/*/hack-mcp-backend",
+  ]);
+  // Anything the script writes into the bundle must also be checksummed.
+  for (const [, name] of script.matchAll(/"\$out\/([\w.-]+)"/g)) {
+    expect(name === "mcp" || versioned.includes(name ?? "")).toBe(true);
+  }
+  // Modes the script sets are the modes packaging and installation require.
+  const chmods = new Map<string, number>();
+  for (const [, mode, targets] of script.matchAll(
+    /^chmod ([0-7]{3}) ((?:"\$out\/[\w.-]+" ?)+)$/gm
+  )) {
+    for (const [, name] of (targets ?? "").matchAll(/"\$out\/([\w.-]+)"/g)) {
+      chmods.set(name ?? "", Number.parseInt(mode ?? "", 8));
+    }
+  }
+  for (const [name, mode] of Object.entries(PAYLOAD_MODES)) {
+    // package-native-storage-tool.ts creates the manifest 0600; the fixture uses it.
+    if (name !== NATIVE_STORAGE_TOOL_MANIFEST) {
+      expect([name, chmods.get(name)]).toEqual([name, mode]);
+    }
+  }
+});
+
+test("installer accepts exactly the versioned bundle contract with the packaged modes", async () => {
+  const { versioned } = bundleChecksumContract(
+    await Bun.file(
+      new URL("../scripts/build-native-candidate.sh", import.meta.url)
+    ).text()
+  );
+  const id = "f".repeat(64);
+  const names = versioned.map((name) => name.replace("mcp/*/", `mcp/${id}/`));
+  const probe = Bun.spawnSync(
+    [
+      "python3",
+      "-I",
+      "-B",
+      "-c",
+      [
+        "import importlib.util, json, sys",
+        "spec = importlib.util.spec_from_file_location('installer_contract', sys.argv[1])",
+        "m = importlib.util.module_from_spec(spec)",
+        "spec.loader.exec_module(m)",
+        "names = set(json.loads(sys.argv[2]))",
+        "def refused(extra):",
+        "    try:",
+        "        m.payload_inventory(extra)",
+        "    except m.Refusal:",
+        "        return True",
+        "    return False",
+        "print(json.dumps({",
+        "    'accepted': sorted(m.payload_inventory(names | {'SHA256SUMS'})),",
+        "    'top_level': sorted(m.PAYLOAD | m.COMPILER_PAYLOAD | m.STORAGE_TOOL_PAYLOAD),",
+        "    'modes': {name: m.payload_mode(name) for name in sorted(names)},",
+        "    'foreign_refused': refused(names | {'SHA256SUMS', 'native-storage-tool.sig'}),",
+        "    'storage_partial_refused': [refused(names - {name} | {'SHA256SUMS'})",
+        "                                for name in sorted(m.STORAGE_TOOL_PAYLOAD)],",
+        "}))",
+      ].join("\n"),
+      new URL("../scripts/install-prerelease.py", import.meta.url).pathname,
+      JSON.stringify(names),
+    ],
+    { stdout: "pipe", stderr: "pipe" }
+  );
+  expect(probe.stderr.toString()).toBe("");
+  expect(probe.exitCode).toBe(0);
+  const result = JSON.parse(probe.stdout.toString()) as {
+    accepted: string[];
+    top_level: string[];
+    modes: Record<string, number>;
+    foreign_refused: boolean;
+    storage_partial_refused: boolean[];
+  };
+  expect(result.accepted).toEqual([...names].sort());
+  expect(result.top_level).toEqual(
+    versioned.filter((name) => !name.startsWith("mcp/")).sort()
+  );
+  for (const [name, mode] of Object.entries(PAYLOAD_MODES)) {
+    expect([name, result.modes[name]]).toEqual([name, mode]);
+  }
+  expect(result.foreign_refused).toBe(true);
+  expect(result.storage_partial_refused).toEqual([true, true]);
 });
 
 /** GitHub's heading anchor: lowercase, punctuation removed, spaces as hyphens. */

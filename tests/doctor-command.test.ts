@@ -1,5 +1,12 @@
 import { expect, test } from "bun:test";
-import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  readdir,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { HACK_AGENT_INTEGRATION_CONTENT_REVISION } from "../src/agents/integration-revision.ts";
@@ -368,6 +375,106 @@ test("doctor treats absent optional agent integrations as current", async () => 
     await rm(root, { recursive: true, force: true });
   }
 });
+
+/** Run a doctor agent-integration check against a fixture HOME and project. */
+async function withDoctorAgentFixture(
+  run: (paths: {
+    readonly home: string;
+    readonly project: string;
+    readonly inspect: () => Promise<{ readonly status: string }>;
+  }) => Promise<void>
+): Promise<void> {
+  const root = await mkdtemp(join(tmpdir(), "hack-doctor-agent-edge-"));
+  const home = join(root, "home");
+  const project = join(root, "repo");
+  const savedHome = process.env.HOME;
+  process.env.HOME = home;
+  try {
+    await mkdir(home, { recursive: true });
+    await mkdir(project, { recursive: true });
+    await run({
+      home,
+      project,
+      inspect: () =>
+        inspectDoctorAgentIntegrations({ projectRoot: project, homeDir: home }),
+    });
+  } finally {
+    if (savedHome === undefined) {
+      // biome-ignore lint/performance/noDelete: restoring an unset env var
+      delete process.env.HOME;
+    } else {
+      process.env.HOME = savedHome;
+    }
+    await rm(root, { recursive: true, force: true });
+  }
+}
+
+test("doctor treats a doc with only one Hack marker as stale", async () => {
+  const marker = `Content revision: \`${HACK_AGENT_INTEGRATION_CONTENT_REVISION}\``;
+  await withDoctorAgentFixture(async ({ project, inspect }) => {
+    const doc = join(project, "AGENTS.md");
+
+    // Start marker only, even with the current revision text inside.
+    await writeFile(
+      doc,
+      `# notes\n<!-- hack:agent-docs:start -->\n${marker}\nno end marker\n`
+    );
+    await expect(inspect()).resolves.toEqual({ status: "stale" });
+
+    // End marker only.
+    await writeFile(
+      doc,
+      `# notes\n${marker}\nno start marker\n<!-- hack:agent-docs:end -->\n`
+    );
+    await expect(inspect()).resolves.toEqual({ status: "stale" });
+
+    // Neither marker: user-owned doc, not stale.
+    await writeFile(doc, "# notes\n");
+    await expect(inspect()).resolves.toEqual({ status: "current" });
+  });
+});
+
+// Root can read mode-000 files, so the unreadable fixture cannot be built.
+const doctorRunsAsRoot = process.getuid?.() === 0;
+
+test.skipIf(doctorRunsAsRoot)(
+  "doctor treats a present but unreadable Hack-owned file as stale",
+  async () => {
+    const marker = `Content revision: \`${HACK_AGENT_INTEGRATION_CONTENT_REVISION}\``;
+    await withDoctorAgentFixture(async ({ project, inspect }) => {
+      const rules = join(project, ".cursor", "rules", "hack.mdc");
+      await mkdir(join(rules, ".."), { recursive: true });
+      await writeFile(rules, `${marker}\n`);
+      await expect(inspect()).resolves.toEqual({ status: "current" });
+
+      await chmod(rules, 0o000);
+      try {
+        await expect(inspect()).resolves.toEqual({ status: "stale" });
+      } finally {
+        await chmod(rules, 0o644);
+      }
+      await expect(inspect()).resolves.toEqual({ status: "current" });
+    });
+  }
+);
+
+test.skipIf(doctorRunsAsRoot)(
+  "doctor treats a present but unreadable agent doc as stale",
+  async () => {
+    await withDoctorAgentFixture(async ({ project, inspect }) => {
+      const doc = join(project, "CLAUDE.md");
+      await writeFile(doc, "# notes\n");
+      await expect(inspect()).resolves.toEqual({ status: "current" });
+
+      await chmod(doc, 0o000);
+      try {
+        await expect(inspect()).resolves.toEqual({ status: "stale" });
+      } finally {
+        await chmod(doc, 0o644);
+      }
+    });
+  }
+);
 
 test("doctor guidance routes runtime hygiene drift to projects prune", () => {
   const guidance = buildDoctorRecoveryGuidance({

@@ -1,8 +1,9 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { installCursorRules } from "../src/agents/cursor.ts";
+import { installSharedHackSkill } from "../src/agents/shared-skill.ts";
 import { inspectAgentIntegrationFreshness } from "../src/cli/integration-sync.ts";
 
 /**
@@ -120,4 +121,71 @@ test("a retired legacy artifact is stale", async () => {
     "---\nname: hack-tickets\n---\n"
   );
   expect(await status(null)).toBe("stale");
+});
+
+test("a doc with only the Hack start marker is a corrupted section and stale", async () => {
+  const { repo } = fixture();
+  await writeFile(
+    join(repo, "AGENTS.md"),
+    "# notes\n<!-- hack:agent-docs:start -->\nold content without end\n"
+  );
+  expect(await status(repo)).toBe("stale");
+});
+
+test("a doc with only the Hack end marker is a corrupted section and stale", async () => {
+  const { repo } = fixture();
+  await writeFile(
+    join(repo, "CLAUDE.md"),
+    "# notes\nold content without start\n<!-- hack:agent-docs:end -->\n"
+  );
+  expect(await status(repo)).toBe("stale");
+});
+
+// Root can read mode-000 files, so the unreadable fixture cannot be built.
+const runsAsRoot = process.getuid?.() === 0;
+
+test.skipIf(runsAsRoot)(
+  "an installed but unreadable Hack-owned project file counts as drift",
+  async () => {
+    const { repo } = fixture();
+    await installCursorRules({ scope: "project", projectRoot: repo });
+    const rules = join(repo, ".cursor", "rules", "hack.mdc");
+    expect(await status(repo)).toBe("current");
+    await chmod(rules, 0o000);
+    try {
+      expect(await status(repo)).toBe("stale");
+    } finally {
+      await chmod(rules, 0o644);
+    }
+    expect(await status(repo)).toBe("current");
+  }
+);
+
+test.skipIf(runsAsRoot)(
+  "an installed but unreadable Hack-owned HOME file counts as drift",
+  async () => {
+    const { home } = fixture();
+    await installSharedHackSkill();
+    const skill = join(home, ".ai", "skills", "hack-cli", "SKILL.md");
+    expect(await status(null)).toBe("current");
+    await chmod(skill, 0o000);
+    try {
+      expect(await status(null)).toBe("stale");
+    } finally {
+      await chmod(skill, 0o644);
+    }
+  }
+);
+
+test.skipIf(runsAsRoot)("an unreadable agent doc counts as drift", async () => {
+  const { repo } = fixture();
+  const doc = join(repo, "AGENTS.md");
+  await writeFile(doc, "# Team notes\n");
+  expect(await status(repo)).toBe("current");
+  await chmod(doc, 0o000);
+  try {
+    expect(await status(repo)).toBe("stale");
+  } finally {
+    await chmod(doc, 0o644);
+  }
 });

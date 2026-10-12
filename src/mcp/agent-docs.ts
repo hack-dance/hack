@@ -4,7 +4,12 @@ import {
   normalizeInstructionText,
   renderInstructionSections,
 } from "../agents/instruction-source.ts";
-import { pathExists, readTextFile, writeTextFileIfChanged } from "../lib/fs.ts";
+import {
+  pathExists,
+  readOptionalTextFile,
+  readTextFile,
+  writeTextFileIfChanged,
+} from "../lib/fs.ts";
 
 export type AgentDocTarget = "agents" | "claude";
 
@@ -20,7 +25,11 @@ export type AgentDocCheckResult = {
   readonly status: "present" | "stale" | "missing" | "error";
   readonly path: string;
   readonly message?: string;
-  /** Set when the file exists but has no Hack-managed section at all. */
+  /**
+   * Set only when the file is readable and carries neither Hack marker, so it
+   * is a user-owned doc without a Hack-managed section. A doc with exactly one
+   * marker is a corrupted managed section and is never `unmanaged`.
+   */
   readonly unmanaged?: true;
 };
 
@@ -108,46 +117,7 @@ export async function checkAgentDocs(opts: {
   for (const target of opts.targets) {
     const path = resolveAgentDocPath({ projectRoot: opts.projectRoot, target });
     try {
-      const existing = await readTextFile(path);
-      if (!existing) {
-        results.push({ target, status: "missing", path });
-        continue;
-      }
-
-      if (!hasAgentDocSnippet({ content: existing })) {
-        results.push({
-          target,
-          status: "error",
-          path,
-          message: "Missing hack agent-docs markers.",
-          unmanaged: true,
-        });
-        continue;
-      }
-
-      const region = extractSnippetRegion({ content: existing });
-      if (region === null) {
-        results.push({
-          target,
-          status: "error",
-          path,
-          message: "Malformed hack agent-docs markers.",
-        });
-        continue;
-      }
-
-      if (normalizeInstructionText({ text: region }) !== expected) {
-        results.push({
-          target,
-          status: "stale",
-          path,
-          message:
-            "hack agent-docs content is out of date. Run: hack setup sync",
-        });
-        continue;
-      }
-
-      results.push({ target, status: "present", path });
+      results.push(await checkAgentDocTarget({ target, path, expected }));
     } catch (error: unknown) {
       const message =
         error instanceof Error ? error.message : "Failed to read file";
@@ -156,6 +126,72 @@ export async function checkAgentDocs(opts: {
   }
 
   return results;
+}
+
+/**
+ * Classify one agent doc. Absent or empty docs are `missing`; an unreadable
+ * doc is `error`; a readable doc with neither Hack marker is a user-owned
+ * `unmanaged` error; a doc with only one marker is a corrupted (managed)
+ * section and is `error` without `unmanaged`.
+ */
+async function checkAgentDocTarget(opts: {
+  readonly target: AgentDocTarget;
+  readonly path: string;
+  readonly expected: string;
+}): Promise<AgentDocCheckResult> {
+  const { target, path } = opts;
+  const file = await readOptionalTextFile(path);
+  if (file.kind === "unreadable") {
+    return {
+      target,
+      status: "error",
+      path,
+      message: "Agent doc exists but could not be read.",
+    };
+  }
+  const existing = file.kind === "text" ? file.text : "";
+  if (!existing) {
+    return { target, status: "missing", path };
+  }
+
+  const markers = inspectAgentDocMarkers({ content: existing });
+  if (!(markers.hasStart || markers.hasEnd)) {
+    return {
+      target,
+      status: "error",
+      path,
+      message: "Missing hack agent-docs markers.",
+      unmanaged: true,
+    };
+  }
+  if (!(markers.hasStart && markers.hasEnd)) {
+    return {
+      target,
+      status: "error",
+      path,
+      message:
+        "Malformed hack agent-docs markers: only one of the start/end markers is present.",
+    };
+  }
+
+  const region = extractSnippetRegion({ content: existing });
+  if (region === null) {
+    return {
+      target,
+      status: "error",
+      path,
+      message: "Malformed hack agent-docs markers.",
+    };
+  }
+  if (normalizeInstructionText({ text: region }) !== opts.expected) {
+    return {
+      target,
+      status: "stale",
+      path,
+      message: "hack agent-docs content is out of date. Run: hack setup sync",
+    };
+  }
+  return { target, status: "present", path };
 }
 
 /**
@@ -290,11 +326,14 @@ function extractSnippetRegion(opts: {
   return match ? match[0] : null;
 }
 
-function hasAgentDocSnippet(opts: { readonly content: string }): boolean {
-  return (
-    opts.content.includes(DOC_MARKER_START) &&
-    opts.content.includes(DOC_MARKER_END)
-  );
+function inspectAgentDocMarkers(opts: { readonly content: string }): {
+  readonly hasStart: boolean;
+  readonly hasEnd: boolean;
+} {
+  return {
+    hasStart: opts.content.includes(DOC_MARKER_START),
+    hasEnd: opts.content.includes(DOC_MARKER_END),
+  };
 }
 
 function escapeRegex(opts: { readonly value: string }): string {

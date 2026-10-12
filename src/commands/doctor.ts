@@ -80,6 +80,7 @@ import {
   ensureDir,
   ensureGitignoreEntry,
   pathExists,
+  readOptionalTextFile,
   readTextFile,
   writeTextFileIfChanged,
 } from "../lib/fs.ts";
@@ -3528,9 +3529,10 @@ async function maybeRepairHackd(): Promise<void> {
 
 /**
  * Optional integrations are current when absent: a path is stale only when it
- * exists and lacks the current revision marker. AGENTS.md/CLAUDE.md are
- * user-owned, so they count only when they carry a Hack-managed section.
- * Retained legacy artifacts are always stale.
+ * exists and lacks the current revision marker, or exists but cannot be read.
+ * AGENTS.md/CLAUDE.md are user-owned, so they count only when they carry a
+ * Hack start or end marker; a section with only one of the two markers is
+ * corrupted and stale. Retained legacy artifacts are always stale.
  */
 export async function inspectDoctorAgentIntegrations(opts: {
   readonly projectRoot: string | null;
@@ -3582,15 +3584,35 @@ export async function inspectDoctorAgentIntegrations(opts: {
       (content) =>
         content.present &&
         (content.text === null ||
-          (content.text.includes(HACK_AGENT_DOCS_SECTION_MARKER) &&
-            !content.text.includes(marker)))
+          isStaleAgentDocSection({ text: content.text, marker }))
     );
   return {
     status: hasStalePath || hasLegacyArtifacts ? "stale" : "current",
   };
 }
 
-const HACK_AGENT_DOCS_SECTION_MARKER = "<!-- hack:agent-docs:start -->";
+const HACK_AGENT_DOCS_SECTION_START = "<!-- hack:agent-docs:start -->";
+const HACK_AGENT_DOCS_SECTION_END = "<!-- hack:agent-docs:end -->";
+
+/**
+ * A user-owned doc with neither Hack marker is not stale. A doc with only one
+ * marker is a corrupted managed section; a complete section is stale when it
+ * lacks the current revision marker.
+ */
+function isStaleAgentDocSection(opts: {
+  readonly text: string;
+  readonly marker: string;
+}): boolean {
+  const hasStart = opts.text.includes(HACK_AGENT_DOCS_SECTION_START);
+  const hasEnd = opts.text.includes(HACK_AGENT_DOCS_SECTION_END);
+  if (!(hasStart || hasEnd)) {
+    return false;
+  }
+  if (!(hasStart && hasEnd)) {
+    return true;
+  }
+  return !opts.text.includes(opts.marker);
+}
 
 async function readOptionalIntegrationText(
   path: string
@@ -3598,13 +3620,11 @@ async function readOptionalIntegrationText(
   | { readonly present: false }
   | { readonly present: true; readonly text: string | null }
 > {
-  const text = await readTextFile(path);
-  if (text !== null) {
-    return { present: true, text };
+  const file = await readOptionalTextFile(path);
+  if (file.kind === "absent") {
+    return { present: false };
   }
-  return (await pathExists(path))
-    ? { present: true, text: null }
-    : { present: false };
+  return { present: true, text: file.kind === "text" ? file.text : null };
 }
 
 async function resolveDaemonReportForDoctorFix(): Promise<

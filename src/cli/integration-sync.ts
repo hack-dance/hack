@@ -103,7 +103,9 @@ async function detectIntegrationDrift(opts: {
 
 // Optional integrations are not required: an absent ("missing") integration is
 // current. Only present-but-stale or unverifiable ("error") checks are drift.
-// Retired legacy artifacts are drift whenever they are present.
+// A Hack-owned file that exists but cannot be read is reported as "error" by
+// its check, so it counts as drift (matching doctor). Retired legacy
+// artifacts are drift whenever they are present.
 function hasSingleCheckDrift(status: string): boolean {
   return status === "stale" || status === "error";
 }
@@ -118,7 +120,8 @@ function hasMcpDrift(opts: {
 function hasDocDrift(opts: {
   readonly checks: readonly AgentDocCheckResult[];
 }): boolean {
-  // A user-owned AGENTS.md/CLAUDE.md without a Hack section is not drift.
+  // A user-owned AGENTS.md/CLAUDE.md with neither Hack marker is not drift.
+  // A doc with only one marker (corrupted section) or an unreadable doc is.
   return opts.checks.some(
     (check) =>
       check.status === "stale" ||

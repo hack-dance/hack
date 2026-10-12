@@ -61,6 +61,7 @@ import {
 import {
   assertValidProjectEnvScopeName,
   discoverComposeServiceNames,
+  ENV_KEY_INVALID_MESSAGE,
   materializeProjectEnv,
   migrateLegacyProjectEnv,
   parseProjectEnvTarget,
@@ -1018,7 +1019,7 @@ const handleEnvGet: CommandHandlerFor<typeof getSpec> = async ({
 }) => {
   const key = args.positionals.key;
   if (!ENV_KEY_PATTERN.test(key)) {
-    throw new CliUsageError("Invalid env key");
+    throw new CliUsageError(ENV_KEY_INVALID_MESSAGE);
   }
   const scope = assertValidProjectEnvScopeName({
     scopeName: args.options.service,
@@ -1733,17 +1734,26 @@ const handleEnvAdd: CommandHandlerFor<typeof addSpec> = async ({
 }): Promise<number> => {
   const keyArg = args.positionals.key?.trim();
   const valueArg = args.positionals.value;
+  const valueStdin = args.options.valueStdin === true;
   // --value-stdin: refuse bad combinations and read the bounded value before
   // any project file is migrated or written, so a refusal stores nothing.
-  let stdinValue: string | null = null;
-  if (args.options.valueStdin === true) {
+  if (valueStdin) {
     assertEnvValueStdinUsage({
       hasKey: Boolean(keyArg),
       hasPositionalValue:
         valueArg !== undefined || keyArg?.includes("=") === true,
     });
-    stdinValue = await readEnvValueFromStdin();
   }
+  // Validate a key argument with fixed, value-free refusals before stdin is
+  // read or any project file is migrated or written.
+  const interactive = !(valueStdin || keyArg || valueArg);
+  const argTarget = interactive
+    ? null
+    : parseProjectEnvTarget({
+        keyOrPath: keyArg ?? "",
+        scopeOverride: args.options.service,
+      });
+  const stdinValue = valueStdin ? await readEnvValueFromStdin() : null;
 
   const project = await resolveProjectForEnv({
     ctx,
@@ -1760,7 +1770,6 @@ const handleEnvAdd: CommandHandlerFor<typeof addSpec> = async ({
     reason: "mutation",
   });
 
-  const interactive = stdinValue === null && !(keyArg || valueArg);
   const prompted = interactive
     ? await promptForEnvAddInput({
         project,
@@ -1770,10 +1779,10 @@ const handleEnvAdd: CommandHandlerFor<typeof addSpec> = async ({
 
   const parsedTarget = prompted
     ? { scope: prompted.scope, key: prompted.key }
-    : parseProjectEnvTarget({
-        keyOrPath: keyArg ?? "",
-        scopeOverride: args.options.service,
-      });
+    : argTarget;
+  if (!parsedTarget) {
+    throw new CliUsageError("Env key is required.");
+  }
   const value =
     prompted?.value ??
     stdinValue ??
@@ -2188,10 +2197,12 @@ const handleEnvUnset: CommandHandlerFor<typeof unsetSpec> = async ({
     projectDir: project.projectDir,
   });
   if (!modernExists) {
-    const store = await resolveConfiguredSecretStore({ project, projectName });
+    // Validate the key before resolving a secret store, so a refused key
+    // never reaches a backend.
     const key = await resolveEnvKey({
       key: (args.positionals.key ?? "").trim(),
     });
+    const store = await resolveConfiguredSecretStore({ project, projectName });
 
     const okLegacy = await confirmSafe({
       message: `Unset "${key}" from ${resolveEnvFilePath({ projectDir: project.projectDir, envName })} and ${formatSecretStoreDescriptor({ descriptor: store.descriptor })}${envName ? ` (env ${envName})` : ""}?`,
@@ -2433,7 +2444,7 @@ async function resolveEnvKey(opts: { readonly key: string }): Promise<string> {
   const fromPos = opts.key.trim();
   if (fromPos.length > 0) {
     if (!ENV_KEY_PATTERN.test(fromPos)) {
-      throw new CliUsageError(`Invalid env key: ${fromPos}`);
+      throw new CliUsageError(ENV_KEY_INVALID_MESSAGE);
     }
     return fromPos;
   }

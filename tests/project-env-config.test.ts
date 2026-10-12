@@ -405,6 +405,51 @@ test("project env scopes accept compose-compatible underscores and dots", () => 
   });
 });
 
+test("env key and scope refusals never echo the rejected argument", async () => {
+  const canary = "echo-canary-lib-5e1c";
+  const refusal = (fn: () => unknown): string => {
+    try {
+      fn();
+    } catch (error: unknown) {
+      return error instanceof Error ? error.message : String(error);
+    }
+    throw new Error("expected a refusal");
+  };
+  const messages = [
+    refusal(() => parseProjectEnvTarget({ keyOrPath: `API_TOKEN=${canary}` })),
+    refusal(() =>
+      parseProjectEnvTarget({ keyOrPath: `API_TOKEN=${canary}.tail` })
+    ),
+    refusal(() => parseProjectEnvTarget({ keyOrPath: canary })),
+    refusal(() => parseProjectEnvTarget({ keyOrPath: `api.${canary}` })),
+    refusal(() =>
+      parseProjectEnvTarget({ keyOrPath: `Bad${canary}.API_TOKEN` })
+    ),
+    refusal(() =>
+      assertValidProjectEnvScopeName({ scopeName: `Bad${canary}` })
+    ),
+  ];
+  for (const message of messages) {
+    expect(message).toMatch(/^Invalid env (key|scope): /);
+    expect(message).not.toContain(canary);
+    expect(message).not.toContain("API_TOKEN=");
+  }
+
+  const repo = await createRepo();
+  const write = setProjectEnvValue({
+    projectRoot: repo.projectRoot,
+    projectDir: repo.projectDir,
+    envName: null,
+    scope: "global",
+    key: `API_TOKEN=${canary}`,
+    value: canary,
+    secret: true,
+  });
+  await expect(write).rejects.toThrow("Invalid env key: keys must match");
+  const error = await write.catch((caught: unknown) => caught);
+  expect(error instanceof Error ? error.message : "").not.toContain(canary);
+});
+
 test("resolveProjectEnvConfig falls back to HACK_ENV_SECRET_KEY when the key file is missing", async () => {
   const repo = await createRepo();
 

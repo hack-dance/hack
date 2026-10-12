@@ -1,0 +1,166 @@
+name: Bun crash experiment
+
+# HACK-1211 instrument. Nothing here runs on push or on ordinary pull-request
+# activity. A run starts only from a manual dispatch (which GitHub registers once
+# this file is on the default branch) or when someone adds the
+# `bun-crash-experiment` label to a pull request. Every run spends hosted macOS
+# minutes (about budget + 15 per Bun version), so start one only with an explicit
+# go-ahead.
+#
+# A labeled pull request runs the matched pair on the pull request's head: the
+# 1.3.9 baseline and the 1.4.2 candidate pinned on next, with the same job and
+# budget. A dispatch runs one Bun version at a chosen source revision.
+on:
+  workflow_dispatch:
+    inputs:
+      bun_version:
+        description: Bun version to loop under (major.minor.patch)
+        type: string
+        default: "1.3.9"
+      source_revision:
+        description: Full 40-character commit to test; empty means the dispatched commit
+        type: string
+        default: ""
+      budget_minutes:
+        description: Loop budget in minutes (5-240); the job timeout is budget + 15
+        type: number
+        default: 30
+  pull_request:
+    types: [labeled]
+
+permissions:
+  contents: read
+
+# Only experiment events contend. A label other than `bun-crash-experiment` gets a
+# group of its own (keyed by run id), so its no-op run can never queue behind,
+# replace or cancel a pending experiment run on the same pull request.
+concurrency:
+  group: bun-crash-experiment-${{ github.event_name == 'workflow_dispatch' && format('dispatch-{0}', github.ref) || github.event.label.name == 'bun-crash-experiment' && format('pr-{0}', github.event.pull_request.number) || format('ignored-label-{0}', github.run_id) }}
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.label.name == 'bun-crash-experiment' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      bun_versions: ${{ steps.plan.outputs.bun_versions }}
+      source_revision: ${{ steps.plan.outputs.source_revision }}
+      budget_seconds: ${{ steps.plan.outputs.budget_seconds }}
+      timeout_minutes: ${{ steps.plan.outputs.timeout_minutes }}
+    steps:
+      - name: Validate inputs and plan the runs
+        id: plan
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_BUN_VERSION: ${{ inputs.bun_version }}
+          INPUT_SOURCE_REVISION: ${{ inputs.source_revision }}
+          INPUT_BUDGET_MINUTES: ${{ inputs.budget_minutes }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          EVENT_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            if ! [[ "$INPUT_BUN_VERSION" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
+              echo "Invalid bun_version"
+              exit 1
+            fi
+            versions="[\"$INPUT_BUN_VERSION\"]"
+            revision="${INPUT_SOURCE_REVISION:-$EVENT_SHA}"
+            budget="$INPUT_BUDGET_MINUTES"
+          else
+            versions='["1.3.9","1.4.2"]'
+            revision="$PR_HEAD_SHA"
+            budget=30
+          fi
+          if ! [[ "$revision" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "Invalid source_revision"
+            exit 1
+          fi
+          if ! [[ "$budget" =~ ^[1-9][0-9]{0,2}$ ]] || [ "$budget" -lt 5 ] || [ "$budget" -gt 240 ]; then
+            echo "Invalid budget_minutes"
+            exit 1
+          fi
+          {
+            echo "bun_versions=$versions"
+            echo "source_revision=$revision"
+            echo "budget_seconds=$((budget * 60))"
+            echo "timeout_minutes=$((budget + 15))"
+          } >> "$GITHUB_OUTPUT"
+
+  loop:
+    name: Bun crash loop (${{ matrix.bun_version }})
+    needs: plan
+    strategy:
+      fail-fast: false
+      matrix:
+        bun_version: ${{ fromJSON(needs.plan.outputs.bun_versions) }}
+    runs-on: blacksmith-6vcpu-macos-15
+    timeout-minutes: ${{ fromJSON(needs.plan.outputs.timeout_minutes) }}
+    permissions:
+      contents: read
+    steps:
+      # The instrument comes from this workflow's commit, so an older source
+      # revision without these scripts can still be measured.
+      - name: Checkout instrument
+        uses: actions/checkout@v4
+        with:
+          path: .bun-crash-instrument
+          persist-credentials: false
+          sparse-checkout: |
+            scripts/bun-crash-loop.ts
+            scripts/lib/bun-crash-classify.ts
+          sparse-checkout-cone-mode: false
+      - name: Move the instrument outside the tested tree
+        run: |
+          mkdir -p "$RUNNER_TEMP/bun-crash-instrument"
+          mv .bun-crash-instrument/scripts "$RUNNER_TEMP/bun-crash-instrument/scripts"
+          rm -rf .bun-crash-instrument
+      - name: Checkout source revision
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.plan.outputs.source_revision }}
+          persist-credentials: false
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v1
+        with:
+          bun-version: ${{ matrix.bun_version }}
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+      - uses: dtolnay/rust-toolchain@1.97.1
+      - name: Prepare matching compiler for private file owner tests
+        run: |
+          if grep -q '"build:config-compiler":' package.json; then
+            bun run build:config-compiler
+          else
+            echo "Source revision has no config compiler build"
+          fi
+      - name: Check test preconditions
+        run: |
+          if grep -q '"test:preflight":' package.json; then
+            bun run test:preflight
+          else
+            echo "Source revision has no test preflight"
+          fi
+      - name: Loop the owner test and the full suite within the budget
+        env:
+          BUN_ENABLE_CRASH_REPORTING: "0"
+          EXPECTED_BUN_VERSION: ${{ matrix.bun_version }}
+          SOURCE_REVISION: ${{ needs.plan.outputs.source_revision }}
+          BUDGET_SECONDS: ${{ needs.plan.outputs.budget_seconds }}
+        run: >-
+          bun "$RUNNER_TEMP/bun-crash-instrument/scripts/bun-crash-loop.ts"
+          --budget-seconds="$BUDGET_SECONDS"
+          --expect-bun-version="$EXPECTED_BUN_VERSION"
+          --source-revision="$SOURCE_REVISION"
+          --out-dir="$RUNNER_TEMP/bun-crash-loop"
+      - name: Preserve iteration logs and Bun crash reports
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: bun-crash-loop-${{ matrix.bun_version }}
+          path: ${{ runner.temp }}/bun-crash-loop
+          if-no-files-found: ignore
+          retention-days: 7

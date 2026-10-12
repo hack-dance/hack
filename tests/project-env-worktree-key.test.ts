@@ -267,8 +267,8 @@ async function runHackCli(opts: {
   readonly sandbox: string;
   readonly args: readonly string[];
 }): Promise<CliResult> {
+  // privateCliEnv creates this HOME with mode 0700.
   const home = resolve(opts.sandbox, "home");
-  await mkdir(home, { recursive: true });
   // No runner variable such as HACK_ENV_SECRET_KEY reaches the child.
   const env = privateCliEnv({
     root: opts.sandbox,

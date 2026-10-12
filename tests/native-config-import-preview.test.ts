@@ -318,7 +318,6 @@ test("CLI requires dry-run, reports values-free mappings and preserves files", a
             HACK_HOME: process.env.HACK_HOME,
             HACK_GLOBAL_CONFIG_PATH: process.env.HACK_GLOBAL_CONFIG_PATH,
             HACK_ENV_SECRET_KEY: process.env.HACK_ENV_SECRET_KEY,
-
             HACK_CONFIG_COMPILER_BINARY: binary,
             FORCE_COLOR: "0",
           },

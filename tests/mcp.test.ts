@@ -265,14 +265,17 @@ async function startContractFixture(
     ].join("\n")
   );
   await chmod(stub, 0o755);
-  const env: Record<string, string | undefined> = {
-    ...process.env,
-    HOME: root,
-    HACK_HOME: state,
-    HACK_GLOBAL_CONFIG_PATH: join(registryDir, "config.json"),
-    HACK_MCP_COMMAND: stub,
-  };
-  Reflect.deleteProperty(env, "HACK_NO_INTERACTIVE");
+  // The server runs HACK_MCP_COMMAND with this env. No runner variable, such
+  // as HACK_NO_INTERACTIVE, reaches the stub unless the server sets it.
+  const env: Record<string, string | undefined> = privateCliEnv({
+    root,
+    home: root,
+    env: {
+      HACK_HOME: state,
+      HACK_GLOBAL_CONFIG_PATH: join(registryDir, "config.json"),
+      HACK_MCP_COMMAND: stub,
+    },
+  });
   const server = createMcpServer({ cwd, env });
   const client = new Client({ name: "hack-mcp-contract", version: "1" });
   contractClients.push(client);

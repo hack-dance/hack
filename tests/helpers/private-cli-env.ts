@@ -1,4 +1,4 @@
-import { mkdirSync } from "node:fs";
+import { chmodSync, mkdirSync } from "node:fs";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import { isolatedDockerClientEnv } from "./docker-client.ts";
 
@@ -21,7 +21,8 @@ export type PrivateCliEnvOptions = {
   readonly root: string;
   /**
    * HOME for the child. It must be the fixture root or a path inside it.
-   * Defaults to `<root>/user-home`. It is created with mode 0700 when absent.
+   * Defaults to `<root>/user-home`. It is created when absent, and its mode
+   * is set to 0700 either way.
    */
   readonly home?: string;
   /**
@@ -59,6 +60,8 @@ export function privateCliEnv(
     throw new Error("privateCliEnv: pass HOME through the home option.");
   }
   mkdirSync(home, { recursive: true, mode: 0o700 });
+  // mkdir leaves an existing directory's mode alone.
+  chmodSync(home, 0o700);
   const env: Record<string, string> = {};
   for (const key of PRIVATE_CLI_INHERITED_ENV) {
     const value = process.env[key];

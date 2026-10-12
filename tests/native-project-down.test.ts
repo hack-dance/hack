@@ -74,6 +74,15 @@ async function fixture(saved = true) {
   return { scope, runtime: { binary: "/not-invoked", home: nativeHome } };
 }
 
+/** A fixture root for the CLI's private HOME, beside the project checkout. */
+async function clientRoot(): Promise<string> {
+  const root = await realpath(
+    await mkdtemp(join(tmpdir(), "native-down-client-"))
+  );
+  roots.push(root);
+  return root;
+}
+
 function finalizationRoot(scope: NativeProjectRunScope): string {
   const hash = createHash("sha256")
     .update(
@@ -487,7 +496,7 @@ test("not-started native down does not run configured hooks", async () => {
     [process.execPath, "index.ts", "down", "--path", opts.scope.projectRoot],
     {
       env: privateCliEnv({
-        root: opts.scope.projectRoot,
+        root: await clientRoot(),
         env: {
           HACK_RUNTIME_BACKEND: "native",
           HACK_NATIVE_HOME: opts.scope.nativeHome,
@@ -651,7 +660,7 @@ test("native down JSON isolates hook output and uses saved overlay through real 
     ],
     {
       env: privateCliEnv({
-        root: opts.scope.projectRoot,
+        root: await clientRoot(),
         env: {
           HACK_RUNTIME_BACKEND: "native",
           HACK_NATIVE_HOME: opts.scope.nativeHome,

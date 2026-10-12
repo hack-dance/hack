@@ -1,7 +1,12 @@
 import { expect, test } from "bun:test";
-import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, relative, resolve } from "node:path";
+import {
+  describeFindings,
+  scanSource,
+  scanSources,
+} from "./helpers/cli-spawn-env-scan.ts";
 import { restoreEnv } from "./helpers/env.ts";
 import {
   PRIVATE_CLI_INHERITED_ENV,
@@ -9,15 +14,11 @@ import {
 } from "./helpers/private-cli-env.ts";
 
 /**
- * Guard: a test that spawns the source CLI must not hand it the test runner's
- * environment with the contributor's HOME. Build the child env with
- * `privateCliEnv` (tests/helpers/private-cli-env.ts), or at least override
- * HOME with a path inside the fixture.
- *
- * This is a text scan, not a type check. A file "spawns the source CLI" when
- * it names `index.ts` in a string literal or uses the E2E harness CLI
- * entrypoint. In such a file, every object literal that spreads `process.env`
- * must set its own `HOME`, and that `HOME` must not be the runner's home.
+ * Guard: no test hands the source CLI the test runner's environment or HOME.
+ * Build the child env with `privateCliEnv` (tests/helpers/private-cli-env.ts).
+ * The scope, rules and limits of the scan are documented in
+ * tests/helpers/cli-spawn-env-scan.ts. Each exception below names its reason
+ * and its exact finding count.
  */
 const ALLOWED: Readonly<
   Record<string, { readonly reason: string; readonly count: number }>
@@ -28,105 +29,57 @@ const ALLOWED: Readonly<
     reason: "runCommand spawns git/docker clients for real-engine E2E",
     count: 1,
   },
-  // Release planning scripts (`scripts/prerelease-plan.ts`) read only
-  // GITHUB_* and release inputs; the source CLI spawn in this file is private.
+  // Two env objects for scripts/prerelease-plan.ts, which reads only GITHUB_*
+  // and release inputs; one `tar` control env (rest destructuring); and one
+  // `bun build index.ts --compile`, which compiles and does not run the CLI.
+  // The compiled and source CLI spawns in this file use `privateCliEnv`.
   "tests/prerelease-plan.test.ts": {
-    reason: "env objects for scripts/prerelease-plan.ts, not the CLI",
-    count: 2,
+    reason: "release-plan script envs, a tar env and a compile, not the CLI",
+    count: 4,
+  },
+  // The fixture TLS probe runs the real-engine `docker` client, which needs
+  // the runner's Docker selection. It does not run the CLI.
+  "tests/e2e/scenarios/native-routing-fixture-ingress.ts": {
+    reason: "real-engine docker TLS probe env, not the CLI",
+    count: 1,
+  },
+  // `bun build index.ts --compile` compiles and does not run the CLI.
+  "tests/host-exec-tty.test.ts": {
+    reason: "bun build --compile of index.ts, which does not run the CLI",
+    count: 1,
   },
 };
 
-const SOURCE_CLI =
-  /["'`](?:\.{1,2}\/)*index\.ts["'`]|\bCLI_ENTRYPOINT\b|\bresolveCliSpawnArgs\b/;
-const SPREAD = /\.\.\.\s*process\.env(?![\w.[])/g;
-const RUNNER_HOME =
-  /\bHOME\s*:\s*(?:process\.env\.HOME|process\.env\[["']HOME["']\]|homedir\(\))/;
-const HOME_KEY = /(?:^|[\s,{])HOME\s*(?::|,|\})/;
-
-/** The text of the object literal that encloses `index`, or null. */
-function enclosingObject(source: string, index: number): string | null {
-  let depth = 0;
-  let start = -1;
-  for (let at = index - 1; at >= 0; at -= 1) {
-    const char = source[at];
-    if (char === "}") {
-      depth += 1;
-    } else if (char === "{") {
-      if (depth === 0) {
-        start = at;
-        break;
-      }
-      depth -= 1;
-    }
-  }
-  if (start < 0) {
-    return null;
-  }
-  depth = 0;
-  for (let at = start; at < source.length; at += 1) {
-    const char = source[at];
-    if (char === "{") {
-      depth += 1;
-    } else if (char === "}") {
-      depth -= 1;
-      if (depth === 0) {
-        return source.slice(start, at + 1);
-      }
-    }
-  }
-  return null;
-}
-
-/** Line numbers of `...process.env` spreads that reach the source CLI with the runner's HOME. */
-function leakingCliEnvSpreads(source: string): number[] {
-  if (!SOURCE_CLI.test(source)) {
-    return [];
-  }
-  const lines: number[] = [];
-  for (const match of source.matchAll(SPREAD)) {
-    const object = enclosingObject(source, match.index);
-    const safe =
-      object !== null && HOME_KEY.test(object) && !RUNNER_HOME.test(object);
-    if (!safe) {
-      lines.push(source.slice(0, match.index).split("\n").length);
-    }
-  }
-  return lines;
-}
-
-async function testSources(): Promise<string[]> {
+async function testSources(): Promise<Map<string, string>> {
   const root = resolve(import.meta.dir);
-  const files: string[] = [];
+  const sources = new Map<string, string>();
   for await (const path of new Bun.Glob("**/*.{ts,tsx,mts}").scan({
     cwd: root,
     absolute: true,
   })) {
     // This file names the patterns it scans for in its own examples.
     if (!(path.includes("/node_modules/") || path === import.meta.path)) {
-      files.push(path);
+      sources.set(path, await readFile(path, "utf8"));
     }
   }
-  return files.sort();
+  return sources;
 }
 
-test("no test spawns the source CLI with the runner's environment and HOME", async () => {
+test("no test spawns the source CLI with the runner's environment or HOME", async () => {
   const repo = resolve(import.meta.dir, "..");
   const violations: string[] = [];
   const allowedSeen = new Map<string, number>();
-  for (const path of await testSources()) {
+  const results = scanSources(await testSources(), resolve(import.meta.dir));
+  for (const [path, findings] of results) {
     const name = relative(repo, path);
-    const lines = leakingCliEnvSpreads(await readFile(path, "utf8"));
-    if (lines.length === 0) {
-      continue;
-    }
     const allowed = ALLOWED[name];
     if (allowed) {
-      allowedSeen.set(name, lines.length);
-      if (lines.length <= allowed.count) {
+      allowedSeen.set(name, findings.length);
+      if (findings.length <= allowed.count) {
         continue;
       }
     }
-    violations.push(`${name}:${lines.join(",")}`);
+    violations.push(`${name}: ${describeFindings(findings)}`);
   }
   expect(violations).toEqual([]);
   // Each exception still exists; remove stale entries rather than keep them.
@@ -138,35 +91,207 @@ test("no test spawns the source CLI with the runner's environment and HOME", asy
   }
 });
 
-test("the scan flags runner HOME and accepts a private HOME", () => {
-  const spawn = (env: string) =>
-    `Bun.spawn([process.execPath, "../index.ts"], {\n  env: ${env},\n});`;
+/** Findings for one synthetic in-scope file, as `line rule` strings. */
+function scanExample(...lines: string[]): string[] {
+  return scanSource("/virtual/example.test.ts", lines.join("\n")).map(
+    ({ line, rule }) => `${line} ${rule}`
+  );
+}
+
+const spawnWith = (options: string) =>
+  `Bun.spawn([process.execPath, "../index.ts"], ${options});`;
+
+test("the scan flags every way to hand the CLI the runner's environment", () => {
+  // Whole-environment copies, in any form.
+  expect(scanExample(spawnWith("{ env: process.env }"))).toEqual([
+    "1 runner-env",
+  ]);
   expect(
-    leakingCliEnvSpreads(spawn("{ ...process.env, HACK_HOME: h }"))
-  ).toEqual([2]);
+    scanExample(spawnWith("{ env: { ...process.env, HOME: h } }"))
+  ).toEqual(["1 runner-env"]);
+  expect(scanExample(spawnWith("{ env: { ...Bun.env, HOME: h } }"))).toEqual([
+    "1 runner-env",
+  ]);
   expect(
-    leakingCliEnvSpreads(spawn("{ ...process.env, HOME: process.env.HOME }"))
-  ).toEqual([2]);
+    scanExample(
+      spawnWith("{ env: Object.assign({}, process.env, { HOME: h }) }")
+    )
+  ).toEqual(["1 runner-env"]);
   expect(
-    leakingCliEnvSpreads(spawn("{ ...process.env, HOME: homedir() }"))
-  ).toEqual([2]);
-  // A nested object's HOME does not cover the outer spread.
+    scanExample(
+      'import { env as e } from "node:process";',
+      spawnWith("{ env: { ...e, HOME: h } }")
+    )
+  ).toEqual(["2 runner-env"]);
   expect(
-    leakingCliEnvSpreads(spawn("{ ...process.env, X: { HOME: h } }"))
+    scanExample(
+      "const { A: _a, ...rest } = process.env;",
+      spawnWith("{ env: { ...rest } }")
+    )
+  ).toEqual(["1 runner-env"]);
+  expect(
+    scanExample(
+      "const saved = process.env;",
+      spawnWith("{ env: { ...saved } }")
+    )
+  ).toEqual(["1 runner-env"]);
+  // The spread is flagged whatever HOME is set to.
+  expect(
+    scanExample(spawnWith("{ env: { ...process.env, HOME: someVar } }"))
+  ).toEqual(["1 runner-env"]);
+  // The runner's HOME, directly or through a same-file binding.
+  expect(
+    scanExample(spawnWith("{ env: { ...process.env, HOME: os.homedir() } }"))
+  ).toEqual(["1 runner-env", "1 runner-home"]);
+  expect(
+    scanExample(spawnWith("{ env: { PATH: p, HOME: homedir() } }"))
+  ).toEqual(["1 runner-home"]);
+  expect(
+    scanExample(spawnWith("{ env: { PATH: p, HOME: process.env.HOME } }"))
+  ).toEqual(["1 runner-home"]);
+  expect(
+    scanExample(spawnWith('{ env: { PATH: p, HOME: Bun.env["HOME"] } }'))
+  ).toEqual(["1 runner-home"]);
+  expect(
+    scanExample(
+      "const someVar = join(homedir(), 'x');",
+      spawnWith("{ env: { PATH: p, HOME: someVar } }")
+    )
+  ).toEqual(["2 runner-home"]);
+  expect(
+    scanExample(
+      "const HOME = userInfo().homedir;",
+      spawnWith("{ env: { PATH: p, HOME } }")
+    )
+  ).toEqual(["2 runner-home"]);
+  // A CLI spawn without env inherits everything; one without HOME falls back
+  // to the account's real home.
+  expect(scanExample(spawnWith("{ stdout: 'pipe' }"))).toEqual([
+    "1 cli-without-env",
+  ]);
+  expect(scanExample('Bun.spawn(["bun", "index.ts", "log-pipe"]);')).toEqual([
+    "1 cli-without-env",
+  ]);
+  expect(
+    scanExample(
+      'import { spawnSync as run } from "node:child_process";',
+      'const cli = resolve(dir, "../index.ts");',
+      "const argv = [process.execPath, cli];",
+      "run(argv[0], argv.slice(1), { cwd });"
+    )
+  ).toEqual(["4 cli-without-env"]);
+  expect(
+    scanExample(
+      'import * as cp from "child_process";',
+      'cp.execFile(process.execPath, ["index.ts"], { cwd });'
+    )
+  ).toEqual(["2 cli-without-env"]);
+  expect(
+    scanExample(
+      'Bun.spawn(["python3", "probe.py", process.execPath, "../index.ts"], { stdin: "ignore" });'
+    )
+  ).toEqual(["1 cli-without-env"]);
+  expect(scanExample(spawnWith("{ env: { PATH: p } }"))).toEqual([
+    "1 env-without-home",
+  ]);
+  expect(
+    scanExample(
+      "const env = { PATH: p };",
+      spawnWith("{ env, stdout: 'pipe' }")
+    )
+  ).toEqual(["2 env-without-home"]);
+});
+
+test("the scan accepts a private env and one-key uses of process.env", () => {
+  expect(scanExample(spawnWith("{ env: privateCliEnv({ root }) }"))).toEqual(
+    []
+  );
+  expect(
+    scanExample(spawnWith('{ env: { PATH: p, HOME: join(root, "home") } }'))
+  ).toEqual([]);
+  // A fixture field named homedir is not the runner's home.
+  expect(
+    scanExample(spawnWith("{ env: { PATH: p, HOME: fixture.homedir } }"))
   ).toEqual([]);
   expect(
-    leakingCliEnvSpreads(spawn('{ ...process.env, HOME: join(root, "home") }'))
+    scanExample(
+      "const env = privateCliEnv({ root });",
+      spawnWith("{ env, cwd }")
+    )
   ).toEqual([]);
-  expect(leakingCliEnvSpreads(spawn("{ ...process.env, HOME }"))).toEqual([]);
-  expect(leakingCliEnvSpreads(spawn("privateCliEnv({ root })"))).toEqual([]);
-  // Reading one variable is not a spread of the environment.
+  // Another module's env object is trusted here and checked where it is built.
+  expect(scanExample(spawnWith("{ env: { ...fixture.env, X: '1' } }"))).toEqual(
+    []
+  );
+  // An opaque options value is trusted; its builder is checked separately.
+  expect(scanExample(spawnWith("options"))).toEqual([]);
   expect(
-    leakingCliEnvSpreads(spawn("{ PATH: `${process.env.PATH}` }"))
+    scanExample(
+      "const home = process.env.HOME;",
+      'Reflect.deleteProperty(process.env, "HACK_HOME");',
+      'if ("CI" in process.env && Object.hasOwn(process.env, "X")) {}',
+      "process.env = { PATH: p };",
+      "const { PATH } = process.env;",
+      "restoreEnv('HOME', home);",
+      "const p = `${process.env.PATH}`;"
+    )
   ).toEqual([]);
-  // Files that never spawn the source CLI are out of scope.
+  // A spawn that does not reach the CLI may inherit, including one that uses
+  // the result of a CLI spawn.
+  expect(scanExample('Bun.spawn(["git", "status"], { cwd });')).toEqual([]);
   expect(
-    leakingCliEnvSpreads('Bun.spawn(["git"], { env: { ...process.env } });')
+    scanExample(
+      'const proc = Bun.spawn([process.execPath, "index.ts"], { env: privateCliEnv({ root }) });',
+      'Bun.spawnSync(["ps", "-p", `${proc.pid}`]);',
+      'const run = (args) => { const argv = [process.execPath, "index.ts", ...args]; return Bun.spawn(argv, { env }); };',
+      'const result = await run(["up"]);',
+      'Bun.spawnSync(["git", "-C", result.root]);'
+    )
   ).toEqual([]);
+  // A local function named like a spawn export is not one.
+  expect(
+    scanExample(
+      "const exec = (a) => a;",
+      'exec([process.execPath, "index.ts"], { cwd });'
+    )
+  ).toEqual([]);
+});
+
+test("the scan follows a CLI file's local imports and skips other files", () => {
+  const root = "/virtual/tests";
+  const sources = new Map([
+    [
+      `${root}/name.test.ts`,
+      [
+        'import { fixture } from "./helpers/fixture.ts";',
+        'Bun.spawn([process.execPath, "../index.ts"], { env: fixture.env });',
+      ].join("\n"),
+    ],
+    [
+      `${root}/helpers/fixture.ts`,
+      [
+        'import { other } from "@tests/helpers/other";',
+        "export const fixture = { env: { ...process.env, HOME: root } };",
+      ].join("\n"),
+    ],
+    [
+      `${root}/helpers/other.ts`,
+      "export const other = Object.assign({}, process.env);",
+    ],
+    [`${root}/git.test.ts`, 'Bun.spawn(["git"], { env: { ...process.env } });'],
+  ]);
+  const results = scanSources(sources, root);
+  expect(
+    Object.fromEntries(
+      [...results].map(([path, findings]) => [
+        relative(root, path),
+        describeFindings(findings),
+      ])
+    )
+  ).toEqual({
+    "helpers/fixture.ts": "2 runner-env",
+    "helpers/other.ts": "1 runner-env",
+  });
 });
 
 test("privateCliEnv keeps only the allow-list, test values and a private HOME", async () => {
@@ -204,6 +329,12 @@ test("privateCliEnv keeps only the allow-list, test values and a private HOME", 
     for (const key of Object.keys(inherited)) {
       expect([...PRIVATE_CLI_INHERITED_ENV, "HOME"]).toContain(key);
     }
+    // A HOME the test created first is still made private to the owner.
+    const existing = join(root, "existing-home");
+    await mkdir(existing);
+    await chmod(existing, 0o755);
+    expect(privateCliEnv({ root, home: existing }).HOME).toBe(existing);
+    expect((await stat(existing)).mode & 0o777).toBe(0o700);
     expect(() => privateCliEnv({ root, home: tmpdir() })).toThrow("inside");
     expect(() => privateCliEnv({ root, env: { HOME: root } })).toThrow(
       "home option"

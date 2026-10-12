@@ -1,13 +1,25 @@
 #!/usr/bin/env bun
 import { appendFile, lstat, mkdir, readdir } from "node:fs/promises";
 import { join, resolve } from "node:path";
+import {
+  NATIVE_STORAGE_TOOL_FILE,
+  NATIVE_STORAGE_TOOL_MANIFEST,
+  type NativeStorageToolManifest,
+  nativeStorageToolManifest,
+  parseNativeStorageToolManifest,
+} from "../src/backends/native-authored-storage-tool.ts";
 import { nativeCandidateMcpPayload } from "../src/mcp/candidate-payload.ts";
 
 export const PRERELEASE_ENVIRONMENT = "v5-prerelease";
+/**
+ * Top-level files in the order `scripts/build-native-candidate.sh` checksums them
+ * for a versioned build. `SHA256SUMS` is compared byte for byte, so order matters.
+ */
 export const PRERELEASE_PAYLOAD = [
   "hack-native",
   "hack-relay-guest",
-  "hack-storage-root-witness",
+  NATIVE_STORAGE_TOOL_FILE,
+  NATIVE_STORAGE_TOOL_MANIFEST,
   "hack-cli",
   "hack-v5",
   "provider-pins.json",
@@ -19,6 +31,22 @@ export const CONFIG_COMPILER_PAYLOAD = [
   "hack.project.schema.json",
   "hack.local.schema.json",
 ] as const;
+/**
+ * Exact modes the bundle builder sets and the installer reproduces. The storage
+ * witness is a guest-only ELF that runtime admission requires to be owner
+ * executable and not group/other writable; its manifest is private data.
+ */
+export const PAYLOAD_MODES: Readonly<Record<string, number>> = {
+  [NATIVE_STORAGE_TOOL_FILE]: 0o500,
+  [NATIVE_STORAGE_TOOL_MANIFEST]: 0o600,
+  "hack-config-compiler": 0o755,
+  "hack.project.schema.json": 0o600,
+  "hack.local.schema.json": 0o600,
+};
+/** The only packaged and installable candidate platform. */
+export const PRERELEASE_PLATFORM = "darwin-arm64";
+/** GitHub heading anchor of the consolidated support list in the prerelease guide. */
+export const PRERELEASE_SUPPORT_ANCHOR = "supported-platforms-and-capabilities";
 const VERSION = /^5\.0\.0-next\.[1-9][0-9]*$/;
 const REVISION = /^[0-9a-f]{40}$/;
 const STABLE_TAG = /^v(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)$/;
@@ -45,7 +73,7 @@ export function prereleaseMetadata({
     version,
     tag: `v${version}`,
     source_revision: sourceRevision,
-    platform: "darwin-arm64",
+    platform: PRERELEASE_PLATFORM,
   } as const;
 }
 
@@ -79,11 +107,11 @@ export function createPrereleasePlan({
   }
   return {
     ...metadata,
-    archive: `hack-${version}-darwin-arm64-native.tar.gz`,
+    archive: `hack-${version}-${PRERELEASE_PLATFORM}-native.tar.gz`,
     publish: publish === "true",
     environment: PRERELEASE_ENVIRONMENT,
     assets: [
-      `hack-${version}-darwin-arm64-native.tar.gz`,
+      `hack-${version}-${PRERELEASE_PLATFORM}-native.tar.gz`,
       "prerelease.json",
       "SHA256SUMS",
     ],
@@ -91,6 +119,21 @@ export function createPrereleasePlan({
 }
 
 export type PrereleasePlan = ReturnType<typeof createPrereleasePlan>;
+
+/**
+ * Release notes for a published candidate. The support link is pinned to the
+ * candidate's own immutable tag, so later guide edits cannot change what the
+ * published notes describe.
+ */
+export function prereleaseNotes({
+  tag,
+  source_revision: sourceRevision,
+}: Pick<PrereleasePlan, "tag" | "source_revision">) {
+  return [
+    `Native macOS ARM64 candidate from ${sourceRevision}. Requires explicit opt-in; stable installation is unchanged.`,
+    `Supported platform, unsupported platforms and capability limits: https://github.com/hack-dance/hack/blob/${tag}/docs/guides/prereleases.md#${PRERELEASE_SUPPORT_ANCHOR}`,
+  ].join("\n\n");
+}
 
 export function stableReleaseVersion({
   channel,
@@ -180,12 +223,17 @@ export function requireHumanApproval({
   }
 }
 
-const CI_JOBS = [
+/** Jobs that must each succeed on the exact-head CI run; `docker-e2e` is the shard fan-in. */
+export const CI_JOBS = [
   "Runtime state models",
   "Candidate core (ubuntu-latest)",
   "Candidate core (macos-latest)",
   "secret-scan",
   "runtime-images",
+  "docker-e2e shard 1/4",
+  "docker-e2e shard 2/4",
+  "docker-e2e shard 3/4",
+  "docker-e2e shard 4/4",
   "docker-e2e",
   "test",
   "linux-process-lifetime",
@@ -441,21 +489,17 @@ export async function packagePrerelease({
     if (!entry.isFile() || entry.nlink !== 1) {
       throw new Error(`Native bundle payload must be a regular file: ${name}`);
     }
-    if (
-      name === "hack-config-compiler" ||
-      name === "hack.project.schema.json" ||
-      name === "hack.local.schema.json"
-    ) {
-      const mode = name === "hack-config-compiler" ? 0o755 : 0o600;
-      if ((entry.mode & 0o7777) !== mode) {
-        throw new Error(
-          `Native config compiler payload has unsafe permissions: ${name}`
-        );
-      }
+    const mode = PAYLOAD_MODES[name];
+    if (mode !== undefined && (entry.mode & 0o7777) !== mode) {
+      throw new Error(`Native bundle payload has unsafe permissions: ${name}`);
     }
   }
   const metadata = prereleaseMetadata({
     version: plan.version,
+    sourceRevision: plan.source_revision,
+  });
+  await verifyStorageToolPayload({
+    bundle,
     sourceRevision: plan.source_revision,
   });
   const actualMetadata: unknown = await Bun.file(
@@ -498,6 +542,54 @@ export async function packagePrerelease({
     join(output, "SHA256SUMS"),
     await renderChecksums({ root: output, names: [plan.archive] })
   );
+}
+
+/**
+ * Bind the manifest to the witness bytes and the planned source revision with the
+ * runtime's own parser. Runtime admission refuses any mismatch, so never publish
+ * a bundle that would refuse every storage-backed project.
+ */
+async function verifyStorageToolPayload({
+  bundle,
+  sourceRevision,
+}: {
+  readonly bundle: string;
+  readonly sourceRevision: string;
+}) {
+  const declared = await readStorageToolManifest(
+    join(bundle, NATIVE_STORAGE_TOOL_MANIFEST)
+  );
+  let observed: NativeStorageToolManifest;
+  try {
+    observed = nativeStorageToolManifest(
+      await Bun.file(join(bundle, NATIVE_STORAGE_TOOL_FILE)).bytes(),
+      sourceRevision
+    );
+  } catch {
+    throw new Error("Native storage tool must be a bounded Linux ARM64 ELF");
+  }
+  if (JSON.stringify(declared) !== JSON.stringify(observed)) {
+    throw new Error(
+      "Native storage tool manifest must match the witness bytes and source revision"
+    );
+  }
+}
+
+/** Same size bound, strict UTF-8 and parser as runtime admission. */
+async function readStorageToolManifest(path: string) {
+  try {
+    const file = Bun.file(path);
+    if (file.size > 4096) {
+      throw new Error("oversized");
+    }
+    return parseNativeStorageToolManifest(
+      JSON.parse(
+        new TextDecoder("utf-8", { fatal: true }).decode(await file.bytes())
+      )
+    );
+  } catch {
+    throw new Error("Native storage tool manifest is malformed");
+  }
 }
 
 export async function renderChecksums({
@@ -706,7 +798,7 @@ async function main() {
         "--title",
         `Hack ${plan.version}`,
         "--notes",
-        `Native macOS ARM64 candidate from ${plan.source_revision}. Requires explicit opt-in; stable installation is unchanged.`,
+        prereleaseNotes(plan),
       ]);
     }
   } else if (mode !== "plan") {

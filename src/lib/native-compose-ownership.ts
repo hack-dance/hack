@@ -3,7 +3,6 @@ import { isRecord } from "./guards.ts";
 import { nativeComposeVolumeCreatedAt } from "./native-compose-retained-storage.ts";
 import { beginNativeCpuChild } from "./native-cpu-diagnostics.ts";
 import { findExecutableInPath } from "./shell.ts";
-import { x01Label, x01Time } from "./x01-cost-probe.ts";
 
 const PROJECT = /^[a-z0-9][a-z0-9_-]*$/;
 const SERVICE = /^[a-z0-9][a-z0-9._-]{0,62}$/;
@@ -1233,7 +1232,7 @@ export function createNativeComposeProbe(
     probeRefused("E_NATIVE_COMPOSE_PROBE", "operation");
   }
   const environment = { ...process.env };
-  const x01Inner = async (args: readonly string[]): Promise<string> => {
+  return async (args) => {
     checkInterruption(opts.signal, false);
     const remainingTime = deadline - Date.now();
     if (remainingTime <= 0) {
@@ -1311,8 +1310,6 @@ export function createNativeComposeProbe(
       observeCpu(probeExitCode(completion[2]));
     }
   };
-  return (args) =>
-    x01Time("probe", x01Label(args, false), () => x01Inner(args));
 }
 
 function probeExitCode(

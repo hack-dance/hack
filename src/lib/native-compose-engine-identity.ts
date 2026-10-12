@@ -8,7 +8,6 @@ import {
 } from "./docker-context.ts";
 import { isRecord } from "./guards.ts";
 import { bindNativeComposeEngineConfig } from "./native-compose-engine-config.ts";
-import { x01Mark, x01Time } from "./x01-cost-probe.ts";
 
 const ENGINE_ID = /^[A-Za-z0-9:-]{1,128}$/;
 const AMBIGUOUS_PATH = /[%?#\0\r\n]/;
@@ -301,8 +300,6 @@ type BoundObserver = {
   /** Opaque digest of the exact selection, executable, config and socket binding. */
   readonly key: string;
   readonly read: () => Promise<string>;
-  /** TEMPORARY X04 measurement: closed selection kind label. */
-  readonly kind: string;
 };
 function bindObserver(opts: {
   readonly signal?: AbortSignal;
@@ -373,15 +370,8 @@ function bindObserver(opts: {
         JSON.stringify([selected, binary, config, endpoint, socket, executable])
       )
       .digest("hex");
-    const label = Array.isArray(endpoint.binding)
-      ? endpoint.binding[0]
-      : undefined;
     return Object.freeze({
       key,
-      kind:
-        label === "host" || label === "default" || label === "context"
-          ? label
-          : "other",
       read: async () => {
         if (reading) {
           return refuse();
@@ -479,22 +469,18 @@ export function createNativeComposeEngineIdentityAdmissions(
       return await opts.cli();
     }
     const state = admitted.get(bound.key);
-    const direct = bound.read;
     if (state === true) {
-      return `${JSON.stringify(await x01Time("ident", "direct", direct))}\n`;
+      return `${JSON.stringify(await bound.read())}\n`;
     }
     const text = await opts.cli();
     if (state === undefined) {
       let equal = false;
       try {
         const value: unknown = JSON.parse(text);
-        equal =
-          typeof value === "string" &&
-          value === (await x01Time("ident", "admission", direct));
+        equal = typeof value === "string" && value === (await bound.read());
       } catch {
         equal = false;
       }
-      x01Mark("ident-admit", `${bound.kind}:${equal ? "admitted" : "refused"}`);
       admitted.set(bound.key, equal);
     }
     return text;

@@ -2,7 +2,6 @@ import { constants } from "node:fs";
 import { type FileHandle, lstat, open, realpath } from "node:fs/promises";
 import type { NativeComposeStorageCommandExecutable } from "./native-compose-storage-command-record.ts";
 import { refuseNativeComposeStorageXattr as refuse } from "./native-compose-storage-witness-xattr-codec.ts";
-import { x01Label, x01Mark } from "./x01-cost-probe.ts";
 
 /** Coarser than any supported filesystem timestamp granularity (1 s on HFS+/ext3). */
 const RACY_MS = 2000;
@@ -84,9 +83,6 @@ export function createNativeComposeStorageCommandExecutableReader(
       const size = Number(before.size);
       const started = now();
       const cached = settled.get(canonical);
-      if (cached?.identity === identity) {
-        x01Mark("hash-cached", x01Label([canonical]));
-      }
       const hash =
         cached?.identity === identity ? cached.hash : await digest(file, size);
       const after = await file.stat({ bigint: true }),

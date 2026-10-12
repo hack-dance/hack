@@ -1,8 +1,16 @@
 import { readdir, rm } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 
-import { renderCodexSkill } from "../src/agents/codex-skill.ts";
+import { renderHackCliSkill } from "../src/agents/codex-skill.ts";
 import { renderCursorRules } from "../src/agents/cursor.ts";
+import {
+  FOCUSED_SKILLS,
+  type FocusedSkillName,
+  HACK_CLI_PLUGIN_ROUTING,
+  renderDescriptionFrontmatter,
+  renderFocusedSkill,
+  renderSkillDescription,
+} from "../src/agents/focused-skills.ts";
 import { renderHackInitSkill } from "../src/agents/hack-init-skill.ts";
 import { renderHackInstallSkill } from "../src/agents/install-skill.ts";
 import { renderHackRemoteSkill } from "../src/agents/remote-bootstrap-skill.ts";
@@ -29,6 +37,10 @@ export async function generateAgentPlugins({
       path: resolve(pluginRoot, "skills", "hack-cli", "SKILL.md"),
       content: renderPluginSkill("hack-cli"),
     },
+    ...FOCUSED_SKILLS.map((skill) => ({
+      path: resolve(pluginRoot, "skills", skill.name, "SKILL.md"),
+      content: renderPluginSkill(skill.name),
+    })),
     {
       path: resolve(pluginRoot, "skills", "hack-init", "SKILL.md"),
       content: renderHackInitSkill(),
@@ -147,16 +159,29 @@ export function portableMcpManifest(
 }
 
 /**
- * Render a plugin skill's SKILL.md. The plugin variant of `hack-cli` adds
- * links to its packaged references; standalone installs keep
- * {@link renderCodexSkill} because they ship no references.
+ * Render a plugin skill's SKILL.md with links to its packaged references.
+ *
+ * The plugin `hack-cli` routes branch, env and diagnosis intents to the
+ * focused skills; standalone installs keep `renderCodexSkill` (broad routing,
+ * no references) because they ship neither.
  */
-export function renderPluginSkill(skill: "hack-cli"): string {
-  return withSkillReferenceLinks({ skill, content: renderCodexSkill() });
+export function renderPluginSkill(
+  skill: "hack-cli" | FocusedSkillName
+): string {
+  const content =
+    skill === "hack-cli"
+      ? renderHackCliSkill({
+          descriptionLines: renderDescriptionFrontmatter(
+            renderSkillDescription(HACK_CLI_PLUGIN_ROUTING)
+          ),
+        })
+      : renderFocusedSkill(skill);
+  return withSkillReferenceLinks({ skill, content });
 }
 
 const PLUGIN_SKILLS: readonly PluginSkillName[] = [
   "hack-cli",
+  ...FOCUSED_SKILLS.map((skill) => skill.name),
   "hack-init",
   "hack-install",
   "hack-remote",

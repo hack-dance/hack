@@ -35,6 +35,10 @@ export const HACK_AGENT_INTEGRATION_CLI_VERSION = (
  * - `skill`: Codex SKILL.md (full content).
  * - `rules`: Cursor `.mdc` rules (lean operational subset).
  * - `primer`: `hack agent prime` session primer (concise subset).
+ *
+ * A section with no surface tags renders only where a focused plugin skill
+ * names its id (see `src/agents/focused-skills.ts`); the broad surfaces never
+ * include it, but it still counts toward the content revision.
  */
 export const INSTRUCTION_SECTIONS: readonly InstructionSection[] = [
   {
@@ -197,6 +201,21 @@ export const INSTRUCTION_SECTIONS: readonly InstructionSection[] = [
     ],
   },
   {
+    id: "diagnose",
+    title: "Read-first diagnosis",
+    surfaces: [],
+    bullets: [
+      "Read before changing anything, in this order, and stop once the cause is clear:",
+      "Step 1, `hack ps --json`: which services exist and their state.",
+      "Step 2, `hack doctor --json`: findings and stable E_* codes.",
+      "Step 3, `hack logs --json --no-follow --tail 200`: a finite snapshot; add a service name to narrow it.",
+      "Step 4, `hack env explain <key> --service <service>`: only when a value is suspect; it reports provenance without the value.",
+      "Step 5, `hack global status`: shared proxy, DNS and logging infrastructure.",
+      "Branch on `error.code`, not on message text; the code is the stable contract and the message may change.",
+      "Report what each read showed before proposing a repair.",
+    ],
+  },
+  {
     id: "lifecycle",
     title: "Lifecycle + startup",
     surfaces: ["docs", "skill"],
@@ -245,6 +264,26 @@ export const INSTRUCTION_SECTIONS: readonly InstructionSection[] = [
       "Accepted flags, injection timing and refresh path per command: the command and delivery matrix in Hack's env guide (`docs/env.md` in the Hack repository).",
     ],
   },
+  {
+    id: "env-commands",
+    title: "Env commands",
+    surfaces: [],
+    bullets: [
+      "`hack env list --env <overlay> --service <service>` shows the resolved values for one overlay and scope with secret values masked; add `--json` for a machine-readable view.",
+      "`hack env set <key> <value> --local` writes a non-secret value to the worktree-local override file for the selected overlay; drop `--local` only when the request covers the shared, committed overlay.",
+      "`hack env exec --env <overlay> --service <service> -- <cmd...>` runs one host command with the resolved env injected; use `hack env exec --env <overlay> --shell '<command>'` when `$VAR` must expand inside the child shell, and add `--timeout <seconds>` to bound a non-TTY job.",
+      "`hack env apply --env <overlay> --service <service>` recreates that one service so it picks up changed values.",
+    ],
+  },
+  {
+    id: "env-safety",
+    title: "Env safety",
+    surfaces: [],
+    bullets: [
+      "A secret value never goes in command arguments or agent prompts. Store one with `hack env set <key> --secret` and no value, which the user runs in their own terminal and answers at its hidden prompt.",
+      "`hack env get` and `hack env list --show-secrets` are plaintext sinks: run them only when the user asks for the value itself, never to check that a key exists, and do not repeat their output in replies, logs or files.",
+    ],
+  },
 
   {
     id: "branch-instances",
@@ -255,6 +294,17 @@ export const INSTRUCTION_SECTIONS: readonly InstructionSection[] = [
       "Target one with `--branch <name>` on up/open/logs/down (for example: `hack up --branch <name> --detach`).",
       "Linked worktrees pick a branch instance automatically (see Linked git worktrees).",
       "Containers receive `HACK_RUNTIME_METADATA` plus `HACK_DEV_URL`, `HACK_ALIAS_URL`, and current-service URL fields derived from effective Caddy routes. Use Compose DNS for internal traffic and this metadata for browser-facing links, OAuth callbacks, and webhooks.",
+    ],
+  },
+  {
+    id: "branch-aliases",
+    title: "Branch aliases",
+    surfaces: [],
+    bullets: [
+      "Aliases are entries in `.hack/hack.branches.json`; `hack up --branch <name>` records or refreshes its entry automatically.",
+      "`hack branch add <name> --note <text>` registers one ahead of time, and `hack branch list` shows each alias with its note and last use.",
+      "`hack branch open <name>` opens that branch's routed host; `hack branch open <name> --prefer <auto|alias|dev>` selects which host.",
+      "`hack branch remove <name>` deletes only the alias entry and leaves any running instance alone; stop the instance with `hack down --branch <name>`.",
     ],
   },
 
@@ -341,7 +391,7 @@ export function renderInstructionSections(opts: {
   readonly headingStyle: InstructionHeadingStyle;
 }): string {
   const blocks = sectionsForSurface({ surface: opts.surface }).map((section) =>
-    renderSection({ section, headingStyle: opts.headingStyle })
+    renderInstructionSection({ section, headingStyle: opts.headingStyle })
   );
   return blocks.join("\n\n");
 }
@@ -362,7 +412,12 @@ export function normalizeInstructionText(opts: {
     .trim();
 }
 
-function renderSection(opts: {
+/**
+ * Render one canonical section. The `freshness` section also carries the
+ * content revision line, so any render that includes it can be checked for
+ * drift against the canonical source.
+ */
+export function renderInstructionSection(opts: {
   readonly section: InstructionSection;
   readonly headingStyle: InstructionHeadingStyle;
 }): string {

@@ -21,7 +21,9 @@ run only `hack agent prime`. See [model-policy ownership](reference/agent-client
 | `src/agents/hack-init-skill.ts` | Thin Claude/Codex/plugin adapter that fetches onboarding guidance |
 | `src/agents/init-patterns.ts`, `init-assistant.ts` | Optional init inventory and pattern hints |
 | `src/agents/install-skill.ts`, `remote-bootstrap-skill.ts` | Plugin installation/channel selection and fresh-host/cloud setup skills |
-| `scripts/generate-agent-plugins.ts` | Portable plugin/MCP manifests, three client compatibility manifests, four skills, and Cursor rule |
+| `src/agents/focused-skills.ts` | Plugin `hack-branches`, `hack-env` and `hack-diagnose` skills, composed from canonical section ids, and the plugin `hack-cli` routing description |
+| `src/agents/error-code-reference.ts` | `hack-diagnose` error-code reference, rendered from the exported `HACK_ERROR_CODES` registry in `src/lib/cli-result.ts` |
+| `scripts/generate-agent-plugins.ts` | Portable plugin/MCP manifests, three client compatibility manifests, seven skills, and Cursor rule |
 
 The portable plugin manifest derives identity and effective OpenAI presentation
 from `.codex-plugin/plugin.json`; portable MCP derives from `.mcp.json` with an
@@ -103,6 +105,17 @@ P01 Compose file against the `locked-v1` dependency cache contract, and the P02
 toolchain service against its card. Every `hack` command in a fixture README
 must resolve in CLI_SPEC and name a declared service and profile. These checks
 are static: they do not start containers or qualify the runtime gates.
+
+The focused plugin skills `hack-branches`, `hack-env` and `hack-diagnose` list
+canonical section ids in `src/agents/focused-skills.ts` and carry no prose of
+their own; composition fails on an unknown id. A section with no surface tags
+renders only in the focused skills that name it. Each trigger phrase belongs to
+one plugin skill, and the plugin `hack-cli` description hands branch, env and
+diagnosis intents to them; the standalone `hack-cli` keeps broad routing because
+those installs ship no focused skills. The `hack-diagnose` error-code reference
+renders from `HACK_ERROR_CODES` in `src/lib/cli-result.ts`.
+`tests/focused-skills.test.ts` checks section ids, CLI_SPEC resolution,
+error-code parity and trigger overlap.
 
 Skill candidates and where their patterns live now:
 

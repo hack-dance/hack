@@ -1,10 +1,14 @@
 import { createHash } from "node:crypto";
 
+import { renderErrorCodeReference } from "./error-code-reference.ts";
 import { renderPatternCatalogue } from "./pattern-catalogue.ts";
 
 /** Plugin skills that can carry packaged references. */
 export type PluginSkillName =
   | "hack-cli"
+  | "hack-branches"
+  | "hack-env"
+  | "hack-diagnose"
   | "hack-init"
   | "hack-install"
   | "hack-remote";
@@ -38,6 +42,14 @@ export const SKILL_REFERENCES: readonly SkillReference[] = [
     summary:
       "reusable project patterns with what Hack supports today, the missing contract and its owner.",
     render: renderPatternCatalogue,
+  },
+  {
+    skill: "hack-diagnose",
+    file: "error-codes.md",
+    title: "Error codes",
+    summary:
+      "every stable `--json` error code with its meaning and the first read-only step.",
+    render: renderErrorCodeReference,
   },
 ];
 

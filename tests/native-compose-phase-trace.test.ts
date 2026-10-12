@@ -339,14 +339,8 @@ test(
         "finalize.witnesses",
         "finalize.pending",
         "finalize.pending-check",
-        "finalize.before-complete",
-        "finalize.fresh",
-        "finalize.generation",
-        "finalize.owned",
-        "finalize.remember-storage",
-        "finalize.witnesses",
-        "finalize.pending",
-        "finalize.pending-check",
+        // No route, after hook or file material: no completion step, so no
+        // second finalization pass.
         "finalize.save",
       ]);
       expect(rows.every((row, index) => row.sequence === index + 1)).toBe(true);

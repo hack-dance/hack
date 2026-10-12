@@ -7,6 +7,7 @@ const PHASES = [
   "oneoff.post-remove-fresh",
   "oneoff.post-remove-guard",
   "storage.enroll",
+  "storage.proof",
   "guard.fresh-before",
   "guard.ownership",
   "guard.storage",

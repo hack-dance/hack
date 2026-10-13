@@ -533,6 +533,7 @@ const handleDoctor: CommandHandlerFor<typeof doctorSpec> = async ({
   if (native) {
     return await handleNativeDoctor({
       runtime: native,
+      startDir: resolveDoctorStartDir(args.options.path),
       browser,
       json,
       fix: args.options.fix === true,
@@ -1030,6 +1031,8 @@ function resolveDoctorStartDir(pathOption: string | undefined): string {
 
 async function handleNativeDoctor(opts: {
   readonly runtime: NativeRuntimeSelection;
+  /** Where project discovery starts for project-scoped checks. */
+  readonly startDir: string;
   readonly browser: ReturnType<typeof parseBrowserNetworkOptions>;
   readonly json: boolean;
   readonly fix: boolean;
@@ -1159,6 +1162,18 @@ async function handleNativeDoctor(opts: {
             ...opts.browser,
           }),
         { timeoutMs: 7000 }
+      )
+    );
+  }
+  // The env key audit is runtime-independent; outside a project there is no
+  // key to audit, so native Doctor adds no check there.
+  if (await findProjectContext(opts.startDir).catch(() => null)) {
+    results.push(
+      await runCheck(
+        progress,
+        ENV_KEY_CHECK,
+        () => checkProjectEnvKey({ startDir: opts.startDir }),
+        { timeoutMs: 5000 }
       )
     );
   }
@@ -4690,16 +4705,17 @@ async function runCheck(
   opts?: { readonly timeoutMs?: number }
 ): Promise<TimedCheckResult> {
   const start = Date.now();
+  let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     const res = opts?.timeoutMs
       ? await Promise.race([
           fn(),
-          new Promise<CheckResult>((resolve) =>
-            setTimeout(
+          new Promise<CheckResult>((resolve) => {
+            timer = setTimeout(
               () => resolve({ name, status: "warn", message: "Timed out" }),
               opts.timeoutMs
-            )
-          ),
+            );
+          }),
         ])
       : await fn();
     const durationMs = Date.now() - start;
@@ -4709,5 +4725,8 @@ async function runCheck(
     const message = err instanceof Error ? err.message : "Unknown error";
     const res: CheckResult = { name, status: "error", message };
     return { ...res, durationMs };
+  } finally {
+    // A settled check must not keep the process alive until its deadline.
+    clearTimeout(timer);
   }
 }

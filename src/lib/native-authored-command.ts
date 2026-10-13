@@ -25,6 +25,7 @@ import {
   NativeAuthoredProjectStartError,
   serveNativeAuthoredProject,
 } from "../backends/native-authored-project-start.ts";
+import { resolveNativeAuthoredExecStaleEnvWarning } from "../backends/native-exec-stale-env.ts";
 import { resolveNativeRuntimeSelection } from "../backends/native-runtime-client.ts";
 import { CliUsageError } from "../cli/command.ts";
 import { display } from "../ui/display.ts";
@@ -33,6 +34,11 @@ import { emitCliResult, HackCliError, okResult } from "./cli-result.ts";
 import { resolveComposeStartupTimeoutMs } from "./compose-startup-budget.ts";
 import type { NativeComposeCommandOptions } from "./native-compose-command.ts";
 import type { NativeComposeSelection } from "./native-compose-selection.ts";
+import {
+  createNativeEnvFingerprintEntry,
+  createNativeEnvFingerprintSession,
+  type NativeEnvFingerprintSession,
+} from "./native-env-fingerprint-state.ts";
 
 function unsupported(): never {
   throw new HackCliError({
@@ -352,6 +358,8 @@ type Seams = {
   readonly stop?: typeof stopNativeAuthoredProject;
   readonly exec?: typeof nativeAuthoredProjectExec;
   readonly run?: typeof nativeAuthoredProjectRun;
+  /** Advisory stale-env seam; the CLI always uses the real resolver. */
+  readonly staleEnv?: typeof resolveNativeAuthoredExecStaleEnvWarning;
 };
 type Runtime = NonNullable<ReturnType<typeof resolveNativeRuntimeSelection>>;
 type RunnerInput = {
@@ -406,16 +414,51 @@ async function runStop(input: LifecycleInput): Promise<number> {
   return 0;
 }
 
-/** Fresh foreground selection shared by up and the start half of restart. */
-function startupSelection(
+/** Value-free stale-env bookkeeping for one foreground lifetime (HACK-1140). */
+function envFingerprintSession(
   input: LifecycleInput
+): NativeEnvFingerprintSession {
+  return createNativeEnvFingerprintSession({
+    projectDir: input.scope.projectDir,
+    owner: "authored",
+    branch: input.scope.branch,
+  });
+}
+
+/**
+ * Fresh foreground selection shared by up and the start half of restart. The
+ * delivered env selection is captured as value-free digests and recorded once
+ * the run is ready, so exec can warn when the env resolved later differs.
+ */
+function startupSelection(
+  input: LifecycleInput,
+  envFingerprints: NativeEnvFingerprintSession
 ): Parameters<typeof serveNativeAuthoredProject>[0] {
+  const run = randomBytes(16).toString("hex");
   return {
     runtime: input.runtime,
     scope: input.scope,
-    run: randomBytes(16).toString("hex"),
+    run,
     profiles: input.options.profiles,
     overlay: input.options.overlay,
+    onEnvironmentSelected: (fingerprint) => {
+      envFingerprints.capture(
+        createNativeEnvFingerprintEntry({
+          owner: "authored",
+          run,
+          fingerprint,
+          selection: {
+            ...(input.options.overlay === undefined
+              ? {}
+              : { overlay: input.options.overlay }),
+            ...(input.options.profiles === undefined
+              ? {}
+              : { profiles: input.options.profiles }),
+          },
+        })
+      );
+      return undefined;
+    },
     startupTimeoutMs: input.startupTimeoutMs,
     signal: input.signal,
     forceSignal: input.forceSignal,
@@ -428,30 +471,43 @@ function startupSelection(
       }
     },
     onReady: () => {
+      envFingerprints.commit();
       logger.info({ message: "Project is ready. Press Ctrl-C to stop." });
       return undefined;
     },
   };
 }
 
-function runStart(input: LifecycleInput): Promise<number> {
-  return (input.seams.serve ?? serveNativeAuthoredProject)(
-    startupSelection(input)
-  );
+async function runStart(input: LifecycleInput): Promise<number> {
+  const envFingerprints = envFingerprintSession(input);
+  try {
+    return await (input.seams.serve ?? serveNativeAuthoredProject)(
+      startupSelection(input, envFingerprints)
+    );
+  } finally {
+    await envFingerprints.release();
+  }
 }
 
-function runRestart(input: LifecycleInput): Promise<number> {
-  return restartNativeAuthoredProject({
-    ...startupSelection(input),
-    onStopped: () => {
-      logger.info({
-        message:
-          "Selected native project stopped; persistent data is retained. Starting a fresh foreground generation.",
-      });
-      return undefined;
-    },
-    dependencies: { stop: input.seams.stop, serve: input.seams.serve },
-  });
+async function runRestart(input: LifecycleInput): Promise<number> {
+  const envFingerprints = envFingerprintSession(input);
+  try {
+    return await restartNativeAuthoredProject({
+      ...startupSelection(input, envFingerprints),
+      onStopped: () => {
+        // The stopped run's record is stale; a failed start leaves none.
+        envFingerprints.drop();
+        logger.info({
+          message:
+            "Selected native project stopped; persistent data is retained. Starting a fresh foreground generation.",
+        });
+        return undefined;
+      },
+      dependencies: { stop: input.seams.stop, serve: input.seams.serve },
+    });
+  } finally {
+    await envFingerprints.release();
+  }
 }
 
 /** Two-stage cancellation and the bounded startup budget shared by the lifecycle modes. */
@@ -506,6 +562,7 @@ const RUNNERS: Readonly<Record<Mode, (input: RunnerInput) => Promise<number>>> =
         runtime: input.runtime,
         perform: input.seams.exec ?? nativeAuthoredProjectExec,
         contract: COMMAND_CONTRACTS.exec,
+        beforeOutput: () => warnStaleAuthoredEnv(input),
       }),
     run: (input) =>
       runAuthoredCommand({
@@ -530,12 +587,44 @@ const RUNNERS: Readonly<Record<Mode, (input: RunnerInput) => Promise<number>>> =
   };
 
 /**
+ * Advisory stale-env check for an admitted authored exec (HACK-1140). It reads
+ * the value-free record of the current run and, only when one exists, resolves
+ * the same env selection again. The closed warning goes to stderr ahead of the
+ * captured output; stdout stays the command's output. It never changes the
+ * exec or its exit code.
+ */
+async function warnStaleAuthoredEnv(input: RunnerInput): Promise<void> {
+  let root: string;
+  try {
+    root = await realpath(input.projectRoot);
+  } catch {
+    return;
+  }
+  const warning = await (
+    input.seams.staleEnv ?? resolveNativeAuthoredExecStaleEnvWarning
+  )({
+    scope: {
+      projectRoot: root,
+      projectDir: join(root, ".hack"),
+      nativeHome: input.runtime.home,
+      branch: input.options.instance ?? null,
+    },
+    service: input.options.service ?? "",
+  }).catch(() => null);
+  if (warning) {
+    process.stderr.write(`WARNING: ${warning}\n`);
+  }
+}
+
+/**
  * Explicit native dispatch after exact authored-family and adoption selection.
  * Compose and omitted selections retain their existing owner. Foreground up delegates
  * to the tagged lifetime owner; ordinary down uses its authenticated stop. Foreground
  * restart sequences that same stop before a fresh foreground up with the given
  * selection. Ps and finite service logs observe its saved run; finite exec and
- * one-off run send one command through its live owner;
+ * one-off run send one command through its live owner (a completed exec may
+ * resolve its run's recorded env selection again, for an advisory value-free
+ * stale-env warning only);
  * explicit down --recover uses the stored cleanup owner without input acquisition.
  * Unsupported requests never start input acquisition or runtime work.
  */
@@ -647,6 +736,8 @@ async function runAuthoredCommand(input: {
     readonly signal: AbortSignal;
   }) => Promise<CommandCompletion>;
   readonly contract: CommandContract;
+  /** Advisory step after a validated completion and before any output. */
+  readonly beforeOutput?: () => Promise<void>;
 }): Promise<number> {
   const controller = new AbortController();
   const cancel = () => controller.abort();
@@ -667,6 +758,10 @@ async function runAuthoredCommand(input: {
       workdir: input.options.workdir,
       signal: controller.signal,
     });
+    if (controller.signal.aborted) {
+      return 130;
+    }
+    await input.beforeOutput?.().catch(() => undefined);
     if (controller.signal.aborted) {
       return 130;
     }

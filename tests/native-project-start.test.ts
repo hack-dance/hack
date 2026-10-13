@@ -31,6 +31,10 @@ import {
   verifyHttpsRoutes,
 } from "../src/backends/native-project-start.ts";
 import { NativeRuntimeRequestError } from "../src/backends/native-runtime-client.ts";
+import {
+  type ComposeEnvFingerprintRecord,
+  evaluateComposeServiceEnvFreshness,
+} from "../src/lib/compose-env-fingerprint.ts";
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -288,6 +292,50 @@ test("foreground saves after readiness and retains mapping after confirmed stop"
     "graph inspect",
     "cleanup",
   ]);
+});
+test("foreground reports value-free digests of the selected env after publishing the mapping", async () => {
+  const { opts, events } = await fixture();
+  const seen: { run: string; fingerprint: ComposeEnvFingerprintRecord }[] = [];
+  expect(
+    await startNativeProject({
+      ...opts,
+      onEnvironmentReady: async (selection) => {
+        events.push("environment");
+        seen.push(selection);
+      },
+    })
+  ).toBe(0);
+  expect(events.indexOf("environment")).toBe(events.indexOf("save") + 1);
+  expect(events.indexOf("environment")).toBeLessThan(events.indexOf("ready"));
+  expect(seen).toHaveLength(1);
+  const [selection] = seen;
+  expect(selection?.run).toMatch(/^[a-f0-9]{32}$/);
+  expect(JSON.stringify(selection)).not.toContain("synthetic-secret");
+  expect(JSON.stringify(selection)).not.toContain("TOKEN");
+  expect(
+    evaluateComposeServiceEnvFreshness({
+      record: selection?.fingerprint,
+      service: "web",
+      currentEnv: { TOKEN: "synthetic-secret" },
+    })
+  ).toBe("unchanged");
+  expect(
+    evaluateComposeServiceEnvFreshness({
+      record: selection?.fingerprint,
+      service: "web",
+      currentEnv: { TOKEN: "synthetic-edited" },
+    })
+  ).toBe("changed");
+});
+test("a failing env digest observer never fails foreground startup", async () => {
+  const { opts, events } = await fixture(false);
+  expect(
+    await startNativeProject({
+      ...opts,
+      onEnvironmentReady: () => Promise.reject(new Error("unwritable")),
+    })
+  ).toBe(0);
+  expect(events).toContain("ready");
 });
 test("uncertain foreground failure retains published mapping and cleans lifecycle listeners", async () => {
   const { opts, events } = await fixture();

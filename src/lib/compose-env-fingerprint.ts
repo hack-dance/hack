@@ -158,6 +158,29 @@ export function buildStaleComposeEnvWarning(opts: {
   return `Env for ${subject} changed since it started; this exec uses the env it started with. Run \`${restart}\` to apply the current env.`;
 }
 
+/**
+ * Closed, value-free warning for a stale running native service (HACK-1140).
+ * Native restart is whole-project, so the hint never names a service.
+ *
+ * - `started`: the exec runs with the env the service started with (authored
+ *   native exec through the live owner).
+ * - `fresh`: the exec itself received freshly resolved values, but the running
+ *   service keeps its start-time env (native image-project exec).
+ */
+export function buildStaleNativeEnvWarning(opts: {
+  readonly service: string;
+  readonly exec: "started" | "fresh";
+}): string {
+  const subject = SERVICE_NAME_PATTERN.test(opts.service)
+    ? `service "${opts.service}"`
+    : "this service";
+  const effect =
+    opts.exec === "started"
+      ? "this exec uses the env it started with"
+      : "the running service still uses the env it started with";
+  return `Env for ${subject} changed since it started; ${effect}. Run \`hack restart\` to apply the current env.`;
+}
+
 /** Strict parse of a stored record; anything unexpected is treated as absent. */
 export function parseComposeEnvFingerprintRecord(
   value: unknown

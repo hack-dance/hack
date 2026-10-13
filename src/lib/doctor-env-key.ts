@@ -1,5 +1,5 @@
 import type { Stats } from "node:fs";
-import { lstat, realpath } from "node:fs/promises";
+import { lstat, readdir, realpath } from "node:fs/promises";
 import { join } from "node:path";
 import { PROJECT_ENV_KEY_FILENAME } from "../constants.ts";
 import { resolveGitPrimaryWorktreeRoot } from "./git-worktree.ts";
@@ -92,7 +92,8 @@ const ENV_KEY_ENV_NAME = "HACK_ENV_SECRET_KEY";
 
 /**
  * Build-output and static-hosting directories whose contents are commonly
- * published. A key file directly inside one is reported as exposed.
+ * published. A key file directly inside one is reported as exposed, at the
+ * project root and in nested packages (bounded walk; see below).
  */
 export const ENV_KEY_PUBLIC_ARTIFACT_DIRS = [
   "public",
@@ -105,6 +106,21 @@ export const ENV_KEY_PUBLIC_ARTIFACT_DIRS = [
   ".next",
   ".output",
 ] as const;
+
+/** Directory names the nested public-artifact walk never enters. */
+const ENV_KEY_PUBLIC_WALK_SKIP: ReadonlySet<string> = new Set([
+  "node_modules",
+  ".git",
+]);
+/**
+ * Bounds of the nested public-artifact walk: the deepest artifact directory
+ * considered (the project root is depth 0), the most directories read, and the
+ * most directory entries examined. Past a bound the walk stops; it never
+ * reports a partial path or fails the check.
+ */
+export const ENV_KEY_PUBLIC_WALK_MAX_DEPTH = 6;
+export const ENV_KEY_PUBLIC_WALK_MAX_DIRECTORIES = 4096;
+export const ENV_KEY_PUBLIC_WALK_MAX_ENTRIES = 100_000;
 
 const STATUS_RANK: Record<EnvKeyFindingStatus, number> = {
   ok: 0,
@@ -309,24 +325,128 @@ function portableRelativePath(path: string): string | null {
     : null;
 }
 
+function publicPathFinding(relativeDir: string): EnvKeyFinding {
+  const portable = portableRelativePath(relativeDir);
+  if (portable === null) {
+    return {
+      code: "env-key-public-path",
+      status: "error",
+      subject: `<unprintable-path>/${PROJECT_ENV_KEY_FILENAME}`,
+      remedy:
+        "Remove the key copy from the public artifact directory, then rotate the key: a published copy is not secret.",
+    };
+  }
+  const relative = `${portable}/${PROJECT_ENV_KEY_FILENAME}`;
+  return {
+    code: "env-key-public-path",
+    status: "error",
+    subject: relative,
+    remedy: `rm -- ${relative}, then rotate the key: a published copy is not secret.`,
+  };
+}
+
+/** Locale-independent order so the walk and its findings are stable. */
+function compareNames(left: string, right: string): number {
+  if (left === right) {
+    return 0;
+  }
+  return left < right ? -1 : 1;
+}
+
+const PUBLIC_ARTIFACT_DIR_NAMES: ReadonlySet<string> = new Set(
+  ENV_KEY_PUBLIC_ARTIFACT_DIRS
+);
+
+/**
+ * Project-relative paths (with `/` separators) of public artifact directories
+ * below the top level, such as `apps/web/public` in a monorepo. Bounded
+ * breadth-first walk in name order: symlinked directories are not followed,
+ * `node_modules` and `.git` are skipped, and unreadable directories are
+ * passed over.
+ */
+async function findNestedPublicArtifactDirs(opts: {
+  readonly projectRoot: string;
+}): Promise<readonly string[]> {
+  const found: string[] = [];
+  const queue: { readonly relative: string; readonly depth: number }[] = [
+    { relative: "", depth: 0 },
+  ];
+  let index = 0;
+  let entries = 0;
+  while (
+    index < queue.length &&
+    index < ENV_KEY_PUBLIC_WALK_MAX_DIRECTORIES &&
+    entries < ENV_KEY_PUBLIC_WALK_MAX_ENTRIES
+  ) {
+    const current = queue[index++];
+    if (!current) {
+      break;
+    }
+    const children = await walkableChildDirectories(
+      join(opts.projectRoot, current.relative)
+    );
+    entries += children.entries;
+    const depth = current.depth + 1;
+    for (const name of children.names) {
+      const relative = current.relative ? `${current.relative}/${name}` : name;
+      if (depth >= 2 && PUBLIC_ARTIFACT_DIR_NAMES.has(name)) {
+        found.push(relative);
+      }
+      if (depth < ENV_KEY_PUBLIC_WALK_MAX_DEPTH) {
+        queue.push({ relative, depth });
+      }
+    }
+  }
+  return found;
+}
+
+/**
+ * Sorted names of the child directories the walk may enter (real directories,
+ * not symlinks, outside the skip list) and the number of entries read; an
+ * unreadable directory has none.
+ */
+async function walkableChildDirectories(path: string): Promise<{
+  readonly names: readonly string[];
+  readonly entries: number;
+}> {
+  try {
+    const children = await readdir(path, { withFileTypes: true });
+    return {
+      entries: children.length,
+      names: children
+        .filter(
+          (child) =>
+            child.isDirectory() && !ENV_KEY_PUBLIC_WALK_SKIP.has(child.name)
+        )
+        .map((child) => child.name)
+        .sort(compareNames),
+    };
+  } catch {
+    return { names: [], entries: 0 };
+  }
+}
+
 async function inspectPublicArtifactCopies(opts: {
   readonly projectRoot: string;
 }): Promise<readonly EnvKeyFinding[]> {
   const findings: EnvKeyFinding[] = [];
-  for (const dir of ENV_KEY_PUBLIC_ARTIFACT_DIRS) {
-    const relative = `${dir}/${PROJECT_ENV_KEY_FILENAME}`;
+  const present = async (relativeDir: string) =>
     // An entry that exists but cannot be inspected still counts as present.
-    const present = await lstatOrNull(join(opts.projectRoot, relative)).then(
+    await lstatOrNull(
+      join(opts.projectRoot, relativeDir, PROJECT_ENV_KEY_FILENAME)
+    ).then(
       (stats) => stats !== null,
       () => true
     );
-    if (present) {
-      findings.push({
-        code: "env-key-public-path",
-        status: "error",
-        subject: relative,
-        remedy: `rm -- ${relative}, then rotate the key: a published copy is not secret.`,
-      });
+  for (const dir of ENV_KEY_PUBLIC_ARTIFACT_DIRS) {
+    if (await present(dir)) {
+      findings.push(publicPathFinding(dir));
+    }
+  }
+  const nested = await findNestedPublicArtifactDirs(opts).catch(() => []);
+  for (const dir of nested) {
+    if (await present(dir)) {
+      findings.push(publicPathFinding(dir));
     }
   }
   return findings;

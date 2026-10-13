@@ -77,6 +77,7 @@ export type NativeAuthoredProjectRestartOptions = {
   readonly onReady?: ServeOptions["onReady"];
   readonly onExitDiagnostic?: ServeOptions["onExitDiagnostic"];
   readonly onHookDiagnostic?: ServeOptions["onHookDiagnostic"];
+  readonly onEnvironmentSelected?: ServeOptions["onEnvironmentSelected"];
   /** Execution seam for sequencing controls; the CLI always uses the real owners. */
   readonly dependencies?: Partial<Dependencies>;
 };
@@ -167,6 +168,7 @@ export async function restartNativeAuthoredProject(
       onReady: opts.onReady,
       onExitDiagnostic: opts.onExitDiagnostic,
       onHookDiagnostic: opts.onHookDiagnostic,
+      onEnvironmentSelected: opts.onEnvironmentSelected,
     });
   } catch (error: unknown) {
     const startup =

@@ -294,6 +294,123 @@ describe("env key doctor diagnostic", () => {
     ]);
   });
 
+  test("nested monorepo public artifact copies are errors with project-relative subjects", async () => {
+    const root = await tempProject();
+    const key = generatedKey();
+    await writeKey({ path: join(root, KEY_FILE), text: key, mode: 0o600 });
+    for (const dir of [
+      ["apps", "web", "public"],
+      ["packages", "site", "dist"],
+      ["apps", "docs", ".next"],
+    ]) {
+      await mkdir(join(root, ...dir), { recursive: true });
+      await writeKey({
+        path: join(root, ...dir, KEY_FILE),
+        text: key,
+        mode: 0o600,
+      });
+    }
+
+    const inspection = await inspect(root);
+
+    expect(inspection.status).toBe("error");
+    expect(
+      inspection.findings.map((finding) => [finding.code, finding.subject])
+    ).toEqual([
+      ["env-key-public-path", `apps/docs/.next/${KEY_FILE}`],
+      ["env-key-public-path", `apps/web/public/${KEY_FILE}`],
+      ["env-key-public-path", `packages/site/dist/${KEY_FILE}`],
+    ]);
+    expect(inspection.findings[1]?.remedy).toBe(
+      `rm -- apps/web/public/${KEY_FILE}, then rotate the key: a published copy is not secret.`
+    );
+    expectValueFree({ output: serialized(inspection), root, secrets: [key] });
+  });
+
+  test("negative control: the nested walk skips node_modules, .git and symlinked directories", async () => {
+    const root = await tempProject();
+    const key = generatedKey();
+    await writeKey({ path: join(root, KEY_FILE), text: key, mode: 0o600 });
+    for (const dir of [
+      ["node_modules", "pkg", "dist"],
+      [".git", "public"],
+      ["apps", "web", "node_modules", "lib", "public"],
+      ["outside", "public"],
+    ]) {
+      await mkdir(join(root, ...dir), { recursive: true });
+      await writeKey({
+        path: join(root, ...dir, KEY_FILE),
+        text: key,
+        mode: 0o600,
+      });
+    }
+    await mkdir(join(root, "apps", "linked"), { recursive: true });
+    await symlink(
+      join(root, "outside", "public"),
+      join(root, "apps", "linked", "public")
+    );
+    // A key directly in a non-artifact directory is not a public copy.
+    await writeKey({
+      path: join(root, "apps", "web", KEY_FILE),
+      text: key,
+      mode: 0o600,
+    });
+
+    const inspection = await inspect(root);
+
+    expect(
+      inspection.findings.map((finding) => [finding.code, finding.subject])
+    ).toEqual([["env-key-public-path", `outside/public/${KEY_FILE}`]]);
+  });
+
+  test("the nested walk is depth bounded", async () => {
+    const root = await tempProject();
+    const key = generatedKey();
+    await writeKey({ path: join(root, KEY_FILE), text: key, mode: 0o600 });
+    const deepest = ["a", "b", "c", "d", "e", "public"];
+    const tooDeep = ["a", "b", "c", "d", "e", "f", "public"];
+    for (const dir of [deepest, tooDeep]) {
+      await mkdir(join(root, ...dir), { recursive: true });
+      await writeKey({
+        path: join(root, ...dir, KEY_FILE),
+        text: key,
+        mode: 0o600,
+      });
+    }
+
+    const inspection = await inspect(root);
+
+    expect(inspection.findings.map((finding) => finding.subject)).toEqual([
+      `a/b/c/d/e/public/${KEY_FILE}`,
+    ]);
+  });
+
+  test("an unprintable nested path is reported without echoing it", async () => {
+    const root = await tempProject();
+    const key = generatedKey();
+    await writeKey({ path: join(root, KEY_FILE), text: key, mode: 0o600 });
+    const odd = "we ird$(x)";
+    await mkdir(join(root, odd, "public"), { recursive: true });
+    await writeKey({
+      path: join(root, odd, "public", KEY_FILE),
+      text: key,
+      mode: 0o600,
+    });
+
+    const inspection = await inspect(root);
+
+    expect(inspection.findings).toEqual([
+      {
+        code: "env-key-public-path",
+        status: "error",
+        subject: `<unprintable-path>/${KEY_FILE}`,
+        remedy:
+          "Remove the key copy from the public artifact directory, then rotate the key: a published copy is not secret.",
+      },
+    ]);
+    expect(serialized(inspection)).not.toContain(odd);
+  });
+
   test("findings are ordered most severe first", async () => {
     const root = await tempProject();
     await writeKey({ path: join(root, KEY_FILE), text: "short", mode: 0o644 });

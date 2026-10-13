@@ -1,5 +1,9 @@
 import { createHash } from "node:crypto";
 import { isAbsolute } from "node:path";
+import {
+  type ComposeEnvFingerprintRecord,
+  withComposeServiceEnvFingerprints,
+} from "../lib/compose-env-fingerprint.ts";
 import { deepFreeze } from "../lib/guards.ts";
 import { NativeComposeHostHookError } from "../lib/native-compose-host-contract.ts";
 import { NativeConfigCompilerError } from "../lib/native-config-compiler.ts";
@@ -162,7 +166,40 @@ type Options = {
   ) => undefined;
   readonly onExitDiagnostic?: (diagnostic: NativeExitDiagnostic) => void;
   readonly onHookDiagnostic?: (event: NativeHookDiagnostic) => void;
+  /**
+   * Advisory stale-env bookkeeping (HACK-1140): value-free digests of the
+   * managed selection delivered to every selected workload, observed
+   * synchronously before the graph starts. Grants no authority; a failing
+   * observer never fails startup.
+   */
+  readonly onEnvironmentSelected?: (
+    fingerprint: ComposeEnvFingerprintRecord
+  ) => undefined;
 };
+
+type SelectedEnvironment = Readonly<
+  Record<string, Readonly<Record<string, string>>>
+>;
+
+function observeSelectedEnvironment(
+  opts: Options,
+  selected: SelectedEnvironment
+): void {
+  if (!opts.onEnvironmentSelected) {
+    return;
+  }
+  try {
+    opts.onEnvironmentSelected(
+      withComposeServiceEnvFingerprints({
+        existing: undefined,
+        services: Object.keys(selected),
+        envByService: selected,
+      })
+    );
+  } catch {
+    // Advisory only; startup proceeds without a stale-env record.
+  }
+}
 
 function observedReady(
   opts: Options,
@@ -211,31 +248,38 @@ function matchingReview(
   return review;
 }
 
-/** Project only compiler-selected managed source keys. Rust owns destination remapping. */
-async function privateDelivery(
-  inputs: Inputs,
-  review: NativeAuthoredReview,
-  lifetimeMs: () => number
-): Promise<Buffer | undefined> {
-  const sources = Object.entries(inputs.result.environment_plan.workloads)
-    .map(([name, bindings]) => ({
-      name,
-      keys: [
-        ...new Set(
-          Object.values(bindings).flatMap((binding) =>
-            binding.kind === "managed" ? [binding.key] : []
-          )
-        ),
-      ],
-    }))
-    .filter(({ keys }) => keys.length > 0);
-  if (sources.length === 0) {
-    return undefined;
-  }
-  const values = await inputs.resolveManagedValues();
-  const services = Object.fromEntries(
-    sources.map(({ name, keys }) => {
-      const selected = values[name];
+type EnvironmentPlan = Inputs["result"]["environment_plan"];
+
+/** Compiler-selected managed source keys per workload; Rust owns destination remapping. */
+function managedSourceKeys(
+  environmentPlan: EnvironmentPlan
+): readonly { readonly name: string; readonly keys: readonly string[] }[] {
+  return Object.entries(environmentPlan.workloads).map(([name, bindings]) => ({
+    name,
+    keys: [
+      ...new Set(
+        Object.values(bindings).flatMap((binding) =>
+          binding.kind === "managed" ? [binding.key] : []
+        )
+      ),
+    ],
+  }));
+}
+
+/**
+ * The managed values startup delivers, per selected workload: only
+ * compiler-selected source keys. Workloads without managed keys select an
+ * empty set. Values stay in memory; callers digest or deliver them privately.
+ */
+export function selectNativeAuthoredManagedEnvironment(opts: {
+  readonly environmentPlan: EnvironmentPlan;
+  readonly values: Readonly<
+    Record<string, Readonly<Record<string, string>> | undefined>
+  >;
+}): Readonly<Record<string, Readonly<Record<string, string>>>> {
+  return Object.fromEntries(
+    managedSourceKeys(opts.environmentPlan).map(({ name, keys }) => {
+      const selected = opts.values[name];
       return [
         name,
         Object.fromEntries(
@@ -253,6 +297,32 @@ async function privateDelivery(
         ),
       ];
     })
+  );
+}
+
+/** Private delivery of the selected managed values, or none when nothing is selected. */
+async function privateDelivery(
+  inputs: Inputs,
+  review: NativeAuthoredReview,
+  lifetimeMs: () => number,
+  observe: (environment: SelectedEnvironment) => void
+): Promise<Buffer | undefined> {
+  const environmentPlan = inputs.result.environment_plan;
+  const managed = managedSourceKeys(environmentPlan).some(
+    ({ keys }) => keys.length > 0
+  );
+  const selected = selectNativeAuthoredManagedEnvironment({
+    environmentPlan,
+    values: managed ? await inputs.resolveManagedValues() : {},
+  });
+  observe(selected);
+  if (!managed) {
+    return undefined;
+  }
+  const services = Object.fromEntries(
+    Object.entries(selected).filter(
+      ([, values]) => Object.keys(values).length > 0
+    )
   );
   const lifetime = Math.floor(lifetimeMs() / 1000);
   if (lifetime < 1 || lifetime > 300) {
@@ -933,7 +1003,12 @@ export async function serveNativeAuthoredProject(
           attempt = { source, start: await admission.reserve({ review }) };
           outcome = "retained";
           stage = "runtime";
-          payload = await privateDelivery(inputs, review, remaining);
+          payload = await privateDelivery(
+            inputs,
+            review,
+            remaining,
+            (selected) => observeSelectedEnvironment(opts, selected)
+          );
           await inputs.assertFresh();
           await storageTool?.assertFresh();
           await source.assertFresh();

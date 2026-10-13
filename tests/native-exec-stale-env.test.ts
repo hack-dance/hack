@@ -675,16 +675,45 @@ describe("authored native command wiring", () => {
     };
   }
 
+  /**
+   * Capture process.stderr writes and Bun.write output in one ordered log.
+   * Bun.write entries name their destination so stdout and stderr stay
+   * distinguishable.
+   */
+  function orderedOutput() {
+    const events: string[] = [];
+    const err = spyOn(process.stderr, "write").mockImplementation((chunk) => {
+      events.push(`process.stderr:${String(chunk)}`);
+      return true;
+    });
+    const writes = spyOn(Bun, "write").mockImplementation(
+      async (destination, data) => {
+        const target =
+          destination === Bun.stdout
+            ? "Bun.stdout"
+            : destination === Bun.stderr
+              ? "Bun.stderr"
+              : "other";
+        events.push(
+          `${target}:${new TextDecoder().decode(data as Uint8Array)}`
+        );
+        return 0;
+      }
+    );
+    return {
+      events,
+      restore: () => {
+        err.mockRestore();
+        writes.mockRestore();
+      },
+    };
+  }
+
   macTest(
     "exec writes the warning to stderr before the command's output",
     async () => {
       const selected = await fixture();
-      const stderr: string[] = [];
-      const err = spyOn(process.stderr, "write").mockImplementation((chunk) => {
-        stderr.push(String(chunk));
-        return true;
-      });
-      const writes = spyOn(Bun, "write").mockImplementation(async () => 0);
+      const io = orderedOutput();
       let code: number | null;
       try {
         code = await tryNativeAuthoredCommand({
@@ -702,8 +731,8 @@ describe("authored native command wiring", () => {
             service: "web",
             container: "f".repeat(64),
             exitCode: 0,
-            stdout: new Uint8Array(),
-            stderr: new Uint8Array(),
+            stdout: new TextEncoder().encode("command-out\n"),
+            stderr: new TextEncoder().encode("command-err\n"),
             truncated: false,
           }),
           staleEnv: async (request) =>
@@ -713,12 +742,13 @@ describe("authored native command wiring", () => {
             }),
         });
       } finally {
-        err.mockRestore();
-        writes.mockRestore();
+        io.restore();
       }
       expect(code).toBe(0);
-      expect(stderr).toEqual([
-        `WARNING: ${buildStaleNativeEnvWarning({ service: "web", exec: "started" })}\n`,
+      expect(io.events).toEqual([
+        `process.stderr:WARNING: ${buildStaleNativeEnvWarning({ service: "web", exec: "started" })}\n`,
+        "Bun.stdout:command-out\n",
+        "Bun.stderr:command-err\n",
       ]);
     }
   );
@@ -740,12 +770,9 @@ describe("authored native command wiring", () => {
     "Ctrl-C during the advisory check returns 130 without waiting for it or writing output",
     async () => {
       const selected = await fixture();
-      const stderr: string[] = [];
-      const err = spyOn(process.stderr, "write").mockImplementation((chunk) => {
-        stderr.push(String(chunk));
-        return true;
-      });
-      const writes = spyOn(Bun, "write").mockImplementation(async () => 0);
+      // mockRestore() clears a spy's recorded calls, so the output is
+      // captured into this log rather than read back from the spies.
+      const io = orderedOutput();
       const received: { signal?: AbortSignal } = {};
       let code: number | null;
       try {
@@ -767,13 +794,11 @@ describe("authored native command wiring", () => {
           },
         });
       } finally {
-        err.mockRestore();
-        writes.mockRestore();
+        io.restore();
       }
       expect(code).toBe(130);
       expect(received.signal?.aborted).toBe(true);
-      expect(writes).not.toHaveBeenCalled();
-      expect(stderr).toEqual([]);
+      expect(io.events).toEqual([]);
     },
     2000
   );

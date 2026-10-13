@@ -16,8 +16,10 @@ import {
 } from "../src/commands/doctor.ts";
 import {
   classifyEnvKeyText,
+  ENV_KEY_PUBLIC_WALK_MAX_DIRECTORIES,
   type EnvKeyCandidate,
   type EnvKeyInspection,
+  findNestedPublicArtifactDirs,
   gitListTrackedKeyPaths,
   type InspectEnvKeyOptions,
   inspectProjectEnvKey,
@@ -384,6 +386,76 @@ describe("env key doctor diagnostic", () => {
       `a/b/c/d/e/public/${KEY_FILE}`,
     ]);
   });
+
+  test("the nested walk stops after its directory bound", async () => {
+    const root = await tempProject();
+    for (const pkg of ["a", "b", "c"]) {
+      await mkdir(join(root, pkg, "public"), { recursive: true });
+    }
+
+    // Breadth-first in name order: the root, then a, b and c.
+    expect(await findNestedPublicArtifactDirs({ projectRoot: root })).toEqual([
+      "a/public",
+      "b/public",
+      "c/public",
+    ]);
+    expect(
+      await findNestedPublicArtifactDirs({
+        projectRoot: root,
+        limits: { maxDirectories: 3 },
+      })
+    ).toEqual(["a/public", "b/public"]);
+  });
+
+  test("the nested walk stops after its entry bound, counting every entry read", async () => {
+    const root = await tempProject();
+    for (const pkg of ["a", "b"]) {
+      await mkdir(join(root, pkg, "public"), { recursive: true });
+    }
+    for (const file of ["f1", "f2", "f3"]) {
+      await writeFile(join(root, file), "x");
+    }
+
+    // The root holds five entries; reading a adds one more.
+    expect(
+      await findNestedPublicArtifactDirs({
+        projectRoot: root,
+        limits: { maxEntries: 6 },
+      })
+    ).toEqual(["a/public"]);
+    expect(
+      await findNestedPublicArtifactDirs({
+        projectRoot: root,
+        limits: { maxEntries: 7 },
+      })
+    ).toEqual(["a/public", "b/public"]);
+  });
+
+  test("the default directory bound is the documented 4096", async () => {
+    expect(ENV_KEY_PUBLIC_WALK_MAX_DIRECTORIES).toBe(4096);
+    const root = await tempProject();
+    const key = generatedKey();
+    await writeKey({ path: join(root, KEY_FILE), text: key, mode: 0o600 });
+    // The root is directory 1; "zz" sorts after the fillers.
+    const fillers = ENV_KEY_PUBLIC_WALK_MAX_DIRECTORIES - 2;
+    for (let index = 0; index < fillers; index++) {
+      await mkdir(join(root, `a${String(index).padStart(4, "0")}`));
+    }
+    await mkdir(join(root, "zz", "public"), { recursive: true });
+    await writeKey({
+      path: join(root, "zz", "public", KEY_FILE),
+      text: key,
+      mode: 0o600,
+    });
+
+    expect(
+      (await inspect(root)).findings.map((finding) => finding.subject)
+    ).toEqual([`zz/public/${KEY_FILE}`]);
+
+    // One more filler pushes "zz" past the bound: it is never read.
+    await mkdir(join(root, "a9999"));
+    expect(codes(await inspect(root))).toEqual(["env-key-ok"]);
+  }, 30_000);
 
   test("an unprintable nested path is reported without echoing it", async () => {
     const root = await tempProject();

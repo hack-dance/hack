@@ -247,7 +247,7 @@ into a host command, and `--target` on env and host commands chooses the `host` 
 | `hack down` | `--env`, `--target` | At teardown, for lifecycle down hooks only; omitted reuses a named overlay recorded for the running stack, else the configured default. | None; nothing is delivered to containers. | The native runtime backend refuses `--env`. |
 | `hack restart` | `--env`, `--target` | When services are recreated; omitted reuses a named overlay recorded for the running stack, else the configured default, and an explicit `--env` (including `base`) wins. | This is the refresh path for the whole stack or the named services. | Authored native projects receive the same selection before dispatch. |
 | `hack run` | `--env` | Per invocation, for the new one-off container. | Each run resolves again. | The native runtime backend refuses `--env`; restart with the selection first. |
-| `hack exec` | `--env` | Checked at invocation against the env recorded for the running stack; the command runs with the env the container was created with. Compose and native exec warn on stderr when the service's resolved env changed since it started. | `hack restart <service>` (or `hack restart --env <name>`); native projects restart as a whole with `hack restart` | Compose refuses when the requested env differs from the env recorded for the running stack; the native runtime backend refuses `--env`. |
+| `hack exec` | `--env` | Checked at invocation against the env recorded for the running stack; the command runs with the env the container was created with. Compose exec and native-runtime exec (Compose-file and authored native projects) warn on stderr when the service's resolved env changed since it started. | `hack restart <service>` (or `hack restart --env <name>`); native projects restart as a whole with `hack restart` | Compose refuses when the requested env differs from the env recorded for the running stack; the native runtime backend refuses `--env`. |
 | `hack env list` | `--env`, `--service` | Per invocation, read-only; secret values are masked unless `--show-secrets`. | Not needed. | Reads files; no runtime required. |
 | `hack env get` | `--env`, `--service` | Per invocation; prints exactly one plaintext value to stdout. | Not needed. | Reads files; refuses native project inputs. |
 | `hack env explain` | `--env`, `--service`, `--target` | Per invocation; reports source, precedence and delivery without the value. | Not needed. | Reads files; no runtime required. |
@@ -280,7 +280,7 @@ service whose last targeted restart failed produce no warning. `hack up <service
 `hack restart <service>` and `hack env apply --service <service>` refresh only the
 named services' digests.
 
-Native projects run the same check. The foreground `hack up` or `hack restart` records
+Projects on the native runtime backend run the same check. The foreground `hack up` or `hack restart` records
 value-free digests of the env selection it delivered once the run is ready, in
 `.hack/.internal/native-env-fingerprints/` (one file per instance, mode 0600). The
 record is bound to that run and removed when the foreground ends. `hack exec` resolves
@@ -292,7 +292,16 @@ whole-project. An image-project exec receives freshly resolved values itself, so
 warning says the running service still uses the env it started with. A restart drops
 the record once the previous run stops, so a failed restart produces no warning. A
 record from another run, a missing record, or any resolution failure produces no
-warning.
+warning. An authored-project check is bounded: after five seconds without a result
+it is skipped and the command's output and exit code follow as usual. Ctrl-C during
+the check ends the command with exit code 130 without waiting for it.
+
+Two exec paths do not run this check yet: an authored `.hack/hack.project.json`
+project on the Compose backend (see
+[native configuration with Compose](reference/native-compose-commands.md)), and an
+existing Compose project switched with
+[`hack config adopt`](reference/native-compose-adoption.md), whose exec runs in the
+retained containers.
 
 MCP tools accept no env selector. They run the CLI without `--env`, so each row's
 omitted-`--env` behavior applies.

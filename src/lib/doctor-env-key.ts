@@ -364,9 +364,17 @@ const PUBLIC_ARTIFACT_DIR_NAMES: ReadonlySet<string> = new Set(
  * `node_modules` and `.git` are skipped, and unreadable directories are
  * passed over.
  */
-async function findNestedPublicArtifactDirs(opts: {
+export async function findNestedPublicArtifactDirs(opts: {
   readonly projectRoot: string;
+  /** Test seam for the walk bounds; production uses the documented constants. */
+  readonly limits?: {
+    readonly maxDirectories?: number;
+    readonly maxEntries?: number;
+  };
 }): Promise<readonly string[]> {
+  const maxDirectories =
+    opts.limits?.maxDirectories ?? ENV_KEY_PUBLIC_WALK_MAX_DIRECTORIES;
+  const maxEntries = opts.limits?.maxEntries ?? ENV_KEY_PUBLIC_WALK_MAX_ENTRIES;
   const found: string[] = [];
   const queue: { readonly relative: string; readonly depth: number }[] = [
     { relative: "", depth: 0 },
@@ -375,8 +383,8 @@ async function findNestedPublicArtifactDirs(opts: {
   let entries = 0;
   while (
     index < queue.length &&
-    index < ENV_KEY_PUBLIC_WALK_MAX_DIRECTORIES &&
-    entries < ENV_KEY_PUBLIC_WALK_MAX_ENTRIES
+    index < maxDirectories &&
+    entries < maxEntries
   ) {
     const current = queue[index++];
     if (!current) {
@@ -443,7 +451,9 @@ async function inspectPublicArtifactCopies(opts: {
       findings.push(publicPathFinding(dir));
     }
   }
-  const nested = await findNestedPublicArtifactDirs(opts).catch(() => []);
+  const nested = await findNestedPublicArtifactDirs({
+    projectRoot: opts.projectRoot,
+  }).catch(() => []);
   for (const dir of nested) {
     if (await present(dir)) {
       findings.push(publicPathFinding(dir));

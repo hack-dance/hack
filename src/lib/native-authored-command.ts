@@ -360,6 +360,8 @@ type Seams = {
   readonly run?: typeof nativeAuthoredProjectRun;
   /** Advisory stale-env seam; the CLI always uses the real resolver. */
   readonly staleEnv?: typeof resolveNativeAuthoredExecStaleEnvWarning;
+  /** Test seam for the advisory bound; the CLI always uses the default. */
+  readonly staleEnvTimeoutMs?: number;
 };
 type Runtime = NonNullable<ReturnType<typeof resolveNativeRuntimeSelection>>;
 type RunnerInput = {
@@ -562,7 +564,7 @@ const RUNNERS: Readonly<Record<Mode, (input: RunnerInput) => Promise<number>>> =
         runtime: input.runtime,
         perform: input.seams.exec ?? nativeAuthoredProjectExec,
         contract: COMMAND_CONTRACTS.exec,
-        beforeOutput: () => warnStaleAuthoredEnv(input),
+        beforeOutput: (signal) => warnStaleAuthoredEnv(input, signal),
       }),
     run: (input) =>
       runAuthoredCommand({
@@ -587,33 +589,81 @@ const RUNNERS: Readonly<Record<Mode, (input: RunnerInput) => Promise<number>>> =
   };
 
 /**
+ * Upper bound on the advisory stale-env resolution of one authored exec. Past
+ * it, or on cancellation, the exec output is written without a warning.
+ */
+export const NATIVE_AUTHORED_EXEC_STALE_ENV_TIMEOUT_MS = 5000;
+
+/**
  * Advisory stale-env check for an admitted authored exec (HACK-1140). It reads
  * the value-free record of the current run and, only when one exists, resolves
- * the same env selection again. The closed warning goes to stderr ahead of the
- * captured output; stdout stays the command's output. It never changes the
- * exec or its exit code.
+ * the same env selection again. The resolution receives the exec's cancellation
+ * signal bounded by {@link NATIVE_AUTHORED_EXEC_STALE_ENV_TIMEOUT_MS}, and the
+ * check settles as soon as that signal aborts even if the resolution has not.
+ * The closed warning goes to stderr ahead of the captured output; stdout stays
+ * the command's output. It never changes the exec or its exit code.
  */
-async function warnStaleAuthoredEnv(input: RunnerInput): Promise<void> {
+async function warnStaleAuthoredEnv(
+  input: RunnerInput,
+  signal: AbortSignal
+): Promise<void> {
+  const bounded = AbortSignal.any([
+    signal,
+    AbortSignal.timeout(
+      input.seams.staleEnvTimeoutMs ?? NATIVE_AUTHORED_EXEC_STALE_ENV_TIMEOUT_MS
+    ),
+  ]);
   let root: string;
   try {
     root = await realpath(input.projectRoot);
   } catch {
     return;
   }
-  const warning = await (
-    input.seams.staleEnv ?? resolveNativeAuthoredExecStaleEnvWarning
-  )({
-    scope: {
-      projectRoot: root,
-      projectDir: join(root, ".hack"),
-      nativeHome: input.runtime.home,
-      branch: input.options.instance ?? null,
-    },
-    service: input.options.service ?? "",
-  }).catch(() => null);
+  const warning = await settleBeforeAbort(
+    (input.seams.staleEnv ?? resolveNativeAuthoredExecStaleEnvWarning)({
+      scope: {
+        projectRoot: root,
+        projectDir: join(root, ".hack"),
+        nativeHome: input.runtime.home,
+        branch: input.options.instance ?? null,
+      },
+      service: input.options.service ?? "",
+      signal: bounded,
+    }),
+    bounded
+  );
   if (warning) {
     process.stderr.write(`WARNING: ${warning}\n`);
   }
+}
+
+/**
+ * The advisory value, or null once `signal` aborts or the work fails. The
+ * abandoned work keeps its own signal and settles on its own; nothing waits
+ * for it.
+ */
+function settleBeforeAbort(
+  work: Promise<string | null>,
+  signal: AbortSignal
+): Promise<string | null> {
+  if (signal.aborted) {
+    work.catch(() => undefined);
+    return Promise.resolve(null);
+  }
+  return new Promise((resolve) => {
+    const onAbort = () => resolve(null);
+    signal.addEventListener("abort", onAbort, { once: true });
+    work.then(
+      (value) => {
+        signal.removeEventListener("abort", onAbort);
+        resolve(value);
+      },
+      () => {
+        signal.removeEventListener("abort", onAbort);
+        resolve(null);
+      }
+    );
+  });
 }
 
 /**
@@ -736,8 +786,12 @@ async function runAuthoredCommand(input: {
     readonly signal: AbortSignal;
   }) => Promise<CommandCompletion>;
   readonly contract: CommandContract;
-  /** Advisory step after a validated completion and before any output. */
-  readonly beforeOutput?: () => Promise<void>;
+  /**
+   * Advisory step after a validated completion and before any output. It
+   * receives the command's cancellation signal and must settle promptly once
+   * that signal aborts.
+   */
+  readonly beforeOutput?: (signal: AbortSignal) => Promise<void>;
 }): Promise<number> {
   const controller = new AbortController();
   const cancel = () => controller.abort();
@@ -761,7 +815,7 @@ async function runAuthoredCommand(input: {
     if (controller.signal.aborted) {
       return 130;
     }
-    await input.beforeOutput?.().catch(() => undefined);
+    await input.beforeOutput?.(controller.signal).catch(() => undefined);
     if (controller.signal.aborted) {
       return 130;
     }

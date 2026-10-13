@@ -219,8 +219,20 @@ describe("native env fingerprint record", () => {
       })
     );
     restart.commit();
+    // The committed write is queued off the synchronous observer.
+    let current = await loadNativeEnvFingerprint(scope);
+    for (
+      let attempt = 0;
+      attempt < 50 && current?.run !== OTHER_RUN;
+      attempt++
+    ) {
+      await Bun.sleep(5);
+      current = await loadNativeEnvFingerprint(scope);
+    }
+    expect(current?.run).toBe(OTHER_RUN);
     // The previous foreground exits late; its release must not remove ours.
     await previous.release();
+    expect((await loadNativeEnvFingerprint(scope))?.run).toBe(OTHER_RUN);
     await restart.release();
     expect(await loadNativeEnvFingerprint(scope)).toBeNull();
   });
@@ -709,6 +721,167 @@ describe("authored native command wiring", () => {
         `WARNING: ${buildStaleNativeEnvWarning({ service: "web", exec: "started" })}\n`,
       ]);
     }
+  );
+
+  function execCompletion(stdout: string) {
+    return async () => ({
+      backend: "native" as const,
+      run: RUN,
+      service: "web",
+      container: "f".repeat(64),
+      exitCode: 4,
+      stdout: new TextEncoder().encode(stdout),
+      stderr: new Uint8Array(),
+      truncated: false,
+    });
+  }
+
+  macTest(
+    "Ctrl-C during the advisory check returns 130 without waiting for it or writing output",
+    async () => {
+      const selected = await fixture();
+      const stderr: string[] = [];
+      const err = spyOn(process.stderr, "write").mockImplementation((chunk) => {
+        stderr.push(String(chunk));
+        return true;
+      });
+      const writes = spyOn(Bun, "write").mockImplementation(async () => 0);
+      const received: { signal?: AbortSignal } = {};
+      let code: number | null;
+      try {
+        code = await tryNativeAuthoredCommand({
+          selected: selected.selected,
+          env: selected.env,
+          options: {
+            cwd: selected.root,
+            operation: "exec",
+            service: "web",
+            command: ["printenv"],
+          },
+          exec: execCompletion("command-out\n"),
+          staleEnv: (request) => {
+            received.signal = request.signal;
+            process.emit("SIGINT");
+            // A resolution that ignores cancellation must not hold the exec.
+            return new Promise<string | null>(() => undefined);
+          },
+        });
+      } finally {
+        err.mockRestore();
+        writes.mockRestore();
+      }
+      expect(code).toBe(130);
+      expect(received.signal?.aborted).toBe(true);
+      expect(writes).not.toHaveBeenCalled();
+      expect(stderr).toEqual([]);
+    },
+    2000
+  );
+
+  macTest(
+    "a slow advisory check is time-bounded: the exec output follows without a warning",
+    async () => {
+      const selected = await fixture();
+      const stderr: string[] = [];
+      const err = spyOn(process.stderr, "write").mockImplementation((chunk) => {
+        stderr.push(String(chunk));
+        return true;
+      });
+      const written: string[] = [];
+      const writes = spyOn(Bun, "write").mockImplementation(
+        async (_destination, data) => {
+          written.push(new TextDecoder().decode(data as Uint8Array));
+          return 0;
+        }
+      );
+      const received: { signal?: AbortSignal } = {};
+      let code: number | null;
+      try {
+        code = await tryNativeAuthoredCommand({
+          selected: selected.selected,
+          env: selected.env,
+          options: {
+            cwd: selected.root,
+            operation: "exec",
+            service: "web",
+            command: ["printenv"],
+          },
+          exec: execCompletion("command-out\n"),
+          staleEnvTimeoutMs: 25,
+          staleEnv: (request) => {
+            received.signal = request.signal;
+            return new Promise<string | null>(() => undefined);
+          },
+        });
+      } finally {
+        err.mockRestore();
+        writes.mockRestore();
+      }
+      expect(code).toBe(4);
+      expect(received.signal?.aborted).toBe(true);
+      expect(written).toEqual(["command-out\n", ""]);
+      expect(stderr).toEqual([]);
+    },
+    2000
+  );
+
+  macTest(
+    "negative control: a warning resolved after the bound, or a failed check, is dropped",
+    async () => {
+      const selected = await fixture();
+      const stderr: string[] = [];
+      const err = spyOn(process.stderr, "write").mockImplementation((chunk) => {
+        stderr.push(String(chunk));
+        return true;
+      });
+      const writes = spyOn(Bun, "write").mockImplementation(async () => 0);
+      let code: number | null;
+      let failedCode: number | null;
+      try {
+        failedCode = await tryNativeAuthoredCommand({
+          selected: selected.selected,
+          env: selected.env,
+          options: {
+            cwd: selected.root,
+            operation: "exec",
+            service: "web",
+            command: ["printenv"],
+          },
+          exec: execCompletion(""),
+          staleEnv: () => Promise.reject(new Error(SECRET_AFTER)),
+        });
+        code = await tryNativeAuthoredCommand({
+          selected: selected.selected,
+          env: selected.env,
+          options: {
+            cwd: selected.root,
+            operation: "exec",
+            service: "web",
+            command: ["printenv"],
+          },
+          exec: execCompletion(""),
+          staleEnvTimeoutMs: 25,
+          staleEnv: (request) =>
+            new Promise<string | null>((resolve) => {
+              request.signal?.addEventListener("abort", () =>
+                resolve(
+                  buildStaleNativeEnvWarning({
+                    service: request.service,
+                    exec: "started",
+                  })
+                )
+              );
+            }),
+        });
+      } finally {
+        err.mockRestore();
+        writes.mockRestore();
+      }
+      expect(failedCode).toBe(4);
+      expect(code).toBe(4);
+      expect(stderr).toEqual([]);
+    },
+    2000
   );
 
   macTest(

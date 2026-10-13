@@ -38,6 +38,15 @@ export async function fixture(
     readonly hooks?: unknown;
     readonly noHooks?: boolean;
     readonly oneoff?: boolean;
+    /**
+     * Echo request `env_metadata.runtime` as public `runtime` bindings below
+     * managed values, as the real compiler does, and record each plan request's
+     * runtime selection in `<root>/compiler-runtime`. Off keeps the stand-in
+     * ignoring runtime metadata.
+     */
+    readonly runtimeMetadata?: boolean;
+    /** Stand-in source run on each `plan` request, before it responds. */
+    readonly onPlan?: string;
     readonly cleanupAllowed?: () => boolean;
     readonly storage?: Readonly<
       Record<
@@ -143,7 +152,10 @@ else {
  if(operation!=="compile") result.local_resolution={overlay:null,origin:"project",auto_branch:false,inherit_local:false,resolution_hash:"b".repeat(64)};
  if(operation==="plan") {
   const metadata=request.env_metadata;const bindings=entries=>Object.fromEntries(Object.entries(entries).map(([key,entry])=>[key,{kind:"managed",key,scope:entry.scope,secret:entry.secret}]));
-  result.environment_plan={plan_version:1,overlay:metadata.overlay,overlay_exists:metadata.overlay_exists,complete:true,workloads:{web:bindings(metadata.workloads.web)},host:Object.fromEntries(allHooks.map(h=>[h.name,{env_target:h.env_target,bindings:bindings(metadata.host.default)}])),warnings:[],diagnostics:[]};
+  ${opts.onPlan ?? ""}
+  ${opts.runtimeMetadata ? 'await import("node:fs/promises").then(m=>m.appendFile("compiler-runtime",JSON.stringify(metadata.runtime??null)+"\\n"));' : ""}
+  const runtime=${opts.runtimeMetadata ? 'Object.fromEntries(Object.entries(metadata.runtime?.web??{}).map(([key,value])=>[key,{kind:"runtime",value}]))' : "{}"};
+  result.environment_plan={plan_version:1,overlay:metadata.overlay,overlay_exists:metadata.overlay_exists,complete:true,workloads:{web:{...runtime,...bindings(metadata.workloads.web)}},host:Object.fromEntries(allHooks.map(h=>[h.name,{env_target:h.env_target,bindings:bindings(metadata.host.default)}])),warnings:[],diagnostics:[]};
  }
  if(result.environment_plan && allHooks.length===0) delete result.environment_plan.host;
  console.log(JSON.stringify(result));

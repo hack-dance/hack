@@ -2,11 +2,10 @@ import { afterEach, expect } from "bun:test";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-
 import { testIntegration } from "./helpers/ci.ts";
+import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
 let tempDir: string | null = null;
 let client: Client | null = null;
@@ -93,10 +92,7 @@ async function startMcpClient(): Promise<Client> {
     command: "bun",
     args: ["index.ts", "mcp", "serve"],
     cwd: repoRoot,
-    env: {
-      ...process.env,
-      HOME: homeDir,
-    },
+    env: privateCliEnv({ root: tempDir, home: homeDir }),
     stderr: "pipe",
   });
 

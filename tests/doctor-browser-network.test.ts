@@ -1,10 +1,14 @@
 import { expect, test } from "bun:test";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { buildDoctorJsonData } from "../src/commands/doctor.ts";
 import {
   checkBrowserLocalNetwork,
   parseBrowserNetworkOptions,
   probeBrowserTarget,
 } from "../src/lib/doctor-browser-network.ts";
+import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
 const url = "https://app.hack/";
 
@@ -152,25 +156,35 @@ test("curl invocation validates TLS, disables config, and bounds transfer withou
 });
 
 test("invalid browser arguments fail before Doctor invokes tools", async () => {
-  const child = Bun.spawn(
-    [
-      process.execPath,
-      "index.ts",
-      "doctor",
-      "--browser-result",
-      "works",
-      "--json",
-    ],
-    { stdout: "pipe", stderr: "pipe", timeout: 5000 }
-  );
-  const [stdout, stderr, code] = await Promise.all([
-    new Response(child.stdout).text(),
-    new Response(child.stderr).text(),
-    child.exited,
-  ]);
-  expect(code).not.toBe(0);
-  expect(stdout).not.toContain("docker");
-  expect(stdout + stderr).toContain("requires --browser-url");
+  const root = await mkdtemp(join(tmpdir(), "hack-doctor-browser-"));
+  try {
+    const child = Bun.spawn(
+      [
+        process.execPath,
+        "index.ts",
+        "doctor",
+        "--browser-result",
+        "works",
+        "--json",
+      ],
+      {
+        env: privateCliEnv({ root }),
+        stdout: "pipe",
+        stderr: "pipe",
+        timeout: 5000,
+      }
+    );
+    const [stdout, stderr, code] = await Promise.all([
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+      child.exited,
+    ]);
+    expect(code).not.toBe(0);
+    expect(stdout).not.toContain("docker");
+    expect(stdout + stderr).toContain("requires --browser-url");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("JSON and summary retain the unknown browser warning separately", async () => {

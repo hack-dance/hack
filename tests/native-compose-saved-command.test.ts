@@ -20,6 +20,7 @@ import {
 } from "../src/lib/native-compose-route-owner.ts";
 import type { NativeRoutingResolution } from "../src/lib/native-routing-plan-protocol.ts";
 import { composeFixture } from "./helpers/native-compose.ts";
+import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
 const roots: string[] = [];
 const children: Bun.Subprocess<"ignore", "pipe", "pipe">[] = [];
@@ -358,13 +359,15 @@ async function recoverSavedStop(root: string) {
     ],
     {
       cwd: root,
-      env: {
-        ...process.env,
-        PATH: `${root}:/usr/bin:/bin`,
-        HACK_HOME: join(root, "home"),
-        HACK_RUNTIME_BACKEND: "compose",
-        HACK_LOGGER: "console",
-      },
+      env: privateCliEnv({
+        root,
+        env: {
+          PATH: `${root}:/usr/bin:/bin`,
+          HACK_HOME: join(root, "home"),
+          HACK_RUNTIME_BACKEND: "compose",
+          HACK_LOGGER: "console",
+        },
+      }),
       stdin: "ignore",
       stdout: "pipe",
       stderr: "pipe",
@@ -385,13 +388,15 @@ test("saved ps reports pending state after an incomplete first startup", async (
     [process.execPath, resolve(import.meta.dir, "../index.ts"), "ps", "--json"],
     {
       cwd: root,
-      env: {
-        ...process.env,
-        PATH: `${root}:/usr/bin:/bin`,
-        HACK_HOME: join(root, "home"),
-        HACK_RUNTIME_BACKEND: "compose",
-        HACK_LOGGER: "console",
-      },
+      env: privateCliEnv({
+        root,
+        env: {
+          PATH: `${root}:/usr/bin:/bin`,
+          HACK_HOME: join(root, "home"),
+          HACK_RUNTIME_BACKEND: "compose",
+          HACK_LOGGER: "console",
+        },
+      }),
       stdin: "ignore",
       stdout: "pipe",
       stderr: "pipe",
@@ -430,13 +435,15 @@ test.each([
     ],
     {
       cwd: root,
-      env: {
-        ...process.env,
-        PATH: `${root}:/usr/bin:/bin`,
-        HACK_HOME: join(root, "home"),
-        HACK_RUNTIME_BACKEND: "compose",
-        HACK_LOGGER: "console",
-      },
+      env: privateCliEnv({
+        root,
+        env: {
+          PATH: `${root}:/usr/bin:/bin`,
+          HACK_HOME: join(root, "home"),
+          HACK_RUNTIME_BACKEND: "compose",
+          HACK_LOGGER: "console",
+        },
+      }),
       stdin: "ignore",
       stdout: "pipe",
       stderr: "pipe",
@@ -522,13 +529,15 @@ process.exit(0);
     ],
     {
       cwd: root,
-      env: {
-        ...process.env,
-        PATH: `${root}:/usr/bin:/bin`,
-        HACK_HOME: join(root, "home"),
-        HACK_RUNTIME_BACKEND: "compose",
-        HACK_LOGGER: "console",
-      },
+      env: privateCliEnv({
+        root,
+        env: {
+          PATH: `${root}:/usr/bin:/bin`,
+          HACK_HOME: join(root, "home"),
+          HACK_RUNTIME_BACKEND: "compose",
+          HACK_LOGGER: "console",
+        },
+      }),
       stdin: "ignore",
       stdout: "pipe",
       stderr: "pipe",

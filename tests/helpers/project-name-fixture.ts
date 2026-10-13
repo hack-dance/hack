@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ProjectContext } from "../../src/lib/project.ts";
 import type { RegisteredProject } from "../../src/lib/projects-registry.ts";
+import { privateCliEnv } from "./private-cli-env.ts";
 
 /** Synthetic checkout and registry; callers own cleanup of root. */
 export async function projectNameFixture() {
@@ -10,15 +11,18 @@ export async function projectNameFixture() {
   const state = join(root, "state");
   await mkdir(state);
   const registryPath = join(state, "projects.json");
-  const env = {
-    ...process.env,
-    HOME: root,
-    PATH: process.env.PATH ?? "",
-    HACK_HOME: state,
-    HACK_GLOBAL_CONFIG_PATH: join(state, "hack.config.json"),
-    HACK_DAEMON_DISABLE: "1",
-    NO_COLOR: "1",
-  };
+  // The source CLI runs with this env: no runner variable such as DOCKER_HOST,
+  // XDG_* or HACK_* reaches it, and HOME is the fixture root.
+  const env = privateCliEnv({
+    root,
+    home: root,
+    env: {
+      HACK_HOME: state,
+      HACK_GLOBAL_CONFIG_PATH: join(state, "hack.config.json"),
+      HACK_DAEMON_DISABLE: "1",
+      NO_COLOR: "1",
+    },
+  });
   async function createProject(directory: string, name: string) {
     const projectRoot = join(root, directory);
     const projectDir = join(projectRoot, ".hack");

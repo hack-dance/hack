@@ -7,6 +7,7 @@ import {
   serveLifecycleProcessDelivery,
 } from "../src/lib/lifecycle-process-delivery.ts";
 import { run } from "../src/lib/shell.ts";
+import { privateCliRunEnv } from "./helpers/private-cli-env.ts";
 
 const roots = new Set<string>();
 let unknown = false;
@@ -50,6 +51,12 @@ async function fixture() {
     await mkdtemp(resolve(tmpdir(), "hack-host-delivery-"))
   );
   roots.add(root);
+  // The client CLI's private HOME and Docker config live outside `root`,
+  // which a test expects to be empty after the handoff.
+  const cliRoot = await realpath(
+    await mkdtemp(resolve(tmpdir(), "hack-host-delivery-cli-"))
+  );
+  roots.add(cliRoot);
   const abort = new AbortController();
   const deadline = performance.now() + 5000;
   const remaining = () => {
@@ -59,7 +66,7 @@ async function fixture() {
     }
     return result;
   };
-  return { root, abort, remaining };
+  return { root, cliRoot, abort, remaining };
 }
 test("private delivery keeps per-process values out of mux command arguments and preserves exact exit", async () => {
   const f = await fixture();
@@ -92,8 +99,13 @@ test("private delivery keeps per-process values out of mux command arguments and
   let exited = false;
   unknown = true;
   try {
+    // The client gets a private env that carries LEAKED_PARENT; the launched
+    // command must still not see it.
     const code = await run(args, {
-      env: { LEAKED_PARENT: "synthetic-inherited-value" },
+      ...privateCliRunEnv({
+        root: f.cliRoot,
+        env: { LEAKED_PARENT: "synthetic-inherited-value" },
+      }),
       stdin: "ignore",
       stdout: "ignore",
       stderr: "ignore",
@@ -171,6 +183,7 @@ test("source drift at delivery claim refuses before the client command", async (
         delivery.path,
       ],
       {
+        ...privateCliRunEnv({ root: f.cliRoot }),
         stdin: "ignore",
         stdout: "ignore",
         stderr: "ignore",

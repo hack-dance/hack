@@ -48,6 +48,7 @@ import { completedJobFixtureSources } from "./e2e/scenarios/native-compose-adopt
 import { createCompletedJobFixtureSettlement } from "./e2e/scenarios/native-compose-adoption-job-worktrees.ts";
 import { restoreEnv } from "./helpers/env.ts";
 import { managedEnvCompilerFixture } from "./helpers/managed-env-compiler.ts";
+import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
 // Each owner workflow performs multiple bounded child probes; allow their cumulative work on shared CI hosts.
 const test = (name: string, run: () => Promise<void>) =>
@@ -4011,11 +4012,13 @@ test("CLI adoption refuses other backends before probes, preparation or engine e
         ...flags,
       ],
       {
-        env: {
-          ...process.env,
-          HACK_RUNTIME_BACKEND: "native",
-          HACK_HOME: join(root, "isolated-home"),
-        },
+        env: privateCliEnv({
+          root,
+          env: {
+            HACK_RUNTIME_BACKEND: "native",
+            HACK_HOME: join(root, "isolated-home"),
+          },
+        }),
         stdin: "ignore",
         stdout: "pipe",
         stderr: "pipe",

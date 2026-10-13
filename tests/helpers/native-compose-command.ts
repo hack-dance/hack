@@ -2,8 +2,8 @@ import { afterEach, expect } from "bun:test";
 import { chmod, mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { isolatedDockerClientEnv } from "./docker-client.ts";
 import { nativeComposeStorageDockerFixtureScript } from "./native-compose-storage-docker.ts";
+import { privateCliEnv } from "./private-cli-env.ts";
 
 const roots: string[] = [];
 const cleanupGuards = new Map<string, () => boolean>();
@@ -247,21 +247,23 @@ export async function invoke(
     ],
     {
       cwd: root,
-      env: {
-        HOME: join(root, "user-home"),
-        LANG: "C",
-        PATH: `${root}:/usr/bin:/bin`,
-        HACK_HOME: join(root, "home"),
-        HACK_GLOBAL_CONFIG_PATH: join(root, "global.json"),
-        HACK_CONFIG_COMPILER_BINARY: join(root, "compiler"),
-        HACK_RUNTIME_BACKEND: "compose",
-        HACK_LOGGER: "console",
-        HACK_COMPOSE_STARTUP_TIMEOUT_MS: String(startupTimeoutMs),
-        CI: "1",
-        HACK_EXECUTION_MODE: "non_interactive",
-        ...isolatedDockerClientEnv(root),
-        ...extraEnv,
-      },
+      // Private HOME (`<root>/user-home`) and isolated Docker client config.
+      env: privateCliEnv({
+        root,
+        env: {
+          LANG: "C",
+          PATH: `${root}:/usr/bin:/bin`,
+          HACK_HOME: join(root, "home"),
+          HACK_GLOBAL_CONFIG_PATH: join(root, "global.json"),
+          HACK_CONFIG_COMPILER_BINARY: join(root, "compiler"),
+          HACK_RUNTIME_BACKEND: "compose",
+          HACK_LOGGER: "console",
+          HACK_COMPOSE_STARTUP_TIMEOUT_MS: String(startupTimeoutMs),
+          CI: "1",
+          HACK_EXECUTION_MODE: "non_interactive",
+          ...extraEnv,
+        },
+      }),
       stdin: "ignore",
       stdout: "pipe",
       stderr: "pipe",

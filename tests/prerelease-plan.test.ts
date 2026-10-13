@@ -37,6 +37,7 @@ import {
 } from "../src/backends/native-authored-storage-tool.ts";
 import { packageMcpBundle } from "../src/mcp/bundle.ts";
 import { nativeCandidateMcpPayload } from "../src/mcp/candidate-payload.ts";
+import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
 const sha = "a".repeat(40);
 const input = {
@@ -1172,11 +1173,13 @@ test("compiled CLI reports the embedded candidate version and ordinary source re
       [process.execPath, "index.ts", "--version"],
     ]) {
       const child = Bun.spawn(args, {
-        env: {
-          ...process.env,
-          HACK_BUILD_VERSION: "wrong",
-          __HACK_BUILD_VERSION__: "wrong",
-        },
+        env: privateCliEnv({
+          root,
+          env: {
+            HACK_BUILD_VERSION: "wrong",
+            __HACK_BUILD_VERSION__: "wrong",
+          },
+        }),
         stdout: "pipe",
         stderr: "pipe",
       });

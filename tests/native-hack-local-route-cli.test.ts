@@ -2,6 +2,7 @@ import { afterEach, expect, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
 const roots: string[] = [];
 
@@ -16,16 +17,18 @@ async function invoke(args: string[]) {
   const home = await mkdtemp(join(tmpdir(), "hack-local-route-cli-"));
   roots.push(home);
   const child = Bun.spawn([process.execPath, "index.ts", ...args], {
-    env: {
-      ...process.env,
-      HOME: home,
-      HACK_HOME: join(home, ".hack"),
-      HACK_GLOBAL_CONFIG_PATH: join(home, ".hack", "hack.config.json"),
-      HACK_RUNTIME_BACKEND: "native",
-      HACK_NATIVE_BINARY: "/nonexistent/hack-native",
-      HACK_NATIVE_HOME: "/nonexistent/native-home",
-      HACK_NO_INTERACTIVE: "1",
-    },
+    env: privateCliEnv({
+      root: home,
+      home,
+      env: {
+        HACK_HOME: join(home, ".hack"),
+        HACK_GLOBAL_CONFIG_PATH: join(home, ".hack", "hack.config.json"),
+        HACK_RUNTIME_BACKEND: "native",
+        HACK_NATIVE_BINARY: "/nonexistent/hack-native",
+        HACK_NATIVE_HOME: "/nonexistent/native-home",
+        HACK_NO_INTERACTIVE: "1",
+      },
+    }),
     stdout: "pipe",
     stderr: "pipe",
     timeout: 10_000,

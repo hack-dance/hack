@@ -11,6 +11,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { openNativeComposeRouteClaims } from "../src/lib/native-compose-route-claims.ts";
 import { composeFixture } from "./helpers/native-compose.ts";
+import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
 const BINDING = {
   engineId: "fixture-engine:1",
@@ -233,18 +234,20 @@ async function invoke(root: string, args: readonly string[]) {
     ],
     {
       cwd: root,
-      env: {
-        ...process.env,
-        PATH: `${root}:/usr/bin:/bin`,
-        HACK_HOME: join(root, "home"),
-        HACK_GLOBAL_CONFIG_PATH: join(root, "home", "hack.config.json"),
-        HACK_CONFIG_COMPILER_BINARY: join(root, "compiler"),
-        HACK_RUNTIME_BACKEND: "compose",
-        HACK_LOGGER: "console",
-        GIT_DIR: "",
-        GIT_WORK_TREE: "",
-        GIT_COMMON_DIR: "",
-      },
+      env: privateCliEnv({
+        root,
+        env: {
+          PATH: `${root}:/usr/bin:/bin`,
+          HACK_HOME: join(root, "home"),
+          HACK_GLOBAL_CONFIG_PATH: join(root, "home", "hack.config.json"),
+          HACK_CONFIG_COMPILER_BINARY: join(root, "compiler"),
+          HACK_RUNTIME_BACKEND: "compose",
+          HACK_LOGGER: "console",
+          GIT_DIR: "",
+          GIT_WORK_TREE: "",
+          GIT_COMMON_DIR: "",
+        },
+      }),
       stdin: "ignore",
       stdout: "pipe",
       stderr: "pipe",

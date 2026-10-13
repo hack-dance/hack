@@ -3,6 +3,7 @@ import { HackCliError } from "./cli-result.ts";
 import { resolveComposeStartupTimeoutMs } from "./compose-startup-budget.ts";
 import { resolveGlobalHackDir } from "./config-paths.ts";
 import { isRecord } from "./guards.ts";
+import type { NativeAuthoredRuntimeMetadataSelection } from "./native-authored-runtime-metadata.ts";
 import {
   nativeComposeEffectReason,
   retainNativeComposeEffectRefusal,
@@ -270,6 +271,8 @@ export async function prepareNativeComposeCommandFiles(opts: {
   readonly inputs: NativeComposeExecutionInputs;
   readonly profiles?: readonly string[];
   readonly explicitOverlay?: string | null;
+  /** The selection `inputs` planned runtime host metadata with, if any. */
+  readonly runtimeMetadata?: NativeAuthoredRuntimeMetadataSelection;
   readonly signal: AbortSignal;
 }) {
   const { mutation, store, reservation, inputs, signal } = opts;
@@ -285,6 +288,7 @@ export async function prepareNativeComposeCommandFiles(opts: {
     reservation,
     profiles,
     explicitOverlay,
+    runtimeMetadata: opts.runtimeMetadata,
     signal,
   });
   const owner = createNativeComposeFileOwner({

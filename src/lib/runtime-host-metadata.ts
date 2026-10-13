@@ -145,6 +145,35 @@ export function buildRuntimeHostMetadataEnvironments(opts: {
         baseHosts,
       })
     : null;
+  return buildEffectiveRuntimeHostMetadataEnvironments({
+    services: opts.services,
+    branch: opts.branch,
+    effectiveDevHost,
+    effectiveAliasHost,
+    composeProject: opts.composeProject,
+    httpsPort: opts.httpsPort,
+  });
+}
+
+/**
+ * The shared metadata document and key set for callers whose instance hosts are
+ * already effective (branch-applied), such as authored projects whose compiler
+ * resolves branch origins itself. {@link buildRuntimeHostMetadataEnvironments}
+ * delegates here after applying the branch, so every backend emits identical keys,
+ * values and document shape for the same effective identity.
+ */
+export function buildEffectiveRuntimeHostMetadataEnvironments(opts: {
+  readonly services: ReadonlyMap<string, RuntimeHostMetadataService>;
+  readonly branch: string | null;
+  /** Effective development host, already branch-applied. */
+  readonly effectiveDevHost: string;
+  /** Effective OAuth alias host, already branch-applied, or null when disabled. */
+  readonly effectiveAliasHost: string | null;
+  readonly composeProject: string;
+  /** Public HTTPS ingress port; omitted, null or 443 keeps URLs portless. */
+  readonly httpsPort?: number | null;
+}): Map<string, Record<string, string>> {
+  const { effectiveDevHost, effectiveAliasHost } = opts;
   const url = (host: string) =>
     runtimeHostUrl({ host, httpsPort: opts.httpsPort });
   const publicServices: Record<string, { readonly urls: readonly string[] }> =

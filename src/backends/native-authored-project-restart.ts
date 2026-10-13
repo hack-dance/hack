@@ -68,6 +68,8 @@ export type NativeAuthoredProjectRestartOptions = {
   readonly run: string;
   readonly profiles?: readonly string[];
   readonly overlay?: string | null;
+  /** Native HTTPS port for the start half's generated runtime metadata URLs. */
+  readonly httpsPort?: ServeOptions["httpsPort"];
   /** Budget of each half; the stop half does not lend time to the start half. */
   readonly startupTimeoutMs: number;
   readonly signal?: AbortSignal;
@@ -161,6 +163,7 @@ export async function restartNativeAuthoredProject(
       run: opts.run,
       profiles: opts.profiles,
       overlay: opts.overlay,
+      httpsPort: opts.httpsPort,
       startupTimeoutMs: opts.startupTimeoutMs,
       signal: opts.signal,
       forceSignal: opts.forceSignal,

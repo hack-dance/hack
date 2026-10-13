@@ -153,6 +153,11 @@ type Options = {
   readonly run: string;
   readonly profiles?: readonly string[];
   readonly overlay?: string | null;
+  /**
+   * Selected native HTTPS frontend port for the generated runtime host metadata
+   * URLs; omitted, null or 443 keeps them portless, as for native image projects.
+   */
+  readonly httpsPort?: number | null;
   readonly startupTimeoutMs: number;
   readonly signal?: AbortSignal;
   readonly forceSignal?: AbortSignal;
@@ -719,6 +724,13 @@ export async function serveNativeAuthoredProject(
     !isAbsolute(opts.runtime.binary) ||
     opts.runtime.home !== opts.scope.nativeHome ||
     !RUN.test(opts.run) ||
+    (opts.httpsPort !== undefined &&
+      opts.httpsPort !== null &&
+      !(
+        Number.isSafeInteger(opts.httpsPort) &&
+        opts.httpsPort >= 1 &&
+        opts.httpsPort <= 65_535
+      )) ||
     !Number.isSafeInteger(opts.startupTimeoutMs) ||
     opts.startupTimeoutMs < 1 ||
     opts.startupTimeoutMs > 300_000 ||
@@ -803,6 +815,10 @@ export async function serveNativeAuthoredProject(
               profiles: opts.profiles,
               explicitOverlay: opts.overlay,
               compilerBranch: opts.scope.branch ?? undefined,
+              runtimeMetadata: {
+                branch: opts.scope.branch,
+                httpsPort: opts.httpsPort ?? null,
+              },
               signal,
             });
           let inputs = await acquire(controller.signal);

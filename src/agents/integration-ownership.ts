@@ -116,6 +116,7 @@ const KNOWN_RENDER_FINGERPRINTS: Readonly<
     "eba974f66328605864507beb", // next: focused plugin skills + plugin-first agent setup
     "cf91ca873a00ad4743198e11", // next: plugin-first agent setup + refresh-only setup sync
     "0e99791aa0edfd1895e31748", // next: runtime metadata backend scope + refresh-only setup sync
+    "124ca278acd4be97747bac9b", // next: runtime metadata for authored projects
   ]),
   "hack-init-skill": new Set([
     "cd15fb6d8ed8e25071d05e75", // v3.1.0..v4.0.3
@@ -154,6 +155,7 @@ const KNOWN_RENDER_FINGERPRINTS: Readonly<
     "270cd2b3fdcc325e04c76d43", // next: focused plugin skills + plugin-first agent setup
     "92ca4aa8f28ba1c93093c04a", // next: plugin-first agent setup + refresh-only setup sync
     "0b82281933af514de8a1b8b8", // next: runtime metadata backend scope + refresh-only setup sync
+    "05f095e17267519ad3660da5", // next: runtime metadata for authored projects
   ]),
 };
 

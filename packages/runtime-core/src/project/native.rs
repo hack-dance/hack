@@ -553,8 +553,10 @@ fn compile_inputs(
                             return Err(private_refused());
                         }
                     }
+                    // Generated runtime metadata is public plan data, never private delivery.
                     EnvironmentBinding::Literal { value }
-                    | EnvironmentBinding::Default { value } => {
+                    | EnvironmentBinding::Default { value }
+                    | EnvironmentBinding::Runtime { value } => {
                         inputs
                             .environment
                             .insert(destination.clone(), value.clone());

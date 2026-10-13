@@ -60,6 +60,7 @@ portable semantic hashes, or write it into the authored configuration directory.
 | Successful job dependency | `service_completed_successfully`; jobs share the generated Compose services namespace. |
 | Exec readiness | `CMD` plus ordered argv; explicit shell source becomes `CMD /bin/sh -c`. |
 | Literal, default, managed reference, unset | Deliver exactly the compiler's effective destination bindings; absent destinations stay absent and empty strings stay present. |
+| Generated runtime host metadata | Public `runtime` bindings render as plain environment values. The renderer refuses one for a key outside the reserved `HACK_*` metadata set, or where an authored directive or a supplied managed value owns the key. |
 | HTTP/HTTPS service endpoint | Explicit `protocol://service-name:port` using project-scoped Compose service DNS. |
 | HTTP/HTTPS external binding | Explicit `protocol://hostname:port`; external loopback retains its container-context meaning and is not translated into a host gateway. |
 

@@ -17,9 +17,9 @@ run only `hack agent prime`. See [model-policy ownership](reference/agent-client
 | `apps/macos/AGENTS.md` | Explicit maintenance of the unsupported native app |
 | `.ai/skills/` | Contributor quality, verification, work units, performance and TLA+ workflows |
 | `src/agents/instruction-source.ts` | Project AGENTS/CLAUDE snippets, standalone/shared Hack skill, Cursor rules, session primer, native plugin skill/rule |
-| `src/agents/onboarding-prompt.ts` | `hack agent onboard`, init handoff, and MCP onboarding prompt |
+| `src/agents/onboarding-prompt.ts` | The one onboarding builder: `hack agent onboard`, `hack agent init`, init handoff, and MCP onboarding prompt (same core, per-entry framing only) |
 | `src/agents/hack-init-skill.ts` | Thin Claude/Codex/plugin adapter that fetches onboarding guidance |
-| `src/agents/init-patterns.ts`, `init-assistant.ts` | Optional init inventory and pattern hints |
+| `src/agents/init-patterns.ts`, `init-assistant.ts` | Repo inventory embedded by the onboarding builder, and pattern hints |
 | `src/agents/install-skill.ts`, `remote-bootstrap-skill.ts` | Plugin installation/channel selection and fresh-host/cloud setup skills |
 | `src/agents/focused-skills.ts` | Plugin `hack-branches`, `hack-env` and `hack-diagnose` skills, composed from canonical section ids, and the plugin `hack-cli` routing description |
 | `src/agents/error-code-reference.ts` | `hack-diagnose` error-code reference, rendered from the exported `HACK_ERROR_CODES` registry in `src/lib/cli-result.ts` |

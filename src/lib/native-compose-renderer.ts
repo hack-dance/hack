@@ -6,6 +6,7 @@ import type {
   Workload,
 } from "../../packages/config-compiler/generated/native-config.ts";
 import { isRecord } from "./guards.ts";
+import { isNativeRuntimeMetadataKey } from "./native-authored-runtime-metadata.ts";
 import {
   type NativeComposeFileProjection,
   nativeComposeFileProjectionMatches,
@@ -1038,6 +1039,11 @@ export function resolveNativeComposeEnvironment(opts: {
     } else if (binding.kind === "endpoint") {
       assert(Object.hasOwn(directives, key), "E_COMPOSE_ENV_MISMATCH");
       entries.push([key, opts.endpointValue(binding)]);
+    } else if (binding.kind === "runtime") {
+      entries.push([
+        key,
+        runtimeValue({ key, binding, directives, values: opts.values }),
+      ]);
     } else {
       const authored = directives[key];
       assert(
@@ -1051,6 +1057,23 @@ export function resolveNativeComposeEnvironment(opts: {
     }
   }
   return Object.fromEntries(entries);
+}
+
+/** Generated public metadata never shadows an authored directive or a managed value. */
+function runtimeValue(opts: {
+  readonly key: string;
+  readonly binding: Extract<EnvironmentBinding, { kind: "runtime" }>;
+  readonly directives: Record<string, unknown>;
+  readonly values?: Readonly<Record<string, string>>;
+}): string {
+  assert(
+    isNativeRuntimeMetadataKey(opts.key) &&
+      !Object.hasOwn(opts.directives, opts.key) &&
+      (opts.values === undefined || !Object.hasOwn(opts.values, opts.key)),
+    "E_COMPOSE_ENV_MISMATCH"
+  );
+  assert(text(opts.binding.value), "E_COMPOSE_ENV");
+  return opts.binding.value;
 }
 
 function verifyBaseline(

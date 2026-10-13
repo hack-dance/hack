@@ -7,6 +7,7 @@ import {
   CallToolRequestSchema,
   type CallToolResult,
   ErrorCode,
+  McpError,
   type ServerNotification,
   type ServerRequest,
   type ToolAnnotations,
@@ -14,10 +15,12 @@ import {
 import * as z from "zod/v4";
 import pkg from "../../package.json";
 import {
+  buildOnboardingPrompt,
   type OnboardingMode,
+  onboardingContextWithoutInventory,
   renderOnboardingPrompt,
 } from "../agents/onboarding-prompt.ts";
-import type { HackErrorCode } from "../lib/cli-result.ts";
+import { HackCliError, type HackErrorCode } from "../lib/cli-result.ts";
 import { ensureDir, pathExists } from "../lib/fs.ts";
 import { isRecord } from "../lib/guards.ts";
 import { resolveHackInvocation } from "../lib/hack-cli.ts";
@@ -310,7 +313,7 @@ export function createMcpServer(opts: {
   );
 
   registerTools({ server, context });
-  registerPrompts({ server });
+  registerPrompts({ server, context });
   return server;
 }
 
@@ -350,43 +353,71 @@ const ONBOARDING_MODES: ReadonlySet<string> = new Set([
   "existing-project",
 ]);
 
+const MCP_ONBOARDING_ENTRY_POINT = { kind: "mcp-hack-init" } as const;
+
 /**
  * Register MCP prompts for no-shell clients.
  *
- * `hack-init` returns the canonical project-onboarding prompt (same content
- * as `hack agent onboard`, `hack init --with`, and the `/hack-init` skill).
+ * `hack-init` returns the canonical project-onboarding prompt from the shared
+ * builder (same core as `hack agent onboard`, `hack agent init`, and
+ * `hack init --with`). With `repoRoot` it inventories that repo, and mode,
+ * project name and dev host come from the repo; without it no filesystem
+ * scan runs (the server's working directory may be a home or root
+ * directory) and the core states that no inventory was run.
  */
-function registerPrompts(opts: { readonly server: McpServer }): void {
+function registerPrompts(opts: {
+  readonly server: McpServer;
+  readonly context: McpSessionContext;
+}): void {
   opts.server.registerPrompt(
     "hack-init",
     {
       title: "hack project onboarding",
       description:
-        "Agent-assisted onboarding prompt: stand up or adopt hack in a project (inventory, compose + env setup, deps/ops container patterns, verification loop).",
+        "Agent-assisted onboarding prompt: stand up or adopt hack in a project (repo inventory, compose + env setup, deps/ops container patterns, verification loop).",
       argsSchema: {
+        repoRoot: z
+          .string()
+          .describe(
+            "Repository root (or a directory inside it) to inventory; relative paths resolve against the server's working directory. When set, mode, projectName and devHost come from the repo and those arguments are ignored."
+          )
+          .optional(),
         mode: z
           .string()
           .describe(
-            'Onboarding mode: "new-project" (no .hack/ yet) or "existing-project" (adopt/refine an existing setup). Default: existing-project.'
+            'Onboarding mode without repoRoot: "new-project" (no .hack/ yet) or "existing-project" (adopt/refine an existing setup). Default: existing-project.'
           )
           .optional(),
-        projectName: z.string().describe("Project slug, when known").optional(),
+        projectName: z
+          .string()
+          .describe("Project slug, when known (without repoRoot)")
+          .optional(),
         devHost: z
           .string()
-          .describe("Project dev host (e.g. myapp.hack), when known")
+          .describe(
+            "Project dev host (e.g. myapp.hack.local), when known (without repoRoot)"
+          )
           .optional(),
       },
     },
-    ({ mode, projectName, devHost }) => {
-      const resolvedMode: OnboardingMode = ONBOARDING_MODES.has(mode ?? "")
-        ? ((mode ?? "existing-project") as OnboardingMode)
-        : "existing-project";
-
-      const prompt = renderOnboardingPrompt({
-        mode: resolvedMode,
-        projectName,
-        devHost,
-      });
+    async ({ repoRoot, mode, projectName, devHost }) => {
+      // Trim once so the presence check and the resolved path agree.
+      const requestedRoot = repoRoot?.trim();
+      const prompt = requestedRoot
+        ? await buildMcpOnboardingPrompt({
+            startDir: resolve(opts.context.cwd, requestedRoot),
+          })
+        : renderOnboardingPrompt({
+            context: onboardingContextWithoutInventory({
+              mode: ONBOARDING_MODES.has(mode ?? "")
+                ? (mode as OnboardingMode)
+                : "existing-project",
+              ...(projectName ? { projectName } : {}),
+              ...(devHost ? { devHost } : {}),
+              reason: "no-repo-root",
+            }),
+            entryPoint: MCP_ONBOARDING_ENTRY_POINT,
+          });
 
       return {
         messages: [
@@ -398,6 +429,44 @@ function registerPrompts(opts: { readonly server: McpServer }): void {
       };
     }
   );
+}
+
+/**
+ * Build the `hack-init` prompt for a caller-named repo. Failures map to a
+ * closed, value-free protocol error: only the Hack error code survives; the
+ * caller's path, config values and the underlying message are never echoed.
+ *
+ * @param opts.build - Test seam for the shared builder; production omits it.
+ */
+export async function buildMcpOnboardingPrompt(opts: {
+  readonly startDir: string;
+  readonly build?: typeof buildOnboardingPrompt;
+}): Promise<string> {
+  if (!(await pathExists(opts.startDir))) {
+    const refusal = MCP_REFUSALS.path_not_found;
+    throw new McpError(
+      ErrorCode.InvalidParams,
+      `${refusal.code}: ${refusal.message}`
+    );
+  }
+  const request = {
+    startDir: opts.startDir,
+    entryPoint: MCP_ONBOARDING_ENTRY_POINT,
+  };
+  try {
+    return opts.build
+      ? await opts.build(request)
+      : await buildOnboardingPrompt(request);
+  } catch (error) {
+    const code: HackErrorCode =
+      error instanceof HackCliError ? error.code : "E_UNEXPECTED";
+    throw new McpError(
+      code === "E_UNEXPECTED"
+        ? ErrorCode.InternalError
+        : ErrorCode.InvalidParams,
+      `${code}: hack-init could not inventory the repo.`
+    );
+  }
 }
 
 function registerTools(opts: {

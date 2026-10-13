@@ -35,7 +35,34 @@ pub struct EnvMetadata {
     #[schemars(with = "HostMetadata")]
     #[ts(optional, type = "HostMetadata")]
     pub host: Option<HostMetadata>,
+    // Hack-generated, non-secret runtime host metadata per declared workload.
+    // Values are public plan data, never managed or private-delivered values.
+    // Only the closed RUNTIME_METADATA_KEYS set is accepted; authored directives
+    // and managed project values for the same key take precedence.
+    #[serde(
+        default,
+        deserialize_with = "crate::model::present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[schemars(with = "BTreeMap<String,BTreeMap<String,String>>")]
+    #[ts(optional, type = "{ [key in string]: { [key in string]: string } }")]
+    pub runtime: Option<BTreeMap<String, BTreeMap<String, String>>>,
 }
+/// The closed environment keys Hack generates as public runtime host metadata.
+pub const RUNTIME_METADATA_KEYS: [&str; 10] = [
+    "HACK_ALIAS_HOST",
+    "HACK_ALIAS_URL",
+    "HACK_BRANCH",
+    "HACK_COMPOSE_PROJECT",
+    "HACK_DEV_HOST",
+    "HACK_DEV_URL",
+    "HACK_RUNTIME_METADATA",
+    "HACK_SERVICE_NAME",
+    "HACK_SERVICE_URL",
+    "HACK_SERVICE_URLS",
+];
+/// Per-value bound for generated runtime metadata; the whole request remains bounded separately.
+pub const MAX_RUNTIME_METADATA_VALUE_BYTES: usize = 64 * 1024;
 #[derive(Debug, Deserialize, Serialize, JsonSchema, TS)]
 #[serde(deny_unknown_fields)]
 pub struct HostMetadata {
@@ -97,6 +124,11 @@ pub enum EnvironmentBinding {
     Endpoint {
         reference: crate::endpoint::EndpointReference,
         target: crate::endpoint::EndpointTarget,
+    },
+    /// Hack-generated public runtime host metadata. Never secret or private-delivered;
+    /// present only where no authored directive or managed value owns the key.
+    Runtime {
+        value: String,
     },
 }
 #[derive(Debug, Serialize, JsonSchema, TS)]
@@ -234,6 +266,18 @@ fn read_metadata(document: &mut json::Document) -> Result<EnvMetadata, local::Re
             return Err(metadata_error(document, "invalid_shape"));
         }
     }
+    if let Some(runtime) = value.get("runtime") {
+        let valid = runtime.as_object().is_some_and(|workloads| {
+            workloads.values().all(|values| {
+                values
+                    .as_object()
+                    .is_some_and(|values| values.values().all(serde_json::Value::is_string))
+            })
+        });
+        if !valid {
+            return Err(metadata_error(document, "invalid_shape"));
+        }
+    }
     let metadata: EnvMetadata = serde_json::from_value(value.clone())
         .map_err(|_| metadata_error(document, "invalid_metadata"))?;
     // Remove the one additional field; the unchanged resolve decoder rejects every other unknown field.
@@ -314,7 +358,8 @@ fn validate_metadata(metadata: &EnvMetadata, resolved: &local::Resolved) -> bool
             return false;
         }
     }
-    if !validate_host_metadata(metadata, resolved) {
+    if !validate_host_metadata(metadata, resolved) || !validate_runtime_metadata(metadata, resolved)
+    {
         return false;
     }
     let mut seen = BTreeSet::new();
@@ -323,6 +368,19 @@ fn validate_metadata(metadata: &EnvMetadata, resolved: &local::Resolved) -> bool
             || matches!(scope.as_str(), "global" | "host")
             || resolved.compiled.declared_workloads.contains_key(scope)
             || !seen.insert(scope)
+    })
+}
+/// Generated metadata may target only declared workloads and only the closed key set.
+fn validate_runtime_metadata(metadata: &EnvMetadata, resolved: &local::Resolved) -> bool {
+    metadata.runtime.as_ref().is_none_or(|runtime| {
+        runtime.iter().all(|(name, values)| {
+            resolved.compiled.declared_workloads.contains_key(name)
+                && values.iter().all(|(key, value)| {
+                    RUNTIME_METADATA_KEYS.contains(&key.as_str())
+                        && value.len() <= MAX_RUNTIME_METADATA_VALUE_BYTES
+                        && !value.contains('\0')
+                })
+        })
     })
 }
 fn plan_inner(
@@ -424,6 +482,10 @@ fn bind(
                 BindingOwner {
                     cache_key: &format!("workload/{name}"),
                     endpoint_context: crate::endpoint::EndpointContext::Workload,
+                    runtime: metadata
+                        .runtime
+                        .as_ref()
+                        .and_then(|runtime| runtime.get(name)),
                 },
             )?;
             output.workloads.insert(name.clone(), bindings);
@@ -456,6 +518,7 @@ fn bind(
                     BindingOwner {
                         cache_key: &cache_key,
                         endpoint_context: crate::endpoint::EndpointContext::Host,
+                        runtime: None,
                     },
                 )?;
                 plans.insert(
@@ -476,6 +539,8 @@ fn bind(
 struct BindingOwner<'a> {
     cache_key: &'a str,
     endpoint_context: crate::endpoint::EndpointContext,
+    /// Generated container metadata; host processes never receive it.
+    runtime: Option<&'a BTreeMap<String, String>>,
 }
 fn bind_environment(
     resolved: &local::Resolved,
@@ -487,10 +552,28 @@ fn bind_environment(
     owner: BindingOwner<'_>,
 ) -> Result<BTreeMap<String, EnvironmentBinding>, local::ResolveDiagnostic> {
     budget.baseline(owner.cache_key, baseline, resolved, pointer)?;
-    let mut bindings: BTreeMap<String, EnvironmentBinding> = baseline
-        .iter()
-        .map(|(key, b)| (key.clone(), managed(key, b)))
-        .collect();
+    // Precedence, lowest first: generated runtime metadata, managed project values,
+    // then authored directives. Explicit authored and managed values always win.
+    let mut bindings: BTreeMap<String, EnvironmentBinding> = BTreeMap::new();
+    if let Some(runtime) = owner.runtime {
+        budget.value(runtime, resolved, pointer)?;
+        budget.charge(32 * runtime.len(), resolved, pointer)?;
+        for (key, value) in runtime {
+            if !baseline.contains_key(key) {
+                bindings.insert(
+                    key.clone(),
+                    EnvironmentBinding::Runtime {
+                        value: value.clone(),
+                    },
+                );
+            }
+        }
+    }
+    bindings.extend(
+        baseline
+            .iter()
+            .map(|(key, b)| (key.clone(), managed(key, b))),
+    );
     for (dest, directive) in directives {
         let pointer = json::child(&format!("{pointer}/environment"), dest);
         // Conservatively retain charges for overwritten/unset entries rather than refunding allocation.

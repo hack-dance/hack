@@ -6,8 +6,8 @@ import { dirname, join } from "node:path";
 import {
   buildInitAssistantReport,
   type InitAssistantReport,
-  renderInitAssistantPrompt,
 } from "../src/agents/init-assistant.ts";
+import { buildOnboardingPrompt } from "../src/agents/onboarding-prompt.ts";
 
 const ALWAYS_PRESENT_LIMITATION =
   "Inventory reads file names and manifest keys only; env files, secrets, lockfile contents, and pin values were not read.";
@@ -41,7 +41,11 @@ async function inventory(files: Record<string, string>): Promise<{
 }> {
   const repoRoot = await createRepo(files);
   const report = await buildInitAssistantReport({ repoRoot });
-  return { report, prompt: renderInitAssistantPrompt({ report }) };
+  const prompt = await buildOnboardingPrompt({
+    startDir: repoRoot,
+    entryPoint: { kind: "agent-init" },
+  });
+  return { report, prompt };
 }
 
 test("bun.lock-only repo is detected as a Bun repo without conflicts", async () => {

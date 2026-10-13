@@ -1,4 +1,5 @@
 import { isRecord } from "./guards.ts";
+import type { NativeRuntimeMetadataValues } from "./native-authored-runtime-metadata.ts";
 import {
   compileNativeConfig,
   NativeConfigCompilerError,
@@ -98,6 +99,8 @@ export async function planNativeProject(
 export async function planPreparedNativeProject(opts: {
   readonly prepared: NativePreparedProject;
   readonly metadata: NativeProjectEnvMetadata;
+  /** Hack-generated public runtime host metadata; never managed or secret values. */
+  readonly runtime?: NativeRuntimeMetadataValues;
   readonly signal?: AbortSignal;
 }): Promise<NativeConfigPlanResult> {
   const { prepared, metadata } = opts;
@@ -121,6 +124,7 @@ export async function planPreparedNativeProject(opts: {
     envMetadata: nativeEnvironmentMetadata({
       metadata,
       declaredWorkloads: declared,
+      runtime: opts.runtime,
     }),
   });
   if (
@@ -145,6 +149,8 @@ export async function planPreparedNativeProject(opts: {
 export function nativeEnvironmentMetadata(opts: {
   readonly metadata: NativeProjectEnvMetadata;
   readonly declaredWorkloads: NativeDeclaredWorkloads;
+  /** Generated public runtime metadata; omitted keeps the prior wire unchanged. */
+  readonly runtime?: NativeRuntimeMetadataValues;
 }): NativeEnvMetadata {
   const { metadata, declaredWorkloads } = opts;
   return {
@@ -161,6 +167,7 @@ export function nativeEnvironmentMetadata(opts: {
     ...(metadata.hostMetadata === undefined
       ? {}
       : { host: metadata.hostMetadata }),
+    ...(opts.runtime === undefined ? {} : { runtime: opts.runtime }),
   };
 }
 

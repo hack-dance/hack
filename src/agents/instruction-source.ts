@@ -293,7 +293,7 @@ export const INSTRUCTION_SECTIONS: readonly InstructionSection[] = [
       "Use a branch instance when you need two versions running at once (PR review, experiments, migrations) or want to keep a stable environment while testing another branch.",
       "Target one with `--branch <name>` on up/open/logs/down (for example: `hack up --branch <name> --detach`).",
       "Linked worktrees pick a branch instance automatically (see Linked git worktrees).",
-      "Containers in Compose-backed and native image projects receive `HACK_RUNTIME_METADATA` plus `HACK_DEV_URL`, `HACK_ALIAS_URL`, and current-service URL fields derived from effective Caddy routes; authored `.hack/hack.project.json` projects do not receive them yet. Use Compose DNS for internal traffic and this metadata for browser-facing links, OAuth callbacks, and webhooks.",
+      "Containers in Compose-file and authored `.hack/hack.project.json` projects, on the Compose and native backends, receive `HACK_RUNTIME_METADATA` plus `HACK_DEV_URL`, `HACK_ALIAS_URL`, and current-service URL fields derived from effective routes; explicit project env and authored env values win. Use Compose DNS for internal traffic and this metadata for browser-facing links, OAuth callbacks, and webhooks.",
     ],
   },
   {
@@ -358,7 +358,7 @@ export const INSTRUCTION_SECTIONS: readonly InstructionSection[] = [
       "MCP is opt-in, only for clients without shell access and only when explicitly selected: add the separate `hack-mcp` plugin, or use `hack setup mcp` (client and scope via `hack mcp install --help`). Do not configure other clients as a side effect.",
       "Standalone export is an opt-in alternative to the plugin: `hack setup cursor` (rules), `hack setup claude` (hooks and skill), `hack setup codex` (skills) or `hack setup agents` (AGENTS.md/CLAUDE.md snippets). Use one integration path per client.",
       "Setup and onboarding never write AGENTS.md, CLAUDE.md, rule files, or repository skill copies unless the user asks for them.",
-      "Agent-assisted onboarding: `hack init --with claude|codex` (new repos) or `hack agent onboard` (existing projects) print/hand off the full setup prompt; the `/hack-init` skill and the `hack-init` MCP prompt return the same content.",
+      "Agent-assisted onboarding: `hack init --with claude|codex` (new repos) or `hack agent onboard` (existing projects) print/hand off the full setup prompt; the `/hack-init` skill and the `hack-init` MCP prompt return the same content. No-shell clients pass `repoRoot` (the repository root path) to the `hack-init` MCP prompt to include Hack's repo inventory.",
       "Init prompt: `hack agent init` (use --client cursor|claude|codex to open)",
       "Init patterns: `hack agent patterns`",
     ],

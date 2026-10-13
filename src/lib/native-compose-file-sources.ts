@@ -3,6 +3,10 @@ import { join } from "node:path";
 import type { FileBinding } from "../../packages/config-compiler/generated/native-config.ts";
 import { deepFreeze } from "./guards.ts";
 import {
+  type NativeAuthoredRuntimeMetadataSelection,
+  nativeAuthoredRuntimeMetadata,
+} from "./native-authored-runtime-metadata.ts";
+import {
   type HeldNativeComposeFile,
   holdNativeComposeFile,
   NATIVE_COMPOSE_FILE_BYTES_LIMIT,
@@ -187,6 +191,33 @@ async function acquireMembers(opts: {
     }
   }
 }
+function runtimeValues(
+  result: {
+    readonly plan: Readonly<Record<string, unknown>>;
+    readonly declared_workloads?: Parameters<
+      typeof nativeAuthoredRuntimeMetadata
+    >[0]["declaredWorkloads"];
+    readonly routing_resolution?: Parameters<
+      typeof nativeAuthoredRuntimeMetadata
+    >[0]["routing"];
+  },
+  selection: NativeAuthoredRuntimeMetadataSelection | undefined
+) {
+  if (selection === undefined) {
+    return undefined;
+  }
+  const declared = result.declared_workloads;
+  const name = result.plan.name;
+  if (!declared || typeof name !== "string") {
+    return refuseNativeComposeFile();
+  }
+  return nativeAuthoredRuntimeMetadata({
+    projectName: name,
+    declaredWorkloads: declared,
+    routing: result.routing_resolution,
+    selection,
+  });
+}
 /**
  * Actual acquisition, not a caller-provided plan/value resolver. It anchors the current
  * checkout and managed baseline, preserves empty/binary bytes and holds source FDs.
@@ -198,6 +229,8 @@ export async function acquireNativeComposeFileSources(opts: {
   readonly profiles?: readonly string[];
   readonly explicitOverlay?: string | null;
   readonly explicitDomain?: string;
+  /** The selection the command inputs planned runtime host metadata with. */
+  readonly runtimeMetadata?: NativeAuthoredRuntimeMetadataSelection;
   readonly signal?: AbortSignal;
 }): Promise<NativeComposeFileSources> {
   const authority = opts.authority;
@@ -257,9 +290,13 @@ export async function acquireNativeComposeFileSources(opts: {
     }
     const envSelection = selectionForEnv(prepared);
     const env = await acquireProjectEnvForNativeExecution(envSelection);
+    // The command inputs' runtime metadata selection, so both plans stay
+    // byte-identical; the delivery owner compares them before any effect.
+    const runtime = runtimeValues(prepared.result, opts.runtimeMetadata);
     const planned = await planPreparedNativeProject({
       prepared,
       metadata: env.metadata,
+      runtime,
       signal,
     });
     if (

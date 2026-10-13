@@ -596,6 +596,16 @@ rest of this section describes the older Compose-file native frontend for
 `.hack/hack.config.json` projects with a Compose file, which keeps its own
 command coverage below.
 
+Authored native `up` and `restart` deliver the same
+[runtime host metadata](../cli.md#runtime-host-metadata) as native image projects.
+The configuration compiler carries it as public `runtime` bindings in the reviewed
+source selection, below managed values and authored directives, and the runtime
+adds it to each workload's public environment, never to private delivery. A
+selected non-443 `HACK_NATIVE_HTTPS_PORT` appears in `HACK_DEV_URL` (authored
+native graphs are not routed, so they have no alias or service URLs); a partial HTTPS selection refuses before any input or runtime
+work. `exec` observes the values stored in the running container, and one-off
+`run` uses the admitted environment.
+
 Explicit `HACK_RUNTIME_BACKEND=native` with absolute `HACK_NATIVE_BINARY` and
 `HACK_NATIVE_HOME` selects native observations for normal `hack ps` and bounded
 `hack logs SERVICE --no-follow`. They verify the project/branch run mapping

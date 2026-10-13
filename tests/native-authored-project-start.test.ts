@@ -384,6 +384,7 @@ console.log(JSON.stringify(result));
   const journal = join(root, "journal.json");
   const calls = join(root, "calls.jsonl");
   const delivery = join(root, "delivery.json");
+  const sources = join(root, "sources.jsonl");
   const ownerPid = join(root, "owner.pid");
   // Each stand-in owner appends its PID; a detached owner leads its own group.
   settlement.record({
@@ -405,6 +406,7 @@ if(['plan','serve','frontend-plan','frontend-serve'].includes(action)){
  const planning=action==='plan'||action==='frontend-plan';
  if(!planning)await appendFile(${JSON.stringify(ownerPid)},process.pid+'\\n');
  const path=args[args.indexOf('--source-file')+1];const input=JSON.parse(await readFile(path,'utf8'));
+ if(planning)await appendFile(${JSON.stringify(sources)},JSON.stringify(input.env_metadata)+'\\n');
  const digest=createHash('sha256');
  if(input.branch!==null)digest.update('hack-native-branch-namespace-v1\\0');
  digest.update(input.project);if(input.branch!==null)digest.update('\\0').update(input.branch);
@@ -489,6 +491,7 @@ if(['plan','serve','frontend-plan','frontend-serve'].includes(action)){
     runtime: { binary, home: nativeHome },
     calls,
     delivery,
+    sources,
   };
 }
 
@@ -1585,3 +1588,41 @@ macTest(
   },
   30_000
 );
+
+for (const [httpsPort, branch, url] of [
+  [8443, "main", "https://main.fixture.hack.local:8443"],
+  [undefined, "main", "https://main.fixture.hack.local"],
+  [8443, null, "https://fixture.hack.local:8443"],
+] as const) {
+  macTest(
+    `authored native source carries public runtime host metadata (port ${httpsPort ?? "none"}, branch ${branch ?? "none"})`,
+    async () => {
+      const selected = await fixture({ branch });
+      expect(
+        await serveNativeAuthoredProject({
+          ...selected,
+          run,
+          httpsPort,
+          startupTimeoutMs: 10_000,
+        })
+      ).toBe(0);
+      const recorded = (await Bun.file(selected.sources).text())
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line));
+      expect(recorded.length).toBeGreaterThan(0);
+      for (const metadata of recorded) {
+        expect(Object.keys(metadata.runtime).sort()).toEqual(["off", "web"]);
+        const web = metadata.runtime.web;
+        expect(web.HACK_BRANCH).toBe(branch ?? "");
+        expect(web.HACK_COMPOSE_PROJECT).toBe(
+          branch ? `fixture--${branch}` : "fixture"
+        );
+        expect(web.HACK_DEV_URL).toBe(url);
+        expect(web.HACK_SERVICE_NAME).toBe("web");
+        expect(metadata.runtime.off.HACK_SERVICE_NAME).toBe("off");
+        expect(JSON.stringify(metadata)).not.toContain(CANARY);
+      }
+    }
+  );
+}

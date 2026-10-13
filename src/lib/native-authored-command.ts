@@ -26,6 +26,7 @@ import {
   serveNativeAuthoredProject,
 } from "../backends/native-authored-project-start.ts";
 import { resolveNativeAuthoredExecStaleEnvWarning } from "../backends/native-exec-stale-env.ts";
+import { parseNativeHttpsSelection } from "../backends/native-project-start.ts";
 import { resolveNativeRuntimeSelection } from "../backends/native-runtime-client.ts";
 import { CliUsageError } from "../cli/command.ts";
 import { display } from "../ui/display.ts";
@@ -416,6 +417,22 @@ async function runStop(input: LifecycleInput): Promise<number> {
   return 0;
 }
 
+/**
+ * The native HTTPS frontend port selected the same way native image projects
+ * select it, so authored runtime host metadata URLs carry the same port.
+ */
+function nativeHttpsPort(
+  env: Readonly<Record<string, string | undefined>>
+): number | null {
+  try {
+    return parseNativeHttpsSelection(env)?.httpsPort ?? null;
+  } catch {
+    throw new CliUsageError(
+      "Native HTTPS selection requires HACK_NATIVE_CADDY_BINARY, HACK_NATIVE_CADDY_SHA256 and HACK_NATIVE_HTTPS_PORT together; values omitted."
+    );
+  }
+}
+
 /** Value-free stale-env bookkeeping for one foreground lifetime (HACK-1140). */
 function envFingerprintSession(
   input: LifecycleInput
@@ -461,6 +478,7 @@ function startupSelection(
       );
       return undefined;
     },
+    httpsPort: nativeHttpsPort(input.env),
     startupTimeoutMs: input.startupTimeoutMs,
     signal: input.signal,
     forceSignal: input.forceSignal,
@@ -691,12 +709,19 @@ export async function tryNativeAuthoredCommand(
     HACK_NATIVE_BINARY: sourceEnv.HACK_NATIVE_BINARY,
     HACK_NATIVE_HOME: sourceEnv.HACK_NATIVE_HOME,
     HACK_COMPOSE_STARTUP_TIMEOUT_MS: sourceEnv.HACK_COMPOSE_STARTUP_TIMEOUT_MS,
+    HACK_NATIVE_CADDY_BINARY: sourceEnv.HACK_NATIVE_CADDY_BINARY,
+    HACK_NATIVE_CADDY_SHA256: sourceEnv.HACK_NATIVE_CADDY_SHA256,
+    HACK_NATIVE_HTTPS_PORT: sourceEnv.HACK_NATIVE_HTTPS_PORT,
   };
   if (env.HACK_RUNTIME_BACKEND !== "native") {
     return null;
   }
   const options = captureCommandOptions(opts.options);
   const mode = commandMode(options);
+  if (mode === "start" || mode === "restart") {
+    // Refuse a partial HTTPS selection before any input or runtime work.
+    nativeHttpsPort(env);
+  }
   let runtime: ReturnType<typeof resolveNativeRuntimeSelection>;
   try {
     runtime = resolveNativeRuntimeSelection(env);

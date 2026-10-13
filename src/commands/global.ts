@@ -58,11 +58,6 @@ import { resolveDaemonPaths } from "../daemon/paths.ts";
 import { isProcessRunning } from "../daemon/process.ts";
 import { readDaemonStatus } from "../daemon/status.ts";
 import {
-  ADMINISTRATOR_PROMPT_HINT,
-  describeAdministratorAuthorizationFailure,
-  requestAdministratorAuthorization,
-} from "../lib/admin-authorization.ts";
-import {
   resolveGlobalConfigPath,
   resolveGlobalHackDir,
 } from "../lib/config-paths.ts";
@@ -106,6 +101,7 @@ import {
 } from "../lib/mutagen.ts";
 import type { NativeDnsActivationInspection } from "../lib/native-domain-dns-activate.ts";
 import { activateNativeDomainDns } from "../lib/native-domain-dns-activate.ts";
+import { createNativeDnsAuthorizer } from "../lib/native-domain-dns-authorization.ts";
 import { deactivateNativeDomainDns } from "../lib/native-domain-dns-deactivate.ts";
 import { createNativeDnsHostDependencies } from "../lib/native-domain-dns-host.ts";
 import { prepareNativeDnsLaunchdRestart } from "../lib/native-domain-dns-launchd.ts";
@@ -536,20 +532,7 @@ async function handleGlobalDnsActivate({
     }
     return current.inspection;
   };
-  const authorize = async () => {
-    if (!isInteractiveTerminal()) {
-      return false;
-    }
-    const accepted = await confirmSafe({
-      message: `Activate only *.${domain} at 127.0.0.1 via a new dnsmasq claim and /etc/resolver file? This restarts dnsmasq; existing v4 suffixes remain unchanged.`,
-      initialValue: false,
-      nonInteractive: "decline",
-    });
-    if (!accepted) {
-      return false;
-    }
-    return await requireNativeAdministratorAuthorization();
-  };
+  const authorize = createNativeDnsAuthorizer({ action: "activate", domain });
   const deps = createNativeDnsHostDependencies({
     receiptPath: initial.receiptPath,
     dnsmasqPath: initial.inspection.plan.dnsmasqPath,
@@ -655,20 +638,10 @@ async function handleGlobalDnsDeactivate({
     }
     return current.inspection;
   };
-  const authorize = async () => {
-    if (!isInteractiveTerminal()) {
-      return false;
-    }
-    const accepted = await confirmSafe({
-      message: `Deactivate only the owned *.${domain} DNS claim? This restarts dnsmasq; the existing v4 parent remains unchanged.`,
-      initialValue: false,
-      nonInteractive: "decline",
-    });
-    if (!accepted) {
-      return false;
-    }
-    return await requireNativeAdministratorAuthorization();
-  };
+  const authorize = createNativeDnsAuthorizer({
+    action: "deactivate",
+    domain,
+  });
   const deps = createNativeDnsHostDependencies({
     receiptPath: initial.receiptPath,
     dnsmasqPath: initial.inspection.plan.dnsmasqPath,
@@ -2336,21 +2309,6 @@ async function runMacPrivilegedCommand(opts: {
   return await run(["sudo", ...opts.command], {
     stdin: "inherit",
   });
-}
-
-/**
- * Native administrator prompt after an approved DNS change. A failed prompt
- * throws, so it is reported as an authorization failure and never as the
- * user's decline.
- */
-async function requireNativeAdministratorAuthorization(): Promise<true> {
-  const result = await requestAdministratorAuthorization();
-  if (result.status === "failed") {
-    throw new Error(
-      `macOS administrator authorization did not complete (${describeAdministratorAuthorizationFailure(result)}); nothing changed. ${ADMINISTRATOR_PROMPT_HINT}`
-    );
-  }
-  return true;
 }
 
 function isInteractiveTerminal(): boolean {

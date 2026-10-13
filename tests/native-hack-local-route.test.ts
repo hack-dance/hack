@@ -25,6 +25,7 @@ import {
   HACK_LOCAL_REPAIR_COMMAND,
   HACK_LOCAL_RESOLVER_CONTENT,
   HACK_LOCAL_ROLLBACK_COMMAND,
+  type HackLocalRouteAuthorization,
   type HackLocalRouteDependencies,
   type HackLocalRoutePlan,
   type HackLocalRouteReceipt,
@@ -62,6 +63,9 @@ afterEach(async () => {
     await rm(root, { recursive: true, force: true });
   }
 });
+
+const APPROVED: HackLocalRouteAuthorization = { outcome: "approved" };
+const DECLINED: HackLocalRouteAuthorization = { outcome: "declined" };
 
 interface Calls {
   readonly authorize: string[];
@@ -179,7 +183,7 @@ async function fixture(
     canPrompt: () => opts.prompt ?? true,
     authorize: async (message) => {
       calls.authorize.push(message);
-      return opts.approve ?? true;
+      return opts.approve === false ? DECLINED : APPROVED;
     },
     confirm: async (message) => {
       calls.confirm.push(message);
@@ -466,13 +470,161 @@ test("non-interactive and declined runs refuse with an exact command", async () 
   }
 });
 
+test("a failed administrator prompt is authorization-failed, never declined", async () => {
+  const f = await fixture();
+  const steps: string[] = [];
+  const deps: HackLocalRouteDependencies = {
+    ...f.deps,
+    authorize: async () => ({
+      outcome: "authorization-failed",
+      detail: "the macOS administrator prompt timed out after 120 seconds",
+    }),
+    prepareRestart: async () => {
+      steps.push("prepare-restart");
+      return async () => {
+        steps.push("restart");
+      };
+    },
+    createResolver: async () => {
+      steps.push("sudo -n resolver");
+      return "1:1";
+    },
+    flushDnsCache: async () => {
+      steps.push("sudo -n flush");
+    },
+  };
+  const result = await repairHackLocalRoute(deps);
+  expect(result).toEqual({
+    outcome: "refused",
+    reason: "authorization-failed",
+    detail: expect.stringContaining('Run "sudo -v" in this terminal first'),
+    command: HACK_LOCAL_REPAIR_COMMAND,
+  });
+  if (result.outcome !== "refused") {
+    throw new Error("expected a refusal");
+  }
+  expect(result.detail).toContain("timed out after 120 seconds");
+  expect(result.detail).toContain("nothing changed");
+  expect(steps).toEqual([]);
+  expect(await readFile(f.dnsmasqPath, "utf8")).toBe(ORIGINAL);
+  await expect(stat(f.deps.paths.receiptPath)).rejects.toThrow();
+});
+
+test("the administrator prompt precedes every privileged sudo -n step", async () => {
+  const f = await fixture();
+  const steps: string[] = [];
+  const deps: HackLocalRouteDependencies = {
+    ...f.deps,
+    authorize: async (message) => {
+      steps.push("authorize");
+      return await f.deps.authorize(message);
+    },
+    prepareRestart: async () => {
+      steps.push("prepare-restart");
+      return async () => {
+        steps.push("sudo -n kickstart");
+      };
+    },
+    createResolver: async (content) => {
+      steps.push("sudo -n resolver");
+      return await f.deps.createResolver(content);
+    },
+    flushDnsCache: async () => {
+      steps.push("sudo -n flush");
+    },
+  };
+  expect((await repairHackLocalRoute(deps)).outcome).toBe("repaired");
+  expect(steps).toEqual([
+    "authorize",
+    "prepare-restart",
+    "sudo -n resolver",
+    "sudo -n kickstart",
+    "sudo -n flush",
+  ]);
+});
+
+test("a failed administrator prompt during rollback changes nothing", async () => {
+  const f = await fixture();
+  expect((await repairHackLocalRoute(f.deps)).outcome).toBe("repaired");
+  const receiptBefore = await readFile(f.deps.paths.receiptPath, "utf8");
+  const result = await rollbackHackLocalRoute({
+    ...f.deps,
+    authorize: async () => ({
+      outcome: "authorization-failed",
+      detail: "the macOS administrator prompt was interrupted",
+    }),
+  });
+  expect(result).toMatchObject({
+    outcome: "refused",
+    reason: "authorization-failed",
+    command: HACK_LOCAL_ROLLBACK_COMMAND,
+  });
+  expect(await readFile(f.dnsmasqPath, "utf8")).toBe(REWRITTEN);
+  expect(await readFile(f.deps.paths.receiptPath, "utf8")).toBe(receiptBefore);
+});
+
+test("doctor releases the spinner before the repair prompt and resumes after", async () => {
+  const { checkNativeHackLocalRoute } = await import(
+    "../src/commands/doctor.ts"
+  );
+  const events: string[] = [];
+  const progress = {
+    start: () => events.push("start"),
+    stop: () => events.push("stop"),
+    pause: () => events.push("pause"),
+    resume: () => events.push("resume"),
+  };
+  const failed = await fixture();
+  const results = await checkNativeHackLocalRoute({
+    progress,
+    fix: true,
+    dependencies: async () => ({
+      ...failed.deps,
+      authorize: async () => {
+        events.push("authorize");
+        return {
+          outcome: "authorization-failed",
+          detail: "the macOS administrator prompt timed out after 120 seconds",
+        };
+      },
+    }),
+  });
+  expect(events).toEqual(["pause", "authorize", "resume"]);
+  expect(results[0]).toMatchObject({
+    name: "native hack.local repair",
+    status: "warn",
+  });
+  expect(results[0]?.message).toContain(
+    "Repair refused (authorization-failed)"
+  );
+  expect(results[0]?.message).toContain('Run "sudo -v" in this terminal first');
+  expect(results[0]?.message).not.toContain("declined");
+
+  events.length = 0;
+  const quiet = await fixture({ prompt: false });
+  const quietResults = await checkNativeHackLocalRoute({
+    progress,
+    fix: true,
+    dependencies: async () => ({
+      ...quiet.deps,
+      authorize: async () => {
+        events.push("authorize");
+        return APPROVED;
+      },
+    }),
+  });
+  // Non-interactive runs neither prompt nor release the terminal.
+  expect(events).toEqual([]);
+  expect(quietResults[0]?.message).toContain("non-interactive");
+});
+
 test("a change during authorization refuses before any effect", async () => {
   const f = await fixture();
   const deps: HackLocalRouteDependencies = {
     ...f.deps,
     authorize: async () => {
       await writeFile(f.dnsmasqPath, `${ORIGINAL}# edited\n`);
-      return true;
+      return APPROVED;
     },
   };
   expect(await repairHackLocalRoute(deps)).toMatchObject({
@@ -694,7 +846,12 @@ test("doctor --fix applies the repair and JSON reports the route state", async (
   const { checkNativeHackLocalRoute, buildDoctorJsonData } = await import(
     "../src/commands/doctor.ts"
   );
-  const progress = { start: () => undefined, stop: () => undefined };
+  const progress = {
+    start: () => undefined,
+    stop: () => undefined,
+    pause: () => undefined,
+    resume: () => undefined,
+  };
   const reportOnly = await fixture();
   const reported = await checkNativeHackLocalRoute({
     progress,
@@ -828,7 +985,7 @@ test("rollback without a terminal refuses with the exact command and changes not
 
   const declined = await rollbackHackLocalRoute({
     ...f.deps,
-    authorize: async () => false,
+    authorize: async () => DECLINED,
   });
   expect(declined).toMatchObject({ outcome: "refused", reason: "declined" });
   expect(await readFile(f.dnsmasqPath, "utf8")).toBe(REWRITTEN);
@@ -845,7 +1002,7 @@ test("rollback rechecks the file and receipt after authorization", async () => {
       ...fileChanged.deps,
       authorize: async () => {
         await writeFile(fileChanged.dnsmasqPath, edited);
-        return true;
+        return APPROVED;
       },
     })
   ).toMatchObject({ outcome: "refused", reason: "inputs-changed" });
@@ -861,7 +1018,7 @@ test("rollback rechecks the file and receipt after authorization", async () => {
       ...receiptChanged.deps,
       authorize: async () => {
         await editReceipt(receiptChanged.deps, {});
-        return true;
+        return APPROVED;
       },
     })
   ).toMatchObject({ outcome: "refused", reason: "inputs-changed" });

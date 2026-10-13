@@ -114,6 +114,7 @@ import {
 } from "../lib/mutagen.ts";
 import {
   inspectNativeCaTrust,
+  type NativeCaDoctorDependencies,
   repairNativeCaTrust,
 } from "../lib/native-ca-doctor.ts";
 import {
@@ -161,6 +162,11 @@ import {
 import { readProjectsRegistry } from "../lib/projects-registry.ts";
 import { readRuntimeProjects } from "../lib/runtime-projects.ts";
 import { exec, findExecutableInPath, run } from "../lib/shell.ts";
+import {
+  type PausableProgress,
+  pausableSpinner,
+  withTerminalHandoff,
+} from "../lib/terminal-handoff.ts";
 import { resolveSessionsMuxMode } from "../mux/mux-config.ts";
 import {
   renderGlobalCaddyCompose,
@@ -1050,22 +1056,11 @@ async function handleNativeDoctor(opts: {
             message: "System-keychain repair requires macOS.",
           };
         }
-        const repaired = await repairNativeCaTrust({
+        return await repairNativeCaTrustCheck({
+          progress,
           runtime: opts.runtime,
           hostname,
         });
-        const messages = {
-          installed:
-            "Verified live native root installed in the System keychain.",
-          "already-trusted": "Verified live native root was already trusted.",
-          declined:
-            "Trust repair requires an interactive confirmation and native administrator prompt.",
-        } as const;
-        return {
-          name: "native ca repair",
-          status: repaired === "declined" ? "warn" : "ok",
-          message: messages[repaired],
-        };
       })
     );
   }
@@ -1189,6 +1184,46 @@ async function handleNativeDoctor(opts: {
 }
 
 /**
+ * The `native ca repair` check body. The spinner is released at the trust
+ * confirmation and stays off through the administrator prompt and the sudo -n
+ * install, so nothing erases the password prompt.
+ */
+export async function repairNativeCaTrustCheck(opts: {
+  readonly progress: DoctorProgress;
+  readonly runtime: NativeRuntimeSelection;
+  readonly hostname: string | undefined;
+  readonly dependencies?: Partial<NativeCaDoctorDependencies>;
+}): Promise<CheckResult> {
+  const confirm = opts.dependencies?.confirm ?? confirmSafe;
+  const repaired = await withTerminalHandoff(
+    opts.progress,
+    async (claim) =>
+      await repairNativeCaTrust({
+        runtime: opts.runtime,
+        hostname: opts.hostname,
+        dependencies: {
+          ...opts.dependencies,
+          confirm: async (prompt) => {
+            claim();
+            return await confirm(prompt);
+          },
+        },
+      })
+  );
+  const messages = {
+    installed: "Verified live native root installed in the System keychain.",
+    "already-trusted": "Verified live native root was already trusted.",
+    declined:
+      "Trust repair requires an interactive confirmation and native administrator prompt.",
+  } as const;
+  return {
+    name: "native ca repair",
+    status: repaired === "declined" ? "warn" : "ok",
+    message: messages[repaired],
+  };
+}
+
+/**
  * Report, and with --fix authorize and apply, the native hack.local route
  * repair. Refusals are warnings with a closed reason; only an unexpected
  * failure is an error.
@@ -1217,7 +1252,23 @@ export async function checkNativeHackLocalRoute(opts: {
   if (opts.fix) {
     results.push(
       await runCheck(opts.progress, HACK_LOCAL_REPAIR_CHECK, async () => {
-        const repaired = await repairHackLocalRoute(deps);
+        // Release the terminal before the first prompt and keep it released
+        // through the administrator prompt and every later sudo -n step.
+        const repaired = await withTerminalHandoff(
+          opts.progress,
+          async (claim) =>
+            await repairHackLocalRoute({
+              ...deps,
+              authorize: async (message) => {
+                claim();
+                return await deps.authorize(message);
+              },
+              confirm: async (message) => {
+                claim();
+                return await deps.confirm(message);
+              },
+            })
+        );
         if (repaired.outcome === "repaired") {
           return {
             name: HACK_LOCAL_REPAIR_CHECK,
@@ -1341,10 +1392,7 @@ export function assertDoctorOptionCompatibility(opts: {
   }
 }
 
-type DoctorProgress = {
-  start(message?: string): void;
-  stop(message?: string): void;
-};
+type DoctorProgress = PausableProgress;
 
 /**
  * Spinner wrapper that stays silent on non-TTY stdout (piped/automation) so
@@ -1359,13 +1407,15 @@ function createDoctorProgress(opts: {
     process.stdout.isTTY === true &&
     (process.env.NO_COLOR ?? "").trim().length === 0;
   if (interactive) {
-    return spinner();
+    return pausableSpinner(spinner());
   }
 
   return {
     start: (_message?: string) => {
       // Quiet in non-TTY/JSON mode.
     },
+    pause: () => undefined,
+    resume: () => undefined,
     stop: (message?: string) => {
       if (!opts.json && message) {
         process.stdout.write(`${message}\n`);

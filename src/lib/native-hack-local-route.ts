@@ -83,7 +83,13 @@ export type HackLocalRouteRefusal =
   | "foreign-resolver"
   | "old-target-live"
   | "non-interactive"
+  /** The user answered no to the reviewed confirmation. */
   | "declined"
+  /**
+   * The user approved, but the macOS administrator prompt did not complete
+   * (timed out, interrupted, wrong password or no foreground terminal).
+   */
+  | "authorization-failed"
   | "busy"
   | "restart-unavailable"
   | "inputs-changed"
@@ -122,6 +128,20 @@ export interface HackLocalRoutePaths {
   readonly receiptPath: string;
 }
 
+/**
+ * Outcome of the confirmation plus the native administrator prompt. Only an
+ * answer of no is `declined`; an approved change whose administrator prompt
+ * did not complete is `authorization-failed`.
+ */
+export type HackLocalRouteAuthorization =
+  | { readonly outcome: "approved" }
+  | { readonly outcome: "declined" }
+  | {
+      readonly outcome: "authorization-failed";
+      /** Control-free phrase naming why the prompt did not complete. */
+      readonly detail: string;
+    };
+
 /** Every host read and effect is supplied by the caller. */
 export interface HackLocalRouteDependencies {
   readonly paths: HackLocalRoutePaths;
@@ -150,8 +170,11 @@ export interface HackLocalRouteDependencies {
   /** Bounded probe: true when the old target still answers on 443. */
   readonly probeTarget: (target: string) => Promise<boolean>;
   readonly canPrompt: () => boolean;
-  /** Human confirmation plus the native administrator prompt. */
-  readonly authorize: (message: string) => Promise<boolean>;
+  /**
+   * Human confirmation plus the native administrator prompt. Runs before any
+   * privileged step, which relies on the ticket this prompt caches.
+   */
+  readonly authorize: (message: string) => Promise<HackLocalRouteAuthorization>;
   /** Human confirmation only, for a change limited to the private receipt. */
   readonly confirm: (message: string) => Promise<boolean>;
   /**
@@ -904,6 +927,26 @@ function busy(): {
   };
 }
 
+/** Refusal for an approved change whose administrator prompt did not complete. */
+function authorizationFailed(
+  why: string,
+  command: string
+): {
+  readonly outcome: "refused";
+  readonly reason: "authorization-failed";
+  readonly detail: string;
+  readonly command: string;
+} {
+  return {
+    outcome: "refused",
+    reason: "authorization-failed",
+    detail: printable(
+      `The macOS administrator prompt did not complete (${why}); nothing changed. Run "sudo -v" in this terminal first, then rerun: ${command}`
+    ),
+    command,
+  };
+}
+
 /**
  * Authorized, reversible repair. Rechecks the plan after the administrator
  * prompt, publishes a pending receipt before effects, and on failure restores
@@ -963,17 +1006,20 @@ async function repairUnderLock(
     plan.oldTarget === DEFAULT_HOST_DNS_IP
       ? ""
       : `${plan.oldTarget}:443 did not answer; `;
-  const approved = await deps.authorize(
+  const authorization = await deps.authorize(
     printable(
       `Native hack.local repair: ${changes.join(" and ")}? ${probe}the native relay listens on 127.0.0.1:${plan.relayPort}. This restarts dnsmasq. Undo: ${HACK_LOCAL_ROLLBACK_COMMAND}`
     )
   );
-  if (!approved) {
+  if (authorization.outcome === "declined") {
     return {
       outcome: "refused",
       reason: "declined",
-      detail: "The hack.local repair was not authorized; nothing changed.",
+      detail: "The hack.local repair was declined; nothing changed.",
     };
+  }
+  if (authorization.outcome === "authorization-failed") {
+    return authorizationFailed(authorization.detail, HACK_LOCAL_REPAIR_COMMAND);
   }
   let restart: () => Promise<void>;
   try {
@@ -1164,7 +1210,7 @@ async function rollbackUnderLock(opts: {
   if (step.kind === "drift") {
     return await releaseReceipt({ ...opts, samePaths });
   }
-  const approved = await deps.authorize(
+  const authorization = await deps.authorize(
     printable(
       `Restore "${receipt.oldLine}" in ${receipt.dnsmasqPath}${
         receipt.resolverAction === "create"
@@ -1173,12 +1219,18 @@ async function rollbackUnderLock(opts: {
       }? This restarts dnsmasq.`
     )
   );
-  if (!approved) {
+  if (authorization.outcome === "declined") {
     return {
       outcome: "refused",
       reason: "declined",
-      detail: "The hack.local rollback was not authorized; nothing changed.",
+      detail: "The hack.local rollback was declined; nothing changed.",
     };
+  }
+  if (authorization.outcome === "authorization-failed") {
+    return authorizationFailed(
+      authorization.detail,
+      HACK_LOCAL_ROLLBACK_COMMAND
+    );
   }
   // Restoring the file needs no service; a missing or ambiguous dnsmasq only
   // means the restored line loads on its next start.

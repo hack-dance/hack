@@ -58,6 +58,11 @@ import { resolveDaemonPaths } from "../daemon/paths.ts";
 import { isProcessRunning } from "../daemon/process.ts";
 import { readDaemonStatus } from "../daemon/status.ts";
 import {
+  ADMINISTRATOR_PROMPT_HINT,
+  describeAdministratorAuthorizationFailure,
+  requestAdministratorAuthorization,
+} from "../lib/admin-authorization.ts";
+import {
   resolveGlobalConfigPath,
   resolveGlobalHackDir,
 } from "../lib/config-paths.ts";
@@ -543,13 +548,7 @@ async function handleGlobalDnsActivate({
     if (!accepted) {
       return false;
     }
-    return (
-      (await run(["sudo", "-v"], {
-        stdin: "inherit",
-        timeoutMs: 120_000,
-        forwardSignals: true,
-      })) === 0
-    );
+    return await requireNativeAdministratorAuthorization();
   };
   const deps = createNativeDnsHostDependencies({
     receiptPath: initial.receiptPath,
@@ -668,13 +667,7 @@ async function handleGlobalDnsDeactivate({
     if (!accepted) {
       return false;
     }
-    return (
-      (await run(["sudo", "-v"], {
-        stdin: "inherit",
-        timeoutMs: 120_000,
-        forwardSignals: true,
-      })) === 0
-    );
+    return await requireNativeAdministratorAuthorization();
   };
   const deps = createNativeDnsHostDependencies({
     receiptPath: initial.receiptPath,
@@ -2343,6 +2336,21 @@ async function runMacPrivilegedCommand(opts: {
   return await run(["sudo", ...opts.command], {
     stdin: "inherit",
   });
+}
+
+/**
+ * Native administrator prompt after an approved DNS change. A failed prompt
+ * throws, so it is reported as an authorization failure and never as the
+ * user's decline.
+ */
+async function requireNativeAdministratorAuthorization(): Promise<true> {
+  const result = await requestAdministratorAuthorization();
+  if (result.status === "failed") {
+    throw new Error(
+      `macOS administrator authorization did not complete (${describeAdministratorAuthorizationFailure(result)}); nothing changed. ${ADMINISTRATOR_PROMPT_HINT}`
+    );
+  }
+  return true;
 }
 
 function isInteractiveTerminal(): boolean {

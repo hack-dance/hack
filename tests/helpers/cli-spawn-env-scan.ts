@@ -11,39 +11,69 @@ import ts from "typescript";
  * so an env object that a fixture helper builds for the CLI is checked where
  * it is built.
  *
+ * Spawn calls are `spawn`, `spawnSync`, `execFile`, `exec`, `fork` and their
+ * `Bun.`/`child_process.`/`execa` forms; `run` and `exec` imported from
+ * src/lib/shell.ts, named or through a namespace import; and calls to a
+ * same-file function (a declaration, or a `const` arrow or function
+ * expression) whose body calls one of those shell functions or another such
+ * wrapper.
+ *
  * Rules, checked on the TypeScript syntax tree of each in-scope file:
  * - `runner-env`: no copy of the whole runner environment. A use of
  *   `process.env`, `Bun.env`, `import.meta.env` or a `node:process` `env`
- *   import is a copy unless it reads, deletes or tests one key, or replaces
- *   the whole object. Spreads, `env: process.env`, `Object.assign(x,
- *   process.env)`, `const saved = process.env` and rest destructuring are
- *   all copies.
+ *   import is a copy unless it reads, deletes or tests one key, lists only
+ *   the key names with `Object.keys`, or replaces the whole object. Spreads,
+ *   `env: process.env`, `Object.assign(x, process.env)`, `const saved =
+ *   process.env` and rest destructuring are all copies.
  * - `runner-home`: no `HOME` property whose value derives from the runner's
  *   home: `process.env.HOME`, `homedir()` in any form, `userInfo().homedir`,
  *   or a binding in the same file that holds one of these.
- * - `cli-without-env`: a spawn call (`spawn`, `spawnSync`, `execFile`,
- *   `exec`, `fork` and their `Bun.`/`child_process.` forms) whose arguments
- *   reach the CLI must pass an `env` option. Without it the child inherits the
- *   whole runner environment, including HOME. A wrapper such as `python3
- *   probe.py bun index.ts` counts, because its argv names the CLI.
+ * - `cli-without-env`: a spawn call whose arguments reach the CLI must pass an
+ *   `env` option. Without it the child inherits the whole runner environment,
+ *   including HOME. Arguments reach the CLI when they name it directly,
+ *   through a same-file binding, or through a call to a same-file function
+ *   that returns it. A wrapper such as `python3 probe.py bun index.ts` counts,
+ *   because its argv names the CLI.
  * - `env-without-home`: when that `env` is an object literal, it must set
  *   HOME or spread another object. Without HOME the child resolves its home
- *   from the account database, which is the runner's real home.
+ *   from the account database, which is the runner's real home. An `env`
+ *   that calls a same-file function, directly or through a binding, is
+ *   checked through the values that function returns.
+ * - `shell-runner-env`: a CLI spawn through src/lib/shell.ts must also pass
+ *   `unsetEnvKeys`, or spread an options object such as
+ *   `privateCliRunEnv(...)`, because shell `run` and `exec` lay `env` over the
+ *   runner's whole `process.env`. Shell `exec` cannot unset keys, so it cannot
+ *   run the CLI privately.
+ *
+ * Shell wrappers. At a wrapper call that names the CLI, each shell call inside
+ * the wrapper is checked: against the wrapper call's own arguments when the
+ * inner options use a wrapper parameter, through the inner wrapper when it is
+ * one (at most four deep), and against the inner options otherwise.
  *
  * Limits. This is a syntax check within one file, not data flow. It trusts an
  * env, HOME or argv value that comes from another module or a parameter: for
  * example `HOME: opts.home`, `env: options.env` in a shared runner, or a local
- * `run(argv)` wrapper whose spawn never names the CLI itself. A spawn of a CLI
- * path built at runtime without naming `index.ts` (for example a compiled
- * binary) is not seen either. Those spawns still need a private env by
- * convention; prefer one shared runner that calls `privateCliEnv`.
+ * `run(argv)` wrapper around `Bun.spawn` whose spawn never names the CLI
+ * itself. A same-file function is followed only for an `env` value (at most
+ * four calls deep) and an argv, and only through its `return` expressions,
+ * not the branches of a conditional; a function that returns options is not
+ * followed, so such a call counts as options without `env`. Inner options
+ * that only partly use a wrapper parameter are checked as the call site's
+ * arguments. An options object that spreads another object is trusted, and
+ * so is the `unsetEnvKeys` value. A
+ * dynamic key read such as `process.env[key]` counts as a one-key use, so a
+ * loop that copies values key by key is not seen. A spawn of a CLI path built
+ * at runtime without naming `index.ts` (for example a compiled binary) is not
+ * seen either. Those spawns still need a private env by convention; prefer one
+ * shared runner that calls `privateCliEnv` or `privateCliRunEnv`.
  */
 
 export type Rule =
   | "runner-env"
   | "runner-home"
   | "cli-without-env"
-  | "env-without-home";
+  | "env-without-home"
+  | "shell-runner-env";
 
 export type Finding = { readonly line: number; readonly rule: Rule };
 
@@ -69,6 +99,11 @@ const ENV_OWNERS = new Set([
   "globalThis.process",
   "globalThis.Bun",
 ]);
+/** src/lib/shell.ts, by relative path or through a `@lib`/`@` alias. */
+const SHELL_MODULE = /(?:^|[/@])lib\/shell(?:\.ts)?$/;
+const SHELL_SPAWNS: ReadonlySet<string> = new Set(["run", "exec"]);
+/** How many same-file calls an `env` value is followed through. */
+const MAX_RETURN_DEPTH = 4;
 const KEY_ACCESSORS = new Set([
   "Reflect.deleteProperty",
   "Reflect.has",
@@ -91,11 +126,27 @@ function moduleName(specifier: string): string {
   return specifier.replace(/^node:/, "");
 }
 
-/** How this file can spawn a process: imported functions and namespaces. */
+type FunctionNode =
+  | ts.FunctionDeclaration
+  | ts.ArrowFunction
+  | ts.FunctionExpression;
+
+/** How this file can spawn a process. */
 type SpawnNames = {
+  /** Imported process-spawning functions, by local name. */
   readonly functions: ReadonlySet<string>;
+  /** Namespace imports (and `Bun`), with the spawn exports they hold. */
   readonly namespaces: ReadonlyMap<string, ReadonlySet<string>>;
+  /** Local names of src/lib/shell.ts `run` and `exec`. */
+  readonly shellFunctions: ReadonlySet<string>;
+  /** Namespace imports of src/lib/shell.ts. */
+  readonly shellNamespaces: ReadonlySet<string>;
+  /** Same-file functions that call a shell spawn, by name. */
+  readonly wrappers: ReadonlyMap<string, FunctionNode>;
 };
+
+/** A process API, src/lib/shell.ts, or a same-file wrapper of the shell. */
+type SpawnKind = "process" | "shell" | "wrapper";
 
 /** Local names that one import declaration binds. */
 type ImportNames = {
@@ -145,45 +196,152 @@ function importNames(file: ts.SourceFile): ImportNames[] {
   return imports;
 }
 
-function spawnImports(file: ts.SourceFile): SpawnNames {
+/** Same-file named functions: declarations and `const` function values. */
+function localFunctions(file: ts.SourceFile): Map<string, FunctionNode> {
+  const functions = new Map<string, FunctionNode>();
+  walk(file, (node) => {
+    if (ts.isFunctionDeclaration(node) && node.name && node.body) {
+      functions.set(node.name.text, node);
+    } else if (
+      ts.isVariableDeclaration(node) &&
+      ts.isIdentifier(node.name) &&
+      node.initializer
+    ) {
+      const value = unwrap(node.initializer);
+      if (ts.isArrowFunction(value) || ts.isFunctionExpression(value)) {
+        functions.set(node.name.text, value);
+      }
+    }
+  });
+  return functions;
+}
+
+/** Calls in a function body, nested functions included, that `matches`. */
+function callsIn(
+  fn: FunctionNode,
+  matches: (call: ts.CallExpression) => boolean
+): ts.CallExpression[] {
+  const calls: ts.CallExpression[] = [];
+  if (!fn.body) {
+    return calls;
+  }
+  walk(fn.body, (node) => {
+    if (ts.isCallExpression(node) && matches(node)) {
+      calls.push(node);
+    }
+  });
+  return calls;
+}
+
+function isShellCall(node: ts.CallExpression, spawn: SpawnNames): boolean {
+  const kind = spawnKind(node, spawn);
+  return kind === "shell" || kind === "wrapper";
+}
+
+/** Records the spawn exports that one import binds, by local name. */
+function addSpawnImport(
+  entry: ImportNames,
+  exports: ReadonlySet<string>,
+  functions: Set<string>,
+  namespaces: Map<string, ReadonlySet<string>>
+): void {
+  for (const name of entry.whole) {
+    namespaces.set(name, exports);
+  }
+  for (const { imported, local } of entry.named) {
+    if (exports.has(imported)) {
+      functions.add(local);
+    }
+  }
+}
+
+function spawnImports(
+  file: ts.SourceFile,
+  localFunctionsByName: ReadonlyMap<string, FunctionNode>
+): SpawnNames {
   const functions = new Set<string>();
   const namespaces = new Map<string, ReadonlySet<string>>([
     ["Bun", new Set(["spawn", "spawnSync"])],
   ]);
+  const shellFunctions = new Set<string>();
+  const shellNamespaces = new Set<string>();
   for (const entry of importNames(file)) {
-    const exports = SPAWN_MODULES[entry.module];
-    if (!exports) {
-      continue;
-    }
-    for (const name of entry.whole) {
-      namespaces.set(name, exports);
-    }
-    for (const { imported, local } of entry.named) {
-      if (exports.has(imported)) {
-        functions.add(local);
+    if (SHELL_MODULE.test(entry.module)) {
+      addSpawnImport(entry, SHELL_SPAWNS, shellFunctions, namespaces);
+      for (const name of entry.whole) {
+        shellNamespaces.add(name);
+      }
+    } else {
+      const exports = SPAWN_MODULES[entry.module];
+      if (exports) {
+        addSpawnImport(entry, exports, functions, namespaces);
       }
     }
   }
-  return { functions, namespaces };
+  const wrappers = new Map<string, FunctionNode>();
+  const names: SpawnNames = {
+    functions,
+    namespaces,
+    shellFunctions,
+    shellNamespaces,
+    wrappers,
+  };
+  addShellWrappers(names, wrappers, localFunctionsByName);
+  return names;
+}
+
+/** Adds same-file shell wrappers to `wrappers`, closed over wrappers of wrappers. */
+function addShellWrappers(
+  names: SpawnNames,
+  wrappers: Map<string, FunctionNode>,
+  localFunctionsByName: ReadonlyMap<string, FunctionNode>
+): void {
+  let grew = true;
+  while (grew) {
+    grew = false;
+    for (const [name, fn] of localFunctionsByName) {
+      if (
+        !wrappers.has(name) &&
+        callsIn(fn, (call) => isShellCall(call, names)).length > 0
+      ) {
+        wrappers.set(name, fn);
+        grew = true;
+      }
+    }
+  }
+}
+
+function spawnKind(node: ts.Node, spawn: SpawnNames): SpawnKind | null {
+  if (!ts.isCallExpression(node)) {
+    return null;
+  }
+  const callee = unwrap(node.expression);
+  if (ts.isIdentifier(callee)) {
+    if (spawn.functions.has(callee.text)) {
+      return "process";
+    }
+    if (spawn.shellFunctions.has(callee.text)) {
+      return "shell";
+    }
+    return spawn.wrappers.has(callee.text) ? "wrapper" : null;
+  }
+  if (
+    ts.isPropertyAccessExpression(callee) &&
+    ts.isIdentifier(callee.expression) &&
+    spawn.namespaces.get(callee.expression.text)?.has(callee.name.text)
+  ) {
+    return spawn.shellNamespaces.has(callee.expression.text)
+      ? "shell"
+      : "process";
+  }
+  return null;
 }
 
 function isSpawnCall(
   node: ts.Node,
   spawn: SpawnNames
 ): node is ts.CallExpression {
-  if (!ts.isCallExpression(node)) {
-    return false;
-  }
-  const callee = unwrap(node.expression);
-  if (ts.isIdentifier(callee)) {
-    return spawn.functions.has(callee.text);
-  }
-  return (
-    ts.isPropertyAccessExpression(callee) &&
-    ts.isIdentifier(callee.expression) &&
-    (spawn.namespaces.get(callee.expression.text)?.has(callee.name.text) ??
-      false)
-  );
+  return spawnKind(node, spawn) !== null;
 }
 
 /** The called name: `f` for `f()` and `x.f()`. */
@@ -353,7 +511,9 @@ function isKeyUse(node: ts.Node): boolean {
   if (
     ts.isCallExpression(parent) &&
     parent.arguments[0] === node &&
-    KEY_ACCESSORS.has(parent.expression.getText())
+    (KEY_ACCESSORS.has(parent.expression.getText()) ||
+      (parent.arguments.length === 1 &&
+        parent.expression.getText() === "Object.keys"))
   ) {
     return true;
   }
@@ -449,12 +609,73 @@ function setsHome(object: ts.ObjectLiteralExpression): boolean {
   );
 }
 
-/** Findings for one spawn call that reaches the source CLI. */
+/** The `return` expressions of a function, outside nested functions. */
+function returnedValues(fn: FunctionNode): ts.Expression[] {
+  if (!fn.body) {
+    return [];
+  }
+  if (!ts.isBlock(fn.body)) {
+    return [fn.body];
+  }
+  const returned: ts.Expression[] = [];
+  walk(fn.body, (node) => {
+    if (isFunctionLike(node)) {
+      return false;
+    }
+    if (ts.isReturnStatement(node) && node.expression) {
+      returned.push(node.expression);
+    }
+  });
+  return returned;
+}
+
+/** Same-file facts that a spawn check reads. */
+type ScanContext = {
+  readonly values: ReadonlyMap<string, ts.Expression>;
+  readonly functions: ReadonlyMap<string, FunctionNode>;
+  readonly cliNames: ReadonlySet<string>;
+  readonly spawn: SpawnNames;
+};
+
+/**
+ * Whether an `env` value is an object literal without HOME: directly, through
+ * a same-file binding, or as a value that a same-file function it calls
+ * returns.
+ */
+function envLacksHome(
+  node: ts.Expression,
+  ctx: ScanContext,
+  depth = 0
+): boolean {
+  const value = resolveLocal(node, ctx.values);
+  if (ts.isObjectLiteralExpression(value)) {
+    return !setsHome(value);
+  }
+  if (!ts.isCallExpression(value) || depth >= MAX_RETURN_DEPTH) {
+    return false;
+  }
+  const callee = unwrap(value.expression);
+  const fn = ts.isIdentifier(callee)
+    ? ctx.functions.get(callee.text)
+    : undefined;
+  return (
+    fn !== undefined &&
+    returnedValues(fn).some((returned) =>
+      envLacksHome(returned, ctx, depth + 1)
+    )
+  );
+}
+
+/**
+ * Findings for one spawn call that reaches the source CLI. `shell` marks a
+ * src/lib/shell.ts call, which lays `env` over the runner's environment.
+ */
 function cliSpawnFindings(
   call: ts.CallExpression,
-  values: ReadonlyMap<string, ts.Expression>,
-  cliNames: ReadonlySet<string>
+  ctx: ScanContext,
+  shell: boolean
 ): Rule[] {
+  const { values, cliNames } = ctx;
   const options = call.arguments.map((argument) =>
     resolveLocal(argument, values)
   );
@@ -466,13 +687,21 @@ function cliSpawnFindings(
     if (!property) {
       continue;
     }
-    const value = resolveLocal(
-      ts.isPropertyAssignment(property) ? property.initializer : property.name,
-      values
+    if (
+      envLacksHome(
+        ts.isPropertyAssignment(property)
+          ? property.initializer
+          : property.name,
+        ctx
+      )
+    ) {
+      return ["env-without-home"];
+    }
+    const unsets = option.properties.some(
+      (item) =>
+        ts.isSpreadAssignment(item) || isNamedProperty(item, "unsetEnvKeys")
     );
-    return ts.isObjectLiteralExpression(value) && !setsHome(value)
-      ? ["env-without-home"]
-      : [];
+    return shell && !unsets ? ["shell-runner-env"] : [];
   }
   // An options value from a parameter, another module or a spread is opaque:
   // it may carry an env, which is checked where it is built.
@@ -487,24 +716,120 @@ function cliSpawnFindings(
   return opaque ? [] : ["cli-without-env"];
 }
 
+function parameterNames(fn: FunctionNode): Set<string> {
+  const names = new Set<string>();
+  for (const parameter of fn.parameters) {
+    walk(parameter.name, (node) => {
+      if (ts.isIdentifier(node)) {
+        names.add(node.text);
+      }
+    });
+  }
+  return names;
+}
+
+/** Whether any of `nodes` references one of `names`. */
+function referencesAny(
+  nodes: readonly ts.Node[],
+  names: ReadonlySet<string>
+): boolean {
+  let found = false;
+  for (const node of nodes) {
+    walk(node, (child) => {
+      if (found) {
+        return false;
+      }
+      found =
+        ts.isIdentifier(child) && names.has(child.text) && isReference(child);
+    });
+  }
+  return found;
+}
+
+/** Findings for a CLI spawn call of any kind. */
+function spawnCallFindings(
+  call: ts.CallExpression,
+  kind: SpawnKind,
+  ctx: ScanContext,
+  depth = 0
+): Rule[] {
+  if (kind !== "wrapper") {
+    return cliSpawnFindings(call, ctx, kind === "shell");
+  }
+  const callee = unwrap(call.expression);
+  const fn = ts.isIdentifier(callee)
+    ? ctx.spawn.wrappers.get(callee.text)
+    : undefined;
+  if (!fn || depth >= MAX_RETURN_DEPTH) {
+    return [];
+  }
+  const parameters = parameterNames(fn);
+  const rules = new Set<Rule>();
+  for (const inner of callsIn(fn, (node) => isShellCall(node, ctx.spawn))) {
+    let found: Rule[];
+    if (referencesAny(inner.arguments.slice(1), parameters)) {
+      // Options built from the wrapper's parameters come from this call site.
+      found = cliSpawnFindings(call, ctx, true);
+    } else if (spawnKind(inner, ctx.spawn) === "wrapper") {
+      found = spawnCallFindings(inner, "wrapper", ctx, depth + 1);
+    } else {
+      found = cliSpawnFindings(inner, ctx, true);
+    }
+    for (const rule of found) {
+      rules.add(rule);
+    }
+  }
+  return [...rules];
+}
+
+/**
+ * Names that hold a CLI path. A binding is one when its value names the CLI
+ * outside a function or a spawn call: `const proc = Bun.spawn([..,
+ * "index.ts"])` is not one. A same-file function is one when a value it
+ * returns names the CLI the same way, so `hostCommand(...)` in an argv counts.
+ */
+function cliPathNames(
+  values: ReadonlyMap<string, ts.Expression>,
+  functions: ReadonlyMap<string, FunctionNode>,
+  spawn: SpawnNames
+): Set<string> {
+  const names = new Set<string>();
+  const notPath = (child: ts.Node) =>
+    isFunctionLike(child) || isSpawnCall(child, spawn);
+  let grew = true;
+  while (grew) {
+    grew = false;
+    for (const [name, value] of values) {
+      if (!names.has(name) && namesCli(value, names, notPath)) {
+        names.add(name);
+        grew = true;
+      }
+    }
+    for (const [name, fn] of functions) {
+      if (
+        !names.has(name) &&
+        returnedValues(fn).some((value) => namesCli(value, names, notPath))
+      ) {
+        names.add(name);
+        grew = true;
+      }
+    }
+  }
+  return names;
+}
+
 /** Rule findings for one in-scope source file. */
 export function scanSource(path: string, source: string): Finding[] {
   const file = parse(path, source);
   const env = processImports(file);
   const values = bindings(file);
-  const spawn = spawnImports(file);
-  // A binding is a CLI path when its value names the CLI outside a function
-  // or a spawn call: `const proc = Bun.spawn([.., "index.ts"])` is not one.
-  const cliNames = taintedNames(values, (node, names) =>
-    namesCli(
-      node,
-      names,
-      (child) => isFunctionLike(child) || isSpawnCall(child, spawn)
-    )
-  );
+  const functions = localFunctions(file);
+  const spawn = spawnImports(file, functions);
+  const cliNames = cliPathNames(values, functions, spawn);
   const homeNames = taintedNames(values, (node, names) =>
     readsRunnerHome(node, env, names)
   );
+  const ctx: ScanContext = { values, functions, cliNames, spawn };
   const findings: Finding[] = [];
   const add = (node: ts.Node, rule: Rule) => {
     findings.push({
@@ -526,11 +851,13 @@ export function scanSource(path: string, source: string): Finding[] {
     ) {
       add(node, "runner-home");
     }
+    const kind = spawnKind(node, spawn);
     if (
-      isSpawnCall(node, spawn) &&
+      kind !== null &&
+      ts.isCallExpression(node) &&
       node.arguments.some((argument) => namesCli(argument, cliNames))
     ) {
-      for (const rule of cliSpawnFindings(node, values, cliNames)) {
+      for (const rule of spawnCallFindings(node, kind, ctx)) {
         add(node, rule);
       }
     }

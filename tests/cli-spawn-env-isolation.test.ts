@@ -129,6 +129,9 @@ test("the scan flags every way to hand the CLI the runner's environment", () => 
       spawnWith("{ env: { ...rest } }")
     )
   ).toEqual(["1 runner-env"]);
+  expect(scanExample("const all = Object.values(process.env);")).toEqual([
+    "1 runner-env",
+  ]);
   expect(
     scanExample(
       "const saved = process.env;",
@@ -233,7 +236,8 @@ test("the scan accepts a private env and one-key uses of process.env", () => {
       "process.env = { PATH: p };",
       "const { PATH } = process.env;",
       "restoreEnv('HOME', home);",
-      "const p = `${process.env.PATH}`;"
+      "const p = `${process.env.PATH}`;",
+      "const keys = Object.keys(process.env);"
     )
   ).toEqual([]);
   // A spawn that does not reach the CLI may inherit, including one that uses
@@ -255,6 +259,105 @@ test("the scan accepts a private env and one-key uses of process.env", () => {
       'exec([process.execPath, "index.ts"], { cwd });'
     )
   ).toEqual([]);
+});
+
+test("the scan follows same-file functions for env and argv", () => {
+  // An env returned by a same-file function, directly or through a binding.
+  expect(
+    scanExample(
+      "function fixtureEnv(root) { return { PATH: p, HACK_HOME: root }; }",
+      spawnWith("{ env: fixtureEnv(root) }")
+    )
+  ).toEqual(["2 env-without-home"]);
+  expect(
+    scanExample(
+      "const envFor = (root) => ({ PATH: p });",
+      "const env = envFor(root);",
+      spawnWith("{ env }")
+    )
+  ).toEqual(["3 env-without-home"]);
+  expect(
+    scanExample(
+      "function fixtureEnv() { const e = { PATH: p }; return e; }",
+      spawnWith("{ env: fixtureEnv() }")
+    )
+  ).toEqual(["2 env-without-home"]);
+  expect(
+    scanExample(
+      "function fixtureEnv(root) { return privateCliEnv({ root, env: { X: '1' } }); }",
+      spawnWith("{ env: fixtureEnv(root) }")
+    )
+  ).toEqual([]);
+  // An argv that a same-file function returns reaches the CLI.
+  expect(
+    scanExample(
+      'const entry = resolve(dir, "../index.ts");',
+      "function command() { return [process.execPath, entry]; }",
+      'Bun.spawn(command(), { stdout: "pipe" });',
+      "Bun.spawn(command(), { env: fixtureEnv(root) });",
+      "function fixtureEnv(root) { return { HACK_HOME: root }; }"
+    )
+  ).toEqual(["3 cli-without-env", "4 env-without-home"]);
+});
+
+test("the scan treats src/lib/shell.ts runners and their wrappers as spawns", () => {
+  const cli = '[process.execPath, "../index.ts"]';
+  const shell = 'import { run } from "../src/lib/shell.ts";';
+  // `run` lays env over the runner's whole environment.
+  expect(scanExample(shell, `await run(${cli}, { stdin: "ignore" });`)).toEqual(
+    ["2 cli-without-env"]
+  );
+  expect(
+    scanExample(shell, `await run(${cli}, { env: { LEAKED: "x" } });`)
+  ).toEqual(["2 env-without-home"]);
+  expect(
+    scanExample(shell, `await run(${cli}, { env: privateCliEnv({ root }) });`)
+  ).toEqual(["2 shell-runner-env"]);
+  expect(
+    scanExample(
+      shell,
+      `await run(${cli}, { ...privateCliRunEnv({ root }), stdin: "ignore" });`,
+      "const { env, unsetEnvKeys } = privateCliRunEnv({ root });",
+      `await run(${cli}, { env, unsetEnvKeys });`,
+      'await run(["git", "status"], { cwd });'
+    )
+  ).toEqual([]);
+  // Namespace, alias and renamed imports; shell `exec` cannot unset keys.
+  expect(
+    scanExample(
+      'import * as sh from "@lib/shell";',
+      `sh.exec(${cli}, { env: privateCliEnv({ root }) });`
+    )
+  ).toEqual(["2 shell-runner-env"]);
+  expect(
+    scanExample(
+      'import { exec as realExec } from "../../src/lib/shell.ts";',
+      'realExec(["bun", "index.ts"]);'
+    )
+  ).toEqual(["2 cli-without-env"]);
+  // A wrapper that forwards its parameters is checked at the call site.
+  expect(
+    scanExample(
+      shell,
+      "function runIt(cmd, opts) { return run(cmd, opts); }",
+      `runIt(${cli}, { stdin: "ignore" });`,
+      `runIt(${cli}, { ...privateCliRunEnv({ root }) });`
+    )
+  ).toEqual(["3 cli-without-env"]);
+  // A wrapper with its own options is checked by them.
+  expect(
+    scanExample(
+      shell,
+      "const runPrivate = (cmd) => run(cmd, { ...privateCliRunEnv({ root }) });",
+      'const runLeaky = async (cmd) => { await run(cmd, { stdin: "ignore" }); };',
+      "const runTwice = (cmd) => runLeaky(cmd);",
+      "const runPrivateTwice = (cmd) => runPrivate(cmd);",
+      `runPrivate(${cli});`,
+      `runLeaky(${cli});`,
+      `runTwice(${cli});`,
+      `runPrivateTwice(${cli});`
+    )
+  ).toEqual(["7 cli-without-env", "8 cli-without-env"]);
 });
 
 test("the scan follows a CLI file's local imports and skips other files", () => {

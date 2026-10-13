@@ -82,3 +82,25 @@ export function privateCliEnv(
   env.HOME = home;
   return env;
 }
+
+/**
+ * Options for `run` in src/lib/shell.ts, which builds a child env from the
+ * runner's whole `process.env` plus `env`. `unsetEnvKeys` names every runner
+ * key that {@link privateCliEnv} did not set, so the child gets exactly the
+ * private env. Spread the result into the `run` options.
+ *
+ * The key list is a snapshot: a runner key added between this call and the
+ * spawn would still reach the child. Call it right before `run`.
+ */
+export function privateCliRunEnv(opts: PrivateCliEnvOptions): {
+  readonly env: Record<string, string>;
+  readonly unsetEnvKeys: readonly string[];
+} {
+  const env = privateCliEnv(opts);
+  return {
+    env,
+    unsetEnvKeys: Object.keys(process.env).filter(
+      (key) => !Object.hasOwn(env, key)
+    ),
+  };
+}

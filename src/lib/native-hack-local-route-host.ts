@@ -14,6 +14,11 @@ import { basename, dirname, join, resolve } from "node:path";
 import { inspectActiveNativeHttpsOwner } from "../backends/native-project-https.ts";
 import type { NativeRuntimeSelection } from "../backends/native-runtime-client.ts";
 import { DEFAULT_HOST_DNS_IP } from "../constants.ts";
+import {
+  type AdministratorAuthorization,
+  describeAdministratorAuthorizationFailure,
+  requestAdministratorAuthorization,
+} from "./admin-authorization.ts";
 import { canPrompt, confirmSafe } from "./interactivity.ts";
 import {
   type NativeDnsCommandRunner,
@@ -27,10 +32,11 @@ import {
 } from "./native-domain-dns-snapshot.ts";
 import {
   HACK_LOCAL_DOMAIN,
+  type HackLocalRouteAuthorization,
   type HackLocalRouteDependencies,
   type HackLocalRouteReceipt,
 } from "./native-hack-local-route.ts";
-import { exec, run } from "./shell.ts";
+import { exec } from "./shell.ts";
 
 const IDENTITY = /^\d+:\d+$/;
 const IP_ADDRESS_LINE = /^ip_address:\s*(\S+)\s*$/gm;
@@ -424,6 +430,38 @@ async function verifyLiveHackLocalDns(): Promise<void> {
 }
 
 /**
+ * Confirmation first, then the native administrator prompt. A "no" never
+ * reaches sudo; an approved change whose prompt fails is reported as
+ * `authorization-failed`, never as a decline.
+ */
+export function createHackLocalRouteAuthorizer(deps: {
+  readonly confirm: (message: string) => Promise<boolean>;
+  readonly requestAdministrator: () => Promise<AdministratorAuthorization>;
+}): (message: string) => Promise<HackLocalRouteAuthorization> {
+  return async (message) => {
+    if (!(await deps.confirm(message))) {
+      return { outcome: "declined" };
+    }
+    const result = await deps.requestAdministrator();
+    if (result.status === "authorized") {
+      return { outcome: "approved" };
+    }
+    return {
+      outcome: "authorization-failed",
+      detail: describeAdministratorAuthorizationFailure(result),
+    };
+  };
+}
+
+async function confirmRouteChange(message: string): Promise<boolean> {
+  return await confirmSafe({
+    message,
+    initialValue: false,
+    nonInteractive: "decline",
+  });
+}
+
+/**
  * Production wiring for the native macOS host: Homebrew dnsmasq, the
  * /etc/resolver directory, the verified native relay owner, the system
  * launchd dnsmasq job and the native administrator prompt.
@@ -458,29 +496,12 @@ export async function createNativeHackLocalRouteDependencies(opts: {
     },
     probeTarget: async (target) => await probeTcp({ host: target, port: 443 }),
     canPrompt: () => canPrompt(),
-    async authorize(message) {
-      const accepted = await confirmSafe({
-        message,
-        initialValue: false,
-        nonInteractive: "decline",
-      });
-      if (!accepted) {
-        return false;
-      }
-      return (
-        (await run(["sudo", "-v"], {
-          stdin: "inherit",
-          timeoutMs: 120_000,
-          forwardSignals: true,
-        })) === 0
-      );
-    },
-    confirm: async (message) =>
-      await confirmSafe({
-        message,
-        initialValue: false,
-        nonInteractive: "decline",
-      }),
+    authorize: createHackLocalRouteAuthorizer({
+      confirm: confirmRouteChange,
+      requestAdministrator: async () =>
+        await requestAdministratorAuthorization(),
+    }),
+    confirm: confirmRouteChange,
     async prepareRestart() {
       const host = await inspectNativeDnsHost({ brewPrefix: prefix });
       if (host.mainConfig.path !== dnsmasqPath) {

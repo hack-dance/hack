@@ -90,6 +90,10 @@ async function fixture() {
       }
       return 0;
     },
+    ownsTerminalForeground: () => {
+      calls.push("foreground");
+      return true;
+    },
   };
   return {
     home,
@@ -269,6 +273,96 @@ test("rotation after the sudo prompt prevents keychain installation", async () =
         },
       })
     ).rejects.toThrow("changed during trust verification");
+    expect(f.calls).not.toContain("install");
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("a failed administrator prompt names the cause and never installs", async () => {
+  const f = await fixture();
+  try {
+    await expect(
+      repairNativeCaTrust({
+        runtime: f.runtime,
+        hostname: "app.hack.gy",
+        dependencies: {
+          ...f.dependencies,
+          runCommand: async (cmd) => {
+            f.calls.push(cmd[1] === "-v" ? "sudo-prompt" : "install");
+            return cmd[1] === "-v" ? 124 : 0;
+          },
+        },
+      })
+    ).rejects.toThrow(
+      'Native administrator authorization did not complete (the macOS administrator prompt timed out after 120 seconds); nothing was installed. Run "sudo -v" in this terminal first, then retry.'
+    );
+    const confirmed = f.calls.indexOf("confirm");
+    expect(confirmed).toBeGreaterThanOrEqual(0);
+    expect(f.calls.slice(confirmed)).toEqual([
+      "confirm",
+      "inspect",
+      "foreground",
+      "sudo-prompt",
+    ]);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("doctor releases the spinner before the trust confirmation and the sudo prompt", async () => {
+  const { repairNativeCaTrustCheck } = await import(
+    "../src/commands/doctor.ts"
+  );
+  const f = await fixture();
+  const progress = {
+    start: () => f.calls.push("spinner-start"),
+    stop: () => f.calls.push("spinner-stop"),
+    pause: () => f.calls.push("spinner-pause"),
+    resume: () => f.calls.push("spinner-resume"),
+  };
+  try {
+    expect(
+      await repairNativeCaTrustCheck({
+        progress,
+        runtime: f.runtime,
+        hostname: "app.hack.gy",
+        dependencies: f.dependencies,
+      })
+    ).toMatchObject({ name: "native ca repair", status: "ok" });
+    const paused = f.calls.indexOf("spinner-pause");
+    expect(paused).toBeGreaterThanOrEqual(0);
+    expect(paused).toBeLessThan(f.calls.indexOf("confirm"));
+    expect(f.calls.indexOf("confirm")).toBeLessThan(
+      f.calls.indexOf("sudo-prompt")
+    );
+    expect(f.calls.indexOf("sudo-prompt")).toBeLessThan(
+      f.calls.indexOf("install")
+    );
+    expect(f.calls.at(-1)).toBe("spinner-resume");
+    expect(f.calls.filter((call) => call.startsWith("spinner-"))).toEqual([
+      "spinner-pause",
+      "spinner-resume",
+    ]);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("a background doctor run never shows the administrator prompt", async () => {
+  const f = await fixture();
+  try {
+    await expect(
+      repairNativeCaTrust({
+        runtime: f.runtime,
+        hostname: "app.hack.gy",
+        dependencies: {
+          ...f.dependencies,
+          ownsTerminalForeground: () => false,
+        },
+      })
+    ).rejects.toThrow("not the terminal's foreground job");
+    expect(f.calls).not.toContain("sudo-prompt");
     expect(f.calls).not.toContain("install");
   } finally {
     await f.cleanup();

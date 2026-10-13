@@ -8,6 +8,12 @@ import {
   verifyNativeHttpsHostname,
 } from "../backends/native-project-https.ts";
 import type { NativeRuntimeSelection } from "../backends/native-runtime-client.ts";
+import {
+  ADMINISTRATOR_PROMPT_HINT,
+  describeAdministratorAuthorizationFailure,
+  ownsTerminalForeground,
+  requestAdministratorAuthorization,
+} from "./admin-authorization.ts";
 import { canPrompt, confirmSafe } from "./interactivity.ts";
 import { checkMacCaTrust } from "./mac-ca-trust.ts";
 import { run } from "./shell.ts";
@@ -23,6 +29,7 @@ export interface NativeCaDoctorDependencies {
   readonly promptAllowed: typeof canPrompt;
   readonly confirm: typeof confirmSafe;
   readonly runCommand: typeof run;
+  readonly ownsTerminalForeground: () => boolean;
 }
 
 const DEFAULTS: NativeCaDoctorDependencies = {
@@ -33,6 +40,7 @@ const DEFAULTS: NativeCaDoctorDependencies = {
   promptAllowed: canPrompt,
   confirm: confirmSafe,
   runCommand: run,
+  ownsTerminalForeground,
 };
 
 function sameOwner(a: NativeCaOwner, b: NativeCaOwner): boolean {
@@ -191,13 +199,16 @@ export async function repairNativeCaTrust(opts: {
     } finally {
       await file.close();
     }
-    const prompted = await deps.runCommand(["sudo", "-v"], {
-      stdin: "inherit",
-      timeoutMs: 120_000,
-      forwardSignals: true,
+    const prompted = await requestAdministratorAuthorization({
+      dependencies: {
+        runCommand: deps.runCommand,
+        ownsTerminalForeground: deps.ownsTerminalForeground,
+      },
     });
-    if (prompted !== 0) {
-      throw new Error("Native administrator authorization was not completed.");
+    if (prompted.status === "failed") {
+      throw new Error(
+        `Native administrator authorization did not complete (${describeAdministratorAuthorizationFailure(prompted)}); nothing was installed. ${ADMINISTRATOR_PROMPT_HINT}`
+      );
     }
     const afterPrompt = await deps.inspect({ runtime: opts.runtime });
     if (!sameOwner(confirmed, afterPrompt)) {

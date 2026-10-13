@@ -1293,7 +1293,11 @@ built-in default such as `hack.local`, they stop with a usage message that names
 activation shows the exact scoped claim and requires interactive confirmation
 and a native administrator prompt. Run it from a terminal; the bounded privileged
 steps preserve that terminal's sudo authorization and report the underlying
-command failure if a step fails. Before changing files, the candidate checks that
+command failure if a step fails. If you approve but the administrator prompt
+does not complete (it times out after 120 seconds, is interrupted, rejects the
+password, or Hack is not the terminal's foreground job), activation fails during
+authorization with that cause, says nothing changed, and suggests running
+`sudo -v` in the same terminal first. Only answering no is reported as denied. Before changing files, the candidate checks that
 the root-owned Homebrew system launchd job matches the inspected dnsmasq command
 and configuration. It restarts that verified job directly through launchctl, so
 activation does not need Homebrew metadata downloads as root. Missing, changed or
@@ -1333,6 +1337,16 @@ trust repair does not set up DNS or a browser's Local Network permission.
 Both authorization and installation retain the caller's controlling terminal,
 so terminal-scoped sudo authorization remains valid during the bounded repair.
 
+Doctor's progress spinner stops before any repair asks a question. It stays off
+through the native administrator prompt and the privileged steps that follow,
+then resumes, so sudo's `Password:` prompt (or the Touch ID sheet) stays
+visible. Doctor runs repairs one at a time. The administrator prompt (`sudo -v`)
+runs in the terminal's foreground process group before any `sudo -n` step. If it
+does not complete, the CA repair reports an error that names the cause and
+suggests running `sudo -v` in the same terminal first. sudo itself prints
+`a password is required` when its first password read is interrupted or times
+out.
+
 `hack.local` stays the default dev-host root. An older Docker-era install routes
 it to Docker Caddy with `address=/.hack.local/172.30.0.2` in Homebrew's
 `dnsmasq.conf`, which the native loopback relay cannot serve. On macOS, native
@@ -1361,7 +1375,12 @@ Each unmet condition is a closed refusal reason: `relay-not-verified`,
 `dnsmasq-config-missing`, `unreadable-config`, `uninspected-config-source`,
 `no-managed-line`, `unmanaged-line`, `foreign-target`, `foreign-resolver`,
 `old-target-live`, `pending-receipt`, `invalid-receipt`, `non-interactive`,
-`declined`, `busy`, `restart-unavailable` or `inputs-changed`. Refusal details
+`declined`, `authorization-failed`, `busy`, `restart-unavailable` or
+`inputs-changed`. `declined` means you answered no to the confirmation.
+`authorization-failed` means you approved, but the native administrator prompt
+did not complete: it timed out after 120 seconds, was interrupted, rejected the
+password, or Hack was not the terminal's foreground job. Run `sudo -v` in the
+same terminal, then rerun `hack doctor --fix` (or the rollback command). Refusal details
 name files and lines by number and never repeat file contents. The repair needs interactive confirmation and the native macOS
 administrator prompt; without a terminal it refuses and names `hack doctor --fix`
 to run in one. Only one repair or rollback runs at a time; a second one refuses

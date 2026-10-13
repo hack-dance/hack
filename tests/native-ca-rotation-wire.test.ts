@@ -217,6 +217,9 @@ while True:
           "Fixture must not invoke sudo or the real System keychain"
         );
       },
+      ownsTerminalForeground: () => {
+        throw new Error("Fixture must not inspect the real terminal");
+      },
     };
     const result = await inspectNativeCaTrust({
       runtime,

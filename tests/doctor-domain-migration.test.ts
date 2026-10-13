@@ -10,6 +10,7 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
 const directories: string[] = [];
 const sentinel = "PRIVATE_CONFIG_MUST_NOT_APPEAR";
@@ -60,12 +61,14 @@ async function invoke(
       ...extra,
     ],
     {
-      env: {
-        ...process.env,
-        HACK_HOME: f.home,
-        HACK_NO_INTERACTIVE: "1",
-        PATH: join(f.root, "no-tools"),
-      },
+      env: privateCliEnv({
+        root: f.root,
+        env: {
+          HACK_HOME: f.home,
+          HACK_NO_INTERACTIVE: "1",
+          PATH: join(f.root, "no-tools"),
+        },
+      }),
       stdin: "ignore",
       stdout: "pipe",
       stderr: "pipe",

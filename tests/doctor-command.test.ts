@@ -22,6 +22,7 @@ import {
   buildRecoveryNextSteps,
   buildRecoveryWorkflowLines,
 } from "../src/commands/recovery-guidance.ts";
+import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
 async function createDoctorTestProject(opts: {
   readonly modern?: boolean;
@@ -74,18 +75,20 @@ test("doctor refuses native input before probing or repairing global runtime", a
         [process.execPath, cli, "doctor", "--path", project, ...flags],
         {
           cwd: project,
-          env: {
-            ...process.env,
-            HOME: root,
-            HACK_HOME: join(root, "state"),
-            HACK_GLOBAL_CONFIG_PATH: join(root, "state", "hack.config.json"),
-            HACK_DAEMON_DISABLE: "1",
-            HACK_NO_INTERACTIVE: "1",
-            HACK_LOGGER: "console",
-            XDG_CACHE_HOME: cache,
-            PATH: `${tools}:/usr/bin:/bin`,
-            RUNTIME_SENTINEL: sentinel,
-          },
+          env: privateCliEnv({
+            root,
+            home: root,
+            env: {
+              HACK_HOME: join(root, "state"),
+              HACK_GLOBAL_CONFIG_PATH: join(root, "state", "hack.config.json"),
+              HACK_DAEMON_DISABLE: "1",
+              HACK_NO_INTERACTIVE: "1",
+              HACK_LOGGER: "console",
+              XDG_CACHE_HOME: cache,
+              PATH: `${tools}:/usr/bin:/bin`,
+              RUNTIME_SENTINEL: sentinel,
+            },
+          }),
           stdout: "pipe",
           stderr: "pipe",
         }
@@ -104,8 +107,10 @@ test("doctor refuses native input before probing or repairing global runtime", a
         });
       }
       expect(await Bun.file(sentinel).exists()).toBe(false);
+      // `docker-client` is the test's isolated Docker client config.
       expect((await readdir(root)).sort()).toEqual([
         "cache",
+        "docker-client",
         "project",
         "tools",
       ]);

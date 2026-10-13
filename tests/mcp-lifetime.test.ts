@@ -10,6 +10,7 @@ import {
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { readLinesFromStream } from "../src/ui/lines.ts";
+import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
 const fixtures: Array<{
   root: string;
@@ -86,13 +87,15 @@ async function startFixture(
     ],
     {
       cwd: root,
-      env: {
-        ...process.env,
-        HOME: root,
-        HACK_HOME: join(root, ".hack"),
-        HACK_GLOBAL_CONFIG_PATH: join(root, "global", "hack.config.json"),
-        HACK_MCP_COMMAND: stub,
-      },
+      env: privateCliEnv({
+        root,
+        home: root,
+        env: {
+          HACK_HOME: join(root, ".hack"),
+          HACK_GLOBAL_CONFIG_PATH: join(root, "global", "hack.config.json"),
+          HACK_MCP_COMMAND: stub,
+        },
+      }),
       stdin: "pipe",
       stdout: "pipe",
       stderr: "ignore",

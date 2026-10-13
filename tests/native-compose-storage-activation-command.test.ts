@@ -2,8 +2,8 @@ import { afterEach, expect, test } from "bun:test";
 import { join, resolve } from "node:path";
 import { openNativeComposeGenerationStore } from "../src/lib/native-compose-generation.ts";
 import { captureCompletedJobFixtureCommand } from "./e2e/scenarios/native-compose-adoption-job-worktrees.ts";
-import { isolatedDockerClientEnv } from "./helpers/docker-client.ts";
 import { fixture, invoke } from "./helpers/native-compose-command.ts";
+import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
 const storage = { data: { kind: "persistent", scope: "worktree" } } as const;
 // Each synthetic carrier has the ordinary finite 30s proof budget. The wrapper
@@ -70,22 +70,24 @@ async function ownedColdCase(
               ...args,
             ],
             cwd: root,
-            env: {
-              // A private HOME under the fixture, never the contributor's.
-              HOME: join(root, "user-home"),
-              LANG: "C",
-              PATH: `${root}:/usr/bin:/bin`,
-              HACK_HOME: join(root, "home"),
-              HACK_GLOBAL_CONFIG_PATH: join(root, "global.json"),
-              HACK_CONFIG_COMPILER_BINARY: join(root, "compiler"),
-              HACK_RUNTIME_BACKEND: "compose",
-              HACK_LOGGER: "console",
-              HACK_NATIVE_COMPOSE_PHASE_TRACE: "1",
-              HACK_COMPOSE_STARTUP_TIMEOUT_MS: "30000",
-              CI: "1",
-              HACK_EXECUTION_MODE: "non_interactive",
-              ...isolatedDockerClientEnv(root),
-            },
+            // A private HOME under the fixture, never the contributor's, and
+            // an isolated Docker client config.
+            env: privateCliEnv({
+              root,
+              env: {
+                LANG: "C",
+                PATH: `${root}:/usr/bin:/bin`,
+                HACK_HOME: join(root, "home"),
+                HACK_GLOBAL_CONFIG_PATH: join(root, "global.json"),
+                HACK_CONFIG_COMPILER_BINARY: join(root, "compiler"),
+                HACK_RUNTIME_BACKEND: "compose",
+                HACK_LOGGER: "console",
+                HACK_NATIVE_COMPOSE_PHASE_TRACE: "1",
+                HACK_COMPOSE_STARTUP_TIMEOUT_MS: "30000",
+                CI: "1",
+                HACK_EXECUTION_MODE: "non_interactive",
+              },
+            }),
             captures: join(root, `storage-capture-${capture++}`),
             timeoutMs: 120_000,
             onUnconfirmed: retain,

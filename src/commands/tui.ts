@@ -2,13 +2,10 @@ import { resolve } from "node:path";
 import type { CliContext, CommandArgs } from "../cli/command.ts";
 import { CliUsageError, defineCommand, withHandler } from "../cli/command.ts";
 import { optPath, optProject } from "../cli/options.ts";
+import { resolveRegisteredProjectOption } from "../cli/project-selector.ts";
 import type { ProjectContext } from "../lib/project.ts";
 import { findProjectContext } from "../lib/project.ts";
-import { normalizeProjectName } from "../lib/project-name.ts";
-import {
-  resolveRegisteredProjectByName,
-  upsertProjectRegistration,
-} from "../lib/projects-registry.ts";
+import { upsertProjectRegistration } from "../lib/projects-registry.ts";
 import { logger } from "../ui/logger.ts";
 
 const options = [optPath, optProject] as const;
@@ -60,16 +57,9 @@ async function resolveProjectForArgs(opts: {
   }
 
   if (opts.projectOpt !== undefined) {
-    const name = normalizeProjectName(opts.projectOpt);
-    if (!name) {
-      throw new CliUsageError("Invalid --project value.");
-    }
-    const fromRegistry = await resolveRegisteredProjectByName({ name });
-    if (!fromRegistry) {
-      throw new CliUsageError(
-        `Unknown project "${name}". Run 'hack init' in that repo (or run 'hack projects' to see registered projects).`
-      );
-    }
+    const fromRegistry = await resolveRegisteredProjectOption({
+      projectOpt: opts.projectOpt,
+    });
     await touchProjectRegistration(fromRegistry);
     return fromRegistry;
   }

@@ -20,7 +20,8 @@ import {
 } from "./command.ts";
 import { resolveRequestedEnvName } from "./env-selection.ts";
 import { printHelpForPath } from "./help.ts";
-import { optEnv } from "./options.ts";
+import { optEnv, optProject } from "./options.ts";
+import { parseProjectSelectorOption } from "./project-selector.ts";
 import { CLI_SPEC } from "./spec.ts";
 
 function isTruthyEnv(value: string | undefined): boolean {
@@ -83,6 +84,10 @@ export async function runCli(argv: readonly string[]): Promise<number> {
       parsed.values
     );
     validateSharedEnvSelection({
+      command: resolved.command,
+      parsedValues: parsed.values,
+    });
+    validateSharedProjectSelection({
       command: resolved.command,
       parsedValues: parsed.values,
     });
@@ -281,6 +286,25 @@ function validateSharedEnvSelection(opts: {
   const value = opts.parsedValues[optEnv.name];
   if (typeof value === "string") {
     resolveRequestedEnvName({ envOption: value });
+  }
+}
+
+/**
+ * Refuse a malformed shared `--project` value before the handler runs, so no
+ * command reads the registry, discovers a project or starts a child process
+ * with a value-bearing argument. The refusal is fixed text that never
+ * includes the argument or a slug derived from it.
+ */
+function validateSharedProjectSelection(opts: {
+  readonly command: AnyCommandSpec;
+  readonly parsedValues: Record<string, unknown>;
+}): void {
+  if (!opts.command.options.includes(optProject)) {
+    return;
+  }
+  const value = opts.parsedValues[optProject.name];
+  if (typeof value === "string") {
+    parseProjectSelectorOption({ projectOpt: value });
   }
 }
 

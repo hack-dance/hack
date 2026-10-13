@@ -1,18 +1,32 @@
 import { expect, test } from "bun:test";
 
 import { INSTRUCTION_SECTIONS } from "../src/agents/instruction-source.ts";
-import { renderOnboardingPrompt } from "../src/agents/onboarding-prompt.ts";
+import {
+  onboardingContextWithoutInventory,
+  renderOnboardingCore,
+} from "../src/agents/onboarding-prompt.ts";
 import { CLI_SPEC } from "../src/cli/spec.ts";
 import {
   extractHackInvocations,
   findGuidanceCommandIssues,
 } from "./helpers/cli-guidance-commands.ts";
 
-const NEW_PROJECT_PROMPT = renderOnboardingPrompt({ mode: "new-project" });
-const EXISTING_PROJECT_PROMPT = renderOnboardingPrompt({
-  mode: "existing-project",
-  projectName: "myapp",
-  devHost: "myapp.hack",
+// Repo-free cores: these assertions cover the static guidance only. The
+// inventory section and entry-point parity are covered by
+// tests/onboarding-entry-parity.test.ts.
+const NEW_PROJECT_PROMPT = renderOnboardingCore({
+  context: onboardingContextWithoutInventory({
+    mode: "new-project",
+    reason: "no-repo-root",
+  }),
+});
+const EXISTING_PROJECT_PROMPT = renderOnboardingCore({
+  context: onboardingContextWithoutInventory({
+    mode: "existing-project",
+    projectName: "myapp",
+    devHost: "myapp.hack",
+    reason: "no-repo-root",
+  }),
 });
 
 const ALL_PROMPTS = {
@@ -222,7 +236,12 @@ test("ground rules forbid instruction-file injection and require reporting disco
     expect(groundRules).toContain("Report discovery limits you hit");
     expect(groundRules).toContain("the agent client CLI was missing");
     expect(groundRules).toContain("a non-interactive run");
-    expect(groundRules).toContain("no-shell `hack-init` MCP prompt");
+    expect(groundRules).toContain(
+      "the inventory's remaining discovery limitations"
+    );
+    expect(groundRules).toContain(
+      "`hack-init` MCP prompt request without `repoRoot`"
+    );
     expect(groundRules).toContain("defaults to existing-project mode");
   }
 });

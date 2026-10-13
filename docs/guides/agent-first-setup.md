@@ -5,6 +5,13 @@ existing setup — instead of doing it by hand. One canonical onboarding prompt 
 every entry point below; the content lives in the CLI, so it is always current for
 your installed version.
 
+Every entry point calls the same builder with the same repo inventory. For the same
+repo, `hack init --with`, `hack agent onboard`, `hack agent init`, and the
+`hack-init` MCP prompt (with `repoRoot`) produce byte-identical prompt content; each
+adds at most a fixed framing line. The mode follows the repo: `existing-project`
+when `.hack/` exists (project name and dev host come from its config),
+`new-project` otherwise.
+
 ## Entry points (same prompt, four ways in)
 
 | You have | Use |
@@ -25,8 +32,9 @@ hack init --auto --with claude   # or codex, or both
   onboarding prompt (`claude "<prompt>"` / `codex "<prompt>"`).
 - If the agent CLI is not on PATH, the prompt is printed with copy-paste
   instructions instead.
-- If `.hack/` already exists, init is skipped and the handoff proceeds in
-  existing-project mode.
+- The handoff always runs after `.hack/` exists, so the prompt is in
+  existing-project mode. A framing line says whether this run scaffolded `.hack/`
+  or found it already present and skipped init.
 - With `--no-interactive` (or `HACK_NO_INTERACTIVE=1`, or no TTY) nothing is
   spawned — the prompt is always printed.
 
@@ -37,8 +45,15 @@ hack agent onboard          # prints the onboarding prompt for this project
 hack agent onboard | pbcopy # copy it for any agent session
 ```
 
-The prompt picks up the project name and dev host from `.hack/hack.config.json`
-when present.
+The prompt starts with a pre-computed repo inventory and picks up the project name
+and dev host from `.hack/hack.config.json` when present.
+
+The `hack-init` MCP prompt takes an optional `repoRoot` argument (relative paths
+resolve against the MCP server's working directory). With `repoRoot` it returns the
+same content as `hack agent onboard` for that repo and ignores the `mode`,
+`projectName`, and `devHost` arguments. Without it the server scans nothing, uses
+those arguments (default `existing-project`), and the prompt states that no
+inventory was run.
 
 ## Agent-side skill: `/hack-init`
 
@@ -117,10 +132,11 @@ The ground rules tell the agent not to create or modify `AGENTS.md`, `CLAUDE.md`
 rule files, or repository skill copies unless asked. Onboarding configures the
 runtime; it does not install agent instructions. The agent also reports the
 discovery limits it hit: a missing agent client (the prompt was printed instead of
-launched), a non-interactive run, or the no-shell `hack-init` MCP prompt, which
-defaults to existing-project mode without a repo inventory.
+launched), a non-interactive run, the inventory's remaining discovery limitations,
+or a `hack-init` MCP prompt request without `repoRoot`, which defaults to
+existing-project mode without a repo inventory.
 
-`hack agent init` adds a pre-computed inventory before the same prompt. It reads
+The pre-computed inventory comes before the phases in every entry point. It reads
 file names and manifest keys only, never env-file contents, lockfile contents or
 pin values. It ends with a list of discovery limitations, such as conflicting
 package managers or non-JS services whose entrypoints were not inferred.

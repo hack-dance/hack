@@ -33,10 +33,7 @@ import {
   parseOnboardingWith,
   runOnboardingHandoff,
 } from "../agents/onboarding-handoff.ts";
-import {
-  type OnboardingMode,
-  renderOnboardingPrompt,
-} from "../agents/onboarding-prompt.ts";
+import { buildOnboardingPrompt } from "../agents/onboarding-prompt.ts";
 import { composeLogBackend, lokiLogBackend } from "../backends/log-backend.ts";
 import { parseNativePreparedBase } from "../backends/native-prepared-base.ts";
 import {
@@ -2863,16 +2860,6 @@ async function promptInitDevHost(opts: {
   return devHost.trim();
 }
 
-/** A skipped init must describe the existing setup, not the new-project default. */
-async function resolveExistingInitHost(repoRoot: string): Promise<string> {
-  const project = await findProjectContext(repoRoot);
-  const configured = project ? await readProjectDevHost(project) : null;
-  return (
-    configured ??
-    `${defaultProjectSlugFromPath(repoRoot)}.${DEFAULT_PROJECT_TLD}`
-  );
-}
-
 function validateInitOauthTld(value: string | undefined): string | undefined {
   const v = value?.trim().toLowerCase();
   if (!v) {
@@ -3061,9 +3048,7 @@ async function handleInit({
       await runInitOnboardingHandoff({
         repoRoot,
         withValue,
-        mode: "existing-project",
-        projectName: slug,
-        devHost: await resolveExistingInitHost(repoRoot),
+        scaffold: "existing",
       });
     }
     return 0;
@@ -3169,9 +3154,7 @@ async function handleInit({
     await runInitOnboardingHandoff({
       repoRoot,
       withValue,
-      mode: "new-project",
-      projectName: slug,
-      devHost,
+      scaffold: "created",
     });
   }
 
@@ -3234,9 +3217,7 @@ async function handleInitAuto({
       await runInitOnboardingHandoff({
         repoRoot,
         withValue,
-        mode: "existing-project",
-        projectName: slug,
-        devHost: await resolveExistingInitHost(repoRoot),
+        scaffold: "existing",
       });
       return 0;
     }
@@ -3332,9 +3313,7 @@ async function handleInitAuto({
     await runInitOnboardingHandoff({
       repoRoot,
       withValue,
-      mode: "new-project",
-      projectName: slug,
-      devHost,
+      scaffold: "created",
     });
   }
 
@@ -3373,6 +3352,11 @@ function resolveInitWithOption(opts: {
 /**
  * Hand the onboarding prompt to the requested agent CLI(s) after init.
  *
+ * The prompt comes from the shared onboarding builder, which inventories the
+ * repo and reads mode, project name and dev host from the `.hack/` config, so
+ * the core matches `hack agent onboard`, `hack agent init` and the `hack-init`
+ * MCP prompt for the same repo. `scaffold` only selects the handoff framing.
+ *
  * Never spawns on non-interactive runs (`--no-interactive`,
  * `HACK_NO_INTERACTIVE`, or no TTY) — the prompt is printed for copy-paste
  * instead. Init success is never rolled back by handoff problems.
@@ -3380,15 +3364,12 @@ function resolveInitWithOption(opts: {
 async function runInitOnboardingHandoff(opts: {
   readonly repoRoot: string;
   readonly withValue: OnboardingWith;
-  readonly mode: OnboardingMode;
-  readonly projectName: string;
-  readonly devHost: string;
+  readonly scaffold: "created" | "existing";
 }): Promise<void> {
   await assertLegacyProjectInputFamily({ projectRoot: opts.repoRoot });
-  const prompt = renderOnboardingPrompt({
-    mode: opts.mode,
-    projectName: opts.projectName,
-    devHost: opts.devHost,
+  const prompt = await buildOnboardingPrompt({
+    startDir: opts.repoRoot,
+    entryPoint: { kind: "init-with", scaffold: opts.scaffold },
   });
 
   await runOnboardingHandoff({

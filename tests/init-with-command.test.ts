@@ -134,7 +134,13 @@ test("hack init --auto --with claude initializes and prints the prompt when no b
   expect(result.stdout).toContain("hack onboarding");
   expect(result.stdout).toContain("## Phase 1 — Inventory the repo");
   expect(result.stdout).toContain("node_modules:/app/node_modules");
-  expect(result.stdout).toContain("stand up hack in this repo");
+  // The shared builder derives mode from repo state: init just wrote
+  // `.hack/`, so the core adopts it and only the framing says it is new.
+  expect(result.stdout).toContain("this run scaffolded `.hack/`");
+  expect(result.stdout).toContain("adopt the existing hack setup in this repo");
+  expect(result.stdout).toContain("(project: repo)");
+  expect(result.stdout).toContain("## Repo inventory (pre-computed by Hack)");
+  expect(result.stdout).toContain("- root (demo): dev -> bun run dev.ts");
 });
 
 test("hack init --auto --with proceeds to handoff when .hack already exists", async () => {
@@ -162,6 +168,9 @@ test("hack init --auto --with proceeds to handoff when .hack already exists", as
   expect(second.exitCode).toBe(0);
   expect(`${second.stdout}${second.stderr}`).toContain("already exists");
   expect(second.stdout).toContain("adopt the existing hack setup in this repo");
+  expect(second.stdout).toContain(
+    "`.hack/` already existed, so init was skipped"
+  );
   expect(second.stdout).toContain("existing.hack");
   expect(
     (await Bun.file(join(repoRoot, ".hack", "hack.config.json")).json())

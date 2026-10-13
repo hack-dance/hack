@@ -3,6 +3,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AdministratorAuthorization } from "../src/lib/admin-authorization.ts";
+import { resetNoInteractiveFlagForTests } from "../src/lib/interactivity.ts";
 import {
   activateNativeDomainDns,
   NativeDnsActivationError,
@@ -456,4 +457,95 @@ test("every administrator failure class throws instead of returning false", asyn
       requestAdministrator: async () => AUTHORIZED,
     })
   ).toBe(true);
+});
+
+/*
+ * Production defaults. Only `isInteractive` and `confirm` fall back to the
+ * defaults here; the administrator prompt stays a fake, so no test reaches
+ * the real `sudo -v`.
+ */
+
+async function withStdinTty<T>(
+  isTTY: boolean | undefined,
+  run: () => Promise<T>
+): Promise<T> {
+  const saved = Object.getOwnPropertyDescriptor(process.stdin, "isTTY");
+  Object.defineProperty(process.stdin, "isTTY", {
+    value: isTTY,
+    configurable: true,
+    writable: true,
+  });
+  try {
+    return await run();
+  } finally {
+    if (saved) {
+      Object.defineProperty(process.stdin, "isTTY", saved);
+    } else {
+      Reflect.deleteProperty(process.stdin, "isTTY");
+    }
+  }
+}
+
+async function withExplicitNonInteractive<T>(run: () => Promise<T>) {
+  const saved = process.env.HACK_NO_INTERACTIVE;
+  process.env.HACK_NO_INTERACTIVE = "1";
+  resetNoInteractiveFlagForTests();
+  try {
+    return await run();
+  } finally {
+    if (saved === undefined) {
+      Reflect.deleteProperty(process.env, "HACK_NO_INTERACTIVE");
+    } else {
+      process.env.HACK_NO_INTERACTIVE = saved;
+    }
+  }
+}
+
+test("default interactivity check requires a stdin TTY before confirming", async () => {
+  const plan = planFor(await workspace());
+  for (const action of ["activate", "deactivate"] as const) {
+    for (const isTTY of [undefined, false, true] as const) {
+      const log: string[] = [];
+      const authorize = createNativeDnsAuthorizer({
+        action,
+        domain: DOMAIN,
+        dependencies: {
+          confirm: async () => {
+            log.push("confirm");
+            return false;
+          },
+          requestAdministrator: async () => {
+            log.push(SUDO_V);
+            return AUTHORIZED;
+          },
+        },
+      });
+      expect(await withStdinTty(isTTY, async () => await authorize(plan))).toBe(
+        false
+      );
+      expect(log).toEqual(isTTY === true ? ["confirm"] : []);
+    }
+  }
+});
+
+test("default confirmation declines an explicitly non-interactive run before sudo", async () => {
+  const plan = planFor(await workspace());
+  for (const action of ["activate", "deactivate"] as const) {
+    const log: string[] = [];
+    const authorize = createNativeDnsAuthorizer({
+      action,
+      domain: DOMAIN,
+      dependencies: {
+        isInteractive: () => true,
+        requestAdministrator: async () => {
+          log.push(SUDO_V);
+          return AUTHORIZED;
+        },
+      },
+    });
+    expect(
+      await withExplicitNonInteractive(async () => await authorize(plan))
+    ).toBe(false);
+    expect(log).toEqual([]);
+  }
 });

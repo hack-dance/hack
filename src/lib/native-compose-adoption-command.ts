@@ -1,5 +1,6 @@
 import { dirname, resolve } from "node:path";
 import { CliUsageError } from "../cli/command.ts";
+import { parseProjectSelectorOption } from "../cli/project-selector.ts";
 import { HackCliError } from "./cli-result.ts";
 import { resolveComposeStartupTimeoutMs } from "./compose-startup-budget.ts";
 import type { LegacyComposeVerifiedBinding } from "./native-compose-adoption-binding.ts";
@@ -16,7 +17,6 @@ import { inspectLegacyComposeContainerStates } from "./native-compose-adoption-r
 import type { NativeComposeCommandOptions } from "./native-compose-command.ts";
 import { requireNativeComposeBackend } from "./native-compose-selection.ts";
 import { inspectProjectInputsAtRoot } from "./project-input-selection.ts";
-import { normalizeProjectName } from "./project-name.ts";
 import {
   readProjectsRegistry,
   selectRegisteredProjectByName,
@@ -40,10 +40,7 @@ function cancelled(signal: AbortSignal) {
   }
 }
 async function registeredAdoptedRoot(project: string) {
-  const name = normalizeProjectName(project);
-  if (!name) {
-    throw new CliUsageError("Invalid --project value.");
-  }
+  const { name } = parseProjectSelectorOption({ projectOpt: project });
   const registry = await readProjectsRegistry(),
     registered = selectRegisteredProjectByName({
       projects: registry.projects,

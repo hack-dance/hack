@@ -1,12 +1,12 @@
 import { resolve } from "node:path";
 import { CliUsageError } from "../cli/command.ts";
+import { parseProjectSelectorOption } from "../cli/project-selector.ts";
 import { HackCliError } from "./cli-result.ts";
 import {
   discoverProjectInputs,
   inspectProjectInputsAtRoot,
   ProjectInputSelectionError,
 } from "./project-input-selection.ts";
-import { normalizeProjectName } from "./project-name.ts";
 import {
   readProjectsRegistry,
   selectRegisteredProjectByName,
@@ -47,10 +47,7 @@ export async function selectNativeComposeProject(opts: {
 async function selectRegisteredNativeInputs(opts: {
   readonly project: string;
 }) {
-  const name = normalizeProjectName(opts.project);
-  if (!name) {
-    throw new CliUsageError("Invalid --project value.");
-  }
+  const { name } = parseProjectSelectorOption({ projectOpt: opts.project });
   const registry = await readProjectsRegistry();
   const registered = selectRegisteredProjectByName({
     projects: registry.projects,

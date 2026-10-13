@@ -3,6 +3,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { restoreEnv } from "./helpers/env.ts";
+import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
 type RunResult = {
   readonly exitCode: number;
@@ -47,7 +48,6 @@ test(
     const result = await runHack({
       args: ["env", "backend", "status", "--json"],
       env: {
-        ...process.env,
         HACK_GLOBAL_CONFIG_PATH: tempGlobalConfigPath ?? "",
       },
     });
@@ -93,7 +93,7 @@ test(
     await writeFile(tempGlobalConfigPath, contents);
     const result = await runHack({
       args: ["env", "backend", "use", "encrypted_file", "--json"],
-      env: { ...process.env, HACK_GLOBAL_CONFIG_PATH: tempGlobalConfigPath },
+      env: { HACK_GLOBAL_CONFIG_PATH: tempGlobalConfigPath },
     });
     expect(result.exitCode).not.toBe(0);
     expect(`${result.stdout}${result.stderr}`).toContain(
@@ -119,7 +119,6 @@ test(
         "--json",
       ],
       env: {
-        ...process.env,
         HACK_GLOBAL_CONFIG_PATH: tempGlobalConfigPath ?? "",
       },
     });
@@ -160,7 +159,6 @@ test(
         "--json",
       ],
       env: {
-        ...process.env,
         HACK_GLOBAL_CONFIG_PATH: tempGlobalConfigPath,
       },
     });
@@ -206,7 +204,6 @@ test(
         "--json",
       ],
       env: {
-        ...process.env,
         HACK_GLOBAL_CONFIG_PATH: tempGlobalConfigPath,
       },
     });
@@ -238,7 +235,6 @@ test(
     const invalid = await runHack({
       args: ["env", "backend", "use", "cloud"],
       env: {
-        ...process.env,
         HACK_GLOBAL_CONFIG_PATH: tempGlobalConfigPath ?? "",
       },
     });
@@ -262,7 +258,6 @@ test(
         "--json",
       ],
       env: {
-        ...process.env,
         HACK_GLOBAL_CONFIG_PATH: tempGlobalConfigPath ?? "",
       },
     });
@@ -336,7 +331,6 @@ test(
     const setResult = await runHack({
       args: ["env", "set", "--secret", "API_KEY=super-secret"],
       env: {
-        ...process.env,
         HACK_AUTH_BROKER_URL: "http://127.0.0.1:9",
         HACK_GLOBAL_CONFIG_PATH: tempGlobalConfigPath ?? "",
         HACK_SECRETS_FILE_KEY: "env-backend-command-key",
@@ -356,7 +350,6 @@ test(
     const listResult = await runHack({
       args: ["env", "list", "--show-secrets", "--json"],
       env: {
-        ...process.env,
         HACK_AUTH_BROKER_URL: "http://127.0.0.1:9",
         HACK_GLOBAL_CONFIG_PATH: tempGlobalConfigPath ?? "",
         HACK_SECRETS_FILE_KEY: "env-backend-command-key",
@@ -387,7 +380,6 @@ test(
     const redactedListResult = await runHack({
       args: ["env", "list", "--json"],
       env: {
-        ...process.env,
         HACK_AUTH_BROKER_URL: "http://127.0.0.1:9",
         HACK_GLOBAL_CONFIG_PATH: tempGlobalConfigPath ?? "",
         HACK_SECRETS_FILE_KEY: "env-backend-command-key",
@@ -408,7 +400,6 @@ test(
     const listTextResult = await runHack({
       args: ["env", "list", "--show-secrets"],
       env: {
-        ...process.env,
         HACK_AUTH_BROKER_URL: "http://127.0.0.1:9",
         HACK_GLOBAL_CONFIG_PATH: tempGlobalConfigPath ?? "",
         HACK_SECRETS_FILE_KEY: "env-backend-command-key",
@@ -474,7 +465,6 @@ test(
     const result = await runHack({
       args: ["env", "set", "SECRET_TOKEN=super-secret"],
       env: {
-        ...process.env,
         HACK_GLOBAL_CONFIG_PATH: tempGlobalConfigPath ?? "",
       },
       cwd: projectRoot,
@@ -531,7 +521,6 @@ test(
     const result = await runHack({
       args: ["env", "set", "SECRET_TOKEN=super-secret"],
       env: {
-        ...process.env,
         HACK_GLOBAL_CONFIG_PATH: tempGlobalConfigPath ?? "",
       },
       cwd: projectRoot,
@@ -602,7 +591,6 @@ test(
     const result = await runHack({
       args: ["env", "set", "SECRET_TOKEN=super-secret"],
       env: {
-        ...process.env,
         HACK_GLOBAL_CONFIG_PATH: tempGlobalConfigPath ?? "",
       },
       cwd: projectRoot,
@@ -642,7 +630,6 @@ test(
     const result = await runHack({
       args: ["env", "set", "SECRET_TOKEN=plain-value"],
       env: {
-        ...process.env,
         HACK_GLOBAL_CONFIG_PATH: tempGlobalConfigPath ?? "",
       },
       cwd: projectRoot,
@@ -710,7 +697,6 @@ test(
     const result = await runHack({
       args: ["env", "list", "--json"],
       env: {
-        ...process.env,
         HACK_GLOBAL_CONFIG_PATH: tempGlobalConfigPath ?? "",
         HACK_SECRETS_DISABLE_KEYCHAIN_FALLBACK: "true",
       },
@@ -797,7 +783,6 @@ test(
     const result = await runHack({
       args: ["env", "list", "--json"],
       env: {
-        ...process.env,
         HACK_GLOBAL_CONFIG_PATH: tempGlobalConfigPath ?? "",
         HACK_SECRETS_FILE_KEY: "env-backend-command-key",
       },
@@ -962,7 +947,6 @@ test(
       )}\n`
     );
     const hackEnv = {
-      ...process.env,
       HACK_GLOBAL_CONFIG_PATH: tempGlobalConfigPath ?? "",
     };
 
@@ -1072,7 +1056,6 @@ test(
     const setResult = await runHack({
       args: ["env", "set", "PUBLIC_URL=https://example.test"],
       env: {
-        ...process.env,
         HACK_GLOBAL_CONFIG_PATH: tempGlobalConfigPath ?? "",
         HACK_SECRETS_FILE_KEY: "env-backend-command-key",
       },
@@ -1091,7 +1074,6 @@ test(
     const listResult = await runHack({
       args: ["env", "list", "--json", "--show-secrets"],
       env: {
-        ...process.env,
         HACK_GLOBAL_CONFIG_PATH: tempGlobalConfigPath ?? "",
         HACK_SECRETS_FILE_KEY: "env-backend-command-key",
       },
@@ -1182,7 +1164,6 @@ test(
     const baseSet = await runHack({
       args: ["env", "set", "--env=base", "PUBLIC_URL=https://base.test"],
       env: {
-        ...process.env,
         HACK_GLOBAL_CONFIG_PATH: tempGlobalConfigPath ?? "",
         HACK_SECRETS_FILE_KEY: "env-overlay-command-key",
       },
@@ -1193,7 +1174,6 @@ test(
     const overlaySet = await runHack({
       args: ["env", "set", "--env=qa", "PUBLIC_URL=https://qa.test"],
       env: {
-        ...process.env,
         HACK_GLOBAL_CONFIG_PATH: tempGlobalConfigPath ?? "",
         HACK_SECRETS_FILE_KEY: "env-overlay-command-key",
       },
@@ -1212,7 +1192,6 @@ test(
     const defaultList = await runHack({
       args: ["env", "list", "--json", "--show-secrets"],
       env: {
-        ...process.env,
         HACK_GLOBAL_CONFIG_PATH: tempGlobalConfigPath ?? "",
         HACK_SECRETS_FILE_KEY: "env-overlay-command-key",
       },
@@ -1238,7 +1217,6 @@ test(
     const baseList = await runHack({
       args: ["env", "list", "--json", "--show-secrets", "--env=base"],
       env: {
-        ...process.env,
         HACK_GLOBAL_CONFIG_PATH: tempGlobalConfigPath ?? "",
         HACK_SECRETS_FILE_KEY: "env-overlay-command-key",
       },
@@ -1317,7 +1295,6 @@ test(
     const overlaySet = await runHack({
       args: ["env", "set", "--env=qa", "PUBLIC_URL=https://qa-bundled.test"],
       env: {
-        ...process.env,
         HACK_GLOBAL_CONFIG_PATH: tempGlobalConfigPath ?? "",
         HACK_SECRETS_FILE_KEY: "env-overlay-backend-key",
       },
@@ -1330,7 +1307,6 @@ test(
     const listResult = await runHack({
       args: ["env", "list", "--json", "--show-secrets", "--env=qa"],
       env: {
-        ...process.env,
         HACK_GLOBAL_CONFIG_PATH: tempGlobalConfigPath ?? "",
         HACK_SECRETS_FILE_KEY: "env-overlay-backend-key",
       },
@@ -1406,7 +1382,6 @@ test(
     const baseSet = await runHack({
       args: ["env", "set", "--env=base", "PUBLIC_URL=https://base.test"],
       env: {
-        ...process.env,
         HACK_GLOBAL_CONFIG_PATH: tempGlobalConfigPath ?? "",
         HACK_SECRETS_FILE_KEY: "env-overlay-manual-file-key",
       },
@@ -1422,7 +1397,6 @@ test(
     const listResult = await runHack({
       args: ["env", "list", "--json", "--show-secrets", "--env=qa"],
       env: {
-        ...process.env,
         HACK_GLOBAL_CONFIG_PATH: tempGlobalConfigPath ?? "",
         HACK_SECRETS_FILE_KEY: "env-overlay-manual-file-key",
       },
@@ -1502,7 +1476,6 @@ test(
     const listResult = await runHack({
       args: ["env", "list", "--json", "--env=qa"],
       env: {
-        ...process.env,
         HACK_GLOBAL_CONFIG_PATH: tempGlobalConfigPath ?? "",
         HACK_SECRETS_FILE_KEY: "env-overlay-warning-key",
       },
@@ -1531,16 +1504,30 @@ test(
   { timeout: 40_000 }
 );
 
+/**
+ * Runs the source CLI with a private HOME under the test's temp directory.
+ * Only the file-store key a test sets in-process and the values in `env` reach
+ * the child; the runner's HOME, keychain and HACK_* settings do not.
+ */
 async function runHack(input: {
   readonly args: readonly string[];
-  readonly env: NodeJS.ProcessEnv;
+  readonly env: Readonly<Record<string, string | undefined>>;
   readonly cwd?: string;
 }): Promise<RunResult> {
+  if (!tempDir) {
+    throw new Error("Missing temp directory state");
+  }
   const proc = Bun.spawn(
     ["bun", resolve(import.meta.dir, "../index.ts"), ...input.args],
     {
       cwd: input.cwd ?? resolve(import.meta.dir, ".."),
-      env: input.env,
+      env: privateCliEnv({
+        root: tempDir,
+        env: {
+          HACK_SECRETS_FILE_KEY: process.env.HACK_SECRETS_FILE_KEY,
+          ...input.env,
+        },
+      }),
       stdin: "ignore",
       stdout: "pipe",
       stderr: "pipe",

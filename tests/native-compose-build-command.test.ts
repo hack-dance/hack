@@ -3,6 +3,7 @@ import { chmod, mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { isRecord } from "../src/lib/guards.ts";
+import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -126,18 +127,20 @@ async function invoke(root: string, operation: "up" | "run") {
     ],
     {
       cwd: root,
-      env: {
-        ...process.env,
-        PATH: `${root}:/usr/bin:/bin`,
-        HACK_HOME: join(root, "home"),
-        HACK_GLOBAL_CONFIG_PATH: join(root, "global.json"),
-        HACK_CONFIG_COMPILER_BINARY: join(root, "compiler"),
-        HACK_RUNTIME_BACKEND: "compose",
-        HACK_LOGGER: "console",
-        AMBIENT: "must-not-expand",
-        CI: "1",
-        HACK_EXECUTION_MODE: "non_interactive",
-      },
+      env: privateCliEnv({
+        root,
+        env: {
+          PATH: `${root}:/usr/bin:/bin`,
+          HACK_HOME: join(root, "home"),
+          HACK_GLOBAL_CONFIG_PATH: join(root, "global.json"),
+          HACK_CONFIG_COMPILER_BINARY: join(root, "compiler"),
+          HACK_RUNTIME_BACKEND: "compose",
+          HACK_LOGGER: "console",
+          AMBIENT: "must-not-expand",
+          CI: "1",
+          HACK_EXECUTION_MODE: "non_interactive",
+        },
+      }),
       stdin: "ignore",
       stdout: "pipe",
       stderr: "pipe",

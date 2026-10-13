@@ -11,6 +11,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { isRecord } from "../../src/lib/guards.ts";
 import { openNativeComposeGenerationStore } from "../../src/lib/native-compose-generation.ts";
+import { privateCliEnv } from "./private-cli-env.ts";
 
 const roots: string[] = [];
 const children: Bun.Subprocess<"ignore", "pipe", "pipe">[] = [];
@@ -168,20 +169,23 @@ export function spawnFiles(
     ],
     {
       cwd: fixture.root,
-      env: {
-        HOME: join(fixture.parent, "user-home"),
-        LANG: "C",
-        PATH: `${fixture.parent}:/usr/bin:/bin`,
-        HACK_HOME: join(fixture.parent, "home"),
-        HACK_GLOBAL_CONFIG_PATH: join(fixture.parent, "global.json"),
-        HACK_CONFIG_COMPILER_BINARY: compiler,
-        HACK_RUNTIME_BACKEND: "compose",
-        HACK_LOGGER: "console",
-        HACK_COMPOSE_STARTUP_TIMEOUT_MS: "3000",
-        CI: "1",
-        HACK_EXECUTION_MODE: "non_interactive",
-        ...extraEnv,
-      },
+      // Private HOME (`<parent>/user-home`) and isolated Docker client config.
+      env: privateCliEnv({
+        root: fixture.parent,
+        env: {
+          LANG: "C",
+          PATH: `${fixture.parent}:/usr/bin:/bin`,
+          HACK_HOME: join(fixture.parent, "home"),
+          HACK_GLOBAL_CONFIG_PATH: join(fixture.parent, "global.json"),
+          HACK_CONFIG_COMPILER_BINARY: compiler,
+          HACK_RUNTIME_BACKEND: "compose",
+          HACK_LOGGER: "console",
+          HACK_COMPOSE_STARTUP_TIMEOUT_MS: "3000",
+          CI: "1",
+          HACK_EXECUTION_MODE: "non_interactive",
+          ...extraEnv,
+        },
+      }),
       stdin: "ignore",
       stdout: "pipe",
       stderr: "pipe",

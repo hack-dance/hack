@@ -10,6 +10,7 @@ import { openNativeComposeRouteClaims } from "../src/lib/native-compose-route-cl
 import { prepareNativeComposeRouteOwner } from "../src/lib/native-compose-route-owner.ts";
 import type { NativeRoutingResolution } from "../src/lib/native-routing-plan-protocol.ts";
 import { composeFixture } from "./helpers/native-compose.ts";
+import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
 const PRIVATE_CANARY = "native-open-private-value-must-not-leak";
 const roots: string[] = [];
@@ -202,18 +203,20 @@ async function invoke(root: string, args: readonly string[]) {
     ],
     {
       cwd: root,
-      env: {
-        ...process.env,
-        PATH: `${root}:/usr/bin:/bin`,
-        HACK_HOME: join(root, "home"),
-        HACK_GLOBAL_CONFIG_PATH: join(root, "home", "hack.config.json"),
-        HACK_CONFIG_COMPILER_BINARY: join(root, "compiler"),
-        HACK_RUNTIME_BACKEND: "compose",
-        HACK_NO_INTERACTIVE: "1",
-        HACK_LOGGER: "console",
-        GIT_DIR: "",
-        GIT_WORK_TREE: "",
-      },
+      env: privateCliEnv({
+        root,
+        env: {
+          PATH: `${root}:/usr/bin:/bin`,
+          HACK_HOME: join(root, "home"),
+          HACK_GLOBAL_CONFIG_PATH: join(root, "home", "hack.config.json"),
+          HACK_CONFIG_COMPILER_BINARY: join(root, "compiler"),
+          HACK_RUNTIME_BACKEND: "compose",
+          HACK_NO_INTERACTIVE: "1",
+          HACK_LOGGER: "console",
+          GIT_DIR: "",
+          GIT_WORK_TREE: "",
+        },
+      }),
       stdin: "ignore",
       stdout: "pipe",
       stderr: "pipe",

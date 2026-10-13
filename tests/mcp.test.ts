@@ -9,11 +9,9 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-
 import { parseCliArgv, resolveCommand } from "../src/cli/command.ts";
 import { CLI_SPEC } from "../src/cli/spec.ts";
 import {
@@ -25,6 +23,7 @@ import {
   type McpRefusalReason,
 } from "../src/mcp/server.ts";
 import { testIntegration } from "./helpers/ci.ts";
+import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
 let tempDir: string | null = null;
 let client: Client | null = null;
@@ -122,11 +121,11 @@ async function startMcpClient(): Promise<Client> {
     command: "bun",
     args: ["index.ts", "mcp", "serve"],
     cwd: repoRoot,
-    env: {
-      ...process.env,
-      HACK_MCP_COMMAND: stubPath,
-      HOME: homeDir,
-    },
+    env: privateCliEnv({
+      root: tempDir,
+      home: homeDir,
+      env: { HACK_MCP_COMMAND: stubPath },
+    }),
     stderr: "pipe",
   });
 
@@ -266,14 +265,17 @@ async function startContractFixture(
     ].join("\n")
   );
   await chmod(stub, 0o755);
-  const env: Record<string, string | undefined> = {
-    ...process.env,
-    HOME: root,
-    HACK_HOME: state,
-    HACK_GLOBAL_CONFIG_PATH: join(registryDir, "config.json"),
-    HACK_MCP_COMMAND: stub,
-  };
-  Reflect.deleteProperty(env, "HACK_NO_INTERACTIVE");
+  // The server runs HACK_MCP_COMMAND with this env. No runner variable, such
+  // as HACK_NO_INTERACTIVE, reaches the stub unless the server sets it.
+  const env: Record<string, string | undefined> = privateCliEnv({
+    root,
+    home: root,
+    env: {
+      HACK_HOME: state,
+      HACK_GLOBAL_CONFIG_PATH: join(registryDir, "config.json"),
+      HACK_MCP_COMMAND: stub,
+    },
+  });
   const server = createMcpServer({ cwd, env });
   const client = new Client({ name: "hack-mcp-contract", version: "1" });
   contractClients.push(client);

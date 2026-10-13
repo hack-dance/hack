@@ -401,9 +401,11 @@ function registerPrompts(opts: {
       },
     },
     async ({ repoRoot, mode, projectName, devHost }) => {
-      const prompt = repoRoot?.trim()
+      // Trim once so the presence check and the resolved path agree.
+      const requestedRoot = repoRoot?.trim();
+      const prompt = requestedRoot
         ? await buildMcpOnboardingPrompt({
-            startDir: resolve(opts.context.cwd, repoRoot),
+            startDir: resolve(opts.context.cwd, requestedRoot),
           })
         : renderOnboardingPrompt({
             context: onboardingContextWithoutInventory({
@@ -433,9 +435,12 @@ function registerPrompts(opts: {
  * Build the `hack-init` prompt for a caller-named repo. Failures map to a
  * closed, value-free protocol error: only the Hack error code survives; the
  * caller's path, config values and the underlying message are never echoed.
+ *
+ * @param opts.build - Test seam for the shared builder; production omits it.
  */
-async function buildMcpOnboardingPrompt(opts: {
+export async function buildMcpOnboardingPrompt(opts: {
   readonly startDir: string;
+  readonly build?: typeof buildOnboardingPrompt;
 }): Promise<string> {
   if (!(await pathExists(opts.startDir))) {
     const refusal = MCP_REFUSALS.path_not_found;
@@ -444,11 +449,14 @@ async function buildMcpOnboardingPrompt(opts: {
       `${refusal.code}: ${refusal.message}`
     );
   }
+  const request = {
+    startDir: opts.startDir,
+    entryPoint: MCP_ONBOARDING_ENTRY_POINT,
+  };
   try {
-    return await buildOnboardingPrompt({
-      startDir: opts.startDir,
-      entryPoint: MCP_ONBOARDING_ENTRY_POINT,
-    });
+    return opts.build
+      ? await opts.build(request)
+      : await buildOnboardingPrompt(request);
   } catch (error) {
     const code: HackErrorCode =
       error instanceof HackCliError ? error.code : "E_UNEXPECTED";

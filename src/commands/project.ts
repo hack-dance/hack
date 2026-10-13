@@ -27,7 +27,10 @@ import {
   text,
 } from "@clack/prompts";
 import { YAML } from "bun";
-import { runInitAgentIntegrations } from "../agents/init-agent-integrations.ts";
+import {
+  type InitAgentIntegrationPrompts,
+  runInitAgentIntegrations,
+} from "../agents/init-agent-integrations.ts";
 import {
   type OnboardingWith,
   parseOnboardingWith,
@@ -2774,13 +2777,51 @@ function validateInitProjectSlug(
   return undefined;
 }
 
+/**
+ * Terminal seams for interactive `hack init`: the TTY check and every prompt
+ * the interactive path asks. Production uses {@link CLACK_INIT_IO}; tests
+ * inject scripted answers so the path, including the `--with` handoff, runs
+ * without a terminal.
+ */
+export type InitInteractiveIo = {
+  readonly canPrompt: () => boolean;
+  readonly text: (opts: {
+    readonly message: string;
+    readonly initialValue: string;
+    readonly validate: (value: string | undefined) => string | undefined;
+  }) => Promise<string | symbol>;
+  readonly confirm: (opts: {
+    readonly message: string;
+    readonly initialValue: boolean;
+  }) => Promise<boolean | symbol>;
+  /**
+   * Service wizard that renders `.hack/docker-compose.yml`: the discovered
+   * wizard when `useDiscovery`, otherwise the manual one.
+   */
+  readonly composeWizard: (opts: {
+    readonly useDiscovery: boolean;
+    readonly input: ComposeWizardInput;
+  }) => Promise<string>;
+  /** Coding-agent step prompts; omitted means the clack prompts. */
+  readonly agentPrompts?: InitAgentIntegrationPrompts;
+};
+
+const CLACK_INIT_IO: InitInteractiveIo = {
+  canPrompt,
+  text: (opts) => text({ ...opts }),
+  confirm: (opts) => confirm({ ...opts }),
+  composeWizard: ({ useDiscovery, input }) =>
+    useDiscovery ? buildDiscoveredCompose(input) : buildManualCompose(input),
+};
+
 async function promptInitProjectSlug(opts: {
+  readonly io: InitInteractiveIo;
   readonly repoRoot: string;
   readonly nameOption: string | undefined;
 }): Promise<string | null> {
   const defaultSlug = defaultProjectSlugFromPath(opts.repoRoot);
   const initialSlug = sanitizeProjectSlug(opts.nameOption ?? defaultSlug);
-  const name = await text({
+  const name = await opts.io.text({
     message: "Project name (slug):",
     initialValue: initialSlug,
     validate: validateInitProjectSlug,
@@ -2843,13 +2884,14 @@ function validateInitDevHost(value: string | undefined): string | undefined {
 }
 
 async function promptInitDevHost(opts: {
+  readonly io: InitInteractiveIo;
   readonly slug: string;
   readonly devHostOption: string | undefined;
   readonly defaultDomain: string;
 }): Promise<string | null> {
   const defaultHost = `${opts.slug}.${opts.defaultDomain}`;
   const initialHost = (opts.devHostOption ?? defaultHost).trim();
-  const devHost = await text({
+  const devHost = await opts.io.text({
     message: "DEV_HOST:",
     initialValue: initialHost,
     validate: validateInitDevHost,
@@ -2872,10 +2914,11 @@ function validateInitOauthTld(value: string | undefined): string | undefined {
 }
 
 async function promptInitOauthSettings(opts: {
+  readonly io: InitInteractiveIo;
   readonly oauthEnabledDefault: boolean;
   readonly oauthTldOption: string | undefined;
 }): Promise<{ readonly enabled: boolean; readonly tld: string } | null> {
-  const enableOauthHost = await confirm({
+  const enableOauthHost = await opts.io.confirm({
     message: `Enable OAuth-safe alias host (https://<project>.${DEFAULT_PROJECT_TLD}.${DEFAULT_OAUTH_ALIAS_TLD})?`,
     initialValue: opts.oauthEnabledDefault,
   });
@@ -2887,7 +2930,7 @@ async function promptInitOauthSettings(opts: {
     return { enabled: false, tld: DEFAULT_OAUTH_ALIAS_TLD };
   }
 
-  const oauthTld = await text({
+  const oauthTld = await opts.io.text({
     message: "OAuth alias TLD (optional):",
     initialValue: opts.oauthTldOption ?? DEFAULT_OAUTH_ALIAS_TLD,
     validate: validateInitOauthTld,
@@ -2918,6 +2961,7 @@ function renderInitDiscoveryNote(opts: {
 }
 
 async function promptInitUseDiscovery(opts: {
+  readonly io: InitInteractiveIo;
   readonly canDiscover: boolean;
   readonly forceManual: boolean;
 }): Promise<boolean | null> {
@@ -2925,7 +2969,7 @@ async function promptInitUseDiscovery(opts: {
     return false;
   }
 
-  const useDiscovery = await confirm({
+  const useDiscovery = await opts.io.confirm({
     message: "Auto-discover dev scripts and generate services?",
     initialValue: true,
   });
@@ -2936,11 +2980,12 @@ async function promptInitUseDiscovery(opts: {
 }
 
 async function ensureInitHackDir(opts: {
+  readonly io: InitInteractiveIo;
   readonly hackDir: string;
 }): Promise<"proceed" | "skip" | null> {
   await assertLegacyProjectInputFamily({ projectRoot: dirname(opts.hackDir) });
   if (await pathExists(opts.hackDir)) {
-    const ok = await confirm({
+    const ok = await opts.io.confirm({
       message: `${HACK_PROJECT_DIR_PRIMARY}/ already exists. Overwrite scaffold files?`,
       initialValue: false,
     });
@@ -2959,12 +3004,18 @@ async function ensureInitHackDir(opts: {
   return "proceed";
 }
 
-async function handleInit({
+/**
+ * `hack init`. `io` is the interactive path's terminal seam; the command
+ * handler omits it and gets the real TTY check and clack prompts.
+ */
+export async function handleInit({
   ctx,
   args,
+  io = CLACK_INIT_IO,
 }: {
   readonly ctx: CliContext;
   readonly args: InitArgs;
+  readonly io?: InitInteractiveIo;
 }): Promise<number> {
   const withValue = resolveInitWithOption({ withRaw: args.options.with });
   const startDir = resolveStartDir(ctx, args.options.path);
@@ -2977,7 +3028,7 @@ async function handleInit({
   const repoRoot = await findRepoRootForInit(startDir);
   await assertLegacyProjectInputFamily({ projectRoot: repoRoot });
 
-  if (!canPrompt()) {
+  if (!io.canPrompt()) {
     requireInteractive({
       what: "hack init asks for project name, dev host, and discovery choices",
       hint: "Use `hack init --auto` (optionally with --name, --dev-host, --oauth, --oauth-tld, --manual) for scripted setup.",
@@ -2985,6 +3036,7 @@ async function handleInit({
   }
 
   const slug = await promptInitProjectSlug({
+    io,
     repoRoot,
     nameOption: args.options.name,
   });
@@ -2995,6 +3047,7 @@ async function handleInit({
   await ensureInitProjectSlugUnique({ repoRoot, slug });
 
   const devHost = await promptInitDevHost({
+    io,
     slug,
     devHostOption: args.options.devHost,
     defaultDomain: args.options.devHost
@@ -3006,6 +3059,7 @@ async function handleInit({
   }
 
   const oauth = await promptInitOauthSettings({
+    io,
     oauthEnabledDefault:
       args.options.oauth === true || Boolean(args.options.oauthTld),
     oauthTldOption: args.options.oauthTld,
@@ -3024,6 +3078,7 @@ async function handleInit({
   }
 
   const useDiscovery = await promptInitUseDiscovery({
+    io,
     canDiscover,
     forceManual,
   });
@@ -3035,7 +3090,7 @@ async function handleInit({
   const composeFile = resolve(hackDir, PROJECT_COMPOSE_FILENAME);
   const configFile = resolve(hackDir, PROJECT_CONFIG_FILENAME);
 
-  const hackDirAction = await ensureInitHackDir({ hackDir });
+  const hackDirAction = await ensureInitHackDir({ io, hackDir });
   if (!hackDirAction) {
     return 1;
   }
@@ -3049,26 +3104,23 @@ async function handleInit({
         repoRoot,
         withValue,
         scaffold: "existing",
+        interactive: io.canPrompt(),
       });
     }
     return 0;
   }
 
   await assertLegacyProjectInputFamily({ projectRoot: repoRoot });
-  const compose = useDiscovery
-    ? await buildDiscoveredCompose({
-        repoRoot,
-        devHost,
-        projectSlug: slug,
-        candidates: discovery.candidates,
-        oauth: { enabled: oauth.enabled, tld: oauth.tld },
-      })
-    : await buildManualCompose({
-        repoRoot,
-        devHost,
-        projectSlug: slug,
-        oauth: { enabled: oauth.enabled, tld: oauth.tld },
-      });
+  const compose = await io.composeWizard({
+    useDiscovery,
+    input: {
+      repoRoot,
+      devHost,
+      projectSlug: slug,
+      candidates: discovery.candidates,
+      oauth: { enabled: oauth.enabled, tld: oauth.tld },
+    },
+  });
   await assertLegacyProjectInputFamily({ projectRoot: repoRoot });
   await ensureDir(hackDir);
 
@@ -3130,8 +3182,9 @@ async function handleInit({
 
   await runInitAgentIntegrations({
     repoRoot,
-    interactive: canPrompt(),
+    interactive: io.canPrompt(),
     guard: assertLegacyProjectInputFamily,
+    ...(io.agentPrompts ? { prompts: io.agentPrompts } : {}),
   });
 
   note(
@@ -3155,6 +3208,7 @@ async function handleInit({
       repoRoot,
       withValue,
       scaffold: "created",
+      interactive: io.canPrompt(),
     });
   }
 
@@ -3360,11 +3414,15 @@ function resolveInitWithOption(opts: {
  * Never spawns on non-interactive runs (`--no-interactive`,
  * `HACK_NO_INTERACTIVE`, or no TTY) — the prompt is printed for copy-paste
  * instead. Init success is never rolled back by handoff problems.
+ *
+ * @param opts.interactive - Defaults to the real TTY check; interactive init
+ *   passes its injected {@link InitInteractiveIo.canPrompt} result.
  */
 async function runInitOnboardingHandoff(opts: {
   readonly repoRoot: string;
   readonly withValue: OnboardingWith;
   readonly scaffold: "created" | "existing";
+  readonly interactive?: boolean;
 }): Promise<void> {
   await assertLegacyProjectInputFamily({ projectRoot: opts.repoRoot });
   const prompt = await buildOnboardingPrompt({
@@ -3375,7 +3433,7 @@ async function runInitOnboardingHandoff(opts: {
   await runOnboardingHandoff({
     prompt,
     withValue: opts.withValue,
-    interactive: canPrompt(),
+    interactive: opts.interactive ?? canPrompt(),
   });
 }
 

@@ -116,11 +116,13 @@ const KNOWN_RENDER_FINGERPRINTS: Readonly<
     "eba974f66328605864507beb", // next: focused plugin skills + plugin-first agent setup
     "cf91ca873a00ad4743198e11", // next: plugin-first agent setup + refresh-only setup sync
     "0e99791aa0edfd1895e31748", // next: runtime metadata backend scope + refresh-only setup sync
+    "c6cd8f369e902624f9a31d2c", // next: hack-init MCP prompt takes repoRoot (HACK-1137)
   ]),
   "hack-init-skill": new Set([
     "cd15fb6d8ed8e25071d05e75", // v3.1.0..v4.0.3
     "f8e3018bcb8546e802dfa19c", // v4.1.0..next
     "dde7ffb2975e3257395f9506", // next: conditional hack-mcp fallback
+    "d8b5426211851f068d9a587b", // next: hack-init MCP prompt takes repoRoot (HACK-1137)
   ]),
   "cursor-rules": new Set([
     "6acabe0f41a9785374970d6c", // v1.1.0..v1.10.2
@@ -154,6 +156,7 @@ const KNOWN_RENDER_FINGERPRINTS: Readonly<
     "270cd2b3fdcc325e04c76d43", // next: focused plugin skills + plugin-first agent setup
     "92ca4aa8f28ba1c93093c04a", // next: plugin-first agent setup + refresh-only setup sync
     "0b82281933af514de8a1b8b8", // next: runtime metadata backend scope + refresh-only setup sync
+    "5dcd202fc7bc640895bd876c", // next: hack-init MCP prompt takes repoRoot (HACK-1137)
   ]),
 };
 

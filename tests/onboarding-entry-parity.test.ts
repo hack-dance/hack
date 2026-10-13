@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { ErrorCode, McpError } from "@modelcontextprotocol/sdk/types.js";
 
 import {
   collectOnboardingContext,
@@ -12,7 +13,11 @@ import {
   renderOnboardingCore,
   renderOnboardingFrame,
 } from "../src/agents/onboarding-prompt.ts";
-import { createMcpServer } from "../src/mcp/server.ts";
+import { HackCliError } from "../src/lib/cli-result.ts";
+import {
+  buildMcpOnboardingPrompt,
+  createMcpServer,
+} from "../src/mcp/server.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
 /**
@@ -25,6 +30,11 @@ import { privateCliEnv } from "./helpers/private-cli-env.ts";
  */
 
 const REPO_ROOT = resolve(import.meta.dir, "..");
+const INTERACTIVE_INIT_RUNNER = resolve(
+  import.meta.dir,
+  "helpers",
+  "interactive-init-runner.ts"
+);
 const INIT_PROMPT_START = "----- hack onboarding prompt -----\n";
 const INIT_PROMPT_END = "\n----- end prompt -----\n";
 
@@ -102,13 +112,38 @@ async function runCli(
   fixture: Fixture,
   args: readonly string[]
 ): Promise<string> {
-  const child = Bun.spawn([process.execPath, "index.ts", ...args], {
+  return await runSourceEntry(fixture, ["index.ts", ...args], {
+    HACK_NO_INTERACTIVE: "1",
+  });
+}
+
+/**
+ * The interactive `hack init` path, run in a child with scripted terminal
+ * seams (tests/helpers/interactive-init-runner.ts) and a private environment.
+ */
+async function runInteractiveInit(
+  fixture: Fixture,
+  withValue: "claude" | "codex"
+): Promise<string> {
+  return await runSourceEntry(fixture, [
+    INTERACTIVE_INIT_RUNNER,
+    fixture.repo,
+    withValue,
+  ]);
+}
+
+async function runSourceEntry(
+  fixture: Fixture,
+  argv: readonly string[],
+  env: Readonly<Record<string, string>> = {}
+): Promise<string> {
+  const child = Bun.spawn([process.execPath, ...argv], {
     cwd: REPO_ROOT,
     env: privateCliEnv({
       root: fixture.root,
       home: fixture.home,
       env: {
-        HACK_NO_INTERACTIVE: "1",
+        ...env,
         // No agent client binary can be found or launched.
         PATH: fixture.emptyPath,
       },
@@ -232,6 +267,13 @@ test("every entry point renders the same discovery-first core for the same repo"
       entryPoint: { kind: "mcp-hack-init" },
       text: await mcpPrompt(mcp, {
         repoRoot: relative(fixture.root, fixture.repo),
+      }),
+    },
+    // The trimmed value is both the presence check and the resolved path.
+    "mcp hack-init (padded relative repoRoot)": {
+      entryPoint: { kind: "mcp-hack-init" },
+      text: await mcpPrompt(mcp, {
+        repoRoot: ` ${relative(fixture.root, fixture.repo)}\n`,
       }),
     },
   };
@@ -380,6 +422,112 @@ test("hack-init MCP refusals are closed and never echo the caller's path", async
   );
   expect(nativeMessage).not.toContain(fixture.repo);
 });
+
+test("hack-init MCP inventory failures drop the underlying message, path and values", async () => {
+  const fixture = await createFixture();
+  const leakedPath = join(
+    fixture.root,
+    "leaked-secret-dir",
+    "hack.config.json"
+  );
+  const leakedValue = "DATABASE_URL=postgres://app:hunter2@db.internal/app";
+  const cases = [
+    {
+      label: "unexpected error",
+      error: new Error(
+        `EACCES: permission denied, open '${leakedPath}' (${leakedValue})`
+      ),
+      code: ErrorCode.InternalError,
+      text: "E_UNEXPECTED: hack-init could not inventory the repo.",
+    },
+    {
+      label: "Hack error",
+      error: new HackCliError({
+        code: "E_NATIVE_PROJECT_UNSUPPORTED",
+        message: `Native project at ${leakedPath} uses ${leakedValue}`,
+      }),
+      code: ErrorCode.InvalidParams,
+      text: "E_NATIVE_PROJECT_UNSUPPORTED: hack-init could not inventory the repo.",
+    },
+  ] as const;
+
+  for (const testCase of cases) {
+    const requests: unknown[] = [];
+    const caught = await buildMcpOnboardingPrompt({
+      startDir: fixture.repo,
+      build: (request) => {
+        requests.push(request);
+        return Promise.reject(testCase.error);
+      },
+    }).then(
+      () => null,
+      (error: unknown) => error
+    );
+    expect(requests, testCase.label).toEqual([
+      { startDir: fixture.repo, entryPoint: { kind: "mcp-hack-init" } },
+    ]);
+    expect(caught, testCase.label).toBeInstanceOf(McpError);
+    const error = caught as McpError;
+    expect(error.code, testCase.label).toBe(testCase.code);
+    // Exact text: any echo of the underlying message, path or value fails.
+    expect(error.message, testCase.label).toBe(
+      `MCP error ${testCase.code}: ${testCase.text}`
+    );
+    expect(error.message).not.toContain("leaked-secret-dir");
+    expect(error.message).not.toContain("hunter2");
+    expect(error.data, testCase.label).toBeUndefined();
+  }
+});
+
+test("an existing setup without a dev_host keeps the <dev_host> placeholder", async () => {
+  const fixture = await createFixture();
+  await Bun.write(
+    join(fixture.repo, ".hack", "hack.config.json"),
+    `${JSON.stringify({ name: "parity" }, null, 2)}\n`
+  );
+  await Bun.write(
+    join(fixture.repo, ".hack", "docker-compose.yml"),
+    "services: {}\n"
+  );
+
+  const context = await collectOnboardingContext({ startDir: fixture.repo });
+  expect(context.mode).toBe("existing-project");
+  expect(context.projectName).toBe("parity");
+  expect(context.devHost).toBeUndefined();
+
+  const core = renderOnboardingCore({ context });
+  expect(core).toContain("the primary app answers on dev_host (<dev_host>)");
+  expect(core).toContain("`api.<dev_host>`");
+  // The new-project default must not describe an adopted setup.
+  expect(core).not.toContain("<project>.hack.local");
+});
+
+test("interactive hack init frames the handoff by whether this run scaffolded .hack/", async () => {
+  const fixture = await createFixture();
+  const created = await runInteractiveInit(fixture, "claude");
+  const existing = await runInteractiveInit(fixture, "codex");
+
+  // The scripted TTY seam took the interactive handoff branch, which falls
+  // back to printing only because no agent CLI is on PATH.
+  expect(created).toContain("claude not found on PATH");
+  expect(existing).toContain("codex not found on PATH");
+
+  const core = await expectedCore(fixture.repo);
+  expect(core).toContain("adopt the existing hack setup in this repo");
+  const scaffolded = renderOnboardingFrame({
+    entryPoint: { kind: "init-with", scaffold: "created" },
+  });
+  const kept = renderOnboardingFrame({
+    entryPoint: { kind: "init-with", scaffold: "existing" },
+  });
+  expect(scaffolded.before).not.toBe(kept.before);
+  expect(extractInitPrompt(created)).toBe(
+    `${scaffolded.before}${core}${scaffolded.after}`
+  );
+  expect(extractInitPrompt(existing)).toBe(
+    `${kept.before}${core}${kept.after}`
+  );
+}, 60_000);
 
 test("negative control: a drifted entry point fails parity", async () => {
   const fixture = await createFixture();

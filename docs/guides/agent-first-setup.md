@@ -62,7 +62,8 @@ through your client's plugin manager (see
 [Optional native plugins](../integrations.md#optional-native-plugins)). The skill
 tells the agent to run `hack agent onboard` and follow the printed prompt. Without
 shell access it fetches the `hack-init` MCP prompt only when a Hack MCP server, such
-as the opt-in `hack-mcp` plugin, is installed; otherwise it reports that blocker.
+as the opt-in `hack-mcp` plugin, is installed, and passes `repoRoot` so the prompt
+includes the repo inventory; otherwise it reports that blocker.
 The content stays in the CLI, so the skill fetches guidance matching the installed
 CLI.
 

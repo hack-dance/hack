@@ -117,6 +117,8 @@ const KNOWN_RENDER_FINGERPRINTS: Readonly<
     "cf91ca873a00ad4743198e11", // next: plugin-first agent setup + refresh-only setup sync
     "0e99791aa0edfd1895e31748", // next: runtime metadata backend scope + refresh-only setup sync
     "c6cd8f369e902624f9a31d2c", // next: hack-init MCP prompt takes repoRoot (HACK-1137)
+    "124ca278acd4be97747bac9b", // next: runtime metadata for authored projects
+    "88900097f7eb18a752de31bb", // next: hack-init MCP prompt repoRoot + authored runtime metadata
   ]),
   "hack-init-skill": new Set([
     "cd15fb6d8ed8e25071d05e75", // v3.1.0..v4.0.3
@@ -157,6 +159,8 @@ const KNOWN_RENDER_FINGERPRINTS: Readonly<
     "92ca4aa8f28ba1c93093c04a", // next: plugin-first agent setup + refresh-only setup sync
     "0b82281933af514de8a1b8b8", // next: runtime metadata backend scope + refresh-only setup sync
     "5dcd202fc7bc640895bd876c", // next: hack-init MCP prompt takes repoRoot (HACK-1137)
+    "05f095e17267519ad3660da5", // next: runtime metadata for authored projects
+    "07e49d3c2b05b93b6c49adfd", // next: hack-init MCP prompt repoRoot + authored runtime metadata
   ]),
 };
 

@@ -583,6 +583,44 @@ type Manifest = {
 function hash(text: string): string {
   return createHash("sha256").update(text).digest("hex");
 }
+function nativeComposeInstanceId(opts: {
+  readonly checkoutRoot: string;
+  readonly dev: number;
+  readonly ino: number;
+  readonly instance: string | null;
+}): string {
+  return hash(
+    JSON.stringify([opts.checkoutRoot, opts.dev, opts.ino, opts.instance])
+  );
+}
+function nativeComposeProjectName(instanceId: string): string {
+  return `hack-nc-${instanceId.slice(0, 32)}`;
+}
+
+/**
+ * The Compose project name a store opened for this checkout and instance reports.
+ * Read-only (one stat); it creates no state and grants no ownership. The opened
+ * store's identity stays authoritative: callers that use this before opening must
+ * compare it with `store.identity.composeProject` and refuse on a mismatch.
+ */
+export async function expectedNativeComposeProject(opts: {
+  readonly projectRoot: string;
+  readonly instance: string | null;
+}): Promise<string> {
+  const checkoutRoot = resolve(opts.projectRoot);
+  const info = await lstat(checkoutRoot).catch(() => refuse());
+  if (!info.isDirectory()) {
+    refuse();
+  }
+  return nativeComposeProjectName(
+    nativeComposeInstanceId({
+      checkoutRoot,
+      dev: info.dev,
+      ino: info.ino,
+      instance: opts.instance,
+    })
+  );
+}
 function identityMatches(left: unknown, right: NativeComposeIdentity): boolean {
   return (
     isRecord(left) &&
@@ -1361,14 +1399,12 @@ export async function openNativeComposeGenerationStore(opts: {
     directories.push(await ownedDirectory(root));
     const ignorePath = join(root, ".gitignore");
     const ignore = await privateIgnore(ignorePath, opts.mode !== "saved");
-    const instanceId = hash(
-      JSON.stringify([
-        checkoutRoot,
-        checkout.info.dev,
-        checkout.info.ino,
-        opts.instance,
-      ])
-    );
+    const instanceId = nativeComposeInstanceId({
+      checkoutRoot,
+      dev: checkout.info.dev,
+      ino: checkout.info.ino,
+      instance: opts.instance,
+    });
     const instanceRoot = join(root, instanceId);
     directories.push(await ownedDirectory(instanceRoot));
     const generationsRoot = join(instanceRoot, "generations");
@@ -1432,7 +1468,7 @@ export async function openNativeComposeGenerationStore(opts: {
           repositoryRoot,
           instance: opts.instance,
           instanceId,
-          composeProject: `hack-nc-${instanceId.slice(0, 32)}`,
+          composeProject: nativeComposeProjectName(instanceId),
           ownerToken: token(),
         };
         value = {
@@ -1459,7 +1495,7 @@ export async function openNativeComposeGenerationStore(opts: {
         repositoryRoot,
         instance: opts.instance,
         instanceId,
-        composeProject: `hack-nc-${instanceId.slice(0, 32)}`,
+        composeProject: nativeComposeProjectName(instanceId),
         ownerToken: value.identity.ownerToken,
       });
       parseReceipt(value, identity, checkoutAnchor);

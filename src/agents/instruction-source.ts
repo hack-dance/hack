@@ -293,7 +293,7 @@ export const INSTRUCTION_SECTIONS: readonly InstructionSection[] = [
       "Use a branch instance when you need two versions running at once (PR review, experiments, migrations) or want to keep a stable environment while testing another branch.",
       "Target one with `--branch <name>` on up/open/logs/down (for example: `hack up --branch <name> --detach`).",
       "Linked worktrees pick a branch instance automatically (see Linked git worktrees).",
-      "Containers in Compose-backed and native image projects receive `HACK_RUNTIME_METADATA` plus `HACK_DEV_URL`, `HACK_ALIAS_URL`, and current-service URL fields derived from effective Caddy routes; authored `.hack/hack.project.json` projects do not receive them yet. Use Compose DNS for internal traffic and this metadata for browser-facing links, OAuth callbacks, and webhooks.",
+      "Containers in Compose-file and authored `.hack/hack.project.json` projects, on the Compose and native backends, receive `HACK_RUNTIME_METADATA` plus `HACK_DEV_URL`, `HACK_ALIAS_URL`, and current-service URL fields derived from effective routes; explicit project env and authored env values win. Use Compose DNS for internal traffic and this metadata for browser-facing links, OAuth callbacks, and webhooks.",
     ],
   },
   {

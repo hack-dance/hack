@@ -1,4 +1,8 @@
 import { createHash } from "node:crypto";
+import {
+  type NativeAuthoredRuntimeMetadataSelection,
+  nativeAuthoredRuntimeMetadata,
+} from "./native-authored-runtime-metadata.ts";
 import { assertNativeComposeFileSubset } from "./native-compose-file-subset.ts";
 import { NativeConfigCompilerError } from "./native-config-compiler.ts";
 import { authoredFilePlanningRequired } from "./native-file-plan-protocol.ts";
@@ -78,8 +82,20 @@ type NativeExecutionInputSelection = {
   readonly explicitOverlay?: string | null;
   readonly explicitDomain?: string;
   readonly compilerBranch?: string;
+  /**
+   * Instance identity for Hack-generated public runtime host metadata. When
+   * present, every declared workload's plan carries the shared metadata keys as
+   * public `runtime` bindings below managed and authored env.
+   */
+  readonly runtimeMetadata?: NativeAuthoredRuntimeMetadataSelection;
   readonly signal?: AbortSignal;
 };
+
+function projectName(plan: Readonly<Record<string, unknown>>): string {
+  return typeof plan.name === "string" && plan.name.length > 0
+    ? plan.name
+    : refused();
+}
 
 /** Graph inputs always refuse raw file intent before environment acquisition. */
 export function acquireNativeExecutionInputs(
@@ -147,14 +163,25 @@ async function acquireInputs(input: {
     signal,
   };
   const env = await acquireProjectEnvForNativeExecution(envSelection);
+  const runtime =
+    opts.runtimeMetadata === undefined
+      ? undefined
+      : nativeAuthoredRuntimeMetadata({
+          projectName: projectName(resolved.plan),
+          declaredWorkloads: declared,
+          routing: resolved.routing_resolution,
+          selection: opts.runtimeMetadata,
+        });
   const metadata = nativeEnvironmentMetadata({
     metadata: env.metadata,
     declaredWorkloads: declared,
+    runtime,
   });
   freezePlan(metadata);
   const planned = await planPreparedNativeProject({
     prepared,
     metadata: env.metadata,
+    runtime,
     signal,
   });
   if (

@@ -12,6 +12,7 @@ import {
 import { resolveComposeStartupTimeoutMs } from "./compose-startup-budget.ts";
 import { isRecord } from "./guards.ts";
 import { tryNativeAuthoredCommand } from "./native-authored-command.ts";
+import { nativeComposeRuntimeMetadataSelection } from "./native-authored-runtime-metadata.ts";
 import { tryLegacyComposeAdoptedCommand } from "./native-compose-adoption-command.ts";
 import {
   assertNativeComposeAfterInputsUnchanged,
@@ -63,6 +64,7 @@ import {
   runNativeComposeOwnedFileChild,
 } from "./native-compose-file-command.ts";
 import {
+  expectedNativeComposeProject,
   type NativeComposeGeneration,
   NativeComposeGenerationError,
   type NativeComposeGenerationStore,
@@ -1874,11 +1876,22 @@ async function prepareCommand(opts: {
   readonly signal: AbortSignal;
 }): Promise<number> {
   const { options, projectRoot, signal } = opts;
+  // Generated runtime host metadata reports the instance's actual Compose project.
+  // The opened store's identity is authoritative and is compared below.
+  const composeProject = await expectedNativeComposeProject({
+    projectRoot,
+    instance: options.instance ?? null,
+  });
+  const runtimeMetadata = nativeComposeRuntimeMetadataSelection({
+    instance: options.instance ?? null,
+    composeProject,
+  });
   const acquire = () =>
     acquireNativeComposeFilePlanningInputs({
       projectRoot,
       profiles: options.profiles,
       explicitOverlay: options.overlay,
+      runtimeMetadata,
       signal,
     });
   let inputs = await acquire();
@@ -1923,6 +1936,9 @@ async function prepareCommand(opts: {
     mode: "prepare",
   });
   try {
+    if (store.identity.composeProject !== composeProject) {
+      return invalid();
+    }
     return await store.withMutation(async (mutation) => {
       const current = await store.loadCurrent();
       assertStartupAvailable(current);
@@ -1999,6 +2015,7 @@ async function prepareCommand(opts: {
             inputs,
             profiles: options.profiles,
             explicitOverlay: options.overlay,
+            runtimeMetadata,
             signal,
           })
         : null;

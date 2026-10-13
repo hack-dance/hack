@@ -605,6 +605,13 @@ For host declarations, metadata additionally includes
 `host:{default?:{KEY:{scope,secret}},workloads:{TARGET:{KEY:{scope,secret}}}}`.
 The default map is present exactly when requested, and workload maps exactly match
 `host_env_targets.workloads`, including empty maps. Extra target authority refuses.
+Optional `runtime:{WORKLOAD:{KEY:string}}` carries Hack-generated, non-secret
+[runtime host metadata](../cli.md#runtime-host-metadata) for declared workloads.
+Only the ten reserved `HACK_*` metadata keys are accepted, each value at most
+64 KiB without NUL. The compiler reports them as public `{kind:"runtime",value}`
+bindings below managed values and every authored directive, so explicit values
+win. Host entries never receive them, and they do not change any hash in the
+authored plan or local resolution. Protocol capability: `runtime_env_plan_version: 1`.
 The compiler shares an 8 MiB output safety budget across the complete planning
 envelope. It charges symbolic baselines before cloning them for each invocation,
 plus authored directives and diagnostics before report growth. Accounting is

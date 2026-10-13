@@ -397,11 +397,12 @@ deliberately marks that exact Compose volume disposable. Hack deliberately does 
 
 ### Runtime host metadata
 
-Containers started by `hack up`, `hack restart`, and `hack run` for a `.hack/docker-compose.yml`
-project receive the effective instance and public-route metadata. This applies to the default
-Compose backend and to the native backend (`HACK_RUNTIME_BACKEND=native`). It keeps
-server-generated links, OAuth callbacks, webhooks, and other browser-facing URLs isolated when the
-same project runs in multiple worktrees. Both backends emit the same keys and document shape.
+Containers started by `hack up`, `hack restart`, and `hack run` receive the effective instance and
+public-route metadata. This applies to `.hack/docker-compose.yml` projects and to authored
+`.hack/hack.project.json` projects, on the default Compose backend and on the native backend
+(`HACK_RUNTIME_BACKEND=native`). It keeps server-generated links, OAuth callbacks, webhooks, and
+other browser-facing URLs isolated when the same project runs in multiple worktrees. Every path
+emits the same keys and document shape from the same shared builder.
 
 | Variable | Value |
 | --- | --- |
@@ -465,8 +466,31 @@ port; host variables never do. Native-specific limits:
   removing the native HTTPS frontend when its port is not 443, changes the metadata without a
   hostname change, so the retained graph refuses to start. Start it with its original HTTPS
   frontend selection and port.
-- Authored `.hack/hack.project.json` configuration does not deliver these variables yet, on either
-  backend.
+
+For an authored `.hack/hack.project.json` project, the configuration compiler carries the values as
+public `runtime` bindings (see the [compiler reference](reference/native-config-compiler.md)), so
+they are reviewed with the rest of the plan and are never managed or secret values. The precedence
+matches Compose-file projects: a managed project env value or any authored `environment` directive
+for one of these keys (literal, default, reference, endpoint or `unset`) wins over the generated
+value. The hosts come from the compiler's routing resolution:
+
+- `HACK_DEV_HOST` is the resolved project origin's host (for example
+  `feature-x.demo.hack.local`). Without a routing resolution it is the compiler's generated
+  `<name>.hack.local`, prefixed with the selected branch when there is one.
+- `HACK_ALIAS_HOST` is the host of the alias named by `routes.oauth_alias`, when set.
+- Service URLs list each `routes.http` route for that service in route-name order, the route origin
+  before its aliases, so `HACK_SERVICE_URL` is the development origin.
+- `HACK_BRANCH` is the routing resolution's branch, or the selected `--branch` instance when no
+  routing resolution exists.
+- On the Compose backend `HACK_COMPOSE_PROJECT` is the instance's actual Compose project
+  (`hack-nc-...`), and URLs are portless. On the native backend it is `<name>` or
+  `<name>--<branch>`, as for native image projects, and URLs carry a selected non-443
+  `HACK_NATIVE_HTTPS_PORT`. Authored native graphs are not routed, so they have no alias and no
+  service URLs; the port appears only in `HACK_DEV_URL`.
+
+Authored native `hack exec` sees the values stored in the running container, and native one-off
+`hack run` uses the admitted service environment. A graph started before this release gains them
+on its next `hack up` or `hack restart`.
 
 Linked worktrees also inherit the project secret key automatically from the primary checkout
 through the shared git common dir, so you don't need to copy `.hack.secret.key` by hand. Set

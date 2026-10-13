@@ -119,11 +119,28 @@ and encoded-request bounds. Managed values, ciphertext and paths are unsupported
 Successful parsing returns `ok: true` and the unchanged plan, semantic hash, local
 resolution and declared namespace, plus `environment_plan`. That object contains
 `plan_version: 1`, selection metadata, `complete`, selected `workloads`, `warnings`
-and `diagnostics`. Bindings have one of three forms:
+and `diagnostics`. Bindings have one of these forms:
 
 - `managed`: symbolic `key`, winning `scope`, and `secret` flag;
 - `literal`: the explicit public authored `value`;
-- `default`: the explicit public fallback `value` used when no baseline key exists.
+- `default`: the explicit public fallback `value` used when no baseline key exists;
+- `endpoint`: a typed endpoint reference and target (see endpoint planning);
+- `runtime`: a Hack-generated public runtime host metadata `value`.
+
+Metadata may also include optional `runtime: {WORKLOAD: {KEY: value}}`: public,
+Hack-generated runtime host metadata (`HACK_BRANCH`, `HACK_COMPOSE_PROJECT`,
+`HACK_DEV_HOST`, `HACK_DEV_URL`, `HACK_ALIAS_HOST`, `HACK_ALIAS_URL`,
+`HACK_SERVICE_NAME`, `HACK_SERVICE_URL`, `HACK_SERVICE_URLS` and
+`HACK_RUNTIME_METADATA`). Only those closed keys are accepted, only for declared
+workloads, with string values up to 64 KiB that contain no NUL. Anything else
+refuses with a fixed request diagnostic that does not echo values. These values
+are never managed or secret: they become `runtime` bindings for that selected
+workload only where neither a managed baseline key nor an authored directive owns
+the key. Managed values replace them, and every authored directive (literal,
+default, reference, endpoint or unset) wins over them. Host process entries never
+receive runtime bindings. The protocol advertises `runtime_env_plan_version: 1`;
+an older compiler refuses the unknown field. Supplying runtime metadata changes
+neither the authored plan nor the semantic or resolution hashes.
 
 Managed baseline presence includes an empty managed value. `unset` removes a
 binding. References always read the immutable owning baseline before authored

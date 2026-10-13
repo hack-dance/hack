@@ -8,6 +8,7 @@ import {
   NativeAuthoredProjectStartError,
   type serveNativeAuthoredProject,
 } from "../src/backends/native-authored-project-start.ts";
+import { CliUsageError } from "../src/cli/command.ts";
 import { HackCliError } from "../src/lib/cli-result.ts";
 import { tryNativeAuthoredCommand } from "../src/lib/native-authored-command.ts";
 import type { NativeComposeCommandOptions } from "../src/lib/native-compose-command.ts";
@@ -715,6 +716,58 @@ macTest(
     expect(result).toHaveProperty("code", "E_LIFECYCLE_FAILED");
     expect(String(result)).not.toContain(privateDetail);
     expect(JSON.stringify(result)).not.toContain(privateDetail);
+    expect(await readdir(join(selected.root, ".hack"))).toEqual([]);
+  }
+);
+
+macTest(
+  "foreground up and restart carry the selected native HTTPS port for runtime metadata",
+  async () => {
+    const selected = await fixture();
+    const https = {
+      HACK_NATIVE_CADDY_BINARY: "/opt/native/caddy",
+      HACK_NATIVE_CADDY_SHA256: "a".repeat(64),
+      HACK_NATIVE_HTTPS_PORT: "8443",
+    };
+    const ports: (number | null | undefined)[] = [];
+    for (const [operation, env] of [
+      ["up", { ...selected.env, ...https }],
+      ["up", selected.env],
+      ["restart", { ...selected.env, ...https }],
+    ] as const) {
+      expect(
+        await tryNativeAuthoredCommand({
+          ...selected,
+          options: { ...selected.options, operation },
+          env,
+          serve: (startup) => {
+            ports.push(startup.httpsPort);
+            return Promise.resolve(0);
+          },
+          stop: () => Promise.resolve(),
+        })
+      ).toBe(0);
+    }
+    expect(ports).toEqual([8443, null, 8443]);
+  }
+);
+
+macTest(
+  "a partial native HTTPS selection refuses before input or owner work",
+  async () => {
+    const selected = await fixture();
+    let calls = 0;
+    const error: unknown = await tryNativeAuthoredCommand({
+      ...selected,
+      env: { ...selected.env, HACK_NATIVE_HTTPS_PORT: "8443" },
+      serve: () => {
+        calls++;
+        return Promise.resolve(0);
+      },
+    }).catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(CliUsageError);
+    expect(String(error)).not.toContain("8443");
+    expect(calls).toBe(0);
     expect(await readdir(join(selected.root, ".hack"))).toEqual([]);
   }
 );

@@ -482,6 +482,8 @@ When you pass `--env` or `--service`, Hack creates a stable scoped workspace nam
 ## Secret key handling
 
 Secret values in the YAML files are encrypted with the project key.
+The [env and secrets threat model](security/env-secrets-threat-model.md) lists what
+this protects against and the gaps that are still open.
 
 Default behavior:
 
@@ -640,6 +642,7 @@ If you are writing new docs or new project setup flows, document the YAML overla
 - [Initialize a project](guides/init-project.md)
 - [Sessions](sessions.md)
 - [CLI reference](cli.md)
+- [Env and secrets threat model](security/env-secrets-threat-model.md): assets, trust boundaries, current mitigations and open gaps
 - [Pulumi-style env config design](plans/2026-03-27-pulumi-style-env-config-design.md)
 
 

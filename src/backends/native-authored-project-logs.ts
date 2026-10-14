@@ -15,6 +15,7 @@ import {
 } from "./native-authored-runtime-binary.ts";
 import {
   invokeNativeRuntime,
+  isNativeRuntimeNotRunning,
   type NativeRuntimeSelection,
 } from "./native-runtime-client.ts";
 
@@ -133,7 +134,11 @@ export async function nativeAuthoredProjectLogs(input: {
   ) {
     return refused();
   }
-  const result = await withStatus(scope, async (saved) => {
+  // The held saved-read owner turns any error raised inside it into its own
+  // refusal, so a stopped runtime leaves it as a value and is rethrown after.
+  const result = await withStatus<
+    { readonly logs: NativeAuthoredLogs } | { readonly stopped: Error }
+  >(scope, async (saved) => {
     active();
     const receipt =
       requireReadyServiceReceipt(saved, scope, service) ?? refused();
@@ -146,32 +151,45 @@ export async function nativeAuthoredProjectLogs(input: {
           active();
         };
         await check();
-        const value = await invoke({
-          runtime,
-          cwd: scope.projectRoot,
-          args: [
-            "graph",
-            "native",
-            "logs",
-            "--run-id",
-            receipt.review.provenance.run,
-            "--service",
-            service,
-            "--tail",
-            String(tail),
-            "--json",
-          ],
-          timeoutMs: 15_000,
-          signal,
-          boundNativeAuthoredLogsDrain: true,
-        });
+        let value: unknown;
+        try {
+          value = await invoke({
+            runtime,
+            cwd: scope.projectRoot,
+            args: [
+              "graph",
+              "native",
+              "logs",
+              "--run-id",
+              receipt.review.provenance.run,
+              "--service",
+              service,
+              "--tail",
+              String(tail),
+              "--json",
+            ],
+            timeoutMs: 15_000,
+            signal,
+            boundNativeAuthoredLogsDrain: true,
+          });
+        } catch (error: unknown) {
+          if (!(isNativeRuntimeNotRunning(error) && error instanceof Error)) {
+            throw error;
+          }
+          // Reported only while the same saved selection and executable hold.
+          await check();
+          return { stopped: error };
+        }
         await check();
         const logs = parseNativeAuthoredLogs(value, receipt, service);
         await check();
-        return logs;
+        return { logs };
       }
     );
   });
   active();
-  return result;
+  if ("stopped" in result) {
+    throw result.stopped;
+  }
+  return result.logs;
 }

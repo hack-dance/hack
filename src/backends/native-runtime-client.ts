@@ -1,4 +1,5 @@
 import { isAbsolute } from "node:path";
+import { ClosedCliError } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
 import { nativeAuthoredExecOptions } from "./native-authored-exec-options.ts";
 import {
@@ -18,8 +19,11 @@ interface NativeFailure {
   readonly stopFailures?: readonly NativeStopFailure[];
 }
 
-/** Structured native codes remain safe to inspect without exposing subprocess diagnostics. */
-export class NativeRuntimeRequestError extends Error {
+/**
+ * Structured native codes remain safe to inspect without exposing subprocess
+ * diagnostics. The message is closed, so the CLI prints it without a stack.
+ */
+export class NativeRuntimeRequestError extends ClosedCliError {
   readonly nativeCode: string | undefined;
   readonly nativeCauseCode: string | undefined;
   readonly nativeStopFailures: readonly NativeStopFailure[] | undefined;
@@ -35,6 +39,22 @@ export class NativeRuntimeRequestError extends Error {
     this.nativeCauseCode = opts.nativeCauseCode;
     this.nativeStopFailures = opts.nativeStopFailures;
   }
+}
+
+/** Native code for a read against a candidate runtime that is not running. */
+export const NATIVE_RUNTIME_NOT_RUNNING = "runtime_not_running";
+
+/**
+ * True when a native request was refused because the candidate runtime is not
+ * running. The runtime reports this before it connects to the guest or reads
+ * graph state, so nothing was observed or changed. A read-only observation may
+ * report the stopped runtime as its result instead of failing.
+ */
+export function isNativeRuntimeNotRunning(error: unknown): boolean {
+  return (
+    error instanceof NativeRuntimeRequestError &&
+    error.nativeCode === NATIVE_RUNTIME_NOT_RUNNING
+  );
 }
 
 export interface NativeRuntimeSelection {

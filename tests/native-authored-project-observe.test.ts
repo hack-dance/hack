@@ -19,7 +19,9 @@ import {
   withNativeAuthoredProjectAdmission,
   withNativeAuthoredProjectStatus,
 } from "../src/backends/native-authored-project-run.ts";
+import { NativeRuntimeRequestError } from "../src/backends/native-runtime-client.ts";
 import { captureCompletedJobFixtureCommand } from "./e2e/scenarios/native-compose-adoption-job-worktrees.ts";
+import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
 let active = 0,
   unknown = false;
@@ -47,7 +49,11 @@ async function owned(body: () => Promise<void>) {
     active--;
   }
 }
-async function fixture(saved = true, branch: string | null = null) {
+async function fixture(
+  saved = true,
+  branch: string | null = null,
+  nativeCode?: string
+) {
   const projectRoot = await realpath(
     await mkdtemp(join(tmpdir(), "native-authored-ps-"))
   );
@@ -133,7 +139,7 @@ async function fixture(saved = true, branch: string | null = null) {
   const attempts = join(nativeHome, "status-attempts");
   await Bun.write(
     runtime.binary,
-    `#!${process.execPath}\nimport { appendFileSync } from 'node:fs';\nconst expected=${JSON.stringify(["--candidate-root", nativeHome, "graph", "native", "control", "--run-id", provenance.run, "--action", "status", "--json"])};if(JSON.stringify(process.argv.slice(2))!==JSON.stringify(expected))process.exit(97);appendFileSync(${JSON.stringify(attempts)},'status\\n');console.log(${JSON.stringify(JSON.stringify(reply))});\n`
+    `#!${process.execPath}\nimport { appendFileSync } from 'node:fs';\nconst expected=${JSON.stringify(["--candidate-root", nativeHome, "graph", "native", "control", "--run-id", provenance.run, "--action", "status", "--json"])};if(JSON.stringify(process.argv.slice(2))!==JSON.stringify(expected))process.exit(97);appendFileSync(${JSON.stringify(attempts)},'status\\n');${nativeCode === undefined ? `console.log(${JSON.stringify(JSON.stringify(reply))});` : `process.stderr.write(${JSON.stringify(JSON.stringify({ code: nativeCode }))});process.exit(1);`}\n`
   );
   await chmod(runtime.binary, 0o700);
   const mapping = join(
@@ -475,7 +481,164 @@ test("dead owner refuses and cancellation waits for the owned request", () =>
     expect(settled).toBe(true);
   }));
 
+test("a stopped runtime is a status for a ready generation; other refusals still refuse", () =>
+  owned(async () => {
+    const f = await fixture();
+    let calls = 0;
+    const stopped = await nativeAuthoredProjectPs({
+      ...f,
+      invoke: async () => {
+        calls++;
+        throw new NativeRuntimeRequestError({
+          message: "stopped",
+          nativeCode: "runtime_not_running",
+        });
+      },
+    });
+    expect(stopped).toEqual({
+      backend: "native",
+      status: "runtime_not_running",
+      run: f.receipt.review.provenance.run,
+      phase: null,
+      items: [],
+    });
+    expect(calls).toBe(1);
+    await expect(
+      nativeAuthoredProjectPs({
+        ...f,
+        invoke: () =>
+          Promise.reject(
+            new NativeRuntimeRequestError({
+              message: "protocol",
+              nativeCode: "engine_protocol",
+            })
+          ),
+      })
+    ).rejects.toThrow();
+    // Cancellation still wins over a stopped-runtime reply.
+    const controller = new AbortController();
+    await expect(
+      nativeAuthoredProjectPs({
+        ...f,
+        signal: controller.signal,
+        invoke: () => {
+          controller.abort();
+          return Promise.reject(
+            new NativeRuntimeRequestError({
+              message: "stopped",
+              nativeCode: "runtime_not_running",
+            })
+          );
+        },
+      })
+    ).rejects.toThrow();
+  }));
+
+test.each([
+  "rebirth",
+  "content",
+  "binary",
+  "recovery",
+])("a stopped-runtime reply still refuses %s drift across its awaited request", (fault) =>
+  owned(async () => {
+    const f = await fixture();
+    let calls = 0;
+    const outcome = nativeAuthoredProjectPs({
+      ...f,
+      invoke: async () => {
+        calls++;
+        if (fault === "rebirth") {
+          await rename(f.mapping, `${f.mapping}.original`);
+          await Bun.write(
+            f.mapping,
+            await Bun.file(`${f.mapping}.original`).text()
+          );
+          await chmod(f.mapping, 0o600);
+        }
+        if (fault === "content") {
+          await Bun.write(f.mapping, "{}");
+        }
+        if (fault === "binary") {
+          await Bun.write(f.runtime.binary, "changed");
+        }
+        if (fault === "recovery") {
+          await Bun.write(`${f.mapping}.recovery.json`, "{}");
+        }
+        // The runtime reports itself stopped only after the saved selection
+        // or executable changed; the recheck must refuse, not report a status.
+        throw new NativeRuntimeRequestError({
+          message: "stopped",
+          nativeCode: "runtime_not_running",
+        });
+      },
+    });
+    await expect(outcome).rejects.toThrow("changed");
+    await expect(outcome).rejects.not.toBeInstanceOf(NativeRuntimeRequestError);
+    expect(calls).toBe(1);
+  }));
+
 const macTest = process.platform === "darwin" ? test : test.skip;
+
+macTest.each([true, false])(
+  "source CLI native authored ps reports a stopped runtime (json=%s)",
+  (json) =>
+    owned(async () => {
+      const f = await fixture(true, null, "runtime_not_running");
+      const result = await captureCompletedJobFixtureCommand({
+        argv: [
+          process.execPath,
+          resolve(import.meta.dir, "../index.ts"),
+          "--path",
+          f.scope.projectRoot,
+          "ps",
+          ...(json ? ["--json"] : []),
+        ],
+        cwd: f.scope.projectRoot,
+        env: privateCliEnv({
+          root: f.scope.projectRoot,
+          env: {
+            HACK_RUNTIME_BACKEND: "native",
+            HACK_NATIVE_BINARY: f.runtime.binary,
+            HACK_NATIVE_HOME: f.runtime.home,
+            HACK_CONFIG_COMPILER_BINARY: "/must-not-compile",
+            HACK_LOGGER: "console",
+            HACK_EXECUTION_MODE: "non_interactive",
+          },
+        }),
+        captures: join(f.scope.projectRoot, "captures"),
+        timeoutMs: 15_000,
+        onUnconfirmed: () => {
+          unknown = true;
+        },
+      }).catch((error: unknown) => {
+        unknown = true;
+        throw error;
+      });
+      expect({
+        exitCode: result.exitCode,
+        output: result.combined,
+      }).toMatchObject({ exitCode: 0 });
+      expect(await Bun.file(f.attempts).text()).toBe("status\n");
+      expect(result.combined).not.toMatch(/^\s+at /m);
+      if (json) {
+        expect(JSON.parse(result.stdout)).toEqual({
+          ok: true,
+          data: {
+            backend: "native",
+            status: "runtime_not_running",
+            run: f.receipt.review.provenance.run,
+            phase: null,
+            items: [],
+          },
+        });
+      } else {
+        expect(result.combined).toContain(
+          "Native runtime is not running; no services are running."
+        );
+      }
+    }),
+  20_000
+);
 macTest.each([
   { json: true, profile: undefined },
   { json: false, profile: undefined },

@@ -21,10 +21,14 @@ import {
   saveNativeAuthoredProjectRun,
   withNativeAuthoredProjectStatus,
 } from "../src/backends/native-authored-project-run.ts";
-import { invokeNativeRuntime } from "../src/backends/native-runtime-client.ts";
+import {
+  invokeNativeRuntime,
+  NativeRuntimeRequestError,
+} from "../src/backends/native-runtime-client.ts";
 import { tryNativeAuthoredCommand } from "../src/lib/native-authored-command.ts";
 import type { NativeComposeCommandOptions } from "../src/lib/native-compose-command.ts";
 import { captureCompletedJobFixtureCommand } from "./e2e/scenarios/native-compose-adoption-job-worktrees.ts";
+import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
 const roots: string[] = [];
 let uncertain = false;
@@ -364,6 +368,41 @@ test("logs drain domain refuses mutations, follow, private input and noncanonica
     ).rejects.toThrow("budget");
   });
 });
+test("a stopped runtime leaves the held read as its own closed error, only while the selection holds", async () => {
+  return owned(async () => {
+    const f = await fixture();
+    const stopped = () =>
+      new NativeRuntimeRequestError({
+        message: "stopped",
+        nativeCode: "runtime_not_running",
+      });
+    let calls = 0;
+    const outcome = nativeAuthoredProjectLogs({
+      ...f,
+      service: "web",
+      invoke: () => {
+        calls++;
+        return Promise.reject(stopped());
+      },
+    });
+    await expect(outcome).rejects.toBeInstanceOf(NativeRuntimeRequestError);
+    await expect(outcome).rejects.toMatchObject({
+      nativeCode: "runtime_not_running",
+    });
+    expect(calls).toBe(1);
+    // An executable that changed during the request refuses instead.
+    await expect(
+      nativeAuthoredProjectLogs({
+        ...f,
+        service: "web",
+        invoke: async () => {
+          await Bun.write(f.runtime.binary, "changed");
+          throw stopped();
+        },
+      })
+    ).rejects.toThrow("changed");
+  });
+});
 test("logs cancellation settles its read child and returns no captured bytes", async () => {
   return owned(async () => {
     const f = await fixture();
@@ -592,6 +631,87 @@ macTest.each([
       } else {
         expect(result.stdout).toBe("literal stdout\n");
         expect(result.stderr).toBe("literal stderr\n");
+      }
+    }),
+  20_000
+);
+
+macTest.each([false, true])(
+  "source CLI authored logs --no-follow reports a stopped runtime as E_DOCKER_UNAVAILABLE (json=%s)",
+  (json) =>
+    owned(async () => {
+      const f = await fixture();
+      await Bun.write(
+        join(f.scope.projectDir, "hack.project.json"),
+        JSON.stringify({
+          version: 1,
+          services: { web: { image: "synthetic:test" } },
+        })
+      );
+      const attempts = join(f.runtime.home, "log-attempts");
+      const expected = [
+        "--candidate-root",
+        f.runtime.home,
+        ...f.args.map((value) => (value === "17" ? "200" : value)),
+      ];
+      // The candidate's reply to any read while its runtime is stopped.
+      await Bun.write(
+        f.runtime.binary,
+        `#!${process.execPath}\nimport {appendFileSync} from 'node:fs';\nif(JSON.stringify(process.argv.slice(2))!==${JSON.stringify(JSON.stringify(expected))})process.exit(97);appendFileSync(${JSON.stringify(attempts)},'logs\\n');process.stderr.write(${JSON.stringify(JSON.stringify({ code: "runtime_not_running" }))});process.exit(1);\n`
+      );
+      const result = await captureCompletedJobFixtureCommand({
+        argv: [
+          process.execPath,
+          "--no-env-file",
+          resolve(import.meta.dir, "../index.ts"),
+          "--path",
+          f.scope.projectRoot,
+          "logs",
+          "web",
+          "--no-follow",
+          ...(json ? ["--json"] : []),
+        ],
+        cwd: f.scope.projectRoot,
+        env: privateCliEnv({
+          root: f.scope.projectRoot,
+          env: {
+            HACK_RUNTIME_BACKEND: "native",
+            HACK_NATIVE_BINARY: f.runtime.binary,
+            HACK_NATIVE_HOME: f.runtime.home,
+            HACK_CONFIG_COMPILER_BINARY: "/must-not-compile",
+            HACK_LOGGER: "console",
+            HACK_EXECUTION_MODE: "non_interactive",
+          },
+        }),
+        captures: join(f.scope.projectRoot, "captures"),
+        timeoutMs: 15_000,
+        onUnconfirmed: () => {
+          uncertain = true;
+        },
+      }).catch((error: unknown) => {
+        uncertain = true;
+        throw error;
+      });
+      expect({
+        exitCode: result.exitCode,
+        output: result.combined,
+      }).toMatchObject({ exitCode: 1 });
+      // The authored read reached the stopped runtime exactly once.
+      expect(await Bun.file(attempts).text()).toBe("logs\n");
+      expect(result.combined).not.toMatch(/^\s+at /m);
+      expect(result.combined).not.toContain("E_LIFECYCLE_FAILED");
+      if (json) {
+        expect(JSON.parse(result.stdout)).toMatchObject({
+          ok: false,
+          error: { code: "E_DOCKER_UNAVAILABLE" },
+        });
+      } else {
+        expect(result.stdout).toBe("");
+        expect(result.stderr.split("\n").filter(Boolean)).toEqual([
+          expect.stringContaining(
+            "E_DOCKER_UNAVAILABLE: Native runtime is not running; no service logs are available. Start the native runtime and retry."
+          ),
+        ]);
       }
     }),
   20_000

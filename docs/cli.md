@@ -129,6 +129,8 @@ Historical remote guides are excluded from the supported documentation.
 
 - `--json` on `hack up`/`down`/`restart`/`doctor` emits a `{ok, data | error: {code, message}}`
   envelope with stable `E_*` error codes. `--json` on `hack up` implies `--detach`.
+- Known Hack errors and closed native runtime refusals print their message only, never a stack
+  trace; set `HACK_DEBUG=1` to add the stack. Unexpected exceptions always print their stack.
 - `--no-interactive` (or `HACK_NO_INTERACTIVE=1`) is a global flag: commands never prompt — they
   apply documented defaults or fail fast with `E_INTERACTIVE_REQUIRED`.
 - `NO_COLOR` (or `HACK_NO_COLOR`) disables colored/decorated output.

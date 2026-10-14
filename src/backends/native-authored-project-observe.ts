@@ -7,6 +7,7 @@ import {
 import { withPinnedRuntimeBinary } from "./native-authored-runtime-binary.ts";
 import {
   invokeNativeRuntime,
+  isNativeRuntimeNotRunning,
   type NativeRuntimeSelection,
 } from "./native-runtime-client.ts";
 
@@ -29,7 +30,15 @@ type Item = {
 };
 export type NativeAuthoredProjectStatus = {
   readonly backend: "native";
-  readonly status: "not_started" | "pending" | "observed";
+  /**
+   * `runtime_not_running`: a Ready generation is saved but the candidate
+   * runtime is stopped. Nothing was observed: `phase` is null, `items` empty.
+   */
+  readonly status:
+    | "not_started"
+    | "pending"
+    | "runtime_not_running"
+    | "observed";
   readonly run: string | null;
   readonly phase: string | null;
   readonly items: readonly Item[];
@@ -83,23 +92,40 @@ export async function nativeAuthoredProjectPs(input: {
             active(signal);
           };
           await check();
-          const value = await invoke({
-            runtime,
-            cwd: scope.projectRoot,
-            args: [
-              "graph",
-              "native",
-              "control",
-              "--run-id",
-              receipt.review.provenance.run,
-              "--action",
-              "status",
-              "--json",
-            ],
-            timeoutMs: 15_000,
-            signal,
-            boundNativeStatusDrain: true,
-          });
+          let value: unknown;
+          try {
+            value = await invoke({
+              runtime,
+              cwd: scope.projectRoot,
+              args: [
+                "graph",
+                "native",
+                "control",
+                "--run-id",
+                receipt.review.provenance.run,
+                "--action",
+                "status",
+                "--json",
+              ],
+              timeoutMs: 15_000,
+              signal,
+              boundNativeStatusDrain: true,
+            });
+          } catch (error: unknown) {
+            if (!isNativeRuntimeNotRunning(error)) {
+              throw error;
+            }
+            // A stopped runtime is a status, not a refusal; the same saved
+            // selection and executable must still hold.
+            await check();
+            return {
+              backend: "native",
+              status: "runtime_not_running",
+              run: receipt.review.provenance.run,
+              phase: null,
+              items: [],
+            };
+          }
           await check();
           const current = parseNativeAuthoredControl(value, receipt, "status");
           const items: Item[] = Object.entries(current.receipt.readiness).map(

@@ -1,5 +1,6 @@
 import { cancel } from "@clack/prompts";
 import {
+  ClosedCliError,
   emitCliResult,
   errorResult,
   errorResultFromUnknown,
@@ -138,6 +139,10 @@ function resolveSensitiveOutputError(
  * stays a single parseable envelope for every error class (usage errors
  * included — they emit E_USAGE and skip the printed help); the human-readable
  * message still reaches stderr.
+ *
+ * Without `--json`, known errors ({@link HackCliError}, {@link ClosedCliError})
+ * print their closed message only, plus the stack when `HACK_DEBUG=1`. Any
+ * other exception is unexpected and always prints its stack.
  */
 export async function handleRunCliError(opts: {
   readonly error: unknown;
@@ -165,15 +170,32 @@ export async function handleRunCliError(opts: {
 
   if (error instanceof HackCliError) {
     logger.error({ message: `${error.code}: ${error.message}` });
+    logDebugStack(error);
     return 1;
   }
 
+  if (error instanceof ClosedCliError) {
+    // A known refusal: its message is the whole report. A stack would only
+    // repeat it with internal frames.
+    logger.error({ message: error.message });
+    logDebugStack(error);
+    return 1;
+  }
+
+  // Unexpected exceptions keep their stack: it is the only lead to the bug.
   const message = error instanceof Error ? error.message : "Unknown error";
   cancel(message);
   if (error instanceof Error && error.stack) {
     logger.error({ message: error.stack });
   }
   return 1;
+}
+
+/** Known errors show their stack only on request (`HACK_DEBUG=1`). */
+function logDebugStack(error: Error): void {
+  if (isTruthyEnv(process.env.HACK_DEBUG) && error.stack) {
+    logger.error({ message: error.stack });
+  }
 }
 
 /**

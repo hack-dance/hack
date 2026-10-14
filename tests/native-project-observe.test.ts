@@ -7,6 +7,8 @@ import {
   nativeProjectPs,
 } from "../src/backends/native-project-observe.ts";
 import { saveNativeProjectRun } from "../src/backends/native-project-run.ts";
+import { NativeRuntimeRequestError } from "../src/backends/native-runtime-client.ts";
+import { HackCliError } from "../src/lib/cli-result.ts";
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -272,10 +274,15 @@ test("source CLI native ps reports not-started with Docker unavailable", async (
       new Response(child.stderr).text(),
     ]);
     expect(code).toBe(0);
-    expect(JSON.parse(stdout)).toMatchObject({
-      backend: "native",
-      status: "not_started",
-      items: [],
+    expect(JSON.parse(stdout)).toEqual({
+      ok: true,
+      data: {
+        backend: "native",
+        status: "not_started",
+        run: null,
+        phase: null,
+        items: [],
+      },
     });
   } finally {
     clearTimeout(timer);
@@ -432,4 +439,71 @@ test("absent native selector preserves legacy command availability", async () =>
   for (const operation of ["down", "restart", "run", "exec"] as const) {
     expect(() => requireComposeOperationAvailable(operation, {})).not.toThrow();
   }
+});
+
+function nativeRefusal(nativeCode: string) {
+  return new NativeRuntimeRequestError({
+    message: `Native runtime request failed (${nativeCode}); inspect owned state before retrying.`,
+    nativeCode,
+  });
+}
+test("ps reports a stopped runtime for an owned mapping instead of failing", async () => {
+  const opts = await fixture();
+  const calls: string[] = [];
+  const invoke = async (request: { args: readonly string[] }) => {
+    calls.push(request.args.join(" "));
+    throw nativeRefusal("runtime_not_running");
+  };
+  expect(await nativeProjectPs({ ...opts, invoke })).toEqual({
+    backend: "native",
+    status: "runtime_not_running",
+    run: run.run,
+    phase: null,
+    items: [],
+  });
+  // One inspect; no owner-status or other follow-up request.
+  expect(calls).toEqual([`graph inspect --run-id ${run.run} --json`]);
+});
+test("ps still fails on every other native refusal", async () => {
+  const opts = await fixture();
+  for (const code of ["engine_protocol", "graph_journal_incomplete"]) {
+    await expect(
+      nativeProjectPs({
+        ...opts,
+        invoke: () => Promise.reject(nativeRefusal(code)),
+      })
+    ).rejects.toThrow(`(${code})`);
+  }
+  // An unstructured failure is not a stopped runtime either.
+  await expect(
+    nativeProjectPs({
+      ...opts,
+      invoke: () => Promise.reject(new Error("runtime_not_running")),
+    })
+  ).rejects.toThrow("runtime_not_running");
+});
+test("logs refuse a stopped runtime with a closed, coded error", async () => {
+  const opts = await fixture();
+  const error = await nativeProjectLogs({
+    ...opts,
+    invoke: () => Promise.reject(nativeRefusal("runtime_not_running")),
+    service: "web",
+    follow: false,
+    tail: 20,
+  }).catch((caught: unknown) => caught);
+  expect(error).toBeInstanceOf(HackCliError);
+  expect(error).toMatchObject({
+    code: "E_DOCKER_UNAVAILABLE",
+    message:
+      "Native runtime is not running; no service logs are available. Start the native runtime and retry.",
+  });
+  await expect(
+    nativeProjectLogs({
+      ...opts,
+      invoke: () => Promise.reject(nativeRefusal("engine_protocol")),
+      service: "web",
+      follow: false,
+      tail: 20,
+    })
+  ).rejects.toThrow("(engine_protocol)");
 });

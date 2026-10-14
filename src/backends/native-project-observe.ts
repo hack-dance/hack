@@ -1,3 +1,4 @@
+import { ClosedCliError, HackCliError } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
 import {
   loadNativeProjectRun,
@@ -6,6 +7,7 @@ import {
 } from "./native-project-run.ts";
 import {
   invokeNativeRuntime,
+  isNativeRuntimeNotRunning,
   type NativeRuntimeSelection,
 } from "./native-runtime-client.ts";
 
@@ -25,10 +27,36 @@ type Options = {
   readonly invoke?: typeof invokeNativeRuntime;
 };
 function refused(): Error {
-  return new Error(
+  return new ClosedCliError(
     "Native graph observation refused: owned mapping or current graph identity is unavailable or changed."
   );
 }
+/** Closed refusal for logs, which have nothing to read from a stopped runtime. */
+function runtimeNotRunning(): HackCliError {
+  return new HackCliError({
+    code: "E_DOCKER_UNAVAILABLE",
+    message:
+      "Native runtime is not running; no service logs are available. Start the native runtime and retry.",
+  });
+}
+/**
+ * Native ps result. `runtime_not_running` means the project has an owned run
+ * mapping but the candidate runtime is stopped: nothing was observed, so
+ * `phase` is null and `items` is empty.
+ */
+export type NativeProjectPsStatus =
+  | "not_started"
+  | "runtime_not_running"
+  | "observed"
+  | "owner_unconfirmed"
+  | "runtime_degraded";
+export type NativeProjectPsResult = {
+  readonly backend: "native";
+  readonly status: NativeProjectPsStatus;
+  readonly run: string | null;
+  readonly phase: string | null;
+  readonly items: Item[];
+};
 function inspected(
   value: unknown,
   expected: NativeProjectRun
@@ -111,19 +139,39 @@ async function inspect(opts: Options, run: NativeProjectRun) {
     run
   );
 }
-/** Historical receipt phase is separated from current per-service observations. */
-export async function nativeProjectPs(opts: Options) {
+/**
+ * Historical receipt phase is separated from current per-service observations.
+ * A stopped candidate runtime is an ordinary state for this read: it reports
+ * `runtime_not_running` instead of failing. Every other refusal still throws.
+ */
+export async function nativeProjectPs(
+  opts: Options
+): Promise<NativeProjectPsResult> {
   const run = await loadNativeProjectRun(opts.scope);
   if (!run) {
     return {
-      backend: "native" as const,
-      status: "not_started" as const,
+      backend: "native",
+      status: "not_started",
       run: null,
       phase: null,
-      items: [] as Item[],
+      items: [],
     };
   }
-  const snapshot = await inspect(opts, run);
+  let snapshot: Awaited<ReturnType<typeof inspect>>;
+  try {
+    snapshot = await inspect(opts, run);
+  } catch (error: unknown) {
+    if (!isNativeRuntimeNotRunning(error)) {
+      throw error;
+    }
+    return {
+      backend: "native",
+      status: "runtime_not_running",
+      run: run.run,
+      phase: null,
+      items: [],
+    };
+  }
   let status: "observed" | "owner_unconfirmed" | "runtime_degraded" =
     "observed";
   if (snapshot.foreground && snapshot.phase === "ready-observed") {
@@ -153,7 +201,7 @@ export async function nativeProjectPs(opts: Options) {
     }
   }
   return {
-    backend: "native" as const,
+    backend: "native",
     status,
     run: run.run,
     items: snapshot.items,
@@ -176,17 +224,22 @@ export async function nativeProjectLogs(
     opts.tail < 1 ||
     opts.tail > 1000
   ) {
-    throw new Error(
+    throw new ClosedCliError(
       "Native logs require one service, --no-follow and --tail 1..1000."
     );
   }
   const run = await loadNativeProjectRun(opts.scope);
   if (!run) {
-    throw new Error(
+    throw new ClosedCliError(
       "Native project has not been started; no owned graph mapping exists."
     );
   }
-  const before = await inspect(opts, run);
+  let before: Awaited<ReturnType<typeof inspect>>;
+  try {
+    before = await inspect(opts, run);
+  } catch (error: unknown) {
+    throw isNativeRuntimeNotRunning(error) ? runtimeNotRunning() : error;
+  }
   const service = before.items.find((item) => item.service === opts.service);
   if (!service?.container) {
     throw refused();

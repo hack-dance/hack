@@ -9,7 +9,10 @@ import {
   planNativeConfig,
   resolveNativeConfig,
 } from "../src/lib/native-config-compiler.ts";
-import type { NativeEnvMetadata } from "../src/lib/native-env-plan-protocol.ts";
+import {
+  type NativeEnvMetadata,
+  parseNativeEnvironmentPlan,
+} from "../src/lib/native-env-plan-protocol.ts";
 import { restoreEnv } from "./helpers/env.ts";
 
 const PROTOCOL = {
@@ -299,6 +302,95 @@ test("rejects oversized metadata before spawning", async () => {
       "Native environment metadata is invalid or exceeds its budget; values omitted.",
   });
   expect(await Bun.file(receipt).exists()).toBe(false);
+});
+
+test("sends reserved runtime metadata for declared workloads and refuses any other runtime entry before spawning", async () => {
+  const receipt = join(directory, "spawn-receipt");
+  const request = join(directory, "request");
+  const binary = await fixture({
+    onInvocation: `await Bun.write(${JSON.stringify(receipt)}, 'spawned');`,
+    body: `await Bun.write(${JSON.stringify(request)}, await Bun.stdin.text()); process.stdout.write(${JSON.stringify(JSON.stringify(SUCCESS))});`,
+  });
+  const refused = [
+    { name: "non-reserved key", runtime: { web: { APP_MODE: CANARY } } },
+    { name: "lowercase key", runtime: { web: { hack_branch: CANARY } } },
+    {
+      name: "undeclared workload",
+      runtime: { other: { HACK_BRANCH: CANARY } },
+    },
+    { name: "NUL value", runtime: { web: { HACK_BRANCH: `${CANARY}\0` } } },
+    { name: "non-string value", runtime: { web: { HACK_BRANCH: 1 } } },
+    { name: "array workload", runtime: { web: [CANARY] } },
+    { name: "array runtime", runtime: [CANARY] },
+  ];
+  for (const { runtime } of refused) {
+    await expectFailure({
+      operation: planNativeConfig({
+        input: INPUT,
+        envMetadata: { ...METADATA, runtime } as unknown as NativeEnvMetadata,
+        binary,
+      }),
+      code: "E_CONFIG_METADATA",
+      message:
+        "Native environment metadata is invalid or exceeds its budget; values omitted.",
+    });
+    expect(await Bun.file(receipt).exists()).toBe(false);
+  }
+  // Positive control: the same wire with reserved keys reaches the compiler.
+  const runtime = {
+    web: { HACK_BRANCH: "feature", HACK_SERVICE_NAME: "web" },
+  };
+  expect(
+    await planNativeConfig({
+      input: INPUT,
+      envMetadata: { ...METADATA, runtime },
+      binary,
+    })
+  ).toEqual(SUCCESS);
+  expect(await Bun.file(receipt).exists()).toBe(true);
+  expect(
+    JSON.parse(await Bun.file(request).text()).env_metadata.runtime
+  ).toEqual(runtime);
+});
+
+test("accepts runtime bindings for reserved workload keys and refuses them in host reports", () => {
+  const parse = (value: unknown) =>
+    parseNativeEnvironmentPlan({
+      value,
+      parseDiagnostic: () => {
+        throw new Error("No diagnostics are expected");
+      },
+    });
+  const host = (binding: unknown) => ({
+    ...ENVIRONMENT_PLAN,
+    host: {
+      before: {
+        env_target: { kind: "host" },
+        bindings: { HACK_BRANCH: binding },
+      },
+    },
+  });
+  const workload = (key: string) => ({
+    ...ENVIRONMENT_PLAN,
+    workloads: {
+      web: {
+        ...ENVIRONMENT_PLAN.workloads.web,
+        [key]: { kind: "runtime", value: "feature" },
+      },
+    },
+  });
+  // Positive controls: the same host report shape with an authored literal,
+  // and a reserved runtime binding on a workload.
+  expect(
+    parse(host({ kind: "literal", value: "feature" }))?.host?.before?.bindings
+  ).toEqual({ HACK_BRANCH: { kind: "literal", value: "feature" } });
+  expect(parse(workload("HACK_BRANCH"))?.workloads.web?.HACK_BRANCH).toEqual({
+    kind: "runtime",
+    value: "feature",
+  });
+  // Generated container metadata never reaches host processes.
+  expect(parse(host({ kind: "runtime", value: "feature" }))).toBeNull();
+  expect(parse(workload("APP_MODE"))).toBeNull();
 });
 
 test("bounds original documents and UTF-8 before spawning", async () => {

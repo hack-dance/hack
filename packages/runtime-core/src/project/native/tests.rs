@@ -1063,3 +1063,49 @@ fn persistent_host_capability_is_exact_ephemeral_and_keeps_standalone_and_mixed_
         );
     }
 }
+
+#[test]
+fn generated_runtime_metadata_is_public_environment_below_managed_and_authored_values() {
+    let mut project = basic();
+    project["services"]["web"]["environment"] =
+        json!({"HACK_DEV_URL":{"literal":"https://authored.example"}});
+    let metadata = json!({"web":{"HACK_BRANCH":{"scope":"web","secret":true}}});
+    let mut wire: Value = serde_json::from_slice(&request(&project, metadata.clone())).unwrap();
+    wire["env_metadata"]["runtime"] = json!({"web":{
+        "HACK_BRANCH":"generated-branch",
+        "HACK_DEV_HOST":"feature.fixture.hack.local",
+        "HACK_DEV_URL":"https://feature.fixture.hack.local:8443",
+        "HACK_SERVICE_NAME":"web"
+    }});
+    let bytes = serde_json::to_vec(&wire).unwrap();
+    let values = BTreeMap::from([(
+        "web".into(),
+        BTreeMap::from([("HACK_BRANCH".into(), "synthetic-private-branch".into())]),
+    )]);
+    let inputs = compile(CompileOptions {
+        request: &bytes,
+        profiles: &[],
+        managed_values: &values,
+    })
+    .unwrap();
+    assert_eq!(
+        inputs.workloads["web"].environment,
+        BTreeMap::from([
+            ("HACK_DEV_HOST".into(), "feature.fixture.hack.local".into()),
+            ("HACK_DEV_URL".into(), "https://authored.example".into()),
+            ("HACK_SERVICE_NAME".into(), "web".into()),
+        ])
+    );
+    assert_eq!(
+        inputs.managed_environment["web"],
+        BTreeMap::from([("HACK_BRANCH".into(), "synthetic-private-branch".into())])
+    );
+    // Generated values are part of the reviewed public policy identity.
+    let reviewed = review(&bytes, &[]).unwrap();
+    let without = review(&request(&project, metadata), &[]).unwrap();
+    assert_eq!(reviewed.semantic_hash, without.semantic_hash);
+    assert_ne!(
+        reviewed.environment_policy_hash,
+        without.environment_policy_hash
+    );
+}

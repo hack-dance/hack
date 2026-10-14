@@ -285,3 +285,128 @@ fn missing_overlay_warning_tracks_local_and_explicit_selection_provenance() {
     assert_eq!(warning["line"], line + 1);
     assert_eq!(warning["column"], content.find("\"qa\"").unwrap() + 1);
 }
+fn runtime_values(service: &str) -> Value {
+    json!({
+        "HACK_BRANCH":"feature",
+        "HACK_COMPOSE_PROJECT":"example--feature",
+        "HACK_DEV_HOST":"feature.example.hack.local",
+        "HACK_DEV_URL":"https://feature.example.hack.local:8443",
+        "HACK_RUNTIME_METADATA":"{\"version\":1}",
+        "HACK_SERVICE_NAME":service,
+        "HACK_SERVICE_URLS":"[]"
+    })
+}
+#[test]
+fn runtime_metadata_binds_public_values_below_managed_and_authored_env() {
+    let mut p = project();
+    p["services"]["web"]["environment"] = json!({
+        "HACK_DEV_URL":{"literal":"https://authored.example"},
+        "HACK_BRANCH":{"default":"authored-default"},
+        "HACK_SERVICE_URLS":{"unset":true},
+        "HACK_RUNTIME_METADATA":{"env_ref":"SOURCE"}
+    });
+    let mut m = metadata();
+    m["workloads"]["web"] =
+        json!({"HACK_COMPOSE_PROJECT":entry("web",false),"SOURCE":entry("global",false)});
+    m["runtime"] = json!({"web":runtime_values("web"),"init":runtime_values("init")});
+    let out = output(&request(p, m), &[]);
+    assert_eq!(out["ok"], true, "{out}");
+    assert_eq!(out["environment_plan"]["complete"], true, "{out}");
+    let web = &out["environment_plan"]["workloads"]["web"];
+    // Authored directives win over generated metadata.
+    assert_eq!(
+        web["HACK_DEV_URL"],
+        json!({"kind":"literal","value":"https://authored.example"})
+    );
+    assert_eq!(
+        web["HACK_BRANCH"],
+        json!({"kind":"default","value":"authored-default"})
+    );
+    assert!(web.get("HACK_SERVICE_URLS").is_none());
+    assert_eq!(web["HACK_RUNTIME_METADATA"]["kind"], "managed");
+    // Managed project values win over generated metadata.
+    assert_eq!(
+        web["HACK_COMPOSE_PROJECT"],
+        json!({"kind":"managed","key":"HACK_COMPOSE_PROJECT","scope":"web","secret":false})
+    );
+    // Keys nothing else owns receive the public runtime binding.
+    assert_eq!(
+        web["HACK_DEV_HOST"],
+        json!({"kind":"runtime","value":"feature.example.hack.local"})
+    );
+    assert_eq!(
+        web["HACK_SERVICE_NAME"],
+        json!({"kind":"runtime","value":"web"})
+    );
+    let init = &out["environment_plan"]["workloads"]["init"];
+    assert_eq!(
+        init["HACK_SERVICE_NAME"],
+        json!({"kind":"runtime","value":"init"})
+    );
+    assert_eq!(
+        init["HACK_DEV_URL"],
+        json!({"kind":"runtime","value":"https://feature.example.hack.local:8443"})
+    );
+    assert_eq!(init.as_object().unwrap().len(), 7);
+}
+#[test]
+fn runtime_metadata_is_absent_without_input_and_never_reaches_host_env() {
+    let p = project();
+    let without = output(&request(p.clone(), metadata()), &[]);
+    let mut m = metadata();
+    m["runtime"] = json!({"web":runtime_values("web")});
+    let with = output(&request(p.clone(), m.clone()), &[]);
+    assert_eq!(without["environment_plan"]["workloads"]["web"], json!({}));
+    assert_eq!(with["semantic_hash"], without["semantic_hash"]);
+    assert_eq!(with["plan"], without["plan"]);
+    assert_eq!(
+        with["local_resolution"]["resolution_hash"],
+        without["local_resolution"]["resolution_hash"]
+    );
+    assert_eq!(
+        with["environment_plan"]["workloads"]["init"],
+        json!({}),
+        "only workloads with supplied metadata receive it"
+    );
+    let mut hosted = project();
+    hosted["host"] = json!({"processes":{"watch":{"command":{"shell":"exit 0"}}}});
+    m["host"] = json!({"default":{},"workloads":{}});
+    let out = output(&request(hosted, m), &[]);
+    assert_eq!(out["ok"], true, "{out}");
+    assert_eq!(
+        out["environment_plan"]["host"]["watch"]["bindings"],
+        json!({})
+    );
+    assert_eq!(
+        out["environment_plan"]["workloads"]["web"]["HACK_BRANCH"]["kind"],
+        "runtime"
+    );
+}
+#[test]
+fn runtime_metadata_shape_keys_workloads_and_values_are_closed() {
+    for runtime in [
+        json!([]),
+        json!({"web":[]}),
+        json!({"web":{"HACK_BRANCH":1}}),
+        json!({"web":{"HACK_BRANCH":null}}),
+        json!({"web":{"SECRET_TOKEN":"private-value"}}),
+        json!({"web":{"HACK_OTHER":"private-value"}}),
+        json!({"absent":{"HACK_BRANCH":"private-value"}}),
+        json!({"web":{"HACK_BRANCH":"private-value\u{0}"}}),
+        json!({"web":{"HACK_RUNTIME_METADATA":"x".repeat(64 * 1024 + 1)}}),
+        Value::Null,
+    ] {
+        let mut m = metadata();
+        m["runtime"] = runtime.clone();
+        let v = output(&request(project(), m), &[]);
+        assert_eq!(v["ok"], false, "{runtime}");
+        assert_eq!(v["diagnostics"][0]["document"], "request", "{runtime}");
+        assert!(
+            !v.to_string().contains("private-value"),
+            "values are not echoed"
+        );
+    }
+    let mut m = metadata();
+    m["runtime"] = json!({"web":{"HACK_RUNTIME_METADATA":"x".repeat(64 * 1024)}});
+    assert_eq!(output(&request(project(), m), &[])["ok"], true);
+}

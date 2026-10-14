@@ -6,6 +6,11 @@ import type {
   WorkloadKind,
 } from "../../packages/config-compiler/generated/native-config.ts";
 import { isRecord } from "./guards.ts";
+import {
+  isNativeRuntimeMetadataKey,
+  type NativeRuntimeMetadataValues,
+  parseNativeRuntimeMetadataValues,
+} from "./native-authored-runtime-metadata.ts";
 import type { NativeConfigDiagnostic } from "./native-config-compiler.ts";
 import { parseNativeEndpointBinding } from "./native-endpoint-plan-protocol.ts";
 import {
@@ -24,13 +29,15 @@ const OVERLAY = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 export type NativeDeclaredWorkloads = Readonly<Record<string, WorkloadKind>>;
 export type NativeManagedEntry = Readonly<ManagedBindingMetadata>;
 export type NativeEnvMetadata = Readonly<
-  Omit<EnvMetadata, "workloads" | "inactive_scopes" | "host">
+  Omit<EnvMetadata, "workloads" | "inactive_scopes" | "host" | "runtime">
 > & {
   readonly workloads: Readonly<
     Record<string, Readonly<Record<string, NativeManagedEntry>>>
   >;
   readonly inactive_scopes: readonly string[];
   readonly host?: NativeHostMetadata;
+  /** Hack-generated public runtime host metadata; never managed or secret values. */
+  readonly runtime?: NativeRuntimeMetadataValues;
 };
 export type NativeEnvBinding = Readonly<EnvironmentBinding>;
 export type NativeEnvironmentPlan = Readonly<
@@ -86,6 +93,7 @@ export function parseNativeEnvMetadata(
         "workloads",
         "inactive_scopes",
         "host",
+        "runtime",
       ])
     ) ||
     value.metadata_version !== 1 ||
@@ -113,6 +121,14 @@ export function parseNativeEnvMetadata(
   if (host === null) {
     return null;
   }
+  const runtime = Object.hasOwn(value, "runtime")
+    ? parseNativeRuntimeMetadataValues(value.runtime, (name) =>
+        Object.hasOwn(workloads, name)
+      )
+    : undefined;
+  if (runtime === null) {
+    return null;
+  }
   return {
     metadata_version: 1,
     overlay: value.overlay,
@@ -120,6 +136,7 @@ export function parseNativeEnvMetadata(
     workloads,
     inactive_scopes: inactiveScopes,
     ...(host === undefined ? {} : { host }),
+    ...(runtime === undefined ? {} : { runtime }),
   };
 }
 
@@ -152,6 +169,13 @@ function parseWorkloadMetadata(
   return workloads;
 }
 
+/** Host process reports never carry generated container runtime metadata. */
+function parseHostBinding(value: unknown): NativeEnvBinding | null {
+  return isRecord(value) && value.kind === "runtime"
+    ? null
+    : parseBinding(value);
+}
+
 function parseBinding(value: unknown): NativeEnvBinding | null {
   if (!isRecord(value)) {
     return null;
@@ -181,6 +205,14 @@ function parseBinding(value: unknown): NativeEnvBinding | null {
     typeof value.value === "string"
   ) {
     return { kind: value.kind, value: value.value };
+  }
+  if (
+    value.kind === "runtime" &&
+    hasOnly(value, ["kind", "value"]) &&
+    typeof value.value === "string" &&
+    !value.value.includes("\0")
+  ) {
+    return { kind: "runtime", value: value.value };
   }
   return null;
 }
@@ -223,7 +255,10 @@ export function parseNativeEnvironmentPlan(opts: {
     const bindings: Record<string, NativeEnvBinding> = {};
     for (const [key, entry] of Object.entries(entries)) {
       const binding = parseBinding(entry);
-      if (!(AUTHORED_KEY.test(key) && binding)) {
+      if (
+        !(AUTHORED_KEY.test(key) && binding) ||
+        (binding.kind === "runtime" && !isNativeRuntimeMetadataKey(key))
+      ) {
         return null;
       }
       // Authored destinations may include __proto__; define an own data key.
@@ -239,7 +274,10 @@ export function parseNativeEnvironmentPlan(opts: {
   const warnings = value.warnings.map(opts.parseDiagnostic);
   const diagnostics = value.diagnostics.map(opts.parseDiagnostic);
   const host = Object.hasOwn(value, "host")
-    ? parseNativeHostReports({ value: value.host, parseBinding })
+    ? parseNativeHostReports({
+        value: value.host,
+        parseBinding: parseHostBinding,
+      })
     : undefined;
   if (
     host === null ||

@@ -26,6 +26,10 @@ import {
   NATIVE_STORAGE_TOOL_MANIFEST,
   nativeStorageToolManifest,
 } from "../src/backends/native-authored-storage-tool.ts";
+import {
+  type ComposeEnvFingerprintRecord,
+  evaluateComposeServiceEnvFreshness,
+} from "../src/lib/compose-env-fingerprint.ts";
 import { restoreEnv } from "./helpers/env.ts";
 import { writeLifecycleMuxFixture } from "./helpers/lifecycle-mux-fixture.ts";
 import { createNativeAuthoredSettlement } from "./helpers/native-authored-settlement.ts";
@@ -582,6 +586,74 @@ macTest(
     expect(delivery.lifetime_seconds).toBeGreaterThan(0);
     expect(delivery.lifetime_seconds).toBeLessThan(10);
     expect(await Bun.file(selected.calls).text()).not.toContain(CANARY);
+  }
+);
+
+macTest(
+  "native frontend observes value-free digests of the delivered managed selection before ready",
+  async () => {
+    const selected = await fixture();
+    const events: string[] = [];
+    let fingerprint: ComposeEnvFingerprintRecord | undefined;
+    const code = await serveNativeAuthoredProject({
+      ...selected,
+      run,
+      startupTimeoutMs: 10_000,
+      onEnvironmentSelected: (value) => {
+        events.push("selected");
+        fingerprint = value;
+        return undefined;
+      },
+      onReady: () => {
+        events.push("ready");
+        return undefined;
+      },
+    });
+    expect(code).toBe(0);
+    expect(events).toEqual(["selected", "ready"]);
+    expect(Object.keys(fingerprint?.services ?? {})).toEqual(["web"]);
+    expect(JSON.stringify(fingerprint)).not.toContain(CANARY);
+    expect(JSON.stringify(fingerprint)).not.toContain("TOKEN");
+    expect(
+      evaluateComposeServiceEnvFreshness({
+        record: fingerprint,
+        service: "web",
+        currentEnv: { TOKEN: CANARY },
+      })
+    ).toBe("unchanged");
+    expect(
+      evaluateComposeServiceEnvFreshness({
+        record: fingerprint,
+        service: "web",
+        currentEnv: { TOKEN: "synthetic-edited" },
+      })
+    ).toBe("changed");
+  }
+);
+
+macTest(
+  "a selection without managed keys digests an empty set and a throwing observer never fails startup",
+  async () => {
+    const selected = await fixture({ noManaged: true });
+    let fingerprint: ComposeEnvFingerprintRecord | undefined;
+    expect(
+      await serveNativeAuthoredProject({
+        ...selected,
+        run,
+        startupTimeoutMs: 10_000,
+        onEnvironmentSelected: (value) => {
+          fingerprint = value;
+          throw new Error("synthetic observer failure");
+        },
+      })
+    ).toBe(0);
+    expect(
+      evaluateComposeServiceEnvFreshness({
+        record: fingerprint,
+        service: "web",
+        currentEnv: {},
+      })
+    ).toBe("unchanged");
   }
 );
 

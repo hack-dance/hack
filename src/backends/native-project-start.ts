@@ -2,6 +2,10 @@ import { createHash, randomBytes } from "node:crypto";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join } from "node:path";
+import {
+  type ComposeEnvFingerprintRecord,
+  withComposeServiceEnvFingerprints,
+} from "../lib/compose-env-fingerprint.ts";
 import { isRecord } from "../lib/guards.ts";
 import { adaptNativeAwsEnvironment } from "./native-aws-environment.ts";
 import {
@@ -855,6 +859,17 @@ export async function startNativeProject(opts: {
   /** Public instance identity delivered as runtime host metadata; omitted delivers none. */
   readonly runtimeMetadata?: NativeRuntimeMetadataSelection;
   readonly before: (input: NativeProjectInput) => Promise<Hooks>;
+  /**
+   * Advisory stale-env bookkeeping (HACK-1140): after the run mapping is
+   * published, receives the run id and value-free digests of the env
+   * selection resolved for delivery, before adaptation, AWS or runtime
+   * metadata. `hack exec` resolves the same selection again to compare. A
+   * failure here never fails startup.
+   */
+  readonly onEnvironmentReady?: (selection: {
+    readonly run: string;
+    readonly fingerprint: ComposeEnvFingerprintRecord;
+  }) => Promise<void>;
   readonly signal?: AbortSignal;
   readonly dependencies?: Partial<Dependencies>;
 }): Promise<number> {
@@ -914,6 +929,14 @@ export async function startNativeProject(opts: {
     composeFile: opts.composeFile,
     envName: selection.envName,
   });
+  // Digest the selection now: later steps adapt the delivered values.
+  const selectedEnvironment = opts.onEnvironmentReady
+    ? withComposeServiceEnvFingerprints({
+        existing: undefined,
+        services: input.serviceNames,
+        envByService: input.managedEnvironment,
+      })
+    : undefined;
   if (
     retained &&
     !opts.restore &&
@@ -1307,6 +1330,14 @@ export async function startNativeProject(opts: {
                     expected: expectedMapping,
                   });
                   mapping = persistedMapping;
+                }
+                if (selectedEnvironment) {
+                  await opts
+                    .onEnvironmentReady?.({
+                      run,
+                      fingerprint: selectedEnvironment,
+                    })
+                    .catch(() => undefined);
                 }
                 await hooks?.ready?.();
                 await opts.onReady?.();

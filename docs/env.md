@@ -247,7 +247,7 @@ into a host command, and `--target` on env and host commands chooses the `host` 
 | `hack down` | `--env`, `--target` | At teardown, for lifecycle down hooks only; omitted reuses a named overlay recorded for the running stack, else the configured default. | None; nothing is delivered to containers. | The native runtime backend refuses `--env`. |
 | `hack restart` | `--env`, `--target` | When services are recreated; omitted reuses a named overlay recorded for the running stack, else the configured default, and an explicit `--env` (including `base`) wins. | This is the refresh path for the whole stack or the named services. | Authored native projects receive the same selection before dispatch. |
 | `hack run` | `--env` | Per invocation, for the new one-off container. | Each run resolves again. | The native runtime backend refuses `--env`; restart with the selection first. |
-| `hack exec` | `--env` | Checked at invocation against the env recorded for the running stack; the command runs with the env the container was created with. Compose warns on stderr when the service's resolved env changed since it started. | `hack restart <service>` (or `hack restart --env <name>`) | Compose refuses when the requested env differs from the env recorded for the running stack; the native runtime backend refuses `--env`. |
+| `hack exec` | `--env` | Checked at invocation against the env recorded for the running stack; the command runs with the env the container was created with. Compose exec and native-runtime exec (Compose-file and authored native projects) warn on stderr when the service's resolved env changed since it started. | `hack restart <service>` (or `hack restart --env <name>`); native projects restart as a whole with `hack restart` | Compose refuses when the requested env differs from the env recorded for the running stack; the native runtime backend refuses `--env`. |
 | `hack env list` | `--env`, `--service` | Per invocation, read-only; secret values are masked unless `--show-secrets`. | Not needed. | Reads files; no runtime required. |
 | `hack env get` | `--env`, `--service` | Per invocation; prints exactly one plaintext value to stdout. | Not needed. | Reads files; refuses native project inputs. |
 | `hack env explain` | `--env`, `--service`, `--target` | Per invocation; reports source, precedence and delivery without the value. | Not needed. | Reads files; no runtime required. |
@@ -278,7 +278,30 @@ command's output. The warning never prints a key or value.
 The check is advisory. Identical env, state written before this check existed, and a
 service whose last targeted restart failed produce no warning. `hack up <service>`,
 `hack restart <service>` and `hack env apply --service <service>` refresh only the
-named services' digests. The native runtime backend does not run this check.
+named services' digests.
+
+Projects on the native runtime backend run the same check. The foreground `hack up` or `hack restart` records
+value-free digests of the env selection it delivered once the run is ready, in
+`.hack/.internal/native-env-fingerprints/` (one file per instance, mode 0600). The
+record is bound to that run and removed when the foreground ends. `hack exec` resolves
+the same selection again: for a Compose-file (image) project, the env for the run's
+recorded env name; for an authored project, the managed values for the recorded
+`--env` and `--profile` selection. When they differ, it prints one fixed warning to
+stderr that names the service and suggests `hack restart`, since native restart is
+whole-project. An image-project exec receives freshly resolved values itself, so its
+warning says the running service still uses the env it started with. A restart drops
+the record once the previous run stops, so a failed restart produces no warning. A
+record from another run, a missing record, or any resolution failure produces no
+warning. An authored-project check is bounded: after five seconds without a result
+it is skipped and the command's output and exit code follow as usual. Ctrl-C during
+the check ends the command with exit code 130 without waiting for it.
+
+Two exec paths do not run this check yet: an authored `.hack/hack.project.json`
+project on the Compose backend (see
+[native configuration with Compose](reference/native-compose-commands.md)), and an
+existing Compose project switched with
+[`hack config adopt`](reference/native-compose-adoption.md), whose exec runs in the
+retained containers.
 
 MCP tools accept no env selector. They run the CLI without `--env`, so each row's
 omitted-`--env` behavior applies.
@@ -545,7 +568,13 @@ no key file exists, the check classifies `HACK_ENV_SECRET_KEY` instead. The chec
 read-only. It never prints key bytes or absolute paths, and `--fix` does not act on it.
 Each finding names a project-relative subject and the exact command to run from the
 project root. `--json` adds an `envKey` object to the check with `status` and
-`findings` (`code`, `status`, `subject`, `remedy`).
+`findings` (`code`, `status`, `subject`, `remedy`). The native runtime backend's
+`hack doctor` runs the same check inside a project.
+
+Nested public artifact directories are found with a bounded walk from the project
+root: at most six levels deep, 4096 directories and 100,000 entries. It skips
+`node_modules` and `.git`, does not follow symlinked directories, and reports a path
+it cannot spell portably as `<unprintable-path>/.hack.secret.key`.
 
 | Code | Status | Meaning |
 | --- | --- | --- |
@@ -559,7 +588,7 @@ project root. `--json` adds an `envKey` object to the check with `status` and
 | `env-key-not-regular` | error | the key path is a directory or another non-file entry |
 | `env-key-unreadable` | error | unreadable, oversized or not UTF-8 |
 | `env-key-tracked` | error | a file named `.hack.secret.key` is tracked by git at any depth |
-| `env-key-public-path` | error | a key copy sits in `public/`, `static/`, `dist/`, `build/`, `out/`, `www/`, `_site/`, `.next/` or `.output/` |
+| `env-key-public-path` | error | a key copy sits directly in `public/`, `static/`, `dist/`, `build/`, `out/`, `www/`, `_site/`, `.next/` or `.output/`, at the project root or in a nested package such as `apps/web/public/` |
 
 Hack derives the AES-256-GCM key by hashing the key text with SHA-256, so key
 strength is the entropy of that text. Generated keys are 32 random bytes in base64url.

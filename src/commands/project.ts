@@ -209,6 +209,10 @@ import {
 } from "../lib/logs.ts";
 import { tryNativeComposeCommand } from "../lib/native-compose-command.ts";
 import { tryNativeComposeOpen } from "../lib/native-compose-open.ts";
+import {
+  createNativeEnvFingerprintEntry,
+  createNativeEnvFingerprintSession,
+} from "../lib/native-env-fingerprint-state.ts";
 import { readNodesRegistry } from "../lib/nodes-registry.ts";
 import {
   parseOpenHostPreference,
@@ -4947,6 +4951,13 @@ async function handleNativeUp({
     branch,
   });
   const devHost = await resolveRuntimeDevHost({ project, branch });
+  const envFingerprintScope = {
+    projectDir: project.projectDir,
+    owner: "image" as const,
+    branch,
+  };
+  const envFingerprints =
+    createNativeEnvFingerprintSession(envFingerprintScope);
   const startup: Parameters<typeof startNativeProject>[0] = {
     runtime: native,
     scope: {
@@ -4975,6 +4986,10 @@ async function handleNativeUp({
       aliasHost: resolveBranchAliasHost({ devHost, cfg }),
       projectName,
     },
+    onEnvironmentReady: async ({ run, fingerprint }) =>
+      await envFingerprints.record(
+        createNativeEnvFingerprintEntry({ owner: "image", run, fingerprint })
+      ),
     before: async (input) => {
       const lifecycle = await runLifecycleUpBeforeAndProcesses({
         title: "Lifecycle (native up before)",
@@ -5014,13 +5029,68 @@ async function handleNativeUp({
     },
   };
   if (!restart) {
-    return await startNativeProject(startup);
+    try {
+      return await startNativeProject(startup);
+    } finally {
+      await envFingerprints.release();
+    }
   }
   if (!startup.sharedSource) {
     throw new CliUsageError(
       "Native restart requires HACK_NATIVE_SHARED_SOURCE=1 before cleanup."
     );
   }
+  try {
+    return await restartNativeImageProject({
+      ctx,
+      args,
+      native,
+      project,
+      cfg,
+      projectName,
+      branch,
+      composeProject,
+      startup,
+      recovery,
+      // Stopping the previous run makes its record stale; a failed restart
+      // then leaves no record, so exec stays silent rather than guessing.
+      dropEnvFingerprint: () => envFingerprints.drop(),
+    });
+  } finally {
+    await envFingerprints.release();
+  }
+}
+
+async function restartNativeImageProject({
+  ctx,
+  args,
+  native,
+  project,
+  cfg,
+  projectName,
+  branch,
+  composeProject,
+  startup,
+  recovery,
+  dropEnvFingerprint,
+}: {
+  readonly ctx: CliContext;
+  readonly args: UpArgs;
+  readonly native: NonNullable<
+    ReturnType<typeof resolveNativeRuntimeSelection>
+  >;
+  readonly project: Awaited<ReturnType<typeof resolveProjectForArgs>>;
+  readonly cfg: Awaited<ReturnType<typeof readProjectConfig>>;
+  readonly projectName: string;
+  readonly branch: string | null;
+  readonly composeProject: string;
+  readonly startup: Parameters<typeof startNativeProject>[0];
+  readonly recovery?: {
+    readonly expectAttempt: string;
+    readonly legacyPid?: number;
+  };
+  readonly dropEnvFingerprint: () => void;
+}): Promise<number> {
   return await restartNativeProject({
     scope: startup.scope,
     envName: startup.envName,
@@ -5076,6 +5146,7 @@ async function handleNativeUp({
       });
     },
     down: async () => {
+      dropEnvFingerprint();
       const code = await handleDown({
         ctx,
         deferFinalization: true,

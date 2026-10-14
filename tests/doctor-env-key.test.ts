@@ -16,8 +16,10 @@ import {
 } from "../src/commands/doctor.ts";
 import {
   classifyEnvKeyText,
+  ENV_KEY_PUBLIC_WALK_MAX_DIRECTORIES,
   type EnvKeyCandidate,
   type EnvKeyInspection,
+  findNestedPublicArtifactDirs,
   gitListTrackedKeyPaths,
   type InspectEnvKeyOptions,
   inspectProjectEnvKey,
@@ -292,6 +294,193 @@ describe("env key doctor diagnostic", () => {
         remedy: `rm -- public/${KEY_FILE}, then rotate the key: a published copy is not secret.`,
       },
     ]);
+  });
+
+  test("nested monorepo public artifact copies are errors with project-relative subjects", async () => {
+    const root = await tempProject();
+    const key = generatedKey();
+    await writeKey({ path: join(root, KEY_FILE), text: key, mode: 0o600 });
+    for (const dir of [
+      ["apps", "web", "public"],
+      ["packages", "site", "dist"],
+      ["apps", "docs", ".next"],
+    ]) {
+      await mkdir(join(root, ...dir), { recursive: true });
+      await writeKey({
+        path: join(root, ...dir, KEY_FILE),
+        text: key,
+        mode: 0o600,
+      });
+    }
+
+    const inspection = await inspect(root);
+
+    expect(inspection.status).toBe("error");
+    expect(
+      inspection.findings.map((finding) => [finding.code, finding.subject])
+    ).toEqual([
+      ["env-key-public-path", `apps/docs/.next/${KEY_FILE}`],
+      ["env-key-public-path", `apps/web/public/${KEY_FILE}`],
+      ["env-key-public-path", `packages/site/dist/${KEY_FILE}`],
+    ]);
+    expect(inspection.findings[1]?.remedy).toBe(
+      `rm -- apps/web/public/${KEY_FILE}, then rotate the key: a published copy is not secret.`
+    );
+    expectValueFree({ output: serialized(inspection), root, secrets: [key] });
+  });
+
+  test("negative control: the nested walk skips node_modules, .git and symlinked directories", async () => {
+    const root = await tempProject();
+    const key = generatedKey();
+    await writeKey({ path: join(root, KEY_FILE), text: key, mode: 0o600 });
+    for (const dir of [
+      ["node_modules", "pkg", "dist"],
+      [".git", "public"],
+      ["apps", "web", "node_modules", "lib", "public"],
+      ["outside", "public"],
+    ]) {
+      await mkdir(join(root, ...dir), { recursive: true });
+      await writeKey({
+        path: join(root, ...dir, KEY_FILE),
+        text: key,
+        mode: 0o600,
+      });
+    }
+    await mkdir(join(root, "apps", "linked"), { recursive: true });
+    await symlink(
+      join(root, "outside", "public"),
+      join(root, "apps", "linked", "public")
+    );
+    // A key directly in a non-artifact directory is not a public copy.
+    await writeKey({
+      path: join(root, "apps", "web", KEY_FILE),
+      text: key,
+      mode: 0o600,
+    });
+
+    const inspection = await inspect(root);
+
+    expect(
+      inspection.findings.map((finding) => [finding.code, finding.subject])
+    ).toEqual([["env-key-public-path", `outside/public/${KEY_FILE}`]]);
+  });
+
+  test("the nested walk is depth bounded", async () => {
+    const root = await tempProject();
+    const key = generatedKey();
+    await writeKey({ path: join(root, KEY_FILE), text: key, mode: 0o600 });
+    const deepest = ["a", "b", "c", "d", "e", "public"];
+    const tooDeep = ["a", "b", "c", "d", "e", "f", "public"];
+    for (const dir of [deepest, tooDeep]) {
+      await mkdir(join(root, ...dir), { recursive: true });
+      await writeKey({
+        path: join(root, ...dir, KEY_FILE),
+        text: key,
+        mode: 0o600,
+      });
+    }
+
+    const inspection = await inspect(root);
+
+    expect(inspection.findings.map((finding) => finding.subject)).toEqual([
+      `a/b/c/d/e/public/${KEY_FILE}`,
+    ]);
+  });
+
+  test("the nested walk stops after its directory bound", async () => {
+    const root = await tempProject();
+    for (const pkg of ["a", "b", "c"]) {
+      await mkdir(join(root, pkg, "public"), { recursive: true });
+    }
+
+    // Breadth-first in name order: the root, then a, b and c.
+    expect(await findNestedPublicArtifactDirs({ projectRoot: root })).toEqual([
+      "a/public",
+      "b/public",
+      "c/public",
+    ]);
+    expect(
+      await findNestedPublicArtifactDirs({
+        projectRoot: root,
+        limits: { maxDirectories: 3 },
+      })
+    ).toEqual(["a/public", "b/public"]);
+  });
+
+  test("the nested walk stops after its entry bound, counting every entry read", async () => {
+    const root = await tempProject();
+    for (const pkg of ["a", "b"]) {
+      await mkdir(join(root, pkg, "public"), { recursive: true });
+    }
+    for (const file of ["f1", "f2", "f3"]) {
+      await writeFile(join(root, file), "x");
+    }
+
+    // The root holds five entries; reading a adds one more.
+    expect(
+      await findNestedPublicArtifactDirs({
+        projectRoot: root,
+        limits: { maxEntries: 6 },
+      })
+    ).toEqual(["a/public"]);
+    expect(
+      await findNestedPublicArtifactDirs({
+        projectRoot: root,
+        limits: { maxEntries: 7 },
+      })
+    ).toEqual(["a/public", "b/public"]);
+  });
+
+  test("the default directory bound is the documented 4096", async () => {
+    expect(ENV_KEY_PUBLIC_WALK_MAX_DIRECTORIES).toBe(4096);
+    const root = await tempProject();
+    const key = generatedKey();
+    await writeKey({ path: join(root, KEY_FILE), text: key, mode: 0o600 });
+    // The root is directory 1; "zz" sorts after the fillers.
+    const fillers = ENV_KEY_PUBLIC_WALK_MAX_DIRECTORIES - 2;
+    for (let index = 0; index < fillers; index++) {
+      await mkdir(join(root, `a${String(index).padStart(4, "0")}`));
+    }
+    await mkdir(join(root, "zz", "public"), { recursive: true });
+    await writeKey({
+      path: join(root, "zz", "public", KEY_FILE),
+      text: key,
+      mode: 0o600,
+    });
+
+    expect(
+      (await inspect(root)).findings.map((finding) => finding.subject)
+    ).toEqual([`zz/public/${KEY_FILE}`]);
+
+    // One more filler pushes "zz" past the bound: it is never read.
+    await mkdir(join(root, "a9999"));
+    expect(codes(await inspect(root))).toEqual(["env-key-ok"]);
+  }, 30_000);
+
+  test("an unprintable nested path is reported without echoing it", async () => {
+    const root = await tempProject();
+    const key = generatedKey();
+    await writeKey({ path: join(root, KEY_FILE), text: key, mode: 0o600 });
+    const odd = "we ird$(x)";
+    await mkdir(join(root, odd, "public"), { recursive: true });
+    await writeKey({
+      path: join(root, odd, "public", KEY_FILE),
+      text: key,
+      mode: 0o600,
+    });
+
+    const inspection = await inspect(root);
+
+    expect(inspection.findings).toEqual([
+      {
+        code: "env-key-public-path",
+        status: "error",
+        subject: `<unprintable-path>/${KEY_FILE}`,
+        remedy:
+          "Remove the key copy from the public artifact directory, then rotate the key: a published copy is not secret.",
+      },
+    ]);
+    expect(serialized(inspection)).not.toContain(odd);
   });
 
   test("findings are ordered most severe first", async () => {

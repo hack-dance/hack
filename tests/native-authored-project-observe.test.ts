@@ -534,6 +534,49 @@ test("a stopped runtime is a status for a ready generation; other refusals still
     ).rejects.toThrow();
   }));
 
+test.each([
+  "rebirth",
+  "content",
+  "binary",
+  "recovery",
+])("a stopped-runtime reply still refuses %s drift across its awaited request", (fault) =>
+  owned(async () => {
+    const f = await fixture();
+    let calls = 0;
+    const outcome = nativeAuthoredProjectPs({
+      ...f,
+      invoke: async () => {
+        calls++;
+        if (fault === "rebirth") {
+          await rename(f.mapping, `${f.mapping}.original`);
+          await Bun.write(
+            f.mapping,
+            await Bun.file(`${f.mapping}.original`).text()
+          );
+          await chmod(f.mapping, 0o600);
+        }
+        if (fault === "content") {
+          await Bun.write(f.mapping, "{}");
+        }
+        if (fault === "binary") {
+          await Bun.write(f.runtime.binary, "changed");
+        }
+        if (fault === "recovery") {
+          await Bun.write(`${f.mapping}.recovery.json`, "{}");
+        }
+        // The runtime reports itself stopped only after the saved selection
+        // or executable changed; the recheck must refuse, not report a status.
+        throw new NativeRuntimeRequestError({
+          message: "stopped",
+          nativeCode: "runtime_not_running",
+        });
+      },
+    });
+    await expect(outcome).rejects.toThrow("changed");
+    await expect(outcome).rejects.not.toBeInstanceOf(NativeRuntimeRequestError);
+    expect(calls).toBe(1);
+  }));
+
 const macTest = process.platform === "darwin" ? test : test.skip;
 
 macTest.each([true, false])(

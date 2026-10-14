@@ -77,6 +77,10 @@ test("renderHackInitSkill is a thin pointer to the CLI prompt source", () => {
     "only if the `hack-mcp` plugin or another Hack MCP server is installed"
   );
   expect(skill).not.toContain("MCP prompt from the hack MCP server.");
+  // Without repoRoot the MCP prompt runs no inventory, so the skill asks for it.
+  expect(skill).toContain(
+    "fetch the `hack-init` MCP prompt from it and pass `repoRoot`"
+  );
   // Thin: the full onboarding content must NOT be duplicated into the skill.
   expect(skill).not.toContain("node_modules:/app/node_modules");
   expect(skill).not.toContain("## Phase 1");

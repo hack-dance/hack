@@ -12,11 +12,9 @@ import {
   removeCursorRules,
   renderCursorRules,
 } from "../src/agents/cursor.ts";
-import {
-  buildInitAssistantReport,
-  renderInitAssistantPrompt,
-} from "../src/agents/init-assistant.ts";
+import { buildInitAssistantReport } from "../src/agents/init-assistant.ts";
 import { renderAgentInitPatterns } from "../src/agents/init-patterns.ts";
+import { buildOnboardingPrompt } from "../src/agents/onboarding-prompt.ts";
 import { renderAgentPrimer } from "../src/agents/primer.ts";
 import { buildSetupSyncScopeResult } from "../src/commands/setup.ts";
 import { renderAgentDocsSnippet } from "../src/mcp/agent-docs.ts";
@@ -305,7 +303,10 @@ test("buildInitAssistantReport captures repo signals", async () => {
   ).toBe(true);
   expect(report.envFiles).toContain(".env.example");
 
-  const prompt = renderInitAssistantPrompt({ report });
+  const prompt = await buildOnboardingPrompt({
+    startDir: repoRoot,
+    entryPoint: { kind: "agent-init" },
+  });
   expect(prompt).toContain("hack init");
   expect(prompt).toContain("docker-compose.yml");
 });

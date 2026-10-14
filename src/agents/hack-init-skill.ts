@@ -74,7 +74,7 @@ export function renderHackInitSkill(): string {
     "",
     "1. Fetch the canonical onboarding prompt:",
     "   - With shell access: run `hack agent onboard` (works for new and existing projects).",
-    "   - Without shell access: only if the `hack-mcp` plugin or another Hack MCP server is installed, fetch the `hack-init` MCP prompt from it; otherwise report that onboarding needs shell access or an explicitly selected Hack MCP server.",
+    "   - Without shell access: only if the `hack-mcp` plugin or another Hack MCP server is installed, fetch the `hack-init` MCP prompt from it and pass `repoRoot` (the repository root path) so the prompt includes Hack's repo inventory; otherwise report that onboarding needs shell access or an explicitly selected Hack MCP server.",
     "2. Apply the relevant phases to the authorized workflow; preserve native approvals, credential safety, and runtime ownership.",
     "3. Verify the requested services and host workflows. Report remaining blockers; unrelated optional integration warnings do not prevent completion.",
     "",

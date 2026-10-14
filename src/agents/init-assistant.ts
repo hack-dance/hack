@@ -6,7 +6,6 @@ import { pathExists, readTextFile } from "../lib/fs.ts";
 import { isRecord } from "../lib/guards.ts";
 import type { ProjectContext } from "../lib/project.ts";
 import { findProjectContext } from "../lib/project.ts";
-import { renderOnboardingPrompt } from "./onboarding-prompt.ts";
 
 export type ComposeSignal = {
   readonly path: string;
@@ -159,28 +158,19 @@ export async function buildInitAssistantReport(opts: {
 }
 
 /**
- * Render the init assistant prompt based on repo signals.
+ * Render the pre-computed repo inventory section of the onboarding prompt.
  *
- * The dynamic repo-signal report is rendered here; the canonical onboarding
- * guidance (phases, deps/ops container patterns, verification loop) comes
- * from the shared onboarding prompt module so content never forks between
- * `hack agent init`, `hack agent onboard`, and `hack init --with`.
+ * This is the only renderer of {@link InitAssistantReport}. Every onboarding
+ * entry point (`hack init --with`, `hack agent onboard`, `hack agent init`, and
+ * the `hack-init` MCP prompt) reaches it through the shared core renderer in
+ * `onboarding-prompt.ts`, so the inventory text cannot fork between them.
+ * The returned lines carry no heading and no trailing blank line.
  */
-export function renderInitAssistantPrompt(opts: {
+export function renderInitAssistantInventory(opts: {
   readonly report: InitAssistantReport;
-}): string {
+}): string[] {
   const lines: string[] = [];
 
-  lines.push("# hack agent init");
-  lines.push("");
-  lines.push(
-    [
-      "You are helping a user bootstrap hack in this repo.",
-      "Prefer the Hack CLI and infer routine details from the repo; ask only when missing information materially affects correctness or scope.",
-      "A pre-computed repo inventory follows — confirm and extend it while working through the onboarding phases below.",
-    ].join(" ")
-  );
-  lines.push("");
   lines.push("Repo context:");
   lines.push(`- Root: ${opts.report.repoRoot}`);
   lines.push(`- Hack config: ${formatHackContext({ report: opts.report })}`);
@@ -267,16 +257,8 @@ export function renderInitAssistantPrompt(opts: {
   for (const question of buildSuggestedQuestions({ report: opts.report })) {
     lines.push(`- ${question}`);
   }
-  lines.push("");
-  lines.push(
-    renderOnboardingPrompt({
-      mode: opts.report.projectContext ? "existing-project" : "new-project",
-    })
-  );
-  lines.push("Need dependency/ops patterns? Run `hack agent patterns`.");
-  lines.push("");
 
-  return lines.join("\n");
+  return lines;
 }
 
 const DOCKERFILE_PATTERNS = ["**/Dockerfile", "**/Dockerfile.*"] as const;

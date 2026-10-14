@@ -132,6 +132,17 @@ export class HackCliError extends Error {
 }
 
 /**
+ * Error whose message is a complete, value-free sentence for the user, such
+ * as a refusal at the native runtime boundary. It carries no stable `--json`
+ * code of its own (the envelope still reports E_UNEXPECTED).
+ *
+ * Without `--json`, the top-level CLI handler prints only the message; the
+ * stack trace is a debugging aid shown only with `HACK_DEBUG=1`. Unexpected
+ * exceptions are not closed errors and keep printing their stack.
+ */
+export class ClosedCliError extends Error {}
+
+/**
  * Convert any thrown value into an error envelope, preserving structured
  * codes from {@link HackCliError} and falling back to E_UNEXPECTED.
  */

@@ -139,9 +139,9 @@ if argv[0] == "ps":
         fcntl.flock(lock, fcntl.LOCK_UN)
         time.sleep(10)
     if state.get("foreground"):
-        reply({"status": "observed", "phase": "ready-observed", "backend": "native", "run": state["run"],
-               "items": [{"container": f"c{state['container']}"}]})
-    reply({"status": "stopped"})
+        reply({"ok": True, "data": {"status": "observed", "phase": "ready-observed", "backend": "native",
+                                    "run": state["run"], "items": [{"container": f"c{state['container']}"}]}})
+    reply({"ok": True, "data": {"status": "runtime_not_running", "backend": "native", "items": []}})
 if argv[0] == "exec":
     command = argv[argv.index("--") + 1:]
     if command[-1] == "/data/marker":

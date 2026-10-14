@@ -46,6 +46,7 @@ import {
 import { adoptNativeLifecycleCleanup } from "../backends/native-project-lifecycle.ts";
 import { parseNativeAllowedHosts } from "../backends/native-project-network.ts";
 import {
+  type NativeProjectPsResult,
   nativeProjectLogs,
   nativeProjectPs,
   requireComposeOperationAvailable,
@@ -7227,15 +7228,25 @@ async function maybeManageProjectLogsAfterDown(opts: {
   });
 }
 
+/**
+ * Native ps output. `--json` prints the standard `{ok: true, data}` envelope
+ * whose `data` is the native ps result, matching authored native ps.
+ */
 async function displayNativePs(
-  result: Awaited<ReturnType<typeof nativeProjectPs>>,
+  result: NativeProjectPsResult,
   json: boolean
 ): Promise<void> {
   if (json) {
-    process.stdout.write(`${JSON.stringify(result)}\n`);
+    emitCliResult({ result: okResult({ data: result }) });
     return;
   }
-  if (result.status === "owner_unconfirmed") {
+  if (result.status === "not_started") {
+    logger.info({ message: "Native project has not been started." });
+  } else if (result.status === "runtime_not_running") {
+    logger.info({
+      message: "Native runtime is not running; no services are running.",
+    });
+  } else if (result.status === "owner_unconfirmed") {
     logger.warn({
       message:
         "Native graph owner is unconfirmed. Service rows are observations, not usable readiness; explicit retaining recovery is required.",

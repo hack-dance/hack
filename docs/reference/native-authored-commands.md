@@ -95,7 +95,11 @@ Only fresh runtime observations supply state and health. Stored readiness and ph
 do not prove that a service is still live.
 
 A project with no saved attempt reports `not_started`; a retained startup intent
-without a Ready mapping reports `pending` with no confirmed service rows. A dead
+without a Ready mapping reports `pending` with no confirmed service rows. When a
+Ready generation is saved but the candidate runtime is stopped (native code
+`runtime_not_running`), `ps` exits 0 and reports `runtime_not_running` with the
+saved `data.run`, a null `data.phase` and no items; text output prints
+"Native runtime is not running; no services are running." A dead
 owner, uncertain recovery, changed selection, or malformed or mismatched reply
 refuses with unconfirmed status. The reader holds and rechecks project, private
 directories, saved record identities and the selected executable across its single
@@ -259,7 +263,9 @@ guest checks, within the existing bounded control reply. Cancellation or incompl
 child/output settlement
 withholds the result; it never stops the foreground owner or retries a query. Logs
 may contain application values and are returned only to the requesting caller;
-they are never journaled or included in refusal diagnostics. Offline controls do
+they are never journaled or included in refusal diagnostics. A stopped candidate
+runtime refuses with `E_DOCKER_UNAVAILABLE` ("Native runtime is not running; no
+service logs are available.") and exit 1. Offline controls do
 not qualify a live provider or application log behavior.
 
 ## Finite service exec

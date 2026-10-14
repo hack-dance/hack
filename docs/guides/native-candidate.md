@@ -614,7 +614,13 @@ A project with no admitted mapping reports not started. `hack ps` keeps containe
 observations separate from the last graph receipt. For a ready foreground graph,
 it also checks the live owner: `owner_unconfirmed` means the
 owner could not be authenticated, while `runtime_degraded` means its runtime check
-failed. Native `exec` and `run` refresh admitted host dependencies once before
+failed. A stopped candidate runtime is an ordinary state for `ps`: with a mapping
+present it exits 0 and reports `runtime_not_running` (no phase, no service rows),
+and text output prints "Native runtime is not running; no services are running."
+`hack ps --json` prints the standard `{ok: true, data}` envelope; `data` holds
+`backend: "native"`, `status` (`not_started`, `runtime_not_running`, `observed`,
+`owner_unconfirmed` or `runtime_degraded`), `run`, `phase` and `items`. Bounded
+logs refuse a stopped runtime with `E_DOCKER_UNAVAILABLE` and exit 1. Native `exec` and `run` refresh admitted host dependencies once before
 command selection and managed environment preparation. They proceed only with
 fresh ownership and runtime proof, even if containers still appear running.
 Unconfirmed ownership or an incomplete refresh requires inspection and explicit

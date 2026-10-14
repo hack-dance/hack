@@ -295,6 +295,8 @@ class Acceptance:
                 ps = self.cli(f"{label}-ps", "ps", "--path", str(self.project), "--branch", self.branch, "--json", timeout=20)
             except Failure:
                 ps = {}
+            # `ps --json` prints the standard {ok, data} envelope; only its data is a native status.
+            ps = ps.get("data") if isinstance(ps, dict) and ps.get("ok") is True else None
             ps = ps if isinstance(ps, dict) else {}
             items = ps.get("items") or []
             if (ps.get("status") == "observed" and ps.get("phase") == "ready-observed"

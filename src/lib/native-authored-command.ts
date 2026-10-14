@@ -27,7 +27,10 @@ import {
 } from "../backends/native-authored-project-start.ts";
 import { resolveNativeAuthoredExecStaleEnvWarning } from "../backends/native-exec-stale-env.ts";
 import { parseNativeHttpsSelection } from "../backends/native-project-start.ts";
-import { resolveNativeRuntimeSelection } from "../backends/native-runtime-client.ts";
+import {
+  isNativeRuntimeNotRunning,
+  resolveNativeRuntimeSelection,
+} from "../backends/native-runtime-client.ts";
 import { CliUsageError } from "../cli/command.ts";
 import { display } from "../ui/display.ts";
 import { logger } from "../ui/logger.ts";
@@ -111,9 +114,16 @@ async function runAuthoredLogs(input: {
       process.stderr.write(result.stderr);
     }
     return 0;
-  } catch {
+  } catch (error: unknown) {
     if (controller.signal.aborted) {
       return 130;
+    }
+    if (isNativeRuntimeNotRunning(error)) {
+      throw new HackCliError({
+        code: "E_DOCKER_UNAVAILABLE",
+        message:
+          "Native runtime is not running; no service logs are available. Start the native runtime and retry.",
+      });
     }
     throw new HackCliError({
       code: "E_LIFECYCLE_FAILED",
@@ -281,6 +291,16 @@ function commandMode(options: NativeComposeCommandOptions): Mode {
   return FOREGROUND_MODES[options.operation] ?? unsupported();
 }
 
+const STATUS_NOTES: Readonly<
+  Record<Exclude<NativeAuthoredProjectStatus["status"], "observed">, string>
+> = {
+  not_started: "Native project has not been started.",
+  pending:
+    "Native project startup is pending; no current service status is confirmed.",
+  runtime_not_running:
+    "Native runtime is not running; no services are running.",
+};
+
 async function showStatus(options: {
   readonly result: NativeAuthoredProjectStatus;
   readonly json?: boolean;
@@ -291,12 +311,7 @@ async function showStatus(options: {
     return;
   }
   if (result.status !== "observed") {
-    logger.info({
-      message:
-        result.status === "pending"
-          ? "Native project startup is pending; no current service status is confirmed."
-          : "Native project has not been started.",
-    });
+    logger.info({ message: STATUS_NOTES[result.status] });
   }
   await display.table({
     columns: ["NATIVE SERVICE", "CONTAINER", "STATE", "HEALTH"],

@@ -198,25 +198,13 @@ fn run_child(
             } else {
                 "timed_out"
             };
-            if !verify_before_signal(
-                child,
-                identity,
-                super::ownership::observe(child.id() as i32),
-            )? {
-                break;
-            }
+            super::ownership::verify(identity, &super::ownership::observe(child.id() as i32)?)?;
             signal_group(child, libc::SIGTERM)?;
             stopping = Some((Instant::now(), reason));
         }
         if let Some((since, _)) = stopping {
             if since.elapsed() >= Duration::from_millis(150) {
-                if !verify_before_signal(
-                    child,
-                    identity,
-                    super::ownership::observe(child.id() as i32),
-                )? {
-                    break;
-                }
+                super::ownership::verify(identity, &super::ownership::observe(child.id() as i32)?)?;
                 signal_group(child, libc::SIGKILL)?;
             }
         }
@@ -300,29 +288,6 @@ fn drain(pipe: &mut impl Read, retained: &mut Vec<u8>, truncated: &mut bool) -> 
         }
     }
     Ok(())
-}
-// A child may exit after the loop's WNOWAIT observation but before native
-// metadata collection. Darwin can withhold proc_pidinfo for that zombie. Only
-// a fresh kernel-confirmed exited, unreaped child permits the terminal path;
-// missing metadata for a live child and every observed mismatch still refuse.
-fn verify_before_signal(
-    child: &Child,
-    identity: &super::ProcessIdentity,
-    observed: Result<super::ProcessIdentity>,
-) -> Result<bool> {
-    match observed {
-        Ok(observed) => {
-            super::ownership::verify(identity, &observed)?;
-            Ok(true)
-        }
-        Err(failure) => {
-            if exited_unreaped(child)? {
-                Ok(false)
-            } else {
-                Err(failure)
-            }
-        }
-    }
 }
 fn signal_group(child: &Child, signal: i32) -> Result<()> {
     // SAFETY: caller owns this unreaped child, whose pre-exec setpgid fixed PGID=PID.
@@ -414,50 +379,4 @@ pub fn fixture(name: &str) -> Result<()> {
         _ => return Err(error("Unsupported built-in fixture.")),
     }
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    struct OwnedChild(Child);
-    impl Drop for OwnedChild {
-        fn drop(&mut self) {
-            let _ = self.0.kill();
-            let _ = self.0.wait();
-        }
-    }
-
-    #[test]
-    fn identity_loss_requires_kernel_confirmed_unreaped_exit() {
-        let mut child = OwnedChild(
-            Command::new("/bin/sh")
-                .args(["-c", "read line"])
-                .stdin(Stdio::piped())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .process_group(0)
-                .spawn()
-                .unwrap(),
-        );
-        let identity = super::super::ownership::observe(child.0.id() as i32).unwrap();
-        assert!(!exited_unreaped(&child.0).unwrap());
-        assert!(verify_before_signal(&child.0, &identity, Err(error("unavailable"))).is_err());
-        let mut foreign = identity.clone();
-        foreign.start += 1;
-        assert!(verify_before_signal(&child.0, &identity, Ok(foreign.clone())).is_err());
-        // EOF deterministically makes this owned child exit between the earlier
-        // WNOWAIT check and the simulated unavailable native metadata result.
-        drop(child.0.stdin.take());
-        let deadline = Instant::now() + Duration::from_secs(3);
-        while !exited_unreaped(&child.0).unwrap() {
-            assert!(Instant::now() < deadline);
-            std::thread::sleep(Duration::from_millis(5));
-        }
-        assert!(!verify_before_signal(&child.0, &identity, Err(error("unavailable"))).unwrap());
-        assert!(verify_before_signal(&child.0, &identity, Ok(foreign)).is_err());
-        // The fallback did not reap: wait still owns the original terminal status.
-        assert_eq!(child.0.wait().unwrap().code(), Some(1));
-        assert!(verify_before_signal(&child.0, &identity, Err(error("unavailable"))).is_err());
-    }
 }

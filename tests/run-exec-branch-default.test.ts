@@ -9,7 +9,6 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { restoreEnv } from "./helpers/env.ts";
 
 type CapturedRunResult = {
   readonly exitCode: number;
@@ -36,8 +35,8 @@ afterEach(async () => {
     await rm(tempDir, { recursive: true, force: true });
     tempDir = null;
   }
-  restoreEnv("HOME", originalHome);
-  restoreEnv("PATH", originalPath);
+  process.env.HOME = originalHome;
+  process.env.PATH = originalPath;
   if (originalLogger === undefined) {
     Reflect.deleteProperty(process.env, "HACK_LOGGER");
   } else {

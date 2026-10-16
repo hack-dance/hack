@@ -9,7 +9,7 @@ alive. You do not need gateway, remote nodes, or extension setup to use this pat
 ## Start here
 
 - [Initialize a project](guides/init-project.md) — or let an agent drive it with
-  `hack init --with claude|codex` (existing projects: `hack agent onboard`)
+  `hack init --with claude|codex|both` (existing projects: `hack agent onboard`)
 - [Architecture](architecture.md)
 - [Env & secrets](env.md)
 - [Lifecycle](lifecycle.md)
@@ -36,6 +36,14 @@ alive. You do not need gateway, remote nodes, or extension setup to use this pat
   pass `--branch <name>`, or set `worktree.auto_branch=false` when intentionally targeting the base
   instance.
 
-## Reference
+## When to leave core
 
-Use [Reference](reference.md) for the full command table and extension authoring.
+Move to [Beta workflows](beta.md) only when you intentionally want unsupported experimental:
+
+- gateway exposure
+- remote nodes
+- remote execution
+- remote supervisor jobs
+
+Move to [Extensions & reference](reference.md) when you need the full command table, extension
+authoring details, or API-level reference material.

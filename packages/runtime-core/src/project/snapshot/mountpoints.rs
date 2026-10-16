@@ -43,10 +43,11 @@ fn required(plan: &PlanData, entries: &[ContentEntry]) -> Result<BTreeSet<String
             let Some(bind) = parent.filter(|m| m.kind == "bind") else {
                 continue;
             };
-            if bind.source != "."
-                && !entries
-                    .iter()
-                    .any(|entry| entry.path == bind.source && entry.kind == "directory")
+            if !bind.read_only
+                || (bind.source != "."
+                    && !entries
+                        .iter()
+                        .any(|entry| entry.path == bind.source && entry.kind == "directory"))
             {
                 return Err(refused());
             }
@@ -125,11 +126,12 @@ impl Snapshot {
             }
         }
         (self.receipt.entries, self.files) = entries.into_values().unzip();
-        self.receipt.revision = revision_hash(
-            self.receipt.schema_version,
-            &self.receipt.selection_sha256,
-            &self.receipt.entries,
-        )?;
+        self.receipt.revision = format!(
+            "{:x}",
+            Sha256::digest(
+                serde_json::to_vec(&(1_u32, &self.receipt.entries)).map_err(|_| refused())?
+            )
+        );
         self.receipt.verify_mountpoints(plan)?;
         Ok(self)
     }
@@ -150,15 +152,13 @@ mod tests {
         }
     }
     fn fixture() -> (Fixture, PlanData) {
-        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let root = std::env::temp_dir().canonicalize().unwrap().join(format!(
-            "hack-mountpoints-{}-{}-{}",
+            "hack-mountpoints-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
-                .as_nanos(),
-            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                .as_nanos()
         ));
         fs::create_dir(&root).unwrap();
         fs::create_dir(root.join("candidate")).unwrap();
@@ -178,7 +178,6 @@ mod tests {
         let plan = project::plan(
             &candidate,
             PlanOptions {
-                branch: None,
                 project: &project,
                 compose_file: Path::new("compose.yaml"),
                 profiles: &[],
@@ -196,46 +195,6 @@ mod tests {
         )
         .unwrap()
     }
-    #[test]
-    fn ignored_mountpoint_selection_changes_do_not_collide_and_legacy_stays_readable() {
-        let (fixture, plan) = fixture();
-        let before = capture(&plan).with_mountpoints(&plan).unwrap();
-        fs::remove_dir_all(plan.source.join("node_modules")).unwrap();
-        let candidate = Candidate::discover(&fixture.0.join("candidate")).unwrap();
-        let next = project::plan(
-            &candidate,
-            PlanOptions {
-                branch: None,
-                project: &plan.source,
-                compose_file: Path::new("compose.yaml"),
-                profiles: &[],
-            },
-        )
-        .unwrap()
-        .plan;
-        let after = capture(&next).with_mountpoints(&next).unwrap();
-        assert_eq!(before.receipt().entries, after.receipt().entries);
-        assert_eq!(before.archive().unwrap(), after.archive().unwrap());
-        assert_ne!(
-            before.receipt().selection_sha256,
-            after.receipt().selection_sha256
-        );
-        assert_ne!(before.receipt().revision, after.receipt().revision);
-        before.receipt().validate().unwrap();
-        after.receipt().validate().unwrap();
-        let mut tampered = after.receipt().clone();
-        tampered.selection_sha256 = before.receipt().selection_sha256.clone();
-        assert!(tampered.validate().is_err());
-        let mut legacy = before.receipt().clone();
-        legacy.schema_version = 1;
-        legacy.revision = format!(
-            "{:x}",
-            Sha256::digest(serde_json::to_vec(&(1_u32, &legacy.entries)).unwrap())
-        );
-        legacy.validate().unwrap();
-        assert_ne!(legacy.revision, before.receipt().revision);
-    }
-
     #[test]
     fn excluded_mountpoint_is_attested_without_copying_ignored_contents_or_host_writes() {
         let (fixture, plan) = fixture();
@@ -278,27 +237,6 @@ mod tests {
         let other = capture(&changed).with_mountpoints(&changed).unwrap();
         assert_ne!(snapshot.receipt().revision, other.receipt().revision);
         assert!(!fixture.0.join("project/other").exists());
-    }
-    #[test]
-    fn writable_declarations_can_publish_immutable_mountpoint_skeletons() {
-        let (_fixture, mut plan) = fixture();
-        plan.services.get_mut("web").unwrap().mounts[0].read_only = false;
-        let snapshot = capture(&plan).with_mountpoints(&plan).unwrap();
-        snapshot.receipt().verify_mountpoints(&plan).unwrap();
-        assert!(
-            snapshot
-                .receipt()
-                .entries
-                .iter()
-                .any(|entry| entry.path == "node_modules" && entry.kind == "directory")
-        );
-        assert!(
-            !snapshot
-                .receipt()
-                .entries
-                .iter()
-                .any(|entry| entry.path.contains("private-excluded"))
-        );
     }
     #[test]
     fn selected_file_symlink_and_escape_conflicts_refuse() {

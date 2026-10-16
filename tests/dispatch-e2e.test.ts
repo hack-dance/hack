@@ -8,8 +8,6 @@ import {
 } from "../src/lib/nodes-registry.ts";
 import { findProjectContext } from "../src/lib/project.ts";
 import { upsertProjectRegistration } from "../src/lib/projects-registry.ts";
-import { restoreEnv } from "./helpers/env.ts";
-import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
 const shouldRun = process.env.HACK_DISPATCH_E2E === "1";
 const runTest = shouldRun ? test : test.skip;
@@ -54,11 +52,11 @@ afterEach(async () => {
     await rm(tempHome, { recursive: true, force: true });
     tempHome = null;
   }
-  restoreEnv("HOME", previousHome);
+  process.env.HOME = previousHome;
   if (previousGlobalConfigPath !== undefined) {
-    restoreEnv("HACK_GLOBAL_CONFIG_PATH", previousGlobalConfigPath);
+    process.env.HACK_GLOBAL_CONFIG_PATH = previousGlobalConfigPath;
   } else {
-    Reflect.deleteProperty(process.env, "HACK_GLOBAL_CONFIG_PATH");
+    process.env.HACK_GLOBAL_CONFIG_PATH = undefined;
   }
 });
 
@@ -139,11 +137,13 @@ runTest(
       const result = await runCommand({
         cmd: command,
         cwd: resolve(import.meta.dir, ".."),
-        env: childEnv({
+        env: {
+          ...process.env,
+          HOME: tempHome,
           HACK_GLOBAL_CONFIG_PATH: "",
           [nodeTokenEnv]: nodeToken,
           NO_COLOR: "1",
-        }),
+        },
       });
       if (result.exitCode !== 0) {
         throw new Error(
@@ -300,13 +300,15 @@ runTest(
       const result = await runCommand({
         cmd: command,
         cwd: resolve(import.meta.dir, ".."),
-        env: childEnv({
+        env: {
+          ...process.env,
+          HOME: tempHome,
           HACK_GLOBAL_CONFIG_PATH: "",
           [nodeTokenEnv]: nodeToken,
           PATH: `${mutagenBinDir}:${process.env.PATH ?? ""}`,
           HACK_TEST_MUTAGEN_LOG_PATH: mutagenLogPath,
           NO_COLOR: "1",
-        }),
+        },
       });
       if (result.exitCode !== 0) {
         throw new Error(
@@ -418,11 +420,13 @@ runTest(
       const result = await runCommand({
         cmd: command,
         cwd: resolve(import.meta.dir, ".."),
-        env: childEnv({
+        env: {
+          ...process.env,
+          HOME: tempHome,
           HACK_GLOBAL_CONFIG_PATH: "",
           [nodeTokenEnv]: nodeToken,
           NO_COLOR: "1",
-        }),
+        },
       });
       expect(result.exitCode).toBe(1);
       expect(result.stderr).toContain("Workspace ensure failed (500)");
@@ -501,19 +505,6 @@ async function initializeGitRepo(input: {
   });
 }
 
-/**
- * A private env for a child of the current test: HOME is the test's temporary
- * home, and no other runner variable is inherited beyond PATH and TMPDIR.
- */
-function childEnv(
-  env: Readonly<Record<string, string>>
-): Record<string, string> {
-  if (tempHome === null) {
-    throw new Error("dispatch E2E child env requires a temporary HOME");
-  }
-  return privateCliEnv({ root: tempHome, home: tempHome, env });
-}
-
 async function runGit(input: {
   readonly cwd: string;
   readonly args: readonly string[];
@@ -521,7 +512,7 @@ async function runGit(input: {
   const result = await runCommand({
     cmd: ["git", ...input.args],
     cwd: input.cwd,
-    env: childEnv({}),
+    env: process.env,
   });
   if (result.exitCode !== 0) {
     throw new Error(

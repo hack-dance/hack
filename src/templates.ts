@@ -1,12 +1,9 @@
 import {
   DEFAULT_CADDY_IP,
   DEFAULT_COREDNS_IP,
-  DEFAULT_GRAFANA_HOST,
   DEFAULT_INGRESS_NETWORK,
   DEFAULT_LOGGING_NETWORK,
   DEFAULT_LOKI_HOST,
-  DEFAULT_NEW_PROJECT_TLD,
-  DEFAULT_OAUTH_ALIAS_ROOT,
   DEFAULT_OAUTH_ALIAS_TLD,
   DEFAULT_PROJECT_TLD,
   DEFAULT_SCHEMAS_HOST,
@@ -19,11 +16,7 @@ import {
   GLOBAL_GRAFANA_DATASOURCE_FILENAME,
   GLOBAL_LOGGING_COMPOSE_FILENAME,
   GLOBAL_LOKI_CONFIG_FILENAME,
-  LEGACY_GRAFANA_HOST,
-  LEGACY_LOKI_HOST,
-  LEGACY_SCHEMAS_HOST,
 } from "./constants.ts";
-import { parseDefaultDomain } from "./lib/default-domain.ts";
 
 export function renderGlobalCaddyCompose(opts?: {
   readonly useStaticCoreDnsIp?: boolean;
@@ -35,7 +28,7 @@ export function renderGlobalCaddyCompose(opts?: {
     "name: hack-dev-proxy",
     "services:",
     "  caddy:",
-    "    image: lucaslorentz/caddy-docker-proxy:2.10.0-alpine",
+    "    image: lucaslorentz/caddy-docker-proxy:2.10",
     "    command:",
     "      - docker-proxy",
     "      - --polling-interval",
@@ -50,7 +43,7 @@ export function renderGlobalCaddyCompose(opts?: {
     "    extra_hosts:",
     '      - "host.docker.internal:host-gateway"',
     "    labels:",
-    `      caddy: ${DEFAULT_SCHEMAS_HOST}, ${LEGACY_SCHEMAS_HOST}`,
+    `      caddy: ${DEFAULT_SCHEMAS_HOST}`,
     "      caddy.root: /srv/schemas",
     '      caddy.file_server: ""',
     "      caddy.tls: internal",
@@ -88,32 +81,19 @@ export function renderGlobalCaddyCompose(opts?: {
 
 export function renderGlobalCoreDnsConfig(opts?: {
   readonly useStaticCaddyIp?: boolean;
-  readonly defaultDomain?: string;
 }): string {
   const useStaticCaddyIp = opts?.useStaticCaddyIp === true;
-  const defaultDomain = parseDefaultDomain(
-    opts?.defaultDomain ?? DEFAULT_NEW_PROJECT_TLD
-  );
-  const builtInDomains: ReadonlySet<string> = new Set([
-    DEFAULT_PROJECT_TLD,
-    DEFAULT_NEW_PROJECT_TLD,
-    DEFAULT_OAUTH_ALIAS_ROOT,
-  ]);
-  const builtInPattern = "(.*)\\.hack(\\..*)?\\.?";
-  const pattern = builtInDomains.has(defaultDomain)
-    ? `${builtInPattern}$`
-    : `(?:${builtInPattern}|(.*)\\.${defaultDomain.replaceAll(".", "\\.")}\\.?)$`;
   return [
     ".:53 {",
     ...(useStaticCaddyIp
       ? [
           "  template IN A {",
-          `    match ${pattern}`,
+          "    match (.*)\\.hack(\\..*)?\\.?$",
           `    answer "{{ .Name }} 30 IN A ${DEFAULT_CADDY_IP}"`,
           "    fallthrough",
           "  }",
         ]
-      : [`  rewrite name regex ${pattern} caddy`]),
+      : ["  rewrite name regex (.*)\\.hack(\\..*)?\\.?$ caddy"]),
     "  forward . 127.0.0.11",
     "  cache 30",
     "}",
@@ -133,7 +113,7 @@ export function renderGlobalLoggingCompose(): string {
     "      - loki-data:/loki",
     `      - ./${GLOBAL_LOKI_CONFIG_FILENAME}:/etc/loki/config.yaml:ro`,
     "    labels:",
-    `      caddy: ${DEFAULT_LOKI_HOST}, ${LEGACY_LOKI_HOST}`,
+    `      caddy: ${DEFAULT_LOKI_HOST}`,
     '      caddy.reverse_proxy: "{{upstreams 3100}}"',
     "      caddy.tls: internal",
     "    networks:",
@@ -159,7 +139,7 @@ export function renderGlobalLoggingCompose(): string {
     `      - ./${GLOBAL_GRAFANA_DASHBOARDS_PROVISIONING_FILENAME}:/etc/grafana/provisioning/dashboards/hack-dashboards.yaml:ro`,
     `      - ./${GLOBAL_GRAFANA_DASHBOARDS_DIR}:/var/lib/grafana/dashboards:ro`,
     "    labels:",
-    `      caddy: ${DEFAULT_GRAFANA_HOST}, ${LEGACY_GRAFANA_HOST}`,
+    `      caddy: logs.${DEFAULT_PROJECT_TLD}`,
     '      caddy.reverse_proxy: "{{upstreams 3000}}"',
     "      caddy.tls: internal",
     "    networks:",
@@ -451,7 +431,6 @@ export function renderProjectConfigSchemaJson(): string {
         additionalProperties: true,
         properties: {
           auto_branch: { type: "boolean" },
-          inherit_local: { type: "boolean" },
         },
       },
       sessions: {

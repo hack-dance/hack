@@ -7,7 +7,7 @@ description: Design and run bounded Hack runtime benchmarks or CPU, memory, disk
 
 Start with the [work-unit contract](../hack-repo-work-unit/SKILL.md), existing
 [performance diagnostics](../../../docs/performance.md) and the relevant
-v5 ledger entry (local `_docs/docs/plans/v5/work-units.md`). Reuse a qualified harness
+[v5 ledger entry](../../../docs/plans/v5/work-units.md). Reuse a qualified harness
 when one exists; inspect its source and workload before treating an old report or
 untracked experiment directory as canonical tooling.
 

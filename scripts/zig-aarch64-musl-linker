@@ -1,12 +1,11 @@
 #!/bin/sh
 set -eu
-# Drop Rust's obsolete optimization hint and cc-rs's redundant Rust-spelled
-# target. The fixed Zig target below owns this wrapper; retain every other
-# argument, including any different target, unchanged and in order.
+# Rust emits this obsolete optimization hint; Zig 0.15's linker ignores it with a
+# warning. Remove only that known no-op, preserving all other arguments in order.
 for argument do
   shift
   case "$argument" in
-    -Wl,-O1|--target=aarch64-unknown-linux-musl) ;;
+    -Wl,-O1) ;;
     *) set -- "$@" "$argument" ;;
   esac
 done

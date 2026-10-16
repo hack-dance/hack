@@ -200,109 +200,6 @@ pub struct SourceAdmission {
     _lock: state::Lock,
 }
 
-/// Workspace identity admitted while the caller retains the provider lease.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct LiveWorkspace {
-    pub namespace: String,
-    pub provider_incarnation: String,
-    pub tree_inode: u64,
-}
-impl LiveWorkspace {
-    pub(super) fn valid(&self) -> bool {
-        hex(&self.namespace, 64) && hex(&self.provider_incarnation, 32) && self.tree_inode != 0
-    }
-}
-
-/// Does not acquire the long-lived writer namespace lock or connect recursively.
-/// Every source-record writer holds the same provider lease as this caller.
-pub(super) fn admit_live(
-    guest: &OwnedGuest<'_>,
-    namespace: &str,
-    source: &Path,
-    baseline: &ContentRevision,
-) -> Result<LiveWorkspace, CandidateError> {
-    let path = record_path(guest.candidate(), namespace)?;
-    state::check_private_directory(path.parent().expect("source state parent"))?;
-    if path
-        .with_extension("pending")
-        .try_exists()
-        .map_err(state::io)?
-        || path.with_extension("pending").is_symlink()
-    {
-        return Err(error("Source acknowledgement has an uncertain journal."));
-    }
-    let record = read_record(&path)?;
-    let workspace = validate_live_record(
-        &record,
-        guest.candidate(),
-        namespace,
-        source,
-        guest.incarnation(),
-        baseline,
-    )?;
-    guest.execute(
-        r#"
-test ! -L /storage/hack-workspaces
-test ! -L "$1"
-test "$(stat -c %u:%a "$1")" = 0:700
-test ! -L "$1/owner"
-test "$(cat "$1/owner")" = "$2"
-test -d "$1/tree"
-test ! -L "$1/tree"
-test "$(stat -c %i "$1/tree")" = "$3"
-test ! -e "$1/pending"
-test ! -L "$1/pending"
-test ! -L "$1/revision"
-test "$(cat "$1/revision")" = "$4"
-"#,
-        &[
-            &format!("/storage/hack-workspaces/{namespace}"),
-            guest.incarnation(),
-            &workspace.tree_inode.to_string(),
-            &baseline.revision,
-        ],
-        None,
-    )?;
-    Ok(workspace)
-}
-
-fn validate_live_record(
-    record: &Record,
-    candidate: &Candidate,
-    namespace: &str,
-    source: &Path,
-    incarnation: &str,
-    baseline: &ContentRevision,
-) -> Result<LiveWorkspace, CandidateError> {
-    baseline.validate()?;
-    if record.checkout != candidate.checkout
-        || record.namespace != namespace
-        || record.source != source
-        || record.provider_incarnation != incarnation
-        || record.phase != "acknowledged"
-        || record.pending.is_some()
-        || !record.pending_operations.is_empty()
-        || !record.repair_paths.is_empty()
-        || record.acknowledged.as_ref().is_none_or(|ack| {
-            ack.revision != baseline.revision || ack.selection_sha256 != baseline.selection_sha256
-        })
-    {
-        return Err(error(
-            "Live source requires an exact unambiguous acknowledged baseline.",
-        ));
-    }
-    let workspace = LiveWorkspace {
-        namespace: namespace.into(),
-        provider_incarnation: incarnation.into(),
-        tree_inode: record.guest_tree_inode.unwrap_or(0),
-    };
-    if !workspace.valid() {
-        return Err(error("Live workspace identity is invalid."));
-    }
-    Ok(workspace)
-}
-
 impl SourceAdmission {
     /// Retained through durable job acceptance, so another sync cannot advance the revision.
     pub(super) fn acquire(
@@ -359,26 +256,6 @@ test "$(cat "$1/revision")" = "$4"
             None,
         )?;
         Ok(Self { _lock: lock })
-    }
-}
-
-fn check_watch_deadline(deadline: Option<Instant>, now: Instant) -> Result<(), CandidateError> {
-    if deadline.is_some_and(|end| now >= end) {
-        return Err(CandidateError::new(
-            "source_watch_deadline",
-            "Watch deadline expired before the observed source update was acknowledged.",
-        ));
-    }
-    Ok(())
-}
-
-// Only the lease-acquisition result passes this boundary; never classify an
-// apply result by error code after source or guest mutation has begun.
-fn pre_effect_lease<T>(result: Result<T, CandidateError>) -> Result<Option<T>, CandidateError> {
-    match result {
-        Ok(lease) => Ok(Some(lease)),
-        Err(error) if error.code == "provider_busy" => Ok(None),
-        Err(error) => Err(error),
     }
 }
 
@@ -439,54 +316,6 @@ impl<'a> SyncSession<'a> {
         snapshot: &Snapshot,
         reconcile: bool,
     ) -> Result<SyncReceipt, CandidateError> {
-        self.apply_inner(snapshot, reconcile, None, None, None)
-    }
-
-    /// Apply a freshly reviewed snapshot while honoring retained live graph consumers.
-    pub fn apply_reviewed(
-        &mut self,
-        snapshot: &Snapshot,
-        reconcile: bool,
-        contract: &crate::project::live_source::Contract,
-    ) -> Result<SyncReceipt, CandidateError> {
-        contract.reviewed_snapshot(snapshot.receipt())?;
-        self.apply_inner(snapshot, reconcile, Some(contract), None, None)
-    }
-
-    /// Watch-only attempt. None means provider lease contention or an expired
-    /// watch deadline, before source intent, guest operations or apply mutation. All later failures
-    /// remain errors, including a same-code error from a future effect boundary.
-    pub fn try_apply_reviewed(
-        &mut self,
-        snapshot: &Snapshot,
-        contract: &crate::project::live_source::Contract,
-        deadline: Option<Instant>,
-    ) -> Result<Option<SyncReceipt>, CandidateError> {
-        contract.reviewed_snapshot(snapshot.receipt())?;
-        if self.record.pending.is_some() {
-            return Err(error(
-                "An interrupted source apply requires explicit --reconcile.",
-            ));
-        }
-        let guest = match pre_effect_lease(OwnedGuest::connect(self.candidate))? {
-            Some(guest) => guest,
-            None => return Ok(None),
-        };
-        if deadline.is_some_and(|end| Instant::now() >= end) {
-            return Ok(None);
-        }
-        self.apply_inner(snapshot, false, Some(contract), Some(guest), deadline)
-            .map(Some)
-    }
-
-    fn apply_inner(
-        &mut self,
-        snapshot: &Snapshot,
-        reconcile: bool,
-        contract: Option<&crate::project::live_source::Contract>,
-        guest: Option<OwnedGuest<'a>>,
-        deadline: Option<Instant>,
-    ) -> Result<SyncReceipt, CandidateError> {
         snapshot.receipt().validate()?;
         if self.record.pending.is_some() && !reconcile {
             return Err(error(
@@ -494,19 +323,10 @@ impl<'a> SyncSession<'a> {
             ));
         }
         let started = Instant::now();
-        let guest = match guest {
-            Some(guest) => guest,
-            None => OwnedGuest::connect(self.candidate)?,
-        };
+        let guest = OwnedGuest::connect(self.candidate)?;
         if guest.incarnation() != self.record.provider_incarnation {
             return Err(error("Provider incarnation changed during source sync."));
         }
-        super::graph::check_live_source_consumers(
-            &guest,
-            &self.record.namespace,
-            self.record.guest_tree_inode,
-            contract,
-        )?;
         let delta = snapshot.delta(if reconcile {
             None
         } else {
@@ -572,9 +392,6 @@ fi
             write_record(&self.path, &self.record)?;
         }
         self.record.repair_paths = known_paths.clone();
-        // Watch expiry refuses admission before durable intent. Once intent is
-        // written, finish or retain the bounded apply; never cancel it mid-effect.
-        check_watch_deadline(deadline, Instant::now())?;
         self.record.pending_operations.push(operation.clone());
         self.record.pending = Some(snapshot.receipt().clone());
         self.record.phase = "applying".into();
@@ -955,113 +772,6 @@ fn apply_script(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn watch_contention_is_classified_only_at_pre_effect_lease_acquisition() {
-        assert!(
-            pre_effect_lease::<()>(Err(CandidateError::new("provider_busy", "lease held")))
-                .unwrap()
-                .is_none()
-        );
-        assert_eq!(pre_effect_lease(Ok(7)).unwrap(), Some(7));
-        for code in ["runtime_changed", "runtime_pressure", "provider_state"] {
-            assert_eq!(
-                pre_effect_lease::<()>(Err(CandidateError::new(code, "refused")))
-                    .unwrap_err()
-                    .code,
-                code
-            );
-        }
-        // An identical error after a successful acquisition is propagated, not
-        // converted to retryable contention by the acquisition-only classifier.
-        let result = pre_effect_lease(Ok(())).and_then(|lease| {
-            assert!(lease.is_some());
-            Err::<(), _>(CandidateError::new("provider_busy", "after acquisition"))
-        });
-        assert_eq!(result.unwrap_err().code, "provider_busy");
-    }
-
-    #[test]
-    fn live_admission_requires_exact_acknowledged_owner_source_revision_and_inode() {
-        let root = std::env::temp_dir().join(format!(
-            "live-admit-{}-{}",
-            std::process::id(),
-            crate::node::now()
-        ));
-        std::fs::create_dir(&root).unwrap();
-        let root = root.canonicalize().unwrap();
-        let source = root.join("source");
-        let home = root.join("candidate");
-        std::fs::create_dir(&source).unwrap();
-        std::fs::create_dir(&home).unwrap();
-        let candidate = Candidate::discover(&home).unwrap();
-        std::fs::write(
-            source.join("compose.yaml"),
-            format!(
-                "services:\n  web:\n    image: sha256:{}\n    network_mode: none\n",
-                "a".repeat(64)
-            ),
-        )
-        .unwrap();
-        let plan = crate::project::plan(
-            &candidate,
-            crate::project::PlanOptions {
-                branch: None,
-                project: &source,
-                compose_file: Path::new("compose.yaml"),
-                profiles: &[],
-            },
-        )
-        .unwrap();
-        let manifest = crate::project::snapshot::capture(
-            &source,
-            &BTreeSet::new(),
-            &plan.plan.source_selection.metadata_sha256,
-        )
-        .unwrap()
-        .receipt()
-        .clone();
-        let record = Record {
-            schema: 1,
-            checkout: candidate.checkout.clone(),
-            source: source.clone(),
-            namespace: "b".repeat(64),
-            provider_incarnation: "c".repeat(32),
-            guest_tree_inode: Some(7),
-            phase: "acknowledged".into(),
-            acknowledged: Some(manifest.clone()),
-            pending: None,
-            repair_paths: BTreeSet::new(),
-            pending_operations: vec![],
-        };
-        let check = |r: &Record| {
-            validate_live_record(
-                r,
-                &candidate,
-                &"b".repeat(64),
-                &source,
-                &"c".repeat(32),
-                &manifest,
-            )
-        };
-        assert_eq!(check(&record).unwrap().tree_inode, 7);
-        for mutation in 0..8 {
-            let mut changed: Record =
-                serde_json::from_slice(&serde_json::to_vec(&record).unwrap()).unwrap();
-            match mutation {
-                0 => changed.checkout = root.join("foreign"),
-                1 => changed.source = root.join("foreign"),
-                2 => changed.provider_incarnation = "d".repeat(32),
-                3 => changed.pending = Some(manifest.clone()),
-                4 => changed.phase = "applying".into(),
-                5 => changed.guest_tree_inode = Some(0),
-                6 => changed.pending_operations.push("e".repeat(32)),
-                _ => changed.acknowledged = None,
-            }
-            assert!(check(&changed).is_err(), "mutation {mutation}");
-        }
-        std::fs::remove_dir_all(root).unwrap();
-    }
 
     #[test]
     fn transfer_envelope_keeps_binary_source_separate_from_verification_scripts() {

@@ -144,10 +144,6 @@ pub(super) fn read(
         || receipt.plan.candidate_root != candidate.checkout
         || receipt.plan.source != source
         || receipt.plan.namespace != namespace
-        || candidate
-            .plan_with_branch(source, receipt.plan.branch.as_deref())?
-            .namespace
-            != namespace
         || receipt.plan.runtime_execution_supported
         || !receipt.plan.enrollment_compatible
         || identity(&receipt.plan)? != receipt.plan_id
@@ -161,15 +157,7 @@ pub(super) fn read(
 }
 
 pub fn status(candidate: &Candidate, project: &Path) -> Result<EnrollmentStatus, CandidateError> {
-    status_with_branch(candidate, project, None)
-}
-
-pub fn status_with_branch(
-    candidate: &Candidate,
-    project: &Path,
-    branch: Option<&str>,
-) -> Result<EnrollmentStatus, CandidateError> {
-    let preview = candidate.plan_with_branch(project, branch)?;
+    let preview = candidate.plan(project)?;
     let previous = read(candidate, &preview.source, &preview.namespace)?;
     Ok(EnrollmentStatus {
         state: if previous.is_some() {
@@ -199,7 +187,6 @@ pub fn enroll(
     let review = super::plan(
         candidate,
         PlanOptions {
-            branch: options.branch,
             project: options.project,
             compose_file: options.compose_file,
             profiles: options.profiles,

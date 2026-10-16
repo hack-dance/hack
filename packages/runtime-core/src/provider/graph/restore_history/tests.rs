@@ -2,7 +2,6 @@ use super::*;
 use std::os::unix::fs::{PermissionsExt, symlink};
 fn receipt(index: usize) -> Receipt {
     Receipt {
-        normalized_input: None,
         relay_startup: None,
         relay_cleanup: None,
         version: 1,
@@ -12,19 +11,13 @@ fn receipt(index: usize) -> Receipt {
         plan_id: "d".repeat(64),
         phase: "stopped-data-retained".into(),
         environment_attached: false,
-        startup_failure: None,
-        initializer_cache_release: BTreeMap::new(),
         source: None,
         readiness: BTreeMap::new(),
         probes: BTreeMap::new(),
         resources: BTreeMap::from([(
             "container:web".into(),
             Resource {
-                routing: None,
-                networks: None,
-                outbound: false,
                 cache: None,
-                cache_provenance: None,
                 kind: Kind::Container,
                 key: "web".into(),
                 name: "owned-web".into(),
@@ -74,23 +67,6 @@ fn repeated_restores_keep_recent_bounded_history_and_never_touch_authority_or_da
     retain(root, &receipt(40)).unwrap();
     let after: History = state::read(&root.join(FILE)).unwrap();
     assert_eq!(bytes(&after).unwrap(), bytes(&history).unwrap());
-}
-#[test]
-fn recovery_requires_a_different_confirmed_stopped_generation() {
-    let fixture = super::super::tests::Fixture::new();
-    let root = &fixture.0;
-    let mut current = receipt(2);
-    current.phase = "ready-observed".into();
-    assert!(!confirms_prior_generation(root, &current).unwrap());
-    retain(root, &receipt(1)).unwrap();
-    assert!(confirms_prior_generation(root, &current).unwrap());
-    let mut same = receipt(1);
-    same.phase = "ready-observed".into();
-    assert!(!confirms_prior_generation(root, &same).unwrap());
-    let mut foreign: History = state::read(&root.join(FILE)).unwrap();
-    foreign.entries[0].owner = "f".repeat(32);
-    state::write(&root.join(FILE), &foreign).unwrap();
-    assert!(confirms_prior_generation(root, &current).is_err());
 }
 #[test]
 fn migration_publishes_bounded_history_and_export_before_retiring_legacy() {

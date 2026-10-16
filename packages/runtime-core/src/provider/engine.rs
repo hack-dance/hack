@@ -10,32 +10,12 @@ use serde::Serialize;
 use serde_json::Value;
 use std::io::Read;
 use std::path::Path;
-use std::time::{Duration, Instant};
-
-#[cfg(any(all(target_os = "macos", feature = "environment-launcher"), test))]
-mod private_service_exec;
-#[cfg(any(target_os = "macos", test))]
-pub(super) mod relay_exec;
-mod service_exec;
-mod stop;
-pub(in crate::provider) use stop::StopBatchFailure;
-#[cfg(test)]
-pub(in crate::provider) use stop::StopFailure;
-#[cfg(all(
-    test,
-    target_os = "macos",
-    target_arch = "aarch64",
-    feature = "environment-launcher"
-))]
-pub(in crate::provider) use stop::with_test_stop_socket;
+use std::time::Duration;
 
 const MAX_BODY: u64 = 4 * 1024 * 1024;
 
 struct Transport {
     client: Client,
-    timeout: Duration,
-    admission_deadline: Option<Instant>,
-    observation_deadline: Option<Instant>,
 }
 
 impl Transport {
@@ -49,12 +29,7 @@ impl Transport {
             .connect_timeout(Duration::from_secs(3))
             .build()
             .map_err(|_| failure("Cannot initialize the private engine transport."))?;
-        Ok(Self {
-            client,
-            timeout,
-            admission_deadline: None,
-            observation_deadline: None,
-        })
+        Ok(Self { client })
     }
 
     fn request(
@@ -77,16 +52,6 @@ impl Transport {
         path: &str,
         body: Option<&Value>,
     ) -> Result<Vec<u8>, CandidateError> {
-        self.request_bytes_until(method, path, body, None)
-    }
-
-    fn request_bytes_until(
-        &self,
-        method: Method,
-        path: &str,
-        body: Option<&Value>,
-        deadline: Option<Instant>,
-    ) -> Result<Vec<u8>, CandidateError> {
         if !path.starts_with('/')
             || path.starts_with("//")
             || path.contains('#')
@@ -94,7 +59,6 @@ impl Transport {
         {
             return Err(failure("Invalid private engine request path."));
         }
-        let requires_admission = ![Method::GET, Method::HEAD, Method::DELETE].contains(&method);
         let mut request = self
             .client
             .request(method, format!("http://hack-local{path}"));
@@ -108,37 +72,9 @@ impl Transport {
                 .header("Content-Type", "application/json")
                 .body(encoded);
         }
-        // This runs after guest/admission verification and encoding, immediately
-        // before dispatch. A connection wait cannot extend the original budget.
-        // Cleanup observations and deletion remain possible after expiry; owned
-        // stop has its separate cleanup-only batch transport and deadline.
-        request = request.timeout(request_timeout(
-            self.timeout,
-            requires_admission
-                .then_some(self.admission_deadline)
-                .flatten(),
-            match (deadline, self.observation_deadline) {
-                (Some(a), Some(b)) => Some(a.min(b)),
-                (a, b) => a.or(b),
-            },
-        )?);
         let response = request.send().map_err(|_| failure("Engine request failed or timed out; its effect may be uncertain. No request was replayed."))?;
         response_bytes(response)
     }
-}
-
-// One minimum budget reaches dispatch. A later explicit deadline cannot replace
-// an earlier mutation-admission deadline; cleanup admission exemptions stay above.
-fn request_timeout(
-    default: Duration,
-    admission: Option<Instant>,
-    explicit: Option<Instant>,
-) -> Result<Duration, CandidateError> {
-    let mut timeout = default;
-    for deadline in admission.into_iter().chain(explicit) {
-        timeout = timeout.min(super::managed_environment::remaining_until(deadline)?);
-    }
-    Ok(timeout)
 }
 
 fn response_bytes(mut response: reqwest::blocking::Response) -> Result<Vec<u8>, CandidateError> {
@@ -214,48 +150,9 @@ pub(super) struct Engine<'a> {
     guest: OwnedGuest<'a>,
     transport: Transport,
     cleanup_only: bool,
-    #[cfg(feature = "native-config-plan")]
-    tool_lifetime: super::guest_tool::Lifetime,
 }
 
 impl<'a> Engine<'a> {
-    #[cfg(feature = "native-config-plan")]
-    pub(in crate::provider) fn tool_lifetime(&self) -> &super::guest_tool::Lifetime {
-        &self.tool_lifetime
-    }
-    #[cfg(feature = "native-config-plan")]
-    pub(in crate::provider) fn request_until(
-        &self,
-        method: Method,
-        path: &str,
-        body: Option<&Value>,
-        deadline: Instant,
-    ) -> Result<Value, CandidateError> {
-        if self.cleanup_only && ![Method::GET, Method::HEAD, Method::DELETE].contains(&method) {
-            return Err(failure(
-                "A cleanup connection cannot allocate or start resources.",
-            ));
-        }
-        self.guest.verify()?;
-        if ![Method::GET, Method::HEAD, Method::DELETE].contains(&method) {
-            self.guest.before_effect()?;
-        }
-        let bytes = self
-            .transport
-            .request_bytes_until(method, path, body, Some(deadline));
-        self.guest.verify()?;
-        if Instant::now() >= deadline {
-            return Err(failure(
-                "Private engine deadline expired; outcome remains uncertain.",
-            ));
-        }
-        let bytes = bytes?;
-        if bytes.is_empty() {
-            return Ok(Value::Null);
-        }
-        serde_json::from_slice(&bytes)
-            .map_err(|_| failure("Malformed engine response; values omitted."))
-    }
     pub(super) fn load_image_archive(&self, archive: Vec<u8>) -> Result<(), CandidateError> {
         if self.cleanup_only {
             return Err(failure("A cleanup connection cannot load images."));
@@ -366,49 +263,14 @@ impl<'a> Engine<'a> {
         self.guest.verify()?;
         Ok(Some(raw))
     }
-    #[cfg(target_os = "macos")]
-    pub(in crate::provider) fn job_logs(
-        &self,
-        id: &str,
-    ) -> Result<(Vec<u8>, Vec<u8>, bool), CandidateError> {
-        if id.len() != 64 || !id.bytes().all(|b| b.is_ascii_hexdigit()) {
-            return Err(failure("Invalid job container identity."));
-        }
-        self.guest.verify()?;
-        let bytes = self.transport.request_bytes(
-            Method::GET,
-            &format!("/v1.53/containers/{id}/logs?stdout=true&stderr=true&tail=all"),
-            None,
-        )?;
-        let result = service_exec::decode(&bytes)?;
-        self.guest.verify()?;
-        Ok(result)
-    }
     pub(super) fn logs(&self, id: &str) -> Result<(String, String, bool), CandidateError> {
-        self.logs_with_tail(id, "all")
-    }
-    pub(super) fn logs_tail(
-        &self,
-        id: &str,
-        tail: u16,
-    ) -> Result<(String, String, bool), CandidateError> {
-        if !(1..=1000).contains(&tail) {
-            return Err(failure("Container log tail must be from 1 to 1000."));
-        }
-        self.logs_with_tail(id, &tail.to_string())
-    }
-    fn logs_with_tail(
-        &self,
-        id: &str,
-        tail: &str,
-    ) -> Result<(String, String, bool), CandidateError> {
         if id.len() != 64 || !id.bytes().all(|b| b.is_ascii_hexdigit()) {
             return Err(failure("Invalid container log identity."));
         }
         self.guest.verify()?;
         let bytes = self.transport.request_bytes(
             Method::GET,
-            &format!("/v1.53/containers/{id}/logs?stdout=true&stderr=true&tail={tail}"),
+            &format!("/v1.53/containers/{id}/logs?stdout=true&stderr=true&tail=all"),
             None,
         )?;
         let result = decode_logs(&bytes)?;
@@ -422,68 +284,8 @@ impl<'a> Engine<'a> {
         Self::connect_mode(candidate, false)
     }
 
-    /// Wait only for the mutation lease. A busy acquisition admits no operation;
-    /// other verification or transport failures are returned without replay.
-    #[cfg(target_os = "macos")]
-    pub(super) fn connect_until(
-        candidate: &'a Candidate,
-        deadline: std::time::Instant,
-        cancelled: impl Fn() -> bool,
-    ) -> Result<Self, CandidateError> {
-        loop {
-            if cancelled() {
-                return Err(CandidateError::new(
-                    "provider_acquisition_cancelled",
-                    "Provider acquisition was cancelled before admission.",
-                ));
-            }
-            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-            if remaining.is_zero() {
-                return Err(CandidateError::new(
-                    "provider_busy",
-                    "Provider lease acquisition expired before admission.",
-                ));
-            }
-            match Self::connect(candidate) {
-                Err(error) if error.code == "provider_busy" => {
-                    std::thread::sleep(remaining.min(Duration::from_millis(50)))
-                }
-                result => return result,
-            }
-        }
-    }
-
     pub(super) fn connect_cleanup(candidate: &'a Candidate) -> Result<Self, CandidateError> {
         Self::connect_mode(candidate, true)
-    }
-
-    /// Read-only operations share one fixed budget across connection and every query.
-    #[cfg(all(target_os = "macos", feature = "native-config-plan"))]
-    pub(in crate::provider) fn connect_cleanup_until(
-        candidate: &'a Candidate,
-        deadline: Instant,
-    ) -> Result<Self, CandidateError> {
-        super::managed_environment::remaining_until(deadline)?;
-        Self::from_guest_until(
-            OwnedGuest::connect_cleanup(candidate)?,
-            true,
-            Some(deadline),
-        )
-    }
-
-    /// One live-owner command keeps its original budget through every engine query.
-    #[cfg(all(target_os = "macos", feature = "native-config-plan"))]
-    pub(in crate::provider) fn connect_command_until(
-        candidate: &'a Candidate,
-        deadline: Instant,
-    ) -> Result<Self, CandidateError> {
-        super::managed_environment::remaining_until(deadline)?;
-        Self::from_guest_until(OwnedGuest::connect(candidate)?, false, Some(deadline))
-    }
-
-    #[cfg(target_os = "macos")]
-    pub(super) fn connect_cleanup_wait(candidate: &'a Candidate) -> Result<Self, CandidateError> {
-        Self::from_guest(OwnedGuest::connect_cleanup_wait(candidate)?, true)
     }
 
     fn connect_mode(candidate: &'a Candidate, cleanup_only: bool) -> Result<Self, CandidateError> {
@@ -492,36 +294,14 @@ impl<'a> Engine<'a> {
         } else {
             OwnedGuest::connect(candidate)?
         };
-        Self::from_guest(guest, cleanup_only)
-    }
-
-    fn from_guest(guest: OwnedGuest<'a>, cleanup_only: bool) -> Result<Self, CandidateError> {
-        Self::from_guest_until(guest, cleanup_only, None)
-    }
-    fn from_guest_until(
-        guest: OwnedGuest<'a>,
-        cleanup_only: bool,
-        deadline: Option<Instant>,
-    ) -> Result<Self, CandidateError> {
-        let mut transport = Transport::new(&guest.engine_socket()?, Duration::from_secs(40))?;
-        transport.observation_deadline = deadline;
+        let transport = Transport::new(&guest.engine_socket()?, Duration::from_secs(40))?;
         let engine = Self {
             guest,
             transport,
             cleanup_only,
-            #[cfg(feature = "native-config-plan")]
-            tool_lifetime: super::guest_tool::Lifetime::default(),
         };
         engine.info()?;
         Ok(engine)
-    }
-
-    /// Carry the private request's original admission deadline to dispatch. This
-    /// is independent of environment mounts, including requests with no values.
-    #[cfg(target_os = "macos")]
-    pub(in crate::provider) fn with_admission_deadline(mut self, deadline: Instant) -> Self {
-        self.transport.admission_deadline = Some(deadline);
-        self
     }
 
     pub(super) fn request(
@@ -692,57 +472,6 @@ mod tests {
     use std::os::unix::net::UnixListener;
 
     #[test]
-    fn explicit_request_budget_never_extends_mutation_admission() {
-        let now = Instant::now();
-        let early = now + Duration::from_secs(1);
-        let late = now + Duration::from_secs(20);
-        let default = Duration::from_secs(40);
-        assert!(
-            request_timeout(default, Some(early), Some(late)).unwrap() <= Duration::from_secs(1)
-        );
-        assert!(
-            request_timeout(default, Some(late), Some(early)).unwrap() <= Duration::from_secs(1)
-        );
-        assert_eq!(request_timeout(default, None, None).unwrap(), default);
-        assert!(request_timeout(default, Some(now), Some(late)).is_err());
-        assert!(request_timeout(default, Some(late), Some(now)).is_err());
-        // GET/HEAD/DELETE omit admission but still honor an explicit cleanup budget.
-        assert!(request_timeout(default, None, Some(late)).unwrap() > Duration::from_secs(1));
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn bounded_acquisition_cancellation_and_expiry_do_not_initialize_state() {
-        use std::os::unix::fs::DirBuilderExt;
-        let path = std::env::temp_dir().join(format!(
-            "hack-engine-acquire-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::DirBuilder::new()
-            .mode(0o700)
-            .create(&path)
-            .unwrap();
-        let candidate = Candidate::discover(&path).unwrap();
-        let cancelled = Engine::connect_until(
-            &candidate,
-            std::time::Instant::now() + Duration::from_secs(1),
-            || true,
-        );
-        assert_eq!(
-            cancelled.err().unwrap().code,
-            "provider_acquisition_cancelled"
-        );
-        let expired = Engine::connect_until(&candidate, std::time::Instant::now(), || false);
-        assert_eq!(expired.err().unwrap().code, "provider_busy");
-        assert!(!candidate.state_root.exists());
-        std::fs::remove_dir(path).unwrap();
-    }
-
-    #[test]
     fn logs_preserve_streams_bound_output_and_reject_partial_frames() {
         let frame = |stream: u8, payload: &[u8]| {
             let mut bytes = vec![stream, 0, 0, 0];
@@ -828,6 +557,3 @@ mod tests {
         assert!(exchange(b"HTTP/1.1 200 OK\r\nContent-Length: 7\r\n\r\n{\"x\":").is_err());
     }
 }
-
-#[cfg(all(test, feature = "environment-launcher"))]
-mod admission_tests;

@@ -1,8 +1,5 @@
 mod graph_cli;
-mod normalized_cli;
-mod prepared_base_cli;
 mod runtime_up_cli;
-mod source_watch_retry;
 use hack_runtime_core::{CANDIDATE_VERSION, Candidate, CandidateError};
 use serde::Serialize;
 use std::path::Path;
@@ -21,45 +18,18 @@ Usage:
   hack-local project capture --project <directory> --file <compose.yaml> --expect-plan <sha256> [--profile <name>] [--json]
   hack-local project publish-source --project <directory> --file <compose.yaml> --expect-plan <sha256> [--profile <name>] [--reconcile] [--json]
   hack-local project verify-source --project <directory> --file <compose.yaml> --expect-plan <sha256> [--profile <name>] [--json]
-  hack-local graph run|restart|restore --project <directory> --file <compose.yaml> --expect-plan <sha256> --run-id <32-hex> --ready <service=started|healthy|completed>... [--source-revision <sha256>] [--live-source] [--profile <name>] [--timeout-seconds <seconds>] [--json]
+  hack-local graph run|restart|restore --project <directory> --file <compose.yaml> --expect-plan <sha256> --run-id <32-hex> --ready <service=started|healthy|completed>... [--source-revision <sha256>] [--profile <name>] [--timeout-seconds <seconds>] [--json]
   hack-local graph inspect|reconcile|archive|export|reconcile-export|prune --run-id <32-hex> [--json]
   hack-local graph cleanup --run-id <32-hex> [--remove-data] [--json]
-  hack-local graph native plan --source-file <absolute-v2-native-source.json> [--json]
-  hack-local graph native run|serve --source-file <absolute-v2-native-source.json> --expect-review <64-hex> [--environment-stdin] [--timeout-seconds <1..300>] [--json]
-  hack-local graph native inspect|cleanup --run-id <32-hex> [--json]
-  hack-local graph native control --run-id <32-hex> --action status|cleanup [--json]
-  hack-local graph recover-cleanup --run-id <32-hex> --expect-receipt <sha256> [--json]
-  hack-local graph recover-live-owner --run-id <32-hex> --expect-receipt <sha256> [--json]
-  hack-local graph retire-recovered-publisher --run-id <32-hex> --expect-owner <32-hex> [--json]
-  hack-local graph retire-acknowledged-publisher --run-id <32-hex> --expect-owner <32-hex> --expect-receipt <64-hex> --expect-publisher <64-hex> [--json]
-  hack-local graph inspect-missing-publication-lock --run-id <32-hex> [--json]
-  hack-local graph retire-missing-publication-lock --run-id <32-hex> --expect-selection <64-hex> --accept-quiesced-candidate-home [--json]
-  hack-local graph release-acknowledged-dependencies --run-id <32-hex> --expect-owner <32-hex> --expect-receipt <64-hex> --expect-publisher <64-hex> --expect-reservation <64-hex> [--json]
-  hack-local graph inspect-host-pin-recovery --run-id <32-hex> [--json]
-  hack-local graph recover-host-pins --run-id <32-hex> --expect-selection <64-hex> --accept-legacy-device-rebind [--json]
-  hack-local graph inspect-absent-publication-cleanup --run-id <32-hex> --original-owner-file <private-json> --host-inspection-file <private-json> [--json]
-  hack-local graph recover-absent-publication-cleanup --run-id <32-hex> --original-owner-file <private-json> --host-inspection-file <private-json> --expect-selection <64-hex> --retain-data --accept-unpinned-post-reboot [--json]
-  hack-local graph inspect-source-device-rebind --run-id <32-hex> [--json]
-  hack-local graph recover-source-device-rebind --run-id <32-hex> --expect-selection <64-hex> --accept-legacy-device-rebind [--json]
-  hack-local graph logs --run-id <32-hex> --service <name> [--tail <1..1000>] [--json]
-  hack-local graph exec --run-id <32-hex> --service <name> [--workdir /path] [--timeout-seconds <1..120>] [--json] -- <program> [args...]
   hack-local graph dependency-plan --dependencies <reviewed.json> [--json]
-  hack-local graph dependency-reservations [--json]
-  hack-local graph recover-dependency-reservation --run-id <32-hex> --expect-reservation <sha256> [--json]
-  hack-local graph dependency-discover --host-port <port> --executable <absolute-path> [--json]
-  hack-local graph serve --project <directory> --file <compose.yaml> --expect-plan <sha256> --run-id <32-hex> --ready <service=started|healthy|completed>... --dependencies <reviewed.json> --expect-dependencies <sha256> [--source-revision <sha256>] [--live-source] [--profile <name>] [--timeout-seconds <seconds>] [--json]
+  hack-local graph serve --project <directory> --file <compose.yaml> --expect-plan <sha256> --run-id <32-hex> --ready <service=started|healthy|completed>... --dependencies <reviewed.json> --expect-dependencies <sha256> [--source-revision <sha256>] [--profile <name>] [--timeout-seconds <seconds>] [--json]
   hack-local graph owner-status --run-id <32-hex> [--json]
-  hack-local graph refresh-dependencies --run-id <32-hex> [--json]
   hack-local graph storage-inventory [--json]
   hack-local runtime probe [--json]
   hack-local runtime publication-hostnames [--json]
   hack-local runtime hostname-authority --socket <path> [--json]
   hack-local runtime recover-hostname-authority --socket <path> --expect-sha256 <sha256> [--json]
   hack-local runtime managed-hostname-authority [--json]
-  hack-local runtime recover-quiescent-https --expect-owner <64-hex> --expect-configuration <64-hex> --expect-frontend-pid <pid> --json
-  hack-local runtime archive-previous-boot-shared-https --run-id <32-hex> --expect-owner-generation <32-hex> --expect-lease-id <32-hex> --expect-attempt <32-hex> --expect-owner <32-hex> --expect-namespace <64-hex> --expect-plan <64-hex> --json
-  hack-local runtime recover-quiescent-https --expect-owner <64-hex> --expect-configuration <64-hex> --expect-frontend-pid <pid> --accept-legacy-device-rebind <run:witness-sha:socket-dev:socket-ino:lock-dev:lock-ino> --json
-  hack-local runtime inspect-host-listener --pid <pid> --port <loopback-port> --executable <absolute-path> [--peer-port <open-client-port>] [--json]
   hack-local runtime serve-managed-hostnames [--certificate-name-limit <1..4096>] (owner pipe on stdin)
   hack-local runtime certificate-admission [--json]
   hack-local runtime guest-disk-usage [--json]
@@ -69,53 +39,27 @@ Usage:
   hack-local runtime lookup-hostname --hostname <name> [--json]
   hack-local runtime publication-recovery [--json]
   hack-local runtime recover-publications --expect-sha256 <sha256> [--json]
-  hack-local runtime dependency-socket-recovery [--json]
-  hack-local runtime quiescent-dependency-socket-recovery [--json]
-  hack-local runtime recover-quiescent-dependency-sockets --expect-sha256 <hash> [--json]
-  hack-local runtime recover-dependency-sockets --expect-sha256 <sha256> [--json]
   hack-local runtime bridge-recovery [--json]
   hack-local runtime export-bridge-recovery --slot <1..8> --expect-sha256 <sha256> [--json]
   hack-local runtime engine-info [--json]
   hack-local graph reserve-bridge --run-id <32-hex> --service <name> --slot <index> --expect-generation <sha256> [--json]
-  hack-local graph serve ... [--route-slot <service=index|auto>]...
-  hack-local graph serve|serve-restore ... [--auto-dependency-slots]
   hack-local graph start-bridge --run-id <32-hex> --slot <index> --expect-reservation <32-hex> [--json]
   hack-local graph publish-bridge --run-id <32-hex> --slot <index> --expect-reservation <32-hex> (--port <loopback-port> | --unix [--hostname <name>]...)
   hack-local graph unpublish-bridge --run-id <32-hex> --expect-reservation <32-hex> [--json]
   hack-local graph release-bridge --run-id <32-hex> --slot <index> --expect-reservation <32-hex> [--json]
   hack-local graph bridges|reconcile-bridges --run-id <32-hex> [--json]
   hack-local runtime probe|up --profile research|development [--json]
-  hack-local runtime up --profile research|development [--bridge-sockets <1..32> | --minimum-bridge-sockets <1..32>] [--dependency-sockets <1..32> | --minimum-dependency-sockets <1..32>] [--json]
-  hack-local runtime up --profile development --project-share <exact-project-root> --unfiltered-source [--json]
-  hack-local runtime check-project-share --project-share <exact-project-root> --unfiltered-source --json
-  hack-local graph serve|run ... --shared-source
+  hack-local runtime up --profile research|development [--bridge-sockets <1..32>] [--dependency-sockets <1..32>] [--json]
   hack-local runtime prepare --archive <pinned-smolvm.tar.gz>
   hack-local runtime prepare-engine --archive <pinned-docker.tgz>
-  hack-local runtime prepare-network-tools --directory <private-pinned-apk-directory>
-  hack-local runtime up --profile research|development --prepared-base prefer|require [--prepared-base-store <absolute-private-store>] [--json]
-  hack-local runtime prepared-base build --profile research|development [--base-id <id>] [--store <absolute-private-store>] [--json]
-  hack-local runtime prepared-base verify --base-id <id> [--store <absolute-private-store>] [--json]
-  hack-local runtime prepared-base status --profile research|development [--store <absolute-private-store>] [--json]
-  hack-local runtime prepared-base remove --base-id <id> [--store <absolute-private-store>] [--json]
-  hack-local runtime ensure-image --reference <namespace/repository[:tag]|namespace/repository@sha256:digest> --json
-  hack-local runtime resolve-image --reference <namespace/repository[:tag]> --json
-  hack-local runtime fetch-image --reference <namespace/repository@sha256:digest> --archive <new-flat-image.tar> [--json]
   hack-local runtime load-image --archive <flat-image.tar> --sha256 <archive-hash> --image-id <sha256:config-hash>
-  hack-local runtime network internet --json
-  hack-local runtime up --profile development --internet --json
-  hack-local runtime network extend --allow-host <hostname> [--allow-host <hostname>] --json
   hack-local runtime up|status|down|recover [--json]
-  hack-local runtime host-filesystem-recovery [--json]
-  hack-local runtime recover-host-filesystem --expect-sha256 <sha256> --accept-legacy-device-rebind [--json]
   hack-local node serve|status|inspect
   hack-local node request <versioned-json>
   hack-local --version
   hack-local --help
 
-Project commands and graph run/serve/serve-restore/source-compatibility/restart/restore accept --branch <canonical-lowercase-dns-label> to select an isolated namespace; omit it for the legacy project namespace. Carry the same selector through review, source publication, and graph admission.
-Normalized public input for project plan/capture/publish-source/verify-source and graph run/serve/serve-restore: --normalized-file <path> --expect-original <sha256> --expect-namespace <sha256>. Sync/enroll/restart/restore do not accept it. Stopped normalized graphs use graph restore-selection --run-id RUN --json, then graph serve-restore with the same run/plan, --expect-generation, and fresh serve dependency/environment/route selections.
 Build with: ./scripts/build-hack-local.sh
-Native graph commands require native-config-plan and are a bounded image-only prerequisite with an owned outbound project network. Foreground serve/control require macOS; ordinary frontend startup remains a separate gate.
 Runtime commands affect only the candidate pool. Graph commands support a bounded pinned-image subset; full project up/exec/down remains unimplemented.
 The installed hack and its state are never used as a fallback.";
 
@@ -130,69 +74,6 @@ fn main() {
     }
 }
 
-fn installed_entrypoint() -> bool {
-    cfg!(feature = "installed-candidate") && env!("CARGO_BIN_NAME") == "hack-native"
-}
-
-/// The prepared-base request for `runtime up`: an explicit store, or the installed home's
-/// `prepared-bases` directory (outside its `.hack-local`, so pool resets never touch it).
-/// Development checkouts require an explicit store rather than writing into the source tree.
-fn prepared_base_request(
-    candidate: &Candidate,
-    mode: hack_runtime_core::provider::prepared_start::Mode,
-    store: Option<&Path>,
-) -> Result<hack_runtime_core::provider::prepared_start::Request, CandidateError> {
-    Ok(hack_runtime_core::provider::prepared_start::Request {
-        mode,
-        store: prepared_base_store(candidate, store)?,
-    })
-}
-
-fn prepared_base_store(
-    candidate: &Candidate,
-    store: Option<&Path>,
-) -> Result<std::path::PathBuf, CandidateError> {
-    match store {
-        Some(store) => Ok(store.to_path_buf()),
-        None if candidate.channel == "installed-candidate" => {
-            Ok(candidate.checkout.join("prepared-bases"))
-        }
-        None => Err(CandidateError::new(
-            "invalid_arguments",
-            "A development checkout needs an explicit absolute prepared-base store.",
-        )),
-    }
-}
-
-fn discover_candidate(root: &Path) -> Result<Candidate, CandidateError> {
-    if installed_entrypoint() {
-        Candidate::discover_installed(root)
-    } else {
-        Candidate::discover(root)
-    }
-}
-
-fn resolve_candidate_root(root: &Path) -> Result<std::path::PathBuf, CandidateError> {
-    if installed_entrypoint() {
-        // Do not inspect the build checkout: release executables must survive its removal.
-        return Ok(Candidate::discover_installed(root)?.checkout);
-    }
-    let compiled_checkout = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let requested = root
-        .canonicalize()
-        .map_err(|error| CandidateError::new("invalid_candidate_root", error.to_string()))?;
-    let compiled = compiled_checkout
-        .canonicalize()
-        .map_err(|error| CandidateError::new("invalid_candidate_root", error.to_string()))?;
-    if requested != compiled {
-        return Err(CandidateError::new(
-            "checkout_mismatch",
-            "This binary was built for a different checkout. Build this checkout's candidate.",
-        ));
-    }
-    Ok(requested)
-}
-
 fn run() -> Result<(), CandidateError> {
     let arguments: Vec<String> = std::env::args_os()
         .skip(1)
@@ -205,47 +86,39 @@ fn run() -> Result<(), CandidateError> {
     if arguments.len() < 2 || arguments[0] != "--candidate-root" {
         return Err(CandidateError::new(
             "missing_candidate_root",
-            "Supply --candidate-root explicitly, or use the matching candidate launcher.",
+            "Use the checkout's hack-local launcher.",
         ));
     }
-    let requested = resolve_candidate_root(Path::new(&arguments[1]))?;
+    let compiled_checkout = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let requested = Path::new(&arguments[1])
+        .canonicalize()
+        .map_err(|error| CandidateError::new("invalid_candidate_root", error.to_string()))?;
+    let compiled = compiled_checkout
+        .canonicalize()
+        .map_err(|error| CandidateError::new("invalid_candidate_root", error.to_string()))?;
+    if requested != compiled {
+        return Err(CandidateError::new(
+            "checkout_mismatch",
+            "This binary was built for a different checkout. Build this checkout's candidate.",
+        ));
+    }
     let command: Vec<&str> = arguments[2..].iter().map(String::as_str).collect();
     match command.as_slice() {
-        [] | ["--help"] | ["help"] => {
-            println!(
-                "{}",
-                if installed_entrypoint() {
-                    HELP.replace("Build with: ./scripts/build-hack-local.sh", "Opt-in installed candidate; explicit private --candidate-root is required.").replace("hack-local", "hack-native")
-                } else {
-                    HELP.to_owned()
-                }
-            )
-        }
+        [] | ["--help"] | ["help"] => println!("{HELP}"),
         ["--version"] => println!(
-            "{} {CANDIDATE_VERSION} (runtime-core {})",
-            if installed_entrypoint() {
-                "hack-native"
-            } else {
-                "hack-local"
-            },
+            "hack-local {CANDIDATE_VERSION} (runtime-core {})",
             env!("CARGO_PKG_VERSION")
         ),
         ["info"] | ["info", "--json"] => {
-            let candidate = discover_candidate(&requested)?;
+            let candidate = Candidate::discover(&requested)?;
             if command.contains(&"--json") {
                 print_json(&candidate)?;
             } else {
                 println!(
-                    "{} {} — {}",
-                    if installed_entrypoint() {
-                        "hack-native"
-                    } else {
-                        "hack-local"
-                    },
-                    candidate.version,
-                    candidate.checkpoint
+                    "hack-local {} — {}",
+                    candidate.version, candidate.checkpoint
                 );
-                println!("Candidate root: {}", candidate.checkout.display());
+                println!("Checkout: {}", candidate.checkout.display());
                 println!("Executable: {}", candidate.executable.display());
                 println!("Candidate state: {}", candidate.state_root.display());
                 println!("Runtime lifecycle: experimental; live qualification pending");
@@ -253,7 +126,7 @@ fn run() -> Result<(), CandidateError> {
             }
         }
         ["plan", "--project", project] | ["plan", "--project", project, "--json"] => {
-            let candidate = discover_candidate(&requested)?;
+            let candidate = Candidate::discover(&requested)?;
             let plan = candidate.plan(Path::new(project))?;
             if command.contains(&"--json") {
                 print_json(&plan)?;
@@ -273,7 +146,7 @@ fn run() -> Result<(), CandidateError> {
             }
         }
         ["node", "serve"] => {
-            let candidate = discover_candidate(&requested)?;
+            let candidate = Candidate::discover(&requested)?;
             hack_runtime_core::node::serve(
                 &hack_runtime_core::node::root(&candidate),
                 &candidate.executable,
@@ -281,7 +154,7 @@ fn run() -> Result<(), CandidateError> {
             )?;
         }
         ["node", "inspect"] => {
-            let candidate = discover_candidate(&requested)?;
+            let candidate = Candidate::discover(&requested)?;
             let mut store = hack_runtime_core::node::Store::inspect(
                 &hack_runtime_core::node::root(&candidate),
             )?;
@@ -291,14 +164,14 @@ fn run() -> Result<(), CandidateError> {
             )?)?;
         }
         ["node", "status"] => {
-            let candidate = discover_candidate(&requested)?;
+            let candidate = Candidate::discover(&requested)?;
             print_json(&hack_runtime_core::node::call(
                 &hack_runtime_core::node::root(&candidate),
                 &hack_runtime_core::node::Request::Status { version: 1 },
             )?)?;
         }
         ["node", "request", json] => {
-            let candidate = discover_candidate(&requested)?;
+            let candidate = Candidate::discover(&requested)?;
             let request: hack_runtime_core::node::Request = serde_json::from_str(json)
                 .map_err(|e| CandidateError::new("invalid_request", e.to_string()))?;
             use hack_runtime_core::node::Request;
@@ -323,7 +196,7 @@ fn run() -> Result<(), CandidateError> {
             }
         }
         ["__job_supervisor", state, id] => {
-            let candidate = discover_candidate(&requested)?;
+            let candidate = Candidate::discover(&requested)?;
             let state = Path::new(state)
                 .canonicalize()
                 .map_err(|e| CandidateError::new("invalid_node_root", e.to_string()))?;
@@ -344,116 +217,23 @@ fn run() -> Result<(), CandidateError> {
             hack_runtime_core::node::fixture(fixture)?;
         }
         ["graph", arguments @ ..] => {
-            let candidate = discover_candidate(&requested)?;
-            let result = graph_cli::command(&candidate, arguments)?;
-            print_json(&result)?;
-            if arguments
-                .first()
-                .is_some_and(|action| ["exec", "run-service"].contains(action))
-            {
-                let code = result["exit_code"].as_i64().ok_or_else(|| {
-                    CandidateError::new("graph_exec_result", "Missing service command exit status.")
-                })?;
-                if code != 0 {
-                    std::process::exit(i32::try_from(code).unwrap_or(1));
-                }
-            }
+            let candidate = Candidate::discover(&requested)?;
+            print_json(&graph_cli::command(&candidate, arguments)?)?;
         }
         ["project", arguments @ ..] => {
-            project_command(&discover_candidate(&requested)?, arguments)?;
-        }
-        ["runtime", "network", "internet", "--json"] => {
-            print_json(&hack_runtime_core::provider::enable_internet(
-                &discover_candidate(&requested)?,
-            )?)?;
-        }
-        ["runtime", "network", "extend", arguments @ ..] => {
-            let mut hosts = Vec::new();
-            let mut rest = arguments;
-            while let ["--allow-host", host, tail @ ..] = rest {
-                hosts.push((*host).to_owned());
-                rest = tail;
-            }
-            if hosts.is_empty() || rest != ["--json"] {
-                return Err(CandidateError::new(
-                    "network_update",
-                    "Expected runtime network extend --allow-host HOST [--allow-host HOST] --json.",
-                ));
-            }
-            print_json(&hack_runtime_core::provider::extend_network(
-                &discover_candidate(&requested)?,
-                hosts,
-            )?)?;
-        }
-        [
-            "runtime",
-            "check-project-share",
-            "--project-share",
-            project,
-            "--unfiltered-source",
-            "--json",
-        ] => {
-            let share =
-                hack_runtime_core::provider::ProjectShareIntent::approve(Path::new(project), true)?;
-            print_json(&hack_runtime_core::provider::check_project_share(
-                &discover_candidate(&requested)?,
-                &share,
-            )?)?;
+            project_command(&Candidate::discover(&requested)?, arguments)?;
         }
         ["runtime", "up", arguments @ ..]
             if arguments.contains(&"--bridge-sockets")
-                || arguments.contains(&"--minimum-bridge-sockets")
-                || arguments.contains(&"--dependency-sockets")
-                || arguments.contains(&"--minimum-dependency-sockets")
-                || arguments.contains(&"--allow-host")
-                || arguments.contains(&"--internet")
-                || arguments.contains(&"--project-share")
-                || arguments.contains(&"--unfiltered-source")
-                || arguments.contains(&"--prepared-base") =>
+                || arguments.contains(&"--dependency-sockets") =>
         {
             let options = runtime_up_cli::parse(arguments)?;
-            let share = options
-                .project_share
-                .as_deref()
-                .map(|project| {
-                    hack_runtime_core::provider::ProjectShareIntent::approve(project, true)
-                })
-                .transpose()?;
-            let candidate = discover_candidate(&requested)?;
-            let retained = options
-                .retained
-                .as_ref()
-                .map(|(run, selection)| (run.as_str(), selection.as_str()));
-            let sockets = hack_runtime_core::provider::SocketRequests {
-                bridges: options.bridges,
-                minimum_bridges: options.minimum_bridges,
-                dependencies: options.dependencies,
-                minimum_dependencies: options.minimum_dependencies,
-            };
-            let started = if let Some((mode, store)) = &options.prepared {
-                let request = prepared_base_request(&candidate, *mode, store.as_deref())?;
-                hack_runtime_core::provider::up_with_prepared_base(
-                    &candidate,
-                    options.profile,
-                    sockets,
-                    options.network,
-                    share,
-                    hack_runtime_core::provider::prepared_start::Start {
-                        retained,
-                        prepared: Some(&request),
-                    },
-                )
-            } else {
-                hack_runtime_core::provider::up_with_socket_requests(
-                    &candidate,
-                    options.profile,
-                    sockets,
-                    options.network,
-                    share,
-                    retained,
-                )
-            };
-            print_json(&started?)?;
+            print_json(&hack_runtime_core::provider::up_with_sockets(
+                &Candidate::discover(&requested)?,
+                options.profile,
+                options.bridges,
+                options.dependencies,
+            )?)?;
         }
         ["runtime", action @ ("probe" | "up"), "--profile", profile]
         | [
@@ -474,9 +254,12 @@ fn run() -> Result<(), CandidateError> {
                     ));
                 }
             };
-            let candidate = discover_candidate(&requested)?;
+            let candidate = Candidate::discover(&requested)?;
             if *action == "probe" {
-                print_json(&provider::probe_with_profile(&candidate, profile)?)?;
+                print_json(&provider::admission::probe_for(
+                    &candidate.checkout,
+                    profile,
+                )?)?;
             } else {
                 print_json(&provider::up_with_profile(&candidate, profile)?)?;
             }
@@ -491,7 +274,7 @@ fn run() -> Result<(), CandidateError> {
         ] => {
             print_json(
                 &hack_runtime_core::provider::hostname_authority::ownership::inspect(
-                    &discover_candidate(&requested)?,
+                    &Candidate::discover(&requested)?,
                     std::path::Path::new(socket),
                 )?,
             )?;
@@ -515,92 +298,9 @@ fn run() -> Result<(), CandidateError> {
         ] => {
             print_json(
                 &hack_runtime_core::provider::hostname_authority::ownership::recover(
-                    &discover_candidate(&requested)?,
+                    &Candidate::discover(&requested)?,
                     std::path::Path::new(socket),
                     hash,
-                )?,
-            )?;
-        }
-        #[cfg(target_os = "macos")]
-        [
-            "runtime",
-            "archive-previous-boot-shared-https",
-            "--run-id",
-            run,
-            "--expect-owner-generation",
-            generation,
-            "--expect-lease-id",
-            lease,
-            "--expect-attempt",
-            attempt,
-            "--expect-owner",
-            owner,
-            "--expect-namespace",
-            namespace,
-            "--expect-plan",
-            plan,
-            "--json",
-        ] => {
-            print_json(
-                &hack_runtime_core::provider::shared_https_recovery::archive(
-                    &discover_candidate(&requested)?,
-                    hack_runtime_core::provider::shared_https_recovery::ArchiveSelection {
-                        run,
-                        owner_generation: generation,
-                        lease_id: lease,
-                        attempt,
-                        owner,
-                        namespace,
-                        plan,
-                    },
-                )?,
-            )?;
-        }
-        [
-            "runtime",
-            "recover-quiescent-https",
-            "--expect-owner",
-            owner,
-            "--expect-configuration",
-            configuration,
-            "--expect-frontend-pid",
-            pid,
-            "--json",
-        ] => {
-            print_json(&hack_runtime_core::provider::https_recovery::recover(
-                &discover_candidate(&requested)?,
-                owner,
-                configuration,
-                pid.parse().map_err(|_| {
-                    CandidateError::new("invalid_arguments", "Expected a positive frontend PID.")
-                })?,
-            )?)?;
-        }
-        [
-            "runtime",
-            "recover-quiescent-https",
-            "--expect-owner",
-            owner,
-            "--expect-configuration",
-            configuration,
-            "--expect-frontend-pid",
-            pid,
-            "--accept-legacy-device-rebind",
-            selection,
-            "--json",
-        ] => {
-            print_json(
-                &hack_runtime_core::provider::https_recovery::recover_legacy_device_rebind(
-                    &discover_candidate(&requested)?,
-                    owner,
-                    configuration,
-                    pid.parse().map_err(|_| {
-                        CandidateError::new(
-                            "invalid_arguments",
-                            "Expected a positive frontend PID.",
-                        )
-                    })?,
-                    selection,
                 )?,
             )?;
         }
@@ -608,77 +308,25 @@ fn run() -> Result<(), CandidateError> {
         | ["runtime", "managed-hostname-authority", "--json"] => {
             print_json(
                 &hack_runtime_core::provider::hostname_authority::managed::inspect(
-                    &discover_candidate(&requested)?,
+                    &Candidate::discover(&requested)?,
                 )?,
             )?;
         }
-        ["runtime", "inspect-host-listener", rest @ ..] => {
-            let _candidate = discover_candidate(&requested)?;
-            let (pid, port, executable, peer_port) = match rest {
-                ["--pid", pid, "--port", port, "--executable", executable]
-                | [
-                    "--pid",
-                    pid,
-                    "--port",
-                    port,
-                    "--executable",
-                    executable,
-                    "--json",
-                ] => (pid, port, executable, None),
-                [
-                    "--pid",
-                    pid,
-                    "--port",
-                    port,
-                    "--executable",
-                    executable,
-                    "--peer-port",
-                    peer_port,
-                    "--json",
-                ] => (pid, port, executable, Some(peer_port)),
-                _ => return Err(CandidateError::new("invalid_arguments", HELP)),
-            };
-            let pid = pid.parse::<i32>().map_err(|_| {
-                CandidateError::new("invalid_arguments", "Invalid host listener PID.")
-            })?;
-            let port = port.parse::<u16>().map_err(|_| {
-                CandidateError::new("invalid_arguments", "Invalid host listener port.")
-            })?;
-            let inspected = match peer_port {
-                Some(peer_port) => {
-                    let peer_port = peer_port.parse::<u16>().map_err(|_| {
-                        CandidateError::new("invalid_arguments", "Invalid host peer port.")
-                    })?;
-                    hack_runtime_core::provider::host_endpoint::inspect_listener_peer(
-                        pid,
-                        port,
-                        Path::new(executable),
-                        peer_port,
-                    )?
-                }
-                None => hack_runtime_core::provider::host_endpoint::inspect_listener(
-                    pid,
-                    port,
-                    Path::new(executable),
-                )?,
-            };
-            print_json(&inspected)?;
-        }
         ["runtime", "guest-disk-usage"] | ["runtime", "guest-disk-usage", "--json"] => {
             print_json(&hack_runtime_core::provider::guest_storage::inspect(
-                &discover_candidate(&requested)?,
+                &Candidate::discover(&requested)?,
             )?)?;
         }
         ["runtime", "disk-usage", rest @ ..] => {
             print_json(&hack_runtime_core::provider::storage_usage::inspect_args(
-                &discover_candidate(&requested)?,
+                &Candidate::discover(&requested)?,
                 rest,
             )?)?;
         }
         ["runtime", "certificate-admission"] | ["runtime", "certificate-admission", "--json"] => {
             print_json(
                 &hack_runtime_core::provider::hostname_authority::certificates::inspect(
-                    &discover_candidate(&requested)?,
+                    &Candidate::discover(&requested)?,
                 )?,
             )?;
         }
@@ -692,12 +340,12 @@ fn run() -> Result<(), CandidateError> {
                 CandidateError::new("certificate_admission", "Invalid certificate name limit.")
             })?;
             hack_runtime_core::provider::hostname_authority::managed::serve_with_certificate_limit(
-                &discover_candidate(&requested)?,
+                &Candidate::discover(&requested)?,
                 Some(limit),
             )?;
         }
         ["runtime", "serve-managed-hostnames"] => {
-            hack_runtime_core::provider::hostname_authority::managed::serve(&discover_candidate(
+            hack_runtime_core::provider::hostname_authority::managed::serve(&Candidate::discover(
                 &requested,
             )?)?;
         }
@@ -720,7 +368,7 @@ fn run() -> Result<(), CandidateError> {
         ] => {
             print_json(
                 &hack_runtime_core::provider::hostname_authority::ownership::stop(
-                    &discover_candidate(&requested)?,
+                    &Candidate::discover(&requested)?,
                     std::path::Path::new(socket),
                     hash,
                 )?,
@@ -728,27 +376,27 @@ fn run() -> Result<(), CandidateError> {
         }
         ["runtime", "serve-hostnames", "--socket", socket] => {
             hack_runtime_core::provider::hostname_authority::serve(
-                &discover_candidate(&requested)?,
+                &Candidate::discover(&requested)?,
                 std::path::Path::new(socket),
             )?;
         }
         ["runtime", "lookup-hostname", "--hostname", name]
         | ["runtime", "lookup-hostname", "--hostname", name, "--json"] => {
             print_json(&hack_runtime_core::provider::publication::lookup_hostname(
-                &discover_candidate(&requested)?,
+                &Candidate::discover(&requested)?,
                 name,
             )?)?;
         }
         ["runtime", "publication-hostnames"] | ["runtime", "publication-hostnames", "--json"] => {
             print_json(&hack_runtime_core::provider::publication::inspect_claims(
-                &discover_candidate(&requested)?,
+                &Candidate::discover(&requested)?,
             )?)?;
         }
         ["runtime", "publication-recovery"] | ["runtime", "publication-recovery", "--json"] => {
             print_json(
-                &hack_runtime_core::provider::publication::recovery::inspect(&discover_candidate(
-                    &requested,
-                )?)?,
+                &hack_runtime_core::provider::publication::recovery::inspect(
+                    &Candidate::discover(&requested)?,
+                )?,
             )?;
         }
         ["runtime", "recover-publications", "--expect-sha256", hash]
@@ -761,72 +409,16 @@ fn run() -> Result<(), CandidateError> {
         ] => {
             print_json(
                 &hack_runtime_core::provider::publication::recovery::recover(
-                    &discover_candidate(&requested)?,
-                    hash,
-                )?,
-            )?;
-        }
-        ["runtime", "dependency-socket-recovery"]
-        | ["runtime", "dependency-socket-recovery", "--json"] => {
-            print_json(
-                &hack_runtime_core::provider::dependency_socket_recovery::inspect(
-                    &discover_candidate(&requested)?,
-                )?,
-            )?;
-        }
-        ["runtime", "quiescent-dependency-socket-recovery"]
-        | ["runtime", "quiescent-dependency-socket-recovery", "--json"] => {
-            print_json(
-                &hack_runtime_core::provider::quiescent_dependency_socket_recovery::inspect(
-                    &discover_candidate(&requested)?,
-                )?,
-            )?;
-        }
-        [
-            "runtime",
-            "recover-quiescent-dependency-sockets",
-            "--expect-sha256",
-            hash,
-        ]
-        | [
-            "runtime",
-            "recover-quiescent-dependency-sockets",
-            "--expect-sha256",
-            hash,
-            "--json",
-        ] => {
-            print_json(
-                &hack_runtime_core::provider::quiescent_dependency_socket_recovery::recover(
-                    &discover_candidate(&requested)?,
-                    hash,
-                )?,
-            )?;
-        }
-        [
-            "runtime",
-            "recover-dependency-sockets",
-            "--expect-sha256",
-            hash,
-        ]
-        | [
-            "runtime",
-            "recover-dependency-sockets",
-            "--expect-sha256",
-            hash,
-            "--json",
-        ] => {
-            print_json(
-                &hack_runtime_core::provider::dependency_socket_recovery::recover(
-                    &discover_candidate(&requested)?,
+                    &Candidate::discover(&requested)?,
                     hash,
                 )?,
             )?;
         }
         ["runtime", "bridge-recovery"] | ["runtime", "bridge-recovery", "--json"] => {
             print_json(
-                &hack_runtime_core::provider::graph::inspect_bridge_recovery(&discover_candidate(
-                    &requested,
-                )?)?,
+                &hack_runtime_core::provider::graph::inspect_bridge_recovery(
+                    &Candidate::discover(&requested)?,
+                )?,
             )?;
         }
         [
@@ -850,123 +442,30 @@ fn run() -> Result<(), CandidateError> {
                 CandidateError::new("invalid_arguments", "Recovery slot must be 1..8.")
             })?;
             print_json(&hack_runtime_core::provider::graph::export_bridge_recovery(
-                &discover_candidate(&requested)?,
+                &Candidate::discover(&requested)?,
                 slot,
                 hash,
             )?)?;
         }
         ["runtime", "engine-info"] | ["runtime", "engine-info", "--json"] => {
             print_json(&hack_runtime_core::provider::engine_info(
-                &discover_candidate(&requested)?,
+                &Candidate::discover(&requested)?,
             )?)?;
         }
         ["runtime", "probe"] | ["runtime", "probe", "--json"] => {
-            print_json(&hack_runtime_core::provider::probe(&discover_candidate(
+            print_json(&hack_runtime_core::provider::probe(&Candidate::discover(
                 &requested,
             )?)?)?;
         }
-        [
-            "runtime",
-            "prepared-base",
-            action @ ("build" | "verify" | "status" | "remove"),
-            arguments @ ..,
-        ] => {
-            let command = prepared_base_cli::parse(action, arguments)?;
-            let candidate = discover_candidate(&requested)?;
-            match command {
-                prepared_base_cli::Command::Build {
-                    store,
-                    profile,
-                    base_id,
-                } => print_json(&hack_runtime_core::provider::build_prepared_base(
-                    &candidate,
-                    &prepared_base_store(&candidate, store.as_deref())?,
-                    profile,
-                    base_id.as_deref(),
-                )?)?,
-                prepared_base_cli::Command::Verify { store, base_id } => {
-                    print_json(&hack_runtime_core::provider::verify_prepared_base(
-                        &candidate,
-                        &prepared_base_store(&candidate, store.as_deref())?,
-                        &base_id,
-                    )?)?
-                }
-                prepared_base_cli::Command::Status { store, profile } => {
-                    print_json(&hack_runtime_core::provider::prepared_base_status(
-                        &candidate,
-                        &prepared_base_store(&candidate, store.as_deref())?,
-                        profile,
-                    )?)?
-                }
-                prepared_base_cli::Command::Remove { store, base_id } => {
-                    hack_runtime_core::provider::remove_prepared_base(
-                        &prepared_base_store(&candidate, store.as_deref())?,
-                        &base_id,
-                    )?;
-                    print_json(&serde_json::json!({ "removed": base_id }))?
-                }
-            }
-        }
         ["runtime", "prepare", "--archive", archive] => {
             print_json(&hack_runtime_core::provider::prepare(
-                &discover_candidate(&requested)?,
+                &Candidate::discover(&requested)?,
                 Path::new(archive),
-            )?)?;
-        }
-        ["runtime", "prepare-network-tools", "--directory", directory] => {
-            print_json(&hack_runtime_core::provider::prepare_network_tools(
-                &discover_candidate(&requested)?,
-                Path::new(directory),
             )?)?;
         }
         ["runtime", "prepare-engine", "--archive", archive] => {
             print_json(&hack_runtime_core::provider::prepare_engine(
-                &discover_candidate(&requested)?,
-                Path::new(archive),
-            )?)?;
-        }
-        [
-            "runtime",
-            "ensure-image",
-            "--reference",
-            reference,
-            "--json",
-        ] => {
-            print_json(&hack_runtime_core::provider::image_ensure::ensure(
-                &discover_candidate(&requested)?,
-                reference,
-            )?)?;
-        }
-        [
-            "runtime",
-            "resolve-image",
-            "--reference",
-            reference,
-            "--json",
-        ] => {
-            print_json(&hack_runtime_core::provider::registry_image::resolve(
-                reference,
-            )?)?;
-        }
-        [
-            "runtime",
-            "fetch-image",
-            "--reference",
-            reference,
-            "--archive",
-            archive,
-        ]
-        | [
-            "runtime",
-            "fetch-image",
-            "--reference",
-            reference,
-            "--archive",
-            archive,
-            "--json",
-        ] => {
-            print_json(&hack_runtime_core::provider::registry_image::acquire(
-                reference,
+                &Candidate::discover(&requested)?,
                 Path::new(archive),
             )?)?;
         }
@@ -981,40 +480,14 @@ fn run() -> Result<(), CandidateError> {
             image,
         ] => {
             print_json(&hack_runtime_core::provider::load_image(
-                &discover_candidate(&requested)?,
+                &Candidate::discover(&requested)?,
                 Path::new(archive),
                 digest,
                 image,
             )?)?;
         }
-        ["runtime", "host-filesystem-recovery"]
-        | ["runtime", "host-filesystem-recovery", "--json"] => {
-            print_json(&hack_runtime_core::provider::host_filesystem::inspect(
-                &discover_candidate(&requested)?,
-            )?)?;
-        }
-        [
-            "runtime",
-            "recover-host-filesystem",
-            "--expect-sha256",
-            hash,
-            "--accept-legacy-device-rebind",
-        ]
-        | [
-            "runtime",
-            "recover-host-filesystem",
-            "--expect-sha256",
-            hash,
-            "--accept-legacy-device-rebind",
-            "--json",
-        ] => {
-            print_json(&hack_runtime_core::provider::host_filesystem::recover(
-                &discover_candidate(&requested)?,
-                hash,
-            )?)?;
-        }
         ["runtime", action] | ["runtime", action, "--json"] => {
-            let candidate = discover_candidate(&requested)?;
+            let candidate = Candidate::discover(&requested)?;
             let result = match *action {
                 "up" => hack_runtime_core::provider::up(&candidate),
                 "status" => hack_runtime_core::provider::status(&candidate),
@@ -1048,12 +521,7 @@ fn project_command(candidate: &Candidate, arguments: &[&str]) -> Result<(), Cand
     {
         return Err(CandidateError::new("unsupported_command", HELP));
     }
-    let (arguments, normalized_selection) = normalized_cli::extract(
-        arguments,
-        ["plan", "capture", "publish-source", "verify-source"].contains(action),
-    )?;
     let mut source = None;
-    let mut branch = None;
     let mut file = None;
     let mut expected = None;
     let mut profiles = Vec::new();
@@ -1100,10 +568,6 @@ fn project_command(candidate: &Candidate, arguments: &[&str]) -> Result<(), Cand
                 );
             }
             "--project" if source.is_none() => source = Some(*value),
-            "--branch" if branch.is_none() => {
-                hack_runtime_core::validate_branch(value)?;
-                branch = Some(*value);
-            }
             "--file" if file.is_none() => file = Some(*value),
             "--expect-plan" if expected.is_none() => expected = Some(*value),
             "--profile" if profiles.len() < 64 => profiles.push((*value).to_owned()),
@@ -1117,7 +581,7 @@ fn project_command(candidate: &Candidate, arguments: &[&str]) -> Result<(), Cand
         if file.is_some() || expected.is_some() || !profiles.is_empty() {
             return Err(CandidateError::new("invalid_arguments", HELP));
         }
-        let status = project::status_with_branch(candidate, source, branch)?;
+        let status = project::status(candidate, source)?;
         if json {
             print_json(&status)?;
         } else {
@@ -1132,15 +596,10 @@ fn project_command(candidate: &Candidate, arguments: &[&str]) -> Result<(), Cand
         )
     })?);
     let options = PlanOptions {
-        branch,
         project: source,
         compose_file: file,
         profiles: &profiles,
     };
-    let normalized = normalized_selection
-        .as_ref()
-        .map(|selection| selection.load())
-        .transpose()?;
     if duration.is_some() && !watch {
         return Err(CandidateError::new(
             "invalid_arguments",
@@ -1151,7 +610,7 @@ fn project_command(candidate: &Candidate, arguments: &[&str]) -> Result<(), Cand
         if expected.is_some() {
             return Err(CandidateError::new("invalid_arguments", HELP));
         }
-        let report = normalized_cli::review(candidate, options, normalized.as_ref())?;
+        let report = project::plan(candidate, options)?;
         return print_json(&hack_runtime_core::provider::sync_status(
             candidate,
             &report.plan.namespace,
@@ -1161,14 +620,25 @@ fn project_command(candidate: &Candidate, arguments: &[&str]) -> Result<(), Cand
         return sync_source_command(candidate, options, expected, watch, reconcile, duration);
     }
     if ["capture", "publish-source", "verify-source"].contains(action) {
-        let report = normalized_cli::review(candidate, options, normalized.as_ref())?;
+        let report = project::plan(candidate, options)?;
         if expected != Some(report.plan_id.as_str()) {
             return Err(CandidateError::new(
                 "stale_plan",
                 "Capture requires the current --expect-plan review ID.",
             ));
         }
-        let snapshot = capture_plan_source(&report.plan)?;
+        let environment_files = report
+            .plan
+            .services
+            .values()
+            .flat_map(|service| service.environment_files.iter().cloned())
+            .collect();
+        let snapshot = project::snapshot::capture(
+            &report.plan.source,
+            &environment_files,
+            &report.plan.source_selection.metadata_sha256,
+        )?
+        .with_mountpoints(&report.plan)?;
         if ["publish-source", "verify-source"].contains(action) {
             let publish = if reconcile {
                 hack_runtime_core::provider::reconcile_source_publication
@@ -1216,7 +686,7 @@ fn project_command(candidate: &Candidate, arguments: &[&str]) -> Result<(), Cand
         if expected.is_some() {
             return Err(CandidateError::new("invalid_arguments", HELP));
         }
-        let report = normalized_cli::review(candidate, options, normalized.as_ref())?;
+        let report = project::plan(candidate, options)?;
         if json {
             print_json(&report)?;
         } else {
@@ -1353,17 +823,6 @@ fn project_command(candidate: &Candidate, arguments: &[&str]) -> Result<(), Cand
     Ok(())
 }
 
-/// Capture the reviewed artifact shape identically for immutable publication and
-/// mutable synchronization, including excluded-volume mountpoint placeholders.
-fn capture_plan_source(
-    plan: &hack_runtime_core::project::PlanData,
-) -> Result<hack_runtime_core::project::snapshot::Snapshot, CandidateError> {
-    hack_runtime_core::project::snapshot::capture_plan(plan)
-}
-
-#[cfg(test)]
-mod source_capture_tests;
-
 fn sync_source_command(
     candidate: &Candidate,
     options: hack_runtime_core::project::PlanOptions<'_>,
@@ -1378,7 +837,6 @@ fn sync_source_command(
         project::plan(
             candidate,
             project::PlanOptions {
-                branch: options.branch,
                 project: options.project,
                 compose_file: options.compose_file,
                 profiles: options.profiles,
@@ -1407,22 +865,21 @@ fn sync_source_command(
                 "Source identity changed while watching.",
             ));
         }
-        capture_plan_source(&report.plan)
+        let environment_files = report
+            .plan
+            .services
+            .values()
+            .flat_map(|service| service.environment_files.iter().cloned())
+            .collect();
+        project::snapshot::capture(
+            &source,
+            &environment_files,
+            &report.plan.source_selection.metadata_sha256,
+        )
     };
     let started = Instant::now();
     let snapshot = capture(&report)?;
-    let live_contract =
-        match project::live_source::Contract::from_plan(&report.plan, snapshot.receipt()) {
-            Ok(contract) => Some(contract),
-            Err(error) if watch => return Err(error),
-            // Capture-only projects can retain unsupported execution diagnostics.
-            // Legacy apply still refuses updates when a live graph needs review.
-            Err(_) => None,
-        };
-    let first = match &live_contract {
-        Some(contract) => session.apply_reviewed(&snapshot, reconcile, contract)?,
-        None => session.apply(&snapshot, reconcile)?,
-    };
+    let first = session.apply(&snapshot, reconcile)?;
     print_sync_event(&first, watch, started.elapsed().as_millis(), false)?;
     let mut revision = snapshot.receipt().revision.clone();
     drop(snapshot);
@@ -1444,30 +901,13 @@ fn sync_source_command(
             continue;
         };
         let started = Instant::now();
-        let completed = source_watch_retry::run(deadline, || {
-            let report = make_plan()?;
-            let snapshot = capture(&report)?;
-            live_contract
-                .as_ref()
-                .expect("watch contract established before initial apply")
-                .verify(&report.plan, snapshot.receipt())?;
-            let reviewed_contract =
-                project::live_source::Contract::from_plan(&report.plan, snapshot.receipt())?;
-            if snapshot.receipt().revision == revision {
-                return Ok(source_watch_retry::Attempt::Complete(None));
-            }
-            match session.try_apply_reviewed(&snapshot, &reviewed_contract, deadline)? {
-                None => Ok(source_watch_retry::Attempt::Busy),
-                Some(receipt) => Ok(source_watch_retry::Attempt::Complete(Some((
-                    receipt,
-                    snapshot.receipt().revision.clone(),
-                )))),
-            }
-        })?;
-        let Some((receipt, next_revision)) = completed else {
+        let report = make_plan()?;
+        let snapshot = capture(&report)?;
+        if snapshot.receipt().revision == revision {
             continue;
-        };
-        revision = next_revision;
+        }
+        let receipt = session.apply(&snapshot, false)?;
+        revision = snapshot.receipt().revision.clone();
         print_sync_event(
             &receipt,
             true,

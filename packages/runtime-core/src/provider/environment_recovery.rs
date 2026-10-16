@@ -39,7 +39,7 @@ fn error() -> CandidateError {
 fn root(candidate: &Candidate) -> PathBuf {
     candidate.state_root.join("run/environment-leases")
 }
-pub(super) fn valid_slot(slot: &str) -> bool {
+fn valid_slot(slot: &str) -> bool {
     let Some(rest) = slot.strip_prefix("hack-env-lease-") else {
         return false;
     };
@@ -55,7 +55,7 @@ fn hex(value: &str, len: usize) -> bool {
             .bytes()
             .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
 }
-pub(super) fn uuid(value: &str) -> bool {
+fn uuid(value: &str) -> bool {
     value.len() == 36
         && value.bytes().enumerate().all(|(i, c)| {
             if [8, 13, 18, 23].contains(&i) {
@@ -88,10 +88,6 @@ fn validate(intent: &Intent, slot: &str) -> Result<(), CandidateError> {
     Ok(())
 }
 const MAX_INTENT_ENTRIES: usize = 4096;
-// Cleanup must cover every allocation admitted by the global history budget.
-// A smaller per-graph bound can strand a valid graph after repeated restores.
-// Active and archived entries share this bound; none are discarded to fit it.
-const MAX_GRAPH_INTENT_ENTRIES: usize = MAX_INTENT_ENTRIES;
 
 /// Retired and uncertain entries still reserve history capacity. This never removes evidence.
 pub(super) fn preflight_records(
@@ -103,15 +99,11 @@ pub(super) fn preflight_records(
     }
     let directory = root(candidate);
     crate::reject_aliased_state(&directory)?;
-    let native = native_count(candidate)?;
-    let available = MAX_INTENT_ENTRIES
-        .checked_sub(requested)
-        .and_then(|n| n.checked_sub(native))
-        .ok_or_else(error)?;
     if !directory.try_exists().map_err(state::io)? {
         return Ok(());
     }
     state::check_private_directory(&directory)?;
+    let available = MAX_INTENT_ENTRIES - requested;
     for (index, entry) in fs::read_dir(&directory).map_err(state::io)?.enumerate() {
         entry.map_err(state::io)?;
         if index >= available {
@@ -121,33 +113,10 @@ pub(super) fn preflight_records(
     Ok(())
 }
 
-// Allocation history is shared even when this binary cannot decode native bindings.
-pub(super) fn native_count(candidate: &Candidate) -> Result<usize, CandidateError> {
-    let directory = candidate.state_root.join("run/native-environment-leases");
-    crate::reject_aliased_state(&directory)?;
-    if !directory.try_exists().map_err(state::io)? {
-        return Ok(0);
-    }
-    state::check_private_directory(&directory)?;
-    let mut count = 0;
-    for entry in fs::read_dir(directory).map_err(state::io)? {
-        entry.map_err(state::io)?;
-        count += 1;
-        if count > MAX_INTENT_ENTRIES {
-            return Err(error());
-        }
-    }
-    Ok(count)
-}
-
 pub(super) fn record(
     candidate: &Candidate,
     lease: &EnvironmentLease,
 ) -> Result<(), CandidateError> {
-    #[cfg(feature = "native-config-plan")]
-    if lease.native.is_some() {
-        return Err(error());
-    }
     if retention::reserved(candidate, &lease.slot)? {
         return Err(error());
     }
@@ -259,28 +228,6 @@ pub fn recorded_slots(candidate: &Candidate) -> Result<Vec<String>, CandidateErr
     }
     Ok(slots.into_iter().collect())
 }
-/// Read-only current-guest metadata for native recovery completeness. Pending
-/// records refuse rather than being promoted or used as missing-slot authority.
-#[cfg(all(target_os = "macos", feature = "native-config-plan"))]
-pub(super) fn known_current_slots(
-    candidate: &Candidate,
-    incarnation: &str,
-    boot: &str,
-) -> Result<std::collections::BTreeSet<String>, CandidateError> {
-    let mut known = std::collections::BTreeSet::new();
-    for slot in recorded_slots(candidate)? {
-        let path = root(candidate).join(format!("{slot}.pending"));
-        match fs::symlink_metadata(path) {
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            _ => return Err(error()),
-        }
-        let intent = read_mode(candidate, &slot, incarnation, None, false)?;
-        if intent.boot == boot {
-            known.insert(slot);
-        }
-    }
-    Ok(known)
-}
 /// Validates immutable records before associating them with graph cleanup.
 pub(super) fn graph_slots(
     candidate: &Candidate,
@@ -298,61 +245,6 @@ pub(super) fn graph_slots(
     }
     Ok(bindings)
 }
-/// Delivery authority for exec, unlike cleanup inventory: only a committed,
-/// current-boot allocation mounted by the exact service may be reused. The caller holds the
-/// guest lease and still verifies the exact container's read-only mounts.
-pub(super) fn active_exec_slot(
-    candidate: &Candidate,
-    guest: &OwnedGuest<'_>,
-    run: &str,
-    service: &str,
-    container: &str,
-    mounted_slot: Option<&str>,
-) -> Result<Option<String>, CandidateError> {
-    active_exec_slot_for(
-        candidate,
-        guest.incarnation(),
-        guest.boot_id(),
-        run,
-        service,
-        container,
-        mounted_slot,
-    )
-}
-fn active_exec_slot_for(
-    candidate: &Candidate,
-    incarnation: &str,
-    boot: &str,
-    run: &str,
-    service: &str,
-    container: &str,
-    mounted_slot: Option<&str>,
-) -> Result<Option<String>, CandidateError> {
-    if !hex(run, 32) || !hex(incarnation, 32) || !uuid(boot) || !super::environment::name(service) {
-        return Err(error());
-    }
-    let Some(slot) = mounted_slot else {
-        return Ok(None);
-    };
-    // Historical allocations survive same-run restores. Only the allocation
-    // actually mounted by the verified current container can authorize delivery.
-    let intent = read_mode(candidate, slot, incarnation, None, false)?;
-    let binding = intent.graph.as_ref().ok_or_else(error)?;
-    match fs::symlink_metadata(root(candidate).join(format!("{slot}.pending"))) {
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        _ => return Err(error()),
-    }
-    if intent.boot != boot
-        || intent.service != service
-        || binding.run != run
-        || binding.container != container
-        || retention::reserved(candidate, slot)?
-    {
-        return Err(error());
-    }
-    Ok(Some(slot.to_owned()))
-}
-
 /// Canonical value-free identities, independent of active/archive file placement.
 #[cfg(target_os = "macos")]
 #[derive(Clone, PartialEq, Eq, Serialize)]
@@ -366,12 +258,6 @@ pub(super) struct GraphInventory {
 impl GraphInventory {
     pub(super) fn is_empty(&self) -> bool {
         self.intents.is_empty()
-    }
-    pub(super) fn slots(&self) -> Vec<String> {
-        self.intents
-            .iter()
-            .map(|intent| intent.slot.clone())
-            .collect()
     }
 }
 
@@ -394,7 +280,7 @@ pub(super) fn graph_inventory(
                 g.run == run && containers.get(&intent.service) == Some(&g.container)
             })
             || retention::reserved(candidate, &intent.slot)?
-            || selected.len() >= MAX_GRAPH_INTENT_ENTRIES
+            || selected.len() >= 72
             || selected.insert(intent.slot.clone(), intent).is_some()
         {
             return Err(error());
@@ -417,7 +303,7 @@ pub(super) fn graph_inventory(
             }
             state::check_private_directory(archive)?;
             for (index, entry) in fs::read_dir(archive).map_err(state::io)?.enumerate() {
-                if index >= MAX_GRAPH_INTENT_ENTRIES {
+                if index >= 72 {
                     return Err(error());
                 }
                 let entry = entry.map_err(state::io)?;
@@ -455,28 +341,6 @@ pub(super) fn verify_graph_retired(
     Ok(())
 }
 
-/// Verify one selected allocation after an interrupted cleanup effect. Other
-/// allocations in the same graph may still be present at this journal step.
-#[cfg(target_os = "macos")]
-pub(super) fn verify_graph_slot_retired(
-    guest: &OwnedGuest<'_>,
-    inventory: &GraphInventory,
-    slot: &str,
-) -> Result<(), CandidateError> {
-    if inventory.incarnation != guest.incarnation() {
-        return Err(error());
-    }
-    let intent = inventory
-        .intents
-        .iter()
-        .find(|intent| intent.slot == slot)
-        .ok_or_else(error)?;
-    let binding = intent.graph.as_ref().ok_or_else(error)?;
-    super::engine::require_container_absent(guest, &binding.container)?;
-    retention::absent(guest, slot)?;
-    guest.verify()
-}
-
 /// Move retired, value-free intents into a removed graph's retained evidence. The graph ID
 /// stays reserved by its active/archive directory, then by the verified-prune consumed record.
 /// A rename interrupted before final graph archival is recovered by validating both inventories.
@@ -501,7 +365,7 @@ pub(super) fn archive_graph(
     };
     let mut archived = std::collections::BTreeMap::new();
     for (index, entry) in fs::read_dir(directory).map_err(state::io)?.enumerate() {
-        if index >= MAX_GRAPH_INTENT_ENTRIES {
+        if index >= 72 {
             return Err(error());
         }
         let entry = entry.map_err(state::io)?;
@@ -517,8 +381,7 @@ pub(super) fn archive_graph(
     for (slot, _, _) in graph_slots(candidate, guest, run)? {
         let intent = read_mode(candidate, &slot, guest.incarnation(), None, false)?;
         matches(&intent)?;
-        if archived.contains_key(&slot) || active.len() + archived.len() >= MAX_GRAPH_INTENT_ENTRIES
-        {
+        if archived.contains_key(&slot) || active.len() + archived.len() >= 72 {
             return Err(error());
         }
         active.push(intent);
@@ -587,7 +450,7 @@ fn retire_intent(guest: &OwnedGuest<'_>, intent: &Intent) -> Result<(), Candidat
     }
     Ok(())
 }
-pub(super) const RETIRE: &str = r#"
+const RETIRE: &str = r#"
 (
 set -eu
 root="/run/$1"
@@ -605,79 +468,6 @@ rmdir "$root"
 ) >/dev/null 2>&1
 printf 'environment-removed-v1\n'
 "#;
-
-/// Retire and archive only one transient service allocation. Other services in the
-/// same graph remain active; their allocation records must not move or expire.
-#[cfg(target_os = "macos")]
-pub(super) fn archive_job(
-    candidate: &Candidate,
-    guest: &OwnedGuest<'_>,
-    run: &str,
-    service: &str,
-    container: &str,
-    directory: &std::path::Path,
-) -> Result<(), CandidateError> {
-    state::private_directory(directory)?;
-    let matches = |intent: &Intent| -> Result<(), CandidateError> {
-        validate(intent, &intent.slot)?;
-        if intent.incarnation != guest.incarnation()
-            || intent.service != service
-            || !intent
-                .graph
-                .as_ref()
-                .is_some_and(|b| b.run == run && b.container == container)
-            || retention::reserved(candidate, &intent.slot)?
-        {
-            return Err(error());
-        }
-        Ok(())
-    };
-    let mut archived = std::collections::BTreeMap::new();
-    for entry in fs::read_dir(directory).map_err(state::io)? {
-        let entry = entry.map_err(state::io)?;
-        let intent: Intent = state::read_bounded(&entry.path(), 2048)?;
-        matches(&intent)?;
-        if entry.file_name().to_str() != Some(format!("{}.json", intent.slot).as_str())
-            || archived.insert(intent.slot.clone(), intent).is_some()
-            || archived.len() > 1
-        {
-            return Err(error());
-        }
-    }
-    let mut active = Vec::new();
-    for (slot, name, binding) in graph_slots(candidate, guest, run)? {
-        if name != service {
-            continue;
-        }
-        if binding.container != container {
-            return Err(error());
-        }
-        let intent = read_mode(candidate, &slot, guest.incarnation(), None, false)?;
-        matches(&intent)?;
-        if archived.contains_key(&slot) || !active.is_empty() || !archived.is_empty() {
-            return Err(error());
-        }
-        active.push(intent);
-    }
-    for intent in archived.values().chain(active.iter()) {
-        retire_intent(guest, intent)?;
-    }
-    for intent in active {
-        read(candidate, &intent.slot, guest.incarnation(), None)?;
-        let source = root(candidate).join(format!("{}.json", intent.slot));
-        let target = directory.join(format!("{}.json", intent.slot));
-        if target.symlink_metadata().is_ok() {
-            return Err(error());
-        }
-        fs::rename(source, target).map_err(state::io)?;
-        for parent in [directory, root(candidate).as_path()] {
-            fs::File::open(parent)
-                .and_then(|f| f.sync_all())
-                .map_err(state::io)?;
-        }
-    }
-    Ok(())
-}
 
 #[cfg(test)]
 mod tests {
@@ -705,67 +495,6 @@ mod tests {
         }
         assert!(preflight_records(&fixture.0, 1).is_err());
         assert_eq!(fs::read_dir(directory).unwrap().count(), 4096);
-    }
-    #[test]
-    fn active_exec_selects_mounted_current_intent_despite_retained_restore_history() {
-        let fixture = Fixture::new();
-        let mut intent = fixture.intent();
-        let run = "c".repeat(32);
-        let container = format!("hkg-{run}-container-0");
-        intent.graph = Some(GraphBinding {
-            run: run.clone(),
-            container: container.clone(),
-        });
-        let select = |boot: &str, container: &str| {
-            active_exec_slot_for(
-                &fixture.0,
-                &intent.incarnation,
-                boot,
-                &run,
-                "web",
-                container,
-                Some(&intent.slot),
-            )
-        };
-        assert!(select(&intent.boot, &container).is_err());
-        let bytes = serde_json::to_vec(&intent).unwrap();
-        let pending = fixture.pending(&bytes, &intent.slot);
-        assert!(select(&intent.boot, &container).is_err());
-        assert!(pending.exists(), "exec must never promote pending intent");
-        let committed = root(&fixture.0).join(format!("{}.json", intent.slot));
-        fs::rename(&pending, &committed).unwrap();
-        assert_eq!(
-            select(&intent.boot, &container).unwrap(),
-            Some(intent.slot.clone())
-        );
-        assert!(select("dddddddd-dddd-4ddd-8ddd-dddddddddddd", &container).is_err());
-        assert!(select(&intent.boot, &format!("hkg-{run}-container-1")).is_err());
-        let mut second = intent.clone();
-        second.slot = format!("hack-env-lease-{}-{}", second.boot, "e".repeat(32));
-        state::write(
-            &root(&fixture.0).join(format!("{}.json", second.slot)),
-            &second,
-        )
-        .unwrap();
-        assert_eq!(
-            select(&intent.boot, &container).unwrap(),
-            Some(intent.slot.clone())
-        );
-        // An older boot's retained record is not a current delivery candidate.
-        second.boot = "dddddddd-dddd-4ddd-8ddd-dddddddddddd".into();
-        second.slot = format!("hack-env-lease-{}-{}", second.boot, "f".repeat(32));
-        state::write(
-            &root(&fixture.0).join(format!("{}.json", second.slot)),
-            &second,
-        )
-        .unwrap();
-        assert_eq!(
-            select(&intent.boot, &container).unwrap(),
-            Some(intent.slot.clone())
-        );
-        fixture.pending(&bytes, &intent.slot);
-        assert!(select(&intent.boot, &container).is_err());
-        assert_eq!(fs::read(committed).unwrap(), bytes);
     }
     impl Fixture {
         fn new() -> Self {
@@ -911,62 +640,24 @@ mod tests {
         let containers = std::collections::BTreeMap::from([("web".into(), container)]);
         let archive = fixture.0.state_root.join("graph-environment-archive");
         state::private_directory(&archive).unwrap();
-        for index in 0..MAX_GRAPH_INTENT_ENTRIES {
+        for index in 0..72 {
             intent.slot = format!("hack-env-lease-{}-{index:032x}", intent.boot);
             state::write(&archive.join(format!("{}.json", intent.slot)), &intent).unwrap();
         }
         let inventory =
             graph_inventory(&fixture.0, &intent.incarnation, &run, &containers, &archive).unwrap();
-        assert_eq!(inventory.intents.len(), MAX_GRAPH_INTENT_ENTRIES);
+        assert_eq!(inventory.intents.len(), 72);
         assert!(
             inventory
                 .intents
                 .windows(2)
                 .all(|pair| pair[0].slot < pair[1].slot)
         );
-        intent.slot = format!(
-            "hack-env-lease-{}-{:032x}",
-            intent.boot, MAX_GRAPH_INTENT_ENTRIES
-        );
+        intent.slot = format!("hack-env-lease-{}-{:032x}", intent.boot, 72);
         fixture.pending(&serde_json::to_vec(&intent).unwrap(), &intent.slot);
         assert!(
             graph_inventory(&fixture.0, &intent.incarnation, &run, &containers, &archive).is_err()
         );
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn graph_inventory_accepts_repeated_start_history_beyond_old_limit() {
-        let fixture = Fixture::new();
-        let mut intent = fixture.intent();
-        let run = "a".repeat(32);
-        let container = format!("hkg-{run}-container-0");
-        intent.graph = Some(GraphBinding {
-            run: run.clone(),
-            container: container.clone(),
-        });
-        // Nineteen normal starts of a fourteen-service graph exceeded the old
-        // cleanup-only ceiling, despite remaining within allocation admission.
-        let retained_count = 19 * 14;
-        for index in 0..retained_count {
-            intent.slot = format!("hack-env-lease-{}-{index:032x}", intent.boot);
-            state::write(
-                &root(&fixture.0).join(format!("{}.json", intent.slot)),
-                &intent,
-            )
-            .unwrap();
-        }
-        assert!(preflight_records(&fixture.0, 14).is_ok());
-        let inventory = graph_inventory(
-            &fixture.0,
-            &intent.incarnation,
-            &run,
-            &std::collections::BTreeMap::from([("web".into(), container)]),
-            &fixture.0.state_root.join("graph-environment-archive"),
-        )
-        .unwrap();
-        assert_eq!(inventory.intents.len(), retained_count);
-        assert_eq!(recorded_slots(&fixture.0).unwrap().len(), retained_count);
     }
 
     #[test]

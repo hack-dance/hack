@@ -8,9 +8,6 @@ pub(in crate::provider::graph) fn apply(
     let Some(startup) = &receipt.relay_startup else {
         return Ok(());
     };
-    if startup.control_only {
-        return absent(engine, receipt);
-    }
     let generations = startup
         .services
         .values()
@@ -39,60 +36,12 @@ pub(in crate::provider::graph) fn apply(
     }
     Ok(())
 }
-#[cfg(target_os = "macos")]
-pub(in crate::provider::graph) fn retire_service(
-    engine: &Engine<'_>,
-    receipt: &Receipt,
-    service: &str,
-) -> Result<(), CandidateError> {
-    let Some(startup) = &receipt.relay_startup else {
-        return Ok(());
-    };
-    let Some(selected) = startup.services.get(service) else {
-        return Ok(());
-    };
-    let generations = startup
-        .services
-        .values()
-        .map(|s| s.generation.as_str())
-        .collect::<Vec<_>>()
-        .join(" ");
-    let identity = startup
-        .guest_root
-        .map(|(d, i)| format!("{d}:{i}"))
-        .ok_or_else(|| {
-            error(
-                "graph_startup_cleanup",
-                "Missing startup directory identity.",
-            )
-        })?;
-    let output = engine.guest().execute_cleanup(
-        SCRIPT,
-        &[
-            &receipt.run,
-            &receipt.owner,
-            &startup.artifact,
-            &generations,
-            "remove-generation",
-            &identity,
-            &selected.generation,
-        ],
-    )?;
-    if output != "startup-cleanup-v1\n" {
-        return Err(error(
-            "graph_startup_cleanup",
-            "One-off startup removal was not confirmed.",
-        ));
-    }
-    Ok(())
-}
 pub(in crate::provider::graph) fn absent(
     engine: &Engine<'_>,
     receipt: &Receipt,
 ) -> Result<(), CandidateError> {
     if receipt.relay_startup.is_some() {
-        let path = format!("/storage/hack-graph-startup/{}", receipt.run);
-        let output = engine.guest().execute_cleanup(ABSENT, &[&path])?;
+        let output=engine.guest().execute_cleanup("test ! -e \"/storage/hack-graph-startup/$1\"; test ! -L \"/storage/hack-graph-startup/$1\"; printf 'startup-absent-v1\\n'",&[&receipt.run])?;
         if output != "startup-absent-v1\n" {
             return Err(error(
                 "graph_startup_cleanup",
@@ -102,36 +51,6 @@ pub(in crate::provider::graph) fn absent(
     }
     Ok(())
 }
-const ABSENT: &str = "set -eu; test ! -e \"$1\"; test ! -L \"$1\"; printf 'startup-absent-v1\\n'";
-
-#[cfg(test)]
-mod absence_tests {
-    use super::*;
-    #[test]
-    fn independent_absence_refuses_existing_and_dangling_artifacts() {
-        let root = crate::provider::graph::tests::Fixture::new();
-        let path = root.0.join("startup");
-        let observe = || {
-            std::process::Command::new("sh")
-                .args(["-c", ABSENT, "sh"])
-                .arg(&path)
-                .output()
-                .unwrap()
-        };
-        assert!(observe().status.success());
-        std::fs::create_dir(&path).unwrap();
-        let result = observe();
-        assert!(!result.status.success());
-        assert!(result.stdout.is_empty());
-        std::fs::remove_dir(&path).unwrap();
-        std::os::unix::fs::symlink(root.0.join("missing"), &path).unwrap();
-        let result = observe();
-        assert!(!result.status.success());
-        assert!(result.stdout.is_empty());
-        assert!(path.symlink_metadata().unwrap().file_type().is_symlink());
-    }
-}
-
 macro_rules! pending_check {
     () => {
         r#"
@@ -186,14 +105,6 @@ for item in "$root"/* "$root"/.[!.]* "$root"/..?*; do
  ;;
  esac
 done
-if test "$5" = remove-generation; then
- case " $4 " in *" $7 "*) ;; *) exit 61;; esac
- directory="$root/$7"
- if test -d "$directory"; then
-  for leaf in release pending; do if test -f "$directory/$leaf"; then rm "$directory/$leaf"; fi; done
-  rmdir "$directory"; sync -f "$root"
- fi
-fi
 if test "$5" = remove; then
  for generation in $4; do
   directory="$root/$generation"

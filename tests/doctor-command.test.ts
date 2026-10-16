@@ -1,14 +1,7 @@
 import { expect, test } from "bun:test";
-import {
-  chmod,
-  mkdir,
-  mkdtemp,
-  readdir,
-  rm,
-  writeFile,
-} from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import { HACK_AGENT_INTEGRATION_CONTENT_REVISION } from "../src/agents/integration-revision.ts";
 import {
   assertDoctorOptionCompatibility,
@@ -22,7 +15,6 @@ import {
   buildRecoveryNextSteps,
   buildRecoveryWorkflowLines,
 } from "../src/commands/recovery-guidance.ts";
-import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
 async function createDoctorTestProject(opts: {
   readonly modern?: boolean;
@@ -49,79 +41,6 @@ async function createDoctorTestProject(opts: {
   }
   return root;
 }
-
-test("doctor refuses native input before probing or repairing global runtime", async () => {
-  const root = await mkdtemp(join(tmpdir(), "hack-doctor-native-"));
-  try {
-    const project = join(root, "project");
-    const tools = join(root, "tools");
-    await mkdir(join(project, ".hack"), { recursive: true });
-    await mkdir(tools);
-    const cache = join(root, "cache");
-    await mkdir(cache);
-    await writeFile(
-      join(project, ".hack", "hack.project.json"),
-      "{invalid-native"
-    );
-    const sentinel = join(root, "runtime-called");
-    await writeFile(
-      join(tools, "docker"),
-      '#!/bin/sh\nprintf called > "$RUNTIME_SENTINEL"\nexit 99\n',
-      { mode: 0o700 }
-    );
-    const cli = resolve(import.meta.dir, "..", "index.ts");
-    for (const flags of [[], ["--fix"], ["--migrate-env-config"], ["--json"]]) {
-      const child = Bun.spawn(
-        [process.execPath, cli, "doctor", "--path", project, ...flags],
-        {
-          cwd: project,
-          env: privateCliEnv({
-            root,
-            home: root,
-            env: {
-              HACK_HOME: join(root, "state"),
-              HACK_GLOBAL_CONFIG_PATH: join(root, "state", "hack.config.json"),
-              HACK_DAEMON_DISABLE: "1",
-              HACK_NO_INTERACTIVE: "1",
-              HACK_LOGGER: "console",
-              XDG_CACHE_HOME: cache,
-              PATH: `${tools}:/usr/bin:/bin`,
-              RUNTIME_SENTINEL: sentinel,
-            },
-          }),
-          stdout: "pipe",
-          stderr: "pipe",
-        }
-      );
-      const [exit, stdout, stderr] = await Promise.all([
-        child.exited,
-        new Response(child.stdout).text(),
-        new Response(child.stderr).text(),
-      ]);
-      expect(exit).not.toBe(0);
-      expect(stdout + stderr).toContain("E_NATIVE_PROJECT_UNSUPPORTED");
-      if (flags.includes("--json")) {
-        expect(JSON.parse(stdout)).toMatchObject({
-          ok: false,
-          error: { code: "E_NATIVE_PROJECT_UNSUPPORTED" },
-        });
-      }
-      expect(await Bun.file(sentinel).exists()).toBe(false);
-      // `docker-client` is the test's isolated Docker client config.
-      expect((await readdir(root)).sort()).toEqual([
-        "cache",
-        "docker-client",
-        "project",
-        "tools",
-      ]);
-      expect(await readdir(join(project, ".hack"))).toEqual([
-        "hack.project.json",
-      ]);
-    }
-  } finally {
-    await rm(root, { recursive: true, force: true });
-  }
-});
 
 test("doctor guidance distinguishes restartable proxy drift from deeper repair", () => {
   const guidance = buildDoctorRecoveryGuidance({
@@ -311,175 +230,6 @@ test("doctor audits global agent guidance without a project", async () => {
     await rm(home, { recursive: true, force: true });
   }
 });
-
-test("doctor treats absent optional agent integrations as current", async () => {
-  const root = await mkdtemp(join(tmpdir(), "hack-doctor-absent-agents-"));
-  const home = join(root, "home");
-  const project = join(root, "repo");
-  const marker = `Content revision: \`${HACK_AGENT_INTEGRATION_CONTENT_REVISION}\``;
-  try {
-    await mkdir(home, { recursive: true });
-    await mkdir(project, { recursive: true });
-
-    // Empty project plus empty HOME.
-    await expect(
-      inspectDoctorAgentIntegrations({ projectRoot: project, homeDir: home })
-    ).resolves.toEqual({ status: "current" });
-
-    // Plugin-only: client plugin state and user-authored docs, but no
-    // standalone Hack rules, skills or managed doc sections.
-    const pluginDir = join(home, ".claude", "plugins", "hack");
-    await mkdir(pluginDir, { recursive: true });
-    await writeFile(join(pluginDir, "plugin.json"), "{}\n");
-    await writeFile(join(project, "AGENTS.md"), "# Team notes\n");
-    await writeFile(join(project, "CLAUDE.md"), "Use bun.\n");
-    await expect(
-      inspectDoctorAgentIntegrations({ projectRoot: project, homeDir: home })
-    ).resolves.toEqual({ status: "current" });
-
-    // A current Hack-managed section stays current.
-    await writeFile(
-      join(project, "AGENTS.md"),
-      `# Team notes\n<!-- hack:agent-docs:start -->\n${marker}\n<!-- hack:agent-docs:end -->\n`
-    );
-    await expect(
-      inspectDoctorAgentIntegrations({ projectRoot: project, homeDir: home })
-    ).resolves.toEqual({ status: "current" });
-
-    // One present Hack-managed section without the current revision is stale.
-    await writeFile(
-      join(project, "AGENTS.md"),
-      "# Team notes\n<!-- hack:agent-docs:start -->\nold\n<!-- hack:agent-docs:end -->\n"
-    );
-    await expect(
-      inspectDoctorAgentIntegrations({ projectRoot: project, homeDir: home })
-    ).resolves.toEqual({ status: "stale" });
-    await writeFile(join(project, "AGENTS.md"), "# Team notes\n");
-
-    // One present Hack-owned file without the current revision is stale.
-    const projectRules = join(project, ".cursor", "rules", "hack.mdc");
-    await mkdir(join(projectRules, ".."), { recursive: true });
-    await writeFile(projectRules, "stale\n");
-    await expect(
-      inspectDoctorAgentIntegrations({ projectRoot: project, homeDir: home })
-    ).resolves.toEqual({ status: "stale" });
-    await writeFile(projectRules, `${marker}\n`);
-    await expect(
-      inspectDoctorAgentIntegrations({ projectRoot: project, homeDir: home })
-    ).resolves.toEqual({ status: "current" });
-
-    // A retired legacy project artifact is stale even when nothing else is.
-    await writeFile(
-      join(project, "CLAUDE.md"),
-      "<!-- hack:tickets:start -->\nRetired\n<!-- hack:tickets:end -->\n"
-    );
-    await expect(
-      inspectDoctorAgentIntegrations({ projectRoot: project, homeDir: home })
-    ).resolves.toEqual({ status: "stale" });
-  } finally {
-    await rm(root, { recursive: true, force: true });
-  }
-});
-
-/** Run a doctor agent-integration check against a fixture HOME and project. */
-async function withDoctorAgentFixture(
-  run: (paths: {
-    readonly home: string;
-    readonly project: string;
-    readonly inspect: () => Promise<{ readonly status: string }>;
-  }) => Promise<void>
-): Promise<void> {
-  const root = await mkdtemp(join(tmpdir(), "hack-doctor-agent-edge-"));
-  const home = join(root, "home");
-  const project = join(root, "repo");
-  const savedHome = process.env.HOME;
-  process.env.HOME = home;
-  try {
-    await mkdir(home, { recursive: true });
-    await mkdir(project, { recursive: true });
-    await run({
-      home,
-      project,
-      inspect: () =>
-        inspectDoctorAgentIntegrations({ projectRoot: project, homeDir: home }),
-    });
-  } finally {
-    if (savedHome === undefined) {
-      // biome-ignore lint/performance/noDelete: restoring an unset env var
-      delete process.env.HOME;
-    } else {
-      process.env.HOME = savedHome;
-    }
-    await rm(root, { recursive: true, force: true });
-  }
-}
-
-test("doctor treats a doc with only one Hack marker as stale", async () => {
-  const marker = `Content revision: \`${HACK_AGENT_INTEGRATION_CONTENT_REVISION}\``;
-  await withDoctorAgentFixture(async ({ project, inspect }) => {
-    const doc = join(project, "AGENTS.md");
-
-    // Start marker only, even with the current revision text inside.
-    await writeFile(
-      doc,
-      `# notes\n<!-- hack:agent-docs:start -->\n${marker}\nno end marker\n`
-    );
-    await expect(inspect()).resolves.toEqual({ status: "stale" });
-
-    // End marker only.
-    await writeFile(
-      doc,
-      `# notes\n${marker}\nno start marker\n<!-- hack:agent-docs:end -->\n`
-    );
-    await expect(inspect()).resolves.toEqual({ status: "stale" });
-
-    // Neither marker: user-owned doc, not stale.
-    await writeFile(doc, "# notes\n");
-    await expect(inspect()).resolves.toEqual({ status: "current" });
-  });
-});
-
-// Root can read mode-000 files, so the unreadable fixture cannot be built.
-const doctorRunsAsRoot = process.getuid?.() === 0;
-
-test.skipIf(doctorRunsAsRoot)(
-  "doctor treats a present but unreadable Hack-owned file as stale",
-  async () => {
-    const marker = `Content revision: \`${HACK_AGENT_INTEGRATION_CONTENT_REVISION}\``;
-    await withDoctorAgentFixture(async ({ project, inspect }) => {
-      const rules = join(project, ".cursor", "rules", "hack.mdc");
-      await mkdir(join(rules, ".."), { recursive: true });
-      await writeFile(rules, `${marker}\n`);
-      await expect(inspect()).resolves.toEqual({ status: "current" });
-
-      await chmod(rules, 0o000);
-      try {
-        await expect(inspect()).resolves.toEqual({ status: "stale" });
-      } finally {
-        await chmod(rules, 0o644);
-      }
-      await expect(inspect()).resolves.toEqual({ status: "current" });
-    });
-  }
-);
-
-test.skipIf(doctorRunsAsRoot)(
-  "doctor treats a present but unreadable agent doc as stale",
-  async () => {
-    await withDoctorAgentFixture(async ({ project, inspect }) => {
-      const doc = join(project, "CLAUDE.md");
-      await writeFile(doc, "# notes\n");
-      await expect(inspect()).resolves.toEqual({ status: "current" });
-
-      await chmod(doc, 0o000);
-      try {
-        await expect(inspect()).resolves.toEqual({ status: "stale" });
-      } finally {
-        await chmod(doc, 0o644);
-      }
-    });
-  }
-);
 
 test("doctor guidance routes runtime hygiene drift to projects prune", () => {
   const guidance = buildDoctorRecoveryGuidance({

@@ -4,12 +4,7 @@
 //! Native identity protects against endpoint replacement, not a malicious authorized peer.
 use super::relay_auth::AuthorizedSession;
 use crate::CandidateError;
-use serde::Serialize;
-use std::{
-    net::TcpStream,
-    path::{Path, PathBuf},
-    time::Duration,
-};
+use std::{net::TcpStream, time::Duration};
 
 fn refused() -> CandidateError {
     CandidateError::new(
@@ -28,119 +23,6 @@ pub struct HostEndpoint {
     listener: NativeIdentity,
     #[cfg(target_os = "macos")]
     port: u16,
-    #[cfg(target_os = "macos")]
-    notification: Option<IdentityNotification>,
-}
-
-/// A fresh observation of a selected same-UID IPv4 loopback listener.
-/// This identifies a host endpoint only; the caller must bind it to its own
-/// frontend owner and separately verify the TLS certificate chain.
-#[derive(Debug, Serialize)]
-pub struct HostListenerIdentity {
-    pub pid: i32,
-    pub start_micros: u64,
-    pub uid: u32,
-    pub executable: PathBuf,
-    pub port: u16,
-    pub fingerprint: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub accepted: Option<bool>,
-}
-
-/// Observe a selected process and listener without connecting or sending bytes.
-/// Unlike dependency admission, this observation allows SO_REUSEPORT. It proves
-/// that this process has the listener, not that a separate connection reaches it.
-/// The fingerprint rechecks process start time and the listener's native identity.
-pub fn inspect_listener(
-    pid: i32,
-    port: u16,
-    executable: &Path,
-) -> Result<HostListenerIdentity, CandidateError> {
-    inspect_listener_inner(pid, port, executable, None)
-}
-
-/// Attribute one already-open loopback TCP connection to the selected listener.
-/// The caller must keep that connection open until this returns. A missing or
-/// ambiguous accepted peer refuses; this function sends no application bytes.
-pub fn inspect_listener_peer(
-    pid: i32,
-    port: u16,
-    executable: &Path,
-    peer_port: u16,
-) -> Result<HostListenerIdentity, CandidateError> {
-    if peer_port == 0 {
-        return Err(refused());
-    }
-    inspect_listener_inner(pid, port, executable, Some(peer_port))
-}
-
-fn inspect_listener_inner(
-    pid: i32,
-    port: u16,
-    executable: &Path,
-    peer_port: Option<u16>,
-) -> Result<HostListenerIdentity, CandidateError> {
-    #[cfg(target_os = "macos")]
-    {
-        use sha2::{Digest, Sha256};
-
-        if pid <= 1 || port == 0 || !executable.is_absolute() {
-            return Err(refused());
-        }
-        let expected = executable.canonicalize().map_err(|_| refused())?;
-        let process = super::identity::observe(pid)?;
-        let uid = unsafe { libc::geteuid() };
-        super::identity::verify(&process, &process, &expected, uid)?;
-        let first = observe_listener(pid, port, peer_port)?;
-        super::identity::verify(&process, &super::identity::observe(pid)?, &expected, uid)?;
-        let second = observe_listener(pid, port, peer_port)?;
-        if first.descriptor != second.descriptor
-            || first.generation != second.generation
-            || first.reuse_port != second.reuse_port
-            || first.accepted != second.accepted
-            || (peer_port.is_some() && first.accepted != 1)
-        {
-            return Err(refused());
-        }
-        super::identity::verify(&process, &super::identity::observe(pid)?, &expected, uid)?;
-        let bytes = serde_json::to_vec(&serde_json::json!([
-            "hack-observed-host-listener-v1",
-            process,
-            port,
-            first.descriptor,
-            first.generation,
-            first.reuse_port
-        ]))
-        .map_err(|_| refused())?;
-        let fingerprint = format!("{:x}", Sha256::digest(bytes));
-        Ok(HostListenerIdentity {
-            pid: process.pid,
-            start_micros: process.start_micros,
-            uid: process.uid,
-            executable: process.executable,
-            port,
-            fingerprint,
-            accepted: peer_port.map(|_| true),
-        })
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = (pid, port, executable, peer_port);
-        Err(CandidateError::new(
-            "unsupported_host",
-            "Native host endpoint identity requires macOS.",
-        ))
-    }
-}
-
-#[cfg(target_os = "macos")]
-#[derive(Clone)]
-struct IdentityNotification(std::sync::Arc<dyn Fn() + Send + Sync>);
-#[cfg(target_os = "macos")]
-impl std::fmt::Debug for IdentityNotification {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("IdentityNotification")
-    }
 }
 
 #[cfg(target_os = "macos")]
@@ -150,7 +32,6 @@ struct NativeIdentity {
     generation: u64,
     descriptor: i32,
     accepted: i32,
-    reuse_port: i32,
 }
 
 #[cfg(target_os = "macos")]
@@ -161,123 +42,9 @@ unsafe extern "C" {
         peer_port: u16,
         result: *mut NativeIdentity,
     ) -> i32;
-    fn hack_loopback_observe(pid: i32, port: u16, result: *mut NativeIdentity) -> i32;
-    fn hack_loopback_observe_peer(
-        pid: i32,
-        port: u16,
-        peer_port: u16,
-        result: *mut NativeIdentity,
-    ) -> i32;
 }
 
 impl HostEndpoint {
-    /// Captured identity, without a fresh process scan. This remains available after
-    /// the original process exits; it is selection evidence, not current authority.
-    #[cfg(target_os = "macos")]
-    pub fn process_identity(&self) -> super::identity::ProcessIdentity {
-        self.process.clone()
-    }
-
-    /// Owner-local event sink. Ordinary capture/discovery/verification never notifies;
-    /// only an authenticated connection's failed native identity check does.
-    #[cfg(target_os = "macos")]
-    pub(super) fn with_identity_notification(
-        mut self,
-        notification: std::sync::Arc<dyn Fn() + Send + Sync>,
-    ) -> Self {
-        self.notification = Some(IdentityNotification(notification));
-        self
-    }
-
-    #[cfg(target_os = "macos")]
-    fn verify_admission(&self, peer_port: u16) -> Result<bool, CandidateError> {
-        self.verify(peer_port).inspect_err(|_| {
-            if let Some(notification) = &self.notification {
-                (notification.0)();
-            }
-        })
-    }
-    /// Discover one same-user exclusive loopback listener from an explicitly
-    /// selected executable. A port alone is never sufficient authority.
-    pub fn discover(executable: &Path, port: u16) -> Result<(i32, String), CandidateError> {
-        #[cfg(target_os = "macos")]
-        {
-            const LIMIT: usize = 8192;
-            const PROC_ALL_PIDS: u32 = 1;
-            if port == 0 || !executable.is_absolute() {
-                return Err(refused());
-            }
-            let expected = executable.canonicalize().map_err(|_| refused())?;
-            let mut pids = [0_i32; LIMIT];
-            // SAFETY: libproc receives a writable fixed-size PID array and retains no pointer.
-            let bytes = unsafe {
-                libc::proc_listpids(
-                    PROC_ALL_PIDS,
-                    0,
-                    pids.as_mut_ptr().cast(),
-                    std::mem::size_of_val(&pids) as i32,
-                )
-            };
-            if bytes <= 0
-                || bytes as usize >= std::mem::size_of_val(&pids)
-                || bytes as usize % std::mem::size_of::<i32>() != 0
-            {
-                return Err(refused());
-            }
-            let uid = unsafe { libc::geteuid() };
-            let mut found = None;
-            for pid in pids[..bytes as usize / std::mem::size_of::<i32>()]
-                .iter()
-                .copied()
-                .filter(|pid| *pid > 1)
-            {
-                let Ok(process) = super::identity::observe(pid) else {
-                    continue;
-                };
-                if process.uid != uid || process.executable != expected {
-                    continue;
-                }
-                let Ok(endpoint) = Self::capture(pid, port) else {
-                    continue;
-                };
-                if found.is_some() {
-                    return Err(refused());
-                }
-                found = Some((pid, endpoint.fingerprint()?));
-            }
-            found.ok_or_else(refused)
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            let _ = (executable, port);
-            Err(CandidateError::new(
-                "unsupported_host",
-                "Native host endpoint discovery requires macOS.",
-            ))
-        }
-    }
-
-    /// Validate the reviewed executable again when the graph captures a PID.
-    pub fn require_executable(&self, executable: &Path) -> Result<(), CandidateError> {
-        #[cfg(target_os = "macos")]
-        {
-            if !executable.is_absolute()
-                || executable.canonicalize().map_err(|_| refused())? != self.process.executable
-            {
-                return Err(refused());
-            }
-            self.verify(0).map(|_| ())
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            let _ = executable;
-            Err(CandidateError::new(
-                "unsupported_host",
-                "Native host endpoint identity requires macOS.",
-            ))
-        }
-    }
-
     /// Review identity for an explicit dependency selection. Revalidates the native
     /// listener; a later capture must match before issuing any capability.
     pub fn fingerprint(&self) -> Result<String, CandidateError> {
@@ -327,7 +94,6 @@ impl HostEndpoint {
                 process,
                 listener,
                 port,
-                notification: None,
             };
             endpoint.verify(0)?;
             Ok(endpoint)
@@ -356,7 +122,7 @@ impl HostEndpoint {
         #[cfg(target_os = "macos")]
         {
             let deadline = std::time::Instant::now() + budget;
-            session.with_active(|| self.verify_admission(0))??;
+            self.verify(0)?;
             let guard = session.effect_guard();
             let stream = pending::connect(self.port, deadline, &guard)?;
             Ok(PendingConnection {
@@ -511,30 +277,21 @@ impl PendingConnection {
         }
         let stream = self.stream.as_ref().ok_or_else(refused)?;
         if stream.take_error().map_err(|_| refused())?.is_some() {
-            // A TCP error is not itself drift. Inspect only this authenticated
-            // failure path so listener death notifies, while ordinary resets do not.
-            self.guard
-                .with_active(|| self.endpoint.verify_admission(0))??;
             return Err(refused());
         }
         match stream.peer_addr() {
             Ok(_) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotConnected => {
-                self.guard
-                    .with_active(|| self.endpoint.verify_admission(0))??;
+                self.endpoint.verify(0)?;
                 return Ok(false);
             }
             Err(_) => return Err(refused()),
         }
         let peer_port = stream.local_addr().map_err(|_| refused())?.port();
-        if !self
-            .guard
-            .with_active(|| self.endpoint.verify_admission(peer_port))??
-        {
+        if !self.endpoint.verify(peer_port)? {
             return Ok(false);
         }
-        self.guard
-            .with_active(|| self.endpoint.verify_admission(0))??;
+        self.endpoint.verify(0)?;
         if std::time::Instant::now() >= self.deadline {
             return Err(timeout());
         }
@@ -559,27 +316,6 @@ fn inspect(pid: i32, port: u16, peer_port: u16) -> Result<NativeIdentity, Candid
     // SAFETY: the SDK-compiled C function receives a writable fixed-width repr(C)
     // record of the matching layout; it retains no pointer and enumerates at most 4096 FDs.
     if unsafe { hack_loopback_inspect(pid, port, peer_port, &mut result) } != 0 {
-        return Err(refused());
-    }
-    Ok(result)
-}
-
-#[cfg(target_os = "macos")]
-fn observe_listener(
-    pid: i32,
-    port: u16,
-    peer_port: Option<u16>,
-) -> Result<NativeIdentity, CandidateError> {
-    let mut result = NativeIdentity::default();
-    // SAFETY: the SDK-compiled C function receives a writable fixed-width repr(C)
-    // record of the matching layout; it retains no pointer and scans at most 4096 FDs.
-    let status = unsafe {
-        match peer_port {
-            Some(peer_port) => hack_loopback_observe_peer(pid, port, peer_port, &mut result),
-            None => hack_loopback_observe(pid, port, &mut result),
-        }
-    };
-    if status != 0 {
         return Err(refused());
     }
     Ok(result)

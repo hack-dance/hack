@@ -2,7 +2,7 @@ use super::*;
 use crate::provider::{host_endpoint::HostEndpoint, relay_loop::Limits, relay_owner::OwnerLimits};
 use std::{
     net::TcpListener,
-    os::unix::{net::UnixStream, process::ExitStatusExt},
+    os::unix::net::UnixStream,
     process::{Child, Command, Stdio},
     sync::atomic::{AtomicU64, Ordering},
 };
@@ -97,8 +97,6 @@ fn private_named_endpoint_retires_and_cleans_only_owned_publication() {
     assert!(absent(&paths(&root).socket).unwrap());
     assert!(absent(&paths(&root).receipt).unwrap());
     assert!(paths(&root).directory.join("operation.lock").is_file());
-    #[cfg(target_os = "macos")]
-    assert!(dead::CleanupWitness::acquire(&root.0, context(), &pin.receipt.process).is_err());
     pin.recover().unwrap();
 }
 #[test]
@@ -254,7 +252,7 @@ fn publication_child() {
         return;
     }
     let mut byte = [0];
-    let _ = std::io::stdin().read(&mut byte).unwrap();
+    std::io::stdin().read_exact(&mut byte).unwrap();
 }
 fn spawn_child(root: &Root, backlog: bool) -> OwnedChild {
     OwnedChild(
@@ -289,11 +287,8 @@ fn dead_publication_recovery_requires_unchanged_receipt_and_socket() {
         };
         assert_eq!(pin.receipt.process.pid, child.0.id() as i32);
         assert!(pin.recover().is_err());
-        #[cfg(target_os = "macos")]
-        assert!(pin.verify_dead().is_err());
         child.0.kill().unwrap();
-        let exit = child.0.wait().unwrap();
-        assert_eq!(exit.signal(), Some(libc::SIGKILL));
+        child.0.wait().unwrap();
         let mut replacement = None;
         if replace_socket {
             fs::remove_file(&pin.paths.socket).unwrap();
@@ -301,29 +296,10 @@ fn dead_publication_recovery_requires_unchanged_receipt_and_socket() {
             fs::set_permissions(&pin.paths.socket, fs::Permissions::from_mode(0o600)).unwrap();
         }
         if replace_socket {
-            #[cfg(target_os = "macos")]
-            assert!(pin.verify_dead().is_err());
             assert!(pin.recover().is_err());
             assert!(pin.paths.socket.exists());
             assert!(pin.paths.receipt.exists());
         } else {
-            #[cfg(target_os = "macos")]
-            {
-                let dead = pin.verify_dead();
-                if dead.is_err() {
-                    let receipt_unchanged = pin.verify_receipt().is_ok();
-                    let socket_unchanged = pin.verify_socket().is_ok();
-                    let process_absent = match identity::alive(pin.receipt.process.pid) {
-                        Ok(false) => "true",
-                        Ok(true) => "false",
-                        Err(_) => "unknown",
-                    };
-                    panic!(
-                        "Dead relay publication refused: receipt_unchanged={receipt_unchanged} socket_unchanged={socket_unchanged} process_absent={process_absent} child_signal={:?}",
-                        exit.signal()
-                    );
-                }
-            }
             pin.recover().unwrap();
             pin.recover().unwrap();
             assert!(absent(&pin.paths.socket).unwrap());
@@ -359,147 +335,4 @@ fn named_selection_verifies_an_explicit_empty_graph_without_retirement() {
         assert!(Instant::now() < deadline);
     }
     assert_eq!(owner.connections(), 0);
-}
-
-#[cfg(target_os = "macos")]
-#[test]
-fn dead_witness_requires_lock_dead_exact_process_and_preserves_partial_retirement() {
-    let root = Root::new();
-    let mut child = spawn_child(&root, false);
-    let deadline = Instant::now() + Duration::from_secs(3);
-    let pin = loop {
-        if let Ok(pin) = PinnedEndpoint::load(&root.0, context()) {
-            break pin;
-        }
-        assert!(Instant::now() < deadline);
-        assert!(child.0.try_wait().unwrap().is_none());
-        std::thread::sleep(Duration::from_millis(1));
-    };
-    assert!(dead::Witness::acquire(&root.0, context(), &pin.receipt.process).is_err());
-    child.0.kill().unwrap();
-    child.0.wait().unwrap();
-    let mut foreign = pin.receipt.process.clone();
-    foreign.start_micros += 1;
-    assert!(dead::Witness::acquire(&root.0, context(), &foreign).is_err());
-    let witness = dead::Witness::acquire(&root.0, context(), &pin.receipt.process).unwrap();
-    let selection = witness.selection();
-    assert!(dead::Witness::acquire(&root.0, context(), &pin.receipt.process).is_err());
-    assert!(dead::retire(&root.0, context(), &selection).is_err());
-    let selected_lock = witness.lock_identity().unwrap();
-    drop(witness);
-    // Simulate interruption after the first authorized unlink. Retrying retains
-    // the immutable original owner selection and finishes only that receipt.
-    let checks = std::cell::Cell::new(0);
-    assert!(
-        dead::retire_checked(&root.0, context(), &selection, Some(selected_lock), &|| {
-            checks.set(checks.get() + 1);
-            if checks.get() == 3 {
-                Err(refused())
-            } else {
-                Ok(())
-            }
-        },)
-        .is_err()
-    );
-    assert_eq!(checks.get(), 3);
-    assert!(!pin.paths.socket.exists());
-    assert!(pin.paths.receipt.exists());
-    assert!(dead::Witness::acquire(&root.0, context(), &pin.receipt.process).is_err());
-    dead::retire_checked(&root.0, context(), &selection, Some(selected_lock), &|| {
-        Ok(())
-    })
-    .unwrap();
-    dead::retire(&root.0, context(), &selection).unwrap();
-    assert!(!pin.paths.receipt.exists());
-    assert!(!pin.paths.socket.exists());
-}
-
-#[cfg(target_os = "macos")]
-#[test]
-fn dead_witness_rejects_replacement_listener_and_changed_lock() {
-    let root = Root::new();
-    let mut child = spawn_child(&root, false);
-    let deadline = Instant::now() + Duration::from_secs(3);
-    let pin = loop {
-        if let Ok(pin) = PinnedEndpoint::load(&root.0, context()) {
-            break pin;
-        }
-        assert!(Instant::now() < deadline);
-        std::thread::sleep(Duration::from_millis(1));
-    };
-    child.0.kill().unwrap();
-    child.0.wait().unwrap();
-    let witness = dead::Witness::acquire(&root.0, context(), &pin.receipt.process).unwrap();
-    let lock = pin.paths.directory.join("operation.lock");
-    fs::rename(&lock, pin.paths.directory.join("old.lock")).unwrap();
-    let replacement = state::Lock::acquire(&pin.paths.directory).unwrap();
-    assert!(witness.verify().is_err());
-    drop(replacement);
-    drop(witness);
-    fs::remove_file(&pin.paths.socket).unwrap();
-    let replacement = UnixListener::bind(&pin.paths.socket).unwrap();
-    fs::set_permissions(&pin.paths.socket, fs::Permissions::from_mode(0o600)).unwrap();
-    assert!(dead::Witness::acquire(&root.0, context(), &pin.receipt.process).is_err());
-    drop(replacement);
-}
-
-#[cfg(target_os = "macos")]
-#[test]
-fn normal_owner_exit_leaves_an_exact_absent_pair_under_its_operation_lock() {
-    let root = Root::new();
-    let mut child = spawn_child(&root, false);
-    let deadline = Instant::now() + Duration::from_secs(3);
-    let pin = loop {
-        if let Ok(pin) = PinnedEndpoint::load(&root.0, context()) {
-            break pin;
-        }
-        assert!(Instant::now() < deadline);
-        assert!(child.0.try_wait().unwrap().is_none());
-        std::thread::sleep(Duration::from_millis(1));
-    };
-    assert!(dead::CleanupWitness::acquire(&root.0, context(), &pin.receipt.process).is_err());
-    drop(child.0.stdin.take());
-    assert!(child.0.wait().unwrap().success());
-    assert!(absent(&pin.paths.receipt).unwrap());
-    assert!(absent(&pin.paths.socket).unwrap());
-    assert!(pin.paths.directory.join("operation.lock").is_file());
-
-    let witness = dead::CleanupWitness::acquire(&root.0, context(), &pin.receipt.process).unwrap();
-    assert!(matches!(&witness, dead::CleanupWitness::Absent(_)));
-    let selected = witness.selection_sha256().unwrap();
-    assert!(witness.verify().is_ok());
-    let mut wrong_process = pin.receipt.process.clone();
-    wrong_process.start_micros += 1;
-    drop(witness);
-    let changed = dead::CleanupWitness::acquire(&root.0, context(), &wrong_process).unwrap();
-    assert_ne!(changed.selection_sha256().unwrap(), selected);
-    drop(changed);
-
-    fs::write(&pin.paths.receipt, b"foreign").unwrap();
-    assert!(dead::CleanupWitness::acquire(&root.0, context(), &pin.receipt.process).is_err());
-    fs::remove_file(&pin.paths.receipt).unwrap();
-    let witness = dead::CleanupWitness::acquire(&root.0, context(), &pin.receipt.process).unwrap();
-    fs::write(&pin.paths.socket, b"foreign").unwrap();
-    assert!(witness.verify().is_err());
-    drop(witness);
-    fs::remove_file(&pin.paths.socket).unwrap();
-
-    let witness = dead::CleanupWitness::acquire(&root.0, context(), &pin.receipt.process).unwrap();
-    let lock = pin.paths.directory.join("operation.lock");
-    let linked = root.0.join("linked.lock");
-    fs::hard_link(&lock, &linked).unwrap();
-    assert!(witness.verify().is_err());
-    fs::remove_file(&linked).unwrap();
-    assert!(witness.verify().is_ok());
-    fs::rename(&lock, pin.paths.directory.join("old.lock")).unwrap();
-    let replacement = state::Lock::acquire(&pin.paths.directory).unwrap();
-    assert!(witness.verify().is_err());
-    drop(replacement);
-    drop(witness);
-
-    let witness = dead::CleanupWitness::acquire(&root.0, context(), &pin.receipt.process).unwrap();
-    fs::rename(&pin.paths.directory, root.0.join("old-control")).unwrap();
-    state::private_directory(&pin.paths.directory).unwrap();
-    let _replacement = state::Lock::acquire(&pin.paths.directory).unwrap();
-    assert!(witness.verify().is_err());
 }

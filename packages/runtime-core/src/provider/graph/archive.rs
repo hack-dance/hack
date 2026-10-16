@@ -112,7 +112,6 @@ fn read_confirmation(
 pub fn archive(candidate: &Candidate, run: &str) -> Result<Receipt, CandidateError> {
     let engine = Engine::connect_cleanup(candidate)?;
     let (receipt, root) = load(candidate, &engine, run)?;
-    initializer_cache::require_resolved(&receipt)?;
     if receipt.phase != "removed"
         || root.join("state.pending").exists()
         || root.join("state.pending").is_symlink()

@@ -84,8 +84,6 @@ export async function installMcpConfig(opts: {
   readonly targets: readonly McpTarget[];
   readonly scope: McpInstallScope;
   readonly projectRoot?: string;
-  /** User-scope root; defaults to `HOME`. */
-  readonly home?: string;
   readonly bundle?: McpBundleSelection;
 }): Promise<McpInstallResult[]> {
   const launch = opts.bundle
@@ -101,7 +99,6 @@ export async function installMcpConfig(opts: {
       target,
       scope: opts.scope,
       projectRoot: opts.projectRoot,
-      home: opts.home,
     });
     if (!resolved.ok) {
       results.push({
@@ -135,8 +132,6 @@ export async function checkMcpConfig(opts: {
   readonly targets: readonly McpTarget[];
   readonly scope: McpInstallScope;
   readonly projectRoot?: string;
-  /** User-scope root; defaults to `HOME`. */
-  readonly home?: string;
 }): Promise<McpCheckResult[]> {
   const results: McpCheckResult[] = [];
 
@@ -145,7 +140,6 @@ export async function checkMcpConfig(opts: {
       target,
       scope: opts.scope,
       projectRoot: opts.projectRoot,
-      home: opts.home,
     });
     if (!resolved.ok) {
       results.push({
@@ -217,8 +211,6 @@ export async function removeMcpConfig(opts: {
   readonly targets: readonly McpTarget[];
   readonly scope: McpInstallScope;
   readonly projectRoot?: string;
-  /** User-scope root; defaults to `HOME`. */
-  readonly home?: string;
 }): Promise<McpRemoveResult[]> {
   const results: McpRemoveResult[] = [];
 
@@ -227,7 +219,6 @@ export async function removeMcpConfig(opts: {
       target,
       scope: opts.scope,
       projectRoot: opts.projectRoot,
-      home: opts.home,
     });
     if (!resolved.ok) {
       results.push({
@@ -329,16 +320,9 @@ async function installJsonConfig(opts: {
   const mcpServersRaw = current.mcpServers;
   const mcpServers = isRecord(mcpServersRaw) ? { ...mcpServersRaw } : {};
   const previous = mcpServers[SERVER_NAME];
-  if (previous !== undefined) {
-    if (!isRecord(previous)) {
-      return { status: "error", message: "Invalid Hack MCP configuration" };
-    }
-    // Ordinary setup ensures an entry exists; only explicit bundle selection or
-    // removal may replace an existing launch. Match Codex's preservation contract.
-    if (!opts.entry.env?.HACK_MCP_COMMAND) {
-      return { status: "noop" };
-    }
+  if (opts.entry.env?.HACK_MCP_COMMAND && previous !== undefined) {
     if (
+      !isRecord(previous) ||
       previous.url !== undefined ||
       (previous.type !== undefined && previous.type !== "stdio") ||
       (previous.env !== undefined && !isRecord(previous.env))
@@ -480,7 +464,6 @@ function resolveConfigPath(opts: {
   readonly target: McpTarget;
   readonly scope: McpInstallScope;
   readonly projectRoot?: string;
-  readonly home?: string;
 }):
   | { readonly ok: true; readonly path: string }
   | { readonly ok: false; readonly message: string } {
@@ -491,7 +474,7 @@ function resolveConfigPath(opts: {
     };
   }
 
-  const home = opts.home === undefined ? resolveHomeDir() : opts.home.trim();
+  const home = resolveHomeDir();
   if (opts.scope === "user" && !home) {
     return {
       ok: false,

@@ -85,14 +85,8 @@ pub(super) fn verify(
                 std::mem::size_of::<VnodePath>() as i32,
             )
         };
-        // A listed unrelated vnode may close while the provider handles an RPC.
-        // EBADF proves this descriptor vanished; it is not evidence for a disk.
-        // Every expected disk must still be positively observed below.
-        let errno = (read <= 0)
-            .then(|| std::io::Error::last_os_error().raw_os_error())
-            .flatten();
-        if !vnode_record_available(read, std::mem::size_of::<VnodePath>(), errno)? {
-            continue;
+        if read as usize != std::mem::size_of::<VnodePath>() {
+            return Err(unavailable());
         }
         let info = unsafe { info.assume_init() };
         let bytes: [u8; 1024] = std::array::from_fn(|i| info.vnode.vip_path[i / 32][i % 32] as u8);
@@ -142,114 +136,9 @@ fn record_count(read: i32, capacity: usize, size: usize) -> Result<usize, Candid
     Ok(read as usize / size)
 }
 
-#[cfg(any(target_os = "macos", test))]
-fn vnode_record_available(
-    read: i32,
-    size: usize,
-    errno: Option<i32>,
-) -> Result<bool, CandidateError> {
-    if read <= 0 && errno == Some(libc::EBADF) {
-        return Ok(false);
-    }
-    if read <= 0 || read as usize != size {
-        return Err(unavailable());
-    }
-    Ok(true)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn only_vanished_descriptor_is_skipped_without_disk_evidence() {
-        assert!(!vnode_record_available(0, 128, Some(libc::EBADF)).unwrap());
-        assert!(!vnode_record_available(-1, 128, Some(libc::EBADF)).unwrap());
-        for errno in [
-            None,
-            Some(libc::EPERM),
-            Some(libc::ESRCH),
-            Some(libc::EINVAL),
-        ] {
-            assert!(vnode_record_available(0, 128, errno).is_err());
-        }
-        assert!(vnode_record_available(64, 128, Some(libc::EBADF)).is_err());
-        assert!(vnode_record_available(128, 128, None).unwrap());
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn closing_a_listed_vnode_returns_the_expected_race_errno() {
-        use std::io::{BufRead, BufReader, Write};
-        use std::process::{Command, Stdio};
-        struct Child(std::process::Child);
-        impl Drop for Child {
-            fn drop(&mut self) {
-                let _ = self.0.kill();
-                let _ = self.0.wait();
-            }
-        }
-        let mut child = Child(Command::new("/bin/sh").args(["-c", "exec 3</dev/null; printf 'ready\\n'; read -r first; exec 3<&-; printf 'closed\\n'; read -r last"]).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap());
-        let mut output = BufReader::new(child.0.stdout.take().unwrap());
-        let mut line = String::new();
-        output.read_line(&mut line).unwrap();
-        assert_eq!(line, "ready\n");
-        let pid = child.0.id() as i32;
-        let mut entries = vec![
-            libc::proc_fdinfo {
-                proc_fd: 0,
-                proc_fdtype: 0
-            };
-            4096
-        ];
-        // SAFETY: initialized writable native-record buffer and owned child PID.
-        let read = unsafe {
-            libc::proc_pidinfo(
-                pid,
-                libc::PROC_PIDLISTFDS,
-                0,
-                entries.as_mut_ptr().cast(),
-                std::mem::size_of_val(entries.as_slice()) as i32,
-            )
-        };
-        let count = record_count(
-            read,
-            std::mem::size_of_val(entries.as_slice()),
-            std::mem::size_of::<libc::proc_fdinfo>(),
-        )
-        .unwrap();
-        assert!(
-            entries[..count]
-                .iter()
-                .any(|entry| entry.proc_fd == 3
-                    && entry.proc_fdtype == libc::PROX_FDTYPE_VNODE as u32)
-        );
-        child
-            .0
-            .stdin
-            .as_mut()
-            .unwrap()
-            .write_all(b"close\n")
-            .unwrap();
-        line.clear();
-        output.read_line(&mut line).unwrap();
-        assert_eq!(line, "closed\n");
-        let mut bytes = [0_u64; 256];
-        // SAFETY: aligned oversized writable buffer; owned child acknowledged FD closure.
-        let read = unsafe {
-            libc::proc_pidfdinfo(
-                pid,
-                3,
-                2,
-                bytes.as_mut_ptr().cast(),
-                std::mem::size_of_val(&bytes) as i32,
-            )
-        };
-        let errno = std::io::Error::last_os_error().raw_os_error();
-        assert!(read <= 0);
-        assert_eq!(errno, Some(libc::EBADF));
-        assert!(!vnode_record_available(read, 128, errno).unwrap());
-    }
-
     #[test]
     fn incomplete_or_full_descriptor_buffers_are_refused() {
         for read in [-1, 0, 7, 32, 40] {

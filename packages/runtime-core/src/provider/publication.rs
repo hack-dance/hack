@@ -475,25 +475,6 @@ pub fn unpublish(c: &Candidate, run: &str, reservation: &str) -> Result<(), Cand
     release(c, &owner.token, Some((run, reservation)))
 }
 
-/// Caller holds the provider lease. This is preflight only; launch rechecks all
-/// claims atomically, including a collision appearing after retained cleanup.
-pub(super) fn check_hostname_change(
-    candidate: &Candidate,
-    owner: &str,
-    run: &str,
-    hostnames: &std::collections::BTreeSet<String>,
-) -> Result<(), CandidateError> {
-    if load(candidate, owner)?.values().any(|entry| {
-        entry.run != run && entry.hostnames.iter().any(|name| hostnames.contains(name))
-    }) {
-        return Err(CandidateError::new(
-            "hostname_claim_conflict",
-            "A reviewed hostname is already owned by another graph; no claim was changed.",
-        ));
-    }
-    Ok(())
-}
-
 /// Durable claims only: consumers must independently verify live publication readiness.
 pub fn inspect_claims(c: &Candidate) -> Result<serde_json::Value, CandidateError> {
     let _lock = state::Lock::acquire(&c.state_root.join("run/smolvm"))?;
@@ -509,16 +490,6 @@ pub fn inspect_claims(c: &Candidate) -> Result<serde_json::Value, CandidateError
         })
         .collect::<Vec<_>>();
     Ok(serde_json::json!({"scope":"durable-ownership-only","claims":claims}))
-}
-
-/// Caller holds the provider operation lease. A prior-boot HTTPS archive may
-/// proceed only when no graph (including a sibling) retains publication.
-#[cfg(target_os = "macos")]
-pub(crate) fn require_no_claims_locked(c: &Candidate, owner: &str) -> Result<(), CandidateError> {
-    if !load(c, owner)?.is_empty() {
-        return Err(error());
-    }
-    Ok(())
 }
 
 fn observe_publication(e: &Entry) -> Result<(), CandidateError> {
@@ -786,26 +757,6 @@ mod tests {
         e.process.executable = directory(&e).join("publisher");
         (candidate, e)
     }
-    #[test]
-    fn hostname_transition_preflight_keeps_foreign_and_pending_claims_intact() {
-        let (candidate, mut entry) = fixture();
-        entry.unix = true;
-        entry.port = 0;
-        entry.hostnames = vec!["taken.v5.hack.gy".into()];
-        let claims = BTreeMap::from([(entry.reservation.clone(), entry.clone())]);
-        save(&candidate, &claims).unwrap();
-        let selected = std::collections::BTreeSet::from(["taken.v5.hack.gy".to_owned()]);
-        check_hostname_change(&candidate, &entry.owner, &entry.run, &selected).unwrap();
-        assert!(
-            check_hostname_change(&candidate, &entry.owner, &"f".repeat(32), &selected).is_err()
-        );
-        assert!(load(&candidate, &entry.owner).unwrap() == claims);
-        state::write(&root(&candidate).join("state.pending"), &claims).unwrap();
-        assert!(check_hostname_change(&candidate, &entry.owner, &entry.run, &selected).is_err());
-        assert!(root(&candidate).join("state.pending").exists());
-        fs::remove_dir_all(&candidate.checkout).unwrap();
-    }
-
     #[test]
     fn absent_prelaunch_process_retires_intent_but_unknown_directory_does_not() {
         let (c, mut e) = fixture();

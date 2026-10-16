@@ -15,7 +15,6 @@ fn service() -> Service {
         bindings: BTreeMap::from([(
             "default".into(),
             Binding {
-                endpoint_generation: None,
                 aliases: vec![],
                 slot: 1,
                 port: 25252,
@@ -33,7 +32,6 @@ fn exact_aliases_share_a_port_without_sharing_a_listener() {
         (
             "one".into(),
             Binding {
-                endpoint_generation: None,
                 slot: 0,
                 port: 443,
                 aliases: vec!["one.example".into()],
@@ -43,7 +41,6 @@ fn exact_aliases_share_a_port_without_sharing_a_listener() {
         (
             "two".into(),
             Binding {
-                endpoint_generation: None,
                 slot: 1,
                 port: 443,
                 aliases: vec!["two.example".into()],
@@ -106,41 +103,11 @@ fn receipt() -> Receipt {
 }
 fn startup() -> Startup {
     Startup {
-        control_only: false,
         guest_root: None,
         control_root: PathBuf::from("/private/tmp/owned-relay"),
         artifact: "b".repeat(64),
         services: BTreeMap::from([("web".into(), service())]),
     }
-}
-#[test]
-fn completed_service_requires_declared_readiness_and_no_historical_helper() {
-    let mut receipt = receipt();
-    receipt.readiness.insert("web".into(), Condition::Completed);
-    let mut value = startup();
-    let selected = value.services.get_mut("web").unwrap();
-    selected.phase = Phase::Completed;
-    selected.started_at = Some("2026-09-27T03:55:59Z".into());
-    assert!(value.valid(&receipt));
-    for condition in [Condition::Started, Condition::Healthy] {
-        receipt.readiness.insert("web".into(), condition);
-        assert!(!value.valid(&receipt));
-    }
-    receipt.readiness.insert("web".into(), Condition::Completed);
-    for phase in [Phase::Provisioned, Phase::Released] {
-        value.services.get_mut("web").unwrap().phase = phase;
-        assert!(!value.valid(&receipt));
-    }
-    let selected = value.services.get_mut("web").unwrap();
-    selected.phase = Phase::Completed;
-    selected.bindings.get_mut("default").unwrap().process =
-        Some(crate::provider::lifecycle::RelayProcess {
-            pid: 42,
-            start: 123,
-            address: "127.0.0.1".parse().unwrap(),
-            port: 25252,
-        });
-    assert!(!value.valid(&receipt));
 }
 #[test]
 fn gate_wraps_environment_launch_and_health_without_changing_identity_or_stdin() {
@@ -345,7 +312,6 @@ fn multiple_bindings_hold_service_until_every_process_is_provisioned() {
     service.bindings.insert(
         "search".into(),
         Binding {
-            endpoint_generation: None,
             aliases: vec![],
             slot: 2,
             port: 25253,
@@ -419,7 +385,6 @@ fn legacy_or_empty_binding_receipts_are_not_silently_adopted() {
     value.services.get_mut("web").unwrap().bindings.insert(
         "bad/name".into(),
         Binding {
-            endpoint_generation: None,
             aliases: vec![],
             slot: 1,
             port: 25252,
@@ -463,103 +428,4 @@ fn named_routes_refuse_resolver_mount_shadowing_without_changing_aliasless_polic
     config["HostConfig"]["ExtraHosts"] = json!(["one.example:host-gateway"]);
     config["HostConfig"]["Mounts"] = json!([{"Target":"/etc/hosts-backup"}]);
     attach(&mut config, &named, "/storage/gate", "/storage/helper").unwrap();
-}
-
-#[test]
-fn control_only_receipt_is_explicit_and_cannot_claim_guest_artifacts() {
-    let mut value = startup();
-    value.services.clear();
-    assert!(!value.valid(&receipt()));
-    value.control_only = true;
-    assert!(value.valid(&receipt()));
-    let serialized = serde_json::to_value(&value).unwrap();
-    assert!(
-        serde_json::from_value::<Startup>(serialized.clone())
-            .unwrap()
-            .valid(&receipt())
-    );
-    let mut legacy = serialized;
-    legacy.as_object_mut().unwrap().remove("control_only");
-    assert!(
-        !serde_json::from_value::<Startup>(legacy)
-            .unwrap()
-            .valid(&receipt())
-    );
-    value.guest_root = Some((1, 2));
-    assert!(!value.valid(&receipt()));
-    value.guest_root = None;
-    value.services.insert("web".into(), service());
-    assert!(!value.valid(&receipt()));
-}
-
-#[test]
-fn shared_listener_receipt_retains_72_grants_on_six_exact_transports() {
-    let mut receipt = receipt();
-    let resource = receipt.resources["container:web"].clone();
-    let mut value = startup();
-    value.services.clear();
-    for index in 0..12 {
-        let name = format!("service-{index}");
-        receipt
-            .resources
-            .insert(format!("container:{name}"), resource.clone());
-        let mut selected = service();
-        selected.bindings = (0..6)
-            .map(|slot| {
-                (
-                    format!("binding-{slot}"),
-                    Binding {
-                        slot,
-                        endpoint_generation: Some(format!("{slot:064x}")),
-                        port: 9000 + u16::from(slot),
-                        aliases: vec![format!("dependency-{slot}.example")],
-                        process: None,
-                    },
-                )
-            })
-            .collect();
-        value.services.insert(name, selected);
-    }
-    let retained: Startup = serde_json::from_slice(&serde_json::to_vec(&value).unwrap()).unwrap();
-    assert!(retained.valid(&receipt));
-    assert_eq!(
-        retained
-            .services
-            .values()
-            .map(|s| s.bindings.len())
-            .sum::<usize>(),
-        72
-    );
-    for changed in [None, Some("f".repeat(64)), Some("not-a-generation".into())] {
-        let mut bad = retained.clone();
-        bad.services
-            .get_mut("service-11")
-            .unwrap()
-            .bindings
-            .get_mut("binding-0")
-            .unwrap()
-            .endpoint_generation = changed;
-        assert!(!bad.valid(&receipt));
-    }
-    let mut collision = retained.clone();
-    collision
-        .services
-        .get_mut("service-11")
-        .unwrap()
-        .bindings
-        .get_mut("binding-1")
-        .unwrap()
-        .slot = 0;
-    assert!(!collision.valid(&receipt));
-    let mut excessive = retained;
-    for index in 12..22 {
-        let name = format!("service-{index}");
-        receipt
-            .resources
-            .insert(format!("container:{name}"), resource.clone());
-        excessive
-            .services
-            .insert(name, excessive.services["service-0"].clone());
-    }
-    assert!(!excessive.valid(&receipt));
 }

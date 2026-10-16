@@ -7,7 +7,7 @@ terminal).
 
 ## Core commands
 
-- `hack init` — generate `.hack/` (compose + config); `--with claude|codex` also hands off to
+- `hack init` — generate `.hack/` (compose + config); `--with claude|codex|both` also hands off to
   agent-assisted onboarding
 - `hack up` / `hack down` / `hack restart`
 - `hack open` — open/print the project URL
@@ -30,81 +30,15 @@ and errors expand with wrapped detail and recovery guidance. `hack doctor --json
 fully detailed automation surface. Generic macOS resolver setup is shown only when those resolver
 checks need attention.
 
-On macOS, a healthy terminal connection does not establish browser connectivity.
-Use `hack doctor --browser-url https://your-service.hack.local --browser-result fails`
-to compare a manually observed browser failure with a verified CLI HTTPS request.
-See [macOS browser connectivity](guides/macos-browser-network.md) for supported
-observations, Local Network permission guidance and the required browser recheck.
-
-Project names in the registry and `--project`/MCP selectors use the same lowercase,
-hyphenated key: for example, `my_app` selects `my-app`. Existing registry spellings
-remain readable aliases; a later registration of that checkout canonicalizes the
-name while preserving its project ID. This does not rename Compose projects,
-volumes, hosts or the name in project configuration.
-
-Because a `--project` argument is sometimes a pasted value, Hack never prints the
-argument or a slug derived from it. A value containing `=` or other characters
-outside a project name is refused with fixed text. An alias spelling that matches
-no registered project is not named either: errors say "Unknown project", and
-`hack projects --json`/`hack status --json` report `"filter": null` with
-`"filter_redacted": true` (and filter without the daemon).
-
-If multiple registrations share a canonical name, selection refuses all aliases,
-including an exact spelling. Inspect `hack projects` and use `--path` to address a
-specific checkout before renaming or pruning the conflicting registration. A
-missing checkout does not authorize another repository to take over its identity;
-automatic relocation requires proof that both checkouts belong to the same Git
-worktree family. Independent clones remain separate even when their remotes match.
-Prune also refuses colliding aliases without a project filter, and checks runtime
-working directories against registered checkout/worktree paths before treating a
-runtime name as an alias. Inspect the conflicting entries before retrying cleanup.
-
-Lookup, registration updates and removal also refuse a selected project ID that
-belongs to multiple entries, even if one checkout is missing. Removal checks every
-requested ID under the registry lock before deleting any entry; an ambiguous ID
-leaves the entire batch unchanged. Creating a registration also refuses an ID
-collision. Unrelated duplicate IDs remain visible and do not block operations on
-unique IDs. Optional registration touches defer on ambiguity so they do not break
-read commands. Updates persist newly observed last-seen or configured host
-metadata even when no existing field changes.
-
 Project resolution for `exec`, `run`, `ps`, `logs`, `open` and host env commands
 does not refresh the global project registry. A held registration lock therefore
 does not block their resolution or require a retry just to update last-seen metadata.
 Use a checkout/path directly, or an existing registry entry with `--project`;
 `hack init`, project lifecycle registration and `hack projects` discovery maintain
 registrations. Optional `hack projects` discovery coalesces unchanged observations
-for one minute and defers refresh when the registry lock is busy. Stale optional
-upserts check before Git and configuration discovery, then again before staging
-an owner, so an observed busy lock avoids work that would be discarded. These
-observations never grant ownership: an apparently absent lock still requires
-atomic acquisition. New or changed checkouts are recorded when the lock is available.
-A registry touch reuses its configuration and canonical checkout paths for
-freshness and any update. A later configuration change is picked up by the next
-invocation, even within the one-minute freshness interval. Updates still reread
-the registry under the lock so they preserve concurrent registrations. An unchanged
-primary checkout refresh skips Git discovery only after that locked reread confirms
-its paths, configuration, and unique registration. It still removes missing sibling
-records; changed or ambiguous registrations use the normal Git checks.
-Registration combines repository identity and branch discovery in one Git call for
-ordinary committed checkouts; repositories without commits and unusual ref output
-retain separate branch discovery. Linked worktrees still verify their shared
-repository identity before joining an existing registration.
-Explicit registry mutations wait up to ten seconds with jittered retries, reread
-the registry under the lock, and publish complete updates by atomic rename.
-A slow live writer is never evicted
-because its lock is old. A confirmed dead owner can be recovered; an occupied or
-reused PID is treated as live, and uncertain ownership is preserved.
-
-Recovery is serialized separately so competing cleanup attempts cannot delete a
-new writer's lock. If a recovery process itself crashes, its recovery guard may
-need offline inspection after all writers have stopped; age alone never authorizes
-removing it. Interrupted writes may leave uniquely named `.tmp` or `.owner` files
-beside `projects.json`; these are never used as registry input. Preserve the current
-registry and inspect ownership before removing abandoned files. This concurrency
-guarantee applies to cooperating v5 writers. Older v4 writers sharing the same
-registry still use their older lock protocol; use separate `HACK_HOME` directories
-when running the two versions concurrently.
+for one minute and defers refresh when the registry lock is busy. New or changed
+checkouts are recorded when the lock is available. Explicit registration and other
+registry mutations retain their locking and failure behavior.
 
 Run `hack help` for the full command list, or `hack help --all` to include hidden unsupported
 experimental commands. Every command and flag on this page is also in the generated
@@ -123,14 +57,12 @@ hidden from default `hack --help` (see `hack help --all`) and print a warning wh
 - `hack node`
 - `hack dispatch`
 
-Historical remote guides are excluded from the supported documentation.
+See [Beta workflows](beta.md) for guides on this surface.
 
 ## Agent/scripted ergonomics
 
 - `--json` on `hack up`/`down`/`restart`/`doctor` emits a `{ok, data | error: {code, message}}`
   envelope with stable `E_*` error codes. `--json` on `hack up` implies `--detach`.
-- Known Hack errors and closed native runtime refusals print their message only, never a stack
-  trace; set `HACK_DEBUG=1` to add the stack. Unexpected exceptions always print their stack.
 - `--no-interactive` (or `HACK_NO_INTERACTIVE=1`) is a global flag: commands never prompt — they
   apply documented defaults or fail fast with `E_INTERACTIVE_REQUIRED`.
 - `NO_COLOR` (or `HACK_NO_COLOR`) disables colored/decorated output.
@@ -140,9 +72,7 @@ the Hack CLI version that generated them. Plain `hack agent prime` prints curren
 an integration scan. Use `hack agent prime --check` for an explicit project/global inventory or a
 targeted `hack setup ... --check` when diagnosing drift. Missing optional integrations do not
 require installation. Repair only affected targets within the authorized scope; use
-`hack setup sync --all-scopes` for an explicitly requested full refresh. Sync refreshes only installed
-Hack-owned integrations; add `--install-missing` to create missing ones (see
-[integration setup](integrations.md#refresh-only-hack-setup-sync)). Read updated guidance after
+`hack setup sync --all-scopes` for an explicitly requested full refresh. Read updated guidance after
 repair; restart only if the client cannot reload changed hooks or skills.
 Ordinary commands, `hack update`, and `hack doctor --fix` never render, repair, remove, or otherwise
 mutate integration files. CLI upgrades do not trigger integration updates.
@@ -156,12 +86,9 @@ hack up --detach
 hack open
 ```
 
-Agent-assisted alternative for a new repo: `hack init --with claude|codex`. For an existing
+Agent-assisted alternative for a new repo: `hack init --with claude|codex|both`. For an existing
 project without `.hack/`, use `hack agent onboard`. See
 [Agent-first setup](guides/agent-first-setup.md).
-
-`--with both` has been removed. Choose `--with claude` or `--with codex`;
-a second-agent review is a separate, explicitly requested workflow.
 
 ### Browser URL preference
 
@@ -188,7 +115,7 @@ route for it.
 - Container-to-container traffic: use Compose DNS rather than routing back through Caddy.
 
 Service-scoped runtime changes do not run project-wide lifecycle hooks and do not start Compose
-dependencies implicitly, except declared shared-cache installers needed by the selected services:
+dependencies implicitly:
 
 ```bash
 hack up api worker --env qa --detach
@@ -209,36 +136,12 @@ Hack scans `.npmrc`, `.yarnrc.yml`, and `bunfig.toml` for `${VAR}` credential re
 with `E_ENV_KEY_MISSING` when the selected Hack overlay cannot supply them. Values are never
 printed.
 
-Detached Compose startup has a 90-second budget by default. For a slow first
-install or container launch, set the host CLI environment explicitly:
-
-```sh
-HACK_COMPOSE_STARTUP_TIMEOUT_MS=300000 hack up --detach
-HACK_COMPOSE_STARTUP_TIMEOUT_MS=300000 hack restart
-```
-
-The value must be an integer from 1,000 to 3,600,000 milliseconds; detached startup
-and restart reject invalid values before project preparation or teardown. Full and service-scoped
-startup/restart use the same setting. The startup phase notice and
-`E_STARTUP_TIMEOUT` message report the effective budget. It covers each detached
-Compose invocation, including image/container launch and dependency waiting, not
-lifecycle hooks or an end-to-end application readiness deadline. A restart repair
-attempt has its own invocation budget and is reported separately. Foreground
-`up` stays unbounded; `down` retains its separate 90-second limit.
-
-On timeout, Hack terminates the owned Compose process group. Containers may still
-be running: inspect `hack ps` and `hack logs` before retrying. Raising the budget
-does not fix a failed installer or prove readiness. Set this on the host invocation,
-not merely in a container's environment.
-
 To share dependency data only across worktrees with the same lockfile/runtime fingerprint, label
 the bootstrap service with a logical top-level Compose volume:
 
 ```yaml
 services:
   install-workspace:
-    image: oven/bun:1.3.9
-    platform: linux/arm64 # choose the actual installer target platform
     command: bun install --frozen-lockfile
     labels:
       hack.dependencies.bootstrap: "true"
@@ -249,27 +152,9 @@ services:
       - workspace-dependencies:/app/node_modules
 ```
 
-Hack generates a content-addressed volume name from the declared files and installer
-image, platform and build configuration. Compatible branch instances select the same
-volume; changing these inputs selects a new one. Specify the installer's Compose
-`platform` explicitly, or set `DOCKER_DEFAULT_PLATFORM`. When platform or runtime
-configuration is unresolved, Hack warns and leaves the original Compose volume
-configuration in effect instead of guessing the remote Docker host's architecture.
-Explicit volume names or external
-volumes can still be shared by Compose; remove that sharing yourself if isolation
-is required. No service name such as `deps` is special.
-
-This identity covers declared configuration, not mutable image-tag contents, build
-context contents or later Compose overrides. Pin installer images by digest and
-include build/runtime source inputs in `hack.dependencies.runtime-files` where
-needed. Installers still own serialization, successful-completion markers and
-recovery of partial output. Sharing a volume does not provide those guarantees.
-The expanded fingerprint selects new volumes on upgrade; old caches are retained.
-
-For explicitly immutable initialization, the opt-in
-[`locked-v1` installer protocol](guides/dependency-cache-protocol.md) adds writer
-exclusion, verified readiness and fresh-generation recovery. It requires a strict
-producer/consumer layout; ordinary cache labels do not enable it automatically.
+Hack generates a content-addressed volume name from the declared inputs. Branch instances adopt an
+existing compatible volume automatically; a lockfile or runtime change selects a new volume. No
+service name such as `deps` is special.
 
 `hack run` uses the same dependency-volume override as `up` and `restart`, including
 in linked worktrees. It skips dependency startup only when the target is running
@@ -283,17 +168,6 @@ lockfile/runtime input, use `hack restart` to move the long-running service to t
 new cache; a successful one-off `run` does not remount that existing service.
 Unlabelled services retain their existing behavior. Old cache volumes are retained;
 this change does not prune caches or application data.
-
-Before a scoped `up`, `restart`, or a consumer `run`, Hack executes each needed cache installer
-with the same Compose files and selected service environment, using `run --rm --no-deps`.
-Installers must be idempotent and coordinate concurrent writers (for example, a lock and a ready
-marker inside the volume). They run even for warm caches so an empty or interrupted cache cannot
-be mistaken for a ready one. No project lifecycle hook or unrelated dependency is started.
-A failed installer leaves existing consumer containers untouched; JSON lifecycle commands return
-`E_DEPENDENCY_BOOTSTRAP_FAILED`. Each initializer in detached scoped `up` and targeted `restart` uses the configured
-`HACK_COMPOSE_STARTUP_TIMEOUT_MS` budget and reports `E_STARTUP_TIMEOUT` on expiry.
-The subsequent Compose launch has its own equal budget. Consumer `run` and foreground
-scoped `up` retain a separate ten-minute initializer deadline.
 
 ## Branch instances and linked worktrees
 
@@ -327,28 +201,6 @@ Opt out:
 - set `worktree.auto_branch` to `false` in `.hack/hack.config.json` to target the base instance.
 
 The primary checkout is unchanged: no `--branch` means the base instance.
-
-### Local configuration in linked worktrees
-
-Linked worktrees read eligible primary-checkout local env overrides and managed
-extra-host aliases at command time. Later primary changes are visible without
-copying files. Tracked project config, generated overrides, runtime state and other
-ignored files stay checkout-local. Set `worktree.inherit_local` to `false` in the
-worktree's `hack.config.json` to disable inheritance. Slim/Codex execution mode and
-CI (`CI=1` or `CI=true`) disable this inheritance automatically.
-
-For Compose aliases, explicit local `internal.extra_hosts` takes precedence over
-inherited dynamic aliases, and local dynamic aliases take precedence over both.
-`hack internal extra-hosts unset <host>` in a linked checkout hides an inherited
-alias without changing the primary. `set` replaces that local removal with an
-override. `list --origins` shows each effective dynamic alias and its source file;
-plain `list` retains its hostname-to-target JSON format. Successful `up.before`
-hooks can create or remove aliases for the same `up` or `restart` operation.
-
-Missing primary configuration is optional. Invalid inherited alias data or
-redirected inherited files fail explicitly instead of silently changing routing.
-These commands manage the Compose path; the experimental graph runner's direct
-Compose-input handling is a separate qualification boundary.
 
 ### Disposable cache volumes
 
@@ -400,11 +252,8 @@ deliberately marks that exact Compose volume disposable. Hack deliberately does 
 ### Runtime host metadata
 
 Containers started by `hack up`, `hack restart`, and `hack run` receive the effective instance and
-public-route metadata. This applies to `.hack/docker-compose.yml` projects and to authored
-`.hack/hack.project.json` projects, on the default Compose backend and on the native backend
-(`HACK_RUNTIME_BACKEND=native`). It keeps server-generated links, OAuth callbacks, webhooks, and
-other browser-facing URLs isolated when the same project runs in multiple worktrees. Every path
-emits the same keys and document shape from the same shared builder.
+public-route metadata. This keeps server-generated links, OAuth callbacks, webhooks, and other
+browser-facing URLs isolated when the same project runs in multiple worktrees.
 
 | Variable | Value |
 | --- | --- |
@@ -446,53 +295,10 @@ over generated metadata for backward compatibility. Existing containers receive 
 their next `hack up` or `hack restart`; `hack exec` observes the values already stored in the running
 container.
 
-With the Compose backend, Hack materializes this contract in generated, machine-local Compose
-overrides. Do not edit or commit `.hack/.internal/compose.runtime.override.yml` or
+Hack materializes this contract in generated, machine-local Compose overrides. Do not edit or
+commit `.hack/.internal/compose.runtime.override.yml` or
 `.hack/.branch/compose.<branch>.runtime.override.yml`; runtime commands refresh them and Hack's
 managed `.hack/.gitignore` covers them.
-
-With the native backend, foreground `hack up` and `hack restart` add the same values to the
-normalized Compose input that native review checks. They are public container environment, not
-private managed values, so `hack exec` and native `hack run` see them too. The service URLs come
-from the reviewed route labels, and startup refuses before serving if they differ from the reviewed
-route plan. When a native HTTPS frontend is selected with a port other than 443
-(`HACK_NATIVE_HTTPS_PORT`), `HACK_DEV_URL`, `HACK_ALIAS_URL` and every service URL include that
-port; host variables never do. Native-specific limits:
-
-- A graph whose data was retained by an earlier release is restored exactly as it was admitted and
-  does not gain these variables. It receives them after it is next started without retained data.
-- These values are part of the retained graph's reviewed input. A retaining restart that changes
-  only route hostnames (for example a domain migration) remains supported, because the generated
-  metadata keys are excluded from the hostname-change fingerprint. Values you declare for these
-  keys in `.hack/docker-compose.yml` still count. Changing the native HTTPS port, or selecting or
-  removing the native HTTPS frontend when its port is not 443, changes the metadata without a
-  hostname change, so the retained graph refuses to start. Start it with its original HTTPS
-  frontend selection and port.
-
-For an authored `.hack/hack.project.json` project, the configuration compiler carries the values as
-public `runtime` bindings (see the [compiler reference](reference/native-config-compiler.md)), so
-they are reviewed with the rest of the plan and are never managed or secret values. The precedence
-matches Compose-file projects: a managed project env value or any authored `environment` directive
-for one of these keys (literal, default, reference, endpoint or `unset`) wins over the generated
-value. The hosts come from the compiler's routing resolution:
-
-- `HACK_DEV_HOST` is the resolved project origin's host (for example
-  `feature-x.demo.hack.local`). Without a routing resolution it is the compiler's generated
-  `<name>.hack.local`, prefixed with the selected branch when there is one.
-- `HACK_ALIAS_HOST` is the host of the alias named by `routes.oauth_alias`, when set.
-- Service URLs list each `routes.http` route for that service in route-name order, the route origin
-  before its aliases, so `HACK_SERVICE_URL` is the development origin.
-- `HACK_BRANCH` is the routing resolution's branch, or the selected `--branch` instance when no
-  routing resolution exists.
-- On the Compose backend `HACK_COMPOSE_PROJECT` is the instance's actual Compose project
-  (`hack-nc-...`), and URLs are portless. On the native backend it is `<name>` or
-  `<name>--<branch>`, as for native image projects, and URLs carry a selected non-443
-  `HACK_NATIVE_HTTPS_PORT`. Authored native graphs are not routed, so they have no alias and no
-  service URLs; the port appears only in `HACK_DEV_URL`.
-
-Authored native `hack exec` sees the values stored in the running container, and native one-off
-`hack run` uses the admitted service environment. A graph started before this release gains them
-on its next `hack up` or `hack restart`.
 
 Linked worktrees also inherit the project secret key automatically from the primary checkout
 through the shared git common dir, so you don't need to copy `.hack.secret.key` by hand. Set

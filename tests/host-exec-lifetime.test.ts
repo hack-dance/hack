@@ -9,7 +9,6 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
-import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
 const fixtures: string[] = [];
 const wrappers: ReturnType<typeof Bun.spawn>[] = [];
@@ -225,16 +224,12 @@ function hostCommand({
   ];
 }
 
-/** A private CLI env: fixture HOME and HACK_HOME, no runner `HACK_*`/Docker state. */
 function fixtureEnv(root: string): Record<string, string> {
-  return privateCliEnv({
-    root,
-    env: {
-      PATH: process.env.PATH ?? "/usr/bin:/bin",
-      HACK_HOME: resolve(root, "hack-home"),
-      HACK_NO_INTERACTIVE: "1",
-    },
-  });
+  return {
+    PATH: process.env.PATH ?? "/usr/bin:/bin",
+    HACK_HOME: resolve(root, "hack-home"),
+    HACK_NO_INTERACTIVE: "1",
+  };
 }
 
 async function createFixture(opts: {

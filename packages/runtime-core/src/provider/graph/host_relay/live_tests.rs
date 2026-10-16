@@ -179,7 +179,6 @@ fn owned_graph_registration_live() -> Result<(), CandidateError> {
     let project = std::env::var("HACK_RELAY_GRAPH_PROJECT").expect("dedicated project");
     assert!(hex(&run_id, 32));
     let options = || PlanOptions {
-        branch: None,
         project: Path::new(&project),
         compose_file: Path::new("compose.json"),
         profiles: &[],
@@ -215,10 +214,6 @@ fn owned_graph_registration_live() -> Result<(), CandidateError> {
         )]);
         let public = BTreeMap::new();
         let run_options = RunOptions {
-            live_source: false,
-            shared_source: false,
-            release_initializer_cache: std::collections::BTreeSet::new(),
-            routing_enrolled: false,
             project: options(),
             expected_plan: &review.plan_id,
             source_revision: None,
@@ -397,10 +392,6 @@ fn owned_graph_registration_live() -> Result<(), CandidateError> {
             let replay = run_with_environment(
                 &candidate,
                 RunOptions {
-                    live_source: false,
-                    shared_source: false,
-                    release_initializer_cache: std::collections::BTreeSet::new(),
-                    routing_enrolled: false,
                     project: options(),
                     expected_plan: &review.plan_id,
                     source_revision: None,
@@ -464,10 +455,6 @@ fn owned_graph_registration_live() -> Result<(), CandidateError> {
             let restored = restore_with_environment(
                 &candidate,
                 RunOptions {
-                    live_source: false,
-                    shared_source: false,
-                    release_initializer_cache: std::collections::BTreeSet::new(),
-                    routing_enrolled: false,
                     project: options(),
                     expected_plan: &review.plan_id,
                     source_revision: None,

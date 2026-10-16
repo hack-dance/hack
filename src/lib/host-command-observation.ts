@@ -141,7 +141,7 @@ export async function runObservedHostCommand(opts: {
   };
   return await run(opts.command, {
     ...opts.runOptions,
-    onSpawn: async ({ pid, ownsProcessGroup, processGroupId }) => {
+    onSpawn: async ({ pid, ownsProcessGroup }) => {
       try {
         const startedAt = new Date().toISOString();
         const snapshot = await readObservedProcesses([process.pid, pid]);
@@ -161,7 +161,7 @@ export async function runObservedHostCommand(opts: {
             birth: snapshot?.find((row) => row.pid === pid)?.birth ?? null,
           },
           ownsProcessGroup,
-          processGroupId: ownsProcessGroup ? (processGroupId ?? pid) : null,
+          processGroupId: ownsProcessGroup ? pid : null,
           lifetime: opts.lifetime,
           timeoutMs: opts.runOptions.timeoutMs ?? null,
           startedAt,

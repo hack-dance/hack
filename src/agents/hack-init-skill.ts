@@ -1,18 +1,18 @@
-import { resolve } from "node:path";
+import { rm } from "node:fs/promises";
+import { dirname, resolve } from "node:path";
 
-import { readOptionalTextFile } from "../lib/fs.ts";
-import { normalizeInstructionText } from "./instruction-source.ts";
 import {
-  type IntegrationPreservedReason,
-  installOwnedIntegrationFile,
-  removeOwnedIntegrationFile,
-} from "./integration-ownership.ts";
+  ensureDir,
+  pathExists,
+  readTextFile,
+  writeTextFileIfChanged,
+} from "../lib/fs.ts";
+import { normalizeInstructionText } from "./instruction-source.ts";
 
 /**
  * Agent-side `/hack-init` skill: a thin pointer that tells the agent to fetch
- * the canonical onboarding prompt from the CLI (`hack agent onboard`) or, only
- * when a Hack MCP server such as the opt-in `hack-mcp` plugin is installed, the
- * `hack-init` MCP prompt, and follow it. The onboarding content itself lives in
+ * the canonical onboarding prompt from the CLI (`hack agent onboard`) or the
+ * `hack-init` MCP prompt and follow it. The onboarding content itself lives in
  * `src/agents/onboarding-prompt.ts` — never in the installed skill file.
  *
  * Installed for both Claude Code (`.claude/skills/hack-init/SKILL.md`) and
@@ -33,12 +33,9 @@ export type HackInitSkillResult = {
     | "stale"
     | "removed"
     | "missing"
-    | "preserved"
     | "error";
   readonly path: string;
   readonly message?: string;
-  /** Set with `preserved`: why an existing file was left unchanged. */
-  readonly reason?: IntegrationPreservedReason;
 };
 
 const SKILL_NAME = "hack-init";
@@ -74,7 +71,7 @@ export function renderHackInitSkill(): string {
     "",
     "1. Fetch the canonical onboarding prompt:",
     "   - With shell access: run `hack agent onboard` (works for new and existing projects).",
-    "   - Without shell access: only if the `hack-mcp` plugin or another Hack MCP server is installed, fetch the `hack-init` MCP prompt from it and pass `repoRoot` (the repository root path) so the prompt includes Hack's repo inventory; otherwise report that onboarding needs shell access or an explicitly selected Hack MCP server.",
+    "   - Without shell access: fetch the `hack-init` MCP prompt from the hack MCP server.",
     "2. Apply the relevant phases to the authorized workflow; preserve native approvals, credential safety, and runtime ownership.",
     "3. Verify the requested services and host workflows. Report remaining blockers; unrelated optional integration warnings do not prevent completion.",
     "",
@@ -83,9 +80,6 @@ export function renderHackInitSkill(): string {
 
 /**
  * Install or update the `/hack-init` skill for a client at a scope.
- *
- * Overwrites only Hack-owned content; an edited or foreign SKILL.md is
- * reported as `preserved` and left unchanged.
  */
 export async function installHackInitSkill(opts: {
   readonly client: HackInitSkillClient;
@@ -104,27 +98,12 @@ export async function installHackInitSkill(opts: {
   }
 
   const path = resolved.path;
-  const outcome = await installOwnedIntegrationFile({
-    surface: "hack-init-skill",
-    path,
-    render: renderHackInitSkill(),
-  });
-  if (outcome.status === "preserved") {
-    return {
-      client: opts.client,
-      scope: opts.scope,
-      status: "preserved",
-      path,
-      reason: outcome.reason,
-      message: outcome.message,
-    };
-  }
-  return {
-    client: opts.client,
-    scope: opts.scope,
-    status: outcome.status,
-    path,
-  };
+  await ensureDir(dirname(path));
+  const existed = await pathExists(path);
+  const result = await writeTextFileIfChanged(path, renderHackInitSkill());
+
+  const status = resolveInstallStatus({ changed: result.changed, existed });
+  return { client: opts.client, scope: opts.scope, status, path };
 }
 
 /**
@@ -150,17 +129,7 @@ export async function checkHackInitSkill(opts: {
   }
 
   const path = resolved.path;
-  const file = await readOptionalTextFile(path);
-  if (file.kind === "unreadable") {
-    return {
-      client: opts.client,
-      scope: opts.scope,
-      status: "error",
-      path,
-      message: "Hack-managed file exists but could not be read.",
-    };
-  }
-  const content = file.kind === "text" ? file.text : "";
+  const content = await readTextFile(path);
   if (!content) {
     return { client: opts.client, scope: opts.scope, status: "missing", path };
   }
@@ -181,9 +150,6 @@ export async function checkHackInitSkill(opts: {
 
 /**
  * Remove the `/hack-init` skill for a client at a scope.
- *
- * Deletes only a Hack-owned SKILL.md, then removes the skill directory only
- * when it is empty. Edited or foreign content is reported as `preserved`.
  */
 export async function removeHackInitSkill(opts: {
   readonly client: HackInitSkillClient;
@@ -202,31 +168,12 @@ export async function removeHackInitSkill(opts: {
   }
 
   const path = resolved.path;
-  const outcome = await removeOwnedIntegrationFile({
-    surface: "hack-init-skill",
-    path,
-    currentRender: renderHackInitSkill(),
-    removeEmptyDirectory: true,
-  });
-  if (outcome.status === "preserved") {
-    return {
-      client: opts.client,
-      scope: opts.scope,
-      status: "preserved",
-      path,
-      reason: outcome.reason,
-      message: outcome.message,
-    };
+  if (!(await pathExists(path))) {
+    return { client: opts.client, scope: opts.scope, status: "missing", path };
   }
-  return {
-    client: opts.client,
-    scope: opts.scope,
-    status: outcome.status,
-    path,
-    ...(outcome.status === "removed" && outcome.message
-      ? { message: outcome.message }
-      : {}),
-  };
+
+  await rm(resolve(path, ".."), { recursive: true, force: true });
+  return { client: opts.client, scope: opts.scope, status: "removed", path };
 }
 
 function resolveHackInitSkillPath(opts: {
@@ -260,4 +207,14 @@ function resolveHackInitSkillPath(opts: {
 function resolveHomeDir(): string | null {
   const home = (process.env.HOME ?? "").trim();
   return home.length > 0 ? home : null;
+}
+
+function resolveInstallStatus(opts: {
+  readonly changed: boolean;
+  readonly existed: boolean;
+}): "created" | "updated" | "noop" {
+  if (!opts.changed) {
+    return "noop";
+  }
+  return opts.existed ? "updated" : "created";
 }

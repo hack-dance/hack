@@ -1,5 +1,5 @@
 import type { Dirent } from "node:fs";
-import { mkdir, mkdtemp, readdir, realpath, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, rm } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -62,11 +62,9 @@ export type CliInvocation = {
   /** Extra env entries layered on top of the isolated base env. */
   readonly env?: Readonly<Record<string, string>>;
   readonly timeoutMs?: number;
-  /** Observe live stderr while retaining regular-file CLI capture. */
-  readonly onStderrChunk?: (chunk: string) => void;
 };
 
-export type ScenarioTier = "local" | "docker" | "host-ingress";
+export type ScenarioTier = "local" | "docker";
 
 export type ScenarioContext = {
   readonly repoRoot: string;
@@ -78,8 +76,6 @@ export type ScenarioContext = {
   readonly cli: (invocation: CliInvocation) => Promise<CliResult>;
   /** Structured progress log line (plain text, no colors). */
   readonly log: (message: string) => void;
-  /** Preserve both owned roots for incomplete cleanup; this can never become a passing scenario. */
-  readonly retainFixtures: (reason: string) => void;
   /** Abort the scenario as skipped (does not fail the suite). */
   readonly skip: (reason: string) => never;
 };
@@ -88,10 +84,6 @@ export type Scenario = {
   readonly name: string;
   readonly tier: ScenarioTier;
   readonly summary: string;
-  /** Retain disposable source and isolated-home evidence after failed ownership cleanup. */
-  readonly preserveFixtureOnFailure?: boolean;
-  /** Recovery controls that intentionally retain uncertain state require explicit selection. */
-  readonly requiresExplicitSelection?: boolean;
   readonly run: (ctx: ScenarioContext) => Promise<void>;
 };
 
@@ -267,11 +259,11 @@ export async function runCli(opts: {
   const timeoutMs = opts.invocation.timeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS;
   const startedAt = Date.now();
 
-  const captureId = ++outputCaptureCounter;
+  outputCaptureCounter += 1;
   const captureDir = join(opts.hackHome, ".e2e-capture");
   await mkdir(captureDir, { recursive: true });
-  const stdoutPath = join(captureDir, `${captureId}.out`);
-  const stderrPath = join(captureDir, `${captureId}.err`);
+  const stdoutPath = join(captureDir, `${outputCaptureCounter}.out`);
+  const stderrPath = join(captureDir, `${outputCaptureCounter}.err`);
 
   const proc = Bun.spawn(resolveCliSpawnArgs(opts.invocation.args), {
     cwd: opts.invocation.cwd,
@@ -286,24 +278,8 @@ export async function runCli(opts: {
     timedOut = true;
     proc.kill();
   }, timeoutMs);
-  let exited = false;
-  let observationError: unknown;
-  const observation = opts.invocation.onStderrChunk
-    ? observeCapture({
-        path: stderrPath,
-        onChunk: opts.invocation.onStderrChunk,
-        isDone: () => exited,
-      }).catch((error: unknown) => {
-        observationError = error;
-      })
-    : Promise.resolve();
   const exitCode = await proc.exited;
-  exited = true;
   clearTimeout(timer);
-  await observation;
-  if (observationError !== undefined) {
-    throw observationError;
-  }
 
   const stdout = await readCapture({ path: stdoutPath });
   const stderr = await readCapture({ path: stderrPath });
@@ -317,36 +293,6 @@ export async function runCli(opts: {
     timedOut,
     durationMs: Date.now() - startedAt,
   };
-}
-
-/** Tail regular-file capture without allowing descendants to hold a pipe open. */
-async function observeCapture(opts: {
-  readonly path: string;
-  readonly onChunk: (chunk: string) => void;
-  readonly isDone: () => boolean;
-}): Promise<void> {
-  let offset = 0;
-  const decoder = new TextDecoder();
-  while (true) {
-    const done = opts.isDone();
-    const file = Bun.file(opts.path);
-    if (await file.exists()) {
-      const bytes = new Uint8Array(await file.slice(offset).arrayBuffer());
-      offset += bytes.byteLength;
-      const chunk = decoder.decode(bytes, { stream: true });
-      if (chunk) {
-        opts.onChunk(chunk);
-      }
-    }
-    if (done) {
-      const tail = decoder.decode();
-      if (tail) {
-        opts.onChunk(tail);
-      }
-      return;
-    }
-    await Bun.sleep(25);
-  }
 }
 
 async function readCapture(opts: { readonly path: string }): Promise<string> {
@@ -369,7 +315,6 @@ export async function runCommand(opts: {
   readonly cwd: string;
   readonly env?: Readonly<Record<string, string>>;
   readonly timeoutMs?: number;
-  readonly onStderrChunk?: (chunk: string) => void;
 }): Promise<CliResult> {
   const proc = Bun.spawn([...opts.argv], {
     cwd: opts.cwd,
@@ -384,45 +329,12 @@ export async function runCommand(opts: {
     timedOut = true;
     proc.kill();
   }, opts.timeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS);
-  let observationError: unknown;
-  const stderrCapture = async () => {
-    const decoder = new TextDecoder();
-    let captured = "";
-    const reader = proc.stderr.getReader();
-    while (true) {
-      const { value: bytes, done } = await reader.read();
-      if (done) {
-        break;
-      }
-      const chunk = decoder.decode(bytes, { stream: true });
-      captured += chunk;
-      try {
-        opts.onStderrChunk?.(chunk);
-      } catch (error) {
-        observationError = error;
-      }
-    }
-    reader.releaseLock();
-    const tail = decoder.decode();
-    captured += tail;
-    if (tail) {
-      try {
-        opts.onStderrChunk?.(tail);
-      } catch (error) {
-        observationError = error;
-      }
-    }
-    return captured;
-  };
   const [stdout, stderr, exitCode] = await Promise.all([
     new Response(proc.stdout).text(),
-    stderrCapture(),
+    new Response(proc.stderr).text(),
     proc.exited,
   ]);
   clearTimeout(timer);
-  if (observationError !== undefined) {
-    throw observationError;
-  }
   return {
     command: opts.argv.join(" "),
     exitCode,
@@ -438,7 +350,7 @@ export async function runCommand(opts: {
 export async function makeTempDir(opts: {
   readonly prefix: string;
 }): Promise<string> {
-  return await realpath(await mkdtemp(join(tmpdir(), `${opts.prefix}-`)));
+  return await mkdtemp(join(tmpdir(), `${opts.prefix}-`));
 }
 
 /**
@@ -692,36 +604,6 @@ export type RunScenariosOptions = {
   readonly keepTempDirs?: boolean;
 };
 
-/** Host ingress qualification requires explicit selection; Docker enablement is insufficient. */
-export function selectScenarios(opts: {
-  readonly scenarios: readonly Scenario[];
-  readonly only?: readonly string[];
-}): readonly Scenario[] {
-  return opts.scenarios.filter((scenario) =>
-    opts.only && opts.only.length > 0
-      ? opts.only.includes(scenario.name)
-      : scenario.tier !== "host-ingress" && !scenario.requiresExplicitSelection
-  );
-}
-
-async function cleanupScenarioRoots(opts: {
-  readonly keep: boolean;
-  readonly retained: boolean;
-  readonly tempRoot: string;
-  readonly hackHome: string;
-  readonly log: (message: string) => void;
-}): Promise<void> {
-  if (!(opts.keep || opts.retained)) {
-    await rm(opts.tempRoot, { recursive: true, force: true });
-    await rm(opts.hackHome, { recursive: true, force: true });
-  }
-  if (opts.retained) {
-    opts.log(
-      `Owned fixture cleanup incomplete; retained recovery roots: ${opts.tempRoot} and ${opts.hackHome}`
-    );
-  }
-}
-
 /**
  * Run scenarios sequentially, printing a plain-text progress log and a final
  * summary table. Returns the outcomes; the caller decides the exit code.
@@ -730,7 +612,10 @@ export async function runScenarios(
   opts: RunScenariosOptions
 ): Promise<ScenarioOutcome[]> {
   const outcomes: ScenarioOutcome[] = [];
-  const selected = selectScenarios(opts);
+  const selected = opts.scenarios.filter(
+    (scenario) =>
+      !opts.only || opts.only.length === 0 || opts.only.includes(scenario.name)
+  );
 
   for (const scenario of selected) {
     const startedAt = Date.now();
@@ -750,7 +635,6 @@ export async function runScenarios(
     const hackHome = await makeTempDir({ prefix: "hack-e2e-home" });
     const tempRoot = await makeTempDir({ prefix: "hack-e2e-fixture" });
     await seedIsolatedHackHome({ hackHome });
-    let retentionReason: string | null = null;
     const ctx: ScenarioContext = {
       repoRoot: REPO_ROOT,
       hackHome,
@@ -759,9 +643,6 @@ export async function runScenarios(
       log: (message) => {
         process.stdout.write(`  [${scenario.name}] ${message}\n`);
       },
-      retainFixtures: (reason) => {
-        retentionReason = reason;
-      },
       skip: (reason) => {
         throw new ScenarioSkip(reason);
       },
@@ -769,18 +650,8 @@ export async function runScenarios(
 
     process.stdout.write(`-- ${scenario.name} (${scenario.tier}) --\n`);
     let outcome: ScenarioOutcome;
-    let preserveFailedFixture = false;
     try {
-      expect({
-        that: scenario.tier !== "host-ingress" || opts.dockerEnabled,
-        message: "Host ingress qualification requires HACK_E2E_DOCKER=1",
-      });
       await scenario.run(ctx);
-      expect({
-        that: retentionReason === null,
-        message:
-          "Scenario cleanup is incomplete; owned fixtures are retained for recovery",
-      });
       outcome = {
         name: scenario.name,
         tier: scenario.tier,
@@ -790,9 +661,7 @@ export async function runScenarios(
       };
     } catch (error: unknown) {
       outcome =
-        error instanceof ScenarioSkip &&
-        scenario.tier !== "host-ingress" &&
-        retentionReason === null
+        error instanceof ScenarioSkip
           ? {
               name: scenario.name,
               tier: scenario.tier,
@@ -807,16 +676,11 @@ export async function runScenarios(
               durationMs: Date.now() - startedAt,
               reason: error instanceof Error ? error.message : String(error),
             };
-      preserveFailedFixture =
-        outcome.status === "fail" && scenario.preserveFixtureOnFailure === true;
     } finally {
-      await cleanupScenarioRoots({
-        keep: opts.keepTempDirs === true || preserveFailedFixture,
-        retained: retentionReason !== null,
-        tempRoot,
-        hackHome,
-        log: ctx.log,
-      });
+      if (opts.keepTempDirs !== true) {
+        await rm(tempRoot, { recursive: true, force: true });
+        await rm(hackHome, { recursive: true, force: true });
+      }
     }
     outcomes.push(outcome);
     printOutcome(outcome);

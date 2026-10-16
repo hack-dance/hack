@@ -22,14 +22,16 @@ import {
   removeCursorRules,
 } from "../agents/cursor.ts";
 import {
-  isSetupSyncFailure,
-  runSetupSyncScope,
-  type SetupSyncAction,
-  type SetupSyncStatus,
-  type SetupSyncTarget,
-  type SetupSyncTargetResult,
-  setupSyncExitCode,
-} from "../agents/setup-sync.ts";
+  checkLegacyProjectAgentArtifacts,
+  checkLegacyUserAgentArtifacts,
+  removeLegacyProjectAgentArtifacts,
+  removeLegacyUserAgentArtifacts,
+} from "../agents/legacy-artifacts.ts";
+import {
+  checkSharedHackSkill,
+  installSharedHackSkill,
+  removeSharedHackSkill,
+} from "../agents/shared-skill.ts";
 import type { CliContext, CommandArgs } from "../cli/command.ts";
 import {
   CliUsageError,
@@ -37,8 +39,7 @@ import {
   defineOption,
   withHandler,
 } from "../cli/command.ts";
-import { optJson, optPath } from "../cli/options.ts";
-import { emitCliResult, okResult } from "../lib/cli-result.ts";
+import { optPath } from "../cli/options.ts";
 import { pathExists, readTextFile, writeTextFile } from "../lib/fs.ts";
 import { canPrompt } from "../lib/interactivity.ts";
 import { findRepoRootForInit } from "../lib/project.ts";
@@ -114,14 +115,6 @@ const optCodex = defineOption({
   description: "Target Codex integration",
 } as const);
 
-const optInstallMissing = defineOption({
-  name: "installMissing",
-  type: "boolean",
-  long: "--install-missing",
-  description:
-    "Also create missing integrations in the selected scope (default: refresh only installed Hack-owned files)",
-} as const);
-
 const optAgentsMd = defineOption({
   name: "agentsMd",
   type: "boolean",
@@ -152,10 +145,8 @@ const setupSyncOptions = [
   optPath,
   optGlobal,
   optAllScopes,
-  optInstallMissing,
   optCheck,
   optRemove,
-  optJson,
 ] as const;
 const setupMcpOptions = [
   optPath,
@@ -175,6 +166,12 @@ type SetupCodexArgs = CommandArgs<typeof setupCodexOptions, readonly []>;
 type SetupAgentsArgs = CommandArgs<typeof setupAgentsOptions, readonly []>;
 type SetupSyncArgs = CommandArgs<typeof setupSyncOptions, readonly []>;
 type SetupMcpArgs = CommandArgs<typeof setupMcpOptions, readonly []>;
+
+type SetupMultiLogResult = {
+  readonly status: string;
+  readonly path?: string;
+  readonly message?: string;
+};
 
 const tmuxSpec = defineCommand({
   name: "tmux",
@@ -223,7 +220,7 @@ const agentsSpec = defineCommand({
 
 const syncSpec = defineCommand({
   name: "sync",
-  summary: "Refresh installed Hack-owned agent integrations",
+  summary: "Refresh project/global agent guidance",
   group: "Agents",
   options: setupSyncOptions,
   positionals: [],
@@ -659,155 +656,80 @@ async function handleSetupAgents({
   });
 }
 
+type SetupSyncAction = "install" | "check" | "remove";
+
+type SetupSyncGroup = {
+  readonly label: string;
+  readonly results: readonly SetupMultiLogResult[];
+};
+
 type SetupSyncScopeResult = {
   readonly exitCode: number;
   readonly item: DisplayStatusItem;
 };
 
-const SETUP_SYNC_TARGET_LABELS: Readonly<Record<SetupSyncTarget, string>> = {
-  "cursor-rules": "Cursor rules",
-  "claude-hooks": "Claude hooks",
-  "claude-hack-init-skill": "Claude hack-init skill",
-  "codex-hack-cli-skill": "Codex hack-cli skill",
-  "codex-hack-init-skill": "Codex hack-init skill",
-  "shared-hack-cli-skill": "Shared Hack skill",
-  "cursor-mcp": "Cursor MCP config",
-  "claude-mcp": "Claude MCP config",
-  "codex-mcp": "Codex MCP config",
-  "agents-md": "AGENTS.md",
-  "claude-md": "CLAUDE.md",
-  "retired-artifact": "Retired agent artifact",
-  "scope-root": "Scope",
-};
-
-/** How `--check` words a status that `sync` would produce. */
-const SETUP_SYNC_CHECK_WORDS: Readonly<
-  Partial<Record<SetupSyncStatus, string>>
-> = {
-  refreshed: "stale",
-  installed: "not installed (would install)",
-  removed: "retired (would remove)",
-};
-
-/**
- * Collapse one scope's per-target results into a compact status row. Paths
- * and reasons are expanded only for errors, preserved files, and (with
- * `--check`) targets that sync would change.
- */
 export function buildSetupSyncScopeResult(input: {
   readonly action: SetupSyncAction;
   readonly scope: "Project" | "Global";
-  readonly results: readonly SetupSyncTargetResult[];
+  readonly groups: readonly SetupSyncGroup[];
 }): SetupSyncScopeResult {
-  const { action, results } = input;
-  const failures = results.filter((result) =>
-    isSetupSyncFailure({ action, status: result.status })
+  const entries = input.groups.flatMap((group) =>
+    group.results.map((result) => ({ ...result, label: group.label }))
   );
-  const errorCount = countSetupSyncStatus({ results, status: "error" });
-  const preserved = countSetupSyncStatus({ results, status: "preserved" });
-
+  const failures = entries.filter((entry) => {
+    if (entry.status === "error") {
+      return true;
+    }
+    return (
+      input.action === "check" &&
+      ["missing", "stale", "deprecated"].includes(entry.status)
+    );
+  });
+  const errorCount = failures.filter(
+    (entry) => entry.status === "error"
+  ).length;
   let status: DisplayStatusItem["status"] = "ok";
   if (errorCount > 0) {
     status = "error";
-  } else if (failures.length > 0 || preserved > 0) {
+  } else if (failures.length > 0) {
     status = "warn";
   }
-
-  const detailLines = results
-    .filter(
-      (result) =>
-        result.status === "error" ||
-        result.status === "preserved" ||
-        failures.includes(result)
-    )
-    .map((result) => describeSetupSyncResult({ action, result }));
-  if (
-    action === "sync" &&
-    countSetupSyncStatus({ results, status: "missing" }) > 0
-  ) {
-    detailLines.push(
-      "Missing integrations were skipped; add --install-missing to create them."
-    );
-  }
+  const meta = (() => {
+    if (input.action === "check") {
+      return failures.length === 0
+        ? `${entries.length} current`
+        : `${entries.length - failures.length}/${entries.length} current`;
+    }
+    if (input.action === "remove") {
+      const removed = entries.filter(
+        (entry) => entry.status === "removed"
+      ).length;
+      return `${removed} removed`;
+    }
+    const changed = entries.filter((entry) =>
+      ["created", "updated", "removed"].includes(entry.status)
+    ).length;
+    return changed === 0 ? "already current" : `${changed} updated`;
+  })();
+  const detail = failures
+    .map((entry) => {
+      if (entry.message) {
+        return `${entry.label}: ${entry.message}`;
+      }
+      const location = entry.path ? ` at ${entry.path}` : "";
+      return `${entry.label}: ${entry.status}${location}`;
+    })
+    .join("\n");
 
   return {
-    exitCode: setupSyncExitCode({ action, results }),
+    exitCode: failures.length > 0 ? 1 : 0,
     item: {
       label: input.scope,
       status,
-      meta: buildSetupSyncMeta({ action, results, failures }),
-      detail: detailLines.length > 0 ? detailLines.join("\n") : undefined,
+      meta,
+      detail: detail.length > 0 ? detail : undefined,
     },
   };
-}
-
-function countSetupSyncStatus(opts: {
-  readonly results: readonly SetupSyncTargetResult[];
-  readonly status: SetupSyncStatus;
-}): number {
-  return opts.results.filter((result) => result.status === opts.status).length;
-}
-
-function buildSetupSyncMeta(opts: {
-  readonly action: SetupSyncAction;
-  readonly results: readonly SetupSyncTargetResult[];
-  readonly failures: readonly SetupSyncTargetResult[];
-}): string {
-  const count = (status: SetupSyncStatus): number =>
-    countSetupSyncStatus({ results: opts.results, status });
-  const preserved = count("preserved");
-  const preservedSuffix = preserved > 0 ? `, ${preserved} preserved` : "";
-  const missing = count("missing");
-
-  if (opts.action === "remove") {
-    return `${count("removed")} removed${preservedSuffix}`;
-  }
-  if (opts.action === "check") {
-    const considered = opts.results.length - missing;
-    const current =
-      opts.failures.length === 0
-        ? `${count("unchanged")} current`
-        : `${count("unchanged")}/${considered} current`;
-    return missing > 0 ? `${current}, ${missing} not installed` : current;
-  }
-
-  const changed = [
-    { status: "refreshed", word: "refreshed" },
-    { status: "installed", word: "installed" },
-    { status: "removed", word: "retired removed" },
-  ] as const;
-  const parts = changed
-    .filter((entry) => count(entry.status) > 0)
-    .map((entry) => `${count(entry.status)} ${entry.word}`);
-  let head = parts.join(", ");
-  if (parts.length === 0) {
-    head = count("unchanged") > 0 ? "already current" : "nothing to refresh";
-  }
-  const missingSuffix = missing > 0 ? `, ${missing} missing (skipped)` : "";
-  return `${head}${preservedSuffix}${missingSuffix}`;
-}
-
-function describeSetupSyncResult(opts: {
-  readonly action: SetupSyncAction;
-  readonly result: SetupSyncTargetResult;
-}): string {
-  const { action, result } = opts;
-  const label = SETUP_SYNC_TARGET_LABELS[result.target];
-  const location = result.path ? ` at ${result.path}` : "";
-  if (result.status === "preserved") {
-    const reason = result.message ? ` ${result.message}` : "";
-    return `${label}: preserved${location}.${reason}`;
-  }
-  if (result.status === "error") {
-    return result.message
-      ? `${label}: ${result.message}`
-      : `${label}: error${location}`;
-  }
-  const word =
-    action === "check"
-      ? (SETUP_SYNC_CHECK_WORDS[result.status] ?? result.status)
-      : result.status;
-  return `${label}: ${word}${location}`;
 }
 
 async function handleSetupSync({
@@ -817,108 +739,174 @@ async function handleSetupSync({
   readonly ctx: CliContext;
   readonly args: SetupSyncArgs;
 }): Promise<number> {
-  const resolved = resolveAction(args.options);
-  const installMissing = args.options.installMissing === true;
-  if (resolved === "remove" && installMissing) {
-    throw new CliUsageError(
-      "Use either --install-missing or --remove, not both."
-    );
-  }
-  const action: SetupSyncAction = resolved === "install" ? "sync" : resolved;
+  const action = resolveAction(args.options);
   const scopes = resolveSyncScopes({
     global: args.options.global === true,
     allScopes: args.options.allScopes === true,
   });
-
-  const results: SetupSyncTargetResult[] = [];
+  const includesProject = scopes.includes("project");
+  const includesUser = scopes.includes("user");
+  const projectRoot = includesProject
+    ? await resolveSetupRoot({ ctx, pathOpt: args.options.path })
+    : undefined;
   const scopeResults: SetupSyncScopeResult[] = [];
-  if (scopes.includes("project")) {
-    const projectRoot = await resolveSetupRoot({
-      ctx,
-      pathOpt: args.options.path,
-    });
-    const projectResults = await runSetupSyncScope({
-      action,
-      scope: "project",
-      root: projectRoot,
-      installMissing,
-    });
-    results.push(...projectResults);
+
+  if (includesProject && projectRoot) {
     scopeResults.push(
-      buildSetupSyncScopeResult({
+      await runProjectScopeSync({
         action,
-        scope: "Project",
-        results: projectResults,
-      })
-    );
-  }
-  if (scopes.includes("user")) {
-    const globalResults = await runSetupSyncScope({
-      action,
-      scope: "global",
-      root: process.env.HOME ?? "",
-      installMissing,
-    });
-    results.push(...globalResults);
-    scopeResults.push(
-      buildSetupSyncScopeResult({
-        action,
-        scope: "Global",
-        results: globalResults,
+        projectRoot,
       })
     );
   }
 
-  const exitCode = setupSyncExitCode({ action, results });
-  if (args.options.json === true) {
-    emitCliResult({
-      result: okResult({
-        data: buildSetupSyncJsonData({ action, installMissing, results }),
-      }),
-    });
-    return exitCode;
+  if (includesUser) {
+    scopeResults.push(await runUserScopeSync({ action }));
   }
 
   const titles: Readonly<Record<SetupSyncAction, string>> = {
     check: "Agent integrations",
-    sync: "Agent integrations refreshed",
+    install: "Agent integrations updated",
     remove: "Agent integrations removed",
   };
   await display.statusList({
     title: titles[action],
     items: scopeResults.map((result) => result.item),
   });
-  return exitCode;
+  return Math.max(0, ...scopeResults.map((result) => result.exitCode));
+}
+
+/** Run one explicit sync action across all project-scope integrations. */
+async function runProjectScopeSync(opts: {
+  readonly action: SetupSyncAction;
+  readonly projectRoot: string;
+}): Promise<SetupSyncScopeResult> {
+  const { action, projectRoot } = opts;
+  let cursorResult: Awaited<ReturnType<typeof checkCursorRules>>;
+  let claudeResult: Awaited<ReturnType<typeof checkClaudeHooks>>;
+  let codexResult: Awaited<ReturnType<typeof checkCodexSkill>>;
+  let legacyResults: SetupMultiLogResult[];
+  let mcpResults: SetupMultiLogResult[];
+  let docsResults: SetupMultiLogResult[];
+
+  if (action === "check") {
+    cursorResult = await checkCursorRules({ scope: "project", projectRoot });
+    claudeResult = await checkClaudeHooks({ scope: "project", projectRoot });
+    codexResult = await checkCodexSkill({ scope: "project", projectRoot });
+    legacyResults = await checkLegacyProjectAgentArtifacts({ projectRoot });
+    mcpResults = await checkMcpConfig({
+      scope: "project",
+      targets: ["cursor", "claude", "codex"],
+      projectRoot,
+    });
+    docsResults = await checkAgentDocs({
+      projectRoot,
+      targets: ["agents", "claude"],
+    });
+  } else if (action === "remove") {
+    cursorResult = await removeCursorRules({ scope: "project", projectRoot });
+    claudeResult = await removeClaudeHooks({ scope: "project", projectRoot });
+    codexResult = await removeCodexSkill({ scope: "project", projectRoot });
+    legacyResults = await removeLegacyProjectAgentArtifacts({ projectRoot });
+    mcpResults = await removeMcpConfig({
+      scope: "project",
+      targets: ["cursor", "claude", "codex"],
+      projectRoot,
+    });
+    docsResults = await removeAgentDocs({
+      projectRoot,
+      targets: ["agents", "claude"],
+    });
+  } else {
+    cursorResult = await installCursorRules({ scope: "project", projectRoot });
+    claudeResult = await installClaudeHooks({ scope: "project", projectRoot });
+    codexResult = await installCodexSkill({ scope: "project", projectRoot });
+    legacyResults = await removeLegacyProjectAgentArtifacts({ projectRoot });
+    mcpResults = await installMcpConfig({
+      scope: "project",
+      targets: ["cursor", "claude", "codex"],
+      projectRoot,
+    });
+    docsResults = await upsertAgentDocs({
+      projectRoot,
+      targets: ["agents", "claude"],
+    });
+  }
+
+  return buildSetupSyncScopeResult({
+    action,
+    scope: "Project",
+    groups: [
+      { label: "Cursor", results: [cursorResult] },
+      { label: "Claude", results: [claudeResult] },
+      { label: "Codex", results: [codexResult] },
+      { label: "Retired agent artifacts", results: legacyResults },
+      { label: "MCP config", results: mcpResults },
+      { label: "Agent docs", results: docsResults },
+    ],
+  });
 }
 
 /**
- * Machine-readable `hack setup sync --json` payload: one entry per target.
- * With `--check`, each status is what `sync` would report (`dryRun: true`).
- * The envelope is `ok` whenever the action ran; the exit code carries
- * failure, as with `hack doctor --json`.
+ * Run one sync action across all global (user) scope integrations and log
+ * results. Shared `~/.ai/skills` guidance is managed alongside client-specific
+ * integrations. Known retired Hack-owned skills are cleaned up safely.
  */
-export function buildSetupSyncJsonData(opts: {
+async function runUserScopeSync(opts: {
   readonly action: SetupSyncAction;
-  readonly installMissing: boolean;
-  readonly results: readonly SetupSyncTargetResult[];
-}): {
-  readonly action: SetupSyncAction;
-  readonly dryRun: boolean;
-  readonly installMissing: boolean;
-  readonly counts: Readonly<Partial<Record<SetupSyncStatus, number>>>;
-  readonly targets: readonly SetupSyncTargetResult[];
-} {
-  const counts: Partial<Record<SetupSyncStatus, number>> = {};
-  for (const result of opts.results) {
-    counts[result.status] = (counts[result.status] ?? 0) + 1;
+}): Promise<SetupSyncScopeResult> {
+  const { action } = opts;
+  let cursorResult: Awaited<ReturnType<typeof checkCursorRules>>;
+  let claudeResult: Awaited<ReturnType<typeof checkClaudeHooks>>;
+  let codexResult: Awaited<ReturnType<typeof checkCodexSkill>>;
+  let sharedSkillResult: SetupMultiLogResult & { readonly path: string };
+  let legacyResults: SetupMultiLogResult[];
+  let mcpResults: SetupMultiLogResult[];
+
+  if (action === "check") {
+    cursorResult = await checkCursorRules({ scope: "user" });
+    claudeResult = await checkClaudeHooks({ scope: "user" });
+    codexResult = await checkCodexSkill({ scope: "user" });
+    sharedSkillResult = await checkSharedHackSkill();
+    legacyResults = await checkLegacyUserAgentArtifacts();
+    mcpResults = await checkMcpConfig({
+      scope: "user",
+      targets: ["cursor", "claude", "codex"],
+    });
+  } else if (action === "remove") {
+    cursorResult = await removeCursorRules({ scope: "user" });
+    claudeResult = await removeClaudeHooks({ scope: "user" });
+    codexResult = await removeCodexSkill({ scope: "user" });
+    sharedSkillResult = await removeSharedHackSkill();
+    legacyResults = await removeLegacyUserAgentArtifacts();
+    mcpResults = await removeMcpConfig({
+      scope: "user",
+      targets: ["cursor", "claude", "codex"],
+    });
+  } else {
+    cursorResult = await installCursorRules({ scope: "user" });
+    claudeResult = await installClaudeHooks({ scope: "user" });
+    codexResult = await installCodexSkill({ scope: "user" });
+    sharedSkillResult = await installSharedHackSkill();
+    legacyResults = await removeLegacyUserAgentArtifacts();
+    mcpResults = await installMcpConfig({
+      scope: "user",
+      targets: ["cursor", "claude", "codex"],
+    });
   }
-  return {
-    action: opts.action,
-    dryRun: opts.action === "check",
-    installMissing: opts.installMissing,
-    counts,
-    targets: opts.results,
-  };
+
+  return buildSetupSyncScopeResult({
+    action,
+    scope: "Global",
+    groups: [
+      { label: "Cursor", results: [cursorResult] },
+      { label: "Claude", results: [claudeResult] },
+      { label: "Codex", results: [codexResult] },
+      { label: "Shared Hack skill", results: [sharedSkillResult] },
+      { label: "Retired agent artifacts", results: legacyResults },
+      { label: "MCP config", results: mcpResults },
+    ],
+  });
 }
 
 async function handleSetupMcp({
@@ -1090,22 +1078,11 @@ function logSingleResult(opts: {
     });
   }
 
-  if (opts.result.status === "preserved") {
-    // Preserving edited or foreign content is the safe outcome, not a failure.
-    logger.warn({
-      message: `Preserved ${opts.okMessage} at ${opts.result.path}: ${opts.result.message ?? "not owned by Hack"}`,
-    });
-    return 0;
-  }
-
   if (opts.action === "remove") {
     if (opts.result.status === "removed") {
       logger.success({
         message: `Removed ${opts.okMessage} at ${opts.result.path}`,
       });
-      if (opts.result.message) {
-        logger.info({ message: opts.result.message });
-      }
       return 0;
     }
     logger.info({

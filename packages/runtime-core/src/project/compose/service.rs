@@ -76,7 +76,7 @@ fn mounts(
     let mut result = Vec::new();
     let mut targets = BTreeSet::new();
     for value in values {
-        let (kind, from, to, read_only, subpath) = match value {
+        let (kind, from, to, read_only) = match value {
             Value::String(s) => {
                 let parts: Vec<_> = s.split(':').collect();
                 if !(2..=3).contains(&parts.len()) {
@@ -104,36 +104,12 @@ fn mounts(
                     parts[0],
                     parts[1],
                     readonly,
-                    None,
                 )
             }
             Value::Object(m) => {
-                let subpath = if let Some(options) = m.get("volume") {
-                    let options = options.as_object().ok_or_else(|| {
-                        problem("invalid_mount", "Volume options must be an object.")
-                    })?;
-                    keys(options, &["subpath"], field, diagnostics);
-                    let selected =
-                        string(options.get("subpath").ok_or_else(|| {
-                            problem("invalid_mount", "Volume subpath is required.")
-                        })?)?;
-                    if !super::super::valid_volume_subpath(selected)
-                        || m.get("type")
-                            .and_then(Value::as_str)
-                            .is_some_and(|kind| kind != "volume")
-                    {
-                        return Err(problem(
-                            "invalid_mount",
-                            "Volume subpath must be a bounded canonical relative directory.",
-                        ));
-                    }
-                    Some(selected.to_owned())
-                } else {
-                    None
-                };
                 keys(
                     m,
-                    &["type", "source", "target", "read_only", "volume"],
+                    &["type", "source", "target", "read_only"],
                     field,
                     diagnostics,
                 );
@@ -148,7 +124,6 @@ fn mounts(
                             .ok_or_else(|| problem("invalid_mount", "Mount target is required."))?,
                     )?,
                     boolean(m.get("read_only"), false)?,
-                    subpath,
                 )
             }
             _ => return Err(problem("invalid_mount", "Invalid mount form.")),
@@ -174,7 +149,6 @@ fn mounts(
         if from.contains('$') || from.starts_with('~') {
             diagnostics.push(Diagnostic::error("unresolved_mount_source",field,"Interpolated or home-relative mount sources are not resolved from ambient environment. Credential directories require scoped credential delivery; declare ordinary source paths relative to the project."));
             result.push(MountPlan {
-                subpath,
                 kind: "unresolved".into(),
                 source: "[unresolved]".into(),
                 target,
@@ -213,7 +187,6 @@ fn mounts(
             }
         };
         result.push(MountPlan {
-            subpath,
             kind: if ["bind", "volume"].contains(&kind) {
                 kind.into()
             } else {
@@ -490,7 +463,7 @@ fn health(
     }))
 }
 
-pub(super) fn environment_files(
+fn environment_files(
     project: &Path,
     base: &Path,
     value: Option<&Value>,
@@ -553,7 +526,7 @@ fn service_networks(
     diagnostics: &mut Vec<Diagnostic>,
     field: &str,
 ) -> Result<Vec<String>, CandidateError> {
-    let result = match value {
+    let mut result = match value {
         None => vec!["default".into()],
         Some(Value::Array(_)) => strings(value)?,
         Some(Value::Object(m)) => {
@@ -574,17 +547,8 @@ fn service_networks(
     for name in &result {
         identifier(name)?;
     }
-    if result
-        .iter()
-        .collect::<std::collections::BTreeSet<_>>()
-        .len()
-        != result.len()
-    {
-        return Err(problem(
-            "invalid_network",
-            "Service network declarations must be unique.",
-        ));
-    }
+    result.sort();
+    result.dedup();
     Ok(result)
 }
 fn limits(
@@ -776,16 +740,6 @@ pub(super) fn compile(
             return Err(problem("invalid_restart", "Unsupported restart policy."));
         }
         let labels = redacted_map(m.get("labels"), false)?;
-        let parsed_routing = super::routing::parse(m.get("labels"));
-        let routing_invalid = parsed_routing.is_err();
-        let routing = parsed_routing.ok().flatten();
-        if routing.is_some() {
-            diagnostics.push(Diagnostic::warning(
-                "route_binding_required",
-                &format!("{field}.labels"),
-                "Local HTTPS intent requires a healthy owned service endpoint and an exclusive hostname publication; label declarations alone do not install routes or permit graph execution.",
-            ));
-        }
         let dependency_cache = super::dependency_cache::parse(m.get("labels"))?;
         if let Some(cache) = &dependency_cache {
             if !volumes.contains_key(&cache.volume) {
@@ -796,15 +750,12 @@ pub(super) fn compile(
             }
             diagnostics.push(Diagnostic::warning("dependency_cache_binding_required", &format!("{field}.labels"), "Dependency cache execution requires a verified source revision, pinned installer image and shared cache binding; declaration alone is not a completed install."));
         }
-        if routing_invalid
-            || labels.keys().any(|key| {
-                !(dependency_cache.is_some() && super::dependency_cache::recognized(key))
-                    && !(routing.is_some() && super::routing::recognized(key))
-                    && ["caddy", "traefik", "hack", "com.docker.compose"]
-                        .iter()
-                        .any(|prefix| key == prefix || key.starts_with(&format!("{prefix}.")))
-            })
-        {
+        if labels.keys().any(|key| {
+            !(dependency_cache.is_some() && super::dependency_cache::recognized(key))
+                && ["caddy", "traefik", "hack", "com.docker.compose"]
+                    .iter()
+                    .any(|prefix| key == prefix || key.starts_with(&format!("{prefix}.")))
+        }) {
             diagnostics.push(Diagnostic::error(
                 "external_route_or_owner_label",
                 &format!("{field}.labels"),
@@ -917,7 +868,7 @@ pub(super) fn compile(
             limits:limits(m,&field,diagnostics)?,read_only:boolean(m.get("read_only"),false)?,init:boolean(m.get("init"),false)?,restart,
             working_dir:m.get("working_dir").map(|v| safe_absolute(string(v)?)).transpose()?,
             user:m.get("user").map(|v| match v {Value::String(s)=>redacted(s),Value::Number(n)=>redacted(&n.to_string()),_=>Err(problem("invalid_user","User must be a string or numeric identifier."))}).transpose()?,
-            platform,labels,routing,dependency_cache,logging,stop_grace_period_nanos:duration(m.get("stop_grace_period"))?,stop_signal,
+            platform,labels,dependency_cache,logging,stop_grace_period_nanos:duration(m.get("stop_grace_period"))?,stop_signal,
         });
     }
     Ok(result)

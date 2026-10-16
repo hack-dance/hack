@@ -19,31 +19,9 @@ Artifact: patch/docs/report and location of durable results
 Exit: completion criteria, experiment budget and any external evidence still required
 ```
 
-For v5, [Linear's Hack project](https://linear.app/hackdance/project/hack-8806a1b201f7/overview)
-is the planning/status source of truth. Start with the
-[program and issue index](https://linear.app/hackdance/document/hack-v5-program-measurable-acceptance-and-source-of-truth-26d5fb362f3e),
-which is available even in a fresh checkout without local planning artifacts. Use the local
-`_docs/docs/plans/v5/linear-sync.md` mapping to find the existing issue and milestone;
-preserve `_docs/docs/plans/v5/work-units.md` and linked source/evidence documents.
-While reconciliation is incomplete, consult both and make coverage gaps explicit.
-Do not overwrite an earlier objective when a new message adds a follow-up. Capture
-new actionable work once with acceptance and a verification path; search existing
-issues before creating one. Keep `v5 prerelease.1` readiness distinct from full `v5`
-acceptance and do not infer publishing authority from either milestone.
-Before rewriting an existing issue, fetch its full detail. List/search descriptions
-may be truncated previews; never use them as replacement bodies. Re-fetch full
-details after a migration and verify acceptance, source links and dependencies.
-
-At meaningful checkpoints, update the owning Linear issue with the outcome, source
-revision/artifact, checks actually executed (including cache/skips), remaining gates
-and next action. Summarize failures and changed decisions as well as successes;
-distinguish historical backfill from newly verified evidence. Link substantive
-research/specifications in project documents so issues remain understandable without
-local access. Never upload secret values, private raw logs or sensitive artifacts.
-Preserve repository models, tests and reproducible evidence; Linear tracks their
-meaning and status, not a replacement copy of source code. Do not mark a parent done
-from component tests. If a Linear write fails, retain the pending update locally and
-report the unsynced state instead of claiming it was saved.
+For v5, maintain [work-units.md](../../../docs/plans/v5/work-units.md). Do not overwrite
+an earlier objective when a new message adds a follow-up. Capture actionable new work
+once with a verification path; do not generate tickets or a second ledger by default.
 
 ## Choose the feedback loop
 

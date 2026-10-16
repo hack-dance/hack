@@ -14,7 +14,7 @@ agent transcripts, generated queues, local reviews, or runtime state.
 | Commands and evidence selection | [verification skill](skills/hack-repo-verify/SKILL.md) |
 | Work units and experiment design | [work-unit skill](skills/hack-repo-work-unit/SKILL.md) |
 | Developer toolchain | [.hack/README.md](../.hack/README.md), root mise/package pins |
-| v5 status and acceptance | [Linear program and issue index](https://linear.app/hackdance/document/hack-v5-program-measurable-acceptance-and-source-of-truth-26d5fb362f3e); local mapping `_docs/docs/plans/v5/linear-sync.md`, preserved ledger `_docs/docs/plans/v5/work-units.md` |
+| v5 status and acceptance | [existing ledger](../docs/plans/v5/work-units.md) |
 | Consumer instructions installed by Hack | [agent-guidance.md](../docs/agent-guidance.md) |
 
 Contributor skills are authored in `.ai/skills/<name>/SKILL.md`. Relative symlinks

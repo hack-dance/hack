@@ -13,8 +13,6 @@ import { resolveDaemonPaths } from "../daemon/paths.ts";
 import { readDaemonPid } from "../daemon/process.ts";
 import { resolveGlobalHackDir } from "../lib/config-paths.ts";
 import {
-  type HostCommandRecord,
-  type ObservedProcess,
   observeHostCommand,
   readHostCommandRecords,
   readObservedProcesses,
@@ -277,7 +275,7 @@ async function resolveUsageSnapshot(opts: {
     : runtime;
   const index = buildContainerIndex({ projects: filtered });
   const host = opts.includeHost
-    ? await readHostUsage({ filter: opts.filter })
+    ? await readHostUsage()
     : { rows: [], total: null };
   const errors: string[] = [];
   if (!runtimeResult.ok) {
@@ -517,18 +515,14 @@ function resolveIntervalMs(opts: {
   return Math.max(250, Math.floor(raw));
 }
 
-async function readHostUsage(opts: {
-  readonly filter: string | null;
-}): Promise<HostUsageReport> {
-  const trackedPids = await resolveTrackedPids(opts);
+async function readHostUsage(): Promise<HostUsageReport> {
+  const trackedPids = await resolveTrackedPids();
   const samples = await readHostProcessSamples({ trackedPids });
   return buildHostUsageReport({ samples });
 }
 
-async function resolveTrackedPids(opts: {
-  readonly filter: string | null;
-}): Promise<Map<number, string | null>> {
-  const tracked = new Map<number, string | null>();
+async function resolveTrackedPids(): Promise<Map<number, string>> {
+  const tracked = new Map<number, string>();
   const daemonPaths = resolveDaemonPaths({});
   const daemonPid = await readDaemonPid({ pidPath: daemonPaths.pidPath });
   if (daemonPid) {
@@ -548,69 +542,17 @@ async function resolveTrackedPids(opts: {
     readHostCommandRecords(),
     readObservedProcesses(),
   ]);
-  for (const [pid, name] of collectTrackedHostPids({
-    records,
-    snapshot,
-    filter: opts.filter,
-  })) {
-    tracked.set(pid, name);
-  }
-  return tracked;
-}
-
-function collectTrackedHostPids(opts: {
-  readonly records: readonly HostCommandRecord[];
-  readonly snapshot: readonly ObservedProcess[] | null;
-  readonly filter: string | null;
-}): Map<number, string | null> {
-  const tracked = new Map<number, string | null>();
-  const parents = new Map(
-    (opts.snapshot ?? []).map((row) => [row.pid, row.ppid])
-  );
-  const records = [...opts.records].sort(
-    (left, right) =>
-      processDepth(right.child.pid, parents) -
-      processDepth(left.child.pid, parents)
-  );
-  for (const record of records) {
-    if (record.status !== "running") {
-      continue;
-    }
-    const included =
-      opts.filter === null ||
-      record.project === opts.filter ||
-      record.project.startsWith(`${opts.filter}--`);
-    const observed = observeHostCommand(record, opts.snapshot);
+  for (const record of records.filter((entry) => entry.status === "running")) {
+    const observed = observeHostCommand(record, snapshot);
     for (const pid of observed.observedPids) {
-      if (tracked.has(pid)) {
-        continue;
-      }
-      // Inner command roots take precedence over their enclosing command trees.
-      // A null entry also excludes known foreign commands from generic host heuristics.
-      tracked.set(
-        pid,
-        included ? `host:${record.project}:${record.executable}` : null
-      );
+      tracked.set(pid, `host:${record.project}:${record.executable}`);
     }
   }
   return tracked;
-}
-
-function processDepth(
-  pid: number,
-  parents: ReadonlyMap<number, number>
-): number {
-  const seen = new Set<number>();
-  let current = pid;
-  while (current > 0 && !seen.has(current)) {
-    seen.add(current);
-    current = parents.get(current) ?? 0;
-  }
-  return seen.size;
 }
 
 async function readHostProcessSamples(opts: {
-  readonly trackedPids: Map<number, string | null>;
+  readonly trackedPids: Map<number, string>;
 }): Promise<HostProcessSample[]> {
   const res = await exec(["ps", "-axo", "pid=,pcpu=,rss=,command="], {
     stdin: "ignore",
@@ -638,9 +580,8 @@ async function readHostProcessSamples(opts: {
     const rssKb = Number.parseInt(match[3] ?? "", 10);
     const command = match[4] ?? "";
 
-    const trackedName = opts.trackedPids.has(pid)
-      ? opts.trackedPids.get(pid)
-      : resolveHostProcessKind({ command });
+    const trackedName =
+      opts.trackedPids.get(pid) ?? resolveHostProcessKind({ command });
     if (!trackedName) {
       continue;
     }
@@ -950,7 +891,7 @@ async function runUsageOnce(opts: {
     : runtime;
   const index = buildContainerIndex({ projects: filtered });
   const hostReport = opts.includeHost
-    ? await readHostUsage({ filter: opts.filter })
+    ? await readHostUsage()
     : { rows: [], total: null };
   const stats =
     index.containerIds.length === 0
@@ -1457,9 +1398,4 @@ function getString(value: Record<string, unknown>, key: string): string | null {
   return typeof raw === "string" ? raw.trim() : null;
 }
 
-export const __testOnlyUsage = {
-  buildContainerIndex,
-  buildUsageReport,
-  collectTrackedHostPids,
-  buildHostUsageReport,
-};
+export const __testOnlyUsage = { buildContainerIndex, buildUsageReport };

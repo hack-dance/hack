@@ -1,15 +1,7 @@
 #[cfg(target_os = "macos")]
 mod environment;
-#[cfg(feature = "native-config-plan")]
-mod native;
-mod normalized;
-mod one_off;
 #[cfg(target_os = "macos")]
 mod relay;
-#[cfg(test)]
-mod restore_tests;
-mod routes;
-mod service_io;
 use hack_runtime_core::{
     Candidate, CandidateError,
     project::{PlanOptions, execution::Condition},
@@ -20,481 +12,13 @@ use std::{collections::BTreeMap, path::Path, time::Duration};
 fn invalid() -> CandidateError {
     CandidateError::new(
         "graph_arguments",
-        "Use graph run|restart|restore with --project, --file, --expect-plan, --run-id and --ready service=started|healthy|completed; planning actions accept optional --branch <canonical-lowercase-dns-label>. Source mounts may select --source-revision. Fresh run/serve may explicitly select --release-initializer-cache service for quiescent guest page/dentry cache release (package contents retained); explicit --live-source binds directory mounts to that initial acknowledged workspace revision; inspect/reconcile/cleanup/archive/export/reconcile-export/prune require --run-id. Cleanup alone may use --remove-data. Dead-owner recover-cleanup and same-boot recover-live-owner require --expect-receipt; retire-recovered-publisher requires --expect-owner. A missing publisher lock requires inspect-missing-publication-lock --run-id and explicitly selected retire-missing-publication-lock --run-id --expect-selection --accept-quiesced-candidate-home. Foreground serve may opt into --auto-dependency-slots for pool-wide transport allocation; dependency-reservations inspects claims and recover-dependency-reservation --run-id --expect-reservation releases a verified dead pre-admission claim. Foreground serve additionally requires --dependencies and --expect-dependencies and accepts explicit --environment-stdin and --route-slot service=index|auto for reviewed local routes; dependency-plan requires --dependencies; dependency-discover requires --host-port and --executable; owner-status requires --run-id. Fresh foreground owner-restore requires exactly --run-id, --expect-plan, --expect-generation and --environment-stdin, plus optional --json. Bridge reservation requires --run-id, --service, --slot and --expect-generation; start/release require --run-id, --slot and --expect-reservation. bridges/reconcile-bridges require --run-id. Foreground publish-bridge requires --run-id, --slot, --expect-reservation and exactly one of --port or --unix (no --json); --unix accepts up to eight --hostname claims; unpublish-bridge requires --run-id and --expect-reservation.",
+        "Use graph run|restart|restore with --project, --file, --expect-plan, --run-id and --ready service=started|healthy|completed, plus --source-revision for source mounts; inspect/reconcile/cleanup/archive/export/reconcile-export/prune require --run-id. Cleanup alone may use --remove-data. Foreground serve additionally requires --dependencies and --expect-dependencies and accepts explicit --environment-stdin; dependency-plan requires --dependencies; owner-status requires --run-id. Bridge reservation requires --run-id, --service, --slot and --expect-generation; start/release require --run-id, --slot and --expect-reservation. bridges/reconcile-bridges require --run-id. Foreground publish-bridge requires --run-id, --slot, --expect-reservation and exactly one of --port or --unix (no --json); --unix accepts up to eight --hostname claims; unpublish-bridge requires --run-id and --expect-reservation.",
     )
 }
 pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateError> {
     let Some((action, args)) = args.split_first() else {
         return Err(invalid());
     };
-    #[cfg(feature = "native-config-plan")]
-    if *action == "native" {
-        return native::command(candidate, args);
-    }
-    if *action == "inspect-interrupted-start-cleanup" {
-        let run = match *args {
-            ["--run-id", run] | ["--run-id", run, "--json"] => run,
-            _ => return Err(invalid()),
-        };
-        #[cfg(target_os = "macos")]
-        {
-            return graph::inspect_interrupted_start_cleanup(candidate, run);
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            let _ = run;
-            return Err(invalid());
-        }
-    }
-    if *action == "recover-interrupted-start-cleanup" {
-        let (run, expected) = match *args {
-            [
-                "--run-id",
-                run,
-                "--expect-selection",
-                expected,
-                "--retain-data",
-            ]
-            | [
-                "--run-id",
-                run,
-                "--expect-selection",
-                expected,
-                "--retain-data",
-                "--json",
-            ] => (run, expected),
-            _ => return Err(invalid()),
-        };
-        #[cfg(target_os = "macos")]
-        {
-            return graph::recover_interrupted_start_cleanup(candidate, run, expected);
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            let _ = (run, expected);
-            return Err(invalid());
-        }
-    }
-    if *action == "release-acknowledged-dependencies" {
-        let (run, owner, receipt, publisher, reservation) = match *args {
-            [
-                "--run-id",
-                run,
-                "--expect-owner",
-                owner,
-                "--expect-receipt",
-                receipt,
-                "--expect-publisher",
-                publisher,
-                "--expect-reservation",
-                reservation,
-            ]
-            | [
-                "--run-id",
-                run,
-                "--expect-owner",
-                owner,
-                "--expect-receipt",
-                receipt,
-                "--expect-publisher",
-                publisher,
-                "--expect-reservation",
-                reservation,
-                "--json",
-            ] => (run, owner, receipt, publisher, reservation),
-            _ => return Err(invalid()),
-        };
-        #[cfg(target_os = "macos")]
-        {
-            return graph::release_acknowledged_dependencies(
-                candidate,
-                graph::AcknowledgedPublisherSelection {
-                    run,
-                    owner,
-                    receipt_sha256: receipt,
-                    publisher_sha256: publisher,
-                },
-                reservation,
-            );
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            let _ = (run, owner, receipt, publisher, reservation);
-            return Err(invalid());
-        }
-    }
-    if *action == "retire-acknowledged-publisher" {
-        let (run, owner, receipt, publisher) = match *args {
-            [
-                "--run-id",
-                run,
-                "--expect-owner",
-                owner,
-                "--expect-receipt",
-                receipt,
-                "--expect-publisher",
-                publisher,
-            ]
-            | [
-                "--run-id",
-                run,
-                "--expect-owner",
-                owner,
-                "--expect-receipt",
-                receipt,
-                "--expect-publisher",
-                publisher,
-                "--json",
-            ] => (run, owner, receipt, publisher),
-            _ => return Err(invalid()),
-        };
-        #[cfg(target_os = "macos")]
-        {
-            return graph::retire_acknowledged_publisher(
-                candidate,
-                graph::AcknowledgedPublisherSelection {
-                    run,
-                    owner,
-                    receipt_sha256: receipt,
-                    publisher_sha256: publisher,
-                },
-            );
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            let _ = (run, owner, receipt, publisher);
-            return Err(invalid());
-        }
-    }
-    if *action == "inspect-missing-publication-lock" {
-        let run = match *args {
-            ["--run-id", run] | ["--run-id", run, "--json"] => run,
-            _ => return Err(invalid()),
-        };
-        #[cfg(target_os = "macos")]
-        {
-            return graph::inspect_missing_publication_lock(candidate, run);
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            let _ = run;
-            return Err(invalid());
-        }
-    }
-    if *action == "retire-missing-publication-lock" {
-        let (run, selection) = match *args {
-            [
-                "--run-id",
-                run,
-                "--expect-selection",
-                selection,
-                "--accept-quiesced-candidate-home",
-            ]
-            | [
-                "--run-id",
-                run,
-                "--expect-selection",
-                selection,
-                "--accept-quiesced-candidate-home",
-                "--json",
-            ] => (run, selection),
-            _ => return Err(invalid()),
-        };
-        #[cfg(target_os = "macos")]
-        {
-            return graph::retire_missing_publication_lock(candidate, run, selection);
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            let _ = (run, selection);
-            return Err(invalid());
-        }
-    }
-    if *action == "inspect-host-pin-recovery" {
-        let run = match *args {
-            ["--run-id", run] | ["--run-id", run, "--json"] => run,
-            _ => return Err(invalid()),
-        };
-        #[cfg(target_os = "macos")]
-        {
-            return graph::inspect_host_pin_recovery(candidate, run);
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            let _ = run;
-            return Err(invalid());
-        }
-    }
-    if *action == "recover-host-pins" {
-        let (run, expected) = match *args {
-            [
-                "--run-id",
-                run,
-                "--expect-selection",
-                expected,
-                "--accept-legacy-device-rebind",
-            ]
-            | [
-                "--run-id",
-                run,
-                "--expect-selection",
-                expected,
-                "--accept-legacy-device-rebind",
-                "--json",
-            ] => (run, expected),
-            _ => return Err(invalid()),
-        };
-        #[cfg(target_os = "macos")]
-        {
-            return graph::recover_host_pins(candidate, run, expected);
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            let _ = (run, expected);
-            return Err(invalid());
-        }
-    }
-    if *action == "inspect-absent-publication-cleanup" {
-        let (run, original, inspection) = match *args {
-            [
-                "--run-id",
-                run,
-                "--original-owner-file",
-                original,
-                "--host-inspection-file",
-                inspection,
-            ]
-            | [
-                "--run-id",
-                run,
-                "--original-owner-file",
-                original,
-                "--host-inspection-file",
-                inspection,
-                "--json",
-            ] => (run, original, inspection),
-            _ => return Err(invalid()),
-        };
-        #[cfg(target_os = "macos")]
-        {
-            return graph::inspect_absent_publication_cleanup(
-                candidate,
-                run,
-                Path::new(original),
-                Path::new(inspection),
-            );
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            let _ = (run, original, inspection);
-            return Err(invalid());
-        }
-    }
-    if *action == "recover-absent-publication-cleanup" {
-        let (run, original, inspection, expected) = match *args {
-            [
-                "--run-id",
-                run,
-                "--original-owner-file",
-                original,
-                "--host-inspection-file",
-                inspection,
-                "--expect-selection",
-                expected,
-                "--retain-data",
-                "--accept-unpinned-post-reboot",
-            ]
-            | [
-                "--run-id",
-                run,
-                "--original-owner-file",
-                original,
-                "--host-inspection-file",
-                inspection,
-                "--expect-selection",
-                expected,
-                "--retain-data",
-                "--accept-unpinned-post-reboot",
-                "--json",
-            ] => (run, original, inspection, expected),
-            _ => return Err(invalid()),
-        };
-        #[cfg(target_os = "macos")]
-        {
-            return graph::recover_absent_publication_cleanup(
-                candidate,
-                run,
-                expected,
-                Path::new(original),
-                Path::new(inspection),
-            );
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            let _ = (run, original, inspection, expected);
-            return Err(invalid());
-        }
-    }
-    if *action == "inspect-source-device-rebind" {
-        let run = match *args {
-            ["--run-id", run] | ["--run-id", run, "--json"] => run,
-            _ => return Err(invalid()),
-        };
-        #[cfg(target_os = "macos")]
-        {
-            return graph::inspect_source_device_rebind(candidate, run);
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            let _ = run;
-            return Err(invalid());
-        }
-    }
-    if *action == "recover-source-device-rebind" {
-        let (run, expected) = match *args {
-            [
-                "--run-id",
-                run,
-                "--expect-selection",
-                expected,
-                "--accept-legacy-device-rebind",
-            ]
-            | [
-                "--run-id",
-                run,
-                "--expect-selection",
-                expected,
-                "--accept-legacy-device-rebind",
-                "--json",
-            ] => (run, expected),
-            _ => return Err(invalid()),
-        };
-        #[cfg(target_os = "macos")]
-        {
-            return graph::recover_source_device_rebind(candidate, run, expected);
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            let _ = (run, expected);
-            return Err(invalid());
-        }
-    }
-    if ["run-selection", "run-service"].contains(action) {
-        return one_off::command(candidate, action, args);
-    }
-    if ["logs", "exec", "exec-selection"].contains(action) {
-        return service_io::command(candidate, action, args);
-    }
-    if *action == "refresh-dependencies" {
-        let run = match *args {
-            ["--run-id", run] | ["--run-id", run, "--json"]
-                if run.len() == 32
-                    && run
-                        .bytes()
-                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)) =>
-            {
-                run
-            }
-            _ => return Err(invalid()),
-        };
-        #[cfg(target_os = "macos")]
-        {
-            return graph::foreground::refresh_dependencies_request(candidate, run);
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            let _ = run;
-            return Err(CandidateError::new(
-                "unsupported_host",
-                "Dependency refresh requires macOS.",
-            ));
-        }
-    }
-    let (arguments, normalized_selection) = crate::normalized_cli::extract(
-        args,
-        ["run", "serve", "serve-restore", "source-compatibility"].contains(action),
-    )?;
-    if *action == "source-compatibility" && normalized_selection.is_none() {
-        return Err(invalid());
-    }
-    let args = arguments.as_slice();
-    if *action == "recover-live-owner" {
-        let (run, expected) = match *args {
-            ["--run-id", run, "--expect-receipt", expected]
-            | ["--run-id", run, "--expect-receipt", expected, "--json"] => (run, expected),
-            _ => return Err(invalid()),
-        };
-        #[cfg(target_os = "macos")]
-        {
-            return graph::recover_live_owner(candidate, run, expected);
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            let _ = (run, expected);
-            return Err(CandidateError::new(
-                "unsupported_host",
-                "Same-boot foreground recovery requires macOS.",
-            ));
-        }
-    }
-    if *action == "owner-restore" {
-        let options = restore_options(args)?;
-        #[cfg(target_os = "macos")]
-        {
-            use std::os::fd::{FromRawFd, OwnedFd};
-            // All flags and identities are validated before stdin ownership moves.
-            // SAFETY: F_GETFD checks validity without taking ownership.
-            if unsafe { libc::fcntl(0, libc::F_GETFD) } < 0 {
-                return Err(CandidateError::new(
-                    "graph_environment_input",
-                    "Private environment input was refused.",
-                ));
-            }
-            // SAFETY: this explicit one-shot operation transfers checked stdin;
-            // the private receiver validates descriptor type, bounds and EOF.
-            let managed = environment::receive(
-                unsafe { OwnedFd::from_raw_fd(0) },
-                options.plan,
-                options.run,
-            )?;
-            return graph::foreground::restore_request(
-                candidate,
-                options.run,
-                options.plan,
-                options.generation,
-                &managed,
-            );
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            let _ = (options.run, options.plan, options.generation);
-            return Err(CandidateError::new(
-                "unsupported_host",
-                "Foreground graph restore requires macOS.",
-            ));
-        }
-    }
-    if ["dependency-reservations", "recover-dependency-reservation"].contains(action) {
-        #[cfg(target_os = "macos")]
-        {
-            return match (*action, args) {
-                ("dependency-reservations", [] | ["--json"]) => {
-                    graph::dependency_reservations(candidate)
-                }
-                (
-                    "recover-dependency-reservation",
-                    ["--run-id", run, "--expect-reservation", expected]
-                    | ["--run-id", run, "--expect-reservation", expected, "--json"],
-                ) => graph::recover_dependency_reservation(candidate, run, expected),
-                _ => Err(invalid()),
-            };
-        }
-        #[cfg(not(target_os = "macos"))]
-        return Err(CandidateError::new(
-            "unsupported_host",
-            "Dependency reservations require macOS.",
-        ));
-    }
     if *action == "dependency-plan" {
         let path = match *args {
             ["--dependencies", path] | ["--dependencies", path, "--json"] => Path::new(path),
@@ -513,28 +37,6 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
             ));
         }
     }
-    if *action == "dependency-discover" {
-        let (port, executable) = match *args {
-            ["--host-port", port, "--executable", executable]
-            | ["--host-port", port, "--executable", executable, "--json"] => (
-                port.parse::<u16>().map_err(|_| invalid())?,
-                Path::new(executable),
-            ),
-            _ => return Err(invalid()),
-        };
-        #[cfg(target_os = "macos")]
-        {
-            return relay::discover(executable, port);
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            let _ = (port, executable);
-            return Err(CandidateError::new(
-                "unsupported_host",
-                "Graph dependency discovery requires macOS.",
-            ));
-        }
-    }
     if *action == "storage-inventory" {
         return if args.is_empty() || *args == ["--json"] {
             graph::storage_inventory(candidate)
@@ -545,18 +47,12 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
     if ![
         "run",
         "serve",
-        "serve-restore",
-        "source-compatibility",
-        "restore-selection",
-        "retained-preflight",
         "owner-status",
         "restart",
         "restore",
         "inspect",
         "reconcile",
         "cleanup",
-        "recover-cleanup",
-        "retire-recovered-publisher",
         "archive",
         "export",
         "reconcile-export",
@@ -575,14 +71,9 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
     }
     let mut singles = BTreeMap::new();
     let mut readiness = BTreeMap::new();
-    let mut route_slots = BTreeMap::new();
-    let mut release_initializer_cache = std::collections::BTreeSet::new();
     let mut profiles = Vec::new();
     let mut remove_data = false;
     let mut environment_stdin = false;
-    let mut automatic_dependency_slots = false;
-    let mut live_source = false;
-    let mut shared_source = false;
     let mut json = false;
     let mut unix = false;
     let mut hostnames = Vec::new();
@@ -590,35 +81,8 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
     while index < args.len() {
         let key = args[index];
         index += 1;
-        if key == "--shared-source" {
-            if shared_source
-                || live_source
-                || !["run", "serve", "serve-restore", "restart", "restore"].contains(action)
-            {
-                return Err(invalid());
-            }
-            shared_source = true;
-            continue;
-        }
-        if key == "--live-source" {
-            if live_source
-                || shared_source
-                || !["run", "serve", "serve-restore", "restart", "restore"].contains(action)
-            {
-                return Err(invalid());
-            }
-            live_source = true;
-            continue;
-        }
-        if key == "--auto-dependency-slots" {
-            if automatic_dependency_slots || !["serve", "serve-restore"].contains(action) {
-                return Err(invalid());
-            }
-            automatic_dependency_slots = true;
-            continue;
-        }
         if key == "--environment-stdin" {
-            if environment_stdin || !["serve", "serve-restore"].contains(action) {
+            if environment_stdin || *action != "serve" {
                 return Err(invalid());
             }
             environment_stdin = true;
@@ -647,20 +111,7 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
         }
         let value = *args.get(index).ok_or_else(invalid)?;
         index += 1;
-        if key == "--release-initializer-cache" && ["run", "serve"].contains(action) {
-            if release_initializer_cache.len() >= 32
-                || value.is_empty()
-                || value.len() > 64
-                || !value
-                    .bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
-                || !release_initializer_cache.insert(value.to_owned())
-            {
-                return Err(invalid());
-            }
-        } else if key == "--route-slot" && ["serve", "serve-restore"].contains(action) {
-            routes::insert(&mut route_slots, value)?;
-        } else if key == "--hostname" && *action == "publish-bridge" {
+        if key == "--hostname" && *action == "publish-bridge" {
             if hostnames.len() >= 8 {
                 return Err(invalid());
             }
@@ -668,9 +119,7 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
                 hack_runtime_core::provider::publication::normalize_hostname(value)
                     .map_err(|_| invalid())?,
             );
-        } else if key == "--ready"
-            && ["run", "serve", "serve-restore", "restart", "restore"].contains(action)
-        {
+        } else if key == "--ready" && ["run", "serve", "restart", "restore"].contains(action) {
             let (service, condition) = value.split_once('=').ok_or_else(invalid)?;
             let condition = match condition {
                 "started" => Condition::Started,
@@ -681,17 +130,7 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
             if readiness.insert(service.to_owned(), condition).is_some() {
                 return Err(invalid());
             }
-        } else if key == "--profile"
-            && [
-                "run",
-                "serve",
-                "serve-restore",
-                "source-compatibility",
-                "restart",
-                "restore",
-            ]
-            .contains(action)
-        {
+        } else if key == "--profile" && ["run", "serve", "restart", "restore"].contains(action) {
             profiles.push(value.to_owned());
         } else if ([
             "reserve-bridge",
@@ -711,24 +150,11 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
             .contains(action)
                 && key == "--expect-reservation")
             || (*action == "publish-bridge" && key == "--port")
-            || (["serve", "serve-restore"].contains(action)
-                && ["--dependencies", "--expect-dependencies"].contains(&key))
-            || (*action == "serve-restore" && key == "--expect-generation")
-            || (*action == "recover-cleanup" && key == "--expect-receipt")
-            || (*action == "retire-recovered-publisher" && key == "--expect-owner")
+            || (*action == "serve" && ["--dependencies", "--expect-dependencies"].contains(&key))
             || key == "--run-id"
-            || ([
-                "run",
-                "serve",
-                "serve-restore",
-                "source-compatibility",
-                "restart",
-                "restore",
-            ]
-            .contains(action)
+            || (["run", "serve", "restart", "restore"].contains(action)
                 && [
                     "--project",
-                    "--branch",
                     "--file",
                     "--expect-plan",
                     "--source-revision",
@@ -743,50 +169,12 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
             return Err(invalid());
         }
     }
-    if live_source && normalized_selection.is_some() {
-        return Err(CandidateError::new(
-            "normalized_live_source_unsupported",
-            "Normalized graphs currently require immutable source; live source is not supported.",
-        ));
-    }
-    if let Some(branch) = singles.get("--branch") {
-        hack_runtime_core::validate_branch(branch)?;
-    }
-    if live_source && !singles.contains_key("--source-revision") {
-        return Err(invalid());
-    }
     let run = *singles.get("--run-id").ok_or_else(invalid)?;
     let encode = |v| {
         serde_json::to_value(v)
             .map_err(|_| CandidateError::new("graph_output", "Cannot encode graph receipt."))
     };
     match *action {
-        "retained-preflight" => {
-            if singles.len() != 1 || remove_data || !readiness.is_empty() || !profiles.is_empty() {
-                return Err(invalid());
-            }
-            #[cfg(target_os = "macos")]
-            {
-                graph::retained_startup_preflight(candidate, run)
-            }
-            #[cfg(not(target_os = "macos"))]
-            {
-                Err(CandidateError::new(
-                    "unsupported_host",
-                    "Retained foreground startup requires macOS.",
-                ))
-            }
-        }
-        "restore-selection" => {
-            #[cfg(target_os = "macos")]
-            {
-                graph::foreground::restore_selection(candidate, run)
-            }
-            #[cfg(not(target_os = "macos"))]
-            {
-                Err(invalid())
-            }
-        }
         "reserve-bridge" => serde_json::to_value(graph::reserve_bridge(
             candidate,
             graph::ReserveBridgeOptions {
@@ -889,30 +277,6 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
                 ))
             }
         }
-        "recover-cleanup" => {
-            let expected = *singles.get("--expect-receipt").ok_or_else(invalid)?;
-            #[cfg(target_os = "macos")]
-            {
-                graph::recover_cleanup(candidate, run, expected)
-            }
-            #[cfg(not(target_os = "macos"))]
-            {
-                let _ = expected;
-                Err(invalid())
-            }
-        }
-        "retire-recovered-publisher" => {
-            let expected = *singles.get("--expect-owner").ok_or_else(invalid)?;
-            #[cfg(target_os = "macos")]
-            {
-                graph::retire_recovered_publisher(candidate, run, expected)
-            }
-            #[cfg(not(target_os = "macos"))]
-            {
-                let _ = expected;
-                Err(invalid())
-            }
-        }
         "cleanup" => {
             #[cfg(target_os = "macos")]
             if graph::inspect(candidate, run)?
@@ -920,7 +284,7 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
                 .relay_startup
                 .is_some()
             {
-                return graph::foreground::cleanup_request(candidate, run, remove_data);
+                return graph::foreground::request(candidate, run, Some(remove_data));
             }
             encode(graph::cleanup(candidate, run, remove_data)?)
         }
@@ -935,47 +299,18 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
                 .unwrap_or(30);
             let values = BTreeMap::new();
             let options = graph::RunOptions {
-                routing_enrolled: !route_slots.is_empty(),
                 project: PlanOptions {
-                    branch: singles.get("--branch").copied(),
                     project: Path::new(project),
                     compose_file: Path::new(file),
                     profiles: &profiles,
                 },
                 expected_plan: expected,
                 source_revision: singles.get("--source-revision").copied(),
-                live_source,
-                shared_source,
-                release_initializer_cache,
                 non_secret_values: &values,
                 readiness: &readiness,
                 run_id: run,
                 timeout: Duration::from_secs(timeout),
             };
-            if let Some(selection) = &normalized_selection {
-                let input = selection.load()?;
-                let compose = input.options(PlanOptions {
-                    branch: options.project.branch,
-                    project: options.project.project,
-                    compose_file: options.project.compose_file,
-                    profiles: options.project.profiles,
-                });
-                return normalized::command(
-                    candidate,
-                    action,
-                    graph::NormalizedRunOptions {
-                        run: options,
-                        compose,
-                    },
-                    &singles,
-                    &route_slots,
-                    environment_stdin,
-                    automatic_dependency_slots,
-                );
-            }
-            if ["serve-restore", "source-compatibility"].contains(action) {
-                return Err(invalid());
-            }
             if *action == "serve" {
                 #[cfg(target_os = "macos")]
                 {
@@ -1001,7 +336,6 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
                         None
                     };
                     let plan_options = PlanOptions {
-                        branch: options.project.branch,
                         project: options.project.project,
                         compose_file: options.project.compose_file,
                         profiles: options.project.profiles,
@@ -1035,27 +369,17 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
                             .copied()
                             .ok_or_else(invalid)?,
                         &inputs,
-                        run,
-                        automatic_dependency_slots,
                     )?;
                     return encode(if let Some(managed) = &managed {
-                        graph::foreground::serve_with_routes(
+                        graph::foreground::serve_with_environment(
                             candidate,
                             options,
                             runtime,
                             managed.values(),
                             managed.deadline(),
-                            &route_slots,
                         )?
                     } else {
-                        graph::foreground::serve_with_routes(
-                            candidate,
-                            options,
-                            runtime,
-                            &BTreeMap::new(),
-                            std::time::Instant::now() + Duration::from_secs(120),
-                            &route_slots,
-                        )?
+                        graph::foreground::serve(candidate, options, runtime)?
                     });
                 }
                 #[cfg(not(target_os = "macos"))]
@@ -1075,49 +399,4 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
             })
         }
     }
-}
-
-struct RestoreOptions<'a> {
-    run: &'a str,
-    plan: &'a str,
-    generation: &'a str,
-}
-fn restore_options<'a>(args: &[&'a str]) -> Result<RestoreOptions<'a>, CandidateError> {
-    let mut run = None;
-    let mut plan = None;
-    let mut generation = None;
-    let mut environment = false;
-    let mut json = false;
-    let mut arguments = args.iter().copied();
-    while let Some(flag) = arguments.next() {
-        match flag {
-            "--run-id" if run.is_none() => run = Some(arguments.next().ok_or_else(invalid)?),
-            "--expect-plan" if plan.is_none() => plan = Some(arguments.next().ok_or_else(invalid)?),
-            "--expect-generation" if generation.is_none() => {
-                generation = Some(arguments.next().ok_or_else(invalid)?)
-            }
-            "--environment-stdin" if !environment => environment = true,
-            "--json" if !json => json = true,
-            _ => return Err(invalid()),
-        }
-    }
-    let options = RestoreOptions {
-        run: run.ok_or_else(invalid)?,
-        plan: plan.ok_or_else(invalid)?,
-        generation: generation.ok_or_else(invalid)?,
-    };
-    let valid = |value: &str, length: usize| {
-        value.len() == length
-            && value
-                .bytes()
-                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-    };
-    if !environment
-        || !valid(options.run, 32)
-        || !valid(options.plan, 64)
-        || !valid(options.generation, 64)
-    {
-        return Err(invalid());
-    }
-    Ok(options)
 }

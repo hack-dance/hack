@@ -1,7 +1,7 @@
 //! Process-wide foreground-only signal ownership. Handler never accesses an FD.
 use super::{CandidateError, refused, transport::Publication};
 use std::{
-    os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd},
+    os::fd::{AsRawFd, FromRawFd, OwnedFd},
     sync::atomic::{AtomicBool, Ordering},
 };
 static OWNED: AtomicBool = AtomicBool::new(false);
@@ -9,22 +9,12 @@ static PENDING: AtomicBool = AtomicBool::new(false);
 extern "C" fn notified(_: libc::c_int) {
     PENDING.store(true, Ordering::Release);
 }
-/// The caller retains Events for the entire callback lifetime.
-pub(super) fn startup_pending() -> bool {
-    PENDING.load(Ordering::Acquire)
-}
-pub(in crate::provider::graph) struct Events {
+pub(super) struct Events {
     queue: OwnedFd,
     previous: Vec<(i32, libc::sigaction)>,
 }
 impl Events {
-    pub(super) fn new(publication: &Publication) -> Result<Self, CandidateError> {
-        Self::new_descriptor(publication.descriptor())
-    }
-    /// Caller retains the exact listener for the entire signal queue lifetime.
-    pub(in crate::provider::graph) fn new_descriptor(
-        listener: BorrowedFd<'_>,
-    ) -> Result<Self, CandidateError> {
+    pub fn new(publication: &Publication) -> Result<Self, CandidateError> {
         if OWNED
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .is_err()
@@ -55,7 +45,7 @@ impl Events {
             udata: std::ptr::null_mut(),
         };
         let changes = [
-            change(listener.as_raw_fd() as usize, libc::EVFILT_READ),
+            change(publication.fd() as usize, libc::EVFILT_READ),
             change(libc::SIGTERM as usize, libc::EVFILT_SIGNAL),
             change(libc::SIGINT as usize, libc::EVFILT_SIGNAL),
         ];
@@ -94,72 +84,8 @@ impl Events {
         }
         Ok(events)
     }
-    /// Register only a retained child handle; no process discovered by PID is adopted.
-    pub fn watch_child(&self, child: &std::process::Child) -> Result<(), CandidateError> {
-        self.child_filter(child, libc::EV_ADD | libc::EV_ENABLE | libc::EV_ONESHOT)
-    }
-    /// Remove queued exit notifications before reaping or replacing a publisher.
-    pub fn unwatch_child(&self, child: &std::process::Child) -> Result<(), CandidateError> {
-        self.child_filter(child, libc::EV_DELETE)
-    }
-    fn child_filter(&self, child: &std::process::Child, flags: u16) -> Result<(), CandidateError> {
-        let change = libc::kevent {
-            ident: child.id() as usize,
-            filter: libc::EVFILT_PROC,
-            flags,
-            fflags: libc::NOTE_EXIT,
-            data: 0,
-            udata: std::ptr::null_mut(),
-        };
-        // SAFETY: owned queue and initialized change remain valid for this call.
-        let result = unsafe {
-            libc::kevent(
-                self.queue.as_raw_fd(),
-                &change,
-                1,
-                std::ptr::null_mut(),
-                0,
-                std::ptr::null(),
-            )
-        };
-        if result < 0 {
-            let code = std::io::Error::last_os_error().raw_os_error();
-            // A one-shot notification may already have been consumed.
-            if flags == libc::EV_DELETE && code == Some(libc::ENOENT) {
-                return Ok(());
-            }
-            return Err(refused());
-        }
-        Ok(())
-    }
     pub fn pending(&self) -> bool {
         PENDING.load(Ordering::Acquire)
-    }
-    /// The runtime retains this notification descriptor for this queue's lifetime.
-    pub fn watch_read(&self, descriptor: BorrowedFd<'_>) -> Result<(), CandidateError> {
-        let change = libc::kevent {
-            ident: descriptor.as_raw_fd() as usize,
-            filter: libc::EVFILT_READ,
-            flags: libc::EV_ADD | libc::EV_ENABLE,
-            fflags: 0,
-            data: 0,
-            udata: std::ptr::null_mut(),
-        };
-        // SAFETY: owned queue, retained descriptor and initialized change are live.
-        if unsafe {
-            libc::kevent(
-                self.queue.as_raw_fd(),
-                &change,
-                1,
-                std::ptr::null_mut(),
-                0,
-                std::ptr::null(),
-            )
-        } < 0
-        {
-            return Err(refused());
-        }
-        Ok(())
     }
     pub fn wait(&self) -> Result<bool, CandidateError> {
         loop {
@@ -189,9 +115,6 @@ impl Events {
                 return Err(refused());
             }
             if count != 1 || event.flags & libc::EV_ERROR != 0 {
-                return Err(refused());
-            }
-            if event.filter == libc::EVFILT_PROC {
                 return Err(refused());
             }
             return Ok(event.filter == libc::EVFILT_SIGNAL);

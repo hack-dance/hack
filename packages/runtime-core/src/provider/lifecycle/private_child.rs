@@ -1,24 +1,34 @@
 //! Typed private relay delivery. Dropping a transport is not proof of guest exit.
-use super::RelayProcess;
-#[cfg(target_os = "macos")]
 use super::{OwnedGuest, command};
-use crate::CandidateError;
-#[cfg(target_os = "macos")]
-use crate::provider::relay_auth::PrivateInput;
-#[cfg(any(target_os = "macos", test))]
-use std::time::{Duration, Instant};
+use crate::{CandidateError, provider::relay_auth::PrivateInput};
+use serde::{Deserialize, Serialize};
 use std::{
     io::{self, Read},
     net::Ipv4Addr,
     os::fd::AsRawFd,
     process::{Child, ChildStderr, ChildStdout, ExitStatus, Stdio},
+    time::{Duration, Instant},
 };
-
 fn refused() -> CandidateError {
     CandidateError::new(
         "relay_private_child",
         "Private relay child operation was refused; guest state may require reconciliation.",
     )
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RelayProcess {
+    pub pid: u32,
+    pub start: u64,
+    pub port: u16,
+    #[serde(default = "legacy_address", skip_serializing_if = "is_legacy_address")]
+    pub address: Ipv4Addr,
+}
+fn legacy_address() -> Ipv4Addr {
+    Ipv4Addr::LOCALHOST
+}
+fn is_legacy_address(address: &Ipv4Addr) -> bool {
+    *address == Ipv4Addr::LOCALHOST
 }
 fn valid_address(slot: u8, address: Ipv4Addr) -> bool {
     slot < 32 && (address == Ipv4Addr::LOCALHOST || address == Ipv4Addr::new(127, 0, 0, slot + 2))
@@ -47,9 +57,8 @@ impl RelayLaunch<'_> {
 pub(crate) struct RelayChild {
     child: Option<Child>,
     status: Option<ExitStatus>,
-    stdout: Option<ChildStdout>,
-    stderr: Option<ChildStderr>,
-    socket: Option<crate::provider::engine::relay_exec::RelayExec>,
+    stdout: ChildStdout,
+    stderr: ChildStderr,
     out: Vec<u8>,
     err: Vec<u8>,
     container: String,
@@ -165,9 +174,8 @@ impl RelayChild {
         let handle = Self {
             child: Some(child),
             status: None,
-            stdout: Some(stdout),
-            stderr: Some(stderr),
-            socket: None,
+            stdout,
+            stderr,
             out: Vec::new(),
             err: Vec::new(),
             container: launch.container.into(),
@@ -180,41 +188,22 @@ impl RelayChild {
             gid: launch.gid,
             process: None,
         };
-        nonblocking(handle.stdout.as_ref().expect("pipe").as_raw_fd())?;
-        nonblocking(handle.stderr.as_ref().expect("pipe").as_raw_fd())?;
+        nonblocking(handle.stdout.as_raw_fd())?;
+        nonblocking(handle.stderr.as_raw_fd())?;
         Ok(handle)
     }
     fn drain(&mut self) -> Result<(), CandidateError> {
-        if let Some(socket) = &mut self.socket {
-            if socket.poll(&mut self.out, &mut self.err)? {
-                use std::os::unix::process::ExitStatusExt;
-                // This synthetic failure denotes lost transport, never guest exit.
-                self.status = Some(ExitStatus::from_raw(1 << 8));
-            }
-            return Ok(());
-        }
         let available = 4096_usize
             .checked_sub(self.out.len() + self.err.len())
             .ok_or_else(refused)?;
-        drain(
-            self.stdout.as_mut().ok_or_else(refused)?,
-            &mut self.out,
-            available,
-        )?;
+        drain(&mut self.stdout, &mut self.out, available)?;
         let available = 4096_usize
             .checked_sub(self.out.len() + self.err.len())
             .ok_or_else(refused)?;
-        drain(
-            self.stderr.as_mut().ok_or_else(refused)?,
-            &mut self.err,
-            available,
-        )
+        drain(&mut self.stderr, &mut self.err, available)
     }
     // May be called only after independent guest absence proof.
     fn reap_after_absence(&mut self) -> Result<(), CandidateError> {
-        // Closing this local descriptor is permitted only after independent STOP
-        // proof; transport EOF/Drop alone is never a guest-death assertion.
-        self.socket.take();
         if let Some(transport) = self.child.as_mut() {
             let status = match transport.try_wait().map_err(|_| refused())? {
                 Some(status) => status,
@@ -263,7 +252,6 @@ impl Drop for RelayChild {
         }
     }
 }
-#[cfg(target_os = "macos")]
 impl OwnedGuest<'_> {
     /// Caller must persist launch intent, verify container ownership/configuration,
     /// and revoke the grant on failure. Credentials travel only through child stdin.
@@ -287,39 +275,36 @@ impl OwnedGuest<'_> {
         let slot = options.slot.to_string();
         let port = options.port.to_string();
         let address = options.address.to_string();
-        let socket = crate::provider::engine::relay_exec::RelayExec::launch(
-            self,
-            options.container,
-            &user,
-            &[
-                "/run/hack-relay-guest".into(),
-                "--slot".into(),
-                slot,
-                "--listen-port".into(),
-                port,
-                "--listen-address".into(),
-                address,
-            ],
-            input,
-        )?;
-        let handle = RelayChild {
-            child: None,
-            status: None,
-            stdout: None,
-            stderr: None,
-            socket: Some(socket),
-            out: Vec::new(),
-            err: Vec::new(),
-            container: options.container.into(),
-            runtime: self.incarnation().into(),
-            boot: self.boot_id().into(),
-            port: options.port,
-            address: options.address,
-            slot: options.slot,
-            uid: options.uid,
-            gid: options.gid,
-            process: None,
-        };
+        let child = command(self.candidate, &self.owner)
+            .args([
+                "machine",
+                "exec",
+                "--name",
+                &self.owner.machine,
+                "-i",
+                "--",
+                "/opt/hack-engine/docker",
+                "--host",
+                "unix:///run/hack-local/docker.sock",
+                "exec",
+                "-i",
+                "--user",
+                &user,
+                options.container,
+                "/run/hack-relay-guest",
+                "--slot",
+                &slot,
+                "--listen-port",
+                &port,
+                "--listen-address",
+                &address,
+            ])
+            .stdin(input.into_stdin())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|_| refused())?;
+        let handle = RelayChild::from_child(child, options, self.incarnation(), self.boot_id())?;
         self.verify()?;
         Ok(handle)
     }
@@ -409,70 +394,10 @@ impl OwnedGuest<'_> {
         child.reap_after_absence()?;
         Ok(())
     }
-
-    /// Stop an orphan selected by a durable ready graph under its provider and
-    /// dead-owner publication locks. A recorded PID alone is never sufficient:
-    /// STOP rechecks container ID, executable, full argv and process start time.
-    pub(in crate::provider) fn stop_orphan_relay_listener(
-        &self,
-        options: RelayLaunch<'_>,
-        process: RelayProcess,
-        budget: Duration,
-    ) -> Result<(), CandidateError> {
-        if !options.valid()
-            || process.pid <= 1
-            || process.start == 0
-            || process.address != options.address
-            || process.port != options.port
-        {
-            return Err(refused());
-        }
-        let mut child = RelayChild {
-            child: None,
-            status: None,
-            stdout: None,
-            stderr: None,
-            socket: None,
-            out: Vec::new(),
-            err: Vec::new(),
-            container: options.container.into(),
-            runtime: self.incarnation().into(),
-            boot: self.boot_id().into(),
-            port: options.port,
-            address: options.address,
-            slot: options.slot,
-            uid: options.uid,
-            gid: options.gid,
-            process: Some(process),
-        };
-        self.stop_relay_listener(&mut child, budget)
-    }
-
-    /// A removed container cannot be inspected by STOP. Prove that both its
-    /// recorded ID and graph name are absent before reaping the host transport;
-    /// Docker removal itself has already killed processes in that container.
-    pub(in crate::provider) fn reap_relay_after_container_absence(
-        &self,
-        child: &mut RelayChild,
-        container_id: &str,
-        container_name: &str,
-    ) -> Result<(), CandidateError> {
-        if child.runtime != self.incarnation()
-            || child.boot != self.boot_id()
-            || child.container != container_id
-        {
-            return Err(refused());
-        }
-        self.verify()?;
-        crate::provider::engine::require_container_absent(self, container_id)?;
-        crate::provider::engine::require_container_absent(self, container_name)?;
-        child.reap_after_absence()
-    }
 }
 // Container absence is not inferred from a failed Docker request. A stopped
 // container must still have its exact immutable identity and zero host PID.
 // A reused process identity refuses without signalling the replacement.
-#[cfg(target_os = "macos")]
 const STOP: &str = r#"
 set -eu
 id=$1; p=$2; s=$3; slot=$4; address=$5; port=$6; user=$7
@@ -675,50 +600,5 @@ mod tests {
             assert!(handle.status.is_some());
             handle.reap_after_absence().unwrap();
         }
-    }
-    #[test]
-    fn live_transport_retains_launch_identity_and_observes_readiness() {
-        let child = std::process::Command::new("/bin/sh")
-            .args([
-                "-c",
-                "printf 'hack-relay-listener-v1 pid=42 start=9 port=25252\\n'; exec /bin/sleep 30",
-            ])
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
-        let container = "a".repeat(64);
-        let mut handle = RelayChild::from_child(
-            child,
-            RelayLaunch {
-                container: &container,
-                uid: 1001,
-                gid: 1002,
-                slot: 7,
-                port: 25252,
-                address: Ipv4Addr::LOCALHOST,
-            },
-            "runtime",
-            "boot",
-        )
-        .unwrap();
-        assert_eq!(handle.container, container);
-        assert_eq!(handle.runtime, "runtime");
-        assert_eq!(handle.boot, "boot");
-        assert_eq!(handle.slot, 7);
-        assert_eq!(handle.stop_user(), "1001:1002");
-        let deadline = Instant::now() + Duration::from_secs(2);
-        let ready = loop {
-            if let Some(ready) = handle.poll_ready().unwrap() {
-                break ready;
-            }
-            assert!(Instant::now() < deadline);
-            std::thread::sleep(Duration::from_millis(2));
-        };
-        assert_eq!(ready.pid, 42);
-        assert_eq!(ready.start, 9);
-        assert_eq!(handle.process, Some(ready));
-        // Drop owns and reaps this fixture transport; no guest is running.
     }
 }

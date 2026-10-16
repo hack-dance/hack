@@ -12,7 +12,6 @@ impl Fixture {
     }
     fn options(&self) -> PlanOptions<'_> {
         PlanOptions {
-            branch: None,
             project: &self.0,
             compose_file: Path::new("compose.yaml"),
             profiles: &[],
@@ -76,24 +75,17 @@ fn driver_profile_preserves_isolation_and_refuses_unqualified_inputs() {
     base["services"]["web"]["expose"] = json!(["3000"]);
     for (case, code) in [
         (0, None),
-        (1, None),
+        (1, Some("graph_subset")),
         (2, None),
         (3, Some("graph_budget")),
         (4, Some("graph_dependency_hosts")),
-        (5, None),
     ] {
         let mut document = base.clone();
         match case {
             1 => document["services"]["web"]["read_only"] = json!(false),
             2 => document["services"]["web"]["environment"] = json!({"PUBLIC":"value"}),
-            3 => document["services"]["web"]["mem_limit"] = json!("5g"),
+            3 => document["services"]["web"]["mem_limit"] = json!("2g"),
             4 => document["services"]["web"]["extra_hosts"] = json!(["one.example:host-gateway"]),
-            5 => {
-                document["services"]["web"]
-                    .as_object_mut()
-                    .unwrap()
-                    .remove("read_only");
-            }
             _ => {}
         }
         state::write(&fixture.0.join("compose.yaml"), &document).unwrap();
@@ -120,31 +112,7 @@ fn driver_profile_preserves_isolation_and_refuses_unqualified_inputs() {
                 );
                 assert_eq!(
                     prepared.configs["web"]["HostConfig"]["ReadonlyRootfs"],
-                    case != 1 && case != 5
-                );
-                let host = &prepared.configs["web"]["HostConfig"];
-                if case == 1 || case == 5 {
-                    // Explicit false and omitted read_only preserve image-layer /tmp.
-                    assert!(host.get("Tmpfs").is_none());
-                } else {
-                    assert_eq!(
-                        host["Tmpfs"],
-                        json!({"/tmp":"rw,noexec,nosuid,size=16777216"})
-                    );
-                }
-                // Other services remain explicitly read-only in the same graph.
-                assert_eq!(
-                    prepared.configs["init"]["HostConfig"]["Tmpfs"],
-                    json!({"/tmp":"rw,noexec,nosuid,size=16777216"})
-                );
-                assert_eq!(host["CapDrop"], json!(["ALL"]));
-                assert_eq!(host["SecurityOpt"], json!(["no-new-privileges"]));
-                assert!(host.get("Privileged").is_none());
-                let mut changed = host.clone();
-                changed["ReadonlyRootfs"] = json!(case == 1 || case == 5);
-                assert_eq!(
-                    mismatch(host, &changed, "HostConfig").as_deref(),
-                    Some("HostConfig.ReadonlyRootfs")
+                    true
                 );
                 assert_eq!(
                     prepared.configs["web"]["HostConfig"]["LogConfig"]["Config"]["max-size"],
@@ -157,201 +125,12 @@ fn driver_profile_preserves_isolation_and_refuses_unqualified_inputs() {
     assert!(!candidate.state_root.exists());
 }
 #[test]
-fn compose_pid_limit_is_opt_in_and_explicit_limits_remain_verified() {
-    let fixture = Fixture::new();
-    let home = Fixture::new();
-    let candidate = Candidate::discover(&home.0).unwrap();
-    for limit in [None, Some(64), Some(128), Some(129)] {
-        let mut document = compose(&format!("sha256:{}", "a".repeat(64)), "marker", false);
-        if let Some(limit) = limit {
-            document["services"]["web"]["pids_limit"] = json!(limit);
-        }
-        state::write(&fixture.0.join("compose.yaml"), &document).unwrap();
-        let review = project::plan(&candidate, fixture.options()).unwrap();
-        let inputs = project::inputs::compile(
-            &candidate,
-            fixture.options(),
-            &review.plan_id,
-            &BTreeMap::new(),
-        )
-        .unwrap();
-        let result = config::prepare(inputs, &goals(), &"a".repeat(32), &"b".repeat(32), None);
-        if limit == Some(129) {
-            assert_eq!(result.err().unwrap().code, "graph_budget");
-            continue;
-        }
-        let prepared = result.unwrap();
-        let host = &prepared.configs["web"]["HostConfig"];
-        assert_eq!(
-            host.get("PidsLimit"),
-            limit.map(|value| json!(value)).as_ref()
-        );
-        let mut observed = host.clone();
-        observed["PidsLimit"] = json!(0);
-        if limit.is_some() {
-            assert_eq!(
-                mismatch(host, &observed, "HostConfig").as_deref(),
-                Some("HostConfig.PidsLimit")
-            );
-        } else {
-            // Docker may materialize its own default; omission does not claim a limit.
-            assert!(mismatch(host, &observed, "HostConfig").is_none());
-        }
-    }
-    assert!(!candidate.state_root.exists());
-}
-#[test]
-fn compose_shared_memory_is_bounded_without_double_counting_memory() {
-    let fixture = Fixture::new();
-    let home = Fixture::new();
-    let candidate = Candidate::discover(&home.0).unwrap();
-    let image = format!("sha256:{}", "a".repeat(64));
-    for (shm, memory, expected) in [
-        (None, None, Some(64 * 1024 * 1024)),
-        (Some(json!("1gb")), None, Some(1024 * 1024 * 1024)),
-        (Some(json!("1gb")), Some("512m"), Some(1024 * 1024 * 1024)),
-        (Some(json!("1gb")), Some("4g"), Some(1024 * 1024 * 1024)),
-        (Some(json!("1b")), None, Some(1)),
-        (Some(json!("1073741825b")), None, None),
-        (Some(json!("0b")), None, None),
-        (Some(json!(-1)), None, None),
-        (Some(json!("-1gb")), None, None),
-        (Some(json!("not-a-size")), None, None),
-    ] {
-        let mut service = json!({"image":image,"network_mode":"none","command":["true"]});
-        if let Some(shm) = shm {
-            service["shm_size"] = shm;
-        }
-        if let Some(memory) = memory {
-            service["mem_limit"] = json!(memory);
-        }
-        let mut document = json!({"services":{"chrome":service}});
-        let mut goals = BTreeMap::from([("chrome".into(), Condition::Completed)]);
-        if memory == Some("4g") {
-            // Fill the 5.5GiB explicit reservation budget; tmpfs ceilings must not add to it.
-            document["services"]["peer"] = json!({"image":image,"network_mode":"none","command":["true"],"mem_limit":"1536m","shm_size":"1gb"});
-            goals.insert("peer".into(), Condition::Completed);
-        }
-        state::write(&fixture.0.join("compose.yaml"), &document).unwrap();
-        let review = match project::plan(&candidate, fixture.options()) {
-            Ok(review) => review,
-            Err(error) => {
-                assert!(
-                    expected.is_none(),
-                    "unexpected parser refusal: {}",
-                    error.code
-                );
-                continue;
-            }
-        };
-        let compiled = project::inputs::compile(
-            &candidate,
-            fixture.options(),
-            &review.plan_id,
-            &BTreeMap::new(),
-        );
-        let result = compiled.and_then(|inputs| {
-            config::prepare(inputs, &goals, &"a".repeat(32), &"b".repeat(32), None)
-        });
-        let Some(expected) = expected else {
-            assert!(result.is_err());
-            continue;
-        };
-        let prepared = result.unwrap();
-        let config = &prepared.configs["chrome"];
-        assert_eq!(config["HostConfig"]["ShmSize"], json!(expected));
-        let expected_memory = match memory {
-            Some("512m") => 512 * 1024 * 1024_u64,
-            Some("4g") => 4 * 1024 * 1024 * 1024_u64,
-            _ => 0,
-        };
-        assert_eq!(config["HostConfig"]["Memory"], json!(expected_memory));
-        let mut changed = config.clone();
-        changed["HostConfig"]["ShmSize"] = json!(expected + 1);
-        assert_eq!(
-            mismatch(config, &changed, "request").as_deref(),
-            Some("request.HostConfig.ShmSize")
-        );
-        assert!(contains_request(config, config));
-        assert!(!contains_request(config, &changed));
-    }
-    assert!(!candidate.state_root.exists());
-}
-#[test]
-fn omitted_service_limits_share_pool_and_explicit_caps_remain_enforced() {
-    let fixture = Fixture::new();
-    let candidate_root = Fixture::new();
-    let candidate = Candidate::discover(&candidate_root.0).unwrap();
-    let image = format!("sha256:{}", "a".repeat(64));
-    for (count, cpu, memory, accepted) in [
-        (14, None, None, true),
-        (32, None, None, true),
-        (33, None, None, false),
-        (1, Some(0.5), Some(64 * 1024 * 1024), true),
-        (1, Some(0.5), None, true),
-        (1, None, Some(64 * 1024 * 1024), true),
-        (1, Some(f64::NAN), None, false),
-        (1, Some(f64::INFINITY), None, false),
-        (1, Some(0.0), None, false),
-        (1, Some(-0.5), None, false),
-        (1, Some(0.05), None, false),
-        (1, Some(2.1), None, false),
-        (1, None, Some(0), false),
-        (1, None, Some(8 * 1024 * 1024), false),
-        (1, None, Some(MAX_MEMORY_BYTES + 1), false),
-        (3, Some(2.0), None, false),
-        (2, None, Some(3 * 1024 * 1024 * 1024), false),
-    ] {
-        let services: serde_json::Map<String, Value> = (0..count).map(|i| (format!("job-{i}"),json!({"image":image,"read_only":true,"network_mode":"none","command":["true"]}))).collect();
-        let goals = services
-            .keys()
-            .map(|name| (name.clone(), Condition::Completed))
-            .collect();
-        state::write(
-            &fixture.0.join("compose.yaml"),
-            &json!({"services":services}),
-        )
-        .unwrap();
-        let review = project::plan(&candidate, fixture.options()).unwrap();
-        let mut inputs = project::inputs::compile(
-            &candidate,
-            fixture.options(),
-            &review.plan_id,
-            &BTreeMap::new(),
-        )
-        .unwrap();
-        for service in inputs.review.plan.services.values_mut() {
-            service.limits.cpus = cpu;
-            service.limits.memory_bytes = memory;
-        }
-        let result = config::prepare(inputs, &goals, &"a".repeat(32), &"b".repeat(32), None);
-        if !accepted {
-            assert_eq!(result.err().unwrap().code, "graph_budget");
-            continue;
-        }
-        let prepared = result.unwrap();
-        assert_eq!(prepared.configs.len(), count);
-        for config in prepared.configs.values() {
-            assert_eq!(config["HostConfig"]["Memory"], json!(memory.unwrap_or(0)));
-            assert_eq!(
-                config["HostConfig"]["NanoCpus"],
-                json!((cpu.unwrap_or(0.0) * 1e9) as u64)
-            );
-        }
-    }
-    assert!(!candidate.state_root.exists());
-}
-#[test]
 fn larger_graphs_fit_by_resources_and_receipts_keep_matching_bounds() {
     let fixture = Fixture::new();
     let candidate_root = Fixture::new();
     let candidate = Candidate::discover(&candidate_root.0).unwrap();
     let image = format!("sha256:{}", "a".repeat(64));
     for (count, cpus, memory, accepted) in [
-        (1, 2.0, "3g", true),
-        (1, 2.0, "4g", true),
-        (1, 2.0, "4097m", false),
-        (2, 1.0, "3g", false),
         (12, 0.1, "32m", true),
         (32, 0.1, "32m", true),
         (33, 0.1, "32m", false),
@@ -395,11 +174,7 @@ fn larger_graphs_fit_by_resources_and_receipts_keep_matching_bounds() {
                     resources.insert(
                         key,
                         Resource {
-                            routing: None,
-                            networks: None,
-                            outbound: false,
                             cache: None,
-                            cache_provenance: None,
                             kind,
                             ..template.clone()
                         },
@@ -412,11 +187,7 @@ fn larger_graphs_fit_by_resources_and_receipts_keep_matching_bounds() {
                 overflow.insert(
                     "excess".into(),
                     Resource {
-                        routing: None,
-                        networks: None,
-                        outbound: false,
                         cache: None,
-                        cache_provenance: None,
                         kind,
                         ..template.clone()
                     },
@@ -993,7 +764,6 @@ fn fault_child() -> Result<(), CandidateError> {
     let project = PathBuf::from(std::env::var("HACK_LOCAL_GRAPH_PROJECT").expect("fixture"));
     let run_id = std::env::var("HACK_LOCAL_GRAPH_RUN").expect("run");
     let options = || PlanOptions {
-        branch: None,
         project: &project,
         compose_file: Path::new("compose.yaml"),
         profiles: &[],
@@ -1007,10 +777,6 @@ fn fault_child() -> Result<(), CandidateError> {
     execute(
         &candidate,
         RunOptions {
-            live_source: false,
-            shared_source: false,
-            release_initializer_cache: std::collections::BTreeSet::new(),
-            routing_enrolled: false,
             project: options(),
             expected_plan: &review.plan_id,
             source_revision: None,
@@ -1312,10 +1078,6 @@ fn native_http_graph_readiness_restart_restore_and_supervisor_loss() -> Result<(
     let goals = goals();
     let public = BTreeMap::new();
     let options = |run_id| RunOptions {
-        live_source: false,
-        shared_source: false,
-        release_initializer_cache: std::collections::BTreeSet::new(),
-        routing_enrolled: false,
         project: fixture.options(),
         expected_plan: &review.plan_id,
         source_revision: None,
@@ -1432,10 +1194,6 @@ kill -KILL "$1"
     let failed_result = super::run(
         &candidate,
         RunOptions {
-            live_source: false,
-            shared_source: false,
-            release_initializer_cache: std::collections::BTreeSet::new(),
-            routing_enrolled: false,
             project: fixture.options(),
             expected_plan: &review.plan_id,
             source_revision: None,
@@ -1634,10 +1392,6 @@ fn native_http_preserves_scoped_nonroot_delivery_and_fresh_restore() -> Result<(
     let goals = goals();
     let public = BTreeMap::new();
     let options = || RunOptions {
-        live_source: false,
-        shared_source: false,
-        release_initializer_cache: std::collections::BTreeSet::new(),
-        routing_enrolled: false,
         project: fixture.options(),
         expected_plan: &review.plan_id,
         source_revision: None,
@@ -1729,10 +1483,8 @@ fn public_environment_composes_with_private_delivery_without_metadata_leakage() 
         &token(),
         &token(),
         None,
-        config::DeliveryOptions {
-            environment: true,
-            ..Default::default()
-        },
+        true,
+        false,
     )
     .unwrap();
     let config = prepared.configs.get_mut("web").unwrap();
@@ -1809,12 +1561,7 @@ fn dependency_cache_graphs_share_only_verified_binding_and_pin_restore_targets()
         .unwrap();
         let manifest = snapshot.receipt().clone();
         let source = source::Inputs {
-            current_manifest: None,
             binding: SourceBinding {
-                shared: None,
-                cache_scope: None,
-                shared_contract: None,
-                live: None,
                 revision: manifest.revision.clone(),
                 archive_sha256: "b".repeat(64),
                 selection_sha256: manifest.selection_sha256.clone(),
@@ -1846,10 +1593,6 @@ fn dependency_cache_graphs_share_only_verified_binding_and_pin_restore_targets()
     );
     let first = prepare(&"a".repeat(32), Condition::Completed).unwrap();
     let second = prepare(&"c".repeat(32), Condition::Completed).unwrap();
-    assert_eq!(
-        first.cache_initializers,
-        BTreeMap::from([("deps".into(), "deps".into())])
-    );
     let cache = &first.resources["volume:deps"];
     assert!(cache.cache.is_some());
     assert_eq!(cache.name, second.resources["volume:deps"].name);
@@ -1870,385 +1613,4 @@ fn dependency_cache_graphs_share_only_verified_binding_and_pin_restore_targets()
     assert_ne!(cache.name, changed.resources["volume:deps"].name);
     assert!(!same_resource_bindings(&changed.resources, &retained));
     assert!(!candidate.state_root.exists());
-}
-
-#[test]
-fn outbound_network_is_pinned_and_requires_explicit_pool_capability() {
-    let resource = Resource {
-        routing: None,
-        networks: None,
-        outbound: true,
-        cache: None,
-        cache_provenance: None,
-        kind: Kind::Network,
-        key: "default".into(),
-        name: "owned-network".into(),
-        id: None,
-        image: None,
-        phase: "reserved".into(),
-    };
-    let resources = BTreeMap::from([("network:default".into(), resource)]);
-    assert!(check_network_request(&super::super::NetworkIntent::Isolated, &resources).is_err());
-    assert!(check_network_request(&super::super::NetworkIntent::HostGateway, &resources).is_err());
-    let approved = super::super::NetworkIntent::ApprovedHosts {
-        hosts: vec!["registry.example.com".into()],
-        cidrs: vec!["1.1.1.1/32".into()],
-    };
-    check_network_request(&approved, &resources).unwrap();
-    check_network_request(&super::super::NetworkIntent::Internet, &resources).unwrap();
-    let mut internal = resources.clone();
-    internal.get_mut("network:default").unwrap().outbound = false;
-    check_network_request(&super::super::NetworkIntent::Isolated, &internal).unwrap();
-    assert!(!same_resource_bindings(&resources, &internal));
-    let encoded = serde_json::to_value(&internal["network:default"]).unwrap();
-    assert!(encoded.get("outbound").is_none());
-    assert!(
-        !serde_json::from_value::<Resource>(encoded)
-            .unwrap()
-            .outbound
-    );
-}
-
-#[test]
-fn two_subpath_mounts_keep_one_volume_and_exact_docker_selection() {
-    let fixture = Fixture::new();
-    let home = Fixture::new();
-    let candidate = Candidate::discover(&home.0).unwrap();
-    let document = json!({"services":{"web":{"image":format!("sha256:{}","a".repeat(64)),"read_only":true,"network_mode":"none","volumes":[
-        {"type":"volume","source":"cache","target":"/one","volume":{"subpath":"workspaces/one"}},
-        {"type":"volume","source":"cache","target":"/two","volume":{"subpath":"workspaces/two"}}
-    ]}},"volumes":{"cache":{}}});
-    fs::write(fixture.0.join("compose.yaml"), document.to_string()).unwrap();
-    let review = project::plan(&candidate, fixture.options()).unwrap();
-    let inputs = project::inputs::compile(
-        &candidate,
-        fixture.options(),
-        &review.plan_id,
-        &BTreeMap::new(),
-    )
-    .unwrap();
-    let prepared = config::prepare(
-        inputs,
-        &BTreeMap::from([("web".into(), Condition::Started)]),
-        &"a".repeat(32),
-        &"b".repeat(32),
-        None,
-    )
-    .unwrap();
-    assert_eq!(
-        prepared
-            .resources
-            .values()
-            .filter(|r| r.kind == Kind::Volume)
-            .count(),
-        1
-    );
-    let mounts = &prepared.configs["web"]["HostConfig"]["Mounts"];
-    assert_eq!(mounts[0]["Source"], mounts[1]["Source"]);
-    assert_eq!(
-        mounts[0]["VolumeOptions"],
-        json!({"Subpath":"workspaces/one","NoCopy":true})
-    );
-    assert_eq!(
-        mounts[1]["VolumeOptions"],
-        json!({"Subpath":"workspaces/two","NoCopy":true})
-    );
-    let mut changed = prepared.configs["web"]["HostConfig"].clone();
-    changed["Mounts"][0]["VolumeOptions"]["Subpath"] = json!("workspaces/two");
-    assert!(!contains_request(
-        &prepared.configs["web"]["HostConfig"],
-        &changed
-    ));
-}
-
-#[test]
-fn endpoint_selects_service_primary_not_unrelated_first_graph_network() {
-    let mut receipt: Receipt = serde_json::from_value(json!({"version":1,"run":"a".repeat(32),"owner":"b".repeat(32),"namespace":"c".repeat(64),"plan_id":"d".repeat(64),"phase":"ready-observed","readiness":{},"resources":{}})).unwrap();
-    let mut networks = BTreeMap::new();
-    for (key, name, id) in [
-        ("aaa", "owned-unrelated", "1".repeat(64)),
-        ("zzz", "owned-primary", "2".repeat(64)),
-    ] {
-        receipt.resources.insert(
-            format!("network:{key}"),
-            Resource {
-                routing: None,
-                networks: None,
-                outbound: false,
-                cache: None,
-                cache_provenance: None,
-                kind: Kind::Network,
-                key: key.into(),
-                name: name.into(),
-                id: Some(id.clone()),
-                image: None,
-                phase: "created".into(),
-            },
-        );
-        networks.insert(format!("network:{key}"), Some(json!({"Id":id,"Name":name,"Containers":{"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee":{"EndpointID":"f".repeat(64),"IPv4Address":"172.20.0.2/16"}}})));
-    }
-    let container = json!({"Id":"e".repeat(64),"HostConfig":{"NetworkMode":"owned-primary"},"State":{"Running":true,"StartedAt":"2026-09-18T12:00:00Z"},"NetworkSettings":{"Networks":{"owned-primary":{"NetworkID":"2".repeat(64),"EndpointID":"f".repeat(64),"IPAddress":"172.20.0.2"}}}});
-    let selected = endpoint_network(&receipt, &container, &networks)
-        .unwrap()
-        .unwrap();
-    let endpoint = endpoints::resolve(
-        &container,
-        selected,
-        6980,
-        &endpoints::EndpointScope {
-            receipt: &receipt,
-            boot: "owned-boot",
-            service: "search",
-        },
-    )
-    .unwrap();
-    assert_eq!(endpoint.network_id, "2".repeat(64));
-    assert_eq!(endpoint.address.to_string(), "172.20.0.2");
-    // The previous graph-wide first selection cannot resolve this service.
-    assert!(
-        endpoints::resolve(
-            &container,
-            networks.first_key_value().unwrap().1.as_ref().unwrap(),
-            6980,
-            &endpoints::EndpointScope {
-                receipt: &receipt,
-                boot: "owned-boot",
-                service: "search"
-            }
-        )
-        .is_err()
-    );
-    for field in [
-        "missing-network",
-        "missing-attachment",
-        "changed-id",
-        "unknown-mode",
-    ] {
-        let mut observed = container.clone();
-        let mut snapshots = networks.clone();
-        match field {
-            "missing-network" => {
-                snapshots.insert("network:zzz".into(), None);
-            }
-            "missing-attachment" => observed["NetworkSettings"]["Networks"] = json!({}),
-            "changed-id" => {
-                observed["NetworkSettings"]["Networks"]["owned-primary"]["NetworkID"] =
-                    json!("3".repeat(64))
-            }
-            _ => observed["HostConfig"]["NetworkMode"] = json!("foreign"),
-        }
-        assert_eq!(
-            endpoint_network(&receipt, &observed, &snapshots)
-                .unwrap_err()
-                .code,
-            "graph_endpoint_identity",
-            "{field}"
-        );
-    }
-    let mut isolated = container;
-    isolated["HostConfig"]["NetworkMode"] = json!("none");
-    assert!(
-        endpoint_network(&receipt, &isolated, &networks)
-            .unwrap()
-            .is_none()
-    );
-}
-
-#[test]
-fn declared_networks_survive_compile_and_bind_restore_identity() {
-    for count in [2, MAX_NETWORKS] {
-        let fixture = Fixture::new();
-        let candidate_root = Fixture::new();
-        let candidate = Candidate::discover(&candidate_root.0).unwrap();
-        let names: Vec<String> = (0..count).rev().map(|i| format!("net{i}")).collect();
-        let declarations: serde_json::Map<String, Value> = names
-            .iter()
-            .map(|name| (name.clone(), json!({"internal":true})))
-            .collect();
-        let document = json!({"services":{"web":{"image":format!("sha256:{}","a".repeat(64)),"read_only":true,"command":["true"],"networks":names}},"networks":declarations});
-        state::write(&fixture.0.join("compose.yaml"), &document).unwrap();
-        let review = project::plan(&candidate, fixture.options()).unwrap();
-        let inputs = project::inputs::compile(
-            &candidate,
-            fixture.options(),
-            &review.plan_id,
-            &BTreeMap::new(),
-        )
-        .unwrap();
-        let prepared = config::prepare(
-            inputs,
-            &BTreeMap::from([("web".into(), Condition::Completed)]),
-            &"a".repeat(32),
-            &"b".repeat(32),
-            None,
-        )
-        .unwrap();
-        assert_eq!(
-            prepared.resources["container:web"].networks.as_ref(),
-            Some(&names)
-        );
-        let endpoints = prepared.configs["web"]["NetworkingConfig"]["EndpointsConfig"]
-            .as_object()
-            .unwrap();
-        assert_eq!(endpoints.len(), count);
-        assert_eq!(
-            prepared.configs["web"]["HostConfig"]["NetworkMode"],
-            prepared.resources[&format!("network:{}", names[0])].name
-        );
-        assert!(network_bindings_valid(&prepared.resources));
-        assert!(resource_counts_fit(&prepared.resources));
-        let mut changed = prepared.resources.clone();
-        changed
-            .get_mut("container:web")
-            .unwrap()
-            .networks
-            .as_mut()
-            .unwrap()
-            .reverse();
-        assert!(!same_resource_bindings(&prepared.resources, &changed));
-        changed.get_mut("container:web").unwrap().networks = Some(vec!["foreign".into()]);
-        assert!(!network_bindings_valid(&changed));
-        changed.get_mut("container:web").unwrap().networks =
-            Some(vec![names[0].clone(), names[0].clone()]);
-        assert!(!network_bindings_valid(&changed));
-        changed.get_mut("container:web").unwrap().networks = None;
-        assert!(!network_bindings_valid(&changed));
-        assert!(!same_resource_bindings(&prepared.resources, &changed));
-        assert!(!candidate.state_root.exists());
-    }
-}
-
-#[test]
-fn cleanup_identity_is_independent_of_declared_root_mode() {
-    let resource: Resource = serde_json::from_value(json!({
-        "kind":"container", "key":"web", "name":"owned-web", "id":"a".repeat(64),
-        "image":format!("sha256:{}","b".repeat(64)), "phase":"started", "networks":[]
-    }))
-    .unwrap();
-    let receipt: Receipt = serde_json::from_value(json!({
-        "version":1,"run":"a".repeat(32),"owner":"b".repeat(32),
-        "namespace":"c".repeat(64),"plan_id":"d".repeat(64),"phase":"ready-observed",
-        "readiness":{},"resources":{}
-    }))
-    .unwrap();
-    for read_only in [false, true] {
-        let observed = json!({"Id":resource.id,"Name":"/owned-web","Image":resource.image,
-            "Config":{"Labels":expected_labels(&receipt,&resource)},
-            "HostConfig":{"ReadonlyRootfs":read_only}});
-        verify_resource_identity(&receipt, &resource, &observed).unwrap();
-        for field in ["owner", "run", "plan", "id", "name", "image"] {
-            let mut foreign = observed.clone();
-            match field {
-                "owner" => foreign["Config"]["Labels"]["io.hack-local.owner"] = json!("foreign"),
-                "run" => foreign["Config"]["Labels"]["io.hack-local.graph"] = json!("foreign"),
-                "plan" => foreign["Config"]["Labels"]["io.hack-local.plan"] = json!("foreign"),
-                "id" => foreign["Id"] = json!("e".repeat(64)),
-                "name" => foreign["Name"] = json!("/foreign"),
-                "image" => foreign["Image"] = json!(format!("sha256:{}", "e".repeat(64))),
-                _ => unreachable!(),
-            }
-            assert!(
-                verify_resource_identity(&receipt, &resource, &foreign).is_err(),
-                "{field}"
-            );
-        }
-    }
-}
-
-#[test]
-fn shared_source_preserves_app_writes_but_freezes_cache_installer_inputs() {
-    let fixture = Fixture::new();
-    let home = Fixture::new();
-    let candidate = Candidate::discover(&home.0).unwrap();
-    fs::write(fixture.0.join("bun.lock"), "lock-one").unwrap();
-    fs::write(fixture.0.join("package.json"), "{}").unwrap();
-    let image = format!("sha256:{}", "a".repeat(64));
-    let document = json!({"services":{
-        "deps":{"image":image,"network_mode":"none","entrypoint":["/bin/true"],"command":[],
-            "volumes":[".:/app","deps:/app/node_modules"],
-            "labels":{"hack.dependencies.cache-volume":"deps","hack.dependencies.lockfiles":"bun.lock","hack.dependencies.bootstrap":"true"}},
-        "app":{"image":image,"network_mode":"none","entrypoint":["/bin/true"],"command":[],
-            "volumes":[".:/app","deps:/app/node_modules"],
-            "depends_on":{"deps":{"condition":"service_completed_successfully"}}},
-        "reader":{"image":image,"network_mode":"none","entrypoint":["/bin/true"],"command":[],"volumes":[".:/app:ro"]}
-    },"volumes":{"deps":{}}});
-    fs::write(fixture.0.join("compose.yaml"), document.to_string()).unwrap();
-    let review = project::plan(&candidate, fixture.options()).unwrap();
-    let snapshot = project::snapshot::capture_plan(&review.plan).unwrap();
-    let manifest = snapshot.receipt().clone();
-    let share = super::super::ProjectShareIntent::approve(&fixture.0, true).unwrap();
-    let path = share.guest_path.clone();
-    let mut source = source::Inputs {
-        current_manifest: None,
-        binding: SourceBinding {
-            shared: Some(share),
-            cache_scope: None,
-            shared_contract: Some(
-                project::live_source::Contract::from_plan(&review.plan, &manifest).unwrap(),
-            ),
-            live: None,
-            revision: manifest.revision.clone(),
-            archive_sha256: "b".repeat(64),
-            selection_sha256: manifest.selection_sha256.clone(),
-        },
-        manifest,
-        paths: BTreeMap::from([(".".into(), path.clone())]),
-    };
-    let compile = || {
-        project::inputs::compile(
-            &candidate,
-            fixture.options(),
-            &review.plan_id,
-            &BTreeMap::new(),
-        )
-        .unwrap()
-    };
-    let prepared = config::prepare(
-        compile(),
-        &BTreeMap::from([
-            ("deps".into(), Condition::Completed),
-            ("app".into(), Condition::Started),
-            ("reader".into(), Condition::Started),
-        ]),
-        &"a".repeat(32),
-        &"b".repeat(32),
-        Some(&source),
-    )
-    .unwrap();
-    let mounts = |name: &str| prepared.configs[name]["HostConfig"]["Mounts"][0].clone();
-    assert_eq!(mounts("app")["Source"], path);
-    assert_eq!(mounts("app")["ReadOnly"], false);
-    assert_eq!(mounts("reader")["ReadOnly"], true);
-    assert_eq!(
-        prepared.configs["app"]["HostConfig"]["CapAdd"],
-        json!(["DAC_OVERRIDE"])
-    );
-    assert_eq!(
-        prepared.configs["reader"]["HostConfig"]["CapAdd"],
-        json!(["DAC_OVERRIDE"])
-    );
-    assert!(prepared.configs["deps"]["HostConfig"]["CapAdd"].is_null());
-    assert_eq!(mounts("deps")["ReadOnly"], true);
-    assert_eq!(
-        mounts("deps")["Source"],
-        format!(
-            "/storage/hack-source/{}/{}/tree",
-            review.plan.namespace, source.manifest.revision
-        )
-    );
-    source.binding.shared = None;
-    assert!(
-        config::prepare(
-            compile(),
-            &BTreeMap::from([
-                ("deps".into(), Condition::Completed),
-                ("app".into(), Condition::Started),
-                ("reader".into(), Condition::Started)
-            ]),
-            &"a".repeat(32),
-            &"b".repeat(32),
-            Some(&source)
-        )
-        .is_err()
-    );
 }

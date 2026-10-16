@@ -120,8 +120,7 @@ fn response_scope_nonce_and_target_shape_are_strict() {
     let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     for key in ["runtime", "boot", "graph", "owner"] {
         let mut changed = value.clone();
-        let original = changed["request"][key][0].as_u64().unwrap();
-        changed["request"][key][0] = serde_json::json!(original ^ 1);
+        changed["request"][key][0] = serde_json::json!(77);
         assert!(GraphSelection::verify(&serde_json::to_vec(&changed).unwrap(), &request).is_err());
     }
     let mut duplicate = value.clone();

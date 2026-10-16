@@ -286,7 +286,6 @@ mod tests {
         let plan = crate::project::plan(
             &candidate,
             crate::project::PlanOptions {
-                branch: None,
                 project: &source,
                 compose_file: std::path::Path::new("compose.yaml"),
                 profiles: &[],
@@ -524,7 +523,6 @@ mod tests {
         let plan = crate::project::plan(
             &candidate,
             crate::project::PlanOptions {
-                branch: None,
                 project: &source,
                 compose_file: std::path::Path::new("compose.yaml"),
                 profiles: &[],
@@ -574,7 +572,6 @@ mod tests {
         let plan = crate::project::plan(
             &candidate,
             crate::project::PlanOptions {
-                branch: None,
                 project: &source,
                 compose_file: std::path::Path::new("compose.yaml"),
                 profiles: &[],

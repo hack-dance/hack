@@ -1,6 +1,5 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
 import { __testOnlyNodeWorkspace } from "../src/commands/node.ts";
-import { restoreEnv } from "./helpers/env.ts";
 
 let previousHome: string | undefined;
 let previousGlobalConfigPath: string | undefined;
@@ -11,12 +10,12 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  restoreEnv("HOME", previousHome);
+  process.env.HOME = previousHome;
   if (previousGlobalConfigPath === undefined) {
-    Reflect.deleteProperty(process.env, "HACK_GLOBAL_CONFIG_PATH");
+    process.env.HACK_GLOBAL_CONFIG_PATH = undefined;
     return;
   }
-  restoreEnv("HACK_GLOBAL_CONFIG_PATH", previousGlobalConfigPath);
+  process.env.HACK_GLOBAL_CONFIG_PATH = previousGlobalConfigPath;
 });
 
 test("parseWorkspaceMapSelector detects id-like selectors", () => {

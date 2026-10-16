@@ -1,6 +1,6 @@
 {
   "name": "hack",
-  "version": "4.2.1",
+  "version": "4.1.1",
   "description": "Operate and onboard Hack-managed local development environments.",
   "author": {
     "name": "Hack Dance LLC",
@@ -11,5 +11,6 @@
   "license": "MIT",
   "keywords": ["local-development", "docker", "developer-tools", "agents"],
   "skills": "./skills/",
-  "hooks": "./hooks/claude-hooks.json"
+  "hooks": "./hooks/claude-hooks.json",
+  "mcpServers": "./.mcp.json"
 }

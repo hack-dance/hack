@@ -41,13 +41,3 @@ export function getStringArray(
   const value = obj[key];
   return isStringArray(value) ? value : undefined;
 }
-
-/** Recursively freeze an own-enumerable object graph in place; cycles are not expected. */
-export function deepFreeze(value: unknown): void {
-  if (typeof value === "object" && value !== null) {
-    for (const child of Object.values(value)) {
-      deepFreeze(child);
-    }
-    Object.freeze(value);
-  }
-}

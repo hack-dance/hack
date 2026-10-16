@@ -7,12 +7,9 @@ publish = false
 description = "Private Hack v5 candidate runtime contracts and local planning"
 
 [features]
-native-config-plan = ["dep:hack-config-compiler"]
-installed-candidate = []
 environment-launcher = []
 native-http-probe = []
 native-stream-relay = []
-storage-root-witness-tool = []
 shared-mcp = []
 
 [lib]
@@ -23,17 +20,11 @@ name = "hack-runtime-candidate"
 path = "src/main.rs"
 
 [[bin]]
-name = "hack-native"
-path = "src/native_main.rs"
-required-features = ["installed-candidate"]
-
-[[bin]]
 name = "hack-mcp-adapter"
 path = "src/bin/hack-mcp-adapter.rs"
 required-features = ["shared-mcp"]
 
 [dependencies]
-hack-config-compiler = { path = "../config-compiler", optional = true }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = "0.10"
@@ -45,7 +36,7 @@ serde_yaml_ng = "=0.10.0"
 ignore = "0.4"
 rusqlite = { version = "=0.37.0", features = ["bundled"] }
 tar = { version = "=0.4.46", default-features = false }
-reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json"] }
 caseless = "=0.2.2"
 unicode-normalization = "=0.1.25"
 notify = "=8.2.0"
@@ -59,8 +50,3 @@ strip = true
 name = "hack-mcp-owner"
 path = "src/bin/hack-mcp-owner.rs"
 required-features = ["shared-mcp"]
-
-[[bin]]
-name = "hack-storage-root-witness"
-path = "src/bin/hack-storage-root-witness.rs"
-required-features = ["storage-root-witness-tool"]

@@ -11,7 +11,7 @@ pub enum Profile {
 }
 
 impl Profile {
-    pub const fn memory_mib(self) -> u32 {
+    pub fn memory_mib(self) -> u32 {
         match self {
             Self::Research => 2048,
             Self::Development => 6144,
@@ -41,21 +41,6 @@ impl Profile {
             // Guest allocation plus a provisional 2 GiB provider-overhead allowance
             // and 2 GiB left for interactive host work. The allowance is not a measurement.
             Self::Development => (u64::from(self.memory_mib()) + 4096) * 1024 * 1024,
-        }
-    }
-    pub(super) fn provider_memory_budget_bytes(self) -> u64 {
-        (u64::from(self.memory_mib()) + 2048) * 1024 * 1024
-    }
-    pub(super) fn operating_host_reserve_bytes(
-        self,
-        pressure: super::admission::MemoryPressureState,
-    ) -> u64 {
-        if self == Self::Development && pressure == super::admission::MemoryPressureState::Warning {
-            // Keep the full provisional overhead + interactive-host reserve
-            // when macOS warns; the guest's allocation has already been charged.
-            self.minimum_free_memory_bytes() - u64::from(self.memory_mib()) * 1024 * 1024
-        } else {
-            2 * 1024 * 1024 * 1024
         }
     }
     pub fn qualification(self) -> &'static str {

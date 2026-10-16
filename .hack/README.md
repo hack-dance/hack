@@ -16,7 +16,6 @@ hack run --profile toolchain toolchain -- test
 hack run --profile toolchain toolchain -- check
 hack run --profile toolchain toolchain -- rust
 hack run --profile toolchain toolchain -- rust-check
-hack run --profile toolchain toolchain -- config-compiler
 hack run --profile toolchain toolchain -- build
 hack run --profile toolchain toolchain -- exec bun index.ts --help
 ```
@@ -41,14 +40,6 @@ No Docker socket, user home, SSH agent, or credential directory is mounted. The
 checkout is writable for normal development, so commands can edit source files.
 The build context allows only the toolchain files and mise config, excluding project
 secrets and runtime state. Preserve Hack-generated `.gitignore` entries.
-
-Before the no-argument full `test` task, prepare its Linux compiler using the
-`config-compiler` task above. Full tests check the selected compiler's protocol and
-usability before launching; they do not automatically build or download it.
-`HACK_CONFIG_COMPILER_BINARY`, when supplied inside the container, must name an
-absolute compatible executable. Native host output does not substitute for the
-container's separate `dist`. Focused `test <paths>` still runs without this suite
-prerequisite; compiler-dependent paths require their own prepared compiler.
 
 Use host-native qualification for macOS Hypervisor/SmolVM/libkrun behavior, routing
 and trust, idle reclamation, and full-runtime resource measurements. A Linux unit

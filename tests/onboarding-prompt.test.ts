@@ -1,38 +1,46 @@
 import { expect, test } from "bun:test";
 
 import { INSTRUCTION_SECTIONS } from "../src/agents/instruction-source.ts";
-import {
-  onboardingContextWithoutInventory,
-  renderOnboardingCore,
-} from "../src/agents/onboarding-prompt.ts";
+import { renderOnboardingPrompt } from "../src/agents/onboarding-prompt.ts";
 import { CLI_SPEC } from "../src/cli/spec.ts";
-import {
-  extractHackInvocations,
-  findGuidanceCommandIssues,
-} from "./helpers/cli-guidance-commands.ts";
 
-// Repo-free cores: these assertions cover the static guidance only. The
-// inventory section and entry-point parity are covered by
-// tests/onboarding-entry-parity.test.ts.
-const NEW_PROJECT_PROMPT = renderOnboardingCore({
-  context: onboardingContextWithoutInventory({
-    mode: "new-project",
-    reason: "no-repo-root",
-  }),
-});
-const EXISTING_PROJECT_PROMPT = renderOnboardingCore({
-  context: onboardingContextWithoutInventory({
-    mode: "existing-project",
-    projectName: "myapp",
-    devHost: "myapp.hack",
-    reason: "no-repo-root",
-  }),
+const NEW_PROJECT_PROMPT = renderOnboardingPrompt({ mode: "new-project" });
+const EXISTING_PROJECT_PROMPT = renderOnboardingPrompt({
+  mode: "existing-project",
+  projectName: "myapp",
+  devHost: "myapp.hack",
 });
 
 const ALL_PROMPTS = {
   "new-project": NEW_PROJECT_PROMPT,
   "existing-project": EXISTING_PROJECT_PROMPT,
 } as const;
+
+const TOP_LEVEL_COMMANDS: ReadonlySet<string> = new Set(
+  CLI_SPEC.commands.map((command) => command.name)
+);
+
+const BACKTICK_SEGMENT_PATTERN = /`([^`]+)`/g;
+
+function extractHackSubcommandTokens(rendered: string): string[] {
+  const tokens: string[] = [];
+  for (const match of rendered.matchAll(BACKTICK_SEGMENT_PATTERN)) {
+    const segment = (match[1] ?? "").trim();
+    if (!(segment === "hack" || segment.startsWith("hack "))) {
+      continue;
+    }
+    const first = segment.slice("hack ".length).trim().split(/\s+/)[0] ?? "";
+    if (first.length === 0 || first.startsWith("-") || first.startsWith("<")) {
+      continue;
+    }
+    for (const part of first.split("/")) {
+      if (part.length > 0) {
+        tokens.push(part);
+      }
+    }
+  }
+  return tokens;
+}
 
 test("onboarding prompt renders all phases in both modes", () => {
   for (const prompt of Object.values(ALL_PROMPTS)) {
@@ -117,15 +125,14 @@ test("known dev_host is threaded into hostname and verification guidance", () =>
   expect(NEW_PROJECT_PROMPT).toContain("api.<project>.hack");
 });
 
-test("every hack command path and long flag referenced by the prompt exists in CLI_SPEC", () => {
+test("every hack subcommand referenced by the prompt exists in CLI_SPEC", () => {
   for (const [mode, prompt] of Object.entries(ALL_PROMPTS)) {
+    const unknown = extractHackSubcommandTokens(prompt).filter(
+      (token) => !TOP_LEVEL_COMMANDS.has(token)
+    );
     expect(
-      extractHackInvocations(prompt).length,
-      `mode "${mode}" has no hack invocations to validate`
-    ).toBeGreaterThan(0);
-    expect(
-      findGuidanceCommandIssues({ cli: CLI_SPEC, rendered: prompt }),
-      `mode "${mode}" references unknown hack commands or flags`
+      unknown,
+      `mode "${mode}" references unknown hack subcommands`
     ).toEqual([]);
   }
 });
@@ -142,106 +149,5 @@ test("onboarding preserves trust and ownership without imposing a full migration
     expect(prompt).toContain("Do not broadly classify");
     expect(prompt).not.toContain("curl -k");
     expect(prompt).not.toMatch(/`hack (?:node|remote|gateway|dispatch)\b/);
-  }
-});
-
-test("new-project guidance uses hack.local without rewriting existing host examples", () => {
-  expect(NEW_PROJECT_PROMPT).toContain("<project>.hack.local");
-  expect(EXISTING_PROJECT_PROMPT).toContain("dev_host (myapp.hack)");
-  expect(NEW_PROJECT_PROMPT).toContain("public-resolvable `*.hack.gy`");
-});
-
-test("deps guidance uses a locked install and treats lockfile failure as a diagnosis", () => {
-  for (const prompt of Object.values(ALL_PROMPTS)) {
-    expect(prompt).toContain(
-      'command: ["bun", "install", "--frozen-lockfile"]'
-    );
-    expect(prompt).not.toContain('command: ["bun", "install"]');
-    expect(prompt).toContain("pnpm install --frozen-lockfile");
-    expect(prompt).toContain("yarn install --immutable");
-    expect(prompt).toContain("npm ci");
-    expect(prompt).toContain("A lockfile mismatch is something to diagnose");
-    expect(prompt).toContain(
-      "do not drop the flag or regenerate the lockfile to get a green run"
-    );
-  }
-});
-
-test("deps guidance references the dependency cache labels and optional locked-v1 protocol", () => {
-  for (const prompt of Object.values(ALL_PROMPTS)) {
-    expect(prompt).toContain("hack.dependencies.cache-volume: node_modules");
-    expect(prompt).toContain("hack.dependencies.lockfiles: bun.lock");
-    expect(prompt).toContain("hack.dependencies.cache-protocol: locked-v1");
-    expect(prompt).toContain("they select a volume but do not serialize");
-  }
-});
-
-test("inventory guidance covers bun.lock, nested lockfiles, non-JS runtimes and pins", () => {
-  for (const prompt of Object.values(ALL_PROMPTS)) {
-    expect(prompt).toContain("`bun.lock` or legacy `bun.lockb`");
-    expect(prompt).toContain("in each workspace package");
-    expect(prompt).toContain("do not delete or regenerate a lockfile");
-    for (const manifest of [
-      "Cargo.toml",
-      "go.mod",
-      "pyproject.toml",
-      "uv.lock",
-      "poetry.lock",
-      "requirements.txt",
-      "Gemfile.lock",
-      "mix.exs",
-      "*.csproj",
-      "*.sln",
-    ]) {
-      expect(prompt).toContain(manifest);
-    }
-    for (const pin of ["`.nvmrc`", "`.tool-versions`", "`mise.toml`"]) {
-      expect(prompt).toContain(pin);
-    }
-  }
-});
-
-test("setup guidance resumes from existing config and offers toolchain-only adoption", () => {
-  for (const prompt of Object.values(ALL_PROMPTS)) {
-    expect(prompt).toContain("Resume before starting over");
-    expect(prompt).toContain(
-      "continue from there instead of re-scaffolding or redoing finished phases"
-    );
-    expect(prompt).toContain("backing-services-only, or toolchain-only");
-    expect(prompt).toContain(
-      "`hack run --profile <profile> <service> -- <cmd>`"
-    );
-    expect(prompt).toContain(
-      "Neither partial shape needs an always-on app service"
-    );
-  }
-});
-
-test("verification covers persistent data across down/up and reruns", () => {
-  for (const prompt of Object.values(ALL_PROMPTS)) {
-    expect(prompt).toContain(
-      "survives `hack down` followed by `hack up --detach --json`"
-    );
-    expect(prompt).toContain("rerunning setup steps");
-    expect(prompt).toContain("Do not delete volumes to get a clean pass");
-  }
-});
-
-test("ground rules forbid instruction-file injection and require reporting discovery limits", () => {
-  for (const prompt of Object.values(ALL_PROMPTS)) {
-    const groundRules = prompt.slice(prompt.indexOf("## Ground rules"));
-    expect(groundRules).toContain(
-      "Never create or modify AGENTS.md, CLAUDE.md, editor or agent rule files, or repository copies of agent skills unless the user asks."
-    );
-    expect(groundRules).toContain("Report discovery limits you hit");
-    expect(groundRules).toContain("the agent client CLI was missing");
-    expect(groundRules).toContain("a non-interactive run");
-    expect(groundRules).toContain(
-      "the inventory's remaining discovery limitations"
-    );
-    expect(groundRules).toContain(
-      "`hack-init` MCP prompt request without `repoRoot`"
-    );
-    expect(groundRules).toContain("defaults to existing-project mode");
   }
 });

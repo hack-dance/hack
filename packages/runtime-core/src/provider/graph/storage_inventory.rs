@@ -202,11 +202,7 @@ mod tests {
             image: format!("sha256:{}", "c".repeat(64)),
         };
         let resource = Resource {
-            routing: None,
-            networks: None,
-            outbound: false,
             cache: Some(cache.clone()),
-            cache_provenance: None,
             kind: Kind::Volume,
             key: "deps".into(),
             name: cache.name(),

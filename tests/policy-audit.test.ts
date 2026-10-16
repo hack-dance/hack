@@ -40,7 +40,7 @@ test("appendPolicyAuditEvent persists JSONL event", async () => {
     expect(parsed.runId).toBe("run-123");
   } finally {
     if (previous === undefined) {
-      Reflect.deleteProperty(process.env, "HACK_GLOBAL_CONFIG_PATH");
+      process.env.HACK_GLOBAL_CONFIG_PATH = undefined;
     } else {
       process.env.HACK_GLOBAL_CONFIG_PATH = previous;
     }

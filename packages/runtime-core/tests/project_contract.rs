@@ -41,7 +41,6 @@ impl Fixture {
     }
     fn options(&self) -> PlanOptions<'_> {
         PlanOptions {
-            branch: None,
             project: &self.project,
             compose_file: Path::new("compose.yaml"),
             profiles: &[],
@@ -65,74 +64,6 @@ impl Drop for Fixture {
     }
 }
 const BASIC: &str = "services:\n  web:\n    image: alpine:3.21\n    command: [echo, hello]\n";
-
-#[test]
-fn local_https_labels_have_typed_review_intent_without_publication() {
-    let labels = "    labels:\n      caddy: 'search.livenation.hack, search.livenation.hack.gy'\n      caddy.reverse_proxy: '{{upstreams 6980}}'\n      caddy.tls: internal\n";
-    let fixture = Fixture::new(&format!("{BASIC}{labels}"));
-    let report = fixture.plan();
-    let route = report.plan.services["web"].routing.as_ref().unwrap();
-    assert_eq!(route.port, 6980);
-    assert_eq!(
-        route.hostnames,
-        ["search.livenation.hack", "search.livenation.hack.gy"]
-    );
-    assert!(
-        report
-            .plan
-            .diagnostics
-            .iter()
-            .any(|d| d.code == "route_binding_required")
-    );
-    assert!(
-        !report
-            .plan
-            .diagnostics
-            .iter()
-            .any(|d| d.code == "external_route_or_owner_label")
-    );
-    assert!(!fixture.candidate.state_root.exists());
-
-    fs::write(
-        fixture.project.join("compose.yaml"),
-        format!("{BASIC}{}", labels.replace("6980", "6981")),
-    )
-    .unwrap();
-    assert_ne!(report.plan_id, fixture.plan().plan_id);
-    fs::write(
-        fixture.project.join("compose.yaml"),
-        format!("{BASIC}{labels}      caddy.basicauth: private-canary\n"),
-    )
-    .unwrap();
-    let invalid = fixture.plan();
-    assert!(invalid.plan.services["web"].routing.is_none());
-    assert!(
-        invalid
-            .plan
-            .diagnostics
-            .iter()
-            .any(|d| d.code == "external_route_or_owner_label")
-    );
-    assert!(
-        !serde_json::to_string(&invalid)
-            .unwrap()
-            .contains("private-canary")
-    );
-    fs::write(
-        fixture.project.join("compose.yaml"),
-        format!("{BASIC}    labels: {{caddy_0: 'search.example'}}\n"),
-    )
-    .unwrap();
-    let indexed = fixture.plan();
-    assert!(indexed.plan.services["web"].routing.is_none());
-    assert!(
-        indexed
-            .plan
-            .diagnostics
-            .iter()
-            .any(|d| d.code == "external_route_or_owner_label")
-    );
-}
 
 #[test]
 fn content_generation_is_immutable_and_excludes_managed_environment() {
@@ -285,101 +216,6 @@ fn captured_archive_uses_retained_bytes_and_cannot_boot_a_runtime() {
     .unwrap_err();
     assert_eq!(error.code, "runtime_not_running");
     assert!(!fixture.candidate.state_root.exists());
-}
-
-#[test]
-fn cursor_settings_and_skill_aliases_are_excluded_from_source_capture() {
-    let fixture = Fixture::new(BASIC);
-    fs::create_dir_all(fixture.project.join(".agents/skills/example")).unwrap();
-    fs::write(fixture.project.join("app.ts"), "export const value = 1;\n").unwrap();
-    for (settings, target) in [
-        (".cursor", "../../.agents/skills/example"),
-        ("packages/web/.CuRsOr", "../../../../.agents/skills/example"),
-    ] {
-        let directory = fixture.project.join(settings);
-        fs::create_dir_all(directory.join("skills")).unwrap();
-        fs::write(directory.join("mcp.json"), "CURSOR_CONFIG_CANARY").unwrap();
-        std::os::unix::fs::symlink(target, directory.join("skills/example")).unwrap();
-    }
-    fs::write(fixture.project.join(".ignore"), "!.cursor/\n").unwrap();
-    let plan = fixture.plan();
-    assert!(plan.plan.enrollment_compatible);
-    for settings in [".cursor", "packages/web/.CuRsOr"] {
-        assert!(
-            plan.plan
-                .source_selection
-                .excluded_paths
-                .contains(&settings.to_owned())
-        );
-        // Even an invalid ignore-file alias inside agent settings is not consulted.
-        std::os::unix::fs::symlink("missing", fixture.project.join(settings).join(".gitignore"))
-            .unwrap();
-    }
-    let snapshot = project::snapshot::capture(
-        &fixture.project,
-        &Default::default(),
-        &plan.plan.source_selection.metadata_sha256,
-    )
-    .unwrap();
-    let bytes = snapshot.archive().unwrap();
-    let paths: Vec<_> = tar::Archive::new(bytes.as_slice())
-        .entries()
-        .unwrap()
-        .map(|entry| entry.unwrap().path().unwrap().into_owned())
-        .collect();
-    assert!(paths.contains(&PathBuf::from("app.ts")));
-    assert!(paths.iter().all(|path| {
-        !path
-            .to_str()
-            .unwrap()
-            .to_ascii_lowercase()
-            .contains(".cursor")
-    }));
-    assert!(
-        !bytes
-            .windows(b"CURSOR_CONFIG_CANARY".len())
-            .any(|window| window == b"CURSOR_CONFIG_CANARY")
-    );
-}
-
-#[test]
-fn application_links_and_mounts_cannot_select_agent_settings() {
-    for settings in [".cursor", ".agents"] {
-        let fixture = Fixture::new(BASIC);
-        fs::create_dir(fixture.project.join(settings)).unwrap();
-        fs::write(fixture.project.join(settings).join("config.json"), "{}").unwrap();
-        std::os::unix::fs::symlink(
-            format!("{settings}/config.json"),
-            fixture.project.join("app-config.json"),
-        )
-        .unwrap();
-        let plan = fixture.plan();
-        assert!(
-            plan.plan
-                .diagnostics
-                .iter()
-                .any(|d| d.code == "source_symlink")
-        );
-        assert!(
-            project::snapshot::capture(
-                &fixture.project,
-                &Default::default(),
-                &plan.plan.source_selection.metadata_sha256,
-            )
-            .is_err()
-        );
-
-        let fixture = Fixture::new(&format!(
-            "{BASIC}    volumes: ['./{settings}:/workspace/settings']\n"
-        ));
-        fs::create_dir(fixture.project.join(settings)).unwrap();
-        assert_eq!(
-            project::plan(&fixture.candidate, fixture.options())
-                .unwrap_err()
-                .code,
-            "excluded_source"
-        );
-    }
 }
 
 #[test]
@@ -681,7 +517,6 @@ fn useful_graph_models_build_mounts_health_limits_and_loopback_proposal() {
     let plan = project::plan(
         &fixture.candidate,
         PlanOptions {
-            branch: None,
             project: &fixture.project,
             compose_file: Path::new("compose.yaml"),
             profiles: &profiles,
@@ -960,7 +795,6 @@ fn compose_relative_paths_and_normalized_reserved_targets_are_checked() {
     let plan = project::plan(
         &fixture.candidate,
         PlanOptions {
-            branch: None,
             project: &fixture.project,
             compose_file: Path::new("config/compose.yaml"),
             profiles: &[],
@@ -1060,7 +894,6 @@ fn a_fifo_compose_input_is_rejected_without_waiting_for_a_writer() {
     let error = project::plan(
         &fixture.candidate,
         PlanOptions {
-            branch: None,
             project: &fixture.project,
             compose_file: Path::new("fifo.yaml"),
             profiles: &[],
@@ -1307,33 +1140,6 @@ fn execution_dependency_compiler_preserves_review_conditions_and_refuses_invalid
         Graph::from_plan(&plan, &goals).unwrap_err().code,
         "graph_incompatible"
     );
-}
-
-#[test]
-fn execution_dependency_compiler_refuses_readiness_for_inactive_or_unknown_services() {
-    use project::execution::{Condition, Graph};
-    use std::collections::BTreeMap;
-    let fixture = Fixture::new(
-        "services:\n  web:\n    image: alpine:3.21\n  tools:\n    image: alpine:3.21\n    profiles: [debug]\n",
-    );
-    let plan = fixture.plan().plan;
-    assert!(plan.enrollment_compatible);
-    assert!(plan.services["web"].active);
-    assert!(!plan.services["tools"].active);
-    let active = BTreeMap::from([("web".into(), Condition::Started)]);
-    let graph = Graph::from_plan(&plan, &active).unwrap();
-    assert_eq!(graph.services.keys().collect::<Vec<_>>(), ["web"]);
-    for extra in ["tools", "ghost"] {
-        let mut goals = active.clone();
-        goals.insert(extra.into(), Condition::Started);
-        let refusal = Graph::from_plan(&plan, &goals).unwrap_err();
-        assert_eq!(refusal.code, "graph_readiness", "{extra}");
-        assert!(
-            refusal.message.contains("inactive or unknown"),
-            "{extra}: {}",
-            refusal.message
-        );
-    }
 }
 
 #[test]
@@ -2120,172 +1926,4 @@ fn dependency_cache_optional_bootstrap_label_is_not_a_malformed_cache() {
             .iter()
             .any(|code| code == "dependency_cache_binding_required")
     );
-}
-
-fn registry_fixture() -> Fixture {
-    let compose = serde_json::json!({"services":{"deps":{"image":"alpine:3.21", "volumes":[".:/app:ro", "node_modules:/app/node_modules"], "labels":{
-        "hack.dependencies.cache-volume":"node_modules", "hack.dependencies.lockfiles":"bun.lock", "hack.dependencies.bootstrap":"true"
-    }}}, "volumes":{"node_modules":{}}});
-    let fixture = Fixture::new(&compose.to_string());
-    fs::write(fixture.project.join("bun.lock"), "fixture-lock").unwrap();
-    fs::write(fixture.project.join(".npmrc"), "@fixture:registry=https://npm.pkg.github.com/\n//npm.pkg.github.com/:_authToken=${REGISTRY_TOKEN}\n").unwrap();
-    fixture
-}
-
-#[test]
-fn registry_template_is_reviewed_materialized_and_stale_configuration_is_refused() {
-    let fixture = registry_fixture();
-    let review = fixture.plan();
-    let registry = review.plan.registry.as_ref().unwrap();
-    assert!(registry.required_environment.contains("REGISTRY_TOKEN"));
-    let capture = || {
-        project::snapshot::capture(
-            &fixture.project,
-            &Default::default(),
-            &review.plan.source_selection.metadata_sha256,
-        )
-        .unwrap()
-    };
-    let raw = capture();
-    assert!(!raw.receipt().entries.iter().any(|e| e.path == ".npmrc"));
-    assert!(raw.receipt().verify_registry(&review.plan).is_err());
-    let snapshot = raw
-        .with_mountpoints(&review.plan)
-        .unwrap()
-        .with_registry(&review.plan)
-        .unwrap();
-    snapshot.receipt().verify_registry(&review.plan).unwrap();
-    let (_, bytes) = snapshot.files().find(|(e, _)| e.path == ".npmrc").unwrap();
-    assert_eq!(bytes, registry.template.as_bytes());
-    let revision = snapshot.receipt().revision.clone();
-    assert_eq!(
-        snapshot
-            .with_registry(&review.plan)
-            .unwrap()
-            .receipt()
-            .revision,
-        revision
-    );
-    assert!(!fixture.project.join("node_modules").exists());
-    fs::write(
-        fixture.project.join(".npmrc"),
-        "registry=https://registry.npmjs.org/\n",
-    )
-    .unwrap();
-    assert!(capture().with_registry(&review.plan).is_err());
-    assert_ne!(review.plan_id, fixture.plan().plan_id);
-}
-
-#[test]
-fn registry_credentials_require_private_delivery_and_never_enter_public_environment() {
-    use std::collections::BTreeMap;
-    let fixture = registry_fixture();
-    let review = fixture.plan();
-    let empty = BTreeMap::new();
-    let managed = BTreeMap::from([(
-        "deps".into(),
-        BTreeMap::from([("REGISTRY_TOKEN".into(), "synthetic-registry-canary".into())]),
-    )]);
-    assert!(
-        project::inputs::compile_scoped(
-            &fixture.candidate,
-            fixture.options(),
-            &review.plan_id,
-            &empty,
-            &BTreeMap::new()
-        )
-        .is_err()
-    );
-    let result = project::inputs::compile_scoped(
-        &fixture.candidate,
-        fixture.options(),
-        &review.plan_id,
-        &empty,
-        &managed,
-    )
-    .unwrap();
-    assert!(result.executable.requires_managed_environment());
-    assert_eq!(result.managed_environment, managed);
-    assert!(result.executable.services["deps"].environment.is_empty());
-    assert!(
-        !serde_json::to_string(&result.executable.review)
-            .unwrap()
-            .contains("synthetic-registry-canary")
-    );
-    let public = BTreeMap::from([("REGISTRY_TOKEN".into(), "synthetic-registry-canary".into())]);
-    assert!(
-        project::inputs::compile_scoped(
-            &fixture.candidate,
-            fixture.options(),
-            &review.plan_id,
-            &public,
-            &BTreeMap::new()
-        )
-        .is_err()
-    );
-    let blank = BTreeMap::from([(
-        "deps".into(),
-        BTreeMap::from([("REGISTRY_TOKEN".into(), String::new())]),
-    )]);
-    assert!(
-        project::inputs::compile_scoped(
-            &fixture.candidate,
-            fixture.options(),
-            &review.plan_id,
-            &empty,
-            &blank
-        )
-        .is_err()
-    );
-}
-
-#[test]
-fn registry_capture_does_not_change_reviewed_mount_permissions() {
-    let fixture = registry_fixture();
-    let compose = fs::read_to_string(fixture.project.join("compose.yaml"))
-        .unwrap()
-        .replace(".:/app:ro", ".:/app:rw");
-    fs::write(fixture.project.join("compose.yaml"), compose).unwrap();
-    let review = fixture.plan();
-    assert!(
-        !review.plan.services["deps"]
-            .mounts
-            .iter()
-            .find(|m| m.kind == "bind")
-            .unwrap()
-            .read_only
-    );
-    let captured = project::snapshot::capture(
-        &fixture.project,
-        &Default::default(),
-        &review.plan.source_selection.metadata_sha256,
-    )
-    .unwrap()
-    .with_registry(&review.plan)
-    .unwrap();
-    captured.receipt().verify_registry(&review.plan).unwrap();
-    assert_eq!(review.plan_id, fixture.plan().plan_id);
-    assert!(!fixture.candidate.state_root.exists());
-}
-
-#[test]
-fn named_volume_subpaths_are_explicit_canonical_and_plan_bound() {
-    let make = |path: &str| {
-        format!(
-            "services:\n  app:\n    image: alpine\n    volumes:\n      - type: volume\n        source: cache\n        target: /app/node_modules\n        volume:\n          subpath: {path:?}\nvolumes:\n  cache: {{}}\n"
-        )
-    };
-    let fixture = Fixture::new(&make("workspaces/one"));
-    let first = project::plan(&fixture.candidate, fixture.options()).unwrap();
-    assert_eq!(
-        first.plan.services["app"].mounts[0].subpath.as_deref(),
-        Some("workspaces/one")
-    );
-    fs::write(fixture.project.join("compose.yaml"), make("workspaces/two")).unwrap();
-    let second = project::plan(&fixture.candidate, fixture.options()).unwrap();
-    assert_ne!(first.plan.compose_sha256, second.plan.compose_sha256);
-    for path in ["../escape", "/absolute", "a//b", "a/./b", "a/", "${PATH}"] {
-        fs::write(fixture.project.join("compose.yaml"), make(path)).unwrap();
-        assert!(project::plan(&fixture.candidate, fixture.options()).is_err());
-    }
 }

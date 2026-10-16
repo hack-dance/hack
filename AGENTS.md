@@ -34,11 +34,8 @@ Read only the focused guide needed for the task:
 - [TLA+](.ai/skills/hack-repo-tla/SKILL.md): repo-local models, checker tools and trace validation.
 - [Operating layer](.ai/README.md): contributor skills, ownership and maintenance.
 
-Internal plans and specs belong in gitignored `_docs/`; never force-add that archive.
-Fresh clones do not include it. Linear's Hack project is the v5 planning and status
-source of truth; use the work-unit skill below for its program links. The local
-`_docs/docs/plans/v5/work-units.md` ledger is supporting context when available,
-not a competing backlog. Keep small fixes lightweight.
+For v5 work, use [the existing ledger](docs/plans/v5/work-units.md); update actionable
+follow-ups there instead of creating a competing backlog. Keep small fixes lightweight.
 Report what changed, evidence, and open gates concisely. A component pass is not
 whole-product parity, lower resource use, or release readiness.
 
@@ -116,20 +113,8 @@ for breaking changes. Describe the final behavior, validation, release signal, a
 material remaining gaps in the PR. Let the repository's release workflow publish;
 verify the release and installed executable separately.
 
-Base v5 candidate and prerelease implementation PRs on the protected `next` branch;
-keep stable-line work targeted at `main`. Verify each PR's base and exact-head checks
-before reporting readiness. This does not authorize a merge or publication.
-
 Record useful decisions or regressions in the closest source, test, or doc. When fclt
 is available and writeback is authorized, use a project writeback with a concrete
 asset and evidence. Drafting does not authorize global promotion or canonical apply.
 Do not require fclt, create tickets, start automations, or produce handoff paperwork
 for every task. Create follow-up records only for actionable work within authorization.
-
-For the authorized v5 program, use the Linear Hack project as the planning/status
-source of truth and preserve repository specs, models and evidence. Read
-`.ai/skills/hack-repo-work-unit/SKILL.md` for milestone mapping and checkpoint updates;
-the local reconciliation map is `_docs/docs/plans/v5/linear-sync.md`. Update existing
-issues with meaningful outcomes, evidence and remaining gates rather than creating
-duplicates. Distinguish canceled legacy scope, historical component completion and
-current application acceptance. Keep private logs and secrets out of Linear.

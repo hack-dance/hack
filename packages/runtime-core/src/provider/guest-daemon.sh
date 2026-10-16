@@ -1,7 +1,6 @@
 set -eu
 case "${1-}" in
   isolated) gateway_rules=false; set -- ;;
-  approved-hosts|internet) gateway_rules=true; set -- ;;
   host-gateway) gateway_rules=true; set -- --host-gateway-ip=100.96.0.1 ;;
   *) exit 64 ;;
 esac

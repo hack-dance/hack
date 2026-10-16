@@ -16,7 +16,6 @@ import {
   GLOBAL_HACK_DIR_NAME,
 } from "../src/constants.ts";
 import { resetNoInteractiveFlagForTests } from "../src/lib/interactivity.ts";
-import { restoreEnv } from "./helpers/env.ts";
 import { registerScopedModuleMock } from "./helpers/scoped-module-mock.ts";
 
 /**
@@ -32,17 +31,6 @@ import { registerScopedModuleMock } from "./helpers/scoped-module-mock.ts";
 const runCalls: string[][] = [];
 const execCalls: string[][] = [];
 const noteCalls: string[] = [];
-
-const dnsMock = await registerScopedModuleMock({
-  importerPath: import.meta.path,
-  specifier: "node:dns/promises",
-  overrides: {
-    lookup: async () => {
-      // Exercise missing-DNS remediation without depending on host resolvers.
-      throw new Error("Fixture DNS is not configured");
-    },
-  },
-});
 
 const clackMock = await registerScopedModuleMock({
   importerPath: import.meta.path,
@@ -110,7 +98,6 @@ let originalMutagenPath: string | undefined;
 let originalLogger: string | undefined;
 
 beforeAll(() => {
-  dnsMock.activate();
   clackMock.activate();
   shellMock.activate();
   osMock.activate();
@@ -139,7 +126,7 @@ afterEach(async () => {
     await rm(tempDir, { recursive: true, force: true });
     tempDir = null;
   }
-  restoreEnv("HOME", originalHome);
+  process.env.HOME = originalHome;
   if (originalNoInteractive === undefined) {
     Reflect.deleteProperty(process.env, "HACK_NO_INTERACTIVE");
   } else {
@@ -150,11 +137,10 @@ afterEach(async () => {
   } else {
     process.env.HACK_MUTAGEN_PATH = originalMutagenPath;
   }
-  restoreEnv("HACK_LOGGER", originalLogger);
+  process.env.HACK_LOGGER = originalLogger;
 });
 
 afterAll(() => {
-  dnsMock.deactivate();
   clackMock.deactivate();
   shellMock.deactivate();
   osMock.deactivate();

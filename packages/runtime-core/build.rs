@@ -31,9 +31,6 @@ fn main() {
             "-O",
             "ReleaseSmall",
             "-fstrip",
-            // The launcher exits with a fixed code; it has no stack unwinder.
-            // Omit unused unwind tables to keep its checked transport bounded.
-            "-fno-unwind-tables",
         ])
         .arg("--cache-dir")
         .arg(output.parent().unwrap().join("zig-cache"))

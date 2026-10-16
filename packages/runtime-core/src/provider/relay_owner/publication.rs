@@ -7,7 +7,6 @@ use super::{
 use crate::{
     CandidateError,
     provider::{
-        host_pin::DeviceRebind,
         identity::{self, ProcessIdentity},
         state,
     },
@@ -28,8 +27,6 @@ use std::{
     time::{Duration, Instant},
 };
 mod connect;
-#[cfg(target_os = "macos")]
-pub(crate) mod dead;
 const LIMIT: u64 = 4096;
 type FileId = (u64, u64);
 fn id(m: &fs::Metadata) -> FileId {
@@ -103,16 +100,6 @@ pub struct PinnedEndpoint {
     receipt: Receipt,
     receipt_id: FileId,
     bytes: Vec<u8>,
-    device_rebind: Option<DeviceRebind>,
-}
-#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct LegacyControl {
-    pub receipt_sha256: String,
-    pub receipt_id: FileId,
-    pub parent: FileId,
-    pub endpoint: FileId,
-    pub process: ProcessIdentity,
 }
 impl PinnedEndpoint {
     pub(crate) fn runtime_root(&self) -> &Path {
@@ -145,13 +132,6 @@ impl PinnedEndpoint {
         Self::read(Paths::new(root)?, context)
     }
     fn read(paths: Paths, context: Context) -> Result<Self, CandidateError> {
-        Self::read_with_rebind(paths, context, None)
-    }
-    fn read_with_rebind(
-        paths: Paths,
-        context: Context,
-        device_rebind: Option<DeviceRebind>,
-    ) -> Result<Self, CandidateError> {
         let parent = paths.parent()?;
         let mut file = OpenOptions::new()
             .read(true)
@@ -178,9 +158,7 @@ impl PinnedEndpoint {
             || context.boot == [0; 16]
             || receipt.owner == [0; 16]
             || receipt.socket != paths.socket
-            || !device_rebind.map_or(receipt.parent == parent, |v| {
-                v.matches(receipt.parent, parent)
-            })
+            || receipt.parent != parent
             || receipt.endpoint.1 == 0
             || !receipt.process.executable.is_absolute()
         {
@@ -199,39 +177,7 @@ impl PinnedEndpoint {
             receipt,
             receipt_id: id(&m),
             bytes,
-            device_rebind,
         })
-    }
-    pub(crate) fn load_legacy_recovery(
-        root: &Path,
-        context: Context,
-        device_rebind: DeviceRebind,
-        host_boot_micros: u64,
-    ) -> Result<Self, CandidateError> {
-        let pin = Self::read_with_rebind(Paths::new(root)?, context, Some(device_rebind))?;
-        pin.verify_dead()?;
-        device_rebind.definitely_dead_before_boot(&pin.receipt.process, host_boot_micros)?;
-        dead::no_listener(&pin.paths.socket)?;
-        Ok(pin)
-    }
-    pub(crate) fn legacy_summary(&self) -> LegacyControl {
-        LegacyControl {
-            receipt_sha256: format!("{:x}", Sha256::digest(&self.bytes)),
-            receipt_id: self.receipt_id,
-            parent: self.receipt.parent,
-            endpoint: self.receipt.endpoint,
-            process: self.receipt.process.clone(),
-        }
-    }
-    /// Read-only predecessor proof: exact private receipt/socket, absent owner.
-    #[cfg(target_os = "macos")]
-    pub(crate) fn verify_dead(&self) -> Result<(), CandidateError> {
-        self.verify_receipt()?;
-        self.verify_socket()?;
-        if identity::alive(self.receipt.process.pid)? {
-            return Err(refused());
-        }
-        Ok(())
     }
     pub fn incarnation(&self) -> [u8; 16] {
         self.receipt.owner
@@ -240,13 +186,12 @@ impl PinnedEndpoint {
         Sha256::digest(&self.bytes).into()
     }
     fn verify_receipt(&self) -> Result<(), CandidateError> {
-        let current = Self::read_with_rebind(
+        let current = Self::read(
             self.paths.clone(),
             Context {
                 runtime: self.receipt.runtime,
                 boot: self.receipt.boot,
             },
-            self.device_rebind,
         )?;
         if current.receipt_id != self.receipt_id || current.bytes != self.bytes {
             return Err(refused());
@@ -254,24 +199,14 @@ impl PinnedEndpoint {
         Ok(())
     }
     fn verify_socket(&self) -> Result<(), CandidateError> {
-        let parent = self.paths.parent()?;
-        if !self
-            .device_rebind
-            .map_or(parent == self.receipt.parent, |v| {
-                v.matches(self.receipt.parent, parent)
-            })
-        {
+        if self.paths.parent()? != self.receipt.parent {
             return Err(refused());
         }
         let m = fs::symlink_metadata(&self.paths.socket).map_err(|_| refused())?;
         if !m.file_type().is_socket()
             || !private(&m)
             || m.nlink() != 1
-            || !self
-                .device_rebind
-                .map_or(id(&m) == self.receipt.endpoint, |v| {
-                    v.matches(self.receipt.endpoint, id(&m))
-                })
+            || id(&m) != self.receipt.endpoint
         {
             return Err(refused());
         }
@@ -406,7 +341,6 @@ impl ControlListener {
             receipt,
             receipt_id,
             bytes,
-            device_rebind: None,
         };
         endpoint.verify_receipt()?;
         endpoint.verify_socket()?;

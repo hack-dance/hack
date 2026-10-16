@@ -21,7 +21,7 @@ export const initScenario: Scenario = {
     });
 
     const result = await ctx.cli({
-      args: ["init", "--auto", "--name", name],
+      args: ["init", "--auto", "--name", name, "--dev-host", `${name}.hack`],
       cwd: fixture.root,
     });
     expectExit({
@@ -40,8 +40,8 @@ export const initScenario: Scenario = {
       result,
     });
     expect({
-      that: config.dev_host === `${name}.hack.local`,
-      message: "hack.config.json dev_host should use the new-project default",
+      that: config.dev_host === `${name}.hack`,
+      message: "hack.config.json dev_host should match --dev-host",
       result,
     });
 

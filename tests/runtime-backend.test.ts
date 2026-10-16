@@ -1,16 +1,9 @@
 import { afterAll, beforeAll, beforeEach, expect, test } from "bun:test";
-import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 
 import { registerScopedModuleMock } from "./helpers/scoped-module-mock.ts";
 
 const runCalls: string[][] = [];
-const runOpts: {
-  stdout?: string;
-  timeoutMs?: number;
-  forwardSignals?: boolean;
-}[] = [];
+const runOpts: { stdout?: string }[] = [];
 const execCalls: string[][] = [];
 
 const shellMock = await registerScopedModuleMock({
@@ -27,18 +20,10 @@ const shellMock = await registerScopedModuleMock({
     },
     run: async (
       cmd: readonly string[],
-      opts: {
-        readonly stdout?: string;
-        readonly timeoutMs?: number;
-        readonly forwardSignals?: boolean;
-      } = {}
+      opts: { readonly stdout?: string } = {}
     ) => {
       runCalls.push([...cmd]);
-      runOpts.push({
-        stdout: opts.stdout,
-        timeoutMs: opts.timeoutMs,
-        forwardSignals: opts.forwardSignals,
-      });
+      runOpts.push({ stdout: opts.stdout });
       return 0;
     },
     findExecutableInPath: () => "/usr/bin/docker",
@@ -394,72 +379,4 @@ test("down routes stdout to stderr when requested (--json purity)", async () => 
     routeStdoutToStderr: true,
   });
   expect(runOpts[0]?.stdout).toBe("stderr");
-});
-
-test("detached startup uses selected budget and down keeps its fixed budget", async () => {
-  const backend = await loadComposeRuntimeBackend();
-  const base = {
-    composeFiles: ["compose.yml"],
-    cwd: "/tmp",
-    env: { HACK_COMPOSE_STARTUP_TIMEOUT_MS: "600000" },
-  };
-  await backend.up({ ...base, detach: true });
-  expect(runOpts[0]?.timeoutMs).toBe(600_000);
-  await backend.up({ ...base, detach: true, startupTimeoutMs: 120_000 });
-  expect(runOpts[1]?.timeoutMs).toBe(120_000);
-  await backend.down(base);
-  expect(runOpts[2]?.timeoutMs).toBe(90_000);
-});
-
-test("invalid startup budget refuses before invoking Compose", async () => {
-  const backend = await loadComposeRuntimeBackend();
-  await expect(
-    backend.up({
-      composeFiles: ["compose.yml"],
-      cwd: "/tmp",
-      detach: true,
-      startupTimeoutMs: 999,
-    })
-  ).rejects.toThrow("Compose startup timeout");
-  expect(runCalls).toEqual([]);
-  expect(execCalls).toEqual([]);
-});
-
-test("foreground ignores detached timeout settings and preserves child exit", async () => {
-  const dir = await mkdtemp(join(tmpdir(), "hack-foreground-budget-"));
-  try {
-    const docker = join(dir, "docker");
-    await writeFile(docker, "#!/bin/sh\nexit 7\n");
-    await chmod(docker, 0o700);
-    const backend = await loadComposeRuntimeBackend();
-    const code = await backend.up({
-      composeFiles: ["compose.yml"],
-      cwd: dir,
-      detach: false,
-      startupTimeoutMs: 0,
-      env: { PATH: dir, HACK_COMPOSE_STARTUP_TIMEOUT_MS: "invalid" },
-    });
-    expect(code).toBe(7);
-    expect(runCalls).toEqual([]);
-  } finally {
-    await rm(dir, { recursive: true, force: true });
-  }
-}, 5000);
-test("automatic bootstrap preserves output and forwards cancellation to its bounded child", async () => {
-  const backend = await loadComposeRuntimeBackend();
-  await backend.run({
-    composeFiles: ["compose.yml"],
-    cwd: "/tmp",
-    service: "deps",
-    cmdArgs: [],
-    noDeps: true,
-    timeoutMs: 600_000,
-    forwardSignals: true,
-    routeStdoutToStderr: true,
-  });
-  expect(runOpts[0]).toEqual({
-    stdout: "stderr",
-    timeoutMs: 600_000,
-    forwardSignals: true,
-  });
 });

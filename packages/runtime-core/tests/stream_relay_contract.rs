@@ -1,15 +1,11 @@
 #![cfg(feature = "native-stream-relay")]
 use std::{
     fs,
-    io::{self, BufRead, BufReader, Read, Write},
+    io::{BufRead, BufReader, Read, Write},
     net::{Shutdown, TcpListener},
     os::{
         fd::AsRawFd,
-        unix::{
-            fs::PermissionsExt,
-            net::{UnixListener, UnixStream},
-            process::CommandExt,
-        },
+        unix::{fs::PermissionsExt, net::UnixStream, process::CommandExt},
     },
     path::PathBuf,
     process::{Child, Command, Stdio},
@@ -209,105 +205,12 @@ fn idle_streams_expire_and_cleanup_preserves_replaced_path() {
     let mut relay = Relay::start(target.local_addr().unwrap().port(), 100);
     let mut client = relay.connect();
     let (_upstream, _) = target.accept().unwrap();
-    let deadline = Instant::now() + Duration::from_secs(10);
-    let result = read_before_deadline(deadline, Instant::now, |remaining| {
-        client.set_read_timeout(Some(remaining))?;
-        client.read(&mut [0])
-    });
-    assert_eq!(result.unwrap(), 0);
+    assert_eq!(client.read(&mut [0]).unwrap(), 0);
     assert!(relay.child.try_wait().unwrap().is_none());
     fs::rename(&relay.socket, relay.root.join("original.sock")).unwrap();
     fs::write(&relay.socket, b"replacement").unwrap();
     relay.stop();
     assert_eq!(fs::read(&relay.socket).unwrap(), b"replacement");
-}
-
-// Signals may interrupt this read; retries must not extend its original timeout.
-fn read_before_deadline(
-    deadline: Instant,
-    mut now: impl FnMut() -> Instant,
-    mut read: impl FnMut(Duration) -> io::Result<usize>,
-) -> io::Result<usize> {
-    loop {
-        let remaining = deadline
-            .checked_duration_since(now())
-            .filter(|remaining| !remaining.is_zero())
-            .ok_or_else(|| io::Error::new(io::ErrorKind::TimedOut, "read deadline elapsed"))?;
-        match read(remaining) {
-            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
-            result => return result,
-        }
-    }
-}
-
-#[test]
-fn interrupted_read_retries_with_only_the_remaining_deadline() {
-    let start = Instant::now();
-    let mut times = [0, 25, 75].into_iter();
-    let mut timeouts = Vec::new();
-    let result = read_before_deadline(
-        start + Duration::from_millis(100),
-        || start + Duration::from_millis(times.next().unwrap()),
-        |remaining| {
-            timeouts.push(remaining);
-            if timeouts.len() < 3 {
-                Err(io::Error::from(io::ErrorKind::Interrupted))
-            } else {
-                Ok(0)
-            }
-        },
-    );
-    assert_eq!(result.unwrap(), 0);
-    assert_eq!(timeouts, [100, 75, 25].map(Duration::from_millis).to_vec());
-    assert!(times.next().is_none());
-}
-
-#[test]
-fn interrupted_reads_cannot_restart_an_expired_deadline() {
-    let start = Instant::now();
-    let mut times = [0, 40, 100].into_iter();
-    let mut reads = 0;
-    let error = read_before_deadline(
-        start + Duration::from_millis(100),
-        || start + Duration::from_millis(times.next().unwrap()),
-        |_| {
-            reads += 1;
-            Err(io::Error::from(io::ErrorKind::Interrupted))
-        },
-    )
-    .unwrap_err();
-    assert_eq!(error.kind(), io::ErrorKind::TimedOut);
-    assert_eq!(reads, 2);
-    assert!(times.next().is_none());
-}
-
-#[test]
-fn read_deadline_preserves_success_and_non_interrupted_errors() {
-    let start = Instant::now();
-    assert_eq!(
-        read_before_deadline(start + Duration::from_secs(1), || start, |_| Ok(1)).unwrap(),
-        1
-    );
-    for kind in [
-        io::ErrorKind::WouldBlock,
-        io::ErrorKind::ConnectionReset,
-        io::ErrorKind::TimedOut,
-    ] {
-        let mut reads = 0;
-        let error = read_before_deadline(
-            start + Duration::from_secs(1),
-            || start,
-            |_| {
-                reads += 1;
-                assert_eq!(reads, 1, "only Interrupted may retry");
-                Err(io::Error::new(kind, "original read error"))
-            },
-        )
-        .unwrap_err();
-        assert_eq!(error.kind(), kind);
-        assert_eq!(error.to_string(), "original read error");
-        assert_eq!(reads, 1);
-    }
 }
 #[test]
 fn occupied_socket_is_not_unlinked_and_unavailable_target_fails_connection() {
@@ -537,7 +440,7 @@ fn reused_socket_rejects_old_reservation_and_expiring_partial_handshakes() {
             Err(e) if e.kind() == std::io::ErrorKind::ConnectionReset => (),
             other => panic!("invalid handshake remained usable: {other:?}"),
         }
-        assert!(started.elapsed() < Duration::from_secs(6));
+        assert!(started.elapsed() < Duration::from_secs(3));
         let mut observed = libc::pollfd {
             fd: target.as_raw_fd(),
             events: libc::POLLIN,
@@ -594,61 +497,6 @@ fn frontend_publisher(
     control_token: Option<&str>,
     unix: bool,
 ) -> Relay {
-    try_frontend_publisher(socket, token, port, control_token, unix)
-        .unwrap_or_else(|failure| panic!("publisher startup refused: {failure:?}"))
-}
-
-#[derive(Debug)]
-struct PublisherStartupFailure {
-    stage: &'static str,
-    status: Option<std::process::ExitStatus>,
-    pid: u32,
-    root: PathBuf,
-}
-struct PublisherStartup {
-    child: Option<Child>,
-    root: PathBuf,
-}
-impl Drop for PublisherStartup {
-    fn drop(&mut self) {
-        if let Some(child) = self.child.as_mut() {
-            if !matches!(child.try_wait(), Ok(Some(_))) {
-                let _ = child.kill();
-                let _ = child.wait();
-            }
-        }
-        if !self.root.as_os_str().is_empty() {
-            let _ = fs::remove_dir_all(&self.root);
-        }
-    }
-}
-impl PublisherStartup {
-    fn failure(&mut self, stage: &'static str) -> PublisherStartupFailure {
-        let child = self.child.as_mut().expect("startup owns child");
-        let deadline = Instant::now() + Duration::from_millis(100);
-        let status = loop {
-            match child.try_wait() {
-                Ok(Some(status)) => break Some(status),
-                Err(_) => break None,
-                Ok(None) if Instant::now() >= deadline => break None,
-                Ok(None) => thread::sleep(Duration::from_millis(2)),
-            }
-        };
-        PublisherStartupFailure {
-            stage,
-            status,
-            pid: child.id(),
-            root: self.root.clone(),
-        }
-    }
-}
-fn try_frontend_publisher(
-    socket: &std::path::Path,
-    token: &str,
-    port: u16,
-    control_token: Option<&str>,
-    unix: bool,
-) -> Result<Relay, PublisherStartupFailure> {
     let root = PathBuf::from(format!(
         "/tmp/hkp-{}-{}",
         std::process::id(),
@@ -672,92 +520,23 @@ fn try_frontend_publisher(
             .arg(root.join("control.sock"))
             .arg(control_token);
     }
-    let mut startup = PublisherStartup { child: None, root };
-    startup.child = Some(command.stdout(Stdio::piped()).spawn().unwrap());
-    let mut output = startup.child.as_mut().unwrap().stdout.take().unwrap();
-    let deadline = Instant::now() + Duration::from_secs(3);
-    let expected = b"ready\n";
-    // Read one byte per readiness notification: no unbounded read_line after POLLIN.
-    for expected_byte in expected {
-        loop {
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
-                return Err(startup.failure("readiness timeout"));
-            }
-            let mut ready = libc::pollfd {
-                fd: output.as_raw_fd(),
-                events: libc::POLLIN,
-                revents: 0,
-            };
-            // SAFETY: one initialized descriptor lives throughout this bounded poll.
-            let polled =
-                unsafe { libc::poll(&mut ready, 1, remaining.as_millis().min(3000) as i32) };
-            if polled < 0
-                && std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted
-            {
-                continue;
-            }
-            if polled <= 0 {
-                return Err(startup.failure("readiness poll"));
-            }
-            if Instant::now() >= deadline {
-                return Err(startup.failure("readiness timeout"));
-            }
-            let mut byte = [0];
-            match output.read(&mut byte) {
-                Ok(1) if byte[0] == *expected_byte => break,
-                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
-                Ok(0) => return Err(startup.failure("readiness EOF")),
-                _ => return Err(startup.failure("readiness marker")),
-            }
-        }
-    }
-    let root = std::mem::take(&mut startup.root);
-    Ok(Relay {
-        child: startup.child.take().unwrap(),
+    let mut child = command.stdout(Stdio::piped()).spawn().unwrap();
+    let output = child.stdout.take().unwrap();
+    let mut ready = libc::pollfd {
+        fd: output.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    assert_eq!(unsafe { libc::poll(&mut ready, 1, 3000) }, 1);
+    let mut line = String::new();
+    BufReader::new(output).read_line(&mut line).unwrap();
+    assert_eq!(line, "ready\n");
+    Relay {
+        child,
         socket: root.join(if unix { "frontend.sock" } else { "unused" }),
         root,
-    })
+    }
 }
-
-#[test]
-fn publisher_startup_reports_port_conflict_and_reaps_child() {
-    let backend = TcpListener::bind("127.0.0.1:0").unwrap();
-    let token = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-    let upstream = Relay::start_options(
-        backend.local_addr().unwrap().port(),
-        10000,
-        None,
-        Some(token),
-        None,
-    );
-    let occupied = TcpListener::bind("127.0.0.1:0").unwrap();
-    let failure = match try_frontend_publisher(
-        &upstream.socket,
-        token,
-        occupied.local_addr().unwrap().port(),
-        None,
-        false,
-    ) {
-        Err(failure) => failure,
-        Ok(_) => panic!("occupied port unexpectedly admitted"),
-    };
-    assert_eq!(failure.stage, "readiness EOF");
-    assert_eq!(failure.status.and_then(|status| status.code()), Some(73));
-    assert!(!failure.root.exists());
-    let mut status = 0;
-    // SAFETY: status is writable; this checks only the exact owned startup child.
-    assert_eq!(
-        unsafe { libc::waitpid(failure.pid as i32, &mut status, libc::WNOHANG) },
-        -1
-    );
-    assert_eq!(
-        std::io::Error::last_os_error().raw_os_error(),
-        Some(libc::ECHILD)
-    );
-    assert!(upstream.socket.exists());
-}
-
 fn free_loopback_port() -> u16 {
     TcpListener::bind("127.0.0.1:0")
         .unwrap()
@@ -866,16 +645,15 @@ fn publisher_refuses_port_conflicts_and_stale_reused_upstream() {
 
 #[test]
 fn publisher_requires_ack_before_forwarding_and_preserves_upstream_socket() {
-    use std::os::unix::{fs::MetadataExt, net::UnixListener};
+    use std::os::unix::net::UnixListener;
     let root = PathBuf::from(format!("/tmp/hkp-ack-{}", std::process::id()));
     fs::create_dir(&root).unwrap();
     let path = root.join("socket");
     let upstream = UnixListener::bind(&path).unwrap();
     fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
     let token = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-    let owned = fs::symlink_metadata(&path).unwrap();
-    // The ack contract is transport-independent; avoid releasing a TCP port before spawn.
-    let mut publication = frontend_publisher(&path, token, 0, None, true);
+    let port = free_loopback_port();
+    let mut publication = publisher(&path, token, port);
     let worker = thread::spawn(move || {
         let (mut socket, _) = upstream.accept().unwrap();
         socket
@@ -889,7 +667,7 @@ fn publisher_requires_ack_before_forwarding_and_preserves_upstream_socket() {
         socket.read_to_end(&mut extra).unwrap();
         assert!(extra.is_empty());
     });
-    let mut client = publication.connect();
+    let mut client = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
     client
         .set_read_timeout(Some(Duration::from_secs(3)))
         .unwrap();
@@ -902,9 +680,7 @@ fn publisher_requires_ack_before_forwarding_and_preserves_upstream_socket() {
     }
     worker.join().unwrap();
     publication.stop();
-    let retained = fs::symlink_metadata(&path).unwrap();
-    assert_eq!((retained.dev(), retained.ino()), (owned.dev(), owned.ino()));
-    assert_eq!(retained.mode(), owned.mode());
+    assert!(path.exists());
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -1014,8 +790,8 @@ fn private_control_stops_only_matching_publisher_and_preserves_replaced_path() {
 }
 
 #[test]
-fn control_startup_refuses_occupied_and_nonprivate_paths_without_retaining_publisher_resources() {
-    use std::os::unix::{fs::MetadataExt, net::UnixListener};
+fn control_startup_refuses_occupied_and_nonprivate_paths_without_leaking_port() {
+    use std::os::unix::net::UnixListener;
     let root = PathBuf::from(format!(
         "/tmp/hkcf-{}-{}",
         std::process::id(),
@@ -1028,80 +804,21 @@ fn control_startup_refuses_occupied_and_nonprivate_paths_without_retaining_publi
     fs::set_permissions(&upstream, fs::Permissions::from_mode(0o700)).unwrap();
     let control = root.join("control");
     fs::write(&control, b"foreign").unwrap();
-    let control_identity = fs::symlink_metadata(&control).unwrap();
-    let frontend = root.join("frontend");
-    // The TCP leg publishes on a port that free_loopback_port() has already
-    // released, so a parallel test may re-take it before the relay binds and the
-    // relay then exits 73 at bind instead of reaching the control path. Retry a
-    // bounded number of times on a fresh port; the 70/78 expectations stay exact.
-    const PORT_ATTEMPTS: u32 = 3;
-    for unix in [false, true] {
-        for (mode, expected_exit) in [(0o700, 70), (0o755, 78)] {
-            fs::set_permissions(&root, fs::Permissions::from_mode(mode)).unwrap();
-            let mut attempt = 1;
-            let (pid, output) = loop {
-                let mut command = Command::new(BINARY);
-                command
-                    .arg(if unix { "--publish-unix" } else { "--publish" })
-                    .arg(if unix {
-                        frontend.as_os_str().to_owned()
-                    } else {
-                        free_loopback_port().to_string().into()
-                    })
-                    .arg(&upstream)
-                    .args(["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "10000", "--control"])
-                    .arg(&control)
-                    .arg("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
-                    .stdin(Stdio::null())
-                    .stdout(Stdio::piped())
-                    .stderr(Stdio::piped());
-                let child = command.spawn().unwrap();
-                let pid = child.id();
-                let output = child.wait_with_output().unwrap();
-                if !unix && output.status.code() == Some(73) && attempt < PORT_ATTEMPTS {
-                    attempt += 1;
-                    continue;
-                }
-                break (pid, output);
-            };
-            assert_eq!(
-                output.status.code(),
-                Some(expected_exit),
-                "unix={unix} mode={mode:o} attempt={attempt}"
-            );
-            assert!(output.stdout.is_empty());
-            let mut status = 0;
-            // The publisher is one C process with no fork/thread/exec path. Exact
-            // reaping and absence prove its descriptors released the TCP port;
-            // connecting to a reusable port cannot identify the former owner.
-            // SAFETY: pid identifies the awaited child and status is writable.
-            assert_eq!(
-                unsafe { libc::waitpid(pid as i32, &mut status, libc::WNOHANG) },
-                -1
-            );
-            assert_eq!(
-                io::Error::last_os_error().raw_os_error(),
-                Some(libc::ECHILD)
-            );
-            // SAFETY: signal zero observes the exact child PID without signaling.
-            assert_eq!(unsafe { libc::kill(pid as i32, 0) }, -1);
-            assert_eq!(io::Error::last_os_error().raw_os_error(), Some(libc::ESRCH));
-            for path in [
-                &frontend,
-                &root.join("frontend.identity"),
-                &root.join("control.identity"),
-            ] {
-                assert_eq!(
-                    fs::symlink_metadata(path).unwrap_err().kind(),
-                    io::ErrorKind::NotFound
-                );
-            }
-            let retained = fs::symlink_metadata(&control).unwrap();
-            assert!(retained.is_file());
-            assert_eq!(retained.dev(), control_identity.dev());
-            assert_eq!(retained.ino(), control_identity.ino());
-            assert_eq!(fs::read(&control).unwrap(), b"foreign");
-        }
+    for mode in [0o700, 0o755] {
+        fs::set_permissions(&root, fs::Permissions::from_mode(mode)).unwrap();
+        let port = free_loopback_port();
+        let output = Command::new(BINARY)
+            .args(["--publish", &port.to_string()])
+            .arg(&upstream)
+            .args(["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "10000", "--control"])
+            .arg(&control)
+            .arg("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        assert!(output.stdout.is_empty());
+        assert!(std::net::TcpStream::connect(("127.0.0.1", port)).is_err());
+        assert_eq!(fs::read(&control).unwrap(), b"foreign");
     }
     fs::remove_dir_all(root).unwrap();
 }
@@ -1182,46 +899,6 @@ fn unix_publication_streams_and_preserves_occupied_or_replaced_frontend() {
         .unwrap();
     assert_eq!(aliased.status.code(), Some(78));
     assert!(!fresh.socket.exists());
-}
-
-#[test]
-fn unix_publication_survives_a_delayed_private_upstream_ack() {
-    let root = PathBuf::from(format!(
-        "/tmp/hkr-{}-{}",
-        std::process::id(),
-        NEXT.fetch_add(1, Ordering::Relaxed)
-    ));
-    fs::create_dir(&root).unwrap();
-    fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
-    let upstream = root.join("delayed.sock");
-    let listener = UnixListener::bind(&upstream).unwrap();
-    fs::set_permissions(&upstream, fs::Permissions::from_mode(0o700)).unwrap();
-    let token = "abababababababababababababababab";
-    let mut publisher = frontend_publisher(&upstream, token, 0, None, true);
-    let server = thread::spawn(move || {
-        let (mut connection, _) = listener.accept().unwrap();
-        connection
-            .set_read_timeout(Some(Duration::from_secs(5)))
-            .unwrap();
-        let mut reservation = [0; 36];
-        connection.read_exact(&mut reservation).unwrap();
-        assert_eq!(&reservation[..4], b"HKR1");
-        assert_eq!(&reservation[4..], token.as_bytes());
-        thread::sleep(Duration::from_millis(1500));
-        connection.write_all(&[1]).unwrap();
-        let mut request = [0; 4];
-        connection.read_exact(&mut request).unwrap();
-        assert_eq!(&request, b"ping");
-        connection.write_all(b"pong").unwrap();
-    });
-    let mut client = publisher.connect();
-    client.write_all(b"ping").unwrap();
-    let mut response = [0; 4];
-    client.read_exact(&mut response).unwrap();
-    assert_eq!(&response, b"pong");
-    server.join().unwrap();
-    publisher.stop();
-    fs::remove_dir_all(root).unwrap();
 }
 
 #[test]

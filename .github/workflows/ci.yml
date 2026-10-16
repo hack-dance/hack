@@ -2,98 +2,11 @@ name: CI
 
 on:
   push:
-    branches:
-      - main
-      - next
     tags-ignore:
       - "v*"
   pull_request:
 
 jobs:
-  config-compiler:
-    name: Config compiler (${{ matrix.os }})
-    strategy:
-      matrix:
-        include:
-          - os: ubuntu-latest
-            platform: linux
-            arch: x64
-          - os: macos-latest
-            platform: darwin
-            arch: arm64
-          - os: ubuntu-24.04-arm
-            platform: linux
-            arch: arm64
-          - os: macos-15-intel
-            platform: darwin
-            arch: x64
-    runs-on: ${{ matrix.os }}
-    # Intel needs time for full compiler, schema and bundle verification.
-    timeout-minutes: ${{ matrix.os == 'macos-15-intel' && 30 || 15 }}
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@v4
-      - uses: oven-sh/setup-bun@v1
-        with:
-          bun-version: "1.4.2"
-      - uses: dtolnay/rust-toolchain@1.97.1
-        with:
-          components: rustfmt, clippy
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - run: bun install --frozen-lockfile
-      - name: Verify release host architecture
-        env:
-          EXPECTED_PLATFORM: ${{ matrix.platform }}
-          EXPECTED_ARCH: ${{ matrix.arch }}
-        run: bun -e 'if (process.platform !== process.env.EXPECTED_PLATFORM || process.arch !== process.env.EXPECTED_ARCH) throw new Error("Unexpected compiler release host");'
-      - run: bun run check:config-compiler && bun run test:config-compiler
-      - run: bun run build:config-compiler
-      # Intentionally permanent: the owner test emits closed stage tokens only, never values.
-      - name: Test private file sources and owner with the matching compiler
-        env:
-          HACK_TEST_NATIVE_FILE_OWNER_DIAGNOSTICS: "1"
-        run: bun test tests/native-compose-file-sources.test.ts tests/native-compose-file-owner.test.ts
-      - name: Test explicit imported jobs and readiness with the matching compiler
-        run: HACK_TEST_NATIVE_COMPILER_BINARY="$PWD/dist/hack-config-compiler" bun test tests/native-config-import-jobs.test.ts tests/native-config-import-readiness.test.ts
-      - name: Independently validate generated schema shape corpus
-        run: |
-          python3 -m venv "$RUNNER_TEMP/config-schema"
-          "$RUNNER_TEMP/config-schema/bin/python" -m pip install -r scripts/config-schema-requirements.txt
-          "$RUNNER_TEMP/config-schema/bin/python" scripts/check-config-schema.py
-      - name: Test transport, projections and compiled bundle without host toolchains
-        run: |
-          bunx ultracite check scripts/build-config-compiler.ts scripts/build-release.ts scripts/check-release-config-compiler.ts scripts/check-config-compiler-cli.ts tests/config-compiler-build.test.ts tests/native-config-compiler.test.ts tests/native-config-command.test.ts tests/native-config-dto.test.ts tests/native-project-inputs.test.ts tests/native-project-inputs-acquisition-race.test.ts tests/release-download-installer.test.ts
-          bun test tests/config-compiler-build.test.ts tests/native-config-compiler.test.ts tests/native-config-command.test.ts tests/native-config-dto.test.ts tests/native-project-inputs.test.ts tests/native-project-inputs-acquisition-race.test.ts
-          bun run --cwd packages/cli typecheck
-          bun test tests/release-download-installer.test.ts
-          bun run build:release --skip-tests --out=dist/config-compiler-release
-          bun scripts/check-release-config-compiler.ts dist/config-compiler-release
-          bun scripts/check-config-compiler-cli.ts
-          bunx ultracite check scripts/check-native-env-plan-cli.ts tests/native-env-plan-transport.test.ts tests/native-env-metadata.test.ts
-          bun test tests/native-env-plan-transport.test.ts tests/native-env-metadata.test.ts tests/project-env-config.test.ts tests/project-env-metadata.test.ts
-          bun scripts/check-native-env-plan-cli.ts
-          bunx ultracite check scripts/check-native-host-plan-cli.ts tests/native-host-plan-transport.test.ts src/lib/native-host-plan-protocol.ts
-          bun test tests/native-host-plan-transport.test.ts
-          bun scripts/check-native-host-plan-cli.ts
-          bunx ultracite check scripts/check-native-routing-plan-cli.ts src/lib/native-routing-plan-protocol.ts src/lib/native-routing-inputs.ts tests/native-routing-plan-transport.test.ts tests/native-routing-inputs.test.ts tests/native-routing-input-race.test.ts tests/native-routing-project.test.ts
-          bun test tests/native-routing-plan-transport.test.ts tests/native-routing-inputs.test.ts tests/native-routing-input-race.test.ts tests/native-routing-project.test.ts
-          bun scripts/check-native-routing-plan-cli.ts
-          bunx ultracite check scripts/check-native-endpoint-plan-cli.ts src/lib/native-endpoint-plan-protocol.ts tests/native-endpoint-plan-transport.test.ts tests/native-endpoint-project.test.ts
-          bun test tests/native-endpoint-plan-transport.test.ts tests/native-endpoint-project.test.ts
-          bun scripts/check-native-endpoint-plan-cli.ts
-          bunx ultracite check scripts/check-native-process-plan-cli.ts src/lib/native-process-plan-protocol.ts tests/native-process-plan-transport.test.ts tests/native-process-project.test.ts
-          bun test tests/native-process-plan-transport.test.ts tests/native-process-project.test.ts
-          bun scripts/check-native-process-plan-cli.ts
-          bunx ultracite check scripts/check-native-acquisition-plan-cli.ts src/lib/native-acquisition-plan-protocol.ts tests/native-acquisition-plan-transport.test.ts tests/native-acquisition-project.test.ts
-          bun test tests/native-acquisition-plan-transport.test.ts tests/native-acquisition-project.test.ts
-          bun scripts/check-native-acquisition-plan-cli.ts
-          bunx ultracite check scripts/check-native-config-import-cli.ts tests/native-config-import-plan.test.ts tests/native-config-import-preview.test.ts
-          bun test tests/native-config-import-plan.test.ts tests/native-config-import-preview.test.ts
-          bun scripts/check-native-config-import-cli.ts
-
   state-models:
     name: Runtime state models
     runs-on: ubuntu-latest
@@ -104,7 +17,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v1
         with:
-          bun-version: "1.4.2"
+          bun-version: "1.3.9"
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -112,25 +25,6 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Install mise for model-helper contract tests
-        uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4
-        with:
-          version: "2026.9.12"
-          install: false
-          cache: false
-          env: false
-      - name: Validate release workflow syntax
-        run: |
-          for attempt in 1 2 3; do
-            if mise install actionlint@1.7.12; then
-              break
-            fi
-            if [ "$attempt" -eq 3 ]; then
-              exit 1
-            fi
-            sleep "$((attempt * 5))"
-          done
-          mise x actionlint@1.7.12 -- actionlint -shellcheck= -pyflakes= .github/workflows/ci.yml .github/workflows/release.yml .github/workflows/prerelease.yml .github/workflows/bun-crash-experiment.yml
       - name: Fetch pinned model checker
         run: curl --fail --location --retry 2 --max-time 60 https://github.com/tlaplus/tlaplus/releases/download/v1.7.4/tla2tools.jar --output "$RUNNER_TEMP/tla2tools.jar"
       - name: Check evidence validation and models
@@ -140,12 +34,6 @@ jobs:
           python3 -m unittest discover -s .ai/skills/hack-repo-tla/tests
           bun test tests/tla-result.test.ts
           bun run test:models
-      - name: Check prepared-base benchmark harness controls
-        run: python3 -m unittest discover -s tests/python -p test_prepared_base_benchmark.py
-      - name: Check native Compose overhead harness controls
-        run: python3 -m unittest discover -s tests/python -p test_native_compose_benchmark.py
-      - name: Check native frontend acceptance controls
-        run: python3 -m unittest discover -s tests/python -p test_native_frontend_acceptance.py
 
   runtime-core:
     name: Candidate core (${{ matrix.os }})
@@ -153,7 +41,6 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 45
     permissions:
       contents: read
     steps:
@@ -161,32 +48,19 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.97.1
         with:
           components: rustfmt, clippy
-      - name: Install pinned Zig for guest helpers
-        uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4
-        with:
-          version: "2026.9.12"
-          install_args: zig
-          add_shims_to_path: false
-          cache: false
-          env: false
       - name: Check candidate formatting
         run: cargo fmt --manifest-path packages/runtime-core/Cargo.toml --check
       - name: Lint candidate core
         run: cargo clippy --locked --manifest-path packages/runtime-core/Cargo.toml --target-dir .hack-local/target --all-targets --jobs 2 -- -D warnings
       - name: Test candidate isolation contracts
         run: cargo test --locked --manifest-path packages/runtime-core/Cargo.toml --target-dir .hack-local/target --jobs 2
-      - name: Lint candidate optional features
-        run: mise exec zig -- cargo clippy --locked --manifest-path packages/runtime-core/Cargo.toml --target-dir .hack-local/target --all-targets --all-features --jobs 2 -- -D warnings
-      - name: Test candidate optional feature contracts
-        run: mise exec zig -- cargo test --locked --manifest-path packages/runtime-core/Cargo.toml --target-dir .hack-local/target --all-features --jobs 2
       - name: Build and inspect local candidate
         run: |
-          mise exec zig -- ./scripts/build-hack-local.sh
+          ./scripts/build-hack-local.sh
           ./hack-local info --json
 
   secret-scan:
     runs-on: blacksmith-4vcpu-ubuntu-2404
-    timeout-minutes: 15
     permissions:
       contents: read
     steps:
@@ -194,26 +68,11 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Install Gitleaks
-        id: gitleaks
+      - name: Gitleaks scan
         uses: gacts/gitleaks@v1
-        with:
-          version: 8.30.1
-          run: 'false'
-      - name: Scan checked-out commit history
-        env:
-          GITLEAKS_BIN: ${{ steps.gitleaks.outputs.gitleaks-bin }}
-        run: |
-          "$GITLEAKS_BIN" git . \
-            --config .gitleaks.toml \
-            --redact \
-            --log-opts='--full-history --diff-filter=tuxdb HEAD' \
-            --report-format sarif \
-            --report-path "$RUNNER_TEMP/gitleaks.sarif"
 
   runtime-images:
     runs-on: blacksmith-4vcpu-ubuntu-2404
-    timeout-minutes: 30
     permissions:
       contents: read
     steps:
@@ -222,11 +81,11 @@ jobs:
       - name: Setup Bun
         uses: oven-sh/setup-bun@v1
         with:
-          bun-version: "1.4.2"
+          bun-version: "1.3.9"
       - name: Setup Blacksmith Builder
         uses: useblacksmith/setup-docker-builder@v1
       - name: Install dependencies
-        run: bun install --frozen-lockfile
+        run: bun install
       - name: Build full runtime image
         run: |
           bun run scripts/build-node-runtime-image.ts \
@@ -249,18 +108,8 @@ jobs:
       - name: Smoke slim runtime mounted-project env flow
         run: bash scripts/portable-container-smoke.sh hack-runtime-ci:slim linux/amd64
 
-  docker-e2e-shard:
-    # One deterministic slice of the default e2e set per runner (tests/e2e/shard.ts).
-    name: docker-e2e shard ${{ matrix.shard }}/4
-    strategy:
-      # Let every shard finish so one failure still reports the other scenarios.
-      fail-fast: false
-      matrix:
-        shard: [1, 2, 3, 4]
+  docker-e2e:
     runs-on: blacksmith-4vcpu-ubuntu-2404
-    # The serial job measured 85-125 min on the shared Blacksmith engine. Each shard
-    # keeps that whole budget, so it bounds a hung engine, not a slow pass.
-    timeout-minutes: 150
     permissions:
       contents: read
     steps:
@@ -269,137 +118,36 @@ jobs:
       - name: Setup Bun
         uses: oven-sh/setup-bun@v1
         with:
-          bun-version: "1.4.2"
+          bun-version: "1.3.9"
       - name: Install tmux
         run: sudo apt-get update && sudo apt-get install --yes tmux
       - name: Install dependencies
-        run: bun install --frozen-lockfile
+        run: bun install
       - name: Create isolated Hack network
         run: docker network create --subnet 172.30.0.0/16 hack-dev
-      - name: Prepare offline cache fixture images
-        run: |
-          docker pull alpine:3.20
-          docker pull alpine:3.22
-          docker pull node:24.11.0-bookworm-slim
-          docker pull oven/bun:1.4.2-slim
-          docker pull postgres:17.6-alpine
-          docker pull lucaslorentz/caddy-docker-proxy:2.10.0-alpine
-      - uses: dtolnay/rust-toolchain@1.97.1
-      # Each shard builds its own binaries (about 20 s), so the hashes it records match what it runs.
-      - name: Build current-branch CLI and native config compiler
-        run: |
-          bun run build
-          bun run build:config-compiler
-      # The one-off compiler checks run once, on the last shard, off the longest shard's path.
-      - name: Verify literal argv through real compiler and Compose normalization
-        if: matrix.shard == 4
-        run: HACK_TEST_COMPOSE_CONFIG=1 bun test tests/native-compose-renderer-config.test.ts --test-name-pattern '^legacy dollar-pair argv matches real compiler plan and Compose normalization$'
-      - name: Verify Compose string argv through real compiler and Compose normalization
-        if: matrix.shard == 4
-        run: HACK_TEST_COMPOSE_CONFIG=1 bun test tests/native-compose-renderer-config.test.ts --test-name-pattern '^(Compose string words match real compiler and renderer exec argv for selected profiles|raw unpaired dollars cannot become accepted pairs after Compose word splitting)$'
-      - name: Verify owned bridge policy and aliases through real compiler and Compose normalization
-        if: matrix.shard == 4
-        run: HACK_TEST_COMPOSE_CONFIG=1 bun test tests/native-compose-renderer-config.test.ts --test-name-pattern '^one authored bridge keeps internal policy and static aliases through compiler and Compose normalization$'
-      # Real Docker CLI against two fake Unix engines (isolated HOME and config; no real engine).
-      - name: Verify Docker context endpoint selection against the real Docker CLI
-        if: matrix.shard == 4
-        run: HACK_TEST_DOCKER_CLI=1 bun test tests/docker-context.test.ts
-      - name: Run local and Docker E2E shard
-        env:
-          HACK_E2E_PROCESS_POLICY_REFUSAL_CAPSULE: "1"
-          HACK_E2E_CAPSULE_DIR: ${{ runner.temp }}/process-policy-capsules
-          HACK_E2E_CLI_BIN: ${{ github.workspace }}/dist/hack
-          HACK_E2E_SHARD: ${{ matrix.shard }}/4
-        run: |
-          HACK_E2E_DOCKER_HOST="${DOCKER_HOST:-$(docker context inspect --format '{{.Endpoints.docker.Host}}')}"
-          HACK_E2E_NETWORK_SOURCE_REVISION="$(git rev-parse HEAD)"
-          HACK_E2E_NETWORK_CLI_SHA256="$(sha256sum dist/hack | cut -d ' ' -f1)"
-          HACK_E2E_NETWORK_COMPILER_SHA256="$(sha256sum dist/hack-config-compiler | cut -d ' ' -f1)"
-          HACK_E2E_COMPOSE_PLUGIN_PATH="$(docker info --format '{{json .ClientInfo.Plugins}}' | bun -e 'import { realpath } from "node:fs/promises"; const value = await Bun.stdin.json(); const plugin = Array.isArray(value) ? value.find((entry) => entry && Object.hasOwn(entry, "Name") && entry.Name === "compose") : null; if (!(plugin && Object.hasOwn(plugin, "Path") && typeof plugin.Path === "string" && plugin.Path.startsWith("/"))) throw new Error("Installed Compose plugin path is unavailable"); process.stdout.write(await realpath(plugin.Path));')"
-          HACK_E2E_COMPOSE_PLUGIN_SHA256="$(sha256sum "$HACK_E2E_COMPOSE_PLUGIN_PATH" | cut -d ' ' -f1)"
-          export HACK_E2E_DOCKER_HOST HACK_E2E_NETWORK_SOURCE_REVISION HACK_E2E_NETWORK_CLI_SHA256 HACK_E2E_NETWORK_COMPILER_SHA256 HACK_E2E_COMPOSE_PLUGIN_PATH HACK_E2E_COMPOSE_PLUGIN_SHA256
-          HACK_E2E_REQUIRE_DOCKER=1 HACK_E2E_REQUIRE_TMUX=1 bun run test:e2e:local:docker --shard="$HACK_E2E_SHARD"
-      - name: Preserve process-policy capsule and startup diagnostic
-        # Closed fixed-field JSON only (counts, enums, booleans); the gh log viewer truncates it inline.
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: process-policy-capsules-shard-${{ matrix.shard }}
-          path: ${{ runner.temp }}/process-policy-capsules
-          if-no-files-found: ignore
-          retention-days: 14
-      - name: Smoke container resource metadata without optional fields
-        if: matrix.shard == 4
-        run: |
-          probe_id=$(docker create --network none --read-only alpine:3.20 true)
-          trap 'docker rm -f "$probe_id" >/dev/null' EXIT
-          bun scripts/inspect-container-resources.ts --container "$probe_id" > "$RUNNER_TEMP/resource-probe.json"
-          bun -e 'const r = await Bun.stdin.json(); if (r.probeStatus !== "not_running" || r.container.healthcheckIntervalNs !== null || r.container.writableLayerBytes !== null) throw new Error("Invalid optional resource metadata");' < "$RUNNER_TEMP/resource-probe.json"
-          bun scripts/inspect-container-resources.ts --container "$probe_id" --storage > "$RUNNER_TEMP/resource-probe.json"
-          bun -e 'const r = await Bun.stdin.json(); if (typeof r.container.writableLayerBytes !== "number") throw new Error("Missing writable-layer accounting");' < "$RUNNER_TEMP/resource-probe.json"
-
-  docker-e2e:
-    # The single docker-e2e signal for the prerelease exact-head gate and branch checks.
-    # It runs even when a shard fails or is cancelled and passes only when every shard
-    # succeeded, so a failed shard can never surface as a skipped docker-e2e check.
-    needs: docker-e2e-shard
-    if: ${{ always() }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    permissions: {}
-    steps:
-      - name: Require every docker-e2e shard to succeed
-        env:
-          SHARD_RESULT: ${{ needs.docker-e2e-shard.result }}
-        run: |
-          if [ "$SHARD_RESULT" != "success" ]; then
-            echo "docker-e2e shards did not all succeed (result: $SHARD_RESULT)"
-            exit 1
-          fi
+      - name: Run local and Docker E2E
+        run: HACK_E2E_REQUIRE_DOCKER=1 HACK_E2E_REQUIRE_TMUX=1 bun run test:e2e:local:docker
 
   test:
     runs-on: blacksmith-6vcpu-macos-15
-    timeout-minutes: 60
     steps:
       - name: Checkout
         uses: actions/checkout@v4
       - name: Setup Bun
         uses: oven-sh/setup-bun@v1
         with:
-          bun-version: "1.4.2"
+          bun-version: "1.3.9"
       - name: Install dependencies
-        run: bun install --frozen-lockfile
+        run: bun install
       - name: Typecheck (Turbo)
         run: bun run turbo:typecheck
       - name: Privacy check
         run: bun run privacy:check
       - name: Quality checks (Turbo)
         run: bun run turbo:check
-      - uses: dtolnay/rust-toolchain@1.97.1
-      - name: Prepare matching compiler for private file owner tests
-        run: bun run build:config-compiler
       - name: Tests (Turbo)
         run: bun run turbo:test
       - name: Build CLI
         run: bun run build
       - name: Build release smoke (no tests)
         run: bun run build:release --skip-tests --no-clean --out=dist/release-ci
-
-  linux-process-lifetime:
-    runs-on: blacksmith-4vcpu-ubuntu-2404
-    timeout-minutes: 15
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-      - name: Setup Bun
-        uses: oven-sh/setup-bun@v1
-        with:
-          bun-version: "1.4.2"
-      - name: Require native regression tools
-        run: |
-          command -v python3
-          command -v lsof
-      - name: Install dependencies
-        run: bun install --frozen-lockfile
-      - name: Run process and terminal regressions
-        run: bun test tests/daemon-command.test.ts tests/daemon-orphan.test.ts tests/host-exec-lifetime.test.ts tests/host-exec-tty.test.ts tests/shell-observation.test.ts

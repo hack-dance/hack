@@ -10,7 +10,6 @@ import {
 import { handleEnvRoutes } from "../src/daemon/routes/env.ts";
 import { ensureDir, writeTextFileIfChanged } from "../src/lib/fs.ts";
 import { upsertProjectRegistration } from "../src/lib/projects-registry.ts";
-import { restoreEnv } from "./helpers/env.ts";
 
 function mockRequest(opts: {
   readonly method: string;
@@ -96,7 +95,7 @@ describe("handleEnvRoutes", () => {
 
   afterEach(async () => {
     if (originalConfigPath !== undefined) {
-      restoreEnv("HACK_GLOBAL_CONFIG_PATH", originalConfigPath);
+      process.env.HACK_GLOBAL_CONFIG_PATH = originalConfigPath;
     } else {
       Reflect.deleteProperty(process.env, "HACK_GLOBAL_CONFIG_PATH");
     }

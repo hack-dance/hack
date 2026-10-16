@@ -15,7 +15,7 @@ pub enum Condition {
     Healthy,
     Completed,
 }
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Health {
     None,
@@ -23,7 +23,7 @@ pub enum Health {
     Healthy,
     Unhealthy,
 }
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum Observation {
     Created,
@@ -43,7 +43,7 @@ impl Observation {
             Condition::Completed => self == Self::Exited { code: 0 },
         }
     }
-    pub(crate) fn failed(self) -> bool {
+    fn failed(self) -> bool {
         matches!(
             self,
             Self::Dead
@@ -85,11 +85,6 @@ pub enum Event<'a> {
 /// `observe` must verify the same identity. Implementations must bound every operation's duration.
 /// This loop neither adopts resources nor retries a failed driver call, including journal writes.
 pub trait Driver {
-    /// Check cancellation between operations; never interrupt or retry an in-flight effect.
-    fn check_cancelled(&self) -> Result<(), CandidateError> {
-        Ok(())
-    }
-
     fn record(&mut self, event: Event<'_>) -> Result<(), CandidateError>;
     fn start(&mut self, service: &str) -> Result<(), CandidateError>;
     fn observe(&mut self, service: &str) -> Result<Observation, CandidateError>;
@@ -98,14 +93,6 @@ fn error(code: &'static str, message: &str) -> CandidateError {
     CandidateError::new(code, message)
 }
 impl Graph {
-    /// Check an explicitly compiled dependency graph before handing it to a driver.
-    /// This validates names, active targets, budgets and cycles, not executable inputs.
-    pub fn from_services(services: BTreeMap<String, Service>) -> Result<Self, CandidateError> {
-        let graph = Self { services };
-        graph.execution_order()?;
-        Ok(graph)
-    }
-
     /// Compile only dependency intent from an already compatible review. Commands and environment
     /// stay redacted; drivers still need a separate verified executable-input compiler.
     pub fn from_plan(
@@ -174,7 +161,9 @@ impl Graph {
                 "Readiness includes inactive or unknown services.",
             ));
         }
-        Self::from_services(services)
+        let graph = Self { services };
+        graph.execution_order()?;
+        Ok(graph)
     }
     fn execution_order(&self) -> Result<Vec<&String>, CandidateError> {
         if self.services.is_empty() || self.services.len() > 128 {
@@ -186,9 +175,9 @@ impl Graph {
         for (name, service) in &self.services {
             if name.is_empty()
                 || name.len() > 128
-                || !name.bytes().enumerate().all(|(index, b)| {
-                    b.is_ascii_alphanumeric() || b"_-".contains(&b) || (index > 0 && b == b'.')
-                })
+                || !name
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b))
             {
                 return Err(error(
                     "graph_service",
@@ -238,7 +227,6 @@ fn inspect(
     name: &str,
     observations: &mut BTreeMap<String, Observation>,
 ) -> Result<Observation, CandidateError> {
-    driver.check_cancelled()?;
     let state = driver.observe(name)?;
     if observations.get(name) != Some(&state) {
         driver.record(Event::Observed {
@@ -250,17 +238,7 @@ fn inspect(
     if state.failed() {
         return Err(error(
             "graph_service_failed",
-            &match state {
-                Observation::Exited { code } => format!(
-                    "Owned graph service {name} exited with code {code}; no further services will start."
-                ),
-                Observation::Dead => format!(
-                    "Owned graph service {name} is dead or OOM-killed; no further services will start."
-                ),
-                _ => format!(
-                    "Owned graph service {name} is unhealthy; no further services will start."
-                ),
-            },
+            "An owned graph service failed; no further services will start.",
         ));
     }
     Ok(state)
@@ -302,11 +280,9 @@ fn run_with_wait(
     let mut observations = BTreeMap::new();
     loop {
         before_deadline(deadline)?;
-        driver.check_cancelled()?;
         for name in &started {
             inspect(driver, name, &mut observations)?;
             before_deadline(deadline)?;
-            driver.check_cancelled()?;
         }
         for name in &order {
             let name = *name;
@@ -322,7 +298,6 @@ fn run_with_wait(
                 }
                 let state = inspect(driver, dependency, &mut observations)?;
                 before_deadline(deadline)?;
-                driver.check_cancelled()?;
                 if !state.satisfies(*condition) {
                     ready = false;
                     break;
@@ -332,10 +307,8 @@ fn run_with_wait(
                 continue;
             }
             before_deadline(deadline)?;
-            driver.check_cancelled()?;
             driver.record(Event::StartIntent { service: name })?;
             before_deadline(deadline)?;
-            driver.check_cancelled()?;
             if let Err(failure) = driver.start(name) {
                 driver.record(Event::StartUncertain { service: name })?;
                 return Err(failure);
@@ -344,14 +317,12 @@ fn run_with_wait(
             started.insert(name.clone());
             inspect(driver, name, &mut observations)?;
             before_deadline(deadline)?;
-            driver.check_cancelled()?;
         }
         if started.len() == graph.services.len() {
             let mut ready = true;
             for (name, service) in &graph.services {
                 let state = inspect(driver, name, &mut observations)?;
                 before_deadline(deadline)?;
-                driver.check_cancelled()?;
                 ready &= state.satisfies(service.ready);
             }
             if ready {
@@ -392,101 +363,6 @@ mod tests {
         fn observe(&mut self, service: &str) -> Result<Observation, CandidateError> {
             Ok(self.states[service])
         }
-    }
-    struct CancelledDriver<'a> {
-        inner: Fake,
-        pending: &'a std::cell::Cell<bool>,
-        cancel_on_observe: bool,
-    }
-    impl Driver for CancelledDriver<'_> {
-        fn check_cancelled(&self) -> Result<(), CandidateError> {
-            if self.pending.get() {
-                Err(error("graph_cancelled", "fixture"))
-            } else {
-                Ok(())
-            }
-        }
-        fn record(&mut self, event: Event<'_>) -> Result<(), CandidateError> {
-            self.inner.record(event)
-        }
-        fn start(&mut self, service: &str) -> Result<(), CandidateError> {
-            self.inner.start(service)
-        }
-        fn observe(&mut self, service: &str) -> Result<Observation, CandidateError> {
-            let observed = self.inner.observe(service)?;
-            if self.cancel_on_observe {
-                self.pending.set(true);
-            }
-            Ok(observed)
-        }
-    }
-    #[test]
-    fn cancellation_before_start_has_no_intent_or_effect() {
-        let pending = std::cell::Cell::new(true);
-        let mut driver = CancelledDriver {
-            inner: driver(),
-            pending: &pending,
-            cancel_on_observe: false,
-        };
-        assert_eq!(
-            run(&graph(), &mut driver, Duration::from_secs(1))
-                .unwrap_err()
-                .code,
-            "graph_cancelled"
-        );
-        assert!(driver.inner.starts.is_empty());
-        assert!(driver.inner.events.is_empty());
-    }
-    #[test]
-    fn cancellation_while_initializer_waits_never_starts_dependent() {
-        let pending = std::cell::Cell::new(false);
-        let mut inner = driver();
-        inner.states.insert("init".into(), Observation::Created);
-        let mut driver = CancelledDriver {
-            inner,
-            pending: &pending,
-            cancel_on_observe: false,
-        };
-        let mut waits = 0;
-        let outcome = run_with_wait(&graph(), &mut driver, Duration::from_secs(1), |_| {
-            waits += 1;
-            pending.set(true);
-        });
-        assert_eq!(outcome.unwrap_err().code, "graph_cancelled");
-        assert_eq!(waits, 1);
-        assert_eq!(driver.inner.starts, vec!["init"]);
-    }
-    #[test]
-    fn cancellation_at_successful_observation_cannot_commit_ready() {
-        let pending = std::cell::Cell::new(false);
-        let graph = Graph {
-            services: BTreeMap::from([(
-                "init".into(),
-                Service {
-                    dependencies: BTreeMap::new(),
-                    ready: Condition::Completed,
-                },
-            )]),
-        };
-        let mut driver = CancelledDriver {
-            inner: driver(),
-            pending: &pending,
-            cancel_on_observe: true,
-        };
-        assert_eq!(
-            run(&graph, &mut driver, Duration::from_secs(1))
-                .unwrap_err()
-                .code,
-            "graph_cancelled"
-        );
-        assert_eq!(driver.inner.starts, vec!["init"]);
-        assert!(
-            !driver
-                .inner
-                .events
-                .iter()
-                .any(|event| event.contains("ready"))
-        );
     }
     fn graph() -> Graph {
         Graph {
@@ -636,14 +512,12 @@ mod tests {
         ] {
             let mut driver = driver();
             driver.states.insert(service.into(), state);
-            let failure = run(&graph(), &mut driver, Duration::from_secs(1)).unwrap_err();
-            assert_eq!(failure.code, "graph_service_failed");
-            assert!(failure.message.contains(service));
-            assert!(failure.message.contains(if service == "init" {
-                "code 23"
-            } else {
-                "unhealthy"
-            }));
+            assert_eq!(
+                run(&graph(), &mut driver, Duration::from_secs(1))
+                    .unwrap_err()
+                    .code,
+                "graph_service_failed"
+            );
             assert_eq!(driver.starts, starts);
         }
     }

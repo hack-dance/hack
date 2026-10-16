@@ -1,6 +1,5 @@
 use std::{env, path::PathBuf, process::Command};
 fn main() {
-    build_loopback_identity();
     println!("cargo:rerun-if-changed=guest/stream-relay.c");
     if env::var_os("CARGO_FEATURE_NATIVE_STREAM_RELAY").is_some() {
         build_stream_relay();
@@ -31,9 +30,6 @@ fn main() {
             "-O",
             "ReleaseSmall",
             "-fstrip",
-            // The launcher exits with a fixed code; it has no stack unwinder.
-            // Omit unused unwind tables to keep its checked transport bounded.
-            "-fno-unwind-tables",
         ])
         .arg("--cache-dir")
         .arg(output.parent().unwrap().join("zig-cache"))
@@ -121,44 +117,4 @@ fn build_http_probe() {
         .status()
         .expect("build host HTTP probe test driver");
     assert!(result.success(), "host HTTP probe build failed");
-}
-
-fn build_loopback_identity() {
-    println!("cargo:rerun-if-changed=host/loopback-identity.c");
-    if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("macos") {
-        return;
-    }
-    let arch = match env::var("CARGO_CFG_TARGET_ARCH").as_deref() {
-        Ok("aarch64") => "arm64",
-        Ok("x86_64") => "x86_64",
-        _ => panic!("unsupported macOS architecture"),
-    };
-    let out = PathBuf::from(env::var_os("OUT_DIR").unwrap());
-    let object = out.join("loopback-identity.o");
-    let status = Command::new("cc")
-        .args([
-            "-std=c11",
-            "-O2",
-            "-Wall",
-            "-Wextra",
-            "-Werror",
-            "-arch",
-            arch,
-            "-c",
-            "host/loopback-identity.c",
-            "-o",
-        ])
-        .arg(&object)
-        .status()
-        .expect("compile native loopback identity inspection");
-    assert!(status.success(), "loopback identity compile failed");
-    let status = Command::new("ar")
-        .arg("crs")
-        .arg(out.join("libhack_loopback_identity.a"))
-        .arg(object)
-        .status()
-        .expect("archive native loopback identity inspection");
-    assert!(status.success(), "loopback identity archive failed");
-    println!("cargo:rustc-link-search=native={}", out.display());
-    println!("cargo:rustc-link-lib=static=hack_loopback_identity");
 }

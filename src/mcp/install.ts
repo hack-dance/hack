@@ -1,19 +1,11 @@
-import { readFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 
-import { ensureDir, writeTextFileIfChanged } from "../lib/fs.ts";
+import { ensureDir, readTextFile, writeTextFileIfChanged } from "../lib/fs.ts";
 import { isRecord } from "../lib/guards.ts";
-import {
-  type McpBundleSelection,
-  type McpLaunch,
-  prepareMcpBundleLaunch,
-} from "./bundle-launch.ts";
-import {
-  hasCodexLaunch,
-  removeCodexLaunch,
-  renderCodexLaunch,
-  replaceCodexLaunch,
-} from "./codex-launch.ts";
+
+const CODEX_SERVER_BLOCK_PATTERN =
+  /^\s*\[mcp_servers\.hack\][\s\S]*?(?=^\s*\[|\s*$)/m;
+const CODEX_SERVER_HEADER_PATTERN = /^\s*\[mcp_servers\.hack\]\s*$/m;
 
 export type McpTarget = "claude" | "codex" | "cursor";
 export type McpInstallScope = "project" | "user";
@@ -69,31 +61,11 @@ const SERVER_NAME = "hack" as const;
 const SERVER_COMMAND = "hack" as const;
 const SERVER_ARGS = ["mcp", "serve"] as const;
 
-async function readConfig(path: string): Promise<string | null> {
-  try {
-    return await readFile(path, "utf8");
-  } catch (error: unknown) {
-    if (isRecord(error) && error.code === "ENOENT") {
-      return null;
-    }
-    throw new Error("Unable to read MCP configuration; leaving it unchanged.");
-  }
-}
-
 export async function installMcpConfig(opts: {
   readonly targets: readonly McpTarget[];
   readonly scope: McpInstallScope;
   readonly projectRoot?: string;
-  /** User-scope root; defaults to `HOME`. */
-  readonly home?: string;
-  readonly bundle?: McpBundleSelection;
 }): Promise<McpInstallResult[]> {
-  const launch = opts.bundle
-    ? await prepareMcpBundleLaunch({
-        selection: opts.bundle,
-        createRuntime: true,
-      })
-    : undefined;
   const results: McpInstallResult[] = [];
 
   for (const target of opts.targets) {
@@ -101,7 +73,6 @@ export async function installMcpConfig(opts: {
       target,
       scope: opts.scope,
       projectRoot: opts.projectRoot,
-      home: opts.home,
     });
     if (!resolved.ok) {
       results.push({
@@ -117,13 +88,12 @@ export async function installMcpConfig(opts: {
     await ensureDir(dirname(path));
 
     if (target === "codex") {
-      const result = await installCodexConfig({ path, launch });
+      const result = await installCodexConfig({ path });
       results.push({ target, scope: opts.scope, path, ...result });
       continue;
     }
 
-    const entry =
-      target === "claude" ? buildClaudeEntry(launch) : buildCursorEntry(launch);
+    const entry = target === "claude" ? buildClaudeEntry() : buildCursorEntry();
     const result = await installJsonConfig({ path, entry });
     results.push({ target, scope: opts.scope, path, ...result });
   }
@@ -135,8 +105,6 @@ export async function checkMcpConfig(opts: {
   readonly targets: readonly McpTarget[];
   readonly scope: McpInstallScope;
   readonly projectRoot?: string;
-  /** User-scope root; defaults to `HOME`. */
-  readonly home?: string;
 }): Promise<McpCheckResult[]> {
   const results: McpCheckResult[] = [];
 
@@ -145,7 +113,6 @@ export async function checkMcpConfig(opts: {
       target,
       scope: opts.scope,
       projectRoot: opts.projectRoot,
-      home: opts.home,
     });
     if (!resolved.ok) {
       results.push({
@@ -158,26 +125,14 @@ export async function checkMcpConfig(opts: {
     }
 
     const path = resolved.path;
-    const text = await readConfig(path);
+    const text = await readTextFile(path);
     if (!text) {
       results.push({ target, scope: opts.scope, status: "missing", path });
       continue;
     }
 
     if (target === "codex") {
-      let present: boolean;
-      try {
-        present = hasCodexLaunch(text);
-      } catch {
-        results.push({
-          target,
-          scope: opts.scope,
-          path,
-          status: "error",
-          message: "Invalid Codex MCP configuration",
-        });
-        continue;
-      }
+      const present = hasCodexServerBlock(text);
       results.push({
         target,
         scope: opts.scope,
@@ -217,8 +172,6 @@ export async function removeMcpConfig(opts: {
   readonly targets: readonly McpTarget[];
   readonly scope: McpInstallScope;
   readonly projectRoot?: string;
-  /** User-scope root; defaults to `HOME`. */
-  readonly home?: string;
 }): Promise<McpRemoveResult[]> {
   const results: McpRemoveResult[] = [];
 
@@ -227,7 +180,6 @@ export async function removeMcpConfig(opts: {
       target,
       scope: opts.scope,
       projectRoot: opts.projectRoot,
-      home: opts.home,
     });
     if (!resolved.ok) {
       results.push({
@@ -257,7 +209,6 @@ export function renderMcpConfigSnippet(opts: {
   readonly target: McpTarget;
   readonly scope: McpInstallScope;
   readonly projectRoot?: string;
-  readonly launch?: McpLaunch;
 }): McpConfigSnippet {
   const resolved = resolveConfigPath(opts);
   if (!resolved.ok) {
@@ -276,17 +227,12 @@ export function renderMcpConfigSnippet(opts: {
       scope: opts.scope,
       path: resolved.path,
       format: "toml",
-      content: (opts.launch
-        ? renderCodexLaunch(opts.launch)
-        : renderCodexTomlBlock()
-      ).trimEnd(),
+      content: renderCodexTomlBlock().trimEnd(),
     };
   }
 
   const entry =
-    opts.target === "claude"
-      ? buildClaudeEntry(opts.launch)
-      : buildCursorEntry(opts.launch);
+    opts.target === "claude" ? buildClaudeEntry() : buildCursorEntry();
   return {
     ok: true,
     target: opts.target,
@@ -297,16 +243,18 @@ export function renderMcpConfigSnippet(opts: {
   };
 }
 
-function buildCursorEntry(launch?: McpLaunch): McpJsonEntry {
+function buildCursorEntry(): McpJsonEntry {
   return {
-    ...(launch ?? { command: SERVER_COMMAND, args: [...SERVER_ARGS] }),
+    command: SERVER_COMMAND,
+    args: [...SERVER_ARGS],
   };
 }
 
-function buildClaudeEntry(launch?: McpLaunch): McpJsonEntry {
+function buildClaudeEntry(): McpJsonEntry {
   return {
     type: "stdio",
-    ...(launch ?? { command: SERVER_COMMAND, args: [...SERVER_ARGS] }),
+    command: SERVER_COMMAND,
+    args: [...SERVER_ARGS],
   };
 }
 
@@ -317,7 +265,7 @@ async function installJsonConfig(opts: {
   readonly status: "updated" | "noop" | "error";
   readonly message?: string;
 }> {
-  const text = await readConfig(opts.path);
+  const text = await readTextFile(opts.path);
   const parsed = text
     ? parseJsonObject(text)
     : createOkParseResult({ value: {} });
@@ -328,37 +276,7 @@ async function installJsonConfig(opts: {
   const current = parsed.value;
   const mcpServersRaw = current.mcpServers;
   const mcpServers = isRecord(mcpServersRaw) ? { ...mcpServersRaw } : {};
-  const previous = mcpServers[SERVER_NAME];
-  if (previous !== undefined) {
-    if (!isRecord(previous)) {
-      return { status: "error", message: "Invalid Hack MCP configuration" };
-    }
-    // Ordinary setup ensures an entry exists; only explicit bundle selection or
-    // removal may replace an existing launch. Match Codex's preservation contract.
-    if (!opts.entry.env?.HACK_MCP_COMMAND) {
-      return { status: "noop" };
-    }
-    if (
-      previous.url !== undefined ||
-      (previous.type !== undefined && previous.type !== "stdio") ||
-      (previous.env !== undefined && !isRecord(previous.env))
-    ) {
-      return {
-        status: "error",
-        message: "Cannot replace a non-stdio or invalid Hack MCP configuration",
-      };
-    }
-    mcpServers[SERVER_NAME] = {
-      ...previous,
-      ...opts.entry,
-      env: {
-        ...(isRecord(previous.env) ? previous.env : {}),
-        ...opts.entry.env,
-      },
-    };
-  } else {
-    mcpServers[SERVER_NAME] = opts.entry;
-  }
+  mcpServers[SERVER_NAME] = opts.entry;
 
   const next = { ...current, mcpServers };
   const nextText = `${JSON.stringify(next, null, 2)}\n`;
@@ -366,37 +284,14 @@ async function installJsonConfig(opts: {
   return { status: result.changed ? "updated" : "noop" };
 }
 
-async function installCodexConfig(opts: {
-  readonly path: string;
-  readonly launch?: McpLaunch;
-}): Promise<{
+async function installCodexConfig(opts: { readonly path: string }): Promise<{
   readonly status: "updated" | "noop" | "error";
   readonly message?: string;
 }> {
-  const text = await readConfig(opts.path);
+  const text = await readTextFile(opts.path);
   const existing = text ?? "";
-  if (opts.launch) {
-    let next: string;
-    try {
-      next = replaceCodexLaunch({ text: existing, launch: opts.launch });
-    } catch (error: unknown) {
-      return {
-        status: "error",
-        message:
-          error instanceof Error
-            ? error.message
-            : "Cannot update Codex MCP configuration",
-      };
-    }
-    const result = await writeTextFileIfChanged(opts.path, next);
-    return { status: result.changed ? "updated" : "noop" };
-  }
-  try {
-    if (hasCodexLaunch(existing)) {
-      return { status: "noop" };
-    }
-  } catch {
-    return { status: "error", message: "Invalid Codex MCP configuration" };
+  if (hasCodexServerBlock(existing)) {
+    return { status: "noop" };
   }
 
   const block = renderCodexTomlBlock();
@@ -412,7 +307,7 @@ async function removeJsonConfig(opts: { readonly path: string }): Promise<{
   readonly status: "removed" | "noop" | "error";
   readonly message?: string;
 }> {
-  const text = await readConfig(opts.path);
+  const text = await readTextFile(opts.path);
   if (!text) {
     return { status: "noop" };
   }
@@ -448,23 +343,17 @@ async function removeCodexConfig(opts: { readonly path: string }): Promise<{
   readonly status: "removed" | "noop" | "error";
   readonly message?: string;
 }> {
-  const text = await readConfig(opts.path);
+  const text = await readTextFile(opts.path);
   if (!text) {
     return { status: "noop" };
   }
-  let next: string;
-  try {
-    next = removeCodexLaunch(text);
-  } catch (error: unknown) {
-    return {
-      status: "error",
-      message:
-        error instanceof Error
-          ? error.message
-          : "Cannot remove Codex MCP configuration",
-    };
+  if (!hasCodexServerBlock(text)) {
+    return { status: "noop" };
   }
-  const result = await writeTextFileIfChanged(opts.path, next);
+
+  const next = text.replace(CODEX_SERVER_BLOCK_PATTERN, "").trimEnd();
+  const normalized = next.length === 0 ? "" : `${next}\n`;
+  const result = await writeTextFileIfChanged(opts.path, normalized);
   return { status: result.changed ? "removed" : "noop" };
 }
 
@@ -476,11 +365,14 @@ function renderCodexTomlBlock(): string {
   ].join("\n");
 }
 
+function hasCodexServerBlock(text: string): boolean {
+  return CODEX_SERVER_HEADER_PATTERN.test(text);
+}
+
 function resolveConfigPath(opts: {
   readonly target: McpTarget;
   readonly scope: McpInstallScope;
   readonly projectRoot?: string;
-  readonly home?: string;
 }):
   | { readonly ok: true; readonly path: string }
   | { readonly ok: false; readonly message: string } {
@@ -491,7 +383,7 @@ function resolveConfigPath(opts: {
     };
   }
 
-  const home = opts.home === undefined ? resolveHomeDir() : opts.home.trim();
+  const home = resolveHomeDir();
   if (opts.scope === "user" && !home) {
     return {
       ok: false,
@@ -515,8 +407,8 @@ function resolveConfigPath(opts: {
         ok: true,
         path:
           opts.scope === "user"
-            ? resolve(home ?? "", ".claude.json")
-            : resolve(projectRoot, ".mcp.json"),
+            ? resolve(home ?? "", ".claude", "settings.json")
+            : resolve(projectRoot, ".claude", "settings.json"),
       };
     case "codex":
       return {
@@ -544,12 +436,10 @@ function parseJsonObject(text: string):
     if (!isRecord(parsed)) {
       return { ok: false, message: "Expected JSON object at config root." };
     }
-    if (parsed.mcpServers !== undefined && !isRecord(parsed.mcpServers)) {
-      return { ok: false, message: "Expected mcpServers to be a JSON object." };
-    }
     return { ok: true, value: parsed };
-  } catch {
-    return { ok: false, message: "Failed to parse config JSON." };
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : "Invalid JSON";
+    return { ok: false, message: `Failed to parse config JSON: ${message}` };
   }
 }
 

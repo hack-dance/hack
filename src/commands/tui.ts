@@ -2,10 +2,13 @@ import { resolve } from "node:path";
 import type { CliContext, CommandArgs } from "../cli/command.ts";
 import { CliUsageError, defineCommand, withHandler } from "../cli/command.ts";
 import { optPath, optProject } from "../cli/options.ts";
-import { resolveRegisteredProjectOption } from "../cli/project-selector.ts";
 import type { ProjectContext } from "../lib/project.ts";
-import { findProjectContext } from "../lib/project.ts";
-import { upsertProjectRegistration } from "../lib/projects-registry.ts";
+import { findProjectContext, sanitizeProjectSlug } from "../lib/project.ts";
+import {
+  resolveRegisteredProjectByName,
+  upsertProjectRegistration,
+} from "../lib/projects-registry.ts";
+import { runHackTui } from "../tui/hack-tui.ts";
 import { logger } from "../ui/logger.ts";
 
 const options = [optPath, optProject] as const;
@@ -43,7 +46,6 @@ async function handleTui({
     projectOpt: args.options.project,
   });
 
-  const { runHackTui } = await import("../tui/hack-tui.ts");
   return await runHackTui({ project });
 }
 
@@ -52,14 +54,21 @@ async function resolveProjectForArgs(opts: {
   readonly pathOpt: string | undefined;
   readonly projectOpt: string | undefined;
 }): Promise<ProjectContext> {
-  if (opts.pathOpt && opts.projectOpt !== undefined) {
+  if (opts.pathOpt && opts.projectOpt) {
     throw new CliUsageError("Use either --path or --project (not both).");
   }
 
-  if (opts.projectOpt !== undefined) {
-    const fromRegistry = await resolveRegisteredProjectOption({
-      projectOpt: opts.projectOpt,
-    });
+  if (opts.projectOpt) {
+    const name = sanitizeProjectSlug(opts.projectOpt);
+    if (name.length === 0) {
+      throw new CliUsageError("Invalid --project value.");
+    }
+    const fromRegistry = await resolveRegisteredProjectByName({ name });
+    if (!fromRegistry) {
+      throw new CliUsageError(
+        `Unknown project "${name}". Run 'hack init' in that repo (or run 'hack projects' to see registered projects).`
+      );
+    }
     await touchProjectRegistration(fromRegistry);
     return fromRegistry;
   }

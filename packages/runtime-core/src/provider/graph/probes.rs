@@ -215,98 +215,24 @@ pub(super) fn observe(
             .id
             .as_ref()
             .unwrap();
-        observe_sample(p, || engine.probe_status(id), now)?
+        let now = now()?;
+        match engine.probe_status(id)? {
+            Some(raw) => p
+                .config
+                .health(&raw, &p.generation, true, now)
+                .unwrap_or(Health::Unhealthy),
+            None if now.saturating_sub(p.started_ms)
+                <= p.config.interval_ms + p.config.timeout_ms + 1000 =>
+            {
+                Health::Starting
+            }
+            None => Health::Unhealthy,
+        }
     } else {
         Health::Unhealthy
     };
     Ok(Observation::Running { health: healthy })
 }
-// Read the sample before observing wall time: a slow archive RPC can return a
-// sample newer than its request time. Existing skew/freshness limits remain exact.
-fn observe_sample(
-    probe: &Probe,
-    read: impl FnOnce() -> Result<Option<String>, CandidateError>,
-    clock: impl FnOnce() -> Result<u64, CandidateError>,
-) -> Result<Health, CandidateError> {
-    let sample = read()?;
-    let now = clock()?;
-    Ok(match sample {
-        Some(raw) => probe
-            .config
-            .health(&raw, &probe.generation, true, now)
-            .unwrap_or(Health::Unhealthy),
-        None if now.saturating_sub(probe.started_ms)
-            <= probe.config.interval_ms + probe.config.timeout_ms + 1000 =>
-        {
-            Health::Starting
-        }
-        None => Health::Unhealthy,
-    })
-}
-
-#[cfg(test)]
-mod observation_clock_tests {
-    use super::*;
-    #[test]
-    fn slow_sample_read_uses_response_time_without_extending_freshness() {
-        let probe = Probe {
-            config: HttpProbe {
-                port: 8080,
-                path: "/health".into(),
-                interval_ms: 100,
-                timeout_ms: 40,
-                retries: 3,
-                start_period_ms: 0,
-            },
-            allocation: "a".repeat(32),
-            generation: "b".repeat(32),
-            binary: String::new(),
-            uid: 0,
-            gid: 0,
-            exec_id: None,
-            started_ms: 10000,
-            phase: "started".into(),
-        };
-        let clock = std::cell::Cell::new(10000);
-        let raw = format!("v1 {} 5 1 0 12000 2\n", probe.generation);
-        assert_eq!(
-            probe
-                .config
-                .health(&raw, &probe.generation, true, clock.get())
-                .unwrap(),
-            Health::Unhealthy
-        );
-        assert_eq!(
-            observe_sample(
-                &probe,
-                || {
-                    clock.set(12010);
-                    Ok(Some(raw.clone()))
-                },
-                || Ok(clock.get())
-            )
-            .unwrap(),
-            Health::Healthy
-        );
-        assert_eq!(
-            observe_sample(&probe, || Ok(Some(raw)), || Ok(13141)).unwrap(),
-            Health::Unhealthy
-        );
-        assert_eq!(
-            observe_sample(
-                &probe,
-                || {
-                    clock.set(12000);
-                    Ok(None)
-                },
-                || Ok(clock.get())
-            )
-            .unwrap(),
-            Health::Unhealthy
-        );
-    }
-}
-
 pub(super) fn cleanup(engine: &Engine<'_>, receipt: &mut Receipt) -> Result<(), CandidateError> {
     validate(receipt)?;
     for name in receipt.probes.keys().cloned().collect::<Vec<_>>() {
@@ -328,144 +254,7 @@ pub(super) fn cleanup(engine: &Engine<'_>, receipt: &mut Receipt) -> Result<(), 
     }
     Ok(())
 }
-
-/// One selected probe effect for interrupted-start recovery. The caller journals
-/// the step before calling and must verify absence before advancing that journal.
-#[cfg(target_os = "macos")]
-fn inactive_exec(value: Option<&Value>) -> bool {
-    value.is_none_or(|observed| observed["Running"].as_bool() == Some(false))
-}
-
-#[cfg(target_os = "macos")]
-pub(super) fn retire_one(
-    engine: &Engine<'_>,
-    receipt: &Receipt,
-    name: &str,
-) -> Result<(), CandidateError> {
-    validate(receipt)?;
-    if !receipt.probes.contains_key(name)
-        || inspect_resource(
-            engine,
-            receipt,
-            &receipt.resources[&format!("container:{name}")],
-        )?
-        .is_some()
-        || !inactive_exec(exec(engine, receipt, name)?.as_ref())
-    {
-        return Err(error(
-            "graph_probe_running",
-            "Selected probe still has an owned consumer.",
-        ));
-    }
-    execute(engine, receipt, name, "remove")
-}
-
-/// An interrupted probe removal advances only from fresh guest absence.
-#[cfg(target_os = "macos")]
-pub(super) fn verify_one_absent(
-    engine: &Engine<'_>,
-    receipt: &Receipt,
-    name: &str,
-) -> Result<(), CandidateError> {
-    validate(receipt)?;
-    let probe = receipt.probes.get(name).ok_or_else(|| {
-        error(
-            "graph_probe_receipt",
-            "Selected probe is missing from the graph receipt.",
-        )
-    })?;
-    if inspect_resource(
-        engine,
-        receipt,
-        &receipt.resources[&format!("container:{name}")],
-    )?
-    .is_some()
-        || !inactive_exec(exec(engine, receipt, name)?.as_ref())
-    {
-        return Err(error(
-            "graph_probe_cleanup_uncertain",
-            "Selected probe remains active.",
-        ));
-    }
-    let output = engine
-        .guest()
-        .execute_cleanup(PROBE_ABSENT, &[&path(probe)])?;
-    if output != "probe-storage-absent\n" {
-        return Err(error(
-            "graph_probe_cleanup_uncertain",
-            "Selected probe storage remains.",
-        ));
-    }
-    Ok(())
-}
-
-/// Immutable probe selection for a cleanup effect. Retirement changes only phase;
-/// every other field remains bound so lost/replaced probe records cannot look empty.
-#[cfg(target_os = "macos")]
-pub(super) fn cleanup_identity(receipt: &Receipt) -> Result<Value, CandidateError> {
-    validate(receipt)?;
-    let mut identity = serde_json::to_value(&receipt.probes).map_err(|_| {
-        error(
-            "graph_probe_receipt",
-            "Probe cleanup identity could not be encoded.",
-        )
-    })?;
-    for binding in identity
-        .as_object_mut()
-        .ok_or_else(|| error("graph_probe_receipt", "Invalid probe inventory."))?
-        .values_mut()
-    {
-        binding
-            .as_object_mut()
-            .ok_or_else(|| error("graph_probe_receipt", "Invalid probe binding."))?
-            .remove("phase");
-    }
-    Ok(identity)
-}
-
-/// Observe actual absence without repeating storage removal or changing the receipt.
-#[cfg(target_os = "macos")]
-pub(super) fn verify_cleanup(engine: &Engine<'_>, receipt: &Receipt) -> Result<(), CandidateError> {
-    validate(receipt)?;
-    for (name, probe) in &receipt.probes {
-        if probe.phase != "retired"
-            || inspect_resource(
-                engine,
-                receipt,
-                &receipt.resources[&format!("container:{name}")],
-            )?
-            .is_some()
-            || exec(engine, receipt, name)?
-                .is_some_and(|value| value["Running"].as_bool() != Some(false))
-        {
-            return Err(error(
-                "graph_probe_cleanup_uncertain",
-                "Probe retirement is not independently confirmed.",
-            ));
-        }
-        let output = engine
-            .guest()
-            .execute_cleanup(PROBE_ABSENT, &[&path(probe)])?;
-        if output != "probe-storage-absent\n" {
-            return Err(error(
-                "graph_probe_cleanup_uncertain",
-                "Probe allocation absence was not confirmed.",
-            ));
-        }
-    }
-    Ok(())
-}
-
-#[cfg(target_os = "macos")]
-const PROBE_ABSENT: &str = r#"
-test ! -L /run/hack-local
-test ! -L /run/hack-local/http-probes
-test ! -e "$1"
-test ! -L "$1"
-printf 'probe-storage-absent\n'
-"#;
-
-impl Session<'_, '_> {
+impl Session<'_> {
     pub(super) fn prepare_probe(&mut self, name: &str) -> Result<(), CandidateError> {
         if !self.receipt.probes.contains_key(name) {
             return Ok(());
@@ -686,66 +475,6 @@ pub(super) fn unchanged(
 mod storage_tests {
     use super::STORAGE;
     use std::{fs, process::Command};
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn recovery_probe_exec_requires_explicit_nonrunning_observation() {
-        use serde_json::json;
-        assert!(super::inactive_exec(None));
-        assert!(super::inactive_exec(Some(&json!({"Running":false}))));
-        for observed in [
-            json!({}),
-            json!({"Running":null}),
-            json!({"Running":"false"}),
-            json!({"Running":true}),
-        ] {
-            assert!(!super::inactive_exec(Some(&observed)));
-        }
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn absence_observation_refuses_live_and_dangling_allocations_without_writes() {
-        use std::os::unix::fs::{MetadataExt, symlink};
-        let parent = std::env::temp_dir().join(format!("probe-absence-{}", std::process::id()));
-        fs::create_dir(&parent).unwrap();
-        let allocation = parent.join("allocation");
-        let invoke = || {
-            Command::new("/bin/sh")
-                .args(["-eu", "-c", super::PROBE_ABSENT, "probe-observation"])
-                .arg(&allocation)
-                .output()
-                .unwrap()
-        };
-        let absent = invoke();
-        assert!(absent.status.success());
-        assert_eq!(absent.stdout, b"probe-storage-absent\n");
-        assert!(!allocation.exists());
-        fs::create_dir(&allocation).unwrap();
-        fs::write(allocation.join("sentinel"), b"preserved").unwrap();
-        let before = fs::metadata(&allocation).unwrap();
-        let present = invoke();
-        assert!(!present.status.success());
-        assert!(present.stdout.is_empty());
-        let after = fs::metadata(&allocation).unwrap();
-        assert_eq!(
-            (before.ino(), before.mtime(), before.mtime_nsec()),
-            (after.ino(), after.mtime(), after.mtime_nsec())
-        );
-        assert_eq!(fs::read(allocation.join("sentinel")).unwrap(), b"preserved");
-        fs::remove_file(allocation.join("sentinel")).unwrap();
-        fs::remove_dir(&allocation).unwrap();
-        symlink(parent.join("missing"), &allocation).unwrap();
-        assert!(!invoke().status.success());
-        assert!(
-            fs::symlink_metadata(&allocation)
-                .unwrap()
-                .file_type()
-                .is_symlink()
-        );
-        fs::remove_file(&allocation).unwrap();
-        fs::remove_dir(parent).unwrap();
-    }
 
     #[test]
     fn reset_recreates_missing_probe_storage_without_overwriting_existing_state() {

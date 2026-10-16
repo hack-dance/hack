@@ -1,37 +1,27 @@
 import { createHash } from "node:crypto";
-import { realpath } from "node:fs/promises";
+import { open, realpath, rename, stat, unlink } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
-import { GLOBAL_PROJECTS_REGISTRY_FILENAME } from "../constants.ts";
+import {
+  GLOBAL_PROJECTS_REGISTRY_FILENAME,
+  PROJECT_COMPOSE_FILENAME,
+  PROJECT_CONFIG_FILENAME,
+  PROJECT_ENV_FILENAME,
+} from "../constants.ts";
 import { resolveGlobalHackDir } from "./config-paths.ts";
 import { ensureDir, pathExists, readTextFile } from "./fs.ts";
 import {
   resolveGitCurrentBranch,
-  resolveGitRegistrationMetadata,
   resolveGitRepositoryIdentity,
 } from "./git-worktree.ts";
 import { getString, isRecord } from "./guards.ts";
 import type { ProjectContext, ProjectDirName } from "./project.ts";
-import {
-  defaultProjectSlugFromPath,
-  findProjectContextAtRoot,
-  readProjectConfig,
-} from "./project.ts";
-import {
-  assertLegacyProjectDirectory,
-  ProjectInputSelectionError,
-} from "./project-input-selection.ts";
-import {
-  AmbiguousProjectNameError,
-  normalizeProjectName,
-} from "./project-name.ts";
-import {
-  deferIfProjectsRegistryBusy,
-  withProjectsRegistryLock,
-  writeProjectsRegistryAtomic,
-} from "./projects-registry-lock.ts";
+import { defaultProjectSlugFromPath, readProjectConfig } from "./project.ts";
 
 const REGISTRY_VERSION = 1 as const;
 const REGISTRY_LOCK_FILENAME = `${GLOBAL_PROJECTS_REGISTRY_FILENAME}.lock`;
+const REGISTRY_LOCK_TIMEOUT_MS = 2000;
+const REGISTRY_LOCK_STALE_MS = 30_000;
+const REGISTRY_LOCK_RETRY_MS = 50;
 const REGISTRY_TOUCH_INTERVAL_MS = 60_000;
 
 export interface RegisteredProjectWorktree {
@@ -58,14 +48,6 @@ export interface ProjectsRegistry {
   readonly projects: readonly RegisteredProject[];
 }
 
-export class AmbiguousProjectIdError extends Error {
-  constructor(id: string) {
-    super(
-      `Ambiguous project ID "${id}". Multiple registrations share this ID; inspect 'hack projects' before updating or removing an entry.`
-    );
-  }
-}
-
 export type RegisterOutcome =
   | { readonly status: "created"; readonly project: RegisteredProject }
   | { readonly status: "updated"; readonly project: RegisteredProject }
@@ -80,11 +62,8 @@ export type RegisterOutcome =
       >;
     };
 
-/** Read an explicit session registry without changing process-wide environment. */
-export async function readProjectsRegistry(opts?: {
-  readonly registryPath?: string;
-}): Promise<ProjectsRegistry> {
-  const path = opts?.registryPath ?? getRegistryPath();
+export async function readProjectsRegistry(): Promise<ProjectsRegistry> {
+  const path = getRegistryPath();
   const text = await readTextFile(path);
   if (!text) {
     return { version: REGISTRY_VERSION, projects: [] };
@@ -101,191 +80,69 @@ export async function readProjectsRegistry(opts?: {
   return out ?? { version: REGISTRY_VERSION, projects: [] };
 }
 
-type RegistrationUpsertOptions = {
+export async function upsertProjectRegistration(opts: {
   readonly project: ProjectContext;
   readonly nowIso?: string;
   /** Optional maintenance may abandon a busy lock without waiting or reclaiming it. */
   readonly waitForLock?: boolean;
-  readonly signal?: AbortSignal;
-};
-
-type RegistrationObservation = {
-  readonly name: string;
-  readonly devHost: string | undefined;
-  readonly repoRoot: string;
-  readonly projectDir: string;
-  readonly projectDirName: ProjectDirName;
-};
-
-export async function upsertProjectRegistration(
-  opts: RegistrationUpsertOptions
-): Promise<RegisterOutcome> {
-  return await upsertObservedRegistration({ options: opts });
-}
-
-async function readRegistrationObservation(
-  project: ProjectContext
-): Promise<RegistrationObservation> {
-  const [cfg, repoRoot, projectDir] = await Promise.all([
-    readProjectConfig(project),
-    tryRealpath(project.projectRoot),
-    tryRealpath(project.projectDir),
-  ]);
-  return {
-    name: requireProjectName(cfg.name ?? defaultProjectSlugFromPath(repoRoot)),
-    devHost: cfg.devHost?.trim(),
-    repoRoot,
-    projectDir,
-    projectDirName: project.projectDirName,
-  };
-}
-
-async function upsertObservedRegistration(input: {
-  readonly options: RegistrationUpsertOptions;
-  readonly observation?: RegistrationObservation;
 }): Promise<RegisterOutcome> {
-  const opts = input.options;
-  await assertLegacyProjectDirectory({ projectDir: opts.project.projectDir });
   const nowIso = opts.nowIso ?? new Date().toISOString();
   const registryPath = getRegistryPath();
   const registryDir = dirname(registryPath);
-  if (opts.waitForLock === false) {
-    // Skip Git and configuration discovery for an already-busy optional upsert.
-    // The late check and atomic publication still arbitrate later arrivals.
-    await deferIfProjectsRegistryBusy({
-      lockPath: getRegistryLockPath(),
-      signal: opts.signal,
-    });
-  }
   await ensureDir(registryDir);
 
-  // A touch can reuse only its own observation. Public upserts always observe
-  // independently after admission; registry mutation still rereads under lock.
-  const observation =
-    input.observation ?? (await readRegistrationObservation(opts.project));
-  const { repoIdentity, gitBranch } = await resolveGitRegistrationMetadata({
-    repoRoot: observation.repoRoot,
+  const [repoRootReal, projectDirReal] = await Promise.all([
+    tryRealpath(opts.project.projectRoot),
+    tryRealpath(opts.project.projectDir),
+  ]);
+  const repoIdentity = await resolveGitRepositoryIdentity({
+    repoRoot: repoRootReal,
   });
+
+  const cfg = await readProjectConfig(opts.project);
+  const derivedName = defaultProjectSlugFromPath(repoRootReal);
+  const name = sanitizeProjectName(cfg.name ?? derivedName);
+  const devHost = cfg.devHost?.trim();
+  const gitBranch = await resolveGitCurrentBranch({ repoRoot: repoRootReal });
 
   return await withRegistryLock(
     async () => {
-      await assertLegacyProjectDirectory({
-        projectDir: opts.project.projectDir,
-      });
       const current = await readProjectsRegistry();
-      const update = await upsertInMemory({
+      const { project, status } = await upsertInMemory({
         current,
         nowIso,
         incoming: {
-          ...observation,
+          name,
+          devHost,
+          repoRoot: repoRootReal,
           repoIdentity,
           gitBranch,
+          projectDirName: opts.project.projectDirName,
+          projectDir: projectDirReal,
         },
       });
 
-      return await commitRegistrationUpdate({
-        update,
-        registryPath,
-        signal: opts.signal,
-        projectDir: opts.project.projectDir,
-      });
-    },
-    { waitForLock: opts.waitForLock, signal: opts.signal }
-  );
-}
-
-async function commitRegistrationUpdate(opts: {
-  readonly update: Awaited<ReturnType<typeof upsertInMemory>>;
-  readonly registryPath: string;
-  readonly signal?: AbortSignal;
-  readonly projectDir: string;
-}): Promise<RegisterOutcome> {
-  const { project, status } = opts.update;
-  if (status.status === "conflict") {
-    return status;
-  }
-  if (status.status !== "noop" || status.changed) {
-    await assertLegacyProjectDirectory({ projectDir: opts.projectDir });
-    await writeRegistryAtomic(
-      opts.registryPath,
-      { version: REGISTRY_VERSION, projects: status.projects },
-      opts.signal
-    );
-  }
-  return { status: status.status, project };
-}
-
-/**
- * Only an unchanged, unambiguous primary may skip Git discovery. Before locking,
- * this selection is merely a hint; the owned reread must prove it again.
- */
-function selectUnchangedPrimary(opts: {
-  readonly registry: ProjectsRegistry;
-  readonly observation: RegistrationObservation;
-}): RegisteredProject | null {
-  const { observation, registry } = opts;
-  const byName = matchingNames(registry.projects, observation.name);
-  const byDir = registry.projects.filter(
-    (entry) => entry.projectDir === observation.projectDir
-  );
-  const entry = byName[0];
-  if (
-    byName.length !== 1 ||
-    byDir.length !== 1 ||
-    entry !== byDir[0] ||
-    !entry ||
-    entry.name !== observation.name ||
-    entry.repoRoot !== observation.repoRoot ||
-    entry.projectDirName !== observation.projectDirName ||
-    entry.devHost !== observation.devHost ||
-    registry.projects.filter((item) => item.id === entry.id).length !== 1
-  ) {
-    return null;
-  }
-  return entry;
-}
-
-/** A failed proof releases ownership completely before the caller discovers Git. */
-async function refreshUnchangedPrimary(opts: {
-  readonly observation: RegistrationObservation;
-  readonly nowIso: string;
-}): Promise<RegisterOutcome | null> {
-  const registryPath = getRegistryPath();
-  await assertLegacyProjectDirectory({
-    projectDir: opts.observation.projectDir,
-  });
-  await deferIfProjectsRegistryBusy({ lockPath: getRegistryLockPath() });
-  await ensureDir(dirname(registryPath));
-  return await withRegistryLock(
-    async () => {
-      await assertLegacyProjectDirectory({
-        projectDir: opts.observation.projectDir,
-      });
-      const current = await readProjectsRegistry();
-      const primary = selectUnchangedPrimary({
-        registry: current,
-        observation: opts.observation,
-      });
-      const age =
-        Date.parse(opts.nowIso) - Date.parse(primary?.lastSeenAt ?? "");
-      if (!(primary && age >= 0)) {
-        return null;
+      if (status.status === "conflict") {
+        return status;
       }
-      if (age < REGISTRY_TOUCH_INTERVAL_MS) {
-        return { status: "noop", project: primary };
+      if (status.status === "noop") {
+        if (status.changed) {
+          await writeRegistryAtomic(registryPath, {
+            version: REGISTRY_VERSION,
+            projects: status.projects,
+          });
+        }
+        return { status: "noop", project };
       }
-      return await commitRegistrationUpdate({
-        registryPath,
-        projectDir: opts.observation.projectDir,
-        update: await updatePrimaryRegistration({
-          current: current.projects,
-          existing: primary,
-          incoming: opts.observation,
-          nowIso: opts.nowIso,
-        }),
+
+      await writeRegistryAtomic(registryPath, {
+        version: REGISTRY_VERSION,
+        projects: status.projects,
       });
+
+      return { status: status.status, project };
     },
-    { waitForLock: false }
+    { waitForLock: opts.waitForLock }
   );
 }
 
@@ -294,9 +151,6 @@ async function refreshUnchangedPrimary(opts: {
  *
  * Coalesces unchanged observations for one minute. New or changed checkouts
  * use the normal serialized upsert, but never wait for or reclaim a busy lock.
- * An unchanged primary refresh skips Git only after a locked registry reread.
- * Configuration and canonical paths are observed once per invocation; a later
- * invocation reads them again even when the registration is still fresh.
  * Registry maintenance must not delay or break a read command.
  *
  * @returns The registration outcome, or null when the touch failed.
@@ -305,62 +159,44 @@ export async function touchProjectRegistration(opts: {
   readonly project: ProjectContext;
   readonly nowIso?: string;
 }): Promise<RegisterOutcome | null> {
-  await assertLegacyProjectDirectory({ projectDir: opts.project.projectDir });
   try {
     const nowIso = opts.nowIso ?? new Date().toISOString();
-    const [registry, observation] = await Promise.all([
-      readProjectsRegistry(),
-      readRegistrationObservation(opts.project),
-    ]);
     const fresh = await readFreshRegistration({
-      registry,
-      observation,
+      project: opts.project,
       nowIso,
     });
     if (fresh) {
       return { status: "noop", project: fresh };
     }
-    const primaryHint = selectUnchangedPrimary({ registry, observation });
-    const age = Date.parse(nowIso) - Date.parse(primaryHint?.lastSeenAt ?? "");
-    if (primaryHint && age >= 0) {
-      const refreshed = await refreshUnchangedPrimary({ observation, nowIso });
-      if (refreshed) {
-        return refreshed;
-      }
-    }
-    return await upsertObservedRegistration({
-      options: { project: opts.project, nowIso, waitForLock: false },
-      observation,
+    return await upsertProjectRegistration({
+      project: opts.project,
+      nowIso,
+      waitForLock: false,
     });
-  } catch (error: unknown) {
-    if (error instanceof ProjectInputSelectionError) {
-      throw error;
-    }
+  } catch {
     return null;
   }
 }
 
 /** A read-only freshness optimization; mutation decisions still run under the lock. */
 async function readFreshRegistration(opts: {
-  readonly registry: ProjectsRegistry;
-  readonly observation: RegistrationObservation;
+  readonly project: ProjectContext;
   readonly nowIso: string;
 }): Promise<RegisteredProject | null> {
-  const { name, devHost, projectDirName, projectDir, repoRoot } =
-    opts.observation;
-  const matches = matchingNames(opts.registry.projects, name);
-  if (matches.length !== 1) {
-    return null;
-  }
-  for (const entry of matches) {
-    selectRegisteredProjectById({
-      projects: opts.registry.projects,
-      id: entry.id,
-    });
+  const [registry, cfg, projectDir, repoRoot] = await Promise.all([
+    readProjectsRegistry(),
+    readProjectConfig(opts.project),
+    tryRealpath(opts.project.projectDir),
+    tryRealpath(opts.project.projectRoot),
+  ]);
+  const name = sanitizeProjectName(
+    cfg.name ?? defaultProjectSlugFromPath(repoRoot)
+  );
+  for (const entry of registry.projects) {
     if (
       entry.name !== name ||
-      entry.devHost !== devHost ||
-      entry.projectDirName !== projectDirName
+      entry.devHost !== cfg.devHost?.trim() ||
+      entry.projectDirName !== opts.project.projectDirName
     ) {
       continue;
     }
@@ -392,59 +228,35 @@ async function readFreshRegistration(opts: {
 }
 
 export async function resolveRegisteredProjectByName(opts: {
-  readonly registryPath?: string;
   readonly name: string;
 }): Promise<ProjectContext | null> {
-  const name = normalizeProjectName(opts.name);
-  if (!name) {
-    return null;
-  }
-  const registry = await readProjectsRegistry({
-    registryPath: opts.registryPath,
-  });
-  const match = selectRegisteredProjectByName({
-    projects: registry.projects,
-    name,
-  });
+  const name = sanitizeProjectName(opts.name);
+  const registry = await readProjectsRegistry();
+  const match = registry.projects.find((p) => p.name === name) ?? null;
   if (!match) {
     return null;
   }
 
-  return await findProjectContextAtRoot({
-    projectRoot: match.repoRoot,
-    projectDirName: match.projectDirName,
-  });
-}
-
-/** Select one canonical name/legacy alias without filtering out stale contenders. */
-export function selectRegisteredProjectByName(opts: {
-  readonly projects: readonly RegisteredProject[];
-  readonly name: string;
-}): RegisteredProject | null {
-  const name = normalizeProjectName(opts.name);
-  if (!name) {
+  if (!(await pathExists(match.projectDir))) {
     return null;
   }
-  const matches = matchingNames(opts.projects, name);
-  if (matches.length > 1) {
-    throw new AmbiguousProjectNameError(name);
-  }
-  const match = matches[0];
-  return match
-    ? selectRegisteredProjectById({ projects: opts.projects, id: match.id })
-    : null;
-}
 
-/** Refuse the selected identity before liveness checks can hide a contender. */
-function selectRegisteredProjectById(opts: {
-  readonly projects: readonly RegisteredProject[];
-  readonly id: string;
-}): RegisteredProject | null {
-  const matches = opts.projects.filter((project) => project.id === opts.id);
-  if (matches.length > 1) {
-    throw new AmbiguousProjectIdError(opts.id);
+  const composeFile = resolve(match.projectDir, PROJECT_COMPOSE_FILENAME);
+  const configFile = resolve(match.projectDir, PROJECT_CONFIG_FILENAME);
+  const envFile = resolve(match.projectDir, PROJECT_ENV_FILENAME);
+
+  if (!(await pathExists(composeFile))) {
+    return null;
   }
-  return matches[0] ?? null;
+
+  return {
+    projectRoot: match.repoRoot,
+    projectDirName: match.projectDirName,
+    projectDir: match.projectDir,
+    composeFile,
+    envFile,
+    configFile,
+  };
 }
 
 export async function resolveRegisteredProjectById(opts: {
@@ -454,61 +266,57 @@ export async function resolveRegisteredProjectById(opts: {
   readonly registration: RegisteredProject;
 } | null> {
   const registry = await readProjectsRegistry();
-  const match = selectRegisteredProjectById({
-    projects: registry.projects,
-    id: opts.id,
-  });
+  const match = registry.projects.find((p) => p.id === opts.id) ?? null;
   if (!match) {
     return null;
   }
 
-  const project = await findProjectContextAtRoot({
-    projectRoot: match.repoRoot,
-    projectDirName: match.projectDirName,
-  });
-  if (!project) {
+  if (!(await pathExists(match.projectDir))) {
+    return null;
+  }
+
+  const composeFile = resolve(match.projectDir, PROJECT_COMPOSE_FILENAME);
+  const configFile = resolve(match.projectDir, PROJECT_CONFIG_FILENAME);
+  const envFile = resolve(match.projectDir, PROJECT_ENV_FILENAME);
+
+  if (!(await pathExists(composeFile))) {
     return null;
   }
 
   return {
     registration: match,
-    project,
+    project: {
+      projectRoot: match.repoRoot,
+      projectDirName: match.projectDirName,
+      projectDir: match.projectDir,
+      composeFile,
+      envFile,
+      configFile,
+    },
   };
 }
 
-/** Validate every requested ID under ownership before removing any entry. */
 export async function removeProjectsById(opts: {
   readonly ids: readonly string[];
-  readonly signal?: AbortSignal;
 }): Promise<{ readonly removed: readonly RegisteredProject[] }> {
   if (opts.ids.length === 0) {
     return { removed: [] };
   }
   const removeIds = new Set(opts.ids);
-  return await withRegistryLock(
-    async () => {
-      const current = await readProjectsRegistry();
-      for (const id of removeIds) {
-        selectRegisteredProjectById({ projects: current.projects, id });
-      }
-      const removed = current.projects.filter((p) => removeIds.has(p.id));
-      if (removed.length === 0) {
-        return { removed: [] };
-      }
+  return await withRegistryLock(async () => {
+    const current = await readProjectsRegistry();
+    const removed = current.projects.filter((p) => removeIds.has(p.id));
+    if (removed.length === 0) {
+      return { removed: [] };
+    }
 
-      const next = current.projects.filter((p) => !removeIds.has(p.id));
-      await writeRegistryAtomic(
-        getRegistryPath(),
-        {
-          version: REGISTRY_VERSION,
-          projects: next,
-        },
-        opts.signal
-      );
-      return { removed };
-    },
-    { signal: opts.signal }
-  );
+    const next = current.projects.filter((p) => !removeIds.has(p.id));
+    await writeRegistryAtomic(getRegistryPath(), {
+      version: REGISTRY_VERSION,
+      projects: next,
+    });
+    return { removed };
+  });
 }
 
 export type DeadProjectRegistration = {
@@ -583,8 +391,7 @@ function parseProject(value: unknown): RegisteredProject | null {
 
   return {
     id,
-    // Preserve the legacy spelling until an unambiguous owned upsert migrates it.
-    name: name.trim().toLowerCase(),
+    name: sanitizeProjectName(name),
     repoRoot,
     projectDirName,
     projectDir,
@@ -637,14 +444,12 @@ function getRegistryLockPath(): string {
 
 async function writeRegistryAtomic(
   path: string,
-  registry: ProjectsRegistry,
-  signal?: AbortSignal
+  registry: ProjectsRegistry
 ): Promise<void> {
-  await writeProjectsRegistryAtomic({
-    path,
-    text: `${JSON.stringify(registry, null, 2)}\n`,
-    signal,
-  });
+  const json = `${JSON.stringify(registry, null, 2)}\n`;
+  const tmp = `${path}.tmp`;
+  await Bun.write(tmp, json);
+  await rename(tmp, path);
 }
 
 async function tryRealpath(path: string): Promise<string> {
@@ -657,49 +462,77 @@ async function tryRealpath(path: string): Promise<string> {
 
 async function withRegistryLock<T>(
   fn: () => Promise<T>,
-  opts?: { readonly waitForLock?: boolean; readonly signal?: AbortSignal }
+  opts?: { readonly waitForLock?: boolean }
 ): Promise<T> {
-  const lockPath = getRegistryLockPath();
-  await ensureDir(dirname(lockPath));
-  return await withProjectsRegistryLock({ lockPath, run: fn, ...opts });
-}
-
-function requireProjectName(input: string): string {
-  const name = normalizeProjectName(input);
-  if (!name) {
-    throw new Error(
-      "Invalid project name: use a name containing letters or digits."
-    );
+  await acquireRegistryLock(opts);
+  try {
+    return await fn();
+  } finally {
+    await releaseRegistryLock();
   }
-  return name;
 }
 
-function matchingNames(projects: readonly RegisteredProject[], name: string) {
-  return projects.filter(
-    (project) => normalizeProjectName(project.name) === name
-  );
+async function acquireRegistryLock(opts?: {
+  readonly waitForLock?: boolean;
+}): Promise<void> {
+  const lockPath = getRegistryLockPath();
+  const start = Date.now();
+
+  while (true) {
+    try {
+      const file = await open(lockPath, "wx");
+      await file.writeFile(`${process.pid}\n`);
+      await file.close();
+      return;
+    } catch (error: unknown) {
+      const code =
+        typeof error === "object" && error !== null && "code" in error
+          ? (error as { code?: string }).code
+          : undefined;
+      if (code !== "EEXIST") {
+        throw error;
+      }
+      if (opts?.waitForLock === false) {
+        throw new Error("Projects registry is busy; optional touch deferred");
+      }
+      if (await isLockStale(lockPath)) {
+        // biome-ignore lint/suspicious/noEmptyBlockStatements: best-effort stale lock cleanup
+        await unlink(lockPath).catch(() => {});
+        continue;
+      }
+      if (Date.now() - start > REGISTRY_LOCK_TIMEOUT_MS) {
+        throw new Error("Timed out waiting for projects registry lock");
+      }
+      await sleep(REGISTRY_LOCK_RETRY_MS);
+    }
+  }
 }
 
-function registrationConflict(opts: {
-  readonly existing: RegisteredProject;
-  readonly incoming: Pick<
-    RegisteredProject,
-    "name" | "projectDir" | "repoRoot"
-  >;
-}) {
-  return {
-    project: opts.existing,
-    status: {
-      status: "conflict" as const,
-      conflictName: opts.incoming.name,
-      existing: opts.existing,
-      incoming: {
-        name: opts.incoming.name,
-        projectDir: opts.incoming.projectDir,
-        repoRoot: opts.incoming.repoRoot,
-      },
-    },
-  };
+async function releaseRegistryLock(): Promise<void> {
+  const lockPath = getRegistryLockPath();
+  // biome-ignore lint/suspicious/noEmptyBlockStatements: lock release is best-effort
+  await unlink(lockPath).catch(() => {});
+}
+
+async function isLockStale(lockPath: string): Promise<boolean> {
+  try {
+    const info = await stat(lockPath);
+    return Date.now() - info.mtimeMs > REGISTRY_LOCK_STALE_MS;
+  } catch {
+    return false;
+  }
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function sanitizeProjectName(name: string): string {
+  const trimmed = name.trim();
+  if (trimmed.length === 0) {
+    return "project";
+  }
+  return trimmed.toLowerCase();
 }
 
 function computeId(opts: {
@@ -761,37 +594,57 @@ async function upsertInMemory(opts: {
   const incoming = opts.incoming;
   const current = [...opts.current.projects];
 
-  const byName = matchingNames(current, incoming.name);
-  const byDir = current.filter((p) => p.projectDir === incoming.projectDir);
-  const ambiguous = byName[1] ?? byDir[1];
-  if (ambiguous) {
-    return registrationConflict({ existing: ambiguous, incoming });
-  }
-  const existingByDir = byDir[0] ?? null;
-  const existingByName = byName[0] ?? null;
-  const existingTarget = existingByDir ?? existingByName;
-  if (existingTarget) {
-    selectRegisteredProjectById({
-      projects: current,
-      id: existingTarget.id,
-    });
-  }
+  const byName = new Map(current.map((p) => [p.name, p] as const));
+  const byDir = new Map(current.map((p) => [p.projectDir, p] as const));
+
+  const existingByDir = byDir.get(incoming.projectDir) ?? null;
+  const existingByName = byName.get(incoming.name) ?? null;
 
   // 1) Same directory already registered → update name/devHost/lastSeen.
   if (existingByDir) {
-    if (existingByName && !isSameProject(existingByName, incoming)) {
-      return registrationConflict({ existing: existingByName, incoming });
+    if (
+      existingByDir.name !== incoming.name &&
+      existingByName &&
+      !isSameProject(existingByName, incoming)
+    ) {
+      return {
+        project: existingByDir,
+        status: {
+          status: "conflict",
+          conflictName: incoming.name,
+          existing: existingByName,
+          incoming: {
+            name: incoming.name,
+            projectDir: incoming.projectDir,
+            repoRoot: incoming.repoRoot,
+          },
+        },
+      };
     }
 
-    return await updatePrimaryRegistration({
-      current,
-      existing: existingByDir,
-      incoming,
-      nowIso: opts.nowIso,
-    });
+    const prunedWorktrees = await pruneWorktreeEntries(existingByDir.worktrees);
+    const { worktrees: _staleWorktrees, ...existingBase } = existingByDir;
+    const updated: RegisteredProject = {
+      ...existingBase,
+      name: incoming.name,
+      repoRoot: incoming.repoRoot,
+      projectDirName: incoming.projectDirName,
+      ...(incoming.devHost ? { devHost: incoming.devHost } : {}),
+      lastSeenAt: opts.nowIso,
+      ...(prunedWorktrees && prunedWorktrees.length > 0
+        ? { worktrees: prunedWorktrees }
+        : {}),
+    };
+    return {
+      project: updated,
+      status: {
+        status: shallowEqual(existingByDir, updated) ? "noop" : "updated",
+        projects: replaceById(current, updated),
+      },
+    };
   }
 
-  // 2) Only a proven Git worktree family may share or move a registered identity.
+  // 2) Name already registered → either move (old path missing) or conflict.
   if (existingByName) {
     const oldMissing = await isPathLikelyMissing(existingByName.projectDir);
     const sameRepositoryFamily = await isSameRepositoryFamily({
@@ -807,10 +660,7 @@ async function upsertInMemory(opts: {
           lastSeenAt: opts.nowIso,
         },
       });
-      if (
-        nextWorktrees === existingByName.worktrees &&
-        existingByName.name === incoming.name
-      ) {
+      if (nextWorktrees === existingByName.worktrees) {
         return {
           project: existingByName,
           status: {
@@ -822,7 +672,6 @@ async function upsertInMemory(opts: {
 
       const withWorktrees: RegisteredProject = {
         ...existingByName,
-        name: incoming.name,
         ...(nextWorktrees && nextWorktrees.length > 0
           ? { worktrees: nextWorktrees }
           : {}),
@@ -837,13 +686,24 @@ async function upsertInMemory(opts: {
       };
     }
 
-    if (!(oldMissing && sameRepositoryFamily)) {
-      return registrationConflict({ existing: existingByName, incoming });
+    if (!oldMissing) {
+      return {
+        project: existingByName,
+        status: {
+          status: "conflict",
+          conflictName: incoming.name,
+          existing: existingByName,
+          incoming: {
+            name: incoming.name,
+            projectDir: incoming.projectDir,
+            repoRoot: incoming.repoRoot,
+          },
+        },
+      };
     }
 
     const moved: RegisteredProject = {
       ...existingByName,
-      name: incoming.name,
       repoRoot: incoming.repoRoot,
       projectDirName: incoming.projectDirName,
       projectDir: incoming.projectDir,
@@ -870,53 +730,10 @@ async function upsertInMemory(opts: {
     createdAt: opts.nowIso,
     lastSeenAt: opts.nowIso,
   };
-  if (current.some((entry) => entry.id === created.id)) {
-    throw new Error(
-      `Project ID collision "${created.id}". Refusing to create a registration with an existing ID; inspect 'hack projects'.`
-    );
-  }
 
   return {
     project: created,
     status: { status: "created", projects: [...current, created] },
-  };
-}
-
-async function updatePrimaryRegistration(opts: {
-  readonly current: readonly RegisteredProject[];
-  readonly existing: RegisteredProject;
-  readonly incoming: Pick<
-    RegisteredProject,
-    "name" | "repoRoot" | "projectDirName" | "devHost"
-  >;
-  readonly nowIso: string;
-}): Promise<{
-  readonly project: RegisteredProject;
-  readonly status: {
-    readonly status: "noop" | "updated";
-    readonly projects: readonly RegisteredProject[];
-  };
-}> {
-  const { existing, incoming } = opts;
-  const prunedWorktrees = await pruneWorktreeEntries(existing.worktrees);
-  const { worktrees: _staleWorktrees, ...existingBase } = existing;
-  const updated: RegisteredProject = {
-    ...existingBase,
-    name: incoming.name,
-    repoRoot: incoming.repoRoot,
-    projectDirName: incoming.projectDirName,
-    ...(incoming.devHost ? { devHost: incoming.devHost } : {}),
-    lastSeenAt: opts.nowIso,
-    ...(prunedWorktrees && prunedWorktrees.length > 0
-      ? { worktrees: prunedWorktrees }
-      : {}),
-  };
-  return {
-    project: updated,
-    status: {
-      status: shallowEqual(existing, updated) ? "noop" : "updated",
-      projects: replaceById(opts.current, updated),
-    },
   };
 }
 
@@ -982,11 +799,8 @@ function replaceById(
 
 function shallowEqual(a: RegisteredProject, b: RegisteredProject): boolean {
   const keys = Object.keys(a) as Array<keyof RegisteredProject>;
-  if (keys.length !== Object.keys(b).length) {
-    return false;
-  }
   for (const k of keys) {
-    if (!Object.hasOwn(b, k) || a[k] !== b[k]) {
+    if (a[k] !== b[k]) {
       return false;
     }
   }

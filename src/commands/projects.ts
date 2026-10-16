@@ -7,10 +7,6 @@ import {
   withHandler,
 } from "../cli/command.ts";
 import { optJson, optProject } from "../cli/options.ts";
-import {
-  type ProjectSelector,
-  parseProjectSelectorOption,
-} from "../cli/project-selector.ts";
 import { PROJECT_COMPOSE_FILENAME } from "../constants.ts";
 import { requestDaemonJson } from "../daemon/client.ts";
 import {
@@ -19,19 +15,12 @@ import {
 } from "../lib/caddy-hosts.ts";
 import { emitCliResult, okResult } from "../lib/cli-result.ts";
 import { confirmSafe } from "../lib/interactivity.ts";
-import { noteBrowserTargetsForLocalNetworkHint } from "../lib/local-network-hint.ts";
 import {
   createOperationTimings,
   type OperationTimings,
 } from "../lib/operation-timings.ts";
 import { findProjectContext } from "../lib/project.ts";
-import { ProjectInputSelectionError } from "../lib/project-input-selection.ts";
 import { type ProjectMeta, resolveProjectMeta } from "../lib/project-meta.ts";
-import {
-  AmbiguousProjectNameError,
-  normalizeProjectName,
-} from "../lib/project-name.ts";
-import { assertPruneRuntimeOwnership } from "../lib/project-prune-ownership.ts";
 import {
   findMissingRegistryEntries,
   findOrphanRuntimeProjects,
@@ -48,7 +37,6 @@ import {
   type RegisteredProject,
   readProjectsRegistry,
   removeProjectsById,
-  selectRegisteredProjectByName,
   touchProjectRegistration,
 } from "../lib/projects-registry.ts";
 import type {
@@ -191,7 +179,11 @@ const handleProjects: CommandHandlerFor<typeof spec> = async ({
   }
   const profiler = createOperationTimings();
   const started = performance.now();
-  const selector = parseProjectFilter(args.options.project);
+  const requestedProject =
+    typeof args.options.project === "string"
+      ? sanitizeName(args.options.project)
+      : "";
+  const filter = requestedProject.length > 0 ? requestedProject : null;
   await profiler.measure("cwd_registration_ms", () =>
     touchCwdProjectRegistration({ cwd: ctx.cwd })
   );
@@ -201,7 +193,7 @@ const handleProjects: CommandHandlerFor<typeof spec> = async ({
     summary: args.options.summary === true,
     timings: args.options.timings === true,
     noDaemon: args.options.noDaemon === true,
-    selector,
+    filter,
     includeGlobal: args.options.includeGlobal === true,
     includeUnregistered: args.options.all === true,
     details: args.options.details === true || args.options.meta === true,
@@ -218,15 +210,7 @@ const handleProjects: CommandHandlerFor<typeof spec> = async ({
 async function touchCwdProjectRegistration(opts: {
   readonly cwd: string;
 }): Promise<void> {
-  let project: Awaited<ReturnType<typeof findProjectContext>>;
-  try {
-    project = await findProjectContext(opts.cwd);
-  } catch (error: unknown) {
-    if (error instanceof ProjectInputSelectionError) {
-      return;
-    }
-    throw error;
-  }
+  const project = await findProjectContext(opts.cwd);
   if (!project) {
     return;
   }
@@ -287,24 +271,28 @@ async function applyPrune(opts: {
 const handlePrune: CommandHandlerFor<typeof pruneSpec> = async ({
   args,
 }): Promise<number> => {
-  const filter = parseProjectFilter(args.options.project)?.name ?? null;
+  const filter =
+    typeof args.options.project === "string"
+      ? sanitizeName(args.options.project)
+      : null;
   const includeGlobal = args.options.includeGlobal === true;
   const json = args.options.json === true;
   const registry = await readProjectsRegistry();
-  const projects = filterPruneRegistryProjects({
-    projects: registry.projects,
-    filter,
+  const candidates = await collectPruneRegistryCandidates({
+    projects: filterPruneRegistryProjects({
+      projects: registry.projects,
+      filter,
+    }),
   });
-  const candidates = await collectPruneRegistryCandidates({ projects });
 
   const runtimeResult = await readRuntimeProjects({ includeGlobal });
-  const runtime = filterPruneRuntimeProjects({
-    runtime: runtimeResult.runtime,
-    filter,
-  });
-  await assertPruneRuntimeOwnership({ projects, runtime });
   const orphaned = runtimeResult.ok
-    ? await findOrphanRuntimeProjects({ runtime })
+    ? await findOrphanRuntimeProjects({
+        runtime: filterPruneRuntimeProjects({
+          runtime: runtimeResult.runtime,
+          filter,
+        }),
+      })
     : [];
   const orphanedContainerCount = orphaned.reduce(
     (sum, entry) => sum + entry.containerIds.length,
@@ -444,10 +432,13 @@ const handleStatus: CommandHandlerFor<typeof statusSpec> = async ({
   ctx,
   args,
 }): Promise<number> => {
-  const selector = parseProjectFilter(args.options.project);
+  const filter =
+    typeof args.options.project === "string"
+      ? sanitizeName(args.options.project)
+      : null;
   await touchCwdProjectRegistration({ cwd: ctx.cwd });
   return await runProjects({
-    selector,
+    filter,
     includeGlobal: args.options.includeGlobal === true,
     includeUnregistered: args.options.all === true,
     details: true,
@@ -459,11 +450,7 @@ const handleStatus: CommandHandlerFor<typeof statusSpec> = async ({
 export const statusCommand = withHandler(statusSpec, handleStatus);
 
 async function runProjects(opts: {
-  /**
-   * Parsed `--project` filter. Its `name` is used only for in-process
-   * matching; output and the daemon query see `resolveListingFilter` instead.
-   */
-  readonly selector: ProjectSelector | null;
+  readonly filter: string | null;
   readonly includeGlobal: boolean;
   readonly includeUnregistered: boolean;
   readonly details: boolean;
@@ -477,19 +464,13 @@ async function runProjects(opts: {
 }): Promise<number> {
   const profiler = opts.profiler ?? createOperationTimings();
   const started = opts.started ?? performance.now();
-  const { filter, filterLabel, filterRedacted } = await resolveListingFilter(
-    opts.selector
-  );
   const daemonRuntimeMeta =
     opts.json || opts.noDaemon ? null : await readDaemonRuntimeRecoveryMeta();
 
-  // The daemon echoes its `filter` query back, so a filter that may not be
-  // named is matched in process only and never sent to it.
   if (
     opts.json &&
     !opts.noDaemon &&
-    !filterRedacted &&
-    (await outputDaemonProjects({ opts, filterLabel, profiler, started }))
+    (await outputDaemonProjects({ opts, profiler, started }))
   ) {
     return 0;
   }
@@ -511,7 +492,7 @@ async function runProjects(opts: {
       registryProjects: registry.projects,
       runtime: runtime.runtime,
       runtimeOk: runtime.ok,
-      filter,
+      filter: opts.filter,
       includeUnregistered: opts.includeUnregistered,
     })
   );
@@ -526,8 +507,7 @@ async function runProjects(opts: {
       profiler,
       started,
       timings: opts.timings === true,
-      filterLabel,
-      filterRedacted,
+      filter: opts.filter,
       includeGlobal: opts.includeGlobal,
       includeUnregistered: opts.includeUnregistered,
       includeMeta: opts.meta,
@@ -547,7 +527,11 @@ async function runProjects(opts: {
     await display.panel({
       title: "Projects",
       tone: "warn",
-      lines: [noProjectsMessage({ filtered: filter !== null, filterLabel })],
+      lines: [
+        opts.filter
+          ? `No projects matched: ${opts.filter}`
+          : "No projects found.",
+      ],
     });
     return 0;
   }
@@ -573,8 +557,6 @@ async function runProjects(opts: {
     }),
   });
 
-  await renderProjectInputDiagnostics(views);
-
   if (opts.details) {
     const caddyIp = await resolveGlobalCaddyIp();
     for (const p of views) {
@@ -586,39 +568,16 @@ async function runProjects(opts: {
       });
     }
   }
-  noteBrowserTargetsForLocalNetworkHint(
-    views.flatMap((p) => (p.devHost ? [p.devHost] : []))
-  );
 
   return 0;
 }
 
-async function renderProjectInputDiagnostics(
-  views: readonly ProjectView[]
-): Promise<void> {
-  const lines = views.flatMap((project) =>
-    project.inputDiagnostic
-      ? [`${project.name}: ${project.inputDiagnostic.message}`]
-      : []
-  );
-  if (lines.length > 0) {
-    await display.panel({
-      title: "Project input diagnostics",
-      tone: "warn",
-      lines,
-    });
-  }
-}
-
 async function outputDaemonProjects({
   opts,
-  filterLabel,
   profiler,
   started,
 }: {
   readonly opts: Parameters<typeof runProjects>[0];
-  /** Filter safe to send (and have echoed back); see `resolveListingFilter`. */
-  readonly filterLabel: string | null;
   readonly profiler: OperationTimings;
   readonly started: number;
 }): Promise<boolean> {
@@ -626,7 +585,7 @@ async function outputDaemonProjects({
     requestDaemonJson({
       path: "/v1/projects",
       query: {
-        filter: filterLabel,
+        filter: opts.filter ?? null,
         include_global: opts.includeGlobal,
         include_unregistered: opts.includeUnregistered,
         include_meta: opts.meta,
@@ -673,10 +632,7 @@ function outputProjectsJson(opts: {
   readonly profiler: OperationTimings;
   readonly started: number;
   readonly timings: boolean;
-  /** Filter safe to echo; see `resolveListingFilter`. */
-  readonly filterLabel: string | null;
-  /** A filter was applied but may not be named. */
-  readonly filterRedacted: boolean;
+  readonly filter: string | null;
   readonly includeGlobal: boolean;
   readonly includeUnregistered: boolean;
   readonly includeMeta: boolean;
@@ -688,8 +644,7 @@ function outputProjectsJson(opts: {
   const payload = {
     ...(opts.summary ? { detail_level: "summary" } : {}),
     generated_at: new Date().toISOString(),
-    filter: opts.filterLabel,
-    ...(opts.filterRedacted ? { filter_redacted: true } : {}),
+    filter: opts.filter,
     include_global: opts.includeGlobal,
     include_unregistered: opts.includeUnregistered,
     include_meta: opts.includeMeta,
@@ -777,9 +732,6 @@ async function renderProjectDetails(opts: {
 
   const meta: Array<readonly [string, string]> = [];
   meta.push(["Status", p.status]);
-  if (p.inputDiagnostic) {
-    meta.push(["Input diagnostic", p.inputDiagnostic.message]);
-  }
   if (p.projectId) {
     meta.push(["Project id", p.projectId]);
   }
@@ -959,13 +911,7 @@ async function buildMetaByProjectName(opts: {
 }): Promise<Map<string, ProjectMeta>> {
   const out = new Map<string, ProjectMeta>();
   const tasks = opts.views
-    .filter(
-      (p) =>
-        p.kind === "registered" &&
-        p.repoRoot &&
-        p.projectDir &&
-        !p.inputDiagnostic
-    )
+    .filter((p) => p.kind === "registered" && p.repoRoot && p.projectDir)
     .map(async (p) => {
       if (!(p.repoRoot && p.projectDir)) {
         return;
@@ -1309,52 +1255,8 @@ function formatRuntimeMeta(opts: {
   };
 }
 
-/** `--project` filter: refused value-free when malformed, never slugged from a value. */
-function parseProjectFilter(value: unknown): ProjectSelector | null {
-  return typeof value === "string"
-    ? parseProjectSelectorOption({ projectOpt: value })
-    : null;
-}
-
-/**
- * Split a `--project` listing filter into the name used for in-process
- * matching and the label that may appear in output or the daemon query.
- * The label is the name when it was typed canonically or selects a
- * registered project (whose name the listing shows anyway). Otherwise it is
- * null and `filterRedacted` is set: a slug derived from a non-canonical
- * argument is never echoed. Ambiguous registry names still throw here.
- */
-async function resolveListingFilter(selector: ProjectSelector | null): Promise<{
-  readonly filter: string | null;
-  readonly filterLabel: string | null;
-  readonly filterRedacted: boolean;
-}> {
-  if (!selector) {
-    return { filter: null, filterLabel: null, filterRedacted: false };
-  }
-  const registered = selectRegisteredProjectByName({
-    projects: (await readProjectsRegistry()).projects,
-    name: selector.name,
-  });
-  const nameable = selector.canonical || registered !== null;
-  return {
-    filter: selector.name,
-    filterLabel: nameable ? selector.name : null,
-    filterRedacted: !nameable,
-  };
-}
-
-/** Name the filter only through `resolveListingFilter`; never a derived slug. */
-function noProjectsMessage(opts: {
-  readonly filtered: boolean;
-  readonly filterLabel: string | null;
-}): string {
-  if (!opts.filtered) {
-    return "No projects found.";
-  }
-  return opts.filterLabel
-    ? `No projects matched: ${opts.filterLabel}`
-    : "No projects matched the --project filter.";
+function sanitizeName(value: string): string {
+  return value.trim().toLowerCase();
 }
 
 function filterPruneRegistryProjects(opts: {
@@ -1362,46 +1264,24 @@ function filterPruneRegistryProjects(opts: {
   readonly filter: string | null;
 }): readonly RegisteredProject[] {
   if (!opts.filter) {
-    for (const project of opts.projects) {
-      selectRegisteredProjectByName({
-        projects: opts.projects,
-        name: project.name,
-      });
-    }
     return opts.projects;
   }
-  const project = selectRegisteredProjectByName({
-    projects: opts.projects,
-    name: opts.filter,
-  });
-  return project ? [project] : [];
+  return opts.projects.filter(
+    (project) => sanitizeName(project.name) === opts.filter
+  );
 }
 
 function filterPruneRuntimeProjects(opts: {
   readonly runtime: readonly RuntimeProject[];
   readonly filter: string | null;
 }): readonly RuntimeProject[] {
-  const matching = opts.filter
-    ? opts.runtime.filter(
-        (project) =>
-          normalizeProjectName(project.project.split("--")[0] ?? "") ===
-          opts.filter
-      )
-    : opts.runtime;
-  const bases = new Map<string, string>();
-  for (const project of matching) {
-    const base = project.project.split("--")[0] ?? "";
-    const name = normalizeProjectName(base);
-    if (!name) {
-      continue;
-    }
-    const previous = bases.get(name);
-    if (previous !== undefined && previous !== base) {
-      throw new AmbiguousProjectNameError(name);
-    }
-    bases.set(name, base);
+  if (!opts.filter) {
+    return opts.runtime;
   }
-  return matching;
+  return opts.runtime.filter((project) => {
+    const name = sanitizeName(project.project);
+    return name === opts.filter || name.startsWith(`${opts.filter}--`);
+  });
 }
 
 function readNumberField(opts: {

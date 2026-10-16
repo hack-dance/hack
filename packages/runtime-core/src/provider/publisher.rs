@@ -219,22 +219,13 @@ mod tests {
                 revents: 0,
             };
             if unsafe { libc::poll(&mut ready, 1, 3000) } != 1 {
-                let observed = child.try_wait().ok().flatten();
-                let _ = child.kill();
-                let reaped = child.wait().ok();
-                let _ = fs::remove_dir_all(&root);
-                panic!("publisher startup timed out: observed={observed:?}, reaped={reaped:?}");
+                child.kill().unwrap();
+                child.wait().unwrap();
+                panic!("publisher startup timed out");
             }
             let mut line = String::new();
-            let read = BufReader::new(output).read_line(&mut line);
-            if read.is_err() || line != "ready\n" {
-                // Preserve the natural failure status before forced cleanup; never retry.
-                let observed = child.try_wait().ok().flatten();
-                let _ = child.kill();
-                let reaped = child.wait().ok();
-                let _ = fs::remove_dir_all(&root);
-                panic!("publisher readiness missing: observed={observed:?}, reaped={reaped:?}");
-            }
+            BufReader::new(output).read_line(&mut line).unwrap();
+            assert_eq!(line, "ready\n");
             let process = identity::observe(child.id() as i32).unwrap();
             Self {
                 child,

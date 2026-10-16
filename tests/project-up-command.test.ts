@@ -2,7 +2,6 @@ import { afterEach, beforeEach, expect, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { restoreEnv } from "./helpers/env.ts";
 
 type CapturedRunResult = {
   readonly exitCode: number;
@@ -25,9 +24,9 @@ afterEach(async () => {
     tempDir = null;
   }
   if (originalLogger !== undefined) {
-    restoreEnv("HACK_LOGGER", originalLogger);
+    process.env.HACK_LOGGER = originalLogger;
   } else {
-    Reflect.deleteProperty(process.env, "HACK_LOGGER");
+    process.env.HACK_LOGGER = undefined;
   }
 });
 

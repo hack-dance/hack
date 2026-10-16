@@ -142,76 +142,6 @@ export async function ensureBundledGumInstalled(): Promise<BundledGumInstallOutc
   }
 }
 
-/**
- * One gum process invocation. stderr is always inherited so gum's own
- * diagnostics reach the user; `stdin.text` is written to gum and closed.
- */
-export interface GumRunRequest {
-  readonly cmd: readonly string[];
-  readonly env: Readonly<Record<string, string | undefined>>;
-  readonly stdin: "inherit" | "ignore" | { readonly text: string };
-  readonly stdout: "inherit" | "pipe" | "ignore";
-}
-
-export interface GumRunResult {
-  readonly exitCode: number;
-  /** Captured stdout when the request used `stdout: "pipe"`, otherwise "". */
-  readonly stdout: string;
-}
-
-/** Process boundary for every gum invocation in this module. */
-export interface GumRunner {
-  /** Synchronous run, used by the logger so log lines keep their order. */
-  runSync(request: GumRunRequest): number;
-  run(request: GumRunRequest): Promise<GumRunResult>;
-}
-
-const bunGumRunner: GumRunner = {
-  runSync({ cmd, env, stdin, stdout }) {
-    const res = Bun.spawnSync({
-      cmd: [...cmd],
-      env: { ...env },
-      stdin:
-        typeof stdin === "string"
-          ? stdin
-          : new TextEncoder().encode(stdin.text),
-      stdout,
-      stderr: "inherit",
-    });
-    return res.exitCode;
-  },
-  async run({ cmd, env, stdin, stdout }) {
-    const proc = Bun.spawn([...cmd], {
-      env: { ...env },
-      stdin: typeof stdin === "string" ? stdin : streamFromText(stdin.text),
-      stdout,
-      stderr: "inherit",
-    });
-    const piped = proc.stdout;
-    const [text, exitCode] = await Promise.all([
-      piped instanceof ReadableStream
-        ? new Response(piped).text()
-        : Promise.resolve(""),
-      proc.exited,
-    ]);
-    return { exitCode, stdout: text };
-  },
-};
-
-let gumRunner: GumRunner = bunGumRunner;
-
-/**
- * Test seam: route gum invocations through `runner` instead of spawning.
- * Pass `null` to restore the real Bun process runner.
- */
-export function setGumRunnerForTests({
-  runner,
-}: {
-  readonly runner: GumRunner | null;
-}): void {
-  gumRunner = runner ?? bunGumRunner;
-}
-
 export function tryGumLog({ level, message, fields }: GumLogInput): boolean {
   const gum = getGumPath();
   if (!gum) {
@@ -232,19 +162,22 @@ export function tryGumLog({ level, message, fields }: GumLogInput): boolean {
   const cmd = [
     gum,
     "log",
-    ...valueFlag({ flag: "level", value: level }),
+    "--level",
+    level,
     ...(kv.length > 0 ? ["--structured"] : []),
-    ...positionals([message, ...kv]),
+    message,
+    ...kv,
   ];
 
-  const exitCode = gumRunner.runSync({
+  const res = Bun.spawnSync({
     cmd,
     env: buildGumRenderEnv(),
     stdin: "ignore",
     stdout: "inherit",
+    stderr: "inherit",
   });
 
-  return exitCode === 0;
+  return res.exitCode === 0;
 }
 
 function getBundledGumInstallPath(): string {
@@ -335,21 +268,23 @@ export async function gumConfirm({
   const cmd = [
     gum,
     "confirm",
+    ...(prompt ? [prompt] : []),
     ...(defaultChoice ? ["--default"] : []),
     ...(showOutput ? ["--show-output"] : []),
-    ...valueFlag({ flag: "affirmative", value: affirmative }),
-    ...valueFlag({ flag: "negative", value: negative }),
+    ...(affirmative ? ["--affirmative", affirmative] : []),
+    ...(negative ? ["--negative", negative] : []),
     ...booleanFlag({ value: showHelp, flag: "show-help" }),
-    ...valueFlag({ flag: "timeout", value: timeout }),
-    ...positionals(prompt ? [prompt] : []),
+    ...(timeout ? ["--timeout", timeout] : []),
   ];
 
-  const { exitCode } = await gumRunner.run({
-    cmd,
+  const proc = Bun.spawn(cmd, {
     env: process.env,
     stdin: "inherit",
     stdout: "inherit",
+    stderr: "inherit",
   });
+
+  const exitCode = await proc.exited;
   if (exitCode === 0) {
     return { ok: true, value: true };
   }
@@ -395,24 +330,29 @@ export async function gumInput({
   const cmd = [
     gum,
     "input",
-    ...valueFlag({ flag: "placeholder", value: placeholder }),
-    ...valueFlag({ flag: "prompt", value: prompt }),
-    ...valueFlag({ flag: "header", value: header }),
-    ...valueFlag({ flag: "value", value }),
-    ...valueFlag({ flag: "width", value: width }),
-    ...valueFlag({ flag: "char-limit", value: charLimit }),
+    ...(placeholder ? ["--placeholder", placeholder] : []),
+    ...(prompt ? ["--prompt", prompt] : []),
+    ...(header ? ["--header", header] : []),
+    ...(value ? ["--value", value] : []),
+    ...(width === undefined ? [] : ["--width", String(width)]),
+    ...(charLimit === undefined ? [] : ["--char-limit", String(charLimit)]),
     ...(password ? ["--password"] : []),
     ...booleanFlag({ value: showHelp, flag: "show-help" }),
-    ...valueFlag({ flag: "timeout", value: timeout }),
+    ...(timeout ? ["--timeout", timeout] : []),
     ...booleanFlag({ value: stripAnsi, flag: "strip-ansi" }),
   ];
 
-  const { exitCode, stdout } = await gumRunner.run({
-    cmd,
+  const proc = Bun.spawn(cmd, {
     env: process.env,
     stdin: "inherit",
     stdout: "pipe",
+    stderr: "inherit",
   });
+
+  const [stdout, exitCode] = await Promise.all([
+    new Response(proc.stdout).text(),
+    proc.exited,
+  ]);
   if (exitCode === 0) {
     return { ok: true, value: stdout.trimEnd() };
   }
@@ -461,27 +401,32 @@ export async function gumWrite({
   const cmd = [
     gum,
     "write",
-    ...valueFlag({ flag: "width", value: width }),
-    ...valueFlag({ flag: "height", value: height }),
-    ...valueFlag({ flag: "header", value: header }),
-    ...valueFlag({ flag: "placeholder", value: placeholder }),
-    ...valueFlag({ flag: "prompt", value: prompt }),
+    ...(width === undefined ? [] : ["--width", String(width)]),
+    ...(height === undefined ? [] : ["--height", String(height)]),
+    ...(header ? ["--header", header] : []),
+    ...(placeholder ? ["--placeholder", placeholder] : []),
+    ...(prompt ? ["--prompt", prompt] : []),
     ...(showCursorLine ? ["--show-cursor-line"] : []),
     ...(showLineNumbers ? ["--show-line-numbers"] : []),
-    ...valueFlag({ flag: "value", value }),
-    ...valueFlag({ flag: "char-limit", value: charLimit }),
-    ...valueFlag({ flag: "max-lines", value: maxLines }),
+    ...(value ? ["--value", value] : []),
+    ...(charLimit === undefined ? [] : ["--char-limit", String(charLimit)]),
+    ...(maxLines === undefined ? [] : ["--max-lines", String(maxLines)]),
     ...booleanFlag({ value: showHelp, flag: "show-help" }),
-    ...valueFlag({ flag: "timeout", value: timeout }),
+    ...(timeout ? ["--timeout", timeout] : []),
     ...booleanFlag({ value: stripAnsi, flag: "strip-ansi" }),
   ];
 
-  const { exitCode, stdout } = await gumRunner.run({
-    cmd,
+  const proc = Bun.spawn(cmd, {
     env: process.env,
     stdin: "inherit",
     stdout: "pipe",
+    stderr: "inherit",
   });
+
+  const [stdout, exitCode] = await Promise.all([
+    new Response(proc.stdout).text(),
+    proc.exited,
+  ]);
   if (exitCode === 0) {
     return { ok: true, value: stdout.trimEnd() };
   }
@@ -536,29 +481,40 @@ export async function gumChooseMany(
   const cmd = [
     gum,
     "choose",
+    ...input.options,
     ...(input.ordered ? ["--ordered"] : []),
-    ...valueFlag({ flag: "height", value: input.height }),
-    ...valueFlag({ flag: "cursor", value: input.cursor }),
+    ...(input.height === undefined ? [] : ["--height", String(input.height)]),
+    ...(input.cursor ? ["--cursor", input.cursor] : []),
     ...booleanFlag({ value: input.showHelp, flag: "show-help" }),
-    ...valueFlag({ flag: "timeout", value: input.timeout }),
-    ...valueFlag({ flag: "header", value: input.header }),
+    ...(input.timeout ? ["--timeout", input.timeout] : []),
+    ...(input.header ? ["--header", input.header] : []),
     ...buildSelectedArg(input.selected),
-    ...valueFlag({ flag: "input-delimiter", value: input.inputDelimiter }),
-    ...valueFlag({ flag: "output-delimiter", value: input.outputDelimiter }),
-    ...valueFlag({ flag: "label-delimiter", value: input.labelDelimiter }),
+    ...(input.inputDelimiter
+      ? ["--input-delimiter", input.inputDelimiter]
+      : []),
+    ...(input.outputDelimiter
+      ? ["--output-delimiter", input.outputDelimiter]
+      : []),
+    ...(input.labelDelimiter
+      ? ["--label-delimiter", input.labelDelimiter]
+      : []),
     ...booleanFlag({ value: input.stripAnsi, flag: "strip-ansi" }),
     ...(input.noLimit ? ["--no-limit"] : []),
-    ...valueFlag({ flag: "limit", value: input.limit }),
+    ...(input.limit === undefined ? [] : ["--limit", String(input.limit)]),
     ...(input.selectIfOne ? ["--select-if-one"] : []),
-    ...positionals(input.options),
   ];
 
-  const { exitCode, stdout } = await gumRunner.run({
-    cmd,
+  const proc = Bun.spawn(cmd, {
     env: process.env,
     stdin: "inherit",
     stdout: "pipe",
+    stderr: "inherit",
   });
+
+  const [stdout, exitCode] = await Promise.all([
+    new Response(proc.stdout).text(),
+    proc.exited,
+  ]);
   if (exitCode === 0) {
     const out = stdout.trimEnd();
     const parts = delimiter === "\n" ? out.split("\n") : out.split(delimiter);
@@ -620,34 +576,43 @@ export async function gumFilterMany(
   const cmd = [
     gum,
     "filter",
+    ...input.options,
     ...buildSelectedArg(input.selected),
     ...booleanFlag({ value: input.showHelp, flag: "show-help" }),
-    ...valueFlag({ flag: "header", value: input.header }),
-    ...valueFlag({ flag: "placeholder", value: input.placeholder }),
-    ...valueFlag({ flag: "prompt", value: input.prompt }),
-    ...valueFlag({ flag: "width", value: input.width }),
-    ...valueFlag({ flag: "height", value: input.height }),
-    ...valueFlag({ flag: "value", value: input.value }),
+    ...(input.header ? ["--header", input.header] : []),
+    ...(input.placeholder ? ["--placeholder", input.placeholder] : []),
+    ...(input.prompt ? ["--prompt", input.prompt] : []),
+    ...(input.width === undefined ? [] : ["--width", String(input.width)]),
+    ...(input.height === undefined ? [] : ["--height", String(input.height)]),
+    ...(input.value ? ["--value", input.value] : []),
     ...(input.reverse ? ["--reverse"] : []),
     ...booleanFlag({ value: input.fuzzy, flag: "fuzzy" }),
     ...booleanFlag({ value: input.fuzzySort, flag: "fuzzy-sort" }),
-    ...valueFlag({ flag: "timeout", value: input.timeout }),
-    ...valueFlag({ flag: "input-delimiter", value: input.inputDelimiter }),
-    ...valueFlag({ flag: "output-delimiter", value: input.outputDelimiter }),
+    ...(input.timeout ? ["--timeout", input.timeout] : []),
+    ...(input.inputDelimiter
+      ? ["--input-delimiter", input.inputDelimiter]
+      : []),
+    ...(input.outputDelimiter
+      ? ["--output-delimiter", input.outputDelimiter]
+      : []),
     ...booleanFlag({ value: input.stripAnsi, flag: "strip-ansi" }),
     ...(input.noLimit ? ["--no-limit"] : []),
-    ...valueFlag({ flag: "limit", value: input.limit }),
+    ...(input.limit === undefined ? [] : ["--limit", String(input.limit)]),
     ...(input.selectIfOne ? ["--select-if-one"] : []),
     ...booleanFlag({ value: input.strict, flag: "strict" }),
-    ...positionals(input.options),
   ];
 
-  const { exitCode, stdout } = await gumRunner.run({
-    cmd,
+  const proc = Bun.spawn(cmd, {
     env: process.env,
     stdin: "inherit",
     stdout: "pipe",
+    stderr: "inherit",
   });
+
+  const [stdout, exitCode] = await Promise.all([
+    new Response(proc.stdout).text(),
+    proc.exited,
+  ]);
   if (exitCode === 0) {
     const out = stdout.trimEnd();
     const parts = delimiter === "\n" ? out.split("\n") : out.split(delimiter);
@@ -694,25 +659,30 @@ export async function gumFile({
   const cmd = [
     gum,
     "file",
-    ...valueFlag({ flag: "cursor", value: cursor }),
+    ...(path ? [path] : []),
+    ...(cursor ? ["--cursor", cursor] : []),
     ...(all ? ["--all"] : []),
     ...booleanFlag({ value: permissions, flag: "permissions" }),
     ...booleanFlag({ value: size, flag: "size" }),
     ...(file ? ["--file"] : []),
     ...(directory ? ["--directory"] : []),
     ...booleanFlag({ value: showHelp, flag: "show-help" }),
-    ...valueFlag({ flag: "timeout", value: timeout }),
-    ...valueFlag({ flag: "header", value: header }),
-    ...valueFlag({ flag: "height", value: height }),
-    ...positionals(path ? [path] : []),
+    ...(timeout ? ["--timeout", timeout] : []),
+    ...(header ? ["--header", header] : []),
+    ...(height === undefined ? [] : ["--height", String(height)]),
   ];
 
-  const { exitCode, stdout } = await gumRunner.run({
-    cmd,
+  const proc = Bun.spawn(cmd, {
     env: process.env,
     stdin: "inherit",
     stdout: "pipe",
+    stderr: "inherit",
   });
+
+  const [stdout, exitCode] = await Promise.all([
+    new Response(proc.stdout).text(),
+    proc.exited,
+  ]);
   if (exitCode === 0) {
     return { ok: true, value: stdout.trimEnd() };
   }
@@ -743,18 +713,20 @@ export async function gumPager({
   const cmd = [
     gum,
     "pager",
+    ...(content ? [content] : []),
     ...(showLineNumbers ? ["--show-line-numbers"] : []),
     ...booleanFlag({ value: softWrap, flag: "soft-wrap" }),
-    ...valueFlag({ flag: "timeout", value: timeout }),
-    ...positionals(content ? [content] : []),
+    ...(timeout ? ["--timeout", timeout] : []),
   ];
 
-  const { exitCode } = await gumRunner.run({
-    cmd,
+  const proc = Bun.spawn(cmd, {
     env: process.env,
     stdin: "inherit",
     stdout: "inherit",
+    stderr: "inherit",
   });
+
+  const exitCode = await proc.exited;
   if (exitCode === 0) {
     return { ok: true, value: undefined };
   }
@@ -799,20 +771,21 @@ export async function gumSpin({
     ...(showError ? ["--show-error"] : []),
     ...(showStdout ? ["--show-stdout"] : []),
     ...(showStderr ? ["--show-stderr"] : []),
-    ...valueFlag({ flag: "spinner", value: spinner }),
-    ...valueFlag({ flag: "title", value: title }),
-    ...valueFlag({ flag: "align", value: align }),
-    ...valueFlag({ flag: "timeout", value: timeout }),
-    // gum consumes this marker; the wrapped command keeps its own flags.
-    ...positionals(cmd),
+    ...(spinner ? ["--spinner", spinner] : []),
+    ...(title ? ["--title", title] : []),
+    ...(align ? ["--align", align] : []),
+    ...(timeout ? ["--timeout", timeout] : []),
+    ...cmd,
   ];
 
-  const { exitCode } = await gumRunner.run({
-    cmd: gumCmd,
+  const proc = Bun.spawn(gumCmd, {
     env: process.env,
     stdin: "inherit",
     stdout: "inherit",
+    stderr: "inherit",
   });
+
+  const exitCode = await proc.exited;
   if (exitCode === 0) {
     return { ok: true, value: 0 };
   }
@@ -871,32 +844,37 @@ export async function gumStyle({
   const cmd = [
     gum,
     "style",
+    ...text,
     ...(trim ? ["--trim"] : []),
     ...booleanFlag({ value: stripAnsi, flag: "strip-ansi" }),
-    ...valueFlag({ flag: "foreground", value: foreground }),
-    ...valueFlag({ flag: "background", value: background }),
-    ...valueFlag({ flag: "border", value: border }),
-    ...valueFlag({ flag: "border-background", value: borderBackground }),
-    ...valueFlag({ flag: "border-foreground", value: borderForeground }),
-    ...valueFlag({ flag: "align", value: align }),
-    ...valueFlag({ flag: "height", value: height }),
-    ...valueFlag({ flag: "width", value: width }),
-    ...valueFlag({ flag: "margin", value: margin }),
-    ...valueFlag({ flag: "padding", value: padding }),
+    ...(foreground ? ["--foreground", foreground] : []),
+    ...(background ? ["--background", background] : []),
+    ...(border ? ["--border", border] : []),
+    ...(borderBackground ? ["--border-background", borderBackground] : []),
+    ...(borderForeground ? ["--border-foreground", borderForeground] : []),
+    ...(align ? ["--align", align] : []),
+    ...(height === undefined ? [] : ["--height", String(height)]),
+    ...(width === undefined ? [] : ["--width", String(width)]),
+    ...(margin ? ["--margin", margin] : []),
+    ...(padding ? ["--padding", padding] : []),
     ...(bold ? ["--bold"] : []),
     ...(faint ? ["--faint"] : []),
     ...(italic ? ["--italic"] : []),
     ...(strikethrough ? ["--strikethrough"] : []),
     ...(underline ? ["--underline"] : []),
-    ...positionals(text),
   ];
 
-  const { exitCode, stdout } = await gumRunner.run({
-    cmd,
+  const proc = Bun.spawn(cmd, {
     env: buildGumRenderEnv(),
     stdin: "ignore",
     stdout: "pipe",
+    stderr: "inherit",
   });
+
+  const [stdout, exitCode] = await Promise.all([
+    new Response(proc.stdout).text(),
+    proc.exited,
+  ]);
   if (exitCode === 0) {
     return { ok: true, value: stdout };
   }
@@ -924,18 +902,23 @@ export async function gumJoin({
   const cmd = [
     gum,
     "join",
-    ...valueFlag({ flag: "align", value: align }),
+    ...text,
+    ...(align ? ["--align", align] : []),
     ...(horizontal ? ["--horizontal"] : []),
     ...(vertical ? ["--vertical"] : []),
-    ...positionals(text),
   ];
 
-  const { exitCode, stdout } = await gumRunner.run({
-    cmd,
+  const proc = Bun.spawn(cmd, {
     env: buildGumRenderEnv(),
     stdin: "ignore",
     stdout: "pipe",
+    stderr: "inherit",
   });
+
+  const [stdout, exitCode] = await Promise.all([
+    new Response(proc.stdout).text(),
+    proc.exited,
+  ]);
   if (exitCode === 0) {
     return { ok: true, value: stdout };
   }
@@ -967,19 +950,25 @@ export async function gumFormat({
   const cmd = [
     gum,
     "format",
-    ...valueFlag({ flag: "theme", value: theme }),
-    ...valueFlag({ flag: "language", value: language }),
+    ...(template ?? []),
+    ...(theme ? ["--theme", theme] : []),
+    ...(language ? ["--language", language] : []),
     ...booleanFlag({ value: stripAnsi, flag: "strip-ansi" }),
-    ...valueFlag({ flag: "type", value: type }),
-    ...positionals(template ?? []),
+    ...(type ? ["--type", type] : []),
   ];
 
-  const { exitCode, stdout } = await gumRunner.run({
-    cmd,
+  const stdin = input !== undefined ? streamFromText(input) : "inherit";
+  const proc = Bun.spawn(cmd, {
     env: buildGumRenderEnv(),
-    stdin: input === undefined ? "inherit" : { text: input },
+    stdin,
     stdout: "pipe",
+    stderr: "inherit",
   });
+
+  const [stdout, exitCode] = await Promise.all([
+    new Response(proc.stdout).text(),
+    proc.exited,
+  ]);
   if (exitCode === 0) {
     return { ok: true, value: stdout };
   }
@@ -1030,27 +1019,37 @@ export async function gumTable({
   const cmd = [
     gum,
     "table",
-    ...valueFlag({ flag: "separator", value: separator }),
-    ...valueFlag({ flag: "columns", value: columns?.join(",") }),
-    ...valueFlag({ flag: "widths", value: widths?.join(",") }),
-    ...valueFlag({ flag: "height", value: height }),
+    ...(separator ? ["--separator", separator] : []),
+    ...(columns ? ["--columns", columns.join(",")] : []),
+    ...(widths ? ["--widths", widths.join(",")] : []),
+    ...(height === undefined ? [] : ["--height", String(height)]),
     ...(print ? ["--print"] : []),
-    ...valueFlag({ flag: "file", value: file }),
-    ...valueFlag({ flag: "border", value: border }),
+    ...(file ? ["--file", file] : []),
+    ...(border ? ["--border", border] : []),
     ...booleanFlag({ value: showHelp, flag: "show-help" }),
     ...booleanFlag({ value: hideCount, flag: "hide-count" }),
     ...(lazyQuotes ? ["--lazy-quotes"] : []),
-    ...valueFlag({ flag: "fields-per-record", value: fieldsPerRecord }),
-    ...valueFlag({ flag: "return-column", value: returnColumn }),
-    ...valueFlag({ flag: "timeout", value: timeout }),
+    ...(fieldsPerRecord === undefined
+      ? []
+      : ["--fields-per-record", String(fieldsPerRecord)]),
+    ...(returnColumn === undefined
+      ? []
+      : ["--return-column", String(returnColumn)]),
+    ...(timeout ? ["--timeout", timeout] : []),
   ];
 
-  const { exitCode, stdout } = await gumRunner.run({
-    cmd,
+  const stdin = input !== undefined ? streamFromText(input) : "inherit";
+  const proc = Bun.spawn(cmd, {
     env: buildGumRenderEnv(),
-    stdin: input === undefined ? "inherit" : { text: input },
+    stdin,
     stdout: "pipe",
+    stderr: "inherit",
   });
+
+  const [stdout, exitCode] = await Promise.all([
+    new Response(proc.stdout).text(),
+    proc.exited,
+  ]);
   if (exitCode === 0) {
     return { ok: true, value: stdout.trimEnd() };
   }
@@ -1072,12 +1071,14 @@ export async function gumVersionCheck({
     return { ok: false, reason: "unavailable" };
   }
 
-  const { exitCode } = await gumRunner.run({
-    cmd: [gum, "version-check", ...positionals([constraint])],
+  const proc = Bun.spawn([gum, "version-check", constraint], {
     env: process.env,
     stdin: "ignore",
     stdout: "ignore",
+    stderr: "inherit",
   });
+
+  const exitCode = await proc.exited;
   if (exitCode === 0) {
     return { ok: true, value: true };
   }
@@ -1137,46 +1138,7 @@ function buildSelectedArg(
     return [];
   }
   if (selected === "*") {
-    return ["--selected=*"];
+    return ["--selected", "*"];
   }
-  return valueFlag({ flag: "selected", value: selected.join(",") });
-}
-
-/**
- * gum (kong) ends option parsing at this token; every later argument is a
- * positional, even when it begins with "-" or "--".
- */
-export const GUM_END_OF_OPTIONS = "--";
-
-/**
- * Builds a valued flag in single-token `--flag=value` form.
- *
- * Invariant: free text must never be parsed as a gum option. In the
- * two-token form kong rejects a value that begins with "-" (it reads it as a
- * flag); the joined form always binds the value to the flag. Empty strings and
- * `undefined` omit the flag, matching the previous truthiness checks.
- */
-function valueFlag({
-  flag,
-  value,
-}: {
-  readonly flag: string;
-  readonly value: string | number | undefined;
-}): readonly string[] {
-  if (value === undefined || value === "") {
-    return [];
-  }
-  return [`--${flag}=${String(value)}`];
-}
-
-/**
- * Places positional text after the end-of-options marker. Callers must spread
- * this last, after every flag, so text such as "--value-stdin requires ..."
- * is printed instead of being parsed as an unknown flag.
- */
-function positionals(args: readonly string[]): readonly string[] {
-  if (args.length === 0) {
-    return [];
-  }
-  return [GUM_END_OF_OPTIONS, ...args];
+  return ["--selected", selected.join(",")];
 }

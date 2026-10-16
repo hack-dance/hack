@@ -20,7 +20,7 @@ beforeEach(async () => {
   originalLogger = process.env.HACK_LOGGER;
   originalProjectEnvKey = process.env.HACK_ENV_SECRET_KEY;
   process.env.HACK_LOGGER = "console";
-  Reflect.deleteProperty(process.env, "HACK_ENV_SECRET_KEY");
+  process.env.HACK_ENV_SECRET_KEY = undefined;
 });
 
 afterEach(async () => {
@@ -29,12 +29,12 @@ afterEach(async () => {
     tempDir = null;
   }
   if (originalLogger === undefined) {
-    Reflect.deleteProperty(process.env, "HACK_LOGGER");
+    process.env.HACK_LOGGER = undefined;
   } else {
     process.env.HACK_LOGGER = originalLogger;
   }
   if (originalProjectEnvKey === undefined) {
-    Reflect.deleteProperty(process.env, "HACK_ENV_SECRET_KEY");
+    process.env.HACK_ENV_SECRET_KEY = undefined;
   } else {
     process.env.HACK_ENV_SECRET_KEY = originalProjectEnvKey;
   }
@@ -88,9 +88,7 @@ test("modern env list rejects unknown service scopes", async () => {
   ]);
 
   expect(result.exitCode).toBe(1);
-  expect(result.stderr).toContain("Unknown env scope:");
-  expect(result.stderr).toContain("Configured scopes: global, api");
-  expect(result.stderr).not.toContain("typo_service");
+  expect(result.stderr).toContain("Unknown env scope: typo_service");
 });
 
 test("env explain reports precedence and delivery without revealing values", async () => {

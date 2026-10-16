@@ -14,18 +14,16 @@ pub(super) fn references(
         .filter(|(_, resource)| resource.kind == Kind::Volume)
         .map(|(key, resource)| {
             let observed = observations.get(key).and_then(|v| v["state"].as_str());
-            let classification = if resource.cache.is_some() {
-                classify_cache(&receipt.phase, &resource.phase, journal_incomplete, observed)
-            } else { classify(
+            let classification = classify(
                 &receipt.phase,
                 &resource.phase,
                 journal_incomplete,
                 observed,
-            ) };
+            );
             json!({
                 "name":resource.name,
                 "resource":resource.key,
-                "kind":if resource.cache.is_some() {"shared_dependency_cache"} else {"persistent_data"},
+                "kind":"persistent_data",
                 "classification":classification,
                 "observed_state":observed,
                 "automatic_collection_allowed":false
@@ -42,24 +40,6 @@ pub(super) fn references(
         "cleanup_authorized":false,
         "volumes":volumes
     })
-}
-
-fn classify_cache(
-    graph: &str,
-    resource: &str,
-    pending: bool,
-    observed: Option<&str>,
-) -> &'static str {
-    if pending {
-        return "recovery_required";
-    }
-    if graph == "removed"
-        && resource == "released"
-        && matches!(observed, Some("present" | "absent"))
-    {
-        return "released_shared_cache_reference";
-    }
-    classify(graph, resource, pending, observed)
 }
 
 fn classify(graph: &str, resource: &str, pending: bool, observed: Option<&str>) -> &'static str {
@@ -81,27 +61,6 @@ fn classify(graph: &str, resource: &str, pending: bool, observed: Option<&str>) 
 mod tests {
     use super::*;
 
-    #[test]
-    fn released_cache_reference_does_not_claim_volume_deletion() {
-        for observed in [Some("present"), Some("absent")] {
-            assert_eq!(
-                classify_cache("removed", "released", false, observed),
-                "released_shared_cache_reference"
-            );
-            assert_eq!(
-                classify_cache("removed", "released", true, observed),
-                "recovery_required"
-            );
-        }
-        assert_eq!(
-            classify_cache("stopped-data-retained", "created", false, Some("present")),
-            "retained_for_restore"
-        );
-        assert_eq!(
-            classify_cache("ready-observed", "created", false, Some("absent")),
-            "expected_data_missing"
-        );
-    }
     #[test]
     fn ordinary_cleanup_retains_intent_even_without_containers() {
         assert_eq!(

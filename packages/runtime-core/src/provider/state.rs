@@ -36,44 +36,6 @@ pub fn check_private_directory(path: &Path) -> Result<(), CandidateError> {
 
 pub struct Lock(File);
 impl Lock {
-    /// Verify that the retained cooperative lock still names this exact private inode.
-    /// Holding an unlinked predecessor cannot serialize a replacement pathname.
-    pub(crate) fn verify_path(&self, root: &Path) -> Result<(), CandidateError> {
-        check_private_directory(root)?;
-        let descriptor = self.0.metadata().map_err(io)?;
-        let current = fs::symlink_metadata(root.join("operation.lock")).map_err(io)?;
-        // SAFETY: geteuid has no preconditions.
-        let uid = unsafe { libc::geteuid() };
-        for metadata in [&descriptor, &current] {
-            if !metadata.is_file()
-                || metadata.nlink() != 1
-                || metadata.uid() != uid
-                || metadata.mode() & 0o7777 != 0o600
-            {
-                return Err(CandidateError::new(
-                    "foreign_state",
-                    "Provider mutation lock changed.",
-                ));
-            }
-        }
-        if (descriptor.dev(), descriptor.ino()) != (current.dev(), current.ino()) {
-            return Err(CandidateError::new(
-                "foreign_state",
-                "Provider mutation lock changed.",
-            ));
-        }
-        Ok(())
-    }
-    #[cfg(target_os = "macos")]
-    pub(crate) fn file(&self) -> &File {
-        &self.0
-    }
-    /// Identity of the retained descriptor, for callers fencing pathname replacement.
-    pub(crate) fn identity(&self) -> Result<(u64, u64), CandidateError> {
-        let metadata = self.0.metadata().map_err(io)?;
-        Ok((metadata.dev(), metadata.ino()))
-    }
-
     pub fn acquire(root: &Path) -> Result<Self, CandidateError> {
         private_directory(root)?;
         let file = OpenOptions::new()
@@ -85,23 +47,6 @@ impl Lock {
             .custom_flags(libc::O_NOFOLLOW)
             .open(root.join("operation.lock"))
             .map_err(io)?;
-        Self::from_file(file)
-    }
-
-    /// Observe existing state without initializing a directory or lock file.
-    pub fn acquire_existing(root: &Path) -> Result<Self, CandidateError> {
-        check_private_directory(root)?;
-        let file = OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-            .open(root.join("operation.lock"))
-            .map_err(io)?;
-        Self::from_file(file)
-    }
-
-    /// Adopt an exclusively created private lock file before publishing its
-    /// pathname. The caller must fence the final pathname against this FD.
-    pub(crate) fn from_file(file: File) -> Result<Self, CandidateError> {
         let m = file.metadata().map_err(io)?;
         if !m.is_file()
             || m.nlink() != 1
@@ -210,17 +155,11 @@ impl Default for ReclamationPolicy {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Owner {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub project_share: Option<super::ProjectShareIntent>,
-    #[serde(default)]
-    pub network: super::NetworkIntent,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub application_bridge: Option<super::BridgeIntent>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub dependency_sockets: Option<super::DependencySocketIntent>,
     pub version: u32,
     pub checkout: PathBuf,
     pub token: String,
@@ -244,58 +183,12 @@ pub struct Owner {
 }
 impl Owner {
     pub fn load(candidate: &Candidate) -> Result<Self, CandidateError> {
-        Self::load_with_short_home(candidate, false)
-    }
-
-    /// Explicit recovery may inspect a missing temporary alias, never a replaced one.
-    /// Loading here is read-only; the lifecycle boundary still proves provider absence.
-    pub(super) fn load_for_short_home_recovery(
-        candidate: &Candidate,
-    ) -> Result<Self, CandidateError> {
-        Self::load_with_short_home(candidate, true)
-    }
-
-    fn load_with_short_home(
-        candidate: &Candidate,
-        allow_missing: bool,
-    ) -> Result<Self, CandidateError> {
         let root = candidate.state_root.join("run/smolvm");
         reject_aliased_state(&root)?;
-        if allow_missing {
-            match fs::symlink_metadata(root.join("owner.pending")) {
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                _ => {
-                    return Err(CandidateError::new(
-                        "recovery_required",
-                        "Provider owner update is pending or unobservable; HOME alias was not restored.",
-                    ));
-                }
-            }
-        }
         let owner: Self = read(&root.join("owner.json"))?;
-        owner.network.validate()?;
-        if let Some(share) = &owner.project_share {
-            share.validate_receipt()?;
-        }
-        if owner.created
-            && matches!(&owner.network, super::NetworkIntent::ApprovedHosts { cidrs, .. } if cidrs.is_empty())
-        {
-            return Err(CandidateError::new(
-                "unaudited_provider_config",
-                "Created pool is missing its pinned egress addresses.",
-            ));
-        }
         if owner
             .application_bridge
             .is_some_and(|bridge| super::BridgeIntent::new(bridge.slots).is_err())
-            || owner
-                .dependency_sockets
-                .is_some_and(|intent| super::DependencySocketIntent::new(intent.slots).is_err())
-            || super::dependency_socket::check_capacity(
-                owner.application_bridge,
-                owner.dependency_sockets,
-            )
-            .is_err()
             || owner.version != 1
             || owner.checkout != candidate.checkout
             || owner.token.len() != 32
@@ -309,107 +202,25 @@ impl Owner {
                 "Provider owner identity does not match this checkout.",
             ));
         }
-        owner.check_short_home(candidate, allow_missing)?;
-        check_private_directory(&root.join("home"))?;
-        Ok(owner)
-    }
-    /// The only permitted alias is the exact receipt-bound HOME for Unix sockets.
-    fn check_short_home(
-        &self,
-        candidate: &Candidate,
-        allow_missing: bool,
-    ) -> Result<(), CandidateError> {
-        let alias = match fs::symlink_metadata(&self.short_home) {
-            Ok(alias) => alias,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return if allow_missing {
-                    Ok(())
-                } else {
-                    Err(CandidateError::new(
-                        "provider_home_missing",
-                        "Temporary provider HOME alias is absent. Use runtime recover to verify the stopped pool before restoring it.",
-                    ))
-                };
-            }
-            Err(error) => return Err(io(error)),
-        };
+        // The only permitted alias is an exact, receipt-bound short HOME for Unix sockets.
+        let alias = fs::symlink_metadata(&owner.short_home).map_err(io)?;
         if !alias.file_type().is_symlink()
             || alias.uid() != unsafe { libc::geteuid() }
-            || fs::read_link(&self.short_home).map_err(io)?
-                != candidate.state_root.join("run/smolvm/home")
+            || fs::read_link(&owner.short_home).map_err(io)? != root.join("home")
         {
             return Err(CandidateError::new(
                 "foreign_state",
                 "Short provider HOME alias was replaced.",
             ));
         }
-        Ok(())
+        check_private_directory(&root.join("home"))?;
+        Ok(owner)
     }
-
-    /// Called only while the lifecycle owns the pool and VM locks and has audited absence.
-    /// Recheck the durable selection, then create exclusively; a concurrent alias is retained.
-    pub(super) fn restore_missing_short_home(
-        &self,
-        candidate: &Candidate,
-    ) -> Result<(), CandidateError> {
-        let observed = Self::load_for_short_home_recovery(candidate)?;
-        if observed != *self {
-            return Err(CandidateError::new(
-                "foreign_state",
-                "Provider owner changed during HOME recovery; no alias was restored.",
-            ));
-        }
-        std::os::unix::fs::symlink(
-            candidate.state_root.join("run/smolvm/home"),
-            &self.short_home,
-        )
-        .map_err(|_| {
-            CandidateError::new(
-                "socket_alias_collision",
-                "Cannot exclusively restore provider HOME alias; no existing path was replaced.",
-            )
-        })?;
-        self.check_short_home(candidate, false)
-    }
-
-    #[cfg(all(test, target_os = "macos"))]
     pub fn create(
         candidate: &Candidate,
         profile: super::Profile,
         application_bridge: Option<super::BridgeIntent>,
-        network: super::NetworkIntent,
     ) -> Result<Self, CandidateError> {
-        Self::create_with_dependencies(candidate, profile, application_bridge, network, None)
-    }
-    #[cfg(all(test, target_os = "macos"))]
-    pub fn create_with_dependencies(
-        candidate: &Candidate,
-        profile: super::Profile,
-        application_bridge: Option<super::BridgeIntent>,
-        network: super::NetworkIntent,
-        dependency_sockets: Option<super::DependencySocketIntent>,
-    ) -> Result<Self, CandidateError> {
-        Self::create_with_project_share(
-            candidate,
-            profile,
-            application_bridge,
-            network,
-            dependency_sockets,
-            None,
-        )
-    }
-    pub fn create_with_project_share(
-        candidate: &Candidate,
-        profile: super::Profile,
-        application_bridge: Option<super::BridgeIntent>,
-        network: super::NetworkIntent,
-        dependency_sockets: Option<super::DependencySocketIntent>,
-        project_share: Option<super::ProjectShareIntent>,
-    ) -> Result<Self, CandidateError> {
-        if let Some(share) = &project_share {
-            share.validate()?;
-        }
-        super::dependency_socket::check_capacity(application_bridge, dependency_sockets)?;
         let root = candidate.state_root.join("run/smolvm");
         let owner_path = root.join("owner.json");
         if owner_path.try_exists().map_err(io)? {
@@ -435,11 +246,8 @@ impl Owner {
             .map_err(io)?;
         let token: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
         let owner = Self {
-            project_share,
-            network,
             profile,
             application_bridge,
-            dependency_sockets,
             version: 1,
             checkout: candidate.checkout.clone(),
             machine: format!("hack-{}", &token[..12]),
@@ -525,13 +333,6 @@ mod tests {
         }))
         .unwrap();
         assert!(owner.reclamation.is_none());
-        assert!(owner.dependency_sockets.is_none());
-        assert!(
-            serde_json::to_value(&owner)
-                .unwrap()
-                .get("dependency_sockets")
-                .is_none()
-        );
         owner.reclamation = Some(ReclamationPolicy::default());
         assert_eq!(owner.begin_boot().as_deref(), Some("previous-boot"));
         assert!(owner.guest_boot_id.is_none());
@@ -620,13 +421,7 @@ mod tests {
         let candidate = Candidate::discover(&root).unwrap();
         let directory = candidate.state_root.join("run/smolvm");
         let lock = Lock::acquire(&directory).unwrap();
-        let owner = Owner::create(
-            &candidate,
-            super::super::Profile::Research,
-            None,
-            super::super::NetworkIntent::Isolated,
-        )
-        .unwrap();
+        let owner = Owner::create(&candidate, super::super::Profile::Research, None).unwrap();
         let receipt = directory.join("owner.json");
         let mut legacy: serde_json::Value = read(&receipt).unwrap();
         legacy.as_object_mut().unwrap().remove("profile");
@@ -651,79 +446,14 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn network_intent_is_durable_and_legacy_conflicts_do_not_write_state() {
-        use super::super::{NetworkIntent, Profile};
-        let root = fixture();
-        let candidate = Candidate::discover(&root).unwrap();
-        let directory = candidate.state_root.join("run/smolvm");
-        let lock = Lock::acquire(&directory).unwrap();
-        let owner = Owner::create(
-            &candidate,
-            Profile::Research,
-            None,
-            NetworkIntent::HostGateway,
-        )
-        .unwrap();
-        assert_eq!(
-            Owner::load(&candidate).unwrap().network,
-            NetworkIntent::HostGateway
-        );
-        let receipt = directory.join("owner.json");
-        let before = fs::read(&receipt).unwrap();
-        assert_eq!(
-            super::super::up_with_capabilities(
-                &candidate,
-                Profile::Research,
-                None,
-                Some(NetworkIntent::Isolated)
-            )
-            .unwrap_err()
-            .code,
-            "network_conflict"
-        );
-        assert_eq!(fs::read(&receipt).unwrap(), before);
-        assert!(!directory.join("admission.json").exists());
-        let mut legacy: serde_json::Value = read(&receipt).unwrap();
-        legacy.as_object_mut().unwrap().remove("network");
-        write(&receipt, &legacy).unwrap();
-        assert_eq!(
-            Owner::load(&candidate).unwrap().network,
-            NetworkIntent::Isolated
-        );
-        let before = fs::read(&receipt).unwrap();
-        assert_eq!(
-            super::super::up_with_capabilities(
-                &candidate,
-                Profile::Research,
-                None,
-                Some(NetworkIntent::HostGateway)
-            )
-            .unwrap_err()
-            .code,
-            "network_conflict"
-        );
-        assert_eq!(fs::read(&receipt).unwrap(), before);
-        assert!(!directory.join("admission.json").exists());
-        fs::remove_file(&owner.short_home).unwrap();
-        drop(lock);
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
     fn bridge_intent_is_durable_and_conflicts_do_not_write_state() {
         let root = fixture();
         let candidate = Candidate::discover(&root).unwrap();
         let directory = candidate.state_root.join("run/smolvm");
         let lock = Lock::acquire(&directory).unwrap();
         let intent = super::super::BridgeIntent::new(2).unwrap();
-        let mut owner = Owner::create(
-            &candidate,
-            super::super::Profile::Research,
-            Some(intent),
-            super::super::NetworkIntent::Isolated,
-        )
-        .unwrap();
+        let mut owner =
+            Owner::create(&candidate, super::super::Profile::Research, Some(intent)).unwrap();
         assert_eq!(
             Owner::load(&candidate).unwrap().application_bridge,
             Some(intent)
@@ -751,70 +481,11 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn dependency_intent_conflicts_refuse_before_admission_and_preserve_state() {
-        let root = fixture();
-        let candidate = Candidate::discover(&root).unwrap();
-        let directory = candidate.state_root.join("run/smolvm");
-        let lock = Lock::acquire(&directory).unwrap();
-        let intent = super::super::DependencySocketIntent::new(2).unwrap();
-        let mut owner = Owner::create_with_dependencies(
-            &candidate,
-            super::super::Profile::Research,
-            None,
-            super::super::NetworkIntent::Isolated,
-            Some(intent),
-        )
-        .unwrap();
-        assert_eq!(
-            Owner::load(&candidate).unwrap().dependency_sockets,
-            Some(intent)
-        );
-        let before = fs::read(directory.join("owner.json")).unwrap();
-        assert_eq!(
-            super::super::up_with_sockets(
-                &candidate,
-                super::super::Profile::Research,
-                None,
-                Some(super::super::DependencySocketIntent::new(1).unwrap())
-            )
-            .unwrap_err()
-            .code,
-            "dependency_socket_conflict"
-        );
-        assert_eq!(
-            super::super::up_with_sockets(
-                &candidate,
-                super::super::Profile::Research,
-                Some(super::super::BridgeIntent::new(32).unwrap()),
-                Some(intent)
-            )
-            .unwrap_err()
-            .code,
-            "dependency_socket"
-        );
-        assert_eq!(fs::read(directory.join("owner.json")).unwrap(), before);
-        assert!(!directory.join("admission.json").exists());
-        owner.dependency_sockets = Some(super::super::DependencySocketIntent { slots: 0 });
-        owner.save(&candidate).unwrap();
-        assert_eq!(Owner::load(&candidate).unwrap_err().code, "foreign_state");
-        fs::remove_file(&owner.short_home).unwrap();
-        drop(lock);
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
     fn replaced_short_alias_cannot_be_adopted() {
         let root = fixture();
         let candidate = Candidate::discover(&root).unwrap();
         let _lock = Lock::acquire(&candidate.state_root.join("run/smolvm")).unwrap();
-        let owner = Owner::create(
-            &candidate,
-            super::super::Profile::Research,
-            None,
-            super::super::NetworkIntent::Isolated,
-        )
-        .unwrap();
+        let owner = Owner::create(&candidate, super::super::Profile::Research, None).unwrap();
         assert!(Owner::load(&candidate).is_ok());
         fs::remove_file(&owner.short_home).unwrap();
         let foreign = root.join("foreign");
@@ -832,13 +503,7 @@ mod tests {
         let root = fixture();
         let candidate = Candidate::discover(&root).unwrap();
         let _lock = Lock::acquire(&candidate.state_root.join("run/smolvm")).unwrap();
-        let mut owner = Owner::create(
-            &candidate,
-            super::super::Profile::Research,
-            None,
-            super::super::NetworkIntent::Isolated,
-        )
-        .unwrap();
+        let mut owner = Owner::create(&candidate, super::super::Profile::Research, None).unwrap();
         owner.checkout = root.join("other");
         owner.save(&candidate).unwrap();
         assert_eq!(Owner::load(&candidate).unwrap_err().code, "foreign_state");

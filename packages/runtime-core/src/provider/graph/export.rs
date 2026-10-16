@@ -32,7 +32,6 @@ pub fn export(candidate: &Candidate, run: &str) -> Result<Export, CandidateError
             "Archive identity differs from the owned removed attempt.",
         ));
     }
-    cleanup_enrollment::retention(&root, &receipt)?;
     archive::verify_removed(&engine, &receipt)?;
     environment::archive_slots(candidate, &engine, &receipt, &root)?;
     let (bytes, files) = bundle(&root)?;

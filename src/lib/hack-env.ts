@@ -6,12 +6,8 @@ import {
 } from "../constants.ts";
 import { readControlPlaneConfig } from "../control-plane/sdk/config.ts";
 import { parseDotEnv, serializeDotEnv } from "./env.ts";
-import { readTextFile } from "./fs.ts";
+import { readTextFile, writeTextFileIfChanged } from "./fs.ts";
 import { getString, isRecord } from "./guards.ts";
-import {
-  readPrivateEnvFile,
-  writePrivateEnvFileIfChanged,
-} from "./private-env-file.ts";
 import { readProjectDefaultEnvConfig } from "./project.ts";
 import type { SecretStoreDescriptor } from "./secret-store.ts";
 import {
@@ -218,58 +214,6 @@ export async function readHackEnvContract(opts: {
   }
 
   return { path, exists: true, contract: contract.contract };
-}
-
-/**
- * Read one declared legacy value using the existing backend and precedence.
- * Only this key (overlay, then base fallback) is requested from the backend.
- * A backend's sealed bundle may internally require whole-bundle decryption.
- */
-export async function resolveHackEnvValue(opts: {
-  readonly projectDir: string;
-  readonly projectName: string;
-  readonly envName?: string | null;
-  readonly scope?: string;
-  readonly key: string;
-}): Promise<string | null> {
-  const read = await readHackEnvContract({ projectDir: opts.projectDir });
-  if (read.parseError) {
-    throw new Error("Invalid env contract");
-  }
-  const scope = opts.scope ?? "global";
-  const contractVar = read.contract.vars.find(
-    (entry) =>
-      entry.key === opts.key &&
-      (entry.services === null ||
-        (scope !== "global" && entry.services.includes(scope)))
-  );
-  if (!contractVar) {
-    return null;
-  }
-  const runtimeConfig = await readHackEnvRuntimeConfig(opts);
-  const selection = await resolveHackEnvSelection(opts);
-  const needsStore =
-    contractVar.source === "keychain" || runtimeConfig.storePlaintextInBackend;
-  const secretStore = needsStore
-    ? await resolveSecretStore({ ...opts, allowKeyProvisioning: false })
-    : { get: async () => null };
-  const baseText = await readTextFile(
-    resolve(opts.projectDir, PROJECT_ENV_FILENAME)
-  );
-  const overlayText =
-    selection.overlayPath === null
-      ? null
-      : await readTextFile(selection.overlayPath);
-  const state = await resolveHackEnvValueState({
-    contractVar,
-    preserveEmpty: true,
-    storePlaintextInBackend: runtimeConfig.storePlaintextInBackend,
-    effectiveEnvName: selection.effectiveEnv,
-    baseDotenv: baseText === null ? {} : parseDotEnv(baseText),
-    overlayDotenv: overlayText === null ? {} : parseDotEnv(overlayText),
-    secretStore,
-  });
-  return state.value;
 }
 
 export async function resolveHackEnv(opts: {
@@ -506,23 +450,19 @@ export async function upsertDotEnvValue(opts: {
   readonly key: string;
   readonly value: string;
 }): Promise<{ readonly changed: boolean }> {
-  const existingText =
-    (await readPrivateEnvFile({ envFile: opts.envFile })) ?? "";
+  const existingText = (await readTextFile(opts.envFile)) ?? "";
   const env = parseDotEnv(existingText);
   const nextEnv: Record<string, string> = { ...env, [opts.key]: opts.value };
   const nextText = serializeDotEnvStable(nextEnv);
-  return await writePrivateEnvFileIfChanged({
-    envFile: opts.envFile,
-    text: nextText,
-  });
+  const result = await writeTextFileIfChanged(opts.envFile, nextText);
+  return { changed: result.changed };
 }
 
 export async function removeDotEnvKey(opts: {
   readonly envFile: string;
   readonly key: string;
 }): Promise<{ readonly changed: boolean }> {
-  const existingText =
-    (await readPrivateEnvFile({ envFile: opts.envFile })) ?? "";
+  const existingText = (await readTextFile(opts.envFile)) ?? "";
   const env = parseDotEnv(existingText);
   if (!(opts.key in env)) {
     return { changed: false };
@@ -535,10 +475,8 @@ export async function removeDotEnvKey(opts: {
     nextEnv[key] = value;
   }
   const nextText = serializeDotEnvStable(nextEnv);
-  return await writePrivateEnvFileIfChanged({
-    envFile: opts.envFile,
-    text: nextText,
-  });
+  const result = await writeTextFileIfChanged(opts.envFile, nextText);
+  return { changed: result.changed };
 }
 
 export function resolveKeychainServiceName(opts: {
@@ -825,21 +763,12 @@ async function resolveHackEnvSelection(opts: {
   };
 }
 
-/** Legacy injection treats empty plaintext as unset; explicit get preserves it. */
-function isPresentEnvValue(
-  value: unknown,
-  preserveEmpty = false
-): value is string {
-  return typeof value === "string" && (preserveEmpty || value.length > 0);
-}
-
 async function resolveSecretValue(opts: {
   readonly secretStore: {
     readonly get: (input: { readonly key: string }) => Promise<string | null>;
   };
   readonly key: string;
   readonly envName?: string | null;
-  readonly preserveEmpty?: boolean;
 }): Promise<string | null> {
   if (opts.envName) {
     const overlayValue = await opts.secretStore.get({
@@ -848,7 +777,7 @@ async function resolveSecretValue(opts: {
         envName: opts.envName,
       }),
     });
-    if (isPresentEnvValue(overlayValue, opts.preserveEmpty)) {
+    if (typeof overlayValue === "string" && overlayValue.length > 0) {
       return overlayValue;
     }
   }
@@ -858,7 +787,6 @@ async function resolveSecretValue(opts: {
 
 async function resolveHackEnvValueState(opts: {
   readonly contractVar: HackEnvVar;
-  readonly preserveEmpty?: boolean;
   readonly storePlaintextInBackend: boolean;
   readonly effectiveEnvName: string | null;
   readonly baseDotenv: Readonly<Record<string, string>>;
@@ -870,7 +798,6 @@ async function resolveHackEnvValueState(opts: {
   if (opts.contractVar.source === "keychain") {
     return await resolveSecretBackedValueState({
       contractVar: opts.contractVar,
-      preserveEmpty: opts.preserveEmpty,
       secretStore: opts.secretStore,
       envName: opts.effectiveEnvName,
     });
@@ -878,7 +805,6 @@ async function resolveHackEnvValueState(opts: {
 
   return await resolvePlaintextValueState({
     contractVar: opts.contractVar,
-    preserveEmpty: opts.preserveEmpty,
     storePlaintextInBackend: opts.storePlaintextInBackend,
     envName: opts.effectiveEnvName,
     baseDotenv: opts.baseDotenv,
@@ -889,7 +815,6 @@ async function resolveHackEnvValueState(opts: {
 
 async function resolveSecretBackedValueState(opts: {
   readonly contractVar: HackEnvVar;
-  readonly preserveEmpty?: boolean;
   readonly secretStore: {
     readonly get: (input: { readonly key: string }) => Promise<string | null>;
   };
@@ -899,7 +824,6 @@ async function resolveSecretBackedValueState(opts: {
     secretStore: opts.secretStore,
     key: opts.contractVar.key,
     envName: opts.envName,
-    preserveEmpty: opts.preserveEmpty,
   });
   return {
     key: opts.contractVar.key,
@@ -913,7 +837,6 @@ async function resolveSecretBackedValueState(opts: {
 
 async function resolvePlaintextValueState(opts: {
   readonly contractVar: HackEnvVar;
-  readonly preserveEmpty?: boolean;
   readonly storePlaintextInBackend: boolean;
   readonly envName: string | null;
   readonly baseDotenv: Readonly<Record<string, string>>;
@@ -929,7 +852,10 @@ async function resolvePlaintextValueState(opts: {
         envName: opts.envName,
       }),
     });
-    if (isPresentEnvValue(fromOverlayPortableBackend, opts.preserveEmpty)) {
+    if (
+      typeof fromOverlayPortableBackend === "string" &&
+      fromOverlayPortableBackend.length > 0
+    ) {
       return {
         key: opts.contractVar.key,
         required: opts.contractVar.required,
@@ -942,7 +868,7 @@ async function resolvePlaintextValueState(opts: {
   }
 
   const fromOverlayDotenv = opts.overlayDotenv[opts.contractVar.key] ?? null;
-  if (isPresentEnvValue(fromOverlayDotenv, opts.preserveEmpty)) {
+  if (typeof fromOverlayDotenv === "string" && fromOverlayDotenv.length > 0) {
     return {
       key: opts.contractVar.key,
       required: opts.contractVar.required,
@@ -957,7 +883,10 @@ async function resolvePlaintextValueState(opts: {
     const fromBasePortableBackend = await opts.secretStore.get({
       key: opts.contractVar.key,
     });
-    if (isPresentEnvValue(fromBasePortableBackend, opts.preserveEmpty)) {
+    if (
+      typeof fromBasePortableBackend === "string" &&
+      fromBasePortableBackend.length > 0
+    ) {
       return {
         key: opts.contractVar.key,
         required: opts.contractVar.required,
@@ -970,7 +899,7 @@ async function resolvePlaintextValueState(opts: {
   }
 
   const fromBaseDotenv = opts.baseDotenv[opts.contractVar.key] ?? null;
-  if (isPresentEnvValue(fromBaseDotenv, opts.preserveEmpty)) {
+  if (typeof fromBaseDotenv === "string" && fromBaseDotenv.length > 0) {
     return {
       key: opts.contractVar.key,
       required: opts.contractVar.required,
@@ -982,7 +911,7 @@ async function resolvePlaintextValueState(opts: {
   }
 
   const fromProcess = process.env[opts.contractVar.key];
-  if (isPresentEnvValue(fromProcess, opts.preserveEmpty)) {
+  if (typeof fromProcess === "string" && fromProcess.length > 0) {
     return {
       key: opts.contractVar.key,
       required: opts.contractVar.required,

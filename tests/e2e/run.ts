@@ -1,60 +1,17 @@
-import {
-  runIsolationCanary,
-  runScenarios,
-  type Scenario,
-  selectScenarios,
-} from "./harness.ts";
-import { nativeConfigNetworksScenario } from "./native-config-networks-acceptance.ts";
+import { runIsolationCanary, runScenarios, type Scenario } from "./harness.ts";
 import { agentDocsSyncScenario } from "./scenarios/agent-docs-sync.ts";
-import { agentSurfaceFreezeScenario } from "./scenarios/agent-surface-freeze.ts";
 import { automationCheckScenario } from "./scenarios/automation-check.ts";
 import { cachePruneScenario } from "./scenarios/cache-prune.ts";
-import { composeConfigHashDriftScenario } from "./scenarios/compose-config-hash-drift.ts";
-import { dependencyCacheScenario } from "./scenarios/dependency-cache.ts";
-import { dependencyCacheBootstrapScenario } from "./scenarios/dependency-cache-bootstrap.ts";
-import { dependencyCachePackageScenario } from "./scenarios/dependency-cache-package.ts";
-import { dependencyCacheProtocolScenario } from "./scenarios/dependency-cache-protocol.ts";
 import { doctorScenario } from "./scenarios/doctor.ts";
-import { domainMigrationScenario } from "./scenarios/domain-migration.ts";
-import { domainMigrationFilesScenario } from "./scenarios/domain-migration-files.ts";
 import { envSecretsScenario } from "./scenarios/env-secrets.ts";
-import { execStaleEnvScenario } from "./scenarios/exec-stale-env.ts";
 import { initScenario } from "./scenarios/init.ts";
 import { lifecycleHostProcessScenario } from "./scenarios/lifecycle-host-process.ts";
 import { lifecycleSessionRecoveryScenario } from "./scenarios/lifecycle-session-recovery.ts";
-import { nativeComposeAdoptionJobWorktreesScenario } from "./scenarios/native-compose-adoption-job-worktrees.ts";
-import { nativeComposeAdoptionRoutingWorktreesScenario } from "./scenarios/native-compose-adoption-routing-worktrees.ts";
-import { nativeComposeAdoptionSourceBindWorktreesScenario } from "./scenarios/native-compose-adoption-source-bind-worktrees.ts";
-import {
-  nativeComposeAdoptionBranchWorktreesScenario,
-  nativeComposeAdoptionBuildWorktreesScenario,
-  nativeComposeAdoptionDependencyWorktreesScenario,
-  nativeComposeAdoptionLocalWorktreesScenario,
-  nativeComposeAdoptionManagedWorktreesScenario,
-  nativeComposeAdoptionNetworkHealthWorktreesScenario,
-  nativeComposeAdoptionNetworkWorktreesScenario,
-  nativeComposeAdoptionPluralNetworkWorktreesScenario,
-  nativeComposeAdoptionStringWorktreesScenario,
-  nativeComposeAdoptionWorktreesScenario,
-} from "./scenarios/native-compose-adoption-worktrees.ts";
-import { nativeConfigBuildScenario } from "./scenarios/native-config-build.ts";
-import { nativeConfigComposeScenario } from "./scenarios/native-config-compose.ts";
-import { nativeConfigDownHooksScenario } from "./scenarios/native-config-down-hooks.ts";
-import {
-  nativeConfigFilesScenario,
-  nativeConfigFileUnknownStopScenario,
-} from "./scenarios/native-config-files.ts";
-import { nativeConfigProcessPolicyScenario } from "./scenarios/native-config-process-policy.ts";
-import { nativeConfigProtectedFilesScenario } from "./scenarios/native-config-protected-files.ts";
-import { nativeConfigRoutingScenario } from "./scenarios/native-config-routing.ts";
-import { nativeConfigVmFilesScenario } from "./scenarios/native-config-vm-files.ts";
-import { portableMultiserviceScenario } from "./scenarios/portable-multiservice.ts";
 import { upDownScenario } from "./scenarios/up-down.ts";
 import { worktreeBranchDefaultScenario } from "./scenarios/worktree-branch-default.ts";
 import { worktreeParallelUpScenario } from "./scenarios/worktree-parallel-up.ts";
 import { worktreeRegistryScenario } from "./scenarios/worktree-registry.ts";
 import { worktreeSecretsScenario } from "./scenarios/worktree-secrets.ts";
-import { parseShard, type ShardSelection, selectShard } from "./shard.ts";
 
 /**
  * hack CLI end-to-end runner.
@@ -63,9 +20,6 @@ import { parseShard, type ShardSelection, selectShard } from "./shard.ts";
  *   bun tests/e2e/run.ts                    # tier 1 (local) scenarios
  *   HACK_E2E_DOCKER=1 bun tests/e2e/run.ts  # + tier 2 (docker) scenarios
  *   bun tests/e2e/run.ts --only=init,doctor # subset by name
- *   bun tests/e2e/run.ts --shard=2/4        # one deterministic CI shard of
- *                                           # the default set (not with --only)
- *   # Host-ingress scenarios require explicit --only plus their prerequisites.
  *   bun tests/e2e/run.ts --list             # list scenarios and exit
  *   HACK_E2E_KEEP=1 ...                     # keep temp fixtures for debugging
  *   HACK_E2E_CLI_BIN=./dist/hack ...        # exercise the compiled binary
@@ -76,7 +30,7 @@ import { parseShard, type ShardSelection, selectShard } from "./shard.ts";
  * failed (nothing ran).
  */
 
-export const ALL_SCENARIOS: readonly Scenario[] = [
+const ALL_SCENARIOS: readonly Scenario[] = [
   automationCheckScenario,
   initScenario,
   envSecretsScenario,
@@ -84,66 +38,21 @@ export const ALL_SCENARIOS: readonly Scenario[] = [
   worktreeRegistryScenario,
   worktreeBranchDefaultScenario,
   agentDocsSyncScenario,
-  agentSurfaceFreezeScenario,
   doctorScenario,
-  domainMigrationFilesScenario,
   lifecycleSessionRecoveryScenario,
   cachePruneScenario,
-  dependencyCacheScenario,
-  dependencyCacheBootstrapScenario,
-  dependencyCacheProtocolScenario,
-  dependencyCachePackageScenario,
-  domainMigrationScenario,
   upDownScenario,
-  execStaleEnvScenario,
-  portableMultiserviceScenario,
-  composeConfigHashDriftScenario,
-  nativeConfigComposeScenario,
-  nativeConfigBuildScenario,
-  nativeConfigDownHooksScenario,
-  nativeConfigFilesScenario,
-  nativeConfigFileUnknownStopScenario,
-  nativeConfigProtectedFilesScenario,
-
-  nativeConfigVmFilesScenario,
-  nativeConfigProcessPolicyScenario,
-  nativeConfigRoutingScenario,
-  nativeConfigNetworksScenario,
-  nativeComposeAdoptionWorktreesScenario,
-  nativeComposeAdoptionBranchWorktreesScenario,
-  nativeComposeAdoptionStringWorktreesScenario,
-  nativeComposeAdoptionNetworkWorktreesScenario,
-  nativeComposeAdoptionPluralNetworkWorktreesScenario,
-  nativeComposeAdoptionNetworkHealthWorktreesScenario,
-  nativeComposeAdoptionManagedWorktreesScenario,
-  nativeComposeAdoptionLocalWorktreesScenario,
-  nativeComposeAdoptionDependencyWorktreesScenario,
-  nativeComposeAdoptionBuildWorktreesScenario,
-  nativeComposeAdoptionJobWorktreesScenario,
-  nativeComposeAdoptionRoutingWorktreesScenario,
-  nativeComposeAdoptionSourceBindWorktreesScenario,
   lifecycleHostProcessScenario,
   worktreeParallelUpScenario,
 ];
 
 type CliArgs = {
   readonly only: readonly string[];
-  readonly shard: ShardSelection | null;
   readonly list: boolean;
 };
 
-const USAGE =
-  "Usage: bun tests/e2e/run.ts [--list] [--only=name,name | --shard=i/n]\n";
-
-function usageError(message: string): CliArgs {
-  process.stdout.write(`${message}\n${USAGE}`);
-  process.exitCode = 2;
-  return { only: [], shard: null, list: true };
-}
-
 function parseArgs(argv: readonly string[]): CliArgs {
   const only: string[] = [];
-  let shard: ShardSelection | null = null;
   let list = false;
   for (const arg of argv) {
     if (arg === "--list") {
@@ -156,64 +65,26 @@ function parseArgs(argv: readonly string[]): CliArgs {
           .map((name) => name.trim())
           .filter((name) => name.length > 0)
       );
-    } else if (arg.startsWith("--shard=")) {
-      shard = parseShard(arg.slice("--shard=".length));
-      if (shard === null) {
-        return usageError("Invalid --shard (expected i/n with 1 <= i <= n)");
-      }
     } else {
-      return usageError(`Unknown argument: ${arg}`);
-    }
-  }
-  if (shard !== null && only.length > 0) {
-    return usageError("--shard and --only cannot be combined");
-  }
-  return { only, shard, list };
-}
-
-/** The default scenario set split for `selection`; see tests/e2e/shard.ts. */
-export function shardScenarioNames(
-  selection: ShardSelection
-): readonly string[] {
-  return selectShard({
-    names: selectScenarios({ scenarios: ALL_SCENARIOS }).map(
-      (scenario) => scenario.name
-    ),
-    selection,
-  });
-}
-
-function printScenarioList(shardNames: readonly string[] | null): void {
-  for (const scenario of ALL_SCENARIOS) {
-    if (shardNames === null || shardNames.includes(scenario.name)) {
+      process.stdout.write(`Unknown argument: ${arg}\n`);
       process.stdout.write(
-        `${scenario.name.padEnd(26)} ${scenario.tier.padEnd(6)} ${scenario.summary}\n`
+        "Usage: bun tests/e2e/run.ts [--list] [--only=name,name]\n"
       );
+      process.exitCode = 2;
+      return { only: [], list: true };
     }
   }
-}
-
-function printShardPlan(opts: {
-  readonly selection: ShardSelection;
-  readonly names: readonly string[];
-}): void {
-  process.stdout.write(
-    `== hack e2e: shard ${opts.selection.index}/${opts.selection.count} (${opts.names.length} scenarios) ==\n${opts.names.join("\n")}\n\n`
-  );
+  return { only, list };
 }
 
 async function main(): Promise<void> {
   const args = parseArgs(Bun.argv.slice(2));
-  const shardNames = args.shard ? shardScenarioNames(args.shard) : null;
-  if (args.shard && shardNames?.length === 0) {
-    process.stdout.write(
-      `Shard ${args.shard.index}/${args.shard.count} selects no scenarios\n`
-    );
-    process.exitCode = 2;
-    return;
-  }
   if (args.list) {
-    printScenarioList(shardNames);
+    for (const scenario of ALL_SCENARIOS) {
+      process.stdout.write(
+        `${scenario.name.padEnd(26)} ${scenario.tier.padEnd(6)} ${scenario.summary}\n`
+      );
+    }
     return;
   }
 
@@ -239,9 +110,6 @@ async function main(): Promise<void> {
   process.stdout.write(
     `canary ok — isolated registry at ${canary.registryPath}\n\n`
   );
-  if (args.shard && shardNames) {
-    printShardPlan({ selection: args.shard, names: shardNames });
-  }
 
   const dockerEnabled = (process.env.HACK_E2E_DOCKER ?? "") === "1";
   const requireDocker = (process.env.HACK_E2E_REQUIRE_DOCKER ?? "") === "1";
@@ -249,7 +117,7 @@ async function main(): Promise<void> {
   const outcomes = await runScenarios({
     scenarios: ALL_SCENARIOS,
     dockerEnabled,
-    only: shardNames ?? args.only,
+    only: args.only,
     keepTempDirs,
   });
 
@@ -263,6 +131,4 @@ async function main(): Promise<void> {
       : 0;
 }
 
-if (import.meta.main) {
-  await main();
-}
+await main();

@@ -11,7 +11,6 @@ import {
 } from "../src/constants.ts";
 import { setProjectEnvValue } from "../src/lib/project-env-config.ts";
 import type { MuxBackend } from "../src/mux/mux-backend.ts";
-import { restoreEnv } from "./helpers/env.ts";
 import { registerScopedModuleMock } from "./helpers/scoped-module-mock.ts";
 
 const createSessionCalls: Array<{
@@ -161,7 +160,7 @@ afterEach(async () => {
     await rm(tempDir, { recursive: true, force: true });
   }
   tempDirs.clear();
-  restoreEnv("HOME", originalHome);
+  process.env.HOME = originalHome;
 });
 
 afterAll(() => {

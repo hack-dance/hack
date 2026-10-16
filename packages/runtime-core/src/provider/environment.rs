@@ -1,4 +1,4 @@
-//! Experimental graph-scoped ephemeral delivery; credential acquisition remains caller-owned.
+//! Experimental ephemeral delivery primitive. Not wired to graph startup or a credential provider.
 use super::lifecycle::OwnedGuest;
 use crate::{Candidate, CandidateError};
 use std::{
@@ -8,45 +8,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-/// Encoded values occupy at most half of each fixed 64 KiB tmpfs allocation.
-pub const MAX_ENVIRONMENT_PAYLOAD: usize = 32 * 1024;
-pub const MAX_ENVIRONMENT_KEYS: usize = 256;
+const MAX_PAYLOAD: usize = 8192;
 const MAX_LIFETIME: Duration = Duration::from_secs(300);
-/// Maximum managed services in one graph/envelope; the aggregate input budget still applies.
-pub const MAX_MANAGED_SERVICES: usize = 32;
-/// Shared guest capacity, not a promise that the runtime admits this many containers.
-pub const MAX_CONCURRENT_ALLOCATIONS: usize = 512;
-/// Per-allocation tmpfs ceiling: all slots together cap payload filesystems at 32 MiB.
-pub const ALLOCATION_BYTES: usize = 64 * 1024;
-
-/// Runs under the caller's retained runtime mutation lease. Uncertain paths consume capacity.
-pub(super) fn preflight_capacity(
-    guest: &OwnedGuest<'_>,
-    requested: usize,
-) -> Result<(), CandidateError> {
-    guest.require_allocation()?;
-    if !(1..=MAX_MANAGED_SERVICES).contains(&requested) {
-        return Err(error("environment_capacity"));
-    }
-    super::environment_recovery::preflight_records(guest.candidate(), requested)?;
-    let prefix = format!("/run/hack-env-lease-{}", guest.boot_id());
-    let result = guest.execute(
-        &format!("{CAPACITY_FUNCTION}\n{CAPACITY}"),
-        &[
-            &prefix,
-            &requested.to_string(),
-            &MAX_CONCURRENT_ALLOCATIONS.to_string(),
-        ],
-        None,
-    );
-    if !result
-        .as_ref()
-        .is_ok_and(|v| v == "environment-capacity-v1\n")
-    {
-        return Err(error("environment_capacity"));
-    }
-    Ok(())
-}
 
 fn error(code: &'static str) -> CandidateError {
     CandidateError::new(
@@ -73,7 +36,7 @@ fn key(value: &str) -> bool {
 /// Intentionally lacks Debug/Serialize. Lifetime begins at preparation, not at delivery.
 pub struct PendingEnvironment {
     service: String,
-    payload: zeroize::Zeroizing<String>,
+    payload: String,
     uid: u32,
     gid: u32,
     deadline: Instant,
@@ -82,8 +45,6 @@ pub struct PendingEnvironment {
 /// Expiry blocks verification/use; explicit removal or VM shutdown reclaims the tmpfs.
 pub struct EnvironmentLease {
     pub(super) graph: Option<super::environment_recovery::GraphBinding>,
-    #[cfg(feature = "native-config-plan")]
-    pub(super) native: Option<super::native_environment::Binding>,
     pub(super) service: String,
     pub(super) uid: u32,
     pub(super) gid: u32,
@@ -91,11 +52,6 @@ pub struct EnvironmentLease {
     pub(super) incarnation: String,
     pub(super) boot: String,
     deadline: Instant,
-}
-enum Binding {
-    Compose(Option<super::environment_recovery::GraphBinding>),
-    #[cfg(feature = "native-config-plan")]
-    Native(super::native_environment::Binding),
 }
 impl PendingEnvironment {
     pub(super) fn with_identity(mut self, uid: u32, gid: u32) -> Self {
@@ -113,30 +69,12 @@ impl PendingEnvironment {
         values: &BTreeMap<String, String>,
         lifetime: Duration,
     ) -> Result<Self, CandidateError> {
-        if lifetime.is_zero() || lifetime > MAX_LIFETIME {
-            return Err(error("environment_input"));
-        }
-        let deadline = Instant::now()
-            .checked_add(lifetime)
-            .ok_or_else(|| error("environment_input"))?;
-        Self::until(service, values, deadline)
-    }
-
-    /// Prepare against the caller's exact deadline; serialization never renews it.
-    pub fn until(
-        service: &str,
-        values: &BTreeMap<String, String>,
-        deadline: Instant,
-    ) -> Result<Self, CandidateError> {
-        let valid_deadline = || {
-            deadline
-                .checked_duration_since(Instant::now())
-                .is_some_and(|left| !left.is_zero() && left <= MAX_LIFETIME)
-        };
-        if !valid_deadline() {
-            return Err(error("environment_expired"));
-        }
-        if !name(service) || values.is_empty() || values.len() > MAX_ENVIRONMENT_KEYS {
+        if !name(service)
+            || values.is_empty()
+            || values.len() > 64
+            || lifetime.is_zero()
+            || lifetime > MAX_LIFETIME
+        {
             return Err(error("environment_input"));
         }
         // Bound input before allocating its encoded copy. JSON escaping is checked separately.
@@ -149,25 +87,20 @@ impl PendingEnvironment {
                 .checked_add(k.len())
                 .and_then(|n| n.checked_add(v.len()))
                 .ok_or_else(|| error("environment_budget"))?;
-            if bytes > MAX_ENVIRONMENT_PAYLOAD {
+            if bytes > MAX_PAYLOAD {
                 return Err(error("environment_budget"));
             }
         }
-        let payload = zeroize::Zeroizing::new(
-            serde_json::to_string(values).map_err(|_| error("environment_input"))?,
-        );
-        if payload.len() > MAX_ENVIRONMENT_PAYLOAD {
+        let payload = serde_json::to_string(values).map_err(|_| error("environment_input"))?;
+        if payload.len() > MAX_PAYLOAD {
             return Err(error("environment_budget"));
-        }
-        if !valid_deadline() {
-            return Err(error("environment_expired"));
         }
         Ok(Self {
             service: service.into(),
             payload,
             uid: 0,
             gid: 0,
-            deadline,
+            deadline: Instant::now() + lifetime,
         })
     }
     pub fn stage(self, candidate: &Candidate) -> Result<EnvironmentLease, CandidateError> {
@@ -187,24 +120,7 @@ impl PendingEnvironment {
         guest: &OwnedGuest<'_>,
         graph: Option<super::environment_recovery::GraphBinding>,
     ) -> Result<EnvironmentLease, CandidateError> {
-        self.stage_binding(guest, Binding::Compose(graph))
-    }
-    #[cfg(feature = "native-config-plan")]
-    pub(super) fn stage_native(
-        self,
-        guest: &OwnedGuest<'_>,
-        binding: super::native_environment::Binding,
-    ) -> Result<EnvironmentLease, CandidateError> {
-        self.stage_binding(guest, Binding::Native(binding))
-    }
-    fn stage_binding(
-        self,
-        guest: &OwnedGuest<'_>,
-        binding: Binding,
-    ) -> Result<EnvironmentLease, CandidateError> {
         guest.require_allocation()?;
-        remaining(self.deadline)?;
-        preflight_capacity(guest, 1)?;
         remaining(self.deadline)?;
         let candidate = guest.candidate();
         let mut random = [0u8; 16];
@@ -212,23 +128,8 @@ impl PendingEnvironment {
             .and_then(|mut f| f.read_exact(&mut random))
             .map_err(|_| error("environment_identity"))?;
         let token: String = random.iter().map(|b| format!("{b:02x}")).collect();
-        #[cfg(feature = "native-config-plan")]
-        let native = match &binding {
-            Binding::Native(binding) => Some(binding.clone()),
-            _ => None,
-        };
-        #[cfg(feature = "native-config-plan")]
-        let graph = match binding {
-            Binding::Compose(graph) => graph,
-            #[cfg(feature = "native-config-plan")]
-            Binding::Native(_) => None,
-        };
-        #[cfg(not(feature = "native-config-plan"))]
-        let Binding::Compose(graph) = binding;
         let lease = EnvironmentLease {
             graph,
-            #[cfg(feature = "native-config-plan")]
-            native,
             uid: self.uid,
             gid: self.gid,
             service: self.service,
@@ -237,26 +138,16 @@ impl PendingEnvironment {
             boot: guest.boot_id().into(),
             deadline: self.deadline,
         };
-        #[cfg(feature = "native-config-plan")]
-        if lease.native.is_some() {
-            super::native_environment::record(candidate, guest, &lease)?;
-        } else {
-            super::environment_recovery::record(candidate, &lease)?;
-        }
-        #[cfg(not(feature = "native-config-plan"))]
         super::environment_recovery::record(candidate, &lease)?;
         let seconds = remaining(lease.deadline)?;
         let result = guest.execute(
-            &format!("{CAPACITY_FUNCTION}\n{STAGE}"),
+            STAGE,
             &[
                 &lease.slot,
                 &lease.service,
                 &seconds.to_string(),
                 &lease.uid.to_string(),
                 &lease.gid.to_string(),
-                &MAX_CONCURRENT_ALLOCATIONS.to_string(),
-                &ALLOCATION_BYTES.to_string(),
-                &MAX_ENVIRONMENT_PAYLOAD.to_string(),
             ],
             Some(&self.payload),
         );
@@ -265,7 +156,8 @@ impl PendingEnvironment {
             .is_ok_and(|value| value == "environment-staged-v1\n")
         {
             // Identity-checked removal also handles a partially written payload. Never expose output.
-            let _ = lease.remove_with_guest(guest);
+            let _ =
+                super::environment_recovery::retire(candidate, guest, &lease.slot, Some(&lease));
             return Err(CandidateError::new(
                 "environment_stage_uncertain",
                 format!(
@@ -275,7 +167,8 @@ impl PendingEnvironment {
             ));
         }
         if remaining(lease.deadline).is_err() {
-            let _ = lease.remove_with_guest(guest);
+            let _ =
+                super::environment_recovery::retire(candidate, guest, &lease.slot, Some(&lease));
             return Err(error("environment_expired"));
         }
         Ok(lease)
@@ -328,7 +221,6 @@ impl EnvironmentLease {
                 &self.service,
                 &self.uid.to_string(),
                 &self.gid.to_string(),
-                &MAX_ENVIRONMENT_PAYLOAD.to_string(),
             ],
             None,
         )?;
@@ -345,15 +237,6 @@ impl EnvironmentLease {
     }
     pub(super) fn remove_with_guest(&self, guest: &OwnedGuest<'_>) -> Result<(), CandidateError> {
         self.matches_guest(guest)?;
-        #[cfg(feature = "native-config-plan")]
-        if self.native.is_some() {
-            return super::native_environment::retire(
-                guest.candidate(),
-                guest,
-                &self.slot,
-                Some(self),
-            );
-        }
         super::environment_recovery::retire(guest.candidate(), guest, &self.slot, Some(self))
     }
     fn matches_guest(&self, guest: &OwnedGuest<'_>) -> Result<(), CandidateError> {
@@ -367,48 +250,29 @@ impl EnvironmentLease {
 // No payload is substituted into these scripts or their argv. Both output streams of the body
 // are discarded, including failures, before the fixed acknowledgment is emitted.
 // Do not put the subshell in an `if` or `||` list: that disables errexit inside its body.
-const CAPACITY_FUNCTION: &str = r#"
-capacity_check() {
-  case "$2" in ''|*[!0-9]*) return 1;; esac
-  case "$3" in ''|*[!0-9]*) return 1;; esac
-  test "$2" -gt 0
-  test "$2" -le "$3"
-  available=$(($3 - $2))
-  count=0
-  for path in "$1"-*; do
-    if test -e "$path" || test -L "$path"; then
-      count=$((count + 1))
-      test "$count" -le "$available"
-    fi
-  done
-}
-"#;
-const CAPACITY: &str = r#"
-(
-set -eu
-capacity_check "$1" "$2" "$3"
-) >/dev/null 2>&1
-printf 'environment-capacity-v1\n'
-"#;
 const STAGE: &str = r#"
 (
 set -eu
 ulimit -c 0
 umask 077
 awk '/^SwapTotal:/ { found=1; if ($2 != 0) bad=1 } END { exit (!found || bad) }' /proc/meminfo
-capacity_check "/run/${1%-*}" 1 "$6"
+count=0
+for path in /run/"${1%-*}"-*; do
+  if test -e "$path" || test -L "$path"; then count=$((count + 1)); fi
+done
+test "$count" -lt 8
 root="/run/$1"
 test ! -e "$root"
 test ! -L "$root"
 mkdir "$root"
-mount -t tmpfs -o "size=$7,mode=0700,nosuid,nodev,noexec" "$1" "$root"
+mount -t tmpfs -o size=65536,mode=0700,nosuid,nodev,noexec "$1" "$root"
 test "$(findmnt -n -o FSTYPE --mountpoint "$root")" = tmpfs
 test "$(findmnt -n -o SOURCE --mountpoint "$root")" = "$1"
 printf '%s' "$2" > "$root/service"
 now=$(cut -d. -f1 /proc/uptime)
 printf '%s' "$((now + $3))" > "$root/expires"
 cat > "$root/values.json"
-test "$(stat -c %s "$root/values.json")" -le "$8"
+test "$(stat -c %s "$root/values.json")" -le 8192
 chmod 400 "$root/service" "$root/expires" "$root/values.json"
 chown "$4:$5" "$root/expires" "$root/values.json"
 ) >/dev/null 2>&1
@@ -433,7 +297,7 @@ for name in service expires values.json; do
 done
 test "$(cat "$root/service")" = "$2"
 test "$(cut -d. -f1 /proc/uptime)" -lt "$(cat "$root/expires")"
-test "$(stat -c %s "$root/values.json")" -le "$5"
+test "$(stat -c %s "$root/values.json")" -le 8192
 ) >/dev/null 2>&1
 printf 'environment-verified-v1\n'
 "#;
@@ -441,87 +305,6 @@ printf 'environment-verified-v1\n'
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn capacity_scan_bounds_batches_and_counts_uncertain_current_boot_paths() {
-        use std::{fs, os::unix::fs::symlink, path::PathBuf, process::Command};
-        struct Directory(PathBuf);
-        impl Drop for Directory {
-            fn drop(&mut self) {
-                let _ = fs::remove_dir_all(&self.0);
-            }
-        }
-        let nonce = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let directory = Directory(
-            std::env::temp_dir()
-                .canonicalize()
-                .unwrap()
-                .join(format!("hack-env-capacity-{}-{nonce}", std::process::id())),
-        );
-        fs::create_dir(&directory.0).unwrap();
-        let prefix = directory.0.join("hack-env-lease-current-boot");
-        let script = format!("{CAPACITY_FUNCTION}\n{CAPACITY}");
-        let check = |requested: &str, accepted: bool| {
-            let output = Command::new("/bin/sh")
-                .args([
-                    "-eu",
-                    "-c",
-                    &script,
-                    "capacity",
-                    prefix.to_str().unwrap(),
-                    requested,
-                    &MAX_CONCURRENT_ALLOCATIONS.to_string(),
-                ])
-                .output()
-                .unwrap();
-            assert_eq!(output.status.success(), accepted);
-            assert!(output.stderr.is_empty());
-            assert_eq!(
-                output.stdout,
-                if accepted {
-                    b"environment-capacity-v1\n".as_slice()
-                } else {
-                    b""
-                }
-            );
-        };
-        check("12", true);
-        for requested in ["0", "513", "bad"] {
-            check(requested, false);
-        }
-        fs::write(directory.0.join("hack-env-lease-other-boot-held"), b"").unwrap();
-        for n in 0..500 {
-            fs::write(
-                directory.0.join(format!("hack-env-lease-current-boot-{n}")),
-                b"",
-            )
-            .unwrap();
-        }
-        check("12", true);
-        symlink(
-            "absent-target",
-            directory.0.join("hack-env-lease-current-boot-dangling"),
-        )
-        .unwrap();
-        check("12", false);
-        check("11", true);
-        fs::create_dir(directory.0.join("hack-env-lease-current-boot-partial")).unwrap();
-        check("11", false);
-        check("10", true);
-        for n in 502..512 {
-            fs::write(
-                directory.0.join(format!("hack-env-lease-current-boot-{n}")),
-                b"",
-            )
-            .unwrap();
-        }
-        check("1", false);
-        assert_eq!(fs::read_dir(&directory.0).unwrap().count(), 513);
-        fs::remove_file(directory.0.join("hack-env-lease-current-boot-511")).unwrap();
-        check("1", true);
-    }
     #[test]
     fn failed_preflight_stops_before_effects_and_emits_no_receipt() {
         // Stub side effects so the real staging script can safely exercise POSIX errexit locally.
@@ -538,31 +321,6 @@ mod tests {
     }
 
     #[test]
-    fn absolute_preparation_preserves_exact_deadline_and_rejects_expiry() {
-        let values = BTreeMap::from([("TOKEN".into(), "synthetic-only".into())]);
-        let deadline = Instant::now() + Duration::from_secs(30);
-        let first = PendingEnvironment::until("web", &values, deadline).unwrap();
-        let second = PendingEnvironment::until("worker", &values, deadline).unwrap();
-        assert_eq!(first.deadline, deadline);
-        assert_eq!(second.deadline, deadline);
-        for invalid in [
-            Instant::now() - Duration::from_secs(1),
-            Instant::now() + Duration::from_secs(301),
-        ] {
-            assert_eq!(
-                PendingEnvironment::until("web", &values, invalid)
-                    .err()
-                    .unwrap()
-                    .code,
-                "environment_expired"
-            );
-        }
-        let before = Instant::now();
-        let relative = PendingEnvironment::new("web", &values, Duration::from_secs(30)).unwrap();
-        assert!(relative.deadline >= before + Duration::from_secs(30));
-        assert!(relative.deadline <= Instant::now() + Duration::from_secs(30));
-    }
-    #[test]
     fn preparation_refuses_invalid_scope_values_and_encoded_overflow() {
         let good = BTreeMap::from([("TOKEN".into(), "synthetic-only".into())]);
         for service in ["", "../web", "web/other", "-web"] {
@@ -572,7 +330,7 @@ mod tests {
             BTreeMap::new(),
             BTreeMap::from([("BAD=KEY".into(), "x".into())]),
             BTreeMap::from([("TOKEN".into(), "x\0y".into())]),
-            BTreeMap::from([("TOKEN".into(), "\n".repeat(MAX_ENVIRONMENT_PAYLOAD / 2))]),
+            BTreeMap::from([("TOKEN".into(), "\n".repeat(5000))]),
         ] {
             assert!(PendingEnvironment::new("web", &values, Duration::from_secs(60)).is_err());
         }
@@ -580,27 +338,6 @@ mod tests {
         assert!(PendingEnvironment::new("web", &good, Duration::from_secs(301)).is_err());
         assert!(PendingEnvironment::new("web", &good, Duration::from_secs(60)).is_ok());
     }
-    #[test]
-    fn application_sized_environment_preserves_fixed_allocation_budget() {
-        let mut values: BTreeMap<String, String> = (0..256)
-            .map(|n| (format!("APP_KEY_{n}"), "synthetic-value".repeat(4)))
-            .collect();
-        let prepared = PendingEnvironment::new("web", &values, Duration::from_secs(60)).unwrap();
-        assert!(prepared.payload.len() > 8192);
-        assert_eq!(
-            serde_json::from_str::<BTreeMap<String, String>>(&prepared.payload).unwrap(),
-            values
-        );
-        assert!(prepared.payload.len() + 3 * 4096 <= ALLOCATION_BYTES);
-        values.insert("ONE_TOO_MANY".into(), "synthetic".into());
-        assert!(PendingEnvironment::new("web", &values, Duration::from_secs(60)).is_err());
-        let mut exact = BTreeMap::from([("K".into(), "x".repeat(MAX_ENVIRONMENT_PAYLOAD - 8))]);
-        let prepared = PendingEnvironment::new("web", &exact, Duration::from_secs(60)).unwrap();
-        assert_eq!(prepared.payload.len(), MAX_ENVIRONMENT_PAYLOAD);
-        exact.get_mut("K").unwrap().push('x');
-        assert!(PendingEnvironment::new("web", &exact, Duration::from_secs(60)).is_err());
-    }
-
     #[test]
     fn expired_preparation_refuses_before_runtime_lookup() {
         let mut pending = PendingEnvironment::new(

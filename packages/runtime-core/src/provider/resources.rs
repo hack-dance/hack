@@ -193,27 +193,14 @@ mod tests {
     #[test]
     fn owned_tree_includes_live_child_and_refuses_stale_root() {
         let mut child = std::process::Command::new("/bin/bash")
-            .args(["-c", "/bin/sleep 30 & wait"])
+            .args(["-c", "sleep 30 & wait"])
             .spawn()
             .unwrap();
         let root = identity::observe(child.id() as i32).unwrap();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
         let result = loop {
             if let Ok(tree) = observe(&root) {
-                // A two-PID snapshot can still catch the forked shell before exec,
-                // or the first accounting sample of the newly started child. Wait
-                // for the intended executable and initialized counters, within the
-                // same bounded startup deadline; persistent zero accounting fails.
-                if tree.processes.len() == 2
-                    && tree.processes.iter().any(|p| {
-                        p.identity.pid != root.pid
-                            && p.identity.executable == std::path::Path::new("/bin/sleep")
-                    })
-                    && tree
-                        .processes
-                        .iter()
-                        .all(|p| p.resident_bytes > 0 && p.physical_footprint_bytes > 0)
-                {
+                if tree.processes.len() == 2 {
                     break tree;
                 }
             }

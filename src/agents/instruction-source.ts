@@ -35,10 +35,6 @@ export const HACK_AGENT_INTEGRATION_CLI_VERSION = (
  * - `skill`: Codex SKILL.md (full content).
  * - `rules`: Cursor `.mdc` rules (lean operational subset).
  * - `primer`: `hack agent prime` session primer (concise subset).
- *
- * A section with no surface tags renders only where a focused plugin skill
- * names its id (see `src/agents/focused-skills.ts`); the broad surfaces never
- * include it, but it still counts toward the content revision.
  */
 export const INSTRUCTION_SECTIONS: readonly InstructionSection[] = [
   {
@@ -69,7 +65,6 @@ export const INSTRUCTION_SECTIONS: readonly InstructionSection[] = [
       "Do not start/stop services from Docker Desktop UI for `hack`-managed projects.",
       "Treat `.hack/.internal` and `.hack/.branch` as hack-managed artifacts; do not hand-edit generated files there.",
       "Use `--json` for machine-readable output when available; `hack up/down/restart/doctor --json` emit an `{ok, data | error: {code, message}}` envelope with stable E_* error codes.",
-      "When the exit status matters, do not pipe `hack` output through `| tail` or `| grep`: the pipeline reports the filter's status, and filtered text can hide failures. Check the `hack` exit status or `--json` envelope first, and use finite reads such as `hack logs --no-follow --tail 100`.",
       "Scripted/agent runs: pass `--no-interactive` (or set `HACK_NO_INTERACTIVE=1`) so commands never block on prompts — they apply documented defaults or fail fast with E_INTERACTIVE_REQUIRED.",
       "Use MCP only when shell access is unavailable.",
       "A task request authorizes its stated scope, not unrelated service, global config, or production changes. Preserve native credential/trust approvals and destructive-cleanup gates; do not ask again for the same authorized action.",
@@ -103,10 +98,10 @@ export const INSTRUCTION_SECTIONS: readonly InstructionSection[] = [
     title: "Hostname routing + Caddy labels",
     surfaces: ["docs", "skill", "primer"],
     bullets: [
-      "Primary host comes from `dev_host` (new-project default: `<project>.hack.local`); existing configured hosts and legacy `.hack` fallbacks remain supported.",
-      "Subdomain pattern is `<sub>.<dev_host>` (for example: `api.myapp.hack.local`).",
-      "OAuth aliases (when enabled) retain `<project>.hack.gy` and `<sub>.<project>.hack.gy` for the managed `.hack.local` and legacy `.hack` hostnames (default alias tld: `gy`).",
-      "Browser launches automatically prefer a routed OAuth alias when enabled; custom development hosts outside `.hack.local` and legacy `.hack` stay on the primary host. Set `open.prefer` or pass `hack open --prefer <auto|alias|dev>` to override.",
+      "Primary host comes from `dev_host` (default: `<project>.hack`).",
+      "Subdomain pattern is `<sub>.<dev_host>` (for example: `api.myapp.hack`).",
+      "OAuth alias (when enabled) also routes `<dev_host>.<tld>` and `<sub>.<dev_host>.<tld>` (default tld: `gy`).",
+      "Browser launches automatically prefer a routed OAuth alias when enabled; custom development hosts outside `.hack` stay on the primary host. Set `open.prefer` or pass `hack open --prefer <auto|alias|dev>` to override.",
       "Not every compose service is routable: only services with Caddy labels and on `hack-dev` are exposed.",
       "Required labels for HTTP services: `caddy`, `caddy.reverse_proxy`, `caddy.tls=internal`.",
       "Quick checks: `hack open`, `hack open <sub>`, `hack open --json`.",
@@ -118,9 +113,9 @@ export const INSTRUCTION_SECTIONS: readonly InstructionSection[] = [
     surfaces: ["docs", "skill", "primer"],
     bullets: [
       "`hack` uses Caddy internal PKI for HTTPS on routed hosts; trust CA with `hack global trust`.",
-      "Containers get a combined public+local trust bundle (SSL_CERT_FILE etc.) once `hack global trust` has run; public TLS (package registries, external APIs) keeps working alongside local routed-host trust.",
-      "If the combined bundle is missing, only Node gets local routed-host trust (NODE_EXTRA_CA_CERTS); OpenSSL-based tools keep public roots — run `hack global trust` to enable both.",
-      "`.hack.local` is the new-project local development suffix; neither it nor legacy `.hack` is a public suffix.",
+      "Containers get a combined public+local trust bundle (SSL_CERT_FILE etc.) once `hack global trust` has run; public TLS (package registries, external APIs) keeps working alongside `*.hack` trust.",
+      "If the combined bundle is missing, only Node gets `*.hack` trust (NODE_EXTRA_CA_CERTS); OpenSSL-based tools keep public roots — run `hack global trust` to enable both.",
+      "`.hack` is local-first and great for dev, but it is not a public suffix.",
       "Use OAuth alias hosts (for example `*.hack.gy`) when providers require public-suffix-style callback domains.",
       "Alias hosts are still local-dev routes unless you add an external tunnel/remote ingress path.",
     ],
@@ -180,7 +175,7 @@ export const INSTRUCTION_SECTIONS: readonly InstructionSection[] = [
     title: "Running things (decision guide)",
     surfaces: ALL_SURFACES,
     bullets: [
-      "One-off command in a fresh service container (deps started as needed): `hack run <service> -- <cmd...>`; the `--` keeps child flags from being parsed as Hack options.",
+      "One-off command in a fresh service container (deps started as needed): `hack run <service> <cmd...>`.",
       "Command inside an already-running service container: `hack exec <service> -- <cmd...>`.",
       "Host script that needs managed env: `hack host exec --env <overlay> --scope <service> -- <cmd...>`. Inspect variable names and non-secret config; never expose secret values in prompts, command arguments, logs, or source control.",
       "Interactive host shell with injected env: `hack host shell --env <overlay> --scope <service>`.",
@@ -201,21 +196,6 @@ export const INSTRUCTION_SECTIONS: readonly InstructionSection[] = [
     ],
   },
   {
-    id: "diagnose",
-    title: "Read-first diagnosis",
-    surfaces: [],
-    bullets: [
-      "Read before changing anything, in this order, and stop once the cause is clear:",
-      "Step 1, `hack ps --json`: which services exist and their state.",
-      "Step 2, `hack doctor --json`: findings and stable E_* codes.",
-      "Step 3, `hack logs --json --no-follow --tail 200`: a finite snapshot; add a service name to narrow it.",
-      "Step 4, `hack env explain <key> --service <service>`: only when a value is suspect; it reports provenance without the value.",
-      "Step 5, `hack global status`: shared proxy, DNS and logging infrastructure.",
-      "Branch on `error.code`, not on message text; the code is the stable contract and the message may change.",
-      "Report what each read showed before proposing a repair.",
-    ],
-  },
-  {
     id: "lifecycle",
     title: "Lifecycle + startup",
     surfaces: ["docs", "skill"],
@@ -223,8 +203,7 @@ export const INSTRUCTION_SECTIONS: readonly InstructionSection[] = [
       "Put host setup in `.hack/hack.config.json` under `startup`/`lifecycle` (not ad-hoc terminal tabs).",
       "Use `lifecycle.up.before` for pre-start hooks and `lifecycle.processes` for long-running host tasks.",
       "Lifecycle hooks and processes receive the selected overlay's `global` values plus `host` overrides; service-scoped values remain container-specific unless a host command explicitly selects that scope.",
-      'For fixed-port host helpers such as SSM tunnels or local proxies, set `singleton.ports` and usually `onConflict: "adopt"` so Hack reuses an existing listener instead of starting duplicate tunnel stacks.',
-      "Adopt only checks that every configured singleton port is already occupied; that is not a health, identity, or readiness check, and an unrelated service on the same port is adopted too. Pair adopt with a `lifecycle.up.before` identity check when the wrong listener would matter.",
+      'For fixed-port host helpers such as SSM tunnels or local proxies, set `singleton.ports` and usually `onConflict: "adopt"` so Hack reuses a healthy existing listener instead of starting duplicate tunnel stacks.',
       "`singleton` is a listener guard, not process ownership transfer; adopted external processes are left running on `hack down`.",
       "Inspect lifecycle status via `hack projects --details` and stream via `hack logs <service-or-process>`.",
       "Lifecycle session recovery is ownership-proven: Hack adopts healthy token-, definition-, and environment-matched sessions, replaces owned stale sessions, and refuses to kill same-name sessions without deterministic ownership proof.",
@@ -251,39 +230,6 @@ export const INSTRUCTION_SECTIONS: readonly InstructionSection[] = [
       "Stop workspace: `hack session stop <workspace>`",
     ],
   },
-  {
-    id: "env-composition",
-    title: "Env composition",
-    surfaces: ALL_SURFACES,
-    bullets: [
-      "Layer order: `.hack/hack.env.default.yaml`, the selected `.hack/hack.env.<overlay>.yaml`, then worktree-local `.hack/hack.env.local.yaml` and `.hack/hack.env.<overlay>.local.yaml`; service values override `global`, and host commands apply `host` values last.",
-      "Omit `--env` to use the configured default overlay; `--env base` (or `default`/`none`) selects base layers only, the same on every command. An overlay name grants no production authority and no network or instance isolation.",
-      "Use `hack env explain <KEY> --env <overlay> --service <service>` for provenance without the value; use `hack env get <KEY>` only when a plaintext value is explicitly needed, and treat its output as secret.",
-      "Store a secret by piping it: `<secret-source> | hack env add <KEY> --service <service> --secret --value-stdin` (or the hidden prompt in a terminal); never pass secret values as command arguments, where shell history and process listings expose them.",
-      "Running containers keep the env they were created with; after an env change, refresh with `hack env apply --service <service>` or `hack restart`.",
-      "Accepted flags, injection timing and refresh path per command: the command and delivery matrix in Hack's env guide (`docs/env.md` in the Hack repository).",
-    ],
-  },
-  {
-    id: "env-commands",
-    title: "Env commands",
-    surfaces: [],
-    bullets: [
-      "`hack env list --env <overlay> --service <service>` shows the resolved values for one overlay and scope with secret values masked; add `--json` for a machine-readable view.",
-      "`hack env set <key> <value> --local` writes a non-secret value to the worktree-local override file for the selected overlay; drop `--local` only when the request covers the shared, committed overlay.",
-      "`hack env exec --env <overlay> --service <service> -- <cmd...>` runs one host command with the resolved env injected; use `hack env exec --env <overlay> --shell '<command>'` when `$VAR` must expand inside the child shell, and add `--timeout <seconds>` to bound a non-TTY job.",
-      "`hack env apply --env <overlay> --service <service>` recreates that one service so it picks up changed values.",
-    ],
-  },
-  {
-    id: "env-safety",
-    title: "Env safety",
-    surfaces: [],
-    bullets: [
-      "A secret value never goes in command arguments or agent prompts. Store one with `hack env set <key> --secret` and no value, which the user runs in their own terminal and answers at its hidden prompt.",
-      "`hack env get` and `hack env list --show-secrets` are plaintext sinks: run them only when the user asks for the value itself, never to check that a key exists, and do not repeat their output in replies, logs or files.",
-    ],
-  },
 
   {
     id: "branch-instances",
@@ -293,18 +239,7 @@ export const INSTRUCTION_SECTIONS: readonly InstructionSection[] = [
       "Use a branch instance when you need two versions running at once (PR review, experiments, migrations) or want to keep a stable environment while testing another branch.",
       "Target one with `--branch <name>` on up/open/logs/down (for example: `hack up --branch <name> --detach`).",
       "Linked worktrees pick a branch instance automatically (see Linked git worktrees).",
-      "Containers in Compose-file and authored `.hack/hack.project.json` projects, on the Compose and native backends, receive `HACK_RUNTIME_METADATA` plus `HACK_DEV_URL`, `HACK_ALIAS_URL`, and current-service URL fields derived from effective routes; explicit project env and authored env values win. Use Compose DNS for internal traffic and this metadata for browser-facing links, OAuth callbacks, and webhooks.",
-    ],
-  },
-  {
-    id: "branch-aliases",
-    title: "Branch aliases",
-    surfaces: [],
-    bullets: [
-      "Aliases are entries in `.hack/hack.branches.json`; `hack up --branch <name>` records or refreshes its entry automatically.",
-      "`hack branch add <name> --note <text>` registers one ahead of time, and `hack branch list` shows each alias with its note and last use.",
-      "`hack branch open <name>` opens that branch's routed host; `hack branch open <name> --prefer <auto|alias|dev>` selects which host.",
-      "`hack branch remove <name>` deletes only the alias entry and leaves any running instance alone; stop the instance with `hack down --branch <name>`.",
+      "Containers receive `HACK_RUNTIME_METADATA` plus `HACK_DEV_URL`, `HACK_ALIAS_URL`, and current-service URL fields derived from effective Caddy routes. Use Compose DNS for internal traffic and this metadata for browser-facing links, OAuth callbacks, and webhooks.",
     ],
   },
 
@@ -344,23 +279,24 @@ export const INSTRUCTION_SECTIONS: readonly InstructionSection[] = [
     surfaces: ALL_SURFACES,
     bullets: [
       "Ordinary Hack commands, `hack update`, `hack doctor --fix`, and primer hooks never install plugins or mutate agent integration files.",
-      "Use the matching `hack setup` command only for the affected client and authorized project scope; add `--global` only when user-scope changes are authorized. Use `--check` for read-only inspection. Reserve `hack setup sync --all-scopes` for an explicitly requested full refresh; it refreshes only installed Hack-owned files and creates missing integrations only with `--install-missing`.",
+      "Use the matching `hack setup` command only for the affected client and authorized project scope; add `--global` only when user-scope changes are authorized. Use `--check` for read-only inspection. Reserve `hack setup sync --all-scopes` for an explicitly requested full refresh.",
       "Standalone setup and optional native plugins are alternative integration paths. A missing optional integration does not require installation. Verify the replacement loads before explicitly removing duplicate Hack-owned entries; preserve customizations.",
       "CLI upgrades do not authorize integration changes. Edit guidance at its generator source and render the affected targets; restart only if the client cannot reload the changed hooks or skills.",
     ],
   },
   {
     id: "agent-setup",
-    title: "Agent setup (plugin-first)",
+    title: "Agent setup (CLI-first)",
     surfaces: ["docs", "skill", "primer"],
     bullets: [
-      "Default integration: the optional `hack` plugin, installed through the client's plugin manager, ships skills, Claude primer hooks and a Cursor rule. It ships no MCP server, and Hack commands never install plugins.",
-      "MCP is opt-in, only for clients without shell access and only when explicitly selected: add the separate `hack-mcp` plugin, or use `hack setup mcp` (client and scope via `hack mcp install --help`). Do not configure other clients as a side effect.",
-      "Standalone export is an opt-in alternative to the plugin: `hack setup cursor` (rules), `hack setup claude` (hooks and skill), `hack setup codex` (skills) or `hack setup agents` (AGENTS.md/CLAUDE.md snippets). Use one integration path per client.",
-      "Setup and onboarding never write AGENTS.md, CLAUDE.md, rule files, or repository skill copies unless the user asks for them.",
-      "Agent-assisted onboarding: `hack init --with claude|codex` (new repos) or `hack agent onboard` (existing projects) print/hand off the full setup prompt; the `/hack-init` skill and the `hack-init` MCP prompt return the same content. No-shell clients pass `repoRoot` (the repository root path) to the `hack-init` MCP prompt to include Hack's repo inventory.",
+      "Cursor rules: `hack setup cursor`",
+      "Claude hooks: `hack setup claude`",
+      "Codex skill: `hack setup codex`",
+      "Agent-assisted onboarding: `hack init --with claude|codex|both` (new repos) or `hack agent onboard` (existing projects) print/hand off the full setup prompt; the `/hack-init` skill and the `hack-init` MCP prompt return the same content.",
       "Init prompt: `hack agent init` (use --client cursor|claude|codex to open)",
       "Init patterns: `hack agent patterns`",
+      "MCP (no-shell only): `hack setup mcp`",
+      "MCP install: choose the requested client and scope with `hack mcp install --help`; do not configure other clients as a side effect.",
     ],
   },
 ];
@@ -390,7 +326,7 @@ export function renderInstructionSections(opts: {
   readonly headingStyle: InstructionHeadingStyle;
 }): string {
   const blocks = sectionsForSurface({ surface: opts.surface }).map((section) =>
-    renderInstructionSection({ section, headingStyle: opts.headingStyle })
+    renderSection({ section, headingStyle: opts.headingStyle })
   );
   return blocks.join("\n\n");
 }
@@ -411,12 +347,7 @@ export function normalizeInstructionText(opts: {
     .trim();
 }
 
-/**
- * Render one canonical section. The `freshness` section also carries the
- * content revision line, so any render that includes it can be checked for
- * drift against the canonical source.
- */
-export function renderInstructionSection(opts: {
+function renderSection(opts: {
   readonly section: InstructionSection;
   readonly headingStyle: InstructionHeadingStyle;
 }): string {

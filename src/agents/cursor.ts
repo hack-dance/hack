@@ -1,15 +1,16 @@
-import { resolve } from "node:path";
+import { unlink } from "node:fs/promises";
+import { dirname, resolve } from "node:path";
 
-import { readOptionalTextFile } from "../lib/fs.ts";
+import {
+  ensureDir,
+  pathExists,
+  readTextFile,
+  writeTextFileIfChanged,
+} from "../lib/fs.ts";
 import {
   normalizeInstructionText,
   renderInstructionSections,
 } from "./instruction-source.ts";
-import {
-  type IntegrationPreservedReason,
-  installOwnedIntegrationFile,
-  removeOwnedIntegrationFile,
-} from "./integration-ownership.ts";
 
 export type CursorScope = "project" | "user";
 
@@ -22,12 +23,9 @@ export type CursorRulesResult = {
     | "stale"
     | "removed"
     | "missing"
-    | "preserved"
     | "error";
   readonly path: string;
   readonly message?: string;
-  /** Set with `preserved`: why an existing file was left unchanged. */
-  readonly reason?: IntegrationPreservedReason;
 };
 
 const RULES_FILENAME = "hack.mdc";
@@ -37,9 +35,6 @@ const MARKER_END = "# END HACK INTEGRATION";
 
 /**
  * Install or update Cursor rules for hack CLI usage.
- *
- * Overwrites only Hack-owned content; an edited or unmarked `hack.mdc` is
- * reported as `preserved` and left unchanged.
  */
 export async function installCursorRules(opts: {
   readonly scope: CursorScope;
@@ -56,21 +51,12 @@ export async function installCursorRules(opts: {
   }
 
   const path = resolved.path;
-  const outcome = await installOwnedIntegrationFile({
-    surface: "cursor-rules",
-    path,
-    render: renderCursorRules(),
-  });
-  if (outcome.status === "preserved") {
-    return {
-      scope: opts.scope,
-      status: "preserved",
-      path,
-      reason: outcome.reason,
-      message: outcome.message,
-    };
-  }
-  return { scope: opts.scope, status: outcome.status, path };
+  const existed = await pathExists(path);
+  await ensureDir(dirname(path));
+  const result = await writeTextFileIfChanged(path, renderCursorRules());
+
+  const status = resolveInstallStatus({ changed: result.changed, existed });
+  return { scope: opts.scope, status, path };
 }
 
 /**
@@ -94,16 +80,7 @@ export async function checkCursorRules(opts: {
   }
 
   const path = resolved.path;
-  const file = await readOptionalTextFile(path);
-  if (file.kind === "unreadable") {
-    return {
-      scope: opts.scope,
-      status: "error",
-      path,
-      message: "Hack-managed file exists but could not be read.",
-    };
-  }
-  const content = file.kind === "text" ? file.text : "";
+  const content = await readTextFile(path);
   if (!content) {
     return { scope: opts.scope, status: "missing", path };
   }
@@ -131,8 +108,7 @@ export async function checkCursorRules(opts: {
 }
 
 /**
- * Remove Cursor rules for hack CLI usage. Deletes only a Hack-owned
- * `hack.mdc`; edited or unmarked files are reported as `preserved`.
+ * Remove Cursor rules for hack CLI usage.
  */
 export async function removeCursorRules(opts: {
   readonly scope: CursorScope;
@@ -149,22 +125,12 @@ export async function removeCursorRules(opts: {
   }
 
   const path = resolved.path;
-  const outcome = await removeOwnedIntegrationFile({
-    surface: "cursor-rules",
-    path,
-    currentRender: renderCursorRules(),
-    removeEmptyDirectory: false,
-  });
-  if (outcome.status === "preserved") {
-    return {
-      scope: opts.scope,
-      status: "preserved",
-      path,
-      reason: outcome.reason,
-      message: outcome.message,
-    };
+  if (!(await pathExists(path))) {
+    return { scope: opts.scope, status: "missing", path };
   }
-  return { scope: opts.scope, status: outcome.status, path };
+
+  await unlink(path);
+  return { scope: opts.scope, status: "removed", path };
 }
 
 /**
@@ -218,4 +184,14 @@ function resolveCursorRulesPath(opts: {
 function resolveHomeDir(): string | null {
   const home = (process.env.HOME ?? "").trim();
   return home.length > 0 ? home : null;
+}
+
+function resolveInstallStatus(opts: {
+  readonly changed: boolean;
+  readonly existed: boolean;
+}): "created" | "updated" | "noop" {
+  if (!opts.changed) {
+    return "noop";
+  }
+  return opts.existed ? "updated" : "created";
 }

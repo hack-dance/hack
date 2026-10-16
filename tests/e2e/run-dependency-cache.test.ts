@@ -9,7 +9,6 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { privateCliEnv } from "../helpers/private-cli-env.ts";
 
 const roots: string[] = [];
 const cli = resolve(import.meta.dir, "../../index.ts");
@@ -40,7 +39,6 @@ async function fixture() {
 services:
   installer:
     image: alpine:3.20
-    platform: linux/arm64
     command: ["true"]
     labels:
       hack.dependencies.cache-volume: dependencies
@@ -49,7 +47,6 @@ services:
       - dependencies:/deps
   api:
     image: alpine:3.20
-    platform: linux/arm64
     depends_on:
       installer:
         condition: service_completed_successfully
@@ -129,17 +126,14 @@ else if(args.includes("run")) console.log("fixture-command-output");
       ],
       {
         cwd: primary,
-        timeout: 10_000,
-        env: privateCliEnv({
-          root,
-          home,
-          env: {
-            HACK_HOME: join(home, ".hack"),
-            PATH: `${bin}:${process.env.PATH ?? ""}`,
-            HACK_NO_INTERACTIVE: "1",
-            HACK_LOGGER: "console",
-          },
-        }),
+        env: {
+          ...process.env,
+          HOME: home,
+          HACK_HOME: join(home, ".hack"),
+          PATH: `${bin}:${process.env.PATH ?? ""}`,
+          HACK_NO_INTERACTIVE: "1",
+          HACK_LOGGER: "console",
+        },
         stdin: "ignore",
         stdout: "pipe",
         stderr: "pipe",
@@ -184,24 +178,6 @@ else if(args.includes("run")) console.log("fixture-command-output");
   };
   return { primary, worktree, projectDir, state, log, run, running };
 }
-
-test("run reconciles dependencies when unresolved platform disables shared caching", async () => {
-  const f = await fixture();
-  const first = await f.run();
-  await f.running(first.call.volumeName);
-  const composePath = join(f.projectDir, "docker-compose.yml");
-  const compose = await readFile(composePath, "utf8");
-  await writeFile(
-    composePath,
-    compose.replaceAll(
-      "    platform: linux/arm64\n",
-      "    platform: ${UNRESOLVED_PLATFORM}\n"
-    )
-  );
-  const fallback = await f.run();
-  expect(fallback.call.volumeName).toBeNull();
-  expect(fallback.call.args).not.toContain("--no-deps");
-});
 
 test("run shares the startup cache across primary and linked worktrees", async () => {
   const f = await fixture();
@@ -273,7 +249,7 @@ test("run reconciles dependencies when inspection cannot prove identity and cach
     );
     expect((await f.run()).call.args).not.toContain("--no-deps");
   }
-}, 15_000);
+});
 
 test("unlabelled run keeps the existing dependency skip without container inspection", async () => {
   const f = await fixture();

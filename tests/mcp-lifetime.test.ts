@@ -10,7 +10,6 @@ import {
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { readLinesFromStream } from "../src/ui/lines.ts";
-import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
 const fixtures: Array<{
   root: string;
@@ -58,11 +57,7 @@ function alive(pid: number): boolean {
 }
 
 async function startFixture(
-  opts: {
-    tool?: string;
-    args?: Record<string, unknown>;
-    output?: "stdout" | "stderr";
-  } = {}
+  opts: { tool?: string; args?: Record<string, unknown> } = {}
 ) {
   const root = await mkdtemp(join(tmpdir(), "hack-mcp-lifetime-"));
   await mkdir(join(root, ".hack"));
@@ -75,7 +70,7 @@ async function startFixture(
   const pidFile = join(root, "child.pid");
   await writeFile(
     stub,
-    `#!${process.execPath}\nprocess.on("SIGTERM", () => {});\nawait Bun.write(${JSON.stringify(pidFile)}, String(process.pid));\nsetInterval(() => {}, 1000);\n${opts.output ? `process.${opts.output}.write("x".repeat(9 * 1024 * 1024));` : ""}\n`
+    `#!${process.execPath}\nprocess.on("SIGTERM", () => {});\nawait Bun.write(${JSON.stringify(pidFile)}, String(process.pid));\nsetInterval(() => {}, 1000);\n`
   );
   await chmod(stub, 0o755);
   const proc = Bun.spawn(
@@ -87,15 +82,13 @@ async function startFixture(
     ],
     {
       cwd: root,
-      env: privateCliEnv({
-        root,
-        home: root,
-        env: {
-          HACK_HOME: join(root, ".hack"),
-          HACK_GLOBAL_CONFIG_PATH: join(root, "global", "hack.config.json"),
-          HACK_MCP_COMMAND: stub,
-        },
-      }),
+      env: {
+        ...process.env,
+        HOME: root,
+        HACK_HOME: join(root, ".hack"),
+        HACK_GLOBAL_CONFIG_PATH: join(root, "global", "hack.config.json"),
+        HACK_MCP_COMMAND: stub,
+      },
       stdin: "pipe",
       stdout: "pipe",
       stderr: "ignore",
@@ -103,19 +96,7 @@ async function startFixture(
   );
   const fixture = { root, proc, childPid: undefined as number | undefined };
   fixtures.push(fixture);
-  const messages: Array<{
-    id?: number;
-    result?: {
-      isError?: boolean;
-      structuredContent?: {
-        stdout?: string;
-        stderr?: string;
-        data?: unknown;
-        outputTruncated?: boolean;
-        ok?: boolean;
-      };
-    };
-  }> = [];
+  const messages: Array<{ id?: number }> = [];
   const drain = (async () => {
     for await (const line of readLinesFromStream(proc.stdout)) {
       messages.push(JSON.parse(line));
@@ -200,15 +181,7 @@ test("MCP log-tail timeout stops a command that ignores SIGTERM and returns a re
   });
   await waitFor(() => messages.some((item) => item.id === 2));
   expect(messages.find((item) => item.id === 2)).toMatchObject({
-    result: {
-      structuredContent: {
-        ok: true,
-        data: {
-          stop_reason: "timeout",
-          cutoff: { bound: "time", limit: 1000 },
-        },
-      },
-    },
+    result: { structuredContent: { data: { stop_reason: "timeout" } } },
   });
   expect(alive(fixture.childPid ?? 0)).toBe(false);
   expect(fixture.proc.exitCode).toBeNull();
@@ -221,38 +194,3 @@ test("MCP graceful server termination stops its in-flight command", async () => 
   expect(alive(fixture.childPid ?? 0)).toBe(false);
   await drain;
 }, 15_000);
-
-for (const tool of ["hack.projects.list", "hack.project.logs.tail"]) {
-  for (const output of ["stdout", "stderr"] as const) {
-    test(`${tool} bounds oversized ${output} and remains usable`, async () => {
-      const { fixture, send, messages } = await startFixture({ tool, output });
-      await waitFor(() => messages.some((item) => item.id === 2));
-      const result = messages.find((item) => item.id === 2)?.result;
-      expect(result?.structuredContent?.outputTruncated).toBe(true);
-      if (tool === "hack.project.logs.tail") {
-        // HACK-1134: the byte bound is a cutoff (success with partial data),
-        // not a failure; see docs/reference/mcp-logs.md.
-        expect(result?.isError).toBeUndefined();
-        expect(result?.structuredContent?.ok).toBe(true);
-        expect(result?.structuredContent?.data).toMatchObject({
-          cutoff: { bound: "bytes", limit: 8 * 1024 * 1024 },
-          stop_reason: "output_limit",
-        });
-      } else {
-        expect(result?.isError).toBe(true);
-        expect(result?.structuredContent?.ok).toBe(false);
-        expect(result?.structuredContent?.data).toBeUndefined();
-      }
-      expect(result?.structuredContent?.stderr).toContain(
-        "8 MiB capture limit"
-      );
-      const captured =
-        (result?.structuredContent?.stdout ?? "") +
-        (result?.structuredContent?.stderr ?? "");
-      expect(captured.length).toBeLessThan(8 * 1024 * 1024 + 200);
-      expect(alive(fixture.childPid ?? 0)).toBe(false);
-      await send({ jsonrpc: "2.0", id: 3, method: "tools/list", params: {} });
-      await waitFor(() => messages.some((item) => item.id === 3));
-    }, 15_000);
-  }
-}

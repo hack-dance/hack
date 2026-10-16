@@ -4,7 +4,6 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { handleNodeRoutes } from "../src/daemon/routes/node.ts";
 import { exec } from "../src/lib/shell.ts";
-import { restoreEnv } from "./helpers/env.ts";
 
 let tempDir: string | null = null;
 let originalHome: string | undefined;
@@ -15,7 +14,7 @@ beforeEach(async () => {
   originalGlobalConfigPath = process.env.HACK_GLOBAL_CONFIG_PATH;
   tempDir = await mkdtemp(join(tmpdir(), "hack-node-bootstrap-"));
   process.env.HOME = tempDir;
-  Reflect.deleteProperty(process.env, "HACK_GLOBAL_CONFIG_PATH");
+  process.env.HACK_GLOBAL_CONFIG_PATH = undefined;
 });
 
 afterEach(async () => {
@@ -23,11 +22,11 @@ afterEach(async () => {
     await rm(tempDir, { recursive: true, force: true });
     tempDir = null;
   }
-  restoreEnv("HOME", originalHome);
+  process.env.HOME = originalHome;
   if (originalGlobalConfigPath !== undefined) {
-    restoreEnv("HACK_GLOBAL_CONFIG_PATH", originalGlobalConfigPath);
+    process.env.HACK_GLOBAL_CONFIG_PATH = originalGlobalConfigPath;
   } else {
-    Reflect.deleteProperty(process.env, "HACK_GLOBAL_CONFIG_PATH");
+    process.env.HACK_GLOBAL_CONFIG_PATH = undefined;
   }
 });
 

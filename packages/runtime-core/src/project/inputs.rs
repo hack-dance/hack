@@ -10,8 +10,6 @@ pub struct ServiceInputs {
     pub command: Option<Vec<String>>,
     pub entrypoint: Option<Vec<String>>,
     pub environment: Vec<String>,
-    /// Canonical DNS aliases requiring explicit authenticated relay bindings.
-    pub extra_hosts: BTreeMap<String, String>,
     pub health_test: Option<Vec<String>>,
     pub user: Option<String>,
 }
@@ -35,58 +33,6 @@ fn error(code: &'static str, message: &str) -> CandidateError {
     CandidateError::new(code, message)
 }
 const MAX_EXPANDED: usize = 1024 * 1024;
-
-fn registry_environment(
-    value: Option<&Value>,
-    registry: Option<&super::registry::RegistryTemplate>,
-    managed: Option<&BTreeMap<String, String>>,
-) -> Result<Option<Value>, CandidateError> {
-    let Some(registry) = registry else {
-        return Ok(value.cloned());
-    };
-    let refused = || {
-        error(
-            "execution_registry_environment",
-            "Registry credentials require private service-scoped environment delivery; values omitted.",
-        )
-    };
-    let mut value = value
-        .cloned()
-        .unwrap_or_else(|| Value::Object(Default::default()));
-    if value.is_null() {
-        value = Value::Object(Default::default());
-    }
-    for key in &registry.required_environment {
-        if !managed
-            .and_then(|values| values.get(key))
-            .is_some_and(|value| !value.is_empty())
-        {
-            return Err(refused());
-        }
-        match &mut value {
-            Value::Object(values) => {
-                if values.get(key).is_some_and(|value| !value.is_null()) {
-                    return Err(refused());
-                }
-                values.insert(key.clone(), Value::Null);
-            }
-            Value::Array(values) => {
-                if values.iter().any(|value| {
-                    value
-                        .as_str()
-                        .is_some_and(|value| value.starts_with(&format!("{key}=")))
-                }) {
-                    return Err(refused());
-                }
-                if !values.iter().any(|value| value.as_str() == Some(key)) {
-                    values.push(Value::String(key.clone()));
-                }
-            }
-            _ => return Err(refused()),
-        }
-    }
-    Ok(Some(value))
-}
 struct Resolver<'a> {
     values: &'a BTreeMap<String, String>,
     remaining: usize,
@@ -113,7 +59,7 @@ impl Resolver<'_> {
         if !variable(name) {
             return Err(error(
                 "execution_interpolation",
-                "Unsupported environment reference; use a valid variable name or supported braced literal-word operator.",
+                "Unsupported environment reference; use NAME or braced NAME without operators.",
             ));
         }
         let value = self.values.get(name).ok_or_else(|| error("execution_environment_missing", "An explicitly required runtime input was not supplied; ambient environment is not consulted."))?;
@@ -124,40 +70,6 @@ impl Resolver<'_> {
             ));
         }
         Ok(value)
-    }
-    fn expression(&self, expression: &str) -> Result<String, CandidateError> {
-        let Some((name, suffix)) = expression.split_once(':') else {
-            return self.lookup(expression).map(str::to_owned);
-        };
-        let invalid = || {
-            error(
-                "execution_interpolation",
-                "Only literal-word :+ and :- operators on explicit inputs are supported; nested interpolation is refused.",
-            )
-        };
-        if !variable(name) || suffix.is_empty() {
-            return Err(invalid());
-        }
-        let (operator, word) = if let Some(word) = suffix.strip_prefix('+') {
-            ("+", word)
-        } else if let Some(word) = suffix.strip_prefix('-') {
-            ("-", word)
-        } else {
-            return Err(invalid());
-        };
-        if word.contains(['$', '{', '}']) {
-            return Err(invalid());
-        }
-        let value = if self.values.contains_key(name) {
-            self.lookup(name)?
-        } else {
-            ""
-        };
-        Ok(match (operator, value.is_empty()) {
-            ("+", false) | ("-", true) => word.to_owned(),
-            ("+", true) => String::new(),
-            _ => value.to_owned(),
-        })
     }
     fn resolve(&mut self, text: &str) -> Result<String, CandidateError> {
         let mut result = String::new();
@@ -184,37 +96,13 @@ impl Resolver<'_> {
                     .count();
                 (&rest[..end], &rest[end..])
             };
-            let value = self.expression(name)?;
+            let value = self.lookup(name)?.to_owned();
             self.charge(&value)?;
             result.push_str(&value);
             rest = tail;
         }
         self.charge(rest)?;
         result.push_str(rest);
-        Ok(result)
-    }
-    fn extra_hosts(
-        &mut self,
-        value: Option<&Value>,
-    ) -> Result<BTreeMap<String, String>, CandidateError> {
-        let mut result = BTreeMap::new();
-        for (hostname, target) in super::extra_host_entries(value)? {
-            let hostname =
-                crate::provider::publication::normalize_hostname(&self.resolve(&hostname)?)
-                    .map_err(|_| {
-                        error(
-                            "invalid_extra_hosts",
-                            "Resolved alias is not an exact DNS name.",
-                        )
-                    })?;
-            let target = self.resolve(&target)?;
-            if target != "host-gateway" || result.insert(hostname, target).is_some() {
-                return Err(error(
-                    "invalid_extra_hosts",
-                    "Resolved aliases must be unique and target explicit host-gateway bindings.",
-                ));
-            }
-        }
         Ok(result)
     }
     fn inherited(&mut self, key: &str) -> Result<String, CandidateError> {
@@ -394,8 +282,7 @@ pub fn compile(
     expected_plan: &str,
     supplied: &BTreeMap<String, String>,
 ) -> Result<ExecutionInputs, CandidateError> {
-    compile_inner(candidate, options, expected_plan, supplied, None, None)
-        .map(|result| result.executable)
+    compile_inner(candidate, options, expected_plan, supplied, None).map(|result| result.executable)
 }
 
 /// Compile service-scoped managed values separately from public executable configuration.
@@ -409,41 +296,7 @@ pub fn compile_scoped(
     non_secret: &BTreeMap<String, String>,
     managed: &BTreeMap<String, BTreeMap<String, String>>,
 ) -> Result<ScopedExecutionInputs, CandidateError> {
-    compile_inner(
-        candidate,
-        options,
-        expected_plan,
-        non_secret,
-        Some(managed),
-        None,
-    )
-}
-
-/// Compile explicitly normalized declarations without persisting private values or
-/// weakening source-path exclusions. Replans the exact supplied bytes against the
-/// pinned original project/configuration and applies the same scoped-value rules.
-/// Provider graph admission still needs to carry this explicit input through its
-/// own revalidation; this API alone does not start services.
-pub fn compile_scoped_normalized(
-    candidate: &Candidate,
-    options: super::NormalizedComposeOptions<'_>,
-    expected_plan: &str,
-    non_secret: &BTreeMap<String, String>,
-    managed: &BTreeMap<String, BTreeMap<String, String>>,
-) -> Result<ScopedExecutionInputs, CandidateError> {
-    compile_inner(
-        candidate,
-        PlanOptions {
-            branch: options.branch,
-            project: options.project,
-            compose_file: options.compose_file,
-            profiles: options.profiles,
-        },
-        expected_plan,
-        non_secret,
-        Some(managed),
-        Some(&options),
-    )
+    compile_inner(candidate, options, expected_plan, non_secret, Some(managed))
 }
 
 fn compile_inner(
@@ -452,13 +305,8 @@ fn compile_inner(
     expected_plan: &str,
     supplied: &BTreeMap<String, String>,
     managed: Option<&BTreeMap<String, BTreeMap<String, String>>>,
-    normalized: Option<&super::NormalizedComposeOptions<'_>>,
 ) -> Result<ScopedExecutionInputs, CandidateError> {
-    let review = if let Some(input) = normalized {
-        super::plan_normalized(candidate, *input)?
-    } else {
-        plan(candidate, options)?
-    };
+    let review = plan(candidate, options)?;
     if review.plan_id != expected_plan {
         return Err(error(
             "execution_plan_changed",
@@ -477,23 +325,14 @@ fn compile_inner(
         &review.plan.compose_file,
         false,
     )?;
-    let original = source::read_compose(&path)?;
-    if normalized.is_some_and(|input| {
-        format!("{:x}", Sha256::digest(&original)) != input.expected_compose_sha256
-    }) {
-        return Err(error(
-            "execution_plan_changed",
-            "Original Compose input changed after normalized review.",
-        ));
-    }
-    let bytes = normalized.map_or(original.as_slice(), |input| input.compose_bytes);
-    if format!("{:x}", Sha256::digest(bytes)) != review.plan.compose_sha256 {
+    let bytes = source::read_compose(&path)?;
+    if format!("{:x}", Sha256::digest(&bytes)) != review.plan.compose_sha256 {
         return Err(error(
             "execution_plan_changed",
             "Compose bytes changed after review.",
         ));
     }
-    let value = yaml::parse(bytes)?;
+    let value = yaml::parse(&bytes)?;
     let raw = value["services"]
         .as_object()
         .ok_or_else(|| error("execution_services", "Missing reviewed services."))?;
@@ -551,17 +390,10 @@ fn compile_inner(
             Some(Value::Number(n)) => Some(resolver.resolve(&n.to_string())?),
             _ => return Err(error("execution_user", "Unsupported service user.")),
         };
-        let private = managed.map(|values| values.get(name).unwrap_or(&empty));
-        let environment = registry_environment(
+        let (environment, scoped) = resolver.environment(
             raw.get("environment"),
-            review
-                .plan
-                .registry
-                .as_ref()
-                .filter(|_| service.dependency_cache.is_some()),
-            private,
+            managed.map(|values| values.get(name).unwrap_or(&empty)),
         )?;
-        let (environment, scoped) = resolver.environment(environment.as_ref(), private)?;
         if !scoped.is_empty() {
             managed_environment.insert(name.clone(), scoped);
         }
@@ -571,28 +403,15 @@ fn compile_inner(
                 command: resolver.argv(raw.get("command"))?,
                 entrypoint: resolver.argv(raw.get("entrypoint"))?,
                 environment,
-                extra_hosts: resolver.extra_hosts(raw.get("extra_hosts"))?,
                 health_test,
                 user,
             },
         );
     }
-    if source::read_compose(&path)? != original {
+    if source::read_compose(&path)? != bytes {
         return Err(error(
             "execution_plan_changed",
             "Compose changed while executable inputs were compiled.",
-        ));
-    }
-    if review
-        .plan
-        .services
-        .values()
-        .any(|s| s.active && s.dependency_cache.is_some())
-        && super::registry::read(&review.plan.source)? != review.plan.registry
-    {
-        return Err(error(
-            "execution_registry_changed",
-            "Registry configuration changed during executable compilation; values omitted.",
         ));
     }
     Ok(ScopedExecutionInputs {

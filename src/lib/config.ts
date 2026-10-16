@@ -3,7 +3,6 @@ import { PROJECT_CONFIG_FILENAME } from "../constants.ts";
 import { resolveGlobalConfigPath } from "./config-paths.ts";
 import { ensureDir, readTextFile, writeTextFileIfChanged } from "./fs.ts";
 import { isRecord } from "./guards.ts";
-import { assertLegacyProjectDirectory } from "./project-input-selection.ts";
 
 /**
  * Updates a value in the global config file at ~/.hack/hack.config.json.
@@ -49,7 +48,6 @@ export async function updateProjectConfig({
     configPath,
     path,
     value,
-    projectDir,
   });
 }
 
@@ -74,7 +72,6 @@ export async function updateProjectConfigBatch({
   return await updateConfigFileValuesAtPath({
     configPath,
     values,
-    projectDir,
   });
 }
 
@@ -82,12 +79,10 @@ async function updateConfigFileAtPath({
   configPath,
   path,
   value,
-  projectDir,
 }: {
   readonly configPath: string;
   readonly path: string;
   readonly value: unknown;
-  readonly projectDir?: string;
 }): Promise<{ readonly changed: boolean }> {
   const parsedPath = parseKeyPath({ raw: path });
 
@@ -98,17 +93,14 @@ async function updateConfigFileAtPath({
   return await updateConfigFileValuesAtPath({
     configPath,
     values: [{ path, value }],
-    projectDir,
   });
 }
 
 async function updateConfigFileValuesAtPath({
   configPath,
   values,
-  projectDir,
 }: {
   readonly configPath: string;
-  readonly projectDir?: string;
   readonly values: ReadonlyArray<{
     readonly path: string;
     readonly value: unknown;
@@ -118,10 +110,6 @@ async function updateConfigFileValuesAtPath({
     return { changed: false };
   }
 
-  if (projectDir) {
-    await assertLegacyProjectDirectory({ projectDir });
-  }
-
   for (const entry of values) {
     const parsedPath = parseKeyPath({ raw: entry.path });
     if (parsedPath.length === 0) {
@@ -129,7 +117,9 @@ async function updateConfigFileValuesAtPath({
     }
   }
 
-  const config = await readConfigForUpdate({ configPath });
+  const jsonText = await readTextFile(configPath);
+  const config: Record<string, unknown> =
+    jsonText !== null ? parseJsonSafe(jsonText) : {};
 
   for (const entry of values) {
     setPathValue({
@@ -140,50 +130,10 @@ async function updateConfigFileValuesAtPath({
   }
 
   const nextText = `${JSON.stringify(config, null, 2)}\n`;
-  if (projectDir) {
-    await assertLegacyProjectDirectory({ projectDir });
-  }
   await ensureDir(dirname(configPath));
-  if (projectDir) {
-    await assertLegacyProjectDirectory({ projectDir });
-  }
   const result = await writeTextFileIfChanged(configPath, nextText);
 
   return { changed: result.changed };
-}
-
-/** Only an absent file may be initialized; existing unreadable or invalid config must survive. */
-async function readConfigForUpdate({
-  configPath,
-}: {
-  readonly configPath: string;
-}): Promise<Record<string, unknown>> {
-  let text: string;
-  try {
-    text = await Bun.file(configPath).text();
-  } catch (error: unknown) {
-    if (isRecord(error) && error.code === "ENOENT") {
-      return {};
-    }
-    throw new Error(
-      `Cannot update config at ${configPath}: unable to read the existing file. Check its permissions and retry.`
-    );
-  }
-
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(text);
-  } catch {
-    throw new Error(
-      `Cannot update config at ${configPath}: invalid JSON. Repair the file before retrying; it has not been changed.`
-    );
-  }
-  if (!isRecord(parsed)) {
-    throw new Error(
-      `Cannot update config at ${configPath}: expected a JSON object. Repair the file before retrying; it has not been changed.`
-    );
-  }
-  return parsed;
 }
 
 /**

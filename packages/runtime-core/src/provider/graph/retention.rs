@@ -70,89 +70,10 @@ pub fn prune(candidate: &Candidate, run: &str) -> Result<Value, CandidateError> 
     let engine = Engine::connect_cleanup(candidate)?;
     let archive = archive::path(candidate, run)?;
     let target = consumed(candidate, run)?;
-    match fs::symlink_metadata(archive.join("state.pending")) {
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        _ => {
-            return Err(error(
-                "graph_relay_enrollment",
-                "Uncertain archive journal blocks retention.",
-            ));
-        }
-    }
-    // Check a complete archive before even relying on an export. A partial prune
-    // may have removed this receipt; its bounded retained tar is checked below.
-    match fs::symlink_metadata(archive.join("state.json")) {
-        Ok(_) => {
-            let receipt: Receipt = state::read(&archive.join("state.json"))?;
-            if receipt.version != 1
-                || receipt.run != run
-                || receipt.owner != engine.guest().incarnation()
-                || receipt.phase != "removed"
-            {
-                return Err(error(
-                    "graph_prune_identity",
-                    "Archive identity differs from the owned removed graph.",
-                ));
-            }
-            cleanup_enrollment::retention(&archive, &receipt)?;
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => return Err(state::io(e)),
-    }
     let exports = candidate.state_root.join("exports/graphs");
     state::check_private_directory(&exports)?;
     let bytes = read_private(&exports.join(format!("{run}.tar")), EXPORT_LIMIT)?;
     let digest = format!("{:x}", Sha256::digest(&bytes));
-    let mut expected = BTreeMap::new();
-    let mut tar = tar::Archive::new(bytes.as_slice());
-    for entry in tar.entries().map_err(state::io)?.take(129) {
-        let mut entry = entry.map_err(state::io)?;
-        let path = entry.path().map_err(state::io)?.to_path_buf();
-        if expected.len() >= 128
-            || !entry.header().entry_type().is_file()
-            || path
-                .components()
-                .any(|c| !matches!(c, Component::Normal(_)))
-            || entry.size() > 1024 * 1024
-        {
-            return Err(error(
-                "graph_prune_export",
-                "Invalid retained export entry.",
-            ));
-        }
-        let mut content = Vec::new();
-        entry.read_to_end(&mut content).map_err(state::io)?;
-        if expected.insert(path, content).is_some() {
-            return Err(error(
-                "graph_prune_export",
-                "Duplicate retained export entry.",
-            ));
-        }
-    }
-
-    let exported: Receipt = serde_json::from_slice(
-        expected
-            .get(Path::new("state.json"))
-            .ok_or_else(|| error("graph_prune_export", "Export has no graph receipt."))?,
-    )
-    .map_err(|_| error("graph_prune_export", "Export graph receipt is invalid."))?;
-    if exported.version != 1
-        || exported.run != run
-        || exported.owner != engine.guest().incarnation()
-        || exported.phase != "removed"
-        || expected.contains_key(Path::new("state.pending"))
-    {
-        return Err(error(
-            "graph_prune_export",
-            "Export graph identity or journal is uncertain.",
-        ));
-    }
-    cleanup_enrollment::retention_receipt(
-        &exported,
-        expected.contains_key(Path::new("relay-cleanup-bridges.json"))
-            || expected.contains_key(Path::new("relay-cleanup-bridges.pending")),
-    )?;
-
     if target.join("state.json").exists() || target.join("state.json").is_symlink() {
         state::check_private_directory(&target)?;
         let receipt: Tombstone = state::read(&target.join("state.json"))?;
@@ -211,6 +132,32 @@ pub fn prune(candidate: &Candidate, run: &str) -> Result<Value, CandidateError> 
         )?;
     }
     if archive.exists() || archive.is_symlink() {
+        let mut expected = BTreeMap::new();
+        let mut tar = tar::Archive::new(bytes.as_slice());
+        for entry in tar.entries().map_err(state::io)?.take(129) {
+            let mut entry = entry.map_err(state::io)?;
+            let path = entry.path().map_err(state::io)?.to_path_buf();
+            if expected.len() >= 128
+                || !entry.header().entry_type().is_file()
+                || path
+                    .components()
+                    .any(|c| !matches!(c, Component::Normal(_)))
+                || entry.size() > 1024 * 1024
+            {
+                return Err(error(
+                    "graph_prune_export",
+                    "Invalid retained export entry.",
+                ));
+            }
+            let mut content = Vec::new();
+            entry.read_to_end(&mut content).map_err(state::io)?;
+            if expected.insert(path, content).is_some() {
+                return Err(error(
+                    "graph_prune_export",
+                    "Duplicate retained export entry.",
+                ));
+            }
+        }
         let mut remaining = BTreeMap::new();
         export::collect(&archive, &archive, 0, &mut remaining, &mut 0, &mut 128)?;
         if remaining

@@ -1,11 +1,7 @@
 //! Durable graph bridge ownership, with explicit relay intent and cleanup phases.
 use super::*;
-use std::os::unix::fs::DirBuilderExt;
 
-#[cfg(target_os = "macos")]
-pub(super) mod cleanup;
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Assignment {
     pub reservation: String,
@@ -78,74 +74,6 @@ fn validate(store: &Store, owner: &str, capacity: u8) -> Result<(), CandidateErr
     }
     Ok(())
 }
-/// Called only while holding the provider mutation lock, immediately after
-/// creating a previously absent owner. Existing owners must use verification.
-/// Legacy enabled pools without a registry require explicit recovery; a missing
-/// file is never promoted into evidence that no reservations previously existed.
-pub(in crate::provider) fn initialize_owner_registry(
-    candidate: &Candidate,
-    owner: &state::Owner,
-) -> Result<(), CandidateError> {
-    if let Some(intent) = owner.application_bridge {
-        initialize_registry(candidate, &owner.token, intent.slots)?;
-    }
-    Ok(())
-}
-
-fn initialize_registry(
-    candidate: &Candidate,
-    owner: &str,
-    capacity: u8,
-) -> Result<(), CandidateError> {
-    if !hex(owner, 32) || capacity == 0 || capacity > 32 {
-        return Err(invalid());
-    }
-    let directory = root(candidate);
-    let store = Store {
-        version: 1,
-        owner: owner.into(),
-        next_launch_serial: 0,
-        slots: BTreeMap::new(),
-    };
-    validate(&store, owner, capacity)?;
-    state::private_directory(directory.parent().ok_or_else(invalid)?)?;
-    // create_dir, unlike create_dir_all, refuses all prior directories and aliases.
-    fs::DirBuilder::new()
-        .mode(0o700)
-        .create(&directory)
-        .map_err(state::io)?;
-    state::write(&directory.join("state.json"), &store)
-}
-
-pub(in crate::provider) fn verify_owner_registry(
-    candidate: &Candidate,
-    owner: &state::Owner,
-) -> Result<(), CandidateError> {
-    if let Some(intent) = owner.application_bridge {
-        read_owner_registry(candidate, &owner.token, intent.slots, false)?;
-    }
-    Ok(())
-}
-
-fn read_owner_registry(
-    candidate: &Candidate,
-    owner: &str,
-    capacity: u8,
-    allow_pending: bool,
-) -> Result<Store, CandidateError> {
-    let directory = root(candidate);
-    state::check_private_directory(&directory)?;
-    if !allow_pending {
-        match fs::symlink_metadata(directory.join("state.pending")) {
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            _ => return Err(invalid()),
-        }
-    }
-    let store: Store = state::read_bounded(&directory.join("state.json"), 65536)?;
-    validate(&store, owner, capacity)?;
-    Ok(store)
-}
-
 fn matches_endpoint(a: &Assignment, e: &GuestEndpoint, boot: &str) -> bool {
     a.boot_id == boot
         && a.generation == e.generation
@@ -157,14 +85,6 @@ fn load_store(
     engine: &Engine<'_>,
     allow_pending: bool,
 ) -> Result<Store, CandidateError> {
-    if let Some(intent) = engine.guest().bridge_intent() {
-        return read_owner_registry(
-            candidate,
-            engine.guest().incarnation(),
-            intent.slots,
-            allow_pending,
-        );
-    }
     let root = root(candidate);
     let empty = || Store {
         version: 1,
@@ -208,160 +128,6 @@ pub struct ReserveBridgeOptions<'a> {
     pub service: &'a str,
     pub slot: u8,
     pub expected_generation: &'a str,
-}
-
-/// Foreground route admission may select a fixed slot or ask the provider to
-/// choose one while holding its pool-wide mutation lease.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum RouteSlot {
-    Auto,
-    Explicit(u8),
-}
-
-#[cfg(any(test, target_os = "macos"))]
-#[derive(Debug)]
-pub(in crate::provider::graph) struct ReservedRoute {
-    pub slot: u8,
-    pub assignment: Assignment,
-}
-
-#[cfg(any(test, target_os = "macos"))]
-fn select_route_slots(
-    store: &Store,
-    requested: &BTreeMap<String, RouteSlot>,
-    capacity: u8,
-    run: &str,
-) -> Result<BTreeMap<String, u8>, CandidateError> {
-    let mut used = store
-        .slots
-        .keys()
-        .copied()
-        .collect::<std::collections::BTreeSet<_>>();
-    let mut selected = BTreeMap::new();
-    for (service, choice) in requested {
-        if store
-            .slots
-            .values()
-            .any(|assignment| assignment.run == run && assignment.service == *service)
-        {
-            return Err(error(
-                "bridge_slot_busy",
-                "The service is already reserved; no reassignment was attempted.",
-            ));
-        }
-        if let RouteSlot::Explicit(slot) = choice {
-            if *slot >= capacity {
-                return Err(error(
-                    "bridge_capacity",
-                    "Requested socket slot is outside this pool's capacity.",
-                ));
-            }
-            if !used.insert(*slot) {
-                return Err(error(
-                    "bridge_slot_busy",
-                    "The slot is already reserved; no reassignment was attempted.",
-                ));
-            }
-            selected.insert(service.clone(), *slot);
-        }
-    }
-    for (service, choice) in requested {
-        if *choice == RouteSlot::Auto {
-            let slot = (0..capacity).find(|slot| !used.contains(slot)).ok_or_else(|| {
-                error(
-                    "bridge_capacity_exhausted",
-                    "No free application bridge socket remains in this pool; no routes were reserved.",
-                )
-            })?;
-            used.insert(slot);
-            selected.insert(service.clone(), slot);
-        }
-    }
-    Ok(selected)
-}
-
-#[cfg(any(test, target_os = "macos"))]
-fn reserve_selected(
-    candidate: &Candidate,
-    mut store: Store,
-    requested: &BTreeMap<String, RouteSlot>,
-    capacity: u8,
-    run: &str,
-    boot_id: &str,
-    endpoints: &BTreeMap<String, GuestEndpoint>,
-) -> Result<BTreeMap<String, ReservedRoute>, CandidateError> {
-    let selected = select_route_slots(&store, requested, capacity, run)?;
-    let mut reserved = BTreeMap::new();
-    for (service, slot) in selected {
-        let endpoint = endpoints.get(&service).ok_or_else(|| {
-            error(
-                "bridge_endpoint_unavailable",
-                "A committed healthy guest endpoint is required.",
-            )
-        })?;
-        let assignment = Assignment {
-            reservation: probes::token()?,
-            run: run.into(),
-            service: service.clone(),
-            generation: endpoint.generation.clone(),
-            container_id: endpoint.container_id.clone(),
-            network_id: endpoint.network_id.clone(),
-            boot_id: boot_id.into(),
-            phase: "reserved".into(),
-            relay: None,
-        };
-        store.slots.insert(slot, assignment.clone());
-        reserved.insert(service, ReservedRoute { slot, assignment });
-    }
-    validate(&store, &store.owner, capacity)?;
-    save(candidate, &store)?;
-    Ok(reserved)
-}
-
-/// Reserve the complete route set against one validated graph snapshot. Capacity
-/// refusal writes no assignments and starts no relays; the provider lease covers
-/// the pool-wide selection and single durable registry update.
-#[cfg(target_os = "macos")]
-pub(in crate::provider::graph) fn reserve_routes(
-    candidate: &Candidate,
-    receipt: &Receipt,
-    requested: &BTreeMap<String, RouteSlot>,
-) -> Result<BTreeMap<String, ReservedRoute>, CandidateError> {
-    if requested.is_empty() || requested.len() > 32 {
-        return Err(invalid());
-    }
-    let engine = Engine::connect_cleanup(candidate)?;
-    let capacity = engine
-        .guest()
-        .bridge_intent()
-        .ok_or_else(|| {
-            error(
-                "bridge_unavailable",
-                "The pool has no application bridge capacity.",
-            )
-        })?
-        .slots;
-    let snapshot = inspect_using(candidate, &engine, &receipt.run)?;
-    if snapshot.receipt.owner != receipt.owner
-        || snapshot.receipt.plan_id != receipt.plan_id
-        || snapshot.receipt.namespace != receipt.namespace
-        || snapshot.receipt.phase != "ready-observed"
-    {
-        return Err(error(
-            "bridge_generation_stale",
-            "The reviewed graph changed before bridge reservation.",
-        ));
-    }
-    let store = load_store(candidate, &engine, false)?;
-    reserve_selected(
-        candidate,
-        store,
-        requested,
-        capacity,
-        &receipt.run,
-        engine.guest().boot_id(),
-        &snapshot.guest_endpoints,
-    )
 }
 pub fn reserve_bridge(
     candidate: &Candidate,
@@ -524,44 +290,6 @@ pub fn start_bridge(
     save(candidate, &store)?;
     Ok(store.slots[&slot].clone())
 }
-/// Declared routes authorize only their complete hostname set over Unix
-/// publication. Legacy un-enrolled services retain the existing publication API.
-fn validate_route_publication(
-    routing: Option<&crate::project::RoutingPlan>,
-    upstream_port: u16,
-    host_port: Option<u16>,
-    hostnames: &[String],
-) -> Result<(), CandidateError> {
-    let Some(routing) = routing else {
-        return Ok(());
-    };
-    let refused = || {
-        error(
-            "graph_route_publication",
-            "Publication differs from the graph's declared route.",
-        )
-    };
-    if host_port.is_some()
-        || upstream_port != routing.port
-        || routing.port == 0
-        || hostnames.is_empty()
-        || hostnames.len() > 8
-    {
-        return Err(refused());
-    }
-    let mut names = std::collections::BTreeSet::new();
-    for name in hostnames {
-        let normalized =
-            super::super::publication::normalize_hostname(name).map_err(|_| refused())?;
-        if !names.insert(normalized) {
-            return Err(refused());
-        }
-    }
-    if names.into_iter().collect::<Vec<_>>() != routing.hostnames {
-        return Err(refused());
-    }
-    Ok(())
-}
 pub fn publish_bridge(
     candidate: &Candidate,
     run: &str,
@@ -593,18 +321,6 @@ pub fn publish_bridge(
     {
         return Err(invalid());
     }
-    let resource = snapshot
-        .receipt
-        .resources
-        .get(&format!("container:{}", a.service))
-        .filter(|resource| resource.kind == Kind::Container && resource.key == a.service)
-        .ok_or_else(invalid)?;
-    validate_route_publication(
-        resource.routing.as_ref(),
-        a.relay.as_ref().ok_or_else(invalid)?.port,
-        port,
-        hostnames,
-    )?;
     let upstream = engine
         .guest()
         .engine_socket()?
@@ -628,24 +344,12 @@ fn stop_slot(
     store: &mut Store,
     slot: u8,
 ) -> Result<(), CandidateError> {
-    stop_slot_fenced(candidate, engine, store, slot, &|| Ok(()), &|| Ok(()))
-}
-fn stop_slot_fenced(
-    candidate: &Candidate,
-    engine: &Engine<'_>,
-    store: &mut Store,
-    slot: u8,
-    fence: &dyn Fn() -> Result<(), CandidateError>,
-    finish_partial: &dyn Fn() -> Result<(), CandidateError>,
-) -> Result<(), CandidateError> {
-    fence()?;
     let a = store.slots.get(&slot).expect("selected slot");
     super::super::publication::release(
         candidate,
         engine.guest().incarnation(),
         Some((&a.run, &a.reservation)),
     )?;
-    fence()?;
     if a.relay.is_none() {
         return Ok(());
     }
@@ -657,36 +361,17 @@ fn stop_slot_fenced(
     if a.phase != "stopped" {
         store.slots.get_mut(&slot).expect("selected slot").phase = "stopping".into();
         save(candidate, store)?;
-        fence()?;
         relay::operate(engine, slot, &store.slots[&slot], "stop", None)?;
-        #[cfg(test)]
-        fault_pause(
-            &directory(candidate, &store.slots[&slot].run)?,
-            &store.slots[&slot].run,
-            "bridge-normalization-after-guest-stop",
-        )?;
-        fence()?;
         store.slots.get_mut(&slot).expect("selected slot").phase = "stopped".into();
         save(candidate, store)?;
     }
-    fence()?;
-    finish_partial()?;
-    fence()?;
     relay::operate(engine, slot, &store.slots[&slot], "remove", None)?;
-    fence()
+    Ok(())
 }
 pub fn inspect_bridges(candidate: &Candidate, run: &str) -> Result<Value, CandidateError> {
     let engine = Engine::connect_cleanup(candidate)?;
-    inspect_bridges_using(candidate, &engine, run)
-}
-
-pub(super) fn inspect_bridges_using(
-    candidate: &Candidate,
-    engine: &Engine<'_>,
-    run: &str,
-) -> Result<Value, CandidateError> {
-    let snapshot = inspect_using(candidate, engine, run)?;
-    let store = load_store(candidate, engine, false)?;
+    let snapshot = inspect_using(candidate, &engine, run)?;
+    let store = load_store(candidate, &engine, false)?;
     let slots = store
         .slots
         .iter()
@@ -695,14 +380,13 @@ pub(super) fn inspect_bridges_using(
             let current = snapshot.guest_endpoints.get(&a.service)
                 .is_some_and(|e| matches_endpoint(a, e, engine.guest().boot_id()));
             let status = if a.relay.is_some() && a.boot_id == engine.guest().boot_id() && a.phase != "stopped" {
-                relay::operate(engine, *slot, a, "inspect", None)?
+                relay::operate(&engine, *slot, a, "inspect", None)?
             } else { "not-running".into() };
             Ok((slot.to_string(), json!({"assignment":a,"current":current,"relay_started":status == "running","relay_status":status})))
         })
         .collect::<Result<BTreeMap<_, _>, CandidateError>>()?;
     Ok(json!({"run":run,"slots":slots,"scope":"graph-owned-guest-relay"}))
 }
-
 pub fn release_bridge(
     candidate: &Candidate,
     run: &str,
@@ -736,22 +420,18 @@ pub(super) fn release_run(
     receipt: &Receipt,
 ) -> Result<(), CandidateError> {
     let mut store = load_store(candidate, engine, false)?;
-    let selected = owned_slots(&store, &receipt.run);
+    let selected = store
+        .slots
+        .iter()
+        .filter(|(_, a)| a.run == receipt.run)
+        .map(|(slot, _)| *slot)
+        .collect::<Vec<_>>();
     for slot in selected {
         stop_slot(candidate, engine, &mut store, slot)?;
         store.slots.remove(&slot);
         save(candidate, &store)?;
     }
     Ok(())
-}
-
-fn owned_slots(store: &Store, run: &str) -> Vec<u8> {
-    store
-        .slots
-        .iter()
-        .filter(|(_, assignment)| assignment.run == run)
-        .map(|(slot, _)| *slot)
-        .collect()
 }
 pub fn reconcile_bridges(candidate: &Candidate, run: &str) -> Result<Value, CandidateError> {
     let engine = Engine::connect_cleanup(candidate)?;
@@ -769,46 +449,6 @@ pub fn reconcile_bridges(candidate: &Candidate, run: &str) -> Result<Value, Cand
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn fresh_registry_is_exclusive_and_lost_registry_stays_unknown() {
-        let fixture = super::super::tests::Fixture::new();
-        let candidate = Candidate::discover(&fixture.0).unwrap();
-        let owner = "a".repeat(32);
-        assert!(read_owner_registry(&candidate, &owner, 2, false).is_err());
-        initialize_registry(&candidate, &owner, 2).unwrap();
-        let store = read_owner_registry(&candidate, &owner, 2, false).unwrap();
-        assert!(store.slots.is_empty());
-        assert_eq!(store.owner, owner);
-        assert!(initialize_registry(&candidate, &owner, 2).is_err());
-        assert!(read_owner_registry(&candidate, &"b".repeat(32), 2, false).is_err());
-        fs::remove_file(root(&candidate).join("state.json")).unwrap();
-        assert!(read_owner_registry(&candidate, &owner, 2, false).is_err());
-        assert!(initialize_registry(&candidate, &owner, 2).is_err());
-    }
-
-    #[test]
-    fn pending_corrupt_and_aliased_registry_are_not_overwritten() {
-        use std::os::unix::fs::symlink;
-        let fixture = super::super::tests::Fixture::new();
-        let candidate = Candidate::discover(&fixture.0).unwrap();
-        let owner = "a".repeat(32);
-        assert!(initialize_registry(&candidate, "bad", 2).is_err());
-        assert!(!root(&candidate).exists());
-        initialize_registry(&candidate, &owner, 2).unwrap();
-        let state_path = root(&candidate).join("state.json");
-        let before = fs::read(&state_path).unwrap();
-        fs::write(root(&candidate).join("state.pending"), b"pending").unwrap();
-        assert!(read_owner_registry(&candidate, &owner, 2, false).is_err());
-        assert_eq!(fs::read(&state_path).unwrap(), before);
-        fs::remove_file(root(&candidate).join("state.pending")).unwrap();
-        fs::write(&state_path, b"corrupt").unwrap();
-        assert!(read_owner_registry(&candidate, &owner, 2, false).is_err());
-        assert!(initialize_registry(&candidate, &owner, 2).is_err());
-        fs::remove_dir_all(root(&candidate)).unwrap();
-        symlink(fixture.0.join("missing"), root(&candidate)).unwrap();
-        assert!(initialize_registry(&candidate, &owner, 2).is_err());
-    }
-
     fn fixture() -> Store {
         Store {
             version: 1,
@@ -829,205 +469,6 @@ mod tests {
                 },
             )]),
         }
-    }
-    #[test]
-    fn automatic_routes_allocate_distinct_free_slots_without_stealing_foreign_owners() {
-        let store = fixture();
-        let requests = BTreeMap::from([
-            ("api".into(), RouteSlot::Auto),
-            ("worker".into(), RouteSlot::Auto),
-            ("web".into(), RouteSlot::Explicit(3)),
-        ]);
-        let selected = select_route_slots(&store, &requests, 4, &"f".repeat(32)).unwrap();
-        assert_eq!(selected["api"], 1);
-        assert_eq!(selected["worker"], 2);
-        assert_eq!(selected["web"], 3);
-        assert_eq!(store.slots[&0].run, "b".repeat(32));
-        assert_eq!(store.slots.len(), 1);
-    }
-    #[test]
-    fn exhausted_batch_refuses_without_changing_registry_or_partial_selection() {
-        let fixture_root = super::super::tests::Fixture::new();
-        let candidate = Candidate::discover(&fixture_root.0).unwrap();
-        let owner = "a".repeat(32);
-        initialize_registry(&candidate, &owner, 2).unwrap();
-        let mut store = fixture();
-        store.owner = owner.clone();
-        save(&candidate, &store).unwrap();
-        let before = fs::read(root(&candidate).join("state.json")).unwrap();
-        let requests = BTreeMap::from([
-            ("api".into(), RouteSlot::Auto),
-            ("worker".into(), RouteSlot::Auto),
-        ]);
-        assert_eq!(
-            reserve_selected(
-                &candidate,
-                read_owner_registry(&candidate, &owner, 2, false).unwrap(),
-                &requests,
-                2,
-                &"f".repeat(32),
-                "12345678-1234-1234-1234-123456789abc",
-                &BTreeMap::new(),
-            )
-            .unwrap_err()
-            .code,
-            "bridge_capacity_exhausted"
-        );
-        assert_eq!(
-            fs::read(root(&candidate).join("state.json")).unwrap(),
-            before
-        );
-    }
-    #[test]
-    fn batch_commit_is_atomic_across_late_endpoint_failure_and_success() {
-        let fixture_root = super::super::tests::Fixture::new();
-        let candidate = Candidate::discover(&fixture_root.0).unwrap();
-        let owner = "a".repeat(32);
-        let run = "f".repeat(32);
-        let boot = "12345678-1234-1234-1234-123456789abc";
-        initialize_registry(&candidate, &owner, 3).unwrap();
-        let mut store = fixture();
-        store.owner = owner.clone();
-        save(&candidate, &store).unwrap();
-        let before = fs::read(root(&candidate).join("state.json")).unwrap();
-        let requested = BTreeMap::from([
-            ("api".into(), RouteSlot::Auto),
-            ("web".into(), RouteSlot::Auto),
-        ]);
-        let endpoint = GuestEndpoint {
-            generation: "c".repeat(64),
-            container_id: "d".repeat(64),
-            network_id: "e".repeat(64),
-            address: "172.17.0.2".parse().unwrap(),
-            port: 3000,
-            scope: "guest-only",
-            reachability: "not-probed",
-        };
-        let mut endpoints = BTreeMap::from([("api".into(), endpoint.clone())]);
-        assert_eq!(
-            reserve_selected(
-                &candidate,
-                read_owner_registry(&candidate, &owner, 3, false).unwrap(),
-                &requested,
-                3,
-                &run,
-                boot,
-                &endpoints,
-            )
-            .unwrap_err()
-            .code,
-            "bridge_endpoint_unavailable"
-        );
-        assert_eq!(
-            fs::read(root(&candidate).join("state.json")).unwrap(),
-            before
-        );
-        let mut invalid = endpoint.clone();
-        invalid.generation = "invalid".into();
-        endpoints.insert("web".into(), invalid);
-        assert_eq!(
-            reserve_selected(
-                &candidate,
-                read_owner_registry(&candidate, &owner, 3, false).unwrap(),
-                &requested,
-                3,
-                &run,
-                boot,
-                &endpoints,
-            )
-            .unwrap_err()
-            .code,
-            "bridge_assignment"
-        );
-        assert_eq!(
-            fs::read(root(&candidate).join("state.json")).unwrap(),
-            before
-        );
-        endpoints.insert("web".into(), endpoint);
-        let reserved = reserve_selected(
-            &candidate,
-            read_owner_registry(&candidate, &owner, 3, false).unwrap(),
-            &requested,
-            3,
-            &run,
-            boot,
-            &endpoints,
-        )
-        .unwrap();
-        assert_eq!(reserved["api"].slot, 1);
-        assert_eq!(reserved["web"].slot, 2);
-        let persisted = read_owner_registry(&candidate, &owner, 3, false).unwrap();
-        assert_eq!(persisted.slots.len(), 3);
-        for (service, route) in reserved {
-            assert_eq!(persisted.slots[&route.slot].run, run);
-            assert_eq!(persisted.slots[&route.slot].service, service);
-            assert_eq!(
-                persisted.slots[&route.slot].reservation,
-                route.assignment.reservation
-            );
-        }
-        assert_eq!(persisted.slots[&0].run, "b".repeat(32));
-    }
-    #[test]
-    fn explicit_slot_and_existing_service_conflicts_still_refuse() {
-        let store = fixture();
-        for (run, choice, code) in [
-            ("f".repeat(32), RouteSlot::Explicit(0), "bridge_slot_busy"),
-            ("f".repeat(32), RouteSlot::Explicit(2), "bridge_capacity"),
-            ("b".repeat(32), RouteSlot::Auto, "bridge_slot_busy"),
-        ] {
-            let requests = BTreeMap::from([("web".into(), choice)]);
-            assert_eq!(
-                select_route_slots(&store, &requests, 2, &run)
-                    .unwrap_err()
-                    .code,
-                code
-            );
-        }
-    }
-    #[test]
-    fn retained_restore_selection_respects_current_pool_ownership() {
-        let mut store = fixture();
-        let requests = BTreeMap::from([("web".into(), RouteSlot::Auto)]);
-        let old_slot = select_route_slots(&store, &requests, 2, &"f".repeat(32)).unwrap()["web"];
-        assert_eq!(old_slot, 1);
-        store.slots.remove(&0);
-        store.slots.insert(1, fixture().slots[&0].clone());
-        let restored = select_route_slots(&store, &requests, 2, &"f".repeat(32)).unwrap();
-        assert_eq!(restored["web"], 0);
-        assert_eq!(store.slots[&1].run, "b".repeat(32));
-    }
-    #[test]
-    fn stopping_slots_stay_occupied_and_cleanup_selects_only_owned_run() {
-        let mut store = fixture();
-        let entry = store.slots.get_mut(&0).unwrap();
-        entry.phase = "stopping".into();
-        entry.relay = Some(relay::Relay {
-            transport: relay::Transport::Raw,
-            launch_serial: 0,
-            binary_sha256: "f".repeat(64),
-            target_pid: 42,
-            target_start: 123,
-            port: 3000,
-        });
-        validate(&store, "owner", 2).unwrap();
-        let requests = BTreeMap::from([("web".into(), RouteSlot::Auto)]);
-        assert_eq!(
-            select_route_slots(&store, &requests, 2, &"f".repeat(32)).unwrap()["web"],
-            1
-        );
-        let mut other = fixture().slots.remove(&0).unwrap();
-        other.run = "f".repeat(32);
-        other.reservation = "9".repeat(32);
-        store.slots.insert(1, other);
-        assert_eq!(owned_slots(&store, &"b".repeat(32)), vec![0]);
-        assert_eq!(owned_slots(&store, &"f".repeat(32)), vec![1]);
-        assert!(
-            select_route_slots(&store, &requests, 2, &"e".repeat(32))
-                .unwrap_err()
-                .code
-                == "bridge_capacity_exhausted"
-        );
     }
     #[test]
     fn matching_generation_cannot_authorize_a_different_container_or_network() {
@@ -1141,68 +582,5 @@ mod tests {
             }
             assert!(validate(&store, "owner", 2).is_err());
         }
-    }
-    #[test]
-    fn declared_route_publication_requires_complete_normalized_names_and_unix() {
-        let route = crate::project::RoutingPlan {
-            hostnames: vec![
-                "search.example.hack".into(),
-                "search.example.localhost".into(),
-            ],
-            port: 6980,
-        };
-        let exact = vec![
-            "Search.Example.Localhost.".into(),
-            "search.example.hack".into(),
-        ];
-        validate_route_publication(Some(&route), 6980, None, &exact).unwrap();
-        for (upstream, host_port, names) in [
-            (6981, None, exact.clone()),
-            (6980, Some(8443), exact.clone()),
-            (6980, None, vec![]),
-            (6980, None, vec!["search.example.hack".into()]),
-            (
-                6980,
-                None,
-                vec![
-                    "wrong.example.hack".into(),
-                    "search.example.localhost".into(),
-                ],
-            ),
-            (
-                6980,
-                None,
-                vec![
-                    "search.example.hack".into(),
-                    "Search.Example.Hack.".into(),
-                    "search.example.localhost".into(),
-                ],
-            ),
-            (
-                6980,
-                None,
-                vec![
-                    "https://search.example.hack".into(),
-                    "search.example.localhost".into(),
-                ],
-            ),
-        ] {
-            assert_eq!(
-                validate_route_publication(Some(&route), upstream, host_port, &names)
-                    .unwrap_err()
-                    .code,
-                "graph_route_publication"
-            );
-        }
-        assert_eq!(
-            route.hostnames,
-            ["search.example.hack", "search.example.localhost"]
-        );
-    }
-
-    #[test]
-    fn legacy_publication_remains_subject_to_existing_publication_validation() {
-        validate_route_publication(None, 3000, Some(8080), &[]).unwrap();
-        validate_route_publication(None, 3000, None, &["legacy.example".into()]).unwrap();
     }
 }

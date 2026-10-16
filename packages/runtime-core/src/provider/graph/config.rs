@@ -2,93 +2,18 @@ use super::*;
 use crate::project::{execution::Graph, inputs::ExecutionInputs};
 use std::collections::BTreeSet;
 
-/// Common bounded container isolation. Input-family lowering owns all overrides;
-/// this does not select an image, grant ownership or authorize engine effects.
-pub(super) fn container_base(image: &str, labels: Value) -> Value {
-    json!({"Image":image,"Labels":labels,"HostConfig":{
-        "NetworkMode":"none","Memory":0,"NanoCpus":0,
-        "ReadonlyRootfs":false,"CapDrop":["ALL"],"SecurityOpt":["no-new-privileges"],"Init":false,
-        "Mounts":[],"ShmSize":67108864,
-        "RestartPolicy":{"Name":"no"},"LogConfig":{"Type":"json-file","Config":{"max-size":"1m","max-file":"1"}}
-    }})
-}
-
 pub(super) struct Prepared {
     pub graph: Graph,
-    pub cache_initializers: BTreeMap<String, String>,
     pub configs: BTreeMap<String, Value>,
     pub probes: BTreeMap<String, super::super::http_probe::HttpProbe>,
     pub resources: BTreeMap<String, Resource>,
     pub namespace: String,
     pub plan_id: String,
 }
-/// After source replay admission, preserve the original graph ownership identity
-/// on restored requests. Never change resource names, images, routes or cache keys.
-pub(super) fn retain_replay_ownership(
-    prepared: &mut Prepared,
-    receipt: &Receipt,
-) -> Result<(), CandidateError> {
-    retain_ownership(prepared, receipt, None)
-}
-
-pub(super) fn retain_hostname_change_ownership(
-    prepared: &mut Prepared,
-    receipt: &Receipt,
-    change: &hostname_change::Verified,
-) -> Result<(), CandidateError> {
-    retain_ownership(prepared, receipt, Some(change))
-}
-
-fn retain_ownership(
-    prepared: &mut Prepared,
-    receipt: &Receipt,
-    change: Option<&hostname_change::Verified>,
-) -> Result<(), CandidateError> {
-    let same = change.map_or_else(
-        || same_resource_bindings(&prepared.resources, &receipt.resources),
-        |change| change.matches_resources(&prepared.resources, receipt),
-    );
-    if prepared.namespace != receipt.namespace || !same {
-        return Err(error(
-            "graph_receipt",
-            "Replay resources differ from their retained ownership.",
-        ));
-    }
-    for (name, config) in &mut prepared.configs {
-        let resource = prepared
-            .resources
-            .get(&format!("container:{name}"))
-            .ok_or_else(|| error("graph_receipt", "Replay container identity is missing."))?;
-        if config["Labels"]
-            != labels(
-                &receipt.owner,
-                &receipt.run,
-                &receipt.namespace,
-                &prepared.plan_id,
-                resource,
-            )
-        {
-            return Err(error(
-                "graph_receipt",
-                "Replay generated labels differ from expected ownership.",
-            ));
-        }
-        config["Labels"] = labels(
-            &receipt.owner,
-            &receipt.run,
-            &receipt.namespace,
-            &receipt.plan_id,
-            resource,
-        );
-    }
-    prepared.plan_id = receipt.plan_id.clone();
-    Ok(())
-}
-
 fn unsupported() -> CandidateError {
     error(
         "graph_subset",
-        "Graph driver requires pinned images, explicit managed environment delivery, internal networks, named volumes and no automatic restart; build, unbound/writable source, port, label and logging overrides remain gated.",
+        "Graph driver requires pinned images, read-only roots, no environment delivery, internal networks, named volumes and no automatic restart; build, unbound/writable source, port, label and logging overrides remain gated.",
     )
 }
 pub(super) fn prepare(
@@ -98,20 +23,7 @@ pub(super) fn prepare(
     owner: &str,
     source: Option<&source::Inputs>,
 ) -> Result<Prepared, CandidateError> {
-    prepare_delivery(
-        inputs,
-        readiness,
-        run,
-        owner,
-        source,
-        DeliveryOptions::default(),
-    )
-}
-#[derive(Default)]
-pub(super) struct DeliveryOptions {
-    pub environment: bool,
-    pub dependency_hosts: bool,
-    pub routing_enrolled: bool,
+    prepare_delivery(inputs, readiness, run, owner, source, false)
 }
 pub(super) fn prepare_delivery(
     inputs: ExecutionInputs,
@@ -119,85 +31,30 @@ pub(super) fn prepare_delivery(
     run: &str,
     owner: &str,
     source: Option<&source::Inputs>,
-    options: DeliveryOptions,
+    delivery: bool,
 ) -> Result<Prepared, CandidateError> {
-    let DeliveryOptions {
-        environment: delivery,
-        dependency_hosts,
-        routing_enrolled,
-    } = options;
     if inputs.requires_managed_environment() && !delivery {
         return Err(unsupported());
     }
-    if !dependency_hosts
-        && inputs
-            .services
-            .values()
-            .any(|service| !service.extra_hosts.is_empty())
-    {
-        return Err(super::dependency_hosts::refused());
-    }
     let graph = Graph::from_plan(&inputs.review.plan, readiness)?;
     let plan = &inputs.review.plan;
-    routes::validate_plan(plan, &graph, routing_enrolled)?;
-    for (name, service) in plan.services.iter().filter(|(_, service)| service.active) {
-        if service.dependency_cache.is_some() && graph.services[name].ready != Condition::Completed
-        {
-            return Err(error(
-                "graph_cache_readiness",
-                "Dependency cache initializers require successful completion readiness.",
-            ));
-        }
-    }
     if graph.services.len() > MAX_SERVICES {
         return Err(error(
             "graph_budget",
             "At most 32 services fit this driver profile; aggregate resource limits also apply.",
         ));
     }
-    let caches = if plan
-        .services
-        .values()
-        .any(|service| service.active && service.dependency_cache.is_some())
-    {
-        let source = source.ok_or_else(|| {
-            error(
-                "graph_cache_source",
-                "Dependency caches require an explicitly verified source publication.",
-            )
-        })?;
-        let scope = source.binding.cache_scope.as_ref().map_or_else(
-            || dependency_cache::scope(&plan.source),
-            |scope| scope.scope(&plan.source),
-        )?;
-        dependency_cache::resolve(
-            plan,
-            source.current_manifest.as_ref().unwrap_or(&source.manifest),
-            &scope,
-            &inputs.services,
-        )?
-    } else {
-        BTreeMap::new()
-    };
     let mut networks = BTreeSet::new();
     let mut volumes = BTreeSet::new();
     let mut total_memory = 0u64;
     let mut total_cpus = 0f64;
-    for service in plan.services.values().filter(|s| s.active) {
-        if service.restart != "no"
+    for (name, service) in plan.services.iter().filter(|(_, s)| s.active) {
+        if !service.read_only
+            || service.restart != "no"
             || !service.ports.is_empty()
-            || service.labels.keys().any(|key| {
-                !(routing_enrolled && service.routing.is_some() && routes::recognized(key))
-                    && !(service.dependency_cache.is_some()
-                        && matches!(
-                            key.as_str(),
-                            "hack.dependencies.cache-volume"
-                                | "hack.dependencies.lockfiles"
-                                | "hack.dependencies.runtime-files"
-                                | "hack.dependencies.bootstrap"
-                        ))
-            })
+            || !service.labels.is_empty()
             || service.logging.is_some()
+            || !inputs.services[name].environment.is_empty()
             || service.image.as_deref().is_none_or(|v| !image_id(v))
             || service
                 .platform
@@ -207,34 +64,22 @@ pub(super) fn prepare_delivery(
             return Err(unsupported());
         }
         if service.network_mode == "project-networks" {
-            if service.networks.is_empty()
-                || service.networks.len() > MAX_NETWORKS
-                || service.networks.iter().collect::<BTreeSet<_>>().len() != service.networks.len()
-            {
-                return Err(unsupported());
-            }
             for network in &service.networks {
                 if !plan
                     .networks
                     .get(network)
-                    .is_some_and(|n| n.driver == "bridge")
+                    .is_some_and(|n| n.internal && n.driver == "bridge")
                 {
                     return Err(unsupported());
                 }
                 networks.insert(network.clone());
             }
-        } else if service.network_mode != "none" || !service.networks.is_empty() {
+        } else if service.network_mode != "none" {
             return Err(unsupported());
         }
         for mount in &service.mounts {
-            if mount.subpath.as_deref().is_some_and(|value| {
-                mount.kind != "volume" || !project::valid_volume_subpath(value)
-            }) {
-                return Err(unsupported());
-            }
             if mount.kind == "bind" {
-                if (!mount.read_only && !source.is_some_and(|s| s.binding.shared.is_some()))
-                    || !source.is_some_and(|s| s.paths.contains_key(&mount.source))
+                if !mount.read_only || !source.is_some_and(|s| s.paths.contains_key(&mount.source))
                 {
                     return Err(unsupported());
                 }
@@ -245,23 +90,16 @@ pub(super) fn prepare_delivery(
             }
             volumes.insert(mount.source.clone());
         }
-        // Omitted limits share the already-admitted VM pool; only explicit limits
-        // count toward graph reservations. Docker represents omitted caps as zero.
-        let memory = service.limits.memory_bytes.unwrap_or(0);
-        let cpus = service.limits.cpus.unwrap_or(0.0);
-        if service
-            .limits
-            .memory_bytes
-            .is_some_and(|value| !(16 * 1024 * 1024..=MAX_MEMORY_BYTES).contains(&value))
-            || service
-                .limits
-                .cpus
-                .is_some_and(|value| !value.is_finite() || !(0.1..=2.0).contains(&value))
+        let memory = service.limits.memory_bytes.unwrap_or(256 * 1024 * 1024);
+        let cpus = service.limits.cpus.unwrap_or(0.5);
+        if !(16 * 1024 * 1024..=1024 * 1024 * 1024).contains(&memory)
+            || !cpus.is_finite()
+            || !(0.1..=2.0).contains(&cpus)
             || service.limits.pids.is_some_and(|p| p > 128)
             || service
                 .limits
                 .shared_memory_bytes
-                .is_some_and(|v| !(1..=1024 * 1024 * 1024).contains(&v))
+                .is_some_and(|v| v > 64 * 1024 * 1024)
             || service
                 .stop_grace_period_nanos
                 .is_some_and(|n| n > 30_000_000_000)
@@ -271,37 +109,26 @@ pub(super) fn prepare_delivery(
                 "A service exceeds the bounded graph profile.",
             ));
         }
-        // ShmSize is a tmpfs ceiling, not preallocated RSS. Its actual usage is
-        // already constrained by an explicit container memory cap or the VM pool.
         total_memory += memory;
         total_cpus += cpus;
     }
     if networks.len() > MAX_NETWORKS
         || volumes.len() > MAX_VOLUMES
-        || total_memory > MAX_TOTAL_MEMORY_BYTES
+        || total_memory > 4 * 1024 * 1024 * 1024
         || total_cpus > 4.0
     {
         return Err(error(
             "graph_budget",
-            "Graph exceeds 32 networks, eight volumes, four CPUs or the development guest memory reservation budget.",
+            "Graph exceeds one network, eight volumes, four CPUs or 4 GiB RAM.",
         ));
     }
     let mut resources = BTreeMap::new();
     for (kind, entries) in [(Kind::Network, networks), (Kind::Volume, volumes)] {
         for (index, key) in entries.into_iter().enumerate() {
-            let cache = (kind == Kind::Volume).then(|| caches.get(&key)).flatten();
             let resource = Resource {
-                routing: None,
-                networks: None,
-                outbound: kind == Kind::Network && !plan.networks[&key].internal,
-                cache: cache.cloned(),
-                cache_provenance: None,
                 kind,
                 key: key.clone(),
-                name: cache.map_or_else(
-                    || format!("hkg-{run}-{}-{index}", kind.word()),
-                    |cache| cache.name(),
-                ),
+                name: format!("hkg-{run}-{}-{index}", kind.word()),
                 id: None,
                 image: None,
                 phase: "reserved".into(),
@@ -315,11 +142,6 @@ pub(super) fn prepare_delivery(
         let values = &inputs.services[name];
         let image = service.image.as_ref().expect("checked image");
         let resource = Resource {
-            routing: service.routing.clone(),
-            networks: Some(service.networks.clone()),
-            outbound: false,
-            cache: None,
-            cache_provenance: None,
             kind: Kind::Container,
             key: name.clone(),
             name: format!("hkg-{run}-container-{index}"),
@@ -334,83 +156,25 @@ pub(super) fn prepare_delivery(
             &inputs.review.plan_id,
             &resource,
         );
-        let network_names = resources
-            .values()
-            .filter(|resource| resource.kind == Kind::Network)
-            .map(|resource| (resource.key.clone(), resource.name.clone()))
-            .collect();
-        let (network, endpoints) = network_config(name, &service.networks, &network_names)?;
+        let network = if service.network_mode == "none" {
+            "none".to_owned()
+        } else {
+            let network = service.networks.first().ok_or_else(unsupported)?;
+            resources[&format!("network:{network}")].name.clone()
+        };
         let mounts: Vec<_> = service.mounts.iter().map(|m| {
             if m.kind == "bind" {
-                let source = source.expect("validated source");
-                // Installers must read immutable inputs so a host edit cannot poison
-                // a content-keyed cache while installation is in progress.
-                let frozen_initializer = source.binding.shared.is_some() && service.dependency_cache.is_some();
-                let path = if frozen_initializer {
-                    let root = format!("/storage/hack-source/{}/{}/tree", plan.namespace, source.manifest.revision);
-                    if m.source == "." { root } else { format!("{root}/{}", m.source) }
-                } else { source.paths[&m.source].clone() };
-                json!({"Type":"bind","Source":path,"Target":m.target,"ReadOnly":frozen_initializer || m.read_only,"BindOptions":{"Propagation":"rprivate"}})
+                json!({"Type":"bind","Source":source.expect("validated source").paths[&m.source],"Target":m.target,"ReadOnly":true,"BindOptions":{"Propagation":"rprivate"}})
             } else {
-                { let mut mount = json!({"Type":"volume","Source":resources[&format!("volume:{}",m.source)].name,"Target":m.target,"ReadOnly":m.read_only});
-                if let Some(subpath) = &m.subpath { mount["VolumeOptions"] = json!({"Subpath":subpath,"NoCopy":true}); } mount }
+                json!({"Type":"volume","Source":resources[&format!("volume:{}",m.source)].name,"Target":m.target,"ReadOnly":m.read_only})
             }
         }).collect();
-        // Writable roots are container-owned layers, not writable source binds.
-        // Their contents are discarded when the container is removed; durable data uses named volumes.
-        let mut config = container_base(image, labels);
-        for (field, value) in [
-            ("NetworkMode", json!(network)),
-            ("Memory", json!(service.limits.memory_bytes.unwrap_or(0))),
-            (
-                "NanoCpus",
-                json!((service.limits.cpus.unwrap_or(0.0) * 1e9) as u64),
-            ),
-            ("ReadonlyRootfs", json!(service.read_only)),
-            ("Init", json!(service.init)),
-            ("Mounts", json!(mounts)),
-            (
-                "ShmSize",
-                json!(service.limits.shared_memory_bytes.unwrap_or(67108864)),
-            ),
-        ] {
-            config["HostConfig"][field] = value;
-        }
-        // An omitted Compose pids_limit leaves the engine default unchanged.
-        // Threads count toward this limit, so inventing a cap can stall dev servers.
-        if let Some(pids) = service.limits.pids {
-            config["HostConfig"]["PidsLimit"] = json!(pids);
-        }
-        // Writable image roots retain their ordinary /tmp capacity and execution
-        // semantics (installers extract and run tools there). Only explicit
-        // read-only roots need this bounded, non-executable scratch mount.
-        if service.read_only {
-            config["HostConfig"]["Tmpfs"] = json!({"/tmp":"rw,noexec,nosuid,size=16777216"});
-        }
-        // Virtiofs preserves the host uid. Root services need DAC_OVERRIDE to
-        // traverse/write an explicitly shared tree owned by that uid. Read-only
-        // mounts still enforce read-only access; no other capabilities are added.
-        if source.is_some_and(|s| s.binding.shared.is_some())
-            && service.dependency_cache.is_none()
-            && service.mounts.iter().any(|m| m.kind == "bind")
-        {
-            config["HostConfig"]["CapAdd"] = json!(["DAC_OVERRIDE"]);
-        }
-        // Only explicitly compiled public values enter engine metadata. Bare/null
-        // managed inputs are delivered separately by the private launcher.
-        // Omit Env when empty so image defaults remain the engine's responsibility.
-        if !values.environment.is_empty() {
-            config["Env"] = json!(values.environment);
-        }
-        if !values.extra_hosts.is_empty() {
-            config["HostConfig"]["ExtraHosts"] = json!(
-                values
-                    .extra_hosts
-                    .iter()
-                    .map(|(name, target)| format!("{name}:{target}"))
-                    .collect::<Vec<_>>()
-            );
-        }
+        let mut config = json!({"Image":image,"Labels":labels,"HostConfig":{
+            "NetworkMode":network,"Memory":service.limits.memory_bytes.unwrap_or(268435456),"NanoCpus":(service.limits.cpus.unwrap_or(0.5)*1e9) as u64,
+            "PidsLimit":service.limits.pids.unwrap_or(64),"ReadonlyRootfs":true,"CapDrop":["ALL"],"SecurityOpt":["no-new-privileges"],"Init":service.init,
+            "Mounts":mounts,"Tmpfs":{"/tmp":"rw,noexec,nosuid,size=16777216"},"ShmSize":service.limits.shared_memory_bytes.unwrap_or(67108864),
+            "RestartPolicy":{"Name":"no"},"LogConfig":{"Type":"json-file","Config":{"max-size":"1m","max-file":"1"}}
+        }});
         if !service.exposed_ports.is_empty() {
             let ports: serde_json::Map<String, Value> = service
                 .exposed_ports
@@ -429,7 +193,7 @@ pub(super) fn prepare_delivery(
             config["ExposedPorts"] = Value::Object(ports);
         }
         if network != "none" {
-            config["NetworkingConfig"] = json!({"EndpointsConfig":endpoints});
+            config["NetworkingConfig"] = json!({"EndpointsConfig":{network:{"Aliases":[name]}}});
         }
         if let Some(argv) = &values.entrypoint {
             config["Entrypoint"] = json!(argv);
@@ -508,19 +272,7 @@ pub(super) fn prepare_delivery(
         configs.insert(name.clone(), config);
         resources.insert(format!("container:{name}"), resource);
     }
-    let cache_initializers = plan
-        .services
-        .iter()
-        .filter(|(_, s)| s.active)
-        .filter_map(|(name, s)| {
-            s.dependency_cache
-                .as_ref()
-                .filter(|c| c.bootstrap)
-                .map(|c| (name.clone(), c.volume.clone()))
-        })
-        .collect();
     Ok(Prepared {
-        cache_initializers,
         graph,
         configs,
         probes,
@@ -528,79 +280,4 @@ pub(super) fn prepare_delivery(
         namespace: plan.namespace.clone(),
         plan_id: inputs.review.plan_id.clone(),
     })
-}
-
-/// Primary network preserves declaration order; every declared network receives
-/// the service DNS alias. An empty declaration is the already-validated none mode.
-pub(super) fn network_config(
-    service: &str,
-    networks: &[String],
-    names: &BTreeMap<String, String>,
-) -> Result<(String, Value), CandidateError> {
-    if networks.len() > MAX_NETWORKS {
-        return Err(unsupported());
-    }
-    let mut seen = BTreeSet::new();
-    let mut endpoints = serde_json::Map::new();
-    let mut primary = "none".to_owned();
-    for (index, key) in networks.iter().enumerate() {
-        if !seen.insert(key) {
-            return Err(unsupported());
-        }
-        let name = names.get(key).ok_or_else(unsupported)?;
-        if index == 0 {
-            primary = name.clone();
-        }
-        if endpoints
-            .insert(name.clone(), json!({"Aliases":[service]}))
-            .is_some()
-        {
-            return Err(unsupported());
-        }
-    }
-    Ok((primary, Value::Object(endpoints)))
-}
-
-#[cfg(test)]
-mod network_tests {
-    use super::*;
-
-    #[test]
-    fn emits_all_endpoints_and_preserves_first_declared_primary() {
-        let names = BTreeMap::from([
-            ("back".into(), "owned-back".into()),
-            ("front".into(), "owned-front".into()),
-        ]);
-        let (primary, endpoints) =
-            network_config("search", &["front".into(), "back".into()], &names).unwrap();
-        assert_eq!(primary, "owned-front");
-        assert_eq!(
-            endpoints,
-            json!({"owned-back":{"Aliases":["search"]},"owned-front":{"Aliases":["search"]}})
-        );
-        assert_eq!(
-            network_config("search", &[], &names).unwrap(),
-            ("none".into(), json!({}))
-        );
-    }
-
-    #[test]
-    fn refuses_missing_duplicate_and_over_budget_networks() {
-        let names = (0..=MAX_NETWORKS)
-            .map(|i| (format!("n{i}"), format!("owned-{i}")))
-            .collect::<BTreeMap<_, _>>();
-        assert!(network_config("s", &["missing".into()], &names).is_err());
-        assert!(network_config("s", &["n0".into(), "n0".into()], &names).is_err());
-        let selected = names.keys().cloned().collect::<Vec<_>>();
-        assert!(network_config("s", &selected, &names).is_err());
-        assert_eq!(
-            network_config("s", &selected[..MAX_NETWORKS], &names)
-                .unwrap()
-                .1
-                .as_object()
-                .unwrap()
-                .len(),
-            MAX_NETWORKS
-        );
-    }
 }

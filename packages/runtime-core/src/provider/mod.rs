@@ -4,95 +4,25 @@ mod agent;
 mod artifact;
 mod bridge;
 mod config_audit;
-mod dependency_socket;
 pub use bridge::BridgeIntent;
-pub use dependency_socket::quiescent_recovery as quiescent_dependency_socket_recovery;
-pub use dependency_socket::recovery as dependency_socket_recovery;
-pub use dependency_socket::{
-    DependencySocketIntent, DependencySocketObservation, DependencySocketPath,
-    dependency_socket_paths,
-};
 mod disk_audit;
-mod disk_template;
 mod engine;
 pub mod environment;
 #[cfg(test)]
 mod environment_probe_test;
 pub mod environment_recovery;
 pub mod graph;
-#[cfg(target_os = "macos")]
-mod host_pin;
 pub use engine::{EngineInfo, info as engine_info};
-#[cfg(all(test, target_os = "macos", target_arch = "aarch64"))]
-mod gateway_probe_test;
 pub mod guest_storage;
-#[cfg(any(target_os = "macos", feature = "native-config-plan"))]
-mod guest_tool;
-pub mod host_endpoint;
 pub mod hostname_authority;
 pub mod http_probe;
-pub mod https_recovery;
 mod identity;
-pub mod image_ensure;
 mod image_load;
-pub mod managed_environment;
-#[cfg(feature = "native-config-plan")]
-mod native_environment;
-#[cfg(feature = "native-config-plan")]
-pub mod native_input;
-pub mod private_deadline;
-pub mod private_input;
-pub mod registry_image;
-pub mod relay_auth;
-pub mod relay_client;
-pub mod relay_frame;
-pub mod relay_integrity;
-#[cfg(target_os = "macos")]
-pub mod relay_loop;
-#[cfg(target_os = "macos")]
-pub mod relay_owner;
 pub mod resources;
-#[cfg(target_os = "macos")]
-pub mod shared_https_recovery;
-#[cfg(any(
-    test,
-    feature = "native-config-plan",
-    feature = "storage-root-witness-tool"
-))]
-// Host clients and the guest executable use different parts of this shared codec.
-#[allow(dead_code)]
-mod storage_root_witness;
-#[cfg(feature = "storage-root-witness-tool")]
-#[doc(hidden)]
-pub fn storage_root_witness_tool() -> std::process::ExitCode {
-    storage_root_witness::entry()
-}
 pub mod storage_usage;
-#[cfg(all(test, target_os = "macos"))]
-mod test_executable;
 pub use image_load::load as load_image;
 mod lifecycle;
-pub use lifecycle::host_filesystem;
-mod network_intent;
-mod network_update;
-pub use network_update::{enable_internet, extend_network};
-mod project_share;
-pub use project_share::ProjectShareIntent;
 mod network_tools;
-pub mod prepared_base;
-mod prepared_inventory;
-pub mod prepared_start;
-pub mod prepared_store;
-
-/// Prepare the pinned guest networking inputs without starting a runtime.
-pub fn prepare_network_tools(
-    candidate: &Candidate,
-    directory: &Path,
-) -> Result<impl Serialize, CandidateError> {
-    network_tools::prepare(candidate, directory)
-}
-
-pub use network_intent::NetworkIntent;
 mod process;
 mod profile;
 pub use profile::Profile;
@@ -116,16 +46,8 @@ mod supervisor_loss_test;
 pub use source_job::{SourceJob, SourceJobEvent, reconcile_source_job, run_source_job};
 pub use source_probe::{ProbeReceipt, verify as verify_source};
 pub use source_sync::{SyncReceipt, SyncSession, sync_status};
-mod socket_requests;
 mod state;
-pub use lifecycle::{
-    PreparedBaseBuilt, build_prepared_base, check_project_share, down, prepared_base_status,
-    probe_with_profile, recover, remove_prepared_base, status, up, up_with_bridge,
-    up_with_capabilities, up_with_minimum_bridges, up_with_network_sockets, up_with_prepared_base,
-    up_with_profile, up_with_project_share, up_with_retained_project_share,
-    up_with_socket_requests, up_with_sockets, verify_prepared_base,
-};
-pub use socket_requests::SocketRequests;
+pub use lifecycle::{down, recover, status, up, up_with_bridge, up_with_profile};
 pub use source_transfer::{
     TransferReceipt, publish as publish_source, reconcile as reconcile_source_publication,
 };

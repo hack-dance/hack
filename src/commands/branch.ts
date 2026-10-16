@@ -7,10 +7,8 @@ import {
   withHandler,
 } from "../cli/command.ts";
 import { optOpenPreference, optPath, optProject } from "../cli/options.ts";
-import { resolveRegisteredProjectOption } from "../cli/project-selector.ts";
 import { DEFAULT_PROJECT_TLD, HACK_PROJECT_DIR_PRIMARY } from "../constants.ts";
 import { readBranchesFile, writeBranchesFile } from "../lib/branches.ts";
-import { noteBrowserTargetsForLocalNetworkHint } from "../lib/local-network-hint.ts";
 import {
   parseOpenHostPreference,
   resolvePreferredOpenHost,
@@ -23,10 +21,13 @@ import {
   readProjectConfig,
   readProjectDevHost,
   resolveProjectOauthAliasHost,
-  resolveProjectRouteBaseHosts,
   sanitizeBranchSlug,
+  sanitizeProjectSlug,
 } from "../lib/project.ts";
-import { upsertProjectRegistration } from "../lib/projects-registry.ts";
+import {
+  resolveRegisteredProjectByName,
+  upsertProjectRegistration,
+} from "../lib/projects-registry.ts";
 import { display } from "../ui/display.ts";
 import { logger } from "../ui/logger.ts";
 
@@ -297,7 +298,9 @@ const handleBranchOpen: CommandHandlerFor<typeof branchOpenSpec> = async ({
   }
 
   const aliasHost = resolveBranchAliasHost({ devHost, cfg });
-  const baseHosts = resolveProjectRouteBaseHosts({ devHost, aliasHost });
+  const baseHosts = [devHost, aliasHost].filter(
+    (host): host is string => typeof host === "string" && host.length > 0
+  );
 
   const preferenceRaw = args.options.prefer;
   const optionPreference = parseOpenHostPreference(preferenceRaw);
@@ -323,7 +326,6 @@ const handleBranchOpen: CommandHandlerFor<typeof branchOpenSpec> = async ({
   const url = `https://${resolvedHost}`;
 
   logger.step({ message: `Opening ${url}` });
-  noteBrowserTargetsForLocalNetworkHint([url]);
   return await openUrl(url);
 };
 
@@ -346,14 +348,21 @@ async function resolveProjectForArgs(opts: {
   readonly pathOpt: string | undefined;
   readonly projectOpt: string | undefined;
 }): Promise<ProjectContext> {
-  if (opts.pathOpt && opts.projectOpt !== undefined) {
+  if (opts.pathOpt && opts.projectOpt) {
     throw new CliUsageError("Use either --path or --project (not both).");
   }
 
-  if (opts.projectOpt !== undefined) {
-    const fromRegistry = await resolveRegisteredProjectOption({
-      projectOpt: opts.projectOpt,
-    });
+  if (opts.projectOpt) {
+    const name = sanitizeProjectSlug(opts.projectOpt);
+    if (name.length === 0) {
+      throw new CliUsageError("Invalid --project value.");
+    }
+    const fromRegistry = await resolveRegisteredProjectByName({ name });
+    if (!fromRegistry) {
+      throw new CliUsageError(
+        `Unknown project "${name}". Run 'hack init' in that repo (or run 'hack projects' to see registered projects).`
+      );
+    }
     await touchProjectRegistration(fromRegistry);
     return fromRegistry;
   }

@@ -44,11 +44,6 @@ fn container_attachment_records_ownership_before_create_and_omits_values_from_me
         state::private_directory(&root).unwrap();
         let engine = Engine::connect(&candidate).unwrap();
         let resource = Resource {
-            routing: None,
-            networks: None,
-            outbound: false,
-            cache: None,
-            cache_provenance: None,
             kind: Kind::Container,
             key: "job".into(),
             name: format!("hkg-{run}-container-0"),
@@ -57,9 +52,6 @@ fn container_attachment_records_ownership_before_create_and_omits_values_from_me
             phase: "reserved".into(),
         };
         let mut receipt = Receipt {
-            normalized_input: None,
-            relay_startup: None,
-            relay_cleanup: None,
             probes: BTreeMap::new(),
             version: 1,
             run: run.clone(),
@@ -68,8 +60,6 @@ fn container_attachment_records_ownership_before_create_and_omits_values_from_me
             plan_id: "b".repeat(64),
             phase: "preparing".into(),
             environment_attached: false,
-            startup_failure: None,
-            initializer_cache_release: BTreeMap::new(),
             source: None,
             readiness: BTreeMap::from([("job".into(), Condition::Completed)]),
             resources: BTreeMap::from([("container:job".into(), resource.clone())]),

@@ -1,23 +1,20 @@
 import { resolve } from "node:path";
 
 import { pathExists } from "./fs.ts";
+import { findExecutableInPath } from "./shell.ts";
 
 export interface HackInvocation {
   readonly bin: string;
   readonly args: readonly string[];
 }
 
-export async function resolveHackInvocation(opts?: {
-  readonly env?: Readonly<Record<string, string | undefined>>;
-  readonly cwd?: string;
-}): Promise<HackInvocation> {
-  const env = opts?.env ?? process.env;
-  const override = (env.HACK_MCP_COMMAND ?? "").trim();
+export async function resolveHackInvocation(): Promise<HackInvocation> {
+  const override = (process.env.HACK_MCP_COMMAND ?? "").trim();
   if (override.length > 0) {
     return { bin: override, args: [] };
   }
 
-  const fromPath = Bun.which("hack", { PATH: env.PATH ?? "", cwd: opts?.cwd });
+  const fromPath = await findExecutableInPath("hack");
   if (fromPath) {
     return { bin: fromPath, args: [] };
   }

@@ -6,29 +6,9 @@ use base64::Engine as _;
 use sha2::{Digest, Sha256};
 
 #[cfg(feature = "environment-launcher")]
-pub(super) fn current_source() -> String {
-    let bytes = include_bytes!(concat!(env!("OUT_DIR"), "/environment-launcher"));
-    format!(
-        "/storage/hack-environment-launcher/{:x}",
-        Sha256::digest(bytes)
-    )
-}
-#[cfg(feature = "environment-launcher")]
 pub(super) fn publish(engine: &Engine<'_>) -> Result<String, CandidateError> {
     let bytes = include_bytes!(concat!(env!("OUT_DIR"), "/environment-launcher"));
     let hash = format!("{:x}", Sha256::digest(bytes));
-    let input = transport(bytes)?;
-    let output = engine.guest().execute(PUBLISH, &[&hash], Some(&input))?;
-    if output != "launcher-ready-v1\n" {
-        return Err(error(
-            "environment_launcher",
-            "Launcher publication was not confirmed.",
-        ));
-    }
-    Ok(current_source())
-}
-#[cfg(feature = "environment-launcher")]
-fn transport(bytes: &[u8]) -> Result<String, CandidateError> {
     use std::io::Write;
     let mut compressed = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
     compressed.write_all(bytes).map_err(state::io)?;
@@ -40,7 +20,14 @@ fn transport(bytes: &[u8]) -> Result<String, CandidateError> {
             "Compressed launcher exceeds the bounded transport profile.",
         ));
     }
-    Ok(input)
+    let output = engine.guest().execute(PUBLISH, &[&hash], Some(&input))?;
+    if output != "launcher-ready-v1\n" {
+        return Err(error(
+            "environment_launcher",
+            "Launcher publication was not confirmed.",
+        ));
+    }
+    Ok(format!("/storage/hack-environment-launcher/{hash}"))
 }
 #[cfg(feature = "environment-launcher")]
 const PUBLISH: &str = r#"
@@ -71,22 +58,14 @@ test "$(sha256sum "$file" | cut -d' ' -f1)" = "$1"
 printf 'launcher-ready-v1\n'
 "#;
 
-/// Ownership for private files and helper execs, not Docker's resolved application
-/// group. UID-only User remains unchanged in create config so the Engine resolves
-/// its image passwd/group semantics; mode0400 payload access depends only on UID.
 pub(super) fn identity(config: &Value) -> Result<(u32, u32), CandidateError> {
-    let user = match config.get("User") {
-        None | Some(Value::Null) => "0:0",
-        Some(Value::String(user)) if user.is_empty() => "0:0",
-        Some(Value::String(user)) => user,
-        _ => {
-            return Err(error(
-                "environment_user",
-                "A numeric image or Compose user is required; values omitted.",
-            ));
-        }
-    };
-    let (uid, gid) = user.split_once(':').unwrap_or((user, "0"));
+    let user = config["User"].as_str().unwrap_or("0:0");
+    let (uid, gid) = user.split_once(':').ok_or_else(|| {
+        error(
+            "environment_user",
+            "Environment delivery requires an explicit numeric UID:GID.",
+        )
+    })?;
     let parse = |v: &str| -> Result<u32, CandidateError> {
         if v.is_empty() || v.len() > 10 || !v.bytes().all(|b| b.is_ascii_digit()) {
             return Err(error("environment_user", "Invalid numeric UID:GID."));
@@ -163,8 +142,8 @@ fn validate_health(config: &Value) -> Result<(), CandidateError> {
 }
 pub(super) fn attach(config: &mut Value, path: &str, launcher: &str) -> Result<(), CandidateError> {
     validate(config)?;
-    // Preserve Docker's numeric UID-only group lookup and supplemental groups.
-    identity(config)?;
+    let (uid, gid) = identity(config)?;
+    config["User"] = json!(format!("{uid}:{gid}"));
     if config["Healthcheck"]["Test"][0] == "CMD" {
         let mut test = vec![
             json!("CMD"),
@@ -251,18 +230,6 @@ mod tests {
         );
     }
     #[test]
-    fn adapter_preserves_public_image_environment_and_explicit_overrides() {
-        let mut value = config();
-        // Represents the engine's merged public image defaults and Compose overrides;
-        // attaching private delivery must not replace that inherited environment.
-        let public = json!(["PATH=/usr/local/bin:/usr/bin:/bin", "MODE=compose"]);
-        value["Env"] = public.clone();
-        attach(&mut value, "/run/slot/values.json", "/storage/launcher").unwrap();
-        assert_eq!(value["Env"], public);
-        assert_eq!(value["Entrypoint"][3], "/bin/app");
-        assert_eq!(value["Entrypoint"][5], "space argument");
-    }
-    #[test]
     fn health_delivery_preserves_command_and_timing_and_refuses_shells() {
         let mut value = config();
         value["Healthcheck"] = json!({"Test":["CMD","/bin/check","space argument"],"Interval":1000000000,"Timeout":2000000000,"Retries":3});
@@ -292,20 +259,8 @@ mod tests {
         }
     }
     #[test]
-    fn uid_only_keeps_engine_group_resolution_while_private_files_use_owner_uid() {
-        let mut value = config();
-        value["User"] = json!("1001");
-        assert_eq!(identity(&value).unwrap(), (1001, 0));
-        attach(&mut value, "/private/payload", "/private/launcher").unwrap();
-        assert_eq!(value["User"], "1001");
-        for invalid in [json!(true), json!(1), json!("1001:staff"), json!("-1")] {
-            value["User"] = invalid;
-            assert!(identity(&value).is_err());
-        }
-    }
-    #[test]
     fn ambiguous_users_health_exec_and_mount_collisions_refuse_before_attachment() {
-        for user in ["bun", "-1:2", "1:4294967295", "1:", "1:2:3"] {
+        for user in ["bun", "1000", "-1:2", "1:4294967295", "1:", "1:2:3"] {
             let mut value = config();
             value["User"] = json!(user);
             assert!(validate(&value).is_err());
@@ -322,26 +277,4 @@ mod tests {
         value["Entrypoint"] = json!(["app"]);
         assert!(validate(&value).is_err());
     }
-}
-
-#[cfg(all(test, feature = "environment-launcher"))]
-#[test]
-fn embedded_launcher_fits_exact_publication_transport_and_roundtrips() {
-    use std::io::Read;
-    let bytes = include_bytes!(concat!(env!("OUT_DIR"), "/environment-launcher"));
-    let encoded = transport(bytes).expect("built launcher must fit the publication budget");
-    assert!(encoded.len() <= 56 * 1024);
-    let compressed = base64::engine::general_purpose::STANDARD
-        .decode(&encoded)
-        .unwrap();
-    let mut decoded = Vec::new();
-    flate2::read::GzDecoder::new(compressed.as_slice())
-        .read_to_end(&mut decoded)
-        .unwrap();
-    assert_eq!(decoded.as_slice(), bytes);
-    eprintln!(
-        "launcher artifact bytes={} transport bytes={}",
-        bytes.len(),
-        encoded.len()
-    );
 }

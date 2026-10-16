@@ -1,16 +1,8 @@
 //! WU03 Compose review and metadata-only enrollment. These plans cannot execute services.
-mod adapter;
-pub use adapter::{NormalizedComposeOptions, plan_normalized};
 mod compose;
 mod enrollment;
 pub mod execution;
-mod generated;
-mod hostname_change;
 pub mod inputs;
-pub mod live_source;
-#[cfg(feature = "native-config-plan")]
-pub mod native;
-pub mod registry;
 pub mod snapshot;
 mod source;
 pub mod watcher;
@@ -22,14 +14,11 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-pub use enrollment::{EnrollmentReceipt, enroll, status, status_with_branch};
-#[cfg(feature = "native-config-plan")]
-pub(crate) use source::resolve as resolve_source;
+pub use enrollment::{EnrollmentReceipt, enroll, status};
 pub use source::{SourceEntry, SourceSelection};
 
 pub struct PlanOptions<'a> {
     pub project: &'a Path,
-    pub branch: Option<&'a str>,
     pub compose_file: &'a Path,
     pub profiles: &'a [String],
 }
@@ -89,25 +78,11 @@ pub struct BuildPlan {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct MountPlan {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub subpath: Option<String>,
     pub kind: String,
     pub source: String,
     pub target: String,
     pub read_only: bool,
     pub source_policy: String,
-}
-/// Canonical bounded directory selection within an owned named volume.
-pub(crate) fn valid_volume_subpath(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= 512
-        && !value.chars().any(char::is_control)
-        && !value.contains('\\')
-        && !value.contains('$')
-        && value.split('/').count() <= 16
-        && value
-            .split('/')
-            .all(|part| !part.is_empty() && part != "." && part != "..")
 }
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(deny_unknown_fields)]
@@ -145,97 +120,6 @@ pub struct LimitsPlan {
     pub pids: Option<u32>,
     pub shared_memory_bytes: Option<u64>,
 }
-/// Reviewed alias requirements; literal values remain omitted from persisted plans.
-#[derive(Debug, Serialize, Deserialize, Clone)]
-#[serde(deny_unknown_fields)]
-pub struct ExtraHostPlan {
-    pub hostname: RedactedText,
-    pub target: RedactedText,
-}
-
-/// Parse declarations without interpolation or ambient host resolution.
-fn extra_host_entries(
-    value: Option<&serde_json::Value>,
-) -> Result<Vec<(String, String)>, CandidateError> {
-    use serde_json::Value;
-    let invalid = || {
-        problem(
-            "invalid_extra_hosts",
-            "Extra hosts require at most 32 unique DNS aliases targeting explicit host-gateway bindings.",
-        )
-    };
-    let pairs: Vec<(String, String)> = match value {
-        None => vec![],
-        Some(Value::Object(values)) if values.len() <= 32 => values
-            .iter()
-            .map(|(name, value)| {
-                value
-                    .as_str()
-                    .map(|target| (name.clone(), target.to_owned()))
-                    .ok_or_else(invalid)
-            })
-            .collect::<Result<_, _>>()?,
-        Some(Value::Array(values)) if values.len() <= 32 => values
-            .iter()
-            .map(|value| {
-                let text = value.as_str().ok_or_else(invalid)?;
-                let mut depth = 0usize;
-                let separator = text
-                    .char_indices()
-                    .find_map(|(offset, c)| {
-                        match c {
-                            '{' => depth += 1,
-                            '}' => depth = depth.saturating_sub(1),
-                            ':' | '=' if depth == 0 => return Some(offset),
-                            _ => {}
-                        }
-                        None
-                    })
-                    .ok_or_else(invalid)?;
-                Ok((
-                    text[..separator].to_owned(),
-                    text[separator + 1..].to_owned(),
-                ))
-            })
-            .collect::<Result<_, CandidateError>>()?,
-        _ => return Err(invalid()),
-    };
-    let mut names = std::collections::BTreeSet::new();
-    for (name, target) in &pairs {
-        if name.is_empty() || target.is_empty() || name.contains('\0') || target.contains('\0') {
-            return Err(invalid());
-        }
-        let canonical = if name.contains('$') {
-            name.clone()
-        } else {
-            crate::provider::publication::normalize_hostname(name).map_err(|_| invalid())?
-        };
-        if !names.insert(canonical) || (!target.contains('$') && target != "host-gateway") {
-            return Err(invalid());
-        }
-    }
-    Ok(pairs)
-}
-
-/// Public declaration only; runtime must securely fingerprint files and bind a shared cache.
-/// Explicit lockfiles must all exist; default candidates require at least one present file.
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct DependencyCachePlan {
-    pub volume: String,
-    pub lockfiles: Vec<String>,
-    pub lockfiles_explicit: bool,
-    pub runtime_files: Vec<String>,
-    pub bootstrap: bool,
-}
-/// Public local HTTPS declarations; publication still requires a healthy owned endpoint.
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct RoutingPlan {
-    pub hostnames: Vec<String>,
-    pub port: u16,
-}
-
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct ServicePlan {
@@ -248,8 +132,6 @@ pub struct ServicePlan {
     pub dependencies: BTreeMap<String, DependencyPlan>,
     pub mounts: Vec<MountPlan>,
     pub environment: BTreeMap<String, RedactedText>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub extra_hosts: Vec<ExtraHostPlan>,
     pub environment_files: Vec<String>,
     pub environment_precedence: String,
     pub healthcheck: Option<HealthPlan>,
@@ -265,10 +147,6 @@ pub struct ServicePlan {
     pub user: Option<RedactedText>,
     pub platform: Option<String>,
     pub labels: BTreeMap<String, RedactedText>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub routing: Option<RoutingPlan>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub dependency_cache: Option<DependencyCachePlan>,
     pub logging: Option<LoggingPlan>,
     pub stop_grace_period_nanos: Option<u64>,
     pub stop_signal: Option<String>,
@@ -299,26 +177,12 @@ pub struct PlanData {
     pub candidate_root: PathBuf,
     pub source: PathBuf,
     pub namespace: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub branch: Option<String>,
     pub compose_file: String,
     pub compose_sha256: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub original_compose_sha256: Option<String>,
-    /// Hash of both reviewed raw documents with only literal route hostnames masked.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub hostname_change_sha256: Option<String>,
     pub active_profiles: Vec<String>,
     pub services: BTreeMap<String, ServicePlan>,
     pub networks: BTreeMap<String, NetworkPlan>,
     pub volumes: BTreeMap<String, VolumePlan>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub registry: Option<registry::RegistryTemplate>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub generated_files: BTreeMap<String, String>,
-    /// Original env-file exclusions retained when normalization removes declarations.
-    #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
-    pub original_environment_files: std::collections::BTreeSet<String>,
     pub source_selection: SourceSelection,
     pub diagnostics: Vec<Diagnostic>,
     pub enrollment_compatible: bool,
@@ -343,11 +207,7 @@ pub struct PlanReport {
 }
 
 pub(crate) fn identity(plan: &PlanData) -> Result<String, CandidateError> {
-    // This additive proof is derived afresh from the exact original/normalized
-    // bytes already bound below. It must not reidentify unchanged legacy graphs.
-    let mut identity_plan = plan.clone();
-    identity_plan.hostname_change_sha256 = None;
-    let bytes = serde_json::to_vec(&identity_plan)
+    let bytes = serde_json::to_vec(plan)
         .map_err(|_| problem("serialization_failed", "Cannot encode review plan."))?;
     if bytes.len() > 3 * 1024 * 1024 {
         return Err(problem("plan_budget", "Review plan exceeds 3 MiB."));
@@ -356,35 +216,21 @@ pub(crate) fn identity(plan: &PlanData) -> Result<String, CandidateError> {
 }
 
 pub fn plan(candidate: &Candidate, options: PlanOptions<'_>) -> Result<PlanReport, CandidateError> {
-    plan_input(candidate, options, None)
-}
-
-fn plan_input(
-    candidate: &Candidate,
-    options: PlanOptions<'_>,
-    normalized: Option<adapter::Input<'_>>,
-) -> Result<PlanReport, CandidateError> {
     if options.profiles.len() > 64 {
         return Err(problem(
             "profile_budget",
             "At most 64 profiles can be selected.",
         ));
     }
-    let preview = candidate.plan_with_branch(options.project, options.branch)?;
+    let preview = candidate.plan(options.project)?;
     let source = &preview.source;
     let file_text = options
         .compose_file
         .to_str()
         .ok_or_else(|| problem("invalid_compose_path", "Compose path must be valid UTF-8."))?;
     let path = source::resolve(source, source, file_text, false)?;
-    let original = source::read_compose(&path)?;
-    let bytes = if let Some(ref input) = normalized {
-        input.verify(&preview.namespace, &original)?;
-        input.bytes
-    } else {
-        &original
-    };
-    let value = yaml::parse(bytes)?;
+    let bytes = source::read_compose(&path)?;
+    let value = yaml::parse(&bytes)?;
     let mut profiles = options.profiles.to_vec();
     profiles.sort();
     profiles.dedup();
@@ -401,38 +247,17 @@ fn plan_input(
         source,
         path.parent().expect("compose parent"),
         &relative,
-        bytes,
+        &bytes,
         &profiles,
         value,
     )?;
     data.namespace = preview.namespace;
-    data.branch = options.branch.map(str::to_owned);
-    data.hostname_change_sha256 = hostname_change::fingerprint(&original, bytes);
-    let mut environment_files = data
+    let environment_files = data
         .services
         .values()
         .flat_map(|service| service.environment_files.iter().cloned())
-        .collect::<std::collections::BTreeSet<_>>();
-    if bytes != original.as_slice() {
-        data.original_compose_sha256 = Some(format!("{:x}", Sha256::digest(&original)));
-        data.original_environment_files = compose::original_environment_files(
-            source,
-            path.parent().expect("compose parent"),
-            &original,
-        )?
-        .difference(&environment_files)
-        .cloned()
         .collect();
-        environment_files.extend(data.original_environment_files.iter().cloned());
-    }
     data.source_selection = source::inventory(source, &environment_files, &mut data.diagnostics)?;
-    let needs_registry = data
-        .services
-        .values()
-        .any(|service| service.active && service.dependency_cache.is_some());
-    if needs_registry {
-        data.registry = registry::read(source)?;
-    }
     data.diagnostics.sort_by(|a, b| {
         (&a.severity, &a.code, &a.field, &a.message).cmp(&(
             &b.severity,
@@ -443,19 +268,12 @@ fn plan_input(
     });
     data.enrollment_compatible = !data.diagnostics.iter().any(|d| d.severity == "error");
     // Re-read only the explicitly selected config; a changed plan is never silently enrolled.
-    if source::read_compose(&path)? != original {
+    if source::read_compose(&path)? != bytes {
         return Err(problem(
             "compose_changed",
             "Compose input changed during planning.",
         ));
     }
-    if needs_registry && registry::read(source)? != data.registry {
-        return Err(problem(
-            "registry_changed",
-            "Project registry configuration changed during planning; values omitted.",
-        ));
-    }
-    generated::validate_plan(&data)?;
     let plan_id = identity(&data)?;
     let existing = enrollment::read(candidate, source, &data.namespace)?;
     let enrollment_diff = match existing {

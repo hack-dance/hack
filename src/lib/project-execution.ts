@@ -1,4 +1,3 @@
-import { CliUsageError } from "../cli/command.ts";
 import type {
   ControlPlaneConfig,
   ProjectExecutionMode,
@@ -114,20 +113,7 @@ function buildRemoteResolution(opts: {
   };
 }
 
-/**
- * Fixed refusal for an unusable lifecycle `--target`. It lists the accepted
- * values and never the argument, which may be a mistyped `KEY=value` or a
- * pasted value.
- */
-export const INVALID_EXECUTION_TARGET_MESSAGE =
-  "Invalid --target value. Expected one of: auto, local, remote.";
-
-/**
- * Parse the `--target` option of `hack up`, `down` and `restart`. Handlers
- * call this before any project discovery or child process so a refusal
- * happens first and never echoes the argument.
- */
-export function parseRequestedTarget(opts: {
+function parseRequestedTarget(opts: {
   readonly raw: string | undefined;
 }): ProjectExecutionTargetPreference {
   const normalized = (opts.raw ?? "auto").trim().toLowerCase();
@@ -140,7 +126,9 @@ export function parseRequestedTarget(opts: {
   if (normalized === "remote") {
     return "remote";
   }
-  throw new CliUsageError(INVALID_EXECUTION_TARGET_MESSAGE);
+  throw new Error(
+    `Invalid --target value: ${opts.raw ?? ""}. Expected auto|local|remote.`
+  );
 }
 
 function normalizeNodeId(opts: {

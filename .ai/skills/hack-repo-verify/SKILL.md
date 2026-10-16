@@ -37,24 +37,6 @@ For native setup use root `mise.toml`, the Bun pin in `package.json`, and
 `bun run test:local`. Add `--all-features` to equivalent Cargo commands for feature
 changes; the toolchain Rust tasks already enable all features. Keep default coverage.
 
-Before a full CLI suite, explicitly prepare the ignored compiler with
-`bun run build:config-compiler` on the host, or the toolchain `config-compiler` task
-inside Linux. Root `test`/`turbo:test`, direct CLI `test`, and no-argument toolchain
-`test` check its protocol and usability before launching the suite. An absolute
-`HACK_CONFIG_COMPILER_BINARY` selects the caller's compiler and survives Turbo's
-environment filtering; no fallback, build or download occurs during preflight.
-Host and container `dist` remain separate. This checks compatibility, not exact
-source provenance. Raw `bun test <paths>` remains available for focused tests;
-it bypasses the suite preflight and does not prepare compiler-dependent fixtures.
-
-For release workflow edits, run the pinned syntax/context check also enforced by CI:
-`mise x actionlint@1.7.12 -- actionlint -shellcheck= -pyflakes= .github/workflows/ci.yml .github/workflows/release.yml .github/workflows/prerelease.yml .github/workflows/bun-crash-experiment.yml`.
-This validates event globs and reusable workflow contexts; Bun YAML parsing alone does not.
-
-`bun run privacy:check` scans Git-tracked files. Stage reviewed new source/tests
-before the final gate, or rerun it after staging: an earlier pass does not cover
-untracked candidate additions. Keep private artifacts excluded from the index.
-
 ## Match the harness to the claim
 
 | Change | Existing loop and required observation |
@@ -67,10 +49,8 @@ untracked candidate additions. Keep private artifacts excluded from the index.
 | Rust state/recovery | `packages/runtime-core/tests/` plus module tests; malformed/stale ownership, crash window, resume and data preservation |
 | TLA models | `test:models`, [model mappings](../../../tests/models/tla/README.md), [runner](../../../scripts/check-tla-models.ts) and expected positive/negative controls |
 | Consumer instructions | [ownership](../../../docs/agent-guidance.md), `bun run generate:agent-plugins`, affected examples and source/render tests |
-| Native authored command slices | `tests/native-authored-command.test.ts` (unsupported matrix), `tests/native-authored-command-dispatch.test.ts`, `tests/native-authored-project-{start,run,observe,logs,exec,recovery}.test.ts` and the [command contract](../../../docs/reference/native-authored-commands.md); the dispatch "source CLI" cases need the prepared compiler (`bun run build:config-compiler` or absolute `HACK_CONFIG_COMPILER_BINARY`) and fail without it; `native-authored-project-start` and `native-authored-project-exec` are nondeterministic on a local macOS host, so a single local pass or failure is not proof; live acceptance runs host-serialized on one prepared macOS provider slot |
-| Native VM/routing/reclamation | [candidate guide](../../../docs/guides/native-candidate.md), relevant acceptance gate and isolated host fixture; Linux checks cannot qualify macOS effects |
+| Native VM/routing/reclamation | candidate guide (local `_docs/docs/plans/v5/development.md`), relevant ledger gate and isolated host fixture; Linux checks cannot qualify macOS effects |
 | Resource/performance claims | [performance skill](../hack-repo-performance/SKILL.md), matched workload and measured boundaries |
-| Bun runtime crashes | Read-only history: `bun run ci:bun-crash-census -- --since <UTC> --until <UTC>` (failed `test` job logs; `--scan-passing` for all). Matched reproduction: the gated [experiment](../../../.github/workflows/bun-crash-experiment.yml), which spends hosted macOS minutes and needs an explicit go-ahead; never loop on a shared host. Its default `focused` mode loops `tests/native-https-owner.test.ts` (where both original segfaults happened); `full` needs a budget of at least 40 minutes because one full suite takes 30-35. A run never starts unless its estimate fits the remaining budget, so read `summary.json` for the verdict and per-mode crash, failure and skipped-for-budget counts. Both share [the classifier](../../../scripts/lib/bun-crash-classify.ts) |
 
 Read [CI](../../../.github/workflows/ci.yml) for current hosted gates. A local pass
 does not mean CI ran. Existing unsupported remote/gateway/native-app checks are
@@ -79,14 +59,6 @@ not default local-product requirements; use them only for explicitly scoped work
 ## Verify the verifier
 
 Treat unavailable prerequisites, ignored tests, cached results and timeouts explicitly.
-Before an ignored native graph fixture, read its prerequisites in the
-[runtime README](../../../packages/runtime-core/README.md). Some fixtures require
-a caller-prepared pool: use the managed provider, engine and network-tool setup,
-start the required socket capacity, load the pinned image, and verify runtime
-status before invoking the test. Record the current-source test executable and
-candidate bundle separately. An unprepared-pool failure does not exercise the
-scenario; preserve its evidence and fix setup before rerunning.
-
 TLC must explore the intended states; its negative control must fail the named
 invariant with the expected trace, not merely return nonzero. A small abstract model
 needs source mapping and implementation regression evidence; use

@@ -87,7 +87,7 @@ fn checked(
     }
     Ok(intent)
 }
-pub(super) fn absent(guest: &OwnedGuest<'_>, slot: &str) -> Result<(), CandidateError> {
+fn absent(guest: &OwnedGuest<'_>, slot: &str) -> Result<(), CandidateError> {
     if guest.execute_cleanup(
         "test ! -e \"/run/$1\"\ntest ! -L \"/run/$1\"\nprintf 'retired-slot-absent\\n'",
         &[slot],

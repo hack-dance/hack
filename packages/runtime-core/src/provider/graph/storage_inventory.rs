@@ -43,7 +43,6 @@ pub fn inventory(candidate: &Candidate) -> Result<Value, CandidateError> {
     let engine = Engine::connect_cleanup(candidate)?;
     let started = Instant::now();
     let mut references = BTreeMap::new();
-    let mut identities = BTreeMap::new();
     let mut graphs = Vec::new();
     for run in runs(&candidate.state_root.join("run/graphs"))? {
         budget(started)?;
@@ -64,9 +63,10 @@ pub fn inventory(candidate: &Candidate) -> Result<Value, CandidateError> {
         }
         let report = storage::references(&receipt, pending, &observations);
         for volume in report["volumes"].as_array().expect("volume references") {
-            let logical = volume["resource"].as_str().expect("logical volume");
-            let resource = &receipt.resources[&format!("volume:{logical}")];
-            register_reference(&mut references, &mut identities, &run, resource, volume)?;
+            let name = volume["name"].as_str().expect("volume name");
+            if references.insert(name.to_owned(), json!({"run":run,"classification":volume["classification"],"observed_state":volume["observed_state"]})).is_some() {
+                return Err(error("graph_storage_inventory", "Duplicate retained volume identity."));
+            }
         }
         graphs.push(report);
     }
@@ -93,69 +93,6 @@ pub fn inventory(candidate: &Candidate) -> Result<Value, CandidateError> {
     }))
 }
 
-// Registration follows independent inspect_resource verification under the retained Engine lease.
-// Repeated persistent identities are never accepted, even if their apparent state agrees.
-fn register_reference(
-    references: &mut BTreeMap<String, Value>,
-    identities: &mut BTreeMap<String, (Option<dependency_cache::CacheBinding>, String)>,
-    run: &str,
-    resource: &Resource,
-    volume: &Value,
-) -> Result<(), CandidateError> {
-    let refused = || {
-        error(
-            "graph_storage_inventory",
-            "Conflicting retained volume references.",
-        )
-    };
-    if resource.kind != Kind::Volume
-        || volume["name"] != resource.name
-        || volume["resource"] != resource.key
-        || !matches!(
-            volume["observed_state"].as_str(),
-            Some("present" | "absent")
-        )
-        || resource
-            .cache
-            .as_ref()
-            .is_some_and(|cache| !cache.valid() || cache.name() != resource.name)
-    {
-        return Err(refused());
-    }
-    let entry = json!({"run":run,"classification":volume["classification"],"observed_state":volume["observed_state"]});
-    if let Some(prior) = references.get_mut(&resource.name) {
-        let identity = identities.get(&resource.name).ok_or_else(refused)?;
-        if resource.cache.is_none()
-            || identity != &(resource.cache.clone(), resource.key.clone())
-            || prior["observed_state"] != volume["observed_state"]
-        {
-            return Err(refused());
-        }
-        let refs = prior["graph_references"]
-            .as_array_mut()
-            .ok_or_else(refused)?;
-        if refs.iter().any(|entry| entry["run"] == run) {
-            return Err(refused());
-        }
-        refs.push(entry);
-        // Single-reference compatibility fields are removed when they would misrepresent sharing.
-        prior.as_object_mut().ok_or_else(refused)?.remove("run");
-        prior["classification"] = json!("shared_dependency_cache_references");
-    } else {
-        let mut value = entry.clone();
-        if let Some(cache) = &resource.cache {
-            value["cache"] = serde_json::to_value(cache).map_err(|_| refused())?;
-            value["graph_references"] = json!([entry]);
-        }
-        identities.insert(
-            resource.name.clone(),
-            (resource.cache.clone(), resource.key.clone()),
-        );
-        references.insert(resource.name.clone(), value);
-    }
-    Ok(())
-}
-
 fn join(items: &Value, references: &BTreeMap<String, Value>) -> Result<Vec<Value>, CandidateError> {
     let mut present = std::collections::BTreeSet::new();
     let mut volumes = Vec::new();
@@ -175,7 +112,7 @@ fn join(items: &Value, references: &BTreeMap<String, Value>) -> Result<Vec<Value
             "container_references":item["container_references"],
             "graph_reference":reference,
             "disposition":"retain",
-            "reason":if reference.is_some_and(|r| r.get("cache").is_some()) {"shared_dependency_cache_no_collection_authority"} else if reference.is_some() {"persistent_graph_data"} else {"ownership_or_non_graph_references_unclassified"}
+            "reason":if reference.is_some() {"persistent_graph_data"} else {"ownership_or_non_graph_references_unclassified"}
         }));
     }
     if references.iter().any(|(name, reference)| {
@@ -193,148 +130,6 @@ fn join(items: &Value, references: &BTreeMap<String, Value>) -> Result<Vec<Value
 mod tests {
     use super::*;
     use std::os::unix::fs::symlink;
-
-    #[test]
-    fn shared_cache_registration_requires_exact_identity_and_consistent_observation() {
-        let cache = dependency_cache::CacheBinding {
-            scope: "a".repeat(64),
-            fingerprint: "b".repeat(64),
-            image: format!("sha256:{}", "c".repeat(64)),
-        };
-        let resource = Resource {
-            routing: None,
-            networks: None,
-            outbound: false,
-            cache: Some(cache.clone()),
-            cache_provenance: None,
-            kind: Kind::Volume,
-            key: "deps".into(),
-            name: cache.name(),
-            id: None,
-            image: None,
-            phase: "created".into(),
-        };
-        let volume = json!({"name":resource.name,"resource":"deps","observed_state":"present","classification":"referenced_by_graph"});
-        let mut references = BTreeMap::new();
-        let mut identities = BTreeMap::new();
-        register_reference(
-            &mut references,
-            &mut identities,
-            "first",
-            &resource,
-            &volume,
-        )
-        .unwrap();
-        let mut released = volume.clone();
-        released["classification"] = json!("released_shared_cache_reference");
-        register_reference(
-            &mut references,
-            &mut identities,
-            "second",
-            &resource,
-            &released,
-        )
-        .unwrap();
-        let refs = &references[&resource.name];
-        assert_eq!(refs["graph_references"].as_array().unwrap().len(), 2);
-        assert_eq!(
-            refs["graph_references"][1]["classification"],
-            "released_shared_cache_reference"
-        );
-        assert!(refs.get("run").is_none());
-        let items = json!([{"name":resource.name,"bytes":99,"container_references":0}]);
-        assert_eq!(
-            join(&items, &references).unwrap()[0]["disposition"],
-            "retain"
-        );
-        assert!(
-            register_reference(
-                &mut references,
-                &mut identities,
-                "second",
-                &resource,
-                &released
-            )
-            .is_err()
-        );
-        let mut absent = volume.clone();
-        absent["observed_state"] = json!("absent");
-        assert!(
-            register_reference(
-                &mut references,
-                &mut identities,
-                "third",
-                &resource,
-                &absent
-            )
-            .is_err()
-        );
-        let mut different = resource.clone();
-        different.cache.as_mut().unwrap().scope = "d".repeat(64);
-        assert!(
-            register_reference(
-                &mut references,
-                &mut identities,
-                "third",
-                &different,
-                &volume
-            )
-            .is_err()
-        );
-        different = resource.clone();
-        different.key = "other".into();
-        let mut other = volume.clone();
-        other["resource"] = json!("other");
-        assert!(
-            register_reference(
-                &mut references,
-                &mut identities,
-                "third",
-                &different,
-                &other
-            )
-            .is_err()
-        );
-        different = resource.clone();
-        different.cache = None;
-        assert!(
-            register_reference(
-                &mut references,
-                &mut identities,
-                "third",
-                &different,
-                &volume
-            )
-            .is_err()
-        );
-        let mut persistent = BTreeMap::new();
-        let mut persistent_ids = BTreeMap::new();
-        register_reference(
-            &mut persistent,
-            &mut persistent_ids,
-            "first",
-            &different,
-            &volume,
-        )
-        .unwrap();
-        assert!(
-            register_reference(
-                &mut persistent,
-                &mut persistent_ids,
-                "second",
-                &different,
-                &volume
-            )
-            .is_err()
-        );
-        assert_eq!(
-            references[&resource.name]["graph_references"]
-                .as_array()
-                .unwrap()
-                .len(),
-            2
-        );
-    }
 
     #[test]
     fn unknown_and_zero_reference_persistent_volumes_are_retained() {

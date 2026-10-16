@@ -4,7 +4,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { requestDaemonJson } from "../src/daemon/client.ts";
-import { restoreEnv } from "./helpers/env.ts";
 
 const AUTOSTART_BUDGET_MS = 5000;
 
@@ -26,7 +25,7 @@ afterEach(async () => {
     await rm(tempDir, { recursive: true, force: true });
     tempDir = null;
   }
-  restoreEnv("HOME", originalHome);
+  process.env.HOME = originalHome;
   if (originalNoInteractive === undefined) {
     Reflect.deleteProperty(process.env, "HACK_NO_INTERACTIVE");
   } else {

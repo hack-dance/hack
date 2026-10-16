@@ -85,55 +85,6 @@ pub(super) fn cleanup_slots(
     Ok(slots)
 }
 
-/// Reads complete value-free allocation identity without promoting pending records.
-/// The caller must retain this inventory in its effect identity across recovery.
-#[cfg(target_os = "macos")]
-pub(super) fn cleanup_inventory(
-    candidate: &Candidate,
-    engine: &Engine<'_>,
-    receipt: &Receipt,
-    root: &std::path::Path,
-) -> Result<environment_recovery::GraphInventory, CandidateError> {
-    let containers = receipt
-        .resources
-        .values()
-        .filter(|r| r.kind == Kind::Container)
-        .map(|r| (r.key.clone(), r.name.clone()))
-        .collect();
-    let inventory = environment_recovery::graph_inventory(
-        candidate,
-        engine.guest().incarnation(),
-        &receipt.run,
-        &containers,
-        &root.join("environment-intents"),
-    )?;
-    if !receipt.environment_attached && !inventory.is_empty() {
-        return Err(error(
-            "graph_environment_marker_missing",
-            "Graph environment allocations exist without their durable attachment marker; cleanup is refused.",
-        ));
-    }
-    Ok(inventory)
-}
-
-/// Requires exact selected inventory plus actual guest absence; never retires slots.
-#[cfg(target_os = "macos")]
-pub(super) fn verify_cleanup(
-    candidate: &Candidate,
-    engine: &Engine<'_>,
-    receipt: &Receipt,
-    root: &std::path::Path,
-    expected: &environment_recovery::GraphInventory,
-) -> Result<(), CandidateError> {
-    if &cleanup_inventory(candidate, engine, receipt, root)? != expected {
-        return Err(error(
-            "graph_environment_inventory_changed",
-            "Selected graph environment inventory changed; cleanup confirmation is refused.",
-        ));
-    }
-    environment_recovery::verify_graph_retired(engine.guest(), expected)
-}
-
 pub(super) fn require_replay_supported(receipt: &Receipt) -> Result<(), CandidateError> {
     if receipt.environment_attached {
         return Err(error(

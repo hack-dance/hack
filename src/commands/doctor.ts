@@ -8,15 +8,6 @@ import {
   checkLegacyProjectAgentArtifacts,
   checkLegacyUserAgentArtifacts,
 } from "../agents/legacy-artifacts.ts";
-import { runNativeProjectCleanupCommand } from "../backends/native-project-cleanup-command.ts";
-import {
-  parseNativeRunMappingRecoveryOptions,
-  runNativeProjectMappingCommand,
-} from "../backends/native-project-mapping-command.ts";
-import {
-  type NativeRuntimeSelection,
-  resolveNativeRuntimeSelection,
-} from "../backends/native-runtime-client.ts";
 import type { CommandHandlerFor } from "../cli/command.ts";
 import {
   CliUsageError,
@@ -24,15 +15,15 @@ import {
   defineOption,
   withHandler,
 } from "../cli/command.ts";
-import { optBranch, optJson, optPath } from "../cli/options.ts";
+import { optJson, optPath } from "../cli/options.ts";
 import {
   DEFAULT_CADDY_IP,
+  DEFAULT_GRAFANA_HOST,
   DEFAULT_HOST_DNS_IP,
   DEFAULT_INGRESS_GATEWAY,
   DEFAULT_INGRESS_NETWORK,
   DEFAULT_INGRESS_SUBNET,
   DEFAULT_LOGGING_NETWORK,
-  DEFAULT_NEW_PROJECT_TLD,
   DEFAULT_OAUTH_ALIAS_ROOT,
   DEFAULT_PROJECT_TLD,
   GLOBAL_CADDY_COMPOSE_FILENAME,
@@ -41,7 +32,6 @@ import {
   GLOBAL_LOGGING_COMPOSE_FILENAME,
   GLOBAL_LOGGING_DIR_NAME,
   HACK_PROJECT_DIR_PRIMARY,
-  LEGACY_GRAFANA_HOST,
   PROJECT_ENV_CONTRACT_FILENAME,
   PROJECT_ENV_KEY_FILENAME,
 } from "../constants.ts";
@@ -50,8 +40,6 @@ import { listGatewayTokens } from "../control-plane/extensions/gateway/tokens.ts
 import { probeDaemonApi } from "../daemon/client.ts";
 import { resolveDaemonPaths } from "../daemon/paths.ts";
 import { buildDaemonStatusReport, readDaemonStatus } from "../daemon/status.ts";
-import { repairCaddyCaExport } from "../lib/caddy-ca-export.ts";
-import { inspectCaddyCaIdentity } from "../lib/caddy-ca-identity.ts";
 import {
   readInternalExtraHostsIp,
   resolveGlobalCaddyIp,
@@ -61,18 +49,6 @@ import {
   resolveGlobalConfigPath,
   resolveGlobalHackDir,
 } from "../lib/config-paths.ts";
-import { resolveDefaultDomain } from "../lib/default-domain.ts";
-import {
-  checkBrowserLocalNetwork,
-  parseBrowserNetworkOptions,
-} from "../lib/doctor-browser-network.ts";
-import {
-  describeEnvKeyInspection,
-  type EnvKeyInspection,
-  gitListTrackedKeyPaths,
-  inspectProjectEnvKey,
-  resolveEnvKeyCandidates,
-} from "../lib/doctor-env-key.ts";
 import {
   inspectTrackedGeneratedFiles,
   untrackGeneratedFiles,
@@ -87,11 +63,9 @@ import {
   ensureDir,
   ensureGitignoreEntry,
   pathExists,
-  readOptionalTextFile,
   readTextFile,
   writeTextFileIfChanged,
 } from "../lib/fs.ts";
-import { resolveInstalledGrafanaHost } from "../lib/global-service-host.ts";
 import { getString, isRecord } from "../lib/guards.ts";
 import { resolveHackInvocation } from "../lib/hack-cli.ts";
 import { inspectHackEnvOverlayWarnings } from "../lib/hack-env.ts";
@@ -99,35 +73,12 @@ import {
   confirmSafe,
   isExplicitlyNonInteractive,
 } from "../lib/interactivity.ts";
-import { findHackLocalCaCertPath } from "../lib/local-ca.ts";
-import { noteBrowserTargetsForLocalNetworkHint } from "../lib/local-network-hint.ts";
-import {
-  describeSupersededRoots,
-  inspectSupersededMacRoots,
-  type SupersededRootInventory,
-} from "../lib/mac-ca-trust.ts";
 import {
   ensureBundledMutagenInstalled,
   getManagedMutagenAgentBundlePath,
   getManagedMutagenInstallPath,
   getMutagenPath,
 } from "../lib/mutagen.ts";
-import {
-  inspectNativeCaTrust,
-  type NativeCaDoctorDependencies,
-  repairNativeCaTrust,
-} from "../lib/native-ca-doctor.ts";
-import {
-  describeHackLocalRoute,
-  HACK_LOCAL_ROLLBACK_COMMAND,
-  type HackLocalRouteDependencies,
-  type HackLocalRouteReport,
-  inspectHackLocalRoute,
-  printable,
-  repairHackLocalRoute,
-  reportHackLocalRoute,
-} from "../lib/native-hack-local-route.ts";
-import { createNativeHackLocalRouteDependencies } from "../lib/native-hack-local-route-host.ts";
 import { isMac } from "../lib/os.ts";
 import {
   defaultProjectSlugFromPath,
@@ -135,7 +86,6 @@ import {
   readProjectConfig,
   readProjectDevHost,
 } from "../lib/project.ts";
-import { runProjectDomainCommand } from "../lib/project-domain-command.ts";
 import {
   discoverComposeServiceNames,
   ensureHackDirGitignore,
@@ -148,7 +98,6 @@ import {
   repairLegacyComposeEnvFileReferences,
   resolveProjectEnvConfig,
 } from "../lib/project-env-config.ts";
-import { assertLegacyProjectDiscovery } from "../lib/project-input-selection.ts";
 import {
   inspectProjectLifecycleHygiene,
   repairProjectLifecycleSessions,
@@ -162,11 +111,6 @@ import {
 import { readProjectsRegistry } from "../lib/projects-registry.ts";
 import { readRuntimeProjects } from "../lib/runtime-projects.ts";
 import { exec, findExecutableInPath, run } from "../lib/shell.ts";
-import {
-  type PausableProgress,
-  pausableSpinner,
-  withTerminalHandoff,
-} from "../lib/terminal-handoff.ts";
 import { resolveSessionsMuxMode } from "../mux/mux-config.ts";
 import {
   renderGlobalCaddyCompose,
@@ -193,35 +137,6 @@ interface CheckResult {
   readonly name: string;
   readonly status: CheckStatus;
   readonly message: string;
-  /** Counts and public fingerprints only; never paths or keychain contents. */
-  readonly supersededRoots?: SupersededRootInventory;
-  /** Native hack.local route state; lines and paths only, never file contents. */
-  readonly hackLocalRoute?: HackLocalRouteReport;
-  /** Closed, value-free env key findings; project-relative subjects only. */
-  readonly envKey?: EnvKeyInspection;
-}
-
-const HACK_LOCAL_ROUTE_CHECK = "native hack.local route";
-const HACK_LOCAL_REPAIR_CHECK = "native hack.local repair";
-
-const SUPERSEDED_ROOTS_CHECK = "superseded caddy roots";
-
-/** Informational inventory: Doctor and --fix never remove a keychain root. */
-function supersededRootsCheck(
-  inventory: SupersededRootInventory | undefined
-): CheckResult {
-  return {
-    name: SUPERSEDED_ROOTS_CHECK,
-    ...describeSupersededRoots(inventory),
-    ...(inventory ? { supersededRoots: inventory } : {}),
-  };
-}
-
-async function checkSupersededCaddyRoots(): Promise<CheckResult> {
-  const certPath = await findHackLocalCaCertPath();
-  return supersededRootsCheck(
-    certPath ? await inspectSupersededMacRoots({ certPath }) : undefined
-  );
 }
 
 interface TimedCheckResult extends CheckResult {
@@ -243,76 +158,13 @@ const optMigrateEnvConfig = defineOption({
     "Migrate legacy hack.env.json/.env state to the new env config files",
 } as const);
 
-const optBrowserUrl = defineOption({
-  name: "browserUrl",
-  type: "string",
-  long: "--browser-url",
-  valueHint: "https://app.hack",
-  description:
-    "HTTPS origin manually tested in the browser (no path or credentials)",
-} as const);
-const optDomainMigration = defineOption({
-  name: "domainMigration",
-  type: "string",
-  long: "--domain-migration",
-  valueHint: "preview|apply|rollback",
-  description:
-    "Preview, apply, or roll back only this project's hack.local migration",
-} as const);
-const optBrowserResult = defineOption({
-  name: "browserResult",
-  type: "string",
-  long: "--browser-result",
-  valueHint: "unknown|works|fails|permission-denied",
-  description:
-    "Your manual browser observation for --browser-url (default: unknown)",
-} as const);
-const doctorOptions = [
-  optPath,
-  optFix,
-  optMigrateEnvConfig,
-  optDomainMigration,
-  optJson,
-  optBrowserUrl,
-  optBrowserResult,
-  optBranch,
-  defineOption({
-    name: "nativeCleanup",
-    type: "string",
-    long: "--native-cleanup",
-    valueHint: "inspect",
-    description:
-      "Inspect one mapped native graph's pending cleanup without recovery or stop replay",
-  } as const),
-  defineOption({
-    name: "nativeRunMapping",
-    type: "string",
-    long: "--native-run-mapping",
-    valueHint: "inspect|repair",
-    description:
-      "Inspect or explicitly repair a native run mapping after filesystem device renumbering",
-  } as const),
-  defineOption({
-    name: "expectSelection",
-    type: "string",
-    long: "--expect-selection",
-    valueHint: "<64-hex>",
-    description: "Require the exact run-mapping recovery inspection selection",
-  } as const),
-  defineOption({
-    name: "acceptLegacyDeviceRebind",
-    type: "boolean",
-    long: "--accept-legacy-device-rebind",
-    description:
-      "Explicitly accept legacy migration without proof of original filesystem volume continuity",
-  } as const),
-] as const;
+const doctorOptions = [optPath, optFix, optMigrateEnvConfig, optJson] as const;
 const doctorPositionals = [] as const;
 
 const doctorSpec = defineCommand({
   name: "doctor",
   summary:
-    "Validate local setup for the selected runtime, routing, trust and project",
+    "Validate local setup (docker, networks, DNS, global infra, project config)",
   group: "Diagnostics",
   options: doctorOptions,
   positionals: doctorPositionals,
@@ -354,33 +206,18 @@ const DOCTOR_SUMMARY_GROUPS = [
       "proxy ports",
       "caddy local ca",
       "host tls trust",
-      SUPERSEDED_ROOTS_CHECK,
-      "native https owner",
-      "native root trust",
-      "native ca repair",
-      "native https route",
       "agent integrations",
     ]),
-  },
-  {
-    title: "Browser access",
-    checks: new Set(["browser local network"]),
   },
   {
     title: "Resolver & DNS",
     checks: new Set([
       `resolver:${DEFAULT_PROJECT_TLD}`,
-      `resolver:${DEFAULT_NEW_PROJECT_TLD}`,
       `resolver:${DEFAULT_OAUTH_ALIAS_ROOT}`,
       `dnsmasq.conf:${DEFAULT_PROJECT_TLD}`,
-      `dnsmasq.conf:${DEFAULT_NEW_PROJECT_TLD}`,
       `dnsmasq.conf:${DEFAULT_OAUTH_ALIAS_ROOT}`,
       "dnsmasq:53",
-      HACK_LOCAL_REPAIR_CHECK,
-      HACK_LOCAL_ROUTE_CHECK,
-      "native host dns",
       `dns:${DEFAULT_PROJECT_TLD}`,
-      `dns:${DEFAULT_NEW_PROJECT_TLD}`,
       `dns:${DEFAULT_OAUTH_ALIAS_ROOT}`,
       "coredns forwarding",
       "caddy hosts",
@@ -408,152 +245,18 @@ const DOCTOR_SUMMARY_GROUPS = [
   },
 ] as const;
 
-async function maybeRunDomainMigration(
-  args: Parameters<CommandHandlerFor<typeof doctorSpec>>[0]["args"]
-): Promise<number | null> {
-  if (args.options.domainMigration !== undefined) {
-    if (args.options.nativeCleanup !== undefined) {
-      throw new CliUsageError(
-        "--native-cleanup accepts only inspect with --path, --branch and --json; recovery is explicit and separate."
-      );
-    }
-    if (
-      args.options.fix ||
-      args.options.migrateEnvConfig ||
-      args.options.browserUrl ||
-      args.options.browserResult
-    ) {
-      throw new CliUsageError(
-        "--domain-migration cannot be combined with other Doctor repair or browser options"
-      );
-    }
-    return await runProjectDomainCommand({
-      action: args.options.domainMigration,
-      startDir: args.options.path
-        ? resolve(process.cwd(), args.options.path)
-        : process.cwd(),
-      json: args.options.json === true,
-    });
-  }
-  return null;
-}
-
-async function maybeRunNativeMappingRecovery(
-  args: Parameters<CommandHandlerFor<typeof doctorSpec>>[0]["args"]
-): Promise<number | null> {
-  if (args.options.nativeCleanup !== undefined) {
-    if (
-      args.options.nativeCleanup !== "inspect" ||
-      args.options.nativeRunMapping !== undefined ||
-      args.options.expectSelection !== undefined ||
-      args.options.acceptLegacyDeviceRebind ||
-      args.options.fix ||
-      args.options.migrateEnvConfig ||
-      args.options.domainMigration ||
-      args.options.browserUrl ||
-      args.options.browserResult
-    ) {
-      throw new CliUsageError(
-        "--native-cleanup accepts only inspect with --path, --branch and --json; recovery is explicit and separate."
-      );
-    }
-    const runtime = resolveNativeRuntimeSelection();
-    if (!runtime) {
-      throw new CliUsageError(
-        "Native cleanup inspection requires an explicitly selected native runtime."
-      );
-    }
-    return await runNativeProjectCleanupCommand({
-      runtime,
-      startDir: args.options.path
-        ? resolve(process.cwd(), args.options.path)
-        : process.cwd(),
-      branch: args.options.branch,
-      json: args.options.json === true,
-    });
-  }
-  const mapping = parseNativeRunMappingRecoveryOptions({
-    action: args.options.nativeRunMapping,
-    expectSelection: args.options.expectSelection,
-    acceptLegacyDeviceRebind: args.options.acceptLegacyDeviceRebind,
-    branch: args.options.branch,
-    otherOptions: Boolean(
-      args.options.fix ||
-        args.options.migrateEnvConfig ||
-        args.options.domainMigration ||
-        args.options.browserUrl ||
-        args.options.browserResult
-    ),
-  });
-  if (mapping) {
-    const runtime = resolveNativeRuntimeSelection();
-    if (!runtime) {
-      throw new CliUsageError(
-        "Native run-mapping recovery requires an explicitly selected native runtime."
-      );
-    }
-    return await runNativeProjectMappingCommand({
-      selection: mapping,
-      runtime,
-      startDir: args.options.path
-        ? resolve(process.cwd(), args.options.path)
-        : process.cwd(),
-      branch: args.options.branch,
-      json: args.options.json === true,
-    });
-  }
-  return null;
-}
-
 const handleDoctor: CommandHandlerFor<typeof doctorSpec> = async ({
   args,
 }): Promise<number> => {
-  await assertLegacyProjectDiscovery({
-    startDir: resolveDoctorStartDir(args.options.path),
-  });
-  const mappingResult = await maybeRunNativeMappingRecovery(args);
-  if (mappingResult !== null) {
-    return mappingResult;
-  }
-  const domainResult = await maybeRunDomainMigration(args);
-  if (domainResult !== null) {
-    return domainResult;
-  }
-  const browser = parseBrowserNetworkOptions({
-    url: args.options.browserUrl,
-    result: args.options.browserResult,
-  });
   const json = args.options.json === true;
   assertDoctorOptionCompatibility({
     json,
     fix: args.options.fix === true,
     migrateEnvConfig: args.options.migrateEnvConfig === true,
   });
-  const native = resolveNativeRuntimeSelection();
-  if (native) {
-    return await handleNativeDoctor({
-      runtime: native,
-      startDir: resolveDoctorStartDir(args.options.path),
-      browser,
-      json,
-      fix: args.options.fix === true,
-      migrateEnvConfig: args.options.migrateEnvConfig === true,
-    });
-  }
   const results: TimedCheckResult[] = [];
-  const defaultDomain = await resolveDefaultDomain();
   const s = createDoctorProgress({ json });
   s.start("Running doctor checks...");
-
-  results.push(
-    await runCheck(
-      s,
-      "browser local network",
-      () =>
-        checkBrowserLocalNetwork({ platform: process.platform, ...browser }),
-      { timeoutMs: 7000 }
-    )
-  );
 
   // Tools
   results.push(
@@ -662,22 +365,6 @@ const handleDoctor: CommandHandlerFor<typeof doctorSpec> = async ({
     results.push(
       await runCheck(
         s,
-        `resolver:${DEFAULT_NEW_PROJECT_TLD}`,
-        () => checkMacResolverForDomain(DEFAULT_NEW_PROJECT_TLD),
-        { timeoutMs: 1000 }
-      )
-    );
-    results.push(
-      await runCheck(
-        s,
-        `dnsmasq.conf:${DEFAULT_NEW_PROJECT_TLD}`,
-        () => checkMacDnsmasqConfigForDomain(DEFAULT_NEW_PROJECT_TLD),
-        { timeoutMs: 3000 }
-      )
-    );
-    results.push(
-      await runCheck(
-        s,
         `resolver:${DEFAULT_PROJECT_TLD}`,
         () => checkMacResolverForDomain(DEFAULT_PROJECT_TLD),
         {
@@ -722,15 +409,6 @@ const handleDoctor: CommandHandlerFor<typeof doctorSpec> = async ({
     );
   }
 
-  results.push(
-    await runCheck(
-      s,
-      `dns:${DEFAULT_NEW_PROJECT_TLD}`,
-      () => checkHackLocalDns(),
-      { timeoutMs: 3000 }
-    )
-  );
-
   // DNS (can be very slow if wildcard DNS isn't configured)
   const dns = await runCheck(
     s,
@@ -751,7 +429,6 @@ const handleDoctor: CommandHandlerFor<typeof doctorSpec> = async ({
     }
   );
   results.push(oauthDns);
-  await appendCustomDomainDnsChecks({ results, progress: s, defaultDomain });
 
   // Endpoint reachability (best-effort). Skip if DNS isn't set up.
   if (dns.status === "ok") {
@@ -764,7 +441,7 @@ const handleDoctor: CommandHandlerFor<typeof doctorSpec> = async ({
     results.push({
       name: "grafana",
       status: "warn",
-      message: `Skipped reachability (DNS for ${LEGACY_GRAFANA_HOST} not configured)`,
+      message: `Skipped reachability (DNS for ${DEFAULT_GRAFANA_HOST} not configured)`,
       durationMs: 0,
     });
   }
@@ -783,8 +460,7 @@ const handleDoctor: CommandHandlerFor<typeof doctorSpec> = async ({
   );
   results.push(
     await runCheck(s, "caddy local ca", () => checkCaddyLocalCa(), {
-      // The identity probe allows three sequential Docker calls up to 5s each.
-      timeoutMs: 16_000,
+      timeoutMs: 1500,
     })
   );
   if (isMac()) {
@@ -792,14 +468,6 @@ const handleDoctor: CommandHandlerFor<typeof doctorSpec> = async ({
       await runCheck(s, "host tls trust", () => checkMacHostTlsTrust(), {
         timeoutMs: 1500,
       })
-    );
-    results.push(
-      await runCheck(
-        s,
-        SUPERSEDED_ROOTS_CHECK,
-        () => checkSupersededCaddyRoots(),
-        { timeoutMs: 1500 }
-      )
     );
   }
 
@@ -882,11 +550,6 @@ const handleDoctor: CommandHandlerFor<typeof doctorSpec> = async ({
       )
     );
     results.push(
-      await runCheck(s, ENV_KEY_CHECK, () => checkProjectEnvKey({ startDir }), {
-        timeoutMs: 5000,
-      })
-    );
-    results.push(
       await runCheck(
         s,
         "generated files",
@@ -941,23 +604,16 @@ const handleDoctor: CommandHandlerFor<typeof doctorSpec> = async ({
 
   const hasError = results.some((r) => r.status === "error");
 
-  const reported = await reportDoctorResults({
-    results,
-    hasError,
-    json,
-    browserHintTargets: composeDoctorBrowserHintTargets({
-      url: browser.url,
-      defaultDomain,
-    }),
-    renderHuman: async () => {
-      await renderDoctorSummary(results);
-      emitSlowChecksNote(results);
-      await renderMacNote(results);
-    },
-  });
-  if (reported !== null) {
-    return reported;
+  if (json) {
+    return finishDoctorJson({
+      results,
+      hasError,
+    });
   }
+
+  await renderDoctorSummary(results);
+  emitSlowChecksNote(results);
+  await renderMacNote(results);
   if (!args.options.fix) {
     await renderRecoveryGuidance(results);
   }
@@ -978,368 +634,11 @@ const handleDoctor: CommandHandlerFor<typeof doctorSpec> = async ({
   return 0;
 };
 
-/**
- * Compose doctor's browser check concerns the reported origin, else the
- * default domain.
- */
-export function composeDoctorBrowserHintTargets(opts: {
-  readonly url: string | null;
-  readonly defaultDomain: string;
-}): readonly string[] {
-  return [opts.url ?? opts.defaultDomain];
-}
-
-/** Native doctor names a browser target only through `--browser-url`. */
-export function nativeDoctorBrowserHintTargets(
-  url: string | null
-): readonly string[] {
-  return url ? [url] : [];
-}
-
-/**
- * Writes the doctor report, then the macOS Local Network hint for the
- * browser targets. JSON mode writes the envelope to stdout and returns its
- * exit code; the hint goes to stderr afterwards, so the payload is unchanged.
- * Human mode runs `renderHuman` and returns null so the caller continues.
- * `noteHint` defaults to the process-wide hint; tests inject an emitter.
- */
-export async function reportDoctorResults(opts: {
-  readonly results: readonly TimedCheckResult[];
-  readonly hasError: boolean;
-  readonly json: boolean;
-  readonly browserHintTargets: readonly string[];
-  readonly renderHuman: () => Promise<void>;
-  readonly noteHint?: (targets: readonly string[]) => boolean;
-}): Promise<number | null> {
-  const noteHint = opts.noteHint ?? noteBrowserTargetsForLocalNetworkHint;
-  if (opts.json) {
-    const code = finishDoctorJson({
-      results: opts.results,
-      hasError: opts.hasError,
-    });
-    noteHint(opts.browserHintTargets);
-    return code;
-  }
-  await opts.renderHuman();
-  noteHint(opts.browserHintTargets);
-  return null;
-}
-
-function resolveDoctorStartDir(pathOption: string | undefined): string {
-  return resolve(process.cwd(), pathOption ?? ".");
-}
-
-async function handleNativeDoctor(opts: {
-  readonly runtime: NativeRuntimeSelection;
-  /** Where project discovery starts for project-scoped checks. */
-  readonly startDir: string;
-  readonly browser: ReturnType<typeof parseBrowserNetworkOptions>;
-  readonly json: boolean;
-  readonly fix: boolean;
-  readonly migrateEnvConfig: boolean;
-}): Promise<number> {
-  if (opts.migrateEnvConfig) {
-    throw new CliUsageError(
-      "Native doctor does not run the Docker-era env migration; use an installed v4 invocation for that migration."
-    );
-  }
-  const results: TimedCheckResult[] = [];
-  const progress = createDoctorProgress({ json: opts.json });
-  progress.start("Checking the active native HTTPS root...");
-  const hostname = opts.browser.url
-    ? new URL(opts.browser.url).hostname
-    : undefined;
-  if (opts.fix) {
-    results.push(
-      await runCheck(progress, "native ca repair", async () => {
-        if (!isMac()) {
-          return {
-            name: "native ca repair",
-            status: "error",
-            message: "System-keychain repair requires macOS.",
-          };
-        }
-        return await repairNativeCaTrustCheck({
-          progress,
-          runtime: opts.runtime,
-          hostname,
-        });
-      })
-    );
-  }
-  let inspected: Awaited<ReturnType<typeof inspectNativeCaTrust>> | undefined;
-  try {
-    inspected = await inspectNativeCaTrust({ runtime: opts.runtime });
-    results.push({
-      name: "native https owner",
-      status: "ok",
-      message: "Active Caddy listener and exact current root verified.",
-      durationMs: 0,
-    });
-  } catch {
-    results.push({
-      name: "native https owner",
-      status: "warn",
-      message:
-        "No verified active native Caddy listener/root. Trust cannot be inferred from a retained certificate or similarly named keychain entry.",
-      durationMs: 0,
-    });
-  }
-  if (inspected) {
-    results.push({
-      name: "native root trust",
-      status: inspected.trust.trusted ? "ok" : "error",
-      message: inspected.trust.trusted
-        ? "Exact live root passes macOS System-keychain TLS trust."
-        : (inspected.trust.issue ??
-          "Exact live root is not trusted in the macOS System keychain."),
-      durationMs: 0,
-    });
-    results.push({
-      ...supersededRootsCheck(inspected.trust.supersededRoots),
-      durationMs: 0,
-    });
-    if (hostname) {
-      results.push(
-        await runCheck(progress, "native https route", async () => {
-          const after = await inspectNativeCaTrust({
-            runtime: opts.runtime,
-            hostname,
-          });
-          if (
-            after.owner.listenerFingerprint !==
-              inspected.owner.listenerFingerprint ||
-            after.owner.caSha256 !== inspected.owner.caSha256
-          ) {
-            throw new Error(
-              "Native HTTPS owner changed during route verification."
-            );
-          }
-          return {
-            name: "native https route",
-            status: "ok",
-            message: `${hostname} completed a loopback TLS handshake against the exact live root.`,
-          };
-        })
-      );
-    }
-  } else {
-    results.push({
-      name: "native root trust",
-      status: "warn",
-      message: "Skipped until the active Caddy owner and root are verified.",
-      durationMs: 0,
-    });
-  }
-  if (isMac()) {
-    results.push(
-      ...(await checkNativeHackLocalRoute({
-        progress,
-        fix: opts.fix,
-        dependencies: () =>
-          createNativeHackLocalRouteDependencies({ runtime: opts.runtime }),
-      }))
-    );
-  }
-  if (hostname) {
-    results.push(
-      await runCheck(
-        progress,
-        "native host dns",
-        () => checkNativeHostDns({ hostname }),
-        { timeoutMs: 3000 }
-      )
-    );
-  }
-  if (opts.browser.url) {
-    results.push(
-      await runCheck(
-        progress,
-        "browser local network",
-        () =>
-          checkBrowserLocalNetwork({
-            platform: process.platform,
-            ...opts.browser,
-          }),
-        { timeoutMs: 7000 }
-      )
-    );
-  }
-  // The env key audit is runtime-independent; outside a project there is no
-  // key to audit, so native Doctor adds no check there.
-  if (await findProjectContext(opts.startDir).catch(() => null)) {
-    results.push(
-      await runCheck(
-        progress,
-        ENV_KEY_CHECK,
-        () => checkProjectEnvKey({ startDir: opts.startDir }),
-        { timeoutMs: 5000 }
-      )
-    );
-  }
-  progress.stop(`Native doctor checks complete (${results.length} checks)`);
-  const hasError = results.some((result) => result.status === "error");
-  const reported = await reportDoctorResults({
-    results,
-    hasError,
-    json: opts.json,
-    browserHintTargets: nativeDoctorBrowserHintTargets(opts.browser.url),
-    renderHuman: () => renderDoctorSummary(results),
-  });
-  if (reported !== null) {
-    return reported;
-  }
-  if (!opts.browser.url) {
-    note(
-      "Pass --browser-url https://your-app.hack.local --browser-result works|fails|permission-denied to check an exact app route and record a separate browser observation.",
-      "Native HTTPS"
-    );
-  }
-  return hasError ? 1 : 0;
-}
-
-/**
- * The `native ca repair` check body. The spinner is released at the trust
- * confirmation and stays off through the administrator prompt and the sudo -n
- * install, so nothing erases the password prompt.
- */
-export async function repairNativeCaTrustCheck(opts: {
-  readonly progress: DoctorProgress;
-  readonly runtime: NativeRuntimeSelection;
-  readonly hostname: string | undefined;
-  readonly dependencies?: Partial<NativeCaDoctorDependencies>;
-}): Promise<CheckResult> {
-  const confirm = opts.dependencies?.confirm ?? confirmSafe;
-  const repaired = await withTerminalHandoff(
-    opts.progress,
-    async (claim) =>
-      await repairNativeCaTrust({
-        runtime: opts.runtime,
-        hostname: opts.hostname,
-        dependencies: {
-          ...opts.dependencies,
-          confirm: async (prompt) => {
-            claim();
-            return await confirm(prompt);
-          },
-        },
-      })
-  );
-  const messages = {
-    installed: "Verified live native root installed in the System keychain.",
-    "already-trusted": "Verified live native root was already trusted.",
-    declined:
-      "Trust repair requires an interactive confirmation and native administrator prompt.",
-  } as const;
-  return {
-    name: "native ca repair",
-    status: repaired === "declined" ? "warn" : "ok",
-    message: messages[repaired],
-  };
-}
-
-/**
- * Report, and with --fix authorize and apply, the native hack.local route
- * repair. Refusals are warnings with a closed reason; only an unexpected
- * failure is an error.
- */
-export async function checkNativeHackLocalRoute(opts: {
-  readonly progress: DoctorProgress;
-  readonly fix: boolean;
-  readonly dependencies: () => Promise<HackLocalRouteDependencies>;
-}): Promise<readonly TimedCheckResult[]> {
-  const results: TimedCheckResult[] = [];
-  let deps: HackLocalRouteDependencies;
-  try {
-    deps = await opts.dependencies();
-  } catch (error) {
-    return [
-      {
-        name: HACK_LOCAL_ROUTE_CHECK,
-        status: "warn",
-        message: printable(
-          `Unable to inspect the hack.local route: ${error instanceof Error ? error.message : String(error)}`
-        ),
-        durationMs: 0,
-      },
-    ];
-  }
-  if (opts.fix) {
-    results.push(
-      await runCheck(opts.progress, HACK_LOCAL_REPAIR_CHECK, async () => {
-        // Release the terminal before the first prompt and keep it released
-        // through the administrator prompt and every later sudo -n step.
-        const repaired = await withTerminalHandoff(
-          opts.progress,
-          async (claim) =>
-            await repairHackLocalRoute({
-              ...deps,
-              authorize: async (message) => {
-                claim();
-                return await deps.authorize(message);
-              },
-              confirm: async (message) => {
-                claim();
-                return await deps.confirm(message);
-              },
-            })
-        );
-        if (repaired.outcome === "repaired") {
-          return {
-            name: HACK_LOCAL_REPAIR_CHECK,
-            status: "ok",
-            message: printable(
-              `Rewrote "${repaired.receipt.oldLine}" to "${repaired.receipt.newLine}"${
-                repaired.receipt.resolverAction === "create"
-                  ? ` and created ${repaired.receipt.resolverPath}`
-                  : ""
-              }; live DNS verified. Receipt: ${deps.paths.receiptPath}. Undo with: ${HACK_LOCAL_ROLLBACK_COMMAND}`
-            ),
-          };
-        }
-        if (repaired.outcome === "current") {
-          return {
-            name: HACK_LOCAL_REPAIR_CHECK,
-            status: "ok",
-            message:
-              "No repair needed; *.hack.local already routes to the native relay.",
-          };
-        }
-        return {
-          name: HACK_LOCAL_REPAIR_CHECK,
-          status: "warn",
-          message: printable(
-            `Repair refused (${repaired.reason}): ${repaired.detail}`
-          ),
-        };
-      })
-    );
-  }
-  results.push(
-    await runCheck(opts.progress, HACK_LOCAL_ROUTE_CHECK, async () => {
-      const report = reportHackLocalRoute(await inspectHackLocalRoute(deps));
-      return {
-        name: HACK_LOCAL_ROUTE_CHECK,
-        status: report.status === "current" ? "ok" : "warn",
-        message: describeHackLocalRoute(report),
-        hackLocalRoute: report,
-      };
-    })
-  );
-  return results;
-}
-
 export type DoctorJsonCheck = {
   readonly id: string;
   readonly status: CheckStatus;
   readonly detail: string;
   readonly durationMs: number;
-  /** Present only on the superseded Caddy roots check. */
-  readonly supersededRoots?: SupersededRootInventory;
-  /** Present only on the native hack.local route check. */
-  readonly hackLocalRoute?: HackLocalRouteReport;
-  /** Present only on the env key check: closed codes, no key bytes or absolute paths. */
-  readonly envKey?: EnvKeyInspection;
 };
 
 export type DoctorJsonData = {
@@ -1368,13 +667,6 @@ export function buildDoctorJsonData(opts: {
       status: result.status,
       detail: result.message,
       durationMs: result.durationMs,
-      ...(result.supersededRoots
-        ? { supersededRoots: result.supersededRoots }
-        : {}),
-      ...(result.hackLocalRoute
-        ? { hackLocalRoute: result.hackLocalRoute }
-        : {}),
-      ...(result.envKey ? { envKey: result.envKey } : {}),
     })),
     summary: buildDoctorSummaryLines({ results: opts.results }),
     counts,
@@ -1407,7 +699,10 @@ export function assertDoctorOptionCompatibility(opts: {
   }
 }
 
-type DoctorProgress = PausableProgress;
+type DoctorProgress = {
+  start(message?: string): void;
+  stop(message?: string): void;
+};
 
 /**
  * Spinner wrapper that stays silent on non-TTY stdout (piped/automation) so
@@ -1422,15 +717,13 @@ function createDoctorProgress(opts: {
     process.stdout.isTTY === true &&
     (process.env.NO_COLOR ?? "").trim().length === 0;
   if (interactive) {
-    return pausableSpinner(spinner());
+    return spinner();
   }
 
   return {
     start: (_message?: string) => {
       // Quiet in non-TTY/JSON mode.
     },
-    pause: () => undefined,
-    resume: () => undefined,
     stop: (message?: string) => {
       if (!opts.json && message) {
         process.stdout.write(`${message}\n`);
@@ -1857,14 +1150,13 @@ export async function checkCoreDnsForwarding(): Promise<CheckResult> {
 
 export async function checkCaddyLocalCa(): Promise<CheckResult> {
   const paths = getGlobalPaths();
-  const identity = await inspectCaddyCaIdentity({
-    composeFile: paths.caddyCompose,
-    certPath: paths.caddyCaCert,
-  });
+  const exists = await pathExists(paths.caddyCaCert);
   return {
     name: "caddy local ca",
-    status: identity.state === "current" ? "ok" : "warn",
-    message: identity.message,
+    status: exists ? "ok" : "warn",
+    message: exists
+      ? paths.caddyCaCert
+      : "Missing Caddy Local CA (run: hack doctor --fix)",
   };
 }
 
@@ -1920,15 +1212,7 @@ async function checkMacDnsmasqConfigForDomain(
     };
   }
 
-  let ok = dnsmasqConfigHasDomain({ text, domain });
-  if (!ok) {
-    const dynamicIp = await resolveGlobalCaddyIp();
-    ok =
-      dynamicIp !== null &&
-      text
-        .split("\n")
-        .some((line) => line.trim() === `address=/.${domain}/${dynamicIp}`);
-  }
+  const ok = dnsmasqConfigHasDomain({ text, domain });
   return {
     name: `dnsmasq.conf:${domain}`,
     status: ok ? "ok" : "warn",
@@ -1940,7 +1224,7 @@ async function checkMacDnsmasqConfigForDomain(
 
 async function checkMacDnsmasqPort53(): Promise<CheckResult> {
   const ip = await queryDnsARecord({
-    hostname: LEGACY_GRAFANA_HOST,
+    hostname: DEFAULT_GRAFANA_HOST,
     server: "127.0.0.1",
     port: 53,
     timeoutMs: 900,
@@ -1959,7 +1243,7 @@ async function checkMacDnsmasqPort53(): Promise<CheckResult> {
   return {
     name: "dnsmasq:53",
     status: ok ? "ok" : "warn",
-    message: `${LEGACY_GRAFANA_HOST} → ${ip} (from 127.0.0.1:53)`,
+    message: `${DEFAULT_GRAFANA_HOST} → ${ip} (from 127.0.0.1:53)`,
   };
 }
 
@@ -2225,106 +1509,9 @@ function skipDnsName(buf: Buffer, startOffset: number): number {
   return offset;
 }
 
-async function appendCustomDomainDnsChecks(opts: {
-  readonly results: TimedCheckResult[];
-  readonly progress: DoctorProgress;
-  readonly defaultDomain: string;
-}): Promise<void> {
-  const { results, progress, defaultDomain } = opts;
-  const builtInDomains: ReadonlySet<string> = new Set([
-    DEFAULT_NEW_PROJECT_TLD,
-    DEFAULT_PROJECT_TLD,
-    DEFAULT_OAUTH_ALIAS_ROOT,
-  ]);
-  if (builtInDomains.has(defaultDomain)) {
-    return;
-  }
-  if (isMac()) {
-    results.push(
-      await runCheck(progress, `resolver:${defaultDomain}`, () =>
-        checkMacResolverForDomain(defaultDomain)
-      )
-    );
-    results.push(
-      await runCheck(progress, `dnsmasq.conf:${defaultDomain}`, () =>
-        checkMacDnsmasqConfigForDomain(defaultDomain)
-      )
-    );
-  }
-  results.push(
-    await runCheck(
-      progress,
-      `dns:${defaultDomain}`,
-      () => checkHackLocalDns({ domain: defaultDomain }),
-      { timeoutMs: 3000 }
-    )
-  );
-}
-
-/** The native HTTPS relay is bound to IPv4 loopback; other DNS answers cannot reach it. */
-export async function checkNativeHostDns(opts: {
-  readonly hostname: string;
-  readonly lookupAll?: (
-    hostname: string
-  ) => Promise<readonly { address: string }[]>;
-}): Promise<CheckResult> {
-  try {
-    const addresses = await (
-      opts.lookupAll ?? ((hostname) => lookup(hostname, { all: true }))
-    )(opts.hostname);
-    const ready =
-      addresses.length > 0 &&
-      addresses.every((entry) => entry.address === DEFAULT_HOST_DNS_IP);
-    return {
-      name: "native host dns",
-      status: ready ? "ok" : "warn",
-      message: ready
-        ? `${opts.hostname} resolves to the native loopback HTTPS relay.`
-        : `${opts.hostname} has a non-loopback DNS answer; the native HTTPS relay is bound to ${DEFAULT_HOST_DNS_IP}.`,
-    };
-  } catch {
-    return {
-      name: "native host dns",
-      status: "warn",
-      message: `Unable to resolve ${opts.hostname} for the native HTTPS relay.`,
-    };
-  }
-}
-
-/** DNS observation only; it does not assert an HTTP service exists at this probe name. */
-export async function checkHackLocalDns(
-  opts: {
-    readonly lookup?: (host: string) => Promise<{ address: string }>;
-    readonly caddyIp?: () => Promise<string | null>;
-    readonly domain?: string;
-  } = {}
-): Promise<CheckResult> {
-  const domain = opts.domain ?? DEFAULT_NEW_PROJECT_TLD;
-  const host = `doctor.${domain}`;
-  const name = `dns:${domain}`;
-  try {
-    const { address } = await (opts.lookup ?? lookup)(host);
-    let ok = [DEFAULT_CADDY_IP, DEFAULT_HOST_DNS_IP, "::1"].includes(address);
-    if (!ok) {
-      ok = address === (await (opts.caddyIp ?? resolveGlobalCaddyIp)());
-    }
-    return {
-      name,
-      status: ok ? "ok" : "warn",
-      message: `${host} → ${address}`,
-    };
-  } catch {
-    return {
-      name,
-      status: "warn",
-      message: `Unable to resolve ${host} (run: hack global install)`,
-    };
-  }
-}
-
 async function checkHackDns(): Promise<CheckResult> {
   try {
-    const res = await lookup(LEGACY_GRAFANA_HOST);
+    const res = await lookup(DEFAULT_GRAFANA_HOST);
     const ok =
       res.address === DEFAULT_CADDY_IP ||
       res.address === "127.0.0.1" ||
@@ -2332,13 +1519,13 @@ async function checkHackDns(): Promise<CheckResult> {
     return {
       name: `dns:${DEFAULT_PROJECT_TLD}`,
       status: ok ? "ok" : "warn",
-      message: `${LEGACY_GRAFANA_HOST} → ${res.address}`,
+      message: `${DEFAULT_GRAFANA_HOST} → ${res.address}`,
     };
   } catch {
     return {
       name: `dns:${DEFAULT_PROJECT_TLD}`,
       status: "warn",
-      message: `Unable to resolve ${LEGACY_GRAFANA_HOST} (run: hack global install)`,
+      message: `Unable to resolve ${DEFAULT_GRAFANA_HOST} (run: hack global install)`,
     };
   }
 }
@@ -2366,20 +1553,11 @@ async function checkOauthAliasDns(): Promise<CheckResult> {
 }
 
 async function checkGrafanaReachable(): Promise<CheckResult> {
-  const host = await resolveInstalledGrafanaHost();
-  if (!host) {
-    return {
-      name: "grafana",
-      status: "warn",
-      message:
-        "Cannot identify configured Grafana route; review global logging Compose configuration",
-    };
-  }
   // Best-effort; TLS may fail if CA isn't trusted. Don't error on this.
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 2000);
-    const res = await fetch(`http://${host}`, {
+    const res = await fetch(`http://${DEFAULT_GRAFANA_HOST}`, {
       signal: controller.signal,
       redirect: "manual",
     });
@@ -2394,13 +1572,13 @@ async function checkGrafanaReachable(): Promise<CheckResult> {
         res.status === 308
           ? "ok"
           : "warn",
-      message: `http://${host} → ${res.status}`,
+      message: `http://${DEFAULT_GRAFANA_HOST} → ${res.status}`,
     };
   } catch {
     return {
       name: "grafana",
       status: "warn",
-      message: `Unable to reach http://${host} (is global infra up?)`,
+      message: `Unable to reach http://${DEFAULT_GRAFANA_HOST} (is global infra up?)`,
     };
   }
 }
@@ -2955,47 +2133,6 @@ async function checkWorktreeSecretKeys({
   };
 }
 
-const ENV_KEY_CHECK = "env key";
-
-/** Doctor check result for an env key inspection; message and data stay value-free. */
-export function envKeyCheckResult(inspection: EnvKeyInspection): CheckResult {
-  return {
-    name: ENV_KEY_CHECK,
-    status: inspection.status,
-    message: describeEnvKeyInspection(inspection),
-    envKey: inspection,
-  };
-}
-
-/**
- * Read-only key-strength and exposure audit (HACK-1127). `--fix` never acts on
- * it; each finding suggests the exact command instead.
- */
-async function checkProjectEnvKey({
-  startDir,
-}: {
-  readonly startDir: string;
-}): Promise<CheckResult> {
-  const ctx = await findProjectContext(startDir);
-  if (!ctx) {
-    return {
-      name: ENV_KEY_CHECK,
-      status: "warn",
-      message: `Skipped (no ${HACK_PROJECT_DIR_PRIMARY}/ found)`,
-    };
-  }
-  const inspection = await inspectProjectEnvKey({
-    projectRoot: ctx.projectRoot,
-    candidates: await resolveEnvKeyCandidates({
-      projectRoot: ctx.projectRoot,
-    }),
-    env: process.env,
-    uid: typeof process.getuid === "function" ? process.getuid() : null,
-    listTrackedKeyPaths: gitListTrackedKeyPaths,
-  });
-  return envKeyCheckResult(inspection);
-}
-
 /**
  * Warns when hack-generated machine-local files (`.hack/.internal/`,
  * `.hack/.branch/`, `.hack/.env`, `.hack/.env.state.json`,
@@ -3528,7 +2665,6 @@ async function maybeMigrateProjectEnvConfig(opts: {
 
   const removed = await removeLegacyProjectEnvArtifacts({
     paths: cleanupCandidates,
-    projectRoot: project.projectRoot,
   });
   if (removed.length > 0) {
     note(`Removed ${removed.join(", ")}`, "env cleanup");
@@ -3865,104 +3001,42 @@ async function maybeRepairHackd(): Promise<void> {
   }
 }
 
-/**
- * Optional integrations are current when absent: a path is stale only when it
- * exists and lacks the current revision marker, or exists but cannot be read.
- * AGENTS.md/CLAUDE.md are user-owned, so they count only when they carry a
- * Hack start or end marker; a section with only one of the two markers is
- * corrupted and stale. Retained legacy artifacts are always stale.
- */
 export async function inspectDoctorAgentIntegrations(opts: {
   readonly projectRoot: string | null;
   readonly homeDir?: string;
 }): Promise<{ readonly status: "current" | "stale" }> {
   const home = (opts.homeDir ?? process.env.HOME ?? homedir()).trim();
-  const hackOwnedPaths = [
+  const paths = [
     ...(opts.projectRoot
       ? [
           resolve(opts.projectRoot, ".cursor", "rules", "hack.mdc"),
           resolve(opts.projectRoot, ".codex", "skills", "hack-cli", "SKILL.md"),
+          resolve(opts.projectRoot, "AGENTS.md"),
+          resolve(opts.projectRoot, "CLAUDE.md"),
         ]
       : []),
     resolve(home, ".cursor", "rules", "hack.mdc"),
     resolve(home, ".codex", "skills", "hack-cli", "SKILL.md"),
     resolve(home, ".ai", "skills", "hack-cli", "SKILL.md"),
   ];
-  const sharedDocPaths = opts.projectRoot
-    ? [
-        resolve(opts.projectRoot, "AGENTS.md"),
-        resolve(opts.projectRoot, "CLAUDE.md"),
-      ]
-    : [];
   const marker = `Content revision: \`${HACK_AGENT_INTEGRATION_CONTENT_REVISION}\``;
-  const [ownedContents, docContents, legacyProject, legacyUser] =
-    await Promise.all([
-      Promise.all(
-        hackOwnedPaths.map((path) => readOptionalIntegrationText(path))
-      ),
-      Promise.all(
-        sharedDocPaths.map((path) => readOptionalIntegrationText(path))
-      ),
-      opts.projectRoot
-        ? checkLegacyProjectAgentArtifacts({ projectRoot: opts.projectRoot })
-        : Promise.resolve([]),
-      checkLegacyUserAgentArtifacts({ home }),
-    ]);
+  const [contents, legacyProject, legacyUser] = await Promise.all([
+    Promise.all(paths.map((path) => readTextFile(path))),
+    opts.projectRoot
+      ? checkLegacyProjectAgentArtifacts({ projectRoot: opts.projectRoot })
+      : Promise.resolve([]),
+    checkLegacyUserAgentArtifacts({ home }),
+  ]);
   const hasLegacyArtifacts = [...legacyProject, ...legacyUser].some(
     (check) => check.status !== "absent"
   );
-  // Present but unreadable paths are treated as stale rather than absent.
-  const hasStalePath =
-    ownedContents.some(
-      (content) =>
-        content.present &&
-        (content.text === null || !content.text.includes(marker))
-    ) ||
-    docContents.some(
-      (content) =>
-        content.present &&
-        (content.text === null ||
-          isStaleAgentDocSection({ text: content.text, marker }))
-    );
   return {
-    status: hasStalePath || hasLegacyArtifacts ? "stale" : "current",
+    status:
+      contents.every((content) => content?.includes(marker)) &&
+      !hasLegacyArtifacts
+        ? "current"
+        : "stale",
   };
-}
-
-const HACK_AGENT_DOCS_SECTION_START = "<!-- hack:agent-docs:start -->";
-const HACK_AGENT_DOCS_SECTION_END = "<!-- hack:agent-docs:end -->";
-
-/**
- * A user-owned doc with neither Hack marker is not stale. A doc with only one
- * marker is a corrupted managed section; a complete section is stale when it
- * lacks the current revision marker.
- */
-function isStaleAgentDocSection(opts: {
-  readonly text: string;
-  readonly marker: string;
-}): boolean {
-  const hasStart = opts.text.includes(HACK_AGENT_DOCS_SECTION_START);
-  const hasEnd = opts.text.includes(HACK_AGENT_DOCS_SECTION_END);
-  if (!(hasStart || hasEnd)) {
-    return false;
-  }
-  if (!(hasStart && hasEnd)) {
-    return true;
-  }
-  return !opts.text.includes(opts.marker);
-}
-
-async function readOptionalIntegrationText(
-  path: string
-): Promise<
-  | { readonly present: false }
-  | { readonly present: true; readonly text: string | null }
-> {
-  const file = await readOptionalTextFile(path);
-  if (file.kind === "absent") {
-    return { present: false };
-  }
-  return { present: true, text: file.kind === "text" ? file.text : null };
 }
 
 async function resolveDaemonReportForDoctorFix(): Promise<
@@ -4108,17 +3182,19 @@ function commandFailureDetail(input: {
 async function maybeExportCaddyCaCert(opts: {
   readonly paths: ReturnType<typeof getGlobalPaths>;
 }): Promise<void> {
-  const result = await repairCaddyCaExport({
-    composeFile: opts.paths.caddyCompose,
-    certPath: opts.paths.caddyCaCert,
-    confirm: () =>
-      doctorConfirm({
-        message:
-          "Refresh the exported Caddy Local CA from the running Caddy container? (does not change system trust)",
-        initialValue: true,
-      }),
+  if (await pathExists(opts.paths.caddyCaCert)) {
+    return;
+  }
+
+  const okCa = await doctorConfirm({
+    message: "Export Caddy Local CA cert for container trust?",
+    initialValue: true,
   });
-  note(result.message, "Caddy CA export");
+  if (!okCa) {
+    return;
+  }
+
+  await exportCaddyLocalCaCert({ paths: opts.paths });
 }
 
 async function maybeRepairMacHostTlsTrust(): Promise<void> {
@@ -4185,31 +3261,26 @@ async function migrateDnsmasqToContainerIpIfNeeded(): Promise<
 
   const targetIp = await resolvePreferredMacHostDnsTarget();
   const desiredHackLine = `address=/.${DEFAULT_PROJECT_TLD}/${targetIp}`;
-  const desiredNewLine = `address=/.${DEFAULT_NEW_PROJECT_TLD}/${targetIp}`;
   const desiredOauthLine = `address=/.${DEFAULT_OAUTH_ALIAS_ROOT}/${targetIp}`;
   const legacyHostTarget =
     targetIp === DEFAULT_CADDY_IP ? DEFAULT_HOST_DNS_IP : DEFAULT_CADDY_IP;
   const legacyLines = [
     `address=/.${DEFAULT_PROJECT_TLD}/${legacyHostTarget}`,
-    `address=/.${DEFAULT_NEW_PROJECT_TLD}/${legacyHostTarget}`,
     `address=/.${DEFAULT_OAUTH_ALIAS_ROOT}/${legacyHostTarget}`,
     `address=/.${DEFAULT_PROJECT_TLD}/::1`,
-    `address=/.${DEFAULT_NEW_PROJECT_TLD}/::1`,
     `address=/.${DEFAULT_OAUTH_ALIAS_ROOT}/::1`,
   ];
 
   const hasDesired =
-    text.includes(desiredHackLine) &&
-    text.includes(desiredOauthLine) &&
-    text.includes(desiredNewLine);
+    text.includes(desiredHackLine) && text.includes(desiredOauthLine);
   const hasLegacy = legacyLines.some((line) => text.includes(line));
 
-  if (hasDesired && !hasLegacy) {
+  if (hasDesired || !hasLegacy) {
     return "not-needed";
   }
 
   const okMigrate = await doctorConfirm({
-    message: `Update dnsmasq to use ${targetIp} for .${DEFAULT_PROJECT_TLD}, .${DEFAULT_NEW_PROJECT_TLD} and .${DEFAULT_OAUTH_ALIAS_ROOT} host routing? (requires sudo to restart dnsmasq and flush the DNS cache)`,
+    message: `Update dnsmasq to use ${targetIp} for host routing? (requires sudo to restart dnsmasq and flush the DNS cache)`,
     initialValue: true,
     destructive: true,
   });
@@ -4223,10 +3294,7 @@ async function migrateDnsmasqToContainerIpIfNeeded(): Promise<
     updated = updated.replace(legacyLine, "");
   }
   updated = updated.replace(/\n{3,}/g, "\n\n").trim();
-  const missing = [desiredHackLine, desiredNewLine, desiredOauthLine].filter(
-    (line) => !updated.split("\n").includes(line)
-  );
-  updated = `${updated}\n${missing.join("\n")}\n`;
+  updated = `${updated}\n${desiredHackLine}\n${desiredOauthLine}\n`;
 
   await writeTextFileIfChanged(dnsmasqConf, updated);
 
@@ -4338,6 +3406,34 @@ async function resolveCoreDnsServer(): Promise<string | null> {
   return typeof network.IPAddress === "string" && network.IPAddress.length > 0
     ? network.IPAddress
     : null;
+}
+
+async function exportCaddyLocalCaCert(opts: {
+  readonly paths: GlobalPaths;
+}): Promise<void> {
+  const ps = await exec(
+    ["docker", "compose", "-f", opts.paths.caddyCompose, "ps", "-q", "caddy"],
+    {
+      cwd: dirname(opts.paths.caddyCompose),
+      stdin: "ignore",
+    }
+  );
+  const id = ps.exitCode === 0 ? ps.stdout.trim() : "";
+  if (!id) {
+    note("Unable to locate running Caddy container for CA export.", "doctor");
+    return;
+  }
+
+  await ensureDir(dirname(opts.paths.caddyCaCert));
+  await run(
+    [
+      "docker",
+      "cp",
+      `${id}:/data/caddy/pki/authorities/local/root.crt`,
+      opts.paths.caddyCaCert,
+    ],
+    { stdin: "inherit" }
+  );
 }
 
 type GlobalPaths = {
@@ -4638,11 +3734,6 @@ async function renderMacNote(
     title: "macOS resolver setup",
     items: [
       {
-        label: `*.${DEFAULT_NEW_PROJECT_TLD}`,
-        status: "info",
-        detail: `/etc/resolver/${DEFAULT_NEW_PROJECT_TLD} with dnsmasq address=/.${DEFAULT_NEW_PROJECT_TLD}/<reachable-ingress-target> (run: hack global install)`,
-      },
-      {
         label: `*.${DEFAULT_PROJECT_TLD}`,
         status: "info",
         detail: `/etc/resolver/${DEFAULT_PROJECT_TLD} with dnsmasq address=/.${DEFAULT_PROJECT_TLD}/<reachable-ingress-target>`,
@@ -4705,17 +3796,16 @@ async function runCheck(
   opts?: { readonly timeoutMs?: number }
 ): Promise<TimedCheckResult> {
   const start = Date.now();
-  let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     const res = opts?.timeoutMs
       ? await Promise.race([
           fn(),
-          new Promise<CheckResult>((resolve) => {
-            timer = setTimeout(
+          new Promise<CheckResult>((resolve) =>
+            setTimeout(
               () => resolve({ name, status: "warn", message: "Timed out" }),
               opts.timeoutMs
-            );
-          }),
+            )
+          ),
         ])
       : await fn();
     const durationMs = Date.now() - start;
@@ -4725,8 +3815,5 @@ async function runCheck(
     const message = err instanceof Error ? err.message : "Unknown error";
     const res: CheckResult = { name, status: "error", message };
     return { ...res, durationMs };
-  } finally {
-    // A settled check must not keep the process alive until its deadline.
-    clearTimeout(timer);
   }
 }

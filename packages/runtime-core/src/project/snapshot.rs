@@ -1,7 +1,4 @@
 //! Bounded content generations. File bytes are never part of debug or JSON receipts.
-mod generated;
-mod mountpoints;
-mod registry;
 use super::{Diagnostic, SourceSelection, problem, source};
 use crate::CandidateError;
 use serde::{Deserialize, Serialize};
@@ -47,35 +44,6 @@ pub struct Delta {
     pub transferred_file_bytes: u64,
 }
 
-// v2 binds the reviewed selection as well as bytes. Two selections can produce
-// identical entries (for example an ignored mount directory appearing after up),
-// but their immutable publication receipts must not collide. v1 remains readable.
-fn revision_hash(
-    version: u32,
-    selection: &str,
-    entries: &[ContentEntry],
-) -> Result<String, CandidateError> {
-    let invalid = || {
-        problem(
-            "invalid_source_manifest",
-            "Unsupported source revision identity.",
-        )
-    };
-    let encoded = match version {
-        1 => serde_json::to_vec(&(1_u32, entries)),
-        2 if selection.len() == 64
-            && selection
-                .bytes()
-                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) =>
-        {
-            serde_json::to_vec(&(2_u32, selection, entries))
-        }
-        _ => return Err(invalid()),
-    }
-    .map_err(|_| invalid())?;
-    Ok(format!("{:x}", Sha256::digest(encoded)))
-}
-
 impl ContentRevision {
     pub fn validate(&self) -> Result<(), CandidateError> {
         let invalid = || {
@@ -84,10 +52,7 @@ impl ContentRevision {
                 "Source manifest identity, paths or limits are invalid.",
             )
         };
-        if ![1, 2].contains(&self.schema_version)
-            || self.entries.len() > 20_000
-            || self.total_bytes > MAX_BYTES
-        {
+        if self.schema_version != 1 || self.entries.len() > 20_000 || self.total_bytes > MAX_BYTES {
             return Err(invalid());
         }
         if self
@@ -178,10 +143,8 @@ impl ContentRevision {
         ) {
             return Err(invalid());
         }
-        if total != self.total_bytes
-            || revision_hash(self.schema_version, &self.selection_sha256, &self.entries)?
-                != self.revision
-        {
+        let encoded = serde_json::to_vec(&(1_u32, &self.entries)).map_err(|_| invalid())?;
+        if total != self.total_bytes || format!("{:x}", Sha256::digest(encoded)) != self.revision {
             return Err(invalid());
         }
         Ok(())
@@ -388,25 +351,6 @@ fn selection(
     Ok(selection)
 }
 
-/// Capture the reviewed graph artifact, including excluded mountpoint skeletons
-/// and value-free registry templates. A stale review is refused by capture.
-pub fn capture_plan(plan: &super::PlanData) -> Result<Snapshot, CandidateError> {
-    let environment_files = plan
-        .services
-        .values()
-        .flat_map(|service| service.environment_files.iter().cloned())
-        .chain(plan.original_environment_files.iter().cloned())
-        .collect();
-    capture(
-        &plan.source,
-        &environment_files,
-        &plan.source_selection.metadata_sha256,
-    )?
-    .with_mountpoints(plan)?
-    .with_registry(plan)?
-    .with_generated(plan)
-}
-
 /// Capture only an explicitly reviewed selection. The returned content is independent of
 /// later edits; a second inventory rejects detected additions, deletions and ignore changes.
 /// This is not an atomic filesystem snapshot of concurrently modified source.
@@ -415,20 +359,10 @@ pub fn capture(
     environment_files: &BTreeSet<String>,
     expected_selection: &str,
 ) -> Result<Snapshot, CandidateError> {
-    capture_after_inventory(project, environment_files, expected_selection, || {})
-}
-
-fn capture_after_inventory(
-    project: &Path,
-    environment_files: &BTreeSet<String>,
-    expected_selection: &str,
-    after_inventory: impl FnOnce(),
-) -> Result<Snapshot, CandidateError> {
     let selected = selection(project, environment_files)?;
     if selected.metadata_sha256 != expected_selection {
         return Err(changed());
     }
-    after_inventory();
     let root = OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
@@ -497,55 +431,16 @@ fn capture_after_inventory(
     if selection(project, environment_files)?.metadata_sha256 != selected.metadata_sha256 {
         return Err(changed());
     }
-    let revision = revision_hash(2, &selected.metadata_sha256, &entries)?;
+    let encoded = serde_json::to_vec(&(1_u32, &entries))
+        .map_err(|_| problem("serialization_failed", "Cannot encode source revision."))?;
     Ok(Snapshot {
         receipt: ContentRevision {
-            schema_version: 2,
-            revision,
+            schema_version: 1,
+            revision: format!("{:x}", Sha256::digest(encoded)),
             selection_sha256: selected.metadata_sha256,
             total_bytes: total,
             entries,
         },
         files,
     })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::{fs, path::PathBuf};
-
-    struct Fixture(PathBuf);
-    impl Drop for Fixture {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
-        }
-    }
-
-    #[test]
-    fn source_replacement_after_inventory_refuses_capture() {
-        let root = Fixture(std::env::temp_dir().canonicalize().unwrap().join(format!(
-            "hack-snapshot-replacement-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        )));
-        fs::create_dir(&root.0).unwrap();
-        let project = root.0.join("project");
-        fs::create_dir(&project).unwrap();
-        fs::write(project.join("app.js"), "original").unwrap();
-        fs::write(root.0.join("replacement.js"), "replacement").unwrap();
-        let environments = BTreeSet::new();
-        let reviewed = selection(&project, &environments).unwrap().metadata_sha256;
-
-        let result = capture_after_inventory(&project, &environments, &reviewed, || {
-            fs::rename(root.0.join("replacement.js"), project.join("app.js")).unwrap();
-        });
-        assert_eq!(
-            result.err().expect("capture must refuse").code,
-            "source_changed"
-        );
-    }
 }

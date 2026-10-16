@@ -12,9 +12,20 @@ use std::path::{Path, PathBuf};
 pub const PROTOCOL_VERSION: u32 = 1;
 pub const CANDIDATE_VERSION: &str = "5.0.0-dev.6";
 
-mod error;
-mod error_stop_diagnostics;
-pub use error::CandidateError;
+#[derive(Debug, Serialize)]
+pub struct CandidateError {
+    pub code: &'static str,
+    pub message: String,
+}
+
+impl CandidateError {
+    pub fn new(code: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            message: message.into(),
+        }
+    }
+}
 
 #[derive(Debug, Serialize)]
 pub struct Candidate {
@@ -54,53 +65,8 @@ impl Candidate {
         })
     }
 
-    /// Discover an explicitly selected private installed home without creating it.
-    /// `checkout` remains the durable root identifier for existing child/receipt contracts;
-    /// it is independent of the executable's versioned installation directory.
-    pub fn discover_installed(home: &Path) -> Result<Self, CandidateError> {
-        use std::os::unix::fs::MetadataExt;
-        if !home.is_absolute()
-            || home
-                .components()
-                .any(|part| matches!(part, std::path::Component::ParentDir))
-        {
-            return Err(CandidateError::new(
-                "invalid_candidate_home",
-                "Candidate home must be an absolute path without parent traversal.",
-            ));
-        }
-        reject_aliased_state(home)?;
-        let metadata = home.symlink_metadata().map_err(|_| {
-            CandidateError::new(
-                "invalid_candidate_home",
-                "Candidate home must already exist.",
-            )
-        })?;
-        validate_installed_home_metadata(
-            metadata.is_dir(),
-            metadata.uid(),
-            metadata.mode(),
-            unsafe { libc::geteuid() },
-        )?;
-        let mut candidate = Self::discover(home)?;
-        candidate.channel = "installed-candidate";
-        Ok(candidate)
-    }
-
     /// Preview a workspace attachment; it neither reads project configuration nor registers it.
     pub fn plan(&self, project: &Path) -> Result<WorkspacePlan, CandidateError> {
-        self.plan_with_branch(project, None)
-    }
-
-    /// Select a branch-specific namespace without changing legacy unscoped identities.
-    pub fn plan_with_branch(
-        &self,
-        project: &Path,
-        branch: Option<&str>,
-    ) -> Result<WorkspacePlan, CandidateError> {
-        if let Some(branch) = branch {
-            validate_branch(branch)?;
-        }
         let project = canonical_directory(project)?;
         if project.starts_with(&self.state_root) || self.state_root.starts_with(&project) {
             return Err(CandidateError::new(
@@ -111,16 +77,7 @@ impl Candidate {
         let project_text = project.to_str().ok_or_else(|| {
             CandidateError::new("unsupported_path", "Project path must be valid UTF-8.")
         })?;
-        let namespace = if let Some(branch) = branch {
-            let mut digest = Sha256::new();
-            digest.update(b"hack-native-branch-namespace-v1\0");
-            digest.update(project_text.as_bytes());
-            digest.update(b"\0");
-            digest.update(branch.as_bytes());
-            format!("{:x}", digest.finalize())
-        } else {
-            format!("{:x}", Sha256::digest(project_text.as_bytes()))
-        };
+        let namespace = format!("{:x}", Sha256::digest(project_text.as_bytes()));
         let planned_paths = PlannedPaths {
             provider_home: self.state_root.join("run/provider"),
             docker_config: self.state_root.join("run/docker-config"),
@@ -155,25 +112,6 @@ impl Candidate {
             next_checkpoint: "WU03-project-plan; WU01 preview is not an enrollment plan",
         })
     }
-}
-
-/// Branch selectors are canonical DNS labels, not filesystem paths or display names.
-pub fn validate_branch(branch: &str) -> Result<(), CandidateError> {
-    let bytes = branch.as_bytes();
-    if bytes.is_empty()
-        || bytes.len() > 63
-        || !bytes[0].is_ascii_lowercase() && !bytes[0].is_ascii_digit()
-        || !bytes[bytes.len() - 1].is_ascii_lowercase() && !bytes[bytes.len() - 1].is_ascii_digit()
-        || !bytes
-            .iter()
-            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'-')
-    {
-        return Err(CandidateError::new(
-            "invalid_branch",
-            "Branch selector must be a canonical lowercase DNS label of at most 63 bytes.",
-        ));
-    }
-    Ok(())
 }
 
 #[derive(Debug, Serialize)]
@@ -242,42 +180,4 @@ fn reject_aliased_state(path: &Path) -> Result<(), CandidateError> {
         }
     }
     Ok(())
-}
-
-/// Keep ownership validation independently testable without privileged chown operations.
-fn validate_installed_home_metadata(
-    directory: bool,
-    owner: u32,
-    mode: u32,
-    current_user: u32,
-) -> Result<(), CandidateError> {
-    if !directory || owner != current_user || mode & 0o777 != 0o700 {
-        return Err(CandidateError::new(
-            "unsafe_candidate_home",
-            "Candidate home must be a current-user-owned directory with mode 0700.",
-        ));
-    }
-    Ok(())
-}
-
-#[cfg(test)]
-mod installed_home_tests {
-    use super::*;
-
-    #[test]
-    fn refuses_foreign_public_or_non_directory_home() {
-        assert!(validate_installed_home_metadata(true, 501, 0o40700, 501).is_ok());
-        for (directory, owner, mode) in [
-            (true, 502, 0o40700),
-            (true, 501, 0o40755),
-            (false, 501, 0o100700),
-        ] {
-            assert_eq!(
-                validate_installed_home_metadata(directory, owner, mode, 501)
-                    .unwrap_err()
-                    .code,
-                "unsafe_candidate_home"
-            );
-        }
-    }
 }

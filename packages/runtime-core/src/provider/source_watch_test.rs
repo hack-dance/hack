@@ -167,7 +167,6 @@ fn owned_source_watch_live() -> Result<(), CandidateError> {
         project::plan(
             &candidate,
             project::PlanOptions {
-                branch: None,
                 project: &source,
                 compose_file: Path::new(&compose),
                 profiles: &[],

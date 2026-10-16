@@ -1,72 +1,29 @@
-import {
-  createLifecycleProcessController,
-  installLifecycleSignalCleanup,
-  type LifecycleOperationCleanup,
-  resolveLifecycleCommandServiceName,
-  resolveLifecycleCwd,
-  resolveLifecycleSessionName,
-  resolveProjectLifecycleDefinitionHash,
-  stopLifecycleProcessController,
-  wrapLifecyclePersistentCommand as wrapSharedLifecyclePersistentCommand,
-} from "../lib/project-lifecycle-controller.ts";
-
-export function wrapLifecyclePersistentCommand(
-  opts: Parameters<typeof wrapSharedLifecyclePersistentCommand>[0]
-): string {
-  return wrapSharedLifecyclePersistentCommand(opts);
-}
-
+import { rm } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import {
   autocompleteMultiselect,
   confirm,
   isCancel,
+  multiselect,
   note,
   password,
   select,
   text,
 } from "@clack/prompts";
 import { YAML } from "bun";
-import {
-  type InitAgentIntegrationPrompts,
-  runInitAgentIntegrations,
-} from "../agents/init-agent-integrations.ts";
+import { installClaudeHooks } from "../agents/claude.ts";
+import { installCodexSkill } from "../agents/codex-skill.ts";
+import { installCursorRules } from "../agents/cursor.ts";
 import {
   type OnboardingWith,
   parseOnboardingWith,
   runOnboardingHandoff,
 } from "../agents/onboarding-handoff.ts";
-import { buildOnboardingPrompt } from "../agents/onboarding-prompt.ts";
+import {
+  type OnboardingMode,
+  renderOnboardingPrompt,
+} from "../agents/onboarding-prompt.ts";
 import { composeLogBackend, lokiLogBackend } from "../backends/log-backend.ts";
-import { parseNativePreparedBase } from "../backends/native-prepared-base.ts";
-import {
-  nativeDownEnvironment,
-  nativeProjectDown,
-} from "../backends/native-project-down.ts";
-import { adoptNativeLifecycleCleanup } from "../backends/native-project-lifecycle.ts";
-import { parseNativeAllowedHosts } from "../backends/native-project-network.ts";
-import {
-  type NativeProjectPsResult,
-  nativeProjectLogs,
-  nativeProjectPs,
-  requireComposeOperationAvailable,
-} from "../backends/native-project-observe.ts";
-import { nativeProjectOneOff } from "../backends/native-project-one-off.ts";
-import {
-  retireNativeRecoveredPublisher,
-  verifyNativeFrontendRecovery,
-} from "../backends/native-project-recovery.ts";
-import { restartNativeProject } from "../backends/native-project-restart.ts";
-import {
-  nativeRestartSelection,
-  preflightNativeRestart,
-} from "../backends/native-project-restart-preflight.ts";
-import { preflightNativeProjectSource } from "../backends/native-project-source-preflight.ts";
-import {
-  parseNativeHttpsSelection,
-  startNativeProject,
-} from "../backends/native-project-start.ts";
-import { resolveNativeRuntimeSelection } from "../backends/native-runtime-client.ts";
 import { composeRuntimeBackend } from "../backends/runtime-backend.ts";
 import type { CliContext, CommandArgs } from "../cli/command.ts";
 import {
@@ -75,7 +32,6 @@ import {
   defineOption,
   withHandler,
 } from "../cli/command.ts";
-import { resolveRequestedEnvName } from "../cli/env-selection.ts";
 import {
   optBranch,
   optDetach,
@@ -92,12 +48,10 @@ import {
   optTail,
   optUntil,
 } from "../cli/options.ts";
-import { resolveRegisteredProjectOption } from "../cli/project-selector.ts";
 import { globalUp } from "../commands/global.ts";
 import {
   DEFAULT_GRAFANA_HOST,
   DEFAULT_INGRESS_NETWORK,
-  DEFAULT_NEW_PROJECT_TLD,
   DEFAULT_OAUTH_ALIAS_TLD,
   DEFAULT_PROJECT_TLD,
   GLOBAL_CADDY_COMPOSE_FILENAME,
@@ -151,28 +105,13 @@ import {
   HackCliError,
   okResult,
 } from "../lib/cli-result.ts";
-import { withComposeServiceEnvFingerprints } from "../lib/compose-env-fingerprint.ts";
-import { renderManagedComposeEnvOverride } from "../lib/compose-managed-env.ts";
-import {
-  DEFAULT_COMPOSE_STARTUP_TIMEOUT_MS,
-  resolveComposeStartupTimeoutMs,
-} from "../lib/compose-startup-budget.ts";
 import {
   buildStartupIncompleteMessage,
   type ComposeServiceState,
   classifyComposeStartupState,
 } from "../lib/compose-startup-state.ts";
 import { resolveGlobalHackDir } from "../lib/config-paths.ts";
-import { resolveDefaultDomain } from "../lib/default-domain.ts";
-import {
-  resolveDependencyCacheBootstrapServices,
-  resolveDependencyCacheOverride,
-  resolveDependencyCacheProgress,
-} from "../lib/dependency-cache.ts";
-import {
-  bootstrapDependencyCaches,
-  dependencyCacheBootstrapFailure,
-} from "../lib/dependency-cache-bootstrap.ts";
+import { resolveDependencyCacheOverride } from "../lib/dependency-cache.ts";
 import { removeDisposableCacheVolumes } from "../lib/disposable-cache-volumes.ts";
 import { parseDurationMs } from "../lib/duration.ts";
 import {
@@ -185,35 +124,30 @@ import {
   readTextFile,
   writeTextFileIfChanged,
 } from "../lib/fs.ts";
-import { resolveInstalledGrafanaHost } from "../lib/global-service-host.ts";
 import { getString, isRecord } from "../lib/guards.ts";
 import { resolveHackInvocation } from "../lib/hack-cli.ts";
 import { resolveHackEnv, upsertDotEnvValue } from "../lib/hack-env.ts";
 import { canPrompt, requireInteractive } from "../lib/interactivity.ts";
-import { resolveInternalExtraHosts } from "../lib/internal-extra-hosts.ts";
 import { parseJsonLines } from "../lib/json-lines.ts";
 import {
   appendLifecycleLogRecord,
+  type LifecycleStateEntry,
   readLifecycleState,
+  removeLifecycleStateEntry,
+  removeLifecycleStateEntryIfOwned,
   resolveLifecycleComposeProjectName,
   resolveLifecycleLogPath,
+  upsertLifecycleStateEntry,
 } from "../lib/lifecycle-runtime.ts";
 import {
   appendHackHostTrustEnvironment,
   findHackHostTrustBundlePath,
 } from "../lib/local-ca.ts";
-import { noteBrowserTargetsForLocalNetworkHint } from "../lib/local-network-hint.ts";
 import {
   buildLogSelector,
   resolveShouldTryLoki,
   resolveUseLoki,
 } from "../lib/logs.ts";
-import { tryNativeComposeCommand } from "../lib/native-compose-command.ts";
-import { tryNativeComposeOpen } from "../lib/native-compose-open.ts";
-import {
-  createNativeEnvFingerprintEntry,
-  createNativeEnvFingerprintSession,
-} from "../lib/native-env-fingerprint-state.ts";
 import { readNodesRegistry } from "../lib/nodes-registry.ts";
 import {
   parseOpenHostPreference,
@@ -225,10 +159,11 @@ import {
   findProjectContext,
   findRepoRootForInit,
   type ProjectLifecycleCommand,
+  type ProjectLifecycleProcess,
+  parseEnvConfigSelection,
   readProjectConfig,
   readProjectDevHost,
   resolveProjectOauthAliasHost,
-  resolveProjectRouteBaseHosts,
   resolveWorktreeAutoBranch,
   sanitizeBranchSlug,
   sanitizeProjectSlug,
@@ -241,23 +176,33 @@ import {
   resolveProjectEnvConfig,
   selectProjectEnvValuesForExecutionTarget,
 } from "../lib/project-env-config.ts";
+import { resolveProjectExecutionTarget } from "../lib/project-execution.ts";
 import {
-  parseRequestedTarget,
-  resolveProjectExecutionTarget,
-} from "../lib/project-execution.ts";
+  readProcessSnapshot,
+  resolveLifecycleProcessGroupIdsForTmuxState,
+  resolveLifecycleStopProcessGroupIds,
+  terminateLifecycleProcessGroups,
+} from "../lib/project-lifecycle-processes.ts";
 import {
-  assertLegacyProjectDiscovery,
-  assertLegacyProjectInputFamily,
-} from "../lib/project-input-selection.ts";
+  createLifecycleOwnershipToken,
+  inspectLifecycleSession,
+  killInspectedLifecycleSession,
+  killLifecycleSessionWithOwnership,
+  resolveLifecycleDefinitionHash,
+  resolveLifecycleEnvironmentFingerprint,
+} from "../lib/project-lifecycle-sessions.ts";
+import {
+  inspectListeningTcpPorts,
+  resolveLifecycleSingletonDecision,
+} from "../lib/project-lifecycle-singleton.ts";
 import {
   readProjectRuntimeStateEntry,
   removeProjectRuntimeStateEntry,
-  resolveComposeExecStaleEnvWarning,
-  updateProjectRuntimeServiceEnvFingerprints,
   upsertProjectRuntimeStateEntry,
 } from "../lib/project-runtime-state.ts";
 import {
   readProjectsRegistry,
+  resolveRegisteredProjectByName,
   upsertProjectRegistration,
 } from "../lib/projects-registry.ts";
 import {
@@ -282,7 +227,16 @@ import {
   buildWorktreeRetargetWarning,
   findSameCheckoutRetargetConflicts,
 } from "../lib/worktree-runtime-target.ts";
-import { resolveMux } from "../mux/mux-resolver.ts";
+import { upsertAgentDocs } from "../mcp/agent-docs.ts";
+import type { McpTarget } from "../mcp/install.ts";
+import { installMcpConfig } from "../mcp/install.ts";
+import type { MuxBackend, MuxBackendName } from "../mux/mux-backend.ts";
+import {
+  getMuxBackends,
+  resolveDefaultBackendName,
+  resolveMux,
+} from "../mux/mux-resolver.ts";
+import { buildLifecycleSessionName } from "../mux/session-names.ts";
 import {
   renderProjectConfigJson,
   renderProjectEnvConfigYaml,
@@ -296,7 +250,6 @@ import {
   prepareDisposableCachePrune,
   reconcileImplicitDownBranch,
 } from "./project-down-safety.ts";
-import { runNativeProjectExec } from "./project-exec-native.ts";
 
 /** Regex for valid TLD/service/subdomain labels (lowercase alphanumeric with hyphens). */
 const SLUG_LABEL_PATTERN = /^[a-z0-9][a-z0-9-]*$/;
@@ -307,12 +260,14 @@ const LABELS_LINE_PATTERN = /^(\s*)labels:\s*$/;
 /** Regex to extract leading whitespace (indentation). */
 const INDENT_PATTERN = /^(\s*)/;
 
+const LIFECYCLE_COMMAND_PID_WAIT_ATTEMPTS = 50;
+const LIFECYCLE_COMMAND_PID_WAIT_INTERVAL_MS = 20;
+
 /** Regex to match caddy label line in YAML. */
 const CADDY_LABEL_PATTERN = /^(\s*)caddy:\s*(.*)$/;
 
 /** Regex to check if a string starts with a URL scheme (e.g., "http://", "https://"). */
 const URL_SCHEME_PATTERN = /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//;
-const FINALIZATION_ATTEMPT = /^[a-f0-9]{32}$/;
 
 const optManual = defineOption({
   name: "manual",
@@ -342,8 +297,7 @@ const optDevHost = defineOption({
   type: "string",
   long: "--dev-host",
   valueHint: "<host>",
-  description:
-    "DEV_HOST override (new projects use global default_domain, or hack.local)",
+  description: "DEV_HOST override",
 } as const);
 
 const optOauth = defineOption({
@@ -372,7 +326,7 @@ const optWith = defineOption({
   name: "with",
   type: "string",
   long: "--with",
-  valueHint: "<claude|codex>",
+  valueHint: "<claude|codex|both>",
   description:
     "After init, hand the onboarding prompt to an agent CLI (prints the prompt when the CLI is missing or the run is non-interactive)",
 } as const);
@@ -399,28 +353,6 @@ const optYes = defineOption({
   type: "boolean",
   long: "--yes",
   description: "Confirm --prune-caches without prompting",
-} as const);
-const optRecoverFrontend = defineOption({
-  name: "recoverFrontend",
-  type: "boolean",
-  long: "--recover-frontend",
-  description:
-    "Recover an interrupted native frontend after proving its owner and effects are gone",
-} as const);
-const optExpectFinalizationAttempt = defineOption({
-  name: "expectFinalizationAttempt",
-  type: "string",
-  long: "--expect-finalization-attempt",
-  valueHint: "<32-hex>",
-  description: "Require this exact interrupted native frontend attempt",
-} as const);
-const optExpectFrontendPid = defineOption({
-  name: "expectFrontendPid",
-  type: "number",
-  long: "--expect-frontend-pid",
-  valueHint: "<pid>",
-  description:
-    "Previously observed frontend PID (required only for legacy v1 state)",
 } as const);
 
 const initOptions = [
@@ -454,13 +386,6 @@ const downOptions = [
   optPruneCaches,
   optYes,
   optJson,
-  defineOption({
-    name: "recoverNativeCompose",
-    type: "boolean",
-    long: "--recover",
-    description:
-      "Explicitly reconcile an interrupted native Compose stop while retaining data",
-  } as const),
 ] as const;
 const restartOptions = [
   optPath,
@@ -470,9 +395,6 @@ const restartOptions = [
   optProfile,
   optTarget,
   optJson,
-  optRecoverFrontend,
-  optExpectFinalizationAttempt,
-  optExpectFrontendPid,
 ] as const;
 const psOptions = [
   optPath,
@@ -681,6 +603,16 @@ function resolveStartDir(ctx: CliContext, pathOpt: string | undefined): string {
   return pathOpt ? resolve(ctx.cwd, pathOpt) : ctx.cwd;
 }
 
+function resolveRequestedEnvName(input: {
+  readonly envOption: string | undefined;
+}): string | null | undefined {
+  const envName = parseEnvConfigSelection(input.envOption);
+  if (input.envOption !== undefined && envName === undefined) {
+    throw new CliUsageError("Invalid --env value.");
+  }
+  return envName;
+}
+
 export function resolveRequestedComposeServices(opts: {
   readonly requested: readonly string[] | undefined;
   readonly available: readonly string[];
@@ -710,14 +642,21 @@ async function resolveProjectForArgs(opts: {
   readonly projectOpt: string | undefined;
   readonly touchRegistration?: boolean;
 }) {
-  if (opts.pathOpt && opts.projectOpt !== undefined) {
+  if (opts.pathOpt && opts.projectOpt) {
     throw new CliUsageError("Use either --path or --project (not both).");
   }
 
-  if (opts.projectOpt !== undefined) {
-    const fromRegistry = await resolveRegisteredProjectOption({
-      projectOpt: opts.projectOpt,
-    });
+  if (opts.projectOpt) {
+    const name = sanitizeProjectSlug(opts.projectOpt);
+    if (name.length === 0) {
+      throw new CliUsageError("Invalid --project value.");
+    }
+    const fromRegistry = await resolveRegisteredProjectByName({ name });
+    if (!fromRegistry) {
+      throw new CliUsageError(
+        `Unknown project "${name}". Run 'hack init' in that repo (or run 'hack projects' to see registered projects).`
+      );
+    }
     if (opts.touchRegistration !== false) {
       await touchProjectRegistration(fromRegistry);
     }
@@ -911,22 +850,9 @@ function startupSnapshotIsIncomplete(opts: {
   return opts.states.length === 0 || opts.failed.length > 0;
 }
 
-function reportComposeStartupBudget(opts: {
-  readonly startupTimeoutMs: number;
-  readonly detach: boolean;
-  readonly repair?: boolean;
-}): void {
-  if (opts.detach) {
-    logger.step({
-      message: `Compose ${opts.repair ? "repair" : "startup"}: launch and dependency wait (budget ${opts.startupTimeoutMs} ms)`,
-    });
-  }
-}
-
 function composeStartupFailure(
   code: number,
-  action: string,
-  startupTimeoutMs: number
+  action: string
 ): {
   readonly code: "E_COMPOSE_FAILED" | "E_STARTUP_TIMEOUT";
   readonly message: string;
@@ -934,7 +860,7 @@ function composeStartupFailure(
   return code === 124
     ? {
         code: "E_STARTUP_TIMEOUT",
-        message: `${action} exceeded its detached Compose startup budget of ${startupTimeoutMs} ms (HACK_COMPOSE_STARTUP_TIMEOUT_MS). The Compose process group was terminated; inspect hack ps and hack logs before retrying. Containers may still be running. This limit covers Compose launch and dependency waiting, not lifecycle hooks or application readiness.`,
+        message: `${action} timed out; the Compose process group was terminated and the runtime may require repair.`,
       }
     : {
         code: "E_COMPOSE_FAILED",
@@ -1071,7 +997,9 @@ async function buildBranchComposeOverride(opts: {
     return null;
   }
 
-  const baseHosts = resolveProjectRouteBaseHosts(opts);
+  const baseHosts = [opts.devHost, opts.aliasHost].filter(
+    (host): host is string => typeof host === "string" && host.length > 0
+  );
 
   const overrideServices: Record<string, { labels: Record<string, string> }> =
     {};
@@ -1179,6 +1107,47 @@ function cleanupYaml(yaml: string): string {
   return yaml.replaceAll(/: \n/g, ":\n");
 }
 
+async function readInternalExtraHostsFile(opts: {
+  readonly projectDir: string;
+}): Promise<Record<string, string>> {
+  const path = resolve(opts.projectDir, ".internal", "extra-hosts.json");
+  const text = await readTextFile(path);
+  if (!text) {
+    return {};
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return {};
+  }
+
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return {};
+  }
+
+  const out: Record<string, string> = {};
+  for (const [keyRaw, valueRaw] of Object.entries(
+    parsed as Record<string, unknown>
+  )) {
+    const key = keyRaw.trim();
+    if (key.length === 0) {
+      continue;
+    }
+    if (typeof valueRaw !== "string") {
+      continue;
+    }
+    const value = valueRaw.trim();
+    if (value.length === 0) {
+      continue;
+    }
+    out[key] = value;
+  }
+
+  return out;
+}
+
 function ensureTrailingNewline(text: string): string {
   return text.endsWith("\n") ? text : `${text}\n`;
 }
@@ -1257,7 +1226,7 @@ async function maybePromptLegacyProjectEnvMigration(opts: {
   return migrated.legacyDetected;
 }
 
-export async function resolveModernComposeEnvOverrides(opts: {
+async function resolveModernComposeEnvOverrides(opts: {
   readonly project: Awaited<ReturnType<typeof requireProjectContext>>;
   readonly targetServices: readonly string[];
   readonly allServiceNames: readonly string[];
@@ -1298,12 +1267,16 @@ export async function resolveModernComposeEnvOverrides(opts: {
     });
   }
 
-  const text = renderManagedComposeEnvOverride({
-    targetServices: opts.targetServices,
-    globalEnv: modern.globalEnv,
-    serviceEnv: modern.serviceEnv,
-  });
-  if (text === null) {
+  const overrideServices: Record<string, Record<string, unknown>> = {};
+  for (const service of opts.targetServices) {
+    const env = modern.serviceEnv[service] ?? modern.globalEnv;
+    if (Object.keys(env).length === 0) {
+      continue;
+    }
+    overrideServices[service] = { environment: env };
+  }
+
+  if (Object.keys(overrideServices).length === 0) {
     return {
       composeFiles: [],
       env: modern.globalEnv,
@@ -1313,6 +1286,9 @@ export async function resolveModernComposeEnvOverrides(opts: {
     };
   }
 
+  const override = { services: overrideServices };
+  const yaml = YAML.stringify(override, null, 2);
+  const text = ensureTrailingNewline(cleanupYaml(yaml));
   await ensureHackDirGitignore({ projectDir: opts.project.projectDir });
   const overrideDir = resolve(opts.project.projectDir, ".internal");
   await ensureDir(overrideDir);
@@ -1647,6 +1623,27 @@ async function maybePromptToFixMissingEnv(opts: {
   return true;
 }
 
+function resolveLifecycleSessionName(opts: {
+  readonly projectName: string;
+  readonly branch: string | null;
+}): string {
+  return buildLifecycleSessionName(opts);
+}
+
+function resolveLifecycleCwd(opts: {
+  readonly projectRoot: string;
+  readonly cwd: string | undefined;
+}): string {
+  const raw = (opts.cwd ?? "").trim();
+  if (raw.length === 0) {
+    return opts.projectRoot;
+  }
+  if (raw.startsWith("/")) {
+    return raw;
+  }
+  return resolve(opts.projectRoot, raw);
+}
+
 async function runLifecycleCommands(opts: {
   readonly title: string;
   readonly commands: readonly ProjectLifecycleCommand[] | undefined;
@@ -1654,7 +1651,6 @@ async function runLifecycleCommands(opts: {
   readonly env: Readonly<Record<string, string>>;
   readonly projectDir: string;
   readonly composeProject: string;
-  readonly routeStdoutToStderr?: boolean;
   readonly onPersistentCommand?: (opts: {
     readonly command: ProjectLifecycleCommand;
     readonly index: number;
@@ -1720,7 +1716,7 @@ async function runLifecycleCommands(opts: {
 
     const stdoutTask = streamLifecycleCommandOutput({
       stream: proc.stdout,
-      output: opts.routeStdoutToStderr ? "stderr" : "stdout",
+      output: "stdout",
       projectDir: opts.projectDir,
       composeProject: opts.composeProject,
       service: serviceName,
@@ -1756,6 +1752,14 @@ async function runLifecycleCommands(opts: {
   }
   return 0;
 }
+
+type StartedLifecycleProcess = {
+  readonly name: string;
+  readonly windowName: string;
+  readonly logPath: string;
+};
+
+type LifecycleOperationCleanup = () => Promise<void>;
 
 type LifecycleUpResult = {
   readonly code: number;
@@ -1827,8 +1831,7 @@ async function runLifecycleUpBeforeAndProcesses(opts: {
     };
   }
 
-  const starter = createLifecycleProcessController({
-    mux: () => resolveMux({ project: opts.project }),
+  const starter = createLifecycleProcessStarter({
     project: opts.project,
     projectName: opts.projectName,
     branch: opts.branch,
@@ -1881,6 +1884,434 @@ async function runLifecycleUpBeforeAndProcesses(opts: {
   };
 }
 
+function installLifecycleSignalCleanup(opts: {
+  readonly cleanup: LifecycleOperationCleanup | null;
+}): { readonly dispose: () => void } {
+  if (!opts.cleanup) {
+    return { dispose: () => undefined };
+  }
+
+  let handlingSignal = false;
+  const handlers = new Map<NodeJS.Signals, () => void>();
+  const dispose = (): void => {
+    for (const [signal, handler] of handlers) {
+      process.off(signal, handler);
+    }
+    handlers.clear();
+  };
+  for (const signal of ["SIGINT", "SIGTERM"] as const) {
+    const handler = (): void => {
+      if (handlingSignal) {
+        return;
+      }
+      handlingSignal = true;
+      void opts.cleanup?.().finally(() => {
+        dispose();
+        process.kill(process.pid, signal);
+      });
+    };
+    handlers.set(signal, handler);
+    process.on(signal, handler);
+  }
+  return { dispose };
+}
+
+function resolveProjectLifecycleDefinitionHash(opts: {
+  readonly beforeCommands: readonly ProjectLifecycleCommand[] | undefined;
+  readonly processes: readonly ProjectLifecycleProcess[] | undefined;
+  readonly env?: Readonly<Record<string, string>>;
+  readonly effectiveEnvName?: string | null;
+}): string {
+  const persistentBefore = (opts.beforeCommands ?? [])
+    .map((command, index) => ({ command, index }))
+    .filter(({ command }) => command.persistent === true)
+    .map(({ command, index }) => ({
+      kind: "up-before",
+      name: resolveLifecycleCommandServiceName({ command, index }),
+      command: command.command,
+      cwd: command.cwd ?? null,
+      singleton: command.singleton ?? null,
+    }));
+  const processes = (opts.processes ?? []).map((process) => ({
+    kind: "process",
+    name: process.name,
+    command: process.command,
+    cwd: process.cwd ?? null,
+    singleton: process.singleton ?? null,
+  }));
+  const environmentFingerprint = resolveLifecycleEnvironmentFingerprint({
+    effectiveEnvName: opts.effectiveEnvName ?? null,
+    env: opts.env ?? {},
+  });
+  return resolveLifecycleDefinitionHash({
+    definitions: [
+      ...persistentBefore,
+      ...processes,
+      { kind: "environment", fingerprint: environmentFingerprint },
+    ],
+  });
+}
+
+async function reconcileChangedLifecycleBackend(opts: {
+  readonly mux: Awaited<ReturnType<typeof resolveMux>>;
+  readonly entry: LifecycleStateEntry | null;
+  readonly resolvedBackend: MuxBackendName;
+  readonly sessionName: string;
+  readonly projectRoot: string;
+  readonly projectDir: string;
+  readonly composeProject: string;
+  readonly definitionHash: string;
+}): Promise<LifecycleStateEntry | null> {
+  if (!opts.entry || opts.entry.backend === opts.resolvedBackend) {
+    return opts.entry;
+  }
+  const previousBackend = opts.mux.backends.get(opts.entry.backend);
+  if (!previousBackend?.available) {
+    throw new Error(
+      `Lifecycle backend changed to ${opts.resolvedBackend}, but the owned ${opts.entry.backend} session cannot be inspected safely because ${opts.entry.backend} is unavailable.`
+    );
+  }
+  const inspection = await inspectLifecycleSession({
+    backend: previousBackend,
+    entry: opts.entry,
+    expectedSessionName: opts.sessionName,
+    expectedProjectRoot: opts.projectRoot,
+    expectedDefinitionHash: opts.definitionHash,
+  });
+  if (inspection.decision.kind === "block") {
+    throw new Error(inspection.decision.reason);
+  }
+  if (
+    inspection.classification !== "absent" &&
+    !(await killInspectedLifecycleSession({
+      backend: previousBackend,
+      inspection,
+    }))
+  ) {
+    throw new Error(
+      `Failed to stop the owned ${opts.entry.backend} lifecycle session before switching to ${opts.resolvedBackend}.`
+    );
+  }
+  await removeLifecycleStateEntry({
+    projectDir: opts.projectDir,
+    composeProject: opts.composeProject,
+  });
+  return null;
+}
+
+async function replaceInspectedLifecycleSession(opts: {
+  readonly backend: MuxBackend;
+  readonly inspection: Awaited<ReturnType<typeof inspectLifecycleSession>>;
+  readonly sessionName: string;
+  readonly projectDir: string;
+  readonly composeProject: string;
+}): Promise<void> {
+  if (
+    !(await killInspectedLifecycleSession({
+      backend: opts.backend,
+      inspection: opts.inspection,
+    }))
+  ) {
+    throw new Error(
+      `Failed to replace stale lifecycle session: ${opts.sessionName}`
+    );
+  }
+  await removeLifecycleStateEntry({
+    projectDir: opts.projectDir,
+    composeProject: opts.composeProject,
+  });
+}
+
+function createLifecycleProcessStarter(opts: {
+  readonly project: Awaited<ReturnType<typeof requireProjectContext>>;
+  readonly projectName: string;
+  readonly branch: string | null;
+  readonly env: Readonly<Record<string, string>>;
+  readonly composeProject: string;
+  readonly definitionHash: string;
+}): {
+  readonly sessionName: string;
+  startFromCommand: (opts: {
+    readonly command: ProjectLifecycleCommand;
+    readonly serviceName: string;
+  }) => Promise<void>;
+  startMany: (opts: {
+    readonly processes: readonly ProjectLifecycleProcess[];
+  }) => Promise<void>;
+  finalize: () => Promise<void>;
+  abort: () => Promise<void>;
+  hasStarted: () => boolean;
+  getOperationCleanup: () => LifecycleOperationCleanup | null;
+  getSignalCleanup: () => { readonly dispose: () => void } | null;
+} {
+  const sessionName = resolveLifecycleSessionName({
+    projectName: opts.projectName,
+    branch: opts.branch,
+  });
+  const startedProcesses: StartedLifecycleProcess[] = [];
+  let backendName: MuxBackendName | null = null;
+  let sessionReady = false;
+  let sessionDispositionResolved = false;
+  let createdOwnershipToken: string | null = null;
+  let adoptedEntry: LifecycleStateEntry | null = null;
+  let operationSignalCleanup: { readonly dispose: () => void } | null = null;
+  let sessionCreationSettled: Promise<void> = Promise.resolve();
+  let nextIndex = 0;
+
+  const resolveSessionDisposition = async (): Promise<void> => {
+    if (sessionDispositionResolved) {
+      return;
+    }
+    const mux = await resolveMux({ project: opts.project });
+    const resolvedBackend = resolveDefaultBackendName({
+      mode: mux.mode,
+      backends: mux.backends,
+    });
+    if (!resolvedBackend) {
+      throw new Error(
+        [
+          "No session mux backend available for lifecycle processes.",
+          "Install tmux or zellij, or set sessions.mux to auto|tmux|zellij.",
+        ].join("\n")
+      );
+    }
+    const backend = mux.backends.get(resolvedBackend);
+    if (!backend?.available) {
+      throw new Error(`${resolvedBackend} is not available`);
+    }
+    const entries = await readLifecycleState({
+      projectDir: opts.project.projectDir,
+    });
+    const persistedEntry =
+      entries.find(
+        (candidate) => candidate.composeProject === opts.composeProject
+      ) ?? null;
+    const entry = await reconcileChangedLifecycleBackend({
+      mux,
+      entry: persistedEntry,
+      resolvedBackend,
+      sessionName,
+      projectRoot: opts.project.projectRoot,
+      projectDir: opts.project.projectDir,
+      composeProject: opts.composeProject,
+      definitionHash: opts.definitionHash,
+    });
+    backendName = resolvedBackend;
+    const inspection = await inspectLifecycleSession({
+      backend,
+      entry,
+      expectedSessionName: sessionName,
+      expectedProjectRoot: opts.project.projectRoot,
+      expectedDefinitionHash: opts.definitionHash,
+    });
+    if (inspection.decision.kind === "block") {
+      throw new Error(inspection.decision.reason);
+    }
+    if (inspection.decision.kind === "adopt") {
+      adoptedEntry = inspection.decision.entry;
+      startedProcesses.push(...inspection.decision.entry.processes);
+      sessionReady = true;
+      sessionDispositionResolved = true;
+      return;
+    }
+    if (inspection.decision.kind === "replace") {
+      await replaceInspectedLifecycleSession({
+        backend,
+        inspection,
+        sessionName,
+        projectDir: opts.project.projectDir,
+        composeProject: opts.composeProject,
+      });
+    }
+    sessionDispositionResolved = true;
+  };
+
+  const ensureSession = async (): Promise<void> => {
+    await resolveSessionDisposition();
+    if (sessionReady) {
+      return;
+    }
+    const backend = backendName
+      ? (await resolveMux({ project: opts.project })).backends.get(backendName)
+      : null;
+    if (!(backendName && backend?.available)) {
+      throw new Error("Lifecycle mux backend became unavailable");
+    }
+    const ownershipToken = createLifecycleOwnershipToken();
+    let settleSessionCreation = (): void => undefined;
+    sessionCreationSettled = new Promise<void>((resolvePromise) => {
+      settleSessionCreation = resolvePromise;
+    });
+    operationSignalCleanup = installLifecycleSignalCleanup({
+      cleanup: starterAbort,
+    });
+    const pendingEntry: LifecycleStateEntry = {
+      composeProject: opts.composeProject,
+      projectName: opts.projectName,
+      branch: opts.branch,
+      sessionName,
+      backend: backendName,
+      ownershipToken,
+      definitionHash: opts.definitionHash,
+      processes: [],
+      updatedAt: new Date().toISOString(),
+    };
+    createdOwnershipToken = ownershipToken;
+    try {
+      // Persist ownership before creating the mux session. If the CLI is
+      // SIGKILLed after session creation, the next up can still prove that
+      // the empty session belongs to this Compose instance and replace it.
+      await upsertLifecycleStateEntry({
+        projectDir: opts.project.projectDir,
+        entry: pendingEntry,
+      });
+      const created = await backend.createSession({
+        name: sessionName,
+        cwd: opts.project.projectRoot,
+        lifecycleOwnerToken: ownershipToken,
+      });
+      if (!created.ok) {
+        throw new Error(`Failed to create lifecycle session: ${sessionName}`);
+      }
+      if (backendName === "tmux") {
+        for (const [key, value] of Object.entries(opts.env)) {
+          await exec(
+            ["tmux", "set-environment", "-t", sessionName, key, value],
+            {
+              stdin: "ignore",
+            }
+          );
+        }
+      }
+    } catch (error: unknown) {
+      await removeLifecycleStateEntryIfOwned({
+        projectDir: opts.project.projectDir,
+        composeProject: opts.composeProject,
+        ownershipToken,
+      });
+      createdOwnershipToken = null;
+      throw error;
+    } finally {
+      settleSessionCreation();
+    }
+    sessionReady = true;
+  };
+
+  const startProcess = async (
+    process: ProjectLifecycleProcess
+  ): Promise<void> => {
+    await resolveSessionDisposition();
+    if (adoptedEntry?.processes.some((entry) => entry.name === process.name)) {
+      return;
+    }
+    const singletonDecision = await resolveLifecycleSingletonDecisionForProcess(
+      {
+        process,
+        projectDir: opts.project.projectDir,
+        composeProject: opts.composeProject,
+      }
+    );
+    if (singletonDecision.kind === "adopt") {
+      logger.info({ message: singletonDecision.message });
+      return;
+    }
+    if (singletonDecision.kind === "fail") {
+      throw new Error(singletonDecision.message);
+    }
+
+    await ensureSession();
+    const started = await startLifecycleProcess({
+      backend: backendName as MuxBackendName,
+      sessionName,
+      projectRoot: opts.project.projectRoot,
+      env: opts.env,
+      index: nextIndex,
+      process,
+      projectDir: opts.project.projectDir,
+      composeProject: opts.composeProject,
+    });
+    nextIndex += 1;
+    startedProcesses.push(started);
+  };
+
+  return {
+    sessionName,
+    startFromCommand: async ({ command, serviceName }) => {
+      await startProcess({
+        name: serviceName,
+        command: command.command,
+        ...(command.cwd ? { cwd: command.cwd } : {}),
+        ...(command.singleton ? { singleton: command.singleton } : {}),
+      });
+    },
+    startMany: async ({ processes }) => {
+      await resolveSessionDisposition();
+      for (const process of processes) {
+        await startProcess(process);
+      }
+    },
+    finalize: async () => {
+      if (startedProcesses.length === 0 || !backendName) {
+        await removeLifecycleStateEntry({
+          projectDir: opts.project.projectDir,
+          composeProject: opts.composeProject,
+        });
+        return;
+      }
+      const ownershipToken =
+        createdOwnershipToken ?? adoptedEntry?.ownershipToken;
+      await upsertLifecycleStateEntry({
+        projectDir: opts.project.projectDir,
+        entry: {
+          composeProject: opts.composeProject,
+          projectName: opts.projectName,
+          branch: opts.branch,
+          sessionName,
+          backend: backendName,
+          ...(ownershipToken ? { ownershipToken } : {}),
+          definitionHash: opts.definitionHash,
+          processes: startedProcesses,
+          updatedAt: new Date().toISOString(),
+        },
+      });
+    },
+    abort: async () => {
+      await starterAbort();
+      operationSignalCleanup?.dispose();
+    },
+    hasStarted: () => startedProcesses.length > 0,
+    getOperationCleanup: () =>
+      createdOwnershipToken
+        ? async () => {
+            await starterAbort();
+          }
+        : null,
+    getSignalCleanup: () => operationSignalCleanup,
+  };
+
+  async function starterAbort(): Promise<void> {
+    await sessionCreationSettled;
+    if (!(createdOwnershipToken && backendName)) {
+      return;
+    }
+    const backend = (await resolveMux({ project: opts.project })).backends.get(
+      backendName
+    );
+    if (backend?.available) {
+      await killLifecycleSessionWithOwnership({
+        backend,
+        sessionName,
+        ownershipToken: createdOwnershipToken,
+      });
+    }
+    await removeLifecycleStateEntryIfOwned({
+      projectDir: opts.project.projectDir,
+      composeProject: opts.composeProject,
+      ownershipToken: createdOwnershipToken,
+    });
+  }
+}
+
 async function startLifecycleProcesses(opts: {
   readonly project: Awaited<ReturnType<typeof requireProjectContext>>;
   readonly cfg: Awaited<ReturnType<typeof readProjectConfig>>;
@@ -1907,8 +2338,7 @@ async function startLifecycleProcesses(opts: {
     }
   }
 
-  const starter = createLifecycleProcessController({
-    mux: () => resolveMux({ project: opts.project }),
+  const starter = createLifecycleProcessStarter({
     project: opts.project,
     projectName: opts.projectName,
     branch: opts.branch,
@@ -1930,6 +2360,43 @@ async function startLifecycleProcesses(opts: {
     }
     throw new Error("Failed to start lifecycle processes");
   }
+}
+
+async function resolveLifecycleSingletonDecisionForProcess(opts: {
+  readonly process: ProjectLifecycleProcess;
+  readonly projectDir: string;
+  readonly composeProject: string;
+}): Promise<
+  | ReturnType<typeof resolveLifecycleSingletonDecision>
+  | Promise<ReturnType<typeof resolveLifecycleSingletonDecision>>
+> {
+  if (!opts.process.singleton) {
+    return { kind: "start" };
+  }
+
+  const occupiedPorts = await inspectListeningTcpPorts({
+    ports: opts.process.singleton.ports,
+  });
+  const decision = resolveLifecycleSingletonDecision({
+    singleton: opts.process.singleton,
+    occupiedPorts,
+    serviceName: opts.process.name,
+  });
+
+  if (decision.kind === "adopt") {
+    await appendLifecycleLogRecord({
+      projectDir: opts.projectDir,
+      composeProject: opts.composeProject,
+      record: {
+        timestamp: new Date().toISOString(),
+        service: opts.process.name,
+        stream: "meta",
+        message: `[adopt] ${decision.message}`,
+      },
+    });
+  }
+
+  return decision;
 }
 
 async function streamLifecycleCommandOutput(opts: {
@@ -1961,6 +2428,148 @@ async function streamLifecycleCommandOutput(opts: {
   }
 }
 
+async function startLifecycleProcess(opts: {
+  readonly backend: MuxBackendName;
+  readonly sessionName: string;
+  readonly projectRoot: string;
+  readonly env: Readonly<Record<string, string>>;
+  readonly index: number;
+  readonly process: ProjectLifecycleProcess;
+  readonly projectDir: string;
+  readonly composeProject: string;
+}): Promise<{
+  readonly name: string;
+  readonly windowName: string;
+  readonly logPath: string;
+  readonly panePid?: number;
+  readonly processGroupId?: number;
+}> {
+  const windowNameRaw = sanitizeBranchSlug(opts.process.name);
+  const windowName =
+    windowNameRaw.length > 0 ? windowNameRaw : `proc-${opts.index + 1}`;
+  const cwd = resolveLifecycleCwd({
+    projectRoot: opts.projectRoot,
+    cwd: opts.process.cwd,
+  });
+  const logPath = resolveLifecycleLogPath({
+    projectDir: opts.projectDir,
+    composeProject: opts.composeProject,
+  });
+  if (opts.backend === "tmux") {
+    const commandPidPath = `${logPath}.${windowName}.pid`;
+    await ensureDir(dirname(commandPidPath));
+    await rm(commandPidPath, { force: true });
+    const wrappedCommand = wrapLifecyclePersistentCommand({
+      command: opts.process.command,
+      commandPidPath,
+      logPath,
+      serviceName: opts.process.name,
+    });
+    const result = await exec(
+      [
+        "tmux",
+        "new-window",
+        "-t",
+        opts.sessionName,
+        "-n",
+        windowName,
+        "-c",
+        cwd,
+        "sh",
+        "-c",
+        wrappedCommand,
+      ],
+      { stdin: "ignore" }
+    );
+    if (result.exitCode !== 0) {
+      await rm(commandPidPath, { force: true });
+      throw new Error(
+        `Failed to start lifecycle process "${opts.process.name}": ${result.stderr.trim()}`
+      );
+    }
+    const panePids = await readTmuxPanePids({
+      sessionName: opts.sessionName,
+      windowName,
+    });
+    const panePid = panePids[0];
+    let processGroupId: number | null = null;
+    try {
+      processGroupId = await waitForLifecycleCommandProcessGroupId({
+        commandPidPath,
+      });
+    } finally {
+      await rm(commandPidPath, { force: true });
+    }
+    if (!processGroupId && panePid !== undefined) {
+      processGroupId = await readProcessGroupIdForPid({ pid: panePid });
+    }
+    await appendLifecycleLogRecord({
+      projectDir: opts.projectDir,
+      composeProject: opts.composeProject,
+      record: {
+        timestamp: new Date().toISOString(),
+        service: opts.process.name,
+        stream: "meta",
+        message: `[start] process launched in tmux:${opts.sessionName}:${windowName}`,
+      },
+    });
+    return {
+      name: opts.process.name,
+      windowName,
+      logPath,
+      ...(panePid !== undefined ? { panePid } : {}),
+      ...(processGroupId ? { processGroupId } : {}),
+    };
+  }
+
+  const wrappedCommand = wrapLifecyclePersistentCommand({
+    command: opts.process.command,
+    commandPidPath: null,
+    logPath,
+    serviceName: opts.process.name,
+  });
+  const result = await exec(
+    [
+      "zellij",
+      "--session",
+      opts.sessionName,
+      "run",
+      "--close-on-exit",
+      "--name",
+      windowName,
+      "--",
+      "sh",
+      "-c",
+      wrappedCommand,
+    ],
+    {
+      stdin: "ignore",
+      cwd,
+      env: { ...opts.env },
+    }
+  );
+  if (result.exitCode !== 0) {
+    throw new Error(
+      `Failed to start lifecycle process "${opts.process.name}": ${result.stderr.trim()}`
+    );
+  }
+  await appendLifecycleLogRecord({
+    projectDir: opts.projectDir,
+    composeProject: opts.composeProject,
+    record: {
+      timestamp: new Date().toISOString(),
+      service: opts.process.name,
+      stream: "meta",
+      message: `[start] process launched in zellij:${opts.sessionName}:${windowName}`,
+    },
+  });
+  return {
+    name: opts.process.name,
+    windowName,
+    logPath,
+  };
+}
+
 async function stopLifecycleProcesses(opts: {
   readonly project: Awaited<ReturnType<typeof requireProjectContext>>;
   readonly cfg: Awaited<ReturnType<typeof readProjectConfig>>;
@@ -1968,12 +2577,77 @@ async function stopLifecycleProcesses(opts: {
   readonly branch: string | null;
   readonly composeProject: string;
 }): Promise<void> {
-  await stopLifecycleProcessController({
-    ...opts,
-    definitionHash: resolveProjectLifecycleDefinitionHash({
+  const sessionName = resolveLifecycleSessionName({
+    projectName: opts.projectName,
+    branch: opts.branch,
+  });
+  const lifecycleEntries = await readLifecycleState({
+    projectDir: opts.project.projectDir,
+  });
+  const lifecycleEntry =
+    lifecycleEntries.find(
+      (entry) => entry.composeProject === opts.composeProject
+    ) ?? null;
+
+  const backend = lifecycleEntry
+    ? getMuxBackends().get(lifecycleEntry.backend)
+    : null;
+  if (!lifecycleEntry) {
+    return;
+  }
+  if (!backend?.available) {
+    throw new Error(
+      `Lifecycle backend ${lifecycleEntry.backend} is unavailable; refusing unverified session cleanup`
+    );
+  }
+
+  const definitionHash =
+    lifecycleEntry.definitionHash ??
+    resolveProjectLifecycleDefinitionHash({
       beforeCommands: opts.cfg.lifecycle?.up?.before,
       processes: opts.cfg.lifecycle?.processes,
+    });
+  const inspection = await inspectLifecycleSession({
+    backend,
+    entry: lifecycleEntry,
+    expectedSessionName: sessionName,
+    expectedProjectRoot: opts.project.projectRoot,
+    expectedDefinitionHash: definitionHash,
+  });
+  if (inspection.decision.kind === "block") {
+    throw new Error(inspection.decision.reason);
+  }
+
+  const matchedLiveSession = inspection.classification !== "absent";
+  if (matchedLiveSession && backend.name === "tmux") {
+    await interruptLifecycleTmuxProcesses({
+      sessionName,
+      lifecycleEntry,
+    });
+  }
+  if (matchedLiveSession) {
+    const killed = lifecycleEntry.ownershipToken
+      ? await killLifecycleSessionWithOwnership({
+          backend,
+          sessionName,
+          ownershipToken: lifecycleEntry.ownershipToken,
+        })
+      : (await backend.killSession({ name: sessionName })).exitCode === 0;
+    if (!killed) {
+      throw new Error(`Failed to stop owned lifecycle session: ${sessionName}`);
+    }
+  }
+
+  await terminateLifecycleProcessGroups({
+    processGroupIds: await resolveLifecycleStopProcessGroupIdsForEntry({
+      matchedLiveSession,
+      lifecycleEntry,
     }),
+  });
+
+  await removeLifecycleStateEntry({
+    projectDir: opts.project.projectDir,
+    composeProject: opts.composeProject,
   });
 }
 
@@ -1989,6 +2663,214 @@ async function stopLifecycleProcessesBestEffort(
         : "Failed to stop lifecycle processes";
     logger.warn({ message });
   }
+}
+
+async function interruptLifecycleTmuxProcesses(opts: {
+  readonly sessionName: string;
+  readonly lifecycleEntry: LifecycleStateEntry | null;
+}): Promise<void> {
+  const processWindows = opts.lifecycleEntry?.processes ?? [];
+  if (processWindows.length === 0) {
+    return;
+  }
+
+  for (const processInfo of processWindows) {
+    await exec(
+      [
+        "tmux",
+        "send-keys",
+        "-t",
+        `${opts.sessionName}:${processInfo.windowName}`,
+        "C-c",
+      ],
+      { stdin: "ignore" }
+    );
+  }
+
+  await Bun.sleep(750);
+  await terminateLifecycleProcessGroups({
+    processGroupIds: await resolveLifecycleProcessGroupIds({
+      sessionName: opts.sessionName,
+      lifecycleEntry: opts.lifecycleEntry,
+    }),
+  });
+}
+
+async function readTmuxPanePids(opts: {
+  readonly sessionName: string;
+  readonly windowName: string;
+}): Promise<number[]> {
+  const result = await exec(
+    [
+      "tmux",
+      "list-panes",
+      "-t",
+      `${opts.sessionName}:${opts.windowName}`,
+      "-F",
+      "#{pane_pid}",
+    ],
+    { stdin: "ignore" }
+  );
+  if (result.exitCode !== 0) {
+    return [];
+  }
+  return result.stdout
+    .split("\n")
+    .map((line) => Number.parseInt(line.trim(), 10))
+    .filter((value) => Number.isInteger(value) && value > 0);
+}
+
+async function readProcessGroupIdForPid(opts: {
+  readonly pid: number;
+}): Promise<number | null> {
+  const result = await exec(["ps", "-o", "pgid=", "-p", String(opts.pid)], {
+    stdin: "ignore",
+  });
+  if (result.exitCode !== 0) {
+    return null;
+  }
+  const parsed = Number.parseInt(result.stdout.trim(), 10);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+}
+
+async function waitForLifecycleCommandProcessGroupId(opts: {
+  readonly commandPidPath: string;
+}): Promise<number | null> {
+  for (
+    let attempt = 0;
+    attempt < LIFECYCLE_COMMAND_PID_WAIT_ATTEMPTS;
+    attempt += 1
+  ) {
+    const commandPidRaw = await readTextFile(opts.commandPidPath);
+    const commandPid = Number.parseInt(commandPidRaw?.trim() ?? "", 10);
+    if (Number.isInteger(commandPid) && commandPid > 1) {
+      const processGroupId = await readProcessGroupIdForPid({
+        pid: commandPid,
+      });
+      if (processGroupId) {
+        return processGroupId;
+      }
+    }
+    await Bun.sleep(LIFECYCLE_COMMAND_PID_WAIT_INTERVAL_MS);
+  }
+  return null;
+}
+
+async function resolveLifecycleProcessGroupIds(opts: {
+  readonly sessionName: string;
+  readonly lifecycleEntry: LifecycleStateEntry | null;
+}): Promise<number[]> {
+  const panePidsByWindow = new Map<string, readonly number[]>();
+  for (const processInfo of opts.lifecycleEntry?.processes ?? []) {
+    const panePids = await readTmuxPanePids({
+      sessionName: opts.sessionName,
+      windowName: processInfo.windowName,
+    });
+    panePidsByWindow.set(processInfo.windowName, panePids);
+  }
+
+  return resolveLifecycleProcessGroupIdsForTmuxState({
+    lifecycleEntry: opts.lifecycleEntry,
+    panePidsByWindow,
+    snapshot: await readProcessSnapshot(),
+  });
+}
+
+async function resolveLifecycleStopProcessGroupIdsForEntry(opts: {
+  readonly matchedLiveSession: boolean;
+  readonly lifecycleEntry: LifecycleStateEntry | null;
+}): Promise<number[]> {
+  return resolveLifecycleStopProcessGroupIds({
+    matchedLiveSession: opts.matchedLiveSession,
+    lifecycleEntry: opts.lifecycleEntry,
+    snapshot: await readProcessSnapshot(),
+  });
+}
+
+function resolveLifecycleCommandServiceName(opts: {
+  readonly command: ProjectLifecycleCommand;
+  readonly index: number;
+}): string {
+  const fromName = (opts.command.name ?? "").trim();
+  if (fromName.length > 0) {
+    return fromName;
+  }
+  return `hook-${opts.index + 1}`;
+}
+
+export function wrapLifecyclePersistentCommand(opts: {
+  readonly command: string;
+  readonly commandPidPath: string | null;
+  readonly logPath: string;
+  readonly serviceName: string;
+}): string {
+  const logPath = shellSingleQuote(opts.logPath);
+  const service = shellSingleQuote(opts.serviceName);
+  const command = shellSingleQuote(opts.command);
+  const commandPidPath =
+    opts.commandPidPath === null ? null : shellSingleQuote(opts.commandPidPath);
+  return [
+    `HACK_LIFECYCLE_LOG=${logPath}`,
+    `HACK_LIFECYCLE_SERVICE=${service}`,
+    `HACK_LIFECYCLE_COMMAND=${command}`,
+    ...(commandPidPath
+      ? [`HACK_LIFECYCLE_COMMAND_PID_FILE=${commandPidPath}`]
+      : []),
+    `fifo="$(mktemp -u "\${TMPDIR:-/tmp}/hack-lifecycle.XXXXXX")"`,
+    'mkfifo "$fifo"',
+    "cleanup_lifecycle() {",
+    "  trap - EXIT INT TERM HUP",
+    `  if [ -n "\${cmd_pid:-}" ]; then`,
+    "    if [ -x /bin/kill ]; then",
+    '      /bin/kill -TERM -- "-$cmd_pid" 2>/dev/null || /bin/kill "$cmd_pid" 2>/dev/null || true',
+    "    elif [ -x /usr/bin/kill ]; then",
+    '      /usr/bin/kill -TERM -- "-$cmd_pid" 2>/dev/null || /usr/bin/kill "$cmd_pid" 2>/dev/null || true',
+    "    else",
+    '      kill "$cmd_pid" 2>/dev/null || true',
+    "    fi",
+    '    wait "$cmd_pid" 2>/dev/null || true',
+    "  fi",
+    `  if [ -n "\${reader_pid:-}" ]; then`,
+    '    wait "$reader_pid" 2>/dev/null || true',
+    "  fi",
+    ...(commandPidPath ? ['  rm -f "$HACK_LIFECYCLE_COMMAND_PID_FILE"'] : []),
+    '  rm -f "$fifo"',
+    "}",
+    'trap "cleanup_lifecycle; exit 130" INT TERM HUP',
+    'trap "cleanup_lifecycle" EXIT',
+    "( while IFS= read -r line; do",
+    '    printf "%s\\n" "$line"',
+    '    printf \'%s\\t%s\\tstdout\\t%s\\n\' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$HACK_LIFECYCLE_SERVICE" "$line" >> "$HACK_LIFECYCLE_LOG"',
+    '  done < "$fifo" ) &',
+    "reader_pid=$!",
+    "if command -v python3 >/dev/null 2>&1; then",
+    ...(commandPidPath
+      ? [
+          '  python3 -c \'import os, sys; os.setsid(); pid_file = open(sys.argv[2], "w"); pid_file.write(str(os.getpid())); pid_file.close(); os.execvp("sh", ["sh", "-c", sys.argv[1]])\' "$HACK_LIFECYCLE_COMMAND" "$HACK_LIFECYCLE_COMMAND_PID_FILE" >"$fifo" 2>&1 &',
+        ]
+      : [
+          '  python3 -c \'import os, sys; os.setsid(); os.execvp("sh", ["sh", "-c", sys.argv[1]])\' "$HACK_LIFECYCLE_COMMAND" >"$fifo" 2>&1 &',
+        ]),
+    "  cmd_pid=$!",
+    "else",
+    '  sh -c "$HACK_LIFECYCLE_COMMAND" >"$fifo" 2>&1 &',
+    "  cmd_pid=$!",
+    ...(commandPidPath
+      ? ['  printf "%s\\n" "$cmd_pid" > "$HACK_LIFECYCLE_COMMAND_PID_FILE"']
+      : []),
+    "fi",
+    'wait "$cmd_pid"',
+    "cmd_status=$?",
+    'cmd_pid=""',
+    'wait "$reader_pid" 2>/dev/null || true',
+    'reader_pid=""',
+    'rm -f "$fifo"',
+    'exit "$cmd_status"',
+  ].join("\n");
+}
+
+function shellSingleQuote(value: string): string {
+  return `'${value.replaceAll("'", "'\\''")}'`;
 }
 
 export async function mergeLifecycleCommandEnv(
@@ -2025,7 +2907,7 @@ async function resolveBranchComposeFiles(opts: {
   return [opts.project.composeFile, overridePath];
 }
 
-export async function resolveRuntimeHostMetadataOverride(opts: {
+async function resolveRuntimeHostMetadataOverride(opts: {
   readonly project: Awaited<ReturnType<typeof requireProjectContext>>;
   readonly composeFiles: readonly string[];
   readonly branch: string | null;
@@ -2094,9 +2976,8 @@ async function resolveInternalComposeOverride(opts: {
 }): Promise<string | null> {
   const internal = resolveInternalSettings(opts.cfg);
 
-  const { hosts: managedExtraHosts } = await resolveInternalExtraHosts({
-    ...opts.project,
-    staticHosts: internal.extraHosts ?? undefined,
+  const managedExtraHosts = await readInternalExtraHostsFile({
+    projectDir: opts.project.projectDir,
   });
   if (!shouldBuildInternalOverride({ internal, managedExtraHosts })) {
     return null;
@@ -2121,6 +3002,7 @@ async function resolveInternalComposeOverride(opts: {
   const extraHosts = buildInternalExtraHosts({
     caddyIp: dns.caddyIp,
     caddyHosts: dns.caddyHosts,
+    internalExtraHosts: internal.extraHosts,
     managedExtraHosts,
   });
   if (!(dns.dnsServer || tls.caPath || Object.keys(extraHosts).length > 0)) {
@@ -2219,10 +3101,9 @@ async function resolveCaddyHostsForBranch(opts: {
 
   const devHost =
     opts.devHost ?? (await resolveBranchDevHost({ project: opts.project }));
-  const baseHosts = resolveProjectRouteBaseHosts({
-    devHost,
-    aliasHost: opts.aliasHost,
-  });
+  const baseHosts = [devHost, opts.aliasHost ?? null].filter(
+    (host): host is string => typeof host === "string" && host.length > 0
+  );
   if (baseHosts.length === 0) {
     return caddyHosts;
   }
@@ -2266,12 +3147,14 @@ async function resolveInternalTlsPaths(opts: {
 function buildInternalExtraHosts(opts: {
   readonly caddyIp: string | null;
   readonly caddyHosts: readonly string[];
+  readonly internalExtraHosts: Record<string, string> | null;
   readonly managedExtraHosts: Record<string, string>;
 }): Record<string, string> {
   return {
     ...(opts.caddyIp && opts.caddyHosts.length > 0
       ? buildExtraHostsMap({ hosts: opts.caddyHosts, ip: opts.caddyIp })
       : {}),
+    ...(opts.internalExtraHosts ? opts.internalExtraHosts : {}),
     ...opts.managedExtraHosts,
   };
 }
@@ -2782,51 +3665,13 @@ function validateInitProjectSlug(
   return undefined;
 }
 
-/**
- * Terminal seams for interactive `hack init`: the TTY check and every prompt
- * the interactive path asks. Production uses {@link CLACK_INIT_IO}; tests
- * inject scripted answers so the path, including the `--with` handoff, runs
- * without a terminal.
- */
-export type InitInteractiveIo = {
-  readonly canPrompt: () => boolean;
-  readonly text: (opts: {
-    readonly message: string;
-    readonly initialValue: string;
-    readonly validate: (value: string | undefined) => string | undefined;
-  }) => Promise<string | symbol>;
-  readonly confirm: (opts: {
-    readonly message: string;
-    readonly initialValue: boolean;
-  }) => Promise<boolean | symbol>;
-  /**
-   * Service wizard that renders `.hack/docker-compose.yml`: the discovered
-   * wizard when `useDiscovery`, otherwise the manual one.
-   */
-  readonly composeWizard: (opts: {
-    readonly useDiscovery: boolean;
-    readonly input: ComposeWizardInput;
-  }) => Promise<string>;
-  /** Coding-agent step prompts; omitted means the clack prompts. */
-  readonly agentPrompts?: InitAgentIntegrationPrompts;
-};
-
-const CLACK_INIT_IO: InitInteractiveIo = {
-  canPrompt,
-  text: (opts) => text({ ...opts }),
-  confirm: (opts) => confirm({ ...opts }),
-  composeWizard: ({ useDiscovery, input }) =>
-    useDiscovery ? buildDiscoveredCompose(input) : buildManualCompose(input),
-};
-
 async function promptInitProjectSlug(opts: {
-  readonly io: InitInteractiveIo;
   readonly repoRoot: string;
   readonly nameOption: string | undefined;
 }): Promise<string | null> {
   const defaultSlug = defaultProjectSlugFromPath(opts.repoRoot);
   const initialSlug = sanitizeProjectSlug(opts.nameOption ?? defaultSlug);
-  const name = await opts.io.text({
+  const name = await text({
     message: "Project name (slug):",
     initialValue: initialSlug,
     validate: validateInitProjectSlug,
@@ -2889,14 +3734,12 @@ function validateInitDevHost(value: string | undefined): string | undefined {
 }
 
 async function promptInitDevHost(opts: {
-  readonly io: InitInteractiveIo;
   readonly slug: string;
   readonly devHostOption: string | undefined;
-  readonly defaultDomain: string;
 }): Promise<string | null> {
-  const defaultHost = `${opts.slug}.${opts.defaultDomain}`;
+  const defaultHost = `${opts.slug}.${DEFAULT_PROJECT_TLD}`;
   const initialHost = (opts.devHostOption ?? defaultHost).trim();
-  const devHost = await opts.io.text({
+  const devHost = await text({
     message: "DEV_HOST:",
     initialValue: initialHost,
     validate: validateInitDevHost,
@@ -2919,11 +3762,10 @@ function validateInitOauthTld(value: string | undefined): string | undefined {
 }
 
 async function promptInitOauthSettings(opts: {
-  readonly io: InitInteractiveIo;
   readonly oauthEnabledDefault: boolean;
   readonly oauthTldOption: string | undefined;
 }): Promise<{ readonly enabled: boolean; readonly tld: string } | null> {
-  const enableOauthHost = await opts.io.confirm({
+  const enableOauthHost = await confirm({
     message: `Enable OAuth-safe alias host (https://<project>.${DEFAULT_PROJECT_TLD}.${DEFAULT_OAUTH_ALIAS_TLD})?`,
     initialValue: opts.oauthEnabledDefault,
   });
@@ -2935,7 +3777,7 @@ async function promptInitOauthSettings(opts: {
     return { enabled: false, tld: DEFAULT_OAUTH_ALIAS_TLD };
   }
 
-  const oauthTld = await opts.io.text({
+  const oauthTld = await text({
     message: "OAuth alias TLD (optional):",
     initialValue: opts.oauthTldOption ?? DEFAULT_OAUTH_ALIAS_TLD,
     validate: validateInitOauthTld,
@@ -2966,7 +3808,6 @@ function renderInitDiscoveryNote(opts: {
 }
 
 async function promptInitUseDiscovery(opts: {
-  readonly io: InitInteractiveIo;
   readonly canDiscover: boolean;
   readonly forceManual: boolean;
 }): Promise<boolean | null> {
@@ -2974,7 +3815,7 @@ async function promptInitUseDiscovery(opts: {
     return false;
   }
 
-  const useDiscovery = await opts.io.confirm({
+  const useDiscovery = await confirm({
     message: "Auto-discover dev scripts and generate services?",
     initialValue: true,
   });
@@ -2985,63 +3826,50 @@ async function promptInitUseDiscovery(opts: {
 }
 
 async function ensureInitHackDir(opts: {
-  readonly io: InitInteractiveIo;
   readonly hackDir: string;
 }): Promise<"proceed" | "skip" | null> {
-  await assertLegacyProjectInputFamily({ projectRoot: dirname(opts.hackDir) });
   if (await pathExists(opts.hackDir)) {
-    const ok = await opts.io.confirm({
+    const ok = await confirm({
       message: `${HACK_PROJECT_DIR_PRIMARY}/ already exists. Overwrite scaffold files?`,
       initialValue: false,
     });
     if (isCancel(ok)) {
       return null;
     }
-    await assertLegacyProjectInputFamily({
-      projectRoot: dirname(opts.hackDir),
-    });
     if (!ok) {
       return "skip";
     }
     return "proceed";
   }
 
+  await ensureDir(opts.hackDir);
   return "proceed";
 }
 
-/**
- * `hack init`. `io` is the interactive path's terminal seam; the command
- * handler omits it and gets the real TTY check and clack prompts.
- */
-export async function handleInit({
+async function handleInit({
   ctx,
   args,
-  io = CLACK_INIT_IO,
 }: {
   readonly ctx: CliContext;
   readonly args: InitArgs;
-  readonly io?: InitInteractiveIo;
 }): Promise<number> {
   const withValue = resolveInitWithOption({ withRaw: args.options.with });
-  const startDir = resolveStartDir(ctx, args.options.path);
-  await assertLegacyProjectDiscovery({ startDir });
 
   if (args.options.auto) {
     return await handleInitAuto({ ctx, args, withValue });
   }
 
-  const repoRoot = await findRepoRootForInit(startDir);
-  await assertLegacyProjectInputFamily({ projectRoot: repoRoot });
-
-  if (!io.canPrompt()) {
+  if (!canPrompt()) {
     requireInteractive({
       what: "hack init asks for project name, dev host, and discovery choices",
       hint: "Use `hack init --auto` (optionally with --name, --dev-host, --oauth, --oauth-tld, --manual) for scripted setup.",
     });
   }
 
+  const startDir = resolveStartDir(ctx, args.options.path);
+  const repoRoot = await findRepoRootForInit(startDir);
+
   const slug = await promptInitProjectSlug({
-    io,
     repoRoot,
     nameOption: args.options.name,
   });
@@ -3052,19 +3880,14 @@ export async function handleInit({
   await ensureInitProjectSlugUnique({ repoRoot, slug });
 
   const devHost = await promptInitDevHost({
-    io,
     slug,
     devHostOption: args.options.devHost,
-    defaultDomain: args.options.devHost
-      ? DEFAULT_NEW_PROJECT_TLD
-      : await resolveDefaultDomain(),
   });
   if (!devHost) {
     return 1;
   }
 
   const oauth = await promptInitOauthSettings({
-    io,
     oauthEnabledDefault:
       args.options.oauth === true || Boolean(args.options.oauthTld),
     oauthTldOption: args.options.oauthTld,
@@ -3083,7 +3906,6 @@ export async function handleInit({
   }
 
   const useDiscovery = await promptInitUseDiscovery({
-    io,
     canDiscover,
     forceManual,
   });
@@ -3095,7 +3917,7 @@ export async function handleInit({
   const composeFile = resolve(hackDir, PROJECT_COMPOSE_FILENAME);
   const configFile = resolve(hackDir, PROJECT_CONFIG_FILENAME);
 
-  const hackDirAction = await ensureInitHackDir({ io, hackDir });
+  const hackDirAction = await ensureInitHackDir({ hackDir });
   if (!hackDirAction) {
     return 1;
   }
@@ -3106,65 +3928,57 @@ export async function handleInit({
           ".hack/ already exists — handing off the onboarding prompt for the existing setup.",
       });
       await runInitOnboardingHandoff({
-        repoRoot,
         withValue,
-        scaffold: "existing",
-        interactive: io.canPrompt(),
+        mode: "existing-project",
+        projectName: slug,
+        devHost,
       });
     }
     return 0;
   }
 
-  await assertLegacyProjectInputFamily({ projectRoot: repoRoot });
-  const compose = await io.composeWizard({
-    useDiscovery,
-    input: {
-      repoRoot,
-      devHost,
-      projectSlug: slug,
-      candidates: discovery.candidates,
-      oauth: { enabled: oauth.enabled, tld: oauth.tld },
-    },
-  });
-  await assertLegacyProjectInputFamily({ projectRoot: repoRoot });
-  await ensureDir(hackDir);
-
   // Committed, hack-owned ignore file for machine-local generated files
   // (.internal/, .branch/, .env, env state, env-local overrides).
-  await assertLegacyProjectInputFamily({ projectRoot: repoRoot });
   await ensureHackDirGitignore({ projectDir: hackDir });
 
-  await writeInitScaffoldFile({
-    repoRoot,
-    file: configFile,
-    content: renderProjectConfigJson({
+  await writeTextFileIfChanged(
+    configFile,
+    renderProjectConfigJson({
       name: slug,
       devHost,
       oauth: { enabled: oauth.enabled, tld: oauth.tld },
-    }),
-  });
-  await writeInitScaffoldFile({
-    repoRoot,
-    file: composeFile,
-    content: compose,
-  });
+    })
+  );
 
-  await writeInitScaffoldFile({
-    repoRoot,
-    file: resolve(hackDir, "README.md"),
-    content: renderHackFolderReadme({
+  const compose = useDiscovery
+    ? await buildDiscoveredCompose({
+        repoRoot,
+        devHost,
+        projectSlug: slug,
+        candidates: discovery.candidates,
+        oauth: { enabled: oauth.enabled, tld: oauth.tld },
+      })
+    : await buildManualCompose({
+        repoRoot,
+        devHost,
+        projectSlug: slug,
+        oauth: { enabled: oauth.enabled, tld: oauth.tld },
+      });
+  await writeTextFileIfChanged(composeFile, compose);
+
+  await writeTextFileIfChanged(
+    resolve(hackDir, "README.md"),
+    renderHackFolderReadme({
       devHost,
       oauth: { enabled: oauth.enabled, tld: oauth.tld },
-    }),
-  });
+    })
+  );
 
-  await writeInitScaffoldFile({
-    repoRoot,
-    file: resolve(hackDir, PROJECT_ENV_CONFIG_DEFAULT_FILENAME),
-    content: renderProjectEnvConfigYaml(),
-  });
+  await writeTextFileIfChanged(
+    resolve(hackDir, PROJECT_ENV_CONFIG_DEFAULT_FILENAME),
+    renderProjectEnvConfigYaml()
+  );
 
-  await assertLegacyProjectInputFamily({ projectRoot: repoRoot });
   const registration = await upsertProjectRegistration({
     project: {
       projectRoot: repoRoot,
@@ -3185,12 +3999,7 @@ export async function handleInit({
     );
   }
 
-  await runInitAgentIntegrations({
-    repoRoot,
-    interactive: io.canPrompt(),
-    guard: assertLegacyProjectInputFamily,
-    ...(io.agentPrompts ? { prompts: io.agentPrompts } : {}),
-  });
+  await maybeSetupAgentIntegrations({ repoRoot });
 
   note(
     [
@@ -3203,17 +4012,17 @@ export async function handleInit({
       "  hack up",
       "  hack open",
       "",
-      `Check DNS/TLS for ${devHost}; hack global install configures managed global domains (needs sudo).`,
+      "First time on this machine? Run `hack global install` for *.hack DNS/TLS (needs sudo).",
     ].join("\n"),
     "Initialized"
   );
 
   if (withValue) {
     await runInitOnboardingHandoff({
-      repoRoot,
       withValue,
-      scaffold: "created",
-      interactive: io.canPrompt(),
+      mode: "new-project",
+      projectName: slug,
+      devHost,
     });
   }
 
@@ -3231,7 +4040,6 @@ async function handleInitAuto({
 }): Promise<number> {
   const startDir = resolveStartDir(ctx, args.options.path);
   const repoRoot = await findRepoRootForInit(startDir);
-  await assertLegacyProjectInputFamily({ projectRoot: repoRoot });
 
   const slug = resolveInitSlug({
     repoRoot,
@@ -3246,9 +4054,6 @@ async function handleInitAuto({
   const devHost = resolveInitDevHost({
     slug,
     devHostOpt: args.options.devHost,
-    defaultDomain: args.options.devHost
-      ? DEFAULT_NEW_PROJECT_TLD
-      : await resolveDefaultDomain(),
   });
 
   const oauthEnabled =
@@ -3267,16 +4072,16 @@ async function handleInitAuto({
   const composeFile = resolve(hackDir, PROJECT_COMPOSE_FILENAME);
   const configFile = resolve(hackDir, PROJECT_CONFIG_FILENAME);
 
-  await assertLegacyProjectInputFamily({ projectRoot: repoRoot });
   if (await pathExists(hackDir)) {
     if (withValue) {
       logger.info({
         message: `${HACK_PROJECT_DIR_PRIMARY}/ already exists — skipping init and handing off the onboarding prompt for the existing setup.`,
       });
       await runInitOnboardingHandoff({
-        repoRoot,
         withValue,
-        scaffold: "existing",
+        mode: "existing-project",
+        projectName: slug,
+        devHost,
       });
       return 0;
     }
@@ -3284,6 +4089,21 @@ async function handleInitAuto({
       `${HACK_PROJECT_DIR_PRIMARY}/ already exists. Run without --auto to overwrite.`
     );
   }
+
+  await ensureDir(hackDir);
+
+  // Committed, hack-owned ignore file for machine-local generated files
+  // (.internal/, .branch/, .env, env state, env-local overrides).
+  await ensureHackDirGitignore({ projectDir: hackDir });
+
+  await writeTextFileIfChanged(
+    configFile,
+    renderProjectConfigJson({
+      name: slug,
+      devHost,
+      oauth: { enabled: oauth.enabled, tld: oauth.tld },
+    })
+  );
 
   const compose = useDiscovery
     ? await buildDiscoveredComposeAuto({
@@ -3299,45 +4119,21 @@ async function handleInitAuto({
         projectSlug: slug,
         oauth,
       });
-  await assertLegacyProjectInputFamily({ projectRoot: repoRoot });
-  await ensureDir(hackDir);
+  await writeTextFileIfChanged(composeFile, compose);
 
-  // Committed, hack-owned ignore file for machine-local generated files
-  // (.internal/, .branch/, .env, env state, env-local overrides).
-  await assertLegacyProjectInputFamily({ projectRoot: repoRoot });
-  await ensureHackDirGitignore({ projectDir: hackDir });
-
-  await writeInitScaffoldFile({
-    repoRoot,
-    file: configFile,
-    content: renderProjectConfigJson({
-      name: slug,
+  await writeTextFileIfChanged(
+    resolve(hackDir, "README.md"),
+    renderHackFolderReadme({
       devHost,
       oauth: { enabled: oauth.enabled, tld: oauth.tld },
-    }),
-  });
-  await writeInitScaffoldFile({
-    repoRoot,
-    file: composeFile,
-    content: compose,
-  });
+    })
+  );
 
-  await writeInitScaffoldFile({
-    repoRoot,
-    file: resolve(hackDir, "README.md"),
-    content: renderHackFolderReadme({
-      devHost,
-      oauth: { enabled: oauth.enabled, tld: oauth.tld },
-    }),
-  });
+  await writeTextFileIfChanged(
+    resolve(hackDir, PROJECT_ENV_CONFIG_DEFAULT_FILENAME),
+    renderProjectEnvConfigYaml()
+  );
 
-  await writeInitScaffoldFile({
-    repoRoot,
-    file: resolve(hackDir, PROJECT_ENV_CONFIG_DEFAULT_FILENAME),
-    content: renderProjectEnvConfigYaml(),
-  });
-
-  await assertLegacyProjectInputFamily({ projectRoot: repoRoot });
   const registration = await upsertProjectRegistration({
     project: {
       projectRoot: repoRoot,
@@ -3365,27 +4161,20 @@ async function handleInitAuto({
     message: "Next: hack up --detach && hack open",
   });
   logger.info({
-    message: `Check DNS/TLS for ${devHost}; hack global install configures managed global domains (needs sudo).`,
+    message:
+      "First time on this machine? Run `hack global install` for *.hack DNS/TLS (needs sudo).",
   });
 
   if (withValue) {
     await runInitOnboardingHandoff({
-      repoRoot,
       withValue,
-      scaffold: "created",
+      mode: "new-project",
+      projectName: slug,
+      devHost,
     });
   }
 
   return 0;
-}
-
-async function writeInitScaffoldFile(opts: {
-  readonly repoRoot: string;
-  readonly file: string;
-  readonly content: string;
-}): Promise<void> {
-  await assertLegacyProjectInputFamily({ projectRoot: opts.repoRoot });
-  await writeTextFileIfChanged(opts.file, opts.content);
 }
 
 /**
@@ -3402,7 +4191,7 @@ function resolveInitWithOption(opts: {
   const parsed = parseOnboardingWith({ value: opts.withRaw });
   if (!parsed) {
     throw new CliUsageError(
-      `Invalid --with "${opts.withRaw}". Choose one agent: claude or codex.`
+      `Invalid --with "${opts.withRaw}". Use claude, codex, or both.`
     );
   }
   return parsed;
@@ -3411,34 +4200,26 @@ function resolveInitWithOption(opts: {
 /**
  * Hand the onboarding prompt to the requested agent CLI(s) after init.
  *
- * The prompt comes from the shared onboarding builder, which inventories the
- * repo and reads mode, project name and dev host from the `.hack/` config, so
- * the core matches `hack agent onboard`, `hack agent init` and the `hack-init`
- * MCP prompt for the same repo. `scaffold` only selects the handoff framing.
- *
  * Never spawns on non-interactive runs (`--no-interactive`,
  * `HACK_NO_INTERACTIVE`, or no TTY) — the prompt is printed for copy-paste
  * instead. Init success is never rolled back by handoff problems.
- *
- * @param opts.interactive - Defaults to the real TTY check; interactive init
- *   passes its injected {@link InitInteractiveIo.canPrompt} result.
  */
 async function runInitOnboardingHandoff(opts: {
-  readonly repoRoot: string;
   readonly withValue: OnboardingWith;
-  readonly scaffold: "created" | "existing";
-  readonly interactive?: boolean;
+  readonly mode: OnboardingMode;
+  readonly projectName: string;
+  readonly devHost: string;
 }): Promise<void> {
-  await assertLegacyProjectInputFamily({ projectRoot: opts.repoRoot });
-  const prompt = await buildOnboardingPrompt({
-    startDir: opts.repoRoot,
-    entryPoint: { kind: "init-with", scaffold: opts.scaffold },
+  const prompt = renderOnboardingPrompt({
+    mode: opts.mode,
+    projectName: opts.projectName,
+    devHost: opts.devHost,
   });
 
   await runOnboardingHandoff({
     prompt,
     withValue: opts.withValue,
-    interactive: opts.interactive ?? canPrompt(),
+    interactive: canPrompt(),
   });
 }
 
@@ -3482,9 +4263,8 @@ async function ensureUniqueProjectSlug(opts: {
 function resolveInitDevHost(opts: {
   readonly slug: string;
   readonly devHostOpt?: string;
-  readonly defaultDomain: string;
 }): string {
-  const fallback = `${opts.slug}.${opts.defaultDomain}`;
+  const fallback = `${opts.slug}.${DEFAULT_PROJECT_TLD}`;
   const raw = (opts.devHostOpt ?? fallback).trim();
   const error = validateDevHost({ value: raw });
   if (error) {
@@ -3534,6 +4314,141 @@ function validateOauthTld(opts: { readonly value: string }): string | null {
   return null;
 }
 
+type SetupIntegration = "cursor" | "claude" | "codex" | "agents" | "mcp";
+
+async function maybeSetupAgentIntegrations(opts: {
+  readonly repoRoot: string;
+}): Promise<void> {
+  if (!canPrompt()) {
+    return;
+  }
+  const shouldSetup = await confirm({
+    message: "Set up coding agent integrations? (Cursor/Claude/Codex)",
+    initialValue: true,
+  });
+  if (isCancel(shouldSetup) || !shouldSetup) {
+    return;
+  }
+
+  const selected = await multiselect<SetupIntegration>({
+    message: "Select integrations to install:",
+    required: true,
+    options: [
+      { value: "cursor", label: "Cursor rules (.cursor/rules/hack.mdc)" },
+      {
+        value: "claude",
+        label: "Claude Code hooks (.claude/settings.local.json)",
+      },
+      { value: "codex", label: "Codex skill (.codex/skills/hack-cli)" },
+      { value: "agents", label: "AGENTS.md / CLAUDE.md snippets" },
+      { value: "mcp", label: "MCP config (no-shell clients)" },
+    ],
+    initialValues: ["cursor", "claude", "codex"],
+  });
+  if (isCancel(selected) || selected.length === 0) {
+    return;
+  }
+
+  const selection = new Set(selected);
+
+  if (selection.has("cursor")) {
+    const result = await installCursorRules({
+      scope: "project",
+      projectRoot: opts.repoRoot,
+    });
+    logInstallResult({
+      label: "Cursor rules",
+      status: result.status,
+      path: result.path,
+      message: result.message,
+    });
+  }
+
+  if (selection.has("claude")) {
+    const result = await installClaudeHooks({
+      scope: "project",
+      projectRoot: opts.repoRoot,
+    });
+    logInstallResult({
+      label: "Claude hooks",
+      status: result.status,
+      path: result.path,
+      message: result.message,
+    });
+  }
+
+  if (selection.has("codex")) {
+    const result = await installCodexSkill({
+      scope: "project",
+      projectRoot: opts.repoRoot,
+    });
+    logInstallResult({
+      label: "Codex skill",
+      status: result.status,
+      path: result.path,
+      message: result.message,
+    });
+  }
+
+  if (selection.has("agents")) {
+    const results = await upsertAgentDocs({
+      projectRoot: opts.repoRoot,
+      targets: ["agents", "claude"],
+    });
+    for (const result of results) {
+      logInstallResult({
+        label: "Agent docs",
+        status: result.status,
+        path: result.path,
+        message: result.message,
+      });
+    }
+  }
+
+  if (selection.has("mcp")) {
+    const targetHints = selected.filter(
+      (value) => value === "cursor" || value === "claude" || value === "codex"
+    );
+    const targets = (
+      targetHints.length > 0 ? targetHints : ["cursor", "claude", "codex"]
+    ) as McpTarget[];
+
+    const results = await installMcpConfig({
+      targets,
+      scope: "project",
+      projectRoot: opts.repoRoot,
+    });
+
+    for (const result of results) {
+      logInstallResult({
+        label: "MCP config",
+        status: result.status,
+        path: result.path ?? "unknown path",
+        message: result.message,
+      });
+    }
+  }
+}
+
+function logInstallResult(opts: {
+  readonly label: string;
+  readonly status: string;
+  readonly path: string;
+  readonly message?: string;
+}): void {
+  if (opts.status === "error") {
+    logger.warn({ message: opts.message ?? `Failed to update ${opts.label}` });
+    return;
+  }
+
+  if (opts.status === "noop") {
+    logger.info({ message: `No changes for ${opts.label} (${opts.path})` });
+    return;
+  }
+
+  logger.success({ message: `Updated ${opts.label} at ${opts.path}` });
+}
+
 // Exported for direct unit-testing of the auto (non-interactive) discovery
 // + validation pipeline without going through the CLI prompt flow.
 export interface ComposeWizardInput {
@@ -3565,14 +4480,12 @@ function buildCaddyHostLabelValue(opts: {
   if (!opts.oauth.enabled) {
     return opts.primaryHost;
   }
-  const tld = normalizeOauthTld(opts.oauth.tld);
-  const aliasHost = resolveProjectOauthAliasHost({
-    devHost: opts.primaryHost,
-    oauth: { enabled: true, tld },
-  });
-  if (!aliasHost) {
+  if (!opts.primaryHost.endsWith(`.${DEFAULT_PROJECT_TLD}`)) {
     return opts.primaryHost;
   }
+
+  const tld = normalizeOauthTld(opts.oauth.tld);
+  const aliasHost = `${opts.primaryHost}.${tld}`;
 
   const uniq = new Set<string>();
   const out: string[] = [];
@@ -3624,13 +4537,10 @@ function expandCaddyHostsWithOauthAliases(opts: {
   }
 
   for (const host of opts.hosts) {
-    const alias = resolveProjectOauthAliasHost({
-      devHost: host,
-      oauth: { enabled: true, tld: opts.tld },
-    });
-    if (!alias) {
+    if (!host.endsWith(`.${DEFAULT_PROJECT_TLD}`)) {
       continue;
     }
+    const alias = `${host}.${opts.tld}`;
     if (seen.has(alias)) {
       continue;
     }
@@ -4570,10 +5480,8 @@ function renderHackFolderReadme(opts: {
   const oauthTld = oauthEnabled
     ? normalizeOauthTld(opts.oauth?.tld ?? DEFAULT_OAUTH_ALIAS_TLD)
     : null;
-  const oauthHost = resolveProjectOauthAliasHost({
-    devHost: opts.devHost,
-    oauth: { enabled: oauthEnabled, tld: oauthTld ?? undefined },
-  });
+  const oauthHost =
+    oauthEnabled && oauthTld ? `${opts.devHost}.${oauthTld}` : null;
 
   return [
     "# hack local dev",
@@ -4630,7 +5538,7 @@ function renderHackFolderReadme(opts: {
     "",
     "## Logs (Grafana + Loki)",
     "",
-    `- Open Grafana: https://${DEFAULT_GRAFANA_HOST}`,
+    "- Open Grafana: https://logs.hack",
     "- Default credentials: `admin` / `admin`",
     "",
     "In **Explore**, try queries like:",
@@ -4902,288 +5810,6 @@ async function runRemoteLifecycleCommand(opts: {
   });
 }
 
-async function handleNativeUp({
-  ctx,
-  args,
-  native,
-  restart = false,
-  recovery,
-}: {
-  readonly restart?: boolean;
-  readonly recovery?: {
-    readonly expectAttempt: string;
-    readonly legacyPid?: number;
-  };
-  readonly ctx: CliContext;
-  readonly args: UpArgs;
-  readonly native: NonNullable<
-    ReturnType<typeof resolveNativeRuntimeSelection>
-  >;
-}): Promise<number> {
-  if (
-    args.options.detach ||
-    args.options.json ||
-    args.options.target ||
-    args.positionals.services?.length
-  ) {
-    throw new CliUsageError(
-      "Native up currently supports foreground whole-project startup only; detach, JSON, target and service selection are unavailable."
-    );
-  }
-  const project = await resolveProjectForArgs({
-    ctx,
-    pathOpt: args.options.path,
-    projectOpt: args.options.project,
-    touchRegistration: false,
-  });
-  const branch = await resolveEffectiveBranchForCommand({
-    project,
-    branchOption: args.options.branch,
-  });
-  const cfg = await readProjectConfig(project);
-  if (cfg.parseError) {
-    throw new CliUsageError(
-      "Native up requires valid project configuration; values omitted."
-    );
-  }
-  const projectName = await resolveComposeProjectName({ project, cfg });
-  const composeProject = resolveLifecycleComposeProjectName({
-    projectName,
-    branch,
-  });
-  const devHost = await resolveRuntimeDevHost({ project, branch });
-  const envFingerprintScope = {
-    projectDir: project.projectDir,
-    owner: "image" as const,
-    branch,
-  };
-  const envFingerprints =
-    createNativeEnvFingerprintSession(envFingerprintScope);
-  const startup: Parameters<typeof startNativeProject>[0] = {
-    runtime: native,
-    scope: {
-      projectRoot: project.projectRoot,
-      projectDir: project.projectDir,
-      nativeHome: native.home,
-      branch,
-    },
-    composeFile: project.composeFile,
-    envName: resolveRequestedEnvName({ envOption: args.options.env }),
-    profiles: parseCsvList(args.options.profile),
-    sharedSource: process.env.HACK_NATIVE_SHARED_SOURCE === "1",
-    dependencyFile: process.env.HACK_NATIVE_DEPENDENCIES,
-    adaptationFile: process.env.HACK_NATIVE_ADAPTATION,
-    allowedHosts: parseNativeAllowedHosts(process.env.HACK_NATIVE_ALLOW_HOSTS),
-    preparedBase: parseNativePreparedBase(process.env),
-    https: parseNativeHttpsSelection(process.env),
-    aws: process.env.HACK_NATIVE_AWS_PROFILE
-      ? {
-          profile: process.env.HACK_NATIVE_AWS_PROFILE,
-          region: process.env.HACK_NATIVE_AWS_REGION,
-        }
-      : undefined,
-    runtimeMetadata: {
-      devHost,
-      aliasHost: resolveBranchAliasHost({ devHost, cfg }),
-      projectName,
-    },
-    onEnvironmentReady: async ({ run, fingerprint }) =>
-      await envFingerprints.record(
-        createNativeEnvFingerprintEntry({ owner: "image", run, fingerprint })
-      ),
-    before: async (input) => {
-      const lifecycle = await runLifecycleUpBeforeAndProcesses({
-        title: "Lifecycle (native up before)",
-        project,
-        cfg,
-        projectName,
-        branch,
-        env: input.lifecycleHostEnvironment,
-        effectiveEnvName: input.effectiveEnvName,
-        composeProject,
-      });
-      const cleanup = adoptNativeLifecycleCleanup(lifecycle);
-      if (lifecycle.code !== 0) {
-        await cleanup();
-        throw new Error(
-          "Native up lifecycle preparation failed; values omitted."
-        );
-      }
-      return {
-        cleanup,
-        ready: async () => {
-          const code = await runLifecycleCommands({
-            title: "Lifecycle (native up after)",
-            commands: cfg.lifecycle?.up?.after,
-            projectRoot: project.projectRoot,
-            env: input.lifecycleHostEnvironment,
-            projectDir: project.projectDir,
-            composeProject,
-          });
-          if (code !== 0) {
-            throw new Error(
-              "Native up lifecycle readiness hook failed; values omitted."
-            );
-          }
-        },
-      };
-    },
-  };
-  if (!restart) {
-    try {
-      return await startNativeProject(startup);
-    } finally {
-      await envFingerprints.release();
-    }
-  }
-  if (!startup.sharedSource) {
-    throw new CliUsageError(
-      "Native restart requires HACK_NATIVE_SHARED_SOURCE=1 before cleanup."
-    );
-  }
-  try {
-    return await restartNativeImageProject({
-      ctx,
-      args,
-      native,
-      project,
-      cfg,
-      projectName,
-      branch,
-      composeProject,
-      startup,
-      recovery,
-      // Stopping the previous run makes its record stale; a failed restart
-      // then leaves no record, so exec stays silent rather than guessing.
-      dropEnvFingerprint: () => envFingerprints.drop(),
-    });
-  } finally {
-    await envFingerprints.release();
-  }
-}
-
-async function restartNativeImageProject({
-  ctx,
-  args,
-  native,
-  project,
-  cfg,
-  projectName,
-  branch,
-  composeProject,
-  startup,
-  recovery,
-  dropEnvFingerprint,
-}: {
-  readonly ctx: CliContext;
-  readonly args: UpArgs;
-  readonly native: NonNullable<
-    ReturnType<typeof resolveNativeRuntimeSelection>
-  >;
-  readonly project: Awaited<ReturnType<typeof resolveProjectForArgs>>;
-  readonly cfg: Awaited<ReturnType<typeof readProjectConfig>>;
-  readonly projectName: string;
-  readonly branch: string | null;
-  readonly composeProject: string;
-  readonly startup: Parameters<typeof startNativeProject>[0];
-  readonly recovery?: {
-    readonly expectAttempt: string;
-    readonly legacyPid?: number;
-  };
-  readonly dropEnvFingerprint: () => void;
-}): Promise<number> {
-  return await restartNativeProject({
-    scope: startup.scope,
-    envName: startup.envName,
-    profiles: args.options.profile === undefined ? undefined : startup.profiles,
-    recovery: recovery
-      ? {
-          ...recovery,
-          verifyEffects: async ({ run, token }) =>
-            await verifyNativeFrontendRecovery({
-              runtime: native,
-              scope: startup.scope,
-              run,
-              httpsPort:
-                token.version !== 1
-                  ? token.httpsPort
-                  : (startup.https?.httpsPort ?? null),
-              legacy: token.version === 1,
-              httpsLease: token.version === 3 ? token.httpsLease : undefined,
-              cleanupLifecycle: async () =>
-                await stopLifecycleProcesses({
-                  project,
-                  cfg,
-                  projectName: sanitizeProjectSlug(projectName),
-                  branch,
-                  composeProject,
-                }),
-            }),
-          retirePublisher: async (run) =>
-            await retireNativeRecoveredPublisher({
-              runtime: native,
-              scope: startup.scope,
-              run,
-            }),
-        }
-      : undefined,
-    preflight: async (run, { cleanedRetry }) => {
-      await preflightNativeProjectSource({
-        runtime: native,
-        projectRoot: startup.scope.projectRoot,
-      });
-      await preflightNativeRestart({
-        runtime: native,
-        scope: startup.scope,
-        composeFile: startup.composeFile,
-        adaptationFile: startup.adaptationFile,
-        dependencyFile: startup.dependencyFile,
-        allowedHosts: startup.allowedHosts,
-        runtimeMetadata: startup.runtimeMetadata,
-        httpsPort: startup.https?.httpsPort ?? null,
-        run,
-        cleanedRetry,
-        recoverStopped: recovery !== undefined,
-      });
-    },
-    down: async () => {
-      dropEnvFingerprint();
-      const code = await handleDown({
-        ctx,
-        deferFinalization: true,
-        args: {
-          options: {
-            path: args.options.path,
-            project: args.options.project,
-            branch: args.options.branch,
-            env: undefined,
-            profile: undefined,
-            target: undefined,
-            json: false,
-            pruneCaches: false,
-            yes: false,
-            recoverNativeCompose: false,
-          },
-          positionals: {},
-          raw: args.raw,
-        },
-      });
-      if (code !== 0) {
-        throw new Error(
-          "Native restart cleanup failed; retained data was not replaced."
-        );
-      }
-    },
-    start: ({ run, onReady }) =>
-      startNativeProject({
-        ...startup,
-        ...nativeRestartSelection({ run }),
-        restore: run,
-        onReady,
-      }),
-  });
-}
-
 async function handleUp({
   ctx,
   args,
@@ -5191,28 +5817,6 @@ async function handleUp({
   readonly ctx: CliContext;
   readonly args: UpArgs;
 }): Promise<number> {
-  // Refuse a malformed --target before any project or runtime work.
-  parseRequestedTarget({ raw: args.options.target });
-  const authored = await tryNativeComposeCommand({
-    cwd: ctx.cwd,
-    path: args.options.path,
-    project: args.options.project,
-    operation: "up",
-    instance: args.options.branch,
-    profiles: parseCsvList(args.options.profile),
-    overlay: args.options.env,
-    json: args.options.json,
-    detach: args.options.detach,
-    services: args.positionals.services,
-    unsupportedOptions: Boolean(args.options.target),
-  });
-  if (authored !== null) {
-    return authored;
-  }
-  const native = resolveNativeRuntimeSelection();
-  if (native) {
-    return await handleNativeUp({ ctx, args, native });
-  }
   const json = args.options.json === true;
   if (!json) {
     return await runUpCommand({ ctx, args, json: false });
@@ -5243,10 +5847,6 @@ async function runUpCommand({
   readonly json: boolean;
   readonly startedAtMs?: number;
 }): Promise<number> {
-  const detach = args.options.detach || json;
-  const startupTimeoutMs = detach
-    ? resolveComposeStartupTimeoutMs()
-    : DEFAULT_COMPOSE_STARTUP_TIMEOUT_MS;
   let project: Awaited<ReturnType<typeof requireProjectContext>>;
   try {
     project = await resolveProjectForArgs({
@@ -5270,6 +5870,9 @@ async function runUpCommand({
     }
     throw error;
   }
+  // `--json` implies detach: machine-readable output requires the command to
+  // return instead of streaming compose logs on stdout.
+  const detach = args.options.detach || json;
   const envName = resolveRequestedEnvName({
     envOption: args.options.env,
   });
@@ -5345,29 +5948,11 @@ async function runUpCommand({
     available: allServiceNames,
   });
   const serviceScoped = requestedServices.length > 0;
-  const scopedDependencyCache = serviceScoped
-    ? await resolveDependencyCacheOverride({
-        projectRoot: project.projectRoot,
-        projectDir: project.projectDir,
-        projectName,
-        composeFile: project.composeFile,
-      })
-    : null;
   const targetServices = serviceScoped ? requestedServices : allServiceNames;
-  const cacheBootstrapServices = scopedDependencyCache
-    ? await resolveDependencyCacheBootstrapServices({
-        composeFile: project.composeFile,
-        cache: scopedDependencyCache,
-        targetServices,
-      })
-    : [];
-  const preparedServices = [
-    ...new Set([...targetServices, ...cacheBootstrapServices]),
-  ];
   const envOverrides = await resolveComposeEnvOverrides({
     project,
     projectName,
-    targetServices: preparedServices,
+    targetServices,
     allServiceNames,
     envName,
   });
@@ -5375,26 +5960,15 @@ async function runUpCommand({
   await assertRegistryCredentialsAvailable({
     projectRoot: project.projectRoot,
     composeFile: project.composeFile,
-    targetServices: preparedServices,
+    targetServices,
     envByService: envOverrides.preflightEnvByService,
   });
 
-  if (serviceScoped) {
-    await updateProjectRuntimeServiceEnvFingerprints({
-      projectDir: project.projectDir,
-      composeProject: lifecycleComposeProject,
-      effectiveEnvName: envOverrides.effectiveEnvName,
-      services: targetServices,
-      envByService: envOverrides.preflightEnvByService,
-      outcome: "applied",
-    });
-  } else {
+  if (!serviceScoped) {
     await persistProjectRuntimeEnvSelection({
       projectDir: project.projectDir,
       composeProject: lifecycleComposeProject,
       envName: envOverrides.effectiveEnvName,
-      services: preparedServices,
-      envByService: envOverrides.preflightEnvByService,
     });
   }
 
@@ -5472,15 +6046,12 @@ async function runUpCommand({
     const composeFilesWithInternal = internalOverride
       ? [...composeFiles, internalOverride]
       : composeFiles;
-    const dependencyCache =
-      scopedDependencyCache ??
-      (await resolveDependencyCacheOverride({
-        projectRoot: project.projectRoot,
-        projectDir: project.projectDir,
-        projectName,
-        composeFile: project.composeFile,
-      }));
-    reportDependencyCacheFallback(dependencyCache);
+    const dependencyCache = await resolveDependencyCacheOverride({
+      projectRoot: project.projectRoot,
+      projectDir: project.projectDir,
+      projectName,
+      composeFile: project.composeFile,
+    });
     const composeFilesWithRuntimeOverrides = dependencyCache.overridePath
       ? [...composeFilesWithInternal, dependencyCache.overridePath]
       : composeFilesWithInternal;
@@ -5497,37 +6068,7 @@ async function runUpCommand({
       ...(runtimeMetadataOverride ? [runtimeMetadataOverride] : []),
       ...envOverrides.composeFiles,
     ];
-    reportComposeStartupBudget({ startupTimeoutMs, detach });
-    const bootstrapCode = await bootstrapDependencyCaches({
-      timeoutMs: detach ? startupTimeoutMs : undefined,
-      services: cacheBootstrapServices,
-      composeFiles: composeFilesWithEnv,
-      composeProject: composeProjectName,
-      profiles,
-      cwd: dirname(project.composeFile),
-      env: envOverrides.env,
-    });
-    if (bootstrapCode !== 0) {
-      const failure = dependencyCacheBootstrapFailure({
-        code: bootstrapCode,
-        timeoutMs: detach ? startupTimeoutMs : undefined,
-      });
-      if (json) {
-        return emitLifecycleResult({
-          result: errorResult(failure),
-          exitCode: bootstrapCode,
-        });
-      }
-      logger.error({ message: failure.message });
-      return bootstrapCode;
-    }
     const upCode = await composeRuntimeBackend.up({
-      dependencyProgress: resolveDependencyCacheProgress({
-        cache: dependencyCache,
-        project: composeProjectName,
-        baseProject: baseProjectName,
-      }),
-      startupTimeoutMs,
       composeFiles: composeFilesWithEnv,
       composeProject: composeProjectName,
       profiles,
@@ -5545,11 +6086,7 @@ async function runUpCommand({
         composeProject: lifecycleComposeProject,
       });
       if (json) {
-        const failure = composeStartupFailure(
-          upCode,
-          "docker compose up",
-          startupTimeoutMs
-        );
+        const failure = composeStartupFailure(upCode, "docker compose up");
         return emitLifecycleResult({
           result: errorResult({
             code: failure.code,
@@ -5559,13 +6096,6 @@ async function runUpCommand({
           exitCode: upCode,
         });
       }
-      logger.error({
-        message: composeStartupFailure(
-          upCode,
-          "docker compose up",
-          startupTimeoutMs
-        ).message,
-      });
       return upCode;
     }
 
@@ -5730,158 +6260,13 @@ function writeDownNotice(opts: {
   }
 }
 
-function refuseLegacyNativeRecovery(recover: boolean): void {
-  if (recover) {
-    throw new CliUsageError(
-      "--recover requires a native-authored Compose instance."
-    );
-  }
-}
-
 async function handleDown({
   ctx,
   args,
-  deferFinalization,
 }: {
   readonly ctx: CliContext;
   readonly args: DownArgs;
-  readonly deferFinalization?: boolean;
 }): Promise<number> {
-  // Refuse a malformed --target before any project or runtime work.
-  parseRequestedTarget({ raw: args.options.target });
-  const authored = await tryNativeComposeCommand({
-    cwd: ctx.cwd,
-    path: args.options.path,
-    project: args.options.project,
-    operation: "down",
-    instance: args.options.branch,
-    profiles:
-      args.options.profile === undefined
-        ? undefined
-        : parseCsvList(args.options.profile),
-    overlay: args.options.env,
-    json: args.options.json,
-    recover: args.options.recoverNativeCompose,
-    unsupportedOptions: [
-      args.options.target,
-      args.options.pruneCaches,
-      args.options.yes,
-    ].some(Boolean),
-  });
-  if (authored !== null) {
-    return authored;
-  }
-  refuseLegacyNativeRecovery(args.options.recoverNativeCompose);
-  const native = resolveNativeRuntimeSelection();
-  if (native) {
-    if (args.options.json) {
-      setLoggerBackendOverride({ backend: "console" });
-    }
-    if (
-      [
-        args.options.env,
-        args.options.profile,
-        args.options.target,
-        args.options.pruneCaches,
-        args.options.yes,
-      ].some(Boolean)
-    ) {
-      throw new CliUsageError(
-        "Native down preserves data and does not support --env, --profile, --target, --prune-caches or --yes."
-      );
-    }
-    const project = await resolveProjectForArgs({
-      ctx,
-      pathOpt: args.options.path,
-      projectOpt: args.options.project,
-      touchRegistration: false,
-    });
-    const branch = await resolveEffectiveBranchForCommand({
-      project,
-      branchOption: args.options.branch,
-      noticeToStderr: args.options.json === true,
-    });
-    const cfg = await readProjectConfig(project);
-    if (cfg.parseError) {
-      throw new CliUsageError(
-        "Native down requires valid lifecycle configuration; values omitted."
-      );
-    }
-    const scope = {
-      projectRoot: project.projectRoot,
-      projectDir: project.projectDir,
-      nativeHome: native.home,
-      branch,
-    };
-    let lifecycleEnv: Readonly<Record<string, string>> = {};
-    const hasHooks = Boolean(
-      cfg.lifecycle?.down?.before?.length || cfg.lifecycle?.down?.after?.length
-    );
-    const projectName = sanitizeProjectSlug(
-      await resolveComposeProjectName({ project, cfg })
-    );
-    const composeProject = resolveLifecycleComposeProjectName({
-      projectName,
-      branch,
-    });
-    const hook = async (phase: "before" | "after") => {
-      const code = await runLifecycleCommands({
-        title: `Lifecycle (native down ${phase})`,
-        commands: cfg.lifecycle?.down?.[phase],
-        projectRoot: project.projectRoot,
-        projectDir: project.projectDir,
-        composeProject,
-        env: lifecycleEnv,
-        routeStdoutToStderr: args.options.json === true,
-      });
-      if (code !== 0) {
-        throw new Error(
-          `Native down ${phase} hook failed (exit ${code})${phase === "after" ? "; native graph cleanup was confirmed and data retained" : "; cleanup was not requested"}.`
-        );
-      }
-    };
-    const result = await nativeProjectDown({
-      runtime: native,
-      scope,
-      deferFinalization,
-      retireHostProcesses: async () => {
-        await stopLifecycleProcesses({
-          project,
-          cfg,
-          projectName,
-          branch,
-          composeProject,
-        });
-      },
-      before: async (run) => {
-        if (!hasHooks) {
-          return;
-        }
-        lifecycleEnv = await nativeDownEnvironment({
-          scope,
-          run,
-          serviceNames: await readComposeServiceNames(project.composeFile),
-        });
-        await hook("before");
-      },
-      after: async () => {
-        if (hasHooks) {
-          await hook("after");
-        }
-      },
-    });
-    if (args.options.json) {
-      process.stdout.write(`${JSON.stringify(result)}\n`);
-    } else {
-      logger.info({
-        message:
-          result.status === "stopped"
-            ? "Native project stopped; data retained."
-            : "Native project is not started.",
-      });
-    }
-    return 0;
-  }
   const json = args.options.json === true;
   if (!json) {
     return await runDownCommand({ ctx, args, json: false });
@@ -6250,7 +6635,6 @@ async function runRestartDownPhase(opts: {
 }
 
 async function runRestartUpPhase(opts: {
-  readonly startupTimeoutMs: number;
   readonly project: Awaited<ReturnType<typeof requireProjectContext>>;
   readonly cfg: Awaited<ReturnType<typeof readProjectConfig>>;
   readonly baseProjectName: string;
@@ -6262,10 +6646,7 @@ async function runRestartUpPhase(opts: {
   readonly envName?: string | null;
   readonly detach?: boolean;
   readonly routeStdoutToStderr?: boolean;
-}): Promise<{
-  readonly code: number;
-  readonly phase: "compose" | "lifecycle";
-}> {
+}): Promise<number> {
   await maybeSyncOauthAliasesInCompose({ project: opts.project });
 
   const devHost = await resolveRuntimeDevHost({
@@ -6295,8 +6676,6 @@ async function runRestartUpPhase(opts: {
     projectDir: opts.project.projectDir,
     composeProject: opts.lifecycleComposeProject,
     envName: envOverrides.effectiveEnvName,
-    services: targetServices,
-    envByService: envOverrides.preflightEnvByService,
   });
 
   let lifecycleCleanup: LifecycleOperationCleanup | null = null;
@@ -6313,7 +6692,7 @@ async function runRestartUpPhase(opts: {
       composeProject: opts.lifecycleComposeProject,
     });
     if (lifecycleUp.code !== 0) {
-      return { code: lifecycleUp.code, phase: "lifecycle" };
+      return lifecycleUp.code;
     }
     if (lifecycleUp.sessionName) {
       logger.info({
@@ -6328,7 +6707,7 @@ async function runRestartUpPhase(opts: {
         ? error.message
         : "Failed to start lifecycle setup";
     logger.error({ message });
-    return { code: 1, phase: "lifecycle" };
+    return 1;
   }
 
   const signalCleanup =
@@ -6362,7 +6741,6 @@ async function runRestartUpPhase(opts: {
       projectName: opts.projectName,
       composeFile: opts.project.composeFile,
     });
-    reportDependencyCacheFallback(dependencyCache);
     const composeFilesWithRuntimeOverrides = dependencyCache.overridePath
       ? [...composeFilesWithInternal, dependencyCache.overridePath]
       : composeFilesWithInternal;
@@ -6379,17 +6757,7 @@ async function runRestartUpPhase(opts: {
       ...(runtimeMetadataOverride ? [runtimeMetadataOverride] : []),
       ...envOverrides.composeFiles,
     ];
-    reportComposeStartupBudget({
-      startupTimeoutMs: opts.startupTimeoutMs,
-      detach: opts.detach === true,
-    });
     const upCode = await composeRuntimeBackend.up({
-      dependencyProgress: resolveDependencyCacheProgress({
-        cache: dependencyCache,
-        project: opts.composeProjectName,
-        baseProject: opts.baseProjectName,
-      }),
-      startupTimeoutMs: opts.startupTimeoutMs,
       composeFiles: composeFilesWithEnv,
       composeProject: opts.composeProjectName,
       profiles: opts.profiles,
@@ -6400,18 +6768,7 @@ async function runRestartUpPhase(opts: {
       forceRecreate: true,
     });
     if (upCode !== 0) {
-      reportComposeStartupBudget({
-        startupTimeoutMs: opts.startupTimeoutMs,
-        detach: true,
-        repair: true,
-      });
       const repairCode = await composeRuntimeBackend.up({
-        dependencyProgress: resolveDependencyCacheProgress({
-          cache: dependencyCache,
-          project: opts.composeProjectName,
-          baseProject: opts.baseProjectName,
-        }),
-        startupTimeoutMs: opts.startupTimeoutMs,
         composeFiles: composeFilesWithEnv,
         composeProject: opts.composeProjectName,
         profiles: opts.profiles,
@@ -6437,7 +6794,7 @@ async function runRestartUpPhase(opts: {
           composeProject: opts.lifecycleComposeProject,
         });
       }
-      return { code: upCode, phase: "compose" };
+      return upCode;
     }
 
     const upAfter = await runLifecycleCommands({
@@ -6451,7 +6808,7 @@ async function runRestartUpPhase(opts: {
     if (upAfter !== 0) {
       await lifecycleCleanup?.();
     }
-    return { code: upAfter, phase: "lifecycle" };
+    return upAfter;
   } catch (error: unknown) {
     await lifecycleCleanup?.();
     await removeProjectRuntimeStateEntry({
@@ -6477,7 +6834,6 @@ type TargetedServiceRestartResult =
       readonly errorCode:
         | "E_COMPOSE_FAILED"
         | "E_STARTUP_INCOMPLETE"
-        | "E_DEPENDENCY_BOOTSTRAP_FAILED"
         | "E_STARTUP_TIMEOUT";
       readonly message: string;
       readonly running: readonly string[];
@@ -6490,7 +6846,6 @@ type TargetedServiceRestartResult =
  * individual Compose service.
  */
 async function runTargetedServiceRestart(opts: {
-  readonly startupTimeoutMs: number;
   readonly project: Awaited<ReturnType<typeof requireProjectContext>>;
   readonly cfg: Awaited<ReturnType<typeof readProjectConfig>>;
   readonly baseProjectName: string;
@@ -6525,34 +6880,25 @@ async function runTargetedServiceRestart(opts: {
           aliasHost,
         })
       : [opts.project.composeFile];
-  const dependencyCache = await resolveDependencyCacheOverride({
-    projectRoot: opts.project.projectRoot,
-    projectDir: opts.project.projectDir,
-    projectName: opts.projectName,
-    composeFile: opts.project.composeFile,
-  });
-  const cacheBootstrapServices = await resolveDependencyCacheBootstrapServices({
-    composeFile: opts.project.composeFile,
-    cache: dependencyCache,
-    targetServices: opts.services,
-  });
-  const preparedServices = [
-    ...new Set([...opts.services, ...cacheBootstrapServices]),
-  ];
   const envOverrides = await resolveComposeEnvOverrides({
     project: opts.project,
     projectName: opts.projectName,
-    targetServices: preparedServices,
+    targetServices: opts.services,
     allServiceNames: opts.allServiceNames,
     envName: opts.envName,
   });
   await assertRegistryCredentialsAvailable({
     projectRoot: opts.project.projectRoot,
     composeFile: opts.project.composeFile,
-    targetServices: preparedServices,
+    targetServices: opts.services,
     envByService: envOverrides.preflightEnvByService,
   });
-  reportDependencyCacheFallback(dependencyCache);
+  const dependencyCache = await resolveDependencyCacheOverride({
+    projectRoot: opts.project.projectRoot,
+    projectDir: opts.project.projectDir,
+    projectName: opts.projectName,
+    composeFile: opts.project.composeFile,
+  });
   const composeFilesWithRuntimeOverrides = [
     ...composeFiles,
     ...(internalOverride ? [internalOverride] : []),
@@ -6566,46 +6912,12 @@ async function runTargetedServiceRestart(opts: {
     aliasHost,
     composeProject: opts.composeProjectName ?? opts.baseProjectName,
   });
-  const composeFilesWithEnv = [
-    ...composeFilesWithRuntimeOverrides,
-    ...(runtimeMetadataOverride ? [runtimeMetadataOverride] : []),
-    ...envOverrides.composeFiles,
-  ];
-  const bootstrapCode = await bootstrapDependencyCaches({
-    timeoutMs: opts.startupTimeoutMs,
-    services: cacheBootstrapServices,
-    composeFiles: composeFilesWithEnv,
-    composeProject: opts.composeProjectName,
-    profiles: opts.profiles,
-    cwd: dirname(opts.project.composeFile),
-    env: envOverrides.env,
-  });
-  if (bootstrapCode !== 0) {
-    const failure = dependencyCacheBootstrapFailure({
-      code: bootstrapCode,
-      timeoutMs: opts.startupTimeoutMs,
-    });
-    return {
-      ok: false,
-      code: bootstrapCode,
-      errorCode: failure.code,
-      message: failure.message,
-      running: [],
-      completed: [],
-    };
-  }
-  reportComposeStartupBudget({
-    startupTimeoutMs: opts.startupTimeoutMs,
-    detach: true,
-  });
   const code = await composeRuntimeBackend.up({
-    dependencyProgress: resolveDependencyCacheProgress({
-      cache: dependencyCache,
-      project: opts.composeProjectName,
-      baseProject: opts.baseProjectName,
-    }),
-    startupTimeoutMs: opts.startupTimeoutMs,
-    composeFiles: composeFilesWithEnv,
+    composeFiles: [
+      ...composeFilesWithRuntimeOverrides,
+      ...(runtimeMetadataOverride ? [runtimeMetadataOverride] : []),
+      ...envOverrides.composeFiles,
+    ],
     composeProject: opts.composeProjectName,
     profiles: opts.profiles,
     detach: true,
@@ -6616,25 +6928,8 @@ async function runTargetedServiceRestart(opts: {
     env: envOverrides.env,
     routeStdoutToStderr: opts.routeStdoutToStderr,
   });
-  // Force-recreate applies the env resolved above; after a failure the
-  // services' delivered env is unknown, so their digests are dropped.
-  await updateProjectRuntimeServiceEnvFingerprints({
-    projectDir: opts.project.projectDir,
-    composeProject: resolveLifecycleComposeProjectName({
-      projectName: opts.projectName,
-      branch: opts.branch,
-    }),
-    effectiveEnvName: envOverrides.effectiveEnvName,
-    services: opts.services,
-    envByService: envOverrides.preflightEnvByService,
-    outcome: code === 0 ? "applied" : "unknown",
-  });
   if (code !== 0) {
-    const failure = composeStartupFailure(
-      code,
-      "Targeted service restart",
-      opts.startupTimeoutMs
-    );
+    const failure = composeStartupFailure(code, "Targeted service restart");
     return {
       ok: false,
       code,
@@ -6689,26 +6984,6 @@ async function runTargetedServiceRestart(opts: {
   };
 }
 
-function validateFrontendRecoveryOptions(opts: {
-  readonly recover: boolean;
-  readonly expectAttempt: string | undefined;
-  readonly legacyPid: number | undefined;
-}): void {
-  const { recover, expectAttempt, legacyPid } = opts;
-  if (
-    (recover &&
-      (typeof expectAttempt !== "string" ||
-        !FINALIZATION_ATTEMPT.test(expectAttempt) ||
-        (legacyPid !== undefined &&
-          (!Number.isSafeInteger(legacyPid) || legacyPid <= 1)))) ||
-    (!recover && (expectAttempt !== undefined || legacyPid !== undefined))
-  ) {
-    throw new CliUsageError(
-      "Native frontend recovery requires --recover-frontend and the exact --expect-finalization-attempt; legacy state also requires --expect-frontend-pid."
-    );
-  }
-}
-
 async function handleRestart({
   ctx,
   args,
@@ -6716,51 +6991,6 @@ async function handleRestart({
   readonly ctx: CliContext;
   readonly args: RestartArgs;
 }): Promise<number> {
-  const recover = args.options.recoverFrontend === true;
-  const expectAttempt = args.options.expectFinalizationAttempt;
-  const legacyPid = args.options.expectFrontendPid;
-  validateFrontendRecoveryOptions({ recover, expectAttempt, legacyPid });
-  // Refuse a malformed --target before any project or runtime work.
-  parseRequestedTarget({ raw: args.options.target });
-  const authored = await tryNativeComposeCommand({
-    cwd: ctx.cwd,
-    path: args.options.path,
-    project: args.options.project,
-    operation: "restart",
-    instance: args.options.branch,
-    profiles: parseCsvList(args.options.profile),
-    overlay: args.options.env,
-    json: args.options.json,
-    services: args.positionals.services,
-    unsupportedOptions: [
-      args.options.target,
-      recover,
-      expectAttempt,
-      legacyPid,
-    ].some(Boolean),
-  });
-  if (authored !== null) {
-    return authored;
-  }
-  const native = resolveNativeRuntimeSelection();
-  if (native) {
-    return await handleNativeUp({
-      ctx,
-      args: { ...args, options: { ...args.options, detach: false } },
-      native,
-      restart: true,
-      recovery:
-        recover && expectAttempt
-          ? { expectAttempt, ...(legacyPid ? { legacyPid } : {}) }
-          : undefined,
-    });
-  }
-  if (recover) {
-    throw new CliUsageError(
-      "Frontend recovery is available only for the native runtime."
-    );
-  }
-  requireComposeOperationAvailable("restart");
   const json = args.options.json === true;
   if (!json) {
     return await runRestartCommand({ ctx, args, json: false });
@@ -6800,7 +7030,6 @@ async function runRestartCommand({
   readonly json: boolean;
   readonly startedAtMs?: number;
 }): Promise<number> {
-  const startupTimeoutMs = resolveComposeStartupTimeoutMs();
   const project = await resolveProjectForArgs({
     ctx,
     pathOpt: args.options.path,
@@ -6860,7 +7089,6 @@ async function runRestartCommand({
   });
   if (requestedServices.length > 0) {
     const result = await runTargetedServiceRestart({
-      startupTimeoutMs,
       project,
       cfg,
       baseProjectName,
@@ -6874,9 +7102,6 @@ async function runRestartCommand({
       routeStdoutToStderr: json,
     });
     if (!json) {
-      if (!result.ok) {
-        logger.error({ message: result.message });
-      }
       return result.code;
     }
     if (!result.ok) {
@@ -6959,8 +7184,7 @@ async function runRestartCommand({
     composeProject: lifecycleComposeProject,
   });
 
-  const upOutcome = await runRestartUpPhase({
-    startupTimeoutMs,
+  const upCode = await runRestartUpPhase({
     project,
     cfg,
     baseProjectName,
@@ -6974,19 +7198,11 @@ async function runRestartCommand({
     routeStdoutToStderr: json,
   });
 
-  const upCode = upOutcome.code;
   if (upCode !== 0) {
-    const failure =
-      upOutcome.phase === "compose"
-        ? composeStartupFailure(upCode, "Restart up phase", startupTimeoutMs)
-        : {
-            code: "E_LIFECYCLE_FAILED" as const,
-            message: `Restart lifecycle hook failed (exit ${upCode})`,
-          };
     if (!json) {
-      logger.error({ message: failure.message });
       return upCode;
     }
+    const failure = composeStartupFailure(upCode, "Restart up phase");
     return emitLifecycleResult({
       result: errorResult({
         code: failure.code,
@@ -7105,19 +7321,10 @@ export function resolveRestartTarget(opts: {
   };
 }
 
-/**
- * Record the env selection of a full-stack up/restart together with fresh,
- * value-free digests of the env set delivered to each prepared service, so
- * `hack exec` can warn when the resolved env later changes.
- */
 async function persistProjectRuntimeEnvSelection(opts: {
   readonly projectDir: string;
   readonly composeProject: string;
   readonly envName: string | null;
-  readonly services: readonly string[];
-  readonly envByService: Readonly<
-    Record<string, Readonly<Record<string, string>>>
-  >;
 }): Promise<void> {
   await upsertProjectRuntimeStateEntry({
     projectDir: opts.projectDir,
@@ -7125,11 +7332,6 @@ async function persistProjectRuntimeEnvSelection(opts: {
       composeProject: opts.composeProject,
       envName: opts.envName,
       updatedAt: new Date().toISOString(),
-      envFingerprint: withComposeServiceEnvFingerprints({
-        existing: undefined,
-        services: opts.services,
-        envByService: opts.envByService,
-      }),
     },
   });
 }
@@ -7228,46 +7430,6 @@ async function maybeManageProjectLogsAfterDown(opts: {
   });
 }
 
-/**
- * Native ps output. `--json` prints the standard `{ok: true, data}` envelope
- * whose `data` is the native ps result, matching authored native ps.
- */
-async function displayNativePs(
-  result: NativeProjectPsResult,
-  json: boolean
-): Promise<void> {
-  if (json) {
-    emitCliResult({ result: okResult({ data: result }) });
-    return;
-  }
-  if (result.status === "not_started") {
-    logger.info({ message: "Native project has not been started." });
-  } else if (result.status === "runtime_not_running") {
-    logger.info({
-      message: "Native runtime is not running; no services are running.",
-    });
-  } else if (result.status === "owner_unconfirmed") {
-    logger.warn({
-      message:
-        "Native graph owner is unconfirmed. Service rows are observations, not usable readiness; explicit retaining recovery is required.",
-    });
-  } else if (result.status === "runtime_degraded") {
-    logger.warn({
-      message:
-        "Native graph owner reported a degraded runtime. Service rows do not prove usable readiness; inspect graph owner-status.",
-    });
-  }
-  await display.table({
-    columns: ["NATIVE SERVICE", "CONTAINER", "STATE", "HEALTH"],
-    rows: result.items.map((item) => [
-      item.service,
-      item.container ?? "",
-      item.state,
-      item.health ?? "",
-    ]),
-  });
-}
-
 async function handlePs({
   ctx,
   args,
@@ -7275,21 +7437,6 @@ async function handlePs({
   readonly ctx: CliContext;
   readonly args: PsArgs;
 }): Promise<number> {
-  const authored = await tryNativeComposeCommand({
-    cwd: ctx.cwd,
-    path: args.options.path,
-    project: args.options.project,
-    operation: "ps",
-    instance: args.options.branch,
-    profiles:
-      args.options.profile === undefined
-        ? undefined
-        : parseCsvList(args.options.profile),
-    json: args.options.json,
-  });
-  if (authored !== null) {
-    return authored;
-  }
   const project = await resolveProjectForArgs({
     ctx,
     pathOpt: args.options.path,
@@ -7302,23 +7449,6 @@ async function handlePs({
     branchOption: args.options.branch,
     noticeToStderr: json,
   });
-  const native = resolveNativeRuntimeSelection();
-  if (native) {
-    if (args.options.profile) {
-      throw new CliUsageError("Native ps does not support profile filtering.");
-    }
-    const result = await nativeProjectPs({
-      runtime: native,
-      scope: {
-        projectRoot: project.projectRoot,
-        projectDir: project.projectDir,
-        nativeHome: native.home,
-        branch,
-      },
-    });
-    await displayNativePs(result, json);
-    return 0;
-  }
   const profiles = parseCsvList(args.options.profile);
 
   const cfg = await readProjectConfig(project);
@@ -7395,18 +7525,6 @@ async function handlePs({
   return 0;
 }
 
-function validateRunBackendOptions(native: boolean, args: RunArgs): void {
-  if (!native) {
-    requireComposeOperationAvailable("run");
-    return;
-  }
-  if (args.options.env || args.options.profile) {
-    throw new CliUsageError(
-      "Native run uses the started project's environment and profiles; restart with the requested selections first."
-    );
-  }
-}
-
 async function handleRun({
   ctx,
   args,
@@ -7414,23 +7532,6 @@ async function handleRun({
   readonly ctx: CliContext;
   readonly args: RunArgs;
 }): Promise<number> {
-  const authored = await tryNativeComposeCommand({
-    cwd: ctx.cwd,
-    path: args.options.path,
-    project: args.options.project,
-    operation: "run",
-    instance: args.options.branch,
-    profiles: optionalCsvList(args.options.profile),
-    overlay: args.options.env,
-    service: args.positionals.service,
-    command: args.positionals.cmd,
-    workdir: args.options.workdir,
-  });
-  if (authored !== null) {
-    return authored;
-  }
-  const native = resolveNativeRuntimeSelection();
-  validateRunBackendOptions(Boolean(native), args);
   const project = await resolveProjectForArgs({
     ctx,
     pathOpt: args.options.path,
@@ -7444,27 +7545,6 @@ async function handleRun({
     // notice on stderr so it never corrupts captured output.
     noticeToStderr: true,
   });
-  if (native) {
-    const result = await nativeProjectOneOff({
-      runtime: native,
-      scope: {
-        projectRoot: project.projectRoot,
-        projectDir: project.projectDir,
-        nativeHome: native.home,
-        branch,
-      },
-      service: args.positionals.service ?? "",
-      argv: args.positionals.cmd,
-      workdir: args.options.workdir,
-      composeFile: project.composeFile,
-    });
-    process.stdout.write(result.stdout);
-    process.stderr.write(result.stderr);
-    if (result.truncated) {
-      process.stderr.write("Native run output was truncated.\n");
-    }
-    return result.exitCode;
-  }
   const envName = resolveRequestedEnvName({
     envOption: args.options.env,
   });
@@ -7511,7 +7591,6 @@ async function handleRun({
     projectName,
     composeFile: project.composeFile,
   });
-  reportDependencyCacheFallback(dependencyCache);
   const composeFilesWithRuntimeOverrides = dependencyCache.overridePath
     ? [...composeFilesWithInternal, dependencyCache.overridePath]
     : composeFilesWithInternal;
@@ -7524,17 +7603,11 @@ async function handleRun({
     composeProject: composeProjectName ?? baseProjectName,
   });
 
-  const cacheBootstrapServices = await resolveDependencyCacheBootstrapServices({
-    composeFile: project.composeFile,
-    cache: dependencyCache,
-    targetServices: [service],
-  });
-  const preparedServices = [...new Set([service, ...cacheBootstrapServices])];
   const allServiceNames = await readComposeServiceNames(project.composeFile);
   const envOverrides = await resolveComposeEnvOverrides({
     project,
     projectName,
-    targetServices: preparedServices,
+    targetServices: [service],
     allServiceNames,
     envName,
   });
@@ -7543,38 +7616,19 @@ async function handleRun({
     ...(runtimeMetadataOverride ? [runtimeMetadataOverride] : []),
     ...envOverrides.composeFiles,
   ];
-  await assertRegistryCredentialsAvailable({
-    projectRoot: project.projectRoot,
-    composeFile: project.composeFile,
-    targetServices: preparedServices,
-    envByService: envOverrides.preflightEnvByService,
-  });
-  const bootstrapCode = await bootstrapDependencyCaches({
-    services: cacheBootstrapServices,
+  const stackIsRunning = await resolveCanSkipRunDependencies({
     composeFiles: composeFilesWithEnv,
+    composeProjectKey: composeProjectName ?? baseProjectName,
     composeProject: composeProjectName,
+    project,
     profiles,
-    cwd: dirname(project.composeFile),
+    effectiveEnvName: envOverrides.effectiveEnvName,
+    cacheVolumeNames: dependencyCache.volumes.map(
+      (volume) => volume.resolvedName
+    ),
     env: envOverrides.env,
+    service,
   });
-  if (bootstrapCode !== 0) {
-    return bootstrapCode;
-  }
-  const stackIsRunning =
-    !dependencyCache.sharingDisabledReason &&
-    (await resolveCanSkipRunDependencies({
-      composeFiles: composeFilesWithEnv,
-      composeProjectKey: composeProjectName ?? baseProjectName,
-      composeProject: composeProjectName,
-      project,
-      profiles,
-      effectiveEnvName: envOverrides.effectiveEnvName,
-      cacheVolumeNames: dependencyCache.volumes.map(
-        (volume) => volume.resolvedName
-      ),
-      env: envOverrides.env,
-      service,
-    }));
   return await composeRuntimeBackend.run({
     composeFiles: composeFilesWithEnv,
     composeProject: composeProjectName,
@@ -7595,27 +7649,6 @@ async function handleExec({
   readonly ctx: CliContext;
   readonly args: ExecArgs;
 }): Promise<number> {
-  const authored = await tryNativeComposeCommand({
-    cwd: ctx.cwd,
-    path: args.options.path,
-    project: args.options.project,
-    operation: "exec",
-    instance: args.options.branch,
-    profiles: optionalCsvList(args.options.profile),
-    overlay: args.options.env,
-    service: args.positionals.service,
-    command: args.positionals.cmd,
-    workdir: args.options.workdir,
-  });
-  if (authored !== null) {
-    return authored;
-  }
-  const native = resolveNativeRuntimeSelection();
-  if (native && [args.options.env, args.options.profile].some(Boolean)) {
-    throw new CliUsageError(
-      "Native exec does not support --env or --profile changes; it uses the running service environment."
-    );
-  }
   const project = await resolveProjectForArgs({
     ctx,
     pathOpt: args.options.path,
@@ -7629,21 +7662,6 @@ async function handleExec({
     // notice on stderr so it never corrupts captured output.
     noticeToStderr: true,
   });
-  if (native) {
-    return await runNativeProjectExec({
-      runtime: native,
-      scope: {
-        projectRoot: project.projectRoot,
-        projectDir: project.projectDir,
-        nativeHome: native.home,
-        branch,
-      },
-      service: args.positionals.service,
-      argv: args.positionals.cmd,
-      workdir: args.options.workdir,
-      composeFile: project.composeFile,
-    });
-  }
   const envName = resolveRequestedEnvName({
     envOption: args.options.env,
   });
@@ -7725,16 +7743,6 @@ async function handleExec({
   if (!execReady.ok) {
     throw new CliUsageError(execReady.message);
   }
-  // exec stdout is the target command's output; keep the warning on stderr.
-  const staleEnvWarning = await resolveComposeExecStaleEnvWarning({
-    projectDir: project.projectDir,
-    composeProject: lifecycleComposeProject,
-    service,
-    currentEnv: envOverrides.preflightEnvByService[service] ?? {},
-  });
-  if (staleEnvWarning) {
-    process.stderr.write(`WARNING: ${staleEnvWarning}\n`);
-  }
 
   return await composeRuntimeBackend.exec({
     composeFiles: composeFilesWithEnv,
@@ -7746,17 +7754,6 @@ async function handleExec({
     cwd: dirname(project.composeFile),
     env: envOverrides.env,
   });
-}
-
-function reportDependencyCacheFallback(cache: {
-  readonly sharingDisabledReason?: string;
-}): void {
-  if (cache.sharingDisabledReason) {
-    logger.warn({
-      message:
-        "Shared dependency cache disabled: installer image/build inputs and platform must be explicit and resolved. Using the original Compose volume configuration.",
-    });
-  }
 }
 
 async function resolveCanSkipRunDependencies(opts: {
@@ -8165,87 +8162,6 @@ async function resolveLifecycleLogCompanion(opts: {
   return { logPath };
 }
 
-async function handleNativeLogs({
-  args,
-  project,
-  branch,
-  native,
-}: {
-  readonly args: LogsArgs;
-  readonly project: Awaited<ReturnType<typeof resolveProjectForArgs>>;
-  readonly branch: string | null;
-  readonly native: NonNullable<
-    ReturnType<typeof resolveNativeRuntimeSelection>
-  >;
-}): Promise<number> {
-  const json = args.options.json === true;
-  const service = args.positionals.service;
-  const tail = args.options.tail ?? 200;
-  const follow = !args.options.noFollow;
-  if (
-    [
-      args.options.profile,
-      args.options.compose,
-      args.options.loki,
-      args.options.services,
-      args.options.query,
-      args.options.since,
-      args.options.until,
-      args.options.pretty,
-    ].some(Boolean)
-  ) {
-    throw new CliUsageError(
-      "Native logs support only a service, --no-follow, --tail and --json."
-    );
-  }
-  const result = await nativeProjectLogs({
-    runtime: native,
-    scope: {
-      projectRoot: project.projectRoot,
-      projectDir: project.projectDir,
-      nativeHome: native.home,
-      branch,
-    },
-    service,
-    tail,
-    follow,
-  });
-  if (json) {
-    process.stdout.write(`${JSON.stringify(result)}\n`);
-  } else {
-    process.stderr.write(
-      `Native logs: ${result.service}${result.truncated ? " (truncated)" : ""}\n`
-    );
-    process.stdout.write(result.stdout);
-    process.stderr.write(result.stderr);
-  }
-  return 0;
-}
-
-function logsHaveUnsupportedNativeOptions(
-  options: LogsArgs["options"]
-): boolean {
-  if (process.env.HACK_RUNTIME_BACKEND === "native") {
-    return Boolean(
-      options.loki ||
-        options.compose ||
-        options.pretty ||
-        options.query !== undefined ||
-        options.services !== undefined ||
-        options.since !== undefined ||
-        options.until !== undefined ||
-        (options.follow && options.noFollow)
-    );
-  }
-  return Boolean(
-    options.loki ||
-      options.query ||
-      options.services ||
-      options.since ||
-      options.until
-  );
-}
-
 async function handleLogs({
   ctx,
   args,
@@ -8253,29 +8169,6 @@ async function handleLogs({
   readonly ctx: CliContext;
   readonly args: LogsArgs;
 }): Promise<number> {
-  const authored = await tryNativeComposeCommand({
-    cwd: ctx.cwd,
-    path: args.options.path,
-    project: args.options.project,
-    operation: "logs",
-    instance: args.options.branch,
-    profiles:
-      args.options.profile === undefined
-        ? undefined
-        : parseCsvList(args.options.profile),
-    service: args.positionals.service,
-    json: args.options.json,
-    follow: !args.options.noFollow,
-    tail: args.options.tail,
-    logFormat: resolveLogFormat({
-      json: args.options.json,
-      pretty: args.options.pretty,
-    }),
-    unsupportedOptions: logsHaveUnsupportedNativeOptions(args.options),
-  });
-  if (authored !== null) {
-    return authored;
-  }
   const project = await resolveProjectForArgs({
     ctx,
     pathOpt: args.options.path,
@@ -8291,10 +8184,6 @@ async function handleLogs({
   const follow = !args.options.noFollow;
   const tail = args.options.tail ?? 200;
   const service = args.positionals.service;
-  const native = resolveNativeRuntimeSelection();
-  if (native) {
-    return await handleNativeLogs({ args, project, branch, native });
-  }
   const profiles = parseCsvList(args.options.profile);
   const format = resolveLogFormat({ json, pretty: args.options.pretty });
   const timeRange = parseLogTimeRange({
@@ -8385,10 +8274,6 @@ async function handleLogs({
   });
 }
 
-/** An omitted option stays omitted so native dispatch can distinguish it from an explicit empty list. */
-function optionalCsvList(value: string | undefined): string[] | undefined {
-  return value === undefined ? undefined : parseCsvList(value);
-}
 function parseCsvList(value: string | undefined): string[] {
   const raw = (value ?? "").trim();
   if (raw.length === 0) {
@@ -8476,20 +8361,6 @@ async function handleOpen({
   readonly ctx: CliContext;
   readonly args: OpenArgs;
 }): Promise<number> {
-  const nativeOrigin = await tryNativeComposeOpen({
-    cwd: ctx.cwd,
-    path: args.options.path,
-    project: args.options.project,
-    instance: args.options.branch,
-    target: args.positionals.target,
-    prefer: args.options.prefer,
-  });
-  if (nativeOrigin !== null) {
-    return await emitOpenOrigin({
-      url: nativeOrigin,
-      json: args.options.json === true,
-    });
-  }
   const project = await resolveProjectForArgs({
     ctx,
     pathOpt: args.options.path,
@@ -8518,7 +8389,9 @@ async function handleOpen({
     }
   }
   const aliasHost = resolveBranchAliasHost({ devHost, cfg });
-  const baseHosts = resolveProjectRouteBaseHosts({ devHost, aliasHost });
+  const baseHosts = [devHost, aliasHost].filter(
+    (host): host is string => typeof host === "string" && host.length > 0
+  );
 
   const targetRaw = (args.positionals.target ?? "").trim();
   const preferenceRaw = args.options.prefer;
@@ -8550,24 +8423,15 @@ async function handleOpen({
     branch && usesProjectBaseHost
       ? applyBranchToHost({ host: rawHost, branch, baseHosts })
       : rawHost;
-  const grafanaHost = await resolveOpenGrafanaHost(targetRaw);
-  const url = resolveOpenUrl({ targetRaw, resolvedHost, grafanaHost });
+  const url = resolveOpenUrl({ targetRaw, resolvedHost });
 
-  return await emitOpenOrigin({ url, json });
-}
-
-async function emitOpenOrigin(opts: {
-  readonly url: string;
-  readonly json: boolean;
-}): Promise<number> {
-  if (opts.json) {
-    process.stdout.write(`${JSON.stringify({ url: opts.url }, null, 2)}\n`);
-    noteBrowserTargetsForLocalNetworkHint([opts.url]);
+  if (json) {
+    process.stdout.write(`${JSON.stringify({ url }, null, 2)}\n`);
     return 0;
   }
-  logger.step({ message: `Opening ${opts.url}` });
-  noteBrowserTargetsForLocalNetworkHint([opts.url]);
-  return await openUrl(opts.url);
+
+  logger.step({ message: `Opening ${url}` });
+  return await openUrl(url);
 }
 
 function hasUrlScheme(value: string): boolean {
@@ -8646,28 +8510,12 @@ function resolveRawHost(opts: {
 /**
  * Resolves the final URL to open based on target input.
  */
-async function resolveOpenGrafanaHost(
-  target: string
-): Promise<string | undefined> {
-  if (target !== "logs") {
-    return undefined;
-  }
-  const host = await resolveInstalledGrafanaHost();
-  if (!host) {
-    throw new CliUsageError(
-      "Cannot identify a configured global Grafana route; review the global logging Compose file or pass an explicit URL."
-    );
-  }
-  return host;
-}
-
-export function resolveOpenUrl(opts: {
-  readonly grafanaHost?: string;
+function resolveOpenUrl(opts: {
   readonly targetRaw: string;
   readonly resolvedHost: string;
 }): string {
   if (opts.targetRaw === "logs") {
-    return `https://${opts.grafanaHost ?? DEFAULT_GRAFANA_HOST}`;
+    return `https://${DEFAULT_GRAFANA_HOST}`;
   }
   if (hasUrlScheme(opts.targetRaw)) {
     return opts.targetRaw;

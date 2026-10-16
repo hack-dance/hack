@@ -18,7 +18,6 @@ fn token() -> String {
 }
 fn project_options(project: &Path) -> PlanOptions<'_> {
     PlanOptions {
-        branch: None,
         project,
         compose_file: Path::new("compose.yaml"),
         profiles: &[],
@@ -30,7 +29,6 @@ fn launch(candidate: &Candidate, project: &Path, run_id: &str) -> Result<Receipt
         candidate,
         RunOptions {
             live_source: false,
-            shared_source: false,
             release_initializer_cache: std::collections::BTreeSet::new(),
             routing_enrolled: false,
             project: project_options(project),

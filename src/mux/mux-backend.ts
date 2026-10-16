@@ -31,10 +31,6 @@ export interface MuxBackend {
   readLifecycleOwnerToken?(opts: {
     readonly name: string;
   }): Promise<string | null>;
-  /** A failed query is unknown, not proof that an owned session exited. */
-  readSessionPresence?(opts: {
-    readonly name: string;
-  }): Promise<"present" | "absent" | "unknown">;
   listSessionWindowNames?(opts: {
     readonly name: string;
   }): Promise<ReadonlySet<string> | null>;

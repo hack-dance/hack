@@ -3,9 +3,6 @@
 use super::super::*;
 use std::{io::Read, path::Path, time::Instant};
 
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-mod integrity;
-
 struct Cleanup<'a> {
     candidate: &'a Candidate,
     run: String,
@@ -30,7 +27,6 @@ fn token() -> String {
 
 fn options(project: &Path) -> PlanOptions<'_> {
     PlanOptions {
-        branch: None,
         project,
         compose_file: Path::new("compose.yaml"),
         profiles: &[],
@@ -110,7 +106,6 @@ fn owned_graph_shutdown_signals_and_escalation() {
         &candidate,
         RunOptions {
             live_source: false,
-            shared_source: false,
             release_initializer_cache: std::collections::BTreeSet::new(),
             routing_enrolled: false,
             project: options(&fixture.0),

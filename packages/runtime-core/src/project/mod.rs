@@ -1,15 +1,10 @@
 //! WU03 Compose review and metadata-only enrollment. These plans cannot execute services.
-mod adapter;
-pub use adapter::{NormalizedComposeOptions, plan_normalized};
 mod compose;
 mod enrollment;
 pub mod execution;
 mod generated;
-mod hostname_change;
 pub mod inputs;
 pub mod live_source;
-#[cfg(feature = "native-config-plan")]
-pub mod native;
 pub mod registry;
 pub mod snapshot;
 mod source;
@@ -22,14 +17,11 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-pub use enrollment::{EnrollmentReceipt, enroll, status, status_with_branch};
-#[cfg(feature = "native-config-plan")]
-pub(crate) use source::resolve as resolve_source;
+pub use enrollment::{EnrollmentReceipt, enroll, status};
 pub use source::{SourceEntry, SourceSelection};
 
 pub struct PlanOptions<'a> {
     pub project: &'a Path,
-    pub branch: Option<&'a str>,
     pub compose_file: &'a Path,
     pub profiles: &'a [String],
 }
@@ -299,15 +291,8 @@ pub struct PlanData {
     pub candidate_root: PathBuf,
     pub source: PathBuf,
     pub namespace: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub branch: Option<String>,
     pub compose_file: String,
     pub compose_sha256: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub original_compose_sha256: Option<String>,
-    /// Hash of both reviewed raw documents with only literal route hostnames masked.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub hostname_change_sha256: Option<String>,
     pub active_profiles: Vec<String>,
     pub services: BTreeMap<String, ServicePlan>,
     pub networks: BTreeMap<String, NetworkPlan>,
@@ -316,9 +301,6 @@ pub struct PlanData {
     pub registry: Option<registry::RegistryTemplate>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub generated_files: BTreeMap<String, String>,
-    /// Original env-file exclusions retained when normalization removes declarations.
-    #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
-    pub original_environment_files: std::collections::BTreeSet<String>,
     pub source_selection: SourceSelection,
     pub diagnostics: Vec<Diagnostic>,
     pub enrollment_compatible: bool,
@@ -343,11 +325,7 @@ pub struct PlanReport {
 }
 
 pub(crate) fn identity(plan: &PlanData) -> Result<String, CandidateError> {
-    // This additive proof is derived afresh from the exact original/normalized
-    // bytes already bound below. It must not reidentify unchanged legacy graphs.
-    let mut identity_plan = plan.clone();
-    identity_plan.hostname_change_sha256 = None;
-    let bytes = serde_json::to_vec(&identity_plan)
+    let bytes = serde_json::to_vec(plan)
         .map_err(|_| problem("serialization_failed", "Cannot encode review plan."))?;
     if bytes.len() > 3 * 1024 * 1024 {
         return Err(problem("plan_budget", "Review plan exceeds 3 MiB."));
@@ -356,35 +334,21 @@ pub(crate) fn identity(plan: &PlanData) -> Result<String, CandidateError> {
 }
 
 pub fn plan(candidate: &Candidate, options: PlanOptions<'_>) -> Result<PlanReport, CandidateError> {
-    plan_input(candidate, options, None)
-}
-
-fn plan_input(
-    candidate: &Candidate,
-    options: PlanOptions<'_>,
-    normalized: Option<adapter::Input<'_>>,
-) -> Result<PlanReport, CandidateError> {
     if options.profiles.len() > 64 {
         return Err(problem(
             "profile_budget",
             "At most 64 profiles can be selected.",
         ));
     }
-    let preview = candidate.plan_with_branch(options.project, options.branch)?;
+    let preview = candidate.plan(options.project)?;
     let source = &preview.source;
     let file_text = options
         .compose_file
         .to_str()
         .ok_or_else(|| problem("invalid_compose_path", "Compose path must be valid UTF-8."))?;
     let path = source::resolve(source, source, file_text, false)?;
-    let original = source::read_compose(&path)?;
-    let bytes = if let Some(ref input) = normalized {
-        input.verify(&preview.namespace, &original)?;
-        input.bytes
-    } else {
-        &original
-    };
-    let value = yaml::parse(bytes)?;
+    let bytes = source::read_compose(&path)?;
+    let value = yaml::parse(&bytes)?;
     let mut profiles = options.profiles.to_vec();
     profiles.sort();
     profiles.dedup();
@@ -401,30 +365,16 @@ fn plan_input(
         source,
         path.parent().expect("compose parent"),
         &relative,
-        bytes,
+        &bytes,
         &profiles,
         value,
     )?;
     data.namespace = preview.namespace;
-    data.branch = options.branch.map(str::to_owned);
-    data.hostname_change_sha256 = hostname_change::fingerprint(&original, bytes);
-    let mut environment_files = data
+    let environment_files = data
         .services
         .values()
         .flat_map(|service| service.environment_files.iter().cloned())
-        .collect::<std::collections::BTreeSet<_>>();
-    if bytes != original.as_slice() {
-        data.original_compose_sha256 = Some(format!("{:x}", Sha256::digest(&original)));
-        data.original_environment_files = compose::original_environment_files(
-            source,
-            path.parent().expect("compose parent"),
-            &original,
-        )?
-        .difference(&environment_files)
-        .cloned()
         .collect();
-        environment_files.extend(data.original_environment_files.iter().cloned());
-    }
     data.source_selection = source::inventory(source, &environment_files, &mut data.diagnostics)?;
     let needs_registry = data
         .services
@@ -443,7 +393,7 @@ fn plan_input(
     });
     data.enrollment_compatible = !data.diagnostics.iter().any(|d| d.severity == "error");
     // Re-read only the explicitly selected config; a changed plan is never silently enrolled.
-    if source::read_compose(&path)? != original {
+    if source::read_compose(&path)? != bytes {
         return Err(problem(
             "compose_changed",
             "Compose input changed during planning.",

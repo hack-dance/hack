@@ -59,38 +59,3 @@ test("buildDoctorJsonData handles an all-ok run", () => {
   expect(data.counts).toEqual({ ok: 1, warn: 0, error: 0 });
   expect(data.checks[0]?.id).toBe("bun");
 });
-
-test("buildDoctorJsonData adds only superseded-root counts and fingerprints", () => {
-  const supersededRoots = {
-    count: 2,
-    expired: 1,
-    notYetValid: 0,
-    sha256: ["A".repeat(64), "B".repeat(64)],
-  };
-  const data = buildDoctorJsonData({
-    results: [
-      {
-        name: "superseded caddy roots",
-        status: "warn",
-        message: "2 superseded Caddy roots remain",
-        durationMs: 3,
-        supersededRoots,
-      },
-      { name: "bun", status: "ok", message: "/usr/bin/bun", durationMs: 2 },
-    ],
-  });
-  expect(data.checks[0]).toStrictEqual({
-    id: "superseded caddy roots",
-    status: "warn",
-    detail: "2 superseded Caddy roots remain",
-    durationMs: 3,
-    supersededRoots,
-  });
-  expect(Object.keys(data.checks[1] ?? {})).toEqual([
-    "id",
-    "status",
-    "detail",
-    "durationMs",
-  ]);
-  expect(data.counts).toEqual({ ok: 1, warn: 1, error: 0 });
-});

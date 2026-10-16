@@ -2,22 +2,21 @@
 use super::*;
 
 #[derive(Default, Debug, PartialEq, Eq)]
-pub(super) struct Budget {
+struct Budget {
     services: u64,
     memory: u64,
     nano_cpus: u64,
 }
 impl Budget {
-    pub(super) fn add(&mut self, config: &Value) -> Result<(), CandidateError> {
+    fn add(&mut self, config: &Value) -> Result<(), CandidateError> {
         let memory = config["HostConfig"]["Memory"]
             .as_u64()
             .ok_or_else(invalid)?;
         let cpu = config["HostConfig"]["NanoCpus"]
             .as_u64()
             .ok_or_else(invalid)?;
-        // Engine zero means shared VM capacity, not a missing reservation field.
-        if (memory != 0 && !(16 * 1024 * 1024..=MAX_MEMORY_BYTES).contains(&memory))
-            || (cpu != 0 && !(100_000_000..=2_000_000_000).contains(&cpu))
+        if !(16 * 1024 * 1024..=MAX_MEMORY_BYTES).contains(&memory)
+            || !(100_000_000..=2_000_000_000).contains(&cpu)
         {
             return Err(invalid());
         }
@@ -48,25 +47,6 @@ pub(super) fn check(
     engine: &Engine<'_>,
     except: Option<&str>,
     requested: &BTreeMap<String, Value>,
-) -> Result<(), CandidateError> {
-    check_using(candidate, engine, except, requested, None)
-}
-#[cfg(feature = "native-config-plan")]
-pub(super) fn check_native_reserved(
-    candidate: &Candidate,
-    engine: &Engine<'_>,
-    receipt: &native::Receipt,
-    requested: &BTreeMap<String, Value>,
-) -> Result<(), CandidateError> {
-    check_using(candidate, engine, None, requested, Some(receipt))
-}
-fn check_using(
-    candidate: &Candidate,
-    engine: &Engine<'_>,
-    except: Option<&str>,
-    requested: &BTreeMap<String, Value>,
-    #[cfg(feature = "native-config-plan")] native_except: Option<&native::Receipt>,
-    #[cfg(not(feature = "native-config-plan"))] _native_except: Option<&()>,
 ) -> Result<(), CandidateError> {
     let mut budget = Budget::default();
     for config in requested.values() {
@@ -114,23 +94,6 @@ fn check_using(
             budget.add(&value)?;
         }
     }
-    #[cfg(feature = "native-config-plan")]
-    if native_except.is_some() {
-        native::reservations_except(candidate, engine, false, native_except, |config| {
-            budget.add(config)
-        })?;
-    } else {
-        native::reservations(candidate, engine, except.is_none(), |config| {
-            budget.add(config)
-        })?;
-    }
-    #[cfg(not(feature = "native-config-plan"))]
-    if !storage_inventory::runs(&candidate.state_root.join("run/native-graphs"))?.is_empty() {
-        return Err(error(
-            "native_graph_feature_unavailable",
-            "Retained native graph ownership requires the native-config-plan feature before more graph work can be admitted.",
-        ));
-    }
     Ok(())
 }
 
@@ -151,118 +114,6 @@ mod tests {
     use super::*;
     fn config(memory: u64, cpu: u64) -> Value {
         json!({"HostConfig":{"Memory":memory,"NanoCpus":cpu}})
-    }
-    #[test]
-    fn shared_pool_entries_count_globally_and_preserve_explicit_reservations() {
-        let mut budget = Budget::default();
-        for _ in 0..32 {
-            budget.add(&config(0, 0)).unwrap();
-        }
-        assert_eq!(
-            budget,
-            Budget {
-                services: 32,
-                memory: 0,
-                nano_cpus: 0
-            }
-        );
-        assert_eq!(
-            budget.add(&config(0, 0)).unwrap_err().code,
-            "graph_capacity_reserved"
-        );
-        let mut mixed = Budget::default();
-        mixed.add(&config(0, 0)).unwrap();
-        mixed.add(&config(64 * 1024 * 1024, 0)).unwrap();
-        mixed.add(&config(0, 2_000_000_000)).unwrap();
-        mixed.add(&config(0, 2_000_000_000)).unwrap();
-        assert_eq!(
-            mixed,
-            Budget {
-                services: 4,
-                memory: 64 * 1024 * 1024,
-                nano_cpus: 4_000_000_000
-            }
-        );
-        assert_eq!(
-            mixed.add(&config(0, 100_000_000)).unwrap_err().code,
-            "graph_capacity_reserved"
-        );
-        unchanged(&config(0, 0), &config(0, 0)).unwrap();
-        for capped in [config(16 * 1024 * 1024, 0), config(0, 100_000_000)] {
-            assert_eq!(
-                unchanged(&config(0, 0), &capped).unwrap_err().code,
-                "graph_capacity_changed"
-            );
-            assert_eq!(
-                unchanged(&capped, &config(0, 0)).unwrap_err().code,
-                "graph_capacity_changed"
-            );
-        }
-        for field in ["Memory", "NanoCpus"] {
-            for value in [
-                Value::Null,
-                json!(-1),
-                json!("0"),
-                json!(0.5),
-                json!(1),
-                json!(u64::MAX),
-            ] {
-                let mut invalid = config(0, 0);
-                invalid["HostConfig"][field] = value;
-                assert_eq!(
-                    Budget::default().add(&invalid).unwrap_err().code,
-                    "graph_capacity_uncertain"
-                );
-            }
-            let mut missing = config(0, 0);
-            missing["HostConfig"].as_object_mut().unwrap().remove(field);
-            assert_eq!(
-                Budget::default().add(&missing).unwrap_err().code,
-                "graph_capacity_uncertain"
-            );
-        }
-    }
-    #[test]
-    fn omitted_compose_limits_compile_into_admissible_engine_configs() {
-        let fixture = super::super::tests::Fixture::new();
-        let home = super::super::tests::Fixture::new();
-        let candidate = Candidate::discover(&home.0).unwrap();
-        let services:serde_json::Map<String,Value>=(0..32).map(|i|(format!("job-{i}"),json!({"image":format!("sha256:{}","a".repeat(64)),"network_mode":"none","command":["true"]}))).collect();
-        let goals = services
-            .keys()
-            .map(|name| (name.clone(), Condition::Completed))
-            .collect();
-        state::write(
-            &fixture.0.join("compose.yaml"),
-            &json!({"services":services}),
-        )
-        .unwrap();
-        let options = || project::PlanOptions {
-            branch: None,
-            project: &fixture.0,
-            compose_file: std::path::Path::new("compose.yaml"),
-            profiles: &[],
-        };
-        let plan = project::plan(&candidate, options()).unwrap();
-        let inputs =
-            project::inputs::compile(&candidate, options(), &plan.plan_id, &BTreeMap::new())
-                .unwrap();
-        let prepared =
-            super::super::config::prepare(inputs, &goals, &"a".repeat(32), &"b".repeat(32), None)
-                .unwrap();
-        let mut budget = Budget::default();
-        for config in prepared.configs.values() {
-            budget.add(config).unwrap();
-        }
-        assert_eq!(
-            budget,
-            Budget {
-                services: 32,
-                memory: 0,
-                nano_cpus: 0
-            }
-        );
-        assert!(!candidate.state_root.exists());
     }
     #[test]
     fn installer_and_web_reservations_preserve_guest_headroom() {
@@ -326,8 +177,8 @@ mod tests {
                 .is_err()
         );
         assert!(Budget::default().add(&json!({})).is_err());
-        Budget::default().add(&config(0, 100_000_000)).unwrap();
-        Budget::default().add(&config(64 * 1024 * 1024, 0)).unwrap();
+        assert!(Budget::default().add(&config(0, 100_000_000)).is_err());
+        assert!(Budget::default().add(&config(64 * 1024 * 1024, 0)).is_err());
         unchanged(&big, &big).unwrap();
         assert!(unchanged(&big, &config(32 * 1024 * 1024, 2_000_000_000)).is_err());
     }

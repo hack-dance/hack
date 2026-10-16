@@ -490,7 +490,7 @@ fn health(
     }))
 }
 
-pub(super) fn environment_files(
+fn environment_files(
     project: &Path,
     base: &Path,
     value: Option<&Value>,

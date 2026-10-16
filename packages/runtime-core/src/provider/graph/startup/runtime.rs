@@ -1,8 +1,5 @@
 //! Foreground graph startup owner. Keys and child handles never enter receipts.
 use super::*;
-mod jobs;
-mod rebind;
-use crate::provider::guest_tool::{APPEND, PREPARE, PUBLISH};
 use crate::provider::{
     host_endpoint::HostEndpoint,
     lifecycle::{RelayChild, RelayLaunch},
@@ -13,64 +10,15 @@ use crate::provider::{
     },
 };
 use base64::Engine as _;
-pub use rebind::RefreshPolicy;
-pub(super) fn require_dependency_rebind_complete(
-    root: &Path,
-    receipt: &Receipt,
-) -> Result<(), CandidateError> {
-    rebind::require_complete(root, receipt)
-}
-
-pub(super) fn require_dependency_rebind_recovery_complete(
-    root: &Path,
-    receipt: &Receipt,
-    boot: &str,
-) -> Result<(), CandidateError> {
-    rebind::require_recovery_complete(root, receipt, boot)
-}
-
-pub(super) fn archive_dependency_rebind_after_cleanup(
-    root: &Path,
-    original: &Receipt,
-    cleaned: &Receipt,
-    boot: &str,
-) -> Result<(), CandidateError> {
-    rebind::archive_after_cleanup(root, original, cleaned, boot)
-}
-
-#[cfg(target_os = "macos")]
-pub(super) fn dependency_rebind_boot(
-    root: &Path,
-    receipt: &Receipt,
-) -> Result<Option<String>, CandidateError> {
-    rebind::boot(root, receipt)
-}
-
-#[cfg(target_os = "macos")]
-pub(super) fn archive_retired_dependency_rebind(
-    root: &Path,
-    original: &Receipt,
-    cleaned: &Receipt,
-    boot: &str,
-    verify: &dyn Fn() -> Result<(), CandidateError>,
-) -> Result<(), CandidateError> {
-    rebind::archive::retired_completed(root, original, cleaned, boot, verify)
-}
-
-#[cfg(target_os = "macos")]
-pub(super) fn retired_dependency_rebind_archive_complete(
-    root: &Path,
-    original: &Receipt,
-    boot: &str,
-) -> Result<bool, CandidateError> {
-    rebind::archive::retired_archive_complete(root, original, boot)
-}
 use sha2::{Digest, Sha256};
-use std::{io::Read, time::Instant};
+use std::{
+    io::Read,
+    os::unix::fs::{MetadataExt, OpenOptionsExt},
+    time::Instant,
+};
 
 /// One explicit host dependency for one service. The endpoint is a live captured
 /// generation, not a port number or implicit host-gateway route.
-#[derive(Clone)]
 pub struct Dependency {
     pub service: String,
     pub binding: String,
@@ -78,9 +26,6 @@ pub struct Dependency {
     pub port: u16,
     pub aliases: Vec<String>,
     pub endpoint: HostEndpoint,
-    /// An executable selection may follow its original stable supervisor. Fixed
-    /// PID selections deliberately carry no refresh authority.
-    pub refresh: Option<RefreshPolicy>,
 }
 /// Must outlive the graph using it. Drop revokes host grants and closes transport
 /// handles; it does not claim guest processes were stopped or persistent data removed.
@@ -93,110 +38,15 @@ pub struct HostRelayRuntime {
     artifact_hash: String,
     dependencies: BTreeMap<(String, String), Dependency>,
     children: BTreeMap<(String, String), RelayChild>,
-    templates: BTreeMap<String, Value>,
-    job_targets: BTreeMap<String, Vec<crate::provider::relay_owner::Target>>,
     run: Option<String>,
     selected_run: Option<String>,
     startup_cancelled: Option<fn() -> bool>,
-    // Dropped after the managed listeners: only verified cleanup releases capacity.
-    dependency_reservation: Option<super::super::dependency_slots::Reservation>,
 }
 fn refused() -> CandidateError {
     error(
         "graph_startup",
         "Graph dependency startup is incomplete or its owned identity changed.",
     )
-}
-// Fixed stage codes identify refusal boundaries without serializing configuration.
-fn stage_refused(code: &'static str) -> CandidateError {
-    error(
-        code,
-        "Graph dependency startup validation failed; configuration values omitted.",
-    )
-}
-// Fresh and restored graphs both provision a new container generation. Retained
-// stopped/ready receipts cannot authorize listener attachment.
-fn validate_start_phase(resource_phase: &str, graph_phase: &str) -> Result<(), CandidateError> {
-    if resource_phase != "start-intent" || !matches!(graph_phase, "preparing" | "restoring") {
-        return Err(stage_refused("graph_startup_started_phase"));
-    }
-    Ok(())
-}
-fn verify_exited_listener(
-    condition: Option<&Condition>,
-    observed: &Value,
-) -> Result<(), CandidateError> {
-    if condition == Some(&Condition::Completed)
-        && observed["State"]["Running"] == false
-        && observed["State"]["ExitCode"] == 0
-        && observed["State"]["OOMKilled"] != true
-    {
-        return Ok(());
-    }
-    let code = if observed["State"]["Running"] == true {
-        "graph_startup_running_listener_lost"
-    } else if observed["State"]["OOMKilled"] == true {
-        "graph_startup_listener_oom"
-    } else {
-        "graph_startup_listener_unexpected_exit"
-    };
-    Err(stage_refused(code))
-}
-fn verify_endpoint_generations(
-    dependencies: &BTreeMap<(String, String), Dependency>,
-    startup: &Startup,
-) -> Result<(), CandidateError> {
-    let mut generations = BTreeMap::new();
-    for ((service, name), dependency) in dependencies {
-        let selected = startup
-            .services
-            .get(service)
-            .ok_or_else(|| stage_refused("graph_dependency_endpoint_changed"))?;
-        let binding = selected
-            .bindings
-            .get(name)
-            .ok_or_else(|| stage_refused("graph_dependency_endpoint_changed"))?;
-        if binding.slot != dependency.slot
-            || binding.port != dependency.port
-            || binding.aliases != dependency.aliases
-        {
-            return Err(stage_refused("graph_dependency_endpoint_changed"));
-        }
-        // A completed job has no admitted relay or live endpoint obligation.
-        // Its exact stopped container identity is verified separately below.
-        if selected.phase == Phase::Completed {
-            continue;
-        }
-        let generation = match generations.entry(dependency.slot) {
-            std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
-            std::collections::btree_map::Entry::Vacant(entry) => entry.insert(
-                dependency
-                    .endpoint
-                    .fingerprint()
-                    .map_err(|_| stage_refused("graph_dependency_endpoint_changed"))?,
-            ),
-        };
-        if binding.endpoint_generation.as_deref() != Some(generation.as_str()) {
-            return Err(stage_refused("graph_dependency_endpoint_changed"));
-        }
-    }
-    Ok(())
-}
-fn completed_generation(
-    receipt: &Receipt,
-    boot: &str,
-    resource: &Resource,
-    observed: &Value,
-    service: &Service,
-) -> Result<[u8; 32], CandidateError> {
-    if resource.kind != Kind::Container
-        || receipt.readiness.get(&resource.key) != Some(&Condition::Completed)
-        || !matches!(service.phase, Phase::Released | Phase::Completed)
-        || observed["State"]["StartedAt"].as_str() != service.started_at.as_deref()
-    {
-        return Err(stage_refused("graph_dependency_completed_identity"));
-    }
-    host_relay::inspected_completed_generation(receipt, boot, resource, observed)
 }
 fn validate_routes<'a>(
     dependencies: impl Iterator<Item = &'a Dependency>,
@@ -246,39 +96,7 @@ fn validate_routes<'a>(
 fn matches_selected_run(selected: Option<&str>, run: &str) -> bool {
     selected.is_none_or(|selected| selected == run)
 }
-fn require_relay_admission(candidate: &Candidate, run: Option<&str>) -> Result<(), CandidateError> {
-    if let Some(run) = run {
-        super::super::acknowledged_publisher::require_no_pending_missing_lock(candidate, run)?;
-        super::super::acknowledged_publisher::require_acknowledged_relay_complete(candidate, run)?;
-    }
-    Ok(())
-}
-fn relay_admission_gate(
-    candidate: &Candidate,
-    run: Option<&str>,
-    deadline: Instant,
-) -> Result<super::super::publication_gate::Guard, CandidateError> {
-    loop {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            return Err(error(
-                "provider_busy",
-                "Relay publication admission expired before provider acquisition.",
-            ));
-        }
-        match super::super::publication_gate::Guard::acquire(candidate) {
-            Err(error) if error.code == "provider_busy" => {
-                std::thread::sleep(remaining.min(Duration::from_millis(50)));
-            }
-            Err(error) => return Err(error),
-            Ok(gate) => {
-                require_relay_admission(candidate, run)?;
-                return Ok(gate);
-            }
-        }
-    }
-}
-pub(in crate::provider::graph) fn control_root(
+fn control_root(
     state_root: &Path,
     owner: &str,
     boot: Option<&str>,
@@ -318,14 +136,7 @@ impl HostRelayRuntime {
         expected_sha256: &str,
         dependencies: Vec<Dependency>,
     ) -> Result<Self, CandidateError> {
-        Self::new_scoped(
-            candidate,
-            artifact,
-            expected_sha256,
-            dependencies,
-            None,
-            false,
-        )
+        Self::new_scoped(candidate, artifact, expected_sha256, dependencies, None)
     }
     /// Run-scoped foreground owner identity. The selected run is validated before
     /// any artifact/provider effects and must match eventual graph admission.
@@ -345,28 +156,6 @@ impl HostRelayRuntime {
             expected_sha256,
             dependencies,
             Some(run),
-            false,
-        )
-    }
-    /// Allocate physical dependency transports pool-wide. Selection slots remain
-    /// logical groups in the reviewed plan; admitted receipts record their mapping.
-    pub fn new_for_run_auto(
-        candidate: &Candidate,
-        artifact: &Path,
-        expected_sha256: &str,
-        dependencies: Vec<Dependency>,
-        run: &str,
-    ) -> Result<Self, CandidateError> {
-        if !hex(run, 32) {
-            return Err(refused());
-        }
-        Self::new_scoped(
-            candidate,
-            artifact,
-            expected_sha256,
-            dependencies,
-            Some(run),
-            true,
         )
     }
     fn new_scoped(
@@ -375,55 +164,55 @@ impl HostRelayRuntime {
         expected_sha256: &str,
         dependencies: Vec<Dependency>,
         selected_run: Option<&str>,
-        automatic_slots: bool,
     ) -> Result<Self, CandidateError> {
-        if !hex(expected_sha256, 64)
-            || dependencies.len() > crate::provider::relay_auth::MAX_LOGICAL_BINDINGS
-        {
-            return Err(stage_refused("graph_startup_input"));
+        if !hex(expected_sha256, 64) || dependencies.len() > 32 {
+            return Err(refused());
         }
-        let bytes = relay_artifact(artifact, expected_sha256, !dependencies.is_empty())?;
-        // The CLI constructs this relay before acquiring its foreground run
-        // lock. Fence pending retirement before any new listener or reservation,
-        // in the recovery path's gate-before-Engine order. This local guard is
-        // released before foreground admission takes the gate again.
-        let admission_deadline = Instant::now() + Duration::from_secs(30);
-        let publication_gate = relay_admission_gate(candidate, selected_run, admission_deadline)?;
-        let engine = Engine::connect_until(candidate, admission_deadline, || false)?;
-        // Ordinary ACK retirement also holds the Engine lease. It may have
-        // changed the journals while this constructor waited for that lease.
-        publication_gate.verify(candidate)?;
-        require_relay_admission(candidate, selected_run)?;
+        let bytes = if dependencies.is_empty() {
+            Vec::new()
+        } else {
+            let mut file = fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+                .open(artifact)
+                .map_err(state::io)?;
+            let metadata = file.metadata().map_err(state::io)?;
+            if !metadata.is_file() || metadata.len() > 2 * 1024 * 1024 || metadata.nlink() != 1 {
+                return Err(refused());
+            }
+            let mut bytes = Vec::new();
+            file.by_ref()
+                .take(2 * 1024 * 1024 + 1)
+                .read_to_end(&mut bytes)
+                .map_err(state::io)?;
+            if bytes.len() as u64 != metadata.len()
+                || format!("{:x}", Sha256::digest(&bytes)) != expected_sha256
+                || bytes.get(..6) != Some(b"\x7fELF\x02\x01")
+                || bytes.get(18..20) != Some(&[183, 0])
+            {
+                return Err(refused());
+            }
+            bytes
+        };
+        let engine = Engine::connect(candidate)?;
         let owner = state::Owner::load(candidate)?;
         engine.guest().verify()?;
         let context = host_relay::context(engine.guest().incarnation(), engine.guest().boot_id())?;
         let capacity = if dependencies.is_empty() {
             0
         } else {
-            owner
-                .dependency_sockets
-                .ok_or_else(|| stage_refused("graph_startup_capacity"))?
-                .slots
+            owner.dependency_sockets.ok_or_else(refused)?.slots
         };
         let mut selected = BTreeMap::new();
-        let mut slots = BTreeMap::new();
-        let mut refresh_policies = BTreeMap::new();
-        let mut service_slots = std::collections::BTreeSet::new();
+        let mut slots = std::collections::BTreeSet::new();
         let mut ports = std::collections::BTreeSet::new();
         let mut aliases = std::collections::BTreeSet::new();
         for dependency in dependencies {
             let address = dependency_address(dependency.slot, &dependency.aliases)?;
-            let endpoint_generation = dependency.endpoint.generation()?;
             if dependency.service.is_empty()
-                || (!automatic_slots && dependency.slot >= capacity)
+                || dependency.slot >= capacity
                 || dependency.port == 0
-                || slots
-                    .insert(dependency.slot, endpoint_generation)
-                    .is_some_and(|prior| prior != endpoint_generation)
-                || refresh_policies
-                    .insert(dependency.slot, dependency.refresh.clone())
-                    .is_some_and(|prior| prior != dependency.refresh)
-                || !service_slots.insert((dependency.service.clone(), dependency.slot))
+                || !slots.insert(dependency.slot)
                 || !binding_name(&dependency.binding)
                 || !ports.insert((dependency.service.clone(), address, dependency.port))
                 || !dependency
@@ -432,7 +221,7 @@ impl HostRelayRuntime {
                     .all(|alias| aliases.insert((dependency.service.clone(), alias.clone())))
                 || selected.contains_key(&(dependency.service.clone(), dependency.binding.clone()))
             {
-                return Err(stage_refused("graph_startup_dependency_selection"));
+                return Err(refused());
             }
             selected.insert(
                 (dependency.service.clone(), dependency.binding.clone()),
@@ -446,60 +235,18 @@ impl HostRelayRuntime {
             selected_run,
         )?;
         state::private_directory(&control_root)?;
-        let mut dependency_reservation = if let Some(run) = selected_run {
-            super::super::dependency_slots::Reservation::reserve(
-                candidate,
-                &engine,
-                run,
-                &slots.keys().copied().collect(),
-                automatic_slots,
-            )?
-        } else {
-            super::super::dependency_slots::check_exact_available(
-                candidate,
-                &engine,
-                &slots.keys().copied().collect(),
-            )?;
-            None
-        };
-        if let Some(reservation) = &dependency_reservation {
-            let mapping = reservation.mapping();
-            for dependency in selected.values_mut() {
-                dependency.slot = *mapping.get(&dependency.slot).ok_or_else(refused)?;
-            }
-            slots = slots
-                .into_iter()
-                .map(|(logical, generation)| (mapping[&logical], generation))
-                .collect();
-        }
-        let started = ManagedOwner::start(
+        let managed = ManagedOwner::start(
             context,
             &control_root,
             slots
-                .into_keys()
+                .into_iter()
                 .map(|slot| ManagedSlot {
                     slot,
                     path: owner.short_home.join(format!("dependency-{slot:02}.sock")),
                     canonical_parent: candidate.state_root.join("run/smolvm/home"),
                 })
                 .collect(),
-        );
-        let managed = match started {
-            Ok(managed) => managed,
-            Err(error) => {
-                if let Some(reservation) = &mut dependency_reservation {
-                    let _ = reservation.cancel_locked();
-                }
-                return Err(error);
-            }
-        };
-        if let Some(reservation) = &mut dependency_reservation {
-            if let Err(error) = reservation.bound() {
-                drop(managed);
-                let _ = reservation.cancel_locked();
-                return Err(error);
-            }
-        }
+        )?;
         Ok(Self {
             managed,
             context,
@@ -508,12 +255,9 @@ impl HostRelayRuntime {
             artifact_hash: expected_sha256.into(),
             dependencies: selected,
             children: BTreeMap::new(),
-            templates: BTreeMap::new(),
-            job_targets: BTreeMap::new(),
             run: None,
             selected_run: selected_run.map(str::to_owned),
             startup_cancelled: None,
-            dependency_reservation,
         })
     }
     /// Armed only while the foreground initial startup runs, never during cleanup.
@@ -525,13 +269,6 @@ impl HostRelayRuntime {
     }
     pub fn endpoint(&self) -> PinnedEndpoint {
         self.managed.endpoint()
-    }
-    /// Event-driven notification only; draining does not authorize replacement.
-    pub fn dependency_notification_fd(&self) -> std::os::fd::BorrowedFd<'_> {
-        self.managed.notification_fd()
-    }
-    pub fn drain_dependency_notifications(&self) -> Result<bool, CandidateError> {
-        self.managed.drain_notifications()
     }
     /// Stop only recorded listener generations, then use enrolled retirement and
     /// graph cleanup. A failed stop or uncertain journal remains retained.
@@ -569,22 +306,8 @@ impl HostRelayRuntime {
         if self.candidate != candidate.checkout {
             return Err(refused());
         }
-        let run = self.run.clone().ok_or_else(refused)?;
-        if crate::provider::graph::directory(candidate, &run)?
-            .join("one-off.json")
-            .symlink_metadata()
-            .is_ok()
-        {
-            crate::provider::graph::one_off::runtime::finish(candidate, self, &run)?;
-        }
-        if let Some(receipt) = self.cleanup_incomplete_rebind(candidate, &run, remove_data)? {
-            let _engine = Engine::connect_cleanup_wait(candidate)?;
-            self.release_dependency_reservation()?;
-            return Ok(receipt);
-        }
-        let engine = Engine::connect_cleanup_wait(candidate)?;
-        let (before, root) = crate::provider::graph::load(candidate, &engine, &run)?;
-        let boot = engine.guest().boot_id().to_owned();
+        let run = self.run.as_deref().ok_or_else(refused)?;
+        let engine = Engine::connect_cleanup(candidate)?;
         for name in self.children.keys().cloned().collect::<Vec<_>>() {
             let child = self.children.get_mut(&name).ok_or_else(refused)?;
             engine
@@ -594,22 +317,9 @@ impl HostRelayRuntime {
         }
         drop(engine);
         let receipt =
-            host_relay::cleanup_with_relay(candidate, &run, remove_data, &self.endpoint())?;
+            host_relay::cleanup_with_relay(candidate, run, remove_data, &self.endpoint())?;
         self.children.clear();
-        let cleanup_engine = Engine::connect_cleanup_wait(candidate)?;
-        startup::verify_cleanup(&cleanup_engine, &receipt)?;
-        rebind::archive_after_cleanup(&root, &before, &receipt, &boot)?;
-        self.release_dependency_reservation()?;
         Ok(receipt)
-    }
-    // Caller retains the provider lease after verified graph cleanup. Close the
-    // authenticated owner and its exact socket inodes before freeing capacity.
-    fn release_dependency_reservation(&mut self) -> Result<(), CandidateError> {
-        if let Some(reservation) = &mut self.dependency_reservation {
-            self.managed.shutdown()?;
-            reservation.cancel_locked()?;
-        }
-        Ok(())
     }
     fn check(&self, engine: &Engine<'_>, receipt: &Receipt) -> Result<(), CandidateError> {
         self.managed.verify_alive()?;
@@ -626,10 +336,6 @@ impl HostRelayRuntime {
     }
 }
 impl Driver for HostRelayRuntime {
-    fn admission_started(&self) -> bool {
-        self.run.is_some()
-    }
-
     fn check_cancelled(&self) -> Result<(), CandidateError> {
         if self.startup_cancelled.is_some_and(|check| check()) {
             return Err(error(
@@ -646,51 +352,8 @@ impl Driver for HostRelayRuntime {
     ) -> Result<(), CandidateError> {
         validate_routes(self.dependencies.values(), inputs)
     }
-    fn verify(
-        &mut self,
-        engine: &Engine<'_>,
-        receipt: &mut Receipt,
-        root: &Path,
-    ) -> Result<(), CandidateError> {
+    fn verify(&mut self, engine: &Engine<'_>, receipt: &Receipt) -> Result<(), CandidateError> {
         self.check(engine, receipt)?;
-        if matches!(
-            receipt.phase.as_str(),
-            "preparing" | "restoring" | "ready-observed"
-        ) {
-            rebind::require_complete(root, receipt)?;
-        }
-        if matches!(
-            receipt.phase.as_str(),
-            "preparing" | "restoring" | "ready-observed"
-        ) && !self.dependencies.is_empty()
-        {
-            verify_endpoint_generations(
-                &self.dependencies,
-                receipt
-                    .relay_startup
-                    .as_ref()
-                    .ok_or_else(|| stage_refused("graph_dependency_endpoint_changed"))?,
-            )?;
-        }
-        if let Some(startup) = &receipt.relay_startup {
-            for (name, service) in &startup.services {
-                if service.phase == Phase::Completed {
-                    let resource = receipt
-                        .resources
-                        .get(&format!("container:{name}"))
-                        .ok_or_else(refused)?;
-                    let observed =
-                        inspect_resource(engine, receipt, resource)?.ok_or_else(refused)?;
-                    completed_generation(
-                        receipt,
-                        engine.guest().boot_id(),
-                        resource,
-                        &observed,
-                        service,
-                    )?;
-                }
-            }
-        }
         for ((name, _), child) in &mut self.children {
             if child.poll_exit()?.is_some() {
                 let resource = receipt
@@ -698,29 +361,12 @@ impl Driver for HostRelayRuntime {
                     .get(&format!("container:{name}"))
                     .ok_or_else(refused)?;
                 let observed = inspect_resource(engine, receipt, resource)?.ok_or_else(refused)?;
-                let observation = probes::observe(engine, receipt, name, &observed)?;
-                if observation.failed() {
-                    // The relay often exits with its application. Preserve the owned
-                    // service's value-free failure before automatic cleanup removes it.
-                    startup_failure::record(receipt, name, observation)?;
-                    state::write(&root.join("state.json"), receipt)?;
-                    return Err(stage_refused("graph_startup_application_failed"));
-                }
-                if let Err(error) = verify_exited_listener(receipt.readiness.get(name), &observed) {
-                    if error.code == "graph_startup_listener_unexpected_exit"
-                        && observation == (Observation::Exited { code: 0 })
-                    {
-                        // A successful process exit can still lose a required
-                        // listener. Keep its identity before cleanup removes it.
-                        return Err(startup_failure::preserve_listener_error(
-                            root,
-                            receipt,
-                            name,
-                            observation,
-                            error,
-                        ));
-                    }
-                    return Err(error);
+                if receipt.readiness.get(name) != Some(&Condition::Completed)
+                    || observed["State"]["Running"] != false
+                    || observed["State"]["ExitCode"] != 0
+                    || observed["State"]["OOMKilled"] == true
+                {
+                    return Err(refused());
                 }
             }
         }
@@ -738,19 +384,14 @@ impl Driver for HostRelayRuntime {
             || receipt.relay_startup.is_some()
             || !matches_selected_run(self.selected_run.as_deref(), &receipt.run)
         {
-            return Err(stage_refused("graph_startup_prepare_state"));
-        }
-        if let Some(reservation) = &mut self.dependency_reservation {
-            reservation.admitted();
+            return Err(refused());
         }
         let mut services: BTreeMap<String, Service> = BTreeMap::new();
         for ((name, binding), dependency) in &self.dependencies {
-            let config = configs
-                .get(name)
-                .ok_or_else(|| stage_refused("graph_startup_service_config"))?;
+            let config = configs.get(name).ok_or_else(refused)?;
             launcher::validate(config)?;
             if config["HostConfig"]["Init"] != true {
-                return Err(stage_refused("graph_startup_init"));
+                return Err(refused());
             }
             if !services.contains_key(name) {
                 let mut random = [0u8; 16];
@@ -771,7 +412,6 @@ impl Driver for HostRelayRuntime {
                 binding.clone(),
                 Binding {
                     slot: dependency.slot,
-                    endpoint_generation: Some(dependency.endpoint.fingerprint()?),
                     port: dependency.port,
                     aliases: dependency.aliases.clone(),
                     process: None,
@@ -785,15 +425,6 @@ impl Driver for HostRelayRuntime {
             artifact: self.artifact_hash.clone(),
             services,
         });
-        if !receipt
-            .relay_startup
-            .as_ref()
-            .ok_or_else(refused)?
-            .valid(receipt)
-        {
-            return Err(stage_refused("graph_startup_binding_validation"));
-        }
-        self.templates = configs.clone();
         self.run = Some(receipt.run.clone());
         self.check(engine, receipt)?;
         state::write(&root.join("state.json"), receipt)?;
@@ -869,7 +500,9 @@ impl Driver for HostRelayRuntime {
             .get(&format!("container:{service}"))
             .ok_or_else(refused)?
             .clone();
-        validate_start_phase(&resource.phase, &receipt.phase)?;
+        if resource.phase != "start-intent" || receipt.phase != "preparing" {
+            return Err(refused());
+        }
         let observed = inspect_resource(engine, receipt, &resource)?.ok_or_else(refused)?;
         let generation = host_relay::inspected_generation(
             receipt,
@@ -903,10 +536,6 @@ impl Driver for HostRelayRuntime {
             let (uid, gid) = launcher::identity(config)?;
             for (name, endpoint) in dependencies {
                 let binding = selected.bindings.get(&name).ok_or_else(refused)?;
-                if binding.endpoint_generation.as_deref() != Some(endpoint.fingerprint()?.as_str())
-                {
-                    return Err(refused());
-                }
                 let identity = host_relay::named_binding_identity(generation, &name, binding)?;
                 let grant = self
                     .managed
@@ -990,9 +619,6 @@ impl Driver for HostRelayRuntime {
                 .phase = Phase::Released;
             state::write(&root.join("state.json"), receipt)
         })();
-        if service.starts_with("job-") {
-            self.job_targets.insert(service.into(), targets.clone());
-        }
         if result.is_err() {
             // Try every selected retirement even if an earlier retirement refuses.
             let mut failure = None;
@@ -1009,6 +635,36 @@ impl Driver for HostRelayRuntime {
     }
 }
 // Arguments are validated receipt IDs/digests. Artifact chunks are non-secret.
+const PREPARE: &str = r#"
+umask 077
+base=/storage/hack-graph-startup
+test ! -L "$base"
+if test ! -e "$base"; then mkdir -m 700 "$base"; fi
+test "$(stat -c %u:%g:%a "$base")" = 0:0:700
+root="$base/$1"
+test ! -e "$root"; test ! -L "$root"
+mkdir -m 700 "$root"
+printf '%s\n' "$2" > "$root/owner"
+chmod 444 "$root/owner"
+: > "$root/helper.pending"
+stat -c %d:%i "$root"
+"#;
+const APPEND: &str = r#"
+root="/storage/hack-graph-startup/$1"
+test ! -L "$root"; test "$(stat -c %u:%g:%a "$root")" = 0:0:700
+test ! -L "$root/helper.pending"; test -f "$root/helper.pending"
+test "$(stat -c %u:%g:%h:%s "$root/helper.pending")" = "0:0:1:$2"
+base64 -d >> "$root/helper.pending"
+"#;
+const PUBLISH: &str = r#"
+root="/storage/hack-graph-startup/$1"
+test ! -L "$root"; test ! -L "$root/helper.pending"
+test -f "$root/helper.pending"; test "$(stat -c %u:%g:%h "$root/helper.pending")" = 0:0:1
+test "$(sha256sum "$root/helper.pending" | cut -d' ' -f1)" = "$2"
+test ! -e "$root/helper"; test ! -L "$root/helper"
+chmod 555 "$root/helper.pending"; mv "$root/helper.pending" "$root/helper"
+sync -f "$root"
+"#;
 const GATE: &str = r#"
 root="/storage/hack-graph-startup/$1"
 test ! -L "$root"; test "$(stat -c %u:%g:%a "$root")" = 0:0:700
@@ -1032,276 +688,9 @@ chmod 444 "$root/pending"; sync -f "$root/pending"
 mv "$root/pending" "$root/release"; sync -f "$root"
 "#;
 
-fn relay_artifact(
-    artifact: &Path,
-    expected_sha256: &str,
-    required: bool,
-) -> Result<Vec<u8>, CandidateError> {
-    if required {
-        Ok(
-            crate::provider::guest_tool::Artifact::read(artifact, expected_sha256)?
-                .bytes()
-                .to_vec(),
-        )
-    } else {
-        Ok(Vec::new())
-    }
-}
-
 #[cfg(test)]
 mod route_tests {
     use super::*;
-    use std::os::unix::fs::MetadataExt;
-    #[test]
-    fn dependency_free_constructor_skips_artifact_but_required_artifact_uses_fixed_refusal() {
-        let fixture = super::super::super::tests::Fixture::new();
-        let absent = fixture.0.join("absent-guest-artifact");
-        assert_eq!(
-            relay_artifact(&absent, &"a".repeat(64), false).unwrap(),
-            Vec::<u8>::new()
-        );
-        assert_eq!(
-            relay_artifact(&absent, &"a".repeat(64), true)
-                .unwrap_err()
-                .code,
-            "guest_tool_artifact"
-        );
-        assert!(!absent.exists());
-    }
-    #[test]
-    fn exited_listener_accepts_only_successful_completed_service() {
-        let exited = json!({"State":{"Running":false,"ExitCode":0,"OOMKilled":false}});
-        verify_exited_listener(Some(&Condition::Completed), &exited).unwrap();
-        assert_eq!(
-            verify_exited_listener(Some(&Condition::Started), &exited)
-                .unwrap_err()
-                .code,
-            "graph_startup_listener_unexpected_exit"
-        );
-        assert_eq!(
-            verify_exited_listener(Some(&Condition::Healthy), &exited)
-                .unwrap_err()
-                .code,
-            "graph_startup_listener_unexpected_exit"
-        );
-        let running = json!({"State":{"Running":true,"ExitCode":0,"OOMKilled":false}});
-        assert_eq!(
-            verify_exited_listener(Some(&Condition::Completed), &running)
-                .unwrap_err()
-                .code,
-            "graph_startup_running_listener_lost"
-        );
-        let oom = json!({"State":{"Running":false,"ExitCode":137,"OOMKilled":true}});
-        assert_eq!(
-            verify_exited_listener(Some(&Condition::Completed), &oom)
-                .unwrap_err()
-                .code,
-            "graph_startup_listener_oom"
-        );
-    }
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn released_dependency_detects_host_listener_rotation_without_adopting_it() {
-        use std::{net::TcpListener, thread};
-
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let address = listener.local_addr().unwrap();
-        let endpoint = HostEndpoint::capture(std::process::id() as i32, address.port()).unwrap();
-        let pinned = endpoint.fingerprint().unwrap();
-        let key = ("web".to_owned(), "content".to_owned());
-        let mut dependencies = BTreeMap::from([(
-            key,
-            Dependency {
-                service: "web".into(),
-                binding: "content".into(),
-                slot: 0,
-                port: 8443,
-                aliases: vec!["content.example".into()],
-                endpoint,
-                refresh: None,
-            },
-        )]);
-        let startup = Startup {
-            control_only: false,
-            guest_root: Some((1, 1)),
-            control_root: PathBuf::from("/tmp/fixture-control"),
-            artifact: "a".repeat(64),
-            services: BTreeMap::from([(
-                "web".into(),
-                Service {
-                    generation: "b".repeat(32),
-                    bindings: BTreeMap::from([(
-                        "content".into(),
-                        Binding {
-                            slot: 0,
-                            endpoint_generation: Some(pinned.clone()),
-                            port: 8443,
-                            aliases: vec!["content.example".into()],
-                            process: None,
-                        },
-                    )]),
-                    phase: Phase::Released,
-                    started_at: Some("fixture-start".into()),
-                },
-            )]),
-        };
-        verify_endpoint_generations(&dependencies, &startup).unwrap();
-
-        drop(listener);
-        let deadline = Instant::now() + Duration::from_millis(250);
-        let replacement = loop {
-            match TcpListener::bind(address) {
-                Ok(replacement) => break replacement,
-                Err(error)
-                    if error.kind() == std::io::ErrorKind::AddrInUse
-                        && Instant::now() < deadline =>
-                {
-                    thread::sleep(Duration::from_millis(1));
-                }
-                Err(error) => panic!("replacement listener could not bind: {error}"),
-            }
-        };
-        let current = HostEndpoint::capture(std::process::id() as i32, address.port()).unwrap();
-        assert_ne!(current.fingerprint().unwrap(), pinned);
-        assert_eq!(
-            verify_endpoint_generations(&dependencies, &startup)
-                .unwrap_err()
-                .code,
-            "graph_dependency_endpoint_changed"
-        );
-        dependencies.values_mut().next().unwrap().endpoint = current;
-        assert_eq!(
-            verify_endpoint_generations(&dependencies, &startup)
-                .unwrap_err()
-                .code,
-            "graph_dependency_endpoint_changed"
-        );
-        drop(replacement);
-    }
-    #[test]
-    fn restored_dependency_container_accepts_only_new_start_intent() {
-        validate_start_phase("start-intent", "preparing").unwrap();
-        validate_start_phase("start-intent", "restoring").unwrap();
-        for phase in [
-            "ready-observed",
-            "stopped-data-retained",
-            "removed",
-            "failed-retained",
-        ] {
-            assert_eq!(
-                validate_start_phase("start-intent", phase)
-                    .unwrap_err()
-                    .code,
-                "graph_startup_started_phase"
-            );
-        }
-        for phase in ["reserved", "created", "running", "removed"] {
-            assert!(validate_start_phase(phase, "restoring").is_err());
-        }
-    }
-    #[test]
-    fn invalid_constructor_input_has_fixed_stage_code_before_effects() {
-        let fixture = super::super::super::tests::Fixture::new();
-        let failure = HostRelayRuntime::new(
-            &Candidate::discover(&fixture.0).unwrap(),
-            Path::new("/unread-artifact"),
-            "invalid",
-            Vec::new(),
-        )
-        .err()
-        .expect("invalid digest refused");
-        assert_eq!(failure.code, "graph_startup_input");
-    }
-    #[test]
-    fn pending_relay_retirement_refuses_both_constructors_before_provider_effects() {
-        let fixture = super::super::super::tests::Fixture::new();
-        let candidate = Candidate::discover(&fixture.0).unwrap();
-        let run = "a".repeat(32);
-        let root = super::super::super::directory(&candidate, &run).unwrap();
-        state::private_directory(&root).unwrap();
-        let retained = root.join("retained-sentinel");
-        fs::write(&retained, b"retained data").unwrap();
-        let before = fs::symlink_metadata(&retained).unwrap();
-        for phase in ["intent", "complete"] {
-            let pending = root.join(format!(
-                "acknowledged-relay-retirement-{}-{phase}.pending",
-                "c".repeat(64)
-            ));
-            fs::write(&pending, b"interrupted retirement").unwrap();
-            for automatic in [false, true] {
-                let result = if automatic {
-                    HostRelayRuntime::new_for_run_auto(
-                        &candidate,
-                        Path::new("/unread-artifact"),
-                        &"b".repeat(64),
-                        Vec::new(),
-                        &run,
-                    )
-                } else {
-                    HostRelayRuntime::new_for_run(
-                        &candidate,
-                        Path::new("/unread-artifact"),
-                        &"b".repeat(64),
-                        Vec::new(),
-                        &run,
-                    )
-                };
-                assert_eq!(
-                    result.err().expect("pending retirement refused").code,
-                    "graph_acknowledged_relay_retirement"
-                );
-                assert!(!candidate.state_root.join("run/smolvm").exists());
-                assert_eq!(fs::read(&pending).unwrap(), b"interrupted retirement");
-                assert_eq!(fs::read(&retained).unwrap(), b"retained data");
-                let after = fs::symlink_metadata(&retained).unwrap();
-                assert_eq!((before.dev(), before.ino()), (after.dev(), after.ino()));
-                // Failure releases the constructor gate; no owner escapes and
-                // ordinary foreground publication can acquire it afterward.
-                super::super::super::publication_gate::Guard::acquire(&candidate).unwrap();
-            }
-            fs::remove_file(pending).unwrap();
-        }
-    }
-    #[test]
-    fn relay_admission_waits_for_gate_release_without_provider_effects() {
-        let fixture = super::super::super::tests::Fixture::new();
-        let candidate = Candidate::discover(&fixture.0).unwrap();
-        let gate = super::super::super::publication_gate::Guard::acquire(&candidate).unwrap();
-        let deadline = Instant::now() + Duration::from_secs(5);
-        std::thread::scope(|scope| {
-            scope.spawn(move || {
-                std::thread::sleep(Duration::from_millis(20));
-                drop(gate);
-            });
-            let acquired = relay_admission_gate(&candidate, Some(&"a".repeat(32)), deadline)
-                .expect("released publication gate admitted");
-            acquired.verify(&candidate).unwrap();
-            assert!(!candidate.state_root.join("run/smolvm").exists());
-        });
-        super::super::super::publication_gate::Guard::acquire(&candidate).unwrap();
-    }
-    #[test]
-    fn relay_admission_gate_timeout_has_no_provider_effects_or_deadline_renewal() {
-        let fixture = super::super::super::tests::Fixture::new();
-        let candidate = Candidate::discover(&fixture.0).unwrap();
-        let gate = super::super::super::publication_gate::Guard::acquire(&candidate).unwrap();
-        let deadline = Instant::now() + Duration::from_millis(20);
-        let failure = relay_admission_gate(&candidate, None, deadline)
-            .err()
-            .expect("held publication gate expired");
-        assert_eq!(failure.code, "provider_busy");
-        assert!(Instant::now() >= deadline);
-        assert!(!candidate.state_root.join("run/smolvm").exists());
-        gate.verify(&candidate).unwrap();
-        drop(gate);
-        assert_eq!(
-            relay_admission_gate(&candidate, None, deadline)
-                .err()
-                .expect("expired original deadline remains expired")
-                .code,
-            "provider_busy"
-        );
-    }
     #[test]
     fn declared_aliases_must_be_bound_exactly_before_owner_creation() {
         let fixture = super::super::super::tests::Fixture::new();
@@ -1318,7 +707,6 @@ mod route_tests {
         )
         .unwrap();
         let options = || project::PlanOptions {
-            branch: None,
             project: &project,
             compose_file: Path::new("compose.yaml"),
             profiles: &[],
@@ -1341,7 +729,6 @@ mod route_tests {
                 port: 443,
                 aliases: vec!["one.example".into()],
                 endpoint: endpoint.clone(),
-                refresh: None,
             },
             Dependency {
                 service: "web".into(),
@@ -1350,7 +737,6 @@ mod route_tests {
                 port: 443,
                 aliases: vec!["two.example".into()],
                 endpoint,
-                refresh: None,
             },
         ];
         HostRelayRuntime::validate_inputs(&dependencies, &inputs).unwrap();

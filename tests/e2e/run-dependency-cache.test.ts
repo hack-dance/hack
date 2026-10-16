@@ -9,7 +9,6 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { privateCliEnv } from "../helpers/private-cli-env.ts";
 
 const roots: string[] = [];
 const cli = resolve(import.meta.dir, "../../index.ts");
@@ -130,16 +129,14 @@ else if(args.includes("run")) console.log("fixture-command-output");
       {
         cwd: primary,
         timeout: 10_000,
-        env: privateCliEnv({
-          root,
-          home,
-          env: {
-            HACK_HOME: join(home, ".hack"),
-            PATH: `${bin}:${process.env.PATH ?? ""}`,
-            HACK_NO_INTERACTIVE: "1",
-            HACK_LOGGER: "console",
-          },
-        }),
+        env: {
+          ...process.env,
+          HOME: home,
+          HACK_HOME: join(home, ".hack"),
+          PATH: `${bin}:${process.env.PATH ?? ""}`,
+          HACK_NO_INTERACTIVE: "1",
+          HACK_LOGGER: "console",
+        },
         stdin: "ignore",
         stdout: "pipe",
         stderr: "pipe",

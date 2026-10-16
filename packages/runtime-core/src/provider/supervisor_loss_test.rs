@@ -66,7 +66,6 @@ fn owned_supervisor_loss_live() -> Result<(), CandidateError> {
     let report = project::plan(
         &candidate,
         project::PlanOptions {
-            branch: None,
             project: &source,
             compose_file: Path::new(".hack/docker-compose.yml"),
             profiles: &[],

@@ -9,19 +9,12 @@ import {
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
-import { YAML } from "bun";
-import type {
-  RuntimeRunOptions,
-  RuntimeUpOptions,
-} from "../src/backends/runtime-backend.ts";
+
 import { CLI_SPEC } from "../src/cli/spec.ts";
 import {
   PROJECT_COMPOSE_FILENAME,
   PROJECT_CONFIG_FILENAME,
 } from "../src/constants.ts";
-import { evaluateComposeServiceEnvFreshness } from "../src/lib/compose-env-fingerprint.ts";
-import { readProjectRuntimeStateEntry } from "../src/lib/project-runtime-state.ts";
-import { restoreEnv } from "./helpers/env.ts";
 import { registerScopedModuleMock } from "./helpers/scoped-module-mock.ts";
 
 const psRows: string[] = [];
@@ -36,11 +29,6 @@ let upExitCode = 0;
 let downCalls = 0;
 const upServiceSelections: Array<readonly string[] | undefined> = [];
 const tempDirs = new Set<string>();
-const runtimeCalls: Array<
-  | { kind: "run"; opts: RuntimeRunOptions }
-  | { kind: "up"; opts: RuntimeUpOptions }
-> = [];
-let runExitCode = 0;
 const originalHackHome = process.env.HACK_HOME;
 const originalComposeProfiles = process.env.COMPOSE_PROFILES;
 const originalStartupTimeout = process.env.HACK_COMPOSE_STARTUP_TIMEOUT_MS;
@@ -77,8 +65,13 @@ const runtimeBackendMock = await registerScopedModuleMock({
   overrides: {
     composeRuntimeBackend: {
       name: "compose",
-      up: async (opts: RuntimeUpOptions) => {
-        runtimeCalls.push({ kind: "up", opts });
+      up: async (opts: {
+        readonly env?: Readonly<Record<string, string>>;
+        readonly services?: readonly string[];
+        readonly composeFiles: readonly string[];
+        readonly startupTimeoutMs?: number;
+        readonly detach?: boolean;
+      }) => {
         upComposeContents.push(
           (
             await Promise.all(
@@ -107,10 +100,7 @@ const runtimeBackendMock = await registerScopedModuleMock({
         };
       },
       ps: async () => 0,
-      run: async (opts: RuntimeRunOptions) => {
-        runtimeCalls.push({ kind: "run", opts });
-        return runExitCode;
-      },
+      run: async () => 0,
       exec: async () => 0,
     },
   },
@@ -144,7 +134,7 @@ const loggerMock = await registerScopedModuleMock({
   },
 });
 
-const { restartCommand, upCommand, runCommand } = await import(
+const { restartCommand, upCommand } = await import(
   "../src/commands/project.ts"
 );
 
@@ -177,15 +167,13 @@ afterEach(async () => {
   } else {
     process.env.HACK_COMPOSE_STARTUP_TIMEOUT_MS = originalStartupTimeout;
   }
-  runtimeCalls.length = 0;
-  runExitCode = 0;
   autoBranch = null;
   runtimeProjects = [];
   for (const tempDir of tempDirs) {
     await rm(tempDir, { recursive: true, force: true });
   }
   tempDirs.clear();
-  restoreEnv("HACK_HOME", originalHackHome);
+  process.env.HACK_HOME = originalHackHome;
   if (originalComposeProfiles === undefined) {
     Reflect.deleteProperty(process.env, "COMPOSE_PROFILES");
   } else {
@@ -384,103 +372,6 @@ test("targeted restart preserves delivered Compose environment", async () => {
   expect(psEnvs).toEqual([
     { COMPOSE_PROFILES: "benchmark", SHARED_MODE: "compose" },
   ]);
-});
-
-test("up records value-free env digests and a targeted restart refreshes only its service", async () => {
-  const projectRoot = await createProject();
-  const projectDir = resolve(projectRoot, ".hack");
-  psRows.push(
-    JSON.stringify({ Service: "api", State: "running", ExitCode: 0 }),
-    JSON.stringify({ Service: "migrate", State: "exited", ExitCode: 0 })
-  );
-  const readEntry = () =>
-    readProjectRuntimeStateEntry({
-      projectDir,
-      composeProject: "startup-state-test",
-    });
-
-  expect(await runDetachedUp({ projectRoot })).toBe(0);
-  const atUp = (await readEntry())?.envFingerprint;
-  expect(Object.keys(atUp?.services ?? {})).toEqual([
-    "api",
-    "migrate",
-    "profiled-worker",
-  ]);
-  const freshness = (
-    record: typeof atUp,
-    service: string,
-    mode: string
-  ): string =>
-    evaluateComposeServiceEnvFreshness({
-      record,
-      service,
-      currentEnv: { SHARED_MODE: mode },
-    });
-  expect(freshness(atUp, "api", "compose")).toBe("unchanged");
-  expect(freshness(atUp, "api", "rotated")).toBe("changed");
-
-  const envPath = resolve(projectDir, "hack.env.default.yaml");
-  await writeFile(
-    envPath,
-    (await readFile(envPath, "utf8")).replace(
-      '    SHARED_MODE: "compose"',
-      '    SHARED_MODE: "rotated"'
-    )
-  );
-  expect(await runRestart({ projectRoot, services: ["api"] })).toBe(0);
-  const afterRestart = (await readEntry())?.envFingerprint;
-  expect(afterRestart?.salt).toBe(atUp?.salt);
-  expect(freshness(afterRestart, "api", "rotated")).toBe("unchanged");
-  expect(freshness(afterRestart, "migrate", "rotated")).toBe("changed");
-  expect(afterRestart?.services.migrate).toBe(atUp?.services.migrate);
-  const stored = await readFile(
-    resolve(projectDir, ".internal/runtime-state.json"),
-    "utf8"
-  );
-  for (const text of ["SHARED_MODE", "rotated", '"compose"']) {
-    expect(stored).not.toContain(text);
-  }
-});
-
-test("failed targeted restart does not record its service's env as applied", async () => {
-  const projectRoot = await createProject();
-  const projectDir = resolve(projectRoot, ".hack");
-  psRows.push(
-    JSON.stringify({ Service: "api", State: "running", ExitCode: 0 }),
-    JSON.stringify({ Service: "migrate", State: "exited", ExitCode: 0 })
-  );
-  const readEntry = () =>
-    readProjectRuntimeStateEntry({
-      projectDir,
-      composeProject: "startup-state-test",
-    });
-  expect(await runDetachedUp({ projectRoot })).toBe(0);
-  const atUp = (await readEntry())?.envFingerprint;
-  expect(atUp?.services.api).toBeDefined();
-
-  const envPath = resolve(projectDir, "hack.env.default.yaml");
-  await writeFile(
-    envPath,
-    (await readFile(envPath, "utf8")).replace(
-      '    SHARED_MODE: "compose"',
-      '    SHARED_MODE: "rotated"'
-    )
-  );
-  upExitCode = 1;
-  expect(await runRestart({ projectRoot, services: ["api"] })).not.toBe(0);
-
-  const afterFailure = (await readEntry())?.envFingerprint;
-  // The delivered env is unknown, so api's digest is dropped rather than
-  // refreshed to the rotated env; exec then reports nothing for api.
-  expect(
-    evaluateComposeServiceEnvFreshness({
-      record: afterFailure,
-      service: "api",
-      currentEnv: { SHARED_MODE: "rotated" },
-    })
-  ).toBe("unknown");
-  expect(afterFailure?.salt).toBe(atUp?.salt);
-  expect(afterFailure?.services.migrate).toBe(atUp?.services.migrate);
 });
 
 test("up --json emits E_STARTUP_INCOMPLETE for a created service", async () => {
@@ -797,7 +688,6 @@ async function runRestart(opts: {
 
 async function runJsonUp(opts: {
   readonly projectRoot: string;
-  readonly services?: readonly string[];
 }): Promise<{ readonly exitCode: number; readonly stdout: string }> {
   let stdout = "";
   const originalWrite = process.stdout.write;
@@ -821,7 +711,7 @@ async function runJsonUp(opts: {
           target: undefined,
           json: true,
         },
-        positionals: { services: opts.services ?? [] },
+        positionals: {},
         raw: {
           argv: ["--path", opts.projectRoot, "--env", "base", "--json"],
           positionals: [],
@@ -939,8 +829,8 @@ async function createProject(opts?: {
 test("linked startup combines inherited aliases, local static precedence and same-start hook output", async () => {
   const savedCi = process.env.CI;
   const savedMode = process.env.HACK_EXECUTION_MODE;
-  Reflect.deleteProperty(process.env, "CI");
-  Reflect.deleteProperty(process.env, "HACK_EXECUTION_MODE");
+  process.env.CI = undefined;
+  process.env.HACK_EXECUTION_MODE = undefined;
   try {
     const primary = await createProject({
       lifecycleCommand:
@@ -994,161 +884,7 @@ test("linked startup combines inherited aliases, local static precedence and sam
     expect(upComposeContents.at(-1)).toContain("hook.test: 192.0.2.30");
     expect(upComposeContents.at(-1)).not.toContain("192.0.2.10");
   } finally {
-    restoreEnv("CI", savedCi);
-    restoreEnv("HACK_EXECUTION_MODE", savedMode);
+    process.env.CI = savedCi;
+    process.env.HACK_EXECUTION_MODE = savedMode;
   }
 });
-
-async function createCachedProject(): Promise<string> {
-  const projectRoot = await createProject({ registryTokenScope: "deps" });
-  const composeFile = resolve(projectRoot, ".hack", PROJECT_COMPOSE_FILENAME);
-  const compose = YAML.parse(await readFile(composeFile, "utf8")) as {
-    services: Record<string, Record<string, unknown>>;
-    volumes: Record<string, unknown>;
-  };
-  compose.services.api!.volumes = ["dependencies:/app/node_modules"];
-  compose.services.deps!.platform = "linux/arm64";
-  compose.services.deps!.volumes = ["dependencies:/app/node_modules"];
-  compose.services.deps!.labels = {
-    "hack.dependencies.cache-volume": "dependencies",
-    "hack.dependencies.bootstrap": "true",
-    "hack.dependencies.lockfiles": "bun.lock",
-  };
-  compose.volumes = { dependencies: {} };
-  await writeFile(composeFile, YAML.stringify(compose));
-  await writeFile(resolve(projectRoot, "bun.lock"), "first-lock");
-  psRows.push(
-    JSON.stringify({ Service: "api", State: "running", ExitCode: 0 })
-  );
-  return projectRoot;
-}
-
-for (const operation of [runDetachedUp, runRestart]) {
-  test(`${operation.name} initializes the selected cache before recreating a consumer`, async () => {
-    const projectRoot = await createCachedProject();
-    expect(await operation({ projectRoot, services: ["api"] })).toBe(0);
-    expect(runtimeCalls.map((call) => call.kind)).toEqual(["run", "up"]);
-    const installer = runtimeCalls[0];
-    const consumer = runtimeCalls[1];
-    expect(installer?.kind).toBe("run");
-    if (installer?.kind !== "run" || consumer?.kind !== "up") {
-      throw new Error("Missing initialization");
-    }
-    expect(installer.opts.service).toBe("deps");
-    expect(installer.opts.noDeps).toBe(true);
-    expect(installer.opts.forwardSignals).toBe(true);
-    expect(installer.opts.composeFiles).toEqual(consumer.opts.composeFiles);
-    expect(installer.opts.env).toEqual(consumer.opts.env);
-    expect(consumer.opts.services).toEqual(["api"]);
-    const override = installer.opts.composeFiles.find((file) =>
-      file.endsWith("compose.dependencies.override.yml")
-    );
-    expect(override).toBeDefined();
-    const firstCache = await readFile(override!, "utf8");
-    runtimeCalls.length = 0;
-    await writeFile(resolve(projectRoot, "bun.lock"), "second-lock");
-    expect(await operation({ projectRoot, services: ["api"] })).toBe(0);
-    expect(runtimeCalls.map((call) => call.kind)).toEqual(["run", "up"]);
-    expect(await readFile(override!, "utf8")).not.toBe(firstCache);
-  });
-
-  test(`${operation.name} leaves consumers untouched when cache initialization fails`, async () => {
-    const projectRoot = await createCachedProject();
-    runExitCode = 42;
-    expect(await operation({ projectRoot, services: ["api"] })).toBe(42);
-    expect(runtimeCalls.map((call) => call.kind)).toEqual(["run"]);
-  });
-
-  test(`${operation.name} does not bootstrap caches for unrelated services`, async () => {
-    const projectRoot = await createCachedProject();
-    psRows.length = 0;
-    psRows.push(
-      JSON.stringify({ Service: "migrate", State: "exited", ExitCode: 0 })
-    );
-    expect(await operation({ projectRoot, services: ["migrate"] })).toBe(0);
-    expect(runtimeCalls.map((call) => call.kind)).toEqual(["up"]);
-  });
-}
-
-test("run deps resolves the same shared cache as up", async () => {
-  const projectRoot = await createCachedProject();
-  await runDetachedUp({ projectRoot, services: ["api"] });
-  const up = runtimeCalls.find((call) => call.kind === "up")!;
-  runtimeCalls.length = 0;
-  const result = await runCommand.handler({
-    ctx: { cwd: projectRoot, cli: CLI_SPEC },
-    args: {
-      options: { path: projectRoot, env: "base" },
-      positionals: { service: "deps", cmd: [] },
-      raw: { argv: [], positionals: [] },
-    },
-  } as unknown as Parameters<typeof runCommand.handler>[0]);
-  expect(result).toBe(0);
-  expect(runtimeCalls).toHaveLength(1);
-  const installer = runtimeCalls[0]!;
-  expect(installer.kind).toBe("run");
-  const dependencyOverrides = (files: readonly string[]) =>
-    files.filter((file) => file.endsWith("compose.dependencies.override.yml"));
-  expect(dependencyOverrides(installer.opts.composeFiles)).toEqual(
-    dependencyOverrides(up.opts.composeFiles)
-  );
-  expect(dependencyOverrides(installer.opts.composeFiles)).toHaveLength(1);
-});
-
-for (const operation of [runDetachedUp, runRestart]) {
-  test(`${operation.name} applies configured budget to cache bootstrap before consumer launch`, async () => {
-    process.env.HACK_COMPOSE_STARTUP_TIMEOUT_MS = "120000";
-    const projectRoot = await createCachedProject();
-    expect(await operation({ projectRoot, services: ["api"] })).toBe(0);
-    const bootstrap = runtimeCalls[0];
-    expect(bootstrap?.kind).toBe("run");
-    if (bootstrap?.kind !== "run") {
-      throw new Error("Missing bootstrap");
-    }
-    expect(bootstrap.opts.timeoutMs).toBe(120_000);
-    expect(upStartupTimeouts).toEqual([120_000]);
-  });
-  test(`${operation.name} reports bootstrap timeout without replacing consumers`, async () => {
-    process.env.HACK_COMPOSE_STARTUP_TIMEOUT_MS = "120000";
-    runExitCode = 124;
-    const projectRoot = await createCachedProject();
-    expect(await operation({ projectRoot, services: ["api"] })).toBe(124);
-    expect(runtimeCalls.map((call) => call.kind)).toEqual(["run"]);
-    expect(errorMessages.join("\n")).toContain(
-      "Dependency cache initialization exceeded its startup budget of 120000 ms"
-    );
-  });
-}
-
-for (const action of ["up", "restart"] as const) {
-  test(`${action} JSON classifies cache initializer deadline as startup timeout`, async () => {
-    process.env.HACK_COMPOSE_STARTUP_TIMEOUT_MS = "120000";
-    runExitCode = 124;
-    const projectRoot = await createCachedProject();
-    let output = "";
-    let code: number;
-    if (action === "up") {
-      const result = await runJsonUp({ projectRoot, services: ["api"] });
-      output = result.stdout;
-      code = result.exitCode;
-    } else {
-      const write = process.stdout.write;
-      process.stdout.write = ((chunk: string | Uint8Array) => {
-        output +=
-          typeof chunk === "string"
-            ? chunk
-            : Buffer.from(chunk).toString("utf8");
-        return true;
-      }) as typeof process.stdout.write;
-      try {
-        code = await runRestart({ projectRoot, services: ["api"], json: true });
-      } finally {
-        process.stdout.write = write;
-      }
-    }
-    expect(code).toBe(124);
-    expect(JSON.parse(output).error.code).toBe("E_STARTUP_TIMEOUT");
-    expect(JSON.parse(output).error.message).toContain("120000 ms");
-    expect(runtimeCalls.map((call) => call.kind)).toEqual(["run"]);
-  });
-}

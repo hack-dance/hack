@@ -1,8 +1,0 @@
-{
-  "name": "pattern-p02",
-  "private": true,
-  "type": "module",
-  "scripts": {
-    "check": "bun test"
-  }
-}

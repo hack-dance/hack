@@ -27,9 +27,6 @@ pub struct Service {
 #[serde(deny_unknown_fields)]
 pub struct Binding {
     pub(crate) slot: u8,
-    /// Exact verified host listener generation. Required for shared physical slots.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) endpoint_generation: Option<String>,
     pub(crate) port: u16,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) aliases: Vec<String>,
@@ -45,14 +42,10 @@ fn binding_name(name: &str) -> bool {
 impl Service {
     fn bindings_valid(&self) -> bool {
         !self.bindings.is_empty()
-            && self.bindings.len() <= crate::provider::relay_auth::MAX_LOGICAL_BINDINGS
+            && self.bindings.len() <= 32
             && self.bindings.iter().all(|(name, binding)| {
                 binding_name(name)
                     && binding.slot < 32
-                    && binding
-                        .endpoint_generation
-                        .as_deref()
-                        .is_none_or(|value| hex(value, 64))
                     && binding.port != 0
                     && dependency_address(binding.slot, &binding.aliases).is_ok()
                     && binding.process.is_none_or(|p| {
@@ -100,9 +93,6 @@ pub(crate) enum Phase {
     ProvisionIntent,
     Provisioned,
     Released,
-    /// Successful declared job; its historical relay capabilities are retired.
-    /// Retained identity does not authorize attachment or execution in this container.
-    Completed,
 }
 impl Startup {
     pub(super) fn valid(&self, receipt: &Receipt) -> bool {
@@ -140,38 +130,27 @@ impl Startup {
                                 .is_some_and(|s| valid_started(s))
                                 && service.all_provisioned()
                         }
-                        Phase::Completed => {
-                            receipt.readiness.get(name) == Some(&Condition::Completed)
-                                && service
-                                    .started_at
-                                    .as_ref()
-                                    .is_some_and(|s| valid_started(s))
-                                && service.bindings.values().all(|b| b.process.is_none())
-                        }
                     }
             })
-            && shared_slots_valid(self.services.values().flat_map(|s| s.bindings.values()))
+            && self
+                .services
+                .values()
+                .flat_map(|s| s.bindings.values().map(|b| b.slot))
+                .collect::<std::collections::BTreeSet<_>>()
+                .len()
+                == self
+                    .services
+                    .values()
+                    .map(|s| s.bindings.len())
+                    .sum::<usize>()
             && self
                 .services
                 .values()
                 .map(|s| s.bindings.len())
                 .sum::<usize>()
-                <= crate::provider::relay_auth::MAX_LOGICAL_BINDINGS
+                <= 32
     }
 }
-/// Legacy unique slots remain readable; sharing never infers listener authority
-/// from a slot number, application alias or guest port.
-fn shared_slots_valid<'a>(bindings: impl Iterator<Item = &'a Binding>) -> bool {
-    let mut slots = BTreeMap::new();
-    bindings.into_iter().all(|binding| {
-        let generation = binding.endpoint_generation.as_deref();
-        match slots.insert(binding.slot, generation) {
-            None => true,
-            Some(previous) => generation.is_some() && previous == generation,
-        }
-    })
-}
-
 pub(super) fn valid_started(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 64
@@ -179,12 +158,6 @@ pub(super) fn valid_started(value: &str) -> bool {
         && !value.bytes().any(|b| b.is_ascii_control())
 }
 pub(super) trait Driver {
-    /// False until this driver can retire its own durable graph enrollment.
-    /// Existing drivers conservatively retain failed intent unless they opt in.
-    fn admission_started(&self) -> bool {
-        true
-    }
-
     fn check_cancelled(&self) -> Result<(), CandidateError> {
         Ok(())
     }
@@ -192,12 +165,7 @@ pub(super) trait Driver {
         &self,
         inputs: &project::inputs::ExecutionInputs,
     ) -> Result<(), CandidateError>;
-    fn verify(
-        &mut self,
-        engine: &Engine<'_>,
-        receipt: &mut Receipt,
-        root: &Path,
-    ) -> Result<(), CandidateError>;
+    fn verify(&mut self, engine: &Engine<'_>, receipt: &Receipt) -> Result<(), CandidateError>;
     fn prepare(
         &mut self,
         engine: &Engine<'_>,
@@ -370,76 +338,7 @@ pub(super) fn attach(
 #[cfg(target_os = "macos")]
 mod runtime;
 #[cfg(target_os = "macos")]
-pub(super) use runtime::control_root;
-#[cfg(target_os = "macos")]
-pub use runtime::{Dependency, HostRelayRuntime, RefreshPolicy};
-
-/// Incomplete native dependency mutation cannot authorize a fresh execution.
-/// Observation and explicit owned cleanup remain independent of this gate.
-pub(super) fn require_dependency_rebind_complete(
-    root: &Path,
-    receipt: &Receipt,
-) -> Result<(), CandidateError> {
-    #[cfg(target_os = "macos")]
-    {
-        runtime::require_dependency_rebind_complete(root, receipt)
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = (root, receipt);
-        Ok(())
-    }
-}
-
-/// Same-boot recovery accepts only a completed refresh for its exact selection.
-#[cfg(target_os = "macos")]
-pub(super) fn require_dependency_rebind_recovery_complete(
-    root: &Path,
-    receipt: &Receipt,
-    boot: &str,
-) -> Result<(), CandidateError> {
-    runtime::require_dependency_rebind_recovery_complete(root, receipt, boot)
-}
-
-#[cfg(target_os = "macos")]
-/// Explicit owned cleanup preserves dependency refresh evidence before a later
-/// restore may create new helper generations. This never replays the refresh.
-pub(super) fn archive_dependency_rebind_after_cleanup(
-    root: &Path,
-    original: &Receipt,
-    cleaned: &Receipt,
-    boot: &str,
-) -> Result<(), CandidateError> {
-    runtime::archive_dependency_rebind_after_cleanup(root, original, cleaned, boot)
-}
-
-#[cfg(target_os = "macos")]
-pub(super) fn dependency_rebind_boot(
-    root: &Path,
-    receipt: &Receipt,
-) -> Result<Option<String>, CandidateError> {
-    runtime::dependency_rebind_boot(root, receipt)
-}
-
-#[cfg(target_os = "macos")]
-pub(super) fn archive_retired_dependency_rebind(
-    root: &Path,
-    original: &Receipt,
-    cleaned: &Receipt,
-    boot: &str,
-    verify: &dyn Fn() -> Result<(), CandidateError>,
-) -> Result<(), CandidateError> {
-    runtime::archive_retired_dependency_rebind(root, original, cleaned, boot, verify)
-}
-
-#[cfg(target_os = "macos")]
-pub(super) fn retired_dependency_rebind_archive_complete(
-    root: &Path,
-    original: &Receipt,
-    boot: &str,
-) -> Result<bool, CandidateError> {
-    runtime::retired_dependency_rebind_archive_complete(root, original, boot)
-}
+pub use runtime::{Dependency, HostRelayRuntime};
 
 pub(super) fn guest_directory(run: &str, generation: &str) -> String {
     format!("/storage/hack-graph-startup/{run}/{generation}")
@@ -455,4 +354,4 @@ mod cleanup;
 pub(super) use cleanup::{absent as verify_cleanup, apply as cleanup_guest};
 
 #[cfg(all(test, target_os = "macos"))]
-pub(super) mod native_test;
+mod native_test;

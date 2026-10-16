@@ -4,11 +4,10 @@ import {
   createHash,
   randomBytes,
 } from "node:crypto";
-import { lstat, readdir, rm, stat } from "node:fs/promises";
+import { chmod, readdir, rm } from "node:fs/promises";
 import { basename, dirname, relative, resolve } from "node:path";
 import { YAML } from "bun";
 import {
-  HACK_PROJECT_DIR_PRIMARY,
   PROJECT_COMPOSE_FILENAME,
   PROJECT_CONFIG_FILENAME,
   PROJECT_ENV_CONFIG_DEFAULT_FILENAME,
@@ -42,69 +41,19 @@ import {
 } from "./git-worktree.ts";
 import { getRecord, getString, isRecord } from "./guards.ts";
 import { readHackEnvContract, resolveHackEnv } from "./hack-env.ts";
-import {
-  isOwnedLegacyAdoptionManagedEnvAdmission,
-  type LegacyAdoptionManagedEnvAdmission,
-} from "./native-compose-adoption-env-inputs.ts";
-import {
-  NATIVE_CONFIG_INPUT_LIMIT,
-  NativeConfigCompilerError,
-} from "./native-config-compiler.ts";
-import {
-  acquireNativeManagedEnvFile,
-  assertNativeProjectInputRoot,
-} from "./native-project-inputs.ts";
-import { writePrivateEnvFileIfChanged } from "./private-env-file.ts";
-import {
-  createPrivateFileExclusive,
-  decodeCanonicalBase64,
-  readBoundedPrivateFile,
-} from "./private-file.ts";
 import { readProjectDefaultEnvConfig } from "./project.ts";
 import {
-  assertLegacyProjectDirectory,
-  assertLegacyProjectInputFamily,
-  ProjectInputSelectionError,
-} from "./project-input-selection.ts";
-import {
-  isNativeManagedLocalTracked,
   resolvePrimaryLocalProjectDir,
-  resolveVerifiedPrimaryWorktreeRoot,
-  resolveVerifiedProjectEnvKeyGitLocation,
-  shouldInheritPrimaryLocalInputs,
   validatePrimaryLocalFile,
 } from "./worktree-local-config.ts";
 
 const PROJECT_ENV_CONFIG_VERSION = 1 as const;
 const PROJECT_ENV_SECRETS_PROVIDER = "project_key" as const;
-const NATIVE_ENV_WORKLOAD_PATTERN = /^[a-z0-9][a-z0-9._-]{0,62}$/;
-const NATIVE_ENV_OVERLAY_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const PROJECT_ENV_KEY_PATTERN = /^[A-Z_][A-Z0-9_]*$/;
 const PROJECT_ENV_SCOPE_PATTERN = /^[a-z0-9][a-z0-9._-]*$/;
-
-/**
- * Fixed refusals for env key and scope arguments.
- *
- * Invariant: these messages never interpolate the rejected argument. A key
- * argument is often a mistyped `KEY=value` or a value pasted into the key
- * position, so echoing any part of it could disclose a secret in terminal
- * output, logs, or CI transcripts.
- */
-export const ENV_KEY_INVALID_MESSAGE =
-  "Invalid env key: keys must match ^[A-Z_][A-Z0-9_]*$ (for example API_TOKEN). The argument is not shown because it may contain a value.";
-export const ENV_KEY_ASSIGNMENT_MESSAGE =
-  'Invalid env key: the key argument cannot contain "=". Pass only the key (matching ^[A-Z_][A-Z0-9_]*$) and supply secret values with --value-stdin or the hidden prompt. The argument is not shown because it may contain a value.';
-export const ENV_SCOPE_INVALID_MESSAGE =
-  'Invalid env scope: scopes must be "global" or match ^[a-z0-9][a-z0-9._-]*$ (usually a compose service name). The argument is not shown because it may contain a value.';
-export const ENV_SCOPE_UNKNOWN_MESSAGE =
-  "Unknown env scope: the requested scope is not global, a compose service, or a scope in the project env files. The argument is not shown because it may contain a value.";
-const UNKNOWN_SCOPE_LIST_LIMIT = 20;
 const PROJECT_ENV_SECRET_PREFIX = "v1" as const;
 const PROJECT_ENV_ALGORITHM = "aes-256-gcm";
 const PROJECT_ENV_IV_BYTES = 12;
-const PROJECT_ENV_TAG_BYTES = 16;
-/** Decoded ciphertext bound; a value never exceeds its 1 MiB env layer. */
-const PROJECT_ENV_CIPHERTEXT_LIMIT = NATIVE_CONFIG_INPUT_LIMIT;
 const PROJECT_ENV_SECRET_KEY_ENV = "HACK_ENV_SECRET_KEY";
 export const PROJECT_ENV_HOST_SCOPE = "host" as const;
 
@@ -156,18 +105,12 @@ type EffectiveEnvMetadata = Record<
   Record<string, { readonly scope: string; readonly secret: boolean }>
 >;
 
-/** Names, winning scopes and secret flags only; never carries stored values. */
-export type ProjectEnvResolvedMetadata = {
+export type ProjectEnvResolvedConfig = {
   readonly effectiveMetadata: EffectiveEnvMetadata;
   readonly hostEffectiveMetadata: EffectiveEnvMetadata;
   readonly selection: ProjectEnvSelection;
-  readonly files: readonly string[];
-  readonly declaredScopes: readonly string[];
-  readonly unknownScopes: readonly string[];
-};
-
-export type ProjectEnvResolvedConfig = ProjectEnvResolvedMetadata & {
   readonly merged: ProjectEnvConfig;
+  readonly files: readonly string[];
   readonly globalEnv: Readonly<Record<string, string>>;
   readonly hostEnv: Readonly<Record<string, string>>;
   readonly hostTargetEnv: Readonly<
@@ -176,6 +119,8 @@ export type ProjectEnvResolvedConfig = ProjectEnvResolvedMetadata & {
   readonly serviceEnv: Readonly<
     Record<string, Readonly<Record<string, string>>>
   >;
+  readonly declaredScopes: readonly string[];
+  readonly unknownScopes: readonly string[];
 };
 
 export function selectProjectEnvValues(opts: {
@@ -189,40 +134,12 @@ export function selectProjectEnvValues(opts: {
     return { ...opts.resolved.globalEnv };
   }
 
-  const scoped = Object.hasOwn(opts.resolved.serviceEnv, scopeName)
-    ? opts.resolved.serviceEnv[scopeName]
-    : undefined;
+  const scoped = opts.resolved.serviceEnv[scopeName];
   if (!scoped) {
-    throw new Error(
-      unknownProjectEnvScopeMessage({
-        configuredScopes: Object.keys(opts.resolved.serviceEnv),
-      })
-    );
+    throw new Error(`Unknown env scope: ${scopeName}`);
   }
 
   return { ...scoped };
-}
-
-/**
- * Fixed refusal for a scope that is not configured. It may list scope names
- * taken from the project's compose and env files, but never the requested
- * argument: a mistyped `--service KEY=value` must not be echoed.
- */
-export function unknownProjectEnvScopeMessage(opts: {
-  readonly configuredScopes: readonly string[];
-}): string {
-  const configured = [
-    "global",
-    ...[...new Set(opts.configuredScopes)]
-      .filter((scope) => scope !== "global")
-      .sort(),
-  ];
-  const shown = configured.slice(0, UNKNOWN_SCOPE_LIST_LIMIT);
-  const more =
-    configured.length > shown.length
-      ? ` (and ${configured.length - shown.length} more)`
-      : "";
-  return `${ENV_SCOPE_UNKNOWN_MESSAGE} Configured scopes: ${shown.join(", ")}${more}.`;
 }
 
 export function selectProjectEnvValuesForExecutionTarget(opts: {
@@ -240,10 +157,7 @@ export function selectProjectEnvValuesForExecutionTarget(opts: {
   const scopeName = normalizeProjectEnvScopeName({
     scopeName: opts.scopeName,
   });
-  const hostTarget = Object.hasOwn(opts.resolved.hostTargetEnv, scopeName)
-    ? opts.resolved.hostTargetEnv[scopeName]
-    : undefined;
-  return { ...(hostTarget ?? selected) };
+  return { ...(opts.resolved.hostTargetEnv[scopeName] ?? selected) };
 }
 
 export function isValidProjectEnvScopeName(opts: {
@@ -269,7 +183,7 @@ export function assertValidProjectEnvScopeName(opts: {
     scopeName: opts.scopeName,
   });
   if (!isValidProjectEnvScopeName({ scopeName })) {
-    throw new Error(ENV_SCOPE_INVALID_MESSAGE);
+    throw new Error(`Invalid env scope: ${scopeName}`);
   }
   return scopeName;
 }
@@ -423,9 +337,7 @@ export async function resolveProjectEnvSharedKeyPath(opts: {
 export async function ensureHackDirGitignore(opts: {
   readonly projectDir: string;
 }): Promise<{ readonly changed: boolean }> {
-  await assertLegacyProjectDirectory({ projectDir: opts.projectDir });
   await ensureDir(opts.projectDir);
-  await assertLegacyProjectDirectory({ projectDir: opts.projectDir });
   return await ensureManagedGitignoreBlock({
     gitignorePath: resolve(opts.projectDir, ".gitignore"),
     beginMarker: HACK_DIR_GITIGNORE_BEGIN_MARKER,
@@ -611,43 +523,11 @@ export async function listProjectEnvOverlayNames(opts: {
     .sort((left, right) => left.localeCompare(right));
 }
 
-/** Strict planning reads distinguish missing paths from failed/non-file layers. */
-async function readProjectEnvLayerText(opts: {
-  readonly path: string;
-  readonly strictRead?: boolean;
-}): Promise<string | null> {
-  if (!opts.strictRead) {
-    return await readTextFile(opts.path);
-  }
-  try {
-    const selected = await stat(opts.path);
-    if (!selected.isFile()) {
-      throw new Error("Selected env layer is not a regular file");
-    }
-  } catch (error: unknown) {
-    if (isRecord(error) && error.code === "ENOENT") {
-      try {
-        await lstat(opts.path);
-      } catch (entryError: unknown) {
-        if (isRecord(entryError) && entryError.code === "ENOENT") {
-          return null;
-        }
-        throw entryError;
-      }
-    }
-    // A dangling link is an existing invalid layer, not an absent one.
-    throw error;
-  }
-  // Preflight is not an atomic input fence; a failed read after it still refuses.
-  return await Bun.file(opts.path).text();
-}
-
 async function readProjectEnvConfigFile(opts: {
   readonly path: string;
   readonly environment: string;
-  readonly strictRead?: boolean;
 }): Promise<ProjectEnvConfigReadResult> {
-  const text = await readProjectEnvLayerText(opts);
+  const text = await readTextFile(opts.path);
   if (text === null) {
     return {
       path: opts.path,
@@ -740,9 +620,7 @@ function parseProjectEnvConfig(opts: {
       if (!PROJECT_ENV_KEY_PATTERN.test(key)) {
         return {
           ok: false,
-          // The scope is validated above; the key is not echoed because a
-          // malformed entry may hold a pasted value.
-          error: `Invalid env key in scope "${scope}"; keys must match ^[A-Z_][A-Z0-9_]*$.`,
+          error: `Invalid env key "${key}" in scope "${scope}".`,
         };
       }
       const normalizedValue = parseProjectEnvStoredValue({ valueRaw });
@@ -848,13 +726,13 @@ export async function resolveProjectEnvSelection(opts: {
   };
 }
 
-/** Read the same ordered layers for injection and requested-key disclosure. */
-async function readProjectEnvLayers(opts: {
+// biome-ignore lint/complexity/noExcessiveCognitiveComplexity: Env resolution keeps layered local/shared/worktree selection explicit in one place.
+export async function resolveProjectEnvConfig(opts: {
   readonly projectRoot: string;
   readonly projectDir: string;
   readonly envName?: string | null;
-  readonly strictRead?: boolean;
-}) {
+  readonly serviceNames: readonly string[];
+}): Promise<ProjectEnvResolvedConfig | null> {
   const selection = await resolveProjectEnvSelection({
     projectRoot: opts.projectRoot,
     projectDir: opts.projectDir,
@@ -862,7 +740,6 @@ async function readProjectEnvLayers(opts: {
   });
 
   const defaultRead = await readProjectEnvConfigFile({
-    strictRead: opts.strictRead,
     path: selection.defaultPath,
     environment: "default",
   });
@@ -870,12 +747,10 @@ async function readProjectEnvLayers(opts: {
     selection.overlayPath === null
       ? null
       : await readProjectEnvConfigFile({
-          strictRead: opts.strictRead,
           path: selection.overlayPath,
           environment: selection.effectiveEnv ?? "default",
         });
   const localDefaultRead = await readProjectEnvConfigFile({
-    strictRead: opts.strictRead,
     path: selection.localDefaultPath,
     environment: "default",
   });
@@ -883,7 +758,6 @@ async function readProjectEnvLayers(opts: {
     selection.localOverlayPath === null
       ? null
       : await readProjectEnvConfigFile({
-          strictRead: opts.strictRead,
           path: selection.localOverlayPath,
           environment: selection.effectiveEnv ?? "default",
         });
@@ -899,7 +773,6 @@ async function readProjectEnvLayers(opts: {
     await validatePrimaryLocalFile(primaryDefaultPath);
     inheritedReads.push(
       await readProjectEnvConfigFile({
-        strictRead: opts.strictRead,
         path: primaryDefaultPath,
         environment: "default",
       })
@@ -912,7 +785,6 @@ async function readProjectEnvLayers(opts: {
       await validatePrimaryLocalFile(primaryOverlayPath);
       inheritedReads.push(
         await readProjectEnvConfigFile({
-          strictRead: opts.strictRead,
           path: primaryOverlayPath,
           environment: selection.effectiveEnv,
         })
@@ -940,6 +812,85 @@ async function readProjectEnvLayers(opts: {
     layers: envLayers,
     environment: selection.effectiveEnv ?? "default",
   });
+  const keyText = await resolveProjectEnvKey({
+    projectRoot: opts.projectRoot,
+    required: hasSecretEntries({ config: merged }),
+  });
+  const globalEnv = resolveLayeredProjectEnvValuesForScopes({
+    layers: envLayers,
+    scopeNames: ["global"],
+    keyText,
+  });
+
+  const declaredScopes = Object.keys(merged.values).sort((left, right) =>
+    left.localeCompare(right)
+  );
+  const knownServiceSet = new Set(opts.serviceNames);
+  const hostScopeConflictsWithService = knownServiceSet.has(
+    PROJECT_ENV_HOST_SCOPE
+  );
+  const hostEnv = hostScopeConflictsWithService
+    ? {}
+    : resolveLayeredProjectEnvValuesForScopes({
+        layers: envLayers,
+        scopeNames: [PROJECT_ENV_HOST_SCOPE],
+        keyText,
+      });
+  const unknownScopes = declaredScopes
+    .filter((scope) => scope !== "global")
+    .filter((scope) => scope !== PROJECT_ENV_HOST_SCOPE)
+    .filter((scope) => !knownServiceSet.has(scope));
+
+  const serviceSet = new Set<string>([
+    ...opts.serviceNames,
+    ...declaredScopes.filter((scope) => scope !== "global"),
+  ]);
+  const effectiveMetadata: EffectiveEnvMetadata = {
+    global: resolveMetadata({ layers: envLayers, scopeNames: ["global"] }),
+  };
+  const hostEffectiveMetadata: EffectiveEnvMetadata = {};
+  const serviceEnv: Record<string, Record<string, string>> = {};
+  const hostTargetEnv: Record<string, Record<string, string>> = {};
+  for (const serviceName of serviceSet) {
+    const composeScopeNames =
+      serviceName === "global" ? ["global"] : ["global", serviceName];
+    effectiveMetadata[serviceName] = resolveMetadata({
+      layers: envLayers,
+      scopeNames: composeScopeNames,
+    });
+    hostEffectiveMetadata[serviceName] = resolveMetadata({
+      layers: envLayers,
+      scopeNames: hostScopeConflictsWithService
+        ? composeScopeNames
+        : [...composeScopeNames, PROJECT_ENV_HOST_SCOPE],
+    });
+    serviceEnv[serviceName] = resolveLayeredProjectEnvValuesForScopes({
+      layers: envLayers,
+      scopeNames: composeScopeNames,
+      keyText,
+    });
+    hostTargetEnv[serviceName] = resolveLayeredProjectEnvValuesForScopes({
+      layers: envLayers,
+      scopeNames: hostScopeConflictsWithService
+        ? composeScopeNames
+        : [...composeScopeNames, PROJECT_ENV_HOST_SCOPE],
+      keyText,
+    });
+  }
+  hostEffectiveMetadata.global = resolveMetadata({
+    layers: envLayers,
+    scopeNames: hostScopeConflictsWithService
+      ? ["global"]
+      : ["global", PROJECT_ENV_HOST_SCOPE],
+  });
+  hostTargetEnv.global = resolveLayeredProjectEnvValuesForScopes({
+    layers: envLayers,
+    scopeNames: hostScopeConflictsWithService
+      ? ["global"]
+      : ["global", PROJECT_ENV_HOST_SCOPE],
+    keyText,
+  });
+
   const files = [selection.defaultPath];
   if (selection.overlayPath && overlayRead?.exists) {
     files.push(selection.overlayPath);
@@ -956,1166 +907,18 @@ async function readProjectEnvLayers(opts: {
     files.push(selection.localOverlayPath);
   }
 
-  return { selection, envLayers, merged, files };
-}
-
-/**
- * Resolve only the requested winning entry, without decrypting unrelated values.
- * null means no modern config; { value: null } means a missing/deleted key.
- * Empty strings remain present. Reading never creates or materializes a key file.
- */
-export async function resolveProjectEnvValue(opts: {
-  readonly projectRoot: string;
-  readonly projectDir: string;
-  readonly envName?: string | null;
-  readonly serviceNames: readonly string[];
-  readonly scope?: string;
-  readonly key: string;
-}): Promise<{ readonly value: string | null } | null> {
-  const layers = await readProjectEnvLayers(opts);
-  if (!layers) {
-    return null;
-  }
-  const scope = normalizeProjectEnvScopeName({ scopeName: opts.scope });
-  if (
-    scope !== "global" &&
-    !opts.serviceNames.includes(scope) &&
-    !Object.hasOwn(layers.merged.values, scope)
-  ) {
-    throw new Error(
-      unknownProjectEnvScopeMessage({
-        configuredScopes: [
-          ...opts.serviceNames,
-          ...Object.keys(layers.merged.values),
-        ],
-      })
-    );
-  }
-  const entries = resolveEffectiveStoredEntries({
-    layers: layers.envLayers,
-    scopeNames: scope === "global" ? ["global"] : ["global", scope],
-  });
-  const entry = Object.hasOwn(entries, opts.key)
-    ? entries[opts.key]
-    : undefined;
-  if (!entry) {
-    return { value: null };
-  }
-  const keyText = isProjectEnvSecretValue(entry.value)
-    ? await resolveProjectEnvKey({
-        projectRoot: opts.projectRoot,
-        required: true,
-      })
-    : null;
   return {
-    value: decryptProjectEnvStoredValue({ storedValue: entry.value, keyText }),
-  };
-}
-
-type ProjectEnvResolveOptions = {
-  readonly projectRoot: string;
-  readonly projectDir: string;
-  readonly envName?: string | null;
-  readonly serviceNames: readonly string[];
-};
-
-type ProjectEnvLayers = NonNullable<
-  Awaited<ReturnType<typeof readProjectEnvLayers>>
->;
-
-/**
- * Plan modern env bindings without acquiring a key or decrypting any value.
- * Uses the same layers and target scopes as runtime injection. Omitted envName
- * selects the configured default; null bypasses it. null output means no modern
- * config, so callers can preserve their own legacy fallback. Errors intentionally
- * omit parser diagnostics because YAML errors may include stored value excerpts.
- * Selected env layer read failures refuse; only ENOENT means an absent layer.
- * Project selection retains legacy behavior. Paths and names are private metadata,
- * not a portable public plan or an atomic snapshot of configuration inputs.
- */
-export async function resolveProjectEnvMetadata(
-  opts: ProjectEnvResolveOptions
-): Promise<ProjectEnvResolvedMetadata | null> {
-  try {
-    const layers = await readProjectEnvLayers({ ...opts, strictRead: true });
-    return layers
-      ? projectEnvProjection({ layers, serviceNames: opts.serviceNames })
-          .metadata
-      : null;
-  } catch {
-    throw new Error(
-      "Cannot resolve project env metadata: selected configuration is invalid or unreadable."
-    );
-  }
-}
-
-export type NativeProjectEnvHostTargets = {
-  readonly includeDefault: boolean;
-  readonly workloadNames: readonly string[];
-};
-
-type EnvTargetMetadata = Readonly<
-  Record<string, { readonly scope: string; readonly secret: boolean }>
->;
-
-export type NativeProjectEnvHostMetadata = {
-  readonly default?: EnvTargetMetadata;
-  readonly workloads: Readonly<Record<string, EnvTargetMetadata>>;
-};
-
-/** Native planning carries names and winning scope/secret flags, never stored values. */
-export type NativeProjectEnvMetadata = {
-  readonly overlay: string | null;
-  readonly overlayExists: boolean;
-  readonly effectiveMetadata: EffectiveEnvMetadata;
-  readonly unknownScopes: readonly string[];
-  readonly hostMetadata?: NativeProjectEnvHostMetadata;
-};
-
-export type NativeProjectEnvSelectionOptions = {
-  readonly projectRoot: string;
-  readonly overlay: string | null;
-  readonly inheritLocal: boolean;
-  readonly declaredWorkloadNames: readonly string[];
-  readonly hostTargets?: NativeProjectEnvHostTargets;
-  readonly signal?: AbortSignal;
-};
-
-type NativeEnvTargetValues = Readonly<Record<string, string>>;
-
-/** Values are private execution inputs; callers must never serialize them into plans or diagnostics. */
-export type NativeProjectEnvResolvedConfig = NativeProjectEnvMetadata & {
-  readonly globalEnv: NativeEnvTargetValues;
-  readonly workloadEnv: Readonly<Record<string, NativeEnvTargetValues>>;
-  readonly hostValues?: {
-    readonly default?: NativeEnvTargetValues;
-    readonly workloads: Readonly<Record<string, NativeEnvTargetValues>>;
-  };
-};
-
-/** Private in-process execution capability; only its names-only metadata is serializable. */
-export type NativeProjectEnvExecutionAcquisition = {
-  readonly metadata: NativeProjectEnvMetadata;
-  readonly resolveValues: (opts?: {
-    readonly signal?: AbortSignal;
-  }) => Promise<NativeProjectEnvResolvedConfig>;
-  readonly assertFresh: (
-    selection: NativeProjectEnvSelectionOptions
-  ) => Promise<void>;
-};
-
-const legacyAdoptionEnvRevisions = new WeakMap<
-  NativeProjectEnvExecutionAcquisition,
-  string
->();
-const PRIVATE_ENV_REVISION = /^[a-f0-9]{64}$/;
-
-/** Private durable owner only. This is the revision of the initial metadata/value acquisition, never a report field. */
-export function privateLegacyAdoptionEnvRevision(
-  acquisition: NativeProjectEnvExecutionAcquisition
-): string {
-  const revision = legacyAdoptionEnvRevisions.get(acquisition);
-  if (!revision) {
-    throw redactLegacyAdoptionEnvError(undefined);
-  }
-  return revision;
-}
-
-/**
- * Raw-only saved-generation check through the identical bounded layer selector.
- * The durable owner must first verify its original source/checkout proof and
- * supply the root checker. This returns names-only metadata, never bytes, digest or values, and
- * never resolves a key or grants value-delivery/execution authority.
- */
-export async function assertSavedLegacyAdoptionEnvRevision(opts: {
-  readonly selection: NativeProjectEnvSelectionOptions;
-  readonly revision: string;
-  readonly inputOwner: ExplicitManagedEnvInputOwner;
-}): Promise<NativeProjectEnvMetadata> {
-  try {
-    const { revision, selection: suppliedSelection, inputOwner } = opts;
-    if (typeof revision !== "string" || !PRIVATE_ENV_REVISION.test(revision)) {
-      throw nativeEnvRevisionError();
-    }
-    const selection = snapshotNativeEnvSelection(suppliedSelection);
-    const recorded = nativeEnvRevisionRecorder();
-    const selected = await readNativeProjectEnvSelection(
-      selection,
-      recorded.onAcquired,
-      inputOwner
-    );
-    if (recorded.finish(selection, selected) !== revision) {
-      throw nativeEnvRevisionError();
-    }
-    return readonlyNativeEnvMetadata(selected.metadata);
-  } catch (error: unknown) {
-    throw redactLegacyAdoptionEnvError(error);
-  }
-}
-
-function nativeEnvRevisionError(): Error {
-  return new Error(
-    "Cannot use native managed env values: selected inputs changed or could not be rechecked; values omitted."
-  );
-}
-
-function nativeEnvValuesError(): Error {
-  return new Error(
-    "Cannot resolve native managed env values: selected inputs or decryption key are missing, invalid, unreadable, unstable or oversized; values omitted."
-  );
-}
-
-function nativeEnvMetadataError(): Error {
-  return new Error(
-    "Cannot resolve native managed env metadata: selected inputs are invalid, unreadable, unstable or oversized; values omitted."
-  );
-}
-
-function validateNativeHostTargets(
-  value: unknown,
-  declaredWorkloadNames: readonly string[]
-): NativeProjectEnvHostTargets | undefined {
-  if (value === undefined) {
-    return undefined;
-  }
-  if (
-    !isRecord(value) ||
-    typeof value.includeDefault !== "boolean" ||
-    !Array.isArray(value.workloadNames)
-  ) {
-    throw nativeEnvMetadataError();
-  }
-  const declared = new Set(declaredWorkloadNames);
-  const names: string[] = [];
-  const seen = new Set<string>();
-  for (const name of value.workloadNames) {
-    if (
-      typeof name !== "string" ||
-      !NATIVE_ENV_WORKLOAD_PATTERN.test(name) ||
-      !declared.has(name) ||
-      seen.has(name)
-    ) {
-      throw nativeEnvMetadataError();
-    }
-    names.push(name);
-    seen.add(name);
-  }
-  return { includeDefault: value.includeDefault, workloadNames: names };
-}
-
-/** Resolve only selected host baselines; scope precedence remains owned by the shared projection. */
-function projectNativeHostMetadata(opts: {
-  readonly targets: NativeProjectEnvHostTargets;
-  readonly envLayers: readonly (ProjectEnvConfig | null)[];
-  readonly projection: ReturnType<typeof projectEnvScopeProjection>;
-  readonly guestResult: NativeProjectEnvMetadata;
-  readonly signal?: AbortSignal;
-}): NativeProjectEnvHostMetadata {
-  const workloads: Record<string, EnvTargetMetadata> = {};
-  let defaultMetadata: EnvTargetMetadata | undefined;
-  // Charge the envelope and each returned map, including duplicate default/workload
-  // baselines. Never build all host maps and then discover that expansion is too large.
-  let bytes = Buffer.byteLength(
-    JSON.stringify({ ...opts.guestResult, hostMetadata: { workloads: {} } })
-  );
-  const acquire = (name: string, scopeNames: readonly string[]) => {
-    checkNativeEnvCancellation(opts.signal);
-    const metadata = resolveMetadata({ layers: opts.envLayers, scopeNames });
-    bytes += Buffer.byteLength(JSON.stringify({ [name]: metadata }));
-    if (bytes > NATIVE_CONFIG_INPUT_LIMIT) {
-      throw nativeEnvMetadataError();
-    }
-    return metadata;
-  };
-  if (opts.targets.includeDefault) {
-    defaultMetadata = acquire("default", opts.projection.globalHostScopeNames);
-  }
-  const scopeNamesByWorkload = new Map(
-    opts.projection.serviceTargets.map((target) => [
-      target.serviceName,
-      target.hostScopeNames,
-    ])
-  );
-  for (const name of opts.targets.workloadNames) {
-    const scopeNames = scopeNamesByWorkload.get(name);
-    if (!scopeNames) {
-      throw nativeEnvMetadataError();
-    }
-    workloads[name] = acquire(name, scopeNames);
-  }
-  return {
-    ...(defaultMetadata === undefined ? {} : { default: defaultMetadata }),
-    workloads,
-  };
-}
-
-function checkNativeEnvCancellation(signal?: AbortSignal): void {
-  if (signal?.aborted) {
-    throw new NativeConfigCompilerError(
-      "E_COMPILER_CANCELLED",
-      "Native managed env acquisition was cancelled."
-    );
-  }
-}
-
-/** Only the managed-env owner may observe these private acquired bytes. */
-type NativeEnvAcquisitionObserver = (input: {
-  readonly projectRoot: string;
-  readonly filename: string;
-  readonly bytes: Uint8Array | undefined;
-}) => void;
-
-type ExplicitManagedEnvInputOwner = {
-  readonly assertRoot: (opts: {
-    readonly projectRoot: string;
-    readonly signal?: AbortSignal;
-  }) => Promise<void>;
-  readonly acquireFile: (opts: {
-    readonly projectRoot: string;
-    readonly filename: string;
-    readonly signal?: AbortSignal;
-  }) => Promise<Uint8Array | undefined>;
-};
-const nativeManagedEnvInputOwner: ExplicitManagedEnvInputOwner = {
-  assertRoot: assertNativeProjectInputRoot,
-  acquireFile: acquireNativeManagedEnvFile,
-};
-
-async function readNativeEnvLayer(opts: {
-  readonly projectRoot: string;
-  readonly filename: string;
-  readonly environment: string;
-  readonly signal?: AbortSignal;
-  readonly onAcquired?: NativeEnvAcquisitionObserver;
-  readonly inputOwner?: ExplicitManagedEnvInputOwner;
-}): Promise<ProjectEnvConfig | null> {
-  const bytes = await (
-    opts.inputOwner ?? nativeManagedEnvInputOwner
-  ).acquireFile(opts);
-  checkNativeEnvCancellation(opts.signal);
-  opts.onAcquired?.({
-    projectRoot: opts.projectRoot,
-    filename: opts.filename,
-    bytes,
-  });
-  if (bytes === undefined) {
-    return null;
-  }
-  return parseNativeEnvLayer({ bytes, environment: opts.environment });
-}
-
-function parseNativeEnvLayer(opts: {
-  readonly bytes: Uint8Array;
-  readonly environment: string;
-}): ProjectEnvConfig {
-  const parsed: unknown = YAML.parse(
-    new TextDecoder("utf-8", { fatal: true }).decode(opts.bytes)
-  );
-  const result = parseProjectEnvConfig({
-    parsed,
-    environment: opts.environment,
-  });
-  if (!result.ok) {
-    throw nativeEnvMetadataError();
-  }
-  return result.config;
-}
-
-/** Preserve tracked local-overlay compatibility without reading legacy policy. */
-async function readNativeLocalBase(opts: {
-  readonly projectRoot: string;
-  readonly signal?: AbortSignal;
-  readonly onAcquired?: NativeEnvAcquisitionObserver;
-  readonly inputOwner?: ExplicitManagedEnvInputOwner;
-}): Promise<ProjectEnvConfig | null> {
-  const bytes = await (
-    opts.inputOwner ?? nativeManagedEnvInputOwner
-  ).acquireFile({
-    ...opts,
-    filename: "hack.env.local.yaml",
-  });
-  opts.onAcquired?.({
-    projectRoot: opts.projectRoot,
-    filename: "hack.env.local.yaml",
-    bytes,
-  });
-  if (bytes === undefined) {
-    return null;
-  }
-  const tracked = await isNativeManagedLocalTracked(opts);
-  const local =
-    tracked === true
-      ? null
-      : parseNativeEnvLayer({ bytes, environment: "default" });
-  if (tracked ?? local?.environment === "local") {
-    return await readNativeEnvLayer({
-      ...opts,
-      filename: "hack.env.default.local.yaml",
-      environment: "default",
-    });
-  }
-  return local;
-}
-
-/**
- * Resolve an explicit native selection through the existing managed-env owner.
- * Does not read legacy policy/defaults, dotenv, keys, or decrypt stored entries.
- * Only missing files are optional; selected files are bounded stable regular
- * files in unredirected native roots. This is not an atomic multi-file snapshot.
- * Unknown scopes remain names for diagnostics, not authorized workload targets.
- * Optional host targets select declared workloads, never host-process names.
- * Only requested host baselines are allocated, under a combined output budget.
- */
-async function readNativeProjectEnvSelection(
-  opts: NativeProjectEnvSelectionOptions,
-  onAcquired?: NativeEnvAcquisitionObserver,
-  inputOwner: ExplicitManagedEnvInputOwner = nativeManagedEnvInputOwner
-) {
-  checkNativeEnvCancellation(opts.signal);
-  const overlayName = opts.overlay;
-  const inheritLocal = opts.inheritLocal;
-  const declaredWorkloadNames = [...opts.declaredWorkloadNames];
-  if (
-    overlayName !== null &&
-    (typeof overlayName !== "string" ||
-      !NATIVE_ENV_OVERLAY_PATTERN.test(overlayName))
-  ) {
-    throw nativeEnvMetadataError();
-  }
-  const hostTargets = validateNativeHostTargets(
-    opts.hostTargets,
-    declaredWorkloadNames
-  );
-  const projectRoot = resolve(opts.projectRoot);
-  await inputOwner.assertRoot({ projectRoot, signal: opts.signal });
-  let primaryRoot: string | null = null;
-  if (shouldInheritPrimaryLocalInputs({ inheritLocal })) {
-    primaryRoot = await resolveVerifiedPrimaryWorktreeRoot({
-      projectRoot,
-      signal: opts.signal,
-    });
-    if (primaryRoot) {
-      await inputOwner.assertRoot({
-        projectRoot: primaryRoot,
-        signal: opts.signal,
-      });
-    }
-  }
-  const read = (root: string, envName: string | null, local: boolean) => {
-    const projectDir = resolve(root, HACK_PROJECT_DIR_PRIMARY);
-    return readNativeEnvLayer({
-      projectRoot: root,
-      filename: basename(
-        local
-          ? resolveProjectEnvLocalConfigPath({ projectDir, envName })
-          : resolveProjectEnvConfigPath({ projectDir, envName })
-      ),
-      environment: envName ?? "default",
-      signal: opts.signal,
-      onAcquired,
-      inputOwner,
-    });
-  };
-  const base = await read(projectRoot, null, false);
-  const overlay =
-    overlayName === null ? null : await read(projectRoot, overlayName, false);
-  const envLayers = [
-    base,
-    overlay,
-    primaryRoot
-      ? await readNativeLocalBase({
-          projectRoot: primaryRoot,
-          signal: opts.signal,
-          onAcquired,
-          inputOwner,
-        })
-      : null,
-    primaryRoot && overlayName !== null
-      ? await read(primaryRoot, overlayName, true)
-      : null,
-    await readNativeLocalBase({
-      projectRoot,
-      signal: opts.signal,
-      onAcquired,
-      inputOwner,
-    }),
-    overlayName === null ? null : await read(projectRoot, overlayName, true),
-  ];
-  const merged = mergeProjectEnvConfigLayers({
-    layers: envLayers,
-    environment: overlayName ?? "default",
-  });
-  const projection = projectEnvScopeProjection({
-    layers: { envLayers, merged },
-    serviceNames: declaredWorkloadNames,
-    metadataByteLimit: NATIVE_CONFIG_INPUT_LIMIT,
-    includeHostMetadata: false,
-  });
-  const guestResult: NativeProjectEnvMetadata = {
-    overlay: overlayName,
-    overlayExists: overlay !== null,
-    effectiveMetadata: envLayers.some((layer) => layer !== null)
-      ? projection.metadata.effectiveMetadata
-      : {},
-    unknownScopes: projection.metadata.unknownScopes,
-  };
-  const result: NativeProjectEnvMetadata =
-    hostTargets === undefined
-      ? guestResult
-      : {
-          ...guestResult,
-          hostMetadata: projectNativeHostMetadata({
-            targets: hostTargets,
-            envLayers,
-            projection,
-            guestResult,
-            signal: opts.signal,
-          }),
-        };
-  if (Buffer.byteLength(JSON.stringify(result)) > NATIVE_CONFIG_INPUT_LIMIT) {
-    throw nativeEnvMetadataError();
-  }
-  await inputOwner.assertRoot({ projectRoot, signal: opts.signal });
-  if (primaryRoot) {
-    await inputOwner.assertRoot({
-      projectRoot: primaryRoot,
-      signal: opts.signal,
-    });
-  }
-  checkNativeEnvCancellation(opts.signal);
-  return {
-    projectRoot,
-    primaryRoot,
-    envLayers,
-    projection,
-    metadata: result,
-    declaredWorkloadNames,
-    hostTargets,
-    inputOwner,
-  };
-}
-
-/** Resolve native names and winning scope/secret flags without acquiring any key or decrypting values. */
-export async function resolveProjectEnvMetadataForNativeSelection(
-  opts: NativeProjectEnvSelectionOptions
-): Promise<NativeProjectEnvMetadata> {
-  try {
-    return (await readNativeProjectEnvSelection(opts)).metadata;
-  } catch (error: unknown) {
-    if (
-      error instanceof NativeConfigCompilerError &&
-      error.code === "E_COMPILER_CANCELLED"
-    ) {
-      throw error;
-    }
-    throw nativeEnvMetadataError();
-  }
-}
-
-/**
- * Deliver values for an explicit native selection through the managed-env owner.
- * Shares bounded layer acquisition and scope precedence with metadata planning;
- * does not read legacy config/defaults, dotenv or materialized state. Only declared
- * workloads and requested host baselines receive values. Reads never create keys.
- * Acquisition is not an atomic execution-admission fence: callers own that fence
- * and the lifetime and disclosure protection of these private execution inputs.
- */
-export async function resolveProjectEnvConfigForNativeSelection(
-  opts: NativeProjectEnvSelectionOptions
-): Promise<NativeProjectEnvResolvedConfig> {
-  try {
-    return await resolveNativeProjectEnvValues({
-      selected: await readNativeProjectEnvSelection(opts),
-      signal: opts.signal,
-    });
-  } catch (error: unknown) {
-    if (
-      error instanceof NativeConfigCompilerError &&
-      error.code === "E_COMPILER_CANCELLED"
-    ) {
-      throw error;
-    }
-    throw nativeEnvValuesError();
-  }
-}
-
-async function resolveNativeProjectEnvValues(opts: {
-  readonly selected: Awaited<ReturnType<typeof readNativeProjectEnvSelection>>;
-  readonly signal?: AbortSignal;
-}): Promise<NativeProjectEnvResolvedConfig> {
-  try {
-    const { selected } = opts;
-    const scopes = new Map(
-      selected.projection.serviceTargets.map((target) => [
-        target.serviceName,
-        target,
-      ])
-    );
-    const guestTargets = selected.declaredWorkloadNames.map((name) => {
-      if (!NATIVE_ENV_WORKLOAD_PATTERN.test(name)) {
-        throw nativeEnvValuesError();
-      }
-      const target = scopes.get(name);
-      if (!target) {
-        throw nativeEnvValuesError();
-      }
-      return target;
-    });
-    const requestedScopes = [
-      ["global"],
-      ...guestTargets.map((target) => target.composeScopeNames),
-      ...(selected.hostTargets?.includeDefault
-        ? [selected.projection.globalHostScopeNames]
-        : []),
-      ...(selected.hostTargets?.workloadNames ?? []).map((name) => {
-        const target = scopes.get(name);
-        if (!target) {
-          throw nativeEnvValuesError();
-        }
-        return target.hostScopeNames;
-      }),
-    ];
-    const required = requestedScopes.some((scopeNames) =>
-      Object.values(
-        resolveEffectiveStoredEntries({
-          layers: selected.envLayers,
-          scopeNames,
-        })
-      ).some((entry) => isProjectEnvSecretValue(entry.value))
-    );
-    const keyText = required
-      ? await resolveProjectEnvKey({
-          projectRoot: selected.projectRoot,
-          required: true,
-          nativeSelection: { signal: opts.signal },
-        })
-      : null;
-    const workloadEnv: Record<string, NativeEnvTargetValues> = {};
-    let bytes = Buffer.byteLength(
-      JSON.stringify({
-        ...selected.metadata,
-        globalEnv: {},
-        workloadEnv: {},
-        ...(selected.hostTargets ? { hostValues: { workloads: {} } } : {}),
-      })
-    );
-    const values = (name: string, scopeNames: readonly string[]) => {
-      checkNativeEnvCancellation(opts.signal);
-      const result: Record<string, string> = {};
-      bytes += Buffer.byteLength(JSON.stringify({ [name]: {} }));
-      const entries = resolveEffectiveStoredEntries({
-        layers: selected.envLayers,
-        scopeNames,
-      });
-      for (const [key, entry] of Object.entries(entries)) {
-        checkNativeEnvCancellation(opts.signal);
-        const value = decryptProjectEnvStoredValue({
-          storedValue: entry.value,
-          keyText,
-        });
-        bytes += Buffer.byteLength(JSON.stringify({ [key]: value }));
-        if (bytes > NATIVE_CONFIG_INPUT_LIMIT) {
-          throw nativeEnvValuesError();
-        }
-        result[key] = value;
-      }
-      if (bytes > NATIVE_CONFIG_INPUT_LIMIT) {
-        throw nativeEnvValuesError();
-      }
-      return result;
-    };
-    const globalEnv = values("globalEnv", ["global"]);
-    for (const target of guestTargets) {
-      workloadEnv[target.serviceName] = values(
-        target.serviceName,
-        target.composeScopeNames
-      );
-    }
-    const hostValues = resolveNativeHostValues({
-      targets: selected.hostTargets,
-      projection: selected.projection,
-      values,
-    });
-    await selected.inputOwner.assertRoot({
-      projectRoot: selected.projectRoot,
-      signal: opts.signal,
-    });
-    if (selected.primaryRoot) {
-      await selected.inputOwner.assertRoot({
-        projectRoot: selected.primaryRoot,
-        signal: opts.signal,
-      });
-    }
-    checkNativeEnvCancellation(opts.signal);
-    return {
-      ...selected.metadata,
-      globalEnv,
-      workloadEnv,
-      ...(hostValues === undefined ? {} : { hostValues }),
-    };
-  } catch (error: unknown) {
-    if (
-      error instanceof NativeConfigCompilerError &&
-      error.code === "E_COMPILER_CANCELLED"
-    ) {
-      throw error;
-    }
-    throw nativeEnvValuesError();
-  }
-}
-
-function snapshotNativeEnvSelection(
-  opts: NativeProjectEnvSelectionOptions
-): NativeProjectEnvSelectionOptions {
-  const declaredWorkloadNames = Object.freeze([...opts.declaredWorkloadNames]);
-  const targets = validateNativeHostTargets(
-    opts.hostTargets,
-    declaredWorkloadNames
-  );
-  return Object.freeze({
-    projectRoot: resolve(opts.projectRoot),
-    overlay: opts.overlay,
-    inheritLocal: opts.inheritLocal,
-    declaredWorkloadNames,
-    signal: opts.signal,
-    ...(targets === undefined
-      ? {}
-      : {
-          hostTargets: Object.freeze({
-            includeDefault: targets.includeDefault,
-            workloadNames: Object.freeze([...targets.workloadNames]),
-          }),
-        }),
-  });
-}
-
-/** Fingerprints remain inside this owner; no digest is placed on a public object. */
-function nativeEnvRevisionRecorder() {
-  const revision = createHash("sha256");
-  const onAcquired: NativeEnvAcquisitionObserver = ({
-    projectRoot,
-    filename,
-    bytes,
-  }) => {
-    revision
-      .update(JSON.stringify([projectRoot, filename, bytes?.length ?? null]))
-      .update("\0");
-    if (bytes !== undefined) {
-      revision.update(bytes);
-    }
-    revision.update("\0");
-  };
-  const finish = (
-    selection: NativeProjectEnvSelectionOptions,
-    selected: Awaited<ReturnType<typeof readNativeProjectEnvSelection>>
-  ) => {
-    revision.update(
-      JSON.stringify({
-        projectRoot: selected.projectRoot,
-        primaryRoot: selected.primaryRoot,
-        overlay: selection.overlay,
-        inheritLocal: selection.inheritLocal,
-        declaredWorkloadNames: selection.declaredWorkloadNames,
-        hostTargets: selection.hostTargets ?? null,
-      })
-    );
-    return revision.digest("hex");
-  };
-  return { onAcquired, finish };
-}
-
-/** Freeze only owner-created acyclic metadata/value objects, never caller inputs. */
-function freezeNativeEnvOwnedValue(value: unknown): void {
-  if (!(isRecord(value) || Array.isArray(value))) {
-    return;
-  }
-  for (const entry of Object.values(value)) {
-    freezeNativeEnvOwnedValue(entry);
-  }
-  Object.freeze(value);
-}
-
-function readonlyNativeEnvMetadata(
-  metadata: NativeProjectEnvMetadata
-): NativeProjectEnvMetadata {
-  const result = structuredClone(metadata);
-  freezeNativeEnvOwnedValue(result);
-  return result;
-}
-
-function redactNativeEnvRevisionError(error: unknown): Error {
-  return error instanceof NativeConfigCompilerError &&
-    error.code === "E_COMPILER_CANCELLED"
-    ? error
-    : nativeEnvRevisionError();
-}
-
-/**
- * Acquire one private env generation for metadata planning and later value delivery.
- * Raw bytes, missing-file presence and selected roots/targets are bound privately;
- * metadata and values come from the same bounded acquisition. Methods are omitted
- * from enumeration and JSON. Call assertFresh with the current validated selection
- * immediately before each effect. Rechecks do not freeze concurrent external editors.
- */
-export async function acquireProjectEnvForNativeExecution(
-  opts: NativeProjectEnvSelectionOptions
-): Promise<NativeProjectEnvExecutionAcquisition> {
-  return await acquireExplicitProjectEnvExecution({
-    selection: opts,
-    inputOwner: nativeManagedEnvInputOwner,
-  });
-}
-
-/** A replacement invocation signal cannot revive a cancelled legacy acquisition. */
-function retainedEnvSignal(
-  captured: AbortSignal | undefined,
-  supplied: AbortSignal | undefined
-): AbortSignal | undefined {
-  return captured && supplied
-    ? AbortSignal.any([captured, supplied])
-    : (supplied ?? captured);
-}
-
-/** Metadata, revision and delivery share one raw-layer acquisition under the admitted input owner. */
-async function acquireExplicitProjectEnvExecution(opts: {
-  readonly selection: NativeProjectEnvSelectionOptions;
-  readonly inputOwner: ExplicitManagedEnvInputOwner;
-  readonly redactError?: (error: unknown) => Error;
-  readonly retainCapturedSignal?: boolean;
-}): Promise<NativeProjectEnvExecutionAcquisition> {
-  const redactError = opts.redactError ?? redactNativeEnvRevisionError;
-  try {
-    const selection = snapshotNativeEnvSelection(opts.selection);
-    const inputOwner = opts.inputOwner;
-    const recorded = nativeEnvRevisionRecorder();
-    const selected = await readNativeProjectEnvSelection(
-      selection,
-      recorded.onAcquired,
-      inputOwner
-    );
-    const revision = recorded.finish(selection, selected);
-    const assertFresh = async (current: NativeProjectEnvSelectionOptions) => {
-      try {
-        const currentSelection = snapshotNativeEnvSelection({
-          ...current,
-          signal: opts.retainCapturedSignal
-            ? retainedEnvSignal(selection.signal, current.signal)
-            : current.signal,
-        });
-        const rechecked = nativeEnvRevisionRecorder();
-        const currentInputs = await readNativeProjectEnvSelection(
-          currentSelection,
-          rechecked.onAcquired,
-          inputOwner
-        );
-        if (rechecked.finish(currentSelection, currentInputs) !== revision) {
-          throw nativeEnvRevisionError();
-        }
-      } catch (error: unknown) {
-        throw redactError(error);
-      }
-    };
-    const resolveValues = async (valueOpts?: {
-      readonly signal?: AbortSignal;
-    }) => {
-      try {
-        if (
-          opts.retainCapturedSignal &&
-          valueOpts !== undefined &&
-          !isRecord(valueOpts)
-        ) {
-          throw nativeEnvRevisionError();
-        }
-        const signal = opts.retainCapturedSignal
-          ? retainedEnvSignal(selection.signal, valueOpts?.signal)
-          : (valueOpts?.signal ?? selection.signal);
-        await assertFresh({ ...selection, signal });
-        const resolved = await resolveNativeProjectEnvValues({
-          selected,
-          signal,
-        });
-        await assertFresh({ ...selection, signal });
-        const result = {
-          ...resolved,
-          ...readonlyNativeEnvMetadata(selected.metadata),
-        };
-        freezeNativeEnvOwnedValue(result);
-        return result;
-      } catch (error: unknown) {
-        throw redactError(error);
-      }
-    };
-    const acquisition = {
-      metadata: readonlyNativeEnvMetadata(selected.metadata),
-      resolveValues,
-      assertFresh,
-    };
-    Object.defineProperty(acquisition, "resolveValues", { enumerable: false });
-    Object.defineProperty(acquisition, "assertFresh", { enumerable: false });
-    if (opts.retainCapturedSignal) {
-      legacyAdoptionEnvRevisions.set(acquisition, revision);
-    }
-    return Object.freeze(acquisition);
-  } catch (error: unknown) {
-    throw redactError(error);
-  }
-}
-
-function redactLegacyAdoptionEnvError(error: unknown): Error {
-  return error instanceof NativeConfigCompilerError &&
-    error.code === "E_COMPILER_CANCELLED"
-    ? new NativeConfigCompilerError(
-        "E_COMPILER_CANCELLED",
-        "Legacy adoption managed acquisition was cancelled; values omitted."
-      )
-    : new Error(
-        "Legacy adoption managed acquisition refused: selected inputs or key are invalid, unsafe or changed; values omitted."
-      );
-}
-
-/** Private legacy-adoption delivery; native metadata and selection APIs keep their native family fence. */
-export async function acquireProjectEnvForLegacyAdoption(opts: {
-  readonly admission: LegacyAdoptionManagedEnvAdmission;
-}): Promise<NativeProjectEnvExecutionAcquisition> {
-  try {
-    if (
-      !(
-        isRecord(opts) &&
-        isOwnedLegacyAdoptionManagedEnvAdmission(opts.admission)
-      )
-    ) {
-      throw nativeEnvRevisionError();
-    }
-    return await acquireExplicitProjectEnvExecution({
-      selection: opts.admission.selection,
-      inputOwner: opts.admission,
-      redactError: redactLegacyAdoptionEnvError,
-      retainCapturedSignal: true,
-    });
-  } catch (error: unknown) {
-    throw redactLegacyAdoptionEnvError(error);
-  }
-}
-
-function resolveNativeHostValues(opts: {
-  readonly targets: NativeProjectEnvHostTargets | undefined;
-  readonly projection: ReturnType<typeof projectEnvScopeProjection>;
-  readonly values: (
-    name: string,
-    scopeNames: readonly string[]
-  ) => NativeEnvTargetValues;
-}): NativeProjectEnvResolvedConfig["hostValues"] {
-  if (!opts.targets) {
-    return undefined;
-  }
-  const workloads: Record<string, NativeEnvTargetValues> = {};
-  const defaultValues = opts.targets.includeDefault
-    ? opts.values("default", opts.projection.globalHostScopeNames)
-    : undefined;
-  const scopes = new Map(
-    opts.projection.serviceTargets.map((target) => [
-      target.serviceName,
-      target.hostScopeNames,
-    ])
-  );
-  for (const name of opts.targets.workloadNames) {
-    const scopeNames = scopes.get(name);
-    if (!scopeNames) {
-      throw nativeEnvValuesError();
-    }
-    workloads[name] = opts.values(name, scopeNames);
-  }
-  return {
-    ...(defaultValues === undefined ? {} : { default: defaultValues }),
-    workloads,
-  };
-}
-
-/** Select only a declared guest workload or an explicitly requested host baseline. */
-export function selectProjectEnvValuesForNativeExecutionTarget(opts: {
-  readonly resolved: NativeProjectEnvResolvedConfig;
-  readonly target: "guest" | "host";
-  readonly workloadName?: string | null;
-}): Record<string, string> {
-  const workloadName = opts.workloadName ?? null;
-  const targets =
-    opts.target === "host"
-      ? (opts.resolved.hostValues?.workloads ?? {})
-      : opts.resolved.workloadEnv;
-  let selected: NativeEnvTargetValues | undefined;
-  if (workloadName === null) {
-    selected =
-      opts.target === "host"
-        ? opts.resolved.hostValues?.default
-        : opts.resolved.globalEnv;
-  } else if (Object.hasOwn(targets, workloadName)) {
-    selected = targets[workloadName];
-  }
-  if (!selected) {
-    throw nativeEnvValuesError();
-  }
-  return { ...selected };
-}
-
-/** Keep legacy selection provenance outside the shared scope projection. */
-function projectEnvProjection(opts: {
-  readonly layers: ProjectEnvLayers;
-  readonly serviceNames: readonly string[];
-}) {
-  const projection = projectEnvScopeProjection(opts);
-  return {
-    ...projection,
-    metadata: {
-      ...projection.metadata,
-      selection: opts.layers.selection,
-      files: opts.layers.files,
-    },
-  };
-}
-
-/** One scope projection owns metadata planning and runtime injection. */
-function projectEnvScopeProjection(opts: {
-  readonly layers: {
-    readonly envLayers: readonly (ProjectEnvConfig | null)[];
-    readonly merged: ProjectEnvConfig;
-  };
-  readonly serviceNames: readonly string[];
-  readonly metadataByteLimit?: number;
-  readonly includeHostMetadata?: boolean;
-}) {
-  const { envLayers, merged } = opts.layers;
-  const declaredScopes = Object.keys(merged.values).sort((left, right) =>
-    left.localeCompare(right)
-  );
-  const knownServiceSet = new Set(opts.serviceNames);
-  const hostScopeConflictsWithService = knownServiceSet.has(
-    PROJECT_ENV_HOST_SCOPE
-  );
-  const unknownScopes = declaredScopes
-    .filter((scope) => scope !== "global")
-    .filter((scope) => scope !== PROJECT_ENV_HOST_SCOPE)
-    .filter((scope) => !knownServiceSet.has(scope));
-  const serviceSet = new Set<string>([
-    ...opts.serviceNames,
-    ...declaredScopes.filter((scope) => scope !== "global"),
-  ]);
-  const serviceTargets = [...serviceSet].map((serviceName) => {
-    const composeScopeNames =
-      serviceName === "global" ? ["global"] : ["global", serviceName];
-    return {
-      serviceName,
-      composeScopeNames,
-      hostScopeNames: hostScopeConflictsWithService
-        ? composeScopeNames
-        : [...composeScopeNames, PROJECT_ENV_HOST_SCOPE],
-    };
-  });
-  const effectiveMetadata: EffectiveEnvMetadata = {
-    global: resolveMetadata({ layers: envLayers, scopeNames: ["global"] }),
-  };
-  let metadataBytes =
-    opts.metadataByteLimit === undefined
-      ? 0
-      : Buffer.byteLength(JSON.stringify(effectiveMetadata));
-  const checkMetadataSize = () => {
-    if (
-      opts.metadataByteLimit !== undefined &&
-      metadataBytes > opts.metadataByteLimit
-    ) {
-      throw nativeEnvMetadataError();
-    }
-  };
-  checkMetadataSize();
-  const hostEffectiveMetadata: EffectiveEnvMetadata = {};
-  for (const {
-    serviceName,
-    composeScopeNames,
-    hostScopeNames,
-  } of serviceTargets) {
-    effectiveMetadata[serviceName] = resolveMetadata({
-      layers: envLayers,
-      scopeNames: composeScopeNames,
-    });
-    if (opts.metadataByteLimit !== undefined) {
-      metadataBytes += Buffer.byteLength(
-        JSON.stringify({ [serviceName]: effectiveMetadata[serviceName] })
-      );
-      checkMetadataSize();
-    }
-    if (opts.includeHostMetadata !== false) {
-      hostEffectiveMetadata[serviceName] = resolveMetadata({
-        layers: envLayers,
-        scopeNames: hostScopeNames,
-      });
-    }
-  }
-  const globalHostScopeNames = hostScopeConflictsWithService
-    ? ["global"]
-    : ["global", PROJECT_ENV_HOST_SCOPE];
-  if (opts.includeHostMetadata !== false) {
-    hostEffectiveMetadata.global = resolveMetadata({
-      layers: envLayers,
-      scopeNames: globalHostScopeNames,
-    });
-  }
-  const metadata = {
+    selection,
     effectiveMetadata,
     hostEffectiveMetadata,
-    declaredScopes,
-    unknownScopes,
-  };
-  return {
-    metadata,
-    serviceTargets,
-    globalHostScopeNames,
-    hostScopeNames: hostScopeConflictsWithService
-      ? []
-      : [PROJECT_ENV_HOST_SCOPE],
-  };
-}
-
-export async function resolveProjectEnvConfig(
-  opts: ProjectEnvResolveOptions
-): Promise<ProjectEnvResolvedConfig | null> {
-  const layers = await readProjectEnvLayers(opts);
-  if (!layers) {
-    return null;
-  }
-  const { envLayers, merged } = layers;
-  const keyText = await resolveProjectEnvKey({
-    projectRoot: opts.projectRoot,
-    required: hasSecretEntries({ config: merged }),
-  });
-  const projection = projectEnvProjection({
-    layers,
-    serviceNames: opts.serviceNames,
-  });
-  const resolveScopes = (scopeNames: readonly string[]) =>
-    resolveLayeredProjectEnvValuesForScopes({
-      layers: envLayers,
-      scopeNames,
-      keyText,
-    });
-  const globalEnv = resolveScopes(["global"]);
-  const hostEnv = resolveScopes(projection.hostScopeNames);
-  const serviceEnv: Record<string, Record<string, string>> = {};
-  const hostTargetEnv: Record<string, Record<string, string>> = {};
-  for (const {
-    serviceName,
-    composeScopeNames,
-    hostScopeNames,
-  } of projection.serviceTargets) {
-    serviceEnv[serviceName] = resolveScopes(composeScopeNames);
-    hostTargetEnv[serviceName] = resolveScopes(hostScopeNames);
-  }
-  hostTargetEnv.global = resolveScopes(projection.globalHostScopeNames);
-  return {
-    ...projection.metadata,
     merged,
+    files,
     globalEnv,
     hostEnv,
     hostTargetEnv,
     serviceEnv,
+    declaredScopes,
+    unknownScopes,
   };
 }
 
@@ -2269,10 +1072,8 @@ export async function setProjectEnvValue(opts: {
   readonly secret: boolean;
   readonly local?: boolean;
 }): Promise<ProjectEnvMutationResult> {
-  await assertLegacyProjectDirectory({ projectDir: opts.projectDir });
-  await assertLegacyProjectInputFamily({ projectRoot: opts.projectRoot });
   if (!PROJECT_ENV_KEY_PATTERN.test(opts.key)) {
-    throw new Error(ENV_KEY_INVALID_MESSAGE);
+    throw new Error(`Invalid env key: ${opts.key}`);
   }
   const scope = assertValidProjectEnvScopeName({
     scopeName: opts.scope,
@@ -2358,8 +1159,6 @@ export async function unsetProjectEnvValue(opts: {
   readonly key: string;
   readonly local?: boolean;
 }): Promise<{ readonly changed: boolean; readonly filePath: string }> {
-  await assertLegacyProjectDirectory({ projectDir: opts.projectDir });
-  await assertLegacyProjectInputFamily({ projectRoot: opts.projectRoot });
   const filePath =
     opts.local === true
       ? await resolveProjectEnvEffectiveLocalConfigPath({
@@ -2423,7 +1222,6 @@ async function writeProjectEnvConfigFile(opts: {
 }): Promise<boolean> {
   const yaml = YAML.stringify(opts.config, null, 2);
   const text = yaml.endsWith("\n") ? yaml : `${yaml}\n`;
-  await assertLegacyProjectDirectory({ projectDir: dirname(opts.path) });
   return (await writeTextFileIfChanged(opts.path, text)).changed;
 }
 
@@ -2438,8 +1236,6 @@ export async function materializeProjectEnv(opts: {
   readonly changed: boolean;
   readonly effectiveEnvName: string | null;
 }> {
-  await assertLegacyProjectDirectory({ projectDir: opts.projectDir });
-  await assertLegacyProjectInputFamily({ projectRoot: opts.projectRoot });
   const resolved = await resolveProjectEnvConfig({
     projectRoot: opts.projectRoot,
     projectDir: opts.projectDir,
@@ -2456,29 +1252,25 @@ export async function materializeProjectEnv(opts: {
   });
   const envPath = resolve(opts.projectDir, PROJECT_ENV_FILENAME);
   const text = serializeDotEnv(selectedEnv);
-  await assertLegacyProjectDirectory({ projectDir: opts.projectDir });
-  // Mode 0600, atomic replace; a symlinked .env or .hack is refused.
-  const changed = (
-    await writePrivateEnvFileIfChanged({ envFile: envPath, text })
-  ).changed;
+  const changed = (await writeTextFileIfChanged(envPath, text)).changed;
   await ensureDir(
     dirname(resolveProjectEnvStatePath({ projectDir: opts.projectDir }))
   );
-  const stateText = `${JSON.stringify(
-    {
-      version: 1,
-      selectedOverlay: resolved.selection.effectiveEnv,
-      selectedService: opts.serviceName ?? null,
-      generatedAt: new Date().toISOString(),
-      inputs: await buildProjectEnvStateDigests({ files: resolved.files }),
-    },
-    null,
-    2
-  )}\n`;
-  await assertLegacyProjectDirectory({ projectDir: opts.projectDir });
   await writeTextFile(
     resolveProjectEnvStatePath({ projectDir: opts.projectDir }),
-    stateText
+    `${JSON.stringify(
+      {
+        version: 1,
+        selectedOverlay: resolved.selection.effectiveEnv,
+        selectedService: opts.serviceName ?? null,
+        generatedAt: new Date().toISOString(),
+        inputs: await buildProjectEnvStateDigests({
+          files: resolved.files,
+        }),
+      },
+      null,
+      2
+    )}\n`
   );
   return {
     envPath,
@@ -2752,37 +1544,29 @@ function formatProjectEnvStateValue(opts: {
 async function resolveProjectEnvKey(opts: {
   readonly projectRoot: string;
   readonly required: boolean;
-  readonly nativeSelection?: { readonly signal?: AbortSignal };
 }): Promise<string | null> {
-  if (opts.nativeSelection) {
-    return await resolveNativeProjectEnvKey({
-      ...opts,
-      signal: opts.nativeSelection.signal,
-    });
-  }
-  // Priority: checkout-local, shared common-dir, primary checkout, environment.
   const keyPath = resolveProjectEnvKeyPath({ projectRoot: opts.projectRoot });
-  const localKey = await readLegacyProjectEnvKeyFile({ path: keyPath });
-  if (localKey) {
-    return localKey;
-  }
   const sharedKeyPath = await resolveProjectEnvSharedKeyPath({
     projectRoot: opts.projectRoot,
   });
-  const sharedKey =
-    sharedKeyPath === null
-      ? null
-      : await readLegacyProjectEnvKeyFile({ path: sharedKeyPath });
-  if (sharedKey) {
-    return sharedKey;
-  }
+  const text = await readTextFile(keyPath);
+  const sharedText =
+    sharedKeyPath === null ? null : await readTextFile(sharedKeyPath);
+  const envFallback = process.env[PROJECT_ENV_SECRET_KEY_ENV]?.trim() ?? "";
   const inheritedKey = await resolveInheritedProjectEnvKey({
     projectRoot: opts.projectRoot,
   });
+  const trimmed = text?.trim() ?? "";
+  if (trimmed.length > 0) {
+    return trimmed;
+  }
+  const sharedTrimmed = sharedText?.trim() ?? "";
+  if (sharedTrimmed.length > 0) {
+    return sharedTrimmed;
+  }
   if (inheritedKey) {
     return inheritedKey.keyText;
   }
-  const envFallback = process.env[PROJECT_ENV_SECRET_KEY_ENV]?.trim() ?? "";
   if (envFallback.length > 0) {
     return envFallback;
   }
@@ -2795,135 +1579,6 @@ async function resolveProjectEnvKey(opts: {
     );
   }
   return null;
-}
-
-/** Native reads preserve this owner's local/shared/primary/environment key priority without mutation. */
-async function resolveNativeProjectEnvKey(opts: {
-  readonly projectRoot: string;
-  readonly required: boolean;
-  readonly signal?: AbortSignal;
-}): Promise<string | null> {
-  checkNativeEnvCancellation(opts.signal);
-  const localKey = await readNativeProjectEnvKeyFile({
-    path: resolveProjectEnvKeyPath(opts),
-    directories: [opts.projectRoot],
-    signal: opts.signal,
-  });
-  if (localKey) {
-    return localKey;
-  }
-  // Key sharing is independent of local env inheritance opt-outs and runner modes.
-  const gitLocation = await resolveVerifiedProjectEnvKeyGitLocation(opts);
-  if (gitLocation) {
-    const sharedKey = await readNativeProjectEnvKeyFile({
-      path: resolve(gitLocation.commonDir, PROJECT_ENV_KEY_FILENAME),
-      directories: [gitLocation.checkoutRoot, gitLocation.commonDir],
-      signal: opts.signal,
-    });
-    if (sharedKey) {
-      return sharedKey;
-    }
-  }
-  const primaryRoot = gitLocation?.primaryRoot;
-  if (primaryRoot) {
-    const inheritedKey = await readNativeProjectEnvKeyFile({
-      path: resolveProjectEnvKeyPath({ projectRoot: primaryRoot }),
-      directories: [primaryRoot],
-      signal: opts.signal,
-    });
-    if (inheritedKey) {
-      return inheritedKey;
-    }
-  }
-  checkNativeEnvCancellation(opts.signal);
-  const envFallback = process.env[PROJECT_ENV_SECRET_KEY_ENV]?.trim() ?? "";
-  if (Buffer.byteLength(envFallback) > NATIVE_CONFIG_INPUT_LIMIT) {
-    throw nativeEnvValuesError();
-  }
-  if (envFallback) {
-    return envFallback;
-  }
-  if (opts.required) {
-    throw nativeEnvValuesError();
-  }
-  return null;
-}
-
-/** Keys stay inside their existing owner; reject redirected, oversized or changing descriptor reads. */
-async function readNativeProjectEnvKeyFile(opts: {
-  readonly path: string;
-  readonly directories: readonly string[];
-  readonly signal?: AbortSignal;
-}): Promise<string | null> {
-  return await readBoundedPrivateFile({
-    path: opts.path,
-    directories: opts.directories,
-    canonical: true,
-    maxBytes: NATIVE_CONFIG_INPUT_LIMIT,
-    refusal: nativeEnvValuesError,
-    checkpoint: () => checkNativeEnvCancellation(opts.signal),
-  });
-}
-
-/**
- * Legacy key files are refused unless they are regular, non-symlink, bounded
- * UTF-8 files, so a committed `.hack.secret.key` symlink never selects another
- * file as the key. Directory components keep their legacy spelling (temporary
- * and home directories are often reached through symlinks); only the final
- * component is pinned. Absent and whitespace-only files return null.
- */
-async function readLegacyProjectEnvKeyFile(opts: {
-  readonly path: string;
-}): Promise<string | null> {
-  try {
-    return await readBoundedPrivateFile({
-      path: opts.path,
-      directories: [],
-      canonical: false,
-      maxBytes: NATIVE_CONFIG_INPUT_LIMIT,
-      refusal: projectEnvKeyFileError,
-    });
-  } catch {
-    throw projectEnvKeyFileError();
-  }
-}
-
-/** Fixed, value-free refusal for legacy key selection, creation and encryption. */
-export class ProjectEnvKeyRefusalError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = "ProjectEnvKeyRefusalError";
-  }
-}
-
-function projectEnvKeyFileError(): ProjectEnvKeyRefusalError {
-  return new ProjectEnvKeyRefusalError(
-    `Refusing project env key: ${PROJECT_ENV_KEY_FILENAME} must be a regular, readable, non-symlink, non-empty UTF-8 file of at most 1 MiB. Remove or replace it; key contents are never included in this message.`
-  );
-}
-
-function projectEnvTrackedKeyError(): ProjectEnvKeyRefusalError {
-  return new ProjectEnvKeyRefusalError(
-    `Refusing to encrypt with a git-tracked ${PROJECT_ENV_KEY_FILENAME}: a committed key is not secret. Run 'hack doctor --fix' to untrack it, rotate the key, and re-encrypt existing secrets.`
-  );
-}
-
-/**
- * Encryption refuses a key file that git tracks. Decryption with such a key
- * stays allowed for v4 compatibility; `hack doctor` reports the tracked key.
- * An undeterminable status (git unavailable, path outside a work tree) is not
- * treated as tracked.
- */
-async function assertProjectEnvKeyUntracked(opts: {
-  readonly keyPath: string;
-}): Promise<void> {
-  const tracked = await isGitTrackedProjectEnvPath({
-    projectRoot: dirname(opts.keyPath),
-    path: opts.keyPath,
-  });
-  if (tracked === true) {
-    throw projectEnvTrackedKeyError();
-  }
 }
 
 export type EnsureProjectEnvSecretKeyResult = {
@@ -2947,40 +1602,34 @@ export type EnsureProjectEnvSecretKeyResult = {
  * A checkout-local key is never silently created in a linked worktree: if the
  * shared location cannot be resolved (degraded git) or written, the fallback
  * local write carries a loud divergence warning (also returned in `warnings`).
- *
- * This is the encryption-side key owner. Key files are read without following
- * symlinks, a git-tracked selected or adopted key is refused before any write,
- * and new key files are created exclusively with mode 0600 (an existing entry,
- * including a dangling symlink, is never replaced or followed).
  */
 export async function ensureProjectEnvSecretKey(opts: {
   readonly projectRoot: string;
 }): Promise<EnsureProjectEnvSecretKeyResult> {
-  await assertLegacyProjectInputFamily({ projectRoot: opts.projectRoot });
   const keyPath = resolveProjectEnvKeyPath({ projectRoot: opts.projectRoot });
   const sharedLocation = await resolveProjectEnvSharedKeyLocation({
     projectRoot: opts.projectRoot,
   });
   const sharedKeyPath = await resolveSharedKeyPathFromLocation(sharedLocation);
-  const existing = await readLegacyProjectEnvKeyFile({ path: keyPath });
-  if (existing !== null) {
-    await assertProjectEnvKeyUntracked({ keyPath });
+  const existing = await readTextFile(keyPath);
+  if (existing !== null && existing.trim().length > 0) {
     return {
       keyPath,
-      keyText: existing,
+      keyText: existing.trim(),
       created: false,
       warnings: [],
     };
   }
   const sharedExisting =
-    sharedKeyPath === null
-      ? null
-      : await readLegacyProjectEnvKeyFile({ path: sharedKeyPath });
-  if (sharedKeyPath !== null && sharedExisting !== null) {
-    await assertProjectEnvKeyUntracked({ keyPath: sharedKeyPath });
+    sharedKeyPath === null ? null : await readTextFile(sharedKeyPath);
+  if (
+    sharedKeyPath !== null &&
+    sharedExisting !== null &&
+    sharedExisting.trim().length > 0
+  ) {
     return {
       keyPath: sharedKeyPath,
-      keyText: sharedExisting,
+      keyText: sharedExisting.trim(),
       created: false,
       warnings: [],
     };
@@ -2990,8 +1639,6 @@ export async function ensureProjectEnvSecretKey(opts: {
     projectRoot: opts.projectRoot,
   });
   if (inheritedKey) {
-    // Refuse before copying a committed key into the shared location.
-    await assertProjectEnvKeyUntracked({ keyPath: inheritedKey.keyPath });
     const written = await writeProjectEnvKeyWithFallback({
       projectRoot: opts.projectRoot,
       preferredKeyPath: sharedKeyPath,
@@ -3001,7 +1648,7 @@ export async function ensureProjectEnvSecretKey(opts: {
     });
     return {
       keyPath: written.keyPath,
-      keyText: written.keyText,
+      keyText: inheritedKey.keyText,
       created: false,
       warnings: written.warnings,
     };
@@ -3017,9 +1664,8 @@ export async function ensureProjectEnvSecretKey(opts: {
   });
   return {
     keyPath: written.keyPath,
-    keyText: written.keyText,
-    // A concurrent writer's key is adopted rather than replaced.
-    created: written.keyText === keyText,
+    keyText,
+    created: true,
     warnings: written.warnings,
   };
 }
@@ -3047,28 +1693,17 @@ async function writeProjectEnvKeyWithFallback(opts: {
   readonly localKeyPath: string;
   readonly keyText: string;
   readonly sharedLocation: ProjectEnvSharedKeyLocation | null;
-}): Promise<{
-  readonly keyPath: string;
-  readonly keyText: string;
-  readonly warnings: string[];
-}> {
+}): Promise<{ readonly keyPath: string; readonly warnings: string[] }> {
   const warnings: string[] = [];
 
   if (opts.preferredKeyPath !== null) {
     try {
-      const keyText = await writeProjectEnvKeyFile({
-        projectRoot: opts.projectRoot,
+      await writeProjectEnvKeyFile({
         path: opts.preferredKeyPath,
         keyText: opts.keyText,
       });
-      return { keyPath: opts.preferredKeyPath, keyText, warnings };
+      return { keyPath: opts.preferredKeyPath, warnings };
     } catch (error: unknown) {
-      if (
-        error instanceof ProjectInputSelectionError ||
-        error instanceof ProjectEnvKeyRefusalError
-      ) {
-        throw error;
-      }
       const message = error instanceof Error ? error.message : String(error);
       warnings.push(
         `Failed to write shared env key at ${opts.preferredKeyPath} (${message}); falling back to a checkout-local key at ${opts.localKeyPath}. Sibling git worktrees will NOT share this key and secrets encrypted here may not decrypt elsewhere.`
@@ -3083,80 +1718,26 @@ async function writeProjectEnvKeyWithFallback(opts: {
     );
   }
 
-  const keyText = await writeProjectEnvKeyFile({
-    projectRoot: opts.projectRoot,
+  await writeProjectEnvKeyFile({
     path: opts.localKeyPath,
     keyText: opts.keyText,
   });
-  await assertLegacyProjectInputFamily({ projectRoot: opts.projectRoot });
   await ensureGitignoreEntry({
     gitignorePath: resolve(opts.projectRoot, ".gitignore"),
     entry: PROJECT_ENV_KEY_FILENAME,
     comment: "# project env key",
   });
   emitProjectEnvKeyWarnings({ warnings });
-  return { keyPath: opts.localKeyPath, keyText, warnings };
+  return { keyPath: opts.localKeyPath, warnings };
 }
 
-/**
- * Creates the key file exclusively (O_CREAT|O_EXCL|O_NOFOLLOW, mode 0600,
- * fsync) and returns the key text now stored at `path`. When the path is
- * already occupied, a valid untracked regular key file (e.g. a concurrent
- * writer's) is adopted; anything else, including a symlink, is refused.
- */
 async function writeProjectEnvKeyFile(opts: {
-  readonly projectRoot: string;
   readonly path: string;
   readonly keyText: string;
-}): Promise<string> {
-  await assertLegacyProjectInputFamily({ projectRoot: opts.projectRoot });
+}): Promise<void> {
   await ensureDir(dirname(opts.path));
-  await assertLegacyProjectInputFamily({ projectRoot: opts.projectRoot });
-  try {
-    await createPrivateFileExclusive({
-      path: opts.path,
-      text: `${opts.keyText}\n`,
-    });
-    return opts.keyText;
-  } catch (error: unknown) {
-    if (!(isRecord(error) && error.code === "EEXIST")) {
-      throw error;
-    }
-  }
-  return await adoptExistingProjectEnvKeyFile({ path: opts.path });
-}
-
-const PROJECT_ENV_KEY_ADOPTION_ATTEMPTS = 20;
-const PROJECT_ENV_KEY_ADOPTION_DELAY_MS = 25;
-
-/**
- * A concurrent creator may expose its key file before writing the key, so a
- * regular file is re-read for a bounded period (about half a second). A
- * symlink or other entry, or a file still empty or invalid afterwards, is
- * refused; it is never replaced.
- */
-async function adoptExistingProjectEnvKeyFile(opts: {
-  readonly path: string;
-}): Promise<string> {
-  for (
-    let attempt = 0;
-    attempt < PROJECT_ENV_KEY_ADOPTION_ATTEMPTS;
-    attempt += 1
-  ) {
-    const entry = await lstat(opts.path).catch(() => null);
-    if (!entry?.isFile()) {
-      break;
-    }
-    const existing = await readLegacyProjectEnvKeyFile({
-      path: opts.path,
-    }).catch(() => null);
-    if (existing !== null) {
-      await assertProjectEnvKeyUntracked({ keyPath: opts.path });
-      return existing;
-    }
-    await Bun.sleep(PROJECT_ENV_KEY_ADOPTION_DELAY_MS);
-  }
-  throw projectEnvKeyFileError();
+  await writeTextFile(opts.path, `${opts.keyText}\n`);
+  await chmod(opts.path, 0o600);
 }
 
 function emitProjectEnvKeyWarnings(opts: {
@@ -3178,8 +1759,8 @@ async function resolveInheritedProjectEnvKey(opts: {
   }
 
   const keyPath = resolveProjectEnvKeyPath({ projectRoot: primaryRoot });
-  const keyText = await readLegacyProjectEnvKeyFile({ path: keyPath });
-  if (keyText === null) {
+  const keyText = (await readTextFile(keyPath))?.trim() ?? "";
+  if (keyText.length === 0) {
     return null;
   }
 
@@ -3195,9 +1776,7 @@ function encryptProjectEnvValue(opts: {
 }): string {
   const iv = randomBytes(PROJECT_ENV_IV_BYTES);
   const key = deriveProjectEnvKey({ keyText: opts.keyText });
-  const cipher = createCipheriv(PROJECT_ENV_ALGORITHM, key, iv, {
-    authTagLength: PROJECT_ENV_TAG_BYTES,
-  });
+  const cipher = createCipheriv(PROJECT_ENV_ALGORITHM, key, iv);
   const ciphertext = Buffer.concat([
     cipher.update(opts.plaintext, "utf8"),
     cipher.final(),
@@ -3211,65 +1790,31 @@ function encryptProjectEnvValue(opts: {
   ].join(":");
 }
 
-function invalidSecureEnvValueError(): Error {
-  return new Error("Invalid secure env value.");
-}
-
-/**
- * Parses and opens a v1 value `v1:<iv>:<tag>:<ciphertext>`. Each segment must
- * be canonical padded base64; the IV must be 12 bytes, the tag 16 bytes and the
- * ciphertext at most the env input bound. An empty ciphertext segment is the
- * authenticated empty plaintext. Malformed, oversized, truncated, tampered and
- * wrong-key inputs all throw the same fixed, value-free error.
- */
 function decryptProjectEnvValue(opts: {
   readonly ciphertext: string;
   readonly keyText: string;
 }): string {
-  const parts = opts.ciphertext.split(":");
-  const [prefix, ivText, tagText, ciphertextText] = parts;
+  const [prefix, ivText, tagText, ciphertextText] = opts.ciphertext.split(":");
   if (
-    parts.length !== 4 ||
     prefix !== PROJECT_ENV_SECRET_PREFIX ||
-    ivText === undefined ||
-    tagText === undefined ||
-    ciphertextText === undefined
+    !ivText ||
+    !tagText ||
+    !ciphertextText
   ) {
-    throw invalidSecureEnvValueError();
+    throw new Error("Invalid secure env value.");
   }
-  const iv = decodeCanonicalBase64({
-    text: ivText,
-    maxBytes: PROJECT_ENV_IV_BYTES,
-  });
-  const tag = decodeCanonicalBase64({
-    text: tagText,
-    maxBytes: PROJECT_ENV_TAG_BYTES,
-  });
-  const ciphertext = decodeCanonicalBase64({
-    text: ciphertextText,
-    maxBytes: PROJECT_ENV_CIPHERTEXT_LIMIT,
-  });
-  if (
-    iv?.length !== PROJECT_ENV_IV_BYTES ||
-    tag?.length !== PROJECT_ENV_TAG_BYTES ||
-    ciphertext === null
-  ) {
-    throw invalidSecureEnvValueError();
-  }
-  try {
-    const key = deriveProjectEnvKey({ keyText: opts.keyText });
-    const decipher = createDecipheriv(PROJECT_ENV_ALGORITHM, key, iv, {
-      authTagLength: PROJECT_ENV_TAG_BYTES,
-    });
-    decipher.setAuthTag(tag);
-    const plaintext = Buffer.concat([
-      decipher.update(ciphertext),
-      decipher.final(),
-    ]);
-    return plaintext.toString("utf8");
-  } catch {
-    throw invalidSecureEnvValueError();
-  }
+  const key = deriveProjectEnvKey({ keyText: opts.keyText });
+  const decipher = createDecipheriv(
+    PROJECT_ENV_ALGORITHM,
+    key,
+    Buffer.from(ivText, "base64")
+  );
+  decipher.setAuthTag(Buffer.from(tagText, "base64"));
+  const plaintext = Buffer.concat([
+    decipher.update(Buffer.from(ciphertextText, "base64")),
+    decipher.final(),
+  ]);
+  return plaintext.toString("utf8");
 }
 
 function deriveProjectEnvKey(opts: { readonly keyText: string }): Buffer {
@@ -3345,7 +1890,6 @@ export async function repairLegacyComposeEnvFileReferences(opts: {
   readonly changed: boolean;
   readonly removed: readonly LegacyComposeEnvFileReference[];
 }> {
-  await assertLegacyProjectDirectory({ projectDir: opts.projectDir });
   const text = await readTextFile(opts.composeFile);
   if (!text) {
     return { changed: false, removed: [] };
@@ -3393,7 +1937,6 @@ export async function repairLegacyComposeEnvFileReferences(opts: {
 
   const nextYaml = YAML.stringify(parsed, null, 2);
   const nextText = nextYaml.endsWith("\n") ? nextYaml : `${nextYaml}\n`;
-  await assertLegacyProjectDirectory({ projectDir: opts.projectDir });
   const result = await writeTextFileIfChanged(opts.composeFile, nextText);
   return {
     changed: result.changed,
@@ -3565,8 +2108,6 @@ export async function migrateLegacyProjectEnv(opts: {
   readonly blockedCleanupCandidates: readonly string[];
   readonly composeEnvFileReferences: readonly LegacyComposeEnvFileReference[];
 }> {
-  await assertLegacyProjectDirectory({ projectDir: opts.projectDir });
-  await assertLegacyProjectInputFamily({ projectRoot: opts.projectRoot });
   const contract = await readHackEnvContract({ projectDir: opts.projectDir });
   if (!contract.exists) {
     return {
@@ -3692,16 +2233,13 @@ export async function migrateLegacyProjectEnv(opts: {
 }
 
 export async function removeLegacyProjectEnvArtifacts(opts: {
-  readonly projectRoot: string;
   readonly paths: readonly string[];
 }): Promise<readonly string[]> {
-  await assertLegacyProjectInputFamily({ projectRoot: opts.projectRoot });
   const removed: string[] = [];
   for (const path of opts.paths) {
     if (!(await pathExists(path))) {
       continue;
     }
-    await assertLegacyProjectInputFamily({ projectRoot: opts.projectRoot });
     await rm(path, { recursive: false, force: true });
     removed.push(path);
   }
@@ -3854,8 +2392,6 @@ async function migrateLegacyProjectConfig(opts: {
   readonly changed: boolean;
   readonly cleanupCandidates: readonly string[];
 }> {
-  await assertLegacyProjectDirectory({ projectDir: opts.projectDir });
-  await assertLegacyProjectInputFamily({ projectRoot: opts.projectRoot });
   const configPath = resolve(opts.projectDir, PROJECT_CONFIG_FILENAME);
   const text = await readTextFile(configPath);
   if (text === null) {
@@ -3885,7 +2421,6 @@ async function migrateLegacyProjectConfig(opts: {
   }
 
   const nextText = `${JSON.stringify(topLevel.config, null, 2)}\n`;
-  await assertLegacyProjectDirectory({ projectDir: opts.projectDir });
   const result = await writeTextFileIfChanged(configPath, nextText);
   return {
     changed: result.changed,
@@ -4136,11 +2671,6 @@ export function parseProjectEnvTarget(input: {
   if (trimmed.length === 0) {
     throw new Error("Env key is required.");
   }
-  // Refuse `KEY=value` before any dotted-scope split, so no fragment of the
-  // value can reach a scope or key error. Every refusal below is fixed text.
-  if (trimmed.includes("=")) {
-    throw new Error(ENV_KEY_ASSIGNMENT_MESSAGE);
-  }
 
   const dotIndex = trimmed.lastIndexOf(".");
   if (dotIndex > 0) {
@@ -4151,13 +2681,13 @@ export function parseProjectEnvTarget(input: {
     const key = trimmed.slice(dotIndex + 1).trim();
     assertValidProjectEnvScopeName({ scopeName: scope });
     if (!PROJECT_ENV_KEY_PATTERN.test(key)) {
-      throw new Error(ENV_KEY_INVALID_MESSAGE);
+      throw new Error(`Invalid env key: ${key}`);
     }
     return { scope, key };
   }
 
   if (!PROJECT_ENV_KEY_PATTERN.test(trimmed)) {
-    throw new Error(ENV_KEY_INVALID_MESSAGE);
+    throw new Error(`Invalid env key: ${trimmed}`);
   }
   return {
     scope: assertValidProjectEnvScopeName({

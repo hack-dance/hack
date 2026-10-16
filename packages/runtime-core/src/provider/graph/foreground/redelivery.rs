@@ -1,10 +1,12 @@
 //! Authenticated explicit replacement of a control-only graph with fresh values.
 use super::*;
 use crate::provider::managed_environment;
+use sha2::{Digest, Sha256};
 
 pub(in crate::provider::graph) fn generation(receipt: &Receipt) -> Result<String, CandidateError> {
     // Receipts contain identities and phases, never environment values.
-    super::super::service_exec_generation(receipt)
+    let bytes = serde_json::to_vec(receipt).map_err(|_| refused())?;
+    Ok(format!("{:x}", Sha256::digest(bytes)))
 }
 pub(in crate::provider::graph) fn check_generation(
     receipt: &Receipt,
@@ -21,11 +23,9 @@ pub(in crate::provider::graph) fn check_generation(
 pub(super) fn options<'a>(original: &RunOptions<'a>) -> RunOptions<'a> {
     RunOptions {
         live_source: original.live_source,
-        shared_source: original.shared_source,
         release_initializer_cache: original.release_initializer_cache.clone(),
         routing_enrolled: original.routing_enrolled,
         project: crate::project::PlanOptions {
-            branch: original.project.branch,
             project: original.project.project,
             compose_file: original.project.compose_file,
             profiles: original.project.profiles,
@@ -59,7 +59,6 @@ pub(super) fn restore(
         Some(crate::project::plan(
             candidate,
             crate::project::PlanOptions {
-                branch: original.project.branch,
                 project: original.project.project,
                 compose_file: original.project.compose_file,
                 profiles: original.project.profiles,
@@ -80,7 +79,7 @@ pub(super) fn restore(
     )?;
     {
         let engine = Engine::connect(candidate)?;
-        let (mut receipt, root) = super::super::load(candidate, &engine, original.run_id)?;
+        let (receipt, _) = super::super::load(candidate, &engine, original.run_id)?;
         check_generation(&receipt, &request.generation)?;
         if receipt.phase != "ready-observed"
             || receipt.plan_id != original.expected_plan
@@ -91,14 +90,13 @@ pub(super) fn restore(
         {
             return Err(refused());
         }
-        startup::Driver::verify(runtime, &engine, &mut receipt, &root)?;
+        startup::Driver::verify(runtime, &engine, &receipt)?;
         super::super::source::prepare_replay(
             &engine,
             &inputs,
             &receipt,
             original.source_revision,
             original.live_source,
-            original.shared_source,
             original.non_secret_values,
         )?;
     }

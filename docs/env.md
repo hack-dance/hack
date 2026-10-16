@@ -136,48 +136,7 @@ Projects can set a default overlay in `.hack/hack.config.json`:
 }
 ```
 
-Use `--env=base` to bypass that default and read only `.hack/hack.env.default.yaml`
-(plus local overrides). `default` and `none` are aliases for `base`, in any case, on every
-command that accepts `--env`; an overlay file named after one of those spellings is never
-selected by name. Any other value must already be a canonical overlay name: lowercase
-letters and digits joined by single hyphens (`^[a-z0-9]+(-[a-z0-9]+)*$`, for example
-`qa` or `qa-2`); surrounding whitespace is ignored. Hack never rewrites a requested name,
-so `QA`, `q_a` or `X=1` is refused with a fixed `Invalid --env value.` message that does
-not repeat the argument, before any project file is read or any child process starts.
-See the [command and delivery matrix](#command-and-delivery-matrix) for what each command
-does with the selection.
-
-## Metadata-only planning API
-
-Repository integrations can call `resolveProjectEnvMetadata` from
-`src/lib/project-env-config.ts` to inspect modern env bindings without obtaining a
-key or decrypting values. Pass `projectRoot`, `projectDir`, and `serviceNames`;
-optional `envName` selects an overlay, omission uses the project default, and
-`null` bypasses that default.
-
-The result contains selection and file paths, declared and unknown scope names,
-and per-target key metadata (`scope` and `secret`) for Compose and host execution.
-It contains no plaintext values, ciphertext, merged config, or raw layers. It
-reads the same ordered files and uses the same scope projection as
-`resolveProjectEnvConfig`: later layers override earlier ones, null removes an
-earlier binding, and a later value can reintroduce it. Linked worktrees inherit
-primary local layers before their own local overrides, subject to the existing
-inheritance settings. If a service is named `host`, that scope remains a service
-scope rather than an override applied to every host target.
-
-A `null` result means no modern env configuration exists; it does not inspect or
-resolve legacy `.env` or secret-store values. Callers retain responsibility for
-their existing legacy fallback. Selected managed-env layer reads distinguish a
-missing path from a failed read or a dangling symlink. Only regular files
-(including readable symlinks to regular files) are read; invalid or unreadable
-layers throw a value-free error without YAML excerpts or a nested cause. Project configuration
-selection keeps its existing semantics. Metadata inspection never writes key
-files or materializes `.env`.
-
-Paths, variable names and scope names can still disclose private project details;
-keep this metadata private. It is not portable plan serialization or an atomic
-snapshot/admission check. It does not establish that encrypted values can be
-decrypted or that runtime injection will succeed.
+Use `--env=base` to bypass that default and read only `.hack/hack.env.default.yaml`.
 
 ## Runtime behavior
 
@@ -198,16 +157,6 @@ That means `.hack/.env` is no longer the primary runtime source of truth.
 
 `hack env materialize` is manual by design. Use it only when you need a compatibility file for an external tool that expects `.env` on disk.
 
-Hack writes `.hack/.env` and `.hack/.env.<overlay>` (from `materialize`, legacy
-`hack env set`, and the daemon env route) with mode `0600` by atomic replace: a
-private temporary file in `.hack/` is written, fsynced and renamed over the target,
-so readers never see a partial file. An existing file with group or other access is
-tightened to `0600` even when its contents are unchanged. These write and update paths
-refuse, with a fixed message that names no file or value, an env file that is a symlink
-(including a dangling one) or not a regular file, or one whose `.hack` directory is a
-symlink. Replace the link with a regular file or directory to continue. Code paths
-that only read an env file do not apply this check and still follow a symlink.
-
 For host execution, `hack host exec`, `hack host shell`, and lifecycle hooks/processes use a host-local view.
 That means Hack prefers host-usable values when it can:
 
@@ -224,91 +173,6 @@ Use `--target compose` if you explicitly want the container-oriented compose vie
 
 For host execution, `--scope` means "which env scope should Hack inject", not "where should this run."
 For example, `hack host exec --scope api -- bun db:migrate` still runs on the host.
-
-## Command and delivery matrix
-
-Every command that accepts `--env` resolves it with the same rule: omitted selects
-the configured default overlay (`env.defaultOverlay`); `base`, `default` or `none`
-selects base layers only; any other value must be a canonical overlay name and selects
-that overlay. The table lists every such command; `tests/env-command-matrix.test.ts`
-fails when a command gains or loses `--env` without a matching row, or when a row's selectors
-drift from the CLI. Commands not listed here refuse `--env` as an option that is not
-valid for them (arguments after a standalone `--` belong to the child command).
-
-The **Selectors** column lists the env-related flags each command accepts.
-`--service` selects a Compose service scope, `--scope` selects the env scope injected
-into a host command, and `--target` on env and host commands chooses the `host` or
-`compose` env view. On `up`, `down` and `restart`, `--target` is execution routing
-(`auto|local|remote`), not an env view.
-
-| Command | Selectors | Resolution timing | Refresh path | Native and compose limits |
-| --- | --- | --- | --- | --- |
-| `hack up` | `--env`, `--target` | Once, when services are created; values go into Compose containers and lifecycle hooks/processes, and the selection is recorded for the running stack. | `hack restart` or `hack env apply --service <service>`; editing env files does not change running containers. | Authored native projects receive the same selection before dispatch. |
-| `hack down` | `--env`, `--target` | At teardown, for lifecycle down hooks only; omitted reuses a named overlay recorded for the running stack, else the configured default. | None; nothing is delivered to containers. | The native runtime backend refuses `--env`. |
-| `hack restart` | `--env`, `--target` | When services are recreated; omitted reuses a named overlay recorded for the running stack, else the configured default, and an explicit `--env` (including `base`) wins. | This is the refresh path for the whole stack or the named services. | Authored native projects receive the same selection before dispatch. |
-| `hack run` | `--env` | Per invocation, for the new one-off container. | Each run resolves again. | The native runtime backend refuses `--env`; restart with the selection first. |
-| `hack exec` | `--env` | Checked at invocation against the env recorded for the running stack; the command runs with the env the container was created with. Compose exec and native-runtime exec (Compose-file and authored native projects) warn on stderr when the service's resolved env changed since it started. | `hack restart <service>` (or `hack restart --env <name>`); native projects restart as a whole with `hack restart` | Compose refuses when the requested env differs from the env recorded for the running stack; the native runtime backend refuses `--env`. |
-| `hack env list` | `--env`, `--service` | Per invocation, read-only; secret values are masked unless `--show-secrets`. | Not needed. | Reads files; no runtime required. |
-| `hack env get` | `--env`, `--service` | Per invocation; prints exactly one plaintext value to stdout. | Not needed. | Reads files; refuses native project inputs. |
-| `hack env explain` | `--env`, `--service`, `--target` | Per invocation; reports source, precedence and delivery without the value. | Not needed. | Reads files; no runtime required. |
-| `hack env apply` | `--env`, `--service` | Runs `hack restart <service>` with the same `--env`, recreating one service. | This is the refresh path for one service. | `--service` is required. |
-| `hack env add` | `--env`, `--service` | Selects the file written (`hack.env.<name>.yaml`, or the base file for `base`/`default`/`none`; `--local` writes the local variant). | Running workloads keep old values until `hack env apply` or `hack restart`. | Mutates only env files. |
-| `hack env set` | `--env`, `--service` | Alias for `hack env add`. | Same as `hack env add`. | Mutates only env files. |
-| `hack env unset` | `--env`, `--service` | Selects the file the key is removed from, as for `hack env add`. | Same as `hack env add`. | Mutates only env files. |
-| `hack env materialize` | `--env`, `--service` | Writes `.hack/.env` once, at invocation. | Rerun `hack env materialize`. | Compatibility output for external tools; runtime injection does not depend on it. |
-| `hack env exec` | `--env`, `--service`, `--target` | Per invocation, into one host command (host view by default). | Each invocation resolves again. | Runs on the host, not in a container. |
-| `hack env shell` | `--env`, `--service`, `--target` | When the shell starts. | Start a new shell. | Runs on the host, not in a container. |
-| `hack host exec` | `--env`, `--scope`, `--target` | Per invocation, into one host command (host view by default). | Each invocation resolves again. | Runs on the host, not in a container. |
-| `hack host shell` | `--env`, `--scope`, `--target` | When the shell starts. | Start a new shell. | Runs on the host, not in a container. |
-| `hack config validate` | `--env` | Per invocation; resolves the native selection without reading managed env documents. | Not needed. | Authored native projects only; cannot be combined with `--file`. |
-| `hack config plan` | `--env` | Per invocation; metadata only (names, scopes, secret flags), never decrypted. | Not needed. | Authored native projects only. |
-| `hack session start` | `--env`, `--service` | When the workspace is created; the name gains `.env-<name>` (`.env-base` for base spellings), and `--up` runs `hack up -d` with the same selection. | Start a new workspace or pass `--env` to `hack session exec`. | Injects into the workspace shell, not into containers. |
-| `hack session exec` | `--env`, `--service` | Per command; omitted reuses the selection encoded in the workspace name. | Each command resolves again. | Injects into the workspace command, not into containers. |
-
-### Stale env warning on `hack exec`
-
-`hack up` and `hack restart` record, for each Compose service they create, a keyed
-digest of the env set delivered to it. The digest lives in Hack-managed runtime state
-(`.hack/.internal/runtime-state.json`) and holds no key name or value. `hack exec`
-resolves the same env set again and, when the digest differs, prints one fixed warning
-to stderr that names the service and suggests `hack restart <service>`. The command
-still runs with the env the container was created with, and stdout stays the target
-command's output. The warning never prints a key or value.
-
-The check is advisory. Identical env, state written before this check existed, and a
-service whose last targeted restart failed produce no warning. `hack up <service>`,
-`hack restart <service>` and `hack env apply --service <service>` refresh only the
-named services' digests.
-
-Projects on the native runtime backend run the same check. The foreground `hack up` or `hack restart` records
-value-free digests of the env selection it delivered once the run is ready, in
-`.hack/.internal/native-env-fingerprints/` (one file per instance, mode 0600). The
-record is bound to that run and removed when the foreground ends. `hack exec` resolves
-the same selection again: for a Compose-file (image) project, the env for the run's
-recorded env name; for an authored project, the managed values for the recorded
-`--env` and `--profile` selection. When they differ, it prints one fixed warning to
-stderr that names the service and suggests `hack restart`, since native restart is
-whole-project. An image-project exec receives freshly resolved values itself, so its
-warning says the running service still uses the env it started with. A restart drops
-the record once the previous run stops, so a failed restart produces no warning. A
-record from another run, a missing record, or any resolution failure produces no
-warning. An authored-project check is bounded: after five seconds without a result
-it is skipped and the command's output and exit code follow as usual. Ctrl-C during
-the check ends the command with exit code 130 without waiting for it.
-
-Two exec paths do not run this check yet: an authored `.hack/hack.project.json`
-project on the Compose backend (see
-[native configuration with Compose](reference/native-compose-commands.md)), and an
-existing Compose project switched with
-[`hack config adopt`](reference/native-compose-adoption.md), whose exec runs in the
-retained containers.
-
-MCP tools accept no env selector. They run the CLI without `--env`, so each row's
-omitted-`--env` behavior applies.
-
-An overlay name is a label for a set of env files. It implies no production authority
-and no network or instance isolation: a `prod` overlay still runs on the local stack,
-and two overlays share the same instance unless you choose a separate branch instance.
 
 ## Common commands
 
@@ -333,79 +197,16 @@ hack env apply --service api --env qa
 
 `--show-secrets` prints secret values in plaintext instead of the masked default; use it deliberately.
 
-Read one value explicitly:
-
-```bash
-hack env get SERVICE_TOKEN --service api
-hack env get SERVICE_TOKEN --service api --env qa
-hack env get API_BASE_URL --env default
-```
-
-`hack env get KEY_NAME` writes exactly the resolved UTF-8 value to stdout, with
-**no added newline**, quotes, label, or JSON envelope. Empty values succeed with
-zero output bytes. Multiline content and trailing newlines are preserved; shell
-command substitution may itself remove trailing newlines. Missing or deleted
-values exit nonzero with an error on stderr and empty stdout. Invalid arguments,
-malformed env files, and unavailable or denied keys/backends also fail without
-printing values, ciphertext, or raw backend errors. `--json` and `--show-secrets`
-are not accepted by `get`; help is available separately with `--help`.
-
-Omitting `--env` uses the configured default overlay. `--env default` (also
-`--env base` or `--env none`) selects base layers, including local overrides.
-An absent optional overlay keeps the existing base/local fallback behavior.
-`--service api` selects global plus service values using the same layer ordering
-as runtime injection; the default scope is `global`. Linked worktrees use the
-same primary-local inheritance and checkout-local precedence as other env flows.
-`get` returns that stored scope's value without host-address rewriting.
-
-This explicit command needs no running containers and adds no confirmation.
-Existing native keychain authorization still applies. Modern YAML secrets decrypt
-only the requested winning entry, so an unrelated missing key or corrupt encrypted
-value does not force disclosure or block a plaintext read. Legacy projects retain
-their configured backend and declared-key lookup; only the requested overlay/base
-key is fetched. The existing encrypted-file backend internally decrypts its sealed
-bundle. Empty legacy values are returned as present by `get`; legacy runtime
-injection keeps its existing empty-value fallback behavior.
-
-`get` does not migrate or materialize env files, write plaintext artifacts, or add
-secret values to diagnostics, MCP tools, or audit output. Treat its stdout as a
-secret when the requested value is sensitive; avoid redirecting it into logs or
-committed files. Use `hack env explain KEY_NAME` for inspection without disclosure.
-
 Add or update values:
 
 ```bash
 hack env add API_BASE_URL https://api.example.com
+hack env add SERVICE_TOKEN abc123 --service api --secret
 hack env add --env qa API_BASE_URL https://qa.example.com
 hack env add API_BASE_URL https://api.example.com --local
 ```
 
 `hack env set` still works as a compatibility alias for `hack env add`, but `add` is the primary UX now.
-
-### Entering secret values
-
-Never pass a secret value as a command argument: arguments land in shell history and are
-visible to other local users and tools through process listings. Use one of these instead:
-
-```bash
-# Pipe the value from a secret manager or file; it never appears in argv.
-<secret-source> | hack env add SERVICE_TOKEN --service api --secret --value-stdin
-hack env add SERVICE_TOKEN --service api --secret --value-stdin < token.txt
-
-# In an interactive terminal, omit the value to use the hidden prompt.
-hack env add SERVICE_TOKEN --service api --secret
-```
-
-`--value-stdin` works on `hack env add` and `hack env set`, with or without `--secret`.
-It reads all of stdin, up to 64 KiB, and strips exactly one trailing newline (`\n` or
-`\r\n`), so `printf '%s\n' "$value"` and `printf '%s' "$value"` store the same value; any
-further trailing newlines are kept. It refuses, with a fixed message that never repeats the
-input and without writing anything:
-
-- an interactive terminal on stdin (pipe the value, or drop `--value-stdin` for the hidden prompt)
-- a value argument alongside the flag, including `KEY=value`
-- a missing key argument
-- empty input, input over 64 KiB, invalid UTF-8, or a NUL byte
 
 `--local` writes to the worktree-local override file (`.hack/hack.env.local.yaml` or
 `.hack/hack.env.<overlay>.local.yaml`) instead of the shared repo env file — use it for
@@ -414,8 +215,7 @@ per-checkout values you don't want to commit.
 If you omit `key`, `value`, or `--service`, `hack env add` prompts for them interactively.
 Pass `--no-interactive` (or set `HACK_NO_INTERACTIVE=1`) for scripted/agent usage: the
 command applies documented defaults or fails fast with `E_INTERACTIVE_REQUIRED` instead of
-blocking on a prompt. In scripts, supply secret values with `--value-stdin` rather than as
-arguments. `hack env unset` and `hack env set` accept `--local` and
+blocking on a prompt. `hack env unset` and `hack env set` accept `--local` and
 `--no-interactive` too.
 
 Remove a value:
@@ -443,14 +243,11 @@ hack host exec --env qa --scope api --target compose -- bun test
 ```
 
 Cancelling `hack host exec` or `hack env exec` with SIGINT or SIGTERM forwards
-the signal to the command. Commands run in an owned process group,
+the signal to the command. Noninteractive commands run in an owned process group,
 so cancellation also stops their descendants, escalating to SIGKILL after two
 seconds if necessary. Hack returns 130 for SIGINT and 143 for SIGTERM. Interactive
-commands use a supervisor in their own foreground group on the same terminal,
-preserving stdin, separate output streams, and Ctrl-Z/foreground resume. Piped
-stdin also retains the controlling terminal, so commands can open `/dev/tty`
-for native authentication prompts. The
-supervisor holds group ownership until cancellation cleanup finishes. SIGKILL cannot be forwarded; supervisors must terminate the
+commands retain their terminal process group so stdin and terminal job control
+continue to work. SIGKILL cannot be forwarded; supervisors must terminate the
 whole owned process tree when force-killing a wrapper. Commands have no implicit
 time limit, and normal completion preserves the command's exit status.
 
@@ -505,8 +302,6 @@ When you pass `--env` or `--service`, Hack creates a stable scoped workspace nam
 ## Secret key handling
 
 Secret values in the YAML files are encrypted with the project key.
-The [env and secrets threat model](security/env-secrets-threat-model.md) lists what
-this protects against and the gaps that are still open.
 
 Default behavior:
 
@@ -560,41 +355,6 @@ Write-path guarantees in a linked worktree (first secret added from any checkout
 - if the shared location cannot be resolved (git unavailable) or written, Hack falls back to a checkout-local key and prints a loud divergence warning
 - `hack doctor` flags divergent `.hack.secret.key` contents across checkouts with the exact paths
 
-Key strength and exposure (`hack doctor` "env key" check):
-
-`hack doctor` and `hack doctor --json` audit the checkout-local key, the shared key
-under the git common dir and, in a linked worktree, the primary checkout's key. When
-no key file exists, the check classifies `HACK_ENV_SECRET_KEY` instead. The check is
-read-only. It never prints key bytes or absolute paths, and `--fix` does not act on it.
-Each finding names a project-relative subject and the exact command to run from the
-project root. `--json` adds an `envKey` object to the check with `status` and
-`findings` (`code`, `status`, `subject`, `remedy`). The native runtime backend's
-`hack doctor` runs the same check inside a project.
-
-Nested public artifact directories are found with a bounded walk from the project
-root: at most six levels deep, 4096 directories and 100,000 entries. It skips
-`node_modules` and `.git`, does not follow symlinked directories, and reports a path
-it cannot spell portably as `<unprintable-path>/.hack.secret.key`.
-
-| Code | Status | Meaning |
-| --- | --- | --- |
-| `env-key-ok` | ok | key material is a regular, private, 256-bit-class file |
-| `env-key-absent` | ok | no key file and no `HACK_ENV_SECRET_KEY` |
-| `env-key-weak-permissions` | warn | group or others have access; suggests `chmod 600` |
-| `env-key-wrong-owner` | warn | the file is not owned by the current user |
-| `env-key-wrong-length` | warn | shorter than the 43-character base64url form of a 256-bit key, or empty |
-| `env-key-low-entropy` | warn | long enough but repetitive (estimated under 128 bits) |
-| `env-key-symlink` | error | the key path is a symlink; Hack refuses symlinked keys |
-| `env-key-not-regular` | error | the key path is a directory or another non-file entry |
-| `env-key-unreadable` | error | unreadable, oversized or not UTF-8 |
-| `env-key-tracked` | error | a file named `.hack.secret.key` is tracked by git at any depth |
-| `env-key-public-path` | error | a key copy sits directly in `public/`, `static/`, `dist/`, `build/`, `out/`, `www/`, `_site/`, `.next/` or `.output/`, at the project root or in a nested package such as `apps/web/public/` |
-
-Hack derives the AES-256-GCM key by hashing the key text with SHA-256, so key
-strength is the entropy of that text. Generated keys are 32 random bytes in base64url.
-For a weak, tracked or published key, the remedy is rotation: move the key aside, then
-re-add each secret with `hack env add --secret KEY VALUE` so Hack generates a new key.
-
 CI and managed container fallback:
 
 - if `.hack.secret.key` is missing, Hack falls back to `HACK_ENV_SECRET_KEY`
@@ -642,14 +402,7 @@ The modern YAML env model is the canonical repo format today.
 
 Some older surfaces are still compatibility-oriented:
 
-- `hack env backend ...` remains relevant for legacy repos and older secret-store configurations.
-  The `encrypted_file` store (also used by the `cloud` shim) is replaced atomically
-  with mode `0600`, and set/delete hold an in-process queue plus a cooperative
-  `<store>.lock` so concurrent writers, including separate processes, do not lose
-  updates. A store path that is a symlink is refused for writes. The v1 store
-  envelope and legacy `v1:` values authenticate no associated data: they are not
-  bound to a path, project or variable name beyond the scoped key inside the
-  encrypted store plaintext
+- `hack env backend ...` remains relevant for legacy repos and older secret-store configurations
 - the daemon's env HTTP route (used by the macOS app) reads and writes the legacy dotenv-shaped
   contract (`source: 'plain_env'|'keychain'`, `resolvedFrom: 'dotenv'/'process'/'keychain'/'portable_backend'`),
   not the modern YAML `hack env list --json` shape; there is no web dashboard surface anymore
@@ -662,7 +415,6 @@ If you are writing new docs or new project setup flows, document the YAML overla
 - Commit `.hack/hack.env.<overlay>.yaml` when the overlay is team-shared
 - Never commit `.hack.secret.key`
 - Prefer `hack env add` over hand-editing encrypted values
-- Enter secrets with `--value-stdin` or the hidden prompt, never as command arguments
 - Prefer direct runtime injection over materializing `.hack/.env`
 - Use `hack host exec` or env-aware sessions for host-side scripts like migrations, generators, and admin tasks
 
@@ -671,7 +423,6 @@ If you are writing new docs or new project setup flows, document the YAML overla
 - [Initialize a project](guides/init-project.md)
 - [Sessions](sessions.md)
 - [CLI reference](cli.md)
-- [Env and secrets threat model](security/env-secrets-threat-model.md): assets, trust boundaries, current mitigations and open gaps
 - [Pulumi-style env config design](plans/2026-03-27-pulumi-style-env-config-design.md)
 
 
@@ -719,3 +470,7 @@ and group members without a surviving identity are explicitly unverified.
 
 See [runtime performance diagnostics](performance.md) for project-listing timings,
 container details, watcher measurements and read-only cleanup previews.
+
+For terminal commands cancelled through the wrapper PID, Hack captures the child
+process tree and revalidates process start times before signalling surviving
+descendants. It never signals the shared terminal process group.

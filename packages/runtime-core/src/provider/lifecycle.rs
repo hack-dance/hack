@@ -1,26 +1,10 @@
-mod admission_pool;
-pub mod host_filesystem;
-mod interrupted;
-mod operating_guard;
-mod prepared_boot;
-#[cfg(test)]
-mod pressure_tests;
-#[cfg(any(target_os = "macos", test))]
 mod private_child;
-mod relay_process;
-mod short_home;
 use super::{
     admission, agent, artifact, identity, process,
     state::{self, Owner, io},
 };
 use crate::{Candidate, CandidateError, reject_aliased_state};
-pub use prepared_boot::{
-    Built as PreparedBaseBuilt, build_prepared_base, prepared_base_status, remove_prepared_base,
-    verify_prepared_base,
-};
-#[cfg(target_os = "macos")]
-pub(super) use private_child::{RelayChild, RelayLaunch};
-pub(super) use relay_process::RelayProcess;
+pub(super) use private_child::{RelayChild, RelayLaunch, RelayProcess};
 use serde::Serialize;
 use serde_json::{Value, json};
 use std::fs::{self, File, OpenOptions};
@@ -35,7 +19,6 @@ use std::time::{Duration, Instant};
 #[derive(Debug, Serialize)]
 pub struct RuntimeStatus {
     pub network: Option<super::NetworkIntent>,
-    pub project_share: Option<super::ProjectShareIntent>,
     pub application_bridge: Option<super::BridgeIntent>,
     pub dependency_sockets: Option<super::DependencySocketIntent>,
     pub dependency_socket_observations: Vec<super::DependencySocketObservation>,
@@ -51,9 +34,6 @@ pub struct RuntimeStatus {
     pub engine_socket: Option<String>,
     pub persistent_disks_identified: bool,
     pub guest_boot_id: Option<String>,
-    /// Prepared-base selection and activation, for pools that requested one.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub prepared_base: Option<super::prepared_start::Status>,
 }
 fn root(candidate: &Candidate) -> std::path::PathBuf {
     candidate.state_root.join("run/smolvm")
@@ -70,17 +50,11 @@ fn command(candidate: &Candidate, owner: &Owner) -> std::process::Command {
         .env("TMPDIR", root(candidate).join("tmp"))
         .env("DOCKER_CONFIG", root(candidate).join("docker-config"))
         .env("SMOLVM_AGENT_ROOTFS", root(candidate).join("rootfs"))
-        // Pinned Smol forwards this to the guest agent. Its automatic trim can
-        // truncate imago backing files; retained disk identity requires exact size.
-        .env("SMOLVM_DISK_TRIM", "0")
         .env("DYLD_LIBRARY_PATH", artifact::root(candidate).join("lib"));
     // All provider invocations (including start/recovery and private exec) use
     // this clean environment. DNS-learned answers must not reopen host/private
-    // ranges; Smol's local default floor is insufficient for public egress modes.
-    if matches!(
-        &owner.network,
-        super::NetworkIntent::ApprovedHosts { .. } | super::NetworkIntent::Internet
-    ) {
+    // ranges; Smol's local default floor is insufficient for ApprovedHosts.
+    if matches!(&owner.network, super::NetworkIntent::ApprovedHosts { .. }) {
         command.env("SMOLVM_EGRESS_FLOOR", "strict");
     }
     let policy = owner.reclamation.unwrap_or_default();
@@ -140,7 +114,7 @@ fn provider_file(
     file.read_to_string(&mut text).map_err(io)?;
     Ok(text)
 }
-pub(super) fn recorded_process(
+fn recorded_process(
     candidate: &Candidate,
     owner: &Owner,
 ) -> Result<identity::ProcessIdentity, CandidateError> {
@@ -167,7 +141,7 @@ pub(super) fn recorded_process(
         executable: binary(candidate),
     })
 }
-pub(super) fn verify_live(candidate: &Candidate, owner: &Owner) -> Result<(), CandidateError> {
+fn verify_live(candidate: &Candidate, owner: &Owner) -> Result<(), CandidateError> {
     let recorded = owner.process.as_ref().ok_or_else(|| {
         CandidateError::new(
             "process_identity_unavailable",
@@ -188,7 +162,7 @@ pub(super) fn verify_live(candidate: &Candidate, owner: &Owner) -> Result<(), Ca
     )?;
     verify_disks(candidate, owner)
 }
-pub(super) fn verify_disks(candidate: &Candidate, owner: &Owner) -> Result<(), CandidateError> {
+fn verify_disks(candidate: &Candidate, owner: &Owner) -> Result<(), CandidateError> {
     let directory = owner.real_data_dir(candidate)?;
     for (name, expected) in [
         ("storage.raw", &owner.storage),
@@ -245,60 +219,6 @@ fn guest(
     Ok(response)
 }
 
-/// Retry only acquisition, never the verification callback or an admitted effect.
-/// The callback runs under the acquired lease and must reload current identity.
-fn operation_lease<T>(
-    root: &Path,
-    deadline: Option<Instant>,
-    verify: impl FnOnce() -> Result<T, CandidateError>,
-) -> Result<(state::Lock, T), CandidateError> {
-    let lock = loop {
-        if deadline.is_some_and(|limit| Instant::now() >= limit) {
-            return Err(CandidateError::new(
-                "provider_busy",
-                "Provider lease acquisition deadline expired; no operation was admitted.",
-            ));
-        }
-        match state::Lock::acquire(root) {
-            Ok(lock) => break lock,
-            Err(error) if error.code == "provider_busy" && deadline.is_some() => {
-                let remaining = deadline
-                    .expect("bounded acquisition")
-                    .saturating_duration_since(Instant::now());
-                std::thread::sleep(remaining.min(Duration::from_millis(50)));
-            }
-            Err(error) => return Err(error),
-        }
-    };
-    let current = verify()?;
-    Ok((lock, current))
-}
-
-/// How long ordinary startup waits for a provider lease that another operation holds, such as
-/// the `graph inspect` behind `hack ps`.
-pub(super) const STARTUP_LEASE_WAIT: Duration = Duration::from_secs(5);
-
-/// Startup's provider lease. Everything `start_pool` does before taking it is read-only
-/// validation, admission sampling and RAII guards, so waiting for a briefly held lease admits
-/// nothing early, and on expiry it refuses `provider_busy` with nothing admitted.
-pub(super) fn startup_lease(root: &Path, wait: Duration) -> Result<state::Lock, CandidateError> {
-    operation_lease(root, Some(Instant::now() + wait), || Ok(())).map(|(lock, ())| lock)
-}
-
-/// Returning the mutation lease requires a fresh Development admission window.
-/// On failure RAII drops the lease, without granting owner/allocation authority.
-fn startup_admission_lease(
-    root: &Path,
-    wait: Duration,
-    profile: super::Profile,
-    samples: &[admission::Admission],
-    observe: impl FnMut() -> Result<admission::Admission, CandidateError>,
-) -> Result<(state::Lock, Vec<admission::Admission>), CandidateError> {
-    let lock = startup_lease(root, wait)?;
-    let fresh = admission::recheck_after_lease(profile, samples, observe)?;
-    Ok((lock, fresh))
-}
-
 /// Read-only observation takes no mutation lease and detects lifecycle changes around each read.
 pub(super) struct ObservedGuest<'a> {
     candidate: &'a Candidate,
@@ -335,7 +255,6 @@ impl<'a> ObservedGuest<'a> {
             || current.token != self.owner.token
             || current.guest_boot_id != self.owner.guest_boot_id
             || current.network != self.owner.network
-            || current.project_share != self.owner.project_share
             || current.application_bridge != self.owner.application_bridge
             || current.dependency_sockets != self.owner.dependency_sockets
             || current.process != self.owner.process
@@ -358,17 +277,8 @@ pub(super) struct OwnedGuest<'a> {
     candidate: &'a Candidate,
     owner: Owner,
     _lock: state::Lock,
-    lease_root: (u64, u64),
     allocation_allowed: bool,
-    guard: Option<operating_guard::OperatingGuard>,
-}
-
-fn operating_observation(
-    owner: &Owner,
-) -> Result<(admission::OperatingSample, u64), CandidateError> {
-    let sample = admission::operating_sample()?;
-    let usage = identity::memory_usage(owner.process.as_ref().expect("verified process").pid)?;
-    Ok((sample, usage.physical_footprint_bytes))
+    guard: Option<(u64, std::cell::Cell<Instant>)>,
 }
 
 impl<'a> OwnedGuest<'a> {
@@ -392,66 +302,39 @@ impl<'a> OwnedGuest<'a> {
     }
 
     pub(super) fn verify(&self) -> Result<(), CandidateError> {
-        let root = root(self.candidate);
-        self._lock.verify_path(&root)?;
-        let current = fs::symlink_metadata(&root).map_err(io)?;
-        if (current.dev(), current.ino()) != self.lease_root {
-            return Err(CandidateError::new(
-                "runtime_changed",
-                "Provider mutation root changed.",
-            ));
-        }
         verify_live(self.candidate, &self.owner)
     }
 
-    #[cfg(feature = "native-config-plan")]
-    pub(in crate::provider) fn persistent_identity(
-        &self,
-    ) -> Result<super::graph::native::persistent_data::GuestIdentity, CandidateError> {
-        self.verify()?;
-        Ok(super::graph::native::persistent_data::GuestIdentity {
-            owner: self.owner.token.clone(),
-            boot_id: self.boot_id().into(),
-            storage: self.owner.storage.clone().ok_or_else(|| {
-                CandidateError::new(
-                    "disk_identity_mismatch",
-                    "Persistent storage requires an independently retained backing disk.",
-                )
-            })?,
-        })
-    }
-
-    pub(super) fn project_share(&self) -> Option<&super::ProjectShareIntent> {
-        self.owner.project_share.as_ref()
-    }
     pub(super) fn before_effect(&self) -> Result<(), CandidateError> {
-        if let Some(guard) = &self.guard {
-            guard.before_effect(self.owner.profile, || operating_observation(&self.owner))?;
+        if let Some((swapouts, last)) = &self.guard {
+            if last.get().elapsed() >= Duration::from_secs(2) {
+                let sample = admission::operating_sample()?;
+                let usage = identity::memory_usage(
+                    self.owner.process.as_ref().expect("verified process").pid,
+                )?;
+                admission::validate_operating(
+                    &sample,
+                    *swapouts,
+                    usage.physical_footprint_bytes,
+                    self.owner.profile,
+                )?;
+                last.set(Instant::now());
+            }
         }
         Ok(())
     }
 
     pub(super) fn connect(candidate: &'a Candidate) -> Result<Self, CandidateError> {
-        Self::connect_mode(candidate, true, None)
+        Self::connect_mode(candidate, true)
     }
 
     pub(super) fn connect_cleanup(candidate: &'a Candidate) -> Result<Self, CandidateError> {
-        Self::connect_mode(candidate, false, None)
-    }
-
-    #[cfg(target_os = "macos")]
-    pub(super) fn connect_cleanup_wait(candidate: &'a Candidate) -> Result<Self, CandidateError> {
-        Self::connect_mode(
-            candidate,
-            false,
-            Some(Instant::now() + Duration::from_secs(5)),
-        )
+        Self::connect_mode(candidate, false)
     }
 
     fn connect_mode(
         candidate: &'a Candidate,
         enforce_budget: bool,
-        deadline: Option<Instant>,
     ) -> Result<Self, CandidateError> {
         // Load before acquiring a lock: a read/transfer must not initialize absent state.
         reject_aliased_state(&root(candidate))?;
@@ -472,36 +355,37 @@ impl<'a> OwnedGuest<'a> {
                 "Start the owned candidate runtime before transferring source.",
             ));
         }
-        let (lock, current) = operation_lease(&root(candidate), deadline, || {
-            let current = Owner::load(candidate)?;
-            if current.token != owner.token
-                || current.phase != "running"
-                || current.guest_boot_id != owner.guest_boot_id
-            {
-                return Err(CandidateError::new(
-                    "runtime_changed",
-                    "Runtime identity changed before transfer.",
-                ));
-            }
-            verify_live(candidate, &current)?;
-            audit_boot(candidate, &current)?;
-            Ok(current)
-        })?;
+        let lock = state::Lock::acquire(&root(candidate))?;
+        let current = Owner::load(candidate)?;
+        if current.token != owner.token
+            || current.phase != "running"
+            || current.guest_boot_id != owner.guest_boot_id
+        {
+            return Err(CandidateError::new(
+                "runtime_changed",
+                "Runtime identity changed before transfer.",
+            ));
+        }
+        verify_live(candidate, &current)?;
+        audit_boot(candidate, &current)?;
         let guard = if enforce_budget && current.profile == super::Profile::Development {
-            Some(operating_guard::OperatingGuard::connect(
+            let sample = admission::operating_sample()?;
+            let usage =
+                identity::memory_usage(current.process.as_ref().expect("verified process").pid)?;
+            admission::validate_operating(
+                &sample,
+                sample.swapouts,
+                usage.physical_footprint_bytes,
                 current.profile,
-                || operating_observation(&current),
-            )?)
+            )?;
+            Some((sample.swapouts, std::cell::Cell::new(Instant::now())))
         } else {
             None
         };
-        lock.verify_path(&root(candidate))?;
-        let lease_root = fs::symlink_metadata(root(candidate)).map_err(io)?;
         Ok(Self {
             candidate,
             owner: current,
             _lock: lock,
-            lease_root: (lease_root.dev(), lease_root.ino()),
             allocation_allowed: enforce_budget,
             guard,
         })
@@ -550,43 +434,6 @@ impl<'a> OwnedGuest<'a> {
         self.execute_mode(script, arguments, input, true)
     }
 
-    #[cfg(feature = "native-config-plan")]
-    pub(in crate::provider) fn execute_until(
-        &self,
-        script: &str,
-        arguments: &[&str],
-        deadline: Instant,
-    ) -> Result<String, CandidateError> {
-        self.execute_input_until(script, arguments, None, deadline, false)
-    }
-
-    #[cfg(feature = "native-config-plan")]
-    pub(in crate::provider) fn execute_input_until(
-        &self,
-        script: &str,
-        arguments: &[&str],
-        input: Option<&str>,
-        deadline: Instant,
-        allocation: bool,
-    ) -> Result<String, CandidateError> {
-        self.verify()?;
-        if allocation {
-            self.before_effect()?;
-        }
-        let script = format!(
-            "set -eu\ntest \"$(cat /proc/sys/kernel/random/boot_id)\" = \"$1\"\ntest \"$(cat /storage/.hack-local-owner)\" = \"$2\"\ntest \"$(findmnt -n -o FSTYPE --mountpoint /storage)\" = ext4\nshift 2\n{script}"
-        );
-        let mut args = vec![self.boot_id(), self.incarnation()];
-        args.extend_from_slice(arguments);
-        let path = socket(self.candidate, &self.owner, "agent.sock")?;
-        let result = match input {
-            Some(input) => agent::exec_input_until(&path, &script, &args, Some(input), deadline),
-            None => agent::exec_until(&path, &script, &args, deadline),
-        };
-        self.verify()?;
-        result
-    }
-
     /// Retains the existing mutation lock and identity checks without allocation admission.
     pub(super) fn execute_cleanup(
         &self,
@@ -603,7 +450,7 @@ impl<'a> OwnedGuest<'a> {
         input: Option<&str>,
         allocation: bool,
     ) -> Result<String, CandidateError> {
-        self.verify()?;
+        verify_live(self.candidate, &self.owner)?;
         if allocation {
             self.before_effect()?;
         }
@@ -622,7 +469,7 @@ impl<'a> OwnedGuest<'a> {
             false,
             input,
         )?;
-        self.verify()?;
+        verify_live(self.candidate, &self.owner)?;
         Ok(result)
     }
 }
@@ -645,14 +492,7 @@ fn audit_boot(candidate: &Candidate, owner: &Owner) -> Result<(), CandidateError
             },
         )?;
     owner.network.verify_resources(&config["resources"])?;
-    let mut mounts = json!([{"source":artifact::engine_root(candidate),"target":"/opt/hack-engine","read_only":true,"staged":false}]);
-    if let Some(share) = &owner.project_share {
-        share.validate_receipt()?;
-        mounts
-            .as_array_mut()
-            .expect("mounts")
-            .push(share.running_mount());
-    }
+    let mounts = json!([{"source":artifact::engine_root(candidate),"target":"/opt/hack-engine","read_only":true,"staged":false}]);
     if config["version"] != 1
         || config["mounts"] != mounts
         || config["ports"] != json!([])
@@ -683,51 +523,6 @@ fn audit_boot(candidate: &Candidate, owner: &Owner) -> Result<(), CandidateError
     Ok(())
 }
 
-/// Read-only source compatibility check before application lifecycle hooks.
-/// This is advisory: `up_selected` repeats the check before VM effects.
-fn require_fresh_source_pool(candidate: &Candidate) -> Result<(), CandidateError> {
-    if !root(candidate).try_exists().map_err(io)? {
-        return Ok(());
-    }
-    state::check_private_directory(&root(candidate))?;
-    for entry in fs::read_dir(root(candidate)).map_err(io)? {
-        let entry = entry.map_err(io)?;
-        let metadata = fs::symlink_metadata(entry.path()).map_err(io)?;
-        if entry.file_name() != "operation.lock"
-            || !metadata.is_file()
-            || metadata.nlink() != 1
-            || metadata.uid() != unsafe { libc::geteuid() }
-            || metadata.mode() & 0o077 != 0
-        {
-            return Err(CandidateError::new(
-                "foreign_state",
-                "Source admission requires a fresh or owned source pool; unowned provider state was preserved.",
-            ));
-        }
-    }
-    Ok(())
-}
-
-pub fn check_project_share(
-    candidate: &Candidate,
-    requested: &super::ProjectShareIntent,
-) -> Result<serde_json::Value, CandidateError> {
-    requested.validate()?;
-    reject_aliased_state(&root(candidate))?;
-    super::network_update::require_complete(candidate)?;
-    let initialized = root(candidate)
-        .join("owner.json")
-        .try_exists()
-        .map_err(io)?;
-    if initialized {
-        let owner = Owner::load(candidate)?;
-        super::project_share::check_request(owner.project_share.as_ref(), Some(requested))?;
-    } else {
-        require_fresh_source_pool(candidate)?;
-    }
-    Ok(json!({ "source_admitted": true, "pool_initialized": initialized }))
-}
-
 pub fn status(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
     reject_aliased_state(&root(candidate))?;
     if !root(candidate)
@@ -737,7 +532,6 @@ pub fn status(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
     {
         return Ok(RuntimeStatus {
             network: None,
-            project_share: None,
             application_bridge: None,
             dependency_sockets: None,
             dependency_socket_observations: Vec::new(),
@@ -753,7 +547,6 @@ pub fn status(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
             engine_socket: None,
             persistent_disks_identified: false,
             guest_boot_id: None,
-            prepared_base: None,
         });
     }
     let owner = Owner::load(candidate)?;
@@ -780,7 +573,6 @@ pub fn status(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
     };
     Ok(RuntimeStatus {
         network: Some(owner.network.clone()),
-        project_share: owner.project_share.clone(),
         dependency_sockets: owner.dependency_sockets,
         dependency_socket_observations: super::dependency_socket::observe(candidate, &owner)?,
         provider_resources: resources,
@@ -809,7 +601,6 @@ pub fn status(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
         )),
         persistent_disks_identified: owner.storage.is_some(),
         guest_boot_id: owner.guest_boot_id,
-        prepared_base: super::prepared_start::status(candidate),
     })
 }
 
@@ -834,15 +625,6 @@ pub fn up_with_profile(
     up_with_bridge(candidate, profile, None)
 }
 
-/// Resource admission distinguishes a proven running pool from a new VM allocation.
-pub fn probe_with_profile(
-    candidate: &Candidate,
-    profile: super::Profile,
-) -> Result<admission::Admission, CandidateError> {
-    let selected = admission_pool::select(candidate, profile)?;
-    admission_pool::probe(candidate, profile, selected.as_ref())
-}
-
 pub fn up_with_bridge(
     candidate: &Candidate,
     profile: super::Profile,
@@ -860,15 +642,7 @@ pub fn up_with_capabilities(
     requested: Option<super::BridgeIntent>,
     network: Option<super::NetworkIntent>,
 ) -> Result<RuntimeStatus, CandidateError> {
-    up_selected(
-        candidate,
-        profile,
-        requested.into(),
-        network,
-        None.into(),
-        None,
-        None,
-    )
+    up_selected(candidate, profile, requested, network, None)
 }
 
 /// Stage fixed inbound and outbound UNIX socket capacity. Missing dependency
@@ -879,15 +653,7 @@ pub fn up_with_sockets(
     bridge: Option<super::BridgeIntent>,
     dependencies: Option<super::DependencySocketIntent>,
 ) -> Result<RuntimeStatus, CandidateError> {
-    up_selected(
-        candidate,
-        profile,
-        bridge.into(),
-        None,
-        dependencies.into(),
-        None,
-        None,
-    )
+    up_selected(candidate, profile, bridge, None, dependencies)
 }
 
 /// Explicit socket and egress selection; an existing pool is never widened.
@@ -898,178 +664,16 @@ pub fn up_with_network_sockets(
     dependencies: Option<super::DependencySocketIntent>,
     network: Option<super::NetworkIntent>,
 ) -> Result<RuntimeStatus, CandidateError> {
-    up_selected(
-        candidate,
-        profile,
-        bridge.into(),
-        network,
-        dependencies.into(),
-        None,
-        None,
-    )
-}
-
-/// Explicit unfiltered writable project sharing; never modifies an existing pool.
-pub fn up_with_project_share(
-    candidate: &Candidate,
-    profile: super::Profile,
-    bridge: Option<super::BridgeIntent>,
-    dependencies: Option<super::DependencySocketIntent>,
-    network: Option<super::NetworkIntent>,
-    project_share: Option<super::ProjectShareIntent>,
-) -> Result<RuntimeStatus, CandidateError> {
-    up_selected(
-        candidate,
-        profile,
-        bridge.into(),
-        network,
-        dependencies.into(),
-        project_share,
-        None,
-    )
-}
-
-/// One explicit start bound to offline retained graph eligibility. The selection
-/// is revalidated under the provider lease and before boot; uncertainty is never replayed.
-pub fn up_with_retained_project_share(
-    candidate: &Candidate,
-    profile: super::Profile,
-    bridge: Option<super::BridgeIntent>,
-    dependencies: Option<super::DependencySocketIntent>,
-    network: Option<super::NetworkIntent>,
-    project_share: Option<super::ProjectShareIntent>,
-    retained: (&str, &str),
-) -> Result<RuntimeStatus, CandidateError> {
-    up_selected(
-        candidate,
-        profile,
-        bridge.into(),
-        network,
-        dependencies.into(),
-        project_share,
-        Some(retained),
-    )
-}
-
-/// Start for a graph requiring at least this many ingress sockets. New pools use
-/// the minimum; existing pools keep their exact durable capacity. This does not
-/// reserve free slots, which remain the graph owner's responsibility.
-pub fn up_with_minimum_bridges(
-    candidate: &Candidate,
-    profile: super::Profile,
-    required: super::BridgeIntent,
-    dependencies: Option<super::DependencySocketIntent>,
-    network: Option<super::NetworkIntent>,
-    project_share: Option<super::ProjectShareIntent>,
-    retained: Option<(&str, &str)>,
-) -> Result<RuntimeStatus, CandidateError> {
-    up_selected(
-        candidate,
-        profile,
-        super::bridge::Request::Minimum(required),
-        network,
-        dependencies.into(),
-        project_share,
-        retained,
-    )
-}
-
-/// Admit exact or minimum capacity independently for ingress and dependencies.
-/// Graph startup must separately allocate free slots under the provider lease.
-pub fn up_with_socket_requests(
-    candidate: &Candidate,
-    profile: super::Profile,
-    sockets: super::SocketRequests,
-    network: Option<super::NetworkIntent>,
-    project_share: Option<super::ProjectShareIntent>,
-    retained: Option<(&str, &str)>,
-) -> Result<RuntimeStatus, CandidateError> {
-    let (bridges, dependencies) = sockets.resolve()?;
-    up_selected(
-        candidate,
-        profile,
-        bridges,
-        network,
-        dependencies,
-        project_share,
-        retained,
-    )
+    up_selected(candidate, profile, bridge, network, dependencies)
 }
 
 fn up_selected(
     candidate: &Candidate,
     profile: super::Profile,
-    bridge_request: super::bridge::Request,
+    requested: Option<super::BridgeIntent>,
     network: Option<super::NetworkIntent>,
-    dependency_request: super::dependency_socket::Request,
-    project_share: Option<super::ProjectShareIntent>,
-    retained: Option<(&str, &str)>,
+    dependencies: Option<super::DependencySocketIntent>,
 ) -> Result<RuntimeStatus, CandidateError> {
-    start_pool(
-        candidate,
-        profile,
-        bridge_request,
-        network,
-        dependency_request,
-        project_share,
-        super::prepared_start::Start {
-            retained,
-            prepared: None,
-        },
-    )
-}
-
-/// Start with a prepared-base request for a fresh pool. Existing wrappers pass none and keep
-/// the stock templates; `prepared_start` documents fallback and refusal.
-pub fn up_with_prepared_base(
-    candidate: &Candidate,
-    profile: super::Profile,
-    sockets: super::SocketRequests,
-    network: Option<super::NetworkIntent>,
-    project_share: Option<super::ProjectShareIntent>,
-    start: super::prepared_start::Start<'_>,
-) -> Result<RuntimeStatus, CandidateError> {
-    let (bridges, dependencies) = sockets.resolve()?;
-    start_pool(
-        candidate,
-        profile,
-        bridges,
-        network,
-        dependencies,
-        project_share,
-        start,
-    )
-}
-
-fn start_pool(
-    candidate: &Candidate,
-    profile: super::Profile,
-    bridge_request: super::bridge::Request,
-    network: Option<super::NetworkIntent>,
-    dependency_request: super::dependency_socket::Request,
-    project_share: Option<super::ProjectShareIntent>,
-    start: super::prepared_start::Start<'_>,
-) -> Result<RuntimeStatus, CandidateError> {
-    let retained = start.retained;
-    #[cfg(target_os = "macos")]
-    let retained_guard = retained
-        .map(|(run, selection)| {
-            super::graph::retained_startup::Guard::acquire(candidate, run, Some(selection))
-        })
-        .transpose()?;
-    #[cfg(not(target_os = "macos"))]
-    if retained.is_some() {
-        return Err(CandidateError::new(
-            "unsupported_host",
-            "Retained foreground startup requires macOS.",
-        ));
-    }
-    let requested = bridge_request.initial();
-    let dependencies = dependency_request.initial();
-    super::network_update::require_complete(candidate)?;
-    if let Some(share) = &project_share {
-        share.validate()?;
-    }
     if let Some(intent) = &network {
         intent.validate()?;
     }
@@ -1081,29 +685,22 @@ fn start_pool(
         super::BridgeIntent::new(intent.slots)?;
     }
     reject_aliased_state(&root(candidate))?;
-    let (existing, existing_network, existing_dependencies, existing_share) = if root(candidate)
+    let (existing, existing_network, existing_dependencies) = if root(candidate)
         .join("owner.json")
         .try_exists()
         .map_err(io)?
     {
         let owner = Owner::load(candidate)?;
-        super::project_share::check_request(owner.project_share.as_ref(), project_share.as_ref())?;
-        bridge_request.check(owner.application_bridge)?;
+        super::bridge::check_request(owner.application_bridge, requested)?;
         super::network_intent::check_request(&owner.network, network.as_ref())?;
-        dependency_request.check(owner.dependency_sockets)?;
+        super::dependency_socket::check_request(owner.dependency_sockets, dependencies)?;
         (
             owner.application_bridge,
             owner.network.clone(),
             owner.dependency_sockets,
-            owner.project_share.clone(),
         )
     } else {
-        (
-            requested,
-            network.unwrap_or_default(),
-            dependencies,
-            project_share.clone(),
-        )
+        (requested, network.unwrap_or_default(), dependencies)
     };
     super::dependency_socket::check_capacity(existing, existing_dependencies)?;
     if existing.is_some() && !cfg!(feature = "native-stream-relay") {
@@ -1124,76 +721,33 @@ fn start_pool(
             "Existing capacity belongs to another profile. No resize, replacement or adoption was attempted.",
         ));
     }
-    // Admission before aliases, provider commands, disks or VM effects. Only
-    // independently verified live ownership avoids charging a second VM's disks.
-    let admission_owner = admission_pool::select(candidate, profile)?;
-    let admission = admission_pool::probe(candidate, profile, admission_owner.as_ref())?;
+    // Admission before locks, aliases, provider commands, disks or VM effects.
+    let admission = admission::probe_for(&candidate.checkout, profile)?;
     if !admission.admitted {
         return Err(CandidateError::new(
             "admission_rejected",
             admission.reasons.join(" "),
         ));
     }
-    let mut samples = if profile == super::Profile::Development {
-        let baseline_swapouts = admission.swapouts;
-        let mut samples = vec![admission];
-        samples.extend(admission::sample_after(profile, baseline_swapouts, || {
-            admission_pool::probe(candidate, profile, admission_owner.as_ref())
-        })?);
-        samples
-    } else {
-        // Retain the frozen Research window and baseline semantics.
-        admission::sample_with(profile, || {
-            admission_pool::probe(candidate, profile, admission_owner.as_ref())
-        })?
-    };
+    let samples = admission::sample_for(&candidate.checkout, profile)?;
     artifact::verify(candidate)?;
     artifact::verify_engine(candidate)?;
-    super::network_tools::verify(candidate)?;
-    let (lock, fresh_samples) = startup_admission_lease(
-        &root(candidate),
-        STARTUP_LEASE_WAIT,
-        profile,
-        &samples,
-        || admission_pool::probe(candidate, profile, admission_owner.as_ref()),
-    )?;
-    if let Some(selected) = &admission_owner {
-        selected.reverify(candidate)?;
-    }
-    samples.extend(fresh_samples);
-    #[cfg(target_os = "macos")]
-    if let Some(guard) = &retained_guard {
-        guard.verify(candidate)?;
-    }
-    super::network_update::require_complete(candidate)?;
+    let _lock = state::Lock::acquire(&root(candidate))?;
     let fresh_owner = match fs::symlink_metadata(root(candidate).join("owner.json")) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
         Ok(_) => false,
         Err(error) => return Err(io(error)),
     };
-    // Hooks and admission can outlive the read-only frontend check. Never adopt
-    // unrelated state that appeared before this operation acquired its lock.
-    if fresh_owner && project_share.is_some() {
-        require_fresh_source_pool(candidate)?;
-    }
-    let mut owner = Owner::create_with_project_share(
+    let mut owner = Owner::create_with_dependencies(
         candidate,
         profile,
         requested,
         existing_network.clone(),
         existing_dependencies,
-        existing_share.clone(),
     )?;
-    super::project_share::check_request(owner.project_share.as_ref(), existing_share.as_ref())?;
-    if owner.project_share != existing_share {
-        return Err(CandidateError::new(
-            "project_share",
-            "Project share changed before the operation lock.",
-        ));
-    }
-    bridge_request.check(owner.application_bridge)?;
+    super::bridge::check_request(owner.application_bridge, requested)?;
     super::network_intent::check_request(&owner.network, Some(&existing_network))?;
-    dependency_request.check(owner.dependency_sockets)?;
+    super::dependency_socket::check_request(owner.dependency_sockets, dependencies)?;
     if owner.dependency_sockets != existing_dependencies {
         return Err(CandidateError::new(
             "dependency_socket_conflict",
@@ -1220,22 +774,9 @@ fn start_pool(
     super::dependency_socket::verify(candidate, &owner)?;
     state::write(&root(candidate).join("admission.json"), &samples)?;
     if owner.phase == "running" {
-        if let Some(selected) = &admission_owner {
-            selected.reverify(candidate)?;
-        }
-        #[cfg(target_os = "macos")]
-        if let Some(guard) = &retained_guard {
-            guard.verify(candidate)?;
-        }
         verify_live(candidate, &owner)?;
         audit_boot(candidate, &owner)?;
         return status(candidate);
-    }
-    if admission_owner.is_some() {
-        return Err(CandidateError::new(
-            "admission_owner_changed",
-            "Reserve-qualified ownership no longer names a running pool; no create or boot was admitted.",
-        ));
     }
     if ![
         "initializing",
@@ -1262,11 +803,6 @@ fn start_pool(
     }
     prepare_rootfs(candidate, &mut owner)?;
     if !owner.created {
-        // SmolVM clones the expanded templates in `home/.smolvm` into the new disks at the
-        // machine's first start. Choose them (stock, or an activated prepared base) and verify
-        // them before the phase records a create attempt; `verify_templates` checks again
-        // around that start.
-        super::prepared_start::before_create(candidate, &owner, &lock, start.prepared)?;
         phase(candidate, &mut owner, "creating")?;
         let mount = format!(
             "{}:/opt/hack-engine:ro",
@@ -1291,10 +827,6 @@ fn start_pool(
             "--volume".into(),
             mount,
         ];
-        if let Some(share) = &owner.project_share {
-            share.validate()?;
-            arguments.extend(["--volume".into(), share.argument()]);
-        }
         arguments.extend(
             owner
                 .network
@@ -1344,25 +876,8 @@ fn start_pool(
         phase(candidate, &mut owner, "stopped-before-engine")?;
         return Err(error);
     }
-    if let Err(error) = verify_templates(
-        candidate,
-        &owner,
-        &lock,
-        super::disk_template::Stage::BeforeUse,
-    ) {
-        phase(candidate, &mut owner, "stopped-before-engine")?;
-        return Err(error);
-    }
-    #[cfg(target_os = "macos")]
-    if let Some(guard) = &retained_guard {
-        guard.verify(candidate)?;
-    }
     let previous_boot = owner.begin_boot();
     owner.reclamation = Some(boot_reclamation_policy());
-    // The previous provider was proven dead above. Until this start records its own provider,
-    // the receipt names none, so recovery identifies it (`interrupted`) instead of trusting the
-    // old identity.
-    owner.process = None;
     phase(candidate, &mut owner, "booting")?;
     invoke(
         candidate,
@@ -1378,7 +893,7 @@ fn start_pool(
     )?;
     owner.process = Some(observed);
     owner.save(candidate)?;
-    let result = finish_boot(candidate, &mut owner, previous_boot.as_deref(), &lock);
+    let result = finish_boot(candidate, &mut owner, previous_boot.as_deref());
     if let Err(error) = &result {
         // Disk rejection must not keep an allocation alive. Process authority is
         // independent of disk adoption; this is an unclean stop, never reconciliation.
@@ -1420,24 +935,6 @@ fn stop_failed_boot(
     Ok(())
 }
 
-/// Verify the expanded disk templates around a start that can format this pool's disks.
-///
-/// Pinned SmolVM 1.14.3 formats a machine's disks from the templates during its first start
-/// (`prepare_for_launch`); `machine create` makes no disks, so nothing is expanded until then.
-/// Until the pool adopts its disk identities, a start may clone templates: verify the ones it
-/// would reuse before the start, and the ones it cloned after it, before adoption. Adopted disks
-/// are not formatted again, and a replaced disk is refused by its pinned identity. A pool bound
-/// to a prepared base verifies its activated templates against the base receipt instead of
-/// the stock pins (`prepared_start::verify`).
-fn verify_templates(
-    candidate: &Candidate,
-    owner: &Owner,
-    lock: &state::Lock,
-    stage: super::disk_template::Stage,
-) -> Result<(), CandidateError> {
-    super::prepared_start::verify(candidate, owner, lock, stage)
-}
-
 fn verify_disk_allocation(
     storage: &identity::DiskIdentity,
     overlay: &identity::DiskIdentity,
@@ -1458,15 +955,7 @@ fn finish_boot(
     candidate: &Candidate,
     owner: &mut Owner,
     previous_boot: Option<&str>,
-    lock: &state::Lock,
 ) -> Result<RuntimeStatus, CandidateError> {
-    // Before any disk is adopted: a refusal here takes the caller's failed-boot path.
-    verify_templates(
-        candidate,
-        owner,
-        lock,
-        super::disk_template::Stage::AfterFirstStart,
-    )?;
     audit_boot(candidate, owner)?;
     let dir = owner.real_data_dir(candidate)?;
     let storage = identity::disk(&dir.join("storage.raw"))?;
@@ -1492,7 +981,6 @@ fn finish_boot(
     owner.storage = Some(storage);
     owner.overlay = Some(overlay);
     owner.save(candidate)?;
-    super::prepared_start::after_adoption(candidate, owner, lock);
     agent::ping(&socket(candidate, owner, "agent.sock")?)?;
     phase(candidate, owner, "provisioning")?;
     let boot = guest(
@@ -1537,8 +1025,7 @@ fn finish_boot(
             ));
         }
     }
-    let tools_owner = super::prepared_start::network_tools_owner(candidate, owner, lock)?;
-    super::network_tools::provision(candidate, &tools_owner, &mut |script, args, input| {
+    super::network_tools::provision(candidate, &owner.token, &mut |script, args, input| {
         verify_live(candidate, owner)?;
         let guarded = format!(
             "set -eu\ntest \"$(cat /proc/sys/kernel/random/boot_id)\" = \"$1\"\ntest \"$(cat /storage/.hack-local-owner)\" = \"$2\"\nshift 2\n{script}"
@@ -1566,7 +1053,6 @@ fn finish_boot(
             &owner.token,
             owner.guest_boot_id.as_deref().expect("verified boot"),
             &artifact::digest(&artifact::engine_root(candidate).join("runc"))?,
-            &artifact::digest(&artifact::engine_root(candidate).join("docker-init"))?,
         ],
         false,
     )?;
@@ -1578,7 +1064,6 @@ fn finish_boot(
     }
     let network_mode = match owner.network {
         super::NetworkIntent::Isolated => "isolated",
-        super::NetworkIntent::Internet => "internet",
         super::NetworkIntent::HostGateway => "host-gateway",
         super::NetworkIntent::ApprovedHosts { .. } => "approved-hosts",
     };
@@ -1703,51 +1188,6 @@ fn prepare_rootfs(candidate: &Candidate, owner: &mut Owner) -> Result<(), Candid
     Ok(())
 }
 
-/// Retained startup may verify existing templates/rootfs but never reconstruct
-/// missing provider state before refusing a stale or interrupted selection.
-#[cfg(target_os = "macos")]
-pub(super) fn verify_retained_rootfs(
-    candidate: &Candidate,
-    owner: &Owner,
-) -> Result<(), CandidateError> {
-    let expected = owner.rootfs_digest.as_deref().ok_or_else(|| {
-        CandidateError::new(
-            "graph_retained_startup",
-            "Retained runtime rootfs pin is missing.",
-        )
-    })?;
-    let templates = root(candidate).join("home/.smolvm");
-    state::check_private_directory(&templates)?;
-    for name in ["storage-template.ext4.zst", "overlay-template.ext4.zst"] {
-        let path = templates.join(name);
-        let metadata = fs::symlink_metadata(&path).map_err(io)?;
-        if !metadata.is_file()
-            || metadata.nlink() != 1
-            || metadata.uid() != unsafe { libc::geteuid() }
-            || artifact::digest(&path)? != artifact::digest(&artifact::root(candidate).join(name))?
-        {
-            return Err(CandidateError::new(
-                "artifact_digest_mismatch",
-                "Retained disk template changed or is missing.",
-            ));
-        }
-    }
-    let destination = root(candidate).join("rootfs");
-    reject_aliased_state(&destination)?;
-    let data = owner.data_dir();
-    let machine = data.file_name().and_then(|v| v.to_str()).ok_or_else(|| {
-        CandidateError::new("foreign_state", "Owned machine identity is missing.")
-    })?;
-    let marker = format!(".smolvm-ready.{machine}");
-    if artifact::rootfs_digest(&destination, Some(&marker))? != expected {
-        return Err(CandidateError::new(
-            "artifact_digest_mismatch",
-            "Retained guest rootfs changed.",
-        ));
-    }
-    Ok(())
-}
-
 fn engine_ping(path: &Path) -> Result<(), CandidateError> {
     let mut stream = UnixStream::connect(path).map_err(io)?;
     stream
@@ -1797,10 +1237,8 @@ pub fn down(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
         "recovered-unclean",
     ]
     .contains(&owner.phase.as_str())
-        && initial.process_alive != Some(true)
+        && initial.process_alive == Some(false)
     {
-        // These phases are written only before a start or after proven absence; no recorded
-        // provider (`None`) is as stopped as a dead one.
         return status(candidate);
     }
     verify_live(candidate, &owner)?;
@@ -1928,43 +1366,6 @@ fn finish_stopped(
             "Provider process absence is not established.",
         ));
     }
-    finish_absent(candidate, owner, value, true)
-}
-
-/// Record `value` once the provider's VM lock is free, no handle remains on the owned disks and
-/// no owned socket accepts connections. The caller has established that no provider process
-/// remains; this proves the machine it launched released everything before the receipt changes.
-/// With `record_disks`, unadopted disks are identified now; without it they stay unadopted, so
-/// the next boot's size, format-marker and template checks decide whether to adopt them.
-fn finish_absent(
-    candidate: &Candidate,
-    owner: &mut Owner,
-    value: &str,
-    record_disks: bool,
-) -> Result<(), CandidateError> {
-    let vm_lock = lock_absent_disks(candidate, owner)?;
-    finish_absent_locked(candidate, owner, value, record_disks, &vm_lock)
-}
-
-/// Closing alone can leave a flock held by a fork/dup copy until that copy closes.
-/// Explicitly unlock this open-file description when the recovery scope ends.
-struct VmLock(File);
-impl std::ops::Deref for VmLock {
-    type Target = File;
-    fn deref(&self) -> &File {
-        &self.0
-    }
-}
-impl Drop for VmLock {
-    fn drop(&mut self) {
-        use std::os::fd::AsRawFd;
-        // SAFETY: the owned descriptor remains live through this Drop call.
-        unsafe { libc::flock(self.0.as_raw_fd(), libc::LOCK_UN) };
-    }
-}
-
-/// Keep this guard through alias restoration and the stopped receipt.
-fn lock_absent_disks(candidate: &Candidate, owner: &Owner) -> Result<VmLock, CandidateError> {
     let directory = owner.real_data_dir(candidate)?;
     let vm_lock = OpenOptions::new()
         .read(true)
@@ -1978,14 +1379,13 @@ fn lock_absent_disks(candidate: &Candidate, owner: &Owner) -> Result<VmLock, Can
         return Err(CandidateError::new("foreign_state", "Unsafe VM lock."));
     }
     use std::os::fd::AsRawFd;
-    // Keep the exclusive VM lock through the stopped receipt.
+    // Keep the exclusive VM lock through the stopped receipt; closing the FD releases it.
     if unsafe { libc::flock(vm_lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
         return Err(CandidateError::new(
             "stop_uncertain",
             "Provider VM lock is still held.",
         ));
     }
-    let vm_lock = VmLock(vm_lock);
     let handles = process::capture(
         process::clean_command(Path::new("/usr/sbin/lsof"))
             .args(["-n", "-P", "-t", "--"])
@@ -2001,22 +1401,12 @@ fn lock_absent_disks(candidate: &Candidate, owner: &Owner) -> Result<VmLock, Can
         ));
     }
     verify_disks(candidate, owner)?;
-    Ok(vm_lock)
-}
-
-fn finish_absent_locked(
-    candidate: &Candidate,
-    owner: &mut Owner,
-    value: &str,
-    record_disks: bool,
-    _vm_lock: &File,
-) -> Result<(), CandidateError> {
-    if record_disks && owner.storage.is_none() {
+    if owner.storage.is_none() {
         owner.storage = Some(identity::disk(
             &owner.real_data_dir(candidate)?.join("storage.raw"),
         )?);
     }
-    if record_disks && owner.overlay.is_none() {
+    if owner.overlay.is_none() {
         owner.overlay = Some(identity::disk(
             &owner.real_data_dir(candidate)?.join("overlay.raw"),
         )?);
@@ -2060,23 +1450,13 @@ fn finish_absent_locked(
 }
 
 pub fn recover(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {
-    let initial = match status(candidate) {
-        Ok(initial) => initial,
-        Err(error) if error.code == "provider_home_missing" => {
-            return short_home::recover(candidate);
-        }
-        Err(error) => return Err(error),
-    };
+    let initial = status(candidate)?;
     if initial.phase == "uninitialized" {
         return Ok(initial);
     }
-    let lock = state::Lock::acquire(&root(candidate))?;
+    let _lock = state::Lock::acquire(&root(candidate))?;
     let mut owner = Owner::load(candidate)?;
-    let Some(process) = owner.process.as_ref() else {
-        // A start interrupted before the provider identity was recorded; see `interrupted`.
-        interrupted::recover(candidate, &mut owner, &lock)?;
-        return status(candidate);
-    };
+    let process = owner.process.as_ref().ok_or_else(|| CandidateError::new("recovery_required","No retained process identity; manual inspection required. No state adopted or removed."))?;
     if identity::alive(process.pid)? {
         return Err(CandidateError::new(
             "recovery_required",
@@ -2129,201 +1509,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn source_preflight_is_read_only_and_preserves_unowned_state() {
-        let directory = std::env::temp_dir().canonicalize().unwrap().join(format!(
-            "hack-source-preflight-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        state::private_directory(&directory).unwrap();
-        struct Remove(std::path::PathBuf);
-        impl Drop for Remove {
-            fn drop(&mut self) {
-                let _ = fs::remove_dir_all(&self.0);
-            }
-        }
-        let _remove = Remove(directory.clone());
-        let project = directory.join("app");
-        state::private_directory(&project).unwrap();
-        fs::write(project.join("package.json"), "{}").unwrap();
-        let candidate = Candidate::discover(&directory).unwrap();
-        let share = super::super::ProjectShareIntent::approve(&project, true).unwrap();
-        assert_eq!(
-            check_project_share(&candidate, &share).unwrap(),
-            json!({"source_admitted":true,"pool_initialized":false})
-        );
-        assert!(!candidate.state_root.exists());
-        let lock = state::Lock::acquire(&root(&candidate)).unwrap();
-        assert!(require_fresh_source_pool(&candidate).is_ok());
-        state::private_directory(&root(&candidate)).unwrap();
-        let canary = root(&candidate).join("unowned");
-        fs::write(&canary, "preserved").unwrap();
-        assert_eq!(
-            check_project_share(&candidate, &share).unwrap_err().code,
-            "foreign_state"
-        );
-        assert_eq!(fs::read_to_string(canary).unwrap(), "preserved");
-        assert_eq!(
-            require_fresh_source_pool(&candidate).unwrap_err().code,
-            "foreign_state"
-        );
-        drop(lock);
-        assert!(!root(&candidate).join("owner.json").exists());
-        #[cfg(target_os = "macos")]
-        {
-            fs::remove_file(root(&candidate).join("unowned")).unwrap();
-            let owner = Owner::create_with_project_share(
-                &candidate,
-                super::super::Profile::Development,
-                None,
-                super::super::NetworkIntent::Internet,
-                None,
-                Some(share.clone()),
-            )
-            .unwrap();
-            let before = fs::read(root(&candidate).join("owner.json")).unwrap();
-            assert_eq!(
-                check_project_share(&candidate, &share).unwrap(),
-                json!({"source_admitted":true,"pool_initialized":true})
-            );
-            let second = directory.join("other-app");
-            state::private_directory(&second).unwrap();
-            fs::write(second.join("package.json"), "{}").unwrap();
-            let other = super::super::ProjectShareIntent::approve(&second, true).unwrap();
-            assert_eq!(
-                check_project_share(&candidate, &other).unwrap_err().code,
-                "project_share"
-            );
-            assert_eq!(
-                fs::read(root(&candidate).join("owner.json")).unwrap(),
-                before
-            );
-            assert_eq!(
-                fs::read_link(&owner.short_home).unwrap(),
-                root(&candidate).join("home")
-            );
-            fs::remove_file(&owner.short_home).unwrap();
-        }
-    }
-
-    #[test]
-    fn cleanup_operation_lease_waits_then_revalidates_without_replaying_effects() {
-        let root = std::fs::canonicalize(std::env::temp_dir())
-            .unwrap()
-            .join(format!(
-                "hkl-lease-{}-{}",
-                std::process::id(),
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_nanos()
-            ));
-        struct Remove(std::path::PathBuf);
-        impl Drop for Remove {
-            fn drop(&mut self) {
-                let _ = std::fs::remove_dir_all(&self.0);
-            }
-        }
-        let _remove = Remove(root.clone());
-        state::private_directory(&root).unwrap();
-        let identity = root.join("identity");
-        std::fs::write(&identity, "original").unwrap();
-        for changed in [false, true] {
-            std::fs::write(&identity, "original").unwrap();
-            let held = state::Lock::acquire(&root).unwrap();
-            let calls = std::cell::Cell::new(0);
-            assert!(
-                matches!(operation_lease(&root, None, || { calls.set(1); Ok(()) }), Err(e) if e.code == "provider_busy")
-            );
-            let writer = identity.clone();
-            let worker = std::thread::spawn(move || {
-                std::thread::sleep(Duration::from_millis(100));
-                if changed {
-                    std::fs::write(writer, "replacement").unwrap();
-                }
-                drop(held);
-            });
-            let acquired =
-                operation_lease(&root, Some(Instant::now() + Duration::from_secs(2)), || {
-                    calls.set(calls.get() + 1);
-                    if std::fs::read_to_string(&identity).unwrap() != "original" {
-                        return Err(CandidateError::new(
-                            "runtime_changed",
-                            "Fixture identity changed.",
-                        ));
-                    }
-                    Ok(())
-                });
-            worker.join().unwrap();
-            assert_eq!(calls.get(), 1);
-            if changed {
-                assert!(matches!(acquired, Err(e) if e.code == "runtime_changed"));
-            } else {
-                assert!(acquired.is_ok());
-            }
-        }
-        let _held = state::Lock::acquire(&root).unwrap();
-        let called = std::cell::Cell::new(false);
-        let expired = operation_lease(
-            &root,
-            Some(Instant::now() + Duration::from_millis(75)),
-            || {
-                called.set(true);
-                Ok(())
-            },
-        );
-        assert!(matches!(expired, Err(e) if e.code == "provider_busy"));
-        assert!(!called.get());
-        assert_eq!(std::fs::read_to_string(&identity).unwrap(), "replacement");
-    }
-
-    #[test]
-    fn startup_lease_waits_out_a_brief_holder_and_refuses_a_lasting_one() {
-        let root = std::fs::canonicalize(std::env::temp_dir())
-            .unwrap()
-            .join(format!(
-                "hkl-startup-lease-{}-{}",
-                std::process::id(),
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_nanos()
-            ));
-        struct Remove(std::path::PathBuf);
-        impl Drop for Remove {
-            fn drop(&mut self) {
-                let _ = std::fs::remove_dir_all(&self.0);
-            }
-        }
-        let _remove = Remove(root.clone());
-        state::private_directory(&root).unwrap();
-        // A brief holder, such as the inspection behind `hack ps`: startup waits, then takes it.
-        let held = state::Lock::acquire(&root).unwrap();
-        let started = Instant::now();
-        let worker = std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(150));
-            drop(held);
-        });
-        let lock = startup_lease(&root, Duration::from_secs(2)).unwrap();
-        worker.join().unwrap();
-        assert!(started.elapsed() >= Duration::from_millis(100));
-        // The lease stays exclusive: an immediate acquisition is still refused while held.
-        assert!(matches!(state::Lock::acquire(&root), Err(e) if e.code == "provider_busy"));
-        drop(lock);
-        // A holder that outlasts the wait is refused with nothing admitted.
-        let _held = state::Lock::acquire(&root).unwrap();
-        let refused = startup_lease(&root, Duration::from_millis(100));
-        assert!(matches!(
-            &refused,
-            Err(e) if e.code == "provider_busy" && e.message.contains("no operation was admitted")
-        ));
-    }
-
-    #[test]
-    fn provider_command_enforces_strict_floor_for_public_egress_modes() {
+    fn provider_command_enforces_strict_floor_only_for_approved_hosts() {
         let candidate = Candidate::discover(Path::new(env!("CARGO_MANIFEST_DIR"))).unwrap();
         let mut owner: Owner = serde_json::from_value(json!({
             "version":1,"checkout":"/fixture","token":"fixture","machine":"fixture",
@@ -2335,15 +1521,10 @@ mod tests {
         for intent in [
             super::super::NetworkIntent::Isolated,
             super::super::NetworkIntent::HostGateway,
-            super::super::NetworkIntent::Internet,
             super::super::NetworkIntent::approved_hosts(vec!["registry.example.com".into()])
                 .unwrap(),
         ] {
-            let approved = matches!(
-                &intent,
-                super::super::NetworkIntent::ApprovedHosts { .. }
-                    | super::super::NetworkIntent::Internet
-            );
+            let approved = matches!(&intent, super::super::NetworkIntent::ApprovedHosts { .. });
             owner.network = intent;
             // The same constructor supplies normal start, re-start after stop,
             // recovery and exec. Inspect argv/env only; never spawn a provider.
@@ -2369,23 +1550,7 @@ mod tests {
     }
 
     #[test]
-    fn provider_command_disables_trim_despite_ambient_override() {
-        let output = std::process::Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "provider::lifecycle::tests::provider_command_uses_recorded_reclamation_policy",
-                "--nocapture",
-            ])
-            .env("SMOLVM_DISK_TRIM", "1")
-            .output()
-            .unwrap();
-        assert!(output.status.success());
-        assert!(String::from_utf8_lossy(&output.stdout).contains("provider-trim-disabled"));
-    }
-
-    #[test]
     fn provider_command_uses_recorded_reclamation_policy() {
-        println!("provider-trim-disabled");
         let candidate = Candidate::discover(Path::new(env!("CARGO_MANIFEST_DIR"))).unwrap();
         let mut owner: Owner = serde_json::from_value(json!({
             "version":1, "checkout":"/fixture", "token":"fixture", "machine":"fixture",
@@ -2404,10 +1569,6 @@ mod tests {
             owner.reclamation = Some(policy);
             let cmd = command(&candidate, &owner);
             let env: std::collections::BTreeMap<_, _> = cmd.get_envs().collect();
-            assert_eq!(
-                env[std::ffi::OsStr::new("SMOLVM_DISK_TRIM")],
-                Some(std::ffi::OsStr::new("0"))
-            );
             assert_eq!(
                 env[std::ffi::OsStr::new("SMOLVM_BALLOON_RECLAIM")],
                 Some(std::ffi::OsStr::new(if policy.enabled { "1" } else { "0" }))
@@ -2441,70 +1602,14 @@ mod tests {
     }
 
     #[test]
-    fn executable_cache_requires_both_digest_arguments_before_guest_effects() {
-        use std::process::{Command, Stdio};
-        let script = include_str!("guest-runc-cache.sh");
-        assert!(
-            Command::new("/bin/sh")
-                .args(["-n", "-c", script])
-                .status()
-                .unwrap()
-                .success()
-        );
-        for digests in [
-            vec!["a".repeat(64)],
-            vec!["a".repeat(64), "b".repeat(63)],
-            vec!["a".repeat(64), "G".repeat(64)],
-        ] {
-            let status = Command::new("/bin/sh")
-                .args(["-c", script, "cache-test", "owner", "boot"])
-                .args(digests)
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status()
-                .unwrap();
-            assert!(!status.success());
-        }
-    }
-
-    #[test]
-    #[ignore = "Manual owned VM, loaded shell image HACK_LOCAL_TEST_IMAGE and watchdog required"]
-    fn cached_init_executes_in_image_only_container_without_capabilities() {
-        let candidate =
-            Candidate::discover(Path::new(&std::env::var("HACK_LOCAL_TEST_ROOT").unwrap()))
-                .unwrap();
-        let image = std::env::var("HACK_LOCAL_TEST_IMAGE").unwrap();
-        assert!(image.strip_prefix("sha256:").is_some_and(|hash| {
-            hash.len() == 64
-                && hash
-                    .bytes()
-                    .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
-        }));
-        let owned = OwnedGuest::connect_cleanup(&candidate).unwrap();
-        assert_eq!(owned.execute_cleanup(r#"
-name=init-cache-check-$1
-docker=/opt/hack-engine/docker
-if "$docker" inspect "$name" >/dev/null 2>&1; then exit 1; fi
-cleanup() {
- if test "$("$docker" inspect --format '{{index .Config.Labels "io.hack-local.init-cache-test"}}' "$name" 2>/dev/null || true)" = "$1"; then "$docker" rm -f "$name" >/dev/null; fi
-}
-trap 'cleanup "$1"' EXIT
-"$docker" run --rm --pull never --name "$name" --label "io.hack-local.init-cache-test=$1" --network none --read-only --cap-drop ALL --security-opt no-new-privileges --init --entrypoint /bin/sh "$2" -c 'test "$(cat /proc/1/comm)" = docker-init; grep -Eq "^CapEff:[[:space:]]+0+$" /proc/self/status'
-printf 'init-without-capabilities\n'
-"#,&[&owned.owner.token,&image]).unwrap(),"init-without-capabilities\n");
-    }
-
-    #[test]
     #[ignore = "Manual owned VM and external watchdog required"]
-    fn executable_cache_is_pinned_bounded_read_only_and_refuses_replacement() {
+    fn runc_cache_is_pinned_bounded_read_only_and_refuses_replacement() {
         let candidate = Candidate::discover(std::path::Path::new(
             &std::env::var("HACK_LOCAL_TEST_ROOT").expect("explicit candidate root"),
         ))
         .unwrap();
         let owned = OwnedGuest::connect_cleanup(&candidate).unwrap();
         let digest = artifact::digest(&artifact::engine_root(&candidate).join("runc")).unwrap();
-        let init_digest =
-            artifact::digest(&artifact::engine_root(&candidate).join("docker-init")).unwrap();
         let verify = || {
             assert_eq!(
                 owned
@@ -2513,8 +1618,7 @@ printf 'init-without-capabilities\n'
 cache=/run/hack-local/engine-exec
 test "$(stat -c %u:%g:%a "$cache")" = 0:0:700
 test "$(stat -c %u:%g:%a "$cache/runc")" = 0:0:555
-test "$(stat -c %u:%g:%a "$cache/docker-init")" = 0:0:555
-for target in "$cache" /opt/hack-engine/runc /opt/hack-engine/docker-init; do
+for target in "$cache" /opt/hack-engine/runc; do
  test "$(findmnt -n -o FSTYPE --mountpoint "$target")" = tmpfs
  case ",$(findmnt -n -o OPTIONS --mountpoint "$target")," in *,ro,*) ;; *) exit 1;; esac
 done
@@ -2522,38 +1626,24 @@ for path in "$cache/runc" /opt/hack-engine/runc; do
  test "$(sha256sum "$path" | cut -d ' ' -f 1)" = "$1"
  if (exec 3>>"$path") >/dev/null 2>&1; then exit 1; fi
 done
-for path in "$cache/docker-init" /opt/hack-engine/docker-init; do
- test "$(sha256sum "$path" | cut -d ' ' -f 1)" = "$2"
- if (exec 3>>"$path") >/dev/null 2>&1; then exit 1; fi
-done
 /opt/hack-engine/runc --version >/dev/null
-/opt/hack-engine/docker-init --version >/dev/null
 set -- $(stat -f -c '%S %b' "$cache")
 test "$(( $1 * $2 ))" = 33554432
 printf 'verified-cache\n'
 "#,
-                        &[&digest, &init_digest],
+                        &[&digest],
                     )
                     .unwrap(),
                 "verified-cache\n"
             );
         };
         verify();
-        for (expected, expected_init) in [
-            ("0".repeat(64), init_digest.clone()),
-            (digest.clone(), "0".repeat(64)),
-            (digest.clone(), init_digest.clone()),
-        ] {
+        for expected in ["0".repeat(64), digest.clone()] {
             let error = guest(
                 &candidate,
                 &owned.owner,
                 include_str!("guest-runc-cache.sh"),
-                &[
-                    &owned.owner.token,
-                    owned.boot_id(),
-                    &expected,
-                    &expected_init,
-                ],
+                &[&owned.owner.token, owned.boot_id(), &expected],
                 false,
             )
             .unwrap_err();
@@ -2580,9 +1670,9 @@ printf 'verified-cache\n'
             .stage_with_guest(&guest)
             .unwrap();
         // Force a baseline mismatch without creating real host pressure or changing global state.
-        guest.guard = Some(operating_guard::OperatingGuard::fixture(
+        guest.guard = Some((
             u64::MAX,
-            Instant::now() - Duration::from_secs(3),
+            std::cell::Cell::new(Instant::now() - Duration::from_secs(3)),
         ));
         assert_eq!(
             lease
@@ -2664,115 +1754,6 @@ printf 'verified-cache\n'
         assert!(sentinel.try_wait().unwrap().is_none());
         sentinel.kill().unwrap();
         sentinel.wait().unwrap();
-    }
-
-    #[test]
-    fn a_prepared_start_refuses_ambiguous_capacity_before_any_pool_state() {
-        let checkout = std::env::temp_dir().canonicalize().unwrap().join(format!(
-            "hack-prepared-sockets-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        fs::create_dir(&checkout).unwrap();
-        let candidate = Candidate::discover(&checkout).unwrap();
-        let one = super::super::BridgeIntent::new(1).unwrap();
-        let request = super::super::prepared_start::Request {
-            mode: super::super::prepared_start::Mode::Require,
-            store: checkout.join("store"),
-        };
-        let error = up_with_prepared_base(
-            &candidate,
-            super::super::Profile::Development,
-            super::super::SocketRequests {
-                bridges: Some(one),
-                minimum_bridges: Some(one),
-                ..Default::default()
-            },
-            None,
-            None,
-            super::super::prepared_start::Start {
-                retained: None,
-                prepared: Some(&request),
-            },
-        )
-        .unwrap_err();
-        assert_eq!(error.code, "invalid_arguments");
-        assert!(!root(&candidate).exists());
-        fs::remove_dir_all(&checkout).unwrap();
-    }
-
-    #[test]
-    fn templates_are_verified_around_the_first_start_not_after_create() {
-        // The state a live fresh pool reached after `machine create`: pinned SmolVM makes no
-        // disks and expands nothing until the first start, so only the compressed templates
-        // exist. The removed after-create check refused exactly this state.
-        let checkout = std::env::temp_dir().canonicalize().unwrap().join(format!(
-            "hack-template-sequence-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        fs::create_dir(&checkout).unwrap();
-        let candidate = Candidate::discover(&checkout).unwrap();
-        let templates = root(&candidate).join("home/.smolvm");
-        state::private_directory(&templates).unwrap();
-        for name in ["storage-template.ext4.zst", "overlay-template.ext4.zst"] {
-            fs::write(templates.join(name), b"compressed").unwrap();
-        }
-        let owner = |adopted: bool| -> Owner {
-            let disk = serde_json::json!({"device": 1, "inode": 2, "bytes": 3, "uuid": "fixture"});
-            let disk = if adopted {
-                disk
-            } else {
-                serde_json::Value::Null
-            };
-            serde_json::from_value(serde_json::json!({
-                "version": 1, "checkout": "/fixture", "token": "fixture", "machine": "fixture",
-                "short_home": "/fixture", "created": adopted, "phase": "creating",
-                "process": null, "storage": disk, "overlay": disk, "guest_boot_id": null,
-                "daemon_pid": null, "daemon_start": null, "rootfs_digest": null
-            }))
-            .unwrap()
-        };
-        let fresh = owner(false);
-        let lock = state::Lock::acquire(&root(&candidate)).unwrap();
-        // Before the first start: nothing to reuse yet, so the start may proceed.
-        verify_templates(
-            &candidate,
-            &fresh,
-            &lock,
-            super::super::disk_template::Stage::BeforeUse,
-        )
-        .unwrap();
-        // After a first start that left no verifiable expansion beside the compressed input,
-        // its disks are refused rather than adopted.
-        let error = verify_templates(
-            &candidate,
-            &fresh,
-            &lock,
-            super::super::disk_template::Stage::AfterFirstStart,
-        )
-        .unwrap_err();
-        assert_eq!(error.code, "disk_template_untrusted");
-        assert!(
-            error.message.contains("missing after the first start"),
-            "{}",
-            error.message
-        );
-        // Adopted disks are never formatted again, so their starts do not depend on templates.
-        let adopted = owner(true);
-        for stage in [
-            super::super::disk_template::Stage::BeforeUse,
-            super::super::disk_template::Stage::AfterFirstStart,
-        ] {
-            verify_templates(&candidate, &adopted, &lock, stage).unwrap();
-        }
-        fs::remove_dir_all(&checkout).unwrap();
     }
 
     #[test]

@@ -10,7 +10,6 @@ import {
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { readLinesFromStream } from "../src/ui/lines.ts";
-import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
 const fixtures: Array<{
   root: string;
@@ -87,15 +86,13 @@ async function startFixture(
     ],
     {
       cwd: root,
-      env: privateCliEnv({
-        root,
-        home: root,
-        env: {
-          HACK_HOME: join(root, ".hack"),
-          HACK_GLOBAL_CONFIG_PATH: join(root, "global", "hack.config.json"),
-          HACK_MCP_COMMAND: stub,
-        },
-      }),
+      env: {
+        ...process.env,
+        HOME: root,
+        HACK_HOME: join(root, ".hack"),
+        HACK_GLOBAL_CONFIG_PATH: join(root, "global", "hack.config.json"),
+        HACK_MCP_COMMAND: stub,
+      },
       stdin: "pipe",
       stdout: "pipe",
       stderr: "ignore",
@@ -200,15 +197,7 @@ test("MCP log-tail timeout stops a command that ignores SIGTERM and returns a re
   });
   await waitFor(() => messages.some((item) => item.id === 2));
   expect(messages.find((item) => item.id === 2)).toMatchObject({
-    result: {
-      structuredContent: {
-        ok: true,
-        data: {
-          stop_reason: "timeout",
-          cutoff: { bound: "time", limit: 1000 },
-        },
-      },
-    },
+    result: { structuredContent: { data: { stop_reason: "timeout" } } },
   });
   expect(alive(fixture.childPid ?? 0)).toBe(false);
   expect(fixture.proc.exitCode).toBeNull();
@@ -228,21 +217,10 @@ for (const tool of ["hack.projects.list", "hack.project.logs.tail"]) {
       const { fixture, send, messages } = await startFixture({ tool, output });
       await waitFor(() => messages.some((item) => item.id === 2));
       const result = messages.find((item) => item.id === 2)?.result;
+      expect(result?.isError).toBe(true);
       expect(result?.structuredContent?.outputTruncated).toBe(true);
-      if (tool === "hack.project.logs.tail") {
-        // HACK-1134: the byte bound is a cutoff (success with partial data),
-        // not a failure; see docs/reference/mcp-logs.md.
-        expect(result?.isError).toBeUndefined();
-        expect(result?.structuredContent?.ok).toBe(true);
-        expect(result?.structuredContent?.data).toMatchObject({
-          cutoff: { bound: "bytes", limit: 8 * 1024 * 1024 },
-          stop_reason: "output_limit",
-        });
-      } else {
-        expect(result?.isError).toBe(true);
-        expect(result?.structuredContent?.ok).toBe(false);
-        expect(result?.structuredContent?.data).toBeUndefined();
-      }
+      expect(result?.structuredContent?.ok).toBe(false);
+      expect(result?.structuredContent?.data).toBeUndefined();
       expect(result?.structuredContent?.stderr).toContain(
         "8 MiB capture limit"
       );

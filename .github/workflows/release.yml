@@ -6,49 +6,12 @@ on:
       tag:
         description: 'Release tag (e.g., v0.1.0)'
         required: false
-      channel:
-        description: Release channel
-        type: choice
-        options: [stable, prerelease]
-        default: stable
-      prerelease_version:
-        description: 'Explicit v5 candidate version (5.0.0-next.N)'
-        type: string
-        required: false
-      source_revision:
-        description: 'Full approved next commit SHA for the candidate'
-        type: string
-        required: false
-      publish_prerelease:
-        description: 'Request publication after exact-head CI and environment review (default prepares artifacts only)'
-        type: boolean
-        default: false
   push:
     tags:
       - "v*"
-      - "!v*-*"
-      - '!v*\+*'
-
-permissions:
-  contents: read
 
 jobs:
-  prerelease:
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.channel == 'prerelease' }}
-    uses: ./.github/workflows/prerelease.yml
-    permissions:
-      contents: write
-      actions: read
-      checks: read
-      statuses: read
-      deployments: read
-    with:
-      version: ${{ inputs.prerelease_version }}
-      source_revision: ${{ inputs.source_revision }}
-      publish: ${{ inputs.publish_prerelease }}
-
   create-release:
-    if: ${{ github.event_name == 'push' || inputs.channel == 'stable' }}
     runs-on: blacksmith-4vcpu-ubuntu-2404
     permissions:
       contents: write
@@ -63,13 +26,25 @@ jobs:
       - name: Setup Bun
         uses: oven-sh/setup-bun@v1
         with:
-          bun-version: "1.4.2"
+          bun-version: "1.3.9"
       - name: Resolve version
         id: version
-        env:
-          RELEASE_CHANNEL: ${{ inputs.channel || 'stable' }}
-          RELEASE_TAG_INPUT: ${{ inputs.tag }}
-        run: bun scripts/prerelease-plan.ts stable
+        run: |
+          TARGET_TAG="${{ github.event.inputs.tag }}"
+          if [ -z "$TARGET_TAG" ]; then
+            TARGET_TAG="$GITHUB_REF_NAME"
+          fi
+          if [ -z "$TARGET_TAG" ]; then
+            echo "Missing tag. Provide workflow input 'tag' or run on a tag ref."
+            exit 1
+          fi
+          VERSION="$(bun -e "const pkg = await Bun.file('package.json').json(); console.log(pkg.version)")"
+          if [ "v$VERSION" != "$TARGET_TAG" ]; then
+            echo "Tag $TARGET_TAG does not match package.json version $VERSION."
+            exit 1
+          fi
+          echo "tag=$TARGET_TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2
         with:
@@ -88,9 +63,6 @@ jobs:
           - os: ubuntu-latest
             upload_install: true
             skip_tests: true
-          - os: ubuntu-24.04-arm
-            upload_install: false
-            skip_tests: true
           - os: macos-15
             upload_install: false
             skip_tests: true
@@ -103,27 +75,18 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          ref: ${{ needs.create-release.outputs.tag }}
       - name: Setup Bun
         uses: oven-sh/setup-bun@v1
         with:
-          bun-version: "1.4.2"
+          bun-version: "1.3.9"
       - name: Install dependencies
-        run: bun install --frozen-lockfile
-      - uses: dtolnay/rust-toolchain@1.97.1
+        run: bun install
       - name: Build release artifacts
         if: ${{ !matrix.skip_tests }}
-        env:
-          RELEASE_VERSION: ${{ needs.create-release.outputs.version }}
-        run: bun run build:release "--version=$RELEASE_VERSION"
+        run: bun run build:release --version="${{ needs.create-release.outputs.version }}"
       - name: Build release artifacts (skip tests)
         if: ${{ matrix.skip_tests }}
-        env:
-          RELEASE_VERSION: ${{ needs.create-release.outputs.version }}
-        run: bun run build:release "--version=$RELEASE_VERSION" --skip-tests
-      - name: Qualify installed release compiler without host runtimes or network
-        run: bun scripts/check-release-config-compiler.ts dist/release
+        run: bun run build:release --version="${{ needs.create-release.outputs.version }}" --skip-tests
       - name: Upload tarball
         env:
           GH_TOKEN: ${{ github.token }}
@@ -183,7 +146,6 @@ jobs:
           done
 
   update-homebrew-tap:
-    if: ${{ github.event_name == 'push' || inputs.channel == 'stable' }}
     needs: [create-release, build]
     runs-on: blacksmith-4vcpu-ubuntu-2404
     permissions:
@@ -209,21 +171,17 @@ jobs:
       - name: Setup Bun
         uses: oven-sh/setup-bun@v1
         with:
-          bun-version: "1.4.2"
+          bun-version: "1.3.9"
       - name: Render formula
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ needs.create-release.outputs.tag }}
-          RELEASE_VERSION: ${{ needs.create-release.outputs.version }}
         run: |
           bun run scripts/update-homebrew-tap.ts \
-            --tag="$RELEASE_TAG" \
-            --version="$RELEASE_VERSION" \
+            --tag="${{ needs.create-release.outputs.tag }}" \
+            --version="${{ needs.create-release.outputs.version }}" \
             --tap-dir=homebrew-tap
       - name: Commit and push tap update
         working-directory: homebrew-tap
-        env:
-          RELEASE_TAG: ${{ needs.create-release.outputs.tag }}
         run: |
           set -euo pipefail
           git add Formula/hack.rb
@@ -233,5 +191,5 @@ jobs:
           fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git commit -m "build(hack): update formula to $RELEASE_TAG"
+          git commit -m "build(hack): update formula to ${{ needs.create-release.outputs.tag }}"
           git push origin HEAD:main

@@ -41,7 +41,6 @@ impl Fixture {
     }
     fn options(&self) -> PlanOptions<'_> {
         PlanOptions {
-            branch: None,
             project: &self.project,
             compose_file: Path::new("compose.yaml"),
             profiles: &[],
@@ -285,101 +284,6 @@ fn captured_archive_uses_retained_bytes_and_cannot_boot_a_runtime() {
     .unwrap_err();
     assert_eq!(error.code, "runtime_not_running");
     assert!(!fixture.candidate.state_root.exists());
-}
-
-#[test]
-fn cursor_settings_and_skill_aliases_are_excluded_from_source_capture() {
-    let fixture = Fixture::new(BASIC);
-    fs::create_dir_all(fixture.project.join(".agents/skills/example")).unwrap();
-    fs::write(fixture.project.join("app.ts"), "export const value = 1;\n").unwrap();
-    for (settings, target) in [
-        (".cursor", "../../.agents/skills/example"),
-        ("packages/web/.CuRsOr", "../../../../.agents/skills/example"),
-    ] {
-        let directory = fixture.project.join(settings);
-        fs::create_dir_all(directory.join("skills")).unwrap();
-        fs::write(directory.join("mcp.json"), "CURSOR_CONFIG_CANARY").unwrap();
-        std::os::unix::fs::symlink(target, directory.join("skills/example")).unwrap();
-    }
-    fs::write(fixture.project.join(".ignore"), "!.cursor/\n").unwrap();
-    let plan = fixture.plan();
-    assert!(plan.plan.enrollment_compatible);
-    for settings in [".cursor", "packages/web/.CuRsOr"] {
-        assert!(
-            plan.plan
-                .source_selection
-                .excluded_paths
-                .contains(&settings.to_owned())
-        );
-        // Even an invalid ignore-file alias inside agent settings is not consulted.
-        std::os::unix::fs::symlink("missing", fixture.project.join(settings).join(".gitignore"))
-            .unwrap();
-    }
-    let snapshot = project::snapshot::capture(
-        &fixture.project,
-        &Default::default(),
-        &plan.plan.source_selection.metadata_sha256,
-    )
-    .unwrap();
-    let bytes = snapshot.archive().unwrap();
-    let paths: Vec<_> = tar::Archive::new(bytes.as_slice())
-        .entries()
-        .unwrap()
-        .map(|entry| entry.unwrap().path().unwrap().into_owned())
-        .collect();
-    assert!(paths.contains(&PathBuf::from("app.ts")));
-    assert!(paths.iter().all(|path| {
-        !path
-            .to_str()
-            .unwrap()
-            .to_ascii_lowercase()
-            .contains(".cursor")
-    }));
-    assert!(
-        !bytes
-            .windows(b"CURSOR_CONFIG_CANARY".len())
-            .any(|window| window == b"CURSOR_CONFIG_CANARY")
-    );
-}
-
-#[test]
-fn application_links_and_mounts_cannot_select_agent_settings() {
-    for settings in [".cursor", ".agents"] {
-        let fixture = Fixture::new(BASIC);
-        fs::create_dir(fixture.project.join(settings)).unwrap();
-        fs::write(fixture.project.join(settings).join("config.json"), "{}").unwrap();
-        std::os::unix::fs::symlink(
-            format!("{settings}/config.json"),
-            fixture.project.join("app-config.json"),
-        )
-        .unwrap();
-        let plan = fixture.plan();
-        assert!(
-            plan.plan
-                .diagnostics
-                .iter()
-                .any(|d| d.code == "source_symlink")
-        );
-        assert!(
-            project::snapshot::capture(
-                &fixture.project,
-                &Default::default(),
-                &plan.plan.source_selection.metadata_sha256,
-            )
-            .is_err()
-        );
-
-        let fixture = Fixture::new(&format!(
-            "{BASIC}    volumes: ['./{settings}:/workspace/settings']\n"
-        ));
-        fs::create_dir(fixture.project.join(settings)).unwrap();
-        assert_eq!(
-            project::plan(&fixture.candidate, fixture.options())
-                .unwrap_err()
-                .code,
-            "excluded_source"
-        );
-    }
 }
 
 #[test]
@@ -681,7 +585,6 @@ fn useful_graph_models_build_mounts_health_limits_and_loopback_proposal() {
     let plan = project::plan(
         &fixture.candidate,
         PlanOptions {
-            branch: None,
             project: &fixture.project,
             compose_file: Path::new("compose.yaml"),
             profiles: &profiles,
@@ -960,7 +863,6 @@ fn compose_relative_paths_and_normalized_reserved_targets_are_checked() {
     let plan = project::plan(
         &fixture.candidate,
         PlanOptions {
-            branch: None,
             project: &fixture.project,
             compose_file: Path::new("config/compose.yaml"),
             profiles: &[],
@@ -1060,7 +962,6 @@ fn a_fifo_compose_input_is_rejected_without_waiting_for_a_writer() {
     let error = project::plan(
         &fixture.candidate,
         PlanOptions {
-            branch: None,
             project: &fixture.project,
             compose_file: Path::new("fifo.yaml"),
             profiles: &[],
@@ -1307,33 +1208,6 @@ fn execution_dependency_compiler_preserves_review_conditions_and_refuses_invalid
         Graph::from_plan(&plan, &goals).unwrap_err().code,
         "graph_incompatible"
     );
-}
-
-#[test]
-fn execution_dependency_compiler_refuses_readiness_for_inactive_or_unknown_services() {
-    use project::execution::{Condition, Graph};
-    use std::collections::BTreeMap;
-    let fixture = Fixture::new(
-        "services:\n  web:\n    image: alpine:3.21\n  tools:\n    image: alpine:3.21\n    profiles: [debug]\n",
-    );
-    let plan = fixture.plan().plan;
-    assert!(plan.enrollment_compatible);
-    assert!(plan.services["web"].active);
-    assert!(!plan.services["tools"].active);
-    let active = BTreeMap::from([("web".into(), Condition::Started)]);
-    let graph = Graph::from_plan(&plan, &active).unwrap();
-    assert_eq!(graph.services.keys().collect::<Vec<_>>(), ["web"]);
-    for extra in ["tools", "ghost"] {
-        let mut goals = active.clone();
-        goals.insert(extra.into(), Condition::Started);
-        let refusal = Graph::from_plan(&plan, &goals).unwrap_err();
-        assert_eq!(refusal.code, "graph_readiness", "{extra}");
-        assert!(
-            refusal.message.contains("inactive or unknown"),
-            "{extra}: {}",
-            refusal.message
-        );
-    }
 }
 
 #[test]

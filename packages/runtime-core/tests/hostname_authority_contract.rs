@@ -58,32 +58,7 @@ impl Authority {
         assert_eq!(unsafe { libc::poll(&mut fd, 1, 3000) }, 1);
         let mut line = String::new();
         BufReader::new(output).read_line(&mut line).unwrap();
-        if line != "ready\n" {
-            // EOF before ready otherwise hides the candidate's structured refusal.
-            // Reap only the exact child handle before reading its bounded diagnostic.
-            drop(child.stdin.take());
-            let deadline = Instant::now() + Duration::from_secs(3);
-            let status = loop {
-                if let Some(status) = child.try_wait().unwrap() {
-                    break status;
-                }
-                if Instant::now() >= deadline {
-                    child.kill().unwrap();
-                    break child.wait().unwrap();
-                }
-                std::thread::sleep(Duration::from_millis(10));
-            };
-            let mut diagnostic = String::new();
-            child
-                .stderr
-                .take()
-                .unwrap()
-                .take(8192)
-                .read_to_string(&mut diagnostic)
-                .unwrap();
-            fs::remove_dir_all(&root).unwrap();
-            panic!("authority startup: {status}; expected ready, got {line:?}; {diagnostic}");
-        }
+        assert_eq!(line, "ready\n");
         Self {
             child,
             root,
@@ -147,20 +122,7 @@ fn owner_eof_bounds_slow_clients_and_preserves_foreign_paths() {
         .unwrap();
     let mut reply = String::new();
     client.read_to_string(&mut reply).unwrap();
-    let reply_status_class = if reply.is_empty() {
-        "empty"
-    } else if reply.starts_with("HTTP/1.1 400") {
-        "expected-400"
-    } else if reply.starts_with("HTTP/") {
-        "other-http"
-    } else {
-        "non-http"
-    };
-    assert!(
-        reply.starts_with("HTTP/1.1 400"),
-        "reply_status_class={reply_status_class}; reply_bytes={}",
-        reply.len()
-    );
+    assert!(reply.starts_with("HTTP/1.1 400"));
     let mut end = [0; 1];
     assert_eq!(slow.read(&mut end).unwrap(), 0);
     let mut oversized = a.connect();

@@ -11,17 +11,17 @@ let savedMode: string | undefined;
 beforeEach(() => {
   savedCi = process.env.CI;
   savedMode = process.env.HACK_EXECUTION_MODE;
-  Reflect.deleteProperty(process.env, "CI");
-  Reflect.deleteProperty(process.env, "HACK_EXECUTION_MODE");
+  process.env.CI = undefined;
+  process.env.HACK_EXECUTION_MODE = undefined;
 });
 afterEach(() => {
   if (savedCi === undefined) {
-    Reflect.deleteProperty(process.env, "CI");
+    process.env.CI = undefined;
   } else {
     process.env.CI = savedCi;
   }
   if (savedMode === undefined) {
-    Reflect.deleteProperty(process.env, "HACK_EXECUTION_MODE");
+    process.env.HACK_EXECUTION_MODE = undefined;
   } else {
     process.env.HACK_EXECUTION_MODE = savedMode;
   }
@@ -216,7 +216,7 @@ test("CI and slim runners do not read primary aliases", async () => {
   await f.write(f.primary, { "search.test": "host-gateway" });
   process.env.CI = "true";
   expect((await resolveInternalExtraHosts(f.context)).hosts).toEqual({});
-  Reflect.deleteProperty(process.env, "CI");
+  process.env.CI = undefined;
   process.env.HACK_EXECUTION_MODE = "slim";
   expect((await resolveInternalExtraHosts(f.context)).hosts).toEqual({});
 });

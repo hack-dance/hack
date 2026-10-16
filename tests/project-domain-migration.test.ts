@@ -1,5 +1,4 @@
 import { afterEach, expect, test } from "bun:test";
-import { writeFileSync } from "node:fs";
 import {
   chmod,
   lstat,
@@ -24,17 +23,12 @@ const config = '{"dev_host":"demo.hack", "custom":"preserve"}\n';
 const compose =
   "# preserved\nservices:\n  web:\n    labels:\n      caddy: demo.hack\n";
 async function fixture() {
-  const tempRoot = await realpath(
+  const root = await realpath(
     await mkdtemp(join(tmpdir(), "domain-migration-"))
   );
-  roots.push(tempRoot);
-  const root = join(tempRoot, ".hack");
-  await mkdir(root);
+  roots.push(root);
   await writeFile(join(root, "hack.config.json"), config, { mode: 0o640 });
   await writeFile(join(root, "docker-compose.yml"), compose, { mode: 0o600 });
-  // Mode restoration needs exact starting permissions, independent of the caller's umask.
-  await chmod(join(root, "hack.config.json"), 0o640);
-  await chmod(join(root, "docker-compose.yml"), 0o600);
   return root;
 }
 afterEach(async () => {
@@ -44,12 +38,6 @@ afterEach(async () => {
 });
 test("preview has no effects; private journal restores exact bytes and modes", async () => {
   const projectDir = await fixture();
-  expect((await lstat(join(projectDir, "hack.config.json"))).mode & 0o777).toBe(
-    0o640
-  );
-  expect(
-    (await lstat(join(projectDir, "docker-compose.yml"))).mode & 0o777
-  ).toBe(0o600);
   const plan = await preview({ projectDir });
   expect(plan.toHost).toBe("demo.hack.local");
   expect(
@@ -285,102 +273,4 @@ test("rollback refuses altered ignore rule and foreign staging entries", async (
   expect(await readFile(join(projectDir, "hack.config.json"), "utf8")).toBe(
     plan.configText
   );
-});
-
-test.each([
-  false,
-  true,
-])("domain migration refuses native input before effects (legacy conflict: %s)", async (legacy) => {
-  const projectDir = await fixture();
-  const plan = await preview({ projectDir });
-  const native = join(projectDir, "hack.project.json");
-  await writeFile(native, '{"schema_version":1,"name":"native"}\n');
-  if (!legacy) {
-    await rm(join(projectDir, "hack.config.json"));
-    await rm(join(projectDir, "docker-compose.yml"));
-  }
-  const code = legacy
-    ? "E_NATIVE_PROJECT_CONFLICT"
-    : "E_NATIVE_PROJECT_UNSUPPORTED";
-  for (const operation of [
-    () => preview({ projectDir }),
-    () => apply({ projectDir, plan }),
-    () => rollback({ projectDir }),
-  ]) {
-    await expect(operation()).rejects.toThrow(code);
-  }
-  expect(await readFile(native, "utf8")).toBe(
-    '{"schema_version":1,"name":"native"}\n'
-  );
-  expect(
-    await lstat(join(projectDir, ".internal")).catch(() => null)
-  ).toBeNull();
-  if (legacy) {
-    expect(await readFile(join(projectDir, "hack.config.json"), "utf8")).toBe(
-      config
-    );
-    expect(await readFile(join(projectDir, "docker-compose.yml"), "utf8")).toBe(
-      compose
-    );
-  } else {
-    expect(
-      await lstat(join(projectDir, "hack.config.json")).catch(() => null)
-    ).toBeNull();
-    expect(
-      await lstat(join(projectDir, "docker-compose.yml")).catch(() => null)
-    ).toBeNull();
-  }
-});
-
-test("domain rollback preserves migrated bytes and journal when native input appears", async () => {
-  const projectDir = await fixture();
-  const plan = await preview({ projectDir });
-  await apply({ projectDir, plan });
-  const journal = join(projectDir, ".internal/domain-migration/record.json");
-  const saved = await readFile(journal);
-  await writeFile(
-    join(projectDir, "hack.project.json"),
-    "{invalid native marker\n"
-  );
-  await expect(rollback({ projectDir })).rejects.toThrow(
-    "E_NATIVE_PROJECT_CONFLICT"
-  );
-  expect(await readFile(join(projectDir, "hack.config.json"), "utf8")).toBe(
-    plan.configText
-  );
-  expect(await readFile(join(projectDir, "docker-compose.yml"), "utf8")).toBe(
-    plan.composeText
-  );
-  expect(await readFile(journal)).toEqual(saved);
-  expect(
-    await lstat(join(projectDir, ".internal/domain-migration.lock")).catch(
-      () => null
-    )
-  ).toBeNull();
-});
-
-test("domain apply rechecks native selection after plan preparation before publishing its journal", async () => {
-  const projectDir = await fixture();
-  const plan = await preview({ projectDir });
-  const changedPlan = {
-    ...plan,
-    get configText() {
-      writeFileSync(join(projectDir, "hack.project.json"), "{}\n");
-      return plan.configText;
-    },
-  };
-  await expect(apply({ projectDir, plan: changedPlan })).rejects.toThrow(
-    "E_NATIVE_PROJECT_CONFLICT"
-  );
-  expect(await readFile(join(projectDir, "hack.config.json"), "utf8")).toBe(
-    config
-  );
-  expect(await readFile(join(projectDir, "docker-compose.yml"), "utf8")).toBe(
-    compose
-  );
-  expect(
-    await lstat(join(projectDir, ".internal/domain-migration")).catch(
-      () => null
-    )
-  ).toBeNull();
 });

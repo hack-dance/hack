@@ -57,7 +57,6 @@ fn container_attachment_records_ownership_before_create_and_omits_values_from_me
             phase: "reserved".into(),
         };
         let mut receipt = Receipt {
-            normalized_input: None,
             relay_startup: None,
             relay_cleanup: None,
             probes: BTreeMap::new(),
@@ -68,7 +67,6 @@ fn container_attachment_records_ownership_before_create_and_omits_values_from_me
             plan_id: "b".repeat(64),
             phase: "preparing".into(),
             environment_attached: false,
-            startup_failure: None,
             initializer_cache_release: BTreeMap::new(),
             source: None,
             readiness: BTreeMap::from([("job".into(), Condition::Completed)]),

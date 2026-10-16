@@ -20,7 +20,6 @@ import {
   resolveRegisteredProjectByName,
   upsertProjectRegistration,
 } from "../src/lib/projects-registry.ts";
-import { restoreEnv } from "./helpers/env.ts";
 
 let tempDir: string | null = null;
 let originalHome: string | undefined;
@@ -36,7 +35,7 @@ afterEach(async () => {
     await rm(tempDir, { recursive: true, force: true });
     tempDir = null;
   }
-  restoreEnv("HOME", originalHome);
+  process.env.HOME = originalHome;
 });
 
 async function writeJson(path: string, value: unknown): Promise<void> {
@@ -114,7 +113,7 @@ test("upsertProjectRegistration returns conflict when name is taken", async () =
   expect(res.status).toBe("conflict");
 });
 
-test("upsertProjectRegistration refuses an unrelated checkout when the old path is missing", async () => {
+test("upsertProjectRegistration moves entry when old path missing", async () => {
   const registryPath = join(tempDir!, ".hack", "projects.json");
   await writeJson(registryPath, {
     version: 1,
@@ -130,26 +129,24 @@ test("upsertProjectRegistration refuses an unrelated checkout when the old path 
     ],
   });
 
-  const before = await readFile(registryPath, "utf8");
   const incoming = await createProject({ rootName: "repo-b", name: "alpha" });
   const res = await upsertProjectRegistration({
     project: incoming,
     nowIso: "2025-01-02T00:00:00Z",
   });
-  expect(res.status).toBe("conflict");
-  expect(await readFile(registryPath, "utf8")).toBe(before);
+  expect(res.status).toBe("updated");
+
+  const registry = await readProjectsRegistry();
+  expect(registry.projects[0]?.projectDir).toBe(
+    await realpath(incoming.projectDir)
+  );
 });
 
-test("upsertProjectRegistration recovers a confirmed dead registry owner", async () => {
+test("upsertProjectRegistration clears stale registry lock", async () => {
   const project = await createProject({ rootName: "repo-a", name: "alpha" });
   const lockPath = join(tempDir!, ".hack", "projects.json.lock");
   await mkdir(dirname(lockPath), { recursive: true });
-  const child = Bun.spawn([process.execPath, "-e", "process.exit(0)"], {
-    stdout: "ignore",
-    stderr: "ignore",
-  });
-  await child.exited;
-  await writeFile(lockPath, `${child.pid}\n`);
+  await writeFile(lockPath, "123\n");
   const staleTime = new Date(Date.now() - 60_000);
   await utimes(lockPath, staleTime, staleTime);
 

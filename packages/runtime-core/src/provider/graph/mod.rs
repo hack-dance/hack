@@ -1,100 +1,26 @@
 //! Fresh owned graph attempts. Recovery only observes or cleans recorded resources; never replay.
-pub mod one_off;
-mod service_exec;
-pub use service_exec::{
-    ServiceExecOptions, ServiceExecResult, service_exec, service_exec_generation,
-    service_exec_with_environment,
-};
-mod hostname_change;
-mod normalized;
-#[cfg(target_os = "macos")]
-pub use normalized::run_normalized_with_host_dependencies_until;
-pub use normalized::{
-    NormalizedInputIdentity, NormalizedRunOptions, compile_normalized_inputs, run_normalized,
-};
-#[cfg(target_os = "macos")]
-mod absent_publication_cleanup;
 mod admission;
 mod cache_provenance;
 mod dependency_hosts;
-#[cfg(target_os = "macos")]
-mod dependency_slots;
-#[cfg(target_os = "macos")]
-mod host_pin_recovery;
-#[cfg(target_os = "macos")]
-mod interrupted_start_cleanup;
-#[cfg(target_os = "macos")]
-pub(crate) mod publication_gate;
-#[cfg(target_os = "macos")]
-pub(crate) mod quiescent_dependency_recovery;
-#[cfg(target_os = "macos")]
-pub use absent_publication_cleanup::{
-    inspect as inspect_absent_publication_cleanup, recover as recover_absent_publication_cleanup,
-};
-#[cfg(target_os = "macos")]
-mod source_device_rebind;
-#[cfg(target_os = "macos")]
-pub use dependency_slots::{
-    inspect as dependency_reservations, recover_orphan as recover_dependency_reservation,
-};
-#[cfg(target_os = "macos")]
-pub use host_pin_recovery::{inspect as inspect_host_pin_recovery, recover as recover_host_pins};
-#[cfg(target_os = "macos")]
-pub use interrupted_start_cleanup::{
-    inspect as inspect_interrupted_start_cleanup, recover as recover_interrupted_start_cleanup,
-};
-#[cfg(all(test, target_os = "macos"))]
-pub(in crate::provider) use source_device_rebind::fixture_https_witness;
-#[cfg(target_os = "macos")]
-pub(in crate::provider) use source_device_rebind::https_devices;
-#[cfg(target_os = "macos")]
-pub use source_device_rebind::{
-    inspect as inspect_source_device_rebind, recover as recover_source_device_rebind,
-};
 mod initializer_cache;
 mod volume_subpaths;
 pub use dependency_hosts::dependency_address;
 #[cfg(target_os = "macos")]
 pub mod foreground;
 mod startup;
-mod startup_failure;
 #[cfg(target_os = "macos")]
-pub use startup::{Dependency, HostRelayRuntime, RefreshPolicy};
+pub use startup::{Dependency, HostRelayRuntime};
 mod archive;
 pub use archive::archive;
 mod bridge_recovery;
 mod bridges;
 pub use bridge_recovery::{export_bridge_recovery, inspect_bridge_recovery};
 pub(in crate::provider) use bridges::{initialize_owner_registry, verify_owner_registry};
-#[cfg(target_os = "macos")]
-mod acknowledged_publisher;
-mod cleanup_diagnostics;
 mod cleanup_enrollment;
-#[cfg(target_os = "macos")]
-pub use acknowledged_publisher::{
-    AcknowledgedPublisherSelection, inspect_missing_publication_lock,
-    release_dependencies as release_acknowledged_dependencies,
-    retire as retire_acknowledged_publisher, retire_missing_publication_lock,
-};
-#[cfg(target_os = "macos")]
-mod dead_owner_cleanup;
-#[cfg(target_os = "macos")]
-mod live_owner_cleanup;
-#[cfg(target_os = "macos")]
-pub(in crate::provider) use dead_owner_cleanup::HttpsArchiveGuard;
-#[cfg(target_os = "macos")]
-pub use dead_owner_cleanup::recover_cleanup;
-#[cfg(target_os = "macos")]
-pub use dead_owner_cleanup::retire_recovered_publisher;
-#[cfg(target_os = "macos")]
-pub use live_owner_cleanup::recover_live_owner;
-
 mod config;
 mod dependency_cache;
 mod image_environment;
 mod image_process;
-#[cfg(feature = "native-config-plan")]
-pub mod native;
 pub use cleanup_enrollment::{Phase as RelayCleanupPhase, RelayCleanup};
 mod endpoints;
 #[cfg(target_os = "macos")]
@@ -105,8 +31,8 @@ pub use host_relay::{
 };
 mod relay;
 pub use bridges::{
-    ReserveBridgeOptions, RouteSlot, inspect_bridges, publish_bridge, reconcile_bridges,
-    release_bridge, reserve_bridge, start_bridge,
+    ReserveBridgeOptions, inspect_bridges, publish_bridge, reconcile_bridges, release_bridge,
+    reserve_bridge, start_bridge,
 };
 mod environment;
 pub use endpoints::GuestEndpoint;
@@ -126,17 +52,9 @@ mod storage_inventory;
 pub use retention::{prune, reconcile_export};
 pub use storage_inventory::inventory as storage_inventory;
 mod restore;
-#[cfg(target_os = "macos")]
-pub(in crate::provider) mod retained_startup;
-#[cfg(target_os = "macos")]
-pub use retained_startup::preflight as retained_startup_preflight;
 mod restore_history;
 mod routes;
-mod service_logs;
 mod shutdown;
-pub use service_logs::{
-    ServiceLogOptions, ServiceLogResult, ServiceSelection, service_logs, service_selection,
-};
 mod source;
 use super::{engine::Engine, state};
 use crate::{
@@ -230,11 +148,6 @@ pub struct Resource {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Receipt {
-    /// Most recent observed startup failure; retained after cleanup and replay.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub startup_failure: Option<startup_failure::Failure>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub normalized_input: Option<NormalizedInputIdentity>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub relay_startup: Option<startup::Startup>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -260,11 +173,6 @@ pub struct Receipt {
 pub struct Snapshot {
     pub receipt: Receipt,
     pub journal_incomplete: bool,
-    /// Presentation only; native recovery selection still validates all evidence.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub pending_cleanup: Option<cleanup_diagnostics::PendingCleanup>,
-    #[cfg(target_os = "macos")]
-    pub interrupted_start_cleanup_incomplete: bool,
     pub observations: BTreeMap<String, Value>,
     pub guest_endpoints: BTreeMap<String, GuestEndpoint>,
     pub storage_references: Value,
@@ -313,16 +221,6 @@ fn inspect_resource(
         Err(e) if e.code == "engine_not_found" => return Ok(None),
         Err(e) => return Err(e),
     };
-    verify_resource_identity(receipt, resource, &value)?;
-    Ok(Some(value))
-}
-// Container layer contents never authorize cleanup: both writable and read-only
-// roots use the same immutable identity, labels, name and image checks.
-fn verify_resource_identity(
-    receipt: &Receipt,
-    resource: &Resource,
-    value: &Value,
-) -> Result<(), CandidateError> {
     let observed_labels = if resource.kind == Kind::Container {
         &value["Config"]["Labels"]
     } else {
@@ -374,7 +272,7 @@ fn verify_resource_identity(
             "Owned resource type, name or pinned image differs.",
         ));
     }
-    Ok(())
+    Ok(Some(value))
 }
 fn observation(value: &Value) -> Result<Observation, CandidateError> {
     let state = &value["State"];
@@ -412,12 +310,11 @@ fn check_network_request(
     resources: &BTreeMap<String, Resource>,
 ) -> Result<(), CandidateError> {
     if resources.values().any(|r| r.outbound)
-        && *intent != super::NetworkIntent::Internet
         && !matches!(intent, super::NetworkIntent::ApprovedHosts { cidrs, .. } if !cidrs.is_empty())
     {
         return Err(error(
             "graph_network_intent",
-            "Outbound graph networks require an internet or explicitly approved-host pool.",
+            "Outbound graph networks require an explicitly approved-host pool.",
         ));
     }
     Ok(())
@@ -502,19 +399,11 @@ fn load_at(
 ) -> Result<(Receipt, PathBuf), CandidateError> {
     state::check_private_directory(&root)?;
     let receipt: Receipt = state::read(&root.join("state.json"))?;
-    if receipt
-        .startup_failure
-        .as_ref()
-        .is_some_and(|failure| !failure.valid(&receipt))
-        || receipt.version != 1
+    if receipt.version != 1
         || receipt.run != run
         || receipt.owner != incarnation
         || !hex(&receipt.namespace, 64)
         || !hex(&receipt.plan_id, 64)
-        || receipt
-            .normalized_input
-            .as_ref()
-            .is_some_and(|input| !input.valid(&receipt.namespace))
         || receipt.source.as_ref().is_some_and(|s| {
             !s.valid()
                 || s.live.as_ref().is_some_and(|live| {
@@ -625,7 +514,6 @@ fn load_at(
 pub struct RunOptions<'a> {
     /// Explicitly consume an acknowledged mutable directory workspace.
     pub live_source: bool,
-    pub shared_source: bool,
     /// Explicit guest page/dentry cache release after selected fresh initializers.
     pub release_initializer_cache: BTreeSet<String>,
     /// Admit reviewed route intent; this does not itself publish an HTTPS route.
@@ -770,8 +658,7 @@ impl Session<'_, '_> {
             .get_mut(key)
             .ok_or_else(|| error("graph_service", "Unknown graph service."))?
             .phase = phase.into();
-        self.save()?;
-        one_off::record_effect(&self.root, key, &self.receipt.resources[key])
+        self.save()
     }
     fn create_resources(&mut self, retain_data: bool) -> Result<(), CandidateError> {
         let keys: Vec<_> = self
@@ -906,17 +793,10 @@ impl Driver for Session<'_, '_> {
                 service,
                 observation: Observation::Exited { code: 0 },
             } => self.record_cache_completion(service),
-            Event::Observed {
-                service,
-                observation,
-            } if observation.failed() => {
-                startup_failure::record(&mut self.receipt, service, observation)?;
-                self.save()
-            }
             Event::Observed { .. } => Ok(()),
             Event::Ready => {
                 if let Some(startup) = self.startup.as_mut() {
-                    startup.verify(&self.engine, &mut self.receipt, &self.root)?;
+                    startup.verify(&self.engine, &self.receipt)?;
                 }
                 self.receipt.phase = "ready-observed".into();
                 self.save()
@@ -1020,7 +900,7 @@ impl Driver for Session<'_, '_> {
             lease.verified_path_with_guest(self.engine.guest(), service)?;
         }
         if let Some(startup) = self.startup.as_mut() {
-            startup.verify(&self.engine, &mut self.receipt, &self.root)?;
+            startup.verify(&self.engine, &self.receipt)?;
         }
         self.check_cancelled()?;
         self.engine
@@ -1041,7 +921,7 @@ impl Driver for Session<'_, '_> {
     }
     fn observe(&mut self, service: &str) -> Result<Observation, CandidateError> {
         if let Some(startup) = self.startup.as_mut() {
-            startup.verify(&self.engine, &mut self.receipt, &self.root)?;
+            startup.verify(&self.engine, &self.receipt)?;
         }
         let resource = &self.receipt.resources[&format!("container:{service}")];
         let value = inspect_resource(&self.engine, &self.receipt, resource)?
@@ -1055,7 +935,6 @@ pub fn run(candidate: &Candidate, options: RunOptions<'_>) -> Result<Receipt, Ca
     let inputs = project::inputs::compile(
         candidate,
         PlanOptions {
-            branch: options.project.branch,
             project: options.project.project,
             compose_file: options.project.compose_file,
             profiles: options.project.profiles,
@@ -1063,7 +942,7 @@ pub fn run(candidate: &Candidate, options: RunOptions<'_>) -> Result<Receipt, Ca
         options.expected_plan,
         options.non_secret_values,
     )?;
-    run_inputs(candidate, options, inputs, BTreeMap::new(), None, None)
+    run_inputs(candidate, options, inputs, BTreeMap::new(), None)
 }
 /// Initial graph startup with a retained foreground dependency owner. The caller
 /// must keep runtime alive and use its enrolled cleanup, including after failure.
@@ -1099,7 +978,6 @@ pub fn run_with_host_dependencies_until(
             project::inputs::compile(
                 candidate,
                 PlanOptions {
-                    branch: options.project.branch,
                     project: options.project.project,
                     compose_file: options.project.compose_file,
                     profiles: options.project.profiles,
@@ -1114,14 +992,7 @@ pub fn run_with_host_dependencies_until(
     };
     check_environment_deadline(deadline)?;
     startup::Driver::check_cancelled(runtime)?;
-    run_inputs(
-        candidate,
-        options,
-        inputs,
-        environments,
-        Some(runtime),
-        None,
-    )
+    run_inputs(candidate, options, inputs, environments, Some(runtime))
 }
 /// Experimental explicit in-memory delivery. No native provider is selected or called.
 pub fn run_with_environment(
@@ -1132,7 +1003,7 @@ pub fn run_with_environment(
 ) -> Result<Receipt, CandidateError> {
     let (inputs, environments) =
         compile_environment_inputs(candidate, &options, managed, lifetime)?;
-    run_inputs(candidate, options, inputs, environments, None, None)
+    run_inputs(candidate, options, inputs, environments, None)
 }
 type EnvironmentInputs = (
     project::inputs::ExecutionInputs,
@@ -1191,7 +1062,6 @@ pub(super) fn compile_environment_inputs_until(
     let scoped = project::inputs::compile_scoped(
         candidate,
         PlanOptions {
-            branch: options.project.branch,
             project: options.project.project,
             compose_file: options.project.compose_file,
             profiles: options.project.profiles,
@@ -1218,7 +1088,6 @@ fn run_inputs(
     inputs: project::inputs::ExecutionInputs,
     environments: BTreeMap<String, super::environment::PendingEnvironment>,
     startup: Option<&mut dyn startup::Driver>,
-    normalized_input: Option<NormalizedInputIdentity>,
 ) -> Result<Receipt, CandidateError> {
     if let Some(driver) = startup.as_ref() {
         driver.validate_inputs(&inputs)?;
@@ -1242,22 +1111,9 @@ fn run_inputs(
             "Live source cannot yet bind external execution substitutions.",
         ));
     }
-    source::requested_mode(
-        &inputs.review.plan,
-        options.source_revision,
-        options.live_source,
-        options.shared_source,
-    )?;
+    source::requested(&inputs.review.plan, options.source_revision)?;
     // The Engine retains OwnedGuest's mutation lease through immutable/live source
     // verification and durable consumer publication, serializing sync and admission.
-    let admission_deadline = std::time::Instant::now() + options.timeout;
-    #[cfg(target_os = "macos")]
-    let engine = Engine::connect_until(candidate, admission_deadline, || {
-        startup
-            .as_ref()
-            .is_some_and(|driver| driver.check_cancelled().is_err())
-    })?;
-    #[cfg(not(target_os = "macos"))]
     let engine = Engine::connect(candidate)?;
     if engine.guest().profile() != super::Profile::Development {
         return Err(error(
@@ -1280,13 +1136,12 @@ fn run_inputs(
         ));
     }
     super::source_job::check_reservations(&engine)?;
-    let source = source::prepare_mode(
+    let source = source::prepare(
         candidate,
         &engine,
         &inputs.review.plan,
         options.source_revision,
         options.live_source,
-        options.shared_source,
     )?;
     let mut prepared = config::prepare_delivery(
         inputs,
@@ -1338,8 +1193,6 @@ fn run_inputs(
         .map_err(state::io)?;
     let probe_states = probes::fresh(&engine, &prepared.configs, prepared.probes)?;
     let receipt = Receipt {
-        startup_failure: None,
-        normalized_input,
         relay_startup: None,
         relay_cleanup: None,
         probes: probe_states,
@@ -1386,11 +1239,7 @@ fn run_inputs(
             )?;
         }
         session.create_resources(false)?;
-        execution::run(
-            &prepared.graph,
-            &mut session,
-            admission_deadline.saturating_duration_since(std::time::Instant::now()),
-        )
+        execution::run(&prepared.graph, &mut session, options.timeout)
     })();
     if let Err(failure) = result {
         session.receipt.phase = "failed-retained".into();
@@ -1450,96 +1299,6 @@ pub fn inspect(candidate: &Candidate, run: &str) -> Result<Snapshot, CandidateEr
     let engine = Engine::connect_cleanup(candidate)?;
     inspect_using(candidate, &engine, run)
 }
-
-fn unchanged_normalized_review(
-    receipt: &Receipt,
-    plan_id: &str,
-    normalized: &NormalizedInputIdentity,
-) -> bool {
-    receipt.plan_id == plan_id && receipt.normalized_input.as_ref() == Some(normalized)
-}
-
-/// Read-only proof for an exact normalized review or a compatible shared-source
-/// transition before restart cleanup. Image-only unchanged graphs need no source.
-/// Admission repeats the compatibility check while holding the provider lease.
-pub fn source_compatibility(
-    candidate: &Candidate,
-    run: &str,
-    plan_id: &str,
-    plan: &project::PlanData,
-    normalized: &NormalizedInputIdentity,
-) -> Result<Value, CandidateError> {
-    let refused = || {
-        error(
-            "graph_source_compatibility",
-            "Retained graph or reviewed shared source changed; the current graph was not stopped.",
-        )
-    };
-    if candidate
-        .plan_with_branch(&plan.source, plan.branch.as_deref())?
-        .namespace
-        != plan.namespace
-    {
-        return Err(refused());
-    }
-    let engine = Engine::connect_cleanup(candidate)?;
-    let (receipt, root) = load(candidate, &engine, run)?;
-    #[cfg(target_os = "macos")]
-    let source_rebind = source_device_rebind::select(&engine, &receipt, &root)?;
-    #[cfg(target_os = "macos")]
-    let source_receipt = source_rebind
-        .as_ref()
-        .map_or(&receipt, |selected| selected.source_receipt());
-    #[cfg(not(target_os = "macos"))]
-    let source_receipt = &receipt;
-    if !hex(plan_id, 64)
-        || project::identity(plan)? != plan_id
-        || !normalized.matches_plan(plan)
-        || receipt.namespace != plan.namespace
-        || !matches!(
-            receipt.phase.as_str(),
-            "ready-observed" | "stopped-data-retained"
-        )
-        || root.join("state.pending").exists()
-        || root.join("state.pending").is_symlink()
-    {
-        return Err(refused());
-    }
-    let cached = plan
-        .services
-        .values()
-        .any(|service| service.active && service.dependency_cache.is_some());
-    let revision = source_receipt
-        .source
-        .as_ref()
-        .map(|binding| binding.revision.as_str());
-    let needs_source = cached
-        || plan.services.values().any(|service| {
-            service.active && service.mounts.iter().any(|mount| mount.kind == "bind")
-        });
-    if needs_source && revision.is_none() {
-        return Err(refused());
-    }
-    if !unchanged_normalized_review(&receipt, plan_id, normalized) {
-        let revision = revision.ok_or_else(refused)?;
-        if hostname_change::prepare(&engine, plan, source_receipt, normalized)?.is_none() {
-            source::prepare_shared_changed(
-                &engine,
-                plan,
-                source_receipt,
-                cached.then_some(revision),
-            )?;
-        }
-    }
-    Ok(json!({
-        "run": receipt.run,
-        "owner": receipt.owner,
-        "namespace": receipt.namespace,
-        "plan": receipt.plan_id,
-        "reviewed_plan": plan_id,
-        "source_revision": if cached { revision } else { None },
-    }))
-}
 fn inspect_using(
     candidate: &Candidate,
     engine: &Engine<'_>,
@@ -1547,11 +1306,8 @@ fn inspect_using(
 ) -> Result<Snapshot, CandidateError> {
     let (receipt, root) = load(candidate, engine, run)?;
     let mut observations = BTreeMap::new();
-    let journal_incomplete = root.join("state.pending").exists()
-        || root.join("state.pending").is_symlink()
-        || startup::require_dependency_rebind_complete(&root, &receipt).is_err();
-    #[cfg(target_os = "macos")]
-    let interrupted_start_cleanup_incomplete = interrupted_start_cleanup::incomplete(&root, run)?;
+    let journal_incomplete =
+        root.join("state.pending").exists() || root.join("state.pending").is_symlink();
     let mut networks = BTreeMap::new();
     for (key, resource) in receipt
         .resources
@@ -1603,13 +1359,9 @@ fn inspect_using(
         observations.insert(key.clone(), value);
     }
     let storage_references = storage::references(&receipt, journal_incomplete, &observations);
-    let pending_cleanup = cleanup_diagnostics::pending(&receipt, &observations, journal_incomplete);
     Ok(Snapshot {
         receipt,
         journal_incomplete,
-        pending_cleanup,
-        #[cfg(target_os = "macos")]
-        interrupted_start_cleanup_incomplete,
         observations,
         guest_endpoints,
         storage_references,
@@ -1632,26 +1384,9 @@ pub fn cleanup(
 fn cleanup_owned(
     candidate: &Candidate,
     engine: &Engine<'_>,
-    receipt: Receipt,
-    root: &std::path::Path,
-    remove_data: bool,
-) -> Result<Receipt, CandidateError> {
-    cleanup_owned_fenced(candidate, engine, receipt, root, remove_data, false, || {
-        Ok(())
-    })
-}
-
-/// An explicit recovery can recheck its independent host proof immediately
-/// before each destructive graph effect. Ordinary callers use the same engine
-/// lease and state machine without an additional recovery witness.
-fn cleanup_owned_fenced(
-    candidate: &Candidate,
-    engine: &Engine<'_>,
     mut receipt: Receipt,
     root: &std::path::Path,
     remove_data: bool,
-    early_intent: bool,
-    fence: impl Fn() -> Result<(), CandidateError>,
 ) -> Result<Receipt, CandidateError> {
     if root.join("state.pending").exists() || root.join("state.pending").is_symlink() {
         return Err(error(
@@ -1659,35 +1394,11 @@ fn cleanup_owned_fenced(
             "Pending graph journal is retained; cleanup is blocked until journal reconciliation.",
         ));
     }
-    fence()?;
-    // Absence recovery must commit the graph cleanup intent before changing a
-    // selected relay/bridge inventory. A crash can then resume from an exact
-    // durable intent even when an early external effect already completed.
-    let environment_slots = if early_intent {
-        let slots = environment::cleanup_slots(candidate, engine, &receipt)?;
-        receipt.phase = "cleanup-intent".into();
-        state::write(&root.join("state.json"), &receipt)?;
-        fence()?;
-        slots
-    } else {
-        Vec::new()
-    };
     startup::cleanup_guest(engine, &receipt, false)?;
-    fence()?;
     bridges::release_run(candidate, engine, &receipt)?;
-    #[cfg(test)]
-    if early_intent {
-        fault_pause(root, &receipt.run, "absent-after-bridge-release")?;
-    }
-    let environment_slots = if early_intent {
-        environment_slots
-    } else {
-        let slots = environment::cleanup_slots(candidate, engine, &receipt)?;
-        receipt.phase = "cleanup-intent".into();
-        state::write(&root.join("state.json"), &receipt)?;
-        slots
-    };
-    fence()?;
+    let environment_slots = environment::cleanup_slots(candidate, engine, &receipt)?;
+    receipt.phase = "cleanup-intent".into();
+    state::write(&root.join("state.json"), &receipt)?;
     shutdown::stop_owned(engine, &receipt, root)?;
     for kind in [Kind::Container, Kind::Network, Kind::Volume] {
         if kind == Kind::Volume && !remove_data {
@@ -1709,14 +1420,12 @@ fn cleanup_owned_fenced(
                 state::write(&root.join("state.json"), &receipt)?;
                 continue;
             }
-            fence()?;
             if let Some(value) = inspect_resource(engine, &receipt, &resource)? {
                 let target = if kind == Kind::Volume {
                     resource.name.as_str()
                 } else {
                     value["Id"].as_str().expect("verified id")
                 };
-                fence()?;
                 engine.request(
                     Method::DELETE,
                     &format!(
@@ -1743,21 +1452,14 @@ fn cleanup_owned_fenced(
             // only the final receipt needs another commit, including environment-slot retirement.
             #[cfg(test)]
             fault_pause(root, &receipt.run, "cleanup-after-remove")?;
-            #[cfg(test)]
-            if kind == Kind::Volume {
-                fault_pause(root, &receipt.run, "retained-data-after-volume-remove")?;
-            }
         }
     }
-    fence()?;
     startup::cleanup_guest(engine, &receipt, true)?;
     startup::verify_cleanup(engine, &receipt)?;
     probes::cleanup(engine, &mut receipt)?;
     for slot in environment_slots {
-        fence()?;
         super::environment_recovery::retire(candidate, engine.guest(), &slot, None)?;
     }
-    fence()?;
     receipt.phase = if remove_data {
         "removed"
     } else {
@@ -1765,7 +1467,6 @@ fn cleanup_owned_fenced(
     }
     .into();
     state::write(&root.join("state.json"), &receipt)?;
-    fence()?;
     Ok(receipt)
 }
 
@@ -1803,7 +1504,6 @@ pub fn restart(candidate: &Candidate, options: RunOptions<'_>) -> Result<Receipt
     if options.timeout.is_zero() || options.timeout > Duration::from_secs(600) {
         return Err(error("graph_budget", "Invalid graph timeout."));
     }
-    let project_path = options.project.project;
     let inputs = project::inputs::compile(
         candidate,
         options.project,
@@ -1818,7 +1518,6 @@ pub fn restart(candidate: &Candidate, options: RunOptions<'_>) -> Result<Receipt
         ));
     }
     let (mut receipt, root) = load(candidate, &engine, options.run_id)?;
-    normalized::require_file_replay(&receipt)?;
     initializer_cache::require_resolved(&receipt)?;
     cleanup_enrollment::ordinary_mutation(&root, &receipt)?;
     environment::require_replay_supported(&receipt)?;
@@ -1839,7 +1538,6 @@ pub fn restart(candidate: &Candidate, options: RunOptions<'_>) -> Result<Receipt
         &receipt,
         options.source_revision,
         options.live_source,
-        options.shared_source,
         options.non_secret_values,
     )?;
     let mut prepared = config::prepare(
@@ -1892,9 +1590,6 @@ pub fn restart(candidate: &Candidate, options: RunOptions<'_>) -> Result<Receipt
             ));
         }
     }
-    source::verify_cache_scope(source.as_ref(), project_path)?;
-    #[cfg(target_os = "macos")]
-    source_device_rebind::verify_cache_scope_origin(candidate, &receipt)?;
     receipt.phase = "restarting".into();
     for resource in receipt
         .resources

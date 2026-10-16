@@ -62,11 +62,13 @@ impl Snapshot {
             entries.insert(path.clone(), (generated, content.as_bytes().to_vec()));
         }
         (self.receipt.entries, self.files) = entries.into_values().unzip();
-        self.receipt.revision = revision_hash(
-            self.receipt.schema_version,
-            &self.receipt.selection_sha256,
-            &self.receipt.entries,
-        )?;
+        self.receipt.revision = format!(
+            "{:x}",
+            Sha256::digest(
+                serde_json::to_vec(&(1_u32, &self.receipt.entries))
+                    .map_err(|_| generated::refused())?
+            )
+        );
         self.receipt.verify_generated(plan)?;
         Ok(self)
     }
@@ -109,7 +111,6 @@ mod tests {
         let plan = project::plan(
             &candidate,
             PlanOptions {
-                branch: None,
                 project: &source,
                 compose_file: Path::new("compose.yaml"),
                 profiles: &[],

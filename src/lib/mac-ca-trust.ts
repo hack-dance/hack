@@ -1,4 +1,4 @@
-import { createHash, X509Certificate } from "node:crypto";
+import { X509Certificate } from "node:crypto";
 import { readTextFile } from "./fs.ts";
 import { exec } from "./shell.ts";
 
@@ -10,111 +10,6 @@ const SINGLE_PEM_CERTIFICATE =
   /^[ \t\r\n]*-----BEGIN CERTIFICATE-----\r?\n([A-Za-z0-9+/=\r\n]+)-----END CERTIFICATE-----[ \t\r\n]*$/;
 const PEM_LINE_BREAKS = /[\r\n]/g;
 const MAX_CA_PEM_BYTES = 64 * 1024;
-/** Caddy writes the creation year into its root name, e.g. "- 2025 ECC Root". */
-const ROOT_NAME_YEAR = /\b\d{4}\b/g;
-const MAX_LISTED_FINGERPRINTS = 32;
-const MAX_MESSAGE_FINGERPRINTS = 8;
-
-/**
- * Same-family roots left in the System keychain whose exact DER differs from
- * the current root. Only counts and public SHA-256 fingerprints are recorded:
- * never paths, PEM bodies or other keychain values.
- */
-export interface SupersededRootInventory {
-  readonly count: number;
-  readonly expired: number;
-  readonly notYetValid: number;
-  /** Uppercase hex SHA-256 of each root's DER, as `security find-certificate -Z` prints it. */
-  readonly sha256: readonly string[];
-}
-
-function rootFamily(subject: string): string {
-  return subject.replace(ROOT_NAME_YEAR, "YYYY");
-}
-
-/**
- * Inventory superseded roots from `security find-certificate -a -p` output.
- * Classification is by exact DER; the subject (ignoring Caddy's year) only
- * groups self-issued CA candidates into the current root's family. This never
- * establishes trust and never selects anything for removal.
- */
-export function inventorySupersededRoots(input: {
-  readonly pem: string;
-  readonly certificate: X509Certificate;
-  readonly now: number;
-}): SupersededRootInventory {
-  const family = rootFamily(input.certificate.subject);
-  const roots = new Map<string, X509Certificate>();
-  for (const [pem] of input.pem.matchAll(PEM_CERTIFICATE)) {
-    let candidate: X509Certificate;
-    try {
-      candidate = new X509Certificate(pem);
-    } catch {
-      continue;
-    }
-    if (
-      candidate.raw.equals(input.certificate.raw) ||
-      !candidate.ca ||
-      candidate.issuer !== candidate.subject ||
-      rootFamily(candidate.subject) !== family
-    ) {
-      continue;
-    }
-    const sha256 = createHash("sha256")
-      .update(candidate.raw)
-      .digest("hex")
-      .toUpperCase();
-    roots.set(sha256, candidate);
-  }
-  let expired = 0;
-  let notYetValid = 0;
-  for (const root of roots.values()) {
-    if (input.now > Date.parse(root.validTo)) {
-      expired += 1;
-    } else if (input.now < Date.parse(root.validFrom)) {
-      notYetValid += 1;
-    }
-  }
-  return {
-    count: roots.size,
-    expired,
-    notYetValid,
-    sha256: [...roots.keys()].sort().slice(0, MAX_LISTED_FINGERPRINTS),
-  };
-}
-
-/** Informational Doctor text; removal stays a user-run, fingerprint-exact step. */
-export function describeSupersededRoots(
-  inventory: SupersededRootInventory | undefined
-): {
-  readonly status: "ok" | "warn";
-  readonly message: string;
-} {
-  if (!inventory) {
-    return {
-      status: "warn",
-      message:
-        "Not inventoried: the current Caddy root or the System keychain listing is unavailable.",
-    };
-  }
-  if (inventory.count === 0) {
-    return {
-      status: "ok",
-      message: "0 superseded Caddy roots remain in the macOS System keychain.",
-    };
-  }
-  const validity = [`${inventory.expired} expired`];
-  if (inventory.notYetValid > 0) {
-    validity.push(`${inventory.notYetValid} not yet valid`);
-  }
-  const listed = inventory.sha256.slice(0, MAX_MESSAGE_FINGERPRINTS);
-  const more = inventory.count - listed.length;
-  const noun = inventory.count === 1 ? "root remains" : "roots remain";
-  return {
-    status: "warn",
-    message: `${inventory.count} superseded Caddy ${noun} in the macOS System keychain (${validity.join(", ")}). SHA-256: ${listed.join(", ")}${more > 0 ? ` (+${more} more)` : ""}. Hack does not remove them; see docs/guides/macos-certificate-trust.md to remove one by exact fingerprint.`,
-  };
-}
 
 export function containsCertificate(input: {
   readonly pem: string;
@@ -193,35 +88,6 @@ export async function inspectMacCaEligibility(input: {
   return { installable: true, certificate };
 }
 
-/**
- * Read-only System-keychain inventory relative to the exported current root.
- * Returns undefined when the current root or the keychain listing is unreadable.
- */
-export async function inspectSupersededMacRoots(input: {
-  readonly certPath: string;
-  readonly exec?: typeof exec;
-  readonly readTextFile?: typeof readTextFile;
-  readonly now?: number;
-}): Promise<SupersededRootInventory | undefined> {
-  const { certificate } = await inspectMacCaEligibility(input);
-  if (!certificate) {
-    return undefined;
-  }
-  const execute = input.exec ?? exec;
-  const listed = await execute(
-    ["security", "find-certificate", "-a", "-p", SYSTEM_KEYCHAIN],
-    { stdin: "ignore" }
-  );
-  if (listed.exitCode !== 0) {
-    return undefined;
-  }
-  return inventorySupersededRoots({
-    pem: listed.stdout,
-    certificate,
-    now: input.now ?? Date.now(),
-  });
-}
-
 /** Check the exported CA itself, never a similarly named keychain entry.
  * Do not supply it as a verification anchor: that would manufacture trust.
  */
@@ -236,8 +102,6 @@ export async function checkMacCaTrust(input: {
   readonly installable: boolean;
   readonly issue?: string;
   readonly certificate?: X509Certificate;
-  /** Present only when the System keychain listing was read successfully. */
-  readonly supersededRoots?: SupersededRootInventory;
 }> {
   const eligibility = await inspectMacCaEligibility(input);
   if (!eligibility.installable) {
@@ -249,28 +113,16 @@ export async function checkMacCaTrust(input: {
     ["security", "find-certificate", "-a", "-p", SYSTEM_KEYCHAIN],
     { stdin: "ignore" }
   );
-  if (installed.exitCode !== 0) {
+  if (
+    installed.exitCode !== 0 ||
+    !containsCertificate({ pem: installed.stdout, certificate })
+  ) {
     return {
       trusted: false,
       installable: true,
       issue:
         "macOS System keychain is missing the current Caddy Local CA (it may contain an older root)",
       certificate,
-    };
-  }
-  const supersededRoots = inventorySupersededRoots({
-    pem: installed.stdout,
-    certificate,
-    now: input.now ?? Date.now(),
-  });
-  if (!containsCertificate({ pem: installed.stdout, certificate })) {
-    return {
-      trusted: false,
-      installable: true,
-      issue:
-        "macOS System keychain is missing the current Caddy Local CA (it may contain an older root)",
-      certificate,
-      supersededRoots,
     };
   }
   const verified = await execute(
@@ -290,13 +142,12 @@ export async function checkMacCaTrust(input: {
     { stdin: "ignore" }
   );
   return verified.exitCode === 0
-    ? { trusted: true, installable: true, certificate, supersededRoots }
+    ? { trusted: true, installable: true, certificate }
     : {
         trusted: false,
         installable: true,
         issue:
           "Current Caddy Local CA does not pass macOS TLS trust verification",
         certificate,
-        supersededRoots,
       };
 }

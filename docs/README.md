@@ -32,14 +32,3 @@ That local archive is not included in a fresh clone.
 The command reference is generated with `bun run docs:cli-reference`. Agent-facing
 setup content is generated from `src/agents/instruction-source.ts` and
 `src/agents/onboarding-prompt.ts`. End-to-end checks live in `tests/e2e/`.
-
-### Dependabot alert inventory
-
-To plan dependency updates, list open Dependabot alerts with
-`bun scripts/dependabot-inventory.ts` (add `--repo owner/name` for another repository,
-or `--json` for machine-readable output). The script prints each alert's package,
-ecosystem, severity, manifest path and first patched version ("fixed-in"), sorted by
-severity. It sends only `GET` requests through your existing `gh` authentication,
-writes no files and changes no alerts or dependencies. Make the dependency updates in
-separate, reviewed changes. You need read access to the repository's Dependabot
-alerts.

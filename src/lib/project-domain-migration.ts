@@ -12,10 +12,6 @@ import {
 import { join, parse, resolve } from "node:path";
 import { isRecord } from "./guards.ts";
 import { planProjectDomainMigration } from "./project-domain-plan.ts";
-import {
-  assertLegacyProjectDirectory,
-  ProjectInputSelectionError,
-} from "./project-input-selection.ts";
 
 const FILES = ["hack.config.json", "docker-compose.yml"] as const;
 const LIMIT = 1024 * 1024;
@@ -146,7 +142,6 @@ export async function previewProjectDomainMigration(opts: {
   readonly projectDir: string;
   readonly claimedHosts?: readonly string[];
 }): Promise<ProjectDomainMigrationPreview> {
-  await assertLegacyProjectDirectory({ projectDir: opts.projectDir });
   try {
     const projectDir = resolve(opts.projectDir);
     const info = await directory(projectDir);
@@ -167,10 +162,7 @@ export async function previewProjectDomainMigration(opts: {
       directory: { dev: info.dev, ino: info.ino },
       files: values.map((value) => value.identity),
     };
-  } catch (error: unknown) {
-    if (error instanceof ProjectInputSelectionError) {
-      throw error;
-    }
+  } catch {
     throw failure();
   }
 }
@@ -233,7 +225,6 @@ async function withLock<T>(
   recover = false
 ): Promise<T> {
   await directory(projectDir);
-  await assertLegacyProjectDirectory({ projectDir });
   const internal = join(projectDir, ".internal");
   try {
     await mkdir(internal, { mode: 0o700 });
@@ -310,7 +301,6 @@ async function replace(
   mode: number,
   expected: Identity | undefined
 ) {
-  await assertLegacyProjectDirectory({ projectDir });
   await directory(projectDir);
   const temporary = join(
     join(projectDir, ".internal/domain-migration/staging"),
@@ -325,7 +315,6 @@ async function replace(
     ) {
       throw failure();
     }
-    await assertLegacyProjectDirectory({ projectDir });
     await rename(temporary, join(projectDir, name));
     await syncDir(projectDir);
   } finally {
@@ -340,7 +329,6 @@ export async function applyProjectDomainMigration(opts: {
   readonly projectDir: string;
   readonly plan: ProjectDomainMigrationPreview;
 }): Promise<void> {
-  await assertLegacyProjectDirectory({ projectDir: opts.projectDir });
   try {
     const projectDir = resolve(opts.projectDir);
     if (projectDir !== opts.plan.projectDir) {
@@ -385,7 +373,6 @@ export async function applyProjectDomainMigration(opts: {
           mode: value.identity.mode,
         };
       });
-      await assertLegacyProjectDirectory({ projectDir });
       const journal = join(internal, "domain-migration");
       await mkdir(journal, { mode: 0o700 });
       // Publish and sync the ignore rule before any potentially sensitive bytes.
@@ -431,10 +418,7 @@ export async function applyProjectDomainMigration(opts: {
         );
       }
     });
-  } catch (error: unknown) {
-    if (error instanceof ProjectInputSelectionError) {
-      throw error;
-    }
+  } catch {
     throw failure();
   }
 }
@@ -510,7 +494,6 @@ async function validateStaging(journal: string): Promise<string[]> {
 export async function rollbackProjectDomainMigration(opts: {
   readonly projectDir: string;
 }): Promise<void> {
-  await assertLegacyProjectDirectory({ projectDir: opts.projectDir });
   try {
     const projectDir = resolve(opts.projectDir);
     await withLock(
@@ -578,10 +561,7 @@ export async function rollbackProjectDomainMigration(opts: {
       },
       true
     );
-  } catch (error: unknown) {
-    if (error instanceof ProjectInputSelectionError) {
-      throw error;
-    }
+  } catch {
     throw failure();
   }
 }

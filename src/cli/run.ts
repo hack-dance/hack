@@ -1,6 +1,5 @@
 import { cancel } from "@clack/prompts";
 import {
-  ClosedCliError,
   emitCliResult,
   errorResult,
   errorResultFromUnknown,
@@ -19,10 +18,7 @@ import {
   parsePositionalsForCommand,
   resolveCommand,
 } from "./command.ts";
-import { resolveRequestedEnvName } from "./env-selection.ts";
 import { printHelpForPath } from "./help.ts";
-import { optEnv, optProject } from "./options.ts";
-import { parseProjectSelectorOption } from "./project-selector.ts";
 import { CLI_SPEC } from "./spec.ts";
 
 function isTruthyEnv(value: string | undefined): boolean {
@@ -84,14 +80,6 @@ export async function runCli(argv: readonly string[]): Promise<number> {
       resolved.command.options,
       parsed.values
     );
-    validateSharedEnvSelection({
-      command: resolved.command,
-      parsedValues: parsed.values,
-    });
-    validateSharedProjectSelection({
-      command: resolved.command,
-      parsedValues: parsed.values,
-    });
     const pos = parsePositionalsForCommand(
       resolved.command.positionals,
       resolved.remainingPositionals
@@ -111,26 +99,7 @@ export async function runCli(argv: readonly string[]): Promise<number> {
       },
     });
   } catch (error: unknown) {
-    const sensitiveError = resolveSensitiveOutputError(argv);
-    if (sensitiveError !== undefined) {
-      // Never echo parser/backend errors: these may contain values or ciphertext.
-      process.stderr.write(`${sensitiveError}\n`);
-      return 1;
-    }
     return await handleRunCliError({ error, jsonRequested });
-  }
-}
-
-/** Recover command identity even when strict parsing rejected its arguments. */
-function resolveSensitiveOutputError(
-  argv: readonly string[]
-): string | undefined {
-  try {
-    const parsed = parseCliArgv(CLI_SPEC, argv, { allowUnknownOptions: true });
-    return resolveCommand(CLI_SPEC, parsed.positionals).command
-      ?.sensitiveOutputError;
-  } catch {
-    return undefined;
   }
 }
 
@@ -139,10 +108,6 @@ function resolveSensitiveOutputError(
  * stays a single parseable envelope for every error class (usage errors
  * included — they emit E_USAGE and skip the printed help); the human-readable
  * message still reaches stderr.
- *
- * Without `--json`, known errors ({@link HackCliError}, {@link ClosedCliError})
- * print their closed message only, plus the stack when `HACK_DEBUG=1`. Any
- * other exception is unexpected and always prints its stack.
  */
 export async function handleRunCliError(opts: {
   readonly error: unknown;
@@ -170,32 +135,15 @@ export async function handleRunCliError(opts: {
 
   if (error instanceof HackCliError) {
     logger.error({ message: `${error.code}: ${error.message}` });
-    logDebugStack(error);
     return 1;
   }
 
-  if (error instanceof ClosedCliError) {
-    // A known refusal: its message is the whole report. A stack would only
-    // repeat it with internal frames.
-    logger.error({ message: error.message });
-    logDebugStack(error);
-    return 1;
-  }
-
-  // Unexpected exceptions keep their stack: it is the only lead to the bug.
   const message = error instanceof Error ? error.message : "Unknown error";
   cancel(message);
   if (error instanceof Error && error.stack) {
     logger.error({ message: error.stack });
   }
   return 1;
-}
-
-/** Known errors show their stack only on request (`HACK_DEBUG=1`). */
-function logDebugStack(error: Error): void {
-  if (isTruthyEnv(process.env.HACK_DEBUG) && error.stack) {
-    logger.error({ message: error.stack });
-  }
 }
 
 /**
@@ -290,43 +238,6 @@ function validateResolvedCommandOptions(opts: {
     throw new CliUsageError(
       `Option(s) not valid for "${opts.command.name}": ${disallowed.map((option) => `--${option}`).join(", ")}`
     );
-  }
-}
-
-/**
- * Refuse an unusable shared `--env` value before the handler runs, so no
- * command discovers a project, migrates or reads files, or starts a child
- * process with it. The refusal is fixed text that never includes the value.
- */
-function validateSharedEnvSelection(opts: {
-  readonly command: AnyCommandSpec;
-  readonly parsedValues: Record<string, unknown>;
-}): void {
-  if (!opts.command.options.includes(optEnv)) {
-    return;
-  }
-  const value = opts.parsedValues[optEnv.name];
-  if (typeof value === "string") {
-    resolveRequestedEnvName({ envOption: value });
-  }
-}
-
-/**
- * Refuse a malformed shared `--project` value before the handler runs, so no
- * command reads the registry, discovers a project or starts a child process
- * with a value-bearing argument. The refusal is fixed text that never
- * includes the argument or a slug derived from it.
- */
-function validateSharedProjectSelection(opts: {
-  readonly command: AnyCommandSpec;
-  readonly parsedValues: Record<string, unknown>;
-}): void {
-  if (!opts.command.options.includes(optProject)) {
-    return;
-  }
-  const value = opts.parsedValues[optProject.name];
-  if (typeof value === "string") {
-    parseProjectSelectorOption({ projectOpt: value });
   }
 }
 

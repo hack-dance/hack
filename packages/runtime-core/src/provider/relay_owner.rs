@@ -25,7 +25,7 @@ fn refused() -> CandidateError {
         "Relay owner, target generation or request is invalid.",
     )
 }
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy)]
 pub struct Context {
     pub runtime: [u8; 16],
     pub boot: [u8; 16],
@@ -51,7 +51,7 @@ pub struct Grant {
 }
 /// Owner-local graph selection, derived by the graph boundary from verified identity.
 /// It is not mutation authority and must be reselected under the runtime mutation lease.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy)]
 pub struct GraphScope {
     context: Context,
     id: [u8; 32],
@@ -277,32 +277,6 @@ impl RelayOwner {
         self.relay
             .admit(transport, &entry.endpoint, &entry.authority, budget)
     }
-    /// Select only among targets registered for this verified listener. The hint
-    /// grants no authority: challenge/proof/acceptance still precede upstream I/O.
-    fn admit_shared(
-        &mut self,
-        targets: &[Target],
-        transport: UnixStream,
-        deadline: Instant,
-        hello: &[u8],
-    ) -> Result<u64, CandidateError> {
-        let entry = targets
-            .iter()
-            .filter_map(|target| {
-                self.entries
-                    .get(&target.service)
-                    .filter(|entry| entry.target == *target && !entry.retired)
-            })
-            .find(|entry| entry.authority.matches_hello(hello))
-            .ok_or_else(refused)?;
-        self.relay.admit_hello(
-            transport,
-            &entry.endpoint,
-            &entry.authority,
-            deadline,
-            hello,
-        )
-    }
     pub fn tick(&mut self, max_wait: Duration) -> Result<(), CandidateError> {
         self.poll_tick(max_wait, &[]).map(|_| ())
     }
@@ -413,52 +387,6 @@ impl RelayOwner {
             entry.retired = true;
         }
         Ok(acknowledgement)
-    }
-
-    /// Replacement-only retirement and compaction, under the caller's real VM
-    /// mutation lease. The managed slot supplies its entire target set. Ordinary
-    /// cleanup retirement retains fences for acknowledgement retries and never
-    /// uses this path. Serial/incarnation are preserved when old entries disappear.
-    fn retire_replacement(
-        &mut self,
-        scope: GraphScope,
-        operation: [u8; 16],
-        targets: &[Target],
-    ) -> Result<usize, CandidateError> {
-        let _registration = self
-            .control_root
-            .as_ref()
-            .map(|root| lifecycle_intent::registration_for_replacement(root))
-            .transpose()?;
-        if !self.matches_context(scope.context) || operation == [0; 16] {
-            return Err(refused());
-        }
-        let mut active = 0;
-        let mut selected = std::collections::BTreeSet::new();
-        for target in targets {
-            let entry = self.entries.get(&target.service).ok_or_else(refused)?;
-            if entry.target != *target
-                || entry.graph != Some(scope.id)
-                || !selected.insert(target.service)
-            {
-                return Err(refused());
-            }
-            active += usize::from(!entry.retired);
-        }
-        if !targets.is_empty() {
-            self.retire(&RetireRequest {
-                version: 1,
-                owner: self.incarnation,
-                operation,
-                targets: targets.to_vec(),
-            })?;
-        }
-        // Retirement synchronously released all admitted/pending descriptors and
-        // revoked escaped sessions. No fallible lookup or effect follows it.
-        for target in targets {
-            self.entries.remove(&target.service);
-        }
-        Ok(active)
     }
 }
 impl Drop for RelayOwner {

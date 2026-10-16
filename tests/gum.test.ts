@@ -104,7 +104,5 @@ test("tryGumLog returns true and writes structured args (fixture)", async () => 
   expect(ok).toBe(true);
 
   const text = await Bun.file(logFile).text();
-  expect(text).toContain(
-    "gum log --level=info --structured -- hello a 1 ok true"
-  );
+  expect(text).toContain("gum log --level info --structured hello a 1 ok true");
 });

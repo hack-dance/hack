@@ -8,37 +8,27 @@
  */
 
 /**
- * Stable machine-readable error codes for `--json` output, in registry order.
+ * Stable machine-readable error codes for `--json` output.
  *
  * Codes are part of the CLI contract: add new ones as failure sites are
- * wired up, never repurpose existing ones. Generated agent references (the
- * `hack-diagnose` error-code reference) render from this list, and a drift
- * test fails when the two diverge.
+ * wired up, never repurpose existing ones.
  */
-export const HACK_ERROR_CODES = [
-  "E_DOCKER_UNAVAILABLE",
-  "E_GLOBAL_INFRA_DOWN",
-  "E_CONFIG_PARSE",
-  "E_CONFIG_INVALID",
-  "E_PROJECT_NOT_FOUND",
-  "E_NATIVE_PROJECT_CONFLICT",
-  "E_NATIVE_PROJECT_UNSUPPORTED",
-  "E_NATIVE_COMPOSE_PROXY_ACCESS",
-  "E_SERVICE_NOT_FOUND",
-  "E_COMPOSE_FAILED",
-  "E_STARTUP_INCOMPLETE",
-  "E_DEPENDENCY_BOOTSTRAP_FAILED",
-  "E_STARTUP_TIMEOUT",
-  "E_LIFECYCLE_FAILED",
-  "E_ENV_KEY_MISSING",
-  "E_PERMISSION",
-  "E_INTERACTIVE_REQUIRED",
-  "E_USAGE",
-  "E_UNEXPECTED",
-] as const;
-
-/** One stable `--json` error code from {@link HACK_ERROR_CODES}. */
-export type HackErrorCode = (typeof HACK_ERROR_CODES)[number];
+export type HackErrorCode =
+  | "E_DOCKER_UNAVAILABLE"
+  | "E_GLOBAL_INFRA_DOWN"
+  | "E_CONFIG_PARSE"
+  | "E_CONFIG_INVALID"
+  | "E_PROJECT_NOT_FOUND"
+  | "E_SERVICE_NOT_FOUND"
+  | "E_COMPOSE_FAILED"
+  | "E_STARTUP_INCOMPLETE"
+  | "E_STARTUP_TIMEOUT"
+  | "E_LIFECYCLE_FAILED"
+  | "E_ENV_KEY_MISSING"
+  | "E_PERMISSION"
+  | "E_INTERACTIVE_REQUIRED"
+  | "E_USAGE"
+  | "E_UNEXPECTED";
 
 export type CliResultError = {
   readonly code: HackErrorCode;
@@ -130,17 +120,6 @@ export class HackCliError extends Error {
     this.detail = opts.detail;
   }
 }
-
-/**
- * Error whose message is a complete, value-free sentence for the user, such
- * as a refusal at the native runtime boundary. It carries no stable `--json`
- * code of its own (the envelope still reports E_UNEXPECTED).
- *
- * Without `--json`, the top-level CLI handler prints only the message; the
- * stack trace is a debugging aid shown only with `HACK_DEBUG=1`. Unexpected
- * exceptions are not closed errors and keep printing their stack.
- */
-export class ClosedCliError extends Error {}
 
 /**
  * Convert any thrown value into an error envelope, preserving structured

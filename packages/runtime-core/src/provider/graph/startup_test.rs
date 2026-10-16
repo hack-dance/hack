@@ -17,11 +17,9 @@ fn options<'a>(
 ) -> RunOptions<'a> {
     RunOptions {
         live_source: false,
-        shared_source: false,
         release_initializer_cache: std::collections::BTreeSet::new(),
         routing_enrolled: false,
         project: PlanOptions {
-            branch: None,
             project: fixture,
             compose_file: Path::new("compose.yaml"),
             profiles: &[],
@@ -143,7 +141,6 @@ fn startup_recovery(reclaim: bool) {
     let plan = project::plan(
         &candidate,
         PlanOptions {
-            branch: None,
             project: &fixture.0,
             compose_file: Path::new("compose.yaml"),
             profiles: &[],

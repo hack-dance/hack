@@ -1,6 +1,12 @@
-import { resolve } from "node:path";
+import { rm } from "node:fs/promises";
+import { dirname, resolve } from "node:path";
 
-import { readOptionalTextFile } from "../lib/fs.ts";
+import {
+  ensureDir,
+  pathExists,
+  readTextFile,
+  writeTextFileIfChanged,
+} from "../lib/fs.ts";
 import {
   checkHackInitSkill,
   installHackInitSkill,
@@ -10,11 +16,6 @@ import {
   normalizeInstructionText,
   renderInstructionSections,
 } from "./instruction-source.ts";
-import {
-  type IntegrationPreservedReason,
-  installOwnedIntegrationFile,
-  removeOwnedIntegrationFile,
-} from "./integration-ownership.ts";
 
 export type CodexSkillScope = "project" | "user";
 
@@ -27,12 +28,9 @@ export type CodexSkillResult = {
     | "stale"
     | "removed"
     | "missing"
-    | "preserved"
     | "error";
   readonly path: string;
   readonly message?: string;
-  /** Set with `preserved`: why an existing file was left unchanged. */
-  readonly reason?: IntegrationPreservedReason;
 };
 
 const SKILL_NAME = "hack-cli";
@@ -46,10 +44,6 @@ const HACK_CLI_MARKER_REGEX = /name:\s*hack-cli\b/i;
  * Writes the main `hack-cli` skill and the companion `/hack-init` onboarding
  * skill. The returned path points at the main skill; the status reflects both
  * artifacts (any change reports as created/updated).
- *
- * Each file is overwritten only when Hack owns it. If either file is edited or
- * foreign, it is left unchanged and the result is `preserved` with that file's
- * path and reason; the other file is still installed.
  */
 export async function installCodexSkill(opts: {
   readonly scope: CodexSkillScope;
@@ -66,11 +60,9 @@ export async function installCodexSkill(opts: {
   }
 
   const path = resolved.path;
-  const outcome = await installOwnedIntegrationFile({
-    surface: "hack-cli-skill",
-    path,
-    render: renderCodexSkill(),
-  });
+  await ensureDir(dirname(path));
+  const existed = await pathExists(path);
+  const result = await writeTextFileIfChanged(path, renderCodexSkill());
 
   const initResult = await installHackInitSkill({
     client: "codex",
@@ -86,32 +78,13 @@ export async function installCodexSkill(opts: {
     };
   }
 
-  if (outcome.status === "preserved") {
-    return {
-      scope: opts.scope,
-      status: "preserved",
-      path,
-      reason: outcome.reason,
-      message: outcome.message,
-    };
-  }
-  if (initResult.status === "preserved") {
-    return {
-      scope: opts.scope,
-      status: "preserved",
-      path: initResult.path,
-      reason: initResult.reason,
-      message: initResult.message,
-    };
-  }
-
   const initChanged =
     initResult.status === "created" || initResult.status === "updated";
-  return {
-    scope: opts.scope,
-    status: resolveInstallStatus({ main: outcome.status, initChanged }),
-    path,
-  };
+  const status = resolveInstallStatus({
+    changed: result.changed || initChanged,
+    existed,
+  });
+  return { scope: opts.scope, status, path };
 }
 
 /**
@@ -135,16 +108,7 @@ export async function checkCodexSkill(opts: {
   }
 
   const path = resolved.path;
-  const file = await readOptionalTextFile(path);
-  if (file.kind === "unreadable") {
-    return {
-      scope: opts.scope,
-      status: "error",
-      path,
-      message: "Hack-managed file exists but could not be read.",
-    };
-  }
-  const content = file.kind === "text" ? file.text : "";
+  const content = await readTextFile(path);
   if (!content) {
     return { scope: opts.scope, status: "missing", path };
   }
@@ -183,11 +147,7 @@ export async function checkCodexSkill(opts: {
 }
 
 /**
- * Remove the Codex skills for hack CLI usage.
- *
- * Deletes only Hack-owned SKILL.md files and removes each skill directory only
- * when it is empty afterwards. Edited or foreign files are left unchanged and
- * reported as `preserved`.
+ * Remove the Codex skill for hack CLI usage.
  */
 export async function removeCodexSkill(opts: {
   readonly scope: CodexSkillScope;
@@ -204,79 +164,37 @@ export async function removeCodexSkill(opts: {
   }
 
   const path = resolved.path;
+  const skillDir = resolve(path, "..");
 
   const initResult = await removeHackInitSkill({
     client: "codex",
     scope: opts.scope,
     projectRoot: opts.projectRoot,
   });
-  const outcome = await removeOwnedIntegrationFile({
-    surface: "hack-cli-skill",
-    path,
-    currentRender: renderCodexSkill(),
-    removeEmptyDirectory: true,
-  });
 
-  if (outcome.status === "preserved") {
-    return {
-      scope: opts.scope,
-      status: "preserved",
-      path,
-      reason: outcome.reason,
-      message: outcome.message,
-    };
-  }
-  if (initResult.status === "preserved" || initResult.status === "error") {
-    return {
-      scope: opts.scope,
-      status: initResult.status,
-      path: initResult.path,
-      reason: initResult.reason,
-      message: initResult.message,
-    };
-  }
-  if (outcome.status === "missing") {
+  if (!(await pathExists(path))) {
     const status = initResult.status === "removed" ? "removed" : "missing";
     return { scope: opts.scope, status, path };
   }
-  return {
-    scope: opts.scope,
-    status: "removed",
-    path,
-    ...(outcome.message ? { message: outcome.message } : {}),
-  };
+
+  await rm(skillDir, { recursive: true, force: true });
+  return { scope: opts.scope, status: "removed", path };
 }
 
 /**
  * Render the Codex skill template for hack CLI usage.
  *
  * Frontmatter and top-level framing live here; the instructional content is
- * the `skill`-tagged sections from the shared instruction source. Standalone
- * installs ship no focused skills, so this variant keeps broad routing.
+ * the `skill`-tagged sections from the shared instruction source.
  */
 export function renderCodexSkill(): string {
-  return renderHackCliSkill({
-    descriptionLines: [
-      "description: >",
-      "  Use the hack CLI for local runtime orchestration (compose, DNS/TLS, logs, env, persistent project workspaces) and agent setup.",
-      "  Trigger when asked to run/start/stop services, inspect logs, manage lifecycle/workspace workflows, or update",
-      "  agent integrations. Prefer CLI over MCP when shell access is available.",
-    ],
-  });
-}
-
-/**
- * Render the `hack-cli` SKILL.md with the given frontmatter description
- * lines. The standalone and plugin variants share the body; only routing
- * differs.
- */
-export function renderHackCliSkill(opts: {
-  readonly descriptionLines: readonly string[];
-}): string {
   const lines = [
     "---",
     "name: hack-cli",
-    ...opts.descriptionLines,
+    "description: >",
+    "  Use the hack CLI for local runtime orchestration (compose, DNS/TLS, logs, env, persistent project workspaces) and agent setup.",
+    "  Trigger when asked to run/start/stop services, inspect logs, manage lifecycle/workspace workflows, or update",
+    "  agent integrations. Prefer CLI over MCP when shell access is available.",
     "---",
     "",
     "# hack CLI",
@@ -323,11 +241,11 @@ function resolveHomeDir(): string | null {
 }
 
 function resolveInstallStatus(opts: {
-  readonly main: "created" | "updated" | "noop";
-  readonly initChanged: boolean;
+  readonly changed: boolean;
+  readonly existed: boolean;
 }): "created" | "updated" | "noop" {
-  if (opts.main !== "noop" || !opts.initChanged) {
-    return opts.main;
+  if (!opts.changed) {
+    return "noop";
   }
-  return "updated";
+  return opts.existed ? "updated" : "created";
 }

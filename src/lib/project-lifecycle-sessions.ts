@@ -191,32 +191,18 @@ export async function inspectLifecycleSession(opts: {
     opts.backend.listSessionWindowNames?.({ name: opts.expectedSessionName }) ??
       Promise.resolve(null),
   ]);
-  // A concurrent owned finalizer can remove the session after listSessions.
-  // Missing metadata is not absence: require a fresh exact-session query, and
-  // never excuse a changed token or state belonging to another session/backend.
-  const removedOwnedSession =
-    opts.entry?.backend === opts.backend.name &&
-    opts.entry.sessionName === opts.expectedSessionName &&
-    Boolean(opts.entry.ownershipToken) &&
-    observedOwnershipToken === null &&
-    (await opts.backend.readSessionPresence?.({
-      name: opts.expectedSessionName,
-    })) === "absent";
   return classifyLifecycleSession({
-    session: removedOwnedSession ? null : session,
+    session,
     entry: opts.entry,
     observedOwnershipToken,
     expectedBackend: opts.backend.name,
     expectedSessionName: opts.expectedSessionName,
     expectedProjectRoot: await normalizePath(opts.expectedProjectRoot),
     expectedDefinitionHash: opts.expectedDefinitionHash,
-    liveWindowNames: removedOwnedSession ? null : liveWindowNames,
+    liveWindowNames,
   });
 }
 
-/** Concurrent finalizers may have already removed the session. Accept only a
- * fresh, explicit absence proof; missing owner metadata alone is insufficient.
- */
 export async function killLifecycleSessionWithOwnership(opts: {
   readonly backend: MuxBackend;
   readonly sessionName: string;
@@ -227,20 +213,10 @@ export async function killLifecycleSessionWithOwnership(opts: {
       name: opts.sessionName,
     })) ?? null;
   if (observedToken !== opts.ownershipToken) {
-    if (observedToken !== null) {
-      return false;
-    }
-    return (
-      (await opts.backend.readSessionPresence?.({ name: opts.sessionName })) ===
-      "absent"
-    );
+    return false;
   }
   const result = await opts.backend.killSession({ name: opts.sessionName });
-  return (
-    result.exitCode === 0 ||
-    (await opts.backend.readSessionPresence?.({ name: opts.sessionName })) ===
-      "absent"
-  );
+  return result.exitCode === 0;
 }
 
 export async function killInspectedLifecycleSession(opts: {

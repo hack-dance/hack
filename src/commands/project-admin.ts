@@ -2,13 +2,13 @@ import { resolve } from "node:path";
 import type { CommandHandlerFor } from "../cli/command.ts";
 import { CliUsageError, defineCommand, withHandler } from "../cli/command.ts";
 import { optJson, optPath, optProject } from "../cli/options.ts";
-import { resolveRegisteredProjectOption } from "../cli/project-selector.ts";
 import { HACK_PROJECT_DIR_PRIMARY } from "../constants.ts";
 import {
   findProjectContext,
   readProjectConfig,
   sanitizeProjectSlug,
 } from "../lib/project.ts";
+import { resolveRegisteredProjectByName } from "../lib/projects-registry.ts";
 import { display } from "../ui/display.ts";
 
 const ownerShowOptions = [optPath, optProject, optJson] as const;
@@ -98,14 +98,22 @@ async function resolveProjectTarget(input: {
   readonly pathOpt: string | undefined;
   readonly projectOpt: string | undefined;
 }) {
-  if (input.pathOpt && input.projectOpt !== undefined) {
+  if (input.pathOpt && input.projectOpt) {
     throw new CliUsageError("Use either --path or --project (not both).");
   }
 
-  if (input.projectOpt !== undefined) {
-    return await resolveRegisteredProjectOption({
-      projectOpt: input.projectOpt,
-    });
+  if (input.projectOpt) {
+    const name = sanitizeProjectSlug(input.projectOpt);
+    if (name.length === 0) {
+      throw new CliUsageError("Invalid --project value.");
+    }
+    const project = await resolveRegisteredProjectByName({ name });
+    if (!project) {
+      throw new CliUsageError(
+        `Unknown project "${name}". Run 'hack init' in that repo (or run 'hack projects' to see registered projects).`
+      );
+    }
+    return project;
   }
 
   const startDir = input.pathOpt

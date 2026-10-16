@@ -108,38 +108,6 @@ fn invalid_or_unavailable_bridges_have_no_runtime_effects() {
         "bridge_capacity"
     );
     assert!(!candidate.state_root.exists());
-    for slots in [0, 33, u8::MAX] {
-        assert_eq!(
-            provider::up_with_minimum_bridges(
-                &candidate,
-                provider::Profile::Development,
-                provider::BridgeIntent { slots },
-                None,
-                None,
-                None,
-                None,
-            )
-            .unwrap_err()
-            .code,
-            "bridge_capacity"
-        );
-        assert!(!candidate.state_root.exists());
-    }
-    assert_eq!(
-        provider::up_with_minimum_bridges(
-            &candidate,
-            provider::Profile::Development,
-            provider::BridgeIntent::new(32).unwrap(),
-            Some(provider::DependencySocketIntent::new(1).unwrap()),
-            None,
-            None,
-            None,
-        )
-        .unwrap_err()
-        .code,
-        "dependency_socket"
-    );
-    assert!(!candidate.state_root.exists());
     #[cfg(not(feature = "native-stream-relay"))]
     {
         assert_eq!(
@@ -179,42 +147,5 @@ fn invalid_dependency_capacity_does_not_initialize_runtime_state() {
     )
     .unwrap_err();
     assert_eq!(error.code, "dependency_socket");
-    assert!(!candidate.state_root.exists());
-}
-
-#[test]
-fn invalid_minimum_dependency_requests_refuse_before_runtime_effects() {
-    let fixture = Fixture::new();
-    let candidate = Candidate::discover(&fixture.0).unwrap();
-    for slots in [0, 33, u8::MAX] {
-        let failure = provider::up_with_socket_requests(
-            &candidate,
-            provider::Profile::Development,
-            provider::SocketRequests {
-                minimum_dependencies: Some(provider::DependencySocketIntent { slots }),
-                ..Default::default()
-            },
-            None,
-            None,
-            None,
-        )
-        .unwrap_err();
-        assert_eq!(failure.code, "dependency_socket");
-        assert!(!candidate.state_root.exists());
-    }
-    let failure = provider::up_with_socket_requests(
-        &candidate,
-        provider::Profile::Development,
-        provider::SocketRequests {
-            minimum_bridges: Some(provider::BridgeIntent { slots: 32 }),
-            minimum_dependencies: Some(provider::DependencySocketIntent { slots: 1 }),
-            ..Default::default()
-        },
-        None,
-        None,
-        None,
-    )
-    .unwrap_err();
-    assert_eq!(failure.code, "dependency_socket");
     assert!(!candidate.state_root.exists());
 }

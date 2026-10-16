@@ -17,7 +17,6 @@ import {
   DEFAULT_HOST_DNS_IP,
   GLOBAL_CADDY_COMPOSE_FILENAME,
   GLOBAL_CADDY_DIR_NAME,
-  GLOBAL_COREDNS_FILENAME,
   GLOBAL_HACK_DIR_NAME,
   GLOBAL_LOGGING_COMPOSE_FILENAME,
   GLOBAL_LOGGING_DIR_NAME,
@@ -25,7 +24,6 @@ import {
 import { resetNoInteractiveFlagForTests } from "../src/lib/interactivity.ts";
 import { resetGumPathCacheForTests } from "../src/ui/gum.ts";
 import { CURRENT_CA_PEM, OLD_CA_PEM } from "./helpers/ca-certificates.ts";
-import { restoreEnv } from "./helpers/env.ts";
 import { registerScopedModuleMock } from "./helpers/scoped-module-mock.ts";
 
 // These fixtures exercise macOS host commands and require that platform.
@@ -269,9 +267,9 @@ afterEach(async () => {
     await rm(tempDir, { recursive: true, force: true });
     tempDir = null;
   }
-  restoreEnv("HOME", originalHome);
-  restoreEnv("USER", originalUser);
-  restoreEnv("HACK_LOGGER", originalLogger);
+  process.env.HOME = originalHome;
+  process.env.USER = originalUser;
+  process.env.HACK_LOGGER = originalLogger;
   if (originalNoInteractive === undefined) {
     Reflect.deleteProperty(process.env, "HACK_NO_INTERACTIVE");
   } else {
@@ -1588,81 +1586,5 @@ test("global DNS setup adds hack.local while retaining legacy and custom domains
     expect(
       updated.split(`address=/.${domain}/${DEFAULT_CADDY_IP}`)
     ).toHaveLength(2);
-  }
-});
-
-test("global DNS setup adds a configured default domain alongside built-in roots", async () => {
-  await prepareManagedTools(tempDir!);
-  await writeFile(
-    join(tempDir!, GLOBAL_HACK_DIR_NAME, "hack.config.json"),
-    JSON.stringify({ default_domain: "project.example.test" })
-  );
-  reachabilityByHost = {
-    [DEFAULT_CADDY_IP]: true,
-    [DEFAULT_HOST_DNS_IP]: true,
-  };
-  const { runCli } = await import("../src/cli/run.ts");
-  expect(await runCli(["global", "install"])).toBe(0);
-  const conf = await readDnsmasqConf(tempDir!);
-  for (const domain of [
-    "hack",
-    "hack.local",
-    "hack.gy",
-    "project.example.test",
-  ]) {
-    expect(conf).toContain(`address=/.${domain}/${DEFAULT_CADDY_IP}`);
-  }
-  const corefile = await Bun.file(
-    join(
-      tempDir!,
-      GLOBAL_HACK_DIR_NAME,
-      GLOBAL_CADDY_DIR_NAME,
-      GLOBAL_COREDNS_FILENAME
-    )
-  ).text();
-  expect(corefile).toContain("(.*)\\.project\\.example\\.test\\.?)$");
-  expect(
-    runCalls.some((cmd) =>
-      cmd.some((arg) => arg.endsWith("> /etc/resolver/project.example.test"))
-    )
-  ).toBe(true);
-});
-
-test("global DNS setup refuses a foreign custom-domain claim before rewriting dnsmasq", async () => {
-  await prepareManagedTools(tempDir!);
-  await writeFile(
-    join(tempDir!, GLOBAL_HACK_DIR_NAME, "hack.config.json"),
-    JSON.stringify({ default_domain: "project.example.test" })
-  );
-  const confPath = join(tempDir!, "brew-prefix", "etc", "dnsmasq.conf");
-  await mkdir(dirname(confPath), { recursive: true });
-  const original = "# foreign\naddress=/.project.example.test/192.0.2.42\n";
-  await writeFile(confPath, original);
-  reachabilityByHost = {
-    [DEFAULT_CADDY_IP]: true,
-    [DEFAULT_HOST_DNS_IP]: true,
-  };
-  const { runCli } = await import("../src/cli/run.ts");
-  expect(await runCli(["global", "install"])).not.toBe(0);
-  expect(await readDnsmasqConf(tempDir!)).toBe(original);
-  expect(runCalls.some((cmd) => cmd[0] === "docker")).toBe(false);
-});
-
-test("native global install refuses before touching the Docker global stack", async () => {
-  const previousBackend = process.env.HACK_RUNTIME_BACKEND;
-  const previousBinary = process.env.HACK_NATIVE_BINARY;
-  const previousNativeHome = process.env.HACK_NATIVE_HOME;
-  process.env.HACK_RUNTIME_BACKEND = "native";
-  process.env.HACK_NATIVE_BINARY = "/nonexistent/hack-native";
-  process.env.HACK_NATIVE_HOME = "/nonexistent/native-home";
-  try {
-    const { runCli } = await import("../src/cli/run.ts");
-    expect(await runCli(["global", "install"])).toBe(1);
-    expect(runCalls).toHaveLength(0);
-    expect(execCalls).toHaveLength(0);
-  } finally {
-    restoreEnv("HACK_RUNTIME_BACKEND", previousBackend);
-    restoreEnv("HACK_NATIVE_BINARY", previousBinary);
-    restoreEnv("HACK_NATIVE_HOME", previousNativeHome);
   }
 });

@@ -3,11 +3,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { YAML } from "bun";
-import {
-  resolveDependencyCacheBootstrapServices,
-  resolveDependencyCacheOverride,
-} from "../src/lib/dependency-cache.ts";
-import { restoreEnv } from "./helpers/env.ts";
+import { resolveDependencyCacheOverride } from "../src/lib/dependency-cache.ts";
 
 const tempDirs: string[] = [];
 
@@ -156,7 +152,7 @@ test("default platform is explicit and never inferred from host architecture", a
   const project = await createProject();
   const original = process.env.DOCKER_DEFAULT_PLATFORM;
   try {
-    Reflect.deleteProperty(process.env, "DOCKER_DEFAULT_PLATFORM");
+    process.env.DOCKER_DEFAULT_PLATFORM = undefined;
     expect(
       (await changeRuntime(project, { image: "oven/bun" }))
         .sharingDisabledReason
@@ -176,7 +172,7 @@ test("default platform is explicit and never inferred from host architecture", a
       ).fingerprint
     ).toBe(amd.fingerprint);
   } finally {
-    restoreEnv("DOCKER_DEFAULT_PLATFORM", original);
+    process.env.DOCKER_DEFAULT_PLATFORM = original;
   }
 });
 
@@ -223,85 +219,4 @@ test("compatible linked worktrees share the same declared runtime cache", async 
   expect(first.fingerprint).not.toBeNull();
   expect(second.fingerprint).toBe(first.fingerprint);
   expect(second.volumes).toEqual(first.volumes);
-});
-
-test("identical inputs share cache across checkouts and runtime changes isolate it", async () => {
-  const firstProject = await createProject();
-  const secondProject = await createProject();
-  const first = await resolveDependencyCacheOverride({
-    ...firstProject,
-    projectName: "shared",
-  });
-  const second = await resolveDependencyCacheOverride({
-    ...secondProject,
-    projectName: "shared",
-  });
-  expect(second.volumes).toEqual(first.volumes);
-  await writeFile(
-    resolve(secondProject.projectRoot, "package.json"),
-    '{"packageManager":"bun@1.4.0"}\n'
-  );
-  const changed = await resolveDependencyCacheOverride({
-    ...secondProject,
-    projectName: "shared",
-  });
-  expect(changed.fingerprint).not.toBe(first.fingerprint);
-});
-
-test("explicit protocol producers bootstrap scoped consumers without command-name heuristics", async () => {
-  const project = await createProject();
-  await writeFile(
-    project.composeFile,
-    YAML.stringify({
-      services: {
-        custom: {
-          command: ["/fixture/initialize"],
-          volumes: ["dependencies:/deps"],
-        },
-        app: { volumes: ["dependencies:/deps:ro"] },
-        unrelated: { volumes: [] },
-      },
-    })
-  );
-  const cache = {
-    overridePath: "/fixture/override.yml",
-    fingerprint: "fixture",
-    inputs: [],
-    progressServices: ["custom"],
-    volumes: [
-      {
-        logicalName: "dependencies",
-        resolvedName: "fixture-cache",
-        services: ["custom"],
-      },
-    ],
-  };
-  expect(
-    await resolveDependencyCacheBootstrapServices({
-      composeFile: project.composeFile,
-      cache,
-      targetServices: ["app"],
-    })
-  ).toEqual(["custom"]);
-  expect(
-    await resolveDependencyCacheBootstrapServices({
-      composeFile: project.composeFile,
-      cache,
-      targetServices: ["unrelated"],
-    })
-  ).toEqual([]);
-  expect(
-    await resolveDependencyCacheBootstrapServices({
-      composeFile: project.composeFile,
-      cache,
-      targetServices: ["custom"],
-    })
-  ).toEqual([]);
-  expect(
-    await resolveDependencyCacheBootstrapServices({
-      composeFile: project.composeFile,
-      cache: { ...cache, overridePath: null },
-      targetServices: ["app"],
-    })
-  ).toEqual([]);
 });

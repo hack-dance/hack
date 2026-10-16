@@ -3,8 +3,8 @@ use super::*;
 #[cfg(target_os = "macos")]
 use std::{
     io::{Read, Write},
-    net::{TcpListener, TcpStream},
-    os::fd::{AsRawFd, FromRawFd, OwnedFd},
+    net::TcpListener,
+    os::fd::AsRawFd,
     thread,
     time::Instant,
 };
@@ -18,266 +18,6 @@ fn fixture() -> (TcpListener, HostEndpoint) {
     )
     .unwrap();
     (listener, endpoint)
-}
-
-#[cfg(target_os = "macos")]
-#[test]
-fn inspection_reports_a_stable_exact_listener_and_refuses_replacement() {
-    let (listener, endpoint) = fixture();
-    let port = listener.local_addr().unwrap().port();
-    let expected = endpoint.process_identity();
-    let observed = inspect_listener(expected.pid, port, &expected.executable).unwrap();
-    assert_eq!(observed.pid, expected.pid);
-    assert_eq!(observed.start_micros, expected.start_micros);
-    assert_eq!(observed.uid, expected.uid);
-    assert_eq!(observed.executable, expected.executable);
-    assert_eq!(observed.port, port);
-    assert_eq!(
-        observed.fingerprint,
-        inspect_listener(expected.pid, port, &expected.executable)
-            .unwrap()
-            .fingerprint
-    );
-    assert!(inspect_listener(expected.pid, port, Path::new("/bin/sh")).is_err());
-    drop(listener);
-    assert!(inspect_listener(expected.pid, port, &expected.executable).is_err());
-}
-
-#[cfg(target_os = "macos")]
-#[test]
-fn peer_inspection_requires_one_exact_open_accepted_socket() {
-    let (listener, endpoint) = fixture();
-    let process = endpoint.process_identity();
-    let port = listener.local_addr().unwrap().port();
-    assert!(inspect_listener_peer(process.pid, port, &process.executable, 1).is_err());
-    let client = TcpStream::connect(("127.0.0.1", port)).unwrap();
-    let (server, _) = listener.accept().unwrap();
-    let peer_port = client.local_addr().unwrap().port();
-    let observed =
-        inspect_listener_peer(process.pid, port, &process.executable, peer_port).unwrap();
-    assert_eq!(observed.accepted, Some(true));
-    assert_eq!(
-        observed.fingerprint,
-        inspect_listener(process.pid, port, &process.executable)
-            .unwrap()
-            .fingerprint
-    );
-    // SAFETY: dup returns a new owned descriptor for the live accepted socket.
-    let duplicate = unsafe { libc::dup(server.as_raw_fd()) };
-    assert!(duplicate >= 0);
-    // SAFETY: this newly duplicated descriptor has not been given to another owner.
-    let _duplicate = unsafe { OwnedFd::from_raw_fd(duplicate) };
-    assert!(inspect_listener_peer(process.pid, port, &process.executable, peer_port).is_err());
-}
-
-#[cfg(target_os = "macos")]
-#[test]
-fn discovery_requires_the_exact_executable_and_live_exclusive_listener() {
-    let (listener, endpoint) = fixture();
-    let port = listener.local_addr().unwrap().port();
-    let (pid, fingerprint) = HostEndpoint::discover(&endpoint.process.executable, port).unwrap();
-    assert_eq!(pid, std::process::id() as i32);
-    assert_eq!(fingerprint, endpoint.fingerprint().unwrap());
-    assert!(HostEndpoint::discover(Path::new("/bin/sh"), port).is_err());
-    assert!(endpoint.require_executable(Path::new("/bin/sh")).is_err());
-    drop(listener);
-    assert!(HostEndpoint::discover(&endpoint.process.executable, port).is_err());
-}
-
-#[cfg(target_os = "macos")]
-#[test]
-fn executable_pinned_discovery_follows_a_new_listener_process() {
-    use std::process::{Child, Command, Stdio};
-    struct OwnedChild(Child);
-    impl Drop for OwnedChild {
-        fn drop(&mut self) {
-            let _ = self.0.kill();
-            let _ = self.0.wait();
-        }
-    }
-    let executable = std::env::current_exe().unwrap().canonicalize().unwrap();
-    let reserved = TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = reserved.local_addr().unwrap().port();
-    drop(reserved);
-    let spawn = || {
-        OwnedChild(
-            Command::new(&executable)
-                .args([
-                    "--ignored",
-                    "--exact",
-                    "provider::host_endpoint::tests::discovery_listener_child",
-                    "--test-threads=1",
-                ])
-                .env("HACK_DISCOVERY_LISTENER_PORT", port.to_string())
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .spawn()
-                .unwrap(),
-        )
-    };
-    let await_discovery = |child: &mut OwnedChild| {
-        let deadline = Instant::now() + Duration::from_secs(5);
-        loop {
-            if let Ok(found) = HostEndpoint::discover(&executable, port) {
-                assert_eq!(found.0, child.0.id() as i32);
-                return found;
-            }
-            assert!(
-                child.0.try_wait().unwrap().is_none(),
-                "listener child exited"
-            );
-            assert!(
-                Instant::now() < deadline,
-                "listener child was not discovered"
-            );
-            thread::sleep(Duration::from_millis(10));
-        }
-    };
-    let mut first = spawn();
-    let previous = await_discovery(&mut first);
-    let captured = HostEndpoint::capture(previous.0, port).unwrap();
-    let original_identity = captured.process_identity();
-    first.0.kill().unwrap();
-    assert!(first.0.wait().unwrap().code().is_none());
-    assert!(HostEndpoint::capture(previous.0, port).is_err());
-    assert_eq!(captured.process_identity(), original_identity);
-    let mut second = spawn();
-    let current = await_discovery(&mut second);
-    assert_ne!(previous.0, current.0);
-    assert_ne!(previous.1, current.1);
-}
-
-#[cfg(target_os = "macos")]
-fn authorized(
-    endpoint: &HostEndpoint,
-) -> (
-    super::super::relay_auth::Authority,
-    super::super::relay_auth::AuthorizedSession,
-) {
-    use super::super::relay_auth::{Authority, Binding, Credential};
-    let credential = Credential::generate(Binding {
-        owner: [1; 16],
-        boot: [2; 16],
-        endpoint: endpoint.generation().unwrap(),
-        service: [3; 32],
-    })
-    .unwrap();
-    let authority = Authority::new(&credential);
-    let (client, hello) = credential.begin().unwrap();
-    let (server, challenge) = authority.challenge(&hello).unwrap();
-    let (finish, proof) = client.answer(&challenge).unwrap();
-    let (session, acceptance) = server.finish(&proof).unwrap();
-    finish.accept(&acceptance).unwrap();
-    (authority, session)
-}
-
-#[cfg(target_os = "macos")]
-#[test]
-fn identity_notifications_require_authenticated_checks_and_ignore_revocation_or_timeout() {
-    use std::sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
-    };
-    let (listener, endpoint) = fixture();
-    let failures = Arc::new(AtomicUsize::new(0));
-    let counter = Arc::clone(&failures);
-    let endpoint = endpoint.with_identity_notification(Arc::new(move || {
-        counter.fetch_add(1, Ordering::Relaxed);
-    }));
-    let (authority, session) = authorized(&endpoint);
-    let mut pending = endpoint
-        .begin_connect(Duration::from_secs(1), &session)
-        .unwrap();
-    pending.deadline = Instant::now();
-    assert_eq!(
-        pending.progress().unwrap_err().code,
-        "host_endpoint_timeout"
-    );
-    assert_eq!(failures.load(Ordering::Relaxed), 0);
-    drop(listener);
-    assert!(endpoint.fingerprint().is_err());
-    assert_eq!(failures.load(Ordering::Relaxed), 0);
-    assert!(
-        endpoint
-            .begin_connect(Duration::from_secs(1), &session)
-            .is_err()
-    );
-    assert_eq!(failures.load(Ordering::Relaxed), 1);
-    authority.revoke();
-    assert!(
-        endpoint
-            .begin_connect(Duration::from_secs(1), &session)
-            .is_err()
-    );
-    assert_eq!(failures.load(Ordering::Relaxed), 1);
-}
-
-#[cfg(target_os = "macos")]
-#[test]
-fn pending_accepted_identity_failure_emits_one_terminal_notification() {
-    isolated_endpoint_fixture(
-        "provider::host_endpoint::tests::pending_accepted_identity_notification_child",
-    );
-}
-
-#[cfg(target_os = "macos")]
-#[test]
-#[ignore = "isolated accepted/close fixture launched by pending_accepted_identity_failure_emits_one_terminal_notification"]
-fn pending_accepted_identity_notification_child() {
-    use std::sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
-    };
-    let (listener, endpoint) = fixture();
-    listener.set_nonblocking(true).unwrap();
-    let failures = Arc::new(AtomicUsize::new(0));
-    let counter = Arc::clone(&failures);
-    let endpoint = endpoint.with_identity_notification(Arc::new(move || {
-        counter.fetch_add(1, Ordering::Relaxed);
-    }));
-    let (_authority, session) = authorized(&endpoint);
-    let mut pending = endpoint
-        .begin_connect(Duration::from_secs(3), &session)
-        .unwrap();
-    let mut peer = accept_pending(&listener);
-    let peer_port = pending
-        .stream
-        .as_ref()
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port();
-    assert!(endpoint.verify(peer_port).unwrap());
-    assert_eq!(failures.load(Ordering::Relaxed), 0);
-    drop(listener);
-    // Prove listener loss independently without emitting an authenticated notice.
-    // An unaccepted socket's transport error or an expired deadline is not drift proof.
-    assert!(endpoint.fingerprint().is_err());
-    assert_eq!(failures.load(Ordering::Relaxed), 0);
-    assert_eq!(
-        pending.progress().unwrap_err().code,
-        "host_endpoint_identity"
-    );
-    assert!(pending.stream.is_none());
-    assert_eq!(failures.load(Ordering::Relaxed), 1);
-    assert!(pending.progress().is_err());
-    assert_eq!(failures.load(Ordering::Relaxed), 1);
-    peer.set_nonblocking(false).unwrap();
-    peer.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
-    assert_eq!(peer.read(&mut [0; 1]).unwrap(), 0);
-}
-
-#[cfg(target_os = "macos")]
-#[test]
-#[ignore = "owned subprocess fixture for executable_pinned_discovery_follows_a_new_listener_process"]
-fn discovery_listener_child() {
-    let port: u16 = std::env::var("HACK_DISCOVERY_LISTENER_PORT")
-        .unwrap()
-        .parse()
-        .unwrap();
-    let _listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port)).unwrap();
-    thread::sleep(Duration::from_secs(30));
 }
 
 #[cfg(target_os = "macos")]
@@ -306,11 +46,11 @@ fn accepted_stream_preserves_payload_and_half_close() {
             peer.write_all(b"reply").unwrap();
         });
         let mut stream = endpoint.connect(Duration::from_secs(2)).unwrap();
+        stream.write_all(b"synthetic endpoint payload").unwrap();
+        stream.shutdown(std::net::Shutdown::Write).unwrap();
         stream
             .set_read_timeout(Some(Duration::from_secs(2)))
             .unwrap();
-        stream.write_all(b"synthetic endpoint payload").unwrap();
-        stream.shutdown(std::net::Shutdown::Write).unwrap();
         let mut response = String::new();
         stream.read_to_string(&mut response).unwrap();
         assert_eq!(response, "reply");
@@ -345,7 +85,7 @@ fn pending_accept_times_out_without_releasing_payload() {
 #[cfg(target_os = "macos")]
 #[test]
 fn replacement_listener_is_refused_in_the_same_process() {
-    isolated_endpoint_fixture("provider::host_endpoint::tests::replacement_listener_child");
+    isolated_replacement("provider::host_endpoint::tests::replacement_listener_child");
 }
 #[cfg(target_os = "macos")]
 #[test]
@@ -383,7 +123,6 @@ fn changed_generation_or_process_cannot_authorize_connection() {
 #[test]
 fn shared_or_wildcard_listener_is_not_captured() {
     let (listener, endpoint) = fixture();
-    let process = endpoint.process_identity();
     let enabled: libc::c_int = 1;
     // SAFETY: the live listener owns fd; enabled points to a correctly sized integer.
     assert_eq!(
@@ -399,11 +138,6 @@ fn shared_or_wildcard_listener_is_not_captured() {
         0
     );
     assert!(HostEndpoint::capture(std::process::id() as i32, endpoint.port).is_err());
-    let observed = inspect_listener(process.pid, endpoint.port, &process.executable).unwrap();
-    assert_eq!(observed.pid, process.pid);
-    assert_eq!(observed.start_micros, process.start_micros);
-    assert_eq!(observed.port, endpoint.port);
-    assert_eq!(observed.fingerprint.len(), 64);
     let wildcard = TcpListener::bind("0.0.0.0:0").unwrap();
     assert!(
         HostEndpoint::capture(
@@ -451,7 +185,7 @@ fn replacement_between_precheck_and_connect_receives_no_payload() {
     assert_eq!(result.unwrap_err().code, "host_endpoint_identity");
     let replacement = replacement.unwrap();
     replacement.set_nonblocking(true).unwrap();
-    let mut peer = accept_pending(&replacement);
+    let (mut peer, _) = replacement.accept().unwrap();
     peer.set_nonblocking(false).unwrap();
     peer.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
     let mut data = Vec::new();
@@ -588,11 +322,11 @@ fn pending_timeout_and_drop_release_the_socket_without_data() {
 #[cfg(target_os = "macos")]
 #[test]
 fn pending_replacement_cannot_release_stream() {
-    isolated_endpoint_fixture("provider::host_endpoint::tests::pending_replacement_child");
+    isolated_replacement("provider::host_endpoint::tests::pending_replacement_child");
 }
 #[cfg(target_os = "macos")]
-fn isolated_endpoint_fixture(test: &str) {
-    // Close/rebind fixtures must not be inherited by unrelated parallel forks.
+fn isolated_replacement(test: &str) {
+    // The close/rebind fixture must not be inherited by unrelated parallel forks.
     // Keep its sockets in an isolated child and require the complete assertion path.
     use std::process::{Child, Command, Stdio};
     struct OwnedChild(Child);
@@ -612,16 +346,17 @@ fn isolated_endpoint_fixture(test: &str) {
             .unwrap(),
     );
     let deadline = Instant::now() + Duration::from_secs(5);
-    let status = loop {
+    loop {
         if let Some(status) = child.0.try_wait().unwrap() {
-            break status;
+            assert!(status.success());
+            break;
         }
         assert!(
             Instant::now() < deadline,
-            "endpoint fixture child exceeded its watchdog"
+            "endpoint replacement child exceeded its watchdog"
         );
         std::thread::sleep(Duration::from_millis(1));
-    };
+    }
     let mut output = String::new();
     child
         .0
@@ -632,10 +367,6 @@ fn isolated_endpoint_fixture(test: &str) {
         .read_to_string(&mut output)
         .unwrap();
     assert!(output.len() <= 4096);
-    assert!(
-        status.success(),
-        "owned endpoint fixture {test} failed: {output}"
-    );
     assert!(
         output.contains("test result: ok. 1 passed"),
         "isolated assertion did not run"
@@ -651,17 +382,6 @@ fn pending_replacement_child() {
     let mut pending = endpoint
         .begin_connect(Duration::from_secs(1), &session)
         .unwrap();
-    // The nonblocking handshake may still be in flight. Let it reach the original listener
-    // first: completed later, it lands on the replacement, which the endpoint refuses but
-    // which leaves that connection queued there.
-    let deadline = Instant::now() + Duration::from_secs(1);
-    while pending.stream.as_ref().unwrap().peer_addr().is_err() {
-        assert!(
-            Instant::now() < deadline,
-            "pending connect never reached its listener"
-        );
-        std::thread::sleep(Duration::from_millis(1));
-    }
     drop(listener);
     let replacement = TcpListener::bind(address).unwrap();
     assert!(pending.progress().is_err());
@@ -855,20 +575,7 @@ fn backend_fin_does_not_bypass_listener_replacement() {
     peer.shutdown(std::net::Shutdown::Write).unwrap();
     let port = listener.local_addr().unwrap().port();
     drop(listener);
-    // Parallel subprocess fixtures can briefly inherit the closing listener
-    // during fork/exec. Require a real replacement within a bounded window.
-    let deadline = Instant::now() + Duration::from_millis(500);
-    let _replacement = loop {
-        match TcpListener::bind(("127.0.0.1", port)) {
-            Ok(listener) => break listener,
-            Err(error)
-                if error.kind() == std::io::ErrorKind::AddrInUse && Instant::now() < deadline =>
-            {
-                thread::sleep(Duration::from_millis(2));
-            }
-            Err(error) => panic!("Replacement listener could not bind: {error}"),
-        }
-    };
+    let _replacement = TcpListener::bind(("127.0.0.1", port)).unwrap();
     assert!(pending.progress().is_err());
     assert!(pending.stream.is_none());
     assert_eq!(peer.read(&mut [0]).unwrap(), 0);

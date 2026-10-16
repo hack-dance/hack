@@ -1,12 +1,4 @@
 import { resolve } from "node:path";
-import {
-  buildStaleComposeEnvWarning,
-  type ComposeEnvFingerprintRecord,
-  evaluateComposeServiceEnvFreshness,
-  parseComposeEnvFingerprintRecord,
-  withComposeServiceEnvFingerprints,
-  withoutComposeServiceEnvFingerprints,
-} from "./compose-env-fingerprint.ts";
 import { ensureDir, pathExists, readTextFile, writeTextFile } from "./fs.ts";
 import { getString, isRecord } from "./guards.ts";
 
@@ -14,12 +6,6 @@ export type ProjectRuntimeStateEntry = {
   readonly composeProject: string;
   readonly envName: string | null;
   readonly updatedAt: string;
-  /**
-   * Value-free digests of the env set each service was last created with.
-   * Absent for state written before fingerprints existed; exec then skips the
-   * staleness check.
-   */
-  readonly envFingerprint?: ComposeEnvFingerprintRecord;
 };
 
 type ProjectRuntimeStateFile = {
@@ -121,76 +107,6 @@ export async function removeProjectRuntimeStateEntry(opts: {
   });
 }
 
-/**
- * Refresh or forget the env digests of `services` after a service-scoped
- * (re)create, preserving the rest of the stack's entry.
- *
- * - No entry: nothing is written. Service-scoped commands never create the
- *   stack entry (its env selection belongs to a full `up`/`restart`).
- * - `applied` with the entry's env selection: digests are recorded.
- * - Otherwise (`unknown` outcome, or a different env selection): the digests
- *   are dropped so exec reports nothing rather than a wrong comparison.
- */
-export async function updateProjectRuntimeServiceEnvFingerprints(opts: {
-  readonly projectDir: string;
-  readonly composeProject: string;
-  readonly effectiveEnvName: string | null;
-  readonly services: readonly string[];
-  readonly envByService: Readonly<
-    Record<string, Readonly<Record<string, string>>>
-  >;
-  readonly outcome: "applied" | "unknown";
-}): Promise<void> {
-  const entry = await readProjectRuntimeStateEntry({
-    projectDir: opts.projectDir,
-    composeProject: opts.composeProject,
-  });
-  if (!entry) {
-    return;
-  }
-  const envFingerprint =
-    opts.outcome === "applied" && entry.envName === opts.effectiveEnvName
-      ? withComposeServiceEnvFingerprints({
-          existing: entry.envFingerprint,
-          services: opts.services,
-          envByService: opts.envByService,
-        })
-      : withoutComposeServiceEnvFingerprints({
-          existing: entry.envFingerprint,
-          services: opts.services,
-        });
-  const { envFingerprint: _previous, ...rest } = entry;
-  await upsertProjectRuntimeStateEntry({
-    projectDir: opts.projectDir,
-    entry: { ...rest, ...(envFingerprint ? { envFingerprint } : {}) },
-  });
-}
-
-/**
- * Closed warning for `hack exec` when the env resolved now differs from the
- * env `service` was created with; null when unchanged or unknown. Never
- * includes a key or value.
- */
-export async function resolveComposeExecStaleEnvWarning(opts: {
-  readonly projectDir: string;
-  readonly composeProject: string;
-  readonly service: string;
-  readonly currentEnv: Readonly<Record<string, string>>;
-}): Promise<string | null> {
-  const entry = await readProjectRuntimeStateEntry({
-    projectDir: opts.projectDir,
-    composeProject: opts.composeProject,
-  });
-  const freshness = evaluateComposeServiceEnvFreshness({
-    record: entry?.envFingerprint,
-    service: opts.service,
-    currentEnv: opts.currentEnv,
-  });
-  return freshness === "changed"
-    ? buildStaleComposeEnvWarning({ service: opts.service })
-    : null;
-}
-
 function parseProjectRuntimeStateEntry(
   value: unknown
 ): ProjectRuntimeStateEntry | null {
@@ -208,13 +124,10 @@ function parseProjectRuntimeStateEntry(
   const envName =
     typeof envNameRaw === "string" ? envNameRaw.trim() || null : null;
 
-  const envFingerprint = parseComposeEnvFingerprintRecord(value.envFingerprint);
-
   return {
     composeProject,
     envName,
     updatedAt,
-    ...(envFingerprint ? { envFingerprint } : {}),
   };
 }
 

@@ -15,7 +15,7 @@ pub enum Condition {
     Healthy,
     Completed,
 }
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Health {
     None,
@@ -23,7 +23,7 @@ pub enum Health {
     Healthy,
     Unhealthy,
 }
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum Observation {
     Created,
@@ -43,7 +43,7 @@ impl Observation {
             Condition::Completed => self == Self::Exited { code: 0 },
         }
     }
-    pub(crate) fn failed(self) -> bool {
+    fn failed(self) -> bool {
         matches!(
             self,
             Self::Dead
@@ -98,14 +98,6 @@ fn error(code: &'static str, message: &str) -> CandidateError {
     CandidateError::new(code, message)
 }
 impl Graph {
-    /// Check an explicitly compiled dependency graph before handing it to a driver.
-    /// This validates names, active targets, budgets and cycles, not executable inputs.
-    pub fn from_services(services: BTreeMap<String, Service>) -> Result<Self, CandidateError> {
-        let graph = Self { services };
-        graph.execution_order()?;
-        Ok(graph)
-    }
-
     /// Compile only dependency intent from an already compatible review. Commands and environment
     /// stay redacted; drivers still need a separate verified executable-input compiler.
     pub fn from_plan(
@@ -174,7 +166,9 @@ impl Graph {
                 "Readiness includes inactive or unknown services.",
             ));
         }
-        Self::from_services(services)
+        let graph = Self { services };
+        graph.execution_order()?;
+        Ok(graph)
     }
     fn execution_order(&self) -> Result<Vec<&String>, CandidateError> {
         if self.services.is_empty() || self.services.len() > 128 {
@@ -186,9 +180,9 @@ impl Graph {
         for (name, service) in &self.services {
             if name.is_empty()
                 || name.len() > 128
-                || !name.bytes().enumerate().all(|(index, b)| {
-                    b.is_ascii_alphanumeric() || b"_-".contains(&b) || (index > 0 && b == b'.')
-                })
+                || !name
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b))
             {
                 return Err(error(
                     "graph_service",
@@ -250,17 +244,7 @@ fn inspect(
     if state.failed() {
         return Err(error(
             "graph_service_failed",
-            &match state {
-                Observation::Exited { code } => format!(
-                    "Owned graph service {name} exited with code {code}; no further services will start."
-                ),
-                Observation::Dead => format!(
-                    "Owned graph service {name} is dead or OOM-killed; no further services will start."
-                ),
-                _ => format!(
-                    "Owned graph service {name} is unhealthy; no further services will start."
-                ),
-            },
+            "An owned graph service failed; no further services will start.",
         ));
     }
     Ok(state)
@@ -636,14 +620,12 @@ mod tests {
         ] {
             let mut driver = driver();
             driver.states.insert(service.into(), state);
-            let failure = run(&graph(), &mut driver, Duration::from_secs(1)).unwrap_err();
-            assert_eq!(failure.code, "graph_service_failed");
-            assert!(failure.message.contains(service));
-            assert!(failure.message.contains(if service == "init" {
-                "code 23"
-            } else {
-                "unhealthy"
-            }));
+            assert_eq!(
+                run(&graph(), &mut driver, Duration::from_secs(1))
+                    .unwrap_err()
+                    .code,
+                "graph_service_failed"
+            );
             assert_eq!(driver.starts, starts);
         }
     }

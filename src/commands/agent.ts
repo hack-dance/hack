@@ -2,8 +2,12 @@ import { resolve } from "node:path";
 
 import { isCancel, select } from "@clack/prompts";
 
+import {
+  buildInitAssistantReport,
+  renderInitAssistantPrompt,
+} from "../agents/init-assistant.ts";
 import { renderAgentInitPatterns } from "../agents/init-patterns.ts";
-import { buildOnboardingPrompt } from "../agents/onboarding-prompt.ts";
+import { renderOnboardingPrompt } from "../agents/onboarding-prompt.ts";
 import { renderAgentPrimer } from "../agents/primer.ts";
 import type { CliContext, CommandArgs } from "../cli/command.ts";
 import {
@@ -18,7 +22,12 @@ import {
 } from "../cli/integration-sync.ts";
 import { optPath } from "../cli/options.ts";
 import { openUrl } from "../lib/os.ts";
-import { findProjectContext, findRepoRootForInit } from "../lib/project.ts";
+import {
+  findProjectContext,
+  findRepoRootForInit,
+  readProjectConfig,
+  readProjectDevHost,
+} from "../lib/project.ts";
 import { findExecutableInPath, run } from "../lib/shell.ts";
 import { logger } from "../ui/logger.ts";
 
@@ -140,10 +149,8 @@ async function handleAgentInit({
 }): Promise<number> {
   const startDir = resolveStartDir(ctx, args.options.path);
   const repoRoot = await findRepoRootForInit(startDir);
-  const prompt = await buildOnboardingPrompt({
-    startDir,
-    entryPoint: { kind: "agent-init" },
-  });
+  const report = await buildInitAssistantReport({ repoRoot });
+  const prompt = renderInitAssistantPrompt({ report });
 
   const selection = await resolveInitClient({
     clientRaw: args.options.client,
@@ -172,10 +179,10 @@ async function handleAgentInit({
 /**
  * `hack agent onboard` — print the canonical onboarding prompt.
  *
- * The shared builder inventories the repo and picks `existing-project` mode
- * (with project name/dev_host from config) when a `.hack/` project is found,
- * `new-project` mode otherwise. `hack init --with`, `hack agent init`, and the
- * `hack-init` MCP prompt render the same core content.
+ * Uses `existing-project` mode (with project name/dev_host from config) when
+ * a `.hack/` project is found; falls back to `new-project` mode otherwise.
+ * The same content backs `hack init --with`, the `/hack-init` skill, and the
+ * `hack-init` MCP prompt.
  */
 async function handleAgentOnboard({
   ctx,
@@ -185,10 +192,21 @@ async function handleAgentOnboard({
   readonly args: OnboardArgs;
 }): Promise<number> {
   const startDir = resolveStartDir(ctx, args.options.path);
+  const projectContext = await findProjectContext(startDir);
+
+  if (!projectContext) {
+    process.stdout.write(renderOnboardingPrompt({ mode: "new-project" }));
+    return 0;
+  }
+
+  const config = await readProjectConfig(projectContext);
+  const devHost = await readProjectDevHost(projectContext);
+
   process.stdout.write(
-    await buildOnboardingPrompt({
-      startDir,
-      entryPoint: { kind: "agent-onboard" },
+    renderOnboardingPrompt({
+      mode: "existing-project",
+      projectName: config.name,
+      devHost: devHost ?? undefined,
     })
   );
   return 0;

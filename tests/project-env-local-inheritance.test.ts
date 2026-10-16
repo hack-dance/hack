@@ -16,16 +16,14 @@ import {
   setProjectEnvValue,
   unsetProjectEnvValue,
 } from "../src/lib/project-env-config.ts";
-import { restoreEnv } from "./helpers/env.ts";
-import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
 const roots: string[] = [];
 const originalCI = process.env.CI;
 const originalMode = process.env.HACK_EXECUTION_MODE;
 
 afterEach(async () => {
-  restoreEnv("CI", originalCI);
-  restoreEnv("HACK_EXECUTION_MODE", originalMode);
+  process.env.CI = originalCI;
+  process.env.HACK_EXECUTION_MODE = originalMode;
   for (const root of roots.splice(0)) {
     await rm(root, { recursive: true, force: true });
   }
@@ -63,8 +61,8 @@ async function config(
 }
 
 async function fixture() {
-  Reflect.deleteProperty(process.env, "CI");
-  Reflect.deleteProperty(process.env, "HACK_EXECUTION_MODE");
+  process.env.CI = undefined;
+  process.env.HACK_EXECUTION_MODE = undefined;
   const root = await realpath(await mkdtemp(join(tmpdir(), "hack-local-env-")));
   roots.push(root);
   const primaryRoot = join(root, "primary");
@@ -98,7 +96,7 @@ async function fixture() {
       envName: "qa",
       serviceNames: ["api"],
     });
-  return { root, primary, primaryRoot, linkedRoot, linked, resolve };
+  return { primary, primaryRoot, linkedRoot, linked, resolve };
 }
 
 test("linked env layers observe primary updates without copying or inheriting primary tracked state", async () => {
@@ -238,7 +236,7 @@ test("CI and slim execution do not inherit primary local environment", async () 
   });
   process.env.CI = "true";
   expect((await f.resolve())?.globalEnv.PRIMARY).toBeUndefined();
-  Reflect.deleteProperty(process.env, "CI");
+  process.env.CI = undefined;
   process.env.HACK_EXECUTION_MODE = "slim";
   expect((await f.resolve())?.globalEnv.PRIMARY).toBeUndefined();
 });
@@ -284,7 +282,7 @@ test("actual CLI masks inherited global secret overriding tracked service plaint
       ],
       {
         cwd: process.cwd(),
-        env: privateCliEnv({ root: f.root, env: { HACK_LOGGER: "console" } }),
+        env: { ...process.env, HACK_LOGGER: "console" },
         stdout: "pipe",
         stderr: "pipe",
       }

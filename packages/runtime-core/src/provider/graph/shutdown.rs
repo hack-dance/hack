@@ -4,10 +4,6 @@
 //! after stopping. These helpers never infer guest death from transport success,
 //! delete resources, retry a stop, or convert a missing observation into success.
 use super::{CandidateError, Engine, Kind, Receipt, Resource, error, hex, inspect_resource, state};
-use crate::{
-    error::{StopFailureDiagnostic, StopFailuresDiagnostic},
-    provider::engine::StopBatchFailure,
-};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{collections::BTreeMap, path::Path};
@@ -93,16 +89,7 @@ pub(super) fn stop_owned(
         .filter(|(_, p)| p.running)
         .map(|(_, p)| (p.id.clone(), u64::from(p.grace_seconds)))
         .collect::<Vec<_>>();
-    engine
-        .stop_containers_diagnosed(&stops)
-        .map_err(|failure| {
-            let admitted = selected
-                .iter()
-                .filter(|(_, prepared)| prepared.running)
-                .map(|(resource, prepared)| (prepared.id.as_str(), resource.key.as_str()))
-                .collect::<BTreeMap<_, _>>();
-            stop_error(failure, &admitted)
-        })?;
+    engine.stop_containers(&stops)?;
     // No container deletion is authorized until every selected instance has a
     // fresh matching terminal observation and that evidence is durable.
     for (resource, prepared) in selected {
@@ -120,49 +107,13 @@ pub(super) fn stop_owned(
     state::write(&path, &evidence)
 }
 
-pub(super) fn stop_error(
-    failure: StopBatchFailure,
-    admitted: &BTreeMap<&str, &str>,
-) -> CandidateError {
-    let StopBatchFailure { error, failures } = failure;
-    if failures.is_empty() {
-        return error;
-    }
-    let detail = failures
-        .into_iter()
-        .map(|failure| {
-            admitted
-                .get(failure.id.as_str())
-                .map(|service| StopFailureDiagnostic {
-                    service: (*service).to_owned(),
-                    stage: failure.stage,
-                })
-        })
-        .collect::<Option<Vec<_>>>();
-    match detail {
-        Some(failures) => error.with_stop_failures(StopFailuresDiagnostic {
-            version: 1,
-            failures,
-        }),
-        None => error,
-    }
-}
-
 // Preserve a committed stop observation across cleanup retries, but never carry
 // that claim into a different immutable container generation.
-fn record(evidence: &mut Evidence, key: String, observed: Terminal) {
-    record_terminal(&mut evidence.containers, key, observed);
-}
-/// Retain an observed stop request only across the same immutable container generation.
-pub(super) fn record_terminal(
-    containers: &mut BTreeMap<String, Terminal>,
-    key: String,
-    mut observed: Terminal,
-) {
-    if let Some(previous) = containers.get(&key) {
+fn record(evidence: &mut Evidence, key: String, mut observed: Terminal) {
+    if let Some(previous) = evidence.containers.get(&key) {
         observed.stop_requested |= previous.id == observed.id && previous.stop_requested;
     }
-    containers.insert(key, observed);
+    evidence.containers.insert(key, observed);
 }
 
 #[cfg(test)]
@@ -271,9 +222,7 @@ pub(super) fn prepare(resource: &Resource, inspected: &Value) -> Result<Prepared
     match (running, state["Status"].as_str(), pid) {
         (true, Some("running"), 1..) => {}
         (false, Some("exited"), 0) => {}
-        // Docker may assign a nonzero exit code when startup fails before the
-        // container ever runs. Preserve that failure without requesting a stop.
-        (false, Some("created"), 0) if state["OOMKilled"] == false => {}
+        (false, Some("created"), 0) if state["ExitCode"] == 0 && state["OOMKilled"] == false => {}
         _ => return Err(refused()),
     }
     Ok(Prepared {
@@ -311,41 +260,7 @@ pub(super) fn terminal(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{error::StopFailureStage, provider::engine::StopFailure};
     use serde_json::json;
-
-    #[test]
-    fn stop_detail_uses_only_admitted_service_names_and_omits_foreign_ids() {
-        let id = "a".repeat(64);
-        let secret_id = "b".repeat(64);
-        let error = stop_error(
-            StopBatchFailure {
-                error: CandidateError::new("engine_protocol", "Value-free stop refusal."),
-                failures: vec![StopFailure {
-                    id: id.clone(),
-                    stage: StopFailureStage::Timeout,
-                }],
-            },
-            &BTreeMap::from([(id.as_str(), "web")]),
-        );
-        let encoded = serde_json::to_string(&error).unwrap();
-        assert!(encoded.contains("\"service\":\"web\""));
-        assert!(encoded.contains("\"stage\":\"timeout\""));
-        assert!(!encoded.contains(&id));
-        let foreign = stop_error(
-            StopBatchFailure {
-                error: CandidateError::new("engine_protocol", "Value-free stop refusal."),
-                failures: vec![StopFailure {
-                    id: secret_id.clone(),
-                    stage: StopFailureStage::Timeout,
-                }],
-            },
-            &BTreeMap::from([(id.as_str(), "web")]),
-        );
-        let encoded = serde_json::to_string(&foreign).unwrap();
-        assert!(!encoded.contains("stop_failures"));
-        assert!(!encoded.contains(&secret_id));
-    }
 
     #[test]
     fn interrupted_evidence_is_retained_and_retry_preserves_only_matching_stop_identity() {
@@ -484,81 +399,11 @@ mod tests {
         value["State"]["Running"] = json!(false);
         value["State"]["Status"] = json!("created");
         value["State"]["Pid"] = json!(0);
-        for code in [0, 126, 127, 128, 255] {
-            value["State"]["ExitCode"] = json!(code);
-            assert!(!prepare(&resource, &value).unwrap().running);
-            let evidence = terminal(&resource, &value, false).unwrap();
-            assert_eq!(evidence.exit_code, code);
-            assert!(!evidence.stop_requested && !evidence.oom_killed);
-            assert!(terminal(&resource, &value, true).is_err());
-        }
+        assert!(!prepare(&resource, &value).unwrap().running);
+        assert_eq!(terminal(&resource, &value, false).unwrap().exit_code, 0);
+        assert!(terminal(&resource, &value, true).is_err());
         value["State"]["Pid"] = json!(42);
         assert!(terminal(&resource, &value, false).is_err());
-    }
-
-    #[test]
-    fn created_start_failure_does_not_strand_running_siblings_or_lose_failure_evidence() {
-        let (resource, mut value) = fixture();
-        value["State"]["Running"] = json!(false);
-        value["State"]["Status"] = json!("created");
-        value["State"]["Pid"] = json!(0);
-        value["State"]["ExitCode"] = json!(128);
-        value["State"]["Error"] = json!("synthetic private startup details");
-        let failed = prepare(&resource, &value).unwrap();
-        let mut selected = vec![failed.clone()];
-        for index in 1..=9 {
-            let (mut sibling, mut observed) = fixture();
-            sibling.id = Some(format!("{index:064x}"));
-            observed["Id"] = json!(sibling.id);
-            selected.push(prepare(&sibling, &observed).unwrap());
-        }
-        let stop_ids = selected
-            .iter()
-            .filter(|prepared| prepared.running)
-            .map(|prepared| &prepared.id)
-            .collect::<Vec<_>>();
-        assert_eq!(stop_ids.len(), 9);
-        assert!(!stop_ids.contains(&&failed.id));
-        let evidence = terminal(&resource, &value, failed.running).unwrap();
-        assert_eq!(evidence.exit_code, 128);
-        assert!(!evidence.stop_requested && !evidence.oom_killed);
-        let encoded = serde_json::to_string(&evidence).unwrap();
-        assert!(!encoded.contains("synthetic private startup details"));
-        assert_eq!(
-            serde_json::from_str::<Terminal>(&encoded).unwrap(),
-            evidence
-        );
-    }
-
-    #[test]
-    fn created_failure_still_refuses_uncertain_or_contradictory_state() {
-        let (resource, mut value) = fixture();
-        value["State"]["Running"] = json!(false);
-        value["State"]["Status"] = json!("created");
-        value["State"]["Pid"] = json!(0);
-        value["State"]["ExitCode"] = json!(128);
-        for (field, invalid) in [
-            ("Running", json!(true)),
-            ("Running", json!(null)),
-            ("Pid", json!(1)),
-            ("Pid", json!(-1)),
-            ("Paused", json!(true)),
-            ("Restarting", json!(true)),
-            ("Dead", json!(true)),
-            ("OOMKilled", json!(true)),
-            ("OOMKilled", json!(null)),
-            ("ExitCode", json!(-1)),
-            ("ExitCode", json!(256)),
-            ("ExitCode", json!(1.5)),
-            ("ExitCode", json!("128")),
-            ("ExitCode", json!(null)),
-        ] {
-            let mut changed = value.clone();
-            changed["State"][field] = invalid;
-            assert!(prepare(&resource, &changed).is_err(), "{field}");
-            assert!(terminal(&resource, &changed, false).is_err(), "{field}");
-        }
-        assert!(terminal(&resource, &value, true).is_err());
     }
 
     #[test]

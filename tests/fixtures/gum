@@ -58,9 +58,6 @@ case "$sub" in
     exit "${GUM_FIXTURE_CONFIRM_EXIT:-0}"
     ;;
   version-check)
-    if [[ "${1:-}" == "--" ]]; then
-      shift
-    fi
     if [[ "${1:-}" == "fail" ]]; then
       exit 1
     fi

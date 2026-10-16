@@ -2,63 +2,25 @@ import { appendFile } from "node:fs/promises";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import type { RequestHandlerExtra } from "@modelcontextprotocol/sdk/shared/protocol.js";
-import {
-  CallToolRequestSchema,
-  type CallToolResult,
-  ErrorCode,
-  McpError,
-  type ServerNotification,
-  type ServerRequest,
-  type ToolAnnotations,
-} from "@modelcontextprotocol/sdk/types.js";
+import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import * as z from "zod/v4";
 import pkg from "../../package.json";
 import {
-  buildOnboardingPrompt,
   type OnboardingMode,
-  onboardingContextWithoutInventory,
   renderOnboardingPrompt,
 } from "../agents/onboarding-prompt.ts";
-import { HackCliError, type HackErrorCode } from "../lib/cli-result.ts";
 import { ensureDir, pathExists } from "../lib/fs.ts";
 import { isRecord } from "../lib/guards.ts";
 import { resolveHackInvocation } from "../lib/hack-cli.ts";
 import { findProjectContext } from "../lib/project.ts";
 import {
-  AmbiguousProjectNameError,
-  normalizeProjectName,
-} from "../lib/project-name.ts";
-import {
-  AmbiguousProjectIdError,
-  type RegisteredProject,
   readProjectsRegistry,
   resolveRegisteredProjectByName,
-  selectRegisteredProjectByName,
 } from "../lib/projects-registry.ts";
 import { readLinesFromStream } from "../ui/lines.ts";
 import type { McpCommandAdmission } from "./command-admission.ts";
 import { superviseMcpCommand } from "./command-lifetime.ts";
-import {
-  MCP_ENV_KEY_PATTERN,
-  MCP_ENV_OUTPUT_WITHHELD_MESSAGE,
-  projectEnvExplain,
-  projectEnvKeys,
-  projectInstances,
-} from "./inspect-projections.ts";
-import {
-  classifyLogCollection,
-  MCP_LOG_BACKEND_ERROR,
-  type McpLogCutoff,
-  type McpLogOutcome,
-  type McpLogStopReason,
-  observeLogStreamEvent,
-  toLogStopReason,
-} from "./logs-contract.ts";
-import {
-  createMcpOutputBudget,
-  MCP_OUTPUT_LIMIT_BYTES,
-} from "./output-budget.ts";
+import { createMcpOutputBudget } from "./output-budget.ts";
 import {
   captureMcpSessionContext,
   type McpSessionContext,
@@ -85,144 +47,14 @@ type HackCommandResult = {
   readonly stderr: string;
 };
 
-/** Existing CLI error codes reused for pre-spawn MCP refusals (no new codes). */
-type McpRefusalCode = Extract<HackErrorCode, "E_USAGE" | "E_PROJECT_NOT_FOUND">;
-
-/**
- * Closed catalogue of pre-spawn refusals. Each reason maps to one existing
- * error code and one fixed message. Messages are value-free: they never repeat
- * caller-supplied project names, ids, paths, services or argv, nor registry
- * values derived from them. `invalid_arguments` may append the rejected schema
- * field names, which are drawn only from the tool's own input schema keys.
- */
-export const MCP_REFUSALS = Object.freeze({
-  invalid_arguments: {
-    code: "E_USAGE",
-    message: "Invalid arguments.",
-  },
-  conflicting_project_selection: {
-    code: "E_USAGE",
-    message: "Use only one of projectName, repoRoot, or path.",
-  },
-  invalid_project_name: {
-    code: "E_USAGE",
-    message: "Invalid projectName: use a name containing letters or digits.",
-  },
-  ambiguous_project: {
-    code: "E_USAGE",
-    message:
-      "Ambiguous project selection: multiple registrations match. Select by path and inspect 'hack projects' before renaming or pruning an entry.",
-  },
-  project_not_found: {
-    code: "E_PROJECT_NOT_FOUND",
-    message: "Unknown project. Run 'hack init' or 'hack projects' first.",
-  },
-  path_not_found: {
-    code: "E_PROJECT_NOT_FOUND",
-    message: "Path not found.",
-  },
-  path_not_registered: {
-    code: "E_PROJECT_NOT_FOUND",
-    message: "Path is outside registered hack projects.",
-  },
-  no_project_context: {
-    code: "E_PROJECT_NOT_FOUND",
-    message: "No project context found. Provide projectName or path.",
-  },
-  init_path_required: {
-    code: "E_USAGE",
-    message: "Provide repoRoot or path for initialization.",
-  },
-} as const satisfies Record<
-  string,
-  { readonly code: McpRefusalCode; readonly message: string }
->);
-
-export type McpRefusalReason = keyof typeof MCP_REFUSALS;
-
-/** Reasons whose message is exactly the catalogue text. */
-type FixedRefusalReason = Exclude<McpRefusalReason, "invalid_arguments">;
-
-const MCP_REFUSAL_REASONS = Object.keys(MCP_REFUSALS) as [
-  McpRefusalReason,
-  ...McpRefusalReason[],
-];
-
-/**
- * In-band result for a `tools/call` naming an unregistered tool. Matches the
- * SDK dispatcher's earlier shape (untyped `isError` text carrying the
- * InvalidParams code) but never repeats the requested tool name.
- */
-export const MCP_UNKNOWN_TOOL_MESSAGE = `MCP error ${ErrorCode.InvalidParams}: Tool not found`;
-
 type ToolResultPayload = HackCommandResult & {
   readonly ok: boolean;
   readonly data?: unknown;
-  /** Present (and false) only on refusals returned before any child spawned. */
-  readonly spawned?: false;
-  readonly error?:
-    | {
-        readonly code: McpRefusalCode;
-        readonly reason: McpRefusalReason;
-        readonly message: string;
-      }
-    | typeof MCP_LOG_BACKEND_ERROR;
 };
-
-type ProjectArgsResolution =
-  | { readonly ok: true; readonly args: string[] }
-  | { readonly ok: false; readonly reason: FixedRefusalReason };
-
-type ProjectNameResolution =
-  | { readonly ok: true; readonly name: string }
-  | { readonly ok: false; readonly reason: FixedRefusalReason };
 
 const DEFAULT_CMD_TIMEOUT_MS = 120_000;
 const DEFAULT_LOG_TAIL_EVENTS = 200;
 const DEFAULT_LOG_TAIL_MS = 5000;
-
-/**
- * Hard ceilings for numeric MCP inputs. These are provisional F27 experiment
- * settings: values are refused above the ceiling (never clamped), and the
- * effective limits a call ran with are echoed in `data.limits`.
- */
-export const MCP_INPUT_CEILINGS = Object.freeze({
-  tail: 10_000,
-  maxEvents: 10_000,
-  maxMs: 60_000,
-  timeoutMs: 600_000,
-});
-
-/**
- * Compose-style identifier: starts with an ASCII letter or digit, so a value
- * can never be read as an option (`-x`) or be empty. Applied to service,
- * services, profiles, logs service and open target.
- */
-const COMPOSE_IDENTIFIER_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_.-]*$/;
-/** Same rule for branch names, which may also carry `/` (the CLI slugs it). */
-const BRANCH_IDENTIFIER_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_./-]*$/;
-const IDENTIFIER_MAX_LENGTH = 253;
-
-const READ_ONLY_TOOL_ANNOTATIONS = Object.freeze({
-  readOnlyHint: true,
-  openWorldHint: false,
-}) satisfies ToolAnnotations;
-
-/** Changes local runtime state without removing it (up, restart). */
-const ADDITIVE_TOOL_ANNOTATIONS = Object.freeze({
-  readOnlyHint: false,
-  destructiveHint: false,
-  idempotentHint: false,
-  openWorldHint: false,
-}) satisfies ToolAnnotations;
-
-/** May stop, replace or overwrite local state (down, run, init). */
-const DESTRUCTIVE_TOOL_ANNOTATIONS = Object.freeze({
-  readOnlyHint: false,
-  destructiveHint: true,
-  idempotentHint: false,
-  openWorldHint: false,
-}) satisfies ToolAnnotations;
 
 const toolOutputSchema = {
   ok: z.boolean(),
@@ -232,58 +64,7 @@ const toolOutputSchema = {
   stdout: z.string(),
   stderr: z.string(),
   data: z.unknown().optional(),
-  spawned: z.literal(false).optional(),
-  error: z
-    .object({
-      code: z.enum(["E_USAGE", "E_PROJECT_NOT_FOUND", "E_UNEXPECTED"]),
-      reason: z.enum([...MCP_REFUSAL_REASONS, MCP_LOG_BACKEND_ERROR.reason]),
-      message: z.string(),
-    })
-    .optional(),
 } as const;
-
-function composeIdentifierInput(description: string) {
-  return z
-    .string()
-    .max(IDENTIFIER_MAX_LENGTH)
-    .regex(COMPOSE_IDENTIFIER_PATTERN)
-    .describe(description);
-}
-
-function envKeyInput(description: string) {
-  return z
-    .string()
-    .max(IDENTIFIER_MAX_LENGTH)
-    .regex(MCP_ENV_KEY_PATTERN)
-    .describe(description);
-}
-
-function branchIdentifierInput(description: string) {
-  return z
-    .string()
-    .max(IDENTIFIER_MAX_LENGTH)
-    .regex(BRANCH_IDENTIFIER_PATTERN)
-    .describe(description);
-}
-
-function boundedLimitInput(opts: {
-  readonly ceiling: number;
-  readonly description: string;
-}) {
-  return z
-    .number()
-    .int()
-    .positive()
-    .max(opts.ceiling)
-    .describe(`${opts.description} (1-${opts.ceiling})`);
-}
-
-/** Child environment: the frozen session env plus forced non-interactivity. */
-function buildChildEnv(
-  env: Readonly<Record<string, string>>
-): Record<string, string> {
-  return { ...env, HACK_NO_INTERACTIVE: "1" };
-}
 
 /**
  * Start the hack MCP server on stdio for local tool clients.
@@ -313,7 +94,7 @@ export function createMcpServer(opts: {
   );
 
   registerTools({ server, context });
-  registerPrompts({ server, context });
+  registerPrompts({ server });
   return server;
 }
 
@@ -353,71 +134,43 @@ const ONBOARDING_MODES: ReadonlySet<string> = new Set([
   "existing-project",
 ]);
 
-const MCP_ONBOARDING_ENTRY_POINT = { kind: "mcp-hack-init" } as const;
-
 /**
  * Register MCP prompts for no-shell clients.
  *
- * `hack-init` returns the canonical project-onboarding prompt from the shared
- * builder (same core as `hack agent onboard`, `hack agent init`, and
- * `hack init --with`). With `repoRoot` it inventories that repo, and mode,
- * project name and dev host come from the repo; without it no filesystem
- * scan runs (the server's working directory may be a home or root
- * directory) and the core states that no inventory was run.
+ * `hack-init` returns the canonical project-onboarding prompt (same content
+ * as `hack agent onboard`, `hack init --with`, and the `/hack-init` skill).
  */
-function registerPrompts(opts: {
-  readonly server: McpServer;
-  readonly context: McpSessionContext;
-}): void {
+function registerPrompts(opts: { readonly server: McpServer }): void {
   opts.server.registerPrompt(
     "hack-init",
     {
       title: "hack project onboarding",
       description:
-        "Agent-assisted onboarding prompt: stand up or adopt hack in a project (repo inventory, compose + env setup, deps/ops container patterns, verification loop).",
+        "Agent-assisted onboarding prompt: stand up or adopt hack in a project (inventory, compose + env setup, deps/ops container patterns, verification loop).",
       argsSchema: {
-        repoRoot: z
-          .string()
-          .describe(
-            "Repository root (or a directory inside it) to inventory; relative paths resolve against the server's working directory. When set, mode, projectName and devHost come from the repo and those arguments are ignored."
-          )
-          .optional(),
         mode: z
           .string()
           .describe(
-            'Onboarding mode without repoRoot: "new-project" (no .hack/ yet) or "existing-project" (adopt/refine an existing setup). Default: existing-project.'
+            'Onboarding mode: "new-project" (no .hack/ yet) or "existing-project" (adopt/refine an existing setup). Default: existing-project.'
           )
           .optional(),
-        projectName: z
-          .string()
-          .describe("Project slug, when known (without repoRoot)")
-          .optional(),
+        projectName: z.string().describe("Project slug, when known").optional(),
         devHost: z
           .string()
-          .describe(
-            "Project dev host (e.g. myapp.hack.local), when known (without repoRoot)"
-          )
+          .describe("Project dev host (e.g. myapp.hack), when known")
           .optional(),
       },
     },
-    async ({ repoRoot, mode, projectName, devHost }) => {
-      // Trim once so the presence check and the resolved path agree.
-      const requestedRoot = repoRoot?.trim();
-      const prompt = requestedRoot
-        ? await buildMcpOnboardingPrompt({
-            startDir: resolve(opts.context.cwd, requestedRoot),
-          })
-        : renderOnboardingPrompt({
-            context: onboardingContextWithoutInventory({
-              mode: ONBOARDING_MODES.has(mode ?? "")
-                ? (mode as OnboardingMode)
-                : "existing-project",
-              ...(projectName ? { projectName } : {}),
-              ...(devHost ? { devHost } : {}),
-              reason: "no-repo-root",
-            }),
-            entryPoint: MCP_ONBOARDING_ENTRY_POINT,
-          });
+    ({ mode, projectName, devHost }) => {
+      const resolvedMode: OnboardingMode = ONBOARDING_MODES.has(mode ?? "")
+        ? ((mode ?? "existing-project") as OnboardingMode)
+        : "existing-project";
+
+      const prompt = renderOnboardingPrompt({
+        mode: resolvedMode,
+        projectName,
+        devHost,
+      });
 
       return {
         messages: [
@@ -431,55 +184,10 @@ function registerPrompts(opts: {
   );
 }
 
-/**
- * Build the `hack-init` prompt for a caller-named repo. Failures map to a
- * closed, value-free protocol error: only the Hack error code survives; the
- * caller's path, config values and the underlying message are never echoed.
- *
- * @param opts.build - Test seam for the shared builder; production omits it.
- */
-export async function buildMcpOnboardingPrompt(opts: {
-  readonly startDir: string;
-  readonly build?: typeof buildOnboardingPrompt;
-}): Promise<string> {
-  if (!(await pathExists(opts.startDir))) {
-    const refusal = MCP_REFUSALS.path_not_found;
-    throw new McpError(
-      ErrorCode.InvalidParams,
-      `${refusal.code}: ${refusal.message}`
-    );
-  }
-  const request = {
-    startDir: opts.startDir,
-    entryPoint: MCP_ONBOARDING_ENTRY_POINT,
-  };
-  try {
-    return opts.build
-      ? await opts.build(request)
-      : await buildOnboardingPrompt(request);
-  } catch (error) {
-    const code: HackErrorCode =
-      error instanceof HackCliError ? error.code : "E_UNEXPECTED";
-    throw new McpError(
-      code === "E_UNEXPECTED"
-        ? ErrorCode.InternalError
-        : ErrorCode.InvalidParams,
-      `${code}: hack-init could not inventory the repo.`
-    );
-  }
-}
-
 function registerTools(opts: {
   readonly server: McpServer;
   readonly context: McpSessionContext;
 }): void {
-  const tools: HackToolRegistry = new Map();
-  const register = <const Shape extends z.ZodRawShape>(
-    tool: HackToolDefinition<Shape>
-  ): void => {
-    registerHackTool({ server: opts.server, tools, tool });
-  };
-
   const projectSelectorInput = {
     projectName: z
       .string()
@@ -496,66 +204,39 @@ function registerTools(opts: {
   };
 
   const branchInput = {
-    branch: branchIdentifierInput("Branch/worktree name").optional(),
+    branch: z.string().describe("Branch/worktree name").optional(),
   };
 
   const profileInput = {
-    profiles: z
-      .array(composeIdentifierInput("Compose profile name"))
-      .describe("Compose profile names")
-      .optional(),
+    profiles: z.array(z.string()).describe("Compose profile names").optional(),
   };
 
-  const logSelectionInput = {
-    service: composeIdentifierInput("Single service name").optional(),
-    services: z
-      .array(composeIdentifierInput("Service name"))
-      .describe("Multiple service names")
-      .optional(),
-    query: z.string().describe("Raw LogQL selector/query").optional(),
-    loki: z.boolean().describe("Force Loki backend").optional(),
-    compose: z.boolean().describe("Force docker compose backend").optional(),
-    tail: boundedLimitInput({
-      ceiling: MCP_INPUT_CEILINGS.tail,
-      description: "Tail last N log lines",
-    }).optional(),
-    since: z.string().describe("Start time (RFC3339 or duration)").optional(),
-    until: z.string().describe("End time (RFC3339 or duration)").optional(),
-  };
-
-  const envSelectionInput = {
-    env: composeIdentifierInput(
-      "Env overlay name; 'base' or 'default' selects base layers only"
-    ).optional(),
-    service: composeIdentifierInput(
-      "Env scope: 'global' or a compose service name"
-    ).optional(),
-  };
-
-  register({
-    name: "hack.projects.list",
-    title: "List hack projects",
-    description: "List registered hack projects and runtime status.",
-    annotations: READ_ONLY_TOOL_ANNOTATIONS,
-    inputSchema: {
-      filter: z.string().describe("Filter by project name").optional(),
-      includeGlobal: z
-        .boolean()
-        .describe("Include global infra projects")
-        .optional(),
-      includeUnregistered: z
-        .boolean()
-        .describe("Include unregistered compose projects")
-        .optional(),
+  opts.server.registerTool(
+    "hack.projects.list",
+    {
+      title: "List hack projects",
+      description: "List registered hack projects and runtime status.",
+      inputSchema: {
+        filter: z.string().describe("Filter by project name").optional(),
+        includeGlobal: z
+          .boolean()
+          .describe("Include global infra projects")
+          .optional(),
+        includeUnregistered: z
+          .boolean()
+          .describe("Include unregistered compose projects")
+          .optional(),
+      },
+      outputSchema: toolOutputSchema,
     },
-    handler: async (
+    async (
       { filter, includeGlobal, includeUnregistered },
       extra
     ): Promise<CallToolResult> => {
       const args = [
         "projects",
         "--json",
-        ...(filter ? [`--project=${filter}`] : []),
+        ...(filter ? ["--project", filter] : []),
         ...(includeGlobal ? ["--include-global"] : []),
         ...(includeUnregistered ? ["--all"] : []),
       ];
@@ -571,27 +252,29 @@ function registerTools(opts: {
         result,
         data: parseJson(result.stdout),
       });
-    },
-  });
+    }
+  );
 
-  register({
-    name: "hack.project.status",
-    title: "Project status",
-    description: "Get docker compose status for a project.",
-    annotations: READ_ONLY_TOOL_ANNOTATIONS,
-    inputSchema: {
-      ...projectSelectorInput,
-      ...branchInput,
-      ...profileInput,
+  opts.server.registerTool(
+    "hack.project.status",
+    {
+      title: "Project status",
+      description: "Get docker compose status for a project.",
+      inputSchema: {
+        ...projectSelectorInput,
+        ...branchInput,
+        ...profileInput,
+      },
+      outputSchema: toolOutputSchema,
     },
-    handler: async (input, extra) => {
+    async (input, extra) => {
       const resolved = await resolveProjectArgs({
         selection: toProjectSelection(input),
         cwd: opts.context.cwd,
         registryPath: opts.context.registryPath,
       });
       if (!resolved.ok) {
-        return buildToolError(resolved);
+        return buildToolError({ message: resolved.message });
       }
 
       const args = [
@@ -613,27 +296,29 @@ function registerTools(opts: {
         result,
         data: parseJson(result.stdout),
       });
-    },
-  });
+    }
+  );
 
-  register({
-    name: "hack.project.up",
-    title: "Start project",
-    description: "Start project services in detached mode.",
-    annotations: ADDITIVE_TOOL_ANNOTATIONS,
-    inputSchema: {
-      ...projectSelectorInput,
-      ...branchInput,
-      ...profileInput,
+  opts.server.registerTool(
+    "hack.project.up",
+    {
+      title: "Start project",
+      description: "Start project services in detached mode.",
+      inputSchema: {
+        ...projectSelectorInput,
+        ...branchInput,
+        ...profileInput,
+      },
+      outputSchema: toolOutputSchema,
     },
-    handler: async (input, extra) => {
+    async (input, extra) => {
       const resolved = await resolveProjectArgs({
         selection: toProjectSelection(input),
         cwd: opts.context.cwd,
         registryPath: opts.context.registryPath,
       });
       if (!resolved.ok) {
-        return buildToolError(resolved);
+        return buildToolError({ message: resolved.message });
       }
 
       const args = [
@@ -652,27 +337,29 @@ function registerTools(opts: {
       });
 
       return buildToolResult({ result });
-    },
-  });
+    }
+  );
 
-  register({
-    name: "hack.project.down",
-    title: "Stop project",
-    description: "Stop project services.",
-    annotations: DESTRUCTIVE_TOOL_ANNOTATIONS,
-    inputSchema: {
-      ...projectSelectorInput,
-      ...branchInput,
-      ...profileInput,
+  opts.server.registerTool(
+    "hack.project.down",
+    {
+      title: "Stop project",
+      description: "Stop project services.",
+      inputSchema: {
+        ...projectSelectorInput,
+        ...branchInput,
+        ...profileInput,
+      },
+      outputSchema: toolOutputSchema,
     },
-    handler: async (input, extra) => {
+    async (input, extra) => {
       const resolved = await resolveProjectArgs({
         selection: toProjectSelection(input),
         cwd: opts.context.cwd,
         registryPath: opts.context.registryPath,
       });
       if (!resolved.ok) {
-        return buildToolError(resolved);
+        return buildToolError({ message: resolved.message });
       }
 
       const args = [
@@ -690,27 +377,29 @@ function registerTools(opts: {
       });
 
       return buildToolResult({ result });
-    },
-  });
+    }
+  );
 
-  register({
-    name: "hack.project.restart",
-    title: "Restart project",
-    description: "Restart project services.",
-    annotations: ADDITIVE_TOOL_ANNOTATIONS,
-    inputSchema: {
-      ...projectSelectorInput,
-      ...branchInput,
-      ...profileInput,
+  opts.server.registerTool(
+    "hack.project.restart",
+    {
+      title: "Restart project",
+      description: "Restart project services.",
+      inputSchema: {
+        ...projectSelectorInput,
+        ...branchInput,
+        ...profileInput,
+      },
+      outputSchema: toolOutputSchema,
     },
-    handler: async (input, extra) => {
+    async (input, extra) => {
       const resolved = await resolveProjectArgs({
         selection: toProjectSelection(input),
         cwd: opts.context.cwd,
         registryPath: opts.context.registryPath,
       });
       if (!resolved.ok) {
-        return buildToolError(resolved);
+        return buildToolError({ message: resolved.message });
       }
 
       const args = [
@@ -728,79 +417,97 @@ function registerTools(opts: {
       });
 
       return buildToolResult({ result });
-    },
-  });
+    }
+  );
 
-  register({
-    name: "hack.project.run",
-    title: "Run command in service container",
-    description:
-      "Run a one-off command inside a service container. Command arguments are passed to the child after `--` and are never parsed as hack options.",
-    annotations: DESTRUCTIVE_TOOL_ANNOTATIONS,
-    inputSchema: {
-      ...projectSelectorInput,
-      ...branchInput,
-      ...profileInput,
-      service: composeIdentifierInput("Compose service name"),
-      cmd: z.array(z.string()).describe("Command arguments").optional(),
-      workdir: z
-        .string()
-        .describe("Working directory inside container")
-        .optional(),
-      timeoutMs: boundedLimitInput({
-        ceiling: MCP_INPUT_CEILINGS.timeoutMs,
-        description: "Command timeout in ms",
-      }).optional(),
+  opts.server.registerTool(
+    "hack.project.run",
+    {
+      title: "Run command in service container",
+      description: "Run a one-off command inside a service container.",
+      inputSchema: {
+        ...projectSelectorInput,
+        ...branchInput,
+        ...profileInput,
+        service: z.string().describe("Compose service name"),
+        cmd: z.array(z.string()).describe("Command arguments").optional(),
+        workdir: z
+          .string()
+          .describe("Working directory inside container")
+          .optional(),
+        timeoutMs: z.number().describe("Command timeout in ms").optional(),
+      },
+      outputSchema: toolOutputSchema,
     },
-    handler: async (input, extra) => {
+    async (input, extra) => {
       const resolved = await resolveProjectArgs({
         selection: toProjectSelection(input),
         cwd: opts.context.cwd,
         registryPath: opts.context.registryPath,
       });
       if (!resolved.ok) {
-        return buildToolError(resolved);
+        return buildToolError({ message: resolved.message });
       }
 
-      const timeoutMs = input.timeoutMs ?? DEFAULT_CMD_TIMEOUT_MS;
+      const args = [
+        "run",
+        ...resolved.args,
+        ...buildBranchArgs({ branch: input.branch }),
+        ...buildProfileArgs({ profiles: input.profiles }),
+        ...(input.workdir ? ["--workdir", input.workdir] : []),
+        input.service,
+        ...(input.cmd ?? []),
+      ];
+
       const result = await runHackCommand({
         context: opts.context,
         signal: extra.signal,
         tool: "hack.project.run",
-        args: buildRunArgs({
-          projectArgs: resolved.args,
-          branch: input.branch,
-          profiles: input.profiles,
-          workdir: input.workdir,
-          service: input.service,
-          cmd: input.cmd ?? [],
-        }),
-        timeoutMs,
+        args,
+        timeoutMs: input.timeoutMs,
       });
 
-      return buildToolResult({ result, data: { limits: { timeoutMs } } });
-    },
-  });
+      return buildToolResult({ result });
+    }
+  );
 
-  register({
-    name: "hack.project.logs.snapshot",
-    title: "Snapshot logs",
-    description: "Fetch a log snapshot and return structured log events.",
-    annotations: READ_ONLY_TOOL_ANNOTATIONS,
-    inputSchema: {
-      ...projectSelectorInput,
-      ...branchInput,
-      ...profileInput,
-      ...logSelectionInput,
+  opts.server.registerTool(
+    "hack.project.logs.snapshot",
+    {
+      title: "Snapshot logs",
+      description: "Fetch a log snapshot and return structured log events.",
+      inputSchema: {
+        ...projectSelectorInput,
+        ...branchInput,
+        ...profileInput,
+        service: z.string().describe("Single service name").optional(),
+        services: z
+          .array(z.string())
+          .describe("Multiple service names")
+          .optional(),
+        query: z.string().describe("Raw LogQL selector/query").optional(),
+        loki: z.boolean().describe("Force Loki backend").optional(),
+        compose: z
+          .boolean()
+          .describe("Force docker compose backend")
+          .optional(),
+        tail: z.number().describe("Tail last N log lines").optional(),
+        since: z
+          .string()
+          .describe("Start time (RFC3339 or duration)")
+          .optional(),
+        until: z.string().describe("End time (RFC3339 or duration)").optional(),
+      },
+      outputSchema: toolOutputSchema,
     },
-    handler: async (input, extra) => {
+    async (input, extra) => {
       const resolved = await resolveProjectArgs({
         selection: toProjectSelection(input),
         cwd: opts.context.cwd,
         registryPath: opts.context.registryPath,
       });
       if (!resolved.ok) {
-        return buildToolError(resolved);
+        return buildToolError({ message: resolved.message });
       }
 
       const args = [
@@ -810,57 +517,74 @@ function registerTools(opts: {
         ...buildProfileArgs({ profiles: input.profiles }),
         "--json",
         "--no-follow",
-        ...buildLogSelectionArgs(input),
+        ...(input.loki ? ["--loki"] : []),
+        ...(input.compose ? ["--compose"] : []),
+        ...(input.tail ? ["--tail", String(input.tail)] : []),
+        ...(input.query ? ["--query", input.query] : []),
+        ...(input.services
+          ? buildServicesArgs({ services: input.services })
+          : []),
+        ...(input.since ? ["--since", input.since] : []),
+        ...(input.until ? ["--until", input.until] : []),
+        ...(input.service ? [input.service] : []),
       ];
 
-      const result = await runHackLogCollect({
+      const result = await runHackCommand({
         context: opts.context,
         signal: extra.signal,
         tool: "hack.project.logs.snapshot",
         args,
-        timeoutMs: DEFAULT_CMD_TIMEOUT_MS,
       });
 
-      return buildLogToolResult({
+      return buildToolResult({
         result,
         data: {
-          events: result.events,
-          count: result.events.length,
-          cutoff: cutoffOf(result.outcome),
-          limits: { tail: input.tail ?? null },
+          events: parseJsonLines(result.stdout),
+          count: countJsonLines(result.stdout),
         },
       });
-    },
-  });
+    }
+  );
 
-  register({
-    name: "hack.project.logs.tail",
-    title: "Tail logs",
-    description: "Stream logs briefly and return the collected events.",
-    annotations: READ_ONLY_TOOL_ANNOTATIONS,
-    inputSchema: {
-      ...projectSelectorInput,
-      ...branchInput,
-      ...profileInput,
-      ...logSelectionInput,
-      maxEvents: boundedLimitInput({
-        ceiling: MCP_INPUT_CEILINGS.maxEvents,
-        description:
-          "Max type:log events to collect; start, heartbeat, error and end events do not count",
-      }).optional(),
-      maxMs: boundedLimitInput({
-        ceiling: MCP_INPUT_CEILINGS.maxMs,
-        description: "Max duration in ms",
-      }).optional(),
+  opts.server.registerTool(
+    "hack.project.logs.tail",
+    {
+      title: "Tail logs",
+      description: "Stream logs briefly and return the collected events.",
+      inputSchema: {
+        ...projectSelectorInput,
+        ...branchInput,
+        ...profileInput,
+        service: z.string().describe("Single service name").optional(),
+        services: z
+          .array(z.string())
+          .describe("Multiple service names")
+          .optional(),
+        query: z.string().describe("Raw LogQL selector/query").optional(),
+        loki: z.boolean().describe("Force Loki backend").optional(),
+        compose: z
+          .boolean()
+          .describe("Force docker compose backend")
+          .optional(),
+        tail: z.number().describe("Tail last N log lines").optional(),
+        since: z
+          .string()
+          .describe("Start time (RFC3339 or duration)")
+          .optional(),
+        until: z.string().describe("End time (RFC3339 or duration)").optional(),
+        maxEvents: z.number().describe("Max events to collect").optional(),
+        maxMs: z.number().describe("Max duration in ms").optional(),
+      },
+      outputSchema: toolOutputSchema,
     },
-    handler: async (input, extra) => {
+    async (input, extra) => {
       const resolved = await resolveProjectArgs({
         selection: toProjectSelection(input),
         cwd: opts.context.cwd,
         registryPath: opts.context.registryPath,
       });
       if (!resolved.ok) {
-        return buildToolError(resolved);
+        return buildToolError({ message: resolved.message });
       }
 
       const args = [
@@ -869,52 +593,65 @@ function registerTools(opts: {
         ...buildBranchArgs({ branch: input.branch }),
         ...buildProfileArgs({ profiles: input.profiles }),
         "--json",
-        ...buildLogSelectionArgs(input),
+        ...(input.loki ? ["--loki"] : []),
+        ...(input.compose ? ["--compose"] : []),
+        ...(input.tail ? ["--tail", String(input.tail)] : []),
+        ...(input.query ? ["--query", input.query] : []),
+        ...(input.services
+          ? buildServicesArgs({ services: input.services })
+          : []),
+        ...(input.since ? ["--since", input.since] : []),
+        ...(input.until ? ["--until", input.until] : []),
+        ...(input.service ? [input.service] : []),
       ];
 
-      const maxEvents = input.maxEvents ?? DEFAULT_LOG_TAIL_EVENTS;
-      const maxMs = input.maxMs ?? DEFAULT_LOG_TAIL_MS;
-      const result = await runHackLogCollect({
+      const result = await runHackLogTail({
         context: opts.context,
         signal: extra.signal,
         tool: "hack.project.logs.tail",
         args,
-        maxEvents,
-        timeoutMs: maxMs,
+        maxEvents: input.maxEvents,
+        maxMs: input.maxMs,
       });
 
-      return buildLogToolResult({
-        result,
+      return buildToolResult({
+        result: {
+          ...(result.outputTruncated ? { outputTruncated: true } : {}),
+          command: result.command,
+          exitCode: result.exitCode,
+          stdout: result.stdout,
+          stderr: result.stderr,
+        },
         data: {
           events: result.events,
           count: result.events.length,
-          cutoff: cutoffOf(result.outcome),
           stop_reason: result.stopReason,
           duration_ms: result.durationMs,
-          limits: { tail: input.tail ?? null, maxEvents, maxMs },
         },
       });
-    },
-  });
+    }
+  );
 
-  register({
-    name: "hack.project.open",
-    title: "Resolve project URL",
-    description: "Return a URL for the project without launching a browser.",
-    annotations: READ_ONLY_TOOL_ANNOTATIONS,
-    inputSchema: {
-      ...projectSelectorInput,
-      ...branchInput,
-      target: composeIdentifierInput("Target host or subdomain").optional(),
+  opts.server.registerTool(
+    "hack.project.open",
+    {
+      title: "Resolve project URL",
+      description: "Return a URL for the project without launching a browser.",
+      inputSchema: {
+        ...projectSelectorInput,
+        ...branchInput,
+        target: z.string().describe("Target host/subdomain or URL").optional(),
+      },
+      outputSchema: toolOutputSchema,
     },
-    handler: async (input, extra) => {
+    async (input, extra) => {
       const resolved = await resolveProjectArgs({
         selection: toProjectSelection(input),
         cwd: opts.context.cwd,
         registryPath: opts.context.registryPath,
       });
       if (!resolved.ok) {
-        return buildToolError(resolved);
+        return buildToolError({ message: resolved.message });
       }
 
       const args = [
@@ -936,33 +673,37 @@ function registerTools(opts: {
         result,
         data: parseJson(result.stdout),
       });
-    },
-  });
+    }
+  );
 
-  register({
-    name: "hack.project.init",
-    title: "Initialize project",
-    description: "Initialize a repo using non-interactive defaults.",
-    annotations: DESTRUCTIVE_TOOL_ANNOTATIONS,
-    inputSchema: {
-      ...projectSelectorInput,
-      name: z.string().describe("Project slug").optional(),
-      devHost: z.string().describe("DEV_HOST override").optional(),
-      oauth: z.boolean().describe("Enable OAuth alias host").optional(),
-      oauthTld: z.string().describe("OAuth alias TLD").optional(),
-      manual: z
-        .boolean()
-        .describe("Skip discovery and generate a minimal compose")
-        .optional(),
-      noDiscovery: z
-        .boolean()
-        .describe("Skip discovery even if available")
-        .optional(),
+  opts.server.registerTool(
+    "hack.project.init",
+    {
+      title: "Initialize project",
+      description: "Initialize a repo using non-interactive defaults.",
+      inputSchema: {
+        ...projectSelectorInput,
+        name: z.string().describe("Project slug").optional(),
+        devHost: z.string().describe("DEV_HOST override").optional(),
+        oauth: z.boolean().describe("Enable OAuth alias host").optional(),
+        oauthTld: z.string().describe("OAuth alias TLD").optional(),
+        manual: z
+          .boolean()
+          .describe("Skip discovery and generate a minimal compose")
+          .optional(),
+        noDiscovery: z
+          .boolean()
+          .describe("Skip discovery even if available")
+          .optional(),
+      },
+      outputSchema: toolOutputSchema,
     },
-    handler: async (input, extra) => {
+    async (input, extra) => {
       const selection = toProjectSelection(input);
       if (!(selection.path || selection.repoRoot)) {
-        return buildToolError({ reason: "init_path_required" });
+        return buildToolError({
+          message: "Provide repoRoot or path for initialization.",
+        });
       }
 
       const resolved = await resolveProjectArgs({
@@ -972,17 +713,17 @@ function registerTools(opts: {
         allowUnregistered: true,
       });
       if (!resolved.ok) {
-        return buildToolError(resolved);
+        return buildToolError({ message: resolved.message });
       }
 
       const args = [
         "init",
         ...resolved.args,
         "--auto",
-        ...(input.name ? [`--name=${input.name}`] : []),
-        ...(input.devHost ? [`--dev-host=${input.devHost}`] : []),
+        ...(input.name ? ["--name", input.name] : []),
+        ...(input.devHost ? ["--dev-host", input.devHost] : []),
         ...(input.oauth ? ["--oauth"] : []),
-        ...(input.oauthTld ? [`--oauth-tld=${input.oauthTld}`] : []),
+        ...(input.oauthTld ? ["--oauth-tld", input.oauthTld] : []),
         ...(input.manual ? ["--manual"] : []),
         ...(input.noDiscovery ? ["--no-discovery"] : []),
       ];
@@ -996,367 +737,8 @@ function registerTools(opts: {
       });
 
       return buildToolResult({ result });
-    },
-  });
-
-  register({
-    name: "hack.project.exec",
-    title: "Exec command in running service",
-    description:
-      "Run a command inside an already-running service container (hack exec). Unlike hack.project.run it never starts a new container. Command arguments are passed to the child after `--` and are never parsed as hack options. Output is bounded by the shared 8 MiB capture limit and timeoutMs.",
-    annotations: DESTRUCTIVE_TOOL_ANNOTATIONS,
-    inputSchema: {
-      ...projectSelectorInput,
-      ...branchInput,
-      ...profileInput,
-      service: composeIdentifierInput("Running compose service name"),
-      cmd: z
-        .array(z.string())
-        .min(1)
-        .describe("Command and arguments (at least one entry)"),
-      workdir: z
-        .string()
-        .describe("Working directory inside container")
-        .optional(),
-      timeoutMs: boundedLimitInput({
-        ceiling: MCP_INPUT_CEILINGS.timeoutMs,
-        description: "Command timeout in ms",
-      }).optional(),
-    },
-    handler: async (input, extra) => {
-      const resolved = await resolveProjectArgs({
-        selection: toProjectSelection(input),
-        cwd: opts.context.cwd,
-        registryPath: opts.context.registryPath,
-      });
-      if (!resolved.ok) {
-        return buildToolError(resolved);
-      }
-
-      const timeoutMs = input.timeoutMs ?? DEFAULT_CMD_TIMEOUT_MS;
-      const result = await runHackCommand({
-        context: opts.context,
-        signal: extra.signal,
-        tool: "hack.project.exec",
-        args: buildExecArgs({
-          projectArgs: resolved.args,
-          branch: input.branch,
-          profiles: input.profiles,
-          workdir: input.workdir,
-          service: input.service,
-          cmd: input.cmd,
-        }),
-        timeoutMs,
-      });
-
-      return buildToolResult({
-        result,
-        data: {
-          limits: { timeoutMs, outputBytes: MCP_OUTPUT_LIMIT_BYTES },
-        },
-      });
-    },
-  });
-
-  register({
-    name: "hack.project.doctor",
-    title: "Diagnose project setup",
-    description:
-      "Run read-only setup diagnostics (hack doctor --json). Never applies repairs: --fix and the migration or recovery modes are not reachable from MCP.",
-    annotations: READ_ONLY_TOOL_ANNOTATIONS,
-    inputSchema: {
-      ...projectSelectorInput,
-      ...branchInput,
-    },
-    handler: async (input, extra) => {
-      const resolved = await resolveProjectArgs({
-        selection: toProjectSelection(input),
-        cwd: opts.context.cwd,
-        registryPath: opts.context.registryPath,
-        selectByPath: true,
-      });
-      if (!resolved.ok) {
-        return buildToolError(resolved);
-      }
-
-      const result = await runHackCommand({
-        context: opts.context,
-        signal: extra.signal,
-        tool: "hack.project.doctor",
-        args: buildDoctorArgs({
-          projectArgs: resolved.args,
-          branch: input.branch,
-        }),
-      });
-
-      return buildToolResult({ result, data: parseJson(result.stdout) });
-    },
-  });
-
-  register({
-    name: "hack.project.env.explain",
-    title: "Explain env key",
-    description:
-      "Explain where one env key comes from: availability, secret flag, scope, source and precedence. Never returns the value; child stdout and stderr are withheld.",
-    annotations: READ_ONLY_TOOL_ANNOTATIONS,
-    inputSchema: {
-      ...projectSelectorInput,
-      ...envSelectionInput,
-      key: envKeyInput("Env key name (letters, digits and _)"),
-      target: z
-        .enum(["host", "compose"])
-        .describe("Env view: host (default) or compose")
-        .optional(),
-    },
-    handler: async (input, extra) => {
-      const resolved = await resolveProjectArgs({
-        selection: toProjectSelection(input),
-        cwd: opts.context.cwd,
-        registryPath: opts.context.registryPath,
-      });
-      if (!resolved.ok) {
-        return buildToolError(resolved);
-      }
-
-      const result = await runHackCommand({
-        context: opts.context,
-        signal: extra.signal,
-        tool: "hack.project.env.explain",
-        args: buildEnvExplainArgs({
-          projectArgs: resolved.args,
-          env: input.env,
-          service: input.service,
-          target: input.target,
-          key: input.key,
-        }),
-      });
-
-      return buildValueFreeToolResult({
-        result,
-        data: projectEnvExplain(parseJson(result.stdout)),
-      });
-    },
-  });
-
-  register({
-    name: "hack.project.env.keys",
-    title: "List env keys",
-    description:
-      "List env key names with secret flag, source and scope metadata. Never returns values (never --show-secrets); child stdout and stderr are withheld.",
-    annotations: READ_ONLY_TOOL_ANNOTATIONS,
-    inputSchema: {
-      ...projectSelectorInput,
-      ...envSelectionInput,
-    },
-    handler: async (input, extra) => {
-      const resolved = await resolveProjectArgs({
-        selection: toProjectSelection(input),
-        cwd: opts.context.cwd,
-        registryPath: opts.context.registryPath,
-      });
-      if (!resolved.ok) {
-        return buildToolError(resolved);
-      }
-
-      const result = await runHackCommand({
-        context: opts.context,
-        signal: extra.signal,
-        tool: "hack.project.env.keys",
-        args: buildEnvKeysArgs({
-          projectArgs: resolved.args,
-          env: input.env,
-          service: input.service,
-        }),
-      });
-
-      return buildValueFreeToolResult({
-        result,
-        data: projectEnvKeys(parseJson(result.stdout)),
-      });
-    },
-  });
-
-  register({
-    name: "hack.project.instances",
-    title: "List project instances",
-    description:
-      "List a registered project's runtime instances from `hack projects --json`: only the default and branch instances that currently have containers (running or stopped); a branch that was never started is not listed. Per-service `containers` and `running` counts include lifecycle-process containers.",
-    annotations: READ_ONLY_TOOL_ANNOTATIONS,
-    inputSchema: {
-      ...projectSelectorInput,
-    },
-    handler: async (input, extra) => {
-      const resolved = await resolveRegisteredProjectName({
-        selection: toProjectSelection(input),
-        cwd: opts.context.cwd,
-        registryPath: opts.context.registryPath,
-      });
-      if (!resolved.ok) {
-        return buildToolError(resolved);
-      }
-
-      const result = await runHackCommand({
-        context: opts.context,
-        signal: extra.signal,
-        tool: "hack.project.instances",
-        args: ["projects", "--json", `--project=${resolved.name}`],
-      });
-
-      // `data` replaces stdout: the raw listing covers every matching
-      // project and carries container inspect data the projection omits.
-      return buildToolResult({
-        result: { ...result, stdout: "" },
-        data: projectInstances({
-          payload: parseJson(result.stdout),
-          project: resolved.name,
-        }),
-      });
-    },
-  });
-
-  installTypedToolDispatch({ server: opts.server, tools });
-}
-
-type ToolExtra = RequestHandlerExtra<ServerRequest, ServerNotification>;
-
-type HackToolDefinition<Shape extends z.ZodRawShape> = {
-  readonly name: string;
-  readonly title: string;
-  readonly description: string;
-  readonly annotations: ToolAnnotations;
-  readonly inputSchema: Shape;
-  readonly handler: (
-    input: z.output<z.ZodObject<Shape>>,
-    extra: ToolExtra
-  ) => Promise<CallToolResult>;
-};
-
-type HackToolEntry = {
-  /** Validates raw arguments and refuses before the handler can spawn. */
-  readonly call: (args: unknown, extra: ToolExtra) => Promise<CallToolResult>;
-};
-
-type HackToolRegistry = Map<string, HackToolEntry>;
-
-/**
- * Register one tool for discovery (`tools/list`) and keep its validating entry
- * point for {@link installTypedToolDispatch}. The schema advertised by the SDK
- * and the schema enforced at call time are the same object.
- */
-function registerHackTool<const Shape extends z.ZodRawShape>(opts: {
-  readonly server: McpServer;
-  readonly tools: HackToolRegistry;
-  readonly tool: HackToolDefinition<Shape>;
-}): void {
-  const { tool } = opts;
-  const schema = z.object(tool.inputSchema);
-  const schemaKeys: ReadonlySet<string> = new Set(
-    Object.keys(tool.inputSchema)
-  );
-  const entry: HackToolEntry = {
-    call: async (args, extra) => {
-      const parsed = await schema.safeParseAsync(args ?? {});
-      if (!parsed.success) {
-        return buildToolError({
-          reason: "invalid_arguments",
-          message: describeInvalidArguments({
-            error: parsed.error,
-            schemaKeys,
-          }),
-        });
-      }
-      return await tool.handler(parsed.data, extra);
-    },
-  };
-  opts.tools.set(tool.name, entry);
-  const listedSchema: z.ZodObject = schema;
-  opts.server.registerTool(
-    tool.name,
-    {
-      title: tool.title,
-      description: tool.description,
-      annotations: { title: tool.title, ...tool.annotations },
-      inputSchema: listedSchema,
-      outputSchema: toolOutputSchema,
-    },
-    (args: unknown, extra: ToolExtra) => entry.call(args, extra)
-  );
-}
-
-/**
- * Replace the SDK's generic `tools/call` dispatcher. The SDK rejects schema
- * failures with untyped text before a handler runs; this dispatcher keeps that
- * ordering (validation precedes any spawn) but returns the typed
- * `{error, spawned: false}` refusal. Thrown handler failures and output-schema
- * mismatches keep the SDK's untyped `isError` text result, because they may
- * occur after a child was spawned.
- *
- * An unknown tool name keeps the SDK 1.26 contract: an in-band `isError` text
- * result (not a JSON-RPC protocol error), with the fixed
- * {@link MCP_UNKNOWN_TOOL_MESSAGE} that omits the requested name.
- */
-function installTypedToolDispatch(opts: {
-  readonly server: McpServer;
-  readonly tools: HackToolRegistry;
-}): void {
-  const outputSchema = z.object(toolOutputSchema);
-  opts.server.server.setRequestHandler(
-    CallToolRequestSchema,
-    async (request, extra): Promise<CallToolResult> => {
-      const entry = opts.tools.get(request.params.name);
-      if (!entry) {
-        return buildUntypedToolError(MCP_UNKNOWN_TOOL_MESSAGE);
-      }
-      try {
-        const result = await entry.call(request.params.arguments, extra);
-        if (
-          !(
-            result.isError ||
-            outputSchema.safeParse(result.structuredContent).success
-          )
-        ) {
-          return buildUntypedToolError(
-            `Output validation error: Invalid structured content for tool ${request.params.name}`
-          );
-        }
-        return result;
-      } catch (error) {
-        return buildUntypedToolError(
-          error instanceof Error ? error.message : String(error)
-        );
-      }
     }
   );
-}
-
-/**
- * Closed, value-free summary: names the rejected fields, never echoes input.
- * Field names are kept only when they are keys of the tool's own schema, so a
- * caller-chosen key can never reach the message.
- */
-function describeInvalidArguments(opts: {
-  readonly error: z.ZodError;
-  readonly schemaKeys: ReadonlySet<string>;
-}): string {
-  const fields = [
-    ...new Set(
-      opts.error.issues
-        .map((issue) => issue.path[0])
-        .filter(
-          (key): key is string =>
-            typeof key === "string" && opts.schemaKeys.has(key)
-        )
-    ),
-  ];
-  const subject =
-    fields.length > 0
-      ? `Invalid arguments: ${fields.join(", ")}.`
-      : MCP_REFUSALS.invalid_arguments.message;
-  return `${subject} Identifiers must match ${COMPOSE_IDENTIFIER_PATTERN.source} (branches may also contain "/"); limits must be positive integers within their documented ceiling.`;
-}
-
-function buildUntypedToolError(message: string): CallToolResult {
-  return { content: [{ type: "text", text: message }], isError: true };
 }
 
 function buildToolResult(opts: {
@@ -1383,94 +765,16 @@ function buildToolResult(opts: {
   };
 }
 
-/**
- * Result for the env tools. The child's stdout and stderr are never returned:
- * `stdout` is always empty, and `stderr` is empty on success or the fixed
- * {@link MCP_ENV_OUTPUT_WITHHELD_MESSAGE} on failure. Only `data`, already
- * projected onto allowlisted metadata, carries the child's answer. Exit status,
- * `outputTruncated` and the argv in `command` follow {@link buildToolResult}.
- */
-function buildValueFreeToolResult(opts: {
-  readonly result: HackCommandResult;
-  readonly data: unknown;
+function buildToolError(opts: {
+  readonly message: string;
+  readonly command?: string;
 }): CallToolResult {
-  const ok = opts.result.exitCode === 0;
-  return buildToolResult({
-    result: {
-      command: opts.result.command,
-      exitCode: opts.result.exitCode,
-      stdout: "",
-      stderr: ok ? "" : MCP_ENV_OUTPUT_WITHHELD_MESSAGE,
-      ...(opts.result.outputTruncated ? { outputTruncated: true } : {}),
-    },
-    data: opts.data,
-  });
-}
-
-/**
- * Logs tools result. Unlike {@link buildToolResult}, success follows the
- * collection outcome rather than the child's exit status: a cutoff is `ok`
- * with `data.cutoff` set (the server stopped the child, so `exitCode` may be
- * non-zero), and `data` is kept after the byte bound so partial events
- * survive. A backend failure is `ok: false` with the closed `backend_error`.
- */
-function buildLogToolResult(opts: {
-  readonly result: HackLogCollection;
-  readonly data: Record<string, unknown>;
-}): CallToolResult {
-  const { result } = opts;
-  const ok =
-    result.outcome.kind === "complete" || result.outcome.kind === "cutoff";
-  const payload: ToolResultPayload = {
-    ok,
-    command: result.command,
-    exitCode: result.exitCode,
-    stdout: result.stdout,
-    stderr: result.stderr,
-    ...(result.outputTruncated ? { outputTruncated: true } : {}),
-    data: opts.data,
-    ...(result.outcome.kind === "backend_error"
-      ? { error: MCP_LOG_BACKEND_ERROR }
-      : {}),
-  };
-
-  return {
-    content: [{ type: "text", text: JSON.stringify(payload, null, 2) }],
-    structuredContent: payload,
-    ...(ok ? {} : { isError: true }),
-  };
-}
-
-function cutoffOf(outcome: McpLogOutcome): McpLogCutoff | null {
-  return outcome.kind === "cutoff" ? outcome.cutoff : null;
-}
-
-/**
- * Typed refusal for a request rejected before any child process exists.
- * `spawned: false` is a guarantee: every caller returns before
- * `runHackCommand`/`runHackLogCollect`, so no argv, audit line or mutation occurs.
- * `stderr` repeats the message for clients reading the earlier contract.
- * The message is the reason's fixed text from {@link MCP_REFUSALS}; only
- * `invalid_arguments` may pass its schema-key-only summary instead.
- */
-function buildToolError(
-  opts:
-    | { readonly reason: FixedRefusalReason }
-    | { readonly reason: "invalid_arguments"; readonly message: string }
-): CallToolResult {
-  const { code } = MCP_REFUSALS[opts.reason];
-  const message =
-    opts.reason === "invalid_arguments"
-      ? opts.message
-      : MCP_REFUSALS[opts.reason].message;
   const payload: ToolResultPayload = {
     ok: false,
-    command: "",
+    command: opts.command ?? "",
     exitCode: 1,
     stdout: "",
-    stderr: message,
-    spawned: false,
-    error: { code, reason: opts.reason, message },
+    stderr: opts.message,
   };
 
   return {
@@ -1480,161 +784,29 @@ function buildToolError(
   };
 }
 
-/**
- * `hack run` argv. Every option value is fused (`--opt=value`) and `--` ends
- * hack's option parsing, so nothing in `cmd` (for example `--branch other` or
- * `--version`) can be consumed by hack or retarget the instance.
- */
-export function buildRunArgs(opts: {
-  readonly projectArgs: readonly string[];
-  readonly branch?: string;
-  readonly profiles?: readonly string[];
-  readonly workdir?: string;
-  readonly service: string;
-  readonly cmd: readonly string[];
-}): string[] {
-  return [
-    "run",
-    ...opts.projectArgs,
-    ...buildBranchArgs({ branch: opts.branch }),
-    ...buildProfileArgs({ profiles: opts.profiles }),
-    ...(opts.workdir ? [`--workdir=${opts.workdir}`] : []),
-    "--",
-    opts.service,
-    ...opts.cmd,
-  ];
-}
-
-/**
- * `hack exec` argv: same boundary as {@link buildRunArgs}. Every option value
- * is fused and `--` precedes the service, so `cmd` entries such as `--branch`
- * or `--help` reach the container command, never hack's parser.
- */
-export function buildExecArgs(opts: {
-  readonly projectArgs: readonly string[];
-  readonly branch?: string;
-  readonly profiles?: readonly string[];
-  readonly workdir?: string;
-  readonly service: string;
-  readonly cmd: readonly string[];
-}): string[] {
-  return [
-    "exec",
-    ...opts.projectArgs,
-    ...buildBranchArgs({ branch: opts.branch }),
-    ...buildProfileArgs({ profiles: opts.profiles }),
-    ...(opts.workdir ? [`--workdir=${opts.workdir}`] : []),
-    "--",
-    opts.service,
-    ...opts.cmd,
-  ];
-}
-
-/**
- * `hack doctor` argv. The set is closed: project path, branch and `--json`.
- * `--fix`, `--migrate-env-config` and the migration and recovery modes are
- * never emitted, and the CLI also refuses `--json` with `--fix`.
- */
-export function buildDoctorArgs(opts: {
-  readonly projectArgs: readonly string[];
-  readonly branch?: string;
-}): string[] {
-  return [
-    "doctor",
-    ...opts.projectArgs,
-    ...buildBranchArgs({ branch: opts.branch }),
-    "--json",
-  ];
-}
-
-/** `hack env explain --json` argv; the validated key follows `--`. */
-export function buildEnvExplainArgs(opts: {
-  readonly projectArgs: readonly string[];
-  readonly env?: string;
-  readonly service?: string;
-  readonly target?: "host" | "compose";
-  readonly key: string;
-}): string[] {
-  return [
-    "env",
-    "explain",
-    ...opts.projectArgs,
-    ...buildEnvScopeArgs(opts),
-    ...(opts.target ? [`--target=${opts.target}`] : []),
-    "--json",
-    "--",
-    opts.key,
-  ];
-}
-
-/** `hack env list --json` argv. `--show-secrets` is never emitted. */
-export function buildEnvKeysArgs(opts: {
-  readonly projectArgs: readonly string[];
-  readonly env?: string;
-  readonly service?: string;
-}): string[] {
-  return [
-    "env",
-    "list",
-    ...opts.projectArgs,
-    ...buildEnvScopeArgs(opts),
-    "--json",
-  ];
-}
-
-function buildEnvScopeArgs(opts: {
-  readonly env?: string;
-  readonly service?: string;
-}): string[] {
-  return [
-    ...(opts.env ? [`--env=${opts.env}`] : []),
-    ...(opts.service ? [`--service=${opts.service}`] : []),
-  ];
-}
-
-function buildLogSelectionArgs(input: {
-  readonly loki?: boolean;
-  readonly compose?: boolean;
-  readonly tail?: number;
-  readonly query?: string;
-  readonly services?: readonly string[];
-  readonly since?: string;
-  readonly until?: string;
-  readonly service?: string;
-}): string[] {
-  return [
-    ...(input.loki ? ["--loki"] : []),
-    ...(input.compose ? ["--compose"] : []),
-    ...(input.tail === undefined ? [] : [`--tail=${input.tail}`]),
-    ...(input.query ? [`--query=${input.query}`] : []),
-    ...(input.services ? buildServicesArgs({ services: input.services }) : []),
-    ...(input.since ? [`--since=${input.since}`] : []),
-    ...(input.until ? [`--until=${input.until}`] : []),
-    ...(input.service ? [input.service] : []),
-  ];
-}
-
 function buildBranchArgs(opts: { readonly branch?: string }): string[] {
-  return opts.branch ? [`--branch=${opts.branch}`] : [];
+  const branch = (opts.branch ?? "").trim();
+  return branch.length > 0 ? ["--branch", branch] : [];
 }
 
 function buildProfileArgs(opts: {
   readonly profiles?: readonly string[];
 }): string[] {
-  const profiles = opts.profiles ?? [];
+  const profiles = (opts.profiles ?? []).map((p) => p.trim()).filter(Boolean);
   if (profiles.length === 0) {
     return [];
   }
-  return [`--profile=${profiles.join(",")}`];
+  return ["--profile", profiles.join(",")];
 }
 
 function buildServicesArgs(opts: {
   readonly services: readonly string[];
 }): string[] {
-  if (opts.services.length === 0) {
+  const services = opts.services.map((s) => s.trim()).filter(Boolean);
+  if (services.length === 0) {
     return [];
   }
-  return [`--services=${opts.services.join(",")}`];
+  return ["--services", services.join(",")];
 }
 
 function toProjectSelection(input: ProjectSelection): ProjectSelection {
@@ -1650,35 +822,42 @@ async function resolveProjectArgs(opts: {
   readonly selection: ProjectSelection;
   readonly cwd: string;
   readonly allowUnregistered?: boolean;
-  /**
-   * Emit `--path=<repo root>` for a projectName selection, for commands
-   * (doctor) that accept `--path` but not `--project`.
-   */
-  readonly selectByPath?: boolean;
-}): Promise<ProjectArgsResolution> {
+}): Promise<
+  | { readonly ok: true; readonly args: string[] }
+  | { readonly ok: false; readonly message: string }
+> {
   const selection = opts.selection;
   const picked = [
     selection.projectName,
     selection.repoRoot,
     selection.path,
-  ].filter((value) => value !== undefined);
+  ].filter(Boolean);
   if (picked.length > 1) {
-    return { ok: false, reason: "conflicting_project_selection" };
+    return {
+      ok: false,
+      message: "Use only one of projectName, repoRoot, or path.",
+    };
   }
 
-  if (selection.projectName !== undefined) {
-    return await resolveProjectNameArgs({
-      projectName: selection.projectName,
+  if (selection.projectName) {
+    const project = await resolveRegisteredProjectByName({
+      name: selection.projectName,
       registryPath: opts.registryPath,
-      selectByPath: opts.selectByPath === true,
     });
+    if (!project) {
+      return {
+        ok: false,
+        message: `Unknown project "${selection.projectName}". Run 'hack init' or 'hack projects' first.`,
+      };
+    }
+    return { ok: true, args: ["--project", selection.projectName] };
   }
 
   const pathLike = selection.repoRoot ?? selection.path;
   if (pathLike) {
     const absPath = resolve(opts.cwd, pathLike);
     if (!(await pathExists(absPath))) {
-      return { ok: false, reason: "path_not_found" };
+      return { ok: false, message: `Path not found: ${absPath}` };
     }
     if (!opts.allowUnregistered) {
       const allowed = await isPathAllowed({
@@ -1686,10 +865,13 @@ async function resolveProjectArgs(opts: {
         registryPath: opts.registryPath,
       });
       if (!allowed) {
-        return { ok: false, reason: "path_not_registered" };
+        return {
+          ok: false,
+          message: "Path is outside registered hack projects.",
+        };
       }
     }
-    return { ok: true, args: [`--path=${absPath}`] };
+    return { ok: true, args: ["--path", absPath] };
   }
 
   const context = await findProjectContext(opts.cwd);
@@ -1703,143 +885,14 @@ async function resolveProjectArgs(opts: {
       registryPath: opts.registryPath,
     });
     if (!allowed) {
-      return { ok: false, reason: "no_project_context" };
+      return {
+        ok: false,
+        message: "No project context found. Provide projectName or path.",
+      };
     }
   }
 
-  return { ok: true, args: [`--path=${opts.cwd}`] };
-}
-
-async function resolveProjectNameArgs(opts: {
-  readonly projectName: string;
-  readonly registryPath: string;
-  readonly selectByPath: boolean;
-}): Promise<ProjectArgsResolution> {
-  const name = normalizeProjectName(opts.projectName);
-  if (!name) {
-    return { ok: false, reason: "invalid_project_name" };
-  }
-  try {
-    const project = await resolveRegisteredProjectByName({
-      name,
-      registryPath: opts.registryPath,
-    });
-    if (!project) {
-      return { ok: false, reason: "project_not_found" };
-    }
-    return {
-      ok: true,
-      args: [
-        opts.selectByPath
-          ? `--path=${project.projectRoot}`
-          : `--project=${name}`,
-      ],
-    };
-  } catch (error) {
-    if (
-      error instanceof AmbiguousProjectNameError ||
-      error instanceof AmbiguousProjectIdError
-    ) {
-      return { ok: false, reason: "ambiguous_project" };
-    }
-    throw error;
-  }
-}
-
-/**
- * Resolve a selection to one registered project name, for commands that select
- * by name only (`hack projects --project`). A path (or, with no selection, the
- * session cwd) selects the registered project whose repo root or project dir
- * contains it; the deepest root wins, and two distinct registrations at that
- * depth are ambiguous. Unregistered paths are refused rather than guessed.
- */
-async function resolveRegisteredProjectName(opts: {
-  readonly registryPath: string;
-  readonly selection: ProjectSelection;
-  readonly cwd: string;
-}): Promise<ProjectNameResolution> {
-  const selection = opts.selection;
-  const picked = [
-    selection.projectName,
-    selection.repoRoot,
-    selection.path,
-  ].filter((value) => value !== undefined);
-  if (picked.length > 1) {
-    return { ok: false, reason: "conflicting_project_selection" };
-  }
-
-  const registry = await readProjectsRegistry({
-    registryPath: opts.registryPath,
-  });
-  if (selection.projectName !== undefined) {
-    const name = normalizeProjectName(selection.projectName);
-    if (!name) {
-      return { ok: false, reason: "invalid_project_name" };
-    }
-    try {
-      const match = selectRegisteredProjectByName({
-        projects: registry.projects,
-        name,
-      });
-      return match
-        ? { ok: true, name }
-        : { ok: false, reason: "project_not_found" };
-    } catch (error) {
-      if (
-        error instanceof AmbiguousProjectNameError ||
-        error instanceof AmbiguousProjectIdError
-      ) {
-        return { ok: false, reason: "ambiguous_project" };
-      }
-      throw error;
-    }
-  }
-
-  const pathLike = selection.repoRoot ?? selection.path;
-  const absPath = resolve(opts.cwd, pathLike ?? ".");
-  if (pathLike && !(await pathExists(absPath))) {
-    return { ok: false, reason: "path_not_found" };
-  }
-  const notFound: FixedRefusalReason = pathLike
-    ? "path_not_registered"
-    : "no_project_context";
-  const containing = selectContainingRegistrations({
-    projects: registry.projects,
-    absPath,
-  });
-  const names = new Set(
-    containing.map((project) => normalizeProjectName(project.name))
-  );
-  if (names.size > 1) {
-    return { ok: false, reason: "ambiguous_project" };
-  }
-  const [name] = [...names];
-  return name ? { ok: true, name } : { ok: false, reason: notFound };
-}
-
-/** Registrations at the deepest root that contains `absPath`. */
-function selectContainingRegistrations(opts: {
-  readonly projects: readonly RegisteredProject[];
-  readonly absPath: string;
-}): RegisteredProject[] {
-  let best: RegisteredProject[] = [];
-  let bestDepth = -1;
-  for (const project of opts.projects) {
-    for (const root of [project.repoRoot, project.projectDir]) {
-      const resolvedRoot = resolve(root);
-      if (!isPathWithin({ parent: resolvedRoot, child: opts.absPath })) {
-        continue;
-      }
-      const depth = resolvedRoot.length;
-      if (depth > bestDepth) {
-        best = [project];
-        bestDepth = depth;
-      } else if (depth === bestDepth && !best.includes(project)) {
-        best.push(project);
-      }
-    }
-  }
-  return best;
+  return { ok: true, args: ["--path", opts.cwd] };
 }
 
 async function isPathAllowed(opts: {
@@ -1891,7 +944,7 @@ async function runHackCommand(opts: {
     const proc = Bun.spawn(cmd, {
       detached: true,
       cwd: opts.cwd ?? opts.context.cwd,
-      env: buildChildEnv(opts.context.env),
+      env: opts.context.env,
       stdin: "ignore",
       stdout: "pipe",
       stderr: "pipe",
@@ -1945,95 +998,70 @@ async function runHackCommand(opts: {
     : await work();
 }
 
-type HackLogCollection = {
+async function runHackLogTail(opts: {
+  readonly context: McpSessionContext;
+  readonly signal: AbortSignal;
+  readonly tool: string;
+  readonly args: readonly string[];
+  readonly maxEvents?: number;
+  readonly maxMs?: number;
+}): Promise<{
   readonly outputTruncated?: boolean;
   readonly command: string;
   readonly exitCode: number;
   readonly stdout: string;
   readonly stderr: string;
   readonly events: readonly Record<string, unknown>[];
-  readonly stopReason: McpLogStopReason;
+  readonly stopReason: string;
   readonly durationMs: number;
-  readonly outcome: McpLogOutcome;
-};
-
-/**
- * Run `hack logs --json` and collect its stream events under the contract in
- * `logs-contract.ts`. `maxEvents` counts `type: "log"` events only; `timeoutMs`
- * bounds the whole collection; the shared byte budget cuts on a UTF-8 code
- * point boundary. Nothing outlives the call: a later call, in this session or
- * a reconnected one, starts a new backend stream (no cursor, no replay).
- */
-async function runHackLogCollect(opts: {
-  readonly context: McpSessionContext;
-  readonly signal: AbortSignal;
-  readonly tool: string;
-  readonly args: readonly string[];
-  readonly maxEvents?: number;
-  readonly timeoutMs: number;
-}): Promise<HackLogCollection> {
-  const work = async (): Promise<HackLogCollection> => {
+}> {
+  const work = async () => {
     const invocation = await resolveHackInvocation(opts.context);
     opts.signal.throwIfAborted();
     const cmd = [invocation.bin, ...invocation.args, ...opts.args];
     const proc = Bun.spawn(cmd, {
       detached: true,
       cwd: opts.context.cwd,
-      env: buildChildEnv(opts.context.env),
+      env: opts.context.env,
       stdin: "ignore",
       stdout: "pipe",
       stderr: "pipe",
     });
 
-    const { maxEvents } = opts;
+    const maxEvents = opts.maxEvents ?? DEFAULT_LOG_TAIL_EVENTS;
+    const maxMs = opts.maxMs ?? DEFAULT_LOG_TAIL_MS;
     const start = Date.now();
 
     const events: Record<string, unknown>[] = [];
     const stdoutLines: string[] = [];
     const stderrLines: string[] = [];
 
-    let stopReason: McpLogStopReason = "eof";
-    // Set once a server stop can have reached the child. Later failure events
-    // may describe that stop. A byte cut is the exception: the retained prefix
-    // was written before the child was signalled, and nothing is retained after
-    // it, so failure evidence in that prefix still counts.
-    let failureEvidenceClosed = false;
-    let logCount = 0;
-    let backendFailureObserved = false;
+    let stopReason = "eof";
 
     const lifetime = superviseMcpCommand({
       proc,
       signal: opts.signal,
-      timeoutMs: opts.timeoutMs,
+      timeoutMs: maxMs,
       onStop: (reason) => {
-        stopReason = toLogStopReason(reason);
-        if (stopReason !== "output_limit") {
-          failureEvidenceClosed = true;
-        }
+        stopReason = reason;
       },
     });
 
     const output = createMcpOutputBudget({
-      codePointSafe: true,
       onLimit: () => lifetime.stop("output_limit"),
     });
-    /** Record one stream event; true once the log-event bound is reached. */
-    const recordEvent = (event: Record<string, unknown>): boolean => {
-      events.push(event);
-      const observed = observeLogStreamEvent(event);
-      if (observed.backendFailure && !failureEvidenceClosed) {
-        backendFailureObserved = true;
-      }
-      if (observed.isLog) {
-        logCount += 1;
-      }
-      return maxEvents !== undefined && logCount >= maxEvents;
-    };
     const stdoutTask = (async () => {
       for await (const line of readLinesFromStream(output.wrap(proc.stdout))) {
         stdoutLines.push(line);
-        const parsed = parseJsonLine(line.trim());
-        if (parsed && recordEvent(parsed)) {
+        const trimmed = line.trim();
+        if (trimmed.length === 0) {
+          continue;
+        }
+        const parsed = parseJsonLine(trimmed);
+        if (parsed) {
+          events.push(parsed);
+        }
+        if (events.length >= maxEvents) {
           lifetime.stop("max_events");
           break;
         }
@@ -2054,6 +1082,7 @@ async function runHackLogCollect(opts: {
     }
 
     if (output.exceeded()) {
+      exitCode = 1;
       stderrLines.push(
         "MCP output exceeded the 8 MiB capture limit; use the CLI for full output."
       );
@@ -2075,16 +1104,6 @@ async function runHackLogCollect(opts: {
       ...(output.exceeded() ? { outputTruncated: true } : {}),
       stopReason,
       durationMs: Date.now() - start,
-      outcome: classifyLogCollection({
-        stopReason,
-        exitCode,
-        backendFailureObserved,
-        limits: {
-          ...(maxEvents === undefined ? {} : { maxEvents }),
-          timeMs: opts.timeoutMs,
-          bytes: MCP_OUTPUT_LIMIT_BYTES,
-        },
-      }),
     };
   };
   return opts.context.admission
@@ -2111,6 +1130,17 @@ function parseJson(text: string): Record<string, unknown> | null {
   }
 }
 
+function parseJsonLines(text: string): Record<string, unknown>[] {
+  const events: Record<string, unknown>[] = [];
+  for (const line of text.split("\n")) {
+    const parsed = parseJsonLine(line.trim());
+    if (parsed) {
+      events.push(parsed);
+    }
+  }
+  return events;
+}
+
 function parseJsonLine(line: string): Record<string, unknown> | null {
   if (line.length === 0) {
     return null;
@@ -2121,6 +1151,16 @@ function parseJsonLine(line: string): Record<string, unknown> | null {
   } catch {
     return null;
   }
+}
+
+function countJsonLines(text: string): number {
+  let count = 0;
+  for (const line of text.split("\n")) {
+    if (parseJsonLine(line.trim())) {
+      count += 1;
+    }
+  }
+  return count;
 }
 
 function joinLines(lines: readonly string[]): string {

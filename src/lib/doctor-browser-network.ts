@@ -71,9 +71,7 @@ export async function probeBrowserTarget(
   try {
     const result = await execute(
       [
-        // macOS system curl uses the System keychain that browsers and native
-        // Caddy trust use; a PATH curl may have a different CA store.
-        process.platform === "darwin" ? "/usr/bin/curl" : "curl",
+        "curl",
         "--disable",
         "--silent",
         "--output",
@@ -134,19 +132,12 @@ export async function checkBrowserLocalNetwork(input: {
     result.outcome === "response" &&
     result.status >= 200 &&
     result.status < 300;
-  // A redirect proves the origin's TLS and HTTP path, but only an actual
-  // browser success proves that its destination worked.
-  const observedRedirectWorks =
-    result.outcome === "response" &&
-    result.status >= 300 &&
-    result.status < 400 &&
-    input.observation === "works";
   const cli =
     result.outcome === "response"
       ? `CLI verified HTTPS returned HTTP ${result.status} (normal CLI proxy settings apply; redirect destinations are not checked)`
       : "CLI verified HTTPS did not succeed";
   const target = new URL(input.url).origin;
-  if (!(cliWorks || observedRedirectWorks)) {
+  if (!cliWorks) {
     return {
       name,
       status: "warn",

@@ -6,7 +6,6 @@ import {
   resolveCommand,
 } from "../src/cli/command.ts";
 import { CLI_SPEC } from "../src/cli/spec.ts";
-import { restoreEnv } from "./helpers/env.ts";
 
 type CapturedRunResult = {
   readonly exitCode: number;
@@ -22,7 +21,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  restoreEnv("HACK_LOGGER", originalLogger);
+  process.env.HACK_LOGGER = originalLogger;
 });
 
 test("resolveCommand finds nested subcommand and remaining positionals", () => {

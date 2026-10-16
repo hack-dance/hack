@@ -1,7 +1,7 @@
 {
   "name": "hack-cli",
-  "version": "4.2.1",
-  "packageManager": "bun@1.4.2",
+  "version": "4.1.1",
+  "packageManager": "bun@1.3.9",
   "module": "index.ts",
   "type": "module",
   "workspaces": [
@@ -16,9 +16,6 @@
     "dev": "bun run --cwd packages/cli dev",
     "build": "bun run --cwd packages/cli build",
     "build:local": "sh scripts/build-hack-local.sh",
-    "build:config-compiler": "bun scripts/build-config-compiler.ts",
-    "check:config-compiler": "cargo fmt --manifest-path packages/config-compiler/Cargo.toml --check && cargo clippy --locked --manifest-path packages/config-compiler/Cargo.toml --target-dir .hack-local/config-compiler-target --all-targets --jobs 2 -- -D warnings",
-    "test:config-compiler": "cargo test --locked --manifest-path packages/config-compiler/Cargo.toml --target-dir .hack-local/config-compiler-target --jobs 2",
     "test:local": "cargo test --locked --manifest-path packages/runtime-core/Cargo.toml --target-dir .hack-local/target --jobs 2",
     "check:local": "cargo fmt --manifest-path packages/runtime-core/Cargo.toml --check && cargo clippy --locked --manifest-path packages/runtime-core/Cargo.toml --target-dir .hack-local/target --all-targets --jobs 2 -- -D warnings",
     "build:runtime-image": "bun run --cwd packages/cli build:runtime-image",
@@ -26,7 +23,6 @@
     "build:slim-runtime-image": "bun run --cwd packages/cli build:slim-runtime-image",
     "build:release": "bun run --cwd packages/cli build:release",
     "smoke:portable-container": "bash scripts/portable-container-smoke.sh",
-    "smoke:portable-bootstrap": "bun scripts/portable-bootstrap-smoke.ts",
     "commit": "cz",
     "install:dev": "bun run --cwd packages/cli install:dev",
     "install:bin": "bun run build && bun run --cwd packages/cli install:bin",
@@ -56,7 +52,7 @@
     "turbo": "bunx turbo",
     "turbo:dev": "bunx turbo run dev --parallel",
     "turbo:typecheck": "bunx turbo run typecheck",
-    "turbo:test": "bun run test:preflight && bunx --no-install turbo run test",
+    "turbo:test": "bunx turbo run test",
     "turbo:check": "bunx turbo run check",
     "check": "bun run privacy:check && bun run turbo:check",
     "prepare": "husky",
@@ -64,16 +60,13 @@
     "typecheck": "bun run turbo:typecheck",
     "uninstall:local": "bun run --cwd packages/cli uninstall:local",
     "test": "bun run turbo:test",
-    "test:preflight": "bun --no-env-file scripts/check-test-config-compiler.ts",
     "test:models": "bun run scripts/check-tla-models.ts",
     "test:e2e:local": "bun tests/e2e/run.ts",
     "test:e2e:local:docker": "HACK_E2E_DOCKER=1 bun tests/e2e/run.ts",
     "test:e2e:gateway": "bun run scripts/gateway-e2e.ts",
     "test:e2e:dispatch": "bun run scripts/dispatch-e2e.ts",
     "test:e2e:railway": "bun run scripts/railway-node-e2e.ts",
-    "ci:bun-crash-census": "bun scripts/ci-bun-crash-census.ts",
     "docs:cli-reference": "bun run scripts/generate-cli-reference.ts",
-    "docs:agent-client-capabilities": "bun run scripts/generate-agent-client-capabilities.ts",
     "generate:agent-plugins": "bun run scripts/generate-agent-plugins.ts"
   },
   "devDependencies": {
@@ -106,7 +99,6 @@
     "typescript": "^5"
   },
   "dependencies": {
-    "@balena/dockerignore": "1.0.2",
     "@charmland/lipgloss": "2.0.0-beta.3-0e280f3",
     "@clack/prompts": "1.0.0-alpha.9",
     "elysia": "^1.4.9",
@@ -114,7 +106,6 @@
     "@opentui/core": "^0.1.74",
     "qrcode": "^1.5.4",
     "qrcode-terminal": "^0.12.0",
-    "yaml": "2.8.2",
     "zod": "4.3.5"
   }
 }

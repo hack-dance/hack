@@ -1,28 +1,20 @@
 //! Explicit foreground lifetime; discovery is not authority to recover a dead owner.
-use super::{
-    Candidate, CandidateError, Engine, HostRelayRuntime, Kind, Receipt, RunOptions, startup,
-};
-use crate::error::StopFailuresDiagnostic;
+use super::{Candidate, CandidateError, Engine, HostRelayRuntime, Receipt, RunOptions, startup};
 use serde_json::{Value, json};
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeMap,
     io::Write,
     time::{Duration, Instant},
 };
-mod dependency_refresh;
-pub mod jobs;
 #[cfg(all(test, feature = "environment-launcher"))]
 mod native_test;
 mod publishers;
 pub(in crate::provider::graph) mod redelivery;
-pub use dependency_refresh::request as refresh_dependencies_request;
 mod retained_data;
-pub(in crate::provider::graph) mod signals;
+mod signals;
 #[cfg(test)]
 mod tests;
-pub(in crate::provider::graph) mod transport;
-pub(in crate::provider::graph) use transport::DeadOwner;
-pub(in crate::provider::graph) use transport::retire_recovered_publisher as retire_publisher_path;
+mod transport;
 use transport::{Publication, WireRequest};
 fn refused() -> CandidateError {
     CandidateError::new(
@@ -84,199 +76,45 @@ pub fn serve_with_environment(
         &BTreeMap::new(),
     )
 }
-/// Reviewed route selectors belong to this foreground owner; publication readiness is
+/// Explicit route slots belong to this foreground owner; publication readiness is
 /// additional to application readiness. TLS is provided by a separate authority.
 pub fn serve_with_routes(
     candidate: &Candidate,
     options: RunOptions<'_>,
-    runtime: HostRelayRuntime,
-    managed: &BTreeMap<String, BTreeMap<String, String>>,
-    deadline: Instant,
-    route_slots: &BTreeMap<String, super::RouteSlot>,
-) -> Result<Receipt, CandidateError> {
-    serve_input(
-        candidate,
-        options,
-        runtime,
-        managed,
-        deadline,
-        route_slots,
-        None,
-    )
-}
-
-/// Supervise a fresh graph using exact normalized bytes. The owner retains these
-/// bytes only in memory. Owner restore is explicitly refused until normalized
-/// recovery is implemented; status and owned cleanup remain available.
-pub fn serve_normalized_with_routes(
-    candidate: &Candidate,
-    options: super::NormalizedRunOptions<'_>,
-    runtime: HostRelayRuntime,
-    managed: &BTreeMap<String, BTreeMap<String, String>>,
-    deadline: Instant,
-    route_slots: &BTreeMap<String, super::RouteSlot>,
-) -> Result<Receipt, CandidateError> {
-    serve_input(
-        candidate,
-        options.run,
-        runtime,
-        managed,
-        deadline,
-        route_slots,
-        Some((options.compose, None)),
-    )
-}
-
-/// New foreground ownership after confirmed retirement, retaining the same run/data.
-pub fn serve_restore_normalized_with_routes(
-    candidate: &Candidate,
-    options: super::NormalizedRunOptions<'_>,
-    runtime: HostRelayRuntime,
-    managed: &BTreeMap<String, BTreeMap<String, String>>,
-    deadline: Instant,
-    route_slots: &BTreeMap<String, super::RouteSlot>,
-    generation: &str,
-) -> Result<Receipt, CandidateError> {
-    serve_input(
-        candidate,
-        options.run,
-        runtime,
-        managed,
-        deadline,
-        route_slots,
-        Some((options.compose, Some(generation))),
-    )
-}
-/// Read-only selection requires an explicitly retired owner and acknowledged data retention.
-pub fn restore_selection(candidate: &Candidate, run: &str) -> Result<Value, CandidateError> {
-    let retired = transport::Retired::acquire(candidate, run)?.ok_or_else(refused)?;
-    let engine = Engine::connect_cleanup(candidate)?;
-    let (receipt, root) = super::load(candidate, &engine, run)?;
-    if receipt.phase != "stopped-data-retained" || receipt.normalized_input.is_none() {
-        return Err(refused());
-    }
-    super::cleanup_enrollment::retention(&root, &receipt)?;
-    for resource in receipt.resources.values() {
-        let observed = super::inspect_resource(&engine, &receipt, resource)?;
-        if resource.kind == super::Kind::Volume {
-            if observed.is_none() {
-                return Err(refused());
-            }
-        } else if resource.phase != "absent" || observed.is_some() {
-            return Err(refused());
-        }
-    }
-    #[cfg(target_os = "macos")]
-    let source_rebind = super::source_device_rebind::select(&engine, &receipt, &root)?;
-    #[cfg(target_os = "macos")]
-    let generation = super::restore::restore_generation_with_source_rebind(
-        &engine,
-        &receipt,
-        source_rebind.as_ref(),
-    )?;
-    #[cfg(not(target_os = "macos"))]
-    let generation = super::restore::restore_generation(&engine, &receipt)?;
-    retired.verify()?;
-    Ok(
-        json!({"run":receipt.run,"owner":receipt.owner,"namespace":receipt.namespace,"plan":receipt.plan_id,
-        "generation":generation,"normalized_input":receipt.normalized_input}),
-    )
-}
-
-fn serve_input<'a>(
-    candidate: &Candidate,
-    options: RunOptions<'a>,
     mut runtime: HostRelayRuntime,
     managed: &BTreeMap<String, BTreeMap<String, String>>,
     deadline: Instant,
-    route_slots: &BTreeMap<String, super::RouteSlot>,
-    normalized: Option<(crate::project::NormalizedComposeOptions<'a>, Option<&str>)>,
+    route_slots: &BTreeMap<String, u8>,
 ) -> Result<Receipt, CandidateError> {
     if options.routing_enrolled != !route_slots.is_empty() {
         return Err(refused());
     }
-    if let Some((compose, _)) = normalized {
-        super::compile_normalized_inputs(
-            candidate,
-            &super::NormalizedRunOptions {
-                run: redelivery::options(&options),
-                compose,
-            },
-            managed,
-        )?;
-    } else if !managed.is_empty() {
+    if !managed.is_empty() {
         // Refuse invalid scoped ownership or payload before publishing an owner.
         // Runtime admission compiles again to detect intervening project changes.
         super::compile_environment_inputs_until(candidate, &options, managed, deadline)?;
     }
     let run_id = options.run_id.to_owned();
-    let fresh_generation = normalized.and_then(|(_, generation)| generation);
-    let mut publication = if fresh_generation.is_some() {
-        Publication::bind_retired(candidate, options.run_id)?
-    } else {
-        Publication::bind(candidate, options.run_id)?
-    };
+    let mut publication = Publication::bind(candidate, options.run_id)?;
     let signals = match signals::Events::new(&publication) {
         Ok(signals) => signals,
         Err(error) => {
-            if fresh_generation.is_some() {
-                // This publication is ours; no restore attempt has begun yet.
-                publication.finish()?;
-            } else {
-                finish_before_admission(&mut publication, candidate, &run_id, false)?;
-            }
+            finish_before_admission(&mut publication, candidate, &run_id, false)?;
             return Err(error);
         }
     };
     runtime.set_startup_cancellation(Some(signals::startup_pending));
-    let attempt = if let Some((compose, Some(generation))) = normalized {
-        super::restore::restore_normalized_foreground(
-            candidate,
-            super::NormalizedRunOptions {
-                run: redelivery::options(&options),
-                compose,
-            },
-            managed,
-            deadline,
-            &mut runtime,
-            generation,
-            &|| publication.verify(),
-        )
-    } else if let Some((compose, _)) = normalized {
-        super::run_normalized_with_host_dependencies_until(
-            candidate,
-            super::NormalizedRunOptions {
-                run: redelivery::options(&options),
-                compose,
-            },
-            &mut runtime,
-            managed,
-            deadline,
-        )
-    } else {
-        super::run_with_host_dependencies_until(
-            candidate,
-            redelivery::options(&options),
-            &mut runtime,
-            managed,
-            deadline,
-        )
-    };
+    let attempt = super::run_with_host_dependencies_until(
+        candidate,
+        redelivery::options(&options),
+        &mut runtime,
+        managed,
+        deadline,
+    );
     runtime.set_startup_cancellation(None);
     let receipt = match attempt {
         Ok(receipt) => receipt,
         Err(error) => {
-            if fresh_generation.is_some() && !runtime.admission_started() {
-                let engine = Engine::connect_cleanup(candidate)?;
-                let (retained, root) = super::load(candidate, &engine, &run_id)?;
-                if retained.phase == "stopped-data-retained"
-                    && std::fs::symlink_metadata(root.join("state.pending"))
-                        .is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound)
-                {
-                    publication.finish()?;
-                    return Err(error);
-                }
-            }
             if !finish_before_admission(
                 &mut publication,
                 candidate,
@@ -298,7 +136,6 @@ fn serve_input<'a>(
             return runtime.cleanup(candidate, false);
         }
         publishers.start(candidate, &receipt, &signals, deadline, route_slots)?;
-        signals.watch_read(runtime.dependency_notification_fd())?;
         let ready =
             json!({"kind":"graph_foreground_ready","run":receipt.run,"phase":receipt.phase});
         let mut stdout = std::io::stdout().lock();
@@ -307,87 +144,38 @@ fn serve_input<'a>(
             .and_then(|_| stdout.flush())
             .map_err(|_| refused())?;
         drop(stdout);
-        let mut queued = None;
         loop {
-            if queued.is_none() && signals.wait()? {
+            if signals.wait()? {
                 cleanup_attempted = true;
                 return runtime.cleanup(candidate, false);
             }
-            if queued.is_none() && runtime.drain_dependency_notifications()? {
-                // Authenticated traffic reports drift once; there is no idle scan.
-                // A refusal preserves the graph and leaves changed grants closed.
-                let _ =
-                    dependency_refresh::automatic(candidate, &mut runtime, &receipt.run, &signals);
-            }
-            let (mut stream, request) = if let Some(pending) = queued.take() {
-                pending
-            } else {
-                let Some(mut stream) = publication.accept()? else {
-                    continue;
-                };
-                let request: WireRequest = match transport::read(
-                    &mut stream,
-                    Duration::from_secs(5),
-                    transport::REQUEST_LIMIT,
-                ) {
-                    Ok(value) => value,
-                    Err(_) => continue,
-                };
-                (stream, request)
+            let Some(mut stream) = publication.accept()? else {
+                continue;
             };
-            if request.version != 1 || request.run != receipt.run || !request.exclusive() {
+            let request: WireRequest = match transport::read(
+                &mut stream,
+                Duration::from_secs(5),
+                transport::REQUEST_LIMIT,
+            ) {
+                Ok(value) => value,
+                Err(_) => continue,
+            };
+            if request.version != 1 || request.run != receipt.run {
                 continue;
             }
             publication.verify()?;
-            if let Some(refresh) = request.refresh_dependencies {
-                let response = match dependency_refresh::handle(
-                    candidate,
-                    &mut runtime,
-                    &receipt.run,
-                    refresh,
-                    &stream,
-                    &signals,
-                ) {
-                    Ok(value) => value,
-                    Err(error) => json!({"ok":false,"run":receipt.run,"code":error.code}),
-                };
-                let _ = transport::write(&mut stream, &response, Duration::from_secs(5));
-                continue;
-            }
-            if let Some(job) = request.job {
-                if request.restore.is_some() || request.remove_data.is_some() {
-                    continue;
-                }
-                let response =
-                    match jobs::handle(candidate, &mut runtime, &receipt.run, job, &stream, || {
-                        let Ok(Some(incoming)) = publication.accept() else {
-                            return false;
-                        };
-                        queued = jobs::pending_cleanup(incoming, &receipt.run);
-                        queued.is_some()
-                    }) {
-                        Ok(value) => value,
-                        Err(error) => json!({"ok":false,"run":receipt.run,"code":error.code}),
-                    };
-                let _ = transport::write_job(&mut stream, &response, Duration::from_secs(5));
-                continue;
-            }
             if let Some(restore) = request.restore {
                 if request.remove_data.is_some() {
                     continue;
                 }
                 let mut effects_started = false;
-                let restored = if normalized.is_some() {
-                    Err(super::normalized::replay_refused())
-                } else {
-                    redelivery::restore(
-                        candidate,
-                        &options,
-                        &mut runtime,
-                        &restore,
-                        &mut effects_started,
-                    )
-                }
+                let restored = redelivery::restore(
+                    candidate,
+                    &options,
+                    &mut runtime,
+                    &restore,
+                    &mut effects_started,
+                )
                 .and_then(|restored| {
                     publishers
                         .reap_after_cleanup(&signals, Instant::now() + Duration::from_secs(5))?;
@@ -436,11 +224,11 @@ fn serve_input<'a>(
                         return Ok(cleaned);
                     }
                     Err(error) => {
-                        let mut reply = json!({"ok":false,"run":receipt.run,"code":error.code});
-                        if let Some(detail) = error.stop_failures {
-                            reply["stop_failures"] = json!(detail);
-                        }
-                        let _ = transport::write(&mut stream, &reply, Duration::from_secs(5));
+                        let _ = transport::write(
+                            &mut stream,
+                            &json!({"ok":false,"code":error.code}),
+                            Duration::from_secs(5),
+                        );
                         continue;
                     }
                 }
@@ -453,12 +241,9 @@ fn serve_input<'a>(
                 }
                 // inspect releases its Engine lease before the fresh runtime check.
                 publishers.verify_live(candidate)?;
-                let mut snapshot = super::inspect(candidate, &receipt.run)?;
+                let snapshot = super::inspect(candidate, &receipt.run)?;
                 let engine = Engine::connect(candidate)?;
-                let (current, root) = super::load(candidate, &engine, &receipt.run)?;
-                snapshot.receipt = current;
-                let checked =
-                    startup::Driver::verify(&mut runtime, &engine, &mut snapshot.receipt, &root);
+                let checked = startup::Driver::verify(&mut runtime, &engine, &snapshot.receipt);
                 Ok::<_, CandidateError>(
                     json!({"ok":true,"run":snapshot.receipt.run,"phase":snapshot.receipt.phase,"plan":snapshot.receipt.plan_id,"generation":redelivery::generation(&snapshot.receipt)?,"foreground_alive":true,"runtime_verified":checked.is_ok(),"runtime_error":checked.err().map(|error|error.code)}),
                 )
@@ -498,9 +283,6 @@ pub fn cleanup_request(
         if let Some(guard) = transport::Retired::acquire(candidate, run)? {
             return retained_data::remove(candidate, run, guard);
         }
-        if let Ok(guard) = transport::DeadOwner::acquire(candidate, run) {
-            return retained_data::remove_recovered(candidate, run, guard);
-        }
     }
     request(candidate, run, Some(remove_data))
 }
@@ -513,168 +295,22 @@ pub fn request(
     remove_data: Option<bool>,
 ) -> Result<Value, CandidateError> {
     let pin = transport::Pin::load(candidate, run)?;
-    // A cleanup diagnostic may name only services in this pinned run's receipt.
-    // Retain its identity before the effect and compare again after the reply.
-    let selected = remove_data.and_then(|_| admitted_services(candidate, run));
     let mut stream = pin.connect()?;
     transport::write(
         &mut stream,
         &WireRequest {
             version: 1,
-            refresh_dependencies: None,
             run: run.to_owned(),
             remove_data,
             restore: None,
-            job: None,
         },
         Duration::from_secs(5),
     )?;
-    let response: Value = transport::read(&mut stream, Duration::from_secs(570), 256 * 1024)?;
-    let current = response
-        .get("stop_failures")
-        .and_then(|_| admitted_services(candidate, run));
-    let allowed = selected
-        .as_ref()
-        .filter(|before| current.as_ref() == Some(before));
-    validate_owner_response_with_services(response, run, allowed.map(|proof| &proof.services))
-}
-
-#[derive(PartialEq, Eq)]
-struct AdmittedServices {
-    owner: String,
-    namespace: String,
-    plan: String,
-    services: BTreeSet<String>,
-    containers: BTreeMap<String, ContainerGeneration>,
-}
-
-#[derive(PartialEq, Eq)]
-struct ContainerGeneration {
-    key: String,
-    name: String,
-    id: Option<String>,
-    image: Option<String>,
-}
-
-fn admitted_services(candidate: &Candidate, run: &str) -> Option<AdmittedServices> {
-    let root = super::directory(candidate, run).ok()?;
-    super::state::check_private_directory(&root).ok()?;
-    let selected: Receipt = super::state::read(&root.join("state.json")).ok()?;
-    if !super::hex(&selected.owner, 32) {
-        return None;
-    }
-    let (receipt, _) = super::load_at(root, run, &selected.owner).ok()?;
-    if !super::hex(&receipt.namespace, 64)
-        || !super::hex(&receipt.plan_id, 64)
-        || receipt.readiness.len() > super::MAX_SERVICES
-        || receipt.readiness.len()
-            != receipt
-                .resources
-                .values()
-                .filter(|resource| resource.kind == Kind::Container)
-                .count()
-        || receipt.readiness.keys().any(|name| {
-            !receipt
-                .resources
-                .get(&format!("container:{name}"))
-                .is_some_and(|resource| resource.kind == Kind::Container && resource.key == *name)
-        })
-    {
-        return None;
-    }
-    // Cleanup may change phases, but diagnostics cannot cross container generations.
-    // These private identities are compared locally and never sent in the reply.
-    let containers = receipt
-        .resources
-        .iter()
-        .filter(|(_, resource)| resource.kind == Kind::Container)
-        .map(|(key, resource)| {
-            (
-                key.clone(),
-                ContainerGeneration {
-                    key: resource.key.clone(),
-                    name: resource.name.clone(),
-                    id: resource.id.clone(),
-                    image: resource.image.clone(),
-                },
-            )
-        })
-        .collect();
-    Some(AdmittedServices {
-        owner: receipt.owner,
-        namespace: receipt.namespace,
-        plan: receipt.plan_id,
-        services: receipt.readiness.into_keys().collect(),
-        containers,
-    })
-}
-
-fn validate_owner_response(response: Value, run: &str) -> Result<Value, CandidateError> {
-    validate_owner_response_with_services(response, run, None)
-}
-
-fn validate_owner_response_with_services(
-    response: Value,
-    run: &str,
-    allowed_services: Option<&BTreeSet<String>>,
-) -> Result<Value, CandidateError> {
-    if response.get("ok") == Some(&Value::Bool(true)) && response.get("stop_failures").is_some() {
-        return Err(refused());
-    }
+    let response: Value = transport::read(&mut stream, Duration::from_secs(120), 256 * 1024)?;
     if response.get("ok") != Some(&Value::Bool(true))
         || response.get("run").and_then(Value::as_str) != Some(run)
     {
-        // Older foreground owners omit `run` from a cleanup refusal. The
-        // pinned local socket still authenticates this exact owner; expose
-        // only its bounded error code, never arbitrary response text.
-        let cause = response
-            .get("code")
-            .and_then(Value::as_str)
-            .filter(|code| {
-                (1..=64).contains(&code.len())
-                    && code.bytes().all(|byte| {
-                        byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_'
-                    })
-            })
-            .filter(|_| {
-                response.get("ok") == Some(&Value::Bool(false))
-                    && response
-                        .get("run")
-                        .and_then(Value::as_str)
-                        .is_none_or(|actual| actual == run)
-            });
-        let Some(code) = cause else {
-            return Err(refused());
-        };
-        let mut error = refused().with_cause_code(code.to_owned());
-        if let Some(raw) = response.get("stop_failures") {
-            // The pinned owner may report only an exact-run stop failure. Reject
-            // extra or malformed detail rather than forwarding untrusted wire data.
-            if response.get("run").and_then(Value::as_str) != Some(run)
-                || !matches!(
-                    code,
-                    "engine_protocol" | "engine_rejected" | "engine_not_found"
-                )
-            {
-                return Err(refused());
-            }
-            let Ok(detail) = serde_json::from_value::<StopFailuresDiagnostic>(raw.clone()) else {
-                return Err(refused());
-            };
-            if !detail.valid() {
-                return Err(refused());
-            }
-            if !allowed_services.is_some_and(|allowed| {
-                detail
-                    .failures
-                    .iter()
-                    .all(|failure| allowed.contains(&failure.service))
-            }) {
-                return Err(refused());
-            }
-            error = error.with_stop_failures(detail);
-        }
-        return Err(error);
+        return Err(refused());
     }
     Ok(response)
 }
@@ -694,10 +330,8 @@ pub fn restore_request(
     let bytes = managed.forward(plan, run)?;
     let request = WireRequest {
         version: 1,
-        refresh_dependencies: None,
         run: run.into(),
         remove_data: None,
-        job: None,
         restore: Some(transport::RestoreRequest {
             plan: plan.into(),
             generation: expected_generation.into(),

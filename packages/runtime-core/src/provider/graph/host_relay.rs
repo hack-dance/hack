@@ -2,7 +2,7 @@
 use super::*;
 use crate::provider::{
     host_endpoint::HostEndpoint,
-    relay_owner::{Context, Grant, GraphScope, RelayOwner, publication::dead},
+    relay_owner::{Context, Grant, GraphScope, RelayOwner},
 };
 use sha2::{Digest, Sha256};
 
@@ -58,7 +58,7 @@ pub(super) fn cleanup_with_relay_expected(
     expected_generation: Option<(&str, std::time::Instant)>,
 ) -> Result<Receipt, CandidateError> {
     use crate::provider::relay_owner::lifecycle_intent::Coordinator;
-    let engine = Engine::connect_cleanup_wait(candidate)?;
+    let engine = Engine::connect_cleanup(candidate)?;
     let (mut receipt, root) = load(candidate, &engine, run)?;
     // Compare under the same mutation lease that performs cleanup. A stale client
     // cannot stop the newer execution between observation and retirement.
@@ -89,7 +89,6 @@ pub(super) fn cleanup_with_relay_expected(
     }
     let scope = graph_scope(context(&receipt.owner, engine.guest().boot_id())?, run)?;
     let environment = environment::cleanup_inventory(candidate, &engine, &receipt, &root)?;
-    bridges::cleanup::retire_exited_for_cleanup(candidate, &engine, &receipt)?;
     let bridge_selection = bridges::cleanup::capture(candidate, &engine, &receipt)?;
     let effect = cleanup_effect(
         &receipt,
@@ -133,7 +132,7 @@ pub(super) fn cleanup_with_relay_expected(
             &bridge_selection,
         )
     })?;
-    finish_confirmation(&mut coordinator, &mut cleaned, &root, None, None)?;
+    finish_confirmation(&mut coordinator, &mut cleaned, &root)?;
     Ok(cleaned)
 }
 
@@ -206,7 +205,7 @@ pub fn resume_relay_cleanup(
             &bridge_selection,
         )
     })?;
-    finish_confirmation(&mut coordinator, &mut cleaned, &root, None, None)?;
+    finish_confirmation(&mut coordinator, &mut cleaned, &root)?;
     Ok(cleaned)
 }
 
@@ -219,46 +218,6 @@ pub fn confirm_relay_cleanup(
     remove_data: bool,
     control_root: &std::path::Path,
     selection: crate::provider::relay_owner::lifecycle_intent::Selection,
-) -> Result<Receipt, CandidateError> {
-    confirm_relay_cleanup_fenced(
-        candidate,
-        run,
-        remove_data,
-        control_root,
-        selection,
-        None,
-        None,
-    )
-}
-
-pub(super) fn confirm_relay_cleanup_selected(
-    candidate: &Candidate,
-    run: &str,
-    remove_data: bool,
-    control_root: &std::path::Path,
-    selection: crate::provider::relay_owner::lifecycle_intent::Selection,
-    expected_identity: &str,
-    relay_selection_sha256: &str,
-) -> Result<Receipt, CandidateError> {
-    confirm_relay_cleanup_fenced(
-        candidate,
-        run,
-        remove_data,
-        control_root,
-        selection,
-        Some(expected_identity),
-        Some(relay_selection_sha256),
-    )
-}
-
-fn confirm_relay_cleanup_fenced(
-    candidate: &Candidate,
-    run: &str,
-    remove_data: bool,
-    control_root: &std::path::Path,
-    selection: crate::provider::relay_owner::lifecycle_intent::Selection,
-    expected_identity: Option<&str>,
-    relay_selection_sha256: Option<&str>,
 ) -> Result<Receipt, CandidateError> {
     use crate::provider::relay_owner::lifecycle_intent::{Coordinator, Phase};
     let engine = Engine::connect_cleanup(candidate)?;
@@ -284,53 +243,17 @@ fn confirm_relay_cleanup_fenced(
     {
         return Err(refused());
     }
-    let relay = match (expected_identity, relay_selection_sha256) {
-        (Some(identity), Some(sha256)) => {
-            use crate::provider::relay_owner::{lifecycle_intent::Inspection, publication::dead};
-            let inspected = Inspection::load(control_root, expected)?;
-            let witness =
-                dead::CleanupWitness::acquire(control_root, expected, &inspected.process)?;
-            if inspected.recovery_fingerprint != identity
-                || inspected.owner == [0; 16]
-                || inspected.publication == [0; 32]
-                || witness.selection_sha256()? != sha256
-                || witness
-                    .present_identity()
-                    .is_some_and(|(owner, publication)| {
-                        inspected.owner != owner || inspected.publication != publication
-                    })
-            {
-                return Err(refused());
-            }
-            Some(witness)
-        }
-        (None, None) => None,
-        _ => return Err(refused()),
-    };
     let mut coordinator = Coordinator::resume(control_root, selection)?;
-    if let Some(identity) = expected_identity {
-        coordinator.verify_recovery_identity(
-            &marker.selection(),
-            graph_scope(expected, run)?,
-            identity,
-        )?;
-    }
     let inspect = || {
-        let observed = inspect_cleanup(
+        inspect_cleanup(
             candidate,
             &engine,
             &receipt,
             remove_data,
             &environment,
             &bridge_selection,
-        )?;
-        if expected_identity.is_some() {
-            interrupted_start_cleanup::verify_retained_volumes(&engine, &receipt)?;
-        }
-        verify_selected_relay(relay.as_ref())?;
-        Ok(observed)
+        )
     };
-    verify_selected_relay(relay.as_ref())?;
     match coordinator.phase() {
         Phase::EffectStarted => coordinator.confirm(effect, inspect)?,
         Phase::Confirmed if coordinator.acknowledgement_pending() => {
@@ -338,40 +261,14 @@ fn confirm_relay_cleanup_fenced(
         }
         _ => return Err(refused()),
     }
-    if let Some(identity) = expected_identity {
-        coordinator.verify_recovery_identity(
-            &marker.selection(),
-            graph_scope(expected, run)?,
-            identity,
-        )?;
-    }
-    verify_selected_relay(relay.as_ref())?;
-    finish_confirmation(
-        &mut coordinator,
-        &mut receipt,
-        &root,
-        relay.as_ref(),
-        expected_identity.map(|_| &engine),
-    )?;
-    verify_selected_relay(relay.as_ref())?;
+    finish_confirmation(&mut coordinator, &mut receipt, &root)?;
     Ok(receipt)
-}
-
-pub(super) fn verify_selected_relay(
-    relay: Option<&dead::CleanupWitness>,
-) -> Result<(), CandidateError> {
-    if let Some(witness) = relay {
-        witness.verify()?;
-    }
-    Ok(())
 }
 
 fn finish_confirmation(
     coordinator: &mut crate::provider::relay_owner::lifecycle_intent::Coordinator,
     receipt: &mut Receipt,
     root: &std::path::Path,
-    relay: Option<&dead::CleanupWitness>,
-    retained_engine: Option<&Engine<'_>>,
 ) -> Result<(), CandidateError> {
     use crate::provider::relay_owner::lifecycle_intent::Phase;
     if coordinator.phase() != Phase::Confirmed || !coordinator.acknowledgement_pending() {
@@ -379,28 +276,14 @@ fn finish_confirmation(
     }
     #[cfg(test)]
     fault_pause(root, &receipt.run, "relay-before-confirmed-receipt")?;
-    if receipt
-        .relay_cleanup
-        .as_ref()
-        .ok_or_else(refused)?
-        .operation
-        != coordinator.operation()
-    {
+    let marker = receipt.relay_cleanup.as_mut().ok_or_else(refused)?;
+    if marker.operation != coordinator.operation() {
         return Err(refused());
     }
-    if let Some(engine) = retained_engine {
-        interrupted_start_cleanup::verify_retained_volumes(engine, receipt)?;
-    }
-    verify_selected_relay(relay)?;
-    receipt.relay_cleanup.as_mut().ok_or_else(refused)?.phase =
-        cleanup_enrollment::Phase::Confirmed;
+    marker.phase = cleanup_enrollment::Phase::Confirmed;
     state::write(&root.join("state.json"), receipt)?;
     #[cfg(test)]
     fault_pause(root, &receipt.run, "relay-before-ack")?;
-    if let Some(engine) = retained_engine {
-        interrupted_start_cleanup::verify_retained_volumes(engine, receipt)?;
-    }
-    verify_selected_relay(relay)?;
     coordinator.acknowledge()
 }
 
@@ -429,7 +312,7 @@ pub(super) fn require_acknowledged_enrollment(receipt: &Receipt) -> Result<(), C
     Ok(())
 }
 
-pub(super) fn cleanup_preflight(
+fn cleanup_preflight(
     engine: &Engine<'_>,
     receipt: &Receipt,
     root: &std::path::Path,
@@ -472,7 +355,7 @@ fn require_retained_volume(
         _ => Err(refused()),
     }
 }
-pub(super) fn cleanup_effect(
+fn cleanup_effect(
     receipt: &Receipt,
     boot: &str,
     remove_data: bool,
@@ -534,30 +417,6 @@ pub(super) fn cleanup_effect(
             .ok_or_else(refused)?
             .push(json!(routes));
     }
-    // Preserve the historical cleanup digest when no listener generations were
-    // recorded. New receipts bind these pins even for aliasless dependencies.
-    let mut listeners = Vec::new();
-    if let Some(startup) = &receipt.relay_startup {
-        for (service_name, service) in &startup.services {
-            for (binding_name, binding) in &service.bindings {
-                if let Some(generation) = &binding.endpoint_generation {
-                    if !hex(generation, 64) {
-                        return Err(refused());
-                    }
-                    listeners.push(json!([
-                        service_name,
-                        service.generation,
-                        binding_name,
-                        binding.slot,
-                        generation
-                    ]));
-                }
-            }
-        }
-    }
-    if !listeners.is_empty() {
-        effect = json!(["hack-graph-relay-cleanup-listeners-v1", effect, listeners]);
-    }
     let outbound = receipt
         .resources
         .iter()
@@ -599,73 +458,13 @@ fn cleanup_requires_absence(
     Ok(resource.kind != Kind::Volume || remove_data)
 }
 
-pub(super) fn inspect_cleanup(
+fn inspect_cleanup(
     candidate: &Candidate,
     engine: &Engine<'_>,
     expected: &Receipt,
     remove_data: bool,
     environment: &super::super::environment_recovery::GraphInventory,
     bridge_selection: &bridges::cleanup::Selection,
-) -> Result<[u8; 32], CandidateError> {
-    inspect_cleanup_recovery(
-        candidate,
-        engine,
-        expected,
-        remove_data,
-        environment,
-        bridge_selection,
-        None,
-    )
-}
-pub(super) fn inspect_cleanup_recovery(
-    candidate: &Candidate,
-    engine: &Engine<'_>,
-    expected: &Receipt,
-    remove_data: bool,
-    environment: &super::super::environment_recovery::GraphInventory,
-    bridge_selection: &bridges::cleanup::Selection,
-    host_pin: Option<&super::host_pin_recovery::Witness>,
-) -> Result<[u8; 32], CandidateError> {
-    inspect_cleanup_selected(
-        candidate,
-        engine,
-        expected,
-        remove_data,
-        environment,
-        bridge_selection,
-        SelectedCleanupProof::Existing(host_pin),
-    )
-}
-pub(super) fn inspect_cleanup_absence(
-    candidate: &Candidate,
-    engine: &Engine<'_>,
-    expected: &Receipt,
-    environment: &super::super::environment_recovery::GraphInventory,
-    bridge_selection: &bridges::cleanup::Selection,
-    witness: &super::absent_publication_cleanup::Selection,
-) -> Result<[u8; 32], CandidateError> {
-    inspect_cleanup_selected(
-        candidate,
-        engine,
-        expected,
-        false,
-        environment,
-        bridge_selection,
-        SelectedCleanupProof::Absence(witness),
-    )
-}
-enum SelectedCleanupProof<'a> {
-    Existing(Option<&'a super::host_pin_recovery::Witness>),
-    Absence(&'a super::absent_publication_cleanup::Selection),
-}
-fn inspect_cleanup_selected(
-    candidate: &Candidate,
-    engine: &Engine<'_>,
-    expected: &Receipt,
-    remove_data: bool,
-    environment: &super::super::environment_recovery::GraphInventory,
-    bridge_selection: &bridges::cleanup::Selection,
-    proof: SelectedCleanupProof<'_>,
 ) -> Result<[u8; 32], CandidateError> {
     let (receipt, root) = archive::load_confirmation(candidate, engine, &expected.run)?;
     match fs::symlink_metadata(root.join("state.pending")) {
@@ -710,33 +509,10 @@ fn inspect_cleanup_selected(
         require_retained_volume(resource, value.is_some(), remove_data)?;
         observations.insert(key, value);
     }
-    let recorded = match proof {
-        SelectedCleanupProof::Absence(witness) => {
-            bridges::cleanup::read_recovery_absence(engine, &receipt, &root, witness)?
-        }
-        SelectedCleanupProof::Existing(host_pin) => {
-            bridges::cleanup::read_recovery(engine, &receipt, &root, host_pin)?
-        }
-    };
-    if &recorded != bridge_selection {
+    if &bridges::cleanup::read(engine, &receipt, &root)? != bridge_selection {
         return Err(refused());
     }
-    match proof {
-        SelectedCleanupProof::Absence(witness) => bridges::cleanup::verify_recovery_absence(
-            candidate,
-            engine,
-            &receipt,
-            bridge_selection,
-            witness,
-        )?,
-        SelectedCleanupProof::Existing(host_pin) => bridges::cleanup::verify_recovery(
-            candidate,
-            engine,
-            &receipt,
-            bridge_selection,
-            host_pin,
-        )?,
-    }
+    bridges::cleanup::verify(candidate, engine, &receipt, bridge_selection)?;
     environment::verify_cleanup(candidate, engine, &receipt, &root, environment)?;
     probes::verify_cleanup(engine, &receipt)?;
     startup::verify_cleanup(engine, &receipt)?;
@@ -769,41 +545,12 @@ pub(super) fn inspected_generation(
     resource: &Resource,
     value: &Value,
 ) -> Result<[u8; 32], CandidateError> {
-    if value["State"]["Running"] != true {
-        return Err(refused());
-    }
-    inspected_identity_generation(receipt, boot, resource, value)
-}
-/// Only a successfully exited container can supply a terminal relay identity.
-/// The caller additionally checks declared Completed readiness and exact StartedAt.
-pub(super) fn inspected_completed_generation(
-    receipt: &Receipt,
-    boot: &str,
-    resource: &Resource,
-    value: &Value,
-) -> Result<[u8; 32], CandidateError> {
-    if value["State"]["Running"] != false
-        || value["State"]["Status"] != "exited"
-        || value["State"]["Pid"] != 0
-        || value["State"]["ExitCode"] != 0
-        || value["State"]["Dead"] != false
-        || value["State"]["OOMKilled"] != false
-    {
-        return Err(refused());
-    }
-    inspected_identity_generation(receipt, boot, resource, value)
-}
-fn inspected_identity_generation(
-    receipt: &Receipt,
-    boot: &str,
-    resource: &Resource,
-    value: &Value,
-) -> Result<[u8; 32], CandidateError> {
     context(&receipt.owner, boot)?;
     if resource.kind != Kind::Container
         || resource.id.as_deref() != value["Id"].as_str()
         || !resource.id.as_deref().is_some_and(|id| hex(id, 64))
         || resource.image.as_deref() != value["Image"].as_str()
+        || value["State"]["Running"] != true
         || value["State"]["Dead"] == true
         || value["State"]["OOMKilled"] == true
     {
@@ -942,38 +689,23 @@ pub(super) fn named_binding_identity(
     binding: &startup::Binding,
 ) -> Result<[u8; 32], CandidateError> {
     let legacy = binding_identity(service, name)?;
-    let base = if binding.aliases.is_empty() {
-        legacy
-    } else {
-        if binding.port == 0 {
-            return Err(refused());
-        }
-        let address = dependency_address(binding.slot, &binding.aliases)?;
-        let bytes = serde_json::to_vec(&json!([
-            "hack-graph-relay-named-dependency-v1",
-            legacy,
-            binding.slot,
-            address,
-            binding.port,
-            binding.aliases,
-        ]))
-        .map_err(|_| refused())?;
-        Sha256::digest(bytes).into()
-    };
-    match &binding.endpoint_generation {
-        None => Ok(base),
-        Some(generation) if hex(generation, 64) => {
-            let bytes = serde_json::to_vec(&json!([
-                "hack-graph-relay-listener-dependency-v1",
-                base,
-                binding.slot,
-                generation
-            ]))
-            .map_err(|_| refused())?;
-            Ok(Sha256::digest(bytes).into())
-        }
-        Some(_) => Err(refused()),
+    if binding.aliases.is_empty() {
+        return Ok(legacy);
     }
+    if binding.port == 0 {
+        return Err(refused());
+    }
+    let address = dependency_address(binding.slot, &binding.aliases)?;
+    let bytes = serde_json::to_vec(&json!([
+        "hack-graph-relay-named-dependency-v1",
+        legacy,
+        binding.slot,
+        address,
+        binding.port,
+        binding.aliases,
+    ]))
+    .map_err(|_| refused())?;
+    Ok(Sha256::digest(bytes).into())
 }
 
 fn select(
@@ -1189,7 +921,6 @@ mod tests {
                     bindings: BTreeMap::from([(
                         "search".into(),
                         startup::Binding {
-                            endpoint_generation: None,
                             slot: 0,
                             port: 443,
                             aliases,
@@ -1202,69 +933,6 @@ mod tests {
             )]),
         }
     }
-    #[test]
-    fn retained_listener_generation_changes_grants_and_cleanup_authority() {
-        for aliases in [vec![], vec!["search.example".into()]] {
-            let (mut receipt, _, _) = fixture();
-            receipt.relay_startup = Some(startup_fixture(aliases));
-            let initial = cleanup_effect(&receipt, "boot", false, &json!([])).unwrap();
-            let binding =
-                receipt.relay_startup.as_ref().unwrap().services["web"].bindings["search"].clone();
-            let legacy = named_binding_identity([1; 32], "search", &binding).unwrap();
-            let mut pinned = binding.clone();
-            pinned.endpoint_generation = Some("1".repeat(64));
-            let first = named_binding_identity([1; 32], "search", &pinned).unwrap();
-            assert_ne!(legacy, first);
-            receipt
-                .relay_startup
-                .as_mut()
-                .unwrap()
-                .services
-                .get_mut("web")
-                .unwrap()
-                .bindings
-                .insert("search".into(), pinned.clone());
-            let first_cleanup = cleanup_effect(&receipt, "boot", false, &json!([])).unwrap();
-            assert_ne!(initial, first_cleanup);
-            pinned.endpoint_generation = Some("2".repeat(64));
-            assert_ne!(
-                first,
-                named_binding_identity([1; 32], "search", &pinned).unwrap()
-            );
-            receipt
-                .relay_startup
-                .as_mut()
-                .unwrap()
-                .services
-                .get_mut("web")
-                .unwrap()
-                .bindings
-                .insert("search".into(), pinned.clone());
-            assert_ne!(
-                first_cleanup,
-                cleanup_effect(&receipt, "boot", false, &json!([])).unwrap()
-            );
-            pinned.endpoint_generation = None;
-            assert_eq!(
-                legacy,
-                named_binding_identity([1; 32], "search", &pinned).unwrap()
-            );
-            receipt
-                .relay_startup
-                .as_mut()
-                .unwrap()
-                .services
-                .get_mut("web")
-                .unwrap()
-                .bindings
-                .insert("search".into(), pinned);
-            assert_eq!(
-                initial,
-                cleanup_effect(&receipt, "boot", false, &json!([])).unwrap()
-            );
-        }
-    }
-
     #[test]
     fn named_grant_identity_binds_alias_slot_address_and_port() {
         let startup = startup_fixture(vec!["search.example".into()]);

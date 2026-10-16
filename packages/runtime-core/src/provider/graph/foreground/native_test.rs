@@ -16,11 +16,6 @@ use zeroize::Zeroizing;
 const FIRST: &str = "synthetic-owner-restore-first";
 const SECOND: &str = "synthetic-owner-restore-second";
 
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-mod partial_stop;
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-mod stop14;
-
 struct Process {
     child: Child,
     out: Vec<u8>,
@@ -281,7 +276,6 @@ fn private_owner_restore_preserves_data_and_retires_values() {
     let review = project::plan(
         &candidate,
         project::PlanOptions {
-            branch: None,
             project: &project,
             compose_file: Path::new("compose.yaml"),
             profiles: &[],
@@ -478,10 +472,8 @@ fn private_owner_restore_preserves_data_and_retires_values() {
         &mut socket,
         &WireRequest {
             version: 1,
-            refresh_dependencies: None,
             run: run.clone(),
             remove_data: None,
-            job: None,
             restore: Some(transport::RestoreRequest {
                 plan: plan.clone(),
                 generation: restored["generation"].as_str().unwrap().into(),
@@ -543,15 +535,4 @@ fn private_owner_restore_preserves_data_and_retires_values() {
     }
 }
 
-mod dependency_rebind;
-mod dependency_slots;
 mod startup_cancellation;
-
-mod absent_publication_recovery;
-mod host_pin_recovery;
-#[cfg(feature = "native-http-probe")]
-mod retired_rebind_history;
-mod retired_recovery_cleanup;
-mod same_boot_absent_relay;
-mod same_boot_recovery;
-mod source_device_rebind;

@@ -77,6 +77,9 @@ verified, reject concurrent/stale writers and downgrade attempts, and test crash
 before/after each durable step. Keychain and environment-backed keys need their
 own custody and rollback contracts; a two-file rename sequence is insufficient.
 
+The [proposed paired rotation protocol](env-secret-rotation.md) records the
+ordering model and compatibility gates. It is not a production rotation command.
+
 ## Remaining acceptance
 
 HACK-1127 stays open for a complete backend/export inventory, synthetic Git-history

@@ -4,7 +4,7 @@ import {
   createHash,
   randomBytes,
 } from "node:crypto";
-import { chmod, stat, writeFile } from "node:fs/promises";
+import { stat } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { secrets } from "bun";
 import type {
@@ -747,11 +747,15 @@ async function writeEncryptedFileKey(input: {
   readonly key: string;
 }): Promise<void> {
   await ensureDir(dirname(input.keyPath));
-  await writeFile(input.keyPath, `${input.key}\n`, {
-    encoding: "utf8",
-    mode: 0o600,
+  await replacePrivateFileAtomic({
+    path: input.keyPath,
+    text: `${input.key}\n`,
+    directories: [dirname(input.keyPath)],
+    refusal: () =>
+      new Error(
+        "Refused encrypted secret key write: the key path or its directory is aliased or not a regular file; values omitted."
+      ),
   });
-  await chmod(input.keyPath, 0o600).catch(() => undefined);
 }
 
 async function readEncryptedEntries(input: {

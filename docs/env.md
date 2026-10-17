@@ -646,7 +646,11 @@ Some older surfaces are still compatibility-oriented:
   The `encrypted_file` store (also used by the `cloud` shim) is replaced atomically
   with mode `0600`, and set/delete hold an in-process queue plus a cooperative
   `<store>.lock` so concurrent writers, including separate processes, do not lose
-  updates. A store path that is a symlink is refused for writes. The v1 store
+  updates. A store path that is a symlink is refused for writes. Explicit key
+  provisioning also uses an atomic mode-`0600` replacement and refuses symlinked
+  key paths or immediate parent directories. This protects individual key writes;
+  it does not make key replacement and store re-encryption a crash-safe rotation
+  transaction. Keep the previous key until recovery has been verified. The v1 store
   envelope and legacy `v1:` values authenticate no associated data: they are not
   bound to a path, project or variable name beyond the scoped key inside the
   encrypted store plaintext

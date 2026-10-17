@@ -592,8 +592,12 @@ it cannot spell portably as `<unprintable-path>/.hack.secret.key`.
 
 Hack derives the AES-256-GCM key by hashing the key text with SHA-256, so key
 strength is the entropy of that text. Generated keys are 32 random bytes in base64url.
-For a weak, tracked or published key, the remedy is rotation: move the key aside, then
-re-add each secret with `hack env add --secret KEY VALUE` so Hack generates a new key.
+For a weak, tracked or published key, rotation is required. Preserve a private,
+recoverable copy of the old key and encrypted inputs before changing either.
+Recover each selected secret with the old key, then re-add it with the new key
+using the hidden prompt or `--value-stdin`; never put secret values in arguments.
+Individual atomic writes do not make this sequence a crash-safe rotation transaction.
+See the [env security decision and rotation gates](security/env-secrets.md).
 
 CI and managed container fallback:
 
@@ -676,7 +680,7 @@ If you are writing new docs or new project setup flows, document the YAML overla
 - [Sessions](sessions.md)
 - [CLI reference](cli.md)
 - [Env and secrets threat model](security/env-secrets-threat-model.md): assets, trust boundaries, current mitigations and open gaps
-- [Pulumi-style env config design](plans/2026-03-27-pulumi-style-env-config-design.md)
+- [Env secret security decision and rotation gates](security/env-secrets.md)
 
 
 ### Host command lifetime and diagnostics

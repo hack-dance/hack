@@ -7,6 +7,10 @@ import {
   readNativeComposeHostBootId,
 } from "../lib/native-compose-private-state.ts";
 import { openProcessSessionInspector } from "../lib/tty-process-group.ts";
+import {
+  beginNativeProcessCensusPhase,
+  type NativeProcessCensusDiagnostics,
+} from "./native-process-census-diagnostics.ts";
 
 const LIMIT = 4 * 1024 * 1024;
 const ROW =
@@ -404,41 +408,87 @@ async function unavailableSession(
 }
 async function sessionRows(
   end: number,
-  denied: ReadonlySet<number>
+  denied: ReadonlySet<number>,
+  diagnostics?: NativeProcessCensusDiagnostics
 ): Promise<readonly NativeAuthoredProcessRow[]> {
-  const { rows, probe, session } = await readRows(end, denied);
-  if (process.platform === "linux") {
-    if (
-      rows.some(
-        (row) => typeof row.session !== "string" || !DECIMAL.test(row.session)
-      )
-    ) {
-      return refused();
-    }
-    return rows;
-  }
-  const inspector = openProcessSessionInspector();
+  const metadata = beginNativeProcessCensusPhase({
+    diagnostics,
+    phase: "metadata",
+  });
+  let captured: Awaited<ReturnType<typeof readRows>>;
   try {
-    const result: NativeAuthoredProcessRow[] = [];
-    for (const row of rows) {
-      if (performance.now() >= end) {
+    captured = await readRows(end, denied);
+    metadata?.({ outcome: "complete", rowCount: captured.rows.length });
+  } catch (error) {
+    metadata?.({ outcome: "refused" });
+    throw error;
+  }
+  const { rows, probe, session } = captured;
+  const sessions = beginNativeProcessCensusPhase({
+    diagnostics,
+    phase: "sessions",
+  });
+  let complete = false;
+  try {
+    if (process.platform === "linux") {
+      if (
+        rows.some(
+          (row) => typeof row.session !== "string" || !DECIMAL.test(row.session)
+        )
+      ) {
         return refused();
       }
-      if (row.state === "zombie") {
-        result.push({ ...row, session: null });
-        continue;
-      }
-      const sid = row.pid === probe ? session : inspector.session(row.pid);
-      if (sid === null) {
-        return await unavailableSession(row, end, denied);
-      }
-      result.push({ ...row, session: String(sid) });
+      complete = true;
+      return rows;
     }
-    return result;
+    const inspector = openProcessSessionInspector();
+    try {
+      const result: NativeAuthoredProcessRow[] = [];
+      for (const row of rows) {
+        if (performance.now() >= end) {
+          return refused();
+        }
+        if (row.state === "zombie") {
+          result.push({ ...row, session: null });
+          continue;
+        }
+        const sid = row.pid === probe ? session : inspector.session(row.pid);
+        if (sid === null) {
+          return await unavailableSession(row, end, denied);
+        }
+        result.push({ ...row, session: String(sid) });
+      }
+      complete = true;
+      return result;
+    } finally {
+      inspector.close();
+    }
   } finally {
-    inspector.close();
+    sessions?.({
+      outcome: complete ? "complete" : "refused",
+      rowCount: rows.length,
+    });
   }
 }
+function mergeObservedCensuses(opts: {
+  before: readonly NativeAuthoredProcessRow[];
+  after: readonly NativeAuthoredProcessRow[];
+  diagnostics: NativeProcessCensusDiagnostics | undefined;
+}): readonly NativeAuthoredProcessRow[] {
+  const merge = beginNativeProcessCensusPhase({
+    diagnostics: opts.diagnostics,
+    phase: "merge",
+  });
+  try {
+    const merged = mergeNativeAuthoredProcessCensuses(opts.before, opts.after);
+    merge?.({ outcome: "complete", rowCount: merged.length });
+    return merged;
+  } catch (error) {
+    merge?.({ outcome: "refused" });
+    throw error;
+  }
+}
+
 /** Complete read-only metadata, including explicit unresolved zombie rows. The
  * second observation brackets state/identity across SID lookup. A positively
  * disappeared live row may discard an entire attempt; its successor requires
@@ -446,42 +496,60 @@ async function sessionRows(
  * disappeared PIDs survive as denial facts: any reappearance refuses. Unknown
  * or changed membership refuses immediately. No saved PID signals. */
 export async function readNativeAuthoredProcessCensus(
-  timeoutMs = 3000
+  timeoutMs = 3000,
+  opts?: { readonly diagnostics?: NativeProcessCensusDiagnostics }
 ): Promise<readonly NativeAuthoredProcessRow[]> {
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 3000) {
     return refused();
   }
   const end = performance.now() + timeoutMs;
-  const denied = new Set<number>();
-  while (performance.now() < end) {
-    try {
-      const before = await sessionRows(end, denied);
-      const after = await sessionRows(end, denied);
-      if (performance.now() >= end) {
-        return refused();
+  const census = beginNativeProcessCensusPhase({
+    diagnostics: opts?.diagnostics,
+    phase: "census",
+  });
+  let completedRows: number | undefined;
+  try {
+    const denied = new Set<number>();
+    while (performance.now() < end) {
+      try {
+        const before = await sessionRows(end, denied, opts?.diagnostics);
+        const after = await sessionRows(end, denied, opts?.diagnostics);
+        if (performance.now() >= end) {
+          return refused();
+        }
+        const merged = mergeObservedCensuses({
+          before,
+          after,
+          diagnostics: opts?.diagnostics,
+        });
+        if (performance.now() >= end) {
+          return refused();
+        }
+        completedRows = merged.length;
+        return merged;
+      } catch (error) {
+        const disappeared =
+          typeof error === "object" && error !== null
+            ? disappearedCensuses.get(error)
+            : undefined;
+        if (
+          disappeared === undefined ||
+          denied.has(disappeared) ||
+          performance.now() >= end
+        ) {
+          throw error;
+        }
+        denied.add(disappeared);
+        // Never carry rows/SIDs from the failed attempt into a successful proof.
       }
-      const merged = mergeNativeAuthoredProcessCensuses(before, after);
-      if (performance.now() >= end) {
-        return refused();
-      }
-      return merged;
-    } catch (error) {
-      const disappeared =
-        typeof error === "object" && error !== null
-          ? disappearedCensuses.get(error)
-          : undefined;
-      if (
-        disappeared === undefined ||
-        denied.has(disappeared) ||
-        performance.now() >= end
-      ) {
-        throw error;
-      }
-      denied.add(disappeared);
-      // Never carry rows/SIDs from the failed attempt into a successful proof.
     }
+    return refused();
+  } finally {
+    census?.({
+      outcome: completedRows === undefined ? "refused" : "complete",
+      rowCount: completedRows,
+    });
   }
-  return refused();
 }
 
 /** One complete census per observation. Absence refuses at once; a transient
@@ -594,7 +662,8 @@ export function requireNativeAuthoredProcessQuiescent(
 /** Fresh same-boot image and complete no-live-members census; no PID signals. */
 export async function assertNativeAuthoredProcessQuiescent(
   original: NativeAuthoredProcessIncarnation,
-  remaining: () => number
+  remaining: () => number,
+  opts?: { readonly diagnostics?: NativeProcessCensusDiagnostics }
 ): Promise<{
   readonly kind: "no-live-members";
   readonly unresolvedZombies: number;
@@ -612,7 +681,8 @@ export async function assertNativeAuthoredProcessQuiescent(
     return refused();
   }
   const rows = await readNativeAuthoredProcessCensus(
-    Math.min(3000, remaining())
+    Math.min(3000, remaining()),
+    opts
   );
   requireNativeAuthoredProcessQuiescent(value, rows);
   remaining();

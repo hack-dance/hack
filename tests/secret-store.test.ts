@@ -682,12 +682,13 @@ test("encrypted file key provisioning refuses symlinks without changing the targ
   const target = join(tempDir, "unrelated-file");
   const keyPath = join(tempDir, "key-link");
   await writeFile(target, "synthetic-original-content", { mode: 0o644 });
+  const targetMode = (await stat(target)).mode & 0o777;
   await symlink(target, keyPath);
   await expect(provisionEncryptedFileKey({ keyPath })).rejects.toThrow(
     "Refused encrypted secret key write"
   );
   expect(await readFile(target, "utf8")).toBe("synthetic-original-content");
-  expect((await stat(target)).mode & 0o777).toBe(0o644);
+  expect((await stat(target)).mode & 0o777).toBe(targetMode);
 });
 
 test("encrypted file key provisioning refuses dangling symlinks", async () => {

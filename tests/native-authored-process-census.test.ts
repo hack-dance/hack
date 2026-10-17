@@ -3,6 +3,7 @@ import {
   readNativeAuthoredProcessCensus,
   requireNativeAuthoredProcessQuiescent,
 } from "../src/backends/native-authored-process-incarnation.ts";
+import { createNativeProcessCensusDiagnostics } from "../src/backends/native-process-census-diagnostics.ts";
 import * as sessions from "../src/lib/tty-process-group.ts";
 
 let active = 0;
@@ -257,5 +258,91 @@ censusTest(
         expect(calls()).toBe(frames.length);
       });
     }
+  }
+);
+
+censusTest(
+  "opt-in phase diagnostics retain only bounded value-free counts and timings",
+  async () => {
+    const diagnostics = createNativeProcessCensusDiagnostics();
+    await standin({ frames: [raw(77), raw(77)] }, async () => {
+      const rows = await readNativeAuthoredProcessCensus(3000, { diagnostics });
+      expect(rows.map((row) => row.pid)).toEqual([77]);
+    });
+    const report = diagnostics.snapshot();
+    expect(report.samples.map((sample) => sample.phase)).toEqual([
+      "metadata",
+      "sessions",
+      "metadata",
+      "sessions",
+      "merge",
+      "census",
+    ]);
+    expect(
+      report.samples.every(
+        (sample) => sample.outcome === "complete" && sample.rowCount === 1
+      )
+    ).toBe(true);
+    expect(
+      report.samples.every(
+        (sample) => Number.isFinite(sample.elapsedMs) && sample.elapsedMs >= 0
+      )
+    ).toBe(true);
+    for (const sample of report.samples) {
+      expect(Object.keys(sample).sort()).toEqual([
+        "elapsedMs",
+        "outcome",
+        "phase",
+        "rowCount",
+      ]);
+      expect(Object.isFrozen(sample)).toBe(true);
+    }
+    expect(JSON.stringify(report)).not.toContain("/bin/sleep");
+    expect(JSON.stringify(report)).not.toContain("Fri Oct");
+    expect(report.dropped).toBe(0);
+  }
+);
+
+censusTest(
+  "phase diagnostics preserve changed-identity refusal without retaining identity or error text",
+  async () => {
+    const diagnostics = createNativeProcessCensusDiagnostics();
+    await standin({ frames: [raw(77), raw(77, 78)] }, async () => {
+      await expect(
+        readNativeAuthoredProcessCensus(3000, { diagnostics })
+      ).rejects.toThrow("identity changed");
+    });
+    expect(
+      diagnostics
+        .snapshot()
+        .samples.slice(-2)
+        .map((sample) => [sample.phase, sample.outcome])
+    ).toEqual([
+      ["merge", "refused"],
+      ["census", "refused"],
+    ]);
+    expect(JSON.stringify(diagnostics.snapshot())).not.toContain(
+      "identity changed"
+    );
+  }
+);
+
+censusTest(
+  "diagnostics do not reset the original budget or admit an expired pair",
+  async () => {
+    const diagnostics = createNativeProcessCensusDiagnostics();
+    await standin(
+      { frames: [raw(77), raw(77)], expiry: "after-final-pair" },
+      async (calls) => {
+        await expect(
+          readNativeAuthoredProcessCensus(3000, { diagnostics })
+        ).rejects.toThrow();
+        expect(calls()).toBe(2);
+      }
+    );
+    expect(diagnostics.snapshot().samples.at(-1)?.outcome).toBe("refused");
+    expect(
+      diagnostics.snapshot().samples.some((sample) => sample.phase === "merge")
+    ).toBe(false);
   }
 );

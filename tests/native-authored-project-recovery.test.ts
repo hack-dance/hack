@@ -22,6 +22,7 @@ import {
   loadNativeAuthoredProjectRun,
   withNativeAuthoredProjectAdmission,
 } from "../src/backends/native-authored-project-run.ts";
+import { createNativeProcessCensusDiagnostics } from "../src/backends/native-process-census-diagnostics.ts";
 import type { invokeNativeRuntime } from "../src/backends/native-runtime-client.ts";
 import { tryNativeAuthoredCommand } from "../src/lib/native-authored-command.ts";
 
@@ -784,13 +785,15 @@ originalCase(
     await current.kill();
     let observedFailure: unknown;
     const observe = incarnation.assertNativeAuthoredProcessQuiescent;
+    const diagnostics = createNativeProcessCensusDiagnostics();
     const observer = spyOn(
       incarnation,
       "assertNativeAuthoredProcessQuiescent"
     ).mockImplementation(async (...args) => {
       try {
-        return await observe(...args);
+        return await observe(args[0], args[1], { diagnostics });
       } catch (error) {
+        console.error(JSON.stringify({ censusPhases: diagnostics.snapshot() }));
         observedFailure = error;
         throw error;
       }

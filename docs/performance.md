@@ -382,6 +382,10 @@ Repeating setup does not switch the selected backend back to standard stdio. Pas
 `--bundle` and `--cli` to select another verified bundle, or remove the selected
 entry and reinstall without bundle options to return to standard stdio.
 
+Project-scoped setup selects the nearest package directory or Git boundary,
+including a linked worktree's `.git` file. It does not select an ancestor package
+outside that repository. User-scoped setup still uses the selected home directory.
+
 Candidate installation preserves other JSON servers, custom Hack fields and env
 keys. Codex updates retain custom Hack values and verify the complete TOML meaning
 after replacing its section. Unsupported table layouts, malformed config and HTTP

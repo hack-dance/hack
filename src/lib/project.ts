@@ -82,24 +82,20 @@ function buildProjectContext(
 
 export async function findRepoRootForInit(startDir: string): Promise<string> {
   let current = resolve(startDir);
-  let nearestGit: string | null = null;
   while (true) {
     const selected = await inspectProjectInputsAtRoot({ projectRoot: current });
     if (selected.kind === "native" || selected.kind === "conflict") {
-      if (nearestGit) {
-        return nearestGit;
-      }
       requireLegacyProjectInputs(selected);
     }
     if (await pathExists(resolve(current, "package.json"))) {
       return current;
     }
-    if (!nearestGit && (await pathExists(resolve(current, ".git")))) {
-      nearestGit = current;
+    if (await pathExists(resolve(current, ".git"))) {
+      return current;
     }
     const parent = dirname(current);
     if (parent === current) {
-      return nearestGit ?? resolve(startDir);
+      return resolve(startDir);
     }
     current = parent;
   }

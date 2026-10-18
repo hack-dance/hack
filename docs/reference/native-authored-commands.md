@@ -64,8 +64,8 @@ provider contact. A refusal names no option value, path or project detail.
 | `ps` | `ps` and `ps --json` for the exact saved project and explicit `--branch` | `--profile`, `--env`, service subsets or a single service, `--recover`, `--detach`, command, workdir, follow, tail and format options |
 | `logs` | `logs SERVICE --no-follow` with `--tail` from 1 through 1000 (default 200), plain or `--json` | Follow mode (the default), omitted, multiple or malformed service selection, non-integer or out-of-range `--tail`, pretty format, time and query filters, `--profile`, `--env`, `--recover`, `--detach`, command and workdir options |
 | `exec` | `exec SERVICE -- COMMAND ARG...` with closed stdin, no TTY and an optional absolute `--workdir` | Empty command or empty first argument, NUL bytes, more than 256 arguments, an argument over 16 KiB or 64 KiB in total, relative `--workdir`, interactive or TTY input, `--json`, `--profile`, `--env`, service subsets, follow, tail and format options, `--recover`, `--detach` |
-| `run` | Not supported | Every request |
-| `restart` | Not supported | Every request |
+| `run` | `run SERVICE -- COMMAND ARG...` through a ready foreground owner, closed stdin, no TTY, optional absolute `--workdir`; member must have no mounts | The `exec` option refusals above; source, persistent-data or private-env mounts refuse before the one-off effect |
+| `restart` | Whole-project proven stop followed by fresh foreground `up`; `--branch`, `--profile` and `--env` select the fresh generation | Service subsets, `--json`, `--detach`, `--target`, recovery and other unsupported foreground options; missing or unproven stop prevents startup |
 
 Both backends remain experimental. This table records the refusal boundary of the
 current slices; it is not a parity claim against the Compose owner and does not

@@ -387,3 +387,15 @@ test("zombie SID uncertainty is explicit and requires stable identity across bot
     ])
   ).toThrow();
 });
+
+test("PGID-only drift in an unrelated row still refuses a complete census", () => {
+  const unrelated = { ...row, pid: 77, group: 77, session: "77" };
+  expect(mergeNativeAuthoredProcessCensuses([unrelated], [unrelated])).toEqual([
+    unrelated,
+  ]);
+  for (const group of [78, original.group]) {
+    expect(() =>
+      mergeNativeAuthoredProcessCensuses([unrelated], [{ ...unrelated, group }])
+    ).toThrow("identity changed");
+  }
+});

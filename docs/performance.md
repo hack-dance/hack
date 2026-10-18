@@ -706,3 +706,6 @@ Preloading an image into a base could skip only the engine load. A fresh pool's 
 bound to its incarnation, so it still acquires and validates every image. Preloading would also
 make bases project-specific and require the verifier to check layer contents, so bases stay
 image-free. The larger remaining costs are image acquisition and per-incarnation revalidation.
+
+Native recovery investigations can use the explicit, value-free
+[process census phase diagnostics](guides/native-census-diagnostics.md).

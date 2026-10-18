@@ -109,7 +109,8 @@ do not prove that a service is still live.
 A project with no saved attempt reports `not_started`; a retained startup intent
 without a Ready mapping reports `pending` with no confirmed service rows. When a
 Ready generation is saved but the candidate runtime is stopped (native code
-`runtime_not_running`), `ps` exits 0 and reports `runtime_not_running` with the
+`runtime_not_running`, or the authenticated `native_graph_foreground` control code
+with that exact cause), `ps` exits 0 and reports `runtime_not_running` with the
 saved `data.run`, a null `data.phase` and no items; text output prints
 "Native runtime is not running; no services are running." A dead
 owner, uncertain recovery, changed selection, or malformed or mismatched reply

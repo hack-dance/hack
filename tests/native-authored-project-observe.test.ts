@@ -574,7 +574,7 @@ test.each(
         throw new NativeRuntimeRequestError({
           message: "stopped",
           nativeCode,
-          causeCode:
+          nativeCauseCode:
             nativeCode === "native_graph_foreground"
               ? "runtime_not_running"
               : undefined,

@@ -197,6 +197,7 @@ type FixtureOptions = {
   readonly liveStop?: boolean;
   readonly semanticAfterHook?: boolean;
   readonly planFailure?: boolean;
+  readonly failBeforeReceipt?: boolean;
   readonly foreignPlan?: boolean;
   readonly foreignNamespace?: boolean;
   readonly branch?: string | null;
@@ -443,6 +444,7 @@ if(['plan','serve','frontend-plan','frontend-serve'].includes(action)){
   const digests=Object.fromEntries(Object.entries(services).map(([name,values])=>[name,Object.fromEntries(Object.entries(values).map(([key,value])=>[key,createHash('sha256').update(value).digest('hex')]))]));
   await writeFile(${JSON.stringify(delivery)},JSON.stringify({version:input.version,kind:input.kind,review:input.review,run:input.run,lifetime_seconds:input.lifetime_seconds,keys,digests,expectedDigest:${JSON.stringify(digest)}}));
  }
+ if(${options.failBeforeReceipt === true}){console.error(JSON.stringify({code:'graph_network_intent',message:${JSON.stringify(CANARY)}}));process.exit(2)}
  const receipt={version:2,kind:'native-graph-runtime',owner:'f'.repeat(32),boot:'00000000-0000-0000-0000-000000000001',review,phase:'ready-observed',readiness:{web:'started'},resources:{'network:default':{kind:'network',key:'default',name:'hkn-'+input.run+'-network-0',id:'1'.repeat(64),image:null,phase:'created',outbound:true},'container:web':{kind:'container',key:'web',name:'hkn-'+input.run+'-container-0',id:'2'.repeat(64),image:'sha256:'+ '3'.repeat(64),phase:'started',networks:['default']}}};
  if(${options.storage === true && options.liveStop === true}){
   const namespace=provenance.namespace, owner='9'.repeat(32);
@@ -467,6 +469,7 @@ if(['plan','serve','frontend-plan','frontend-serve'].includes(action)){
  }
  await finish();
 }else{
+ if(action==='inspect'&&${options.failBeforeReceipt === true}){console.error(JSON.stringify({code:'native_graph_receipt',message:${JSON.stringify(CANARY)}}));process.exit(2)}
  if(action==='inspect'&&${JSON.stringify(options.cleanup)}==='missing'){console.error(JSON.stringify({code:'graph_owner_recovery',message:'private-missing-journal-detail'}));process.exit(2)}
  const receipt=JSON.parse(await readFile(journal,'utf8'));
  const observations={web:receipt.phase==='removed'?null:{state:'running',health:'none'}};
@@ -512,6 +515,27 @@ async function failure(
   return error;
 }
 const macTest = process.platform === "darwin" ? test : bunTest.skip;
+
+macTest(
+  "startup keeps the native failure when missing receipt inspection also refuses",
+  async () => {
+    const selected = await fixture({ failBeforeReceipt: true });
+    const error = await failure(
+      serveNativeAuthoredProject({
+        ...selected,
+        run,
+        startupTimeoutMs: 10_000,
+      }),
+      "retained"
+    );
+    expect(error).toHaveProperty("nativeCode", "graph_network_intent");
+    expect(error).toHaveProperty("stage", "runtime");
+    const retained = await artifacts(selected.scope);
+    expect(retained).toHaveLength(2);
+    expect(retained.some((name) => name.endsWith(".start.json"))).toBe(true);
+    expect(retained.some((name) => name.endsWith(".source.json"))).toBe(true);
+  }
+);
 
 test("startup diagnostics accept only closed compiler codes", () => {
   const known = new NativeAuthoredProjectStartError({

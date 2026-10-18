@@ -709,7 +709,10 @@ async function failedAdmission(opts: {
     outcome = "retained";
   }
   if (error instanceof NativeRuntimeRequestError) {
-    nativeCode = error.nativeCode;
+    // A follow-up retirement inspection may refuse because startup never
+    // published a receipt. Preserve the already captured native startup code;
+    // inspection still refuses retirement and retains every recovery binding.
+    nativeCode ??= error.nativeCode;
   } else if (
     outcome === "not-started" &&
     source === undefined &&

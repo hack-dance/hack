@@ -139,7 +139,7 @@ async function fixture(
   const attempts = join(nativeHome, "status-attempts");
   await Bun.write(
     runtime.binary,
-    `#!${process.execPath}\nimport { appendFileSync } from 'node:fs';\nconst expected=${JSON.stringify(["--candidate-root", nativeHome, "graph", "native", "control", "--run-id", provenance.run, "--action", "status", "--json"])};if(JSON.stringify(process.argv.slice(2))!==JSON.stringify(expected))process.exit(97);appendFileSync(${JSON.stringify(attempts)},'status\\n');${nativeCode === undefined ? `console.log(${JSON.stringify(JSON.stringify(reply))});` : `process.stderr.write(${JSON.stringify(JSON.stringify({ code: nativeCode }))});process.exit(1);`}\n`
+    `#!${process.execPath}\nimport { appendFileSync } from 'node:fs';\nconst expected=${JSON.stringify(["--candidate-root", nativeHome, "graph", "native", "control", "--run-id", provenance.run, "--action", "status", "--json"])};if(JSON.stringify(process.argv.slice(2))!==JSON.stringify(expected))process.exit(97);appendFileSync(${JSON.stringify(attempts)},'status\\n');${nativeCode === undefined ? `console.log(${JSON.stringify(JSON.stringify(reply))});` : `process.stderr.write(${JSON.stringify(JSON.stringify({ code: nativeCode, ...(nativeCode === "native_graph_foreground" ? { cause_code: "runtime_not_running" } : {}) }))});process.exit(1);`}\n`
   );
   await chmod(runtime.binary, 0o700);
   const mapping = join(
@@ -534,12 +534,17 @@ test("a stopped runtime is a status for a ready generation; other refusals still
     ).rejects.toThrow();
   }));
 
-test.each([
-  "rebirth",
-  "content",
-  "binary",
-  "recovery",
-])("a stopped-runtime reply still refuses %s drift across its awaited request", (fault) =>
+test.each(
+  ["rebirth", "content", "binary", "recovery"].flatMap((fault) =>
+    ["runtime_not_running", "native_graph_foreground"].map((nativeCode) => ({
+      fault,
+      nativeCode,
+    }))
+  )
+)("a stopped-runtime reply still refuses $fault drift ($nativeCode)", ({
+  fault,
+  nativeCode,
+}) =>
   owned(async () => {
     const f = await fixture();
     let calls = 0;
@@ -568,7 +573,11 @@ test.each([
         // or executable changed; the recheck must refuse, not report a status.
         throw new NativeRuntimeRequestError({
           message: "stopped",
-          nativeCode: "runtime_not_running",
+          nativeCode,
+          causeCode:
+            nativeCode === "native_graph_foreground"
+              ? "runtime_not_running"
+              : undefined,
         });
       },
     });
@@ -579,11 +588,16 @@ test.each([
 
 const macTest = process.platform === "darwin" ? test : test.skip;
 
-macTest.each([true, false])(
-  "source CLI native authored ps reports a stopped runtime (json=%s)",
-  (json) =>
+macTest.each([
+  { json: true, nativeCode: "runtime_not_running" },
+  { json: false, nativeCode: "runtime_not_running" },
+  { json: true, nativeCode: "native_graph_foreground" },
+  { json: false, nativeCode: "native_graph_foreground" },
+])(
+  "source CLI native authored ps reports a stopped runtime (%j)",
+  ({ json, nativeCode }) =>
     owned(async () => {
-      const f = await fixture(true, null, "runtime_not_running");
+      const f = await fixture(true, null, nativeCode);
       const result = await captureCompletedJobFixtureCommand({
         argv: [
           process.execPath,

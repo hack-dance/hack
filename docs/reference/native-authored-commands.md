@@ -11,6 +11,14 @@ the caller's separately prepared native provider pool and matching runtime binar
 It does not install or select a runtime automatically. An omitted backend continues
 to use the [Compose command owner](native-compose-commands.md).
 
+This bounded native consumer requires each service's `image` to be an immutable
+`sha256:` image **content ID**, such as the `image_id` returned by a successful
+[`runtime ensure-image`](../guides/native-candidate.md#public-image-acquisition-without-docker)
+acquisition. Keep that acquisition's pinned-reference and archive evidence. A
+registry tag or `repository@sha256:manifest-digest` is not the content ID: it can
+pass configuration planning while execution refuses `native_graph_admission`.
+Do not substitute a mutable image or bypass the image identity guard.
+
 ```sh
 HACK_RUNTIME_BACKEND=native \
 HACK_NATIVE_BINARY=/absolute/candidate/hack-native \
@@ -77,7 +85,11 @@ Startup shares the configured `HACK_COMPOSE_STARTUP_TIMEOUT_MS` budget across
 input preparation and native review, with a native maximum of 300000 milliseconds.
 Startup refusals identify a fixed owning stage and, when available, a closed
 compiler or native error code. They omit arbitrary errors, child output, paths and
-values. These diagnostics do not grant retry or cleanup authority.
+values. If startup fails before publishing a receipt and the later retirement
+inspection also refuses, the captured native startup code takes precedence over
+the inspection code. That preserves the failure's owning boundary; it does not
+prove cleanup. Retained bindings and recovery requirements stay in force.
+These diagnostics do not grant retry or cleanup authority.
 Readiness requires authenticated current observations and unchanged input before
 publication. The foreground owner remains attached until owned shutdown finishes;
 Ctrl-C requests that shutdown. Exact durable Removed evidence retires the tagged

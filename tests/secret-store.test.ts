@@ -6,6 +6,8 @@ import {
   mkdtemp,
   readFile,
   rm,
+  stat,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -671,3 +673,64 @@ async function writeGlobalConfig(input: {
   }
   await writeFile(path, `${JSON.stringify(input.value, null, 2)}\n`);
 }
+
+test("encrypted file key provisioning refuses symlinks without changing the target", async () => {
+  if (!tempDir) {
+    throw new Error("Missing temp dir");
+  }
+  process.env.HACK_SECRETS_FILE_KEY = "synthetic-new-key";
+  const target = join(tempDir, "unrelated-file");
+  const keyPath = join(tempDir, "key-link");
+  await writeFile(target, "synthetic-original-content", { mode: 0o644 });
+  const targetMode = (await stat(target)).mode & 0o777;
+  await symlink(target, keyPath);
+  await expect(provisionEncryptedFileKey({ keyPath })).rejects.toThrow(
+    "Refused encrypted secret key write"
+  );
+  expect(await readFile(target, "utf8")).toBe("synthetic-original-content");
+  expect((await stat(target)).mode & 0o777).toBe(targetMode);
+});
+
+test("encrypted file key provisioning refuses dangling symlinks", async () => {
+  if (!tempDir) {
+    throw new Error("Missing temp dir");
+  }
+  process.env.HACK_SECRETS_FILE_KEY = "synthetic-new-key";
+  const target = join(tempDir, "missing-target");
+  const keyPath = join(tempDir, "key-link");
+  await symlink(target, keyPath);
+  await expect(provisionEncryptedFileKey({ keyPath })).rejects.toThrow(
+    "Refused encrypted secret key write"
+  );
+  await expect(access(target)).rejects.toThrow();
+});
+
+test("encrypted file key provisioning replaces a regular key with private permissions", async () => {
+  if (!tempDir) {
+    throw new Error("Missing temp dir");
+  }
+  process.env.HACK_SECRETS_FILE_KEY = "synthetic-new-key";
+  const keyPath = join(tempDir, "regular-key");
+  await writeFile(keyPath, "synthetic-old-key", { mode: 0o644 });
+  const before = await stat(keyPath);
+  await provisionEncryptedFileKey({ keyPath });
+  expect(await readFile(keyPath, "utf8")).toBe("synthetic-new-key\n");
+  const after = await stat(keyPath);
+  expect(after.mode & 0o777).toBe(0o600);
+  expect(after.ino).not.toBe(before.ino);
+});
+
+test("encrypted file key provisioning refuses a symlinked parent directory", async () => {
+  if (!tempDir) {
+    throw new Error("Missing temp dir");
+  }
+  process.env.HACK_SECRETS_FILE_KEY = "synthetic-new-key";
+  const target = join(tempDir, "real-directory");
+  const alias = join(tempDir, "directory-link");
+  await mkdir(target);
+  await symlink(target, alias);
+  await expect(
+    provisionEncryptedFileKey({ keyPath: join(alias, "key") })
+  ).rejects.toThrow("Refused encrypted secret key write");
+  await expect(access(join(target, "key"))).rejects.toThrow();
+});

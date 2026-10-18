@@ -21,10 +21,10 @@
  */
 
 /** Increment when cells are reclassified or the cell shape changes. */
-export const AGENT_CLIENT_CAPABILITY_MATRIX_VERSION = 2;
+export const AGENT_CLIENT_CAPABILITY_MATRIX_VERSION = 3;
 
-/** Date (UTC) of the observations recorded below. */
-export const AGENT_CLIENT_CAPABILITY_OBSERVED_ON = "2026-10-11";
+/** Latest observation date (UTC); older cells retain their own provenance. */
+export const AGENT_CLIENT_CAPABILITY_OBSERVED_ON = "2026-10-18";
 
 export const AGENT_CLIENTS = [
   "codex",
@@ -493,15 +493,14 @@ export const AGENT_CLIENT_CAPABILITY_MATRIX: readonly ClientCapabilityCell[] = [
   {
     client: "standalone",
     capability: "standaloneMcp",
-    status: "untested",
+    status: "verified",
     evidenceClass: "isolated-fixture",
     evidenceRef: BUNDLE_FIXTURE,
-    observedClientVersion: null,
-    sourceSha: SOURCE_SHA,
+    observedClientVersion: "@modelcontextprotocol/sdk 1.26.0 (Bun 1.4.2)",
+    sourceSha: "f0c0d1740db3cd45f22594f32dcbff8087a55d97",
     hostLabel: HOST,
-    note: "The fixture's reference MCP SDK client calls a real tool through the generated entry, but that step was not reached in the recorded run. The SDK client is not an agent.",
-    openGate:
-      "Pass tests/mcp-bundle-client.test.ts end to end, or add a client-independent stdio fixture.",
+    note: "The client-independent bundle fixture passed on Apple Silicon macOS: a real SDK client loaded the generated stdio entry, listed tools, called hack.projects.list through the compiled CLI with an isolated empty registry and unavailable Docker, then observed owned backend retirement. Source-matched adapter/owner/backend and CLI were built locally. This qualifies this SDK transport, not agent authentication, plugin loading or a published installation.",
+    openGate: null,
   },
   {
     client: "standalone",

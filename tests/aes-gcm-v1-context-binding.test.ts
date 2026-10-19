@@ -39,6 +39,7 @@ import {
 } from "../src/lib/project-env-config.ts";
 import { resolveSecretStore } from "../src/lib/secret-store.ts";
 import { restoreEnv } from "./helpers/env.ts";
+import { createSecretWorktreeFixture } from "./helpers/secret-fixture.ts";
 
 const STORE_KEY = "synthetic-v1-binding-store-key";
 const ENV_KEY = "synthetic-v1-binding-env-key";
@@ -480,3 +481,333 @@ for (const [label, aad] of [
     }
   });
 }
+
+// ---------------------------------------------------------------------------
+// Cross-context substitution controls (HACK-1127)
+//
+// Each case moves authentic v1 ciphertext into another context. The key alone
+// decides the outcome: a different key refuses with the fixed error and never
+// reveals the value or a key; the same key accepts, whatever the variable,
+// scope, overlay, override file, checkout, project or backend. Accepted moves
+// are residual risks in docs/security/env-secrets-threat-model.md.
+// ---------------------------------------------------------------------------
+
+const OTHER_ENV_KEY = "synthetic-v1-binding-other-env-key";
+
+type ProjectPaths = {
+  readonly projectRoot: string;
+  readonly projectDir: string;
+};
+
+async function createKeyedProject(opts: {
+  readonly name: string;
+  readonly keyText: string | null;
+}): Promise<ProjectPaths> {
+  const projectRoot = resolve(requireRoot(), opts.name);
+  const projectDir = resolve(projectRoot, ".hack");
+  await mkdir(projectDir, { recursive: true });
+  await writeFile(
+    resolve(projectDir, PROJECT_COMPOSE_FILENAME),
+    "services:\n  api: {}\n"
+  );
+  await writeFile(
+    resolve(projectDir, PROJECT_CONFIG_FILENAME),
+    `${JSON.stringify({ name: opts.name, dev_host: `${opts.name}.hack` })}\n`
+  );
+  if (opts.keyText !== null) {
+    await writeFile(
+      resolve(projectRoot, PROJECT_ENV_KEY_FILENAME),
+      `${opts.keyText}\n`
+    );
+  }
+  return { projectRoot, projectDir };
+}
+
+/** Encrypts a value through the real writer; returns its file and token. */
+async function sealThroughWriter(opts: {
+  readonly project: ProjectPaths;
+  readonly envName?: string | null;
+  readonly key?: string;
+  readonly value?: string;
+  readonly local?: boolean;
+}): Promise<{ readonly filePath: string; readonly secure: string }> {
+  const key = opts.key ?? "TOKEN";
+  const written = await setProjectEnvValue({
+    projectRoot: opts.project.projectRoot,
+    projectDir: opts.project.projectDir,
+    envName: opts.envName ?? null,
+    scope: "global",
+    key,
+    value: opts.value ?? SENTINEL,
+    secret: true,
+    local: opts.local,
+  });
+  const config = await readLegacyConfig(written.filePath);
+  return {
+    filePath: written.filePath,
+    secure: secureOf(config, "global", key),
+  };
+}
+
+/** Sets one secure entry in an env file, keeping the rest of the file. */
+async function plantSecure(opts: {
+  readonly filePath: string;
+  readonly scope: string;
+  readonly key: string;
+  readonly secure: string;
+}): Promise<void> {
+  const text = await readFile(opts.filePath, "utf8").catch(() => null);
+  const config: LegacyConfig =
+    text === null
+      ? {
+          version: 1,
+          environment: "default",
+          secretsprovider: "project_key",
+          values: {},
+        }
+      : (YAML.parse(text) as LegacyConfig);
+  await writeFile(
+    opts.filePath,
+    JSON.stringify({
+      ...config,
+      values: {
+        ...config.values,
+        [opts.scope]: {
+          ...(config.values[opts.scope] ?? {}),
+          [opts.key]: { secure: opts.secure },
+        },
+      },
+    })
+  );
+}
+
+async function resolveSelected(opts: {
+  readonly project: ProjectPaths;
+  readonly envName?: string | null;
+}) {
+  const resolved = await resolveProjectEnvConfig({
+    projectRoot: opts.project.projectRoot,
+    projectDir: opts.project.projectDir,
+    envName: opts.envName ?? null,
+    serviceNames: ["api"],
+  });
+  if (!resolved) {
+    throw new Error("missing resolved config");
+  }
+  return resolved;
+}
+
+async function expectFixedEnvRefusal(pending: Promise<unknown>): Promise<void> {
+  const error = await pending.then(
+    () => null,
+    (caught: unknown) => caught
+  );
+  expect(error).toBeInstanceOf(Error);
+  expect(error instanceof Error ? error.message : "").toBe(
+    "Invalid secure env value."
+  );
+  for (const privateText of [SENTINEL, ENV_KEY, OTHER_ENV_KEY, STORE_KEY]) {
+    expect(String(error)).not.toContain(privateText);
+    expect(JSON.stringify(error)).not.toContain(privateText);
+  }
+}
+
+async function caughtStoreRead(): Promise<unknown> {
+  return await (await resolveSecretStore({ projectName: "app" }))
+    .get({ key: "TOKEN" })
+    .then(
+      () => null,
+      (caught: unknown) => caught
+    );
+}
+
+test("cross-context: a v1 value moved to a project with another key is refused without disclosure", async () => {
+  const source = await createKeyedProject({ name: "source", keyText: ENV_KEY });
+  const target = await createKeyedProject({
+    name: "target",
+    keyText: OTHER_ENV_KEY,
+  });
+  const { secure } = await sealThroughWriter({ project: source });
+  await plantSecure({
+    filePath: resolve(target.projectDir, "hack.env.default.yaml"),
+    scope: "global",
+    key: "TOKEN",
+    secure,
+  });
+  await expectFixedEnvRefusal(resolveSelected({ project: target }));
+});
+
+test("cross-context: a HACK_ENV_SECRET_KEY that differs from the sealing key is refused", async () => {
+  const source = await createKeyedProject({ name: "source", keyText: ENV_KEY });
+  const { secure } = await sealThroughWriter({ project: source });
+  // A keyless checkout (for example CI) falls back to HACK_ENV_SECRET_KEY.
+  const keyless = await createKeyedProject({ name: "keyless", keyText: null });
+  await plantSecure({
+    filePath: resolve(keyless.projectDir, "hack.env.default.yaml"),
+    scope: "global",
+    key: "TOKEN",
+    secure,
+  });
+  process.env.HACK_ENV_SECRET_KEY = OTHER_ENV_KEY;
+  await expectFixedEnvRefusal(resolveSelected({ project: keyless }));
+  // Control: the sealing key opens the same moved value.
+  process.env.HACK_ENV_SECRET_KEY = ENV_KEY;
+  expect((await resolveSelected({ project: keyless })).globalEnv.TOKEN).toBe(
+    SENTINEL
+  );
+});
+
+test("cross-context (accepted): a v1 value moved between overlays of one project decrypts", async () => {
+  const project = await createKeyedProject({
+    name: "overlays",
+    keyText: ENV_KEY,
+  });
+  const sealed = await sealThroughWriter({ project, envName: "staging" });
+  const defaultFile = resolve(project.projectDir, "hack.env.default.yaml");
+  expect(sealed.filePath).not.toBe(defaultFile);
+  await plantSecure({
+    filePath: defaultFile,
+    scope: "api",
+    key: "MOVED_FROM_STAGING",
+    secure: sealed.secure,
+  });
+  expect(
+    (await resolveSelected({ project, envName: "default" })).serviceEnv.api
+      ?.MOVED_FROM_STAGING
+  ).toBe(SENTINEL);
+});
+
+test("cross-context (accepted): a v1 value moved from the shared file to the local override decrypts", async () => {
+  const project = await createKeyedProject({ name: "local", keyText: ENV_KEY });
+  const shared = await sealThroughWriter({ project });
+  const local = await sealThroughWriter({
+    project,
+    key: "LOCAL_TOKEN",
+    value: OTHER_SENTINEL,
+    local: true,
+  });
+  expect(local.filePath).not.toBe(shared.filePath);
+  await plantSecure({
+    filePath: local.filePath,
+    scope: "global",
+    key: "LOCAL_TOKEN",
+    secure: shared.secure,
+  });
+  expect((await resolveSelected({ project })).globalEnv.LOCAL_TOKEN).toBe(
+    SENTINEL
+  );
+});
+
+test("cross-context (accepted): projects that share HACK_ENV_SECRET_KEY accept each other's values", async () => {
+  process.env.HACK_ENV_SECRET_KEY = ENV_KEY;
+  const first = await createKeyedProject({ name: "first", keyText: null });
+  const second = await createKeyedProject({ name: "second", keyText: null });
+  // Sealed under the shared environment key, as a CI-only checkout would be.
+  await writeLegacyValue({
+    configPath: resolve(first.projectDir, "hack.env.default.yaml"),
+    secure: legacyValue(),
+  });
+  expect((await resolveSelected({ project: first })).globalEnv.TOKEN).toBe(
+    SENTINEL
+  );
+  await copyFile(
+    resolve(first.projectDir, "hack.env.default.yaml"),
+    resolve(second.projectDir, "hack.env.default.yaml")
+  );
+  expect((await resolveSelected({ project: second })).globalEnv.TOKEN).toBe(
+    SENTINEL
+  );
+});
+
+test("cross-context (accepted): a v1 value moved from the primary checkout to a linked worktree decrypts", async () => {
+  const fixture = await createSecretWorktreeFixture({
+    parent: requireRoot(),
+    home: join(requireRoot(), "home"),
+    name: "worktree-binding",
+  });
+  const primary = {
+    projectRoot: fixture.primaryRoot,
+    projectDir: join(fixture.primaryRoot, ".hack"),
+  };
+  const linked = {
+    projectRoot: fixture.linkedRoot,
+    projectDir: join(fixture.linkedRoot, ".hack"),
+  };
+  const { secure } = await sealThroughWriter({ project: primary });
+  await plantSecure({
+    filePath: resolve(linked.projectDir, "hack.env.default.yaml"),
+    scope: "api",
+    key: "FROM_PRIMARY",
+    secure,
+  });
+  expect(
+    (await resolveSelected({ project: linked })).serviceEnv.api?.FROM_PRIMARY
+  ).toBe(SENTINEL);
+});
+
+test("cross-context: an encrypted_file envelope moved to a store with another key is refused", async () => {
+  const storePath = resolve(requireRoot(), "secrets.enc.json");
+  await configureStore({ storePath });
+  await (await resolveSecretStore({ projectName: "app" })).set({
+    key: "TOKEN",
+    value: SENTINEL,
+  });
+  const otherPath = resolve(requireRoot(), "other.enc.json");
+  await copyFile(storePath, otherPath);
+  await configureStore({ storePath: otherPath });
+  process.env.HACK_SECRETS_FILE_KEY = OTHER_ENV_KEY;
+  const error = await caughtStoreRead();
+  expect(error).toBeInstanceOf(Error);
+  expect(String(error)).toContain("Cannot decrypt encrypted secret store at ");
+  for (const privateText of [SENTINEL, STORE_KEY, OTHER_ENV_KEY]) {
+    expect(String(error)).not.toContain(privateText);
+  }
+});
+
+test("cross-context (accepted, reused key text only): store ciphertext re-framed as a v1 env value decrypts to the whole store map", async () => {
+  const storePath = resolve(requireRoot(), "secrets.enc.json");
+  await configureStore({ storePath });
+  await (await resolveSecretStore({ projectName: "app" })).set({
+    key: "TOKEN",
+    value: SENTINEL,
+  });
+  const envelope = JSON.parse(await readFile(storePath, "utf8")) as Record<
+    string,
+    string
+  >;
+  const project = await createKeyedProject({
+    name: "reused-key",
+    keyText: STORE_KEY,
+  });
+  await plantSecure({
+    filePath: resolve(project.projectDir, "hack.env.default.yaml"),
+    scope: "global",
+    key: "REFRAMED",
+    secure: ["v1", envelope.iv, envelope.tag, envelope.ciphertext].join(":"),
+  });
+  expect((await resolveSelected({ project })).globalEnv.REFRAMED).toBe(
+    STORE_PLAINTEXT
+  );
+});
+
+test("cross-context: a v1 env value re-framed as a store envelope under a reused key is refused", async () => {
+  const project = await createKeyedProject({
+    name: "reframe-source",
+    keyText: STORE_KEY,
+  });
+  const { secure } = await sealThroughWriter({ project });
+  const [, iv, tag, ciphertext] = secure.split(":");
+  const storePath = resolve(requireRoot(), "reframed.enc.json");
+  await writeFile(
+    storePath,
+    `${JSON.stringify({ version: 1, algorithm: "aes-256-gcm", iv, tag, ciphertext })}\n`
+  );
+  await configureStore({ storePath });
+  // Authentication succeeds under the reused key; the plaintext is not a map.
+  const error = await caughtStoreRead();
+  expect(error).toBeInstanceOf(Error);
+  expect(String(error)).toContain("Decrypted secret store payload");
+  for (const privateText of [SENTINEL, STORE_KEY]) {
+    expect(String(error)).not.toContain(privateText);
+  }
+});

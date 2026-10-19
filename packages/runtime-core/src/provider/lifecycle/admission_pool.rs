@@ -51,12 +51,12 @@ impl Choice {
         self.selection.as_ref()
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "macos"))]
     pub(super) fn into_selection(self) -> Option<Selection> {
         self.selection
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "macos"))]
     pub(super) fn refusal(&self) -> Option<StoppedRefusal> {
         self.refusal
     }

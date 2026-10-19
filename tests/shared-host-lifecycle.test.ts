@@ -196,7 +196,7 @@ function lineReader(stream: ReadableStream<Uint8Array>) {
 }
 
 async function startForeign(opts: {
-  readonly mode: "identity" | "tcp" | "placeholder" | "oversized";
+  readonly mode: "identity" | "tcp" | "reset" | "placeholder" | "oversized";
   readonly port: number;
   readonly helper?: string;
   readonly upstream?: string;
@@ -450,6 +450,7 @@ test(
   async () => {
     for (const fixture of [
       { mode: "tcp" as const },
+      { mode: "reset" as const },
       { mode: "identity" as const, helper: "unrelated-dev-server" },
     ]) {
       const root = await scratch();

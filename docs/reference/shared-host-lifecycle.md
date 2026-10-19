@@ -100,7 +100,10 @@ replaced atomically, and parsed strictly (exact keys, version 1):
      Either way the listener keeps running and no child is spawned;
    - a probe whose timeout was shortened by the deadline and then timed out proves
      nothing about the listener: `deadline`;
-   - connection refused: confirm with a loopback bind probe, then spawn.
+   - connection failed (refused, reset or unreachable): confirm with a loopback
+     bind probe. An occupied port is `foreign-listener`; a free port is spawned.
+     The refused-connection error code differs by platform, so the error itself
+     never proves absence.
 5. Spawn through an exec gate in a new session:
    `/bin/sh -c 'IFS= read -r hack_gate || exit 0; [ "$hack_gate" = open ] || exit 0; exec "$@" </dev/null'`.
    The gate blocks on stdin. Hack reads the gate's PID and birth time, writes the
@@ -184,7 +187,7 @@ Linux pass is a receipt only once that hosted job has run it.
 | owned start | Claimed before the gate opens; the endpoint serves the branch upstream; the last release stops it. |
 | healthy shared helper | Adopted; endpoint served; release never signals it. |
 | wrong upstream | Refused, no spawn, no claim; the listener survives. The result contains no upstream value. |
-| foreign listener | A silent TCP owner, a different helper and an identity answer over 4 KiB are refused and survive. |
+| foreign listener | A silent TCP owner, a TCP owner that drops every connection, a different helper and an identity answer over 4 KiB are refused and survive. |
 | concurrent starters | The first starter holds the lock while the second is shown waiting without acquiring it; then one spawn, both holders recorded, a sibling branch with another upstream refused, the first release retains and the last release stops. |
 | different time zones | Clients with `TZ=UTC0` and `TZ=HST10` agree on the birth; the second reuses the owned helper, which stays owned and is stopped by the last release. |
 | stale PID / reuse | A claim naming a live PID with a different birth time is cleared on release and discarded on start; that process survives. |

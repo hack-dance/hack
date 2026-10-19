@@ -10,6 +10,7 @@
  * - `oversized`: like `identity`, but pads the identity answer past 4 KiB.
  * - `exit`: exits immediately (a helper that dies during startup).
  * - `tcp`: a plain TCP listener that never answers (a foreign port owner).
+ * - `reset`: a TCP listener that drops every connection at once.
  * - `placeholder`: stays alive and never listens (a sleeping placeholder).
  * - `parent`: spawns a `placeholder` grandchild, prints its PID, then serves
  *   like `identity` (a helper with its own child process).
@@ -73,6 +74,21 @@ switch (mode) {
       socket: {
         data() {
           // Accepts connections and never answers.
+        },
+      },
+    });
+    break;
+  case "reset":
+    Bun.listen({
+      hostname: "127.0.0.1",
+      port,
+      socket: {
+        open(socket) {
+          // Accepts and drops every connection without answering.
+          socket.terminate();
+        },
+        data() {
+          // Never reached.
         },
       },
     });

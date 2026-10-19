@@ -199,7 +199,8 @@ type AdoptedClaim = {
 type Claim = OwnedClaim | AdoptedClaim;
 
 type ProbeObservation =
-  | { readonly kind: "absent" }
+  /** The connection failed (refused, reset or unreachable). */
+  | { readonly kind: "no-answer" }
   | { readonly kind: "unidentified" }
   /** The listener did not answer within this probe's own timeout. */
   | { readonly kind: "timeout" }
@@ -522,18 +523,17 @@ export async function probeSharedHostIdentity(opts: {
       redirect: "manual",
       signal: AbortSignal.any(signals),
     });
-  } catch (error: unknown) {
+  } catch {
     if (opts.signal?.aborted) {
       return { kind: "cancelled" };
     }
     if (timeout.aborted) {
       return { kind: "timeout" };
     }
-    // Only a refused connection proves no listener; a reset means something
-    // holds the port without answering as the helper.
-    return isRecord(error) && error.code === "ECONNREFUSED"
-      ? { kind: "absent" }
-      : { kind: "unidentified" };
+    // The refused-connection error code differs by platform and runtime, so a
+    // transport error alone never proves absence: the caller confirms it with
+    // a loopback bind probe before spawning.
+    return { kind: "no-answer" };
   }
   const text = await readBounded(response);
   if (opts.signal?.aborted) {

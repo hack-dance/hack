@@ -916,6 +916,17 @@ Graph cleanup uses that same history capacity, counting active and archived
 records together, so repeated restores cannot exceed a smaller cleanup-only
 ceiling after allocation succeeds. Matching ownership, container bindings and
 unambiguous records are still required.
+After ordinary `graph cleanup` commits, the same engine lease compacts that run's
+records: each must match a receipt container that is absent and a guest slot that is
+absent, or nothing is written. Their exact intent digests move into one value-free
+per-run tombstone in `run/environment-lease-tombstones`, bound to the VM incarnation,
+and only then are the active records unlinked. Prior boots fold into one sealed
+summary each; the current boot keeps per-slot reservations (bounded at 16384). A
+retired slot or any slot of a sealed boot is never recorded, delivered, retired as
+live or counted again, so history no longer consumes the 4096 active-record budget.
+Pending, live, changed, misbound or foreign-incarnation records refuse compaction,
+and other runs' records are untouched. An interruption is resumed by the next
+cleanup or archive; exact residue reads as retired, changed residue refuses.
 No retained evidence is automatically deleted to admit new work. This environment
 budget does not increase the runtime's separate container, CPU or memory limits and
 does not establish 32-branch qualification.

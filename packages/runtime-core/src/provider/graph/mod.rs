@@ -1624,7 +1624,11 @@ pub fn cleanup(
     let engine = Engine::connect_cleanup(candidate)?;
     let (receipt, root) = load(candidate, &engine, run)?;
     cleanup_enrollment::ordinary_mutation(&root, &receipt)?;
-    cleanup_owned(candidate, &engine, receipt, &root, remove_data)
+    let receipt = cleanup_owned(candidate, &engine, receipt, &root, remove_data)?;
+    // Only ordinary cleanup compacts. Recovery flows retain an exact environment inventory
+    // across their confirmation and use the fenced path without this effect.
+    environment::compact_retired(candidate, &engine, &receipt)?;
+    Ok(receipt)
 }
 
 // The caller retains the VM mutation lease through this entire effect and any

@@ -134,6 +134,27 @@ pub(super) fn verify_cleanup(
     environment_recovery::verify_graph_retired(engine.guest(), expected)
 }
 
+/// Compact this graph's confirmed-retired allocation records after ordinary cleanup. The caller
+/// holds the engine's mutation lease and has committed the cleaned receipt; every record must
+/// match a receipt container that is absent, and its guest slot must be absent.
+pub(super) fn compact_retired(
+    candidate: &Candidate,
+    engine: &Engine<'_>,
+    receipt: &Receipt,
+) -> Result<(), CandidateError> {
+    if !receipt.environment_attached {
+        return Ok(());
+    }
+    let containers = receipt
+        .resources
+        .values()
+        .filter(|r| r.kind == Kind::Container)
+        .map(|r| (r.key.clone(), r.name.clone()))
+        .collect();
+    environment_recovery::compact_graph(candidate, engine.guest(), &receipt.run, &containers)?;
+    Ok(())
+}
+
 pub(super) fn require_replay_supported(receipt: &Receipt) -> Result<(), CandidateError> {
     if receipt.environment_attached {
         return Err(error(
@@ -156,6 +177,9 @@ pub(super) fn archive_slots(
     if !receipt.environment_attached {
         return Ok(());
     }
+    // Finish an interrupted compaction so exact residue is not stranded in the active
+    // directory after the graph leaves cleanup. No new record is compacted here.
+    environment_recovery::resume_graph(candidate, engine.guest(), &receipt.run)?;
     let containers = receipt
         .resources
         .values()

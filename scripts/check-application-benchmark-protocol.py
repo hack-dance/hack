@@ -8,6 +8,9 @@ This helper never runs a benchmark, starts a runtime, calls Docker or reads host
   --schedule           prints the frozen rotated lane order for each round;
   --evaluate SUMMARY   judges a retained cohort summary against the frozen budgets.
 
+Revision-1 identities (artifacts, host, lane kinds and backends, candidate capacity,
+workload pins) are exact; budgets and sample policy are floors a revision may tighten.
+Every number must lie within MAX_JSON_NUMBER.
 Diagnostics are closed codes from DIAGNOSTICS; they never echo input values or paths.
 A budget verdict is one of VERDICTS. A statistic is judged only from complete,
 sufficient, admitted samples: missing, short, flagged or unaccounted samples are
@@ -72,12 +75,86 @@ REQUIRED_PHASES = (
 SCALE_POINTS = {"branch_instances": (1, 8, 32), "mcp_clients": (1, 32)}
 JUDGED_SCALE = {"branch_instances": 1}
 
+# Revision-1 identities. These are exact, not floors: a different artifact, host, lane
+# kind or backend, candidate capacity or workload pin is a different experiment and
+# needs a new revision (and new constants here), never an edit to revision 1.
+FROZEN_HOST = {
+    "id": "m3-max",
+    "cpu": "Apple M3 Max",
+    "logical_cpus": 16,
+    "memory_bytes": 137438953472,
+    "os": "macOS 27.0",
+    "docker_cli": "29.4.0",
+    "compose": "5.1.2",
+    "orbstack": {"version": "2.2.3", "build": "20963", "cpu": 16, "memory_mib": 71680},
+}
+# Fields that identify the exact released artifact a lane installs.
+ARTIFACT_FIELDS = ("version", "tag", "commit", "asset", "asset_sha256")
+# Fields that identify how a lane runs.
+LANE_RUNTIME_FIELDS = ("kind", "backend", "engine", "compose_version")
+FROZEN_LANES = {
+    "candidate": {
+        "kind": "hack", "backend": "native", "version": "5.0.0-next.5", "tag": "v5.0.0-next.5",
+        "commit": "28de2f8902d3776c3da9326e7ae6c6aa6e7f69bc",
+        "asset": "hack-5.0.0-next.5-darwin-arm64-native.tar.gz",
+        "asset_sha256": "ba1da4d349ab70069a1b0775ba671838440b5479cffd1fc2fe41c59816c3df11",
+    },
+    "compose": {"kind": "compose", "backend": "docker-compose", "engine": "orbstack", "compose_version": "5.1.2"},
+    "hack-4.1.1": {
+        "kind": "hack", "backend": "compose", "version": "4.1.1", "tag": "v4.1.1",
+        "commit": "74bf0672f41bd3f68a4ce6cba28b9ba15467c2b2",
+        "asset": "hack-4.1.1-darwin-arm64.tar.gz",
+        "asset_sha256": "968f75fe66cd84fdf93b0c5b64ca5df02f98c74281b5a9238125b3afd2f3d72b",
+    },
+    "hack-4.2.0": {
+        "kind": "hack", "backend": "compose", "version": "4.2.0", "tag": "v4.2.0",
+        "commit": "575847486963db94623e1e7f8cd49acca286c517",
+        "asset": "hack-4.2.0-darwin-arm64.tar.gz",
+        "asset_sha256": "c62b533aaddbeaafa594cab682cf10041c9bcaea69e2fe25e33e85df49654a85",
+    },
+    "hack-4.2.1": {
+        "kind": "hack", "backend": "compose", "version": "4.2.1", "tag": "v4.2.1",
+        "commit": "5a4c51babb7ef725a30f2f3fd3677081a64bc247",
+        "asset": "hack-4.2.1-darwin-arm64.tar.gz",
+        "asset_sha256": "557583d946abcd0dd0a3fa12b2f7b81f18310d594b0699d663ebf239d0d4d729",
+    },
+}
+# The native `development` profile: graph execution, and so every workload here,
+# refuses any other profile (see the protocol page, "Capacities").
+FROZEN_CANDIDATE_CAPACITY = {"profile": "development", "vcpus": 4, "memory_mib": 6144, "storage_gib": 32,
+                             "overlay_gib": 10}
+FROZEN_WORKLOAD_PINS = {
+    "event-agent": "application commit and configuration digest recorded per cohort; identical across lanes",
+    "small-fixture": "image oven/bun:1.4.2-slim with its image ID recorded per cohort, pull never",
+}
+# Frozen correctness checks per workload. A revision may add checks, never drop one.
+FROZEN_CORRECTNESS = {
+    "event-agent": (
+        "all declared long-running services running and every HTTP health check healthy",
+        "both initializers exited 0",
+        "routed sign-in page returns HTTP 200",
+        "a per-run data marker written before restart reads back after restart",
+    ),
+    "small-fixture": (
+        "initializer creates the SQLite schema in a named volume and exits 0",
+        "web health endpoint returns HTTP 200",
+        "check task inserts a per-run row and reads the expected count",
+        "the row reads back after restart",
+        "a source edit is served within the watcher acknowledgement window",
+    ),
+}
+# Largest JSON number magnitude accepted anywhere: the I-JSON (RFC 7493) interoperable
+# integer range. Bounding every number keeps each statistic and ratio finite and keeps
+# Python from converting an unbounded JSON integer to a float.
+MAX_JSON_NUMBER = 2 ** 53 - 1
+
 DIAGNOSTICS = frozenset({
     "protocol_unreadable",
     "protocol_not_object",
     "protocol_id_mismatch",
     "protocol_revision_mismatch",
     "host_incomplete",
+    "host_mismatch",
     "lanes_malformed",
     "lane_id_duplicate",
     "compose_lane_host_mismatch",
@@ -86,10 +163,15 @@ DIAGNOSTICS = frozenset({
     "artifact_commit_malformed",
     "artifact_digest_malformed",
     "artifact_version_malformed",
+    "artifact_identity_mismatch",
+    "lane_runtime_mismatch",
+    "candidate_capacity_mismatch",
     "workloads_malformed",
     "workload_lane_unknown",
     "workload_baseline_missing",
     "workload_shape_mismatch",
+    "workload_pin_mismatch",
+    "workload_correctness_weakened",
     "phases_mismatch",
     "scale_points_mismatch",
     "cache_class_missing",
@@ -211,7 +293,18 @@ def median(samples):
 
 
 def _number(value):
-    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+    """A finite JSON number within MAX_JSON_NUMBER; a boolean is not a number.
+
+    The range comparison never converts an int to a float, so an oversized integer is
+    refused rather than raising OverflowError, and NaN and infinities compare false.
+    """
+    return isinstance(value, (int, float)) and not isinstance(value, bool) \
+        and -MAX_JSON_NUMBER <= value <= MAX_JSON_NUMBER
+
+
+def _same(value, frozen):
+    """Exact JSON equality: unlike ==, 4.0 is not 4 and true is not 1."""
+    return json.dumps(value, sort_keys=True) == json.dumps(frozen, sort_keys=True)
 
 
 def _count(value):
@@ -230,6 +323,29 @@ def _check_host(host, found):
     elif not isinstance(host["orbstack"], dict) or any(
             not host["orbstack"].get(field) for field in ("version", "build", "cpu", "memory_mib")):
         found.add("host_incomplete")
+    # Native stateful results are host-specific: any other host or engine is a new revision.
+    if not _same(host, FROZEN_HOST):
+        found.add("host_mismatch")
+
+
+def _check_lane_identity(lane_id, lane, found):
+    """Refuse a frozen lane whose artifact, runtime or capacity differs from revision 1.
+
+    A missing field counts as different, so removing an identity cannot weaken it.
+    """
+    frozen = FROZEN_LANES.get(lane_id)
+    if frozen is None:
+        return
+    for field in ARTIFACT_FIELDS + LANE_RUNTIME_FIELDS:
+        if (field in frozen or field in lane) and not _same(lane.get(field), frozen.get(field)):
+            found.add("artifact_identity_mismatch" if field in ARTIFACT_FIELDS else "lane_runtime_mismatch")
+    if lane_id == "candidate":
+        if not _same(lane.get("capacity"), FROZEN_CANDIDATE_CAPACITY):
+            found.add("candidate_capacity_mismatch")
+    elif "capacity" in lane:
+        # Baselines run with the shared engine's default capacity; a per-lane capacity
+        # would make them a different experiment.
+        found.add("lane_runtime_mismatch")
 
 
 def _check_lanes(lanes, host, found):
@@ -263,6 +379,7 @@ def _check_lanes(lanes, host, found):
                 found.add("compose_lane_host_mismatch")
         else:
             found.add("lanes_malformed")
+        _check_lane_identity(lane_id, lane, found)
     if "candidate" not in lane_ids:
         found.add("candidate_lane_missing")
     if any(baseline not in lane_ids for baseline in REQUIRED_BASELINES):
@@ -296,8 +413,14 @@ def _check_workloads(workloads, lane_ids, found):
             found.add("workloads_malformed")
         workload_id = workload.get("id")
         shape = WORKLOAD_SHAPES.get(workload_id) if isinstance(workload_id, str) else None
-        if shape is not None and workload.get("shape") != shape:
+        if shape is not None and not _same(workload.get("shape"), shape):
             found.add("workload_shape_mismatch")
+        if isinstance(workload_id, str) and workload_id in FROZEN_WORKLOAD_PINS:
+            if not _same(workload.get("pin"), FROZEN_WORKLOAD_PINS[workload_id]):
+                found.add("workload_pin_mismatch")
+            checks = workload.get("correctness")
+            if not _strings(checks) or not set(FROZEN_CORRECTNESS[workload_id]) <= set(checks):
+                found.add("workload_correctness_weakened")
     return ids
 
 
@@ -619,11 +742,16 @@ def evaluate(protocol, summary):
                 problem = "inconclusive_observer"
             if problem is None and base_value <= 0:
                 problem = "inconclusive_missing"
+            ratio = None
             if problem is None:
-                record["ratio"] = cand_value / base_value
+                ratio = cand_value / base_value
+                # A tiny positive baseline can overflow the ratio to infinity: that is a
+                # failure, but only a finite ratio is printed, so the report stays strict JSON.
+                if math.isfinite(ratio):
+                    record["ratio"] = ratio
                 if abs(cand_value - base_value) < factor * cost:
                     problem = "inconclusive_observer"
-            record["verdict"] = problem or ("pass" if record["ratio"] <= budget["max_ratio"] else "fail")
+            record["verdict"] = problem or ("pass" if ratio <= budget["max_ratio"] else "fail")
             records.append(record)
         if applicable == 0:
             records.append({"workload": workload["id"], "metric": metric, "statistic": statistic,

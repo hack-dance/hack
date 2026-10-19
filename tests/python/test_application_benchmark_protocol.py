@@ -23,8 +23,14 @@ COMPARATIVE = ("steady_physical_footprint_bytes", "cpu_seconds_per_task", "warm_
                "warm_restart_seconds")
 ABSOLUTE = ("info_latency_ms", "warm_admission_ms", "cached_status_1000_objects_ms",
             "idle_control_plane_core_fraction", "watcher_ack_ms")
-# Every JSON value type, including the non-standard numbers Python's json module accepts.
-FUZZ_VALUES = (None, True, 0, -1, 1.5, float("nan"), float("inf"), "x", [], ["x"], [["x"]], {}, {"x": []})
+# Every JSON value type, including the non-standard numbers Python's json module accepts
+# and integers too large for a float, which Python's json module also parses.
+HUGE = 10 ** 400
+FUZZ_VALUES = (None, True, 0, -1, 1.5, float("nan"), float("inf"), float("-inf"), HUGE, -HUGE, 2 ** 53,
+               "x", [], ["x"], [["x"]], {}, {"x": []})
+# Another well-formed 40-hex commit and 64-hex digest: only the identity pin refuses them.
+OTHER_COMMIT = "0123456789abcdef0123456789abcdef01234567"
+OTHER_DIGEST = "0123456789abcdef" * 4
 
 
 def mutated(change, doc=None):
@@ -161,11 +167,32 @@ class FrozenProtocolTest(unittest.TestCase):
         for item in PROTOCOL["workloads"]:
             self.assertEqual(sorted(item["lanes"]), sorted(("candidate",) + BASELINES))
 
+    def test_frozen_file_matches_the_pinned_identities(self):
+        for lane_id, frozen in protocol_check.FROZEN_LANES.items():
+            item = lane(PROTOCOL, lane_id)
+            for field, value in frozen.items():
+                self.assertEqual(item[field], value, (lane_id, field))
+        self.assertEqual(lane(PROTOCOL, "candidate")["capacity"], protocol_check.FROZEN_CANDIDATE_CAPACITY)
+        self.assertEqual(PROTOCOL["host"], protocol_check.FROZEN_HOST)
+        for workload_id, pin in protocol_check.FROZEN_WORKLOAD_PINS.items():
+            self.assertEqual(workload(PROTOCOL, workload_id)["pin"], pin)
+            self.assertEqual(workload(PROTOCOL, workload_id)["correctness"],
+                             list(protocol_check.FROZEN_CORRECTNESS[workload_id]))
+
     def test_documents_carry_every_frozen_artifact_and_budget(self):
-        for item in PROTOCOL["lanes"]:
+        # Driven by the validator's pins, not the JSON, so a removed field is still required.
+        for lane_id, frozen in protocol_check.FROZEN_LANES.items():
+            if frozen["kind"] != "hack":
+                continue
             for field in ("commit", "asset", "asset_sha256", "tag"):
-                if field in item:
-                    self.assertIn(item[field], PROTOCOL_DOC, (item["id"], field))
+                self.assertIn(f"`{frozen[field]}`", PROTOCOL_DOC, (lane_id, field))
+        capacity = protocol_check.FROZEN_CANDIDATE_CAPACITY
+        self.assertIn(f"native `{capacity['profile']}` profile: {capacity['vcpus']} vCPUs, "
+                      f"{capacity['memory_mib']} MiB guest memory, {capacity['storage_gib']} GiB storage, "
+                      f"{capacity['overlay_gib']} GiB overlay", PROTOCOL_DOC)
+        # The candidate's own source labels this profile non-qualifying; the page must say why it is used.
+        for phrase in ("experimental-development-not-benchmark-qualified", "graph_profile", "`research`"):
+            self.assertIn(phrase, PROTOCOL_DOC)
         host = PROTOCOL["host"]
         for value in (host["cpu"], host["os"], host["docker_cli"], host["compose"],
                       host["orbstack"]["version"], host["orbstack"]["build"]):
@@ -187,6 +214,12 @@ class FrozenProtocolTest(unittest.TestCase):
                       f"{limit['witness_target_seconds']} s", "HACK-1169"):
             self.assertIn(value, PERFORMANCE_DOC)
         self.assertIn("application-benchmark-protocol.md", PERFORMANCE_DOC)
+
+
+def _recast_as_compose(item):
+    for field in ("version", "commit", "asset_sha256", "tag", "asset", "capacity"):
+        item.pop(field, None)
+    item.update(kind="compose", engine="orbstack", compose_version="5.1.2")
 
 
 def _set_scope(metric, scope):
@@ -254,6 +287,32 @@ class NegativeProtocolControls(unittest.TestCase):
         "lane_id_duplicate": lambda d: d["lanes"].append(copy.deepcopy(d["lanes"][0])),
         "compose_lane_host_mismatch": lambda d: lane(d, "compose").update(compose_version="2.0.0"),
         "compose_lane_host_mismatch:engine": lambda d: lane(d, "compose").update(engine="docker-desktop"),
+        # Well-formed but different identities: only the revision-1 pins refuse these.
+        "artifact_identity_mismatch:candidate-commit": lambda d: lane(d, "candidate").update(commit=OTHER_COMMIT),
+        "artifact_identity_mismatch:baseline-commit": lambda d: lane(d, "hack-4.2.0").update(commit=OTHER_COMMIT),
+        "artifact_identity_mismatch:digest": lambda d: lane(d, "hack-4.1.1").update(asset_sha256=OTHER_DIGEST),
+        "artifact_identity_mismatch:version": lambda d: lane(d, "candidate").update(
+            version="5.0.0-next.6", tag="v5.0.0-next.6"),
+        "artifact_identity_mismatch:asset": lambda d: lane(d, "hack-4.2.1").update(
+            asset="hack-4.2.1-darwin-x64.tar.gz"),
+        "artifact_identity_mismatch:asset-removed": lambda d: lane(d, "candidate").pop("asset"),
+        # A hack lane recast as a Compose lane on the frozen engine, with its artifact removed.
+        "lane_runtime_mismatch:candidate-kind": lambda d: _recast_as_compose(lane(d, "candidate")),
+        "lane_runtime_mismatch:baseline-kind": lambda d: _recast_as_compose(lane(d, "hack-4.1.1")),
+        "lane_runtime_mismatch:backend": lambda d: lane(d, "candidate").update(backend="compose"),
+        "lane_runtime_mismatch:backend-removed": lambda d: lane(d, "candidate").pop("backend"),
+        "lane_runtime_mismatch:compose-backend": lambda d: lane(d, "compose").update(backend="hack"),
+        "lane_runtime_mismatch:baseline-capacity": lambda d: lane(d, "compose").update(capacity={"cpus": 4}),
+        "candidate_capacity_mismatch": lambda d: lane(d, "candidate")["capacity"].update(memory_mib=12288),
+        "candidate_capacity_mismatch:profile": lambda d: lane(d, "candidate")["capacity"].update(
+            profile="research"),
+        "candidate_capacity_mismatch:removed": lambda d: lane(d, "candidate").pop("capacity"),
+        "candidate_capacity_mismatch:float": lambda d: lane(d, "candidate")["capacity"].update(vcpus=4.0),
+        "host_mismatch:os": lambda d: d["host"].update(os="macOS 26.5.1"),
+        "host_mismatch:cpu": lambda d: d["host"].update(cpu="Apple M5 Max", logical_cpus=18),
+        "host_mismatch:orbstack": lambda d: d["host"]["orbstack"].update(memory_mib=32768),
+        "workload_pin_mismatch": lambda d: workload(d, "small-fixture").update(pin="image oven/bun:latest"),
+        "workload_correctness_weakened": lambda d: workload(d, "event-agent")["correctness"].pop(),
     }
 
     def test_each_weakening_is_refused_with_its_closed_code(self):
@@ -265,6 +324,7 @@ class NegativeProtocolControls(unittest.TestCase):
 
     def test_stricter_revisions_stay_valid(self):
         stricter = mutated(lambda d: (
+            workload(d, "small-fixture")["correctness"].append("cleanup leaves no owned container"),
             budget(d, "absolute", "watcher_ack_ms").pop("workload"),
             budget(d, "absolute", "info_latency_ms").update(max=90),
             budget(d, "comparative", "cpu_seconds_per_task").update(max_ratio=0.6),
@@ -323,7 +383,8 @@ class NegativeProtocolControls(unittest.TestCase):
             self.assertEqual(code, 2)
             self.assertNotIn(MARKER, out.getvalue())
             self.assertEqual(json.loads(out.getvalue())["diagnostics"],
-                             ["artifact_commit_malformed", "artifact_digest_malformed"])
+                             ["artifact_commit_malformed", "artifact_digest_malformed",
+                              "artifact_identity_mismatch"])
             path.write_text("{not json " + MARKER)
             out = io.StringIO()
             with contextlib.redirect_stdout(out):
@@ -538,6 +599,46 @@ class BudgetEvaluationTest(unittest.TestCase):
             change(summary)
             with self.subTest(code=code, summary=summary.get("workload")):
                 self.assertEqual(self.refused(summary), [code])
+
+    def test_oversized_integers_are_refused_not_a_traceback(self):
+        """Python parses 10**400 exactly; converting it to a float would raise OverflowError."""
+        cases = {
+            "candidate": lambda s: s["lanes"]["candidate"].update(info_latency_ms=entry([HUGE] * 60)),
+            "baseline": lambda s: s["lanes"]["compose"].update(cpu_seconds_per_task=entry([HUGE] * 10)),
+            "beyond-interoperable": lambda s: s["lanes"]["compose"].update(
+                cpu_seconds_per_task=entry([2 ** 53] * 10)),
+        }
+        for name, change in cases.items():
+            with self.subTest(case=name):
+                summary = small_summary()
+                change(summary)
+                self.assertEqual(evaluate_file(summary),
+                                 (2, {"status": "invalid", "diagnostics": ["summary_entry_malformed"]}))
+        summary = small_summary()
+        summary["observer_cost"]["cpu_seconds_per_task"] = HUGE
+        self.assertEqual(evaluate_file(summary),
+                         (2, {"status": "invalid", "diagnostics": ["summary_observer_malformed"]}))
+        protocol = mutated(lambda d: budget(d, "comparative", "cpu_seconds_per_task").update(max_ratio=HUGE))
+        self.assertIn("comparative_budget_weakened", protocol_check.validate_protocol(protocol))
+
+    def test_an_overflowing_ratio_fails_and_the_report_stays_strict_json(self):
+        summary = small_summary()
+        summary["lanes"]["compose"]["warm_startup_seconds"] = entry([5e-324] * 10)
+        records = self.judge(summary)
+        [record] = [item for item in records
+                    if item["metric"] == "warm_startup_seconds" and item.get("baseline") == "compose"]
+        self.assertEqual(record["verdict"], "fail")
+        self.assertNotIn("ratio", record)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "summary.json"
+            path.write_text(json.dumps(summary))
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                self.assertEqual(protocol_check.main(["--evaluate", str(path)]), 1)
+
+        def refuse_constant(name):
+            raise AssertionError(f"non-standard JSON constant {name}")
+        json.loads(out.getvalue(), parse_constant=refuse_constant)
 
     def test_list_valued_workload_exits_invalid_not_with_a_traceback(self):
         self.assertEqual(evaluate_file({**small_summary(), "workload": ["x"]}),

@@ -71,6 +71,25 @@ of the whole runtime, not the configured limit. A lower configured limit is not 
 footprint result. Any capacity-matched control is a separate experiment with its own
 revision.
 
+**Why `development`.** The candidate's own source describes the `development` profile
+as an experimental allocation that cannot supply benchmark qualification, and its
+lifecycle records carry the label `experimental-development-not-benchmark-qualified`.
+That label belongs to the earlier WU02 provider comparison, whose frozen envelope is the
+`research` profile (2 vCPUs, 2048 MiB, 4 GiB storage). It does not apply to this
+protocol, for two reasons:
+
+- Graph allocation refuses every profile except `development` with `graph_profile`,
+  and both workloads here are service graphs. The `research` profile cannot run either
+  workload.
+- A native `hack up` or `restart` always requests `development`. It is the capacity a
+  user gets by default, which is what this table freezes.
+
+So revision 1 freezes `development` on purpose. A candidate record that carries that
+label is expected and recorded, not a reason to refuse the cohort. This protocol does
+not produce WU02 research-envelope results, and WU02 results are not revision-1
+results. Changing the candidate's label or comment is separate runtime work; it cannot
+change the frozen `28de2f89` artifact.
+
 ## Workloads
 
 Two workloads run in every lane, and each workload is compared against every required
@@ -259,6 +278,15 @@ changed p95 method or confidence, a workload that drops a required baseline, a c
 workload shape, a missing phase, a missing scale point and a Compose lane that differs
 from the frozen host engine.
 
+The identities on this page are exact, not floors. The checker pins each lane's tag,
+version, commit, asset name and digest, each lane's kind and backend, the candidate's
+capacity, the host and engine values, and each workload's pin. A different or missing
+value is refused (`artifact_identity_mismatch`, `lane_runtime_mismatch`,
+`candidate_capacity_mismatch`, `host_mismatch`, `workload_pin_mismatch`), and so is a
+workload that drops a frozen correctness check (`workload_correctness_weakened`). A
+revision may add correctness checks. Every number in the protocol or a summary must be
+within ±(2⁵³ − 1), the interoperable JSON range; a larger value is refused as malformed.
+
 These are acceptance thresholds, not measured achievements.
 
 ## Judging a summary
@@ -325,8 +353,10 @@ python3 -m unittest discover -s tests/python -p test_application_benchmark_proto
 
 The unit tests check the frozen file, the rotation balance, the p95 sample floor and
 that this page carries every frozen artifact, budget, phase and verdict. They also
-prove that each weakening listed under [Budgets](#budgets), a bad digest, an unbalanced
-order, too few samples and a missing observer policy is refused; that missing,
-flagged, `not_applicable`-only or cold-cache data is never accepted; and that any
-malformed protocol or summary value yields a closed code rather than a traceback. They
+prove that each weakening listed under [Budgets](#budgets), a bad digest, a changed
+artifact, host, capacity or workload pin, an unbalanced order, too few samples and a
+missing observer policy is refused; that missing, flagged, `not_applicable`-only or
+cold-cache data is never accepted; and that any malformed protocol or summary value,
+including an integer too large for a float, yields a closed code rather than a
+traceback. They
 run offline, locally and in CI.

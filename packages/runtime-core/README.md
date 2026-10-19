@@ -1466,17 +1466,33 @@ unproved capacity retains fresh-allocation requirements or refuses.
 
 Restarting an exactly clean stopped Development pool also requires only the 16 GiB
 host reserve (`verified-stopped-owned-pool-host-reserve`), because it reuses its
-retained disks instead of allocating new ones. Clean means phase `stopped` from a
-quiesced `down` of the last boot (its quiescence receipt matches the guest boot and
-engine identity), a creation receipt, rootfs pin, both disk identities and declared
-sizes, the recorded executable and user, a dead recorded provider, a free VM lock, no
-open disk handle or owned listener, and no pending owner update. Each check maps to a
-closed refusal code: `retained_reserve_foreign_owner`, `retained_reserve_active_owner`,
-`retained_reserve_dirty_owner` or `retained_reserve_stale_owner`. A refused owner keeps
-the 58 GiB fresh-allocation budget; the reserve is never relaxed. The selected owner
-is rechecked around every sample, under the startup lease, around the pre-boot sample
-and immediately before `machine start`; a stopped selection never enters
-`machine create`. Pressure, thermal, swapout and memory-headroom checks are unchanged.
+retained disks instead of allocating new ones. Clean means phase `stopped` plus the
+clean-stop marker that only a completed `down` records, in the same receipt write as
+that phase, after the guest acknowledged flush and shutdown of a quiesced engine and the
+provider's absence was proven. The marker names the stopped boot's guest boot and engine
+identity and must match both the receipt and the quiescence receipt. Every other phase
+write and every new boot clear it, so an interrupted, uncertain (`stop_uncertain`),
+recovered-unclean, before-engine or failed-boot stop never qualifies, even after a start
+refused before boot rewrites the phase to `stopped`; a start refused before boot after a
+clean `down` keeps it clean. Pools stopped before this marker existed qualify after their
+next clean `down`. Clean also requires a creation receipt, rootfs pin, both disk
+identities and declared sizes, the recorded executable and user, a dead recorded
+provider and no pending owner update; these receipt checks are read-only, take no
+provider lock and run around every sample, including `runtime probe`. Under the startup
+lease, before any restart effect and again immediately before `machine start`, the
+release checks also require a free VM lock, no open disk handle (`lsof`), no owned
+listener and an unchanged audited provider configuration. The short-HOME alias is
+checked on every owner load, and the rootfs content against its pin before boot.
+
+Each refusal maps to a closed code: `retained_reserve_foreign_owner`,
+`retained_reserve_active_owner`, `retained_reserve_dirty_owner` or
+`retained_reserve_stale_owner`. A created stopped pool that fails the receipt checks
+keeps the 58 GiB fresh-allocation budget, and the admission report carries
+`retained_reserve_refusal` with that code; the reserve is never relaxed. A selected pool
+that fails a later check refuses the start with the code. `machine create` requires an
+authority only a start without a reserve selection obtains, and `machine start` requires
+one issued only by the pre-boot admission on the qualifying basis followed by the final
+leased recheck. Pressure, thermal, swapout and memory-headroom checks are unchanged.
 
 ### Native persistent-data identity codec
 

@@ -366,12 +366,18 @@ v4 state is enabled. Runtime startup is a further explicit operation subject to
 host resource admission. Read `--help` for the candidate command surface.
 
 The development profile reserves the declared 32 GiB storage disk and 10 GiB
-overlay ceiling plus 16 GiB of host disk space before startup. Its unchanged memory
-budget is a 10 GiB free-plus-file-cache estimate: 6 GiB guest, 2 GiB provisional
-provider overhead and 2 GiB host reserve. Normal and warning macOS pressure can
-qualify only with that headroom, normal thermal/performance state and stable
-swapouts. Development samples before the startup lease and again under the lease
-before allocation, keeping the same swapout baseline across both windows.
+overlay ceiling plus 16 GiB of host disk space before a fresh startup. Starting
+again on a verified running pool, or restarting an exactly clean stopped pool whose
+last `down` completed, reuses existing disks and reserves only the 16 GiB host
+reserve; `runtime probe --profile development --json` reports the basis in
+`disk_budget_basis`, and `retained_reserve_refusal` names why a stopped pool's
+disks were charged again. Any other stopped pool keeps the fresh budget. The
+unchanged memory budget is a 10 GiB free-plus-file-cache estimate: 6 GiB guest,
+2 GiB provisional provider overhead and 2 GiB host reserve. Normal and warning
+macOS pressure can qualify only with that headroom, normal thermal/performance
+state and stable swapouts. Development samples before the startup lease and again
+under the lease before allocation, keeping the same swapout baseline across both
+windows.
 Critical, unknown or incomplete observations refuse; there is no bypass option.
 It reports host load without refusing solely because unrelated jobs raise the
 one-minute average. The research profile keeps its normal-only pressure policy,

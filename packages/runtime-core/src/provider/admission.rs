@@ -101,6 +101,10 @@ pub struct Admission {
     pub swapouts: Option<u64>,
     pub admitted: bool,
     pub reasons: Vec<String>,
+    /// For a fresh-budget sample beside a created stopped Development pool: the closed code
+    /// explaining why its retained disks did not qualify for the host reserve.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retained_reserve_refusal: Option<&'static str>,
 }
 
 pub fn parse_free_memory(text: &str) -> Result<u64, CandidateError> {
@@ -322,6 +326,7 @@ fn probe_with_disk_budget(
         swapouts: None,
         admitted: false,
         reasons: Vec::new(),
+        retained_reserve_refusal: None,
     };
     if !supported {
         result

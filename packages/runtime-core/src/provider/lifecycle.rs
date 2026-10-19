@@ -113,7 +113,14 @@ fn invoke(candidate: &Candidate, owner: &Owner, args: &[&str]) -> Result<String,
         Duration::from_secs(60),
     )
 }
+/// Record a lifecycle phase. Every phase other than `stopped` clears the clean-stop marker
+/// in the same write; only `down` records the marker (see [`finish_quiesced_stop`]), so a
+/// `stopped` rewrite after a refused start keeps a clean stop clean but never makes an
+/// unclean one clean.
 fn phase(candidate: &Candidate, owner: &mut Owner, value: &str) -> Result<(), CandidateError> {
+    if value != "stopped" {
+        owner.clean_stop = None;
+    }
     owner.phase = value.into();
     owner.save(candidate)
 }
@@ -839,8 +846,8 @@ pub fn probe_with_profile(
     candidate: &Candidate,
     profile: super::Profile,
 ) -> Result<admission::Admission, CandidateError> {
-    let selected = admission_pool::select(candidate, profile)?;
-    admission_pool::probe(candidate, profile, selected.as_ref())
+    let choice = admission_pool::select(candidate, profile)?;
+    admission_pool::probe(candidate, profile, &choice)
 }
 
 pub fn up_with_bridge(
@@ -1128,7 +1135,7 @@ fn start_pool(
     // independently verified ownership of existing disks (a live pool, or an exactly
     // clean stopped pool this start reuses) avoids charging a second VM's disks.
     let admission_owner = admission_pool::select(candidate, profile)?;
-    let admission = admission_pool::probe(candidate, profile, admission_owner.as_ref())?;
+    let admission = admission_pool::probe(candidate, profile, &admission_owner)?;
     if !admission.admitted {
         return Err(CandidateError::new(
             "admission_rejected",
@@ -1139,13 +1146,13 @@ fn start_pool(
         let baseline_swapouts = admission.swapouts;
         let mut samples = vec![admission];
         samples.extend(admission::sample_after(profile, baseline_swapouts, || {
-            admission_pool::probe(candidate, profile, admission_owner.as_ref())
+            admission_pool::probe(candidate, profile, &admission_owner)
         })?);
         samples
     } else {
         // Retain the frozen Research window and baseline semantics.
         admission::sample_with(profile, || {
-            admission_pool::probe(candidate, profile, admission_owner.as_ref())
+            admission_pool::probe(candidate, profile, &admission_owner)
         })?
     };
     artifact::verify(candidate)?;
@@ -1156,10 +1163,12 @@ fn start_pool(
         STARTUP_LEASE_WAIT,
         profile,
         &samples,
-        || admission_pool::probe(candidate, profile, admission_owner.as_ref()),
+        || admission_pool::probe(candidate, profile, &admission_owner),
     )?;
-    if let Some(selected) = &admission_owner {
-        selected.reverify(candidate)?;
+    // Under the lease: the selection is rechecked, including a stopped pool's provider
+    // release (VM lock, disk handles, listeners, provider configuration).
+    if let Some(selected) = admission_owner.selected() {
+        selected.reverify_leased(candidate, &lock)?;
     }
     samples.extend(fresh_samples);
     #[cfg(target_os = "macos")]
@@ -1221,7 +1230,7 @@ fn start_pool(
     super::dependency_socket::verify(candidate, &owner)?;
     state::write(&root(candidate).join("admission.json"), &samples)?;
     if owner.phase == "running" {
-        if let Some(selected) = &admission_owner {
+        if let Some(selected) = admission_owner.selected() {
             selected.reverify(candidate)?;
         }
         #[cfg(target_os = "macos")]
@@ -1232,17 +1241,8 @@ fn start_pool(
         audit_boot(candidate, &owner)?;
         return status(candidate);
     }
-    if let Some(selected) = &admission_owner {
-        // Only a clean stopped selection continues, as a restart of its verified retained
-        // disks. A reserve-qualified start never reaches `machine create`.
-        if !selected.is_stopped() || !owner.created {
-            return Err(CandidateError::new(
-                "admission_owner_changed",
-                "Reserve-qualified ownership no longer names its selected pool; no create or boot was admitted.",
-            ));
-        }
-        selected.reverify(candidate)?;
-    }
+    // Only a clean stopped selection continues, as a restart of its verified retained disks.
+    admission_pool::restart_only(candidate, &admission_owner, &owner, &lock)?;
     if ![
         "initializing",
         "stopped",
@@ -1268,6 +1268,8 @@ fn start_pool(
     }
     prepare_rootfs(candidate, &mut owner)?;
     if !owner.created {
+        // A reserve-qualified start never reaches `machine create`.
+        let fresh = admission_pool::fresh_create(&admission_owner)?;
         // SmolVM clones the expanded templates in `home/.smolvm` into the new disks at the
         // machine's first start. Choose them (stock, or an activated prepared base) and verify
         // them before the phase records a create attempt; `verify_templates` checks again
@@ -1321,33 +1323,26 @@ fn start_pool(
                 ]);
             }
         }
-        invoke(
-            candidate,
-            &owner,
-            &arguments.iter().map(String::as_str).collect::<Vec<_>>(),
-        )?;
+        create_machine(candidate, &owner, &arguments, fresh)?;
         super::config_audit::pin_created_network(candidate, &mut owner)?;
         owner.created = true;
         owner.save(candidate)?;
     }
-    // A fresh admission immediately before boot closes installation/lock delays. Without a
-    // selection this is the unchanged fresh-allocation probe; a clean stopped selection is
-    // rechecked around its reserve sample.
-    let admission = admission_pool::probe(candidate, profile, admission_owner.as_ref())?;
-    if !admission.admitted {
-        phase(candidate, &mut owner, "stopped")?;
-        return Err(CandidateError::new(
-            "admission_rejected",
-            admission.reasons.join(" "),
-        ));
-    }
-    if admission.swapouts != samples.last().and_then(|sample| sample.swapouts) {
-        phase(candidate, &mut owner, "stopped")?;
-        return Err(CandidateError::new(
-            "admission_rejected",
-            "Swapouts changed after qualification; refusing boot.",
-        ));
-    }
+    // A fresh admission immediately before boot, on the qualification's basis, closes
+    // installation/lock delays. `machine start` needs the permit it leads to.
+    let boot = match admission_pool::admit_boot(
+        candidate,
+        profile,
+        &admission_owner,
+        samples.last().and_then(|sample| sample.swapouts),
+    )? {
+        admission_pool::BootGate::Admitted(boot) => boot,
+        admission_pool::BootGate::Refused(error) => {
+            // Nothing booted: a clean stop stays clean, an unclean one stays unclean.
+            phase(candidate, &mut owner, "stopped")?;
+            return Err(error);
+        }
+    };
     if let Err(error) = super::config_audit::verify(candidate, &owner) {
         phase(candidate, &mut owner, "stopped-before-engine")?;
         return Err(error);
@@ -1365,10 +1360,8 @@ fn start_pool(
     if let Some(guard) = &retained_guard {
         guard.verify(candidate)?;
     }
-    if let Some(selected) = &admission_owner {
-        // The last check before `machine start` releases the VM lock to the provider.
-        selected.reverify(candidate)?;
-    }
+    // The last check before `machine start` releases the VM lock to the provider.
+    let permit = boot.release(candidate, &lock)?;
     let previous_boot = owner.begin_boot();
     owner.reclamation = Some(boot_reclamation_policy());
     // The previous provider was proven dead above. Until this start records its own provider,
@@ -1376,11 +1369,7 @@ fn start_pool(
     // old identity.
     owner.process = None;
     phase(candidate, &mut owner, "booting")?;
-    invoke(
-        candidate,
-        &owner,
-        &["machine", "start", "--name", &owner.machine],
-    )?;
+    start_machine(candidate, &owner, permit)?;
     let observed = recorded_process(candidate, &owner)?;
     identity::verify(
         &observed,
@@ -1409,6 +1398,35 @@ fn start_pool(
         cleanup?;
     }
     result
+}
+
+/// `machine create` allocates new disks; only a start without a reserve selection may.
+fn create_machine(
+    candidate: &Candidate,
+    owner: &Owner,
+    arguments: &[String],
+    _fresh: admission_pool::FreshCreate,
+) -> Result<(), CandidateError> {
+    invoke(
+        candidate,
+        owner,
+        &arguments.iter().map(String::as_str).collect::<Vec<_>>(),
+    )
+    .map(drop)
+}
+
+/// `machine start` hands the VM lock to the provider; only a released boot admission may.
+fn start_machine(
+    candidate: &Candidate,
+    owner: &Owner,
+    _permit: admission_pool::StartPermit,
+) -> Result<(), CandidateError> {
+    invoke(
+        candidate,
+        owner,
+        &["machine", "start", "--name", &owner.machine],
+    )
+    .map(drop)
 }
 
 fn stop_failed_boot(
@@ -1909,18 +1927,23 @@ sync"#,
             "Provider remains alive after TERM; no force-kill or false stopped receipt.",
         ));
     }
-    finish_stopped(
-        candidate,
-        &mut owner,
-        if before_engine {
-            "stopped-before-engine"
-        } else if failed_engine {
-            "stopped-after-engine-failure"
-        } else {
-            "stopped"
-        },
-    )?;
+    if before_engine {
+        finish_stopped(candidate, &mut owner, "stopped-before-engine")?;
+    } else if failed_engine {
+        finish_stopped(candidate, &mut owner, "stopped-after-engine-failure")?;
+    } else {
+        finish_quiesced_stop(candidate, &mut owner)?;
+    }
     status(candidate)
+}
+
+/// `down`'s completion after the guest acknowledged flush and shutdown of a quiesced engine
+/// and the provider exited: the clean-stop marker names this boot and is written with the
+/// `stopped` phase once the provider's release is proven. If any proof fails, nothing is
+/// written and the receipt keeps its in-progress phase.
+fn finish_quiesced_stop(candidate: &Candidate, owner: &mut Owner) -> Result<(), CandidateError> {
+    owner.clean_stop = state::CleanStop::of(owner);
+    finish_stopped(candidate, owner, "stopped")
 }
 
 fn finish_stopped(

@@ -2,16 +2,28 @@
 //! declared disks already exist: a live running pool, or an exactly clean stopped
 //! Development pool that a restart reuses without `machine create`.
 //!
-//! Every stopped-pool refusal keeps the unchanged fresh-allocation budget, so an
-//! ineligible owner is never admitted on the reserve and the later restart checks still
-//! decide. The startup lease, not this module, proves exclusive provider ownership; the
-//! VM-lock, open-handle and listener probes here only establish that the provider the
-//! receipt names released its machine.
+//! Every stopped-pool refusal at selection keeps the unchanged fresh-allocation budget and
+//! reports its closed code, so an ineligible owner is never admitted on the reserve. A
+//! stopped selection is proven in two layers:
+//!
+//! * Receipt checks ([`stopped`]) are read-only and run around every admission sample,
+//!   including the read-only `runtime probe`: the `down`-completed clean-stop marker of the
+//!   last boot, its quiescence receipt, creation, rootfs pin, disk identities and sizes,
+//!   the recorded executable and user, and a dead recorded provider.
+//! * Release checks ([`released`]) take the provider's VM lock, run `lsof` on the owned
+//!   disks, probe the owned sockets and audit the provider configuration. They need the
+//!   startup lease, so they never contend with another lifecycle operation that may be
+//!   handing the VM lock to a provider; they run once the lease is held, before any restart
+//!   effect, and immediately before `machine start`.
+//!
+//! The boot gate is typed: `machine create` needs a [`FreshCreate`], which no selection can
+//! obtain, and `machine start` needs a [`StartPermit`], which only the pre-boot admission
+//! ([`admit_boot`]) followed by the final leased recheck ([`BootAdmission::release`]) issues.
 use super::{
     Owner, admission, binary, io, lock_absent_disks, root, sockets_absent, verify_disk_allocation,
     verify_disks, verify_live,
 };
-use crate::provider::identity;
+use crate::provider::{Profile, config_audit, identity, state};
 use crate::{Candidate, CandidateError};
 use serde_json::Value;
 use std::fs;
@@ -27,15 +39,40 @@ pub(super) struct Selection {
     basis: Basis,
 }
 
+/// The admission basis chosen before startup: a verified selection, or the fresh budget
+/// with the closed reason a retained stopped pool did not qualify for the reserve.
+pub(super) struct Choice {
+    selection: Option<Selection>,
+    refusal: Option<StoppedRefusal>,
+}
+
+impl Choice {
+    pub(super) fn selected(&self) -> Option<&Selection> {
+        self.selection.as_ref()
+    }
+
+    #[cfg(test)]
+    pub(super) fn into_selection(self) -> Option<Selection> {
+        self.selection
+    }
+
+    #[cfg(test)]
+    pub(super) fn refusal(&self) -> Option<StoppedRefusal> {
+        self.refusal
+    }
+}
+
 /// Closed reasons a stopped Development owner cannot use the host-reserve budget.
 /// Codes are fixed labels without paths, identities or provider output.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum StoppedRefusal {
-    /// The receipt names another machine, executable, user or unsafe VM lock.
+    /// The receipt names another machine, executable, user, provider configuration or
+    /// unsafe VM lock.
     Foreign,
     /// A provider process, VM lock holder, disk handle or listener may remain.
     Active,
-    /// The last stop was interrupted, unclean, unquiesced, or an owner update is pending.
+    /// The last stop was not a completed quiesced `down` of the last boot, or an owner
+    /// update is pending.
     Dirty,
     /// Creation, disk identities, sizes, rootfs or boot identity are missing or drifted.
     Stale,
@@ -63,34 +100,43 @@ impl StoppedRefusal {
     /// could not complete (for example a slow `lsof`), leaves the provider possibly active.
     fn from_check(error: &CandidateError) -> Self {
         match error.code {
-            "foreign_state" => Self::Foreign,
+            "foreign_state" | "unaudited_provider_config" => Self::Foreign,
             "provider_state" | "disk_identity_mismatch" | "disk_allocation_mismatch" => Self::Stale,
             _ => Self::Active,
         }
     }
 }
 
-pub(super) fn select(
-    candidate: &Candidate,
-    profile: crate::provider::Profile,
-) -> Result<Option<Selection>, CandidateError> {
-    if profile != crate::provider::Profile::Development {
-        return Ok(None);
+pub(super) fn select(candidate: &Candidate, profile: Profile) -> Result<Choice, CandidateError> {
+    let fresh = |refusal| Choice {
+        selection: None,
+        refusal,
+    };
+    if profile != Profile::Development {
+        return Ok(fresh(None));
     }
     match fs::symlink_metadata(root(candidate).join("owner.json")) {
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(fresh(None)),
         Err(e) => return Err(io(e)),
         Ok(_) => {}
     }
     let owner = Owner::load(candidate)?;
     if owner.profile != profile {
-        return Ok(None);
+        return Ok(fresh(None));
     }
     if owner.phase != "running" {
-        return Ok(stopped(candidate, &owner).ok().map(|()| Selection {
-            owner,
-            basis: Basis::Stopped,
-        }));
+        return Ok(match stopped(candidate, &owner) {
+            Ok(()) => Choice {
+                selection: Some(Selection {
+                    owner,
+                    basis: Basis::Stopped,
+                }),
+                refusal: None,
+            },
+            // A never-created owner has no retained disks, so the fresh budget needs no
+            // explanation; a created one reports why its disks were charged again.
+            Err(refusal) => fresh(owner.created.then_some(refusal)),
+        });
     }
     if !owner.created || owner.storage.is_none() || owner.overlay.is_none() {
         return Err(changed());
@@ -101,19 +147,26 @@ pub(super) fn select(
         owner.overlay.as_ref().unwrap(),
         profile,
     )?;
-    Ok(Some(Selection {
-        owner,
-        basis: Basis::Running,
-    }))
+    Ok(Choice {
+        selection: Some(Selection {
+            owner,
+            basis: Basis::Running,
+        }),
+        refusal: None,
+    })
 }
 
-/// Whether `owner` is an exactly clean stopped Development pool with its retained disks.
+/// Receipt checks: whether `owner` records an exactly clean stopped Development pool with
+/// its retained disks.
 ///
-/// Clean means the receipt reached `stopped` through a quiesced stop of its last boot:
-/// interrupted, unclean, before-engine or failed-boot stops never qualify, even when a
-/// later refused start rewrote the phase. Read-only; it never repairs or adopts state.
+/// Clean means `down` completed a quiesced stop of the last boot and recorded its
+/// clean-stop marker with the `stopped` phase. Any other phase write and every new boot
+/// clear that marker, so an interrupted, uncertain, unclean, before-engine or failed-boot
+/// stop never qualifies, even when a later refused start rewrote the phase to `stopped`.
+/// Read-only and lock-free: it never repairs or adopts state, takes no provider lock and
+/// runs no host tool.
 pub(super) fn stopped(candidate: &Candidate, owner: &Owner) -> Result<(), StoppedRefusal> {
-    if owner.profile != crate::provider::Profile::Development {
+    if owner.profile != Profile::Development {
         return Err(StoppedRefusal::Foreign);
     }
     match fs::symlink_metadata(root(candidate).join("owner.pending")) {
@@ -136,8 +189,17 @@ pub(super) fn stopped(candidate: &Candidate, owner: &Owner) -> Result<(), Stoppe
     if !owner.created || owner.rootfs_digest.is_none() {
         return Err(StoppedRefusal::Stale);
     }
+    // Only `down` records this marker, after the guest acknowledged flush and shutdown and
+    // provider absence was proven, in the same receipt write as its `stopped` phase.
+    if !owner
+        .clean_stop
+        .as_ref()
+        .is_some_and(|clean| clean.names(boot, daemon, start))
+    {
+        return Err(StoppedRefusal::Dirty);
+    }
     // Only `down` writes this receipt, after the guest engine quiesced in this boot.
-    let quiesced = crate::provider::state::read::<Value>(&root(candidate).join("quiescence.json"))
+    let quiesced = state::read::<Value>(&root(candidate).join("quiescence.json"))
         .ok()
         .is_some_and(|receipt| {
             receipt["guest_boot_id"].as_str() == Some(boot)
@@ -159,10 +221,23 @@ pub(super) fn stopped(candidate: &Candidate, owner: &Owner) -> Result<(), Stoppe
     }
     verify_disks(candidate, owner).map_err(|error| StoppedRefusal::from_check(&error))?;
     verify_disk_allocation(storage, overlay, owner.profile)
-        .map_err(|error| StoppedRefusal::from_check(&error))?;
-    // The VM lock guard is released on return; the provider's own start reacquires it.
-    lock_absent_disks(candidate, owner).map_err(|error| StoppedRefusal::from_check(&error))?;
-    sockets_absent(owner).map_err(|error| StoppedRefusal::from_check(&error))
+        .map_err(|error| StoppedRefusal::from_check(&error))
+}
+
+/// Release checks, under the startup lease: the provider the receipt names released its
+/// machine (free VM lock, no open disk handle, no owned listener) and the provider's
+/// persisted configuration is still this pool's audited one. The VM lock is released on
+/// return; the provider's own `machine start` reacquires it.
+fn released(
+    candidate: &Candidate,
+    owner: &Owner,
+    lease: &state::Lock,
+) -> Result<(), StoppedRefusal> {
+    let check = |error: CandidateError| StoppedRefusal::from_check(&error);
+    lease.verify_path(&root(candidate)).map_err(check)?;
+    lock_absent_disks(candidate, owner).map_err(check)?;
+    sockets_absent(owner).map_err(check)?;
+    config_audit::verify(candidate, owner).map_err(check)
 }
 
 fn changed() -> CandidateError {
@@ -178,6 +253,7 @@ impl Selection {
     }
 
     /// The selected receipt is unchanged and its basis is still independently proven.
+    /// For a stopped selection these are the lock-free receipt checks.
     pub(super) fn reverify(&self, candidate: &Candidate) -> Result<(), CandidateError> {
         let current = Owner::load(candidate)?;
         if current != self.owner {
@@ -198,27 +274,179 @@ impl Selection {
             }
         }
     }
+
+    /// [`Self::reverify`] plus, for a stopped selection, the release checks that need the
+    /// startup lease.
+    pub(super) fn reverify_leased(
+        &self,
+        candidate: &Candidate,
+        lease: &state::Lock,
+    ) -> Result<(), CandidateError> {
+        self.reverify(candidate)?;
+        if self.basis == Basis::Stopped {
+            released(candidate, &self.owner, lease).map_err(StoppedRefusal::error)?;
+            // The receipt cannot have changed under the lease, but bind it after the
+            // release probes as well.
+            self.reverify(candidate)?;
+        }
+        Ok(())
+    }
 }
 
+/// Which disk allocation an admission sample treats as already paid.
+fn owned_pool(choice: &Choice) -> admission::OwnedPool {
+    match choice.selected().map(|selected| selected.basis) {
+        None => admission::OwnedPool::Fresh,
+        Some(Basis::Running) => admission::OwnedPool::Running,
+        Some(Basis::Stopped) => admission::OwnedPool::Stopped,
+    }
+}
+
+/// The host observation behind every lifecycle admission sample.
+fn observe_host(
+    candidate: &Candidate,
+    profile: Profile,
+    owned: admission::OwnedPool,
+) -> Result<admission::Admission, CandidateError> {
+    match owned {
+        admission::OwnedPool::Fresh => admission::probe_for(&candidate.checkout, profile),
+        owned => admission::probe_owned_development(&candidate.checkout, owned),
+    }
+}
+
+/// One admission sample on `choice`'s basis. A selection is rechecked around the sample;
+/// a fresh sample reports why a retained stopped pool did not qualify for the reserve.
 pub(super) fn probe(
     candidate: &Candidate,
-    profile: crate::provider::Profile,
-    selected: Option<&Selection>,
+    profile: Profile,
+    choice: &Choice,
 ) -> Result<admission::Admission, CandidateError> {
-    match selected {
-        None => admission::probe_for(&candidate.checkout, profile),
+    probe_with(candidate, choice, |owned| {
+        observe_host(candidate, profile, owned)
+    })
+}
+
+fn probe_with(
+    candidate: &Candidate,
+    choice: &Choice,
+    observe: impl FnOnce(admission::OwnedPool) -> Result<admission::Admission, CandidateError>,
+) -> Result<admission::Admission, CandidateError> {
+    let owned = owned_pool(choice);
+    match choice.selected() {
+        None => {
+            let mut observed = observe(owned)?;
+            observed.retained_reserve_refusal = choice.refusal.map(StoppedRefusal::code);
+            Ok(observed)
+        }
         Some(selected) => {
             selected.reverify(candidate)?;
-            let observed = admission::probe_owned_development(
-                &candidate.checkout,
-                match selected.basis {
-                    Basis::Running => admission::OwnedPool::Running,
-                    Basis::Stopped => admission::OwnedPool::Stopped,
-                },
-            )?;
+            let observed = observe(owned)?;
             selected.reverify(candidate)?;
             Ok(observed)
         }
+    }
+}
+
+/// Before a restart effect under the startup lease: a selection continues only as a
+/// restart of its clean stopped pool's verified retained disks.
+pub(super) fn restart_only(
+    candidate: &Candidate,
+    choice: &Choice,
+    owner: &Owner,
+    lease: &state::Lock,
+) -> Result<(), CandidateError> {
+    let Some(selected) = choice.selected() else {
+        return Ok(());
+    };
+    if !selected.is_stopped() || !owner.created || *owner != selected.owner {
+        return Err(CandidateError::new(
+            "admission_owner_changed",
+            "Reserve-qualified ownership no longer names its selected pool; no create or boot was admitted.",
+        ));
+    }
+    selected.reverify_leased(candidate, lease)
+}
+
+/// Authority to run `machine create`: only a start without a reserve selection allocates
+/// new disks.
+pub(super) struct FreshCreate(());
+
+pub(super) fn fresh_create(choice: &Choice) -> Result<FreshCreate, CandidateError> {
+    if choice.selected().is_some() {
+        return Err(CandidateError::new(
+            "admission_owner_changed",
+            "A reserve-qualified start never creates a machine; no create or boot was admitted.",
+        ));
+    }
+    Ok(FreshCreate(()))
+}
+
+/// The pre-boot admission passed on this start's basis.
+pub(super) struct BootAdmission<'a> {
+    selection: Option<&'a Selection>,
+}
+
+/// Authority to run `machine start`, issued only by [`BootAdmission::release`].
+pub(super) struct StartPermit(());
+
+/// The pre-boot admission's outcome. A refusal leaves the provider untouched; the caller
+/// records the stop before returning it.
+pub(super) enum BootGate<'a> {
+    Admitted(BootAdmission<'a>),
+    Refused(CandidateError),
+}
+
+/// A fresh admission immediately before boot, on the same basis as qualification, closes
+/// installation and lock delays: unchanged fresh budget without a selection; a selection's
+/// reserve basis rechecked around the sample. Swapouts must not have grown since the
+/// qualifying window's last sample.
+pub(super) fn admit_boot<'a>(
+    candidate: &Candidate,
+    profile: Profile,
+    choice: &'a Choice,
+    baseline_swapouts: Option<u64>,
+) -> Result<BootGate<'a>, CandidateError> {
+    admit_boot_with(candidate, choice, baseline_swapouts, |owned| {
+        observe_host(candidate, profile, owned)
+    })
+}
+
+fn admit_boot_with<'a>(
+    candidate: &Candidate,
+    choice: &'a Choice,
+    baseline_swapouts: Option<u64>,
+    observe: impl FnOnce(admission::OwnedPool) -> Result<admission::Admission, CandidateError>,
+) -> Result<BootGate<'a>, CandidateError> {
+    let admission = probe_with(candidate, choice, observe)?;
+    if !admission.admitted {
+        return Ok(BootGate::Refused(CandidateError::new(
+            "admission_rejected",
+            admission.reasons.join(" "),
+        )));
+    }
+    if admission.swapouts != baseline_swapouts {
+        return Ok(BootGate::Refused(CandidateError::new(
+            "admission_rejected",
+            "Swapouts changed after qualification; refusing boot.",
+        )));
+    }
+    Ok(BootGate::Admitted(BootAdmission {
+        selection: choice.selected(),
+    }))
+}
+
+impl BootAdmission<'_> {
+    /// The last check before `machine start` hands the VM lock to the provider: the
+    /// selection, if any, is rechecked under the startup lease after every pre-boot effect.
+    pub(super) fn release(
+        self,
+        candidate: &Candidate,
+        lease: &state::Lock,
+    ) -> Result<StartPermit, CandidateError> {
+        if let Some(selected) = self.selection {
+            selected.reverify_leased(candidate, lease)?;
+        }
+        Ok(StartPermit(()))
     }
 }
 

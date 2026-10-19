@@ -18,6 +18,10 @@ import {
   renderPluginRule,
   renderPluginSkill,
 } from "../scripts/generate-agent-plugins.ts";
+import {
+  FEEDBACK_ISSUE_TEMPLATE_PATH,
+  renderFeedbackIssueTemplateFile,
+} from "../src/agents/feedback-skill.ts";
 import { FOCUSED_SKILLS } from "../src/agents/focused-skills.ts";
 import { renderHackInitSkill } from "../src/agents/hack-init-skill.ts";
 import { renderHackInstallSkill } from "../src/agents/install-skill.ts";
@@ -404,6 +408,12 @@ test("bundled skills and rule match current canonical guidance", async () => {
   for (const [path, content] of references) {
     expect(await Bun.file(join(root, path)).text()).toBe(content);
   }
+  expect(
+    await Bun.file(join(root, "skills/hack-feedback/SKILL.md")).text()
+  ).toBe(renderPluginSkill("hack-feedback"));
+  expect(
+    await Bun.file(join(repoRoot, FEEDBACK_ISSUE_TEMPLATE_PATH)).text()
+  ).toBe(renderFeedbackIssueTemplateFile());
   expect(await Bun.file(join(root, "skills/hack-init/SKILL.md")).text()).toBe(
     renderHackInitSkill()
   );

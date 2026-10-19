@@ -4,8 +4,9 @@ description: >
   Use the hack CLI for local runtime orchestration (compose, DNS/TLS, routed URLs, persistent
   project workspaces) and agent setup. Trigger when asked to run, start or stop services; tail
   service logs; open a routed app URL; manage lifecycle or workspace workflows; or update agent
-  integrations. Use hack-branches for branch instances, hack-env for env values and hack-diagnose
-  for a failing project. Prefer CLI over MCP when shell access is available.
+  integrations. Use hack-branches for branch instances, hack-env for env values, hack-diagnose for
+  a failing project and hack-feedback to draft a report about Hack itself. Prefer CLI over MCP
+  when shell access is available.
 ---
 
 # hack CLI

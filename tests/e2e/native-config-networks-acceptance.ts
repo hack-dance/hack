@@ -211,7 +211,7 @@ export function nativeNetworkFixtureCommandDiagnostic(opts: {
   readonly expected: number;
   readonly result: Pick<
     CliResult,
-    "exitCode" | "timedOut" | "stdout" | "stderr"
+    "exitCode" | "timedOut" | "stdout" | "stderr" | "durationMs"
   >;
 }): string {
   const step = /^(hack|docker):[a-z]{1,16}(?::[a-z]{1,16}|\+recover)?$|^other$/;
@@ -223,6 +223,7 @@ export function nativeNetworkFixtureCommandDiagnostic(opts: {
       Number.isSafeInteger(opts.expected) &&
       Number.isSafeInteger(opts.result.exitCode) &&
       typeof opts.result.timedOut === "boolean" &&
+      Number.isSafeInteger(opts.result.durationMs) &&
       typeof opts.result.stdout === "string" &&
       typeof opts.result.stderr === "string"
     )
@@ -236,8 +237,19 @@ export function nativeNetworkFixtureCommandDiagnostic(opts: {
     expected: opts.expected,
     exit: opts.result.exitCode,
     timedOut: opts.result.timedOut,
+    durationMs: opts.result.durationMs,
     ...closedFailure(opts.result),
   })}`;
+}
+
+/** A fixture-authored assertion is a fixed sentence; anything else (paths, values, product text) is withheld. */
+export function nativeNetworkFixtureFailureLabel(error: unknown): string {
+  const message = error instanceof Error ? error.message : null;
+  return typeof message === "string" &&
+    message.length <= 160 &&
+    /^[A-Z](?:[A-Za-z ,;'-]|(?<=[a-z])\/(?=[a-z]))*$/.test(message)
+    ? `Network failure ${JSON.stringify(message)}`
+    : "Network failure withheld";
 }
 
 /** Counts exact owned engine objects by fixed role, kind and closed state; foreign rows are never selected. */
@@ -2441,6 +2453,8 @@ export const nativeConfigNetworksScenario: Scenario = {
         ctx.log(
           "Cleanup also failed; original failure retained in private captures"
         );
+        ctx.log(nativeNetworkFixtureFailureLabel(cleanupError));
+        await census();
       }
     }
     if (failure !== undefined) {

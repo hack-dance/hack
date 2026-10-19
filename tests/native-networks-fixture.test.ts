@@ -20,6 +20,7 @@ import {
   nativeNetworkFixtureCensus,
   nativeNetworkFixtureCommandDiagnostic,
   nativeNetworkFixtureCreateArgs,
+  nativeNetworkFixtureFailureLabel,
   nativeNetworkFixtureHasNoPublication,
   nativeNetworkFixtureInventory,
   nativeNetworkFixtureNetworkMatches,
@@ -181,6 +182,7 @@ test("failing command evidence names only its closed class, role and product cod
     result: {
       exitCode: 1,
       timedOut: false,
+      durationMs: 2345,
       stdout: JSON.stringify({
         ok: false,
         error: {
@@ -198,7 +200,7 @@ test("failing command evidence names only its closed class, role and product cod
     },
   });
   expect(json).toBe(
-    'Network command diagnostic {"step":"hack:down+recover","role":"primary","sequence":412,"expected":0,"exit":1,"timedOut":false,"code":"E_CONFIG_INVALID","stage":"storage-helper-start","reason":"probe-timeout"}'
+    'Network command diagnostic {"step":"hack:down+recover","role":"primary","sequence":412,"expected":0,"exit":1,"timedOut":false,"durationMs":2345,"code":"E_CONFIG_INVALID","stage":"storage-helper-start","reason":"probe-timeout"}'
   );
   const human = nativeNetworkFixtureCommandDiagnostic({
     step: "hack:exec",
@@ -208,6 +210,7 @@ test("failing command evidence names only its closed class, role and product cod
     result: {
       exitCode: 1,
       timedOut: false,
+      durationMs: 7,
       stdout: secret,
       stderr: `\nERROR E_COMPOSE_FAILED: Native Compose operation failed ${secret}\n`,
     },
@@ -229,6 +232,7 @@ test("failing command evidence drops non-closed codes and malformed fields", () 
     result: {
       exitCode: 1,
       timedOut: false,
+      durationMs: 1,
       stdout: JSON.stringify({
         ok: false,
         error: {
@@ -255,9 +259,39 @@ test("failing command evidence drops non-closed codes and malformed fields", () 
       ...(value as { step: string; role: "primary" }),
       sequence: 1,
       expected: 0,
-      result: { exitCode: 1, timedOut: false, stdout: "", stderr: "" },
+      result: {
+        exitCode: 1,
+        timedOut: false,
+        durationMs: 1,
+        stdout: "",
+        stderr: "",
+      },
     });
     expect(result).toBe("Network command diagnostic unavailable");
+  }
+});
+
+test("fixture failure label prints only fixed assertion sentences", () => {
+  expect(
+    nativeNetworkFixtureFailureLabel(
+      new Error(
+        "Product saved down must retire all exact fixture containers/bridges and clear intent"
+      )
+    )
+  ).toBe(
+    'Network failure "Product saved down must retire all exact fixture containers/bridges and clear intent"'
+  );
+  for (const error of [
+    new Error("Refused /private/fixture/root"),
+    new Error("Value 42 omitted"),
+    new Error("lowercase start"),
+    new Error(`Long ${"x".repeat(200)}`),
+    "Fixture string throw",
+    { message: "Fixture object" },
+  ]) {
+    expect(nativeNetworkFixtureFailureLabel(error)).toBe(
+      "Network failure withheld"
+    );
   }
 });
 

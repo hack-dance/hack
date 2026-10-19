@@ -25,6 +25,7 @@ import {
   nativeNetworkFixtureInventory,
   nativeNetworkFixtureNetworkMatches,
   nativeNetworkFixturePreservedContainerMatches,
+  nativeNetworkFixtureProjectKind,
   nativeNetworkFixtureProtocolMatches,
   nativeNetworkFixtureRefusalDiagnostic,
   nativeNetworkFixtureShim,
@@ -291,6 +292,43 @@ test("fixture failure label prints only fixed assertion sentences", () => {
   ]) {
     expect(nativeNetworkFixtureFailureLabel(error)).toBe(
       "Network failure withheld"
+    );
+  }
+});
+
+test("failure census separates canonical services from one-offs and strays", () => {
+  const project = "hack-nc-0123456789abcdef0123456789abcdef";
+  expect(
+    nativeNetworkFixtureProjectKind({
+      project,
+      name: `${project}-web-1`,
+      service: "web",
+      oneoff: "False",
+    })
+  ).toBe("service");
+  expect(
+    nativeNetworkFixtureProjectKind({
+      project,
+      name: `0123456789ab_${project}-web-1`,
+      service: "web",
+      oneoff: "False",
+    })
+  ).toBe("stray");
+  expect(
+    nativeNetworkFixtureProjectKind({
+      project,
+      name: `${project}-run-0123`,
+      service: "web",
+      oneoff: "True",
+    })
+  ).toBe("oneoff");
+  for (const value of [
+    { name: `${project}-other-1`, service: "other", oneoff: "False" },
+    { name: `${project}-web-2`, service: "web", oneoff: "False" },
+    { name: `${project}-web-1`, service: "web", oneoff: "" },
+  ]) {
+    expect(nativeNetworkFixtureProjectKind({ project, ...value })).toBe(
+      "stray"
     );
   }
 });

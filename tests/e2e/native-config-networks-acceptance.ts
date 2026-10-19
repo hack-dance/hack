@@ -252,18 +252,43 @@ export function nativeNetworkFixtureFailureLabel(error: unknown): string {
     : "Network failure withheld";
 }
 
+const CENSUS_KINDS = [
+  "service",
+  "oneoff",
+  "stray",
+  "carrier",
+  "fixture",
+] as const;
+
+/** A project-labelled container is a canonical service, a Compose one-off, or a stray (for example a recreate temporary). */
+export function nativeNetworkFixtureProjectKind(opts: {
+  readonly project: string;
+  readonly name: string;
+  readonly service: string;
+  readonly oneoff: string;
+}): "service" | "oneoff" | "stray" {
+  if (opts.oneoff === "True") {
+    return "oneoff";
+  }
+  return opts.oneoff === "False" &&
+    NAMES.includes(opts.service as Name) &&
+    opts.name === `${opts.project}-${opts.service}-1`
+    ? "service"
+    : "stray";
+}
+
 /** Counts exact owned engine objects by fixed role, kind and closed state; foreign rows are never selected. */
 export function nativeNetworkFixtureCensus(
   rows: readonly {
     readonly role: FixtureRole;
-    readonly kind: "service" | "carrier" | "fixture";
+    readonly kind: (typeof CENSUS_KINDS)[number];
     readonly state: string;
   }[]
 ): string {
   const counts: Record<string, number> = {};
   for (const row of rows) {
     const state = CONTAINER_STATES.find((value) => value === row.state);
-    const key = `${NATIVE_NETWORK_FIXTURE_ROLES.includes(row.role) ? row.role : "unknown"}:${["service", "carrier", "fixture"].includes(row.kind) ? row.kind : "unknown"}:${state ?? "unknown"}`;
+    const key = `${NATIVE_NETWORK_FIXTURE_ROLES.includes(row.role) ? row.role : "unknown"}:${CENSUS_KINDS.includes(row.kind) ? row.kind : "unknown"}:${state ?? "unknown"}`;
     counts[key] = (counts[key] ?? 0) + 1;
   }
   return `Network failure census ${JSON.stringify(
@@ -1787,7 +1812,7 @@ export const nativeConfigNetworksScenario: Scenario = {
       try {
         const rows: Parameters<typeof nativeNetworkFixtureCensus>[0][number][] =
           [];
-        const states = async (filter: string): Promise<string[]> =>
+        const listed = async (filter: string): Promise<string[][]> =>
           (
             await docker([
               "container",
@@ -1797,11 +1822,14 @@ export const nativeConfigNetworksScenario: Scenario = {
               "--filter",
               filter,
               "--format",
-              "{{.State}}",
+              `{{.State}}|{{.Names}}|{{.Label "${SERVICE}"}}|{{.Label "com.docker.compose.oneoff"}}`,
             ])
           )
-            .split(/\s+/)
-            .filter(Boolean);
+            .split("\n")
+            .filter(Boolean)
+            .map((line) => line.split("|"));
+        const states = async (filter: string): Promise<string[]> =>
+          (await listed(filter)).map(([state]) => state ?? "unknown");
         for (const checkout of checkouts) {
           if (!startedRoots.has(checkout.root)) {
             continue;
@@ -1814,10 +1842,22 @@ export const nativeConfigNetworksScenario: Scenario = {
           const identity = store.identity;
           await store.close();
           const role = roles.get(checkout.root) ?? "fixture";
-          for (const state of await states(
-            `label=${PROJECT}=${identity.composeProject}`
-          )) {
-            rows.push({ role, kind: "service", state });
+          for (const [
+            state = "unknown",
+            name = "",
+            service = "",
+            oneoff = "",
+          ] of await listed(`label=${PROJECT}=${identity.composeProject}`)) {
+            rows.push({
+              role,
+              kind: nativeNetworkFixtureProjectKind({
+                project: identity.composeProject,
+                name,
+                service,
+                oneoff,
+              }),
+              state,
+            });
           }
           for (const state of await states(
             `label=${CARRIER_OWNER}=${identity.ownerToken}`

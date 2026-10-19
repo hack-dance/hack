@@ -2289,3 +2289,92 @@ fn named_volume_subpaths_are_explicit_canonical_and_plan_bound() {
         assert!(project::plan(&fixture.candidate, fixture.options()).is_err());
     }
 }
+
+#[test]
+fn disposable_cache_declarations_are_exact_volume_relative_and_review_bound() {
+    let service = "services:\n  web:\n    image: alpine:3.21\n    command: [echo, hello]\n    volumes: ['www_next:/app/.next', 'redis:/data']\n";
+    let plain = Fixture::new(&format!(
+        "{service}volumes:\n  www_next: {{}}\n  redis: {{}}\n"
+    ))
+    .plan();
+    let fixture = Fixture::new(&format!(
+        "{service}volumes:\n  www_next: {{x-hack-disposable-cache: [dev/cache/turbopack, dev/cache/images]}}\n  redis: {{}}\n"
+    ));
+    let review = fixture.plan();
+    assert!(review.plan.enrollment_compatible);
+    assert_eq!(
+        review.plan.volumes["www_next"].disposable_caches,
+        ["dev/cache/turbopack", "dev/cache/images"]
+    );
+    assert!(review.plan.volumes["redis"].disposable_caches.is_empty());
+    // The declaration is reviewed intent; absent declarations keep plan bytes.
+    assert_ne!(plain.plan_id, review.plan_id);
+    assert!(
+        serde_json::to_value(&review.plan.volumes["redis"])
+            .unwrap()
+            .get("disposable_caches")
+            .is_none()
+    );
+    let nine = (0..9)
+        .map(|n| format!("c{n}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    for declaration in [
+        "[../escape]".to_owned(),
+        "[/var/lib/docker]".into(),
+        "[dev/../redis]".into(),
+        "[dev//cache]".into(),
+        "[dev/cache/]".into(),
+        "['']".into(),
+        "['$HOME']".into(),
+        "[dev/cache, dev/cache]".into(),
+        "[dev/cache, dev/cache/turbopack]".into(),
+        "[dev/cache/turbopack, dev/cache]".into(),
+        format!("[{nine}]"),
+        "dev/cache".into(),
+        "[1]".into(),
+    ] {
+        let fixture = Fixture::new(&format!(
+            "{service}volumes:\n  www_next: {{x-hack-disposable-cache: {declaration}}}\n  redis: {{}}\n"
+        ));
+        assert_eq!(
+            project::plan(&fixture.candidate, fixture.options())
+                .unwrap_err()
+                .code,
+            "invalid_disposable_cache",
+            "{declaration}"
+        );
+    }
+    // A declared cache cannot be, or contain, a mounted volume subpath; a cache
+    // inside a mounted subpath remains selectable.
+    let subpath = |cache: &str| {
+        format!(
+            "services:\n  web:\n    image: alpine:3.21\n    command: [echo, hello]\n    volumes:\n      - {{type: volume, source: www_next, target: /app/.next, volume: {{subpath: apps/www}}}}\nvolumes:\n  www_next: {{x-hack-disposable-cache: [{cache}]}}\n"
+        )
+    };
+    for cache in ["apps/www", "apps"] {
+        let fixture = Fixture::new(&subpath(cache));
+        assert_eq!(
+            project::plan(&fixture.candidate, fixture.options())
+                .unwrap_err()
+                .code,
+            "invalid_disposable_cache",
+            "{cache}"
+        );
+    }
+    let nested = Fixture::new(&subpath("apps/www/dev/cache/turbopack")).plan();
+    assert_eq!(
+        nested.plan.volumes["www_next"].disposable_caches,
+        ["apps/www/dev/cache/turbopack"]
+    );
+    // A shared dependency cache volume is never a per-graph disposable target.
+    let fixture = Fixture::new(
+        "services:\n  web:\n    image: alpine:3.21\n    command: [echo, hello]\n    labels: {hack.dependencies.cache-volume: deps, hack.dependencies.lockfiles: bun.lock}\n    volumes: ['deps:/app/node_modules']\nvolumes:\n  deps: {x-hack-disposable-cache: [.cache]}\n",
+    );
+    assert_eq!(
+        project::plan(&fixture.candidate, fixture.options())
+            .unwrap_err()
+            .code,
+        "invalid_disposable_cache"
+    );
+}

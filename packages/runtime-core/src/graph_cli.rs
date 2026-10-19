@@ -335,6 +335,56 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
             return Err(invalid());
         }
     }
+    if *action == "inspect-cache-quarantine" {
+        let (run, volume, path) = match *args {
+            ["--run-id", run, "--volume", volume, "--path", path]
+            | [
+                "--run-id",
+                run,
+                "--volume",
+                volume,
+                "--path",
+                path,
+                "--json",
+            ] => (run, volume, path),
+            _ => return Err(invalid()),
+        };
+        return graph::inspect_cache_quarantine(
+            candidate,
+            graph::CacheQuarantineTarget { run, volume, path },
+        );
+    }
+    if *action == "quarantine-cache" {
+        let (run, volume, path, expected) = match *args {
+            [
+                "--run-id",
+                run,
+                "--volume",
+                volume,
+                "--path",
+                path,
+                "--expect-selection",
+                expected,
+            ]
+            | [
+                "--run-id",
+                run,
+                "--volume",
+                volume,
+                "--path",
+                path,
+                "--expect-selection",
+                expected,
+                "--json",
+            ] => (run, volume, path, expected),
+            _ => return Err(invalid()),
+        };
+        return graph::quarantine_cache(
+            candidate,
+            graph::CacheQuarantineTarget { run, volume, path },
+            expected,
+        );
+    }
     if *action == "inspect-source-device-rebind" {
         let run = match *args {
             ["--run-id", run] | ["--run-id", run, "--json"] => run,

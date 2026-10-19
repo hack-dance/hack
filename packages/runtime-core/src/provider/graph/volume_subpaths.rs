@@ -189,7 +189,7 @@ pub(super) fn forget_removed(
         &expected_labels(receipt, resource),
     )
 }
-fn no_consumers(value: &Value, volume: &str) -> Result<(), CandidateError> {
+pub(super) fn no_consumers(value: &Value, volume: &str) -> Result<(), CandidateError> {
     let containers = value
         .as_array()
         .filter(|v| v.len() <= 4096)

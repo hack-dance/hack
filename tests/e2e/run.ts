@@ -249,12 +249,20 @@ async function main(): Promise<void> {
   const dockerEnabled = (process.env.HACK_E2E_DOCKER ?? "") === "1";
   const requireDocker = (process.env.HACK_E2E_REQUIRE_DOCKER ?? "") === "1";
   const keepTempDirs = (process.env.HACK_E2E_KEEP ?? "") === "1";
-  const outcomes = await runScenarios({
-    scenarios: ALL_SCENARIOS,
-    dockerEnabled,
-    only: shardNames ?? args.only,
-    keepTempDirs,
-  });
+  // TEMPORARY HACK-1281 sampling: three sequential iterations per shard, stopping at a failure.
+  const outcomes: Awaited<ReturnType<typeof runScenarios>> = [];
+  for (let iteration = 0; iteration < (args.shard ? 3 : 1); iteration++) {
+    const batch = await runScenarios({
+      scenarios: ALL_SCENARIOS,
+      dockerEnabled,
+      only: shardNames ?? args.only,
+      keepTempDirs,
+    });
+    outcomes.push(...batch);
+    if (batch.some((outcome) => outcome.status === "fail")) {
+      break;
+    }
+  }
 
   const dockerSkipped = outcomes.some(
     (outcome) => outcome.tier === "docker" && outcome.status === "skip"

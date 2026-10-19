@@ -196,6 +196,19 @@ Hack reads the canonical YAML files and injects the resolved env directly into:
 
 That means `.hack/.env` is no longer the primary runtime source of truth.
 
+On the Compose backend, Hack still generates `.hack/.internal/compose.env.override.yml`
+so each service gets its own environment. The file holds no values: each entry is a
+`${HACK_ENV_<digest>_<KEY>}` reference, and Hack passes the resolved values to
+`docker compose` through its process environment. Nothing Hack writes there contains a
+decrypted value, whether `up` succeeds, fails or is interrupted. The file is written
+with mode 0600, and Hack refuses to write through a symlink at that path. A value
+reaches the container literally, `$` included.
+
+An override written by an earlier Hack version can still hold literal values. The next
+`hack up`, `hack restart`, `hack run` or `hack exec` replaces it, and `hack down` removes
+it. `hack doctor` reports such a file in its "compose env at rest" check (counts only,
+never values), and `hack doctor --fix` removes it.
+
 `hack env materialize` is manual by design. Use it only when you need a compatibility file for an external tool that expects `.env` on disk.
 
 Hack writes `.hack/.env` and `.hack/.env.<overlay>` (from `materialize`, legacy

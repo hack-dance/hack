@@ -32,7 +32,7 @@ node code is listed under [open gaps](#open-gaps) so that it is not lost.
 | `encrypted_file` store and its key | Store file chosen in config; key from `HACK_SECRETS_FILE_KEY`, `~/.hack/secrets-file.key`, or the keychain service `hack-secrets-backend` | Legacy backend values, including the `cloud` shim. |
 | `keychain` store | macOS keychain through `Bun.secrets`, one service per project | Legacy backend values. |
 | Values from an external manager (for example 1Password) | The manager's vault, until the user pipes a value into Hack or injects `HACK_ENV_SECRET_KEY` into a process | Hack has no first-party 1Password integration. Custody passes to Hack's stores at the moment of the pipe or injection. |
-| Decrypted values in flight | Process environments of Compose containers, host commands, lifecycle processes and session shells; `.hack/.env`; `.hack/.internal/compose.env.override.yml` | The resolved plaintext, after decryption. |
+| Decrypted values in flight | Process environments of the `docker compose` client, Compose containers, host commands, lifecycle processes and session shells; `.hack/.env` | The resolved plaintext, after decryption. `.hack/.internal/compose.env.override.yml` holds only `${HACK_ENV_...}` references (HACK-1273). |
 
 ## Trust boundaries
 
@@ -75,6 +75,7 @@ refer to `hack-dance/hack`.
 | A repository plants `.hack.secret.key` as a symlink (dangling or not) so that Hack reads or writes a file it should not. | Key reads go through `readBoundedPrivateFile` (`lstat`, `O_NOFOLLOW`, descriptor and path identity checks, 1 MiB bound, fatal UTF-8). New keys are created with `createPrivateFileExclusive` (`O_CREAT|O_EXCL|O_NOFOLLOW`, mode 0600, `fchmod`, `fsync`). Both are in `src/lib/private-file.ts`, used by `resolveProjectEnvKey`, `ensureProjectEnvSecretKey` and `resolveInheritedProjectEnvKey` in `src/lib/project-env-config.ts` (#288). |
 | A symlinked `.hack/.env`, overlay file or `.hack` directory redirects a write, or a reader sees a partial file. | `src/lib/private-env-file.ts` (`readPrivateEnvFile`, `writePrivateEnvFileIfChanged`) and `replacePrivateFileAtomic` in `src/lib/private-file.ts`: a private sibling is written and fsynced, then renamed over the target; symlinks and non-regular entries are refused with one fixed message (#302). Used by `src/lib/hack-env.ts` and `materializeProjectEnv`. |
 | A world-readable env file or store. | `.hack/.env`, overlays and the `encrypted_file` store are written 0600, and a same-content file with group or other access is tightened (#302). The `hack doctor` env key check reports `env-key-weak-permissions` and `env-key-wrong-owner` (#309). |
+| The Compose backend leaves decrypted values at rest in `.hack/.internal/compose.env.override.yml` after `up`, `down`, a failed `up` or an interrupted one. | The override holds only `${HACK_ENV_<digest>_<KEY>}` references; each value reaches `docker compose` through its process environment, so no Compose command writes a value to disk, whatever way it ends (`renderComposeEnvReferenceOverride` in `src/lib/compose-managed-env.ts`). The file keeps its path because Compose records it in each container's `config_files` label. It is written with `replacePrivateFileAtomic` (mode 0600, symlink refused), and a literal value is refused before any write (`writeComposeEnvOverride` in `src/lib/compose-env-at-rest.ts`). A file left by an earlier version is replaced by the next Compose command that renders the override, removed by one that renders none and by `hack down`, and reported by the `hack doctor` "compose env at rest" check by counts only; `hack doctor --fix` removes it. Proven with a stub `docker` by `tests/compose-env-at-rest-cli.test.ts` and `tests/compose-env-at-rest.test.ts` (HACK-1273). |
 | Two writers of the `encrypted_file` store lose an update. | An in-process queue plus a cooperative `<store>.lock` using the owner protocol from `src/lib/projects-registry-lock.ts`; a symlinked store path is refused for writes (`src/lib/secret-store.ts`, #302). |
 
 ### Malformed or hostile ciphertext
@@ -120,12 +121,15 @@ These gaps are known and not closed on `next`. Each one needs its own change.
    1Password stay only in the expected custody: the keychain item, the encrypted YAML
    or store, and the target process environment. The CLI tests disable the keychain
    fallback (`HACK_SECRETS_DISABLE_KEYCHAIN_FALLBACK=1`) and never call 1Password.
-4. **Plaintext Compose override.** For the Compose runtime, `src/commands/project.ts`
-   writes resolved values, including decrypted secrets, to
-   `.hack/.internal/compose.env.override.yml` with `writeTextFileIfChanged` from
-   `src/lib/fs.ts`. That call uses `Bun.write`, so the file gets the process umask
-   mode (often 0644) and a symlink at that path is followed. The #302 rules do not
-   cover it.
+4. **Compose client environment.** The Compose override no longer holds values
+   (HACK-1273), but the `docker compose` client process now carries one
+   `HACK_ENV_*` variable per service and key. Like every injected env, it is
+   readable by the same user (for example `ps eww`) for the life of that process.
+   A project whose resolved values exceed the platform's argument and environment
+   limit (about 1 MiB on macOS) cannot start through Compose. Existing containers
+   keep their values in `docker inspect` (gap 9). Legacy adoption can no longer
+   prove from a reference-form file that a running container got the current
+   values; it still proves the services and keys.
 5. **YAML env file writes.** `writeProjectEnvConfigFile` in
    `src/lib/project-env-config.ts` also uses `writeTextFileIfChanged`, so
    `.hack/hack.env.*.yaml` writes follow a symlink at the file. These files hold

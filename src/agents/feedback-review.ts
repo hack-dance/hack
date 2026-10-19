@@ -167,7 +167,8 @@ export const REDACTION_KINDS: readonly FeedbackVocabularyEntry<RedactionKind>[] 
     },
     {
       id: "raw-log",
-      summary: "Timestamped, structured or service-prefixed log lines.",
+      summary:
+        "Timestamped, syslog, JSON or logfmt structured and service-prefixed log lines.",
     },
     {
       id: "secret",
@@ -320,10 +321,25 @@ const EMBEDDED_INSTRUCTION_PATTERNS: readonly RegExp[] = [
   /\bno (?:need to (?:ask|confirm)|approval (?:is )?(?:needed|required))\b/i,
   /\buser (?:has )?(?:already )?(?:said|says) (?:yes|ok|okay)\b/i,
   /\bcurl\s[^\n|]*\|\s*(?:ba|z)?sh\b/i,
+  // Text addressed to whichever agent reads it.
+  /\b(?:agents?|assistants?|ais?|llms?|models?|bots?)\s+(?:reading|processing|parsing|seeing)\s+(?:this|these)\b/i,
+  /\bif you are an? (?:ai|agent|assistant|llm|language model|bot)\b/i,
+  // Directions to open an issue in a named repository.
+  /\b(?:open|create|file|post|submit)\s+(?:an?|the|this|new)?\s*(?:new\s+)?issue\s+(?:at|on|in|to|against)\s+[\w.-]+\/[\w.-]+/i,
+  // Directions to hand over private material: "and paste the env".
+  /\b(?:please|now|then|and|also)\s+(?:paste|attach|include|upload|share|dump)\s+(?:in\s+)?(?:this|these|the|your|all|its|their)?\s*(?:\.env|env|secrets?|tokens?|credentials?|keys?|passwords?|cookies?)\b/i,
+  /^\s*(?:paste|attach|include|upload|share|dump)\s+(?:in\s+)?(?:this|these|the|your|all|its|their)?\s*(?:\.env|env|secrets?|tokens?|credentials?|keys?|passwords?|cookies?)\b/i,
 ];
 
+/**
+ * Raw log lines: ISO, Go-style (`2026/10/19 10:00:01`) and clock-time
+ * prefixes, syslog (`Oct 19 10:00:01 host proc[1]:`), logfmt (`level=`),
+ * Compose service prefixes (`web-1 | `) and JSON records with a log field
+ * key (`{"level":...}`, `{"svc":"web","ts":...}`). A JSON envelope such as
+ * `{"ok":false,"error":{...}}` is not a log record and stays.
+ */
 const RAW_LOG_LINE =
-  /^\s*(?:\[?\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}|\[\d{2}:\d{2}:\d{2}|(?:level|lvl|ts|time)=\S|[a-z0-9][\w.-]*\s+\|\s)/i;
+  /^\s*(?:\[?\d{4}[-/]\d{2}[-/]\d{2}[T ]\d{2}:\d{2}|\[?\d{2}:\d{2}:\d{2}(?:[.,]\d+)?\]?\s|(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}\b|(?:level|lvl|ts|time)=\S|[a-z0-9][\w.-]*\s+\|\s|\{\s*"(?:[^\n]*[,{]\s*")?(?:level|lvl|severity|ts|time|timestamp|@timestamp|logger|msg|log)"\s*:)/i;
 
 const NEWLINE = /\r?\n/;
 const PUBLIC_FEEDBACK_URL =
@@ -339,25 +355,60 @@ const HAS_HEX = /[0-9a-f]/i;
 const COLON = /:/g;
 const IPV6_FULL_COLONS = 7;
 
+/**
+ * Key names whose value is a secret, matched case-insensitively. `PASS` must
+ * be a whole word part (`db_pass`, not `bypass` or `passed`), and any
+ * `<prefix>_KEY` such as `encryption_key` or `MASTER_KEY` counts.
+ */
 const SECRET_KEY_NAME =
-  "[A-Za-z0-9_.-]*(?:TOKEN|SECRET|PASSWORD|PASSWD|PASSPHRASE|API_?KEY|PRIVATE_?KEY|CREDENTIALS?|ACCESS_?KEY)[A-Za-z0-9_.-]*";
+  "[A-Za-z0-9_.-]*(?:TOKEN|SECRET|PASSWORD|PASSWD|PASSPHRASE|(?<![A-Za-z])PASS(?![A-Za-z])|API_?KEY|PRIVATE_?KEY|[A-Za-z0-9][_.-]KEY(?![A-Za-z])|CREDENTIALS?|ACCESS_?KEY|COOKIE|SESSION_?(?:ID|KEY))[A-Za-z0-9_.-]*";
 
 /**
- * A complete placeholder value such as `<name>` or `<redacted:secret>`. It is
- * exempt only when it is the whole value: it must end at whitespace, closing
- * punctuation or the end of the text. `<x>leaked` is a value, not a
- * placeholder, so a leading `<` never hides what follows it.
+ * Field names of Hack's secret-store record (`iv`, `tag`, `ciphertext`) and
+ * similar encrypted envelopes. A ciphertext field is redacted at any length;
+ * a parameter field only when its value looks encoded.
  */
-const PLACEHOLDER = String.raw`<[^<>\s]+>(?=[\s,;)\]}"'\x60]|[.:!?](?:\s|$)|$)`;
+const CIPHERTEXT_FIELD =
+  "ciphertext|encrypted(?:_?(?:data|value|key))?|wrapped_?key";
+const CIPHER_PARAMETER_FIELD = "iv|tag|auth_?tag|nonce|salt";
+
+/** Closing and sentence punctuation that may trail a placeholder. */
+const PLACEHOLDER_TRAILER = String.raw`[)\]}"'\x60.,;:!?]*`;
+
+/**
+ * A complete placeholder value such as `<name>` or `<redacted:secret>`, given
+ * the characters that end the value it stands for. It is exempt only when it
+ * is the whole value: after `<...>`, only trailing punctuation may follow
+ * before one of `terminators` or the end of the text. So `<x>)leaked`,
+ * `<x>"leaked"` and `<x>leaked` are values, not placeholders, and a leading
+ * `<` never hides what follows it.
+ */
+function placeholderValue(terminators: string): string {
+  return String.raw`<[^<>\s]+>(?=${PLACEHOLDER_TRAILER}(?:${terminators}|$))`;
+}
+
+/** A placeholder standing for a value that runs to the next whitespace. */
+const PLACEHOLDER = placeholderValue(String.raw`\s`);
+/** A placeholder standing for a bare assignment value (`[^\s,;]+`). */
+const ASSIGNED_PLACEHOLDER = placeholderValue(String.raw`[\s,;]`);
+/** A placeholder standing for an `Authorization` header value. */
+const HEADER_PLACEHOLDER = placeholderValue(String.raw`[\s"'\x60,;]`);
+/** A placeholder standing for a bare JSON value (`[^\s,}]+`). */
+const JSON_PLACEHOLDER = placeholderValue(String.raw`[\s,}]`);
 /** A double- or single-quoted value that is exactly one placeholder. */
 const QUOTED_PLACEHOLDER_DOUBLE = String.raw`<[^<>"\n]*>"`;
 const QUOTED_PLACEHOLDER_SINGLE = String.raw`<[^<>'\n]*>'`;
 /** An assignment value: quoted, or bare up to whitespace or a separator. */
-const ASSIGNED_VALUE = String.raw`(?:"(?!${QUOTED_PLACEHOLDER_DOUBLE})[^"\n]*"|'(?!${QUOTED_PLACEHOLDER_SINGLE})[^'\n]*'|(?!["'])(?!${PLACEHOLDER})[^\s,;]+)`;
+const ASSIGNED_VALUE = String.raw`(?:"(?!${QUOTED_PLACEHOLDER_DOUBLE})[^"\n]*"|'(?!${QUOTED_PLACEHOLDER_SINGLE})[^'\n]*'|(?!["'])(?!${ASSIGNED_PLACEHOLDER})[^\s,;]+)`;
 
 /** Reserved, private or local suffixes; a host under one never leaves the machine. */
 const PRIVATE_HOST_SUFFIXES =
   "hack|corp|internal|intranet|local|localdomain|localhost|lan|home|private|test";
+/** Private labels that mark a host even when a public suffix follows them. */
+const PRIVATE_INNER_LABELS = "corp|internal|intranet|lan|private";
+/** Final labels that make a dotted name a file, not a host. */
+const FILE_EXTENSIONS =
+  "c|cjs|conf|cfg|css|env|go|h|html|ini|js|json|jsonc|jsx|key|lock|log|md|mjs|pem|py|rb|rs|sh|sock|sql|toml|ts|tsx|txt|xml|yaml|yml";
 
 /**
  * Value rules, applied in order. A value that is exactly a placeholder
@@ -382,6 +433,25 @@ const VALUE_RULES: readonly ValueRule[] = [
     replace: () => redactionPlaceholder("ciphertext"),
   },
   {
+    // Envelope ciphertext such as `{"ciphertext":"..."}`, at any length.
+    kind: "ciphertext",
+    pattern: new RegExp(
+      String.raw`(["']?\b(?:${CIPHERTEXT_FIELD})["']?\s*:\s*)(?:"(?!${QUOTED_PLACEHOLDER_DOUBLE})[^"\n]*"|'(?!${QUOTED_PLACEHOLDER_SINGLE})[^'\n]*')`,
+      "gi"
+    ),
+    replace: (_match, key) => `${key}"${redactionPlaceholder("ciphertext")}"`,
+  },
+  {
+    // Envelope IVs, tags, nonces and salts: encoded values, so a
+    // `"tag": "latest"` image tag stays.
+    kind: "ciphertext",
+    pattern: new RegExp(
+      String.raw`(["']?\b(?:${CIPHER_PARAMETER_FIELD})["']?\s*:\s*)(?:"[A-Za-z0-9+/_-]{12,}={0,2}"|'[A-Za-z0-9+/_-]{12,}={0,2}')`,
+      "gi"
+    ),
+    replace: (_match, key) => `${key}"${redactionPlaceholder("ciphertext")}"`,
+  },
+  {
     kind: "secret",
     // A URL with credentials goes whole: its host is private as well.
     pattern: /\b[a-z][a-z0-9+.-]*:\/\/[^\s/@:<>]+:[^\s/@<>]+@[^\s<>"'`)\]]*/gi,
@@ -390,7 +460,7 @@ const VALUE_RULES: readonly ValueRule[] = [
   {
     kind: "secret",
     pattern: new RegExp(
-      String.raw`\b(Bearer|Basic)\s+(?!${PLACEHOLDER})[A-Za-z0-9._~+/=<>-]{12,}`,
+      String.raw`\b(Bearer|Basic)\s+(?!${PLACEHOLDER})(?:<\S+|[A-Za-z0-9._~+/=<>-]{12,})`,
       "g"
     ),
     replace: (_match, scheme) => `${scheme} ${redactionPlaceholder("secret")}`,
@@ -406,7 +476,7 @@ const VALUE_RULES: readonly ValueRule[] = [
     kind: "secret",
     // GitHub-style `Authorization: token <value>` and other header schemes.
     pattern: new RegExp(
-      String.raw`(\bAuthorization\s*[:=]\s*["']?(?:token|bearer|basic|digest)\s+)(?!${PLACEHOLDER})[^\s"'\x60,;]+`,
+      String.raw`(\bAuthorization\s*[:=]\s*["']?(?:token|bearer|basic|digest)\s+)(?!${HEADER_PLACEHOLDER})[^\s"'\x60,;]+`,
       "gi"
     ),
     replace: (_match, header) => `${header}${redactionPlaceholder("secret")}`,
@@ -443,7 +513,7 @@ const VALUE_RULES: readonly ValueRule[] = [
   {
     kind: "config-value",
     pattern: new RegExp(
-      String.raw`("[A-Z][A-Z0-9_]{1,}"\s*:\s*)(?:"(?!${QUOTED_PLACEHOLDER_DOUBLE})[^"\n]*"|(?!["\s])(?!${PLACEHOLDER})[^\s,}]+)`,
+      String.raw`("[A-Z][A-Z0-9_]{1,}"\s*:\s*)(?:"(?!${QUOTED_PLACEHOLDER_DOUBLE})[^"\n]*"|(?!["\s])(?!${JSON_PLACEHOLDER})[^\s,}]+)`,
       "g"
     ),
     replace: (_match, key) => `${key}"${redactionPlaceholder("config-value")}"`,
@@ -469,7 +539,7 @@ const VALUE_RULES: readonly ValueRule[] = [
     // Other absolute roots that hold checkouts, volumes or a user's home.
     kind: "path",
     pattern:
-      /(?<![\w.~/-])\/(?:root|srv|Volumes|workspaces?|mnt|media|data|code|projects?|var\/www)\/[^\s<>"'`)]+/g,
+      /(?<![\w.~/-])\/(?:root|srv|Volumes|workspaces?|mnt|media|data|code|projects?|var\/www|var\/lib|opt(?!\/homebrew(?:[/\s]|$)))\/[^\s<>"'`)]+/g,
     replace: () => redactionPlaceholder("path"),
   },
   {
@@ -478,9 +548,11 @@ const VALUE_RULES: readonly ValueRule[] = [
     replace: () => redactionPlaceholder("path"),
   },
   {
+    // `~/`, `$HOME/` and `${HOME}/` paths; only Hack-owned files stay.
     kind: "path",
-    pattern: /(?<![\w.~])~\/(?!\.hack(?:-next)?(?:\/|\s|$))[^\s<>"'`)]+/g,
+    pattern: /(?<![\w.~$])(?:~|\$HOME|\$\{HOME\})\/[^\s<>"'`)]+/g,
     replace: () => redactionPlaceholder("path"),
+    accept: (path) => !isHackHomePath(path),
   },
   {
     // SSH remotes such as `git@host:org/repo.git` name the organization too.
@@ -499,6 +571,18 @@ const VALUE_RULES: readonly ValueRule[] = [
     kind: "hostname",
     pattern: new RegExp(
       String.raw`(?<![\w.@/-])(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+(?:${PRIVATE_HOST_SUFFIXES})(?![\w-]|\.[\w-])`,
+      "gi"
+    ),
+    replace: () => redactionPlaceholder("hostname"),
+  },
+  {
+    // A private label inside a longer name, such as
+    // `app.internal.acme.com/admin`. File names such as
+    // `compose.local.yml` are not hosts: `local` is not one of these labels,
+    // and a final label that is a file extension never matches.
+    kind: "hostname",
+    pattern: new RegExp(
+      String.raw`(?<![\w.@/-])(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+(?:${PRIVATE_INNER_LABELS})(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*\.(?!(?:${FILE_EXTENSIONS})(?![\w-]))[a-z][a-z0-9-]*[a-z0-9](?![\w-]|\.[\w-])(?:[:/][^\s<>"'\x60)]*)?`,
       "gi"
     ),
     replace: () => redactionPlaceholder("hostname"),
@@ -552,6 +636,61 @@ function isPublicFeedbackUrl(url: string): boolean {
     SAFE_URL_FRAGMENT.test(parsed.hash) &&
     (parsed.pathname === PUBLIC_FEEDBACK_PATH ||
       parsed.pathname.startsWith(`${PUBLIC_FEEDBACK_PATH}/`))
+  );
+}
+
+/**
+ * Hack-owned names under `~/.hack` that identify nothing about the user's
+ * projects. Anything else there, such as a project directory, is private.
+ */
+const HACK_HOME_SEGMENTS: ReadonlySet<string> = new Set([
+  "assets",
+  "bin",
+  "caddy",
+  "Caddyfile",
+  "certs",
+  "daemon",
+  "fzf",
+  "hack",
+  "hack.config.json",
+  "hackd.log",
+  "hackd.pid",
+  "hackd.sock",
+  "host-commands",
+  "libexec",
+  "logging",
+  "loki.yaml",
+  "mcp",
+  "mcp-audit.log",
+  "mutagen",
+  "projects.json",
+  "schemas",
+  "secrets-file.key",
+  "secrets.enc.json",
+]);
+const HACK_HOME_ROOT = /^\.hack(?:-next)?$/;
+const HOME_PREFIX = /^(?:~|\$HOME|\$\{HOME\})\//;
+const TRAILING_PUNCTUATION = /[.,;:!?]+$/;
+const PLACEHOLDER_SEGMENT = /^<[^<>]+>$/;
+
+/**
+ * `~/.hack` itself, or a path under it made only of Hack-owned names and
+ * placeholders, such as `~/.hack/daemon/hackd.sock` or `~/.hack/certs/<host>`.
+ */
+function isHackHomePath(path: string): boolean {
+  const segments = path
+    .replace(HOME_PREFIX, "")
+    .replace(TRAILING_PUNCTUATION, "")
+    .split("/")
+    .filter((segment) => segment !== "");
+  const [root, ...rest] = segments;
+  return (
+    root !== undefined &&
+    HACK_HOME_ROOT.test(root) &&
+    rest.every(
+      (segment) =>
+        HACK_HOME_SEGMENTS.has(segment) || PLACEHOLDER_SEGMENT.test(segment)
+    )
   );
 }
 
@@ -834,13 +973,17 @@ export function renderFeedbackDraft(
   const counts: Partial<Record<RedactionKind, number>> = {};
   const title = sanitizeFeedbackText(input.title);
   mergeCounts(counts, title.redactions);
-  const body = sanitizeFeedbackText(renderDraftBody(input));
-  mergeCounts(counts, body.redactions);
+  // Names are sanitized before the body lists them, so the listing and the
+  // attachment carry the same sanitized name.
   const attachments = (input.attachments ?? []).map((attachment) => {
+    const name = sanitizeFeedbackText(attachment.name);
+    mergeCounts(counts, name.redactions);
     const content = sanitizeFeedbackText(attachment.content);
     mergeCounts(counts, content.redactions);
-    return { name: attachment.name, content: content.text };
+    return { name: name.text, content: content.text };
   });
+  const body = sanitizeFeedbackText(renderDraftBody({ ...input, attachments }));
+  mergeCounts(counts, body.redactions);
   return {
     payload: { title: title.text.trim(), body: body.text, attachments },
     redactions: counts,
@@ -976,7 +1119,8 @@ export const FEEDBACK_GATE_REFUSALS: readonly FeedbackVocabularyEntry<FeedbackGa
     },
     {
       id: "attachment-unlisted",
-      summary: "An attachment is not listed in the body.",
+      summary:
+        "An attachment is not listed by name in the visible Attachments section; HTML comments and raw HTML do not count.",
     },
     {
       id: "approval-missing",
@@ -1083,10 +1227,61 @@ function payloadIssue(
   if (texts.some((text) => findFeedbackPrivacyIssues(text).length > 0)) {
     return "privacy-findings";
   }
+  const listed = visibleAttachmentListing(payload.body);
   const unlisted = payload.attachments.some(
-    (attachment) => !payload.body.includes(`- \`${attachment.name}\``)
+    (attachment) => !isListedAttachment(listed, attachment.name)
   );
   return unlisted ? "attachment-unlisted" : undefined;
+}
+
+/** HTML comments hide text on GitHub; an unterminated one hides the rest. */
+const HTML_COMMENT = /<!--[\s\S]*?(?:-->|$)/g;
+const HTML_TAG = /<\/?[A-Za-z][^>]*>/;
+const INLINE_CODE = /`[^`\n]*`/g;
+const ATTACHMENTS_HEADING = /^##\s+Attachments\s*$/;
+const ANY_HEADING = /^#{1,6}\s/;
+const UNSAFE_ATTACHMENT_NAME = /[`\r\n]/;
+
+/**
+ * The lines of the `## Attachments` section a reader actually sees: HTML
+ * comments are removed first, and a section that contains raw HTML outside
+ * inline code, which can hide or restyle a listing, counts as listing nothing.
+ */
+function visibleAttachmentListing(body: string): readonly string[] {
+  const lines = body.replace(HTML_COMMENT, "").split(NEWLINE);
+  const listing: string[] = [];
+  let inSection = false;
+  let hasHtml = false;
+  for (const line of lines) {
+    if (ANY_HEADING.test(line)) {
+      inSection = ATTACHMENTS_HEADING.test(line);
+      continue;
+    }
+    if (inSection) {
+      hasHtml ||= HTML_TAG.test(line.replace(INLINE_CODE, ""));
+      listing.push(line.trim());
+    }
+  }
+  return hasHtml ? [] : listing;
+}
+
+/**
+ * An attachment is listed when a visible line of the Attachments section
+ * starts with `` - `name` ``, followed by nothing, whitespace or `:`. A name
+ * with a backtick or line break cannot be listed unambiguously.
+ */
+function isListedAttachment(listing: readonly string[], name: string): boolean {
+  if (name.trim() === "" || UNSAFE_ATTACHMENT_NAME.test(name)) {
+    return false;
+  }
+  const entry = `- \`${name}\``;
+  return listing.some((line) => {
+    if (!line.startsWith(entry)) {
+      return false;
+    }
+    const next = line.charAt(entry.length);
+    return next === "" || next === ":" || next === " " || next === "\t";
+  });
 }
 
 /** GitHub issue numbers are positive integers. */

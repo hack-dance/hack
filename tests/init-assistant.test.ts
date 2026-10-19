@@ -7,7 +7,11 @@ import {
   buildInitAssistantReport,
   type InitAssistantReport,
 } from "../src/agents/init-assistant.ts";
-import { buildOnboardingPrompt } from "../src/agents/onboarding-prompt.ts";
+import {
+  buildOnboardingPrompt,
+  collectOnboardingContext,
+} from "../src/agents/onboarding-prompt.ts";
+import { markRepoBoundary } from "./helpers/repo-boundary.ts";
 
 const ALWAYS_PRESENT_LIMITATION =
   "Inventory reads file names and manifest keys only; env files, secrets, lockfile contents, and pin values were not read.";
@@ -20,15 +24,27 @@ afterEach(async () => {
   }
 });
 
+/**
+ * A temp repo bounded by its own `.git`, so the walk-up in
+ * `buildOnboardingPrompt` stops here even without a `package.json`.
+ */
 async function createRepo(files: Record<string, string>): Promise<string> {
   const repoRoot = await mkdtemp(join(tmpdir(), "hack-init-assistant-"));
   tempDirs.push(repoRoot);
-  for (const [rel, content] of Object.entries(files)) {
-    const abs = join(repoRoot, rel);
+  await markRepoBoundary(repoRoot);
+  await writeFiles({ root: repoRoot, files });
+  return repoRoot;
+}
+
+async function writeFiles(opts: {
+  readonly root: string;
+  readonly files: Record<string, string>;
+}): Promise<void> {
+  for (const [rel, content] of Object.entries(opts.files)) {
+    const abs = join(opts.root, rel);
     await mkdir(dirname(abs), { recursive: true });
     await Bun.write(abs, content);
   }
-  return repoRoot;
 }
 
 function packageJson(value: Record<string, unknown>): string {
@@ -243,4 +259,29 @@ test("prompt embeds the canonical onboarding guidance after the inventory", asyn
   expect(inventoryIndex).toBeGreaterThan(0);
   expect(onboardingIndex).toBeGreaterThan(inventoryIndex);
   expect(prompt).toContain("bun install --frozen-lockfile");
+});
+
+test("a fixture without package.json is inventoried at its own boundary, not a host ancestor", async () => {
+  // A host ancestor with a package.json, like a stray /tmp/package.json.
+  const host = await mkdtemp(join(tmpdir(), "hack-init-assistant-host-"));
+  tempDirs.push(host);
+  const files = {
+    "package.json": packageJson({ name: "host-ancestor" }),
+    "unbounded/pyproject.toml": '[project]\nname = "svc"\n',
+    "bounded/pyproject.toml": '[project]\nname = "svc"\n',
+  };
+  await writeFiles({ root: host, files });
+  const bounded = join(host, "bounded");
+  await markRepoBoundary(bounded);
+
+  const rootOf = async (startDir: string): Promise<string | null> => {
+    const context = await collectOnboardingContext({ startDir });
+    return context.inventory.status === "collected"
+      ? context.inventory.report.repoRoot
+      : null;
+  };
+  // Negative control: without a boundary the walk-up adopts the ancestor
+  // and the inventory describes (and scans) the wrong tree.
+  expect(await rootOf(join(host, "unbounded"))).toBe(host);
+  expect(await rootOf(bounded)).toBe(bounded);
 });

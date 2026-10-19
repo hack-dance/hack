@@ -1,6 +1,14 @@
 import { createHash } from "node:crypto";
 import { lstat, readFile, realpath, stat } from "node:fs/promises";
-import { dirname, resolve, sep } from "node:path";
+import {
+  basename,
+  dirname,
+  isAbsolute,
+  join,
+  relative,
+  resolve,
+  sep,
+} from "node:path";
 import { YAML } from "bun";
 import { PROJECT_COMPOSE_FILENAME } from "../constants.ts";
 import { HACK_ERROR_CODES, type HackErrorCode } from "./cli-result.ts";
@@ -19,6 +27,7 @@ import {
   claimedProvenanceSource,
   isInlineCommandArgv,
   isKnownCapability,
+  isSafeInputPath,
   missingCapabilities,
   parseTaskId,
   parseTaskRecipe,
@@ -775,7 +784,10 @@ async function readServiceDefinitions(
 /**
  * Digest of one pinned input: the whole file's bytes, or the canonical JSON
  * of the value an RFC 6901 pointer selects. The file must be a regular file
- * (not a symlink) whose directory resolves inside the checkout.
+ * (not a symlink), and its path with every directory symlink resolved must
+ * itself be a safe input path: inside the checkout (`root` is already
+ * real), and not an alias for `.git`, Hack's machine-local state or a secret
+ * file reached through a symlinked directory.
  */
 async function readPinnedDigest(input: {
   readonly root: string;
@@ -792,7 +804,8 @@ async function readPinnedDigest(input: {
     }
     throw error;
   }
-  if (parent !== input.root && !parent.startsWith(`${input.root}${sep}`)) {
+  const resolved = relative(input.root, join(parent, basename(path)));
+  if (isAbsolute(resolved) || !isSafeInputPath(resolved.split(sep).join("/"))) {
     return "invalid";
   }
   let info: Awaited<ReturnType<typeof lstat>>;

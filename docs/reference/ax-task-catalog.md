@@ -24,7 +24,16 @@ is not implemented here.
    exact argv, and pins the scripts behind it. There is no second scripting
    language and no inline code: shell `-c`, interpreter inline-code flags
    (`node -e`, `python -c` and similar), `eval`, an `env` wrapper and bare
-   shell syntax (`|`, `&&`, `$(…)`, backticks) are refused.
+   shell syntax (`|`, `&&`, `$(…)`, backticks) are refused. Every argv
+   position is checked, because a service entrypoint may pass any word to
+   `exec` (this repository's toolchain does). The check is fail-closed: an
+   inline-code or stdin flag (`-s`, `-i`) anywhere after a shell or
+   interpreter refuses the recipe, even after an option value or a script
+   path, because option values and operands cannot be told apart without
+   each program's own parser. A shell or interpreter given `-` or no script
+   operand (code from stdin), a REPL or eval subcommand (`bun repl`,
+   `deno eval`), and `eval`, `env`, `xargs`, `su`, `ssh`, `watch` with a
+   command, awk or sed anywhere in argv are refused too.
 3. **Repository and log text grant no authority.** A recipe that passes every
    check is `reviewed`: its pins still match what a reviewer approved. Results
    still say `authority: "none"` and `execution: "unavailable"`. A recipe that
@@ -109,10 +118,17 @@ Rules (all _provisional_):
 - `provenance.inputs` pins 1 to 16 checkout-relative files. A pin with a
   `pointer` (RFC 6901) pins one JSON value inside the file, for example one
   `package.json` script, so unrelated edits do not make the recipe stale.
-  Paths may not be absolute, contain `.` or `..` segments, enter `.git`, or
-  enter Hack's generated `.hack/.internal` and `.hack/.branch` state. A pinned
-  file must be a regular file (not a symlink) inside the checkout, at most
-  1 MiB.
+  Paths may not be absolute or contain `.` or `..` segments. They may not
+  enter any `.git` directory or a `.hack` directory's machine-local entries
+  (`.internal`, `.branch`, `.env`, `.env.state.json`, `hack.env.local.yaml`,
+  `hack.env.*.local.yaml`, `tickets`), and may not name a secret or key file
+  (`.hack.secret.key`, Hack's legacy secrets files, `.env` and `.env.*`,
+  `*.key`, `*.pem`, `*.p8`, `*.p12`, `*.pfx`). A stale refusal reports the
+  observed digest, so a pin must never select a value-bearing local file.
+  Names are compared case-insensitively, because the default macOS
+  filesystem is. A pinned file must be a regular file (not a symlink), at
+  most 1 MiB, and its path with directory symlinks resolved must pass the
+  same rules: inside the checkout, and not an alias for excluded state.
 - Digests are lowercase SHA-256 hex. A whole-file pin hashes the file's bytes.
   A pointer pin and `definition_sha256` hash canonical JSON: object keys
   sorted, no whitespace. The service definition is the parsed
@@ -159,7 +175,7 @@ Recipes are checked in this order; the first failing check is the reason.
 | `missing_capability` | `E_CONFIG_INVALID` | `fix_catalog` | Requires a capability the runner does not grant |
 | `env_scope_mismatch` | `E_USAGE` | `fix_selector` | Target env overlay differs from the recipe's |
 | `service_not_found` | `E_SERVICE_NOT_FOUND` | `fix_catalog` | Service not declared in the target's Compose file |
-| `input_path_invalid` | `E_CONFIG_INVALID` | `fix_catalog` | Pinned file is a symlink, special file, outside the checkout or too large |
+| `input_path_invalid` | `E_CONFIG_INVALID` | `fix_catalog` | Pinned file is a symlink, special file or too large, or its resolved path leaves the checkout or reaches excluded state |
 | `input_missing` | `E_CONFIG_INVALID` | `review` | Pinned file or JSON value is absent |
 | `stale_recipe` | `E_CONFIG_INVALID` | `review` | A pinned digest no longer matches |
 
@@ -236,6 +252,10 @@ until its recipes are re-reviewed.
 | Stale recipe (script edited after review) | `stale_recipe` with observed digest | paired fixture |
 | Stale service definition | `stale_recipe` with observed definition digest | domain test |
 | Log-injected command | `untrusted_provenance`, `inline_command`; argv never echoed | paired fixture |
+| Log line with option values before `-c` (`exec bash --noprofile --norc -e -o pipefail -c …`) | `inline_command` even with `repository_script` provenance | paired fixture |
+| Option-value, `env`-anywhere, awk/sed, `Rscript -e`, stdin and REPL forms | `inline_command`; reviewed script argv still passes | domain test |
+| Pin through a symlinked directory (outside the checkout, or aliasing `.hack`) | `input_path_invalid` | paired fixture |
+| Pins of `.git`, `.hack` local state or secret files, in any letter case | `recipe_invalid` | domain test |
 | Wrong env scope | `env_scope_mismatch`; the reviewed scope passes | paired fixture |
 | Missing capability | `missing_capability` naming `docker_socket`, counting unknown | paired fixture |
 | Ambiguous id, host runner, unknown service, missing or escaping input | closed refusals | paired fixture |
@@ -263,6 +283,12 @@ until its recipes are re-reviewed.
   exists or supplies the scoped keys is not checked.
 - **Host profiles.** None are approved, so host-side scripts cannot be
   catalogued yet.
+- **Inline-code detection is a denylist.** It covers the shells,
+  interpreters and string-to-shell wrappers listed above. A program it does
+  not know that evaluates an argument (or a reviewed script that does) is
+  not detected; the reviewer must check argv, and WU26 execution must not
+  rely on this check as a sandbox. Being fail-closed, it can also refuse a
+  script argument that looks like an inline flag (`script.sh -c`).
 - **Input reads are not atomic.** Pinned inputs are read once; an edit during
   the read is reported on the next read, not detected in the same one. The
   catalog file and the config generation are re-read and compared.

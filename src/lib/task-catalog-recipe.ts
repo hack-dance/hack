@@ -249,36 +249,168 @@ export function claimedProvenanceSource(value: unknown): string | null {
   return typeof source === "string" ? source : null;
 }
 
-/** Shell inline-code flags: `sh -c '<code>'` and its clusters (`-ec`). */
-const SHELL_FLAGS = ["-c", "--command"] as const;
+/**
+ * How one program can evaluate text as code. The detector is deliberately
+ * fail-closed: it cannot know every program's option grammar, so an inline
+ * or stdin flag anywhere after the program counts, even one that would be an
+ * option value or a script argument. A recipe that trips it must run a
+ * reviewed script file without such arguments instead.
+ */
+type Evaluator = {
+  /** Options whose argument (or the rest of argv) is inline code. */
+  readonly inline: readonly string[];
+  /** Options that read code from stdin or start an interactive session. */
+  readonly stdin: readonly string[];
+  /**
+   * Options that consume the next argument, so that argument is not the
+   * script operand. Matched case-sensitively; used only to find the operand.
+   */
+  readonly valueOptions: readonly string[];
+  /** First-operand subcommands that evaluate a string or start a REPL. */
+  readonly subcommands: readonly string[];
+  /** True when, without a script operand, the program reads code from stdin. */
+  readonly needsOperand: boolean;
+  /** True when every following argument is joined and run by a shell. */
+  readonly evaluatesOperands: boolean;
+};
+
+function evaluator(spec: Partial<Evaluator>): Evaluator {
+  return {
+    inline: [],
+    stdin: [],
+    valueOptions: [],
+    subcommands: [],
+    needsOperand: false,
+    evaluatesOperands: false,
+    ...spec,
+  };
+}
+
+const SHELL = evaluator({
+  inline: ["-c", "--command"],
+  stdin: ["-s", "-i"],
+  valueOptions: ["-o", "+o", "-O", "+O", "--rcfile", "--init-file"],
+  needsOperand: true,
+});
+
+const JS_INLINE = ["-e", "--eval", "-p", "--print"] as const;
+const PWSH_INLINE = ["-c", "-command", "-encodedcommand", "-e", "-ec"] as const;
 
 /**
- * Program names whose options can evaluate a string argument as code: a
- * shell, or a second scripting language's inline-code flag.
+ * Programs that can evaluate a string argument as code, keyed by their name
+ * without a version suffix (`python3.12` is `python`). Every argv position
+ * is checked, because a service entrypoint may pass any word on to `exec`
+ * (this repository's toolchain service does).
  */
-const INLINE_FLAGS: Readonly<Record<string, readonly string[]>> = {
-  sh: SHELL_FLAGS,
-  bash: SHELL_FLAGS,
-  zsh: SHELL_FLAGS,
-  dash: SHELL_FLAGS,
-  ksh: SHELL_FLAGS,
-  mksh: SHELL_FLAGS,
-  ash: SHELL_FLAGS,
-  fish: SHELL_FLAGS,
-  csh: SHELL_FLAGS,
-  tcsh: SHELL_FLAGS,
-  node: ["-e", "--eval", "-p", "--print"],
-  nodejs: ["-e", "--eval", "-p", "--print"],
-  bun: ["-e", "--eval", "-p", "--print"],
-  perl: ["-e", "-E"],
-  ruby: ["-e"],
-  php: ["-r"],
-  lua: ["-e"],
-  osascript: ["-e"],
-  pwsh: ["-c", "-command", "-encodedcommand", "-e", "-ec"],
-  powershell: ["-c", "-command", "-encodedcommand", "-e", "-ec"],
-  python: ["-c"],
+const EVALUATORS: Readonly<Record<string, Evaluator>> = {
+  sh: SHELL,
+  bash: SHELL,
+  zsh: SHELL,
+  dash: SHELL,
+  ksh: SHELL,
+  mksh: SHELL,
+  ash: SHELL,
+  fish: SHELL,
+  csh: SHELL,
+  tcsh: SHELL,
+  node: evaluator({
+    inline: JS_INLINE,
+    stdin: ["-i", "--interactive"],
+    valueOptions: [
+      "-r",
+      "--require",
+      "--import",
+      "--loader",
+      "--experimental-loader",
+      "-C",
+      "--conditions",
+      "--input-type",
+      "--title",
+      "--env-file",
+    ],
+    needsOperand: true,
+  }),
+  nodejs: evaluator({
+    inline: JS_INLINE,
+    stdin: ["-i", "--interactive"],
+    needsOperand: true,
+  }),
+  bun: evaluator({
+    inline: JS_INLINE,
+    valueOptions: ["-r", "--preload", "--cwd", "--env-file", "--config"],
+    subcommands: ["repl"],
+  }),
+  deno: evaluator({ subcommands: ["eval", "repl"], needsOperand: true }),
+  python: evaluator({
+    inline: ["-c"],
+    stdin: ["-i"],
+    valueOptions: ["-W", "-X", "--check-hash-based-pycs"],
+    needsOperand: true,
+  }),
+  pypy: evaluator({ inline: ["-c"], stdin: ["-i"], needsOperand: true }),
+  perl: evaluator({
+    inline: ["-e", "-E"],
+    valueOptions: ["-I", "-M", "-m"],
+    needsOperand: true,
+  }),
+  ruby: evaluator({
+    inline: ["-e"],
+    valueOptions: ["-I", "-r", "-C"],
+    needsOperand: true,
+  }),
+  irb: evaluator({ needsOperand: true }),
+  php: evaluator({
+    inline: ["-r", "-B", "-R", "-E"],
+    stdin: ["-a"],
+    valueOptions: ["-c", "-d", "-z"],
+    needsOperand: true,
+  }),
+  lua: evaluator({
+    inline: ["-e"],
+    stdin: ["-i"],
+    valueOptions: ["-l"],
+    needsOperand: true,
+  }),
+  luajit: evaluator({ inline: ["-e"], stdin: ["-i"], needsOperand: true }),
+  rscript: evaluator({ inline: ["-e"] }),
+  // Bare `R` would also read stdin, but a one-letter word is too common as
+  // an ordinary argument to refuse on its own.
+  r: evaluator({ inline: ["-e"] }),
+  osascript: evaluator({
+    inline: ["-e"],
+    valueOptions: ["-l", "-s"],
+    needsOperand: true,
+  }),
+  expect: evaluator({ inline: ["-c"], stdin: ["-i"], needsOperand: true }),
+  tclsh: evaluator({ needsOperand: true }),
+  pwsh: evaluator({ inline: PWSH_INLINE, needsOperand: true }),
+  powershell: evaluator({ inline: PWSH_INLINE, needsOperand: true }),
+  cmd: evaluator({ inline: ["/c", "/k"], needsOperand: true }),
+  flock: evaluator({ inline: ["-c", "--command"] }),
+  script: evaluator({ inline: ["-c", "--command"] }),
+  watch: evaluator({ evaluatesOperands: true }),
 };
+
+/**
+ * Programs refused wherever they appear: `eval`; `env`, which can rewrite
+ * the scoped environment, split a string into a command (`-S`) or print
+ * every value; `xargs`, which builds a command from stdin; `su` and `ssh`,
+ * which hand a string to another shell; and the awk and sed families, whose
+ * first operand is program text (`awk 'BEGIN{system(…)}'`, GNU sed's `e`).
+ */
+const ALWAYS_EVALUATES: ReadonlySet<string> = new Set([
+  "eval",
+  "env",
+  "xargs",
+  "su",
+  "ssh",
+  "awk",
+  "gawk",
+  "mawk",
+  "nawk",
+  "sed",
+  "gsed",
+]);
 
 /** Argv elements that only make sense to a shell parser. */
 const SHELL_SYNTAX_TOKENS: ReadonlySet<string> = new Set([
@@ -297,54 +429,62 @@ const SHELL_SYNTAX_TOKENS: ReadonlySet<string> = new Set([
 ]);
 
 const EXE_SUFFIX = /\.exe$/;
-const PYTHON_NAME = /^python[0-9.]*$/;
+const VERSION_SUFFIX = /[0-9.]+$/;
 const SHORT_OPTION_CLUSTER = /^-[a-z]+$/;
 
+/** Program basename, lowercased, without `.exe` or a version suffix. */
 function programName(arg: string): string {
   const base = arg.split("/").at(-1) ?? arg;
-  return base.toLowerCase().replace(EXE_SUFFIX, "");
-}
-
-function inlineFlagsFor(name: string): readonly string[] | null {
-  if (PYTHON_NAME.test(name)) {
-    return INLINE_FLAGS.python ?? null;
-  }
-  return Object.hasOwn(INLINE_FLAGS, name)
-    ? (INLINE_FLAGS[name] ?? null)
-    : null;
+  const name = base.toLowerCase().replace(EXE_SUFFIX, "");
+  return name.replace(VERSION_SUFFIX, "") || name;
 }
 
 /**
- * An option that selects inline code: the flag itself, its `=` form, or a
- * single-dash cluster that contains a one-letter flag (`-Ic`, `-ec`).
+ * An argument that selects one of `flags`: the flag itself, its `=` form,
+ * or a single-dash cluster that contains a one-letter flag (`-Ic`, `-ec`).
+ * Both sides are lowercased, so `-C` also matches `-c` (fail-closed).
  */
-function matchesInlineFlag(opts: {
-  readonly option: string;
+function matchesFlag(opts: {
+  readonly arg: string;
   readonly flags: readonly string[];
 }): boolean {
-  return opts.flags.some((flag) => {
-    if (opts.option === flag || opts.option.startsWith(`${flag}=`)) {
+  const arg = opts.arg.toLowerCase();
+  return opts.flags.some((raw) => {
+    const flag = raw.toLowerCase();
+    if (arg === flag || arg.startsWith(`${flag}=`)) {
       return true;
     }
     return (
       flag.length === 2 &&
-      SHORT_OPTION_CLUSTER.test(opts.option) &&
-      opts.option.includes(flag.slice(1))
+      flag.startsWith("-") &&
+      SHORT_OPTION_CLUSTER.test(arg) &&
+      arg.includes(flag.slice(1))
     );
   });
 }
 
-/** Leading option arguments that follow argv[index], lowercased. */
-function optionsAfter(argv: readonly string[], index: number): string[] {
-  const out: string[] = [];
-  for (let next = index + 1; next < argv.length; next++) {
-    const arg = argv[next] ?? "";
-    if (!arg.startsWith("-") || arg === "--") {
-      break;
+/**
+ * The first argument that is neither an option nor a known option's value:
+ * the script operand, or null when there is none. `-` (read the script from
+ * stdin) is returned as is.
+ */
+function firstOperand(opts: {
+  readonly rest: readonly string[];
+  readonly valueOptions: readonly string[];
+}): string | null {
+  for (let index = 0; index < opts.rest.length; index++) {
+    const arg = opts.rest[index] ?? "";
+    if (arg === "--") {
+      return opts.rest[index + 1] ?? null;
     }
-    out.push(arg.toLowerCase());
+    if (arg === "-" || !(arg.startsWith("-") || arg.startsWith("+"))) {
+      return arg;
+    }
+    if (opts.valueOptions.includes(arg)) {
+      index += 1;
+    }
   }
-  return out;
+  return null;
 }
 
 function isShellSyntax(arg: string): boolean {
@@ -353,37 +493,43 @@ function isShellSyntax(arg: string): boolean {
   );
 }
 
-/** True when argv[index] is a program invoked with inline code. */
-function evaluatesInlineCode(argv: readonly string[], index: number): boolean {
+/** True when argv[index], taken as a program, could evaluate code. */
+function evaluatesCode(argv: readonly string[], index: number): boolean {
   const name = programName(argv[index] ?? "");
-  if (name === "eval") {
+  if (ALWAYS_EVALUATES.has(name)) {
     return true;
   }
-  if (name === "deno" && argv[index + 1] === "eval") {
-    return true;
-  }
-  const flags = inlineFlagsFor(name);
-  if (flags === null) {
+  const spec = Object.hasOwn(EVALUATORS, name) ? EVALUATORS[name] : undefined;
+  if (spec === undefined) {
     return false;
   }
-  return optionsAfter(argv, index).some((option) =>
-    matchesInlineFlag({ option, flags })
-  );
+  const rest = argv.slice(index + 1);
+  if (spec.evaluatesOperands) {
+    return rest.length > 0;
+  }
+  const flags = [...spec.inline, ...spec.stdin];
+  if (rest.some((arg) => matchesFlag({ arg, flags }))) {
+    return true;
+  }
+  const operand = firstOperand({ rest, valueOptions: spec.valueOptions });
+  if (operand === null) {
+    return spec.needsOperand;
+  }
+  return operand === "-" || spec.subcommands.includes(operand.toLowerCase());
 }
 
 /**
- * True when argv would evaluate a string as code or depend on a shell
- * parser: a shell with `-c`, an interpreter's inline-code flag, `eval`,
- * an `env` wrapper (which can rewrite the scoped environment or split a
- * string), or bare shell syntax copied from a log line. Recipes must run a
- * reviewed script file instead; there is no shell endpoint.
+ * True when argv could evaluate a string as code or depend on a shell
+ * parser: a shell or interpreter given an inline-code or stdin flag
+ * (anywhere after it, even after an option value or a script path), given
+ * `-` or no script operand, or a REPL/eval subcommand; `eval`, `env`,
+ * `xargs`, `su`, `ssh`, awk or sed anywhere; or bare shell syntax copied
+ * from a log line. Recipes must run a reviewed script file instead; there
+ * is no shell endpoint.
  */
 export function isInlineCommandArgv(argv: readonly string[]): boolean {
-  if (argv.length > 0 && programName(argv[0] ?? "") === "env") {
-    return true;
-  }
   return argv.some(
-    (arg, index) => isShellSyntax(arg) || evaluatesInlineCode(argv, index)
+    (arg, index) => isShellSyntax(arg) || evaluatesCode(argv, index)
   );
 }
 
@@ -494,9 +640,38 @@ function parseEnvScope(value: unknown): TaskRecipe["env"] | null {
 }
 
 /**
- * A checkout-relative POSIX path: no absolute path, backslash, empty, `.` or
- * `..` segment, nothing inside `.git`, and nothing in Hack's machine-local
- * generated state.
+ * Entries of a `.hack` directory that are machine-local: generated state,
+ * the materialized env and its state, local overlays and legacy caches
+ * (the managed `.hack/.gitignore` block). Compared lowercased.
+ */
+const HACK_DIR_LOCAL_ENTRIES: ReadonlySet<string> = new Set([
+  ".internal",
+  ".branch",
+  ".env",
+  ".env.state.json",
+  "hack.env.local.yaml",
+  "tickets",
+]);
+
+/** `hack.env.<overlay>.local.yaml` local overlay files. Lowercased input. */
+const HACK_ENV_LOCAL_OVERLAY = /^hack\.env\..+\.local\.yaml$/;
+
+/**
+ * Basenames that hold secrets or key material wherever they appear: the
+ * project env secret key, Hack's legacy secrets files, dotenv files and
+ * private-key files. Lowercased input.
+ */
+const SECRET_BASENAME =
+  /^(?:\.hack\.secret\.key|\.hack-secrets-file\.key|\.hack-secrets\.enc\.json|\.env|\.env\..*|.*\.(?:key|pem|p8|p12|pfx))$/;
+
+/**
+ * A checkout-relative POSIX path to a reviewed repository file: no absolute
+ * path, backslash, empty, `.` or `..` segment; nothing inside any `.git`;
+ * nothing in a `.hack` directory's machine-local entries; and no secret or
+ * key file. Pin digests are reported back on a stale refusal, so a pin must
+ * never select a value-bearing machine-local file. Segments are compared
+ * lowercased and NFC-normalized, because the default macOS filesystem is
+ * case- and normalization-insensitive (`.GIT/config` is `.git/config`).
  */
 export function isSafeInputPath(path: string): boolean {
   if (
@@ -512,14 +687,18 @@ export function isSafeInputPath(path: string): boolean {
   if (segments.some((s) => s === "" || s === "." || s === "..")) {
     return false;
   }
-  if (segments[0] === ".git") {
+  const folded = segments.map((s) => s.normalize("NFC").toLowerCase());
+  if (folded.includes(".git")) {
     return false;
   }
-  const generated = new Set([".internal", ".branch"]);
-  return !segments.some(
+  const inHackDirLocalState = folded.some(
     (segment, index) =>
-      index > 0 && segments[index - 1] === ".hack" && generated.has(segment)
+      index > 0 &&
+      folded[index - 1] === ".hack" &&
+      (HACK_DIR_LOCAL_ENTRIES.has(segment) ||
+        HACK_ENV_LOCAL_OVERLAY.test(segment))
   );
+  return !(inHackDirLocalState || SECRET_BASENAME.test(folded.at(-1) ?? ""));
 }
 
 function parsePointer(value: unknown): string | null | undefined {

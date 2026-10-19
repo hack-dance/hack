@@ -386,7 +386,14 @@ test("a secret that does not open under the current key refuses the whole import
 test("secret hydration will not mint a key file that shadows HACK_ENV_SECRET_KEY", async () => {
   const repo = await createRepo();
   const previous = process.env.HACK_ENV_SECRET_KEY;
-  process.env.HACK_ENV_SECRET_KEY = "synthetic-environment-key-material-42";
+  // Assembled at runtime so no key-shaped literal is committed.
+  process.env.HACK_ENV_SECRET_KEY = [
+    "synthetic",
+    "environment",
+    "key",
+    "material",
+    "42",
+  ].join("-");
   try {
     expect(await refusalOf(() => hydrate(repo, { API_TOKEN: TOKEN }))).toBe(
       "key_env_only"

@@ -479,6 +479,31 @@ async function isGitTrackedProjectEnvPath(opts: {
   return null;
 }
 
+/**
+ * Whether `startDir` or an ancestor holds a `.git` entry (directory, linked
+ * worktree file or symlink), or `GIT_DIR` points git elsewhere. It does not ask
+ * git, so it still answers when git itself refuses to run in the checkout.
+ */
+async function isInsideGitCheckoutMarker(opts: {
+  readonly startDir: string;
+}): Promise<boolean> {
+  if ((process.env.GIT_DIR ?? "").trim().length > 0) {
+    return true;
+  }
+  let current = resolve(opts.startDir);
+  while (true) {
+    const marker = await lstat(resolve(current, ".git")).catch(() => null);
+    if (marker !== null) {
+      return true;
+    }
+    const parent = dirname(current);
+    if (parent === current) {
+      return false;
+    }
+    current = parent;
+  }
+}
+
 async function hasLegacyLocalEnvironment(opts: {
   readonly path: string;
 }): Promise<boolean> {
@@ -2488,11 +2513,13 @@ export async function unsetProjectEnvValue(opts: {
 /** Closed reasons `hydrateProjectEnvLocalLayer` refuses with; none writes a layer. */
 export const PROJECT_ENV_HYDRATION_REFUSAL_REASONS = [
   "tracked_layer",
+  "tracking_unknown",
   "locked",
   "stale_lock",
   "unreadable_layer",
   "wrong_key",
   "key_env_only",
+  "secret_downgrade",
   "concurrent_write",
 ] as const;
 
@@ -2509,6 +2536,8 @@ function projectEnvHydrationRefusalMessage(opts: {
   switch (opts.reason) {
     case "tracked_layer":
       return "Refusing to hydrate: git tracks the machine-local env layer, so hydrated values would be committed. Untrack it with `git rm --cached` and retry.";
+    case "tracking_unknown":
+      return "Refusing to hydrate: this checkout is a git repository, but git could not report whether it tracks the machine-local env layer (for example after a safe.directory refusal, with a damaged index, or without git installed), so hydrated values could be committed. Make `git status` work in this checkout and retry.";
     case "locked":
       return "Refusing to hydrate: another `hack env hydrate` is writing this project's machine-local env layer. Retry when it finishes.";
     case "stale_lock":
@@ -2519,6 +2548,8 @@ function projectEnvHydrationRefusalMessage(opts: {
       return `Refusing to hydrate: a secret already in the machine-local env layer does not decrypt under the project env key, or no key is available. Restore the matching ${PROJECT_ENV_KEY_FILENAME} and retry.`;
     case "key_env_only":
       return `Refusing to hydrate secrets: ${PROJECT_ENV_SECRET_KEY_ENV} is set but no ${PROJECT_ENV_KEY_FILENAME} exists, and creating one would replace that key for every layer. Store the same key in ${PROJECT_ENV_KEY_FILENAME} and retry.`;
+    case "secret_downgrade":
+      return "Refusing to hydrate without --secret: an imported key is stored as a secret in the machine-local env layer, and a plain import would replace its ciphertext with plaintext. Re-run with --secret, or first remove that key with `hack env unset <key> --local` if it should be stored as plain text.";
     case "concurrent_write":
       return "Refusing to hydrate: the machine-local env layer changed while hydration was preparing it. Re-run hydration.";
     default:
@@ -2564,7 +2595,13 @@ export type ProjectEnvHydrationResult = {
  * Contract:
  * - Only the effective machine-local layer for `envName` is written
  *   (`hack.env.local.yaml` or `hack.env.<overlay>.local.yaml`); a layer that
- *   git tracks is refused. Tracked defaults are never read for writing.
+ *   git tracks is refused, and so is any layer inside a git checkout where
+ *   git cannot answer (fail closed). Tracked defaults are never read for
+ *   writing.
+ * - A layer that exists but is not a valid env file is refused, never
+ *   replaced, so hand-written content is not lost.
+ * - Without `secret`, an imported key that the target scope stores as a
+ *   secret is refused rather than downgraded to plaintext.
  * - Keys outside `entries`, other scopes and removal markers for other keys
  *   are kept as they are. An imported key replaces that key's local entry.
  * - Idempotent: an entry that already holds its value is kept unchanged (a
@@ -2624,6 +2661,14 @@ export async function hydrateProjectEnvLocalLayer(opts: {
   if (tracked === true) {
     throw refuse("tracked_layer");
   }
+  // `null` covers both "not a repository" and "git failed" (a safe.directory
+  // refusal, a damaged index, git missing). Only the first is safe to write.
+  if (
+    tracked === null &&
+    (await isInsideGitCheckoutMarker({ startDir: opts.projectRoot }))
+  ) {
+    throw refuse("tracking_unknown");
+  }
 
   const release = await acquireProjectEnvHydrationLock({
     projectDir: opts.projectDir,
@@ -2668,8 +2713,25 @@ async function hydrateLockedProjectEnvLayer(opts: {
     secret: opts.secret,
     refuse: opts.refuse,
   });
+  const previousScope = layer.config.values[opts.scope] ?? {};
+  if (
+    !opts.secret &&
+    [...opts.entries.keys()].some((entryKey) => {
+      const previous = Object.hasOwn(previousScope, entryKey)
+        ? previousScope[entryKey]
+        : undefined;
+      return (
+        previous !== undefined &&
+        previous !== null &&
+        isProjectEnvSecretValue(previous)
+      );
+    })
+  ) {
+    // A plain import would silently drop at-rest encryption for that key.
+    throw opts.refuse("secret_downgrade");
+  }
   const plan = planProjectEnvHydration({
-    previousScope: layer.config.values[opts.scope] ?? {},
+    previousScope,
     entries: opts.entries,
     keyText: key.keyText,
   });

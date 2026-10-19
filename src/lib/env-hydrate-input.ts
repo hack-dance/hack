@@ -28,7 +28,7 @@ import type { EnvValueStdinSource } from "./env-value-stdin.ts";
  * - Empty values and repeated keys are refused. No `${VAR}` expansion.
  *
  * `json` format: one object whose keys match the key pattern and whose values
- * are non-empty strings.
+ * are non-empty strings. Repeated keys are refused, not resolved last-wins.
  */
 export const ENV_HYDRATE_INPUT_MAX_BYTES = 1024 * 1024;
 
@@ -298,6 +298,11 @@ function parseJsonEntries(text: string): Map<string, string> {
   if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
     throw new EnvHydrateInputError("json_not_object");
   }
+  // JSON.parse silently keeps the last of repeated keys; refuse them instead,
+  // as the env format does.
+  if (hasDuplicateTopLevelJsonKey(text)) {
+    throw new EnvHydrateInputError("duplicate_key");
+  }
   const entries = new Map<string, string>();
   for (const [key, value] of Object.entries(parsed)) {
     if (!ENV_KEY_PATTERN.test(key)) {
@@ -312,6 +317,61 @@ function parseJsonEntries(text: string): Map<string, string> {
     entries.set(key, value);
   }
   return entries;
+}
+
+/**
+ * Whether the top-level object in `text` names one key twice. `text` must
+ * already be valid JSON whose root is an object: the scan only tracks string
+ * boundaries and nesting depth, and decodes each depth-1 key with JSON.parse
+ * so escaped spellings of one key compare equal.
+ */
+function hasDuplicateTopLevelJsonKey(text: string): boolean {
+  const seen = new Set<string>();
+  let depth = 0;
+  let expectKey = false;
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index];
+    if (char === '"') {
+      const end = closingJsonQuoteIndex(text, index);
+      // expectKey is set only at depth 1, after `{` or `,`, and in valid JSON
+      // the next string there is the key.
+      if (expectKey) {
+        const key = String(JSON.parse(text.slice(index, end + 1)));
+        if (seen.has(key)) {
+          return true;
+        }
+        seen.add(key);
+        expectKey = false;
+      }
+      index = end;
+      continue;
+    }
+    depth += jsonDepthChange(char);
+    // Only the root opens depth 1, and the caller checked it is an object.
+    if (depth === 1 && (char === "{" || char === ",")) {
+      expectKey = true;
+    }
+  }
+  return false;
+}
+
+/** Index of the quote closing the JSON string that opens at `start`. */
+function closingJsonQuoteIndex(text: string, start: number): number {
+  let index = start + 1;
+  while (index < text.length && text[index] !== '"') {
+    index += text[index] === "\\" ? 2 : 1;
+  }
+  return index;
+}
+
+function jsonDepthChange(char: string | undefined): number {
+  if (char === "{" || char === "[") {
+    return 1;
+  }
+  if (char === "}" || char === "]") {
+    return -1;
+  }
+  return 0;
 }
 
 async function readBoundedStdin(input: {

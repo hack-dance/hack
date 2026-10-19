@@ -141,6 +141,40 @@ test("empty input and malformed json are refused without echo", () => {
   }
 });
 
+test("json format refuses a repeated key instead of keeping the last value", () => {
+  const duplicates = [
+    `{"API_TOKEN": "${CANARY}", "API_TOKEN": "x"}`,
+    `{"API_TOKEN": "x", "DB_PASS": "y", "API_TOKEN": "${CANARY}"}`,
+    // An escaped spelling names the same key.
+    `{"API_TOKEN": "${CANARY}", "\\u0041PI_TOKEN": "x"}`,
+    // Brackets inside a value do not hide a later repeat.
+    `{"API_TOKEN": "{[${CANARY}", "API_TOKEN": "x"}`,
+  ];
+  for (const text of duplicates) {
+    expect(refusal(() => entriesOf(text, "json"))).toEqual({
+      reason: "duplicate_key",
+      line: null,
+    });
+  }
+  // Quotes, commas and braces inside values, and nested keys, are not keys.
+  expect(
+    entriesOf(
+      `{"API_TOKEN": "a\\",\\"API_TOKEN\\": {[", "DB_PASS": "}${CANARY}"}`,
+      "json"
+    )
+  ).toEqual({ API_TOKEN: 'a","API_TOKEN": {[', DB_PASS: `}${CANARY}` });
+  for (const nested of [
+    '{"API_TOKEN": {"NESTED": "a", "NESTED": "b"}}',
+    '{"API_TOKEN": {"API_TOKEN": "a"}}',
+    '{"API_TOKEN": "a", "DB_PASS": {"X": 1, "API_TOKEN": 2}}',
+    '{"API_TOKEN": ["a", "API_TOKEN"]}',
+  ]) {
+    expect(refusal(() => entriesOf(nested, "json")).reason).toBe(
+      "json_value_not_string"
+    );
+  }
+});
+
 test("--format accepts only env and json and never echoes the argument", () => {
   expect(parseEnvHydrateInputFormat(undefined)).toBe("env");
   expect(parseEnvHydrateInputFormat("json")).toBe("json");

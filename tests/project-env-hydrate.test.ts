@@ -51,6 +51,32 @@ const PASSWORD = "synthetic-password-c51a";
 const CHANGED = "synthetic-changed-80f2";
 const CANARIES = [TOKEN, PASSWORD, CHANGED] as const;
 
+/**
+ * Synthetic key material, assembled at runtime so that no key-shaped literal
+ * sits in source for secret scanners to flag.
+ */
+function syntheticKeyMaterial(label: string): string {
+  return ["synthetic", label, "key", "material", "0123456789"].join("-");
+}
+
+/** Runs `run` with `HACK_ENV_SECRET_KEY` set, restoring the previous value. */
+async function withEnvironmentKey<T>(
+  keyText: string,
+  run: () => Promise<T>
+): Promise<T> {
+  const previous = process.env.HACK_ENV_SECRET_KEY;
+  process.env.HACK_ENV_SECRET_KEY = keyText;
+  try {
+    return await run();
+  } finally {
+    if (previous === undefined) {
+      Reflect.deleteProperty(process.env, "HACK_ENV_SECRET_KEY");
+    } else {
+      process.env.HACK_ENV_SECRET_KEY = previous;
+    }
+  }
+}
+
 const tempDirs = new Set<string>();
 
 afterEach(async () => {
@@ -385,26 +411,11 @@ test("a secret that does not open under the current key refuses the whole import
 
 test("secret hydration will not mint a key file that shadows HACK_ENV_SECRET_KEY", async () => {
   const repo = await createRepo();
-  const previous = process.env.HACK_ENV_SECRET_KEY;
-  // Assembled at runtime so no key-shaped literal is committed.
-  process.env.HACK_ENV_SECRET_KEY = [
-    "synthetic",
-    "environment",
-    "key",
-    "material",
-    "42",
-  ].join("-");
-  try {
+  await withEnvironmentKey(syntheticKeyMaterial("environment"), async () => {
     expect(await refusalOf(() => hydrate(repo, { API_TOKEN: TOKEN }))).toBe(
       "key_env_only"
     );
-  } finally {
-    if (previous === undefined) {
-      Reflect.deleteProperty(process.env, "HACK_ENV_SECRET_KEY");
-    } else {
-      process.env.HACK_ENV_SECRET_KEY = previous;
-    }
-  }
+  });
   expect(
     await Bun.file(resolve(repo.projectRoot, PROJECT_ENV_KEY_FILENAME)).exists()
   ).toBe(false);
@@ -431,6 +442,119 @@ test("a git-tracked local layer is refused", async () => {
   // Positive control: the untracked base local layer still hydrates.
   expect((await hydrate(repo, { API_TOKEN: TOKEN })).changed).toBe(true);
 }, 30_000);
+
+test("a checkout where git cannot report tracking refuses instead of writing", async () => {
+  const repo = await createTrackedRepo();
+  await hydrate(repo, { API_TOKEN: TOKEN });
+  const original = await readFile(repo.localFile);
+  // A damaged index makes `git ls-files` exit 128, as a safe.directory
+  // refusal does; that is not the same as "not a repository".
+  await writeFile(resolve(repo.projectRoot, ".git", "index"), "not an index\n");
+
+  expect(await refusalOf(() => hydrate(repo, { API_TOKEN: CHANGED }))).toBe(
+    "tracking_unknown"
+  );
+  expect(
+    await refusalOf(() => hydrate(repo, { PLAIN: "plain" }, false, "dev"))
+  ).toBe("tracking_unknown");
+  expect((await readFile(repo.localFile)).equals(original)).toBe(true);
+  expect(
+    await Bun.file(
+      resolveProjectEnvLocalConfigPath({
+        projectDir: repo.projectDir,
+        envName: "dev",
+      })
+    ).exists()
+  ).toBe(false);
+  expect(await stagingFiles(repo)).toEqual([]);
+  expect(await lockExists(repo)).toBe(false);
+}, 30_000);
+
+test("an existing local layer that is not a valid env file is refused, never replaced", async () => {
+  const repo = await createRepo();
+  const invalidLayers = [
+    // Not YAML at all.
+    `values: [unclosed\n  API_TOKEN: ${TOKEN}\n`,
+    // Valid YAML, wrong shape: a scope that is not a mapping.
+    "version: 1\nenvironment: default\nsecretsprovider: project_key\nvalues:\n  global: operator notes\n",
+    // Valid YAML, wrong version.
+    "version: 99\nenvironment: default\nsecretsprovider: project_key\nvalues:\n  global: {}\n",
+  ];
+  for (const layer of invalidLayers) {
+    await writeFile(repo.localFile, layer);
+    for (const secret of [true, false]) {
+      expect(
+        await refusalOf(() => hydrate(repo, { API_TOKEN: TOKEN }, secret))
+      ).toBe("unreadable_layer");
+      expect(await readFile(repo.localFile, "utf8")).toBe(layer);
+    }
+  }
+  expect(await stagingFiles(repo)).toEqual([]);
+  expect(await lockExists(repo)).toBe(false);
+
+  // Positive control: once the layer is removed, the same import succeeds.
+  await rm(repo.localFile);
+  expect((await hydrate(repo, { API_TOKEN: TOKEN })).changed).toBe(true);
+});
+
+test("existing secrets are checked with the key file before HACK_ENV_SECRET_KEY, as readers do", async () => {
+  const repo = await createRepo();
+  // Creates the key file; the stored secret is encrypted under it.
+  await hydrate(repo, { API_TOKEN: TOKEN });
+
+  await withEnvironmentKey(syntheticKeyMaterial("environment"), async () => {
+    const plain = await hydrate(repo, { PLAIN: "plain" }, false);
+    expect(plain).toMatchObject({ changed: true, added: ["PLAIN"] });
+    const secret = await hydrate(repo, {
+      API_TOKEN: CHANGED,
+      DB_PASS: PASSWORD,
+    });
+    expect(secret).toMatchObject({
+      changed: true,
+      createdKey: false,
+      added: ["DB_PASS"],
+      updated: ["API_TOKEN"],
+    });
+    // Readers resolve with the same priority and open every entry.
+    expect(await resolvedGlobal(repo)).toMatchObject({
+      PLAIN: "plain",
+      API_TOKEN: CHANGED,
+      DB_PASS: PASSWORD,
+    });
+  });
+});
+
+test("a plain import never downgrades a stored secret to plaintext", async () => {
+  const repo = await createRepo();
+  await hydrate(repo, { API_TOKEN: TOKEN });
+  const original = await readFile(repo.localFile);
+
+  // Same value or a new one, alone or with other keys: all refused.
+  const attempts: readonly Record<string, string>[] = [
+    { API_TOKEN: TOKEN },
+    { API_TOKEN: CHANGED },
+    { OTHER: "plain", API_TOKEN: TOKEN },
+  ];
+  for (const entries of attempts) {
+    expect(await refusalOf(() => hydrate(repo, entries, false))).toBe(
+      "secret_downgrade"
+    );
+  }
+  expect((await readFile(repo.localFile)).equals(original)).toBe(true);
+  expect(await stagingFiles(repo)).toEqual([]);
+  expect(await lockExists(repo)).toBe(false);
+
+  // Positive controls: other plain keys, and a secret repeat, still work.
+  expect((await hydrate(repo, { OTHER: "plain" }, false)).added).toEqual([
+    "OTHER",
+  ]);
+  expect((await hydrate(repo, { API_TOKEN: TOKEN })).unchanged).toEqual([
+    "API_TOKEN",
+  ]);
+  expect(
+    ciphertextOf(await readFile(repo.localFile, "utf8"), "API_TOKEN")
+  ).toBe(ciphertextOf(original.toString("utf8"), "API_TOKEN"));
+});
 
 test("a held lock refuses, and a lock from an exited process is reported as stale", async () => {
   const repo = await createRepo();

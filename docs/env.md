@@ -476,12 +476,15 @@ Input comes only from piped stdin or `--file`, never from arguments, and is at m
   must close on the same line, followed only by spaces or a `# comment`
 - empty values, repeated keys and `${VAR}` expansion are not supported
 
-`--format json` takes one object whose values are non-empty strings. One malformed
-entry refuses the whole input. The message gives only the line number, never the
+`--format json` takes one object whose values are non-empty strings. A key that
+appears twice is refused, as in the `env` format; it is not resolved by keeping the
+last value. One malformed entry refuses the whole input. The message gives only the line number, never the
 line, and nothing is written.
 
 `--secret` encrypts every imported value; without it the values are stored as plain
-entries in the local layer. `--service` picks one scope for all entries (default
+entries in the local layer. A plain import refuses to replace a key that the local
+layer already stores as a secret, so repeat an import with the same flags it was first
+run with. `--service` picks one scope for all entries (default
 `global`). The output and `--json` result list the added, updated and unchanged keys,
 never values.
 
@@ -500,11 +503,20 @@ Hydration is idempotent and all-or-nothing:
 Hydration refuses, without changing the layer, when:
 
 - git tracks the target local layer
+- the project is in a git checkout but git cannot say whether it tracks the local layer,
+  for example after a `safe.directory` refusal, with a damaged index, or with git not
+  installed (outside any git checkout, hydration proceeds)
+- the local layer exists but is not a valid env file, for example invalid YAML, the
+  wrong `version`, or a scope that is not a mapping; fix or remove it first
 - a secret already in the local layer does not decrypt under the project env key, or no
-  key is available
+  key is available (`.hack.secret.key` is used before `HACK_ENV_SECRET_KEY`, as when
+  values are read)
 - `--secret` is used, no `.hack.secret.key` exists, and `HACK_ENV_SECRET_KEY` is set
   (a new key file would replace that key for every layer)
-- another `hack env hydrate` for the same project is running
+- `--secret` is not used and an imported key is stored as a secret in the target scope;
+  re-run with `--secret`, or remove the key with `hack env unset <key> --local` first
+- another `hack env hydrate` for the same project is running, or an interrupted one left
+  a stale lock (see below)
 - the local layer changed between hydration's read and its rename, for example from a
   concurrent `hack env set --local`
 

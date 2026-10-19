@@ -1,5 +1,7 @@
 import {
+  type ComposeStartupPhase,
   DEFAULT_COMPOSE_STARTUP_TIMEOUT_MS,
+  resolveComposeImageTimeoutMs,
   resolveComposeStartupTimeoutMs,
 } from "../lib/compose-startup-budget.ts";
 import { withDependencyStartupProgress } from "../lib/dependency-startup-progress.ts";
@@ -39,7 +41,15 @@ export interface RuntimeUpOptions extends RuntimeBaseOptions {
     readonly services: readonly string[];
   };
   readonly detach: boolean;
+  /** Detached `start` phase budget (container start and dependency wait). */
   readonly startupTimeoutMs?: number;
+  /** Detached `images` phase budget (image build/pull and container creation). */
+  readonly imageTimeoutMs?: number;
+  /**
+   * Called before each detached phase begins, so a caller can attribute a
+   * non-zero exit (including the 124 deadline) to the phase that produced it.
+   */
+  readonly onStartupPhase?: (phase: ComposeStartupPhase) => void;
   readonly services?: readonly string[];
   readonly noDeps?: boolean;
   readonly forceRecreate?: boolean;
@@ -85,26 +95,52 @@ function buildComposeArgs(opts: RuntimeBaseOptions): string[] {
 export const composeRuntimeBackend: RuntimeBackend = {
   name: "compose",
   async up(opts) {
-    const cmd = [
-      ...buildComposeArgs(opts),
-      "up",
-      ...(opts.detach ? ["-d"] : []),
-      ...(opts.noDeps ? ["--no-deps"] : []),
-      ...(opts.forceRecreate ? ["--force-recreate"] : []),
-      ...(opts.services ?? []),
-    ];
     if (opts.detach) {
+      const budgetEnv = { ...process.env, ...opts.env };
       const startupTimeoutMs = resolveComposeStartupTimeoutMs({
         startupTimeoutMs: opts.startupTimeoutMs,
-        env: { ...process.env, ...opts.env },
+        env: budgetEnv,
       });
-      const launch = () =>
+      const imageTimeoutMs = resolveComposeImageTimeoutMs({
+        imageTimeoutMs: opts.imageTimeoutMs,
+        env: budgetEnv,
+      });
+      const scope = [
+        ...(opts.noDeps ? ["--no-deps"] : []),
+        ...(opts.services ?? []),
+      ];
+      const runPhase = (cmd: readonly string[], timeoutMs: number) =>
         run(cmd, {
           cwd: opts.cwd,
           env: opts.env,
           stdout: opts.routeStdoutToStderr ? "stderr" : "inherit",
-          timeoutMs: startupTimeoutMs,
+          timeoutMs,
         });
+      // Image build/pull can take far longer than starting containers, so it
+      // runs (with container creation/recreation) under its own budget. The
+      // start invocation then only starts the prepared containers and waits on
+      // Compose dependency conditions; --no-build keeps it from rebuilding.
+      const launch = async () => {
+        opts.onStartupPhase?.("images");
+        const prepared = await runPhase(
+          [
+            ...buildComposeArgs(opts),
+            "up",
+            "--no-start",
+            ...(opts.forceRecreate ? ["--force-recreate"] : []),
+            ...scope,
+          ],
+          imageTimeoutMs
+        );
+        if (prepared !== 0) {
+          return prepared;
+        }
+        opts.onStartupPhase?.("start");
+        return await runPhase(
+          [...buildComposeArgs(opts), "up", "-d", "--no-build", ...scope],
+          startupTimeoutMs
+        );
+      };
       const progress = opts.dependencyProgress;
       if (!progress) {
         return await launch();
@@ -129,6 +165,13 @@ export const composeRuntimeBackend: RuntimeBackend = {
       });
     }
 
+    const cmd = [
+      ...buildComposeArgs(opts),
+      "up",
+      ...(opts.noDeps ? ["--no-deps"] : []),
+      ...(opts.forceRecreate ? ["--force-recreate"] : []),
+      ...(opts.services ?? []),
+    ];
     const env = mergeSpawnEnv(opts.env);
     const proc = Bun.spawn(cmd, {
       cwd: opts.cwd,

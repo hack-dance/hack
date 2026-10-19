@@ -122,8 +122,9 @@ on a refusal.
 | `project.registration` | The registration that owns this exact checkout root (`match: root`) or lists it as a linked worktree (`match: worktree`); `null` when unregistered |
 | `checkout.kind` | `primary`, `linked` (a linked Git worktree) or `not_git` |
 | `instance.source` | `explicit` (`--branch`), `worktree` (derived from a linked worktree's branch) or `default` |
+| `instance.branch` | The instance slug. An explicit `--branch` is slugged like `hack up --branch` (`Feature/X` becomes `feature-x`) |
 | `instance.compose_project` | The Compose project name commands use for this instance (`<base>--<branch>` for a branch instance) |
-| `services` | Service names declared in the Compose file, sorted |
+| `services` | Service names declared in the Compose file, sorted; `[]` when the file is absent or has no `services` key. A Compose file that is not YAML, whose top level is not a mapping, or whose `services` is not a mapping is refused as `compose_parse_failed` |
 | `env.source` | `explicit`, `project_default` (configured default overlay) or `base`; selection only, overlay existence is not checked |
 | `generation.id` | `cfg-v0:` plus 32 hex characters; pass it back as `--expect-generation` |
 
@@ -147,6 +148,7 @@ fixed text that never repeats caller input, paths or registry values.
 | `no_project_context` | `E_PROJECT_NOT_FOUND` | `project` | `fix_selector` |
 | `project_inputs_unsupported` | `E_CONFIG_INVALID` | `project` | `fix_project` |
 | `config_parse_failed` | `E_CONFIG_PARSE` | `project` | `fix_project` |
+| `compose_parse_failed` | `E_CONFIG_PARSE` | `project` | `fix_project` |
 | `detached_checkout` | `E_USAGE` | `instance` | `fix_selector` |
 | `service_not_found` | `E_SERVICE_NOT_FOUND` | `service` | `fix_selector` |
 | `stale_generation` | `E_USAGE` | `generation` | `reinspect` |
@@ -183,15 +185,20 @@ WU21). The inspector itself only produces snapshots.
 | --- | --- | --- | --- |
 | Two projects, selection by name | yes | yes | paired fixture |
 | Two branches (linked worktree default, explicit instance) | yes | yes | paired fixture |
+| Explicit instance slug (`Feature/X` gives `<base>--feature-x`) | yes | yes | paired fixture |
+| Env selection: project default, explicit overlay, `base` | yes | yes | paired fixture |
 | Conflicting selectors | `conflicting_selectors` | same | paired fixture |
 | Stale generation | `stale_generation` | same | paired fixture |
 | Source edit keeps generation | yes | yes | paired fixture |
 | Ambiguous equal names, moved checkout, unknown project | closed refusals | same | paired fixture |
+| Two registrations owning one checkout | `ambiguous_project` | same | paired fixture |
+| Malformed Hack config or Compose file, oversized input | `config_parse_failed`, `compose_parse_failed`, `generation_input_too_large` | same | paired fixture |
 | Detached linked worktree, no project, missing path | closed refusals | same | paired fixture |
 | Unknown service | `service_not_found` | same | paired fixture |
 | Config changed during read | `generation_changed_during_read` | same code path | domain test |
 | No registry, state or Git writes | yes | yes (audit log only) | paired fixture |
 | Malformed selector | `invalid_selector` / parser `E_USAGE` | `invalid_arguments`, not spawned | paired fixture |
+| Drifted CLI output | n/a | `data: null`; foreign fields dropped | stubbed CLI fixture |
 
 The fixtures live in `tests/project-target-inspect.test.ts`.
 
@@ -205,6 +212,10 @@ The fixtures live in `tests/project-target-inspect.test.ts`.
   inspector has no runtime probe yet.
 - **Env overlays.** Selection only; overlay existence and resolved keys are not
   checked. Use `hack env list` or `hack.project.env.keys` for key metadata.
+- **Compose validity.** The inspector refuses a Compose file it cannot parse
+  as a YAML mapping, but it does not run `docker compose config`, so a file
+  that parses but that Compose would reject (for example an invalid service
+  definition) is still reported as a target.
 - **Generation scope.** Worktree-local overrides, env files and native
   `hack.project.json` inputs are not part of the generation. Native projects
   are refused as `project_inputs_unsupported`.

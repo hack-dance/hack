@@ -45,6 +45,8 @@ type Fixture = {
   readonly alpha: string;
   readonly beta: string;
   readonly client: Client;
+  /** MCP client whose CLI command is a stub that prints `fake-envelope.json`. */
+  readonly stubClient: Client;
   readonly cliEnv: Record<string, string>;
 };
 
@@ -85,6 +87,7 @@ async function writeProject(opts: {
   readonly repo: string;
   readonly name: string;
   readonly services: readonly string[];
+  readonly config?: Readonly<Record<string, unknown>>;
 }): Promise<void> {
   await mkdir(join(opts.repo, ".hack"), { recursive: true });
   const services = opts.services
@@ -96,9 +99,12 @@ async function writeProject(opts: {
   );
   await writeFile(
     join(opts.repo, ".hack", "hack.config.json"),
-    `${JSON.stringify({ name: opts.name })}\n`
+    `${JSON.stringify({ name: opts.name, ...opts.config })}\n`
   );
 }
+
+/** Larger than the inspector's 4 MiB bound on one generation input. */
+const OVERSIZED_INPUT_BYTES = 4 * 1024 * 1024 + 1024;
 
 function registryRow(opts: {
   readonly id: string;
@@ -171,6 +177,46 @@ beforeAll(async () => {
   const moved = join(root, "moved");
   await writeProject({ repo: moved, name: "moved", services: ["api"] });
 
+  // A project with a configured default env overlay.
+  const delta = join(root, "delta");
+  await writeProject({
+    repo: delta,
+    name: "delta",
+    services: ["api"],
+    config: { env: { default_overlay: "staging" } },
+  });
+
+  // One checkout owned by two registrations (a corrupt registry).
+  const shared = join(root, "shared");
+  await writeProject({ repo: shared, name: "shared", services: ["api"] });
+
+  // Unregistered projects with malformed or oversized Hack inputs.
+  const brokenConfig = join(root, "broken-config");
+  await writeProject({ repo: brokenConfig, name: "broken", services: ["api"] });
+  await writeFile(join(brokenConfig, ".hack", "hack.config.json"), '{"name":');
+  const brokenCompose = join(root, "broken-compose");
+  await writeProject({
+    repo: brokenCompose,
+    name: "broken",
+    services: ["api"],
+  });
+  await writeFile(
+    join(brokenCompose, ".hack", "docker-compose.yml"),
+    "services: [unclosed\n"
+  );
+  const listCompose = join(root, "list-compose");
+  await writeProject({ repo: listCompose, name: "listed", services: ["api"] });
+  await writeFile(
+    join(listCompose, ".hack", "docker-compose.yml"),
+    "services:\n  - api\n"
+  );
+  const oversized = join(root, "oversized");
+  await writeProject({ repo: oversized, name: "oversized", services: ["api"] });
+  await writeFile(
+    join(oversized, ".hack", "docker-compose.yml"),
+    `services:\n  api:\n    image: busybox\n#${"x".repeat(OVERSIZED_INPUT_BYTES)}\n`
+  );
+
   await mkdir(join(root, "outside"), { recursive: true });
 
   await writeFile(
@@ -198,6 +244,9 @@ beforeAll(async () => {
           repo: join(root, "gamma-two"),
         }),
         registryRow({ id: "moved", name: "moved", repo: moved }),
+        registryRow({ id: "delta", name: "delta", repo: delta }),
+        registryRow({ id: "shared-a", name: "shared-a", repo: shared }),
+        registryRow({ id: "shared-b", name: "shared-b", repo: shared }),
       ],
     })}\n`
   );
@@ -222,11 +271,35 @@ beforeAll(async () => {
   await server.connect(serverTransport);
   await client.connect(clientTransport);
 
-  fixture = { root, state, alpha, beta, client, cliEnv };
+  // A stub CLI that prints whatever envelope a test stores, so the MCP
+  // adapter's re-validation can be observed against drifted output.
+  const stub = join(root, "hack-stub-cli");
+  await writeFile(
+    stub,
+    `#!/bin/sh\ncat '${join(root, "fake-envelope.json")}'\n`
+  );
+  await chmod(stub, 0o755);
+  const stubState = join(root, "stub-state");
+  await mkdir(stubState, { recursive: true });
+  const stubServer = createMcpServer({
+    cwd: alpha,
+    env: privateCliEnv({
+      root,
+      env: { HACK_HOME: stubState, HACK_MCP_COMMAND: stub },
+    }),
+  });
+  const stubClient = new Client({ name: "hack-target-stub", version: "1" });
+  const [stubClientTransport, stubServerTransport] =
+    InMemoryTransport.createLinkedPair();
+  await stubServer.connect(stubServerTransport);
+  await stubClient.connect(stubClientTransport);
+
+  fixture = { root, state, alpha, beta, client, stubClient, cliEnv };
 }, CASE_TIMEOUT_MS);
 
 afterAll(async () => {
   await fixture?.client.close();
+  await fixture?.stubClient.close();
   if (fixture?.root) {
     await rm(fixture.root, { recursive: true, force: true });
   }
@@ -353,6 +426,7 @@ describe("paired CLI/MCP target fixtures", () => {
       });
       expect(data.services).toEqual(["api", "web"]);
       expect(data.service).toBeNull();
+      expect(data.env).toEqual({ overlay: null, source: "base" });
       expect(data.authority).toBe("none");
       expect(data.runtime).toEqual({ observed: false, reason: "not_probed" });
     },
@@ -432,6 +506,93 @@ describe("paired CLI/MCP target fixtures", () => {
         "feature/login",
         "main",
       ]);
+    },
+    CASE_TIMEOUT_MS
+  );
+
+  test(
+    "an explicit instance is slugged like 'hack up --branch'",
+    async () => {
+      // `hack up --branch Feature/X` targets <base>--feature-x.
+      const data = okData(
+        await inspectBoth({ projectName: "alpha", branch: "Feature/X" })
+      );
+      expect(data.instance).toEqual({
+        branch: "feature-x",
+        source: "explicit",
+        compose_project: "alpha--feature-x",
+      });
+      expect(data.checkout.git_branch).toBe("main");
+    },
+    CASE_TIMEOUT_MS
+  );
+
+  test(
+    "env selection: project default, explicit overlay and base agree",
+    async () => {
+      const byDefault = okData(await inspectBoth({ projectName: "delta" }));
+      expect(byDefault.selector.env_explicit).toBe(false);
+      expect(byDefault.env).toEqual({
+        overlay: "staging",
+        source: "project_default",
+      });
+
+      const explicit = okData(
+        await inspectBoth({ projectName: "delta", env: "preview" })
+      );
+      expect(explicit.selector.env_explicit).toBe(true);
+      expect(explicit.env).toEqual({ overlay: "preview", source: "explicit" });
+
+      const base = okData(
+        await inspectBoth({ projectName: "delta", env: "base" })
+      );
+      expect(base.selector.env_explicit).toBe(true);
+      expect(base.env).toEqual({ overlay: null, source: "base" });
+    },
+    CASE_TIMEOUT_MS
+  );
+
+  test(
+    "malformed or oversized Hack inputs are refused, not reported empty",
+    async () => {
+      expectRefusal(
+        await inspectBoth({ path: join(fixture.root, "broken-config") }),
+        "config_parse_failed"
+      );
+      expectRefusal(
+        await inspectBoth({ path: join(fixture.root, "broken-compose") }),
+        "compose_parse_failed"
+      );
+      expectRefusal(
+        await inspectBoth({
+          path: join(fixture.root, "broken-compose"),
+          service: "api",
+        }),
+        "compose_parse_failed"
+      );
+      expectRefusal(
+        await inspectBoth({ path: join(fixture.root, "list-compose") }),
+        "compose_parse_failed"
+      );
+      expectRefusal(
+        await inspectBoth({ path: join(fixture.root, "oversized") }),
+        "generation_input_too_large"
+      );
+    },
+    CASE_TIMEOUT_MS
+  );
+
+  test(
+    "two registrations that own one checkout are refused as ambiguous",
+    async () => {
+      expectRefusal(
+        await inspectBoth({ path: join(fixture.root, "shared") }),
+        "ambiguous_project"
+      );
+      expectRefusal(
+        await inspectBoth({ projectName: "shared-a" }),
+        "ambiguous_project"
+      );
     },
     CASE_TIMEOUT_MS
   );
@@ -569,6 +730,55 @@ describe("paired CLI/MCP target fixtures", () => {
   );
 });
 
+describe("MCP adapter re-validation", () => {
+  async function stubbedData(envelope: unknown): Promise<unknown> {
+    await writeFile(
+      join(fixture.root, "fake-envelope.json"),
+      JSON.stringify(envelope)
+    );
+    const result = await fixture.stubClient.callTool({
+      name: "hack.project.target",
+      arguments: {},
+    });
+    const payload = result.structuredContent as McpPayload;
+    expect(payload.stdout).toBe("");
+    return payload.data;
+  }
+
+  test(
+    "drifted CLI output is never passed to MCP callers",
+    async () => {
+      // Off-contract success data becomes null.
+      expect(
+        await stubbedData({
+          ok: true,
+          data: { schema: "hack.target.v0", provisional: true, leak: "x" },
+        })
+      ).toBeNull();
+      // Foreign fields around a valid refusal are dropped.
+      const refusal = targetRefusalEnvelope({ reason: "service_not_found" });
+      if (refusal.ok) {
+        throw new Error("expected a refusal envelope");
+      }
+      expect(
+        await stubbedData({
+          ...refusal,
+          leak: "x",
+          error: { ...refusal.error, leak: "x" },
+        })
+      ).toEqual(refusal);
+      // A refusal whose message no longer matches its reason becomes null.
+      expect(
+        await stubbedData({
+          ...refusal,
+          error: { ...refusal.error, message: "drifted text" },
+        })
+      ).toBeNull();
+    },
+    CASE_TIMEOUT_MS
+  );
+});
+
 describe("target inspector domain", () => {
   test("a config change during the read is refused, not snapshotted", async () => {
     const result = await inspectTarget({
@@ -642,6 +852,22 @@ describe("target inspector domain", () => {
       parseTargetInspectEnvelope({
         ok: false,
         error: { code: "E_NOT_A_CODE", message: "x" },
+      })
+    ).toBeNull();
+    // The message and code must be the reason's own fixed values.
+    if (refusal.ok) {
+      throw new Error("expected a refusal envelope");
+    }
+    expect(
+      parseTargetInspectEnvelope({
+        ...refusal,
+        error: { ...refusal.error, message: "The service is missing." },
+      })
+    ).toBeNull();
+    expect(
+      parseTargetInspectEnvelope({
+        ...refusal,
+        error: { ...refusal.error, code: "E_USAGE" },
       })
     ).toBeNull();
     expect(

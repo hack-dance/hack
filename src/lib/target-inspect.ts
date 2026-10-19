@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { readFile, realpath, stat } from "node:fs/promises";
 import { resolve } from "node:path";
+import { YAML } from "bun";
 import {
   PROJECT_COMPOSE_FILENAME,
   PROJECT_CONFIG_FILENAME,
@@ -29,7 +30,6 @@ import {
   sanitizeBranchSlug,
   sanitizeProjectSlug,
 } from "./project.ts";
-import { discoverComposeServiceNames } from "./project-env-config.ts";
 import { ProjectInputSelectionError } from "./project-input-selection.ts";
 import {
   AmbiguousProjectNameError,
@@ -175,6 +175,12 @@ export const TARGET_REFUSALS = Object.freeze({
     stage: "project",
     retry: "fix_project",
     message: "The project config could not be parsed.",
+  },
+  compose_parse_failed: {
+    code: "E_CONFIG_PARSE",
+    stage: "project",
+    retry: "fix_project",
+    message: "The project's Compose file could not be parsed.",
   },
   detached_checkout: {
     code: "E_USAGE",
@@ -455,6 +461,7 @@ async function resolveTarget(opts: {
   if (cfg.parseError) {
     throw new TargetRefusal("config_parse_failed");
   }
+  const services = await readComposeServiceNames(context.composeFile);
 
   const root = await canonicalPath(context.projectRoot);
   const registration = await findRegistrationForRoot({
@@ -485,9 +492,6 @@ async function resolveTarget(opts: {
   });
   const instanceBranch = effective.branch;
 
-  const services = await discoverComposeServiceNames({
-    composeFile: context.composeFile,
-  });
   if (selector.service !== null && !services.includes(selector.service)) {
     throw new TargetRefusal("service_not_found");
   }
@@ -694,6 +698,45 @@ async function resolveEnvSelection(opts: {
   return configured
     ? { overlay: configured, source: "project_default" }
     : { overlay: null, source: "base" };
+}
+
+/**
+ * Service names declared in the Compose file, sorted. An absent file declares
+ * none, as does an empty `services:` key. A file that is present but is not YAML, whose top level is not a
+ * mapping, or whose `services` is not a mapping is refused as
+ * `compose_parse_failed`: lifecycle commands would fail on it, so it must not
+ * be reported as a target with no services. The generation read has already
+ * bounded the file's size.
+ */
+async function readComposeServiceNames(
+  composeFile: string
+): Promise<readonly string[]> {
+  let text: string;
+  try {
+    text = await readFile(composeFile, "utf8");
+  } catch (error: unknown) {
+    if (isMissing(error)) {
+      return [];
+    }
+    throw error;
+  }
+  let parsed: unknown;
+  try {
+    parsed = YAML.parse(text);
+  } catch {
+    throw new TargetRefusal("compose_parse_failed");
+  }
+  if (!isRecord(parsed)) {
+    throw new TargetRefusal("compose_parse_failed");
+  }
+  const services = parsed.services;
+  if (services === undefined || services === null) {
+    return [];
+  }
+  if (!isRecord(services)) {
+    throw new TargetRefusal("compose_parse_failed");
+  }
+  return Object.keys(services).sort((left, right) => left.localeCompare(right));
 }
 
 type Generation = {

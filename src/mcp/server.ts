@@ -1600,7 +1600,6 @@ export function buildDoctorArgs(opts: {
   ];
 }
 
-/** `hack env explain --json` argv; the validated key follows `--`. */
 /**
  * `hack project target --json` argv. Project selection is passed through
  * unresolved (both selectors included when both are given) so the CLI owns
@@ -1631,6 +1630,7 @@ export function buildTargetInspectArgs(opts: {
   ];
 }
 
+/** `hack env explain --json` argv; the validated key follows `--`. */
 export function buildEnvExplainArgs(opts: {
   readonly projectArgs: readonly string[];
   readonly env?: string;

@@ -153,6 +153,7 @@ import {
 } from "../lib/cli-result.ts";
 import { withComposeServiceEnvFingerprints } from "../lib/compose-env-fingerprint.ts";
 import { renderManagedComposeEnvOverride } from "../lib/compose-managed-env.ts";
+import { resolveComposeProjectName } from "../lib/compose-project-name.ts";
 import {
   DEFAULT_COMPOSE_STARTUP_TIMEOUT_MS,
   resolveComposeStartupTimeoutMs,
@@ -1006,43 +1007,6 @@ function emitRemoteLifecycleJson(opts: {
     }),
     exitCode: 0,
   });
-}
-
-async function resolveComposeProjectName(opts: {
-  readonly project: Awaited<ReturnType<typeof requireProjectContext>>;
-  readonly cfg?: Awaited<ReturnType<typeof readProjectConfig>>;
-}): Promise<string> {
-  const composeName = await readComposeProjectName(opts.project.composeFile);
-  if (composeName) {
-    return composeName;
-  }
-
-  const derived = defaultProjectSlugFromPath(opts.project.projectRoot);
-  const cfgName = (opts.cfg?.name ?? derived).trim();
-  return cfgName.length > 0 ? cfgName : derived;
-}
-
-async function readComposeProjectName(
-  composeFile: string
-): Promise<string | null> {
-  const text = await readTextFile(composeFile);
-  if (!text) {
-    return null;
-  }
-
-  let parsed: unknown;
-  try {
-    parsed = YAML.parse(text);
-  } catch {
-    return null;
-  }
-
-  if (!isRecord(parsed)) {
-    return null;
-  }
-  const name = getString(parsed, "name");
-  const trimmed = name?.trim() ?? "";
-  return trimmed.length > 0 ? trimmed : null;
 }
 
 async function buildBranchComposeOverride(opts: {

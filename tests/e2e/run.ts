@@ -48,6 +48,7 @@ import { nativeConfigProcessPolicyScenario } from "./scenarios/native-config-pro
 import { nativeConfigProtectedFilesScenario } from "./scenarios/native-config-protected-files.ts";
 import { nativeConfigRoutingScenario } from "./scenarios/native-config-routing.ts";
 import { nativeConfigVmFilesScenario } from "./scenarios/native-config-vm-files.ts";
+import { portableBootstrapNegativesScenario } from "./scenarios/portable-bootstrap-negatives.ts";
 import { portableMultiserviceScenario } from "./scenarios/portable-multiservice.ts";
 import { upDownScenario } from "./scenarios/up-down.ts";
 import { worktreeBranchDefaultScenario } from "./scenarios/worktree-branch-default.ts";
@@ -97,6 +98,7 @@ export const ALL_SCENARIOS: readonly Scenario[] = [
   upDownScenario,
   execStaleEnvScenario,
   portableMultiserviceScenario,
+  portableBootstrapNegativesScenario,
   composeConfigHashDriftScenario,
   nativeConfigComposeScenario,
   nativeConfigBuildScenario,

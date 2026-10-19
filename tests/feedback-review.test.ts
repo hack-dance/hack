@@ -406,17 +406,17 @@ test("misleading log instructions and raw logs never reach the draft", () => {
 
 test("structured, syslog, Go-style and clock-prefixed log lines are raw logs", () => {
   const lines = [
-    '{"level":"error","ts":1729,"msg":"dial failed","user":"alice","host":"alice-mbp"}',
-    '{"logger":"http","msg":"handled","remote":"alice-mbp"}',
-    '  {"svc":"web","ts":"2026-10-19","user":"alice"}',
-    "Oct 19 10:00:01 alice-mbp hackd[123]: started for alice",
-    "2026/10/19 10:00:01 dial tcp: alice-mbp refused",
-    "10:00:01.123 WARN alice-mbp slow",
+    '{"level":"error","ts":1729,"msg":"dial failed","user":"example","host":"example-mbp"}',
+    '{"logger":"http","msg":"handled","remote":"example-mbp"}',
+    '  {"svc":"web","ts":"2026-10-19","user":"example"}',
+    "Oct 19 10:00:01 example-mbp hackd[123]: started for example",
+    "2026/10/19 10:00:01 dial tcp: example-mbp refused",
+    "10:00:01.123 WARN example-mbp slow",
   ];
   // Prose between the lines keeps each one a separate log run.
   const input = lines.flatMap((line) => [line, "Then it retried."]).join("\n");
   const { text, redactions } = sanitizeFeedbackText(input);
-  expect(text).not.toContain("alice");
+  expect(text).not.toContain("example");
   expect(redactions["raw-log"]).toBe(lines.length);
   expect(text).toContain("Then it retried.");
   // A JSON envelope from `--json` is not a log record.
@@ -958,7 +958,7 @@ test("negative control: an attachment listed only where a reader cannot see it n
 test("negative control: a private attachment name is a privacy finding, listed or not", async () => {
   const base = cleanPayload();
   const sender = mockSender(["sent"]);
-  const name = "/Users/alice/acme/dump.log";
+  const name = "/Users/example/acme-app/dump.log";
   // Unlisted, so the body carries no trace of the name: only the name check
   // can report it as private rather than merely unlisted.
   const payload: FeedbackPayload = {
@@ -990,7 +990,7 @@ test("negative control: a private attachment name is a privacy finding, listed o
   ]);
   expect(rendered.body).toContain("## Attachments\n\n- `<redacted:path>`");
   expect(`${rendered.body}${rendered.attachments[0]?.name}`).not.toContain(
-    "alice"
+    "acme-app"
   );
   expect(
     evaluateFeedbackGate({
@@ -1061,7 +1061,7 @@ test("negative control: a freshly approved edit still fails the privacy recheck"
     'API_TOKEN=<x>"hunter2secretvalue"',
     "password=<x>}leakvalue",
     "token: <x>`hunter2`",
-    '{"level":"error","ts":1729,"msg":"dial failed","user":"alice"}',
+    '{"level":"error","ts":1729,"msg":"dial failed","user":"example"}',
     "db_pass: hunter2fixture",
     "compose ~/.hack/projects/acme-secret-project/compose.yml",
     "admin acme-secret.internal.acme.com/admin",

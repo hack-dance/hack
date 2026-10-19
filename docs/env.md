@@ -433,7 +433,17 @@ rename has these effects:
 - a symlinked env file keeps its link; the new contents land at the file the link points
   to, and the staging file is created next to that file
 - a symlink whose target does not exist is replaced by a regular file
+- a hard link is broken: the env file gets a new inode, and any other name for the old
+  file keeps the previous contents
 - the directory must be writable, even when the env file itself is writable
+
+A rename does not need write access to the file it replaces, so Hack checks that access
+itself before it stages anything. It refuses to replace an existing env file that it
+cannot read, that is not a regular file, that is not writable, or whose owner and group
+it cannot keep (for example a root-owned file left by an earlier `sudo hack`). The error
+names the file and the reason, never a value, and the file is left as it was. Fix the
+file's permissions or ownership and run the command again. A rewrite keeps the file's
+permission bits, owner and group.
 
 If you omit `key`, `value`, or `--service`, `hack env add` prompts for them interactively.
 Pass `--no-interactive` (or set `HACK_NO_INTERACTIVE=1`) for scripted/agent usage: the

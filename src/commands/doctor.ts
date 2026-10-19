@@ -2999,7 +2999,8 @@ async function checkProjectEnvKey({
 /**
  * Warns when hack-generated machine-local files (`.hack/.internal/`,
  * `.hack/.branch/`, `.hack/.env`, `.hack/.env.state.json`,
- * `.hack/hack.env.*.local.yaml`, `.hack.secret.key`) are tracked in git.
+ * `.hack/hack.env.*.local.yaml`, `.hack/tickets`, `.hack/.hack.env*.tmp`
+ * staging files, `.hack.secret.key`) are tracked in git.
  * A tracked secret key is reported as an error because it is a committed
  * secret. `hack doctor --fix` untracks the offenders (files stay on disk) and
  * ensures the committed `.hack/.gitignore`.

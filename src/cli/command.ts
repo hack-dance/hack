@@ -448,8 +448,11 @@ export function parsePositionalsForCommand<
   }
 
   if (idx < remaining.length) {
-    const extra = remaining.slice(idx).join(" ");
-    throw new CliUsageError(`Unexpected arguments: ${extra}`);
+    // Count only: an extra argument is often a pasted `KEY=value` or secret.
+    const extra = remaining.length - idx;
+    throw new CliUsageError(
+      `Unexpected arguments: ${extra} more than this command accepts. They are not shown because they may contain values.`
+    );
   }
 
   return out as PositionalsValues<Pos>;

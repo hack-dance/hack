@@ -101,6 +101,14 @@ export async function writeTextFileIfChanged(
   return { changed: true };
 }
 
+/** A compare-and-swap write found the file changed by another writer. */
+export class AtomicWriteConflictError extends Error {
+  constructor() {
+    super("The file changed while it was being replaced; nothing was written.");
+    this.name = "AtomicWriteConflictError";
+  }
+}
+
 /**
  * Replaces `absolutePath` with `content` only when the text differs, publishing
  * the new contents atomically.
@@ -119,12 +127,24 @@ export async function writeTextFileIfChanged(
  * a plain write through the link would. A new file gets the umask default.
  * Unlike an in-place write, a dangling symlink is replaced by a regular file,
  * and the containing directory must be writable.
+ *
+ * With `expectedExisting`, the write is a compare-and-swap: the current text
+ * (null when absent) must equal it both before staging and again after the
+ * staging file is fsynced, immediately before the rename; otherwise the
+ * staging file is removed and {@link AtomicWriteConflictError} is thrown. The
+ * second check narrows, but cannot close, the window in which a writer that
+ * does not use this check can still be overwritten.
  */
 export async function writeTextFileAtomicIfChanged(
   absolutePath: string,
-  content: string
+  content: string,
+  options: { readonly expectedExisting?: string | null } = {}
 ): Promise<{ readonly changed: boolean }> {
   const existing = await readTextFile(absolutePath);
+  const expectsExisting = options.expectedExisting !== undefined;
+  if (expectsExisting && existing !== options.expectedExisting) {
+    throw new AtomicWriteConflictError();
+  }
   if (existing === content) {
     return { changed: false };
   }
@@ -150,6 +170,12 @@ export async function writeTextFileAtomicIfChanged(
     }
     await file.writeFile(content, "utf8");
     await file.sync();
+    if (
+      expectsExisting &&
+      (await readTextFile(absolutePath)) !== options.expectedExisting
+    ) {
+      throw new AtomicWriteConflictError();
+    }
     await rename(staging, target);
     committed = true;
   } finally {

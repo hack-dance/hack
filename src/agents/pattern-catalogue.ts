@@ -255,21 +255,23 @@ export const PATTERN_CATALOGUE: readonly PatternCard[] = [
       "A repository tracks env defaults and each machine adds local values on top.",
     disposition: "partial",
     supportedCommands: [
+      "hack env hydrate --file <path> --secret",
       "hack env set <key> --local --value-stdin --secret",
       "hack env explain <key> --json",
     ],
     prerequisites:
       "Tracked defaults, a machine-local layer and preserved operator overrides.",
     envOwnership:
-      "Defaults are tracked; hydration runs `hack env set <key> --local --value-stdin --secret` once per key with the value piped on stdin, so values stay out of argv. Without `--local` the same command writes a tracked default.",
+      "Defaults are tracked; `hack env hydrate --secret` reads `KEY=value` entries from piped stdin or `--file` and writes only the gitignored machine-local layer, so values stay out of argv and out of tracked files. Local entries outside the input are kept.",
     readiness:
-      "Setting a secret to its current value keeps the stored ciphertext, so repeat hydration leaves the tracked tree clean; a changed value gets new ciphertext with a fresh IV. Each layer write commits by rename, so an interrupted write leaves the previous layer resolvable.",
-    cleanup: "Unchanged values cause no rewrite.",
+      "A repeat import with the same values does not rewrite the layer; a changed value gets new ciphertext with a fresh IV. One rename commits all keys, so an interrupted import leaves every key at its previous value. A wrong key, a tracked local layer or a concurrent hydration refuses without changing the layer.",
+    cleanup:
+      "Unchanged values cause no rewrite. A killed import can leave a staging file and a stale `.hack/.internal/env-hydrate.lock`; the next import reports the lock instead of taking it over.",
     negativeControl:
       "Re-encrypting unchanged entries causes diff and stash churn, and values passed in command arguments are not a secure import mechanism.",
     domainOwner: "WU27/WU14",
     missingContract:
-      "No-op detection and rename-committed writes cover one key per command. Hack has no multi-key import: an interrupted hydration can leave some keys updated and others not.",
+      "Hydration replaces an imported key's local entry; it cannot tell an operator's deliberate local override of that key from a stale hydrated value. `hack env set --local` does not take the hydration lock, so only a recheck just before the rename guards against it.",
     provenance: { consumers: 1, source: "HACK-P08 research register" },
     example: null,
   },

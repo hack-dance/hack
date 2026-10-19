@@ -48,6 +48,15 @@ test("parsePositionalsForCommand throws on extra args", () => {
   ).toThrow("Unexpected arguments");
 });
 
+test("parsePositionalsForCommand never echoes the extra arguments", () => {
+  // An extra argument is often a pasted `KEY=value`; only the count is shown.
+  expect(() =>
+    parsePositionalsForCommand([], ["API_TOKEN=synthetic-extra-4c2d", "more"])
+  ).toThrow(
+    "Unexpected arguments: 2 more than this command accepts. They are not shown because they may contain values."
+  );
+});
+
 test("parseOptionsForCommand converts number options", () => {
   const opts = [
     {

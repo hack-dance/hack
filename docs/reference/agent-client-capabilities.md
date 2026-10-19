@@ -40,7 +40,7 @@ named test passes against the recorded client version.
 
 <!-- BEGIN GENERATED: agent-client-capabilities -->
 
-Matrix version 2, observed 2026-10-11.
+Matrix version 3, latest observation 2026-10-18. Older cells retain their recorded source and client versions.
 
 ### Clients
 
@@ -71,7 +71,7 @@ Matrix version 2, observed 2026-10-11.
 | Skill discovery | untested | untested | untested | untested |
 | Hooks | unsupported | untested | unsupported | unsupported |
 | Plugin MCP | untested | untested | untested | untested |
-| Standalone MCP | untested | untested | untested | untested |
+| Standalone MCP | untested | untested | untested | verified |
 | Rules | unsupported | unsupported | untested | unsupported |
 | UI | untested | unsupported | unsupported | unsupported |
 
@@ -104,11 +104,30 @@ Matrix version 2, observed 2026-10-11.
 | standalone | Skill discovery | untested | source-read | `plugins/hack/plugin.json` | none | `macos-arm64-contributor` | `ec56769bdc04` | The portable manifest declares no component paths; discovery of `skills/` by convention is unverified. | Name a portable consumer and observe skill discovery in a fresh session. |
 | standalone | Hooks | unsupported | source-read | `plugins/hack/plugin.json` | none | `macos-arm64-contributor` | `ec56769bdc04` | The portable manifest carries hooks only through the OpenAI extension, and Hack ships none there. | none |
 | standalone | Plugin MCP | untested | schema | `plugins/hack-mcp/mcp.json` | none | `macos-arm64-contributor` | `3e261d517ed7` | The opt-in `hack-mcp` portable MCP manifest adds an explicit stdio transport to the same launch as its `.mcp.json`; the default `hack` package ships no MCP file. | Name a portable consumer and observe it start the declared server. |
-| standalone | Standalone MCP | untested | isolated-fixture | `tests/mcp-bundle-client.test.ts` | none | `macos-arm64-contributor` | `ec56769bdc04` | The fixture's reference MCP SDK client calls a real tool through the generated entry, but that step was not reached in the recorded run. The SDK client is not an agent. | Pass tests/mcp-bundle-client.test.ts end to end, or add a client-independent stdio fixture. |
+| standalone | Standalone MCP | verified | isolated-fixture | `tests/mcp-bundle-client.test.ts` | @modelcontextprotocol/sdk 1.26.0 (Bun 1.4.2) | `macos-arm64-contributor` | `f0c0d1740db3` | The client-independent bundle fixture passed on Apple Silicon macOS: a real SDK client loaded the generated stdio entry, listed tools, called hack.projects.list through the compiled CLI with an isolated empty registry and unavailable Docker, then observed owned backend retirement. Source-matched adapter/owner/backend and CLI were built locally. This qualifies this SDK transport, not agent authentication, plugin loading or a published installation. | none |
 | standalone | Rules | unsupported | source-read | `plugins/hack/plugin.json` | none | `macos-arm64-contributor` | `ec56769bdc04` | No portable rule component is shipped. | none |
 | standalone | UI | unsupported | source-read | `plugins/hack/plugin.json` | none | `macos-arm64-contributor` | `ec56769bdc04` | Presentation metadata exists only in the OpenAI extension; no portable UI is claimed. | none |
 
 <!-- END GENERATED: agent-client-capabilities -->
+
+## Standalone bundle qualification
+
+The SDK transport can be qualified independently of Claude, Codex or Cursor sign-in.
+Use a verified local bundle and its source-matched compiled CLI:
+
+```sh
+HACK_MCP_BUNDLE_TEST_DIRECTORY=/absolute/verified/bundle \
+HACK_MCP_CLI_TEST_BINARY=/absolute/source-matched/hack \
+bun test tests/mcp-bundle-client.test.ts --test-name-pattern 'generated standalone'
+```
+
+The fixture installs an entry in a private temporary project, starts the declared
+adapter, lists tools, calls the real CLI against an empty private registry and
+waits for owned backend retirement. It uses no agent credentials or VM. A skipped
+test is not qualification. Passing this test establishes the recorded SDK transport
+only; agent trust, plugin loading and official installed-package acceptance remain
+separate gates. The original multi-client fixture still requires its explicit
+Claude and Codex executables and their native approval requirements.
 
 ## Companion-package layout decision
 
@@ -117,7 +136,7 @@ owner, and none of them replaces the others. Users choose one per client.
 
 | Layout | What it contains | Authoritative owner | Installed and updated by |
 | --- | --- | --- | --- |
-| Native plugin (`plugins/hack`) | Client manifests, seven skills, Claude primer hooks, Cursor rule, `hack mcp serve` declaration | `scripts/generate-agent-plugins.ts`, rendering from `src/agents/instruction-source.ts` and the skill renderers in `src/agents/` | The client's plugin manager. Hack commands never install or update it. |
+| Native plugin (`plugins/hack`) | Client manifests, seven skills, Claude primer hooks and Cursor rule; opt-in `plugins/hack-mcp` separately declares `hack mcp serve` | `scripts/generate-agent-plugins.ts`, rendering from `src/agents/instruction-source.ts` and the skill renderers in `src/agents/` | The client's plugin manager. Hack commands never install or update it. |
 | Standalone setup | Project AGENTS.md/CLAUDE.md snippets, Cursor rules, shared skills, Claude primer hooks, MCP entries | `src/agents/instruction-source.ts` and its renderers, written by `hack setup` and `hack mcp install` | Explicit `hack setup` and `hack mcp install` commands in a chosen scope |
 | MCP bundle | Native MCP adapter, owner and backend executables with a content-derived identity | `src/mcp/bundle.ts` (packaging and verification) | `hack mcp install --bundle ... --cli ...` writes the client entry; the bundle is never modified after selection |
 

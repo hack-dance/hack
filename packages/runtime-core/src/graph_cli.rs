@@ -354,7 +354,7 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
             graph::CacheQuarantineTarget { run, volume, path },
         );
     }
-    if *action == "quarantine-cache" {
+    if *action == "quarantine-cache" || *action == "resolve-cache-quarantine" {
         let (run, volume, path, expected) = match *args {
             [
                 "--run-id",
@@ -379,11 +379,12 @@ pub fn command(candidate: &Candidate, args: &[&str]) -> Result<Value, CandidateE
             ] => (run, volume, path, expected),
             _ => return Err(invalid()),
         };
-        return graph::quarantine_cache(
-            candidate,
-            graph::CacheQuarantineTarget { run, volume, path },
-            expected,
-        );
+        let target = graph::CacheQuarantineTarget { run, volume, path };
+        return if *action == "quarantine-cache" {
+            graph::quarantine_cache(candidate, target, expected)
+        } else {
+            graph::resolve_cache_quarantine(candidate, target, expected)
+        };
     }
     if *action == "inspect-source-device-rebind" {
         let run = match *args {

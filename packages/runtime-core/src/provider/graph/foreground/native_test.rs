@@ -548,6 +548,7 @@ mod dependency_slots;
 mod startup_cancellation;
 
 mod absent_publication_recovery;
+mod cache_quarantine;
 mod host_pin_recovery;
 #[cfg(feature = "native-http-probe")]
 mod retired_rebind_history;

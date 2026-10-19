@@ -171,13 +171,13 @@ fn selection(target_identity: &str) -> Selection {
         entries: 3,
     }
 }
-fn record(target_identity: &str, completed: bool) -> Record {
+fn record(target_identity: &str, outcome: Outcome) -> Record {
     let selection = selection(target_identity);
     Record {
         version: 1,
         selection_sha256: selection.sha256().unwrap(),
         selection,
-        completed,
+        outcome,
     }
 }
 
@@ -188,7 +188,7 @@ fn durable_records_are_private_exact_bounded_and_refuse_torn_or_forged_state() {
     state::private_directory(&candidate.state_root.join("run")).unwrap();
     let records = Records::load(&candidate).unwrap();
     assert!(records.pending("hkg-www").unwrap().is_none());
-    let pending = record("7:200", false);
+    let pending = record("7:200", Outcome::Pending);
     records.write(&pending).unwrap();
     let loaded = Records::load(&candidate).unwrap();
     assert_eq!(
@@ -216,7 +216,7 @@ fn durable_records_are_private_exact_bounded_and_refuse_torn_or_forged_state() {
     assert!(Records::load(&candidate).is_err());
     fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
     // Two unresolved operations for one volume are ambiguous.
-    let second = record("7:300", false);
+    let second = record("7:300", Outcome::Pending);
     records.write(&second).unwrap();
     assert!(
         Records::load(&candidate)
@@ -224,33 +224,58 @@ fn durable_records_are_private_exact_bounded_and_refuse_torn_or_forged_state() {
             .pending("hkg-www")
             .is_err()
     );
-    // Completion is retained as diagnosis evidence, not collected.
+    // Settled outcomes are retained as diagnosis evidence, not collected.
     records
         .write(&Record {
-            completed: true,
+            outcome: Outcome::Quarantined,
             ..second.clone()
         })
         .unwrap();
     records
         .write(&Record {
-            completed: true,
+            outcome: Outcome::Abandoned,
             ..pending.clone()
         })
         .unwrap();
     let done = Records::load(&candidate).unwrap();
     assert!(done.pending("hkg-www").unwrap().is_none());
     assert_eq!(done.records.len(), 2);
+    // A quarantined selection never re-admits; an abandoned one moved nothing.
+    assert!(!done.admits(&second.selection, &second.selection_sha256));
+    assert!(done.admits(&pending.selection, &pending.selection_sha256));
     let mut invalid = pending.clone();
     invalid.selection.target_bytes += 1;
     assert!(records.write(&invalid).is_err());
+    // The per-volume budget refuses new selections for that volume only.
+    for inode in 0..MAX_VOLUME_RECORDS - 2 {
+        records
+            .write(&record(
+                &format!("7:{}", 1000 + inode),
+                Outcome::Quarantined,
+            ))
+            .unwrap();
+    }
+    let full = Records::load(&candidate).unwrap();
+    let next = record("7:999", Outcome::Pending);
+    assert!(!full.admits(&next.selection, &next.selection_sha256));
+    let mut other = next.selection.clone();
+    other.volume_name = "hkg-other".into();
+    assert!(full.admits(&other, &other.sha256().unwrap()));
 }
 
 /// Run a production guest script on this host. Linux runs it unchanged; macOS
 /// receives PATH shims translating GNU `stat -c`, util-linux `flock`, and
 /// `sync -f` to the same syscalls (lstat, fstat of fd 9, flock, fsync).
 fn script(fixture: &Path, program: &str, args: &[&str]) -> Output {
+    script_with(fixture, program, args, false)
+}
+/// `split_mount` places a `findmnt` shim first in PATH that reports a distinct
+/// mount for the quarantine root, as a separate bind mount of the same
+/// filesystem would; equal device numbers alone cannot exclude that layout.
+fn script_with(fixture: &Path, program: &str, args: &[&str], split_mount: bool) -> Output {
     let mut command = Command::new("sh");
     command.args(["-c", program, "sh"]).args(args);
+    let mut path = std::env::var("PATH").unwrap();
     if cfg!(target_os = "macos") {
         let bin = fixture.join("shim");
         if !bin.exists() {
@@ -294,17 +319,40 @@ test "$1" = -f || exit 70
 exec python3 -c 'import os,sys; fd=os.open(sys.argv[1],os.O_RDONLY); os.fsync(fd); os.close(fd)' "$2"
 "#,
                 ),
+                (
+                    // The mount containing the path, as statfs(2) reports it.
+                    "findmnt",
+                    r#"#!/bin/sh
+test "$1 $2 $3 $4" = "-n -o ID -T" || exit 70
+exec python3 -c 'import os,sys; print(os.statvfs(sys.argv[1]).f_fsid)' "$5"
+"#,
+                ),
             ] {
-                let path = bin.join(name);
-                fs::write(&path, body).unwrap();
-                fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+                let shim = bin.join(name);
+                fs::write(&shim, body).unwrap();
+                fs::set_permissions(&shim, fs::Permissions::from_mode(0o755)).unwrap();
             }
         }
-        command.env(
-            "PATH",
-            format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
-        );
+        path = format!("{}:{path}", bin.display());
     }
+    if split_mount {
+        let bin = fixture.join("split-mount");
+        if !bin.exists() {
+            fs::create_dir(&bin).unwrap();
+            let shim = bin.join("findmnt");
+            fs::write(
+                &shim,
+                r#"#!/bin/sh
+test "$1 $2 $3 $4" = "-n -o ID -T" || exit 70
+case "$5" in */hack-quarantine) echo 2;; *) echo 1;; esac
+"#,
+            )
+            .unwrap();
+            fs::set_permissions(&shim, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        path = format!("{}:{path}", bin.display());
+    }
+    command.env("PATH", path);
     command.output().unwrap()
 }
 fn identity(path: &Path) -> String {
@@ -581,3 +629,76 @@ fn foreign_quarantine_root_lock_and_identity_refuse_without_effects() {
     );
     volume.untouched_application_data();
 }
+
+#[test]
+fn move_refuses_a_quarantine_on_another_mount_before_any_rename() {
+    // Equal st_dev does not exclude two bind mounts of one filesystem, where
+    // rename(2) fails with EXDEV and `mv` would copy then unlink the source.
+    let volume = Volume::new();
+    let original = identity(&volume.target);
+    let output = script_with(
+        &volume.fixture.0,
+        MOVE,
+        &[
+            volume.root.to_str().unwrap(),
+            volume.quarantine.to_str().unwrap(),
+            ID,
+            PATH,
+            &identity(&volume.root),
+            &original,
+        ],
+        true,
+    );
+    assert!(!output.status.success());
+    assert_eq!(identity(&volume.target), original);
+    assert!(!volume.quarantine.join(ID).exists());
+    volume.untouched_application_data();
+}
+
+#[test]
+fn locate_reports_only_the_recorded_destination_and_never_moves() {
+    let volume = Volume::new();
+    let original = identity(&volume.target);
+    let locate = |root_identity: &str, target_identity: &str| {
+        script(
+            &volume.fixture.0,
+            LOCATE,
+            &[
+                volume.root.to_str().unwrap(),
+                volume.quarantine.to_str().unwrap(),
+                ID,
+                root_identity,
+                target_identity,
+            ],
+        )
+    };
+    let root = identity(&volume.root);
+    // No quarantine root, then an empty one: the rename never happened.
+    assert_eq!(
+        stdout(locate(&root, &original)),
+        "cache-quarantine-v1 absent\n"
+    );
+    fs::create_dir(&volume.quarantine).unwrap();
+    fs::set_permissions(&volume.quarantine, fs::Permissions::from_mode(0o700)).unwrap();
+    assert_eq!(
+        stdout(locate(&root, &original)),
+        "cache-quarantine-v1 absent\n"
+    );
+    assert_eq!(identity(&volume.target), original);
+    fs::rename(&volume.target, volume.quarantine.join(ID)).unwrap();
+    assert_eq!(
+        stdout(locate(&root, &original)),
+        "cache-quarantine-v1 present\n"
+    );
+    // A different directory at the destination, or a replaced root, refuses.
+    assert!(!locate(&root, "1:1").status.success());
+    assert!(!locate("0:0", &original).status.success());
+    let moved = volume.fixture.0.join("moved-quarantine");
+    fs::rename(&volume.quarantine, &moved).unwrap();
+    std::os::unix::fs::symlink(&moved, &volume.quarantine).unwrap();
+    assert!(!locate(&root, &original).status.success());
+    volume.untouched_application_data();
+}
+
+#[path = "orchestration.rs"]
+mod orchestration;

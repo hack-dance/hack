@@ -1559,8 +1559,8 @@ target directory identity and the measured bytes. Review it, then quarantine:
   --expect-selection <selection_sha256> --json
 ```
 
-Both commands hold the provider mutation lease. They refuse when any of these is
-true:
+These commands, and `resolve-cache-quarantine` below, hold the provider mutation
+lease. They refuse when any of these is true:
 
 - the graph is active, its journal is incomplete, or interrupted cleanup is pending
 - the path is not exactly a declared entry, or is absolute, traversing or empty
@@ -1573,24 +1573,58 @@ true:
 
 The guest renames the directory under a lock on the volume root into
 `/var/lib/docker/volumes/<volume>/hack-quarantine/<id>`. That directory is beside
-the volume's `_data` root on the same filesystem, so the move never copies, and no
-container can mount it. The result reports `quarantined_bytes` and
+the volume's `_data` root, and no container can mount it. Before the rename the
+guest checks that the source and the quarantine directory are on the same mount
+(the same `findmnt` mount ID, not only the same device number). A rename within
+one mount cannot fail with a cross-device error, so `mv` never falls back to
+copying and then deleting the source. The result reports `quarantined_bytes` and
 `reclaimed_bytes: 0`. The bytes remain for diagnosis until the owning volume
 itself is explicitly removed (for example `graph cleanup --remove-data`). Restart,
 restore and ordinary cleanup never collect them. Then use a normal retaining
 restart. The framework regenerates its cache.
 
+Quarantined bytes are outside the volume's `_data` directory. Docker's disk-usage
+report, and therefore `graph storage-inventory`, does not count them, so the inventory
+undercounts a volume that holds a quarantine. Every `inspect-cache-quarantine`
+result, including `target_absent`, reports `retained_quarantine_records` and
+`retained_quarantine_bytes`: the recorded bytes still held in the current
+incarnation of that volume.
+
 A private record under the candidate home's `run/cache-quarantine/` is written
-before the guest effect and completed after the guest syncs the move. If the
-command is interrupted, repeat it with the same selection: `inspect-cache-quarantine`
-reports `resume_required` with the recorded digest. Resumption accepts the recorded
-directory either still at its source or already at its destination with the same
-inode. It refuses a regenerated directory, a different destination or both
-present, and never moves new bytes. A torn record write refuses automatic replay.
-Resume before restarting the graph. A restart changes the receipt, so the pending
-record can no longer be resumed and further quarantines of that volume are
-refused. The bytes stay where the interruption left them.
-Records are retained (at most 256) and are not collected automatically.
+before the guest effect and marked `quarantined` after the guest syncs the move.
+If the command is interrupted, `inspect-cache-quarantine` reports the recorded
+digest with one of two phases:
+
+- `resume_required`: the receipt and volume are unchanged. Repeat
+  `quarantine-cache` with the same selection. Resumption accepts the recorded
+  directory either still at its source or already at its destination with the
+  same inode. It refuses a regenerated directory, a different destination or
+  both present, and never moves new bytes.
+- `resolve_required`: resumption is no longer possible, for example because a
+  restart changed the receipt, or because the move keeps refusing. Settle the
+  record without moving anything:
+
+  ```sh
+  ./hack-native --candidate-root /absolute/private/candidate-home graph resolve-cache-quarantine \
+    --run-id <run-id> --volume www_next --path dev/cache/turbopack \
+    --expect-selection <recorded selection_sha256> --json
+  ```
+
+  Under the same lease, consumer and ownership checks, the guest reads the
+  recorded destination under the volume root lock. The record becomes
+  `quarantined` when the recorded directory (same inode) is there, and
+  `abandoned` when the destination is absent, which means nothing was moved. Any
+  other layout, such as a symbolic-link quarantine directory or a different
+  directory at the destination, refuses. After resolution, inspect again for a
+  fresh selection.
+
+You can also resolve a record that could still be resumed. While a record is
+pending, other quarantines of that volume are refused. A torn record write
+refuses automatic replay. Records are retained as diagnosis evidence and are not
+collected automatically. Each volume admits at most 16 records, and the candidate
+home holds at most 1024. Volume names are specific to a run, so a new run starts
+with a fresh per-volume budget. When the global limit is reached, every new
+quarantine is refused; this candidate has no command that collects records.
 
 This operation does not classify the cause of the corruption. One checksum error
 does not show an interrupted write or a storage integrity fault. Container health

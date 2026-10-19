@@ -42,6 +42,7 @@ Usage:
   hack-local graph inspect-source-device-rebind --run-id <32-hex> [--json]
   hack-local graph inspect-cache-quarantine --run-id <32-hex> --volume <logical-volume> --path <declared-relative-directory> [--json]
   hack-local graph quarantine-cache --run-id <32-hex> --volume <logical-volume> --path <declared-relative-directory> --expect-selection <64-hex> [--json]
+  hack-local graph resolve-cache-quarantine --run-id <32-hex> --volume <logical-volume> --path <declared-relative-directory> --expect-selection <64-hex> [--json]
   hack-local graph recover-source-device-rebind --run-id <32-hex> --expect-selection <64-hex> --accept-legacy-device-rebind [--json]
   hack-local graph logs --run-id <32-hex> --service <name> [--tail <1..1000>] [--json]
   hack-local graph exec --run-id <32-hex> --service <name> [--workdir /path] [--timeout-seconds <1..120>] [--json] -- <program> [args...]

@@ -78,6 +78,15 @@ fn cache_quarantine_requires_one_exact_target_and_reviewed_selection() {
     inspect.truncate(8);
     inspect.push("--expect-selection".into());
     cases.push(inspect);
+    // Resolution takes the same exact shape and never a mutation flag.
+    let mut resolve = full.clone();
+    resolve[1] = "resolve-cache-quarantine".into();
+    let mut unreviewed = resolve.clone();
+    unreviewed.drain(8..10);
+    cases.push(unreviewed);
+    let mut destructive = resolve.clone();
+    destructive.insert(10, "--remove-data".into());
+    cases.push(destructive);
     for arguments in cases {
         let (status, failure) = run(&home, &arguments);
         assert_eq!(status, Some(2), "{arguments:?}");
@@ -85,13 +94,21 @@ fn cache_quarantine_requires_one_exact_target_and_reviewed_selection() {
         assert_eq!(fs::read_dir(&home).unwrap().count(), 0);
     }
     // A malformed selection digest refuses before the provider is contacted.
-    for selection in [
+    for (action, selection) in [
         "B".repeat(64),
         "b".repeat(63),
         "b".repeat(65),
         String::new(),
-    ] {
+    ]
+    .into_iter()
+    .flat_map(|s| {
+        [
+            ("quarantine-cache", s.clone()),
+            ("resolve-cache-quarantine", s),
+        ]
+    }) {
         let mut arguments = full.clone();
+        arguments[1] = action.into();
         arguments[9] = selection;
         let (status, failure) = run(&home, &arguments);
         assert_eq!(status, Some(2), "{arguments:?}");

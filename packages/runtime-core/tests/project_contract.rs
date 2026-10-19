@@ -1071,6 +1071,38 @@ fn a_fifo_compose_input_is_rejected_without_waiting_for_a_writer() {
 }
 
 #[test]
+fn plan_admits_normalizable_image_references_and_keeps_authored_identity_text() {
+    let pin = format!("sha256:{}", "a".repeat(64));
+    let long_tag = format!("alpine:{}", "t".repeat(129));
+    let refused = [
+        format!("alpine@sha256:{}", "A".repeat(64)),
+        format!("sha256:{}", "E".repeat(64)),
+        format!("{}/{}", "a".repeat(200), "b".repeat(60)),
+        long_tag,
+    ];
+    for image in refused {
+        let fixture = Fixture::new(&format!("services:\n  web:\n    image: '{image}'\n"));
+        let error = project::plan(&fixture.candidate, fixture.options()).unwrap_err();
+        assert_eq!(error.code, "invalid_image", "{image}");
+        assert!(!error.message.contains(&image));
+    }
+    for image in [
+        "alpine".to_owned(),
+        "user/img".to_owned(),
+        format!("alpine:3.21@{pin}"),
+        format!("localhost:5000/team/app@{pin}"),
+        format!("sha256:{}", "e".repeat(64)),
+    ] {
+        let fixture = Fixture::new(&format!("services:\n  web:\n    image: '{image}'\n"));
+        let report = project::plan(&fixture.candidate, fixture.options()).unwrap();
+        assert_eq!(
+            report.plan.services["web"].image.as_deref(),
+            Some(image.as_str())
+        );
+    }
+}
+
+#[test]
 fn malformed_images_and_control_characters_in_source_names_are_refused() {
     for image in [
         "alpine::tag",
@@ -1079,6 +1111,9 @@ fn malformed_images_and_control_characters_in_source_names_are_refused() {
         "registry:bad/repo:tag",
         "https://registry/repo",
         "user:password@registry/repo",
+        "Alpine:3.21",
+        "registry.test:0/repo",
+        "sha256:abc",
     ] {
         let fixture = Fixture::new(&format!("services:\n  web:\n    image: '{image}'\n"));
         assert_eq!(

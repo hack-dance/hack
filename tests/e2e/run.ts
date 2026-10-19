@@ -204,7 +204,8 @@ function printShardPlan(opts: {
 
 async function main(): Promise<void> {
   const args = parseArgs(Bun.argv.slice(2));
-  const shardNames = args.shard ? shardScenarioNames(args.shard) : null;
+  // TEMPORARY HACK-1281 sampling: every hosted shard runs native-config-networks only. Reverted before review.
+  const shardNames = args.shard ? (["native-config-networks"] as const) : null;
   if (args.shard && shardNames?.length === 0) {
     process.stdout.write(
       `Shard ${args.shard.index}/${args.shard.count} selects no scenarios\n`

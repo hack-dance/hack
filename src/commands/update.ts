@@ -68,8 +68,13 @@ const handleUpdate: CommandHandlerFor<Spec> = async ({
   ctx,
   args,
 }): Promise<number> => {
-  // The native launcher runs hack-cli; PATH fallback can select the stable install.
-  if (process.env.HACK_RUNTIME_BACKEND === "native") {
+  // Candidate launchers run hack-cli; PATH fallback can select the stable install.
+  // `hack-next` and `hack-v5` mark their children on both backends, because an
+  // explicit Compose selection no longer carries the native backend marker.
+  if (
+    process.env.HACK_RUNTIME_BACKEND === "native" ||
+    (process.env.HACK_CANDIDATE_ENTRYPOINT ?? "") !== ""
+  ) {
     return writeResult({
       json: args.options.json === true,
       result: {

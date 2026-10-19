@@ -135,11 +135,13 @@ class ChannelTests(unittest.TestCase):
         self.run_patch = mock.patch.object(installer.subprocess, "run", side_effect=self.process)
         self.run_patch.start()
         self.addCleanup(self.run_patch.stop)
+        # A manually exported native selection naming a foreign executor and home:
+        # the launcher must still pin its own. Backend selection has its own tests.
         self.env_patch = mock.patch.dict(os.environ, {
             "HOME": str(self.stable_home), "HACK_HOME": str(self.stable_home / ".hack"),
             "HACK_GLOBAL_CONFIG_PATH": str(self.stable_home / ".hack/config.json"),
             "HACK_NATIVE_HOME": str(self.stable_home / "foreign-native"),
-            "HACK_NATIVE_BINARY": str(self.brew / "hack"), "HACK_RUNTIME_BACKEND": "docker",
+            "HACK_NATIVE_BINARY": str(self.brew / "hack"), "HACK_RUNTIME_BACKEND": "native",
             "HACK_NATIVE_ADAPTATION": "/private/project/adaptation.json",
             "HACK_NATIVE_DEPENDENCIES": "/private/project/dependencies.json",
             "HACK_NATIVE_AWS_PROFILE": "fixture-qa",
@@ -1334,6 +1336,8 @@ print(json.dumps(stages))
 
     def test_launcher_pins_private_homes_arguments_exit_code_and_allows_peer_launchers(self):
         self.install()
+        # No backend selection: the channel default is native with private homes.
+        os.environ.pop("HACK_RUNTIME_BACKEND")
         child = mock.Mock()
         child.wait.return_value = 23
         with self.channel.lock(shared=True):
@@ -1347,6 +1351,7 @@ print(json.dumps(stages))
                 self.assertEqual(environment["HACK_NATIVE_HOME"], str(self.channel.root / "versions/5.0.0-next.1/native-home"))
                 self.assertEqual(environment["HACK_NATIVE_BINARY"], str(self.channel.root / "versions/5.0.0-next.1/bundle/hack-native"))
                 self.assertEqual(environment["HACK_RUNTIME_BACKEND"], "native")
+                self.assertEqual(environment["HACK_CANDIDATE_ENTRYPOINT"], "hack-next")
                 for name in ("HACK_NATIVE_ADAPTATION", "HACK_NATIVE_DEPENDENCIES", "HACK_NATIVE_AWS_PROFILE",
                              "HACK_NATIVE_HTTPS_PORT", "HACK_NATIVE_SHARED_SOURCE"):
                     self.assertEqual(environment[name], os.environ[name])
@@ -1357,6 +1362,96 @@ print(json.dumps(stages))
         child.wait.return_value = -15
         with self.channel.lock(shared=True), mock.patch.object(installer.subprocess, "Popen", return_value=child):
             self.assertEqual(self.channel.run(["ps"]), 143)
+
+    def launch(self, channel=None):
+        """Run the selected candidate through `channel` with a stand-in child process."""
+        channel = channel or self.channel
+        child = mock.Mock()
+        child.wait.return_value = 0
+        # Every manager imports the same standard-library subprocess module.
+        with channel.lock(shared=True), \
+                mock.patch.object(installer.subprocess, "Popen", return_value=child) as spawn:
+            self.assertEqual(channel.run(["ps", "--path", "a path"]), 0)
+        self.assertEqual(spawn.call_args.args[0][1:], ["ps", "--path", "a path"])
+        return Path(spawn.call_args.args[0][0]), spawn.call_args.kwargs["env"]
+
+    def test_launcher_respects_explicit_backend_and_keeps_native_default(self):
+        self.install()
+        version = self.channel.root / "versions/5.0.0-next.1"
+        for selection in (None, "", "native"):
+            with self.subTest(backend=selection), mock.patch.dict(os.environ):
+                if selection is None:
+                    os.environ.pop("HACK_RUNTIME_BACKEND")
+                else:
+                    os.environ["HACK_RUNTIME_BACKEND"] = selection
+                command, environment = self.launch()
+                self.assertEqual(command, version / "bundle/hack-v5")
+                self.assertEqual(environment["HACK_RUNTIME_BACKEND"], "native")
+                self.assertEqual(environment["HACK_NATIVE_BINARY"], str(version / "bundle/hack-native"))
+                self.assertEqual(environment["HACK_NATIVE_HOME"], str(version / "native-home"))
+                self.assertEqual(environment["HACK_HOME"], str(version / "cli-home"))
+                self.assertNotIn("HACK_GLOBAL_CONFIG_PATH", environment)
+        with mock.patch.dict(os.environ, {"HACK_RUNTIME_BACKEND": "compose"}):
+            command, environment = self.launch()
+        # Compose runs the same verified CLI with the caller's own Hack home, so the
+        # existing global Caddy/CoreDNS and local CA apply; native selectors are removed.
+        self.assertEqual(command, version / "bundle/hack-cli")
+        self.assertEqual(environment["HACK_RUNTIME_BACKEND"], "compose")
+        self.assertEqual(environment["HACK_CANDIDATE_ENTRYPOINT"], "hack-next")
+        self.assertEqual(environment["HACK_HOME"], str(self.stable_home / ".hack"))
+        self.assertEqual(environment["HACK_GLOBAL_CONFIG_PATH"], str(self.stable_home / ".hack/config.json"))
+        self.assertNotIn("HACK_NATIVE_BINARY", environment)
+        self.assertNotIn("HACK_NATIVE_HOME", environment)
+        for name in ("HACK_NATIVE_ADAPTATION", "HACK_NATIVE_HTTPS_PORT", "HACK_NATIVE_SHARED_SOURCE"):
+            self.assertEqual(environment[name], os.environ[name])
+        # Unknown selections refuse before verification or spawn; inherited `docker` is
+        # not silently replaced by either backend.
+        for selection in ("docker", "Native", "native "):
+            with self.subTest(backend=selection), \
+                    mock.patch.dict(os.environ, {"HACK_RUNTIME_BACKEND": selection}), \
+                    mock.patch.object(installer.subprocess, "Popen") as spawn, \
+                    mock.patch.object(installer, "verify_signatures") as signatures:
+                with self.channel.lock(shared=True):
+                    with self.assertRaisesRegex(installer.Refusal, "must be native or compose"):
+                        self.channel.run(["up"])
+                spawn.assert_not_called()
+                signatures.assert_not_called()
+
+    def test_released_next5_manager_needs_upgrade_manager_for_compose_selection(self):
+        source = SOURCE.parent.parent / "tests/fixtures/prerelease-manager-storage-v5.py"
+        predecessor = "e2e2bcbacf58b21d1086047c94727e5e814776384439700adcf5aabe5c49c2fa"
+        self.assertEqual(installer.digest(source), predecessor)
+        self.assertIn(predecessor, installer.MANAGER_PREDECESSORS)
+        spec = importlib.util.spec_from_file_location("storage_v5_predecessor", source)
+        previous = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(previous)
+        self.channel = previous.Channel(self.root / "storage-v5")
+        self.channel.initialize()
+        archive, checksum = self.archive("5.0.0-next.1", with_current_payload)
+        with self.channel.lock():
+            self.channel.install("5.0.0-next.1", archive, checksum)
+        version = self.channel.root / "versions/5.0.0-next.1"
+        for home in ("native-home", "cli-home"):
+            (version / home / "marker").write_text(home)
+        before = self.retained_snapshot()
+        with mock.patch.dict(os.environ, {"HACK_RUNTIME_BACKEND": "compose"}):
+            # The released manager always selects native and its private homes.
+            command, environment = self.launch()
+            self.assertEqual(command, version / "bundle/hack-v5")
+            self.assertEqual(environment["HACK_RUNTIME_BACKEND"], "native")
+            self.assertEqual(environment["HACK_HOME"], str(version / "cli-home"))
+            self.channel = self.upgrade_manager()
+            self.assertEqual((self.channel.root / "manager.py").read_bytes(), SOURCE.read_bytes())
+            self.assertEqual(self.retained_snapshot(), before)
+            command, environment = self.launch()
+        self.assertEqual(command, version / "bundle/hack-cli")
+        self.assertEqual(environment["HACK_RUNTIME_BACKEND"], "compose")
+        self.assertEqual(environment["HACK_HOME"], str(self.stable_home / ".hack"))
+        os.environ.pop("HACK_RUNTIME_BACKEND")
+        command, environment = self.launch()
+        self.assertEqual(command, version / "bundle/hack-v5")
+        self.assertEqual(environment["HACK_HOME"], str(version / "cli-home"))
+        self.assertEqual(self.retained_snapshot(), before)
 
     def test_host_and_local_archive_cli_contract(self):
         for system, machine in (("Linux", "aarch64"), ("Darwin", "x86_64")):

@@ -109,12 +109,16 @@ export async function writeTextFileIfChanged(
  * follow), written and fsynced, then renamed over the target. A process that
  * dies before the rename leaves the previous complete file in place and at most
  * an orphaned `.<name>.<uuid>.tmp` sibling that no reader selects; the staging
- * file is removed on every failure this process observes. Directory fsync is
- * best effort.
+ * file is removed on every failure this process observes. Orphans are never
+ * swept here, because a concurrent writer may still own one; callers that write
+ * under `.hack/` rely on its managed `.gitignore` to keep them unstaged.
+ * Directory fsync is best effort.
  *
  * An existing target keeps its permission bits, and an existing symlink keeps
  * pointing where it did: the replacement lands at the link's resolved path, as
  * a plain write through the link would. A new file gets the umask default.
+ * Unlike an in-place write, a dangling symlink is replaced by a regular file,
+ * and the containing directory must be writable.
  */
 export async function writeTextFileAtomicIfChanged(
   absolutePath: string,

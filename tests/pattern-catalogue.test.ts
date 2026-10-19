@@ -161,6 +161,26 @@ test("negative control: the banned-recipe scan flags each recipe outside a negat
   }
 });
 
+test("the argv-env-value scan skips flags but still flags a value operand", () => {
+  for (const text of [
+    "hack env set API_TOKEN --local --value-stdin --secret",
+    "`hack env set <key> --value-stdin` (pipe the value)",
+    "run `hack env set API_TOKEN` and pipe the value",
+    "hack env set API_TOKEN\nsecond line",
+  ]) {
+    expect(bannedRecipeFindings(text), text).toEqual([]);
+  }
+  for (const text of [
+    "hack env set --local API_TOKEN synthetic-value",
+    "hack env add API_TOKEN --local synthetic-value",
+    "`hack env set API_TOKEN synthetic-value`",
+    "hack env set API_TOKEN `cat synthetic-file`",
+    "hack env set API_TOKEN --env dev",
+  ]) {
+    expect(bannedRecipeFindings(text), text).toEqual(["argv-env-value"]);
+  }
+});
+
 test("the packaged hack-cli reference is the rendered catalogue", async () => {
   const packaged = await Bun.file(
     join(

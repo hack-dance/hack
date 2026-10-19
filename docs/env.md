@@ -51,6 +51,7 @@ worktrees inherit the rules with zero setup. It covers (patterns relative to
 - `.env.state.json`
 - `hack.env.local.yaml`
 - `hack.env.*.local.yaml`
+- `.hack.env*.tmp` (staging files an interrupted env write can leave behind)
 - `tickets/` (retained only to contain retired machine-local ticket caches during upgrades)
 
 How it is maintained:
@@ -413,12 +414,24 @@ per-checkout values you don't want to commit.
 
 Repeating `hack env add` or `hack env set` with the value already stored is a no-op: when
 the existing secret decrypts to the same value under the current key, its ciphertext is
-kept, so the file stays byte-identical and Git shows no change. A different value, a
-plain entry becoming secret, or an entry that does not decrypt under the current key gets
-new ciphertext with a fresh IV. Each env file write goes to a temporary file in the same
-directory and replaces the file by rename, so an interrupted write leaves the previous
-file in place. Each command writes one key; a script that sets several keys is not atomic
-across them.
+kept, so once Hack has written the file it stays byte-identical and Git shows no change.
+A hand-edited file (comments, other formatting, or no `global: {}`) is normalized on the
+first repeat and stays byte-identical after that. A different value, a plain entry
+becoming secret, or an entry that does not decrypt under the current key gets new
+ciphertext with a fresh IV. Each command writes one key; a script that sets several keys
+is not atomic across them.
+
+Each env file write goes to a hidden `.<file>.<id>.tmp` file in the same directory and
+replaces the file by rename, so an interrupted write leaves the previous file in place.
+A write killed before the rename can leave that staging file behind. It holds the whole
+new layer, so `.hack/.gitignore` ignores `.hack.env*.tmp`, and you can delete it. Hack
+does not remove it on the next write, because another write may still be using it. The
+rename has these effects:
+
+- a symlinked env file keeps its link; the new contents land at the file the link points
+  to, and the staging file is created next to that file
+- a symlink whose target does not exist is replaced by a regular file
+- the directory must be writable, even when the env file itself is writable
 
 If you omit `key`, `value`, or `--service`, `hack env add` prompts for them interactively.
 Pass `--no-interactive` (or set `HACK_NO_INTERACTIVE=1`) for scripted/agent usage: the

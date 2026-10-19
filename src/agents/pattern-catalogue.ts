@@ -254,11 +254,14 @@ export const PATTERN_CATALOGUE: readonly PatternCard[] = [
     useWhen:
       "A repository tracks env defaults and each machine adds local values on top.",
     disposition: "partial",
-    supportedCommands: ["hack env explain <key> --json"],
+    supportedCommands: [
+      "hack env set <key> --local --value-stdin --secret",
+      "hack env explain <key> --json",
+    ],
     prerequisites:
       "Tracked defaults, a machine-local layer and preserved operator overrides.",
     envOwnership:
-      "Defaults are tracked; hydration writes one key at a time with the `env set` subcommand, piping each value through `--value-stdin` (with `--secret`, and `--local` for the machine-local layer), so values stay out of argv.",
+      "Defaults are tracked; hydration runs `hack env set <key> --local --value-stdin --secret` once per key with the value piped on stdin, so values stay out of argv. Without `--local` the same command writes a tracked default.",
     readiness:
       "Setting a secret to its current value keeps the stored ciphertext, so repeat hydration leaves the tracked tree clean; a changed value gets new ciphertext with a fresh IV. Each layer write commits by rename, so an interrupted write leaves the previous layer resolvable.",
     cleanup: "Unchanged values cause no rewrite.",

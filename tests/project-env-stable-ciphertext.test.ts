@@ -1,12 +1,14 @@
 import { afterEach, expect, test } from "bun:test";
 import {
   chmod,
+  lstat,
   mkdir,
   mkdtemp,
   readdir,
   readFile,
   rm,
   stat,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -18,9 +20,12 @@ import {
   PROJECT_CONFIG_FILENAME,
   PROJECT_ENV_KEY_FILENAME,
 } from "../src/constants.ts";
+import { writeTextFileAtomicIfChanged } from "../src/lib/fs.ts";
 import {
+  ensureHackDirGitignore,
   resolveProjectEnvConfig,
   resolveProjectEnvConfigPath,
+  resolveProjectEnvLocalConfigPath,
   setProjectEnvValue,
 } from "../src/lib/project-env-config.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
@@ -80,7 +85,18 @@ async function createRepo(): Promise<Repo> {
   };
 }
 
-async function setSecret(repo: Repo, value: string) {
+type Layer = "tracked" | "local";
+
+function layerPath(repo: Repo, layer: Layer): string {
+  return layer === "local"
+    ? resolveProjectEnvLocalConfigPath({
+        projectDir: repo.projectDir,
+        envName: null,
+      })
+    : repo.envFile;
+}
+
+async function setSecret(repo: Repo, value: string, layer: Layer = "tracked") {
   return await setProjectEnvValue({
     projectRoot: repo.projectRoot,
     projectDir: repo.projectDir,
@@ -89,6 +105,7 @@ async function setSecret(repo: Repo, value: string) {
     key: "API_TOKEN",
     value,
     secret: true,
+    local: layer === "local",
   });
 }
 
@@ -257,13 +274,63 @@ async function readUntil(
   }
 }
 
-test("a write killed before its commit rename leaves the previous layer resolvable", async () => {
+test("a symlinked layer keeps its link and the write lands at the link target", async () => {
   const repo = await createRepo();
-  await setSecret(repo, FIRST);
-  const original = await readFile(repo.envFile);
+  const shared = resolve(repo.root, "shared");
+  await mkdir(shared);
+  const linkTarget = resolve(shared, "hack.env.default.yaml");
+  await writeFile(
+    linkTarget,
+    "version: 1\nenvironment: default\nsecretsprovider: project_key\nvalues:\n  global: {}\n"
+  );
+  await symlink(linkTarget, repo.envFile);
+
+  expect((await setSecret(repo, FIRST)).changed).toBe(true);
+  expect((await lstat(repo.envFile)).isSymbolicLink()).toBe(true);
+  storedCiphertext(await readFile(linkTarget, "utf8"));
+  expect(await resolvedToken(repo)).toBe(FIRST);
+  // Neither directory keeps a staging file after a committed write.
+  for (const dir of [repo.projectDir, shared]) {
+    expect(
+      (await readdir(dir)).filter((name) => name.endsWith(".tmp"))
+    ).toEqual([]);
+  }
+});
+
+test("a write that fails after staging removes its staging file", async () => {
+  const repo = await createRepo();
+  // A directory at the target path: staging succeeds, the commit rename fails.
+  const target = resolve(repo.projectDir, "occupied.yaml");
+  await mkdir(target);
+
+  await expect(
+    writeTextFileAtomicIfChanged(target, "synthetic: content\n")
+  ).rejects.toThrow();
+  expect((await stat(target)).isDirectory()).toBe(true);
+  expect(
+    (await readdir(repo.projectDir)).filter((name) => name.endsWith(".tmp"))
+  ).toEqual([]);
+});
+
+for (const layer of ["tracked", "local"] as const) {
+  test(`a ${layer} write killed before its commit rename leaves the layer resolvable and git clean`, async () => {
+    await assertKilledWriteIsRecoverable(layer);
+  }, 30_000);
+}
+
+async function assertKilledWriteIsRecoverable(layer: Layer): Promise<void> {
+  const repo = await createRepo();
+  const layerFile = layerPath(repo, layer);
+  await git(repo, ["init", "-q", "-b", "main"]);
+  // `hack init` writes the managed `.hack/.gitignore`; `--local` writes heal it.
+  await ensureHackDirGitignore({ projectDir: repo.projectDir });
+  await setSecret(repo, FIRST, layer);
+  await commitAll(repo);
+  expect(await git(repo, ["status", "--porcelain"])).toBe("");
+  const original = await readFile(layerFile);
 
   const worker = Bun.spawn(
-    [process.execPath, WORKER, repo.projectRoot, repo.projectDir],
+    [process.execPath, WORKER, repo.projectRoot, repo.projectDir, layer],
     {
       cwd: repo.projectRoot,
       env: privateCliEnv({ root: repo.root }),
@@ -276,7 +343,7 @@ test("a write killed before its commit rename leaves the previous layer resolvab
   await worker.stdin.end();
   await readUntil(worker.stdout, "prepared\n");
   // The replacement is fully staged and fsynced, but not yet committed.
-  expect((await readFile(repo.envFile)).equals(original)).toBe(true);
+  expect((await readFile(layerFile)).equals(original)).toBe(true);
   worker.kill("SIGKILL");
   await worker.exited;
 
@@ -293,17 +360,22 @@ test("a write killed before its commit rename leaves the previous layer resolvab
   );
 
   // The old layer is intact and still resolves; the orphan is not a layer.
-  expect((await readFile(repo.envFile)).equals(original)).toBe(true);
+  expect((await readFile(layerFile)).equals(original)).toBe(true);
   expect(await resolvedToken(repo)).toBe(FIRST);
+  // The orphan holds the whole layer, so it must be ignored: `git add -A`
+  // would otherwise commit machine-local values, and the tree would be dirty.
+  expect(await git(repo, ["status", "--porcelain"])).toBe("");
+  await git(repo, ["add", "-A"]);
+  expect(await git(repo, ["diff", "--cached", "--name-only"])).toBe("");
 
   // The next writer commits normally without adopting the orphan.
-  const retried = await setSecret(repo, SECOND);
+  const retried = await setSecret(repo, SECOND, layer);
   expect(retried.changed).toBe(true);
   expect(await resolvedToken(repo)).toBe(SECOND);
-  expect(storedCiphertext(await readFile(repo.envFile, "utf8"))).not.toBe(
+  expect(storedCiphertext(await readFile(layerFile, "utf8"))).not.toBe(
     storedCiphertext(staged)
   );
-}, 30_000);
+}
 
 async function runCli(
   repo: Repo,

@@ -39,6 +39,8 @@ async function runGit(args: readonly string[], cwd: string): Promise<string> {
   return stdout.trim();
 }
 
+const STAGING_ORPHAN = ".hack.env.local.yaml.0b88c1d2.tmp";
+
 /**
  * Creates a git repo where machine-local generated files were force-added and
  * committed — the leak scenario the doctor check exists to catch.
@@ -69,6 +71,11 @@ async function createLeakedRepo(): Promise<string> {
     resolve(repoRoot, ".hack", "tickets", "legacy-cache.json"),
     "{}\n"
   );
+  // Staging file left by an env layer write killed before its commit rename.
+  await writeFile(
+    resolve(repoRoot, ".hack", STAGING_ORPHAN),
+    "version: 1\nvalues:\n  global: {}\n"
+  );
   await writeFile(
     resolve(repoRoot, PROJECT_ENV_KEY_FILENAME),
     "super-secret-key\n"
@@ -90,6 +97,7 @@ test("inspectTrackedGeneratedFiles lists tracked generated files and flags the s
     PROJECT_ENV_KEY_FILENAME,
     ".hack/.branch/compose.x.override.yml",
     ".hack/.env.state.json",
+    `.hack/${STAGING_ORPHAN}`,
     ".hack/tickets/legacy-cache.json",
   ]);
   expect(inspection?.secretKeyTracked).toBe(true);
@@ -138,7 +146,7 @@ test("untrackGeneratedFiles removes offenders from the index, keeps files on dis
     projectRoot: repoRoot,
     projectDirName: ".hack",
   });
-  expect(inspection?.trackedPaths.length).toBe(4);
+  expect(inspection?.trackedPaths.length).toBe(5);
 
   // Same flow as `hack doctor --fix`: untrack, then ensure the nested ignore.
   const untracked = await untrackGeneratedFiles({
@@ -152,6 +160,7 @@ test("untrackGeneratedFiles removes offenders from the index, keeps files on dis
   for (const path of [
     ".hack/.branch/compose.x.override.yml",
     ".hack/.env.state.json",
+    `.hack/${STAGING_ORPHAN}`,
     ".hack/tickets/legacy-cache.json",
     PROJECT_ENV_KEY_FILENAME,
   ]) {

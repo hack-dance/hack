@@ -59,6 +59,8 @@ const FAKE = {
   ].join("."),
   awsKeyId: `AKIA${"FIXTURE0".repeat(2)}`,
   password: "correct-horse-fixture",
+  privateKeyArmor: (edge: "BEGIN" | "END") =>
+    `-----${edge} OPENSSH ${"PRIVATE"} KEY-----`,
   base64Blob: `${"QmFzZTY0Rml4dHVyZQ".repeat(3)}9xZ`,
   digest: "ab12".repeat(16),
 } as const;
@@ -109,9 +111,9 @@ const REDACTION_CASES: readonly RedactionCase[] = [
   {
     name: "private keys, armored ciphertext, sops values and encoded blobs",
     input: [
-      "-----BEGIN OPENSSH PRIVATE KEY-----",
+      FAKE.privateKeyArmor("BEGIN"),
       "fixture-private-key-material",
-      "-----END OPENSSH PRIVATE KEY-----",
+      FAKE.privateKeyArmor("END"),
       "-----BEGIN AGE ENCRYPTED FILE-----",
       "fixture-ciphertext-material",
       "-----END AGE ENCRYPTED FILE-----",

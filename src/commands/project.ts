@@ -5984,6 +5984,10 @@ async function runDownCommand({
       );
     }
   }
+  // An override written by an earlier Hack version can hold decrypted values.
+  // Down never reads it, so it is removed first: a failed lifecycle hook, a
+  // remote target or a failed Compose down cannot leave it behind.
+  await scrubPlaintextComposeEnvOverride({ projectDir: project.projectDir });
 
   const remoteDownCode = await runRemoteLifecycleCommand({
     project,
@@ -6122,9 +6126,6 @@ async function runDownCommand({
   } finally {
     signalCleanup.dispose();
   }
-  // An override written by an earlier Hack version can hold decrypted values;
-  // down never needs it, so it does not outlive the stack.
-  await scrubPlaintextComposeEnvOverride({ projectDir: project.projectDir });
 
   if (code !== 0) {
     if (json) {

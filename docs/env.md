@@ -204,10 +204,25 @@ decrypted value, whether `up` succeeds, fails or is interrupted. The file is wri
 with mode 0600, and Hack refuses to write through a symlink at that path. A value
 reaches the container literally, `$` included.
 
+Because the file holds only references, a `docker compose -f
+.hack/.internal/compose.env.override.yml ...` command run outside Hack (a script, an IDE
+integration or a test harness) gets a blank value for every managed variable, with only a
+per-variable warning from Compose. Use `hack run` or `hack exec`, or supply the same
+`HACK_ENV_*` variables to that command.
+
+Every service gets its own `HACK_ENV_*` copy of each value, including values that come
+from the global scope, so the Compose client environment grows with services times keys.
+The platform limits apply to it: about 1 MiB of arguments and environment in total on
+macOS, and on Linux also 128 KiB (`MAX_ARG_STRLEN`) for a single `NAME=value` string. A
+larger single value, such as a big JSON credential, makes the Compose start fail with
+`E2BIG`.
+
 An override written by an earlier Hack version can still hold literal values. The next
-`hack up`, `hack restart`, `hack run` or `hack exec` replaces it, and `hack down` removes
-it. `hack doctor` reports such a file in its "compose env at rest" check (counts only,
-never values), and `hack doctor --fix` removes it.
+`hack up`, `hack restart`, `hack run` or `hack exec` replaces it or, when it renders no
+override, removes it. `hack down` removes it before anything else, so a failed lifecycle
+hook or a remote target does not keep it. `hack doctor` reports such a file in its
+"compose env at rest" check (counts only, never values), and `hack doctor --fix` removes
+it. A removal never deletes a value-free file that a concurrent Hack command wrote.
 
 `hack env materialize` is manual by design. Use it only when you need a compatibility file for an external tool that expects `.env` on disk.
 

@@ -1,5 +1,6 @@
-import { lstat, mkdir, unlink } from "node:fs/promises";
-import { dirname, resolve } from "node:path";
+import { randomUUID } from "node:crypto";
+import { link, lstat, mkdir, readdir, rename, unlink } from "node:fs/promises";
+import { dirname, join, resolve } from "node:path";
 import {
   type ComposeEnvOverrideContent,
   classifyComposeEnvOverrideText,
@@ -25,8 +26,9 @@ import {
  * Compose command that renders the override replaces such a file, one that
  * renders none removes it, `hack down` removes it, and `hack doctor` reports
  * it with an authorized `--fix` removal. A value-free file is never removed
- * here, so a concurrent Compose command that names it keeps working. Nothing
- * here returns or logs a value from the file.
+ * here, even when a concurrent Compose command replaces the inspected file
+ * between inspection and removal, so that command keeps working. Nothing here
+ * returns or logs a value from the file.
  */
 export const COMPOSE_ENV_OVERRIDE_FILENAME = "compose.env.override.yml";
 
@@ -87,48 +89,136 @@ export async function inspectComposeEnvOverrideAtRest(opts: {
   readonly projectDir: string;
 }): Promise<ComposeEnvOverrideAtRest> {
   const path = composeEnvOverridePath(opts);
+  return { ...(await inspectEntry(path)), path };
+}
+
+async function inspectEntry(
+  path: string
+): Promise<
+  | { readonly kind: "absent" }
+  | { readonly kind: "unreadable" }
+  | ComposeEnvOverrideContent
+> {
   let current: Awaited<ReturnType<typeof readReplaceablePrivateFile>>;
   try {
     current = await readReplaceablePrivateFile(fileOptions(path));
   } catch (error: unknown) {
     if (error instanceof Error && error.message === REFUSAL) {
       const info = await lstat(path).catch(() => null);
-      return info ? { kind: "unverifiable", path } : { kind: "absent", path };
+      return info ? { kind: "unverifiable" } : { kind: "absent" };
     }
-    return { kind: "unreadable", path };
+    return { kind: "unreadable" };
   }
   if (current === null) {
-    return { kind: "absent", path };
+    return { kind: "absent" };
   }
-  return { ...classifyComposeEnvOverrideText(current.text), path };
+  return classifyComposeEnvOverrideText(current.text);
 }
+
+/** Private sibling that holds an entry only between its move and its unlink. */
+const ASIDE_PATTERN = /^\.compose\.env\.override\.yml\.[0-9a-f-]{36}\.remove$/;
+/** An aside is stale (its owner crashed) once its rename is this old. */
+const STALE_ASIDE_MS = 60_000;
 
 /**
  * Removes the override only while it still holds (or may hold) literal
  * values: `plaintext` always, `unverifiable` when `includeUnverifiable` is set.
- * The state is re-read immediately before the unlink; a value-free file is
- * kept. Returns the state that was acted on.
+ * Returns the state that was acted on.
+ *
+ * Race safety: the entry is first moved aside with one atomic rename, and the
+ * moved entry itself is classified again. If a concurrent Compose command had
+ * already replaced the inspected file with a value-free one, that file is put
+ * back with a no-clobber link (a still newer file at the path wins), so a
+ * value-free override is never removed. An aside left by a crash between the
+ * move and the unlink is removed by a later call once it is stale.
  */
 export async function removePlaintextComposeEnvOverride(opts: {
   readonly projectDir: string;
   readonly includeUnverifiable?: boolean;
+  /** Race-test observation point between inspection and the move; no authority. */
+  readonly afterInspect?: () => Promise<void>;
 }): Promise<{
   readonly removed: boolean;
   readonly state: ComposeEnvOverrideAtRest;
 }> {
-  const state = await inspectComposeEnvOverrideAtRest(opts);
-  const eligible =
+  const path = composeEnvOverridePath(opts);
+  await removeStaleAsides(path);
+  const eligible = (state: { readonly kind: string }) =>
     state.kind === "plaintext" ||
     (state.kind === "unverifiable" && opts.includeUnverifiable === true);
-  if (!eligible) {
+  const state = await inspectComposeEnvOverrideAtRest(opts);
+  if (!eligible(state)) {
     return { removed: false, state };
   }
-  const info = await lstat(state.path).catch(() => null);
+  await opts.afterInspect?.();
+  const info = await lstat(path).catch(() => null);
   if (!info || info.isDirectory()) {
     return { removed: false, state };
   }
-  await unlinkIfPresent(state.path);
+  const aside = join(
+    dirname(path),
+    `.${COMPOSE_ENV_OVERRIDE_FILENAME}.${randomUUID()}.remove`
+  );
+  try {
+    await rename(path, aside);
+  } catch (error: unknown) {
+    if (isRecord(error) && error.code === "ENOENT") {
+      return { removed: false, state: { kind: "absent", path } };
+    }
+    throw error;
+  }
+  const movedInfo = await lstat(aside);
+  const moved = await inspectEntry(aside);
+  if (movedInfo.isDirectory() || !eligible(moved)) {
+    await restoreAside({ aside, path, regular: movedInfo.isFile() });
+    return { removed: false, state: { ...moved, path } };
+  }
+  await unlinkIfPresent(aside);
   return { removed: true, state };
+}
+
+/** Puts a moved entry back unless a newer one already holds the path. */
+async function restoreAside(opts: {
+  readonly aside: string;
+  readonly path: string;
+  readonly regular: boolean;
+}): Promise<void> {
+  if (opts.regular) {
+    try {
+      await link(opts.aside, opts.path);
+    } catch (error: unknown) {
+      if (
+        !(isRecord(error) && ["EEXIST", "ENOENT"].includes(String(error.code)))
+      ) {
+        throw error;
+      }
+    }
+    await unlinkIfPresent(opts.aside);
+    return;
+  }
+  if (!(await lstat(opts.path).catch(() => null))) {
+    await rename(opts.aside, opts.path);
+  }
+}
+
+/**
+ * Removes stale regular-file asides; they are never a current override. The
+ * rename that created an aside updated its ctime, so a fresh one may still
+ * belong to a concurrent call and is left alone.
+ */
+async function removeStaleAsides(path: string): Promise<void> {
+  const directory = dirname(path);
+  const names = await readdir(directory).catch(() => []);
+  for (const name of names) {
+    if (!ASIDE_PATTERN.test(name)) {
+      continue;
+    }
+    const aside = join(directory, name);
+    const info = await lstat(aside).catch(() => null);
+    if (info?.isFile() && Date.now() - info.ctimeMs > STALE_ASIDE_MS) {
+      await unlinkIfPresent(aside);
+    }
+  }
 }
 
 async function unlinkIfPresent(path: string): Promise<void> {

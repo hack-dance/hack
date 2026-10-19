@@ -4,6 +4,7 @@ import {
   lstat,
   mkdir,
   mkdtemp,
+  readdir,
   readFile,
   realpath,
   rm,
@@ -257,6 +258,32 @@ test("inspection and removal act only on literal or unverifiable overrides", asy
   ).toBe(true);
   expect(await lstat(path).catch(() => null)).toBeNull();
   expect(await readFile(target, "utf8")).toContain(CANARY);
+});
+
+test("removal keeps a value-free override that replaced the inspected literal file", async () => {
+  const path = composeEnvOverridePath({ projectDir });
+  await mkdir(join(projectDir, ".internal"));
+  const projection = { targetServices: ["web"], globalEnv: {}, serviceEnv };
+  await writeFile(path, renderManagedComposeEnvOverride(projection) ?? "");
+  const references = renderComposeEnvReferenceOverride(projection)?.text ?? "";
+  // A concurrent Compose command rewrites the override after the scrub saw
+  // the literal file and before it removes anything.
+  const raced = await removePlaintextComposeEnvOverride({
+    projectDir,
+    afterInspect: async () => {
+      await writeComposeEnvOverride({ projectDir, text: references });
+    },
+  });
+  expect(raced.removed).toBe(false);
+  expect(raced.state.kind).toBe("references");
+  expect(await readFile(path, "utf8")).toBe(references);
+  expect((await lstat(path)).mode & 0o777).toBe(0o600);
+  expect(
+    (await readdir(join(projectDir, ".internal"))).filter((name) =>
+      name.endsWith(".remove")
+    )
+  ).toEqual([]);
+  expect(JSON.stringify(raced)).not.toContain(CANARY);
 });
 
 test("doctor --fix plan offers removal only while a literal override is at rest", async () => {

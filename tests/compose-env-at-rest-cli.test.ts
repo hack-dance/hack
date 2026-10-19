@@ -14,7 +14,10 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { PROJECT_ENV_KEY_FILENAME } from "../src/constants.ts";
 import { renderManagedComposeEnvOverride } from "../src/lib/compose-managed-env.ts";
-import { setProjectEnvValue } from "../src/lib/project-env-config.ts";
+import {
+  setProjectEnvValue,
+  unsetProjectEnvValue,
+} from "../src/lib/project-env-config.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
 /**
@@ -131,7 +134,8 @@ function cliEnv(extra?: Readonly<Record<string, string>>) {
   return privateCliEnv({
     root,
     env: {
-      PATH: `${join(root, "bin")}:${process.env.PATH ?? ""}`,
+      // Stub docker plus base system tools only: no host mutagen or brew.
+      PATH: `${join(root, "bin")}:/usr/bin:/bin`,
       STUB_CAPTURE: capture,
       HACK_NO_INTERACTIVE: "1",
       ...extra,
@@ -259,6 +263,56 @@ test("down removes a literal override left by an earlier version", async () => {
   const down = await runCli({ args: ["down", "--json"] });
   expectNoCanary(down);
   expect(down.exitCode).toBe(0);
+  expect(await lstat(overridePath).catch(() => null)).toBeNull();
+  expect(await filesHoldingCanary(root)).toEqual([]);
+}, 60_000);
+
+test("down removes a literal override even when its down-before hook fails", async () => {
+  const configPath = join(projectRoot, ".hack", "hack.config.json");
+  const config = JSON.parse(await readFile(configPath, "utf8"));
+  await writeFile(
+    configPath,
+    `${JSON.stringify({ ...config, lifecycle: { down: { before: ["exit 17"] } } })}\n`
+  );
+  await seedEarlierVersionPlaintext();
+  const down = await runCli({ args: ["down", "--json"] });
+  expectNoCanary(down);
+  expect(down.exitCode).toBe(17);
+  expect(await lstat(overridePath).catch(() => null)).toBeNull();
+  expect(await filesHoldingCanary(root)).toEqual([]);
+}, 60_000);
+
+test("up that renders no override removes a literal one (env config without values)", async () => {
+  const hackDir = join(projectRoot, ".hack");
+  for (const [scope, key] of [
+    ["global", "SECRET_TOKEN"],
+    ["web", "WEB_ONLY"],
+  ] as const) {
+    await unsetProjectEnvValue({
+      projectRoot,
+      projectDir: hackDir,
+      envName: null,
+      scope,
+      key,
+    });
+  }
+  await seedEarlierVersionPlaintext();
+  const up = await runCli({ args: ["up", "--detach", "--json"] });
+  expectNoCanary(up);
+  expect(up.exitCode).toBe(0);
+  expect(await lstat(overridePath).catch(() => null)).toBeNull();
+  expect(
+    await readFile(join(capture, "docker-args.log"), "utf8")
+  ).not.toContain("compose.env.override.yml");
+  expect(await filesHoldingCanary(root)).toEqual([]);
+}, 60_000);
+
+test("up that renders no override removes a literal one (no env config)", async () => {
+  await rm(join(projectRoot, ".hack", "hack.env.default.yaml"));
+  await seedEarlierVersionPlaintext();
+  const up = await runCli({ args: ["up", "--detach", "--json"] });
+  expectNoCanary(up);
+  expect(up.exitCode).toBe(0);
   expect(await lstat(overridePath).catch(() => null)).toBeNull();
   expect(await filesHoldingCanary(root)).toEqual([]);
 }, 60_000);

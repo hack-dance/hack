@@ -75,7 +75,7 @@ refer to `hack-dance/hack`.
 | A repository plants `.hack.secret.key` as a symlink (dangling or not) so that Hack reads or writes a file it should not. | Key reads go through `readBoundedPrivateFile` (`lstat`, `O_NOFOLLOW`, descriptor and path identity checks, 1 MiB bound, fatal UTF-8). New keys are created with `createPrivateFileExclusive` (`O_CREAT|O_EXCL|O_NOFOLLOW`, mode 0600, `fchmod`, `fsync`). Both are in `src/lib/private-file.ts`, used by `resolveProjectEnvKey`, `ensureProjectEnvSecretKey` and `resolveInheritedProjectEnvKey` in `src/lib/project-env-config.ts` (#288). |
 | A symlinked `.hack/.env`, overlay file or `.hack` directory redirects a write, or a reader sees a partial file. | `src/lib/private-env-file.ts` (`readPrivateEnvFile`, `writePrivateEnvFileIfChanged`) and `replacePrivateFileAtomic` in `src/lib/private-file.ts`: a private sibling is written and fsynced, then renamed over the target; symlinks and non-regular entries are refused with one fixed message (#302). Used by `src/lib/hack-env.ts` and `materializeProjectEnv`. |
 | A world-readable env file or store. | `.hack/.env`, overlays and the `encrypted_file` store are written 0600, and a same-content file with group or other access is tightened (#302). The `hack doctor` env key check reports `env-key-weak-permissions` and `env-key-wrong-owner` (#309). |
-| The Compose backend leaves decrypted values at rest in `.hack/.internal/compose.env.override.yml` after `up`, `down`, a failed `up` or an interrupted one. | The override holds only `${HACK_ENV_<digest>_<KEY>}` references; each value reaches `docker compose` through its process environment, so no Compose command writes a value to disk, whatever way it ends (`renderComposeEnvReferenceOverride` in `src/lib/compose-managed-env.ts`). The file keeps its path because Compose records it in each container's `config_files` label. It is written with `replacePrivateFileAtomic` (mode 0600, symlink refused), and a literal value is refused before any write (`writeComposeEnvOverride` in `src/lib/compose-env-at-rest.ts`). A file left by an earlier version is replaced by the next Compose command that renders the override, removed by one that renders none and by `hack down`, and reported by the `hack doctor` "compose env at rest" check by counts only; `hack doctor --fix` removes it. Proven with a stub `docker` by `tests/compose-env-at-rest-cli.test.ts` and `tests/compose-env-at-rest.test.ts` (HACK-1273). |
+| The Compose backend leaves decrypted values at rest in `.hack/.internal/compose.env.override.yml` after `up`, `down`, a failed `up` or an interrupted one. | The override holds only `${HACK_ENV_<digest>_<KEY>}` references; each value reaches `docker compose` through its process environment, so no Compose command writes a value to disk, whatever way it ends (`renderComposeEnvReferenceOverride` in `src/lib/compose-managed-env.ts`). The file keeps its path because Compose records it in each container's `config_files` label. It is written with `replacePrivateFileAtomic` (mode 0600, symlink refused), and a literal value is refused before any write (`writeComposeEnvOverride` in `src/lib/compose-env-at-rest.ts`). A file left by an earlier version is replaced by the next Compose command that renders the override, removed by one that renders none and by `hack down` (first, so a failed hook or a remote target cannot skip it), and reported by the `hack doctor` "compose env at rest" check by counts only; `hack doctor --fix` removes it. Removal moves the file aside atomically and classifies what it moved, so a value-free file written concurrently is put back rather than deleted. Legacy adoption gives the reference values only to its Compose config-hash probe at preview and preparation; a saved recheck runs without values and binds each container's config-hash label to the hash proven at preparation. Proven with a stub `docker` by `tests/compose-env-at-rest-cli.test.ts`, `tests/compose-env-at-rest.test.ts`, `tests/doctor-fix-noninteractive.test.ts` and `tests/native-compose-adoption-generation.test.ts` (HACK-1273). |
 | Two writers of the `encrypted_file` store lose an update. | An in-process queue plus a cooperative `<store>.lock` using the owner protocol from `src/lib/projects-registry-lock.ts`; a symlinked store path is refused for writes (`src/lib/secret-store.ts`, #302). |
 
 ### Malformed or hostile ciphertext
@@ -125,11 +125,16 @@ These gaps are known and not closed on `next`. Each one needs its own change.
    (HACK-1273), but the `docker compose` client process now carries one
    `HACK_ENV_*` variable per service and key. Like every injected env, it is
    readable by the same user (for example `ps eww`) for the life of that process.
-   A project whose resolved values exceed the platform's argument and environment
-   limit (about 1 MiB on macOS) cannot start through Compose. Existing containers
-   keep their values in `docker inspect` (gap 9). Legacy adoption can no longer
-   prove from a reference-form file that a running container got the current
-   values; it still proves the services and keys.
+   Each service gets its own copy of each value, so the size grows with services
+   times keys. A project whose resolved values exceed the platform's argument and
+   environment limit (about 1 MiB in total on macOS; on Linux also 128 KiB for one
+   `NAME=value` string) cannot start through Compose. Existing containers keep their
+   values in `docker inspect` (gap 9). A direct `docker compose -f` run of the
+   override outside Hack gets blank values. Legacy adoption resolves the values at
+   preview and preparation and checks each container's config-hash label against
+   Compose's hash computed with them; a saved recheck, which has no key or values,
+   compares the label with the hash saved at preparation while the Compose copy, the
+   generated override bytes and the managed env revision stay pinned.
 5. **YAML env file writes.** `writeProjectEnvConfigFile` in
    `src/lib/project-env-config.ts` also uses `writeTextFileIfChanged`, so
    `.hack/hack.env.*.yaml` writes follow a symlink at the file. These files hold

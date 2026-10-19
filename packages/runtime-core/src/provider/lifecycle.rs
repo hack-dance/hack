@@ -1125,7 +1125,8 @@ fn start_pool(
         ));
     }
     // Admission before aliases, provider commands, disks or VM effects. Only
-    // independently verified live ownership avoids charging a second VM's disks.
+    // independently verified ownership of existing disks (a live pool, or an exactly
+    // clean stopped pool this start reuses) avoids charging a second VM's disks.
     let admission_owner = admission_pool::select(candidate, profile)?;
     let admission = admission_pool::probe(candidate, profile, admission_owner.as_ref())?;
     if !admission.admitted {
@@ -1231,11 +1232,16 @@ fn start_pool(
         audit_boot(candidate, &owner)?;
         return status(candidate);
     }
-    if admission_owner.is_some() {
-        return Err(CandidateError::new(
-            "admission_owner_changed",
-            "Reserve-qualified ownership no longer names a running pool; no create or boot was admitted.",
-        ));
+    if let Some(selected) = &admission_owner {
+        // Only a clean stopped selection continues, as a restart of its verified retained
+        // disks. A reserve-qualified start never reaches `machine create`.
+        if !selected.is_stopped() || !owner.created {
+            return Err(CandidateError::new(
+                "admission_owner_changed",
+                "Reserve-qualified ownership no longer names its selected pool; no create or boot was admitted.",
+            ));
+        }
+        selected.reverify(candidate)?;
     }
     if ![
         "initializing",
@@ -1324,8 +1330,10 @@ fn start_pool(
         owner.created = true;
         owner.save(candidate)?;
     }
-    // A fresh admission immediately before boot closes installation/lock delays.
-    let admission = admission::probe_for(&candidate.checkout, profile)?;
+    // A fresh admission immediately before boot closes installation/lock delays. Without a
+    // selection this is the unchanged fresh-allocation probe; a clean stopped selection is
+    // rechecked around its reserve sample.
+    let admission = admission_pool::probe(candidate, profile, admission_owner.as_ref())?;
     if !admission.admitted {
         phase(candidate, &mut owner, "stopped")?;
         return Err(CandidateError::new(
@@ -1356,6 +1364,10 @@ fn start_pool(
     #[cfg(target_os = "macos")]
     if let Some(guard) = &retained_guard {
         guard.verify(candidate)?;
+    }
+    if let Some(selected) = &admission_owner {
+        // The last check before `machine start` releases the VM lock to the provider.
+        selected.reverify(candidate)?;
     }
     let previous_boot = owner.begin_boot();
     owner.reclamation = Some(boot_reclamation_policy());
@@ -2021,6 +2033,18 @@ fn finish_absent_locked(
             &owner.real_data_dir(candidate)?.join("overlay.raw"),
         )?);
     }
+    sockets_absent(owner)?;
+    for name in ["storage.raw", "overlay.raw"] {
+        File::open(owner.real_data_dir(candidate)?.join(name))
+            .map_err(io)?
+            .sync_all()
+            .map_err(io)?;
+    }
+    phase(candidate, owner, value)
+}
+
+/// No owned provider socket accepts connections. Read-only: connecting never creates one.
+fn sockets_absent(owner: &Owner) -> Result<(), CandidateError> {
     let mut sockets = vec!["agent.sock".to_owned(), "docker.sock".to_owned()];
     if let Some(bridge) = owner.application_bridge {
         sockets.extend(bridge.guest_paths().into_iter().map(|path| {
@@ -2050,13 +2074,7 @@ fn finish_absent_locked(
             }
         }
     }
-    for name in ["storage.raw", "overlay.raw"] {
-        File::open(owner.real_data_dir(candidate)?.join(name))
-            .map_err(io)?
-            .sync_all()
-            .map_err(io)?;
-    }
-    phase(candidate, owner, value)
+    Ok(())
 }
 
 pub fn recover(candidate: &Candidate) -> Result<RuntimeStatus, CandidateError> {

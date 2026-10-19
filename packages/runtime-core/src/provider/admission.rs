@@ -233,36 +233,71 @@ pub fn probe(path: &Path) -> Result<Admission, CandidateError> {
 }
 
 pub fn probe_for(path: &Path, profile: Profile) -> Result<Admission, CandidateError> {
-    probe_with_disk_budget(path, profile, false)
+    probe_with_disk_budget(path, profile, OwnedPool::Fresh)
 }
 
-/// Only the lifecycle's independently verified live development pool may use this budget.
-pub(super) fn probe_owned_development(path: &Path) -> Result<Admission, CandidateError> {
-    probe_with_disk_budget(path, Profile::Development, true)
+/// Which existing Development disk allocation an admission may treat as already paid.
+/// Only the lifecycle's admission-pool selection names an owned pool, after proving it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum OwnedPool {
+    /// No proven allocation: charge the declared storage, overlay and host reserve.
+    Fresh,
+    /// An independently verified live development pool.
+    Running,
+    /// An exactly clean stopped development pool whose verified retained disks a
+    /// restart reuses without `machine create`.
+    Stopped,
 }
 
-fn disk_budget(profile: Profile, owned_live: bool) -> (u64, &'static str) {
-    if profile == Profile::Development && owned_live {
-        (
+/// Only the lifecycle's independently verified development pool may use this budget.
+pub(super) fn probe_owned_development(
+    path: &Path,
+    owned: OwnedPool,
+) -> Result<Admission, CandidateError> {
+    probe_with_disk_budget(path, Profile::Development, owned)
+}
+
+fn disk_budget(profile: Profile, owned: OwnedPool) -> (u64, &'static str) {
+    match (profile, owned) {
+        (Profile::Research, _) => (disk_floor_bytes(profile), "research-floor"),
+        (Profile::Development, OwnedPool::Fresh) => (
+            disk_floor_bytes(profile),
+            "new-pool-storage-overlay-host-reserve",
+        ),
+        (Profile::Development, OwnedPool::Running) => (
             DEVELOPMENT_HOST_DISK_RESERVE_GIB * 1024 * 1024 * 1024,
             "verified-live-owned-pool-host-reserve",
-        )
-    } else {
-        (
-            disk_floor_bytes(profile),
-            if profile == Profile::Research {
-                "research-floor"
-            } else {
-                "new-pool-storage-overlay-host-reserve"
-            },
-        )
+        ),
+        (Profile::Development, OwnedPool::Stopped) => (
+            DEVELOPMENT_HOST_DISK_RESERVE_GIB * 1024 * 1024 * 1024,
+            "verified-stopped-owned-pool-host-reserve",
+        ),
     }
+}
+
+/// The fixed refusal for free disk below the selected budget, or none when it fits.
+fn disk_shortfall(profile: Profile, owned: OwnedPool, available: u64) -> Option<&'static str> {
+    if available >= disk_budget(profile, owned).0 {
+        return None;
+    }
+    Some(match (profile, owned) {
+        (Profile::Research, _) => "Free disk is below the 100 GiB research floor.",
+        (Profile::Development, OwnedPool::Fresh) => {
+            "Free disk is below the development VM storage and host reserve budget."
+        }
+        (Profile::Development, OwnedPool::Running) => {
+            "Free disk is below the host reserve for the verified running development pool."
+        }
+        (Profile::Development, OwnedPool::Stopped) => {
+            "Free disk is below the host reserve for the verified stopped development pool."
+        }
+    })
 }
 
 fn probe_with_disk_budget(
     path: &Path,
     profile: Profile,
-    owned_live: bool,
+    owned: OwnedPool,
 ) -> Result<Admission, CandidateError> {
     let supported = cfg!(all(target_os = "macos", target_arch = "aarch64"));
     let mut result = Admission {
@@ -279,8 +314,8 @@ fn probe_with_disk_budget(
         memory_pressure_normal: false,
         memory_pressure: MemoryPressure::from_level(None),
         disk_free_bytes: None,
-        minimum_disk_free_bytes: disk_budget(profile, owned_live).0,
-        disk_budget_basis: disk_budget(profile, owned_live).1,
+        minimum_disk_free_bytes: disk_budget(profile, owned).0,
+        disk_budget_basis: disk_budget(profile, owned).1,
         one_minute_load: None,
         load_ceiling: None,
         thermal_normal: false,
@@ -369,19 +404,8 @@ fn probe_with_disk_budget(
     let available = u64::try_from(available)
         .map_err(|_| CandidateError::new("admission_unavailable", "Invalid disk headroom."))?;
     result.disk_free_bytes = Some(available);
-    if available < result.minimum_disk_free_bytes {
-        result.reasons.push(
-            match profile {
-                Profile::Research => "Free disk is below the 100 GiB research floor.",
-                Profile::Development if owned_live => {
-                    "Free disk is below the host reserve for the verified running development pool."
-                }
-                Profile::Development => {
-                    "Free disk is below the development VM storage and host reserve budget."
-                }
-            }
-            .into(),
-        );
+    if let Some(reason) = disk_shortfall(profile, owned, available) {
+        result.reasons.push(reason.into());
     }
     let thermal = run(
         clean_command(Path::new("/usr/bin/pmset")).args(["-g", "therm"]),
@@ -509,11 +533,63 @@ mod tests {
         const GIB: u64 = 1024 * 1024 * 1024;
         assert_eq!(disk_floor_bytes(Profile::Research), 100 * GIB);
         assert_eq!(disk_floor_bytes(Profile::Development), 58 * GIB);
-        assert_eq!(disk_budget(Profile::Development, true).0, 16 * GIB);
-        assert_eq!(disk_budget(Profile::Research, true).0, 100 * GIB);
-        assert_eq!(disk_budget(Profile::Development, false).0, 58 * GIB);
+        assert_eq!(
+            disk_budget(Profile::Development, OwnedPool::Running).0,
+            16 * GIB
+        );
+        assert_eq!(
+            disk_budget(Profile::Research, OwnedPool::Running).0,
+            100 * GIB
+        );
+        assert_eq!(
+            disk_budget(Profile::Development, OwnedPool::Fresh).0,
+            58 * GIB
+        );
         assert_eq!(load_ceiling(Profile::Research), Some(8.0));
         assert_eq!(load_ceiling(Profile::Development), None);
+    }
+
+    #[test]
+    fn stopped_owned_pool_charges_only_the_host_reserve_and_refuses_below_it() {
+        const GIB: u64 = 1024 * 1024 * 1024;
+        let stopped = OwnedPool::Stopped;
+        assert_eq!(
+            disk_budget(Profile::Development, stopped),
+            (16 * GIB, "verified-stopped-owned-pool-host-reserve")
+        );
+        // The observed October 2 restart: 58,010,112,000 free bytes with retained disks.
+        assert_eq!(
+            disk_shortfall(Profile::Development, stopped, 58_010_112_000),
+            None
+        );
+        assert_eq!(
+            disk_shortfall(Profile::Development, OwnedPool::Fresh, 58_010_112_000),
+            Some("Free disk is below the development VM storage and host reserve budget.")
+        );
+        // The reserve boundary is inclusive and never waived for a stopped pool.
+        assert_eq!(
+            disk_shortfall(Profile::Development, stopped, 16 * GIB),
+            None
+        );
+        assert_eq!(
+            disk_shortfall(Profile::Development, stopped, 16 * GIB - 1),
+            Some("Free disk is below the host reserve for the verified stopped development pool.")
+        );
+        assert!(disk_shortfall(Profile::Development, stopped, 0).is_some());
+        // Research keeps its frozen floor whatever ownership is claimed.
+        assert_eq!(
+            disk_budget(Profile::Research, stopped),
+            (100 * GIB, "research-floor")
+        );
+        assert!(disk_shortfall(Profile::Research, stopped, 58_010_112_000).is_some());
+        assert_eq!(
+            disk_budget(Profile::Development, OwnedPool::Fresh).1,
+            "new-pool-storage-overlay-host-reserve"
+        );
+        assert_eq!(
+            disk_budget(Profile::Development, OwnedPool::Running).1,
+            "verified-live-owned-pool-host-reserve"
+        );
     }
 
     #[test]

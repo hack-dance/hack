@@ -281,3 +281,310 @@ fn selected_owner_or_provider_changes_refuse_reverification() {
     sparse_disk(&path, 10, 2);
     assert!(selection.reverify(&pool.candidate).is_err());
 }
+
+/// A pool `down` left exactly clean: provider proven dead after a quiesced engine stop of
+/// its last boot, retained disks identified, VM lock free and no listener or disk handle.
+fn stopped_pool() -> Pool {
+    let mut pool = Pool::new();
+    let child = pool.cleanup.child.as_mut().unwrap();
+    child.kill().unwrap();
+    child.wait().unwrap();
+    pool.cleanup.child = None;
+    pool.owner.phase = "stopped".into();
+    pool.owner.daemon_pid = Some(4242);
+    pool.owner.daemon_start = Some(99);
+    pool.owner.rootfs_digest = Some("fixture-rootfs".into());
+    pool.save();
+    quiescence(&pool, BOOT, 4242, 99, "quiesced");
+    OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(pool.data().join("vm.lock"))
+        .unwrap();
+    pool
+}
+
+const BOOT: &str = "11111111-1111-1111-1111-111111111111";
+
+fn quiescence(pool: &Pool, boot: &str, daemon: u32, start: u64, result: &str) {
+    state::write(
+        &root(&pool.candidate).join("quiescence.json"),
+        &serde_json::json!({
+            "guest_boot_id": boot, "daemon_pid": daemon, "daemon_start": start, "result": result,
+        }),
+    )
+    .unwrap();
+}
+
+/// The closed refusal for the current receipt; every refusal keeps the fresh budget.
+fn refusal(pool: &Pool) -> StoppedRefusal {
+    let owner = Owner::load(&pool.candidate).unwrap();
+    let refusal = stopped(&pool.candidate, &owner).unwrap_err();
+    assert!(
+        select(&pool.candidate, Profile::Development)
+            .unwrap()
+            .is_none()
+    );
+    refusal
+}
+
+fn exclusive_lock(path: &Path) -> fs::File {
+    use std::os::fd::AsRawFd;
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+        .unwrap();
+    // SAFETY: the descriptor stays open for this call; the lock ends when `file` drops.
+    assert_eq!(
+        unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+        0
+    );
+    file
+}
+
+#[test]
+fn only_a_clean_stopped_owned_development_pool_selects_the_retained_reserve() {
+    let pool = stopped_pool();
+    let receipt = fs::read(root(&pool.candidate).join("owner.json")).unwrap();
+    let storage = identity::disk(&pool.data().join("storage.raw")).unwrap();
+    let overlay = identity::disk(&pool.data().join("overlay.raw")).unwrap();
+
+    let selection = select(&pool.candidate, Profile::Development)
+        .unwrap()
+        .expect("exact clean stopped development ownership");
+    assert!(selection.is_stopped());
+    selection.reverify(&pool.candidate).unwrap();
+    selection.reverify(&pool.candidate).unwrap();
+    assert!(
+        select(&pool.candidate, Profile::Research)
+            .unwrap()
+            .is_none()
+    );
+    // Selection is read-only: receipt, disks and the provider's VM lock are left as found.
+    assert_eq!(
+        fs::read(root(&pool.candidate).join("owner.json")).unwrap(),
+        receipt
+    );
+    assert_eq!(
+        identity::disk(&pool.data().join("storage.raw")).unwrap(),
+        storage
+    );
+    assert_eq!(
+        identity::disk(&pool.data().join("overlay.raw")).unwrap(),
+        overlay
+    );
+    drop(exclusive_lock(&pool.data().join("vm.lock")));
+
+    // A running selection keeps its separate live basis.
+    let running = Pool::new();
+    assert!(
+        !select(&running.candidate, Profile::Development)
+            .unwrap()
+            .unwrap()
+            .is_stopped()
+    );
+}
+
+#[test]
+fn foreign_stopped_owner_refuses_the_retained_reserve() {
+    let pool = stopped_pool();
+    fs::write(pool.data().join("name"), b"hack-foreign0000").unwrap();
+    assert_eq!(refusal(&pool), StoppedRefusal::Foreign);
+
+    let mut pool = stopped_pool();
+    pool.owner.process.as_mut().unwrap().executable = PathBuf::from("/usr/bin/true");
+    pool.save();
+    assert_eq!(refusal(&pool), StoppedRefusal::Foreign);
+
+    let mut pool = stopped_pool();
+    pool.owner.process.as_mut().unwrap().uid += 1;
+    pool.save();
+    assert_eq!(refusal(&pool), StoppedRefusal::Foreign);
+
+    let pool = stopped_pool();
+    fs::hard_link(
+        pool.data().join("vm.lock"),
+        pool.data().join("vm.lock.alias"),
+    )
+    .unwrap();
+    assert_eq!(refusal(&pool), StoppedRefusal::Foreign);
+    assert_eq!(
+        StoppedRefusal::Foreign.code(),
+        "retained_reserve_foreign_owner"
+    );
+}
+
+#[test]
+fn active_stopped_owner_refuses_the_retained_reserve() {
+    // A receipt that says stopped while its recorded provider is still alive.
+    let mut pool = Pool::new();
+    pool.owner.phase = "stopped".into();
+    pool.owner.daemon_pid = Some(4242);
+    pool.owner.daemon_start = Some(99);
+    pool.owner.rootfs_digest = Some("fixture-rootfs".into());
+    pool.save();
+    quiescence(&pool, BOOT, 4242, 99, "quiesced");
+    assert_eq!(refusal(&pool), StoppedRefusal::Active);
+
+    let pool = stopped_pool();
+    let held = exclusive_lock(&pool.data().join("vm.lock"));
+    assert_eq!(refusal(&pool), StoppedRefusal::Active);
+    drop(held);
+
+    let pool = stopped_pool();
+    let handle = fs::File::open(pool.data().join("storage.raw")).unwrap();
+    assert_eq!(refusal(&pool), StoppedRefusal::Active);
+    drop(handle);
+
+    let pool = stopped_pool();
+    let listener =
+        std::os::unix::net::UnixListener::bind(pool.owner.data_dir().join("agent.sock")).unwrap();
+    assert_eq!(refusal(&pool), StoppedRefusal::Active);
+    drop(listener);
+    assert_eq!(
+        StoppedRefusal::Active.code(),
+        "retained_reserve_active_owner"
+    );
+}
+
+#[test]
+fn dirty_stopped_owner_refuses_the_retained_reserve() {
+    for phase in [
+        "recovered-unclean",
+        "stopped-before-engine",
+        "stopped-after-engine-failure",
+        "failed-boot-stopped",
+        "stopping",
+        "quiescing",
+        "booting",
+        "creating",
+        "initializing",
+    ] {
+        let mut pool = stopped_pool();
+        pool.owner.phase = phase.into();
+        pool.save();
+        assert_eq!(refusal(&pool), StoppedRefusal::Dirty, "{phase}");
+    }
+
+    // A phase rewritten to stopped without a quiesced stop of the last boot.
+    let pool = stopped_pool();
+    fs::remove_file(root(&pool.candidate).join("quiescence.json")).unwrap();
+    assert_eq!(refusal(&pool), StoppedRefusal::Dirty);
+    for (boot, daemon, start, result) in [
+        ("22222222-2222-2222-2222-222222222222", 4242, 99, "quiesced"),
+        (BOOT, 4243, 99, "quiesced"),
+        (BOOT, 4242, 98, "quiesced"),
+        (BOOT, 4242, 99, "timeout"),
+    ] {
+        let pool = stopped_pool();
+        quiescence(&pool, boot, daemon, start, result);
+        assert_eq!(
+            refusal(&pool),
+            StoppedRefusal::Dirty,
+            "{boot} {daemon} {start} {result}"
+        );
+    }
+
+    let pool = stopped_pool();
+    fs::write(root(&pool.candidate).join("owner.pending"), b"{}").unwrap();
+    assert_eq!(refusal(&pool), StoppedRefusal::Dirty);
+    assert_eq!(StoppedRefusal::Dirty.code(), "retained_reserve_dirty_owner");
+}
+
+#[test]
+fn stale_or_unknown_stopped_owner_refuses_the_retained_reserve() {
+    for missing in [
+        "created", "storage", "overlay", "rootfs", "boot", "daemon", "process",
+    ] {
+        let mut pool = stopped_pool();
+        match missing {
+            "created" => pool.owner.created = false,
+            "storage" => pool.owner.storage = None,
+            "overlay" => pool.owner.overlay = None,
+            "rootfs" => pool.owner.rootfs_digest = None,
+            "boot" => pool.owner.guest_boot_id = None,
+            "daemon" => pool.owner.daemon_start = None,
+            "process" => pool.owner.process = None,
+            _ => unreachable!(),
+        }
+        pool.save();
+        assert_eq!(refusal(&pool), StoppedRefusal::Stale, "{missing}");
+    }
+
+    let pool = stopped_pool();
+    let path = pool.data().join("storage.raw");
+    fs::rename(&path, pool.data().join("storage.retained")).unwrap();
+    sparse_disk(&path, 32, 1);
+    assert_eq!(refusal(&pool), StoppedRefusal::Stale);
+
+    let pool = stopped_pool();
+    fs::remove_file(pool.data().join("overlay.raw")).unwrap();
+    assert_eq!(refusal(&pool), StoppedRefusal::Stale);
+
+    let mut pool = stopped_pool();
+    let path = pool.data().join("overlay.raw");
+    OpenOptions::new()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_len(9 * GIB)
+        .unwrap();
+    pool.owner.overlay = Some(identity::disk(&path).unwrap());
+    pool.save();
+    assert_eq!(refusal(&pool), StoppedRefusal::Stale);
+
+    let pool = stopped_pool();
+    fs::remove_file(pool.data().join("vm.lock")).unwrap();
+    assert_eq!(refusal(&pool), StoppedRefusal::Stale);
+    assert_eq!(StoppedRefusal::Stale.code(), "retained_reserve_stale_owner");
+}
+
+#[test]
+fn selected_stopped_owner_drift_refuses_reverification() {
+    let mut pool = stopped_pool();
+    let selection = select(&pool.candidate, Profile::Development)
+        .unwrap()
+        .unwrap();
+    pool.owner.phase = "booting".into();
+    pool.save();
+    assert_eq!(
+        selection.reverify(&pool.candidate).err().unwrap().code,
+        "admission_owner_changed"
+    );
+
+    let pool = stopped_pool();
+    let selection = select(&pool.candidate, Profile::Development)
+        .unwrap()
+        .unwrap();
+    let held = exclusive_lock(&pool.data().join("vm.lock"));
+    assert_eq!(
+        selection.reverify(&pool.candidate).err().unwrap().code,
+        "retained_reserve_active_owner"
+    );
+    drop(held);
+    selection.reverify(&pool.candidate).unwrap();
+
+    let pool = stopped_pool();
+    let selection = select(&pool.candidate, Profile::Development)
+        .unwrap()
+        .unwrap();
+    let path = pool.data().join("overlay.raw");
+    fs::rename(&path, pool.data().join("overlay.retained")).unwrap();
+    sparse_disk(&path, 10, 2);
+    assert_eq!(
+        selection.reverify(&pool.candidate).err().unwrap().code,
+        "retained_reserve_stale_owner"
+    );
+
+    let pool = stopped_pool();
+    let selection = select(&pool.candidate, Profile::Development)
+        .unwrap()
+        .unwrap();
+    fs::remove_file(root(&pool.candidate).join("quiescence.json")).unwrap();
+    assert_eq!(
+        selection.reverify(&pool.candidate).err().unwrap().code,
+        "retained_reserve_dirty_owner"
+    );
+}

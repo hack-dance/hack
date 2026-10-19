@@ -1461,8 +1461,22 @@ host reserve, with memory-pressure, memory-headroom and thermal checks unchanged
 requires matching profile, creation receipt, native process/PID-file identity,
 machine name and both disks' current identities and declared sizes. Every sample
 and the acquired startup lease recheck the selected owner; changed ownership
-refuses, and a reserve-qualified request cannot enter VM create or boot. Stopped,
-missing or unproved capacity retains fresh-allocation requirements or refuses.
+refuses, and a reserve-qualified request cannot enter VM create or boot. Missing or
+unproved capacity retains fresh-allocation requirements or refuses.
+
+Restarting an exactly clean stopped Development pool also requires only the 16 GiB
+host reserve (`verified-stopped-owned-pool-host-reserve`), because it reuses its
+retained disks instead of allocating new ones. Clean means phase `stopped` from a
+quiesced `down` of the last boot (its quiescence receipt matches the guest boot and
+engine identity), a creation receipt, rootfs pin, both disk identities and declared
+sizes, the recorded executable and user, a dead recorded provider, a free VM lock, no
+open disk handle or owned listener, and no pending owner update. Each check maps to a
+closed refusal code: `retained_reserve_foreign_owner`, `retained_reserve_active_owner`,
+`retained_reserve_dirty_owner` or `retained_reserve_stale_owner`. A refused owner keeps
+the 58 GiB fresh-allocation budget; the reserve is never relaxed. The selected owner
+is rechecked around every sample, under the startup lease, around the pre-boot sample
+and immediately before `machine start`; a stopped selection never enters
+`machine create`. Pressure, thermal, swapout and memory-headroom checks are unchanged.
 
 ### Native persistent-data identity codec
 

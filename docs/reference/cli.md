@@ -1970,7 +1970,7 @@ hack setup migrate [options]
 | `--cursor` | Limit to Cursor files (default: all clients) |
 | `--skip-plugin-check <clients>` | Treat the plugin as verified for these comma-separated clients (claude, codex, cursor, or all) after checking it loads yourself |
 | `--apply` | Remove the previewed Hack-owned standalone files after backing them up (default: read-only preview) |
-| `--rollback <manifest>` | Restore the exact files recorded in a migration backup manifest |
+| `--rollback-manifest <manifest>` | Restore the exact files recorded in a migration backup manifest |
 | `--json` | Output JSON (machine-readable) |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |

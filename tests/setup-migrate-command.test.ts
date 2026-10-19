@@ -152,7 +152,7 @@ test(
     await expect(lstat(owned)).rejects.toThrow();
     expect(await readFile(rule, "utf8")).toContain("team addition");
 
-    const rollback = await runCli(["--rollback", manifestPath]);
+    const rollback = await runCli(["--rollback-manifest", manifestPath]);
     expect(rollback.exitCode).toBe(0);
     expect(rollback.stdout).toContain("1 restored");
     expect(await snapshotRepo()).toEqual(before);
@@ -163,7 +163,10 @@ test(
 test(
   "a nonexistent manifest is refused without output of file content",
   async () => {
-    const result = await runCli(["--rollback", join(root, "missing.json")]);
+    const result = await runCli([
+      "--rollback-manifest",
+      join(root, "missing.json"),
+    ]);
     expect(result.exitCode).toBe(1);
     expect(`${result.stdout}${result.stderr}`).toContain(
       "nothing was restored"
@@ -176,10 +179,10 @@ test(
   "rollback rejects scope, client and apply flags",
   async () => {
     for (const extra of [["--apply"], ["--global"], ["--codex"]]) {
-      const result = await runCli(["--rollback", "m.json", ...extra]);
+      const result = await runCli(["--rollback-manifest", "m.json", ...extra]);
       expect(result.exitCode).not.toBe(0);
       expect(`${result.stdout}${result.stderr}`).toContain(
-        "--rollback takes only the manifest path"
+        "--rollback-manifest takes only the manifest path"
       );
     }
   },

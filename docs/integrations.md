@@ -160,7 +160,7 @@ with their own `hack setup` command if you no longer want them.
 hack setup migrate                    # preview this project; changes nothing
 hack setup migrate --global --codex   # preview user-scope Codex files only
 hack setup migrate --apply            # back up and remove the previewed files
-hack setup migrate --rollback ~/.hack/agent-migrations/<id>.json
+hack setup migrate --rollback-manifest ~/.hack/agent-migrations/<id>.json
 ```
 
 The preview (the default) is read-only. For each file it reports one action:
@@ -194,7 +194,7 @@ is empty afterwards. A file edited in between is reported as `changed`, left in
 place, and makes the command exit 1. With nothing Hack-owned to remove, apply writes
 no manifest.
 
-`--rollback <manifest>` restores every recorded file whose path is now empty, with
+`--rollback-manifest <manifest>` restores every recorded file whose path is now empty, with
 its original bytes and mode. It never overwrites an existing file: identical bytes
 are reported as `already-present`, and different content as `conflict` (exit 1),
 left unchanged. Rollback can be repeated, and it also recovers an interrupted

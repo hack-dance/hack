@@ -29,7 +29,7 @@ import { logger } from "../ui/logger.ts";
 
 /**
  * `hack setup migrate`: preview (default, read-only), `--apply`, or
- * `--rollback <manifest>` for moving from standalone Hack skill and rule
+ * `--rollback-manifest <manifest>` for moving from standalone Hack skill and rule
  * files to the skills-only `hack` plugin. See `plugin-migration.ts` for the
  * ownership, verification and backup contract.
  */
@@ -42,10 +42,10 @@ const optApply = defineOption({
     "Remove the previewed Hack-owned standalone files after backing them up (default: read-only preview)",
 } as const);
 
-const optRollback = defineOption({
-  name: "rollback",
+const optRollbackManifest = defineOption({
+  name: "rollbackManifest",
   type: "string",
-  long: "--rollback",
+  long: "--rollback-manifest",
   valueHint: "<manifest>",
   description:
     "Restore the exact files recorded in a migration backup manifest",
@@ -104,7 +104,7 @@ const setupMigrateOptions = [
   optMigrateCursor,
   optSkipPluginCheck,
   optApply,
-  optRollback,
+  optRollbackManifest,
   optJson,
 ] as const;
 
@@ -191,10 +191,10 @@ export async function handleSetupMigrate({
   readonly args: SetupMigrateArgs;
 }): Promise<number> {
   const options = args.options;
-  const rollback = options.rollback?.trim();
-  if (options.rollback !== undefined) {
+  const rollback = options.rollbackManifest?.trim();
+  if (options.rollbackManifest !== undefined) {
     if (!rollback) {
-      throw new CliUsageError("--rollback needs a manifest path.");
+      throw new CliUsageError("--rollback-manifest needs a manifest path.");
     }
     if (
       options.apply ||
@@ -207,7 +207,7 @@ export async function handleSetupMigrate({
       options.path !== undefined
     ) {
       throw new CliUsageError(
-        "--rollback takes only the manifest path (and --json); the manifest records the scopes and files."
+        "--rollback-manifest takes only the manifest path (and --json); the manifest records the scopes and files."
       );
     }
     const result = await rollbackPluginMigration({
@@ -472,7 +472,7 @@ async function reportApply(opts: {
   });
   logger.info({ message: `Backup manifest: ${result.manifestPath}` });
   logger.info({
-    message: `Undo with: hack setup migrate --rollback ${result.manifestPath}`,
+    message: `Undo with: hack setup migrate --rollback-manifest ${result.manifestPath}`,
   });
   return exitCode;
 }

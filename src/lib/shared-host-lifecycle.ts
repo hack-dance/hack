@@ -31,9 +31,10 @@ import { withProjectsRegistryLock } from "./projects-registry-lock.ts";
  *   left running: this module never signals a process it cannot prove it owns.
  * - Ownership is a persisted PID plus process birth time (`ps lstart`, read in
  *   UTC so clients with different time zones agree). A claim whose PID is
- *   gone or now belongs to a different process (PID reuse) is stale and is
- *   discarded without signalling anything. A stale claim whose PID still
- *   answers as the helper is uncertain: it is kept, never adopted.
+ *   gone, an unreaped zombie, or now belongs to a different process (PID
+ *   reuse) is stale and is discarded without signalling anything. A stale
+ *   claim whose PID still answers as the helper is uncertain: it is kept,
+ *   never adopted.
  * - A child is spawned behind an exec gate: it waits on stdin until its claim
  *   is durable. If the starter dies first, the gate reads EOF and exits, so a
  *   spawned helper is never left running without a claim.
@@ -455,12 +456,46 @@ async function removeClaim(
 }
 
 /**
+ * The process census and signal boundary. Production callers omit it and get
+ * {@link systemProcesses}; tests replace it to simulate states real processes
+ * cannot produce portably, such as a process that stays in the census after
+ * SIGKILL.
+ */
+export type SharedHostProcesses = {
+  /** Every process row, including zombies; `[]` when `ps` failed. */
+  readonly census: () => Promise<readonly ProcessIdentityRow[]>;
+  /** Signal the members of a captured tree that still carry their birth. */
+  readonly signalTree: (
+    tree: readonly ProcessIdentityRow[],
+    signal: NodeJS.Signals
+  ) => Promise<void>;
+};
+
+const systemProcesses: SharedHostProcesses = {
+  census: readProcessIdentities,
+  signalTree: signalVerifiedProcessTree,
+};
+
+/**
  * A census is usable only when it observed this process; an empty or failed
  * `ps` must never be read as "every claimed process is gone".
+ *
+ * Zombies are left out: an exited process that its parent has not reaped yet
+ * runs no code, holds no listener or open file, and cannot be stopped any
+ * further. Its PID cannot be reused until it is reaped, so treating it as
+ * exited can never confuse it with another process. Counting it as live would
+ * report a finished stop as unconfirmed, and would make a `ready` claim whose
+ * helper crashed under a suspended (for example Ctrl-Z) starter look live, so
+ * no other client could restart that helper until the starter resumed.
  */
-async function readCensus(): Promise<readonly ProcessIdentityRow[] | null> {
-  const rows = await readProcessIdentities();
-  return rows.some((row) => row.pid === process.pid) ? rows : null;
+async function readCensus(
+  processes: SharedHostProcesses = systemProcesses
+): Promise<readonly ProcessIdentityRow[] | null> {
+  const rows = await processes.census();
+  if (!rows.some((row) => row.pid === process.pid)) {
+    return null;
+  }
+  return rows.filter((row) => !row.zombie);
 }
 
 function isLive(
@@ -581,14 +616,17 @@ function classifyIdentity(
 /**
  * Stop a birth-verified process tree: TERM, bounded grace, then KILL for the
  * members that still carry their captured birth time. Nothing is signalled
- * when the root no longer matches its claim.
+ * when the root no longer matches its claim. A member that has exited counts
+ * as stopped even before its parent reaps it (see {@link readCensus}).
  */
 export async function stopVerifiedSharedHostProcess(opts: {
   readonly pid: number;
   readonly birth: string;
   readonly graceMs: number;
+  readonly processes?: SharedHostProcesses;
 }): Promise<"stopped" | "absent" | "unconfirmed" | "census-unavailable"> {
-  const census = await readCensus();
+  const processes = opts.processes ?? systemProcesses;
+  const census = await readCensus(processes);
   if (census === null) {
     return "census-unavailable";
   }
@@ -597,13 +635,13 @@ export async function stopVerifiedSharedHostProcess(opts: {
   }
   const tree = selectProcessTree(census, opts.pid);
   const remaining = async (): Promise<ProcessIdentityRow[] | null> => {
-    const live = await readCensus();
+    const live = await readCensus(processes);
     if (live === null) {
       return null;
     }
     return tree.filter((row) => isLive(live, row));
   };
-  await signalVerifiedProcessTree(tree, "SIGTERM");
+  await processes.signalTree(tree, "SIGTERM");
   const termDeadline = performance.now() + opts.graceMs;
   let left = await remaining();
   while (left !== null && left.length > 0 && performance.now() < termDeadline) {
@@ -613,7 +651,7 @@ export async function stopVerifiedSharedHostProcess(opts: {
   if (left !== null && left.length === 0) {
     return "stopped";
   }
-  await signalVerifiedProcessTree(left ?? tree, "SIGKILL");
+  await processes.signalTree(left ?? tree, "SIGKILL");
   const killDeadline = performance.now() + 1000;
   left = await remaining();
   while (left !== null && left.length > 0 && performance.now() < killDeadline) {
@@ -1122,6 +1160,8 @@ export async function releaseSharedHostHelper(opts: {
   readonly graceMs?: number;
   readonly timeoutMs?: number;
   readonly signal?: AbortSignal;
+  /** Test seam for the census and signals; production callers omit it. */
+  readonly processes?: SharedHostProcesses;
 }): Promise<SharedHostReleaseResult> {
   if (!NAME.test(opts.spec.name)) {
     throw new Error("Invalid shared host helper specification");
@@ -1149,6 +1189,7 @@ async function releaseLocked(opts: {
   readonly spec: Pick<SharedHostHelperSpec, "name" | "stateDir">;
   readonly holder: string;
   readonly graceMs?: number;
+  readonly processes?: SharedHostProcesses;
 }): Promise<SharedHostReleaseResult> {
   const read = await readClaim(opts.spec);
   if (read.kind === "absent") {
@@ -1171,6 +1212,7 @@ async function releaseLocked(opts: {
     pid: claim.pid,
     birth: claim.birth,
     graceMs: opts.graceMs ?? 2000,
+    processes: opts.processes,
   });
   switch (stopped) {
     case "census-unavailable":

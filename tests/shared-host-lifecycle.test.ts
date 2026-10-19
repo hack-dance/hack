@@ -22,6 +22,7 @@ import {
   releaseSharedHostHelper,
   type SharedHostEvent,
   type SharedHostHelperSpec,
+  type SharedHostProcesses,
 } from "../src/lib/shared-host-lifecycle.ts";
 import { restoreEnv } from "./helpers/env.ts";
 
@@ -1432,34 +1433,100 @@ test(
 test(
   "a stop that cannot be confirmed keeps the claim so the process stays recorded",
   async () => {
+    // No real process can portably survive SIGKILL, so the census and signal
+    // boundary is simulated: the claimed helper and its child stay in every
+    // census whatever is sent to them.
+    const root = await scratch();
+    const spec = specFor({ root, port: freePort() });
+    const birth = "Thu Jan 1 00:00:00 1970";
+    const helper = { pid: 4242, parentPid: 1, birth, zombie: false };
+    const child = { pid: 4243, parentPid: 4242, birth, zombie: false };
+    const self = {
+      pid: process.pid,
+      parentPid: process.ppid,
+      birth,
+      zombie: false,
+    };
+    await writeClaimFile(spec, {
+      version: 1,
+      helper: spec.name,
+      port: spec.port,
+      ownership: "owned",
+      phase: "ready",
+      pid: helper.pid,
+      birth,
+      holders: ["branch-a"],
+    });
+    const signals: [NodeJS.Signals, number[]][] = [];
+    const processes: SharedHostProcesses = {
+      census: async () => [self, helper, child],
+      signalTree: async (tree, signal) => {
+        signals.push([signal, tree.map((row) => row.pid)]);
+      },
+    };
+    expect(
+      await releaseSharedHostHelper({
+        spec,
+        holder: "branch-a",
+        graceMs: 100,
+        processes,
+      })
+    ).toEqual({ state: "stop-unconfirmed" });
+    // TERM, then KILL, each to the whole captured tree and nothing else.
+    expect(signals).toEqual([
+      ["SIGTERM", [helper.pid, child.pid]],
+      ["SIGKILL", [helper.pid, child.pid]],
+    ]);
+    // The claim keeps the exact process recorded, now with no holders.
+    expect(await readClaim(spec)).toEqual({
+      version: 1,
+      helper: spec.name,
+      port: spec.port,
+      ownership: "owned",
+      phase: "ready",
+      pid: helper.pid,
+      birth,
+      holders: [],
+    });
+  },
+  TIMEOUT
+);
+
+test(
+  "an exited helper its parent has not reaped yet is stopped, not unconfirmed",
+  async () => {
     const root = await scratch();
     const spec = specFor({ root, port: freePort() });
     // The starter stays alive and is then frozen, so the helper it spawned
-    // cannot be reaped: after SIGKILL it remains a zombie in the census.
+    // cannot be reaped: once it exits on SIGTERM it is a zombie in the census.
     const starter = startStarter({ spec, holder: "branch-a", linger: true });
     expect(await starterResult(starter)).toMatchObject({
       state: "ready",
       ownership: "owned",
     });
     const owned = await trackClaimedHelper(spec);
-    starter.proc.kill("SIGSTOP");
+    // process.kill, not Subprocess.kill: Bun 1.4.2 on macOS delivers SIGCONT
+    // for Subprocess.kill("SIGSTOP"), which would leave the starter running.
+    process.kill(starter.proc.pid, "SIGSTOP");
     try {
       expect(
         await releaseSharedHostHelper({
           spec,
           holder: "branch-a",
-          graceMs: 100,
+          graceMs: 1000,
         })
-      ).toEqual({ state: "stop-unconfirmed" });
-      expect(await readClaim(spec)).toMatchObject({
-        ownership: "owned",
-        pid: owned.pid,
-        birth: owned.birth,
-        holders: [],
-      });
+      ).toEqual({ state: "stopped" });
+      expect(await readClaim(spec)).toBeNull();
+      // The helper really is an unreaped zombie, so this run exercised the
+      // zombie path rather than an ordinary reaped exit.
+      const row = (await readProcessIdentities()).find(
+        (entry) => entry.pid === owned.pid && entry.birth === owned.birth
+      );
+      expect(row).toMatchObject({ parentPid: starter.proc.pid, zombie: true });
     } finally {
-      starter.proc.kill("SIGCONT");
+      process.kill(starter.proc.pid, "SIGCONT");
     }
+    expect(await waitGone(owned)).toBe(true);
   },
   TIMEOUT
 );

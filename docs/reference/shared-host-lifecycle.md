@@ -63,6 +63,12 @@ replaced atomically, and parsed strictly (exact keys, version 1):
 - The claim is live only when the census shows that exact pair. A missing PID, or
   the same PID with a different birth time (PID reuse), makes the claim stale. A
   stale claim grants nothing. Hack discards it and never signals that PID.
+- A zombie (a process that has exited but that its parent has not reaped yet,
+  `ps` state `Z`) counts as exited. It runs no code and holds no listener, and its
+  PID cannot be reused until it is reaped. So a stop that leaves the helper a zombie
+  is `stopped`, and a claim whose helper is a zombie is stale. Otherwise a helper
+  that crashed under a suspended starter would block every restart until that
+  starter resumed.
 - One exception: if a stale owned claim's PID still answers the identity endpoint
   as the expected helper, ownership is uncertain. Hack keeps the claim and fails
   with `claim-invalid`. It neither adopts the helper (which would drop the owned
@@ -205,7 +211,8 @@ Linux pass is a receipt only once that hosted job has run it.
 | lost parent after ready | The helper stays claimed; another client reuses it; the release by both holders stops it. |
 | owned descendants | Release stops the helper and its grandchild; a bystander survives. |
 | SIGTERM ignored | Release escalates to SIGKILL after the grace period: `stopped`. |
-| stop unconfirmed | A helper that stays in the census after KILL (a zombie under a frozen parent) gives `stop-unconfirmed` and keeps the claim. |
+| stop unconfirmed | With a simulated census and signal boundary (no real process can portably survive KILL), a tree that stays in the census gets TERM then KILL, gives `stop-unconfirmed` and keeps the claim with no holders. |
+| unreaped zombie | A helper whose starter is frozen with `SIGSTOP` exits on TERM and stays an unreaped zombie; release reports `stopped` and removes the claim. |
 | session and environment | The helper leads its own process group and does not see a runner-only variable. |
 | impostor identity | A live `ready` claim whose port is answered by another PID fails `foreign-listener`; neither process is signalled. |
 | invalid claim / no census | Malformed, other-port, group-readable and oversized claims, and an unavailable census, fail closed; nothing is spawned or signalled; the claim is kept. |

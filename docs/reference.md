@@ -21,6 +21,7 @@
 - [Native configuration validation](./reference/native-config-compiler.md) — the authored `.hack/hack.project.json` compiler contract
 - [Native configuration with Compose](./reference/native-compose-commands.md) — the Compose command owner for authored projects
 - [Authored configuration with the native runtime](./reference/native-authored-commands.md) — the explicit native backend command slices and their support matrix
+- [Application benchmark protocol](./reference/application-benchmark-protocol.md) — the frozen matched benchmark artifacts, workloads, order, sample counts and budgets
 
 ## Extensions
 

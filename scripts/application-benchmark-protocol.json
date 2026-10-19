@@ -1,0 +1,234 @@
+{
+  "protocol": "hack-application-benchmark",
+  "revision": 1,
+  "frozen_on": "2026-10-19",
+  "linear_issue": "HACK-1169",
+  "document": "docs/reference/application-benchmark-protocol.md",
+  "host": {
+    "id": "m3-max",
+    "cpu": "Apple M3 Max",
+    "logical_cpus": 16,
+    "memory_bytes": 137438953472,
+    "os": "macOS 27.0",
+    "docker_cli": "29.4.0",
+    "compose": "5.1.2",
+    "orbstack": {
+      "version": "2.2.3",
+      "build": "20963",
+      "cpu": 16,
+      "memory_mib": 71680
+    }
+  },
+  "lanes": [
+    {
+      "id": "candidate",
+      "kind": "hack",
+      "version": "5.0.0-next.5",
+      "tag": "v5.0.0-next.5",
+      "commit": "28de2f8902d3776c3da9326e7ae6c6aa6e7f69bc",
+      "asset": "hack-5.0.0-next.5-darwin-arm64-native.tar.gz",
+      "asset_sha256": "ba1da4d349ab70069a1b0775ba671838440b5479cffd1fc2fe41c59816c3df11",
+      "backend": "native",
+      "capacity": {
+        "profile": "development",
+        "vcpus": 4,
+        "memory_mib": 6144,
+        "storage_gib": 32,
+        "overlay_gib": 10
+      }
+    },
+    {
+      "id": "compose",
+      "kind": "compose",
+      "engine": "orbstack",
+      "compose_version": "5.1.2",
+      "backend": "docker-compose"
+    },
+    {
+      "id": "hack-4.1.1",
+      "kind": "hack",
+      "version": "4.1.1",
+      "tag": "v4.1.1",
+      "commit": "74bf0672f41bd3f68a4ce6cba28b9ba15467c2b2",
+      "asset": "hack-4.1.1-darwin-arm64.tar.gz",
+      "asset_sha256": "968f75fe66cd84fdf93b0c5b64ca5df02f98c74281b5a9238125b3afd2f3d72b",
+      "backend": "compose"
+    },
+    {
+      "id": "hack-4.2.0",
+      "kind": "hack",
+      "version": "4.2.0",
+      "tag": "v4.2.0",
+      "commit": "575847486963db94623e1e7f8cd49acca286c517",
+      "asset": "hack-4.2.0-darwin-arm64.tar.gz",
+      "asset_sha256": "c62b533aaddbeaafa594cab682cf10041c9bcaea69e2fe25e33e85df49654a85",
+      "backend": "compose"
+    },
+    {
+      "id": "hack-4.2.1",
+      "kind": "hack",
+      "version": "4.2.1",
+      "tag": "v4.2.1",
+      "commit": "5a4c51babb7ef725a30f2f3fd3677081a64bc247",
+      "asset": "hack-4.2.1-darwin-arm64.tar.gz",
+      "asset_sha256": "557583d946abcd0dd0a3fa12b2f7b81f18310d594b0699d663ebf239d0d4d729",
+      "backend": "compose"
+    }
+  ],
+  "workloads": [
+    {
+      "id": "event-agent",
+      "lanes": [
+        "candidate",
+        "compose",
+        "hack-4.1.1",
+        "hack-4.2.0",
+        "hack-4.2.1"
+      ],
+      "pin": "application commit and configuration digest recorded per cohort; identical across lanes",
+      "shape": { "services": 14, "http_health_checks": 9, "initializers": 2 },
+      "correctness": [
+        "all declared long-running services running and every HTTP health check healthy",
+        "both initializers exited 0",
+        "routed sign-in page returns HTTP 200",
+        "a per-run data marker written before restart reads back after restart"
+      ]
+    },
+    {
+      "id": "small-fixture",
+      "lanes": [
+        "candidate",
+        "compose",
+        "hack-4.1.1",
+        "hack-4.2.0",
+        "hack-4.2.1"
+      ],
+      "pin": "image oven/bun:1.4.2-slim with its image ID recorded per cohort, pull never",
+      "shape": { "services": 2, "http_health_checks": 1, "initializers": 1 },
+      "correctness": [
+        "initializer creates the SQLite schema in a named volume and exits 0",
+        "web health endpoint returns HTTP 200",
+        "check task inserts a per-run row and reads the expected count",
+        "the row reads back after restart",
+        "a source edit is served within the watcher acknowledgement window"
+      ]
+    }
+  ],
+  "phases": [
+    "cold-startup",
+    "warm-startup",
+    "restart",
+    "reload",
+    "build-test",
+    "exec",
+    "steady-idle",
+    "sustained-load",
+    "shutdown",
+    "cleanup"
+  ],
+  "cache_classes": {
+    "budget_class": "warm",
+    "warm": "engine or VM running; images, dependency and build caches populated by a prior correct lifecycle of the same lane; application volumes retained",
+    "cold-capacity": "engine or VM stopped before the trial; images and caches retained",
+    "cold-cache": "engine or VM running; images present; dependency and build caches empty"
+  },
+  "schedule": {
+    "design": "williams",
+    "rounds_per_workload": 10,
+    "orders": [
+      ["candidate", "compose", "hack-4.2.1", "hack-4.1.1", "hack-4.2.0"],
+      ["compose", "hack-4.1.1", "candidate", "hack-4.2.0", "hack-4.2.1"],
+      ["hack-4.1.1", "hack-4.2.0", "compose", "hack-4.2.1", "candidate"],
+      ["hack-4.2.0", "hack-4.2.1", "hack-4.1.1", "candidate", "compose"],
+      ["hack-4.2.1", "candidate", "hack-4.2.0", "compose", "hack-4.1.1"],
+      ["hack-4.2.0", "hack-4.1.1", "hack-4.2.1", "compose", "candidate"],
+      ["hack-4.2.1", "hack-4.2.0", "candidate", "hack-4.1.1", "compose"],
+      ["candidate", "hack-4.2.1", "compose", "hack-4.2.0", "hack-4.1.1"],
+      ["compose", "candidate", "hack-4.1.1", "hack-4.2.1", "hack-4.2.0"],
+      ["hack-4.1.1", "compose", "hack-4.2.0", "candidate", "hack-4.2.1"]
+    ]
+  },
+  "samples": {
+    "min_lifecycle_runs_per_lane": 10,
+    "p95_quantile": 0.95,
+    "p95_method": "nearest-rank",
+    "p95_bound_confidence": 0.95,
+    "p95_min_samples": 60
+  },
+  "budgets": {
+    "comparative": [
+      {
+        "metric": "steady_physical_footprint_bytes",
+        "statistic": "median",
+        "max_ratio": 0.7
+      },
+      {
+        "metric": "cpu_seconds_per_task",
+        "statistic": "median",
+        "max_ratio": 0.75
+      },
+      {
+        "metric": "warm_startup_seconds",
+        "statistic": "median",
+        "max_ratio": 0.8
+      },
+      {
+        "metric": "warm_restart_seconds",
+        "statistic": "median",
+        "max_ratio": 0.8
+      }
+    ],
+    "absolute": [
+      {
+        "metric": "info_latency_ms",
+        "statistic": "p95",
+        "max": 100,
+        "inclusive": true
+      },
+      {
+        "metric": "warm_admission_ms",
+        "statistic": "p95",
+        "max": 250,
+        "inclusive": true
+      },
+      {
+        "metric": "cached_status_1000_objects_ms",
+        "statistic": "p95",
+        "max": 150,
+        "inclusive": true,
+        "workload": "small-fixture"
+      },
+      {
+        "metric": "idle_control_plane_core_fraction",
+        "statistic": "window_mean",
+        "max": 0.01,
+        "inclusive": false,
+        "workload": "small-fixture"
+      },
+      {
+        "metric": "watcher_ack_ms",
+        "statistic": "p95",
+        "max": 200,
+        "inclusive": true,
+        "workload": "small-fixture"
+      }
+    ]
+  },
+  "observer": {
+    "control_window_seconds": 600,
+    "inconclusive_factor": 2
+  },
+  "known_limits": [
+    {
+      "id": "storage-witness-warm-up",
+      "issue": "HACK-1123",
+      "after": "hack-dance/hack#313",
+      "proofs_per_warm_up": 4,
+      "warm_up_seconds": 17.7,
+      "witness_seconds": 8.7,
+      "witness_target_seconds": 5,
+      "basis": "estimate from a hosted docker-e2e phase trace, not a revision-1 cohort measurement",
+      "revisit": "after the first complete revision-1 cohort, or before any proof-policy change"
+    }
+  ]
+}

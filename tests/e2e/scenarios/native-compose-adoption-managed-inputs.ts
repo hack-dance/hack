@@ -4,7 +4,7 @@ import {
   resolveModernComposeEnvOverrides,
   resolveRuntimeHostMetadataOverride,
 } from "../../../src/commands/project.ts";
-import { renderManagedComposeEnvOverride } from "../../../src/lib/compose-managed-env.ts";
+import { renderComposeEnvReferenceOverride } from "../../../src/lib/compose-managed-env.ts";
 import {
   defaultProjectSlugFromPath,
   findProjectContextAtRoot,
@@ -241,11 +241,12 @@ async function writeGenerated(instance: Checkout) {
     refuse();
   }
   const expectedRuntime = buildRuntimeHostMetadataOverride(runtimeOpts);
-  const expectedEnv = renderManagedComposeEnvOverride({
+  // The writer keeps only `${NAME}` references at rest (HACK-1273).
+  const expectedEnv = renderComposeEnvReferenceOverride({
     targetServices: ["db", "worker"],
     globalEnv: managed.env,
     serviceEnv: managed.preflightEnvByService,
-  });
+  })?.text;
   if (
     (await readFile(runtime, "utf8")) !== expectedRuntime ||
     (await readFile(files[2] ?? "", "utf8")) !== expectedEnv

@@ -58,6 +58,12 @@ import {
 } from "../lib/caddy-hosts.ts";
 import { emitCliResult, okResult } from "../lib/cli-result.ts";
 import {
+  composeEnvOverrideNeedsRemoval,
+  describeComposeEnvOverrideAtRest,
+  inspectComposeEnvOverrideAtRest,
+  removePlaintextComposeEnvOverride,
+} from "../lib/compose-env-at-rest.ts";
+import {
   resolveGlobalConfigPath,
   resolveGlobalHackDir,
 } from "../lib/config-paths.ts";
@@ -894,6 +900,11 @@ const handleDoctor: CommandHandlerFor<typeof doctorSpec> = async ({
         {
           timeoutMs: 5000,
         }
+      )
+    );
+    results.push(
+      await runCheck(s, COMPOSE_ENV_AT_REST_CHECK, () =>
+        checkComposeEnvOverrideAtRest({ startDir })
       )
     );
     if (
@@ -3053,6 +3064,39 @@ async function checkTrackedGeneratedFiles({
   };
 }
 
+const COMPOSE_ENV_AT_REST_CHECK = "compose env at rest";
+
+/**
+ * Warns when `.hack/.internal/compose.env.override.yml` holds literal env
+ * values (an earlier Hack version wrote decrypted values there) or cannot be
+ * verified. Counts only; never a key or value. `hack doctor --fix` removes it.
+ */
+async function checkComposeEnvOverrideAtRest({
+  startDir,
+}: {
+  readonly startDir: string;
+}): Promise<CheckResult> {
+  const name = COMPOSE_ENV_AT_REST_CHECK;
+  const ctx = await findProjectContext(startDir);
+  if (!ctx) {
+    return {
+      name,
+      status: "warn",
+      message: `Skipped (no ${HACK_PROJECT_DIR_PRIMARY}/ found)`,
+    };
+  }
+  const state = await inspectComposeEnvOverrideAtRest({
+    projectDir: ctx.projectDir,
+  });
+  return {
+    name,
+    ...describeComposeEnvOverrideAtRest({
+      state,
+      projectDirName: ctx.projectDirName,
+    }),
+  };
+}
+
 async function checkWorktreeInstanceCollisions({
   startDir,
 }: {
@@ -3278,6 +3322,7 @@ async function runDoctorFix(opts: {
 
   await maybeInstallMutagenForDoctorFix();
   await maybeUntrackGeneratedFiles({ startDir: opts.startDir });
+  await maybeRemovePlaintextComposeEnvOverride({ startDir: opts.startDir });
   await maybeRepairHackd();
 
   const dockerOk = await dockerInfoOk();
@@ -3625,6 +3670,15 @@ export async function buildDoctorRemediationPlanLines(opts: {
     );
   }
 
+  const composeEnvAtRest = project
+    ? await inspectComposeEnvOverrideAtRest({ projectDir: project.projectDir })
+    : null;
+  if (composeEnvAtRest && composeEnvOverrideNeedsRemoval(composeEnvAtRest)) {
+    steps.push(
+      `Remove ${project?.projectDirName}/.internal/compose.env.override.yml, which may hold env values at rest; Compose commands regenerate it with references only.`
+    );
+  }
+
   if (opts.migrateEnvConfig) {
     steps.push(await buildEnvMigrationPlanStep({ project }));
   }
@@ -3719,6 +3773,52 @@ async function maybeUntrackGeneratedFiles(opts: {
     );
   }
   note(notes.join("\n"), "generated files");
+}
+
+/**
+ * `hack doctor --fix` step: removes a generated Compose env override that holds
+ * (or may hold) literal env values. Hack-owned and regenerated value-free by
+ * the next Compose command, so it is a safe generated-file repair. The file is
+ * re-inspected immediately before removal; a value-free file is kept.
+ */
+async function maybeRemovePlaintextComposeEnvOverride(opts: {
+  readonly startDir: string;
+}): Promise<void> {
+  const project = await findProjectContext(opts.startDir);
+  if (!project) {
+    return;
+  }
+  const state = await inspectComposeEnvOverrideAtRest({
+    projectDir: project.projectDir,
+  });
+  if (!composeEnvOverrideNeedsRemoval(state)) {
+    return;
+  }
+  const file = `${project.projectDirName}/.internal/compose.env.override.yml`;
+  const ok = await doctorConfirm({
+    message: `Remove ${file}? It may hold env values at rest; Compose commands regenerate it with references only.`,
+    initialValue: true,
+  });
+  if (!ok) {
+    return;
+  }
+  try {
+    const removal = await removePlaintextComposeEnvOverride({
+      projectDir: project.projectDir,
+      includeUnverifiable: true,
+    });
+    note(
+      removal.removed
+        ? `Removed ${file} (values omitted).`
+        : `Left ${file} in place: it no longer holds env values.`,
+      "compose env at rest"
+    );
+  } catch {
+    note(
+      `Failed to remove ${file}; remove it manually (values omitted).`,
+      "compose env at rest"
+    );
+  }
 }
 
 async function maybeRepairProjectLifecycleSessions(opts: {

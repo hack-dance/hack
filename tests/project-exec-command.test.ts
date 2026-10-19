@@ -139,10 +139,29 @@ test("exec reaches the running service while registry registration is locked", a
   expect(await Bun.file(resolve(registryRoot, "projects.json")).exists()).toBe(
     false
   );
-  expect(execCalls[0]?.env).toEqual({
+  const execEnv = Object.entries(execCalls[0]?.env ?? {});
+  expect(
+    Object.fromEntries(execEnv.filter(([key]) => !key.startsWith("HACK_ENV_")))
+  ).toEqual({
     GLOBAL_FLAG: "qa",
     SHARED_KEY: "base",
   });
+  // HACK-1273: the api override references these through the Compose
+  // process env instead of holding the values on disk.
+  expect(
+    execEnv
+      .filter(([key]) => key.startsWith("HACK_ENV_"))
+      .map(
+        ([key, value]) =>
+          `${key.replace(/^HACK_ENV_[0-9A-F]{12}_/, "")}=${value}`
+      )
+      .sort()
+  ).toEqual([
+    "GLOBAL_FLAG=qa",
+    "PORT=3000",
+    "SERVICE_TOKEN=overlay-secret",
+    "SHARED_KEY=base",
+  ]);
   expect(execCalls[0]?.workdir).toBe("/app");
   expect(execCalls[0]?.cmdArgs).toEqual(["bun", "test"]);
   expect(execCalls[0]?.composeFiles.length).toBeGreaterThanOrEqual(2);

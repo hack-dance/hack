@@ -3,7 +3,10 @@ import type { Stats } from "node:fs";
 import { lstat, opendir } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { DEFAULT_PROJECT_TLD } from "../constants.ts";
-import { renderManagedComposeEnvOverride } from "./compose-managed-env.ts";
+import {
+  renderComposeEnvReferenceOverride,
+  renderManagedComposeEnvOverride,
+} from "./compose-managed-env.ts";
 import { isRecord } from "./guards.ts";
 import {
   legacyComposeAdoptionCandidateSupported,
@@ -784,14 +787,20 @@ export class LegacyComposeAdoptionProjection {
       ) {
         refuse();
       }
-      const text = renderManagedComposeEnvOverride({
+      const projection = {
         targetServices: context.serviceNames,
         globalEnv: values.globalEnv,
         serviceEnv: values.workloadEnv,
-      });
+      };
+      // Current writers keep only `${NAME}` references at rest; files from
+      // earlier versions hold the literal projection. Either must match exactly.
+      const referenceText =
+        renderComposeEnvReferenceOverride(projection)?.text ?? null;
+      const literalText = renderManagedComposeEnvOverride(projection);
       const [runtime, env] = context.generated.files;
+      const envText = env?.text ?? null;
       if (
-        (env?.text ?? null) !== text ||
+        (envText !== referenceText && envText !== literalText) ||
         (runtime && runtime.text !== context.runtimeText)
       ) {
         refuse();

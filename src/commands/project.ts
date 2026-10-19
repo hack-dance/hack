@@ -151,8 +151,12 @@ import {
   HackCliError,
   okResult,
 } from "../lib/cli-result.ts";
+import {
+  removePlaintextComposeEnvOverride,
+  writeComposeEnvOverride,
+} from "../lib/compose-env-at-rest.ts";
 import { withComposeServiceEnvFingerprints } from "../lib/compose-env-fingerprint.ts";
-import { renderManagedComposeEnvOverride } from "../lib/compose-managed-env.ts";
+import { renderComposeEnvReferenceOverride } from "../lib/compose-managed-env.ts";
 import {
   DEFAULT_COMPOSE_STARTUP_TIMEOUT_MS,
   resolveComposeStartupTimeoutMs,
@@ -1201,6 +1205,24 @@ function isEnvVarRelevantToServices(opts: {
   return opts.varServices.some((svc) => serviceSet.has(svc));
 }
 
+/**
+ * Removes an env override that still holds literal values (written by an
+ * earlier Hack version). Best effort: a failure is reported without values and
+ * never fails the command; `hack doctor` reports what remains.
+ */
+async function scrubPlaintextComposeEnvOverride(opts: {
+  readonly projectDir: string;
+}): Promise<void> {
+  try {
+    await removePlaintextComposeEnvOverride({ projectDir: opts.projectDir });
+  } catch {
+    logger.warn({
+      message:
+        "Could not remove .hack/.internal/compose.env.override.yml, which holds env values from an earlier Hack version (values omitted). Run 'hack doctor --fix'.",
+    });
+  }
+}
+
 async function maybePromptLegacyProjectEnvMigration(opts: {
   readonly project: Awaited<ReturnType<typeof requireProjectContext>>;
   readonly projectName: string;
@@ -1298,12 +1320,17 @@ export async function resolveModernComposeEnvOverrides(opts: {
     });
   }
 
-  const text = renderManagedComposeEnvOverride({
+  // Values travel only through the Compose process env; the file on disk holds
+  // `${NAME}` references (see src/lib/compose-env-at-rest.ts).
+  const override = renderComposeEnvReferenceOverride({
     targetServices: opts.targetServices,
     globalEnv: modern.globalEnv,
     serviceEnv: modern.serviceEnv,
   });
-  if (text === null) {
+  if (override === null) {
+    await scrubPlaintextComposeEnvOverride({
+      projectDir: opts.project.projectDir,
+    });
     return {
       composeFiles: [],
       env: modern.globalEnv,
@@ -1314,13 +1341,13 @@ export async function resolveModernComposeEnvOverrides(opts: {
   }
 
   await ensureHackDirGitignore({ projectDir: opts.project.projectDir });
-  const overrideDir = resolve(opts.project.projectDir, ".internal");
-  await ensureDir(overrideDir);
-  const overridePath = resolve(overrideDir, "compose.env.override.yml");
-  await writeTextFileIfChanged(overridePath, text);
+  const overridePath = await writeComposeEnvOverride({
+    projectDir: opts.project.projectDir,
+    text: override.text,
+  });
   return {
     composeFiles: [overridePath],
-    env: modern.globalEnv,
+    env: { ...modern.globalEnv, ...override.env },
     lifecycleEnv,
     preflightEnvByService,
     effectiveEnvName: modern.selection.effectiveEnv,
@@ -1420,6 +1447,9 @@ async function resolveComposeEnvOverrides(opts: {
   );
 
   if (resolved.contract.vars.length === 0) {
+    await scrubPlaintextComposeEnvOverride({
+      projectDir: opts.project.projectDir,
+    });
     return {
       composeFiles: [],
       env: {},
@@ -1462,6 +1492,9 @@ async function resolveComposeEnvOverrides(opts: {
   }
 
   if (Object.keys(overrideServices).length === 0) {
+    await scrubPlaintextComposeEnvOverride({
+      projectDir: opts.project.projectDir,
+    });
     return {
       composeFiles: [],
       env: resolved.envForCompose,
@@ -1475,10 +1508,10 @@ async function resolveComposeEnvOverrides(opts: {
   const yaml = YAML.stringify(override, null, 2);
   const text = ensureTrailingNewline(cleanupYaml(yaml));
   await ensureHackDirGitignore({ projectDir: opts.project.projectDir });
-  const overrideDir = resolve(opts.project.projectDir, ".internal");
-  await ensureDir(overrideDir);
-  const overridePath = resolve(overrideDir, "compose.env.override.yml");
-  await writeTextFileIfChanged(overridePath, text);
+  const overridePath = await writeComposeEnvOverride({
+    projectDir: opts.project.projectDir,
+    text,
+  });
 
   return {
     composeFiles: [overridePath],
@@ -6089,6 +6122,9 @@ async function runDownCommand({
   } finally {
     signalCleanup.dispose();
   }
+  // An override written by an earlier Hack version can hold decrypted values;
+  // down never needs it, so it does not outlive the stack.
+  await scrubPlaintextComposeEnvOverride({ projectDir: project.projectDir });
 
   if (code !== 0) {
     if (json) {

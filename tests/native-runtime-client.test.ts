@@ -6,8 +6,10 @@ import {
   invokeNativeRuntime,
   isNativeRuntimeNotRunning,
   NativeRuntimeRequestError,
+  nativeCodesReportRuntimeNotRunning,
   resolveNativeRuntimeSelection,
 } from "../src/backends/native-runtime-client.ts";
+import { ClosedCliError } from "../src/lib/cli-result.ts";
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -55,6 +57,17 @@ test("native selection is explicit and requires an isolated absolute home", () =
       HACK_NATIVE_HOME: "/tmp/home",
     })
   ).toThrow();
+  // The refusal is closed: the CLI prints this one line without a stack.
+  let refusal: unknown;
+  try {
+    resolveNativeRuntimeSelection({ HACK_RUNTIME_BACKEND: "native" });
+  } catch (error: unknown) {
+    refusal = error;
+  }
+  expect(refusal).toBeInstanceOf(ClosedCliError);
+  expect(String(refusal)).toContain(
+    "Native runtime requires absolute HACK_NATIVE_BINARY and HACK_NATIVE_HOME paths."
+  );
   expect(
     resolveNativeRuntimeSelection({
       HACK_RUNTIME_BACKEND: "native",
@@ -584,6 +597,28 @@ test.each([
   expect(isNativeRuntimeNotRunning({ nativeCode: "runtime_not_running" })).toBe(
     false
   );
+});
+
+test("a carried code pair reports a direct or foreground-wrapped stopped runtime only", () => {
+  expect(
+    nativeCodesReportRuntimeNotRunning({ nativeCode: "runtime_not_running" })
+  ).toBe(true);
+  expect(
+    nativeCodesReportRuntimeNotRunning({
+      nativeCode: "native_graph_foreground",
+      nativeCauseCode: "runtime_not_running",
+    })
+  ).toBe(true);
+  for (const codes of [
+    { nativeCode: "native_graph_foreground" },
+    {
+      nativeCode: "graph_owner_recovery",
+      nativeCauseCode: "runtime_not_running",
+    },
+    {},
+  ]) {
+    expect(nativeCodesReportRuntimeNotRunning(codes)).toBe(false);
+  }
 });
 
 test("one-off failures expose only a validated owner cause code", async () => {

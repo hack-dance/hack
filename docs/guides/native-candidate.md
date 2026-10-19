@@ -644,8 +644,11 @@ services or external networks. `--detach`, `--json`, `--target` and service name
 each refuse with a one-line `E_USAGE` message that names the option and the supported
 form: run `hack up` in the foreground in its own terminal and use `hack ps` and
 `hack logs` from another. Routed services and host dependencies require the
-explicit native selections described below; any other unsupported configuration
-refuses with `E_NATIVE_PROJECT_UNSUPPORTED` and drops nothing. Existing
+explicit native selections described below. Unsupported Compose or environment input
+(for example a service `env_file`, or a project `.env` without managed env) and
+unreviewed route labels refuse with `E_NATIVE_PROJECT_UNSUPPORTED`; invalid branch
+hosts, project adaptations, AWS selections and changed fresh-exec environments refuse
+with `E_CONFIG_INVALID`. Each prints one closed line and drops nothing. Existing
 `hack.dependencies.*` cache declarations publish the reviewed source snapshot and
 require successful initializer completion before dependent services start. Cache
 initializers receive immutable source mounts and writable named cache volumes;

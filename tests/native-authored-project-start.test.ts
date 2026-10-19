@@ -199,6 +199,12 @@ type FixtureOptions = {
   readonly semanticAfterHook?: boolean;
   readonly planFailure?: boolean;
   readonly failBeforeReceipt?: boolean;
+  /**
+   * Like `failBeforeReceipt`, but serve fails the way authored foreground
+   * control reports a runtime that stopped: `runtime_not_running` wrapped in
+   * `native_graph_foreground`.
+   */
+  readonly stoppedDuringServe?: boolean;
   readonly foreignPlan?: boolean;
   readonly foreignNamespace?: boolean;
   readonly branch?: string | null;
@@ -212,6 +218,8 @@ type FixtureOptions = {
    * inconclusive.
    */
   readonly runtimeStopped?: boolean;
+  /** `runtime status --json` hangs, so a caller can cancel during the check. */
+  readonly runtimeStatusHangs?: boolean;
   readonly cleanup?:
     | "removed"
     | "live"
@@ -409,6 +417,7 @@ import {appendFile,readFile,readdir,writeFile} from 'node:fs/promises';
 import {createHash} from 'node:crypto';import {join} from 'node:path';
 const args=process.argv.slice(2);const action=args[4];await appendFile(${JSON.stringify(calls)},JSON.stringify(args)+'\\n');
 if(${options.runtimeStopped === true}&&args[2]==='runtime'&&args[3]==='status'){console.log(JSON.stringify({phase:'stopped',process_alive:false}));process.exit(0)}
+if(${options.runtimeStatusHangs === true}&&args[2]==='runtime'&&args[3]==='status'){await new Promise((resolve)=>setTimeout(resolve,10000));process.exit(0)}
 const journal=${JSON.stringify(journal)};
 const root=${JSON.stringify(join(projectDir, ".internal", "native-authored-runs"))};
 if(['plan','serve','frontend-plan','frontend-serve'].includes(action)){
@@ -453,6 +462,7 @@ if(['plan','serve','frontend-plan','frontend-serve'].includes(action)){
   await writeFile(${JSON.stringify(delivery)},JSON.stringify({version:input.version,kind:input.kind,review:input.review,run:input.run,lifetime_seconds:input.lifetime_seconds,keys,digests,expectedDigest:${JSON.stringify(digest)}}));
  }
  if(${options.failBeforeReceipt === true}){console.error(JSON.stringify({code:'graph_network_intent',message:${JSON.stringify(CANARY)}}));process.exit(2)}
+ if(${options.stoppedDuringServe === true}){console.error(JSON.stringify({code:'native_graph_foreground',cause_code:'runtime_not_running',message:${JSON.stringify(CANARY)}}));process.exit(2)}
  const receipt={version:2,kind:'native-graph-runtime',owner:'f'.repeat(32),boot:'00000000-0000-0000-0000-000000000001',review,phase:'ready-observed',readiness:{web:'started'},resources:{'network:default':{kind:'network',key:'default',name:'hkn-'+input.run+'-network-0',id:'1'.repeat(64),image:null,phase:'created',outbound:true},'container:web':{kind:'container',key:'web',name:'hkn-'+input.run+'-container-0',id:'2'.repeat(64),image:'sha256:'+ '3'.repeat(64),phase:'started',networks:['default']}}};
  if(${options.storage === true && options.liveStop === true}){
   const namespace=provenance.namespace, owner='9'.repeat(32);
@@ -477,7 +487,7 @@ if(['plan','serve','frontend-plan','frontend-serve'].includes(action)){
  }
  await finish();
 }else{
- if(action==='inspect'&&${options.failBeforeReceipt === true}){console.error(JSON.stringify({code:'native_graph_receipt',message:${JSON.stringify(CANARY)}}));process.exit(2)}
+ if(action==='inspect'&&${options.failBeforeReceipt === true || options.stoppedDuringServe === true}){console.error(JSON.stringify({code:'native_graph_receipt',message:${JSON.stringify(CANARY)}}));process.exit(2)}
  if(action==='inspect'&&${JSON.stringify(options.cleanup)}==='missing'){console.error(JSON.stringify({code:'graph_owner_recovery',message:'private-missing-journal-detail'}));process.exit(2)}
  const receipt=JSON.parse(await readFile(journal,'utf8'));
  const observations={web:receipt.phase==='removed'?null:{state:'running',health:'none'}};
@@ -542,6 +552,24 @@ macTest(
     expect(retained).toHaveLength(2);
     expect(retained.some((name) => name.endsWith(".start.json"))).toBe(true);
     expect(retained.some((name) => name.endsWith(".source.json"))).toBe(true);
+  }
+);
+
+macTest(
+  "a runtime that stops during serve keeps the wrapped stopped-runtime cause",
+  async () => {
+    const selected = await fixture({ stoppedDuringServe: true });
+    const error = await failure(
+      serveNativeAuthoredProject({
+        ...selected,
+        run,
+        startupTimeoutMs: 10_000,
+      }),
+      "retained"
+    );
+    expect(error).toHaveProperty("nativeCode", "native_graph_foreground");
+    expect(error).toHaveProperty("nativeCauseCode", "runtime_not_running");
+    expect(error).toHaveProperty("stage", "runtime");
   }
 );
 
@@ -611,6 +639,53 @@ macTest(
       "runtime status --json",
     ]);
     expect(await Bun.file(selected.delivery).exists()).toBe(false);
+    expect(await artifacts(selected.scope)).toEqual([]);
+    expect(
+      await nativeAuthoredProjectPs({
+        runtime: selected.runtime,
+        scope: selected.scope,
+      })
+    ).toMatchObject({ status: "not_started", run: null, items: [] });
+  }
+);
+
+macTest(
+  "cancel during the runtime status check refuses before the startup intent",
+  async () => {
+    const selected = await fixture({ runtimeStatusHangs: true });
+    const signal = new AbortController();
+    const started = serveNativeAuthoredProject({
+      ...selected,
+      run,
+      signal: signal.signal,
+      startupTimeoutMs: 10_000,
+    });
+    // Cancel once the status request is in flight. The check treats the
+    // aborted request as inconclusive; the start must still not reserve.
+    const deadline = performance.now() + 8000;
+    while (
+      !(
+        (await Bun.file(selected.calls).exists()) &&
+        (await Bun.file(selected.calls).text()).includes('"status"')
+      )
+    ) {
+      if (performance.now() > deadline) {
+        throw new Error("runtime status was never requested");
+      }
+      await Bun.sleep(20);
+    }
+    signal.abort();
+    const error = await failure(started, "not-started");
+    expect(error).toHaveProperty("canceled", true);
+    expect(error).toHaveProperty("stage", "reservation");
+    const calls = (await Bun.file(selected.calls).text())
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as string[]);
+    expect(calls.map((args) => args.slice(2, 5).join(" "))).toEqual([
+      "graph native plan",
+      "runtime status --json",
+    ]);
     expect(await artifacts(selected.scope)).toEqual([]);
     expect(
       await nativeAuthoredProjectPs({

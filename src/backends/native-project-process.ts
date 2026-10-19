@@ -12,7 +12,7 @@ import type { NativeAuthoredStorageTool } from "./native-authored-storage-tool.t
 import {
   invokeNativeRuntime,
   type NativeRuntimeSelection,
-  readNativeFailureCode,
+  readNativeFailureCodes,
   rethrowNativeInputFailure,
   writeNativePrivateInput,
 } from "./native-runtime-client.ts";
@@ -24,6 +24,8 @@ const MAX_INPUT = 256 * 1024;
 export type NativeExitDiagnostic = {
   readonly exitCode: number;
   readonly nativeCode?: string;
+  /** Bounded cause the runtime allows with `nativeCode`, such as a wrapped stopped runtime. */
+  readonly nativeCauseCode?: string;
 };
 
 type ProcessOptions = {
@@ -321,7 +323,8 @@ async function serveGraphProcess(
     owner.abort();
     drainTimer = setTimeout(() => drain.abort(), 250);
   });
-  const failureCode = readNativeFailureCode(child.stderr, drain.signal);
+  const failureCodes = readNativeFailureCodes(child.stderr, drain.signal);
+  const failureCode = failureCodes.then((failure) => failure?.code);
   let ready = false;
   let canceled = false;
   let timedOut = false;
@@ -445,13 +448,16 @@ async function serveGraphProcess(
       clearTimeout(killTimer);
     }
     const exitCode = await child.exited;
-    const nativeCode = await failureCode;
+    const failure = await failureCodes;
+    const nativeCode = failure?.code;
+    const nativeCauseCode = failure?.causeCode;
     clearTimeout(drainTimer);
     drain.abort();
     try {
       opts.onExitDiagnostic?.({
         exitCode,
         ...(nativeCode ? { nativeCode } : {}),
+        ...(nativeCauseCode ? { nativeCauseCode } : {}),
       });
     } catch {
       // Observation must never replace the startup result or cleanup authority.

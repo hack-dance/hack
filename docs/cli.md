@@ -187,11 +187,17 @@ route for it.
 - Browser/host URL: use `hack open <service> --json`; OAuth aliases are preferred when enabled.
 - Container-to-container traffic: use Compose DNS rather than routing back through Caddy.
 
-For `run`, `exec`, `host exec`, `env exec`, `session exec` and `x`, Hack options go before the
-child command. From the child command's first word on, every argument belongs to the child,
-including flags that Hack also defines: `hack run web bun --version` runs `bun --version` in the
-container rather than printing Hack's version. A `--` before the child command is optional and is
-not passed on; a later `--` (as in `hack run web npm test -- --watch`) reaches the child unchanged.
+For `run`, `exec`, `host exec`, `env exec` and `x`, Hack options go before the child command.
+From the child command's first word on, every argument belongs to the child, including flags
+that Hack also defines: `hack run web bun --version` runs `bun --version` in the container
+rather than printing Hack's version, and a child `--json` does not switch Hack's own error output
+to JSON. A `--` before the child command is optional and is not passed on; a later `--` (as in
+`hack run web npm test -- --watch`) reaches the child unchanged.
+
+`session exec` takes the workspace command as one argument, so quote a command that has its own
+arguments or flags: `hack session exec ws "npm --version"`. Hack options go before it, and an
+unquoted `hack session exec ws npm --version` refuses with a hint to quote the command instead
+of printing Hack's version.
 
 Service-scoped runtime changes do not run project-wide lifecycle hooks and do not start Compose
 dependencies implicitly, except declared shared-cache installers needed by the selected services:

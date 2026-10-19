@@ -30,6 +30,7 @@ import { parseNativeHttpsSelection } from "../backends/native-project-start.ts";
 import {
   isNativeRuntimeNotRunning,
   NATIVE_RUNTIME_NOT_RUNNING,
+  nativeCodesReportRuntimeNotRunning,
   resolveNativeRuntimeSelection,
 } from "../backends/native-runtime-client.ts";
 import { CliUsageError } from "../cli/command.ts";
@@ -221,7 +222,7 @@ function startupFailure(error: unknown): number {
     if (error.canceled && error.outcome === "removed") {
       return 130;
     }
-    if (error.nativeCode === NATIVE_RUNTIME_NOT_RUNNING) {
+    if (nativeCodesReportRuntimeNotRunning(error)) {
       throw stoppedRuntimeStartup(error);
     }
     throw new HackCliError({

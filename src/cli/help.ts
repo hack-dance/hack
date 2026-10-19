@@ -419,11 +419,14 @@ function passthroughPositionalName(
 
 /** One line explaining where a child command's own argv begins. */
 function renderPassthroughNote(command: AnyCommandSpec): string | undefined {
-  const name = passthroughPositionalName(command);
-  if (!name) {
+  const spec = command.positionals.find((p) => p.passthrough === true);
+  if (!spec) {
     return;
   }
-  return `Everything from \`<${name}>\` on is passed to the command unchanged, including flags such as \`--version\` or \`--help\`. Put Hack options before it; a leading \`--\` is optional.`;
+  if (spec.multiple !== true) {
+    return `\`<${spec.name}>\` is one argument: quote a command that has its own arguments or flags, as in \`"npm --version"\`. Put Hack options before it; a leading \`--\` is optional.`;
+  }
+  return `Everything from \`<${spec.name}>\` on is passed to the command unchanged, including flags such as \`--version\` or \`--help\`. Put Hack options before it; a leading \`--\` is optional.`;
 }
 
 function buildInvocation(

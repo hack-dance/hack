@@ -159,7 +159,10 @@ test("ambiguous/custom/writable AWS mounts refuse before exporting", async () =>
         exportSource,
         now,
       })
-    ).rejects.toThrow("values omitted");
+    ).rejects.toMatchObject({
+      code: "E_CONFIG_INVALID",
+      message: expect.stringContaining("values omitted"),
+    });
   }
   expect(calls).toBe(0);
 });

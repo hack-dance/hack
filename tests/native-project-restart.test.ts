@@ -27,6 +27,7 @@ import {
   saveNativeRestartIntent,
   withNativeRestartLock,
 } from "../src/backends/native-project-run.ts";
+import { ClosedCliError } from "../src/lib/cli-result.ts";
 
 const run = {
   run: "a".repeat(32),
@@ -296,6 +297,17 @@ test("legacy unknown selections refuse and omitted flags preserve saved values",
   expect(() =>
     nativeRestartSelection({ run: { ...run, profiles: undefined } })
   ).toThrow("legacy");
+  // Restart preflight refusals are closed: one line, no stack, in the CLI.
+  let refusal: unknown;
+  try {
+    nativeRestartSelection({ run, envName: "other" });
+  } catch (error: unknown) {
+    refusal = error;
+  }
+  expect(refusal).toBeInstanceOf(ClosedCliError);
+  expect(String(refusal)).toContain(
+    "cannot change the startup environment or profiles"
+  );
 });
 
 test("preflight compares actual reviewed identity before cleanup eligibility", async () => {

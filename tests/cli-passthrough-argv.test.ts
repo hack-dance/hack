@@ -4,7 +4,9 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import {
   findPassthroughStart,
+  hackOwnedArgv,
   parseCliArgv,
+  parsePositionalsForCommand,
   resolveCommand,
 } from "../src/cli/command.ts";
 import { CLI_SPEC } from "../src/cli/spec.ts";
@@ -110,6 +112,46 @@ test("session exec never gives a flag after the workspace command to Hack", () =
   expect(parsed.rest).toEqual(["dev", "npm", "--version"]);
 });
 
+test("an unquoted single-argument child command refuses with a quoting hint", () => {
+  const resolved = resolveCommand(CLI_SPEC, ["session", "exec"]);
+  const positionals = resolved.command?.positionals ?? [];
+  expect(() =>
+    parsePositionalsForCommand(positionals, ["dev", "npm", "--version"])
+  ).toThrow(
+    'Unexpected arguments: --version. <command> is one argument; quote the whole command, as in "npm --version".'
+  );
+  const quoted: Readonly<Record<string, unknown>> = parsePositionalsForCommand(
+    positionals,
+    ["dev", "npm --version"]
+  );
+  expect(quoted).toEqual({ workspace: "dev", command: "npm --version" });
+});
+
+test("only Hack's own argv can select the JSON error envelope", () => {
+  expect(hackOwnedArgv(CLI_SPEC, ["run", "web", "tool", "--json"])).toEqual([
+    "run",
+    "web",
+  ]);
+  expect(
+    hackOwnedArgv(CLI_SPEC, ["--json", "run", "web", "tool", "--json"])
+  ).toEqual(["--json", "run", "web"]);
+  expect(hackOwnedArgv(CLI_SPEC, ["exec", "web", "cat", "--json"])).toEqual([
+    "exec",
+    "web",
+  ]);
+  // Tokens after an explicit `--` are the child's too.
+  expect(hackOwnedArgv(CLI_SPEC, ["run", "web", "--", "--json"])).toEqual([
+    "run",
+    "web",
+  ]);
+  // A command without a child command keeps every token.
+  expect(hackOwnedArgv(CLI_SPEC, ["up", "web", "--json"])).toEqual([
+    "up",
+    "web",
+    "--json",
+  ]);
+});
+
 test("Hack's own flags still work before the child command", () => {
   expect(parse(["--version"]).values.version).toBe(true);
   expect(parse(["run", "--help"]).values.help).toBe(true);
@@ -185,6 +227,47 @@ test.each([
     expect(result.stdout).not.toMatch(VERSION_LINE);
     expect(result.stdout + result.stderr).not.toContain(
       "hack <command> [options]"
+    );
+  },
+  SPAWN_TIMEOUT_MS
+);
+
+test.each([
+  [["run", "web", "tool", "--json"]],
+  [["run", "--profile", "toolchain", "web", "tool", "--json"]],
+  [["exec", "web", "cat", "--json"]],
+])(
+  "source CLI %j keeps Hack's refusal human-readable for a child --json",
+  async (args) => {
+    const result = await cli(args);
+    expect(result.code).not.toBe(0);
+    // The child's --json is not Hack's: no JSON error envelope on stdout.
+    expect(result.stdout).not.toContain('"ok":false');
+    expect(result.stderr).toContain("ERROR:");
+  },
+  SPAWN_TIMEOUT_MS
+);
+
+test(
+  "source CLI --json before the child command still selects the envelope",
+  async () => {
+    const result = await cli(["--json", "run", "web", "tool", "--json"]);
+    expect(result.code).not.toBe(0);
+    expect(JSON.parse(result.stdout)).toMatchObject({ ok: false });
+  },
+  SPAWN_TIMEOUT_MS
+);
+
+test(
+  "source CLI unquoted session exec command refuses with a quoting hint",
+  async () => {
+    const result = await cli(["session", "exec", "ws", "npm", "--version"]);
+    expect(result.code).toBe(1);
+    // Not Hack's bare `--version` output (the usage help's banner also names
+    // the version, so match the whole line).
+    expect(result.stdout).not.toMatch(/^hack v[\d.]+\S*$/m);
+    expect(result.stdout + result.stderr).toContain(
+      'quote the whole command, as in "npm --version"'
     );
   },
   SPAWN_TIMEOUT_MS

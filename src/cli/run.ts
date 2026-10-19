@@ -13,6 +13,7 @@ import {
   CliUsageError,
   collectAllowedOptionNames,
   collectUnionOptionNames,
+  hackOwnedArgv,
   hasHandler,
   parseCliArgv,
   parseOptionsForCommand,
@@ -31,7 +32,9 @@ function isTruthyEnv(value: string | undefined): boolean {
 }
 
 export async function runCli(argv: readonly string[]): Promise<number> {
-  const jsonRequested = argv.includes("--json");
+  // Only Hack's own argv selects the JSON error envelope: a child command's
+  // `--json` (as in `hack run web tool --json`) belongs to the child.
+  const jsonRequested = hackOwnedArgv(CLI_SPEC, argv).includes("--json");
   // Set once argument parsing succeeded and the handler owns the request.
   let handlerPath: readonly string[] | undefined;
   try {

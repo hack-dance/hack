@@ -494,15 +494,27 @@ macTest(
 macTest.each([
   {
     outcome: "not-started" as const,
+    stage: "reservation" as const,
+    nativeCode: "runtime_not_running",
     text: "Native runtime is not running; nothing was started. Start the native runtime, then run this command again.",
   },
   {
     outcome: "retained" as const,
+    stage: "reservation" as const,
+    nativeCode: "runtime_not_running",
+    text: "so `hack ps` reports it as pending",
+  },
+  {
+    // Authored foreground control wraps a runtime that stopped during serve.
+    outcome: "retained" as const,
+    stage: "runtime" as const,
+    nativeCode: "native_graph_foreground",
+    nativeCauseCode: "runtime_not_running",
     text: "so `hack ps` reports it as pending",
   },
 ])(
-  "a start refused by a stopped runtime ($outcome) reports the runtime, not incomplete startup",
-  async ({ outcome, text }) => {
+  "a start refused by a stopped runtime ($outcome, $nativeCode) reports the runtime, not incomplete startup",
+  async ({ outcome, stage, nativeCode, nativeCauseCode, text }) => {
     const selected = await fixture();
     const value = await tryNativeAuthoredCommand({
       ...selected,
@@ -511,8 +523,9 @@ macTest.each([
           new NativeAuthoredProjectStartError({
             outcome,
             canceled: false,
-            nativeCode: "runtime_not_running",
-            stage: "reservation",
+            nativeCode,
+            nativeCauseCode,
+            stage,
           })
         ),
     }).catch((caught: unknown) => caught);
@@ -522,7 +535,7 @@ macTest.each([
     expect(value).toHaveProperty("detail", {
       outcome,
       canceled: false,
-      stage: "reservation",
+      stage,
       nativeCode: "runtime_not_running",
     });
   }

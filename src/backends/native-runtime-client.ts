@@ -54,9 +54,24 @@ export const NATIVE_RUNTIME_NOT_RUNNING = "runtime_not_running";
 export function isNativeRuntimeNotRunning(error: unknown): boolean {
   return (
     error instanceof NativeRuntimeRequestError &&
-    (error.nativeCode === NATIVE_RUNTIME_NOT_RUNNING ||
-      (error.nativeCode === "native_graph_foreground" &&
-        error.nativeCauseCode === NATIVE_RUNTIME_NOT_RUNNING))
+    nativeCodesReportRuntimeNotRunning(error)
+  );
+}
+
+/**
+ * True when a bounded native code pair reports a stopped runtime, either
+ * directly or wrapped by authored foreground control (see
+ * {@link isNativeRuntimeNotRunning}). Callers that carry the codes without the
+ * request error, such as a failed foreground start, classify with this.
+ */
+export function nativeCodesReportRuntimeNotRunning(codes: {
+  readonly nativeCode?: string;
+  readonly nativeCauseCode?: string;
+}): boolean {
+  return (
+    codes.nativeCode === NATIVE_RUNTIME_NOT_RUNNING ||
+    (codes.nativeCode === "native_graph_foreground" &&
+      codes.nativeCauseCode === NATIVE_RUNTIME_NOT_RUNNING)
   );
 }
 
@@ -598,6 +613,20 @@ export async function readNativeFailureCode(
   signal?: AbortSignal
 ): Promise<string | undefined> {
   return (await readNativeFailure(stream, signal))?.code;
+}
+
+/** Like {@link readNativeFailureCode}, plus the bounded cause code it allows. */
+export async function readNativeFailureCodes(
+  stream: ReadableStream<Uint8Array>,
+  signal?: AbortSignal
+): Promise<{ readonly code: string; readonly causeCode?: string } | undefined> {
+  const failure = await readNativeFailure(stream, signal);
+  return failure === undefined
+    ? undefined
+    : {
+        code: failure.code,
+        ...(failure.causeCode ? { causeCode: failure.causeCode } : {}),
+      };
 }
 
 /** Capture delivery failure while the caller drains and reaps the receiver, never replaying input. */

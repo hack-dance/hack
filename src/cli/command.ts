@@ -40,7 +40,8 @@ export interface PositionalSpec<Name extends string = string> {
    * `--help` or `--json`; Hack's own options must come before it. A `--` before
    * the child argv is still accepted and is not passed on, while a `--` inside
    * the child argv is passed through unchanged. Only the last positional of a
-   * command may set this.
+   * command may set this. Without `multiple`, the child command is one quoted
+   * argument, and any further token is refused with a hint to quote it.
    */
   readonly passthrough?: boolean;
 }
@@ -368,6 +369,25 @@ export function findPassthroughStart(
   return null;
 }
 
+/**
+ * The leading argv tokens that belong to Hack: everything before the child
+ * command of a passthrough positional and before the first `--`. Raw-argv
+ * checks (for example whether `--json` selects Hack's error envelope) must
+ * read only these, so a child's own `--json` never changes Hack's output.
+ */
+export function hackOwnedArgv(
+  cli: CliSpec,
+  argv: readonly string[]
+): readonly string[] {
+  const separator = argv.indexOf("--");
+  const childStart = findPassthroughStart(cli, argv);
+  const end = Math.min(
+    separator === -1 ? argv.length : separator,
+    childStart ?? argv.length
+  );
+  return argv.slice(0, end);
+}
+
 /** Every value-taking option, by long and short spelling. */
 function collectValueOptions(cli: CliSpec): ReadonlyMap<string, OptionSpec> {
   const valueOptions = new Map<string, OptionSpec>();
@@ -572,6 +592,15 @@ export function parsePositionalsForCommand<
 
   if (idx < remaining.length) {
     const extra = remaining.slice(idx).join(" ");
+    const single = posSpecs.at(-1);
+    if (single?.passthrough === true && single.multiple !== true) {
+      // A single-valued child command (such as `session exec`'s <command>)
+      // takes the whole command line as one quoted argument.
+      const whole = [out[single.name], ...remaining.slice(idx)].join(" ");
+      throw new CliUsageError(
+        `Unexpected arguments: ${extra}. <${single.name}> is one argument; quote the whole command, as in ${JSON.stringify(whole)}.`
+      );
+    }
     throw new CliUsageError(`Unexpected arguments: ${extra}`);
   }
 

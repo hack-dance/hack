@@ -508,6 +508,19 @@ test.each([
   });
 });
 
+test("a canceled start reports cancellation, not the configuration refusal", async () => {
+  const { opts, events } = await fixture();
+  const refusal = await startNativeProject({
+    ...opts,
+    signal: AbortSignal.abort(),
+  }).catch((error: unknown) => error);
+  expect(refusal).toBeInstanceOf(ClosedCliError);
+  expect(refusal).not.toBeInstanceOf(HackCliError);
+  expect(String(refusal)).toContain("Native foreground up was canceled");
+  expect(String(refusal)).not.toContain(NATIVE_CONFIGURATION_REFUSAL);
+  expect(events).toEqual([]);
+});
+
 test("source opt-in and occupied mapping refuse before lifecycle or runtime effects", async () => {
   const { opts, events } = await fixture();
   const refusal = await startNativeProject({

@@ -49,3 +49,18 @@ test("dispatch help no longer advertises built-in GitHub PR automation", () => {
   expect(help).not.toContain("create/update GitHub PR");
   expect(help).not.toMatch(/--pr(?:-|\b)|--github-profile/);
 });
+
+test("text help says where a child command's own argv begins", () => {
+  const run = renderHelpForPath(CLI_SPEC, ["run"]);
+  expect(run).toContain("hack run [options] <service> [cmd...]");
+  expect(run).toContain(
+    "Everything from `<cmd>` on is passed to the command unchanged, including flags such as `--version` or `--help`."
+  );
+  // session exec takes its workspace command as one argument: the note says to
+  // quote it rather than claiming that later tokens pass through.
+  const sessionExec = renderHelpForPath(CLI_SPEC, ["session", "exec"]);
+  expect(sessionExec).toContain(
+    '`<command>` is one argument: quote a command that has its own arguments or flags, as in `"npm --version"`.'
+  );
+  expect(sessionExec).not.toContain("Everything from `<command>` on");
+});

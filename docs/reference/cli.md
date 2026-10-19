@@ -822,7 +822,7 @@ Send a command to a running workspace
 hack session exec [options] <workspace> <command>
 ```
 
-Everything from `<command>` on is passed to the command unchanged, including flags such as `--version` or `--help`. Put Hack options before it; a leading `--` is optional.
+`<command>` is one argument: quote a command that has its own arguments or flags, as in `"npm --version"`. Put Hack options before it; a leading `--` is optional.
 
 Queue a command in the workspace without opening a new interactive attach flow. Tmux sends it to the active pane; zellij opens a new pane for the command. This is useful for long-running agents, background checks, or remote follow-up work.
 

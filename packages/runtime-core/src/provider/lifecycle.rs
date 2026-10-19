@@ -1872,28 +1872,25 @@ sync"#,
         )?;
     }
     phase(candidate, &mut owner, "stopping")?;
+    let process = owner.process.as_ref().ok_or_else(|| {
+        CandidateError::new(
+            "process_identity_unavailable",
+            "No independently retained provider identity.",
+        )
+    })?;
     // Only an explicit guest syncfs and read-only remount result authorizes signalling the
-    // provider. Any refusal returns before the signal and keeps the `stopping` phase, disk
-    // identities and process authority for a later stop or unclean recovery.
-    shutdown_proof::request(&socket(candidate, &owner, "agent.sock")?)?;
-    verify_live(candidate, &owner)?;
-    let process = owner.process.as_ref().expect("live identity verified");
-    // Revalidate immediately before signalling. macOS has no Linux pidfd equivalent;
-    // this is cooperative same-user ownership, not hostile-process containment.
-    identity::terminate(process, &binary(candidate))?;
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while identity::alive(process.pid)? && Instant::now() < deadline {
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    if identity::alive(process.pid)? {
-        return Err(CandidateError::new(
-            "stop_uncertain",
-            "Provider remains alive after TERM; no force-kill or false stopped receipt.",
-        ));
-    }
-    finish_stopped(
+    // provider. Any refusal returns here, before the signal, and keeps the `stopping` phase,
+    // disk identities and process authority for a later stop or unclean recovery.
+    let clean = shutdown_proof::stop_provider(
+        &socket(candidate, &owner, "agent.sock")?,
+        || verify_live(candidate, &owner),
+        process,
+        &binary(candidate),
+    )?;
+    finish_clean_stop(
         candidate,
         &mut owner,
+        clean,
         if before_engine {
             "stopped-before-engine"
         } else if failed_engine {
@@ -1903,6 +1900,17 @@ sync"#,
         },
     )?;
     status(candidate)
+}
+
+/// Record a clean stop phase. The witness exists only after the guest proved its storage flush
+/// and the verified provider exited, so no refused or unconfirmed stop reaches this receipt.
+fn finish_clean_stop(
+    candidate: &Candidate,
+    owner: &mut Owner,
+    _proof: shutdown_proof::CleanStop,
+    value: &str,
+) -> Result<(), CandidateError> {
+    finish_stopped(candidate, owner, value)
 }
 
 fn finish_stopped(

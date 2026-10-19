@@ -19,15 +19,26 @@
 //! failed step. A refusal happens before any provider signal, so the pool keeps its `stopping`
 //! phase, recorded disk identities and process authority; no clean-stop receipt is written.
 //! Diagnostics never echo guest-provided values.
-use super::super::agent;
+//!
+//! [`stop_provider`] owns the whole proof-then-signal sequence, and only it constructs the
+//! [`CleanStop`] witness that the clean-stop receipt requires. A caller therefore cannot ignore a
+//! refusal and still signal the provider or record a clean stop.
+use super::super::{agent, identity};
 use crate::CandidateError;
 use serde_json::{Value, json};
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// The only storage flush protocol this host trusts.
 const FLUSH_PROTOCOL: u64 = 1;
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(15);
+/// How long a signalled provider may take to exit before the stop is uncertain.
+const EXIT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Proof that the guest reported a successful storage flush and the verified provider then
+/// exited. Only [`stop_provider`] constructs it.
+#[must_use]
+pub(super) struct CleanStop(());
 
 /// Closed reasons a shutdown reply cannot prove a guest storage flush.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -71,10 +82,41 @@ impl Refusal {
     }
 }
 
+/// Stop the verified provider only after the guest proves its storage flush.
+///
+/// The order is the safety contract. A flush refusal or an agent transport failure returns
+/// before `revalidate` runs or any signal is sent, so the caller keeps its `stopping` phase, disk
+/// identities and process authority. `revalidate` must re-establish the live provider identity
+/// and disks; it runs immediately before the signal. A provider still alive after
+/// [`EXIT_TIMEOUT`] is `stop_uncertain` and is never force-killed.
+pub(super) fn stop_provider(
+    agent_socket: &Path,
+    revalidate: impl FnOnce() -> Result<(), CandidateError>,
+    process: &identity::ProcessIdentity,
+    binary: &Path,
+) -> Result<CleanStop, CandidateError> {
+    request(agent_socket)?;
+    revalidate()?;
+    // macOS has no Linux pidfd equivalent; this is cooperative same-user ownership, not
+    // hostile-process containment. `terminate` checks the native identity again.
+    identity::terminate(process, binary)?;
+    let deadline = Instant::now() + EXIT_TIMEOUT;
+    while identity::alive(process.pid)? && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    if identity::alive(process.pid)? {
+        return Err(CandidateError::new(
+            "stop_uncertain",
+            "Provider remains alive after TERM; no force-kill or false stopped receipt.",
+        ));
+    }
+    Ok(CleanStop(()))
+}
+
 /// Request guest shutdown over the owned agent socket and require an explicit flush proof.
 ///
 /// Transport and framing failures keep the agent's own `agent_protocol_uncertain` refusal.
-pub(super) fn request(path: &Path) -> Result<(), CandidateError> {
+fn request(path: &Path) -> Result<(), CandidateError> {
     verify(&agent::request(
         path,
         json!({"method":"shutdown"}),

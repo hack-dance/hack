@@ -179,9 +179,29 @@ complete bundle to change the candidate.
    foreground owner and host processes have retired, and stop the owned candidate
    runtime. Keep existing bundles in place while any of their child processes live.
    A runtime stop is clean only when the guest reports explicit storage syncfs and
-   read-only remount results. A `stop_uncertain` refusal (for example
-   `guest_flush_unreported` from a guest that predates that report) keeps the pool's
-   disks and phase; do not treat it as a clean stop or delete its data.
+   read-only remount results (storage flush protocol 1). Any other reply refuses
+   with `stop_uncertain` before the provider is signalled. The pool keeps its
+   `stopping` phase, recorded disks and process authority. Do not treat it as a
+   clean stop, and do not delete its home or disks. **The current pinned guest
+   (SmolVM 1.14.3) never sends that report**, so every stop of a booted pool ends
+   with `stop_uncertain` and `guest_flush_unreported` until a guest that reports
+   protocol 1 is pinned. After that refusal:
+   - Check `runtime status --json`. If the guest halted after its shutdown request,
+     the provider process should exit by itself; this has not been verified on a
+     live VM. Once `process_alive` is `false`, run `runtime recover --json`. It
+     records `recovered-unclean` and keeps the disks, and the next `runtime up`
+     boots from them.
+   - While the provider stays alive, `recover` refuses with `recovery_required`.
+     Another `down` sends a new shutdown request and is refused again
+     (`stop_uncertain`, or `agent_protocol_uncertain` when the guest agent no longer
+     answers). No supported command leaves this state. Preserve the home and its
+     disks and report it; do not kill the provider or edit receipts.
+
+   `recovered-unclean` is not a clean stop. Retained-data frontend startup in step 3
+   and the [prerelease installer's](https://github.com/hack-dance/hack/blob/next/docs/guides/candidate-install.md) upgrade, rollback, `stable` and
+   `upgrade-manager` operations require a clean `stopped` runtime, so they refuse
+   that pool. With the current pin, steps 3 and 4 therefore cannot complete for a
+   candidate whose runtime has booted.
 3. Select the new bundle's `hack-v5` by its full path with the same canonical
    mode-`0700` `HACK_NATIVE_HOME`. Check its `info` identity and update any explicitly
    selected guest-relay artifact paths to the verified complete bundle. Normal

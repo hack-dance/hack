@@ -482,6 +482,15 @@ signal, so the pool keeps its `stopping` phase, recorded disks and process autho
 clean-stop receipt. Older guests, including the current pin, report no flush block and are never
 trusted: their stop is `guest_flush_unreported`. Once that provider has exited, `runtime recover`
 records `recovered-unclean`; a clean `stopped` receipt needs a pinned guest that reports protocol 1.
+While the provider stays alive, `recover` refuses with `recovery_required` and a repeated `down`
+is refused again; no supported command leaves that state. `shutdown_proof::stop_provider` owns
+the proof, revalidation, signal and exit wait, and only it returns the `CleanStop` witness that the
+clean-stop receipt requires.
+
+Consumers that require a clean `stopped` phase refuse a pool after `stop_uncertain` or
+`recovered-unclean`: the prerelease installer's quiescence check (upgrade, rollback, `stable`,
+`upgrade-manager`), retained-data frontend startup, and host evidence harnesses and native fixtures
+that assert `down(...).phase == "stopped"`. With the current pin they cannot pass on a real VM.
 
 SmolVM seeds a machine's disks during its first start (`machine create` makes none) from expanded
 `*-template.ext4` files that it creates from the verified compressed templates and then reuses.

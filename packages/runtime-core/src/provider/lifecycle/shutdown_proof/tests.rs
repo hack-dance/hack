@@ -214,3 +214,85 @@ fn unreachable_agent_keeps_the_transport_refusal() {
     let error = request(Path::new("/nonexistent/hack-shutdown-proof.sock")).unwrap_err();
     assert_eq!(error.code, "agent_protocol_uncertain");
 }
+
+/// The production stop sequence against a fake agent and a real stand-in provider process.
+/// A refusal must leave the provider unsignalled; only flush proof plus revalidation stops it.
+#[cfg(target_os = "macos")]
+#[test]
+fn the_provider_is_signalled_only_after_flush_proof_and_revalidation() {
+    use std::cell::Cell;
+    use std::os::unix::process::ExitStatusExt;
+    let legacy = json!({"status":"ok","data":{"shutdown":true}});
+    let syncfs_failed = reply(json!({"version":1,"syncfs":"failed","remount_read_only":"ok"}));
+    let remount_failed = reply(json!({"version":1,"syncfs":"ok","remount_read_only":"failed"}));
+    // (agent reply, whether revalidation succeeds, expected refusal code and cause)
+    let cases = [
+        (
+            legacy,
+            true,
+            Some(("stop_uncertain", Some("guest_flush_unreported"))),
+        ),
+        (
+            syncfs_failed,
+            true,
+            Some(("stop_uncertain", Some("guest_syncfs_failed"))),
+        ),
+        (
+            remount_failed,
+            true,
+            Some(("stop_uncertain", Some("guest_remount_failed"))),
+        ),
+        (flushed(), false, Some(("process_identity_mismatch", None))),
+        (flushed(), true, None),
+    ];
+    for (response, revalidates, refusal) in cases {
+        let mut child = std::process::Command::new("/bin/sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let provider = identity::observe(child.id() as i32).unwrap();
+        // The exit signal names who stopped the child: SIGTERM only from `stop_provider`.
+        let (exited, exit) = std::sync::mpsc::channel();
+        std::thread::spawn(move || exited.send(child.wait().unwrap().signal()).unwrap());
+        let (agent, worker) = FakeAgent::serve(response);
+        let revalidated = Cell::new(0);
+        let result = stop_provider(
+            &agent.socket,
+            || {
+                revalidated.set(revalidated.get() + 1);
+                if revalidates {
+                    Ok(())
+                } else {
+                    Err(CandidateError::new(
+                        "process_identity_mismatch",
+                        "Synthetic revalidation refusal.",
+                    ))
+                }
+            },
+            &provider,
+            &provider.executable,
+        );
+        assert_eq!(worker.join().unwrap(), json!({"method":"shutdown"}));
+        match refusal {
+            None => {
+                assert!(result.is_ok());
+                assert_eq!(revalidated.get(), 1);
+                assert_eq!(exit.recv().unwrap(), Some(libc::SIGTERM));
+            }
+            Some((code, cause)) => {
+                let error = result.err().unwrap();
+                assert_eq!(error.code, code);
+                assert_eq!(error.cause_code.as_deref(), cause);
+                // A flush refusal never reaches revalidation; neither refusal signals.
+                assert_eq!(revalidated.get(), u32::from(cause.is_none()));
+                assert_eq!(
+                    exit.recv_timeout(Duration::from_millis(300)),
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+                );
+                // SAFETY: the test's own child, still unreaped, so its PID cannot be reused.
+                assert_eq!(unsafe { libc::kill(provider.pid, libc::SIGKILL) }, 0);
+                assert_eq!(exit.recv().unwrap(), Some(libc::SIGKILL));
+            }
+        }
+    }
+}

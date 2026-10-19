@@ -128,6 +128,17 @@ refuses selection. An uninitialized runtime is accepted only when its native hom
 is completely empty; unexplained leftover state requires inspection through its
 owning CLI. The manager never treats a missing PID or a failed command as idle.
 
+A runtime stop is clean only when the guest reports explicit storage flush
+results. A candidate whose guest does not report them, including every candidate
+on the current SmolVM 1.14.3 pin, refuses `runtime down` with `stop_uncertain`
+once its runtime has booted. `runtime recover` then records only
+`recovered-unclean`, which is also not an explicitly stopped runtime. Upgrade,
+rollback, `stable` and `upgrade-manager` therefore refuse to move away from such a
+candidate, and its selection stays in place. Do not delete its home or edit
+receipts to get past the check. See the
+[native candidate guide](https://github.com/hack-dance/hack/blob/next/docs/guides/native-candidate.md#manual-candidate-upgrade-and-rollback)
+for what to do after `stop_uncertain`.
+
 Every new version starts with **fresh native and CLI homes**. Prepare its provider
 and application explicitly. Upgrading selects software; it does not copy or migrate
 the previous candidate's VM, project registry, volumes, environment store, or data.

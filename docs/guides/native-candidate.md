@@ -371,7 +371,9 @@ again on a verified running pool, or restarting an exactly clean stopped pool wh
 last `down` completed, reuses existing disks and reserves only the 16 GiB host
 reserve; `runtime probe --profile development --json` reports the basis in
 `disk_budget_basis`, and `retained_reserve_refusal` names why a stopped pool's
-disks were charged again. Any other stopped pool keeps the fresh budget. The
+disks were charged again. A restart uses that reserve only when free disk is
+below the fresh budget; with enough room it starts on the fresh budget as before.
+Any other stopped pool keeps the fresh budget. The
 unchanged memory budget is a 10 GiB free-plus-file-cache estimate: 6 GiB guest,
 2 GiB provisional provider overhead and 2 GiB host reserve. Normal and warning
 macOS pressure can qualify only with that headroom, normal thermal/performance

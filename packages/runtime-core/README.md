@@ -1478,18 +1478,28 @@ clean `down` keeps it clean. Pools stopped before this marker existed qualify af
 next clean `down`. Clean also requires a creation receipt, rootfs pin, both disk
 identities and declared sizes, the recorded executable and user, a dead recorded
 provider and no pending owner update; these receipt checks are read-only, take no
-provider lock and run around every sample, including `runtime probe`. Under the startup
-lease, before any restart effect and again immediately before `machine start`, the
-release checks also require a free VM lock, no open disk handle (`lsof`), no owned
-listener and an unchanged audited provider configuration. The short-HOME alias is
-checked on every owner load, and the rootfs content against its pin before boot.
+provider lock and run around every sample, including `runtime probe`.
+
+The reserve is used only when a start needs it. Once the startup lease is held, a
+start whose every qualifying sample, including the lease recheck, also fits the 58 GiB
+fresh budget drops the stopped selection: it records those samples on the fresh basis
+and continues exactly as a start without a selection, with no release checks. Only a
+start whose free disk lies between the host reserve and the fresh budget keeps the
+selection. Under the lease, before any restart effect and again immediately before
+`machine start`, its release checks also require a free VM lock, no open disk handle
+(`lsof`, bounded at 30 seconds because it scans every process and is slow on a loaded
+host), no owned listener and an unchanged audited provider configuration. The short-HOME
+alias is checked on every owner load, and the rootfs content against its pin before
+boot.
 
 Each refusal maps to a closed code: `retained_reserve_foreign_owner`,
 `retained_reserve_active_owner`, `retained_reserve_dirty_owner` or
 `retained_reserve_stale_owner`. A created stopped pool that fails the receipt checks
 keeps the 58 GiB fresh-allocation budget, and the admission report carries
 `retained_reserve_refusal` with that code; the reserve is never relaxed. A selected pool
-that fails a later check refuses the start with the code. `machine create` requires an
+that fails a later check refuses the start with the code. Because only a start that
+needs the reserve runs the release checks, a release-check refusal, including an `lsof`
+scan that times out, never refuses a start whose samples all fit the fresh budget. `machine create` requires an
 authority only a start without a reserve selection obtains, and `machine start` requires
 one issued only by the pre-boot admission on the qualifying basis followed by the final
 leased recheck. Pressure, thermal, swapout and memory-headroom checks are unchanged.

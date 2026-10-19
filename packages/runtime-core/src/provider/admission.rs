@@ -298,6 +298,28 @@ fn disk_shortfall(profile: Profile, owned: OwnedPool, available: u64) -> Option<
     })
 }
 
+/// Whether an admitted Development sample also passes the unchanged fresh-allocation budget.
+/// Free disk is the only predicate that depends on the disk basis, so an admitted sample
+/// whose observed free disk fits the fresh budget is admitted on that budget too.
+pub(super) fn fits_fresh_budget(sample: &Admission) -> bool {
+    sample.profile == Profile::Development
+        && sample.admitted
+        && sample.reasons.is_empty()
+        && sample.disk_free_bytes.is_some_and(|free| {
+            disk_shortfall(Profile::Development, OwnedPool::Fresh, free).is_none()
+        })
+}
+
+/// Record a sample that [`fits_fresh_budget`] on the fresh-allocation budget, exactly as a
+/// start without an owned pool would have recorded the same observation.
+pub(super) fn rebase_fresh(sample: &mut Admission) {
+    debug_assert!(fits_fresh_budget(sample));
+    let (minimum, basis) = disk_budget(Profile::Development, OwnedPool::Fresh);
+    sample.minimum_disk_free_bytes = minimum;
+    sample.disk_budget_basis = basis;
+    sample.retained_reserve_refusal = None;
+}
+
 fn probe_with_disk_budget(
     path: &Path,
     profile: Profile,
@@ -595,6 +617,60 @@ mod tests {
             disk_budget(Profile::Development, OwnedPool::Running).1,
             "verified-live-owned-pool-host-reserve"
         );
+    }
+
+    #[test]
+    fn only_an_admitted_development_sample_with_fresh_headroom_rebases_to_the_fresh_budget() {
+        const GIB: u64 = 1024 * 1024 * 1024;
+        let reserve = |free: u64| Admission {
+            profile: Profile::Development,
+            host_supported: true,
+            free_memory_bytes: Some(10 * GIB),
+            minimum_free_memory_bytes: 10 * GIB,
+            free_plus_file_cache_estimate_bytes: Some(10 * GIB),
+            memory_budget_basis: "free-plus-file-cache-estimate",
+            memory_pressure: MemoryPressure::from_level(Some(1)),
+            memory_pressure_normal: true,
+            disk_free_bytes: Some(free),
+            minimum_disk_free_bytes: 16 * GIB,
+            disk_budget_basis: "verified-stopped-owned-pool-host-reserve",
+            one_minute_load: Some(0.0),
+            load_ceiling: None,
+            thermal_normal: true,
+            swapouts: Some(7),
+            admitted: true,
+            reasons: Vec::new(),
+            retained_reserve_refusal: None,
+        };
+        // The fresh boundary is inclusive, like the probe's own comparison.
+        let mut sample = reserve(58 * GIB);
+        assert!(fits_fresh_budget(&sample));
+        rebase_fresh(&mut sample);
+        assert_eq!(sample.minimum_disk_free_bytes, 58 * GIB);
+        assert_eq!(
+            sample.disk_budget_basis,
+            "new-pool-storage-overlay-host-reserve"
+        );
+        assert!(sample.admitted && sample.reasons.is_empty());
+        assert_eq!(sample.swapouts, Some(7));
+        // The October 2 restart's headroom needs the reserve; it never rebases.
+        assert!(!fits_fresh_budget(&reserve(58 * GIB - 1)));
+        assert!(!fits_fresh_budget(&reserve(58_010_112_000)));
+        let mut unobserved = reserve(100 * GIB);
+        unobserved.disk_free_bytes = None;
+        assert!(!fits_fresh_budget(&unobserved));
+        // A refused sample stays refused whatever its headroom.
+        let mut refused = reserve(100 * GIB);
+        refused.admitted = false;
+        assert!(!fits_fresh_budget(&refused));
+        let mut explained = reserve(100 * GIB);
+        explained
+            .reasons
+            .push("Thermal/performance status is not confirmed normal.".into());
+        assert!(!fits_fresh_budget(&explained));
+        let mut research = reserve(200 * GIB);
+        research.profile = Profile::Research;
+        assert!(!fits_fresh_budget(&research));
     }
 
     #[test]

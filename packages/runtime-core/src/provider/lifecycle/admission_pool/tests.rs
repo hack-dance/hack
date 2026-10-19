@@ -1108,3 +1108,113 @@ fn a_reserve_selection_only_restarts_and_never_creates() {
     restart_only(&running.candidate, &fresh, &owner, &lease).unwrap();
     fresh_create(&fresh).unwrap();
 }
+
+/// Qualifying samples on `owned`'s basis, each observing `free` bytes of free disk.
+fn window(owned: admission::OwnedPool, free: &[u64]) -> Vec<admission::Admission> {
+    free.iter()
+        .map(|&bytes| {
+            let mut observed = sample(owned, true, Some(7));
+            observed.disk_free_bytes = Some(bytes);
+            observed
+        })
+        .collect()
+}
+
+#[test]
+fn a_start_with_fresh_headroom_drops_the_reserve_and_runs_no_release_check() {
+    let _serial = serial();
+    let stopped = admission::OwnedPool::Stopped;
+    let fresh_floor = 58 * GIB;
+    let pool = stopped_pool();
+    let lease = lease(&pool);
+    // A provider holds the VM lock, so any release check would refuse.
+    let held = exclusive_lock(&pool.data().join("vm.lock"));
+
+    // Every sample fits the fresh budget: the start continues exactly as one without a
+    // selection, so the held lock is never examined.
+    let mut choice = select(&pool.candidate, Profile::Development).unwrap();
+    assert!(choice.selected().is_some_and(Selection::is_stopped));
+    let mut samples = window(stopped, &[fresh_floor, 80 * GIB, fresh_floor, 70 * GIB]);
+    settle(&pool.candidate, &mut choice, &lease, &mut samples).unwrap();
+    assert!(choice.selected().is_none());
+    assert_eq!(choice.refusal(), None);
+    for observed in &samples {
+        assert_eq!(observed.minimum_disk_free_bytes, fresh_floor);
+        assert_eq!(
+            observed.disk_budget_basis,
+            "new-pool-storage-overlay-host-reserve"
+        );
+        assert!(observed.admitted);
+        assert_eq!(observed.retained_reserve_refusal, None);
+    }
+    // From here the start is the unchanged fresh path: no restart-only gate, a fresh
+    // pre-boot sample and a start permit without release checks.
+    let owner = Owner::load(&pool.candidate).unwrap();
+    restart_only(&pool.candidate, &choice, &owner, &lease).unwrap();
+    let mut asked = None;
+    let gate = admit_boot_with(&pool.candidate, &choice, Some(7), |owned| {
+        asked = Some(owned);
+        Ok(sample(owned, true, Some(7)))
+    })
+    .unwrap();
+    assert_eq!(asked, Some(admission::OwnedPool::Fresh));
+    let BootGate::Admitted(boot) = gate else {
+        panic!("fresh pre-boot sample admitted")
+    };
+    boot.release(&pool.candidate, &lease).unwrap();
+
+    // One sample below the fresh budget needs the reserve: its release checks run under the
+    // lease and refuse the start; nothing is rebased or dropped.
+    let mut choice = select(&pool.candidate, Profile::Development).unwrap();
+    let mut samples = window(stopped, &[80 * GIB, fresh_floor - 1, 80 * GIB]);
+    assert_eq!(
+        settle(&pool.candidate, &mut choice, &lease, &mut samples)
+            .err()
+            .unwrap()
+            .code,
+        "retained_reserve_active_owner"
+    );
+    assert!(choice.selected().is_some_and(Selection::is_stopped));
+    assert!(
+        samples.iter().all(
+            |observed| observed.disk_budget_basis == "verified-stopped-owned-pool-host-reserve"
+        )
+    );
+    drop(held);
+    // Released, the reserve-band start keeps its selection on the reserve basis.
+    settle(&pool.candidate, &mut choice, &lease, &mut samples).unwrap();
+    assert!(choice.selected().is_some_and(Selection::is_stopped));
+    assert_eq!(samples[1].minimum_disk_free_bytes, 16 * GIB);
+
+    // A drifted receipt is refused before any basis is settled, even with fresh headroom.
+    let mut choice = select(&pool.candidate, Profile::Development).unwrap();
+    fs::write(root(&pool.candidate).join("owner.pending"), b"{}").unwrap();
+    let mut samples = window(stopped, &[80 * GIB, 80 * GIB, 80 * GIB]);
+    assert_eq!(
+        settle(&pool.candidate, &mut choice, &lease, &mut samples)
+            .err()
+            .unwrap()
+            .code,
+        "retained_reserve_dirty_owner"
+    );
+    assert!(choice.selected().is_some());
+    fs::remove_file(root(&pool.candidate).join("owner.pending")).unwrap();
+    drop(lease);
+
+    // A live selection keeps its own basis whatever the headroom.
+    let running = Pool::new();
+    let lease = state::Lock::acquire(&root(&running.candidate)).unwrap();
+    let mut choice = select(&running.candidate, Profile::Development).unwrap();
+    let mut samples = window(admission::OwnedPool::Running, &[80 * GIB, 80 * GIB]);
+    settle(&running.candidate, &mut choice, &lease, &mut samples).unwrap();
+    assert!(
+        choice
+            .selected()
+            .is_some_and(|selected| !selected.is_stopped())
+    );
+    assert!(
+        samples
+            .iter()
+            .all(|observed| observed.disk_budget_basis == "verified-live-owned-pool-host-reserve")
+    );
+}

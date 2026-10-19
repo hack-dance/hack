@@ -1134,7 +1134,7 @@ fn start_pool(
     // Admission before aliases, provider commands, disks or VM effects. Only
     // independently verified ownership of existing disks (a live pool, or an exactly
     // clean stopped pool this start reuses) avoids charging a second VM's disks.
-    let admission_owner = admission_pool::select(candidate, profile)?;
+    let mut admission_owner = admission_pool::select(candidate, profile)?;
     let admission = admission_pool::probe(candidate, profile, &admission_owner)?;
     if !admission.admitted {
         return Err(CandidateError::new(
@@ -1165,12 +1165,11 @@ fn start_pool(
         &samples,
         || admission_pool::probe(candidate, profile, &admission_owner),
     )?;
-    // Under the lease: the selection is rechecked, including a stopped pool's provider
-    // release (VM lock, disk handles, listeners, provider configuration).
-    if let Some(selected) = admission_owner.selected() {
-        selected.reverify_leased(candidate, &lock)?;
-    }
     samples.extend(fresh_samples);
+    // Under the lease: the selection is rechecked. A stopped pool keeps the reserve only if
+    // a sample needs it, and then its provider release (VM lock, disk handles, listeners,
+    // provider configuration) is proven; otherwise this start uses the fresh budget.
+    admission_pool::settle(candidate, &mut admission_owner, &lock, &mut samples)?;
     #[cfg(target_os = "macos")]
     if let Some(guard) = &retained_guard {
         guard.verify(candidate)?;
@@ -1998,8 +1997,21 @@ impl Drop for VmLock {
     }
 }
 
+/// How long `down`, `recover` and other stop paths wait for `lsof` over the owned disks.
+const STOP_HANDLE_WAIT: Duration = Duration::from_secs(5);
+
 /// Keep this guard through alias restoration and the stopped receipt.
 fn lock_absent_disks(candidate: &Candidate, owner: &Owner) -> Result<VmLock, CandidateError> {
+    lock_absent_disks_within(candidate, owner, STOP_HANDLE_WAIT)
+}
+
+/// [`lock_absent_disks`] with a caller-chosen bound on the `lsof` disk-handle scan. A scan
+/// that does not finish within `handle_wait` fails as `provider_timeout_uncertain`.
+fn lock_absent_disks_within(
+    candidate: &Candidate,
+    owner: &Owner,
+    handle_wait: Duration,
+) -> Result<VmLock, CandidateError> {
     let directory = owner.real_data_dir(candidate)?;
     let vm_lock = OpenOptions::new()
         .read(true)
@@ -2026,7 +2038,7 @@ fn lock_absent_disks(candidate: &Candidate, owner: &Owner) -> Result<VmLock, Can
             .args(["-n", "-P", "-t", "--"])
             .arg(directory.join("storage.raw"))
             .arg(directory.join("overlay.raw")),
-        Duration::from_secs(5),
+        handle_wait,
     )?;
     if handles.status.code() != Some(1) || !handles.stdout.is_empty() || !handles.stderr.is_empty()
     {

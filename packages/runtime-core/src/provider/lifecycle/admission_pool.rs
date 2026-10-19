@@ -16,17 +16,30 @@
 //!   handing the VM lock to a provider; they run once the lease is held, before any restart
 //!   effect, and immediately before `machine start`.
 //!
+//! The reserve is used only when a start needs it. Once the lease is held, [`settle`] drops
+//! a stopped selection whose every qualifying sample also fits the unchanged fresh budget:
+//! that start continues exactly as it would without a selection, on the fresh budget and
+//! without release checks. Only a start whose free disk lies between the host reserve and
+//! the fresh budget keeps the selection, and it is refused if a release check fails.
+//!
 //! The boot gate is typed: `machine create` needs a [`FreshCreate`], which no selection can
 //! obtain, and `machine start` needs a [`StartPermit`], which only the pre-boot admission
 //! ([`admit_boot`]) followed by the final leased recheck ([`BootAdmission::release`]) issues.
 use super::{
-    Owner, admission, binary, io, lock_absent_disks, root, sockets_absent, verify_disk_allocation,
-    verify_disks, verify_live,
+    Owner, admission, binary, io, lock_absent_disks_within, root, sockets_absent,
+    verify_disk_allocation, verify_disks, verify_live,
 };
 use crate::provider::{Profile, config_audit, identity, state};
 use crate::{Candidate, CandidateError};
 use serde_json::Value;
 use std::fs;
+use std::time::Duration;
+
+/// How long a release check waits for `lsof` over the owned disks. `lsof` scans every
+/// process, so it is slow on a loaded host (5.4–6.5 s at about 1,850 processes and load
+/// 30–80). The wait is longer than `down`'s because only a start that needs the reserve runs
+/// it, under the startup lease; a scan that still does not finish refuses the reserve.
+const RELEASE_HANDLE_WAIT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Basis {
@@ -235,7 +248,7 @@ fn released(
 ) -> Result<(), StoppedRefusal> {
     let check = |error: CandidateError| StoppedRefusal::from_check(&error);
     lease.verify_path(&root(candidate)).map_err(check)?;
-    lock_absent_disks(candidate, owner).map_err(check)?;
+    lock_absent_disks_within(candidate, owner, RELEASE_HANDLE_WAIT).map_err(check)?;
     sockets_absent(owner).map_err(check)?;
     config_audit::verify(candidate, owner).map_err(check)
 }
@@ -345,6 +358,36 @@ fn probe_with(
             Ok(observed)
         }
     }
+}
+
+/// Once the startup lease is held and before any restart effect, settle the basis this start
+/// uses. `samples` are the qualifying samples, including the lease recheck, in the order they
+/// will be recorded.
+///
+/// A live selection is rechecked. A stopped selection's receipt is rechecked; then, if every
+/// sample also fits the unchanged fresh budget, the selection is dropped and the samples are
+/// recorded on that budget, so the start runs exactly as one without a selection and no
+/// release check runs. Otherwise the reserve is needed, and the release checks must pass
+/// under the lease.
+pub(super) fn settle(
+    candidate: &Candidate,
+    choice: &mut Choice,
+    lease: &state::Lock,
+    samples: &mut [admission::Admission],
+) -> Result<(), CandidateError> {
+    let Some(selected) = choice.selected() else {
+        return Ok(());
+    };
+    if !selected.is_stopped() {
+        return selected.reverify(candidate);
+    }
+    selected.reverify(candidate)?;
+    if !samples.is_empty() && samples.iter().all(admission::fits_fresh_budget) {
+        samples.iter_mut().for_each(admission::rebase_fresh);
+        choice.selection = None;
+        return Ok(());
+    }
+    selected.reverify_leased(candidate, lease)
 }
 
 /// Before a restart effect under the startup lease: a selection continues only as a

@@ -469,6 +469,20 @@ native process/disk identity, guest protocol, and lifecycle decisions. Guest req
 connection to the existing socket; they cannot silently start or recover a VM. Failed operations
 retain their phase and receipts. Recovery preserves disks and labels an unclean exit explicitly.
 
+A clean stop signals the provider only after the guest agent's `shutdown` reply carries explicit
+storage flush results (storage flush protocol 1):
+`{"status":"ok","data":{"shutdown":true,"storage_flush":{"version":1,"syncfs":"ok","remount_read_only":"ok"}}}`.
+Each result is exactly `"ok"` or `"failed"`. A bare `shutdown: true` is not proof: the pinned
+SmolVM 1.14.3 agent (agent protocol 1) syncs, only warns when the read-only remount fails, and still
+acknowledges, and host `fsync` of the raw disks cannot prove guest writeback. Any other reply refuses
+with `stop_uncertain` and a closed `cause_code` (`guest_shutdown_unacknowledged`,
+`guest_flush_unreported`, `guest_flush_version_unsupported`, `guest_syncfs_unreported`,
+`guest_syncfs_failed`, `guest_remount_unreported` or `guest_remount_failed`) before any provider
+signal, so the pool keeps its `stopping` phase, recorded disks and process authority and writes no
+clean-stop receipt. Older guests, including the current pin, report no flush block and are never
+trusted: their stop is `guest_flush_unreported`. Once that provider has exited, `runtime recover`
+records `recovered-unclean`; a clean `stopped` receipt needs a pinned guest that reports protocol 1.
+
 SmolVM seeds a machine's disks during its first start (`machine create` makes none) from expanded
 `*-template.ext4` files that it creates from the verified compressed templates and then reuses.
 Until a pool adopts its disk identities, those expanded files are verified against content

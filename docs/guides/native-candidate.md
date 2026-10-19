@@ -178,6 +178,10 @@ complete bundle to change the candidate.
 2. Retain application data with ordinary `down` for each owned graph, confirm its
    foreground owner and host processes have retired, and stop the owned candidate
    runtime. Keep existing bundles in place while any of their child processes live.
+   A runtime stop is clean only when the guest reports explicit storage syncfs and
+   read-only remount results. A `stop_uncertain` refusal (for example
+   `guest_flush_unreported` from a guest that predates that report) keeps the pool's
+   disks and phase; do not treat it as a clean stop or delete its data.
 3. Select the new bundle's `hack-v5` by its full path with the same canonical
    mode-`0700` `HACK_NATIVE_HOME`. Check its `info` identity and update any explicitly
    selected guest-relay artifact paths to the verified complete bundle. Normal

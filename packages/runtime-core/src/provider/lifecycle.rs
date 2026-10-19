@@ -9,6 +9,7 @@ mod pressure_tests;
 mod private_child;
 mod relay_process;
 mod short_home;
+mod shutdown_proof;
 use super::{
     admission, agent, artifact, identity, process,
     state::{self, Owner, io},
@@ -1871,17 +1872,10 @@ sync"#,
         )?;
     }
     phase(candidate, &mut owner, "stopping")?;
-    let response = agent::request(
-        &socket(candidate, &owner, "agent.sock")?,
-        json!({"method":"shutdown"}),
-        Duration::from_secs(15),
-    )?;
-    if response["status"] != "ok" || response["data"]["shutdown"] != true {
-        return Err(CandidateError::new(
-            "stop_uncertain",
-            "Guest did not acknowledge flush/unmount.",
-        ));
-    }
+    // Only an explicit guest syncfs and read-only remount result authorizes signalling the
+    // provider. Any refusal returns before the signal and keeps the `stopping` phase, disk
+    // identities and process authority for a later stop or unclean recovery.
+    shutdown_proof::request(&socket(candidate, &owner, "agent.sock")?)?;
     verify_live(candidate, &owner)?;
     let process = owner.process.as_ref().expect("live identity verified");
     // Revalidate immediately before signalling. macOS has no Linux pidfd equivalent;

@@ -24,8 +24,10 @@ import { withProjectsRegistryLock } from "./projects-registry-lock.ts";
  * - Ownership is `owned` (Hack started it and holds an exact process claim),
  *   `adopted` (an identity-verified helper someone else started) or `disabled`
  *   (no lock, no claim, no child). Phases are `starting`, `ready` and `failed`.
- * - Starters for one helper are serialized by an exclusive lock in the
- *   caller's private state directory; only one of them may spawn.
+ * - Starters for one helper are serialized by an exclusive lock next to its
+ *   claim; only one of them may spawn. Every client of one helper port must
+ *   therefore use the same `stateDir` and `name` (see
+ *   {@link SharedHostHelperSpec.stateDir}).
  * - A listener is only ever adopted after its identity endpoint names the
  *   expected helper and upstream. Anything else on the port is refused and
  *   left running: this module never signals a process it cannot prove it owns.
@@ -102,11 +104,25 @@ export type SharedHostIdentity = {
 };
 
 export type SharedHostHelperSpec = {
-  /** Claim and lock name; `[A-Za-z0-9][A-Za-z0-9_.-]{0,127}`. */
+  /**
+   * Claim and lock name; `[A-Za-z0-9][A-Za-z0-9_.-]{0,127}`. Every client of
+   * one helper port must use the same name (see {@link stateDir}).
+   */
   readonly name: string;
   /** Disabled helpers take no lock, write no claim and start no child. */
   readonly enabled: boolean;
-  /** Caller-owned private directory for the claim and lock. */
+  /**
+   * Private (owner-only) directory that holds this helper's claim and lock.
+   *
+   * It is shared, not per caller: every branch or client that uses the helper
+   * on `port` must pass the same `stateDir` and `name`. The claim and lock are
+   * the only coordination between clients, and nothing here can see a claim in
+   * another directory. A client with a different `stateDir` or `name` takes a
+   * different lock and finds no claim. If the running owned helper answers its
+   * identity check, that client adopts it, so the owner's last release stops a
+   * helper this client still holds, and their starts are not serialized.
+   * Derive both values from the helper and its port, never from the branch.
+   */
   readonly stateDir: string;
   /** Loopback port the helper serves. */
   readonly port: number;

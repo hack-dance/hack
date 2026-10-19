@@ -56,6 +56,17 @@ replaced atomically, and parsed strictly (exact keys, version 1):
 {"version":1,"helper":"issuer-bridge","port":4100,"ownership":"adopted","holders":["branch-a"]}
 ```
 
+The lock is `<stateDir>/<name>.lock`. Every branch or client that uses one helper
+port must pass the same `stateDir` and `name`: the state directory belongs to the
+helper, not to each caller. The claim and lock are the only coordination between
+clients, and Hack cannot see a claim in another directory. A client with a
+different `stateDir` or `name` takes a different lock and finds no claim. If the
+running owned helper answers its identity check, that client adopts it as if
+someone else had started it. The owner's last release then stops the helper while
+the other client still holds it, and the two clients' starts are not serialized.
+Derive both values from the helper and its port, never from the branch or
+checkout.
+
 - Ownership is the pair `pid` + `birth`. `birth` is the process start time from
   `ps lstart`, always read with `TZ=UTC0` and `LC_ALL=C`. `ps` prints `lstart` in
   local time, so without a fixed zone two clients with different `TZ` values, or a

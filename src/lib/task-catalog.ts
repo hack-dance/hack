@@ -13,6 +13,7 @@ import { YAML } from "bun";
 import { PROJECT_COMPOSE_FILENAME } from "../constants.ts";
 import { HACK_ERROR_CODES, type HackErrorCode } from "./cli-result.ts";
 import { isRecord } from "./guards.ts";
+import { exec } from "./shell.ts";
 import {
   inspectTarget,
   parseTargetInspectEnvelope,
@@ -51,8 +52,10 @@ import {
  *
  * Invariants:
  * - Reading or registering a recipe runs nothing. The only child processes
- *   are the target inspector's read-only Git queries. There is no execution
- *   path and no shell endpoint: results say `execution: "unavailable"`.
+ *   are read-only Git queries: the target inspector's, and one
+ *   `git ls-files` per pinned recipe to prove its pins are tracked files.
+ *   There is no execution path and no shell endpoint: results say
+ *   `execution: "unavailable"`.
  * - Results carry `authority: "none"`. Repository text (this file) and log
  *   text never grant execution authority; `reviewed` means the recipe's pins
  *   still match what a reviewer approved, not that anything may run.
@@ -193,7 +196,7 @@ export const TASK_RECIPE_REFUSALS = Object.freeze({
     code: "E_CONFIG_INVALID",
     retry: "fix_catalog",
     message:
-      "A pinned task input is not a regular file inside the checkout, or exceeds the input size bound.",
+      "A pinned task input is not a Git-tracked regular file inside the checkout, or exceeds the input size bound.",
   },
   input_missing: {
     code: "E_CONFIG_INVALID",
@@ -711,13 +714,34 @@ async function checkPins(input: {
   readonly definition: unknown;
   readonly root: string;
 }): Promise<TaskRecipeRefusalDetail | null> {
+  const files: PinnedFile[] = [];
+  for (const pin of input.recipe.provenance.inputs) {
+    const file = await resolvePinnedFile({ root: input.root, path: pin.path });
+    if (file === "invalid") {
+      return recipeRefusal("input_path_invalid");
+    }
+    if (file === "missing") {
+      return recipeRefusal("input_missing");
+    }
+    files.push(file);
+  }
+  // Checked before any pinned byte is read: an untracked file (a gitignored
+  // secrets file, a local credential) is never hashed.
+  if (
+    !(await allTrackedByGit({
+      root: input.root,
+      paths: files.map((file) => file.relative),
+    }))
+  ) {
+    return recipeRefusal("input_path_invalid");
+  }
   const observedInputs: { index: number; observed_sha256: string }[] = [];
   for (const [index, pin] of input.recipe.provenance.inputs.entries()) {
-    const observed = await readPinnedDigest({
-      root: input.root,
-      path: pin.path,
-      pointer: pin.pointer,
-    });
+    const file = files[index];
+    const observed =
+      file === undefined
+        ? "invalid"
+        : await readPinnedDigest({ file, pointer: pin.pointer });
     if (observed === "invalid") {
       return recipeRefusal("input_path_invalid");
     }
@@ -781,19 +805,26 @@ async function readServiceDefinitions(
   return out;
 }
 
+/** A pinned input that passed the path checks. */
+type PinnedFile = {
+  /** Absolute path as the pin names it. */
+  readonly absolute: string;
+  /** Checkout-relative POSIX path with directory symlinks resolved. */
+  readonly relative: string;
+};
+
 /**
- * Digest of one pinned input: the whole file's bytes, or the canonical JSON
- * of the value an RFC 6901 pointer selects. The file must be a regular file
- * (not a symlink), and its path with every directory symlink resolved must
- * itself be a safe input path: inside the checkout (`root` is already
- * real), and not an alias for `.git`, Hack's machine-local state or a secret
- * file reached through a symlinked directory.
+ * Resolve one pin without reading its content. The file must be a regular
+ * file (not a symlink) within the input size bound, and its path with every
+ * directory symlink resolved must itself be a safe input path: inside the
+ * checkout (`root` is already real), and not an alias for `.git`, Hack's
+ * machine-local state or a secret file reached through a symlinked
+ * directory.
  */
-async function readPinnedDigest(input: {
+async function resolvePinnedFile(input: {
   readonly root: string;
   readonly path: string;
-  readonly pointer: string | null;
-}): Promise<string | "invalid" | "missing"> {
+}): Promise<PinnedFile | "invalid" | "missing"> {
   const path = resolve(input.root, input.path);
   let parent: string;
   try {
@@ -805,7 +836,8 @@ async function readPinnedDigest(input: {
     throw error;
   }
   const resolved = relative(input.root, join(parent, basename(path)));
-  if (isAbsolute(resolved) || !isSafeInputPath(resolved.split(sep).join("/"))) {
+  const posix = resolved.split(sep).join("/");
+  if (isAbsolute(resolved) || !isSafeInputPath(posix)) {
     return "invalid";
   }
   let info: Awaited<ReturnType<typeof lstat>>;
@@ -820,7 +852,73 @@ async function readPinnedDigest(input: {
   if (!info.isFile() || info.size > INPUT_MAX_BYTES) {
     return "invalid";
   }
-  const bytes = await readFile(path);
+  return { absolute: path, relative: posix };
+}
+
+/**
+ * True when every path (checkout-relative, POSIX, case as given) is tracked
+ * in the Git index of the checkout at `root`. A checkout without Git, a
+ * failed query or any untracked path gives false, so the caller refuses.
+ *
+ * Why: a stale refusal reports each pin's observed digest, and the lexical
+ * path rules cannot name every local secret file (`.npmrc`, `.netrc`,
+ * `secrets.json`, ...). A tracked file's content is already shared with
+ * everyone who has the repository. One read-only `git ls-files` with literal
+ * pathspecs runs per recipe; fsmonitor is disabled so no repository-
+ * configured hook can run.
+ */
+async function allTrackedByGit(input: {
+  readonly root: string;
+  readonly paths: readonly string[];
+}): Promise<boolean> {
+  if (input.paths.length === 0) {
+    return true;
+  }
+  let result: Awaited<ReturnType<typeof exec>>;
+  try {
+    result = await exec(
+      [
+        "git",
+        "--literal-pathspecs",
+        "-C",
+        input.root,
+        "-c",
+        "core.fsmonitor=false",
+        "ls-files",
+        "-z",
+        "--cached",
+        "--",
+        ...input.paths,
+      ],
+      { stdin: "ignore" }
+    );
+  } catch {
+    return false;
+  }
+  if (result.exitCode !== 0) {
+    return false;
+  }
+  const tracked = new Set(result.stdout.split("\0"));
+  return input.paths.every((path) => tracked.has(path));
+}
+
+/**
+ * Digest of one resolved pin: the whole file's bytes, or the canonical JSON
+ * of the value an RFC 6901 pointer selects.
+ */
+async function readPinnedDigest(input: {
+  readonly file: PinnedFile;
+  readonly pointer: string | null;
+}): Promise<string | "invalid" | "missing"> {
+  let bytes: Uint8Array;
+  try {
+    bytes = await readFile(input.file.absolute);
+  } catch (error: unknown) {
+    if (isMissing(error)) {
+      return "missing";
+    }
+    throw error;
+  }
   if (bytes.byteLength > INPUT_MAX_BYTES) {
     return "invalid";
   }

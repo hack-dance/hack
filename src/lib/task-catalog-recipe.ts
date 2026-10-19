@@ -1,3 +1,7 @@
+import {
+  HACK_PROJECT_DIR_LEGACY,
+  HACK_PROJECT_DIR_PRIMARY,
+} from "../constants.ts";
 import { isRecord } from "./guards.ts";
 
 /**
@@ -250,17 +254,23 @@ export function claimedProvenanceSource(value: unknown): string | null {
 }
 
 /**
- * How one program can evaluate text as code. The detector is deliberately
- * fail-closed: it cannot know every program's option grammar, so an inline
- * or stdin flag anywhere after the program counts, even one that would be an
- * option value or a script argument. A recipe that trips it must run a
- * reviewed script file without such arguments instead.
+ * How one program can evaluate text as code. The detector is a denylist of
+ * known programs: a program missing from it is not inspected. For a known
+ * program it is fail-closed: it cannot know every program's option grammar,
+ * so an inline or stdin flag anywhere after the program counts, even one
+ * that would be an option value or a script argument. A recipe that trips it
+ * must run a reviewed script file without such arguments instead.
  */
 type Evaluator = {
   /** Options whose argument (or the rest of argv) is inline code. */
   readonly inline: readonly string[];
   /** Options that read code from stdin or start an interactive session. */
   readonly stdin: readonly string[];
+  /**
+   * Words that make the program run a string as a command wherever they
+   * appear after it (`git submodule foreach 'cmd'`). Matched lowercased.
+   */
+  readonly words: readonly string[];
   /**
    * Options that consume the next argument, so that argument is not the
    * script operand. Matched case-sensitively; used only to find the operand.
@@ -278,6 +288,7 @@ function evaluator(spec: Partial<Evaluator>): Evaluator {
   return {
     inline: [],
     stdin: [],
+    words: [],
     valueOptions: [],
     subcommands: [],
     needsOperand: false,
@@ -338,9 +349,34 @@ const EVALUATORS: Readonly<Record<string, Evaluator>> = {
   bun: evaluator({
     inline: JS_INLINE,
     valueOptions: ["-r", "--preload", "--cwd", "--env-file", "--config"],
-    subcommands: ["repl"],
+    // `bun exec` runs a string with Bun Shell.
+    subcommands: ["repl", "exec"],
   }),
-  deno: evaluator({ subcommands: ["eval", "repl"], needsOperand: true }),
+  // `deno run -` reads the program from stdin.
+  deno: evaluator({
+    stdin: ["-"],
+    subcommands: ["eval", "repl"],
+    needsOperand: true,
+  }),
+  tsx: evaluator({
+    inline: JS_INLINE,
+    stdin: ["-i", "--interactive"],
+    valueOptions: ["--tsconfig", "--import", "--require", "-r", "--env-file"],
+    needsOperand: true,
+  }),
+  "ts-node": evaluator({
+    inline: JS_INLINE,
+    stdin: ["-i", "--interactive"],
+    valueOptions: ["-r", "--require", "-P", "--project", "-O"],
+    needsOperand: true,
+  }),
+  // Package runners whose `-c` runs a string in a shell; `yarn exec` (Berry)
+  // runs a string in Yarn's shell.
+  npx: evaluator({ inline: ["-c", "--call"] }),
+  npm: evaluator({ inline: ["-c", "--call"] }),
+  pnpm: evaluator({ inline: ["-c", "--shell-mode"] }),
+  yarn: evaluator({ subcommands: ["exec"] }),
+  nodemon: evaluator({ inline: ["--exec", "-x"] }),
   python: evaluator({
     inline: ["-c"],
     stdin: ["-i"],
@@ -386,24 +422,65 @@ const EVALUATORS: Readonly<Record<string, Evaluator>> = {
   pwsh: evaluator({ inline: PWSH_INLINE, needsOperand: true }),
   powershell: evaluator({ inline: PWSH_INLINE, needsOperand: true }),
   cmd: evaluator({ inline: ["/c", "/k"], needsOperand: true }),
+  elixir: evaluator({ inline: ["-e", "--eval", "--rpc-eval"] }),
+  mix: evaluator({ inline: ["-e", "--eval"] }),
+  erl: evaluator({ inline: ["-eval"] }),
+  // Privilege wrappers: the named command is checked at its own position,
+  // but `-s`/`-i` start a shell (`sudo -s cmd` runs `$SHELL -c cmd`).
+  sudo: evaluator({ stdin: ["-s", "-i", "--shell", "--login"] }),
+  doas: evaluator({ stdin: ["-s"] }),
+  // Config values and subcommands that run a string in a shell:
+  // `git -c alias.x='!cmd' x`, `rebase --exec`, `difftool --extcmd`,
+  // `submodule foreach`.
+  git: evaluator({
+    inline: ["-c", "--config-env", "--exec", "-x", "--extcmd"],
+    words: ["foreach"],
+  }),
+  nix: evaluator({
+    inline: ["--expr"],
+    subcommands: ["repl", "eval", "develop", "shell"],
+  }),
+  // GNU make `--eval` (`-E`) adds makefile text; `-f -` reads it from stdin.
+  make: evaluator({ inline: ["--eval", "-E"], stdin: ["-"] }),
+  entr: evaluator({ inline: ["-s"] }),
   flock: evaluator({ inline: ["-c", "--command"] }),
   script: evaluator({ inline: ["-c", "--command"] }),
+  // These run their operands through a shell. Refused only when followed by
+  // an argument, so the bare word (a `make` target, a script argument)
+  // still passes.
   watch: evaluator({ evaluatesOperands: true }),
+  parallel: evaluator({ evaluatesOperands: true }),
+  sg: evaluator({ evaluatesOperands: true }),
 };
 
 /**
  * Programs refused wherever they appear: `eval`; `env`, which can rewrite
  * the scoped environment, split a string into a command (`-S`) or print
- * every value; `xargs`, which builds a command from stdin; `su` and `ssh`,
- * which hand a string to another shell; and the awk and sed families, whose
- * first operand is program text (`awk 'BEGIN{system(…)}'`, GNU sed's `e`).
+ * every value; `xargs`, which builds a command from stdin; `su`, `runuser`,
+ * `ssh` and `nix-shell`, which hand a string to another shell or start one;
+ * `concurrently`, `watchexec` and `tmux`, which run strings in a shell;
+ * `iex` and the vi and Emacs editors, which are interactive and run
+ * commands (`vim -c ':!id'`, `emacs --eval`); and the awk and sed families,
+ * whose first operand is program text (`awk 'BEGIN{system(…)}'`, GNU sed's
+ * `e`).
  */
 const ALWAYS_EVALUATES: ReadonlySet<string> = new Set([
   "eval",
   "env",
   "xargs",
   "su",
+  "runuser",
   "ssh",
+  "nix-shell",
+  "concurrently",
+  "watchexec",
+  "tmux",
+  "iex",
+  "vi",
+  "vim",
+  "nvim",
+  "gvim",
+  "emacs",
   "awk",
   "gawk",
   "mawk",
@@ -508,7 +585,12 @@ function evaluatesCode(argv: readonly string[], index: number): boolean {
     return rest.length > 0;
   }
   const flags = [...spec.inline, ...spec.stdin];
-  if (rest.some((arg) => matchesFlag({ arg, flags }))) {
+  if (
+    rest.some(
+      (arg) =>
+        matchesFlag({ arg, flags }) || spec.words.includes(arg.toLowerCase())
+    )
+  ) {
     return true;
   }
   const operand = firstOperand({ rest, valueOptions: spec.valueOptions });
@@ -522,10 +604,12 @@ function evaluatesCode(argv: readonly string[], index: number): boolean {
  * True when argv could evaluate a string as code or depend on a shell
  * parser: a shell or interpreter given an inline-code or stdin flag
  * (anywhere after it, even after an option value or a script path), given
- * `-` or no script operand, or a REPL/eval subcommand; `eval`, `env`,
- * `xargs`, `su`, `ssh`, awk or sed anywhere; or bare shell syntax copied
- * from a log line. Recipes must run a reviewed script file instead; there
- * is no shell endpoint.
+ * `-` or no script operand, or a REPL/eval subcommand; a package runner,
+ * privilege wrapper or tool given its string-to-shell option or word;
+ * `eval`, `env`, `xargs`, `su`, `ssh`, awk, sed or another always-refused
+ * program anywhere; or bare shell syntax copied from a log line. Recipes
+ * must run a reviewed script file instead; there is no shell endpoint.
+ * Programs missing from the tables are not inspected (a denylist).
  */
 export function isInlineCommandArgv(argv: readonly string[]): boolean {
   return argv.some(
@@ -640,7 +724,16 @@ function parseEnvScope(value: unknown): TaskRecipe["env"] | null {
 }
 
 /**
- * Entries of a `.hack` directory that are machine-local: generated state,
+ * Hack project directory names: `.hack`, and the legacy `.dev` that Hack
+ * still resolves (a catalog may live in `.dev/tasks.json`). Lowercase.
+ */
+const PROJECT_DIR_NAMES: ReadonlySet<string> = new Set([
+  HACK_PROJECT_DIR_PRIMARY,
+  HACK_PROJECT_DIR_LEGACY,
+]);
+
+/**
+ * Entries of a project directory that are machine-local: generated state,
  * the materialized env and its state, local overlays and legacy caches
  * (the managed `.hack/.gitignore` block). Compared lowercased.
  */
@@ -667,9 +760,11 @@ const SECRET_BASENAME =
 /**
  * A checkout-relative POSIX path to a reviewed repository file: no absolute
  * path, backslash, empty, `.` or `..` segment; nothing inside any `.git`;
- * nothing in a `.hack` directory's machine-local entries; and no secret or
- * key file. Pin digests are reported back on a stale refusal, so a pin must
- * never select a value-bearing machine-local file. Segments are compared
+ * nothing in a project directory's (`.hack` or legacy `.dev`) machine-local
+ * entries; and no secret or key file. Pin digests are reported back on a
+ * stale refusal, so a pin must never select a value-bearing machine-local
+ * file. This is a lexical denylist; the catalog also requires every pin to
+ * be a Git-tracked file (see `task-catalog.ts`). Segments are compared
  * lowercased and NFC-normalized, because the default macOS filesystem is
  * case- and normalization-insensitive (`.GIT/config` is `.git/config`).
  */
@@ -694,7 +789,7 @@ export function isSafeInputPath(path: string): boolean {
   const inHackDirLocalState = folded.some(
     (segment, index) =>
       index > 0 &&
-      folded[index - 1] === ".hack" &&
+      PROJECT_DIR_NAMES.has(folded[index - 1] ?? "") &&
       (HACK_DIR_LOCAL_ENTRIES.has(segment) ||
         HACK_ENV_LOCAL_OVERLAY.test(segment))
   );

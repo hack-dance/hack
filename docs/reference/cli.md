@@ -24,6 +24,7 @@ hack project <subcommand> [options]
 | --- | --- |
 | `hack project owner` | Inspect project ownership |
 | `hack project target` | Inspect the exact project, checkout, instance and service a command would target (read-only, provisional) |
+| `hack project task` | Discover reviewed task recipes without running them (read-only, provisional) |
 
 ### Options
 
@@ -78,6 +79,31 @@ hack project target [options]
 | `--env <name|base|default>` | Select an env overlay by name; omit for the configured default overlay, or use 'base' or 'default' for base layers only |
 | `--expect-generation <id>` | Refuse unless the project's config generation still equals this id |
 | `--json` | Output JSON (machine-readable) |
+| `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
+| `--help, -h` | Show help |
+| `--version, -v` | Show version |
+
+## `hack project task`
+
+Discover reviewed task recipes without running them (read-only, provisional)
+
+### Usage
+
+```bash
+hack project task <subcommand> [options]
+```
+
+### Subcommands
+
+| Command | Summary |
+| --- | --- |
+| `hack project task list` | List reviewed task recipes and refusals for the target (read-only, provisional; runs nothing) |
+| `hack project task inspect <task>` | Show one reviewed task recipe: argv, service, env scope, effects and pins (read-only, provisional; runs nothing) |
+
+### Options
+
+| Option | Description |
+| --- | --- |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |
 | `--version, -v` | Show version |

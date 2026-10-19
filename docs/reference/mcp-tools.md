@@ -39,6 +39,8 @@ Every tool sets `openWorldHint: false`. Mutating tools set `idempotentHint: fals
 | `hack.project.env.keys` | read-only | `hack env list --json` |
 | `hack.project.instances` | read-only | `hack projects --json --project=<name>` |
 | `hack.project.target` | read-only | `hack project target --json` (provisional) |
+| `hack.project.task.list` | read-only | `hack project task list --json` (provisional; runs nothing) |
+| `hack.project.task.inspect` | read-only | `hack project task inspect --json -- <task>` (provisional; runs nothing) |
 
 ## Project selection
 
@@ -213,6 +215,26 @@ provisional; see the [AX target and result contract](./ax-target-result-contract
   `null` when the output does not match it. `stdout` is always `""`, because
   `data` carries the same envelope. `stderr` is returned as captured.
 - The command never probes the engine, writes the registry or changes Git.
+
+## `hack.project.task.list` and `hack.project.task.inspect`
+
+List or inspect the reviewed task recipes in the target project's
+`.hack/tasks.json`: `hack project task list --json` and `hack project task
+inspect --json -- <task>`, with the same `projectName`, `path`, `branch`,
+`env` and `expectGeneration` inputs as `hack.project.target` (no `service`;
+each recipe names its own). The tools, inputs and schemas are provisional;
+see the [AX task catalog contract](./ax-task-catalog.md).
+
+- `task` (inspect only) must match the task id grammar; a malformed id is
+  refused before spawning, as `invalid_arguments` with `spawned: false`.
+- Selection is passed through unresolved, so every refusal comes from the
+  CLI and matches it exactly.
+- `data` is the CLI's JSON envelope, re-validated against the contract, or
+  `null` when the output does not match it. A refused recipe never carries
+  its argv or text, and a result never carries a recipe the catalog's checks
+  would refuse. `stdout` is always `""`.
+- Nothing is executed. The results say `authority: "none"` and
+  `execution: "unavailable"`; there is no task execution tool.
 
 ## Audit log
 

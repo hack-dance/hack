@@ -1,4 +1,11 @@
-import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
+import {
+  afterEach,
+  beforeEach,
+  expect,
+  setDefaultTimeout,
+  spyOn,
+  test,
+} from "bun:test";
 import { chmod, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -26,6 +33,15 @@ const VOLUME = "hack-21-hack-fixture-instance-4-data";
 const CREATED = "2026-10-08T00:00:00.123456789Z";
 const REBORN = "2026-10-08T00:00:01.123456789Z";
 const CANARY = "synthetic-private-env-image-canary";
+/**
+ * Every fake Docker query here is a cold Bun process, and one scenario can launch
+ * dozens. Bun's 5 s default then budgets host process start-up rather than the
+ * product, and an expired test keeps running against the next test's shared
+ * root. The probe keeps its own default (or test-chosen) timeout in every query.
+ */
+const FAKE_DOCKER_TEST_TIMEOUT_MS = 60_000;
+setDefaultTimeout(FAKE_DOCKER_TEST_TIMEOUT_MS);
+
 const options: NativeComposeOwnershipOptions = {
   composeProject: PROJECT,
   runtimeIdentity: PROJECT,
@@ -50,7 +66,7 @@ beforeEach(async () => {
   await Bun.write(
     join(root, "docker"),
     `#!${process.execPath}
-import {appendFileSync, existsSync, readFileSync, writeFileSync} from "node:fs";
+import {appendFileSync, existsSync, readFileSync, renameSync, writeFileSync} from "node:fs";
 const root = ${JSON.stringify(root)};
 const args = process.argv.slice(2);
 appendFileSync(root + "/commands", JSON.stringify(args) + "\\n");
@@ -59,10 +75,12 @@ const [kind, action] = args;
 if (!["container","volume","network"].includes(kind) || !["ls","inspect"].includes(action) || !args.includes("--format")) {
  writeFileSync(root + "/mutated", "unexpected engine mutation"); process.exit(99);
 }
-if (fixture.mode === "hang") { writeFileSync(root + "/started", String(process.pid)); await Bun.sleep(60_000); }
+// Handshake markers appear atomically: a reader never observes a partial pid.
+const signal = (name, pid) => { writeFileSync(root + "/" + name + ".tmp", String(pid)); renameSync(root + "/" + name + ".tmp", root + "/" + name); };
+if (fixture.mode === "hang") { signal("started", process.pid); await Bun.sleep(60_000); }
 if (fixture.mode === "descendant") {
  const child = Bun.spawn([process.execPath, "-e", 'await Bun.sleep(60_000)'], {stdout: "inherit", stderr: "inherit"});
- writeFileSync(root + "/descendant", String(child.pid)); process.exit(0);
+ signal("descendant", child.pid); process.exit(0);
 }
 if (fixture.mode === "fail") { console.error(${JSON.stringify(CANARY)}); process.exit(23); }
 if (fixture.mode === "stderr-overflow") { await Bun.write(Bun.stderr, "x".repeat(17 * 1024)); process.exit(0); }
@@ -1057,21 +1075,66 @@ test("inspect argv batching does not cap the number of owned resources", async (
     ).toBeLessThanOrEqual(16 * 1024);
   }
 });
+/**
+ * Probe timeouts tried in order for one hanging fake Docker. The kill proof needs
+ * the fake Docker to publish its pid before the probe fires; on a loaded host a
+ * cold Bun start can exceed the fast rung. An attempt without that handshake is
+ * inconclusive (its process died before it could be observed) and escalates; it
+ * never counts as a pass. Every attempt still has to refuse with the timeout code.
+ * Both modes at every rung plus reaping stay within FAKE_DOCKER_TEST_TIMEOUT_MS.
+ */
+const HANG_PROBE_TIMEOUTS_MS = [500, 2000, 8000] as const;
+/** Bound for the kernel to reap a SIGKILLed orphan after the probe refuses. */
+const HANG_REAP_DEADLINE_MS = 10_000;
+
+async function hangHandshakePid(marker: string): Promise<number | undefined> {
+  if (!(await Bun.file(marker).exists())) {
+    return;
+  }
+  const pid = Number(await readFile(marker, "utf8"));
+  if (!(Number.isSafeInteger(pid) && pid > 1)) {
+    throw new Error(`Malformed ${marker} handshake`);
+  }
+  return pid;
+}
+
+async function exitedWithin(pid: number, deadlineMs: number): Promise<boolean> {
+  const deadline = Date.now() + deadlineMs;
+  while (true) {
+    try {
+      process.kill(pid, 0);
+    } catch {
+      return true;
+    }
+    if (Date.now() >= deadline) {
+      return false;
+    }
+    await Bun.sleep(10);
+  }
+}
+
 test("a real hanging process times out and its inherited-pipe descendant is killed", async () => {
   for (const mode of ["hang", "descendant"]) {
-    await prepare({ mode });
-    await expectRefusal(
-      { ...options, timeoutMs: 500 },
-      "E_NATIVE_COMPOSE_PROBE_TIMEOUT"
-    );
-    const pid = Number(
-      await readFile(
-        join(root, mode === "hang" ? "started" : "descendant"),
-        "utf8"
-      )
-    );
-    await Bun.sleep(50);
-    expect(() => process.kill(pid, 0)).toThrow();
+    const marker = join(root, mode === "hang" ? "started" : "descendant");
+    let pid: number | undefined;
+    for (const timeoutMs of HANG_PROBE_TIMEOUTS_MS) {
+      await rm(marker, { force: true });
+      await prepare({ mode });
+      await expectRefusal(
+        { ...options, timeoutMs },
+        "E_NATIVE_COMPOSE_PROBE_TIMEOUT"
+      );
+      pid = await hangHandshakePid(marker);
+      if (pid !== undefined) {
+        break;
+      }
+    }
+    if (pid === undefined) {
+      throw new Error(
+        `Fake Docker never published its ${mode} pid before the longest probe timeout`
+      );
+    }
+    expect(await exitedWithin(pid, HANG_REAP_DEADLINE_MS)).toBe(true);
   }
 });
 test("abort before spawn and during a real read-only query refuses and reaps the child", async () => {

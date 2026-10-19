@@ -24,13 +24,17 @@ import { preflightNativeRestart } from "../src/backends/native-project-restart-p
 import { selectNativeRetainedImages } from "../src/backends/native-project-retained-images.ts";
 import type { NativeProjectRun } from "../src/backends/native-project-run.ts";
 import {
+  NATIVE_CONFIGURATION_REFUSAL,
+  NATIVE_SHARED_SOURCE_REFUSAL,
   nativeReadinessArgs,
   parseNativeHttpsSelection,
+  prepareNativeProjectServices,
   reviewedNativeHttpsRoutes,
   startNativeProject,
   verifyHttpsRoutes,
 } from "../src/backends/native-project-start.ts";
 import { NativeRuntimeRequestError } from "../src/backends/native-runtime-client.ts";
+import { ClosedCliError, HackCliError } from "../src/lib/cli-result.ts";
 import {
   type ComposeEnvFingerprintRecord,
   evaluateComposeServiceEnvFreshness,
@@ -481,20 +485,52 @@ test("foreground partial shutdown is reported without selecting failed-start rec
   expect(events).not.toContain("remove");
 });
 
+test.each([
+  { build: "." },
+  { ports: ["8080:80"] },
+  { restart: "always" },
+])("an unsupported service setting %j is a coded configuration refusal", (setting) => {
+  const refusal = (() => {
+    try {
+      prepareNativeProjectServices({
+        normalizedComposeJson: JSON.stringify({
+          services: { web: { image: "busybox", ...setting } },
+        }),
+      } as NativeProjectInput);
+    } catch (error: unknown) {
+      return error;
+    }
+  })();
+  expect(refusal).toBeInstanceOf(HackCliError);
+  expect(refusal).toMatchObject({
+    code: "E_NATIVE_PROJECT_UNSUPPORTED",
+    message: NATIVE_CONFIGURATION_REFUSAL,
+  });
+});
+
 test("source opt-in and occupied mapping refuse before lifecycle or runtime effects", async () => {
   const { opts, events } = await fixture();
-  await expect(
-    startNativeProject({ ...opts, sharedSource: false })
-  ).rejects.toThrow("HACK_NATIVE_SHARED_SOURCE");
+  const refusal = await startNativeProject({
+    ...opts,
+    sharedSource: false,
+  }).catch((error: unknown) => error);
+  // A known refusal: stable code, closed message, printed without a stack.
+  expect(refusal).toBeInstanceOf(HackCliError);
+  expect(refusal).toMatchObject({
+    code: "E_PERMISSION",
+    message: NATIVE_SHARED_SOURCE_REFUSAL,
+  });
   opts.dependencies.load = async () => ({
     run: "a".repeat(32),
     owner: "b".repeat(32),
     namespace: "c".repeat(64),
     planId: "d".repeat(64),
   });
-  await expect(startNativeProject(opts)).rejects.toThrow(
-    "cannot change the retained run"
+  const retained = await startNativeProject(opts).catch(
+    (error: unknown) => error
   );
+  expect(retained).toBeInstanceOf(ClosedCliError);
+  expect(String(retained)).toContain("cannot change the retained run");
   expect(events).toEqual([]);
 });
 test("caller cancellation is forwarded and lifecycle cleanup remains owned", async () => {

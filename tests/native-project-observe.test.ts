@@ -416,13 +416,16 @@ test("unsupported native forms and missing restart consent refuse before Docker 
       expect(code).not.toBe(0);
       expect(stdout + stderr).toContain(
         operation === "up"
-          ? "foreground whole-project startup only"
+          ? "E_USAGE: Native `hack up` runs in the foreground only, so --detach is not supported."
           : operation === "restart"
-            ? "Native restart requires HACK_NATIVE_SHARED_SOURCE=1"
+            ? "E_PERMISSION: Native restart requires HACK_NATIVE_SHARED_SOURCE=1"
             : operation === "exec"
               ? "Native project has not been started"
               : "Native run currently requires a started project"
       );
+      // A known refusal is one closed line: no command help and no stack.
+      expect(stdout + stderr).not.toContain("hack <command> [options]");
+      expect(stdout + stderr).not.toMatch(/^\s+at /m);
     } finally {
       clearTimeout(timer);
       child.kill("SIGKILL");

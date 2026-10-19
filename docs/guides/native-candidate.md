@@ -636,9 +636,16 @@ lifecycle hooks, and publishes the run mapping after native readiness. Ctrl-C wa
 for owned cleanup and keeps the stopped run mapping and named volumes after
 confirming cleanup. The VM remains available until explicit runtime shutdown.
 
+Without that grant, `up` and `restart` refuse with `E_PERMISSION` before any stop or
+runtime request; set it and run the command again.
+
 This initial foreground path does not support detached/JSON startup, selected
-services or external networks. Routed services and host dependencies require the
-explicit native selections described below. Existing
+services or external networks. `--detach`, `--json`, `--target` and service names
+each refuse with a one-line `E_USAGE` message that names the option and the supported
+form: run `hack up` in the foreground in its own terminal and use `hack ps` and
+`hack logs` from another. Routed services and host dependencies require the
+explicit native selections described below; any other unsupported configuration
+refuses with `E_NATIVE_PROJECT_UNSUPPORTED` and drops nothing. Existing
 `hack.dependencies.*` cache declarations publish the reviewed source snapshot and
 require successful initializer completion before dependent services start. Cache
 initializers receive immutable source mounts and writable named cache volumes;

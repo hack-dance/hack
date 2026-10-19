@@ -12,6 +12,7 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { nativeAuthoredProjectPs } from "../src/backends/native-authored-project-observe.ts";
 import {
   loadNativeAuthoredProjectRun,
   stopNativeAuthoredProject,
@@ -205,6 +206,12 @@ type FixtureOptions = {
   readonly changeDuringStatus?: boolean;
   readonly changeDuringPlan?: boolean;
   readonly noManaged?: boolean;
+  /**
+   * `runtime status --json` reports a stopped candidate runtime. Otherwise the
+   * status request fails like any unknown action, which the start treats as
+   * inconclusive.
+   */
+  readonly runtimeStopped?: boolean;
   readonly cleanup?:
     | "removed"
     | "live"
@@ -401,6 +408,7 @@ console.log(JSON.stringify(result));
 import {appendFile,readFile,readdir,writeFile} from 'node:fs/promises';
 import {createHash} from 'node:crypto';import {join} from 'node:path';
 const args=process.argv.slice(2);const action=args[4];await appendFile(${JSON.stringify(calls)},JSON.stringify(args)+'\\n');
+if(${options.runtimeStopped === true}&&args[2]==='runtime'&&args[3]==='status'){console.log(JSON.stringify({phase:'stopped',process_alive:false}));process.exit(0)}
 const journal=${JSON.stringify(journal)};
 const root=${JSON.stringify(join(projectDir, ".internal", "native-authored-runs"))};
 if(['plan','serve','frontend-plan','frontend-serve'].includes(action)){
@@ -575,6 +583,41 @@ macTest(
     expect(await artifacts(selected.scope)).toEqual([]);
     expect(await Bun.file(selected.calls).exists()).toBe(false);
     expect(await Bun.file(selected.delivery).exists()).toBe(false);
+  }
+);
+
+macTest(
+  "a stopped runtime refuses before the startup intent, so ps stays not_started",
+  async () => {
+    const selected = await fixture({ runtimeStopped: true });
+    const error = await failure(
+      serveNativeAuthoredProject({
+        ...selected,
+        run,
+        startupTimeoutMs: 10_000,
+      }),
+      "not-started"
+    );
+    expect(error).toHaveProperty("nativeCode", "runtime_not_running");
+    expect(error).toHaveProperty("stage", "reservation");
+    // Planning ran; the read-only status check refused before reservation, so
+    // no graph was served and no environment was delivered.
+    const calls = (await Bun.file(selected.calls).text())
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as string[]);
+    expect(calls.map((args) => args.slice(2, 5).join(" "))).toEqual([
+      "graph native plan",
+      "runtime status --json",
+    ]);
+    expect(await Bun.file(selected.delivery).exists()).toBe(false);
+    expect(await artifacts(selected.scope)).toEqual([]);
+    expect(
+      await nativeAuthoredProjectPs({
+        runtime: selected.runtime,
+        scope: selected.scope,
+      })
+    ).toMatchObject({ status: "not_started", run: null, items: [] });
   }
 );
 

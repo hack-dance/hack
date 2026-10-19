@@ -234,8 +234,10 @@ Run a one-off command in a service container (docker compose run --rm)
 ### Usage
 
 ```bash
-hack run <service> [cmd...] [options]
+hack run [options] <service> [cmd...]
 ```
+
+Everything from `<cmd>` on is passed to the command unchanged, including flags such as `--version` or `--help`. Put Hack options before it; a leading `--` is optional.
 
 ### Arguments
 
@@ -266,8 +268,10 @@ Run a command in an already-running service container (docker compose exec)
 ### Usage
 
 ```bash
-hack exec <service> [cmd...] [options]
+hack exec [options] <service> [cmd...]
 ```
+
+Everything from `<cmd>` on is passed to the command unchanged, including flags such as `--version` or `--help`. Put Hack options before it; a leading `--` is optional.
 
 ### Arguments
 
@@ -815,8 +819,10 @@ Send a command to a running workspace
 ### Usage
 
 ```bash
-hack session exec <workspace> <command> [options]
+hack session exec [options] <workspace> <command>
 ```
+
+Everything from `<command>` on is passed to the command unchanged, including flags such as `--version` or `--help`. Put Hack options before it; a leading `--` is optional.
 
 Queue a command in the workspace without opening a new interactive attach flow. Tmux sends it to the active pane; zellij opens a new pane for the command. This is useful for long-running agents, background checks, or remote follow-up work.
 
@@ -2423,8 +2429,10 @@ Run a host command with project env injected
 ### Usage
 
 ```bash
-hack env exec [command...] [options]
+hack env exec [options] [command...]
 ```
+
+Everything from `<command>` on is passed to the command unchanged, including flags such as `--version` or `--help`. Put Hack options before it; a leading `--` is optional.
 
 Inject the selected Hack env overlay directly into a one-off host command without materializing .hack/.env. To inspect a value, prefer `printenv KEY` or `sh -lc 'printf "%s\n" "$KEY"'`; `echo $KEY` expands in your current shell before Hack injects env.
 
@@ -2585,8 +2593,10 @@ Run a host command with project env injected
 ### Usage
 
 ```bash
-hack host exec [command...] [options]
+hack host exec [options] [command...]
 ```
+
+Everything from `<command>` on is passed to the command unchanged, including flags such as `--version` or `--help`. Put Hack options before it; a leading `--` is optional.
 
 Run a one-off command on the host with the selected Hack env overlay injected. Use --scope when you want service-scoped values without running inside that service container. To inspect a value, prefer `printenv KEY` or `sh -lc 'printf "%s\n" "$KEY"'`; `echo $KEY` expands in your current shell before Hack injects env.
 
@@ -2647,8 +2657,10 @@ Run extension commands
 ### Usage
 
 ```bash
-hack x [args...] [options]
+hack x [options] [args...]
 ```
+
+Everything from `<args>` on is passed to the command unchanged, including flags such as `--version` or `--help`. Put Hack options before it; a leading `--` is optional.
 
 Usage:
   hack x list

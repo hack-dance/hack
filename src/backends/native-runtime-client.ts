@@ -79,7 +79,7 @@ export function resolveNativeRuntimeSelection(
   const binary = env.HACK_NATIVE_BINARY;
   const home = env.HACK_NATIVE_HOME;
   if (!(binary && home && isAbsolute(binary) && isAbsolute(home))) {
-    throw new Error(
+    throw new ClosedCliError(
       "Native runtime requires absolute HACK_NATIVE_BINARY and HACK_NATIVE_HOME paths."
     );
   }

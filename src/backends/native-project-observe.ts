@@ -293,7 +293,7 @@ export function requireComposeOperationAvailable(
   env: Readonly<Record<string, string | undefined>> = process.env
 ): void {
   if (env.HACK_RUNTIME_BACKEND === "native") {
-    throw new Error(
+    throw new ClosedCliError(
       `Native runtime operation '${operation}' is unavailable through this command; refusing Compose fallback.`
     );
   }

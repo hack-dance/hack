@@ -29,6 +29,7 @@ import { resolveNativeAuthoredExecStaleEnvWarning } from "../backends/native-exe
 import { parseNativeHttpsSelection } from "../backends/native-project-start.ts";
 import {
   isNativeRuntimeNotRunning,
+  NATIVE_RUNTIME_NOT_RUNNING,
   resolveNativeRuntimeSelection,
 } from "../backends/native-runtime-client.ts";
 import { CliUsageError } from "../cli/command.ts";
@@ -44,12 +45,24 @@ import {
   type NativeEnvFingerprintSession,
 } from "./native-env-fingerprint-state.ts";
 
-function unsupported(): never {
+function unsupported(hint?: string): never {
   throw new HackCliError({
     code: "E_NATIVE_PROJECT_UNSUPPORTED",
-    message:
-      "Native authored execution requires whole-project foreground up or restart, owner-mediated down, ps, finite single-service logs --no-follow, noninteractive single-service exec or run, or explicit stored-generation down --recover on macOS. This request ran no input or runtime operation.",
+    message: `Native authored execution requires whole-project foreground up or restart, owner-mediated down, ps, finite single-service logs --no-follow, noninteractive single-service exec or run, or explicit stored-generation down --recover on macOS. This request ran no input or runtime operation.${hint ? ` ${hint}` : ""}`,
   });
+}
+
+/** The supported alternative to a detached native foreground start. */
+function foregroundDetachHint(
+  options: NativeComposeCommandOptions
+): string | undefined {
+  if (
+    !(options.detach && ["up", "restart"].includes(options.operation)) ||
+    process.platform !== "darwin"
+  ) {
+    return;
+  }
+  return `Native \`hack ${options.operation}\` runs in the foreground only, so --detach is not supported: run it without --detach in its own terminal and keep it open, use \`hack ps\` and \`hack logs\` from another terminal, and press Ctrl-C to stop it.`;
 }
 
 function assertLogsOptions(options: NativeComposeCommandOptions): void {
@@ -199,7 +212,7 @@ function assertForegroundOptions(options: NativeComposeCommandOptions): void {
         options.overlay !== undefined ||
         options.services !== undefined))
   ) {
-    unsupported();
+    unsupported(foregroundDetachHint(options));
   }
 }
 
@@ -207,6 +220,9 @@ function startupFailure(error: unknown): number {
   if (error instanceof NativeAuthoredProjectStartError) {
     if (error.canceled && error.outcome === "removed") {
       return 130;
+    }
+    if (error.nativeCode === NATIVE_RUNTIME_NOT_RUNNING) {
+      throw stoppedRuntimeStartup(error);
     }
     throw new HackCliError({
       code:
@@ -226,6 +242,36 @@ function startupFailure(error: unknown): number {
   throw new HackCliError({
     code: "E_CONFIG_INVALID",
     message: "Native authored startup selection is invalid; values omitted.",
+  });
+}
+
+/**
+ * A start refused because the candidate runtime is stopped reports that cause
+ * directly, as logs does, with the next action. When nothing was reserved
+ * (`not-started`), `ps` keeps reporting `not_started`. A start that reserved
+ * its intent before the runtime stopped keeps that evidence, so `ps` reports
+ * `pending` until the retained attempt is inspected.
+ */
+function stoppedRuntimeStartup(
+  error: NativeAuthoredProjectStartError
+): HackCliError {
+  const message = {
+    "not-started":
+      "Native runtime is not running; nothing was started. Start the native runtime, then run this command again.",
+    removed:
+      "Native runtime is not running; this start did not stay up and its native cleanup was confirmed. Start the native runtime, then run this command again.",
+    retained:
+      "Native runtime is not running; this start did not reach Ready and its startup evidence is retained, so `hack ps` reports it as pending. Start the native runtime and inspect owned state before retrying.",
+  }[error.outcome];
+  return new HackCliError({
+    code: "E_DOCKER_UNAVAILABLE",
+    message,
+    detail: {
+      outcome: error.outcome,
+      canceled: error.canceled,
+      stage: error.stage,
+      nativeCode: NATIVE_RUNTIME_NOT_RUNNING,
+    },
   });
 }
 
@@ -296,7 +342,7 @@ const STATUS_NOTES: Readonly<
 > = {
   not_started: "Native project has not been started.",
   pending:
-    "Native project startup is pending; no current service status is confirmed.",
+    "Native project startup is pending: a start reserved its intent but has not reached Ready (it is still starting, or it failed and its startup evidence is retained). No current service status is confirmed.",
   runtime_not_running:
     "Native runtime is not running; no services are running.",
 };

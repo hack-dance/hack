@@ -491,6 +491,62 @@ macTest(
   }
 );
 
+macTest.each([
+  {
+    outcome: "not-started" as const,
+    text: "Native runtime is not running; nothing was started. Start the native runtime, then run this command again.",
+  },
+  {
+    outcome: "retained" as const,
+    text: "so `hack ps` reports it as pending",
+  },
+])(
+  "a start refused by a stopped runtime ($outcome) reports the runtime, not incomplete startup",
+  async ({ outcome, text }) => {
+    const selected = await fixture();
+    const value = await tryNativeAuthoredCommand({
+      ...selected,
+      serve: () =>
+        Promise.reject(
+          new NativeAuthoredProjectStartError({
+            outcome,
+            canceled: false,
+            nativeCode: "runtime_not_running",
+            stage: "reservation",
+          })
+        ),
+    }).catch((caught: unknown) => caught);
+    expect(value).toBeInstanceOf(HackCliError);
+    expect(value).toHaveProperty("code", "E_DOCKER_UNAVAILABLE");
+    expect(value).toHaveProperty("message", expect.stringContaining(text));
+    expect(value).toHaveProperty("detail", {
+      outcome,
+      canceled: false,
+      stage: "reservation",
+      nativeCode: "runtime_not_running",
+    });
+  }
+);
+
+macTest(
+  "a detached native up names the foreground-only contract and its alternative",
+  async () => {
+    const selected = await fixture();
+    const value = await tryNativeAuthoredCommand({
+      ...selected,
+      options: { ...selected.options, detach: true },
+    }).catch((caught: unknown) => caught);
+    expect(value).toBeInstanceOf(HackCliError);
+    expect(value).toHaveProperty("code", "E_NATIVE_PROJECT_UNSUPPORTED");
+    expect(value).toHaveProperty(
+      "message",
+      expect.stringContaining(
+        "Native `hack up` runs in the foreground only, so --detach is not supported: run it without --detach in its own terminal"
+      )
+    );
+  }
+);
+
 if (process.platform !== "darwin") {
   test("unsupported host refuses native foreground startup before input or pins", async () => {
     const selected = await fixture();

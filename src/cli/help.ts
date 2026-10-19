@@ -275,8 +275,15 @@ function renderCommandHelp(
   lines.push(`${invocation} — ${command.summary}`);
   lines.push("");
   lines.push("Usage:");
-  lines.push(`  ${renderCommandUsage(invocation, command)}`);
+  lines.push(
+    `  ${renderCommandUsage(invocation, command, [cli.name, ...matchedPath].join(" "))}`
+  );
   lines.push("");
+  const passthroughNote = renderPassthroughNote(command);
+  if (passthroughNote) {
+    lines.push(passthroughNote);
+    lines.push("");
+  }
 
   if (command.group === "Beta") {
     lines.push("Status: Unsupported experimental workflow");
@@ -329,9 +336,20 @@ function renderCommandHelpMarkdown(
   lines.push("### Usage");
   lines.push("");
   lines.push("```bash");
-  lines.push(renderCommandUsage(invocation, command));
+  lines.push(
+    renderCommandUsage(
+      invocation,
+      command,
+      [cli.name, ...matchedPath].join(" ")
+    )
+  );
   lines.push("```");
   lines.push("");
+  const passthroughNote = renderPassthroughNote(command);
+  if (passthroughNote) {
+    lines.push(mdEscape(passthroughNote));
+    lines.push("");
+  }
 
   if (command.group === "Beta") {
     lines.push("> Status: Unsupported experimental workflow.");
@@ -379,12 +397,33 @@ function renderCommandHelpMarkdown(
 
 function renderCommandUsage(
   invocation: string,
-  command: AnyCommandSpec
+  command: AnyCommandSpec,
+  base: string
 ): string {
   const hasSubcommands = command.subcommands.length > 0;
-  return hasSubcommands
-    ? `${invocation} <subcommand> [options]`
+  if (hasSubcommands) {
+    return `${invocation} <subcommand> [options]`;
+  }
+  const args = renderArgsFromPositionals(command.positionals);
+  // Options must precede a child command: everything after it is the child's.
+  return passthroughPositionalName(command) && args
+    ? `${base} [options] ${args}`
     : `${invocation} [options]`;
+}
+
+function passthroughPositionalName(
+  command: AnyCommandSpec
+): string | undefined {
+  return command.positionals.find((p) => p.passthrough === true)?.name;
+}
+
+/** One line explaining where a child command's own argv begins. */
+function renderPassthroughNote(command: AnyCommandSpec): string | undefined {
+  const name = passthroughPositionalName(command);
+  if (!name) {
+    return;
+  }
+  return `Everything from \`<${name}>\` on is passed to the command unchanged, including flags such as \`--version\` or \`--help\`. Put Hack options before it; a leading \`--\` is optional.`;
 }
 
 function buildInvocation(

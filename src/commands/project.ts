@@ -214,6 +214,7 @@ import {
   createNativeEnvFingerprintEntry,
   createNativeEnvFingerprintSession,
 } from "../lib/native-env-fingerprint-state.ts";
+import { refuseUnsupportedNativeUpOptions } from "../lib/native-up-refusals.ts";
 import { readNodesRegistry } from "../lib/nodes-registry.ts";
 import {
   parseOpenHostPreference,
@@ -498,7 +499,7 @@ const runOptions = [
 ] as const;
 const runPositionals = [
   { name: "service", required: true },
-  { name: "cmd", required: false, multiple: true },
+  { name: "cmd", required: false, multiple: true, passthrough: true },
 ] as const;
 const optLoki = defineOption({
   name: "loki",
@@ -4920,16 +4921,13 @@ async function handleNativeUp({
     ReturnType<typeof resolveNativeRuntimeSelection>
   >;
 }): Promise<number> {
-  if (
-    args.options.detach ||
-    args.options.json ||
-    args.options.target ||
-    args.positionals.services?.length
-  ) {
-    throw new CliUsageError(
-      "Native up currently supports foreground whole-project startup only; detach, JSON, target and service selection are unavailable."
-    );
-  }
+  refuseUnsupportedNativeUpOptions({
+    restart,
+    detach: args.options.detach,
+    json: args.options.json,
+    target: args.options.target,
+    services: args.positionals.services,
+  });
   const project = await resolveProjectForArgs({
     ctx,
     pathOpt: args.options.path,
@@ -5005,9 +5003,10 @@ async function handleNativeUp({
       const cleanup = adoptNativeLifecycleCleanup(lifecycle);
       if (lifecycle.code !== 0) {
         await cleanup();
-        throw new Error(
-          "Native up lifecycle preparation failed; values omitted."
-        );
+        throw new HackCliError({
+          code: "E_LIFECYCLE_FAILED",
+          message: "Native up lifecycle preparation failed; values omitted.",
+        });
       }
       return {
         cleanup,
@@ -5021,9 +5020,11 @@ async function handleNativeUp({
             composeProject,
           });
           if (code !== 0) {
-            throw new Error(
-              "Native up lifecycle readiness hook failed; values omitted."
-            );
+            throw new HackCliError({
+              code: "E_LIFECYCLE_FAILED",
+              message:
+                "Native up lifecycle readiness hook failed; values omitted.",
+            });
           }
         },
       };
@@ -5037,9 +5038,11 @@ async function handleNativeUp({
     }
   }
   if (!startup.sharedSource) {
-    throw new CliUsageError(
-      "Native restart requires HACK_NATIVE_SHARED_SOURCE=1 before cleanup."
-    );
+    throw new HackCliError({
+      code: "E_PERMISSION",
+      message:
+        "Native restart requires HACK_NATIVE_SHARED_SOURCE=1 before cleanup; nothing was stopped. Set it to grant the project share and run the command again.",
+    });
   }
   try {
     return await restartNativeImageProject({
@@ -5169,9 +5172,11 @@ async function restartNativeImageProject({
         },
       });
       if (code !== 0) {
-        throw new Error(
-          "Native restart cleanup failed; retained data was not replaced."
-        );
+        throw new HackCliError({
+          code: "E_LIFECYCLE_FAILED",
+          message:
+            "Native restart cleanup failed; retained data was not replaced.",
+        });
       }
     },
     start: ({ run, onReady }) =>

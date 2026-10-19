@@ -1,4 +1,5 @@
 import { isDeepStrictEqual } from "node:util";
+import { ClosedCliError } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
 import { inspectNativeProjectGraph } from "./native-project-inspect.ts";
 import { confirmedNativeRetainedGraph } from "./native-project-retained.ts";
@@ -11,13 +12,13 @@ import {
 const SHA256 = /^[a-f0-9]{64}$/;
 
 function refused(): Error {
-  return new Error(
+  return new ClosedCliError(
     "Native interrupted startup cleanup is unconfirmed; inspect owned state before retrying."
   );
 }
 
 /** A pending shutdown is fenced; it cannot reuse a failed-start selection. */
-export class NativePartialShutdownError extends Error {
+export class NativePartialShutdownError extends ClosedCliError {
   constructor() {
     super(
       "Native retaining shutdown is incomplete; retained state and mapping require inspection. No uncertain stop was replayed. Inspect with hack doctor --native-cleanup inspect and follow explicit owned cleanup recovery; do not repeat down or restart the pool blindly."

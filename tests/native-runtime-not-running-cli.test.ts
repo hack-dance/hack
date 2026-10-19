@@ -98,15 +98,17 @@ async function cli(opts: {
   readonly args: readonly string[];
   readonly env?: Record<string, string>;
 }) {
+  // Project selection goes first: after a child command (`run web bun ...`)
+  // every token belongs to the child.
   const child = Bun.spawn(
     [
       process.execPath,
       entrypoint,
-      ...opts.args,
       "--path",
       opts.fixture.project,
       "--branch",
       "alpha",
+      ...opts.args,
     ],
     {
       cwd: opts.fixture.root,
@@ -216,3 +218,34 @@ test("HACK_DEBUG=1 adds the stack to a closed native refusal", async () => {
   expect(result.code).toBe(1);
   expect(result.stdout + result.stderr).toMatch(STACK_FRAME);
 });
+
+test("a refused native run prints the refusal and one hint, not the help or Hack's version", async () => {
+  const f = await fixture({ nativeCode: "runtime_not_running" });
+  const result = await cli({
+    fixture: f,
+    args: ["run", "--profile", "toolchain", "web", "bun", "--version"],
+  });
+  const output = result.stdout + result.stderr;
+  expect(result.code).toBe(1);
+  expect(output).toContain(
+    "Native run uses the started project's environment and profiles; restart with the requested selections first."
+  );
+  expect(output).toContain("See `hack run --help` for usage.");
+  expect(output).not.toContain("hack <command> [options]");
+  expect(result.stdout).not.toMatch(/^hack v\d/m);
+  expect(output).not.toMatch(STACK_FRAME);
+  expect(await nativeCalls(f.root)).toEqual([]);
+}, 30_000);
+
+test("a child --version reaches the native one-off instead of printing Hack's version", async () => {
+  const f = await fixture({ nativeCode: "runtime_not_running" });
+  const result = await cli({
+    fixture: f,
+    args: ["run", "web", "bun", "--version"],
+  });
+  expect(result.code).not.toBe(0);
+  expect(result.stdout).not.toMatch(/^hack v\d/m);
+  expect(result.stdout + result.stderr).not.toMatch(STACK_FRAME);
+  // The one-off reached the runtime (which reports itself stopped).
+  expect((await nativeCalls(f.root)).length).toBeGreaterThan(0);
+}, 30_000);

@@ -96,6 +96,20 @@ Ctrl-C requests that shutdown. Exact durable Removed evidence retires the tagged
 native run and startup intent. Unknown, changed or live cleanup retains the attempt
 and refuses replay; a missing ready mapping does not authorize a fresh start.
 
+`--detach` refuses with `E_NATIVE_PROJECT_UNSUPPORTED` and says that native `up` runs in
+the foreground only: run it without `--detach` in its own terminal, use `ps` and `logs`
+from another terminal, and press Ctrl-C to stop it.
+
+After native review and before it reserves the startup intent, `up` asks the runtime
+for its read-only status. A stopped runtime (any phase other than `running`, or a dead
+runtime process) refuses at stage `reservation` with native code `runtime_not_running`.
+The CLI reports `E_DOCKER_UNAVAILABLE`: "Native runtime is not running; nothing was
+started." No intent is retained, so `ps` keeps reporting `not_started`. An inconclusive
+status reply does not refuse. The check is advisory: if the runtime stops after it,
+the start fails later and, when its intent was already reserved, keeps that evidence;
+the CLI then still reports `E_DOCKER_UNAVAILABLE`, and `ps` reports `pending` until the
+retained attempt is inspected.
+
 ## Saved-run `ps`
 
 `ps` and `ps --json` issue one authenticated current status request for the exact
@@ -107,7 +121,10 @@ Only fresh runtime observations supply state and health. Stored readiness and ph
 do not prove that a service is still live.
 
 A project with no saved attempt reports `not_started`; a retained startup intent
-without a Ready mapping reports `pending` with no confirmed service rows. When a
+without a Ready mapping reports `pending` with no confirmed service rows. `pending`
+covers a start that is still in progress and a failed start whose reserved intent was
+retained as evidence; Hack does not guess which, because only the owner's cleanup proof
+may retire that intent. When a
 Ready generation is saved but the candidate runtime is stopped (native code
 `runtime_not_running`, or the authenticated `native_graph_foreground` control code
 with that exact cause), `ps` exits 0 and reports `runtime_not_running` with the
@@ -241,7 +258,8 @@ half is `up`, `host.up.before`, `host.up.after` and `host.processes` run again
 exactly as on `up`, after the stopped generation's `host.down.before`,
 `host.down.after` and process stop completed. Startup refusals keep the `up`
 contract: a fixed owning stage, a closed compiler or native code and
-`E_STARTUP_INCOMPLETE` or `E_NATIVE_PROJECT_UNSUPPORTED`. Retained startup evidence
+`E_STARTUP_INCOMPLETE`, `E_NATIVE_PROJECT_UNSUPPORTED` or, for a stopped runtime,
+`E_DOCKER_UNAVAILABLE`. Retained startup evidence
 from an incomplete retirement refuses the fresh start without replay. A Ctrl-C that
 arrives after the proven stop and before the fresh start returns 130 with nothing
 restarted. Each half uses the configured `HACK_COMPOSE_STARTUP_TIMEOUT_MS` budget

@@ -66,10 +66,13 @@ import {
   NativeRuntimeRequestError,
   type NativeRuntimeSelection,
 } from "./native-runtime-client.ts";
+import { refuseStoppedNativeRuntime } from "./native-runtime-preflight.ts";
 
 const RUN = /^[a-f0-9]{32}$/;
 const CODE = /^[a-z][a-z0-9_]{0,63}$/;
 const PRIVATE_LIMIT = 256 * 1024;
+/** Upper bound of the read-only runtime check before the startup intent. */
+const RUNTIME_STATUS_TIMEOUT_MS = 5000;
 type Inputs = Awaited<ReturnType<typeof acquireNativeExecutionInputs>>;
 type Outcome = "not-started" | "removed" | "retained";
 const STAGES = [
@@ -1019,6 +1022,14 @@ export async function serveNativeAuthoredProject(
           await source.assertFresh();
           remaining();
           stage = "reservation";
+          // A stopped runtime refuses here, before the startup intent exists,
+          // so the failed start retains nothing and ps stays not_started.
+          await refuseStoppedNativeRuntime({
+            runtime: opts.runtime,
+            cwd: opts.scope.projectRoot,
+            timeoutMs: Math.min(RUNTIME_STATUS_TIMEOUT_MS, remaining()),
+            signal: controller.signal,
+          });
           attempt = { source, start: await admission.reserve({ review }) };
           outcome = "retained";
           stage = "runtime";

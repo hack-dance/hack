@@ -17,6 +17,8 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import {
   nativeNetworkFixtureAttachmentMatches,
+  nativeNetworkFixtureCensus,
+  nativeNetworkFixtureCommandDiagnostic,
   nativeNetworkFixtureCreateArgs,
   nativeNetworkFixtureHasNoPublication,
   nativeNetworkFixtureInventory,
@@ -26,6 +28,7 @@ import {
   nativeNetworkFixtureRefusalDiagnostic,
   nativeNetworkFixtureShim,
   nativeNetworkFixtureStateRefused,
+  nativeNetworkFixtureStep,
   nativeNetworkFixtureVolumeMatches,
   nativeNetworkFixtureVolumeSelectionMatches,
   provisionNativeNetworkFixtureComposePlugin,
@@ -139,6 +142,138 @@ test("refusal diagnostics never print untrusted labels or non-boolean values", (
     expect(result).toBe("Network refusal diagnostic unavailable");
     expect(result).not.toContain(secret);
   }
+});
+
+test("failing command evidence names only its closed class, role and product codes", () => {
+  const secret = "/private/fixture/secret-path";
+  const executables = { cli: "/pinned/hack", engine: "/pinned/docker" };
+  expect(
+    nativeNetworkFixtureStep(
+      ["/pinned/hack", "down", "--recover", "--json"],
+      executables
+    )
+  ).toBe("hack:down+recover");
+  expect(
+    nativeNetworkFixtureStep(
+      ["/pinned/hack", "exec", "web", "--", "bun", "-e", secret],
+      executables
+    )
+  ).toBe("hack:exec");
+  expect(
+    nativeNetworkFixtureStep(
+      ["/pinned/docker", "container", "start", secret],
+      executables
+    )
+  ).toBe("docker:container:start");
+  expect(
+    nativeNetworkFixtureStep(["/pinned/docker", "exec", secret], executables)
+  ).toBe("docker:exec");
+  expect(nativeNetworkFixtureStep([secret, "up"], executables)).toBe("other");
+  expect(nativeNetworkFixtureStep(["/pinned/hack", secret], executables)).toBe(
+    "hack:other"
+  );
+
+  const json = nativeNetworkFixtureCommandDiagnostic({
+    step: "hack:down+recover",
+    role: "primary",
+    sequence: 412,
+    expected: 0,
+    result: {
+      exitCode: 1,
+      timedOut: false,
+      stdout: JSON.stringify({
+        ok: false,
+        error: {
+          code: "E_CONFIG_INVALID",
+          message: `values ${secret}`,
+          detail: {
+            native_compose_effect_refusal: {
+              stage: "storage-helper-start",
+              reason: "probe-timeout",
+            },
+          },
+        },
+      }),
+      stderr: secret,
+    },
+  });
+  expect(json).toBe(
+    'Network command diagnostic {"step":"hack:down+recover","role":"primary","sequence":412,"expected":0,"exit":1,"timedOut":false,"code":"E_CONFIG_INVALID","stage":"storage-helper-start","reason":"probe-timeout"}'
+  );
+  const human = nativeNetworkFixtureCommandDiagnostic({
+    step: "hack:exec",
+    role: "sibling-b",
+    sequence: 7,
+    expected: 0,
+    result: {
+      exitCode: 1,
+      timedOut: false,
+      stdout: secret,
+      stderr: `\nERROR E_COMPOSE_FAILED: Native Compose operation failed ${secret}\n`,
+    },
+  });
+  expect(human).toContain('"code":"E_COMPOSE_FAILED","stage":null');
+  for (const result of [json, human]) {
+    expect(result).not.toContain(secret);
+    expect(result).not.toContain("values");
+  }
+});
+
+test("failing command evidence drops non-closed codes and malformed fields", () => {
+  const secret = "secret-value-must-not-appear";
+  const forged = nativeNetworkFixtureCommandDiagnostic({
+    step: "hack:up",
+    role: "primary",
+    sequence: 1,
+    expected: 0,
+    result: {
+      exitCode: 1,
+      timedOut: false,
+      stdout: JSON.stringify({
+        ok: false,
+        error: {
+          code: `E_${secret}`,
+          detail: {
+            native_compose_effect_refusal: {
+              stage: `/${secret}`,
+              reason: { value: secret },
+            },
+          },
+        },
+      }),
+      stderr: "",
+    },
+  });
+  expect(forged).toContain('"code":null,"stage":null,"reason":null');
+  expect(forged).not.toContain(secret);
+  for (const value of [
+    { step: secret, role: "primary" },
+    { step: "hack:up", role: secret },
+    { step: "hack:up --json", role: "primary" },
+  ]) {
+    const result = nativeNetworkFixtureCommandDiagnostic({
+      ...(value as { step: string; role: "primary" }),
+      sequence: 1,
+      expected: 0,
+      result: { exitCode: 1, timedOut: false, stdout: "", stderr: "" },
+    });
+    expect(result).toBe("Network command diagnostic unavailable");
+  }
+});
+
+test("failure census counts owned roles and kinds by closed engine state only", () => {
+  expect(
+    nativeNetworkFixtureCensus([
+      { role: "primary", kind: "service", state: "running" },
+      { role: "primary", kind: "service", state: "running" },
+      { role: "primary", kind: "carrier", state: "exited" },
+      { role: "fixture", kind: "fixture", state: "created" },
+      { role: "sibling-a", kind: "service", state: "secret-state" },
+    ])
+  ).toBe(
+    'Network failure census {"fixture:fixture:created":1,"primary:carrier:exited":1,"primary:service:running":2,"sibling-a:service:unknown":1}'
+  );
+  expect(nativeNetworkFixtureCensus([])).toBe("Network failure census {}");
 });
 
 async function withPluginFixture(

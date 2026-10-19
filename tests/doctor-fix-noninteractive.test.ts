@@ -290,4 +290,5 @@ test("doctor --fix removes a literal Compose env override and keeps a reference-
   for (const message of noteCalls) {
     expect(message).not.toContain(canary);
   }
-});
+  // Two full doctor --fix runs; the default 5 s budget is too tight on CI.
+}, 30_000);

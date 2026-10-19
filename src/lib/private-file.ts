@@ -278,7 +278,10 @@ async function observeReplaceableTarget(opts: {
  * unreadable file is never mistaken for an empty one and overwritten.
  */
 export async function readReplaceablePrivateFile(
-  opts: ReplaceablePrivateFileOptions
+  opts: ReplaceablePrivateFileOptions & {
+    /** Largest accepted file size in bytes; a larger file throws `refusal()` before it is read. */
+    readonly maxBytes?: number;
+  }
 ): Promise<ReplaceablePrivateFile | null> {
   const directories = await captureRealDirectories(opts);
   const observed = await observeReplaceableTarget(opts);
@@ -303,11 +306,19 @@ export async function readReplaceablePrivateFile(
     if (
       !opened.isFile() ||
       opened.dev !== observed.dev ||
-      opened.ino !== observed.ino
+      opened.ino !== observed.ino ||
+      (opts.maxBytes !== undefined && opened.size > opts.maxBytes)
     ) {
       throw opts.refusal();
     }
     const text = await file.readFile({ encoding: "utf8" });
+    if (
+      opts.maxBytes !== undefined &&
+      Buffer.byteLength(text, "utf8") > opts.maxBytes
+    ) {
+      // The file grew in place after the size check.
+      throw opts.refusal();
+    }
     await recheckRealDirectories({ directories, refusal: opts.refusal });
     return { text, mode: opened.mode & 0o7777 };
   } finally {

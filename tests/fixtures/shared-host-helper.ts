@@ -4,7 +4,11 @@
  *
  * argv: <mode> <port> <helper> <upstream>
  * - `identity`: HTTP on 127.0.0.1:<port>; `/__hack/identity` reports
- *   {helper, upstream, pid}; `/` answers `served:<upstream>`.
+ *   {helper, upstream, pid}; `/` answers `served:<upstream>`;
+ *   `/__fixture/env` lists this process's environment variable names.
+ * - `stubborn`: like `identity`, but ignores SIGTERM (only SIGKILL stops it).
+ * - `oversized`: like `identity`, but pads the identity answer past 4 KiB.
+ * - `exit`: exits immediately (a helper that dies during startup).
  * - `tcp`: a plain TCP listener that never answers (a foreign port owner).
  * - `placeholder`: stays alive and never listens (a sleeping placeholder).
  * - `parent`: spawns a `placeholder` grandchild, prints its PID, then serves
@@ -24,14 +28,22 @@ setInterval(() => {
   }
 }, 250);
 
-function serveIdentity(): void {
+function serveIdentity(opts: { readonly padding?: number } = {}): void {
   Bun.serve({
     hostname: "127.0.0.1",
     port,
     fetch(request) {
       const url = new URL(request.url);
       if (url.pathname === "/__hack/identity") {
-        return Response.json({ helper, upstream, pid: process.pid });
+        return Response.json({
+          helper,
+          upstream,
+          pid: process.pid,
+          ...(opts.padding ? { padding: "x".repeat(opts.padding) } : {}),
+        });
+      }
+      if (url.pathname === "/__fixture/env") {
+        return Response.json(Object.keys(process.env).sort());
       }
       return new Response(`served:${upstream}`);
     },
@@ -41,6 +53,18 @@ function serveIdentity(): void {
 switch (mode) {
   case "identity":
     serveIdentity();
+    break;
+  case "stubborn":
+    process.on("SIGTERM", () => {
+      // Ignored on purpose: the stop path must escalate to SIGKILL.
+    });
+    serveIdentity();
+    break;
+  case "oversized":
+    serveIdentity({ padding: 8192 });
+    break;
+  case "exit":
+    process.exit(3);
     break;
   case "tcp":
     Bun.listen({

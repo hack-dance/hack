@@ -5,11 +5,19 @@ export type ProcessIdentityRow = {
 };
 const IDENTITY_ROW = /^\s*(\d+)\s+(\d+)\s+(.+?)\s*$/;
 
-/** Capture only process identity and lineage; never command arguments or environment. */
+/**
+ * Capture only process identity and lineage; never command arguments or environment.
+ *
+ * `birth` is the `lstart` start time rendered in UTC with the C locale. `ps`
+ * prints `lstart` in local time, so without a fixed zone two clients with
+ * different `TZ` values, or one host whose zone changes, would see different
+ * births for the same live process. Births may be persisted and compared across
+ * processes, so the zone is pinned here (POSIX `UTC0` needs no zoneinfo).
+ */
 export async function readProcessIdentities(): Promise<ProcessIdentityRow[]> {
   try {
     const proc = Bun.spawn(["ps", "-A", "-o", "pid=,ppid=,lstart="], {
-      env: { ...process.env, LC_ALL: "C" },
+      env: { ...process.env, LC_ALL: "C", TZ: "UTC0" },
       stdin: "ignore",
       stdout: "pipe",
       stderr: "ignore",

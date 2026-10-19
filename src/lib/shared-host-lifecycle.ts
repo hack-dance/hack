@@ -29,15 +29,19 @@ import { withProjectsRegistryLock } from "./projects-registry-lock.ts";
  * - A listener is only ever adopted after its identity endpoint names the
  *   expected helper and upstream. Anything else on the port is refused and
  *   left running: this module never signals a process it cannot prove it owns.
- * - Ownership is a persisted PID plus process birth time. A claim whose PID is
+ * - Ownership is a persisted PID plus process birth time (`ps lstart`, read in
+ *   UTC so clients with different time zones agree). A claim whose PID is
  *   gone or now belongs to a different process (PID reuse) is stale and is
- *   discarded without signalling anything.
+ *   discarded without signalling anything. A stale claim whose PID still
+ *   answers as the helper is uncertain: it is kept, never adopted.
  * - A child is spawned behind an exec gate: it waits on stdin until its claim
  *   is durable. If the starter dies first, the gate reads EOF and exits, so a
  *   spawned helper is never left running without a claim.
  * - Readiness is the identity endpoint answering for the expected helper, not
- *   process liveness. Retries back off and are bounded by one deadline;
- *   cancellation stops the owned child and removes its claim.
+ *   process liveness. Retries back off and are bounded by one deadline that
+ *   also covers the lock wait; cancellation stops the owned child and removes
+ *   its claim. A `starting` claim found under the lock has lost its starter;
+ *   if that helper still cannot become ready, it is stopped.
  * - Release removes one holder. Only when no holder remains is an owned helper
  *   stopped, through its birth-verified process tree. Adopted helpers are
  *   never signalled.
@@ -54,6 +58,7 @@ export type SharedHostFailure =
   | "foreign-listener"
   | "wrong-upstream"
   | "claim-invalid"
+  | "state-unavailable"
   | "census-unavailable"
   | "lock-unavailable"
   | "port-probe-failed"
@@ -68,7 +73,9 @@ const FAILURE_MESSAGES: Readonly<Record<SharedHostFailure, string>> = {
   "wrong-upstream":
     "The shared helper on this port serves a different upstream; it was left running.",
   "claim-invalid":
-    "The persisted shared helper claim is unreadable or belongs to another configuration; inspect and release it before retrying.",
+    "The persisted shared helper claim is unreadable, uncertain or belongs to another configuration; inspect and release it before retrying.",
+  "state-unavailable":
+    "The shared helper state directory could not be read or written.",
   "census-unavailable":
     "The process census is unavailable, so helper ownership cannot be verified.",
   "lock-unavailable":
@@ -135,6 +142,7 @@ export type SharedHostEnsureResult =
 
 /** Closed progress events. The observer is awaited (a test and UI seam). */
 export type SharedHostEvent =
+  | "lock-waiting"
   | "lock-acquired"
   | "claim-stale"
   | "claim-reused"
@@ -158,15 +166,18 @@ export type SharedHostReleaseResult =
     }
   | {
       readonly state: "failed";
-      readonly reason: Extract<
-        SharedHostFailure,
-        | "claim-invalid"
-        | "census-unavailable"
-        | "lock-unavailable"
-        | "cancelled"
-      >;
+      readonly reason: ReleaseFailure;
       readonly message: string;
     };
+
+type ReleaseFailure = Extract<
+  SharedHostFailure,
+  | "claim-invalid"
+  | "state-unavailable"
+  | "census-unavailable"
+  | "lock-unavailable"
+  | "cancelled"
+>;
 
 type OwnedClaim = {
   readonly version: 1;
@@ -190,6 +201,8 @@ type Claim = OwnedClaim | AdoptedClaim;
 type ProbeObservation =
   | { readonly kind: "absent" }
   | { readonly kind: "unidentified" }
+  /** The listener did not answer within this probe's own timeout. */
+  | { readonly kind: "timeout" }
   | { readonly kind: "foreign" }
   | { readonly kind: "wrong-upstream" }
   | { readonly kind: "match"; readonly pid: number | null }
@@ -214,16 +227,40 @@ class ClaimRefusal extends Error {
   }
 }
 
+/** Carries an error thrown by the caller's observer; it is rethrown as is. */
+class ObserverError extends Error {
+  readonly original: unknown;
+  constructor(original: unknown) {
+    super("shared host observer failed");
+    this.original = original;
+  }
+}
+
+/**
+ * Wraps an error thrown while the helper lock is held, so it is never
+ * reported as a lock acquisition failure.
+ */
+class LockedRunError extends Error {
+  readonly original: unknown;
+  constructor(original: unknown) {
+    super("shared host locked operation failed");
+    this.original = original;
+  }
+}
+
+async function runLocked<T>(run: () => Promise<T>): Promise<T> {
+  try {
+    return await run();
+  } catch (error: unknown) {
+    throw new LockedRunError(error);
+  }
+}
+
 function failed(reason: SharedHostFailure): SharedHostEnsureResult {
   return { state: "failed", reason, message: FAILURE_MESSAGES[reason] };
 }
 
-function releaseFailed(
-  reason: Extract<
-    SharedHostFailure,
-    "claim-invalid" | "census-unavailable" | "lock-unavailable" | "cancelled"
-  >
-): SharedHostReleaseResult {
+function releaseFailed(reason: ReleaseFailure): SharedHostReleaseResult {
   return { state: "failed", reason, message: FAILURE_MESSAGES[reason] };
 }
 
@@ -373,6 +410,7 @@ async function readClaim(
       path: claimPath(spec),
       directories: [spec.stateDir],
       refusal: () => new ClaimRefusal(),
+      maxBytes: MAX_CLAIM_BYTES,
     });
   } catch {
     return { kind: "invalid" };
@@ -380,7 +418,8 @@ async function readClaim(
   if (file === null) {
     return { kind: "absent" };
   }
-  if (file.text.length > MAX_CLAIM_BYTES || (file.mode & 0o077) !== 0) {
+  // Only an owner-only receipt is trusted; group/world access makes it uncertain.
+  if ((file.mode & 0o077) !== 0) {
     return { kind: "invalid" };
   }
   const claim = parseSharedHostClaim(file.text);
@@ -472,7 +511,8 @@ export async function probeSharedHostIdentity(opts: {
   readonly timeoutMs: number;
   readonly signal?: AbortSignal;
 }): Promise<ProbeObservation> {
-  const signals = [AbortSignal.timeout(opts.timeoutMs)];
+  const timeout = AbortSignal.timeout(opts.timeoutMs);
+  const signals = [timeout];
   if (opts.signal) {
     signals.push(opts.signal);
   }
@@ -486,8 +526,11 @@ export async function probeSharedHostIdentity(opts: {
     if (opts.signal?.aborted) {
       return { kind: "cancelled" };
     }
-    // Only a refused connection proves no listener; a timeout or reset means
-    // something holds the port without answering as the helper.
+    if (timeout.aborted) {
+      return { kind: "timeout" };
+    }
+    // Only a refused connection proves no listener; a reset means something
+    // holds the port without answering as the helper.
     return isRecord(error) && error.code === "ECONNREFUSED"
       ? { kind: "absent" }
       : { kind: "unidentified" };
@@ -496,9 +539,19 @@ export async function probeSharedHostIdentity(opts: {
   if (opts.signal?.aborted) {
     return { kind: "cancelled" };
   }
+  if (text === null && timeout.aborted) {
+    return { kind: "timeout" };
+  }
   if (response.status !== 200 || text === null) {
     return { kind: "unidentified" };
   }
+  return classifyIdentity(text, opts.expected);
+}
+
+function classifyIdentity(
+  text: string,
+  expected: SharedHostIdentity
+): ProbeObservation {
   let body: unknown;
   try {
     body = JSON.parse(text);
@@ -512,10 +565,10 @@ export async function probeSharedHostIdentity(opts: {
   ) {
     return { kind: "unidentified" };
   }
-  if (body.helper !== opts.expected.helper) {
+  if (body.helper !== expected.helper) {
     return { kind: "foreign" };
   }
-  if (body.upstream !== opts.expected.upstream) {
+  if (body.upstream !== expected.upstream) {
     return { kind: "wrong-upstream" };
   }
   const pid =
@@ -662,10 +715,83 @@ async function awaitReadiness(
   }
 }
 
+type OwnedIdentity = { readonly pid: number; readonly birth: string };
+
+/**
+ * Readiness failures after which an owned helper that never reached `ready` is
+ * stopped. `cancelled` and `census-unavailable` leave it recorded instead: a
+ * cancelled caller or a blind census is not evidence that the start failed.
+ */
+const ABANDONED_START_FAILURES: ReadonlySet<SharedHostFailure> = new Set([
+  "child-exited",
+  "deadline",
+  "foreign-listener",
+  "wrong-upstream",
+]);
+
+/**
+ * Stop an owned helper whose start failed and forget its claim. When the stop
+ * cannot be confirmed the claim is kept, so the process stays recorded.
+ */
+async function stopFailedStart(opts: {
+  readonly context: EnsureContext;
+  readonly owned: OwnedIdentity;
+  readonly notify: boolean;
+}): Promise<void> {
+  const stopped = await stopVerifiedSharedHostProcess({
+    ...opts.owned,
+    graceMs: 1000,
+  });
+  if (stopped === "stopped" || stopped === "absent") {
+    await removeClaim(opts.context.spec);
+  }
+  if (opts.notify) {
+    await opts.context.observe("stopped-after-failure");
+  }
+}
+
+/**
+ * Reuse a live owned helper. A `ready` helper may serve other holders, so a
+ * failed readiness check never stops it. A `starting` claim seen under the
+ * lock has no live starter (a starter holds the lock until its helper is
+ * ready or stopped), so a helper that still cannot become ready is an
+ * abandoned start and is stopped through its birth-verified tree.
+ */
+async function reuseOwned(
+  context: EnsureContext,
+  claim: OwnedClaim
+): Promise<SharedHostEnsureResult> {
+  const { spec, holder } = context;
+  await context.observe("claim-reused");
+  const outcome = await awaitReadiness(context, claim);
+  if (outcome.kind === "failed") {
+    if (
+      claim.phase === "starting" &&
+      ABANDONED_START_FAILURES.has(outcome.reason)
+    ) {
+      await stopFailedStart({ context, owned: claim, notify: true });
+    }
+    return failed(outcome.reason);
+  }
+  await writeClaim(spec, {
+    ...claim,
+    phase: "ready",
+    holders: withHolder(claim.holders, holder),
+  });
+  await context.observe("ready");
+  return {
+    state: "ready",
+    ownership: "owned",
+    endpoint: endpointFor(spec.port),
+    pid: claim.pid,
+    spawned: false,
+  };
+}
+
 async function ensureLocked(
   context: EnsureContext
 ): Promise<SharedHostEnsureResult> {
-  const { spec, holder } = context;
+  const { spec } = context;
   await context.observe("lock-acquired");
   const census = await readCensus();
   if (census === null) {
@@ -676,55 +802,87 @@ async function ensureLocked(
     return failed("claim-invalid");
   }
   let carried: readonly string[] = [];
+  let staleOwned: OwnedClaim | null = null;
   if (read.kind === "claim") {
     const claim = read.claim;
     if (claim.port !== spec.port) {
       return failed("claim-invalid");
     }
     if (claim.ownership === "owned" && isLive(census, claim)) {
-      await context.observe("claim-reused");
-      const outcome = await awaitReadiness(context, claim);
-      if (outcome.kind === "failed") {
-        // Other holders may depend on it: a reused helper is never stopped here.
-        return failed(outcome.reason);
-      }
-      await writeClaim(spec, {
-        ...claim,
-        phase: "ready",
-        holders: withHolder(claim.holders, holder),
-      });
-      await context.observe("ready");
-      return {
-        state: "ready",
-        ownership: "owned",
-        endpoint: endpointFor(spec.port),
-        pid: claim.pid,
-        spawned: false,
-      };
+      return await reuseOwned(context, claim);
     }
     if (claim.ownership === "owned") {
       // Dead or reused PID: the claim no longer proves ownership of anything.
       await context.observe("claim-stale");
+      staleOwned = claim;
     }
     carried = claim.holders;
   }
+  const settled = await adoptOrRefuse(context, { carried, staleOwned });
+  if (settled !== null) {
+    return settled;
+  }
+  try {
+    const occupied = await inspectListeningTcpPorts({ ports: [spec.port] });
+    if (occupied.length > 0) {
+      return failed("foreign-listener");
+    }
+  } catch {
+    return failed("port-probe-failed");
+  }
+  if (read.kind === "claim") {
+    await removeClaim(spec);
+  }
+  return await spawnOwned(context, carried);
+}
 
+/**
+ * Probe the helper port when no live owned claim exists. Returns the final
+ * result (adopted, refused, deadline or cancelled), or null when nothing
+ * answers and the caller may spawn.
+ */
+async function adoptOrRefuse(
+  context: EnsureContext,
+  prior: {
+    readonly carried: readonly string[];
+    readonly staleOwned: OwnedClaim | null;
+  }
+): Promise<SharedHostEnsureResult | null> {
+  const { spec, holder } = context;
+  const { carried, staleOwned } = prior;
+  // The lock wait shares the deadline; never start a probe after it passed.
+  const left = remainingMs(context);
+  if (left <= 0) {
+    return failed("deadline");
+  }
+  const cutByDeadline = left < spec.probeTimeoutMs;
   const existing = await probeSharedHostIdentity({
     port: spec.port,
     identityPath: spec.identityPath,
     expected: spec.expected,
-    timeoutMs: Math.min(spec.probeTimeoutMs, Math.max(1, remainingMs(context))),
+    timeoutMs: cutByDeadline ? left : spec.probeTimeoutMs,
     signal: context.signal,
   });
   switch (existing.kind) {
     case "cancelled":
       return failed("cancelled");
-    case "foreign":
+    case "timeout":
+      // A probe cut short by the deadline proves nothing about the listener;
+      // one that used its full timeout met a listener that does not answer.
+      return failed(cutByDeadline ? "deadline" : "foreign-listener");
     case "unidentified":
+    case "foreign":
       return failed("foreign-listener");
     case "wrong-upstream":
       return failed("wrong-upstream");
     case "match":
+      if (staleOwned !== null && existing.pid === staleOwned.pid) {
+        // The claimed PID answers as the helper, but its birth no longer
+        // matches: ownership is uncertain. Adopting it would drop the owned
+        // record (and a later release would leak the helper); stopping it
+        // could signal a stranger. Keep the claim and fail closed.
+        return failed("claim-invalid");
+      }
       await writeClaim(spec, {
         version: 1,
         helper: spec.name,
@@ -740,20 +898,8 @@ async function ensureLocked(
         spawned: false,
       };
     default:
-      break;
+      return null;
   }
-  try {
-    const occupied = await inspectListeningTcpPorts({ ports: [spec.port] });
-    if (occupied.length > 0) {
-      return failed("foreign-listener");
-    }
-  } catch {
-    return failed("port-probe-failed");
-  }
-  if (read.kind === "claim") {
-    await removeClaim(spec);
-  }
-  return await spawnOwned(context, carried);
 }
 
 async function spawnOwned(
@@ -780,7 +926,6 @@ async function spawnOwned(
     return failed("spawn-failed");
   }
   child.unref();
-  await context.observe("spawned");
   const closeGate = () => {
     try {
       child.stdin.end();
@@ -788,73 +933,83 @@ async function spawnOwned(
       // Already closed; the gate treats EOF as "do not run".
     }
   };
-  const census = await readCensus();
-  const row = census?.find((entry) => entry.pid === child.pid);
-  if (!row) {
-    closeGate();
-    return failed(census === null ? "census-unavailable" : "spawn-failed");
-  }
-  const owned = { pid: row.pid, birth: row.birth };
-  const holders = withHolder(carried, holder);
+  let owned: OwnedIdentity | null = null;
+  let gateOpened = false;
   try {
+    await context.observe("spawned");
+    const census = await readCensus();
+    const row = census?.find((entry) => entry.pid === child.pid);
+    if (!row) {
+      closeGate();
+      return failed(census === null ? "census-unavailable" : "spawn-failed");
+    }
+    const identity: OwnedIdentity = { pid: row.pid, birth: row.birth };
+    const holders = withHolder(carried, holder);
     await writeClaim(spec, {
       version: 1,
       helper: spec.name,
       port: spec.port,
       ownership: "owned",
       phase: "starting",
-      pid: owned.pid,
-      birth: owned.birth,
+      pid: identity.pid,
+      birth: identity.birth,
       holders,
     });
-  } catch {
-    closeGate();
-    return failed("claim-invalid");
-  }
-  await context.observe("claimed");
-  if (context.signal?.aborted) {
-    closeGate();
-    await removeClaim(spec);
-    return failed("cancelled");
-  }
-  try {
-    child.stdin.write("open\n");
-    await child.stdin.flush();
-  } finally {
-    closeGate();
-  }
-  await context.observe("gate-opened");
-  const outcome = await awaitReadiness(context, owned);
-  if (outcome.kind === "failed") {
-    const stopped = await stopVerifiedSharedHostProcess({
-      ...owned,
-      graceMs: 1000,
-    });
-    // Keep the claim when the stop is unproven, so the process stays recorded.
-    if (stopped === "stopped" || stopped === "absent") {
+    owned = identity;
+    await context.observe("claimed");
+    if (context.signal?.aborted) {
+      closeGate();
       await removeClaim(spec);
+      return failed("cancelled");
     }
-    await context.observe("stopped-after-failure");
-    return failed(outcome.reason);
+    gateOpened = true;
+    try {
+      child.stdin.write("open\n");
+      await child.stdin.flush();
+    } catch {
+      // The gate died before it could run the helper.
+      closeGate();
+      await stopFailedStart({ context, owned: identity, notify: false });
+      return failed("spawn-failed");
+    }
+    closeGate();
+    await context.observe("gate-opened");
+    const outcome = await awaitReadiness(context, identity);
+    if (outcome.kind === "failed") {
+      await stopFailedStart({ context, owned: identity, notify: true });
+      return failed(outcome.reason);
+    }
+    await writeClaim(spec, {
+      version: 1,
+      helper: spec.name,
+      port: spec.port,
+      ownership: "owned",
+      phase: "ready",
+      pid: identity.pid,
+      birth: identity.birth,
+      holders,
+    });
+    await context.observe("ready");
+    return {
+      state: "ready",
+      ownership: "owned",
+      endpoint: endpointFor(spec.port),
+      pid: identity.pid,
+      spawned: true,
+    };
+  } catch (error: unknown) {
+    // An observer or a state write failed. Never leave a gate waiting while
+    // this starter lives, nor a running helper the caller was not handed.
+    closeGate();
+    if (owned !== null) {
+      const recorded = owned;
+      await (gateOpened
+        ? stopFailedStart({ context, owned: recorded, notify: false })
+        : removeClaim(spec)
+      ).catch(() => undefined);
+    }
+    throw error;
   }
-  await writeClaim(spec, {
-    version: 1,
-    helper: spec.name,
-    port: spec.port,
-    ownership: "owned",
-    phase: "ready",
-    pid: owned.pid,
-    birth: owned.birth,
-    holders,
-  });
-  await context.observe("ready");
-  return {
-    state: "ready",
-    ownership: "owned",
-    endpoint: endpointFor(spec.port),
-    pid: owned.pid,
-    spawned: true,
-  };
 }
 
 async function prepareStateDir(stateDir: string): Promise<void> {
@@ -868,9 +1023,45 @@ function isAbort(error: unknown, signal?: AbortSignal): boolean {
   );
 }
 
+function hasErrorCode(error: unknown): boolean {
+  return isRecord(error) && typeof error.code === "string";
+}
+
+/**
+ * Map an error to a closed reason. A caller's observer error is rethrown
+ * unchanged; errors raised while the lock is held are never `lock-unavailable`.
+ */
+function classifyFailure(
+  error: unknown,
+  signal: AbortSignal | undefined
+): ReleaseFailure {
+  if (error instanceof ObserverError) {
+    throw error.original;
+  }
+  if (error instanceof LockedRunError) {
+    const inner = error.original;
+    if (inner instanceof ObserverError) {
+      throw inner.original;
+    }
+    if (inner instanceof ClaimRefusal) {
+      return "claim-invalid";
+    }
+    return isAbort(inner, signal) ? "cancelled" : "state-unavailable";
+  }
+  if (isAbort(error, signal)) {
+    return "cancelled";
+  }
+  // The lock times out with a plain error; a filesystem error carries a code.
+  return hasErrorCode(error) ? "state-unavailable" : "lock-unavailable";
+}
+
 /**
  * Make the shared helper ready for `holder`, adopting an identity-verified
  * helper, reusing the owned one, or starting it under an exact claim.
+ *
+ * An error thrown by `observe` propagates unchanged after cleanup: a gate that
+ * has not opened is closed and its claim removed, and a helper started by this
+ * call is stopped. A holder recorded before the error stays recorded.
  */
 export async function ensureSharedHostHelper(opts: {
   readonly spec: SharedHostHelperSpec;
@@ -892,37 +1083,38 @@ export async function ensureSharedHostHelper(opts: {
     holder: opts.holder,
     signal: opts.signal,
     observe: async (event) => {
-      await observer?.(event);
+      try {
+        await observer?.(event);
+      } catch (error: unknown) {
+        throw new ObserverError(error);
+      }
     },
     deadline: performance.now() + opts.spec.deadlineMs,
   };
   try {
     await prepareStateDir(opts.spec.stateDir);
   } catch {
-    return failed("claim-invalid");
+    return failed("state-unavailable");
   }
   try {
+    await context.observe("lock-waiting");
     return await withProjectsRegistryLock({
       lockPath: lockPath(opts.spec),
       label: "shared host helper",
       timeoutMs: opts.spec.deadlineMs,
       signal: opts.signal,
-      run: () => ensureLocked(context),
+      run: () => runLocked(() => ensureLocked(context)),
     });
   } catch (error: unknown) {
-    if (isAbort(error, opts.signal)) {
-      return failed("cancelled");
-    }
-    if (error instanceof ClaimRefusal) {
-      return failed("claim-invalid");
-    }
-    return failed("lock-unavailable");
+    return failed(classifyFailure(error, opts.signal));
   }
 }
 
 /**
  * Drop `holder`. The last holder of an owned helper stops it through its
  * birth-verified tree; adopted helpers and stale claims are never signalled.
+ * Releasing a holder that is not recorded changes nothing and reports
+ * `retained` while other holders remain.
  */
 export async function releaseSharedHostHelper(opts: {
   readonly spec: Pick<SharedHostHelperSpec, "name" | "stateDir">;
@@ -938,7 +1130,7 @@ export async function releaseSharedHostHelper(opts: {
   try {
     await prepareStateDir(opts.spec.stateDir);
   } catch {
-    return releaseFailed("claim-invalid");
+    return releaseFailed("state-unavailable");
   }
   try {
     return await withProjectsRegistryLock({
@@ -946,16 +1138,10 @@ export async function releaseSharedHostHelper(opts: {
       label: "shared host helper",
       timeoutMs: opts.timeoutMs ?? 10_000,
       signal: opts.signal,
-      run: () => releaseLocked(opts),
+      run: () => runLocked(() => releaseLocked(opts)),
     });
   } catch (error: unknown) {
-    if (isAbort(error, opts.signal)) {
-      return releaseFailed("cancelled");
-    }
-    if (error instanceof ClaimRefusal) {
-      return releaseFailed("claim-invalid");
-    }
-    return releaseFailed("lock-unavailable");
+    return releaseFailed(classifyFailure(error, opts.signal));
   }
 }
 

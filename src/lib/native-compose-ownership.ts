@@ -1211,7 +1211,14 @@ function batches(resources: readonly Inventory[]): Inventory[][] {
  * an acquisition whose aggregate deadline or output allowance has expired.
  */
 export function createNativeComposeProbe(
-  opts: Pick<NativeComposeOwnershipOptions, "signal" | "timeoutMs">
+  opts: Pick<NativeComposeOwnershipOptions, "signal" | "timeoutMs"> & {
+    /**
+     * Private Compose interpolation values (the `HACK_ENV_*` references of a
+     * value-free env override) added to the child environment only. Never
+     * logged, returned or serialized.
+     */
+    readonly privateInterpolationEnv?: Readonly<Record<string, string>>;
+  }
 ): (args: readonly string[]) => Promise<string> {
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   if (
@@ -1231,7 +1238,7 @@ export function createNativeComposeProbe(
   if (!binary) {
     probeRefused("E_NATIVE_COMPOSE_PROBE", "operation");
   }
-  const environment = { ...process.env };
+  const environment = { ...process.env, ...opts.privateInterpolationEnv };
   return async (args) => {
     checkInterruption(opts.signal, false);
     const remainingTime = deadline - Date.now();

@@ -20,7 +20,10 @@ import {
   resolveRuntimeHostMetadataOverride,
 } from "../src/commands/project.ts";
 import { HackCliError } from "../src/lib/cli-result.ts";
-import { renderManagedComposeEnvOverride } from "../src/lib/compose-managed-env.ts";
+import {
+  renderComposeEnvReferenceOverride,
+  renderManagedComposeEnvOverride,
+} from "../src/lib/compose-managed-env.ts";
 import { acquireLegacyComposeAdoptionPreparationBinding } from "../src/lib/native-compose-adoption-binding.ts";
 import { tryLegacyComposeAdoptedCommand } from "../src/lib/native-compose-adoption-command.ts";
 import {
@@ -58,6 +61,28 @@ const ID = "a".repeat(64);
 const NETWORK = "b".repeat(64);
 const VOLUME = "original_private_database";
 const CREATED = "2026-01-01T01:02:03Z";
+/**
+ * Synthetic engine config hash over every `${NAME}` reference in the selected
+ * Compose files, resolved from the Compose process env (blank when unset), as
+ * the engine does when it labels a container. The stub engine below computes
+ * the same digest from its own argv and environment.
+ */
+async function composeReferenceHash(opts: {
+  readonly files: readonly string[];
+  readonly env: Readonly<Record<string, string>>;
+}): Promise<string> {
+  const names: string[] = [];
+  for (const file of opts.files) {
+    for (const match of (await readFile(file, "utf8")).matchAll(
+      /\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g
+    )) {
+      names.push(match[1] ?? "");
+    }
+  }
+  return new Bun.CryptoHasher("sha256")
+    .update(JSON.stringify(names.map((name) => [name, opts.env[name] ?? ""])))
+    .digest("hex");
+}
 type Fixture = {
   engine: string;
   container: Record<string, unknown>[];
@@ -65,6 +90,8 @@ type Fixture = {
   network: Record<string, unknown>[];
   mode?: string;
   configHash?: string;
+  /** Hash Compose references like the engine: with the values in the Compose env. */
+  envConfigHash?: boolean;
   running?: boolean;
   mutationFailure?: boolean;
   states?: Record<string, boolean>;
@@ -216,7 +243,11 @@ if (kind === 'container' && ['start','restart','stop'].includes(action)) {
  writeFileSync(root+'/fixture.json',JSON.stringify(fixture));process.exit(fixture.mutationFailure ? 7 : 0);
 }
 if (kind === 'container' && ['exec','logs'].includes(action)) { process.exit(0); }
-if (kind === "compose") { for (const container of fixture.container) console.log(container.service + ' ' + 'd'.repeat(64)); process.exit(0); }
+if (kind === "compose") {
+ let hash = 'd'.repeat(64);
+ if (fixture.envConfigHash) { const names = args.flatMap((arg, index) => args[index - 1] === '--file' ? [...readFileSync(arg, 'utf8').matchAll(/\\$\\{([A-Za-z_][A-Za-z0-9_]*)\\}/g)].map((match) => match[1]) : []); hash = new Bun.CryptoHasher('sha256').update(JSON.stringify(names.map((name) => [name, process.env[name] ?? '']))).digest('hex'); }
+ for (const container of fixture.container) console.log(container.service + ' ' + hash); process.exit(0);
+}
 if (!(kind === "info" && action === "--format") && (!['container','volume','network'].includes(kind) || !['ls','inspect'].includes(action) || !args.includes('--format'))) {writeFileSync(root + "/mutation", "unauthorized command");process.exit(99);}
 if (fixture.mode === "fail") {console.error(${JSON.stringify(CANARY)});process.exit(29);}
 if (fixture.mode === "malformed") {console.log(${JSON.stringify(CANARY)});process.exit(0);}
@@ -1869,7 +1900,7 @@ boundedTest.skipIf(!process.env.HACK_TEST_OLD_ADOPTION_BINARY)(
   30_000
 );
 
-async function managedGenerated() {
+async function managedGenerated(form: "literal" | "reference" = "literal") {
   const composeText = await readFile(
     join(projectRoot, ".hack/docker-compose.yml"),
     "utf8"
@@ -1890,11 +1921,15 @@ async function managedGenerated() {
     aliasHost: null,
     composeProject: "fixture",
   });
-  const env = renderManagedComposeEnvOverride({
+  const projection = {
     targetServices: ["db"],
     globalEnv: { MANAGED: CANARY, EMPTY: "" },
     serviceEnv: { db: { MANAGED: CANARY, EMPTY: "" } },
-  });
+  };
+  const env =
+    form === "reference"
+      ? renderComposeEnvReferenceOverride(projection)?.text
+      : renderManagedComposeEnvOverride(projection);
   if (!(runtime && env)) {
     throw new Error("Synthetic projections missing");
   }
@@ -2015,6 +2050,107 @@ test("v3 saved adoption consumes canonical original generated sources without en
     } finally {
       await savedStore.close();
     }
+  } finally {
+    await store.close();
+  }
+});
+
+test("v3 value-free env override binds the engine config hash computed with the values (HACK-1273)", async () => {
+  Reflect.deleteProperty(process.env, "CI");
+  Reflect.deleteProperty(process.env, "HACK_EXECUTION_MODE");
+  await trackedManagedCheckout();
+  // Distinct from CANARY, which the stub engine also uses as its engine ID.
+  const value = "synthetic-private-reference-env-value";
+  const files = await managedGenerated("reference");
+  expect(await readFile(files[2] ?? "", "utf8")).not.toContain(CANARY);
+  await writeFile(join(projectRoot, ".hack.secret.key"), "synthetic-v3-key");
+  await setProjectEnvValue({
+    projectRoot,
+    projectDir: join(projectRoot, ".hack"),
+    envName: null,
+    scope: "global",
+    key: "MANAGED",
+    value,
+    secret: true,
+  });
+  const reference = renderComposeEnvReferenceOverride({
+    targetServices: ["db"],
+    globalEnv: { MANAGED: value, EMPTY: "" },
+    serviceEnv: { db: { MANAGED: value, EMPTY: "" } },
+  });
+  if (!reference) {
+    throw new Error("Synthetic reference projection missing");
+  }
+  // The label Compose writes when Hack starts the stack with the values in
+  // its environment, and the hash the same files give without them.
+  const label = await composeReferenceHash({ files, env: reference.env });
+  const blank = await composeReferenceHash({ files, env: {} });
+  expect(label).not.toBe(blank);
+  fixture.envConfigHash = true;
+  fixture.configHash = label;
+  await save();
+  const binary = await managedEnvCompilerFixture(
+    join(root, "managed-compiler")
+  );
+  expect(
+    (await previewLegacyComposeAdoption({ projectRoot, binary })).complete
+  ).toBe(true);
+  const store = await openLegacyComposeAdoptedGenerationStore({ projectRoot });
+  try {
+    const generation = await store.prepare({ binary });
+    expect(generation.report.adoption_generation_version).toBe(3);
+    const metaText = await readFile(
+      await artifactPath("manifest.json"),
+      "utf8"
+    );
+    const meta = JSON.parse(metaText);
+    expect(meta.binding.composeFiles).toEqual(files);
+    expect(meta.runtimeConfig).toEqual([
+      { id: ID, service: "db", hash: label },
+    ]);
+    for (const text of [metaText, JSON.stringify(generation)]) {
+      expect(text).not.toContain(value);
+      expect(text).not.toContain("HACK_ENV_");
+    }
+    await store.publish({ generation, binary });
+    await store.close();
+    // Saved reads run without key or value delivery.
+    await rm(join(projectRoot, ".hack.secret.key"));
+    await mkdir(join(projectRoot, ".hack.secret.key"));
+    const savedStore = await openLegacyComposeAdoptedGenerationStore({
+      projectRoot,
+      mode: "saved",
+    });
+    try {
+      const active = await savedStore.loadActive();
+      if (!active) {
+        throw new Error("Expected active adopted generation");
+      }
+      let effects = 0;
+      await savedStore.withLease({
+        generation: active,
+        run: async (input) => {
+          effects++;
+          expect(input.binding.containers[0]?.id).toBe(ID);
+        },
+      });
+      expect(effects).toBe(1);
+      // A recreated container carries a different engine label.
+      fixture.configHash = "e".repeat(64);
+      await save();
+      await refusal(
+        savedStore.withLease({
+          generation: active,
+          run: async () => {
+            effects++;
+          },
+        })
+      );
+      expect(effects).toBe(1);
+    } finally {
+      await savedStore.close();
+    }
+    expect(await readFile(join(root, "commands"), "utf8")).not.toContain(value);
   } finally {
     await store.close();
   }

@@ -107,6 +107,7 @@ export async function previewLegacyComposeAdoption(input: {
     await inspectLegacyComposeRuntimeConfig({
       binding: acquired.binding,
       composeFile: acquired.binding.composeFile,
+      privateInterpolationEnv: acquired.projection?.composeEnv,
       signal: opts.signal,
     });
     const states = await inspectLegacyComposeContainerStates({

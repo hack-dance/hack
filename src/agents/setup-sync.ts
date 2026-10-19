@@ -108,7 +108,8 @@ export type SetupSyncTargetResult = {
 
 type Outcome = Omit<SetupSyncTargetResult, "scope" | "target" | "path">;
 
-type OwnedFileTarget = {
+/** A standalone Hack-owned file target and the render that owns it. */
+export type OwnedFileTarget = {
   readonly target: SetupSyncTarget;
   readonly surface: IntegrationSurface;
   readonly relativePath: string;
@@ -157,6 +158,17 @@ const GLOBAL_OWNED_FILES: readonly OwnedFileTarget[] = [
     removeEmptyDirectory: true,
   },
 ];
+
+/**
+ * Standalone Hack-owned file targets for one scope, relative to the scope
+ * root (project root or home). Shared with the plugin migration engine so
+ * both act on the same paths and ownership surfaces.
+ */
+export function listOwnedFileTargets(
+  scope: SetupSyncScope
+): readonly OwnedFileTarget[] {
+  return scope === "global" ? GLOBAL_OWNED_FILES : PROJECT_OWNED_FILES;
+}
 
 const CLAUDE_SETTINGS_PATHS: Readonly<Record<SetupSyncScope, string>> = {
   project: ".claude/settings.local.json",
@@ -214,8 +226,7 @@ export async function runSetupSyncScope(opts: {
     installMissing: opts.action === "sync" ? opts.installMissing : false,
     planInstall: opts.action === "check" && opts.installMissing,
   };
-  const ownedFiles =
-    opts.scope === "global" ? GLOBAL_OWNED_FILES : PROJECT_OWNED_FILES;
+  const ownedFiles = listOwnedFileTargets(opts.scope);
 
   const results: SetupSyncTargetResult[] = [];
   for (const file of ownedFiles) {

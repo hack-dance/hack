@@ -60,9 +60,11 @@ async function fixture() {
     join(project, ".hack", "docker-compose.yml"),
     "name: run-exit\nservices:\n  app:\n    image: alpine:3.20\n"
   );
+  // Internal DNS/TLS off: no CoreDNS/Caddy probes, whose warnings would
+  // otherwise depend on the host's global Hack state.
   await writeFile(
     join(project, ".hack", "hack.config.json"),
-    '{"name":"run-exit","dev_host":"run-exit.hack"}\n'
+    '{"name":"run-exit","dev_host":"run-exit.hack","internal":{"dns":false,"tls":false}}\n'
   );
   const log = join(root, "docker-log.jsonl");
   await writeFile(log, "");
@@ -137,7 +139,7 @@ if (args.includes("config")) {
     await collect(
       Bun.spawn(
         [
-          "bash",
+          "/bin/bash",
           "-c",
           `set ${opts.pipefail ? "-o" : "+o"} pipefail; "$@" | cat; echo "pipeline=$? hack=\${PIPESTATUS[0]}"`,
           "hack-pipe",

@@ -216,6 +216,18 @@ export const TARGET_REFUSALS = Object.freeze({
     retry: "fix_project",
     message: "A project config input exceeds the inspector size bound.",
   },
+  input_permission_denied: {
+    code: "E_PERMISSION",
+    stage: "project",
+    retry: "fix_project",
+    message: "A project input could not be read: permission denied.",
+  },
+  input_unreadable: {
+    code: "E_CONFIG_INVALID",
+    stage: "project",
+    retry: "fix_project",
+    message: "A project input could not be read.",
+  },
 } as const satisfies Record<string, RefusalSpec>);
 
 export type TargetRefusalReason = keyof typeof TARGET_REFUSALS;
@@ -341,8 +353,12 @@ export function targetRefusalEnvelope(opts: {
 }
 
 /**
- * Inspect one target. Returns a refusal envelope for every closed failure;
- * only unexpected faults (for example an unreadable directory) throw.
+ * Inspect one target. Returns a refusal envelope for every closed failure.
+ * A filesystem fault while reading inputs (for example a permission-denied
+ * Compose file, or a directory where a config file belongs) is mapped to the
+ * closed `input_permission_denied` / `input_unreadable` refusals, so the OS
+ * message and its absolute path never reach the caller. Only non-filesystem
+ * faults (programming errors) still throw.
  *
  * `afterResolve` is a test seam that runs after the target is resolved and
  * before the generation is re-read; production callers never pass it.
@@ -366,8 +382,37 @@ export async function inspectTarget(opts: {
           : { observedGeneration: error.observedGeneration }),
       });
     }
+    const fault = filesystemFaultCode(error);
+    if (fault !== null) {
+      return targetRefusalEnvelope({
+        reason:
+          fault === "EACCES" || fault === "EPERM"
+            ? "input_permission_denied"
+            : "input_unreadable",
+      });
+    }
     throw error;
   }
+}
+
+/** Shape of an errno code such as `EACCES` or `EISDIR`. */
+const ERRNO_CODE_PATTERN = /^E[A-Z0-9]+$/;
+
+/**
+ * The errno code of a Node/Bun filesystem or syscall error, or null for any
+ * other value. Such errors carry a string `code` and `syscall`; their
+ * `message` includes the absolute path, which is why it is never surfaced.
+ */
+function filesystemFaultCode(error: unknown): string | null {
+  if (
+    isRecord(error) &&
+    typeof error.code === "string" &&
+    ERRNO_CODE_PATTERN.test(error.code) &&
+    typeof error.syscall === "string"
+  ) {
+    return error.code;
+  }
+  return null;
 }
 
 type ValidatedSelector = {
@@ -836,8 +881,11 @@ const KNOWN_ERROR_CODES: ReadonlySet<string> = new Set(HACK_ERROR_CODES);
 /**
  * Parse a `hack project target --json` envelope. Returns a rebuilt envelope
  * containing only contract fields, or null when the value does not match the
- * provisional contract. Error envelopes with a known code but no `detail`
- * (the CLI's shared option-grammar refusals) are accepted as-is.
+ * provisional contract. The only error envelope accepted without a `detail`
+ * is an `E_USAGE` refusal (the CLI's shared option-grammar refusals, raised
+ * before the inspector runs). Any other detail-less error, such as an
+ * `E_UNEXPECTED` fault whose message is free OS text, is off contract and
+ * becomes null, so it is never passed on.
  */
 export function parseTargetInspectEnvelope(
   value: unknown
@@ -862,7 +910,9 @@ export function parseTargetInspectEnvelope(
   }
   const errorCode = code as HackErrorCode;
   if (detail === undefined) {
-    return { ok: false, error: { code: errorCode, message } };
+    return errorCode === "E_USAGE"
+      ? { ok: false, error: { code: errorCode, message } }
+      : null;
   }
   const parsedDetail = parseRefusalDetail(detail);
   if (!parsedDetail) {

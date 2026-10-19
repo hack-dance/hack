@@ -134,25 +134,31 @@ pub(super) fn verify_cleanup(
     environment_recovery::verify_graph_retired(engine.guest(), expected)
 }
 
-/// Compact this graph's confirmed-retired allocation records after ordinary cleanup. The caller
-/// holds the engine's mutation lease and has committed the cleaned receipt; every record must
-/// match a receipt container that is absent, and its guest slot must be absent.
-pub(super) fn compact_retired(
+/// Service-to-container bindings an environment-attached receipt's records must match; `None`
+/// when the graph never recorded an environment allocation.
+pub(super) fn bound_containers(receipt: &Receipt) -> Option<BTreeMap<String, String>> {
+    receipt.environment_attached.then(|| {
+        receipt
+            .resources
+            .values()
+            .filter(|r| r.kind == Kind::Container)
+            .map(|r| (r.key.clone(), r.name.clone()))
+            .collect()
+    })
+}
+
+/// Compact `run`'s confirmed-retired allocation records. The caller holds the engine's mutation
+/// lease, has already committed a cleanup or retirement, and no retained effect identity still
+/// binds this run's environment inventory (see `environment_recovery::compaction`). Every
+/// record must match `containers` with that container and its guest slot absent. A refusal is
+/// retained evidence, never a failure of the caller's committed cleanup.
+pub(super) fn compact_history(
     candidate: &Candidate,
     engine: &Engine<'_>,
-    receipt: &Receipt,
-) -> Result<(), CandidateError> {
-    if !receipt.environment_attached {
-        return Ok(());
-    }
-    let containers = receipt
-        .resources
-        .values()
-        .filter(|r| r.kind == Kind::Container)
-        .map(|r| (r.key.clone(), r.name.clone()))
-        .collect();
-    environment_recovery::compact_graph(candidate, engine.guest(), &receipt.run, &containers)?;
-    Ok(())
+    run: &str,
+    containers: &BTreeMap<String, String>,
+) -> environment_recovery::Settled {
+    environment_recovery::compact_graph(candidate, engine.guest(), run, containers).into()
 }
 
 pub(super) fn require_replay_supported(receipt: &Receipt) -> Result<(), CandidateError> {

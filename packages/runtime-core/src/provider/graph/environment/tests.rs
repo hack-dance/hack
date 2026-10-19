@@ -27,6 +27,101 @@ fn bound_receipt_never_silently_loses_its_redelivery_gate() {
     );
 }
 #[test]
+fn history_bindings_cover_only_attached_graph_containers() {
+    let mut receipt: Receipt = serde_json::from_value(json!({"version":1,"run":"a".repeat(32),"owner":"b".repeat(32),"namespace":"c".repeat(64),"plan_id":"d".repeat(64),"phase":"stopped-data-retained","readiness":{},"resources":{
+        "container:app":{"key":"app","kind":"container","name":"hkg-app","phase":"absent"},
+        "container:db":{"key":"db","kind":"container","name":"hkg-db","phase":"absent"},
+        "volume:data":{"key":"data","kind":"volume","name":"hkg-data","phase":"created"}
+    }})).unwrap();
+    assert_eq!(
+        bound_containers(&receipt),
+        None,
+        "no environment, no history"
+    );
+    receipt.environment_attached = true;
+    assert_eq!(
+        bound_containers(&receipt).unwrap(),
+        BTreeMap::from([
+            ("app".to_owned(), "hkg-app".to_owned()),
+            ("db".to_owned(), "hkg-db".to_owned()),
+        ])
+    );
+}
+
+/// Wiring guard. The trigger points need an owned VM and engine, so their effects are proven
+/// natively, not here; this only fails if a trigger is removed or moved past the point where
+/// the new generation allocates. The state machine itself is covered by compaction's tests.
+#[test]
+fn compaction_triggers_stay_wired_at_their_lease_points() {
+    fn body<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
+        let from = source.find(start).expect("function start");
+        let to = from + source[from..].find(end).expect("function end");
+        &source[from..to]
+    }
+    let cleanup = body(
+        include_str!("../mod.rs"),
+        "pub fn cleanup(",
+        "fn cleanup_owned(",
+    );
+    let committed = cleanup.find("cleanup_owned(").expect("cleanup effect");
+    let compacted = cleanup
+        .find("environment::compact_history(")
+        .expect("ordinary cleanup compacts");
+    assert!(
+        committed < compacted,
+        "compaction follows the committed cleanup"
+    );
+
+    let restore = body(
+        include_str!("../restore.rs"),
+        "fn restore_inputs(",
+        "fn retain_restore_failure(",
+    );
+    let retired = restore
+        .find("environment_recovery::retire(")
+        .expect("prior slots re-retired");
+    let captured = restore
+        .find("environment::bound_containers(&receipt)")
+        .expect("history bindings captured");
+    let replaced = restore
+        .find("*resource = prepared.resources[key].clone()")
+        .expect("fresh resources");
+    let prepared = restore
+        .find("driver.prepare(")
+        .expect("fresh owner prepare");
+    let compacted = restore
+        .find("environment::compact_history(")
+        .expect("restore compacts");
+    let allocated = restore
+        .find("session.create_resources(true)")
+        .expect("new generation allocates");
+    assert!(
+        retired < captured && captured < replaced,
+        "bindings of the retired generation"
+    );
+    assert!(
+        prepared < compacted && compacted < allocated,
+        "superseded, then allocate"
+    );
+
+    let relay = body(
+        include_str!("../host_relay.rs"),
+        "pub(super) fn cleanup_with_relay_expected(",
+        "pub fn resume_relay_cleanup(",
+    );
+    assert!(
+        !relay.contains("compact_history("),
+        "acknowledged relay cleanup re-verifies its inventory; it must not compact"
+    );
+
+    let archive = body(
+        include_str!("../environment.rs"),
+        "pub(super) fn archive_slots(",
+        "environment_recovery::archive_graph(",
+    );
+    assert!(archive.contains("environment_recovery::resume_graph("));
+}
+#[test]
 #[ignore = "Manual owned development VM, pinned Bun image, explicit candidate and external watchdog"]
 fn container_attachment_records_ownership_before_create_and_omits_values_from_metadata() {
     let candidate = candidate();

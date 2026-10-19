@@ -16,6 +16,17 @@
 //! 3. Retired slots of prior guest boots are folded into one sealed summary per boot. A prior
 //!    boot cannot allocate again, so the whole boot stays reserved without per-slot entries.
 //!
+//! Trigger points. Compaction rewrites the run's environment inventory, so it runs only where no
+//! retained effect identity still binds that inventory:
+//! - ordinary `graph cleanup` (no relay enrollment), right after its cleaned receipt commits;
+//! - graph restore (foreground redelivery and fresh-owner serve-restore), after every prior slot
+//!   is re-retired and the acknowledged stopped receipt is superseded on disk, before the new
+//!   generation allocates. Enrolled relay cleanup itself never compacts: its acknowledged
+//!   effect, which includes the inventory, is re-verified until a restore supersedes it;
+//! - archive, which only resumes an interrupted compaction.
+//!
+//! A refusal after a committed cleanup is [`Settled::Retained`], never a failure of that cleanup.
+//!
 //! Reservation: a retired slot, or any slot of a sealed boot, can never be recorded again,
 //! selected for delivery, retired as live, or counted as a live allocation. Records are never
 //! deleted to make room: an uncertain (pending), live, changed, misbound or foreign-owned record
@@ -68,6 +79,24 @@ pub(crate) struct Compaction {
     pub completed: usize,
     /// Prior boots folded into sealed reservations.
     pub sealed_boots: usize,
+}
+
+/// Outcome of compaction attempted after the caller's cleanup already committed. A refusal
+/// (uncertain or changed record, retired-slot cap, sealed-boot cap, malformed tombstone, I/O)
+/// reverts nothing and is not reported as a failure of that cleanup: every record it did not
+/// durably retire stays active as exact evidence, and the next confirmed cleanup, restore or
+/// archive retries. A run that keeps refusing eventually meets the active-record budget, whose
+/// admission refusal is the closed `environment_recovery` error.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Settled {
+    Compacted(Compaction),
+    Retained,
+}
+
+impl From<Result<Compaction, CandidateError>> for Settled {
+    fn from(result: Result<Compaction, CandidateError>) -> Self {
+        result.map_or(Self::Retained, Self::Compacted)
+    }
 }
 
 /// `Resume` only completes an interrupted compaction: it selects no new record and seals nothing,

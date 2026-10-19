@@ -1,6 +1,8 @@
 //! Filesystem-only tests. Guest absence is injected through `confirm`; no VM, engine,
 //! real HOME or process interruption is involved. Faults stop the state machine in-process.
-use super::super::{active_exec_slot_for, graph_slots_for, preflight_records, record_intent};
+use super::super::{
+    active_exec_slot_for, graph_slots_for, live_intent, preflight_records, record_intent,
+};
 use super::*;
 use std::{
     cell::Cell,
@@ -665,4 +667,215 @@ fn record_changed_after_tombstone_commit_is_retained_not_unlinked() {
     assert!(fixture.slots(RUN).is_err());
     assert!(fixture.compact_now(RUN).is_err());
     assert_eq!(fs::read(&target).unwrap(), replacement);
+}
+
+#[test]
+fn compacted_residue_and_replay_are_never_retired_as_live() {
+    let fixture = Fixture::new();
+    let intents = fixture.generation(RUN, CURRENT);
+    let slot = intents[0].slot.clone();
+    // Before compaction the record is a live allocation that retirement may act on.
+    assert!(
+        live_intent(&fixture.candidate, INCARNATION, &slot, None).unwrap() == intents[0],
+        "live record is retirable"
+    );
+    // Commit point 1 only: every record is exact residue of a durable tombstone.
+    assert!(
+        fixture
+            .compact(Mode::Compact, INCARNATION, CURRENT, RUN, stop_at(0))
+            .is_err()
+    );
+    assert!(fixture.active(&slot).exists());
+    let before = fixture.state();
+    assert!(live_intent(&fixture.candidate, INCARNATION, &slot, None).is_err());
+    assert_eq!(fixture.state(), before, "refusal is read-only");
+    // After completion, an exact replay of the retired record is refused the same way.
+    fixture.compact_now(RUN).unwrap();
+    write_raw(
+        &fixture.active(&slot),
+        &serde_json::to_vec_pretty(&intents[0]).unwrap(),
+    );
+    assert!(live_intent(&fixture.candidate, INCARNATION, &slot, None).is_err());
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn archived_copy_of_a_compacted_record_is_refused_by_inventory() {
+    let fixture = Fixture::new();
+    let intents = fixture.generation(RUN, CURRENT);
+    fixture.compact_now(RUN).unwrap();
+    let archive = fixture
+        .candidate
+        .state_root
+        .join("graph-environment-archive");
+    let inventory = || {
+        graph_inventory(
+            &fixture.candidate,
+            INCARNATION,
+            RUN,
+            &containers(RUN),
+            &archive,
+        )
+    };
+    state::private_directory(&archive).unwrap();
+    assert!(inventory().unwrap().is_empty());
+    // The archived directory has no residue rule: a compacted identity there is a copy.
+    state::write(
+        &archive.join(format!("{}.json", intents[0].slot)),
+        &intents[0],
+    )
+    .unwrap();
+    assert!(inventory().is_err());
+    fs::remove_file(archive.join(format!("{}.json", intents[0].slot))).unwrap();
+    // A fresh, unreserved archived record of the run is still ordinary inventory.
+    let fresh = fixture.intent(Some(RUN), CURRENT, 0);
+    state::write(&archive.join(format!("{}.json", fresh.slot)), &fresh).unwrap();
+    assert_eq!(inventory().unwrap().intents.len(), 1);
+}
+
+#[test]
+fn residue_with_an_uncertain_pending_record_refuses() {
+    let fixture = Fixture::new();
+    let intents = fixture.generation(RUN, CURRENT);
+    assert!(
+        fixture
+            .compact(Mode::Compact, INCARNATION, CURRENT, RUN, stop_at(0))
+            .is_err()
+    );
+    let tombstone = load(&fixture.candidate, RUN, INCARNATION).unwrap();
+    let slot = &intents[0].slot;
+    assert!(residue(&fixture.candidate, tombstone.as_ref(), slot).unwrap());
+    let pending = fixture.active(slot).with_extension("pending");
+    write_raw(&pending, &serde_json::to_vec(&intents[0]).unwrap());
+    assert!(residue(&fixture.candidate, tombstone.as_ref(), slot).is_err());
+    fs::remove_file(&pending).unwrap();
+    assert!(residue(&fixture.candidate, tombstone.as_ref(), slot).unwrap());
+}
+
+#[test]
+fn retired_slot_cap_refuses_rather_than_discards() {
+    let filled = |entries: usize| {
+        let fixture = Fixture::new();
+        let mut tombstone = Tombstone::new(RUN, INCARNATION);
+        for index in 0..entries {
+            tombstone.retired.insert(
+                format!(
+                    "hack-env-lease-{CURRENT}-{:032x}",
+                    u32::MAX as usize - index
+                ),
+                "e".repeat(64),
+            );
+        }
+        commit(
+            &directory(&fixture.candidate),
+            &fixture.tombstone_path(RUN),
+            &tombstone,
+        )
+        .unwrap();
+        fixture.generation(RUN, CURRENT);
+        fixture
+    };
+    // Exactly at the cap the compaction is admitted.
+    let fixture = filled(MAX_RETIRED_SLOTS - SERVICES);
+    assert_eq!(fixture.compact_now(RUN).unwrap().compacted, SERVICES);
+    let tombstone = load(&fixture.candidate, RUN, INCARNATION).unwrap().unwrap();
+    assert_eq!(tombstone.retired.len(), MAX_RETIRED_SLOTS);
+    // One past the cap refuses before any write: nothing is discarded or unlinked.
+    let fixture = filled(MAX_RETIRED_SLOTS - SERVICES + 1);
+    let before = fixture.state();
+    let refused = fixture.compact_now(RUN);
+    assert!(refused.is_err());
+    assert_eq!(fixture.state(), before);
+    assert_eq!(
+        fixture.slots(RUN).unwrap().len(),
+        SERVICES,
+        "still live inventory"
+    );
+    // After a committed cleanup that refusal is retained evidence, not a cleanup failure.
+    assert_eq!(Settled::from(refused), Settled::Retained);
+}
+
+/// HACK-1193 state-machine proof: more than 256 start/cleanup/restore generations of a
+/// 14-service graph across several guest boots. Every generation is admitted through the
+/// ordinary record path; active records and per-generation scans stay at one generation;
+/// retained bytes stay bounded. Guest and container absence is injected; this does not
+/// measure native cleanup time or VM disk allocation.
+#[test]
+fn repeated_generations_beyond_256_stay_bounded_by_active_allocations() {
+    const GENERATIONS: usize = 260;
+    const PER_BOOT: usize = 32;
+    let fixture = Fixture::new();
+    let foreign = fixture.foreign();
+    let untouched = fixture.snapshot(&root(&fixture.candidate));
+    let boot =
+        |generation: usize| format!("{:08x}-2222-4222-8222-222222222222", generation / PER_BOOT);
+    let mut peak_tombstone = 0;
+    for generation in 0..GENERATIONS {
+        let boot = boot(generation);
+        let intents: Vec<Intent> = (0..SERVICES)
+            .map(|service| fixture.intent(Some(RUN), &boot, service))
+            .collect();
+        // The whole batch is admitted; one record goes through the full durable record path
+        // (budget plus standalone and tombstone reservations). The others are written without
+        // per-file fsync only to keep this long test fast; their bytes are identical.
+        preflight_records(&fixture.candidate, SERVICES).unwrap();
+        for (index, intent) in intents.iter().enumerate() {
+            if index == 0 {
+                record_intent(&fixture.candidate, intent).unwrap();
+            } else {
+                assert!(!reserved(&fixture.candidate, RUN, INCARNATION, &intent.slot).unwrap());
+                write_raw(
+                    &fixture.active(&intent.slot),
+                    &serde_json::to_vec_pretty(intent).unwrap(),
+                );
+            }
+        }
+        // Cleanup and the next restore see only the active generation, never history.
+        assert_eq!(
+            fixture.slots(RUN).unwrap().len(),
+            SERVICES,
+            "generation {generation}"
+        );
+        let outcome = fixture
+            .compact(Mode::Compact, INCARNATION, &boot, RUN, |_| Ok(()))
+            .unwrap();
+        assert_eq!(outcome.compacted, SERVICES);
+        assert_eq!(
+            outcome.sealed_boots,
+            usize::from(generation % PER_BOOT == 0 && generation > 0)
+        );
+        assert!(fixture.slots(RUN).unwrap().is_empty());
+        assert_eq!(
+            fs::read_dir(root(&fixture.candidate)).unwrap().count(),
+            foreign.len(),
+            "generation {generation}"
+        );
+        let metadata = fs::metadata(fixture.tombstone_path(RUN)).unwrap();
+        peak_tombstone = peak_tombstone.max(metadata.blocks() * 512);
+    }
+    let tombstone = load(&fixture.candidate, RUN, INCARNATION).unwrap().unwrap();
+    let boots = GENERATIONS.div_ceil(PER_BOOT);
+    assert_eq!(tombstone.sealed.len(), boots - 1);
+    assert!(
+        tombstone
+            .sealed
+            .values()
+            .all(|sealed| sealed.slots as usize == PER_BOOT * SERVICES)
+    );
+    assert_eq!(
+        tombstone.retired.len(),
+        (GENERATIONS - (boots - 1) * PER_BOOT) * SERVICES
+    );
+    // Retained bytes follow the current boot's generations, not total history: at most one
+    // boot of per-slot entries plus one summary per sealed boot.
+    assert!(
+        peak_tombstone <= 256 * 1024,
+        "allocated {peak_tombstone} bytes"
+    );
+    assert!(preflight_records(&fixture.candidate, MAX_INTENT_ENTRIES - foreign.len()).is_ok());
+    let now = fixture.snapshot(&root(&fixture.candidate));
+    assert_eq!(now, untouched, "foreign records unchanged");
+    eprintln!(
+        "generations={GENERATIONS} services={SERVICES} boots={boots} peak_tombstone_allocated_bytes={peak_tombstone}"
+    );
 }

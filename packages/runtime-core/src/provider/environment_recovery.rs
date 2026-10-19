@@ -3,7 +3,7 @@ mod compaction;
 mod retention;
 use super::{environment::EnvironmentLease, lifecycle::OwnedGuest, state};
 use crate::{Candidate, CandidateError};
-pub(super) use compaction::{compact_graph, resume_graph};
+pub(super) use compaction::{Settled, compact_graph, resume_graph};
 pub use retention::{RetiredExport, export_retired};
 use serde::{Deserialize, Serialize};
 use std::{fs, path::PathBuf};
@@ -594,14 +594,23 @@ pub(super) fn retire(
     if retention::reserved(candidate, slot)? {
         return retention::verify_retired(candidate, guest, slot, lease);
     }
-    // A compacted graph slot is retained history; never treat it as a live allocation.
-    if let Some(binding) = read_mode(candidate, slot, guest.incarnation(), lease, false)?.graph {
-        if compaction::reserved(candidate, &binding.run, guest.incarnation(), slot)? {
+    let intent = live_intent(candidate, guest.incarnation(), slot, lease)?;
+    retire_intent(guest, &intent)
+}
+/// The recorded intent a retirement may act on. A slot reserved by its graph's compaction
+/// tombstone is retained history (exact residue or a replay), never a live allocation.
+fn live_intent(
+    candidate: &Candidate,
+    incarnation: &str,
+    slot: &str,
+    lease: Option<&EnvironmentLease>,
+) -> Result<Intent, CandidateError> {
+    if let Some(binding) = read_mode(candidate, slot, incarnation, lease, false)?.graph {
+        if compaction::reserved(candidate, &binding.run, incarnation, slot)? {
             return Err(error());
         }
     }
-    let intent = read(candidate, slot, guest.incarnation(), lease)?;
-    retire_intent(guest, &intent)
+    read(candidate, slot, incarnation, lease)
 }
 fn retire_intent(guest: &OwnedGuest<'_>, intent: &Intent) -> Result<(), CandidateError> {
     let slot = &intent.slot;

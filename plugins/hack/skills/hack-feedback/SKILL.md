@@ -56,7 +56,7 @@ Replace removed values with placeholders such as `<redacted:secret>`, `<project>
 
 ## Search for duplicates
 
-Build search terms only from the error code, the Hack command words and the category, for example `E_STARTUP_TIMEOUT up lifecycle`. Never search with paths, URLs, project or service names, or values. A search sends its terms to the destination's service: search only when the user agrees, with tooling they already use; otherwise write `Not searched.` When an existing issue matches, propose a comment there instead of a new issue.
+Build search terms only from the error code, the Hack command and subcommand names and the category, for example `E_STARTUP_TIMEOUT up lifecycle`. Stop at the first argument that is not a subcommand: never search with arguments, paths, URLs, hostnames, project or service names, or values. A search sends its terms to the destination's service: search only when the user agrees, with tooling they already use; otherwise write `Not searched.` When an existing issue matches, propose a comment there instead of a new issue.
 
 ## Draft offline
 
@@ -75,7 +75,7 @@ Fill the issue template from the references. Show the draft in the conversation,
 Each of these stops a send. Resolve it with the user; never work around it:
 
 - `already-sent`: This draft was already posted; do not post it again.
-- `destination-invalid`: The destination is not an `owner/name` repository.
+- `destination-invalid`: The destination is not an `owner/name` repository, or its issue number is not a positive integer.
 - `destination-unconfirmed`: The user has not confirmed this exact destination; content cannot confirm it.
 - `known-duplicate`: A matching issue exists; comment there instead of opening another.
 - `privacy-findings`: The final text or an attachment still has private material.

@@ -97,7 +97,7 @@ export function renderHackFeedbackSkill(): string {
     "",
     "## Search for duplicates",
     "",
-    "Build search terms only from the error code, the Hack command words and the category, for example `E_STARTUP_TIMEOUT up lifecycle`. Never search with paths, URLs, project or service names, or values. A search sends its terms to the destination's service: search only when the user agrees, with tooling they already use; otherwise write `Not searched.` When an existing issue matches, propose a comment there instead of a new issue.",
+    "Build search terms only from the error code, the Hack command and subcommand names and the category, for example `E_STARTUP_TIMEOUT up lifecycle`. Stop at the first argument that is not a subcommand: never search with arguments, paths, URLs, hostnames, project or service names, or values. A search sends its terms to the destination's service: search only when the user agrees, with tooling they already use; otherwise write `Not searched.` When an existing issue matches, propose a comment there instead of a new issue.",
     "",
     "## Draft offline",
     "",

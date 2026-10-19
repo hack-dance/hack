@@ -1,5 +1,8 @@
 import { createHash } from "node:crypto";
 
+import { type CliSpec, resolveCommand } from "../cli/command.ts";
+import { HACK_ERROR_CODES } from "../lib/cli-result.ts";
+
 /**
  * Privacy-reviewed Hack feedback drafts (HACK-1138).
  *
@@ -150,6 +153,7 @@ export type RedactionKind =
   | "url"
   | "path"
   | "email"
+  | "hostname"
   | "ip-address"
   | "digest";
 
@@ -185,10 +189,19 @@ export const REDACTION_KINDS: readonly FeedbackVocabularyEntry<RedactionKind>[] 
     },
     {
       id: "path",
-      summary: "Home, user, temporary and other identifying paths.",
+      summary:
+        "Home, user, temporary, volume, workspace and other identifying absolute paths.",
     },
     { id: "email", summary: "Email addresses and SSH remotes." },
-    { id: "ip-address", summary: "IP addresses other than loopback." },
+    {
+      id: "hostname",
+      summary:
+        "Routed `*.hack` hosts and private or local hostnames written without a scheme.",
+    },
+    {
+      id: "ip-address",
+      summary: "IPv4 and IPv6 addresses other than loopback.",
+    },
     {
       id: "digest",
       summary: "Long hexadecimal digests; hashing is not anonymization.",
@@ -288,8 +301,26 @@ type ValueRule = {
   readonly accept?: (match: string) => boolean;
 };
 
-const EMBEDDED_INSTRUCTION_LINE =
-  /\bignore (?:all |any |the )?(?:previous|prior|above|earlier) instructions\b|\b(?:assistant|agent|claude|codex|ai)\b[,:]\s*(?:please\s+)?(?:run|post|send|open|execute|delete|upload|approve)\b|\b(?:post|send|upload|forward|submit|email)\s+(?:this|these|the|your|all)?\s*(?:issue|report|feedback|logs?|files?|secrets?|env|tokens?|credentials?)\b|\b(?:pre-?approved|already approved)\b|\bno (?:need to (?:ask|confirm)|approval (?:is )?(?:needed|required))\b|\bcurl\s[^\n|]*\|\s*(?:ba|z)?sh\b|\byou (?:must|should) now\b/i;
+/**
+ * Lines in logs or tool output that address the agent. Each pattern aims at
+ * an instruction, not at ordinary prose about Hack: "Hack failed to send the
+ * report to the daemon" stays, while "Send the logs to ..." at the start of a
+ * line or "Claude, please file this ..." goes.
+ */
+const EMBEDDED_INSTRUCTION_PATTERNS: readonly RegExp[] = [
+  /\bignore (?:all |any |the )?(?:previous|prior|above|earlier) instructions\b/i,
+  // Direct address: "Assistant: run ...", "Hey Claude, please file this ...".
+  /\b(?:assistant|agent|claude|codex|ai|llm|model)\b[,:]\s*(?:please\s+)?(?:run|post|send|open|file|create|submit|execute|delete|upload|approve|forward|email|push)\b/i,
+  // Imperative at the start of a line or sentence, or after please/now/then.
+  /(?:^\s*|[.!?;:]\s+|\b(?:please|now|then)\s+)(?:post|send|upload|forward|submit|email|file)\s+(?:this|these|the|your|all|it)?\s*(?:issue|report|feedback|logs?|files?|secrets?|env|tokens?|credentials?|draft)\b/i,
+  // Urgent obligations addressed to the agent: "the agent must now run ...".
+  /\b(?:you|assistant|agent|claude|codex|ai|llm|model)\s+(?:must|should|needs? to|has to)\s+(?:now|immediately)\b/i,
+  // Claimed approvals: only the user, in the conversation, can approve.
+  /\b(?:pre-?approved|already approved)\b/i,
+  /\bno (?:need to (?:ask|confirm)|approval (?:is )?(?:needed|required))\b/i,
+  /\buser (?:has )?(?:already )?(?:said|says) (?:yes|ok|okay)\b/i,
+  /\bcurl\s[^\n|]*\|\s*(?:ba|z)?sh\b/i,
+];
 
 const RAW_LOG_LINE =
   /^\s*(?:\[?\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}|\[\d{2}:\d{2}:\d{2}|(?:level|lvl|ts|time)=\S|[a-z0-9][\w.-]*\s+\|\s)/i;
@@ -297,16 +328,39 @@ const RAW_LOG_LINE =
 const NEWLINE = /\r?\n/;
 const PUBLIC_FEEDBACK_URL =
   /^https:\/\/github\.com\/hack-dance\/hack(?:[/#]|$)/;
-const URL_QUERY = /[?]/;
+const PUBLIC_FEEDBACK_PATH = "/hack-dance/hack";
+/** Queries, dot segments, encoded dots and backslashes can leave the repository. */
+const UNSAFE_URL_PART = /[?\\]|\.\.|%2e/i;
+const SAFE_URL_FRAGMENT = /^(?:#[A-Za-z0-9_-]*)?$/;
 const HAS_DIGIT = /\d/;
 const HAS_UPPER = /[A-Z]/;
 const HAS_LOWER = /[a-z]/;
+const HAS_HEX = /[0-9a-f]/i;
+const COLON = /:/g;
+const IPV6_FULL_COLONS = 7;
 
 const SECRET_KEY_NAME =
   "[A-Za-z0-9_.-]*(?:TOKEN|SECRET|PASSWORD|PASSWD|PASSPHRASE|API_?KEY|PRIVATE_?KEY|CREDENTIALS?|ACCESS_?KEY)[A-Za-z0-9_.-]*";
 
 /**
- * Value rules, applied in order. A value that already is a placeholder
+ * A complete placeholder value such as `<name>` or `<redacted:secret>`. It is
+ * exempt only when it is the whole value: it must end at whitespace, closing
+ * punctuation or the end of the text. `<x>leaked` is a value, not a
+ * placeholder, so a leading `<` never hides what follows it.
+ */
+const PLACEHOLDER = String.raw`<[^<>\s]+>(?=[\s,;)\]}"'\x60]|[.:!?](?:\s|$)|$)`;
+/** A double- or single-quoted value that is exactly one placeholder. */
+const QUOTED_PLACEHOLDER_DOUBLE = String.raw`<[^<>"\n]*>"`;
+const QUOTED_PLACEHOLDER_SINGLE = String.raw`<[^<>'\n]*>'`;
+/** An assignment value: quoted, or bare up to whitespace or a separator. */
+const ASSIGNED_VALUE = String.raw`(?:"(?!${QUOTED_PLACEHOLDER_DOUBLE})[^"\n]*"|'(?!${QUOTED_PLACEHOLDER_SINGLE})[^'\n]*'|(?!["'])(?!${PLACEHOLDER})[^\s,;]+)`;
+
+/** Reserved, private or local suffixes; a host under one never leaves the machine. */
+const PRIVATE_HOST_SUFFIXES =
+  "hack|corp|internal|intranet|local|localdomain|localhost|lan|home|private|test";
+
+/**
+ * Value rules, applied in order. A value that is exactly a placeholder
  * (`<...>`) never matches, so sanitizing is idempotent and documented
  * placeholders such as `<name>` survive.
  */
@@ -335,9 +389,12 @@ const VALUE_RULES: readonly ValueRule[] = [
   },
   {
     kind: "secret",
-    pattern: /\b(Bearer|Basic)\s+(?!<)[A-Za-z0-9._~+/=-]{12,}/g,
+    pattern: new RegExp(
+      String.raw`\b(Bearer|Basic)\s+(?!${PLACEHOLDER})[A-Za-z0-9._~+/=<>-]{12,}`,
+      "g"
+    ),
     replace: (_match, scheme) => `${scheme} ${redactionPlaceholder("secret")}`,
-    accept: (match) => HAS_DIGIT.test(match),
+    accept: (match) => HAS_DIGIT.test(match) || match.includes("<"),
   },
   {
     kind: "secret",
@@ -347,33 +404,48 @@ const VALUE_RULES: readonly ValueRule[] = [
   },
   {
     kind: "secret",
+    // GitHub-style `Authorization: token <value>` and other header schemes.
+    pattern: new RegExp(
+      String.raw`(\bAuthorization\s*[:=]\s*["']?(?:token|bearer|basic|digest)\s+)(?!${PLACEHOLDER})[^\s"'\x60,;]+`,
+      "gi"
+    ),
+    replace: (_match, header) => `${header}${redactionPlaceholder("secret")}`,
+  },
+  {
+    kind: "secret",
     pattern: /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g,
     replace: () => redactionPlaceholder("secret"),
   },
   {
     kind: "secret",
-    pattern:
-      /(--(?:password|passwd|passphrase|token|secret|api-key|apikey|access-key)(?:=|\s+))(?![-<])\S+/gi,
+    pattern: new RegExp(
+      String.raw`(--(?:password|passwd|passphrase|token|secret|api-key|apikey|access-key)(?:=|\s+))(?!-)(?!${PLACEHOLDER})\S+`,
+      "gi"
+    ),
     replace: (_match, flag) => `${flag}${redactionPlaceholder("secret")}`,
   },
   {
     kind: "secret",
     pattern: new RegExp(
-      `(["']?\\b${SECRET_KEY_NAME}["']?\\s*[=:]\\s*)(?:"(?!<)[^"\\n]*"|'(?!<)[^'\\n]*'|(?![<"'])[^\\s,;]+)`,
+      String.raw`(["']?\b${SECRET_KEY_NAME}["']?\s*[=:]\s*)${ASSIGNED_VALUE}`,
       "gi"
     ),
     replace: (_match, key) => `${key}${redactionPlaceholder("secret")}`,
   },
   {
     kind: "config-value",
-    pattern:
-      /(\b[A-Z][A-Z0-9_]{1,}=)(?:"(?!<)[^"\n]*"|'(?!<)[^'\n]*'|(?![<"'])[^\s,;]+)/g,
+    pattern: new RegExp(
+      String.raw`(\b[A-Z][A-Z0-9_]{1,}=)${ASSIGNED_VALUE}`,
+      "g"
+    ),
     replace: (_match, key) => `${key}${redactionPlaceholder("config-value")}`,
   },
   {
     kind: "config-value",
-    pattern:
-      /("[A-Z][A-Z0-9_]{1,}"\s*:\s*)(?:"(?!<)[^"\n]*"|(?![<"\s])[^\s,}]+)/g,
+    pattern: new RegExp(
+      String.raw`("[A-Z][A-Z0-9_]{1,}"\s*:\s*)(?:"(?!${QUOTED_PLACEHOLDER_DOUBLE})[^"\n]*"|(?!["\s])(?!${PLACEHOLDER})[^\s,}]+)`,
+      "g"
+    ),
     replace: (_match, key) => `${key}"${redactionPlaceholder("config-value")}"`,
   },
   {
@@ -394,6 +466,18 @@ const VALUE_RULES: readonly ValueRule[] = [
     replace: () => redactionPlaceholder("path"),
   },
   {
+    // Other absolute roots that hold checkouts, volumes or a user's home.
+    kind: "path",
+    pattern:
+      /(?<![\w.~/-])\/(?:root|srv|Volumes|workspaces?|mnt|media|data|code|projects?|var\/www)\/[^\s<>"'`)]+/g,
+    replace: () => redactionPlaceholder("path"),
+  },
+  {
+    kind: "path",
+    pattern: /(?<![\w.~/-])[A-Za-z]:\\[^\s<>"'`)]+/g,
+    replace: () => redactionPlaceholder("path"),
+  },
+  {
     kind: "path",
     pattern: /(?<![\w.~])~\/(?!\.hack(?:-next)?(?:\/|\s|$))[^\s<>"'`)]+/g,
     replace: () => redactionPlaceholder("path"),
@@ -410,15 +494,33 @@ const VALUE_RULES: readonly ValueRule[] = [
     replace: () => redactionPlaceholder("email"),
   },
   {
+    // Routed `<service>.<project>.hack` hosts and private hosts written
+    // without a scheme; runs after URLs and emails, which took theirs.
+    kind: "hostname",
+    pattern: new RegExp(
+      String.raw`(?<![\w.@/-])(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+(?:${PRIVATE_HOST_SUFFIXES})(?![\w-]|\.[\w-])`,
+      "gi"
+    ),
+    replace: () => redactionPlaceholder("hostname"),
+  },
+  {
     kind: "ip-address",
     pattern: /\b(?:\d{1,3}\.){3}\d{1,3}\b/g,
     replace: () => redactionPlaceholder("ip-address"),
     accept: (ip) => !(ip.startsWith("127.") || ip === "0.0.0.0"),
   },
   {
+    kind: "ip-address",
+    pattern: /(?<![\w:.])(?:[0-9a-f]{0,4}:){2,7}[0-9a-f]{0,4}(?![\w:])/gi,
+    replace: () => redactionPlaceholder("ip-address"),
+    accept: looksLikeRoutableIpv6,
+  },
+  {
+    // Full and truncated digests: a short prefix of a hash still identifies.
     kind: "digest",
-    pattern: /\b[a-f0-9]{32,}\b/gi,
+    pattern: /\b[a-f0-9]{16,}\b/gi,
     replace: () => redactionPlaceholder("digest"),
+    accept: (digest) => digest.length >= 32 || HAS_DIGIT.test(digest),
   },
   {
     kind: "ciphertext",
@@ -428,9 +530,44 @@ const VALUE_RULES: readonly ValueRule[] = [
   },
 ];
 
-/** Hack's public repository pages stay; query strings never do. */
+/**
+ * Hack's public repository pages stay. The URL must resolve, after dot
+ * segments are applied, under the repository on github.com, with no
+ * credentials, query, encoded dots or free-text fragment.
+ */
 function isPublicFeedbackUrl(url: string): boolean {
-  return PUBLIC_FEEDBACK_URL.test(url) && !URL_QUERY.test(url);
+  if (!PUBLIC_FEEDBACK_URL.test(url) || UNSAFE_URL_PART.test(url)) {
+    return false;
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return false;
+  }
+  return (
+    parsed.origin === "https://github.com" &&
+    parsed.username === "" &&
+    parsed.password === "" &&
+    SAFE_URL_FRAGMENT.test(parsed.hash) &&
+    (parsed.pathname === PUBLIC_FEEDBACK_PATH ||
+      parsed.pathname.startsWith(`${PUBLIC_FEEDBACK_PATH}/`))
+  );
+}
+
+/**
+ * An IPv6 candidate is an address when it is compressed (`::`) or has all
+ * eight groups. Clock times such as `10:00:01` have neither; loopback and the
+ * unspecified address stay.
+ */
+function looksLikeRoutableIpv6(candidate: string): boolean {
+  const compressed = candidate.includes("::");
+  const colons = candidate.match(COLON)?.length ?? 0;
+  if (!(compressed || colons === IPV6_FULL_COLONS)) {
+    return false;
+  }
+  const lower = candidate.toLowerCase();
+  return lower !== "::" && lower !== "::1" && HAS_HEX.test(lower);
 }
 
 /** Mixed-case alphanumerics without path separators read as an encoded blob. */
@@ -461,7 +598,7 @@ function removeUnsafeLines(
   const kept: string[] = [];
   let inLogRun = false;
   for (const line of text.split(NEWLINE)) {
-    if (EMBEDDED_INSTRUCTION_LINE.test(line)) {
+    if (EMBEDDED_INSTRUCTION_PATTERNS.some((pattern) => pattern.test(line))) {
       addCount(counts, "embedded-instruction");
       kept.push(redactionPlaceholder("embedded-instruction"));
       inLogRun = false;
@@ -711,29 +848,44 @@ export function renderFeedbackDraft(
 }
 
 const ERROR_CODE = /\bE_[A-Z0-9_]+\b/g;
-const COMMAND_WORD = /^[a-z][a-z-]*$/;
 const WHITESPACE = /\s+/;
+const KNOWN_ERROR_CODES: ReadonlySet<string> = new Set(HACK_ERROR_CODES);
 
 /**
- * Sanitized duplicate-search terms: error codes, the Hack command words and
- * the category. Values, flags, placeholders, paths, URLs and project names
- * never become search terms.
+ * Sanitized duplicate-search terms: registered error codes, the Hack command
+ * path and the category.
+ *
+ * Every term comes from a closed vocabulary. Error codes must be in
+ * {@link HACK_ERROR_CODES}, and command words are only the leading tokens
+ * that resolve to a command path in `cli` (normally `CLI_SPEC`); the walk
+ * stops at the first token that is not a subcommand. So positional arguments
+ * such as project, service, branch or script names, and every value, flag,
+ * placeholder, path or URL, never become search terms. `cli` is injected so
+ * this module does not import the whole command tree.
  */
-export function buildDuplicateSearchTerms(
-  input: Pick<FeedbackDraftInput, "category" | "observed" | "environment">
-): string {
-  const codes = [...new Set(input.observed.match(ERROR_CODE) ?? [])];
-  const words: string[] = [];
-  const tokens = input.environment.command.trim().split(WHITESPACE);
-  if (tokens[0] === "hack") {
-    for (const token of tokens.slice(1)) {
-      if (!COMMAND_WORD.test(token)) {
-        break;
-      }
-      words.push(token);
-    }
-  }
-  return [...codes, ...words, input.category].join(" ");
+export function buildDuplicateSearchTerms(opts: {
+  readonly cli: CliSpec;
+  readonly draft: Pick<
+    FeedbackDraftInput,
+    "category" | "observed" | "environment"
+  >;
+}): string {
+  const { draft } = opts;
+  const codes = [
+    ...new Set(
+      (draft.observed.match(ERROR_CODE) ?? []).filter((code) =>
+        KNOWN_ERROR_CODES.has(code)
+      )
+    ),
+  ];
+  const tokens = draft.environment.command.trim().split(WHITESPACE);
+  const words =
+    tokens[0] === "hack"
+      ? resolveCommand(opts.cli, tokens.slice(1)).path.map(
+          (command) => command.name
+        )
+      : [];
+  return [...codes, ...words, draft.category].join(" ");
 }
 
 export type FeedbackAction =
@@ -805,7 +957,8 @@ export const FEEDBACK_GATE_REFUSALS: readonly FeedbackVocabularyEntry<FeedbackGa
     },
     {
       id: "destination-invalid",
-      summary: "The destination is not an `owner/name` repository.",
+      summary:
+        "The destination is not an `owner/name` repository, or its issue number is not a positive integer.",
     },
     {
       id: "destination-unconfirmed",
@@ -936,10 +1089,19 @@ function payloadIssue(
   return unlisted ? "attachment-unlisted" : undefined;
 }
 
+/** GitHub issue numbers are positive integers. */
+function isIssueNumber(issue: number): boolean {
+  return Number.isSafeInteger(issue) && issue > 0;
+}
+
 function destinationIssue(
   request: FeedbackSendRequest
 ): FeedbackGateRefusal | undefined {
-  if (!REPOSITORY.test(request.destination.repository)) {
+  if (
+    !REPOSITORY.test(request.destination.repository) ||
+    (request.destination.kind === "issue-comment" &&
+      !isIssueNumber(request.destination.issue))
+  ) {
     return "destination-invalid";
   }
   const confirmation = request.confirmation;
@@ -1015,9 +1177,10 @@ export type FeedbackSendOutcome =
 /**
  * Attempt one send. A refusal never calls the sender and leaves the state
  * unchanged. An attempt consumes its approval whether it succeeds or fails,
- * so a retry needs a fresh review; a thrown sender error counts as a failed
- * attempt. Nothing retries automatically, and the caller's draft is never
- * discarded here.
+ * so a retry needs a fresh review. A sender error counts as a failed attempt
+ * whether the sender throws synchronously or returns a rejected promise, so
+ * the approval is consumed either way. Nothing retries automatically, and the
+ * caller's draft is never discarded here.
  */
 export async function attemptFeedbackSend(opts: {
   readonly state: FeedbackSendState;
@@ -1038,11 +1201,14 @@ export async function attemptFeedbackSend(opts: {
     };
   }
   const approvalId = opts.request.approval?.id ?? "";
-  const result = await opts
-    .send({
-      payload: opts.request.payload,
-      destination: opts.request.destination,
-    })
+  // Calling the sender inside `then` turns a synchronous throw into a rejection.
+  const result = await Promise.resolve()
+    .then(() =>
+      opts.send({
+        payload: opts.request.payload,
+        destination: opts.request.destination,
+      })
+    )
     .catch((): "failed" => "failed");
   const state: FeedbackSendState = {
     status: result === "sent" ? "sent" : "send-failed",

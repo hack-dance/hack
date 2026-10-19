@@ -800,7 +800,8 @@ async function prepareStack(opts: {
   await chmod(mcpCommand, 0o755);
 
   const list = async (kind: ResourceKind, filters: readonly string[]) => {
-    const args = kind === "container" ? ["ps", "-aq"] : [kind, "ls", "-q"];
+    const args =
+      kind === "container" ? ["ps", "-aq", "--no-trunc"] : [kind, "ls", "-q"];
     return (
       await docker([
         ...args,

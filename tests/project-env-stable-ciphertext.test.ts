@@ -1,6 +1,7 @@
 import { afterEach, expect, test } from "bun:test";
 import {
   chmod,
+  chown,
   lstat,
   mkdir,
   mkdtemp,
@@ -20,7 +21,10 @@ import {
   PROJECT_CONFIG_FILENAME,
   PROJECT_ENV_KEY_FILENAME,
 } from "../src/constants.ts";
-import { writeTextFileAtomicIfChanged } from "../src/lib/fs.ts";
+import {
+  AtomicWriteRefusedError,
+  writeTextFileAtomicIfChanged,
+} from "../src/lib/fs.ts";
 import {
   ensureHackDirGitignore,
   resolveProjectEnvConfig,
@@ -40,6 +44,10 @@ import { privateCliEnv } from "./helpers/private-cli-env.ts";
 const REPO_ROOT = resolve(import.meta.dir, "..");
 const ENTRYPOINT = resolve(REPO_ROOT, "index.ts");
 const WORKER = resolve(import.meta.dir, "fixtures/project-env-set-worker.ts");
+const RENAME_FAILURE_WORKER = resolve(
+  import.meta.dir,
+  "fixtures/atomic-write-rename-failure-worker.ts"
+);
 const FIRST = "synthetic-first-6f1c";
 const SECOND = "synthetic-second-92ad";
 
@@ -299,18 +307,126 @@ test("a symlinked layer keeps its link and the write lands at the link target", 
 
 test("a write that fails after staging removes its staging file", async () => {
   const repo = await createRepo();
-  // A directory at the target path: staging succeeds, the commit rename fails.
+  const target = resolve(repo.projectDir, "occupied.yaml");
+  await writeFile(target, "synthetic: before\n");
+
+  const worker = Bun.spawn([process.execPath, RENAME_FAILURE_WORKER, target], {
+    cwd: repo.projectRoot,
+    env: privateCliEnv({ root: repo.root }),
+    stdin: "pipe",
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  worker.stdin.write("synthetic: after\n");
+  await worker.stdin.end();
+  const [stdout, exitCode] = await Promise.all([
+    new Response(worker.stdout).text(),
+    worker.exited,
+  ]);
+  expect({ stdout, exitCode }).toEqual({ stdout: "failed\n", exitCode: 0 });
+  expect(await readFile(target, "utf8")).toBe("synthetic: before\n");
+  expect(await tmpSiblings(repo.projectDir)).toEqual([]);
+}, 30_000);
+
+test("a directory at the target is refused before anything is staged", async () => {
+  const repo = await createRepo();
   const target = resolve(repo.projectDir, "occupied.yaml");
   await mkdir(target);
 
-  await expect(
+  const refusal = await refusalOf(
     writeTextFileAtomicIfChanged(target, "synthetic: content\n")
-  ).rejects.toThrow();
+  );
+  expect(refusal.reason).toBe("not_regular_file");
   expect((await stat(target)).isDirectory()).toBe(true);
-  expect(
-    (await readdir(repo.projectDir)).filter((name) => name.endsWith(".tmp"))
-  ).toEqual([]);
+  expect(await tmpSiblings(repo.projectDir)).toEqual([]);
 });
+
+const RUNS_AS_ROOT =
+  typeof process.getuid === "function" && process.getuid() === 0;
+
+/** Synthetic layer holding a key the failed write must not drop. */
+const OTHER_LAYER =
+  "version: 1\nenvironment: default\nsecretsprovider: project_key\nvalues:\n  global:\n    OTHER_SETTING: synthetic-other-31b7\n";
+
+// Root bypasses permission bits, so these refusals only apply to other users.
+test.skipIf(RUNS_AS_ROOT)(
+  "an existing layer that cannot be read is refused, not replaced",
+  async () => {
+    const repo = await createRepo();
+    await writeFile(repo.envFile, OTHER_LAYER);
+    await chmod(repo.envFile, 0o000);
+    try {
+      const refusal = await refusalOf(setSecret(repo, FIRST));
+      expect(refusal.reason).toBe("unreadable");
+      expect(refusal.message).not.toContain(FIRST);
+      expect(await tmpSiblings(repo.projectDir)).toEqual([]);
+    } finally {
+      await chmod(repo.envFile, 0o600);
+    }
+    expect(await readFile(repo.envFile, "utf8")).toBe(OTHER_LAYER);
+  }
+);
+
+test.skipIf(RUNS_AS_ROOT)(
+  "a readable layer that is not writable is refused, not replaced",
+  async () => {
+    const repo = await createRepo();
+    await writeFile(repo.envFile, OTHER_LAYER);
+    await chmod(repo.envFile, 0o444);
+    const before = await stat(repo.envFile);
+
+    const refusal = await refusalOf(setSecret(repo, FIRST));
+    expect(refusal.reason).toBe("not_writable");
+    expect(await readFile(repo.envFile, "utf8")).toBe(OTHER_LAYER);
+    const after = await stat(repo.envFile);
+    expect(after.ino).toBe(before.ino);
+    expect(after.mode & 0o777).toBe(0o444);
+    expect(await tmpSiblings(repo.projectDir)).toEqual([]);
+  }
+);
+
+test("a rewrite keeps the layer's group", async () => {
+  const repo = await createRepo();
+  await setSecret(repo, FIRST);
+  const current = (await stat(repo.envFile)).gid;
+  // Any other group this process belongs to can be assigned without root.
+  const other = (process.getgroups?.() ?? []).find((gid) => gid !== current);
+  if (other === undefined) {
+    return;
+  }
+  await chown(repo.envFile, (await stat(repo.envFile)).uid, other);
+
+  expect((await setSecret(repo, SECOND)).changed).toBe(true);
+  expect((await stat(repo.envFile)).gid).toBe(other);
+  expect(await resolvedToken(repo)).toBe(SECOND);
+});
+
+test("a dangling symlink layer is replaced by a regular file", async () => {
+  const repo = await createRepo();
+  await symlink(resolve(repo.root, "missing.yaml"), repo.envFile);
+
+  expect((await setSecret(repo, FIRST)).changed).toBe(true);
+  expect((await lstat(repo.envFile)).isFile()).toBe(true);
+  expect(await resolvedToken(repo)).toBe(FIRST);
+});
+
+async function refusalOf(
+  pending: Promise<unknown>
+): Promise<AtomicWriteRefusedError> {
+  try {
+    await pending;
+  } catch (error: unknown) {
+    if (error instanceof AtomicWriteRefusedError) {
+      return error;
+    }
+    throw error;
+  }
+  throw new Error("Expected the write to be refused");
+}
+
+async function tmpSiblings(directory: string): Promise<string[]> {
+  return (await readdir(directory)).filter((name) => name.endsWith(".tmp"));
+}
 
 for (const layer of ["tracked", "local"] as const) {
   test(`a ${layer} write killed before its commit rename leaves the layer resolvable and git clean`, async () => {
@@ -439,3 +555,34 @@ test("repeat `env set --secret --value-stdin` leaves git status clean", async ()
     " M .hack/hack.env.default.yaml\n"
   );
 }, 60_000);
+
+test.skipIf(RUNS_AS_ROOT)(
+  "`env set` on an unreadable layer fails and keeps the layer",
+  async () => {
+    const repo = await createRepo();
+    await writeFile(repo.envFile, OTHER_LAYER);
+    await chmod(repo.envFile, 0o000);
+    let exitCode: number;
+    try {
+      exitCode = await runCli(
+        repo,
+        [
+          "env",
+          "set",
+          "API_TOKEN",
+          "--secret",
+          "--value-stdin",
+          "--path",
+          repo.projectRoot,
+        ],
+        `${FIRST}\n`
+      );
+    } finally {
+      await chmod(repo.envFile, 0o600);
+    }
+    expect(exitCode).not.toBe(0);
+    expect(await readFile(repo.envFile, "utf8")).toBe(OTHER_LAYER);
+    expect(await tmpSiblings(repo.projectDir)).toEqual([]);
+  },
+  60_000
+);

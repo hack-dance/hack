@@ -411,6 +411,15 @@ input and without writing anything:
 `.hack/hack.env.<overlay>.local.yaml`) instead of the shared repo env file — use it for
 per-checkout values you don't want to commit.
 
+Repeating `hack env add` or `hack env set` with the value already stored is a no-op: when
+the existing secret decrypts to the same value under the current key, its ciphertext is
+kept, so the file stays byte-identical and Git shows no change. A different value, a
+plain entry becoming secret, or an entry that does not decrypt under the current key gets
+new ciphertext with a fresh IV. Each env file write goes to a temporary file in the same
+directory and replaces the file by rename, so an interrupted write leaves the previous
+file in place. Each command writes one key; a script that sets several keys is not atomic
+across them.
+
 If you omit `key`, `value`, or `--service`, `hack env add` prompts for them interactively.
 Pass `--no-interactive` (or set `HACK_NO_INTERACTIVE=1`) for scripted/agent usage: the
 command applies documented defaults or fails fast with `E_INTERACTIVE_REQUIRED` instead of

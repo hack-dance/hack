@@ -1,4 +1,16 @@
-import { lstat, mkdir, stat } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import {
+  constants,
+  type FileHandle,
+  lstat,
+  mkdir,
+  open,
+  realpath,
+  rename,
+  stat,
+  unlink,
+} from "node:fs/promises";
+import { basename, dirname, join } from "node:path";
 
 export async function pathExists(absolutePath: string): Promise<boolean> {
   try {
@@ -87,6 +99,75 @@ export async function writeTextFileIfChanged(
   }
   await writeTextFile(absolutePath, content);
   return { changed: true };
+}
+
+/**
+ * Replaces `absolutePath` with `content` only when the text differs, publishing
+ * the new contents atomically.
+ *
+ * Commit point: a uniquely named sibling is created exclusively (no symlink
+ * follow), written and fsynced, then renamed over the target. A process that
+ * dies before the rename leaves the previous complete file in place and at most
+ * an orphaned `.<name>.<uuid>.tmp` sibling that no reader selects; the staging
+ * file is removed on every failure this process observes. Directory fsync is
+ * best effort.
+ *
+ * An existing target keeps its permission bits, and an existing symlink keeps
+ * pointing where it did: the replacement lands at the link's resolved path, as
+ * a plain write through the link would. A new file gets the umask default.
+ */
+export async function writeTextFileAtomicIfChanged(
+  absolutePath: string,
+  content: string
+): Promise<{ readonly changed: boolean }> {
+  const existing = await readTextFile(absolutePath);
+  if (existing === content) {
+    return { changed: false };
+  }
+  const target =
+    existing === null ? absolutePath : await realpath(absolutePath);
+  const mode = existing === null ? null : (await stat(target)).mode & 0o7777;
+  const staging = join(
+    dirname(target),
+    `.${basename(target)}.${randomUUID()}.tmp`
+  );
+  const file = await open(
+    staging,
+    constants.O_CREAT |
+      constants.O_EXCL |
+      constants.O_NOFOLLOW |
+      constants.O_WRONLY,
+    0o666
+  );
+  let committed = false;
+  try {
+    if (mode !== null) {
+      await file.chmod(mode);
+    }
+    await file.writeFile(content, "utf8");
+    await file.sync();
+    await rename(staging, target);
+    committed = true;
+  } finally {
+    await file.close();
+    if (!committed) {
+      await unlink(staging).catch(() => undefined);
+    }
+  }
+  await syncDirectoryBestEffort(dirname(target));
+  return { changed: true };
+}
+
+async function syncDirectoryBestEffort(directory: string): Promise<void> {
+  let handle: FileHandle | null = null;
+  try {
+    handle = await open(directory, constants.O_RDONLY);
+    await handle.sync();
+  } catch {
+    // Some filesystems refuse directory fsync; the file itself is synced.
+  } finally {
+    await handle?.close().catch(() => undefined);
+  }
 }
 
 /**

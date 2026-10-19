@@ -68,7 +68,7 @@ test("starting dispositions match the recorded decisions", () => {
     "HACK-P05": "deferred",
     "HACK-P06": "deferred",
     "HACK-P07": "partial",
-    "HACK-P08": "deferred",
+    "HACK-P08": "partial",
     "HACK-P09": "partial",
     "HACK-P10": "partial",
     "HACK-P11": "partial",

@@ -107,8 +107,16 @@ export const patternP02PortableToolchainScenario: Scenario = {
       });
     const checkout = async (cwd: string, expected: string) => {
       const result = await passes(cwd, ["sh", "-c", CHECKOUT_PROBE]);
+      // Read only the probe's own marker lines. Without global DNS/TLS the
+      // legacy `hack run` path also prints its internal DNS/TLS notices on
+      // stdout (observed on the hosted runner); that is reported separately.
+      const probed = result.stdout
+        .split("\n")
+        .map((line) => line.trim())
+        .filter((line) => /^(?:git|checkout)=/.test(line))
+        .join("\n");
       expect({
-        that: result.stdout.trim() === expected,
+        that: probed === expected,
         message: "toolchain must mount the invoking checkout",
         result,
       });

@@ -432,9 +432,10 @@ async function checkBoundedOutcomes(session: Session): Promise<void> {
   });
 
   // Event cutoff: exactly maxEvents log events; other events do not count.
+  // Three replayed ticks (the boot line is older) plus two live ones.
   const eventTail = await session.call("hack.project.logs.tail", {
     service: "ticker",
-    tail: 50,
+    tail: 3,
     maxEvents: 5,
     maxMs: 30_000,
   });
@@ -451,7 +452,7 @@ async function checkBoundedOutcomes(session: Session): Promise<void> {
       eventTicks.length === 5 &&
       strictlyOrdered(eventTicks) &&
       Number(eventTail.data?.duration_ms) < 30_000,
-    message: `ticker tail must stop at exactly 5 log events: ${summarize(eventTail)}`,
+    message: `ticker tail must stop at exactly 5 log events, all ticks (${eventTicks.length} ticks): ${summarize(eventTail)}`,
   });
 }
 

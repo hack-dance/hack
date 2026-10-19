@@ -73,8 +73,9 @@ revision.
 
 ## Workloads
 
-Two workloads run in every lane. A cohort records each workload's pin, and every lane
-in that cohort uses the same pin.
+Two workloads run in every lane, and each workload is compared against every required
+baseline. A cohort records each workload's pin, and every lane in that cohort uses the
+same pin.
 
 **Event Agent.** The actual application configuration, not a reduced copy. The cohort
 records the application commit and a digest of its configuration. Its expected shape is
@@ -100,8 +101,9 @@ A lifecycle counts as correct only when:
 - a source edit is served within the watcher acknowledgement window.
 
 A lane that cannot run a workload correctly records a failure for that lifecycle. It
-is not dropped and its timings are not used. A lane is `not_applicable` only when the
-lane cannot express the workload at all, and that reason is recorded.
+is not dropped and its timings are not used. A baseline lane is `not_applicable` for a
+metric only when it cannot express the workload at all, and that reason is recorded.
+The candidate is never `not_applicable`: it is the subject of every budget.
 
 ## Cache classes
 
@@ -119,15 +121,28 @@ Classes are never mixed in one statistic.
 
 One lifecycle is: warm startup to full readiness and correctness, the workload's check
 and build/test task, an exec, a source reload, a restart to full readiness and data
-readback, a steady idle window, sustained application load, shutdown and cleanup
-readback. Each phase is timed and reported on its own:
+readback, a steady idle window, sustained application load, a retaining shutdown, a
+restore (an ordinary start after that shutdown, to full readiness with the per-run data
+marker or row read back), and a final shutdown with cleanup readback. Each phase is
+timed and reported on its own:
 
-`cold-startup`, `warm-startup`, `restart`, `reload`, `build-test`, `exec`,
+`cold-startup`, `warm-startup`, `restart`, `restore`, `reload`, `build-test`, `exec`,
 `steady-idle`, `sustained-load`, `shutdown`, `cleanup`.
 
 Readiness means the workload's correctness checks pass, not that a process started or
 a port opened. Cleanup readback inventories owned containers, processes, sockets and
 allocated disk, and keeps persistent data.
+
+## Scale points
+
+Each lane is also measured at 1, 8 and 32 branch instances of the small fixture, and
+with 1 and 32 MCP clients connected, using the same accounting, order and sample counts.
+A lane that has no MCP server records `not_applicable` with its reason. Revision 1
+judges budgets only at the single-instance matched lifecycle (`{"branch_instances": 1}`).
+It sets no separate numerical budget for the other scale points: their results are
+reported per lane, and every regression at any scale point is reported and blocks
+acceptance under [Admission and failures](#admission-and-failures). The evaluator
+refuses a summary for another scale point rather than judge it.
 
 ## Order and repetitions
 
@@ -165,6 +180,11 @@ Print the same schedule with
   59 samples is the smallest count that reaches 95%.
 - A statistic with fewer samples than planned, or fewer than these floors, is
   inconclusive. It is never a pass.
+- A statistic is computed only from admitted samples. If any planned sample was
+  flagged, or its lifecycle failed, or the summary does not account for flags and
+  failures, the statistic is inconclusive; a failed candidate lifecycle is a failure.
+  Samples are never rerun or replaced to fill a gap: a summary that accounts for more
+  samples than were planned is refused.
 
 ## Measurement boundary
 
@@ -228,31 +248,63 @@ document.
 | --- | --- | --- | --- |
 | `info_latency_ms` | p95 | ≤ 100 ms | both |
 | `warm_admission_ms` | p95 | ≤ 250 ms | both |
-| `cached_status_1000_objects_ms` | p95 | ≤ 150 ms, with 1,000 cached objects | small fixture |
-| `idle_control_plane_core_fraction` | mean over 600 s | < 1% of one core | small fixture |
+| `cached_status_1000_objects_ms` | p95 | ≤ 150 ms, with 1,000 cached objects | both |
+| `idle_control_plane_core_fraction` | mean over 600 s | < 1% of one core | both |
 | `watcher_ack_ms` | p95 | ≤ 200 ms | small fixture |
+
+Only the watcher budget is limited to the small fixture, as in the program acceptance
+document. A later revision may apply a budget to more workloads, but never fewer. The
+checker also refuses a changed statistic, a raised ceiling, a lower observer factor, a
+changed p95 method or confidence, a workload that drops a required baseline, a changed
+workload shape, a missing phase, a missing scale point and a Compose lane that differs
+from the frozen host engine.
 
 These are acceptance thresholds, not measured achievements.
 
 ## Judging a summary
 
-`--evaluate SUMMARY` reads one workload's retained summary and returns one verdict per
-budget and baseline: `pass`, `fail`, `not_applicable`, `inconclusive_coverage`,
-`inconclusive_samples`, `inconclusive_observer` or `inconclusive_missing`. It exits 0
-only when every verdict is `pass` or `not_applicable`. It exits 1 when any verdict
-fails or is inconclusive, and 2 when the protocol or summary is invalid. Diagnostics
-are closed codes and never repeat input values.
+`--evaluate SUMMARY` reads one workload's retained summary for the `warm` class at the
+single-instance scale point. It returns one verdict per budget and baseline:
 
-A summary has this shape:
+| Verdict | Meaning |
+| --- | --- |
+| `pass` | the statistic meets the budget |
+| `fail` | the statistic misses the budget, or a candidate lifecycle failed |
+| `not_applicable` | a baseline cannot express the workload, with a recorded reason |
+| `inconclusive_coverage` | fewer admitted samples than planned |
+| `inconclusive_samples` | fewer samples than the protocol's floor |
+| `inconclusive_admission` | a sample was flagged, a baseline lifecycle failed, or flags and failures were not accounted |
+| `inconclusive_observer` | the difference is within 2 times the observer's cost, or that cost is not reported |
+| `inconclusive_missing` | the lane, metric or planned count is missing |
+| `inconclusive_no_baseline` | every baseline is `not_applicable`, so there is no comparison |
+
+It exits 0 only when every verdict is `pass` or `not_applicable`, and a comparative
+budget always has at least one applicable baseline or an `inconclusive_no_baseline`
+record. It exits 1 when any verdict fails or is inconclusive. It exits 2, without
+judging, when the protocol or summary is invalid: for example a summary for another
+cache class or scale point, a candidate marked `not_applicable`, a `not_applicable`
+record that carries samples, a negative sample, a planned count that is not a positive
+integer, or a value of the wrong type. Diagnostics are closed codes and never repeat
+input values.
+
+A summary has this shape. `samples` lists only admitted samples; `flagged` and `failed`
+count the planned samples left out, so `samples` plus both counts never exceeds
+`expected`:
 
 ```json
 {
   "protocol_revision": 1,
   "workload": "small-fixture",
+  "cache_class": "warm",
+  "scale": { "branch_instances": 1 },
   "observer_cost": { "cpu_seconds_per_task": 0.02 },
   "lanes": {
-    "candidate": { "cpu_seconds_per_task": { "samples": [1.2], "expected": 10 } },
-    "compose": { "cpu_seconds_per_task": { "not_applicable": true } }
+    "candidate": {
+      "cpu_seconds_per_task": { "samples": [1.2], "expected": 10, "flagged": 0, "failed": 0 }
+    },
+    "compose": {
+      "cpu_seconds_per_task": { "not_applicable": true, "reason": "no matched task" }
+    }
   }
 }
 ```
@@ -272,6 +324,9 @@ python3 -m unittest discover -s tests/python -p test_application_benchmark_proto
 ```
 
 The unit tests check the frozen file, the rotation balance, the p95 sample floor and
-that this page carries every frozen artifact and budget. They also prove that a
-weakened budget, a bad digest, an unbalanced order, too few samples or a missing
-observer policy is refused. They run offline, locally and in CI.
+that this page carries every frozen artifact, budget, phase and verdict. They also
+prove that each weakening listed under [Budgets](#budgets), a bad digest, an unbalanced
+order, too few samples and a missing observer policy is refused; that missing,
+flagged, `not_applicable`-only or cold-cache data is never accepted; and that any
+malformed protocol or summary value yields a closed code rather than a traceback. They
+run offline, locally and in CI.

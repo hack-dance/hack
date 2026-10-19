@@ -118,6 +118,7 @@
     "cold-startup",
     "warm-startup",
     "restart",
+    "restore",
     "reload",
     "build-test",
     "exec",
@@ -126,6 +127,11 @@
     "shutdown",
     "cleanup"
   ],
+  "scale_points": {
+    "branch_instances": [1, 8, 32],
+    "mcp_clients": [1, 32],
+    "judged": { "branch_instances": 1 }
+  },
   "cache_classes": {
     "budget_class": "warm",
     "warm": "engine or VM running; images, dependency and build caches populated by a prior correct lifecycle of the same lane; application volumes retained",
@@ -195,15 +201,13 @@
         "metric": "cached_status_1000_objects_ms",
         "statistic": "p95",
         "max": 150,
-        "inclusive": true,
-        "workload": "small-fixture"
+        "inclusive": true
       },
       {
         "metric": "idle_control_plane_core_fraction",
         "statistic": "window_mean",
         "max": 0.01,
-        "inclusive": false,
-        "workload": "small-fixture"
+        "inclusive": false
       },
       {
         "metric": "watcher_ack_ms",

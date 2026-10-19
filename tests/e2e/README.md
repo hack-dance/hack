@@ -360,7 +360,15 @@ Each replay and the startup diagnostic also report a closed member-key histogram
 for the bridge the `network-member-id` predicate inspected: counts of `hex64`,
 `epPrefixed` (Docker `ep-` placeholder endpoints) and `other` keys, plus the fixed
 service names observed in the `restarting` state. The keys themselves are never
-emitted. This evidence is for classifying the flake; the ownership guard is unchanged.
+emitted. This evidence classifies the flake; the diagnostics do not change the guard.
+
+The startup readiness guard itself admits one `ep-` placeholder only in the first scan
+of a query, and only for a selected on-failure container that the same scan inspected
+as `restarting` or `running`. `running` is included because containers are inspected
+before the bridge, so the retry container can exit and begin its restart between the
+two reads. That container stays unready, and the recheck scan must see its container
+ID. A placeholder that persists, or one that names any other container, still refuses
+with `network-member-id`.
 
 ## Native config routing qualification
 

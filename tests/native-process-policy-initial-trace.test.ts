@@ -849,7 +849,7 @@ test("startup diagnostic classifies refused member keys instead of hiding the ca
 });
 
 /** The captured docker-e2e after-compose shape: three container-ID members and one `ep-` placeholder for the restarting retry service. */
-test("trace replay re-observes a restarting endpoint placeholder member and refuses an unresolved or non-restarting one", async () => {
+test("trace replay re-observes a restarting or just-restarted endpoint placeholder member and refuses an unresolved one", async () => {
   const root = await mkdtemp(join(tmpdir(), "process-initial-placeholder-"));
   const services = ["forced", "graceful", "reaper", "retry"] as const;
   const ids = {
@@ -1057,21 +1057,60 @@ test("trace replay re-observes a restarting endpoint placeholder member and refu
       memberKeyClasses: { hex64: 3, epPrefixed: 1, other: 0 },
       restartingServices: ["retry"],
     });
+    // HACK-1271 capture (run 39279573566): the retry container was inspected `running`
+    // before it exited and began its on-failure restart, so the later bridge read in the
+    // same scan held only its placeholder. The recheck resolves it, so startup re-observes.
+    const runningResolved = queries(
+      { retryKey: placeholder, retryState: "running" },
+      { retryKey: ids.retry, retryState: "running" }
+    );
     const running = await replayProcessPolicyInitialOwnership({
       directory: join(root, "running"),
-      queries: queries(
-        { retryKey: placeholder, retryState: "running" },
-        { retryKey: ids.retry, retryState: "running" }
-      ),
+      queries: runningResolved,
       selection: fleet,
       mode: "startup",
     });
     expect(running).toEqual({
+      outcome: "unready",
+      code: null,
+      reason: null,
+      topologyPredicate: null,
+      consumed: runningResolved.length,
+      protocolMatched: true,
+      memberKeyClasses: { hex64: 4, epPrefixed: 0, other: 0 },
+      restartingServices: [],
+    });
+    const runningStrict = await replayProcessPolicyInitialOwnership({
+      directory: join(root, "running-strict"),
+      queries: runningResolved,
+      selection: fleet,
+      mode: "strict",
+    });
+    expect(runningStrict).toEqual({
       outcome: "refused",
       code: "E_NATIVE_COMPOSE_OWNERSHIP",
       reason: "topology",
       topologyPredicate: "network-member-id",
       consumed: 6,
+      protocolMatched: true,
+      memberKeyClasses: { hex64: 3, epPrefixed: 1, other: 0 },
+      restartingServices: [],
+    });
+    const runningUnresolved = await replayProcessPolicyInitialOwnership({
+      directory: join(root, "running-unresolved"),
+      queries: queries(
+        { retryKey: placeholder, retryState: "running" },
+        { retryKey: placeholder, retryState: "running" }
+      ),
+      selection: fleet,
+      mode: "startup",
+    });
+    expect(runningUnresolved).toEqual({
+      outcome: "refused",
+      code: "E_NATIVE_COMPOSE_OWNERSHIP",
+      reason: "topology",
+      topologyPredicate: "network-member-id",
+      consumed: 9,
       protocolMatched: true,
       memberKeyClasses: { hex64: 3, epPrefixed: 1, other: 0 },
       restartingServices: [],
@@ -1082,6 +1121,8 @@ test("trace replay re-observes a restarting endpoint placeholder member and refu
       owned,
       unresolved,
       running,
+      runningStrict,
+      runningUnresolved,
     });
     expect(serialized).not.toContain(owner);
     expect(serialized).not.toContain(placeholder);

@@ -528,9 +528,83 @@ test("a restarting endpoint placeholder member must resolve to a container ID in
   expect(await Bun.file(join(root, "mutated")).exists()).toBe(false);
 });
 
+/**
+ * Captured docker-e2e shape (HACK-1271): the same-scan container inspect runs before the
+ * network inspect, so the retry container is observed `running` and then exits and begins
+ * its on-failure restart before the bridge is read, which shows only its `ep-` placeholder.
+ */
+test("a placeholder for a running on-failure container inspected before its restart re-observes instead of refusing", async () => {
+  const fixture = restartingPlaceholder();
+  const retry = fixture.container?.[3];
+  if (!retry) {
+    throw new Error("Missing owned placeholder fixture");
+  }
+  retry.state = "running";
+  retry.exitCode = 0;
+  // Resolved within the budget: the recheck observes the retry container ID instead.
+  fixture.mode = "restart-placeholder-transition";
+  await prepare(fixture);
+  const before = await inspectCount();
+  expect(
+    await observeNativeComposeStartupOwned(placeholderOptions, ["retry"])
+  ).toBeNull();
+  expect((await inspectCount()) - before).toBe(6);
+  expect(
+    (await observeNativeComposeStartupOwned(placeholderOptions, ["retry"]))
+      ?.containers
+  ).toMatchObject([
+    { id: "1".repeat(64), state: "running" },
+    { id: "2".repeat(64), state: "running" },
+    { id: RETRY_ID, service: "retry", state: "running" },
+    { id: ID, state: "running" },
+  ]);
+  // The placeholder never grants effect authority, and strict/saved reads never admit it.
+  await prepare(fixture);
+  await expectRefusal(
+    placeholderOptions,
+    "E_NATIVE_COMPOSE_OWNERSHIP",
+    "topology",
+    "network-member-id"
+  );
+  await prepare(fixture);
+  await expect(
+    observeSavedNativeComposeOwned(placeholderOptions)
+  ).rejects.toBeInstanceOf(NativeComposeOwnershipError);
+  // Unresolved past the scan budget: the placeholder persists into the recheck scan.
+  fixture.mode = undefined;
+  await prepare(fixture);
+  const unresolved = await observeNativeComposeStartupOwned(
+    placeholderOptions,
+    ["retry"]
+  ).catch((error: unknown) => error);
+  expect(unresolved).toBeInstanceOf(NativeComposeOwnershipError);
+  expect(nativeComposeOwnershipRefusal(unresolved)).toBe("topology");
+  expect(nativeComposeTopologyPredicate(unresolved)).toBe("network-member-id");
+  expect(String(unresolved)).not.toContain(PLACEHOLDER_KEY);
+  // A running container with no placeholder and no membership remains fenced.
+  const memberless = restartingPlaceholder();
+  const memberlessRetry = memberless.container?.[3];
+  const memberlessNetwork = memberless.network?.[0];
+  if (!(memberlessRetry && memberlessNetwork)) {
+    throw new Error("Missing owned placeholder fixture");
+  }
+  memberlessRetry.state = "running";
+  delete (memberlessNetwork.containers as Record<string, unknown>)[
+    PLACEHOLDER_KEY
+  ];
+  await prepare(memberless);
+  const fenced = await observeNativeComposeStartupOwned(placeholderOptions, [
+    "retry",
+  ]).catch((error: unknown) => error);
+  expect(fenced).toBeInstanceOf(NativeComposeOwnershipError);
+  expect(nativeComposeTopologyPredicate(fenced)).toBe(
+    "live-endpoint-membership"
+  );
+  expect(await Bun.file(join(root, "mutated")).exists()).toBe(false);
+});
+
 test("endpoint placeholders for non-restarting, unknown, duplicate or memberless containers refuse", async () => {
   for (const change of [
-    "running",
     "created",
     "exited",
     "unknown-name",

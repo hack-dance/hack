@@ -103,7 +103,7 @@ export function renderAgentClientCapabilitySection({
   const lines = [
     GENERATED_BEGIN,
     "",
-    `Matrix version ${AGENT_CLIENT_CAPABILITY_MATRIX_VERSION}, observed ${AGENT_CLIENT_CAPABILITY_OBSERVED_ON}.`,
+    `Matrix version ${AGENT_CLIENT_CAPABILITY_MATRIX_VERSION}, latest observation ${AGENT_CLIENT_CAPABILITY_OBSERVED_ON}. Older cells retain their recorded source and client versions.`,
     "",
     "### Clients",
     "",

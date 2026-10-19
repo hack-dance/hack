@@ -590,8 +590,10 @@ performance guarantee or claim about fairness between workloads.
 Two native frontends exist. An authored `.hack/hack.project.json` project is owned
 by `src/lib/native-authored-command.ts`, which admits only the bounded macOS slices
 in the [authored command contract](../reference/native-authored-commands.md):
-foreground `up`, owner-mediated `down` and `down --recover`, saved-run `ps`, finite
-`logs --no-follow` and noninteractive `exec`; `run` and `restart` refuse there. The
+foreground `up` and `restart`, owner-mediated `down` and `down --recover`, saved-run
+`ps`, finite `logs --no-follow`, noninteractive `exec` and bounded one-off `run`.
+One-off `run` refuses members with source, persistent-data or private-env mounts;
+`restart` requires a proven stop before a fresh foreground start. The
 rest of this section describes the older Compose-file native frontend for
 `.hack/hack.config.json` projects with a Compose file, which keeps its own
 command coverage below.

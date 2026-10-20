@@ -57,6 +57,7 @@ import {
 } from "../mcp/install.ts";
 import { type DisplayStatusItem, display } from "../ui/display.ts";
 import { logger } from "../ui/logger.ts";
+import { handleSetupMigrate, setupMigrateSpec } from "./setup-migrate.ts";
 
 const optCheck = defineOption({
   name: "check",
@@ -253,6 +254,7 @@ export const setupCommand = defineCommand({
     withHandler(codexSpec, handleSetupCodex),
     withHandler(agentsSpec, handleSetupAgents),
     withHandler(syncSpec, handleSetupSync),
+    withHandler(setupMigrateSpec, handleSetupMigrate),
     withHandler(mcpSpec, handleSetupMcp),
   ],
 } as const);

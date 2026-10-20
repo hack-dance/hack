@@ -229,7 +229,7 @@ fn ensure_pinned(
             }
         };
         let (_, pin) = registry_image::reference(&reference)?;
-        if acquired.source_digest != pin {
+        if acquired.source_digest != pin.as_str() {
             return Err(refused(
                 "Acquired image does not match the requested immutable reference.",
             ));
@@ -303,7 +303,7 @@ mod tests {
         fs::write(path, b"fixture").unwrap();
         fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
         Ok(registry_image::AcquiredImage {
-            source_digest: registry_image::reference(reference)?.1.into(),
+            source_digest: registry_image::reference(reference)?.1,
             manifest_digest: format!("sha256:{}", "b".repeat(64)),
             image_id: format!("sha256:{}", "c".repeat(64)),
             archive_sha256: key("fixture"),
@@ -461,6 +461,16 @@ mod tests {
         assert!(ensure(&f.1, "untrusted/thing:bad tag").is_err());
         assert!(ensure(&f.1, &pin(1)).is_err());
         assert!(ensure(&f.1, "fixture/image:latest").is_err());
+        // Docker Hub shorthand passes reference admission and stops at the absent
+        // runtime; an unacquirable registry refuses before any runtime check.
+        assert_ne!(
+            ensure(&f.1, "alpine:3.21").unwrap_err().code,
+            "registry_image"
+        );
+        assert_eq!(
+            ensure(&f.1, "ghcr.io/fixture/image:1").unwrap_err().code,
+            "registry_image"
+        );
         assert!(!f.1.state_root.join("artifacts/images").exists());
     }
     #[test]

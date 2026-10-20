@@ -56,8 +56,8 @@ import {
 } from "./native-project-inputs.ts";
 import { writePrivateEnvFileIfChanged } from "./private-env-file.ts";
 import {
-  createPrivateFileExclusive,
   decodeCanonicalBase64,
+  publishPrivateFileExclusive,
   readBoundedPrivateFile,
 } from "./private-file.ts";
 import { readProjectDefaultEnvConfig } from "./project.ts";
@@ -66,6 +66,7 @@ import {
   assertLegacyProjectInputFamily,
   ProjectInputSelectionError,
 } from "./project-input-selection.ts";
+import { withProjectsRegistryLock } from "./projects-registry-lock.ts";
 import {
   isNativeManagedLocalTracked,
   resolvePrimaryLocalProjectDir,
@@ -2865,26 +2866,40 @@ async function readNativeProjectEnvKeyFile(opts: {
   });
 }
 
+const PROJECT_ENV_KEY_READ_ATTEMPTS = 10;
+const PROJECT_ENV_KEY_READ_RETRY_DELAY_MS = 25;
+
 /**
  * Legacy key files are refused unless they are regular, non-symlink, bounded
  * UTF-8 files, so a committed `.hack.secret.key` symlink never selects another
  * file as the key. Directory components keep their legacy spelling (temporary
  * and home directories are often reached through symlinks); only the final
  * component is pinned. Absent and whitespace-only files return null.
+ *
+ * A read that overlaps a concurrent creator's publication can observe the
+ * file's metadata change (the publisher drops its staging link) and refuse.
+ * While the entry is still a regular file the read is retried for a bounded
+ * period (about a quarter second); a persistent refusal still throws.
  */
 async function readLegacyProjectEnvKeyFile(opts: {
   readonly path: string;
 }): Promise<string | null> {
-  try {
-    return await readBoundedPrivateFile({
-      path: opts.path,
-      directories: [],
-      canonical: false,
-      maxBytes: NATIVE_CONFIG_INPUT_LIMIT,
-      refusal: projectEnvKeyFileError,
-    });
-  } catch {
-    throw projectEnvKeyFileError();
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      return await readBoundedPrivateFile({
+        path: opts.path,
+        directories: [],
+        canonical: false,
+        maxBytes: NATIVE_CONFIG_INPUT_LIMIT,
+        refusal: projectEnvKeyFileError,
+      });
+    } catch {
+      const entry = await lstat(opts.path).catch(() => null);
+      if (attempt >= PROJECT_ENV_KEY_READ_ATTEMPTS || !entry?.isFile()) {
+        throw projectEnvKeyFileError();
+      }
+      await Bun.sleep(PROJECT_ENV_KEY_READ_RETRY_DELAY_MS);
+    }
   }
 }
 
@@ -2952,8 +2967,60 @@ export type EnsureProjectEnvSecretKeyResult = {
  * symlinks, a git-tracked selected or adopted key is refused before any write,
  * and new key files are created exclusively with mode 0600 (an existing entry,
  * including a dangling symlink, is never replaced or followed).
+ *
+ * Concurrency: when no key exists, creation in a git checkout runs under a
+ * cooperative lock at `<git common dir>/.hack.secret.key.lock`, so concurrent
+ * first users across primary and linked checkouts converge on one key. Legacy
+ * v4 writers do not take this lock.
  */
 export async function ensureProjectEnvSecretKey(opts: {
+  readonly projectRoot: string;
+}): Promise<EnsureProjectEnvSecretKeyResult> {
+  await assertLegacyProjectInputFamily({ projectRoot: opts.projectRoot });
+  const sharedLocation = await resolveProjectEnvSharedKeyLocation({
+    projectRoot: opts.projectRoot,
+  });
+  if (
+    sharedLocation === null ||
+    (await pathExists(resolveProjectEnvKeyPath(opts))) ||
+    (await pathExists(sharedLocation.path))
+  ) {
+    return await ensureProjectEnvSecretKeyUnlocked(opts);
+  }
+  // No key yet. The primary checkout mints a checkout-local key and a linked
+  // worktree mints a shared one, so concurrent first users in different
+  // checkouts would each select a different key. One cooperative lock in the
+  // git common dir serializes creation; under it the full lookup runs again
+  // and adopts a key another checkout created meanwhile.
+  let started = false;
+  try {
+    return await withProjectsRegistryLock({
+      lockPath: `${sharedLocation.path}.lock`,
+      label: "project env key",
+      run: async () => {
+        started = true;
+        return await ensureProjectEnvSecretKeyUnlocked(opts);
+      },
+    });
+  } catch (error: unknown) {
+    if (started || !isProjectEnvKeyLockUnavailable(error)) {
+      throw error;
+    }
+    // The git dir cannot hold a lock (for example it is read-only): create
+    // the key unserialized, as before; the writer's own fallbacks apply.
+    return await ensureProjectEnvSecretKeyUnlocked(opts);
+  }
+}
+
+function isProjectEnvKeyLockUnavailable(error: unknown): boolean {
+  return (
+    isRecord(error) &&
+    typeof error.code === "string" &&
+    ["EACCES", "ENOENT", "EPERM", "EROFS"].includes(error.code)
+  );
+}
+
+async function ensureProjectEnvSecretKeyUnlocked(opts: {
   readonly projectRoot: string;
 }): Promise<EnsureProjectEnvSecretKeyResult> {
   await assertLegacyProjectInputFamily({ projectRoot: opts.projectRoot });
@@ -3099,10 +3166,11 @@ async function writeProjectEnvKeyWithFallback(opts: {
 }
 
 /**
- * Creates the key file exclusively (O_CREAT|O_EXCL|O_NOFOLLOW, mode 0600,
- * fsync) and returns the key text now stored at `path`. When the path is
- * already occupied, a valid untracked regular key file (e.g. a concurrent
- * writer's) is adopted; anything else, including a symlink, is refused.
+ * Publishes the key file only when the path is free (a fsynced mode-0600
+ * sibling linked into place, so no reader ever sees an empty or partial key)
+ * and returns the key text now stored at `path`. When the path is already
+ * occupied, a valid untracked regular key file (e.g. a concurrent writer's)
+ * is adopted; anything else, including a symlink, is refused.
  */
 async function writeProjectEnvKeyFile(opts: {
   readonly projectRoot: string;
@@ -3112,16 +3180,16 @@ async function writeProjectEnvKeyFile(opts: {
   await assertLegacyProjectInputFamily({ projectRoot: opts.projectRoot });
   await ensureDir(dirname(opts.path));
   await assertLegacyProjectInputFamily({ projectRoot: opts.projectRoot });
-  try {
-    await createPrivateFileExclusive({
-      path: opts.path,
-      text: `${opts.keyText}\n`,
-    });
+  const published = await publishPrivateFileExclusive({
+    path: opts.path,
+    text: `${opts.keyText}\n`,
+    // Like an O_EXCL|O_NOFOLLOW create, only the final component is checked,
+    // so a checkout reached through a symlinked root stays usable.
+    directories: [],
+    refusal: projectEnvKeyFileError,
+  });
+  if (published) {
     return opts.keyText;
-  } catch (error: unknown) {
-    if (!(isRecord(error) && error.code === "EEXIST")) {
-      throw error;
-    }
   }
   return await adoptExistingProjectEnvKeyFile({ path: opts.path });
 }

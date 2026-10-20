@@ -35,6 +35,7 @@ import {
   waitNativeProjectFinalization,
 } from "./native-project-finalization.ts";
 import { isNativeHttpsProbePath } from "./native-project-https.ts";
+import { admitNativeProjectImages } from "./native-project-image-admission.ts";
 import {
   type NativeProjectInput,
   prepareNativeProjectInput,
@@ -1001,6 +1002,15 @@ export async function startNativeProject(opts: {
     input,
     opts.dependencyFile !== undefined
   );
+  // Refuse malformed or unacquirable references before hooks, VM or provider start.
+  await admitNativeProjectImages({
+    runtime: opts.runtime,
+    projectRoot: opts.scope.projectRoot,
+    specs,
+    signal: opts.signal,
+    invoke: deps.invoke,
+  });
+  requireActiveStartup(opts.signal);
   const bridgeCapacity = nativeBridgeCapacity(specs);
   const artifact = join(dirname(opts.runtime.binary), "hack-relay-guest");
   const artifactFile = Bun.file(artifact);

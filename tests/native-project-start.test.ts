@@ -104,6 +104,9 @@ async function fixture(withEnvironment = true) {
       if (opts.args[1] === "check-project-share") {
         return { source_admitted: true, pool_initialized: false };
       }
+      if (opts.args[1] === "admit-image") {
+        return { reference: opts.args[3], kind: "docker_hub" };
+      }
       events.push(opts.args.slice(0, 2).join(" "));
       if (opts.args[0] === "runtime" && opts.args[1] === "status") {
         return {
@@ -2856,6 +2859,120 @@ test("retained startup selects legacy labels only after runtime admission and be
       expect(reviewed).toBe(true);
     }
   }
+});
+
+function withImages(
+  opts: Awaited<ReturnType<typeof fixture>>["opts"],
+  services: Record<string, string>
+) {
+  const prepare = opts.dependencies.prepare!;
+  opts.dependencies.prepare = async (request) => ({
+    ...(await prepare(request)),
+    normalizedComposeJson: JSON.stringify({
+      services: Object.fromEntries(
+        Object.entries(services).map(([name, image]) => [name, { image }])
+      ),
+    }),
+    serviceNames: Object.keys(services),
+  });
+}
+
+test("an invalid image reference is refused before hooks, VM, provider or image effects", async () => {
+  const { opts, events } = await fixture(false);
+  withImages(opts, { web: "Private-Canary:3.21" });
+  const invoke = opts.dependencies.invoke!;
+  const admissions: string[] = [];
+  opts.dependencies.invoke = async (request) => {
+    if (request.args[1] === "admit-image") {
+      admissions.push(String(request.args[3]));
+      throw new NativeRuntimeRequestError({
+        message: "Image repository names must be lowercase.",
+        nativeCode: "registry_image",
+      });
+    }
+    return await invoke(request);
+  };
+  let served = false;
+  opts.dependencies.serve = async () => {
+    served = true;
+    return 0;
+  };
+  let failure: unknown;
+  try {
+    await startNativeProject(opts);
+  } catch (error) {
+    failure = error;
+  }
+  expect(String(failure)).toContain(
+    "image reference refused before runtime startup"
+  );
+  expect(String(failure)).not.toContain("Canary");
+  expect(admissions).toEqual(["Private-Canary:3.21"]);
+  // No startup hook, runtime/VM start, image acquisition or graph effect occurred.
+  expect(events).toEqual([]);
+  expect(served).toBe(false);
+});
+
+test("Docker Hub shorthand is admitted once per distinct reference before the runtime starts", async () => {
+  const { opts, events } = await fixture(false);
+  const id = `sha256:${"e".repeat(64)}`;
+  withImages(opts, {
+    web: "alpine:3.21",
+    worker: "alpine:3.21",
+    cache: "redis",
+    pinned: id,
+  });
+  opts.dependencies.review = async (request) =>
+    request.run({
+      planId: "a".repeat(64),
+      namespace: "b".repeat(64),
+      projectArgs: ["--project", request.projectRoot],
+      report: { plan: { enrollment_compatible: true, services: {} } },
+    });
+  const invoke = opts.dependencies.invoke!;
+  const order: string[] = [];
+  opts.dependencies.invoke = async (request) => {
+    if (request.args[1] === "admit-image") {
+      order.push(`admit ${request.args[3]}`);
+      expect(request.timeoutMs).toBeLessThanOrEqual(10_000);
+    }
+    if (request.args[0] === "runtime" && request.args[1] === "up") {
+      order.push("runtime up");
+    }
+    if (request.args[1] === "ensure-image") {
+      order.push(`ensure ${request.args[3]}`);
+      return { image_id: id };
+    }
+    return await invoke(request);
+  };
+  expect(await startNativeProject(opts)).toBe(0);
+  expect(order).toEqual([
+    "admit alpine:3.21",
+    "admit redis",
+    "runtime up",
+    "ensure alpine:3.21",
+    "ensure alpine:3.21",
+    "ensure redis",
+  ]);
+  expect(events.indexOf("before")).toBeLessThan(events.indexOf("runtime up"));
+});
+
+test("a runtime failure during image admission keeps its own diagnostic and starts nothing", async () => {
+  const { opts, events } = await fixture(false);
+  withImages(opts, { web: "alpine:3.21" });
+  const invoke = opts.dependencies.invoke!;
+  opts.dependencies.invoke = async (request) => {
+    if (request.args[1] === "admit-image") {
+      throw new NativeRuntimeRequestError({
+        message: "Native runtime request timed out.",
+      });
+    }
+    return await invoke(request);
+  };
+  await expect(startNativeProject(opts)).rejects.toThrow(
+    "Native runtime request timed out."
+  );
+  expect(events).toEqual([]);
 });
 
 test("retained startup reviews the saved content ID instead of a newly resolved mutable tag", async () => {

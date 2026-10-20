@@ -16,6 +16,9 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import {
+  humanBoundary,
+  humanClosedCode,
+  NATIVE_NETWORK_PROBE_EXIT,
   nativeNetworkFixtureAttachmentMatches,
   nativeNetworkFixtureCensus,
   nativeNetworkFixtureCommandDiagnostic,
@@ -23,11 +26,15 @@ import {
   nativeNetworkFixtureFailureLabel,
   nativeNetworkFixtureHasNoPublication,
   nativeNetworkFixtureInventory,
+  nativeNetworkFixtureMarkerRead,
+  nativeNetworkFixtureMarkerWrite,
   nativeNetworkFixtureNetworkMatches,
+  nativeNetworkFixturePeerProbe,
   nativeNetworkFixturePreservedContainerMatches,
   nativeNetworkFixtureProjectKind,
   nativeNetworkFixtureProtocolMatches,
   nativeNetworkFixtureRefusalDiagnostic,
+  nativeNetworkFixtureSavedEvidence,
   nativeNetworkFixtureShim,
   nativeNetworkFixtureStateRefused,
   nativeNetworkFixtureStep,
@@ -212,15 +219,183 @@ test("failing command evidence names only its closed class, role and product cod
       exitCode: 1,
       timedOut: false,
       durationMs: 7,
-      stdout: secret,
-      stderr: `\nERROR E_COMPOSE_FAILED: Native Compose operation failed ${secret}\n`,
+      // The clack backend (no gum on the hosted runner) writes errors to stdout.
+      stdout: `\u2502\n\u25a0  E_COMPOSE_FAILED: Native Compose operation failed ${secret}\n\u2502\n\u25a0  Refusal boundary: storage-helper-policy (unclassified); values omitted.\n`,
+      stderr: secret,
     },
   });
-  expect(human).toContain('"code":"E_COMPOSE_FAILED","stage":null');
-  for (const result of [json, human]) {
+  expect(human).toContain(
+    '"code":"E_COMPOSE_FAILED","stage":"storage-helper-policy","reason":"unclassified"'
+  );
+  const unbounded = nativeNetworkFixtureCommandDiagnostic({
+    step: "hack:exec",
+    role: "sibling-b",
+    sequence: 8,
+    expected: 0,
+    result: {
+      exitCode: 1,
+      timedOut: false,
+      durationMs: 7,
+      stdout: `\u25a0  E_CONFIG_INVALID: Refused ${secret}\n`,
+      stderr: "",
+    },
+  });
+  expect(unbounded).toContain(
+    '"code":"E_CONFIG_INVALID","stage":null,"reason":null'
+  );
+  for (const result of [json, human, unbounded]) {
     expect(result).not.toContain(secret);
     expect(result).not.toContain("values");
   }
+});
+
+test("human error output yields only its leading closed code for every logger backend", () => {
+  const secret = "/private/fixture/secret-path";
+  for (const [text, code] of [
+    // clack (hosted runner, NO_COLOR) on stdout
+    [`│\n■  E_CONFIG_INVALID: Refused ${secret}\n`, "E_CONFIG_INVALID"],
+    // clack with color
+    [
+      `\u001b[90m│\u001b[39m\n\u001b[31m■\u001b[39m  E_COMPOSE_FAILED: ${secret}\n`,
+      "E_COMPOSE_FAILED",
+    ],
+    // gum and console backends on stderr
+    [`ERROR E_NATIVE_COMPOSE_STATE: ${secret}`, "E_NATIVE_COMPOSE_STATE"],
+    [`ERROR: E_LIFECYCLE_FAILED: ${secret}\n`, "E_LIFECYCLE_FAILED"],
+  ] as const) {
+    expect(humanClosedCode(text)).toBe(code);
+  }
+  for (const text of [
+    "",
+    secret,
+    "ERROR MissingProjectContextError: E_FAKE: nested",
+    `value E_INLINE: ${secret}`,
+    `■  e_lower: ${secret}`,
+    `■  E_${"X".repeat(70)}: ${secret}`,
+  ]) {
+    expect(humanClosedCode(text)).toBeNull();
+  }
+  expect(
+    humanBoundary(
+      "ERROR: Refusal boundary: storage-target (probe-timeout); values omitted.\n"
+    )
+  ).toEqual({ stage: "storage-target", reason: "probe-timeout" });
+  for (const text of [
+    `■  Refusal boundary: ${secret} (probe-timeout); values omitted.`,
+    "■  Refusal boundary: storage-target (Probe Timeout); values omitted.",
+    "■  Refusal boundary: storage-target (probe-timeout)",
+    "value Refusal boundary: storage-target (probe-timeout); values omitted.",
+  ]) {
+    expect(humanBoundary(text)).toBeNull();
+  }
+});
+
+test("probe scripts exit with a closed code for every in-container failure", async () => {
+  const root = await mkdtemp(join(tmpdir(), "hack-network-probe-"));
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch(request) {
+      const path = new URL(request.url).pathname;
+      if (path === "/hang") {
+        return new Promise<Response>(() => undefined);
+      }
+      return new Response(path === "/wrong" ? "other" : "primary:peer");
+    },
+  });
+  const closed = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch: () => new Response(""),
+  });
+  const refused = `http://127.0.0.1:${closed.port}/`;
+  closed.stop(true);
+  const origin = `http://127.0.0.1:${server.port}`;
+  const run = async (script: string, peer = origin): Promise<number> => {
+    const child = Bun.spawn([process.execPath, "-e", script], {
+      cwd: root,
+      env: { PATH: process.env.PATH ?? "/usr/bin:/bin", PEER_ORIGIN: peer },
+      stdout: "ignore",
+      stderr: "ignore",
+    });
+    return await child.exited;
+  };
+  try {
+    const probe = (alias: string, timeoutMs = 4000) =>
+      nativeNetworkFixturePeerProbe({
+        origin,
+        alias,
+        expected: "primary:peer",
+        timeoutMs,
+      });
+    expect(await run(probe(`${origin}/alias`))).toBe(0);
+    expect(await run(probe(`${origin}/alias`), `${origin}/x`)).toBe(
+      NATIVE_NETWORK_PROBE_EXIT.environment
+    );
+    expect(await run(probe(`${origin}/wrong`))).toBe(
+      NATIVE_NETWORK_PROBE_EXIT.response
+    );
+    expect(await run(probe(refused))).toBe(NATIVE_NETWORK_PROBE_EXIT.rejected);
+    expect(await run(probe(`${origin}/hang`, 200))).toBe(
+      NATIVE_NETWORK_PROBE_EXIT.timeout
+    );
+
+    const marker = join(root, "marker");
+    const read = nativeNetworkFixtureMarkerRead({ path: marker, marker: "m" });
+    expect(await run(read)).toBe(NATIVE_NETWORK_PROBE_EXIT.unreadable);
+    expect(
+      await run(nativeNetworkFixtureMarkerWrite({ path: marker, marker: "m" }))
+    ).toBe(0);
+    expect(await run(read)).toBe(0);
+    expect(
+      await run(nativeNetworkFixtureMarkerRead({ path: marker, marker: "n" }))
+    ).toBe(NATIVE_NETWORK_PROBE_EXIT.marker);
+    expect(
+      await run(
+        nativeNetworkFixtureMarkerWrite({
+          // Bun.write creates directories; a regular-file parent cannot be one.
+          path: join(marker, "child"),
+          marker: "m",
+        })
+      )
+    ).toBe(NATIVE_NETWORK_PROBE_EXIT.unwritable);
+    // No probe code collides with an ordinary product failure exit.
+    expect(Object.values(NATIVE_NETWORK_PROBE_EXIT)).not.toContain(1);
+  } finally {
+    server.stop(true);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("saved-state evidence reports closed flags and pending operation only", () => {
+  const secret = "secret-generation-token";
+  expect(
+    nativeNetworkFixtureSavedEvidence([
+      {
+        role: "primary",
+        stopped: false,
+        pending: null,
+        storageWitnessesPending: false,
+        beforeHooksPending: false,
+      },
+      {
+        role: "sibling-b",
+        stopped: false,
+        pending: { operation: "up", token: secret, generationId: secret },
+        storageWitnessesPending: true,
+        beforeHooksPending: false,
+      },
+      {
+        role: "sibling-a",
+        stopped: secret,
+        pending: { operation: secret },
+        storageWitnessesPending: undefined,
+        beforeHooksPending: null,
+      },
+    ])
+  ).toBe(
+    'Network failure saved state {"primary":{"stopped":false,"pending":"none","storageWitnessesPending":false,"beforeHooksPending":false},"sibling-b":{"stopped":false,"pending":"up","storageWitnessesPending":true,"beforeHooksPending":false},"sibling-a":{"stopped":"unknown","pending":"unknown","storageWitnessesPending":"unknown","beforeHooksPending":"unknown"}}'
+  );
 });
 
 test("failing command evidence drops non-closed codes and malformed fields", () => {

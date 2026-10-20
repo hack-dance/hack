@@ -167,40 +167,121 @@ export function nativeNetworkFixtureStep(
   return "other";
 }
 
-function closedFailure(result: Pick<CliResult, "stdout" | "stderr">): {
+type ClosedFailure = {
   readonly code: string | null;
   readonly stage: string | null;
   readonly reason: string | null;
-} {
-  let code: string | null = null;
-  let stage: string | null = null;
-  let reason: string | null = null;
+};
+
+function closedToken(value: unknown, pattern: RegExp): string | null {
+  return typeof value === "string" && pattern.test(value) ? value : null;
+}
+
+/** The JSON envelope's closed code and issued boundary; null when stdout is not JSON. */
+function jsonClosedFailure(stdout: string): ClosedFailure | null {
+  let value: unknown;
   try {
-    const value: unknown = JSON.parse(result.stdout);
-    const error = isRecord(value) ? own(value, "error") : undefined;
-    if (isRecord(error)) {
-      const candidate = own(error, "code");
-      code =
-        typeof candidate === "string" && CLOSED_CODE.test(candidate)
-          ? candidate
-          : null;
-      const detail = own(error, "detail");
-      const refusal = isRecord(detail)
-        ? own(detail, "native_compose_effect_refusal")
-        : undefined;
-      if (isRecord(refusal)) {
-        const s = own(refusal, "stage");
-        const r = own(refusal, "reason");
-        stage = typeof s === "string" && CLOSED_TOKEN.test(s) ? s : null;
-        reason = typeof r === "string" && CLOSED_TOKEN.test(r) ? r : null;
-      }
-    }
+    value = JSON.parse(stdout);
   } catch {
-    // Human output carries only its leading closed error code.
-    const match = /^ERROR (E_[A-Z0-9_]{1,62}):/m.exec(result.stderr);
-    code = match?.[1] ?? null;
+    return null;
   }
-  return { code, stage, reason };
+  const error = isRecord(value) ? own(value, "error") : undefined;
+  if (!isRecord(error)) {
+    return { code: null, stage: null, reason: null };
+  }
+  const detail = own(error, "detail");
+  const refusal = isRecord(detail)
+    ? own(detail, "native_compose_effect_refusal")
+    : undefined;
+  return {
+    code: closedToken(own(error, "code"), CLOSED_CODE),
+    stage: isRecord(refusal)
+      ? closedToken(own(refusal, "stage"), CLOSED_TOKEN)
+      : null,
+    reason: isRecord(refusal)
+      ? closedToken(own(refusal, "reason"), CLOSED_TOKEN)
+      : null,
+  };
+}
+
+function closedFailure(
+  result: Pick<CliResult, "stdout" | "stderr">
+): ClosedFailure {
+  const json = jsonClosedFailure(result.stdout);
+  if (json) {
+    return json;
+  }
+  const boundary = humanBoundary(result.stdout) ?? humanBoundary(result.stderr);
+  return {
+    code: humanClosedCode(result.stdout) ?? humanClosedCode(result.stderr),
+    stage: boundary?.stage ?? null,
+    reason: boundary?.reason ?? null,
+  };
+}
+
+const HUMAN_BOUNDARY =
+  /^[^\w\n]*(?:ERROR:?[ \t]+)?Refusal boundary: ([a-z][a-z0-9-]{0,62}) \(([a-z][a-z0-9-]{0,62})\); values omitted\.$/m;
+
+/** The closed refusal boundary line a human CLI error prints after its code. */
+export function humanBoundary(
+  text: string
+): { readonly stage: string; readonly reason: string } | null {
+  const match = HUMAN_BOUNDARY.exec(text.replace(ANSI, ""));
+  return match?.[1] && match[2] ? { stage: match[1], reason: match[2] } : null;
+}
+
+const ANSI = /\u001b\[[0-9;]*m/g;
+// A human error line opens with the logger's glyph or level, then `E_CODE: `:
+// clack writes `■  E_CODE: ` to stdout, gum `ERROR E_CODE: ` and console
+// `ERROR: E_CODE: ` to stderr. Only the closed code is kept.
+const HUMAN_CODE = /^[^\w\n]*(?:ERROR:?[ \t]+)?(E_[A-Z0-9_]{1,62}): /m;
+
+/** The leading closed error code of human CLI output; nothing else of the text. */
+export function humanClosedCode(text: string): string | null {
+  return HUMAN_CODE.exec(text.replace(ANSI, ""))?.[1] ?? null;
+}
+
+/**
+ * Closed exit codes of the in-container probe scripts. Every script failure
+ * exits with one of them, so a failing `hack exec` that exits 1 is the product
+ * (or the runtime), never an uncaught probe error.
+ */
+export const NATIVE_NETWORK_PROBE_EXIT = {
+  environment: 23,
+  response: 24,
+  marker: 25,
+  rejected: 26,
+  timeout: 27,
+  unreadable: 28,
+  unwritable: 29,
+} as const;
+const PROBE = NATIVE_NETWORK_PROBE_EXIT;
+
+/** Fetches the endpoint origin and its alias; both must answer the exact marker. */
+export function nativeNetworkFixturePeerProbe(opts: {
+  readonly origin: string;
+  readonly alias: string;
+  readonly expected: string;
+  readonly timeoutMs?: number;
+}): string {
+  const timeout = opts.timeoutMs ?? 4000;
+  return `if(process.env.PEER_ORIGIN!==${JSON.stringify(opts.origin)})process.exit(${PROBE.environment});for(const url of [process.env.PEER_ORIGIN,${JSON.stringify(opts.alias)}]){let ok=false;try{const r=await fetch(url,{signal:AbortSignal.timeout(${timeout})});ok=r.ok&&await r.text()===${JSON.stringify(opts.expected)}}catch(e){process.exit(e?.name==="TimeoutError"?${PROBE.timeout}:${PROBE.rejected})}if(!ok)process.exit(${PROBE.response})}`;
+}
+
+/** Reads the retained marker; a missing or unreadable file has its own code. */
+export function nativeNetworkFixtureMarkerRead(opts: {
+  readonly path: string;
+  readonly marker: string;
+}): string {
+  return `let t;try{t=await Bun.file(${JSON.stringify(opts.path)}).text()}catch{process.exit(${PROBE.unreadable})}if(t!==${JSON.stringify(opts.marker)})process.exit(${PROBE.marker})`;
+}
+
+/** Writes the retained marker. */
+export function nativeNetworkFixtureMarkerWrite(opts: {
+  readonly path: string;
+  readonly marker: string;
+}): string {
+  return `try{await Bun.write(${JSON.stringify(opts.path)},${JSON.stringify(opts.marker)})}catch{process.exit(${PROBE.unwritable})}`;
 }
 
 /** Fixed failing-command evidence: command class, checkout role, sequence, exit and closed product codes. Never argv, output text, values or paths. */
@@ -296,6 +377,41 @@ export function nativeNetworkFixtureCensus(
       Object.entries(counts).sort(([a], [b]) => a.localeCompare(b))
     )
   )}`;
+}
+const PENDING_OPERATIONS = ["up", "restart", "run", "down"] as const;
+
+/** Saved intent per started checkout: closed booleans and the pending operation only. */
+export function nativeNetworkFixtureSavedEvidence(
+  rows: readonly {
+    readonly role: FixtureRole;
+    readonly stopped: unknown;
+    readonly pending: unknown;
+    readonly storageWitnessesPending: unknown;
+    readonly beforeHooksPending: unknown;
+  }[]
+): string {
+  const flag = (value: unknown) =>
+    typeof value === "boolean" ? value : "unknown";
+  const entries = rows.map((row) => {
+    const operation =
+      isRecord(row.pending) && typeof row.pending.operation === "string"
+        ? row.pending.operation
+        : null;
+    return [
+      NATIVE_NETWORK_FIXTURE_ROLES.includes(row.role) ? row.role : "unknown",
+      {
+        stopped: flag(row.stopped),
+        pending:
+          row.pending === null
+            ? "none"
+            : (PENDING_OPERATIONS.find((value) => value === operation) ??
+              "unknown"),
+        storageWitnessesPending: flag(row.storageWitnessesPending),
+        beforeHooksPending: flag(row.beforeHooksPending),
+      },
+    ] as const;
+  });
+  return `Network failure saved state ${JSON.stringify(Object.fromEntries(entries))}`;
 }
 function object(text: string): Record<string, unknown> {
   let value: unknown;
@@ -1603,17 +1719,23 @@ export const nativeConfigNetworksScenario: Scenario = {
         ["vault", "reader", "reader-alias"],
         ["reader", "vault", "vault-alias"],
       ] as const) {
-        const expected = JSON.stringify(`${checkout.marker}:${target}`);
         await exec(
           checkout,
           service,
-          `if(process.env.PEER_ORIGIN!==${JSON.stringify(`http://${target}:3000`)})process.exit(23);for(const url of [process.env.PEER_ORIGIN,${JSON.stringify(`http://${alias}:3000/`)}]){const r=await fetch(url,{signal:AbortSignal.timeout(4000)});if(!r.ok||await r.text()!==${expected})process.exit(24)}`
+          nativeNetworkFixturePeerProbe({
+            origin: `http://${target}:3000`,
+            alias: `http://${alias}:3000/`,
+            expected: `${checkout.marker}:${target}`,
+          })
         );
       }
       await exec(
         checkout,
         "web",
-        `if(await Bun.file("/state/marker").text()!==${JSON.stringify(checkout.marker)})process.exit(25)`
+        nativeNetworkFixtureMarkerRead({
+          path: "/state/marker",
+          marker: checkout.marker,
+        })
       );
     };
     const siblings = checkouts.slice(1);
@@ -1830,6 +1952,9 @@ export const nativeConfigNetworksScenario: Scenario = {
             .map((line) => line.split("|"));
         const states = async (filter: string): Promise<string[]> =>
           (await listed(filter)).map(([state]) => state ?? "unknown");
+        const savedRows: Parameters<
+          typeof nativeNetworkFixtureSavedEvidence
+        >[0][number][] = [];
         for (const checkout of checkouts) {
           if (!startedRoots.has(checkout.root)) {
             continue;
@@ -1840,8 +1965,28 @@ export const nativeConfigNetworksScenario: Scenario = {
             mode: "saved",
           });
           const identity = store.identity;
-          await store.close();
           const role = roles.get(checkout.root) ?? "fixture";
+          try {
+            // storageWitnessesPending is nonenumerable; read each field explicitly.
+            const state = await store.loadCurrent();
+            savedRows.push({
+              role,
+              stopped: state.stopped,
+              pending: state.pending,
+              storageWitnessesPending: state.storageWitnessesPending,
+              beforeHooksPending: state.beforeHooksPending,
+            });
+          } catch {
+            savedRows.push({
+              role,
+              stopped: null,
+              pending: undefined,
+              storageWitnessesPending: null,
+              beforeHooksPending: null,
+            });
+          } finally {
+            await store.close();
+          }
           for (const [
             state = "unknown",
             name = "",
@@ -1869,6 +2014,7 @@ export const nativeConfigNetworksScenario: Scenario = {
           rows.push({ role: "fixture", kind: "fixture", state });
         }
         ctx.log(nativeNetworkFixtureCensus(rows));
+        ctx.log(nativeNetworkFixtureSavedEvidence(savedRows));
       } catch {
         ctx.log("Network failure census unavailable");
       }
@@ -1935,7 +2081,10 @@ export const nativeConfigNetworksScenario: Scenario = {
         await exec(
           checkout,
           "web",
-          `await Bun.write("/state/marker",${JSON.stringify(checkout.marker)})`
+          nativeNetworkFixtureMarkerWrite({
+            path: "/state/marker",
+            marker: checkout.marker,
+          })
         );
         await markers(checkout);
         await cli(checkout, ["ps", "--json"]);

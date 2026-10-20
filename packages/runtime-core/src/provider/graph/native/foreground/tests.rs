@@ -587,6 +587,47 @@ fn abandoned_publication_is_evidence_and_never_implicit_recovery_authority() {
 }
 
 #[test]
+fn inspect_names_only_an_exactly_absent_unpublished_journal_as_unreserved() {
+    // HACK-1272: a startup refused before reservation must be distinguishable from
+    // damaged or foreign receipt evidence, without weakening either refusal.
+    let fixture = Fixture::new();
+    let code = |fixture: &Fixture| inspect(&fixture.candidate, RUN).unwrap_err().code;
+    assert_eq!(code(&fixture), "native_graph_unreserved");
+    assert!(
+        !journal::directory(&fixture.candidate, RUN)
+            .unwrap()
+            .exists()
+    );
+
+    // A published (live or abandoned) owner is evidence, never "unreserved".
+    let receipt = fixture.receipt();
+    let mut publication = owner::Publication::bind(&fixture.candidate, &receipt.review).unwrap();
+    assert_eq!(code(&fixture), "native_graph_foreground");
+    publication.finish().unwrap();
+    assert_eq!(code(&fixture), "native_graph_unreserved");
+
+    // A partial journal directory keeps the ordinary receipt refusal.
+    let root = journal::directory(&fixture.candidate, RUN).unwrap();
+    fs::DirBuilder::new()
+        .mode(0o700)
+        .recursive(true)
+        .create(&root)
+        .unwrap();
+    assert_ne!(code(&fixture), "native_graph_unreserved");
+    fs::remove_dir(&root).unwrap();
+
+    // A public ancestor refuses instead of proving absence.
+    let parent = root.parent().unwrap();
+    fs::set_permissions(parent, fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(code(&fixture), "native_graph_receipt");
+    fs::set_permissions(parent, fs::Permissions::from_mode(0o700)).unwrap();
+
+    // A reserved journal is validated as before.
+    journal::reserve(&fixture.candidate, &receipt).unwrap();
+    assert_ne!(code(&fixture), "native_graph_unreserved");
+}
+
+#[test]
 fn direct_operation_guard_refuses_replaced_lock_path() {
     let fixture = Fixture::new();
     let direct = DirectGuard::acquire(&fixture.candidate, RUN).unwrap();

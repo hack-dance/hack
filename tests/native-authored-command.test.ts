@@ -227,6 +227,85 @@ macTest(
 );
 
 macTest(
+  "HACK-1272: down --recover retires a pending unreserved start without the generation owner",
+  async () => {
+    const selected = await fixture();
+    const options = {
+      ...selected.options,
+      operation: "down" as const,
+      recover: true,
+      instance: "alpha",
+    };
+    const scope = {
+      projectRoot: selected.root,
+      projectDir: join(selected.root, ".hack"),
+      nativeHome: join(selected.root, "candidate"),
+      branch: "alpha",
+    };
+    const retired: unknown[] = [];
+    const outcome = (retire: () => Promise<{ readonly run: string }>) =>
+      tryNativeAuthoredCommand({
+        ...selected,
+        options,
+        serve: () => {
+          throw new Error("Recovery cannot invoke startup.");
+        },
+        recover: () => {
+          throw new Error("A pending start has no stored generation.");
+        },
+        unreservedSelected: (value) => {
+          expect(value).toEqual(scope);
+          return Promise.resolve(true);
+        },
+        retireUnreserved: (value) => {
+          retired.push(value);
+          return retire();
+        },
+      }).catch((error: unknown) => error);
+    expect(await outcome(() => Promise.resolve({ run: "a".repeat(32) }))).toBe(
+      0
+    );
+    expect(retired).toHaveLength(1);
+    expect(retired[0]).toMatchObject({ scope, timeoutMs: 1500 });
+    const refused = await outcome(() =>
+      Promise.reject(new Error("Private retained detail."))
+    );
+    expect(refused).toHaveProperty("code", "E_LIFECYCLE_FAILED");
+    expect(String(refused)).not.toContain("Private retained detail");
+    expect(await readdir(join(selected.root, ".hack"))).toEqual([]);
+  }
+);
+
+macTest(
+  "HACK-1272: a canceled unreserved startup exits 130 like confirmed removal",
+  async () => {
+    const selected = await fixture();
+    for (const [outcome, expected] of [
+      ["unreserved", 130],
+      ["retained", "E_STARTUP_INCOMPLETE"],
+    ] as const) {
+      const result = await tryNativeAuthoredCommand({
+        ...selected,
+        serve: () =>
+          Promise.reject(
+            new NativeAuthoredProjectStartError({
+              outcome,
+              canceled: true,
+              stage: "runtime",
+              nativeCode: "native_graph_canceled",
+            })
+          ),
+      }).catch((error: unknown) => error);
+      if (typeof expected === "number") {
+        expect(result).toBe(expected);
+      } else {
+        expect(result).toHaveProperty("code", expected);
+      }
+    }
+  }
+);
+
+macTest(
   "recovery refuses env/profile/effect overrides before runtime pin or stored owner selection",
   async () => {
     for (const extra of [

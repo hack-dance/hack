@@ -1485,7 +1485,9 @@ start whose every qualifying sample, including the lease recheck, also fits the 
 fresh budget drops the stopped selection: it records those samples on the fresh basis
 and continues exactly as a start without a selection, with no release checks. Only a
 start whose free disk lies between the host reserve and the fresh budget keeps the
-selection. Under the lease, before any restart effect and again immediately before
+selection. `runtime probe` takes no lease and settles no basis, so it reports the reserve
+basis for a qualifying stopped pool whatever its headroom; the start's `admission.json`
+records the basis that start used. Under the lease, before any restart effect and again immediately before
 `machine start`, its release checks also require a free VM lock, no open disk handle
 (`lsof`, bounded at 30 seconds because it scans every process and is slow on a loaded
 host), no owned listener and an unchanged audited provider configuration. The short-HOME

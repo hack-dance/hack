@@ -32,11 +32,14 @@ is not implemented here.
    recipe, even after an option value or a script path, because option
    values and operands cannot be told apart without each program's own
    parser. A shell or interpreter given `-` or no script operand (code from
-   stdin), and a REPL or eval subcommand (`bun repl`, `deno eval`) are
-   refused too. So are the string-to-shell forms of package runners and
-   wrappers (`npx -c`, `npm exec -c`, `pnpm -c`, `yarn exec`, `bun exec`,
-   `nodemon --exec`, `tsx -e`, `ts-node -e`, `sudo -s`, `doas -s`,
-   `git -c`/`--exec`/`submodule foreach`, `make --eval`, `nix eval`) and
+   stdin), a REPL or eval subcommand (`bun repl`, `deno eval`) and a
+   `data:` URL module given to Node, Bun, Deno or tsx
+   (`node --import data:text/javascript,…`) are refused too. So are the
+   string-to-shell forms of package runners and wrappers (`npx -c`,
+   `npm exec -c`, `pnpm -c`, `yarn exec`, `bun exec`, `nodemon --exec`,
+   `tsx -e`, `ts-node -e`, `julia -e`, `sudo -s`, `doas -s`,
+   `git -c`/`--exec`/`submodule foreach`/`bisect`/`filter-branch`,
+   `make --eval`, `nix eval`) and
    `eval`, `env`, `xargs`, `su`, `runuser`, `ssh`, `nix-shell`,
    `concurrently`, `watchexec`, `tmux`, `iex`, the vi and Emacs editors, awk
    or sed anywhere in argv, and `watch`, `parallel` or `sg` with a command.
@@ -267,6 +270,7 @@ until its recipes are re-reviewed.
 | Log line with option values before `-c` (`exec bash --noprofile --norc -e -o pipefail -c …`) | `inline_command` even with `repository_script` provenance | paired fixture |
 | Option-value, `env`-anywhere, awk/sed, `Rscript -e`, stdin and REPL forms | `inline_command`; reviewed script argv still passes | domain test |
 | Package-runner, TypeScript-runner, privilege-wrapper, `git -c`, `make --eval`, `deno run -` and editor forms | `inline_command`; `npm run`, `npx tsc`, `tsx script.ts`, `sudo -u`, `git status`, `make test` still pass | domain test |
+| `data:` URL modules (`node --import data:…`, `deno run data:…`), `git bisect run`, `git filter-branch` and `julia -e` | `inline_command`; `node --import ./register.js`, `git log`, `julia -t 4 script.jl` still pass | domain test |
 | Pin through a symlinked directory (outside the checkout, or aliasing `.hack`) | `input_path_invalid` | paired fixture |
 | Pointer pin into a gitignored, untracked secrets file | `input_path_invalid` with no digest; the same pin is checked once the file is tracked | paired fixture, domain test |
 | Pin of a file removed from the Git index, or in a checkout without Git | `input_path_invalid` | domain test |
@@ -311,7 +315,8 @@ until its recipes are re-reviewed.
 - **Tracked pins hash working-tree bytes.** A pin must be tracked by Git,
   but its digest is of the file in the working tree. An uncommitted local
   edit to a tracked file (for example a credential added to a tracked
-  config) is hashed and its digest can appear in a stale refusal.
+  config, including one hidden with `git update-index --skip-worktree`) is
+  hashed and its digest can appear in a stale refusal.
 - **Input reads are not atomic.** Pinned inputs are read once; an edit during
   the read is reported on the next read, not detected in the same one. The
   catalog file and the config generation are re-read and compared.

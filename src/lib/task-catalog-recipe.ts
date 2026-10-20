@@ -282,6 +282,11 @@ type Evaluator = {
   readonly needsOperand: boolean;
   /** True when every following argument is joined and run by a shell. */
   readonly evaluatesOperands: boolean;
+  /**
+   * True when a `data:` URL argument is a module given inline
+   * (`node --import data:text/javascript,…`, `deno run data:…`).
+   */
+  readonly dataUrlModules: boolean;
 };
 
 function evaluator(spec: Partial<Evaluator>): Evaluator {
@@ -293,6 +298,7 @@ function evaluator(spec: Partial<Evaluator>): Evaluator {
     subcommands: [],
     needsOperand: false,
     evaluatesOperands: false,
+    dataUrlModules: false,
     ...spec,
   };
 }
@@ -340,29 +346,34 @@ const EVALUATORS: Readonly<Record<string, Evaluator>> = {
       "--env-file",
     ],
     needsOperand: true,
+    dataUrlModules: true,
   }),
   nodejs: evaluator({
     inline: JS_INLINE,
     stdin: ["-i", "--interactive"],
     needsOperand: true,
+    dataUrlModules: true,
   }),
   bun: evaluator({
     inline: JS_INLINE,
     valueOptions: ["-r", "--preload", "--cwd", "--env-file", "--config"],
     // `bun exec` runs a string with Bun Shell.
     subcommands: ["repl", "exec"],
+    dataUrlModules: true,
   }),
   // `deno run -` reads the program from stdin.
   deno: evaluator({
     stdin: ["-"],
     subcommands: ["eval", "repl"],
     needsOperand: true,
+    dataUrlModules: true,
   }),
   tsx: evaluator({
     inline: JS_INLINE,
     stdin: ["-i", "--interactive"],
     valueOptions: ["--tsconfig", "--import", "--require", "-r", "--env-file"],
     needsOperand: true,
+    dataUrlModules: true,
   }),
   "ts-node": evaluator({
     inline: JS_INLINE,
@@ -425,16 +436,22 @@ const EVALUATORS: Readonly<Record<string, Evaluator>> = {
   elixir: evaluator({ inline: ["-e", "--eval", "--rpc-eval"] }),
   mix: evaluator({ inline: ["-e", "--eval"] }),
   erl: evaluator({ inline: ["-eval"] }),
+  julia: evaluator({
+    inline: ["-e", "--eval", "--print"],
+    stdin: ["-i"],
+    valueOptions: ["-L", "--load", "-J", "--sysimage", "-t", "--threads"],
+    needsOperand: true,
+  }),
   // Privilege wrappers: the named command is checked at its own position,
   // but `-s`/`-i` start a shell (`sudo -s cmd` runs `$SHELL -c cmd`).
   sudo: evaluator({ stdin: ["-s", "-i", "--shell", "--login"] }),
   doas: evaluator({ stdin: ["-s"] }),
   // Config values and subcommands that run a string in a shell:
   // `git -c alias.x='!cmd' x`, `rebase --exec`, `difftool --extcmd`,
-  // `submodule foreach`.
+  // `submodule foreach`, `bisect run` and the `filter-branch` filters.
   git: evaluator({
     inline: ["-c", "--config-env", "--exec", "-x", "--extcmd"],
-    words: ["foreach"],
+    words: ["foreach", "bisect", "filter-branch"],
   }),
   nix: evaluator({
     inline: ["--expr"],
@@ -508,6 +525,8 @@ const SHELL_SYNTAX_TOKENS: ReadonlySet<string> = new Set([
 const EXE_SUFFIX = /\.exe$/;
 const VERSION_SUFFIX = /[0-9.]+$/;
 const SHORT_OPTION_CLUSTER = /^-[a-z]+$/;
+/** A `data:` URL argument or option value (`--import=data:…`). */
+const DATA_URL = /(?:^|=)data:/i;
 
 /** Program basename, lowercased, without `.exe` or a version suffix. */
 function programName(arg: string): string {
@@ -588,7 +607,9 @@ function evaluatesCode(argv: readonly string[], index: number): boolean {
   if (
     rest.some(
       (arg) =>
-        matchesFlag({ arg, flags }) || spec.words.includes(arg.toLowerCase())
+        matchesFlag({ arg, flags }) ||
+        spec.words.includes(arg.toLowerCase()) ||
+        (spec.dataUrlModules && DATA_URL.test(arg))
     )
   ) {
     return true;

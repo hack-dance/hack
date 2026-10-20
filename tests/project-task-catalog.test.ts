@@ -1181,6 +1181,16 @@ describe("recipe grammar", () => {
       ["exec", "parallel", ":::", "id"],
       ["watchexec", "--", "id"],
       ["tmux", "new-session", "id"],
+      // Inline `data:` modules, `git bisect run`/`filter-branch` and Julia.
+      ["exec", "node", "--import", "data:text/javascript,1", "x.js"],
+      ["node", "--import=data:text/javascript,1", "x.js"],
+      ["tsx", "--import", "DATA:text/javascript,1", "x.ts"],
+      ["deno", "run", "data:application/typescript,1"],
+      ["exec", "git", "bisect", "run", "id; true"],
+      ["git", "filter-branch", "--tree-filter", "id", "HEAD"],
+      ["exec", "julia", "-e", "1"],
+      ["julia", "--print", "1"],
+      ["julia"],
     ];
     for (const argv of inline) {
       expect({ argv, inline: isInlineCommandArgv(argv) }).toEqual({
@@ -1212,6 +1222,10 @@ describe("recipe grammar", () => {
       ["git", "status", "--short"],
       ["make", "test"],
       ["make", "parallel"],
+      ["node", "--import", "./register.js", "scripts/data.js"],
+      ["deno", "run", "scripts/data-sync.ts"],
+      ["git", "log", "--oneline"],
+      ["julia", "-t", "4", "scripts/x.jl"],
     ];
     for (const argv of exact) {
       expect({ argv, inline: isInlineCommandArgv(argv) }).toEqual({

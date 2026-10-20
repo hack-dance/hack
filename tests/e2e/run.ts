@@ -249,18 +249,52 @@ async function main(): Promise<void> {
   const dockerEnabled = (process.env.HACK_E2E_DOCKER ?? "") === "1";
   const requireDocker = (process.env.HACK_E2E_REQUIRE_DOCKER ?? "") === "1";
   const keepTempDirs = (process.env.HACK_E2E_KEEP ?? "") === "1";
-  // TEMPORARY HACK-1281 sampling: three sequential iterations per shard, stopping at a failure.
+  // TEMPORARY HACK-1281 sampling: sequential iterations while one more fits the 150-minute
+  // job budget (a third iteration once crossed it), stopping at a failure. Shards 1 and 2
+  // add background CPU and fsync load to widen any timing window; 3 and 4 run unloaded.
   const outcomes: Awaited<ReturnType<typeof runScenarios>> = [];
-  for (let iteration = 0; iteration < (args.shard ? 3 : 1); iteration++) {
-    const batch = await runScenarios({
-      scenarios: ALL_SCENARIOS,
-      dockerEnabled,
-      only: shardNames ?? args.only,
-      keepTempDirs,
-    });
-    outcomes.push(...batch);
-    if (batch.some((outcome) => outcome.status === "fail")) {
-      break;
+  const samplingStarted = Date.now();
+  const load: ReturnType<typeof Bun.spawn>[] = [];
+  if (args.shard && args.shard.index <= 2) {
+    process.stdout.write("HACK-1281 sampling: background load enabled\n");
+    for (let spinner = 0; spinner < 2; spinner++) {
+      load.push(
+        Bun.spawn([process.execPath, "-e", "for(;;){}"], {
+          stdout: "ignore",
+          stderr: "ignore",
+        })
+      );
+    }
+    load.push(
+      Bun.spawn(
+        [
+          "sh",
+          "-c",
+          'f="${TMPDIR:-/tmp}/hack-1281-load-$$"; trap \'rm -f "$f"\' EXIT; while :; do dd if=/dev/zero of="$f" bs=1M count=128 conv=fsync status=none; done',
+        ],
+        { stdout: "ignore", stderr: "ignore" }
+      )
+    );
+  }
+  try {
+    for (let iteration = 0; iteration < (args.shard ? 3 : 1); iteration++) {
+      if (iteration > 0 && Date.now() - samplingStarted > 55 * 60_000) {
+        break;
+      }
+      const batch = await runScenarios({
+        scenarios: ALL_SCENARIOS,
+        dockerEnabled,
+        only: shardNames ?? args.only,
+        keepTempDirs,
+      });
+      outcomes.push(...batch);
+      if (batch.some((outcome) => outcome.status === "fail")) {
+        break;
+      }
+    }
+  } finally {
+    for (const child of load) {
+      child.kill("SIGTERM");
     }
   }
 

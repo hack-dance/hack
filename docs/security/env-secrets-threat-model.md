@@ -77,6 +77,8 @@ refer to `hack-dance/hack`.
 | A world-readable env file or store. | `.hack/.env`, overlays and the `encrypted_file` store are written 0600, and a same-content file with group or other access is tightened (#302). The `hack doctor` env key check reports `env-key-weak-permissions` and `env-key-wrong-owner` (#309). |
 | The Compose backend leaves decrypted values at rest in `.hack/.internal/compose.env.override.yml` after `up`, `down`, a failed `up` or an interrupted one. | The override holds only `${HACK_ENV_<digest>_<KEY>}` references; each value reaches `docker compose` through its process environment, so no Compose command writes a value to disk, whatever way it ends (`renderComposeEnvReferenceOverride` in `src/lib/compose-managed-env.ts`). The file keeps its path because Compose records it in each container's `config_files` label. It is written with `replacePrivateFileAtomic` (mode 0600, symlink refused), and a literal value is refused before any write (`writeComposeEnvOverride` in `src/lib/compose-env-at-rest.ts`). A file left by an earlier version is replaced by the next Compose command that renders the override, removed by one that renders none and by `hack down` (first, so a failed hook or a remote target cannot skip it), and reported by the `hack doctor` "compose env at rest" check by counts only; `hack doctor --fix` removes it. Removal moves the file aside atomically and classifies what it moved, so a value-free file written concurrently is put back rather than deleted. Legacy adoption gives the reference values only to its Compose config-hash probe at preview and preparation; a saved recheck runs without values and binds each container's config-hash label to the hash proven at preparation. Proven with a stub `docker` by `tests/compose-env-at-rest-cli.test.ts`, `tests/compose-env-at-rest.test.ts`, `tests/doctor-fix-noninteractive.test.ts` and `tests/native-compose-adoption-generation.test.ts` (HACK-1273). |
 | Two writers of the `encrypted_file` store lose an update. | An in-process queue plus a cooperative `<store>.lock` using the owner protocol from `src/lib/projects-registry-lock.ts`; a symlinked store path is refused for writes (`src/lib/secret-store.ts`, #302). |
+| Concurrent first users of the `encrypted_file` store each generate a key; the last key file wins and the store, already encrypted under another key, can no longer be decrypted. | The generated key is published with `publishPrivateFileExclusive` (`src/lib/private-file.ts`): a fsynced 0600 sibling is linked into place only when no key file exists, so losers adopt the published key. A store found non-empty after the first key read re-reads the key file before the keychain fallback. Proven across eight worker processes by `tests/secret-key-provisioning-convergence.test.ts`. |
+| Concurrent first secrets in the primary checkout and a linked worktree create two different project keys (checkout-local and shared), so values do not decrypt across checkouts; or a reader refuses a key file that another process is still publishing. | When no key exists, `ensureProjectEnvSecretKey` (`src/lib/project-env-config.ts`) creates it under a cooperative lock at `<git common dir>/.hack.secret.key.lock` and repeats the lookup under the lock. Key files are published complete with `publishPrivateFileExclusive`, and a key read that overlaps a publication is retried for about a quarter second while the entry is a regular file. Proven by `tests/secret-key-provisioning-convergence.test.ts`. Hack v4 writers do not take the lock. |
 
 ### Malformed or hostile ciphertext
 
@@ -84,6 +86,7 @@ refer to `hack-dance/hack`.
 | --- | --- |
 | Truncated tags, oversized ciphertext or non-canonical base64 cause a wrong decision or a crash. | `decryptProjectEnvValue` (`src/lib/project-env-config.ts`) and `parseEncryptedEnvelope`/`decryptStore` (`src/lib/secret-store.ts`) require canonical base64 (`decodeCanonicalBase64` in `src/lib/private-file.ts`), a 12-byte IV and a 16-byte tag, pin `authTagLength: 16`, bound the size before decoding, and fail with one fixed error (#288). |
 | Ciphertext is moved to another variable, scope or file and still decrypts. | Not prevented. The current v1 format authenticates no associated data. `tests/aes-gcm-v1-context-binding.test.ts` pins this behavior so that any change is deliberate (#302). See [open gaps](#open-gaps). |
+| Ciphertext is moved to another key context: another project, a different `HACK_ENV_SECRET_KEY`, or a store with another key. | Refused with the fixed `Invalid secure env value.` or store error, which contains neither the value nor any key. Cross-context controls in `tests/aes-gcm-v1-context-binding.test.ts` cover each move. The key alone decides: every move that keeps the key is accepted (see [cross-context substitution](#cross-context-substitution-accepted-under-v1)). |
 
 ### Public-artifact and git leakage
 
@@ -93,6 +96,7 @@ refer to `hack-dance/hack`.
 | A key copy ships in build output or a static site. | `hack doctor` reports `env-key-public-path` for copies under `public/`, `static/`, `dist/`, `build/`, `out/`, `www/`, `_site/`, `.next/` and `.output/` (#309). |
 | A weak, short or repetitive key. | `env-key-wrong-length` and `env-key-low-entropy` (#309). Generated keys are 32 random bytes in base64url. |
 | Materialized `.hack/.env` or local overrides are committed. | Hack owns a committed `.hack/.gitignore` block, and `hack doctor` flags tracked generated files (see [ignore rules](../env.md#ignore-rules-committed-hackgitignore)). |
+| A secret leaks into a public artifact through a path nobody listed. | `tests/env-secret-sentinel-scan.test.ts` runs in the CI `test` job. It gives a primary checkout and a linked worktree random synthetic secrets through `env add --secret --value-stdin` (shared and `--local`), runs materialize, exec, up (Compose generation), env apply, logs, list, explain and doctor, then commits everything with `git add -A`. It requires zero occurrences of any value or the project key, raw or hex/base64/base64url encoded, in CLI output, recorded child argv, tracked files, every Git object, HACK_HOME, the private HOME and its caches, and generated Compose and runtime files. Plaintext may exist only in `.hack/.env` and `.hack/.internal/compose.env.override.yml`, and key text only in key files; each must be git-ignored, untracked and mode 0600. Values may reach a child's environment only for the exec'd command and `docker compose`. Positive controls prove delivery and that the scanner finds planted encodings in files and Git objects. Docker is a recording shim; no engine, keychain or installed Hack is reached. |
 | A dependency vulnerability ships in Hack. | `bun install --frozen-lockfile`, and the read-only `scripts/dependabot-inventory.ts` lists open alerts (#309). Hack does not sandbox project dependencies that run under `hack host exec`; they receive the injected env by design. |
 
 ### Agent and MCP exfiltration
@@ -111,39 +115,49 @@ These gaps are known and not closed on `next`. Each one needs its own change.
    secret. A crash or a partial run leaves files encrypted under two different keys,
    and Hack has no journal or resume step for this. There is also no command that
    rotates the `encrypted_file` store key.
-2. **Crypto decision record pending independent review.** The KDF (a single SHA-256
-   of the key text), the missing AAD binding, and the v1 envelope format are
-   characterized in tests but have no written decision record. #288 was flagged for an
-   independent crypto review (WU14) that has not happened yet. Any format change must
-   keep v1 values readable.
+2. **Independent crypto review.** The KDF (a single SHA-256 of the key text), the
+   missing AAD binding and the v1 envelope format are characterized in tests, and
+   [the bounded decision record](env-secrets.md) keeps the format unchanged. The
+   independent crypto review flagged in #288 (WU14) has not happened. Any format
+   change must keep v1 values readable.
 3. **Live keychain and 1Password custody receipts.** No test or receipt proves, on a
    real macOS host, that values stored through the `keychain` backend or piped from
    1Password stay only in the expected custody: the keychain item, the encrypted YAML
    or store, and the target process environment. The CLI tests disable the keychain
    fallback (`HACK_SECRETS_DISABLE_KEYCHAIN_FALLBACK=1`) and never call 1Password.
-4. **Compose client environment.** The Compose override no longer holds values
-   (HACK-1273), but the `docker compose` client process now carries one
-   `HACK_ENV_*` variable per service and key. Like every injected env, it is
-   readable by the same user (for example `ps eww`) for the life of that process.
-   Each service gets its own copy of each value, so the size grows with services
-   times keys. A project whose resolved values exceed the platform's argument and
-   environment limit (about 1 MiB in total on macOS; on Linux also 128 KiB for one
-   `NAME=value` string) cannot start through Compose. Existing containers keep their
-   values in `docker inspect` (gap 9). A direct `docker compose -f` run of the
-   override outside Hack gets blank values. Legacy adoption resolves the values at
-   preview and preparation and checks each container's config-hash label against
-   Compose's hash computed with them; a saved recheck, which has no key or values,
-   compares the label with the hash saved at preparation while the Compose copy, the
-   generated override bytes and the managed env revision stay pinned.
+4. **Plaintext materializations and the Compose client environment.** `.hack/.env`
+   is private (0600, atomic, symlink refusal) and git-ignored, and the sentinel scan
+   enforces that. It still holds decrypted values by design, so backups, file sync and
+   anything running as the user can read it. `.hack/.internal/compose.env.override.yml`
+   no longer holds values (HACK-1273), but the `docker compose` client process now
+   carries one `HACK_ENV_*` variable per service and key. Like every injected env, it is
+   readable by the same user (for example `ps eww`) for the life of that process. Each
+   service gets its own copy of each value, so the size grows with services times keys.
+   A project whose resolved values exceed the platform's argument and environment limit
+   (about 1 MiB in total on macOS; on Linux also 128 KiB, `MAX_ARG_STRLEN`, for one
+   `NAME=value` string such as a large PEM bundle) cannot start through Compose; the
+   start fails with `E2BIG`. Existing containers keep their values in `docker inspect`
+   (gap 9). A direct `docker compose -f` run of the override outside Hack gets blank
+   values. Legacy adoption resolves the values at preview and preparation and checks
+   each container's config-hash label against Compose's hash computed with them; a
+   saved recheck, which has no key or values, compares the label with the hash saved
+   at preparation while the Compose copy, the generated override bytes and the managed
+   env revision stay pinned. Removing an earlier version's literal override moves it
+   aside first; if a concurrent Hack command had just written a value-free file there,
+   that file is put back, but for the moment between the move and the put-back the path
+   is absent, so a concurrent Compose command reading it then fails and must be
+   retried. Other generated files under `.hack/.internal/` and `.hack/.branch/` are
+   written with the process umask; the scan shows they hold no values today.
 5. **YAML env file writes.** `writeProjectEnvConfigFile` in
    `src/lib/project-env-config.ts` also uses `writeTextFileIfChanged`, so
    `.hack/hack.env.*.yaml` writes follow a symlink at the file. These files hold
    ciphertext and non-secret plaintext, but a hostile repository could redirect the
    write.
-6. **`encrypted_file` key file hygiene.** `readEncryptedFileKey` and
-   `writeEncryptedFileKey` in `src/lib/secret-store.ts` read with `readTextFile` and
-   write with `writeFile` plus `chmod`. They do not use the `src/lib/private-file.ts`
-   helpers, so they follow symlinks and do not create the key exclusively.
+6. **`encrypted_file` key file reads.** Key writes now use the
+   `src/lib/private-file.ts` helpers: explicit provisioning replaces the key
+   atomically, and first-use generation publishes it exclusively. `readEncryptedFileKey`
+   in `src/lib/secret-store.ts` still reads with `readTextFile`, which follows a
+   symlink at the key path.
 7. **Directory TOCTOU.** The #302 directory checks are path-based `lstat` with
    identity rechecks, not `openat`/`renameat`. A swap of `.hack` between the recheck
    and `rename(2)` is not fully closed. The store lock is cooperative, and v4 writers
@@ -159,6 +173,43 @@ These gaps are known and not closed on `next`. Each one needs its own change.
     tokens with `security add-generic-password ... -w <value>`, which puts the value in
     argv for the life of that process. The node surface is unsupported; fix or remove
     it before that surface returns.
+11. **Cooperative key-creation lock.** Concurrent project key creation converges only
+    among writers that take `<git common dir>/.hack.secret.key.lock`. Hack v4, a
+    manually copied key, or a git dir that cannot hold the lock (creation then runs
+    unserialized, as before) can still produce divergent keys; `hack doctor` reports
+    divergent key files. A crashed lock owner is reclaimed only when its process is
+    gone, by the protocol in `src/lib/projects-registry-lock.ts`.
+12. **Limits of the sentinel scan.** The scan covers the files, argv and output that
+    the listed commands produce with a recording Docker shim. It does not cover a real
+    engine (`docker inspect`, container logs, image layers), application output, crash
+    reports, session archives, the keychain backend or 1Password, other CLI commands,
+    or the native runtime backend. A zero-hit result is evidence for those paths and
+    encodings only; it is not a complete-redaction claim.
+
+## Cross-context substitution accepted under v1
+
+Under the v1 formats the key alone decides whether ciphertext opens. The tests in
+`tests/aes-gcm-v1-context-binding.test.ts` refuse every move to another key and
+pin these moves as accepted. An attacker who can write a repository's env files can
+therefore swap or copy authentic ciphertext among them and change which value a
+variable receives, without knowing any key:
+
+- between variables and scopes in one file
+- between overlays of one project (for example `staging` to `default`)
+- between the shared env file and the `--local` override
+- from the primary checkout to a linked worktree, which share one key
+- between unrelated projects that use the same `HACK_ENV_SECRET_KEY` (for example
+  one CI secret for several repositories)
+- between `encrypted_file` stores with the same key, whatever their paths
+- across formats when the same key text is used for the project key and the
+  `encrypted_file` store: a store envelope re-framed as a `v1:` value decrypts to the
+  whole store map (the reverse is refused because the plaintext is not a store map)
+
+Mitigations available today: review changes to `.hack/hack.env.*.yaml` like code,
+use a different key per repository and per backend, and do not reuse a project key
+as `HACK_SECRETS_FILE_KEY`. Binding ciphertext to its context needs a new envelope
+version with associated data and a migration contract (see
+[the decision record](env-secrets.md)).
 
 ## Related
 

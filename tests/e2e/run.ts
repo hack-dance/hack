@@ -48,6 +48,9 @@ import { nativeConfigProcessPolicyScenario } from "./scenarios/native-config-pro
 import { nativeConfigProtectedFilesScenario } from "./scenarios/native-config-protected-files.ts";
 import { nativeConfigRoutingScenario } from "./scenarios/native-config-routing.ts";
 import { nativeConfigVmFilesScenario } from "./scenarios/native-config-vm-files.ts";
+import { patternP01DependencyBootstrapScenario } from "./scenarios/pattern-p01-dependency-bootstrap.ts";
+import { patternP02PortableToolchainScenario } from "./scenarios/pattern-p02-portable-toolchain.ts";
+import { patternP07CapabilityOverlaysScenario } from "./scenarios/pattern-p07-capability-overlays.ts";
 import { portableMultiserviceScenario } from "./scenarios/portable-multiservice.ts";
 import { upDownScenario } from "./scenarios/up-down.ts";
 import { worktreeBranchDefaultScenario } from "./scenarios/worktree-branch-default.ts";
@@ -93,6 +96,9 @@ export const ALL_SCENARIOS: readonly Scenario[] = [
   dependencyCacheBootstrapScenario,
   dependencyCacheProtocolScenario,
   dependencyCachePackageScenario,
+  patternP01DependencyBootstrapScenario,
+  patternP02PortableToolchainScenario,
+  patternP07CapabilityOverlaysScenario,
   domainMigrationScenario,
   upDownScenario,
   execStaleEnvScenario,

@@ -12,6 +12,7 @@
 
 - [Environment model](./env.md)
 - [Lifecycle & startup](./lifecycle.md)
+- [Shared host helper lifecycle](./reference/shared-host-lifecycle.md) — identity-verified adoption, exact process claims and release rules for helpers shared across branches
 - [Sessions](./sessions.md)
 - [Agent-first setup](./guides/agent-first-setup.md)
 

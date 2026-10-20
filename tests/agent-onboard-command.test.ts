@@ -2,6 +2,7 @@ import { afterEach, expect, test } from "bun:test";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { markRepoBoundary } from "./helpers/repo-boundary.ts";
 
 type CapturedRunResult = {
   readonly exitCode: number;
@@ -17,8 +18,10 @@ afterEach(async () => {
   }
 });
 
+/** An empty temp repo bounded by its own `.git` (no host ancestor adopted). */
 async function setupTempRepo(): Promise<string> {
   tempDir = await mkdtemp(join(tmpdir(), "hack-onboard-cmd-"));
+  await markRepoBoundary(tempDir);
   return tempDir;
 }
 
@@ -50,6 +53,7 @@ test("hack agent onboard prints the new-project prompt outside a hack project", 
   ]);
 
   expect(result.exitCode).toBe(0);
+  expect(result.stdout).toContain(`- Root: ${repoRoot}`);
   expect(result.stdout).toContain("stand up hack in this repo");
   expect(result.stdout).toContain("hack init --auto");
   expect(result.stdout).toContain("## Phase 5 — Verify the requested workflow");

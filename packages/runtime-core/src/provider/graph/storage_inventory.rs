@@ -207,6 +207,7 @@ mod tests {
             outbound: false,
             cache: Some(cache.clone()),
             cache_provenance: None,
+            disposable_caches: Vec::new(),
             kind: Kind::Volume,
             key: "deps".into(),
             name: cache.name(),

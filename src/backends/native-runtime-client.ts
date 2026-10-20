@@ -46,14 +46,17 @@ export const NATIVE_RUNTIME_NOT_RUNNING = "runtime_not_running";
 
 /**
  * True when a native request was refused because the candidate runtime is not
- * running. The runtime reports this before it connects to the guest or reads
- * graph state, so nothing was observed or changed. A read-only observation may
- * report the stopped runtime as its result instead of failing.
+ * running. Direct requests report this before guest access. Authored foreground
+ * control first authenticates its saved journal and owner, then wraps the same
+ * runtime refusal in its fixed control code. Neither form supplies live health.
+ * A read-only caller must still recheck its saved selection and executable.
  */
 export function isNativeRuntimeNotRunning(error: unknown): boolean {
   return (
     error instanceof NativeRuntimeRequestError &&
-    error.nativeCode === NATIVE_RUNTIME_NOT_RUNNING
+    (error.nativeCode === NATIVE_RUNTIME_NOT_RUNNING ||
+      (error.nativeCode === "native_graph_foreground" &&
+        error.nativeCauseCode === NATIVE_RUNTIME_NOT_RUNNING))
   );
 }
 
@@ -513,6 +516,22 @@ async function readBoundedOutput(
   return result;
 }
 
+function nativeFailureCause(input: {
+  readonly code: string;
+  readonly cause: unknown;
+}): string | undefined {
+  if (typeof input.cause !== "string" || !ERROR_CODE.test(input.cause)) {
+    return undefined;
+  }
+  return ["graph_one_off_failed", "graph_owner_recovery"].includes(
+    input.code
+  ) ||
+    (input.code === "native_graph_foreground" &&
+      input.cause === NATIVE_RUNTIME_NOT_RUNNING)
+    ? input.cause
+    : undefined;
+}
+
 /** Only bounded native error codes leave this boundary, never stderr messages. */
 async function readNativeFailure(
   stream: ReadableStream<Uint8Array>,
@@ -549,15 +568,13 @@ async function readNativeFailure(
       typeof value.code === "string" &&
       ERROR_CODE.test(value.code)
     ) {
+      const causeCode = nativeFailureCause({
+        code: value.code,
+        cause: value.cause_code,
+      });
       return {
         code: value.code,
-        ...(["graph_one_off_failed", "graph_owner_recovery"].includes(
-          value.code
-        ) &&
-        typeof value.cause_code === "string" &&
-        ERROR_CODE.test(value.cause_code)
-          ? { causeCode: value.cause_code }
-          : {}),
+        ...(causeCode ? { causeCode } : {}),
         ...(["engine_protocol", "engine_rejected", "engine_not_found"].includes(
           value.code === "graph_owner_recovery" &&
             typeof value.cause_code === "string"

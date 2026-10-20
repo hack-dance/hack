@@ -668,6 +668,7 @@ Write-path guarantees in a linked worktree (first secret added from any checkout
 - otherwise an existing shared key (git common dir) is reused
 - otherwise the primary checkout's key is adopted by copying it to the shared location, so sibling checkouts converge on one key
 - only then is a new key generated, and it is written to the shared location — never silently to the checkout
+- concurrent first use from several checkouts converges on one key: when no key exists, creation runs under a cooperative lock at `<git common dir>/.hack.secret.key.lock`, and a key file is published only when complete, never empty or partial (Hack v4 writers do not take the lock)
 - if the shared location cannot be resolved (git unavailable) or written, Hack falls back to a checkout-local key and prints a loud divergence warning
 - `hack doctor` flags divergent `.hack.secret.key` contents across checkouts with the exact paths
 
@@ -763,7 +764,10 @@ Some older surfaces are still compatibility-oriented:
   `<store>.lock` so concurrent writers, including separate processes, do not lose
   updates. A store path that is a symlink is refused for writes. Explicit key
   provisioning also uses an atomic mode-`0600` replacement and refuses symlinked
-  key paths or immediate parent directories. This protects individual key writes;
+  key paths or immediate parent directories. A key generated on first use is
+  published only when no key file exists, so concurrent first users adopt the key
+  published first instead of replacing it under a store already encrypted with
+  it. This protects individual key writes;
   it does not make key replacement and store re-encryption a crash-safe rotation
   transaction. Keep the previous key until recovery has been verified. The v1 store
   envelope and legacy `v1:` values authenticate no associated data: they are not

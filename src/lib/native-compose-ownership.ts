@@ -522,6 +522,7 @@ async function queryNativeComposeOwned(
       networks: [],
       endpoints: new Map(),
       members: new Map(),
+      placeholders: new Map(),
     };
     const selected = new Map<Kind, Inventory[]>();
     for (const kind of ["container", "volume", "network"] as const) {
@@ -566,6 +567,7 @@ async function queryNativeComposeOwned(
       networks: [],
       endpoints: new Map(),
       members: new Map(),
+      placeholders: new Map(),
     };
     for (const kind of ["container", "volume", "network"] as const) {
       await collectInspections({
@@ -638,6 +640,8 @@ type MutableObservation = {
   networks: { id: string; name: string }[];
   endpoints: Map<string, Record<string, unknown>>;
   members: Map<string, readonly string[]>;
+  /** Per network, container IDs whose `ep-` placeholder this scan admitted; never member identities. */
+  placeholders: Map<string, ReadonlySet<string>>;
 };
 function volumeSnapshot(observations: MutableObservation) {
   return [...observations.volumes].sort((left, right) =>
@@ -759,7 +763,7 @@ async function collectInspections(input: {
           "topology",
           "network-members-shape"
         );
-        const members = networkMembers({
+        const { members, placeholders } = networkMembers({
           members: row.containers,
           network: resource.name,
           observations,
@@ -768,6 +772,7 @@ async function collectInspections(input: {
           restartingServices: input.restartingServices,
         });
         observations.members.set(resource.name, members);
+        observations.placeholders.set(resource.name, placeholders);
         networks.push({ id: resource.id, name: resource.name });
       }
     }
@@ -778,12 +783,14 @@ async function collectInspections(input: {
  * Member keys are immutable container IDs. While a restarting container's endpoint
  * exists without its sandbox, Docker keys it `ep-<endpoint>` instead; that placeholder
  * is never a member identity. Only the first startup scan tolerates one such key per
- * selected on-failure container whose same-scan inspect reports state `restarting` and
- * an endpoint on this network, exactly the container the live-endpoint admission keeps
- * unready; the recheck scan must observe only container IDs, so an unresolved,
- * non-restarting or unselected placeholder refuses with the unchanged
- * `network-member-id` predicate. Key and name values are compared only, never
- * retained or disclosed.
+ * selected on-failure container whose same-scan inspect reports state `restarting` or
+ * `running` and an endpoint on this network. `running` is admitted because the scan
+ * inspects containers before networks and Docker does not lock them together: a
+ * container observed running can exit and begin its on-failure restart before the
+ * bridge is read. The live-endpoint admission keeps every admitted container unready;
+ * the recheck scan must observe only container IDs, so an unresolved, created/exited,
+ * oneoff or unselected placeholder refuses with the unchanged `network-member-id`
+ * predicate. Key and name values are compared only, never retained or disclosed.
  */
 function networkMembers(opts: {
   readonly members: Record<string, unknown>;
@@ -791,7 +798,10 @@ function networkMembers(opts: {
   readonly observations: MutableObservation;
   readonly admitRestartingPlaceholders: boolean;
   readonly restartingServices: ReadonlySet<string>;
-}): readonly string[] {
+}): {
+  readonly members: readonly string[];
+  readonly placeholders: ReadonlySet<string>;
+} {
   const members = Object.keys(opts.members).filter((key) => ID.test(key));
   const claimed = new Set<string>();
   for (const [key, member] of Object.entries(opts.members)) {
@@ -813,7 +823,7 @@ function networkMembers(opts: {
     requireValue(
       owners.length === 1 &&
         owner !== undefined &&
-        owner.state === "restarting" &&
+        (owner.state === "restarting" || owner.state === "running") &&
         !owner.oneoff &&
         opts.restartingServices.has(owner.service) &&
         !members.includes(owner.id) &&
@@ -827,7 +837,7 @@ function networkMembers(opts: {
     );
     claimed.add(owner.id);
   }
-  return members.sort();
+  return { members: members.sort(), placeholders: claimed };
 }
 
 function containerObservation(
@@ -1031,7 +1041,10 @@ function requireLiveMember(opts: {
   }
   requireValue(
     mode === "startup" &&
-      container.state === "restarting" &&
+      (container.state === "restarting" ||
+        (container.state === "running" &&
+          observations.placeholders.get(attachment.name)?.has(container.id) ===
+            true)) &&
       !container.oneoff &&
       restartingServices.has(container.service) &&
       policy.networks.length === 1 &&

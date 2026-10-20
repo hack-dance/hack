@@ -1351,6 +1351,7 @@ test("installer accepts exactly the versioned bundle contract with the packaged 
         "print(json.dumps({",
         "    'accepted': sorted(m.payload_inventory(names | {'SHA256SUMS'})),",
         "    'top_level': sorted(m.PAYLOAD | m.COMPILER_PAYLOAD | m.STORAGE_TOOL_PAYLOAD),",
+        "    'member_ceiling': m.MAX_ARCHIVE_MEMBERS,",
         "    'modes': {name: m.payload_mode(name) for name in sorted(names)},",
         "    'foreign_refused': refused(names | {'SHA256SUMS', 'native-storage-tool.sig'}),",
         "    'storage_partial_refused': [refused(names - {name} | {'SHA256SUMS'})",
@@ -1367,6 +1368,7 @@ test("installer accepts exactly the versioned bundle contract with the packaged 
   const result = JSON.parse(probe.stdout.toString()) as {
     accepted: string[];
     top_level: string[];
+    member_ceiling: number;
     modes: Record<string, number>;
     foreign_refused: boolean;
     storage_partial_refused: boolean[];
@@ -1380,6 +1382,10 @@ test("installer accepts exactly the versioned bundle contract with the packaged 
   }
   expect(result.foreign_refused).toBe(true);
   expect(result.storage_partial_refused).toEqual([true, true]);
+  // The packaged archive holds the versioned payload plus SHA256SUMS. Its member
+  // count must stay below the installer's fixed ceiling, leaving headroom for a
+  // reviewed addition, instead of filling it exactly.
+  expect(result.member_ceiling).toBeGreaterThan(names.length + 1);
 });
 
 /** GitHub's heading anchor: lowercase, punctuation removed, spaces as hyphens. */

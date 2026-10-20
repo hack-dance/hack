@@ -154,7 +154,14 @@ import {
 import { withComposeServiceEnvFingerprints } from "../lib/compose-env-fingerprint.ts";
 import { renderManagedComposeEnvOverride } from "../lib/compose-managed-env.ts";
 import {
+  type ComposeStartupBudgets,
+  type ComposeStartupFailure,
+  type ComposeStartupPhase,
+  composeStartupFailure,
+  DEFAULT_COMPOSE_IMAGE_TIMEOUT_MS,
   DEFAULT_COMPOSE_STARTUP_TIMEOUT_MS,
+  describeComposeStartupBudgets,
+  resolveComposeImageTimeoutMs,
   resolveComposeStartupTimeoutMs,
 } from "../lib/compose-startup-budget.ts";
 import {
@@ -220,6 +227,7 @@ import {
   resolvePreferredOpenHost,
 } from "../lib/open-host.ts";
 import { openUrl } from "../lib/os.ts";
+import { writePrivateEnvFileIfChanged } from "../lib/private-env-file.ts";
 import {
   defaultProjectSlugFromPath,
   findProjectContext,
@@ -912,34 +920,57 @@ function startupSnapshotIsIncomplete(opts: {
 }
 
 function reportComposeStartupBudget(opts: {
-  readonly startupTimeoutMs: number;
+  readonly budgets: ComposeStartupBudgets;
   readonly detach: boolean;
   readonly repair?: boolean;
 }): void {
   if (opts.detach) {
     logger.step({
-      message: `Compose ${opts.repair ? "repair" : "startup"}: launch and dependency wait (budget ${opts.startupTimeoutMs} ms)`,
+      message: `Compose ${opts.repair ? "repair" : "startup"}: ${describeComposeStartupBudgets(opts.budgets)}`,
     });
   }
 }
 
-function composeStartupFailure(
-  code: number,
-  action: string,
-  startupTimeoutMs: number
-): {
-  readonly code: "E_COMPOSE_FAILED" | "E_STARTUP_TIMEOUT";
-  readonly message: string;
-} {
-  return code === 124
+/** Resolve both detached Compose budgets before any project side effect. */
+function resolveDetachedComposeBudgets(detach: boolean): ComposeStartupBudgets {
+  return detach
     ? {
-        code: "E_STARTUP_TIMEOUT",
-        message: `${action} exceeded its detached Compose startup budget of ${startupTimeoutMs} ms (HACK_COMPOSE_STARTUP_TIMEOUT_MS). The Compose process group was terminated; inspect hack ps and hack logs before retrying. Containers may still be running. This limit covers Compose launch and dependency waiting, not lifecycle hooks or application readiness.`,
+        imageTimeoutMs: resolveComposeImageTimeoutMs(),
+        startupTimeoutMs: resolveComposeStartupTimeoutMs(),
       }
     : {
-        code: "E_COMPOSE_FAILED",
-        message: `${action} failed (exit ${code})`,
+        imageTimeoutMs: DEFAULT_COMPOSE_IMAGE_TIMEOUT_MS,
+        startupTimeoutMs: DEFAULT_COMPOSE_STARTUP_TIMEOUT_MS,
       };
+}
+
+/**
+ * Record the last detached Compose phase the backend entered, so a failure is
+ * attributed to it. A backend that never reports a phase is treated as `start`.
+ */
+function trackComposeStartupPhase(): {
+  readonly onStartupPhase: (phase: ComposeStartupPhase) => void;
+  readonly phase: () => ComposeStartupPhase;
+} {
+  let current: ComposeStartupPhase = "start";
+  return {
+    onStartupPhase: (phase) => {
+      current = phase;
+    },
+    phase: () => current,
+  };
+}
+
+function composeStartupFailureDetail(opts: {
+  readonly failure: ComposeStartupFailure;
+  readonly exitCode: number;
+}): Record<string, unknown> {
+  return {
+    exitCode: opts.exitCode,
+    composePhase: opts.failure.phase,
+    budgetMs: opts.failure.budgetMs,
+    budgetEnv: opts.failure.budgetEnv,
+  };
 }
 
 /**
@@ -1314,10 +1345,14 @@ export async function resolveModernComposeEnvOverrides(opts: {
   }
 
   await ensureHackDirGitignore({ projectDir: opts.project.projectDir });
-  const overrideDir = resolve(opts.project.projectDir, ".internal");
-  await ensureDir(overrideDir);
-  const overridePath = resolve(overrideDir, "compose.env.override.yml");
-  await writeTextFileIfChanged(overridePath, text);
+  const overridePath = resolve(
+    opts.project.projectDir,
+    ".internal",
+    "compose.env.override.yml"
+  );
+  // The modern projection holds resolved plaintext, including decrypted
+  // secrets: write it like .hack/.env (0600, atomic, symlink refusal).
+  await writePrivateEnvFileIfChanged({ envFile: overridePath, text });
   return {
     composeFiles: [overridePath],
     env: modern.globalEnv,
@@ -5244,9 +5279,8 @@ async function runUpCommand({
   readonly startedAtMs?: number;
 }): Promise<number> {
   const detach = args.options.detach || json;
-  const startupTimeoutMs = detach
-    ? resolveComposeStartupTimeoutMs()
-    : DEFAULT_COMPOSE_STARTUP_TIMEOUT_MS;
+  const budgets = resolveDetachedComposeBudgets(detach);
+  const { startupTimeoutMs } = budgets;
   let project: Awaited<ReturnType<typeof requireProjectContext>>;
   try {
     project = await resolveProjectForArgs({
@@ -5497,7 +5531,7 @@ async function runUpCommand({
       ...(runtimeMetadataOverride ? [runtimeMetadataOverride] : []),
       ...envOverrides.composeFiles,
     ];
-    reportComposeStartupBudget({ startupTimeoutMs, detach });
+    reportComposeStartupBudget({ budgets, detach });
     const bootstrapCode = await bootstrapDependencyCaches({
       timeoutMs: detach ? startupTimeoutMs : undefined,
       services: cacheBootstrapServices,
@@ -5521,6 +5555,7 @@ async function runUpCommand({
       logger.error({ message: failure.message });
       return bootstrapCode;
     }
+    const upPhase = trackComposeStartupPhase();
     const upCode = await composeRuntimeBackend.up({
       dependencyProgress: resolveDependencyCacheProgress({
         cache: dependencyCache,
@@ -5528,6 +5563,8 @@ async function runUpCommand({
         baseProject: baseProjectName,
       }),
       startupTimeoutMs,
+      imageTimeoutMs: budgets.imageTimeoutMs,
+      onStartupPhase: upPhase.onStartupPhase,
       composeFiles: composeFilesWithEnv,
       composeProject: composeProjectName,
       profiles,
@@ -5544,28 +5581,23 @@ async function runUpCommand({
         projectDir: project.projectDir,
         composeProject: lifecycleComposeProject,
       });
+      const failure = composeStartupFailure({
+        code: upCode,
+        action: "docker compose up",
+        phase: upPhase.phase(),
+        budgets,
+      });
       if (json) {
-        const failure = composeStartupFailure(
-          upCode,
-          "docker compose up",
-          startupTimeoutMs
-        );
         return emitLifecycleResult({
           result: errorResult({
             code: failure.code,
             message: failure.message,
-            detail: { exitCode: upCode },
+            detail: composeStartupFailureDetail({ failure, exitCode: upCode }),
           }),
           exitCode: upCode,
         });
       }
-      logger.error({
-        message: composeStartupFailure(
-          upCode,
-          "docker compose up",
-          startupTimeoutMs
-        ).message,
-      });
+      logger.error({ message: failure.message });
       return upCode;
     }
 
@@ -6250,7 +6282,7 @@ async function runRestartDownPhase(opts: {
 }
 
 async function runRestartUpPhase(opts: {
-  readonly startupTimeoutMs: number;
+  readonly budgets: ComposeStartupBudgets;
   readonly project: Awaited<ReturnType<typeof requireProjectContext>>;
   readonly cfg: Awaited<ReturnType<typeof readProjectConfig>>;
   readonly baseProjectName: string;
@@ -6265,6 +6297,7 @@ async function runRestartUpPhase(opts: {
 }): Promise<{
   readonly code: number;
   readonly phase: "compose" | "lifecycle";
+  readonly composePhase?: ComposeStartupPhase;
 }> {
   await maybeSyncOauthAliasesInCompose({ project: opts.project });
 
@@ -6380,16 +6413,19 @@ async function runRestartUpPhase(opts: {
       ...envOverrides.composeFiles,
     ];
     reportComposeStartupBudget({
-      startupTimeoutMs: opts.startupTimeoutMs,
+      budgets: opts.budgets,
       detach: opts.detach === true,
     });
+    const upPhase = trackComposeStartupPhase();
     const upCode = await composeRuntimeBackend.up({
       dependencyProgress: resolveDependencyCacheProgress({
         cache: dependencyCache,
         project: opts.composeProjectName,
         baseProject: opts.baseProjectName,
       }),
-      startupTimeoutMs: opts.startupTimeoutMs,
+      startupTimeoutMs: opts.budgets.startupTimeoutMs,
+      imageTimeoutMs: opts.budgets.imageTimeoutMs,
+      onStartupPhase: upPhase.onStartupPhase,
       composeFiles: composeFilesWithEnv,
       composeProject: opts.composeProjectName,
       profiles: opts.profiles,
@@ -6401,7 +6437,7 @@ async function runRestartUpPhase(opts: {
     });
     if (upCode !== 0) {
       reportComposeStartupBudget({
-        startupTimeoutMs: opts.startupTimeoutMs,
+        budgets: opts.budgets,
         detach: true,
         repair: true,
       });
@@ -6411,7 +6447,8 @@ async function runRestartUpPhase(opts: {
           project: opts.composeProjectName,
           baseProject: opts.baseProjectName,
         }),
-        startupTimeoutMs: opts.startupTimeoutMs,
+        startupTimeoutMs: opts.budgets.startupTimeoutMs,
+        imageTimeoutMs: opts.budgets.imageTimeoutMs,
         composeFiles: composeFilesWithEnv,
         composeProject: opts.composeProjectName,
         profiles: opts.profiles,
@@ -6437,7 +6474,7 @@ async function runRestartUpPhase(opts: {
           composeProject: opts.lifecycleComposeProject,
         });
       }
-      return { code: upCode, phase: "compose" };
+      return { code: upCode, phase: "compose", composePhase: upPhase.phase() };
     }
 
     const upAfter = await runLifecycleCommands({
@@ -6490,7 +6527,7 @@ type TargetedServiceRestartResult =
  * individual Compose service.
  */
 async function runTargetedServiceRestart(opts: {
-  readonly startupTimeoutMs: number;
+  readonly budgets: ComposeStartupBudgets;
   readonly project: Awaited<ReturnType<typeof requireProjectContext>>;
   readonly cfg: Awaited<ReturnType<typeof readProjectConfig>>;
   readonly baseProjectName: string;
@@ -6572,7 +6609,7 @@ async function runTargetedServiceRestart(opts: {
     ...envOverrides.composeFiles,
   ];
   const bootstrapCode = await bootstrapDependencyCaches({
-    timeoutMs: opts.startupTimeoutMs,
+    timeoutMs: opts.budgets.startupTimeoutMs,
     services: cacheBootstrapServices,
     composeFiles: composeFilesWithEnv,
     composeProject: opts.composeProjectName,
@@ -6583,7 +6620,7 @@ async function runTargetedServiceRestart(opts: {
   if (bootstrapCode !== 0) {
     const failure = dependencyCacheBootstrapFailure({
       code: bootstrapCode,
-      timeoutMs: opts.startupTimeoutMs,
+      timeoutMs: opts.budgets.startupTimeoutMs,
     });
     return {
       ok: false,
@@ -6595,16 +6632,19 @@ async function runTargetedServiceRestart(opts: {
     };
   }
   reportComposeStartupBudget({
-    startupTimeoutMs: opts.startupTimeoutMs,
+    budgets: opts.budgets,
     detach: true,
   });
+  const upPhase = trackComposeStartupPhase();
   const code = await composeRuntimeBackend.up({
     dependencyProgress: resolveDependencyCacheProgress({
       cache: dependencyCache,
       project: opts.composeProjectName,
       baseProject: opts.baseProjectName,
     }),
-    startupTimeoutMs: opts.startupTimeoutMs,
+    startupTimeoutMs: opts.budgets.startupTimeoutMs,
+    imageTimeoutMs: opts.budgets.imageTimeoutMs,
+    onStartupPhase: upPhase.onStartupPhase,
     composeFiles: composeFilesWithEnv,
     composeProject: opts.composeProjectName,
     profiles: opts.profiles,
@@ -6630,11 +6670,12 @@ async function runTargetedServiceRestart(opts: {
     outcome: code === 0 ? "applied" : "unknown",
   });
   if (code !== 0) {
-    const failure = composeStartupFailure(
+    const failure = composeStartupFailure({
       code,
-      "Targeted service restart",
-      opts.startupTimeoutMs
-    );
+      action: "Targeted service restart",
+      phase: upPhase.phase(),
+      budgets: opts.budgets,
+    });
     return {
       ok: false,
       code,
@@ -6800,7 +6841,7 @@ async function runRestartCommand({
   readonly json: boolean;
   readonly startedAtMs?: number;
 }): Promise<number> {
-  const startupTimeoutMs = resolveComposeStartupTimeoutMs();
+  const budgets = resolveDetachedComposeBudgets(true);
   const project = await resolveProjectForArgs({
     ctx,
     pathOpt: args.options.path,
@@ -6860,7 +6901,7 @@ async function runRestartCommand({
   });
   if (requestedServices.length > 0) {
     const result = await runTargetedServiceRestart({
-      startupTimeoutMs,
+      budgets,
       project,
       cfg,
       baseProjectName,
@@ -6960,7 +7001,7 @@ async function runRestartCommand({
   });
 
   const upOutcome = await runRestartUpPhase({
-    startupTimeoutMs,
+    budgets,
     project,
     cfg,
     baseProjectName,
@@ -6978,7 +7019,12 @@ async function runRestartCommand({
   if (upCode !== 0) {
     const failure =
       upOutcome.phase === "compose"
-        ? composeStartupFailure(upCode, "Restart up phase", startupTimeoutMs)
+        ? composeStartupFailure({
+            code: upCode,
+            action: "Restart up phase",
+            phase: upOutcome.composePhase ?? "start",
+            budgets,
+          })
         : {
             code: "E_LIFECYCLE_FAILED" as const,
             message: `Restart lifecycle hook failed (exit ${upCode})`,
@@ -6991,7 +7037,12 @@ async function runRestartCommand({
       result: errorResult({
         code: failure.code,
         message: failure.message,
-        detail: { exitCode: upCode, phase: "up" },
+        detail: {
+          ...("phase" in failure
+            ? composeStartupFailureDetail({ failure, exitCode: upCode })
+            : { exitCode: upCode }),
+          phase: "up",
+        },
       }),
       exitCode: upCode,
     });

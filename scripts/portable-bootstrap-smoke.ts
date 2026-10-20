@@ -204,7 +204,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
  * v1:base64(iv):base64(tag):base64(ciphertext), AES-256-GCM, SHA-256(key text).
  * The synthetic key and plaintext never become fixture files or CLI arguments.
  */
-function encryptSynthetic(opts: { key: string; secret: string }): string {
+export function encryptSynthetic(opts: {
+  key: string;
+  secret: string;
+}): string {
   const iv = randomBytes(12);
   const cipher = createCipheriv(
     "aes-256-gcm",

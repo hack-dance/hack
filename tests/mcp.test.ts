@@ -813,6 +813,11 @@ test("tools/list publishes names, annotations and required inputs for every tool
       annotations: { title: "List project instances", ...READ_ONLY },
       required: [],
     },
+    {
+      name: "hack.project.target",
+      annotations: { title: "Inspect project target", ...READ_ONLY },
+      required: [],
+    },
   ]);
   const run = listed.tools.find((tool) => tool.name === "hack.project.run");
   expect(run?.inputSchema.properties?.timeoutMs).toMatchObject({

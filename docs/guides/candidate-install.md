@@ -30,8 +30,10 @@ latest-version lookup or automatic updater.
 By default installation creates a private, current-user-owned mode-`0700`
 `~/.hack-next` directory. Each immutable version directory contains a complete
 bundle, its own `native-home`, and its own `cli-home`. An installation receipt binds
-the bundle hashes and both homes' filesystem identities. Stable Homebrew `hack`,
-its links, and `~/.hack` are untouched. No shell profile or PATH is edited.
+the bundle hashes and both homes' filesystem identities. Installation leaves stable
+Homebrew `hack`, its links, and `~/.hack` untouched; only an explicit
+[Compose test](#test-both-backends) uses your own Hack home. No shell profile or
+PATH is edited.
 
 Run the candidate explicitly:
 
@@ -41,9 +43,13 @@ Run the candidate explicitly:
 python3 "$HOME/.hack-next/manager.py" --root "$HOME/.hack-next" status
 ```
 
-`hack-next` selects the adjacent verified native executor and the selected version's
-private native and CLI homes. These settings override inherited installation
-selectors, including `HACK_GLOBAL_CONFIG_PATH`. Explicit native project adaptation,
+By default `hack-next` uses the native backend. It selects the adjacent verified
+native executor and the selected version's private native and CLI homes. These
+settings override inherited installation selectors, including `HACK_NATIVE_BINARY`,
+`HACK_NATIVE_HOME`, `HACK_HOME` and `HACK_GLOBAL_CONFIG_PATH`. To run the same
+verified candidate on the Compose backend, set `HACK_RUNTIME_BACKEND=compose`; see
+[Test both backends](#test-both-backends). Any other non-empty value refuses before
+the candidate starts. Explicit native project adaptation,
 dependency, AWS profile, routing, and source-sharing settings still reach the CLI.
 Arguments, standard input and output, exit codes, and signals reach the selected
 candidate. Concurrent observation and stop commands can accompany a foreground
@@ -63,7 +69,54 @@ Provider setup and actual application acceptance remain separate steps. Installa
 does not install the provider, boot a VM, enroll a project, move volumes, or activate
 system DNS or trust. Follow [native candidate preparation](native-candidate.md)
 using the selected bundle and its `native-home`. Candidate `hack-next update`
-retains the existing refusal; use the channel manager's explicit upgrade command.
+retains the existing refusal on both backends; use the channel manager's explicit
+upgrade command.
+
+## Test both backends
+
+The same selected candidate can run on either backend. You do not need to call the
+bundled `hack-cli` directly or create a private `HACK_HOME` to test Compose.
+
+| Backend | Command | Hack home | Routing, DNS and TLS |
+| --- | --- | --- | --- |
+| Native (default) | `"$HOME/.hack-next/bin/hack-next" up --path /absolute/project` | The version's private `cli-home` and `native-home` | The candidate's native routing, set up through [native candidate preparation](native-candidate.md) |
+| Compose | `HACK_RUNTIME_BACKEND=compose "$HOME/.hack-next/bin/hack-next" up --path /absolute/project` | Your own `HACK_HOME` (default `~/.hack`) and `HACK_GLOBAL_CONFIG_PATH` | Your existing global Caddy, CoreDNS and local CA |
+
+With `HACK_RUNTIME_BACKEND=compose`, `hack-next` verifies the selected bundle as
+usual and then runs its `hack-cli` on the Compose backend. It keeps your Hack home,
+so `https://<project>.hack` routes, container DNS and CA trust use the global
+services that `hack global install` already set up. It removes `HACK_NATIVE_BINARY`
+and `HACK_NATIVE_HOME` so native selections cannot reach Compose children. The
+candidate's private homes are not used. Compose `up` still uses the configurable
+Compose startup budget; a cold image build can need a larger
+`HACK_COMPOSE_STARTUP_TIMEOUT_MS`.
+
+Compose testing shares state with stable Hack:
+
+- The candidate reads and writes the same project registry, global configuration
+  and project `.hack/` files as stable `hack`. Stable v4 uses an older registry
+  lock protocol, so do not run stable `hack` and the candidate against the same
+  home at the same time. Stop one before you start the other.
+- `hack-next` does not set up the shared global services for you. Install or
+  change them with stable `hack global` commands.
+- To test Compose in isolation instead, set `HACK_HOME` to a separate private
+  directory. That home has no global services, so routing, container DNS and CA
+  trust are not tested.
+
+Leave `HACK_RUNTIME_BACKEND` unset, or set it to `native`, to return to the native
+default. A shell that exported `HACK_RUNTIME_BACKEND=compose` for other work also
+selects Compose for `hack-next`; unset it before native testing.
+
+Backend selection needs the current channel manager. The manager released with
+`5.0.0-next.3` through `5.0.0-next.5` always selects native, and ignores
+`HACK_RUNTIME_BACKEND=compose`. Run the reviewed `upgrade-manager` operation below
+once to receive backend selection. This works for every retained bundle, including
+`5.0.0-next.5`. Candidate CLIs from `5.0.0-next.5` and earlier refuse `update` only
+on the native backend; do not run `hack-next update` on Compose with those bundles.
+
+The bundled `hack-v5` entrypoint follows the same rule for manual bundles:
+unset selects native and requires `HACK_NATIVE_HOME`; `compose` needs no native
+home and uses your own Hack home.
 
 ## Upgrade and return to a retained candidate
 

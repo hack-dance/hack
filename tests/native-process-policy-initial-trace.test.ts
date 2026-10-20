@@ -105,121 +105,136 @@ test("initial trace accepts only exact ownership read protocols", () => {
   }
 });
 
-test("initial forwarding preserves bytes/exits but records no unknown output, args or stderr", async () => {
-  const root = await mkdtemp(join(tmpdir(), "process-initial-forwarding-"));
-  const previous = process.env.PATH;
-  const binary = join(root, "docker");
-  const traceRoot = join(root, "trace");
-  try {
-    await Bun.write(
-      binary,
-      `#!${process.execPath} --no-env-file
+/**
+ * Each forwarded command cold-starts two Bun processes (the trace forwarder and
+ * the fake Docker). These bounds only stop a wedged child from hanging the run;
+ * exits, bytes and trace order are still asserted exactly.
+ */
+const FORWARDED_DOCKER_EXEC_TIMEOUT_MS = 30_000;
+/** Four forwarded commands at their exec bound, plus trace reads and rewrites. */
+const INITIAL_FORWARDING_TEST_TIMEOUT_MS = 150_000;
+
+test(
+  "initial forwarding preserves bytes/exits but records no unknown output, args or stderr",
+  async () => {
+    const root = await mkdtemp(join(tmpdir(), "process-initial-forwarding-"));
+    const previous = process.env.PATH;
+    const binary = join(root, "docker");
+    const traceRoot = join(root, "trace");
+    try {
+      await Bun.write(
+        binary,
+        `#!${process.execPath} --no-env-file
 const args=process.argv.slice(2); await Bun.sleep(20);
 if(args[0]==="compose"){await Bun.write(Bun.stdout,"original compose bytes\\n");await Bun.write(Bun.stderr,${JSON.stringify(CANARY)});process.exit(17);}
 if(args[1]==="ls"){await Bun.write(Bun.stdout,"original list bytes\\n");process.exit(0);}
 await Bun.write(Bun.stdout,${JSON.stringify(CANARY)});await Bun.write(Bun.stderr,${JSON.stringify(CANARY)});process.exit(23);
 `
-    );
-    await chmod(binary, 0o700);
-    process.env.PATH = root;
-    const prepared = await prepareProcessPolicyInitialTrace({
-      directory: traceRoot,
-    });
-    const run = async (args: readonly string[]) =>
-      await exec([join(traceRoot, "docker"), ...args], {
-        env: { PATH: prepared.path },
-        stdin: "ignore",
-        timeoutMs: 3000,
-      });
-    expect(await run(list("container"))).toEqual({
-      exitCode: 0,
-      stdout: "original list bytes\n",
-      stderr: "",
-    });
-    expect(
-      await run(["compose", "-p", project, "-f", CANARY, "up", "-d"])
-    ).toEqual({
-      exitCode: 17,
-      stdout: "original compose bytes\n",
-      stderr: CANARY,
-    });
-    expect(
-      await run(["inspect", id, "--format", "{{json .Config.Env}}"])
-    ).toEqual({ exitCode: 23, stdout: CANARY, stderr: CANARY });
-    expect(await run(list("network"))).toEqual({
-      exitCode: 0,
-      stdout: "original list bytes\n",
-      stderr: "",
-    });
-    const trace = await readProcessPolicyInitialTrace(prepared.directory);
-    expect(trace.queries.map((row) => row.args)).toEqual([
-      list("container"),
-      list("network"),
-    ]);
-    expect((trace.queries[0]?.startOrder ?? -1) < trace.upStartOrder).toBe(
-      true
-    );
-    expect((trace.queries[1]?.startOrder ?? -1) > trace.upReapOrder).toBe(true);
-    for (const name of await readdir(prepared.directory)) {
-      expect(
-        await Bun.file(join(prepared.directory, name)).text()
-      ).not.toContain(CANARY);
-    }
-    const journal = join(prepared.directory, "events.jsonl");
-    const originalJournal = await Bun.file(journal).text();
-    const second = trace.queries[1];
-    const first = trace.queries[0];
-    if (!(first && second)) {
-      throw new Error("Missing synthetic query pair");
-    }
-    // Complete but overlapping original reads cannot be grouped into a faithful
-    // single-owner replay, even if every capsule and reply is still present.
-    const effect = originalJournal
-      .trimEnd()
-      .split("\n")
-      .filter(
-        (line) => !(line.includes(first.token) || line.includes(second.token))
       );
-    const overlapping = [
-      { token: first.token, event: "start" },
-      { token: second.token, event: "start" },
-      { token: first.token, event: "reap" },
-      { token: second.token, event: "reap" },
-    ].map((event) => JSON.stringify(event));
-    await Bun.write(journal, `${[...overlapping, ...effect].join("\n")}\n`);
-    await expect(
-      readProcessPolicyInitialTrace(prepared.directory)
-    ).rejects.toThrow("trace unavailable");
-    await Bun.write(journal, originalJournal.slice(0, -1));
-    await expect(
-      readProcessPolicyInitialTrace(prepared.directory)
-    ).rejects.toThrow("trace unavailable");
-    await Bun.write(journal, originalJournal);
-    expect(
-      (await readProcessPolicyInitialTrace(prepared.directory)).queries.map(
-        (row) => row.args
-      )
-    ).toEqual([list("container"), list("network")]);
-    const row = trace.queries[0];
-    if (!row) {
-      throw new Error("Missing synthetic trace");
+      await chmod(binary, 0o700);
+      process.env.PATH = root;
+      const prepared = await prepareProcessPolicyInitialTrace({
+        directory: traceRoot,
+      });
+      const run = async (args: readonly string[]) =>
+        await exec([join(traceRoot, "docker"), ...args], {
+          env: { PATH: prepared.path },
+          stdin: "ignore",
+          timeoutMs: FORWARDED_DOCKER_EXEC_TIMEOUT_MS,
+        });
+      expect(await run(list("container"))).toEqual({
+        exitCode: 0,
+        stdout: "original list bytes\n",
+        stderr: "",
+      });
+      expect(
+        await run(["compose", "-p", project, "-f", CANARY, "up", "-d"])
+      ).toEqual({
+        exitCode: 17,
+        stdout: "original compose bytes\n",
+        stderr: CANARY,
+      });
+      expect(
+        await run(["inspect", id, "--format", "{{json .Config.Env}}"])
+      ).toEqual({ exitCode: 23, stdout: CANARY, stderr: CANARY });
+      expect(await run(list("network"))).toEqual({
+        exitCode: 0,
+        stdout: "original list bytes\n",
+        stderr: "",
+      });
+      const trace = await readProcessPolicyInitialTrace(prepared.directory);
+      expect(trace.queries.map((row) => row.args)).toEqual([
+        list("container"),
+        list("network"),
+      ]);
+      expect((trace.queries[0]?.startOrder ?? -1) < trace.upStartOrder).toBe(
+        true
+      );
+      expect((trace.queries[1]?.startOrder ?? -1) > trace.upReapOrder).toBe(
+        true
+      );
+      for (const name of await readdir(prepared.directory)) {
+        expect(
+          await Bun.file(join(prepared.directory, name)).text()
+        ).not.toContain(CANARY);
+      }
+      const journal = join(prepared.directory, "events.jsonl");
+      const originalJournal = await Bun.file(journal).text();
+      const second = trace.queries[1];
+      const first = trace.queries[0];
+      if (!(first && second)) {
+        throw new Error("Missing synthetic query pair");
+      }
+      // Complete but overlapping original reads cannot be grouped into a faithful
+      // single-owner replay, even if every capsule and reply is still present.
+      const effect = originalJournal
+        .trimEnd()
+        .split("\n")
+        .filter(
+          (line) => !(line.includes(first.token) || line.includes(second.token))
+        );
+      const overlapping = [
+        { token: first.token, event: "start" },
+        { token: second.token, event: "start" },
+        { token: first.token, event: "reap" },
+        { token: second.token, event: "reap" },
+      ].map((event) => JSON.stringify(event));
+      await Bun.write(journal, `${[...overlapping, ...effect].join("\n")}\n`);
+      await expect(
+        readProcessPolicyInitialTrace(prepared.directory)
+      ).rejects.toThrow("trace unavailable");
+      await Bun.write(journal, originalJournal.slice(0, -1));
+      await expect(
+        readProcessPolicyInitialTrace(prepared.directory)
+      ).rejects.toThrow("trace unavailable");
+      await Bun.write(journal, originalJournal);
+      expect(
+        (await readProcessPolicyInitialTrace(prepared.directory)).queries.map(
+          (row) => row.args
+        )
+      ).toEqual([list("container"), list("network")]);
+      const row = trace.queries[0];
+      if (!row) {
+        throw new Error("Missing synthetic trace");
+      }
+      const reap = join(prepared.directory, `${row.token}.json.reap`);
+      const originalReap = await Bun.file(reap).text();
+      await unlink(reap);
+      await expect(
+        readProcessPolicyInitialTrace(prepared.directory)
+      ).rejects.toThrow();
+      await Bun.write(reap, originalReap);
+      await unlink(join(prepared.directory, `${row.token}.json.start`));
+      await expect(
+        readProcessPolicyInitialTrace(prepared.directory)
+      ).rejects.toThrow();
+    } finally {
+      restoreEnv("PATH", previous);
+      await rm(root, { recursive: true, force: true });
     }
-    const reap = join(prepared.directory, `${row.token}.json.reap`);
-    const originalReap = await Bun.file(reap).text();
-    await unlink(reap);
-    await expect(
-      readProcessPolicyInitialTrace(prepared.directory)
-    ).rejects.toThrow();
-    await Bun.write(reap, originalReap);
-    await unlink(join(prepared.directory, `${row.token}.json.start`));
-    await expect(
-      readProcessPolicyInitialTrace(prepared.directory)
-    ).rejects.toThrow();
-  } finally {
-    restoreEnv("PATH", previous);
-    await rm(root, { recursive: true, force: true });
-  }
-});
+  },
+  INITIAL_FORWARDING_TEST_TIMEOUT_MS
+);
 
 test("initial forwarding preserves a multicall Docker entry and refuses its replacement", async () => {
   const root = await mkdtemp(join(tmpdir(), "process-initial-entry-"));

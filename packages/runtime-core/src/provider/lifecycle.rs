@@ -1169,7 +1169,7 @@ fn start_pool(
     // Under the lease: the selection is rechecked. A stopped pool keeps the reserve only if
     // a sample needs it, and then its provider release (VM lock, disk handles, listeners,
     // provider configuration) is proven; otherwise this start uses the fresh budget.
-    admission_pool::settle(candidate, &mut admission_owner, &lock, &mut samples)?;
+    let settled = admission_pool::settle(candidate, &mut admission_owner, &lock, &mut samples)?;
     #[cfg(target_os = "macos")]
     if let Some(guard) = &retained_guard {
         guard.verify(candidate)?;
@@ -1229,7 +1229,7 @@ fn start_pool(
     super::dependency_socket::verify(candidate, &owner)?;
     state::write(&root(candidate).join("admission.json"), &samples)?;
     if owner.phase == "running" {
-        if let Some(selected) = admission_owner.selected() {
+        if let Some(selected) = settled.selected() {
             selected.reverify(candidate)?;
         }
         #[cfg(target_os = "macos")]
@@ -1241,7 +1241,7 @@ fn start_pool(
         return status(candidate);
     }
     // Only a clean stopped selection continues, as a restart of its verified retained disks.
-    admission_pool::restart_only(candidate, &admission_owner, &owner, &lock)?;
+    let restart = admission_pool::restart_only(candidate, settled, &owner, &lock)?;
     if ![
         "initializing",
         "stopped",
@@ -1268,7 +1268,7 @@ fn start_pool(
     prepare_rootfs(candidate, &mut owner)?;
     if !owner.created {
         // A reserve-qualified start never reaches `machine create`.
-        let fresh = admission_pool::fresh_create(&admission_owner)?;
+        let fresh = admission_pool::fresh_create(&restart)?;
         // SmolVM clones the expanded templates in `home/.smolvm` into the new disks at the
         // machine's first start. Choose them (stock, or an activated prepared base) and verify
         // them before the phase records a create attempt; `verify_templates` checks again
@@ -1332,7 +1332,7 @@ fn start_pool(
     let boot = match admission_pool::admit_boot(
         candidate,
         profile,
-        &admission_owner,
+        &restart,
         samples.last().and_then(|sample| sample.swapouts),
     )? {
         admission_pool::BootGate::Admitted(boot) => boot,

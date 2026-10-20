@@ -22,9 +22,12 @@
 //! without release checks. Only a start whose free disk lies between the host reserve and
 //! the fresh budget keeps the selection, and it is refused if a release check fails.
 //!
-//! The boot gate is typed: `machine create` needs a [`FreshCreate`], which no selection can
-//! obtain, and `machine start` needs a [`StartPermit`], which only the pre-boot admission
-//! ([`admit_boot`]) followed by the final leased recheck ([`BootAdmission::release`]) issues.
+//! The start sequence is typed, so a start cannot skip a step: [`restart_only`] needs the
+//! [`Settled`] basis that only [`settle`] returns, and both `machine create` and the
+//! pre-boot admission need the [`Restart`] that only [`restart_only`] returns. `machine
+//! create` also needs a [`FreshCreate`], which no selection can obtain, and `machine start`
+//! needs a [`StartPermit`], which only the pre-boot admission ([`admit_boot`]) followed by
+//! the final leased recheck ([`BootAdmission::release`]) issues.
 use super::{
     Owner, admission, binary, io, lock_absent_disks_within, root, sockets_absent,
     verify_disk_allocation, verify_disks, verify_live,
@@ -369,37 +372,52 @@ fn probe_with(
 /// recorded on that budget, so the start runs exactly as one without a selection and no
 /// release check runs. Otherwise the reserve is needed, and the release checks must pass
 /// under the lease.
-pub(super) fn settle(
+pub(super) fn settle<'a>(
     candidate: &Candidate,
-    choice: &mut Choice,
+    choice: &'a mut Choice,
     lease: &state::Lock,
     samples: &mut [admission::Admission],
-) -> Result<(), CandidateError> {
-    let Some(selected) = choice.selected() else {
-        return Ok(());
-    };
-    if !selected.is_stopped() {
-        return selected.reverify(candidate);
+) -> Result<Settled<'a>, CandidateError> {
+    if let Some(selected) = choice.selected() {
+        selected.reverify(candidate)?;
+        if selected.is_stopped() {
+            if !samples.is_empty() && samples.iter().all(admission::fits_fresh_budget) {
+                samples.iter_mut().for_each(admission::rebase_fresh);
+                choice.selection = None;
+            } else {
+                selected.reverify_leased(candidate, lease)?;
+            }
+        }
     }
-    selected.reverify(candidate)?;
-    if !samples.is_empty() && samples.iter().all(admission::fits_fresh_budget) {
-        samples.iter_mut().for_each(admission::rebase_fresh);
-        choice.selection = None;
-        return Ok(());
-    }
-    selected.reverify_leased(candidate, lease)
+    Ok(Settled(choice))
 }
+
+/// The admission basis this start settled under the startup lease. Only [`settle`] issues
+/// it, and [`restart_only`] needs it.
+#[derive(Clone, Copy)]
+pub(super) struct Settled<'a>(&'a Choice);
+
+impl Settled<'_> {
+    pub(super) fn selected(&self) -> Option<&Selection> {
+        self.0.selected()
+    }
+}
+
+/// Authority for create or restart effects and for the pre-boot admission. Only
+/// [`restart_only`] issues it.
+pub(super) struct Restart<'a>(&'a Choice);
 
 /// Before a restart effect under the startup lease: a selection continues only as a
 /// restart of its clean stopped pool's verified retained disks.
-pub(super) fn restart_only(
+pub(super) fn restart_only<'a>(
     candidate: &Candidate,
-    choice: &Choice,
+    settled: Settled<'a>,
     owner: &Owner,
     lease: &state::Lock,
-) -> Result<(), CandidateError> {
+) -> Result<Restart<'a>, CandidateError> {
+    let choice = settled.0;
     let Some(selected) = choice.selected() else {
-        return Ok(());
+        return Ok(Restart(choice));
     };
     if !selected.is_stopped() || !owner.created || *owner != selected.owner {
         return Err(CandidateError::new(
@@ -407,15 +425,16 @@ pub(super) fn restart_only(
             "Reserve-qualified ownership no longer names its selected pool; no create or boot was admitted.",
         ));
     }
-    selected.reverify_leased(candidate, lease)
+    selected.reverify_leased(candidate, lease)?;
+    Ok(Restart(choice))
 }
 
 /// Authority to run `machine create`: only a start without a reserve selection allocates
 /// new disks.
 pub(super) struct FreshCreate(());
 
-pub(super) fn fresh_create(choice: &Choice) -> Result<FreshCreate, CandidateError> {
-    if choice.selected().is_some() {
+pub(super) fn fresh_create(restart: &Restart<'_>) -> Result<FreshCreate, CandidateError> {
+    if restart.0.selected().is_some() {
         return Err(CandidateError::new(
             "admission_owner_changed",
             "A reserve-qualified start never creates a machine; no create or boot was admitted.",
@@ -446,10 +465,10 @@ pub(super) enum BootGate<'a> {
 pub(super) fn admit_boot<'a>(
     candidate: &Candidate,
     profile: Profile,
-    choice: &'a Choice,
+    restart: &Restart<'a>,
     baseline_swapouts: Option<u64>,
 ) -> Result<BootGate<'a>, CandidateError> {
-    admit_boot_with(candidate, choice, baseline_swapouts, |owned| {
+    admit_boot_with(candidate, restart.0, baseline_swapouts, |owned| {
         observe_host(candidate, profile, owned)
     })
 }

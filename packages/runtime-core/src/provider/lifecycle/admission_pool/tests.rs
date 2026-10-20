@@ -1050,16 +1050,18 @@ fn a_reserve_selection_only_restarts_and_never_creates() {
     let choice = select(&pool.candidate, Profile::Development).unwrap();
     let lease = lease(&pool);
     let owner = Owner::load(&pool.candidate).unwrap();
-    restart_only(&pool.candidate, &choice, &owner, &lease).unwrap();
+    // Each case stands for a start whose basis `settle` already settled under the lease.
+    let settled = Settled(&choice);
+    let restart = restart_only(&pool.candidate, settled, &owner, &lease).unwrap();
     assert_eq!(
-        fresh_create(&choice).err().unwrap().code,
+        fresh_create(&restart).err().unwrap().code,
         "admission_owner_changed"
     );
     // The owner the start holds must be the selected, created pool.
     let mut uncreated = owner.clone();
     uncreated.created = false;
     assert_eq!(
-        restart_only(&pool.candidate, &choice, &uncreated, &lease)
+        restart_only(&pool.candidate, settled, &uncreated, &lease)
             .err()
             .unwrap()
             .code,
@@ -1068,7 +1070,7 @@ fn a_reserve_selection_only_restarts_and_never_creates() {
     let mut other = owner.clone();
     other.guest_boot_id = None;
     assert_eq!(
-        restart_only(&pool.candidate, &choice, &other, &lease)
+        restart_only(&pool.candidate, settled, &other, &lease)
             .err()
             .unwrap()
             .code,
@@ -1077,7 +1079,7 @@ fn a_reserve_selection_only_restarts_and_never_creates() {
     // The provider's release is proven under the lease before any restart effect.
     let held = exclusive_lock(&pool.data().join("vm.lock"));
     assert_eq!(
-        restart_only(&pool.candidate, &choice, &owner, &lease)
+        restart_only(&pool.candidate, settled, &owner, &lease)
             .err()
             .unwrap()
             .code,
@@ -1092,21 +1094,21 @@ fn a_reserve_selection_only_restarts_and_never_creates() {
     let lease = state::Lock::acquire(&root(&running.candidate)).unwrap();
     let owner = Owner::load(&running.candidate).unwrap();
     assert_eq!(
-        restart_only(&running.candidate, &choice, &owner, &lease)
+        restart_only(&running.candidate, Settled(&choice), &owner, &lease)
             .err()
             .unwrap()
             .code,
         "admission_owner_changed"
     );
-    assert!(fresh_create(&choice).is_err());
+    assert!(fresh_create(&Restart(&choice)).is_err());
 
     // Without a selection, the unchanged fresh path may create.
     let fresh = Choice {
         selection: None,
         refusal: None,
     };
-    restart_only(&running.candidate, &fresh, &owner, &lease).unwrap();
-    fresh_create(&fresh).unwrap();
+    let restart = restart_only(&running.candidate, Settled(&fresh), &owner, &lease).unwrap();
+    fresh_create(&restart).unwrap();
 }
 
 /// Qualifying samples on `owned`'s basis, each observing `free` bytes of free disk.
@@ -1135,9 +1137,9 @@ fn a_start_with_fresh_headroom_drops_the_reserve_and_runs_no_release_check() {
     let mut choice = select(&pool.candidate, Profile::Development).unwrap();
     assert!(choice.selected().is_some_and(Selection::is_stopped));
     let mut samples = window(stopped, &[fresh_floor, 80 * GIB, fresh_floor, 70 * GIB]);
-    settle(&pool.candidate, &mut choice, &lease, &mut samples).unwrap();
-    assert!(choice.selected().is_none());
-    assert_eq!(choice.refusal(), None);
+    let settled = settle(&pool.candidate, &mut choice, &lease, &mut samples).unwrap();
+    assert!(settled.selected().is_none());
+    assert_eq!(settled.0.refusal(), None);
     for observed in &samples {
         assert_eq!(observed.minimum_disk_free_bytes, fresh_floor);
         assert_eq!(
@@ -1150,9 +1152,10 @@ fn a_start_with_fresh_headroom_drops_the_reserve_and_runs_no_release_check() {
     // From here the start is the unchanged fresh path: no restart-only gate, a fresh
     // pre-boot sample and a start permit without release checks.
     let owner = Owner::load(&pool.candidate).unwrap();
-    restart_only(&pool.candidate, &choice, &owner, &lease).unwrap();
+    let restart = restart_only(&pool.candidate, settled, &owner, &lease).unwrap();
+    fresh_create(&restart).unwrap();
     let mut asked = None;
-    let gate = admit_boot_with(&pool.candidate, &choice, Some(7), |owned| {
+    let gate = admit_boot_with(&pool.candidate, restart.0, Some(7), |owned| {
         asked = Some(owned);
         Ok(sample(owned, true, Some(7)))
     })
@@ -1182,8 +1185,8 @@ fn a_start_with_fresh_headroom_drops_the_reserve_and_runs_no_release_check() {
     );
     drop(held);
     // Released, the reserve-band start keeps its selection on the reserve basis.
-    settle(&pool.candidate, &mut choice, &lease, &mut samples).unwrap();
-    assert!(choice.selected().is_some_and(Selection::is_stopped));
+    let settled = settle(&pool.candidate, &mut choice, &lease, &mut samples).unwrap();
+    assert!(settled.selected().is_some_and(Selection::is_stopped));
     assert_eq!(samples[1].minimum_disk_free_bytes, 16 * GIB);
 
     // A drifted receipt is refused before any basis is settled, even with fresh headroom.
@@ -1206,9 +1209,9 @@ fn a_start_with_fresh_headroom_drops_the_reserve_and_runs_no_release_check() {
     let lease = state::Lock::acquire(&root(&running.candidate)).unwrap();
     let mut choice = select(&running.candidate, Profile::Development).unwrap();
     let mut samples = window(admission::OwnedPool::Running, &[80 * GIB, 80 * GIB]);
-    settle(&running.candidate, &mut choice, &lease, &mut samples).unwrap();
+    let settled = settle(&running.candidate, &mut choice, &lease, &mut samples).unwrap();
     assert!(
-        choice
+        settled
             .selected()
             .is_some_and(|selected| !selected.is_stopped())
     );

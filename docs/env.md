@@ -219,10 +219,18 @@ larger single value, such as a big JSON credential, makes the Compose start fail
 
 An override written by an earlier Hack version can still hold literal values. The next
 `hack up`, `hack restart`, `hack run` or `hack exec` replaces it or, when it renders no
-override, removes it. `hack down` removes it before anything else, so a failed lifecycle
-hook or a remote target does not keep it. `hack doctor` reports such a file in its
-"compose env at rest" check (counts only, never values), and `hack doctor --fix` removes
-it. A removal never deletes a value-free file that a concurrent Hack command wrote.
+override, removes it. `hack down` removes it before its lifecycle hooks, the remote target
+or `docker compose down` run, so a failed hook, a remote target or a failed Compose down
+does not keep it. `hack doctor` reports such a file in its "compose env at rest" check
+(counts only, never values), and `hack doctor --fix` removes it.
+
+A removal first moves the file aside, then checks what it moved. If a concurrent Hack
+command had just replaced it with a value-free file, that file is put back rather than
+deleted. Between the move and the put-back the path is briefly absent, so a Compose
+command started by that concurrent Hack command at that moment can fail to find it; run
+the command again. If Hack is killed between the move and the delete, the moved file
+(`.hack/.internal/.compose.env.override.yml.<id>.remove`) stays until a later removal
+finds it more than a minute old; `hack doctor` does not report it.
 
 `hack env materialize` is manual by design. Use it only when you need a compatibility file for an external tool that expects `.env` on disk.
 

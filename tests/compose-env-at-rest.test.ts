@@ -286,6 +286,46 @@ test("removal keeps a value-free override that replaced the inspected literal fi
   expect(JSON.stringify(raced)).not.toContain(CANARY);
 });
 
+test("removal sweeps an aside left by a crashed removal once it is stale", async () => {
+  const internal = join(projectDir, ".internal");
+  await mkdir(internal);
+  const literal =
+    renderManagedComposeEnvOverride({
+      targetServices: ["web"],
+      globalEnv: {},
+      serviceEnv,
+    }) ?? "";
+  // A removal that crashed between its move and its unlink left this behind.
+  const aside =
+    ".compose.env.override.yml.0f8c2a4e-1b3d-4c5e-8f9a-0b1c2d3e4f5a.remove";
+  await writeFile(join(internal, aside), literal, { mode: 0o600 });
+  // Not an aside of this module: wrong suffix shape, or not a regular file.
+  const unrelated = ".compose.env.override.yml.backup.remove";
+  await writeFile(join(internal, unrelated), "kept\n");
+  const directory =
+    ".compose.env.override.yml.11111111-2222-3333-4444-555555555555.remove";
+  await mkdir(join(internal, directory));
+
+  // A fresh aside may still belong to a concurrent removal: it is kept.
+  const fresh = await removePlaintextComposeEnvOverride({ projectDir });
+  expect(fresh.state.kind).toBe("absent");
+  expect((await readdir(internal)).sort()).toEqual(
+    [aside, directory, unrelated].sort()
+  );
+
+  const stale = await removePlaintextComposeEnvOverride({
+    projectDir,
+    now: () => Date.now() + 61_000,
+  });
+  expect(stale).toEqual({
+    removed: false,
+    state: { kind: "absent", path: composeEnvOverridePath({ projectDir }) },
+  });
+  expect((await readdir(internal)).sort()).toEqual(
+    [directory, unrelated].sort()
+  );
+});
+
 test("doctor --fix plan offers removal only while a literal override is at rest", async () => {
   await writeFile(
     join(projectDir, "docker-compose.yml"),

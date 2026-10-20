@@ -317,6 +317,32 @@ test("up that renders no override removes a literal one (no env config)", async 
   expect(await filesHoldingCanary(root)).toEqual([]);
 }, 60_000);
 
+test("up that renders no override removes a literal one (legacy contract, no value for these services)", async () => {
+  // Legacy `hack.env.json` path: the contract has a var, but only for a
+  // service this stack does not run, so no service gets an override.
+  const hackDir = join(projectRoot, ".hack");
+  await rm(join(hackDir, "hack.env.default.yaml"));
+  await writeFile(
+    join(hackDir, "hack.env.json"),
+    `${JSON.stringify({
+      version: 1,
+      vars: [{ key: "OTHER_ONLY", source: "plain_env", services: ["other"] }],
+    })}\n`
+  );
+  await writeFile(join(hackDir, ".env"), "OTHER_ONLY=synthetic-other\n", {
+    mode: 0o600,
+  });
+  await seedEarlierVersionPlaintext();
+  const up = await runCli({ args: ["up", "--detach", "--json"] });
+  expectNoCanary(up);
+  expect(up.exitCode).toBe(0);
+  expect(await lstat(overridePath).catch(() => null)).toBeNull();
+  expect(
+    await readFile(join(capture, "docker-args.log"), "utf8")
+  ).not.toContain("compose.env.override.yml");
+  expect(await filesHoldingCanary(root)).toEqual([]);
+}, 60_000);
+
 test("a failed up leaves no literal override, even over an earlier version's file", async () => {
   await seedEarlierVersionPlaintext();
   const up = await runCli({

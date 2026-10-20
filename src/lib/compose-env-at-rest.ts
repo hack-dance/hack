@@ -27,8 +27,10 @@ import {
  * renders none removes it, `hack down` removes it, and `hack doctor` reports
  * it with an authorized `--fix` removal. A value-free file is never removed
  * here, even when a concurrent Compose command replaces the inspected file
- * between inspection and removal, so that command keeps working. Nothing here
- * returns or logs a value from the file.
+ * between inspection and removal: it is put back. It is absent only between
+ * the move aside and the put-back, so a Compose process that opens it in that
+ * moment fails and must be retried. Nothing here returns or logs a value from
+ * the file.
  */
 export const COMPOSE_ENV_OVERRIDE_FILENAME = "compose.env.override.yml";
 
@@ -137,12 +139,14 @@ export async function removePlaintextComposeEnvOverride(opts: {
   readonly includeUnverifiable?: boolean;
   /** Race-test observation point between inspection and the move; no authority. */
   readonly afterInspect?: () => Promise<void>;
+  /** Clock for the stale-aside age check; tests only, no authority. */
+  readonly now?: () => number;
 }): Promise<{
   readonly removed: boolean;
   readonly state: ComposeEnvOverrideAtRest;
 }> {
   const path = composeEnvOverridePath(opts);
-  await removeStaleAsides(path);
+  await removeStaleAsides({ path, now: opts.now ?? Date.now });
   const eligible = (state: { readonly kind: string }) =>
     state.kind === "plaintext" ||
     (state.kind === "unverifiable" && opts.includeUnverifiable === true);
@@ -206,8 +210,11 @@ async function restoreAside(opts: {
  * rename that created an aside updated its ctime, so a fresh one may still
  * belong to a concurrent call and is left alone.
  */
-async function removeStaleAsides(path: string): Promise<void> {
-  const directory = dirname(path);
+async function removeStaleAsides(opts: {
+  readonly path: string;
+  readonly now: () => number;
+}): Promise<void> {
+  const directory = dirname(opts.path);
   const names = await readdir(directory).catch(() => []);
   for (const name of names) {
     if (!ASIDE_PATTERN.test(name)) {
@@ -215,7 +222,7 @@ async function removeStaleAsides(path: string): Promise<void> {
     }
     const aside = join(directory, name);
     const info = await lstat(aside).catch(() => null);
-    if (info?.isFile() && Date.now() - info.ctimeMs > STALE_ASIDE_MS) {
+    if (info?.isFile() && opts.now() - info.ctimeMs > STALE_ASIDE_MS) {
       await unlinkIfPresent(aside);
     }
   }

@@ -938,6 +938,20 @@ test("negative control: an attachment listed only where a reader cannot see it n
       "escaped backtick before a tag",
       beforeHeading("Note \\`<details>` here.", "- `dump.log`"),
     ],
+    // GitHub drops processing instructions, declarations and CDATA sections
+    // with their content, and an unclosed one swallows the rest of the body.
+    [
+      "processing instruction around the heading",
+      beforeHeading("<?x", "- `dump.log`\n\n?>"),
+    ],
+    [
+      "unclosed declaration before the heading",
+      beforeHeading("<!DOCTYPE x", "- `dump.log`"),
+    ],
+    [
+      "cdata section in the section",
+      withAttachments("<![CDATA[\n- `dump.log`\n]]>"),
+    ],
     [
       "outside the section",
       {

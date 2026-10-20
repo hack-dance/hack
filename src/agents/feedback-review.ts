@@ -1120,7 +1120,7 @@ export const FEEDBACK_GATE_REFUSALS: readonly FeedbackVocabularyEntry<FeedbackGa
     {
       id: "attachment-unlisted",
       summary:
-        "An attachment is not listed by name in the visible Attachments section; HTML comments do not count, and raw HTML such as `<details>` anywhere in the body cancels the listing.",
+        "An attachment is not listed by name in the visible Attachments section; HTML comments do not count, and raw HTML such as `<details>`, `<?` or `<!` anywhere in the body cancels the listing.",
     },
     {
       id: "approval-missing",
@@ -1252,6 +1252,14 @@ const ESCAPED_BACKTICK = /\\`/g;
  */
 const HIDING_HTML_ELEMENT =
   /<\/?(?:a|abbr|address|article|aside|b|bdi|bdo|blockquote|center|cite|code|dd|del|details|dfn|dialog|div|dl|dt|em|embed|fieldset|figcaption|figure|font|footer|form|h[1-6]|header|i|iframe|ins|kbd|li|main|mark|math|nav|noembed|noframes|noscript|object|ol|p|picture|plaintext|pre|q|rp|rt|ruby|s|samp|script|section|select|small|span|strike|strong|style|sub|summary|sup|svg|table|tbody|td|template|textarea|tfoot|th|thead|title|tr|tt|u|ul|var|xmp)(?=[\s/>]|$)/i;
+/**
+ * A processing instruction (`<?`), declaration (`<!X`) or CDATA section
+ * (`<![CDATA[`). CommonMark passes each through as raw HTML, and GitHub drops
+ * it with everything up to its closing `>`, or to the end of the body when it
+ * is never closed, so one can hide the whole Attachments section. HTML
+ * comments are removed before this check runs.
+ */
+const HIDING_HTML_MARKUP = /<[?!]/;
 const ATTACHMENTS_HEADING = /^##\s+Attachments\s*$/;
 const ANY_HEADING = /^#{1,6}\s/;
 const UNSAFE_ATTACHMENT_NAME = /[`\r\n]/;
@@ -1267,7 +1275,8 @@ function outsideInlineCode(line: string): string {
  * attribute cannot hide the tag.
  */
 function hasHidingHtml(line: string): boolean {
-  return HIDING_HTML_ELEMENT.test(outsideInlineCode(line));
+  const markup = outsideInlineCode(line);
+  return HIDING_HTML_ELEMENT.test(markup) || HIDING_HTML_MARKUP.test(markup);
 }
 
 /**

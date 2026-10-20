@@ -1238,13 +1238,22 @@ function isEnvVarRelevantToServices(opts: {
 /**
  * Removes an env override that still holds literal values (written by an
  * earlier Hack version). Best effort: a failure is reported without values and
- * never fails the command; `hack doctor` reports what remains.
+ * never fails the command; `hack doctor` reports what remains. A file that a
+ * saved adoption pins is kept (removing it would break the adoption).
  */
 async function scrubPlaintextComposeEnvOverride(opts: {
   readonly projectDir: string;
 }): Promise<void> {
   try {
-    await removePlaintextComposeEnvOverride({ projectDir: opts.projectDir });
+    const result = await removePlaintextComposeEnvOverride({
+      projectDir: opts.projectDir,
+    });
+    if (result.adoptionBound) {
+      logger.warn({
+        message:
+          "Kept .hack/.internal/compose.env.override.yml, which holds env values from an earlier Hack version, because a saved 'hack config adopt' generation pins it (values omitted). Run 'hack doctor' for the supported way to drop them.",
+      });
+    }
   } catch {
     logger.warn({
       message:
@@ -7804,6 +7813,7 @@ async function handleExec({
     profiles,
     effectiveEnvName: envOverrides.effectiveEnvName,
     service,
+    env: envOverrides.env,
   });
   if (!execReady.ok) {
     throw new CliUsageError(execReady.message);
@@ -7899,6 +7909,12 @@ async function resolveExecTargetReady(opts: {
   readonly project: Awaited<ReturnType<typeof requireProjectContext>>;
   readonly effectiveEnvName: string | null;
   readonly service: string;
+  /**
+   * The Compose env, including the `HACK_ENV_*` values the env override
+   * references. `ps` does not use them, but without them Compose warns once
+   * per unset reference.
+   */
+  readonly env?: Record<string, string>;
 }): Promise<
   { readonly ok: true } | { readonly ok: false; readonly message: string }
 > {
@@ -7920,6 +7936,7 @@ async function resolveExecTargetReady(opts: {
     composeProject: opts.composeProject,
     profiles: opts.profiles,
     cwd: dirname(opts.project.composeFile),
+    env: opts.env,
   });
   if (psResult.exitCode !== 0) {
     return {

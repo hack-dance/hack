@@ -65,7 +65,10 @@ Git objects, output, child argv, HACK_HOME or caches; plaintext exists only in t
 private, ignored, mode-0600 `.hack/.env`. The generated
 `.hack/.internal/compose.env.override.yml` must hold `${HACK_ENV_...}` references and no
 value (HACK-1273), and must also be private and ignored. Values reach a child process
-environment only for the exec'd command and the `docker compose` client.
+environment only for the exec'd command and the `docker compose` client. The
+per-service `HACK_ENV_*` values go only to `docker compose` invocations that read the
+override; the `docker inspect`, `logs` and `events` children Hack starts around Compose
+get the same environment without them.
 Its limits are listed in the threat model.
 
 ## Key writes and rotation

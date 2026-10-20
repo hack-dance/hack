@@ -794,6 +794,10 @@ export class LegacyComposeAdoptionProjection {
       };
       // Current writers keep only `${NAME}` references at rest; files from
       // earlier versions hold the literal projection. Either must match exactly.
+      // `hack config adopt` and its preview refuse a literal file before this
+      // point (HACK-1273), so a new adoption never pins values on disk. The
+      // literal match remains so tests can model a generation that an earlier
+      // version prepared over such a file.
       const reference = renderComposeEnvReferenceOverride(projection);
       const referenceText = reference?.text ?? null;
       const literalText = renderManagedComposeEnvOverride(projection);

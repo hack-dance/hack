@@ -15,11 +15,18 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { checkComposeEnvOverrideAtRest } from "../src/commands/doctor.ts";
 import {
   resolveModernComposeEnvOverrides,
   resolveRuntimeHostMetadataOverride,
 } from "../src/commands/project.ts";
 import { HackCliError } from "../src/lib/cli-result.ts";
+import {
+  composeEnvAtRestRepairs,
+  describeComposeEnvAtRest,
+  inspectComposeEnvAtRest,
+  removePlaintextComposeEnvOverride,
+} from "../src/lib/compose-env-at-rest.ts";
 import {
   renderComposeEnvReferenceOverride,
   renderManagedComposeEnvOverride,
@@ -35,7 +42,10 @@ import {
   openLegacyComposeAdoptedGenerationStore,
 } from "../src/lib/native-compose-adoption-generation.ts";
 import { inspectLegacyComposeAdoptionSelection } from "../src/lib/native-compose-adoption-marker.ts";
-import { previewLegacyComposeAdoption } from "../src/lib/native-compose-adoption-preview.ts";
+import {
+  LEGACY_ADOPTION_LITERAL_ENV_OVERRIDE_CODE,
+  previewLegacyComposeAdoption,
+} from "../src/lib/native-compose-adoption-preview.ts";
 import {
   defaultProjectSlugFromPath,
   findProjectContextAtRoot,
@@ -1994,9 +2004,14 @@ test("v3 saved adoption consumes canonical original generated sources without en
   const binary = await managedEnvCompilerFixture(
     join(root, "managed-compiler")
   );
+  // `hack config adopt` and its preview now refuse an earlier version's
+  // literal override (HACK-1273); the store below models a generation that an
+  // earlier version prepared over it.
   expect(
-    (await previewLegacyComposeAdoption({ projectRoot, binary })).complete
-  ).toBe(true);
+    (await previewLegacyComposeAdoption({ projectRoot, binary })).fields.map(
+      (field) => field.code
+    )
+  ).toEqual([LEGACY_ADOPTION_LITERAL_ENV_OVERRIDE_CODE]);
   const store = await openLegacyComposeAdoptedGenerationStore({ projectRoot });
   try {
     const generation = await store.prepare({ binary });
@@ -2052,6 +2067,139 @@ test("v3 saved adoption consumes canonical original generated sources without en
     }
   } finally {
     await store.close();
+  }
+});
+
+test("an adoption bound to an earlier version's literal env override keeps it loadable until rollback frees it (HACK-1273)", async () => {
+  Reflect.deleteProperty(process.env, "CI");
+  Reflect.deleteProperty(process.env, "HACK_EXECUTION_MODE");
+  await trackedManagedCheckout();
+  const files = await managedGenerated();
+  const override = files[2] ?? "";
+  const projectDir = join(projectRoot, ".hack");
+  await writeFile(join(projectRoot, ".hack.secret.key"), "synthetic-v3-key");
+  await setProjectEnvValue({
+    projectRoot,
+    projectDir,
+    envName: null,
+    scope: "global",
+    key: "MANAGED",
+    value: CANARY,
+    secret: true,
+  });
+  const binary = await managedEnvCompilerFixture(
+    join(root, "managed-compiler")
+  );
+  // Models an adoption that an earlier version made over its literal file.
+  const store = await openLegacyComposeAdoptedGenerationStore({ projectRoot });
+  try {
+    const generation = await store.prepare({ binary });
+    await store.publish({ generation, binary });
+  } finally {
+    await store.close();
+  }
+  const pinned = await lstat(override);
+
+  // What `hack doctor --fix` and the down and no-override scrubs run.
+  const kept = await removePlaintextComposeEnvOverride({
+    projectDir,
+    includeUnverifiable: true,
+  });
+  expect(kept).toMatchObject({ removed: false, adoptionBound: true });
+  expect(kept.state.kind).toBe("plaintext");
+  expect((await lstat(override)).ino).toBe(pinned.ino);
+  expect(await readFile(override, "utf8")).toContain(CANARY);
+  const report = await inspectComposeEnvAtRest({ projectDir });
+  expect(report.adoptionBound).toBe(true);
+  expect(composeEnvAtRestRepairs(report)).toEqual({
+    override: false,
+    asides: false,
+  });
+  const described = describeComposeEnvAtRest({
+    report,
+    projectDirName: ".hack",
+  });
+  expect(described.status).toBe("warn");
+  expect(described.message).toContain("hack config adopt --rollback");
+  expect(JSON.stringify([kept, report, described])).not.toContain(CANARY);
+  // The doctor check reaches the adopted project, whose inputs ordinary
+  // discovery now refuses, and names the supported next step.
+  const checked = await checkComposeEnvOverrideAtRest({
+    startDir: projectRoot,
+  });
+  expect(checked.status).toBe("warn");
+  expect(checked.message).toContain("pins this file");
+  expect(checked.message).toContain("hack config adopt --rollback");
+  expect(checked.message).not.toContain(CANARY);
+
+  // The adoption still loads with key-free saved reads, then rolls back.
+  await rm(join(projectRoot, ".hack.secret.key"));
+  const savedStore = await openLegacyComposeAdoptedGenerationStore({
+    projectRoot,
+    mode: "saved",
+  });
+  try {
+    expect(await savedStore.loadActive()).toBeTruthy();
+    await savedStore.rollback();
+  } finally {
+    await savedStore.close();
+  }
+  expect(await inspectLegacyComposeAdoptionSelection({ projectRoot })).toBe(
+    "rolled-back"
+  );
+  // Rolled back, nothing pins the file: the same removal now takes it.
+  expect(
+    await removePlaintextComposeEnvOverride({
+      projectDir,
+      includeUnverifiable: true,
+    })
+  ).toMatchObject({ removed: true, adoptionBound: false });
+  expect(await lstat(override).catch(() => null)).toBeNull();
+});
+
+test("CLI adoption and its preview refuse a literal env override before preparation or engine probes (HACK-1273)", async () => {
+  await managedGenerated();
+  for (const flags of [
+    [],
+    ["--dry-run"],
+    ["--stop"],
+    ["--dry-run", "--json"],
+  ]) {
+    const child = Bun.spawn(
+      [
+        process.execPath,
+        join(import.meta.dir, "../index.ts"),
+        "config",
+        "adopt",
+        "--path",
+        projectRoot,
+        ...flags,
+      ],
+      {
+        env: privateCliEnv({
+          root,
+          env: { HACK_HOME: join(root, "isolated-home") },
+        }),
+        stdin: "ignore",
+        stdout: "pipe",
+        stderr: "pipe",
+      }
+    );
+    const [stdout, stderr, code] = await Promise.all([
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+      child.exited,
+    ]);
+    expect(code).not.toBe(0);
+    const output = stdout + stderr;
+    expect(output).toContain(
+      flags.includes("--json")
+        ? LEGACY_ADOPTION_LITERAL_ENV_OVERRIDE_CODE
+        : "Run 'hack up' once so Hack rewrites it with references only"
+    );
+    expect(output).not.toContain(CANARY);
+    expect(await Bun.file(join(root, "commands")).exists()).toBe(false);
+    expect(await Bun.file(stateRoot()).exists()).toBe(false);
   }
 });
 

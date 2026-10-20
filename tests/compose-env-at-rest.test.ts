@@ -16,9 +16,10 @@ import { join } from "node:path";
 import { YAML } from "bun";
 import { buildDoctorRemediationPlanLines } from "../src/commands/doctor.ts";
 import {
-  composeEnvOverrideNeedsRemoval,
+  composeEnvAtRestRepairs,
   composeEnvOverridePath,
-  describeComposeEnvOverrideAtRest,
+  describeComposeEnvAtRest,
+  inspectComposeEnvAtRest,
   inspectComposeEnvOverrideAtRest,
   removePlaintextComposeEnvOverride,
   writeComposeEnvOverride,
@@ -223,10 +224,14 @@ test("inspection and removal act only on literal or unverifiable overrides", asy
       serviceEnv,
     }) ?? ""
   );
-  const state = await inspectComposeEnvOverrideAtRest({ projectDir });
-  expect(composeEnvOverrideNeedsRemoval(state)).toBe(true);
-  const described = describeComposeEnvOverrideAtRest({
-    state,
+  const report = await inspectComposeEnvAtRest({ projectDir });
+  expect(report.adoptionBound).toBe(false);
+  expect(composeEnvAtRestRepairs(report)).toEqual({
+    override: true,
+    asides: false,
+  });
+  const described = describeComposeEnvAtRest({
+    report,
     projectDirName: ".hack",
   });
   expect(described.status).toBe("warn");
@@ -247,6 +252,8 @@ test("inspection and removal act only on literal or unverifiable overrides", asy
   expect(linked).toEqual({
     removed: false,
     state: { kind: "unverifiable", path },
+    adoptionBound: false,
+    asidesRemoved: 0,
   });
   expect(
     (
@@ -320,6 +327,8 @@ test("removal sweeps an aside left by a crashed removal once it is stale", async
   expect(stale).toEqual({
     removed: false,
     state: { kind: "absent", path: composeEnvOverridePath({ projectDir }) },
+    adoptionBound: false,
+    asidesRemoved: 1,
   });
   expect((await readdir(internal)).sort()).toEqual(
     [directory, unrelated].sort()
@@ -356,22 +365,137 @@ test("doctor --fix plan offers removal only while a literal override is at rest"
 
 test("doctor descriptions are ok for absent and reference-only files", () => {
   const path = "/unused";
+  const describe = (
+    override: Parameters<
+      typeof describeComposeEnvAtRest
+    >[0]["report"]["override"]
+  ) =>
+    describeComposeEnvAtRest({
+      report: {
+        override,
+        adoptionBound: false,
+        asides: { stale: 0, fresh: 0 },
+      },
+      projectDirName: ".hack",
+    });
+  expect(describe({ kind: "absent", path }).status).toBe("ok");
+  expect(describe({ kind: "references", path }).status).toBe("ok");
+  expect(describe({ kind: "unverifiable", path }).message).toContain(
+    "hack doctor --fix"
+  );
+});
+
+const ASIDE =
+  ".compose.env.override.yml.0f8c2a4e-1b3d-4c5e-8f9a-0b1c2d3e4f5a.remove";
+
+function literalText(): string {
+  return (
+    renderManagedComposeEnvOverride({
+      targetServices: ["web"],
+      globalEnv: {},
+      serviceEnv,
+    }) ?? ""
+  );
+}
+
+test("a rendering write sweeps stale removal asides and keeps fresh ones", async () => {
+  const internal = join(projectDir, ".internal");
+  await mkdir(internal);
+  await writeFile(join(internal, ASIDE), literalText(), { mode: 0o600 });
+  const text =
+    renderComposeEnvReferenceOverride({
+      targetServices: ["web"],
+      globalEnv: {},
+      serviceEnv,
+    })?.text ?? "";
+  // A fresh aside may still belong to a removal in progress.
+  await writeComposeEnvOverride({ projectDir, text });
+  expect(await readdir(internal)).toContain(ASIDE);
+  await writeComposeEnvOverride({
+    projectDir,
+    text,
+    now: () => Date.now() + 61_000,
+  });
+  expect(await readdir(internal)).toEqual(["compose.env.override.yml"]);
+});
+
+test("doctor reports leftover removal asides by count and --fix removes only stale ones", async () => {
+  await writeFile(
+    join(projectDir, "docker-compose.yml"),
+    "services:\n  web:\n    image: alpine:3.22\n"
+  );
+  const internal = join(projectDir, ".internal");
+  await mkdir(internal);
+  await writeFile(join(internal, ASIDE), literalText(), { mode: 0o600 });
+
+  const fresh = await inspectComposeEnvAtRest({ projectDir });
+  expect(fresh.override.kind).toBe("absent");
+  expect(fresh.asides).toEqual({ stale: 0, fresh: 1 });
+  expect(composeEnvAtRestRepairs(fresh)).toEqual({
+    override: false,
+    asides: false,
+  });
+  const described = describeComposeEnvAtRest({
+    report: fresh,
+    projectDirName: ".hack",
+  });
+  expect(described.status).toBe("warn");
+  expect(described.message).toContain("1 leftover removal file(s)");
+  expect(described.message).not.toContain(CANARY);
+  expect(described.message).not.toContain(ASIDE);
+
+  const stale = await inspectComposeEnvAtRest({
+    projectDir,
+    now: () => Date.now() + 61_000,
+  });
+  expect(stale.asides).toEqual({ stale: 1, fresh: 0 });
+  expect(composeEnvAtRestRepairs(stale).asides).toBe(true);
+  const removed = await removePlaintextComposeEnvOverride({
+    projectDir,
+    includeUnverifiable: true,
+    now: () => Date.now() + 61_000,
+  });
+  expect(removed.asidesRemoved).toBe(1);
+  expect(await readdir(internal)).toEqual([]);
   expect(
-    describeComposeEnvOverrideAtRest({
-      state: { kind: "absent", path },
+    describeComposeEnvAtRest({
+      report: await inspectComposeEnvAtRest({ projectDir }),
       projectDirName: ".hack",
     }).status
   ).toBe("ok");
-  expect(
-    describeComposeEnvOverrideAtRest({
-      state: { kind: "references", path },
-      projectDirName: ".hack",
-    }).status
-  ).toBe("ok");
-  expect(
-    describeComposeEnvOverrideAtRest({
-      state: { kind: "unverifiable", path },
-      projectDirName: ".hack",
-    }).message
-  ).toContain("hack doctor --fix");
+});
+
+test("an override that an adoption state may pin is kept by removal and reported by doctor", async () => {
+  const internal = join(projectDir, ".internal");
+  await mkdir(internal);
+  const path = composeEnvOverridePath({ projectDir });
+  await writeFile(path, literalText(), { mode: 0o600 });
+  // Adoption state Hack cannot read safely counts as pinning the override.
+  const adoption = join(internal, "legacy-compose-adoption-v1");
+  await mkdir(adoption);
+
+  const kept = await removePlaintextComposeEnvOverride({
+    projectDir,
+    includeUnverifiable: true,
+  });
+  expect(kept.removed).toBe(false);
+  expect(kept.adoptionBound).toBe(true);
+  expect(await readFile(path, "utf8")).toBe(literalText());
+  const report = await inspectComposeEnvAtRest({ projectDir });
+  expect(report.adoptionBound).toBe(true);
+  expect(composeEnvAtRestRepairs(report).override).toBe(false);
+  const described = describeComposeEnvAtRest({
+    report,
+    projectDirName: ".hack",
+  });
+  expect(described.status).toBe("warn");
+  expect(described.message).toContain("pins this file");
+  expect(described.message).toContain("hack config adopt --rollback");
+  expect(described.message).not.toContain(CANARY);
+
+  // Without the adoption state the same file is removed.
+  await rm(adoption, { recursive: true });
+  const removed = await removePlaintextComposeEnvOverride({ projectDir });
+  expect(removed).toMatchObject({ removed: true, adoptionBound: false });
+  expect(await lstat(path).catch(() => null)).toBeNull();
 });

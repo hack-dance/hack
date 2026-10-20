@@ -1,3 +1,6 @@
+import { join } from "node:path";
+import { HACK_PROJECT_DIR_PRIMARY } from "../constants.ts";
+import { inspectComposeEnvOverrideAtRest } from "./compose-env-at-rest.ts";
 import { acquireLegacyComposeAdoptionPreparationBinding } from "./native-compose-adoption-binding.ts";
 import { admitLegacyComposeCandidate } from "./native-compose-adoption-compiler.ts";
 import {
@@ -33,6 +36,25 @@ function report<T>(value: T): Readonly<T> {
   freezeImportValue(value);
   return Object.freeze(value);
 }
+/** Preview field code for a generated env override that holds literal values. */
+export const LEGACY_ADOPTION_LITERAL_ENV_OVERRIDE_CODE =
+  "generated_env_override_holds_values";
+
+/**
+ * True when `.hack/.internal/compose.env.override.yml` holds literal env
+ * values written by an earlier Hack version. Adoption pins the file's bytes and
+ * inode for the life of the adoption, so it must not bind such a file
+ * (HACK-1273); `hack up` rewrites it with references first. Counts only.
+ */
+export async function legacyAdoptionEnvOverrideHoldsValues(opts: {
+  readonly projectRoot: string;
+}): Promise<boolean> {
+  const state = await inspectComposeEnvOverrideAtRest({
+    projectDir: join(opts.projectRoot, HACK_PROJECT_DIR_PRIMARY),
+  });
+  return state.kind === "plaintext";
+}
+
 /** Read-only exact existing-data preview; source values, resource names and digests never enter this report. */
 export async function previewLegacyComposeAdoption(input: {
   readonly projectRoot: string;
@@ -43,6 +65,13 @@ export async function previewLegacyComposeAdoption(input: {
   const opts = { ...input };
   let fields: readonly ImportField[] = [];
   try {
+    if (await legacyAdoptionEnvOverrideHoldsValues(opts)) {
+      return report({
+        complete: false,
+        adoption: "not_performed",
+        fields: [refused(LEGACY_ADOPTION_LITERAL_ENV_OVERRIDE_CODE)],
+      });
+    }
     const owner = await acquireLegacyComposeAdoptionPreparationBinding(opts),
       acquired = await owner.resolvePreparationInputs(opts);
     let mapper = mapLegacyNativeStorageAdoption;

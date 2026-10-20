@@ -20,6 +20,7 @@ const execCalls: Array<{
   readonly cmdArgs: readonly string[];
 }> = [];
 const psJsonByComposeProject = new Map<string, string>();
+const psEnvs: Array<Record<string, string> | undefined> = [];
 const tempDirs = new Set<string>();
 const originalHackHome = process.env.HACK_HOME;
 
@@ -31,11 +32,17 @@ const runtimeBackendMock = await registerScopedModuleMock({
       name: "compose",
       up: async () => 0,
       down: async () => 0,
-      psJson: async (opts: { readonly composeFiles: readonly string[] }) => ({
-        exitCode: 0,
-        stdout: psJsonByComposeProject.get(opts.composeFiles[0] ?? "") ?? "",
-        stderr: "",
-      }),
+      psJson: async (opts: {
+        readonly composeFiles: readonly string[];
+        readonly env?: Record<string, string>;
+      }) => {
+        psEnvs.push(opts.env ? { ...opts.env } : undefined);
+        return {
+          exitCode: 0,
+          stdout: psJsonByComposeProject.get(opts.composeFiles[0] ?? "") ?? "",
+          stderr: "",
+        };
+      },
       ps: async () => 0,
       run: async () => 0,
       exec: async (opts: {
@@ -66,6 +73,7 @@ beforeAll(() => {
 
 afterEach(async () => {
   execCalls.length = 0;
+  psEnvs.length = 0;
   psJsonByComposeProject.clear();
   for (const tempDir of tempDirs) {
     await rm(tempDir, { recursive: true, force: true });
@@ -162,6 +170,9 @@ test("exec reaches the running service while registry registration is locked", a
     "SERVICE_TOKEN=overlay-secret",
     "SHARED_KEY=base",
   ]);
+  // The readiness `compose ps` reads the same override, so it gets the same
+  // env; without it Compose warns once per unset reference.
+  expect(psEnvs).toEqual([execCalls[0]?.env]);
   expect(execCalls[0]?.workdir).toBe("/app");
   expect(execCalls[0]?.cmdArgs).toEqual(["bun", "test"]);
   expect(execCalls[0]?.composeFiles.length).toBeGreaterThanOrEqual(2);

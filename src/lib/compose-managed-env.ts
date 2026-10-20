@@ -67,6 +67,35 @@ export function composeEnvReferenceName(opts: {
     : `${COMPOSE_ENV_REFERENCE_PREFIX}${digest}`;
 }
 
+const COMPOSE_ENV_REFERENCE_NAME = /^HACK_ENV_[0-9A-F]{12}(?:_|$)/;
+
+/** True for a name {@link composeEnvReferenceName} can produce. */
+export function isComposeEnvReferenceName(name: string): boolean {
+  return COMPOSE_ENV_REFERENCE_NAME.test(name);
+}
+
+/**
+ * Copy of `env` without the `HACK_ENV_*` reference values. Only a
+ * `docker compose` invocation that reads the generated override needs them;
+ * every other child (for example `docker inspect` or `docker events`) gets
+ * this copy, so the private per-service values reach no process that cannot
+ * use them.
+ */
+export function withoutComposeEnvReferences(
+  env: Readonly<Record<string, string>> | undefined
+): Record<string, string> | undefined {
+  if (!env) {
+    return env;
+  }
+  const kept: Record<string, string> = {};
+  for (const [key, value] of Object.entries(env)) {
+    if (!isComposeEnvReferenceName(key)) {
+      kept[key] = value;
+    }
+  }
+  return kept;
+}
+
 /**
  * Value-free managed override plus the private values it references.
  *

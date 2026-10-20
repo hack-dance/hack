@@ -897,6 +897,17 @@ test("negative control: an attachment listed only where a reader cannot see it n
       { name: "dump.log", content: "Two of three runs timed out." },
     ],
   });
+  // Puts raw text on its own lines just before the Attachments heading.
+  const beforeHeading = (prefix: string, listing: string): FeedbackPayload => {
+    const payload = withAttachments(listing);
+    return {
+      ...payload,
+      body: payload.body.replace(
+        "## Attachments",
+        `${prefix}\n\n## Attachments`
+      ),
+    };
+  };
   const hidden: readonly [string, FeedbackPayload][] = [
     ["html comment", withAttachments("None.\n<!-- - `dump.log` -->")],
     ["unterminated comment", withAttachments("None.\n<!--\n- `dump.log`")],
@@ -907,6 +918,26 @@ test("negative control: an attachment listed only where a reader cannot see it n
       ),
     ],
     ["prefix only", withAttachments("- `dump.log`.bak")],
+    // Any tag inside the section, even a custom element, cancels the listing.
+    [
+      "custom element in the section",
+      withAttachments("<x-note hidden>\n\n- `dump.log`\n\n</x-note>"),
+    ],
+    // An element opened before the heading folds the whole section.
+    [
+      "details around the heading",
+      beforeHeading("<details>", "- `dump.log`\n\n## Notes\n\n</details>"),
+    ],
+    // A backtick in an attribute does not turn the tag into code.
+    [
+      "tag with a backtick attribute",
+      beforeHeading('<details title="`">`', "- `dump.log`"),
+    ],
+    // An escaped backtick is literal, so it opens no code span either.
+    [
+      "escaped backtick before a tag",
+      beforeHeading("Note \\`<details>` here.", "- `dump.log`"),
+    ],
     [
       "outside the section",
       {
@@ -938,7 +969,12 @@ test("negative control: an attachment listed only where a reader cannot see it n
   expect(sender.calls).toEqual([]);
 
   // A visible listing, with or without a short description, is sendable.
-  for (const listing of ["- `dump.log`", "- `dump.log`: two of three runs"]) {
+  // Redaction placeholders and HTML inside inline code are not raw HTML.
+  for (const listing of [
+    "- `dump.log`",
+    "- `dump.log`: two of three runs",
+    "- `dump.log`: from <redacted:path>, see `<details>`",
+  ]) {
     const payload = withAttachments(listing);
     expect(
       evaluateFeedbackGate({

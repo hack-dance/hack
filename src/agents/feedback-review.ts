@@ -1120,7 +1120,7 @@ export const FEEDBACK_GATE_REFUSALS: readonly FeedbackVocabularyEntry<FeedbackGa
     {
       id: "attachment-unlisted",
       summary:
-        "An attachment is not listed by name in the visible Attachments section; HTML comments and raw HTML do not count.",
+        "An attachment is not listed by name in the visible Attachments section; HTML comments do not count, and raw HTML such as `<details>` anywhere in the body cancels the listing.",
     },
     {
       id: "approval-missing",
@@ -1236,16 +1236,46 @@ function payloadIssue(
 
 /** HTML comments hide text on GitHub; an unterminated one hides the rest. */
 const HTML_COMMENT = /<!--[\s\S]*?(?:-->|$)/g;
-const HTML_TAG = /<\/?[A-Za-z][^>]*>/;
+/**
+ * A tag with a CommonMark tag name. The tag may continue on the next line.
+ * `<redacted:path>` is not a tag name, so GitHub renders it as text.
+ */
+const HTML_TAG = /<\/?[A-Za-z][A-Za-z0-9-]*(?=[\s/>]|$)/;
 const INLINE_CODE = /`[^`\n]*`/g;
+/** A backslash-escaped backtick is literal text and never opens a code span. */
+const ESCAPED_BACKTICK = /\\`/g;
+/**
+ * HTML elements that GitHub renders or drops with their content, so they can
+ * fold (`<details>`), hide or swallow Markdown that follows them, including a
+ * whole `## Attachments` section. Redaction placeholders such as
+ * `<redacted:path>` are not element names and do not match.
+ */
+const HIDING_HTML_ELEMENT =
+  /<\/?(?:a|abbr|address|article|aside|b|bdi|bdo|blockquote|center|cite|code|dd|del|details|dfn|dialog|div|dl|dt|em|embed|fieldset|figcaption|figure|font|footer|form|h[1-6]|header|i|iframe|ins|kbd|li|main|mark|math|nav|noembed|noframes|noscript|object|ol|p|picture|plaintext|pre|q|rp|rt|ruby|s|samp|script|section|select|small|span|strike|strong|style|sub|summary|sup|svg|table|tbody|td|template|textarea|tfoot|th|thead|title|tr|tt|u|ul|var|xmp)(?=[\s/>]|$)/i;
 const ATTACHMENTS_HEADING = /^##\s+Attachments\s*$/;
 const ANY_HEADING = /^#{1,6}\s/;
 const UNSAFE_ATTACHMENT_NAME = /[`\r\n]/;
 
+/** Inline text with code spans removed, so only rendered markup remains. */
+function outsideInlineCode(line: string): string {
+  return line.replace(ESCAPED_BACKTICK, "").replace(INLINE_CODE, "");
+}
+
+/**
+ * Whether a line carries an element that can hide Markdown, outside inline
+ * code. Only the tag name must be outside a code span, so a backtick in a later
+ * attribute cannot hide the tag.
+ */
+function hasHidingHtml(line: string): boolean {
+  return HIDING_HTML_ELEMENT.test(outsideInlineCode(line));
+}
+
 /**
  * The lines of the `## Attachments` section a reader actually sees: HTML
- * comments are removed first, and a section that contains raw HTML outside
- * inline code, which can hide or restyle a listing, counts as listing nothing.
+ * comments are removed first. A section that contains raw HTML outside inline
+ * code, which can hide or restyle a listing, counts as listing nothing, and so
+ * does a body with a hiding element such as `<details>` anywhere, because an
+ * element opened before the heading can fold the whole section.
  */
 function visibleAttachmentListing(body: string): readonly string[] {
   const lines = body.replace(HTML_COMMENT, "").split(NEWLINE);
@@ -1253,12 +1283,13 @@ function visibleAttachmentListing(body: string): readonly string[] {
   let inSection = false;
   let hasHtml = false;
   for (const line of lines) {
+    hasHtml ||= hasHidingHtml(line);
     if (ANY_HEADING.test(line)) {
       inSection = ATTACHMENTS_HEADING.test(line);
       continue;
     }
     if (inSection) {
-      hasHtml ||= HTML_TAG.test(line.replace(INLINE_CODE, ""));
+      hasHtml ||= HTML_TAG.test(outsideInlineCode(line));
       listing.push(line.trim());
     }
   }

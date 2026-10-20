@@ -49,6 +49,7 @@ fn container_attachment_records_ownership_before_create_and_omits_values_from_me
             outbound: false,
             cache: None,
             cache_provenance: None,
+            disposable_caches: Vec::new(),
             kind: Kind::Container,
             key: "job".into(),
             name: format!("hkg-{run}-container-0"),

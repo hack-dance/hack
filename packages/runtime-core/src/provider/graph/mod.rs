@@ -51,7 +51,11 @@ pub(in crate::provider) use source_device_rebind::https_devices;
 pub use source_device_rebind::{
     inspect as inspect_source_device_rebind, recover as recover_source_device_rebind,
 };
+mod cache_quarantine;
 mod initializer_cache;
+pub use cache_quarantine::{
+    CacheQuarantineTarget, inspect_cache_quarantine, quarantine_cache, resolve_cache_quarantine,
+};
 mod volume_subpaths;
 pub use dependency_hosts::dependency_address;
 #[cfg(target_os = "macos")]
@@ -220,6 +224,10 @@ pub struct Resource {
     pub cache: Option<dependency_cache::CacheBinding>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_provenance: Option<cache_provenance::CacheProvenance>,
+    /// Admitted `x-hack-disposable-cache` directories of an ordinary owned volume.
+    /// Fixed at admission; only these exact paths may be explicitly quarantined.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub disposable_caches: Vec<String>,
     pub kind: Kind,
     pub key: String,
     pub name: String,

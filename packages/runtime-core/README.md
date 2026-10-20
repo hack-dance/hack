@@ -1464,6 +1464,37 @@ and the acquired startup lease recheck the selected owner; changed ownership
 refuses, and a reserve-qualified request cannot enter VM create or boot. Stopped,
 missing or unproved capacity retains fresh-allocation requirements or refuses.
 
+### Disposable cache quarantine
+
+A volume can declare regenerable directories with `x-hack-disposable-cache` (at
+most eight distinct, non-nested, volume-relative paths). The receipt records them
+at admission. For a stopped retained graph, `graph inspect-cache-quarantine
+--run-id RUN --volume VOLUME --path PATH --json` measures one declared directory
+read-only and returns a `selection_sha256`. That digest binds the receipt bytes,
+volume incarnation, root and target directory identities, and measured bytes.
+`graph quarantine-cache ... --expect-selection SHA --json` renames exactly that
+directory into `/var/lib/docker/volumes/<name>/hack-quarantine/<id>`, under the
+cleanup-only lease and a lock on the volume root. It requires owned volume labels,
+no container consumers (stopped containers count), and source and destination on
+the same mount ID, so `mv` cannot fall back to copy-then-unlink. Nothing is
+deleted. Results report `reclaimed_bytes: 0`, and the bytes stay until the volume
+itself is removed. Docker disk usage, and therefore `graph storage-inventory`,
+does not count them. Inspect reports the recorded `retained_quarantine_bytes`
+instead.
+
+A private record in `run/cache-quarantine/` is written before the guest effect
+(`pending`) and settled after the synchronized rename (`quarantined`). When the
+receipt and volume are unchanged, repeating `quarantine-cache` resumes it.
+Otherwise inspect reports `resolve_required`, and `graph resolve-cache-quarantine
+... --expect-selection SHA --json` settles the record without moving bytes. The
+record becomes `quarantined` when the recorded inode is at the destination, and
+`abandoned` when the destination is absent. Records are retained, with at most 16
+per run-scoped volume and 1024 in total. Unit tests drive this inspect, quarantine,
+resume and resolve flow through a synthetic provider that runs the production
+guest scripts on a fixture volume. The ignored native fixture
+`synthetic_bad_cache_is_quarantined_and_a_retaining_restore_keeps_application_data`
+covers the real engine, guest and restore path.
+
 ### Native persistent-data identity codec
 
 `provider::graph::native::persistent_data` defines one closed, private-candidate

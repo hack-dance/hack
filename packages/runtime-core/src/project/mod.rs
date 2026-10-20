@@ -290,6 +290,11 @@ pub struct NetworkPlan {
 pub struct VolumePlan {
     pub driver: String,
     pub ownership: String,
+    /// Volume-relative directories the project explicitly declared regenerable
+    /// (`x-hack-disposable-cache`). Declaration grants no automatic effect; it is
+    /// the only path set an explicit, single-target quarantine may select.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub disposable_caches: Vec<String>,
 }
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(deny_unknown_fields)]

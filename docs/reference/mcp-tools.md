@@ -38,6 +38,7 @@ Every tool sets `openWorldHint: false`. Mutating tools set `idempotentHint: fals
 | `hack.project.env.explain` | read-only | `hack env explain --json -- <key>` |
 | `hack.project.env.keys` | read-only | `hack env list --json` |
 | `hack.project.instances` | read-only | `hack projects --json --project=<name>` |
+| `hack.project.target` | read-only | `hack project target --json` (provisional) |
 
 ## Project selection
 
@@ -194,6 +195,26 @@ the CLI adds to the service with the process name. `stdout` is always `""`: the 
 projects and carries container labels, mounts and networks, which `data` omits.
 `stderr` is returned as captured. `found` is `false` when the project is
 registered but the CLI listing does not include it.
+
+## `hack.project.target`
+
+Resolves the exact target a command would act on: `hack project target --json
+[--project=…] [--path=…] [--branch=…] [--service=…] [--env=…]
+[--expect-generation=…]`. The tool, its inputs and the result schema are
+provisional; see the [AX target and result contract](./ax-target-result-contract.md).
+
+- Inputs: `projectName`, `path`, `branch`, `service`, `env` and
+  `expectGeneration`, all optional.
+- Unlike the other project tools, selection is not resolved by the MCP server.
+  `projectName` and `path` are passed through, both of them when both are
+  given, so the CLI owns every resolution refusal (for example
+  `conflicting_selectors`) and the MCP result matches the CLI exactly.
+- `data` is the CLI's JSON envelope, re-validated against the contract, or
+  `null` when the output does not match it. A detail-less error is accepted
+  only as a parser `E_USAGE` refusal, so an `E_UNEXPECTED` fault message never
+  reaches `data`. `stdout` is always `""`, because
+  `data` carries the same envelope. `stderr` is returned as captured.
+- The command never probes the engine, writes the registry or changes Git.
 
 ## Audit log
 

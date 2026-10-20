@@ -62,7 +62,10 @@ job) enforces the artifact policy above for one primary checkout and one linked
 worktree: after env set, materialize, exec, Compose generation, env apply, logs and
 doctor and a careless `git add -A` commit, no value or key appears in tracked files,
 Git objects, output, child argv, HACK_HOME or caches; plaintext exists only in the
-private, ignored, mode-0600 `.hack/.env` and `.hack/.internal/compose.env.override.yml`.
+private, ignored, mode-0600 `.hack/.env`. The generated
+`.hack/.internal/compose.env.override.yml` must hold `${HACK_ENV_...}` references and no
+value (HACK-1273), and must also be private and ignored. Values reach a child process
+environment only for the exec'd command and the `docker compose` client.
 Its limits are listed in the threat model.
 
 ## Key writes and rotation

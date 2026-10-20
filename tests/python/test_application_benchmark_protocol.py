@@ -5,6 +5,7 @@ import importlib.util
 import io
 import json
 from pathlib import Path
+import re
 import tempfile
 import unittest
 
@@ -132,6 +133,9 @@ class FrozenProtocolTest(unittest.TestCase):
     def test_frozen_schedule_is_the_williams_design_for_the_frozen_lanes(self):
         lanes = [item["id"] for item in PROTOCOL["lanes"]]
         self.assertEqual(PROTOCOL["schedule"]["orders"], protocol_check.williams_orders(lanes))
+        self.assertEqual(PROTOCOL["schedule"]["orders"], protocol_check.FROZEN_ORDERS)
+        self.assertEqual(PROTOCOL["samples"]["min_lifecycle_runs_per_lane"], protocol_check.FROZEN_LIFECYCLE_RUNS)
+        self.assertEqual(PROTOCOL["samples"]["p95_min_samples"], protocol_check.FROZEN_P95_MIN_SAMPLES)
         self.assertEqual(PROTOCOL["schedule"]["rounds_per_workload"], len(PROTOCOL["schedule"]["orders"]))
         self.assertGreaterEqual(len(PROTOCOL["schedule"]["orders"]), protocol_check.MIN_ROTATED_LIFECYCLE_RUNS)
         self.assertEqual(PROTOCOL["samples"]["min_lifecycle_runs_per_lane"], len(PROTOCOL["schedule"]["orders"]))
@@ -208,7 +212,13 @@ class FrozenProtocolTest(unittest.TestCase):
         self.assertIn("1 and 32 MCP clients", PROTOCOL_DOC)
         for code in sorted(protocol_check.VERDICTS):
             self.assertIn(f"`{code}`", PROTOCOL_DOC)
-        self.assertIn(str(PROTOCOL["samples"]["p95_min_samples"]), PROTOCOL_DOC)
+        self.assertIn(f"at least {protocol_check.FROZEN_P95_MIN_SAMPLES} samples per lane", PROTOCOL_DOC)
+        self.assertIn(f"at least {protocol_check.FROZEN_LIFECYCLE_RUNS} lifecycles per lane", PROTOCOL_DOC)
+        # The published order table is the frozen rotation, round for round.
+        rows = re.findall(r"^\| (\d+) \| ([a-z0-9., -]+) \|$", PROTOCOL_DOC, re.MULTILINE)
+        self.assertEqual([int(number) for number, _ in rows],
+                         list(range(1, len(protocol_check.FROZEN_ORDERS) + 1)))
+        self.assertEqual([order.split(", ") for _, order in rows], protocol_check.FROZEN_ORDERS)
         limit = PROTOCOL["known_limits"][0]
         for value in (limit["issue"], "#313", f"{limit['warm_up_seconds']} s", f"{limit['witness_seconds']} s",
                       f"{limit['witness_target_seconds']} s", "HACK-1169"):
@@ -220,6 +230,11 @@ def _recast_as_compose(item):
     for field in ("version", "commit", "asset_sha256", "tag", "asset", "capacity"):
         item.pop(field, None)
     item.update(kind="compose", engine="orbstack", compose_version="5.1.2")
+
+
+def _reorder_schedule(doc):
+    doc["lanes"][1], doc["lanes"][2] = doc["lanes"][2], doc["lanes"][1]
+    doc["schedule"]["orders"] = protocol_check.williams_orders([item["id"] for item in doc["lanes"]])
 
 
 def _set_scope(metric, scope):
@@ -265,14 +280,19 @@ class NegativeProtocolControls(unittest.TestCase):
         "artifact_digest_malformed": lambda d: lane(d, "hack-4.2.1").update(asset_sha256="0" * 63),
         "artifact_version_malformed": lambda d: lane(d, "hack-4.1.1").update(tag="v4.1.2"),
         "p95_samples_insufficient": lambda d: d["samples"].update(p95_min_samples=58),
+        # 59 clears the distribution-free bound; only the frozen revision-1 floor of 60 refuses it.
+        "p95_samples_insufficient:frozen-floor": lambda d: d["samples"].update(p95_min_samples=59),
         # 0.90 needs only 29 samples, so 60 still clears the bound: only the quantile check catches it.
         "p95_samples_insufficient:quantile": lambda d: d["samples"].update(p95_quantile=0.9),
-        # 0.90 confidence needs 45 samples: only the confidence floor catches it.
-        "p95_samples_insufficient:confidence": lambda d: d["samples"].update(
-            p95_bound_confidence=0.9, p95_min_samples=45),
+        # 0.90 confidence needs only 45 samples, so 60 still clears it: only the confidence floor catches it.
+        "p95_samples_insufficient:confidence": lambda d: d["samples"].update(p95_bound_confidence=0.9),
         "p95_method_mismatch": lambda d: d["samples"].update(p95_method="linear-interpolation"),
         "schedule_rounds_mismatch": lambda d: d["schedule"].update(rounds_per_workload=9),
         "schedule_design_mismatch": lambda d: d["schedule"].update(design="latin-square"),
+        # Above the program floor of 5 but below the frozen 10 runs per lane.
+        "schedule_rounds_below_minimum:frozen-floor": lambda d: d["samples"].update(min_lifecycle_runs_per_lane=5),
+        # Another balanced Williams square, from a reordered lane list: only the order pin refuses it.
+        "schedule_order_mismatch": _reorder_schedule,
         "observer_policy_missing": lambda d: d["observer"].update(inconclusive_factor=0.5),
         "observer_policy_missing:factor": lambda d: d["observer"].update(inconclusive_factor=1),
         "observer_policy_missing:window": lambda d: d["observer"].update(control_window_seconds=599),

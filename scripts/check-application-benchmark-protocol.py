@@ -9,7 +9,8 @@ This helper never runs a benchmark, starts a runtime, calls Docker or reads host
   --evaluate SUMMARY   judges a retained cohort summary against the frozen budgets.
 
 Revision-1 identities (artifacts, host, lane kinds and backends, candidate capacity,
-workload pins) are exact; budgets and sample policy are floors a revision may tighten.
+workload pins, rotated lane order) are exact; budgets and sample counts are floors at
+their frozen values, which a revision may tighten.
 Every number must lie within MAX_JSON_NUMBER.
 Diagnostics are closed codes from DIAGNOSTICS; they never echo input values or paths.
 A budget verdict is one of VERDICTS. A statistic is judged only from complete,
@@ -37,6 +38,9 @@ LANE_ID = re.compile(r"^[a-z0-9][a-z0-9.-]{0,31}$")
 # Program floors (Linear program acceptance, Gate C) and the frozen revision-1 choices.
 # A protocol revision may be stricter than these, never weaker.
 MIN_ROTATED_LIFECYCLE_RUNS = 5
+# Frozen revision-1 sample counts. These are floors: a revision may plan more, never fewer.
+FROZEN_LIFECYCLE_RUNS = 10
+FROZEN_P95_MIN_SAMPLES = 60
 REQUIRED_BASELINES = ("compose", "hack-4.1.1", "hack-4.2.0", "hack-4.2.1")
 # metric: (ceiling ratio, frozen statistic). A ratio at the ceiling passes.
 COMPARATIVE_CEILINGS = {
@@ -181,6 +185,7 @@ DIAGNOSTICS = frozenset({
     "schedule_rounds_mismatch",
     "schedule_position_unbalanced",
     "schedule_carryover_unbalanced",
+    "schedule_order_mismatch",
     "p95_samples_insufficient",
     "p95_method_mismatch",
     "comparative_budget_missing",
@@ -241,6 +246,12 @@ def williams_orders(lanes):
     if n % 2:
         rows += [list(reversed(row)) for row in rows]
     return [[lanes[index] for index in row] for row in rows]
+
+
+# The frozen revision-1 rotation: the Williams square for this lane sequence. Another
+# balanced order is a different schedule, so it needs a new revision.
+FROZEN_LANE_SEQUENCE = ("candidate", "compose", "hack-4.1.1", "hack-4.2.0", "hack-4.2.1")
+FROZEN_ORDERS = williams_orders(list(FROZEN_LANE_SEQUENCE))
 
 
 def position_balanced(orders):
@@ -453,12 +464,15 @@ def _check_schedule(doc, lane_ids, found):
         found.add("schedule_rounds_mismatch")
     samples = doc.get("samples") if isinstance(doc.get("samples"), dict) else {}
     planned = samples.get("min_lifecycle_runs_per_lane")
-    if not _count(planned) or planned < MIN_ROTATED_LIFECYCLE_RUNS or len(orders) < planned:
+    if not _count(planned) or planned < max(MIN_ROTATED_LIFECYCLE_RUNS, FROZEN_LIFECYCLE_RUNS) \
+            or len(orders) < planned:
         found.add("schedule_rounds_below_minimum")
     if not position_balanced(orders):
         found.add("schedule_position_unbalanced")
     if not carryover_balanced(orders):
         found.add("schedule_carryover_unbalanced")
+    if orders != FROZEN_ORDERS:
+        found.add("schedule_order_mismatch")
 
 
 def _check_samples(doc, found):
@@ -468,7 +482,8 @@ def _check_samples(doc, found):
     floor = samples.get("p95_min_samples")
     if not _number(quantile) or quantile != P95_QUANTILE \
             or not _number(confidence) or not P95_MIN_CONFIDENCE <= confidence < 1 \
-            or not _count(floor) or floor < minimum_order_statistic_samples(P95_QUANTILE, confidence):
+            or not _count(floor) or floor < FROZEN_P95_MIN_SAMPLES \
+            or floor < minimum_order_statistic_samples(P95_QUANTILE, confidence):
         found.add("p95_samples_insufficient")
     if samples.get("p95_method") != P95_METHOD:
         found.add("p95_method_mismatch")

@@ -280,11 +280,14 @@ from the frozen host engine.
 
 The identities on this page are exact, not floors. The checker pins each lane's tag,
 version, commit, asset name and digest, each lane's kind and backend, the candidate's
-capacity, the host and engine values, and each workload's pin. A different or missing
-value is refused (`artifact_identity_mismatch`, `lane_runtime_mismatch`,
-`candidate_capacity_mismatch`, `host_mismatch`, `workload_pin_mismatch`), and so is a
-workload that drops a frozen correctness check (`workload_correctness_weakened`). A
-revision may add correctness checks. Every number in the protocol or a summary must be
+capacity, the host and engine values, each workload's pin and the rotated order above.
+A different or missing value is refused (`artifact_identity_mismatch`,
+`lane_runtime_mismatch`, `candidate_capacity_mismatch`, `host_mismatch`,
+`workload_pin_mismatch`, `schedule_order_mismatch`), and so is a workload that drops a
+frozen correctness check (`workload_correctness_weakened`). A revision may add
+correctness checks. The sample counts are floors at their frozen values: a protocol
+that plans fewer than 10 lifecycle runs or 60 tail samples per lane is refused, even
+where the program floor or the p95 bound would allow fewer. Every number in the protocol or a summary must be
 within ±(2⁵³ − 1), the interoperable JSON range; a larger value is refused as malformed.
 
 These are acceptance thresholds, not measured achievements.
@@ -352,11 +355,10 @@ python3 -m unittest discover -s tests/python -p test_application_benchmark_proto
 ```
 
 The unit tests check the frozen file, the rotation balance, the p95 sample floor and
-that this page carries every frozen artifact, budget, phase and verdict. They also
-prove that each weakening listed under [Budgets](#budgets), a bad digest, a changed
-artifact, host, capacity or workload pin, an unbalanced order, too few samples and a
-missing observer policy is refused; that missing, flagged, `not_applicable`-only or
-cold-cache data is never accepted; and that any malformed protocol or summary value,
-including an integer too large for a float, yields a closed code rather than a
-traceback. They
-run offline, locally and in CI.
+that this page carries every frozen artifact, budget, phase, round and verdict. They
+also prove that each weakening listed under [Budgets](#budgets), a bad digest, a
+changed artifact, host, capacity, workload pin or rotated order, an unbalanced order,
+too few samples and a missing observer policy is refused; that missing, flagged,
+`not_applicable`-only or cold-cache data is never accepted; and that any malformed
+protocol or summary value, including an integer too large for a float, yields a closed
+code rather than a traceback. They run offline, locally and in CI.

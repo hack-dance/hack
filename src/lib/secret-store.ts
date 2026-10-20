@@ -17,6 +17,9 @@ import { resolveGlobalHackDir } from "./config-paths.ts";
 import { ensureDir, readTextFile } from "./fs.ts";
 import {
   decodeCanonicalBase64,
+  publishPrivateFileExclusive,
+  type ReplaceablePrivateFileOptions,
+  readReplaceablePrivateFile,
   replacePrivateFileAtomic,
 } from "./private-file.ts";
 import { withProjectsRegistryLock } from "./projects-registry-lock.ts";
@@ -627,16 +630,32 @@ async function resolveEncryptedFileKeyMaterial(input?: {
     }));
   if (configuredKeyPath && shouldBootstrapFileKey) {
     const generated = randomBytes(32).toString("base64url");
-    await writeEncryptedFileKey({
+    const key = await createOrAdoptEncryptedFileKey({
       keyPath: configuredKeyPath,
       key: generated,
     });
-    cachedEncryptedFileKey = generated;
+    cachedEncryptedFileKey = key;
     encryptedFileKeyFailureCooldownUntilMs = 0;
     return {
-      key: generated,
-      source: "generated",
+      key,
+      source: key === generated ? "generated" : "file",
     };
+  }
+  if (configuredKeyPath) {
+    // A first user publishes its key file before it writes the store, so a
+    // store found non-empty after the first key read implies a key file that
+    // may have appeared since. Prefer it to the keychain.
+    const publishedKey = await readEncryptedFileKey({
+      keyPath: configuredKeyPath,
+    });
+    if (publishedKey) {
+      cachedEncryptedFileKey = publishedKey;
+      encryptedFileKeyFailureCooldownUntilMs = 0;
+      return {
+        key: publishedKey,
+        source: "file",
+      };
+    }
   }
 
   const nowMs = Date.now();
@@ -742,20 +761,58 @@ async function readEncryptedFileKey(input: {
   return key.length > 0 ? key : null;
 }
 
+function encryptedFileKeyOptions(input: {
+  readonly keyPath: string;
+}): ReplaceablePrivateFileOptions {
+  return {
+    path: input.keyPath,
+    directories: [dirname(input.keyPath)],
+    refusal: () =>
+      new Error(
+        "Refused encrypted secret key write: the key path or its directory is aliased or not a regular file; values omitted."
+      ),
+  };
+}
+
+/** Explicit provisioning: replaces the key file atomically (0600). */
 async function writeEncryptedFileKey(input: {
   readonly keyPath: string;
   readonly key: string;
 }): Promise<void> {
   await ensureDir(dirname(input.keyPath));
   await replacePrivateFileAtomic({
-    path: input.keyPath,
+    ...encryptedFileKeyOptions(input),
     text: `${input.key}\n`,
-    directories: [dirname(input.keyPath)],
-    refusal: () =>
-      new Error(
-        "Refused encrypted secret key write: the key path or its directory is aliased or not a regular file; values omitted."
-      ),
   });
+}
+
+/**
+ * First-use bootstrap of a generated key; returns the key now stored.
+ *
+ * Concurrent first users must converge on one key: a key that is replaced
+ * after another process has encrypted the store with it leaves that store
+ * undecryptable. The generated key is therefore published only when no key
+ * file exists (complete contents, never a partial file); otherwise the key
+ * already published is adopted. An existing empty key file is replaced as
+ * before, since a published key is never empty.
+ */
+async function createOrAdoptEncryptedFileKey(input: {
+  readonly keyPath: string;
+  readonly key: string;
+}): Promise<string> {
+  await ensureDir(dirname(input.keyPath));
+  const options = encryptedFileKeyOptions(input);
+  if (
+    await publishPrivateFileExclusive({ ...options, text: `${input.key}\n` })
+  ) {
+    return input.key;
+  }
+  const existing = (await readReplaceablePrivateFile(options))?.text.trim();
+  if (existing) {
+    return existing;
+  }
+  await replacePrivateFileAtomic({ ...options, text: `${input.key}\n` });
+  return input.key;
 }
 
 async function readEncryptedEntries(input: {

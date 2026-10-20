@@ -36,6 +36,38 @@ pub(super) fn original_environment_files(
     Ok(result)
 }
 
+/// Maximum declared disposable cache directories per volume.
+const MAX_DISPOSABLE_CACHES: usize = 8;
+
+/// Parse an explicit list of volume-relative regenerable cache directories.
+/// Entries are exact, distinct and non-nested, so a later quarantine can select
+/// exactly one declared directory and never an ancestor that holds other data.
+fn disposable_caches(value: Option<&Value>) -> Result<Vec<String>, CandidateError> {
+    let invalid = || {
+        problem(
+            "invalid_disposable_cache",
+            "x-hack-disposable-cache must list at most eight distinct, non-nested, volume-relative directories.",
+        )
+    };
+    let values = strings(value).map_err(|_| invalid())?;
+    if values.len() > MAX_DISPOSABLE_CACHES
+        || values
+            .iter()
+            .any(|value| !super::valid_volume_subpath(value))
+    {
+        return Err(invalid());
+    }
+    for (index, value) in values.iter().enumerate() {
+        for other in &values[index + 1..] {
+            let nested = |a: &str, b: &str| a == b || b.starts_with(&format!("{a}/"));
+            if nested(value, other) || nested(other, value) {
+                return Err(invalid());
+            }
+        }
+    }
+    Ok(values)
+}
+
 pub(super) fn compile(
     candidate: &Candidate,
     project: &Path,
@@ -78,7 +110,13 @@ pub(super) fn compile(
             } else {
                 object(value)?
             };
-            keys(v, &["driver", "external"], &field, &mut diagnostics);
+            keys(
+                v,
+                &["driver", "external", "x-hack-disposable-cache"],
+                &field,
+                &mut diagnostics,
+            );
+            let disposable_caches = disposable_caches(v.get("x-hack-disposable-cache"))?;
             if boolean(v.get("external"), false)? {
                 diagnostics.push(Diagnostic::error(
                     "external_volume",
@@ -94,7 +132,7 @@ pub(super) fn compile(
                     "Only owned local volumes are modeled.",
                 ));
             }
-            volumes.insert(name.clone(),VolumePlan {driver:if driver=="local" {"local".into()} else {"[unsupported]".into()},ownership:"new candidate namespace; retained on ordinary stop; no active v4 volume adoption".into()});
+            volumes.insert(name.clone(),VolumePlan {driver:if driver=="local" {"local".into()} else {"[unsupported]".into()},ownership:"new candidate namespace; retained on ordinary stop; no active v4 volume adoption".into(),disposable_caches});
         }
     }
     let mut networks = BTreeMap::new();
@@ -167,6 +205,27 @@ pub(super) fn compile(
         &volumes,
         &mut diagnostics,
     )?;
+    // Quarantining a directory that is, or contains, a mounted volume subpath
+    // would remove a mount source that retained startup never recreates.
+    for service in services.values() {
+        if service.mounts.iter().any(|mount| {
+            mount.kind == "volume"
+                && mount.subpath.as_deref().is_some_and(|subpath| {
+                    volumes
+                        .get(&mount.source)
+                        .is_some_and(|volume: &VolumePlan| {
+                            volume.disposable_caches.iter().any(|cache| {
+                                subpath == cache || subpath.starts_with(&format!("{cache}/"))
+                            })
+                        })
+                })
+        }) {
+            return Err(problem(
+                "invalid_disposable_cache",
+                "A disposable cache directory cannot be or contain a mounted volume subpath.",
+            ));
+        }
+    }
     graph::validate(&services, &networks, profiles, &mut diagnostics);
     Ok(PlanData {schema_version:1,kind:"compose-enrollment-review-only".into(),candidate_root:candidate.checkout.clone(),source:project.into(),namespace:String::new(),branch:None,compose_file:file.into(),compose_sha256:format!("{:x}",Sha256::digest(input)),original_compose_sha256:None,hostname_change_sha256:None,active_profiles:profiles.to_vec(),services,networks,volumes,registry:None,generated_files:super::generated::parse(m.get("x-hack-generated-files"))?,
         original_environment_files:std::collections::BTreeSet::new(),source_selection:SourceSelection {policy:String::new(),identity_kind:String::new(),metadata_sha256:String::new(),ignore_files:BTreeMap::new(),entries:vec![],excluded_paths:vec![],exclusion_rules:vec![]},diagnostics,enrollment_compatible:false,runtime_execution_supported:false,

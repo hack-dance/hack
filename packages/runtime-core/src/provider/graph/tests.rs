@@ -400,6 +400,7 @@ fn larger_graphs_fit_by_resources_and_receipts_keep_matching_bounds() {
                             outbound: false,
                             cache: None,
                             cache_provenance: None,
+                            disposable_caches: Vec::new(),
                             kind,
                             ..template.clone()
                         },
@@ -417,6 +418,7 @@ fn larger_graphs_fit_by_resources_and_receipts_keep_matching_bounds() {
                         outbound: false,
                         cache: None,
                         cache_provenance: None,
+                        disposable_caches: Vec::new(),
                         kind,
                         ..template.clone()
                     },
@@ -1880,6 +1882,7 @@ fn outbound_network_is_pinned_and_requires_explicit_pool_capability() {
         outbound: true,
         cache: None,
         cache_provenance: None,
+        disposable_caches: Vec::new(),
         kind: Kind::Network,
         key: "default".into(),
         name: "owned-network".into(),
@@ -1907,6 +1910,50 @@ fn outbound_network_is_pinned_and_requires_explicit_pool_capability() {
             .unwrap()
             .outbound
     );
+}
+
+#[test]
+fn admitted_receipts_carry_only_declared_disposable_cache_directories() {
+    let fixture = Fixture::new();
+    let home = Fixture::new();
+    let candidate = Candidate::discover(&home.0).unwrap();
+    let document = json!({"services":{"web":{"image":format!("sha256:{}","a".repeat(64)),"read_only":true,"network_mode":"none","volumes":[
+        {"type":"volume","source":"www_next","target":"/app/.next"},
+        {"type":"volume","source":"redis","target":"/data"}
+    ]}},"volumes":{"www_next":{"x-hack-disposable-cache":["dev/cache/turbopack"]},"redis":{}}});
+    fs::write(fixture.0.join("compose.yaml"), document.to_string()).unwrap();
+    let review = project::plan(&candidate, fixture.options()).unwrap();
+    let inputs = project::inputs::compile(
+        &candidate,
+        fixture.options(),
+        &review.plan_id,
+        &BTreeMap::new(),
+    )
+    .unwrap();
+    let prepared = config::prepare(
+        inputs,
+        &BTreeMap::from([("web".into(), Condition::Started)]),
+        &"a".repeat(32),
+        &"b".repeat(32),
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        prepared.resources["volume:www_next"].disposable_caches,
+        ["dev/cache/turbopack"]
+    );
+    assert!(
+        prepared.resources["volume:redis"]
+            .disposable_caches
+            .is_empty()
+    );
+    let encoded = serde_json::to_value(&prepared.resources["volume:redis"]).unwrap();
+    assert!(encoded.get("disposable_caches").is_none());
+    let decoded: Resource = serde_json::from_value(
+        serde_json::to_value(&prepared.resources["volume:www_next"]).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(decoded.disposable_caches, ["dev/cache/turbopack"]);
 }
 
 #[test]
@@ -1977,6 +2024,7 @@ fn endpoint_selects_service_primary_not_unrelated_first_graph_network() {
                 outbound: false,
                 cache: None,
                 cache_provenance: None,
+                disposable_caches: Vec::new(),
                 kind: Kind::Network,
                 key: key.into(),
                 name: name.into(),

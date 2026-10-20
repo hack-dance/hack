@@ -28,6 +28,43 @@ fn json_image_fetch_still_refuses_unpinned_input_before_network_or_output() {
     assert!(!archive.exists());
 }
 
+#[test]
+fn image_admission_normalizes_shorthand_without_candidate_state_or_network() {
+    let fixture = Fixture::new();
+    let admit = |reference: &str| {
+        invoke(
+            &fixture,
+            &["runtime", "admit-image", "--reference", reference, "--json"],
+        )
+    };
+    let output = admit("alpine:3.21");
+    assert_eq!(output.status.code(), Some(0));
+    let admitted: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(admitted["reference"], "docker.io/library/alpine:3.21");
+    assert_eq!(admitted["kind"], "docker_hub");
+    for reference in ["Private-Canary", "ghcr.io/private-canary/app:1"] {
+        let output = admit(reference);
+        assert_eq!(output.status.code(), Some(2));
+        let failure: Value = serde_json::from_slice(&output.stderr).unwrap();
+        assert_eq!(failure["code"], "registry_image");
+        assert!(!String::from_utf8_lossy(&output.stderr).contains("anary"));
+    }
+    // Admission never creates candidate or home state.
+    for directory in [fixture.0.clone(), fixture.directory("fake-home")] {
+        let mut names: Vec<_> = std::fs::read_dir(&directory)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        names.sort();
+        let expected: &[&str] = if directory == fixture.0 {
+            &["empty-path", "fake-home"]
+        } else {
+            &[]
+        };
+        assert_eq!(names, expected);
+    }
+}
+
 struct Fixture(PathBuf);
 
 impl Fixture {

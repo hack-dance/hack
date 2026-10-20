@@ -46,6 +46,11 @@ still be reconnecting. When the wrong listener would matter, pair `onConflict: "
 `lifecycle.up.before` hook that verifies the listener's identity (for example, a request to a known
 endpoint) and fails when it does not match.
 
+The [shared host helper lifecycle contract](./reference/shared-host-lifecycle.md) defines the
+identity-verified alternative: adoption only after the listener names the expected helper and upstream,
+exact PID-plus-start-time claims, serialized starters, and release that never signals a foreign
+process. It is a library contract today; `singleton` does not use it yet.
+
 ## Config
 
 ```json

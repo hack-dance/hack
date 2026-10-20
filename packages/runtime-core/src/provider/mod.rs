@@ -35,6 +35,7 @@ pub mod https_recovery;
 mod identity;
 pub mod image_ensure;
 mod image_load;
+pub mod image_reference;
 pub mod managed_environment;
 #[cfg(feature = "native-config-plan")]
 mod native_environment;

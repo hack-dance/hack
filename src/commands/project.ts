@@ -220,6 +220,7 @@ import {
   resolvePreferredOpenHost,
 } from "../lib/open-host.ts";
 import { openUrl } from "../lib/os.ts";
+import { writePrivateEnvFileIfChanged } from "../lib/private-env-file.ts";
 import {
   defaultProjectSlugFromPath,
   findProjectContext,
@@ -1314,10 +1315,14 @@ export async function resolveModernComposeEnvOverrides(opts: {
   }
 
   await ensureHackDirGitignore({ projectDir: opts.project.projectDir });
-  const overrideDir = resolve(opts.project.projectDir, ".internal");
-  await ensureDir(overrideDir);
-  const overridePath = resolve(overrideDir, "compose.env.override.yml");
-  await writeTextFileIfChanged(overridePath, text);
+  const overridePath = resolve(
+    opts.project.projectDir,
+    ".internal",
+    "compose.env.override.yml"
+  );
+  // The modern projection holds resolved plaintext, including decrypted
+  // secrets: write it like .hack/.env (0600, atomic, symlink refusal).
+  await writePrivateEnvFileIfChanged({ envFile: overridePath, text });
   return {
     composeFiles: [overridePath],
     env: modern.globalEnv,

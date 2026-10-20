@@ -51,7 +51,11 @@ pub(in crate::provider) use source_device_rebind::https_devices;
 pub use source_device_rebind::{
     inspect as inspect_source_device_rebind, recover as recover_source_device_rebind,
 };
+mod cache_quarantine;
 mod initializer_cache;
+pub use cache_quarantine::{
+    CacheQuarantineTarget, inspect_cache_quarantine, quarantine_cache, resolve_cache_quarantine,
+};
 mod volume_subpaths;
 pub use dependency_hosts::dependency_address;
 #[cfg(target_os = "macos")]
@@ -220,6 +224,10 @@ pub struct Resource {
     pub cache: Option<dependency_cache::CacheBinding>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_provenance: Option<cache_provenance::CacheProvenance>,
+    /// Admitted `x-hack-disposable-cache` directories of an ordinary owned volume.
+    /// Fixed at admission; only these exact paths may be explicitly quarantined.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub disposable_caches: Vec<String>,
     pub kind: Kind,
     pub key: String,
     pub name: String,
@@ -1624,7 +1632,15 @@ pub fn cleanup(
     let engine = Engine::connect_cleanup(candidate)?;
     let (receipt, root) = load(candidate, &engine, run)?;
     cleanup_enrollment::ordinary_mutation(&root, &receipt)?;
-    cleanup_owned(candidate, &engine, receipt, &root, remove_data)
+    let receipt = cleanup_owned(candidate, &engine, receipt, &root, remove_data)?;
+    // The cleaned receipt is committed and ordinary cleanup binds no relay effect identity to
+    // its environment inventory, so history is compacted under the same lease. A refusal keeps
+    // the records for the next cleanup, restore or archive; it never reports this cleanup failed.
+    // Relay-enrolled graphs compact in restore instead (see `environment_recovery::compaction`).
+    if let Some(containers) = environment::bound_containers(&receipt) {
+        environment::compact_history(candidate, &engine, &receipt.run, &containers);
+    }
+    Ok(receipt)
 }
 
 // The caller retains the VM mutation lease through this entire effect and any

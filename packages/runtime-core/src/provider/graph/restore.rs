@@ -478,6 +478,8 @@ fn restore_inputs(
     for slot in environment::cleanup_slots(candidate, &engine, &receipt)? {
         super::super::environment_recovery::retire(candidate, engine.guest(), &slot, None)?;
     }
+    // Bindings of the retired generations, captured before fresh resources replace them.
+    let retired_history = environment::bound_containers(&receipt);
     let launcher = if environments.is_empty() {
         None
     } else {
@@ -528,6 +530,10 @@ fn restore_inputs(
         if let Some(selected) = &source_rebind {
             selected.reverify(&session.engine)?;
         }
+        // A redelivery restore committed its restoring receipt (relay marker dormant) above; a
+        // fresh owner's prepare commits its own enrollment. Only then is the acknowledged
+        // stopped receipt, whose cleanup effect binds the environment inventory, superseded.
+        let mut superseded = fresh.is_none();
         if fresh.is_some()
             && let Some(driver) = session.startup.as_mut()
         {
@@ -537,6 +543,18 @@ fn restore_inputs(
                 &session.root,
                 &mut session.configs,
             )?;
+            superseded = true;
+        }
+        // Every prior slot was re-retired under this lease and each prior container is absent:
+        // compact that history before the new generation allocates, so restore and the next
+        // cleanup scan only active allocations. A refusal retains the records.
+        if superseded && let Some(containers) = &retired_history {
+            environment::compact_history(
+                candidate,
+                &session.engine,
+                &session.receipt.run,
+                containers,
+            );
         }
         session.create_resources(true)?;
         execution::run(&prepared.graph, &mut session, options.timeout)

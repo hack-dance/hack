@@ -189,7 +189,7 @@ pub(super) fn forget_removed(
         &expected_labels(receipt, resource),
     )
 }
-fn no_consumers(value: &Value, volume: &str) -> Result<(), CandidateError> {
+pub(super) fn no_consumers(value: &Value, volume: &str) -> Result<(), CandidateError> {
     let containers = value
         .as_array()
         .filter(|v| v.len() <= 4096)
@@ -312,13 +312,24 @@ pub(super) fn directory_identity(
     resource: &Resource,
     inspected: &Value,
 ) -> Result<String, CandidateError> {
+    directory_identity_with(
+        |script, arguments| engine.guest().execute(script, arguments, None),
+        resource,
+        inspected,
+    )
+}
+/// The same check through an explicit guest executor, so a caller that
+/// abstracts its provider effects runs the identical script and validation.
+pub(super) fn directory_identity_with(
+    execute: impl FnOnce(&str, &[&str]) -> Result<String, CandidateError>,
+    resource: &Resource,
+    inspected: &Value,
+) -> Result<String, CandidateError> {
     let expected = format!("/var/lib/docker/volumes/{}/_data", resource.name);
     if inspected["Mountpoint"].as_str() != Some(expected.as_str()) {
         return Err(refused());
     }
-    let identity = engine
-        .guest()
-        .execute(IDENTITY, &[&expected, "existing"], None)?;
+    let identity = execute(IDENTITY, &[&expected, "existing"])?;
     let identity = identity.trim_end_matches('\n').to_owned();
     if !valid_identity(&identity) {
         return Err(refused());

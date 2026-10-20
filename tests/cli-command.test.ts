@@ -1,6 +1,10 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
 import {
+  type AnyCommandSpec,
+  builtinOptions,
   collectAllowedOptionNames,
+  type OptionSpec,
+  parseCliArgv,
   parseOptionsForCommand,
   parsePositionalsForCommand,
   resolveCommand,
@@ -84,6 +88,71 @@ test("resolveCommand exposes host exec path", () => {
     "exec",
   ]);
   expect(resolved.remainingPositionals).toEqual(["bun", "test"]);
+});
+
+/**
+ * argv is parsed once against the union of every command's options, keyed by
+ * long name, so one long name declared as a boolean in one command and as a
+ * value in another changes how every command parses it. A value-typed
+ * `setup migrate --rollback` once made `config adopt --rollback --json` consume
+ * `--json` as its value and fail with a usage error.
+ */
+test("each long option keeps one value type across the command tree", () => {
+  const declarations = new Map<string, Set<string>>();
+  const record = (opts: {
+    readonly owner: string;
+    readonly options: readonly OptionSpec[];
+  }) => {
+    for (const option of opts.options) {
+      const kind = option.type === "boolean" ? "boolean" : "value";
+      const owners = declarations.get(option.long) ?? new Set<string>();
+      owners.add(`${kind} (${opts.owner})`);
+      declarations.set(option.long, owners);
+    }
+  };
+  record({ owner: "builtin", options: builtinOptions() });
+  record({ owner: "global", options: CLI_SPEC.globalOptions });
+  const walk = (
+    commands: readonly AnyCommandSpec[],
+    parent: readonly string[]
+  ) => {
+    for (const command of commands) {
+      const path = [...parent, command.name];
+      record({ owner: path.join(" "), options: command.options });
+      walk(command.subcommands, path);
+    }
+  };
+  walk(CLI_SPEC.commands, []);
+
+  const conflicts = [...declarations]
+    .filter(
+      ([, owners]) =>
+        new Set([...owners].map((owner) => owner.split(" ")[0])).size > 1
+    )
+    .map(([long, owners]) => `${long}: ${[...owners].sort().join(", ")}`);
+  expect(conflicts).toEqual([]);
+});
+
+test("boolean config adopt --rollback does not consume the next flag", () => {
+  const adopt = parseCliArgv(CLI_SPEC, [
+    "config",
+    "adopt",
+    "--rollback",
+    "--json",
+  ]);
+  expect(adopt.values.rollback).toBe(true);
+  expect(adopt.values.json).toBe(true);
+  expect(adopt.positionals).toEqual(["config", "adopt"]);
+
+  const migrate = parseCliArgv(CLI_SPEC, [
+    "setup",
+    "migrate",
+    "--rollback-manifest",
+    "manifest.json",
+    "--json",
+  ]);
+  expect(migrate.values["rollback-manifest"]).toBe("manifest.json");
+  expect(migrate.values.json).toBe(true);
 });
 
 test("dispatch rejects retired GitHub PR automation flags as unknown", async () => {

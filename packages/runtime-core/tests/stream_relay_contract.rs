@@ -800,6 +800,37 @@ fn publisher_startup_reports_port_conflict_and_reaps_child() {
     assert!(upstream.socket.exists());
 }
 
+/// Runs a command that must refuse promptly and returns its exit code and stdout.
+/// A child that is still running after the deadline was admitted instead of
+/// refused; it is killed and reaped so the test fails rather than hangs.
+fn bounded_refusal(command: &mut Command) -> (Option<i32>, Vec<u8>) {
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("command was admitted instead of refused: {command:?}");
+        }
+        thread::sleep(Duration::from_millis(5));
+    };
+    let mut stdout = Vec::new();
+    child
+        .stdout
+        .take()
+        .unwrap()
+        .read_to_end(&mut stdout)
+        .unwrap();
+    (status.code(), stdout)
+}
+
 #[test]
 fn ephemeral_publication_reports_its_bound_port_and_explicit_ports_keep_bare_ready() {
     let backend = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -813,23 +844,22 @@ fn ephemeral_publication_reports_its_bound_port_and_explicit_ports_keep_bare_rea
     );
     // Only the exact `--publish 0` form selects an ephemeral port.
     for (mode, endpoint) in [("--publish", "00"), ("--publish-unix", "0")] {
-        let refused = Command::new(BINARY)
-            .args([mode, endpoint])
-            .arg(&guard.socket)
-            .args([token, "10000"])
-            .stdin(Stdio::null())
-            .output()
-            .unwrap();
-        assert_eq!(refused.status.code(), Some(64), "{mode} {endpoint}");
-        assert!(refused.stdout.is_empty());
+        let (code, stdout) = bounded_refusal(
+            Command::new(BINARY)
+                .args([mode, endpoint])
+                .arg(&guard.socket)
+                .args([token, "10000"]),
+        );
+        assert_eq!(code, Some(64), "{mode} {endpoint}");
+        assert!(stdout.is_empty());
     }
-    let refused = Command::new(BINARY)
-        .arg(guard.root.join("relay-port-zero.sock"))
-        .args(["127.0.0.1", "0", "1000"])
-        .stdin(Stdio::null())
-        .output()
-        .unwrap();
-    assert_eq!(refused.status.code(), Some(64));
+    let (code, stdout) = bounded_refusal(
+        Command::new(BINARY)
+            .arg(guard.root.join("relay-port-zero.sock"))
+            .args(["127.0.0.1", "0", "1000"]),
+    );
+    assert_eq!(code, Some(64));
+    assert!(stdout.is_empty());
     assert!(!guard.root.join("relay-port-zero.sock").exists());
 
     let (mut first, first_port) = ephemeral_publisher(&guard.socket, token, None);

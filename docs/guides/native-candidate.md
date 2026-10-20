@@ -1538,6 +1538,121 @@ the dead predecessor publication. That selection belongs to the interrupted
 operation; replacing a selection from an older restored generation still requires
 independent restore-history proof.
 
+### Quarantine a corrupted disposable build cache
+
+Some frameworks keep a regenerable build cache inside a named volume next to other
+generated output. When such a cache is corrupted (for example a Turbopack checksum
+mismatch reported as a misleading `Module not found`), you can move exactly that
+cache directory aside. Nothing is deleted, and other volumes and directories are
+unchanged.
+
+First declare the regenerable directories on the volume in the Compose file. Paths
+are relative to the volume root. List at most eight distinct directories; one entry
+cannot contain another:
+
+```yaml
+volumes:
+  www_next:
+    x-hack-disposable-cache:
+      - dev/cache/turbopack
+```
+
+The declaration is part of the reviewed plan. It is recorded in the graph receipt
+when the graph is admitted, and only a receipt-recorded entry can be selected later.
+A volume that is also a shared dependency cache cannot declare disposable
+directories. Declaring a path grants no automatic cleanup.
+
+Stop the graph with an ordinary retaining `down` (phase `stopped-data-retained`).
+With the owned runtime running, inspect the single target. This step is read-only:
+
+```sh
+./hack-native --candidate-root /absolute/private/candidate-home graph inspect-cache-quarantine \
+  --run-id <run-id> --volume www_next --path dev/cache/turbopack --json
+```
+
+The response reports the target's `target_bytes` (regular-file bytes),
+`allocated_bytes`, `entries` and a `selection_sha256`. The selection binds the exact
+receipt bytes, the volume name, creation time and root directory identity, the
+target directory identity and the measured bytes. Review it, then quarantine:
+
+```sh
+./hack-native --candidate-root /absolute/private/candidate-home graph quarantine-cache \
+  --run-id <run-id> --volume www_next --path dev/cache/turbopack \
+  --expect-selection <selection_sha256> --json
+```
+
+These commands, and `resolve-cache-quarantine` below, hold the provider mutation
+lease. They refuse when any of these is true:
+
+- the graph is active, its journal is incomplete, or interrupted cleanup is pending
+- the path is not exactly a declared entry, or is absolute, traversing or empty
+- the volume is missing, carries foreign ownership labels, or has changed
+  incarnation
+- any container mounts the volume, including stopped containers
+- a component of the path, or the target itself, is a symbolic link or not a
+  directory
+- the target directory was replaced after inspection
+
+The guest renames the directory under a lock on the volume root into
+`/var/lib/docker/volumes/<volume>/hack-quarantine/<id>`. That directory is beside
+the volume's `_data` root, and no container can mount it. Before the rename the
+guest checks that the source and the quarantine directory are on the same mount
+(the same `findmnt` mount ID, not only the same device number). A rename within
+one mount cannot fail with a cross-device error, so `mv` never falls back to
+copying and then deleting the source. The result reports `quarantined_bytes` and
+`reclaimed_bytes: 0`. The bytes remain for diagnosis until the owning volume
+itself is explicitly removed (for example `graph cleanup --remove-data`). Restart,
+restore and ordinary cleanup never collect them. Then use a normal retaining
+restart. The framework regenerates its cache.
+
+Quarantined bytes are outside the volume's `_data` directory. Docker's disk-usage
+report, and therefore `graph storage-inventory`, does not count them, so the inventory
+undercounts a volume that holds a quarantine. Every `inspect-cache-quarantine`
+result, including `target_absent`, reports `retained_quarantine_records` and
+`retained_quarantine_bytes`: the recorded bytes still held in the current
+incarnation of that volume.
+
+A private record under the candidate home's `run/cache-quarantine/` is written
+before the guest effect and marked `quarantined` after the guest syncs the move.
+If the command is interrupted, `inspect-cache-quarantine` reports the recorded
+digest with one of two phases:
+
+- `resume_required`: the receipt and volume are unchanged. Repeat
+  `quarantine-cache` with the same selection. Resumption accepts the recorded
+  directory either still at its source or already at its destination with the
+  same inode. It refuses a regenerated directory, a different destination or
+  both present, and never moves new bytes.
+- `resolve_required`: resumption is no longer possible, for example because a
+  restart changed the receipt, or because the move keeps refusing. Settle the
+  record without moving anything:
+
+  ```sh
+  ./hack-native --candidate-root /absolute/private/candidate-home graph resolve-cache-quarantine \
+    --run-id <run-id> --volume www_next --path dev/cache/turbopack \
+    --expect-selection <recorded selection_sha256> --json
+  ```
+
+  Under the same lease, consumer and ownership checks, the guest reads the
+  recorded destination under the volume root lock. The record becomes
+  `quarantined` when the recorded directory (same inode) is there, and
+  `abandoned` when the destination is absent, which means nothing was moved. Any
+  other layout, such as a symbolic-link quarantine directory or a different
+  directory at the destination, refuses. After resolution, inspect again for a
+  fresh selection.
+
+You can also resolve a record that could still be resumed. While a record is
+pending, other quarantines of that volume are refused. A torn record write
+refuses automatic replay. Records are retained as diagnosis evidence and are not
+collected automatically. Each volume admits at most 16 records, and the candidate
+home holds at most 1024. Volume names are specific to a run, so a new run starts
+with a fresh per-volume budget. When the global limit is reached, every new
+quarantine is refused; this candidate has no command that collects records.
+
+This operation does not classify the cause of the corruption. One checksum error
+does not show an interrupted write or a storage integrity fault. Container health
+also does not prove that application routes work; check the public route
+separately after restart.
+
 ### Explicit cleanup after a dead foreground owner
 
 For a fully ready graph whose foreground owner died while its pool remains on the

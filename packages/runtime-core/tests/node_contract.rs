@@ -650,3 +650,203 @@ fn a_new_journal_incarnation_rejects_old_target_and_copied_state() {
     .unwrap();
     assert!(Store::open(&other.root, false).is_err());
 }
+
+#[test]
+fn same_operation_id_with_a_different_request_conflicts_without_effect() {
+    let root = std::env::temp_dir().canonicalize().unwrap().join(format!(
+        "hkl-operation-conflict-{}-{}",
+        std::process::id(),
+        SERIAL.fetch_add(1, Ordering::SeqCst)
+    ));
+    let uid = unsafe { libc::geteuid() };
+    let mut store = Store::open(&root, true).unwrap();
+    let target = store.target.clone();
+    let mutation = |id: &str, generation: i64| Mutation {
+        operation_id: id.into(),
+        expected_generation: generation,
+        target: target.clone(),
+        principal: uid,
+        request_digest: String::new(),
+        required_capabilities: vec!["fixture_jobs_v1".into()],
+    };
+    let submit = |id: &str, generation: i64| Request::Submit {
+        version: 1,
+        mutation: mutation(id, generation),
+        fixture: "success".into(),
+        queue_timeout_ms: 5000,
+        execution_timeout_ms: 2000,
+    };
+    let original = submit("same-id", 0);
+    let mut variants = Vec::new();
+    for edit in 0..5 {
+        let mut variant = original.clone();
+        if let Request::Submit {
+            mutation,
+            fixture,
+            queue_timeout_ms,
+            execution_timeout_ms,
+            ..
+        } = &mut variant
+        {
+            match edit {
+                0 => *fixture = "failure".into(),
+                1 => *queue_timeout_ms += 1,
+                2 => *execution_timeout_ms += 1,
+                3 => mutation
+                    .required_capabilities
+                    .push("cooperative_process_groups".into()),
+                // A retry that refreshes its generation is a different request.
+                _ => mutation.expected_generation = 1,
+            }
+        }
+        variants.push(variant);
+    }
+    let accepted = store
+        .handle(&original.clone().seal().unwrap(), uid)
+        .unwrap();
+    let job = accepted["job_id"].as_str().unwrap().to_owned();
+    // The job ID is derived from the operation ID, so every variant names this job.
+    variants.push(Request::Cancel {
+        version: 1,
+        mutation: mutation("same-id", 0),
+        job_id: job.clone(),
+    });
+    let receipt = serde_json::to_value(store.get(&job).unwrap()).unwrap();
+    for variant in variants {
+        let refusal = store
+            .handle(&variant.clone().seal().unwrap(), uid)
+            .unwrap_err();
+        assert_eq!(refusal.code, "operation_conflict", "{variant:?}");
+    }
+    assert_eq!(
+        serde_json::to_value(store.get(&job).unwrap()).unwrap(),
+        receipt
+    );
+    assert_eq!(store.list().unwrap().len(), 1);
+    assert_eq!(
+        store
+            .handle(&original.clone().seal().unwrap(), uid)
+            .unwrap(),
+        accepted
+    );
+
+    // A cancel operation ID cannot be re-pointed at a different job.
+    let other = store
+        .handle(&submit("other", 1).seal().unwrap(), uid)
+        .unwrap();
+    let other = other["job_id"].as_str().unwrap().to_owned();
+    let cancel = |job_id: &str| Request::Cancel {
+        version: 1,
+        mutation: mutation("cancel-once", 2),
+        job_id: job_id.into(),
+    };
+    store.handle(&cancel(&job).seal().unwrap(), uid).unwrap();
+    assert_eq!(
+        store
+            .handle(&cancel(&other).seal().unwrap(), uid)
+            .unwrap_err()
+            .code,
+        "operation_conflict"
+    );
+    assert_eq!(store.get(&job).unwrap().state, "cancelled");
+    let untouched = store.get(&other).unwrap();
+    assert_eq!(untouched.state, "queued");
+    assert!(!untouched.cancel_requested);
+    let status = store.handle(&Request::Status { version: 1 }, uid).unwrap();
+    assert_eq!(status["generation"], 3);
+    drop(store);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn crash_between_claim_spawn_and_result_persistence_quarantines_without_replay() {
+    // The supervisor persisted its claim ("running") and then died either before
+    // recording its spawned child or after it, but before any result was written.
+    // The recorded PIDs belong to an unrelated live process, as after PID reuse.
+    for child_recorded in [false, true] {
+        let mut n = Node::new();
+        let request = n.submit("spawn-window", "success", 5000, 2000);
+        n.stop();
+        let mut store = Store::open(&n.root, false).unwrap();
+        let accepted = store
+            .handle(&request.clone().seal().unwrap(), unsafe { libc::geteuid() })
+            .unwrap();
+        let id = accepted["job_id"].as_str().unwrap();
+        let mut sentinel = Command::new("/bin/sleep").arg("10").spawn().unwrap();
+        let mut receipt = store.get(id).unwrap();
+        receipt.state = "running".into();
+        receipt.supervisor_pid = Some(sentinel.id() as i32);
+        if child_recorded {
+            receipt.child_pid = Some(sentinel.id() as i32);
+            receipt.starts = 1;
+        }
+        let connection = rusqlite::Connection::open(n.root.join("journal.sqlite")).unwrap();
+        connection
+            .execute(
+                "UPDATE jobs SET receipt=? WHERE id=?",
+                rusqlite::params![serde_json::to_string(&receipt).unwrap(), id],
+            )
+            .unwrap();
+        drop((connection, store));
+        n.start();
+        let result = n.terminal(id);
+        assert_eq!(result.state, "quarantined", "{result:?}");
+        assert_eq!(result.starts, u32::from(child_recorded));
+        assert_eq!(result.exit_code, None);
+        assert!(result.stdout.is_empty());
+        assert_eq!(n.ask(&request), accepted);
+        // Several scheduling passes later, quarantine has neither replayed the job
+        // nor signalled the recorded PID.
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(
+            serde_json::to_value(n.receipt(id)).unwrap(),
+            serde_json::to_value(&result).unwrap()
+        );
+        assert!(sentinel.try_wait().unwrap().is_none());
+        sentinel.kill().unwrap();
+        sentinel.wait().unwrap();
+    }
+}
+
+#[test]
+fn terminal_receipts_and_retry_identity_survive_node_restart() {
+    let mut n = Node::new();
+    let success = n.submit("restart-success", "success", 5000, 3000);
+    let accepted = n.ask(&success);
+    let success_id = accepted["job_id"].as_str().unwrap().to_owned();
+    let succeeded = n.terminal(&success_id);
+    let failure = n.submit("restart-failure", "failure", 5000, 3000);
+    let rejected = n.ask(&failure);
+    let failure_id = rejected["job_id"].as_str().unwrap().to_owned();
+    let failed = n.terminal(&failure_id);
+    let cancel = Request::Cancel {
+        version: 1,
+        mutation: n.mutation("restart-late-cancel"),
+        job_id: success_id.clone(),
+    };
+    let cancelled = n.ask(&cancel);
+    let status = n.ask(&Request::Status { version: 1 });
+    // The service process is gone; the journal is the only durable owner.
+    n.stop();
+    n.start();
+    assert_eq!(n.ask(&Request::Status { version: 1 }), status);
+    for (id, expected) in [(&success_id, &succeeded), (&failure_id, &failed)] {
+        assert_eq!(
+            serde_json::to_value(n.receipt(id)).unwrap(),
+            serde_json::to_value(expected).unwrap()
+        );
+    }
+    assert_eq!(succeeded.state, "succeeded");
+    assert!(!succeeded.cancel_requested);
+    assert_eq!(
+        (failed.state.as_str(), failed.exit_code),
+        ("failed", Some(23))
+    );
+    assert_eq!(n.ask(&success), accepted);
+    assert_eq!(n.ask(&failure), rejected);
+    assert_eq!(n.ask(&cancel), cancelled);
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(n.ask(&Request::Status { version: 1 }), status);
+    assert_eq!(n.receipt(&success_id).starts, 1);
+    assert_eq!(n.receipt(&failure_id).starts, 1);
+}

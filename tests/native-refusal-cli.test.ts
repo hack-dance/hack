@@ -53,7 +53,7 @@ afterEach(async () => {
   }
 });
 
-async function fixture() {
+async function fixture(compose = COMPOSE) {
   const root = await realpath(
     await mkdtemp(join(tmpdir(), "native-refusal-cli-"))
   );
@@ -67,7 +67,7 @@ async function fixture() {
   await mkdir(nativeHome, { mode: 0o700 });
   await mkdir(runtimeDir);
   await mkdir(stub);
-  await writeFile(join(projectDir, "docker-compose.yml"), COMPOSE);
+  await writeFile(join(projectDir, "docker-compose.yml"), compose);
   await writeFile(
     join(projectDir, "hack.config.json"),
     JSON.stringify({
@@ -83,6 +83,7 @@ async function fixture() {
     `#!/bin/sh
 printf '%s\\n' "$*" >> '${stub}/calls'
 if [ -f '${stub}/'"$3-$4"'.out' ]; then cat '${stub}/'"$3-$4"'.out'; exit 0; fi
+if [ -f '${stub}/'"$3-$4"'.err' ]; then cat '${stub}/'"$3-$4"'.err' >&2; exit 1; fi
 printf '%s' '{"code":"runtime_not_running"}' >&2
 exit 1
 `,
@@ -93,6 +94,12 @@ exit 1
     await writeFile(
       join(stub, `${request.replace(" ", "-")}.out`),
       typeof value === "string" ? value : JSON.stringify(value)
+    );
+  /** Make `request` fail with this closed native failure on stderr. */
+  const fail = async (request: string, failure: Record<string, unknown>) =>
+    await writeFile(
+      join(stub, `${request.replace(" ", "-")}.err`),
+      JSON.stringify(failure)
     );
   const calls = async () =>
     (await readFile(join(stub, "calls"), "utf8").catch(() => ""))
@@ -111,7 +118,7 @@ exit 1
         ...extra,
       },
     });
-  return { root, project, projectDir, scope, reply, calls, env };
+  return { root, project, projectDir, scope, compose, reply, fail, calls, env };
 }
 
 type Fixture = Awaited<ReturnType<typeof fixture>>;
@@ -166,7 +173,7 @@ async function scriptUpThroughReview(
   f: Fixture,
   plan: Record<string, unknown> = {}
 ) {
-  const sha = createHash("sha256").update(COMPOSE).digest("hex");
+  const sha = createHash("sha256").update(f.compose).digest("hex");
   await f.reply("runtime check-project-share", {
     source_admitted: true,
     pool_initialized: true,
@@ -447,6 +454,90 @@ test(
       "graph serve",
       "graph inspect",
     ]);
+  },
+  SPAWN_TIMEOUT_MS
+);
+
+/** A project whose only service names a registry image the candidate refuses. */
+const REGISTRY_COMPOSE = JSON.stringify({
+  services: { web: { image: "ghcr.io/example/app:1" } },
+});
+const IMAGE_REFUSAL =
+  "Native project image reference refused before runtime startup: use a public Docker Hub reference (shorthand such as alpine:3.21 is accepted) or a sha256 image ID; no VM, provider or image acquisition was started.";
+
+test(
+  "native-project-image-admission: a refused image reference is one coded line",
+  async () => {
+    const f = await fixture(REGISTRY_COMPOSE);
+    await scriptUpThroughReview(f);
+    await f.fail("runtime admit-image", { code: "registry_image" });
+    const result = await cli({ fixture: f, args: ["up"], env: SHARED });
+    expectOneClosedLine(
+      result,
+      `E_NATIVE_PROJECT_UNSUPPORTED: ${IMAGE_REFUSAL}`
+    );
+    expect(result.output).not.toContain("ghcr.io");
+    expect((await f.calls()).at(-1)).toBe("runtime admit-image");
+  },
+  SPAWN_TIMEOUT_MS
+);
+
+test(
+  "native-project-image-admission: a malformed admission reply is one closed integrity line",
+  async () => {
+    const f = await fixture(REGISTRY_COMPOSE);
+    await scriptUpThroughReview(f);
+    await f.reply("runtime admit-image", {});
+    const result = await cli({ fixture: f, args: ["up"], env: SHARED });
+    expectOneClosedLine(
+      result,
+      "Native runtime returned an invalid image admission response; no VM, provider or image acquisition was started."
+    );
+    expect(result.output).not.toContain("ghcr.io");
+    expect((await f.calls()).at(-1)).toBe("runtime admit-image");
+  },
+  SPAWN_TIMEOUT_MS
+);
+
+test(
+  "native-prepared-base: an invalid prepared-base mode is one coded line before any request",
+  async () => {
+    const f = await fixture();
+    const result = await cli({
+      fixture: f,
+      args: ["up"],
+      env: { ...SHARED, HACK_NATIVE_PREPARED_BASE: "bogus" },
+    });
+    expectOneClosedLine(
+      result,
+      "E_CONFIG_INVALID: HACK_NATIVE_PREPARED_BASE must be prefer, require or off."
+    );
+    expect(await f.calls()).toEqual([]);
+  },
+  SPAWN_TIMEOUT_MS
+);
+
+test(
+  "native-workspace-cache: an invalid cache layout is one coded line",
+  async () => {
+    const f = await fixture();
+    await scriptUpThroughReview(f);
+    const adaptation = join(f.root, "adaptation.json");
+    await writeFile(
+      adaptation,
+      JSON.stringify({ version: 1, workspaceCache: { bogus: 1 } }),
+      { mode: 0o600 }
+    );
+    const result = await cli({
+      fixture: f,
+      args: ["up"],
+      env: { ...SHARED, HACK_NATIVE_ADAPTATION: adaptation },
+    });
+    expectOneClosedLine(
+      result,
+      "E_CONFIG_INVALID: Native workspace cache layout conflicts with declared mounts or is invalid; values omitted."
+    );
+    expect(await f.calls()).toEqual(["runtime check-project-share"]);
   },
   SPAWN_TIMEOUT_MS
 );

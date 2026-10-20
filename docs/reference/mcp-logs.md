@@ -64,6 +64,23 @@ To continue a stream approximately, call again with `since` set to the last
 event's `ts`. `since` selects the Loki backend and cannot be combined with
 `compose`. Expect overlap at the boundary and remove duplicates on the client.
 
+## Container restarts
+
+A restart of the logged container does not change the contract. A tail that
+spans the restart still ends in one outcome within its bound. Compose may
+reattach to the restarted container from a coarse timestamp, so a tail that
+spans the restart can repeat a few lines from before it. A snapshot taken after
+the restart holds each line once, in order, and a new tail starts from the
+current output.
+
+## Verification
+
+`tests/mcp-logs-contract.test.ts` checks each outcome against a scripted stub
+backend. The `mcp-logs-compose` scenario in the optional `docker-e2e` CI job
+checks the same outcomes through `hack mcp serve` against a real Compose
+project (see `tests/e2e/README.md`). It does not cover the Loki backend or the
+native/authored logs path.
+
 ## Decision: no handles, cursors or idempotency keys (no-go)
 
 Status: no-go for now (HACK-1134). This decision adds no cursor implementation.

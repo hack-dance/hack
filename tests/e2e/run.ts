@@ -22,6 +22,7 @@ import { execStaleEnvScenario } from "./scenarios/exec-stale-env.ts";
 import { initScenario } from "./scenarios/init.ts";
 import { lifecycleHostProcessScenario } from "./scenarios/lifecycle-host-process.ts";
 import { lifecycleSessionRecoveryScenario } from "./scenarios/lifecycle-session-recovery.ts";
+import { mcpLogsComposeScenario } from "./scenarios/mcp-logs-compose.ts";
 import { nativeComposeAdoptionJobWorktreesScenario } from "./scenarios/native-compose-adoption-job-worktrees.ts";
 import { nativeComposeAdoptionRoutingWorktreesScenario } from "./scenarios/native-compose-adoption-routing-worktrees.ts";
 import { nativeComposeAdoptionSourceBindWorktreesScenario } from "./scenarios/native-compose-adoption-source-bind-worktrees.ts";
@@ -104,6 +105,7 @@ export const ALL_SCENARIOS: readonly Scenario[] = [
   execStaleEnvScenario,
   portableMultiserviceScenario,
   composeConfigHashDriftScenario,
+  mcpLogsComposeScenario,
   nativeConfigComposeScenario,
   nativeConfigBuildScenario,
   nativeConfigDownHooksScenario,

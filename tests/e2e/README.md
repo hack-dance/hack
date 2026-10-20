@@ -286,6 +286,49 @@ fixture; host and provider proxy settings remain unchanged. In a real project,
 add its internal service names to the existing proxy exceptions rather than
 discarding the project's other entries.
 
+## MCP logs on real Compose (F13)
+
+`mcp-logs-compose` (HACK-1134, HACK-1155) starts `hack mcp serve` over stdio
+and calls the logs tools against a real Compose project. Every tool call runs
+the CLI under test through `HACK_MCP_COMMAND`. The fixture uses cached
+`alpine:3.20` with `pull_policy: never`, a private internal network, no
+published ports, and Hack internal DNS/TLS turned off. Both log backends are set
+to `compose`. It has three services: `ticker` prints a boot marker and then a
+numbered line every 0.2 s, `quiet` prints one line, and `bulk` prints 1500
+lines of 2048 four-byte emoji (about 12 MiB) and then idles.
+
+The scenario requires these results:
+
+- A `quiet` snapshot completes with `cutoff: null`. A `quiet` tail stops at
+  `maxMs` with a `time` cutoff and only its one line.
+- A `ticker` tail stops at `maxMs` with a `time` cutoff and live lines in
+  order. Another stops at exactly 5 log events with an `events` cutoff.
+- A `bulk` snapshot stops at 8 MiB with a `bytes` cutoff and
+  `outputTruncated`. It keeps an ordered prefix of whole lines. No result
+  payload may contain U+FFFD, so a split code point fails the run. Where the
+  cut falls varies from run to run, so a single pass does not prove that this
+  run cut inside a code point; `tests/mcp-logs-contract.test.ts` covers that
+  case deterministically.
+- With `DOCKER_HOST` pointing at a missing socket, a snapshot and a tail both
+  return the closed `backend_error`. The tail ends at end of stream, not at
+  `maxMs`.
+- `docker restart` on the exact owned `ticker` container during a tail: the
+  tail still ends in one typed outcome within its bound. Lines repeated across
+  the restart are logged, not asserted (see `docs/reference/mcp-logs.md`). The
+  stored history then holds `BOOT 1` and `BOOT 2` once each, with ordered
+  lines. A new tail streams only the new boot. A new MCP session does not
+  replay lines older than the previous session's last line.
+- `hack run quiet -- false` exits 1, and an `exit 7` child exits 7 with its
+  output. The MCP `hack.project.run` result reports `ok: false` and
+  `exitCode: 7`, and a `true` child reports `ok: true`.
+
+Cleanup removes only containers, networks and volumes with the fixture's
+owner label.
+
+```sh
+HACK_E2E_CLI_BIN=./dist/hack HACK_E2E_DOCKER=1 HACK_E2E_REQUIRE_DOCKER=1 bun tests/e2e/run.ts --only=mcp-logs-compose
+```
+
 ## Native file qualification
 
 `native-config-files` requires the current compiled CLI, its matching compiler and

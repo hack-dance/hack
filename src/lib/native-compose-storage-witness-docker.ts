@@ -810,7 +810,7 @@ async function groupAbsent(
       return refuse();
     }
     if (now() >= deadline) {
-      return refuse();
+      return refuseCommand("probe-budget");
     }
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
@@ -903,6 +903,42 @@ async function commandBoot(
 }
 /** No callback can reject before the shared owner awaits exit. A rejected owner or
  * unproven group retains the journal; daemon effects are never inferred from exit. */
+type StorageCommandRefusal = "probe-timeout" | "probe-cancel" | "probe-budget";
+const storageCommandRefusals = new WeakMap<object, StorageCommandRefusal>();
+/** The same fixed refusal, keeping only its closed command cause (a timed-out or
+ * cancelled child, or an exhausted publication/settlement budget) for the effect
+ * diagnostic. It grants nothing and changes no check, deadline or retention. */
+function refuseCommand(reason: StorageCommandRefusal | undefined): never {
+  const error = new Error(
+    "Native storage xattr proof refused; values omitted."
+  );
+  if (reason) {
+    storageCommandRefusals.set(error, reason);
+  }
+  throw error;
+}
+function storageCommandRefusal(
+  error: unknown
+): StorageCommandRefusal | undefined {
+  return typeof error === "object" && error !== null
+    ? storageCommandRefusals.get(error)
+    : undefined;
+}
+function exitRefusal(
+  exit: RunExitEvent | null
+): StorageCommandRefusal | undefined {
+  if (exit?.timedOut) {
+    return "probe-timeout";
+  }
+  return exit?.cancelled ? "probe-cancel" : undefined;
+}
+/** Effect reason for a carrier boundary: a classified command cause first. */
+export function nativeComposeStorageCarrierReason(
+  error: unknown
+): NativeComposeEffectRefusal["reason"] {
+  return storageCommandRefusal(error) ?? nativeComposeEffectReason(error);
+}
+
 export async function runNativeComposeStorageDockerCommand(supplied: {
   readonly context: Pick<Context, "signal" | "deadline">;
   readonly files: Pick<
@@ -958,6 +994,7 @@ export async function runNativeComposeStorageDockerCommand(supplied: {
     exit: RunExitEvent | null = null;
   let armed: NativeComposeStorageArmedCommand | null = null;
   let publicationRefused = false;
+  let publicationCause: StorageCommandRefusal | undefined;
   const cancellation = new AbortController();
   try {
     await opts.assertAdmitted();
@@ -965,19 +1002,24 @@ export async function runNativeComposeStorageDockerCommand(supplied: {
       ? opts.timeoutMs
       : Math.min(opts.timeoutMs, opts.context.deadline - Date.now());
     if (!(timeoutMs > 0)) {
-      return refuse();
+      return refuseCommand("probe-budget");
     }
     const deadline = Date.now() + timeoutMs;
     let boundaryDeadline = performance.now() + timeoutMs;
     let recordingSettlement = false;
     const record = opts.originalCommand;
     const guard = () => {
+      if (performance.now() >= boundaryDeadline) {
+        return refuseCommand("probe-budget");
+      }
+      if (publicationRefused) {
+        return refuseCommand(publicationCause);
+      }
       if (
-        performance.now() >= boundaryDeadline ||
-        publicationRefused ||
-        (!(recordingSettlement || opts.cleanup) && opts.context.signal.aborted)
+        !(recordingSettlement || opts.cleanup) &&
+        opts.context.signal.aborted
       ) {
-        return refuse();
+        return refuseCommand("probe-cancel");
       }
     };
     const bounded = async <T>(work: Promise<T>): Promise<T> => {
@@ -990,6 +1032,7 @@ export async function runNativeComposeStorageDockerCommand(supplied: {
             timer = setTimeout(
               () => {
                 publicationRefused = true;
+                publicationCause ??= "probe-budget";
                 if (record) {
                   invalidateNativeComposeStorageCommandOwner(record.owner);
                 }
@@ -1006,13 +1049,14 @@ export async function runNativeComposeStorageDockerCommand(supplied: {
         ]);
         guard();
         return result;
-      } catch {
+      } catch (error) {
         publicationRefused = true;
+        publicationCause ??= storageCommandRefusal(error);
         if (record) {
           invalidateNativeComposeStorageCommandOwner(record.owner);
         }
         cancellation.abort();
-        return refuse();
+        return refuseCommand(publicationCause);
       } finally {
         if (timer !== undefined) {
           clearTimeout(timer);
@@ -1156,8 +1200,9 @@ export async function runNativeComposeStorageDockerCommand(supplied: {
             if (!event.resumeSuspended?.()) {
               return refuse();
             }
-          } catch {
+          } catch (error) {
             publicationRefused = true;
+            publicationCause ??= storageCommandRefusal(error);
             invalidateNativeComposeStorageCommandOwner(record.owner);
             cancellation.abort();
           }
@@ -1173,7 +1218,10 @@ export async function runNativeComposeStorageDockerCommand(supplied: {
     await groupAbsent(pid, record ? boundaryDeadline : undefined);
     settled = true;
     if (record) {
-      if (publicationRefused || !armed || !exit) {
+      if (publicationRefused) {
+        return refuseCommand(publicationCause);
+      }
+      if (!(armed && exit)) {
         return refuse();
       }
       if (
@@ -1208,13 +1256,13 @@ export async function runNativeComposeStorageDockerCommand(supplied: {
         !(exit as RunExitEvent).cancelled
       )
     ) {
-      return refuse();
+      return refuseCommand(exitRefusal(exit));
     }
     return { exitCode: code, stdout: io.read().stdout };
   } catch (error) {
     if (opts.originalCommand) {
       invalidateNativeComposeStorageCommandOwner(opts.originalCommand.owner);
-      return refuse();
+      return refuseCommand(storageCommandRefusal(error));
     }
     throw error;
   } finally {
@@ -1334,7 +1382,7 @@ export async function createNativeComposeDockerStorageXattrCarrier(
     } catch (error) {
       retainNativeComposeEffectRefusal(error, {
         stage,
-        reason: nativeComposeEffectReason(error),
+        reason: nativeComposeStorageCarrierReason(error),
       });
       throw error;
     }
@@ -1375,7 +1423,7 @@ export async function createNativeComposeDockerStorageXattrCarrier(
       } catch (error) {
         retainNativeComposeEffectRefusal(error, {
           stage: "storage-target",
-          reason: nativeComposeEffectReason(error),
+          reason: nativeComposeStorageCarrierReason(error),
         });
         throw error;
       }
@@ -1535,7 +1583,7 @@ export async function createNativeComposeDockerStorageXattrCarrier(
     } catch (error) {
       retainNativeComposeEffectRefusal(error, {
         stage,
-        reason: nativeComposeEffectReason(error),
+        reason: nativeComposeStorageCarrierReason(error),
       });
       throw error;
     }
@@ -1689,7 +1737,7 @@ export async function createNativeComposeDockerStorageXattrCarrier(
           } catch (error) {
             retainNativeComposeEffectRefusal(error, {
               stage: "storage-helper-policy",
-              reason: nativeComposeEffectReason(error),
+              reason: nativeComposeStorageCarrierReason(error),
             });
             throw error;
           }
@@ -2026,7 +2074,7 @@ export async function createNativeComposeDockerStorageXattrCarrier(
     } catch (error) {
       retainNativeComposeEffectRefusal(error, {
         stage,
-        reason: nativeComposeEffectReason(error),
+        reason: nativeComposeStorageCarrierReason(error),
       });
       throw error;
     }

@@ -31,7 +31,10 @@ import {
   publishNativeComposeStorageCommandChild,
   settleNativeComposeStorageCommand,
 } from "../src/lib/native-compose-storage-command-record.ts";
-import { runNativeComposeStorageDockerCommand } from "../src/lib/native-compose-storage-witness-docker.ts";
+import {
+  nativeComposeStorageCarrierReason,
+  runNativeComposeStorageDockerCommand,
+} from "../src/lib/native-compose-storage-witness-docker.ts";
 import * as shell from "../src/lib/shell.ts";
 
 const hash = "a".repeat(64);
@@ -389,7 +392,8 @@ test.each(["timedOut", "cancelled"] as const)(
 async function transport(
   f: Awaited<ReturnType<typeof fixture>>,
   marker: string,
-  timeoutMs = 3000
+  timeoutMs = 3000,
+  script = 'printf complete > "$1"; printf value'
 ) {
   try {
     return await runNativeComposeStorageDockerCommand({
@@ -398,13 +402,7 @@ async function transport(
         deadline: Date.now() + timeoutMs,
       },
       files: f.files,
-      args: [
-        "/bin/sh",
-        "-c",
-        'printf complete > "$1"; printf value',
-        "owned",
-        marker,
-      ],
+      args: ["/bin/sh", "-c", script, "owned", marker],
       timeoutMs,
       beforeSpawn: () => {},
       assertAdmitted: async () => {},
@@ -520,7 +518,11 @@ test(
     const f = await fixture(),
       marker = join(f.root, "effect");
     f.failChild();
-    await expect(transport(f, marker)).rejects.toThrow("values omitted");
+    const caught = await transport(f, marker).catch((error: unknown) => error);
+    expect(caught).toBeInstanceOf(Error);
+    expect((caught as Error).message).toContain("values omitted");
+    // An ordinary refusal keeps no command cause.
+    expect(nativeComposeStorageCarrierReason(caught)).toBe("unclassified");
     expect(existsSync(marker)).toBe(false);
     expect((await f.read()).commands[0]?.child?.pid).toBeGreaterThan(1);
     expect((await f.read()).commands[0]?.settlement).toBeNull();
@@ -564,6 +566,62 @@ test(
         observer.mockRestore();
       }
     }
+  }),
+  30_000
+);
+test(
+  "a settlement that outlasts its post-exit budget refuses as probe-budget and stays unsettled",
+  ownedCase(async () => {
+    const f = await fixture(),
+      marker = join(f.root, "effect"),
+      sync = f.directory.file.sync.bind(f.directory.file);
+    // Only syncs after the target ran are slow: arm and child publication are not.
+    const observer = spyOn(f.directory.file, "sync").mockImplementation(
+      async () => {
+        if (existsSync(marker)) {
+          await Bun.sleep(3500);
+        }
+        await sync();
+      }
+    );
+    try {
+      const caught = await transport(f, marker).catch(
+        (error: unknown) => error
+      );
+      expect(caught).toBeInstanceOf(Error);
+      expect((caught as Error).message).toContain("values omitted");
+      expect(nativeComposeStorageCarrierReason(caught)).toBe("probe-budget");
+      expect(await readFile(marker, "utf8")).toBe("complete");
+      expect((await f.read()).commands[0]?.settlement).toBeNull();
+      expect(nativeComposeStorageCommandOwnerConfirmed(f.owner)).toBe(false);
+      retained.add(f.root);
+    } finally {
+      if (confirmedTestLifetime()) {
+        observer.mockRestore();
+      }
+    }
+  }),
+  30_000
+);
+test(
+  "a recorded child that outlives its command budget refuses as probe-timeout",
+  ownedCase(async () => {
+    const f = await fixture(),
+      marker = join(f.root, "effect");
+    const caught = await transport(
+      f,
+      marker,
+      1500,
+      'printf started > "$1"; exec sleep 10'
+    ).catch((error: unknown) => error);
+    expect(caught).toBeInstanceOf(Error);
+    expect((caught as Error).message).toContain("values omitted");
+    expect(nativeComposeStorageCarrierReason(caught)).toBe("probe-timeout");
+    expect(await readFile(marker, "utf8")).toBe("started");
+    expect((await f.read()).commands[0]?.settlement).toMatchObject({
+      timedOut: true,
+      groupAbsent: true,
+    });
   }),
   30_000
 );

@@ -300,3 +300,115 @@ export function readmeServiceIssues(opts: {
   }
   return issues;
 }
+
+/** Keys per scope in one parsed `hack.env.*.yaml` document. */
+function envKeysByScope(document: unknown): Map<string, Set<string>> {
+  const scopes = new Map<string, Set<string>>();
+  const values =
+    isRecord(document) && isRecord(document.values) ? document.values : {};
+  for (const [scope, entries] of Object.entries(values)) {
+    scopes.set(scope, new Set(isRecord(entries) ? Object.keys(entries) : []));
+  }
+  return scopes;
+}
+
+/** Issues of one overlay document plus its sorted `scope.KEY` signature. */
+function overlayDocumentIssues(opts: {
+  readonly name: string;
+  readonly document: unknown;
+  readonly sharedKeys: ReadonlySet<string>;
+}): { readonly issues: string[]; readonly signature: string } {
+  const { name, document } = opts;
+  const issues: string[] = [];
+  if (!isRecord(document) || document.environment !== name) {
+    issues.push(`${name}: environment-mismatch`);
+  }
+  const values =
+    isRecord(document) && isRecord(document.values) ? document.values : {};
+  const keys: string[] = [];
+  for (const [scope, entries] of Object.entries(values)) {
+    const scoped = isRecord(entries) ? entries : {};
+    for (const [key, value] of Object.entries(scoped)) {
+      keys.push(`${scope}.${key}`);
+      if (opts.sharedKeys.has(key)) {
+        issues.push(`${name}: overrides-shared-key`);
+      }
+      if (typeof value !== "string") {
+        issues.push(`${name}: non-plaintext-capability`);
+      }
+    }
+  }
+  return { issues, signature: keys.sort().join(",") };
+}
+
+/**
+ * HACK-P07 static contract for capability overlays: the base env file holds
+ * the shared topology values, and every overlay names its own environment,
+ * holds plaintext capability values only, declares the same keys as every
+ * other overlay (so switching never leaves a stale capability), and never
+ * redefines a base key (an overlay must not change the shared topology).
+ * Findings are closed codes plus the overlay name the fixture authored.
+ */
+export function overlayIssues(opts: {
+  readonly base: unknown;
+  readonly overlays: Readonly<Record<string, unknown>>;
+}): string[] {
+  const issues: string[] = [];
+  const sharedKeys = new Set(
+    [...envKeysByScope(opts.base).values()].flatMap((keys) => [...keys])
+  );
+  if (sharedKeys.size === 0) {
+    issues.push("base-without-shared-values");
+  }
+  const signatures = new Set<string>();
+  const overlays = Object.entries(opts.overlays);
+  for (const [name, document] of overlays) {
+    const checked = overlayDocumentIssues({ name, document, sharedKeys });
+    issues.push(...checked.issues);
+    signatures.add(checked.signature);
+  }
+  if (overlays.length < 2) {
+    issues.push("fewer-than-two-overlays");
+  }
+  if (signatures.size > 1) {
+    issues.push("overlay-key-sets-differ");
+  }
+  return [...new Set(issues)];
+}
+
+/**
+ * Check that every card with an example names a registered Docker-tier E2E
+ * scenario with a checked-in duration hint, and that no card without an
+ * example claims one. Findings are closed codes plus the card id.
+ */
+export function e2eRegistrationIssues(opts: {
+  readonly cards: readonly PatternCard[];
+  readonly scenarios: readonly {
+    readonly name: string;
+    readonly tier: string;
+  }[];
+  readonly hints: Readonly<Record<string, number>>;
+}): string[] {
+  const issues: string[] = [];
+  for (const card of opts.cards) {
+    if (card.example === null) {
+      if (card.e2eScenario !== null) {
+        issues.push(`${card.id}: scenario-without-example`);
+      }
+      continue;
+    }
+    const name = card.e2eScenario;
+    const scenario = opts.scenarios.find((entry) => entry.name === name);
+    if (name === null || scenario === undefined) {
+      issues.push(`${card.id}: scenario-not-registered`);
+      continue;
+    }
+    if (scenario.tier !== "docker") {
+      issues.push(`${card.id}: scenario-not-docker-tier`);
+    }
+    if (!Object.hasOwn(opts.hints, name)) {
+      issues.push(`${card.id}: scenario-without-duration-hint`);
+    }
+  }
+  return issues;
+}

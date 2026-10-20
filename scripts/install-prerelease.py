@@ -43,12 +43,21 @@ MCP_FILES = {"adapter": "hack-mcp-adapter", "owner": "hack-mcp-owner",
              "backend": "hack-mcp-backend"}
 MCP_MEMBER = re.compile(r"mcp/([0-9a-f]{64})/(manifest\.json|hack-mcp-adapter|hack-mcp-owner|hack-mcp-backend)\Z")
 MAX_ARCHIVE = 512 * 1024 * 1024
+# Hard ceiling on tar members read before the payload inventory is checked. Every
+# member must still be a distinct allowlisted name with a complete group, so this
+# only bounds header parsing, chiefly for the MCP group whose directory is a digest
+# wildcard. The largest reviewed inventory is 17 members (seven core files plus
+# SHA256SUMS, three compiler, two storage, four MCP). The ceiling is a fixed number
+# rather than that sum, so a reviewed addition needs only its allowlist entry, mode
+# and group rule; a hostile archive still refuses after at most 64 headers.
+MAX_ARCHIVE_MEMBERS = 64
 METADATA_KEYS = {"schema", "version", "tag", "source_revision", "platform"}
 REPOSITORY = "hack-dance/hack"
 DOWNLOAD_HOSTS = {"api.github.com", "github.com", "release-assets.githubusercontent.com",
                   "objects.githubusercontent.com"}
 # Reviewed flat-layout, shared-MCP, compiler, batched-signature, verified-launcher and
-# storage-witness managers (the last, e2e2bcba..., shipped with 5.0.0-next.3 through next.5).
+# storage-witness managers. e2e2bcba is the manager the 5.0.0-next.3, next.4 and
+# next.5 tags shipped (fixture prerelease-manager-storage-v5.py).
 # Keep this an explicit allowlist; a matching user-written receipt is not provenance.
 MANAGER_PREDECESSORS = frozenset({
     "b459ffc4f227482119b48e357c91e4607aa4f7d1f88c7ccf5b7d684f66f2c0cd",
@@ -353,8 +362,7 @@ def extract_archive(archive, checksum, destination, version, release_metadata=No
             seen = set()
             total = 0
             for entry in source:
-                require(len(entries) < len(BUNDLE_FILES) + len(COMPILER_PAYLOAD)
-                        + len(STORAGE_TOOL_PAYLOAD) + 4, "Incomplete or duplicate archive entries.")
+                require(len(entries) < MAX_ARCHIVE_MEMBERS, "Too many archive entries.")
                 require((entry.name in BUNDLE_FILES | COMPILER_PAYLOAD | STORAGE_TOOL_PAYLOAD
                          or MCP_MEMBER.fullmatch(entry.name)) and entry.name not in seen,
                         "Foreign, duplicate or traversing archive entry.")

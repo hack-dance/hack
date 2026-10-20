@@ -81,6 +81,34 @@ def with_current_payload(entries):
     return with_storage_tool(with_mcp(with_compiler(entries)))
 
 
+# A hypothetical reviewed top-level bundle file. Tests patch it into the installer's
+# allowlist to stand in for the next reviewed installer that ships a new file.
+EXTENSION = "hack-reviewed-extension.json"
+EXTENSION_BYTES = b'{"reviewed": true}\n'
+
+
+def with_extended_payload(entries):
+    """The current 17-member layout plus one reviewed addition: 18 archive members."""
+    payload = {name: value for name, value, _ in entries if name != "SHA256SUMS"}
+    payload[EXTENSION] = EXTENSION_BYTES
+    # with_current_payload recomputes SHA256SUMS over every member, including this one.
+    return with_current_payload([(name, value, tarfile.REGTYPE) for name, value in payload.items()])
+
+
+def reviewed_extension():
+    """Admit EXTENSION as a required core file, as a later reviewed installer would."""
+    stack = contextlib.ExitStack()
+    stack.enter_context(mock.patch.object(installer, "PAYLOAD", installer.PAYLOAD | {EXTENSION}))
+    stack.enter_context(mock.patch.object(installer, "BUNDLE_FILES",
+                                          installer.BUNDLE_FILES | {EXTENSION}))
+    return stack
+
+
+def archive_members(archive):
+    with tarfile.open(archive, "r:gz") as source:
+        return [entry.name for entry in source]
+
+
 class OfficialResponse:
     """One HTTP response read through the installer's real download loop.
 
@@ -743,6 +771,152 @@ class ChannelTests(unittest.TestCase):
                     for home in ("native-home", "cli-home"):
                         self.assertEqual((self.channel.root / "versions" / version / home / "marker").read_text(),
                                          version + home)
+
+    def test_member_ceiling_is_fixed_above_the_largest_reviewed_inventory(self):
+        archive, _ = self.archive(mutate=with_current_payload)
+        reviewed = len(installer.BUNDLE_FILES | installer.COMPILER_PAYLOAD
+                       | installer.STORAGE_TOOL_PAYLOAD) + len(installer.MCP_FILES) + 1
+        self.assertEqual(len(archive_members(archive)), reviewed)
+        self.assertGreater(installer.MAX_ARCHIVE_MEMBERS, reviewed)
+        with reviewed_extension():
+            # The bound no longer follows the allowlist sizes; growing them leaves it unchanged.
+            self.assertEqual(installer.MAX_ARCHIVE_MEMBERS, 64)
+
+    def test_reviewed_addition_beyond_seventeen_members_installs_and_rolls_back(self):
+        with reviewed_extension():
+            for number in (1, 2):
+                version = "5.0.0-next." + str(number)
+                archive, checksum = self.archive(version, with_extended_payload)
+                self.assertEqual(len(archive_members(archive)), 18)
+                with self.channel.lock():
+                    self.channel.install(version, archive, checksum, number == 2)
+                bundle = self.channel.root / "versions" / version / "bundle"
+                _, manifest = installer.verify_bundle(bundle, version)
+                self.assertEqual(len(manifest), 17)
+                self.assertIn(EXTENSION, manifest)
+                self.assertEqual((bundle / EXTENSION).read_bytes(), EXTENSION_BYTES)
+                self.assertEqual((bundle / EXTENSION).stat().st_mode & 0o777, 0o600)
+                self.assertEqual((bundle / installer.STORAGE_TOOL).stat().st_mode & 0o777, 0o500)
+            for prior in ("5.0.0-next.1", "5.0.0-next.2"):
+                with self.channel.lock():
+                    self.channel.select(prior)
+                self.assertEqual(self.selection()["selected"], prior)
+
+    def test_member_ceiling_refuses_excess_headers_before_inventory(self):
+        # MCP members are the only digest-wildcard names, so distinct identities are
+        # allowlisted one by one. The ceiling bounds them; the inventory refuses below it.
+        def mcp_identities(count):
+            return lambda entries: [*entries, *(("mcp/%064x/manifest.json" % index, b"{}\n",
+                                                 tarfile.REGTYPE) for index in range(count))]
+        flat = 8
+        self.rejects_install(mcp_identities(installer.MAX_ARCHIVE_MEMBERS - flat + 1),
+                             r"\AToo many archive entries\.\Z")
+        self.rejects_install(mcp_identities(installer.MAX_ARCHIVE_MEMBERS - flat),
+                             "one MCP bundle identity")
+
+    def test_larger_reviewed_inventory_keeps_member_refusals(self):
+        with reviewed_extension():
+            archive, checksum = self.archive(mutate=with_extended_payload)
+            with self.channel.lock():
+                self.channel.install("5.0.0-next.1", archive, checksum)
+
+            def extended(change):
+                return lambda entries: change(with_extended_payload(entries))
+
+            def replace(name=None, value=None, kind=None):
+                return extended(lambda entries: [
+                    (name if name and key == EXTENSION else key,
+                     value if value is not None and key == EXTENSION else data,
+                     kind if kind is not None and key == EXTENSION else entry_kind)
+                    for key, data, entry_kind in entries])
+
+            foreign = "Foreign, duplicate or traversing archive entry"
+            cases = [
+                (extended(lambda entries: [*entries, next(entry for entry in entries
+                                                          if entry[0] == EXTENSION)]), foreign),
+                (replace(name="../" + EXTENSION), foreign),
+                (replace(name="/tmp/" + EXTENSION), foreign),
+                (replace(name="bundle/" + EXTENSION), foreign),
+                (replace(name="hack-unreviewed-extension.json"), foreign),
+                (replace(kind=tarfile.SYMTYPE), "regular archive files"),
+                (replace(kind=tarfile.LNKTYPE), "regular archive files"),
+                (replace(value=b'{"reviewed": false}\n'), "checksum mismatch"),
+                (extended(lambda entries: [entry for entry in entries if entry[0] != EXTENSION]),
+                 "Incomplete candidate bundle"),
+            ]
+            for mutate, message in cases:
+                with self.subTest(message=message, mutate=mutate):
+                    self.rejects_install(mutate, message)
+            limit = 4096
+            with mock.patch.object(installer, "MAX_ARCHIVE", limit):
+                for mutate, message in (
+                        (replace(value=bytes(limit + 1)), "Only bounded regular archive files"),
+                        (extended(lambda entries: [
+                            (key, bytes(limit // 2) if key in (EXTENSION, "hack-cli") else value, kind)
+                            for key, value, kind in entries]), "Oversized archive")):
+                    with self.subTest(message=message):
+                        archive, _ = self.archive("5.0.0-next.2", mutate)
+                        self.assertLessEqual(archive.stat().st_size, limit)
+                        self.rejects_install(mutate, message)
+
+    def test_released_storage_manager_upgrades_before_accepting_new_installer_payloads(self):
+        # 5.0.0-next.3, next.4 and next.5 all shipped this manager byte for byte.
+        source = SOURCE.parent.parent / "tests/fixtures/prerelease-manager-storage-v5.py"
+        predecessor = "e2e2bcbacf58b21d1086047c94727e5e814776384439700adcf5aabe5c49c2fa"
+        self.assertEqual(installer.digest(source), predecessor)
+        self.assertIn(predecessor, installer.MANAGER_PREDECESSORS)
+        spec = importlib.util.spec_from_file_location("storage_prerelease_manager", source)
+        previous = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(previous)
+        self.channel = previous.Channel(self.root / "storage-v5-channel")
+        self.channel.initialize()
+        self.install()
+        for version in ("5.0.0-next.4", "5.0.0-next.5"):
+            archive, checksum = self.archive(version, with_current_payload)
+            with self.channel.lock():
+                self.channel.install(version, archive, checksum, True)
+        for version in ("5.0.0-next.1", "5.0.0-next.4", "5.0.0-next.5"):
+            for home in ("native-home", "cli-home"):
+                (self.channel.root / "versions" / version / home / "marker").write_text(version + home)
+        before = self.retained_snapshot()
+        # The retained manager filled its derived 17-member bound and knows no new name,
+        # so it refuses a larger layout instead of selecting files it cannot verify.
+        larger, larger_checksum = self.archive("5.0.0-next.6", with_extended_payload)
+        self.assertEqual(len(archive_members(larger)), 18)
+        with self.channel.lock():
+            with self.assertRaisesRegex(previous.Refusal, "archive entr"):
+                self.channel.install("5.0.0-next.6", larger, larger_checksum, True)
+        self.assertEqual(self.retained_snapshot(), before)
+        archive, checksum = self.archive("5.0.0-next.6", with_current_payload)
+        current = installer.Channel(self.channel.root)
+        with current.lock():
+            with self.assertRaisesRegex(installer.Refusal, "upgrade-manager"):
+                current.install("5.0.0-next.6", archive, checksum, True)
+        self.assertEqual(self.retained_snapshot(), before)
+        self.channel = self.upgrade_manager()
+        self.assertEqual(self.retained_snapshot(), before)
+        self.assertEqual((self.channel.root / "manager.py").read_bytes(), SOURCE.read_bytes())
+        with self.channel.lock():
+            self.assertEqual(self.channel.state["selected"], "5.0.0-next.5")
+            self.channel.install("5.0.0-next.6", archive, checksum, True)
+        for prior in ("5.0.0-next.5", "5.0.0-next.1", "5.0.0-next.4", "5.0.0-next.6"):
+            with self.channel.lock():
+                self.channel.select(prior)
+            self.assertEqual(self.selection()["selected"], prior)
+        bundle = self.channel.root / "versions/5.0.0-next.6/bundle"
+        child = mock.Mock()
+        child.wait.return_value = 0
+        with self.channel.lock(shared=True), \
+                mock.patch.object(installer.subprocess, "Popen", return_value=child) as spawn:
+            self.assertEqual(self.channel.run(["--version"]), 0)
+        self.assertEqual(Path(spawn.call_args.args[0][0]), bundle / "hack-v5")
+        for version in ("5.0.0-next.1", "5.0.0-next.4", "5.0.0-next.5"):
+            for home in ("native-home", "cli-home"):
+                self.assertEqual((self.channel.root / "versions" / version / home / "marker").read_text(),
+                                 version + home)
+        # Repeating the upgrade with the installed manager is a no-op.
+        self.upgrade_manager()
+        self.assertEqual((self.channel.root / "manager.py").read_bytes(), SOURCE.read_bytes())
 
     def test_bundle_verification_hashes_each_payload_once_without_cross_call_cache(self):
         archive, checksum = self.archive(mutate=with_current_payload)

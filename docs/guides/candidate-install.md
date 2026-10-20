@@ -128,8 +128,9 @@ from the retained manager, before publishing a version or changing selection. Th
 older manager itself refuses the newer layout as foreign files.
 
 To update a reviewed predecessor manager, including the managers shipped with
-`5.0.0-next.1` and `5.0.0-next.2`, review the newer installer from the tag you are
-upgrading to, then run that saved file explicitly. For example, before upgrading a
+`5.0.0-next.1`, `5.0.0-next.2` and `5.0.0-next.3` through `5.0.0-next.5`, review
+the newer installer from the tag you are upgrading to, then run that saved file
+explicitly. For example, before upgrading a
 `5.0.0-next.2` channel to `5.0.0-next.3`:
 
 ```sh

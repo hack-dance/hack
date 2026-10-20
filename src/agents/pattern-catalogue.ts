@@ -13,6 +13,9 @@
  * - A card's `example` directory exists and is statically validated by
  *   tests/pattern-examples.test.ts (config schema, Compose contract, README
  *   commands); every directory under `examples/patterns/` belongs to one card.
+ * - A card with an `example` names the Docker-tier E2E scenario that starts
+ *   that fixture against a real engine; the scenario is registered for the
+ *   hosted docker-e2e shards with a duration hint.
  *
  * Consumer names stay in the Linear issues; the shipped reference records
  * only how many consumers a card generalizes from.
@@ -65,6 +68,13 @@ export type PatternCard = {
    * plugin ships without the repository's `examples/` tree.
    */
   readonly example: string | null;
+  /**
+   * Name of the Docker-tier scenario in `tests/e2e/run.ts` that runs `example`
+   * against a real engine in the hosted docker-e2e job, or `null` when the
+   * card has no example. Contributor reference only; not rendered. A
+   * registered scenario is a maintained gate, not a recorded pass.
+   */
+  readonly e2eScenario: string | null;
 };
 
 /** The complete pattern register, in id order. */
@@ -93,9 +103,10 @@ export const PATTERN_CATALOGUE: readonly PatternCard[] = [
       "A populated cache directory is not a completion marker. Concurrent writers to one volume and failed publication need ownership and recovery; consumers must see a complete old or complete new artifact.",
     domainOwner: "WU07/WU11",
     missingContract:
-      "locked-v1 covers one immutable payload per volume. Atomic publication of worktree-specific generated artifacts, env-dependent installers, and two-worktree or interrupted-writer qualification remain open.",
+      "locked-v1 covers one immutable payload per volume. Atomic publication of worktree-specific generated artifacts across concurrent writers, env-dependent installers, and automatic reclamation of failed generations remain open.",
     provenance: { consumers: 4, source: "HACK-P01 research register" },
     example: "examples/patterns/p01-dependency-bootstrap",
+    e2eScenario: "pattern-p01-dependency-bootstrap",
   },
   {
     id: "HACK-P02",
@@ -120,6 +131,7 @@ export const PATTERN_CATALOGUE: readonly PatternCard[] = [
       "Cross-worktree cache reuse with bounded eviction, a source receipt for linked worktrees, and owned cache accounting remain open.",
     provenance: { consumers: 4, source: "HACK-P02 research register" },
     example: "examples/patterns/p02-portable-toolchain",
+    e2eScenario: "pattern-p02-portable-toolchain",
   },
   {
     id: "HACK-P03",
@@ -147,6 +159,7 @@ export const PATTERN_CATALOGUE: readonly PatternCard[] = [
       "Hack has no credential availability, expiry or scope check and no machine-identity path for headless runners; the WU27 env contract owns both.",
     provenance: { consumers: 3, source: "HACK-P03 research register" },
     example: null,
+    e2eScenario: null,
   },
   {
     id: "HACK-P04",
@@ -171,6 +184,7 @@ export const PATTERN_CATALOGUE: readonly PatternCard[] = [
       "Today's adoption is port-only. Health- and upstream-checked adoption with a recorded adopted-versus-owned state is the WU29 lifecycle ownership contract.",
     provenance: { consumers: 1, source: "HACK-P04 research register" },
     example: null,
+    e2eScenario: null,
   },
   {
     id: "HACK-P05",
@@ -194,6 +208,7 @@ export const PATTERN_CATALOGUE: readonly PatternCard[] = [
       "Hack has no branch-scoped external claim/release contract with bounded retry, stop-during-retry and PID-reuse safety.",
     provenance: { consumers: 1, source: "HACK-P05 research register" },
     example: null,
+    e2eScenario: null,
   },
   {
     id: "HACK-P06",
@@ -218,6 +233,7 @@ export const PATTERN_CATALOGUE: readonly PatternCard[] = [
       "Hack has no opt-in tunnel lifecycle with external-route readiness and owned-child shutdown.",
     provenance: { consumers: 1, source: "HACK-P06 research register" },
     example: null,
+    e2eScenario: null,
   },
   {
     id: "HACK-P07",
@@ -245,7 +261,8 @@ export const PATTERN_CATALOGUE: readonly PatternCard[] = [
     missingContract:
       "Hack has env overlays and value-free inspection but no laptop/headless capability contract or headless machine identity; WU27 and WU30 own them.",
     provenance: { consumers: 1, source: "HACK-P07 research register" },
-    example: null,
+    example: "examples/patterns/p07-capability-overlays",
+    e2eScenario: "pattern-p07-capability-overlays",
   },
   {
     id: "HACK-P08",
@@ -269,6 +286,7 @@ export const PATTERN_CATALOGUE: readonly PatternCard[] = [
       "Hack has no semantic no-op detection or atomic machine-local import contract for env hydration.",
     provenance: { consumers: 1, source: "HACK-P08 research register" },
     example: null,
+    e2eScenario: null,
   },
   {
     id: "HACK-P09",
@@ -295,6 +313,7 @@ export const PATTERN_CATALOGUE: readonly PatternCard[] = [
       "Generation/run ownership, active references, holds and interrupted-reclamation recovery are not implemented for run workspaces.",
     provenance: { consumers: 1, source: "HACK-P09 research register" },
     example: null,
+    e2eScenario: null,
   },
   {
     id: "HACK-P10",
@@ -322,6 +341,7 @@ export const PATTERN_CATALOGUE: readonly PatternCard[] = [
       "Hack does not yet distinguish L1, L2 and cold misses, detect a tampered cache, or emit stage timing and provenance receipts.",
     provenance: { consumers: 3, source: "HACK-P10 research register" },
     example: null,
+    e2eScenario: null,
   },
   {
     id: "HACK-P11",
@@ -351,6 +371,7 @@ export const PATTERN_CATALOGUE: readonly PatternCard[] = [
       "A guidance freeze during execution and a typed terminal result for resumed background operations remain open.",
     provenance: { consumers: 2, source: "HACK-P11 research register" },
     example: null,
+    e2eScenario: null,
   },
   {
     id: "HACK-P12",
@@ -374,6 +395,7 @@ export const PATTERN_CATALOGUE: readonly PatternCard[] = [
       "Hack has no multi-lane admission, lease or durable run-provenance contract.",
     provenance: { consumers: 2, source: "HACK-P12 research register" },
     example: null,
+    e2eScenario: null,
   },
 ];
 

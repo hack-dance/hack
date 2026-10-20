@@ -1,5 +1,6 @@
 //! Anonymous, digest-pinned Docker Hub acquisition. No daemon, credential store or VM effects.
 use super::image_load;
+use super::image_reference::{ImageReference, NamedReference, normalize};
 use crate::CandidateError;
 use reqwest::{Url, blocking::Client, header::ACCEPT, redirect::Policy};
 use serde::{Deserialize, Serialize};
@@ -30,27 +31,25 @@ fn valid_digest(value: &str) -> bool {
                 .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
     })
 }
-pub(super) fn reference(value: &str) -> Result<(&str, &str), CandidateError> {
-    let value = value.strip_prefix("docker.io/").unwrap_or(value);
-    let (name, hash) = value
-        .split_once('@')
-        .ok_or_else(|| error("A public Docker Hub reference pinned with @sha256 is required."))?;
-    let repo = name.split_once(':').map_or(name, |(repo, _)| repo);
-    if !valid_digest(hash)
-        || repo.len() > 200
-        || repo.split('/').count() != 2
-        || repo.split('/').any(|s| {
-            s.is_empty()
-                || !s
-                    .bytes()
-                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"._-".contains(&b))
-        })
-    {
-        return Err(error(
-            "Only namespace/repository@sha256 Docker Hub references are supported.",
-        ));
+/// Normalize to a Docker Hub reference; other registries and image IDs refuse.
+fn docker_hub(value: &str) -> Result<NamedReference, CandidateError> {
+    match normalize(value) {
+        Ok(ImageReference::Named(named)) if named.docker_hub_repository().is_some() => Ok(named),
+        _ => Err(error(
+            "Only public Docker Hub [namespace/]repository[:tag][@sha256] references are supported.",
+        )),
     }
-    Ok((repo, hash))
+}
+/// Normalized Docker Hub `namespace/repository` and its required sha256 pin.
+/// Docker shorthand such as `alpine@sha256:...` expands to `library/alpine`.
+pub(super) fn reference(value: &str) -> Result<(String, String), CandidateError> {
+    let pinned = || error("A public Docker Hub reference pinned with @sha256 is required.");
+    if !value.contains('@') {
+        return Err(pinned());
+    }
+    let named = docker_hub(value)?;
+    let pin = named.digest.ok_or_else(pinned)?;
+    Ok((named.path, pin))
 }
 #[derive(Clone, Deserialize)]
 struct Descriptor {
@@ -278,41 +277,49 @@ fn authenticated_fetch(repo: &str) -> Result<Fetch, CandidateError> {
     Ok(fetch)
 }
 
-pub(super) fn tagged_reference(value: &str) -> Result<(&str, &str), CandidateError> {
-    let value = value.strip_prefix("docker.io/").unwrap_or(value);
+/// Normalized Docker Hub `namespace/repository` and tag for mutable resolution.
+/// Shorthand expands as Docker does: `alpine` is `library/alpine:latest`.
+pub(super) fn tagged_reference(value: &str) -> Result<(String, String), CandidateError> {
     if value.contains('@') {
         return Err(error(
             "Tag resolution requires a repository and optional tag, not a digest.",
         ));
     }
-    let (repo, tag) = value.split_once(':').unwrap_or((value, "latest"));
-    let tag_valid = !tag.is_empty()
-        && tag.len() <= 128
-        && tag.bytes().enumerate().all(|(i, b)| {
-            b.is_ascii_alphanumeric() || b == b'_' || (i > 0 && matches!(b, b'.' | b'-'))
-        });
-    let repo_valid = repo.len() <= 200
-        && repo.split('/').count() == 2
-        && repo.split('/').all(|part| {
-            !part.is_empty()
-                && part
-                    .bytes()
-                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"._-".contains(&b))
-                && part
-                    .bytes()
-                    .next()
-                    .is_some_and(|b| b.is_ascii_alphanumeric())
-                && part
-                    .bytes()
-                    .last()
-                    .is_some_and(|b| b.is_ascii_alphanumeric())
-        });
-    if !tag_valid || !repo_valid {
-        return Err(error(
-            "Only public Docker Hub namespace/repository[:tag] references are supported.",
-        ));
+    let named = docker_hub(value)?;
+    let tag = named.tag.unwrap_or_else(|| "latest".into());
+    Ok((named.path, tag))
+}
+
+/// The admitted form of one authored image reference.
+#[derive(Debug, Serialize)]
+pub struct AdmittedImage {
+    /// Canonical normalized reference, for example `docker.io/library/alpine:3.21`.
+    pub reference: String,
+    /// `image_id` for an already-local content ID, `docker_hub` for an acquirable reference.
+    pub kind: &'static str,
+}
+
+/// Pure admission for one authored image reference. It normalizes Docker shorthand
+/// and refuses anything the provider could not later acquire. No network, credential,
+/// candidate state or runtime effect occurs, so a caller can refuse before any VM or
+/// provider starts. Acquisition re-normalizes with the same function.
+pub fn admit(value: &str) -> Result<AdmittedImage, CandidateError> {
+    match normalize(value) {
+        Ok(ImageReference::ImageId(id)) => Ok(AdmittedImage {
+            reference: id,
+            kind: "image_id",
+        }),
+        Ok(ImageReference::Named(named)) if named.docker_hub_repository().is_some() => {
+            Ok(AdmittedImage {
+                reference: named.canonical(),
+                kind: "docker_hub",
+            })
+        }
+        Ok(ImageReference::Named(_)) => Err(error(
+            "Only public Docker Hub references or sha256 image IDs are supported; other registries are not acquired.",
+        )),
+        Err(reason) => Err(error(reason.message())),
     }
-    Ok((repo, tag))
 }
 
 #[derive(Debug, Serialize)]
@@ -329,6 +336,7 @@ pub struct ResolvedImage {
 /// fetch must use pinned_reference: reusing the original tag would discard this review.
 pub fn resolve(reference_text: &str) -> Result<ResolvedImage, CandidateError> {
     let (repo, tag) = tagged_reference(reference_text)?;
+    let (repo, tag) = (repo.as_str(), tag.as_str());
     let fetch = authenticated_fetch(repo)?;
     let url = Url::parse(&format!(
         "https://registry-1.docker.io/v2/{repo}/manifests/{tag}"
@@ -380,6 +388,7 @@ fn verify_platform(config_bytes: &[u8]) -> Result<(), CandidateError> {
 /// SIGINT/process cancellation stops acquisition; no child transfer outlives the caller.
 pub fn acquire(reference_text: &str, output: &Path) -> Result<AcquiredImage, CandidateError> {
     let (repo, pin) = reference(reference_text)?;
+    let (repo, pin) = (repo.as_str(), pin.as_str());
     if output.exists() {
         return Err(error("Image archive output already exists."));
     }
@@ -524,16 +533,30 @@ mod tests {
     }
     #[test]
     fn mutable_resolution_is_explicit_and_rejects_non_repository_inputs() {
+        let owned = |repo: &str, tag: &str| (repo.to_owned(), tag.to_owned());
         assert_eq!(
             tagged_reference("bitnami/redis").unwrap(),
-            ("bitnami/redis", "latest")
+            owned("bitnami/redis", "latest")
         );
         assert_eq!(
             tagged_reference("docker.io/chromedp/headless-shell:stable").unwrap(),
-            ("chromedp/headless-shell", "stable")
+            owned("chromedp/headless-shell", "stable")
+        );
+        // Ordinary Docker Hub shorthand expands to the official library namespace.
+        assert_eq!(
+            tagged_reference("alpine:3.21").unwrap(),
+            owned("library/alpine", "3.21")
+        );
+        assert_eq!(
+            tagged_reference("redis").unwrap(),
+            owned("library/redis", "latest")
         );
         for value in [
-            "redis",
+            "Redis",
+            "ghcr.io/a/b:tag",
+            "localhost:5000/a:tag",
+            "a/b/c:tag",
+            format!("sha256:{}", "e".repeat(64)).as_str(),
             "host.test/a/b:tag",
             "https://docker.io/a/b:tag",
             "a/b@sha256:bad",
@@ -583,10 +606,19 @@ mod tests {
         ] {
             assert_eq!(
                 reference(&format!("{prefix}@{pin}")).unwrap(),
-                ("imbios/bun-node", pin.as_str())
+                ("imbios/bun-node".to_owned(), pin.clone())
+            );
+        }
+        for prefix in ["alpine", "alpine:3.21", "docker.io/alpine"] {
+            assert_eq!(
+                reference(&format!("{prefix}@{pin}")).unwrap(),
+                ("library/alpine".to_owned(), pin.clone())
             );
         }
         for value in [
+            format!("ghcr.io/a/b@{pin}").as_str(),
+            format!("localhost:5000/a@{pin}").as_str(),
+            format!("Imbios/bun-node@{pin}").as_str(),
             "imbios/bun-node:latest",
             "https://docker.io/a/b",
             "user:secret@docker.io/a/b",
@@ -594,6 +626,52 @@ mod tests {
             "../bad@sha256:bad",
         ] {
             assert!(reference(value).is_err());
+        }
+    }
+    #[test]
+    fn admission_normalizes_hub_shorthand_and_refuses_unacquirable_references() {
+        let pin = format!("sha256:{}", "a".repeat(64));
+        let id = format!("sha256:{}", "e".repeat(64));
+        for (input, reference, kind) in [
+            (
+                "alpine",
+                "docker.io/library/alpine:latest".to_owned(),
+                "docker_hub",
+            ),
+            (
+                "alpine:3.21",
+                "docker.io/library/alpine:3.21".to_owned(),
+                "docker_hub",
+            ),
+            (
+                "user/img",
+                "docker.io/user/img:latest".to_owned(),
+                "docker_hub",
+            ),
+            (
+                &*format!("alpine@{pin}"),
+                format!("docker.io/library/alpine@{pin}"),
+                "docker_hub",
+            ),
+            (id.as_str(), id.clone(), "image_id"),
+        ] {
+            let admitted = admit(input).unwrap();
+            assert_eq!(
+                (admitted.reference.as_str(), admitted.kind),
+                (reference.as_str(), kind)
+            );
+        }
+        for input in [
+            "",
+            "PRIVATE_CANARY",
+            "ghcr.io/private-canary/app:v1",
+            "localhost:5000/private-canary",
+            "private-canary/nested/app",
+            "private-canary@sha256:bad",
+        ] {
+            let failure = admit(input).unwrap_err();
+            assert_eq!(failure.code, "registry_image");
+            assert!(!failure.message.to_ascii_lowercase().contains("canary"));
         }
     }
     #[test]

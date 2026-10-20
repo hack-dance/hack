@@ -44,5 +44,17 @@ the named cache volumes.
 
 A test-only source identity override must never reach release evidence.
 
+## How this example is checked
+
 The static checks in `tests/pattern-examples.test.ts` validate this config and
 its commands. They do not start containers.
+
+The Docker-tier scenario `pattern-p02-portable-toolchain` in `tests/e2e/` runs
+both commands above in the hosted `docker-e2e` job, from the primary checkout
+and from a linked worktree. In the linked worktree `/app/.git` is a pointer file
+whose target is not mounted, and the checks still pass because they do not need
+Git. A failing check exits non-zero, Hack returns the command's exact exit
+status, and an ordinary down keeps both instances' cache volumes. Each instance gets
+its own caches; cross-worktree reuse is still open. The copy uses the runner's
+cached `oven/bun:1.4.2-slim` digest instead of the pinned Alpine image, and
+never pulls.

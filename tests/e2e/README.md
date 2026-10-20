@@ -205,6 +205,45 @@ data survive that cleanup. The canary is then removed separately. PostgreSQL use
 fixture-only trust on this unexposed network. This qualifies the actual execution
 host, not Codex Cloud capabilities, browser access or native VM support elsewhere.
 
+## Pattern fixture qualification
+
+`pattern-p01-dependency-bootstrap` (HACK-1145), `pattern-p02-portable-toolchain`
+(HACK-1146) and `pattern-p07-capability-overlays` (HACK-1151) start copies of the
+checked-in `examples/patterns/` fixtures against a real engine. Each catalogue card
+names its scenario in `e2eScenario`, and `tests/pattern-examples.test.ts` fails when
+that scenario is not registered here as Docker-tier with a duration hint.
+`tests/e2e/scenarios/pattern-fixture.ts` makes the copy. It changes only the
+project name, the image (the cached `oven/bun:1.4.2-slim` repository digest with
+`pull_policy: never` instead of the pinned Alpine image), a declared platform
+(the daemon's architecture) and exact owner labels. Commands, mounts, dependency
+labels, gates and health checks stay as the fixture authored them.
+
+- P01 runs a cold and a warm `hack up --json`, a linked worktree, a `bun.lock`
+  change and an installer killed mid-run under a fresh generation. Every running
+  consumer must read a complete payload with a ready marker and never mount the
+  killed attempt's volume. That volume must stay populated but unready, a retry
+  of the same generation must be refused, and a generation bump must recover.
+- P02 runs the README's `hack run --profile toolchain` commands from the primary
+  checkout and a linked worktree, whose `/app/.git` is a pointer to an unmounted
+  `gitdir`. A failing check must exit non-zero, `sh -c "exit 7"` must return 7, and
+  a pipe filter must show how filtered output hides the failure. Ordinary
+  `hack down` must keep both instances' cache volumes.
+- P07 runs the laptop overlay in the primary checkout and the runner overlay in a
+  linked worktree. `hack env explain` must name each source file, including an
+  inherited primary-local override, without printing a value. Container metadata
+  must carry each overlay's keys, both APIs must reach `upstream`, `hack exec`
+  with the other overlay must be refused, and no browser opener on `PATH` or in
+  `BROWSER` may run.
+
+```sh
+HACK_E2E_CLI_BIN=./dist/hack HACK_E2E_DOCKER=1 HACK_E2E_REQUIRE_DOCKER=1 bun tests/e2e/run.ts --only=pattern-p01-dependency-bootstrap,pattern-p02-portable-toolchain,pattern-p07-capability-overlays
+```
+
+These are maintained gates for the hosted Linux runner, not recorded passes on
+other hosts. They do not qualify the pinned Alpine image, registry access,
+credential-dependent installers, cross-worktree toolchain cache reuse or a
+headless machine identity.
+
 ## Compose config-hash drift (F03)
 
 `compose-config-hash-drift` (HACK-1124) checks that `hack run` and `hack exec`

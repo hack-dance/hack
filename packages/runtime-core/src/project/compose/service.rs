@@ -794,6 +794,13 @@ pub(super) fn compile(
                     "Dependency cache volume must be declared; values omitted.",
                 ));
             }
+            // A shared dependency cache outlives and is consumed beyond one graph.
+            if !volumes[&cache.volume].disposable_caches.is_empty() {
+                return Err(problem(
+                    "invalid_disposable_cache",
+                    "A shared dependency cache volume cannot declare disposable cache directories.",
+                ));
+            }
             diagnostics.push(Diagnostic::warning("dependency_cache_binding_required", &format!("{field}.labels"), "Dependency cache execution requires a verified source revision, pinned installer image and shared cache binding; declaration alone is not a completed install."));
         }
         if routing_invalid

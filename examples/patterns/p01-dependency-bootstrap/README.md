@@ -57,8 +57,19 @@ If an initializer attempt fails or is interrupted, find the cause, then incremen
   writers.
 - Installers that need credentials or environment values. `locked-v1` refuses
   explicit `environment` and `env_file` on the initializer.
-- Two-worktree or interrupted-writer qualification. Those runtime gates belong to
-  WU07/WU11.
+- Automatic reclamation of failed or superseded generations. Those runtime gates
+  belong to WU07/WU11.
+
+## How this example is checked
 
 The static checks in `tests/pattern-examples.test.ts` validate this config and
 its commands. They do not start containers.
+
+The Docker-tier scenario `pattern-p01-dependency-bootstrap` in `tests/e2e/`
+starts a copy of this example in the hosted `docker-e2e` job. It runs a cold and
+a warm start, a second worktree, a `bun.lock` change, and an installer killed
+mid-run. Every running consumer must read a complete old or complete new
+payload. The killed attempt must stay unready, a retry under the same
+generation must be refused, and a generation bump must recover. The copy uses
+the runner's cached `oven/bun:1.4.2-slim` digest and the daemon's platform
+instead of the pinned Alpine image, and never pulls.

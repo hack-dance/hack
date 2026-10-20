@@ -1,0 +1,10 @@
+{
+  "$schema": "https://schemas.hack/hack.config.schema.json",
+  "name": "pattern-p07",
+  "dev_host": "pattern-p07.hack.local",
+  "logs": {
+    "follow_backend": "compose",
+    "snapshot_backend": "compose",
+    "clear_on_down": false
+  }
+}

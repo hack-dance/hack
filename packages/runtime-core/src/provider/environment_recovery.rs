@@ -1,7 +1,9 @@
 //! Immutable, value-free allocation intent. Recovery grants cleanup, never renewed delivery.
+mod compaction;
 mod retention;
 use super::{environment::EnvironmentLease, lifecycle::OwnedGuest, state};
 use crate::{Candidate, CandidateError};
+pub(super) use compaction::{Settled, compact_graph, resume_graph};
 pub use retention::{RetiredExport, export_retired};
 use serde::{Deserialize, Serialize};
 use std::{fs, path::PathBuf};
@@ -148,29 +150,39 @@ pub(super) fn record(
     if lease.native.is_some() {
         return Err(error());
     }
-    if retention::reserved(candidate, &lease.slot)? {
+    record_intent(
+        candidate,
+        &Intent {
+            version: 1,
+            graph: lease.graph.clone(),
+            service: lease.service.clone(),
+            uid: lease.uid,
+            gid: lease.gid,
+            slot: lease.slot.clone(),
+            incarnation: lease.incarnation.clone(),
+            boot: lease.boot.clone(),
+        },
+    )
+}
+/// A slot reserved by standalone export or by its graph's compaction tombstone is never reused.
+fn record_intent(candidate: &Candidate, intent: &Intent) -> Result<(), CandidateError> {
+    if retention::reserved(candidate, &intent.slot)?
+        || intent.graph.as_ref().map_or(Ok(false), |binding| {
+            compaction::reserved(candidate, &binding.run, &intent.incarnation, &intent.slot)
+        })?
+    {
         return Err(error());
     }
     let directory = root(candidate);
     state::private_directory(&directory)?;
     preflight_records(candidate, 1)?;
-    let intent = Intent {
-        version: 1,
-        graph: lease.graph.clone(),
-        service: lease.service.clone(),
-        uid: lease.uid,
-        gid: lease.gid,
-        slot: lease.slot.clone(),
-        incarnation: lease.incarnation.clone(),
-        boot: lease.boot.clone(),
-    };
-    validate(&intent, &lease.slot)?;
-    let path = directory.join(format!("{}.json", lease.slot));
+    validate(intent, &intent.slot)?;
+    let path = directory.join(format!("{}.json", intent.slot));
     match fs::symlink_metadata(&path) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         _ => return Err(error()),
     }
-    state::write(&path, &intent)
+    state::write(&path, intent)
 }
 fn read(
     candidate: &Candidate,
@@ -287,11 +299,20 @@ pub(super) fn graph_slots(
     guest: &OwnedGuest<'_>,
     run: &str,
 ) -> Result<Vec<(String, String, GraphBinding)>, CandidateError> {
+    graph_slots_for(candidate, guest.incarnation(), run)
+}
+/// Exact residue of a durable compaction is retired history, not an allocation to retire again.
+fn graph_slots_for(
+    candidate: &Candidate,
+    incarnation: &str,
+    run: &str,
+) -> Result<Vec<(String, String, GraphBinding)>, CandidateError> {
+    let tombstone = compaction::load(candidate, run, incarnation)?;
     let mut bindings = Vec::new();
     for slot in recorded_slots(candidate)? {
-        let intent = read_mode(candidate, &slot, guest.incarnation(), None, false)?;
+        let intent = read_mode(candidate, &slot, incarnation, None, false)?;
         if let Some(binding) = intent.graph {
-            if binding.run == run {
+            if binding.run == run && !compaction::residue(candidate, tombstone.as_ref(), &slot)? {
                 bindings.push((slot, intent.service, binding));
             }
         }
@@ -347,6 +368,7 @@ fn active_exec_slot_for(
         || binding.run != run
         || binding.container != container
         || retention::reserved(candidate, slot)?
+        || compaction::reserved(candidate, run, incarnation, slot)?
     {
         return Err(error());
     }
@@ -386,6 +408,7 @@ pub(super) fn graph_inventory(
     if !hex(run, 32) || !hex(incarnation, 32) {
         return Err(error());
     }
+    let tombstone = compaction::load(candidate, run, incarnation)?;
     let mut selected = std::collections::BTreeMap::new();
     let mut insert = |intent: Intent| -> Result<(), CandidateError> {
         validate(&intent, &intent.slot)?;
@@ -394,6 +417,7 @@ pub(super) fn graph_inventory(
                 g.run == run && containers.get(&intent.service) == Some(&g.container)
             })
             || retention::reserved(candidate, &intent.slot)?
+            || compaction::reserves(tombstone.as_ref(), &intent.slot)
             || selected.len() >= MAX_GRAPH_INTENT_ENTRIES
             || selected.insert(intent.slot.clone(), intent).is_some()
         {
@@ -403,7 +427,9 @@ pub(super) fn graph_inventory(
     };
     for slot in recorded_slots(candidate)? {
         let intent = read_mode(candidate, &slot, incarnation, None, false)?;
-        if intent.graph.as_ref().is_some_and(|g| g.run == run) {
+        if intent.graph.as_ref().is_some_and(|g| g.run == run)
+            && !compaction::residue(candidate, tombstone.as_ref(), &slot)?
+        {
             insert(intent)?;
         }
     }
@@ -568,8 +594,23 @@ pub(super) fn retire(
     if retention::reserved(candidate, slot)? {
         return retention::verify_retired(candidate, guest, slot, lease);
     }
-    let intent = read(candidate, slot, guest.incarnation(), lease)?;
+    let intent = live_intent(candidate, guest.incarnation(), slot, lease)?;
     retire_intent(guest, &intent)
+}
+/// The recorded intent a retirement may act on. A slot reserved by its graph's compaction
+/// tombstone is retained history (exact residue or a replay), never a live allocation.
+fn live_intent(
+    candidate: &Candidate,
+    incarnation: &str,
+    slot: &str,
+    lease: Option<&EnvironmentLease>,
+) -> Result<Intent, CandidateError> {
+    if let Some(binding) = read_mode(candidate, slot, incarnation, lease, false)?.graph {
+        if compaction::reserved(candidate, &binding.run, incarnation, slot)? {
+            return Err(error());
+        }
+    }
+    read(candidate, slot, incarnation, lease)
 }
 fn retire_intent(guest: &OwnedGuest<'_>, intent: &Intent) -> Result<(), CandidateError> {
     let slot = &intent.slot;

@@ -2,14 +2,31 @@ export type ProcessIdentityRow = {
   readonly pid: number;
   readonly parentPid: number;
   readonly birth: string;
+  /**
+   * The process has exited but its parent has not reaped it yet (`ps` state
+   * `Z`). A zombie runs no code and holds no listener; its PID cannot be
+   * reused until it is reaped.
+   */
+  readonly zombie: boolean;
 };
-const IDENTITY_ROW = /^\s*(\d+)\s+(\d+)\s+(.+?)\s*$/;
+const IDENTITY_ROW = /^\s*(\d+)\s+(\d+)\s+(\S+)\s+(.+?)\s*$/;
 
-/** Capture only process identity and lineage; never command arguments or environment. */
+/**
+ * Capture only process identity and lineage; never command arguments or environment.
+ *
+ * `birth` is the `lstart` start time rendered in UTC with the C locale. `ps`
+ * prints `lstart` in local time, so without a fixed zone two clients with
+ * different `TZ` values, or one host whose zone changes, would see different
+ * births for the same live process. Births may be persisted and compared across
+ * processes, so the zone is pinned here (POSIX `UTC0` needs no zoneinfo).
+ *
+ * Zombie rows are kept and flagged, not dropped: each caller decides whether
+ * an exited, unreaped process still counts for its purpose.
+ */
 export async function readProcessIdentities(): Promise<ProcessIdentityRow[]> {
   try {
-    const proc = Bun.spawn(["ps", "-A", "-o", "pid=,ppid=,lstart="], {
-      env: { ...process.env, LC_ALL: "C" },
+    const proc = Bun.spawn(["ps", "-A", "-o", "pid=,ppid=,stat=,lstart="], {
+      env: { ...process.env, LC_ALL: "C", TZ: "UTC0" },
       stdin: "ignore",
       stdout: "pipe",
       stderr: "ignore",
@@ -26,7 +43,8 @@ export async function readProcessIdentities(): Promise<ProcessIdentityRow[]> {
             {
               pid: Number(match[1]),
               parentPid: Number(match[2]),
-              birth: (match[3] ?? "").replace(/\s+/g, " "),
+              birth: (match[4] ?? "").replace(/\s+/g, " "),
+              zombie: (match[3] ?? "").startsWith("Z"),
             },
           ]
         : [];

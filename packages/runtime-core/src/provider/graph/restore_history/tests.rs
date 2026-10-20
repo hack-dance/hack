@@ -25,6 +25,7 @@ fn receipt(index: usize) -> Receipt {
                 outbound: false,
                 cache: None,
                 cache_provenance: None,
+                disposable_caches: Vec::new(),
                 kind: Kind::Container,
                 key: "web".into(),
                 name: "owned-web".into(),

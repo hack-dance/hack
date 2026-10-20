@@ -1,40 +1,159 @@
 import { CliUsageError } from "../cli/command.ts";
 
+/** Default budget for starting containers and waiting on Compose dependencies. */
 export const DEFAULT_COMPOSE_STARTUP_TIMEOUT_MS = 90_000;
-const MIN_STARTUP_TIMEOUT_MS = 1000;
+/** Default budget for image build/pull and container creation before start. */
+export const DEFAULT_COMPOSE_IMAGE_TIMEOUT_MS = 1_800_000;
+export const COMPOSE_STARTUP_TIMEOUT_ENV = "HACK_COMPOSE_STARTUP_TIMEOUT_MS";
+export const COMPOSE_IMAGE_TIMEOUT_ENV = "HACK_COMPOSE_IMAGE_TIMEOUT_MS";
+const MIN_TIMEOUT_MS = 1000;
 const MAX_STARTUP_TIMEOUT_MS = 3_600_000;
+const MAX_IMAGE_TIMEOUT_MS = 14_400_000;
 const INTEGER_TEXT = /^[0-9]+$/;
 
-/** Total detached Compose invocation budget, not a readiness or per-phase guarantee. */
+/**
+ * Detached Compose startup runs as two bounded invocations, each in its own
+ * owned process group that is terminated (exit 124) when its budget expires:
+ * - `images`: `up --no-start` builds or pulls missing images and creates or
+ *   recreates containers without starting them. Bounded by
+ *   {@link resolveComposeImageTimeoutMs}.
+ * - `start`: `up -d --no-build` starts containers and waits for Compose
+ *   `depends_on` conditions. Bounded by {@link resolveComposeStartupTimeoutMs}.
+ * Image acquisition therefore never consumes the start/dependency-wait budget,
+ * while a genuine hang in either phase is still terminated.
+ */
+export type ComposeStartupPhase = "images" | "start";
+
+/**
+ * Budget for the `start` phase of detached Compose startup: container start
+ * and dependency waiting. It excludes image build/pull and is not an
+ * application readiness guarantee.
+ */
 export function resolveComposeStartupTimeoutMs(
   opts: {
     readonly startupTimeoutMs?: number;
     readonly env?: Readonly<Record<string, string | undefined>>;
   } = {}
 ): number {
-  const configured = (opts.env ?? process.env).HACK_COMPOSE_STARTUP_TIMEOUT_MS;
-  let timeout = opts.startupTimeoutMs;
+  return resolveBudget({
+    explicit: opts.startupTimeoutMs,
+    configured: (opts.env ?? process.env)[COMPOSE_STARTUP_TIMEOUT_ENV],
+    fallback: DEFAULT_COMPOSE_STARTUP_TIMEOUT_MS,
+    max: MAX_STARTUP_TIMEOUT_MS,
+    invalid: () =>
+      new CliUsageError(
+        `Compose startup timeout must be an integer from ${MIN_TIMEOUT_MS} to ${MAX_STARTUP_TIMEOUT_MS} milliseconds (${COMPOSE_STARTUP_TIMEOUT_ENV})`
+      ),
+  });
+}
+
+/** Budget for the `images` phase: image build/pull and container creation. */
+export function resolveComposeImageTimeoutMs(
+  opts: {
+    readonly imageTimeoutMs?: number;
+    readonly env?: Readonly<Record<string, string | undefined>>;
+  } = {}
+): number {
+  return resolveBudget({
+    explicit: opts.imageTimeoutMs,
+    configured: (opts.env ?? process.env)[COMPOSE_IMAGE_TIMEOUT_ENV],
+    fallback: DEFAULT_COMPOSE_IMAGE_TIMEOUT_MS,
+    max: MAX_IMAGE_TIMEOUT_MS,
+    invalid: () =>
+      new CliUsageError(
+        `Compose image build/pull timeout must be an integer from ${MIN_TIMEOUT_MS} to ${MAX_IMAGE_TIMEOUT_MS} milliseconds (${COMPOSE_IMAGE_TIMEOUT_ENV})`
+      ),
+  });
+}
+
+function resolveBudget(opts: {
+  readonly explicit: number | undefined;
+  readonly configured: string | undefined;
+  readonly fallback: number;
+  readonly max: number;
+  readonly invalid: () => CliUsageError;
+}): number {
+  let timeout = opts.explicit;
   if (timeout === undefined) {
-    if (configured === undefined) {
-      return DEFAULT_COMPOSE_STARTUP_TIMEOUT_MS;
+    if (opts.configured === undefined) {
+      return opts.fallback;
     }
-    if (!INTEGER_TEXT.test(configured)) {
-      throw invalidBudget();
+    if (!INTEGER_TEXT.test(opts.configured)) {
+      throw opts.invalid();
     }
-    timeout = Number(configured);
+    timeout = Number(opts.configured);
   }
   if (
     !Number.isSafeInteger(timeout) ||
-    timeout < MIN_STARTUP_TIMEOUT_MS ||
-    timeout > MAX_STARTUP_TIMEOUT_MS
+    timeout < MIN_TIMEOUT_MS ||
+    timeout > opts.max
   ) {
-    throw invalidBudget();
+    throw opts.invalid();
   }
   return timeout;
 }
 
-function invalidBudget(): CliUsageError {
-  return new CliUsageError(
-    "Compose startup timeout must be an integer from 1000 to 3600000 milliseconds (HACK_COMPOSE_STARTUP_TIMEOUT_MS)"
-  );
+export interface ComposeStartupBudgets {
+  readonly startupTimeoutMs: number;
+  readonly imageTimeoutMs: number;
+}
+
+const PHASE_LABEL: Readonly<Record<ComposeStartupPhase, string>> = {
+  images: "image build/pull and container creation",
+  start: "start and dependency wait",
+};
+
+/** One-line summary of both detached phases and their effective budgets. */
+export function describeComposeStartupBudgets(
+  budgets: ComposeStartupBudgets
+): string {
+  return `${PHASE_LABEL.images} (budget ${budgets.imageTimeoutMs} ms, ${COMPOSE_IMAGE_TIMEOUT_ENV}), then ${PHASE_LABEL.start} (budget ${budgets.startupTimeoutMs} ms, ${COMPOSE_STARTUP_TIMEOUT_ENV})`;
+}
+
+export interface ComposeStartupFailure {
+  readonly code: "E_COMPOSE_FAILED" | "E_STARTUP_TIMEOUT";
+  readonly message: string;
+  readonly phase: ComposeStartupPhase;
+  readonly budgetMs: number;
+  readonly budgetEnv: string;
+}
+
+/**
+ * Map a detached Compose exit code to the CLI failure contract. Exit 124 is
+ * the owned process-group deadline; its message names the phase that hit it,
+ * the effective budget, and the host variable that raises it.
+ */
+export function composeStartupFailure(opts: {
+  readonly code: number;
+  readonly action: string;
+  readonly phase: ComposeStartupPhase;
+  readonly budgets: ComposeStartupBudgets;
+}): ComposeStartupFailure {
+  const images = opts.phase === "images";
+  const budgetMs = images
+    ? opts.budgets.imageTimeoutMs
+    : opts.budgets.startupTimeoutMs;
+  const budgetEnv = images
+    ? COMPOSE_IMAGE_TIMEOUT_ENV
+    : COMPOSE_STARTUP_TIMEOUT_ENV;
+  const phaseLabel = PHASE_LABEL[opts.phase];
+  if (opts.code !== 124) {
+    return {
+      code: "E_COMPOSE_FAILED",
+      message: `${opts.action} failed (exit ${opts.code}) during Compose ${phaseLabel}`,
+      phase: opts.phase,
+      budgetMs,
+      budgetEnv,
+    };
+  }
+  const message = images
+    ? `${opts.action} exceeded its Compose image build/pull budget of ${budgetMs} ms (phase: ${phaseLabel}). Raise it with ${budgetEnv}=<ms> on the host invocation (max ${MAX_IMAGE_TIMEOUT_MS}); it is separate from ${COMPOSE_STARTUP_TIMEOUT_ENV}. The Compose process group was terminated before this attempt started containers; containers may have been created or recreated but not started. Inspect hack ps before retrying.`
+    : `${opts.action} exceeded its detached Compose startup budget of ${budgetMs} ms (phase: ${phaseLabel}). Raise it with ${budgetEnv}=<ms> on the host invocation (max ${MAX_STARTUP_TIMEOUT_MS}). The Compose process group was terminated; inspect hack ps and hack logs before retrying. Containers may still be running. Image build/pull is not counted against this budget, and it does not cover lifecycle hooks or application readiness.`;
+  return {
+    code: "E_STARTUP_TIMEOUT",
+    message,
+    phase: opts.phase,
+    budgetMs,
+    budgetEnv,
+  };
 }

@@ -68,6 +68,12 @@ export const E2E_DURATION_HINTS_SECONDS: Readonly<Record<string, number>> = {
   "exec-stale-env": 20,
   "cache-prune": 12,
   "dependency-cache-protocol": 11,
+  // Estimates until a hosted docker-e2e summary measures them: P01 runs six
+  // locked-v1 starts plus a killed installer; P02 seven one-shot runs; P07
+  // two health-gated stacks plus value-free explain calls.
+  "pattern-p01-dependency-bootstrap": 90,
+  "pattern-p02-portable-toolchain": 45,
+  "pattern-p07-capability-overlays": 45,
   "worktree-branch-default": 2,
   "agent-docs-sync": 2,
   "domain-migration-files": 1,

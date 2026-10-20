@@ -39,7 +39,7 @@ fn present(path: &Path) -> Result<bool, CandidateError> {
         Err(e) => Err(state::io(e)),
     }
 }
-fn bytes(path: &Path) -> Result<Vec<u8>, CandidateError> {
+pub(super) fn bytes(path: &Path) -> Result<Vec<u8>, CandidateError> {
     let mut file = fs::OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)

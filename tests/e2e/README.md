@@ -263,6 +263,45 @@ image here is a pinned ID that is absent locally, not a baked-tool manifest
 mismatch. A pass qualifies the hosted Linux Docker runner, not native VM support or
 a cloud provider.
 
+## Pattern fixture qualification
+
+`pattern-p01-dependency-bootstrap` (HACK-1145), `pattern-p02-portable-toolchain`
+(HACK-1146) and `pattern-p07-capability-overlays` (HACK-1151) start copies of the
+checked-in `examples/patterns/` fixtures against a real engine. Each catalogue card
+names its scenario in `e2eScenario`, and `tests/pattern-examples.test.ts` fails when
+that scenario is not registered here as Docker-tier with a duration hint.
+`tests/e2e/scenarios/pattern-fixture.ts` makes the copy. It changes only the
+project name, the image (the cached `oven/bun:1.4.2-slim` repository digest with
+`pull_policy: never` instead of the pinned Alpine image), a declared platform
+(the daemon's architecture) and exact owner labels. Commands, mounts, dependency
+labels, gates and health checks stay as the fixture authored them.
+
+- P01 runs a cold and a warm `hack up --json`, a linked worktree, a `bun.lock`
+  change and an installer killed mid-run under a fresh generation. Every running
+  consumer must read a complete payload with a ready marker and never mount the
+  killed attempt's volume. That volume must stay populated but unready, a retry
+  of the same generation must be refused, and a generation bump must recover.
+- P02 runs the README's `hack run --profile toolchain` commands from the primary
+  checkout and a linked worktree, whose `/app/.git` is a pointer to an unmounted
+  `gitdir`. A failing check must exit non-zero, `sh -c "exit 7"` must return 7, and
+  a pipe filter must show how filtered output hides the failure. Ordinary
+  `hack down` must keep both instances' cache volumes.
+- P07 runs the laptop overlay in the primary checkout and the runner overlay in a
+  linked worktree. `hack env explain` must name each source file, including an
+  inherited primary-local override, without printing a value. Container metadata
+  must carry each overlay's keys, both APIs must reach `upstream`, `hack exec`
+  with the other overlay must be refused, and no browser opener on `PATH` or in
+  `BROWSER` may run.
+
+```sh
+HACK_E2E_CLI_BIN=./dist/hack HACK_E2E_DOCKER=1 HACK_E2E_REQUIRE_DOCKER=1 bun tests/e2e/run.ts --only=pattern-p01-dependency-bootstrap,pattern-p02-portable-toolchain,pattern-p07-capability-overlays
+```
+
+These are maintained gates for the hosted Linux runner, not recorded passes on
+other hosts. They do not qualify the pinned Alpine image, registry access,
+credential-dependent installers, cross-worktree toolchain cache reuse or a
+headless machine identity.
+
 ## Compose config-hash drift (F03)
 
 `compose-config-hash-drift` (HACK-1124) checks that `hack run` and `hack exec`
@@ -418,7 +457,15 @@ Each replay and the startup diagnostic also report a closed member-key histogram
 for the bridge the `network-member-id` predicate inspected: counts of `hex64`,
 `epPrefixed` (Docker `ep-` placeholder endpoints) and `other` keys, plus the fixed
 service names observed in the `restarting` state. The keys themselves are never
-emitted. This evidence is for classifying the flake; the ownership guard is unchanged.
+emitted. This evidence classifies the flake; the diagnostics do not change the guard.
+
+The startup readiness guard itself admits one `ep-` placeholder only in the first scan
+of a query, and only for a selected on-failure container that the same scan inspected
+as `restarting` or `running`. `running` is included because containers are inspected
+before the bridge, so the retry container can exit and begin its restart between the
+two reads. That container stays unready, and the recheck scan must see its container
+ID. A placeholder that persists, or one that names any other container, still refuses
+with `network-member-id`.
 
 ## Native config routing qualification
 
@@ -552,9 +599,12 @@ sentinel client config (`~/.claude/settings.json`, `~/.claude.json`,
 `.claude/settings.local.json` and `.mcp.json` into two fixtures. It then runs
 `init --auto`, `init --auto --with codex`, `agent prime`,
 `agent prime --check`, `agent onboard`, `agent patterns`, `doctor --json`,
-`doctor --fix --no-interactive`, `setup sync --check`, and refresh-only
-`setup sync --all-scopes` twice each (`setup sync --check` exits 1 because the
-customized files are reported as preserved). After
+`doctor --fix --no-interactive`, `setup sync --check`, refresh-only
+`setup sync --all-scopes`, the read-only `setup migrate --all-scopes` preview,
+and `setup migrate --all-scopes --apply --skip-plugin-check all` twice each
+(`setup sync --check` exits 1 because the customized files are reported as
+preserved; the migration apply exits 0 and removes nothing because no seeded
+file is Hack-owned). After
 every run it requires byte-identical hashes for those trees, no new entries
 under them, and `git status` changes only under `.hack/`. Each command must
 also exit with its expected code, so a usage error cannot pass as "no write".

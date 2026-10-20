@@ -502,9 +502,12 @@ sentinel client config (`~/.claude/settings.json`, `~/.claude.json`,
 `.claude/settings.local.json` and `.mcp.json` into two fixtures. It then runs
 `init --auto`, `init --auto --with codex`, `agent prime`,
 `agent prime --check`, `agent onboard`, `agent patterns`, `doctor --json`,
-`doctor --fix --no-interactive`, `setup sync --check`, and refresh-only
-`setup sync --all-scopes` twice each (`setup sync --check` exits 1 because the
-customized files are reported as preserved). After
+`doctor --fix --no-interactive`, `setup sync --check`, refresh-only
+`setup sync --all-scopes`, the read-only `setup migrate --all-scopes` preview,
+and `setup migrate --all-scopes --apply --skip-plugin-check all` twice each
+(`setup sync --check` exits 1 because the customized files are reported as
+preserved; the migration apply exits 0 and removes nothing because no seeded
+file is Hack-owned). After
 every run it requires byte-identical hashes for those trees, no new entries
 under them, and `git status` changes only under `.hack/`. Each command must
 also exit with its expected code, so a usage error cannot pass as "no write".

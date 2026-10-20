@@ -144,6 +144,10 @@ require installation. Repair only affected targets within the authorized scope; 
 Hack-owned integrations; add `--install-missing` to create missing ones (see
 [integration setup](integrations.md#refresh-only-hack-setup-sync)). Read updated guidance after
 repair; restart only if the client cannot reload changed hooks or skills.
+To move from standalone skill and rule files to the `hack` plugin, preview with
+`hack setup migrate`, then run `hack setup migrate --apply` after the plugin loads; apply writes a
+backup manifest that `hack setup migrate --rollback-manifest <manifest>` restores (see
+[migrate standalone files](integrations.md#migrate-standalone-files-to-the-plugin)).
 Ordinary commands, `hack update`, and `hack doctor --fix` never render, repair, remove, or otherwise
 mutate integration files. CLI upgrades do not trigger integration updates.
 

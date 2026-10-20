@@ -205,6 +205,64 @@ data survive that cleanup. The canary is then removed separately. PostgreSQL use
 fixture-only trust on this unexposed network. This qualifies the actual execution
 host, not Codex Cloud capabilities, browser access or native VM support elsewhere.
 
+## Portable bootstrap negative controls
+
+`portable-bootstrap-negatives` (HACK-1143) adds negative controls to the portable
+bootstrap fixture. It runs the selected CLI in slim mode with cached `alpine:3.20`
+pinned by immutable ID, `network_mode: none`, no published ports and no pulls.
+A `deps` producer fills a `locked-v1` dependency cache. Its install is frozen: it
+fails when the lockfile's manifest digest no longer matches `package.json`, and the
+workspace is mounted read-only. The `app` consumer mounts the cache read-only. It
+copies the cache artifact only after a synthetic encrypted token, scoped to `app`,
+matches the expected digest, so a loaded artifact proves env injection without the
+scenario reading the value.
+
+Every stage runs `hack up --detach app` and must give this result:
+
+| Stage | Change before the stage | Required result |
+| --- | --- | --- |
+| `refuse-missing-key` | no key | refused; no owned container, network or volume; only the managed `.hack/.gitignore` may appear |
+| `refuse-wrong-key` | wrong key | refused; nothing created; no worktree diff |
+| `refuse-wrong-overlay` | `--env drift`, an overlay sealed under another key | refused; nothing created; no worktree diff |
+| `bootstrap-cold` | correct key | consumer created; one initialization; one ready cache; no diff |
+| `bootstrap-repeat` | none | same consumer ID and start time; same cache; still one initialization; same index; no diff |
+| `refuse-wrong-key-running` | wrong key | refused; consumer unchanged |
+| `refuse-stale-image` | both services pinned to an absent image ID | refused; consumer unchanged; the stale ID is not pulled and the cached tag keeps its ID |
+| `refuse-frozen-lockfile` | `package.json` no longer matches the lockfile | refused; consumer unchanged; lockfile bytes kept; the new cache has an attempt but no ready marker |
+| `bootstrap-changed-lockfile` | committed lockfile revision | consumer replaced on a new cache initialized once; the previous ready cache is kept |
+| `refuse-corrupted-cache` | the current ready marker is overwritten | refused; consumer unchanged; no reinstall; the corrupted marker is not rewritten |
+| `bootstrap-new-generation` | `hack.dependencies.cache-generation` bumped | consumer replaced on a new cache; the corrupted cache is kept for inspection |
+
+Unchanged means the same full container ID and `State.StartedAt`. CLI output and
+Git-tracked files must never contain the keys or token values, and the scenario
+reads only fixed container fields because the consumer's environment holds the
+token. Cleanup checks exact owner and Compose project labels, and an adjacent
+canary volume must survive it.
+
+The scenario ends with one value-free line, `portable-bootstrap receipt {...}`. For
+each stage it records the outcome, the consumer transition, the command duration,
+stdout/stderr bytes, Git-tracked fixture bytes, the bytes in the consumer's mounted
+cache and the number of owned cache volumes. It also records the pinned image
+size. It contains no env values, keys, resource IDs, image IDs or paths;
+`tests/e2e/portable-bootstrap-controls.ts` refuses any other shape.
+
+```sh
+HACK_E2E_CLI_BIN=./dist/hack HACK_E2E_DOCKER=1 HACK_E2E_REQUIRE_DOCKER=1 bun tests/e2e/run.ts --only=portable-bootstrap-negatives
+```
+
+Two local tests need no Docker engine. `tests/portable-bootstrap-env-refusal.test.ts`
+runs the source CLI on the same fixture against a recording Docker stub: a missing
+key, a wrong key and a wrong overlay key must fail before any Compose `create`,
+`run`, `start` or `up`, and the correct key must reach the `deps` bootstrap first.
+`tests/e2e-portable-bootstrap-controls.test.ts` covers the stage expectations,
+consumer classification, worktree diff check and receipt validation.
+
+This does not cover WU12 storage: mount and free-space admission, generation holds,
+reclamation and archives. Old cache volumes are kept, never reclaimed. A stale
+image here is a pinned ID that is absent locally, not a baked-tool manifest
+mismatch. A pass qualifies the hosted Linux Docker runner, not native VM support or
+a cloud provider.
+
 ## Pattern fixture qualification
 
 `pattern-p01-dependency-bootstrap` (HACK-1145), `pattern-p02-portable-toolchain`

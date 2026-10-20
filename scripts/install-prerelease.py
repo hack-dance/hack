@@ -67,6 +67,8 @@ MANAGER_PREDECESSORS = frozenset({
     "d39e77623be1876567e9db66c468e8da96067aeac0d88089df28efc11f850ef8",
     "e2e2bcbacf58b21d1086047c94727e5e814776384439700adcf5aabe5c49c2fa",
 })
+# Launch backends. Unset or empty selects native; anything else refuses.
+BACKENDS = frozenset(("native", "compose"))
 MANAGER_UPGRADE = ".manager-upgrade.json"
 
 
@@ -782,9 +784,24 @@ class Channel:
                     "Candidate home identity changed.")
         return directory
 
-    def environment(self, version):
+    def environment(self, version, backend="native"):
+        """Child environment for one launch.
+
+        Native pins this version's executor and both private homes, overriding
+        inherited installation selectors. Compose is an explicit caller choice:
+        it keeps the caller's HACK_HOME and HACK_GLOBAL_CONFIG_PATH so the
+        existing global Caddy/CoreDNS and local CA apply, and removes native
+        selectors. Either way the CLI knows it is a candidate and refuses
+        self-update.
+        """
         directory = self.root / "versions" / version
         environment = dict(os.environ)
+        environment["HACK_CANDIDATE_ENTRYPOINT"] = "hack-next"
+        if backend == "compose":
+            environment.pop("HACK_NATIVE_BINARY", None)
+            environment.pop("HACK_NATIVE_HOME", None)
+            environment["HACK_RUNTIME_BACKEND"] = "compose"
+            return environment
         environment.pop("HACK_GLOBAL_CONFIG_PATH", None)
         environment.update({"HACK_RUNTIME_BACKEND": "native",
                             "HACK_NATIVE_BINARY": str(directory / "bundle/hack-native"),
@@ -901,6 +918,9 @@ class Channel:
                 remove_created_stage(stage, created)
 
     def run(self, arguments):
+        backend = os.environ.get("HACK_RUNTIME_BACKEND") or "native"
+        require(backend in BACKENDS,
+                "HACK_RUNTIME_BACKEND must be native or compose (unset selects native).")
         version = self.state["selected"]
         require(version is not None, "No candidate selected. Use your ordinary stable hack command.")
         directory = self.verify_version(version, self.state["installed"][version])
@@ -908,8 +928,11 @@ class Channel:
         # Shared launcher locks permit ps/down alongside foreground up, while an
         # exclusive selection switch refuses any in-flight launcher. Background
         # runtime state is gated by the owning executor on later switches.
-        child = subprocess.Popen([str(directory / "bundle/hack-v5"), *arguments],
-                                 env=self.environment(version))
+        # Compose runs the verified CLI directly: retained bundles' hack-v5
+        # entrypoints always select native and would ignore the choice.
+        entrypoint = "bundle/hack-cli" if backend == "compose" else "bundle/hack-v5"
+        child = subprocess.Popen([str(directory / entrypoint), *arguments],
+                                 env=self.environment(version, backend))
         handlers = {}
         def forward(signum, _frame):
             child.send_signal(signum)

@@ -22,6 +22,7 @@ import { execStaleEnvScenario } from "./scenarios/exec-stale-env.ts";
 import { initScenario } from "./scenarios/init.ts";
 import { lifecycleHostProcessScenario } from "./scenarios/lifecycle-host-process.ts";
 import { lifecycleSessionRecoveryScenario } from "./scenarios/lifecycle-session-recovery.ts";
+import { mcpLogsComposeScenario } from "./scenarios/mcp-logs-compose.ts";
 import { nativeComposeAdoptionJobWorktreesScenario } from "./scenarios/native-compose-adoption-job-worktrees.ts";
 import { nativeComposeAdoptionRoutingWorktreesScenario } from "./scenarios/native-compose-adoption-routing-worktrees.ts";
 import { nativeComposeAdoptionSourceBindWorktreesScenario } from "./scenarios/native-compose-adoption-source-bind-worktrees.ts";
@@ -51,6 +52,7 @@ import { nativeConfigVmFilesScenario } from "./scenarios/native-config-vm-files.
 import { patternP01DependencyBootstrapScenario } from "./scenarios/pattern-p01-dependency-bootstrap.ts";
 import { patternP02PortableToolchainScenario } from "./scenarios/pattern-p02-portable-toolchain.ts";
 import { patternP07CapabilityOverlaysScenario } from "./scenarios/pattern-p07-capability-overlays.ts";
+import { portableBootstrapNegativesScenario } from "./scenarios/portable-bootstrap-negatives.ts";
 import { portableMultiserviceScenario } from "./scenarios/portable-multiservice.ts";
 import { upDownScenario } from "./scenarios/up-down.ts";
 import { worktreeBranchDefaultScenario } from "./scenarios/worktree-branch-default.ts";
@@ -103,7 +105,9 @@ export const ALL_SCENARIOS: readonly Scenario[] = [
   upDownScenario,
   execStaleEnvScenario,
   portableMultiserviceScenario,
+  portableBootstrapNegativesScenario,
   composeConfigHashDriftScenario,
+  mcpLogsComposeScenario,
   nativeConfigComposeScenario,
   nativeConfigBuildScenario,
   nativeConfigDownHooksScenario,

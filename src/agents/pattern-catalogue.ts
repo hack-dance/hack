@@ -366,14 +366,14 @@ export const PATTERN_CATALOGUE: readonly PatternCard[] = [
       "Generated guidance from Hack's canonical source with a content revision; `--json` on lifecycle and diagnostic commands.",
     envOwnership: "Results report names and states, not values.",
     readiness:
-      "Pass child argv after `--` in `hack run <service> -- <cmd...>`. Check the exit status or `--json` envelope directly rather than through a pipe filter.",
+      "Pass child argv after `--` in `hack run <service> -- <cmd...>`; its exit status, and the MCP run result's `exitCode`, are the child's own. Check the exit status or `--json` envelope directly rather than through a pipe filter.",
     cleanup:
-      "Guidance updates are explicit `hack setup` operations, never side effects of ordinary commands.",
+      "Guidance updates are explicit `hack setup` operations, never side effects of ordinary commands. The `agent-surface-freeze` E2E scenario checks that init, agent, doctor and setup-sync runs leave tracked guidance and client config byte-identical.",
     negativeControl:
       "Filtered shell text can hide a failed child, and historical dispatch, PR or gateway requests must not silently expand current product scope.",
     domainOwner: "WU19/WU21",
     missingContract:
-      "A guidance freeze during execution and a typed terminal result for resumed background operations remain open.",
+      "A freeze that refuses explicit guidance updates while an agent runs, and a typed terminal result for resumed background operations, remain open.",
     provenance: { consumers: 2, source: "HACK-P11 research register" },
     example: null,
     e2eScenario: null,

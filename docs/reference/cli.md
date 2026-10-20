@@ -23,6 +23,7 @@ hack project <subcommand> [options]
 | Command | Summary |
 | --- | --- |
 | `hack project owner` | Inspect project ownership |
+| `hack project target` | Inspect the exact project, checkout, instance and service a command would target (read-only, provisional) |
 
 ### Options
 
@@ -52,6 +53,31 @@ hack project owner <subcommand> [options]
 
 | Option | Description |
 | --- | --- |
+| `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
+| `--help, -h` | Show help |
+| `--version, -v` | Show version |
+
+## `hack project target`
+
+Inspect the exact project, checkout, instance and service a command would target (read-only, provisional)
+
+### Usage
+
+```bash
+hack project target [options]
+```
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--path, -p <dir>` | Run a project command against a repo path (overrides cwd search) |
+| `--project <name>` | Target a registered project by name (from ~/.hack/projects.json) |
+| `--branch <name>` | Run against a branch-specific instance (compose name + hostnames) |
+| `--service <service>` | Also resolve one Compose service of the target |
+| `--env <name|base|default>` | Select an env overlay by name; omit for the configured default overlay, or use 'base' or 'default' for base layers only |
+| `--expect-generation <id>` | Refuse unless the project's config generation still equals this id |
+| `--json` | Output JSON (machine-readable) |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |
 | `--version, -v` | Show version |

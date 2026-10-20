@@ -264,6 +264,7 @@ into a host command, and `--target` on env and host commands chooses the `host` 
 | `hack host shell` | `--env`, `--scope`, `--target` | When the shell starts. | Start a new shell. | Runs on the host, not in a container. |
 | `hack config validate` | `--env` | Per invocation; resolves the native selection without reading managed env documents. | Not needed. | Authored native projects only; cannot be combined with `--file`. |
 | `hack config plan` | `--env` | Per invocation; metadata only (names, scopes, secret flags), never decrypted. | Not needed. | Authored native projects only. |
+| `hack project target` | `--env`, `--service` | Per invocation, read-only; reports the overlay selection (explicit, project default or base) without reading env files or values. | Not needed. | Selection only: overlay existence is not checked; no runtime required. |
 | `hack session start` | `--env`, `--service` | When the workspace is created; the name gains `.env-<name>` (`.env-base` for base spellings), and `--up` runs `hack up -d` with the same selection. | Start a new workspace or pass `--env` to `hack session exec`. | Injects into the workspace shell, not into containers. |
 | `hack session exec` | `--env`, `--service` | Per command; omitted reuses the selection encoded in the workspace name. | Each command resolves again. | Injects into the workspace command, not into containers. |
 

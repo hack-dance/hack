@@ -264,7 +264,11 @@ ordinary frontend selection yet and does not implement reactive health or hooks.
 The optional feature exposes this bounded consumer through a distinct public CLI:
 `graph native plan --source-file FILE --json`, then
 `graph native run --source-file FILE --expect-review SHA --json`.
-`graph native inspect|cleanup --run-id RUN --json` use its versioned native journal. These commands
+`graph native inspect|cleanup --run-id RUN --json` use its versioned native journal. On macOS,
+`inspect` refuses `native_graph_unreserved` before guest access only when the run's journal
+directory is exactly absent under private state directories and no foreground owner is
+published for the run. It is a point-in-time observation, not proof that no consumer can
+still start. A partial, public or present journal keeps the ordinary receipt refusal. These commands
 are explicit bounded prerequisites, not full ordinary project parity. Their project
 network does not publish ports or grant host-service access. Normal native `hack up`
 continues to require the full source/storage/routing/host and foreground-owner contract.

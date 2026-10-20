@@ -45,6 +45,10 @@ import {
   requestNativeAuthoredLiveStop,
 } from "./native-authored-live-stop.ts";
 import type { NativeAuthoredProcessIncarnation } from "./native-authored-process-incarnation.ts";
+import {
+  NATIVE_GRAPH_UNRESERVED,
+  NativeRuntimeRequestError,
+} from "./native-runtime-client.ts";
 
 const LIMIT = 64 * 1024;
 const SOURCE_LIMIT = 1024 * 1024;
@@ -139,6 +143,19 @@ export type NativeAuthoredProjectAdmission = {
     readonly expectedStart: NativeAuthoredProjectStartSelection;
     readonly expectedRun?: NativeAuthoredProjectRunSelection;
     readonly cleaned: NativeAuthoredReceipt;
+  }) => Promise<void>;
+  /**
+   * Retire a start intent whose native consumer never reserved runtime state
+   * (HACK-1272). `refusal` must be the fresh `native_graph_unreserved` inspection
+   * refusal for this exact run, obtained while this admission is held and after
+   * the caller proved no consumer for the run can still start. The ready mapping,
+   * hook owner and live-stop owner must be absent. The run's retained source is
+   * removed first (absence is accepted) so an interruption keeps the start
+   * intent blocking. No receipt, journal or guest state is read or changed here.
+   */
+  readonly retireUnreserved: (opts: {
+    readonly expectedStart: NativeAuthoredProjectStartSelection;
+    readonly refusal: unknown;
   }) => Promise<void>;
 };
 function refused(): never {
@@ -540,43 +557,7 @@ export async function withNativeAuthoredProjectRecoveryStorage<T>(
         );
       },
       async readSource(run) {
-        const current = await readPrivate(sourcePath(run), SOURCE_LIMIT);
-        const value: unknown = JSON.parse(current.text);
-        if (
-          !(
-            isRecord(value) &&
-            keys(
-              value,
-              value.version === 3 || value.version === 5
-                ? "branch,env_metadata,hook_permit,kind,overlay,profiles,project,run,version"
-                : "branch,env_metadata,kind,overlay,profiles,project,run,version"
-            ) &&
-            (value.version === 2 ||
-              ((value.version === 3 || value.version === 5) &&
-                validHookPin(value.hook_permit)))
-          ) ||
-          value.kind !== "native-graph-source" ||
-          value.project !== store.identity.projectRoot ||
-          value.branch !== store.identity.branch ||
-          value.run !== run ||
-          !Array.isArray(value.profiles) ||
-          value.profiles.length > 64 ||
-          value.profiles.some(
-            (profile: unknown) =>
-              typeof profile !== "string" || !validBranch(profile)
-          ) ||
-          !(
-            value.overlay === "inherit" ||
-            value.overlay === "base" ||
-            (isRecord(value.overlay) &&
-              keys(value.overlay, "named") &&
-              typeof value.overlay.named === "string" &&
-              validBranch(value.overlay.named))
-          ) ||
-          !parseNativeEnvMetadata(value.env_metadata)
-        ) {
-          return refused();
-        }
+        const current = await readRetainedSource(store, sourcePath(run), run);
         await store.check();
         return {
           dev: current.info.dev,
@@ -586,6 +567,70 @@ export async function withNativeAuthoredProjectRecoveryStorage<T>(
       },
     });
   });
+}
+/** Read one retained private source envelope and require its exact kind, scope and run. */
+async function readRetainedSource(store: Store, path: string, run: string) {
+  const current = await readPrivate(path, SOURCE_LIMIT);
+  const value: unknown = JSON.parse(current.text);
+  if (
+    !(
+      isRecord(value) &&
+      keys(
+        value,
+        value.version === 3 || value.version === 5
+          ? "branch,env_metadata,hook_permit,kind,overlay,profiles,project,run,version"
+          : "branch,env_metadata,kind,overlay,profiles,project,run,version"
+      ) &&
+      (value.version === 2 ||
+        ((value.version === 3 || value.version === 5) &&
+          validHookPin(value.hook_permit)))
+    ) ||
+    value.kind !== "native-graph-source" ||
+    value.project !== store.identity.projectRoot ||
+    value.branch !== store.identity.branch ||
+    value.run !== run ||
+    !Array.isArray(value.profiles) ||
+    value.profiles.length > 64 ||
+    value.profiles.some(
+      (profile: unknown) => typeof profile !== "string" || !validBranch(profile)
+    ) ||
+    !(
+      value.overlay === "inherit" ||
+      value.overlay === "base" ||
+      (isRecord(value.overlay) &&
+        keys(value.overlay, "named") &&
+        typeof value.overlay.named === "string" &&
+        validBranch(value.overlay.named))
+    ) ||
+    !parseNativeEnvMetadata(value.env_metadata)
+  ) {
+    return refused();
+  }
+  return current;
+}
+/** Remove this run's exact validated source envelope; an absent source is accepted. */
+async function removeRetainedSource(
+  store: Store,
+  path: string,
+  run: string,
+  check: () => Promise<void>
+): Promise<void> {
+  let source: Awaited<ReturnType<typeof readPrivate>>;
+  try {
+    source = await readRetainedSource(store, path, run);
+  } catch (error) {
+    if (hasCode(error, "ENOENT")) {
+      return;
+    }
+    return refused();
+  }
+  await check();
+  const current = await readPrivate(path, SOURCE_LIMIT);
+  if (!sameFile(source.info, current.info) || current.text !== source.text) {
+    return refused();
+  }
+  await unlink(path);
+  await synchronizeDirectories(store.held);
 }
 async function read(store: Store): Promise<NativeAuthoredProjectRunSelection> {
   return await readRecord(store, store.file, selected);
@@ -1092,6 +1137,33 @@ export async function withNativeAuthoredProjectAdmission<T>(
             }
             // If retirement stops here, the durable start continues to block a new run.
             await unchanged(store, store.startFile, expected, started);
+            await check();
+            await unlink(store.startFile);
+            await synchronizeDirectories(store.held);
+          });
+        },
+        async retireUnreserved(input) {
+          const expected = selection(input.expectedStart, started);
+          const run = expected.record.review.provenance.run;
+          if (
+            !(
+              input.refusal instanceof NativeRuntimeRequestError &&
+              input.refusal.nativeCode === NATIVE_GRAPH_UNRESERVED &&
+              HEX32.test(run)
+            ) ||
+            (await loadNativeAuthoredHookOwner(hookStore)) !== null
+          ) {
+            return refused();
+          }
+          const sourcePath = join(store.root.path, `${run}.source.json`);
+          await withMutation(async (check) => {
+            await unchanged(store, store.startFile, expected, started);
+            await absent(store.file);
+            await absent(liveStopPath(store));
+            await removeRetainedSource(store, sourcePath, run, check);
+            // If retirement stops here, the durable start continues to block a new run.
+            await unchanged(store, store.startFile, expected, started);
+            await absent(store.file);
             await check();
             await unlink(store.startFile);
             await synchronizeDirectories(store.held);

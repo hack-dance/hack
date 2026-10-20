@@ -555,6 +555,40 @@ fn valid_network_name(value: &str) -> bool {
                 || matches!(*byte, b'-' | b'_' | b'.')
         })
 }
+/// Stable refusal for a run that never reserved native runtime state.
+#[cfg(target_os = "macos")]
+pub(super) fn unreserved() -> CandidateError {
+    error(
+        "native_graph_unreserved",
+        "Native runtime state for this run was never reserved: its journal is absent and no foreground owner is published. This point-in-time observation does not prove that no consumer can still start; no state was created, repaired or adopted.",
+    )
+}
+/// True only when this run's journal directory is exactly absent beneath private
+/// existing ancestors. A present, partial or unreadable path returns false so the
+/// ordinary receipt validation still owns it. Read-only; nothing is created.
+#[cfg(target_os = "macos")]
+pub(super) fn absent(candidate: &Candidate, run: &str) -> Result<bool, CandidateError> {
+    let root = directory(candidate, run)?;
+    match fs::symlink_metadata(&root) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        _ => return Ok(false),
+    }
+    for path in root
+        .ancestors()
+        .skip(1)
+        .take_while(|path| path.starts_with(&candidate.state_root))
+    {
+        match fs::symlink_metadata(path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Ok(_) => state::check_private_directory(path).map_err(|_| refused())?,
+            Err(_) => return Err(refused()),
+        }
+    }
+    Ok(
+        fs::symlink_metadata(&root)
+            .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound),
+    )
+}
 pub(super) fn directory(candidate: &Candidate, run: &str) -> Result<PathBuf, CandidateError> {
     if !hex(run, 32) {
         return Err(refused());

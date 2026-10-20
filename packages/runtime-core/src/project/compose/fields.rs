@@ -315,117 +315,13 @@ pub(super) fn image(
         diagnostics.push(Diagnostic::error("structural_environment_reference", field, "Image interpolation requires an explicit future value-binding step; ambient environment is not read."));
         return Ok(None);
     }
-    if value.len() > 512
-        || value.is_empty()
-        || !value
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b"._-/:@".contains(&b))
-        || value.contains("://")
-    {
-        return Err(problem(
-            "invalid_image",
-            "Image must be a literal OCI-style reference without URLs, credentials or whitespace.",
-        ));
-    }
-    if let Some((_, digest)) = value.split_once('@') {
-        let Some(digest) = digest.strip_prefix("sha256:") else {
-            return Err(problem(
-                "invalid_image",
-                "Only sha256 image digests are supported.",
-            ));
-        };
-        if digest.len() != 64 || !digest.bytes().all(|b| b.is_ascii_hexdigit()) {
-            return Err(problem("invalid_image", "Invalid image digest."));
-        }
-    }
-    let reference = value.split('@').next().unwrap_or("");
-    if !valid_image_name(reference) {
-        return Err(problem("invalid_image", "Invalid image reference."));
-    }
+    // Plan admission uses the same normalizer as acquisition, so a reference the
+    // provider would refuse as malformed never reaches a VM start. The authored
+    // text is kept in the plan: normalizing it here would re-identify every
+    // existing reviewed plan and enrollment receipt.
+    crate::provider::image_reference::normalize(&value)
+        .map_err(|reason| problem("invalid_image", reason.message()))?;
     Ok(Some(value))
-}
-fn valid_image_name(reference: &str) -> bool {
-    let last = reference.rsplit('/').next().unwrap_or("");
-    let repository = if let Some((_, tag)) = last.rsplit_once(':') {
-        if tag.is_empty()
-            || tag.len() > 128
-            || !tag
-                .bytes()
-                .next()
-                .is_some_and(|b| b.is_ascii_alphanumeric() || b == b'_')
-            || !tag
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b"_.-".contains(&b))
-        {
-            return false;
-        }
-        &reference[..reference.len() - tag.len() - 1]
-    } else {
-        reference
-    };
-    let parts: Vec<_> = repository.split('/').collect();
-    for (index, part) in parts.iter().enumerate() {
-        if index == 0
-            && parts.len() > 1
-            && (part.contains('.') || part.contains(':') || *part == "localhost")
-        {
-            let host = if let Some((host, port)) = part.split_once(':') {
-                if port.parse::<u16>().ok().filter(|p| *p > 0).is_none() {
-                    return false;
-                }
-                host
-            } else {
-                part
-            };
-            if host.is_empty()
-                || !host
-                    .bytes()
-                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b".-".contains(&b))
-            {
-                return false;
-            }
-            continue;
-        }
-        let bytes = part.as_bytes();
-        let mut cursor = 0;
-        while cursor < bytes.len() {
-            let start = cursor;
-            while bytes
-                .get(cursor)
-                .is_some_and(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
-            {
-                cursor += 1;
-            }
-            if start == cursor {
-                return false;
-            }
-            if cursor == bytes.len() {
-                break;
-            }
-            match bytes[cursor] {
-                b'.' => cursor += 1,
-                b'_' => {
-                    cursor += 1;
-                    if bytes.get(cursor) == Some(&b'_') {
-                        cursor += 1;
-                    }
-                }
-                b'-' => {
-                    while bytes.get(cursor) == Some(&b'-') {
-                        cursor += 1;
-                    }
-                }
-                _ => return false,
-            }
-            if cursor == bytes.len() {
-                return false;
-            }
-        }
-        if bytes.is_empty() {
-            return false;
-        }
-    }
-    true
 }
 pub(super) fn number(value: &Value) -> Result<f64, CandidateError> {
     let number = match value {

@@ -1828,6 +1828,7 @@ hack setup <subcommand> [options]
 | `hack setup codex` | Install Codex skill for hack CLI usage |
 | `hack setup agents` | Install AGENTS.md / CLAUDE.md snippets for hack CLI usage |
 | `hack setup sync` | Refresh installed Hack-owned agent integrations |
+| `hack setup migrate` | Preview, apply or roll back moving standalone agent files to the hack plugin |
 | `hack setup mcp` | Install MCP configs for hack CLI usage (no-shell only) |
 
 ### Options
@@ -1968,6 +1969,34 @@ hack setup sync [options]
 | `--install-missing` | Also create missing integrations in the selected scope (default: refresh only installed Hack-owned files) |
 | `--check` | Check whether integration is installed |
 | `--remove` | Remove integration files/config |
+| `--json` | Output JSON (machine-readable) |
+| `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
+| `--help, -h` | Show help |
+| `--version, -v` | Show version |
+
+## `hack setup migrate`
+
+Preview, apply or roll back moving standalone agent files to the hack plugin
+
+### Usage
+
+```bash
+hack setup migrate [options]
+```
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--path, -p <dir>` | Run a project command against a repo path (overrides cwd search) |
+| `--global` | Migrate user-scope files under HOME instead of the project |
+| `--all-scopes` | Migrate both project and user-scope files |
+| `--claude` | Limit to Claude Code files (default: all clients) |
+| `--codex` | Limit to Codex files (default: all clients) |
+| `--cursor` | Limit to Cursor files (default: all clients) |
+| `--skip-plugin-check <clients>` | Treat the plugin as verified for these comma-separated clients (claude, codex, cursor, or all) after checking it loads yourself |
+| `--apply` | Remove the previewed Hack-owned standalone files after backing them up (default: read-only preview) |
+| `--rollback-manifest <manifest>` | Restore the exact files recorded in a migration backup manifest |
 | `--json` | Output JSON (machine-readable) |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |

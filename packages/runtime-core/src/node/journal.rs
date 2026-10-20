@@ -784,4 +784,310 @@ mod tests {
         drop(store);
         std::fs::remove_dir_all(root).unwrap();
     }
+
+    static ROOTS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+    /// A private journal directory owned by one test; removed by the caller.
+    fn test_root(label: &str) -> PathBuf {
+        std::env::temp_dir().canonicalize().unwrap().join(format!(
+            "hack-node-{label}-{}-{}",
+            std::process::id(),
+            ROOTS.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+        ))
+    }
+
+    fn mutation(store: &Store, operation_id: &str, generation: i64) -> Mutation {
+        Mutation {
+            operation_id: operation_id.into(),
+            expected_generation: generation,
+            target: store.target.clone(),
+            principal: unsafe { libc::geteuid() },
+            request_digest: String::new(),
+            required_capabilities: vec!["fixture_jobs_v1".into()],
+        }
+    }
+
+    fn submit(store: &Store, operation_id: &str, generation: i64) -> Request {
+        Request::Submit {
+            version: 1,
+            mutation: mutation(store, operation_id, generation),
+            fixture: "success".into(),
+            queue_timeout_ms: 30_000,
+            execution_timeout_ms: 1000,
+        }
+        .seal()
+        .unwrap()
+    }
+
+    fn cancel(store: &Store, operation_id: &str, generation: i64, job_id: &str) -> Request {
+        Request::Cancel {
+            version: 1,
+            mutation: mutation(store, operation_id, generation),
+            job_id: job_id.into(),
+        }
+        .seal()
+        .unwrap()
+    }
+
+    fn generation(store: &mut Store) -> i64 {
+        store
+            .handle(&Request::Status { version: 1 }, unsafe { libc::geteuid() })
+            .unwrap()["generation"]
+            .as_i64()
+            .unwrap()
+    }
+
+    fn operations(store: &Store) -> i64 {
+        store
+            .connection
+            .query_row("SELECT count(*) FROM operations", [], |r| r.get(0))
+            .unwrap()
+    }
+
+    fn snapshot(store: &Store, id: &str) -> serde_json::Value {
+        serde_json::to_value(store.get(id).unwrap()).unwrap()
+    }
+
+    /// Simulates the scheduler claim and the supervisor's spawn persistence for a
+    /// fixture job without starting a process: only journal transitions are tested.
+    fn mark_running(store: &mut Store, id: &str) {
+        store
+            .update(id, |r| {
+                r.state = "running".into();
+                r.supervisor_pid = Some(1);
+                r.child_pid = Some(1);
+                r.starts += 1;
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn sqlite_full_cancel_and_terminal_publication_leave_prior_receipts_intact() {
+        let uid = unsafe { libc::geteuid() };
+        let root = test_root("full-effects");
+        let mut store = Store::open(&root, true).unwrap();
+        let mut jobs = Vec::new();
+        for index in 0..100 {
+            let accepted = store
+                .handle(&submit(&store, &format!("job-{index}"), index), uid)
+                .unwrap();
+            jobs.push(accepted["job_id"].as_str().unwrap().to_owned());
+        }
+        let running = jobs.pop().unwrap();
+        mark_running(&mut store, &running);
+        // No free pages: every growth below must allocate, so SQLITE_FULL comes from
+        // SQLite's real allocation failure rather than an injected trigger.
+        let free: i64 = store
+            .connection
+            .pragma_query_value(None, "freelist_count", |r| r.get(0))
+            .unwrap();
+        assert_eq!(free, 0);
+        let pages: i64 = store
+            .connection
+            .pragma_query_value(None, "page_count", |r| r.get(0))
+            .unwrap();
+        store
+            .connection
+            .pragma_update(None, "max_page_count", pages)
+            .unwrap();
+
+        // Terminal publication: retained output needs overflow pages. The failed
+        // write must not publish a partial result over the persisted running state.
+        let before = snapshot(&store, &running);
+        let failure = store
+            .update(&running, |r| {
+                r.state = "succeeded".into();
+                r.exit_code = Some(0);
+                r.stdout = "o".repeat(OUTPUT_LIMIT);
+                r.stderr = "e".repeat(OUTPUT_LIMIT);
+                Ok(())
+            })
+            .unwrap_err();
+        assert!(failure.message.contains("full"), "{failure:?}");
+        assert_eq!(snapshot(&store, &running), before);
+
+        // Cancellation: each accepted cancel adds an operation row, so the journal
+        // fills within the queued set. The refused cancel leaves no trace at all.
+        let mut refused = None;
+        for (index, job) in jobs.iter().enumerate() {
+            let expected = 100 + index as i64;
+            let request = cancel(&store, &format!("cancel-{index}"), expected, job);
+            let (before, recorded) = (snapshot(&store, job), operations(&store));
+            match store.handle(&request, uid) {
+                Ok(response) => {
+                    assert_eq!(store.get(job).unwrap().state, "cancelled", "{response}");
+                }
+                Err(failure) => {
+                    assert!(failure.message.contains("full"), "{failure:?}");
+                    assert_eq!(snapshot(&store, job), before);
+                    assert_eq!(store.get(job).unwrap().state, "queued");
+                    assert!(!store.get(job).unwrap().cancel_requested);
+                    assert_eq!(operations(&store), recorded);
+                    assert_eq!(generation(&mut store), expected);
+                    refused = Some((request, job.clone(), expected));
+                    break;
+                }
+            }
+        }
+        let (request, job, expected) =
+            refused.expect("Test must exercise SQLite's actual SQLITE_FULL path for cancel.");
+
+        // Space returns: the same requests now apply exactly once.
+        store
+            .connection
+            .pragma_update(None, "max_page_count", 100_000)
+            .unwrap();
+        let accepted = store.handle(&request, uid).unwrap();
+        assert_eq!(accepted["generation"], expected + 1);
+        assert_eq!(store.handle(&request, uid).unwrap(), accepted);
+        assert_eq!(store.get(&job).unwrap().state, "cancelled");
+        let published = store
+            .update(&running, |r| {
+                r.state = "succeeded".into();
+                r.exit_code = Some(0);
+                r.stdout = "o".repeat(OUTPUT_LIMIT);
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(published.state, "succeeded");
+        assert_eq!(published.starts, 1);
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn cancel_and_completion_serialize_and_terminal_receipts_are_final() {
+        let uid = unsafe { libc::geteuid() };
+        let root = test_root("cancel-race");
+        // Two connections stand in for the node service and a job supervisor process.
+        let mut node = Store::open(&root, true).unwrap();
+        let mut supervisor = Store::open(&root, false).unwrap();
+        let mut ids = Vec::new();
+        for (index, name) in ["completes-first", "cancel-first", "queued"]
+            .iter()
+            .enumerate()
+        {
+            let accepted = node
+                .handle(&submit(&node, name, index as i64), uid)
+                .unwrap();
+            ids.push(accepted["job_id"].as_str().unwrap().to_owned());
+        }
+        let (first, second, queued) = (ids[0].as_str(), ids[1].as_str(), ids[2].as_str());
+        mark_running(&mut supervisor, first);
+        mark_running(&mut supervisor, second);
+
+        // Completion holds the write lock while cancellation arrives. SQLite
+        // serializes them: the cancel waits, then observes a terminal receipt.
+        supervisor
+            .connection
+            .execute_batch("BEGIN IMMEDIATE")
+            .unwrap();
+        let mut completed = read_receipt(&supervisor.connection, first).unwrap();
+        completed.state = "succeeded".into();
+        completed.exit_code = Some(0);
+        write_receipt(&supervisor.connection, &completed).unwrap();
+        let request = cancel(&node, "late-cancel", 3, first);
+        let waiting = std::thread::spawn(move || {
+            let response = node.handle(&request, uid);
+            (node, request, response)
+        });
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        supervisor.connection.execute_batch("COMMIT").unwrap();
+        let (mut node, request, response) = waiting.join().unwrap();
+        let response = response.unwrap();
+        assert_eq!(response["generation"], 4);
+        let terminal = snapshot(&node, first);
+        assert_eq!(terminal["state"], "succeeded");
+        assert_eq!(terminal["cancel_requested"], false, "{terminal}");
+        assert_eq!(node.handle(&request, uid).unwrap(), response);
+        let late = supervisor
+            .update(first, |r| {
+                r.state = "cancelled".into();
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(late.state, "succeeded");
+        assert_eq!(snapshot(&node, first), terminal);
+
+        // Cancellation commits first while the child runs: it is recorded as a
+        // request, never as an achieved cancellation. The owner's natural-exit
+        // result stays truthful and later cancels cannot rewrite it.
+        node.handle(&cancel(&node, "early-cancel", 4, second), uid)
+            .unwrap();
+        let requested = node.get(second).unwrap();
+        assert_eq!(requested.state, "running");
+        assert!(requested.cancel_requested);
+        let natural = supervisor
+            .update(second, |r| {
+                r.state = "succeeded".into();
+                r.exit_code = Some(0);
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(natural.state, "succeeded");
+        node.handle(&cancel(&node, "after-exit", 5, second), uid)
+            .unwrap();
+        assert_eq!(
+            snapshot(&node, second),
+            serde_json::to_value(&natural).unwrap()
+        );
+
+        // A queued cancel is terminal at once; a racing scheduler claim cannot
+        // move it to preparing or start it.
+        node.handle(&cancel(&node, "queued-cancel", 6, queued), uid)
+            .unwrap();
+        let claim = supervisor
+            .update(queued, |r| {
+                r.state = "preparing".into();
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(claim.state, "cancelled");
+        assert_eq!(node.get(queued).unwrap().starts, 0);
+        assert_eq!(generation(&mut node), 7);
+        drop((node, supervisor));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn reopened_journal_preserves_receipts_generation_and_retry_identity() {
+        let uid = unsafe { libc::geteuid() };
+        let root = test_root("reopen");
+        let mut store = Store::open(&root, true).unwrap();
+        let target = store.target.clone();
+        let request = submit(&store, "survives", 0);
+        let accepted = store.handle(&request, uid).unwrap();
+        let id = accepted["job_id"].as_str().unwrap().to_owned();
+        mark_running(&mut store, &id);
+        store
+            .update(&id, |r| {
+                r.state = "failed".into();
+                r.exit_code = Some(23);
+                r.stderr = "fixture failure\n".into();
+                Ok(())
+            })
+            .unwrap();
+        let cancel_request = cancel(&store, "late-cancel", 1, &id);
+        let cancelled = store.handle(&cancel_request, uid).unwrap();
+        let receipt = snapshot(&store, &id);
+        drop(store);
+
+        // An in-process restart: the only surviving state is the committed journal.
+        let mut reopened = Store::open(&root, false).unwrap();
+        assert_eq!(reopened.target, target);
+        assert_eq!(snapshot(&reopened, &id), receipt);
+        assert_eq!(generation(&mut reopened), 2);
+        assert_eq!(reopened.handle(&request, uid).unwrap(), accepted);
+        assert_eq!(reopened.handle(&cancel_request, uid).unwrap(), cancelled);
+        assert_eq!(snapshot(&reopened, &id), receipt);
+        assert_eq!(generation(&mut reopened), 2);
+        assert_eq!(reopened.get(&id).unwrap().starts, 1);
+        drop(reopened);
+        let mut inspect = Store::inspect(&root).unwrap();
+        assert_eq!(snapshot(&inspect, &id), receipt);
+        assert_eq!(generation(&mut inspect), 2);
+        drop(inspect);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }

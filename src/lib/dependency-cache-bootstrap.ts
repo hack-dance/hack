@@ -2,6 +2,7 @@ import {
   composeRuntimeBackend,
   type RuntimeBaseOptions,
 } from "../backends/runtime-backend.ts";
+import { COMPOSE_STARTUP_TIMEOUT_ENV } from "./compose-startup-budget.ts";
 
 const BOOTSTRAP_TIMEOUT_MS = 600_000;
 
@@ -44,7 +45,10 @@ export function dependencyCacheBootstrapFailure(opts: {
   return opts.code === 124
     ? {
         code: "E_STARTUP_TIMEOUT",
-        message: `Dependency cache initialization exceeded its startup budget of ${opts.timeoutMs ?? BOOTSTRAP_TIMEOUT_MS} ms; consumers were not changed`,
+        message:
+          opts.timeoutMs === undefined
+            ? `Dependency cache initialization exceeded its startup budget of ${BOOTSTRAP_TIMEOUT_MS} ms (phase: dependency cache initialization; fixed for foreground and consumer runs); consumers were not changed`
+            : `Dependency cache initialization exceeded its startup budget of ${opts.timeoutMs} ms (phase: dependency cache initialization, including any installer image pull; raise ${COMPOSE_STARTUP_TIMEOUT_ENV}=<ms> on the host invocation); consumers were not changed`,
       }
     : {
         code: "E_DEPENDENCY_BOOTSTRAP_FAILED",

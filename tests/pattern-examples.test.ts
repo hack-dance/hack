@@ -15,29 +15,37 @@ import {
   findProjectContextAtRoot,
   readProjectConfig,
 } from "../src/lib/project.ts";
+import { resolveProjectEnvConfig } from "../src/lib/project-env-config.ts";
 import { renderProjectConfigSchemaJson } from "../src/templates.ts";
+import { ALL_SCENARIOS } from "./e2e/run.ts";
+import { E2E_DURATION_HINTS_SECONDS } from "./e2e/shard.ts";
 import {
   extractHackInvocations,
   findGuidanceCommandIssues,
 } from "./helpers/cli-guidance-commands.ts";
 import { validateJsonSchemaSubset } from "./helpers/json-schema-subset.ts";
 import {
+  e2eRegistrationIssues,
   exampleReferenceIssues,
+  overlayIssues,
   readmeServiceIssues,
   toolchainServiceIssues,
 } from "./helpers/pattern-fixtures.ts";
 import { bannedRecipeFindings } from "./helpers/pattern-recipes.ts";
 
 /**
- * Static validation of the HACK-P01/P02 example fixtures. Nothing here starts
- * containers or contacts Docker; the dependency-cache resolution runs against
- * a temporary copy so generated `.hack/.internal` files never land in the
- * repository.
+ * Static validation of the HACK-P01/P02/P07 example fixtures. Nothing here
+ * starts containers or contacts Docker; the dependency-cache and env
+ * resolution run against temporary copies so generated `.hack/.internal`
+ * files never land in the repository. The Docker-tier scenarios that start
+ * these fixtures live in tests/e2e/scenarios/pattern-*.ts.
  */
 
 const REPO_ROOT = join(import.meta.dir, "..");
 const P01_DIR = "examples/patterns/p01-dependency-bootstrap";
 const P02_DIR = "examples/patterns/p02-portable-toolchain";
+const P07_DIR = "examples/patterns/p07-capability-overlays";
+const EXAMPLE_CARDS = ["HACK-P01", "HACK-P02", "HACK-P07"] as const;
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -130,9 +138,10 @@ async function resolveP01Cache(opts: {
   });
 }
 
-test("P01 and P02 reference their example fixtures and every fixture belongs to a card", async () => {
+test("P01, P02 and P07 reference their example fixtures and every fixture belongs to a card", async () => {
   expect(card("HACK-P01").example).toBe(P01_DIR);
   expect(card("HACK-P02").example).toBe(P02_DIR);
+  expect(card("HACK-P07").example).toBe(P07_DIR);
   expect(
     await exampleReferenceIssues({
       repoRoot: REPO_ROOT,
@@ -184,7 +193,7 @@ test("negative control: a broken, shared or escaping example reference fails", a
 });
 
 test("each fixture's hack.config.json validates against the project schema and parser", async () => {
-  for (const id of ["HACK-P01", "HACK-P02"]) {
+  for (const id of EXAMPLE_CARDS) {
     const dir = exampleDir(id);
     const config = await readConfigJson(dir);
     expect(
@@ -392,7 +401,7 @@ test("negative control: breaking the P02 toolchain contract fails", async () => 
 });
 
 test("every hack command in the fixture READMEs resolves in CLI_SPEC and names real services", async () => {
-  for (const id of ["HACK-P01", "HACK-P02"]) {
+  for (const id of EXAMPLE_CARDS) {
     const dir = exampleDir(id);
     const readme = await readText(dir, "README.md");
     const compose = await readCompose(dir);
@@ -459,4 +468,180 @@ test("negative control: an invalid README command or service reference fails", a
   expect(
     bannedRecipeFindings(`${readme}\n    command: sleep infinity\n`)
   ).toEqual(["placeholder-liveness-sleep"]);
+});
+
+async function readEnvFile(dir: string, overlay: string): Promise<unknown> {
+  return YAML.parse(await readText(dir, `.hack/hack.env.${overlay}.yaml`));
+}
+
+async function readP07Overlays(dir: string) {
+  return {
+    base: await readEnvFile(dir, "default"),
+    overlays: {
+      laptop: await readEnvFile(dir, "laptop"),
+      runner: await readEnvFile(dir, "runner"),
+    },
+  };
+}
+
+test("P07 overlays express only capability differences over one shared topology", async () => {
+  const dir = exampleDir("HACK-P07");
+  expect(overlayIssues(await readP07Overlays(dir))).toEqual([]);
+
+  // The real resolver sees the same split: shared values from the base file,
+  // capabilities only from the selected overlay.
+  const projectRoot = await copyExample("HACK-P07");
+  const resolve = async (envName: string | null) => {
+    const resolved = await resolveProjectEnvConfig({
+      projectRoot,
+      projectDir: join(projectRoot, ".hack"),
+      envName,
+      serviceNames: ["api", "upstream"],
+    });
+    if (!resolved) {
+      throw new Error("missing resolved env");
+    }
+    return resolved.serviceEnv.api ?? {};
+  };
+  const shared = {
+    UPSTREAM_URL: "http://upstream:4000",
+    UPSTREAM_TIMEOUT_MS: "3000",
+  };
+  expect(await resolve("laptop")).toEqual({
+    ...shared,
+    AUTH_MODE: "browser-session",
+    BROWSER_SIGN_IN: "allowed",
+    HELPER_MODE: "host-helper",
+  });
+  expect(await resolve("runner")).toEqual({
+    ...shared,
+    AUTH_MODE: "machine-identity",
+    BROWSER_SIGN_IN: "disabled",
+    HELPER_MODE: "none",
+  });
+  // Base layers alone carry no auth capability, so the app refuses to start.
+  expect(await resolve(null)).toEqual(shared);
+
+  // Both overlays start the same services with the same commands.
+  const compose = await readCompose(dir);
+  expect(Object.keys(compose.services as object).sort()).toEqual([
+    "api",
+    "upstream",
+  ]);
+  expect(service(compose, "api").depends_on).toEqual({
+    upstream: { condition: "service_healthy" },
+  });
+  expect(service(compose, "api").environment).toBeUndefined();
+});
+
+test("negative control: an overlay that changes topology or drifts is refused", async () => {
+  const { base, overlays } = await readP07Overlays(exampleDir("HACK-P07"));
+  const globals = (document: unknown): Record<string, unknown> => {
+    const values = isRecord(document) ? document.values : undefined;
+    const global = isRecord(values) ? values.global : undefined;
+    if (!isRecord(global)) {
+      throw new Error("overlay without global values");
+    }
+    return global;
+  };
+  const runner = (opts: {
+    readonly environment?: string;
+    readonly global: Record<string, unknown>;
+  }) => ({
+    base,
+    overlays: {
+      laptop: overlays.laptop,
+      runner: {
+        version: 1,
+        environment: opts.environment ?? "runner",
+        secretsprovider: "project_key",
+        values: { global: opts.global },
+      },
+    },
+  });
+  const runnerGlobal = globals(overlays.runner);
+  // Baseline: rebuilding the runner overlay unchanged passes.
+  expect(overlayIssues(runner({ global: { ...runnerGlobal } }))).toEqual([]);
+  expect(
+    overlayIssues(
+      runner({
+        global: { ...runnerGlobal, UPSTREAM_URL: "http://localhost:4000" },
+      })
+    )
+  ).toEqual(["runner: overrides-shared-key", "overlay-key-sets-differ"]);
+  const { BROWSER_SIGN_IN: _dropped, ...withoutSignIn } = runnerGlobal;
+  expect(overlayIssues(runner({ global: withoutSignIn }))).toEqual([
+    "overlay-key-sets-differ",
+  ]);
+  expect(
+    overlayIssues(
+      runner({
+        global: { ...runnerGlobal, AUTH_MODE: { secure: "v1:ciphertext" } },
+      })
+    )
+  ).toEqual(["runner: non-plaintext-capability"]);
+  expect(
+    overlayIssues(
+      runner({ environment: "laptop", global: { ...runnerGlobal } })
+    )
+  ).toEqual(["runner: environment-mismatch"]);
+  expect(
+    overlayIssues({ base, overlays: { laptop: overlays.laptop } })
+  ).toEqual(["fewer-than-two-overlays"]);
+  expect(overlayIssues({ base: {}, overlays })).toEqual([
+    "base-without-shared-values",
+  ]);
+});
+
+test("each example card names a registered, hinted Docker-tier E2E scenario", () => {
+  expect(
+    EXAMPLE_CARDS.map((id) => card(id).e2eScenario).every(
+      (name) => typeof name === "string"
+    )
+  ).toBe(true);
+  expect(
+    e2eRegistrationIssues({
+      cards: PATTERN_CATALOGUE,
+      scenarios: ALL_SCENARIOS,
+      hints: E2E_DURATION_HINTS_SECONDS,
+    })
+  ).toEqual([]);
+});
+
+test("negative control: an unregistered, local-tier or unhinted scenario is reported", () => {
+  const withScenario = (id: string, e2eScenario: string | null) =>
+    PATTERN_CATALOGUE.map((entry) =>
+      entry.id === id ? { ...entry, e2eScenario } : entry
+    );
+  const check = (opts: {
+    readonly cards?: readonly PatternCard[];
+    readonly scenarios?: readonly { name: string; tier: string }[];
+    readonly hints?: Readonly<Record<string, number>>;
+  }) =>
+    e2eRegistrationIssues({
+      cards: opts.cards ?? PATTERN_CATALOGUE,
+      scenarios: opts.scenarios ?? ALL_SCENARIOS,
+      hints: opts.hints ?? E2E_DURATION_HINTS_SECONDS,
+    });
+  expect(
+    check({ cards: withScenario("HACK-P01", "missing-scenario") })
+  ).toEqual(["HACK-P01: scenario-not-registered"]);
+  expect(check({ cards: withScenario("HACK-P02", null) })).toEqual([
+    "HACK-P02: scenario-not-registered",
+  ]);
+  expect(check({ cards: withScenario("HACK-P03", "init") })).toEqual([
+    "HACK-P03: scenario-without-example",
+  ]);
+  const p07 = card("HACK-P07").e2eScenario ?? "";
+  expect(
+    check({
+      scenarios: ALL_SCENARIOS.map((entry) =>
+        entry.name === p07 ? { ...entry, tier: "local" } : entry
+      ),
+    })
+  ).toEqual(["HACK-P07: scenario-not-docker-tier"]);
+  const { [p07]: _removed, ...unhinted } = E2E_DURATION_HINTS_SECONDS;
+  expect(check({ hints: unhinted })).toEqual([
+    "HACK-P07: scenario-without-duration-hint",
+  ]);
 });

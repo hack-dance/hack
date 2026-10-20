@@ -23,6 +23,8 @@ struct Relay {
     child: Child,
     root: PathBuf,
     socket: PathBuf,
+    /// The TCP port a `--publish` publisher reported or was given; None otherwise.
+    port: Option<u16>,
 }
 impl Relay {
     fn start(port: u16, idle: u32) -> Self {
@@ -93,6 +95,7 @@ impl Relay {
             child,
             root,
             socket,
+            port: None,
         }
     }
     fn connect(&self) -> UnixStream {
@@ -576,9 +579,6 @@ fn malformed_reservations_refuse_before_socket_creation() {
     fs::remove_dir_all(root).unwrap();
 }
 
-fn publisher(socket: &std::path::Path, token: &str, port: u16) -> Relay {
-    controlled_publisher(socket, token, port, None)
-}
 fn controlled_publisher(
     socket: &std::path::Path,
     token: &str,
@@ -676,9 +676,15 @@ fn try_frontend_publisher(
     startup.child = Some(command.stdout(Stdio::piped()).spawn().unwrap());
     let mut output = startup.child.as_mut().unwrap().stdout.take().unwrap();
     let deadline = Instant::now() + Duration::from_secs(3);
-    let expected = b"ready\n";
+    // Port 0 asks a TCP publisher to bind an ephemeral port and report it as
+    // "ready <port>\n"; every other form keeps the bare "ready\n" line.
+    let ephemeral = port == 0 && !unix;
+    let mut line = Vec::with_capacity(READINESS_LIMIT);
     // Read one byte per readiness notification: no unbounded read_line after POLLIN.
-    for expected_byte in expected {
+    while line.last() != Some(&b'\n') {
+        if line.len() == READINESS_LIMIT {
+            return Err(startup.failure("readiness marker"));
+        }
         loop {
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
@@ -705,19 +711,55 @@ fn try_frontend_publisher(
             }
             let mut byte = [0];
             match output.read(&mut byte) {
-                Ok(1) if byte[0] == *expected_byte => break,
+                Ok(1) => {
+                    line.push(byte[0]);
+                    break;
+                }
                 Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
                 Ok(0) => return Err(startup.failure("readiness EOF")),
                 _ => return Err(startup.failure("readiness marker")),
             }
         }
     }
+    let published = match (ephemeral, line.as_slice()) {
+        (false, b"ready\n") => (!unix).then_some(port),
+        (true, reported) => match parse_reported_port(reported) {
+            Some(reported) => Some(reported),
+            None => return Err(startup.failure("readiness marker")),
+        },
+        _ => return Err(startup.failure("readiness marker")),
+    };
     let root = std::mem::take(&mut startup.root);
     Ok(Relay {
         child: startup.child.take().unwrap(),
         socket: root.join(if unix { "frontend.sock" } else { "unused" }),
         root,
+        port: published,
     })
+}
+
+/// "ready 65535\n" is the longest valid readiness line.
+const READINESS_LIMIT: usize = 12;
+
+/// Parses "ready <port>\n" with a canonical, nonzero decimal port.
+fn parse_reported_port(line: &[u8]) -> Option<u16> {
+    let digits = line.strip_prefix(b"ready ")?.strip_suffix(b"\n")?;
+    if digits.is_empty() || digits[0] == b'0' || !digits.iter().all(u8::is_ascii_digit) {
+        return None;
+    }
+    std::str::from_utf8(digits).ok()?.parse::<u16>().ok()
+}
+
+/// Starts a TCP publisher on a kernel-chosen port that stays bound from the
+/// publisher's bind() onward, so parallel tests cannot take it first.
+fn ephemeral_publisher(
+    socket: &std::path::Path,
+    token: &str,
+    control_token: Option<&str>,
+) -> (Relay, u16) {
+    let publication = controlled_publisher(socket, token, 0, control_token);
+    let port = publication.port.expect("TCP publication reports its port");
+    (publication, port)
 }
 
 #[test]
@@ -758,12 +800,73 @@ fn publisher_startup_reports_port_conflict_and_reaps_child() {
     assert!(upstream.socket.exists());
 }
 
-fn free_loopback_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
+#[test]
+fn ephemeral_publication_reports_its_bound_port_and_explicit_ports_keep_bare_ready() {
+    let backend = TcpListener::bind("127.0.0.1:0").unwrap();
+    let token = "dddddddddddddddddddddddddddddddd";
+    let guard = Relay::start_options(
+        backend.local_addr().unwrap().port(),
+        10000,
+        None,
+        Some(token),
+        None,
+    );
+    // Only the exact `--publish 0` form selects an ephemeral port.
+    for (mode, endpoint) in [("--publish", "00"), ("--publish-unix", "0")] {
+        let refused = Command::new(BINARY)
+            .args([mode, endpoint])
+            .arg(&guard.socket)
+            .args([token, "10000"])
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        assert_eq!(refused.status.code(), Some(64), "{mode} {endpoint}");
+        assert!(refused.stdout.is_empty());
+    }
+    let refused = Command::new(BINARY)
+        .arg(guard.root.join("relay-port-zero.sock"))
+        .args(["127.0.0.1", "0", "1000"])
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert_eq!(refused.status.code(), Some(64));
+    assert!(!guard.root.join("relay-port-zero.sock").exists());
+
+    let (mut first, first_port) = ephemeral_publisher(&guard.socket, token, None);
+    let (mut second, second_port) = ephemeral_publisher(&guard.socket, token, None);
+    assert_ne!(first_port, second_port);
+    for port in [first_port, second_port] {
+        // The reported port is the publisher's live listener, not a released probe.
+        assert_eq!(
+            TcpListener::bind(("127.0.0.1", port)).unwrap_err().kind(),
+            io::ErrorKind::AddrInUse
+        );
+        std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+    }
+    first.stop();
+    second.stop();
+
+    // Explicit ports keep the bare "ready\n" line for existing callers. Picking a
+    // concrete port needs a released probe, so retry only on the publisher's
+    // confirmed bind refusal (no readiness line, exit 73) and never otherwise.
+    let mut attempts = 0;
+    let explicit = loop {
+        attempts += 1;
+        let probe = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = probe.local_addr().unwrap().port();
+        drop(probe);
+        match try_frontend_publisher(&guard.socket, token, port, None, false) {
+            Ok(publication) => break publication,
+            Err(failure)
+                if attempts < 3
+                    && failure.stage == "readiness EOF"
+                    && failure.status.and_then(|status| status.code()) == Some(73) => {}
+            Err(failure) => panic!("explicit-port publisher refused: {failure:?}"),
+        }
+    };
+    let port = explicit.port.expect("explicit TCP port recorded");
+    std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+    assert!(guard.socket.exists());
 }
 
 #[test]
@@ -777,8 +880,7 @@ fn loopback_publication_streams_without_exposing_handshake_and_releases_port() {
         Some(token),
         None,
     );
-    let port = free_loopback_port();
-    let mut publication = publisher(&guard.socket, token, port);
+    let (mut publication, port) = ephemeral_publisher(&guard.socket, token, None);
     let payload = vec![0x5a; 2 * 1024 * 1024];
     let expected = payload.clone();
     let worker = thread::spawn(move || {
@@ -835,8 +937,7 @@ fn publisher_refuses_port_conflicts_and_stale_reused_upstream() {
         Some(73)
     );
     assert!(std::net::TcpStream::connect(("127.0.0.1", busy_port)).is_ok());
-    let port = free_loopback_port();
-    let _publication = publisher(&guard.socket, old, port);
+    let (_publication, port) = ephemeral_publisher(&guard.socket, old, None);
     guard.stop();
     let _replacement = Relay::start_options(
         backend.local_addr().unwrap().port(),
@@ -915,17 +1016,27 @@ fn publisher_refuses_nonprivate_or_aliased_upstream_before_listening() {
     fs::create_dir(&root).unwrap();
     let path = root.join("socket");
     let _listener = UnixListener::bind(&path).unwrap();
-    let port = free_loopback_port();
+    // Hold the requested port for the whole test: a publisher that reached bind()
+    // would exit 73 on it, so exit 78 proves the refusal precedes listening without
+    // probing a released port that a parallel test could have taken.
+    let occupied = TcpListener::bind("127.0.0.1:0").unwrap();
+    occupied.set_nonblocking(true).unwrap();
+    let port = occupied.local_addr().unwrap().port();
     let attempt = |upstream: &std::path::Path| {
         let result = Command::new(BINARY)
             .arg("--publish")
             .arg(port.to_string())
             .arg(upstream)
             .args(["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "10000"])
-            .status()
+            .stdin(Stdio::null())
+            .output()
             .unwrap();
-        assert_eq!(result.code(), Some(78));
-        assert!(std::net::TcpStream::connect(("127.0.0.1", port)).is_err());
+        assert_eq!(result.status.code(), Some(78));
+        assert!(result.stdout.is_empty());
+        assert_eq!(
+            occupied.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
     };
     fs::set_permissions(&path, fs::Permissions::from_mode(0o777)).unwrap();
     attempt(&path);
@@ -955,8 +1066,7 @@ fn private_control_stops_only_matching_publisher_and_preserves_replaced_path() {
     fs::set_permissions(&upstream, fs::Permissions::from_mode(0o700)).unwrap();
     let token = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     for replace in [false, true] {
-        let port = free_loopback_port();
-        let mut publication = controlled_publisher(&upstream, token, port, Some(token));
+        let (mut publication, port) = ephemeral_publisher(&upstream, token, Some(token));
         let path = publication.root.join("control.sock");
         assert_eq!(
             fs::metadata(&path).unwrap().permissions().mode() & 0o777,
@@ -1030,44 +1140,34 @@ fn control_startup_refuses_occupied_and_nonprivate_paths_without_retaining_publi
     fs::write(&control, b"foreign").unwrap();
     let control_identity = fs::symlink_metadata(&control).unwrap();
     let frontend = root.join("frontend");
-    // The TCP leg publishes on a port that free_loopback_port() has already
-    // released, so a parallel test may re-take it before the relay binds and the
-    // relay then exits 73 at bind instead of reaching the control path. Retry a
-    // bounded number of times on a fresh port; the 70/78 expectations stay exact.
-    const PORT_ATTEMPTS: u32 = 3;
     for unix in [false, true] {
         for (mode, expected_exit) in [(0o700, 70), (0o755, 78)] {
             fs::set_permissions(&root, fs::Permissions::from_mode(mode)).unwrap();
-            let mut attempt = 1;
-            let (pid, output) = loop {
-                let mut command = Command::new(BINARY);
-                command
-                    .arg(if unix { "--publish-unix" } else { "--publish" })
-                    .arg(if unix {
-                        frontend.as_os_str().to_owned()
-                    } else {
-                        free_loopback_port().to_string().into()
-                    })
-                    .arg(&upstream)
-                    .args(["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "10000", "--control"])
-                    .arg(&control)
-                    .arg("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
-                    .stdin(Stdio::null())
-                    .stdout(Stdio::piped())
-                    .stderr(Stdio::piped());
-                let child = command.spawn().unwrap();
-                let pid = child.id();
-                let output = child.wait_with_output().unwrap();
-                if !unix && output.status.code() == Some(73) && attempt < PORT_ATTEMPTS {
-                    attempt += 1;
-                    continue;
-                }
-                break (pid, output);
-            };
+            let mut command = Command::new(BINARY);
+            command
+                .arg(if unix { "--publish-unix" } else { "--publish" })
+                // TCP port 0 binds an ephemeral port inside the publisher, so the TCP
+                // leg always reaches the control path instead of racing a parallel
+                // test for a released port and exiting 73 at bind.
+                .arg(if unix {
+                    frontend.as_os_str().to_owned()
+                } else {
+                    "0".into()
+                })
+                .arg(&upstream)
+                .args(["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "10000", "--control"])
+                .arg(&control)
+                .arg("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+            let child = command.spawn().unwrap();
+            let pid = child.id();
+            let output = child.wait_with_output().unwrap();
             assert_eq!(
                 output.status.code(),
                 Some(expected_exit),
-                "unix={unix} mode={mode:o} attempt={attempt}"
+                "unix={unix} mode={mode:o}"
             );
             assert!(output.stdout.is_empty());
             let mut status = 0;

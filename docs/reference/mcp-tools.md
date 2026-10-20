@@ -212,7 +212,9 @@ provisional; see the [AX target and result contract](./ax-target-result-contract
   given, so the CLI owns every resolution refusal (for example
   `conflicting_selectors`) and the MCP result matches the CLI exactly.
 - `data` is the CLI's JSON envelope, re-validated against the contract, or
-  `null` when the output does not match it. `stdout` is always `""`, because
+  `null` when the output does not match it. A detail-less error is accepted
+  only as a parser `E_USAGE` refusal, so an `E_UNEXPECTED` fault message never
+  reaches `data`. `stdout` is always `""`, because
   `data` carries the same envelope. `stderr` is returned as captured.
 - The command never probes the engine, writes the registry or changes Git.
 

@@ -48,6 +48,9 @@ type Fixture = {
   /** MCP client whose CLI command is a stub that prints `fake-envelope.json`. */
   readonly stubClient: Client;
   readonly cliEnv: Record<string, string>;
+  /** Registry bytes and mtime exactly as written before any CLI run. */
+  readonly registryText: string;
+  readonly registryMtimeMs: number;
 };
 
 let fixture: Fixture;
@@ -216,6 +219,19 @@ beforeAll(async () => {
     join(oversized, ".hack", "docker-compose.yml"),
     `services:\n  api:\n    image: busybox\n#${"x".repeat(OVERSIZED_INPUT_BYTES)}\n`
   );
+  // Unreadable inputs: a directory where the Compose file belongs, and a
+  // Compose file with no read permission. Their OS errors carry the path.
+  const dirCompose = join(root, "dir-compose");
+  await writeProject({ repo: dirCompose, name: "dir", services: ["api"] });
+  await rm(join(dirCompose, ".hack", "docker-compose.yml"));
+  await mkdir(join(dirCompose, ".hack", "docker-compose.yml"));
+  const lockedCompose = join(root, "locked-compose");
+  await writeProject({
+    repo: lockedCompose,
+    name: "locked",
+    services: ["api"],
+  });
+  await chmod(join(lockedCompose, ".hack", "docker-compose.yml"), 0o000);
 
   await mkdir(join(root, "outside"), { recursive: true });
 
@@ -251,6 +267,8 @@ beforeAll(async () => {
     })}\n`
   );
   await rm(moved, { recursive: true, force: true });
+  const registryText = await readFile(join(state, "projects.json"), "utf8");
+  const registryMtimeMs = (await stat(join(state, "projects.json"))).mtimeMs;
 
   const wrapper = join(root, "hack-source-cli");
   await writeFile(
@@ -294,7 +312,17 @@ beforeAll(async () => {
   await stubServer.connect(stubServerTransport);
   await stubClient.connect(stubClientTransport);
 
-  fixture = { root, state, alpha, beta, client, stubClient, cliEnv };
+  fixture = {
+    root,
+    state,
+    alpha,
+    beta,
+    client,
+    stubClient,
+    cliEnv,
+    registryText,
+    registryMtimeMs,
+  };
 }, CASE_TIMEOUT_MS);
 
 afterAll(async () => {
@@ -583,6 +611,31 @@ describe("paired CLI/MCP target fixtures", () => {
   );
 
   test(
+    "an unreadable input is a closed refusal without the OS message or path",
+    async () => {
+      const path = join(fixture.root, "dir-compose");
+      expectRefusal(await inspectBoth({ path }), "input_unreadable");
+      const cli = await runCli({ path });
+      expect(JSON.stringify(cli.envelope)).not.toContain(fixture.root);
+      expect(JSON.stringify(cli.envelope)).not.toContain("EISDIR");
+    },
+    CASE_TIMEOUT_MS
+  );
+
+  // Root reads a mode-000 file, so the permission fault cannot be produced.
+  test.skipIf(process.getuid?.() === 0)(
+    "a permission-denied input is a closed refusal without the OS message",
+    async () => {
+      const path = join(fixture.root, "locked-compose");
+      expectRefusal(await inspectBoth({ path }), "input_permission_denied");
+      const cli = await runCli({ path });
+      expect(JSON.stringify(cli.envelope)).not.toContain(fixture.root);
+      expect(JSON.stringify(cli.envelope)).not.toContain("EACCES");
+    },
+    CASE_TIMEOUT_MS
+  );
+
+  test(
     "two registrations that own one checkout are refused as ambiguous",
     async () => {
       expectRefusal(
@@ -698,9 +751,11 @@ describe("paired CLI/MCP target fixtures", () => {
   test(
     "inspection writes nothing: no registry, state or Git change",
     async () => {
+      // The baseline is the registry as beforeAll wrote it, not as it is now:
+      // every earlier paired case already ran the CLI (directly and through
+      // MCP) against this HACK_HOME, so a last-seen touch made by any of them
+      // would already be in a baseline read here and go unnoticed.
       const registryPath = join(fixture.state, "projects.json");
-      const before = await readFile(registryPath, "utf8");
-      const beforeStat = await stat(registryPath);
       const worktreesBefore = runGit({
         cwd: fixture.alpha,
         home: join(fixture.root, "user-home"),
@@ -708,8 +763,8 @@ describe("paired CLI/MCP target fixtures", () => {
       });
       await runCli({ projectName: "alpha", branch: "fresh-instance" });
       await runCli({ path: join(fixture.root, "alpha-login") });
-      expect(await readFile(registryPath, "utf8")).toBe(before);
-      expect((await stat(registryPath)).mtimeMs).toBe(beforeStat.mtimeMs);
+      expect(await readFile(registryPath, "utf8")).toBe(fixture.registryText);
+      expect((await stat(registryPath)).mtimeMs).toBe(fixture.registryMtimeMs);
       // Only the registry and the MCP audit log exist in the state dir.
       expect((await readdir(fixture.state)).sort()).toEqual([
         "mcp-audit.log",
@@ -774,10 +829,45 @@ describe("MCP adapter re-validation", () => {
           error: { ...refusal.error, message: "drifted text" },
         })
       ).toBeNull();
+      // A detail-less fault outside the catalogue carries free OS text.
+      expect(
+        await stubbedData({
+          ok: false,
+          error: {
+            code: "E_UNEXPECTED",
+            message: "EACCES: permission denied, open '/x/.hack/y.yml'",
+          },
+        })
+      ).toBeNull();
+      // Success data that claims authority or a runtime observation.
+      const valid = await validSuccessEnvelope();
+      expect(await stubbedData(valid)).toEqual(valid);
+      expect(
+        await stubbedData({
+          ok: true,
+          data: { ...valid.data, authority: "owner" },
+        })
+      ).toBeNull();
     },
     CASE_TIMEOUT_MS
   );
 });
+
+/** A real success envelope from the inspector, for validator mutations. */
+async function validSuccessEnvelope(): Promise<{
+  readonly ok: true;
+  readonly data: Record<string, unknown>;
+}> {
+  const result = await inspectTarget({
+    cwd: fixture.root,
+    registryPath: join(fixture.state, "projects.json"),
+    selector: { path: fixture.beta },
+  });
+  if (!result.ok) {
+    throw new Error(`expected a target, got ${JSON.stringify(result)}`);
+  }
+  return { ok: true, data: { ...result.data } };
+}
 
 describe("target inspector domain", () => {
   test("a config change during the read is refused, not snapshotted", async () => {
@@ -876,5 +966,40 @@ describe("target inspector domain", () => {
         data: { schema: "hack.target.v1" },
       })
     ).toBeNull();
+  });
+
+  test("the adapter validator only passes parser E_USAGE without detail", () => {
+    const usage = {
+      ok: false,
+      error: { code: "E_USAGE", message: "Unknown option '--x'." },
+    };
+    expect<unknown>(parseTargetInspectEnvelope(usage)).toEqual(usage);
+    for (const code of ["E_UNEXPECTED", "E_PERMISSION", "E_CONFIG_INVALID"]) {
+      expect(
+        parseTargetInspectEnvelope({
+          ok: false,
+          error: { code, message: "EISDIR: illegal operation on a directory" },
+        })
+      ).toBeNull();
+    }
+  });
+
+  test("the adapter validator refuses data that claims authority or readiness", async () => {
+    const valid = await validSuccessEnvelope();
+    expect<unknown>(parseTargetInspectEnvelope(valid)).toEqual(valid);
+    const patched = (patch: Record<string, unknown>) =>
+      parseTargetInspectEnvelope({
+        ok: true,
+        data: { ...valid.data, ...patch },
+      });
+    expect(patched({ authority: "owner" })).toBeNull();
+    expect(patched({ authority: undefined })).toBeNull();
+    expect(
+      patched({ runtime: { observed: true, reason: "not_probed" } })
+    ).toBeNull();
+    expect(
+      patched({ runtime: { observed: false, reason: "probed" } })
+    ).toBeNull();
+    expect(patched({ runtime: null })).toBeNull();
   });
 });

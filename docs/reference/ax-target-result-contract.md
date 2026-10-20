@@ -154,6 +154,14 @@ fixed text that never repeats caller input, paths or registry values.
 | `stale_generation` | `E_USAGE` | `generation` | `reinspect` |
 | `generation_changed_during_read` | `E_USAGE` | `generation` | `reinspect` |
 | `generation_input_too_large` | `E_CONFIG_INVALID` | `generation` | `fix_project` |
+| `input_permission_denied` | `E_PERMISSION` | `project` | `fix_project` |
+| `input_unreadable` | `E_CONFIG_INVALID` | `project` | `fix_project` |
+
+A filesystem fault while reading an input (for example a Compose file with no
+read permission, or a directory where a config file belongs) is reported as
+`input_permission_denied` (`EACCES`, `EPERM`) or `input_unreadable` (any other
+filesystem error). The OS message is never surfaced, because it contains the
+absolute path.
 
 `retry` is advice for the caller. Like suggested actions and application logs,
 it carries no execution authority.
@@ -165,6 +173,12 @@ server refuses grammar-invalid `branch`, `service`, `env`, `projectName` length
 or `expectGeneration` before spawning, as `invalid_arguments` with
 `spawned: false`. These are input-shape refusals; every resolution refusal
 above is identical on both surfaces.
+
+These parser refusals are the only detail-less errors in the contract. A
+non-filesystem fault outside the catalogue (a defect) still makes the CLI print
+`E_UNEXPECTED` with free text and no `detail`. That envelope is off contract:
+the MCP adapter accepts a detail-less error only when its code is `E_USAGE`, so
+it returns `data: null` for any other.
 
 ## Result semantics for future operations
 
@@ -193,12 +207,13 @@ WU21). The inspector itself only produces snapshots.
 | Ambiguous equal names, moved checkout, unknown project | closed refusals | same | paired fixture |
 | Two registrations owning one checkout | `ambiguous_project` | same | paired fixture |
 | Malformed Hack config or Compose file, oversized input | `config_parse_failed`, `compose_parse_failed`, `generation_input_too_large` | same | paired fixture |
+| Unreadable input (directory in place of a file, no read permission) | `input_unreadable`, `input_permission_denied` | same | paired fixture (permission case skipped as root) |
 | Detached linked worktree, no project, missing path | closed refusals | same | paired fixture |
 | Unknown service | `service_not_found` | same | paired fixture |
 | Config changed during read | `generation_changed_during_read` | same code path | domain test |
 | No registry, state or Git writes | yes | yes (audit log only) | paired fixture |
 | Malformed selector | `invalid_selector` / parser `E_USAGE` | `invalid_arguments`, not spawned | paired fixture |
-| Drifted CLI output | n/a | `data: null`; foreign fields dropped | stubbed CLI fixture |
+| Drifted CLI output, detail-less non-`E_USAGE` error, data claiming authority | n/a | `data: null`; foreign fields dropped | stubbed CLI fixture |
 
 The fixtures live in `tests/project-target-inspect.test.ts`.
 

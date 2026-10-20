@@ -916,6 +916,35 @@ Graph cleanup uses that same history capacity, counting active and archived
 records together, so repeated restores cannot exceed a smaller cleanup-only
 ceiling after allocation succeeds. Matching ownership, container bindings and
 unambiguous records are still required.
+Retired graph history is compacted under the engine mutation lease where no retained
+effect identity still binds the run's environment inventory: right after an ordinary
+(non-relay) `graph cleanup` commits, and in every graph restore (foreground
+`owner-restore` redelivery and fresh-owner `serve-restore`) after all prior slots are
+re-retired and the acknowledged stopped receipt is superseded on disk, before the new
+generation allocates. Enrolled relay cleanup (`graph cleanup` of a relay-owned graph,
+or owner shutdown) does not compact, because its acknowledged effect is re-verified
+against the inventory; its last generation stays active until the next restore or
+archive. Each compacted record must match a receipt container that is absent and a
+guest slot that is absent, or nothing is written. Exact intent digests move into one
+value-free per-run tombstone in `run/environment-lease-tombstones`, bound to the VM
+incarnation, and only then are the active records unlinked. Prior boots fold into one
+sealed summary each; the current boot keeps per-slot reservations (at most 16384, about
+1170 generations of a 14-service graph in one boot). A retired slot or any slot of a
+sealed boot is never recorded, delivered, retired as live or counted again. Restore and
+cleanup therefore scan only the active generation, and repeated restores no longer
+consume the 4096 active-record budget; tombstone reads still grow with the current
+boot's per-slot reservations until the next boot seals them.
+Pending, live, changed, misbound or foreign-incarnation records refuse compaction,
+and other runs' records are untouched. A refusal never fails or reverts the cleanup
+or restore that triggered it: the records stay active as exact evidence and the next
+cleanup, restore or archive retries; a run that keeps refusing eventually meets the
+active-record budget's `environment_recovery` admission refusal. An interruption is
+resumed by the next compaction or by archive; exact residue reads as retired, changed
+residue refuses. Tombstones are retained permanently as slot-ID reservations, like
+standalone retention exports: archive and prune do not remove them, so the directory
+holds one file per environment-attached run: about 160 bytes per current-boot
+retired slot plus one summary per sealed boot, capped at 4 MiB and refused, never
+truncated, beyond that.
 No retained evidence is automatically deleted to admit new work. This environment
 budget does not increase the runtime's separate container, CPU or memory limits and
 does not establish 32-branch qualification.

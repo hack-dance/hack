@@ -1632,7 +1632,15 @@ pub fn cleanup(
     let engine = Engine::connect_cleanup(candidate)?;
     let (receipt, root) = load(candidate, &engine, run)?;
     cleanup_enrollment::ordinary_mutation(&root, &receipt)?;
-    cleanup_owned(candidate, &engine, receipt, &root, remove_data)
+    let receipt = cleanup_owned(candidate, &engine, receipt, &root, remove_data)?;
+    // The cleaned receipt is committed and ordinary cleanup binds no relay effect identity to
+    // its environment inventory, so history is compacted under the same lease. A refusal keeps
+    // the records for the next cleanup, restore or archive; it never reports this cleanup failed.
+    // Relay-enrolled graphs compact in restore instead (see `environment_recovery::compaction`).
+    if let Some(containers) = environment::bound_containers(&receipt) {
+        environment::compact_history(candidate, &engine, &receipt.run, &containers);
+    }
+    Ok(receipt)
 }
 
 // The caller retains the VM mutation lease through this entire effect and any

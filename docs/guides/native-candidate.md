@@ -517,7 +517,7 @@ OrbStack, registry credentials, or a running guest:
 
 ```sh
 ./hack-native --candidate-root /absolute/private/candidate-home runtime fetch-image \
-  --reference 'namespace/repository@sha256:REVIEWED_MANIFEST_DIGEST' \
+  --reference '[namespace/]repository@sha256:REVIEWED_MANIFEST_DIGEST' \
   --archive /absolute/private/new-image.tar
 ```
 
@@ -525,8 +525,29 @@ For an existing mutable image declaration, resolve it explicitly first:
 
 ```sh
 ./hack-native --candidate-root /absolute/private/candidate-home runtime resolve-image \
-  --reference 'namespace/repository:tag' --json
+  --reference '[namespace/]repository:tag' --json
 ```
+
+Image references are normalized as the Docker CLI does before any request:
+`alpine` is `docker.io/library/alpine:latest`, `alpine:3.21` is
+`docker.io/library/alpine:3.21`, and `user/img` is `docker.io/user/img:latest`.
+`index.docker.io` becomes `docker.io`. Tags, digests, other registries and
+ports are kept as written; only public Docker Hub `namespace/repository`
+references are acquired. Repository names must be lowercase, and a normalized
+name is limited to 255 bytes. Uppercase digests and malformed registry ports are
+refused. Check a reference without network, credentials or candidate state:
+
+```sh
+./hack-native --candidate-root /absolute/private/candidate-home runtime admit-image \
+  --reference 'alpine:3.21' --json
+```
+
+It returns the canonical `reference` and a `kind` of `docker_hub` or
+`image_id`; any other registry refuses with `registry_image`. Native foreground
+`hack up` runs this admission for every authored service image before startup
+hooks, the VM or any provider starts. Compose plan review applies the same
+syntax rules, keeps the authored image text in the reviewed plan, and does not
+change existing plan identities.
 
 Omitting the tag selects `latest`. Resolution returns `pinned_reference`,
 `source_digest`, `manifest_digest`, `image_id` and `platform`; it downloads only
@@ -777,7 +798,8 @@ restored one-off remain open. An uncertain shutdown retains its mapping and evid
 for recovery; do not delete managed state to retry.
 
 After starting an owned native pool, `runtime ensure-image --reference REF --json`
-resolves a public Docker Hub tag or accepts an explicit digest, reuses the verified
+resolves a public Docker Hub tag (including shorthand such as `alpine:3.21`) or
+accepts an explicit digest, reuses the verified
 archive cache, and imports through the existing content-ID-checked loader. Tags
 are resolved on each call; a warm explicit digest needs no registry request.
 The cache is limited to 16 archives and 2 GiB; an incomplete or conflicting entry

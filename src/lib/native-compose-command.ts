@@ -2466,9 +2466,15 @@ function throwNativeComposeCommandError(error: unknown): never {
   if (error instanceof HackCliError || error instanceof CliUsageError) {
     throw error;
   }
+  // An unclassified failure (for example a storage-carrier refusal) keeps the
+  // closed boundary its owner issued; the code and fixed text are unchanged.
+  const diagnostic = nativeComposeEffectRefusal(error);
   throw new HackCliError({
     code: "E_COMPOSE_FAILED",
     message:
       "Native Compose operation failed; saved ownership and persistent data are retained. Values omitted.",
+    ...(diagnostic
+      ? { detail: { native_compose_effect_refusal: diagnostic } }
+      : {}),
   });
 }

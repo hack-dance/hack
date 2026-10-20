@@ -94,6 +94,62 @@ test("an unexpected exception keeps its stack", async () => {
   expect(output).toMatch(STACK_FRAME);
 });
 
+test("a coded native refusal also names its closed boundary without --json", async () => {
+  const coded = new HackCliError({
+    code: "E_COMPOSE_FAILED",
+    message: "Native Compose operation failed. Values omitted.",
+    detail: {
+      native_compose_effect_refusal: {
+        stage: "storage-helper-start",
+        reason: "probe-timeout",
+      },
+    },
+  });
+  expect(await handleRunCliError({ error: coded, jsonRequested: false })).toBe(
+    1
+  );
+  expect(output).toBe(
+    "ERROR: E_COMPOSE_FAILED: Native Compose operation failed. Values omitted.\nERROR: Refusal boundary: storage-helper-start (probe-timeout); values omitted.\n"
+  );
+});
+
+test("unknown or accessor-backed boundary detail prints nothing extra", async () => {
+  const canary = "private-boundary-canary";
+  for (const detail of [
+    {
+      native_compose_effect_refusal: { stage: canary, reason: "probe-timeout" },
+    },
+    {
+      native_compose_effect_refusal: {
+        stage: "storage-target",
+        reason: canary,
+      },
+    },
+    { native_compose_effect_refusal: "storage-target" },
+    {
+      native_compose_effect_refusal: {
+        get stage() {
+          return "storage-target";
+        },
+        reason: "unclassified",
+      },
+    },
+    { other: { stage: "storage-target", reason: "unclassified" } },
+    canary,
+  ]) {
+    output = "";
+    const coded = new HackCliError({
+      code: "E_COMPOSE_FAILED",
+      message: "Closed refusal.",
+      detail,
+    });
+    expect(
+      await handleRunCliError({ error: coded, jsonRequested: false })
+    ).toBe(1);
+    expect(output).toBe("ERROR: E_COMPOSE_FAILED: Closed refusal.\n");
+  }
+});
+
 test("--json keeps one envelope for a closed refusal", async () => {
   const error = nativeRefusal();
   expect(await handleRunCliError({ error, jsonRequested: true })).toBe(1);

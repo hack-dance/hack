@@ -52,6 +52,7 @@ import { nativeConfigVmFilesScenario } from "./scenarios/native-config-vm-files.
 import { patternP01DependencyBootstrapScenario } from "./scenarios/pattern-p01-dependency-bootstrap.ts";
 import { patternP02PortableToolchainScenario } from "./scenarios/pattern-p02-portable-toolchain.ts";
 import { patternP07CapabilityOverlaysScenario } from "./scenarios/pattern-p07-capability-overlays.ts";
+import { portableBootstrapNegativesScenario } from "./scenarios/portable-bootstrap-negatives.ts";
 import { portableMultiserviceScenario } from "./scenarios/portable-multiservice.ts";
 import { upDownScenario } from "./scenarios/up-down.ts";
 import { worktreeBranchDefaultScenario } from "./scenarios/worktree-branch-default.ts";
@@ -104,6 +105,7 @@ export const ALL_SCENARIOS: readonly Scenario[] = [
   upDownScenario,
   execStaleEnvScenario,
   portableMultiserviceScenario,
+  portableBootstrapNegativesScenario,
   composeConfigHashDriftScenario,
   mcpLogsComposeScenario,
   nativeConfigComposeScenario,

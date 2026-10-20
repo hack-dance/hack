@@ -110,8 +110,14 @@ export HACK_NATIVE_HOME=/absolute/private/candidate-home
 ```
 
 Keep the bundle together and invoke this entrypoint by its full path (do not copy
-or symlink only the script). It selects the adjacent executor even if inherited
-backend variables select another binary. It preserves arguments, exit codes and
+or symlink only the script). With `HACK_RUNTIME_BACKEND` unset (or `native`) it
+selects the native backend and the adjacent executor, even if an inherited
+`HACK_NATIVE_BINARY` selects another binary. An explicit
+`HACK_RUNTIME_BACKEND=compose` runs the same bundled CLI on the Compose backend
+with your own Hack home and existing global routing services. It needs no
+`HACK_NATIVE_HOME` and removes the native selectors. Other values refuse with exit
+code 64. The [candidate installer guide](https://github.com/hack-dance/hack/blob/next/docs/guides/candidate-install.md#test-both-backends)
+describes Compose testing and its shared-state limits. It preserves arguments, exit codes and
 signals through `exec`, and never replaces the installed `hack`. Project-specific
 native adaptation, dependency and routing selections remain explicit; this entrypoint
 does not prepare a provider or migrate existing projects. An unversioned local

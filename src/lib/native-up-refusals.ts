@@ -7,6 +7,21 @@ import { HackCliError } from "./cli-result.ts";
  * one-line message (no command help, no stack). The refusal happens before
  * project discovery, input acquisition or any runtime request.
  */
+/**
+ * The one-line `E_USAGE` refusal of a detached native foreground start. Image
+ * and authored projects share it, so `up --detach` and `restart --detach` give
+ * the same code and message on either path.
+ */
+export function nativeForegroundDetachRefusal(opts: {
+  readonly restart: boolean;
+}): HackCliError {
+  const command = opts.restart ? "hack restart" : "hack up";
+  return new HackCliError({
+    code: "E_USAGE",
+    message: `Native \`${command}\` runs in the foreground only, so --detach is not supported. Run \`${command}\` without --detach in its own terminal and keep it open; use \`hack ps\` and \`hack logs\` from another terminal, and press Ctrl-C to stop it.`,
+  });
+}
+
 export function refuseUnsupportedNativeUpOptions(opts: {
   readonly restart: boolean;
   readonly detach?: boolean;
@@ -19,9 +34,7 @@ export function refuseUnsupportedNativeUpOptions(opts: {
     throw new HackCliError({ code: "E_USAGE", message });
   };
   if (opts.detach) {
-    refuse(
-      `Native \`${command}\` runs in the foreground only, so --detach is not supported. Run \`${command}\` without --detach in its own terminal and keep it open; use \`hack ps\` and \`hack logs\` from another terminal, and press Ctrl-C to stop it.`
-    );
+    throw nativeForegroundDetachRefusal({ restart: opts.restart });
   }
   if (opts.json) {
     refuse(

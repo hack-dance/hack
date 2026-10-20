@@ -648,7 +648,13 @@ explicit native selections described below. Unsupported Compose or environment i
 (for example a service `env_file`, or a project `.env` without managed env) and
 unreviewed route labels refuse with `E_NATIVE_PROJECT_UNSUPPORTED`; invalid branch
 hosts, project adaptations, AWS selections and changed fresh-exec environments refuse
-with `E_CONFIG_INVALID`. Each prints one closed line and drops nothing. Existing
+with `E_CONFIG_INVALID`, as do an unbounded `--profile` selection, a malformed
+`HACK_NATIVE_DEPENDENCIES` listener selection and an occupied HTTPS port. A runtime
+reply, saved mapping or retained graph that changed or cannot be confirmed (for example
+a startup receipt for another run, or a mapping owned by another run) is an integrity
+or ownership refusal, not a configuration one: it prints one closed line naming what
+was not confirmed, and `--json` reports it as `E_UNEXPECTED`. Each prints one closed
+line and drops nothing. Existing
 `hack.dependencies.*` cache declarations publish the reviewed source snapshot and
 require successful initializer completion before dependent services start. Cache
 initializers receive immutable source mounts and writable named cache volumes;

@@ -521,6 +521,145 @@ test("a canceled start reports cancellation, not the configuration refusal", asy
   expect(events).toEqual([]);
 });
 
+/** An integrity or ownership refusal: closed, and never the configuration refusal. */
+function expectIntegrityRefusal(refusal: unknown, text: string): void {
+  expect(refusal).toBeInstanceOf(ClosedCliError);
+  expect(refusal).not.toBeInstanceOf(HackCliError);
+  expect(refusal).toHaveProperty("message", expect.stringContaining(text));
+  expect(String(refusal)).not.toContain(NATIVE_CONFIGURATION_REFUSAL);
+  expect(String(refusal)).not.toContain("E_NATIVE_PROJECT_UNSUPPORTED");
+}
+
+test("an unconfirmed image selection reply is an integrity refusal, not a configuration refusal", async () => {
+  const { opts } = await fixture();
+  const prepare = opts.dependencies.prepare!;
+  opts.dependencies.prepare = async (request) => ({
+    ...(await prepare(request)),
+    normalizedComposeJson: JSON.stringify({
+      services: { web: { image: "redis:latest" } },
+    }),
+  });
+  const invoke = opts.dependencies.invoke!;
+  opts.dependencies.invoke = async (request) =>
+    request.args[1] === "ensure-image"
+      ? { image_id: "not-a-content-id" }
+      : await invoke(request);
+  expectIntegrityRefusal(
+    await startNativeProject(opts).catch((error: unknown) => error),
+    "Native foreground up could not confirm the runtime image selection; inspect owned state before retrying."
+  );
+});
+
+test("an invalid host dependency plan reply is an integrity refusal", async () => {
+  const { opts, events } = await fixture();
+  const invoke = opts.dependencies.invoke!;
+  opts.dependencies.invoke = async (request) =>
+    request.args[1] === "dependency-plan"
+      ? { dependency_plan_id: "not-a-digest" }
+      : await invoke(request);
+  expectIntegrityRefusal(
+    await startNativeProject(opts).catch((error: unknown) => error),
+    "Native foreground up could not confirm the host dependency plan; inspect owned state before retrying."
+  );
+  expect(events).not.toContain("save");
+});
+
+test("a ready receipt for another namespace is an integrity refusal", async () => {
+  const { opts, events } = await fixture();
+  const invoke = opts.dependencies.invoke!;
+  let serving = false;
+  const serve = opts.dependencies.serve!;
+  opts.dependencies.serve = async (request) => {
+    serving = true;
+    try {
+      return await serve(request);
+    } finally {
+      serving = false;
+    }
+  };
+  opts.dependencies.invoke = async (request) => {
+    const reply = await invoke(request);
+    if (request.args[1] === "inspect" && serving) {
+      const graph = reply as { receipt: Record<string, unknown> };
+      return {
+        ...graph,
+        receipt: { ...graph.receipt, namespace: "0".repeat(64) },
+      };
+    }
+    return reply;
+  };
+  expectIntegrityRefusal(
+    await startNativeProject(opts).catch((error: unknown) => error),
+    "Native foreground up could not confirm the startup receipt; inspect owned state before retrying."
+  );
+  expect(events).not.toContain("save");
+});
+
+test("a run mapping owned by another run is an ownership refusal and is not removed", async () => {
+  const { opts, events } = await fixture();
+  const invoke = opts.dependencies.invoke!;
+  let ready = false;
+  const serve = opts.dependencies.serve!;
+  opts.dependencies.serve = async (request) => {
+    try {
+      return await serve(request);
+    } finally {
+      ready = true;
+    }
+  };
+  opts.dependencies.invoke = async (request) => {
+    const reply = await invoke(request);
+    if (request.args[1] === "inspect" && ready) {
+      // After serve, the final receipt names a different owner than the one
+      // the published mapping recorded at readiness.
+      const graph = reply as { receipt: Record<string, unknown> };
+      return {
+        ...graph,
+        receipt: { ...graph.receipt, owner: "9".repeat(32), phase: "removed" },
+      };
+    }
+    return reply;
+  };
+  expectIntegrityRefusal(
+    await startNativeProject(opts).catch((error: unknown) => error),
+    "Native run mapping is owned by another run; it was not removed. Inspect owned state before retrying."
+  );
+  expect(events).toContain("save");
+  expect(events).not.toContain("remove");
+});
+
+test("a missing or unparseable HTTPS verification response is a verification failure", async () => {
+  const plan = {
+    services: {
+      web: {
+        routing: { hostnames: ["web.hack"] },
+        healthcheck: { native_http: { path: "/health" } },
+      },
+    },
+  };
+  const frontend = (response: { statusCode?: number; location?: string }) => ({
+    caPath: "/public",
+    httpsPort: 18_443,
+    exited: new Promise<{ component: string; code: number }>(() => {}),
+    releaseAfterCleanup: async () => {},
+    verifyHostname: async () => response as { statusCode: number },
+  });
+  expectIntegrityRefusal(
+    await verifyHttpsRoutes(frontend({}), plan, new Set(["web"])).catch(
+      (error: unknown) => error
+    ),
+    "Native HTTPS verification failed (NO_RESPONSE); peer values omitted."
+  );
+  expectIntegrityRefusal(
+    await verifyHttpsRoutes(
+      frontend({ statusCode: 307, location: "https://[" }),
+      plan,
+      new Set(["web"])
+    ).catch((error: unknown) => error),
+    "Native HTTPS verification failed (REDIRECT_TARGET_REFUSED); peer values omitted."
+  );
+});
+
 test("source opt-in and occupied mapping refuse before lifecycle or runtime effects", async () => {
   const { opts, events } = await fixture();
   const refusal = await startNativeProject({

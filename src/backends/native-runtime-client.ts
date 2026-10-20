@@ -1,5 +1,5 @@
 import { isAbsolute } from "node:path";
-import { ClosedCliError } from "../lib/cli-result.ts";
+import { ClosedCliError, HackCliError } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
 import { nativeAuthoredExecOptions } from "./native-authored-exec-options.ts";
 import {
@@ -82,6 +82,8 @@ export interface NativeRuntimeSelection {
 
 const MAX_OUTPUT_BYTES = 16 * 1024 * 1024;
 const MAX_PRIVATE_INPUT_BYTES = 256 * 1024;
+const REQUEST_BUDGET_REFUSAL =
+  "Native runtime request exceeds its input or time budget.";
 const SYSTEM_ENVIRONMENT = ["PATH", "HOME", "TMPDIR", "USER", "LOGNAME"];
 
 /** Explicit candidate selection never redirects installed v4 or starts Docker. */
@@ -143,14 +145,23 @@ export async function invokeNativeRuntime(opts: {
         opts.args,
         bound,
         opts.privateInput !== undefined
-      ) &&
-      Number.isSafeInteger(timeoutMs)
-    ) ||
+      )
+    )
+  ) {
+    // Internal invariant: callers build these argv shapes; no user input selects them.
+    throw new Error(REQUEST_BUDGET_REFUSAL);
+  }
+  if (
+    !Number.isSafeInteger(timeoutMs) ||
     timeoutMs < 1 ||
     timeoutMs > 600_000 ||
     (opts.privateInput?.byteLength ?? 0) > MAX_PRIVATE_INPUT_BYTES
   ) {
-    throw new Error("Native runtime request exceeds its input or time budget.");
+    // A selected startup timeout or the managed environment size can exceed these bounds.
+    throw new HackCliError({
+      code: "E_CONFIG_INVALID",
+      message: REQUEST_BUDGET_REFUSAL,
+    });
   }
   const env: Record<string, string> = {};
   for (const key of SYSTEM_ENVIRONMENT) {
@@ -446,7 +457,9 @@ function completionResponse(
   try {
     return JSON.parse(new TextDecoder().decode(bytes)) as unknown;
   } catch {
-    throw new Error("Native runtime returned an invalid control response.");
+    throw new ClosedCliError(
+      "Native runtime returned an invalid control response."
+    );
   }
 }
 
@@ -485,7 +498,7 @@ function parseExecCompletion(bytes: Uint8Array, code: number): unknown {
   ) {
     return execResult;
   }
-  throw new Error(
+  throw new ClosedCliError(
     "Native exec returned an invalid or inconsistent completion response; command effects may have occurred."
   );
 }
@@ -512,7 +525,7 @@ async function readBoundedOutput(
       }
       total += chunk.byteLength;
       if (total > MAX_OUTPUT_BYTES) {
-        throw new Error(
+        throw new ClosedCliError(
           "Native runtime control response exceeds its output budget."
         );
       }

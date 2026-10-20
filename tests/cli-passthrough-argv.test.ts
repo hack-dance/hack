@@ -45,6 +45,8 @@ const PASSTHROUGH = [
   { prefix: ["host", "exec"], path: ["host", "exec"] },
   { prefix: ["env", "exec"], path: ["env", "exec"] },
   { prefix: ["x"], path: ["x"] },
+  // Beta and unsupported, but still shipped: its child command is passthrough too.
+  { prefix: ["dispatch", "run", "--project", "p"], path: ["dispatch", "run"] },
 ] as const;
 
 for (const { prefix, path } of PASSTHROUGH) {
@@ -218,6 +220,7 @@ test.each([
   [["run", "web", "--", "bun", "--version"]],
   [["exec", "web", "bun", "--help"]],
   [["host", "exec", "bun", "--version"]],
+  [["dispatch", "run", "--project", "p", "bun", "--version"]],
 ])(
   "source CLI %j does not print Hack's version or help for a child flag",
   async (args) => {

@@ -7,6 +7,7 @@ import {
   removeNativeProjectRun,
   saveNativeProjectRun,
 } from "../src/backends/native-project-run.ts";
+import { expectClosedRefusal } from "./helpers/closed-refusal.ts";
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -114,7 +115,7 @@ test("one-off preserves default command or literal argv and fresh private delive
 test("stale selection and missing project never request a job", async () => {
   const opts = await fixture();
   let mutations = 0;
-  await expect(
+  await expectClosedRefusal(
     nativeProjectOneOff({
       ...opts,
       argv: [],
@@ -127,18 +128,40 @@ test("stale selection and missing project never request a job", async () => {
         }
         return { ...selection, plan: "0".repeat(64) };
       },
-    })
-  ).rejects.toThrow("unconfirmed");
+    }),
+    "unconfirmed"
+  );
   expect(mutations).toBe(0);
-  await expect(
+  await expectClosedRefusal(
     nativeProjectOneOff({
       ...(await fixture(false)),
       argv: [],
       invoke: async () => {
         throw new Error("must not invoke");
       },
-    })
-  ).rejects.toThrow("started project");
+    }),
+    "started project"
+  );
+});
+
+test("invalid one-off arguments refuse with a closed message before any request", async () => {
+  const opts = await fixture();
+  for (const request of [
+    { argv: [""] },
+    { argv: ["echo", "\0"] },
+    { argv: ["true"], workdir: "relative" },
+  ]) {
+    await expectClosedRefusal(
+      nativeProjectOneOff({
+        ...opts,
+        ...request,
+        invoke: async () => {
+          throw new Error("must not invoke");
+        },
+      }),
+      "Native run requires a service, bounded arguments and an optional absolute workdir."
+    );
+  }
 });
 
 test("one-off explicitly delivers an empty environment and wipes it after completion", async () => {
@@ -223,7 +246,7 @@ test("unconfirmed cleanup or transport failure never replays and wipes delivery"
 test("environment preparation cannot authorize a job after the project mapping changes", async () => {
   const opts = await fixture();
   const calls: string[] = [];
-  await expect(
+  await expectClosedRefusal(
     nativeProjectOneOff({
       ...opts,
       argv: [],
@@ -242,8 +265,9 @@ test("environment preparation cannot authorize a job after the project mapping c
         }
         return selection;
       },
-    })
-  ).rejects.toThrow("unconfirmed");
+    }),
+    "unconfirmed"
+  );
   expect(calls).toEqual(["refresh-dependencies", "run-selection"]);
 });
 

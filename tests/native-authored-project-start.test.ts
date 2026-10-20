@@ -27,6 +27,7 @@ import {
   NATIVE_STORAGE_TOOL_MANIFEST,
   nativeStorageToolManifest,
 } from "../src/backends/native-authored-storage-tool.ts";
+import { nativeCodesReportRuntimeNotRunning } from "../src/backends/native-runtime-client.ts";
 import {
   type ComposeEnvFingerprintRecord,
   evaluateComposeServiceEnvFreshness,
@@ -220,6 +221,12 @@ type FixtureOptions = {
   readonly runtimeStopped?: boolean;
   /** `runtime status --json` hangs, so a caller can cancel during the check. */
   readonly runtimeStatusHangs?: boolean;
+  /**
+   * The `runtime status --json` request itself fails the way authored
+   * foreground control reports a stopped runtime: `runtime_not_running`
+   * wrapped in `native_graph_foreground`.
+   */
+  readonly runtimeStatusWrappedStop?: boolean;
   readonly cleanup?:
     | "removed"
     | "live"
@@ -418,6 +425,7 @@ import {createHash} from 'node:crypto';import {join} from 'node:path';
 const args=process.argv.slice(2);const action=args[4];await appendFile(${JSON.stringify(calls)},JSON.stringify(args)+'\\n');
 if(${options.runtimeStopped === true}&&args[2]==='runtime'&&args[3]==='status'){console.log(JSON.stringify({phase:'stopped',process_alive:false}));process.exit(0)}
 if(${options.runtimeStatusHangs === true}&&args[2]==='runtime'&&args[3]==='status'){await new Promise((resolve)=>setTimeout(resolve,10000));process.exit(0)}
+if(${options.runtimeStatusWrappedStop === true}&&args[2]==='runtime'&&args[3]==='status'){console.error(JSON.stringify({code:'native_graph_foreground',cause_code:'runtime_not_running',message:${JSON.stringify(CANARY)}}));process.exit(2)}
 const journal=${JSON.stringify(journal)};
 const root=${JSON.stringify(join(projectDir, ".internal", "native-authored-runs"))};
 if(['plan','serve','frontend-plan','frontend-serve'].includes(action)){
@@ -646,6 +654,32 @@ macTest(
         scope: selected.scope,
       })
     ).toMatchObject({ status: "not_started", run: null, items: [] });
+  }
+);
+
+macTest(
+  "a wrapped stopped-runtime refusal from a runtime request keeps its cause code",
+  async () => {
+    const selected = await fixture({ runtimeStatusWrappedStop: true });
+    const error = await failure(
+      serveNativeAuthoredProject({
+        ...selected,
+        run,
+        startupTimeoutMs: 10_000,
+      }),
+      "not-started"
+    );
+    // failedAdmission takes both codes from the request error, so the CLI can
+    // still classify the wrapped form as a stopped runtime.
+    expect(error).toHaveProperty("nativeCode", "native_graph_foreground");
+    expect(error).toHaveProperty("nativeCauseCode", "runtime_not_running");
+    expect(error).toHaveProperty("stage", "reservation");
+    expect(
+      nativeCodesReportRuntimeNotRunning(
+        error as { nativeCode?: string; nativeCauseCode?: string }
+      )
+    ).toBe(true);
+    expect(await artifacts(selected.scope)).toEqual([]);
   }
 );
 

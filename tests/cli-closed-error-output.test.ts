@@ -1,5 +1,8 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
+import { createServer } from "node:net";
+import { checkNativeHttpsPort } from "../src/backends/native-https-port.ts";
 import { NativeHttpsStartupError } from "../src/backends/native-https-startup-failure.ts";
+import { nativeHttpsVerificationError } from "../src/backends/native-project-https.ts";
 import { NativePartialShutdownError } from "../src/backends/native-project-interrupted-cleanup.ts";
 import { NativeRuntimeRequestError } from "../src/backends/native-runtime-client.ts";
 import { CliUsageError } from "../src/cli/command.ts";
@@ -208,4 +211,39 @@ test.each([
   expect(error).toBeInstanceOf(ClosedCliError);
   expect(await handleRunCliError({ error, jsonRequested: false })).toBe(1);
   expect(output).toBe(`ERROR: ${error.message}\n`);
+});
+
+/**
+ * HTTPS verification and port refusals are raised inside the foreground
+ * owner's readiness step, which a CLI spawn reaches only with a live serve
+ * owner. Their real errors still render as one closed line here.
+ */
+test("a native HTTPS verification failure prints one closed line", async () => {
+  const error = nativeHttpsVerificationError({ code: "ECONNREFUSED" });
+  expect(error).toBeInstanceOf(ClosedCliError);
+  expect(await handleRunCliError({ error, jsonRequested: false })).toBe(1);
+  expect(output).toBe(
+    "ERROR: Native HTTPS verification failed (ECONNREFUSED); peer values omitted.\n"
+  );
+});
+
+test("an occupied native HTTPS port prints one coded line without the port", async () => {
+  const server = createServer();
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  try {
+    const address = server.address();
+    if (!address || typeof address === "string") {
+      throw new Error("Fixture has no TCP address");
+    }
+    const error = await checkNativeHttpsPort(address.port).catch(
+      (caught: unknown) => caught
+    );
+    expect(error).toBeInstanceOf(HackCliError);
+    expect(await handleRunCliError({ error, jsonRequested: false })).toBe(1);
+    expect(output).toBe(
+      "ERROR: E_CONFIG_INVALID: The selected native HTTPS port is already in use; the existing listener was left untouched. Select a free port.\n"
+    );
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
 });

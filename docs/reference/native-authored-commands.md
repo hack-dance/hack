@@ -96,9 +96,10 @@ Ctrl-C requests that shutdown. Exact durable Removed evidence retires the tagged
 native run and startup intent. Unknown, changed or live cleanup retains the attempt
 and refuses replay; a missing ready mapping does not authorize a fresh start.
 
-`--detach` refuses with `E_NATIVE_PROJECT_UNSUPPORTED` and says that native `up` runs in
-the foreground only: run it without `--detach` in its own terminal, use `ps` and `logs`
-from another terminal, and press Ctrl-C to stop it.
+On macOS, `up --detach` and `restart --detach` refuse with `E_USAGE` and the same
+one-line message as an image project: native `up` runs in the foreground only, so run
+it without `--detach` in its own terminal, use `ps` and `logs` from another terminal,
+and press Ctrl-C to stop it.
 
 After native review and before it reserves the startup intent, `up` asks the runtime
 for its read-only status. A stopped runtime (any phase other than `running`, or a dead

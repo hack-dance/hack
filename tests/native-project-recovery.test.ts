@@ -14,6 +14,7 @@ import {
   retireNativeRecoveredPublisher,
   verifyNativeFrontendRecovery,
 } from "../src/backends/native-project-recovery.ts";
+import { expectClosedRefusal } from "./helpers/closed-refusal.ts";
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -150,14 +151,16 @@ test("shared recovery refuses foreign leases and retains uncertainty on failed r
     { ...lease, namespace: "f".repeat(64) },
     { ...lease, planId: "f".repeat(64) },
   ]) {
-    await expect(
-      verifyNativeFrontendRecovery({ ...options, httpsLease: foreign })
-    ).rejects.toThrow("cannot prove");
+    await expectClosedRefusal(
+      verifyNativeFrontendRecovery({ ...options, httpsLease: foreign }),
+      "cannot prove"
+    );
   }
   expect(recoveries).toBe(0);
-  await expect(
-    verifyNativeFrontendRecovery({ ...options, httpsPort: null })
-  ).rejects.toThrow("cannot prove");
+  await expectClosedRefusal(
+    verifyNativeFrontendRecovery({ ...options, httpsPort: null }),
+    "cannot prove"
+  );
   await expect(verifyNativeFrontendRecovery(options)).rejects.toThrow(
     "exact lease retirement uncertain"
   );
@@ -166,9 +169,10 @@ test("shared recovery refuses foreign leases and retains uncertainty on failed r
   const changed = structuredClone(f.receipt);
   changed.observations["container:app"].state = "present";
   f.events.length = 0;
-  await expect(
-    verifyNativeFrontendRecovery({ ...options, inspect: async () => changed })
-  ).rejects.toThrow("cannot prove");
+  await expectClosedRefusal(
+    verifyNativeFrontendRecovery({ ...options, inspect: async () => changed }),
+    "cannot prove"
+  );
   expect(recoveries).toBe(1);
   expect(f.events).toEqual([]);
 });
@@ -197,13 +201,14 @@ test("recovery cleans owned lifecycle only after graph, authority and port proof
   const changed = structuredClone(f.receipt);
   changed.observations["container:app"].state = "present";
   f.events.length = 0;
-  await expect(
+  await expectClosedRefusal(
     verifyNativeFrontendRecovery({
       ...f.opts,
       inspect: async () => changed,
       cleanupLifecycle,
-    })
-  ).rejects.toThrow("cannot prove");
+    }),
+    "cannot prove"
+  );
   expect(f.events).not.toContain("lifecycle");
 });
 
@@ -211,18 +216,20 @@ test("changed graph, live effect, or failed legacy inventory refuses recovery", 
   const f = await fixture();
   const changed = structuredClone(f.receipt);
   changed.observations["container:app"].state = "present";
-  await expect(
+  await expectClosedRefusal(
     verifyNativeFrontendRecovery({
       ...f.opts,
       inspect: async () => changed,
-    })
-  ).rejects.toThrow("cannot prove");
-  await expect(
+    }),
+    "cannot prove"
+  );
+  await expectClosedRefusal(
     verifyNativeFrontendRecovery({
       ...f.opts,
       invoke: async () => ({ authority: { present: true } }),
-    })
-  ).rejects.toThrow("cannot prove");
+    }),
+    "cannot prove"
+  );
   await expect(
     verifyNativeFrontendRecovery({
       ...f.opts,
@@ -238,7 +245,8 @@ test("changed graph, live effect, or failed legacy inventory refuses recovery", 
     lstat(join(f.root, "native-https/owner.lock"))
   ).rejects.toMatchObject({ code: "ENOENT" });
   await writeFile(join(f.lifecycle, "state.json"), '{"entries":[{}]}');
-  await expect(verifyNativeFrontendRecovery(f.opts)).rejects.toThrow(
+  await expectClosedRefusal(
+    verifyNativeFrontendRecovery(f.opts),
     "cannot prove"
   );
 });
@@ -248,19 +256,22 @@ test("recovery preserves an occupied or unverifiable HTTPS lock", async () => {
   const lock = join(f.root, "native-https/owner.lock");
   await mkdir(lock, { recursive: true, mode: 0o700 });
   await writeFile(join(lock, "owned-state"), "keep");
-  await expect(verifyNativeFrontendRecovery(f.opts)).rejects.toThrow(
+  await expectClosedRefusal(
+    verifyNativeFrontendRecovery(f.opts),
     "cannot prove"
   );
   await lstat(join(lock, "owned-state"));
   await rm(join(lock, "owned-state"));
   await chmod(lock, 0o755);
-  await expect(verifyNativeFrontendRecovery(f.opts)).rejects.toThrow(
+  await expectClosedRefusal(
+    verifyNativeFrontendRecovery(f.opts),
     "cannot prove"
   );
   await chmod(lock, 0o700);
-  await expect(
-    verifyNativeFrontendRecovery({ ...f.opts, httpsPort: null })
-  ).rejects.toThrow("cannot prove");
+  await expectClosedRefusal(
+    verifyNativeFrontendRecovery({ ...f.opts, httpsPort: null }),
+    "cannot prove"
+  );
   await lstat(lock);
 });
 
@@ -291,12 +302,13 @@ test("publisher retirement requests the exact run and owner, and rejects weak ac
       "--json",
     ],
   ]);
-  await expect(
+  await expectClosedRefusal(
     retireNativeRecoveredPublisher({
       runtime: f.opts.runtime,
       scope: f.opts.scope,
       run: f.opts.run,
       invoke: async () => ({ publisher_retired: true }),
-    })
-  ).rejects.toThrow("cannot prove");
+    }),
+    "cannot prove"
+  );
 });

@@ -30,6 +30,7 @@ import {
 } from "../src/backends/native-project-https.ts";
 import { NativeRuntimeRequestError } from "../src/backends/native-runtime-client.ts";
 import { CURRENT_CA_PEM, OLD_CA_PEM } from "./helpers/ca-certificates.ts";
+import { expectClosedRefusal } from "./helpers/closed-refusal.ts";
 
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => {
@@ -274,12 +275,13 @@ test("owner receipt verifier refuses a replaced listener", async () => {
   const running = await startNativeProjectHttps(f.opts);
   cleanups.push(() => running.close());
   f.wrongListener();
-  await expect(
+  await expectClosedRefusal(
     inspectActiveNativeHttpsOwner({
       runtime: f.opts.runtime,
       invoke: f.opts.dependencies.invoke,
-    })
-  ).rejects.toThrow("ownership verification failed");
+    }),
+    "ownership verification failed"
+  );
 });
 test("peer proof requires the accepted socket and exact receipted listener", async () => {
   const f = await fixture();
@@ -309,14 +311,15 @@ test("peer proof requires the accepted socket and exact receipted listener", asy
     "--json",
   ]);
   f.wrongPeer();
-  await expect(
+  await expectClosedRefusal(
     verifyActiveNativeHttpsConnection({
       runtime: f.opts.runtime,
       owner,
       peerPort: 52_342,
       invoke: f.opts.dependencies.invoke,
-    })
-  ).rejects.toThrow("ownership verification failed");
+    }),
+    "ownership verification failed"
+  );
   const other = await fixture();
   const otherRunning = await startNativeProjectHttps(other.opts);
   cleanups.push(() => otherRunning.close());
@@ -325,38 +328,41 @@ test("peer proof requires the accepted socket and exact receipted listener", asy
     invoke: other.opts.dependencies.invoke,
   });
   other.rejectPeer();
-  await expect(
+  await expectClosedRefusal(
     verifyActiveNativeHttpsConnection({
       runtime: other.opts.runtime,
       owner: otherOwner,
       peerPort: 52_343,
       invoke: other.opts.dependencies.invoke,
-    })
-  ).rejects.toThrow("ownership verification failed");
+    }),
+    "ownership verification failed"
+  );
 });
 test("owner receipt verifier refuses CA rotation", async () => {
   const f = await fixture();
   const running = await startNativeProjectHttps(f.opts);
   cleanups.push(() => running.close());
   await writeFile(running.caPath, OLD_CA_PEM);
-  await expect(
+  await expectClosedRefusal(
     inspectActiveNativeHttpsOwner({
       runtime: f.opts.runtime,
       invoke: f.opts.dependencies.invoke,
-    })
-  ).rejects.toThrow("ownership verification failed");
+    }),
+    "ownership verification failed"
+  );
 });
 test("owner receipt verifier refuses a dead frontend challenge even while children remain", async () => {
   const f = await fixture();
   const running = await startNativeProjectHttps(f.opts);
   cleanups.push(() => running.close());
   await rm(join(f.root, "native-https/owner.sock"));
-  await expect(
+  await expectClosedRefusal(
     inspectActiveNativeHttpsOwner({
       runtime: f.opts.runtime,
       invoke: f.opts.dependencies.invoke,
-    })
-  ).rejects.toThrow("ownership verification failed");
+    }),
+    "ownership verification failed"
+  );
 });
 test("owner receipt verifier refuses malformed or publicly readable receipts", async () => {
   const f = await fixture();
@@ -365,20 +371,22 @@ test("owner receipt verifier refuses malformed or publicly readable receipts", a
   const receipt = join(f.root, "native-https/active-owner.json");
   const original = await readFile(receipt);
   await writeFile(receipt, "{}");
-  await expect(
+  await expectClosedRefusal(
     inspectActiveNativeHttpsOwner({
       runtime: f.opts.runtime,
       invoke: f.opts.dependencies.invoke,
-    })
-  ).rejects.toThrow("ownership verification failed");
+    }),
+    "ownership verification failed"
+  );
   await writeFile(receipt, original);
   await chmod(receipt, 0o644);
-  await expect(
+  await expectClosedRefusal(
     inspectActiveNativeHttpsOwner({
       runtime: f.opts.runtime,
       invoke: f.opts.dependencies.invoke,
-    })
-  ).rejects.toThrow("ownership verification failed");
+    }),
+    "ownership verification failed"
+  );
   await chmod(receipt, 0o600);
 });
 test("owner challenge refuses a valid receipt with a different signing key", async () => {
@@ -393,12 +401,13 @@ test("owner challenge refuses a valid receipt with a different signing key", asy
     .export({ format: "der", type: "spki" })
     .toString("base64");
   await writeFile(receipt, JSON.stringify(parsed));
-  await expect(
+  await expectClosedRefusal(
     inspectActiveNativeHttpsOwner({
       runtime: f.opts.runtime,
       invoke: f.opts.dependencies.invoke,
-    })
-  ).rejects.toThrow("ownership verification failed");
+    }),
+    "ownership verification failed"
+  );
   await writeFile(receipt, original);
 });
 test("owner socket preparation failure retires only its bound socket and lock", async () => {
@@ -760,7 +769,7 @@ while True:
     peerPort
   );
   await rm(seenPath);
-  await expect(
+  await expectClosedRefusal(
     verifyNativeHttpsHostname(
       "fixture.invalid",
       address.port,
@@ -769,22 +778,25 @@ while True:
       async () => {
         throw new Error("untrusted peer detail");
       }
-    )
-  ).rejects.toThrow("Native HTTPS verification failed");
+    ),
+    "Native HTTPS verification failed"
+  );
   expect(await Bun.file(seenPath).exists()).toBe(false);
-  await expect(
-    verifyNativeHttpsHostname("wrong.invalid", address.port, cert, "/health")
-  ).rejects.toThrow("Native HTTPS verification failed");
+  await expectClosedRefusal(
+    verifyNativeHttpsHostname("wrong.invalid", address.port, cert, "/health"),
+    "Native HTTPS verification failed"
+  );
   const foreignCa = join(root, "foreign.pem");
   await writeFile(foreignCa, CURRENT_CA_PEM);
-  await expect(
+  await expectClosedRefusal(
     verifyNativeHttpsHostname(
       "fixture.invalid",
       address.port,
       foreignCa,
       "/health"
-    )
-  ).rejects.toThrow("Native HTTPS verification failed");
+    ),
+    "Native HTTPS verification failed"
+  );
   await writeFile(
     responsePath,
     "HTTP/1.1 307 Temporary Redirect\r\nLocation: https://canonical.invalid/health\r\nContent-Length: 0\r\n\r\n"
@@ -804,14 +816,15 @@ while True:
     "HTTP/1.1 200 OK",
   ]) {
     await writeFile(responsePath, invalid);
-    await expect(
+    await expectClosedRefusal(
       verifyNativeHttpsHostname(
         "fixture.invalid",
         address.port,
         cert,
         "/health"
-      )
-    ).rejects.toThrow("Native HTTPS verification failed");
+      ),
+      "Native HTTPS verification failed"
+    );
   }
 });
 

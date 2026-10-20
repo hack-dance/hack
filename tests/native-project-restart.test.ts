@@ -28,6 +28,10 @@ import {
   withNativeRestartLock,
 } from "../src/backends/native-project-run.ts";
 import { ClosedCliError } from "../src/lib/cli-result.ts";
+import {
+  expectClosedRefusal,
+  expectCodedRefusal,
+} from "./helpers/closed-refusal.ts";
 
 const run = {
   run: "a".repeat(32),
@@ -373,7 +377,7 @@ test("preflight compares actual reviewed identity before cleanup eligibility", a
   );
   expect(calls).toEqual(["review"]);
   // The native receipt, not the immutable ownership plan, records current routes.
-  await expect(
+  await expectClosedRefusal(
     preflightNativeRestart({
       ...options,
       dependencies: {
@@ -386,8 +390,9 @@ test("preflight compares actual reviewed identity before cleanup eligibility", a
             projectArgs: [],
           }),
       },
-    })
-  ).rejects.toThrow("compatibility changed");
+    }),
+    "compatibility changed"
+  );
 });
 
 test("preflight refuses a stale host listener before restart cleanup", async () => {
@@ -411,7 +416,7 @@ test("preflight refuses a stale host listener before restart cleanup", async () 
       lifecycleHostEnvironment: {},
       effectiveEnvName: "qa",
     };
-    await expect(
+    await expectClosedRefusal(
       preflightNativeRestart({
         runtime: { binary: join(directory, "hack-native"), home: "/candidate" },
         scope,
@@ -459,8 +464,9 @@ test("preflight refuses a stale host listener before restart cleanup", async () 
               projectArgs: [],
             }),
         },
-      })
-    ).rejects.toThrow("host dependency listener is unavailable or changed");
+      }),
+      "host dependency listener is unavailable or changed"
+    );
     expect(calls).toEqual([
       "runtime status",
       "runtime probe",
@@ -504,7 +510,7 @@ test("restart preflight refuses failed or unknown admission before reading envir
   );
   for (const admission of [{ admitted: false }, {}, null]) {
     const calls: string[] = [];
-    await expect(
+    await expectClosedRefusal(
       preflightNativeRestart({
         runtime: { binary: "/unused", home: "/candidate" },
         scope,
@@ -519,8 +525,9 @@ test("restart preflight refuses failed or unknown admission before reading envir
             throw new Error("environment should not be read");
           },
         },
-      })
-    ).rejects.toThrow("admission failed before cleanup");
+      }),
+      "admission failed before cleanup"
+    );
     expect(calls).toEqual(["status", "probe"]);
   }
 });
@@ -753,7 +760,7 @@ test("explicit stopped recovery refuses incomplete, foreign or missing retained 
     ]) {
       const f = fixture();
       const calls: string[] = [];
-      await expect(
+      await expectClosedRefusal(
         restartNativeProject({
           ...f.options,
           preflight: async () =>
@@ -768,8 +775,9 @@ test("explicit stopped recovery refuses incomplete, foreign or missing retained 
                 },
               },
             }),
-        })
-      ).rejects.toThrow("cannot confirm the stopped retained graph");
+        }),
+        "cannot confirm the stopped retained graph"
+      );
       expect(calls).toEqual(["inspect"]);
       expect(f.events).toEqual([]);
       expect(f.state.pending).toBeNull();
@@ -785,7 +793,7 @@ test("explicit stopped recovery rechecks compute and retained data after review"
     for (const changed of ["compute", "data"]) {
       const f = fixture();
       let inspections = 0;
-      await expect(
+      await expectClosedRefusal(
         restartNativeProject({
           ...f.options,
           preflight: async () =>
@@ -811,8 +819,9 @@ test("explicit stopped recovery rechecks compute and retained data after review"
                 },
               },
             }),
-        })
-      ).rejects.toThrow("stopped recovery changed during review");
+        }),
+        "stopped recovery changed during review"
+      );
       expect(inspections).toBe(2);
       expect(f.events).toEqual([]);
       expect(f.state.pending).toBeNull();
@@ -826,7 +835,7 @@ test("frontend recovery on an active graph still requires live host listeners", 
   const listener = await listenerIntentFixture();
   try {
     const f = fixture();
-    await expect(
+    await expectCodedRefusal(
       restartNativeProject({
         ...f.options,
         preflight: async () =>
@@ -847,8 +856,10 @@ test("frontend recovery on an active graph still requires live host listeners", 
                   : await listener.options.dependencies!.invoke!(options),
             },
           }),
-      })
-    ).rejects.toThrow("bounded explicit listener selection; values omitted");
+      }),
+      "E_CONFIG_INVALID",
+      "bounded explicit listener selection; values omitted"
+    );
     expect(listener.calls).toEqual([
       "runtime status",
       "runtime probe",
@@ -941,7 +952,7 @@ test("invalid retained image provenance refuses stopped preflight before tag res
   try {
     const f = fixture();
     const calls: string[] = [];
-    await expect(
+    await expectClosedRefusal(
       restartNativeProject({
         ...f.options,
         preflight: async () =>
@@ -971,8 +982,9 @@ test("invalid retained image provenance refuses stopped preflight before tag res
               },
             },
           }),
-      })
-    ).rejects.toThrow("retained image provenance is invalid");
+      }),
+      "retained image provenance is invalid"
+    );
     expect(calls).not.toContain("ensure-image");
     expect(f.events).toEqual([]);
     expect(f.state.pending).toBeNull();
@@ -1146,7 +1158,7 @@ test("cleaned intent cannot bypass live, uncertain, foreign or malformed retaine
     for (const observed of invalid) {
       listener.calls.length = 0;
       const f = fixture({ run, finalization: token, phase: "cleaned" });
-      await expect(
+      await expectClosedRefusal(
         restartNativeProject({
           ...f.options,
           preflight: async (selected, { cleanedRetry }) =>
@@ -1163,14 +1175,15 @@ test("cleaned intent cannot bypass live, uncertain, foreign or malformed retaine
               },
             }),
           dependencies: { ...f.options.dependencies, load: async () => run },
-        })
-      ).rejects.toThrow("cannot confirm the stopped retained graph");
+        }),
+        "cannot confirm the stopped retained graph"
+      );
       expect(listener.calls).toEqual(["graph inspect"]);
       expect(f.events).toEqual([]);
       expect(f.state.pending?.phase).toBe("cleaned");
     }
     const f = fixture({ run, finalization: token, phase: "cleaned" });
-    await expect(
+    await expectClosedRefusal(
       restartNativeProject({
         ...f.options,
         preflight: async (selected, { cleanedRetry }) =>
@@ -1186,8 +1199,9 @@ test("cleaned intent cannot bypass live, uncertain, foreign or malformed retaine
             },
           }),
         dependencies: { ...f.options.dependencies, load: async () => run },
-      })
-    ).rejects.toThrow("cannot confirm the stopped retained graph");
+      }),
+      "cannot confirm the stopped retained graph"
+    );
     expect(f.events).toEqual([]);
   } finally {
     await rm(listener.directory, { recursive: true, force: true });
@@ -1198,7 +1212,7 @@ test("active restart still refuses absent or wrong-executable listeners before c
   const listener = await listenerIntentFixture();
   try {
     const f = fixture();
-    await expect(
+    await expectCodedRefusal(
       restartNativeProject({
         ...f.options,
         preflight: async (selected, { cleanedRetry }) => {
@@ -1209,8 +1223,10 @@ test("active restart still refuses absent or wrong-executable listeners before c
             cleanedRetry,
           });
         },
-      })
-    ).rejects.toThrow("bounded explicit listener selection; values omitted");
+      }),
+      "E_CONFIG_INVALID",
+      "bounded explicit listener selection; values omitted"
+    );
     expect(listener.calls).toEqual([
       "runtime status",
       "runtime probe",
@@ -1241,7 +1257,7 @@ test("malformed dependency intent refuses cleaned retry without capture or start
         JSON.stringify({ version: 1, dependencies: [binding] })
       );
       const f = fixture({ run, finalization: token, phase: "cleaned" });
-      await expect(
+      await expectClosedRefusal(
         restartNativeProject({
           ...f.options,
           preflight: async (selected, { cleanedRetry }) =>
@@ -1250,8 +1266,9 @@ test("malformed dependency intent refuses cleaned retry without capture or start
               run: selected,
               cleanedRetry,
             }),
-        })
-      ).rejects.toThrow("dependency intent is invalid; values omitted");
+        }),
+        "dependency intent is invalid; values omitted"
+      );
       expect(listener.calls).toEqual([
         "graph inspect",
         "runtime status",
@@ -1379,7 +1396,7 @@ test("active legacy restart preserves adapted labels and rechecks authenticated 
           }),
       });
       if (drift) {
-        await expect(result).rejects.toThrow("active review identity changed");
+        await expectClosedRefusal(result, "active review identity changed");
         expect(f.events).toEqual([]);
       } else {
         expect(await result).toBe(0);

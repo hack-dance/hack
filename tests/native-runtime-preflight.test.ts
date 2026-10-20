@@ -26,6 +26,8 @@ async function preflight(reply: () => Promise<unknown>) {
 
 test.each([
   { phase: "stopped", process_alive: null },
+  // Any non-running phase refuses on its own, without a dead-process signal.
+  { phase: "initializing", process_alive: null },
   { phase: "uninitialized", process_alive: false },
   { phase: "process-exited", process_alive: false },
   { phase: "running", process_alive: false },

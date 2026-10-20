@@ -9,6 +9,10 @@ import {
   readNativeHostDependencies,
 } from "../src/backends/native-project-dependencies.ts";
 import { NativeRuntimeRequestError } from "../src/backends/native-runtime-client.ts";
+import {
+  expectCodedRefusal,
+  expectCodedThrow,
+} from "./helpers/closed-refusal.ts";
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -87,7 +91,7 @@ test("startup discovery stops on cancellation and never accepts a late query res
   await expect(waiting).rejects.toThrow();
   expect(calls).toBe(1);
   const late = new AbortController();
-  await expect(
+  await expectCodedRefusal(
     discoverNativeHostDependency({
       ...discovery,
       wait: { deadlineMs: performance.now() + 2000, signal: late.signal },
@@ -95,8 +99,10 @@ test("startup discovery stops on cancellation and never accepts a late query res
         late.abort();
         return { host_pid: 456, endpoint_fingerprint: "e".repeat(64) };
       },
-    })
-  ).rejects.toThrow("values omitted");
+    }),
+    "E_CONFIG_INVALID",
+    "values omitted"
+  );
 });
 
 test("startup discovery deadline bounds missing listeners and subsequent bindings", async () => {
@@ -109,18 +115,22 @@ test("startup discovery deadline bounds missing listeners and subsequent binding
     calls++;
     throw unavailableListener();
   };
-  await expect(
-    discoverNativeHostDependency({ ...discovery, wait, invoke })
-  ).rejects.toThrow("values omitted");
+  await expectCodedRefusal(
+    discoverNativeHostDependency({ ...discovery, wait, invoke }),
+    "E_CONFIG_INVALID",
+    "values omitted"
+  );
   const exhaustedCalls = calls;
-  await expect(
+  await expectCodedRefusal(
     discoverNativeHostDependency({
       ...discovery,
       hostPort: 8444,
       wait,
       invoke,
-    })
-  ).rejects.toThrow("values omitted");
+    }),
+    "E_CONFIG_INVALID",
+    "values omitted"
+  );
   expect(calls).toBe(exhaustedCalls);
 });
 
@@ -149,7 +159,7 @@ test("startup discovery does not retry unrelated failures or malformed results",
     expect(calls).toBe(1);
   }
   let malformedCalls = 0;
-  await expect(
+  await expectCodedRefusal(
     discoverNativeHostDependency({
       ...discovery,
       wait: {
@@ -160,8 +170,10 @@ test("startup discovery does not retry unrelated failures or malformed results",
         malformedCalls++;
         return { password: "synthetic-do-not-print" };
       },
-    })
-  ).rejects.toThrow("values omitted");
+    }),
+    "E_CONFIG_INVALID",
+    "values omitted"
+  );
   expect(malformedCalls).toBe(1);
 });
 
@@ -207,9 +219,11 @@ test("dependency launchers add reaping init only when omitted and preserve expli
   expect(services.web?.init).toBe(true);
   expect(services.worker?.init).toBe(false);
   const refused = { web: { init: false } };
-  expect(() =>
-    prepareNativeDependencyServices({ dependencies, services: refused })
-  ).toThrow("init: true");
+  expectCodedThrow(
+    () => prepareNativeDependencyServices({ dependencies, services: refused }),
+    "E_NATIVE_PROJECT_UNSUPPORTED",
+    "init: true"
+  );
   expect(refused.web.init).toBe(false);
 });
 test("equal endpoints share transport across services while same-service bindings remain distinct", () => {
@@ -243,9 +257,11 @@ test("wrapped supervisors require an explicit bounded executable selector", () =
     Number.NaN,
     Number.POSITIVE_INFINITY,
   ]) {
-    expect(() =>
-      parse([{ ...selected, host_supervisor_depth: depth }])
-    ).toThrow("values omitted");
+    expectCodedThrow(
+      () => parse([{ ...selected, host_supervisor_depth: depth }]),
+      "E_CONFIG_INVALID",
+      "values omitted"
+    );
   }
   expect(() => parse([{ ...binding(), host_supervisor_depth: 2 }])).toThrow(
     "values omitted"
@@ -265,7 +281,11 @@ test("shared listener transports reject differing supervisor authority", () => {
     { ...second, host_executable: "/synthetic/foreign" },
     binding("worker"),
   ]) {
-    expect(() => parse([first, replacement])).toThrow("values omitted");
+    expectCodedThrow(
+      () => parse([first, replacement]),
+      "E_CONFIG_INVALID",
+      "values omitted"
+    );
   }
 });
 test("ambiguous, undeclared, wildcard or credential-bearing dependencies refuse without values", () => {
@@ -288,7 +308,11 @@ test("ambiguous, undeclared, wildcard or credential-bearing dependencies refuse 
     Array.from({ length: 33 }, (_, i) => binding("web", `h${i}`)),
   ];
   for (const entries of bad) {
-    expect(() => parse(entries)).toThrow("values omitted");
+    expectCodedThrow(
+      () => parse(entries),
+      "E_CONFIG_INVALID",
+      "values omitted"
+    );
   }
   for (const value of [
     null,
@@ -299,9 +323,11 @@ test("ambiguous, undeclared, wildcard or credential-bearing dependencies refuse 
       password: "synthetic-do-not-print",
     },
   ]) {
-    expect(() =>
-      parseNativeHostDependencies({ value, services: ["web"] })
-    ).toThrow("values omitted");
+    expectCodedThrow(
+      () => parseNativeHostDependencies({ value, services: ["web"] }),
+      "E_CONFIG_INVALID",
+      "values omitted"
+    );
   }
 });
 test("selection files are bounded regular files; symlinks and malformed private contents refuse", async () => {
@@ -318,15 +344,19 @@ test("selection files are bounded regular files; symlinks and malformed private 
   const link = join(root, "link.json");
   await symlink(path, link);
   for (const candidate of [link, root, "relative.json"]) {
-    await expect(
-      readNativeHostDependencies({ path: candidate, services: ["web"] })
-    ).rejects.toThrow("values omitted");
+    await expectCodedRefusal(
+      readNativeHostDependencies({ path: candidate, services: ["web"] }),
+      "E_CONFIG_INVALID",
+      "values omitted"
+    );
   }
   for (const body of ["synthetic-do-not-print", " ".repeat(65_537)]) {
     await writeFile(path, body);
-    await expect(
-      readNativeHostDependencies({ path, services: ["web"] })
-    ).rejects.toThrow("values omitted");
+    await expectCodedRefusal(
+      readNativeHostDependencies({ path, services: ["web"] }),
+      "E_CONFIG_INVALID",
+      "values omitted"
+    );
   }
   expect(await readNativeHostDependencies({ services: ["web"] })).toEqual([]);
 });
@@ -365,10 +395,12 @@ test("executable-pinned selection refreshes one current PID per shared listener 
   ]);
   expect(result[0]?.host_executable).toBe(executable);
   expect(result.map((entry) => entry.host_supervisor_depth)).toEqual([2, 2]);
-  await expect(
-    readNativeHostDependencies({ path, services: ["web", "worker"] })
-  ).rejects.toThrow("values omitted");
-  await expect(
+  await expectCodedRefusal(
+    readNativeHostDependencies({ path, services: ["web", "worker"] }),
+    "E_CONFIG_INVALID",
+    "values omitted"
+  );
+  await expectCodedRefusal(
     readNativeHostDependencies({
       path,
       services: ["web", "worker"],
@@ -376,8 +408,10 @@ test("executable-pinned selection refreshes one current PID per shared listener 
         host_pid: 456,
         endpoint_fingerprint: "invalid",
       }),
-    })
-  ).rejects.toThrow("values omitted");
+    }),
+    "E_CONFIG_INVALID",
+    "values omitted"
+  );
   await writeFile(
     path,
     JSON.stringify({
@@ -386,9 +420,11 @@ test("executable-pinned selection refreshes one current PID per shared listener 
     })
   );
   calls.length = 0;
-  await expect(
-    readNativeHostDependencies({ path, services: ["web"], discover })
-  ).rejects.toThrow("values omitted");
+  await expectCodedRefusal(
+    readNativeHostDependencies({ path, services: ["web"], discover }),
+    "E_CONFIG_INVALID",
+    "values omitted"
+  );
   expect(calls).toEqual([]);
   await writeFile(
     path,
@@ -397,9 +433,11 @@ test("executable-pinned selection refreshes one current PID per shared listener 
       dependencies: [{ ...selected[0], host_supervisor_depth: 9 }],
     })
   );
-  await expect(
-    readNativeHostDependencies({ path, services: ["web"], discover })
-  ).rejects.toThrow("values omitted");
+  await expectCodedRefusal(
+    readNativeHostDependencies({ path, services: ["web"], discover }),
+    "E_CONFIG_INVALID",
+    "values omitted"
+  );
   expect(calls).toEqual([]);
 });
 
@@ -438,7 +476,7 @@ test("logical grant bounds and endpoint identity remain independent of transport
       services,
     });
   expect(select(entries.slice(0, 128))).toHaveLength(128);
-  expect(() => select(entries)).toThrow("values omitted");
+  expectCodedThrow(() => select(entries), "E_CONFIG_INVALID", "values omitted");
   expect(
     select([
       { ...binding("service-0"), host_pid: 123 },

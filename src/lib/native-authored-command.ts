@@ -45,25 +45,14 @@ import {
   createNativeEnvFingerprintSession,
   type NativeEnvFingerprintSession,
 } from "./native-env-fingerprint-state.ts";
+import { nativeForegroundDetachRefusal } from "./native-up-refusals.ts";
 
-function unsupported(hint?: string): never {
+function unsupported(): never {
   throw new HackCliError({
     code: "E_NATIVE_PROJECT_UNSUPPORTED",
-    message: `Native authored execution requires whole-project foreground up or restart, owner-mediated down, ps, finite single-service logs --no-follow, noninteractive single-service exec or run, or explicit stored-generation down --recover on macOS. This request ran no input or runtime operation.${hint ? ` ${hint}` : ""}`,
+    message:
+      "Native authored execution requires whole-project foreground up or restart, owner-mediated down, ps, finite single-service logs --no-follow, noninteractive single-service exec or run, or explicit stored-generation down --recover on macOS. This request ran no input or runtime operation.",
   });
-}
-
-/** The supported alternative to a detached native foreground start. */
-function foregroundDetachHint(
-  options: NativeComposeCommandOptions
-): string | undefined {
-  if (
-    !(options.detach && ["up", "restart"].includes(options.operation)) ||
-    process.platform !== "darwin"
-  ) {
-    return;
-  }
-  return `Native \`hack ${options.operation}\` runs in the foreground only, so --detach is not supported: run it without --detach in its own terminal and keep it open, use \`hack ps\` and \`hack logs\` from another terminal, and press Ctrl-C to stop it.`;
 }
 
 function assertLogsOptions(options: NativeComposeCommandOptions): void {
@@ -194,6 +183,17 @@ function assertRecoveryOptions(options: NativeComposeCommandOptions): void {
 }
 
 function assertForegroundOptions(options: NativeComposeCommandOptions): void {
+  // Where authored foreground up/restart is supported, a detached start gets
+  // the same one-line refusal as an image project, not the generic one.
+  if (
+    process.platform === "darwin" &&
+    options.detach &&
+    (options.operation === "up" || options.operation === "restart")
+  ) {
+    throw nativeForegroundDetachRefusal({
+      restart: options.operation === "restart",
+    });
+  }
   if (
     process.platform !== "darwin" ||
     !["up", "down", "restart"].includes(options.operation) ||
@@ -213,7 +213,7 @@ function assertForegroundOptions(options: NativeComposeCommandOptions): void {
         options.overlay !== undefined ||
         options.services !== undefined))
   ) {
-    unsupported(foregroundDetachHint(options));
+    unsupported();
   }
 }
 

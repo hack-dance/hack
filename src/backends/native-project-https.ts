@@ -25,6 +25,7 @@ import { connect, createServer, type Server } from "node:net";
 import { tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import { connect as tlsConnect } from "node:tls";
+import { ClosedCliError } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
 import { listenPublishedUnixSocket } from "../lib/unix-socket-publish.ts";
 import { checkNativeHttpsPort } from "./native-https-port.ts";
@@ -114,12 +115,12 @@ export function nativeHttpsVerificationError(
   ) {
     code = error.code;
   }
-  return new Error(
+  return new ClosedCliError(
     `Native HTTPS verification failed (${code}); peer values omitted.`
   );
 }
 function refused(): Error {
-  return new Error(
+  return new ClosedCliError(
     "Native HTTPS startup or ownership verification failed; values omitted. Inspect retained owned state before retrying."
   );
 }

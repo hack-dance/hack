@@ -285,6 +285,24 @@ function refused(): Error {
   });
 }
 
+/**
+ * A runtime reply or saved ownership record that does not match this start.
+ * This is an integrity or ownership refusal, not a configuration refusal: it
+ * is closed (no stack) and carries no configuration code.
+ */
+function unconfirmed(subject: string): Error {
+  return new ClosedCliError(
+    `Native foreground up could not confirm ${subject}; inspect owned state before retrying.`
+  );
+}
+
+/** Fixed classifications from reviewed-route verification; peer values are never echoed. */
+function httpsVerificationFailed(code: string): Error {
+  return new ClosedCliError(
+    `Native HTTPS verification failed (${code}); peer values omitted.`
+  );
+}
+
 /** Cancellation is not a configuration refusal: it carries no refusal code. */
 function canceled(): Error {
   return new ClosedCliError(
@@ -358,7 +376,7 @@ async function pinNativeProjectImages(opts: {
       typeof ensured.image_id !== "string" ||
       !IMAGE.test(ensured.image_id)
     ) {
-      throw refused();
+      throw unconfirmed("the runtime image selection");
     }
     spec.image = ensured.image_id;
   }
@@ -429,7 +447,7 @@ function authoritative(
     value.journal_incomplete !== false ||
     !isRecord(value.receipt)
   ) {
-    throw refused();
+    throw unconfirmed("the startup receipt");
   }
   const receipt = value.receipt;
   if (
@@ -439,7 +457,7 @@ function authoritative(
     typeof receipt.owner !== "string" ||
     !OWNER.test(receipt.owner)
   ) {
-    throw refused();
+    throw unconfirmed("the startup receipt");
   }
   return { run, owner: receipt.owner, namespace, planId };
 }
@@ -461,7 +479,7 @@ function redirectHostname(
   try {
     target = new URL(location, `https://${hostname}:${port}${route.path}`);
   } catch {
-    throw refused();
+    throw httpsVerificationFailed("REDIRECT_TARGET_REFUSED");
   }
   const reviewed = routes.find((entry) => entry.hostname === target.hostname);
   if (
@@ -476,9 +494,7 @@ function redirectHostname(
     reviewed.path !== route.path ||
     target.pathname !== route.path
   ) {
-    throw new ClosedCliError(
-      "Native HTTPS verification failed (REDIRECT_TARGET_REFUSED); peer values omitted."
-    );
+    throw httpsVerificationFailed("REDIRECT_TARGET_REFUSED");
   }
   return target.hostname;
 }
@@ -511,22 +527,18 @@ export async function verifyHttpsRoutes(
     let hostname = route.hostname;
     while (true) {
       if (visited.has(hostname)) {
-        throw new ClosedCliError(
-          "Native HTTPS verification failed (REDIRECT_CYCLE); peer values omitted."
-        );
+        throw httpsVerificationFailed("REDIRECT_CYCLE");
       }
       visited.add(hostname);
       const response = results.get(hostname);
       if (!(response && Number.isInteger(response.statusCode))) {
-        throw refused();
+        throw httpsVerificationFailed("NO_RESPONSE");
       }
       if (response.statusCode >= 200 && response.statusCode < 300) {
         break;
       }
       if (!(HTTPS_REDIRECTS.has(response.statusCode) && response.location)) {
-        throw new ClosedCliError(
-          `Native HTTPS verification failed (HTTP_STATUS_${response.statusCode}); peer values omitted.`
-        );
+        throw httpsVerificationFailed(`HTTP_STATUS_${response.statusCode}`);
       }
       hostname = redirectHostname(
         response.location,
@@ -809,7 +821,9 @@ async function retireRemovedMapping(opts: {
     return;
   }
   if (opts.mapping.owner !== opts.owned.owner) {
-    throw refused();
+    throw new ClosedCliError(
+      "Native run mapping is owned by another run; it was not removed. Inspect owned state before retrying."
+    );
   }
   if (
     isRecord(opts.final) &&
@@ -1222,7 +1236,7 @@ export async function startNativeProject(opts: {
             typeof plan.dependency_plan_id !== "string" ||
             !SHA.test(plan.dependency_plan_id)
           ) {
-            throw refused();
+            throw unconfirmed("the host dependency plan");
           }
           const invokeInspect = () =>
             inspectNativeProjectGraph({

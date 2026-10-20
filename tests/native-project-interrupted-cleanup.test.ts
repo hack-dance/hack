@@ -4,6 +4,7 @@ import {
   recoverNativeInterruptedStartupCleanup,
 } from "../src/backends/native-project-interrupted-cleanup.ts";
 import type { invokeNativeRuntime } from "../src/backends/native-runtime-client.ts";
+import { expectClosedRefusal } from "./helpers/closed-refusal.ts";
 
 const run = {
   run: "a".repeat(32),
@@ -156,7 +157,7 @@ test("presentation cannot bypass foreign selection or an unfinished startup jour
   const foreign = snapshot();
   foreign.receipt.owner = "changed";
   let calls = 0;
-  await expect(
+  await expectClosedRefusal(
     recoverNativeInterruptedStartupCleanup({
       runtime,
       projectRoot: "/not-used",
@@ -169,12 +170,13 @@ test("presentation cannot bypass foreign selection or an unfinished startup jour
         calls++;
         throw new Error("unexpected recovery");
       },
-    })
-  ).rejects.toThrow("startup cleanup is unconfirmed");
+    }),
+    "startup cleanup is unconfirmed"
+  );
   expect(calls).toBe(0);
   const partial = snapshot();
   partial.interrupted_start_cleanup_incomplete = true;
-  await expect(
+  await expectClosedRefusal(
     recoverNativeInterruptedStartupCleanup({
       runtime,
       projectRoot: "/not-used",
@@ -187,8 +189,9 @@ test("presentation cannot bypass foreign selection or an unfinished startup jour
         calls++;
         throw new Error("synthetic-private-canary");
       },
-    })
-  ).rejects.toThrow("startup cleanup is unconfirmed");
+    }),
+    "startup cleanup is unconfirmed"
+  );
   expect(calls).toBe(1);
 });
 
@@ -223,7 +226,7 @@ test("a native journal hint cannot grant authority to a different graph phase", 
   partial.interrupted_start_cleanup_incomplete = true;
   partial.receipt.phase = "ready-observed";
   let calls = 0;
-  await expect(
+  await expectClosedRefusal(
     recoverNativeInterruptedStartupCleanup({
       runtime,
       projectRoot: "/not-used",
@@ -233,8 +236,9 @@ test("a native journal hint cannot grant authority to a different graph phase", 
         calls++;
         throw new Error("unexpected recovery");
       },
-    })
-  ).rejects.toThrow("cleanup is unconfirmed");
+    }),
+    "cleanup is unconfirmed"
+  );
   expect(calls).toBe(0);
 });
 
@@ -253,7 +257,7 @@ test("foreign or incomplete graph selection refuses before native requests", asy
       value.receipt[field] = "invalid";
     }
     let calls = 0;
-    await expect(
+    await expectClosedRefusal(
       recoverNativeInterruptedStartupCleanup({
         runtime,
         projectRoot: "/not-used",
@@ -263,8 +267,9 @@ test("foreign or incomplete graph selection refuses before native requests", asy
           calls++;
           throw new Error("synthetic-private-canary");
         },
-      })
-    ).rejects.toThrow("cleanup is unconfirmed");
+      }),
+      "cleanup is unconfirmed"
+    );
     expect(calls).toBe(0);
   }
 });
@@ -391,14 +396,15 @@ test("recovery acknowledgement does not replace fresh exact retained-data observ
       }
       return final;
     };
-    await expect(
+    await expectClosedRefusal(
       recoverNativeInterruptedStartupCleanup({
         runtime,
         projectRoot: "/not-used",
         run,
         snapshot: snapshot(),
         invoke,
-      })
-    ).rejects.toThrow("cleanup is unconfirmed");
+      }),
+      "cleanup is unconfirmed"
+    );
   }
 });

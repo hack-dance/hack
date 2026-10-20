@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import { selectNativeProjectRestore } from "../src/backends/native-project-restore.ts";
+import { expectClosedRefusal } from "./helpers/closed-refusal.ts";
 
 const saved = {
   run: "a".repeat(32),
@@ -59,22 +60,24 @@ test("restore binds the same run to exact owner plan and generation", async () =
 });
 test("changed retained identity refuses without adopting volumes", async () => {
   for (const key of ["run", "owner", "namespace", "plan", "generation"]) {
-    await expect(
+    await expectClosedRefusal(
       selectNativeProjectRestore({
         ...options,
         restore: saved,
         invoke: async () => ({ ...selected, [key]: "changed" }),
-      })
-    ).rejects.toThrow("selection changed");
+      }),
+      "selection changed"
+    );
   }
-  await expect(
+  await expectClosedRefusal(
     selectNativeProjectRestore({
       ...options,
       restore: saved,
       review: { ...options.review, planId: "f".repeat(64) },
       invoke: async () => selected,
-    })
-  ).rejects.toThrow("compatibility changed");
+    }),
+    "compatibility changed"
+  );
 });
 
 test("changed source review retains the old cache publication after native compatibility proof", async () => {

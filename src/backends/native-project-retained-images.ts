@@ -1,3 +1,4 @@
+import { ClosedCliError } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
 import { inspectNativeProjectGraph } from "./native-project-inspect.ts";
 import { confirmedNativeRetainedGraph } from "./native-project-retained.ts";
@@ -42,7 +43,7 @@ export async function selectNativeRetainedImages(opts: {
       isRecord(observed.receipt)
     )
   ) {
-    throw new Error(
+    throw new ClosedCliError(
       "Native retained image selection changed; no images were resolved."
     );
   }
@@ -73,7 +74,7 @@ function imagesFromReceipt(opts: {
     !SHA.test(opts.originalSha256) ||
     !isRecord(receipt.resources)
   ) {
-    throw new Error(
+    throw new ClosedCliError(
       "Native retained image provenance is invalid; no images were resolved."
     );
   }
@@ -91,7 +92,7 @@ function imagesFromReceipt(opts: {
       typeof resource.image !== "string" ||
       !IMAGE.test(resource.image)
     ) {
-      throw new Error(
+      throw new ClosedCliError(
         "Native retained image identity is invalid; no images were resolved."
       );
     }
@@ -112,7 +113,7 @@ function activeReceipt(value: unknown, saved: NativeProjectRun) {
     value.receipt.plan_id !== saved.planId ||
     !isRecord(value.receipt.resources)
   ) {
-    throw new Error(
+    throw new ClosedCliError(
       "Native active image selection changed; the current graph was not stopped."
     );
   }
@@ -147,7 +148,7 @@ export async function selectNativeActiveImages(opts: {
       SERVICE.test(resource.key)
   );
   if (!isRecord(service) || typeof service.key !== "string") {
-    throw new Error(
+    throw new ClosedCliError(
       "Native active image selection has no service authority; the current graph was not stopped."
     );
   }
@@ -164,13 +165,13 @@ export async function selectNativeActiveImages(opts: {
     ? receipt.resources[`container:${proof.service}`]
     : undefined;
   if (!isRecord(resource) || resource.id !== proof.container) {
-    throw new Error(
+    throw new ClosedCliError(
       "Native active image identity changed; the current graph was not stopped."
     );
   }
   const images = imagesFromReceipt({ ...opts, receipt });
   if (JSON.stringify([...initialImages]) !== JSON.stringify([...images])) {
-    throw new Error(
+    throw new ClosedCliError(
       "Native active image selection changed; the current graph was not stopped."
     );
   }

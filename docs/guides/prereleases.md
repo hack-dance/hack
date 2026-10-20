@@ -155,6 +155,14 @@ against the existing root, then run `upgrade`. See
 [upgrade and return to a retained candidate](candidate-install.md#upgrade-and-return-to-a-retained-candidate).
 A fresh `--root` does not need this step.
 
+Channels created by the `5.0.0-next.3`, `next.4` or `next.5` installer share one
+manager. It accepts at most 17 archive members, the exact size of the layout those
+releases ship, and no file names beyond it. Later installers use a fixed 64-member
+ceiling, but every member must still be a reviewed name in a complete group. A
+later bundle that adds a file therefore needs the same `upgrade-manager` step
+first. Upgrading with that newer installer against such a channel also refuses
+until you run it, and leaves the channel unchanged.
+
 A truncated, interrupted or oversized official download is a refused installation.
 The installer removes only the staging directory that attempt created. It leaves
 the current selection, retained bundles and homes unchanged. Retry the same version

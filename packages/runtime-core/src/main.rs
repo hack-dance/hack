@@ -97,9 +97,10 @@ Usage:
   hack-local runtime prepared-base verify --base-id <id> [--store <absolute-private-store>] [--json]
   hack-local runtime prepared-base status --profile research|development [--store <absolute-private-store>] [--json]
   hack-local runtime prepared-base remove --base-id <id> [--store <absolute-private-store>] [--json]
-  hack-local runtime ensure-image --reference <namespace/repository[:tag]|namespace/repository@sha256:digest> --json
-  hack-local runtime resolve-image --reference <namespace/repository[:tag]> --json
-  hack-local runtime fetch-image --reference <namespace/repository@sha256:digest> --archive <new-flat-image.tar> [--json]
+  hack-local runtime admit-image --reference <[namespace/]repository[:tag][@sha256:digest]|sha256:image-id> --json
+  hack-local runtime ensure-image --reference <[namespace/]repository[:tag]|[namespace/]repository@sha256:digest> --json
+  hack-local runtime resolve-image --reference <[namespace/]repository[:tag]> --json
+  hack-local runtime fetch-image --reference <[namespace/]repository@sha256:digest> --archive <new-flat-image.tar> [--json]
   hack-local runtime load-image --archive <flat-image.tar> --sha256 <archive-hash> --image-id <sha256:config-hash>
   hack-local runtime network internet --json
   hack-local runtime up --profile development --internet --json
@@ -934,6 +935,12 @@ fn run() -> Result<(), CandidateError> {
         ] => {
             print_json(&hack_runtime_core::provider::image_ensure::ensure(
                 &discover_candidate(&requested)?,
+                reference,
+            )?)?;
+        }
+        ["runtime", "admit-image", "--reference", reference, "--json"] => {
+            // Pure: no candidate discovery, network, credentials or runtime effects.
+            print_json(&hack_runtime_core::provider::registry_image::admit(
                 reference,
             )?)?;
         }

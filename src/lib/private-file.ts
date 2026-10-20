@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { constants, type Stats } from "node:fs";
 import {
   type FileHandle,
+  link,
   lstat,
   open,
   realpath,
@@ -372,6 +373,62 @@ export async function replacePrivateFileAtomic(
     }
   }
   await syncDirectory({ path: dirname(opts.path) });
+}
+
+/**
+ * Publishes `text` at `path` only when no entry exists there, and reports
+ * whether this call published it.
+ *
+ * The complete contents are staged in a private (0600, fsynced) sibling and
+ * published with link(2), which fails with EEXIST instead of replacing an
+ * existing entry. Unlike {@link createPrivateFileExclusive}, readers never see
+ * an empty or partial file, so a concurrent loser can adopt the winner's file
+ * immediately. An existing regular file returns false untouched; a symlink
+ * (dangling or not), a non-regular entry, or a symlinked or replaced directory
+ * from `directories` throws `refusal()`. The staging file is always removed.
+ */
+export async function publishPrivateFileExclusive(
+  opts: ReplaceablePrivateFileOptions & { readonly text: string }
+): Promise<boolean> {
+  const directories = await captureRealDirectories(opts);
+  if (await observeReplaceableTarget(opts)) {
+    return false;
+  }
+  const staging = join(
+    dirname(opts.path),
+    `.${basename(opts.path)}.${randomUUID()}.tmp`
+  );
+  const file = await open(
+    staging,
+    constants.O_CREAT |
+      constants.O_EXCL |
+      constants.O_NOFOLLOW |
+      constants.O_WRONLY,
+    0o600
+  );
+  let published = false;
+  try {
+    // The umask can only remove bits; restore owner read/write explicitly.
+    await file.chmod(0o600);
+    await file.writeFile(opts.text, "utf8");
+    await file.sync();
+    await recheckRealDirectories({ directories, refusal: opts.refusal });
+    try {
+      await link(staging, opts.path);
+      published = true;
+    } catch (error: unknown) {
+      if (!(isRecord(error) && error.code === "EEXIST")) {
+        throw error;
+      }
+      // Lost the race: classify what is there now (regular file or refusal).
+      await observeReplaceableTarget(opts);
+    }
+  } finally {
+    await file.close();
+    await unlink(staging).catch(() => undefined);
+  }
+  await syncDirectory({ path: dirname(opts.path) });
+  return published;
 }
 
 /** Best effort: persist the directory entry where the platform allows it. */

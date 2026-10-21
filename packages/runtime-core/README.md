@@ -1504,7 +1504,11 @@ needs the reserve runs the release checks, a release-check refusal, including an
 scan that times out, never refuses a start whose samples all fit the fresh budget. `machine create` requires an
 authority only a start without a reserve selection obtains, and `machine start` requires
 one issued only by the pre-boot admission on the qualifying basis followed by the final
-leased recheck. Pressure, thermal, swapout and memory-headroom checks are unchanged.
+leased recheck. The start sequence itself is typed: the check before any restart effect
+needs the basis that only the leased settle step returns, and both `machine create` and
+the pre-boot admission need the authority that only that check returns, so a start that
+skips or reorders a step does not compile. Pressure, thermal, swapout and
+memory-headroom checks are unchanged.
 
 ### Native persistent-data identity codec
 

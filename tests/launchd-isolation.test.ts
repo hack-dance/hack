@@ -164,7 +164,7 @@ async function runAsDarwin(opts: {
 }
 
 test("launchd access: only the default hack home may manage launchd", () => {
-  const home = "/Users/someone";
+  const home = "/tmp/hack-launchd-real-home";
   const cases: ReadonlyArray<{
     readonly env: Record<string, string | undefined>;
     readonly allowed: boolean;

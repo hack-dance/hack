@@ -270,20 +270,23 @@ export const PATTERN_CATALOGUE: readonly PatternCard[] = [
     title: "Tracked defaults plus idempotent machine-local hydration",
     useWhen:
       "A repository tracks env defaults and each machine adds local values on top.",
-    disposition: "deferred",
-    supportedCommands: [],
+    disposition: "partial",
+    supportedCommands: [
+      "hack env set <key> --local --value-stdin --secret",
+      "hack env explain <key> --json",
+    ],
     prerequisites:
       "Tracked defaults, a machine-local layer and preserved operator overrides.",
     envOwnership:
-      "Defaults are tracked; hydration writes only the local layer and keeps values out of argv.",
+      "Defaults are tracked; hydration runs `hack env set <key> --local --value-stdin --secret` once per key with the value piped on stdin, so values stay out of argv. Without `--local` the same command writes a tracked default.",
     readiness:
-      "Repeat hydration leaves the tracked tree clean; an interrupted import still leaves a resolvable layer.",
+      "Setting a secret to its current value keeps the stored ciphertext, so repeat hydration leaves the tracked tree clean; a changed value gets new ciphertext with a fresh IV. Each layer write commits by rename, so an interrupted write leaves the previous layer resolvable.",
     cleanup: "Unchanged values cause no rewrite.",
     negativeControl:
       "Re-encrypting unchanged entries causes diff and stash churn, and values passed in command arguments are not a secure import mechanism.",
     domainOwner: "WU27/WU14",
     missingContract:
-      "Hack has no semantic no-op detection or atomic machine-local import contract for env hydration.",
+      "No-op detection and rename-committed writes cover one key per command. Hack has no multi-key import: an interrupted hydration can leave some keys updated and others not.",
     provenance: { consumers: 1, source: "HACK-P08 research register" },
     example: null,
     e2eScenario: null,

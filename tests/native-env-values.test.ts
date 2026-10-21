@@ -133,8 +133,12 @@ async function linked() {
 }
 
 /** Generate synthetic ciphertext using the existing mutation owner, outside the native fixture. */
+// Each call encrypts in a fresh store: an existing store keeps the stored
+// ciphertext for an unchanged value, so reusing one would not re-encrypt.
+let cipherFixtures = 0;
 async function encrypted(plaintext = SENTINEL): Promise<ProjectEnvStoredValue> {
-  const fixture = join(root, "cipher-fixture");
+  cipherFixtures += 1;
+  const fixture = join(root, `cipher-fixture-${cipherFixtures}`);
   await fs.mkdir(join(fixture, ".hack"), { recursive: true });
   await fs.writeFile(join(fixture, PROJECT_ENV_KEY_FILENAME), KEY);
   await setProjectEnvValue({

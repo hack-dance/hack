@@ -33,6 +33,7 @@ import {
   pathExists,
   readTextFile,
   writeTextFile,
+  writeTextFileAtomicIfChanged,
   writeTextFileIfChanged,
 } from "./fs.ts";
 import {
@@ -2260,6 +2261,59 @@ function decryptProjectEnvStoredValue(opts: {
   });
 }
 
+/**
+ * Secret value to store for `plaintext`, keeping the entry's current ciphertext
+ * when it already opens to exactly `plaintext` under `keyText`.
+ *
+ * Fresh-IV encryption makes every write differ, so re-encrypting an unchanged
+ * value would churn a tracked file on each repeat. Reuse is semantic, not
+ * textual: an absent, plain, removed, malformed, wrong-key or different entry
+ * gets a new ciphertext with a fresh IV. Decryption failures are not reported;
+ * they only select rotation.
+ */
+function stableProjectEnvSecretValue(opts: {
+  readonly previous: ProjectEnvStoredValue | undefined;
+  readonly plaintext: string;
+  readonly keyText: string;
+}): ProjectEnvSecretValue {
+  const previous = opts.previous;
+  if (
+    previous !== undefined &&
+    previous !== null &&
+    isProjectEnvSecretValue(previous) &&
+    opensToPlaintext({
+      ciphertext: previous.secure,
+      plaintext: opts.plaintext,
+      keyText: opts.keyText,
+    })
+  ) {
+    return { secure: previous.secure };
+  }
+  return {
+    secure: encryptProjectEnvValue({
+      plaintext: opts.plaintext,
+      keyText: opts.keyText,
+    }),
+  };
+}
+
+function opensToPlaintext(opts: {
+  readonly ciphertext: string;
+  readonly plaintext: string;
+  readonly keyText: string;
+}): boolean {
+  try {
+    return (
+      decryptProjectEnvValue({
+        ciphertext: opts.ciphertext,
+        keyText: opts.keyText,
+      }) === opts.plaintext
+    );
+  } catch {
+    return false;
+  }
+}
+
 export async function setProjectEnvValue(opts: {
   readonly projectRoot: string;
   readonly projectDir: string;
@@ -2312,12 +2366,11 @@ export async function setProjectEnvValue(opts: {
       projectRoot: opts.projectRoot,
     });
     createdKey = ensuredKey.created;
-    storedValue = {
-      secure: encryptProjectEnvValue({
-        plaintext: opts.value,
-        keyText: ensuredKey.keyText,
-      }),
-    };
+    storedValue = stableProjectEnvSecretValue({
+      previous: read.config.values[scope]?.[opts.key],
+      plaintext: opts.value,
+      keyText: ensuredKey.keyText,
+    });
   }
   if (opts.local === true) {
     await ensureHackDirGitignore({
@@ -2425,7 +2478,8 @@ async function writeProjectEnvConfigFile(opts: {
   const yaml = YAML.stringify(opts.config, null, 2);
   const text = yaml.endsWith("\n") ? yaml : `${yaml}\n`;
   await assertLegacyProjectDirectory({ projectDir: dirname(opts.path) });
-  return (await writeTextFileIfChanged(opts.path, text)).changed;
+  // Rename-committed: an interrupted mutation leaves the previous layer intact.
+  return (await writeTextFileAtomicIfChanged(opts.path, text)).changed;
 }
 
 export async function materializeProjectEnv(opts: {

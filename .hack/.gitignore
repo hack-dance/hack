@@ -5,5 +5,6 @@
 .env.state.json
 hack.env.local.yaml
 hack.env.*.local.yaml
+.hack.env*.tmp
 tickets/
 # end managed by hack

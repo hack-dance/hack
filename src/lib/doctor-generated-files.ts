@@ -28,6 +28,7 @@ export function buildGeneratedFilePathspecs(opts: {
     `${dir}/.env.state.json`,
     `${dir}/tickets`,
     `${dir}/hack.env.*.local.yaml`,
+    `${dir}/.hack.env*.tmp`,
     PROJECT_ENV_KEY_FILENAME,
   ];
 }

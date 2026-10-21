@@ -707,5 +707,46 @@ bound to its incarnation, so it still acquires and validates every image. Preloa
 make bases project-specific and require the verifier to check layer contents, so bases stay
 image-free. The larger remaining costs are image acquisition and per-incarnation revalidation.
 
+## Matched application benchmark protocol
+
+Revision 1 of the v5 matched application benchmark is frozen in the
+[application benchmark protocol](reference/application-benchmark-protocol.md)
+(HACK-1169). It fixes the exact candidate and stable artifacts, the host and engine
+versions, the Event Agent and small-fixture workloads, capacities, cache classes, a
+10-round rotated order, sample counts, observer accounting and the program budgets.
+It records no results.
+
+## Known v5 limit: storage-witness startup cost
+
+On 2026-10-19 the user accepted the current storage-witness cost as a known v5 limit
+for now (HACK-1123). It is part of every native warm `up` and is not removed from
+candidate timings under the benchmark protocol.
+
+**Current cost.** Since #313, a warm, image-only, unrouted native `up` or `restart`
+without hooks runs 4 storage proofs instead of 6. Each proof starts 3 helper
+containers. Estimated from a traced hosted docker-e2e run, the warm `up` went from
+about 22 s to about 17.7 s, and the witness share went from about 13 s to about 8.7 s.
+The target is at most 5 s of witness overhead per warm `up`, so the target is not met.
+These are hosted-engine estimates, not measurements from the frozen benchmark host.
+The proof sequence is described in the
+[storage witness reference](reference/native-compose-storage-witness.md).
+
+**Why it is accepted.** The remaining proofs are the witness safety contract. Cutting
+more changes that contract, not just its cost:
+
+- Reusing a proof receipt across commands was analyzed and found unsafe. The root
+  identity is only device, inode, uid and gid, so a recreated volume can match it. The
+  marker is a `user.*` extended attribute that any workload container can remove.
+  Docker exposes no boot ID or start time, and the engine ID survives restarts.
+  Checking a stored receipt would itself need a helper container.
+- A third in-command cut was left out because it changes when a refusal surfaces.
+
+Every command therefore still opens with a full proof.
+
+**Revisit trigger.** Revisit this limit after the matched benchmark protocol
+(HACK-1169) is frozen and its first complete revision-1 cohort has run, using that
+cohort's measured warm startup and restart results. No proof-policy change may be made
+without a separate safety review and approval.
+
 Native recovery investigations can use the explicit, value-free
 [process census phase diagnostics](guides/native-census-diagnostics.md).

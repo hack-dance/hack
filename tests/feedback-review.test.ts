@@ -234,6 +234,118 @@ const REDACTION_CASES: readonly RedactionCase[] = [
     ],
   },
   {
+    // A quoted placeholder is exempt only when it is the whole value; text
+    // or another quote glued after the closing quote continues the value.
+    name: "secrets glued after a quoted placeholder",
+    input: [
+      'DB_PASSWORD="<x>"gluedone',
+      "api_token='<x>'gluedtwo",
+      'client_secret: "<x>""gluedthree"',
+      "ran with --password '<x>'\"gluedfour\"",
+      'password="<x>".gluedfive',
+      'secret_key="plainvalue"gluedsix',
+    ].join("\n"),
+    leaked: [
+      "gluedone",
+      "gluedtwo",
+      "gluedthree",
+      "gluedfour",
+      "gluedfive",
+    ].concat(["plainvalue", "gluedsix"]),
+    kinds: ["secret"],
+    kept: [
+      "DB_PASSWORD=<redacted:secret>",
+      "api_token=<redacted:secret>",
+      "--password <redacted:secret>",
+    ],
+  },
+  {
+    name: "config values and ciphertext glued after a quoted placeholder",
+    input: [
+      '{"HACK_REGION": "<x>"gluedregion}',
+      '{"ciphertext": "<x>"gluedcipher}',
+    ].join("\n"),
+    leaked: ["gluedregion", "gluedcipher"],
+    kinds: ["ciphertext", "config-value"],
+    kept: [
+      '{"HACK_REGION": "<redacted:config-value>"}',
+      '{"ciphertext": "<redacted:ciphertext>"}',
+    ],
+  },
+  {
+    // Only MySQL and MariaDB clients take a password after a short `-p`.
+    name: "mysql and mariadb short -p passwords, attached or separate",
+    input: [
+      "mysql -uroot -pmysqlattached app",
+      "mysqldump -h 127.0.0.1 -p mysqlseparate app",
+      "mariadb-dump -p'mariadbquoted' app",
+      'mysqladmin -u root -p"admin quoted" status',
+      "`mariadb -pmariadbticked`",
+      "(mysql -pmysqlparen)",
+    ].join("\n"),
+    leaked: [
+      "mysqlattached",
+      "mysqlseparate",
+      "mariadbquoted",
+      "admin quoted",
+      "mariadbticked",
+      "mysqlparen",
+    ],
+    kinds: ["secret"],
+    kept: [
+      "mysql -uroot -p<redacted:secret> app",
+      "mysqldump -h 127.0.0.1 -p <redacted:secret> app",
+      "mariadb-dump -p<redacted:secret> app",
+      "-p<redacted:secret> status",
+      "`mariadb -p<redacted:secret>`",
+      "(mysql -p<redacted:secret>)",
+    ],
+  },
+  {
+    // A bare `auth` key counts only with a secret-shaped value.
+    name: "secret-shaped values under a bare auth key",
+    input: [
+      `{"auths": {"registry": {"auth": "${"Zml4dHVyZTpm".repeat(2)}"}}}`,
+      "auth: fixture42value",
+      "auth = Zml4dHVyZQ==",
+      'auth: <x>gluedauth and "auth": "<x>"gluedquoted',
+      "auth: true, auth: required and auth: none",
+    ].join("\n"),
+    leaked: [
+      "Zml4dHVyZTpm",
+      "fixture42value",
+      "Zml4dHVyZQ==",
+      "gluedauth",
+      "gluedquoted",
+    ],
+    kinds: ["secret"],
+    kept: [
+      '"auth": <redacted:secret>}',
+      "auth: <redacted:secret>",
+      "auth: true, auth: required and auth: none",
+    ],
+  },
+  {
+    // Closing punctuation after a bare value stays, for readability.
+    name: "redactions keep the closing backtick, parenthesis or quote",
+    input: [
+      `\`DB_PASSWORD=${FAKE.password}\` failed`,
+      `(set API_TOKEN=${FAKE.password}) first`,
+      `"HACK_REGION=fixture-region" was set`,
+      `ran \`tool --token ${FAKE.password}\` twice`,
+      `curl -H 'Authorization: token ${"fx".repeat(8)}9)' once`,
+    ].join("\n"),
+    leaked: [FAKE.password, "fixture-region", `${"fx".repeat(8)}9`],
+    kinds: ["secret", "config-value"],
+    kept: [
+      "`DB_PASSWORD=<redacted:secret>` failed",
+      "(set API_TOKEN=<redacted:secret>) first",
+      '"HACK_REGION=<redacted:config-value>" was set',
+      "`tool --token <redacted:secret>` twice",
+      "Authorization: token <redacted:secret>)' once",
+    ],
+  },
+  {
     name: "lowercase secret keys outside the provider vocabulary",
     input: [
       `db_pass: ${FAKE.password}`,
@@ -426,6 +538,15 @@ test("placeholders and ordinary Hack text pass through unchanged", () => {
     '(set API_TOKEN=<value>), then `--password <password>`; {"PORT": <port>}',
     "Use `Authorization: token <token>`, or ~/.hack/certs/<host>.",
     'Pass HACK_A=<a>,HACK_B=<b> or {"PORT": <port>,"HOST": <host>}.',
+    // A quoted placeholder that is the whole value stays, before any
+    // separator, closing bracket, backtick or sentence end.
+    `Use \`DB_PASSWORD="<password>"\`, {"API_KEY":"<key>","HACK_A":"<a>"} or token='<token>'.`,
+    // `-p` is a port or a parents flag outside MySQL and MariaDB clients, and
+    // a bare `-p` there prompts for the password.
+    "Run `ssh -p 2222 <host>`, `mkdir -p .hack/tmp`, `docker run -p 8080:80 web`,",
+    "`mysql -p -u <user> <db>`, `mysql -p<password>` or `mariadb -p '<password>'`.",
+    // A bare `auth` key with a setting, not a secret, stays.
+    'Set auth: true, auth: required, auth = none or {"auth": false, "auth": "basic"}.',
   ].join("\n");
   expect(sanitizeFeedbackText(clean)).toEqual({ text: clean, redactions: {} });
 });
@@ -1033,6 +1154,39 @@ test("negative control: an attachment listed only where a reader cannot see it n
     [
       "html comment that takes the backtick",
       beforeHeading("Note `a <!-- ` --> <details> ` here.", "- `dump.log`"),
+    ],
+    // GitHub reads these comments differently from removing everything
+    // between `<!--` and the next `-->`, which would also remove a live
+    // `<details>` (or declaration) that folds the listing.
+    [
+      "comment marker inside code spans around a tag",
+      beforeHeading("Note `<!--` <details> `-->` here.", "- `dump.log`"),
+    ],
+    [
+      "short comment `<!-->` before a details block",
+      beforeHeading("<!-->\n<details>\n<!-- -->", "- `dump.log`"),
+    ],
+    [
+      "short comment `<!--->` before a details block",
+      beforeHeading("<!--->\n<details>\n<!-- -->", "- `dump.log`"),
+    ],
+    [
+      "inline short comment before a tag",
+      beforeHeading("Note <!--> <details> <!-- --> here.", "- `dump.log`"),
+    ],
+    [
+      "processing instruction between comment markers in code",
+      beforeHeading("Note `<!--` <?x `-->` here.", "- `dump.log`\n\n?>"),
+    ],
+    [
+      "declaration between comment markers in code",
+      beforeHeading("Note `<!--` <!DOCTYPE x `-->` here.", "- `dump.log`"),
+    ],
+    // A listing inside a comment that GitHub ends early is still hidden by
+    // the details element that the comment seemed to contain.
+    [
+      "details inside a section comment",
+      withAttachments("<!-->\n<details>\n\n- `dump.log`\n\n-->"),
     ],
     // Table cells split at pipes before code spans are parsed.
     [

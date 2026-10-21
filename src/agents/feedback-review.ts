@@ -394,9 +394,28 @@ const PLACEHOLDER = placeholderValue(String.raw`\s`);
 const HEADER_PLACEHOLDER = placeholderValue(String.raw`[\s"'\x60,;]`);
 /** A placeholder standing for a bare JSON value (`[^\s,}]+`). */
 const JSON_PLACEHOLDER = placeholderValue(String.raw`[\s,}]`);
-/** A double- or single-quoted value that is exactly one placeholder. */
-const QUOTED_PLACEHOLDER_DOUBLE = String.raw`<[^<>"\n]*>"`;
-const QUOTED_PLACEHOLDER_SINGLE = String.raw`<[^<>'\n]*>'`;
+/**
+ * What may follow the closing quote of a quoted placeholder: sentence
+ * punctuation, then whitespace, a separator, a closing bracket, a backtick or
+ * the end of the text. Anything else, such as more text or another quote,
+ * continues the value (`"<x>"leaked`), so the value is not the placeholder.
+ */
+const QUOTED_PLACEHOLDER_END = String.raw`(?=[.:!?]*(?:[\s,;\x60)\]}]|$))`;
+/**
+ * A double- or single-quoted value that is exactly one placeholder, read
+ * after the opening quote. The exemption covers the whole value only.
+ */
+const QUOTED_PLACEHOLDER_DOUBLE = String.raw`<[^<>"\n]*>"${QUOTED_PLACEHOLDER_END}`;
+const QUOTED_PLACEHOLDER_SINGLE = String.raw`<[^<>'\n]*>'${QUOTED_PLACEHOLDER_END}`;
+/**
+ * Text glued to a quoted value, which a shell joins to it: `"a"b` and
+ * `'a'"b"` are one value. Whitespace, `,`, `;`, closing brackets and
+ * backticks end it, so they stay in the text.
+ */
+const QUOTED_CONTINUATION = String.raw`(?:[^\s,;"'\x60)\]}]+|"[^"\n]*"|'[^'\n]*')*`;
+/** A quoted value with what is glued to it, unless it is one placeholder. */
+const DOUBLE_QUOTED_VALUE = String.raw`"(?!${QUOTED_PLACEHOLDER_DOUBLE})[^"\n]*"${QUOTED_CONTINUATION}`;
+const SINGLE_QUOTED_VALUE = String.raw`'(?!${QUOTED_PLACEHOLDER_SINGLE})[^'\n]*'${QUOTED_CONTINUATION}`;
 /** A `,` or `;` that starts another assignment, as in `A=<a>,B=<b>`. */
 const NEXT_ASSIGNMENT = "[,;](?=[A-Za-z_][A-Za-z0-9_]*=)";
 /** A placeholder standing for a bare assignment value. */
@@ -408,7 +427,124 @@ const ASSIGNED_PLACEHOLDER = placeholderValue(
  * value runs through any other `,` or `;`, so the rest of an `a,b` list, or
  * of a secret that holds one, goes with it.
  */
-const ASSIGNED_VALUE = String.raw`(?:"(?!${QUOTED_PLACEHOLDER_DOUBLE})[^"\n]*"|'(?!${QUOTED_PLACEHOLDER_SINGLE})[^'\n]*'|(?!["'])(?!${ASSIGNED_PLACEHOLDER})(?:[^\s,;]|(?!${NEXT_ASSIGNMENT})[,;])+)`;
+const ASSIGNED_VALUE = String.raw`(?:${DOUBLE_QUOTED_VALUE}|${SINGLE_QUOTED_VALUE}|(?!["'])(?!${ASSIGNED_PLACEHOLDER})(?:[^\s,;]|(?!${NEXT_ASSIGNMENT})[,;])+)`;
+
+/**
+ * Closing punctuation at the end of a bare value, such as the backtick of
+ * `` `TOKEN=abc` `` or the parenthesis of `(TOKEN=abc)`. It most likely closes
+ * the surrounding text, so a redaction keeps up to three of these characters
+ * for readability, and never the whole value.
+ */
+const VALUE_CLOSERS = /[)\]}"'\x60]{1,3}$/;
+
+/**
+ * The placeholder that replaces `value`, followed by the closing punctuation
+ * that ended a bare value. A quoted value keeps nothing: its closing quote is
+ * part of the value.
+ */
+function redactedValue(value: string, placeholder: string): string {
+  if (value.startsWith('"') || value.startsWith("'")) {
+    return placeholder;
+  }
+  const tail = VALUE_CLOSERS.exec(value)?.[0] ?? "";
+  return tail.length < value.length ? `${placeholder}${tail}` : placeholder;
+}
+
+/**
+ * `value` without its enclosing quotes, or for a bare value without its
+ * closing punctuation. A quoted value with text glued after its closing
+ * quote is returned whole.
+ */
+function bareValue(value: string): string {
+  const open = value.charAt(0);
+  if (open === '"' || open === "'") {
+    return value.length > 1 && value.endsWith(open)
+      ? value.slice(1, -1)
+      : value;
+  }
+  const tail = VALUE_CLOSERS.exec(value)?.[0] ?? "";
+  return value.slice(0, value.length - tail.length);
+}
+
+const SECRET_SHAPED_CHARS = /^[A-Za-z0-9+/=_.~-]+$/;
+const HAS_LETTER = /[A-Za-z]/;
+const BASE64_MARK = /[+/=]/;
+const QUOTES = /["']/g;
+const PLACEHOLDER_MARK = /[<>]/;
+/** A bare `auth` key and its separator, as in `"auth": "..."` or `auth=...`. */
+const AUTH_KEY = /^["']?auth["']?\s*[=:]\s*/i;
+
+/**
+ * Whether a value under a generic key such as `auth` looks like a secret
+ * rather than a setting: eight or more token characters with a digit and a
+ * letter or base64 marks, or twelve or more in mixed case. `auth: true`,
+ * `auth: required` and `auth: none` stay.
+ */
+function looksSecretShaped(value: string): boolean {
+  const candidate = bareValue(value).replace(QUOTES, "");
+  // A whole placeholder never gets here; one with text glued to it hides
+  // that text, as in `auth: <x>value`.
+  if (PLACEHOLDER_MARK.test(candidate)) {
+    return true;
+  }
+  if (candidate.length < 8 || !SECRET_SHAPED_CHARS.test(candidate)) {
+    return false;
+  }
+  return (
+    (HAS_DIGIT.test(candidate) && HAS_LETTER.test(candidate)) ||
+    BASE64_MARK.test(candidate) ||
+    (candidate.length >= 12 &&
+      HAS_UPPER.test(candidate) &&
+      HAS_LOWER.test(candidate))
+  );
+}
+
+/**
+ * MySQL and MariaDB clients, which take a password as `-pVALUE` or
+ * `-p VALUE`. Other commands use `-p` for a port, a path or a parent
+ * directory, so `-p` counts only after one of these. The match runs to the
+ * end of the line, a code span or a shell separator outside quotes.
+ */
+const PASSWORD_CLIENT_COMMAND =
+  /(?<![\w.-])(?:mysql|mysqldump|mysqladmin|mariadb|mariadb-dump)(?![\w-])(?:[ \t]+(?:"[^"\n]*"?|'[^'\n]*'?|[^\s|;&\x60"'])+)*/g;
+/** One shell word: quoted parts, which may hold spaces, and bare text. */
+const SHELL_WORD = /(?:"[^"\n]*"?|'[^'\n]*'?|[^\s"'])+/g;
+const SHORT_PASSWORD_FLAG = "-p";
+
+/**
+ * The client command with the value of each `-pVALUE` and `-p VALUE`
+ * redacted, unless the value is already a placeholder. A `-p` followed by
+ * another flag, or by nothing, prompts for the password and stays.
+ */
+function redactPasswordArguments(command: string): string {
+  const placeholder = redactionPlaceholder("secret");
+  let isCommandName = true;
+  let passwordNext = false;
+  return command.replace(SHELL_WORD, (word) => {
+    if (isCommandName) {
+      isCommandName = false;
+      return word;
+    }
+    const valueFollows = passwordNext;
+    passwordNext = word === SHORT_PASSWORD_FLAG;
+    let flag: string | undefined;
+    if (valueFollows && !word.startsWith("-")) {
+      flag = "";
+    } else if (
+      word.startsWith(SHORT_PASSWORD_FLAG) &&
+      word.length > SHORT_PASSWORD_FLAG.length
+    ) {
+      flag = SHORT_PASSWORD_FLAG;
+    }
+    if (flag === undefined) {
+      return word;
+    }
+    const value = word.slice(flag.length);
+    return WHOLE_PLACEHOLDER.test(bareValue(value))
+      ? word
+      : `${flag}${redactedValue(value, placeholder)}`;
+  });
+}
 
 /** Reserved, private or local suffixes; a host under one never leaves the machine. */
 const PRIVATE_HOST_SUFFIXES =
@@ -490,7 +626,7 @@ const VALUE_RULES: readonly ValueRule[] = [
     // Envelope ciphertext such as `{"ciphertext":"..."}`, at any length.
     kind: "ciphertext",
     pattern: new RegExp(
-      String.raw`(["']?\b(?:${CIPHERTEXT_FIELD})["']?\s*:\s*)(?:"(?!${QUOTED_PLACEHOLDER_DOUBLE})[^"\n]*"|'(?!${QUOTED_PLACEHOLDER_SINGLE})[^'\n]*')`,
+      String.raw`(["']?\b(?:${CIPHERTEXT_FIELD})["']?\s*:\s*)(?:${DOUBLE_QUOTED_VALUE}|${SINGLE_QUOTED_VALUE})`,
       "gi"
     ),
     replace: (_match, key) => `${key}"${redactionPlaceholder("ciphertext")}"`,
@@ -533,7 +669,8 @@ const VALUE_RULES: readonly ValueRule[] = [
       String.raw`(\bAuthorization\s*[:=]\s*["']?(?:token|bearer|basic|digest)\s+)(?!${HEADER_PLACEHOLDER})[^\s"'\x60,;]+`,
       "gi"
     ),
-    replace: (_match, header) => `${header}${redactionPlaceholder("secret")}`,
+    replace: (match, header) =>
+      `${header}${redactedValue(match.slice(header.length), redactionPlaceholder("secret"))}`,
   },
   {
     kind: "secret",
@@ -546,7 +683,15 @@ const VALUE_RULES: readonly ValueRule[] = [
       String.raw`(--(?:password|passwd|passphrase|token|secret|api-key|apikey|access-key)(?:=|\s+))(?!-)${ASSIGNED_VALUE}`,
       "gi"
     ),
-    replace: (_match, flag) => `${flag}${redactionPlaceholder("secret")}`,
+    replace: (match, flag) =>
+      `${flag}${redactedValue(match.slice(flag.length), redactionPlaceholder("secret"))}`,
+  },
+  {
+    // `mysql -pVALUE` and `mysql -p VALUE`, for MySQL and MariaDB clients.
+    kind: "secret",
+    pattern: PASSWORD_CLIENT_COMMAND,
+    replace: (match) => redactPasswordArguments(match),
+    accept: (match) => redactPasswordArguments(match) !== match,
   },
   {
     kind: "config-value",
@@ -560,7 +705,20 @@ const VALUE_RULES: readonly ValueRule[] = [
       String.raw`(["']?\b${SECRET_KEY_NAME}["']?\s*[=:]\s*)${ASSIGNED_VALUE}`,
       "gi"
     ),
-    replace: (_match, key) => `${key}${redactionPlaceholder("secret")}`,
+    replace: (match, key) =>
+      `${key}${redactedValue(match.slice(key.length), redactionPlaceholder("secret"))}`,
+  },
+  {
+    // A bare `auth` key, as in Docker's `"auth": "<base64>"`, only with a
+    // secret-shaped value: `auth: true` and `auth: required` stay.
+    kind: "secret",
+    pattern: new RegExp(
+      String.raw`(["']?\bauth["']?\s*[=:]\s*)${ASSIGNED_VALUE}`,
+      "gi"
+    ),
+    replace: (match, key) =>
+      `${key}${redactedValue(match.slice(key.length), redactionPlaceholder("secret"))}`,
+    accept: (match) => looksSecretShaped(match.replace(AUTH_KEY, "")),
   },
   {
     kind: "config-value",
@@ -568,15 +726,17 @@ const VALUE_RULES: readonly ValueRule[] = [
       String.raw`(\b[A-Z][A-Z0-9_]{1,}=)${ASSIGNED_VALUE}`,
       "g"
     ),
-    replace: (_match, key) => `${key}${redactionPlaceholder("config-value")}`,
+    replace: (match, key) =>
+      `${key}${redactedValue(match.slice(key.length), redactionPlaceholder("config-value"))}`,
   },
   {
     kind: "config-value",
     pattern: new RegExp(
-      String.raw`("[A-Z][A-Z0-9_]{1,}"\s*:\s*)(?:"(?!${QUOTED_PLACEHOLDER_DOUBLE})[^"\n]*"|(?!["\s])(?!${JSON_PLACEHOLDER})[^\s,}]+)`,
+      String.raw`("[A-Z][A-Z0-9_]{1,}"\s*:\s*)(?:${DOUBLE_QUOTED_VALUE}|(?!["\s])(?!${JSON_PLACEHOLDER})[^\s,}]+)`,
       "g"
     ),
-    replace: (_match, key) => `${key}"${redactionPlaceholder("config-value")}"`,
+    replace: (match, key) =>
+      `${key}${redactedValue(match.slice(key.length), `"${redactionPlaceholder("config-value")}"`)}`,
   },
   {
     kind: "url",
@@ -1180,7 +1340,7 @@ export const FEEDBACK_GATE_REFUSALS: readonly FeedbackVocabularyEntry<FeedbackGa
     {
       id: "attachment-unlisted",
       summary:
-        "An attachment is not listed by name in the visible Attachments section; HTML comments do not count, and raw HTML such as `<details>`, `<?` or `<!` anywhere in the body cancels the listing.",
+        "An attachment is not listed by name in the visible Attachments section; HTML comments do not count, and raw HTML such as `<details>`, `<?` or `<!` anywhere in the body, even inside or beside an HTML comment, cancels the listing.",
     },
     {
       id: "approval-missing",
@@ -1332,6 +1492,11 @@ const HIDING_HTML_ELEMENT =
  * comments are removed before this check runs.
  */
 const HIDING_HTML_MARKUP = /<[?!]/;
+/**
+ * A processing instruction, declaration or CDATA section that is not the
+ * start of an HTML comment, for scanning a body with its comments in place.
+ */
+const HIDING_MARKUP_BESIDE_COMMENTS = /<\?|<!(?!--)/;
 const ATTACHMENTS_HEADING = /^##\s+Attachments\s*$/;
 const ANY_HEADING = /^#{1,6}\s/;
 const UNSAFE_ATTACHMENT_NAME = /[`\r\n]/;
@@ -1437,13 +1602,36 @@ function hasHidingHtml(markup: string): boolean {
 }
 
 /**
+ * Whether the body, read with its HTML comments in place, carries a hiding
+ * element or declaration. Removing comments is not how GitHub reads a body:
+ * `<!-->` and `<!--->` are whole comments there, and `<!--` inside a code
+ * span is text. So removing from `<!--` to the next `-->` can also remove a
+ * live `<details>` that folds the Attachments section. A comment outside
+ * inline code makes every code span in the body uncertain, so then a hiding
+ * element anywhere counts, even one that looks like inline code.
+ */
+function hasHidingHtmlBesideComments(lines: readonly string[]): boolean {
+  return renderedMarkupLines({ lines, commentsHoldBacktick: false }).some(
+    (markup) =>
+      HIDING_HTML_ELEMENT.test(markup) ||
+      HIDING_MARKUP_BESIDE_COMMENTS.test(markup)
+  );
+}
+
+/**
  * The lines of the `## Attachments` section a reader actually sees: HTML
  * comments are removed first. A section that contains raw HTML outside inline
  * code, which can hide or restyle a listing, counts as listing nothing, and so
  * does a body with a hiding element such as `<details>` anywhere, because an
- * element opened before the heading can fold the whole section.
+ * element opened before the heading can fold the whole section. The hiding
+ * check runs both with comments removed and with them in place, so a listing
+ * inside a comment, a `<details>` or a construct that GitHub reads
+ * differently from this parser fails closed.
  */
 function visibleAttachmentListing(body: string): readonly string[] {
+  if (hasHidingHtmlBesideComments(body.split(NEWLINE))) {
+    return [];
+  }
   const comments = body.match(HTML_COMMENT) ?? [];
   const lines = body.replace(HTML_COMMENT, "").split(NEWLINE);
   const markup = renderedMarkupLines({

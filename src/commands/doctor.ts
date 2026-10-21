@@ -67,6 +67,11 @@ import {
   parseBrowserNetworkOptions,
 } from "../lib/doctor-browser-network.ts";
 import {
+  COMPOSE_BACKEND_CHECK,
+  type ComposeBackendReport,
+  composeBackendCheckResult,
+} from "../lib/doctor-compose-backend.ts";
+import {
   describeEnvKeyInspection,
   type EnvKeyInspection,
   gitListTrackedKeyPaths,
@@ -117,6 +122,7 @@ import {
   type NativeCaDoctorDependencies,
   repairNativeCaTrust,
 } from "../lib/native-ca-doctor.ts";
+import { readComposeBackendFeatures } from "../lib/native-compose-backend-features.ts";
 import {
   describeHackLocalRoute,
   HACK_LOCAL_ROLLBACK_COMMAND,
@@ -199,6 +205,8 @@ interface CheckResult {
   readonly hackLocalRoute?: HackLocalRouteReport;
   /** Closed, value-free env key findings; project-relative subjects only. */
   readonly envKey?: EnvKeyInspection;
+  /** Closed Compose-backend feature names only; never authored values. */
+  readonly composeBackend?: ComposeBackendReport;
 }
 
 const HACK_LOCAL_ROUTE_CHECK = "native hack.local route";
@@ -856,6 +864,11 @@ const handleDoctor: CommandHandlerFor<typeof doctorSpec> = async ({
       )
     );
     results.push(
+      await runCheck(s, COMPOSE_BACKEND_CHECK, () =>
+        checkComposeBackendFeatures({ startDir, backend: "compose" })
+      )
+    );
+    results.push(
       await runCheck(s, "DEV_HOST", () => checkDevHost({ startDir }))
     );
     results.push(
@@ -1176,6 +1189,14 @@ async function handleNativeDoctor(opts: {
         { timeoutMs: 5000 }
       )
     );
+    results.push(
+      await runCheck(progress, COMPOSE_BACKEND_CHECK, () =>
+        checkComposeBackendFeatures({
+          startDir: opts.startDir,
+          backend: "native",
+        })
+      )
+    );
   }
   progress.stop(`Native doctor checks complete (${results.length} checks)`);
   const hasError = results.some((result) => result.status === "error");
@@ -1340,6 +1361,8 @@ export type DoctorJsonCheck = {
   readonly hackLocalRoute?: HackLocalRouteReport;
   /** Present only on the env key check: closed codes, no key bytes or absolute paths. */
   readonly envKey?: EnvKeyInspection;
+  /** Present only on the Compose-backend feature check: closed feature names. */
+  readonly composeBackend?: ComposeBackendReport;
 };
 
 export type DoctorJsonData = {
@@ -1375,6 +1398,9 @@ export function buildDoctorJsonData(opts: {
         ? { hackLocalRoute: result.hackLocalRoute }
         : {}),
       ...(result.envKey ? { envKey: result.envKey } : {}),
+      ...(result.composeBackend
+        ? { composeBackend: result.composeBackend }
+        : {}),
     })),
     summary: buildDoctorSummaryLines({ results: opts.results }),
     counts,
@@ -2971,6 +2997,28 @@ export function envKeyCheckResult(inspection: EnvKeyInspection): CheckResult {
  * Read-only key-strength and exposure audit (HACK-1127). `--fix` never acts on
  * it; each finding suggests the exact command instead.
  */
+/**
+ * Reports which Compose features keep the current project on the Compose
+ * backend (HACK-1291). Reads only the project's Compose file; value-free.
+ */
+async function checkComposeBackendFeatures(opts: {
+  readonly startDir: string;
+  readonly backend: "native" | "compose";
+}): Promise<CheckResult> {
+  const ctx = await findProjectContext(opts.startDir);
+  if (!ctx) {
+    return {
+      name: COMPOSE_BACKEND_CHECK,
+      status: "warn",
+      message: `Skipped (no ${HACK_PROJECT_DIR_PRIMARY}/ found)`,
+    };
+  }
+  return composeBackendCheckResult({
+    backend: opts.backend,
+    features: await readComposeBackendFeatures(ctx.composeFile),
+  });
+}
+
 async function checkProjectEnvKey({
   startDir,
 }: {

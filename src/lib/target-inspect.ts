@@ -31,7 +31,10 @@ import {
   sanitizeBranchSlug,
   sanitizeProjectSlug,
 } from "./project.ts";
-import { ProjectInputSelectionError } from "./project-input-selection.ts";
+import {
+  ProjectInputAccessError,
+  ProjectInputSelectionError,
+} from "./project-input-selection.ts";
 import {
   AmbiguousProjectNameError,
   normalizeProjectName,
@@ -367,7 +370,8 @@ export function targetRefusalEnvelope(opts: {
  * closed `input_permission_denied` / `input_unreadable` refusals, so the OS
  * message and its absolute path never reach the caller. The shared project
  * input guards' own refusals (native or conflicting inputs, an unsafe or
- * unreadable legacy adoption state) are mapped too, wherever they are raised.
+ * unreadable legacy adoption state, an input whose presence cannot be checked)
+ * are mapped too, wherever they are raised.
  * Only other faults (programming errors) still throw.
  *
  * `afterResolve` is a test seam that runs after the target is resolved and
@@ -418,6 +422,11 @@ export async function inspectTarget(opts: {
 function projectInputGuardReason(error: unknown): TargetRefusalReason | null {
   if (error instanceof ProjectInputSelectionError) {
     return "project_inputs_unsupported";
+  }
+  if (error instanceof ProjectInputAccessError) {
+    return error.access === "permission"
+      ? "input_permission_denied"
+      : "input_unreadable";
   }
   if (error instanceof LegacyComposeAdoptionSelectionError) {
     return error.kind === "input-access"

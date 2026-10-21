@@ -169,7 +169,10 @@ too. Native or conflicting project files are `project_inputs_unsupported`. A
 legacy adoption state that is unparseable, interrupted, or cannot be checked
 (for example a project directory the caller cannot search) is
 `adoption_state_unsafe`. A non-directory where the project directory belongs is
-`input_unreadable`.
+`input_unreadable`. When the guard cannot check whether a project input exists
+(for example a `.dev` file, or a `.dev` directory the caller cannot search,
+beside a valid `.hack`), the refusal is `input_permission_denied` (`EACCES`,
+`EPERM`) or `input_unreadable` (any other fault), like a read fault.
 
 `retry` is advice for the caller. Like suggested actions and application logs,
 it carries no execution authority.
@@ -217,6 +220,7 @@ WU21). The inspector itself only produces snapshots.
 | Malformed Hack config or Compose file, oversized input | `config_parse_failed`, `compose_parse_failed`, `generation_input_too_large` | same | paired fixture |
 | Unreadable input (directory in place of a file, no read permission) | `input_unreadable`, `input_permission_denied` | same | paired fixture (permission case skipped as root) |
 | Input guard refusals (native/legacy conflict, unsafe adoption state, unsearchable or non-directory project dir) | `project_inputs_unsupported`, `adoption_state_unsafe`, `input_unreadable` | same | paired fixture (unsearchable case skipped as root) |
+| Uncheckable input presence (`.dev` file or unsearchable `.dev` beside a valid `.hack`) | `input_unreadable`, `input_permission_denied` | same | paired fixture and domain test (unsearchable case skipped as root) |
 | Detached linked worktree, no project, missing path | closed refusals | same | paired fixture |
 | Unknown service | `service_not_found` | same | paired fixture |
 | Config changed during read | `generation_changed_during_read` | same code path | domain test |

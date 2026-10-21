@@ -268,6 +268,15 @@ beforeAll(async () => {
   const fileProjectDir = join(root, "file-project-dir");
   await mkdir(fileProjectDir, { recursive: true });
   await writeFile(join(fileProjectDir, ".hack"), "not a directory\n");
+  // A valid .hack project whose legacy .dev input directory cannot be checked:
+  // a regular file where .dev belongs, and a .dev directory whose mode is
+  // dropped inside the test.
+  const devFile = join(root, "dev-file");
+  await writeProject({ repo: devFile, name: "devfile", services: ["api"] });
+  await writeFile(join(devFile, ".dev"), "not a directory\n");
+  const devLocked = join(root, "dev-locked");
+  await writeProject({ repo: devLocked, name: "devlocked", services: ["api"] });
+  await mkdir(join(devLocked, ".dev"), { recursive: true });
 
   await mkdir(join(root, "outside"), { recursive: true });
 
@@ -707,6 +716,40 @@ describe("paired CLI/MCP target fixtures", () => {
         expect(JSON.stringify(cli.envelope)).not.toContain("EACCES");
       } finally {
         await chmod(projectDir, 0o755);
+      }
+    },
+    CASE_TIMEOUT_MS
+  );
+
+  test(
+    "a .dev file beside a valid .hack is a closed refusal without the path",
+    async () => {
+      // The input presence check used to escape as a detail-less E_UNEXPECTED.
+      expectRefusal(
+        await inspectBoth({ path: join(fixture.root, "dev-file") }),
+        "input_unreadable"
+      );
+      const cli = await runCli({ path: join(fixture.root, "dev-file") });
+      expect(JSON.stringify(cli.envelope)).not.toContain(fixture.root);
+      expect(JSON.stringify(cli.envelope)).not.toContain("ENOTDIR");
+    },
+    CASE_TIMEOUT_MS
+  );
+
+  // Root can search a mode-000 directory, so this fault cannot be produced.
+  test.skipIf(process.getuid?.() === 0)(
+    "an unsearchable .dev beside a valid .hack is a closed refusal without the path",
+    async () => {
+      const path = join(fixture.root, "dev-locked");
+      const devDir = join(path, ".dev");
+      await chmod(devDir, 0o000);
+      try {
+        expectRefusal(await inspectBoth({ path }), "input_permission_denied");
+        const cli = await runCli({ path });
+        expect(JSON.stringify(cli.envelope)).not.toContain(fixture.root);
+        expect(JSON.stringify(cli.envelope)).not.toContain("EACCES");
+      } finally {
+        await chmod(devDir, 0o755);
       }
     },
     CASE_TIMEOUT_MS

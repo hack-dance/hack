@@ -56,6 +56,18 @@ available container capabilities, and any skips. Review the tested Install
 script and Start skill before publishing the private environment. A local or
 ordinary Linux-container result does not qualify Codex Cloud by itself.
 
+## Negative controls in Docker CI
+
+The hosted `docker-e2e` job also runs the `portable-bootstrap-negatives` scenario.
+On the slim path, it checks that a missing key, a wrong key, an overlay sealed
+under another key, a stale pinned image, a lockfile that no longer matches its
+manifest and a corrupted dependency cache each stop the bootstrap without
+changing a running app. It also checks that a second identical bootstrap leaves
+no diff and does not reinstall. Each stage records its time and byte counts in a
+value-free receipt. See
+[the e2e harness guide](../../tests/e2e/README.md#portable-bootstrap-negative-controls)
+for the stages and what they do not cover.
+
 ## Repeat maintenance
 
 `scripts/maintain-codex-slim.sh` installs dependencies with

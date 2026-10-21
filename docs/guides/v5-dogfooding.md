@@ -9,8 +9,9 @@ compatibility, lower resource use or whole-product readiness.
 
 The [version-pinned candidate installer](candidate-install.md) provides `hack-next`
 alongside stable `hack`. It does not replace Homebrew Hack, edit PATH, convert
-projects, move volumes, enable DNS or trust, or start a VM. Candidate homes and
-stable state are separate. Do not alias `hack` to `hack-next` as a rollout step.
+projects, move volumes, enable DNS or trust, or start a VM. On the default native
+backend, candidate homes and stable state are separate; an explicit Compose test
+uses your own Hack home. Do not alias `hack` to `hack-next` as a rollout step.
 
 Each candidate upgrade starts fresh native and CLI homes. Retained bundles keep
 their original homes; selecting another version does not migrate application data.
@@ -35,6 +36,11 @@ These commands do not establish that an arbitrary v4 project can run natively.
    the [candidate guide](native-candidate.md), with admitted storage and an explicitly
    approved source share and network policy. A refused guard is a result to inspect,
    not permission to change host security, erase evidence or raise resource limits.
+   Test the backend the project will use. `hack-next` runs native by default;
+   `HACK_RUNTIME_BACKEND=compose hack-next` runs the same candidate on Compose with
+   your own Hack home, so global routing, DNS and CA trust are checked too. See
+   [Test both backends](candidate-install.md#test-both-backends), including why
+   stable `hack` must not run against the same home at the same time.
 3. Exercise the project's supported command form: foreground start, readiness,
    status, finite logs, noninteractive exec, retaining stop and restart. Exercise
    one-off run only where admitted. For an authored project, check generated public

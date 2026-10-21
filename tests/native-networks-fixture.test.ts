@@ -50,10 +50,10 @@ import {
 test("whole-run and cleanup budgets gate command starts and never clip an in-flight command", () => {
   const started = 1_000_000;
   const budget = NATIVE_NETWORK_FIXTURE_SCENARIO_TIMEOUT;
-  // Measured hosted passes reach 3343 s; the named budget keeps margin above it.
-  expect(budget).toBe(80 * 60_000);
-  expect(budget).toBeGreaterThanOrEqual(1.4 * 3_343_000);
-  for (const now of [started, started + 3_343_000, started + budget - 1]) {
+  // Measured hosted passes reach 3494 s; the named budget keeps margin above it.
+  expect(budget).toBe(90 * 60_000);
+  expect(budget).toBeGreaterThanOrEqual(1.5 * 3_494_000);
+  for (const now of [started, started + 3_494_000, started + budget - 1]) {
     // A command started one millisecond before the budget still gets its full
     // own timeout instead of being killed when the whole-run budget expires.
     expect(

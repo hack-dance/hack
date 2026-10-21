@@ -799,6 +799,11 @@ It does not publish service ports or aliases. Commands are noninteractive and
 bounded to 300 seconds; omitted arguments retain the service's default command.
 The CLI returns command output and exit status only after owned job cleanup is
 confirmed. There is no automatic command replay or fallback to Compose.
+`run` uses the running project's environment and profiles. `--env` and `--profile`
+are optional; when given they must equal the selection recorded at startup
+(profiles compare as a set). A different selection, or a legacy mapping without
+recorded selectors, refuses with `E_USAGE` before any runtime request. `run` never
+restarts the project to change its selection.
 Services with no managed environment values also support `run`; they keep the
 admitted image's environment without creating a private environment mount or
 launcher. The one-off request still carries an explicit empty, identity-bound

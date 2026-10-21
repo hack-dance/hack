@@ -35,6 +35,23 @@ output through a filter that can hide a failed check.
 The service is one-shot, so there is nothing to keep running. `hack down` keeps
 the named cache volumes.
 
+### Native runtime candidate
+
+With the native runtime candidate (`HACK_RUNTIME_BACKEND=native`), the run
+commands above work only against a started project. Start it with the same
+profile first. Native `up` stays in the foreground, so run it in its own terminal:
+
+```sh
+hack up --profile toolchain
+```
+
+Then run the commands above from another terminal. A native run uses the
+environment and profiles that the running project started with. You can omit
+`--profile` and `--env`. If you pass them, they must match the running selection
+exactly; the order and repeats of profile names do not matter. A different
+selection is refused with `E_USAGE` before any command runs. A run never
+restarts the project to change the selection.
+
 ## What this example does not prove
 
 - Cache reuse across worktrees with bounded eviction.

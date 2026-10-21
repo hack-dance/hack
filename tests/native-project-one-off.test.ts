@@ -2,12 +2,18 @@ import { afterEach, expect, test } from "bun:test";
 import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { nativeProjectOneOff } from "../src/backends/native-project-one-off.ts";
+import {
+  NATIVE_RUN_SELECTION_REFUSAL,
+  nativeProjectOneOff,
+} from "../src/backends/native-project-one-off.ts";
 import {
   removeNativeProjectRun,
   saveNativeProjectRun,
 } from "../src/backends/native-project-run.ts";
-import { expectClosedRefusal } from "./helpers/closed-refusal.ts";
+import {
+  expectClosedRefusal,
+  expectCodedRefusal,
+} from "./helpers/closed-refusal.ts";
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -45,7 +51,7 @@ function refreshed() {
     changed_slots: [],
   };
 }
-async function fixture(saved = true) {
+async function fixture(saved = true, recorded: Record<string, unknown> = {}) {
   const projectRoot = await realpath(
     await mkdtemp(join(tmpdir(), "native-one-off-"))
   );
@@ -56,7 +62,7 @@ async function fixture(saved = true) {
   await mkdir(nativeHome);
   const scope = { projectRoot, projectDir, nativeHome, branch: null };
   if (saved) {
-    await saveNativeProjectRun({ ...scope, run });
+    await saveNativeProjectRun({ ...scope, run: { ...run, ...recorded } });
   }
   return {
     scope,
@@ -296,5 +302,82 @@ test("failed dependency refresh refuses before one-off selection or private prep
     ).rejects.toThrow("dependency refresh identity or outcome is unconfirmed");
     expect(calls).toEqual(["refresh-dependencies"]);
     expect(prepared).toBe(0);
+  }
+});
+
+const startedSelection = {
+  profiles: ["toolchain", "tools"],
+  effectiveEnvName: "staging",
+  aws: null,
+};
+
+test("a run selection equal to the running one proceeds to the job", async () => {
+  for (const requested of [
+    {},
+    { profiles: ["tools", "toolchain", "tools"] },
+    { envName: "staging", profiles: ["toolchain", "tools"] },
+  ]) {
+    const opts = await fixture(true, startedSelection);
+    const calls: string[] = [];
+    const result = await nativeProjectOneOff({
+      ...opts,
+      argv: ["bun", "--version"],
+      selection: requested,
+      environment: async () => ({}),
+      invoke: async (request) => {
+        calls.push(String(request.args[1]));
+        if (request.args[1] === "refresh-dependencies") {
+          return refreshed();
+        }
+        if (request.args[1] === "run-selection") {
+          return selection;
+        }
+        return { ...completion, exit_code: 0 };
+      },
+    });
+    expect(calls).toEqual([
+      "refresh-dependencies",
+      "run-selection",
+      "run-service",
+    ]);
+    expect(result.exitCode).toBe(0);
+  }
+});
+
+test("a run selection that differs from the running one refuses before any request", async () => {
+  const cases: {
+    readonly recorded: Record<string, unknown>;
+    readonly selection: { envName?: string | null; profiles?: string[] };
+  }[] = [
+    { recorded: startedSelection, selection: { profiles: ["web"] } },
+    { recorded: startedSelection, selection: { profiles: ["toolchain"] } },
+    {
+      recorded: startedSelection,
+      selection: { profiles: ["toolchain", "tools", "web"] },
+    },
+    { recorded: startedSelection, selection: { profiles: [] } },
+    { recorded: startedSelection, selection: { envName: null } },
+    { recorded: startedSelection, selection: { envName: "preview" } },
+    // A legacy mapping without recorded selectors cannot confirm a match.
+    { recorded: {}, selection: { profiles: [] } },
+    { recorded: {}, selection: { envName: null } },
+  ];
+  for (const { recorded, selection: requested } of cases) {
+    const opts = await fixture(true, recorded);
+    await expectCodedRefusal(
+      nativeProjectOneOff({
+        ...opts,
+        argv: ["bun", "--version"],
+        selection: requested,
+        environment: async () => {
+          throw new Error("must not prepare");
+        },
+        invoke: async () => {
+          throw new Error("must not invoke");
+        },
+      }),
+      "E_USAGE",
+      NATIVE_RUN_SELECTION_REFUSAL
+    );
   }
 });

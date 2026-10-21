@@ -8,6 +8,22 @@ import {
  * Findings are closed codes; the scanned text is never echoed.
  */
 
+// One shell word on the same line. A backtick ends a word, because it closes
+// an inline code span; a whole backtick command substitution is one operand.
+const WORD = "[^\\s`]*";
+const FLAG = `[ \\t]+-${WORD}`;
+const OPERAND = `[ \\t]+(?:\`[^\`\\n]*\`|[^\\s\`-]${WORD})`;
+
+/**
+ * `hack env set|add` with two operands, so a key and a value in argv. Flags
+ * between them are skipped, which keeps `hack env set <key> --value-stdin`
+ * allowed. A flag that takes a value (`--env dev`) leaves that value as an
+ * operand, so such a form is still flagged.
+ */
+const ARGV_ENV_VALUE = new RegExp(
+  `\\bhack[ \\t]+env[ \\t]+(?:set|add)(?:${FLAG})*${OPERAND}(?:${FLAG})*${OPERAND}`
+);
+
 /** Recipes that must never appear outside a negative-example block. */
 export const BANNED_RECIPES: readonly (readonly [string, RegExp])[] = [
   ["broad-process-kill", /\b(?:pkill|killall)\b/],
@@ -22,7 +38,7 @@ export const BANNED_RECIPES: readonly (readonly [string, RegExp])[] = [
     "argv-secret-assignment",
     /\b[A-Z][A-Z0-9_]*(?:TOKEN|SECRET|PASSWORD|PASSWD|API_KEY)=\S/,
   ],
-  ["argv-env-value", /\bhack\s+env\s+(?:set|add)\s+\S+\s+\S+/],
+  ["argv-env-value", ARGV_ENV_VALUE],
 ];
 
 function stripNegativeExamples(text: string): string {

@@ -569,19 +569,118 @@ test(
   }),
   30_000
 );
+// HACK-1281 replay: a stalled owner resumes with its timer already due. A
+// one-second identity read refused this healthy command after its stopped child
+// was published, leaving the durable uncertainty that blocks saved recovery.
+test(
+  "a host stall in a child identity read stays within the command budget",
+  ownedCase(async () => {
+    const f = await fixture(),
+      marker = join(f.root, "effect"),
+      run = shell.run;
+    let stalled = 0;
+    const observer = spyOn(shell, "run").mockImplementation((args, opts) => {
+      const pid = args[args.indexOf("-p") + 1];
+      if (
+        stalled === 0 &&
+        args[4] === "/bin/ps" &&
+        pid !== undefined &&
+        pid !== String(process.pid)
+      ) {
+        stalled++;
+        // The read itself stalls past the former one-second bound.
+        return run(
+          [
+            args[0] ?? "",
+            args[1] ?? "",
+            `sleep 1.2; ${args[2]}`,
+            ...args.slice(3),
+          ],
+          opts
+        );
+      }
+      return run(args, opts);
+    });
+    try {
+      expect(await transport(f, marker, 15_000)).toEqual({
+        exitCode: 0,
+        stdout: "value",
+      });
+      expect(stalled).toBe(1);
+      expect(await readFile(marker, "utf8")).toBe("complete");
+      expect((await f.read()).commands[0]?.settlement).toMatchObject({
+        exitCode: 0,
+        timedOut: false,
+        groupAbsent: true,
+      });
+    } finally {
+      if (confirmedTestLifetime()) {
+        observer.mockRestore();
+      }
+    }
+  }),
+  30_000
+);
+test(
+  "a multi-second host stall after exit still settles the original command",
+  ownedCase(async () => {
+    const f = await fixture(),
+      marker = join(f.root, "effect"),
+      sync = f.directory.file.sync.bind(f.directory.file);
+    let stalled = false;
+    // One post-exit sync stalls past the former three-second settlement budget.
+    const observer = spyOn(f.directory.file, "sync").mockImplementation(
+      async () => {
+        if (existsSync(marker) && !stalled) {
+          stalled = true;
+          await Bun.sleep(3500);
+        }
+        await sync();
+      }
+    );
+    try {
+      expect(await transport(f, marker)).toEqual({
+        exitCode: 0,
+        stdout: "value",
+      });
+      expect(stalled).toBe(true);
+      expect((await f.read()).commands[0]?.settlement).toMatchObject({
+        exitCode: 0,
+        groupAbsent: true,
+      });
+      expect(nativeComposeStorageCommandOwnerConfirmed(f.owner)).toBe(true);
+    } finally {
+      if (confirmedTestLifetime()) {
+        observer.mockRestore();
+      }
+    }
+  }),
+  30_000
+);
 test(
   "a settlement that outlasts its post-exit budget refuses as probe-budget and stays unsettled",
   ownedCase(async () => {
     const f = await fixture(),
       marker = join(f.root, "effect"),
-      sync = f.directory.file.sync.bind(f.directory.file);
-    // Only syncs after the target ran are slow: arm and child publication are not.
-    const observer = spyOn(f.directory.file, "sync").mockImplementation(
-      async () => {
-        if (existsSync(marker)) {
-          await Bun.sleep(3500);
+      kill = process.kill,
+      monotonic = performance.now.bind(performance);
+    let elapsed = 0;
+    // The post-exit group observation sees 16 s of monotonic time pass: past
+    // the finite settlement budget, without a real 16 s wait.
+    const clock = spyOn(performance, "now").mockImplementation(
+      () => monotonic() + elapsed
+    );
+    const observer = spyOn(process, "kill").mockImplementation(
+      (pid, signal) => {
+        if (
+          signal === 0 &&
+          typeof pid === "number" &&
+          pid < 0 &&
+          existsSync(marker)
+        ) {
+          elapsed = 16_000;
         }
-        await sync();
+        return kill(pid, signal);
       }
     );
     try {
@@ -597,6 +696,7 @@ test(
       retained.add(f.root);
     } finally {
       if (confirmedTestLifetime()) {
+        clock.mockRestore();
         observer.mockRestore();
       }
     }

@@ -105,6 +105,15 @@ const PROCESS =
 const TICKS = /^[1-9][0-9]*$/;
 const BOOT = /^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/;
 const CAPTURE_LIMIT = 4096;
+/**
+ * Post-exit settlement budget of a recorded command (group absence, boot and
+ * executable identity, capture sync and settlement publication). It and the
+ * identity reads must outlast an ordinary multi-second host stall: a stalled
+ * owner resumes with its timer already due, so a sub-second or three-second
+ * bound refused healthy commands after their daemon effect and left durable
+ * uncertainty (HACK-1281). It stays finite and grants nothing.
+ */
+const SETTLEMENT_BUDGET_MS = 15_000;
 // A late/unconfirmed publication cannot release its original held directory FDs.
 const unsettledCommandFiles = new Set<readonly HeldDirectory[]>();
 type Selection = { readonly name: string; readonly storage: string };
@@ -1024,6 +1033,9 @@ export async function runNativeComposeStorageDockerCommand(supplied: {
     };
     const bounded = async <T>(work: Promise<T>): Promise<T> => {
       let timer: ReturnType<typeof setTimeout> | undefined;
+      // An exhausted budget refuses below before the race observes the work;
+      // its own rejection must not escape as an unhandled process error.
+      work.catch(() => undefined);
       try {
         guard();
         const result = await Promise.race([
@@ -1080,7 +1092,8 @@ export async function runNativeComposeStorageDockerCommand(supplied: {
           guard();
           return Promise.resolve();
         },
-        timeoutMs: Math.min(1000, boundaryDeadline - performance.now()),
+        // Shares the enclosing handshake or settlement budget; no tighter bound.
+        timeoutMs: boundaryDeadline - performance.now(),
       });
       if (result.exitCode !== 0) {
         return refuse();
@@ -1213,7 +1226,7 @@ export async function runNativeComposeStorageDockerCommand(supplied: {
         },
       }
     );
-    boundaryDeadline = performance.now() + 3000;
+    boundaryDeadline = performance.now() + SETTLEMENT_BUDGET_MS;
     recordingSettlement = true;
     await groupAbsent(pid, record ? boundaryDeadline : undefined);
     settled = true;

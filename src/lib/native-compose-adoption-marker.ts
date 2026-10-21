@@ -21,6 +21,9 @@ export type LegacyComposeAdoptionSelection =
   | "rolled-back";
 /** Private owner markers fence upgraded discovery without parsing authored inputs or contacting an engine. */
 export class LegacyComposeAdoptionSelectionError extends HackCliError {
+  /** Which refusal this is, so readers can classify it without its message. */
+  readonly kind: "adoption" | "input-access";
+
   constructor(kind: "adoption" | "input-access" = "adoption") {
     super({
       code: "E_CONFIG_INVALID",
@@ -30,6 +33,7 @@ export class LegacyComposeAdoptionSelectionError extends HackCliError {
           : "Legacy adoption selection is unsafe or interrupted. Use explicit adoption recovery; values omitted.",
     });
     this.name = "LegacyComposeAdoptionSelectionError";
+    this.kind = kind;
   }
 }
 function refuse(): never {

@@ -232,6 +232,42 @@ beforeAll(async () => {
     services: ["api"],
   });
   await chmod(join(lockedCompose, ".hack", "docker-compose.yml"), 0o000);
+  // Faults the shared project input guards raise before any input is read:
+  // an unparseable legacy adoption receipt, and a project directory the
+  // inspector cannot search (its mode is dropped inside the test).
+  const adoptionUnsafe = join(root, "adoption-unsafe");
+  await writeProject({
+    repo: adoptionUnsafe,
+    name: "adopt",
+    services: ["api"],
+  });
+  const adoptionState = join(
+    adoptionUnsafe,
+    ".hack",
+    ".internal",
+    "legacy-compose-adoption-v1"
+  );
+  await mkdir(adoptionState, { recursive: true, mode: 0o700 });
+  await writeFile(join(adoptionState, "receipt.json"), "{not json", {
+    mode: 0o600,
+  });
+  await writeProject({
+    repo: join(root, "unsearchable"),
+    name: "unsearchable",
+    services: ["api"],
+  });
+  // Native and legacy inputs side by side (a conflicting project family).
+  const nativeConflict = join(root, "native-conflict");
+  await writeProject({
+    repo: nativeConflict,
+    name: "native",
+    services: ["api"],
+  });
+  await writeFile(join(nativeConflict, ".hack", "hack.project.json"), "{}\n");
+  // A regular file where the project directory belongs.
+  const fileProjectDir = join(root, "file-project-dir");
+  await mkdir(fileProjectDir, { recursive: true });
+  await writeFile(join(fileProjectDir, ".hack"), "not a directory\n");
 
   await mkdir(join(root, "outside"), { recursive: true });
 
@@ -636,6 +672,47 @@ describe("paired CLI/MCP target fixtures", () => {
   );
 
   test(
+    "project input guard refusals are closed refusals, not detail-less errors",
+    async () => {
+      // An unsafe legacy adoption state used to escape as a detail-less
+      // E_CONFIG_INVALID, which the adapter turned into data: null.
+      expectRefusal(
+        await inspectBoth({ path: join(fixture.root, "adoption-unsafe") }),
+        "adoption_state_unsafe"
+      );
+      expectRefusal(
+        await inspectBoth({ path: join(fixture.root, "native-conflict") }),
+        "project_inputs_unsupported"
+      );
+      // A file where `.hack` belongs is an input access failure.
+      expectRefusal(
+        await inspectBoth({ path: join(fixture.root, "file-project-dir") }),
+        "input_unreadable"
+      );
+    },
+    CASE_TIMEOUT_MS
+  );
+
+  // Root can search a mode-000 directory, so this fault cannot be produced.
+  test.skipIf(process.getuid?.() === 0)(
+    "an unsearchable project directory is a closed refusal without the path",
+    async () => {
+      const path = join(fixture.root, "unsearchable");
+      const projectDir = join(path, ".hack");
+      await chmod(projectDir, 0o000);
+      try {
+        expectRefusal(await inspectBoth({ path }), "adoption_state_unsafe");
+        const cli = await runCli({ path });
+        expect(JSON.stringify(cli.envelope)).not.toContain(fixture.root);
+        expect(JSON.stringify(cli.envelope)).not.toContain("EACCES");
+      } finally {
+        await chmod(projectDir, 0o755);
+      }
+    },
+    CASE_TIMEOUT_MS
+  );
+
+  test(
     "two registrations that own one checkout are refused as ambiguous",
     async () => {
       expectRefusal(
@@ -885,6 +962,32 @@ describe("target inspector domain", () => {
     expect(result).toEqual(
       targetRefusalEnvelope({ reason: "generation_changed_during_read" })
     );
+  });
+
+  test("the MCP argv carries every selector as one --name=value token", () => {
+    // The paired cases build the direct CLI argv with this same helper, so a
+    // dropped selector would change both sides alike. Pin the argv literally.
+    expect(
+      buildTargetInspectArgs({
+        projectName: "alpha",
+        path: "/x",
+        branch: "feature/login",
+        service: "api",
+        env: "staging",
+        expectGeneration: "cfg-v0:0123456789abcdef0123456789abcdef",
+      })
+    ).toEqual([
+      "project",
+      "target",
+      "--json",
+      "--project=alpha",
+      "--path=/x",
+      "--branch=feature/login",
+      "--service=api",
+      "--env=staging",
+      "--expect-generation=cfg-v0:0123456789abcdef0123456789abcdef",
+    ]);
+    expect(buildTargetInspectArgs({})).toEqual(["project", "target", "--json"]);
   });
 
   test("selectors are validated before any project lookup", async () => {

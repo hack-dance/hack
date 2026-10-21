@@ -34,6 +34,7 @@ import {
   nativeNetworkFixtureProjectKind,
   nativeNetworkFixtureProtocolMatches,
   nativeNetworkFixtureRefusalDiagnostic,
+  nativeNetworkFixtureRunnerDiagnostic,
   nativeNetworkFixtureSavedEvidence,
   nativeNetworkFixtureShim,
   nativeNetworkFixtureStateRefused,
@@ -208,7 +209,7 @@ test("failing command evidence names only its closed class, role and product cod
     },
   });
   expect(json).toBe(
-    'Network command diagnostic {"step":"hack:down+recover","role":"primary","sequence":412,"expected":0,"exit":1,"timedOut":false,"durationMs":2345,"code":"E_CONFIG_INVALID","stage":"storage-helper-start","reason":"probe-timeout"}'
+    'Network command diagnostic {"step":"hack:down+recover","role":"primary","sequence":412,"expected":0,"exit":1,"timedOut":false,"durationMs":2345,"code":"E_CONFIG_INVALID","stage":"storage-helper-start","reason":"probe-timeout","message":null}'
   );
   const human = nativeNetworkFixtureCommandDiagnostic({
     step: "hack:exec",
@@ -396,6 +397,115 @@ test("saved-state evidence reports closed flags and pending operation only", () 
   ).toBe(
     'Network failure saved state {"primary":{"stopped":false,"pending":"none","storageWitnessesPending":false,"beforeHooksPending":false},"sibling-b":{"stopped":false,"pending":"up","storageWitnessesPending":true,"beforeHooksPending":false},"sibling-a":{"stopped":"unknown","pending":"unknown","storageWitnessesPending":"unknown","beforeHooksPending":"unknown"}}'
   );
+});
+
+test("an incomplete saved stop without an issued boundary is still named by its fixed sentence", () => {
+  const secret = "/private/fixture/secret-path";
+  const stop =
+    "Native Compose stop is incomplete; saved ownership and persistent data are retained.";
+  const diagnostic = (stdout: string, stderr = "") =>
+    nativeNetworkFixtureCommandDiagnostic({
+      step: "hack:down+recover",
+      role: "sibling-a",
+      sequence: 942,
+      expected: 0,
+      result: {
+        exitCode: 1,
+        timedOut: false,
+        durationMs: 2750,
+        stdout,
+        stderr,
+      },
+    });
+  // The sampled HACK-1281 cleanup failure: E_COMPOSE_FAILED with no stage or reason.
+  const json = diagnostic(
+    JSON.stringify({
+      ok: false,
+      error: { code: "E_COMPOSE_FAILED", message: stop },
+    })
+  );
+  expect(json).toContain(
+    '"code":"E_COMPOSE_FAILED","stage":null,"reason":null,"message":"stop-incomplete"'
+  );
+  expect(diagnostic(`│\n■  E_COMPOSE_FAILED: ${stop}\n`, secret)).toContain(
+    '"message":"stop-incomplete"'
+  );
+  expect(
+    diagnostic(
+      JSON.stringify({
+        ok: false,
+        error: {
+          code: "E_CONFIG_INVALID",
+          message:
+            "Native Compose operation has an uncertain outcome; inspect the saved generation or explicitly stop its owned resources before retrying.",
+        },
+      })
+    )
+  ).toContain('"message":"native-uncertain"');
+  // Only the exact sentence is classified; appended values are withheld.
+  for (const changed of [`${stop} ${secret}`, stop.toUpperCase(), ""]) {
+    const result = diagnostic(
+      JSON.stringify({
+        ok: false,
+        error: { code: "E_COMPOSE_FAILED", message: changed },
+      })
+    );
+    expect(result).toContain('"message":null');
+    expect(result).not.toContain(secret);
+  }
+  expect(diagnostic(`■  E_COMPOSE_FAILED: ${stop} ${secret}\n`)).toContain(
+    '"message":null'
+  );
+});
+
+test("a command the runner killed or could not return still names its class and runner outcome", async () => {
+  const root = await mkdtemp(join(tmpdir(), "native-network-runner-"));
+  try {
+    const caught = await runNativeNetworkFixtureCommand({
+      argv: ["/bin/sh", "-c", "sleep 5"],
+      cwd: root,
+      env: {},
+      captures: join(root, "captures"),
+      timeoutMs: 150,
+    }).catch((error: unknown) => error);
+    const timeout = nativeNetworkFixtureRunnerDiagnostic({
+      step: "hack:exec",
+      role: "sibling-a",
+      sequence: 941,
+      durationMs: 180_000,
+      error: caught,
+    });
+    expect(timeout).toBe(
+      'Network command diagnostic {"step":"hack:exec","role":"sibling-a","sequence":941,"durationMs":180000,"runner":"timeout"}'
+    );
+    const secret = "/private/fixture/secret-path";
+    expect(
+      nativeNetworkFixtureRunnerDiagnostic({
+        step: "hack:exec",
+        role: "primary",
+        sequence: 1,
+        durationMs: 1,
+        error: new Error(secret),
+      })
+    ).toBe(
+      'Network command diagnostic {"step":"hack:exec","role":"primary","sequence":1,"durationMs":1,"runner":"other"}'
+    );
+    for (const value of [
+      { step: secret, role: "primary" },
+      { step: "hack:exec", role: secret },
+    ]) {
+      expect(
+        nativeNetworkFixtureRunnerDiagnostic({
+          ...(value as { step: string; role: "primary" }),
+          sequence: 1,
+          durationMs: 1,
+          error: caught,
+        })
+      ).toBe("Network command diagnostic unavailable");
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("failing command evidence drops non-closed codes and malformed fields", () => {

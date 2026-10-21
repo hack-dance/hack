@@ -19,6 +19,7 @@ import type {
 } from "../../packages/config-compiler/generated/native-config.ts";
 import { isRecord } from "../../src/lib/guards.ts";
 import {
+  NativeComposeGenerationError,
   type NativeComposeIdentity,
   openNativeComposeGenerationStore,
   readNativeComposeNetworkTopology,
@@ -171,7 +172,39 @@ type ClosedFailure = {
   readonly code: string | null;
   readonly stage: string | null;
   readonly reason: string | null;
+  readonly message: string | null;
 };
+
+/**
+ * Exact fixed product sentences, each named by a closed label. A failure that
+ * issues no refusal boundary (for example an incomplete saved stop) is still
+ * classified; any other text, or a changed sentence, yields null.
+ */
+const FIXED_MESSAGES: ReadonlyMap<string, string> = new Map([
+  [
+    "Native Compose stop is incomplete; saved ownership and persistent data are retained.",
+    "stop-incomplete",
+  ],
+  [
+    "Native Compose operation failed; saved ownership and persistent data are retained. Values omitted.",
+    "operation-failed",
+  ],
+  ...(
+    [
+      ["E_NATIVE_COMPOSE_STATE", "native-state"],
+      ["E_NATIVE_COMPOSE_BUSY", "native-busy"],
+      ["E_NATIVE_COMPOSE_UNCERTAIN", "native-uncertain"],
+      ["E_NATIVE_COMPOSE_STALE", "native-stale"],
+    ] as const
+  ).map(
+    ([code, label]) =>
+      [new NativeComposeGenerationError(code).message, label] as const
+  ),
+]);
+
+function fixedMessage(value: unknown): string | null {
+  return typeof value === "string" ? (FIXED_MESSAGES.get(value) ?? null) : null;
+}
 
 function closedToken(value: unknown, pattern: RegExp): string | null {
   return typeof value === "string" && pattern.test(value) ? value : null;
@@ -187,7 +220,7 @@ function jsonClosedFailure(stdout: string): ClosedFailure | null {
   }
   const error = isRecord(value) ? own(value, "error") : undefined;
   if (!isRecord(error)) {
-    return { code: null, stage: null, reason: null };
+    return { code: null, stage: null, reason: null, message: null };
   }
   const detail = own(error, "detail");
   const refusal = isRecord(detail)
@@ -201,6 +234,7 @@ function jsonClosedFailure(stdout: string): ClosedFailure | null {
     reason: isRecord(refusal)
       ? closedToken(own(refusal, "reason"), CLOSED_TOKEN)
       : null,
+    message: fixedMessage(own(error, "message")),
   };
 }
 
@@ -216,7 +250,16 @@ function closedFailure(
     code: humanClosedCode(result.stdout) ?? humanClosedCode(result.stderr),
     stage: boundary?.stage ?? null,
     reason: boundary?.reason ?? null,
+    message:
+      humanFixedMessage(result.stdout) ?? humanFixedMessage(result.stderr),
   };
+}
+
+const HUMAN_MESSAGE = /^[^\w\n]*(?:ERROR:?[ \t]+)?E_[A-Z0-9_]{1,62}: (.+)$/m;
+
+/** The closed label of a human error line's exact fixed sentence; never its text. */
+export function humanFixedMessage(text: string): string | null {
+  return fixedMessage(HUMAN_MESSAGE.exec(text.replace(ANSI, ""))?.[1]);
 }
 
 const HUMAN_BOUNDARY =
@@ -320,6 +363,59 @@ export function nativeNetworkFixtureCommandDiagnostic(opts: {
     timedOut: opts.result.timedOut,
     durationMs: opts.result.durationMs,
     ...closedFailure(opts.result),
+  })}`;
+}
+
+const RUNNER_FAILURES = [
+  [
+    "Fixture command timed out; uncertain engine outcome and captures retained",
+    "timeout",
+  ],
+  [
+    "Fixture command exceeded its output bound; bounded captures retained",
+    "output-bound",
+  ],
+  [
+    "Fixture could not confirm owned group cleanup; captures retained",
+    "group-unconfirmed",
+  ],
+  [
+    "Fixture capture failed after owned command reap; captures retained",
+    "capture",
+  ],
+] as const;
+
+/**
+ * A command the runner could not return (a timeout kills it) still names its
+ * closed class, role, sequence, duration and runner outcome; never its output.
+ */
+export function nativeNetworkFixtureRunnerDiagnostic(opts: {
+  readonly step: string;
+  readonly role: FixtureRole;
+  readonly sequence: number;
+  readonly durationMs: number;
+  readonly error: unknown;
+}): string {
+  const step = /^(hack|docker):[a-z]{1,16}(?::[a-z]{1,16}|\+recover)?$|^other$/;
+  if (
+    !(
+      step.test(opts.step) &&
+      NATIVE_NETWORK_FIXTURE_ROLES.includes(opts.role) &&
+      Number.isSafeInteger(opts.sequence) &&
+      Number.isSafeInteger(opts.durationMs)
+    )
+  ) {
+    return "Network command diagnostic unavailable";
+  }
+  const message = opts.error instanceof Error ? opts.error.message : null;
+  const outcome =
+    RUNNER_FAILURES.find(([text]) => text === message)?.[1] ?? "other";
+  return `Network command diagnostic ${JSON.stringify({
+    step: opts.step,
+    role: opts.role,
+    sequence: opts.sequence,
+    durationMs: opts.durationMs,
+    runner: outcome,
   })}`;
 }
 
@@ -1508,13 +1604,27 @@ export const nativeConfigNetworksScenario: Scenario = {
         role: roles.get(cwd) ?? ("fixture" as const),
         sequence,
       };
-      const result = await runNativeNetworkFixtureCommand({
-        argv,
-        cwd,
-        env: { ...env, ...extra },
-        captures,
-        timeoutMs: Math.min(COMMAND_TIMEOUT, remaining),
-      });
+      const begun = Date.now();
+      let result: CliResult;
+      try {
+        result = await runNativeNetworkFixtureCommand({
+          argv,
+          cwd,
+          env: { ...env, ...extra },
+          captures,
+          timeoutMs: Math.min(COMMAND_TIMEOUT, remaining),
+        });
+      } catch (error: unknown) {
+        // A killed or unreturned command has no result for ok(); name it here.
+        ctx.log(
+          nativeNetworkFixtureRunnerDiagnostic({
+            ...command,
+            durationMs: Date.now() - begun,
+            error,
+          })
+        );
+        throw error;
+      }
       commands.set(result, command);
       return result;
     };

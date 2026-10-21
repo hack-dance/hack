@@ -14,7 +14,11 @@ import {
   type LegacyComposeAdoptedGenerationStore,
   openLegacyComposeAdoptedGenerationStore,
 } from "../lib/native-compose-adoption-generation.ts";
-import { previewLegacyComposeAdoption } from "../lib/native-compose-adoption-preview.ts";
+import {
+  LEGACY_ADOPTION_LITERAL_ENV_OVERRIDE_CODE,
+  legacyAdoptionEnvOverrideHoldsValues,
+  previewLegacyComposeAdoption,
+} from "../lib/native-compose-adoption-preview.ts";
 import { legacyComposePublicationRefusal } from "../lib/native-compose-adoption-publication-diagnostics.ts";
 import { legacyComposeRetainedOrdered } from "../lib/native-compose-adoption-readiness.ts";
 import { runLegacyComposeRetainedRoutingOperation } from "../lib/native-compose-adoption-routing-execution.ts";
@@ -68,6 +72,22 @@ const spec = defineCommand({
   subcommands: [],
 } as const);
 
+/**
+ * Adoption pins the generated env override's bytes and inode for the life of
+ * the adoption, so binding a literal file from an earlier version would keep
+ * decrypted values on disk (HACK-1273). Fixed text; values omitted.
+ */
+const LITERAL_ENV_OVERRIDE_REFUSAL =
+  "Refused adoption: .hack/.internal/compose.env.override.yml holds literal env values written by an earlier Hack version, and adoption would keep them on disk. Run 'hack up' once so Hack rewrites it with references only, then retry 'hack config adopt'. Values omitted.";
+
+/** The one refusal whose fixed guidance survives the handler's redaction. */
+class LiteralEnvOverrideRefusal extends HackCliError {
+  constructor() {
+    super({ code: "E_CONFIG_INVALID", message: LITERAL_ENV_OVERRIDE_REFUSAL });
+    this.name = "LiteralEnvOverrideRefusal";
+  }
+}
+
 async function dryRun(
   projectRoot: string,
   signal: AbortSignal,
@@ -89,6 +109,13 @@ async function dryRun(
       process.stdout.write(
         `${field.document} ${JSON.stringify(field.pointer || "/")} (${field.line}:${field.column}): ${field.status} ${field.code}\n`
       );
+    }
+    if (
+      report.fields.some(
+        (field) => field.code === LEGACY_ADOPTION_LITERAL_ENV_OVERRIDE_CODE
+      )
+    ) {
+      process.stdout.write(`${LITERAL_ENV_OVERRIDE_REFUSAL}\n`);
     }
   }
   return report.complete ? 0 : 1;
@@ -174,13 +201,23 @@ async function apply(opts: {
   readonly stop?: boolean;
   readonly branch?: string;
 }) {
-  const saved = opts.rollback || opts.recover,
-    store = await openLegacyComposeAdoptedGenerationStore({
+  const saved = opts.rollback || opts.recover;
+  // A new preparation would pin a literal override for the life of the
+  // adoption. Recovery and rollback act on an existing generation's proof.
+  if (
+    !saved &&
+    (await legacyAdoptionEnvOverrideHoldsValues({
       projectRoot: opts.projectRoot,
-      requestedBranch: opts.branch,
-      mode: saved ? "saved" : "prepare",
-      signal: opts.signal,
-    });
+    }))
+  ) {
+    throw new LiteralEnvOverrideRefusal();
+  }
+  const store = await openLegacyComposeAdoptedGenerationStore({
+    projectRoot: opts.projectRoot,
+    requestedBranch: opts.branch,
+    mode: saved ? "saved" : "prepare",
+    signal: opts.signal,
+  });
   try {
     if (opts.recover && !opts.stop) {
       await store.recoverInterruptedLock();
@@ -252,6 +289,9 @@ export const configAdoptCommand = withHandler(spec, async ({ ctx, args }) => {
       branch: args.options.branch,
     });
   } catch (error: unknown) {
+    if (error instanceof LiteralEnvOverrideRefusal) {
+      throw error;
+    }
     const diagnostic = legacyComposePublicationRefusal(error);
     throw new HackCliError({
       code: "E_CONFIG_INVALID",

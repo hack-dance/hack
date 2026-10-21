@@ -14,7 +14,7 @@ missing part with ad hoc scripts.
 | HACK-P05 | Branch-owned external routing claim | Deferred | WU29 |
 | HACK-P06 | Opt-in public tunnel with end-to-end readiness | Deferred | WU29 |
 | HACK-P07 | Laptop and headless-runner capability overlays | Partial | WU27/WU30 |
-| HACK-P08 | Tracked defaults plus idempotent machine-local hydration | Deferred | WU27/WU14 |
+| HACK-P08 | Tracked defaults plus idempotent machine-local hydration | Partial | WU27/WU14 |
 | HACK-P09 | Disposable run workspaces with reference-aware retention | Partial | WU12/WU30 |
 | HACK-P10 | Pinned tool image plus independent dependency caches | Partial | WU30 |
 | HACK-P11 | Stable agent guidance and typed operation results | Partial | WU19/WU21 |
@@ -23,7 +23,7 @@ missing part with ad hoc scripts.
 ## HACK-P01: One-shot dependency and generated-artifact bootstrap
 
 - Use when: Services need installed dependencies or generated artifacts before the application starts.
-- Disposition: Partial. Missing: locked-v1 covers one immutable payload per volume. Atomic publication of worktree-specific generated artifacts, env-dependent installers, and two-worktree or interrupted-writer qualification remain open.
+- Disposition: Partial. Missing: locked-v1 covers one immutable payload per volume. Atomic publication of worktree-specific generated artifacts across concurrent writers, env-dependent installers, and automatic reclamation of failed generations remain open.
 - Owner: WU07/WU11; tracked in HACK-1145.
 - Commands: `hack up --json`, `hack ps --json`, `hack logs --no-follow --tail 100`
 - Prerequisites: A Compose initializer service that consumers require through `service_completed_successfully`; for the opt-in `hack.dependencies.cache-protocol: locked-v1` label, a pinned installer image and an immutable dependency payload.
@@ -135,12 +135,12 @@ missing part with ad hoc scripts.
 ## HACK-P08: Tracked defaults plus idempotent machine-local hydration
 
 - Use when: A repository tracks env defaults and each machine adds local values on top.
-- Disposition: Deferred. Missing: Hack has no semantic no-op detection or atomic machine-local import contract for env hydration.
+- Disposition: Partial. Missing: No-op detection and rename-committed writes cover one key per command. Hack has no multi-key import: an interrupted hydration can leave some keys updated and others not.
 - Owner: WU27/WU14; tracked in HACK-1152.
-- Commands: none yet; do not substitute a hand-written recipe.
+- Commands: `hack env set <key> --local --value-stdin --secret`, `hack env explain <key> --json`
 - Prerequisites: Tracked defaults, a machine-local layer and preserved operator overrides.
-- Env ownership: Defaults are tracked; hydration writes only the local layer and keeps values out of argv.
-- Readiness: Repeat hydration leaves the tracked tree clean; an interrupted import still leaves a resolvable layer.
+- Env ownership: Defaults are tracked; hydration runs `hack env set <key> --local --value-stdin --secret` once per key with the value piped on stdin, so values stay out of argv. Without `--local` the same command writes a tracked default.
+- Readiness: Setting a secret to its current value keeps the stored ciphertext, so repeat hydration leaves the tracked tree clean; a changed value gets new ciphertext with a fresh IV. Each layer write commits by rename, so an interrupted write leaves the previous layer resolvable.
 - Cleanup: Unchanged values cause no rewrite.
 - Provenance: single-consumer generalization (HACK-P08 research register).
 
@@ -183,13 +183,13 @@ missing part with ad hoc scripts.
 ## HACK-P11: Stable agent guidance and typed operation results
 
 - Use when: Agents run project workflows and need versioned guidance plus machine-readable results.
-- Disposition: Partial. Missing: A guidance freeze during execution and a typed terminal result for resumed background operations remain open.
+- Disposition: Partial. Missing: A freeze that refuses explicit guidance updates while an agent runs, and a typed terminal result for resumed background operations, remain open.
 - Owner: WU19/WU21; tracked in HACK-1155.
 - Commands: `hack up --json`, `hack down --json`, `hack restart --json`, `hack doctor --json`, `hack run <service> -- <cmd...>`
 - Prerequisites: Generated guidance from Hack's canonical source with a content revision; `--json` on lifecycle and diagnostic commands.
 - Env ownership: Results report names and states, not values.
-- Readiness: Pass child argv after `--` in `hack run <service> -- <cmd...>`. Check the exit status or `--json` envelope directly rather than through a pipe filter.
-- Cleanup: Guidance updates are explicit `hack setup` operations, never side effects of ordinary commands.
+- Readiness: Pass child argv after `--` in `hack run <service> -- <cmd...>`; its exit status, and the MCP run result's `exitCode`, are the child's own. Check the exit status or `--json` envelope directly rather than through a pipe filter.
+- Cleanup: Guidance updates are explicit `hack setup` operations, never side effects of ordinary commands. The `agent-surface-freeze` E2E scenario checks that init, agent, doctor and setup-sync runs leave tracked guidance and client config byte-identical.
 - Provenance: 2 consumers (HACK-P11 research register).
 
 <!-- negative-example -->
@@ -214,4 +214,4 @@ missing part with ad hoc scripts.
 
 ---
 
-Content revision: `091b4e80a9b6`. Generated by Hack; edit the canonical source and regenerate the plugin.
+Content revision: `247c8f20c3c8`. Generated by Hack; edit the canonical source and regenerate the plugin.

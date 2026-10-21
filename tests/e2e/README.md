@@ -205,6 +205,103 @@ data survive that cleanup. The canary is then removed separately. PostgreSQL use
 fixture-only trust on this unexposed network. This qualifies the actual execution
 host, not Codex Cloud capabilities, browser access or native VM support elsewhere.
 
+## Portable bootstrap negative controls
+
+`portable-bootstrap-negatives` (HACK-1143) adds negative controls to the portable
+bootstrap fixture. It runs the selected CLI in slim mode with cached `alpine:3.20`
+pinned by immutable ID, `network_mode: none`, no published ports and no pulls.
+A `deps` producer fills a `locked-v1` dependency cache. Its install is frozen: it
+fails when the lockfile's manifest digest no longer matches `package.json`, and the
+workspace is mounted read-only. The `app` consumer mounts the cache read-only. It
+copies the cache artifact only after a synthetic encrypted token, scoped to `app`,
+matches the expected digest, so a loaded artifact proves env injection without the
+scenario reading the value.
+
+Every stage runs `hack up --detach app` and must give this result:
+
+| Stage | Change before the stage | Required result |
+| --- | --- | --- |
+| `refuse-missing-key` | no key | refused; no owned container, network or volume; only the managed `.hack/.gitignore` may appear |
+| `refuse-wrong-key` | wrong key | refused; nothing created; no worktree diff |
+| `refuse-wrong-overlay` | `--env drift`, an overlay sealed under another key | refused; nothing created; no worktree diff |
+| `bootstrap-cold` | correct key | consumer created; one initialization; one ready cache; no diff |
+| `bootstrap-repeat` | none | same consumer ID and start time; same cache; still one initialization; same index; no diff |
+| `refuse-wrong-key-running` | wrong key | refused; consumer unchanged |
+| `refuse-stale-image` | both services pinned to an absent image ID | refused; consumer unchanged; the stale ID is not pulled and the cached tag keeps its ID |
+| `refuse-frozen-lockfile` | `package.json` no longer matches the lockfile | refused; consumer unchanged; lockfile bytes kept; the new cache has an attempt but no ready marker |
+| `bootstrap-changed-lockfile` | committed lockfile revision | consumer replaced on a new cache initialized once; the previous ready cache is kept |
+| `refuse-corrupted-cache` | the current ready marker is overwritten | refused; consumer unchanged; no reinstall; the corrupted marker is not rewritten |
+| `bootstrap-new-generation` | `hack.dependencies.cache-generation` bumped | consumer replaced on a new cache; the corrupted cache is kept for inspection |
+
+Unchanged means the same full container ID and `State.StartedAt`. CLI output and
+Git-tracked files must never contain the keys or token values, and the scenario
+reads only fixed container fields because the consumer's environment holds the
+token. Cleanup checks exact owner and Compose project labels, and an adjacent
+canary volume must survive it.
+
+The scenario ends with one value-free line, `portable-bootstrap receipt {...}`. For
+each stage it records the outcome, the consumer transition, the command duration,
+stdout/stderr bytes, Git-tracked fixture bytes, the bytes in the consumer's mounted
+cache and the number of owned cache volumes. It also records the pinned image
+size. It contains no env values, keys, resource IDs, image IDs or paths;
+`tests/e2e/portable-bootstrap-controls.ts` refuses any other shape.
+
+```sh
+HACK_E2E_CLI_BIN=./dist/hack HACK_E2E_DOCKER=1 HACK_E2E_REQUIRE_DOCKER=1 bun tests/e2e/run.ts --only=portable-bootstrap-negatives
+```
+
+Two local tests need no Docker engine. `tests/portable-bootstrap-env-refusal.test.ts`
+runs the source CLI on the same fixture against a recording Docker stub: a missing
+key, a wrong key and a wrong overlay key must fail before any Compose `create`,
+`run`, `start` or `up`, and the correct key must reach the `deps` bootstrap first.
+`tests/e2e-portable-bootstrap-controls.test.ts` covers the stage expectations,
+consumer classification, worktree diff check and receipt validation.
+
+This does not cover WU12 storage: mount and free-space admission, generation holds,
+reclamation and archives. Old cache volumes are kept, never reclaimed. A stale
+image here is a pinned ID that is absent locally, not a baked-tool manifest
+mismatch. A pass qualifies the hosted Linux Docker runner, not native VM support or
+a cloud provider.
+
+## Pattern fixture qualification
+
+`pattern-p01-dependency-bootstrap` (HACK-1145), `pattern-p02-portable-toolchain`
+(HACK-1146) and `pattern-p07-capability-overlays` (HACK-1151) start copies of the
+checked-in `examples/patterns/` fixtures against a real engine. Each catalogue card
+names its scenario in `e2eScenario`, and `tests/pattern-examples.test.ts` fails when
+that scenario is not registered here as Docker-tier with a duration hint.
+`tests/e2e/scenarios/pattern-fixture.ts` makes the copy. It changes only the
+project name, the image (the cached `oven/bun:1.4.2-slim` repository digest with
+`pull_policy: never` instead of the pinned Alpine image), a declared platform
+(the daemon's architecture) and exact owner labels. Commands, mounts, dependency
+labels, gates and health checks stay as the fixture authored them.
+
+- P01 runs a cold and a warm `hack up --json`, a linked worktree, a `bun.lock`
+  change and an installer killed mid-run under a fresh generation. Every running
+  consumer must read a complete payload with a ready marker and never mount the
+  killed attempt's volume. That volume must stay populated but unready, a retry
+  of the same generation must be refused, and a generation bump must recover.
+- P02 runs the README's `hack run --profile toolchain` commands from the primary
+  checkout and a linked worktree, whose `/app/.git` is a pointer to an unmounted
+  `gitdir`. A failing check must exit non-zero, `sh -c "exit 7"` must return 7, and
+  a pipe filter must show how filtered output hides the failure. Ordinary
+  `hack down` must keep both instances' cache volumes.
+- P07 runs the laptop overlay in the primary checkout and the runner overlay in a
+  linked worktree. `hack env explain` must name each source file, including an
+  inherited primary-local override, without printing a value. Container metadata
+  must carry each overlay's keys, both APIs must reach `upstream`, `hack exec`
+  with the other overlay must be refused, and no browser opener on `PATH` or in
+  `BROWSER` may run.
+
+```sh
+HACK_E2E_CLI_BIN=./dist/hack HACK_E2E_DOCKER=1 HACK_E2E_REQUIRE_DOCKER=1 bun tests/e2e/run.ts --only=pattern-p01-dependency-bootstrap,pattern-p02-portable-toolchain,pattern-p07-capability-overlays
+```
+
+These are maintained gates for the hosted Linux runner, not recorded passes on
+other hosts. They do not qualify the pinned Alpine image, registry access,
+credential-dependent installers, cross-worktree toolchain cache reuse or a
+headless machine identity.
+
 ## Compose config-hash drift (F03)
 
 `compose-config-hash-drift` (HACK-1124) checks that `hack run` and `hack exec`
@@ -246,6 +343,49 @@ service DNS and direct HTTP work. These exceptions apply only to this disposable
 fixture; host and provider proxy settings remain unchanged. In a real project,
 add its internal service names to the existing proxy exceptions rather than
 discarding the project's other entries.
+
+## MCP logs on real Compose (F13)
+
+`mcp-logs-compose` (HACK-1134, HACK-1155) starts `hack mcp serve` over stdio
+and calls the logs tools against a real Compose project. Every tool call runs
+the CLI under test through `HACK_MCP_COMMAND`. The fixture uses cached
+`alpine:3.20` with `pull_policy: never`, a private internal network, no
+published ports, and Hack internal DNS/TLS turned off. Both log backends are set
+to `compose`. It has three services: `ticker` prints a boot marker and then a
+numbered line every 0.2 s, `quiet` prints one line, and `bulk` prints 1500
+lines of 2048 four-byte emoji (about 12 MiB) and then idles.
+
+The scenario requires these results:
+
+- A `quiet` snapshot completes with `cutoff: null`. A `quiet` tail stops at
+  `maxMs` with a `time` cutoff and only its one line.
+- A `ticker` tail stops at `maxMs` with a `time` cutoff and live lines in
+  order. Another stops at exactly 5 log events with an `events` cutoff.
+- A `bulk` snapshot stops at 8 MiB with a `bytes` cutoff and
+  `outputTruncated`. It keeps an ordered prefix of whole lines. No result
+  payload may contain U+FFFD, so a split code point fails the run. Where the
+  cut falls varies from run to run, so a single pass does not prove that this
+  run cut inside a code point; `tests/mcp-logs-contract.test.ts` covers that
+  case deterministically.
+- With `DOCKER_HOST` pointing at a missing socket, a snapshot and a tail both
+  return the closed `backend_error`. The tail ends at end of stream, not at
+  `maxMs`.
+- `docker restart` on the exact owned `ticker` container during a tail: the
+  tail still ends in one typed outcome within its bound. Lines repeated across
+  the restart are logged, not asserted (see `docs/reference/mcp-logs.md`). The
+  stored history then holds `BOOT 1` and `BOOT 2` once each, with ordered
+  lines. A new tail streams only the new boot. A new MCP session does not
+  replay lines older than the previous session's last line.
+- `hack run quiet -- false` exits 1, and an `exit 7` child exits 7 with its
+  output. The MCP `hack.project.run` result reports `ok: false` and
+  `exitCode: 7`, and a `true` child reports `ok: true`.
+
+Cleanup removes only containers, networks and volumes with the fixture's
+owner label.
+
+```sh
+HACK_E2E_CLI_BIN=./dist/hack HACK_E2E_DOCKER=1 HACK_E2E_REQUIRE_DOCKER=1 bun tests/e2e/run.ts --only=mcp-logs-compose
+```
 
 ## Native file qualification
 
@@ -360,7 +500,26 @@ Each replay and the startup diagnostic also report a closed member-key histogram
 for the bridge the `network-member-id` predicate inspected: counts of `hex64`,
 `epPrefixed` (Docker `ep-` placeholder endpoints) and `other` keys, plus the fixed
 service names observed in the `restarting` state. The keys themselves are never
-emitted. This evidence is for classifying the flake; the ownership guard is unchanged.
+emitted. This evidence classifies the flake; the diagnostics do not change the guard.
+
+The startup readiness guard follows Docker's on-failure restart: on a failing exit the
+daemon releases the container's endpoint, waits a backoff, then recreates the endpoint
+(keyed `ep-<endpoint>` until the sandbox joins) for the same container ID. Containers
+are inspected before the bridge, and Docker does not lock the reads together. So for a
+selected, non-oneoff on-failure container inspected `restarting` or `running`, startup
+stays unready (never ready, never effect authority) when its bridge membership is
+missing (the backoff, HACK-1279 case 2) or is one `ep-` placeholder in the first scan
+(HACK-1271). A placeholder first seen in the recheck scan is admitted only for the same
+container that the first scan saw by ID or as absent (HACK-1279 case 1). A placeholder
+that persists from the first scan into the recheck, or one that names any other
+container, still refuses with `network-member-id`. Strict and saved reads admit none of
+these shapes.
+
+The readiness deadline bounds the `running` shapes. If it passes while the last
+observation was unready only because of them, one settled check follows. That check
+refuses a member that is still missing or placeholdered with the original topology
+predicate, so a permanently missing member cannot stay unready. The replay harness
+exposes this check as mode `settled`.
 
 ## Native config routing qualification
 
@@ -494,9 +653,12 @@ sentinel client config (`~/.claude/settings.json`, `~/.claude.json`,
 `.claude/settings.local.json` and `.mcp.json` into two fixtures. It then runs
 `init --auto`, `init --auto --with codex`, `agent prime`,
 `agent prime --check`, `agent onboard`, `agent patterns`, `doctor --json`,
-`doctor --fix --no-interactive`, `setup sync --check`, and refresh-only
-`setup sync --all-scopes` twice each (`setup sync --check` exits 1 because the
-customized files are reported as preserved). After
+`doctor --fix --no-interactive`, `setup sync --check`, refresh-only
+`setup sync --all-scopes`, the read-only `setup migrate --all-scopes` preview,
+and `setup migrate --all-scopes --apply --skip-plugin-check all` twice each
+(`setup sync --check` exits 1 because the customized files are reported as
+preserved; the migration apply exits 0 and removes nothing because no seeded
+file is Hack-owned). After
 every run it requires byte-identical hashes for those trees, no new entries
 under them, and `git status` changes only under `.hack/`. Each command must
 also exit with its expected code, so a usage error cannot pass as "no write".

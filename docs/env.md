@@ -51,6 +51,7 @@ worktrees inherit the rules with zero setup. It covers (patterns relative to
 - `.env.state.json`
 - `hack.env.local.yaml`
 - `hack.env.*.local.yaml`
+- `.hack.env*.tmp` (staging files an interrupted env write can leave behind)
 - `tickets/` (retained only to contain retired machine-local ticket caches during upgrades)
 
 How it is maintained:
@@ -196,6 +197,37 @@ Hack reads the canonical YAML files and injects the resolved env directly into:
 
 That means `.hack/.env` is no longer the primary runtime source of truth.
 
+On the Compose backend, Hack still generates `.hack/.internal/compose.env.override.yml`
+so each service gets its own environment. The file holds no values: each entry is a
+`${HACK_ENV_<digest>_<KEY>}` reference, and Hack passes the resolved values to
+`docker compose` through its process environment. Nothing Hack writes there contains a
+decrypted value, whether `up` succeeds, fails or is interrupted. The file is written
+with mode 0600, and Hack refuses to write through a symlink at that path. A value
+reaches the container literally, `$` included.
+
+Only the `docker compose` invocations that read the override (`up`, `run`, `exec`,
+`ps` and the dependency cache initialization) receive the `HACK_ENV_*` values. The other
+`docker` commands Hack runs around Compose, such as `docker inspect`, `docker logs` and
+`docker events` for dependency cache progress and reuse, get the same environment
+without them.
+
+Because the file holds only references, a `docker compose -f
+.hack/.internal/compose.env.override.yml ...` command run outside Hack (a script, an IDE
+integration or a test harness) gets a blank value for every managed variable, with only a
+per-variable warning from Compose. Use `hack run` or `hack exec`, or supply the same
+`HACK_ENV_*` variables to that command.
+
+Every service gets its own `HACK_ENV_*` copy of each value, including values that come
+from the global scope, so the Compose client environment grows with services times keys.
+The platform limits apply to it: about 1 MiB of arguments and environment in total on
+macOS, and on Linux also 128 KiB (`MAX_ARG_STRLEN`) for a single `NAME=value` string. A
+larger single value, such as a big JSON credential, makes the Compose start fail with
+`E2BIG`.
+
+When you upgrade from an earlier version, read the two subsections at the end of this
+section: managed values that contain `$` now reach containers differently, and an
+override written by the earlier version can still hold values.
+
 `hack env materialize` is manual by design. Use it only when you need a compatibility file for an external tool that expects `.env` on disk.
 
 Hack writes `.hack/.env` and `.hack/.env.<overlay>` (from `materialize`, legacy
@@ -215,6 +247,53 @@ That means Hack prefers host-usable values when it can:
 - common container-only hostnames such as `host.docker.internal` and compose service hosts are rewritten to `127.0.0.1`
 
 Use `--target compose` if you explicitly want the container-oriented compose view instead.
+
+### Upgrading: managed values that contain `$`
+
+Earlier versions wrote each value into the override literally, so Compose interpolated
+a `$` inside a managed value: `$VAR` and `${VAR}` became the host or Compose value of
+`VAR` (blank when unset), and `$$` became `$`. Now Compose substitutes each reference
+once and does not interpolate the value, so the container receives the value exactly as
+stored, `$` included. If a managed value contains `$`:
+
+- the container sees a different value after the upgrade, and the next `hack up`
+  recreates that service's containers because their configuration changed;
+- a value that relied on interpolation (for example `${HOME}/data`) now reaches the
+  container unexpanded; store the expanded value instead;
+- a value that escaped `$` as `$$` now reaches the container as `$$`; store a single `$`.
+
+Values without `$` reach containers unchanged, and their containers are not recreated.
+
+### Overrides from earlier versions
+
+An override written by an earlier Hack version can still hold literal values. The next
+`hack up`, `hack restart`, `hack run` or `hack exec` replaces it or, when it renders no
+override, removes it. `hack down` removes it before its lifecycle hooks, the remote target
+or `docker compose down` run, so a failed hook, a remote target or a failed Compose down
+does not keep it. `hack doctor` reports such a file in its "compose env at rest" check
+(counts only, never values), and `hack doctor --fix` removes it.
+
+A legacy adoption (`hack config adopt`) pins the override's exact bytes and file
+identity for as long as the adoption exists, and adopted commands never rewrite it. So:
+
+- `hack config adopt` and `hack config adopt --dry-run` refuse a literal override. Run
+  `hack up` once so Hack rewrites it with references, then adopt.
+- An adoption made by an earlier version over a literal override keeps that file. Hack
+  never removes it while a prepared, active or pending adoption exists, because removal
+  would make the adoption refuse to load. `hack doctor` reports it with this next step.
+  To drop the values, stop the adopted containers (`hack down`), run
+  `hack config adopt --rollback`, run `hack up` so Hack rewrites the file with references,
+  then adopt again with `hack config adopt --stop`.
+
+A removal first moves the file aside, then checks what it moved. If a concurrent Hack
+command had just replaced it with a value-free file, that file is put back rather than
+deleted. Between the move and the put-back the path is briefly absent, so a Compose
+command started by that concurrent Hack command at that moment can fail to find it; run
+the command again. If Hack is killed between the move and the delete, the moved file
+(`.hack/.internal/.compose.env.override.yml.<id>.remove`) can hold values. `hack doctor`
+reports such files by count, and the next removal, `hack doctor --fix`, or `hack up`,
+`hack restart`, `hack run` or `hack exec` deletes each one once it is more than a minute
+old. A newer one may belong to a removal that is still running, so it is left alone.
 
 ## Choosing the right execution surface
 
@@ -262,6 +341,9 @@ into a host command, and `--target` on env and host commands chooses the `host` 
 | `hack host shell` | `--env`, `--scope`, `--target` | When the shell starts. | Start a new shell. | Runs on the host, not in a container. |
 | `hack config validate` | `--env` | Per invocation; resolves the native selection without reading managed env documents. | Not needed. | Authored native projects only; cannot be combined with `--file`. |
 | `hack config plan` | `--env` | Per invocation; metadata only (names, scopes, secret flags), never decrypted. | Not needed. | Authored native projects only. |
+| `hack project target` | `--env`, `--service` | Per invocation, read-only; reports the overlay selection (explicit, project default or base) without reading env files or values. | Not needed. | Selection only: overlay existence is not checked; no runtime required. |
+| `hack project task list` | `--env` | Per invocation, read-only; selects the overlay that each recipe's reviewed env scope is compared with, without reading env files or values. | Not needed. | Selection only; lists recipes and runs nothing, so no runtime is required. |
+| `hack project task inspect` | `--env` | Per invocation, read-only; as for `hack project task list`, for one recipe. | Not needed. | Selection only; runs nothing, so no runtime is required. |
 | `hack session start` | `--env`, `--service` | When the workspace is created; the name gains `.env-<name>` (`.env-base` for base spellings), and `--up` runs `hack up -d` with the same selection. | Start a new workspace or pass `--env` to `hack session exec`. | Injects into the workspace shell, not into containers. |
 | `hack session exec` | `--env`, `--service` | Per command; omitted reuses the selection encoded in the workspace name. | Each command resolves again. | Injects into the workspace command, not into containers. |
 
@@ -411,6 +493,37 @@ input and without writing anything:
 `.hack/hack.env.<overlay>.local.yaml`) instead of the shared repo env file — use it for
 per-checkout values you don't want to commit.
 
+Repeating `hack env add` or `hack env set` with the value already stored is a no-op: when
+the existing secret decrypts to the same value under the current key, its ciphertext is
+kept, so once Hack has written the file it stays byte-identical and Git shows no change.
+A hand-edited file (comments, other formatting, or no `global: {}`) is normalized on the
+first repeat and stays byte-identical after that. A different value, a plain entry
+becoming secret, or an entry that does not decrypt under the current key gets new
+ciphertext with a fresh IV. Each command writes one key; a script that sets several keys
+is not atomic across them.
+
+Each env file write goes to a hidden `.<file>.<id>.tmp` file in the same directory and
+replaces the file by rename, so an interrupted write leaves the previous file in place.
+A write killed before the rename can leave that staging file behind. It holds the whole
+new layer, so `.hack/.gitignore` ignores `.hack.env*.tmp`, and you can delete it. Hack
+does not remove it on the next write, because another write may still be using it. The
+rename has these effects:
+
+- a symlinked env file keeps its link; the new contents land at the file the link points
+  to, and the staging file is created next to that file
+- a symlink whose target does not exist is replaced by a regular file
+- a hard link is broken: the env file gets a new inode, and any other name for the old
+  file keeps the previous contents
+- the directory must be writable, even when the env file itself is writable
+
+A rename does not need write access to the file it replaces, so Hack checks that access
+itself before it stages anything. It refuses to replace an existing env file that it
+cannot read, that is not a regular file, that is not writable, or whose owner and group
+it cannot keep (for example a root-owned file left by an earlier `sudo hack`). The error
+names the file and the reason, never a value, and the file is left as it was. Fix the
+file's permissions or ownership and run the command again. A rewrite keeps the file's
+permission bits, owner and group.
+
 If you omit `key`, `value`, or `--service`, `hack env add` prompts for them interactively.
 Pass `--no-interactive` (or set `HACK_NO_INTERACTIVE=1`) for scripted/agent usage: the
 command applies documented defaults or fails fast with `E_INTERACTIVE_REQUIRED` instead of
@@ -557,6 +670,7 @@ Write-path guarantees in a linked worktree (first secret added from any checkout
 - otherwise an existing shared key (git common dir) is reused
 - otherwise the primary checkout's key is adopted by copying it to the shared location, so sibling checkouts converge on one key
 - only then is a new key generated, and it is written to the shared location — never silently to the checkout
+- concurrent first use from several checkouts converges on one key: when no key exists, creation runs under a cooperative lock at `<git common dir>/.hack.secret.key.lock`, and a key file is published only when complete, never empty or partial (Hack v4 writers do not take the lock)
 - if the shared location cannot be resolved (git unavailable) or written, Hack falls back to a checkout-local key and prints a loud divergence warning
 - `hack doctor` flags divergent `.hack.secret.key` contents across checkouts with the exact paths
 
@@ -652,7 +766,10 @@ Some older surfaces are still compatibility-oriented:
   `<store>.lock` so concurrent writers, including separate processes, do not lose
   updates. A store path that is a symlink is refused for writes. Explicit key
   provisioning also uses an atomic mode-`0600` replacement and refuses symlinked
-  key paths or immediate parent directories. This protects individual key writes;
+  key paths or immediate parent directories. A key generated on first use is
+  published only when no key file exists, so concurrent first users adopt the key
+  published first instead of replacing it under a store already encrypted with
+  it. This protects individual key writes;
   it does not make key replacement and store re-encryption a crash-safe rotation
   transaction. Keep the previous key until recovery has been verified. The v1 store
   envelope and legacy `v1:` values authenticate no associated data: they are not

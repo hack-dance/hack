@@ -254,8 +254,10 @@ try {
   });
   require(unsupported.exit !== 0 &&
     (unsupported.stdout + unsupported.stderr).includes(
-      "E_NATIVE_PROJECT_UNSUPPORTED"
-    ), "unsupported native detached up refuses before input or runtime work");
+      // On macOS authored foreground up is supported, so --detach gets the
+      // shared one-line E_USAGE refusal; elsewhere it is unsupported.
+      process.platform === "darwin" ? "E_USAGE" : "E_NATIVE_PROJECT_UNSUPPORTED"
+    ), "native detached up refuses before input or runtime work");
   require((await readdir(home)).length === 0 &&
     !(await readdir(join(checkout, ".hack"))).some(
       (name) => name === ".internal" || name === ".branch"

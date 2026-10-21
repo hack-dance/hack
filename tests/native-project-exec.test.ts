@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { nativeProjectExec } from "../src/backends/native-project-exec.ts";
 import { saveNativeProjectRun } from "../src/backends/native-project-run.ts";
+import { expectClosedRefusal } from "./helpers/closed-refusal.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
 const roots: string[] = [];
@@ -103,19 +104,21 @@ test("invalid arguments and absent mapping never execute", async () => {
   const invoke = async () => {
     throw new Error("unexpected runtime");
   };
-  await expect(
-    nativeProjectExec({ ...opts, service: "web", argv: ["true"], invoke })
-  ).rejects.toThrow("not been started");
+  await expectClosedRefusal(
+    nativeProjectExec({ ...opts, service: "web", argv: ["true"], invoke }),
+    "not been started"
+  );
   for (const argv of [[], [""], ["echo", "\0"]]) {
-    await expect(
-      nativeProjectExec({ ...opts, service: "web", argv, invoke })
-    ).rejects.toThrow("requires");
+    await expectClosedRefusal(
+      nativeProjectExec({ ...opts, service: "web", argv, invoke }),
+      "requires"
+    );
   }
 });
 test("dead foreground owner refuses one-off exec before command effects", async () => {
   const opts = await fixture();
   let executions = 0;
-  await expect(
+  await expectClosedRefusal(
     nativeProjectExec({
       ...opts,
       service: "web",
@@ -137,8 +140,9 @@ test("dead foreground owner refuses one-off exec before command effects", async 
         executions++;
         throw new Error("unexpected effect");
       },
-    })
-  ).rejects.toThrow("unconfirmed");
+    }),
+    "unconfirmed"
+  );
   expect(executions).toBe(0);
 });
 test("foreign receipt refuses before exec and changed container after exec is uncertain without replay", async () => {
@@ -161,11 +165,12 @@ test("foreign receipt refuses before exec and changed container after exec is un
     value.receipt.owner = "f".repeat(32);
     return value;
   };
-  await expect(
-    nativeProjectExec({ ...opts, service: "web", argv: ["true"], invoke })
-  ).rejects.toThrow("mapping");
+  await expectClosedRefusal(
+    nativeProjectExec({ ...opts, service: "web", argv: ["true"], invoke }),
+    "mapping"
+  );
   expect(executions).toBe(0);
-  await expect(
+  await expectClosedRefusal(
     nativeProjectExec({
       ...opts,
       service: "web",
@@ -189,8 +194,9 @@ test("foreign receipt refuses before exec and changed container after exec is un
         }
         return value;
       },
-    })
-  ).rejects.toThrow("unconfirmed");
+    }),
+    "unconfirmed"
+  );
   expect(executions).toBe(1);
 });
 
@@ -231,7 +237,7 @@ test("malformed exec output refuses without replay", async () => {
   const opts = await fixture();
   for (const bad of ["not base64!", "Zh=="]) {
     let executions = 0;
-    await expect(
+    await expectClosedRefusal(
       nativeProjectExec({
         ...opts,
         service: "web",
@@ -251,8 +257,9 @@ test("malformed exec output refuses without replay", async () => {
             truncated: false,
           };
         },
-      })
-    ).rejects.toThrow("unconfirmed");
+      }),
+      "unconfirmed"
+    );
     expect(executions).toBe(1);
   }
 });
@@ -393,7 +400,7 @@ test("fresh exec clears private input on transport failure and never retries", a
 test("changed exec selection refuses before private environment delivery", async () => {
   const opts = await freshFixture({ FIXTURE: "private-fixture-value" });
   let executions = 0;
-  await expect(
+  await expectClosedRefusal(
     nativeProjectExec({
       ...opts,
       service: "web",
@@ -411,8 +418,9 @@ test("changed exec selection refuses before private environment delivery", async
         executions++;
         throw new Error("unexpected execution");
       },
-    })
-  ).rejects.toThrow("unconfirmed");
+    }),
+    "unconfirmed"
+  );
   expect(executions).toBe(0);
 });
 

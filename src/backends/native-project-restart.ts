@@ -1,3 +1,4 @@
+import { ClosedCliError } from "../lib/cli-result.ts";
 import {
   captureNativeProjectFinalization,
   type NativeProjectFinalizationToken,
@@ -59,7 +60,7 @@ export async function restartNativeProject(opts: {
     const current = await deps.load(opts.scope);
     const run = intent?.run ?? current;
     if (!run) {
-      throw new Error(
+      throw new ClosedCliError(
         "Native restart has no existing run; use hack up for initial startup."
       );
     }
@@ -70,7 +71,9 @@ export async function restartNativeProject(opts: {
         current.owner !== run.owner ||
         current.namespace !== run.namespace)
     ) {
-      throw new Error("Native restart mapping changed; no cleanup requested.");
+      throw new ClosedCliError(
+        "Native restart mapping changed; no cleanup requested."
+      );
     }
     nativeRestartSelection({
       run,
@@ -78,7 +81,7 @@ export async function restartNativeProject(opts: {
       profiles: opts.profiles,
     });
     if (!current && intent && intent.phase !== "cleaned") {
-      throw new Error(
+      throw new ClosedCliError(
         "Native restart cleanup or down hooks were interrupted; inspect the pending intent before recovery."
       );
     }
@@ -97,7 +100,7 @@ export async function restartNativeProject(opts: {
       await opts.down();
       intent = await deps.cleaned({ ...opts.scope, expected: intent });
     } else if (intent.phase !== "cleaned") {
-      throw new Error(
+      throw new ClosedCliError(
         "Native restart cleanup or down hooks were interrupted; inspect the pending intent before recovery."
       );
     }

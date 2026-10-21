@@ -1,11 +1,14 @@
+import { HackCliError } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
 import { hasOnlyNativeCacheLabels } from "./native-project-cache.ts";
 
 const ROUTE_LABELS = new Set(["caddy", "caddy.reverse_proxy", "caddy.tls"]);
 function refused(): Error {
-  return new Error(
-    "Native routes require reviewed Caddy labels and existing matching native HTTP health probes; no probe or route was invented."
-  );
+  return new HackCliError({
+    code: "E_NATIVE_PROJECT_UNSUPPORTED",
+    message:
+      "Native routes require reviewed Caddy labels and existing matching native HTTP health probes; no probe or route was invented.",
+  });
 }
 function labelKeys(labels: unknown): string[] | undefined {
   if (labels === undefined) {

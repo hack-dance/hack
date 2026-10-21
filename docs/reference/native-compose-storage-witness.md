@@ -137,6 +137,8 @@ proves four times (opening, prepublication, effect-entry and post-workload)
 rather than six. With `HACK_NATIVE_COMPOSE_PHASE_TRACE=1`, each performed
 verification proof emits one `storage.proof` span; a reused proof emits none.
 These counts establish call ordering and helper invocations, not wall time.
+The remaining per-command cost is an accepted known v5 limit; see
+[performance diagnostics](../performance.md#known-v5-limit-storage-witness-startup-cost).
 
 The one-off `run` path separately omits the enrollment-tail read that
 would immediately repeat its mandatory pre-spawn witness read. `up` and `restart`

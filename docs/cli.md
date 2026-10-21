@@ -144,6 +144,10 @@ require installation. Repair only affected targets within the authorized scope; 
 Hack-owned integrations; add `--install-missing` to create missing ones (see
 [integration setup](integrations.md#refresh-only-hack-setup-sync)). Read updated guidance after
 repair; restart only if the client cannot reload changed hooks or skills.
+To move from standalone skill and rule files to the `hack` plugin, preview with
+`hack setup migrate`, then run `hack setup migrate --apply` after the plugin loads; apply writes a
+backup manifest that `hack setup migrate --rollback-manifest <manifest>` restores (see
+[migrate standalone files](integrations.md#migrate-standalone-files-to-the-plugin)).
 Ordinary commands, `hack update`, and `hack doctor --fix` never render, repair, remove, or otherwise
 mutate integration files. CLI upgrades do not trigger integration updates.
 
@@ -187,6 +191,19 @@ route for it.
 - Browser/host URL: use `hack open <service> --json`; OAuth aliases are preferred when enabled.
 - Container-to-container traffic: use Compose DNS rather than routing back through Caddy.
 
+For `run`, `exec`, `host exec`, `env exec`, `x` and the Beta `dispatch run`, Hack options go before
+the child command.
+From the child command's first word on, every argument belongs to the child, including flags
+that Hack also defines: `hack run web bun --version` runs `bun --version` in the container
+rather than printing Hack's version, and a child `--json` does not switch Hack's own error output
+to JSON. A `--` before the child command is optional and is not passed on; a later `--` (as in
+`hack run web npm test -- --watch`) reaches the child unchanged.
+
+`session exec` takes the workspace command as one argument, so quote a command that has its own
+arguments or flags: `hack session exec ws "npm --version"`. Hack options go before it, and an
+unquoted `hack session exec ws npm --version` refuses with a hint to quote the command instead
+of printing Hack's version.
+
 Service-scoped runtime changes do not run project-wide lifecycle hooks and do not start Compose
 dependencies implicitly, except declared shared-cache installers needed by the selected services:
 
@@ -209,27 +226,45 @@ Hack scans `.npmrc`, `.yarnrc.yml`, and `bunfig.toml` for `${VAR}` credential re
 with `E_ENV_KEY_MISSING` when the selected Hack overlay cannot supply them. Values are never
 printed.
 
-Detached Compose startup has a 90-second budget by default. For a slow first
-install or container launch, set the host CLI environment explicitly:
+Detached Compose startup runs in two phases, each with its own budget:
+
+| Phase | Compose invocation | Default | Variable | Range (ms) |
+| --- | --- | --- | --- | --- |
+| Image build/pull and container creation | `up --no-start` | 30 minutes | `HACK_COMPOSE_IMAGE_TIMEOUT_MS` | 1,000–14,400,000 |
+| Start and dependency wait | `up -d --no-build` | 90 seconds | `HACK_COMPOSE_STARTUP_TIMEOUT_MS` | 1,000–3,600,000 |
+
+A first-time build or a large image pull therefore does not consume the start
+budget. Raise the budget for the phase that was hit, on the host CLI invocation
+rather than in a container's environment:
 
 ```sh
+# Slow first build or pull of a large image
+HACK_COMPOSE_IMAGE_TIMEOUT_MS=3600000 hack up --detach
+# Slow container start or a dependency that is slow to become healthy
 HACK_COMPOSE_STARTUP_TIMEOUT_MS=300000 hack up --detach
 HACK_COMPOSE_STARTUP_TIMEOUT_MS=300000 hack restart
 ```
 
-The value must be an integer from 1,000 to 3,600,000 milliseconds; detached startup
-and restart reject invalid values before project preparation or teardown. Full and service-scoped
-startup/restart use the same setting. The startup phase notice and
-`E_STARTUP_TIMEOUT` message report the effective budget. It covers each detached
-Compose invocation, including image/container launch and dependency waiting, not
-lifecycle hooks or an end-to-end application readiness deadline. A restart repair
-attempt has its own invocation budget and is reported separately. Foreground
-`up` stays unbounded; `down` retains its separate 90-second limit.
+Detached startup and restart reject invalid values before project preparation or
+teardown. Full and service-scoped startup/restart use the same settings. The
+startup notice reports both effective budgets. On expiry, `E_STARTUP_TIMEOUT`
+names the phase that was hit, its budget, and the variable that raises it; with
+`--json`, `error.detail` carries `composePhase` (`images` or `start`),
+`budgetMs`, and `budgetEnv`. The start budget covers container start and Compose
+`depends_on` waiting, not lifecycle hooks or an end-to-end application readiness
+deadline. A restart repair attempt has its own budgets and is reported
+separately. Foreground `up` stays a single unbounded Compose invocation; `down`
+retains its separate 90-second limit.
 
-On timeout, Hack terminates the owned Compose process group. Containers may still
-be running: inspect `hack ps` and `hack logs` before retrying. Raising the budget
-does not fix a failed installer or prove readiness. Set this on the host invocation,
-not merely in a container's environment.
+On timeout, Hack terminates the owned Compose process group of that phase. After an
+image-phase timeout no container was started by that attempt, but containers may
+have been created or recreated. After a start-phase timeout containers may still be
+running. Inspect `hack ps` and `hack logs` before retrying. Raising a budget does not
+fix a failed installer or prove readiness.
+
+Services with `pull_policy: always` still pull again in the start phase because
+Compose applies that policy on every `up`; such pulls count against the start
+budget.
 
 To share dependency data only across worktrees with the same lockfile/runtime fingerprint, label
 the bootstrap service with a logical top-level Compose volume:
@@ -292,7 +327,8 @@ be mistaken for a ready one. No project lifecycle hook or unrelated dependency i
 A failed installer leaves existing consumer containers untouched; JSON lifecycle commands return
 `E_DEPENDENCY_BOOTSTRAP_FAILED`. Each initializer in detached scoped `up` and targeted `restart` uses the configured
 `HACK_COMPOSE_STARTUP_TIMEOUT_MS` budget and reports `E_STARTUP_TIMEOUT` on expiry.
-The subsequent Compose launch has its own equal budget. Consumer `run` and foreground
+That budget also covers any installer image pull or build, because `run` acquires
+the image itself. The subsequent Compose launch has its own phased budgets. Consumer `run` and foreground
 scoped `up` retain a separate ten-minute initializer deadline.
 
 ## Branch instances and linked worktrees

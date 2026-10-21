@@ -1,4 +1,5 @@
 import { isAbsolute } from "node:path";
+import { ClosedCliError } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
 import {
   type NativeAuthoredReceipt,
@@ -12,7 +13,7 @@ import type { NativeAuthoredStorageTool } from "./native-authored-storage-tool.t
 import {
   invokeNativeRuntime,
   type NativeRuntimeSelection,
-  readNativeFailureCode,
+  readNativeFailureCodes,
   rethrowNativeInputFailure,
   writeNativePrivateInput,
 } from "./native-runtime-client.ts";
@@ -24,6 +25,8 @@ const MAX_INPUT = 256 * 1024;
 export type NativeExitDiagnostic = {
   readonly exitCode: number;
   readonly nativeCode?: string;
+  /** Bounded cause the runtime allows with `nativeCode`, such as a wrapped stopped runtime. */
+  readonly nativeCauseCode?: string;
 };
 
 type ProcessOptions = {
@@ -77,7 +80,7 @@ export async function serveNativeProjectGraph(
         value.kind !== "graph_foreground_ready" ||
         value.run !== opts.run
       ) {
-        throw new Error(
+        throw new ClosedCliError(
           "Native graph readiness identity is invalid or canceled."
         );
       }
@@ -124,7 +127,7 @@ export async function serveNativeAuthoredProjectGraph(
     expected.provenance.run !== opts.run ||
     opts.startupTimeoutMs > 300_000
   ) {
-    throw new Error(
+    throw new ClosedCliError(
       "Native authored source selection is invalid; values omitted."
     );
   }
@@ -184,7 +187,7 @@ export async function serveNativeAuthoredProjectGraph(
       const current = parseNativeAuthoredControl(status, receipt, "status");
       const assertRunning = () => {
         if (interrupted() || !nativeSnapshotReady(current)) {
-          throw new Error(
+          throw new ClosedCliError(
             "Native graph readiness identity is invalid or canceled."
           );
         }
@@ -216,7 +219,7 @@ export async function serveNativeAuthoredProjectGraph(
             "status"
           );
           if (interrupted() || !nativeSnapshotReady(fresh)) {
-            throw new Error(
+            throw new ClosedCliError(
               "Native graph readiness identity changed; values omitted."
             );
           }
@@ -265,7 +268,9 @@ function assertProcessSelection(opts: ProcessOptions): void {
     (opts.privateInput?.byteLength ?? 0) > MAX_INPUT ||
     canceledAtEntry(opts)
   ) {
-    throw new Error("Native graph startup input is invalid or canceled.");
+    throw new ClosedCliError(
+      "Native graph startup input is invalid or canceled."
+    );
   }
 }
 
@@ -321,7 +326,8 @@ async function serveGraphProcess(
     owner.abort();
     drainTimer = setTimeout(() => drain.abort(), 250);
   });
-  const failureCode = readNativeFailureCode(child.stderr, drain.signal);
+  const failureCodes = readNativeFailureCodes(child.stderr, drain.signal);
+  const failureCode = failureCodes.then((failure) => failure?.code);
   let ready = false;
   let canceled = false;
   let timedOut = false;
@@ -408,7 +414,7 @@ async function serveGraphProcess(
       onReady: async (value, interrupted) => {
         await opts.onReady(value, interrupted, owner.signal, () => {
           if (interrupted()) {
-            throw new Error(
+            throw new ClosedCliError(
               "Native graph publication interrupted; values omitted."
             );
           }
@@ -427,7 +433,7 @@ async function serveGraphProcess(
       nativeCode: failure,
     });
     if (timedOut || canceled || !ready) {
-      throw new Error(
+      throw new ClosedCliError(
         `Native graph startup was interrupted or failed${failure ? ` (${failure})` : ""}; inspect owned state before retrying.`
       );
     }
@@ -445,13 +451,16 @@ async function serveGraphProcess(
       clearTimeout(killTimer);
     }
     const exitCode = await child.exited;
-    const nativeCode = await failureCode;
+    const failure = await failureCodes;
+    const nativeCode = failure?.code;
+    const nativeCauseCode = failure?.causeCode;
     clearTimeout(drainTimer);
     drain.abort();
     try {
       opts.onExitDiagnostic?.({
         exitCode,
         ...(nativeCode ? { nativeCode } : {}),
+        ...(nativeCauseCode ? { nativeCauseCode } : {}),
       });
     } catch {
       // Observation must never replace the startup result or cleanup authority.
@@ -478,7 +487,7 @@ async function requireGroupAbsent(group: number): Promise<void> {
     }
     await Bun.sleep(50);
   }
-  throw new Error(
+  throw new ClosedCliError(
     "Native foreground child group settlement is unknown; values omitted."
   );
 }
@@ -514,7 +523,9 @@ async function consumeGraphOutput(opts: {
       }
       total += chunk.value.byteLength;
       if (total > MAX_OUTPUT) {
-        throw new Error("Native graph control output exceeded its budget.");
+        throw new ClosedCliError(
+          "Native graph control output exceeded its budget."
+        );
       }
       if (ready) {
         continue;
@@ -523,7 +534,7 @@ async function consumeGraphOutput(opts: {
       const end = line.indexOf("\n");
       if (end < 0) {
         if (readyFrameSize(line, opts.strictReady) > opts.readyLimit) {
-          throw new Error(
+          throw new ClosedCliError(
             "Native graph readiness response exceeded its budget."
           );
         }
@@ -533,7 +544,9 @@ async function consumeGraphOutput(opts: {
         opts.strictReady &&
         Buffer.byteLength(line.slice(0, end)) > opts.readyLimit
       ) {
-        throw new Error("Native graph readiness response exceeded its budget.");
+        throw new ClosedCliError(
+          "Native graph readiness response exceeded its budget."
+        );
       }
       await acceptGraphReady({ ...opts, line: line.slice(0, end) });
       ready = true;
@@ -563,13 +576,17 @@ async function acceptGraphReady(opts: {
   try {
     value = JSON.parse(opts.line);
   } catch {
-    throw new Error("Native graph readiness response is invalid.");
+    throw new ClosedCliError("Native graph readiness response is invalid.");
   }
   if (opts.interrupted()) {
-    throw new Error("Native graph readiness identity is invalid or canceled.");
+    throw new ClosedCliError(
+      "Native graph readiness identity is invalid or canceled."
+    );
   }
   await opts.onReady(value, opts.interrupted);
   if (opts.strictReady && opts.interrupted()) {
-    throw new Error("Native graph readiness identity is invalid or canceled.");
+    throw new ClosedCliError(
+      "Native graph readiness identity is invalid or canceled."
+    );
   }
 }

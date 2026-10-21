@@ -81,6 +81,34 @@ def with_current_payload(entries):
     return with_storage_tool(with_mcp(with_compiler(entries)))
 
 
+# A hypothetical reviewed top-level bundle file. Tests patch it into the installer's
+# allowlist to stand in for the next reviewed installer that ships a new file.
+EXTENSION = "hack-reviewed-extension.json"
+EXTENSION_BYTES = b'{"reviewed": true}\n'
+
+
+def with_extended_payload(entries):
+    """The current 17-member layout plus one reviewed addition: 18 archive members."""
+    payload = {name: value for name, value, _ in entries if name != "SHA256SUMS"}
+    payload[EXTENSION] = EXTENSION_BYTES
+    # with_current_payload recomputes SHA256SUMS over every member, including this one.
+    return with_current_payload([(name, value, tarfile.REGTYPE) for name, value in payload.items()])
+
+
+def reviewed_extension():
+    """Admit EXTENSION as a required core file, as a later reviewed installer would."""
+    stack = contextlib.ExitStack()
+    stack.enter_context(mock.patch.object(installer, "PAYLOAD", installer.PAYLOAD | {EXTENSION}))
+    stack.enter_context(mock.patch.object(installer, "BUNDLE_FILES",
+                                          installer.BUNDLE_FILES | {EXTENSION}))
+    return stack
+
+
+def archive_members(archive):
+    with tarfile.open(archive, "r:gz") as source:
+        return [entry.name for entry in source]
+
+
 class OfficialResponse:
     """One HTTP response read through the installer's real download loop.
 
@@ -135,11 +163,13 @@ class ChannelTests(unittest.TestCase):
         self.run_patch = mock.patch.object(installer.subprocess, "run", side_effect=self.process)
         self.run_patch.start()
         self.addCleanup(self.run_patch.stop)
+        # A manually exported native selection naming a foreign executor and home:
+        # the launcher must still pin its own. Backend selection has its own tests.
         self.env_patch = mock.patch.dict(os.environ, {
             "HOME": str(self.stable_home), "HACK_HOME": str(self.stable_home / ".hack"),
             "HACK_GLOBAL_CONFIG_PATH": str(self.stable_home / ".hack/config.json"),
             "HACK_NATIVE_HOME": str(self.stable_home / "foreign-native"),
-            "HACK_NATIVE_BINARY": str(self.brew / "hack"), "HACK_RUNTIME_BACKEND": "docker",
+            "HACK_NATIVE_BINARY": str(self.brew / "hack"), "HACK_RUNTIME_BACKEND": "native",
             "HACK_NATIVE_ADAPTATION": "/private/project/adaptation.json",
             "HACK_NATIVE_DEPENDENCIES": "/private/project/dependencies.json",
             "HACK_NATIVE_AWS_PROFILE": "fixture-qa",
@@ -741,6 +771,152 @@ class ChannelTests(unittest.TestCase):
                     for home in ("native-home", "cli-home"):
                         self.assertEqual((self.channel.root / "versions" / version / home / "marker").read_text(),
                                          version + home)
+
+    def test_member_ceiling_is_fixed_above_the_largest_reviewed_inventory(self):
+        archive, _ = self.archive(mutate=with_current_payload)
+        reviewed = len(installer.BUNDLE_FILES | installer.COMPILER_PAYLOAD
+                       | installer.STORAGE_TOOL_PAYLOAD) + len(installer.MCP_FILES) + 1
+        self.assertEqual(len(archive_members(archive)), reviewed)
+        self.assertGreater(installer.MAX_ARCHIVE_MEMBERS, reviewed)
+        with reviewed_extension():
+            # The bound no longer follows the allowlist sizes; growing them leaves it unchanged.
+            self.assertEqual(installer.MAX_ARCHIVE_MEMBERS, 64)
+
+    def test_reviewed_addition_beyond_seventeen_members_installs_and_rolls_back(self):
+        with reviewed_extension():
+            for number in (1, 2):
+                version = "5.0.0-next." + str(number)
+                archive, checksum = self.archive(version, with_extended_payload)
+                self.assertEqual(len(archive_members(archive)), 18)
+                with self.channel.lock():
+                    self.channel.install(version, archive, checksum, number == 2)
+                bundle = self.channel.root / "versions" / version / "bundle"
+                _, manifest = installer.verify_bundle(bundle, version)
+                self.assertEqual(len(manifest), 17)
+                self.assertIn(EXTENSION, manifest)
+                self.assertEqual((bundle / EXTENSION).read_bytes(), EXTENSION_BYTES)
+                self.assertEqual((bundle / EXTENSION).stat().st_mode & 0o777, 0o600)
+                self.assertEqual((bundle / installer.STORAGE_TOOL).stat().st_mode & 0o777, 0o500)
+            for prior in ("5.0.0-next.1", "5.0.0-next.2"):
+                with self.channel.lock():
+                    self.channel.select(prior)
+                self.assertEqual(self.selection()["selected"], prior)
+
+    def test_member_ceiling_refuses_excess_headers_before_inventory(self):
+        # MCP members are the only digest-wildcard names, so distinct identities are
+        # allowlisted one by one. The ceiling bounds them; the inventory refuses below it.
+        def mcp_identities(count):
+            return lambda entries: [*entries, *(("mcp/%064x/manifest.json" % index, b"{}\n",
+                                                 tarfile.REGTYPE) for index in range(count))]
+        flat = 8
+        self.rejects_install(mcp_identities(installer.MAX_ARCHIVE_MEMBERS - flat + 1),
+                             r"\AToo many archive entries\.\Z")
+        self.rejects_install(mcp_identities(installer.MAX_ARCHIVE_MEMBERS - flat),
+                             "one MCP bundle identity")
+
+    def test_larger_reviewed_inventory_keeps_member_refusals(self):
+        with reviewed_extension():
+            archive, checksum = self.archive(mutate=with_extended_payload)
+            with self.channel.lock():
+                self.channel.install("5.0.0-next.1", archive, checksum)
+
+            def extended(change):
+                return lambda entries: change(with_extended_payload(entries))
+
+            def replace(name=None, value=None, kind=None):
+                return extended(lambda entries: [
+                    (name if name and key == EXTENSION else key,
+                     value if value is not None and key == EXTENSION else data,
+                     kind if kind is not None and key == EXTENSION else entry_kind)
+                    for key, data, entry_kind in entries])
+
+            foreign = "Foreign, duplicate or traversing archive entry"
+            cases = [
+                (extended(lambda entries: [*entries, next(entry for entry in entries
+                                                          if entry[0] == EXTENSION)]), foreign),
+                (replace(name="../" + EXTENSION), foreign),
+                (replace(name="/tmp/" + EXTENSION), foreign),
+                (replace(name="bundle/" + EXTENSION), foreign),
+                (replace(name="hack-unreviewed-extension.json"), foreign),
+                (replace(kind=tarfile.SYMTYPE), "regular archive files"),
+                (replace(kind=tarfile.LNKTYPE), "regular archive files"),
+                (replace(value=b'{"reviewed": false}\n'), "checksum mismatch"),
+                (extended(lambda entries: [entry for entry in entries if entry[0] != EXTENSION]),
+                 "Incomplete candidate bundle"),
+            ]
+            for mutate, message in cases:
+                with self.subTest(message=message, mutate=mutate):
+                    self.rejects_install(mutate, message)
+            limit = 4096
+            with mock.patch.object(installer, "MAX_ARCHIVE", limit):
+                for mutate, message in (
+                        (replace(value=bytes(limit + 1)), "Only bounded regular archive files"),
+                        (extended(lambda entries: [
+                            (key, bytes(limit // 2) if key in (EXTENSION, "hack-cli") else value, kind)
+                            for key, value, kind in entries]), "Oversized archive")):
+                    with self.subTest(message=message):
+                        archive, _ = self.archive("5.0.0-next.2", mutate)
+                        self.assertLessEqual(archive.stat().st_size, limit)
+                        self.rejects_install(mutate, message)
+
+    def test_released_storage_manager_upgrades_before_accepting_new_installer_payloads(self):
+        # 5.0.0-next.3, next.4 and next.5 all shipped this manager byte for byte.
+        source = SOURCE.parent.parent / "tests/fixtures/prerelease-manager-storage-v5.py"
+        predecessor = "e2e2bcbacf58b21d1086047c94727e5e814776384439700adcf5aabe5c49c2fa"
+        self.assertEqual(installer.digest(source), predecessor)
+        self.assertIn(predecessor, installer.MANAGER_PREDECESSORS)
+        spec = importlib.util.spec_from_file_location("storage_prerelease_manager", source)
+        previous = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(previous)
+        self.channel = previous.Channel(self.root / "storage-v5-channel")
+        self.channel.initialize()
+        self.install()
+        for version in ("5.0.0-next.4", "5.0.0-next.5"):
+            archive, checksum = self.archive(version, with_current_payload)
+            with self.channel.lock():
+                self.channel.install(version, archive, checksum, True)
+        for version in ("5.0.0-next.1", "5.0.0-next.4", "5.0.0-next.5"):
+            for home in ("native-home", "cli-home"):
+                (self.channel.root / "versions" / version / home / "marker").write_text(version + home)
+        before = self.retained_snapshot()
+        # The retained manager filled its derived 17-member bound and knows no new name,
+        # so it refuses a larger layout instead of selecting files it cannot verify.
+        larger, larger_checksum = self.archive("5.0.0-next.6", with_extended_payload)
+        self.assertEqual(len(archive_members(larger)), 18)
+        with self.channel.lock():
+            with self.assertRaisesRegex(previous.Refusal, "archive entr"):
+                self.channel.install("5.0.0-next.6", larger, larger_checksum, True)
+        self.assertEqual(self.retained_snapshot(), before)
+        archive, checksum = self.archive("5.0.0-next.6", with_current_payload)
+        current = installer.Channel(self.channel.root)
+        with current.lock():
+            with self.assertRaisesRegex(installer.Refusal, "upgrade-manager"):
+                current.install("5.0.0-next.6", archive, checksum, True)
+        self.assertEqual(self.retained_snapshot(), before)
+        self.channel = self.upgrade_manager()
+        self.assertEqual(self.retained_snapshot(), before)
+        self.assertEqual((self.channel.root / "manager.py").read_bytes(), SOURCE.read_bytes())
+        with self.channel.lock():
+            self.assertEqual(self.channel.state["selected"], "5.0.0-next.5")
+            self.channel.install("5.0.0-next.6", archive, checksum, True)
+        for prior in ("5.0.0-next.5", "5.0.0-next.1", "5.0.0-next.4", "5.0.0-next.6"):
+            with self.channel.lock():
+                self.channel.select(prior)
+            self.assertEqual(self.selection()["selected"], prior)
+        bundle = self.channel.root / "versions/5.0.0-next.6/bundle"
+        child = mock.Mock()
+        child.wait.return_value = 0
+        with self.channel.lock(shared=True), \
+                mock.patch.object(installer.subprocess, "Popen", return_value=child) as spawn:
+            self.assertEqual(self.channel.run(["--version"]), 0)
+        self.assertEqual(Path(spawn.call_args.args[0][0]), bundle / "hack-v5")
+        for version in ("5.0.0-next.1", "5.0.0-next.4", "5.0.0-next.5"):
+            for home in ("native-home", "cli-home"):
+                self.assertEqual((self.channel.root / "versions" / version / home / "marker").read_text(),
+                                 version + home)
+        # Repeating the upgrade with the installed manager is a no-op.
+        self.upgrade_manager()
+        self.assertEqual((self.channel.root / "manager.py").read_bytes(), SOURCE.read_bytes())
 
     def test_bundle_verification_hashes_each_payload_once_without_cross_call_cache(self):
         archive, checksum = self.archive(mutate=with_current_payload)
@@ -1359,6 +1535,8 @@ print(json.dumps(stages))
 
     def test_launcher_pins_private_homes_arguments_exit_code_and_allows_peer_launchers(self):
         self.install()
+        # No backend selection: the channel default is native with private homes.
+        os.environ.pop("HACK_RUNTIME_BACKEND")
         child = mock.Mock()
         child.wait.return_value = 23
         with self.channel.lock(shared=True):
@@ -1372,6 +1550,7 @@ print(json.dumps(stages))
                 self.assertEqual(environment["HACK_NATIVE_HOME"], str(self.channel.root / "versions/5.0.0-next.1/native-home"))
                 self.assertEqual(environment["HACK_NATIVE_BINARY"], str(self.channel.root / "versions/5.0.0-next.1/bundle/hack-native"))
                 self.assertEqual(environment["HACK_RUNTIME_BACKEND"], "native")
+                self.assertEqual(environment["HACK_CANDIDATE_ENTRYPOINT"], "hack-next")
                 for name in ("HACK_NATIVE_ADAPTATION", "HACK_NATIVE_DEPENDENCIES", "HACK_NATIVE_AWS_PROFILE",
                              "HACK_NATIVE_HTTPS_PORT", "HACK_NATIVE_SHARED_SOURCE"):
                     self.assertEqual(environment[name], os.environ[name])
@@ -1382,6 +1561,96 @@ print(json.dumps(stages))
         child.wait.return_value = -15
         with self.channel.lock(shared=True), mock.patch.object(installer.subprocess, "Popen", return_value=child):
             self.assertEqual(self.channel.run(["ps"]), 143)
+
+    def launch(self, channel=None):
+        """Run the selected candidate through `channel` with a stand-in child process."""
+        channel = channel or self.channel
+        child = mock.Mock()
+        child.wait.return_value = 0
+        # Every manager imports the same standard-library subprocess module.
+        with channel.lock(shared=True), \
+                mock.patch.object(installer.subprocess, "Popen", return_value=child) as spawn:
+            self.assertEqual(channel.run(["ps", "--path", "a path"]), 0)
+        self.assertEqual(spawn.call_args.args[0][1:], ["ps", "--path", "a path"])
+        return Path(spawn.call_args.args[0][0]), spawn.call_args.kwargs["env"]
+
+    def test_launcher_respects_explicit_backend_and_keeps_native_default(self):
+        self.install()
+        version = self.channel.root / "versions/5.0.0-next.1"
+        for selection in (None, "", "native"):
+            with self.subTest(backend=selection), mock.patch.dict(os.environ):
+                if selection is None:
+                    os.environ.pop("HACK_RUNTIME_BACKEND")
+                else:
+                    os.environ["HACK_RUNTIME_BACKEND"] = selection
+                command, environment = self.launch()
+                self.assertEqual(command, version / "bundle/hack-v5")
+                self.assertEqual(environment["HACK_RUNTIME_BACKEND"], "native")
+                self.assertEqual(environment["HACK_NATIVE_BINARY"], str(version / "bundle/hack-native"))
+                self.assertEqual(environment["HACK_NATIVE_HOME"], str(version / "native-home"))
+                self.assertEqual(environment["HACK_HOME"], str(version / "cli-home"))
+                self.assertNotIn("HACK_GLOBAL_CONFIG_PATH", environment)
+        with mock.patch.dict(os.environ, {"HACK_RUNTIME_BACKEND": "compose"}):
+            command, environment = self.launch()
+        # Compose runs the same verified CLI with the caller's own Hack home, so the
+        # existing global Caddy/CoreDNS and local CA apply; native selectors are removed.
+        self.assertEqual(command, version / "bundle/hack-cli")
+        self.assertEqual(environment["HACK_RUNTIME_BACKEND"], "compose")
+        self.assertEqual(environment["HACK_CANDIDATE_ENTRYPOINT"], "hack-next")
+        self.assertEqual(environment["HACK_HOME"], str(self.stable_home / ".hack"))
+        self.assertEqual(environment["HACK_GLOBAL_CONFIG_PATH"], str(self.stable_home / ".hack/config.json"))
+        self.assertNotIn("HACK_NATIVE_BINARY", environment)
+        self.assertNotIn("HACK_NATIVE_HOME", environment)
+        for name in ("HACK_NATIVE_ADAPTATION", "HACK_NATIVE_HTTPS_PORT", "HACK_NATIVE_SHARED_SOURCE"):
+            self.assertEqual(environment[name], os.environ[name])
+        # Unknown selections refuse before verification or spawn; inherited `docker` is
+        # not silently replaced by either backend.
+        for selection in ("docker", "Native", "native "):
+            with self.subTest(backend=selection), \
+                    mock.patch.dict(os.environ, {"HACK_RUNTIME_BACKEND": selection}), \
+                    mock.patch.object(installer.subprocess, "Popen") as spawn, \
+                    mock.patch.object(installer, "verify_signatures") as signatures:
+                with self.channel.lock(shared=True):
+                    with self.assertRaisesRegex(installer.Refusal, "must be native or compose"):
+                        self.channel.run(["up"])
+                spawn.assert_not_called()
+                signatures.assert_not_called()
+
+    def test_released_next5_manager_needs_upgrade_manager_for_compose_selection(self):
+        source = SOURCE.parent.parent / "tests/fixtures/prerelease-manager-storage-v5.py"
+        predecessor = "e2e2bcbacf58b21d1086047c94727e5e814776384439700adcf5aabe5c49c2fa"
+        self.assertEqual(installer.digest(source), predecessor)
+        self.assertIn(predecessor, installer.MANAGER_PREDECESSORS)
+        spec = importlib.util.spec_from_file_location("storage_v5_predecessor", source)
+        previous = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(previous)
+        self.channel = previous.Channel(self.root / "storage-v5")
+        self.channel.initialize()
+        archive, checksum = self.archive("5.0.0-next.1", with_current_payload)
+        with self.channel.lock():
+            self.channel.install("5.0.0-next.1", archive, checksum)
+        version = self.channel.root / "versions/5.0.0-next.1"
+        for home in ("native-home", "cli-home"):
+            (version / home / "marker").write_text(home)
+        before = self.retained_snapshot()
+        with mock.patch.dict(os.environ, {"HACK_RUNTIME_BACKEND": "compose"}):
+            # The released manager always selects native and its private homes.
+            command, environment = self.launch()
+            self.assertEqual(command, version / "bundle/hack-v5")
+            self.assertEqual(environment["HACK_RUNTIME_BACKEND"], "native")
+            self.assertEqual(environment["HACK_HOME"], str(version / "cli-home"))
+            self.channel = self.upgrade_manager()
+            self.assertEqual((self.channel.root / "manager.py").read_bytes(), SOURCE.read_bytes())
+            self.assertEqual(self.retained_snapshot(), before)
+            command, environment = self.launch()
+        self.assertEqual(command, version / "bundle/hack-cli")
+        self.assertEqual(environment["HACK_RUNTIME_BACKEND"], "compose")
+        self.assertEqual(environment["HACK_HOME"], str(self.stable_home / ".hack"))
+        os.environ.pop("HACK_RUNTIME_BACKEND")
+        command, environment = self.launch()
+        self.assertEqual(command, version / "bundle/hack-v5")
+        self.assertEqual(environment["HACK_HOME"], str(version / "cli-home"))
+        self.assertEqual(self.retained_snapshot(), before)
 
     def test_host_and_local_archive_cli_contract(self):
         for system, machine in (("Linux", "aarch64"), ("Darwin", "x86_64")):

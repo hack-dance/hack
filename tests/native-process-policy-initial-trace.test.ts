@@ -105,121 +105,136 @@ test("initial trace accepts only exact ownership read protocols", () => {
   }
 });
 
-test("initial forwarding preserves bytes/exits but records no unknown output, args or stderr", async () => {
-  const root = await mkdtemp(join(tmpdir(), "process-initial-forwarding-"));
-  const previous = process.env.PATH;
-  const binary = join(root, "docker");
-  const traceRoot = join(root, "trace");
-  try {
-    await Bun.write(
-      binary,
-      `#!${process.execPath} --no-env-file
+/**
+ * Each forwarded command cold-starts two Bun processes (the trace forwarder and
+ * the fake Docker). These bounds only stop a wedged child from hanging the run;
+ * exits, bytes and trace order are still asserted exactly.
+ */
+const FORWARDED_DOCKER_EXEC_TIMEOUT_MS = 30_000;
+/** Four forwarded commands at their exec bound, plus trace reads and rewrites. */
+const INITIAL_FORWARDING_TEST_TIMEOUT_MS = 150_000;
+
+test(
+  "initial forwarding preserves bytes/exits but records no unknown output, args or stderr",
+  async () => {
+    const root = await mkdtemp(join(tmpdir(), "process-initial-forwarding-"));
+    const previous = process.env.PATH;
+    const binary = join(root, "docker");
+    const traceRoot = join(root, "trace");
+    try {
+      await Bun.write(
+        binary,
+        `#!${process.execPath} --no-env-file
 const args=process.argv.slice(2); await Bun.sleep(20);
 if(args[0]==="compose"){await Bun.write(Bun.stdout,"original compose bytes\\n");await Bun.write(Bun.stderr,${JSON.stringify(CANARY)});process.exit(17);}
 if(args[1]==="ls"){await Bun.write(Bun.stdout,"original list bytes\\n");process.exit(0);}
 await Bun.write(Bun.stdout,${JSON.stringify(CANARY)});await Bun.write(Bun.stderr,${JSON.stringify(CANARY)});process.exit(23);
 `
-    );
-    await chmod(binary, 0o700);
-    process.env.PATH = root;
-    const prepared = await prepareProcessPolicyInitialTrace({
-      directory: traceRoot,
-    });
-    const run = async (args: readonly string[]) =>
-      await exec([join(traceRoot, "docker"), ...args], {
-        env: { PATH: prepared.path },
-        stdin: "ignore",
-        timeoutMs: 3000,
-      });
-    expect(await run(list("container"))).toEqual({
-      exitCode: 0,
-      stdout: "original list bytes\n",
-      stderr: "",
-    });
-    expect(
-      await run(["compose", "-p", project, "-f", CANARY, "up", "-d"])
-    ).toEqual({
-      exitCode: 17,
-      stdout: "original compose bytes\n",
-      stderr: CANARY,
-    });
-    expect(
-      await run(["inspect", id, "--format", "{{json .Config.Env}}"])
-    ).toEqual({ exitCode: 23, stdout: CANARY, stderr: CANARY });
-    expect(await run(list("network"))).toEqual({
-      exitCode: 0,
-      stdout: "original list bytes\n",
-      stderr: "",
-    });
-    const trace = await readProcessPolicyInitialTrace(prepared.directory);
-    expect(trace.queries.map((row) => row.args)).toEqual([
-      list("container"),
-      list("network"),
-    ]);
-    expect((trace.queries[0]?.startOrder ?? -1) < trace.upStartOrder).toBe(
-      true
-    );
-    expect((trace.queries[1]?.startOrder ?? -1) > trace.upReapOrder).toBe(true);
-    for (const name of await readdir(prepared.directory)) {
-      expect(
-        await Bun.file(join(prepared.directory, name)).text()
-      ).not.toContain(CANARY);
-    }
-    const journal = join(prepared.directory, "events.jsonl");
-    const originalJournal = await Bun.file(journal).text();
-    const second = trace.queries[1];
-    const first = trace.queries[0];
-    if (!(first && second)) {
-      throw new Error("Missing synthetic query pair");
-    }
-    // Complete but overlapping original reads cannot be grouped into a faithful
-    // single-owner replay, even if every capsule and reply is still present.
-    const effect = originalJournal
-      .trimEnd()
-      .split("\n")
-      .filter(
-        (line) => !(line.includes(first.token) || line.includes(second.token))
       );
-    const overlapping = [
-      { token: first.token, event: "start" },
-      { token: second.token, event: "start" },
-      { token: first.token, event: "reap" },
-      { token: second.token, event: "reap" },
-    ].map((event) => JSON.stringify(event));
-    await Bun.write(journal, `${[...overlapping, ...effect].join("\n")}\n`);
-    await expect(
-      readProcessPolicyInitialTrace(prepared.directory)
-    ).rejects.toThrow("trace unavailable");
-    await Bun.write(journal, originalJournal.slice(0, -1));
-    await expect(
-      readProcessPolicyInitialTrace(prepared.directory)
-    ).rejects.toThrow("trace unavailable");
-    await Bun.write(journal, originalJournal);
-    expect(
-      (await readProcessPolicyInitialTrace(prepared.directory)).queries.map(
-        (row) => row.args
-      )
-    ).toEqual([list("container"), list("network")]);
-    const row = trace.queries[0];
-    if (!row) {
-      throw new Error("Missing synthetic trace");
+      await chmod(binary, 0o700);
+      process.env.PATH = root;
+      const prepared = await prepareProcessPolicyInitialTrace({
+        directory: traceRoot,
+      });
+      const run = async (args: readonly string[]) =>
+        await exec([join(traceRoot, "docker"), ...args], {
+          env: { PATH: prepared.path },
+          stdin: "ignore",
+          timeoutMs: FORWARDED_DOCKER_EXEC_TIMEOUT_MS,
+        });
+      expect(await run(list("container"))).toEqual({
+        exitCode: 0,
+        stdout: "original list bytes\n",
+        stderr: "",
+      });
+      expect(
+        await run(["compose", "-p", project, "-f", CANARY, "up", "-d"])
+      ).toEqual({
+        exitCode: 17,
+        stdout: "original compose bytes\n",
+        stderr: CANARY,
+      });
+      expect(
+        await run(["inspect", id, "--format", "{{json .Config.Env}}"])
+      ).toEqual({ exitCode: 23, stdout: CANARY, stderr: CANARY });
+      expect(await run(list("network"))).toEqual({
+        exitCode: 0,
+        stdout: "original list bytes\n",
+        stderr: "",
+      });
+      const trace = await readProcessPolicyInitialTrace(prepared.directory);
+      expect(trace.queries.map((row) => row.args)).toEqual([
+        list("container"),
+        list("network"),
+      ]);
+      expect((trace.queries[0]?.startOrder ?? -1) < trace.upStartOrder).toBe(
+        true
+      );
+      expect((trace.queries[1]?.startOrder ?? -1) > trace.upReapOrder).toBe(
+        true
+      );
+      for (const name of await readdir(prepared.directory)) {
+        expect(
+          await Bun.file(join(prepared.directory, name)).text()
+        ).not.toContain(CANARY);
+      }
+      const journal = join(prepared.directory, "events.jsonl");
+      const originalJournal = await Bun.file(journal).text();
+      const second = trace.queries[1];
+      const first = trace.queries[0];
+      if (!(first && second)) {
+        throw new Error("Missing synthetic query pair");
+      }
+      // Complete but overlapping original reads cannot be grouped into a faithful
+      // single-owner replay, even if every capsule and reply is still present.
+      const effect = originalJournal
+        .trimEnd()
+        .split("\n")
+        .filter(
+          (line) => !(line.includes(first.token) || line.includes(second.token))
+        );
+      const overlapping = [
+        { token: first.token, event: "start" },
+        { token: second.token, event: "start" },
+        { token: first.token, event: "reap" },
+        { token: second.token, event: "reap" },
+      ].map((event) => JSON.stringify(event));
+      await Bun.write(journal, `${[...overlapping, ...effect].join("\n")}\n`);
+      await expect(
+        readProcessPolicyInitialTrace(prepared.directory)
+      ).rejects.toThrow("trace unavailable");
+      await Bun.write(journal, originalJournal.slice(0, -1));
+      await expect(
+        readProcessPolicyInitialTrace(prepared.directory)
+      ).rejects.toThrow("trace unavailable");
+      await Bun.write(journal, originalJournal);
+      expect(
+        (await readProcessPolicyInitialTrace(prepared.directory)).queries.map(
+          (row) => row.args
+        )
+      ).toEqual([list("container"), list("network")]);
+      const row = trace.queries[0];
+      if (!row) {
+        throw new Error("Missing synthetic trace");
+      }
+      const reap = join(prepared.directory, `${row.token}.json.reap`);
+      const originalReap = await Bun.file(reap).text();
+      await unlink(reap);
+      await expect(
+        readProcessPolicyInitialTrace(prepared.directory)
+      ).rejects.toThrow();
+      await Bun.write(reap, originalReap);
+      await unlink(join(prepared.directory, `${row.token}.json.start`));
+      await expect(
+        readProcessPolicyInitialTrace(prepared.directory)
+      ).rejects.toThrow();
+    } finally {
+      restoreEnv("PATH", previous);
+      await rm(root, { recursive: true, force: true });
     }
-    const reap = join(prepared.directory, `${row.token}.json.reap`);
-    const originalReap = await Bun.file(reap).text();
-    await unlink(reap);
-    await expect(
-      readProcessPolicyInitialTrace(prepared.directory)
-    ).rejects.toThrow();
-    await Bun.write(reap, originalReap);
-    await unlink(join(prepared.directory, `${row.token}.json.start`));
-    await expect(
-      readProcessPolicyInitialTrace(prepared.directory)
-    ).rejects.toThrow();
-  } finally {
-    restoreEnv("PATH", previous);
-    await rm(root, { recursive: true, force: true });
-  }
-});
+  },
+  INITIAL_FORWARDING_TEST_TIMEOUT_MS
+);
 
 test("initial forwarding preserves a multicall Docker entry and refuses its replacement", async () => {
   const root = await mkdtemp(join(tmpdir(), "process-initial-entry-"));
@@ -848,9 +863,13 @@ test("startup diagnostic classifies refused member keys instead of hiding the ca
   }
 });
 
-/** The captured docker-e2e after-compose shape: three container-ID members and one `ep-` placeholder for the restarting retry service. */
-test("trace replay re-observes a restarting endpoint placeholder member and refuses an unresolved or non-restarting one", async () => {
-  const root = await mkdtemp(join(tmpdir(), "process-initial-placeholder-"));
+/** One retry-service scan: its bridge key (`null` when absent from the bridge) and its inspected state. */
+type RetryScan = {
+  readonly retryKey: string | null;
+  readonly retryState: "running" | "restarting";
+};
+/** The process-policy fixture fleet: three settled services plus the on-failure `retry` service, as one after-compose query of 12 recorded replies. */
+function restartFleet() {
   const services = ["forced", "graceful", "reaper", "retry"] as const;
   const ids = {
     forced: "1".repeat(64),
@@ -886,14 +905,16 @@ test("trace replay re-observes a restarting endpoint placeholder member and refu
       },
     },
   });
-  const members = (retryKey: string) =>
+  const members = (retryKey: string | null) =>
     Object.fromEntries(
-      services.map((service) => [
-        service === "retry" ? retryKey : ids[service],
-        { Name: `${project}-${service}-1` },
-      ])
+      services
+        .filter((service) => service !== "retry" || retryKey !== null)
+        .map((service) => [
+          service === "retry" ? retryKey : ids[service],
+          { Name: `${project}-${service}-1` },
+        ])
     );
-  const network = (retryKey: string) =>
+  const network = (retryKey: string | null) =>
     JSON.stringify({
       id: networkId,
       name: `${project}_default`,
@@ -953,8 +974,8 @@ test("trace replay re-observes a restarting endpoint placeholder member and refu
     project,
   });
   const queries = (
-    first: { retryKey: string; retryState: "running" | "restarting" },
-    recheck: { retryKey: string; retryState: "running" | "restarting" }
+    first: RetryScan,
+    recheck: RetryScan
   ): ProcessPolicyInitialTraceQuery[] => {
     const calls: [string[], string][] = [
       [list("container"), containerList],
@@ -981,6 +1002,13 @@ test("trace replay re-observes a restarting endpoint placeholder member and refu
       exitCode: 0,
     }));
   };
+  return { fleet, ids, placeholder, queries };
+}
+
+/** The captured docker-e2e after-compose shape: three container-ID members and one `ep-` placeholder for the restarting retry service. */
+test("trace replay re-observes a restarting or just-restarted endpoint placeholder member and refuses an unresolved one", async () => {
+  const root = await mkdtemp(join(tmpdir(), "process-initial-placeholder-"));
+  const { fleet, ids, placeholder, queries } = restartFleet();
   const resolved = queries(
     { retryKey: placeholder, retryState: "restarting" },
     { retryKey: ids.retry, retryState: "running" }
@@ -1057,21 +1085,60 @@ test("trace replay re-observes a restarting endpoint placeholder member and refu
       memberKeyClasses: { hex64: 3, epPrefixed: 1, other: 0 },
       restartingServices: ["retry"],
     });
+    // HACK-1271 capture (run 39279573566): the retry container was inspected `running`
+    // before it exited and began its on-failure restart, so the later bridge read in the
+    // same scan held only its placeholder. The recheck resolves it, so startup re-observes.
+    const runningResolved = queries(
+      { retryKey: placeholder, retryState: "running" },
+      { retryKey: ids.retry, retryState: "running" }
+    );
     const running = await replayProcessPolicyInitialOwnership({
       directory: join(root, "running"),
-      queries: queries(
-        { retryKey: placeholder, retryState: "running" },
-        { retryKey: ids.retry, retryState: "running" }
-      ),
+      queries: runningResolved,
       selection: fleet,
       mode: "startup",
     });
     expect(running).toEqual({
+      outcome: "unready",
+      code: null,
+      reason: null,
+      topologyPredicate: null,
+      consumed: runningResolved.length,
+      protocolMatched: true,
+      memberKeyClasses: { hex64: 4, epPrefixed: 0, other: 0 },
+      restartingServices: [],
+    });
+    const runningStrict = await replayProcessPolicyInitialOwnership({
+      directory: join(root, "running-strict"),
+      queries: runningResolved,
+      selection: fleet,
+      mode: "strict",
+    });
+    expect(runningStrict).toEqual({
       outcome: "refused",
       code: "E_NATIVE_COMPOSE_OWNERSHIP",
       reason: "topology",
       topologyPredicate: "network-member-id",
       consumed: 6,
+      protocolMatched: true,
+      memberKeyClasses: { hex64: 3, epPrefixed: 1, other: 0 },
+      restartingServices: [],
+    });
+    const runningUnresolved = await replayProcessPolicyInitialOwnership({
+      directory: join(root, "running-unresolved"),
+      queries: queries(
+        { retryKey: placeholder, retryState: "running" },
+        { retryKey: placeholder, retryState: "running" }
+      ),
+      selection: fleet,
+      mode: "startup",
+    });
+    expect(runningUnresolved).toEqual({
+      outcome: "refused",
+      code: "E_NATIVE_COMPOSE_OWNERSHIP",
+      reason: "topology",
+      topologyPredicate: "network-member-id",
+      consumed: 9,
       protocolMatched: true,
       memberKeyClasses: { hex64: 3, epPrefixed: 1, other: 0 },
       restartingServices: [],
@@ -1082,6 +1149,8 @@ test("trace replay re-observes a restarting endpoint placeholder member and refu
       owned,
       unresolved,
       running,
+      runningStrict,
+      runningUnresolved,
     });
     expect(serialized).not.toContain(owner);
     expect(serialized).not.toContain(placeholder);
@@ -1090,3 +1159,218 @@ test("trace replay re-observes a restarting endpoint placeholder member and refu
     await rm(root, { recursive: true, force: true });
   }
 }, 30_000);
+
+/**
+ * HACK-1279 capture: run 39436132066, job 118673527798, scenario
+ * `native-config-process-policy`, after-compose observation 3. These are the capsule's
+ * fixed fields; the capsule carries no key, ID or label value. Startup and strict both
+ * refused at the first scan's topology check, the bridge held three container-ID members
+ * and no placeholder, and no service was inspected as `restarting`. Only `retry`
+ * (on-failure, max 2) restarts in this fixture, so the absent member is `retry`.
+ */
+const HACK_1279_CAPSULE = {
+  observationIndex: 3,
+  startupReason: "topology",
+  strictReason: "topology",
+  startupTopologyPredicate: "live-endpoint-membership",
+  strictTopologyPredicate: "live-endpoint-membership",
+  startupMemberKeyClasses: { hex64: 3, epPrefixed: 0, other: 0 },
+  strictMemberKeyClasses: { hex64: 3, epPrefixed: 0, other: 0 },
+  startupRestartingServices: [],
+  strictRestartingServices: [],
+} as const;
+/** The capsule's refusal as a replay result; the original query stopped after the first scan's six replies. */
+const HACK_1279_REFUSAL = {
+  outcome: "refused",
+  code: "E_NATIVE_COMPOSE_OWNERSHIP",
+  reason: HACK_1279_CAPSULE.strictReason,
+  topologyPredicate: HACK_1279_CAPSULE.strictTopologyPredicate,
+  consumed: 6,
+  protocolMatched: true,
+  memberKeyClasses: HACK_1279_CAPSULE.strictMemberKeyClasses,
+  restartingServices: HACK_1279_CAPSULE.strictRestartingServices,
+} as const;
+type ReplayMode = "settled" | "startup" | "strict";
+
+test("trace replay keeps an on-failure member absent during its restart backoff unready instead of refusing (HACK-1279 case 2)", async () => {
+  const root = await mkdtemp(join(tmpdir(), "process-initial-backoff-"));
+  const { fleet, ids, placeholder, queries } = restartFleet();
+  const replay = (
+    name: string,
+    mode: ReplayMode,
+    recorded: ProcessPolicyInitialTraceQuery[]
+  ) =>
+    replayProcessPolicyInitialOwnership({
+      directory: join(root, name),
+      queries: recorded,
+      selection: fleet,
+      mode,
+    });
+  // The capture: `retry` was inspected `running`, then exited, and Docker released its
+  // endpoint before the same scan read the bridge.
+  const captured = { retryKey: null, retryState: "running" } as const;
+  try {
+    expect(HACK_1279_CAPSULE.observationIndex).toBe(3);
+    // The original query recorded no recheck. Every recheck Docker can produce next is
+    // unready: the endpoint rejoined, the backoff still running, the new endpoint not yet
+    // joined to its sandbox, or the container read `running` again before the bridge.
+    const rechecks = [
+      {
+        name: "rejoined",
+        recheck: { retryKey: ids.retry, retryState: "running" },
+        memberKeyClasses: { hex64: 4, epPrefixed: 0, other: 0 },
+        restartingServices: [],
+      },
+      {
+        name: "backoff",
+        recheck: { retryKey: null, retryState: "restarting" },
+        memberKeyClasses: { hex64: 3, epPrefixed: 0, other: 0 },
+        restartingServices: ["retry"],
+      },
+      {
+        name: "joining",
+        recheck: { retryKey: placeholder, retryState: "restarting" },
+        memberKeyClasses: { hex64: 3, epPrefixed: 1, other: 0 },
+        restartingServices: ["retry"],
+      },
+      {
+        name: "absent",
+        recheck: { retryKey: null, retryState: "running" },
+        memberKeyClasses: { hex64: 3, epPrefixed: 0, other: 0 },
+        restartingServices: [],
+      },
+    ] as const;
+    for (const item of rechecks) {
+      const recorded = queries(captured, item.recheck);
+      expect(await replay(`startup-${item.name}`, "startup", recorded)).toEqual(
+        {
+          outcome: "unready",
+          code: null,
+          reason: null,
+          topologyPredicate: null,
+          consumed: recorded.length,
+          protocolMatched: true,
+          memberKeyClasses: item.memberKeyClasses,
+          restartingServices: item.restartingServices,
+        }
+      );
+      // Strict effect authority still refuses exactly as captured.
+      expect(await replay(`strict-${item.name}`, "strict", recorded)).toEqual(
+        HACK_1279_REFUSAL
+      );
+    }
+    // Once the readiness deadline has passed, the settled check refuses a member that is
+    // still absent with the captured startup refusal.
+    expect(
+      await replay("settled", "settled", queries(captured, captured))
+    ).toEqual({
+      ...HACK_1279_REFUSAL,
+      reason: HACK_1279_CAPSULE.startupReason,
+      topologyPredicate: HACK_1279_CAPSULE.startupTopologyPredicate,
+      memberKeyClasses: HACK_1279_CAPSULE.startupMemberKeyClasses,
+      restartingServices: HACK_1279_CAPSULE.startupRestartingServices,
+    });
+    // A member that has rejoined by the settled check is owned.
+    const rejoined = queries(
+      { retryKey: ids.retry, retryState: "running" },
+      { retryKey: ids.retry, retryState: "running" }
+    );
+    expect(await replay("settled-rejoined", "settled", rejoined)).toMatchObject(
+      { outcome: "owned", consumed: rejoined.length }
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+}, 60_000);
+
+test("trace replay keeps a member whose placeholder first appears in the recheck scan unready (HACK-1279 case 1)", async () => {
+  const root = await mkdtemp(join(tmpdir(), "process-initial-recheck-"));
+  const { fleet, ids, placeholder, queries } = restartFleet();
+  const replay = (
+    name: string,
+    mode: ReplayMode,
+    recorded: ProcessPolicyInitialTraceQuery[]
+  ) =>
+    replayProcessPolicyInitialOwnership({
+      directory: join(root, name),
+      queries: recorded,
+      selection: fleet,
+      mode,
+    });
+  const refusedAtRecheck = (restartingServices: readonly "retry"[]) => ({
+    outcome: "refused" as const,
+    code: "E_NATIVE_COMPOSE_OWNERSHIP" as const,
+    reason: "topology" as const,
+    topologyPredicate: "network-member-id" as const,
+    consumed: 9,
+    protocolMatched: true,
+    memberKeyClasses: { hex64: 3, epPrefixed: 1, other: 0 },
+    restartingServices,
+  });
+  try {
+    // `retry` was a container-ID member in the first scan, then exited and restarted; the
+    // recheck read its new endpoint before its sandbox joined.
+    const shapes = [
+      {
+        name: "running",
+        first: { retryKey: ids.retry, retryState: "running" },
+        recheck: { retryKey: placeholder, retryState: "running" },
+      },
+      {
+        name: "restarting",
+        first: { retryKey: ids.retry, retryState: "running" },
+        recheck: { retryKey: placeholder, retryState: "restarting" },
+      },
+      // Case 2 progressing within one query: absent in the first scan, joining in the recheck.
+      {
+        name: "backoff-joining",
+        first: { retryKey: null, retryState: "running" },
+        recheck: { retryKey: placeholder, retryState: "running" },
+      },
+    ] as const;
+    for (const { name, first, recheck } of shapes) {
+      const recorded = queries(first, recheck);
+      const restartingServices: readonly "retry"[] =
+        recheck.retryState === "restarting" ? ["retry"] : [];
+      expect(await replay(`startup-${name}`, "startup", recorded)).toEqual({
+        outcome: "unready",
+        code: null,
+        reason: null,
+        topologyPredicate: null,
+        consumed: recorded.length,
+        protocolMatched: true,
+        memberKeyClasses: { hex64: 3, epPrefixed: 1, other: 0 },
+        restartingServices,
+      });
+      // The settled check never admits a recheck placeholder or a running absent member.
+      expect(await replay(`settled-${name}`, "settled", recorded)).toEqual(
+        first.retryKey === null
+          ? HACK_1279_REFUSAL
+          : refusedAtRecheck(restartingServices)
+      );
+    }
+    // Strict effect authority refuses the recheck placeholder.
+    expect(
+      await replay(
+        "strict",
+        "strict",
+        queries(shapes[0].first, shapes[0].recheck)
+      )
+    ).toEqual(refusedAtRecheck([]));
+    // A placeholder that persists from the first scan into the recheck still refuses.
+    for (const retryState of ["running", "restarting"] as const) {
+      expect(
+        await replay(
+          `persistent-${retryState}`,
+          "startup",
+          queries(
+            { retryKey: placeholder, retryState },
+            { retryKey: placeholder, retryState }
+          )
+        )
+      ).toEqual(refusedAtRecheck(retryState === "restarting" ? ["retry"] : []));
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+}, 60_000);

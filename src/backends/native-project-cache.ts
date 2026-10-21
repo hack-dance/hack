@@ -1,3 +1,4 @@
+import { ClosedCliError } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
 import type { NativeProjectReview } from "./native-project-review.ts";
 import {
@@ -16,7 +17,7 @@ const SHA = /^[a-f0-9]{64}$/;
 /** Source sharing is meaningful only for active bind mounts, not image-only services. */
 export function nativeSharedSourceFlags(plan: unknown): readonly string[] {
   if (!(isRecord(plan) && isRecord(plan.services))) {
-    throw new Error("Native source review is invalid.");
+    throw new ClosedCliError("Native source review is invalid.");
   }
   const shared = Object.values(plan.services).some(
     (service) =>
@@ -82,7 +83,7 @@ export async function publishNativeCacheSource(opts: {
       publication.state === "guest-content-verified-no-job-started"
     )
   ) {
-    throw new Error(
+    throw new ClosedCliError(
       "Native cache source publication did not return a verified revision."
     );
   }
@@ -91,12 +92,12 @@ export async function publishNativeCacheSource(opts: {
 
 export function nativeCacheInitializers(plan: unknown): ReadonlySet<string> {
   if (!(isRecord(plan) && isRecord(plan.services))) {
-    throw new Error("Native cache review is invalid.");
+    throw new ClosedCliError("Native cache review is invalid.");
   }
   const initializers = new Set<string>();
   for (const [name, service] of Object.entries(plan.services)) {
     if (!isRecord(service)) {
-      throw new Error("Native service review is invalid.");
+      throw new ClosedCliError("Native service review is invalid.");
     }
     if (service.active === true && isRecord(service.dependency_cache)) {
       initializers.add(name);
@@ -115,7 +116,9 @@ export async function nativeStartCacheSource(opts: {
 }): ReturnType<typeof publishNativeCacheSource> {
   if (opts.restoreRevision) {
     if (!SHA.test(opts.restoreRevision)) {
-      throw new Error("Native retained cache source revision is invalid.");
+      throw new ClosedCliError(
+        "Native retained cache source revision is invalid."
+      );
     }
     return {
       flags: ["--source-revision", opts.restoreRevision],

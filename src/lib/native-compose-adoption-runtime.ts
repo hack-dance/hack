@@ -40,6 +40,8 @@ function row(text: string) {
   return parsed;
 }
 
+const ENV_OVERRIDE_SUFFIX = "/.hack/.internal/compose.env.override.yml";
+
 /**
  * Private ordered-source fidelity check. The strict importer and generated-source
  * owner have already refused interpolation, env files and unknown
@@ -47,11 +49,28 @@ function row(text: string) {
  * and a null env file prevent Compose from discovering alternate inputs. Only
  * configuration hashes and engine-created hash labels are read, never container
  * environment/image values. This read-only observation grants no effect authority.
+ *
+ * The generated env override keeps only `${HACK_ENV_*}` references at rest
+ * (HACK-1273), while each container's config-hash label was computed by Compose
+ * with the resolved values. A fresh check therefore needs those values:
+ * `privateInterpolationEnv` carries them into the Compose child environment
+ * only, and they are never returned, logged or serialized.
+ *
+ * A saved-generation recheck runs without key or value delivery. When the
+ * bound files include the env override and no values are supplied, `saved`
+ * (the runtime config proven fresh at preparation) is required instead: each
+ * retained container's engine label must still equal its saved hash. The
+ * caller's saved owners separately pin the Compose copy, the generated
+ * override bytes and the managed env revision, so an unchanged label means the
+ * container still runs the configuration proven at preparation.
  */
 export async function inspectLegacyComposeRuntimeConfig(opts: {
   readonly binding: LegacyComposeVerifiedBinding;
   readonly composeFile: string;
   readonly composeFiles?: readonly string[];
+  readonly privateInterpolationEnv?: Readonly<Record<string, string>>;
+  /** Saved manifest proof; validated here, so the raw saved value is accepted. */
+  readonly saved?: unknown;
   readonly signal?: AbortSignal;
   readonly timeoutMs?: number;
 }): Promise<
@@ -61,7 +80,11 @@ export async function inspectLegacyComposeRuntimeConfig(opts: {
     readonly hash: string;
   }[]
 > {
-  const probe = createNativeComposeProbe(opts);
+  const probe = createNativeComposeProbe({
+    signal: opts.signal,
+    timeoutMs: opts.timeoutMs,
+    privateInterpolationEnv: opts.privateInterpolationEnv,
+  });
   const expectedFiles = [
     opts.composeFile,
     ...(opts.binding.binding_version === 2 ||
@@ -78,35 +101,17 @@ export async function inspectLegacyComposeRuntimeConfig(opts: {
   ) {
     refuse();
   }
-  const output = await probe([
-    "compose",
-    "--project-name",
-    opts.binding.composeProject,
-    "--project-directory",
-    `${opts.binding.projectRoot}/.hack`,
-    "--env-file",
-    "/dev/null",
-    "--profile",
-    "*",
-    ...expectedFiles.flatMap((file) => ["--file", file]),
-    "config",
-    "--no-env-resolution",
-    "--hash",
-    "*",
-  ]);
-  const hashes = new Map<string, string>();
-  for (const line of output.trim().split("\n")) {
-    const match = HASH_LINE.exec(line);
-    const service = match?.[1],
-      hash = match?.[2];
-    if (!(service && hash) || hashes.has(service)) {
-      refuse();
-    }
-    hashes.set(service, hash);
-  }
-  if (hashes.size !== opts.binding.containers.length) {
-    refuse();
-  }
+  const savedOnly =
+    opts.saved !== undefined &&
+    opts.privateInterpolationEnv === undefined &&
+    expectedFiles.some((file) => file.endsWith(ENV_OVERRIDE_SUFFIX));
+  const hashes = savedOnly
+    ? savedHashes({ binding: opts.binding, saved: opts.saved })
+    : await composeHashes({
+        probe,
+        binding: opts.binding,
+        files: expectedFiles,
+      });
   const result: RuntimeConfig[] = [];
   for (const container of opts.binding.containers) {
     if (!ID.test(container.id)) {
@@ -135,6 +140,79 @@ export async function inspectLegacyComposeRuntimeConfig(opts: {
     );
   }
   return Object.freeze(result);
+}
+
+/** Compose's own per-service hash of the exact ordered files. */
+async function composeHashes(opts: {
+  readonly probe: (args: readonly string[]) => Promise<string>;
+  readonly binding: LegacyComposeVerifiedBinding;
+  readonly files: readonly string[];
+}): Promise<Map<string, string>> {
+  const output = await opts.probe([
+    "compose",
+    "--project-name",
+    opts.binding.composeProject,
+    "--project-directory",
+    `${opts.binding.projectRoot}/.hack`,
+    "--env-file",
+    "/dev/null",
+    "--profile",
+    "*",
+    ...opts.files.flatMap((file) => ["--file", file]),
+    "config",
+    "--no-env-resolution",
+    "--hash",
+    "*",
+  ]);
+  const hashes = new Map<string, string>();
+  for (const line of output.trim().split("\n")) {
+    const match = HASH_LINE.exec(line);
+    const service = match?.[1],
+      hash = match?.[2];
+    if (!(service && hash) || hashes.has(service)) {
+      refuse();
+    }
+    hashes.set(service, hash);
+  }
+  if (hashes.size !== opts.binding.containers.length) {
+    refuse();
+  }
+  return hashes;
+}
+
+/** The saved per-container proof, exactly aligned with the retained binding. */
+function savedHashes(opts: {
+  readonly binding: LegacyComposeVerifiedBinding;
+  readonly saved: unknown;
+}): Map<string, string> {
+  if (
+    !(
+      Array.isArray(opts.saved) &&
+      opts.saved.length === opts.binding.containers.length
+    )
+  ) {
+    refuse();
+  }
+  const hashes = new Map<string, string>();
+  for (const [index, container] of opts.binding.containers.entries()) {
+    const saved: unknown = opts.saved[index];
+    if (
+      !(
+        saved &&
+        isRecord(saved) &&
+        Object.keys(saved).sort().join() === "hash,id,service" &&
+        saved.id === container.id &&
+        saved.service === container.service &&
+        typeof saved.hash === "string" &&
+        ID.test(saved.hash)
+      ) ||
+      hashes.has(container.service)
+    ) {
+      refuse();
+    }
+    hashes.set(container.service, saved.hash);
+  }
+  return hashes;
 }
 
 /** Minimal state observation for owned stopped adoption and retained-ID lifecycle postconditions. */

@@ -460,7 +460,8 @@ function renderComposeYaml(opts: {
   ].join("\n");
 }
 
-async function gitInitAndCommit(opts: {
+/** Initialize a repository on `main` and commit every file under `root`. */
+export async function gitInitAndCommit(opts: {
   readonly root: string;
 }): Promise<void> {
   await git({ root: opts.root, args: ["init", "-q", "-b", "main"] });

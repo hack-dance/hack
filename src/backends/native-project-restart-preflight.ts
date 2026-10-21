@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { ClosedCliError } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
 import { adaptNativeAwsEnvironment } from "./native-aws-environment.ts";
 import { prepareNativeProjectAdaptation } from "./native-project-adaptation.ts";
@@ -83,7 +84,7 @@ async function verifyNativeRestartListeners(opts: {
     file.size === 0 ||
     file.size > 16 * 1024 * 1024
   ) {
-    throw new Error(
+    throw new ClosedCliError(
       "Native restart needs its bundled dependency relay before cleanup; the current graph was not stopped."
     );
   }
@@ -115,7 +116,7 @@ async function verifyNativeRestartListeners(opts: {
         args: ["graph", "dependency-plan", "--dependencies", path, "--json"],
       });
     } catch {
-      throw new Error(
+      throw new ClosedCliError(
         "Native restart host dependency listener is unavailable or changed; refresh its private selection before restart. The current graph was not stopped."
       );
     }
@@ -125,7 +126,7 @@ async function verifyNativeRestartListeners(opts: {
       typeof result.dependency_plan_id !== "string" ||
       !SHA.test(result.dependency_plan_id)
     ) {
-      throw new Error(
+      throw new ClosedCliError(
         "Native restart host dependency selection was not confirmed; the current graph was not stopped."
       );
     }
@@ -149,7 +150,7 @@ async function readNativeRestartDependencyIntent(opts: {
   try {
     const value = await readNativeSelection(opts.path);
     if (!(isRecord(value) && Array.isArray(value.dependencies))) {
-      throw new Error("Invalid dependency intent");
+      throw new ClosedCliError("Invalid dependency intent");
     }
     return parseNativeHostDependencies({
       services: opts.services,
@@ -163,7 +164,7 @@ async function readNativeRestartDependencyIntent(opts: {
       },
     });
   } catch {
-    throw new Error(
+    throw new ClosedCliError(
       "Native restart dependency intent is invalid; values omitted."
     );
   }
@@ -188,7 +189,7 @@ export function requireNativeRestartNetwork(
   ) {
     return;
   }
-  throw new Error(
+  throw new ClosedCliError(
     "Native restart network selection differs from the owned pool; migrate its network policy explicitly before restart. The current graph was not stopped."
   );
 }
@@ -205,7 +206,7 @@ export function nativeRestartSelection(opts: {
     run.profiles === undefined ||
     run.aws === undefined
   ) {
-    throw new Error(
+    throw new ClosedCliError(
       "Native restart requires recorded startup selectors; legacy state needs explicit recovery."
     );
   }
@@ -215,7 +216,7 @@ export function nativeRestartSelection(opts: {
       JSON.stringify(normalizeNativeProfiles(opts.profiles)) !==
         JSON.stringify(run.profiles))
   ) {
-    throw new Error(
+    throw new ClosedCliError(
       "Native restart cannot change the startup environment or profiles; the current graph was not stopped."
     );
   }
@@ -240,7 +241,7 @@ async function inspectRestartGraph(opts: {
       invoke: opts.invoke,
     });
   } catch {
-    throw new Error(
+    throw new ClosedCliError(
       "Native restart cannot confirm the stopped retained graph; no listener discovery or cleanup was requested."
     );
   }
@@ -266,7 +267,7 @@ async function stoppedRestartMode(opts: {
         isRecord(observed.receipt) &&
         observed.receipt.phase === "stopped-data-retained"))
   ) {
-    throw new Error(
+    throw new ClosedCliError(
       "Native restart cannot confirm the stopped retained graph; no listener discovery or cleanup was requested."
     );
   }
@@ -302,7 +303,9 @@ async function pinRestartImages(opts: {
       typeof pinned.image_id !== "string" ||
       !IMAGE.test(pinned.image_id)
     ) {
-      throw new Error("Native restart image selection failed before cleanup.");
+      throw new ClosedCliError(
+        "Native restart image selection failed before cleanup."
+      );
     }
     spec.image = pinned.image_id;
   }
@@ -349,7 +352,7 @@ export async function preflightNativeRestart(opts: {
     args: ["runtime", "probe", "--profile", "development", "--json"],
   });
   if (!isRecord(admission) || admission.admitted !== true) {
-    throw new Error(
+    throw new ClosedCliError(
       "Native restart admission failed before cleanup; inspect runtime probe --profile development. The current graph was not stopped."
     );
   }
@@ -449,7 +452,7 @@ export async function preflightNativeRestart(opts: {
     input: { ...input, normalizedComposeJson: JSON.stringify(compose) },
     run: async (review) => {
       if (review.namespace !== opts.run.namespace) {
-        throw new Error(
+        throw new ClosedCliError(
           "Native restart configuration changed; the current graph was not stopped."
         );
       }
@@ -496,7 +499,7 @@ export async function preflightNativeRestart(opts: {
           invoke: deps.invoke,
         });
         if (!confirmedNativeRetainedGraph(observed, opts.run)) {
-          throw new Error(
+          throw new ClosedCliError(
             "Native restart stopped recovery changed during review; no cleanup was requested."
           );
         }

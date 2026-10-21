@@ -290,12 +290,26 @@ pub(super) fn prepare_delivery(
     for (kind, entries) in [(Kind::Network, networks), (Kind::Volume, volumes)] {
         for (index, key) in entries.into_iter().enumerate() {
             let cache = (kind == Kind::Volume).then(|| caches.get(&key)).flatten();
+            let disposable_caches = if kind == Kind::Volume {
+                plan.volumes[&key].disposable_caches.clone()
+            } else {
+                Vec::new()
+            };
+            // A shared dependency cache has consumers outside this graph; its
+            // directories can never be selected through one graph's declaration.
+            if cache.is_some() && !disposable_caches.is_empty() {
+                return Err(error(
+                    "graph_disposable_cache",
+                    "A shared dependency cache volume cannot declare disposable cache directories.",
+                ));
+            }
             let resource = Resource {
                 routing: None,
                 networks: None,
                 outbound: kind == Kind::Network && !plan.networks[&key].internal,
                 cache: cache.cloned(),
                 cache_provenance: None,
+                disposable_caches,
                 kind,
                 key: key.clone(),
                 name: cache.map_or_else(
@@ -320,6 +334,7 @@ pub(super) fn prepare_delivery(
             outbound: false,
             cache: None,
             cache_provenance: None,
+            disposable_caches: Vec::new(),
             kind: Kind::Container,
             key: name.clone(),
             name: format!("hkg-{run}-container-{index}"),

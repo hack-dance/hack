@@ -36,6 +36,15 @@ import {
   resolveRegisteredProjectByName,
   selectRegisteredProjectByName,
 } from "../lib/projects-registry.ts";
+import {
+  parseTargetInspectEnvelope,
+  TARGET_GENERATION_PATTERN,
+} from "../lib/target-inspect.ts";
+import {
+  parseTaskInspectEnvelope,
+  parseTaskListEnvelope,
+} from "../lib/task-catalog.ts";
+import { TASK_ID_PATTERN } from "../lib/task-catalog-recipe.ts";
 import { readLinesFromStream } from "../ui/lines.ts";
 import type { McpCommandAdmission } from "./command-admission.ts";
 import { superviseMcpCommand } from "./command-lifetime.ts";
@@ -202,6 +211,8 @@ const COMPOSE_IDENTIFIER_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_.-]*$/;
 /** Same rule for branch names, which may also carry `/` (the CLI slugs it). */
 const BRANCH_IDENTIFIER_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_./-]*$/;
 const IDENTIFIER_MAX_LENGTH = 253;
+/** Longest path accepted by the target inspector tool. */
+const TARGET_PATH_MAX_LENGTH = 4096;
 
 const READ_ONLY_TOOL_ANNOTATIONS = Object.freeze({
   readOnlyHint: true,
@@ -1214,6 +1225,125 @@ function registerTools(opts: {
     },
   });
 
+  register({
+    name: "hack.project.target",
+    title: "Inspect project target",
+    description:
+      "Resolve the exact project, checkout, runtime instance, optional service, env overlay and config generation that a command would target (hack project target --json). Read-only: no engine probe, registry write or repository change. Selection is resolved by the CLI, so refusals match the CLI exactly; data is the validated CLI envelope. Names and fields are provisional.",
+    annotations: READ_ONLY_TOOL_ANNOTATIONS,
+    inputSchema: {
+      projectName: z
+        .string()
+        .max(IDENTIFIER_MAX_LENGTH)
+        .describe("Registered project name (exclusive with path)")
+        .optional(),
+      path: z
+        .string()
+        .max(TARGET_PATH_MAX_LENGTH)
+        .describe(
+          "Checkout path, absolute or relative (exclusive with projectName)"
+        )
+        .optional(),
+      ...branchInput,
+      service: composeIdentifierInput("Compose service to resolve").optional(),
+      env: composeIdentifierInput(
+        "Env overlay name; 'base' or 'default' selects base layers only"
+      ).optional(),
+      expectGeneration: z
+        .string()
+        .regex(TARGET_GENERATION_PATTERN)
+        .describe("Refuse unless the config generation still equals this id")
+        .optional(),
+    },
+    handler: async (input, extra) => {
+      const result = await runHackCommand({
+        context: opts.context,
+        signal: extra.signal,
+        tool: "hack.project.target",
+        args: buildTargetInspectArgs(input),
+      });
+
+      // `data` replaces stdout: it is the same envelope, re-validated
+      // against the provisional contract (null when it does not match).
+      return buildToolResult({
+        result: { ...result, stdout: "" },
+        data: parseTargetInspectEnvelope(parseJson(result.stdout)),
+      });
+    },
+  });
+
+  const taskTargetInput = {
+    projectName: z
+      .string()
+      .max(IDENTIFIER_MAX_LENGTH)
+      .describe("Registered project name (exclusive with path)")
+      .optional(),
+    path: z
+      .string()
+      .max(TARGET_PATH_MAX_LENGTH)
+      .describe(
+        "Checkout path, absolute or relative (exclusive with projectName)"
+      )
+      .optional(),
+    ...branchInput,
+    env: composeIdentifierInput(
+      "Env overlay name; 'base' or 'default' selects base layers only"
+    ).optional(),
+    expectGeneration: z
+      .string()
+      .regex(TARGET_GENERATION_PATTERN)
+      .describe("Refuse unless the config generation still equals this id")
+      .optional(),
+  };
+
+  register({
+    name: "hack.project.task.list",
+    title: "List reviewed tasks",
+    description:
+      "List the reviewed task recipes in the target project's .hack/tasks.json catalog, with closed refusals for stale, ambiguous, untrusted, out-of-scope or capability-missing recipes (hack project task list --json). Read-only: nothing is executed, there is no execution path, and results grant no authority. Refused recipes never echo their argv. Names and fields are provisional.",
+    annotations: READ_ONLY_TOOL_ANNOTATIONS,
+    inputSchema: taskTargetInput,
+    handler: async (input, extra) => {
+      const result = await runHackCommand({
+        context: opts.context,
+        signal: extra.signal,
+        tool: "hack.project.task.list",
+        args: buildTaskListArgs(input),
+      });
+      return buildToolResult({
+        result: { ...result, stdout: "" },
+        data: parseTaskListEnvelope(parseJson(result.stdout)),
+      });
+    },
+  });
+
+  register({
+    name: "hack.project.task.inspect",
+    title: "Inspect a reviewed task",
+    description:
+      "Show one reviewed task recipe: exact argv, Compose service, workdir, env scope, required capabilities, effects, prerequisites, checks, cleanup and pinned provenance (hack project task inspect --json). A refused recipe returns its closed refusal without echoing its argv. Read-only: nothing is executed and the result grants no authority. Names and fields are provisional.",
+    annotations: READ_ONLY_TOOL_ANNOTATIONS,
+    inputSchema: {
+      task: z
+        .string()
+        .regex(TASK_ID_PATTERN)
+        .describe("Task id from hack.project.task.list"),
+      ...taskTargetInput,
+    },
+    handler: async (input, extra) => {
+      const result = await runHackCommand({
+        context: opts.context,
+        signal: extra.signal,
+        tool: "hack.project.task.inspect",
+        args: buildTaskInspectArgs(input),
+      });
+      return buildToolResult({
+        result: { ...result, stdout: "" },
+        data: parseTaskInspectEnvelope(parseJson(result.stdout)),
+      });
+    },
+  });
+
   installTypedToolDispatch({ server: opts.server, tools });
 }
 
@@ -1544,6 +1674,81 @@ export function buildDoctorArgs(opts: {
     ...opts.projectArgs,
     ...buildBranchArgs({ branch: opts.branch }),
     "--json",
+  ];
+}
+
+/**
+ * `hack project target --json` argv. Project selection is passed through
+ * unresolved (both selectors included when both are given) so the CLI owns
+ * every resolution refusal, including `conflicting_selectors`.
+ */
+export function buildTargetInspectArgs(opts: {
+  readonly projectName?: string;
+  readonly path?: string;
+  readonly branch?: string;
+  readonly service?: string;
+  readonly env?: string;
+  readonly expectGeneration?: string;
+}): string[] {
+  return [
+    "project",
+    "target",
+    "--json",
+    ...(opts.projectName === undefined
+      ? []
+      : [`--project=${opts.projectName}`]),
+    ...(opts.path === undefined ? [] : [`--path=${opts.path}`]),
+    ...(opts.branch === undefined ? [] : [`--branch=${opts.branch}`]),
+    ...(opts.service === undefined ? [] : [`--service=${opts.service}`]),
+    ...(opts.env === undefined ? [] : [`--env=${opts.env}`]),
+    ...(opts.expectGeneration === undefined
+      ? []
+      : [`--expect-generation=${opts.expectGeneration}`]),
+  ];
+}
+
+type TaskTargetArgs = {
+  readonly projectName?: string;
+  readonly path?: string;
+  readonly branch?: string;
+  readonly env?: string;
+  readonly expectGeneration?: string;
+};
+
+function taskTargetArgs(opts: TaskTargetArgs): string[] {
+  return [
+    ...(opts.projectName === undefined
+      ? []
+      : [`--project=${opts.projectName}`]),
+    ...(opts.path === undefined ? [] : [`--path=${opts.path}`]),
+    ...(opts.branch === undefined ? [] : [`--branch=${opts.branch}`]),
+    ...(opts.env === undefined ? [] : [`--env=${opts.env}`]),
+    ...(opts.expectGeneration === undefined
+      ? []
+      : [`--expect-generation=${opts.expectGeneration}`]),
+  ];
+}
+
+/**
+ * `hack project task list --json` argv. Like the target tool, selection is
+ * passed through unresolved so the CLI owns every refusal.
+ */
+export function buildTaskListArgs(opts: TaskTargetArgs): string[] {
+  return ["project", "task", "list", "--json", ...taskTargetArgs(opts)];
+}
+
+/** `hack project task inspect --json` argv; the task id follows `--`. */
+export function buildTaskInspectArgs(
+  opts: TaskTargetArgs & { readonly task: string }
+): string[] {
+  return [
+    "project",
+    "task",
+    "inspect",
+    "--json",
+    ...taskTargetArgs(opts),
+    "--",
+    opts.task,
   ];
 }
 

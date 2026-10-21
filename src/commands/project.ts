@@ -151,10 +151,22 @@ import {
   HackCliError,
   okResult,
 } from "../lib/cli-result.ts";
-import { withComposeServiceEnvFingerprints } from "../lib/compose-env-fingerprint.ts";
-import { renderManagedComposeEnvOverride } from "../lib/compose-managed-env.ts";
 import {
+  removePlaintextComposeEnvOverride,
+  writeComposeEnvOverride,
+} from "../lib/compose-env-at-rest.ts";
+import { withComposeServiceEnvFingerprints } from "../lib/compose-env-fingerprint.ts";
+import { renderComposeEnvReferenceOverride } from "../lib/compose-managed-env.ts";
+import { resolveComposeProjectName } from "../lib/compose-project-name.ts";
+import {
+  type ComposeStartupBudgets,
+  type ComposeStartupFailure,
+  type ComposeStartupPhase,
+  composeStartupFailure,
+  DEFAULT_COMPOSE_IMAGE_TIMEOUT_MS,
   DEFAULT_COMPOSE_STARTUP_TIMEOUT_MS,
+  describeComposeStartupBudgets,
+  resolveComposeImageTimeoutMs,
   resolveComposeStartupTimeoutMs,
 } from "../lib/compose-startup-budget.ts";
 import {
@@ -214,6 +226,7 @@ import {
   createNativeEnvFingerprintEntry,
   createNativeEnvFingerprintSession,
 } from "../lib/native-env-fingerprint-state.ts";
+import { refuseUnsupportedNativeUpOptions } from "../lib/native-up-refusals.ts";
 import { readNodesRegistry } from "../lib/nodes-registry.ts";
 import {
   parseOpenHostPreference,
@@ -498,7 +511,7 @@ const runOptions = [
 ] as const;
 const runPositionals = [
   { name: "service", required: true },
-  { name: "cmd", required: false, multiple: true },
+  { name: "cmd", required: false, multiple: true, passthrough: true },
 ] as const;
 const optLoki = defineOption({
   name: "loki",
@@ -912,34 +925,57 @@ function startupSnapshotIsIncomplete(opts: {
 }
 
 function reportComposeStartupBudget(opts: {
-  readonly startupTimeoutMs: number;
+  readonly budgets: ComposeStartupBudgets;
   readonly detach: boolean;
   readonly repair?: boolean;
 }): void {
   if (opts.detach) {
     logger.step({
-      message: `Compose ${opts.repair ? "repair" : "startup"}: launch and dependency wait (budget ${opts.startupTimeoutMs} ms)`,
+      message: `Compose ${opts.repair ? "repair" : "startup"}: ${describeComposeStartupBudgets(opts.budgets)}`,
     });
   }
 }
 
-function composeStartupFailure(
-  code: number,
-  action: string,
-  startupTimeoutMs: number
-): {
-  readonly code: "E_COMPOSE_FAILED" | "E_STARTUP_TIMEOUT";
-  readonly message: string;
-} {
-  return code === 124
+/** Resolve both detached Compose budgets before any project side effect. */
+function resolveDetachedComposeBudgets(detach: boolean): ComposeStartupBudgets {
+  return detach
     ? {
-        code: "E_STARTUP_TIMEOUT",
-        message: `${action} exceeded its detached Compose startup budget of ${startupTimeoutMs} ms (HACK_COMPOSE_STARTUP_TIMEOUT_MS). The Compose process group was terminated; inspect hack ps and hack logs before retrying. Containers may still be running. This limit covers Compose launch and dependency waiting, not lifecycle hooks or application readiness.`,
+        imageTimeoutMs: resolveComposeImageTimeoutMs(),
+        startupTimeoutMs: resolveComposeStartupTimeoutMs(),
       }
     : {
-        code: "E_COMPOSE_FAILED",
-        message: `${action} failed (exit ${code})`,
+        imageTimeoutMs: DEFAULT_COMPOSE_IMAGE_TIMEOUT_MS,
+        startupTimeoutMs: DEFAULT_COMPOSE_STARTUP_TIMEOUT_MS,
       };
+}
+
+/**
+ * Record the last detached Compose phase the backend entered, so a failure is
+ * attributed to it. A backend that never reports a phase is treated as `start`.
+ */
+function trackComposeStartupPhase(): {
+  readonly onStartupPhase: (phase: ComposeStartupPhase) => void;
+  readonly phase: () => ComposeStartupPhase;
+} {
+  let current: ComposeStartupPhase = "start";
+  return {
+    onStartupPhase: (phase) => {
+      current = phase;
+    },
+    phase: () => current,
+  };
+}
+
+function composeStartupFailureDetail(opts: {
+  readonly failure: ComposeStartupFailure;
+  readonly exitCode: number;
+}): Record<string, unknown> {
+  return {
+    exitCode: opts.exitCode,
+    composePhase: opts.failure.phase,
+    budgetMs: opts.failure.budgetMs,
+    budgetEnv: opts.failure.budgetEnv,
+  };
 }
 
 /**
@@ -1006,43 +1042,6 @@ function emitRemoteLifecycleJson(opts: {
     }),
     exitCode: 0,
   });
-}
-
-async function resolveComposeProjectName(opts: {
-  readonly project: Awaited<ReturnType<typeof requireProjectContext>>;
-  readonly cfg?: Awaited<ReturnType<typeof readProjectConfig>>;
-}): Promise<string> {
-  const composeName = await readComposeProjectName(opts.project.composeFile);
-  if (composeName) {
-    return composeName;
-  }
-
-  const derived = defaultProjectSlugFromPath(opts.project.projectRoot);
-  const cfgName = (opts.cfg?.name ?? derived).trim();
-  return cfgName.length > 0 ? cfgName : derived;
-}
-
-async function readComposeProjectName(
-  composeFile: string
-): Promise<string | null> {
-  const text = await readTextFile(composeFile);
-  if (!text) {
-    return null;
-  }
-
-  let parsed: unknown;
-  try {
-    parsed = YAML.parse(text);
-  } catch {
-    return null;
-  }
-
-  if (!isRecord(parsed)) {
-    return null;
-  }
-  const name = getString(parsed, "name");
-  const trimmed = name?.trim() ?? "";
-  return trimmed.length > 0 ? trimmed : null;
 }
 
 async function buildBranchComposeOverride(opts: {
@@ -1201,6 +1200,33 @@ function isEnvVarRelevantToServices(opts: {
   return opts.varServices.some((svc) => serviceSet.has(svc));
 }
 
+/**
+ * Removes an env override that still holds literal values (written by an
+ * earlier Hack version). Best effort: a failure is reported without values and
+ * never fails the command; `hack doctor` reports what remains. A file that a
+ * saved adoption pins is kept (removing it would break the adoption).
+ */
+async function scrubPlaintextComposeEnvOverride(opts: {
+  readonly projectDir: string;
+}): Promise<void> {
+  try {
+    const result = await removePlaintextComposeEnvOverride({
+      projectDir: opts.projectDir,
+    });
+    if (result.adoptionBound) {
+      logger.warn({
+        message:
+          "Kept .hack/.internal/compose.env.override.yml, which holds env values from an earlier Hack version, because a saved 'hack config adopt' generation pins it (values omitted). Run 'hack doctor' for the supported way to drop them.",
+      });
+    }
+  } catch {
+    logger.warn({
+      message:
+        "Could not remove .hack/.internal/compose.env.override.yml, which holds env values from an earlier Hack version (values omitted). Run 'hack doctor --fix'.",
+    });
+  }
+}
+
 async function maybePromptLegacyProjectEnvMigration(opts: {
   readonly project: Awaited<ReturnType<typeof requireProjectContext>>;
   readonly projectName: string;
@@ -1298,12 +1324,17 @@ export async function resolveModernComposeEnvOverrides(opts: {
     });
   }
 
-  const text = renderManagedComposeEnvOverride({
+  // Values travel only through the Compose process env; the file on disk holds
+  // `${NAME}` references (see src/lib/compose-env-at-rest.ts).
+  const override = renderComposeEnvReferenceOverride({
     targetServices: opts.targetServices,
     globalEnv: modern.globalEnv,
     serviceEnv: modern.serviceEnv,
   });
-  if (text === null) {
+  if (override === null) {
+    await scrubPlaintextComposeEnvOverride({
+      projectDir: opts.project.projectDir,
+    });
     return {
       composeFiles: [],
       env: modern.globalEnv,
@@ -1314,13 +1345,13 @@ export async function resolveModernComposeEnvOverrides(opts: {
   }
 
   await ensureHackDirGitignore({ projectDir: opts.project.projectDir });
-  const overrideDir = resolve(opts.project.projectDir, ".internal");
-  await ensureDir(overrideDir);
-  const overridePath = resolve(overrideDir, "compose.env.override.yml");
-  await writeTextFileIfChanged(overridePath, text);
+  const overridePath = await writeComposeEnvOverride({
+    projectDir: opts.project.projectDir,
+    text: override.text,
+  });
   return {
     composeFiles: [overridePath],
-    env: modern.globalEnv,
+    env: { ...modern.globalEnv, ...override.env },
     lifecycleEnv,
     preflightEnvByService,
     effectiveEnvName: modern.selection.effectiveEnv,
@@ -1420,6 +1451,9 @@ async function resolveComposeEnvOverrides(opts: {
   );
 
   if (resolved.contract.vars.length === 0) {
+    await scrubPlaintextComposeEnvOverride({
+      projectDir: opts.project.projectDir,
+    });
     return {
       composeFiles: [],
       env: {},
@@ -1462,6 +1496,9 @@ async function resolveComposeEnvOverrides(opts: {
   }
 
   if (Object.keys(overrideServices).length === 0) {
+    await scrubPlaintextComposeEnvOverride({
+      projectDir: opts.project.projectDir,
+    });
     return {
       composeFiles: [],
       env: resolved.envForCompose,
@@ -1475,10 +1512,10 @@ async function resolveComposeEnvOverrides(opts: {
   const yaml = YAML.stringify(override, null, 2);
   const text = ensureTrailingNewline(cleanupYaml(yaml));
   await ensureHackDirGitignore({ projectDir: opts.project.projectDir });
-  const overrideDir = resolve(opts.project.projectDir, ".internal");
-  await ensureDir(overrideDir);
-  const overridePath = resolve(overrideDir, "compose.env.override.yml");
-  await writeTextFileIfChanged(overridePath, text);
+  const overridePath = await writeComposeEnvOverride({
+    projectDir: opts.project.projectDir,
+    text,
+  });
 
   return {
     composeFiles: [overridePath],
@@ -4920,16 +4957,13 @@ async function handleNativeUp({
     ReturnType<typeof resolveNativeRuntimeSelection>
   >;
 }): Promise<number> {
-  if (
-    args.options.detach ||
-    args.options.json ||
-    args.options.target ||
-    args.positionals.services?.length
-  ) {
-    throw new CliUsageError(
-      "Native up currently supports foreground whole-project startup only; detach, JSON, target and service selection are unavailable."
-    );
-  }
+  refuseUnsupportedNativeUpOptions({
+    restart,
+    detach: args.options.detach,
+    json: args.options.json,
+    target: args.options.target,
+    services: args.positionals.services,
+  });
   const project = await resolveProjectForArgs({
     ctx,
     pathOpt: args.options.path,
@@ -5005,9 +5039,10 @@ async function handleNativeUp({
       const cleanup = adoptNativeLifecycleCleanup(lifecycle);
       if (lifecycle.code !== 0) {
         await cleanup();
-        throw new Error(
-          "Native up lifecycle preparation failed; values omitted."
-        );
+        throw new HackCliError({
+          code: "E_LIFECYCLE_FAILED",
+          message: "Native up lifecycle preparation failed; values omitted.",
+        });
       }
       return {
         cleanup,
@@ -5021,9 +5056,11 @@ async function handleNativeUp({
             composeProject,
           });
           if (code !== 0) {
-            throw new Error(
-              "Native up lifecycle readiness hook failed; values omitted."
-            );
+            throw new HackCliError({
+              code: "E_LIFECYCLE_FAILED",
+              message:
+                "Native up lifecycle readiness hook failed; values omitted.",
+            });
           }
         },
       };
@@ -5037,9 +5074,11 @@ async function handleNativeUp({
     }
   }
   if (!startup.sharedSource) {
-    throw new CliUsageError(
-      "Native restart requires HACK_NATIVE_SHARED_SOURCE=1 before cleanup."
-    );
+    throw new HackCliError({
+      code: "E_PERMISSION",
+      message:
+        "Native restart requires HACK_NATIVE_SHARED_SOURCE=1 before cleanup; nothing was stopped. Set it to grant the project share and run the command again.",
+    });
   }
   try {
     return await restartNativeImageProject({
@@ -5169,9 +5208,11 @@ async function restartNativeImageProject({
         },
       });
       if (code !== 0) {
-        throw new Error(
-          "Native restart cleanup failed; retained data was not replaced."
-        );
+        throw new HackCliError({
+          code: "E_LIFECYCLE_FAILED",
+          message:
+            "Native restart cleanup failed; retained data was not replaced.",
+        });
       }
     },
     start: ({ run, onReady }) =>
@@ -5244,9 +5285,8 @@ async function runUpCommand({
   readonly startedAtMs?: number;
 }): Promise<number> {
   const detach = args.options.detach || json;
-  const startupTimeoutMs = detach
-    ? resolveComposeStartupTimeoutMs()
-    : DEFAULT_COMPOSE_STARTUP_TIMEOUT_MS;
+  const budgets = resolveDetachedComposeBudgets(detach);
+  const { startupTimeoutMs } = budgets;
   let project: Awaited<ReturnType<typeof requireProjectContext>>;
   try {
     project = await resolveProjectForArgs({
@@ -5497,7 +5537,7 @@ async function runUpCommand({
       ...(runtimeMetadataOverride ? [runtimeMetadataOverride] : []),
       ...envOverrides.composeFiles,
     ];
-    reportComposeStartupBudget({ startupTimeoutMs, detach });
+    reportComposeStartupBudget({ budgets, detach });
     const bootstrapCode = await bootstrapDependencyCaches({
       timeoutMs: detach ? startupTimeoutMs : undefined,
       services: cacheBootstrapServices,
@@ -5521,6 +5561,7 @@ async function runUpCommand({
       logger.error({ message: failure.message });
       return bootstrapCode;
     }
+    const upPhase = trackComposeStartupPhase();
     const upCode = await composeRuntimeBackend.up({
       dependencyProgress: resolveDependencyCacheProgress({
         cache: dependencyCache,
@@ -5528,6 +5569,8 @@ async function runUpCommand({
         baseProject: baseProjectName,
       }),
       startupTimeoutMs,
+      imageTimeoutMs: budgets.imageTimeoutMs,
+      onStartupPhase: upPhase.onStartupPhase,
       composeFiles: composeFilesWithEnv,
       composeProject: composeProjectName,
       profiles,
@@ -5544,28 +5587,23 @@ async function runUpCommand({
         projectDir: project.projectDir,
         composeProject: lifecycleComposeProject,
       });
+      const failure = composeStartupFailure({
+        code: upCode,
+        action: "docker compose up",
+        phase: upPhase.phase(),
+        budgets,
+      });
       if (json) {
-        const failure = composeStartupFailure(
-          upCode,
-          "docker compose up",
-          startupTimeoutMs
-        );
         return emitLifecycleResult({
           result: errorResult({
             code: failure.code,
             message: failure.message,
-            detail: { exitCode: upCode },
+            detail: composeStartupFailureDetail({ failure, exitCode: upCode }),
           }),
           exitCode: upCode,
         });
       }
-      logger.error({
-        message: composeStartupFailure(
-          upCode,
-          "docker compose up",
-          startupTimeoutMs
-        ).message,
-      });
+      logger.error({ message: failure.message });
       return upCode;
     }
 
@@ -5951,6 +5989,10 @@ async function runDownCommand({
       );
     }
   }
+  // An override written by an earlier Hack version can hold decrypted values.
+  // Down never reads it, so it is removed first: a failed lifecycle hook, a
+  // remote target or a failed Compose down cannot leave it behind.
+  await scrubPlaintextComposeEnvOverride({ projectDir: project.projectDir });
 
   const remoteDownCode = await runRemoteLifecycleCommand({
     project,
@@ -6250,7 +6292,7 @@ async function runRestartDownPhase(opts: {
 }
 
 async function runRestartUpPhase(opts: {
-  readonly startupTimeoutMs: number;
+  readonly budgets: ComposeStartupBudgets;
   readonly project: Awaited<ReturnType<typeof requireProjectContext>>;
   readonly cfg: Awaited<ReturnType<typeof readProjectConfig>>;
   readonly baseProjectName: string;
@@ -6265,6 +6307,7 @@ async function runRestartUpPhase(opts: {
 }): Promise<{
   readonly code: number;
   readonly phase: "compose" | "lifecycle";
+  readonly composePhase?: ComposeStartupPhase;
 }> {
   await maybeSyncOauthAliasesInCompose({ project: opts.project });
 
@@ -6380,16 +6423,19 @@ async function runRestartUpPhase(opts: {
       ...envOverrides.composeFiles,
     ];
     reportComposeStartupBudget({
-      startupTimeoutMs: opts.startupTimeoutMs,
+      budgets: opts.budgets,
       detach: opts.detach === true,
     });
+    const upPhase = trackComposeStartupPhase();
     const upCode = await composeRuntimeBackend.up({
       dependencyProgress: resolveDependencyCacheProgress({
         cache: dependencyCache,
         project: opts.composeProjectName,
         baseProject: opts.baseProjectName,
       }),
-      startupTimeoutMs: opts.startupTimeoutMs,
+      startupTimeoutMs: opts.budgets.startupTimeoutMs,
+      imageTimeoutMs: opts.budgets.imageTimeoutMs,
+      onStartupPhase: upPhase.onStartupPhase,
       composeFiles: composeFilesWithEnv,
       composeProject: opts.composeProjectName,
       profiles: opts.profiles,
@@ -6401,7 +6447,7 @@ async function runRestartUpPhase(opts: {
     });
     if (upCode !== 0) {
       reportComposeStartupBudget({
-        startupTimeoutMs: opts.startupTimeoutMs,
+        budgets: opts.budgets,
         detach: true,
         repair: true,
       });
@@ -6411,7 +6457,8 @@ async function runRestartUpPhase(opts: {
           project: opts.composeProjectName,
           baseProject: opts.baseProjectName,
         }),
-        startupTimeoutMs: opts.startupTimeoutMs,
+        startupTimeoutMs: opts.budgets.startupTimeoutMs,
+        imageTimeoutMs: opts.budgets.imageTimeoutMs,
         composeFiles: composeFilesWithEnv,
         composeProject: opts.composeProjectName,
         profiles: opts.profiles,
@@ -6437,7 +6484,7 @@ async function runRestartUpPhase(opts: {
           composeProject: opts.lifecycleComposeProject,
         });
       }
-      return { code: upCode, phase: "compose" };
+      return { code: upCode, phase: "compose", composePhase: upPhase.phase() };
     }
 
     const upAfter = await runLifecycleCommands({
@@ -6490,7 +6537,7 @@ type TargetedServiceRestartResult =
  * individual Compose service.
  */
 async function runTargetedServiceRestart(opts: {
-  readonly startupTimeoutMs: number;
+  readonly budgets: ComposeStartupBudgets;
   readonly project: Awaited<ReturnType<typeof requireProjectContext>>;
   readonly cfg: Awaited<ReturnType<typeof readProjectConfig>>;
   readonly baseProjectName: string;
@@ -6572,7 +6619,7 @@ async function runTargetedServiceRestart(opts: {
     ...envOverrides.composeFiles,
   ];
   const bootstrapCode = await bootstrapDependencyCaches({
-    timeoutMs: opts.startupTimeoutMs,
+    timeoutMs: opts.budgets.startupTimeoutMs,
     services: cacheBootstrapServices,
     composeFiles: composeFilesWithEnv,
     composeProject: opts.composeProjectName,
@@ -6583,7 +6630,7 @@ async function runTargetedServiceRestart(opts: {
   if (bootstrapCode !== 0) {
     const failure = dependencyCacheBootstrapFailure({
       code: bootstrapCode,
-      timeoutMs: opts.startupTimeoutMs,
+      timeoutMs: opts.budgets.startupTimeoutMs,
     });
     return {
       ok: false,
@@ -6595,16 +6642,19 @@ async function runTargetedServiceRestart(opts: {
     };
   }
   reportComposeStartupBudget({
-    startupTimeoutMs: opts.startupTimeoutMs,
+    budgets: opts.budgets,
     detach: true,
   });
+  const upPhase = trackComposeStartupPhase();
   const code = await composeRuntimeBackend.up({
     dependencyProgress: resolveDependencyCacheProgress({
       cache: dependencyCache,
       project: opts.composeProjectName,
       baseProject: opts.baseProjectName,
     }),
-    startupTimeoutMs: opts.startupTimeoutMs,
+    startupTimeoutMs: opts.budgets.startupTimeoutMs,
+    imageTimeoutMs: opts.budgets.imageTimeoutMs,
+    onStartupPhase: upPhase.onStartupPhase,
     composeFiles: composeFilesWithEnv,
     composeProject: opts.composeProjectName,
     profiles: opts.profiles,
@@ -6630,11 +6680,12 @@ async function runTargetedServiceRestart(opts: {
     outcome: code === 0 ? "applied" : "unknown",
   });
   if (code !== 0) {
-    const failure = composeStartupFailure(
+    const failure = composeStartupFailure({
       code,
-      "Targeted service restart",
-      opts.startupTimeoutMs
-    );
+      action: "Targeted service restart",
+      phase: upPhase.phase(),
+      budgets: opts.budgets,
+    });
     return {
       ok: false,
       code,
@@ -6800,7 +6851,7 @@ async function runRestartCommand({
   readonly json: boolean;
   readonly startedAtMs?: number;
 }): Promise<number> {
-  const startupTimeoutMs = resolveComposeStartupTimeoutMs();
+  const budgets = resolveDetachedComposeBudgets(true);
   const project = await resolveProjectForArgs({
     ctx,
     pathOpt: args.options.path,
@@ -6860,7 +6911,7 @@ async function runRestartCommand({
   });
   if (requestedServices.length > 0) {
     const result = await runTargetedServiceRestart({
-      startupTimeoutMs,
+      budgets,
       project,
       cfg,
       baseProjectName,
@@ -6960,7 +7011,7 @@ async function runRestartCommand({
   });
 
   const upOutcome = await runRestartUpPhase({
-    startupTimeoutMs,
+    budgets,
     project,
     cfg,
     baseProjectName,
@@ -6978,7 +7029,12 @@ async function runRestartCommand({
   if (upCode !== 0) {
     const failure =
       upOutcome.phase === "compose"
-        ? composeStartupFailure(upCode, "Restart up phase", startupTimeoutMs)
+        ? composeStartupFailure({
+            code: upCode,
+            action: "Restart up phase",
+            phase: upOutcome.composePhase ?? "start",
+            budgets,
+          })
         : {
             code: "E_LIFECYCLE_FAILED" as const,
             message: `Restart lifecycle hook failed (exit ${upCode})`,
@@ -6991,7 +7047,12 @@ async function runRestartCommand({
       result: errorResult({
         code: failure.code,
         message: failure.message,
-        detail: { exitCode: upCode, phase: "up" },
+        detail: {
+          ...("phase" in failure
+            ? composeStartupFailureDetail({ failure, exitCode: upCode })
+            : { exitCode: upCode }),
+          phase: "up",
+        },
       }),
       exitCode: upCode,
     });
@@ -7721,6 +7782,7 @@ async function handleExec({
     profiles,
     effectiveEnvName: envOverrides.effectiveEnvName,
     service,
+    env: envOverrides.env,
   });
   if (!execReady.ok) {
     throw new CliUsageError(execReady.message);
@@ -7816,6 +7878,12 @@ async function resolveExecTargetReady(opts: {
   readonly project: Awaited<ReturnType<typeof requireProjectContext>>;
   readonly effectiveEnvName: string | null;
   readonly service: string;
+  /**
+   * The Compose env, including the `HACK_ENV_*` values the env override
+   * references. `ps` does not use them, but without them Compose warns once
+   * per unset reference.
+   */
+  readonly env?: Record<string, string>;
 }): Promise<
   { readonly ok: true } | { readonly ok: false; readonly message: string }
 > {
@@ -7837,6 +7905,7 @@ async function resolveExecTargetReady(opts: {
     composeProject: opts.composeProject,
     profiles: opts.profiles,
     cwd: dirname(opts.project.composeFile),
+    env: opts.env,
   });
   if (psResult.exitCode !== 0) {
     return {

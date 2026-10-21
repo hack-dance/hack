@@ -23,6 +23,8 @@ hack project <subcommand> [options]
 | Command | Summary |
 | --- | --- |
 | `hack project owner` | Inspect project ownership |
+| `hack project target` | Inspect the exact project, checkout, instance and service a command would target (read-only, provisional) |
+| `hack project task` | Discover reviewed task recipes without running them (read-only, provisional) |
 
 ### Options
 
@@ -47,6 +49,56 @@ hack project owner <subcommand> [options]
 | Command | Summary |
 | --- | --- |
 | `hack project owner show` | Show the local ownership metadata for the current project |
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
+| `--help, -h` | Show help |
+| `--version, -v` | Show version |
+
+## `hack project target`
+
+Inspect the exact project, checkout, instance and service a command would target (read-only, provisional)
+
+### Usage
+
+```bash
+hack project target [options]
+```
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--path, -p <dir>` | Run a project command against a repo path (overrides cwd search) |
+| `--project <name>` | Target a registered project by name (from ~/.hack/projects.json) |
+| `--branch <name>` | Run against a branch-specific instance (compose name + hostnames) |
+| `--service <service>` | Also resolve one Compose service of the target |
+| `--env <name|base|default>` | Select an env overlay by name; omit for the configured default overlay, or use 'base' or 'default' for base layers only |
+| `--expect-generation <id>` | Refuse unless the project's config generation still equals this id |
+| `--json` | Output JSON (machine-readable) |
+| `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
+| `--help, -h` | Show help |
+| `--version, -v` | Show version |
+
+## `hack project task`
+
+Discover reviewed task recipes without running them (read-only, provisional)
+
+### Usage
+
+```bash
+hack project task <subcommand> [options]
+```
+
+### Subcommands
+
+| Command | Summary |
+| --- | --- |
+| `hack project task list` | List reviewed task recipes and refusals for the target (read-only, provisional; runs nothing) |
+| `hack project task inspect <task>` | Show one reviewed task recipe: argv, service, env scope, effects and pins (read-only, provisional; runs nothing) |
 
 ### Options
 
@@ -234,8 +286,10 @@ Run a one-off command in a service container (docker compose run --rm)
 ### Usage
 
 ```bash
-hack run <service> [cmd...] [options]
+hack run [options] <service> [cmd...]
 ```
+
+Everything from `<cmd>` on is passed to the command unchanged, including flags such as `--version` or `--help`. Put Hack options before it; a leading `--` is optional.
 
 ### Arguments
 
@@ -266,8 +320,10 @@ Run a command in an already-running service container (docker compose exec)
 ### Usage
 
 ```bash
-hack exec <service> [cmd...] [options]
+hack exec [options] <service> [cmd...]
 ```
+
+Everything from `<cmd>` on is passed to the command unchanged, including flags such as `--version` or `--help`. Put Hack options before it; a leading `--` is optional.
 
 ### Arguments
 
@@ -815,8 +871,10 @@ Send a command to a running workspace
 ### Usage
 
 ```bash
-hack session exec <workspace> <command> [options]
+hack session exec [options] <workspace> <command>
 ```
+
+`<command>` is one argument: quote a command that has its own arguments or flags, as in `"npm --version"`. Put Hack options before it; a leading `--` is optional.
 
 Queue a command in the workspace without opening a new interactive attach flow. Tmux sends it to the active pane; zellij opens a new pane for the command. This is useful for long-running agents, background checks, or remote follow-up work.
 
@@ -1802,6 +1860,7 @@ hack setup <subcommand> [options]
 | `hack setup codex` | Install Codex skill for hack CLI usage |
 | `hack setup agents` | Install AGENTS.md / CLAUDE.md snippets for hack CLI usage |
 | `hack setup sync` | Refresh installed Hack-owned agent integrations |
+| `hack setup migrate` | Preview, apply or roll back moving standalone agent files to the hack plugin |
 | `hack setup mcp` | Install MCP configs for hack CLI usage (no-shell only) |
 
 ### Options
@@ -1942,6 +2001,34 @@ hack setup sync [options]
 | `--install-missing` | Also create missing integrations in the selected scope (default: refresh only installed Hack-owned files) |
 | `--check` | Check whether integration is installed |
 | `--remove` | Remove integration files/config |
+| `--json` | Output JSON (machine-readable) |
+| `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
+| `--help, -h` | Show help |
+| `--version, -v` | Show version |
+
+## `hack setup migrate`
+
+Preview, apply or roll back moving standalone agent files to the hack plugin
+
+### Usage
+
+```bash
+hack setup migrate [options]
+```
+
+### Options
+
+| Option | Description |
+| --- | --- |
+| `--path, -p <dir>` | Run a project command against a repo path (overrides cwd search) |
+| `--global` | Migrate user-scope files under HOME instead of the project |
+| `--all-scopes` | Migrate both project and user-scope files |
+| `--claude` | Limit to Claude Code files (default: all clients) |
+| `--codex` | Limit to Codex files (default: all clients) |
+| `--cursor` | Limit to Cursor files (default: all clients) |
+| `--skip-plugin-check <clients>` | Treat the plugin as verified for these comma-separated clients (claude, codex, cursor, or all) after checking it loads yourself |
+| `--apply` | Remove the previewed Hack-owned standalone files after backing them up (default: read-only preview) |
+| `--rollback-manifest <manifest>` | Restore the exact files recorded in a migration backup manifest |
 | `--json` | Output JSON (machine-readable) |
 | `--no-interactive` | Never prompt: apply documented defaults or fail with E_INTERACTIVE_REQUIRED (also via HACK_NO_INTERACTIVE=1) |
 | `--help, -h` | Show help |
@@ -2423,8 +2510,10 @@ Run a host command with project env injected
 ### Usage
 
 ```bash
-hack env exec [command...] [options]
+hack env exec [options] [command...]
 ```
+
+Everything from `<command>` on is passed to the command unchanged, including flags such as `--version` or `--help`. Put Hack options before it; a leading `--` is optional.
 
 Inject the selected Hack env overlay directly into a one-off host command without materializing .hack/.env. To inspect a value, prefer `printenv KEY` or `sh -lc 'printf "%s\n" "$KEY"'`; `echo $KEY` expands in your current shell before Hack injects env.
 
@@ -2585,8 +2674,10 @@ Run a host command with project env injected
 ### Usage
 
 ```bash
-hack host exec [command...] [options]
+hack host exec [options] [command...]
 ```
+
+Everything from `<command>` on is passed to the command unchanged, including flags such as `--version` or `--help`. Put Hack options before it; a leading `--` is optional.
 
 Run a one-off command on the host with the selected Hack env overlay injected. Use --scope when you want service-scoped values without running inside that service container. To inspect a value, prefer `printenv KEY` or `sh -lc 'printf "%s\n" "$KEY"'`; `echo $KEY` expands in your current shell before Hack injects env.
 
@@ -2647,8 +2738,10 @@ Run extension commands
 ### Usage
 
 ```bash
-hack x [args...] [options]
+hack x [options] [args...]
 ```
+
+Everything from `<args>` on is passed to the command unchanged, including flags such as `--version` or `--help`. Put Hack options before it; a leading `--` is optional.
 
 Usage:
   hack x list

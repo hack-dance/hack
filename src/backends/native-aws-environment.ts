@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { HackCliError } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
 import type { NativeProjectInput } from "./native-project-input.ts";
 
@@ -17,9 +18,11 @@ const CREDENTIAL_KEYS = [
 ];
 
 function refused(): Error {
-  return new Error(
-    "Native AWS adaptation refused: verify the explicit profile, supported read-only AWS mount and unexpired exported credentials; values omitted."
-  );
+  return new HackCliError({
+    code: "E_CONFIG_INVALID",
+    message:
+      "Native AWS adaptation refused: verify the explicit profile, supported read-only AWS mount and unexpired exported credentials; values omitted.",
+  });
 }
 
 export type NativeAwsExportSource = (opts: {

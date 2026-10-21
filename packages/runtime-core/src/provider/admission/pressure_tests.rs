@@ -23,6 +23,7 @@ fn observation(profile: Profile, level: Option<u32>, headroom: u64) -> Admission
         swapouts: Some(42),
         admitted: true,
         reasons: Vec::new(),
+        retained_reserve_refusal: None,
     }
 }
 

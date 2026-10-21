@@ -1,10 +1,14 @@
+import { HackCliError } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
 
 const SEGMENT = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
-function refused(): Error {
-  return new Error(
-    "Native workspace cache layout conflicts with declared mounts or is invalid; values omitted."
-  );
+/** The private adaptation's cache layout did not validate: a closed `E_CONFIG_INVALID` refusal. */
+function refused(): HackCliError {
+  return new HackCliError({
+    code: "E_CONFIG_INVALID",
+    message:
+      "Native workspace cache layout conflicts with declared mounts or is invalid; values omitted.",
+  });
 }
 function mount(value: unknown): {
   source: string;

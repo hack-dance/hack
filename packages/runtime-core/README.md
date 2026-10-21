@@ -264,7 +264,11 @@ ordinary frontend selection yet and does not implement reactive health or hooks.
 The optional feature exposes this bounded consumer through a distinct public CLI:
 `graph native plan --source-file FILE --json`, then
 `graph native run --source-file FILE --expect-review SHA --json`.
-`graph native inspect|cleanup --run-id RUN --json` use its versioned native journal. These commands
+`graph native inspect|cleanup --run-id RUN --json` use its versioned native journal. On macOS,
+`inspect` refuses `native_graph_unreserved` before guest access only when the run's journal
+directory is exactly absent under private state directories and no foreground owner is
+published for the run. It is a point-in-time observation, not proof that no consumer can
+still start. A partial, public or present journal keeps the ordinary receipt refusal. These commands
 are explicit bounded prerequisites, not full ordinary project parity. Their project
 network does not publish ports or grant host-service access. Normal native `hack up`
 continues to require the full source/storage/routing/host and foreground-owner contract.
@@ -939,6 +943,35 @@ Graph cleanup uses that same history capacity, counting active and archived
 records together, so repeated restores cannot exceed a smaller cleanup-only
 ceiling after allocation succeeds. Matching ownership, container bindings and
 unambiguous records are still required.
+Retired graph history is compacted under the engine mutation lease where no retained
+effect identity still binds the run's environment inventory: right after an ordinary
+(non-relay) `graph cleanup` commits, and in every graph restore (foreground
+`owner-restore` redelivery and fresh-owner `serve-restore`) after all prior slots are
+re-retired and the acknowledged stopped receipt is superseded on disk, before the new
+generation allocates. Enrolled relay cleanup (`graph cleanup` of a relay-owned graph,
+or owner shutdown) does not compact, because its acknowledged effect is re-verified
+against the inventory; its last generation stays active until the next restore or
+archive. Each compacted record must match a receipt container that is absent and a
+guest slot that is absent, or nothing is written. Exact intent digests move into one
+value-free per-run tombstone in `run/environment-lease-tombstones`, bound to the VM
+incarnation, and only then are the active records unlinked. Prior boots fold into one
+sealed summary each; the current boot keeps per-slot reservations (at most 16384, about
+1170 generations of a 14-service graph in one boot). A retired slot or any slot of a
+sealed boot is never recorded, delivered, retired as live or counted again. Restore and
+cleanup therefore scan only the active generation, and repeated restores no longer
+consume the 4096 active-record budget; tombstone reads still grow with the current
+boot's per-slot reservations until the next boot seals them.
+Pending, live, changed, misbound or foreign-incarnation records refuse compaction,
+and other runs' records are untouched. A refusal never fails or reverts the cleanup
+or restore that triggered it: the records stay active as exact evidence and the next
+cleanup, restore or archive retries; a run that keeps refusing eventually meets the
+active-record budget's `environment_recovery` admission refusal. An interruption is
+resumed by the next compaction or by archive; exact residue reads as retired, changed
+residue refuses. Tombstones are retained permanently as slot-ID reservations, like
+standalone retention exports: archive and prune do not remove them, so the directory
+holds one file per environment-attached run: about 160 bytes per current-boot
+retired slot plus one summary per sealed boot, capped at 4 MiB and refused, never
+truncated, beyond that.
 No retained evidence is automatically deleted to admit new work. This environment
 budget does not increase the runtime's separate container, CPU or memory limits and
 does not establish 32-branch qualification.
@@ -1484,8 +1517,85 @@ host reserve, with memory-pressure, memory-headroom and thermal checks unchanged
 requires matching profile, creation receipt, native process/PID-file identity,
 machine name and both disks' current identities and declared sizes. Every sample
 and the acquired startup lease recheck the selected owner; changed ownership
-refuses, and a reserve-qualified request cannot enter VM create or boot. Stopped,
-missing or unproved capacity retains fresh-allocation requirements or refuses.
+refuses, and a reserve-qualified request cannot enter VM create or boot. Missing or
+unproved capacity retains fresh-allocation requirements or refuses.
+
+Restarting an exactly clean stopped Development pool also requires only the 16 GiB
+host reserve (`verified-stopped-owned-pool-host-reserve`), because it reuses its
+retained disks instead of allocating new ones. Clean means phase `stopped` plus the
+clean-stop marker that only a completed `down` records, in the same receipt write as
+that phase, after the guest acknowledged flush and shutdown of a quiesced engine and the
+provider's absence was proven. The marker names the stopped boot's guest boot and engine
+identity and must match both the receipt and the quiescence receipt. Every other phase
+write and every new boot clear it, so an interrupted, uncertain (`stop_uncertain`),
+recovered-unclean, before-engine or failed-boot stop never qualifies, even after a start
+refused before boot rewrites the phase to `stopped`; a start refused before boot after a
+clean `down` keeps it clean. Pools stopped before this marker existed qualify after their
+next clean `down`. Clean also requires a creation receipt, rootfs pin, both disk
+identities and declared sizes, the recorded executable and user, a dead recorded
+provider and no pending owner update; these receipt checks are read-only, take no
+provider lock and run around every sample, including `runtime probe`.
+
+The reserve is used only when a start needs it. Once the startup lease is held, a
+start whose every qualifying sample, including the lease recheck, also fits the 58 GiB
+fresh budget drops the stopped selection: it records those samples on the fresh basis
+and continues exactly as a start without a selection, with no release checks. Only a
+start whose free disk lies between the host reserve and the fresh budget keeps the
+selection. `runtime probe` takes no lease and settles no basis, so it reports the reserve
+basis for a qualifying stopped pool whatever its headroom; the start's `admission.json`
+records the basis that start used. Under the lease, before any restart effect and again immediately before
+`machine start`, its release checks also require a free VM lock, no open disk handle
+(`lsof`, bounded at 30 seconds because it scans every process and is slow on a loaded
+host), no owned listener and an unchanged audited provider configuration. The short-HOME
+alias is checked on every owner load, and the rootfs content against its pin before
+boot.
+
+Each refusal maps to a closed code: `retained_reserve_foreign_owner`,
+`retained_reserve_active_owner`, `retained_reserve_dirty_owner` or
+`retained_reserve_stale_owner`. A created stopped pool that fails the receipt checks
+keeps the 58 GiB fresh-allocation budget, and the admission report carries
+`retained_reserve_refusal` with that code; the reserve is never relaxed. A selected pool
+that fails a later check refuses the start with the code. Because only a start that
+needs the reserve runs the release checks, a release-check refusal, including an `lsof`
+scan that times out, never refuses a start whose samples all fit the fresh budget. `machine create` requires an
+authority only a start without a reserve selection obtains, and `machine start` requires
+one issued only by the pre-boot admission on the qualifying basis followed by the final
+leased recheck. The start sequence itself is typed: the check before any restart effect
+needs the basis that only the leased settle step returns, and both `machine create` and
+the pre-boot admission need the authority that only that check returns, so a start that
+skips or reorders a step does not compile. Pressure, thermal, swapout and
+memory-headroom checks are unchanged.
+
+### Disposable cache quarantine
+
+A volume can declare regenerable directories with `x-hack-disposable-cache` (at
+most eight distinct, non-nested, volume-relative paths). The receipt records them
+at admission. For a stopped retained graph, `graph inspect-cache-quarantine
+--run-id RUN --volume VOLUME --path PATH --json` measures one declared directory
+read-only and returns a `selection_sha256`. That digest binds the receipt bytes,
+volume incarnation, root and target directory identities, and measured bytes.
+`graph quarantine-cache ... --expect-selection SHA --json` renames exactly that
+directory into `/var/lib/docker/volumes/<name>/hack-quarantine/<id>`, under the
+cleanup-only lease and a lock on the volume root. It requires owned volume labels,
+no container consumers (stopped containers count), and source and destination on
+the same mount ID, so `mv` cannot fall back to copy-then-unlink. Nothing is
+deleted. Results report `reclaimed_bytes: 0`, and the bytes stay until the volume
+itself is removed. Docker disk usage, and therefore `graph storage-inventory`,
+does not count them. Inspect reports the recorded `retained_quarantine_bytes`
+instead.
+
+A private record in `run/cache-quarantine/` is written before the guest effect
+(`pending`) and settled after the synchronized rename (`quarantined`). When the
+receipt and volume are unchanged, repeating `quarantine-cache` resumes it.
+Otherwise inspect reports `resolve_required`, and `graph resolve-cache-quarantine
+... --expect-selection SHA --json` settles the record without moving bytes. The
+record becomes `quarantined` when the recorded inode is at the destination, and
+`abandoned` when the destination is absent. Records are retained, with at most 16
+per run-scoped volume and 1024 in total. Unit tests drive this inspect, quarantine,
+resume and resolve flow through a synthetic provider that runs the production
+guest scripts on a fixture volume. The ignored native fixture
+`synthetic_bad_cache_is_quarantined_and_a_retaining_restore_keeps_application_data`
+covers the real engine, guest and restore path.
 
 ### Native persistent-data identity codec
 

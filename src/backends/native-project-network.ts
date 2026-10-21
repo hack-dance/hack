@@ -1,10 +1,13 @@
 import { isIP } from "node:net";
+import { HackCliError } from "../lib/cli-result.ts";
 
 const LABEL = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/;
 function refused(): Error {
-  return new Error(
-    "HACK_NATIVE_ALLOW_HOSTS requires at most 32 unique canonical public DNS names; wildcards, IP addresses, local names and empty entries are refused. Values omitted."
-  );
+  return new HackCliError({
+    code: "E_CONFIG_INVALID",
+    message:
+      "HACK_NATIVE_ALLOW_HOSTS requires at most 32 unique canonical public DNS names; wildcards, IP addresses, local names and empty entries are refused. Values omitted.",
+  });
 }
 
 /** Match native NetworkIntent admission; never resolve or widen the selection here. */

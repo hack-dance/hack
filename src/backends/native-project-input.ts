@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { constants } from "node:fs";
 import { lstat, open } from "node:fs/promises";
 import { join } from "node:path";
+import { HackCliError } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
 import {
   resolveProjectEnvConfig,
@@ -26,9 +27,11 @@ export type NativeProjectInput = {
 };
 
 function refused(): Error {
-  return new Error(
-    "Native project input refused: unsupported or invalid Compose/environment configuration; values omitted"
-  );
+  return new HackCliError({
+    code: "E_NATIVE_PROJECT_UNSUPPORTED",
+    message:
+      "Native project input refused: unsupported or invalid Compose/environment configuration; values omitted",
+  });
 }
 
 async function readCompose(path: string): Promise<Buffer> {

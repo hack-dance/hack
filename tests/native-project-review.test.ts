@@ -11,6 +11,10 @@ import {
   withNativeProjectReview,
 } from "../src/backends/native-project-review.ts";
 import type { invokeNativeRuntime } from "../src/backends/native-runtime-client.ts";
+import {
+  expectClosedRefusal,
+  expectCodedRefusal,
+} from "./helpers/closed-refusal.ts";
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -79,15 +83,47 @@ test("an original edit after env preparation stops before the callback", async (
   const options = await fixture();
   await Bun.write(options.composeFile, '{"services":{"different":{}}}');
   let ran = false;
-  await expect(
+  await expectClosedRefusal(
     withNativeProjectReview({
       ...options,
       run: async () => {
         ran = true;
       },
-    })
-  ).rejects.toThrow("input changed");
+    }),
+    "input changed"
+  );
   expect(ran).toBe(false);
+});
+
+test("a Compose file outside the project and an invalid reviewed identity refuse without a stack", async () => {
+  const options = await fixture();
+  await expectCodedRefusal(
+    selectNativeProjectReviewIdentity({
+      ...options,
+      composeFile: join(dirname(options.projectRoot), "elsewhere.yml"),
+    }),
+    "E_NATIVE_PROJECT_UNSUPPORTED",
+    "Native project review requires an owned original Compose file."
+  );
+  const invoke: typeof invokeNativeRuntime = async (request) =>
+    request.args.includes("--normalized-file")
+      ? { plan_id: "not-a-digest", plan: { namespace: "a".repeat(64) } }
+      : {
+          plan: {
+            namespace: "a".repeat(64),
+            compose_sha256: options.input.originalSha256,
+          },
+        };
+  await expectClosedRefusal(
+    withNativeProjectReview({
+      ...options,
+      invoke,
+      run: async () => {
+        throw new Error("must not run");
+      },
+    }),
+    "Native project returned an invalid reviewed identity."
+  );
 });
 
 test("failed admission removes the temporary public input", async () => {
@@ -243,7 +279,7 @@ test("legacy review rejects changed native selection before unbranched review", 
   for (const key of ["run", "owner", "namespace", "plan", "generation"]) {
     const { options, calls, selected, invoke } = await legacyFixture();
     selected[key] = "invalid";
-    await expect(
+    await expectClosedRefusal(
       withNativeProjectReview({
         ...options,
         branch: "feature-a",
@@ -252,8 +288,9 @@ test("legacy review rejects changed native selection before unbranched review", 
         run: async () => {
           throw new Error("unexpected callback");
         },
-      })
-    ).rejects.toThrow("restore selection changed");
+      }),
+      "restore selection changed"
+    );
     expect(calls).toHaveLength(2);
   }
 });
@@ -267,7 +304,7 @@ test("legacy review rejects a different project, namespace or edited original wi
       }
       return await invoke(request);
     };
-    await expect(
+    await expectClosedRefusal(
       withNativeProjectReview({
         ...options,
         branch: "feature-a",
@@ -276,8 +313,9 @@ test("legacy review rejects a different project, namespace or edited original wi
         run: async () => {
           throw new Error("unexpected callback");
         },
-      })
-    ).rejects.toThrow("retained project review changed");
+      }),
+      "retained project review changed"
+    );
     expect(calls).toHaveLength(3);
   }
 });
@@ -285,7 +323,7 @@ test("legacy review rejects a different project, namespace or edited original wi
 test("legacy review cleans temporary input and refuses selection drift after review", async () => {
   const { options, selected, invoke } = await legacyFixture();
   let temporary = "";
-  await expect(
+  await expectClosedRefusal(
     withNativeProjectReview({
       ...options,
       branch: "feature-a",
@@ -305,8 +343,9 @@ test("legacy review cleans temporary input and refuses selection drift after rev
           invoke,
         });
       },
-    })
-  ).rejects.toThrow("restore selection changed");
+    }),
+    "restore selection changed"
+  );
   expect(await Bun.file(temporary).exists()).toBe(false);
 });
 
@@ -363,7 +402,7 @@ test("early identity proof is rechecked after route preparation before normalize
     });
     selected[key] = "1".repeat(key === "generation" ? 64 : 32);
     calls.splice(0);
-    await expect(
+    await expectClosedRefusal(
       withNativeProjectReview({
         ...options,
         branch: "feature-a",
@@ -373,8 +412,9 @@ test("early identity proof is rechecked after route preparation before normalize
         run: async () => {
           throw new Error("unexpected admission");
         },
-      })
-    ).rejects.toThrow("selection changed");
+      }),
+      "selection changed"
+    );
     expect(calls.some((args) => args.includes("--normalized-file"))).toBe(
       false
     );
@@ -456,27 +496,30 @@ test("active proof refuses every tuple drift after compatibility and unavailable
       key === "boot"
         ? "another-boot"
         : "2".repeat(key === "run" || key === "owner" ? 32 : 64);
-    await expect(
+    await expectClosedRefusal(
       verifyNativeActiveReview({
         ...options,
         retained,
         proof: identity.activeProof,
         invoke,
-      })
-    ).rejects.toThrow("changed");
+      }),
+      "changed"
+    );
   }
   for (const services of [{}, { web: { active: false } }]) {
     const { options, calls, unbranched, invoke } = await legacyFixture();
     unbranched.services = services;
-    await expect(
+    await expectCodedRefusal(
       selectNativeProjectReviewIdentity({
         ...options,
         branch: "feature-a",
         retained,
         retainedMode: "active",
         invoke,
-      })
-    ).rejects.toThrow("no supported service authority");
+      }),
+      "E_NATIVE_PROJECT_UNSUPPORTED",
+      "no supported service authority"
+    );
     expect(calls).toHaveLength(1);
   }
 });

@@ -63,15 +63,24 @@ import {
 } from "./native-project-process.ts";
 import {
   invokeNativeRuntime,
+  NATIVE_GRAPH_UNRESERVED,
   NativeRuntimeRequestError,
   type NativeRuntimeSelection,
 } from "./native-runtime-client.ts";
+import { refuseStoppedNativeRuntime } from "./native-runtime-preflight.ts";
 
 const RUN = /^[a-f0-9]{32}$/;
 const CODE = /^[a-z][a-z0-9_]{0,63}$/;
 const PRIVATE_LIMIT = 256 * 1024;
+/** Upper bound of the read-only runtime check before the startup intent. */
+const RUNTIME_STATUS_TIMEOUT_MS = 5000;
 type Inputs = Awaited<ReturnType<typeof acquireNativeExecutionInputs>>;
-type Outcome = "not-started" | "removed" | "retained";
+/**
+ * `unreserved`: the native consumer settled after refusing before it reserved
+ * any runtime journal or published a receipt, and the exact startup intent and
+ * source were retired. Nothing is retained.
+ */
+type Outcome = "not-started" | "removed" | "retained" | "unreserved";
 const STAGES = [
   "selection",
   "admission",
@@ -113,6 +122,11 @@ export class NativeAuthoredProjectStartError extends Error {
   readonly outcome: Outcome;
   readonly canceled: boolean;
   readonly nativeCode?: string;
+  /**
+   * Bounded cause allowed with `nativeCode`, for example `runtime_not_running`
+   * wrapped by authored foreground control in `native_graph_foreground`.
+   */
+  readonly nativeCauseCode?: string;
   readonly stage: Stage;
   readonly compilerCode?: string;
 
@@ -120,6 +134,7 @@ export class NativeAuthoredProjectStartError extends Error {
     readonly outcome: Outcome;
     readonly canceled: boolean;
     readonly nativeCode?: string;
+    readonly nativeCauseCode?: string;
     readonly stage?: Stage;
     readonly compilerCode?: string;
   }) {
@@ -137,6 +152,8 @@ export class NativeAuthoredProjectStartError extends Error {
     const detail = {
       "not-started": "no native consumer was started",
       removed: "exact native cleanup was confirmed",
+      unreserved:
+        "native runtime state was never reserved; the startup intent was retired and nothing is retained",
       retained:
         "startup evidence is retained; inspect owned state before retrying",
     }[opts.outcome];
@@ -146,6 +163,10 @@ export class NativeAuthoredProjectStartError extends Error {
     this.outcome = opts.outcome;
     this.canceled = opts.canceled;
     this.nativeCode = nativeCode;
+    this.nativeCauseCode =
+      nativeCode && opts.nativeCauseCode && CODE.test(opts.nativeCauseCode)
+        ? opts.nativeCauseCode
+        : undefined;
     this.stage = stage;
     this.compilerCode = compilerCode;
   }
@@ -428,6 +449,42 @@ async function retireAttempt(opts: {
   await attempt.source.remove();
 }
 
+/**
+ * HACK-1272: a consumer that refused before journal reservation (for example
+ * `native_graph_admission` for a non-content-ID image) leaves no receipt, so
+ * Removed retirement can never succeed. Retire the exact start intent and
+ * source only when the settled consumer's failure was never observed as a
+ * receipt and fresh inspection names the run `native_graph_unreserved` (an
+ * absent journal and no published foreground owner). Every other inspection
+ * refusal keeps all evidence.
+ */
+async function retireUnreservedAttempt(opts: {
+  readonly admission: NativeAuthoredProjectAdmission;
+  readonly attempt: Attempt;
+  readonly failure: unknown;
+  readonly refusal: unknown;
+}): Promise<boolean> {
+  if (
+    opts.failure === undefined ||
+    opts.attempt.observed !== undefined ||
+    opts.attempt.ready !== undefined ||
+    !(
+      opts.refusal instanceof NativeRuntimeRequestError &&
+      opts.refusal.nativeCode === NATIVE_GRAPH_UNRESERVED
+    )
+  ) {
+    return false;
+  }
+  // The exact source this attempt wrote is still unchanged; retirement removes
+  // it before the start intent so an interruption keeps the intent blocking.
+  await opts.attempt.source.assertFresh();
+  await opts.admission.retireUnreserved({
+    expectedStart: opts.attempt.start,
+    refusal: opts.refusal,
+  });
+  return true;
+}
+
 const HOOK_STAGES: Record<NativeHookPhase, Stage> = {
   "up.before": "hook-up-before",
   "up.after": "hook-up-after",
@@ -534,8 +591,11 @@ async function runPreparedLifecycle(ctx: {
   }) => void;
   readonly published: () => void;
   readonly removed: () => void;
+  readonly unreserved: () => void;
   readonly hookRetired: () => void;
-  readonly nativeCode: (code: string | undefined) => void;
+  readonly nativeCode: (
+    diagnostic: Pick<NativeExitDiagnostic, "nativeCode" | "nativeCauseCode">
+  ) => void;
 }): Promise<number> {
   const review = ctx.review;
   let downBefore = false;
@@ -597,7 +657,7 @@ async function runPreparedLifecycle(ctx: {
         ctx.completeStop(false);
       },
       onExitDiagnostic: (diagnostic) => {
-        ctx.nativeCode(diagnostic.nativeCode);
+        ctx.nativeCode(diagnostic);
         const observed: unknown = ctx.options.onExitDiagnostic?.(diagnostic);
         void Promise.resolve(observed).catch(() => undefined);
       },
@@ -677,7 +737,25 @@ async function runPreparedLifecycle(ctx: {
     await ctx.hookOwner.retire();
     ctx.hookRetired();
   }
-  await retireAttempt({ ...retirement, beforeRetire: liveStop?.retire });
+  try {
+    await retireAttempt({ ...retirement, beforeRetire: liveStop?.retire });
+  } catch (refusal) {
+    if (
+      ctx.hookOwner !== undefined ||
+      liveStop !== undefined ||
+      !(await retireUnreservedAttempt({
+        admission: ctx.admission,
+        attempt: ctx.admitted,
+        failure,
+        refusal,
+      }))
+    ) {
+      throw refusal;
+    }
+    ctx.unreserved();
+    ctx.completeStop(false);
+    throw failure;
+  }
   ctx.removed();
   ctx.completeStop(failure === undefined);
   if (failure) {
@@ -695,10 +773,12 @@ async function failedAdmission(opts: {
   readonly attempt: Attempt | undefined;
   readonly hookOwner: NativeAuthoredHookOwner | undefined;
   readonly nativeCode: string | undefined;
+  readonly nativeCauseCode: string | undefined;
 }): Promise<NativeAuthoredProjectStartError> {
   const { error, source, attempt, hookOwner } = opts;
   let outcome = await removeUnstartedSource(source, attempt, opts.outcome);
   let nativeCode = opts.nativeCode;
+  let nativeCauseCode = opts.nativeCauseCode;
   if (hookOwner && !attempt) {
     try {
       await hookOwner.retire();
@@ -709,7 +789,13 @@ async function failedAdmission(opts: {
     outcome = "retained";
   }
   if (error instanceof NativeRuntimeRequestError) {
-    nativeCode = error.nativeCode;
+    // A follow-up retirement inspection may refuse because startup never
+    // published a receipt. Preserve the already captured native startup code;
+    // inspection still refuses retirement and retains every recovery binding.
+    if (nativeCode === undefined) {
+      nativeCode = error.nativeCode;
+      nativeCauseCode = error.nativeCauseCode;
+    }
   } else if (
     outcome === "not-started" &&
     source === undefined &&
@@ -719,11 +805,13 @@ async function failedAdmission(opts: {
       error instanceof NativeComposeHostHookError)
   ) {
     nativeCode = "native_graph_subset";
+    nativeCauseCode = undefined;
   }
   return new NativeAuthoredProjectStartError({
     outcome,
     canceled: opts.options.signal?.aborted === true,
     nativeCode,
+    nativeCauseCode,
     stage: opts.stage,
     compilerCode: compilerDiagnostic(error),
   });
@@ -854,6 +942,7 @@ export async function serveNativeAuthoredProject(
         let payload: Buffer | undefined;
         let outcome: Outcome = "not-started";
         let nativeCode: string | undefined;
+        let nativeCauseCode: string | undefined;
         let hookOwner: NativeAuthoredHookOwner | undefined;
         let hostProcesses: NativeAuthoredHostProcesses | undefined;
         let storageTool: NativeAuthoredStorageTool | undefined;
@@ -1016,6 +1105,18 @@ export async function serveNativeAuthoredProject(
           await source.assertFresh();
           remaining();
           stage = "reservation";
+          // A stopped runtime refuses here, before the startup intent exists,
+          // so the failed start retains nothing and ps stays not_started.
+          await refuseStoppedNativeRuntime({
+            runtime: opts.runtime,
+            cwd: opts.scope.projectRoot,
+            timeoutMs: Math.min(RUNTIME_STATUS_TIMEOUT_MS, remaining()),
+            signal: controller.signal,
+          });
+          // The check treats a failed request as inconclusive, including one
+          // ended by cancellation; recheck so a cancel or deadline during it
+          // still refuses before the startup intent is reserved.
+          remaining();
           attempt = { source, start: await admission.reserve({ review }) };
           outcome = "retained";
           stage = "runtime";
@@ -1062,11 +1163,15 @@ export async function serveNativeAuthoredProject(
             removed: () => {
               outcome = "removed";
             },
+            unreserved: () => {
+              outcome = "unreserved";
+            },
             hookRetired: () => {
               hookOwner = undefined;
             },
             nativeCode: (value) => {
-              nativeCode = value;
+              nativeCode = value.nativeCode;
+              nativeCauseCode = value.nativeCauseCode;
             },
           });
           return { ok: true as const, code };
@@ -1088,6 +1193,7 @@ export async function serveNativeAuthoredProject(
             attempt,
             outcome,
             nativeCode,
+            nativeCauseCode,
             hookOwner,
           });
           outcome = failure.outcome;
@@ -1098,7 +1204,7 @@ export async function serveNativeAuthoredProject(
             host: hostProcesses,
             hookStop,
             storageTool,
-            retained: outcome !== "removed",
+            retained: outcome !== "removed" && outcome !== "unreserved",
           });
         }
       }

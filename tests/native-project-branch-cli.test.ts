@@ -59,6 +59,12 @@ if [ "$4" = "check-project-share" ]; then
   touch "$HOME/preflight-ran"
   ${approveSource ? `printf '%s\\n' '{"source_admitted":true,"pool_initialized":false}'\n  exit 0` : "exit 71"}
 fi
+# Image admission is a pure runtime check that runs before hooks; it is not a
+# runtime effect, so it answers without touching the native-ran tripwire.
+if [ "$4" = "admit-image" ]; then
+  printf '{"reference":"%s","kind":"docker_hub"}\n' "$6"
+  exit 0
+fi
 touch "$HOME/native-ran"
 exit 71
 `,

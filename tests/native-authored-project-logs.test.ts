@@ -636,9 +636,14 @@ macTest.each([
   20_000
 );
 
-macTest.each([false, true])(
-  "source CLI authored logs --no-follow reports a stopped runtime as E_DOCKER_UNAVAILABLE (json=%s)",
-  (json) =>
+macTest.each([
+  { json: true, nativeCode: "runtime_not_running" },
+  { json: false, nativeCode: "runtime_not_running" },
+  { json: true, nativeCode: "native_graph_foreground" },
+  { json: false, nativeCode: "native_graph_foreground" },
+])(
+  "source CLI authored logs --no-follow reports a stopped runtime as E_DOCKER_UNAVAILABLE (%j)",
+  ({ json, nativeCode }) =>
     owned(async () => {
       const f = await fixture();
       await Bun.write(
@@ -657,7 +662,7 @@ macTest.each([false, true])(
       // The candidate's reply to any read while its runtime is stopped.
       await Bun.write(
         f.runtime.binary,
-        `#!${process.execPath}\nimport {appendFileSync} from 'node:fs';\nif(JSON.stringify(process.argv.slice(2))!==${JSON.stringify(JSON.stringify(expected))})process.exit(97);appendFileSync(${JSON.stringify(attempts)},'logs\\n');process.stderr.write(${JSON.stringify(JSON.stringify({ code: "runtime_not_running" }))});process.exit(1);\n`
+        `#!${process.execPath}\nimport {appendFileSync} from 'node:fs';\nif(JSON.stringify(process.argv.slice(2))!==${JSON.stringify(JSON.stringify(expected))})process.exit(97);appendFileSync(${JSON.stringify(attempts)},'logs\\n');process.stderr.write(${JSON.stringify(JSON.stringify({ code: nativeCode, ...(nativeCode === "native_graph_foreground" ? { cause_code: "runtime_not_running" } : {}) }))});process.exit(1);\n`
       );
       const result = await captureCompletedJobFixtureCommand({
         argv: [

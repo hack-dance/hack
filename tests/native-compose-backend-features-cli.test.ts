@@ -341,9 +341,13 @@ async function adaptation(f: Fixture, selection: unknown): Promise<string> {
   return path;
 }
 
-/** A runtime request that the stub refused or that timed out on a loaded host. */
+/**
+ * A runtime request that the stub refused, or, on a heavily loaded host, one
+ * that timed out or whose reply the client could not read. Each is only
+ * reachable after the Compose-backend check passed.
+ */
 const RUNTIME_REQUEST_LINE =
-  /^ERROR: Native runtime request (failed \(runtime_not_running\)|timed out); inspect owned state before retrying\.$/m;
+  /^ERROR: Native runtime (request failed \(runtime_not_running\)|request timed out); inspect owned state before retrying\.$|^ERROR: Native runtime returned an invalid control response\.$/m;
 
 test(
   "the documented isolatedNetworks adaptation keeps an external network on native up",

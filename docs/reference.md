@@ -30,3 +30,4 @@
 - [Integrations](./integrations.md)
 - [MCP tool contract](./reference/mcp-tools.md) — every MCP tool: annotations, inputs, argv, results, and the value-free env tools
 - [MCP logs contract](./reference/mcp-logs.md) — cutoff versus backend failure for the MCP log tools, and the cursor/handle decision
+- [AX target and result contract](./reference/ax-target-result-contract.md) — provisional target schema, closed refusals and the read-only `hack project target` inspector

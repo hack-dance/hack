@@ -52,8 +52,13 @@ export const E2E_DURATION_HINTS_SECONDS: Readonly<Record<string, number>> = {
   "native-compose-adoption-plural-network-worktrees": 33,
   "native-compose-adoption-branch-worktrees": 33,
   "portable-multiservice": 30,
+  // Estimate until a hosted docker-e2e summary measures it: eleven cached-alpine stages.
+  "portable-bootstrap-negatives": 45,
   // Estimate (no measured run yet): two cached-alpine ups plus four run/exec probes.
   "compose-config-hash-drift": 25,
+  // Estimate (no measured run yet): one up, ~15 s of bounded tails, a 12 MiB
+  // log snapshot, one container restart and two one-off runs.
+  "mcp-logs-compose": 60,
   "dependency-cache-package": 30,
   "native-compose-adoption-worktrees": 28,
   "native-compose-adoption-string-worktrees": 28,

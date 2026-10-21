@@ -4,11 +4,20 @@ import { CliUsageError } from "../cli/command.ts";
 export const DEFAULT_COMPOSE_STARTUP_TIMEOUT_MS = 90_000;
 /** Default budget for image build/pull and container creation before start. */
 export const DEFAULT_COMPOSE_IMAGE_TIMEOUT_MS = 1_800_000;
+/**
+ * Default budget of one native storage carrier: its dependency check, target
+ * observation, helper create/policy/start/response/cleanup and closing proof.
+ * It equals the earlier shared start default, so an unset host keeps the same
+ * per-carrier bound.
+ */
+export const DEFAULT_NATIVE_STORAGE_TIMEOUT_MS = 90_000;
 export const COMPOSE_STARTUP_TIMEOUT_ENV = "HACK_COMPOSE_STARTUP_TIMEOUT_MS";
 export const COMPOSE_IMAGE_TIMEOUT_ENV = "HACK_COMPOSE_IMAGE_TIMEOUT_MS";
+export const NATIVE_STORAGE_TIMEOUT_ENV = "HACK_NATIVE_STORAGE_TIMEOUT_MS";
 const MIN_TIMEOUT_MS = 1000;
 const MAX_STARTUP_TIMEOUT_MS = 3_600_000;
 const MAX_IMAGE_TIMEOUT_MS = 14_400_000;
+const MAX_NATIVE_STORAGE_TIMEOUT_MS = 600_000;
 const INTEGER_TEXT = /^[0-9]+$/;
 
 /**
@@ -64,6 +73,78 @@ export function resolveComposeImageTimeoutMs(
         `Compose image build/pull timeout must be an integer from ${MIN_TIMEOUT_MS} to ${MAX_IMAGE_TIMEOUT_MS} milliseconds (${COMPOSE_IMAGE_TIMEOUT_ENV})`
       ),
   });
+}
+
+/**
+ * Budget of one native storage carrier (one fresh helper proof session), from
+ * `HACK_NATIVE_STORAGE_TIMEOUT_MS`. It is separate from the start budget:
+ * storage preparation, enrollment and every storage proof use it, never
+ * `HACK_COMPOSE_STARTUP_TIMEOUT_MS`. Each Docker probe inside a carrier keeps its
+ * own fixed 10-15 s cap, and an exhausted carrier refuses with the closed
+ * `storage-budget` effect reason. It grants nothing and relaxes no check.
+ */
+export function resolveNativeStorageTimeoutMs(
+  opts: {
+    readonly storageTimeoutMs?: number;
+    readonly env?: Readonly<Record<string, string | undefined>>;
+  } = {}
+): number {
+  return resolveBudget({
+    explicit: opts.storageTimeoutMs,
+    configured: (opts.env ?? process.env)[NATIVE_STORAGE_TIMEOUT_ENV],
+    fallback: DEFAULT_NATIVE_STORAGE_TIMEOUT_MS,
+    max: MAX_NATIVE_STORAGE_TIMEOUT_MS,
+    invalid: () =>
+      new CliUsageError(
+        `Native storage timeout must be an integer from ${MIN_TIMEOUT_MS} to ${MAX_NATIVE_STORAGE_TIMEOUT_MS} milliseconds (${NATIVE_STORAGE_TIMEOUT_ENV})`
+      ),
+  });
+}
+
+/**
+ * Start deadline of a native `up`/`restart` workload phase (image builds,
+ * container start, readiness and route verification), bounded by
+ * `HACK_COMPOSE_STARTUP_TIMEOUT_MS`. Storage proofs that pre-spawn guards run
+ * inside this phase are bounded by their own `HACK_NATIVE_STORAGE_TIMEOUT_MS`
+ * carriers instead: their monotonic elapsed time extends this deadline rather
+ * than consuming it. Overlapping exclusions count once, a rejected proof still
+ * counts as excluded time, and the deadline never moves earlier. The total
+ * phase stays finite because every excluded proof is itself finite.
+ */
+export function createNativeComposeStartDeadline(opts: {
+  readonly timeoutMs: number;
+  /** Wall clock that callers compare the deadline with; defaults to `Date.now`. */
+  readonly wallNow?: () => number;
+  /** Monotonic clock that measures excluded storage time. */
+  readonly monotonicNow?: () => number;
+}): {
+  readonly deadline: () => number;
+  readonly excludeStorage: <T>(work: () => Promise<T>) => Promise<T>;
+} {
+  const wallNow = opts.wallNow ?? Date.now;
+  const monotonicNow = opts.monotonicNow ?? (() => performance.now());
+  const base = wallNow() + opts.timeoutMs;
+  let excluded = 0;
+  let active = 0;
+  let since = 0;
+  return {
+    deadline: () =>
+      base + excluded + (active > 0 ? Math.max(0, monotonicNow() - since) : 0),
+    excludeStorage: async (work) => {
+      if (active === 0) {
+        since = monotonicNow();
+      }
+      active += 1;
+      try {
+        return await work();
+      } finally {
+        active -= 1;
+        if (active === 0) {
+          excluded += Math.max(0, monotonicNow() - since);
+        }
+      }
+    },
+  };
 }
 
 function resolveBudget(opts: {

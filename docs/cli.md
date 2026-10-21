@@ -266,6 +266,25 @@ Services with `pull_policy: always` still pull again in the start phase because
 Compose applies that policy on every `up`; such pulls count against the start
 budget.
 
+Native authored projects with persistent storage also prove their storage with
+short-lived helper containers. Each helper proof (one storage carrier: dependency
+check, target observation, helper create, policy, start, response and cleanup) has
+its own budget, separate from the start budget:
+
+| Budget | Default | Variable | Range (ms) |
+| --- | --- | --- | --- |
+| One native storage carrier | 90 seconds | `HACK_NATIVE_STORAGE_TIMEOUT_MS` | 1,000–600,000 |
+
+`HACK_COMPOSE_STARTUP_TIMEOUT_MS` never shortens a storage proof. Storage proofs
+that run while a native `up` or `restart` builds and starts workloads do not
+consume the start budget either: their elapsed time extends the start deadline,
+and each proof stays bounded by its own carrier budget. Each Docker command inside
+a carrier keeps its fixed 10–15 second cap. When a carrier budget runs out, the
+command reports the closed effect reason `storage-budget` in
+`error.detail.native_compose_effect_refusal`, and the human summary names
+`HACK_NATIVE_STORAGE_TIMEOUT_MS`. Exhaustion leaves the same retained, uncertain
+state as any other storage refusal; inspect saved state before retrying.
+
 To share dependency data only across worktrees with the same lockfile/runtime fingerprint, label
 the bootstrap service with a logical top-level Compose volume:
 

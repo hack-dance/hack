@@ -1,5 +1,5 @@
 import { HackCliError } from "./cli-result.ts";
-import { resolveComposeStartupTimeoutMs } from "./compose-startup-budget.ts";
+import { resolveNativeStorageTimeoutMs } from "./compose-startup-budget.ts";
 import { isRecord } from "./guards.ts";
 import {
   type NativeComposeEffectRefusal,
@@ -186,13 +186,15 @@ export async function prepareNativeComposeCommandStorage(opts: {
     return refuse();
   }
   const engineId = await engine({ signal });
+  // Each fresh carrier gets the named storage budget, never the start budget:
+  // a short HACK_COMPOSE_STARTUP_TIMEOUT_MS must not starve helper proofs.
   const carrier = (): Promise<NativeComposeStorageXattrCarrier> =>
     createCarrier({
       store,
       authority: mutation.materialAuthority,
       engineId,
       signal,
-      deadline: Date.now() + resolveComposeStartupTimeoutMs(),
+      deadline: Date.now() + resolveNativeStorageTimeoutMs(),
       originalCommandRecords: true,
     });
   // Check the explicit dependency before any authored hook, intent or volume effect.
@@ -383,7 +385,7 @@ export async function reconcileNativeComposeCommandStorage(opts: {
   const engineId = await observeNativeComposeFileEngine({
     signal: opts.signal,
   });
-  const deadline = Date.now() + resolveComposeStartupTimeoutMs();
+  const deadline = Date.now() + resolveNativeStorageTimeoutMs();
   for (const state of candidates) {
     if (state.state !== "enrolled" || state.reference.version !== 3) {
       continue;

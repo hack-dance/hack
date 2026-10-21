@@ -13,6 +13,7 @@ import { join } from "node:path";
 import { isRecord } from "./guards.ts";
 import {
   copyNativeComposeEffectRefusal,
+  markNativeComposeStorageBudgetRefusal,
   type NativeComposeEffectRefusal,
   nativeComposeEffectReason,
   retainNativeComposeEffectRefusal,
@@ -143,8 +144,16 @@ function same(left: unknown, right: unknown): boolean {
   return JSON.stringify(left) === JSON.stringify(right);
 }
 function lifetime(context: Context): void {
-  if (context.signal.aborted || Date.now() >= context.deadline) {
+  if (context.signal.aborted) {
     refuse();
+  }
+  if (Date.now() >= context.deadline) {
+    // Same refusal; only its effect reason names the exhausted storage budget.
+    const error = new Error(
+      "Native storage xattr proof refused; values omitted."
+    );
+    markNativeComposeStorageBudgetRefusal(error);
+    throw error;
   }
 }
 async function current(
@@ -799,6 +808,14 @@ export async function reconcileNativeComposeStorageDockerCarrierRecovery(
     return refuse();
   }
 }
+/**
+ * Post-exit group-absence budget of an unrecorded command (an identity read or
+ * a legacy root/seed command). A recorded command shares its settlement budget
+ * instead. Fixed and finite; exhaustion refuses as `probe-budget`.
+ */
+const UNRECORDED_GROUP_BUDGET_MS = 3000;
+/** Every deadline here is monotonic (`performance.now`), like the handshake and
+ * settlement budgets: a wall-clock step cannot shorten or extend the wait. */
 async function groupAbsent(
   pid: number,
   monotonicDeadline?: number
@@ -806,9 +823,8 @@ async function groupAbsent(
   if (!(Number.isInteger(pid) && pid > 1)) {
     return refuse();
   }
-  const now =
-    monotonicDeadline === undefined ? Date.now : () => performance.now();
-  const deadline = monotonicDeadline ?? Date.now() + 3000;
+  const deadline =
+    monotonicDeadline ?? performance.now() + UNRECORDED_GROUP_BUDGET_MS;
   while (true) {
     try {
       process.kill(-pid, 0);
@@ -818,7 +834,7 @@ async function groupAbsent(
       }
       return refuse();
     }
-    if (now() >= deadline) {
+    if (performance.now() >= deadline) {
       return refuseCommand("probe-budget");
     }
     await new Promise((resolve) => setTimeout(resolve, 20));
@@ -946,6 +962,26 @@ export function nativeComposeStorageCarrierReason(
   error: unknown
 ): NativeComposeEffectRefusal["reason"] {
   return storageCommandRefusal(error) ?? nativeComposeEffectReason(error);
+}
+/**
+ * Effect reason at a carrier boundary of one storage carrier. When its own
+ * deadline, the named `HACK_NATIVE_STORAGE_TIMEOUT_MS` storage budget, is
+ * exhausted and the carrier was not cancelled, the refusal names that budget:
+ * every probe and command inside it is clipped to the remaining budget, so its
+ * timeout or budget refusal fires exactly at that end. Otherwise it keeps the
+ * classified command cause. Diagnostics only: no check, deadline or retention changes.
+ */
+export function nativeComposeStorageCarrierBudgetReason(opts: {
+  readonly error: unknown;
+  readonly signal: AbortSignal;
+  readonly deadline: number;
+  readonly now?: () => number;
+}): NativeComposeEffectRefusal["reason"] {
+  const now = opts.now ?? Date.now;
+  if (!opts.signal.aborted && now() >= opts.deadline) {
+    return "storage-budget";
+  }
+  return nativeComposeStorageCarrierReason(opts.error);
 }
 
 export async function runNativeComposeStorageDockerCommand(supplied: {
@@ -1313,6 +1349,12 @@ export async function createNativeComposeDockerStorageXattrCarrier(
   opts: Context
 ): Promise<NativeComposeStorageXattrCarrier> {
   const context: Context = Object.freeze({ ...opts });
+  const carrierReason = (error: unknown) =>
+    nativeComposeStorageCarrierBudgetReason({
+      error,
+      signal: context.signal,
+      deadline: context.deadline,
+    });
   const docker = findExecutableInPath("docker") ?? refuse();
   const selectors = [
     "DOCKER_HOST",
@@ -1370,7 +1412,7 @@ export async function createNativeComposeDockerStorageXattrCarrier(
     copyNativeComposeEffectRefusal(error, normalized);
     retainNativeComposeEffectRefusal(normalized, {
       stage: "storage-dependency",
-      reason: nativeComposeEffectReason(error),
+      reason: carrierReason(error),
     });
     throw normalized;
   }
@@ -1395,7 +1437,7 @@ export async function createNativeComposeDockerStorageXattrCarrier(
     } catch (error) {
       retainNativeComposeEffectRefusal(error, {
         stage,
-        reason: nativeComposeStorageCarrierReason(error),
+        reason: carrierReason(error),
       });
       throw error;
     }
@@ -1436,7 +1478,7 @@ export async function createNativeComposeDockerStorageXattrCarrier(
       } catch (error) {
         retainNativeComposeEffectRefusal(error, {
           stage: "storage-target",
-          reason: nativeComposeStorageCarrierReason(error),
+          reason: carrierReason(error),
         });
         throw error;
       }
@@ -1596,7 +1638,7 @@ export async function createNativeComposeDockerStorageXattrCarrier(
     } catch (error) {
       retainNativeComposeEffectRefusal(error, {
         stage,
-        reason: nativeComposeStorageCarrierReason(error),
+        reason: carrierReason(error),
       });
       throw error;
     }
@@ -1750,7 +1792,7 @@ export async function createNativeComposeDockerStorageXattrCarrier(
           } catch (error) {
             retainNativeComposeEffectRefusal(error, {
               stage: "storage-helper-policy",
-              reason: nativeComposeStorageCarrierReason(error),
+              reason: carrierReason(error),
             });
             throw error;
           }
@@ -2087,7 +2129,7 @@ export async function createNativeComposeDockerStorageXattrCarrier(
     } catch (error) {
       retainNativeComposeEffectRefusal(error, {
         stage,
-        reason: nativeComposeStorageCarrierReason(error),
+        reason: carrierReason(error),
       });
       throw error;
     }

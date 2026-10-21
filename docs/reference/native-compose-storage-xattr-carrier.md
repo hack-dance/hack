@@ -402,6 +402,28 @@ leaves durable uncertainty that only explicit recovery can report. Earlier
 one-second identity reads and a three-second settlement budget refused healthy
 commands that way on loaded hosts.
 
+Budgets are layered and all finite:
+
+- Each carrier (one helper proof session) has an absolute deadline from the
+  named storage budget `HACK_NATIVE_STORAGE_TIMEOUT_MS` (default 90 seconds,
+  1,000–600,000 ms). It is never derived from `HACK_COMPOSE_STARTUP_TIMEOUT_MS`,
+  so a short start budget cannot starve a helper proof.
+- Inside a carrier every Docker probe and command keeps a fixed cap, clipped to
+  the carrier's remaining budget: 15 seconds for reads, target observation and
+  helper create/start, and 10 seconds for helper removal and cleanup reads, which
+  are not clipped. A recorded command's 15-second settlement budget follows its
+  exit.
+- An unrecorded command (an identity read or a legacy root/seed command) waits
+  at most three seconds for its process group to become absent after exit. Like
+  the handshake and settlement budgets, this deadline is monotonic
+  (`performance.now`), so a wall-clock step cannot shorten or extend it.
+  Exhaustion refuses as `probe-budget`.
+
+A refusal that finds its carrier's own deadline passed (and the carrier not
+cancelled) reports the closed effect reason `storage-budget`; a probe clipped to
+the remaining budget times out exactly at that end. Cancellation keeps
+`probe-cancel`. The reason changes no check, retention or recovery rule.
+
 Only the original in-memory writer can advance its exact sequence. Publication
 failure or deadline permanently invalidates that writer and retains its private
 files/descriptors. A rename or sync may finish after refusal, so a serialized

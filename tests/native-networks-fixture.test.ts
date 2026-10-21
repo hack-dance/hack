@@ -18,10 +18,12 @@ import { dirname, join } from "node:path";
 import {
   humanBoundary,
   humanClosedCode,
+  NATIVE_NETWORK_FIXTURE_SCENARIO_TIMEOUT,
   NATIVE_NETWORK_PROBE_EXIT,
   nativeNetworkFixtureAttachmentMatches,
   nativeNetworkFixtureCensus,
   nativeNetworkFixtureCommandDiagnostic,
+  nativeNetworkFixtureCommandTimeout,
   nativeNetworkFixtureCreateArgs,
   nativeNetworkFixtureFailureLabel,
   nativeNetworkFixtureHasNoPublication,
@@ -44,6 +46,42 @@ import {
   provisionNativeNetworkFixtureComposePlugin,
   runNativeNetworkFixtureCommand,
 } from "./e2e/native-config-networks-acceptance.ts";
+
+test("whole-run and cleanup budgets gate command starts and never clip an in-flight command", () => {
+  const started = 1_000_000;
+  const budget = NATIVE_NETWORK_FIXTURE_SCENARIO_TIMEOUT;
+  // Measured hosted passes reach 3200 s; the named budget keeps margin above it.
+  expect(budget).toBe(75 * 60_000);
+  expect(budget).toBeGreaterThanOrEqual(1.4 * 3_200_000);
+  for (const now of [started, started + 3_200_000, started + budget - 1]) {
+    // A command started one millisecond before the budget still gets its full
+    // own timeout instead of being killed when the whole-run budget expires.
+    expect(
+      nativeNetworkFixtureCommandTimeout({ started, cleanupStarted: null, now })
+    ).toBe(180_000);
+  }
+  for (const now of [started + budget, started + budget + 1]) {
+    expect(() =>
+      nativeNetworkFixtureCommandTimeout({ started, cleanupStarted: null, now })
+    ).toThrow("Network scenario exceeded its whole-run budget");
+  }
+  // Cleanup keeps its own start gate after the whole-run budget is spent.
+  const cleanupStarted = started + budget + 60_000;
+  expect(
+    nativeNetworkFixtureCommandTimeout({
+      started,
+      cleanupStarted,
+      now: cleanupStarted + 3 * 60_000 - 1,
+    })
+  ).toBe(180_000);
+  expect(() =>
+    nativeNetworkFixtureCommandTimeout({
+      started,
+      cleanupStarted,
+      now: cleanupStarted + 3 * 60_000,
+    })
+  ).toThrow("Network scenario exceeded its cleanup budget");
+});
 
 test("preserved user container comparison permits only mount ordering", () => {
   const mount = {

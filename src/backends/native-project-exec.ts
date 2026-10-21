@@ -1,3 +1,4 @@
+import { ClosedCliError } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
 import { prepareNativeExecEnvironment } from "./native-exec-environment.ts";
 import { refreshNativeProjectDependencies } from "./native-project-dependency-refresh.ts";
@@ -11,7 +12,7 @@ import {
 
 const SERVICE = /^[A-Za-z0-9_.-]{1,128}$/;
 function refused(): Error {
-  return new Error(
+  return new ClosedCliError(
     "Native exec identity or response is unconfirmed; command effects may have occurred. No request was replayed."
   );
 }
@@ -126,14 +127,14 @@ export async function nativeProjectExec(opts: {
         opts.workdir.includes("\0") ||
         Buffer.byteLength(opts.workdir) > 4096))
   ) {
-    throw new Error(
+    throw new ClosedCliError(
       "Native exec requires one service and bounded command arguments with an optional absolute workdir."
     );
   }
   const refreshed = await refreshNativeProjectDependencies(opts);
   const before = await nativeProjectPs(opts);
   if (!before.run) {
-    throw new Error(
+    throw new ClosedCliError(
       "Native project has not been started; no owned graph mapping exists."
     );
   }

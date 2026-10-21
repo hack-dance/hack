@@ -108,9 +108,10 @@ test("env_file and malformed modern input refuse without diagnostic contents", a
   await env(opts.projectDir, "default", {
     global: { TOKEN: { secure: "invalid-secret-canary" } },
   });
-  await expect(prepareNativeProjectInput(opts)).rejects.toThrow(
-    "values omitted"
-  );
+  await expect(prepareNativeProjectInput(opts)).rejects.toMatchObject({
+    code: "E_NATIVE_PROJECT_UNSUPPORTED",
+    message: expect.stringContaining("values omitted"),
+  });
   await writeFile(opts.composeFile, '{"services":{"api":{"image":"bun:1"}}}');
   await writeFile(
     join(opts.projectDir, "hack.env.default.yaml"),
@@ -133,9 +134,10 @@ test("legacy dotenv refuses and unmanaged public projects preserve original fiel
     JSON.parse((await prepareNativeProjectInput(opts)).normalizedComposeJson)
   ).toEqual(original);
   await writeFile(join(opts.projectDir, ".env"), "PRIVATE=synthetic\n");
-  await expect(prepareNativeProjectInput(opts)).rejects.toThrow(
-    "values omitted"
-  );
+  await expect(prepareNativeProjectInput(opts)).rejects.toMatchObject({
+    code: "E_NATIVE_PROJECT_UNSUPPORTED",
+    message: expect.stringContaining("values omitted"),
+  });
 });
 
 test("linked worktree inherits primary local environment and observes checkout overrides", async () => {

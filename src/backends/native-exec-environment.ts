@@ -1,4 +1,5 @@
 import { basename } from "node:path";
+import { HackCliError } from "../lib/cli-result.ts";
 import { adaptNativeAwsEnvironment } from "./native-aws-environment.ts";
 import { prepareNativeProjectInput } from "./native-project-input.ts";
 import type {
@@ -21,9 +22,11 @@ export async function prepareNativeExecEnvironment(opts: {
       Object.hasOwn(opts.run, "aws")
     )
   ) {
-    throw new Error(
-      "Native fresh exec requires recorded startup environment and AWS selections; restart with the current candidate. Values omitted."
-    );
+    throw new HackCliError({
+      code: "E_CONFIG_INVALID",
+      message:
+        "Native fresh exec requires recorded startup environment and AWS selections; restart with the current candidate. Values omitted.",
+    });
   }
   try {
     let input = await (opts.prepare ?? prepareNativeProjectInput)({
@@ -60,8 +63,10 @@ export async function prepareNativeExecEnvironment(opts: {
     }
     return input.managedEnvironment[opts.service] ?? {};
   } catch {
-    throw new Error(
-      "Native fresh exec environment is unavailable or changed; no command was requested. Values omitted."
-    );
+    throw new HackCliError({
+      code: "E_CONFIG_INVALID",
+      message:
+        "Native fresh exec environment is unavailable or changed; no command was requested. Values omitted.",
+    });
   }
 }

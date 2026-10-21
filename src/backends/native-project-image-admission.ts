@@ -1,3 +1,4 @@
+import { ClosedCliError, HackCliError } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
 import {
   invokeNativeRuntime,
@@ -11,9 +12,25 @@ const KINDS = new Set(["docker_hub", "image_id"]);
 /** Admission is pure in the runtime, so each request is short and bounded. */
 const ADMISSION_TIMEOUT_MS = 10_000;
 
-function refused(): Error {
-  return new Error(
-    "Native project image reference refused before runtime startup: use a public Docker Hub reference (shorthand such as alpine:3.21 is accepted) or a sha256 image ID; no VM, provider or image acquisition was started."
+/** An authored image the candidate cannot admit: a closed, coded refusal. */
+function refused(): HackCliError {
+  return new HackCliError({
+    code: "E_NATIVE_PROJECT_UNSUPPORTED",
+    message:
+      "Native project image reference refused before runtime startup: use a public Docker Hub reference (shorthand such as alpine:3.21 is accepted) or a sha256 image ID; no VM, provider or image acquisition was started.",
+  });
+}
+
+/** An admission reply outside its closed shape is a runtime integrity failure, not a refusal. */
+function malformed(): ClosedCliError {
+  return new ClosedCliError(
+    "Native runtime returned an invalid image admission response; no VM, provider or image acquisition was started."
+  );
+}
+
+function canceled(): ClosedCliError {
+  return new ClosedCliError(
+    "Native image admission was canceled; no VM, provider or image acquisition was started."
   );
 }
 
@@ -24,8 +41,9 @@ function refused(): Error {
  * this adapter only collects distinct references and checks the closed response.
  * Content IDs need no registry and are not sent. Admission does not pin or
  * rewrite images: acquisition later re-normalizes with the same runtime rule.
- * A refusal or malformed response throws a value-free error; other runtime
- * request failures propagate unchanged.
+ * An unsupported reference throws a value-free `E_NATIVE_PROJECT_UNSUPPORTED`
+ * refusal; a malformed reply or cancellation throws a value-free closed error.
+ * Other runtime request failures propagate unchanged.
  */
 export async function admitNativeProjectImages(opts: {
   readonly runtime: NativeRuntimeSelection;
@@ -46,7 +64,7 @@ export async function admitNativeProjectImages(opts: {
   }
   for (const reference of references) {
     if (opts.signal?.aborted) {
-      throw refused();
+      throw canceled();
     }
     let admitted: unknown;
     try {
@@ -76,7 +94,7 @@ export async function admitNativeProjectImages(opts: {
         KINDS.has(admitted.kind)
       )
     ) {
-      throw refused();
+      throw malformed();
     }
   }
 }

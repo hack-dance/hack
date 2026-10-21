@@ -1,5 +1,6 @@
 import { basename } from "node:path";
 import { isDeepStrictEqual } from "node:util";
+import { ClosedCliError } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
 import {
   resolveProjectEnvConfig,
@@ -23,12 +24,12 @@ import {
 } from "./native-runtime-client.ts";
 
 function refused(): Error {
-  return new Error(
+  return new ClosedCliError(
     "Native down cleanup is unconfirmed; retained mapping and runtime state require inspection. No cleanup was replayed."
   );
 }
 function finalizationRefused(): Error {
-  return new Error(
+  return new ClosedCliError(
     "Native down frontend finalization is unconfirmed or its ownership changed; retained mapping and runtime state require inspection. No cleanup was replayed."
   );
 }
@@ -200,7 +201,7 @@ export async function nativeDownEnvironment(opts: {
   readonly serviceNames: readonly string[];
 }): Promise<Readonly<Record<string, string>>> {
   if (!Object.hasOwn(opts.run, "effectiveEnvName")) {
-    throw new Error(
+    throw new ClosedCliError(
       "Native down lifecycle hooks require persisted startup environment selection; legacy mapping must not guess an overlay."
     );
   }
@@ -235,7 +236,7 @@ export async function nativeDownEnvironment(opts: {
       target: "host",
     });
   } catch {
-    throw new Error(
+    throw new ClosedCliError(
       "Native down lifecycle environment is unavailable; values omitted. No cleanup was requested."
     );
   }

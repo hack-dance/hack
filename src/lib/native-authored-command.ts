@@ -33,6 +33,8 @@ import { resolveNativeAuthoredExecStaleEnvWarning } from "../backends/native-exe
 import { parseNativeHttpsSelection } from "../backends/native-project-start.ts";
 import {
   isNativeRuntimeNotRunning,
+  NATIVE_RUNTIME_NOT_RUNNING,
+  nativeCodesReportRuntimeNotRunning,
   resolveNativeRuntimeSelection,
 } from "../backends/native-runtime-client.ts";
 import { CliUsageError } from "../cli/command.ts";
@@ -47,6 +49,7 @@ import {
   createNativeEnvFingerprintSession,
   type NativeEnvFingerprintSession,
 } from "./native-env-fingerprint-state.ts";
+import { nativeForegroundDetachRefusal } from "./native-up-refusals.ts";
 
 function unsupported(): never {
   throw new HackCliError({
@@ -184,6 +187,17 @@ function assertRecoveryOptions(options: NativeComposeCommandOptions): void {
 }
 
 function assertForegroundOptions(options: NativeComposeCommandOptions): void {
+  // Where authored foreground up/restart is supported, a detached start gets
+  // the same one-line refusal as an image project, not the generic one.
+  if (
+    process.platform === "darwin" &&
+    options.detach &&
+    (options.operation === "up" || options.operation === "restart")
+  ) {
+    throw nativeForegroundDetachRefusal({
+      restart: options.operation === "restart",
+    });
+  }
   if (
     process.platform !== "darwin" ||
     !["up", "down", "restart"].includes(options.operation) ||
@@ -215,6 +229,9 @@ function startupFailure(error: unknown): number {
     ) {
       return 130;
     }
+    if (nativeCodesReportRuntimeNotRunning(error)) {
+      throw stoppedRuntimeStartup(error);
+    }
     throw new HackCliError({
       code:
         error.nativeCode === "native_graph_subset"
@@ -233,6 +250,40 @@ function startupFailure(error: unknown): number {
   throw new HackCliError({
     code: "E_CONFIG_INVALID",
     message: "Native authored startup selection is invalid; values omitted.",
+  });
+}
+
+/**
+ * A start refused because the candidate runtime is stopped reports that cause
+ * directly, as logs does, with the next action. When nothing was reserved
+ * (`not-started`), `ps` keeps reporting `not_started`. A start that reserved
+ * its intent before the runtime stopped keeps that evidence, so `ps` reports
+ * `pending` until the retained attempt is inspected. A start whose consumer
+ * never reserved runtime state (`unreserved`) had its intent retired, so `ps`
+ * reports `not_started`.
+ */
+function stoppedRuntimeStartup(
+  error: NativeAuthoredProjectStartError
+): HackCliError {
+  const message = {
+    "not-started":
+      "Native runtime is not running; nothing was started. Start the native runtime, then run this command again.",
+    removed:
+      "Native runtime is not running; this start did not stay up and its native cleanup was confirmed. Start the native runtime, then run this command again.",
+    unreserved:
+      "Native runtime is not running; this start never reserved runtime state and its startup intent was retired, so `hack ps` reports not_started. Start the native runtime, then run this command again.",
+    retained:
+      "Native runtime is not running; this start did not reach Ready and its startup evidence is retained, so `hack ps` reports it as pending. Start the native runtime and inspect owned state before retrying.",
+  }[error.outcome];
+  return new HackCliError({
+    code: "E_DOCKER_UNAVAILABLE",
+    message,
+    detail: {
+      outcome: error.outcome,
+      canceled: error.canceled,
+      stage: error.stage,
+      nativeCode: NATIVE_RUNTIME_NOT_RUNNING,
+    },
   });
 }
 
@@ -303,7 +354,7 @@ const STATUS_NOTES: Readonly<
 > = {
   not_started: "Native project has not been started.",
   pending:
-    "Native project startup is pending or incomplete; no current service status is confirmed. If no startup is running, `hack down --recover` retires an attempt that never reserved runtime state.",
+    "Native project startup is pending: a start reserved its intent but has not reached Ready (it is still starting, or it failed and its startup evidence is retained). No current service status is confirmed. If no startup is running, `hack down --recover` retires an attempt that never reserved runtime state.",
   runtime_not_running:
     "Native runtime is not running; no services are running.",
 };

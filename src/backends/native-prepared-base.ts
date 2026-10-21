@@ -1,4 +1,5 @@
 import { isAbsolute } from "node:path";
+import { HackCliError } from "../lib/cli-result.ts";
 
 /**
  * Opt-in prepared base for a fresh native pool (`runtime up --prepared-base`).
@@ -18,10 +19,15 @@ export interface NativePreparedBase {
 
 type Environment = Readonly<Record<string, string | undefined>>;
 
+/** An invalid selection is user configuration: a closed `E_CONFIG_INVALID` refusal. */
+function invalid(message: string): HackCliError {
+  return new HackCliError({ code: "E_CONFIG_INVALID", message });
+}
+
 /**
  * Parse `HACK_NATIVE_PREPARED_BASE` (`prefer`, `require`, or unset/`off` to disable) and the
- * optional absolute `HACK_NATIVE_PREPARED_BASE_STORE`. Invalid combinations throw before any
- * runtime effect.
+ * optional absolute `HACK_NATIVE_PREPARED_BASE_STORE`. Invalid combinations throw a closed
+ * `E_CONFIG_INVALID` refusal before any runtime effect.
  */
 export function parseNativePreparedBase(
   env: Environment
@@ -31,24 +37,20 @@ export function parseNativePreparedBase(
   const hasStore = store !== undefined && store !== "";
   if (mode === undefined || mode === "" || mode === "off") {
     if (hasStore) {
-      throw new Error(
+      throw invalid(
         "HACK_NATIVE_PREPARED_BASE_STORE requires HACK_NATIVE_PREPARED_BASE=prefer or require."
       );
     }
     return undefined;
   }
   if (mode !== "prefer" && mode !== "require") {
-    throw new Error(
-      "HACK_NATIVE_PREPARED_BASE must be prefer, require or off."
-    );
+    throw invalid("HACK_NATIVE_PREPARED_BASE must be prefer, require or off.");
   }
   if (!hasStore) {
     return { mode };
   }
   if (!isAbsolute(store)) {
-    throw new Error(
-      "HACK_NATIVE_PREPARED_BASE_STORE must be an absolute path."
-    );
+    throw invalid("HACK_NATIVE_PREPARED_BASE_STORE must be an absolute path.");
   }
   return { mode, store };
 }

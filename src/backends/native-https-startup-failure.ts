@@ -1,4 +1,5 @@
 import { join } from "node:path";
+import { ClosedCliError } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
 import {
   type NativeHttpsOwnerConfiguration,
@@ -61,7 +62,7 @@ function isDiagnostic(value: unknown): value is Diagnostic {
   );
 }
 /** Only reviewed classifications cross the detached owner boundary; never raw errors. */
-export class NativeHttpsStartupError extends Error {
+export class NativeHttpsStartupError extends ClosedCliError {
   readonly diagnostic: Diagnostic;
   constructor(stage: Stage, error?: unknown, cleanupUnconfirmed = false) {
     const inherited =

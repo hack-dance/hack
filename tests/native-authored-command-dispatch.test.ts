@@ -102,7 +102,6 @@ async function invoke(opts: {
 }
 
 test.each([
-  { args: ["up", "--detach"] },
   { args: ["up", "--json"] },
   { args: ["restart", "--json"] },
   { args: ["restart", "web"] },
@@ -120,6 +119,30 @@ test.each([
   expect(value.stdout + value.stderr).toContain(
     "whole-project foreground up or restart, owner-mediated down, ps, finite single-service logs --no-follow, noninteractive single-service exec or run, or explicit stored-generation down --recover on macOS"
   );
+  expect(await Bun.file(join(selected.root, "compiler-called")).exists()).toBe(
+    false
+  );
+  expect(await readdir(join(selected.root, ".hack"))).toEqual([
+    "hack.project.json",
+  ]);
+});
+
+test("source CLI native up --detach refuses with one line before compiler or runtime work", async () => {
+  const selected = await fixture();
+  const value = await invoke({
+    selected,
+    args: ["up", "--detach"],
+    backend: "native",
+  });
+  expect(value.code).toBe(1);
+  // macOS supports authored foreground up, so a detached start gets the image
+  // project's E_USAGE refusal; elsewhere authored execution is unsupported.
+  expect(value.stdout + value.stderr).toContain(
+    process.platform === "darwin"
+      ? "E_USAGE: Native `hack up` runs in the foreground only, so --detach is not supported."
+      : "E_NATIVE_PROJECT_UNSUPPORTED"
+  );
+  expect(value.stdout + value.stderr).not.toMatch(/^\s+at /m);
   expect(await Bun.file(join(selected.root, "compiler-called")).exists()).toBe(
     false
   );

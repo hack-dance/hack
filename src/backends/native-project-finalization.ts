@@ -10,6 +10,7 @@ import {
   unlink,
 } from "node:fs/promises";
 import { join } from "node:path";
+import { ClosedCliError } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
 import {
   isNativeHttpsLeaseIdentity,
@@ -131,7 +132,7 @@ export function isNativeProjectFinalizationToken(
   );
 }
 function refused(): Error {
-  return new Error(
+  return new ClosedCliError(
     "Native frontend finalization is unconfirmed or its ownership changed; no replacement owner may start."
   );
 }

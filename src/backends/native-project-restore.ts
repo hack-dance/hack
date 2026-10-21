@@ -1,4 +1,5 @@
 import { randomBytes } from "node:crypto";
+import { ClosedCliError } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
 import { nativeCacheInitializers } from "./native-project-cache.ts";
 import type { NativeProjectReview } from "./native-project-review.ts";
@@ -26,7 +27,7 @@ export function validateNativeRestoreSelection(opts: {
     typeof selected.generation !== "string" ||
     !SHA.test(selected.generation)
   ) {
-    throw new Error(
+    throw new ClosedCliError(
       "Native restore selection changed; retained data was not adopted."
     );
   }
@@ -80,13 +81,13 @@ export async function verifyNativeSourceCompatibility(opts: {
         SHA.test(result.source_revision))
     )
   ) {
-    throw new Error(
+    throw new ClosedCliError(
       "Native shared-source compatibility changed; retained data was not adopted."
     );
   }
   const cached = nativeCacheInitializers(opts.review.report.plan).size > 0;
   if ((result.source_revision === null) !== !cached) {
-    throw new Error(
+    throw new ClosedCliError(
       "Native shared-source compatibility changed; retained data was not adopted."
     );
   }
@@ -127,7 +128,7 @@ export async function selectNativeProjectRestore(opts: {
     opts.review.retainedGeneration !== undefined &&
     opts.review.retainedGeneration !== selection.generation
   ) {
-    throw new Error(
+    throw new ClosedCliError(
       "Native restore selection changed; retained data was not adopted."
     );
   }

@@ -1,3 +1,4 @@
+import { HackCliError } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
 import {
   buildRuntimeHostMetadataEnvironments,
@@ -28,9 +29,11 @@ export type NativeRuntimeMetadata = {
 };
 
 function refused(): Error {
-  return new Error(
-    "Native runtime metadata requires reviewable services whose route labels match the reviewed plan; no graph was started."
-  );
+  return new HackCliError({
+    code: "E_NATIVE_PROJECT_UNSUPPORTED",
+    message:
+      "Native runtime metadata requires reviewable services whose route labels match the reviewed plan; no graph was started.",
+  });
 }
 
 /** Mirror native review's hostname normalization: trailing dot removed, lowercase. */

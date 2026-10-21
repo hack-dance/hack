@@ -663,9 +663,25 @@ lifecycle hooks, and publishes the run mapping after native readiness. Ctrl-C wa
 for owned cleanup and keeps the stopped run mapping and named volumes after
 confirming cleanup. The VM remains available until explicit runtime shutdown.
 
+Without that grant, `up` and `restart` refuse with `E_PERMISSION` before any stop or
+runtime request; set it and run the command again.
+
 This initial foreground path does not support detached/JSON startup, selected
-services or external networks. Routed services and host dependencies require the
-explicit native selections described below. Existing
+services or external networks. `--detach`, `--json`, `--target` and service names
+each refuse with a one-line `E_USAGE` message that names the option and the supported
+form: run `hack up` in the foreground in its own terminal and use `hack ps` and
+`hack logs` from another. Routed services and host dependencies require the
+explicit native selections described below. Unsupported Compose or environment input
+(for example a service `env_file`, or a project `.env` without managed env) and
+unreviewed route labels refuse with `E_NATIVE_PROJECT_UNSUPPORTED`; invalid branch
+hosts, project adaptations, AWS selections and changed fresh-exec environments refuse
+with `E_CONFIG_INVALID`, as do an unbounded `--profile` selection, a malformed
+`HACK_NATIVE_DEPENDENCIES` listener selection and an occupied HTTPS port. A runtime
+reply, saved mapping or retained graph that changed or cannot be confirmed (for example
+a startup receipt for another run, or a mapping owned by another run) is an integrity
+or ownership refusal, not a configuration one: it prints one closed line naming what
+was not confirmed, and `--json` reports it as `E_UNEXPECTED`. Each prints one closed
+line and drops nothing. Existing
 `hack.dependencies.*` cache declarations publish the reviewed source snapshot and
 require successful initializer completion before dependent services start. Cache
 initializers receive immutable source mounts and writable named cache volumes;

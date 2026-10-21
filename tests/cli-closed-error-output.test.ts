@@ -1,7 +1,14 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
+import { createServer } from "node:net";
+import { checkNativeHttpsPort } from "../src/backends/native-https-port.ts";
+import { NativeHttpsStartupError } from "../src/backends/native-https-startup-failure.ts";
+import { nativeHttpsVerificationError } from "../src/backends/native-project-https.ts";
+import { NativePartialShutdownError } from "../src/backends/native-project-interrupted-cleanup.ts";
 import { NativeRuntimeRequestError } from "../src/backends/native-runtime-client.ts";
+import { CliUsageError } from "../src/cli/command.ts";
 import { handleRunCliError } from "../src/cli/run.ts";
 import { ClosedCliError, HackCliError } from "../src/lib/cli-result.ts";
+import { refuseUnsupportedNativeUpOptions } from "../src/lib/native-up-refusals.ts";
 import { setLoggerBackendOverride } from "../src/ui/logger.ts";
 import { restoreEnv } from "./helpers/env.ts";
 
@@ -101,4 +108,142 @@ test("--json keeps one envelope for a closed refusal", async () => {
     ok: false,
     error: { code: "E_UNEXPECTED", message: error.message },
   });
+});
+
+test("a handler's usage refusal prints its message and one hint line, not the help", async () => {
+  const error = new CliUsageError(
+    "Native run uses the started project's environment and profiles; restart with the requested selections first."
+  );
+  expect(
+    await handleRunCliError({
+      error,
+      jsonRequested: false,
+      handlerPath: ["run"],
+    })
+  ).toBe(1);
+  expect(output).toBe(
+    `ERROR: ${error.message}\nSee \`hack run --help\` for usage.\n`
+  );
+});
+
+test("a usage error found while parsing still prints the help", async () => {
+  const error = new CliUsageError("Unknown option(s): --bogus");
+  expect(await handleRunCliError({ error, jsonRequested: false })).toBe(1);
+  expect(output).toStartWith(`ERROR: ${error.message}\n`);
+  expect(output).toContain("hack <command> [options]");
+});
+
+test("a handler's usage refusal under --json stays one E_USAGE envelope", async () => {
+  const error = new CliUsageError("Native exec does not support --env.");
+  expect(
+    await handleRunCliError({
+      error,
+      jsonRequested: true,
+      handlerPath: ["exec"],
+    })
+  ).toBe(1);
+  expect(JSON.parse(output)).toEqual({
+    ok: false,
+    error: { code: "E_USAGE", message: error.message },
+  });
+});
+
+function thrownBy(action: () => void): unknown {
+  try {
+    action();
+  } catch (error: unknown) {
+    return error;
+  }
+  return undefined;
+}
+
+test.each([
+  {
+    refusal: () =>
+      refuseUnsupportedNativeUpOptions({ restart: false, detach: true }),
+    text: "E_USAGE: Native `hack up` runs in the foreground only, so --detach is not supported. Run `hack up` without --detach in its own terminal and keep it open;",
+  },
+  {
+    refusal: () =>
+      refuseUnsupportedNativeUpOptions({ restart: true, json: true }),
+    text: "E_USAGE: Native `hack restart` does not support --json",
+  },
+  {
+    refusal: () =>
+      refuseUnsupportedNativeUpOptions({ restart: false, target: "remote" }),
+    text: "E_USAGE: Native `hack up` does not support --target;",
+  },
+  {
+    refusal: () =>
+      refuseUnsupportedNativeUpOptions({ restart: false, services: ["web"] }),
+    text: "E_USAGE: Native `hack up` starts the whole project; service selection is not supported.",
+  },
+])("native up option refusal prints one closed line: $text", async ({
+  refusal,
+  text,
+}) => {
+  const error = thrownBy(refusal);
+  expect(error).toBeInstanceOf(HackCliError);
+  expect(await handleRunCliError({ error, jsonRequested: false })).toBe(1);
+  expect(output).toStartWith(`ERROR: ${text}`);
+  expect(output.trimEnd().split("\n")).toHaveLength(1);
+  expect(output).not.toMatch(STACK_FRAME);
+});
+
+test("supported native up options are not refused", () => {
+  expect(
+    thrownBy(() =>
+      refuseUnsupportedNativeUpOptions({
+        restart: false,
+        detach: false,
+        json: false,
+        services: [],
+      })
+    )
+  ).toBeUndefined();
+});
+
+test.each([
+  () => new NativePartialShutdownError(),
+  () => new NativeHttpsStartupError("frontend-start"),
+])("native refusal class %# prints its closed message without a stack", async (make) => {
+  const error = make();
+  expect(error).toBeInstanceOf(ClosedCliError);
+  expect(await handleRunCliError({ error, jsonRequested: false })).toBe(1);
+  expect(output).toBe(`ERROR: ${error.message}\n`);
+});
+
+/**
+ * HTTPS verification and port refusals are raised inside the foreground
+ * owner's readiness step, which a CLI spawn reaches only with a live serve
+ * owner. Their real errors still render as one closed line here.
+ */
+test("a native HTTPS verification failure prints one closed line", async () => {
+  const error = nativeHttpsVerificationError({ code: "ECONNREFUSED" });
+  expect(error).toBeInstanceOf(ClosedCliError);
+  expect(await handleRunCliError({ error, jsonRequested: false })).toBe(1);
+  expect(output).toBe(
+    "ERROR: Native HTTPS verification failed (ECONNREFUSED); peer values omitted.\n"
+  );
+});
+
+test("an occupied native HTTPS port prints one coded line without the port", async () => {
+  const server = createServer();
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  try {
+    const address = server.address();
+    if (!address || typeof address === "string") {
+      throw new Error("Fixture has no TCP address");
+    }
+    const error = await checkNativeHttpsPort(address.port).catch(
+      (caught: unknown) => caught
+    );
+    expect(error).toBeInstanceOf(HackCliError);
+    expect(await handleRunCliError({ error, jsonRequested: false })).toBe(1);
+    expect(output).toBe(
+      "ERROR: E_CONFIG_INVALID: The selected native HTTPS port is already in use; the existing listener was left untouched. Select a free port.\n"
+    );
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
 });

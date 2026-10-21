@@ -6,8 +6,14 @@ import {
   invokeNativeRuntime,
   isNativeRuntimeNotRunning,
   NativeRuntimeRequestError,
+  nativeCodesReportRuntimeNotRunning,
   resolveNativeRuntimeSelection,
 } from "../src/backends/native-runtime-client.ts";
+import { ClosedCliError } from "../src/lib/cli-result.ts";
+import {
+  expectClosedRefusal,
+  expectCodedRefusal,
+} from "./helpers/closed-refusal.ts";
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -32,6 +38,7 @@ if (process.argv.includes("one-off-unsafe")) { console.error(JSON.stringify({cod
 if (process.argv.includes("owner-fail")) { const {appendFileSync}=await import("node:fs"); appendFileSync("attempts","attempt"); console.error(JSON.stringify({code:"graph_owner_recovery",cause_code:"graph_relay_identity",message:"synthetic-secret-diagnostic"})); process.exit(23); }
 if (process.argv.includes("owner-unsafe")) { console.error(JSON.stringify({code:"graph_owner_recovery",cause_code:"synthetic-secret-diagnostic",message:"synthetic-secret-diagnostic"})); process.exit(23); }
 if (process.argv.includes("fail")) { console.error("synthetic-secret-diagnostic"); process.exit(23); }
+if (process.argv.includes("garbage")) { process.stdout.write("not-json"); process.exit(0); }
 if (process.argv.includes("overflow")) { process.stdout.write("x".repeat(17 * 1024 * 1024)); }
 else {
  const input = await Bun.stdin.text();
@@ -55,6 +62,17 @@ test("native selection is explicit and requires an isolated absolute home", () =
       HACK_NATIVE_HOME: "/tmp/home",
     })
   ).toThrow();
+  // The refusal is closed: the CLI prints this one line without a stack.
+  let refusal: unknown;
+  try {
+    resolveNativeRuntimeSelection({ HACK_RUNTIME_BACKEND: "native" });
+  } catch (error: unknown) {
+    refusal = error;
+  }
+  expect(refusal).toBeInstanceOf(ClosedCliError);
+  expect(String(refusal)).toContain(
+    "Native runtime requires absolute HACK_NATIVE_BINARY and HACK_NATIVE_HOME paths."
+  );
   expect(
     resolveNativeRuntimeSelection({
       HACK_RUNTIME_BACKEND: "native",
@@ -527,17 +545,40 @@ await Bun.sleep(60_000);
 
 test("private-input and response bounds reject instead of truncating", async () => {
   const runtime = await fixture();
-  await expect(
+  // A managed environment or a selected timeout can exceed the bounds: a
+  // coded configuration refusal, not an unexpected exception.
+  await expectCodedRefusal(
     invokeNativeRuntime({
       runtime,
       cwd: runtime.home,
       args: [],
       privateInput: new Uint8Array(256 * 1024 + 1),
-    })
-  ).rejects.toThrow("input or time budget");
-  await expect(
-    invokeNativeRuntime({ runtime, cwd: runtime.home, args: ["overflow"] })
-  ).rejects.toThrow("output budget");
+    }),
+    "E_CONFIG_INVALID",
+    "input or time budget"
+  );
+  await expectCodedRefusal(
+    invokeNativeRuntime({
+      runtime,
+      cwd: runtime.home,
+      args: [],
+      timeoutMs: 600_001,
+    }),
+    "E_CONFIG_INVALID",
+    "input or time budget"
+  );
+  await expectClosedRefusal(
+    invokeNativeRuntime({ runtime, cwd: runtime.home, args: ["overflow"] }),
+    "output budget"
+  );
+});
+
+test("an unparseable control response is a closed refusal", async () => {
+  const runtime = await fixture();
+  await expectClosedRefusal(
+    invokeNativeRuntime({ runtime, cwd: runtime.home, args: ["garbage"] }),
+    "Native runtime returned an invalid control response."
+  );
 });
 
 test("structured failures expose only a bounded code, never their message", async () => {
@@ -584,6 +625,28 @@ test.each([
   expect(isNativeRuntimeNotRunning({ nativeCode: "runtime_not_running" })).toBe(
     false
   );
+});
+
+test("a carried code pair reports a direct or foreground-wrapped stopped runtime only", () => {
+  expect(
+    nativeCodesReportRuntimeNotRunning({ nativeCode: "runtime_not_running" })
+  ).toBe(true);
+  expect(
+    nativeCodesReportRuntimeNotRunning({
+      nativeCode: "native_graph_foreground",
+      nativeCauseCode: "runtime_not_running",
+    })
+  ).toBe(true);
+  for (const codes of [
+    { nativeCode: "native_graph_foreground" },
+    {
+      nativeCode: "graph_owner_recovery",
+      nativeCauseCode: "runtime_not_running",
+    },
+    {},
+  ]) {
+    expect(nativeCodesReportRuntimeNotRunning(codes)).toBe(false);
+  }
 });
 
 test("one-off failures expose only a validated owner cause code", async () => {
@@ -807,8 +870,13 @@ test("exec accepts matching nonzero completion only through its explicit transpo
           args: ["graph", "cleanup", "--json"],
         })
       ).rejects.toThrow("budget");
-    } else {
+    } else if (variant === "native-error") {
       await expect(invokeNativeRuntime(request)).rejects.toThrow();
+    } else {
+      await expectClosedRefusal(
+        invokeNativeRuntime(request),
+        "Native exec returned an invalid or inconsistent completion response; command effects may have occurred."
+      );
     }
   }
 });

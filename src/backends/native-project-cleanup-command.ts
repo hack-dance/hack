@@ -1,6 +1,6 @@
 import { CliUsageError } from "../cli/command.ts";
 import { resolveEffectiveBranch } from "../lib/branches.ts";
-import { emitCliResult, okResult } from "../lib/cli-result.ts";
+import { ClosedCliError, emitCliResult, okResult } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
 import {
   findProjectContext,
@@ -34,7 +34,7 @@ const GUIDANCE =
   "No uncertain stop was replayed. Preserve receipts and run mappings. Pending cleanup requires explicit owned recovery; review every graph sharing the pool before stopping it, and do not roll over its boot repeatedly.";
 
 function refused(): Error {
-  return new Error(
+  return new ClosedCliError(
     "Native cleanup inspection is unconfirmed; owned mapping or observations are unavailable or changed. Values omitted; no recovery was requested."
   );
 }

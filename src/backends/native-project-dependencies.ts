@@ -1,5 +1,6 @@
 import { isAbsolute } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
+import { HackCliError } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
 
 import { readNativeSelection } from "./native-project-selection.ts";
@@ -46,9 +47,11 @@ export function prepareNativeDependencyServices(opts: {
   for (const dependency of opts.dependencies) {
     const service = opts.services[dependency.service];
     if (!service || (service.init !== undefined && service.init !== true)) {
-      throw new Error(
-        "Native host dependencies require init: true; explicit service settings were not overridden."
-      );
+      throw new HackCliError({
+        code: "E_NATIVE_PROJECT_UNSUPPORTED",
+        message:
+          "Native host dependencies require init: true; explicit service settings were not overridden.",
+      });
     }
     selected.push(service);
   }
@@ -57,10 +60,13 @@ export function prepareNativeDependencyServices(opts: {
   }
 }
 
+/** The private listener selection (or its discovery) did not validate. */
 function refused(): Error {
-  return new Error(
-    "Native host dependencies require a bounded explicit listener selection; values omitted."
-  );
+  return new HackCliError({
+    code: "E_CONFIG_INVALID",
+    message:
+      "Native host dependencies require a bounded explicit listener selection; values omitted.",
+  });
 }
 function port(value: unknown): value is number {
   return (

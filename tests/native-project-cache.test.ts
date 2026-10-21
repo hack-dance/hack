@@ -1,10 +1,16 @@
 import { expect, test } from "bun:test";
 import {
   hasOnlyNativeCacheLabels,
+  nativeCacheInitializers,
   nativeSharedSourceFlags,
+  nativeStartCacheSource,
   publishNativeCacheSource,
 } from "../src/backends/native-project-cache.ts";
 import type { NativeProjectReview } from "../src/backends/native-project-review.ts";
+import {
+  expectClosedRefusal,
+  expectClosedThrow,
+} from "./helpers/closed-refusal.ts";
 
 const planId = "a".repeat(64),
   namespace = "b".repeat(64),
@@ -126,12 +132,40 @@ test("missing, foreign or unverified source publications cannot be admitted", as
       state: "guest-content-verified-no-job-started",
     },
   ]) {
-    await expect(
+    await expectClosedRefusal(
       publishNativeCacheSource({
         ...base,
         review: selected,
         invoke: async () => publication,
-      })
-    ).rejects.toThrow("verified revision");
+      }),
+      "verified revision"
+    );
   }
+});
+
+test("invalid reviewed cache and source replies refuse with closed messages", async () => {
+  expectClosedThrow(
+    () => nativeSharedSourceFlags(null),
+    "Native source review is invalid."
+  );
+  expectClosedThrow(
+    () => nativeCacheInitializers({}),
+    "Native cache review is invalid."
+  );
+  expectClosedThrow(
+    () => nativeCacheInitializers({ services: { web: null } }),
+    "Native service review is invalid."
+  );
+  await expectClosedRefusal(
+    nativeStartCacheSource({
+      runtime: { binary: "/fixture/native", home: "/fixture/home" },
+      projectRoot: "/fixture/project",
+      review: {} as NativeProjectReview,
+      restoreRevision: "not-a-revision",
+      invoke: async () => {
+        throw new Error("must not invoke");
+      },
+    }),
+    "Native retained cache source revision is invalid."
+  );
 });

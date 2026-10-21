@@ -613,7 +613,7 @@ Validate native configuration and selected local overlays without starting workl
 hack config validate [options]
 ```
 
-Uses the matching bundled Rust compiler. Without --file, discovers a native project and resolves permitted worktree-local overlay and routing settings. --file validates only the explicit document. Neither mode reads env values, writes state, or starts workloads.
+Uses the matching bundled Rust compiler. Without --file, discovers a native project and resolves permitted worktree-local overlay and routing settings. --file validates only the explicit document. With HACK_RUNTIME_BACKEND=native, a selected workload image that is not a sha256: content ID refuses with the native consumer's native_graph_admission code. Neither mode reads env values, writes state, or starts workloads.
 
 ### Options
 

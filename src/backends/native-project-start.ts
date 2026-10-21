@@ -2,6 +2,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join } from "node:path";
+import { ClosedCliError, HackCliError } from "../lib/cli-result.ts";
 import {
   type ComposeEnvFingerprintRecord,
   withComposeServiceEnvFingerprints,
@@ -34,6 +35,7 @@ import {
   waitNativeProjectFinalization,
 } from "./native-project-finalization.ts";
 import { isNativeHttpsProbePath } from "./native-project-https.ts";
+import { admitNativeProjectImages } from "./native-project-image-admission.ts";
 import {
   type NativeProjectInput,
   prepareNativeProjectInput,
@@ -106,9 +108,11 @@ export function validateHttpsSelection(
       selection.httpsPort < 1 ||
       selection.httpsPort > 65_535)
   ) {
-    throw new Error(
-      "Native HTTPS requires an absolute HACK_NATIVE_CADDY_BINARY, SHA256 pin and explicit HTTPS port; values omitted."
-    );
+    throw new HackCliError({
+      code: "E_CONFIG_INVALID",
+      message:
+        "Native HTTPS requires an absolute HACK_NATIVE_CADDY_BINARY, SHA256 pin and explicit HTTPS port; values omitted.",
+    });
   }
 }
 export function parseNativeHttpsSelection(
@@ -126,9 +130,11 @@ export function parseNativeHttpsSelection(
     port === undefined ||
     String(Number(port)) !== port
   ) {
-    throw new Error(
-      "Native HTTPS selection requires binary, SHA256 and port together; values omitted."
-    );
+    throw new HackCliError({
+      code: "E_CONFIG_INVALID",
+      message:
+        "Native HTTPS selection requires binary, SHA256 and port together; values omitted.",
+    });
   }
   const selection = {
     caddyBinary: binary,
@@ -164,7 +170,7 @@ async function acquireReadyHttps(opts: {
       BOOT_ID.test(pool.guest_boot_id)
     )
   ) {
-    throw new Error(
+    throw new ClosedCliError(
       "Native HTTPS requires a verified running pool incarnation."
     );
   }
@@ -269,15 +275,45 @@ const DEFAULTS: Dependencies = {
   captureFinalization: captureNativeProjectFinalization,
   waitFinalization: waitNativeProjectFinalization,
 };
+/** Fixed text of the native foreground configuration refusal. */
+export const NATIVE_CONFIGURATION_REFUSAL =
+  "Native foreground up cannot admit this configuration: routing, host dependencies, builds or unsupported runtime settings require explicit native support; configuration was not dropped.";
+/** Known configuration refusal: a stable code and a closed message, no stack. */
 function refused(): Error {
-  return new Error(
-    "Native foreground up cannot admit this configuration: routing, host dependencies, builds or unsupported runtime settings require explicit native support; configuration was not dropped."
+  return new HackCliError({
+    code: "E_NATIVE_PROJECT_UNSUPPORTED",
+    message: NATIVE_CONFIGURATION_REFUSAL,
+  });
+}
+
+/**
+ * A runtime reply or saved ownership record that does not match this start.
+ * This is an integrity or ownership refusal, not a configuration refusal: it
+ * is closed (no stack) and carries no configuration code.
+ */
+function unconfirmed(subject: string): Error {
+  return new ClosedCliError(
+    `Native foreground up could not confirm ${subject}; inspect owned state before retrying.`
+  );
+}
+
+/** Fixed classifications from reviewed-route verification; peer values are never echoed. */
+function httpsVerificationFailed(code: string): Error {
+  return new ClosedCliError(
+    `Native HTTPS verification failed (${code}); peer values omitted.`
+  );
+}
+
+/** Cancellation is not a configuration refusal: it carries no refusal code. */
+function canceled(): Error {
+  return new ClosedCliError(
+    "Native foreground up was canceled; values omitted."
   );
 }
 
 function requireActiveStartup(signal: AbortSignal | undefined): void {
   if (signal?.aborted) {
-    throw refused();
+    throw canceled();
   }
 }
 export function prepareNativeProjectServices(
@@ -306,6 +342,9 @@ export function prepareNativeProjectServices(
   }
   return result;
 }
+/** Fixed text of the refusal when the project share was not granted. */
+export const NATIVE_SHARED_SOURCE_REFUSAL =
+  "Native foreground up requires HACK_NATIVE_SHARED_SOURCE=1 to share this exact project, including ignored files. Set it to grant that share and run the command again.";
 /** Keep image acquisition separate from graph admission and preserve cancellation between requests. */
 async function pinNativeProjectImages(opts: {
   readonly runtime: NativeRuntimeSelection;
@@ -317,7 +356,7 @@ async function pinNativeProjectImages(opts: {
 }): Promise<void> {
   for (const [name, spec] of Object.entries(opts.specs)) {
     if (opts.signal.aborted) {
-      throw refused();
+      throw canceled();
     }
     const retainedImage = opts.retainedImages.get(name);
     if (retainedImage) {
@@ -338,7 +377,7 @@ async function pinNativeProjectImages(opts: {
       typeof ensured.image_id !== "string" ||
       !IMAGE.test(ensured.image_id)
     ) {
-      throw refused();
+      throw unconfirmed("the runtime image selection");
     }
     spec.image = ensured.image_id;
   }
@@ -409,7 +448,7 @@ function authoritative(
     value.journal_incomplete !== false ||
     !isRecord(value.receipt)
   ) {
-    throw refused();
+    throw unconfirmed("the startup receipt");
   }
   const receipt = value.receipt;
   if (
@@ -419,7 +458,7 @@ function authoritative(
     typeof receipt.owner !== "string" ||
     !OWNER.test(receipt.owner)
   ) {
-    throw refused();
+    throw unconfirmed("the startup receipt");
   }
   return { run, owner: receipt.owner, namespace, planId };
 }
@@ -441,7 +480,7 @@ function redirectHostname(
   try {
     target = new URL(location, `https://${hostname}:${port}${route.path}`);
   } catch {
-    throw refused();
+    throw httpsVerificationFailed("REDIRECT_TARGET_REFUSED");
   }
   const reviewed = routes.find((entry) => entry.hostname === target.hostname);
   if (
@@ -456,9 +495,7 @@ function redirectHostname(
     reviewed.path !== route.path ||
     target.pathname !== route.path
   ) {
-    throw new Error(
-      "Native HTTPS verification failed (REDIRECT_TARGET_REFUSED); peer values omitted."
-    );
+    throw httpsVerificationFailed("REDIRECT_TARGET_REFUSED");
   }
   return target.hostname;
 }
@@ -491,22 +528,18 @@ export async function verifyHttpsRoutes(
     let hostname = route.hostname;
     while (true) {
       if (visited.has(hostname)) {
-        throw new Error(
-          "Native HTTPS verification failed (REDIRECT_CYCLE); peer values omitted."
-        );
+        throw httpsVerificationFailed("REDIRECT_CYCLE");
       }
       visited.add(hostname);
       const response = results.get(hostname);
       if (!(response && Number.isInteger(response.statusCode))) {
-        throw refused();
+        throw httpsVerificationFailed("NO_RESPONSE");
       }
       if (response.statusCode >= 200 && response.statusCode < 300) {
         break;
       }
       if (!(HTTPS_REDIRECTS.has(response.statusCode) && response.location)) {
-        throw new Error(
-          `Native HTTPS verification failed (HTTP_STATUS_${response.statusCode}); peer values omitted.`
-        );
+        throw httpsVerificationFailed(`HTTP_STATUS_${response.statusCode}`);
       }
       hostname = redirectHostname(
         response.location,
@@ -571,7 +604,7 @@ function cleanupUnconfirmed(
     startupFailure === undefined
       ? ""
       : ` Startup diagnostic: ${diagnostic ? `${diagnostic[1]} (${diagnostic[2]})` : "STARTUP_FAILURE (details omitted)"}.`;
-  return new Error(
+  return new ClosedCliError(
     `Native foreground exit cleanup is unconfirmed; runtime and bridge state may be retained. Any published run mapping is retained; inspect owned state before retrying.${startup}${nativeCode ? ` Native exit diagnostic: ${nativeCode}.` : ""}`
   );
 }
@@ -640,7 +673,7 @@ async function refusePendingFreshStart(
   load: typeof loadNativeRestartIntent
 ): Promise<void> {
   if (!restore && (await load(scope))) {
-    throw new Error(
+    throw new ClosedCliError(
       "Native project has a pending restart; use hack restart to resume retained data."
     );
   }
@@ -664,7 +697,7 @@ function retainedStartupSelection(opts: {
       (opts.aws.profile !== run.aws?.profile ||
         opts.aws.region !== run.aws?.region))
   ) {
-    throw new Error(
+    throw new ClosedCliError(
       "Native up cannot change the retained run's environment, profiles or AWS profile; data was not replaced."
     );
   }
@@ -706,7 +739,9 @@ async function selectNativeStartup(opts: {
       opts.restore &&
       JSON.stringify(opts.restore) !== JSON.stringify(retained)
     ) {
-      throw new Error("Native retained run mapping changed before restore.");
+      throw new ClosedCliError(
+        "Native retained run mapping changed before restore."
+      );
     }
     const preflight = await preflightNativeRetainedStartup({
       runtime: opts.runtime,
@@ -729,7 +764,7 @@ async function selectNativeStartup(opts: {
       preflight.runtimePhase === "running" &&
       !confirmedNativeRetainedGraph(observed, retained)
     ) {
-      throw new Error(
+      throw new ClosedCliError(
         "Native project already has an owned run mapping that is not safely stopped; inspect it before starting another run."
       );
     }
@@ -770,7 +805,7 @@ export function nativeRuntimeMetadataSelected(opts: {
     return undefined;
   }
   if (opts.restore && !opts.selection) {
-    throw new Error(
+    throw new ClosedCliError(
       "Native retained graph requires its runtime metadata selection; no hooks, runtime start or HTTPS owner were requested."
     );
   }
@@ -787,7 +822,9 @@ async function retireRemovedMapping(opts: {
     return;
   }
   if (opts.mapping.owner !== opts.owned.owner) {
-    throw refused();
+    throw new ClosedCliError(
+      "Native run mapping is owned by another run; it was not removed. Inspect owned state before retrying."
+    );
   }
   if (
     isRecord(opts.final) &&
@@ -835,7 +872,7 @@ async function requireAcknowledgedRetainedFinalization(opts: {
       timeoutMs: 1,
     });
   } catch {
-    throw new Error(
+    throw new ClosedCliError(
       "Native retained frontend finalization is unconfirmed or its ownership changed; no hooks, runtime start or HTTPS owner were requested."
     );
   }
@@ -878,9 +915,10 @@ export async function startNativeProject(opts: {
   const allowedHosts = validateNativeAllowedHosts(opts.allowedHosts);
   validateHttpsSelection(opts.https);
   if (!opts.sharedSource) {
-    throw new Error(
-      "Native foreground up requires HACK_NATIVE_SHARED_SOURCE=1 to share this exact project, including ignored files."
-    );
+    throw new HackCliError({
+      code: "E_PERMISSION",
+      message: NATIVE_SHARED_SOURCE_REFUSAL,
+    });
   }
   const deps = { ...DEFAULTS, ...opts.dependencies };
   await refusePendingFreshStart(opts.restore, opts.scope, deps.loadRestart);
@@ -942,7 +980,7 @@ export async function startNativeProject(opts: {
     !opts.restore &&
     input.effectiveEnvName !== selection.envName
   ) {
-    throw new Error(
+    throw new ClosedCliError(
       "Native retained environment selection changed; data was not replaced."
     );
   }
@@ -964,6 +1002,15 @@ export async function startNativeProject(opts: {
     input,
     opts.dependencyFile !== undefined
   );
+  // Refuse malformed or unacquirable references before hooks, VM or provider start.
+  await admitNativeProjectImages({
+    runtime: opts.runtime,
+    projectRoot: opts.scope.projectRoot,
+    specs,
+    signal: opts.signal,
+    invoke: deps.invoke,
+  });
+  requireActiveStartup(opts.signal);
   const bridgeCapacity = nativeBridgeCapacity(specs);
   const artifact = join(dirname(opts.runtime.binary), "hack-relay-guest");
   const artifactFile = Bun.file(artifact);
@@ -972,7 +1019,7 @@ export async function startNativeProject(opts: {
     artifactFile.size > 16 * 1024 * 1024 ||
     artifactFile.size === 0
   ) {
-    throw new Error(
+    throw new ClosedCliError(
       "Native foreground up requires the bundled hack-relay-guest artifact."
     );
   }
@@ -1199,7 +1246,7 @@ export async function startNativeProject(opts: {
             typeof plan.dependency_plan_id !== "string" ||
             !SHA.test(plan.dependency_plan_id)
           ) {
-            throw refused();
+            throw unconfirmed("the host dependency plan");
           }
           const invokeInspect = () =>
             inspectNativeProjectGraph({
@@ -1255,7 +1302,7 @@ export async function startNativeProject(opts: {
                   restore?.planId ?? review.planId
                 );
                 if (controller.signal.aborted) {
-                  throw new Error(
+                  throw new ClosedCliError(
                     "Native startup canceled before mapping publication."
                   );
                 }
@@ -1299,7 +1346,7 @@ export async function startNativeProject(opts: {
                   });
                   void https.exited.then(() => {
                     if (!httpsClosing) {
-                      httpsFailure = new Error(
+                      httpsFailure = new ClosedCliError(
                         "Native HTTPS owner exited unexpectedly; graph shutdown requested."
                       );
                       controller.abort();

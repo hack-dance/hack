@@ -24,13 +24,17 @@ import { preflightNativeRestart } from "../src/backends/native-project-restart-p
 import { selectNativeRetainedImages } from "../src/backends/native-project-retained-images.ts";
 import type { NativeProjectRun } from "../src/backends/native-project-run.ts";
 import {
+  NATIVE_CONFIGURATION_REFUSAL,
+  NATIVE_SHARED_SOURCE_REFUSAL,
   nativeReadinessArgs,
   parseNativeHttpsSelection,
+  prepareNativeProjectServices,
   reviewedNativeHttpsRoutes,
   startNativeProject,
   verifyHttpsRoutes,
 } from "../src/backends/native-project-start.ts";
 import { NativeRuntimeRequestError } from "../src/backends/native-runtime-client.ts";
+import { ClosedCliError, HackCliError } from "../src/lib/cli-result.ts";
 import {
   type ComposeEnvFingerprintRecord,
   evaluateComposeServiceEnvFreshness,
@@ -99,6 +103,9 @@ async function fixture(withEnvironment = true) {
     invoke: async (opts) => {
       if (opts.args[1] === "check-project-share") {
         return { source_admitted: true, pool_initialized: false };
+      }
+      if (opts.args[1] === "admit-image") {
+        return { reference: opts.args[3], kind: "docker_hub" };
       }
       events.push(opts.args.slice(0, 2).join(" "));
       if (opts.args[0] === "runtime" && opts.args[1] === "status") {
@@ -481,20 +488,204 @@ test("foreground partial shutdown is reported without selecting failed-start rec
   expect(events).not.toContain("remove");
 });
 
+test.each([
+  { build: "." },
+  { ports: ["8080:80"] },
+  { restart: "always" },
+])("an unsupported service setting %j is a coded configuration refusal", (setting) => {
+  const refusal = (() => {
+    try {
+      prepareNativeProjectServices({
+        normalizedComposeJson: JSON.stringify({
+          services: { web: { image: "busybox", ...setting } },
+        }),
+      } as NativeProjectInput);
+    } catch (error: unknown) {
+      return error;
+    }
+  })();
+  expect(refusal).toBeInstanceOf(HackCliError);
+  expect(refusal).toMatchObject({
+    code: "E_NATIVE_PROJECT_UNSUPPORTED",
+    message: NATIVE_CONFIGURATION_REFUSAL,
+  });
+});
+
+test("a canceled start reports cancellation, not the configuration refusal", async () => {
+  const { opts, events } = await fixture();
+  const refusal = await startNativeProject({
+    ...opts,
+    signal: AbortSignal.abort(),
+  }).catch((error: unknown) => error);
+  expect(refusal).toBeInstanceOf(ClosedCliError);
+  expect(refusal).not.toBeInstanceOf(HackCliError);
+  expect(String(refusal)).toContain("Native foreground up was canceled");
+  expect(String(refusal)).not.toContain(NATIVE_CONFIGURATION_REFUSAL);
+  expect(events).toEqual([]);
+});
+
+/** An integrity or ownership refusal: closed, and never the configuration refusal. */
+function expectIntegrityRefusal(refusal: unknown, text: string): void {
+  expect(refusal).toBeInstanceOf(ClosedCliError);
+  expect(refusal).not.toBeInstanceOf(HackCliError);
+  expect(refusal).toHaveProperty("message", expect.stringContaining(text));
+  expect(String(refusal)).not.toContain(NATIVE_CONFIGURATION_REFUSAL);
+  expect(String(refusal)).not.toContain("E_NATIVE_PROJECT_UNSUPPORTED");
+}
+
+test("an unconfirmed image selection reply is an integrity refusal, not a configuration refusal", async () => {
+  const { opts } = await fixture();
+  const prepare = opts.dependencies.prepare!;
+  opts.dependencies.prepare = async (request) => ({
+    ...(await prepare(request)),
+    normalizedComposeJson: JSON.stringify({
+      services: { web: { image: "redis:latest" } },
+    }),
+  });
+  const invoke = opts.dependencies.invoke!;
+  opts.dependencies.invoke = async (request) =>
+    request.args[1] === "ensure-image"
+      ? { image_id: "not-a-content-id" }
+      : await invoke(request);
+  expectIntegrityRefusal(
+    await startNativeProject(opts).catch((error: unknown) => error),
+    "Native foreground up could not confirm the runtime image selection; inspect owned state before retrying."
+  );
+});
+
+test("an invalid host dependency plan reply is an integrity refusal", async () => {
+  const { opts, events } = await fixture();
+  const invoke = opts.dependencies.invoke!;
+  opts.dependencies.invoke = async (request) =>
+    request.args[1] === "dependency-plan"
+      ? { dependency_plan_id: "not-a-digest" }
+      : await invoke(request);
+  expectIntegrityRefusal(
+    await startNativeProject(opts).catch((error: unknown) => error),
+    "Native foreground up could not confirm the host dependency plan; inspect owned state before retrying."
+  );
+  expect(events).not.toContain("save");
+});
+
+test("a ready receipt for another namespace is an integrity refusal", async () => {
+  const { opts, events } = await fixture();
+  const invoke = opts.dependencies.invoke!;
+  let serving = false;
+  const serve = opts.dependencies.serve!;
+  opts.dependencies.serve = async (request) => {
+    serving = true;
+    try {
+      return await serve(request);
+    } finally {
+      serving = false;
+    }
+  };
+  opts.dependencies.invoke = async (request) => {
+    const reply = await invoke(request);
+    if (request.args[1] === "inspect" && serving) {
+      const graph = reply as { receipt: Record<string, unknown> };
+      return {
+        ...graph,
+        receipt: { ...graph.receipt, namespace: "0".repeat(64) },
+      };
+    }
+    return reply;
+  };
+  expectIntegrityRefusal(
+    await startNativeProject(opts).catch((error: unknown) => error),
+    "Native foreground up could not confirm the startup receipt; inspect owned state before retrying."
+  );
+  expect(events).not.toContain("save");
+});
+
+test("a run mapping owned by another run is an ownership refusal and is not removed", async () => {
+  const { opts, events } = await fixture();
+  const invoke = opts.dependencies.invoke!;
+  let ready = false;
+  const serve = opts.dependencies.serve!;
+  opts.dependencies.serve = async (request) => {
+    try {
+      return await serve(request);
+    } finally {
+      ready = true;
+    }
+  };
+  opts.dependencies.invoke = async (request) => {
+    const reply = await invoke(request);
+    if (request.args[1] === "inspect" && ready) {
+      // After serve, the final receipt names a different owner than the one
+      // the published mapping recorded at readiness.
+      const graph = reply as { receipt: Record<string, unknown> };
+      return {
+        ...graph,
+        receipt: { ...graph.receipt, owner: "9".repeat(32), phase: "removed" },
+      };
+    }
+    return reply;
+  };
+  expectIntegrityRefusal(
+    await startNativeProject(opts).catch((error: unknown) => error),
+    "Native run mapping is owned by another run; it was not removed. Inspect owned state before retrying."
+  );
+  expect(events).toContain("save");
+  expect(events).not.toContain("remove");
+});
+
+test("a missing or unparseable HTTPS verification response is a verification failure", async () => {
+  const plan = {
+    services: {
+      web: {
+        routing: { hostnames: ["web.hack"] },
+        healthcheck: { native_http: { path: "/health" } },
+      },
+    },
+  };
+  const frontend = (response: { statusCode?: number; location?: string }) => ({
+    caPath: "/public",
+    httpsPort: 18_443,
+    exited: new Promise<{ component: string; code: number }>(() => {}),
+    releaseAfterCleanup: async () => {},
+    verifyHostname: async () => response as { statusCode: number },
+  });
+  expectIntegrityRefusal(
+    await verifyHttpsRoutes(frontend({}), plan, new Set(["web"])).catch(
+      (error: unknown) => error
+    ),
+    "Native HTTPS verification failed (NO_RESPONSE); peer values omitted."
+  );
+  expectIntegrityRefusal(
+    await verifyHttpsRoutes(
+      frontend({ statusCode: 307, location: "https://[" }),
+      plan,
+      new Set(["web"])
+    ).catch((error: unknown) => error),
+    "Native HTTPS verification failed (REDIRECT_TARGET_REFUSED); peer values omitted."
+  );
+});
+
 test("source opt-in and occupied mapping refuse before lifecycle or runtime effects", async () => {
   const { opts, events } = await fixture();
-  await expect(
-    startNativeProject({ ...opts, sharedSource: false })
-  ).rejects.toThrow("HACK_NATIVE_SHARED_SOURCE");
+  const refusal = await startNativeProject({
+    ...opts,
+    sharedSource: false,
+  }).catch((error: unknown) => error);
+  // A known refusal: stable code, closed message, printed without a stack.
+  expect(refusal).toBeInstanceOf(HackCliError);
+  expect(refusal).toMatchObject({
+    code: "E_PERMISSION",
+    message: NATIVE_SHARED_SOURCE_REFUSAL,
+  });
   opts.dependencies.load = async () => ({
     run: "a".repeat(32),
     owner: "b".repeat(32),
     namespace: "c".repeat(64),
     planId: "d".repeat(64),
   });
-  await expect(startNativeProject(opts)).rejects.toThrow(
-    "cannot change the retained run"
+  const retained = await startNativeProject(opts).catch(
+    (error: unknown) => error
   );
+  expect(retained).toBeInstanceOf(ClosedCliError);
+  expect(String(retained)).toContain("cannot change the retained run");
   expect(events).toEqual([]);
 });
 test("caller cancellation is forwarded and lifecycle cleanup remains owned", async () => {
@@ -2668,6 +2859,120 @@ test("retained startup selects legacy labels only after runtime admission and be
       expect(reviewed).toBe(true);
     }
   }
+});
+
+function withImages(
+  opts: Awaited<ReturnType<typeof fixture>>["opts"],
+  services: Record<string, string>
+) {
+  const prepare = opts.dependencies.prepare!;
+  opts.dependencies.prepare = async (request) => ({
+    ...(await prepare(request)),
+    normalizedComposeJson: JSON.stringify({
+      services: Object.fromEntries(
+        Object.entries(services).map(([name, image]) => [name, { image }])
+      ),
+    }),
+    serviceNames: Object.keys(services),
+  });
+}
+
+test("an invalid image reference is refused before hooks, VM, provider or image effects", async () => {
+  const { opts, events } = await fixture(false);
+  withImages(opts, { web: "Private-Canary:3.21" });
+  const invoke = opts.dependencies.invoke!;
+  const admissions: string[] = [];
+  opts.dependencies.invoke = async (request) => {
+    if (request.args[1] === "admit-image") {
+      admissions.push(String(request.args[3]));
+      throw new NativeRuntimeRequestError({
+        message: "Image repository names must be lowercase.",
+        nativeCode: "registry_image",
+      });
+    }
+    return await invoke(request);
+  };
+  let served = false;
+  opts.dependencies.serve = async () => {
+    served = true;
+    return 0;
+  };
+  let failure: unknown;
+  try {
+    await startNativeProject(opts);
+  } catch (error) {
+    failure = error;
+  }
+  expect(String(failure)).toContain(
+    "image reference refused before runtime startup"
+  );
+  expect(String(failure)).not.toContain("Canary");
+  expect(admissions).toEqual(["Private-Canary:3.21"]);
+  // No startup hook, runtime/VM start, image acquisition or graph effect occurred.
+  expect(events).toEqual([]);
+  expect(served).toBe(false);
+});
+
+test("Docker Hub shorthand is admitted once per distinct reference before the runtime starts", async () => {
+  const { opts, events } = await fixture(false);
+  const id = `sha256:${"e".repeat(64)}`;
+  withImages(opts, {
+    web: "alpine:3.21",
+    worker: "alpine:3.21",
+    cache: "redis",
+    pinned: id,
+  });
+  opts.dependencies.review = async (request) =>
+    request.run({
+      planId: "a".repeat(64),
+      namespace: "b".repeat(64),
+      projectArgs: ["--project", request.projectRoot],
+      report: { plan: { enrollment_compatible: true, services: {} } },
+    });
+  const invoke = opts.dependencies.invoke!;
+  const order: string[] = [];
+  opts.dependencies.invoke = async (request) => {
+    if (request.args[1] === "admit-image") {
+      order.push(`admit ${request.args[3]}`);
+      expect(request.timeoutMs).toBeLessThanOrEqual(10_000);
+    }
+    if (request.args[0] === "runtime" && request.args[1] === "up") {
+      order.push("runtime up");
+    }
+    if (request.args[1] === "ensure-image") {
+      order.push(`ensure ${request.args[3]}`);
+      return { image_id: id };
+    }
+    return await invoke(request);
+  };
+  expect(await startNativeProject(opts)).toBe(0);
+  expect(order).toEqual([
+    "admit alpine:3.21",
+    "admit redis",
+    "runtime up",
+    "ensure alpine:3.21",
+    "ensure alpine:3.21",
+    "ensure redis",
+  ]);
+  expect(events.indexOf("before")).toBeLessThan(events.indexOf("runtime up"));
+});
+
+test("a runtime failure during image admission keeps its own diagnostic and starts nothing", async () => {
+  const { opts, events } = await fixture(false);
+  withImages(opts, { web: "alpine:3.21" });
+  const invoke = opts.dependencies.invoke!;
+  opts.dependencies.invoke = async (request) => {
+    if (request.args[1] === "admit-image") {
+      throw new NativeRuntimeRequestError({
+        message: "Native runtime request timed out.",
+      });
+    }
+    return await invoke(request);
+  };
+  await expect(startNativeProject(opts)).rejects.toThrow(
+    "Native runtime request timed out."
+  );
+  expect(events).toEqual([]);
 });
 
 test("retained startup reviews the saved content ID instead of a newly resolved mutable tag", async () => {

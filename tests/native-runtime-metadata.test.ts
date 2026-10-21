@@ -19,6 +19,7 @@ import {
   buildRuntimeHostMetadataOverride,
   type RuntimeHostMetadata,
 } from "../src/lib/runtime-host-metadata.ts";
+import { expectCodedThrow } from "./helpers/closed-refusal.ts";
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -305,20 +306,25 @@ test("reviewed routes must match the advertised hostnames for active services", 
     routes,
   });
   for (const changed of [["a.hack"], ["a.hack", "c.hack"], [1], undefined]) {
-    expect(() =>
-      verifyNativeRuntimeMetadataRoutes({ plan: plan(changed), routes })
-    ).toThrow("Native runtime metadata");
+    expectCodedThrow(
+      () => verifyNativeRuntimeMetadataRoutes({ plan: plan(changed), routes }),
+      "E_NATIVE_PROJECT_UNSUPPORTED",
+      "Native runtime metadata"
+    );
   }
-  expect(() =>
-    verifyNativeRuntimeMetadataRoutes({
-      plan: {
-        services: {
-          worker: { active: true, routing: { hostnames: ["w.hack"] } },
+  expectCodedThrow(
+    () =>
+      verifyNativeRuntimeMetadataRoutes({
+        plan: {
+          services: {
+            worker: { active: true, routing: { hostnames: ["w.hack"] } },
+          },
         },
-      },
-      routes,
-    })
-  ).toThrow("Native runtime metadata");
+        routes,
+      }),
+    "E_NATIVE_PROJECT_UNSUPPORTED",
+    "Native runtime metadata"
+  );
 });
 
 test("retained graphs reproduce exactly the metadata selection they were admitted with", () => {

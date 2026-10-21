@@ -1,5 +1,5 @@
 import { isAbsolute } from "node:path";
-import { ClosedCliError } from "../lib/cli-result.ts";
+import { ClosedCliError, HackCliError } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
 import { nativeAuthoredExecOptions } from "./native-authored-exec-options.ts";
 import {
@@ -41,19 +41,45 @@ export class NativeRuntimeRequestError extends ClosedCliError {
   }
 }
 
+/**
+ * Native inspection code for a run whose journal is exactly absent and whose
+ * foreground owner is not published: no runtime state was ever reserved. It is
+ * point-in-time only; a caller must separately prove the run's consumer settled
+ * (or cannot exist) before treating it as retirement authority.
+ */
+export const NATIVE_GRAPH_UNRESERVED = "native_graph_unreserved";
+
 /** Native code for a read against a candidate runtime that is not running. */
 export const NATIVE_RUNTIME_NOT_RUNNING = "runtime_not_running";
 
 /**
  * True when a native request was refused because the candidate runtime is not
- * running. The runtime reports this before it connects to the guest or reads
- * graph state, so nothing was observed or changed. A read-only observation may
- * report the stopped runtime as its result instead of failing.
+ * running. Direct requests report this before guest access. Authored foreground
+ * control first authenticates its saved journal and owner, then wraps the same
+ * runtime refusal in its fixed control code. Neither form supplies live health.
+ * A read-only caller must still recheck its saved selection and executable.
  */
 export function isNativeRuntimeNotRunning(error: unknown): boolean {
   return (
     error instanceof NativeRuntimeRequestError &&
-    error.nativeCode === NATIVE_RUNTIME_NOT_RUNNING
+    nativeCodesReportRuntimeNotRunning(error)
+  );
+}
+
+/**
+ * True when a bounded native code pair reports a stopped runtime, either
+ * directly or wrapped by authored foreground control (see
+ * {@link isNativeRuntimeNotRunning}). Callers that carry the codes without the
+ * request error, such as a failed foreground start, classify with this.
+ */
+export function nativeCodesReportRuntimeNotRunning(codes: {
+  readonly nativeCode?: string;
+  readonly nativeCauseCode?: string;
+}): boolean {
+  return (
+    codes.nativeCode === NATIVE_RUNTIME_NOT_RUNNING ||
+    (codes.nativeCode === "native_graph_foreground" &&
+      codes.nativeCauseCode === NATIVE_RUNTIME_NOT_RUNNING)
   );
 }
 
@@ -64,6 +90,8 @@ export interface NativeRuntimeSelection {
 
 const MAX_OUTPUT_BYTES = 16 * 1024 * 1024;
 const MAX_PRIVATE_INPUT_BYTES = 256 * 1024;
+const REQUEST_BUDGET_REFUSAL =
+  "Native runtime request exceeds its input or time budget.";
 const SYSTEM_ENVIRONMENT = ["PATH", "HOME", "TMPDIR", "USER", "LOGNAME"];
 
 /** Explicit candidate selection never redirects installed v4 or starts Docker. */
@@ -76,7 +104,7 @@ export function resolveNativeRuntimeSelection(
   const binary = env.HACK_NATIVE_BINARY;
   const home = env.HACK_NATIVE_HOME;
   if (!(binary && home && isAbsolute(binary) && isAbsolute(home))) {
-    throw new Error(
+    throw new ClosedCliError(
       "Native runtime requires absolute HACK_NATIVE_BINARY and HACK_NATIVE_HOME paths."
     );
   }
@@ -125,14 +153,23 @@ export async function invokeNativeRuntime(opts: {
         opts.args,
         bound,
         opts.privateInput !== undefined
-      ) &&
-      Number.isSafeInteger(timeoutMs)
-    ) ||
+      )
+    )
+  ) {
+    // Internal invariant: callers build these argv shapes; no user input selects them.
+    throw new Error(REQUEST_BUDGET_REFUSAL);
+  }
+  if (
+    !Number.isSafeInteger(timeoutMs) ||
     timeoutMs < 1 ||
     timeoutMs > 600_000 ||
     (opts.privateInput?.byteLength ?? 0) > MAX_PRIVATE_INPUT_BYTES
   ) {
-    throw new Error("Native runtime request exceeds its input or time budget.");
+    // A selected startup timeout or the managed environment size can exceed these bounds.
+    throw new HackCliError({
+      code: "E_CONFIG_INVALID",
+      message: REQUEST_BUDGET_REFUSAL,
+    });
   }
   const env: Record<string, string> = {};
   for (const key of SYSTEM_ENVIRONMENT) {
@@ -428,7 +465,9 @@ function completionResponse(
   try {
     return JSON.parse(new TextDecoder().decode(bytes)) as unknown;
   } catch {
-    throw new Error("Native runtime returned an invalid control response.");
+    throw new ClosedCliError(
+      "Native runtime returned an invalid control response."
+    );
   }
 }
 
@@ -467,7 +506,7 @@ function parseExecCompletion(bytes: Uint8Array, code: number): unknown {
   ) {
     return execResult;
   }
-  throw new Error(
+  throw new ClosedCliError(
     "Native exec returned an invalid or inconsistent completion response; command effects may have occurred."
   );
 }
@@ -494,7 +533,7 @@ async function readBoundedOutput(
       }
       total += chunk.byteLength;
       if (total > MAX_OUTPUT_BYTES) {
-        throw new Error(
+        throw new ClosedCliError(
           "Native runtime control response exceeds its output budget."
         );
       }
@@ -511,6 +550,22 @@ async function readBoundedOutput(
     offset += chunk.byteLength;
   }
   return result;
+}
+
+function nativeFailureCause(input: {
+  readonly code: string;
+  readonly cause: unknown;
+}): string | undefined {
+  if (typeof input.cause !== "string" || !ERROR_CODE.test(input.cause)) {
+    return undefined;
+  }
+  return ["graph_one_off_failed", "graph_owner_recovery"].includes(
+    input.code
+  ) ||
+    (input.code === "native_graph_foreground" &&
+      input.cause === NATIVE_RUNTIME_NOT_RUNNING)
+    ? input.cause
+    : undefined;
 }
 
 /** Only bounded native error codes leave this boundary, never stderr messages. */
@@ -549,15 +604,13 @@ async function readNativeFailure(
       typeof value.code === "string" &&
       ERROR_CODE.test(value.code)
     ) {
+      const causeCode = nativeFailureCause({
+        code: value.code,
+        cause: value.cause_code,
+      });
       return {
         code: value.code,
-        ...(["graph_one_off_failed", "graph_owner_recovery"].includes(
-          value.code
-        ) &&
-        typeof value.cause_code === "string" &&
-        ERROR_CODE.test(value.cause_code)
-          ? { causeCode: value.cause_code }
-          : {}),
+        ...(causeCode ? { causeCode } : {}),
         ...(["engine_protocol", "engine_rejected", "engine_not_found"].includes(
           value.code === "graph_owner_recovery" &&
             typeof value.cause_code === "string"
@@ -581,6 +634,20 @@ export async function readNativeFailureCode(
   signal?: AbortSignal
 ): Promise<string | undefined> {
   return (await readNativeFailure(stream, signal))?.code;
+}
+
+/** Like {@link readNativeFailureCode}, plus the bounded cause code it allows. */
+export async function readNativeFailureCodes(
+  stream: ReadableStream<Uint8Array>,
+  signal?: AbortSignal
+): Promise<{ readonly code: string; readonly causeCode?: string } | undefined> {
+  const failure = await readNativeFailure(stream, signal);
+  return failure === undefined
+    ? undefined
+    : {
+        code: failure.code,
+        ...(failure.causeCode ? { causeCode: failure.causeCode } : {}),
+      };
 }
 
 /** Capture delivery failure while the caller drains and reaps the receiver, never replaying input. */

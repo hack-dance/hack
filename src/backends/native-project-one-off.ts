@@ -1,3 +1,4 @@
+import { ClosedCliError } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
 import { prepareNativeExecEnvironment } from "./native-exec-environment.ts";
 import { refreshNativeProjectDependencies } from "./native-project-dependency-refresh.ts";
@@ -14,7 +15,7 @@ const SERVICE = /^[A-Za-z0-9_.-]{1,128}$/;
 const DIGEST = /^[a-f0-9]{64}$/;
 const JOB = /^[a-f0-9]{32}$/;
 function refused(): Error {
-  return new Error(
+  return new ClosedCliError(
     "Native one-off identity or cleanup is unconfirmed; inspect owned job state before retrying. No command was replayed."
   );
 }
@@ -52,13 +53,13 @@ export async function nativeProjectOneOff(opts: {
         opts.workdir.includes("\0") ||
         Buffer.byteLength(opts.workdir) > 4096))
   ) {
-    throw new Error(
+    throw new ClosedCliError(
       "Native run requires a service, bounded arguments and an optional absolute workdir."
     );
   }
   const mapping = await loadNativeProjectRun(opts.scope);
   if (!mapping) {
-    throw new Error(
+    throw new ClosedCliError(
       "Native run currently requires a started project; run up first."
     );
   }

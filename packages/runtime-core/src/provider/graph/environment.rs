@@ -134,6 +134,33 @@ pub(super) fn verify_cleanup(
     environment_recovery::verify_graph_retired(engine.guest(), expected)
 }
 
+/// Service-to-container bindings an environment-attached receipt's records must match; `None`
+/// when the graph never recorded an environment allocation.
+pub(super) fn bound_containers(receipt: &Receipt) -> Option<BTreeMap<String, String>> {
+    receipt.environment_attached.then(|| {
+        receipt
+            .resources
+            .values()
+            .filter(|r| r.kind == Kind::Container)
+            .map(|r| (r.key.clone(), r.name.clone()))
+            .collect()
+    })
+}
+
+/// Compact `run`'s confirmed-retired allocation records. The caller holds the engine's mutation
+/// lease, has already committed a cleanup or retirement, and no retained effect identity still
+/// binds this run's environment inventory (see `environment_recovery::compaction`). Every
+/// record must match `containers` with that container and its guest slot absent. A refusal is
+/// retained evidence, never a failure of the caller's committed cleanup.
+pub(super) fn compact_history(
+    candidate: &Candidate,
+    engine: &Engine<'_>,
+    run: &str,
+    containers: &BTreeMap<String, String>,
+) -> environment_recovery::Settled {
+    environment_recovery::compact_graph(candidate, engine.guest(), run, containers).into()
+}
+
 pub(super) fn require_replay_supported(receipt: &Receipt) -> Result<(), CandidateError> {
     if receipt.environment_attached {
         return Err(error(
@@ -156,6 +183,9 @@ pub(super) fn archive_slots(
     if !receipt.environment_attached {
         return Ok(());
     }
+    // Finish an interrupted compaction so exact residue is not stranded in the active
+    // directory after the graph leaves cleanup. No new record is compacted here.
+    environment_recovery::resume_graph(candidate, engine.guest(), &receipt.run)?;
     let containers = receipt
         .resources
         .values()

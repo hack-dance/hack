@@ -25,10 +25,16 @@ import {
   NativeAuthoredProjectStartError,
   serveNativeAuthoredProject,
 } from "../backends/native-authored-project-start.ts";
+import {
+  nativeAuthoredUnreservedStartSelected,
+  retireNativeAuthoredUnreservedStart,
+} from "../backends/native-authored-unreserved-start.ts";
 import { resolveNativeAuthoredExecStaleEnvWarning } from "../backends/native-exec-stale-env.ts";
 import { parseNativeHttpsSelection } from "../backends/native-project-start.ts";
 import {
   isNativeRuntimeNotRunning,
+  NATIVE_RUNTIME_NOT_RUNNING,
+  nativeCodesReportRuntimeNotRunning,
   resolveNativeRuntimeSelection,
 } from "../backends/native-runtime-client.ts";
 import { CliUsageError } from "../cli/command.ts";
@@ -43,6 +49,7 @@ import {
   createNativeEnvFingerprintSession,
   type NativeEnvFingerprintSession,
 } from "./native-env-fingerprint-state.ts";
+import { nativeForegroundDetachRefusal } from "./native-up-refusals.ts";
 
 function unsupported(): never {
   throw new HackCliError({
@@ -180,6 +187,17 @@ function assertRecoveryOptions(options: NativeComposeCommandOptions): void {
 }
 
 function assertForegroundOptions(options: NativeComposeCommandOptions): void {
+  // Where authored foreground up/restart is supported, a detached start gets
+  // the same one-line refusal as an image project, not the generic one.
+  if (
+    process.platform === "darwin" &&
+    options.detach &&
+    (options.operation === "up" || options.operation === "restart")
+  ) {
+    throw nativeForegroundDetachRefusal({
+      restart: options.operation === "restart",
+    });
+  }
   if (
     process.platform !== "darwin" ||
     !["up", "down", "restart"].includes(options.operation) ||
@@ -205,8 +223,14 @@ function assertForegroundOptions(options: NativeComposeCommandOptions): void {
 
 function startupFailure(error: unknown): number {
   if (error instanceof NativeAuthoredProjectStartError) {
-    if (error.canceled && error.outcome === "removed") {
+    if (
+      error.canceled &&
+      (error.outcome === "removed" || error.outcome === "unreserved")
+    ) {
       return 130;
+    }
+    if (nativeCodesReportRuntimeNotRunning(error)) {
+      throw stoppedRuntimeStartup(error);
     }
     throw new HackCliError({
       code:
@@ -226,6 +250,40 @@ function startupFailure(error: unknown): number {
   throw new HackCliError({
     code: "E_CONFIG_INVALID",
     message: "Native authored startup selection is invalid; values omitted.",
+  });
+}
+
+/**
+ * A start refused because the candidate runtime is stopped reports that cause
+ * directly, as logs does, with the next action. When nothing was reserved
+ * (`not-started`), `ps` keeps reporting `not_started`. A start that reserved
+ * its intent before the runtime stopped keeps that evidence, so `ps` reports
+ * `pending` until the retained attempt is inspected. A start whose consumer
+ * never reserved runtime state (`unreserved`) had its intent retired, so `ps`
+ * reports `not_started`.
+ */
+function stoppedRuntimeStartup(
+  error: NativeAuthoredProjectStartError
+): HackCliError {
+  const message = {
+    "not-started":
+      "Native runtime is not running; nothing was started. Start the native runtime, then run this command again.",
+    removed:
+      "Native runtime is not running; this start did not stay up and its native cleanup was confirmed. Start the native runtime, then run this command again.",
+    unreserved:
+      "Native runtime is not running; this start never reserved runtime state and its startup intent was retired, so `hack ps` reports not_started. Start the native runtime, then run this command again.",
+    retained:
+      "Native runtime is not running; this start did not reach Ready and its startup evidence is retained, so `hack ps` reports it as pending. Start the native runtime and inspect owned state before retrying.",
+  }[error.outcome];
+  return new HackCliError({
+    code: "E_DOCKER_UNAVAILABLE",
+    message,
+    detail: {
+      outcome: error.outcome,
+      canceled: error.canceled,
+      stage: error.stage,
+      nativeCode: NATIVE_RUNTIME_NOT_RUNNING,
+    },
   });
 }
 
@@ -296,7 +354,7 @@ const STATUS_NOTES: Readonly<
 > = {
   not_started: "Native project has not been started.",
   pending:
-    "Native project startup is pending; no current service status is confirmed.",
+    "Native project startup is pending: a start reserved its intent but has not reached Ready (it is still starting, or it failed and its startup evidence is retained). No current service status is confirmed. If no startup is running, `hack down --recover` retires an attempt that never reserved runtime state.",
   runtime_not_running:
     "Native runtime is not running; no services are running.",
 };
@@ -369,6 +427,9 @@ type Seams = {
   /** Execution seam for command-selection controls; the CLI always uses the real owner. */
   readonly serve?: typeof serveNativeAuthoredProject;
   readonly recover?: typeof recoverNativeAuthoredProject;
+  /** Pending-start selection and unreserved retirement seams (HACK-1272). */
+  readonly unreservedSelected?: typeof nativeAuthoredUnreservedStartSelected;
+  readonly retireUnreserved?: typeof retireNativeAuthoredUnreservedStart;
   readonly observe?: typeof nativeAuthoredProjectPs;
   readonly logs?: typeof nativeAuthoredProjectLogs;
   readonly stop?: typeof stopNativeAuthoredProject;
@@ -408,6 +469,27 @@ async function runStatus(input: LifecycleInput): Promise<number> {
 }
 
 async function runRecovery(input: LifecycleInput): Promise<number> {
+  if (
+    await (
+      input.seams.unreservedSelected ?? nativeAuthoredUnreservedStartSelected
+    )(input.scope)
+  ) {
+    // A startup intent without a Ready generation: only a provably unreserved
+    // attempt is retired; every other retained attempt refuses unchanged.
+    await (input.seams.retireUnreserved ?? retireNativeAuthoredUnreservedStart)(
+      {
+        runtime: input.runtime,
+        scope: input.scope,
+        timeoutMs: input.startupTimeoutMs,
+        signal: input.signal,
+      }
+    );
+    logger.info({
+      message:
+        "Retired an incomplete native startup that never reserved runtime state; nothing else was changed.",
+    });
+    return 0;
+  }
   await (input.seams.recover ?? recoverNativeAuthoredProject)({
     runtime: input.runtime,
     scope: input.scope,

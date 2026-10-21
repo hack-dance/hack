@@ -48,21 +48,42 @@ therefore remains part of the threat model even after rotation.
 
 The inline `v1:` and encrypted-store envelope authenticate no associated data.
 Inline ciphertext is not bound to its variable, project or path; the store scopes
-entry names inside its encrypted map. Cross-context copying needs explicit controls
-in any future format. Existing negative controls reject incorrect decryption
-material, altered or truncated payloads, invalid IV/tag lengths and oversized
-ciphertext. Passing those controls does not prove all backends, exports or endpoint
-behavior safe.
+entry names inside its encrypted map. Cross-context controls now pin the outcome:
+ciphertext moved to another key (project, `HACK_ENV_SECRET_KEY` or store key) is
+refused with a fixed, value-free error, and every move that keeps the key is
+accepted. The [threat model](env-secrets-threat-model.md#cross-context-substitution-accepted-under-v1)
+lists the accepted moves as residual risk; binding them needs a future envelope
+version. Existing negative controls also reject altered or truncated payloads,
+invalid IV/tag lengths and oversized ciphertext. Passing those controls does not
+prove all backends, exports or endpoint behavior safe.
+
+A synthetic-sentinel scan (`tests/env-secret-sentinel-scan.test.ts`, CI `test`
+job) enforces the artifact policy above for one primary checkout and one linked
+worktree: after env set, materialize, exec, Compose generation, env apply, logs and
+doctor and a careless `git add -A` commit, no value or key appears in tracked files,
+Git objects, output, child argv, HACK_HOME or caches; plaintext exists only in the
+private, ignored, mode-0600 `.hack/.env`. The generated
+`.hack/.internal/compose.env.override.yml` must hold `${HACK_ENV_...}` references and no
+value (HACK-1273), and must also be private and ignored. Values reach a child process
+environment only for the exec'd command and the `docker compose` client. The
+per-service `HACK_ENV_*` values go only to `docker compose` invocations that read the
+override; the `docker inspect`, `logs` and `events` children Hack starts around Compose
+get the same environment without them.
+Its limits are listed in the threat model.
 
 ## Key writes and rotation
 
-Project-env key creation already uses exclusive private-file creation and
-worktree selection rules. Encrypted-store provisioning now stages and syncs a
-mode-0600 sibling and atomically replaces a regular key; key-path and immediate
-parent symlinks refuse. Store set/delete have their own cooperative lock. These
-are separate operations: neither the store lock nor atomic key replacement makes
-key provisioning converge across concurrent processes or coordinates rotation of
-a key with its ciphertext.
+Project-env key creation publishes a complete mode-0600 key file only when the
+path is free, and, when no key exists in a git checkout, runs under a cooperative
+lock in the git common dir, so concurrent first users in primary and linked
+checkouts converge on one key. Explicit encrypted-store provisioning stages and
+syncs a mode-0600 sibling and atomically replaces a regular key; key-path and
+immediate parent symlinks refuse. A store key generated on first use is published
+only when no key file exists, so concurrent first users adopt one key instead of
+replacing a key the store is already encrypted with. Store set/delete have their
+own cooperative lock. `tests/secret-key-provisioning-convergence.test.ts` proves
+both convergence cases across eight worker processes. None of this coordinates
+rotation of a key with its ciphertext, and Hack v4 writers take no lock.
 
 Before rotating real data, preserve a private recoverable key/ciphertext snapshot,
 validate recovery, inventory every overlay, linked-worktree override and backend,
@@ -82,11 +103,14 @@ ordering model and compatibility gates. It is not a production rotation command.
 
 ## Remaining acceptance
 
-HACK-1127 stays open for a complete backend/export inventory, synthetic Git-history
-and runtime leakage controls, concurrent key provisioning, cross-context controls,
-nonce/usage limits, crash-safe paired rotation and interrupted recovery, primary
-and linked-worktree isolation, and independent review where a new construction is
-proposed. Compare maintained alternatives only against a concrete distribution
+HACK-1127 stays open for a complete backend/export inventory, leakage controls
+beyond the synthetic scan (a real engine, application output, crash reports,
+archives, the keychain backend and the native runtime), context binding for the
+accepted cross-context moves, nonce/usage limits, crash-safe paired rotation and
+interrupted recovery, and independent review where a new construction is proposed.
+Synthetic Git-history, output, argv and cache scans, concurrent key provisioning
+and cross-context controls now exist as regression tests; they are evidence for
+the paths they exercise, not complete qualification. Compare maintained alternatives only against a concrete distribution
 and migration design; this decision does not claim they have been benchmarked or
 qualified. Production rotation, private off-machine backup and publication require
 their actual authorized destination and scope.

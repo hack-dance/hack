@@ -1286,7 +1286,20 @@ fn logs_with<B: Backend>(
 }
 
 /// Read-only same-incarnation inspection. A historical ready phase is not current health.
+///
+/// A run whose journal is exactly absent and whose foreground owner is not
+/// published refuses `native_graph_unreserved` before any guest access. Absence
+/// is a point-in-time observation: only a caller that separately proved its
+/// consumer settled may treat it as "never reserved". Every other journal state
+/// keeps the ordinary receipt validation below.
 pub fn inspect(candidate: &Candidate, run: &str) -> Result<Snapshot, CandidateError> {
+    #[cfg(target_os = "macos")]
+    if journal::absent(candidate, run)? {
+        super::foreground::require_unpublished(candidate, run)?;
+        if journal::absent(candidate, run)? {
+            return Err(journal::unreserved());
+        }
+    }
     let engine = Engine::connect_cleanup(candidate)?;
     let (receipt, _) = journal::load(
         candidate,

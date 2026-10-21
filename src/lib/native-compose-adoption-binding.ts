@@ -373,7 +373,12 @@ export type LegacyComposeVerifiedBinding = LegacyComposeVerifiedBindingBase &
 
 type ProjectedPreparation = Pick<
   Awaited<ReturnType<LegacyComposeAdoptionProjection["resolve"]>>,
-  "candidate" | "composeFiles" | "metadata" | "projectionProof" | "localFields"
+  | "candidate"
+  | "composeFiles"
+  | "composeEnv"
+  | "metadata"
+  | "projectionProof"
+  | "localFields"
 >;
 
 /** Canonical ordered owner paths only; observations cannot introduce caller-selected override authority. */
@@ -1482,13 +1487,17 @@ async function acquireBinding(
         retainedRouting: intent.routing !== undefined,
       });
       const resolved = await projection.resolve({ signal });
-      projected = Object.freeze({
+      const prepared = {
         candidate: resolved.candidate,
         composeFiles: resolved.composeFiles,
+        composeEnv: resolved.composeEnv,
         metadata: resolved.metadata,
         projectionProof: resolved.projectionProof,
         localFields: resolved.localFields,
-      });
+      };
+      // Private interpolation values for the runtime config-hash probe only.
+      Object.defineProperty(prepared, "composeEnv", { enumerable: false });
+      projected = Object.freeze(prepared);
     }
     const layoutSupported = async (selectedSignal?: AbortSignal) => {
       if (branch) {

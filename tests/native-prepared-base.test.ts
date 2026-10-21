@@ -3,6 +3,7 @@ import {
   parseNativePreparedBase,
   preparedBaseArguments,
 } from "../src/backends/native-prepared-base.ts";
+import { expectCodedThrow } from "./helpers/closed-refusal.ts";
 
 test("prepared base is off unless a mode is selected", () => {
   expect(parseNativePreparedBase({})).toBeUndefined();
@@ -44,6 +45,10 @@ test("invalid selections are refused before any runtime effect", () => {
       HACK_NATIVE_PREPARED_BASE_STORE: "relative",
     },
   ]) {
-    expect(() => parseNativePreparedBase(env)).toThrow();
+    expectCodedThrow(
+      () => parseNativePreparedBase(env),
+      "E_CONFIG_INVALID",
+      "HACK_NATIVE_PREPARED_BASE"
+    );
   }
 });

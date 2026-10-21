@@ -67,6 +67,7 @@ import {
 } from "./native-compose-adoption-local-inputs.ts";
 import {
   MANAGED_FIXTURE_VALUE,
+  managedAdoptionFixtureComposeEnv,
   managedAdoptionFixtureComposeFiles,
   managedAdoptionFixtureEnvAssertion,
   managedAdoptionFixtureSourceSnapshot,
@@ -2329,6 +2330,11 @@ export async function bootstrapOriginal(h: FixtureRuntime, instance: Instance) {
       ...(instance.basicBuild ? ["--no-build"] : []),
     ],
     cwd: fixtureRoot,
+    // The generated env override holds references only; Hack delivers the
+    // values through the Compose process env, so the original start does too.
+    ...(instance.sourceMode === "canonical-generated"
+      ? { env: managedAdoptionFixtureComposeEnv(instance.root) }
+      : {}),
     timeoutMs: TIMEOUT,
   });
   if (instance.basicBuild) {

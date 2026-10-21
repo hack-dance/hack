@@ -1,6 +1,8 @@
 import { expect, test } from "bun:test";
 import {
+  DEFAULT_COMPOSE_IMAGE_TIMEOUT_MS,
   DEFAULT_COMPOSE_STARTUP_TIMEOUT_MS,
+  resolveComposeImageTimeoutMs,
   resolveComposeStartupTimeoutMs,
 } from "../src/lib/compose-startup-budget.ts";
 
@@ -56,5 +58,35 @@ test("startup budget rejects malformed or out-of-bounds settings without echoing
     expect(() =>
       resolveComposeStartupTimeoutMs({ startupTimeoutMs: value })
     ).toThrow();
+  }
+});
+
+test("image build/pull budget is separate, defaults to 30 minutes and allows up to 4 hours", () => {
+  expect(resolveComposeImageTimeoutMs({ env: {} })).toBe(
+    DEFAULT_COMPOSE_IMAGE_TIMEOUT_MS
+  );
+  expect(DEFAULT_COMPOSE_IMAGE_TIMEOUT_MS).toBe(1_800_000);
+  // The startup budget never sizes the image phase, and vice versa.
+  expect(
+    resolveComposeImageTimeoutMs({
+      env: { HACK_COMPOSE_STARTUP_TIMEOUT_MS: "1000" },
+    })
+  ).toBe(1_800_000);
+  expect(
+    resolveComposeStartupTimeoutMs({
+      env: { HACK_COMPOSE_IMAGE_TIMEOUT_MS: "14400000" },
+    })
+  ).toBe(DEFAULT_COMPOSE_STARTUP_TIMEOUT_MS);
+  expect(
+    resolveComposeImageTimeoutMs({
+      env: { HACK_COMPOSE_IMAGE_TIMEOUT_MS: "14400000" },
+    })
+  ).toBe(14_400_000);
+  for (const value of ["999", "14400001", "1e6", "private-input"]) {
+    expect(() =>
+      resolveComposeImageTimeoutMs({
+        env: { HACK_COMPOSE_IMAGE_TIMEOUT_MS: value },
+      })
+    ).toThrow("HACK_COMPOSE_IMAGE_TIMEOUT_MS");
   }
 });

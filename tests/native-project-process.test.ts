@@ -3,6 +3,7 @@ import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { serveNativeProjectGraph } from "../src/backends/native-project-process.ts";
+import { expectClosedRefusal } from "./helpers/closed-refusal.ts";
 
 const roots: string[] = [];
 const run = "a".repeat(32);
@@ -57,39 +58,42 @@ test("wrong readiness identity never publishes a mapping and stops the owned chi
     `console.log(JSON.stringify({kind:"graph_foreground_ready",run:"${"b".repeat(32)}"})); await Bun.sleep(10000);`
   );
   let ready = false;
-  await expect(
+  await expectClosedRefusal(
     serveNativeProjectGraph({
       ...opts,
       onReady: async () => {
         ready = true;
       },
-    })
-  ).rejects.toThrow("identity");
+    }),
+    "identity"
+  );
   expect(ready).toBe(false);
 });
 test("startup timeout and pre-cancellation do not become readiness", async () => {
   const opts = await fixture("await Bun.sleep(10000)");
   let ready = false;
-  await expect(
+  await expectClosedRefusal(
     serveNativeProjectGraph({
       ...opts,
       startupTimeoutMs: 30,
       onReady: async () => {
         ready = true;
       },
-    })
-  ).rejects.toThrow("interrupted");
+    }),
+    "interrupted"
+  );
   const controller = new AbortController();
   controller.abort();
-  await expect(
+  await expectClosedRefusal(
     serveNativeProjectGraph({
       ...opts,
       signal: controller.signal,
       onReady: async () => {
         ready = true;
       },
-    })
-  ).rejects.toThrow("canceled");
+    }),
+    "canceled"
+  );
   expect(ready).toBe(false);
 });
 test("failed owner preserves nonzero completion and callback failure terminates ownership", async () => {
@@ -148,15 +152,16 @@ test("cancellation preserves the owner's graceful cleanup beyond five seconds", 
     (await Bun.file(file).text()).replace("PLACEHOLDER", marker)
   );
   const controller = new AbortController();
-  await expect(
+  await expectClosedRefusal(
     serveNativeProjectGraph({
       ...opts,
       signal: controller.signal,
       onReady: async () => {
         setTimeout(() => controller.abort(), 20);
       },
-    })
-  ).rejects.toThrow("interrupted");
+    }),
+    "interrupted"
+  );
   expect(await Bun.file(marker).text()).toBe("cleaned");
 }, 15_000);
 

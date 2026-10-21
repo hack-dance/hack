@@ -17,6 +17,7 @@ import {
   recoverNativeProjectFinalization,
   waitNativeProjectFinalization,
 } from "../src/backends/native-project-finalization.ts";
+import { expectClosedRefusal } from "./helpers/closed-refusal.ts";
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -68,21 +69,23 @@ test("shared HTTPS finalization v3 binds the exact lease and never inherits a st
     { ...lease, namespace: "f".repeat(64) },
     { ...lease, planId: "f".repeat(64) },
   ]) {
-    await expect(
+    await expectClosedRefusal(
       beginNativeProjectFinalization({
         ...opts,
         httpsPort: 18_443,
         httpsLease: invalid,
-      })
-    ).rejects.toThrow("unconfirmed");
+      }),
+      "unconfirmed"
+    );
   }
-  await expect(
+  await expectClosedRefusal(
     beginNativeProjectFinalization({
       ...opts,
       httpsPort: null,
       httpsLease: lease,
-    })
-  ).rejects.toThrow("unconfirmed");
+    }),
+    "unconfirmed"
+  );
   expect(await readdir(opts.scope.nativeHome)).toEqual([".hack"]);
   const first = await beginNativeProjectFinalization({
     ...opts,
@@ -110,14 +113,15 @@ test("shared HTTPS finalization v3 binds the exact lease and never inherits a st
     httpsLease: secondLease,
   });
   expect(second.token.attempt).toBe(first.token.attempt);
-  await expect(
+  await expectClosedRefusal(
     waitNativeProjectFinalization({
       ...opts,
       token: second.token,
       timeoutMs: 1,
-    })
-  ).rejects.toThrow("unconfirmed");
-  await expect(first.complete()).rejects.toThrow("unconfirmed");
+    }),
+    "unconfirmed"
+  );
+  await expectClosedRefusal(first.complete(), "unconfirmed");
   if (second.token.version !== 3) {
     throw new Error("expected v3 finalizer");
   }
@@ -126,9 +130,10 @@ test("shared HTTPS finalization v3 binds the exact lease and never inherits a st
     httpsLease: { ...second.token.httpsLease, leaseId: "6".repeat(32) },
   };
   expect(isNativeProjectFinalizationToken(forged)).toBe(true);
-  await expect(
-    waitNativeProjectFinalization({ ...opts, token: forged, timeoutMs: 1 })
-  ).rejects.toThrow("unconfirmed");
+  await expectClosedRefusal(
+    waitNativeProjectFinalization({ ...opts, token: forged, timeoutMs: 1 }),
+    "unconfirmed"
+  );
   await second.complete();
   await waitNativeProjectFinalization({
     ...opts,
@@ -156,7 +161,7 @@ test("dead v3 frontend recovery requires its exact persisted HTTPS lease", async
       observations++;
     },
   };
-  await expect(
+  await expectClosedRefusal(
     recoverNativeProjectFinalization({
       ...recovery,
       token: {
@@ -166,8 +171,9 @@ test("dead v3 frontend recovery requires its exact persisted HTTPS lease", async
           ownerGeneration: "f".repeat(32),
         },
       },
-    })
-  ).rejects.toThrow("unconfirmed");
+    }),
+    "unconfirmed"
+  );
   expect(observations).toBe(0);
   await expect(
     recoverNativeProjectFinalization({
@@ -177,13 +183,14 @@ test("dead v3 frontend recovery requires its exact persisted HTTPS lease", async
       },
     })
   ).rejects.toThrow("lease recovery uncertain");
-  await expect(
+  await expectClosedRefusal(
     waitNativeProjectFinalization({
       ...opts,
       token: lifetime.token,
       timeoutMs: 1,
-    })
-  ).rejects.toThrow("unconfirmed");
+    }),
+    "unconfirmed"
+  );
   await recoverNativeProjectFinalization(recovery);
   expect(observations).toBe(1);
   await waitNativeProjectFinalization({
@@ -197,25 +204,28 @@ test("capture binds exact attempt and waits for explicit finalizer completion", 
   const lifetime = await beginNativeProjectFinalization(opts);
   const token = await captureNativeProjectFinalization(opts);
   expect(token).toEqual(lifetime.token);
-  await expect(
-    waitNativeProjectFinalization({ ...opts, token, timeoutMs: 1 })
-  ).rejects.toThrow("unconfirmed");
+  await expectClosedRefusal(
+    waitNativeProjectFinalization({ ...opts, token, timeoutMs: 1 }),
+    "unconfirmed"
+  );
   await lifetime.complete();
   await waitNativeProjectFinalization({ ...opts, token, timeoutMs: 1 });
 });
 test("same-run restore cannot reuse stale acknowledgement or supersede incomplete owner", async () => {
   const opts = await fixture();
   const old = await beginNativeProjectFinalization(opts);
-  await expect(beginNativeProjectFinalization(opts)).rejects.toThrow(
+  await expectClosedRefusal(
+    beginNativeProjectFinalization(opts),
     "unconfirmed"
   );
   await old.complete();
   const next = await beginNativeProjectFinalization(opts);
   expect(next.token.attempt).not.toBe(old.token.attempt);
-  await expect(
-    waitNativeProjectFinalization({ ...opts, token: next.token, timeoutMs: 1 })
-  ).rejects.toThrow("unconfirmed");
-  await expect(old.complete()).rejects.toThrow("unconfirmed");
+  await expectClosedRefusal(
+    waitNativeProjectFinalization({ ...opts, token: next.token, timeoutMs: 1 }),
+    "unconfirmed"
+  );
+  await expectClosedRefusal(old.complete(), "unconfirmed");
   await next.complete();
   await waitNativeProjectFinalization({
     ...opts,
@@ -299,19 +309,21 @@ test("dead frontend recovery is explicit, exact, and distinct from completion", 
       observations++;
     },
   };
-  await expect(
+  await expectClosedRefusal(
     recoverNativeProjectFinalization({
       ...recovery,
       expectAttempt: "f".repeat(32),
       isDead: () => true,
-    })
-  ).rejects.toThrow("unconfirmed");
-  await expect(
+    }),
+    "unconfirmed"
+  );
+  await expectClosedRefusal(
     recoverNativeProjectFinalization({
       ...recovery,
       isDead: () => false,
-    })
-  ).rejects.toThrow("unconfirmed");
+    }),
+    "unconfirmed"
+  );
   expect(observations).toBe(0);
   await expect(
     recoverNativeProjectFinalization({
@@ -322,13 +334,14 @@ test("dead frontend recovery is explicit, exact, and distinct from completion", 
       },
     })
   ).rejects.toThrow("live HTTPS owner");
-  await expect(
+  await expectClosedRefusal(
     waitNativeProjectFinalization({
       ...opts,
       token: lifetime.token,
       timeoutMs: 1,
-    })
-  ).rejects.toThrow("unconfirmed");
+    }),
+    "unconfirmed"
+  );
   await recoverNativeProjectFinalization({
     ...recovery,
     isDead: () => true,
@@ -341,14 +354,15 @@ test("dead frontend recovery is explicit, exact, and distinct from completion", 
   });
   const next = await beginNativeProjectFinalization(opts);
   expect(next.token.attempt).not.toBe(lifetime.token.attempt);
-  await expect(
+  await expectClosedRefusal(
     waitNativeProjectFinalization({
       ...opts,
       token: lifetime.token,
       timeoutMs: 1,
-    })
-  ).rejects.toThrow("unconfirmed");
-  await expect(lifetime.complete()).rejects.toThrow("unconfirmed");
+    }),
+    "unconfirmed"
+  );
+  await expectClosedRefusal(lifetime.complete(), "unconfirmed");
 });
 
 test("legacy recovery requires the observed PID and preserves stale completion", async () => {
@@ -381,7 +395,8 @@ test("legacy recovery requires the observed PID and preserves stale completion",
     verifyEffects: async () => undefined,
     isDead: () => true,
   };
-  await expect(recoverNativeProjectFinalization(recovery)).rejects.toThrow(
+  await expectClosedRefusal(
+    recoverNativeProjectFinalization(recovery),
     "unconfirmed"
   );
   await recoverNativeProjectFinalization({ ...recovery, legacyPid: 52_141 });

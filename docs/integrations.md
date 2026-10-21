@@ -142,9 +142,71 @@ all, and why a repository `.mcp.json` counts as that client's MCP path.
 Installing a plugin does not migrate or remove existing rules, skills, hooks, or MCP
 configuration. If switching an existing installation, inspect the chosen client's
 project and user scopes, verify the plugin loads in a fresh session, then explicitly
-remove only duplicate Hack-owned entries in that scope. Preserve customized content.
-Do not use a broad sync or removal command as a migration step. If validation fails,
-disable the plugin and keep using the standalone integration.
+remove only duplicate Hack-owned entries in that scope with `hack setup migrate`
+(below). Preserve customized content. Do not use a broad sync or removal command as
+a migration step. If validation fails, disable the plugin and keep using the
+standalone integration.
+
+### Migrate standalone files to the plugin
+
+`hack setup migrate` moves one scope at a time from standalone Hack skill and rule
+files to the `hack` plugin. It covers the files the plugin replaces: the Codex
+`hack-cli` and `hack-init` skills, the Claude Code `hack-init` skill, the Cursor
+`hack.mdc` rule, and the shared `~/.ai/skills/hack-cli` skill. It never touches
+Claude primer hooks, MCP entries, or `AGENTS.md`/`CLAUDE.md` sections; remove those
+with their own `hack setup` command if you no longer want them.
+
+```bash
+hack setup migrate                    # preview this project; changes nothing
+hack setup migrate --global --codex   # preview user-scope Codex files only
+hack setup migrate --apply            # back up and remove the previewed files
+hack setup migrate --rollback-manifest ~/.hack/agent-migrations/<id>.json
+```
+
+The preview (the default) is read-only. For each file it reports one action:
+
+| Action | Meaning |
+| --- | --- |
+| `remove` | Hack-owned (the current or an unedited earlier render), and the replacement plugin is verified or its check was skipped |
+| `blocked` | Hack-owned, but the replacement plugin is not verified for this scope; `--apply` refuses |
+| `preserve` | Customized, unrecognized, or reached through a symbolic link; never removed |
+| `absent` | Not installed |
+
+Replacement checks read client configuration for the scope. Claude Code must enable
+`hack@hack-dance` in the nearest settings file (project `settings.local.json`, then
+project `settings.json`, then `~/.claude/settings.json`), and
+`~/.claude/plugins/installed_plugins.json` must list an installed copy that carries
+the `hack-cli` and `hack-init` skills. Codex must set
+`[plugins."hack@hack-dance"] enabled = true` in the project or user `config.toml`.
+For the user scope (`--global`), only user-level configuration counts. Hack cannot
+inspect Cursor plugin installs, so Cursor files stay `blocked` until you pass
+`--skip-plugin-check cursor`. A verified configuration is not proof that the plugin
+loads: check that in a fresh session before applying, and use
+`--skip-plugin-check <clients>` (comma-separated `claude`, `codex`, `cursor`, or
+`all`) only after you have.
+
+`--apply` is all or nothing. If any selected file is `blocked`, or a file cannot be
+read for backup, it changes nothing and exits 1. Otherwise it first writes a backup
+manifest under `$HACK_HOME/agent-migrations/` (default `~/.hack/agent-migrations/`)
+with the exact bytes and mode of every file it will remove, then removes each file
+only if its bytes still match the backup. A skill directory is removed only when it
+is empty afterwards. A file edited in between is reported as `changed`, left in
+place, and makes the command exit 1. With nothing Hack-owned to remove, apply writes
+no manifest.
+
+`--rollback-manifest <manifest>` restores every recorded file whose path is now empty, with
+its original bytes and mode. It never overwrites an existing file: identical bytes
+are reported as `already-present`, and different content as `conflict` (exit 1),
+left unchanged. Rollback can be repeated, and it also recovers an interrupted
+apply. A manifest that names a path other than a known Hack target, or whose bytes
+do not match their digest, is refused without restoring anything.
+
+Limit clients with `--claude`, `--codex`, or `--cursor` (default: all three). The
+shared skill follows Claude Code or Codex. `--json` prints
+`{ok, data: {action, dryRun, ...}}`: the preview carries `counts`, `plugins`
+(per-scope check status) and `targets`; apply adds `status`, `reason` when refused,
+`manifestPath`, and per-file `results`; rollback carries `status` and `results`.
+Messages are fixed text and never include file contents.
 
 ### Upgrading from a plugin that bundled MCP
 

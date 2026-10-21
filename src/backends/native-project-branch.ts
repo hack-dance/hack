@@ -1,5 +1,6 @@
 import { resolve } from "node:path";
 import { rewriteCaddyLabelForBranch } from "../lib/branch-hosts.ts";
+import { HackCliError } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
 import {
   findProjectContext,
@@ -14,9 +15,11 @@ const LABEL = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 const HOST_SEPARATOR = /[\s,]+/;
 
 function refused(): Error {
-  return new Error(
-    "Native branch routing requires a canonical branch and valid project host configuration; values omitted."
-  );
+  return new HackCliError({
+    code: "E_CONFIG_INVALID",
+    message:
+      "Native branch routing requires a canonical branch and valid project host configuration; values omitted.",
+  });
 }
 
 /** The same selector must reach original review, normalized review and execution. */

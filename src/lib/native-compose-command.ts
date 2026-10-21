@@ -99,8 +99,8 @@ import {
   NativeComposeOwnershipError,
   type NativeComposeOwnershipObservation,
   type NativeComposeOwnershipOptions,
-  observeNativeComposeStartupOwned,
   observeSavedNativeComposeOwned,
+  waitNativeComposeStartupOwned,
 } from "./native-compose-ownership.ts";
 import {
   measureNativeComposePhase,
@@ -137,7 +137,6 @@ import {
   requireNativeComposeBackend,
   selectNativeComposeProject,
 } from "./native-compose-selection.ts";
-import { waitNativeComposeReady } from "./native-compose-wait-ready.ts";
 import { NativeConfigCompilerError } from "./native-config-compiler.ts";
 import { nativeFilePlanningRequired } from "./native-file-plan-protocol.ts";
 import { run } from "./shell.ts";
@@ -473,20 +472,11 @@ async function waitReady(opts: {
     observed: NativeComposeOwnershipObservation
   ) => void;
 }): Promise<NativeComposeOwnershipObservation | null> {
-  const services = nativeComposeOnFailureServices(opts.document);
-  return await waitNativeComposeReady({
+  return await waitNativeComposeStartupOwned({
+    ownership: opts.ownership,
+    restartingServices: nativeComposeOnFailureServices(opts.document),
     deadline: opts.deadline,
-    signal: opts.ownership.signal,
-    observe: async () => {
-      const state = await observeNativeComposeStartupOwned(
-        opts.ownership,
-        services
-      );
-      if (state) {
-        opts.observeStorage(state);
-      }
-      return state;
-    },
+    observed: opts.observeStorage,
     ready: (state) => ready(opts.document, state, opts.generation),
   });
 }
@@ -2466,9 +2456,15 @@ function throwNativeComposeCommandError(error: unknown): never {
   if (error instanceof HackCliError || error instanceof CliUsageError) {
     throw error;
   }
+  // An unclassified failure (for example a storage-carrier refusal) keeps the
+  // closed boundary its owner issued; the code and fixed text are unchanged.
+  const diagnostic = nativeComposeEffectRefusal(error);
   throw new HackCliError({
     code: "E_COMPOSE_FAILED",
     message:
       "Native Compose operation failed; saved ownership and persistent data are retained. Values omitted.",
+    ...(diagnostic
+      ? { detail: { native_compose_effect_refusal: diagnostic } }
+      : {}),
   });
 }

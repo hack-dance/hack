@@ -1,4 +1,11 @@
-import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
+import {
+  afterEach,
+  beforeEach,
+  expect,
+  setDefaultTimeout,
+  spyOn,
+  test,
+} from "bun:test";
 import { chmod, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -13,6 +20,7 @@ import {
   nativeComposeTopologyPredicate,
   observeNativeComposeStartupOwned,
   observeSavedNativeComposeOwned,
+  waitNativeComposeStartupOwned,
 } from "../src/lib/native-compose-ownership.ts";
 import { restoreEnv } from "./helpers/env.ts";
 
@@ -26,6 +34,15 @@ const VOLUME = "hack-21-hack-fixture-instance-4-data";
 const CREATED = "2026-10-08T00:00:00.123456789Z";
 const REBORN = "2026-10-08T00:00:01.123456789Z";
 const CANARY = "synthetic-private-env-image-canary";
+/**
+ * Every fake Docker query here is a cold Bun process, and one scenario can launch
+ * dozens. Bun's 5 s default then budgets host process start-up rather than the
+ * product, and an expired test keeps running against the next test's shared
+ * root. The probe keeps its own default (or test-chosen) timeout in every query.
+ */
+const FAKE_DOCKER_TEST_TIMEOUT_MS = 60_000;
+setDefaultTimeout(FAKE_DOCKER_TEST_TIMEOUT_MS);
+
 const options: NativeComposeOwnershipOptions = {
   composeProject: PROJECT,
   runtimeIdentity: PROJECT,
@@ -39,6 +56,11 @@ type Fixture = {
   container?: Record<string, unknown>[];
   volume?: Record<string, unknown>[];
   network?: Record<string, unknown>[];
+  /** Inspect rows served after the first inspect of that kind (the recheck scan onward). */
+  recheck?: {
+    container?: Record<string, unknown>[];
+    network?: Record<string, unknown>[];
+  };
   mode?: string;
 };
 let root: string;
@@ -50,7 +72,7 @@ beforeEach(async () => {
   await Bun.write(
     join(root, "docker"),
     `#!${process.execPath}
-import {appendFileSync, existsSync, readFileSync, writeFileSync} from "node:fs";
+import {appendFileSync, existsSync, readFileSync, renameSync, writeFileSync} from "node:fs";
 const root = ${JSON.stringify(root)};
 const args = process.argv.slice(2);
 appendFileSync(root + "/commands", JSON.stringify(args) + "\\n");
@@ -59,10 +81,12 @@ const [kind, action] = args;
 if (!["container","volume","network"].includes(kind) || !["ls","inspect"].includes(action) || !args.includes("--format")) {
  writeFileSync(root + "/mutated", "unexpected engine mutation"); process.exit(99);
 }
-if (fixture.mode === "hang") { writeFileSync(root + "/started", String(process.pid)); await Bun.sleep(60_000); }
+// Handshake markers appear atomically: a reader never observes a partial pid.
+const signal = (name, pid) => { writeFileSync(root + "/" + name + ".tmp", String(pid)); renameSync(root + "/" + name + ".tmp", root + "/" + name); };
+if (fixture.mode === "hang") { signal("started", process.pid); await Bun.sleep(60_000); }
 if (fixture.mode === "descendant") {
  const child = Bun.spawn([process.execPath, "-e", 'await Bun.sleep(60_000)'], {stdout: "inherit", stderr: "inherit"});
- writeFileSync(root + "/descendant", String(child.pid)); process.exit(0);
+ signal("descendant", child.pid); process.exit(0);
 }
 if (fixture.mode === "fail") { console.error(${JSON.stringify(CANARY)}); process.exit(23); }
 if (fixture.mode === "stderr-overflow") { await Bun.write(Bun.stderr, "x".repeat(17 * 1024)); process.exit(0); }
@@ -78,11 +102,11 @@ if (action === "ls") {
  for (const row of rows) console.log(JSON.stringify(row));
 } else {
  const selected = args.slice(args.indexOf("--format") + 2);
- const rows = fixture[kind] ?? [];
  if (fixture.mode === "vanished") process.exit(1);
  const counter = root + "/inspects-" + kind;
  const count = existsSync(counter) ? Number(readFileSync(counter, "utf8")) : 0;
  writeFileSync(counter, String(count + 1));
+ const rows = (count > 0 ? fixture.recheck?.[kind] : undefined) ?? fixture[kind] ?? [];
  if (fixture.mode === "endpoint-drift" && kind === "container" && count > 0) {
    rows[0].networks[Object.keys(rows[0].networks)[0]].NetworkID = "f".repeat(64);
  }
@@ -528,9 +552,106 @@ test("a restarting endpoint placeholder member must resolve to a container ID in
   expect(await Bun.file(join(root, "mutated")).exists()).toBe(false);
 });
 
+/**
+ * Captured docker-e2e shape (HACK-1271): the same-scan container inspect runs before the
+ * network inspect, so the retry container is observed `running` and then exits and begins
+ * its on-failure restart before the bridge is read, which shows only its `ep-` placeholder.
+ */
+test("a placeholder for a running on-failure container inspected before its restart re-observes instead of refusing", async () => {
+  const fixture = restartingPlaceholder();
+  const retry = fixture.container?.[3];
+  if (!retry) {
+    throw new Error("Missing owned placeholder fixture");
+  }
+  retry.state = "running";
+  retry.exitCode = 0;
+  // Resolved within the budget: the recheck observes the retry container ID instead.
+  fixture.mode = "restart-placeholder-transition";
+  await prepare(fixture);
+  const before = await inspectCount();
+  expect(
+    await observeNativeComposeStartupOwned(placeholderOptions, ["retry"])
+  ).toBeNull();
+  expect((await inspectCount()) - before).toBe(6);
+  expect(
+    (await observeNativeComposeStartupOwned(placeholderOptions, ["retry"]))
+      ?.containers
+  ).toMatchObject([
+    { id: "1".repeat(64), state: "running" },
+    { id: "2".repeat(64), state: "running" },
+    { id: RETRY_ID, service: "retry", state: "running" },
+    { id: ID, state: "running" },
+  ]);
+  // The placeholder never grants effect authority, and strict/saved reads never admit it.
+  await prepare(fixture);
+  await expectRefusal(
+    placeholderOptions,
+    "E_NATIVE_COMPOSE_OWNERSHIP",
+    "topology",
+    "network-member-id"
+  );
+  await prepare(fixture);
+  await expect(
+    observeSavedNativeComposeOwned(placeholderOptions)
+  ).rejects.toBeInstanceOf(NativeComposeOwnershipError);
+  // Unresolved past the scan budget: the placeholder persists into the recheck scan.
+  fixture.mode = undefined;
+  await prepare(fixture);
+  const unresolved = await observeNativeComposeStartupOwned(
+    placeholderOptions,
+    ["retry"]
+  ).catch((error: unknown) => error);
+  expect(unresolved).toBeInstanceOf(NativeComposeOwnershipError);
+  expect(nativeComposeOwnershipRefusal(unresolved)).toBe("topology");
+  expect(nativeComposeTopologyPredicate(unresolved)).toBe("network-member-id");
+  expect(String(unresolved)).not.toContain(PLACEHOLDER_KEY);
+  // The settled check after the readiness deadline refuses the running placeholder.
+  fixture.mode = "restart-placeholder-transition";
+  await prepare(fixture);
+  const settled = await observeNativeComposeStartupOwned(
+    placeholderOptions,
+    ["retry"],
+    { membership: "settled" }
+  ).catch((error: unknown) => error);
+  expect(nativeComposeTopologyPredicate(settled)).toBe("network-member-id");
+  // A running container with no placeholder and no membership (its restart backoff,
+  // HACK-1279) stays unready, and the settled check refuses it.
+  const memberless = restartingPlaceholder();
+  const memberlessRetry = memberless.container?.[3];
+  const memberlessNetwork = memberless.network?.[0];
+  if (!(memberlessRetry && memberlessNetwork)) {
+    throw new Error("Missing owned placeholder fixture");
+  }
+  memberlessRetry.state = "running";
+  delete (memberlessNetwork.containers as Record<string, unknown>)[
+    PLACEHOLDER_KEY
+  ];
+  await prepare(memberless);
+  expect(
+    await observeNativeComposeStartupOwned(placeholderOptions, ["retry"])
+  ).toBeNull();
+  await prepare(memberless);
+  const fenced = await observeNativeComposeStartupOwned(
+    placeholderOptions,
+    ["retry"],
+    { membership: "settled" }
+  ).catch((error: unknown) => error);
+  expect(fenced).toBeInstanceOf(NativeComposeOwnershipError);
+  expect(nativeComposeTopologyPredicate(fenced)).toBe(
+    "live-endpoint-membership"
+  );
+  await prepare(memberless);
+  await expectRefusal(
+    placeholderOptions,
+    "E_NATIVE_COMPOSE_OWNERSHIP",
+    "topology",
+    "live-endpoint-membership"
+  );
+  expect(await Bun.file(join(root, "mutated")).exists()).toBe(false);
+});
+
 test("endpoint placeholders for non-restarting, unknown, duplicate or memberless containers refuse", async () => {
   for (const change of [
-    "running",
     "created",
     "exited",
     "unknown-name",
@@ -581,6 +702,131 @@ test("endpoint placeholders for non-restarting, unknown, duplicate or memberless
     expect(nativeComposeOwnershipRefusal(error)).toBe("topology");
     expect(nativeComposeTopologyPredicate(error)).toBe("network-member-id");
     expect((await inspectCount()) - before).toBe(3);
+  }
+  expect(await Bun.file(join(root, "mutated")).exists()).toBe(false);
+});
+
+/**
+ * HACK-1279 case 1: `retry` was a container-ID member in the first scan, then exited and
+ * restarted; the recheck reads its new endpoint before the sandbox joins.
+ */
+function recheckPlaceholder(recheckState: "restarting" | "running"): Fixture {
+  const fixture = restartingPlaceholder();
+  const retry = fixture.container?.[3];
+  const network = fixture.network?.[0];
+  if (!(retry && network)) {
+    throw new Error("Missing owned placeholder fixture");
+  }
+  retry.state = "running";
+  retry.exitCode = 0;
+  const recheck = structuredClone(fixture);
+  const members = network.containers as Record<string, unknown>;
+  members[RETRY_ID] = members[PLACEHOLDER_KEY];
+  delete members[PLACEHOLDER_KEY];
+  const recheckRetry = recheck.container?.[3];
+  if (!recheckRetry) {
+    throw new Error("Missing owned placeholder fixture");
+  }
+  recheckRetry.state = recheckState;
+  recheckRetry.exitCode = recheckState === "restarting" ? 17 : 0;
+  fixture.recheck = { container: recheck.container, network: recheck.network };
+  return fixture;
+}
+
+test("a placeholder first seen in the recheck scan stays unready only for the exact restarted container", async () => {
+  for (const state of ["running", "restarting"] as const) {
+    await prepare(recheckPlaceholder(state));
+    const before = await inspectCount();
+    expect(
+      await observeNativeComposeStartupOwned(placeholderOptions, ["retry"])
+    ).toBeNull();
+    expect((await inspectCount()) - before).toBe(6);
+    // Strict, saved and settled reads never admit it.
+    await prepare(recheckPlaceholder(state));
+    await expectRefusal(
+      placeholderOptions,
+      "E_NATIVE_COMPOSE_OWNERSHIP",
+      "topology",
+      "network-member-id"
+    );
+    await prepare(recheckPlaceholder(state));
+    await expect(
+      observeSavedNativeComposeOwned(placeholderOptions)
+    ).rejects.toBeInstanceOf(NativeComposeOwnershipError);
+    await prepare(recheckPlaceholder(state));
+    const settled = await observeNativeComposeStartupOwned(
+      placeholderOptions,
+      ["retry"],
+      { membership: "settled" }
+    ).catch((error: unknown) => error);
+    expect(nativeComposeTopologyPredicate(settled)).toBe("network-member-id");
+  }
+  for (const change of [
+    "created",
+    "exited",
+    "unknown-name",
+    "missing-name",
+    "non-record",
+    "also-member",
+    "duplicate",
+    "other-prefix",
+    "no-endpoint",
+    "unselected",
+    "oneoff",
+    "first-exited",
+    "first-placeholder",
+  ]) {
+    const fixture = recheckPlaceholder("running");
+    const network = fixture.recheck?.network?.[0];
+    const retry = fixture.recheck?.container?.[3];
+    const firstRetry = fixture.container?.[3];
+    const firstNetwork = fixture.network?.[0];
+    if (!(network && retry && firstRetry && firstNetwork)) {
+      throw new Error("Missing owned placeholder fixture");
+    }
+    const members = network.containers as Record<string, unknown>;
+    const firstMembers = firstNetwork.containers as Record<string, unknown>;
+    if (change === "created" || change === "exited") {
+      retry.state = change;
+    } else if (change === "unknown-name") {
+      members[PLACEHOLDER_KEY] = { Name: `${PROJECT}-foreign-1` };
+    } else if (change === "missing-name") {
+      members[PLACEHOLDER_KEY] = {};
+    } else if (change === "non-record") {
+      members[PLACEHOLDER_KEY] = `${PROJECT}-retry-1`;
+    } else if (change === "also-member") {
+      members[RETRY_ID] = { Name: `${PROJECT}-retry-1` };
+    } else if (change === "duplicate") {
+      members[`ep-${"8".repeat(64)}`] = { Name: `${PROJECT}-retry-1` };
+    } else if (change === "other-prefix") {
+      delete members[PLACEHOLDER_KEY];
+      members[`endpoint-${"9".repeat(64)}`] = { Name: `${PROJECT}-retry-1` };
+    } else if (change === "no-endpoint") {
+      retry.networks = {};
+    } else if (change === "oneoff") {
+      retry.oneoff = "True";
+    } else if (change === "first-exited") {
+      // The first scan must have seen the same container live (on-failure backoff
+      // reports `restarting`, never `exited`).
+      firstRetry.state = "exited";
+      firstRetry.exitCode = 17;
+      delete firstMembers[RETRY_ID];
+    } else if (change === "first-placeholder") {
+      // A placeholder that persists from the first scan into the recheck.
+      delete firstMembers[RETRY_ID];
+      firstMembers[PLACEHOLDER_KEY] = { Name: `${PROJECT}-retry-1` };
+    }
+    await prepare(fixture);
+    const error = await observeNativeComposeStartupOwned(
+      placeholderOptions,
+      change === "unselected" ? ["web"] : ["retry"]
+    ).catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(NativeComposeOwnershipError);
+    expect(nativeComposeOwnershipRefusal(error)).toBe("topology");
+    expect([change, nativeComposeTopologyPredicate(error)]).toEqual([
+      change,
+      "network-member-id",
+    ]);
   }
   expect(await Bun.file(join(root, "mutated")).exists()).toBe(false);
 });
@@ -652,14 +898,87 @@ test("restart observation keeps foreign and incomplete endpoint shapes fenced", 
         ],
       };
     }
+    const restarting = change === "wrong-service" ? ["install"] : ["web"];
+    // A selected `running` container absent from its bridge is the restart-backoff race
+    // (HACK-1279): unready while transient, refused once settled. Every other shape
+    // refuses in both.
+    await prepare(fixture);
+    if (change === "running") {
+      expect(
+        await observeNativeComposeStartupOwned(selection, restarting)
+      ).toBeNull();
+    } else {
+      await expect(
+        observeNativeComposeStartupOwned(selection, restarting)
+      ).rejects.toBeInstanceOf(NativeComposeOwnershipError);
+    }
     await prepare(fixture);
     await expect(
-      observeNativeComposeStartupOwned(
-        selection,
-        change === "wrong-service" ? ["install"] : ["web"]
-      )
+      observeNativeComposeStartupOwned(selection, restarting, {
+        membership: "settled",
+      })
     ).rejects.toBeInstanceOf(NativeComposeOwnershipError);
   }
+  expect(await Bun.file(join(root, "mutated")).exists()).toBe(false);
+});
+
+/** HACK-1279: a restart race may keep startup unready only until the caller's readiness deadline. */
+test("startup wait bounds a missing running member by the readiness deadline", async () => {
+  const backoff = owned();
+  const container = backoff.container?.[0];
+  const network = backoff.network?.[0];
+  if (!(container && network)) {
+    throw new Error("Missing owned retry fixture");
+  }
+  // Inspected `running`, then absent from the bridge: the restart backoff race.
+  network.containers = {};
+  const wait = (deadline: number) =>
+    waitNativeComposeStartupOwned({
+      ownership: options,
+      restartingServices: ["web"],
+      deadline,
+      ready: () => true,
+    });
+  // Permanently missing: unready until the deadline, then the settled check refuses.
+  await prepare(backoff);
+  const missing = await wait(Date.now() + 250).catch((error: unknown) => error);
+  expect(missing).toBeInstanceOf(NativeComposeOwnershipError);
+  expect(nativeComposeOwnershipRefusal(missing)).toBe("topology");
+  expect(nativeComposeTopologyPredicate(missing)).toBe(
+    "live-endpoint-membership"
+  );
+  // The member rejoins: the next observation is owned and ready before the deadline.
+  backoff.mode = "restart-member-transition";
+  await prepare(backoff);
+  const observed: unknown[] = [];
+  expect(
+    (
+      await waitNativeComposeStartupOwned({
+        ownership: options,
+        restartingServices: ["web"],
+        deadline: Date.now() + 30_000,
+        ready: () => true,
+        observed: (state) => observed.push(state),
+      })
+    )?.containers[0]
+  ).toMatchObject({ id: ID, state: "running" });
+  expect(observed).toHaveLength(1);
+  // A container inspected `restarting` past the deadline times out unready, as before.
+  const restarting = owned();
+  const restartingContainer = restarting.container?.[0];
+  const restartingNetwork = restarting.network?.[0];
+  if (!(restartingContainer && restartingNetwork)) {
+    throw new Error("Missing owned retry fixture");
+  }
+  restartingContainer.state = "restarting";
+  restartingNetwork.containers = {};
+  await prepare(restarting);
+  expect(await wait(Date.now() + 250)).toBeNull();
+  // A deadline that passes before the first observation reads nothing.
+  await prepare(backoff);
+  const before = await inspectCount();
+  expect(await wait(Date.now() - 1)).toBeNull();
+  expect(await inspectCount()).toBe(before);
   expect(await Bun.file(join(root, "mutated")).exists()).toBe(false);
 });
 test("owned resources yield only bounded readiness observations and exact read-only queries", async () => {
@@ -1057,21 +1376,66 @@ test("inspect argv batching does not cap the number of owned resources", async (
     ).toBeLessThanOrEqual(16 * 1024);
   }
 });
+/**
+ * Probe timeouts tried in order for one hanging fake Docker. The kill proof needs
+ * the fake Docker to publish its pid before the probe fires; on a loaded host a
+ * cold Bun start can exceed the fast rung. An attempt without that handshake is
+ * inconclusive (its process died before it could be observed) and escalates; it
+ * never counts as a pass. Every attempt still has to refuse with the timeout code.
+ * Both modes at every rung plus reaping stay within FAKE_DOCKER_TEST_TIMEOUT_MS.
+ */
+const HANG_PROBE_TIMEOUTS_MS = [500, 2000, 8000] as const;
+/** Bound for the kernel to reap a SIGKILLed orphan after the probe refuses. */
+const HANG_REAP_DEADLINE_MS = 10_000;
+
+async function hangHandshakePid(marker: string): Promise<number | undefined> {
+  if (!(await Bun.file(marker).exists())) {
+    return;
+  }
+  const pid = Number(await readFile(marker, "utf8"));
+  if (!(Number.isSafeInteger(pid) && pid > 1)) {
+    throw new Error(`Malformed ${marker} handshake`);
+  }
+  return pid;
+}
+
+async function exitedWithin(pid: number, deadlineMs: number): Promise<boolean> {
+  const deadline = Date.now() + deadlineMs;
+  while (true) {
+    try {
+      process.kill(pid, 0);
+    } catch {
+      return true;
+    }
+    if (Date.now() >= deadline) {
+      return false;
+    }
+    await Bun.sleep(10);
+  }
+}
+
 test("a real hanging process times out and its inherited-pipe descendant is killed", async () => {
   for (const mode of ["hang", "descendant"]) {
-    await prepare({ mode });
-    await expectRefusal(
-      { ...options, timeoutMs: 500 },
-      "E_NATIVE_COMPOSE_PROBE_TIMEOUT"
-    );
-    const pid = Number(
-      await readFile(
-        join(root, mode === "hang" ? "started" : "descendant"),
-        "utf8"
-      )
-    );
-    await Bun.sleep(50);
-    expect(() => process.kill(pid, 0)).toThrow();
+    const marker = join(root, mode === "hang" ? "started" : "descendant");
+    let pid: number | undefined;
+    for (const timeoutMs of HANG_PROBE_TIMEOUTS_MS) {
+      await rm(marker, { force: true });
+      await prepare({ mode });
+      await expectRefusal(
+        { ...options, timeoutMs },
+        "E_NATIVE_COMPOSE_PROBE_TIMEOUT"
+      );
+      pid = await hangHandshakePid(marker);
+      if (pid !== undefined) {
+        break;
+      }
+    }
+    if (pid === undefined) {
+      throw new Error(
+        `Fake Docker never published its ${mode} pid before the longest probe timeout`
+      );
+    }
+    expect(await exitedWithin(pid, HANG_REAP_DEADLINE_MS)).toBe(true);
   }
 });
 test("abort before spawn and during a real read-only query refuses and reaps the child", async () => {

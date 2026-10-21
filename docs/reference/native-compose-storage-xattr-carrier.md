@@ -381,7 +381,8 @@ publishes and synchronizes that identity, then repeats identity, boot, executabl
 and admission checks before a one-use continuation of the captured child. A
 missing or failed publication cancels that original invocation; an armed record
 alone proves neither spawn nor absence. The command's original budget includes
-the handshake. No guessed PID or retry is used to rescue a fast command.
+the handshake, and each process identity read shares that remaining budget rather
+than a tighter fixed bound. No guessed PID or retry is used to rescue a fast command.
 Live handshake and settlement budgets use a captured monotonic deadline; the
 saved wall deadline is a record field only. Executable device/inode identities
 use exact decimal strings from bigint metadata, including sealed macOS binaries.
@@ -392,9 +393,14 @@ The carrier uses held regular capture files, not pipes. Version 2 therefore name
 its capture evidence `held-files-quiescent`, never EOF. The original exit callback,
 strict ESRCH group absence, held file/path identity, both synchronized bounded
 captures and their hashes precede settlement publication. EPERM/EIO and unknown
-exit or capture disposition refuse. Settlement publication shares the existing
-three-second post-command group-observation budget; timeout/cancellation remain
-refused results and cannot grant a subsequent daemon command.
+exit or capture disposition refuse. Settlement publication shares one finite
+15-second post-command budget with group observation and its identity reads;
+timeout/cancellation remain refused results and cannot grant a subsequent daemon
+command. These budgets must outlast an ordinary multi-second host stall: a stalled
+owner resumes with its timer already due, and a refusal after the daemon effect
+leaves durable uncertainty that only explicit recovery can report. Earlier
+one-second identity reads and a three-second settlement budget refused healthy
+commands that way on loaded hosts.
 
 Only the original in-memory writer can advance its exact sequence. Publication
 failure or deadline permanently invalidates that writer and retains its private

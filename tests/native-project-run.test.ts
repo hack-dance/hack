@@ -14,9 +14,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   loadNativeProjectRun as load,
+  normalizeNativeProfiles,
   removeNativeProjectRun as remove,
   saveNativeProjectRun as save,
 } from "../src/backends/native-project-run.ts";
+import {
+  expectClosedRefusal,
+  expectCodedThrow,
+} from "./helpers/closed-refusal.ts";
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -52,9 +57,10 @@ test("exclusive project/branch mapping roundtrips and exact cleanup preserves ot
     branch: "other",
     run: { ...run, run: "e".repeat(32) },
   });
-  await expect(
-    remove({ ...opts, expected: { ...run, owner: "e".repeat(32) } })
-  ).rejects.toThrow();
+  await expectClosedRefusal(
+    remove({ ...opts, expected: { ...run, owner: "e".repeat(32) } }),
+    "owned by another run"
+  );
   expect(await load(opts)).toEqual(run);
   await remove({ ...opts, expected: run });
   expect(await load(opts)).toBeNull();
@@ -122,7 +128,10 @@ test("malformed ownership, symlink storage and foreign contents refuse", async (
   const name = (await readdir(dir)).find((x) => x.endsWith(".json"));
   expect(name).toBeDefined();
   await writeFile(join(dir, name ?? "absent"), "{}");
-  await expect(load(opts)).rejects.toThrow();
+  await expectClosedRefusal(
+    load(opts),
+    "Native project run mapping is unsafe, changed, or owned by another run"
+  );
 });
 
 test("repeated confirmed retirement is idempotent without deleting a replacement", async () => {
@@ -283,12 +292,29 @@ test("restart operation lock excludes overlap and releases at readiness", async 
   );
   const opts = await fixture();
   await withNativeRestartLock(opts, async (release) => {
-    await expect(
-      withNativeRestartLock(opts, () => Promise.resolve())
-    ).rejects.toThrow("already owned");
+    await expectClosedRefusal(
+      withNativeRestartLock(opts, () => Promise.resolve()),
+      "already owned"
+    );
     await release();
     expect(
       await withNativeRestartLock(opts, () => Promise.resolve("next"))
     ).toBe("next");
   });
+});
+
+test("unbounded profile selections are a coded configuration refusal", () => {
+  expect(normalizeNativeProfiles(["b", "a", "b"])).toEqual(["a", "b"]);
+  for (const profiles of [
+    ["x".repeat(300)],
+    [""],
+    ["bad\u0000name"],
+    Array.from({ length: 65 }, (_, index) => `p${index}`),
+  ]) {
+    expectCodedThrow(
+      () => normalizeNativeProfiles(profiles),
+      "E_CONFIG_INVALID",
+      "Native profiles require at most 64 bounded nonempty names."
+    );
+  }
 });

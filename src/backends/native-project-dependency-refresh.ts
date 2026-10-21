@@ -1,3 +1,4 @@
+import { ClosedCliError } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
 import {
   loadNativeProjectRun,
@@ -51,7 +52,7 @@ function refused(cause?: unknown): Error {
         : "";
     diagnostic = ` Native diagnostic: ${cause.nativeCode}${nested}.`;
   }
-  return new Error(
+  return new ClosedCliError(
     `Native dependency refresh identity or outcome is unconfirmed; inspect the owned graph before retrying. No request or command was replayed.${diagnostic}`
   );
 }
@@ -79,7 +80,7 @@ export async function refreshNativeProjectDependencies(opts: {
 }) {
   const mapping = await loadNativeProjectRun(opts.scope);
   if (!mapping) {
-    throw new Error(
+    throw new ClosedCliError(
       "Native project has not been started; dependency refresh requires a started project."
     );
   }

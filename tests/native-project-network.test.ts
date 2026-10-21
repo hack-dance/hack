@@ -3,6 +3,7 @@ import {
   parseNativeAllowedHosts,
   validateNativeAllowedHosts,
 } from "../src/backends/native-project-network.ts";
+import { expectCodedThrow } from "./helpers/closed-refusal.ts";
 
 test("CSV selection is explicit, canonical, bounded and immutable", () => {
   expect(parseNativeAllowedHosts(undefined)).toEqual([]);
@@ -40,7 +41,9 @@ test("CSV selection is explicit, canonical, bounded and immutable", () => {
     `${"x".repeat(64)}.com`,
     "x".repeat(8128),
   ]) {
-    expect(() => parseNativeAllowedHosts(value)).toThrow(
+    expectCodedThrow(
+      () => parseNativeAllowedHosts(value),
+      "E_CONFIG_INVALID",
       "HACK_NATIVE_ALLOW_HOSTS"
     );
   }

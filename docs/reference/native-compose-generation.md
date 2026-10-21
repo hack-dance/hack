@@ -73,7 +73,12 @@ are never diagnostic fields. Copied error properties do not acquire provenance.
 The diagnostic does not grant recovery, clear intent or change the original error
 code, checks, child lifetime or deadline. Missing detail leaves the cause unknown;
 returned incomplete outcomes retain their existing reporting contract. Historical
-failures without this detail remain unexplained.
+failures without this detail remain unexplained. An unclassified native failure
+(fixed `E_COMPOSE_FAILED` text, for example a storage-carrier refusal during
+`exec`) carries the same detail when its owner issued one. Without `--json`, the
+CLI prints the same pair after the error line as
+`Refusal boundary: <stage> (<reason>); values omitted.`; detail with any other
+shape prints nothing extra.
 
 `publishRunProjection` derives a one-off document from the verified saved artifact
 inside the mutation lock. It accepts a target service, never caller-supplied JSON.

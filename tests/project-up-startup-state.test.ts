@@ -28,11 +28,29 @@ const psRows: string[] = [];
 const errorMessages: string[] = [];
 const warnMessages: string[] = [];
 const upComposeContents: string[] = [];
+/**
+ * The global env Compose receives. The per-service `HACK_ENV_*` values that the
+ * value-free env override references (HACK-1273) are covered by
+ * tests/compose-env-at-rest-cli.test.ts.
+ */
+function withoutComposeEnvReferences(
+  env: Readonly<Record<string, string>> | undefined
+): Readonly<Record<string, string>> | undefined {
+  return env
+    ? Object.fromEntries(
+        Object.entries(env).filter(([key]) => !key.startsWith("HACK_ENV_"))
+      )
+    : env;
+}
+
 const upEnvs: Array<Readonly<Record<string, string>> | undefined> = [];
 const psEnvs: Array<Readonly<Record<string, string>> | undefined> = [];
 const upDetachSelections: Array<boolean | undefined> = [];
 const upStartupTimeouts: Array<number | undefined> = [];
 let upExitCode = 0;
+/** Detached phases the mocked backend reports before returning upExitCode. */
+let upReportedPhases: readonly ("images" | "start")[] = [];
+const upImageTimeouts: Array<number | undefined> = [];
 let downCalls = 0;
 const upServiceSelections: Array<readonly string[] | undefined> = [];
 const tempDirs = new Set<string>();
@@ -86,10 +104,14 @@ const runtimeBackendMock = await registerScopedModuleMock({
             )
           ).join("\n")
         );
-        upEnvs.push(opts.env);
+        upEnvs.push(withoutComposeEnvReferences(opts.env));
         upServiceSelections.push(opts.services);
         upStartupTimeouts.push(opts.startupTimeoutMs);
+        upImageTimeouts.push(opts.imageTimeoutMs);
         upDetachSelections.push(opts.detach);
+        for (const phase of upReportedPhases) {
+          opts.onStartupPhase?.(phase);
+        }
         return upExitCode;
       },
       down: async () => {
@@ -99,7 +121,7 @@ const runtimeBackendMock = await registerScopedModuleMock({
       psJson: async (opts: {
         readonly env?: Readonly<Record<string, string>>;
       }) => {
-        psEnvs.push(opts.env);
+        psEnvs.push(withoutComposeEnvReferences(opts.env));
         return {
           exitCode: 0,
           stdout: psRows.join("\n"),
@@ -156,8 +178,11 @@ beforeAll(() => {
   loggerMock.activate();
 });
 
+const originalImageTimeout = process.env.HACK_COMPOSE_IMAGE_TIMEOUT_MS;
+
 beforeEach(() => {
   Reflect.deleteProperty(process.env, "HACK_COMPOSE_STARTUP_TIMEOUT_MS");
+  Reflect.deleteProperty(process.env, "HACK_COMPOSE_IMAGE_TIMEOUT_MS");
 });
 
 afterEach(async () => {
@@ -171,6 +196,9 @@ afterEach(async () => {
   upStartupTimeouts.length = 0;
   upDetachSelections.length = 0;
   upExitCode = 0;
+  upReportedPhases = [];
+  upImageTimeouts.length = 0;
+  restoreEnv("HACK_COMPOSE_IMAGE_TIMEOUT_MS", originalImageTimeout);
   downCalls = 0;
   if (originalStartupTimeout === undefined) {
     Reflect.deleteProperty(process.env, "HACK_COMPOSE_STARTUP_TIMEOUT_MS");
@@ -663,6 +691,92 @@ for (const action of ["up", "restart", "scoped restart"] as const) {
     expect(errorMessages.join("\n")).toContain("startup budget");
   });
 }
+
+for (const action of ["up", "restart", "scoped restart"] as const) {
+  const run = (projectRoot: string) =>
+    action === "up"
+      ? runDetachedUp({ projectRoot })
+      : runRestart({
+          projectRoot,
+          ...(action === "scoped restart" ? { services: ["api"] } : {}),
+        });
+
+  test(`${action} forwards a separate image build/pull budget to Compose`, async () => {
+    process.env.HACK_COMPOSE_IMAGE_TIMEOUT_MS = "2400000";
+    const projectRoot = await createProject();
+    psRows.push(
+      JSON.stringify({ Service: "api", State: "running", ExitCode: 0 })
+    );
+
+    expect(await run(projectRoot)).toBe(0);
+    expect(upImageTimeouts).toEqual([2_400_000]);
+    expect(upStartupTimeouts).toEqual([90_000]);
+  });
+
+  test(`${action} names the image phase and its variable when image build/pull times out`, async () => {
+    process.env.HACK_COMPOSE_IMAGE_TIMEOUT_MS = "2400000";
+    upReportedPhases = ["images"];
+    upExitCode = 124;
+    const projectRoot = await createProject();
+
+    expect(await run(projectRoot)).toBe(124);
+    const errors = errorMessages.join("\n");
+    expect(errors).toContain(
+      "image build/pull budget of 2400000 ms (phase: image build/pull and container creation)"
+    );
+    expect(errors).toContain("HACK_COMPOSE_IMAGE_TIMEOUT_MS=<ms>");
+  });
+
+  test(`${action} names the start phase when dependency wait times out after a build`, async () => {
+    upReportedPhases = ["images", "start"];
+    upExitCode = 124;
+    const projectRoot = await createProject();
+
+    expect(await run(projectRoot)).toBe(124);
+    const errors = errorMessages.join("\n");
+    expect(errors).toContain(
+      "startup budget of 90000 ms (phase: start and dependency wait)"
+    );
+    expect(errors).toContain("HACK_COMPOSE_STARTUP_TIMEOUT_MS=<ms>");
+    expect(errors).not.toContain("HACK_COMPOSE_IMAGE_TIMEOUT_MS=<ms>");
+  });
+
+  test(`${action} rejects an invalid image budget before hooks or backend effects`, async () => {
+    process.env.HACK_COMPOSE_IMAGE_TIMEOUT_MS = "soon";
+    const projectRoot = await createProject({
+      lifecycleCommand: "touch image-budget-hook-ran",
+    });
+
+    await expect(run(projectRoot)).rejects.toThrow(
+      "HACK_COMPOSE_IMAGE_TIMEOUT_MS"
+    );
+    expect(
+      await Bun.file(resolve(projectRoot, "image-budget-hook-ran")).exists()
+    ).toBe(false);
+    expect(upComposeContents).toEqual([]);
+    expect(downCalls).toBe(0);
+  });
+}
+
+test("up JSON reports the timed-out Compose phase and its budget", async () => {
+  upReportedPhases = ["images"];
+  upExitCode = 124;
+  const projectRoot = await createProject();
+  const result = await runJsonUp({ projectRoot });
+  expect(result.exitCode).toBe(124);
+  expect(JSON.parse(result.stdout)).toMatchObject({
+    ok: false,
+    error: {
+      code: "E_STARTUP_TIMEOUT",
+      detail: {
+        exitCode: 124,
+        composePhase: "images",
+        budgetMs: 1_800_000,
+        budgetEnv: "HACK_COMPOSE_IMAGE_TIMEOUT_MS",
+      },
+    },
+  });
+});
 
 test("foreground up ignores an invalid detached startup budget", async () => {
   process.env.HACK_COMPOSE_STARTUP_TIMEOUT_MS = "invalid";

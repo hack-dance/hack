@@ -12,6 +12,7 @@ import { CliUsageError } from "../src/cli/command.ts";
 import { HackCliError } from "../src/lib/cli-result.ts";
 import { tryNativeAuthoredCommand } from "../src/lib/native-authored-command.ts";
 import type { NativeComposeCommandOptions } from "../src/lib/native-compose-command.ts";
+import { refuseUnsupportedNativeUpOptions } from "../src/lib/native-up-refusals.ts";
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -140,8 +141,17 @@ test.each([
       return Promise.resolve();
     },
   }).catch((error: unknown) => error);
+  // Where authored foreground starts are supported, a detached start gets the
+  // image project's one-line E_USAGE refusal instead of the generic one.
+  const detachedStart =
+    process.platform === "darwin" &&
+    options.detach === true &&
+    ["up", "restart"].includes(options.operation ?? "up");
   expect(result).toBeInstanceOf(HackCliError);
-  expect(result).toHaveProperty("code", "E_NATIVE_PROJECT_UNSUPPORTED");
+  expect(result).toHaveProperty(
+    "code",
+    detachedStart ? "E_USAGE" : "E_NATIVE_PROJECT_UNSUPPORTED"
+  );
   expect(calls).toBe(0);
   expect(await readdir(join(selected.root, ".hack"))).toEqual([]);
 });
@@ -223,6 +233,85 @@ macTest(
     expect(result).toHaveProperty("code", "E_LIFECYCLE_FAILED");
     expect(String(result)).not.toContain("Private diagnostic");
     expect(await readdir(join(selected.root, ".hack"))).toEqual([]);
+  }
+);
+
+macTest(
+  "HACK-1272: down --recover retires a pending unreserved start without the generation owner",
+  async () => {
+    const selected = await fixture();
+    const options = {
+      ...selected.options,
+      operation: "down" as const,
+      recover: true,
+      instance: "alpha",
+    };
+    const scope = {
+      projectRoot: selected.root,
+      projectDir: join(selected.root, ".hack"),
+      nativeHome: join(selected.root, "candidate"),
+      branch: "alpha",
+    };
+    const retired: unknown[] = [];
+    const outcome = (retire: () => Promise<{ readonly run: string }>) =>
+      tryNativeAuthoredCommand({
+        ...selected,
+        options,
+        serve: () => {
+          throw new Error("Recovery cannot invoke startup.");
+        },
+        recover: () => {
+          throw new Error("A pending start has no stored generation.");
+        },
+        unreservedSelected: (value) => {
+          expect(value).toEqual(scope);
+          return Promise.resolve(true);
+        },
+        retireUnreserved: (value) => {
+          retired.push(value);
+          return retire();
+        },
+      }).catch((error: unknown) => error);
+    expect(await outcome(() => Promise.resolve({ run: "a".repeat(32) }))).toBe(
+      0
+    );
+    expect(retired).toHaveLength(1);
+    expect(retired[0]).toMatchObject({ scope, timeoutMs: 1500 });
+    const refused = await outcome(() =>
+      Promise.reject(new Error("Private retained detail."))
+    );
+    expect(refused).toHaveProperty("code", "E_LIFECYCLE_FAILED");
+    expect(String(refused)).not.toContain("Private retained detail");
+    expect(await readdir(join(selected.root, ".hack"))).toEqual([]);
+  }
+);
+
+macTest(
+  "HACK-1272: a canceled unreserved startup exits 130 like confirmed removal",
+  async () => {
+    const selected = await fixture();
+    for (const [outcome, expected] of [
+      ["unreserved", 130],
+      ["retained", "E_STARTUP_INCOMPLETE"],
+    ] as const) {
+      const result = await tryNativeAuthoredCommand({
+        ...selected,
+        serve: () =>
+          Promise.reject(
+            new NativeAuthoredProjectStartError({
+              outcome,
+              canceled: true,
+              stage: "runtime",
+              nativeCode: "native_graph_canceled",
+            })
+          ),
+      }).catch((error: unknown) => error);
+      if (typeof expected === "number") {
+        expect(result).toBe(expected);
+      } else {
+        expect(result).toHaveProperty("code", expected);
+      }
+    }
   }
 );
 
@@ -488,6 +577,97 @@ macTest(
           : "E_CONFIG_INVALID"
       );
     }
+  }
+);
+
+macTest.each([
+  {
+    outcome: "not-started" as const,
+    stage: "reservation" as const,
+    nativeCode: "runtime_not_running",
+    text: "Native runtime is not running; nothing was started. Start the native runtime, then run this command again.",
+  },
+  {
+    outcome: "retained" as const,
+    stage: "reservation" as const,
+    nativeCode: "runtime_not_running",
+    text: "so `hack ps` reports it as pending",
+  },
+  {
+    // Authored foreground control wraps a runtime that stopped during serve.
+    outcome: "retained" as const,
+    stage: "runtime" as const,
+    nativeCode: "native_graph_foreground",
+    nativeCauseCode: "runtime_not_running",
+    text: "so `hack ps` reports it as pending",
+  },
+  {
+    // HACK-1272: the consumer refused before reserving a journal, so startup
+    // retired its intent; the stopped runtime is still the reported cause.
+    outcome: "unreserved" as const,
+    stage: "runtime" as const,
+    nativeCode: "runtime_not_running",
+    text: "its startup intent was retired, so `hack ps` reports not_started",
+  },
+])(
+  "a start refused by a stopped runtime ($outcome, $nativeCode) reports the runtime, not incomplete startup",
+  async ({ outcome, stage, nativeCode, nativeCauseCode, text }) => {
+    const selected = await fixture();
+    const value = await tryNativeAuthoredCommand({
+      ...selected,
+      serve: () =>
+        Promise.reject(
+          new NativeAuthoredProjectStartError({
+            outcome,
+            canceled: false,
+            nativeCode,
+            nativeCauseCode,
+            stage,
+          })
+        ),
+    }).catch((caught: unknown) => caught);
+    expect(value).toBeInstanceOf(HackCliError);
+    expect(value).toHaveProperty("code", "E_DOCKER_UNAVAILABLE");
+    expect(value).toHaveProperty("message", expect.stringContaining(text));
+    expect(value).toHaveProperty("detail", {
+      outcome,
+      canceled: false,
+      stage,
+      nativeCode: "runtime_not_running",
+    });
+  }
+);
+
+macTest.each(["up", "restart"] as const)(
+  "a detached native %s gives the image project's one-line E_USAGE refusal",
+  async (operation) => {
+    const selected = await fixture();
+    const value = await tryNativeAuthoredCommand({
+      ...selected,
+      options: { ...selected.options, operation, detach: true },
+    }).catch((caught: unknown) => caught);
+    // The image path refuses the same request before project discovery.
+    let image: unknown;
+    try {
+      refuseUnsupportedNativeUpOptions({
+        restart: operation === "restart",
+        detach: true,
+      });
+    } catch (caught: unknown) {
+      image = caught;
+    }
+    expect(image).toBeInstanceOf(HackCliError);
+    expect(value).toBeInstanceOf(HackCliError);
+    expect(value).toHaveProperty("code", "E_USAGE");
+    expect(value).toHaveProperty("code", (image as HackCliError).code);
+    expect(value).toHaveProperty("message", (image as HackCliError).message);
+    const message = (value as HackCliError).message;
+    // The foreground-only hint stands on its own, not after the generic sentence.
+    expect(message).toStartWith(
+      `Native \`hack ${operation}\` runs in the foreground only, so --detach is not supported. Run \`hack ${operation}\` without --detach in its own terminal and keep it open;`
+    );
+    expect(message).not.toContain("Native authored execution requires");
+    expect(message).not.toContain("\n");
   }
 );
 

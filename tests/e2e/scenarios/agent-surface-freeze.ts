@@ -45,7 +45,9 @@ type FreezeCommand = {
  * because the customized guidance is reported as preserved; it must not
  * repair it. Refresh-only `setup sync --all-scopes` (HACK-1132) exits 0: every
  * seeded file is customized or lacks a Hack section, so nothing is refreshed
- * and nothing missing is created.
+ * and nothing missing is created. The plugin migration preview is read-only,
+ * and an explicit apply with every replacement check skipped still removes
+ * nothing, because no seeded file is Hack-owned (HACK-1132).
  */
 const FREEZE_COMMANDS: readonly FreezeCommand[] = [
   {
@@ -112,6 +114,25 @@ const FREEZE_COMMANDS: readonly FreezeCommand[] = [
     label: "setup sync --all-scopes",
     fixture: "project",
     args: ["setup", "sync", "--all-scopes"],
+    codes: [[0], [0]],
+  },
+  {
+    label: "setup migrate --all-scopes",
+    fixture: "project",
+    args: ["setup", "migrate", "--all-scopes"],
+    codes: [[0], [0]],
+  },
+  {
+    label: "setup migrate --all-scopes --apply --skip-plugin-check all",
+    fixture: "project",
+    args: [
+      "setup",
+      "migrate",
+      "--all-scopes",
+      "--apply",
+      "--skip-plugin-check",
+      "all",
+    ],
     codes: [[0], [0]],
   },
 ];

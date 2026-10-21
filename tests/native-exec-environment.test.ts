@@ -82,7 +82,10 @@ test("fresh exec refuses missing selectors or deleted overlays before AWS export
   const { aws: _aws, ...legacy } = opts.run;
   await expect(
     prepareNativeExecEnvironment({ ...opts, run: legacy, adaptAws })
-  ).rejects.toThrow("recorded startup");
+  ).rejects.toMatchObject({
+    code: "E_CONFIG_INVALID",
+    message: expect.stringContaining("recorded startup"),
+  });
   await rm(join(opts.scope.projectDir, "hack.env.qa.yaml"));
   await expect(
     prepareNativeExecEnvironment({
@@ -90,7 +93,10 @@ test("fresh exec refuses missing selectors or deleted overlays before AWS export
       run: { ...opts.run, aws: { profile: "qa" } },
       adaptAws,
     })
-  ).rejects.toThrow("unavailable");
+  ).rejects.toMatchObject({
+    code: "E_CONFIG_INVALID",
+    message: expect.stringContaining("unavailable"),
+  });
   expect(calls).toBe(0);
 });
 test("fresh exec uses only saved AWS selection and omits adapter failure details", async () => {

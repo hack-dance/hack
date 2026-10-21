@@ -1,12 +1,15 @@
 import { constants } from "node:fs";
 import { open } from "node:fs/promises";
 import { isAbsolute } from "node:path";
+import { HackCliError } from "../lib/cli-result.ts";
 
 const LIMIT = 65_536;
 function refused(): Error {
-  return new Error(
-    "Native selection requires a bounded, unchanged regular JSON file; values omitted."
-  );
+  return new HackCliError({
+    code: "E_CONFIG_INVALID",
+    message:
+      "Native selection requires a bounded, unchanged regular JSON file; values omitted.",
+  });
 }
 /** Selection files contain public intent, never credentials or durable process authority. */
 export async function readNativeSelection(path: string): Promise<unknown> {

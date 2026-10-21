@@ -219,6 +219,7 @@ import {
   buildLogSelector,
   resolveShouldTryLoki,
   resolveUseLoki,
+  runLokiSnapshotWithFallback,
 } from "../lib/logs.ts";
 import { tryNativeComposeCommand } from "../lib/native-compose-command.ts";
 import { tryNativeComposeOpen } from "../lib/native-compose-open.ts";
@@ -8054,6 +8055,9 @@ async function runLogsWithLoki(opts: {
   readonly queryOpt: string | undefined;
   readonly since: string | undefined;
   readonly until: string | undefined;
+  readonly wantsLokiExplicit: boolean;
+  /** Compose snapshot used when an implicit Loki snapshot comes back empty. */
+  readonly runCompose: () => Promise<number>;
 }): Promise<number> {
   if (isSlimExecutionMode()) {
     process.stderr.write(
@@ -8096,16 +8100,30 @@ async function runLogsWithLoki(opts: {
     services,
   });
 
-  return await lokiLogBackend.run({
+  const lokiOptions = {
     baseUrl: opts.baseUrl,
     query,
-    follow: opts.follow,
     tail: opts.tail,
     format: opts.format,
     showProjectPrefix: true,
     streamContext,
     start: opts.timeRange.start ?? undefined,
     end: opts.timeRange.end ?? undefined,
+  };
+  if (opts.follow) {
+    return await lokiLogBackend.run({ ...lokiOptions, follow: true });
+  }
+
+  return await runLokiSnapshotWithFallback({
+    wantsLokiExplicit: opts.wantsLokiExplicit,
+    query,
+    service: opts.positionalService,
+    runLoki: async ({ deferEmpty }) =>
+      await lokiLogBackend.snapshot({ ...lokiOptions, deferEmpty }),
+    runCompose: opts.runCompose,
+    writeNotice: (line) => {
+      process.stderr.write(`${line}\n`);
+    },
   });
 }
 
@@ -8418,6 +8436,22 @@ async function handleLogs({
     lokiReachable,
   });
 
+  const runCompose = async (): Promise<number> =>
+    await runLogsWithCompose({
+      project,
+      projectNameForPrefix,
+      composeProject: branch ? projectNameForPrefix : undefined,
+      branch,
+      json,
+      follow,
+      tail,
+      service: typeof service === "string" ? service : undefined,
+      profiles,
+      format,
+      since: args.options.since,
+      until: args.options.until,
+    });
+
   if (useLoki) {
     return await runLogsWithLoki({
       baseUrl,
@@ -8434,24 +8468,13 @@ async function handleLogs({
       queryOpt: args.options.query,
       since: args.options.since,
       until: args.options.until,
+      wantsLokiExplicit,
+      runCompose,
     });
   }
 
   // Fallback to docker compose logs when Loki isn't available.
-  return await runLogsWithCompose({
-    project,
-    projectNameForPrefix,
-    composeProject: branch ? projectNameForPrefix : undefined,
-    branch,
-    json,
-    follow,
-    tail,
-    service: typeof service === "string" ? service : undefined,
-    profiles,
-    format,
-    since: args.options.since,
-    until: args.options.until,
-  });
+  return await runCompose();
 }
 
 /** An omitted option stays omitted so native dispatch can distinguish it from an explicit empty list. */

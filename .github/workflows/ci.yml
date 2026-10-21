@@ -146,6 +146,10 @@ jobs:
         run: python3 -m unittest discover -s tests/python -p test_native_compose_benchmark.py
       - name: Check native frontend acceptance controls
         run: python3 -m unittest discover -s tests/python -p test_native_frontend_acceptance.py
+      - name: Check application benchmark protocol controls
+        run: |
+          python3 scripts/check-application-benchmark-protocol.py
+          python3 -m unittest discover -s tests/python -p test_application_benchmark_protocol.py
 
   runtime-core:
     name: Candidate core (${{ matrix.os }})

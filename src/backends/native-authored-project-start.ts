@@ -63,6 +63,7 @@ import {
 } from "./native-project-process.ts";
 import {
   invokeNativeRuntime,
+  NATIVE_GRAPH_UNRESERVED,
   NativeRuntimeRequestError,
   type NativeRuntimeSelection,
 } from "./native-runtime-client.ts";
@@ -74,7 +75,12 @@ const PRIVATE_LIMIT = 256 * 1024;
 /** Upper bound of the read-only runtime check before the startup intent. */
 const RUNTIME_STATUS_TIMEOUT_MS = 5000;
 type Inputs = Awaited<ReturnType<typeof acquireNativeExecutionInputs>>;
-type Outcome = "not-started" | "removed" | "retained";
+/**
+ * `unreserved`: the native consumer settled after refusing before it reserved
+ * any runtime journal or published a receipt, and the exact startup intent and
+ * source were retired. Nothing is retained.
+ */
+type Outcome = "not-started" | "removed" | "retained" | "unreserved";
 const STAGES = [
   "selection",
   "admission",
@@ -146,6 +152,8 @@ export class NativeAuthoredProjectStartError extends Error {
     const detail = {
       "not-started": "no native consumer was started",
       removed: "exact native cleanup was confirmed",
+      unreserved:
+        "native runtime state was never reserved; the startup intent was retired and nothing is retained",
       retained:
         "startup evidence is retained; inspect owned state before retrying",
     }[opts.outcome];
@@ -441,6 +449,42 @@ async function retireAttempt(opts: {
   await attempt.source.remove();
 }
 
+/**
+ * HACK-1272: a consumer that refused before journal reservation (for example
+ * `native_graph_admission` for a non-content-ID image) leaves no receipt, so
+ * Removed retirement can never succeed. Retire the exact start intent and
+ * source only when the settled consumer's failure was never observed as a
+ * receipt and fresh inspection names the run `native_graph_unreserved` (an
+ * absent journal and no published foreground owner). Every other inspection
+ * refusal keeps all evidence.
+ */
+async function retireUnreservedAttempt(opts: {
+  readonly admission: NativeAuthoredProjectAdmission;
+  readonly attempt: Attempt;
+  readonly failure: unknown;
+  readonly refusal: unknown;
+}): Promise<boolean> {
+  if (
+    opts.failure === undefined ||
+    opts.attempt.observed !== undefined ||
+    opts.attempt.ready !== undefined ||
+    !(
+      opts.refusal instanceof NativeRuntimeRequestError &&
+      opts.refusal.nativeCode === NATIVE_GRAPH_UNRESERVED
+    )
+  ) {
+    return false;
+  }
+  // The exact source this attempt wrote is still unchanged; retirement removes
+  // it before the start intent so an interruption keeps the intent blocking.
+  await opts.attempt.source.assertFresh();
+  await opts.admission.retireUnreserved({
+    expectedStart: opts.attempt.start,
+    refusal: opts.refusal,
+  });
+  return true;
+}
+
 const HOOK_STAGES: Record<NativeHookPhase, Stage> = {
   "up.before": "hook-up-before",
   "up.after": "hook-up-after",
@@ -547,6 +591,7 @@ async function runPreparedLifecycle(ctx: {
   }) => void;
   readonly published: () => void;
   readonly removed: () => void;
+  readonly unreserved: () => void;
   readonly hookRetired: () => void;
   readonly nativeCode: (
     diagnostic: Pick<NativeExitDiagnostic, "nativeCode" | "nativeCauseCode">
@@ -692,7 +737,25 @@ async function runPreparedLifecycle(ctx: {
     await ctx.hookOwner.retire();
     ctx.hookRetired();
   }
-  await retireAttempt({ ...retirement, beforeRetire: liveStop?.retire });
+  try {
+    await retireAttempt({ ...retirement, beforeRetire: liveStop?.retire });
+  } catch (refusal) {
+    if (
+      ctx.hookOwner !== undefined ||
+      liveStop !== undefined ||
+      !(await retireUnreservedAttempt({
+        admission: ctx.admission,
+        attempt: ctx.admitted,
+        failure,
+        refusal,
+      }))
+    ) {
+      throw refusal;
+    }
+    ctx.unreserved();
+    ctx.completeStop(false);
+    throw failure;
+  }
   ctx.removed();
   ctx.completeStop(failure === undefined);
   if (failure) {
@@ -1100,6 +1163,9 @@ export async function serveNativeAuthoredProject(
             removed: () => {
               outcome = "removed";
             },
+            unreserved: () => {
+              outcome = "unreserved";
+            },
             hookRetired: () => {
               hookOwner = undefined;
             },
@@ -1138,7 +1204,7 @@ export async function serveNativeAuthoredProject(
             host: hostProcesses,
             hookStop,
             storageTool,
-            retained: outcome !== "removed",
+            retained: outcome !== "removed" && outcome !== "unreserved",
           });
         }
       }

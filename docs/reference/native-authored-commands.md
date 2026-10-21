@@ -68,7 +68,7 @@ provider contact. A refusal names no option value, path or project detail.
 | --- | --- | --- |
 | `up` | Whole-project foreground; `--branch`, `--profile` and `--env` (including `--env base`) keep their compiler contracts | `--detach`, `--json`, `--recover`, service subsets, single-service, command, workdir, follow, tail and format options, other unsupported options |
 | `down` | Whole-project owner-mediated stop of a ready generation through its live foreground owner or private no-host endpoint | `--json`, `--detach`, `--profile` and `--env` overrides, service subsets including an empty selection, single-service, command, workdir, follow, tail and format options |
-| `down --recover` | Explicit retirement of a complete stored generation whose owners are dead; omit `--profile` | `--json`, `--detach`, explicit empty or named `--profile`, `--env` overrides, service subsets, single-service, command, workdir, follow, tail and format options |
+| `down --recover` | Explicit retirement of a complete stored generation whose owners are dead, or of a pending startup intent that never reserved runtime state; omit `--profile` | `--json`, `--detach`, explicit empty or named `--profile`, `--env` overrides, service subsets, single-service, command, workdir, follow, tail and format options |
 | `ps` | `ps` and `ps --json` for the exact saved project and explicit `--branch` | `--profile`, `--env`, service subsets or a single service, `--recover`, `--detach`, command, workdir, follow, tail and format options |
 | `logs` | `logs SERVICE --no-follow` with `--tail` from 1 through 1000 (default 200), plain or `--json` | Follow mode (the default), omitted, multiple or malformed service selection, non-integer or out-of-range `--tail`, pretty format, time and query filters, `--profile`, `--env`, `--recover`, `--detach`, command and workdir options |
 | `exec` | `exec SERVICE -- COMMAND ARG...` with closed stdin, no TTY and an optional absolute `--workdir` | Empty command or empty first argument, NUL bytes, more than 256 arguments, an argument over 16 KiB or 64 KiB in total, relative `--workdir`, interactive or TTY input, `--json`, `--profile`, `--env`, service subsets, follow, tail and format options, `--recover`, `--detach` |
@@ -90,6 +90,21 @@ inspection also refuses, the captured native startup code takes precedence over
 the inspection code. That preserves the failure's owning boundary; it does not
 prove cleanup. Retained bindings and recovery requirements stay in force.
 These diagnostics do not grant retry or cleanup authority.
+
+A native consumer can refuse after the startup intent is reserved but before it
+reserves any runtime journal. For example, a `repository@sha256:` image reaches
+execution and refuses `native_graph_admission`. Such a run has no receipt, so the
+Removed retirement inspection can never succeed. After the consumer process has
+settled, startup asks the native runtime to inspect the exact run. Startup retires
+the startup intent and its source envelope only when the runtime refuses
+`native_graph_unreserved`: the run's journal directory is exactly absent under
+private state directories, and no foreground owner is published for the run. The
+failure then reports outcome `unreserved` with the original native code, and `ps`
+reports `not_started`. Any other inspection result keeps the attempt retained.
+Examples include `native_graph_receipt` for damaged or foreign evidence,
+`native_graph_foreground` for a published owner, and a stopped runtime. This
+applies only to attempts without lifecycle hooks, host processes or a live-stop
+owner. A canceled `unreserved` startup exits 130, like confirmed removal.
 Readiness requires authenticated current observations and unchanged input before
 publication. The foreground owner remains attached until owned shutdown finishes;
 Ctrl-C requests that shutdown. Exact durable Removed evidence retires the tagged
@@ -125,7 +140,8 @@ A project with no saved attempt reports `not_started`; a retained startup intent
 without a Ready mapping reports `pending` with no confirmed service rows. `pending`
 covers a start that is still in progress and a failed start whose reserved intent was
 retained as evidence; Hack does not guess which, because only the owner's cleanup proof
-may retire that intent. When a
+may retire that intent. When no startup is running, `down --recover` can retire the
+attempt if it never reserved runtime state (see below). When a
 Ready generation is saved but the candidate runtime is stopped (native code
 `runtime_not_running`, or the authenticated `native_graph_foreground` control code
 with that exact cause), `ps` exits 0 and reports `runtime_not_running` with the
@@ -201,6 +217,19 @@ changed files and rebooted guests refuse. Env/profile changes, service subsets a
 nor acquires managed values or starts a provider.
 Omit `--profile` to recover the stored generation; explicit empty or named profile
 overrides both refuse.
+
+When the selection has a retained startup intent but no Ready mapping and no
+recovery intent, `down --recover` takes a different path. It handles only an
+incomplete startup that never reserved runtime state. One example is an attempt
+retained by an earlier CLI before this retirement existed. The command first
+takes a fresh startup admission. A live or interrupted foreground CLI still holds
+that admission, so the command refuses as busy in that case. It also requires that
+no Ready mapping, lifecycle-hook owner or live-stop owner exists. It then inspects
+the exact run. It retires the start intent and the validated source envelope only
+when the native runtime refuses `native_graph_unreserved`. It removes the source
+first, so an interrupted retirement keeps the start intent blocking. Any receipt,
+any other refusal, or a successful inspection retains every file. This path does
+not compile input, acquire values, serve a run or touch guest resources.
 
 The closed version 3 publication and version 1 recovery selector remain supported
 with their original calendar boot qualifier; clock drift conservatively refuses

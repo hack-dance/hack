@@ -6,6 +6,7 @@ import {
   mkdir,
   mkdtemp,
   readdir,
+  readFile,
   realpath,
   rm,
   writeFile,
@@ -27,7 +28,15 @@ import {
   NATIVE_STORAGE_TOOL_MANIFEST,
   nativeStorageToolManifest,
 } from "../src/backends/native-authored-storage-tool.ts";
-import { nativeCodesReportRuntimeNotRunning } from "../src/backends/native-runtime-client.ts";
+import {
+  nativeAuthoredUnreservedStartSelected,
+  retireNativeAuthoredUnreservedStart,
+} from "../src/backends/native-authored-unreserved-start.ts";
+import {
+  type invokeNativeRuntime,
+  NativeRuntimeRequestError,
+  nativeCodesReportRuntimeNotRunning,
+} from "../src/backends/native-runtime-client.ts";
 import {
   type ComposeEnvFingerprintRecord,
   evaluateComposeServiceEnvFreshness,
@@ -206,6 +215,10 @@ type FixtureOptions = {
    * `native_graph_foreground`.
    */
   readonly stoppedDuringServe?: boolean;
+  /** Native startup code for failBeforeReceipt; defaults to graph_network_intent. */
+  readonly failBeforeReceiptCode?: string;
+  /** Inspection after failBeforeReceipt proves the journal was never reserved. */
+  readonly unreservedInspection?: boolean;
   readonly foreignPlan?: boolean;
   readonly foreignNamespace?: boolean;
   readonly branch?: string | null;
@@ -469,7 +482,7 @@ if(['plan','serve','frontend-plan','frontend-serve'].includes(action)){
   const digests=Object.fromEntries(Object.entries(services).map(([name,values])=>[name,Object.fromEntries(Object.entries(values).map(([key,value])=>[key,createHash('sha256').update(value).digest('hex')]))]));
   await writeFile(${JSON.stringify(delivery)},JSON.stringify({version:input.version,kind:input.kind,review:input.review,run:input.run,lifetime_seconds:input.lifetime_seconds,keys,digests,expectedDigest:${JSON.stringify(digest)}}));
  }
- if(${options.failBeforeReceipt === true}){console.error(JSON.stringify({code:'graph_network_intent',message:${JSON.stringify(CANARY)}}));process.exit(2)}
+ if(${options.failBeforeReceipt === true}){console.error(JSON.stringify({code:${JSON.stringify(options.failBeforeReceiptCode ?? "graph_network_intent")},message:${JSON.stringify(CANARY)}}));process.exit(2)}
  if(${options.stoppedDuringServe === true}){console.error(JSON.stringify({code:'native_graph_foreground',cause_code:'runtime_not_running',message:${JSON.stringify(CANARY)}}));process.exit(2)}
  const receipt={version:2,kind:'native-graph-runtime',owner:'f'.repeat(32),boot:'00000000-0000-0000-0000-000000000001',review,phase:'ready-observed',readiness:{web:'started'},resources:{'network:default':{kind:'network',key:'default',name:'hkn-'+input.run+'-network-0',id:'1'.repeat(64),image:null,phase:'created',outbound:true},'container:web':{kind:'container',key:'web',name:'hkn-'+input.run+'-container-0',id:'2'.repeat(64),image:'sha256:'+ '3'.repeat(64),phase:'started',networks:['default']}}};
  if(${options.storage === true && options.liveStop === true}){
@@ -495,7 +508,7 @@ if(['plan','serve','frontend-plan','frontend-serve'].includes(action)){
  }
  await finish();
 }else{
- if(action==='inspect'&&${options.failBeforeReceipt === true || options.stoppedDuringServe === true}){console.error(JSON.stringify({code:'native_graph_receipt',message:${JSON.stringify(CANARY)}}));process.exit(2)}
+ if(action==='inspect'&&${options.failBeforeReceipt === true || options.stoppedDuringServe === true}){console.error(JSON.stringify({code:${JSON.stringify(options.unreservedInspection === true ? "native_graph_unreserved" : "native_graph_receipt")},message:${JSON.stringify(CANARY)}}));process.exit(2)}
  if(action==='inspect'&&${JSON.stringify(options.cleanup)}==='missing'){console.error(JSON.stringify({code:'graph_owner_recovery',message:'private-missing-journal-detail'}));process.exit(2)}
  const receipt=JSON.parse(await readFile(journal,'utf8'));
  const observations={web:receipt.phase==='removed'?null:{state:'running',health:'none'}};
@@ -531,7 +544,7 @@ async function artifacts(scope: Awaited<ReturnType<typeof fixture>>["scope"]) {
 }
 async function failure(
   value: Promise<unknown>,
-  outcome: "not-started" | "removed" | "retained"
+  outcome: "not-started" | "removed" | "retained" | "unreserved"
 ) {
   const error: unknown = await value.catch((caught: unknown) => caught);
   expect(error).toBeInstanceOf(NativeAuthoredProjectStartError);
@@ -560,7 +573,143 @@ macTest(
     expect(retained).toHaveLength(2);
     expect(retained.some((name) => name.endsWith(".start.json"))).toBe(true);
     expect(retained.some((name) => name.endsWith(".source.json"))).toBe(true);
-  }
+  },
+  30_000
+);
+
+macTest(
+  "HACK-1272: a consumer refused before journal reservation retires its exact start intent",
+  async () => {
+    // M3 next.5 repro: a repository@digest image passes planning, then the
+    // native consumer refuses native_graph_admission before reserving a journal.
+    // Retirement inspection can never authenticate a Removed receipt; only the
+    // exact native_graph_unreserved refusal may retire the attempt.
+    const selected = await fixture({
+      failBeforeReceipt: true,
+      failBeforeReceiptCode: "native_graph_admission",
+      unreservedInspection: true,
+    });
+    const error = await failure(
+      serveNativeAuthoredProject({
+        ...selected,
+        run,
+        startupTimeoutMs: 60_000,
+      }),
+      "unreserved"
+    );
+    expect(error).toHaveProperty("nativeCode", "native_graph_admission");
+    expect(error).toHaveProperty("stage", "runtime");
+    expect(String(error)).toContain("never reserved");
+    expect(await artifacts(selected.scope)).toEqual([]);
+    const status = await nativeAuthoredProjectPs({
+      runtime: selected.runtime,
+      scope: selected.scope,
+      invoke: () => {
+        throw new Error("No runtime request for an absent attempt.");
+      },
+    });
+    expect(status.status).toBe("not_started");
+    const calls = (await readFile(selected.calls, "utf8"))
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line)[4]);
+    // `--json` is the read-only `runtime status --json` check that runs after
+    // review and before the startup intent is reserved.
+    expect(calls).toEqual(["plan", "--json", "serve", "inspect"]);
+  },
+  90_000
+);
+
+macTest(
+  "HACK-1272: down --recover retires only a provably unreserved retained start",
+  async () => {
+    // Reproduce the next.5 retained state: inspection named the absent journal
+    // native_graph_receipt, so start and source were retained and ps is pending.
+    const selected = await fixture({
+      failBeforeReceipt: true,
+      failBeforeReceiptCode: "native_graph_admission",
+    });
+    await failure(
+      serveNativeAuthoredProject({
+        ...selected,
+        run,
+        startupTimeoutMs: 60_000,
+      }),
+      "retained"
+    );
+    expect(await artifacts(selected.scope)).toHaveLength(2);
+    const ps = () =>
+      nativeAuthoredProjectPs({
+        runtime: selected.runtime,
+        scope: selected.scope,
+        invoke: () => {
+          throw new Error("No runtime request without a Ready mapping.");
+        },
+      });
+    expect((await ps()).status).toBe("pending");
+    expect(await nativeAuthoredUnreservedStartSelected(selected.scope)).toBe(
+      true
+    );
+    const requests: string[][] = [];
+    const refusing =
+      (code: string | null): typeof invokeNativeRuntime =>
+      (input) => {
+        requests.push([...input.args]);
+        if (code === null) {
+          return Promise.resolve({ receipt: {}, observations: {} });
+        }
+        return Promise.reject(
+          new NativeRuntimeRequestError({
+            message: "synthetic refusal",
+            nativeCode: code,
+          })
+        );
+      };
+    const recover = (code: string | null) =>
+      retireNativeAuthoredUnreservedStart({
+        scope: selected.scope,
+        runtime: selected.runtime,
+        timeoutMs: 10_000,
+        request: refusing(code),
+      });
+    // Damaged/foreign receipt evidence, a published owner, a stopped runtime
+    // and a present journal all keep every file.
+    for (const code of [
+      "native_graph_receipt",
+      "native_graph_foreground",
+      "runtime_not_running",
+      null,
+    ]) {
+      expect(
+        await recover(code).catch((caught: unknown) => caught)
+      ).toBeInstanceOf(Error);
+      expect(await artifacts(selected.scope)).toHaveLength(2);
+      expect((await ps()).status).toBe("pending");
+    }
+    expect(await recover("native_graph_unreserved")).toEqual({ run });
+    expect(requests.at(-1)).toEqual([
+      "graph",
+      "native",
+      "inspect",
+      "--run-id",
+      run,
+      "--json",
+    ]);
+    expect(await artifacts(selected.scope)).toEqual([]);
+    expect((await ps()).status).toBe("not_started");
+    expect(await nativeAuthoredUnreservedStartSelected(selected.scope)).toBe(
+      false
+    );
+    // Nothing remains to retire; a second recovery refuses without a request.
+    const before = requests.length;
+    expect(
+      await recover("native_graph_unreserved").catch(
+        (caught: unknown) => caught
+      )
+    ).toBeInstanceOf(Error);
+    expect(requests).toHaveLength(before);
+  },
+  90_000
 );
 
 macTest(

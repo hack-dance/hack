@@ -41,6 +41,14 @@ export class NativeRuntimeRequestError extends ClosedCliError {
   }
 }
 
+/**
+ * Native inspection code for a run whose journal is exactly absent and whose
+ * foreground owner is not published: no runtime state was ever reserved. It is
+ * point-in-time only; a caller must separately prove the run's consumer settled
+ * (or cannot exist) before treating it as retirement authority.
+ */
+export const NATIVE_GRAPH_UNRESERVED = "native_graph_unreserved";
+
 /** Native code for a read against a candidate runtime that is not running. */
 export const NATIVE_RUNTIME_NOT_RUNNING = "runtime_not_running";
 

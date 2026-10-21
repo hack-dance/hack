@@ -20,6 +20,7 @@ const ENV_KEYS = [
   "HACK_NATIVE_HOME",
   "HACK_HOME",
   "HACK_ASSETS_DIR",
+  "HACK_CANDIDATE_ENTRYPOINT",
 ] as const;
 const STABLE_BYTES = "unrelated standalone stable Hack sentinel\n";
 const refuseNetwork: typeof globalThis.fetch = Object.assign(
@@ -50,6 +51,7 @@ beforeEach(async () => {
   process.env.HACK_RUNTIME_BACKEND = "native";
   process.env.HACK_NATIVE_BINARY = join(root, "candidate", "hack-native");
   process.env.HACK_NATIVE_HOME = join(root, "candidate-home");
+  Reflect.deleteProperty(process.env, "HACK_CANDIDATE_ENTRYPOINT");
 });
 
 afterEach(async () => {
@@ -144,6 +146,39 @@ test("native update --check --tag also refuses with a human diagnostic", async (
   expect(fetch).not.toHaveBeenCalled();
   expect(lookup).not.toHaveBeenCalled();
   expect(await readFile(stable, "utf8")).toBe(STABLE_BYTES);
+});
+
+test.each([
+  ["hack-next", "compose"],
+  ["hack-v5", "compose"],
+  ["hack-next", undefined],
+])("candidate launcher %s on backend %p refuses before lookup or fetch", async (entrypoint, backend) => {
+  // An explicit Compose selection through a candidate launcher drops the native
+  // marker; the launcher's own marker must still keep update off the stable install.
+  process.env.HACK_CANDIDATE_ENTRYPOINT = entrypoint;
+  Reflect.deleteProperty(process.env, "HACK_NATIVE_BINARY");
+  Reflect.deleteProperty(process.env, "HACK_NATIVE_HOME");
+  if (backend === undefined) {
+    Reflect.deleteProperty(process.env, "HACK_RUNTIME_BACKEND");
+  } else {
+    process.env.HACK_RUNTIME_BACKEND = backend;
+  }
+  const before = await stableIdentity();
+  const fetch = spyOn(globalThis, "fetch").mockImplementation(refuseNetwork);
+  const lookup = spyOn(Bun, "which").mockImplementation(() => {
+    throw new Error("unexpected stable binary lookup");
+  });
+  const result = await capturedRun(["update", "--yes", "--json"]);
+  expect(result.exitCode).toBe(1);
+  expect(JSON.parse(result.stdout)).toEqual({
+    ok: false,
+    error:
+      "Refusing to self-update the opt-in native candidate. Install a separately reviewed candidate bundle to update it.",
+  });
+  expect(fetch).not.toHaveBeenCalled();
+  expect(lookup).not.toHaveBeenCalled();
+  expect(await readFile(stable, "utf8")).toBe(STABLE_BYTES);
+  expect(await stableIdentity()).toEqual(before);
 });
 
 test.each([

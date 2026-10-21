@@ -4,6 +4,7 @@ import copy
 import importlib.util
 import io
 import json
+import math
 from pathlib import Path
 import re
 import tempfile
@@ -514,6 +515,23 @@ class BudgetEvaluationTest(unittest.TestCase):
         self.assertEqual(verdicts(self.judge(summary), "info_latency_ms"), ["pass"])
         summary["lanes"]["candidate"]["info_latency_ms"] = entry([50] * 56 + [101] * 4)
         self.assertEqual(verdicts(self.judge(summary), "info_latency_ms"), ["fail"])
+
+    def test_window_mean_is_correctly_rounded_on_every_interpreter(self):
+        # Built-in sum() gives 0.009999999999999998 here before Python 3.12, which would
+        # pass the exclusive 1% idle ceiling; on 3.12+ it differs from the exact mean on
+        # the second list. Both must judge from the correctly rounded mean.
+        self.assertEqual(protocol_check.window_mean([0.01] * 10), 0.01)
+        large = [1000000000000000.2, 0.001, 0.007, 0.1, 0.01, 3.0, 1.0, 0.0, 0.007, 1000000000000000.2]
+        exact = math.fsum(large) / len(large)
+        self.assertEqual(protocol_check.window_mean(large), exact)
+        # A stricter extra budget whose exclusive ceiling is that exact mean must fail.
+        strict = mutated(lambda d: d["budgets"]["absolute"].append(
+            {"metric": "probe_window_mean", "statistic": "window_mean", "max": exact, "inclusive": False}))
+        self.assertEqual(protocol_check.validate_protocol(strict), [])
+        summary = small_summary()
+        summary["lanes"]["candidate"]["probe_window_mean"] = entry(large)
+        _, records = protocol_check.evaluate(strict, summary)
+        self.assertEqual(verdicts(records, "probe_window_mean"), ["fail"])
 
     def test_a_not_applicable_baseline_with_a_reason_is_skipped_and_missing_lanes_are_inconclusive(self):
         summary = small_summary()

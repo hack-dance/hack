@@ -287,8 +287,10 @@ A different or missing value is refused (`artifact_identity_mismatch`,
 frozen correctness check (`workload_correctness_weakened`). A revision may add
 correctness checks. The sample counts are floors at their frozen values: a protocol
 that plans fewer than 10 lifecycle runs or 60 tail samples per lane is refused, even
-where the program floor or the p95 bound would allow fewer. Every number in the protocol or a summary must be
-within ±(2⁵³ − 1), the interoperable JSON range; a larger value is refused as malformed.
+where the program floor or the p95 bound would allow fewer. Every number in the
+protocol or a summary must be within ±(2⁵³ − 1), the interoperable JSON range; a larger
+value is refused as malformed. A mean is the correctly rounded sum divided by the
+count, so a mean at an exclusive ceiling gets the same verdict on every Python version.
 
 These are acceptance thresholds, not measured achievements.
 

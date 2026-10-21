@@ -679,12 +679,22 @@ def validate_summary(protocol, summary):
     return sorted(found), workload
 
 
+def window_mean(samples):
+    """The correctly rounded sum divided by the count.
+
+    Built-in sum() rounds after every addition, and Python 3.12 changed how, so a mean
+    at an exclusive ceiling (ten samples of 0.01) could land just below it on one
+    interpreter and on it on another. math.fsum gives the same verdict everywhere.
+    """
+    return math.fsum(samples) / len(samples)
+
+
 def _statistic(samples, statistic):
     if statistic == "median":
         return median(samples)
     if statistic == "p95":
         return nearest_rank(samples, P95_QUANTILE)
-    return sum(samples) / len(samples)
+    return window_mean(samples)
 
 
 def _sample_floor(protocol, statistic):

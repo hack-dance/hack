@@ -342,6 +342,8 @@ into a host command, and `--target` on env and host commands chooses the `host` 
 | `hack config validate` | `--env` | Per invocation; resolves the native selection without reading managed env documents. | Not needed. | Authored native projects only; cannot be combined with `--file`. |
 | `hack config plan` | `--env` | Per invocation; metadata only (names, scopes, secret flags), never decrypted. | Not needed. | Authored native projects only. |
 | `hack project target` | `--env`, `--service` | Per invocation, read-only; reports the overlay selection (explicit, project default or base) without reading env files or values. | Not needed. | Selection only: overlay existence is not checked; no runtime required. |
+| `hack project task list` | `--env` | Per invocation, read-only; selects the overlay that each recipe's reviewed env scope is compared with, without reading env files or values. | Not needed. | Selection only; lists recipes and runs nothing, so no runtime is required. |
+| `hack project task inspect` | `--env` | Per invocation, read-only; as for `hack project task list`, for one recipe. | Not needed. | Selection only; runs nothing, so no runtime is required. |
 | `hack session start` | `--env`, `--service` | When the workspace is created; the name gains `.env-<name>` (`.env-base` for base spellings), and `--up` runs `hack up -d` with the same selection. | Start a new workspace or pass `--env` to `hack session exec`. | Injects into the workspace shell, not into containers. |
 | `hack session exec` | `--env`, `--service` | Per command; omitted reuses the selection encoded in the workspace name. | Each command resolves again. | Injects into the workspace command, not into containers. |
 

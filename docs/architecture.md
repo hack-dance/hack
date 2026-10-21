@@ -113,8 +113,8 @@ Projects can declare shareable env overlays and safely inject secrets into compo
 At runtime, hack resolves the selected overlay and injects the effective env directly into compose and
 host-side command flows. For service-scoped values, hack still generates
 `.hack/.internal/compose.env.override.yml` so compose services get the right per-service environment
-without requiring `.hack/.env` to exist. That file holds resolved plaintext, so it is written like
-`.hack/.env`: atomically, mode `0600`, and never through a symlink.
+without requiring `.hack/.env` to exist. That file holds only `${HACK_ENV_...}` references; the values
+reach `docker compose` through its process environment, so no decrypted value rests on disk.
 
 See `docs/env.md` for the current env model and migration notes.
 

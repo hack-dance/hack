@@ -28,6 +28,21 @@ const psRows: string[] = [];
 const errorMessages: string[] = [];
 const warnMessages: string[] = [];
 const upComposeContents: string[] = [];
+/**
+ * The global env Compose receives. The per-service `HACK_ENV_*` values that the
+ * value-free env override references (HACK-1273) are covered by
+ * tests/compose-env-at-rest-cli.test.ts.
+ */
+function withoutComposeEnvReferences(
+  env: Readonly<Record<string, string>> | undefined
+): Readonly<Record<string, string>> | undefined {
+  return env
+    ? Object.fromEntries(
+        Object.entries(env).filter(([key]) => !key.startsWith("HACK_ENV_"))
+      )
+    : env;
+}
+
 const upEnvs: Array<Readonly<Record<string, string>> | undefined> = [];
 const psEnvs: Array<Readonly<Record<string, string>> | undefined> = [];
 const upDetachSelections: Array<boolean | undefined> = [];
@@ -89,7 +104,7 @@ const runtimeBackendMock = await registerScopedModuleMock({
             )
           ).join("\n")
         );
-        upEnvs.push(opts.env);
+        upEnvs.push(withoutComposeEnvReferences(opts.env));
         upServiceSelections.push(opts.services);
         upStartupTimeouts.push(opts.startupTimeoutMs);
         upImageTimeouts.push(opts.imageTimeoutMs);
@@ -106,7 +121,7 @@ const runtimeBackendMock = await registerScopedModuleMock({
       psJson: async (opts: {
         readonly env?: Readonly<Record<string, string>>;
       }) => {
-        psEnvs.push(opts.env);
+        psEnvs.push(withoutComposeEnvReferences(opts.env));
         return {
           exitCode: 0,
           stdout: psRows.join("\n"),

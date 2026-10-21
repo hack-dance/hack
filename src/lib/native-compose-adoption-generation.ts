@@ -1269,6 +1269,9 @@ async function readInputs(
       : await inspectLegacyComposeRuntimeConfig({
           binding: observed,
           composeFile: join(generationRoot, "legacy-compose.yml"),
+          // Saved reads deliver no env values; a value-free env override is
+          // bound to the preparation-time hashes instead.
+          ...(projection ? { saved: meta.runtimeConfig } : {}),
           signal: ctx.signal,
           timeoutMs: ctx.timeoutMs,
         });
@@ -1701,6 +1704,7 @@ async function prepare(
       runtimeConfig: await inspectLegacyComposeRuntimeConfig({
         binding: acquired.binding,
         composeFile: join(generationRoot, "legacy-compose.yml"),
+        privateInterpolationEnv: acquired.projection?.composeEnv,
         signal: ctx.signal,
         timeoutMs: ctx.timeoutMs,
       }),

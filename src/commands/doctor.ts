@@ -1,6 +1,6 @@
 import { lookup } from "node:dns/promises";
 import { homedir } from "node:os";
-import { dirname, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { note, spinner } from "@clack/prompts";
 import { YAML } from "bun";
 import { HACK_AGENT_INTEGRATION_CONTENT_REVISION } from "../agents/integration-revision.ts";
@@ -57,6 +57,13 @@ import {
   resolveGlobalCaddyIp,
 } from "../lib/caddy-hosts.ts";
 import { emitCliResult, okResult } from "../lib/cli-result.ts";
+import {
+  ADOPTED_COMPOSE_ENV_OVERRIDE_NEXT_STEP,
+  composeEnvAtRestRepairs,
+  describeComposeEnvAtRest,
+  inspectComposeEnvAtRest,
+  removePlaintextComposeEnvOverride,
+} from "../lib/compose-env-at-rest.ts";
 import {
   resolveGlobalConfigPath,
   resolveGlobalHackDir,
@@ -117,6 +124,7 @@ import {
   type NativeCaDoctorDependencies,
   repairNativeCaTrust,
 } from "../lib/native-ca-doctor.ts";
+import { selectLegacyComposeAdoptedRoot } from "../lib/native-compose-adoption-command.ts";
 import {
   describeHackLocalRoute,
   HACK_LOCAL_ROLLBACK_COMMAND,
@@ -894,6 +902,11 @@ const handleDoctor: CommandHandlerFor<typeof doctorSpec> = async ({
         {
           timeoutMs: 5000,
         }
+      )
+    );
+    results.push(
+      await runCheck(s, COMPOSE_ENV_AT_REST_CHECK, () =>
+        checkComposeEnvOverrideAtRest({ startDir })
       )
     );
     if (
@@ -3053,6 +3066,70 @@ async function checkTrackedGeneratedFiles({
   };
 }
 
+const COMPOSE_ENV_AT_REST_CHECK = "compose env at rest";
+
+/**
+ * Warns when `.hack/.internal/compose.env.override.yml` holds literal env
+ * values (an earlier Hack version wrote decrypted values there) or cannot be
+ * verified, and when an interrupted removal left an aside that may hold them.
+ * Counts only; never a key or value. `hack doctor --fix` removes them, except
+ * an override that a saved adoption pins (the message gives the next step).
+ */
+export async function checkComposeEnvOverrideAtRest({
+  startDir,
+}: {
+  readonly startDir: string;
+}): Promise<CheckResult> {
+  const name = COMPOSE_ENV_AT_REST_CHECK;
+  const ctx = await findComposeEnvAtRestProject({ startDir });
+  if (!ctx) {
+    return {
+      name,
+      status: "warn",
+      message: `Skipped (no ${HACK_PROJECT_DIR_PRIMARY}/ found)`,
+    };
+  }
+  const report = await inspectComposeEnvAtRest({ projectDir: ctx.projectDir });
+  return {
+    name,
+    ...describeComposeEnvAtRest({
+      report,
+      projectDirName: ctx.projectDirName,
+    }),
+  };
+}
+
+/**
+ * The project whose generated Compose env override doctor inspects. A legacy
+ * adoption makes ordinary discovery refuse the project (its inputs become
+ * native), yet the adoption can pin an earlier version's literal override, so
+ * an active or pending adoption root is selected explicitly.
+ */
+async function findComposeEnvAtRestProject(opts: {
+  readonly startDir: string;
+}): Promise<{
+  readonly projectDir: string;
+  readonly projectDirName: string;
+} | null> {
+  try {
+    const ctx = await findProjectContext(opts.startDir);
+    if (ctx) {
+      return ctx;
+    }
+  } catch {
+    // Adopted or refused inputs: fall through to the adoption selector.
+  }
+  const adopted = await selectLegacyComposeAdoptedRoot({
+    cwd: opts.startDir,
+  }).catch(() => null);
+  return adopted
+    ? {
+        projectDir: join(adopted, HACK_PROJECT_DIR_PRIMARY),
+        projectDirName: HACK_PROJECT_DIR_PRIMARY,
+      }
+    : null;
+}
+
 async function checkWorktreeInstanceCollisions({
   startDir,
 }: {
@@ -3278,6 +3355,7 @@ async function runDoctorFix(opts: {
 
   await maybeInstallMutagenForDoctorFix();
   await maybeUntrackGeneratedFiles({ startDir: opts.startDir });
+  await maybeRemovePlaintextComposeEnvOverride({ startDir: opts.startDir });
   await maybeRepairHackd();
 
   const dockerOk = await dockerInfoOk();
@@ -3625,6 +3703,22 @@ export async function buildDoctorRemediationPlanLines(opts: {
     );
   }
 
+  const composeEnvAtRest = project
+    ? composeEnvAtRestRepairs(
+        await inspectComposeEnvAtRest({ projectDir: project.projectDir })
+      )
+    : null;
+  if (composeEnvAtRest?.override) {
+    steps.push(
+      `Remove ${project?.projectDirName}/.internal/compose.env.override.yml, which may hold env values at rest; Compose commands regenerate it with references only.`
+    );
+  }
+  if (composeEnvAtRest?.asides) {
+    steps.push(
+      `Remove leftover ${project?.projectDirName}/.internal/.compose.env.override.yml.<id>.remove files from an interrupted removal, which may hold env values.`
+    );
+  }
+
   if (opts.migrateEnvConfig) {
     steps.push(await buildEnvMigrationPlanStep({ project }));
   }
@@ -3719,6 +3813,101 @@ async function maybeUntrackGeneratedFiles(opts: {
     );
   }
   note(notes.join("\n"), "generated files");
+}
+
+/**
+ * `hack doctor --fix` step: removes a generated Compose env override that holds
+ * (or may hold) literal env values, and stale asides that an interrupted
+ * removal left. Hack-owned and regenerated value-free by the next Compose
+ * command, so it is a safe generated-file repair. The file is re-inspected
+ * immediately before removal; a value-free file is kept, and so is one that a
+ * saved adoption pins (removing it would break the adoption).
+ */
+async function maybeRemovePlaintextComposeEnvOverride(opts: {
+  readonly startDir: string;
+}): Promise<void> {
+  const project = await findComposeEnvAtRestProject(opts);
+  if (!project) {
+    return;
+  }
+  const report = await inspectComposeEnvAtRest({
+    projectDir: project.projectDir,
+  });
+  const file = `${project.projectDirName}/.internal/compose.env.override.yml`;
+  const repairs = composeEnvAtRestRepairs(report);
+  if (report.adoptionBound) {
+    note(
+      `Kept ${file}: a saved 'hack config adopt' generation pins it, and removing it would break the adoption (values omitted). ${ADOPTED_COMPOSE_ENV_OVERRIDE_NEXT_STEP}`,
+      "compose env at rest"
+    );
+  }
+  if (!(repairs.override || repairs.asides)) {
+    return;
+  }
+  const targets = [
+    ...(repairs.override ? [file] : []),
+    ...(repairs.asides
+      ? [
+          `leftover ${project.projectDirName}/.internal/.compose.env.override.yml.<id>.remove files`,
+        ]
+      : []),
+  ].join(" and ");
+  const ok = await doctorConfirm({
+    message: `Remove ${targets}? They may hold env values at rest; Compose commands regenerate the override with references only.`,
+    initialValue: true,
+  });
+  if (!ok) {
+    return;
+  }
+  try {
+    const removal = await removePlaintextComposeEnvOverride({
+      projectDir: project.projectDir,
+      includeUnverifiable: true,
+    });
+    note(
+      composeEnvAtRestFixLines({
+        removal,
+        file,
+        overrideRequested: repairs.override,
+      }).join("\n"),
+      "compose env at rest"
+    );
+  } catch {
+    note(
+      `Failed to remove ${targets}; remove them manually (values omitted).`,
+      "compose env at rest"
+    );
+  }
+}
+
+/** Value-free outcome lines for the `--fix` step above. */
+function composeEnvAtRestFixLines(opts: {
+  readonly removal: Awaited<
+    ReturnType<typeof removePlaintextComposeEnvOverride>
+  >;
+  readonly file: string;
+  readonly overrideRequested: boolean;
+}): string[] {
+  const { removal, file } = opts;
+  const lines =
+    removal.asidesRemoved > 0
+      ? [
+          `Removed ${removal.asidesRemoved} leftover removal file(s) (values omitted).`,
+        ]
+      : [];
+  if (!opts.overrideRequested) {
+    return lines;
+  }
+  if (removal.removed) {
+    lines.push(`Removed ${file} (values omitted).`);
+  } else if (removal.adoptionBound) {
+    lines.push(
+      `Kept ${file}: a saved 'hack config adopt' generation now pins it (values omitted).`
+    );
+  } else {
+    lines.push(`Left ${file} in place: it no longer holds env values.`);
+  }
+  return lines;
 }
 
 async function maybeRepairProjectLifecycleSessions(opts: {

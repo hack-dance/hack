@@ -4,7 +4,7 @@ import {
   resolveModernComposeEnvOverrides,
   resolveRuntimeHostMetadataOverride,
 } from "../../../src/commands/project.ts";
-import { renderManagedComposeEnvOverride } from "../../../src/lib/compose-managed-env.ts";
+import { renderComposeEnvReferenceOverride } from "../../../src/lib/compose-managed-env.ts";
 import {
   defaultProjectSlugFromPath,
   findProjectContextAtRoot,
@@ -31,6 +31,8 @@ const LAYERS = [
   "hack.env.qa.local.yaml",
 ] as const;
 const NAME = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+/** Synthetic Compose process env per fixture root, as Hack supplies it. */
+const composeEnvByRoot = new Map<string, Readonly<Record<string, string>>>();
 function refuse(): never {
   throw new Error(
     "Adoption managed fixture source check failed; values omitted."
@@ -46,6 +48,22 @@ export function managedAdoptionFixtureComposeFiles(
     join(root, ".hack/.internal/compose.runtime.override.yml"),
     join(root, ".hack/.internal/compose.env.override.yml"),
   ]);
+}
+
+/**
+ * The Compose process env Hack supplies with the value-free env override
+ * (HACK-1273): the override holds only `${HACK_ENV_*}` references, so a raw
+ * `docker compose --file` start of the original stack needs these values or
+ * every managed variable reaches the containers blank. Synthetic values only.
+ */
+export function managedAdoptionFixtureComposeEnv(
+  root: string
+): Readonly<Record<string, string>> {
+  const env = composeEnvByRoot.get(root);
+  if (!env) {
+    refuse();
+  }
+  return env;
 }
 
 /** Direct existing writers use the same isolated home/policy as the later compiled CLI. */
@@ -241,17 +259,23 @@ async function writeGenerated(instance: Checkout) {
     refuse();
   }
   const expectedRuntime = buildRuntimeHostMetadataOverride(runtimeOpts);
-  const expectedEnv = renderManagedComposeEnvOverride({
+  // The writer keeps only `${NAME}` references at rest (HACK-1273).
+  const expectedEnv = renderComposeEnvReferenceOverride({
     targetServices: ["db", "worker"],
     globalEnv: managed.env,
     serviceEnv: managed.preflightEnvByService,
   });
   if (
+    !expectedEnv ||
     (await readFile(runtime, "utf8")) !== expectedRuntime ||
-    (await readFile(files[2] ?? "", "utf8")) !== expectedEnv
+    (await readFile(files[2] ?? "", "utf8")) !== expectedEnv.text ||
+    Object.entries(expectedEnv.env).some(
+      ([name, value]) => managed.env[name] !== value
+    )
   ) {
     refuse();
   }
+  composeEnvByRoot.set(instance.root, Object.freeze({ ...managed.env }));
 }
 
 /** Private byte/inode oracle covers selected raw layers, shared primary locals and original generated files throughout adoption. */

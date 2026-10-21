@@ -4,6 +4,7 @@ import {
   selectNativeRetainedImages,
 } from "../src/backends/native-project-retained-images.ts";
 import { verifyNativeActiveReview } from "../src/backends/native-project-review.ts";
+import { expectClosedRefusal } from "./helpers/closed-refusal.ts";
 
 const saved = {
   run: "a".repeat(32),
@@ -213,7 +214,7 @@ test("active native selection and a substituted fresh receipt cannot authenticat
     ).rejects.toThrow();
   }
   let inspections = 0;
-  await expect(
+  await expectClosedRefusal(
     selectNativeActiveImages({
       ...options,
       invoke: async ({ args }) => {
@@ -238,8 +239,9 @@ test("active native selection and a substituted fresh receipt cannot authenticat
               },
             };
       },
-    })
-  ).rejects.toThrow("active image identity changed");
+    }),
+    "active image identity changed"
+  );
 });
 test("native generation, container and boot are rechecked after image selection", async () => {
   const selected = await selectNativeActiveImages({
@@ -248,7 +250,7 @@ test("native generation, container and boot are rechecked after image selection"
       args[1] === "inspect" ? activeObservation() : activeSelection(),
   });
   for (const field of ["generation", "container", "boot"]) {
-    await expect(
+    await expectClosedRefusal(
       verifyNativeActiveReview({
         ...options,
         retained: saved,
@@ -257,13 +259,14 @@ test("native generation, container and boot are rechecked after image selection"
           ...activeSelection(),
           [field]: field === "boot" ? "new-boot" : "4".repeat(64),
         }),
-      })
-    ).rejects.toThrow("active review identity changed");
+      }),
+      "active review identity changed"
+    );
   }
 });
 test("image drift between inspections refuses even when the mocked native proof is unchanged", async () => {
   let inspections = 0;
-  await expect(
+  await expectClosedRefusal(
     selectNativeActiveImages({
       ...options,
       invoke: async ({ args }) => {
@@ -288,8 +291,9 @@ test("image drift between inspections refuses even when the mocked native proof 
               },
             };
       },
-    })
-  ).rejects.toThrow("active image selection changed");
+    }),
+    "active image selection changed"
+  );
 });
 test("fresh input never observes retained state", async () => {
   expect(
@@ -347,9 +351,10 @@ test("stale ownership and uncertain compute or data refuse image reuse", async (
       },
     },
   ]) {
-    await expect(
-      selectNativeRetainedImages({ ...options, invoke: async () => changed })
-    ).rejects.toThrow("image selection changed");
+    await expectClosedRefusal(
+      selectNativeRetainedImages({ ...options, invoke: async () => changed }),
+      "image selection changed"
+    );
   }
 });
 test("malformed provenance or image and mismatched resource keys refuse reuse", async () => {
@@ -359,7 +364,7 @@ test("malformed provenance or image and mismatched resource keys refuse reuse", 
     "original_compose_sha256",
     "normalized_compose_sha256",
   ]) {
-    await expect(
+    await expectClosedRefusal(
       selectNativeRetainedImages({
         ...options,
         invoke: async () => ({
@@ -372,8 +377,9 @@ test("malformed provenance or image and mismatched resource keys refuse reuse", 
             },
           },
         }),
-      })
-    ).rejects.toThrow("provenance is invalid");
+      }),
+      "provenance is invalid"
+    );
   }
   for (const resource of [
     { ...baseline.receipt.resources["container:web"], image: "redis:latest" },

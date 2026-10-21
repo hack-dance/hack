@@ -1,3 +1,4 @@
+import { ClosedCliError } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
 import {
   invokeNativeRuntime,
@@ -30,7 +31,7 @@ export async function preflightNativeProjectSource(opts: {
     result.source_admitted !== true ||
     typeof result.pool_initialized !== "boolean"
   ) {
-    throw new Error(
+    throw new ClosedCliError(
       "Native source admission returned an invalid receipt; startup hooks were not run."
     );
   }

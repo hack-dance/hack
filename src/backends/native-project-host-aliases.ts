@@ -1,10 +1,13 @@
+import { HackCliError } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
 
 const LABEL = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 function refused(): Error {
-  return new Error(
-    "Native host alias selection conflicts with declared configuration; values omitted."
-  );
+  return new HackCliError({
+    code: "E_CONFIG_INVALID",
+    message:
+      "Native host alias selection conflicts with declared configuration; values omitted.",
+  });
 }
 function existingAliases(value: unknown): string[] {
   if (value === undefined) {

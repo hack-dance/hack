@@ -1,6 +1,7 @@
 import { DEFAULT_INGRESS_NETWORK } from "../constants.ts";
 import { isRecord } from "./guards.ts";
 import { nativeComposeVolumeCreatedAt } from "./native-compose-retained-storage.ts";
+import { waitNativeComposeReady } from "./native-compose-wait-ready.ts";
 import { beginNativeCpuChild } from "./native-cpu-diagnostics.ts";
 import { findExecutableInPath } from "./shell.ts";
 
@@ -416,28 +417,99 @@ export async function assertNativeComposeOwned(
     .observation;
 }
 
-/** Startup readiness only: an exact owned on-failure restart without bridge membership remains unready. Never use this observation as effect authority. */
-export async function observeNativeComposeStartupOwned(
+/**
+ * How startup readiness treats an exact owned on-failure container that was inspected
+ * `running` while its bridge membership was missing or an `ep-` placeholder. `transient`
+ * keeps it unready while its restart can still be in flight. `settled` is the check after
+ * the readiness deadline: it refuses that shape. Both still admit a container inspected
+ * `restarting` exactly as before.
+ */
+export type NativeComposeStartupMembership = "settled" | "transient";
+
+function startupSelection(
   input: NativeComposeOwnershipOptions,
   restartingServices: readonly string[]
-): Promise<NativeComposeOwnershipObservation | null> {
+): ReadonlySet<string> {
   const selected = new Set(restartingServices);
   requireValue(
     input.recovery === undefined &&
       selected.size === restartingServices.length &&
       restartingServices.every((name) => input.expectedServices.includes(name))
   );
-  const result = await queryNativeComposeOwned(input, "startup", selected);
+  return selected;
+}
+
+/** Startup readiness only: an exact owned on-failure restart without bridge membership remains unready. Never use this observation as effect authority. */
+export async function observeNativeComposeStartupOwned(
+  input: NativeComposeOwnershipOptions,
+  restartingServices: readonly string[],
+  opts: { readonly membership?: NativeComposeStartupMembership } = {}
+): Promise<NativeComposeOwnershipObservation | null> {
+  const result = await queryNativeComposeOwned(
+    input,
+    "startup",
+    startupSelection(input, restartingServices),
+    (opts.membership ?? "transient") === "transient"
+  );
   return result.restarting ? null : result.observation;
+}
+
+/**
+ * Startup readiness wait under the caller's readiness deadline. Each observation is a
+ * fresh `transient` startup query. If the deadline passes while the last observation was
+ * unready only because a `running` on-failure member was missing or placeholdered, one
+ * `settled` query follows: it refuses with the unchanged topology predicate when that
+ * member is still absent, so a permanently missing member cannot stay unready. The
+ * settled query never turns a timeout into readiness; this returns `null` either way.
+ * The settled query runs after the deadline, so it is bounded by the probe timeout.
+ * Never use the observation as effect authority.
+ */
+export async function waitNativeComposeStartupOwned(opts: {
+  readonly ownership: NativeComposeOwnershipOptions;
+  readonly restartingServices: readonly string[];
+  readonly deadline: number;
+  readonly ready: (state: NativeComposeOwnershipObservation) => boolean;
+  readonly observed?: (state: NativeComposeOwnershipObservation) => void;
+}): Promise<NativeComposeOwnershipObservation | null> {
+  const selected = startupSelection(opts.ownership, opts.restartingServices);
+  let transient = false;
+  const state = await waitNativeComposeReady({
+    deadline: opts.deadline,
+    signal: opts.ownership.signal,
+    observe: async () => {
+      const result = await queryNativeComposeOwned(
+        opts.ownership,
+        "startup",
+        selected,
+        true
+      );
+      transient = result.restarting && result.transient;
+      if (result.restarting) {
+        return null;
+      }
+      opts.observed?.(result.observation);
+      return result.observation;
+    },
+    ready: opts.ready,
+  });
+  if (state !== null || !transient || opts.ownership.signal?.aborted) {
+    return state;
+  }
+  await queryNativeComposeOwned(opts.ownership, "startup", selected, false);
+  return null;
 }
 
 async function queryNativeComposeOwned(
   input: NativeComposeOwnershipOptions,
   mode: "saved" | "startup" | "strict",
-  restartingServices: ReadonlySet<string>
+  restartingServices: ReadonlySet<string>,
+  /** Startup only: admit the `running` restart-race shapes; see {@link NativeComposeStartupMembership}. */
+  transientMembership = false
 ): Promise<{
   readonly observation: NativeComposeOwnershipObservation;
   readonly restarting: boolean;
+  /** An admitted container depended on a shape that a `settled` query refuses. */
+  readonly transient: boolean;
 }> {
   try {
     requireValue(mode === "strict" || input.recovery === undefined);
@@ -537,14 +609,16 @@ async function queryNativeComposeOwned(
         scan: "first",
         mode,
         restartingServices,
+        transientMembership,
       });
     }
-    const firstRestarting = validateTopology(
+    const first = validateTopology({
       opts,
       observations,
       mode,
-      restartingServices
-    );
+      restartingServices,
+      transientMembership,
+    });
     for (const volume of opts.expectedVolumes ?? []) {
       if (volume.mustExist || volume.createdAt !== undefined) {
         requireValue(
@@ -577,17 +651,20 @@ async function queryNativeComposeOwned(
         probe,
         observations: rechecked,
         scan: "recheck",
+        first: observations,
         mode,
         restartingServices,
+        transientMembership,
       });
     }
-    const secondRestarting = validateTopology(
+    const second = validateTopology({
       opts,
-      rechecked,
+      observations: rechecked,
       mode,
-      restartingServices
-    );
-    const restarting = new Set([...firstRestarting, ...secondRestarting]);
+      restartingServices,
+      transientMembership,
+    });
+    const restarting = new Set([...first.restarting, ...second.restarting]);
     for (const id of restarting) {
       const first = observations.containers.find((value) => value.id === id);
       const second = rechecked.containers.find((value) => value.id === id);
@@ -625,6 +702,10 @@ async function queryNativeComposeOwned(
         networks: rechecked.networks,
       },
       restarting: restarting.size > 0,
+      transient:
+        first.transient ||
+        second.transient ||
+        [...rechecked.placeholders.values()].some((ids) => ids.size > 0),
     };
   } catch (error: unknown) {
     if (error instanceof NativeComposeOwnershipError) {
@@ -654,10 +735,13 @@ async function collectInspections(input: {
   readonly selection: NativeComposeOwnershipOptions;
   readonly probe: (args: readonly string[]) => Promise<string>;
   readonly observations: MutableObservation;
-  /** Only the first startup scan may admit a restarting endpoint placeholder; the recheck must resolve it. */
+  /** Placeholder admission differs by scan; see {@link networkMembers}. */
   readonly scan: "first" | "recheck";
+  /** The same query's first-scan observations; the recheck scan only. */
+  readonly first?: MutableObservation;
   readonly mode: "saved" | "startup" | "strict";
   readonly restartingServices: ReadonlySet<string>;
+  readonly transientMembership: boolean;
 }): Promise<void> {
   const { kind, resources, selection: opts, probe, observations } = input;
   const { containers, volumes, networks } = observations;
@@ -767,8 +851,10 @@ async function collectInspections(input: {
           members: row.containers,
           network: resource.name,
           observations,
-          admitRestartingPlaceholders:
-            input.scan === "first" && input.mode === "startup",
+          startup: input.mode === "startup",
+          scan: input.scan,
+          first: input.first,
+          transientMembership: input.transientMembership,
           restartingServices: input.restartingServices,
         });
         observations.members.set(resource.name, members);
@@ -780,23 +866,41 @@ async function collectInspections(input: {
 }
 
 /**
- * Member keys are immutable container IDs. While a restarting container's endpoint
- * exists without its sandbox, Docker keys it `ep-<endpoint>` instead; that placeholder
- * is never a member identity. Only the first startup scan tolerates one such key per
- * selected on-failure container whose same-scan inspect reports state `restarting` or
- * `running` and an endpoint on this network. `running` is admitted because the scan
- * inspects containers before networks and Docker does not lock them together: a
- * container observed running can exit and begin its on-failure restart before the
- * bridge is read. The live-endpoint admission keeps every admitted container unready;
- * the recheck scan must observe only container IDs, so an unresolved, created/exited,
- * oneoff or unselected placeholder refuses with the unchanged `network-member-id`
- * predicate. Key and name values are compared only, never retained or disclosed.
+ * Member keys are immutable container IDs. While a container's endpoint exists without
+ * its sandbox, Docker keys it `ep-<endpoint>` instead; that placeholder is never a
+ * member identity.
+ *
+ * Docker on-failure restart semantics (the reason any placeholder or missing member is
+ * tolerated): when a container whose policy allows another attempt exits non-zero, the
+ * daemon increments its restart count, releases its network endpoints as part of exit
+ * cleanup, and waits a backoff (100 ms, doubling per quick failure) before starting the
+ * same container ID again. During that backoff the bridge lists no key for it at all.
+ * The restart then recreates the endpoint before the sandbox joins, so for a moment the
+ * bridge keys it `ep-<endpoint>`; after the join the key is the container ID again.
+ * Each query reads containers, then volumes, then networks, and Docker does not lock
+ * these reads together, so the container read and the bridge read can straddle any of
+ * those transitions.
+ *
+ * Only a startup read admits a placeholder, and only for one selected on-failure,
+ * non-oneoff container with that exact name, an endpoint on this network, and no
+ * container-ID membership. The first scan admits a container inspected `restarting`, or
+ * `running` while membership is `transient` (inspected before it exited). The recheck
+ * admits one only while membership is `transient`, for a container inspected `running`
+ * or `restarting` that the first scan saw by the same ID and name without a placeholder:
+ * it was a member or absent there, then exited and began restarting between the scans.
+ * A placeholder that persists from the first scan into the recheck, and every
+ * created/exited, oneoff, unselected, foreign or malformed key, refuses with the
+ * unchanged `network-member-id` predicate. Admission keeps the container unready, never
+ * ready. Key and name values are compared only, never retained or disclosed.
  */
 function networkMembers(opts: {
   readonly members: Record<string, unknown>;
   readonly network: string;
   readonly observations: MutableObservation;
-  readonly admitRestartingPlaceholders: boolean;
+  readonly startup: boolean;
+  readonly scan: "first" | "recheck";
+  readonly first: MutableObservation | undefined;
+  readonly transientMembership: boolean;
   readonly restartingServices: ReadonlySet<string>;
 }): {
   readonly members: readonly string[];
@@ -809,7 +913,8 @@ function networkMembers(opts: {
       continue;
     }
     requireValue(
-      opts.admitRestartingPlaceholders &&
+      opts.startup &&
+        (opts.scan === "first" || opts.transientMembership) &&
         ENDPOINT_PLACEHOLDER.test(key) &&
         isRecord(member) &&
         typeof member.Name === "string",
@@ -823,7 +928,8 @@ function networkMembers(opts: {
     requireValue(
       owners.length === 1 &&
         owner !== undefined &&
-        (owner.state === "restarting" || owner.state === "running") &&
+        (owner.state === "restarting" ||
+          (owner.state === "running" && opts.transientMembership)) &&
         !owner.oneoff &&
         opts.restartingServices.has(owner.service) &&
         !members.includes(owner.id) &&
@@ -831,13 +937,41 @@ function networkMembers(opts: {
         Object.hasOwn(
           opts.observations.endpoints.get(owner.id) ?? {},
           opts.network
-        ),
+        ) &&
+        (opts.scan === "first" ||
+          restartedBetweenScans({
+            first: opts.first,
+            owner,
+            network: opts.network,
+          })),
       "topology",
       "network-member-id"
     );
     claimed.add(owner.id);
   }
   return { members: members.sort(), placeholders: claimed };
+}
+
+/** The first scan saw this exact container, live, as an ID member or absent, never as a placeholder. */
+function restartedBetweenScans(opts: {
+  readonly first: MutableObservation | undefined;
+  readonly owner: NativeComposeContainerObservation;
+  readonly network: string;
+}): boolean {
+  const { first, owner, network } = opts;
+  const previous = first?.containers.find(
+    (container) => container.id === owner.id
+  );
+  return (
+    first !== undefined &&
+    previous !== undefined &&
+    previous.name === owner.name &&
+    previous.service === owner.service &&
+    !previous.oneoff &&
+    (previous.state === "running" || previous.state === "restarting") &&
+    first.members.has(network) &&
+    first.placeholders.get(network)?.has(owner.id) !== true
+  );
 }
 
 function containerObservation(
@@ -1010,6 +1144,17 @@ function endpointContainerName(opts: {
   return predecessors.length === 1 ? canonical : container.name;
 }
 
+/**
+ * A live container must be a container-ID member of each owned bridge it is attached
+ * to. Startup admits (keeps unready) one that is not, only on the single owned outbound
+ * default bridge, only for a selected on-failure, non-oneoff container, and only while
+ * its restart can explain the gap: inspected `restarting` (the backoff), or inspected
+ * `running` while membership is `transient`. A `running` container can be read just
+ * before it exits; Docker then releases its endpoint for the restart backoff before the
+ * bridge read (no key) or recreates it before the sandbox joins (an `ep-` key; see
+ * {@link networkMembers}). The caller's readiness deadline bounds `transient`: the
+ * `settled` check after it refuses a `running` container still missing here.
+ */
 function requireLiveMember(opts: {
   readonly selection: NativeComposeOwnershipOptions;
   readonly observations: MutableObservation;
@@ -1020,6 +1165,7 @@ function requireLiveMember(opts: {
   readonly endpoint: Record<string, unknown>;
   readonly mode: "saved" | "startup" | "strict";
   readonly restartingServices: ReadonlySet<string>;
+  readonly transientMembership: boolean;
 }): boolean {
   const {
     selection,
@@ -1031,6 +1177,7 @@ function requireLiveMember(opts: {
     endpoint,
     mode,
     restartingServices,
+    transientMembership,
   } = opts;
   if (
     attachment.externalId !== undefined ||
@@ -1042,9 +1189,7 @@ function requireLiveMember(opts: {
   requireValue(
     mode === "startup" &&
       (container.state === "restarting" ||
-        (container.state === "running" &&
-          observations.placeholders.get(attachment.name)?.has(container.id) ===
-            true)) &&
+        (container.state === "running" && transientMembership)) &&
       !container.oneoff &&
       restartingServices.has(container.service) &&
       policy.networks.length === 1 &&
@@ -1059,13 +1204,21 @@ function requireLiveMember(opts: {
   return true;
 }
 
-function validateTopology(
-  opts: NativeComposeOwnershipOptions,
-  observations: MutableObservation,
-  mode: "saved" | "startup" | "strict",
-  restartingServices: ReadonlySet<string>
-): ReadonlySet<string> {
+function validateTopology(input: {
+  readonly opts: NativeComposeOwnershipOptions;
+  readonly observations: MutableObservation;
+  readonly mode: "saved" | "startup" | "strict";
+  readonly restartingServices: ReadonlySet<string>;
+  readonly transientMembership: boolean;
+}): {
+  /** Containers admitted without container-ID membership; they keep startup unready. */
+  readonly restarting: ReadonlySet<string>;
+  /** Some admitted container was inspected `running`, which only `transient` membership admits. */
+  readonly transient: boolean;
+} {
+  const { opts, observations, mode, restartingServices } = input;
   const restarting = new Set<string>();
+  let transient = false;
   const policies = workloadNetworks(opts);
   const owned = new Map(
     observations.networks.map((network) => [network.name, network.id])
@@ -1156,13 +1309,15 @@ function validateTopology(
           endpoint,
           mode,
           restartingServices,
+          transientMembership: input.transientMembership,
         })
       ) {
         restarting.add(container.id);
+        transient ||= container.state === "running";
       }
     }
   }
-  return restarting;
+  return { restarting, transient };
 }
 
 function topologySnapshot(
@@ -1224,7 +1379,14 @@ function batches(resources: readonly Inventory[]): Inventory[][] {
  * an acquisition whose aggregate deadline or output allowance has expired.
  */
 export function createNativeComposeProbe(
-  opts: Pick<NativeComposeOwnershipOptions, "signal" | "timeoutMs">
+  opts: Pick<NativeComposeOwnershipOptions, "signal" | "timeoutMs"> & {
+    /**
+     * Private Compose interpolation values (the `HACK_ENV_*` references of a
+     * value-free env override) added to the child environment only. Never
+     * logged, returned or serialized.
+     */
+    readonly privateInterpolationEnv?: Readonly<Record<string, string>>;
+  }
 ): (args: readonly string[]) => Promise<string> {
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   if (
@@ -1244,7 +1406,7 @@ export function createNativeComposeProbe(
   if (!binary) {
     probeRefused("E_NATIVE_COMPOSE_PROBE", "operation");
   }
-  const environment = { ...process.env };
+  const environment = { ...process.env, ...opts.privateInterpolationEnv };
   return async (args) => {
     checkInterruption(opts.signal, false);
     const remainingTime = deadline - Date.now();

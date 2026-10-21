@@ -104,9 +104,16 @@ test("unsupported changes and conflicts refuse without mutating input", () => {
     { version: 1, additionalHostnames: { web: ["web.hack.gy"] } },
     { version: 1, additionalHostnames: { web: ["*.hack.local"] } },
   ]) {
-    expect(() => adaptNativeProject({ input: original, selection })).toThrow(
-      "values omitted"
-    );
+    let refusal: unknown;
+    try {
+      adaptNativeProject({ input: original, selection });
+    } catch (error: unknown) {
+      refusal = error;
+    }
+    expect(refusal).toMatchObject({
+      code: "E_CONFIG_INVALID",
+      message: expect.stringContaining("values omitted"),
+    });
     expect(original.normalizedComposeJson).toBe(bytes);
   }
   const compose = JSON.parse(bytes);

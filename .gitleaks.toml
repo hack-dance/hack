@@ -29,3 +29,10 @@ condition = "AND"
 paths = ['''^tests/mcp-inspect-tools\.test\.ts$''']
 regexTarget = "line"
 regexes = ['''(?m)^\s*const SECRET_CANARY = "zqx-secret-canary-7731";\s*$''']
+
+[[rules.allowlists]]
+description = "Task catalog tests use a fixed synthetic canary to prove smuggled env values are never echoed"
+condition = "AND"
+paths = ['''^tests/project-task-catalog\.test\.ts$''']
+regexTarget = "line"
+regexes = ['''(?m)^\s*const SECRET_CANARY = "secret-canary-91c4d0";\s*$''']

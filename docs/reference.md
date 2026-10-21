@@ -22,6 +22,7 @@
 - [Native configuration validation](./reference/native-config-compiler.md) — the authored `.hack/hack.project.json` compiler contract
 - [Native configuration with Compose](./reference/native-compose-commands.md) — the Compose command owner for authored projects
 - [Authored configuration with the native runtime](./reference/native-authored-commands.md) — the explicit native backend command slices and their support matrix
+- [Application benchmark protocol](./reference/application-benchmark-protocol.md) — the frozen matched benchmark artifacts, workloads, order, sample counts and budgets
 
 ## Extensions
 
@@ -31,3 +32,4 @@
 - [MCP tool contract](./reference/mcp-tools.md) — every MCP tool: annotations, inputs, argv, results, and the value-free env tools
 - [MCP logs contract](./reference/mcp-logs.md) — cutoff versus backend failure for the MCP log tools, and the cursor/handle decision
 - [AX target and result contract](./reference/ax-target-result-contract.md) — provisional target schema, closed refusals and the read-only `hack project target` inspector
+- [AX task catalog contract](./reference/ax-task-catalog.md) — provisional reviewed-recipe catalog, closed refusals and the read-only `hack project task list|inspect` commands

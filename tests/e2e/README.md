@@ -502,13 +502,24 @@ for the bridge the `network-member-id` predicate inspected: counts of `hex64`,
 service names observed in the `restarting` state. The keys themselves are never
 emitted. This evidence classifies the flake; the diagnostics do not change the guard.
 
-The startup readiness guard itself admits one `ep-` placeholder only in the first scan
-of a query, and only for a selected on-failure container that the same scan inspected
-as `restarting` or `running`. `running` is included because containers are inspected
-before the bridge, so the retry container can exit and begin its restart between the
-two reads. That container stays unready, and the recheck scan must see its container
-ID. A placeholder that persists, or one that names any other container, still refuses
-with `network-member-id`.
+The startup readiness guard follows Docker's on-failure restart: on a failing exit the
+daemon releases the container's endpoint, waits a backoff, then recreates the endpoint
+(keyed `ep-<endpoint>` until the sandbox joins) for the same container ID. Containers
+are inspected before the bridge, and Docker does not lock the reads together. So for a
+selected, non-oneoff on-failure container inspected `restarting` or `running`, startup
+stays unready (never ready, never effect authority) when its bridge membership is
+missing (the backoff, HACK-1279 case 2) or is one `ep-` placeholder in the first scan
+(HACK-1271). A placeholder first seen in the recheck scan is admitted only for the same
+container that the first scan saw by ID or as absent (HACK-1279 case 1). A placeholder
+that persists from the first scan into the recheck, or one that names any other
+container, still refuses with `network-member-id`. Strict and saved reads admit none of
+these shapes.
+
+The readiness deadline bounds the `running` shapes. If it passes while the last
+observation was unready only because of them, one settled check follows. That check
+refuses a member that is still missing or placeholdered with the original topology
+predicate, so a permanently missing member cannot stay unready. The replay harness
+exposes this check as mode `settled`.
 
 ## Native config routing qualification
 

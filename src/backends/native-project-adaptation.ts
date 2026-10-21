@@ -1,3 +1,4 @@
+import { HackCliError } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
 import { addNativeHostAliases } from "./native-project-host-aliases.ts";
 import type { NativeProjectInput } from "./native-project-input.ts";
@@ -25,9 +26,11 @@ const PATH = /^\/[!-~]*$/;
 const HOST_SEPARATOR = /[\s,]+/;
 
 function refused(): Error {
-  return new Error(
-    "Native project adaptation is invalid or conflicts with declared configuration; values omitted."
-  );
+  return new HackCliError({
+    code: "E_CONFIG_INVALID",
+    message:
+      "Native project adaptation is invalid or conflicts with declared configuration; values omitted.",
+  });
 }
 function integer(value: unknown, min: number, max: number): value is number {
   return (

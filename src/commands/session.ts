@@ -204,6 +204,7 @@ const execSpec = defineCommand({
       name: "command",
       description: "Command to execute in workspace",
       required: true,
+      passthrough: true,
     },
   ],
   subcommands: [],

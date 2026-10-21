@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { inspectNativeProjectCleanup } from "../src/backends/native-project-cleanup-command.ts";
 import { saveNativeProjectRun } from "../src/backends/native-project-run.ts";
+import { ClosedCliError } from "../src/lib/cli-result.ts";
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -146,6 +147,7 @@ test("foreign, incomplete and malformed graph observations refuse without raw va
         return value;
       },
     }).catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(ClosedCliError);
     expect(String(failure)).toContain("inspection is unconfirmed");
     expect(Bun.inspect(failure)).not.toContain("synthetic-private-canary");
     expect(calls).toBe(1);

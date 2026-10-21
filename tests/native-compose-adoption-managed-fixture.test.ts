@@ -131,10 +131,16 @@ test("managed fixture uses real writer owners with isolated home, exact private 
         MANAGED_FIXTURE_VALUE
       );
       expect(JSON.stringify(resolved)).toBe("{}");
+      expect(resolved.globalEnv.NC04_SECRET).toBe(
+        `${MANAGED_FIXTURE_VALUE}-${instance.name}`
+      );
+      // HACK-1273: the generated override keeps only `${NAME}` references at
+      // rest; the private value is delivered through the resolved env.
       const path = resolved.composeFiles[2] ?? "";
       const text = await readFile(path, "utf8");
-      expect(text).toContain(`${MANAGED_FIXTURE_VALUE}-${instance.name}`);
-      generated.push(text);
+      expect(text).not.toContain(MANAGED_FIXTURE_VALUE);
+      expect(text).toContain('NC04_SECRET: "${HACK_ENV_');
+      generated.push(resolved.globalEnv.NC04_SECRET ?? "");
       const before = await managedAdoptionFixtureSourceSnapshot({
         ...selected,
         instance,

@@ -151,8 +151,12 @@ import {
   HackCliError,
   okResult,
 } from "../lib/cli-result.ts";
+import {
+  removePlaintextComposeEnvOverride,
+  writeComposeEnvOverride,
+} from "../lib/compose-env-at-rest.ts";
 import { withComposeServiceEnvFingerprints } from "../lib/compose-env-fingerprint.ts";
-import { renderManagedComposeEnvOverride } from "../lib/compose-managed-env.ts";
+import { renderComposeEnvReferenceOverride } from "../lib/compose-managed-env.ts";
 import { resolveComposeProjectName } from "../lib/compose-project-name.ts";
 import {
   type ComposeStartupBudgets,
@@ -222,13 +226,13 @@ import {
   createNativeEnvFingerprintEntry,
   createNativeEnvFingerprintSession,
 } from "../lib/native-env-fingerprint-state.ts";
+import { refuseUnsupportedNativeUpOptions } from "../lib/native-up-refusals.ts";
 import { readNodesRegistry } from "../lib/nodes-registry.ts";
 import {
   parseOpenHostPreference,
   resolvePreferredOpenHost,
 } from "../lib/open-host.ts";
 import { openUrl } from "../lib/os.ts";
-import { writePrivateEnvFileIfChanged } from "../lib/private-env-file.ts";
 import {
   defaultProjectSlugFromPath,
   findProjectContext,
@@ -507,7 +511,7 @@ const runOptions = [
 ] as const;
 const runPositionals = [
   { name: "service", required: true },
-  { name: "cmd", required: false, multiple: true },
+  { name: "cmd", required: false, multiple: true, passthrough: true },
 ] as const;
 const optLoki = defineOption({
   name: "loki",
@@ -1196,6 +1200,33 @@ function isEnvVarRelevantToServices(opts: {
   return opts.varServices.some((svc) => serviceSet.has(svc));
 }
 
+/**
+ * Removes an env override that still holds literal values (written by an
+ * earlier Hack version). Best effort: a failure is reported without values and
+ * never fails the command; `hack doctor` reports what remains. A file that a
+ * saved adoption pins is kept (removing it would break the adoption).
+ */
+async function scrubPlaintextComposeEnvOverride(opts: {
+  readonly projectDir: string;
+}): Promise<void> {
+  try {
+    const result = await removePlaintextComposeEnvOverride({
+      projectDir: opts.projectDir,
+    });
+    if (result.adoptionBound) {
+      logger.warn({
+        message:
+          "Kept .hack/.internal/compose.env.override.yml, which holds env values from an earlier Hack version, because a saved 'hack config adopt' generation pins it (values omitted). Run 'hack doctor' for the supported way to drop them.",
+      });
+    }
+  } catch {
+    logger.warn({
+      message:
+        "Could not remove .hack/.internal/compose.env.override.yml, which holds env values from an earlier Hack version (values omitted). Run 'hack doctor --fix'.",
+    });
+  }
+}
+
 async function maybePromptLegacyProjectEnvMigration(opts: {
   readonly project: Awaited<ReturnType<typeof requireProjectContext>>;
   readonly projectName: string;
@@ -1293,12 +1324,17 @@ export async function resolveModernComposeEnvOverrides(opts: {
     });
   }
 
-  const text = renderManagedComposeEnvOverride({
+  // Values travel only through the Compose process env; the file on disk holds
+  // `${NAME}` references (see src/lib/compose-env-at-rest.ts).
+  const override = renderComposeEnvReferenceOverride({
     targetServices: opts.targetServices,
     globalEnv: modern.globalEnv,
     serviceEnv: modern.serviceEnv,
   });
-  if (text === null) {
+  if (override === null) {
+    await scrubPlaintextComposeEnvOverride({
+      projectDir: opts.project.projectDir,
+    });
     return {
       composeFiles: [],
       env: modern.globalEnv,
@@ -1309,17 +1345,13 @@ export async function resolveModernComposeEnvOverrides(opts: {
   }
 
   await ensureHackDirGitignore({ projectDir: opts.project.projectDir });
-  const overridePath = resolve(
-    opts.project.projectDir,
-    ".internal",
-    "compose.env.override.yml"
-  );
-  // The modern projection holds resolved plaintext, including decrypted
-  // secrets: write it like .hack/.env (0600, atomic, symlink refusal).
-  await writePrivateEnvFileIfChanged({ envFile: overridePath, text });
+  const overridePath = await writeComposeEnvOverride({
+    projectDir: opts.project.projectDir,
+    text: override.text,
+  });
   return {
     composeFiles: [overridePath],
-    env: modern.globalEnv,
+    env: { ...modern.globalEnv, ...override.env },
     lifecycleEnv,
     preflightEnvByService,
     effectiveEnvName: modern.selection.effectiveEnv,
@@ -1419,6 +1451,9 @@ async function resolveComposeEnvOverrides(opts: {
   );
 
   if (resolved.contract.vars.length === 0) {
+    await scrubPlaintextComposeEnvOverride({
+      projectDir: opts.project.projectDir,
+    });
     return {
       composeFiles: [],
       env: {},
@@ -1461,6 +1496,9 @@ async function resolveComposeEnvOverrides(opts: {
   }
 
   if (Object.keys(overrideServices).length === 0) {
+    await scrubPlaintextComposeEnvOverride({
+      projectDir: opts.project.projectDir,
+    });
     return {
       composeFiles: [],
       env: resolved.envForCompose,
@@ -1474,10 +1512,10 @@ async function resolveComposeEnvOverrides(opts: {
   const yaml = YAML.stringify(override, null, 2);
   const text = ensureTrailingNewline(cleanupYaml(yaml));
   await ensureHackDirGitignore({ projectDir: opts.project.projectDir });
-  const overrideDir = resolve(opts.project.projectDir, ".internal");
-  await ensureDir(overrideDir);
-  const overridePath = resolve(overrideDir, "compose.env.override.yml");
-  await writeTextFileIfChanged(overridePath, text);
+  const overridePath = await writeComposeEnvOverride({
+    projectDir: opts.project.projectDir,
+    text,
+  });
 
   return {
     composeFiles: [overridePath],
@@ -4919,16 +4957,13 @@ async function handleNativeUp({
     ReturnType<typeof resolveNativeRuntimeSelection>
   >;
 }): Promise<number> {
-  if (
-    args.options.detach ||
-    args.options.json ||
-    args.options.target ||
-    args.positionals.services?.length
-  ) {
-    throw new CliUsageError(
-      "Native up currently supports foreground whole-project startup only; detach, JSON, target and service selection are unavailable."
-    );
-  }
+  refuseUnsupportedNativeUpOptions({
+    restart,
+    detach: args.options.detach,
+    json: args.options.json,
+    target: args.options.target,
+    services: args.positionals.services,
+  });
   const project = await resolveProjectForArgs({
     ctx,
     pathOpt: args.options.path,
@@ -5004,9 +5039,10 @@ async function handleNativeUp({
       const cleanup = adoptNativeLifecycleCleanup(lifecycle);
       if (lifecycle.code !== 0) {
         await cleanup();
-        throw new Error(
-          "Native up lifecycle preparation failed; values omitted."
-        );
+        throw new HackCliError({
+          code: "E_LIFECYCLE_FAILED",
+          message: "Native up lifecycle preparation failed; values omitted.",
+        });
       }
       return {
         cleanup,
@@ -5020,9 +5056,11 @@ async function handleNativeUp({
             composeProject,
           });
           if (code !== 0) {
-            throw new Error(
-              "Native up lifecycle readiness hook failed; values omitted."
-            );
+            throw new HackCliError({
+              code: "E_LIFECYCLE_FAILED",
+              message:
+                "Native up lifecycle readiness hook failed; values omitted.",
+            });
           }
         },
       };
@@ -5036,9 +5074,11 @@ async function handleNativeUp({
     }
   }
   if (!startup.sharedSource) {
-    throw new CliUsageError(
-      "Native restart requires HACK_NATIVE_SHARED_SOURCE=1 before cleanup."
-    );
+    throw new HackCliError({
+      code: "E_PERMISSION",
+      message:
+        "Native restart requires HACK_NATIVE_SHARED_SOURCE=1 before cleanup; nothing was stopped. Set it to grant the project share and run the command again.",
+    });
   }
   try {
     return await restartNativeImageProject({
@@ -5168,9 +5208,11 @@ async function restartNativeImageProject({
         },
       });
       if (code !== 0) {
-        throw new Error(
-          "Native restart cleanup failed; retained data was not replaced."
-        );
+        throw new HackCliError({
+          code: "E_LIFECYCLE_FAILED",
+          message:
+            "Native restart cleanup failed; retained data was not replaced.",
+        });
       }
     },
     start: ({ run, onReady }) =>
@@ -5947,6 +5989,10 @@ async function runDownCommand({
       );
     }
   }
+  // An override written by an earlier Hack version can hold decrypted values.
+  // Down never reads it, so it is removed first: a failed lifecycle hook, a
+  // remote target or a failed Compose down cannot leave it behind.
+  await scrubPlaintextComposeEnvOverride({ projectDir: project.projectDir });
 
   const remoteDownCode = await runRemoteLifecycleCommand({
     project,
@@ -7736,6 +7782,7 @@ async function handleExec({
     profiles,
     effectiveEnvName: envOverrides.effectiveEnvName,
     service,
+    env: envOverrides.env,
   });
   if (!execReady.ok) {
     throw new CliUsageError(execReady.message);
@@ -7831,6 +7878,12 @@ async function resolveExecTargetReady(opts: {
   readonly project: Awaited<ReturnType<typeof requireProjectContext>>;
   readonly effectiveEnvName: string | null;
   readonly service: string;
+  /**
+   * The Compose env, including the `HACK_ENV_*` values the env override
+   * references. `ps` does not use them, but without them Compose warns once
+   * per unset reference.
+   */
+  readonly env?: Record<string, string>;
 }): Promise<
   { readonly ok: true } | { readonly ok: false; readonly message: string }
 > {
@@ -7852,6 +7905,7 @@ async function resolveExecTargetReady(opts: {
     composeProject: opts.composeProject,
     profiles: opts.profiles,
     cwd: dirname(opts.project.composeFile),
+    env: opts.env,
   });
   if (psResult.exitCode !== 0) {
     return {

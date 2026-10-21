@@ -357,7 +357,9 @@ const execSpec = defineCommand({
     optHostTimeout,
     optHostLifetime,
   ],
-  positionals: [{ name: "command", required: false, multiple: true }],
+  positionals: [
+    { name: "command", required: false, multiple: true, passthrough: true },
+  ],
   subcommands: [],
 } as const);
 
@@ -388,7 +390,9 @@ const hostExecSpec = defineCommand({
     optHostTimeout,
     optHostLifetime,
   ],
-  positionals: [{ name: "command", required: false, multiple: true }],
+  positionals: [
+    { name: "command", required: false, multiple: true, passthrough: true },
+  ],
   subcommands: [],
 } as const);
 

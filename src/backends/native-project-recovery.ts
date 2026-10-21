@@ -1,6 +1,7 @@
 import { constants } from "node:fs";
 import { lstat, open, realpath, rmdir } from "node:fs/promises";
 import { basename, join } from "node:path";
+import { ClosedCliError } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
 import {
   isNativeHttpsLeaseIdentity,
@@ -22,7 +23,7 @@ import {
 const PROCESS_LINE = /^\s*(\d+)\s+(.+?)\s*$/;
 
 function refused(): Error {
-  return new Error(
+  return new ClosedCliError(
     "Native frontend recovery cannot prove the old owner and effects are gone; retained data was not changed."
   );
 }

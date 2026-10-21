@@ -1,6 +1,7 @@
 import { chmod, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
+import { ClosedCliError, HackCliError } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
 import {
   nativeProjectBranchArgs,
@@ -80,7 +81,7 @@ export async function selectNativeActiveReview(opts: {
     selected.boot.length > 128 ||
     CONTROL.test(selected.boot)
   ) {
-    throw new Error(
+    throw new ClosedCliError(
       "Native active review identity changed; the current graph was not stopped."
     );
   }
@@ -109,9 +110,11 @@ function activeReviewService(plan: Readonly<Record<string, unknown>>): string {
         services[key].active === true
     );
   if (!service) {
-    throw new Error(
-      "Native active review has no supported service authority; the current graph was not stopped."
-    );
+    throw new HackCliError({
+      code: "E_NATIVE_PROJECT_UNSUPPORTED",
+      message:
+        "Native active review has no supported service authority; the current graph was not stopped.",
+    });
   }
   return service;
 }
@@ -133,7 +136,7 @@ export async function verifyNativeActiveReview(opts: {
     invoke: opts.invoke ?? invokeNativeRuntime,
   });
   if (JSON.stringify(current) !== JSON.stringify(opts.proof)) {
-    throw new Error(
+    throw new ClosedCliError(
       "Native active review identity changed; the current graph was not stopped."
     );
   }
@@ -165,9 +168,10 @@ export async function selectNativeProjectReviewIdentity(opts: {
     file.startsWith("../") ||
     !DIGEST.test(opts.input.originalSha256)
   ) {
-    throw new Error(
-      "Native project review requires an owned original Compose file."
-    );
+    throw new HackCliError({
+      code: "E_NATIVE_PROJECT_UNSUPPORTED",
+      message: "Native project review requires an owned original Compose file.",
+    });
   }
   let projectArgs = [
     "--project",
@@ -189,7 +193,7 @@ export async function selectNativeProjectReviewIdentity(opts: {
     !DIGEST.test(original.plan.namespace) ||
     original.plan.compose_sha256 !== opts.input.originalSha256
   ) {
-    throw new Error(
+    throw new ClosedCliError(
       "Native project input changed before review; prepare it again."
     );
   }
@@ -244,7 +248,7 @@ export async function selectNativeProjectReviewIdentity(opts: {
       unbranched.plan.source !== canonicalProject ||
       unbranched.plan.compose_sha256 !== opts.input.originalSha256
     ) {
-      throw new Error(
+      throw new ClosedCliError(
         "Native retained project review changed; retained data was not adopted."
       );
     }
@@ -285,7 +289,7 @@ export async function withNativeProjectReview<T>(opts: {
     opts.reviewIdentity &&
     JSON.stringify(opts.reviewIdentity) !== JSON.stringify(identity)
   ) {
-    throw new Error(
+    throw new ClosedCliError(
       "Native project review selection changed; retained data was not adopted."
     );
   }
@@ -319,7 +323,9 @@ export async function withNativeProjectReview<T>(opts: {
       !DIGEST.test(report.plan_id) ||
       report.plan.namespace !== namespace
     ) {
-      throw new Error("Native project returned an invalid reviewed identity.");
+      throw new ClosedCliError(
+        "Native project returned an invalid reviewed identity."
+      );
     }
     return await opts.run({
       planId: report.plan_id,

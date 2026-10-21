@@ -115,12 +115,20 @@ export function summarizeConsumedProcessPolicyReplies(
   };
 }
 
+const REPLAY_CALLS = {
+  startup: 'await observeNativeComposeStartupOwned(selection,["retry"])',
+  settled:
+    'await observeNativeComposeStartupOwned(selection,["retry"],{membership:"settled"})',
+  strict: "await assertNativeComposeOwned(selection)",
+} as const;
+
 /** Run the real ownership policy against original recorded replies, with no engine access. */
 export async function replayProcessPolicyInitialOwnership(opts: {
   readonly directory: string;
   readonly queries: readonly ProcessPolicyInitialTraceQuery[];
   readonly selection: NativeComposeOwnershipOptions;
-  readonly mode: "startup" | "strict";
+  /** `settled` is the startup check after the readiness deadline: no transient running-member admission. */
+  readonly mode: "settled" | "startup" | "strict";
   readonly timeoutMs?: number;
 }): Promise<Replay> {
   await mkdir(opts.directory, { mode: 0o700 });
@@ -154,7 +162,7 @@ await Bun.write(Bun.stdout,row.stdout);process.exit(row.exitCode);
 import {assertNativeComposeOwned,observeNativeComposeStartupOwned,NativeComposeOwnershipError,nativeComposeOwnershipRefusal,nativeComposeTopologyPredicate} from ${JSON.stringify(join(import.meta.dir, "../../src/lib/native-compose-ownership.ts"))};
 const {selection}=await Bun.file(${JSON.stringify(inputs)}).json();
 let outcome="refused",code=null,reason=null,topologyPredicate=null;
-try {const value=${opts.mode === "startup" ? 'await observeNativeComposeStartupOwned(selection,["retry"])' : "await assertNativeComposeOwned(selection)"};outcome=value===null?"unready":"owned";}
+try {const value=${REPLAY_CALLS[opts.mode]};outcome=value===null?"unready":"owned";}
 catch(error){code=error instanceof NativeComposeOwnershipError?error.code:null;reason=nativeComposeOwnershipRefusal(error)??null;topologyPredicate=nativeComposeTopologyPredicate(error)??null;}
 const consumed=(await Bun.file(${JSON.stringify(cursor)}).exists())?Number(await Bun.file(${JSON.stringify(cursor)}).text()):0;
 process.stdout.write(JSON.stringify({outcome,code,reason,topologyPredicate,consumed,protocolMatched:!(await Bun.file(${JSON.stringify(mismatch)}).exists())}));

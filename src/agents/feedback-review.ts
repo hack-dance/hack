@@ -356,12 +356,13 @@ const COLON = /:/g;
 const IPV6_FULL_COLONS = 7;
 
 /**
- * Key names whose value is a secret, matched case-insensitively. `PASS` must
- * be a whole word part (`db_pass`, not `bypass` or `passed`), and any
- * `<prefix>_KEY` such as `encryption_key` or `MASTER_KEY` counts.
+ * Key names whose value is a secret, matched case-insensitively. `PASS` and
+ * `PWD` must be whole word parts (`db_pass`, not `bypass` or `passed`), any
+ * `<prefix>_KEY` such as `encryption_key` or `MASTER_KEY` counts, and so do
+ * camel-case key names such as `authKey` and `signingKey`.
  */
 const SECRET_KEY_NAME =
-  "[A-Za-z0-9_.-]*(?:TOKEN|SECRET|PASSWORD|PASSWD|PASSPHRASE|(?<![A-Za-z])PASS(?![A-Za-z])|API_?KEY|PRIVATE_?KEY|[A-Za-z0-9][_.-]KEY(?![A-Za-z])|CREDENTIALS?|ACCESS_?KEY|COOKIE|SESSION_?(?:ID|KEY))[A-Za-z0-9_.-]*";
+  "[A-Za-z0-9_.-]*(?:TOKEN|SECRET|PASSWORD|PASSWD|PASSPHRASE|(?<![A-Za-z])(?:PASS|PWD)(?![A-Za-z])|API_?KEY|PRIVATE_?KEY|(?:AUTH|SIGNING|MASTER|ENCRYPTION|LICENSE|CLIENT|SERVICE)_?KEY|[A-Za-z0-9][_.-]KEY(?![A-Za-z])|CREDENTIALS?|ACCESS_?KEY|COOKIE|SESSION_?(?:ID|KEY))[A-Za-z0-9_.-]*";
 
 /**
  * Field names of Hack's secret-store record (`iv`, `tag`, `ciphertext`) and
@@ -389,8 +390,6 @@ function placeholderValue(terminators: string): string {
 
 /** A placeholder standing for a value that runs to the next whitespace. */
 const PLACEHOLDER = placeholderValue(String.raw`\s`);
-/** A placeholder standing for a bare assignment value (`[^\s,;]+`). */
-const ASSIGNED_PLACEHOLDER = placeholderValue(String.raw`[\s,;]`);
 /** A placeholder standing for an `Authorization` header value. */
 const HEADER_PLACEHOLDER = placeholderValue(String.raw`[\s"'\x60,;]`);
 /** A placeholder standing for a bare JSON value (`[^\s,}]+`). */
@@ -398,8 +397,18 @@ const JSON_PLACEHOLDER = placeholderValue(String.raw`[\s,}]`);
 /** A double- or single-quoted value that is exactly one placeholder. */
 const QUOTED_PLACEHOLDER_DOUBLE = String.raw`<[^<>"\n]*>"`;
 const QUOTED_PLACEHOLDER_SINGLE = String.raw`<[^<>'\n]*>'`;
-/** An assignment value: quoted, or bare up to whitespace or a separator. */
-const ASSIGNED_VALUE = String.raw`(?:"(?!${QUOTED_PLACEHOLDER_DOUBLE})[^"\n]*"|'(?!${QUOTED_PLACEHOLDER_SINGLE})[^'\n]*'|(?!["'])(?!${ASSIGNED_PLACEHOLDER})[^\s,;]+)`;
+/** A `,` or `;` that starts another assignment, as in `A=<a>,B=<b>`. */
+const NEXT_ASSIGNMENT = "[,;](?=[A-Za-z_][A-Za-z0-9_]*=)";
+/** A placeholder standing for a bare assignment value. */
+const ASSIGNED_PLACEHOLDER = placeholderValue(
+  String.raw`\s|${NEXT_ASSIGNMENT}`
+);
+/**
+ * A value: quoted, or bare up to whitespace or the next assignment. A bare
+ * value runs through any other `,` or `;`, so the rest of an `a,b` list, or
+ * of a secret that holds one, goes with it.
+ */
+const ASSIGNED_VALUE = String.raw`(?:"(?!${QUOTED_PLACEHOLDER_DOUBLE})[^"\n]*"|'(?!${QUOTED_PLACEHOLDER_SINGLE})[^'\n]*'|(?!["'])(?!${ASSIGNED_PLACEHOLDER})(?:[^\s,;]|(?!${NEXT_ASSIGNMENT})[,;])+)`;
 
 /** Reserved, private or local suffixes; a host under one never leaves the machine. */
 const PRIVATE_HOST_SUFFIXES =
@@ -409,6 +418,51 @@ const PRIVATE_INNER_LABELS = "corp|internal|intranet|lan|private";
 /** Final labels that make a dotted name a file, not a host. */
 const FILE_EXTENSIONS =
   "c|cjs|conf|cfg|css|env|go|h|html|ini|js|json|jsonc|jsx|key|lock|log|md|mjs|pem|py|rb|rs|sh|sock|sql|toml|ts|tsx|txt|xml|yaml|yml";
+
+/**
+ * Hack commands that take a value as an argument: `hack env add|set <key>
+ * <value>` and `hack config set <key> <value>`. A quoted command line carries
+ * the value, which may be a secret. The match runs to the end of the line,
+ * a code span or a shell separator.
+ */
+const VALUE_ARGUMENT_COMMAND =
+  /\bhack\s+(?:env\s+(?:add|set)|config\s+set)(?:[ \t]+[^\s`|;&]+)*/g;
+const VALUE_ARGUMENT_PREFIX = /^hack\s+(?:env\s+(?:add|set)|config\s+set)/;
+const ARGUMENT_SPACE = /([ \t]+)/;
+const KEY_ARGUMENT = /^[A-Za-z_][A-Za-z0-9_.-]*$/;
+const FLAG_WITH_VALUE = /^(--?[A-Za-z0-9-]+=)(.+)$/;
+const WHOLE_PLACEHOLDER = /^<[^<>\s]+>$/;
+
+/**
+ * The command with its value arguments redacted. Flag names and the first
+ * key-shaped argument stay; every other argument, and the value of a
+ * `--flag=value`, becomes a placeholder unless it already is one.
+ */
+function redactValueArguments(command: string): string {
+  const prefix = VALUE_ARGUMENT_PREFIX.exec(command)?.[0] ?? "";
+  const placeholder = redactionPlaceholder("config-value");
+  let keptKey = false;
+  const args = command
+    .slice(prefix.length)
+    .split(ARGUMENT_SPACE)
+    .map((token) => {
+      if (token.trim() === "" || WHOLE_PLACEHOLDER.test(token)) {
+        return token;
+      }
+      if (token.startsWith("-")) {
+        const flag = FLAG_WITH_VALUE.exec(token);
+        return flag?.[1] && flag[2] && !WHOLE_PLACEHOLDER.test(flag[2])
+          ? `${flag[1]}${placeholder}`
+          : token;
+      }
+      if (!keptKey && KEY_ARGUMENT.test(token)) {
+        keptKey = true;
+        return token;
+      }
+      return placeholder;
+    });
+  return `${prefix}${args.join("")}`;
+}
 
 /**
  * Value rules, applied in order. A value that is exactly a placeholder
@@ -489,10 +543,16 @@ const VALUE_RULES: readonly ValueRule[] = [
   {
     kind: "secret",
     pattern: new RegExp(
-      String.raw`(--(?:password|passwd|passphrase|token|secret|api-key|apikey|access-key)(?:=|\s+))(?!-)(?!${PLACEHOLDER})\S+`,
+      String.raw`(--(?:password|passwd|passphrase|token|secret|api-key|apikey|access-key)(?:=|\s+))(?!-)${ASSIGNED_VALUE}`,
       "gi"
     ),
     replace: (_match, flag) => `${flag}${redactionPlaceholder("secret")}`,
+  },
+  {
+    kind: "config-value",
+    pattern: VALUE_ARGUMENT_COMMAND,
+    replace: (match) => redactValueArguments(match),
+    accept: (match) => redactValueArguments(match) !== match,
   },
   {
     kind: "secret",
@@ -1241,9 +1301,21 @@ const HTML_COMMENT = /<!--[\s\S]*?(?:-->|$)/g;
  * `<redacted:path>` is not a tag name, so GitHub renders it as text.
  */
 const HTML_TAG = /<\/?[A-Za-z][A-Za-z0-9-]*(?=[\s/>]|$)/;
-const INLINE_CODE = /`[^`\n]*`/g;
-/** A backslash-escaped backtick is literal text and never opens a code span. */
-const ESCAPED_BACKTICK = /\\`/g;
+/** CommonMark ASCII punctuation, which a backslash escapes outside code. */
+const ESCAPABLE = /^[!-/:-@[-`{-~]$/;
+const BACKTICK_RUN = /^`+/;
+/** A tag without attributes, such as `<b>` or `</b>`; it holds no backtick. */
+const BARE_TAG = /^<\/?[A-Za-z][A-Za-z0-9-]*\/?>/;
+/** A tag that may carry attributes, which can hold backticks or span lines. */
+const OPEN_TAG = /^<\/?[A-Za-z][A-Za-z0-9-]*(?=[\s/]|$)/;
+/**
+ * A line that can open an HTML block, also inside list or quote markers.
+ * Inline code is not parsed in an HTML block, so a backtick there is text.
+ */
+const HTML_BLOCK_START =
+  /^\s*(?:(?:>|[-*+]|\d{1,9}[.)])\s*)*<(?:\/?[A-Za-z][A-Za-z0-9-]*(?=[\s/>]|$)|[?!])/;
+/** A GFM table delimiter row; table cells split at pipes inside code spans. */
+const TABLE_DELIMITER_ROW = /^(?=[^|\n]*\|)(?=[^-\n]*-)[\t |:-]+$/;
 /**
  * HTML elements that GitHub renders or drops with their content, so they can
  * fold (`<details>`), hide or swallow Markdown that follows them, including a
@@ -1264,18 +1336,103 @@ const ATTACHMENTS_HEADING = /^##\s+Attachments\s*$/;
 const ANY_HEADING = /^#{1,6}\s/;
 const UNSAFE_ATTACHMENT_NAME = /[`\r\n]/;
 
-/** Inline text with code spans removed, so only rendered markup remains. */
-function outsideInlineCode(line: string): string {
-  return line.replace(ESCAPED_BACKTICK, "").replace(INLINE_CODE, "");
+/** Index of the next backtick run of exactly `length`, or -1 on this line. */
+function closingBacktickRun(
+  line: string,
+  from: number,
+  length: number
+): number {
+  let index = line.indexOf("`", from);
+  while (index !== -1) {
+    const run = BACKTICK_RUN.exec(line.slice(index))?.[0].length ?? 1;
+    if (run === length) {
+      return index;
+    }
+    index = line.indexOf("`", index + run);
+  }
+  return -1;
 }
 
 /**
- * Whether a line carries an element that can hide Markdown, outside inline
- * code. Only the tag name must be outside a code span, so a backtick in a later
- * attribute cannot hide the tag.
+ * How many characters at a `<` outside code are plain markup: a bare tag, or
+ * the `<` alone. Undefined when the `<` can open a tag with attributes, a
+ * declaration or an autolink that holds a backtick: CommonMark gives such a
+ * backtick to the HTML, not to a code span.
  */
-function hasHidingHtml(line: string): boolean {
-  const markup = outsideInlineCode(line);
+function angleMarkupLength(rest: string): number | undefined {
+  const bare = BARE_TAG.exec(rest)?.[0];
+  if (bare) {
+    return bare.length;
+  }
+  if (OPEN_TAG.test(rest) || HIDING_HTML_MARKUP.test(rest.slice(0, 2))) {
+    return;
+  }
+  const end = rest.indexOf(">");
+  return end !== -1 && rest.slice(0, end).includes("`") ? undefined : 1;
+}
+
+/**
+ * A line's markup outside CommonMark code spans, or undefined when the line
+ * alone cannot tell code from HTML. A code span pairs a backtick run with the
+ * next run of the same length, and a backslash escapes punctuation outside
+ * code but not inside it. A run with no partner on the line can close on a
+ * later line, so it is ambiguous, and so is a `<` that can open HTML holding
+ * a backtick.
+ */
+function markupOutsideCode(line: string): string | undefined {
+  let markup = "";
+  let index = 0;
+  while (index < line.length) {
+    const char = line.charAt(index);
+    let length: number | undefined = 1;
+    if (char === "\\" && ESCAPABLE.test(line.charAt(index + 1))) {
+      length = 2;
+    } else if (char === "<") {
+      length = angleMarkupLength(line.slice(index));
+    } else if (char === "`") {
+      const run = BACKTICK_RUN.exec(line.slice(index))?.[0].length ?? 1;
+      const close = closingBacktickRun(line, index + run, run);
+      if (close === -1) {
+        return;
+      }
+      index = close + run;
+      continue;
+    }
+    if (length === undefined) {
+      return;
+    }
+    markup += line.slice(index, index + length);
+    index += length;
+  }
+  return markup;
+}
+
+/**
+ * The rendered markup of each line, with inline code removed only when every
+ * code span is certain. Code spans can cross lines, and GitHub reads no code
+ * inside HTML blocks, table cells split at pipes before code is parsed, and
+ * an HTML comment can take a backtick from a code span. In any of those
+ * cases, and whenever a line is ambiguous, inline code hides nothing.
+ */
+function renderedMarkupLines(opts: {
+  readonly lines: readonly string[];
+  readonly commentsHoldBacktick: boolean;
+}): readonly string[] {
+  const { lines } = opts;
+  if (
+    opts.commentsHoldBacktick ||
+    lines.some(
+      (line) => HTML_BLOCK_START.test(line) || TABLE_DELIMITER_ROW.test(line)
+    )
+  ) {
+    return lines;
+  }
+  const markup = lines.map(markupOutsideCode);
+  return markup.every((line) => line !== undefined) ? markup : lines;
+}
+
+/** Whether markup carries an element or declaration that can hide Markdown. */
+function hasHidingHtml(markup: string): boolean {
   return HIDING_HTML_ELEMENT.test(markup) || HIDING_HTML_MARKUP.test(markup);
 }
 
@@ -1287,18 +1444,24 @@ function hasHidingHtml(line: string): boolean {
  * element opened before the heading can fold the whole section.
  */
 function visibleAttachmentListing(body: string): readonly string[] {
+  const comments = body.match(HTML_COMMENT) ?? [];
   const lines = body.replace(HTML_COMMENT, "").split(NEWLINE);
+  const markup = renderedMarkupLines({
+    lines,
+    commentsHoldBacktick: comments.some((comment) => comment.includes("`")),
+  });
   const listing: string[] = [];
   let inSection = false;
   let hasHtml = false;
-  for (const line of lines) {
-    hasHtml ||= hasHidingHtml(line);
+  for (const [index, line] of lines.entries()) {
+    const rendered = markup[index] ?? line;
+    hasHtml ||= hasHidingHtml(rendered);
     if (ANY_HEADING.test(line)) {
       inSection = ATTACHMENTS_HEADING.test(line);
       continue;
     }
     if (inSection) {
-      hasHtml ||= HTML_TAG.test(outsideInlineCode(line));
+      hasHtml ||= HTML_TAG.test(rendered);
       listing.push(line.trim());
     }
   }

@@ -333,6 +333,50 @@ const REDACTION_CASES: readonly RedactionCase[] = [
     kept: ["loopback ::1 stays", "10:00:01", ".hack/hack.config.json", "502"],
   },
   {
+    // A quoted flag value goes whole, and a bare value runs through `,`.
+    name: "quoted secret flags, comma values and camel-case key names",
+    input: [
+      "ran with --password \"correct horse fixture\" and --token='two wordleak'",
+      "PASSWORD=commafixture,tailleak and password: alpha,omegaleak",
+      "ALLOWED_HOSTS=acme-one.example,acme-two.example",
+      `pwd: ${FAKE.password}, authKey: ${FAKE.password}, signingKey=${FAKE.password}`,
+      "keep HACK_A=<a>,HACK_B=<b> and monkey: banana",
+    ].join("\n"),
+    leaked: [
+      "horse",
+      "wordleak",
+      "tailleak",
+      "omegaleak",
+      "acme-two",
+      FAKE.password,
+    ],
+    kinds: ["secret", "config-value"],
+    kept: [
+      "--password <redacted:secret> and",
+      "HACK_A=<a>,HACK_B=<b>",
+      "monkey: banana",
+    ],
+  },
+  {
+    // `hack env add|set` and `hack config set` take the value as an argument.
+    name: "value arguments of Hack's own value-taking commands",
+    input: [
+      "ran `hack env set API_TOKEN argleak` then",
+      "hack env add --branch main DB_URL postgres-argleak",
+      "hack config set controlPlane.host acme-argleak.example.com",
+      "hack env add --value=flagargleak KEY",
+      "`hack env add <KEY> <value>` and `hack env add API_TOKEN --value-stdin` stay",
+    ].join("\n"),
+    leaked: ["argleak"],
+    kinds: ["config-value"],
+    kept: [
+      "hack env set API_TOKEN <redacted:config-value>` then",
+      "hack config set controlPlane.host <redacted:config-value>",
+      "`hack env add <KEY> <value>`",
+      "`hack env add API_TOKEN --value-stdin` stay",
+    ],
+  },
+  {
     name: "repository-looking URLs that leave the repository",
     input: [
       "see https://github.com/hack-dance/hack/../../attacker/x",
@@ -952,6 +996,52 @@ test("negative control: an attachment listed only where a reader cannot see it n
       "cdata section in the section",
       withAttachments("<![CDATA[\n- `dump.log`\n]]>"),
     ],
+    // Each of these renders `<details>` as HTML on GitHub, folding the
+    // listing, although a line-by-line code-span match calls it code.
+    [
+      "backslash inside a code span",
+      beforeHeading("Note `\\`<details>` here.", "- `dump.log`"),
+    ],
+    [
+      "backtick runs of different lengths",
+      beforeHeading("Note `x```<details>`` here.", "- `dump.log`"),
+    ],
+    [
+      "code span closing on the next line",
+      beforeHeading("Note `a\nb` <details> `c` here.", "- `dump.log`"),
+    ],
+    [
+      "html block, where backticks are text",
+      beforeHeading("<hr>\n`<details>`", "- `dump.log`"),
+    ],
+    [
+      "custom element opening an html block",
+      beforeHeading("<x-note>\n`<details>`", "- `dump.log`"),
+    ],
+    [
+      "inline tag whose attribute takes the backtick",
+      beforeHeading('Note <x title="`">x<details>` here.', "- `dump.log`"),
+    ],
+    [
+      "autolink that takes the backtick",
+      beforeHeading("Note <ab:c`d>x<details>` here.", "- `dump.log`"),
+    ],
+    [
+      "inline tag continuing on the next line",
+      beforeHeading('Note <x\ntitle="`">x<details>` here.', "- `dump.log`"),
+    ],
+    [
+      "html comment that takes the backtick",
+      beforeHeading("Note `a <!-- ` --> <details> ` here.", "- `dump.log`"),
+    ],
+    // Table cells split at pipes before code spans are parsed.
+    [
+      "table cell splitting a code span",
+      beforeHeading(
+        "| a | b |\n| - | - |\n| `x | <details> | y` |",
+        "- `dump.log`"
+      ),
+    ],
     [
       "outside the section",
       {
@@ -984,12 +1074,19 @@ test("negative control: an attachment listed only where a reader cannot see it n
 
   // A visible listing, with or without a short description, is sendable.
   // Redaction placeholders and HTML inside inline code are not raw HTML.
-  for (const listing of [
-    "- `dump.log`",
-    "- `dump.log`: two of three runs",
-    "- `dump.log`: from <redacted:path>, see `<details>`",
+  // An HTML comment elsewhere hides only itself, and certain code spans
+  // before the heading still hide nothing.
+  for (const payload of [
+    withAttachments("- `dump.log`"),
+    withAttachments("- `dump.log`: two of three runs"),
+    withAttachments("- `dump.log`: from <redacted:path>, see `<details>`"),
+    beforeHeading("<!-- template hint -->", "- `dump.log`"),
+    beforeHeading(
+      "From <redacted:path>, run ``hack run <script>`` and `<details>`.",
+      "- `dump.log`"
+    ),
   ]) {
-    const payload = withAttachments(listing);
+    const listing = payload.body;
     expect(
       evaluateFeedbackGate({
         state: INITIAL_FEEDBACK_SEND_STATE,

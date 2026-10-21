@@ -4973,8 +4973,11 @@ async function handleNativeUp({
   });
   // Before branch, config, env, lifecycle, storage or runtime work. `down`
   // stays available for any graph a project already has.
+  // The explicit adaptation applies first: a network it isolates is not
+  // external here, exactly as native start normalizes it.
   await refuseNativeComposeBackendFeatures({
     composeFile: project.composeFile,
+    adaptationFile: process.env.HACK_NATIVE_ADAPTATION,
     restart,
   });
   const branch = await resolveEffectiveBranchForCommand({

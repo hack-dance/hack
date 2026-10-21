@@ -1207,6 +1207,7 @@ async function handleNativeDoctor(opts: {
         checkComposeBackendFeatures({
           startDir: opts.startDir,
           backend: "native",
+          adaptationFile: process.env.HACK_NATIVE_ADAPTATION,
         })
       )
     );
@@ -3012,11 +3013,14 @@ export function envKeyCheckResult(inspection: EnvKeyInspection): CheckResult {
  */
 /**
  * Reports which Compose features keep the current project on the Compose
- * backend (HACK-1291). Reads only the project's Compose file; value-free.
+ * backend (HACK-1291). Reads only the project's Compose file and, on the native
+ * backend, the `HACK_NATIVE_ADAPTATION` selection native up applies. An
+ * invalid selection is the same value-free error native up gives.
  */
 async function checkComposeBackendFeatures(opts: {
   readonly startDir: string;
   readonly backend: "native" | "compose";
+  readonly adaptationFile?: string;
 }): Promise<CheckResult> {
   const ctx = await findProjectContext(opts.startDir);
   if (!ctx) {
@@ -3028,7 +3032,9 @@ async function checkComposeBackendFeatures(opts: {
   }
   return composeBackendCheckResult({
     backend: opts.backend,
-    features: await readComposeBackendFeatures(ctx.composeFile),
+    features: await readComposeBackendFeatures(ctx.composeFile, {
+      adaptationFile: opts.adaptationFile,
+    }),
   });
 }
 

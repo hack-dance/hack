@@ -2,6 +2,8 @@ import { afterEach, expect, test } from "bun:test";
 import { mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { adaptNativeProject } from "../src/backends/native-project-adaptation.ts";
+import type { NativeProjectInput } from "../src/backends/native-project-input.ts";
 import {
   COMPOSE_BACKEND_CHECK,
   composeBackendCheckResult,
@@ -239,5 +241,144 @@ test("doctor reports the same features value-free for each backend", () => {
       status: "ok",
       composeBackend: { features: [] },
     });
+  }
+});
+
+const ADAPTATION_REFUSAL =
+  "Native project adaptation is invalid or conflicts with declared configuration; values omitted.";
+
+function adaptationInput(compose: unknown): NativeProjectInput {
+  return {
+    originalSha256: "0".repeat(64),
+    normalizedComposeJson: JSON.stringify(compose),
+    managedEnvironment: {},
+    lifecycleHostEnvironment: {},
+    effectiveEnvName: null,
+    environmentFiles: [],
+    serviceNames: ["web"],
+  };
+}
+
+test("a network the native adaptation isolates is not external, as after native normalization", () => {
+  const compose = {
+    services: { web: { image: IMAGE, networks: ["hack-dev", "edge"] } },
+    networks: { "hack-dev": { external: true }, edge: { external: true } },
+  };
+  const both = new Set(["hack-dev", "edge"]);
+  expect(
+    findComposeBackendFeatures(compose, { isolatedNetworks: both })
+  ).toEqual([]);
+  // Parity with the adaptation itself: the adapted normalized copy has no
+  // external network left for the same selection.
+  const adapted = adaptNativeProject({
+    input: adaptationInput(compose),
+    selection: { version: 1, isolatedNetworks: [...both] },
+  });
+  expect(
+    findComposeBackendFeatures(JSON.parse(adapted.normalizedComposeJson))
+  ).toEqual([]);
+  // A network the adaptation does not list is still external.
+  expect(
+    findComposeBackendFeatures(compose, {
+      isolatedNetworks: new Set(["hack-dev"]),
+    })
+  ).toEqual(["external_network"]);
+  // Isolation hides only the network feature, never another one.
+  expect(
+    findComposeBackendFeatures(
+      {
+        ...compose,
+        services: { web: { image: IMAGE, platform: "linux/amd64" } },
+      },
+      { isolatedNetworks: both }
+    )
+  ).toEqual(["foreign_platform"]);
+});
+
+test("the Compose file is classified after a valid HACK_NATIVE_ADAPTATION selection", async () => {
+  const root = await mkdtemp(join(tmpdir(), "compose-backend-"));
+  roots.push(root);
+  const composeFile = join(root, "docker-compose.yml");
+  await writeFile(
+    composeFile,
+    "services:\n  web:\n    image: app\n    networks: [hack-dev]\nnetworks:\n  hack-dev:\n    external: true\n"
+  );
+  const selection = async (name: string, value: unknown) => {
+    const path = join(root, name);
+    await writeFile(path, JSON.stringify(value));
+    return path;
+  };
+  const isolating = await selection("isolating.json", {
+    version: 1,
+    isolatedNetworks: ["hack-dev"],
+  });
+  expect(
+    await readComposeBackendFeatures(composeFile, { adaptationFile: isolating })
+  ).toEqual([]);
+  await refuseNativeComposeBackendFeatures({
+    composeFile,
+    adaptationFile: isolating,
+    restart: true,
+  });
+  for (const [index, other] of [
+    { version: 1, isolatedNetworks: ["other-net"] },
+    { version: 1, httpProbes: { web: { port: 3000, path: "/health" } } },
+  ].entries()) {
+    expect(
+      await readComposeBackendFeatures(composeFile, {
+        adaptationFile: await selection(`other-${index}.json`, other),
+      })
+    ).toEqual(["external_network"]);
+  }
+});
+
+test("an invalid adaptation refuses as native start does, and is read only for an external network", async () => {
+  const root = await mkdtemp(join(tmpdir(), "compose-backend-"));
+  roots.push(root);
+  const external = join(root, "external.yml");
+  await writeFile(external, "networks:\n  hack-dev:\n    external: true\n");
+  const owned = join(root, "owned.yml");
+  await writeFile(owned, "services:\n  web:\n    image: app\n");
+  const invalid: unknown[] = [
+    { version: 2, isolatedNetworks: ["hack-dev"] },
+    { version: 1, isolatedNetworks: "hack-dev" },
+    { version: 1, isolatedNetworks: ["hack-dev", "hack-dev"] },
+    { version: 1, isolatedNetworks: [7] },
+    ["hack-dev"],
+  ];
+  for (const [index, value] of invalid.entries()) {
+    const path = join(root, `invalid-${index}.json`);
+    await writeFile(path, JSON.stringify(value));
+    await expectCodedRefusal(
+      refuseNativeComposeBackendFeatures({
+        composeFile: external,
+        adaptationFile: path,
+        restart: false,
+      }),
+      "E_CONFIG_INVALID",
+      ADAPTATION_REFUSAL
+    );
+    // The adaptation native start applies refuses the same selection.
+    expect(() =>
+      adaptNativeProject({
+        input: adaptationInput({
+          services: { web: { image: IMAGE } },
+          networks: { "hack-dev": { external: true } },
+        }),
+        selection: value,
+      })
+    ).toThrow(ADAPTATION_REFUSAL);
+    // Without an external network the selection is not read here; native
+    // start reports it in its usual order.
+    expect(
+      await readComposeBackendFeatures(owned, { adaptationFile: path })
+    ).toEqual([]);
+  }
+  for (const unreadable of [join(root, "missing.json"), "relative.json"]) {
+    await expectCodedRefusal(
+      readComposeBackendFeatures(external, { adaptationFile: unreadable }),
+      "E_CONFIG_INVALID",
+      "values omitted"
+    );
   }
 });

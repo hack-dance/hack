@@ -329,6 +329,146 @@ test(
   SPAWN_TIMEOUT_MS
 );
 
+/** The documented `isolatedNetworks` adaptation for an external `hack-dev`. */
+const HACK_DEV_COMPOSE = {
+  services: { web: { image: IMAGE, networks: ["hack-dev"] } },
+  networks: { "hack-dev": { external: true } },
+};
+
+async function adaptation(f: Fixture, selection: unknown): Promise<string> {
+  const path = join(f.root, "native-adaptation.json");
+  await writeFile(path, JSON.stringify(selection));
+  return path;
+}
+
+/** A runtime request that the stub refused or that timed out on a loaded host. */
+const RUNTIME_REQUEST_LINE =
+  /^ERROR: Native runtime request (failed \(runtime_not_running\)|timed out); inspect owned state before retrying\.$/m;
+
+test(
+  "the documented isolatedNetworks adaptation keeps an external network on native up",
+  async () => {
+    const f = await fixture(HACK_DEV_COMPOSE);
+    const path = await adaptation(f, {
+      version: 1,
+      isolatedNetworks: ["hack-dev"],
+    });
+    const result = await cli(f, ["up"], {
+      HACK_NATIVE_SHARED_SOURCE: "1",
+      HACK_NATIVE_ADAPTATION: path,
+    });
+    expect(result.output).not.toContain("E_NATIVE_PROJECT_UNSUPPORTED");
+    expect(result.output).not.toContain("HACK_RUNTIME_BACKEND=compose");
+    // The check passed: native start went on to its source preflight and,
+    // after applying the adaptation in native review, to `runtime up`.
+    expect(result.output).toMatch(RUNTIME_REQUEST_LINE);
+    const calls = await f.calls();
+    expect(calls).toEqual(
+      ["runtime check-project-share", "runtime up"].slice(0, calls.length)
+    );
+  },
+  SPAWN_TIMEOUT_MS
+);
+
+test(
+  "the same adaptation lets native restart reach its own preflight",
+  async () => {
+    const f = await fixture(HACK_DEV_COMPOSE);
+    const path = await adaptation(f, {
+      version: 1,
+      isolatedNetworks: ["hack-dev"],
+    });
+    const result = await cli(f, ["restart"], {
+      HACK_NATIVE_SHARED_SOURCE: "1",
+      HACK_NATIVE_ADAPTATION: path,
+    });
+    // Restart preflight refuses a project with no run, after the check.
+    expectOneClosedLine(
+      result,
+      "Native restart has no existing run; use hack up for initial startup."
+    );
+    expect(await f.calls()).toEqual([]);
+  },
+  SPAWN_TIMEOUT_MS
+);
+
+test(
+  "an adaptation that isolates a different network still refuses the external one",
+  async () => {
+    const f = await fixture(HACK_DEV_COMPOSE);
+    f.env({});
+    const path = await adaptation(f, {
+      version: 1,
+      isolatedNetworks: ["other-net"],
+    });
+    const before = await tree(f.root);
+    const result = await cli(f, ["up"], {
+      HACK_NATIVE_SHARED_SOURCE: "1",
+      HACK_NATIVE_ADAPTATION: path,
+    });
+    expectOneClosedLine(
+      result,
+      `E_NATIVE_PROJECT_UNSUPPORTED: Native \`hack up\` does not support an external Compose network; ${SELECTION}`
+    );
+    expect(await f.calls()).toEqual([]);
+    expect(await tree(f.root)).toEqual(before);
+  },
+  SPAWN_TIMEOUT_MS
+);
+
+test(
+  "an invalid adaptation refuses with native start's closed line before any request",
+  async () => {
+    const f = await fixture(HACK_DEV_COMPOSE);
+    f.env({});
+    const path = await adaptation(f, {
+      version: 2,
+      isolatedNetworks: ["hack-dev"],
+    });
+    const before = await tree(f.root);
+    const result = await cli(f, ["up"], {
+      HACK_NATIVE_SHARED_SOURCE: "1",
+      HACK_NATIVE_ADAPTATION: path,
+    });
+    expectOneClosedLine(
+      result,
+      "E_CONFIG_INVALID: Native project adaptation is invalid or conflicts with declared configuration; values omitted."
+    );
+    expect(await f.calls()).toEqual([]);
+    expect(await tree(f.root)).toEqual(before);
+  },
+  SPAWN_TIMEOUT_MS
+);
+
+test(
+  "native doctor applies the same adaptation before reporting",
+  async () => {
+    const f = await fixture(HACK_DEV_COMPOSE);
+    const path = await adaptation(f, {
+      version: 1,
+      isolatedNetworks: ["hack-dev"],
+    });
+    const result = await cli(f, ["doctor", "--json"], {
+      HACK_NATIVE_ADAPTATION: path,
+    });
+    const envelope: unknown = JSON.parse(
+      result.output.slice(result.output.indexOf("{"))
+    );
+    expect(envelope).toMatchObject({
+      data: {
+        checks: expect.arrayContaining([
+          expect.objectContaining({
+            id: "compose backend features",
+            status: "ok",
+            composeBackend: { features: [] },
+          }),
+        ]),
+      },
+    });
+  },
+  SPAWN_TIMEOUT_MS
+);
+
 test(
   "native doctor reports the same features for the current project, value-free",
   async () => {

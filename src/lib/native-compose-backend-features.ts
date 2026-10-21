@@ -1,5 +1,6 @@
 import { constants } from "node:fs";
 import { open } from "node:fs/promises";
+import { readNativeSelection } from "../backends/native-project-selection.ts";
 import { HackCliError } from "./cli-result.ts";
 import { isRecord } from "./guards.ts";
 import { mapLegacyComposeBuild } from "./native-config-import-build.ts";
@@ -85,7 +86,9 @@ function hasReservedLabel(labels: unknown): boolean {
  * Compose treats `external: true` and the legacy `external: {name: ...}` form
  * as a network the project does not own. The runtime's reviewed
  * `x-hack-isolated: true` replacement is supported natively: it creates an
- * owned internal bridge instead of joining the external one.
+ * owned internal bridge instead of joining the external one. A network that
+ * the `HACK_NATIVE_ADAPTATION` selection lists in `isolatedNetworks` receives
+ * that replacement in native normalization, so it is not external either.
  */
 function isExternalNetwork(network: unknown): boolean {
   if (!isRecord(network)) {
@@ -135,17 +138,34 @@ function topLevelEntries(
  * {@link COMPOSE_BACKEND_FEATURES} order, each at most once. Every service is
  * inspected, including services outside the selected profiles, because the
  * native path reviews all declarations. Shapes this classifier does not
- * recognize are left to native review, which refuses them as before.
+ * recognize are left to native review, which refuses them as before. A
+ * network named in `isolatedNetworks` is not external, because the native
+ * adaptation replaces its connectivity with an owned isolated network.
  */
 export function findComposeBackendFeatures(
-  compose: unknown
+  compose: unknown,
+  opts?: {
+    /**
+     * Network names a valid native adaptation isolates; see
+     * {@link readAdaptedIsolatedNetworks}.
+     */
+    readonly isolatedNetworks?: ReadonlySet<string>;
+  }
 ): ComposeBackendFeature[] {
   if (!isRecord(compose)) {
     return [];
   }
   const found = new Set<ComposeBackendFeature>();
   const services = topLevelEntries(compose, "services").filter(isRecord);
-  if (topLevelEntries(compose, "networks").some(isExternalNetwork)) {
+  const isolated = opts?.isolatedNetworks ?? new Set<string>();
+  const networks = isRecord(compose.networks)
+    ? Object.entries(compose.networks)
+    : [];
+  if (
+    networks.some(
+      ([name, network]) => !isolated.has(name) && isExternalNetwork(network)
+    )
+  ) {
     found.add("external_network");
   }
   const resources = [
@@ -168,14 +188,12 @@ export function findComposeBackendFeatures(
 }
 
 /**
- * Reads and classifies one Compose file with the bounds native image-project
- * input uses. Read-only: no lock, no write, no runtime request. A file that is
- * missing, oversized, a symlink or not parseable returns no features, so the
- * existing native input refusal still reports it.
+ * Reads one Compose file with the bounds native image-project input uses.
+ * Read-only: no lock, no write, no runtime request. A file that is missing,
+ * oversized, a symlink or not parseable returns `undefined`, so the existing
+ * native input refusal still reports it.
  */
-export async function readComposeBackendFeatures(
-  composeFile: string
-): Promise<ComposeBackendFeature[]> {
+async function readComposeDocument(composeFile: string): Promise<unknown> {
   let text: string;
   try {
     const file = await open(
@@ -187,7 +205,7 @@ export async function readComposeBackendFeatures(
       const buffer = Buffer.alloc(COMPOSE_LIMIT + 1);
       const { bytesRead } = await file.read(buffer, 0, buffer.length, 0);
       if (bytesRead > COMPOSE_LIMIT) {
-        return [];
+        return;
       }
       text = new TextDecoder("utf-8", { fatal: true }).decode(
         buffer.subarray(0, bytesRead)
@@ -196,13 +214,83 @@ export async function readComposeBackendFeatures(
       await file.close();
     }
   } catch {
-    return [];
+    return;
   }
   try {
-    return findComposeBackendFeatures(Bun.YAML.parse(text));
+    return Bun.YAML.parse(text);
   } catch {
-    return [];
+    return;
   }
+}
+
+/** The same closed refusal native start gives for an invalid adaptation. */
+function adaptationRefused(): HackCliError {
+  return new HackCliError({
+    code: "E_CONFIG_INVALID",
+    message:
+      "Native project adaptation is invalid or conflicts with declared configuration; values omitted.",
+  });
+}
+
+/**
+ * Reads the network names a `HACK_NATIVE_ADAPTATION` selection isolates. The
+ * file is read with the same bounds as native start. An unreadable file, a
+ * selection that is not version 1, or an `isolatedNetworks` value that is not
+ * a bounded list of unique names refuses with `E_CONFIG_INVALID`, as native
+ * start would. Native start still validates the whole selection against the
+ * normalized Compose file, including that each name is an external network.
+ */
+export async function readAdaptedIsolatedNetworks(
+  adaptationFile: string
+): Promise<ReadonlySet<string>> {
+  const selection = await readNativeSelection(adaptationFile);
+  if (!isRecord(selection) || selection.version !== 1) {
+    throw adaptationRefused();
+  }
+  const names = selection.isolatedNetworks;
+  if (names === undefined) {
+    return new Set();
+  }
+  if (
+    !(
+      Array.isArray(names) &&
+      names.length <= 32 &&
+      names.every((name) => typeof name === "string") &&
+      new Set(names).size === names.length
+    )
+  ) {
+    throw adaptationRefused();
+  }
+  return new Set(names);
+}
+
+/**
+ * Reads and classifies one Compose file after the explicit native adaptation.
+ * Read-only: no lock, no write, no runtime request. A Compose file that is
+ * missing, oversized, a symlink or not parseable returns no features, so the
+ * existing native input refusal still reports it.
+ *
+ * `adaptationFile` is the `HACK_NATIVE_ADAPTATION` path native start applies.
+ * It is read only when the unadapted file has an external network, so a
+ * project without one keeps its existing order of refusals. An invalid
+ * adaptation refuses with `E_CONFIG_INVALID` (see
+ * {@link readAdaptedIsolatedNetworks}).
+ */
+export async function readComposeBackendFeatures(
+  composeFile: string,
+  opts?: { readonly adaptationFile?: string }
+): Promise<ComposeBackendFeature[]> {
+  const compose = await readComposeDocument(composeFile);
+  const features = findComposeBackendFeatures(compose);
+  if (
+    opts?.adaptationFile === undefined ||
+    !features.includes("external_network")
+  ) {
+    return features;
+  }
+  return findComposeBackendFeatures(compose, {
+    isolatedNetworks: await readAdaptedIsolatedNetworks(opts.adaptationFile),
+  });
 }
 
 /** Value-free phrase list, such as "a and b" or "a, b and c". */
@@ -244,9 +332,13 @@ export function composeBackendRefusal(opts: {
  */
 export async function refuseNativeComposeBackendFeatures(opts: {
   readonly composeFile: string;
+  /** The `HACK_NATIVE_ADAPTATION` path native start applies, if any. */
+  readonly adaptationFile?: string;
   readonly restart: boolean;
 }): Promise<void> {
-  const features = await readComposeBackendFeatures(opts.composeFile);
+  const features = await readComposeBackendFeatures(opts.composeFile, {
+    adaptationFile: opts.adaptationFile,
+  });
   if (features.length > 0) {
     throw composeBackendRefusal({ features, restart: opts.restart });
   }

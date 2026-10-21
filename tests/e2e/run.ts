@@ -246,22 +246,12 @@ async function main(): Promise<void> {
   const dockerEnabled = (process.env.HACK_E2E_DOCKER ?? "") === "1";
   const requireDocker = (process.env.HACK_E2E_REQUIRE_DOCKER ?? "") === "1";
   const keepTempDirs = (process.env.HACK_E2E_KEEP ?? "") === "1";
-  // TEMPORARY HACK-1281 sampling: every shard runs only native-config-networks
-  // (shards 1-2 inject CLI stalls) under a natural host-stall monitor.
-  const monitor = startHack1281StallMonitor();
-  let outcomes: Awaited<ReturnType<typeof runScenarios>>;
-  try {
-    outcomes = await runScenarios({
-      scenarios: ALL_SCENARIOS,
-      dockerEnabled,
-      only: args.shard ? ["native-config-networks"] : (shardNames ?? args.only),
-      keepTempDirs,
-    });
-  } finally {
-    process.stdout.write(
-      `HACK-1281 stall monitor ${JSON.stringify(await monitor())}\n`
-    );
-  }
+  const outcomes = await runScenarios({
+    scenarios: ALL_SCENARIOS,
+    dockerEnabled,
+    only: shardNames ?? args.only,
+    keepTempDirs,
+  });
 
   const dockerSkipped = outcomes.some(
     (outcome) => outcome.tier === "docker" && outcome.status === "skip"
@@ -271,62 +261,6 @@ async function main(): Promise<void> {
     (requireDocker && dockerSkipped)
       ? 1
       : 0;
-}
-
-/** TEMPORARY HACK-1281 sampling: event-loop lag and the duration of a product-shaped
- * process identity read (`sh -c 'ulimit; exec ps'`) every two seconds. Numbers only. */
-function startHack1281StallMonitor(): () => Promise<Record<string, number>> {
-  let last = performance.now();
-  const lags: number[] = [];
-  const reads: number[] = [];
-  const lag = setInterval(() => {
-    const now = performance.now();
-    lags.push(now - last - 100);
-    last = now;
-  }, 100);
-  let pending: Promise<unknown> = Promise.resolve();
-  const probe = setInterval(() => {
-    pending = (async () => {
-      const started = performance.now();
-      const child = Bun.spawn(
-        [
-          "/bin/sh",
-          "-c",
-          'ulimit -f 8; exec "$@"',
-          "hack-1281-monitor",
-          "/bin/ps",
-          "-p",
-          String(process.pid),
-          "-o",
-          "uid=,pgid=,state=,lstart=,comm=",
-        ],
-        { stdout: "ignore", stderr: "ignore" }
-      );
-      await child.exited;
-      reads.push(performance.now() - started);
-    })();
-  }, 2000);
-  const summary = (values: number[], prefix: string) => {
-    const sorted = [...values].sort((a, b) => a - b);
-    const at = (p: number) =>
-      Math.round(
-        sorted[Math.min(sorted.length - 1, Math.floor(p * sorted.length))] ?? 0
-      );
-    return {
-      [`${prefix}Count`]: sorted.length,
-      [`${prefix}P99Ms`]: at(0.99),
-      [`${prefix}MaxMs`]: Math.round(sorted.at(-1) ?? 0),
-      [`${prefix}Over250`]: sorted.filter((value) => value >= 250).length,
-      [`${prefix}Over1000`]: sorted.filter((value) => value >= 1000).length,
-      [`${prefix}Over3000`]: sorted.filter((value) => value >= 3000).length,
-    };
-  };
-  return async () => {
-    clearInterval(lag);
-    clearInterval(probe);
-    await pending;
-    return { ...summary(lags, "lag"), ...summary(reads, "read") };
-  };
 }
 
 if (import.meta.main) {

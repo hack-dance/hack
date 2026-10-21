@@ -725,8 +725,6 @@ export async function runNativeNetworkFixtureCommand(opts: {
   readonly outputLimit?: number;
   /** Focused fault observation. A thrown capture error must kill/reap before fixture cleanup. */
   readonly afterCaptureWrite?: () => void;
-  /** TEMPORARY HACK-1281 replay: stop only the launched process for pauseMs every restMs. */
-  readonly stall?: { readonly pauseMs: number; readonly restMs: number };
 }): Promise<CliResult> {
   const timeout = opts.timeoutMs ?? COMMAND_TIMEOUT;
   const limit = opts.outputLimit ?? OUTPUT_LIMIT;
@@ -822,45 +820,14 @@ export async function runNativeNetworkFixtureCommand(opts: {
       timedOut = true;
       kill();
     }, timeout);
-    // TEMPORARY HACK-1281 replay: a host stall of the CLI process only.
-    let stalling = opts.stall !== undefined && launched.pid !== undefined;
-    void (async () => {
-      const pid = launched.pid;
-      const stall = opts.stall;
-      if (!(stall && pid !== undefined)) {
-        return;
-      }
-      while (stalling) {
-        await Bun.sleep(stall.restMs);
-        if (!stalling) {
-          return;
-        }
-        try {
-          process.kill(pid, "SIGSTOP");
-        } catch {
-          return;
-        }
-        await Bun.sleep(stall.pauseMs);
-        try {
-          process.kill(pid, "SIGCONT");
-        } catch {
-          return;
-        }
-      }
-    })();
     const exited = new Promise<number>((resolveExit, reject) => {
       launched.once("error", reject);
       launched.once("exit", (code) => {
-        stalling = false;
         // Reap descendants of this just-launched detached group; no stale PID reclamation.
         kill();
         resolveExit(code ?? 128);
       });
     });
-    const stopStalling = () => {
-      stalling = false;
-    };
-    exited.then(stopStalling, stopStalling);
     const stdoutCapture = capture(launched.stdout, output);
     const stderrCapture = capture(launched.stderr, errors);
     let exitCode: number;
@@ -1618,12 +1585,6 @@ export const nativeConfigNetworksScenario: Scenario = {
     >();
     let sequence = 0;
     let stepExecutables = { cli: "", engine: engine ?? "" };
-    // TEMPORARY HACK-1281 replay controls.
-    const stallInjection = ["1/4", "2/4"].includes(
-      process.env.HACK_E2E_SHARD ?? ""
-    );
-    let stallsArmed = false;
-    let stalledCommands = 0;
     const execute = async (
       argv: readonly string[],
       cwd = ctx.tempRoot,
@@ -1643,21 +1604,6 @@ export const nativeConfigNetworksScenario: Scenario = {
         role: roles.get(cwd) ?? ("fixture" as const),
         sequence,
       };
-      // TEMPORARY HACK-1281 replay: shards 1 and 2 stall the CLI process of the
-      // first 20 saved `exec` commands after the created-recovery phase.
-      const stall =
-        stallInjection &&
-        stallsArmed &&
-        cleanupStarted === null &&
-        stalledCommands < 20 &&
-        stepExecutables.cli !== "" &&
-        argv[0] === stepExecutables.cli &&
-        argv[1] === "exec"
-          ? { pauseMs: 1200, restMs: 800 }
-          : undefined;
-      if (stall) {
-        stalledCommands += 1;
-      }
       const begun = Date.now();
       let result: CliResult;
       try {
@@ -1667,7 +1613,6 @@ export const nativeConfigNetworksScenario: Scenario = {
           env: { ...env, ...extra },
           captures,
           timeoutMs: Math.min(COMMAND_TIMEOUT, remaining),
-          ...(stall ? { stall } : {}),
         });
       } catch (error: unknown) {
         // A killed or unreturned command has no result for ok(); name it here.
@@ -1679,12 +1624,6 @@ export const nativeConfigNetworksScenario: Scenario = {
           })
         );
         throw error;
-      }
-      if (stall) {
-        // TEMPORARY HACK-1281 replay: closed numbers only.
-        ctx.log(
-          `HACK-1281 replay stalled exec ${JSON.stringify({ index: stalledCommands, exit: result.exitCode, durationMs: result.durationMs })}`
-        );
       }
       commands.set(result, command);
       return result;
@@ -2245,13 +2184,6 @@ export const nativeConfigNetworksScenario: Scenario = {
       ctx.log(
         "Actual created-before-start empty network identity recovered through owned saved down"
       );
-      // TEMPORARY HACK-1281 replay.
-      stallsArmed = stallInjection;
-      if (stallInjection) {
-        ctx.log(
-          "HACK-1281 replay: stalling the CLI 1.2 s of every 2 s in the next 20 saved exec commands"
-        );
-      }
       for (const checkout of checkouts) {
         startedRoots.add(checkout.root);
         await cli(checkout, ["up", "--detach", "--json"]);

@@ -45,11 +45,11 @@ const OUTPUT_LIMIT = 2 * 1024 * 1024;
 const COMMAND_TIMEOUT = 180_000;
 // Witness-bearing exec/up verification runs three fresh helper carriers per proof; on the
 // hosted Linux engine a storage exec (two proofs) takes ~10 s and a warm up (six or seven)
-// ~30 s across three checkouts. Measured hosted passes take 2190-2430 s, and a
-// pass through host stalls took 3200 s (89% of the former 60-minute budget).
-// The named 75-minute budget keeps 1.85x the normal maximum and 1.4x that
-// stalled pass, inside the 150-minute shard job.
-export const NATIVE_NETWORK_FIXTURE_SCENARIO_TIMEOUT = 75 * 60_000;
+// ~30 s across three checkouts. 42 hosted passes (Blacksmith 4 vCPU, runs
+// 39461479278-39675404010, 2026-10-19..21) took 2113-3343 s, median ~2650 s;
+// the slowest used 93% of the former 60-minute budget. The named 80-minute
+// budget keeps 1.44x that slowest pass, inside the 150-minute shard job.
+export const NATIVE_NETWORK_FIXTURE_SCENARIO_TIMEOUT = 80 * 60_000;
 const SCENARIO_TIMEOUT = NATIVE_NETWORK_FIXTURE_SCENARIO_TIMEOUT;
 const CLEANUP_TIMEOUT = 3 * 60_000;
 /**

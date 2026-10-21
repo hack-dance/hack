@@ -621,7 +621,8 @@ class BudgetEvaluationTest(unittest.TestCase):
             ("summary_entry_malformed", baseline("cpu_seconds_per_task", "flagged", -1)),
             ("summary_entry_malformed", baseline("cpu_seconds_per_task", "failed", "0")),
             ("summary_entry_malformed", baseline("cpu_seconds_per_task", "samples", [1, "2"])),
-            ("summary_entry_malformed", baseline("cpu_seconds_per_task", "samples", [float("nan")] * 10)),
+            (("summary_entry_malformed", "summary_number_out_of_range"),
+             baseline("cpu_seconds_per_task", "samples", [float("nan")] * 10)),
             ("summary_entry_malformed", baseline("cpu_seconds_per_task", "median", 1.0)),
             ("summary_entry_malformed", candidate("watcher_ack_ms", [100] * 60)),
             ("summary_lane_malformed", lambda s: s["lanes"].update(compose=[MARKER])),
@@ -636,7 +637,7 @@ class BudgetEvaluationTest(unittest.TestCase):
             summary = small_summary()
             change(summary)
             with self.subTest(code=code, summary=summary.get("workload")):
-                self.assertEqual(self.refused(summary), [code])
+                self.assertEqual(self.refused(summary), [code] if isinstance(code, str) else list(code))
 
     def test_oversized_integers_are_refused_not_a_traceback(self):
         """Python parses 10**400 exactly; converting it to a float would raise OverflowError."""
@@ -650,14 +651,56 @@ class BudgetEvaluationTest(unittest.TestCase):
             with self.subTest(case=name):
                 summary = small_summary()
                 change(summary)
-                self.assertEqual(evaluate_file(summary),
-                                 (2, {"status": "invalid", "diagnostics": ["summary_entry_malformed"]}))
+                self.assertEqual(evaluate_file(summary), (2, {"status": "invalid", "diagnostics": [
+                    "summary_entry_malformed", "summary_number_out_of_range"]}))
         summary = small_summary()
         summary["observer_cost"]["cpu_seconds_per_task"] = HUGE
-        self.assertEqual(evaluate_file(summary),
-                         (2, {"status": "invalid", "diagnostics": ["summary_observer_malformed"]}))
+        self.assertEqual(evaluate_file(summary), (2, {"status": "invalid", "diagnostics": [
+            "summary_number_out_of_range", "summary_observer_malformed"]}))
         protocol = mutated(lambda d: budget(d, "comparative", "cpu_seconds_per_task").update(max_ratio=HUGE))
         self.assertIn("comparative_budget_weakened", protocol_check.validate_protocol(protocol))
+
+    def test_every_number_anywhere_must_be_finite_and_interoperable(self):
+        # The page promises every number in a protocol or summary is within +/-(2**53 - 1).
+        # These sit where no other check would refuse them: an unread field, or a count
+        # that is only compared as a floor or against the sample list.
+        limit = 2 ** 53 - 1
+        for value in (limit + 1, -limit - 1, HUGE, float("nan"), float("inf"), -float("inf"), 1e300):
+            with self.subTest(value=repr(value)):
+                unread = mutated(lambda d: d.update(notes=[{"bytes": value}]))
+                self.assertEqual(protocol_check.validate_protocol(unread), ["protocol_number_out_of_range"])
+                floor = mutated(lambda d: d["samples"].update(p95_min_samples=value))
+                self.assertIn("protocol_number_out_of_range", protocol_check.validate_protocol(floor))
+                summary = small_summary()
+                summary["lanes"]["candidate"]["unbudgeted_metric"] = {"samples": [value]}
+                summary["notes"] = value
+                self.assertEqual(self.refused(summary), ["summary_number_out_of_range"])
+                summary = small_summary()
+                summary["lanes"]["candidate"]["info_latency_ms"]["expected"] = value
+                self.assertIn("summary_number_out_of_range", self.refused(summary))
+        self.assertEqual(protocol_check.validate_protocol(mutated(lambda d: d["samples"].update(
+            p95_min_samples=limit))), [])
+        self.assertEqual(protocol_check.validate_protocol(mutated(lambda d: d.update(
+            notes=[limit, -limit, 1e-300, True]))), [])
+        summary = small_summary()
+        summary["lanes"]["candidate"]["unbudgeted_metric"] = {"samples": [limit, -limit]}
+        self.judge(summary)
+        summary["lanes"]["candidate"]["unbudgeted_metric"]["samples"].append(limit + 1)
+        self.assertEqual(evaluate_file(summary),
+                         (2, {"status": "invalid", "diagnostics": ["summary_number_out_of_range"]}))
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "protocol.json"
+            path.write_text(json.dumps(mutated(lambda d: d.update(notes=float("nan")))))
+            self.assertEqual(run_cli(["--protocol", str(path)]),
+                             (2, {"status": "invalid", "diagnostics": ["protocol_number_out_of_range"]}))
+
+    def test_a_deeply_nested_unread_field_is_scanned_without_raising(self):
+        # Far deeper than the recursion limit: a recursive walk would raise RecursionError.
+        deep = [2 ** 53]
+        for _ in range(100000):
+            deep = [deep]
+        self.assertEqual(protocol_check.validate_protocol(mutated(lambda d: d.update(notes=deep))),
+                         ["protocol_number_out_of_range"])
 
     def test_an_overflowing_ratio_fails_and_the_report_stays_strict_json(self):
         summary = small_summary()

@@ -11,7 +11,8 @@ This helper never runs a benchmark, starts a runtime, calls Docker or reads host
 Revision-1 identities (artifacts, host, lane kinds and backends, candidate capacity,
 workload pins, rotated lane order) are exact; budgets and sample counts are floors at
 their frozen values, which a revision may tighten.
-Every number must lie within MAX_JSON_NUMBER.
+Every number anywhere in the protocol or a summary must be finite and lie within
+MAX_JSON_NUMBER, including fields the checker does not otherwise read.
 Diagnostics are closed codes from DIAGNOSTICS; they never echo input values or paths.
 A budget verdict is one of VERDICTS. A statistic is judged only from complete,
 sufficient, admitted samples: missing, short, flagged or unaccounted samples are
@@ -197,8 +198,10 @@ DIAGNOSTICS = frozenset({
     "statistic_unknown",
     "observer_policy_missing",
     "known_limit_malformed",
+    "protocol_number_out_of_range",
     "summary_unreadable",
     "summary_not_object",
+    "summary_number_out_of_range",
     "summary_revision_mismatch",
     "summary_workload_unknown",
     "summary_cache_class_mismatch",
@@ -311,6 +314,24 @@ def _number(value):
     """
     return isinstance(value, (int, float)) and not isinstance(value, bool) \
         and -MAX_JSON_NUMBER <= value <= MAX_JSON_NUMBER
+
+
+def _numbers_in_range(value):
+    """True when every number anywhere in a JSON value satisfies _number.
+
+    Booleans are not numbers and object keys are strings, so neither is checked. The
+    walk is iterative, so a deeply nested value cannot raise RecursionError.
+    """
+    pending = [value]
+    while pending:
+        node = pending.pop()
+        if isinstance(node, dict):
+            pending.extend(node.values())
+        elif isinstance(node, list):
+            pending.extend(node)
+        elif isinstance(node, (int, float)) and not isinstance(node, bool) and not _number(node):
+            return False
+    return True
 
 
 def _same(value, frozen):
@@ -554,6 +575,8 @@ def validate_protocol(doc):
     if not isinstance(doc, dict):
         return ["protocol_not_object"]
     found = set()
+    if not _numbers_in_range(doc):
+        found.add("protocol_number_out_of_range")
     if doc.get("protocol") != PROTOCOL_ID:
         found.add("protocol_id_mismatch")
     if not _count(doc.get("revision")) or doc["revision"] != PROTOCOL_REVISION:
@@ -647,6 +670,8 @@ def validate_summary(protocol, summary):
     if workload is None:
         return ["summary_workload_unknown"], None
     found = set()
+    if not _numbers_in_range(summary):
+        found.add("summary_number_out_of_range")
     # Budgets are frozen for the warm class only; other classes are reported separately.
     if summary.get("cache_class") != protocol["cache_classes"]["budget_class"]:
         found.add("summary_cache_class_mismatch")

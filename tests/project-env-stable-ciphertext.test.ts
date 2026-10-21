@@ -48,6 +48,10 @@ const RENAME_FAILURE_WORKER = resolve(
   import.meta.dir,
   "fixtures/atomic-write-rename-failure-worker.ts"
 );
+const FOREIGN_OWNER_WORKER = resolve(
+  import.meta.dir,
+  "fixtures/atomic-write-foreign-owner-worker.ts"
+);
 const FIRST = "synthetic-first-6f1c";
 const SECOND = "synthetic-second-92ad";
 
@@ -400,6 +404,41 @@ test("a rewrite keeps the layer's group", async () => {
   expect((await stat(repo.envFile)).gid).toBe(other);
   expect(await resolvedToken(repo)).toBe(SECOND);
 });
+
+// Root can chown to any user, so the refusal only applies to other users.
+test.skipIf(RUNS_AS_ROOT)(
+  "a layer whose owner cannot be kept is refused, not replaced",
+  async () => {
+    const repo = await createRepo();
+    await writeFile(repo.envFile, OTHER_LAYER);
+    const before = await stat(repo.envFile);
+
+    const worker = Bun.spawn(
+      [process.execPath, FOREIGN_OWNER_WORKER, repo.envFile],
+      {
+        cwd: repo.projectRoot,
+        env: privateCliEnv({ root: repo.root }),
+        stdin: "pipe",
+        stdout: "pipe",
+        stderr: "pipe",
+      }
+    );
+    worker.stdin.write("synthetic: after\n");
+    await worker.stdin.end();
+    const [stdout, exitCode] = await Promise.all([
+      new Response(worker.stdout).text(),
+      worker.exited,
+    ]);
+    expect({ stdout, exitCode }).toEqual({
+      stdout: "refused:owner_not_preserved\n",
+      exitCode: 0,
+    });
+    expect(await readFile(repo.envFile, "utf8")).toBe(OTHER_LAYER);
+    expect((await stat(repo.envFile)).ino).toBe(before.ino);
+    expect(await tmpSiblings(repo.projectDir)).toEqual([]);
+  },
+  30_000
+);
 
 test("a dangling symlink layer is replaced by a regular file", async () => {
   const repo = await createRepo();

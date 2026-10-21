@@ -148,7 +148,7 @@ const runOptions = [
 ] as const;
 
 const runPositionals = [
-  { name: "command", required: false, multiple: true },
+  { name: "command", required: false, multiple: true, passthrough: true },
 ] as const;
 
 const statusOptions = [optJson] as const;

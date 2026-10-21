@@ -34,6 +34,16 @@ export interface PositionalSpec<Name extends string = string> {
   readonly required?: boolean;
   readonly multiple?: boolean;
   readonly description?: string;
+  /**
+   * A child command's argv starts at this positional. From its first token on,
+   * every token belongs to the child, including flags such as `--version`,
+   * `--help` or `--json`; Hack's own options must come before it. A `--` before
+   * the child argv is still accepted and is not passed on, while a `--` inside
+   * the child argv is passed through unchanged. Only the last positional of a
+   * command may set this. Without `multiple`, the child command is one quoted
+   * argument, and any further token is refused with a hint to quote it.
+   */
+  readonly passthrough?: boolean;
 }
 
 export interface CliContext {
@@ -224,7 +234,16 @@ export function parseCliArgv(
   argv: readonly string[],
   opts?: { readonly allowUnknownOptions?: boolean }
 ): ParsedCliInvocation {
-  const normalizedArgv = normalizeArgvForDefaults(cli, argv);
+  const childStart = findPassthroughStart(cli, argv);
+  const normalizedArgv =
+    childStart === null
+      ? normalizeArgvForDefaults(cli, argv)
+      : [
+          ...normalizeArgvForDefaults(cli, argv.slice(0, childStart)),
+          // End Hack's option parsing: the child argv is passed on verbatim.
+          "--",
+          ...argv.slice(childStart),
+        ];
   const options = buildUnionParseOptions(cli);
 
   let parsed: unknown;
@@ -296,6 +315,130 @@ function normalizeArgvForDefaults(
   }
 
   return out;
+}
+
+/**
+ * Index of the first child-command token for a command whose positional is
+ * marked {@link PositionalSpec.passthrough}, or null when there is none or an
+ * explicit `--` already ends Hack's options before it.
+ *
+ * The scan mirrors the parser: it resolves the command path from leading
+ * positionals and skips the value token of each value-taking option, including
+ * the omitted-value form of options with a default. Without this boundary,
+ * `hack run web bun --version` would let Hack's own `--version` (or `--help`,
+ * `--json`, `--path`...) consume a flag meant for the child.
+ */
+export function findPassthroughStart(
+  cli: CliSpec,
+  argv: readonly string[]
+): number | null {
+  const valueOptions = collectValueOptions(cli);
+  let subcommands: readonly AnyCommandSpec[] = cli.commands;
+  let command: AnyCommandSpec | null = null;
+  let resolving = true;
+  let positionalIndex = 0;
+  for (let i = 0; i < argv.length; i += 1) {
+    const token = argv[i] ?? "";
+    if (token === "--") {
+      return null;
+    }
+    if (token.startsWith("-") && token !== "-") {
+      if (consumesNextToken({ token, nextToken: argv[i + 1], valueOptions })) {
+        i += 1;
+      }
+      continue;
+    }
+    const next = resolving
+      ? subcommands.find((c) => c.name === token)
+      : undefined;
+    if (next) {
+      command = next;
+      subcommands = next.subcommands;
+      continue;
+    }
+    resolving = false;
+    const start = passthroughPositionalIndex(command);
+    if (start === null) {
+      return null;
+    }
+    if (positionalIndex === start) {
+      return i;
+    }
+    positionalIndex += 1;
+  }
+  return null;
+}
+
+/**
+ * The leading argv tokens that belong to Hack: everything before the child
+ * command of a passthrough positional and before the first `--`. Raw-argv
+ * checks (for example whether `--json` selects Hack's error envelope) must
+ * read only these, so a child's own `--json` never changes Hack's output.
+ */
+export function hackOwnedArgv(
+  cli: CliSpec,
+  argv: readonly string[]
+): readonly string[] {
+  const separator = argv.indexOf("--");
+  const childStart = findPassthroughStart(cli, argv);
+  const end = Math.min(
+    separator === -1 ? argv.length : separator,
+    childStart ?? argv.length
+  );
+  return argv.slice(0, end);
+}
+
+/** Every value-taking option, by long and short spelling. */
+function collectValueOptions(cli: CliSpec): ReadonlyMap<string, OptionSpec> {
+  const valueOptions = new Map<string, OptionSpec>();
+  for (const opt of [...builtinOptions(), ...collectAllOptions(cli)]) {
+    if (opt.type === "boolean") {
+      continue;
+    }
+    valueOptions.set(opt.long, opt);
+    if (opt.short) {
+      valueOptions.set(opt.short, opt);
+    }
+  }
+  return valueOptions;
+}
+
+/** True when an option token takes the following token as its value. */
+function consumesNextToken(opts: {
+  readonly token: string;
+  readonly nextToken: string | undefined;
+  readonly valueOptions: ReadonlyMap<string, OptionSpec>;
+}): boolean {
+  const opt = opts.token.includes("=")
+    ? undefined
+    : opts.valueOptions.get(opts.token);
+  return (
+    opt !== undefined &&
+    !omitsOptionValue({ token: opts.token, opt, nextToken: opts.nextToken })
+  );
+}
+
+/** A long option with a default takes no value token when none follows. */
+function omitsOptionValue(opts: {
+  readonly token: string;
+  readonly opt: OptionSpec;
+  readonly nextToken: string | undefined;
+}): boolean {
+  return (
+    opts.token.startsWith("--") &&
+    isDefaultableOption(opts.opt) &&
+    shouldApplyDefault({ opt: opts.opt, nextToken: opts.nextToken })
+  );
+}
+
+function passthroughPositionalIndex(
+  command: AnyCommandSpec | null
+): number | null {
+  if (!command) {
+    return null;
+  }
+  const index = command.positionals.findIndex((p) => p.passthrough === true);
+  return index === -1 ? null : index;
 }
 
 function isDefaultableOption(opt: OptionSpec): boolean {
@@ -449,6 +592,15 @@ export function parsePositionalsForCommand<
 
   if (idx < remaining.length) {
     const extra = remaining.slice(idx).join(" ");
+    const single = posSpecs.at(-1);
+    if (single?.passthrough === true && single.multiple !== true) {
+      // A single-valued child command (such as `session exec`'s <command>)
+      // takes the whole command line as one quoted argument.
+      const whole = [out[single.name], ...remaining.slice(idx)].join(" ");
+      throw new CliUsageError(
+        `Unexpected arguments: ${extra}. <${single.name}> is one argument; quote the whole command, as in ${JSON.stringify(whole)}.`
+      );
+    }
     throw new CliUsageError(`Unexpected arguments: ${extra}`);
   }
 

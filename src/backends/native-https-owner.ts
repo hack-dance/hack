@@ -3,6 +3,7 @@ import { randomBytes } from "node:crypto";
 import { lstat, mkdir, realpath } from "node:fs/promises";
 import { connect, type Socket } from "node:net";
 import { dirname, join } from "node:path";
+import { ClosedCliError } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
 import { acquireNativeHttpsOwnerAdmission } from "./native-https-owner-admission.ts";
 import {
@@ -85,7 +86,7 @@ export interface NativeHttpsAcquireOptions {
   /** Persist finalization ownership before any lease request can be delivered. */
   readonly onIntent?: (identity: NativeHttpsLeaseIdentity) => Promise<void>;
 }
-export class NativeHttpsLeaseAcquisitionError extends Error {
+export class NativeHttpsLeaseAcquisitionError extends ClosedCliError {
   readonly identity: NativeHttpsLeaseIdentity;
   readonly startupFailure: NativeHttpsStartupError | undefined;
   constructor(

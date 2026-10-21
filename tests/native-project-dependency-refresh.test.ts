@@ -9,6 +9,7 @@ import {
   saveNativeProjectRun,
 } from "../src/backends/native-project-run.ts";
 import { NativeRuntimeRequestError } from "../src/backends/native-runtime-client.ts";
+import { expectClosedRefusal } from "./helpers/closed-refusal.ts";
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -89,15 +90,16 @@ test("refresh validates the owned no-op or bounded changed slots with one public
 test("missing owned mapping never invokes refresh", async () => {
   const opts = await fixture(false);
   let calls = 0;
-  await expect(
+  await expectClosedRefusal(
     refreshNativeProjectDependencies({
       ...opts,
       invoke: async () => {
         calls++;
         return response();
       },
-    })
-  ).rejects.toThrow("not been started");
+    }),
+    "not been started"
+  );
   expect(calls).toBe(0);
 });
 
@@ -260,7 +262,7 @@ test("mapping removal, replacement or selector drift during refresh cannot autho
   for (const change of ["removed", "run", "selector"]) {
     const opts = await fixture();
     let calls = 0;
-    await expect(
+    await expectClosedRefusal(
       refreshNativeProjectDependencies({
         ...opts,
         invoke: async () => {
@@ -277,8 +279,9 @@ test("mapping removal, replacement or selector drift during refresh cannot autho
           }
           return response();
         },
-      })
-    ).rejects.toThrow("identity or outcome is unconfirmed");
+      }),
+      "identity or outcome is unconfirmed"
+    );
     expect(calls).toBe(1);
   }
 });

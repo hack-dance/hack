@@ -1,3 +1,4 @@
+import { ClosedCliError } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
 import { inspectNativeProjectGraph } from "./native-project-inspect.ts";
 import { confirmedNativeRetainedGraph } from "./native-project-retained.ts";
@@ -46,7 +47,7 @@ export async function preflightNativeRetainedStartup(opts: {
       SHA.test(value.selection)
     )
   ) {
-    throw new Error(
+    throw new ClosedCliError(
       "Native retained startup eligibility changed; no hooks or runtime start were requested."
     );
   }
@@ -62,7 +63,7 @@ export async function preflightNativeRetainedStartup(opts: {
 }
 function requireActive(signal: AbortSignal | undefined): void {
   if (signal?.aborted) {
-    throw new Error(
+    throw new ClosedCliError(
       "Native retained startup was canceled; no hooks or runtime start were requested."
     );
   }
@@ -77,7 +78,7 @@ export async function verifyNativeRetainedMapping(opts: {
     opts.run &&
     JSON.stringify(await opts.load(opts.scope)) !== JSON.stringify(opts.run)
   ) {
-    throw new Error(
+    throw new ClosedCliError(
       "Native retained run mapping changed before runtime start; no start was requested."
     );
   }
@@ -97,7 +98,7 @@ export async function verifyNativeResumedRetainedGraph(opts: {
     run: opts.run.run,
   });
   if (!confirmedNativeRetainedGraph(observed, opts.run)) {
-    throw new Error(
+    throw new ClosedCliError(
       "Native resumed retained graph differs; no graph restore was requested."
     );
   }

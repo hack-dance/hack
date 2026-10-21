@@ -13,6 +13,7 @@ import {
   CliUsageError,
   collectAllowedOptionNames,
   collectUnionOptionNames,
+  hackOwnedArgv,
   hasHandler,
   parseCliArgv,
   parseOptionsForCommand,
@@ -31,7 +32,11 @@ function isTruthyEnv(value: string | undefined): boolean {
 }
 
 export async function runCli(argv: readonly string[]): Promise<number> {
-  const jsonRequested = argv.includes("--json");
+  // Only Hack's own argv selects the JSON error envelope: a child command's
+  // `--json` (as in `hack run web tool --json`) belongs to the child.
+  const jsonRequested = hackOwnedArgv(CLI_SPEC, argv).includes("--json");
+  // Set once argument parsing succeeded and the handler owns the request.
+  let handlerPath: readonly string[] | undefined;
   try {
     const cli = CLI_SPEC;
     const allowUnknownOptions = shouldAllowUnknownOptions({
@@ -102,6 +107,7 @@ export async function runCli(argv: readonly string[]): Promise<number> {
       jsonRequested: parsed.values.json === true,
     });
 
+    handlerPath = resolved.path.map((command) => command.name);
     return await resolved.command.handler({
       ctx: { cwd: process.cwd(), cli },
       args: {
@@ -117,7 +123,7 @@ export async function runCli(argv: readonly string[]): Promise<number> {
       process.stderr.write(`${sensitiveError}\n`);
       return 1;
     }
-    return await handleRunCliError({ error, jsonRequested });
+    return await handleRunCliError({ error, jsonRequested, handlerPath });
   }
 }
 
@@ -143,10 +149,17 @@ function resolveSensitiveOutputError(
  * Without `--json`, known errors ({@link HackCliError}, {@link ClosedCliError})
  * print their closed message only, plus the stack when `HACK_DEBUG=1`. Any
  * other exception is unexpected and always prints its stack.
+ *
+ * A usage error found while parsing arguments prints the help, since the
+ * arguments themselves were wrong. Once a command handler owns the request
+ * (`handlerPath` is set), a {@link CliUsageError} it throws is a refusal of a
+ * well-formed request: it prints the message and a one-line pointer to the
+ * command's help, never the full help.
  */
 export async function handleRunCliError(opts: {
   readonly error: unknown;
   readonly jsonRequested: boolean;
+  readonly handlerPath?: readonly string[];
 }): Promise<number> {
   const { error, jsonRequested } = opts;
   if (error instanceof CliUsageError) {
@@ -159,7 +172,11 @@ export async function handleRunCliError(opts: {
       return 1;
     }
     logger.error({ message: error.message });
-    await printHelpForPath(CLI_SPEC, []);
+    if (opts.handlerPath === undefined) {
+      await printHelpForPath(CLI_SPEC, []);
+    } else {
+      process.stderr.write(`${usageHint(opts.handlerPath)}\n`);
+    }
     return 1;
   }
 
@@ -189,6 +206,11 @@ export async function handleRunCliError(opts: {
     logger.error({ message: error.stack });
   }
   return 1;
+}
+
+/** One-line pointer to a command's help, printed after a handler refusal. */
+export function usageHint(path: readonly string[]): string {
+  return `See \`${["hack", ...path].join(" ")} --help\` for usage.`;
 }
 
 /** Known errors show their stack only on request (`HACK_DEBUG=1`). */

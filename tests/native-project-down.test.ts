@@ -17,6 +17,7 @@ import {
   removeNativeProjectRun,
   saveNativeProjectRun,
 } from "../src/backends/native-project-run.ts";
+import { expectClosedRefusal } from "./helpers/closed-refusal.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
 const roots: string[] = [];
@@ -166,7 +167,7 @@ test("missing frontend identity refuses before hooks or cleanup without leaking 
       return snapshot();
     },
   });
-  await expect(result).rejects.toThrow("frontend finalization is unconfirmed");
+  await expectClosedRefusal(result, "frontend finalization is unconfirmed");
   try {
     await result;
   } catch (error) {
@@ -179,7 +180,7 @@ test("missing frontend identity refuses before hooks or cleanup without leaking 
 test("frontend identity changed by a before hook refuses before compute cleanup", async () => {
   const opts = await fixture();
   const calls: string[] = [];
-  await expect(
+  await expectClosedRefusal(
     nativeProjectDown({
       ...opts,
       before: async () => {
@@ -190,8 +191,9 @@ test("frontend identity changed by a before hook refuses before compute cleanup"
         calls.push(request.args[1]!);
         return snapshot();
       },
-    })
-  ).rejects.toThrow("ownership changed");
+    }),
+    "ownership changed"
+  );
   expect(calls).toEqual(["inspect", "before", "inspect"]);
   expect(await loadNativeProjectRun(opts.scope)).toEqual(run);
 });
@@ -206,7 +208,7 @@ test("stopped compute cannot borrow a wrong or missing frontend completion", asy
     const root = finalizationRoot(opts.scope);
     const calls: string[] = [];
     let cleaned = false;
-    await expect(
+    await expectClosedRefusal(
       nativeProjectDown({
         ...opts,
         finalizationTimeoutMs: 1,
@@ -232,8 +234,9 @@ test("stopped compute cannot borrow a wrong or missing frontend completion", asy
           }
           return snapshot(cleaned);
         },
-      })
-    ).rejects.toThrow("frontend finalization is unconfirmed");
+      }),
+      "frontend finalization is unconfirmed"
+    );
     expect(calls).toEqual(["inspect", "inspect", "cleanup", "inspect"]);
     expect(await loadNativeProjectRun(opts.scope)).toEqual(run);
   }
@@ -290,7 +293,7 @@ test("already-stopped unacknowledged frontend refuses without replaying compute"
   );
   await rm(join(root, "completed.json"));
   const calls: string[] = [];
-  await expect(
+  await expectClosedRefusal(
     nativeProjectDown({
       ...opts,
       finalizationTimeoutMs: 1,
@@ -298,8 +301,9 @@ test("already-stopped unacknowledged frontend refuses without replaying compute"
         calls.push(request.args[1]!);
         return snapshot(true);
       },
-    })
-  ).rejects.toThrow("frontend finalization is unconfirmed");
+    }),
+    "frontend finalization is unconfirmed"
+  );
   expect(calls).toEqual(["inspect"]);
   expect(await loadNativeProjectRun(opts.scope)).toEqual(run);
 });
@@ -377,7 +381,7 @@ test("down invokes cleanup once and retains the stopped mapping for later up", a
 test("unconfirmed cleanup retains mapping and skips after hook", async () => {
   const opts = await fixture();
   let effects = 0;
-  await expect(
+  await expectClosedRefusal(
     nativeProjectDown({
       ...opts,
       retireHostProcesses: async () => {
@@ -393,8 +397,9 @@ test("unconfirmed cleanup retains mapping and skips after hook", async () => {
         }
         return snapshot();
       },
-    })
-  ).rejects.toThrow("unconfirmed");
+    }),
+    "unconfirmed"
+  );
   expect(effects).toBe(1);
   expect(await loadNativeProjectRun(opts.scope)).toEqual(run);
 });
@@ -422,7 +427,7 @@ test("foreground concurrent mapping removal is accepted only after confirmed cle
 test("foreign owner refuses before hooks or cleanup", async () => {
   const opts = await fixture();
   let calls = 0;
-  await expect(
+  await expectClosedRefusal(
     nativeProjectDown({
       ...opts,
       before: async () => {
@@ -434,8 +439,9 @@ test("foreign owner refuses before hooks or cleanup", async () => {
         value.receipt.owner = "f".repeat(32);
         return value;
       },
-    })
-  ).rejects.toThrow("unconfirmed");
+    }),
+    "unconfirmed"
+  );
   expect(calls).toBe(1);
   expect(await loadNativeProjectRun(opts.scope)).toEqual(run);
 });
@@ -562,16 +568,18 @@ test("down environment preserves explicit base and named overlay while legacy re
     })
   ).toEqual({ VALUE: "fresh-value" });
   await rm(join(opts.scope.projectDir, "hack.env.qa.yaml"));
-  await expect(
+  await expectClosedRefusal(
     nativeDownEnvironment({
       scope: opts.scope,
       run: { ...run, effectiveEnvName: "qa" },
       serviceNames: ["web"],
-    })
-  ).rejects.toThrow("unavailable");
-  await expect(
-    nativeDownEnvironment({ scope: opts.scope, run, serviceNames: ["web"] })
-  ).rejects.toThrow("legacy");
+    }),
+    "unavailable"
+  );
+  await expectClosedRefusal(
+    nativeDownEnvironment({ scope: opts.scope, run, serviceNames: ["web"] }),
+    "legacy"
+  );
 });
 test("before failure prevents cleanup; after failure retains the stopped mapping", async () => {
   for (const phase of ["before", "after"] as const) {
@@ -786,7 +794,7 @@ test("down recovers a selected interrupted startup without replaying hooks or or
 test("down preserves a partial ready-graph shutdown without hooks, stop replay or startup recovery", async () => {
   const opts = await fixture();
   const calls: string[] = [];
-  await expect(
+  await expectClosedRefusal(
     nativeProjectDown({
       ...opts,
       before: async () => {
@@ -809,15 +817,16 @@ test("down preserves a partial ready-graph shutdown without hooks, stop replay o
           pending_cleanup: { version: 1, kind: "partial_shutdown" },
         };
       },
-    })
-  ).rejects.toThrow("Native retaining shutdown is incomplete");
+    }),
+    "Native retaining shutdown is incomplete"
+  );
   expect(calls).toEqual(["inspect"]);
   expect(await loadNativeProjectRun(opts.scope)).toEqual(run);
 });
 
 test("stopped receipt with a remaining container preserves mapping", async () => {
   const opts = await fixture();
-  await expect(
+  await expectClosedRefusal(
     nativeProjectDown({
       ...opts,
       retireHostProcesses: async () => {
@@ -828,8 +837,9 @@ test("stopped receipt with a remaining container preserves mapping", async () =>
         value.receipt.phase = "stopped-data-retained";
         return value;
       },
-    })
-  ).rejects.toThrow("unconfirmed");
+    }),
+    "unconfirmed"
+  );
   expect(await loadNativeProjectRun(opts.scope)).toEqual(run);
 });
 

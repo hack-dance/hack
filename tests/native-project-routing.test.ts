@@ -82,6 +82,19 @@ test("active reviewed routes request pool allocation with matching existing prob
     ).toThrow();
   }
   expect(() => reviewedNativeRoutes({ ...opts, capacity: 1 })).toThrow();
+  let refusal: unknown;
+  try {
+    reviewedNativeRoutes({
+      ...opts,
+      specs: { ...opts.specs, z: { labels } },
+    });
+  } catch (error: unknown) {
+    refusal = error;
+  }
+  expect(refusal).toMatchObject({
+    code: "E_NATIVE_PROJECT_UNSUPPORTED",
+    message: expect.stringContaining("reviewed Caddy labels"),
+  });
   expect(() =>
     reviewedNativeRoutes({
       ...opts,

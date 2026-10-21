@@ -176,9 +176,10 @@ test("invalid branch selectors and missing or malformed config refuse", async ()
     expect(() => nativeProjectBranchArgs(branch)).toThrow("canonical branch");
   }
   await writeFile(f.configFile, "{");
-  await expect(prepareNativeProjectBranch(f)).rejects.toThrow(
-    "valid project host"
-  );
+  await expect(prepareNativeProjectBranch(f)).rejects.toMatchObject({
+    code: "E_CONFIG_INVALID",
+    message: expect.stringContaining("valid project host"),
+  });
   await rm(f.configFile);
   await expect(prepareNativeProjectBranch(f)).rejects.toThrow(
     "valid project host"

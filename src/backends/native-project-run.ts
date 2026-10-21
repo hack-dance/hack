@@ -11,6 +11,7 @@ import {
   unlink,
 } from "node:fs/promises";
 import { join, relative } from "node:path";
+import { ClosedCliError, HackCliError } from "../lib/cli-result.ts";
 import { isRecord } from "../lib/guards.ts";
 import {
   isNativeProjectFinalizationToken,
@@ -54,8 +55,9 @@ export type NativeProjectRunScope = {
   readonly nativeHome: string;
   readonly branch: string | null;
 };
+/** Integrity or ownership refusal of the saved mapping: closed, no stack. */
 function refused(): Error {
-  return new Error(
+  return new ClosedCliError(
     "Native project run mapping is unsafe, changed, or owned by another run; inspect native state before recovery."
   );
 }
@@ -88,9 +90,10 @@ export function normalizeNativeProfiles(
         CONTROL.test(profile)
     )
   ) {
-    throw new Error(
-      "Native profiles require at most 64 bounded nonempty names."
-    );
+    throw new HackCliError({
+      code: "E_CONFIG_INVALID",
+      message: "Native profiles require at most 64 bounded nonempty names.",
+    });
   }
   return [...new Set(profiles)].sort();
 }
@@ -301,7 +304,7 @@ export async function withNativeRestartLock<T>(
   try {
     await mkdir(lock, { mode: 0o700 });
   } catch {
-    throw new Error(
+    throw new ClosedCliError(
       "Native restart is already owned or was interrupted; inspect the pending restart before recovery."
     );
   }

@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import { preflightNativeProjectSource } from "../src/backends/native-project-source-preflight.ts";
+import { ClosedCliError } from "../src/lib/cli-result.ts";
 
 const runtime = { binary: "/candidate/hack-native", home: "/candidate/home" };
 
@@ -31,13 +32,14 @@ test("invalid and refused source admission never counts as startup permission", 
     { source_admitted: false, pool_initialized: true },
     { source_admitted: true },
   ]) {
-    await expect(
-      preflightNativeProjectSource({
-        runtime,
-        projectRoot: "/project",
-        invoke: async () => result,
-      })
-    ).rejects.toThrow("invalid receipt");
+    const refusal = await preflightNativeProjectSource({
+      runtime,
+      projectRoot: "/project",
+      invoke: async () => result,
+    }).catch((error: unknown) => error);
+    // A closed refusal: the CLI prints this one line without a stack.
+    expect(refusal).toBeInstanceOf(ClosedCliError);
+    expect(String(refusal)).toContain("invalid receipt");
   }
   await expect(
     preflightNativeProjectSource({

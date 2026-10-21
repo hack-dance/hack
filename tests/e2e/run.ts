@@ -1,4 +1,8 @@
 import {
+  blockedLaunchctlCalls,
+  describeLaunchAgentChange,
+  fingerprintLaunchAgentPlist,
+  realHackdLaunchAgentPath,
   runIsolationCanary,
   runScenarios,
   type Scenario,
@@ -78,7 +82,8 @@ import { parseShard, type ShardSelection, selectShard } from "./shard.ts";
  *   HACK_E2E_REQUIRE_TMUX=1 ...              # fail if tmux recovery cannot run
  *
  * Exit codes: 0 all pass/skip, 1 any scenario failed, 2 isolation canary
- * failed (nothing ran).
+ * failed (nothing ran) or the launchd canary saw the real hackd plist change
+ * or a refused hackd launchctl call (HACK-1313).
  */
 
 export const ALL_SCENARIOS: readonly Scenario[] = [
@@ -238,6 +243,44 @@ async function main(): Promise<void> {
     return;
   }
 
+  // HACK-1313: HOME stays real here, so the user's hackd LaunchAgent plist is
+  // reachable. Fingerprint it (hash + mtime only) around the whole run.
+  const launchAgentPath = realHackdLaunchAgentPath();
+  const launchAgentBefore = await fingerprintLaunchAgentPlist({
+    path: launchAgentPath,
+  });
+  try {
+    await runSuite({ args, shardNames });
+  } finally {
+    const change = describeLaunchAgentChange({
+      before: launchAgentBefore,
+      after: await fingerprintLaunchAgentPlist({ path: launchAgentPath }),
+    });
+    const blocked = blockedLaunchctlCalls();
+    if (change !== null || blocked.length > 0) {
+      process.stdout.write(
+        [
+          "LAUNCHD CANARY FAILED — the run reached the real hackd launchd service.",
+          change === null
+            ? "hackd LaunchAgent plist unchanged."
+            : `hackd LaunchAgent plist changed during the run: ${change}`,
+          blocked.length === 0
+            ? "No hackd launchctl calls were refused."
+            : `Refused hackd launchctl calls: ${blocked.join(", ")}`,
+          "A concurrent `hack daemon install` outside this run also trips this check.",
+          "",
+        ].join("\n")
+      );
+      process.exitCode = 2;
+    }
+  }
+}
+
+async function runSuite(opts: {
+  readonly args: CliArgs;
+  readonly shardNames: readonly string[] | null;
+}): Promise<void> {
+  const { args, shardNames } = opts;
   process.stdout.write("== hack e2e: isolation canary ==\n");
   const canary = await runIsolationCanary();
   if (!canary.ok) {

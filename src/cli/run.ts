@@ -187,6 +187,16 @@ export async function handleRunCliError(opts: {
 
   if (error instanceof HackCliError) {
     logger.error({ message: `${error.code}: ${error.message}` });
+    if (error.detail !== undefined) {
+      // Loaded only for a detailed error, off the ordinary CLI start path.
+      const { nativeComposeEffectRefusalSummary } = await import(
+        "../lib/native-compose-effect-diagnostics.ts"
+      );
+      const summary = nativeComposeEffectRefusalSummary(error.detail);
+      if (summary) {
+        logger.error({ message: summary });
+      }
+    }
     logDebugStack(error);
     return 1;
   }

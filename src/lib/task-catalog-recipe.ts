@@ -448,9 +448,19 @@ const EVALUATORS: Readonly<Record<string, Evaluator>> = {
   doas: evaluator({ stdin: ["-s"] }),
   // Config values and subcommands that run a string in a shell:
   // `git -c alias.x='!cmd' x`, `rebase --exec`, `difftool --extcmd`,
-  // `submodule foreach`, `bisect run` and the `filter-branch` filters.
+  // `submodule foreach`, `bisect run`, the `filter-branch` filters and the
+  // remote-side commands of `fetch`/`clone`/`ls-remote --upload-pack` and
+  // `push --receive-pack`.
   git: evaluator({
-    inline: ["-c", "--config-env", "--exec", "-x", "--extcmd"],
+    inline: [
+      "-c",
+      "--config-env",
+      "--exec",
+      "-x",
+      "--extcmd",
+      "--upload-pack",
+      "--receive-pack",
+    ],
     words: ["foreach", "bisect", "filter-branch"],
   }),
   nix: evaluator({
@@ -523,7 +533,8 @@ const SHELL_SYNTAX_TOKENS: ReadonlySet<string> = new Set([
 ]);
 
 const EXE_SUFFIX = /\.exe$/;
-const VERSION_SUFFIX = /[0-9.]+$/;
+/** `python3.12`, `node22` and `node-22` name the same program. */
+const VERSION_SUFFIX = /-?[0-9.]+$/;
 const SHORT_OPTION_CLUSTER = /^-[a-z]+$/;
 /** A `data:` URL argument or option value (`--import=data:…`). */
 const DATA_URL = /(?:^|=)data:/i;

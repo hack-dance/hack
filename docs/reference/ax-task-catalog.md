@@ -38,8 +38,8 @@ is not implemented here.
    string-to-shell forms of package runners and wrappers (`npx -c`,
    `npm exec -c`, `pnpm -c`, `yarn exec`, `bun exec`, `nodemon --exec`,
    `tsx -e`, `ts-node -e`, `julia -e`, `sudo -s`, `doas -s`,
-   `git -c`/`--exec`/`submodule foreach`/`bisect`/`filter-branch`,
-   `make --eval`, `nix eval`) and
+   `git -c`/`--exec`/`--upload-pack`/`--receive-pack`/`submodule foreach`/
+   `bisect`/`filter-branch`, `make --eval`, `nix eval`) and
    `eval`, `env`, `xargs`, `su`, `runuser`, `ssh`, `nix-shell`,
    `concurrently`, `watchexec`, `tmux`, `iex`, the vi and Emacs editors, awk
    or sed anywhere in argv, and `watch`, `parallel` or `sg` with a command.
@@ -271,6 +271,7 @@ until its recipes are re-reviewed.
 | Option-value, `env`-anywhere, awk/sed, `Rscript -e`, stdin and REPL forms | `inline_command`; reviewed script argv still passes | domain test |
 | Package-runner, TypeScript-runner, privilege-wrapper, `git -c`, `make --eval`, `deno run -` and editor forms | `inline_command`; `npm run`, `npx tsc`, `tsx script.ts`, `sudo -u`, `git status`, `make test` still pass | domain test |
 | `data:` URL modules (`node --import data:…`, `deno run data:…`), `git bisect run`, `git filter-branch` and `julia -e` | `inline_command`; `node --import ./register.js`, `git log`, `julia -t 4 script.jl` still pass | domain test |
+| `git fetch`/`clone --upload-pack`, `git push --receive-pack` and a dash version suffix (`node-22 -e`) | `inline_command`; `git push -u origin main`, `git fetch origin`, `node-22 script.js` still pass | domain test |
 | Pin through a symlinked directory (outside the checkout, or aliasing `.hack`) | `input_path_invalid` | paired fixture |
 | Pointer pin into a gitignored, untracked secrets file | `input_path_invalid` with no digest; the same pin is checked once the file is tracked | paired fixture, domain test |
 | Pin of a file removed from the Git index, or in a checkout without Git | `input_path_invalid` | domain test |

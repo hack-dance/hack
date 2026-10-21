@@ -1191,6 +1191,11 @@ describe("recipe grammar", () => {
       ["exec", "julia", "-e", "1"],
       ["julia", "--print", "1"],
       ["julia"],
+      // Remote-side command strings and a dash version suffix.
+      ["exec", "git", "fetch", "--upload-pack=id;git-upload-pack", "origin"],
+      ["git", "clone", "--upload-pack", "id", "x"],
+      ["git", "push", "--receive-pack=id", "origin"],
+      ["exec", "node-22", "-e", "1"],
     ];
     for (const argv of inline) {
       expect({ argv, inline: isInlineCommandArgv(argv) }).toEqual({
@@ -1226,6 +1231,9 @@ describe("recipe grammar", () => {
       ["deno", "run", "scripts/data-sync.ts"],
       ["git", "log", "--oneline"],
       ["julia", "-t", "4", "scripts/x.jl"],
+      ["git", "push", "-u", "origin", "main"],
+      ["git", "fetch", "origin"],
+      ["node-22", "scripts/build.js"],
     ];
     for (const argv of exact) {
       expect({ argv, inline: isInlineCommandArgv(argv) }).toEqual({

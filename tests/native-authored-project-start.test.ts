@@ -1,6 +1,6 @@
-import { afterEach, test as bunTest, expect, spyOn } from "bun:test";
+import { test as bunTest, expect, spyOn } from "bun:test";
 import { createHash } from "node:crypto";
-import { readdirSync, readFileSync } from "node:fs";
+import { readdirSync, readFileSync, writeFileSync } from "node:fs";
 import {
   chmod,
   mkdir,
@@ -8,7 +8,6 @@ import {
   readdir,
   readFile,
   realpath,
-  rm,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -41,25 +40,83 @@ import {
   type ComposeEnvFingerprintRecord,
   evaluateComposeServiceEnvFreshness,
 } from "../src/lib/compose-env-fingerprint.ts";
-import { restoreEnv } from "./helpers/env.ts";
 import { writeLifecycleMuxFixture } from "./helpers/lifecycle-mux-fixture.ts";
-import { createNativeAuthoredSettlement } from "./helpers/native-authored-settlement.ts";
+import {
+  createNativeFixtureCases,
+  type NativeFixtureCase,
+} from "./helpers/native-fixture-cases.ts";
 
-const roots: string[] = [];
 const run = "a".repeat(32);
 const CANARY = "synthetic-private-native-start-canary";
 /** Allowance for a case's owners, groups and stop endpoints to be absent afterwards. */
-const SETTLEMENT_BUDGET_MS = 5000;
+const SETTLEMENT_BUDGET_MS = 15_000;
+/**
+ * Caller startup deadline for cases that are not about the deadline itself.
+ * Each start spawns several Bun children (compiler, planner, owner, hooks); on
+ * a loaded host that takes well over the 10-20 s these cases used to allow.
+ */
+const STARTUP_TIMEOUT_MS = 60_000;
+/** Caller stop deadline for ordinary `down` in the hook and live-stop cases. */
+const STOP_TIMEOUT_MS = 60_000;
+/**
+ * Body budget for every case: a full start plus a stop, with slack. The guard
+ * adds the settlement budget on top, so cases never fall back to Bun's 5 s.
+ */
+const CASE_TIMEOUT_MS = 2 * STARTUP_TIMEOUT_MS;
 /** A caller's 50 ms startup deadline must return the frontend well inside this wall bound. */
 const DEADLINE_WALL_BOUND_MS = 1000;
-/** Fixture creation (compiler and owner scripts) before the deadline case's measured call. */
-const DEADLINE_FIXTURE_SETUP_MS = 2000;
-const settlement = createNativeAuthoredSettlement();
-let observationFailure: unknown;
+/**
+ * Upper bound for a stand-in owner that never receives its release or SIGTERM,
+ * so a broken case cannot leave an orphan. Passing cases release it explicitly.
+ */
+const OWNER_RELEASE_CAP_MS = 2 * CASE_TIMEOUT_MS;
+const cases = createNativeFixtureCases({
+  label: "Startup fixture",
+  defaultTimeoutMs: CASE_TIMEOUT_MS,
+  settlementBudgetMs: SETTLEMENT_BUDGET_MS,
+});
+const test = cases.test;
+
+/** File the stand-in owner waits for before it retires after ready publication. */
+function ownerRelease(root: string, runId: string): string {
+  return join(root, `owner-release-${runId}`);
+}
+
+/**
+ * Let a ready stand-in owner retire. This explicit handshake replaces the
+ * owner's former fixed ready window: the owner leaves only after the frontend
+ * has finished ready publication, or on SIGTERM.
+ */
+function releaseOwner(root: string, runId: string): void {
+  writeFileSync(ownerRelease(root, runId), "release", { mode: 0o600 });
+}
+
+/** Window PIDs from the stand-in mux state; `undefined` while it is mid-write. */
+function muxWindowPids(text: string): readonly number[] | undefined {
+  let state: unknown;
+  try {
+    state = JSON.parse(text);
+  } catch {
+    return;
+  }
+  if (typeof state !== "object" || state === null || !("windows" in state)) {
+    return;
+  }
+  return Object.values(state.windows as Record<string, unknown>).flatMap(
+    (row) =>
+      typeof row === "object" &&
+      row !== null &&
+      "pid" in row &&
+      typeof row.pid === "number"
+        ? [row.pid]
+        : []
+  );
+}
 
 /** Record what a published generation may leave behind: the stop owner's loopback
  * endpoint and any detached host process groups. Synchronous, as `onReady` requires. */
 function observeOwners(
+  owner: NativeFixtureCase,
   input: Parameters<typeof serveStart>[0] & { readonly root: string }
 ): void {
   try {
@@ -81,7 +138,7 @@ function observeOwners(
         "port" in value &&
         typeof value.port === "number"
       ) {
-        settlement.record({
+        owner.settlement.record({
           kind: "endpoint",
           name: `stop owner endpoint (${name.replace(/^[0-9a-f]+\./, "")})`,
           port: value.port,
@@ -104,7 +161,7 @@ function observeOwners(
           "pid" in row &&
           typeof row.pid === "number"
         ) {
-          settlement.record({
+          owner.settlement.record({
             kind: "process",
             name: `host process group (${window})`,
             pid: row.pid,
@@ -114,20 +171,33 @@ function observeOwners(
       }
     }
   } catch (error) {
-    observationFailure ??= error;
+    owner.fail(error);
   }
 }
-/** Every case serves through this observer; one case below deliberately uses `serveStart`. */
+/**
+ * Every case serves through this observer; one case below deliberately uses
+ * `serveStart`. Ready publication releases the stand-in owner unless the case
+ * sets `holdOwner` and calls `releaseOwner` itself.
+ */
 const serveNativeAuthoredProject = (
-  input: Parameters<typeof serveStart>[0] & { readonly root: string }
-) =>
-  serveStart({
+  input: Parameters<typeof serveStart>[0] & {
+    readonly root: string;
+    readonly holdOwner?: boolean;
+  }
+) => {
+  const owner = cases.current();
+  const runId = input.run;
+  return serveStart({
     ...input,
     onReady: (selection) => {
-      observeOwners(input);
+      observeOwners(owner, input);
+      if (input.holdOwner !== true) {
+        releaseOwner(input.root, runId);
+      }
       return input.onReady?.(selection);
     },
   });
+};
 const KEYS = [
   "HACK_HOME",
   "HACK_GLOBAL_CONFIG_PATH",
@@ -142,58 +212,6 @@ const KEYS = [
   "HACK_SESSIONS_MUX",
   "HACK_TEST_MUX_STATE",
 ] as const;
-let saved: Record<string, string | undefined> | undefined;
-let activeCases = 0;
-let unconfirmed = false;
-function test(
-  name: string,
-  body: () => void | Promise<void>,
-  timeout?: number
-) {
-  bunTest(
-    name,
-    async () => {
-      if (unconfirmed) {
-        throw new Error(
-          "Startup fixture settlement unconfirmed; roots retained."
-        );
-      }
-      activeCases++;
-      try {
-        await body();
-        if (observationFailure !== undefined) {
-          throw observationFailure;
-        }
-        // The next case must not start while this case's owner, its detached
-        // group or its stop endpoint is still present.
-        await settlement.settle({ budgetMs: SETTLEMENT_BUDGET_MS });
-      } catch (error) {
-        unconfirmed = true;
-        throw error;
-      } finally {
-        activeCases--;
-      }
-    },
-    timeout
-  );
-}
-afterEach(async () => {
-  if (activeCases !== 0) {
-    unconfirmed = true;
-  }
-  if (unconfirmed) {
-    return;
-  }
-  if (saved) {
-    for (const key of KEYS) {
-      restoreEnv(key, saved[key]);
-    }
-  }
-  saved = undefined;
-  await Promise.all(
-    roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))
-  );
-});
 
 type FixtureOptions = {
   readonly compilerFailure?: boolean;
@@ -250,6 +268,7 @@ type FixtureOptions = {
 
 /** Fake compiler/engine transport; real managed inputs, admission, process and storage owners. */
 async function fixture(options: FixtureOptions = {}) {
+  const owner = cases.current();
   // Optional effect-free integration uses the real compiler and native planner;
   // execution/status/cleanup remain this file's separately controlled fake driver.
   const realCompiler = process.env.HACK_TEST_NATIVE_COMPILER;
@@ -262,14 +281,16 @@ async function fixture(options: FixtureOptions = {}) {
   const root = await realpath(
     await mkdtemp(join(tmpdir(), "native-authored-start-"))
   );
-  roots.push(root);
+  owner.root(root);
   const projectRoot = join(root, "project");
   const projectDir = join(projectRoot, ".hack");
   const nativeHome = join(root, "candidate");
   await mkdir(projectRoot, { mode: 0o700 });
   await mkdir(projectDir, { mode: 0o700 });
   await mkdir(nativeHome, { mode: 0o700 });
-  saved = Object.fromEntries(KEYS.map((key) => [key, process.env[key]]));
+  // Restored by the case guard whatever the outcome, so no later case or file
+  // inherits this fixture's HACK_HOME, CI mode or missing PATH.
+  const saved = owner.saveEnv(KEYS);
   for (const key of KEYS) {
     Reflect.deleteProperty(process.env, key);
   }
@@ -283,6 +304,16 @@ async function fixture(options: FixtureOptions = {}) {
     process.env.PATH = `${bin}:${saved.PATH ?? "/usr/bin:/bin"}`;
     process.env.HACK_SESSIONS_MUX = "tmux";
     process.env.HACK_TEST_MUX_STATE = join(root, "mux.json");
+    // Every supervised host group the stand-in mux starts, including ones a
+    // failed start retains before ready (which `observeOwners` never sees).
+    owner.settlement.record({
+      kind: "pid-file",
+      name: "stand-in mux host process groups",
+      path: join(root, "mux.json"),
+      group: true,
+      emptySettled: true,
+      parse: muxWindowPids,
+    });
   }
   const hook = (name: string) => ({
     name,
@@ -423,21 +454,29 @@ console.log(JSON.stringify(result));
   const sources = join(root, "sources.jsonl");
   const ownerPid = join(root, "owner.pid");
   // Each stand-in owner appends its PID; a detached owner leads its own group.
-  settlement.record({
+  owner.settlement.record({
     kind: "pid-file",
     name: "stand-in native owner",
     path: ownerPid,
     group: true,
   });
+  // A hanging status request must be killed by cancellation, not outlive the case.
+  const statusPid = join(root, "status.pid");
+  owner.settlement.record({
+    kind: "pid-file",
+    name: "stand-in hanging runtime status request",
+    path: statusPid,
+    group: false,
+  });
   const digest = createHash("sha256").update(CANARY).digest("hex");
   await writeFile(
     binary,
     `#!${process.execPath}
-import {appendFile,readFile,readdir,writeFile} from 'node:fs/promises';
+import {appendFile,readFile,readdir,unlink,writeFile} from 'node:fs/promises';
 import {createHash} from 'node:crypto';import {join} from 'node:path';
 const args=process.argv.slice(2);const action=args[4];await appendFile(${JSON.stringify(calls)},JSON.stringify(args)+'\\n');
 if(${options.runtimeStopped === true}&&args[2]==='runtime'&&args[3]==='status'){console.log(JSON.stringify({phase:'stopped',process_alive:false}));process.exit(0)}
-if(${options.runtimeStatusHangs === true}&&args[2]==='runtime'&&args[3]==='status'){await new Promise((resolve)=>setTimeout(resolve,10000));process.exit(0)}
+if(${options.runtimeStatusHangs === true}&&args[2]==='runtime'&&args[3]==='status'){await appendFile(${JSON.stringify(statusPid)},process.pid+'\\n');await new Promise((resolve)=>setTimeout(resolve,${2 * CASE_TIMEOUT_MS}));process.exit(0)}
 if(${options.runtimeStatusWrappedStop === true}&&args[2]==='runtime'&&args[3]==='status'){console.error(JSON.stringify({code:'native_graph_foreground',cause_code:'runtime_not_running',message:${JSON.stringify(CANARY)}}));process.exit(2)}
 const journal=${JSON.stringify(journal)};
 const root=${JSON.stringify(join(projectDir, ".internal", "native-authored-runs"))};
@@ -502,10 +541,12 @@ if(['plan','serve','frontend-plan','frontend-serve'].includes(action)){
  process.on('SIGTERM',finish);await writeFile(journal,JSON.stringify(receipt));
  console.log(JSON.stringify({version:2,kind:'native-graph-foreground-ready',run:input.run,review:review.review_id,receipt}));
  if(${options.finiteHooks === true || options.liveStop === true}){ while(true)await Bun.sleep(50); }
- for(let index=0;index<200;index++){
-  const mapping=(await readdir(root)).find(name=>name.endsWith('.json')&&!name.endsWith('.start.json')&&!name.endsWith('.source.json'));
-  if(mapping){await Bun.sleep(30);await finish()}await Bun.sleep(10);
- }
+ // Handshake, not a wall-clock window: retire only once the frontend has
+ // finished ready publication and the test released this run (or on SIGTERM).
+ const release=${JSON.stringify(ownerRelease(root, ""))}+input.run;
+ const cap=performance.now()+${OWNER_RELEASE_CAP_MS};
+ while(!(await Bun.file(release).exists())&&performance.now()<cap)await Bun.sleep(10);
+ await unlink(release).catch(()=>undefined);
  await finish();
 }else{
  if(action==='inspect'&&${options.failBeforeReceipt === true || options.stoppedDuringServe === true}){console.error(JSON.stringify({code:${JSON.stringify(options.unreservedInspection === true ? "native_graph_unreserved" : "native_graph_receipt")},message:${JSON.stringify(CANARY)}}));process.exit(2)}
@@ -563,7 +604,7 @@ macTest(
       serveNativeAuthoredProject({
         ...selected,
         run,
-        startupTimeoutMs: 10_000,
+        startupTimeoutMs: STARTUP_TIMEOUT_MS,
       }),
       "retained"
     );
@@ -574,7 +615,7 @@ macTest(
     expect(retained.some((name) => name.endsWith(".start.json"))).toBe(true);
     expect(retained.some((name) => name.endsWith(".source.json"))).toBe(true);
   },
-  30_000
+  CASE_TIMEOUT_MS
 );
 
 macTest(
@@ -593,7 +634,7 @@ macTest(
       serveNativeAuthoredProject({
         ...selected,
         run,
-        startupTimeoutMs: 60_000,
+        startupTimeoutMs: STARTUP_TIMEOUT_MS,
       }),
       "unreserved"
     );
@@ -617,7 +658,7 @@ macTest(
     // review and before the startup intent is reserved.
     expect(calls).toEqual(["plan", "--json", "serve", "inspect"]);
   },
-  90_000
+  CASE_TIMEOUT_MS
 );
 
 macTest(
@@ -633,7 +674,7 @@ macTest(
       serveNativeAuthoredProject({
         ...selected,
         run,
-        startupTimeoutMs: 60_000,
+        startupTimeoutMs: STARTUP_TIMEOUT_MS,
       }),
       "retained"
     );
@@ -709,7 +750,7 @@ macTest(
     ).toBeInstanceOf(Error);
     expect(requests).toHaveLength(before);
   },
-  90_000
+  CASE_TIMEOUT_MS
 );
 
 macTest(
@@ -720,7 +761,7 @@ macTest(
       serveNativeAuthoredProject({
         ...selected,
         run,
-        startupTimeoutMs: 10_000,
+        startupTimeoutMs: STARTUP_TIMEOUT_MS,
       }),
       "retained"
     );
@@ -759,7 +800,7 @@ macTest(
       serveNativeAuthoredProject({
         ...selected,
         run,
-        startupTimeoutMs: 10_000,
+        startupTimeoutMs: STARTUP_TIMEOUT_MS,
       }),
       "not-started"
     );
@@ -779,7 +820,7 @@ macTest(
       serveNativeAuthoredProject({
         ...selected,
         run,
-        startupTimeoutMs: 10_000,
+        startupTimeoutMs: STARTUP_TIMEOUT_MS,
       }),
       "not-started"
     );
@@ -814,7 +855,7 @@ macTest(
       serveNativeAuthoredProject({
         ...selected,
         run,
-        startupTimeoutMs: 10_000,
+        startupTimeoutMs: STARTUP_TIMEOUT_MS,
       }),
       "not-started"
     );
@@ -841,11 +882,13 @@ macTest(
       ...selected,
       run,
       signal: signal.signal,
-      startupTimeoutMs: 10_000,
+      startupTimeoutMs: STARTUP_TIMEOUT_MS,
     });
     // Cancel once the status request is in flight. The check treats the
     // aborted request as inconclusive; the start must still not reserve.
-    const deadline = performance.now() + 8000;
+    // The stand-in request hangs past the case budget, so this waits on the
+    // request itself rather than racing a shorter fixed window.
+    const deadline = performance.now() + CASE_TIMEOUT_MS;
     while (
       !(
         (await Bun.file(selected.calls).exists()) &&
@@ -887,7 +930,7 @@ macTest(
     const code = await serveNativeAuthoredProject({
       ...selected,
       run,
-      startupTimeoutMs: 10_000,
+      startupTimeoutMs: STARTUP_TIMEOUT_MS,
       onReady: (mapping) => {
         ready += 1;
         expect(Object.isFrozen(mapping.record.receipt.resources)).toBe(true);
@@ -909,7 +952,7 @@ macTest(
       web: { TOKEN: delivery.expectedDigest },
     });
     expect(delivery.lifetime_seconds).toBeGreaterThan(0);
-    expect(delivery.lifetime_seconds).toBeLessThan(10);
+    expect(delivery.lifetime_seconds).toBeLessThan(STARTUP_TIMEOUT_MS / 1000);
     expect(await Bun.file(selected.calls).text()).not.toContain(CANARY);
   }
 );
@@ -923,7 +966,7 @@ macTest(
     const code = await serveNativeAuthoredProject({
       ...selected,
       run,
-      startupTimeoutMs: 10_000,
+      startupTimeoutMs: STARTUP_TIMEOUT_MS,
       onEnvironmentSelected: (value) => {
         events.push("selected");
         fingerprint = value;
@@ -965,7 +1008,7 @@ macTest(
       await serveNativeAuthoredProject({
         ...selected,
         run,
-        startupTimeoutMs: 10_000,
+        startupTimeoutMs: STARTUP_TIMEOUT_MS,
         onEnvironmentSelected: (value) => {
           fingerprint = value;
           throw new Error("synthetic observer failure");
@@ -995,7 +1038,7 @@ for (const option of [
         serveNativeAuthoredProject({
           ...selected,
           run,
-          startupTimeoutMs: 10_000,
+          startupTimeoutMs: STARTUP_TIMEOUT_MS,
         }),
         "not-started"
       );
@@ -1019,7 +1062,7 @@ macTest(
       await serveNativeAuthoredProject({
         ...selected,
         run,
-        startupTimeoutMs: 10_000,
+        startupTimeoutMs: STARTUP_TIMEOUT_MS,
         onReady: (mapping) => {
           expect(mapping.record.receipt.review.provenance.namespace).toBe(
             createHash("sha256")
@@ -1046,7 +1089,7 @@ for (const option of ["failedStatus", "changeDuringStatus"] as const) {
         serveNativeAuthoredProject({
           ...selected,
           run,
-          startupTimeoutMs: 10_000,
+          startupTimeoutMs: STARTUP_TIMEOUT_MS,
           onReady: () => {
             ready = true;
             return undefined;
@@ -1074,7 +1117,7 @@ for (const option of ["failedStatus", "changeDuringStatus"] as const) {
           serveNativeAuthoredProject({
             ...selected,
             run,
-            startupTimeoutMs: 10_000,
+            startupTimeoutMs: STARTUP_TIMEOUT_MS,
             onReady: () => {
               ready = true;
               return undefined;
@@ -1099,7 +1142,7 @@ for (const option of ["failedStatus", "changeDuringStatus"] as const) {
           serveNativeAuthoredProject({
             ...selected,
             run: "9".repeat(32),
-            startupTimeoutMs: 10_000,
+            startupTimeoutMs: STARTUP_TIMEOUT_MS,
           }),
           "retained"
         );
@@ -1124,7 +1167,7 @@ for (const cleanup of ["live", "missing", "foreign-id"] as const) {
         serveNativeAuthoredProject({
           ...selected,
           run,
-          startupTimeoutMs: 10_000,
+          startupTimeoutMs: STARTUP_TIMEOUT_MS,
         }),
         "retained"
       );
@@ -1138,7 +1181,7 @@ for (const cleanup of ["live", "missing", "foreign-id"] as const) {
         serveNativeAuthoredProject({
           ...selected,
           run: "9".repeat(32),
-          startupTimeoutMs: 10_000,
+          startupTimeoutMs: STARTUP_TIMEOUT_MS,
         }),
         "retained"
       );
@@ -1164,7 +1207,7 @@ macTest(
         ...selected,
         run,
         signal: signal.signal,
-        startupTimeoutMs: 10_000,
+        startupTimeoutMs: STARTUP_TIMEOUT_MS,
         onReady: () => {
           ready = true;
           signal.abort();
@@ -1189,18 +1232,24 @@ macTest(
     const first = serveNativeAuthoredProject({
       ...selected,
       run,
-      startupTimeoutMs: 10_000,
+      startupTimeoutMs: STARTUP_TIMEOUT_MS,
+      // The owner stays ready until the second consumer has been refused.
+      holdOwner: true,
       onReady: () => {
         entered.resolve();
         return undefined;
       },
     });
     await entered.promise;
-    await expect(
-      withNativeAuthoredProjectAdmission(selected.scope, () =>
-        Promise.resolve()
-      )
-    ).rejects.toThrow("unsafe");
+    try {
+      await expect(
+        withNativeAuthoredProjectAdmission(selected.scope, () =>
+          Promise.resolve()
+        )
+      ).rejects.toThrow("unsafe");
+    } finally {
+      releaseOwner(selected.root, run);
+    }
     await first;
     await withNativeAuthoredProjectAdmission(selected.scope, (admission) =>
       admission.assertHeld()
@@ -1216,7 +1265,7 @@ test("invalid or pre-canceled native frontend selection has no input or runtime 
       ...selected,
       run,
       signal,
-      startupTimeoutMs: 10_000,
+      startupTimeoutMs: STARTUP_TIMEOUT_MS,
     }),
     "not-started"
   );
@@ -1224,7 +1273,7 @@ test("invalid or pre-canceled native frontend selection has no input or runtime 
     serveNativeAuthoredProject({
       ...selected,
       run: "invalid",
-      startupTimeoutMs: 10_000,
+      startupTimeoutMs: STARTUP_TIMEOUT_MS,
     }),
     "not-started"
   );
@@ -1241,7 +1290,7 @@ macTest(
       serveNativeAuthoredProject({
         ...selected,
         run,
-        startupTimeoutMs: 10_000,
+        startupTimeoutMs: STARTUP_TIMEOUT_MS,
       }),
       "retained"
     );
@@ -1260,7 +1309,7 @@ macTest(
       await serveNativeAuthoredProject({
         ...selected,
         run,
-        startupTimeoutMs: 10_000,
+        startupTimeoutMs: STARTUP_TIMEOUT_MS,
       })
     ).toBe(0);
     expect(await Bun.file(selected.delivery).exists()).toBe(false);
@@ -1282,9 +1331,7 @@ macTest(
     expect(performance.now() - started).toBeLessThan(DEADLINE_WALL_BOUND_MS);
     expect(await Bun.file(selected.calls).exists()).toBe(false);
     expect(await Bun.file(selected.delivery).exists()).toBe(false);
-  },
-  // Larger than the wall bound: fixture setup, the bounded call, then settlement.
-  DEADLINE_FIXTURE_SETUP_MS + DEADLINE_WALL_BOUND_MS + SETTLEMENT_BUDGET_MS
+  }
 );
 
 macTest(
@@ -1296,7 +1343,11 @@ macTest(
       runtime: { ...selected.runtime },
       scope: { ...selected.scope },
       run,
-      startupTimeoutMs: 10_000,
+      startupTimeoutMs: STARTUP_TIMEOUT_MS,
+      onReady: () => {
+        releaseOwner(selected.root, run);
+        return undefined;
+      },
     };
     // Unwrapped on purpose: the observer's copy must not mask the source's own
     // selection snapshot. The owner PID file still settles this case.
@@ -1328,7 +1379,7 @@ macTest(
       serveNativeAuthoredProject({
         ...selected,
         run,
-        startupTimeoutMs: 10_000,
+        startupTimeoutMs: STARTUP_TIMEOUT_MS,
         onReady: callback as unknown as () => undefined,
       }),
       "removed"
@@ -1348,7 +1399,7 @@ macTest(
       await serveNativeAuthoredProject({
         ...selected,
         run,
-        startupTimeoutMs: 10_000,
+        startupTimeoutMs: STARTUP_TIMEOUT_MS,
         onExitDiagnostic: async () => {
           await Bun.sleep(10);
           completed.resolve();
@@ -1369,7 +1420,7 @@ if (process.platform !== "darwin") {
       serveNativeAuthoredProject({
         ...selected,
         run,
-        startupTimeoutMs: 10_000,
+        startupTimeoutMs: STARTUP_TIMEOUT_MS,
       }),
       "not-started"
     );
@@ -1386,11 +1437,11 @@ macTest(
     const code = await serveNativeAuthoredProject({
       ...selected,
       run,
-      startupTimeoutMs: 15_000,
+      startupTimeoutMs: STARTUP_TIMEOUT_MS,
       onReady: () => {
         stop = stopNativeAuthoredProject({
           scope: selected.scope,
-          timeoutMs: 15_000,
+          timeoutMs: STOP_TIMEOUT_MS,
         });
         return undefined;
       },
@@ -1414,7 +1465,7 @@ macTest(
     ).toHaveLength(4);
     expect(files.some((name) => name.endsWith(".hooks.json"))).toBe(false);
   },
-  30_000
+  CASE_TIMEOUT_MS
 );
 macTest(
   "failed up.before records known completion and starts no native consumer or later hook",
@@ -1424,7 +1475,7 @@ macTest(
       serveNativeAuthoredProject({
         ...selected,
         run,
-        startupTimeoutMs: 15_000,
+        startupTimeoutMs: STARTUP_TIMEOUT_MS,
       }),
       "not-started"
     );
@@ -1441,7 +1492,7 @@ macTest(
       )
     ).toBe(false);
   },
-  30_000
+  CASE_TIMEOUT_MS
 );
 macTest(
   "missing storage bundle refuses before hooks, native planning, reservation or private delivery",
@@ -1455,7 +1506,7 @@ macTest(
       serveNativeAuthoredProject({
         ...selected,
         run,
-        startupTimeoutMs: 15_000,
+        startupTimeoutMs: STARTUP_TIMEOUT_MS,
       }),
       "not-started"
     );
@@ -1467,7 +1518,7 @@ macTest(
     expect(await Bun.file(selected.delivery).exists()).toBe(false);
     expect(await artifacts(selected.scope)).toEqual([]);
   },
-  30_000
+  CASE_TIMEOUT_MS
 );
 macTest(
   "malformed unnormalized host processes refuse before any hook or native operation",
@@ -1477,7 +1528,7 @@ macTest(
       serveNativeAuthoredProject({
         ...selected,
         run,
-        startupTimeoutMs: 15_000,
+        startupTimeoutMs: STARTUP_TIMEOUT_MS,
       }),
       "not-started"
     );
@@ -1496,7 +1547,7 @@ macTest(
     const code = await serveNativeAuthoredProject({
       ...selected,
       run,
-      startupTimeoutMs: 20_000,
+      startupTimeoutMs: STARTUP_TIMEOUT_MS,
       onReady: () => {
         stop = (async () => {
           readyValue = await Bun.file(
@@ -1504,7 +1555,7 @@ macTest(
           ).text();
           await stopNativeAuthoredProject({
             scope: selected.scope,
-            timeoutMs: 20_000,
+            timeoutMs: STOP_TIMEOUT_MS,
           });
         })();
         return undefined;
@@ -1529,7 +1580,7 @@ macTest(
       await Bun.file(join(selected.root, "mux.json.calls")).text()
     ).not.toContain(CANARY);
   },
-  40_000
+  CASE_TIMEOUT_MS
 );
 macTest(
   "Source5 failed up.before leaves no host intent or mux effect",
@@ -1543,7 +1594,7 @@ macTest(
       serveNativeAuthoredProject({
         ...selected,
         run,
-        startupTimeoutMs: 20_000,
+        startupTimeoutMs: STARTUP_TIMEOUT_MS,
       }),
       "not-started"
     );
@@ -1559,7 +1610,7 @@ macTest(
       files.some((name) => name.endsWith(".host-process-owner.json"))
     ).toBe(false);
   },
-  30_000
+  CASE_TIMEOUT_MS
 );
 macTest(
   "Source5 cancellation after readiness settles exact host processes before retiring hooks",
@@ -1571,7 +1622,7 @@ macTest(
         ...selected,
         run,
         signal: signal.signal,
-        startupTimeoutMs: 20_000,
+        startupTimeoutMs: STARTUP_TIMEOUT_MS,
         onReady: () => {
           signal.abort();
           return undefined;
@@ -1587,7 +1638,7 @@ macTest(
     ).toBe(false);
     expect(files.some((name) => name.endsWith(".hooks.json"))).toBe(false);
   },
-  40_000
+  CASE_TIMEOUT_MS
 );
 macTest(
   "failed down.before retains the supervised runtime and cannot replay before explicit hard cancellation",
@@ -1600,7 +1651,7 @@ macTest(
     const code = await serveNativeAuthoredProject({
       ...selected,
       run,
-      startupTimeoutMs: 15_000,
+      startupTimeoutMs: STARTUP_TIMEOUT_MS,
       forceSignal: force.signal,
       onHookDiagnostic: (event) => stages.push(event),
       onReady: () => {
@@ -1608,7 +1659,7 @@ macTest(
           await expect(
             stopNativeAuthoredProject({
               scope: selected.scope,
-              timeoutMs: 15_000,
+              timeoutMs: STOP_TIMEOUT_MS,
             })
           ).rejects.toThrow();
           retainedAtFailure =
@@ -1638,7 +1689,7 @@ macTest(
       await Bun.file(join(selected.scope.projectRoot, "hook-order")).text()
     ).toBe("up-before\nup-after\ndown-before\n");
   },
-  30_000
+  CASE_TIMEOUT_MS
 );
 
 macTest(
@@ -1651,11 +1702,11 @@ macTest(
         serveNativeAuthoredProject({
           ...selected,
           run: currentRun,
-          startupTimeoutMs: 15_000,
+          startupTimeoutMs: STARTUP_TIMEOUT_MS,
           onReady: () => {
             stop = stopNativeAuthoredProject({
               scope: selected.scope,
-              timeoutMs: 15_000,
+              timeoutMs: STOP_TIMEOUT_MS,
             }).catch((caught: unknown) => caught);
             return undefined;
           },
@@ -1684,7 +1735,7 @@ macTest(
       2
     );
   },
-  30_000
+  CASE_TIMEOUT_MS
 );
 
 macTest(
@@ -1699,11 +1750,11 @@ macTest(
       serveNativeAuthoredProject({
         ...selected,
         run,
-        startupTimeoutMs: 15_000,
+        startupTimeoutMs: STARTUP_TIMEOUT_MS,
         onReady: () => {
           stop = stopNativeAuthoredProject({
             scope: selected.scope,
-            timeoutMs: 15_000,
+            timeoutMs: STOP_TIMEOUT_MS,
           }).catch((caught: unknown) => caught);
           return undefined;
         },
@@ -1727,7 +1778,7 @@ macTest(
       await Bun.file(join(selected.scope.projectRoot, "hook-order")).text()
     ).toBe("up-before\nup-after\ndown-before\ndown-after\n");
   },
-  30_000
+  CASE_TIMEOUT_MS
 );
 
 macTest(
@@ -1741,7 +1792,7 @@ macTest(
       serveNativeAuthoredProject({
         ...selected,
         run,
-        startupTimeoutMs: 15_000,
+        startupTimeoutMs: STARTUP_TIMEOUT_MS,
       }),
       "not-started"
     );
@@ -1761,7 +1812,7 @@ macTest(
         .map((line) => JSON.parse(line)[4])
     ).toEqual(["frontend-plan"]);
   },
-  30_000
+  CASE_TIMEOUT_MS
 );
 
 macTest(
@@ -1776,7 +1827,7 @@ macTest(
       const code = await serveNativeAuthoredProject({
         ...selected,
         run: currentRun,
-        startupTimeoutMs: 15_000,
+        startupTimeoutMs: STARTUP_TIMEOUT_MS,
         onReady: (mapping) => {
           const data = mapping.record.receipt.data?.data;
           if (!data || data.state.status !== "enrolled") {
@@ -1785,7 +1836,7 @@ macTest(
           identities.push(data.state.volume.name);
           stop = stopNativeAuthoredProject({
             scope: selected.scope,
-            timeoutMs: 15_000,
+            timeoutMs: STOP_TIMEOUT_MS,
           });
           return undefined;
         },
@@ -1804,7 +1855,7 @@ macTest(
       await Bun.file(join(selected.scope.projectRoot, "hook-order")).exists()
     ).toBe(false);
   },
-  30_000
+  CASE_TIMEOUT_MS
 );
 
 macTest(
@@ -1828,7 +1879,7 @@ macTest(
       serveNativeAuthoredProject({
         ...selected,
         run,
-        startupTimeoutMs: 10_000,
+        startupTimeoutMs: STARTUP_TIMEOUT_MS,
       }),
       "retained"
     );
@@ -1838,7 +1889,7 @@ macTest(
       "{}"
     );
   },
-  15_000
+  CASE_TIMEOUT_MS
 );
 
 function confirmTestGroupAbsent(
@@ -1872,11 +1923,11 @@ macTest(
         serveNativeAuthoredProject({
           ...selected,
           run,
-          startupTimeoutMs: 15_000,
+          startupTimeoutMs: STARTUP_TIMEOUT_MS,
           onReady: () => {
             stop = stopNativeAuthoredProject({
               scope: selected.scope,
-              timeoutMs: 15_000,
+              timeoutMs: STOP_TIMEOUT_MS,
             });
             void stop.catch(() => undefined);
             return undefined;
@@ -1911,7 +1962,7 @@ macTest(
       spy?.mockRestore();
     }
   },
-  30_000
+  CASE_TIMEOUT_MS
 );
 
 for (const [httpsPort, branch, url] of [
@@ -1928,7 +1979,7 @@ for (const [httpsPort, branch, url] of [
           ...selected,
           run,
           httpsPort,
-          startupTimeoutMs: 10_000,
+          startupTimeoutMs: STARTUP_TIMEOUT_MS,
         })
       ).toBe(0);
       const recorded = (await Bun.file(selected.sources).text())

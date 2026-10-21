@@ -1,12 +1,5 @@
-import { afterEach, test as bunTest, expect } from "bun:test";
-import {
-  mkdir,
-  mkdtemp,
-  readdir,
-  readFile,
-  realpath,
-  rm,
-} from "node:fs/promises";
+import { expect } from "bun:test";
+import { mkdir, mkdtemp, readdir, readFile, realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { withNativeAuthoredProjectAdmission } from "../src/backends/native-authored-project-run.ts";
@@ -15,50 +8,24 @@ import {
   prepareNativeFiniteHookPhase,
   selectNativeFiniteHooks,
 } from "../src/lib/native-host-hook-runner.ts";
+import { createNativeFixtureCases } from "./helpers/native-fixture-cases.ts";
 
-const roots: string[] = [];
-let activeCases = 0;
-let unconfirmed = false;
-function test(
-  name: string,
-  body: () => void | Promise<void>,
-  timeout?: number
-) {
-  bunTest(
-    name,
-    async () => {
-      if (unconfirmed) {
-        throw new Error("Hook fixture settlement unconfirmed; roots retained.");
-      }
-      activeCases++;
-      try {
-        await body();
-      } catch (error) {
-        unconfirmed = true;
-        throw error;
-      } finally {
-        activeCases--;
-      }
-    },
-    timeout
-  );
-}
-afterEach(async () => {
-  if (activeCases !== 0) {
-    unconfirmed = true;
-  }
-  if (unconfirmed) {
-    return;
-  }
-  await Promise.all(
-    roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))
-  );
+/**
+ * Each case owns its roots; a failed case retains only its own roots and never
+ * fails the cases after it. Hook children spawn Bun, so allow a loaded host
+ * more than Bun's 5 s default.
+ */
+const cases = createNativeFixtureCases({
+  label: "Hook fixture",
+  defaultTimeoutMs: 30_000,
+  settlementBudgetMs: 5000,
 });
+const test = cases.test;
 async function fixture() {
   const root = await realpath(
     await mkdtemp(join(tmpdir(), "native-finite-hooks-"))
   );
-  roots.push(root);
+  cases.current().root(root);
   const projectDir = join(root, ".hack");
   const nativeHome = join(root, "candidate");
   await mkdir(projectDir);

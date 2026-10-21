@@ -29,7 +29,13 @@ export type NativeAuthoredSettlementTarget =
       /** A file the fixture writes its own PID(s) into. A missing file means no child was captured. */
       readonly path: string;
       readonly group: boolean;
-      readonly parse?: (text: string) => readonly number[];
+      /** PIDs named by the file; `undefined` while the record is incomplete. */
+      readonly parse?: (text: string) => readonly number[] | undefined;
+      /**
+       * A complete record that names no PID means nothing was captured. By
+       * default an empty parse is treated as a write still in progress.
+       */
+      readonly emptySettled?: boolean;
     }
   | {
       readonly kind: "endpoint";
@@ -101,7 +107,8 @@ export function parsePidLines(text: string): readonly number[] {
 async function pidFileSettled(target: {
   readonly path: string;
   readonly group: boolean;
-  readonly parse?: (text: string) => readonly number[];
+  readonly parse?: (text: string) => readonly number[] | undefined;
+  readonly emptySettled?: boolean;
 }): Promise<boolean> {
   let text: string;
   try {
@@ -113,9 +120,13 @@ async function pidFileSettled(target: {
     throw error;
   }
   const pids = (target.parse ?? parsePidLines)(text);
-  if (pids.length === 0) {
-    // The fixture has created the file but not finished writing its identity.
+  if (pids === undefined) {
     return false;
+  }
+  if (pids.length === 0) {
+    // Either nothing was captured, or the fixture has created the file but not
+    // finished writing its identity.
+    return target.emptySettled === true;
   }
   return pids.every((pid) => processSettled(pid, target.group));
 }

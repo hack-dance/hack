@@ -197,6 +197,7 @@ import {
   readTextFile,
   writeTextFileIfChanged,
 } from "../lib/fs.ts";
+import { ensureHackGitInfoExclude } from "../lib/git-info-exclude.ts";
 import { resolveInstalledGrafanaHost } from "../lib/global-service-host.ts";
 import { getString, isRecord } from "../lib/guards.ts";
 import { resolveHackInvocation } from "../lib/hack-cli.ts";
@@ -1344,7 +1345,7 @@ export async function resolveModernComposeEnvOverrides(opts: {
     };
   }
 
-  await ensureHackDirGitignore({ projectDir: opts.project.projectDir });
+  await ensureHackGitInfoExclude({ projectDir: opts.project.projectDir });
   const overridePath = await writeComposeEnvOverride({
     projectDir: opts.project.projectDir,
     text: override.text,
@@ -1511,7 +1512,7 @@ async function resolveComposeEnvOverrides(opts: {
   const override = { services: overrideServices };
   const yaml = YAML.stringify(override, null, 2);
   const text = ensureTrailingNewline(cleanupYaml(yaml));
-  await ensureHackDirGitignore({ projectDir: opts.project.projectDir });
+  await ensureHackGitInfoExclude({ projectDir: opts.project.projectDir });
   const overridePath = await writeComposeEnvOverride({
     projectDir: opts.project.projectDir,
     text,
@@ -2051,7 +2052,7 @@ async function resolveBranchComposeFiles(opts: {
     return [opts.project.composeFile];
   }
 
-  await ensureHackDirGitignore({ projectDir: opts.project.projectDir });
+  await ensureHackGitInfoExclude({ projectDir: opts.project.projectDir });
   const overrideDir = resolve(opts.project.projectDir, ".branch");
   await ensureDir(overrideDir);
   const overridePath = resolve(
@@ -2089,7 +2090,7 @@ export async function resolveRuntimeHostMetadataOverride(opts: {
     return null;
   }
 
-  await ensureHackDirGitignore({ projectDir: opts.project.projectDir });
+  await ensureHackGitInfoExclude({ projectDir: opts.project.projectDir });
   const overrideDir = resolve(
     opts.project.projectDir,
     opts.branch ? ".branch" : ".internal"
@@ -2407,7 +2408,7 @@ async function writeInternalComposeOverride(opts: {
   readonly projectDir: string;
   readonly text: string;
 }): Promise<string> {
-  await ensureHackDirGitignore({ projectDir: opts.projectDir });
+  await ensureHackGitInfoExclude({ projectDir: opts.projectDir });
   const overrideDir = resolve(opts.projectDir, ".internal");
   await ensureDir(overrideDir);
   const overridePath = resolve(overrideDir, "compose.override.yml");
@@ -5355,9 +5356,11 @@ async function runUpCommand({
     return remoteUpCode;
   }
   await maybeSyncOauthAliasesInCompose({ project });
-  // Self-heal the committed .hack/.gitignore so machine-local generated files
-  // (.internal/, .branch/, .env, env state) never leak into git history.
-  await ensureHackDirGitignore({ projectDir: project.projectDir });
+  // Keep machine-local generated files (.internal/, .branch/, .env, env
+  // state) out of git status without writing into the user's tree: the rules
+  // go into the repository's info/exclude. Only init and doctor --fix write
+  // the committed .hack/.gitignore (HACK-1278).
+  await ensureHackGitInfoExclude({ projectDir: project.projectDir });
 
   const cfg = await readProjectConfig(project);
   if (cfg.parseError) {

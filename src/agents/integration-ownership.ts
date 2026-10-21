@@ -119,6 +119,7 @@ const KNOWN_RENDER_FINGERPRINTS: Readonly<
     "c6cd8f369e902624f9a31d2c", // next: hack-init MCP prompt takes repoRoot (HACK-1137)
     "124ca278acd4be97747bac9b", // next: runtime metadata for authored projects
     "88900097f7eb18a752de31bb", // next: hack-init MCP prompt repoRoot + authored runtime metadata
+    "e909706034f2780434920b9b", // next: lifecycle ignores via info/exclude (HACK-1278)
   ]),
   "hack-init-skill": new Set([
     "cd15fb6d8ed8e25071d05e75", // v3.1.0..v4.0.3
@@ -161,6 +162,7 @@ const KNOWN_RENDER_FINGERPRINTS: Readonly<
     "5dcd202fc7bc640895bd876c", // next: hack-init MCP prompt takes repoRoot (HACK-1137)
     "05f095e17267519ad3660da5", // next: runtime metadata for authored projects
     "07e49d3c2b05b93b6c49adfd", // next: hack-init MCP prompt repoRoot + authored runtime metadata
+    "2255a7c877b17397c1a96a85", // next: lifecycle ignores via info/exclude (HACK-1278)
   ]),
 };
 

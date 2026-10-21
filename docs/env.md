@@ -55,8 +55,21 @@ worktrees inherit the rules with zero setup. It covers (patterns relative to
 
 How it is maintained:
 
-- written by `hack init`, and self-healed by `hack up` and whenever hack
-  writes `.hack/.internal/` overrides or `--local` env overrides
+- written by `hack init`, re-ensured by `hack doctor --fix`, and refreshed
+  when you write `--local` env overrides with `hack env set`
+- runtime commands (`hack up`, `down`, `restart`, `run`, `exec`) never write
+  into your working tree to set up ignores, so they leave `git status`
+  unchanged. Before they write `.hack/.internal/` or `.hack/.branch/` files,
+  they add the same patterns, anchored at the repository root, to a marked
+  block in the repository's `info/exclude` (resolved with
+  `git rev-parse --git-common-dir`, so one block covers every linked
+  worktree). That file is local to your clone and never committed. The update
+  is best-effort: if git is unavailable or `info/exclude` is a symlink or
+  cannot be written, the command still runs. Run `hack init` (or
+  `hack doctor --fix`) and commit `.hack/.gitignore` to give fresh clones the
+  rules too.
+- never commit `.hack/.internal/`: it holds machine-local generated state that
+  runtime commands rewrite. If it is tracked, `hack doctor --fix` untracks it.
 - the entries live inside a marked, hack-managed block; anything you add
   outside the markers is preserved on every rewrite
 - the root `.gitignore` still gets a `.hack.secret.key` entry when the secret

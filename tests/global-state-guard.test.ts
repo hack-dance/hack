@@ -14,6 +14,7 @@ import { restoreEnv } from "./helpers/env.ts";
 import {
   captureGlobalState,
   diffGlobalState,
+  diffNativeEnv,
   restoreGlobalState,
 } from "./helpers/global-state-guard.ts";
 
@@ -146,12 +147,37 @@ beforeAll(() => {
 test("passes but never restores", () => {});
 `;
 
+// Port 9 on loopback refuses connections, so a request sent through this
+// proxy fails at once instead of waiting for DNS or a timeout.
+const LEAK_NATIVE_PROXY = `import { test } from "bun:test";
+test("sets a proxy and deletes it, which Bun's fetch never sees", () => {
+  process.env.HTTP_PROXY = "http://127.0.0.1:9";
+  delete process.env.HTTP_PROXY;
+});
+`;
+
 const LATER = `import { expect, test } from "bun:test";
 test("a later file still finds executables on PATH", () => {
   const child = Bun.spawnSync(["hack-guard-probe"], { env: { ...process.env } });
   expect(child.exitCode).toBe(0);
   expect(process.env.HACK_HOME).toBeUndefined();
   console.log("LATER-FILE-PASSED");
+});
+test("a later file still reaches a loopback server directly", async () => {
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch: () => new Response("direct"),
+  });
+  try {
+    const response = await fetch("http://127.0.0.1:" + server.port + "/", {
+      signal: AbortSignal.timeout(5000),
+    });
+    expect(await response.text()).toBe("direct");
+    console.log("LATER-FETCH-PASSED");
+  } finally {
+    server.stop(true);
+  }
 });
 `;
 
@@ -173,14 +199,19 @@ async function runNestedSuite(opts: {
   );
   await writeFile(join(suite, "a-leak-in-test.test.ts"), LEAK_IN_TEST);
   await writeFile(join(suite, "b-leak-in-hooks.test.ts"), LEAK_IN_HOOKS);
-  await writeFile(join(suite, "c-later.test.ts"), LATER);
+  await writeFile(
+    join(suite, "c-leak-native-proxy.test.ts"),
+    LEAK_NATIVE_PROXY
+  );
+  await writeFile(join(suite, "d-later.test.ts"), LATER);
   const child = Bun.spawn(
     [
       process.execPath,
       "test",
       "./a-leak-in-test.test.ts",
       "./b-leak-in-hooks.test.ts",
-      "./c-later.test.ts",
+      "./c-leak-native-proxy.test.ts",
+      "./d-later.test.ts",
     ],
     {
       cwd: suite,
@@ -204,6 +235,10 @@ test("without the guard, an early leak cascades into a later file", async () => 
   expect(run.output).toContain(
     "(fail) a later file still finds executables on PATH"
   );
+  // The deleted proxy still routes a later file's loopback fetch.
+  expect(run.output).toContain(
+    "(fail) a later file still reaches a loopback server directly"
+  );
 }, 60_000);
 
 test("the guard names each leaking file, restores state, and later files pass", async () => {
@@ -215,7 +250,80 @@ test("the guard names each leaking file, restores state, and later files pass", 
   expect(run.output).toContain(
     "b-leak-in-hooks.test.ts left process state changed after the file finished: cwd changed; env HACK_HOME added"
   );
-  expect(run.output).toContain("1 test file(s) leaked process state");
+  expect(run.output).toContain(
+    "c-leak-native-proxy.test.ts left Bun's native environment changed after the file finished: native env HTTP_PROXY changed."
+  );
+  expect(run.output).toContain("2 test file(s) leaked process state");
+  expect(run.output).not.toContain("127.0.0.1:9");
   expect(run.output).not.toContain("Executable not found");
   expect(run.output).toContain("LATER-FILE-PASSED");
+  expect(run.output).toContain("LATER-FETCH-PASSED");
 }, 60_000);
+
+test("the native diff names changed keys only and treats empty as unset", () => {
+  const before = new Map([
+    ["PATH", "/bin"],
+    ["HTTP_PROXY", ""],
+  ]);
+  const current = new Map([
+    ["PATH", "/bin"],
+    ["HTTPS_PROXY", "http://user:secret-shaped@127.0.0.1:9"],
+  ]);
+  expect(diffNativeEnv(before, current)).toEqual(["HTTPS_PROXY"]);
+  expect(diffNativeEnv(before, new Map([["PATH", "/bin"]]))).toEqual([]);
+  expect(diffNativeEnv(before, current).join("\n")).not.toContain("secret");
+});
+
+// Runs in its own process: once a proxy key is deleted, Bun ignores later
+// assignments to it, so checking this in the shared test process would
+// depend on which files ran before.
+const RESTORE_ENV_PROBE = `import { restoreEnv } from ${JSON.stringify(resolve(import.meta.dir, "helpers/env.ts"))};
+import { captureNativeEnv, diffNativeEnv } from ${JSON.stringify(resolve(import.meta.dir, "helpers/global-state-guard.ts"))};
+const before = captureNativeEnv();
+process.env.HTTP_PROXY = "http://127.0.0.1:9";
+const set = captureNativeEnv();
+if (process.argv[2] === "bare-delete") delete process.env.HTTP_PROXY;
+else restoreEnv("HTTP_PROXY", undefined);
+const after = captureNativeEnv();
+console.log(JSON.stringify({
+  js: process.env.HTTP_PROXY ?? null,
+  set: before && set ? diffNativeEnv(before, set) : null,
+  after: before && after ? diffNativeEnv(before, after) : null,
+}));
+`;
+
+async function runRestoreEnvProbe(mode: string): Promise<unknown> {
+  const dir = await tempDir();
+  const script = join(dir, "probe.ts");
+  await writeFile(script, RESTORE_ENV_PROBE);
+  const child = Bun.spawn([process.execPath, script, mode], {
+    cwd: dir,
+    env: { PATH: "/usr/bin:/bin", HOME: dir, TMPDIR: dir },
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const [stdout, stderr, code] = await Promise.all([
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+    child.exited,
+  ]);
+  if (code !== 0) {
+    throw new Error(`restoreEnv probe exited ${code}: ${stderr}`);
+  }
+  return JSON.parse(stdout);
+}
+
+test("restoreEnv leaves no proxy in Bun's native environment; a bare delete does", async () => {
+  expect(await runRestoreEnvProbe("restore-env")).toEqual({
+    js: null,
+    set: ["HTTP_PROXY"],
+    after: [],
+  });
+  // If a Bun upgrade makes deletes reach the native environment, this fails
+  // and the empty-assignment workaround in restoreEnv can go.
+  expect(await runRestoreEnvProbe("bare-delete")).toEqual({
+    js: null,
+    set: ["HTTP_PROXY"],
+    after: ["HTTP_PROXY"],
+  });
+}, 30_000);

@@ -71,6 +71,9 @@ exit code, a guarded global function or a process listener changed fails with a
 environment, cwd, umask and exit code so later files run clean; it keeps
 replaced functions and listeners, which may still protect unsettled work. Fix
 the named file's restore (`try`/`finally` or `afterEach`), not the later failures.
+Restore environment keys with `restoreEnv` from `tests/helpers/env.ts`: Bun keeps
+a deleted `HTTP_PROXY`-style key for `fetch` and `Bun.spawn` without `env`, and
+the guard reports that as `native env <KEY> changed`.
 
 For release workflow edits, run the pinned syntax/context check also enforced by CI:
 `mise x actionlint@1.7.12 -- actionlint -shellcheck= -pyflakes= .github/workflows/ci.yml .github/workflows/release.yml .github/workflows/prerelease.yml .github/workflows/bun-crash-experiment.yml`.

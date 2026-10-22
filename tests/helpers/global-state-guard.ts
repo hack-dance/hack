@@ -242,6 +242,15 @@ export function diffGlobalState(
   ];
 }
 
+/**
+ * Removes one key. The empty assignment first clears Bun's own copy of a proxy
+ * key, which a delete alone never reaches (see {@link captureNativeEnv}).
+ */
+function deleteEnvKey(env: NodeJS.ProcessEnv, key: string): void {
+  env[key] = "";
+  Reflect.deleteProperty(env, key);
+}
+
 function restoreEnvObject(snapshot: GlobalStateSnapshot): void {
   if (process.env !== snapshot.envObject) {
     process.env = snapshot.envObject;
@@ -249,7 +258,7 @@ function restoreEnvObject(snapshot: GlobalStateSnapshot): void {
   const env = process.env;
   for (const key of Object.keys(env)) {
     if (!Object.hasOwn(snapshot.env, key)) {
-      Reflect.deleteProperty(env, key);
+      deleteEnvKey(env, key);
     }
   }
   for (const [key, value] of Object.entries(snapshot.env)) {
@@ -282,4 +291,94 @@ export function restoreGlobalState(snapshot: GlobalStateSnapshot): void {
     process.umask(snapshot.umask);
   }
   process.exitCode = snapshot.exitCode;
+}
+
+/**
+ * The environment Bun itself uses for `fetch` proxies and for `Bun.spawn`
+ * without an `env` option, as key to value.
+ */
+export type NativeEnv = ReadonlyMap<string, string>;
+
+// Bound at load so a leaked `Bun.spawnSync` fake can never answer for Bun.
+const realSpawnSync = Bun.spawnSync.bind(Bun);
+
+/**
+ * Reads Bun's native environment by running `/usr/bin/env -0` without an
+ * `env` option, or returns undefined when that is not possible.
+ *
+ * `process.env` does not show all of it. Bun 1.4 starts this environment
+ * from the startup environment and copies later assignments to the proxy
+ * keys (`HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY` and their lower-case forms)
+ * into it, but a delete never reaches it. A test that sets a proxy and then
+ * deletes it leaves `process.env` looking clean while every later `fetch` in
+ * the process, loopback included, still goes through that proxy (HACK-1327).
+ * `restoreEnv` in `tests/helpers/env.ts` avoids this by assigning "" first.
+ * Other keys never change here: Bun does not copy assignments to them.
+ * Costs one short child process; the preload runs it once per test file.
+ */
+export function captureNativeEnv(): NativeEnv | undefined {
+  try {
+    const child = realSpawnSync(["/usr/bin/env", "-0"], {
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "ignore",
+    });
+    if (child.exitCode !== 0 || !child.stdout) {
+      return;
+    }
+    const env = new Map<string, string>();
+    for (const entry of child.stdout.toString().split("\0")) {
+      const separator = entry.indexOf("=");
+      if (separator > 0) {
+        env.set(entry.slice(0, separator), entry.slice(separator + 1));
+      }
+    }
+    return env;
+  } catch {
+    return;
+  }
+}
+
+/** An empty value and an absent key mean the same to Bun: no proxy. */
+function nativeValue(env: NativeEnv, key: string): string | undefined {
+  const value = env.get(key);
+  return value === "" ? undefined : value;
+}
+
+/**
+ * Lists the keys whose native value differs from `before`, sorted. An empty
+ * value and an absent key compare equal. Never includes values.
+ */
+export function diffNativeEnv(before: NativeEnv, current: NativeEnv): string[] {
+  const keys = new Set([...before.keys(), ...current.keys()]);
+  return [...keys]
+    .filter((key) => nativeValue(before, key) !== nativeValue(current, key))
+    .sort();
+}
+
+const NO_PROXY_KEYS = ["NO_PROXY", "no_proxy"] as const;
+
+/**
+ * Turns proxies off in Bun's native environment for the rest of the process,
+ * and leaves `process.env` as `snapshot` had it.
+ *
+ * A stale native key cannot be put back: once a key is deleted from
+ * `process.env`, Bun 1.4 ignores every later assignment to it as well. The
+ * only repair left is `NO_PROXY=*`: it is assigned (Bun copies it) and deleted
+ * again (Bun keeps the copy), so later `fetch` calls go direct while
+ * `process.env` is unchanged. Children spawned without `env` still inherit
+ * the stale proxy key next to `NO_PROXY=*`. If a no-proxy key was itself
+ * deleted earlier, Bun ignores this too; the next file check then reports it
+ * again.
+ */
+export function disableNativeProxies(snapshot: GlobalStateSnapshot): void {
+  const env = process.env;
+  for (const key of NO_PROXY_KEYS) {
+    env[key] = "*";
+    Reflect.deleteProperty(env, key);
+    const value = snapshot.env[key];
+    if (value !== undefined) {
+      env[key] = value;
+    }
+  }
 }

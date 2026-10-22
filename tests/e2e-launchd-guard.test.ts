@@ -12,6 +12,7 @@ import {
   buildCliEnv,
   describeLaunchAgentChange,
   fingerprintLaunchAgentPlist,
+  releaseLaunchctlGuard,
 } from "./e2e/harness.ts";
 
 /*
@@ -24,6 +25,9 @@ import {
 let cleanupRoot: string | null = null;
 
 afterEach(async () => {
+  // The shim and its process exit listener are per process in the e2e runner;
+  // here every test file shares one Bun process, so release them per test.
+  releaseLaunchctlGuard();
   if (cleanupRoot) {
     await rm(cleanupRoot, { recursive: true, force: true });
     cleanupRoot = null;
@@ -128,4 +132,17 @@ test("the LaunchAgent canary reports content, mtime, creation and removal by has
       after: await fingerprintLaunchAgentPlist({ path }),
     })
   ).toEndWith("-> absent");
+});
+
+test("releasing the launchctl guard removes its shim and exit listener", async () => {
+  const listeners = process.listenerCount("exit");
+  const env = buildCliEnv({ hackHome: "/tmp/hack-e2e-home-guard" });
+  const guardDir = (env.PATH ?? "").split(":")[0] ?? "";
+  expect(process.listenerCount("exit")).toBe(listeners + 1);
+  expect((await stat(guardDir)).isDirectory()).toBe(true);
+  releaseLaunchctlGuard();
+  expect(process.listenerCount("exit")).toBe(listeners);
+  expect(await stat(guardDir).catch(() => null)).toBeNull();
+  const next = buildCliEnv({ hackHome: "/tmp/hack-e2e-home-guard" });
+  expect((next.PATH ?? "").split(":")[0]).not.toBe(guardDir);
 });

@@ -16,6 +16,9 @@
  *   `beforeAll`/`afterAll` leaks, including an `afterAll` that never ran its
  *   restore. A mismatch is reported at once, the pre-file environment is restored,
  *   and the run fails from the preload `afterAll` with every leaking file.
+ *   This check also compares Bun's native environment (one short `/usr/bin/env`
+ *   child per file), which keeps a proxy key that a test set and then deleted
+ *   although `process.env` no longer shows it.
  *
  * Bun calls a runtime plugin's `onLoad` for a test file after the previous
  * file's `afterAll` hooks and before the new file's module code, which makes
@@ -27,8 +30,12 @@ import { relative } from "node:path";
 
 import {
   captureGlobalState,
+  captureNativeEnv,
   diffGlobalState,
+  diffNativeEnv,
+  disableNativeProxies,
   type GlobalStateSnapshot,
+  type NativeEnv,
   restoreGlobalState,
 } from "./global-state-guard.ts";
 
@@ -43,6 +50,7 @@ const ROOT = process.cwd();
 const TEST_FILE = /\.test\.[cm]?[jt]sx?$/;
 
 let fileBaseline: GlobalStateSnapshot = captureGlobalState();
+let nativeBaseline: NativeEnv | undefined = captureNativeEnv();
 let currentFile: string | undefined;
 const fileLeaks: string[] = [];
 
@@ -50,18 +58,45 @@ function displayPath(path: string | undefined): string {
   return path === undefined ? "(preload)" : relative(ROOT, path);
 }
 
+function reportFileLeak(message: string, repair: string): void {
+  fileLeaks.push(message);
+  console.error(`\n[global-state-guard] ${message}. ${repair}\n`);
+}
+
+/**
+ * Checks Bun's native environment after `process.env` was compared and
+ * restored, so only a change that `process.env` cannot show remains: a proxy
+ * key that was set and then deleted (see `captureNativeEnv`).
+ */
+function checkNativeEnv(): void {
+  const current = captureNativeEnv();
+  if (nativeBaseline === undefined || current === undefined) {
+    nativeBaseline = current;
+    return;
+  }
+  const keys = diffNativeEnv(nativeBaseline, current);
+  if (keys.length > 0) {
+    reportFileLeak(
+      `${displayPath(currentFile)} left Bun's native environment changed after the file finished: ${keys.map((key) => `native env ${key} changed`).join("; ")}. process.env no longer shows it, but fetch proxies and Bun.spawn without env still use it; restore proxy keys with restoreEnv from tests/helpers/env.ts`,
+      "Bun cannot take a deleted key back, so the guard set NO_PROXY=* in Bun's native environment for the rest of the run: later fetches go direct."
+    );
+    disableNativeProxies(fileBaseline);
+  }
+  nativeBaseline = captureNativeEnv();
+}
+
 function checkFileBoundary(): void {
   const changes = diffGlobalState(fileBaseline, captureGlobalState(), {
     allowedEnvChanges: ALLOWED_ENV_CHANGES,
   });
   if (changes.length > 0) {
-    const message = `${displayPath(currentFile)} left process state changed after the file finished: ${changes.join("; ")}`;
-    fileLeaks.push(message);
-    console.error(
-      `\n[global-state-guard] ${message}. Restored the environment and cwd from before the file so later files run clean.\n`
+    reportFileLeak(
+      `${displayPath(currentFile)} left process state changed after the file finished: ${changes.join("; ")}`,
+      "Restored the environment and cwd from before the file so later files run clean."
     );
     restoreGlobalState(fileBaseline);
   }
+  checkNativeEnv();
   fileBaseline = captureGlobalState();
 }
 

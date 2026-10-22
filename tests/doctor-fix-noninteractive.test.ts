@@ -47,6 +47,11 @@ import { registerScopedModuleMock } from "./helpers/scoped-module-mock.ts";
 const runCalls: string[][] = [];
 const execCalls: string[][] = [];
 const noteCalls: string[] = [];
+/**
+ * Paths the mocked `git ls-files` reports as tracked generated files. Empty by
+ * default, so the untrack step stays idle unless a test sets it.
+ */
+let trackedGeneratedPaths: string[] = [];
 
 const dnsMock = await registerScopedModuleMock({
   importerPath: import.meta.path,
@@ -101,6 +106,16 @@ const shellMock = await registerScopedModuleMock({
         cmd[2].endsWith("/project")
       ) {
         return { exitCode: 0, stdout: "true\n", stderr: "" };
+      }
+      if (cmd[0] === "git" && cmd[3] === "ls-files") {
+        return {
+          exitCode: 0,
+          stdout: trackedGeneratedPaths.map((path) => `${path}\0`).join(""),
+          stderr: "",
+        };
+      }
+      if (cmd[0] === "git" && cmd[3] === "rm" && cmd[4] === "--cached") {
+        return { exitCode: 0, stdout: "", stderr: "" };
       }
       return { exitCode: 1, stdout: "", stderr: "" };
     },
@@ -157,6 +172,7 @@ beforeEach(async () => {
   runCalls.length = 0;
   execCalls.length = 0;
   noteCalls.length = 0;
+  trackedGeneratedPaths = [];
 });
 
 afterEach(async () => {
@@ -315,6 +331,42 @@ test("doctor --fix leaves a read-only .hack/.gitignore without the managed block
     expect(await readFile(gitignore, "utf8")).toBe("my-own-entry\n");
     expect((await lstat(gitignore)).mode & 0o777).toBe(0o444);
     expect(noteCalls.join("\n")).not.toContain("Updated .hack/.gitignore.");
+  } finally {
+    await chmod(gitignore, 0o644);
+  }
+}, 30_000);
+
+test("doctor --fix untracks generated files but leaves a read-only outdated .hack/.gitignore alone (HACK-1363)", async () => {
+  const projectRoot = await createProjectWithStaleDaemonPid();
+  const gitignore = resolve(projectRoot, ".hack", ".gitignore");
+  await writeFile(gitignore, "my-own-entry\n");
+  await chmod(gitignore, 0o444);
+  trackedGeneratedPaths = [".hack/.env"];
+  try {
+    const { runCli } = await import("../src/cli/run.ts");
+    const { HACK_DIR_GITIGNORE_READ_ONLY_WARNING } = await import(
+      "../src/lib/project-env-config.ts"
+    );
+    expect(
+      await runCli([
+        "doctor",
+        "--fix",
+        "--no-interactive",
+        "--path",
+        projectRoot,
+      ])
+    ).toBe(0);
+    expect(
+      execCalls.some((cmd) => cmd[3] === "rm" && cmd.at(-1) === ".hack/.env")
+    ).toBe(true);
+    expect(await readFile(gitignore, "utf8")).toBe("my-own-entry\n");
+    expect((await lstat(gitignore)).mode & 0o777).toBe(0o444);
+    const notes = noteCalls.join("\n");
+    expect(notes).toContain(
+      "Removed 1 path(s) from the git index; .hack/.gitignore was left alone."
+    );
+    expect(notes).toContain(HACK_DIR_GITIGNORE_READ_ONLY_WARNING);
+    expect(notes).not.toContain("and ensured .hack/.gitignore");
   } finally {
     await chmod(gitignore, 0o644);
   }

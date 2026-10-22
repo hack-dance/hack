@@ -17,7 +17,10 @@ import { dirname, join, resolve } from "node:path";
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { targetRefusalEnvelope } from "../src/lib/target-inspect.ts";
+import {
+  inspectTarget,
+  targetRefusalEnvelope,
+} from "../src/lib/target-inspect.ts";
 import {
   inspectTask,
   listTasks,
@@ -1397,19 +1400,95 @@ describe("MCP adapter re-validation", () => {
   });
 });
 
+/**
+ * Runtime instance named by the reviewed-recipe check. Recipes are judged
+ * against the checkout's files, Compose services and env selection, never its
+ * instance. But every catalog result embeds one exact `hack.target.v0`
+ * target, and a detached linked worktree (how CI and agent checkouts are often
+ * made, with `git worktree add --detach`) has no implicit instance, so it is
+ * refused as `detached_checkout`. Naming the instance keeps the check
+ * independent of how the checkout was made, without weakening that refusal.
+ */
+const REVIEW_INSTANCE = "task-catalog-review";
+
+/** The reviewed-recipe check for one checkout root, on the base env scope. */
+function reviewCheckoutCatalog(input: {
+  readonly root: string;
+  readonly registryPath: string;
+}): Promise<TaskListEnvelope> {
+  return listTasks({
+    cwd: input.root,
+    selector: { path: input.root, branch: REVIEW_INSTANCE, env: "base" },
+    registryPath: input.registryPath,
+  });
+}
+
+async function writeEmptyRegistry(name: string): Promise<string> {
+  const registryPath = join(fixture.root, name);
+  await writeFile(
+    registryPath,
+    `${JSON.stringify({ version: 1, projects: [] })}\n`
+  );
+  return registryPath;
+}
+
+/**
+ * A committed one-recipe project plus a detached linked worktree of it, both
+ * inside the fixture root. Returns the linked worktree's root.
+ */
+async function writeDetachedWorktree(): Promise<string> {
+  const primary = join(fixture.root, "detached-primary");
+  const linked = join(fixture.root, "detached-linked");
+  await mkdir(join(primary, ".hack"), { recursive: true });
+  await mkdir(join(primary, "scripts"), { recursive: true });
+  await writeFile(
+    join(primary, ".hack", "docker-compose.yml"),
+    [
+      "services:",
+      "  tools:",
+      "    image: busybox",
+      "    working_dir: /work",
+      "    profiles: [tools]",
+      "",
+    ].join("\n")
+  );
+  await writeFile(
+    join(primary, ".hack", "hack.config.json"),
+    `${JSON.stringify({ name: "detached" })}\n`
+  );
+  await writeFile(join(primary, "scripts", "run-tool.sh"), RUN_TOOL);
+  await writeFile(
+    join(primary, ".hack", "tasks.json"),
+    `${JSON.stringify(
+      { schema: "hack.tasks.v0", tasks: [recipe({ id: "lint" })] },
+      null,
+      2
+    )}\n`
+  );
+  await git(primary, ["init", "--quiet"]);
+  await git(primary, ["add", "--all"]);
+  await git(primary, [
+    "-c",
+    "user.name=fixture",
+    "-c",
+    "user.email=fixture@hack.invalid",
+    "commit",
+    "--quiet",
+    "--no-gpg-sign",
+    "-m",
+    "fixture",
+  ]);
+  await git(primary, ["worktree", "add", "--quiet", "--detach", linked]);
+  return linked;
+}
+
 describe("repository catalog", () => {
   test(
     "the checked-in .hack/tasks.json recipes are all reviewed",
     async () => {
-      const registryPath = join(fixture.root, "repo-registry.json");
-      await writeFile(
-        registryPath,
-        `${JSON.stringify({ version: 1, projects: [] })}\n`
-      );
-      const result = await listTasks({
-        cwd: REPO_ROOT,
-        selector: { path: REPO_ROOT, env: "base" },
-        registryPath,
+      const result = await reviewCheckoutCatalog({
+        root: REPO_ROOT,
+        registryPath: await writeEmptyRegistry("repo-registry.json"),
       });
       if (!result.ok) {
         throw new Error(JSON.stringify(result));
@@ -1420,6 +1499,70 @@ describe("repository catalog", () => {
         [0, "models", "reviewed"],
         [1, "check", "reviewed"],
         [2, "rust-check", "reviewed"],
+      ]);
+    },
+    CASE_TIMEOUT_MS
+  );
+
+  test(
+    "the reviewed-recipe check runs in a detached linked worktree, where implicit instance selection stays refused",
+    async () => {
+      const linked = await writeDetachedWorktree();
+      const registryPath = await writeEmptyRegistry("detached-registry.json");
+      // The fixture really is a detached linked worktree.
+      expect(
+        (await git(linked, ["rev-parse", "--abbrev-ref", "HEAD"])).trim()
+      ).toBe("HEAD");
+
+      const reviewed = await reviewCheckoutCatalog({
+        root: linked,
+        registryPath,
+      });
+      if (!reviewed.ok) {
+        throw new Error(JSON.stringify(reviewed));
+      }
+      expect(statuses(reviewed.data.tasks)).toEqual([[0, "lint", "reviewed"]]);
+      expect(reviewed.data.target.checkout.kind).toBe("linked");
+      expect(reviewed.data.target.checkout.git_branch).toBeNull();
+      expect(reviewed.data.target.instance).toMatchObject({
+        branch: REVIEW_INSTANCE,
+        source: "explicit",
+      });
+
+      // Without a named instance the catalog, the target inspector and the
+      // CLI refuse closed: nothing falls back to the base instance.
+      const detached = targetRefusalEnvelope({ reason: "detached_checkout" });
+      const selector = { path: linked, env: "base" };
+      expect<unknown>(
+        await listTasks({ cwd: linked, selector, registryPath })
+      ).toEqual(detached);
+      expect<unknown>(
+        await inspectTask({
+          cwd: linked,
+          selector,
+          registryPath,
+          taskId: "lint",
+        })
+      ).toEqual(detached);
+      expect(
+        await inspectTarget({ cwd: linked, selector, registryPath })
+      ).toEqual(detached);
+      const implicit = await runCli(
+        buildTaskListArgs({ path: linked, env: "base" })
+      );
+      expect(implicit.exitCode).toBe(1);
+      expect(implicit.envelope).toEqual(detached);
+      const named = await runCli(
+        buildTaskListArgs({
+          path: linked,
+          branch: REVIEW_INSTANCE,
+          env: "base",
+        })
+      );
+      expect(named.exitCode).toBe(0);
+      const parsed = parseTaskListEnvelope(named.envelope);
+      expect(parsed?.ok && statuses(parsed.data.tasks)).toEqual([
+        [0, "lint", "reviewed"],
       ]);
     },
     CASE_TIMEOUT_MS

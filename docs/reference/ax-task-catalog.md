@@ -62,7 +62,12 @@ is not implemented here.
    [`hack.target.v0`](./ax-target-result-contract.md) target, and target
    refusals pass through unchanged. Recipes are judged against that target's
    env selection and Compose services; if the config generation changes
-   during the read, the result is `generation_changed_during_read`.
+   during the read, the result is `generation_changed_during_read`. The
+   runtime instance does not change how a recipe is judged, but the embedded
+   target still names one. A detached linked worktree (for example one made
+   with `git worktree add --detach`) has no implicit instance, so it is
+   refused as `detached_checkout` unless the caller names one with
+   `--branch` (MCP `branch`).
 
 ## Commands
 

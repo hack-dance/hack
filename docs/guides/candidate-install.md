@@ -128,23 +128,36 @@ home and uses your own Hack home.
 A Compose candidate run uses the same `~/.hack` as stable Hack, so the stable
 `hackd` daemon must not run while the candidate does. Stopping it once is not
 enough: stable `hack global up` (v4.2.0) starts `hackd` again whenever it is
-stopped, because the stable `daemon.autoStart` setting is on by default. Other
-stable commands that talk to `hackd` can also start it again.
+stopped, because the stable `daemon.autoStart` setting is on by default. Stable
+`hack doctor --fix` (v4.2.0) also offers to start a stopped `hackd`. Other
+stable commands that talk to `hackd` can also start it again. Newer candidate
+builds turn off daemon autostart in `hack-next` and the bundled `hack-v5`
+entrypoint, so the candidate itself does not start the stable `hackd`. Older
+candidate bundles can start it, so use this order with every bundle.
 
 Use this order:
 
 ```sh
 hack global up                  # stable: global services up; also restarts hackd
-hack daemon stop                # stable: stop hackd after global up, not before
+hack doctor                     # stable, optional: run any doctor or --fix here
+hack daemon stop                # stable: stop hackd after global up and doctor
 pgrep -fl "hack daemon start"   # must print nothing
 HACK_RUNTIME_BACKEND=compose "$HOME/.hack-next/bin/hack-next" up --path /absolute/project
 ```
 
 1. Run stable `hack global up` first, so the global Caddy and CoreDNS services run.
-2. Then run stable `hack daemon stop`.
-3. Then check with `pgrep -fl "hack daemon start"`. If it lists a process, a
-   stable `hackd` is still running, for example one that its launchd service
-   restarted. Do not start the candidate until the check prints nothing.
+2. If you want a stable `hack doctor` or `hack doctor --fix` check, run it now,
+   before you stop `hackd`. Do not answer yes to its "Start hackd now?" prompt
+   after you stop `hackd`.
+3. Then run stable `hack daemon stop`.
+4. Then check with `pgrep -fl "hack daemon start"`. If it lists a process, a
+   stable `hackd` is still running, usually one that its per-user launchd
+   service (`dance.hack.hackd`) started again. Run stable `hack daemon uninstall`
+   to unload that service and remove its plist, or run
+   `launchctl bootout "gui/$(id -u)/dance.hack.hackd"` to unload it only. Then run
+   `hack daemon stop` again and repeat the check. Do not start the candidate until
+   the check prints nothing. If you uninstalled the service, run stable
+   `hack daemon install` after the candidate run to restore it.
 
 Run no stable `hack` command against the same `~/.hack` while the candidate run
 is active, including `hack global`, `hack status`, `hack doctor` and project

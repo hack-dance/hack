@@ -243,6 +243,11 @@ Matching a process name is insufficient: a different `HOME` or `HACK_HOME` may
 own another daemon. If socket ownership cannot be established, automatic orphan
 termination is skipped. Scripted/noninteractive commands do not autostart the
 daemon; after an explicit stop, use `hack daemon start` to restore cached queries.
+`HACK_DAEMON_AUTOSTART_DISABLE=1` turns autostart off for interactive commands
+too. Candidate runs never autostart: `hack-next` and the bundled `hack-v5`
+entrypoint set `HACK_CANDIDATE_ENTRYPOINT`, and `hack-v5` also sets the opt-out.
+Autostart would start whatever hackd the host resolves (the launchd plist or the
+first `hack` on PATH), which is the stable daemon, not the candidate.
 
 launchd and isolated state roots: on macOS the hackd launchd service is one
 per-user service (`gui/<uid>/dance.hack.hackd`, plist in

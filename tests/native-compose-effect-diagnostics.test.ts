@@ -10,6 +10,7 @@ import {
 import {
   attachNativeComposeEffectRefusal,
   copyNativeComposeEffectRefusal,
+  markNativeComposeStorageBudgetRefusal,
   nativeComposeEffectReason,
   nativeComposeEffectRefusal,
   nativeComposeEffectRefusalSummary,
@@ -327,6 +328,33 @@ test("the human boundary summary names only a known stage and reason pair", () =
   ]) {
     expect(nativeComposeEffectRefusalSummary(detail)).toBeNull();
   }
+});
+
+test("an exhausted storage carrier budget is a closed reason that names its variable", () => {
+  const exhausted = new Error(
+    "Native storage xattr proof refused; values omitted."
+  );
+  expect(nativeComposeEffectReason(exhausted)).toBe("unclassified");
+  markNativeComposeStorageBudgetRefusal(exhausted);
+  expect(nativeComposeEffectReason(exhausted)).toBe("storage-budget");
+  // Marking one refusal never reclassifies another.
+  expect(nativeComposeEffectReason(new Error("other"))).toBe("unclassified");
+  retainNativeComposeEffectRefusal(exhausted, {
+    stage: "storage-helper-start",
+    reason: nativeComposeEffectReason(exhausted),
+  });
+  const diagnostic = nativeComposeEffectRefusal(exhausted);
+  expect(diagnostic).toEqual({
+    stage: "storage-helper-start",
+    reason: "storage-budget",
+  });
+  expect(
+    nativeComposeEffectRefusalSummary({
+      native_compose_effect_refusal: diagnostic,
+    })
+  ).toBe(
+    "Refusal boundary: storage-helper-start (storage-budget); the native storage budget HACK_NATIVE_STORAGE_TIMEOUT_MS was exhausted; values omitted."
+  );
 });
 
 test.each([

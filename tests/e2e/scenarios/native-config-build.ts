@@ -13,10 +13,37 @@ import {
   runCommand,
   type Scenario,
 } from "../harness.ts";
+import {
+  describeNativeComposeStorageTimings,
+  summarizeNativeComposeStorageTimings,
+} from "../native-compose-phase-summary.ts";
 import { prepareNativeEngineTripwire } from "../native-engine-tripwire.ts";
 import { proxyHasNoPublishedPorts } from "./native-routing-fixture-ingress.ts";
 
 const TIMEOUT = 120_000;
+/**
+ * One hack command. A storage-backed `up` with two builds runs about a dozen
+ * storage proofs in its build and spawn guards; each is bounded by its own
+ * storage carrier budget and no longer consumes the 90 s start budget. The
+ * hosted failure reached the start deadline about 110 s into `up` (HACK-1324),
+ * so a 120 s command bound would kill a proof that now continues. 300 s keeps
+ * a measured margin; each command's duration is logged as evidence.
+ */
+const CLI_TIMEOUT = 300_000;
+const LOGGED_VERBS: ReadonlySet<string> = new Set([
+  "up",
+  "down",
+  "restart",
+  "run",
+  "exec",
+  "ps",
+  "logs",
+  "config",
+]);
+/** The first argv entry that is a closed lifecycle verb, or a fixed placeholder; never a value. */
+function nativeBuildCommandVerb(args: readonly string[]): string {
+  return args.find((arg) => LOGGED_VERBS.has(arg)) ?? "command";
+}
 const IMAGE_ID = /^sha256:[a-f0-9]{64}$/;
 const RESOURCE_ID = /^[a-f0-9]{64}$/;
 const TOKEN = /^[a-f0-9]{32}$/;
@@ -573,21 +600,29 @@ export const nativeConfigBuildScenario: Scenario = {
           "Native-only build and source Dockerfile fences must be intact",
       });
     };
-    const raw = (
+    const raw = async (
       args: readonly string[],
       env: Readonly<Record<string, string>> = {}
-    ): Promise<CliResult> =>
-      ctx.cli({
+    ): Promise<CliResult> => {
+      const result = await ctx.cli({
         args,
         cwd: root,
-        timeoutMs: TIMEOUT,
+        timeoutMs: CLI_TIMEOUT,
         env: {
           HACK_RUNTIME_BACKEND: "compose",
           HACK_DAEMON_DISABLE_DOCKER_EVENTS: "1",
           NC03_BUILD_AMBIENT: PUBLIC_AMBIENT,
+          HACK_NATIVE_COMPOSE_PHASE_TRACE: "1",
           ...env,
         },
       });
+      // Fixed verb, exit, duration and closed storage phase timings only:
+      // measured budget evidence without values.
+      ctx.log(
+        `hack ${nativeBuildCommandVerb(args)} ${result.timedOut ? "timeout" : `exit ${result.exitCode}`} in ${Math.round(result.durationMs)}ms; ${describeNativeComposeStorageTimings(summarizeNativeComposeStorageTimings(result.stderr))}`
+      );
+      return result;
+    };
     const cli = async (args: readonly string[]): Promise<CliResult> => {
       const result = await raw(args);
       expectExit({

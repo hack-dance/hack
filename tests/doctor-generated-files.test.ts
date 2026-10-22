@@ -1,8 +1,19 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  lstat,
+  mkdir,
+  mkdtemp,
+  readdir,
+  readFile,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
+import { checkHackDirGitignore } from "../src/commands/doctor.ts";
 import { PROJECT_ENV_KEY_FILENAME } from "../src/constants.ts";
 import {
   buildGeneratedFilePathspecs,
@@ -257,4 +268,91 @@ test("inspectHackDirGitignoreForDoctor reports missing, outdated and current, an
     "current"
   );
   expect(await readFile(gitignore, "utf8")).toStartWith("custom-entry\n");
+});
+
+const COMPOSE_TEXT = "services:\n  api:\n    image: alpine:3.20\n";
+
+/** A git repo with `.hack/docker-compose.yml`, so doctor finds the project. */
+async function createGitProject(): Promise<{
+  readonly dir: string;
+  readonly repoRoot: string;
+  readonly projectDir: string;
+}> {
+  const dir = await mkdtemp(join(tmpdir(), "hack-doctor-gitignore-"));
+  tempDirs.add(dir);
+  const repoRoot = resolve(dir, "repo");
+  const projectDir = resolve(repoRoot, ".hack");
+  await mkdir(projectDir, { recursive: true });
+  await writeFile(resolve(projectDir, "docker-compose.yml"), COMPOSE_TEXT);
+  await runGit(["init", "-b", "main"], repoRoot);
+  return { dir, repoRoot, projectDir };
+}
+
+test("a read-only .hack/.gitignore without the managed block is reported, never replaced (HACK-1363)", async () => {
+  const { repoRoot, projectDir } = await createGitProject();
+  const gitignore = resolve(projectDir, ".gitignore");
+  await writeFile(gitignore, "custom-entry\n");
+  await chmod(gitignore, 0o444);
+  try {
+    expect(await inspectHackDirGitignoreForDoctor({ projectDir })).toBe(
+      "read-only"
+    );
+    const check = await checkHackDirGitignore({ startDir: repoRoot });
+    expect(check.status).toBe("warn");
+    expect(check.message).toBe(
+      ".hack/.gitignore is read-only and lacks Hack's current managed block; Hack leaves it unchanged. Make it writable (chmod u+w .hack/.gitignore), then run 'hack doctor --fix' and commit it."
+    );
+    expect(await readFile(gitignore, "utf8")).toBe("custom-entry\n");
+    expect((await lstat(gitignore)).mode & 0o777).toBe(0o444);
+  } finally {
+    await chmod(gitignore, 0o644);
+  }
+});
+
+test("a read-only .hack/.gitignore that is already current is ok", async () => {
+  const { projectDir } = await createGitProject();
+  await ensureHackDirGitignore({ projectDir });
+  const gitignore = resolve(projectDir, ".gitignore");
+  await chmod(gitignore, 0o444);
+  try {
+    expect(await inspectHackDirGitignoreForDoctor({ projectDir })).toBe(
+      "current"
+    );
+  } finally {
+    await chmod(gitignore, 0o644);
+  }
+});
+
+test("a .hack symlinked outside the repository is reported unsafe, not skipped as a non-git dir (HACK-1363)", async () => {
+  const { dir, repoRoot, projectDir } = await createGitProject();
+  const outsideDir = resolve(dir, "outside-hack");
+  await mkdir(outsideDir);
+  await writeFile(resolve(outsideDir, "docker-compose.yml"), COMPOSE_TEXT);
+  await rm(projectDir, { recursive: true });
+  await symlink(outsideDir, projectDir);
+
+  expect(await inspectHackDirGitignoreForDoctor({ projectDir })).toBe("unsafe");
+  const check = await checkHackDirGitignore({ startDir: repoRoot });
+  expect(check.status).toBe("warn");
+  expect(check.message).toBe(
+    ".hack/.gitignore or its directory is a symlink or not a regular file; Hack will not read or write through it. Replace it with a regular file."
+  );
+  expect(await readdir(outsideDir)).toEqual(["docker-compose.yml"]);
+});
+
+test("a project root outside git is still skipped", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "hack-doctor-gitignore-"));
+  tempDirs.add(dir);
+  const projectDir = resolve(dir, "plain", ".hack");
+  await mkdir(projectDir, { recursive: true });
+  await writeFile(resolve(projectDir, "docker-compose.yml"), COMPOSE_TEXT);
+
+  expect(await inspectHackDirGitignoreForDoctor({ projectDir })).toBeNull();
+  const check = await checkHackDirGitignore({
+    startDir: resolve(dir, "plain"),
+  });
+  expect(check).toMatchObject({
+    status: "ok",
+    message: "Skipped (not a git checkout)",
+  });
 });

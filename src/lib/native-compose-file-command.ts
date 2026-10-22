@@ -60,7 +60,12 @@ export async function runNativeComposeOwnedFileChild(opts: {
   readonly assertOwned: () => Promise<void>;
   readonly command: readonly string[];
   readonly signal: AbortSignal;
-  readonly deadline: number;
+  /**
+   * Wall deadline, read at each admission check and once for the child's
+   * remaining budget after the final guard. A start-phase deadline moves later
+   * only by storage proof time that the guard excludes from the start budget.
+   */
+  readonly deadline: () => number;
   readonly options: Omit<
     RunOptions,
     "timeoutMs" | "beforeSpawn" | "onSpawn" | "onExit"
@@ -78,7 +83,7 @@ export async function runNativeComposeOwnedFileChild(opts: {
   }
   const hooks = opts.hooks;
   const requireAdmission = () => {
-    if (signal.aborted || Date.now() >= deadline) {
+    if (signal.aborted || Date.now() >= deadline()) {
       throw new NativeComposeGenerationError("E_NATIVE_COMPOSE_UNCERTAIN");
     }
   };
@@ -90,7 +95,7 @@ export async function runNativeComposeOwnedFileChild(opts: {
   return await run(command, {
     ...options,
     ...hooks?.(),
-    timeoutMs: deadline - Date.now(),
+    timeoutMs: deadline() - Date.now(),
     beforeSpawn: requireAdmission,
   });
 }

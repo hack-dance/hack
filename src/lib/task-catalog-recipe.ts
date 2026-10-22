@@ -297,11 +297,41 @@ type Evaluator = {
    * True when the program's option parser accepts an unambiguous prefix of
    * a long option (Git's parse-options, `getopt_long`): `--upl=cmd` is
    * `--upload-pack=cmd`. A long inline flag then also matches any prefix of
-   * it, and a one-letter inline flag also matches a value attached to it at
-   * the end of a letter cluster (`-u/path/cmd`, `-qu/path/cmd`),
-   * case-sensitively.
+   * it. MySQL 8 and later require exact names; refusing a prefix there is
+   * only fail-closed.
    */
   readonly abbreviates: boolean;
+  /**
+   * The one-letter options that take a value, for a program whose parser
+   * accepts that value attached in the same argument (getopt `h:`:
+   * `-hlocalhost`, `-cSQL`), or null when attached values are not modeled.
+   * When set, a one-letter inline flag matches wherever it appears in a
+   * one-dash argument (`-1c`, `-Xcselect`, `-u/path/cmd`), scanning letters
+   * and digits up to the first option listed here, which takes the rest of
+   * the argument as its value (`psql -hlocalhost` is host `localhost`, not
+   * `-c`). Unlisted letters are scanned as flags (fail-closed), so a list
+   * must hold only options that take a value in every version.
+   * Case-sensitive.
+   */
+  readonly shortValueOptions: readonly string[] | null;
+  /**
+   * True for MySQL's `my_getopt` parser (`mysql`, `mariadb`): before a long
+   * option is looked up, any number of `loose-`/`loose_` prefixes are
+   * stripped, and `-` and `_` in its name are the same character
+   * (`--loose_init_command=SQL` is `--init-command=SQL`). Long arguments are
+   * normalized that way before matching. The `skip-`, `disable-` and
+   * `enable-` prefixes replace the value with `0` or `1`, so they cannot
+   * carry SQL and are kept.
+   */
+  readonly myGetopt: boolean;
+  /**
+   * Flags that select module mode with the module given as a later operand
+   * rather than as the flag's own value (`uv run -m code`,
+   * `uv run --module code`). Every argument after such a flag is checked
+   * against `replModules` (fail-closed), because the program's value
+   * options are not modeled.
+   */
+  readonly moduleFlags: readonly string[];
   /**
    * True when the option parser strips one leading dash from a two-dash
    * option, so `--cmd` is `-cmd` and `--c` is `-c` (the `sqlite3` shell and
@@ -349,6 +379,9 @@ function evaluator(spec: Partial<Evaluator>): Evaluator {
     dataUrlModules: false,
     clusters: true,
     abbreviates: false,
+    shortValueOptions: null,
+    myGetopt: false,
+    moduleFlags: [],
     foldsDoubleDash: false,
     codeOperandsAfter: null,
     replModules: [],
@@ -385,10 +418,35 @@ const PYTHON_REPL_MODULES = [
   "ptpython",
 ] as const;
 
-/** `mysql`/`mariadb` `-e`, `--execute` and `--init-command` run SQL text. */
+/**
+ * `mysql`/`mariadb` options that run SQL text: `-e`/`--execute`, and
+ * `--init-command` and MariaDB's `--init-command-add`, which run at connect
+ * and again on every reconnect. Their `my_getopt` parser also accepts
+ * `--loose-execute` and `--init_command`. MySQL 8 and later reject an
+ * abbreviated name (`--exec`); refusing one is fail-closed for older
+ * parsers. The short options that take a value (`-uroot`, `-psecret`,
+ * `-Dname`, `-hhost`) end a letter cluster, so `-e` inside their value is
+ * not `-e`.
+ */
 const MYSQL = evaluator({
-  inline: ["-e", "--execute", "--init-command"],
+  inline: ["-e", "--execute", "--init-command", "--init-command-add"],
   abbreviates: true,
+  shortValueOptions: ["D", "h", "p", "P", "S", "u"],
+  myGetopt: true,
+});
+
+/**
+ * CPython's interpreter: `-c` code, `-i` and `-` or no script for an
+ * interactive session, and the REPL modules. `-m`, `-W` and `-X` take a
+ * value attached in a cluster (`-mcompileall`, `-Wdefault`).
+ */
+const PYTHON = evaluator({
+  inline: ["-c"],
+  stdin: ["-i"],
+  valueOptions: ["-W", "-X", "--check-hash-based-pycs"],
+  needsOperand: true,
+  shortValueOptions: ["m", "W", "X"],
+  replModules: PYTHON_REPL_MODULES,
 });
 
 /**
@@ -485,17 +543,16 @@ const EVALUATORS: Readonly<Record<string, Evaluator>> = {
   pnpm: evaluator({ inline: ["-c", "--shell-mode"] }),
   yarn: evaluator({ subcommands: ["exec"] }),
   nodemon: evaluator({ inline: ["--exec", "-x"] }),
-  python: evaluator({
-    inline: ["-c"],
-    stdin: ["-i"],
-    valueOptions: ["-W", "-X", "--check-hash-based-pycs"],
-    needsOperand: true,
-    replModules: PYTHON_REPL_MODULES,
-  }),
-  pypy: evaluator({
-    inline: ["-c"],
-    stdin: ["-i"],
-    needsOperand: true,
+  // `python3.13t` and `python3t` (free-threaded) lose their suffix with the
+  // version; `pythonw` is the Windows launcher without a console.
+  python: PYTHON,
+  pythonw: PYTHON,
+  pypy: PYTHON,
+  // `uv run -m code` and `uv run --module code` run `python -m code`;
+  // `uv run -` reads the script from stdin.
+  uv: evaluator({
+    stdin: ["-"],
+    moduleFlags: ["-m", "--module"],
     replModules: PYTHON_REPL_MODULES,
   }),
   perl: evaluator({
@@ -581,12 +638,36 @@ const EVALUATORS: Readonly<Record<string, Evaluator>> = {
       "--attr-source",
     ],
     abbreviates: true,
+    // Which short options take a value depends on the subcommand (`-m` is a
+    // message for `commit` but a flag in `rebase -mx cmd`), so none ends a
+    // cluster: `git log -Scache` and `git commit -mcleanup` are refused
+    // (fail-closed); pass the value as its own argument instead.
+    shortValueOptions: [],
     subcommandInline: { clone: ["-u"] },
     bangCommands: true,
   }),
   // SQL clients given a statement string. A statement can also reach the
   // host shell (`psql` `\!`, `mysql` `system`, the `sqlite3` `.shell`).
-  psql: evaluator({ inline: ["-c", "--command"], abbreviates: true }),
+  // The options `psql`'s getopt string gives a value, so `-hlocalhost`,
+  // `-Ucustomer` and `-dcustomers` are not `-c` clusters.
+  psql: evaluator({
+    inline: ["-c", "--command"],
+    abbreviates: true,
+    shortValueOptions: [
+      "d",
+      "f",
+      "F",
+      "h",
+      "L",
+      "o",
+      "p",
+      "P",
+      "R",
+      "T",
+      "U",
+      "v",
+    ],
+  }),
   mysql: MYSQL,
   mariadb: MYSQL,
   // `sqlite3` (`sqlite` once the version suffix is removed) and `duckdb`
@@ -677,9 +758,16 @@ const SHELL_SYNTAX_TOKENS: ReadonlySet<string> = new Set([
 ]);
 
 const EXE_SUFFIX = /\.exe$/;
-/** `python3.12`, `node22` and `node-22` name the same program. */
-const VERSION_SUFFIX = /-?[0-9.]+$/;
+/**
+ * `python3.12`, `node22` and `node-22` name the same program, and so do
+ * CPython's ABI-tagged names: free-threaded `python3.13t` and `python3t`,
+ * debug `python3.12d`, and `python3.7m`.
+ */
+const VERSION_SUFFIX = /-?[0-9][0-9.]*[dmt]{0,2}$/;
 const SHORT_OPTION_CLUSTER = /^-[a-z]+$/;
+const LETTER_OR_DIGIT = /^[A-Za-z0-9]$/;
+/** One `loose-`/`loose_` prefix of a `my_getopt` long option name. */
+const MY_GETOPT_LOOSE = /^loose[-_]/i;
 /** A `data:` URL argument or option value (`--import=data:…`). */
 const DATA_URL = /(?:^|=)data:/i;
 
@@ -695,16 +783,19 @@ function programName(arg: string): string {
  * or (for a program with letter clusters) a single-dash cluster that
  * contains a one-letter flag (`-Ic`, `-ec`). Both sides are lowercased, so
  * `-C` also matches `-c` (fail-closed). For a program that abbreviates long
- * options, a prefix of a long flag (`--upl` for `--upload-pack`) and a
- * one-letter flag with its value attached after a letter cluster
- * (`-u/path`, `-qu/path`) match too.
+ * options, a prefix of a long flag (`--upl` for `--upload-pack`) matches
+ * too. For a program with modeled attached values (`shortValueOptions`), a
+ * one-letter flag also matches before a value attached to it (`-cSQL`,
+ * `-u/path`, `-qu/path`), but not inside another option's value
+ * (`psql -hlocalhost`).
  */
 function matchesFlag(opts: {
   readonly arg: string;
   readonly flags: readonly string[];
   readonly spec: Evaluator;
 }): boolean {
-  const arg = foldDoubleDash(opts.arg, opts.spec).toLowerCase();
+  const normalized = normalizeOption(opts.arg, opts.spec);
+  const arg = normalized.toLowerCase();
   const longName = arg.split("=", 1)[0] ?? arg;
   return opts.flags.some((raw) => {
     const flag = raw.toLowerCase();
@@ -712,21 +803,18 @@ function matchesFlag(opts: {
       return true;
     }
     const oneLetter = flag.length === 2 && flag.startsWith("-");
-    if (
-      oneLetter &&
-      opts.spec.clusters &&
-      SHORT_OPTION_CLUSTER.test(arg) &&
-      arg.includes(flag.slice(1))
-    ) {
-      return true;
-    }
-    if (!opts.spec.abbreviates) {
-      return false;
-    }
     if (oneLetter) {
-      return attachedShortValue(raw.slice(1)).test(opts.arg);
+      return (
+        opts.spec.clusters &&
+        clusterSelects({
+          arg: normalized,
+          letter: flag.slice(1),
+          values: opts.spec.shortValueOptions,
+        })
+      );
     }
     return (
+      opts.spec.abbreviates &&
       flag.startsWith("--") &&
       longName.startsWith("--") &&
       longName.length > 2 &&
@@ -736,18 +824,63 @@ function matchesFlag(opts: {
 }
 
 /**
- * `--x` as `-x` for a program whose parser strips one leading dash
- * (`foldsDoubleDash`); every other argument, and `--` itself, unchanged.
+ * True when a one-dash argument selects the one-letter option `letter`
+ * (lowercase), compared case-insensitively. Without modeled attached
+ * values (`values` null) only an all-letter cluster counts (`-Ic`). With
+ * them, letters and digits are read as options until one of `values` takes
+ * the rest of the argument as its value (getopt, Git's parse-options,
+ * `my_getopt`): `-1c` and `-cSQL` count, `-hlocalhost` does not.
  */
-function foldDoubleDash(arg: string, spec: Evaluator): string {
-  return spec.foldsDoubleDash && arg.startsWith("--") && arg.length > 2
-    ? arg.slice(1)
-    : arg;
+function clusterSelects(opts: {
+  readonly arg: string;
+  readonly letter: string;
+  readonly values: readonly string[] | null;
+}): boolean {
+  if (opts.values === null) {
+    const arg = opts.arg.toLowerCase();
+    return SHORT_OPTION_CLUSTER.test(arg) && arg.includes(opts.letter);
+  }
+  if (!opts.arg.startsWith("-") || opts.arg.startsWith("--")) {
+    return false;
+  }
+  for (const char of opts.arg.slice(1)) {
+    if (!LETTER_OR_DIGIT.test(char)) {
+      return false;
+    }
+    if (char.toLowerCase() === opts.letter) {
+      return true;
+    }
+    if (opts.values.includes(char)) {
+      return false;
+    }
+  }
+  return false;
 }
 
-/** `-u…`, `-qu…`: a letter cluster ending in `letter`, then its value. */
-function attachedShortValue(letter: string): RegExp {
-  return new RegExp(`^-[A-Za-z]*${letter}`);
+/**
+ * An argument as the program's option parser reads it: `--x` as `-x` when
+ * it strips one leading dash (`foldsDoubleDash`), and a `my_getopt` long
+ * option without `loose-` prefixes and with `_` as `-`
+ * (`--loose_init_command=SQL` as `--init-command=SQL`). Every other
+ * argument, an option's value, and `--` itself are unchanged.
+ */
+function normalizeOption(arg: string, spec: Evaluator): string {
+  if (!arg.startsWith("--") || arg.length <= 2) {
+    return arg;
+  }
+  if (spec.foldsDoubleDash) {
+    return arg.slice(1);
+  }
+  if (!spec.myGetopt) {
+    return arg;
+  }
+  const split = arg.indexOf("=");
+  const end = split === -1 ? arg.length : split;
+  let name = arg.slice(2, end).replaceAll("_", "-");
+  while (MY_GETOPT_LOOSE.test(name)) {
+    name = name.slice("loose-".length);
+  }
+  return `--${name}${arg.slice(end)}`;
 }
 
 /**
@@ -775,6 +908,23 @@ function moduleNames(rest: readonly string[]): string[] {
 const PYTHON_MODULE_OPTION = /^-[A-Za-z]*?m(.*)$/;
 
 /**
+ * Every argument after the first of `spec.moduleFlags` (`uv run -m code`),
+ * any of which may be the module (fail-closed); none without such a flag.
+ */
+function afterModuleFlag(opts: {
+  readonly rest: readonly string[];
+  readonly spec: Evaluator;
+}): readonly string[] {
+  if (opts.spec.moduleFlags.length === 0) {
+    return [];
+  }
+  const index = opts.rest.findIndex((arg) =>
+    matchesFlag({ arg, flags: opts.spec.moduleFlags, spec: opts.spec })
+  );
+  return index === -1 ? [] : opts.rest.slice(index + 1);
+}
+
+/**
  * Every argument that is neither an option nor a known option's value,
  * in order. Everything after `--` is an operand.
  */
@@ -792,7 +942,7 @@ function operands(opts: {
     if (arg === "-" || !(arg.startsWith("-") || arg.startsWith("+"))) {
       out.push(arg);
     } else if (
-      opts.spec.valueOptions.includes(foldDoubleDash(arg, opts.spec))
+      opts.spec.valueOptions.includes(normalizeOption(arg, opts.spec))
     ) {
       index += 1;
     }
@@ -844,7 +994,7 @@ function evaluatesCode(argv: readonly string[], index: number): boolean {
   }
   if (
     spec.replModules.length > 0 &&
-    moduleNames(rest).some((module) =>
+    [...moduleNames(rest), ...afterModuleFlag({ rest, spec })].some((module) =>
       spec.replModules.includes(
         (module.split(".", 1)[0] ?? module).toLowerCase()
       )

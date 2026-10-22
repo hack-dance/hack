@@ -1049,65 +1049,70 @@ describe("catalog domain", () => {
     });
   });
 
-  test("HACK-1331: the tracked-pin query ignores the caller's GIT_* env", async () => {
-    const { dir, registryPath } = await project("git-env");
-    const inspect = (taskId: string) =>
-      inspectTask({ cwd: dir, selector: {}, registryPath, taskId });
-    // An alternate index that does track the gitignored secrets file.
-    const altIndex = join(fixture.root, "git-env-alt-index");
-    await writeFile(altIndex, await readFile(join(dir, ".git", "index")));
-    await git(dir, ["add", "--force", "config/secrets.json"], {
-      GIT_INDEX_FILE: altIndex,
-    });
-    // Positive control: through that index the file reads as tracked.
-    expect(
-      await git(dir, ["ls-files", "--cached", "--", "config/secrets.json"], {
+  test(
+    "HACK-1331: the tracked-pin query ignores the caller's GIT_* env",
+    async () => {
+      const { dir, registryPath } = await project("git-env");
+      const inspect = (taskId: string) =>
+        inspectTask({ cwd: dir, selector: {}, registryPath, taskId });
+      // An alternate index that does track the gitignored secrets file.
+      const altIndex = join(fixture.root, "git-env-alt-index");
+      await writeFile(altIndex, await readFile(join(dir, ".git", "index")));
+      await git(dir, ["add", "--force", "config/secrets.json"], {
         GIT_INDEX_FILE: altIndex,
-      })
-    ).toBe("config/secrets.json\n");
-    const withCallerEnv = async <T>(
-      env: Readonly<Record<string, string>>,
-      run: () => Promise<T>
-    ): Promise<T> => {
-      const saved = new Map<string, string | undefined>();
-      for (const [key, value] of Object.entries(env)) {
-        saved.set(key, process.env[key]);
-        process.env[key] = value;
-      }
-      try {
-        return await run();
-      } finally {
-        for (const [key, value] of saved) {
-          restoreEnv(key, value);
+      });
+      // Positive control: through that index the file reads as tracked.
+      expect(
+        await git(dir, ["ls-files", "--cached", "--", "config/secrets.json"], {
+          GIT_INDEX_FILE: altIndex,
+        })
+      ).toBe("config/secrets.json\n");
+      const withCallerEnv = async <T>(
+        env: Readonly<Record<string, string>>,
+        run: () => Promise<T>
+      ): Promise<T> => {
+        const saved = new Map<string, string | undefined>();
+        for (const [key, value] of Object.entries(env)) {
+          saved.set(key, process.env[key]);
+          process.env[key] = value;
         }
-      }
-    };
-    // A caller's index override cannot make an untracked file pinnable.
-    const untracked = await withCallerEnv(
-      {
-        GIT_INDEX_FILE: altIndex,
-        GIT_DIR: join(dir, ".git"),
-        GIT_WORK_TREE: dir,
-      },
-      () => inspect("untracked-secret")
-    );
-    expect(untracked).toMatchObject({
-      ok: false,
-      error: { detail: { reason: "input_path_invalid" } },
-    });
-    expect(JSON.stringify(untracked)).not.toContain(
-      sha256(canonical("fixture-value"))
-    );
-    // A caller's GIT_DIR elsewhere does not hide the checkout's own index.
-    const reviewed = await withCallerEnv(
-      {
-        GIT_DIR: join(fixture.root, "git-env-not-a-repository"),
-        GIT_INDEX_FILE: join(fixture.root, "git-env-missing-index"),
-      },
-      () => inspect("lint")
-    );
-    expect(reviewed.ok).toBe(true);
-  });
+        try {
+          return await run();
+        } finally {
+          for (const [key, value] of saved) {
+            restoreEnv(key, value);
+          }
+        }
+      };
+      // A caller's index override cannot make an untracked file pinnable.
+      const untracked = await withCallerEnv(
+        {
+          GIT_INDEX_FILE: altIndex,
+          GIT_DIR: join(dir, ".git"),
+          GIT_WORK_TREE: dir,
+        },
+        () => inspect("untracked-secret")
+      );
+      expect(untracked).toMatchObject({
+        ok: false,
+        error: { detail: { reason: "input_path_invalid" } },
+      });
+      expect(JSON.stringify(untracked)).not.toContain(
+        sha256(canonical("fixture-value"))
+      );
+      // A caller's GIT_DIR elsewhere does not hide the checkout's own index.
+      const reviewed = await withCallerEnv(
+        {
+          GIT_DIR: join(fixture.root, "git-env-not-a-repository"),
+          GIT_INDEX_FILE: join(fixture.root, "git-env-missing-index"),
+        },
+        () => inspect("lint")
+      );
+      expect(reviewed.ok).toBe(true);
+      // Several Git fixture inspections; close to Bun's 5 s default alone.
+    },
+    CASE_TIMEOUT_MS
+  );
 
   test("a catalog or config edit during the read is refused", async () => {
     const { dir, registryPath } = await project("racing");
@@ -1349,6 +1354,83 @@ describe("recipe grammar", () => {
       ],
     },
     {
+      // my_getopt strips `loose-` prefixes (repeatedly) and reads `_` as
+      // `-` before looking an option up; `--init-command` runs at connect.
+      rule: "mysql/mariadb my_getopt spellings of SQL options",
+      refused: [
+        ["mysql", "--loose-execute", "select 1"],
+        ["mysql", "--init_command=select 1"],
+        ["mariadb", "--loose-execute=select 1"],
+        ["mariadb", "--loose_init-command", "select 1", "db"],
+        ["mysql", "--loose-loose-execute=select 1"],
+        ["mysql", "--LOOSE_Execute=select 1"],
+        ["mariadb", "--init-command-add=select 1", "db"],
+        ["mariadb", "--loose-init_command_add=select 1", "db"],
+        ["mysql", "--init-command", "select 1", "db"],
+      ],
+      accepted: [
+        ["mysql", "--loose-skip-column-names", "db"],
+        ["mysql", "--default_character_set=utf8mb4", "db"],
+        ["mariadb", "--skip-pager", "db"],
+        // `skip-`/`enable-` replace the value with 0/1: no SQL reaches it.
+        ["mysql", "--skip-execute", "db"],
+      ],
+    },
+    {
+      // Only the inline letter selects inline code; an attached value of
+      // another option (`-hlocalhost`) is not a cluster that contains it.
+      rule: "attached short values end the cluster scan",
+      refused: [
+        ["psql", "-cselect 1"],
+        ["psql", "-Xcselect 1"],
+        ["psql", "-1c", "select 1"],
+        ["psql", "-Atc", "select 1"],
+        ["mysql", "-eselect 1"],
+        ["mysql", "-BNe", "select 1"],
+        ["mariadb", "-1e", "select 1"],
+        ["python3", "-cprint(1)", "scripts/x.py"],
+        ["python3", "-Ic", "print(1)"],
+        ["python3", "-Bc", "print(1)", "scripts/x.py"],
+      ],
+      accepted: [
+        ["psql", "-hlocalhost", "-f", "scripts/x.sql"],
+        ["psql", "-Ucustomer", "-dcustomers", "-f", "scripts/x.sql"],
+        ["psql", "-Fc", "-f", "scripts/x.sql"],
+        ["psql", "-vcolor=1", "-f", "scripts/x.sql"],
+        ["mysql", "-uroot", "-psecret", "-Dexample", "db"],
+        ["mariadb", "-hexample.com", "-P3306", "db"],
+        ["python3", "-mcompileall", "src"],
+        ["python3", "-Ximporttime", "scripts/x.py"],
+        ["python3", "-Wdefault", "scripts/x.py"],
+      ],
+    },
+    {
+      rule: "Python launcher names and uv run module mode",
+      refused: [
+        ["python3.13t", "-c", "print(1)"],
+        ["python3t", "-c", "print(1)"],
+        ["pythonw", "-c", "print(1)"],
+        ["pythonw3.13t.exe", "-m", "code"],
+        ["python3.12", "-m", "code"],
+        ["python3.13t", "-m", "code"],
+        ["python3.12d", "-c", "print(1)"],
+        ["uv", "run", "-m", "code"],
+        ["uv", "run", "--module", "asyncio"],
+        ["uv", "run", "-qm", "IPython"],
+        ["uv", "run", "-m", "--with", "ipython", "IPython"],
+        ["uv", "run", "-m", "idlelib.idle"],
+        ["uv", "run", "-"],
+      ],
+      accepted: [
+        ["python3.13t", "scripts/x.py"],
+        ["pythonw", "scripts/x.py"],
+        ["uv", "run", "-m", "pytest"],
+        ["uv", "run", "--module", "mypy", "src"],
+        ["uv", "run", "pytest", "-x"],
+        ["uv", "sync", "--frozen"],
+      ],
+    },
+    {
       rule: "sqlite3/duckdb SQL operand after the database",
       refused: [
         ["sqlite3", "app.db", "select 1"],
@@ -1467,6 +1549,17 @@ describe("recipe grammar", () => {
     expect(isInlineCommandArgv(["git", "push", "-u", "origin", "clone"])).toBe(
       true
     );
+    // Git's value-taking short options depend on the subcommand
+    // (`rebase -mx cmd`), so an attached value containing `c`, `x` or `u`
+    // is refused; the value as its own argument passes.
+    expect(isInlineCommandArgv(["git", "log", "-Scache"])).toBe(true);
+    expect(isInlineCommandArgv(["git", "commit", "-mcleanup"])).toBe(true);
+    expect(isInlineCommandArgv(["git", "rebase", "-mx", "id"])).toBe(true);
+    expect(isInlineCommandArgv(["git", "log", "-S", "cache"])).toBe(false);
+    expect(isInlineCommandArgv(["git", "commit", "-m", "cleanup"])).toBe(false);
+    // An abbreviated name is rejected by MySQL 8 itself; refusing it is
+    // fail-closed for older parsers.
+    expect(isInlineCommandArgv(["mysql", "--exec", "select 1"])).toBe(true);
   });
 
   test("effects must be covered by required capabilities", () => {

@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { constants } from "node:fs";
-import { lstat, mkdir, open, rename, unlink } from "node:fs/promises";
+import { access, lstat, mkdir, open, rename, unlink } from "node:fs/promises";
 import { isAbsolute, join, resolve } from "node:path";
 
 import { HACK_DIR_GITIGNORE_ENTRIES } from "../templates.ts";
@@ -13,9 +13,11 @@ import { exec } from "./shell.ts";
  * state and local overlays under the project dir) out of `git status` without
  * writing into the user's working tree.
  *
- * Lifecycle commands (`up`, `down`, `restart`, `run`, `exec`, ...) call this
- * instead of writing `.hack/.gitignore`, which only `hack init` and
- * `hack doctor --fix` create. The rules go into the repository's
+ * Lifecycle commands (`up`, `down`, `restart`, `run`, `exec`, ...) and the
+ * `.hack/.env` writers (`upsertDotEnvValue`, `materializeProjectEnv`) call
+ * this. Runtime commands never write `.hack/.gitignore`; `hack init` creates
+ * it, `hack doctor --fix` creates or repairs it, and local env overlay writes
+ * (`env set --local`, `env hydrate`) ensure it. The rules go into the repository's
  * `info/exclude`, resolved through `git rev-parse --git-common-dir` so one
  * block covers the primary checkout and every linked worktree. Each project
  * dir gets its own marker-delimited block of patterns anchored at the
@@ -31,6 +33,8 @@ import { exec } from "./shell.ts";
  * - No-follow: a symlinked `info/` dir or `exclude` file is left alone; the
  *   new content is written to an exclusive, no-follow temp file in `info/`
  *   and renamed into place, so readers never see a partial file.
+ * - Read-only is respected: an `exclude` file the user cannot write is left
+ *   alone instead of being replaced through the rename.
  * - Concurrency: two writers can race and one block update can be lost; the
  *   next lifecycle command converges it again. Within a process, the work
  *   runs at most once per project dir.
@@ -114,6 +118,10 @@ async function ensureUncached(projectDir: string): Promise<void> {
   const next = mergeManagedGitignoreBlock({ existing: current, ...block });
   if (next === current) {
     return;
+  }
+  if (existing.kind === "text") {
+    // A rename would replace a read-only file the user cannot write.
+    await access(excludePath, constants.W_OK);
   }
   await replaceNoFollow({
     dir: infoDir,

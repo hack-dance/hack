@@ -556,7 +556,8 @@ materialized `.hack/.env` or `.hack/.env.state.json` is stale and should be rege
 
 ## Project files
 
-Hack owns a committed `.hack/.gitignore` (written by `init` and `doctor --fix`) that ignores
+Hack owns a committed `.hack/.gitignore` (created by `init`; for an existing project without it,
+`doctor` warns and `doctor --fix` creates or repairs it) that ignores
 machine-local generated files (`.internal/`, `.branch/`, `.env`, `.env.state.json`,
 `hack.env*.local.yaml`). The retired `tickets/` path remains ignored only so upgrades cannot
 recommit legacy machine-local caches. Keep `.hack/.gitignore` committed. Runtime commands (`up`,

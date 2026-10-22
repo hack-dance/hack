@@ -86,6 +86,7 @@ import {
   resolveEnvKeyCandidates,
 } from "../lib/doctor-env-key.ts";
 import {
+  inspectHackDirGitignoreForDoctor,
   inspectTrackedGeneratedFiles,
   untrackGeneratedFiles,
 } from "../lib/doctor-generated-files.ts";
@@ -335,6 +336,9 @@ const doctorSpec = defineCommand({
   subcommands: [],
 } as const);
 
+/** Doctor check for a missing or outdated committed `.hack/.gitignore`. */
+const HACK_GITIGNORE_CHECK = "hack gitignore";
+
 const DOCTOR_SUMMARY_GROUPS = [
   {
     title: "Dependencies",
@@ -416,6 +420,7 @@ const DOCTOR_SUMMARY_GROUPS = [
       "worktree keys",
       "worktree instances",
       "generated files",
+      HACK_GITIGNORE_CHECK,
     ]),
   },
   {
@@ -912,6 +917,16 @@ const handleDoctor: CommandHandlerFor<typeof doctorSpec> = async ({
         s,
         "generated files",
         () => checkTrackedGeneratedFiles({ startDir }),
+        {
+          timeoutMs: 5000,
+        }
+      )
+    );
+    results.push(
+      await runCheck(
+        s,
+        HACK_GITIGNORE_CHECK,
+        () => checkHackDirGitignore({ startDir }),
         {
           timeoutMs: 5000,
         }
@@ -3121,6 +3136,59 @@ async function checkTrackedGeneratedFiles({
   };
 }
 
+/**
+ * Warns when the committed `.hack/.gitignore` is missing or lacks Hack's
+ * managed block, for example in a project an earlier Hack version
+ * initialized. Runtime commands keep `git status` clean through the local
+ * `info/exclude` either way, but only the committed file reaches fresh clones.
+ * `hack doctor --fix` creates or repairs it.
+ */
+async function checkHackDirGitignore({
+  startDir,
+}: {
+  readonly startDir: string;
+}): Promise<CheckResult> {
+  const name = HACK_GITIGNORE_CHECK;
+  const ctx = await findProjectContext(startDir);
+  if (!ctx) {
+    return {
+      name,
+      status: "warn",
+      message: `Skipped (no ${HACK_PROJECT_DIR_PRIMARY}/ found)`,
+    };
+  }
+  const file = `${ctx.projectDirName}/.gitignore`;
+  const state = await inspectHackDirGitignoreForDoctor({
+    projectDir: ctx.projectDir,
+  });
+  switch (state) {
+    case null:
+      return { name, status: "ok", message: "Skipped (not a git checkout)" };
+    case "current":
+      return { name, status: "ok", message: `${file} has the managed block` };
+    case "missing":
+      return {
+        name,
+        status: "warn",
+        message: `${file} is missing. Run 'hack doctor --fix' to create it, then commit it so fresh clones and worktrees ignore machine-local files.`,
+      };
+    case "outdated":
+      return {
+        name,
+        status: "warn",
+        message: `${file} lacks Hack's current managed block. Run 'hack doctor --fix' to update it (your own lines are kept), then commit it.`,
+      };
+    case "unreadable":
+      return {
+        name,
+        status: "warn",
+        message: `${file} cannot be read; check its permissions.`,
+      };
+    default:
+      return state satisfies never;
+  }
+}
+
 const COMPOSE_ENV_AT_REST_CHECK = "compose env at rest";
 
 /**
@@ -3410,6 +3478,7 @@ async function runDoctorFix(opts: {
 
   await maybeInstallMutagenForDoctorFix();
   await maybeUntrackGeneratedFiles({ startDir: opts.startDir });
+  await maybeEnsureHackDirGitignore({ startDir: opts.startDir });
   await maybeRemovePlaintextComposeEnvOverride({ startDir: opts.startDir });
   await maybeRepairHackd();
 
@@ -3757,6 +3826,16 @@ export async function buildDoctorRemediationPlanLines(opts: {
       `Untrack machine-local generated files from git (git rm --cached; files stay on disk) and ensure the committed ${project?.projectDirName}/.gitignore: ${trackedGenerated.trackedPaths.join(", ")}`
     );
   }
+  const hackGitignore = project
+    ? await inspectHackDirGitignoreForDoctor({
+        projectDir: project.projectDir,
+      })
+    : null;
+  if (hackGitignore === "missing" || hackGitignore === "outdated") {
+    steps.push(
+      `${hackGitignore === "missing" ? "Create" : "Update the managed block in"} the committed ${project?.projectDirName}/.gitignore so machine-local generated files stay out of git (commit it afterwards).`
+    );
+  }
 
   const composeEnvAtRest = project
     ? composeEnvAtRestRepairs(
@@ -3868,6 +3947,44 @@ async function maybeUntrackGeneratedFiles(opts: {
     );
   }
   note(notes.join("\n"), "generated files");
+}
+
+/**
+ * `hack doctor --fix` step: creates a missing committed `.hack/.gitignore`, or
+ * restores its managed block, in a git checkout. This is the explicit,
+ * user-invoked way to add the file to an existing project: runtime commands
+ * never write it, and `hack init` refuses or rescaffolds an existing project.
+ * Lines outside the managed markers are kept. An unreadable file is left alone.
+ */
+async function maybeEnsureHackDirGitignore(opts: {
+  readonly startDir: string;
+}): Promise<void> {
+  const project = await findProjectContext(opts.startDir);
+  if (!project) {
+    return;
+  }
+  const state = await inspectHackDirGitignoreForDoctor({
+    projectDir: project.projectDir,
+  });
+  if (state !== "missing" && state !== "outdated") {
+    return;
+  }
+  const file = `${project.projectDirName}/.gitignore`;
+  const ok = await doctorConfirm({
+    message:
+      state === "missing"
+        ? `Create ${file} with Hack's managed ignore block?`
+        : `Update Hack's managed block in ${file}? (your own lines are kept)`,
+    initialValue: true,
+  });
+  if (!ok) {
+    return;
+  }
+  await ensureHackDirGitignore({ projectDir: project.projectDir });
+  note(
+    `${state === "missing" ? "Created" : "Updated"} ${file}. Commit it so fresh clones and worktrees ignore machine-local generated files.`,
+    HACK_GITIGNORE_CHECK
+  );
 }
 
 /**

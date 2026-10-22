@@ -120,6 +120,7 @@ const KNOWN_RENDER_FINGERPRINTS: Readonly<
     "124ca278acd4be97747bac9b", // next: runtime metadata for authored projects
     "88900097f7eb18a752de31bb", // next: hack-init MCP prompt repoRoot + authored runtime metadata
     "e909706034f2780434920b9b", // next: lifecycle ignores via info/exclude (HACK-1278)
+    "32d67ad37d8e43883c0febb7", // next: doctor --fix creates a missing .hack/.gitignore (HACK-1278)
   ]),
   "hack-init-skill": new Set([
     "cd15fb6d8ed8e25071d05e75", // v3.1.0..v4.0.3
@@ -163,6 +164,7 @@ const KNOWN_RENDER_FINGERPRINTS: Readonly<
     "05f095e17267519ad3660da5", // next: runtime metadata for authored projects
     "07e49d3c2b05b93b6c49adfd", // next: hack-init MCP prompt repoRoot + authored runtime metadata
     "2255a7c877b17397c1a96a85", // next: lifecycle ignores via info/exclude (HACK-1278)
+    "d09a7518bb0d26cdbbfaba52", // next: doctor --fix creates a missing .hack/.gitignore (HACK-1278)
   ]),
 };
 

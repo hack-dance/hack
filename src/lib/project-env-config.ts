@@ -32,12 +32,15 @@ import {
   ensureDir,
   ensureGitignoreEntry,
   ensureManagedGitignoreBlock,
+  mergeManagedGitignoreBlock,
   pathExists,
+  readOptionalTextFile,
   readTextFile,
   writeTextFile,
   writeTextFileAtomicIfChanged,
   writeTextFileIfChanged,
 } from "./fs.ts";
+import { ensureHackGitInfoExclude } from "./git-info-exclude.ts";
 import {
   resolveGitPrimaryWorktreeRoot,
   resolveGitRepositoryIdentity,
@@ -422,8 +425,10 @@ export async function resolveProjectEnvSharedKeyPath(opts: {
  * The file is meant to be committed, so fresh clones and linked worktrees
  * inherit the ignore rules with zero setup. User lines outside the managed
  * markers are preserved; see `ensureManagedGitignoreBlock` for the merge
- * scheme. Self-healing: called from `hack init`, `hack up`, the internal
- * override writers, and env-local override writes.
+ * scheme. Called only from explicit commands: `hack init`, `hack doctor
+ * --fix`, and machine-local env writes (`hack env set --local`,
+ * `hack env hydrate`). Runtime commands never call it; they use
+ * `ensureHackGitInfoExclude` so they do not change the working tree.
  */
 export async function ensureHackDirGitignore(opts: {
   readonly projectDir: string;
@@ -437,6 +442,43 @@ export async function ensureHackDirGitignore(opts: {
     endMarker: HACK_DIR_GITIGNORE_END_MARKER,
     entries: HACK_DIR_GITIGNORE_ENTRIES,
   });
+}
+
+/**
+ * State of the committed `.hack/.gitignore`, for `hack doctor`:
+ * - `current`: it carries the canonical managed block
+ * - `missing`: the file does not exist (for example, a project initialized by
+ *   an earlier Hack version)
+ * - `outdated`: it exists without the canonical managed block
+ * - `unreadable`: it exists but cannot be read; `--fix` leaves it alone
+ *
+ * Read-only: never writes. `ensureHackDirGitignore` applies the repair.
+ */
+export type HackDirGitignoreState =
+  | "current"
+  | "missing"
+  | "outdated"
+  | "unreadable";
+
+export async function inspectHackDirGitignore(opts: {
+  readonly projectDir: string;
+}): Promise<HackDirGitignoreState> {
+  const file = await readOptionalTextFile(
+    resolve(opts.projectDir, ".gitignore")
+  );
+  if (file.kind === "absent") {
+    return "missing";
+  }
+  if (file.kind === "unreadable") {
+    return "unreadable";
+  }
+  const merged = mergeManagedGitignoreBlock({
+    existing: file.text,
+    beginMarker: HACK_DIR_GITIGNORE_BEGIN_MARKER,
+    endMarker: HACK_DIR_GITIGNORE_END_MARKER,
+    entries: HACK_DIR_GITIGNORE_ENTRIES,
+  });
+  return merged === file.text ? "current" : "outdated";
 }
 
 function toGitRelativePath(opts: {
@@ -3080,6 +3122,7 @@ export async function materializeProjectEnv(opts: {
   });
   const envPath = resolve(opts.projectDir, PROJECT_ENV_FILENAME);
   const text = serializeDotEnv(selectedEnv);
+  await ensureHackGitInfoExclude({ projectDir: opts.projectDir });
   await assertLegacyProjectDirectory({ projectDir: opts.projectDir });
   // Mode 0600, atomic replace; a symlinked .env or .hack is refused.
   const changed = (

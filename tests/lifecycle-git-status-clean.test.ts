@@ -79,7 +79,10 @@ async function git(args: readonly string[], cwd: string): Promise<string> {
   return stdout;
 }
 
-async function hack(args: readonly string[], cwd: string): Promise<void> {
+async function hackRun(
+  args: readonly string[],
+  cwd: string
+): Promise<{ exitCode: number; stdout: string; stderr: string }> {
   const child = Bun.spawn([process.execPath, CLI, ...args], {
     cwd,
     env: cliEnv(),
@@ -92,6 +95,11 @@ async function hack(args: readonly string[], cwd: string): Promise<void> {
     new Response(child.stdout).text(),
     new Response(child.stderr).text(),
   ]);
+  return { exitCode, stdout, stderr };
+}
+
+async function hack(args: readonly string[], cwd: string): Promise<void> {
+  const { exitCode, stdout, stderr } = await hackRun(args, cwd);
   if (exitCode !== 0) {
     throw new Error(
       `hack ${args.join(" ")} exited ${exitCode}\n${stdout}\n${stderr}`
@@ -226,6 +234,49 @@ test("up and down in a linked worktree leave both checkouts clean", async () => 
   }
   // Authored files stay visible to git.
   expect(await isIgnored(".hack/hack.config.json", worktree)).toBe(false);
+}, 120_000);
+
+test("a read-only info directory does not make up or down fail", async () => {
+  const info = join(repoRoot, ".git", "info");
+  await chmod(info, 0o555);
+  try {
+    expect(
+      (await hackRun(["up", "--detach", "--json"], repoRoot)).exitCode
+    ).toBe(0);
+    expect((await hackRun(["down", "--json"], repoRoot)).exitCode).toBe(0);
+  } finally {
+    await chmod(info, 0o755);
+  }
+}, 120_000);
+
+test("env set without env config keeps the written .hack/.env out of git status", async () => {
+  // No hack.env.*.yaml: `env set` takes the plain .hack/.env path.
+  await hack(["env", "set", "GITCLEAN_FLAG", "on", "--local"], repoRoot);
+  expect(
+    await lstat(join(repoRoot, ".hack", ".env")).catch(() => null)
+  ).not.toBeNull();
+  expect(await porcelain(repoRoot)).toBe("");
+}, 120_000);
+
+test("doctor reports a missing .hack/.gitignore in an initialized project", async () => {
+  const report = await hackRun(["doctor", "--json"], repoRoot);
+  const parsed = JSON.parse(report.stdout) as {
+    readonly data?: {
+      readonly checks?: readonly {
+        readonly id: string;
+        readonly status: string;
+        readonly detail: string;
+      }[];
+    };
+  };
+  const check = parsed.data?.checks?.find(
+    (entry) => entry.id === "hack gitignore"
+  );
+  expect(check?.status).toBe("warn");
+  expect(check?.detail).toContain(".hack/.gitignore is missing");
+  expect(check?.detail).toContain("hack doctor --fix");
+  // Read-only: doctor without --fix writes nothing into the tree.
+  expect(await porcelain(repoRoot)).toBe("");
 }, 120_000);
 
 async function isIgnored(path: string, cwd: string): Promise<boolean> {

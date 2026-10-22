@@ -87,6 +87,16 @@ const shellMock = await registerScopedModuleMock({
       if (cmd[0] === "docker" && cmd[1] === "network" && cmd[2] === "inspect") {
         return { exitCode: 0, stdout: "[]", stderr: "" };
       }
+      // The fixture project dir counts as a git work tree for the
+      // `.hack/.gitignore` doctor step; every other git probe stays absent.
+      if (
+        cmd[0] === "git" &&
+        cmd.at(-1) === "--is-inside-work-tree" &&
+        typeof cmd[2] === "string" &&
+        cmd[2].endsWith("/project/.hack")
+      ) {
+        return { exitCode: 0, stdout: "true\n", stderr: "" };
+      }
       return { exitCode: 1, stdout: "", stderr: "" };
     },
     execOrThrow: async () => ({ exitCode: 0, stdout: "", stderr: "" }),
@@ -257,6 +267,29 @@ test("doctor --fix never calls the raw clack confirm prompt under HACK_NO_INTERA
   // non-interactive branch instead of the raw clack prompt.
   expect(code).toBe(0);
 });
+
+test("doctor --fix creates a missing .hack/.gitignore and keeps user lines on a repair (HACK-1278)", async () => {
+  const projectRoot = await createProjectWithStaleDaemonPid();
+  const gitignore = resolve(projectRoot, ".hack", ".gitignore");
+  expect(await lstat(gitignore).catch(() => null)).toBeNull();
+
+  const { runCli } = await import("../src/cli/run.ts");
+  const fix = () =>
+    runCli(["doctor", "--fix", "--no-interactive", "--path", projectRoot]);
+  expect(await fix()).toBe(0);
+  const created = await readFile(gitignore, "utf8");
+  expect(created).toContain(".internal/\n");
+  expect(created).toContain("# end managed by hack");
+  expect(noteCalls.join("\n")).toContain("Created .hack/.gitignore.");
+
+  await writeFile(gitignore, "my-own-entry\n");
+  noteCalls.length = 0;
+  expect(await fix()).toBe(0);
+  const repaired = await readFile(gitignore, "utf8");
+  expect(repaired.startsWith("my-own-entry\n")).toBe(true);
+  expect(repaired).toContain(".internal/\n");
+  expect(noteCalls.join("\n")).toContain("Updated .hack/.gitignore.");
+}, 30_000);
 
 test("doctor --fix removes a literal Compose env override and keeps a reference-only one (HACK-1273)", async () => {
   const projectRoot = await createProjectWithStaleDaemonPid();

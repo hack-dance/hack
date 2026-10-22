@@ -15,6 +15,7 @@ import { renderCodexSkill } from "../src/agents/codex-skill.ts";
 import { renderCursorRules } from "../src/agents/cursor.ts";
 import { CliUsageError } from "../src/cli/command.ts";
 import { parseSkipPluginCheck } from "../src/commands/setup-migrate.ts";
+import { requireFixtureRoot } from "./helpers/fixture-root.ts";
 import { privateCliEnv } from "./helpers/private-cli-env.ts";
 
 /**
@@ -27,6 +28,12 @@ const CLI = resolve(import.meta.dir, "..", "index.ts");
 const CLI_TEST_TIMEOUT_MS = 60_000;
 
 let root = "";
+/**
+ * CLI children of the current test. A test that hits its timeout leaves its
+ * `runCli` call running; `afterEach` kills and awaits these before it removes
+ * the fixture, so no child outlives the test that started it (HACK-1343).
+ */
+const children = new Set<Bun.Subprocess>();
 
 beforeEach(async () => {
   root = await mkdtemp(join(tmpdir(), "hack-setup-migrate-"));
@@ -34,14 +41,24 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  const running = [...children];
+  children.clear();
+  for (const child of running) {
+    child.kill("SIGKILL");
+  }
+  await Promise.all(running.map((child) => child.exited));
   if (root) {
     await rm(root, { recursive: true, force: true });
+    // A call that starts after this point reads "" and is refused, closed, by
+    // requireFixtureRoot instead of resolving paths against the checkout.
     root = "";
   }
 });
 
-const repo = (): string => join(root, "repo");
-const hackHome = (): string => join(root, "hack-home");
+const fixture = (): string =>
+  requireFixtureRoot(root, "setup-migrate-command fixture");
+const repo = (): string => join(fixture(), "repo");
+const hackHome = (): string => join(fixture(), "hack-home");
 
 async function put(path: string, content: string): Promise<void> {
   await mkdir(dirname(path), { recursive: true });
@@ -58,19 +75,24 @@ async function runCli(args: readonly string[]): Promise<{
     {
       cwd: repo(),
       env: privateCliEnv({
-        root,
+        root: fixture(),
         env: { HACK_HOME: hackHome(), NO_COLOR: "1" },
       }),
       stdout: "pipe",
       stderr: "pipe",
     }
   );
-  const [stdout, stderr, exitCode] = await Promise.all([
-    new Response(child.stdout).text(),
-    new Response(child.stderr).text(),
-    child.exited,
-  ]);
-  return { exitCode, stdout, stderr };
+  children.add(child);
+  try {
+    const [stdout, stderr, exitCode] = await Promise.all([
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+      child.exited,
+    ]);
+    return { exitCode, stdout, stderr };
+  } finally {
+    children.delete(child);
+  }
 }
 
 async function snapshotRepo(): Promise<Map<string, string>> {
@@ -165,7 +187,7 @@ test(
   async () => {
     const result = await runCli([
       "--rollback-manifest",
-      join(root, "missing.json"),
+      join(fixture(), "missing.json"),
     ]);
     expect(result.exitCode).toBe(1);
     expect(`${result.stdout}${result.stderr}`).toContain(

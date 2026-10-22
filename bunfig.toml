@@ -1,2 +1,4 @@
 [test]
 root = "./tests"
+# Fails the run when a test leaves an untracked file in the checkout.
+preload = ["./tests/helpers/checkout-write-guard-preload.ts"]

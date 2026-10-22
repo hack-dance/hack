@@ -110,12 +110,12 @@
           {
             "path": "package.json",
             "pointer": "/scripts/check",
-            "sha256": "ae7e24ee743b2aa230c6a492da63a0e7b6a0db925e691a24a7a8f1c97d3ee7fb"
+            "sha256": "c8dad6241a07d0de512741c0bc88b302f627b822b442de7d640490eaf239ce1f"
           },
           {
             "path": "package.json",
             "pointer": "/scripts/typecheck",
-            "sha256": "4209d96797d84dcd31f559acfde1395b9969d025ef6fc11f4684567a3009ef6f"
+            "sha256": "dce86c009756c167434b90e06ffa8ba3dbcfc01047abbae2a2803a4d5ecea01a"
           }
         ],
         "review": "HACK-1157"

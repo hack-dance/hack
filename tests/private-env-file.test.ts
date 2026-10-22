@@ -102,8 +102,14 @@ function expectClosedRefusal(error: unknown, paths: readonly string[]): void {
   }
 }
 
-async function caught(promise: Promise<unknown>): Promise<unknown> {
-  return await promise.then(
+/**
+ * Starts `run` and settles it to its rejection (or null). Taking a thunk rather
+ * than a promise keeps every operation started inside the await that observes
+ * it: a promise started earlier can reject while the test awaits something
+ * else, which Bun reports as an unhandled rejection (HACK-1292).
+ */
+async function caught(run: () => Promise<unknown>): Promise<unknown> {
+  return await run().then(
     () => null,
     (error: unknown) => error
   );
@@ -204,13 +210,17 @@ test("negative control: a symlinked .hack/.env is refused without reading or wri
   const project = await createProject();
   await symlink(project.outsideFile, project.envFile);
 
+  // Each attempt starts only inside the caught() that awaits it, so the two
+  // refusals cannot race each other.
   for (const attempt of [
-    upsertDotEnvValue({
-      envFile: project.envFile,
-      key: SENTINEL_KEY,
-      value: SENTINEL_VALUE,
-    }),
-    removeDotEnvKey({ envFile: project.envFile, key: "OUTSIDE_SENTINEL" }),
+    () =>
+      upsertDotEnvValue({
+        envFile: project.envFile,
+        key: SENTINEL_KEY,
+        value: SENTINEL_VALUE,
+      }),
+    () =>
+      removeDotEnvKey({ envFile: project.envFile, key: "OUTSIDE_SENTINEL" }),
   ]) {
     expectClosedRefusal(await caught(attempt), [
       project.envFile,
@@ -229,7 +239,7 @@ test("negative control: a dangling .hack/.env symlink is refused and its target 
   await symlink(missingTarget, project.envFile);
 
   expectClosedRefusal(
-    await caught(
+    await caught(() =>
       upsertDotEnvValue({
         envFile: project.envFile,
         key: SENTINEL_KEY,
@@ -248,7 +258,7 @@ test("negative control: an env overlay file that is a symlink is refused", async
   await symlink(project.outsideFile, overlayFile);
 
   expectClosedRefusal(
-    await caught(
+    await caught(() =>
       upsertDotEnvValue({
         envFile: overlayFile,
         key: SENTINEL_KEY,
@@ -273,7 +283,7 @@ test("negative control: a symlinked .hack directory is refused and the linked di
   const envFile = resolve(projectDir, PROJECT_ENV_FILENAME);
 
   expectClosedRefusal(
-    await caught(
+    await caught(() =>
       upsertDotEnvValue({ envFile, key: SENTINEL_KEY, value: SENTINEL_VALUE })
     ),
     [envFile, outsideDir]
@@ -285,7 +295,7 @@ test("a directory at the .hack/.env path is refused with the same closed diagnos
   const project = await createProject();
   await mkdir(project.envFile);
   expectClosedRefusal(
-    await caught(
+    await caught(() =>
       upsertDotEnvValue({
         envFile: project.envFile,
         key: SENTINEL_KEY,
@@ -343,7 +353,7 @@ test("negative control: materializeProjectEnv refuses a symlinked .hack/.env tar
   await symlink(project.outsideFile, project.envFile);
 
   expectClosedRefusal(
-    await caught(
+    await caught(() =>
       materializeProjectEnv({
         projectRoot: project.projectRoot,
         projectDir: project.projectDir,
@@ -373,7 +383,7 @@ test("negative control: replacePrivateFileAtomic itself refuses a symlinked targ
   // cannot mask a missing check in the replace step.
   for (const path of [project.envFile, danglingLink]) {
     expectClosedRefusal(
-      await caught(
+      await caught(() =>
         replacePrivateFileAtomic({
           path,
           directories: [project.projectDir],

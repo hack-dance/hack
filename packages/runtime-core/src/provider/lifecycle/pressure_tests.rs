@@ -26,6 +26,7 @@ fn report(level: u32) -> Admission {
         swapouts: Some(42),
         admitted: true,
         reasons: Vec::new(),
+        retained_reserve_refusal: None,
     }
 }
 

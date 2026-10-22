@@ -1,0 +1,172 @@
+{
+  "schema": "hack.tasks.v0",
+  "tasks": [
+    {
+      "id": "models",
+      "summary": "Check the repository's TLA+ models with TLC in the toolchain service.",
+      "runner": {
+        "kind": "compose_service",
+        "service": "toolchain",
+        "definition_sha256": "5eb5bd4b52eaa878821fd2929292a5c7a5df0bb6524843e0843addd7404fd767"
+      },
+      "argv": ["models"],
+      "workdir": null,
+      "env": { "overlay": null, "keys": [] },
+      "requires": ["checkout_read", "network_egress"],
+      "effects": [
+        "reads_checkout",
+        "network_egress",
+        "creates_ephemeral_container"
+      ],
+      "prerequisites": [
+        "A container engine that Hack can reach.",
+        "The toolchain image builds from .hack/toolchain/Dockerfile; the first build downloads pinned tools."
+      ],
+      "checks": [
+        "Exit status 0 means every model in scripts/check-tla-models.ts passed TLC."
+      ],
+      "cleanup": [
+        "The one-shot container exits; TLC state lives in the container's temporary directory.",
+        "Named toolchain volumes are kept for reuse."
+      ],
+      "provenance": {
+        "source": "repository_script",
+        "inputs": [
+          {
+            "path": ".hack/toolchain/run.sh",
+            "sha256": "0690919e0937c49638ea1c8318d731df3c45df26c3865c6a37ae263e8854e6a5"
+          },
+          {
+            "path": ".hack/toolchain/Dockerfile",
+            "sha256": "26743556cde8930e2105e860a9b6bd3f5d6d4e2a4f5b567df01d4dd3e8e0c745"
+          },
+          {
+            "path": "mise.toml",
+            "sha256": "e43a4542f0c4a466219402a1f5b9ad993bf4a6b109cadfba9281149de9a2f205"
+          },
+          {
+            "path": "package.json",
+            "pointer": "/scripts/test:models",
+            "sha256": "69aff6d9215e0567db0cb729b6f6f227f0482092d3561e813d621cb4d49a0b54"
+          },
+          {
+            "path": "scripts/check-tla-models.ts",
+            "sha256": "e162839a788a69c6c42adcfb28f12aa91943a5f43b2de43c445ea96e88b5cc81"
+          }
+        ],
+        "review": "HACK-1157"
+      }
+    },
+    {
+      "id": "check",
+      "summary": "Install locked dependencies, then run typecheck and lint/format checks in the toolchain service.",
+      "runner": {
+        "kind": "compose_service",
+        "service": "toolchain",
+        "definition_sha256": "5eb5bd4b52eaa878821fd2929292a5c7a5df0bb6524843e0843addd7404fd767"
+      },
+      "argv": ["check"],
+      "workdir": null,
+      "env": { "overlay": null, "keys": [] },
+      "requires": [
+        "checkout_read",
+        "checkout_write",
+        "named_volumes",
+        "network_egress"
+      ],
+      "effects": [
+        "reads_checkout",
+        "writes_checkout",
+        "writes_named_volumes",
+        "network_egress",
+        "creates_ephemeral_container"
+      ],
+      "prerequisites": [
+        "A container engine that Hack can reach.",
+        "The toolchain image builds from .hack/toolchain/Dockerfile; the first build downloads pinned tools."
+      ],
+      "checks": [
+        "Exit status 0 means typecheck and the repository check script passed."
+      ],
+      "cleanup": [
+        "The one-shot container exits; installed dependencies stay in the toolchain_dependencies volume.",
+        "Build tool caches written under the checkout are ignored by Git."
+      ],
+      "provenance": {
+        "source": "repository_script",
+        "inputs": [
+          {
+            "path": ".hack/toolchain/run.sh",
+            "sha256": "0690919e0937c49638ea1c8318d731df3c45df26c3865c6a37ae263e8854e6a5"
+          },
+          {
+            "path": ".hack/toolchain/Dockerfile",
+            "sha256": "26743556cde8930e2105e860a9b6bd3f5d6d4e2a4f5b567df01d4dd3e8e0c745"
+          },
+          {
+            "path": "mise.toml",
+            "sha256": "e43a4542f0c4a466219402a1f5b9ad993bf4a6b109cadfba9281149de9a2f205"
+          },
+          {
+            "path": "package.json",
+            "pointer": "/scripts/check",
+            "sha256": "ae7e24ee743b2aa230c6a492da63a0e7b6a0db925e691a24a7a8f1c97d3ee7fb"
+          },
+          {
+            "path": "package.json",
+            "pointer": "/scripts/typecheck",
+            "sha256": "4209d96797d84dcd31f559acfde1395b9969d025ef6fc11f4684567a3009ef6f"
+          }
+        ],
+        "review": "HACK-1157"
+      }
+    },
+    {
+      "id": "rust-check",
+      "summary": "Check formatting and run Clippy for the runtime-core crate in the toolchain service.",
+      "runner": {
+        "kind": "compose_service",
+        "service": "toolchain",
+        "definition_sha256": "5eb5bd4b52eaa878821fd2929292a5c7a5df0bb6524843e0843addd7404fd767"
+      },
+      "argv": ["rust-check"],
+      "workdir": null,
+      "env": { "overlay": null, "keys": [] },
+      "requires": ["checkout_read", "named_volumes", "network_egress"],
+      "effects": [
+        "reads_checkout",
+        "writes_named_volumes",
+        "network_egress",
+        "creates_ephemeral_container"
+      ],
+      "prerequisites": [
+        "A container engine that Hack can reach.",
+        "The toolchain image builds from .hack/toolchain/Dockerfile; the first build downloads pinned tools."
+      ],
+      "checks": [
+        "Exit status 0 means cargo fmt --check and Clippy with -D warnings passed."
+      ],
+      "cleanup": [
+        "The one-shot container exits; the Cargo registry and build outputs stay in named toolchain volumes."
+      ],
+      "provenance": {
+        "source": "repository_script",
+        "inputs": [
+          {
+            "path": ".hack/toolchain/run.sh",
+            "sha256": "0690919e0937c49638ea1c8318d731df3c45df26c3865c6a37ae263e8854e6a5"
+          },
+          {
+            "path": ".hack/toolchain/Dockerfile",
+            "sha256": "26743556cde8930e2105e860a9b6bd3f5d6d4e2a4f5b567df01d4dd3e8e0c745"
+          },
+          {
+            "path": "mise.toml",
+            "sha256": "e43a4542f0c4a466219402a1f5b9ad993bf4a6b109cadfba9281149de9a2f205"
+          }
+        ],
+        "review": "HACK-1157"
+      }
+    }
+  ]
+}

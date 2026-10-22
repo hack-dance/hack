@@ -130,7 +130,7 @@ test(
         "use",
         "encrypted_file",
         "--store-path",
-        "/tmp/custom-secrets.enc.json",
+        resolve(tempDir, "secrets.enc.json"),
         "--key-path",
         keyPath,
         "--provision-key",
@@ -139,7 +139,7 @@ test(
       env: {
         ...process.env,
         HACK_GLOBAL_CONFIG_PATH: tempGlobalConfigPath,
-        HACK_SECRETS_FILE_KEY: "hermetic-provisioning-test-key",
+        HACK_SECRETS_FILE_KEY: "",
       },
     });
     expect(result.exitCode).toBe(0);
@@ -155,7 +155,7 @@ test(
     expect(json.encrypted_file.keyPath).toBe(keyPath);
 
     const keyText = await readFile(keyPath, "utf8");
-    expect(keyText.trim()).toBe("hermetic-provisioning-test-key");
+    expect(keyText.trim()).toMatch(/^[A-Za-z0-9_-]{43}$/);
 
     const configText = await readFile(tempGlobalConfigPath, "utf8");
     expect(configText).toContain('"keyPath"');

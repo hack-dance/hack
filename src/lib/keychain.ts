@@ -13,6 +13,14 @@ export function isKeychainDisabled(): boolean {
   );
 }
 
+function assertKeychainEnabled(): void {
+  if (isKeychainDisabled()) {
+    throw new Error(
+      "Keychain access is disabled by HACK_SECRETS_DISABLE_KEYCHAIN_FALLBACK."
+    );
+  }
+}
+
 /** Check on every operation so changing the flag also protects existing stores. */
 export function createKeychainBackend({
   backend,
@@ -20,18 +28,18 @@ export function createKeychainBackend({
   readonly backend: KeychainBackend;
 }): KeychainBackend {
   return {
-    get: async (input) =>
-      isKeychainDisabled() ? null : await backend.get(input),
+    get: async (input) => {
+      assertKeychainEnabled();
+      return await backend.get(input);
+    },
     set: async (input) => {
-      if (isKeychainDisabled()) {
-        throw new Error(
-          "Keychain access is disabled by HACK_SECRETS_DISABLE_KEYCHAIN_FALLBACK."
-        );
-      }
+      assertKeychainEnabled();
       await backend.set(input);
     },
-    delete: async (input) =>
-      isKeychainDisabled() ? false : await backend.delete(input),
+    delete: async (input) => {
+      assertKeychainEnabled();
+      return await backend.delete(input);
+    },
   };
 }
 

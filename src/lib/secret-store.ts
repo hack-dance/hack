@@ -511,17 +511,7 @@ async function resolveEncryptedFileKeyMaterial(input?: {
     }
   }
 
-  if (isKeychainDisabled()) {
-    throw new Error(
-      buildEncryptedBackendKeyRecoveryMessage({
-        keyPath: configuredKeyPath,
-        storePath: input?.storePath,
-        reason: "keychain_disabled",
-      })
-    );
-  }
-
-  if (cachedEncryptedFileKey) {
+  if (!isKeychainDisabled() && cachedEncryptedFileKey) {
     if (input?.persistResolvedKey && input.keyPath) {
       await writeEncryptedFileKey({
         keyPath: input.keyPath,
@@ -551,6 +541,16 @@ async function resolveEncryptedFileKeyMaterial(input?: {
       key: generated,
       source: "generated",
     };
+  }
+
+  if (isKeychainDisabled()) {
+    throw new Error(
+      buildEncryptedBackendKeyRecoveryMessage({
+        keyPath: configuredKeyPath,
+        storePath: input?.storePath,
+        reason: "keychain_disabled",
+      })
+    );
   }
 
   const nowMs = Date.now();

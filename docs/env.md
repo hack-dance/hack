@@ -457,9 +457,10 @@ container details, watcher measurements and read-only cleanup previews.
 ### Disabling native keychain access
 
 `HACK_SECRETS_DISABLE_KEYCHAIN_FALLBACK=1` disables native keychain reads, writes,
-and deletes, including `hack secrets` and project keychain stores. Reads return
-missing and deletes return false; writes fail with an explicit disabled error.
-Encrypted-file stores still accept a configured key file or `HACK_SECRETS_FILE_KEY`.
+and deletes, including `hack secrets`, project keychain stores, and macOS node
+auth tokens. All three operations throw an explicit disabled error.
+Encrypted-file stores still accept a configured key file or `HACK_SECRETS_FILE_KEY`,
+and can generate a new key file when no encrypted store exists.
 
 `bun test` loads `tests/preload.ts`, which sets this flag and replaces `Bun.secrets`
 with an in-memory backend. Tests that exercise keychain behavior can temporarily

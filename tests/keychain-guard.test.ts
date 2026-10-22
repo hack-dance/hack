@@ -41,11 +41,15 @@ test("disable flag gates every operation before even an injected backend is call
   const input = { service: "guard", name: "SECRET_TWO" };
   for (const flag of ["1", "true", "yes", "on", " TRUE "]) {
     process.env.HACK_SECRETS_DISABLE_KEYCHAIN_FALLBACK = flag;
-    expect(await backend.get(input)).toBeNull();
+    await expect(backend.get(input)).rejects.toThrow(
+      "HACK_SECRETS_DISABLE_KEYCHAIN_FALLBACK"
+    );
     await expect(backend.set({ ...input, value: "value" })).rejects.toThrow(
       "disabled"
     );
-    expect(await backend.delete(input)).toBe(false);
+    await expect(backend.delete(input)).rejects.toThrow(
+      "HACK_SECRETS_DISABLE_KEYCHAIN_FALLBACK"
+    );
   }
   expect(calls).toEqual([]);
   process.env.HACK_SECRETS_DISABLE_KEYCHAIN_FALLBACK = "0";
@@ -65,11 +69,13 @@ test("existing keychain stores honor changes to the flag without native calls", 
     await store.set({ key: "SECRET_TWO", value: "memory-only" });
     expect(await store.get({ key: "SECRET_TWO" })).toBe("memory-only");
     process.env.HACK_SECRETS_DISABLE_KEYCHAIN_FALLBACK = "1";
-    expect(await store.get({ key: "SECRET_TWO" })).toBeNull();
+    await expect(store.get({ key: "SECRET_TWO" })).rejects.toThrow("disabled");
     await expect(
       store.set({ key: "SECRET_TWO", value: "blocked" })
     ).rejects.toThrow("disabled");
-    expect(await store.delete({ key: "SECRET_TWO" })).toBe(false);
+    await expect(store.delete({ key: "SECRET_TWO" })).rejects.toThrow(
+      "disabled"
+    );
     process.env.HACK_SECRETS_DISABLE_KEYCHAIN_FALLBACK = "0";
     expect(await store.get({ key: "SECRET_TWO" })).toBe("memory-only");
     expect(await store.delete({ key: "SECRET_TWO" })).toBe(true);

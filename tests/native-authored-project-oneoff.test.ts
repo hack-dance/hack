@@ -21,6 +21,7 @@ import {
   saveNativeAuthoredProjectRun,
   withNativeAuthoredProjectStatus,
 } from "../src/backends/native-authored-project-run.ts";
+import { NATIVE_RUN_EMPTY_SELECTION_REFUSAL } from "../src/backends/native-project-one-off.ts";
 import { invokeNativeRuntime } from "../src/backends/native-runtime-client.ts";
 import { tryNativeAuthoredCommand } from "../src/lib/native-authored-command.ts";
 import type { NativeComposeCommandOptions } from "../src/lib/native-compose-command.ts";
@@ -578,16 +579,23 @@ test(
 );
 
 const macTest = process.platform === "darwin" ? test : test.skip;
+// An empty selection is refused as E_USAGE before authored dispatch; a
+// non-empty selection reaches dispatch and is refused there.
+const unsupportedSelection = "E_NATIVE_PROJECT_UNSUPPORTED";
 macTest.each([
-  { extra: [], code: 3 },
+  { extra: [], code: 3, refusal: undefined },
+  {
+    extra: ["--profile", ""],
+    code: 1,
+    refusal: `ERROR: E_USAGE: ${NATIVE_RUN_EMPTY_SELECTION_REFUSAL}`,
+  },
   ...[
-    ["--profile", ""],
     ["--profile", "dev"],
     ["--env", "base"],
-  ].map((extra) => ({ extra, code: 1 })),
+  ].map((extra) => ({ extra, code: 1, refusal: unsupportedSelection })),
 ])(
   "source CLI run %j preserves omitted options and exact completion",
-  async ({ extra, code }) =>
+  async ({ extra, code, refusal }) =>
     owned(async () => {
       const f = await fixture(),
         attempts = join(f.runtime.home, "run-attempts");
@@ -646,8 +654,8 @@ macTest.each([
       expect({ code: result.exitCode, output: result.combined }).toMatchObject({
         code,
       });
-      if (extra.length) {
-        expect(result.combined).toContain("E_NATIVE_PROJECT_UNSUPPORTED");
+      if (refusal) {
+        expect(result.combined).toContain(refusal);
         expect(await Bun.file(attempts).exists()).toBe(false);
       } else {
         expect(await Bun.file(attempts).text()).toBe("one-off\n");

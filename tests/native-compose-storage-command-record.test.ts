@@ -17,6 +17,8 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { markNativeComposeStorageBudgetRefusal } from "../src/lib/native-compose-effect-diagnostics.ts";
+import { createNativeComposeProbe } from "../src/lib/native-compose-ownership.ts";
 import {
   holdDirectory,
   writeExclusive,
@@ -527,6 +529,65 @@ test(
     expect((await f.read()).commands[0]?.child?.pid).toBeGreaterThan(1);
     expect((await f.read()).commands[0]?.settlement).toBeNull();
   }),
+  30_000
+);
+// HACK-1365: a recorded command rewraps every rejection as its own fixed
+// refusal. A classified cause raised by an admission check (a cancelled or
+// timed-out probe, an exhausted storage budget) must keep its effect reason
+// rather than surface as `unclassified`. Calls: 1 before arming, 2 after
+// arming, 3 inside the stopped-child publication.
+test.each([
+  [1, "probe-cancel"],
+  [2, "probe-cancel"],
+  [3, "probe-cancel"],
+  [1, "storage-budget"],
+  [3, "storage-budget"],
+] as const)(
+  "a recorded command keeps a classified admission cause (call %i, %s)",
+  (failing, reason) =>
+    ownedCase(async () => {
+      const f = await fixture(),
+        marker = join(f.root, "effect");
+      let calls = 0;
+      const caught = await runNativeComposeStorageDockerCommand({
+        context: {
+          signal: new AbortController().signal,
+          deadline: Date.now() + 5000,
+        },
+        files: f.files,
+        args: ["/bin/sh", "-c", 'printf complete > "$1"', "owned", marker],
+        timeoutMs: 5000,
+        beforeSpawn: () => {},
+        assertAdmitted: async () => {
+          calls += 1;
+          if (calls !== failing) {
+            return;
+          }
+          if (reason === "probe-cancel") {
+            // A genuine probe refusal: an aborted signal refuses before any
+            // executable lookup or spawn.
+            createNativeComposeProbe({
+              signal: AbortSignal.abort(),
+              timeoutMs: 1000,
+            });
+          }
+          const error = new Error("synthetic storage budget refusal");
+          markNativeComposeStorageBudgetRefusal(error);
+          throw error;
+        },
+        originalCommand: { owner: f.owner, kind: "create", carrier: null },
+      }).catch((error: unknown) => error);
+      if (!nativeComposeStorageCommandOwnerConfirmed(f.owner)) {
+        retained.add(f.root);
+      }
+      expect(calls).toBe(failing);
+      expect(caught).toBeInstanceOf(Error);
+      expect((caught as Error).message).toBe(
+        "Native storage xattr proof refused; values omitted."
+      );
+      expect(nativeComposeStorageCarrierReason(caught)).toBe(reason);
+      expect(existsSync(marker)).toBe(false);
+    })(),
   30_000
 );
 test(

@@ -1,5 +1,7 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, spyOn, test } from "bun:test";
 import {
+  chmod,
+  lstat,
   mkdir,
   mkdtemp,
   readdir,
@@ -22,6 +24,7 @@ import {
 } from "../src/lib/fs.ts";
 import {
   ensureHackDirGitignore,
+  HACK_DIR_GITIGNORE_READ_ONLY_WARNING,
   hydrateProjectEnvLocalLayer,
   ProjectEnvHydrationRefusalError,
   type ProjectEnvHydrationRefusalReason,
@@ -252,6 +255,34 @@ async function createTrackedRepo(): Promise<Repo> {
   await commitAll(repo);
   return repo;
 }
+
+test("hydration keeps a read-only outdated .hack/.gitignore and warns instead of failing (HACK-1363)", async () => {
+  const repo = await createRepo();
+  await git(repo, ["init", "-q", "-b", "main"]);
+  const gitignore = resolve(repo.projectDir, ".gitignore");
+  await writeFile(gitignore, "my-own-entry\n");
+  await chmod(gitignore, 0o444);
+  // Captured from process.stderr, not a logger spy: the warning must bypass
+  // the UI logger (whose clack backend prints to stdout), and another file's
+  // scoped logger mock in the same Bun process would hide a logger spy.
+  const stderr = spyOn(process.stderr, "write").mockImplementation(() => true);
+  try {
+    const result = await hydrate(repo, { PUBLIC_FLAG: "on" }, false);
+    expect(result).toMatchObject({ changed: true, added: ["PUBLIC_FLAG"] });
+    expect(await readFile(repo.localFile, "utf8")).toContain("PUBLIC_FLAG");
+    expect(await readFile(gitignore, "utf8")).toBe("my-own-entry\n");
+    expect((await lstat(gitignore)).mode & 0o777).toBe(0o444);
+    expect(
+      stderr.mock.calls
+        .map(([chunk]) => String(chunk))
+        .filter((chunk) => chunk.includes(".hack/.gitignore"))
+    ).toEqual([`WARN: ${HACK_DIR_GITIGNORE_READ_ONLY_WARNING}\n`]);
+    expect(await stagingFiles(repo)).toEqual([]);
+  } finally {
+    stderr.mockRestore();
+    await chmod(gitignore, 0o644);
+  }
+});
 
 test("a repeated import leaves the local layer and the tracked tree byte-identical", async () => {
   const repo = await createTrackedRepo();
@@ -730,7 +761,8 @@ test("a compare-and-swap write refuses when the file no longer matches", async (
 async function runCli(
   repo: Repo,
   args: readonly string[],
-  stdin: string
+  stdin: string,
+  loggerBackend: "console" | "clack" = "console"
 ): Promise<{ exitCode: number; stdout: string; stderr: string }> {
   const proc = Bun.spawn([process.execPath, ENTRYPOINT, ...args], {
     cwd: repo.projectRoot,
@@ -738,7 +770,7 @@ async function runCli(
       root: repo.root,
       env: {
         HACK_GLOBAL_CONFIG_PATH: join(repo.root, "hack-config.json"),
-        HACK_LOGGER: "console",
+        HACK_LOGGER: loggerBackend,
         GIT_CONFIG_NOSYSTEM: "1",
         GIT_CONFIG_GLOBAL: "/dev/null",
       },
@@ -800,6 +832,38 @@ test("`hack env hydrate` imports from stdin or a file and never prints values", 
     API_TOKEN: CHANGED,
     DB_PASS: PASSWORD,
   });
+}, 60_000);
+
+test("`hack env hydrate --json` keeps stdout pure JSON when a read-only .hack/.gitignore is outdated (HACK-1363)", async () => {
+  const repo = await createRepo();
+  await git(repo, ["init", "-q", "-b", "main"]);
+  const gitignore = resolve(repo.projectDir, ".gitignore");
+  await writeFile(gitignore, "my-own-entry\n");
+  await chmod(gitignore, 0o444);
+  try {
+    // The clack backend prints log lines to stdout; the read-only warning
+    // must go to stderr so the JSON document stays parseable.
+    const result = await runCli(
+      repo,
+      ["env", "hydrate", "--json", "--path", repo.projectRoot],
+      "PUBLIC_FLAG=on\n",
+      "clack"
+    );
+    expect(result.exitCode).toBe(0);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      file: repo.localFile,
+      local: true,
+      changed: true,
+      added: ["PUBLIC_FLAG"],
+    });
+    expect(result.stderr).toContain(
+      `WARN: ${HACK_DIR_GITIGNORE_READ_ONLY_WARNING}\n`
+    );
+    expect(await readFile(gitignore, "utf8")).toBe("my-own-entry\n");
+    expect((await lstat(gitignore)).mode & 0o777).toBe(0o444);
+  } finally {
+    await chmod(gitignore, 0o644);
+  }
 }, 60_000);
 
 test("`hack env hydrate` refuses values in argv and malformed input without echo", async () => {

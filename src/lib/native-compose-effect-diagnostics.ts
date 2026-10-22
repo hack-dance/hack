@@ -255,6 +255,38 @@ export function nativeComposeEffectReason(
   return "unclassified";
 }
 
+function ownData(value: unknown, key: string): unknown {
+  if (typeof value !== "object" || value === null) {
+    return undefined;
+  }
+  const descriptor = Object.getOwnPropertyDescriptor(value, key);
+  return descriptor && Object.hasOwn(descriptor, "value")
+    ? descriptor.value
+    : undefined;
+}
+
+/**
+ * One fixed human line for the closed boundary carried in public CLI error
+ * detail, so a command without `--json` (such as `exec`) still names it.
+ * Anything but a known stage and reason pair yields null; accessors are not read.
+ */
+export function nativeComposeEffectRefusalSummary(
+  detail: unknown
+): string | null {
+  try {
+    const refusal = ownData(detail, "native_compose_effect_refusal");
+    const stage = stages.find((value) => value === ownData(refusal, "stage"));
+    const reason = reasons.find(
+      (value) => value === ownData(refusal, "reason")
+    );
+    return stage && reason
+      ? `Refusal boundary: ${stage} (${reason}); values omitted.`
+      : null;
+  } catch {
+    return null;
+  }
+}
+
 /** Keep the original issued boundary through a deliberate fixed-code translation. */
 export function copyNativeComposeEffectRefusal(
   source: unknown,

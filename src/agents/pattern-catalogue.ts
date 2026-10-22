@@ -270,20 +270,25 @@ export const PATTERN_CATALOGUE: readonly PatternCard[] = [
     title: "Tracked defaults plus idempotent machine-local hydration",
     useWhen:
       "A repository tracks env defaults and each machine adds local values on top.",
-    disposition: "deferred",
-    supportedCommands: [],
+    disposition: "partial",
+    supportedCommands: [
+      "hack env hydrate --file <path> --secret",
+      "hack env set <key> --local --value-stdin --secret",
+      "hack env explain <key> --json",
+    ],
     prerequisites:
       "Tracked defaults, a machine-local layer and preserved operator overrides.",
     envOwnership:
-      "Defaults are tracked; hydration writes only the local layer and keeps values out of argv.",
+      "Defaults are tracked; `hack env hydrate --secret` reads `KEY=value` entries from piped stdin or `--file` and writes only the gitignored machine-local layer, so values stay out of argv and out of tracked files. Local entries outside the input are kept.",
     readiness:
-      "Repeat hydration leaves the tracked tree clean; an interrupted import still leaves a resolvable layer.",
-    cleanup: "Unchanged values cause no rewrite.",
+      "A repeat import with the same values does not rewrite the layer; a changed value gets new ciphertext with a fresh IV. One rename commits all keys, so an interrupted import leaves every key at its previous value. A wrong key, a tracked local layer or a concurrent hydration refuses without changing the layer.",
+    cleanup:
+      "Unchanged values cause no rewrite. A killed import can leave a staging file and a stale `.hack/.internal/env-hydrate.lock`; the next import reports the lock instead of taking it over.",
     negativeControl:
       "Re-encrypting unchanged entries causes diff and stash churn, and values passed in command arguments are not a secure import mechanism.",
     domainOwner: "WU27/WU14",
     missingContract:
-      "Hack has no semantic no-op detection or atomic machine-local import contract for env hydration.",
+      "Hydration replaces an imported key's local entry; it cannot tell an operator's deliberate local override of that key from a stale hydrated value. `hack env set --local` does not take the hydration lock, so only a recheck just before the rename guards against it.",
     provenance: { consumers: 1, source: "HACK-P08 research register" },
     example: null,
     e2eScenario: null,

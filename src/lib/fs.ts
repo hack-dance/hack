@@ -1,4 +1,17 @@
-import { lstat, mkdir, stat } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import {
+  access,
+  constants,
+  type FileHandle,
+  lstat,
+  mkdir,
+  open,
+  realpath,
+  rename,
+  stat,
+  unlink,
+} from "node:fs/promises";
+import { basename, dirname, join } from "node:path";
 
 export async function pathExists(absolutePath: string): Promise<boolean> {
   try {
@@ -87,6 +100,245 @@ export async function writeTextFileIfChanged(
   }
   await writeTextFile(absolutePath, content);
   return { changed: true };
+}
+
+/** A compare-and-swap write found the file changed by another writer. */
+export class AtomicWriteConflictError extends Error {
+  constructor() {
+    super("The file changed while it was being replaced; nothing was written.");
+    this.name = "AtomicWriteConflictError";
+  }
+}
+
+/**
+ * Replaces `absolutePath` with `content` only when the text differs, publishing
+ * the new contents atomically.
+ *
+ * Commit point: a uniquely named sibling is created exclusively (no symlink
+ * follow), written and fsynced, then renamed over the target. A process that
+ * dies before the rename leaves the previous complete file in place and at most
+ * an orphaned `.<name>.<uuid>.tmp` sibling that no reader selects; the staging
+ * file is removed on every failure this process observes. Orphans are never
+ * swept here, because a concurrent writer may still own one; callers that write
+ * under `.hack/` rely on its managed `.gitignore` to keep them unstaged.
+ * Directory fsync is best effort.
+ *
+ * Rename needs no write permission on the file it replaces, so the guards an
+ * in-place write got from the kernel are checked explicitly, before any staging
+ * file exists, and fail with {@link AtomicWriteRefusedError}: an existing target
+ * that cannot be read, is not a regular file or is not writable is refused, and
+ * so is one whose owner and group the staging file cannot take (for example a
+ * root-owned file left by `sudo hack`). A caller that merged a change into what
+ * it read therefore never replaces contents it could not see. These checks are
+ * not an atomic fence against a concurrent permission change.
+ *
+ * An existing target keeps its permission bits, owner and group, and an
+ * existing symlink keeps pointing where it did: the replacement lands at the
+ * link's resolved path, as a plain write through the link would. A new file
+ * gets the umask default. Unlike an in-place write, a dangling symlink is
+ * replaced by a regular file, a hard link to the target is detached (its other
+ * names keep the previous contents), and the containing directory must be
+ * writable.
+ *
+ * With `expectedExisting`, the write is a compare-and-swap: the current text
+ * (null when absent; an unreadable target is refused, never read as absent)
+ * must equal it both before staging and again after the
+ * staging file is fsynced, immediately before the rename; otherwise the
+ * staging file is removed and {@link AtomicWriteConflictError} is thrown. The
+ * second check narrows, but cannot close, the window in which a writer that
+ * does not use this check can still be overwritten.
+ */
+export async function writeTextFileAtomicIfChanged(
+  absolutePath: string,
+  content: string,
+  options: { readonly expectedExisting?: string | null } = {}
+): Promise<{ readonly changed: boolean }> {
+  const existing = await inspectAtomicWriteTarget(absolutePath);
+  const expectsExisting = options.expectedExisting !== undefined;
+  if (expectsExisting && targetText(existing) !== options.expectedExisting) {
+    throw new AtomicWriteConflictError();
+  }
+  if (existing.kind === "existing" && existing.text === content) {
+    return { changed: false };
+  }
+  const target =
+    existing.kind === "absent" ? absolutePath : await realpath(absolutePath);
+  if (existing.kind === "existing") {
+    try {
+      await access(target, constants.W_OK);
+    } catch {
+      throw new AtomicWriteRefusedError({
+        path: absolutePath,
+        reason: "not_writable",
+      });
+    }
+  }
+  const staging = join(
+    dirname(target),
+    `.${basename(target)}.${randomUUID()}.tmp`
+  );
+  const file = await open(
+    staging,
+    constants.O_CREAT |
+      constants.O_EXCL |
+      constants.O_NOFOLLOW |
+      constants.O_WRONLY,
+    0o666
+  );
+  let committed = false;
+  try {
+    if (existing.kind === "existing") {
+      // chown can clear set-id bits, so the mode is applied after it.
+      await preserveOwnership({ file, existing, path: absolutePath });
+      await file.chmod(existing.mode);
+    }
+    await file.writeFile(content, "utf8");
+    await file.sync();
+    if (
+      expectsExisting &&
+      targetText(await inspectAtomicWriteTarget(absolutePath)) !==
+        options.expectedExisting
+    ) {
+      throw new AtomicWriteConflictError();
+    }
+    await rename(staging, target);
+    committed = true;
+  } finally {
+    await file.close();
+    if (!committed) {
+      await unlink(staging).catch(() => undefined);
+    }
+  }
+  await syncDirectoryBestEffort(dirname(target));
+  return { changed: true };
+}
+
+/** Why {@link writeTextFileAtomicIfChanged} refused to replace a file. */
+export type AtomicWriteRefusal =
+  | "unreadable"
+  | "not_regular_file"
+  | "not_writable"
+  | "owner_not_preserved";
+
+const ATOMIC_WRITE_REFUSAL_MESSAGES: Readonly<
+  Record<AtomicWriteRefusal, string>
+> = {
+  unreadable: "it exists but cannot be read, so its contents cannot be kept",
+  not_regular_file: "it is not a regular file",
+  not_writable: "it is not writable",
+  owner_not_preserved: "its owner and group cannot be preserved",
+};
+
+/**
+ * Closed refusal from {@link writeTextFileAtomicIfChanged}. The message names
+ * the path and a fixed reason only; it never carries file contents or a cause.
+ */
+export class AtomicWriteRefusedError extends Error {
+  readonly path: string;
+  readonly reason: AtomicWriteRefusal;
+
+  constructor(opts: {
+    readonly path: string;
+    readonly reason: AtomicWriteRefusal;
+  }) {
+    super(
+      `Refusing to replace ${opts.path}: ${ATOMIC_WRITE_REFUSAL_MESSAGES[opts.reason]}.`
+    );
+    this.name = "AtomicWriteRefusedError";
+    this.path = opts.path;
+    this.reason = opts.reason;
+  }
+}
+
+type AtomicWriteTarget =
+  | { readonly kind: "absent" }
+  | {
+      readonly kind: "existing";
+      readonly text: string;
+      readonly mode: number;
+      readonly uid: number;
+      readonly gid: number;
+    };
+
+/**
+ * Classifies the current target without collapsing "exists but unreadable"
+ * into "absent". Only a missing path, or a symlink whose target is missing, is
+ * `absent`; any other lstat, stat or read failure is a refusal.
+ */
+async function inspectAtomicWriteTarget(
+  absolutePath: string
+): Promise<AtomicWriteTarget> {
+  const refuse = (reason: AtomicWriteRefusal) =>
+    new AtomicWriteRefusedError({ path: absolutePath, reason });
+  try {
+    await lstat(absolutePath);
+  } catch (error: unknown) {
+    if (isMissingPathError(error)) {
+      return { kind: "absent" };
+    }
+    throw refuse("unreadable");
+  }
+  let info: Awaited<ReturnType<typeof stat>>;
+  try {
+    info = await stat(absolutePath);
+  } catch (error: unknown) {
+    // lstat found an entry, so a missing stat target is a dangling symlink.
+    if (isMissingPathError(error)) {
+      return { kind: "absent" };
+    }
+    throw refuse("unreadable");
+  }
+  if (!info.isFile()) {
+    throw refuse("not_regular_file");
+  }
+  const text = await readTextFile(absolutePath);
+  if (text === null) {
+    throw refuse("unreadable");
+  }
+  return {
+    kind: "existing",
+    text,
+    mode: Number(info.mode) & 0o7777,
+    uid: Number(info.uid),
+    gid: Number(info.gid),
+  };
+}
+
+/** The compare-and-swap view of a target: its text, or null when absent. */
+function targetText(target: AtomicWriteTarget): string | null {
+  return target.kind === "existing" ? target.text : null;
+}
+
+/** Gives the staging file the target's owner and group, or refuses. */
+async function preserveOwnership(opts: {
+  readonly file: FileHandle;
+  readonly existing: { readonly uid: number; readonly gid: number };
+  readonly path: string;
+}): Promise<void> {
+  const staged = await opts.file.stat();
+  if (staged.uid === opts.existing.uid && staged.gid === opts.existing.gid) {
+    return;
+  }
+  try {
+    await opts.file.chown(opts.existing.uid, opts.existing.gid);
+  } catch {
+    throw new AtomicWriteRefusedError({
+      path: opts.path,
+      reason: "owner_not_preserved",
+    });
+  }
+}
+
+async function syncDirectoryBestEffort(directory: string): Promise<void> {
+  let handle: FileHandle | null = null;
+  try {
+    handle = await open(directory, constants.O_RDONLY);
+    await handle.sync();
+  } catch {
+    // Some filesystems refuse directory fsync; the file itself is synced.
+  } finally {
+    await handle?.close().catch(() => undefined);
+  }
 }
 
 /**

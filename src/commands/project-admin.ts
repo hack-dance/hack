@@ -11,6 +11,7 @@ import {
 } from "../lib/project.ts";
 import { display } from "../ui/display.ts";
 import { targetCommand, targetSpec } from "./project-target.ts";
+import { taskCommand, taskSpec } from "./project-task.ts";
 
 const ownerShowOptions = [optPath, optProject, optJson] as const;
 
@@ -38,7 +39,7 @@ const projectSpec = defineCommand({
   group: "Project",
   options: [],
   positionals: [],
-  subcommands: [ownerSpec, targetSpec],
+  subcommands: [ownerSpec, targetSpec, taskSpec],
 } as const);
 
 const handleOwnerShow: CommandHandlerFor<typeof ownerShowSpec> = async ({
@@ -91,7 +92,7 @@ const ownerCommand = {
 
 export const projectCommand = {
   ...projectSpec,
-  subcommands: [ownerCommand, targetCommand],
+  subcommands: [ownerCommand, targetCommand, taskCommand],
 } as const;
 
 async function resolveProjectTarget(input: {

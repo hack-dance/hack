@@ -51,6 +51,7 @@ worktrees inherit the rules with zero setup. It covers (patterns relative to
 - `.env.state.json`
 - `hack.env.local.yaml`
 - `hack.env.*.local.yaml`
+- `.hack.env*.tmp` (staging files an interrupted env write can leave behind)
 - `tickets/` (retained only to contain retired machine-local ticket caches during upgrades)
 
 How it is maintained:
@@ -345,6 +346,7 @@ into a host command, and `--target` on env and host commands chooses the `host` 
 | `hack env apply` | `--env`, `--service` | Runs `hack restart <service>` with the same `--env`, recreating one service. | This is the refresh path for one service. | `--service` is required. |
 | `hack env add` | `--env`, `--service` | Selects the file written (`hack.env.<name>.yaml`, or the base file for `base`/`default`/`none`; `--local` writes the local variant). | Running workloads keep old values until `hack env apply` or `hack restart`. | Mutates only env files. |
 | `hack env set` | `--env`, `--service` | Alias for `hack env add`. | Same as `hack env add`. | Mutates only env files. |
+| `hack env hydrate` | `--env`, `--service` | Selects the local file written, as for `hack env add --local`; imports every entry in one commit. | Same as `hack env add`. | Mutates only the machine-local env file; refuses a git-tracked one. |
 | `hack env unset` | `--env`, `--service` | Selects the file the key is removed from, as for `hack env add`. | Same as `hack env add`. | Mutates only env files. |
 | `hack env materialize` | `--env`, `--service` | Writes `.hack/.env` once, at invocation. | Rerun `hack env materialize`. | Compatibility output for external tools; runtime injection does not depend on it. |
 | `hack env exec` | `--env`, `--service`, `--target` | Per invocation, into one host command (host view by default). | Each invocation resolves again. | Runs on the host, not in a container. |
@@ -354,6 +356,8 @@ into a host command, and `--target` on env and host commands chooses the `host` 
 | `hack config validate` | `--env` | Per invocation; resolves the native selection without reading managed env documents. | Not needed. | Authored native projects only; cannot be combined with `--file`. |
 | `hack config plan` | `--env` | Per invocation; metadata only (names, scopes, secret flags), never decrypted. | Not needed. | Authored native projects only. |
 | `hack project target` | `--env`, `--service` | Per invocation, read-only; reports the overlay selection (explicit, project default or base) without reading env files or values. | Not needed. | Selection only: overlay existence is not checked; no runtime required. |
+| `hack project task list` | `--env` | Per invocation, read-only; selects the overlay that each recipe's reviewed env scope is compared with, without reading env files or values. | Not needed. | Selection only; lists recipes and runs nothing, so no runtime is required. |
+| `hack project task inspect` | `--env` | Per invocation, read-only; as for `hack project task list`, for one recipe. | Not needed. | Selection only; runs nothing, so no runtime is required. |
 | `hack session start` | `--env`, `--service` | When the workspace is created; the name gains `.env-<name>` (`.env-base` for base spellings), and `--up` runs `hack up -d` with the same selection. | Start a new workspace or pass `--env` to `hack session exec`. | Injects into the workspace shell, not into containers. |
 | `hack session exec` | `--env`, `--service` | Per command; omitted reuses the selection encoded in the workspace name. | Each command resolves again. | Injects into the workspace command, not into containers. |
 
@@ -503,6 +507,38 @@ input and without writing anything:
 `.hack/hack.env.<overlay>.local.yaml`) instead of the shared repo env file — use it for
 per-checkout values you don't want to commit.
 
+Repeating `hack env add` or `hack env set` with the value already stored is a no-op: when
+the existing secret decrypts to the same value under the current key, its ciphertext is
+kept, so once Hack has written the file it stays byte-identical and Git shows no change.
+A hand-edited file (comments, other formatting, or no `global: {}`) is normalized on the
+first repeat and stays byte-identical after that. A different value, a plain entry
+becoming secret, or an entry that does not decrypt under the current key gets new
+ciphertext with a fresh IV. Each command writes one key; a script that sets several keys
+is not atomic across them. To write many machine-local values in one commit, use
+`hack env hydrate` (below).
+
+Each env file write goes to a hidden `.<file>.<id>.tmp` file in the same directory and
+replaces the file by rename, so an interrupted write leaves the previous file in place.
+A write killed before the rename can leave that staging file behind. It holds the whole
+new layer, so `.hack/.gitignore` ignores `.hack.env*.tmp`, and you can delete it. Hack
+does not remove it on the next write, because another write may still be using it. The
+rename has these effects:
+
+- a symlinked env file keeps its link; the new contents land at the file the link points
+  to, and the staging file is created next to that file
+- a symlink whose target does not exist is replaced by a regular file
+- a hard link is broken: the env file gets a new inode, and any other name for the old
+  file keeps the previous contents
+- the directory must be writable, even when the env file itself is writable
+
+A rename does not need write access to the file it replaces, so Hack checks that access
+itself before it stages anything. It refuses to replace an existing env file that it
+cannot read, that is not a regular file, that is not writable, or whose owner and group
+it cannot keep (for example a root-owned file left by an earlier `sudo hack`). The error
+names the file and the reason, never a value, and the file is left as it was. Fix the
+file's permissions or ownership and run the command again. A rewrite keeps the file's
+permission bits, owner and group.
+
 If you omit `key`, `value`, or `--service`, `hack env add` prompts for them interactively.
 Pass `--no-interactive` (or set `HACK_NO_INTERACTIVE=1`) for scripted/agent usage: the
 command applies documented defaults or fails fast with `E_INTERACTIVE_REQUIRED` instead of
@@ -517,6 +553,83 @@ hack env unset API_BASE_URL
 hack env unset SERVICE_TOKEN --service api --env qa
 hack env unset API_BASE_URL --local
 ```
+
+### Hydrate machine-local values in one step
+
+`hack env hydrate` imports many values into the machine-local layer at once, for example
+when a new checkout or machine pulls its secrets from a secret manager. Tracked defaults
+stay in `hack.env.default.yaml`; hydration writes only the gitignored local layer
+(`.hack/hack.env.local.yaml`, or `.hack/hack.env.<overlay>.local.yaml` with `--env`).
+
+```bash
+# Pipe KEY=value lines from a secret manager; values never appear in argv.
+<secret-source> | hack env hydrate --secret
+
+# Or read a file, or a pipe such as <(secret-source).
+hack env hydrate --secret --file .secrets.env
+hack env hydrate --secret --file secrets.json --format json --env qa --service api
+```
+
+Input comes only from piped stdin or `--file`, never from arguments, and is at most
+1 MiB. The default `env` format is strict, one entry per line:
+
+- blank lines and lines starting with `#` are skipped, and an `export ` prefix is allowed
+- `KEY=value`, where the key matches `^[A-Z_][A-Z0-9_]*$`; an unquoted value is the
+  rest of the line with surrounding spaces removed, and `#` inside it is part of the value
+- `'...'` is literal; `"..."` accepts `\n`, `\r`, `\t`, `\"` and `\\`; a quoted value
+  must close on the same line, followed only by spaces or a `# comment`
+- empty values, repeated keys and `${VAR}` expansion are not supported
+
+`--format json` takes one object whose values are non-empty strings. A key that
+appears twice is refused, as in the `env` format; it is not resolved by keeping the
+last value. One malformed entry refuses the whole input. The message gives only the line number, never the
+line, and nothing is written.
+
+`--secret` encrypts every imported value; without it the values are stored as plain
+entries in the local layer. A plain import refuses to replace a key that the local
+layer already stores as a secret, so repeat an import with the same flags it was first
+run with. `--service` picks one scope for all entries (default
+`global`). The output and `--json` result list the added, updated and unchanged keys,
+never values.
+
+Hydration is idempotent and all-or-nothing:
+
+- An entry that already holds its value is left alone: a secret keeps its ciphertext
+  and a plain number keeps its YAML type. When nothing changes, the file is not
+  rewritten, so comments and formatting survive and Git shows no change.
+- A changed value gets new ciphertext with a fresh IV.
+- Local entries that are not in the input, other scopes, and removal markers for other
+  keys are kept. A key in the input replaces that key's local entry, including a
+  value you set by hand with `--local`.
+- The whole new layer is written to a staging file and published by one rename, so an
+  interrupted hydration leaves the previous layer, with every key at its old value.
+
+Hydration refuses, without changing the layer, when:
+
+- git tracks the target local layer
+- the project is in a git checkout but git cannot say whether it tracks the local layer,
+  for example after a `safe.directory` refusal, with a damaged index, or with git not
+  installed (outside any git checkout, hydration proceeds)
+- the local layer exists but is not a valid env file, for example invalid YAML, the
+  wrong `version`, or a scope that is not a mapping; fix or remove it first
+- a secret already in the local layer does not decrypt under the project env key, or no
+  key is available (`.hack.secret.key` is used before `HACK_ENV_SECRET_KEY`, as when
+  values are read)
+- `--secret` is used, no `.hack.secret.key` exists, and `HACK_ENV_SECRET_KEY` is set
+  (a new key file would replace that key for every layer)
+- `--secret` is not used and an imported key is stored as a secret in the target scope;
+  re-run with `--secret`, or remove the key with `hack env unset <key> --local` first
+- another `hack env hydrate` for the same project is running, or an interrupted one left
+  a stale lock (see below)
+- the local layer changed between hydration's read and its rename, for example from a
+  concurrent `hack env set --local`
+
+Concurrent hydrations are serialized by `.hack/.internal/env-hydrate.lock`, which holds
+the owner's process ID. A hydration that is killed (for example with SIGKILL) cannot
+remove it; the next hydration then reports the stale lock and its path instead of taking
+it over. Remove the file once no hydration is running. `hack env set --local` does not
+take this lock. Hydration checks the layer again just before its rename, which narrows
+the window in which such a write could be overwritten but cannot close it.
 
 Materialize a compatibility `.hack/.env`:
 

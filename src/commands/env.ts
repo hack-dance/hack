@@ -23,6 +23,10 @@ import { readControlPlaneConfig } from "../control-plane/sdk/config.ts";
 import { updateGlobalConfig } from "../lib/config.ts";
 import { resolveGlobalConfigPath } from "../lib/config-paths.ts";
 import {
+  parseEnvHydrateInputFormat,
+  readEnvHydrateInput,
+} from "../lib/env-hydrate-input.ts";
+import {
   assertEnvValueStdinUsage,
   readEnvValueFromStdin,
 } from "../lib/env-value-stdin.ts";
@@ -69,6 +73,7 @@ import {
 import {
   discoverComposeServiceNames,
   ENV_KEY_INVALID_MESSAGE,
+  hydrateProjectEnvLocalLayer,
   materializeProjectEnv,
   migrateLegacyProjectEnv,
   parseProjectEnvTarget,
@@ -286,6 +291,44 @@ const setSpec = defineCommand({
     { name: "key", required: false },
     { name: "value", required: false },
   ],
+  subcommands: [],
+} as const);
+
+const optHydrateFile = defineOption({
+  name: "file",
+  type: "string",
+  long: "--file",
+  valueHint: "<path>",
+  description:
+    "Read entries from this file (or a pipe such as <(producer)) instead of stdin",
+} as const);
+
+const optHydrateFormat = defineOption({
+  name: "format",
+  type: "string",
+  long: "--format",
+  valueHint: "<env|json>",
+  description:
+    "Input format: KEY=value lines (env, default) or one JSON object of string values (json)",
+} as const);
+
+const hydrateSpec = defineCommand({
+  name: "hydrate",
+  summary: "Import many values into the machine-local env layer at once",
+  description:
+    "Reads KEY=value entries from piped stdin or --file (never from arguments) and writes them, in one atomic commit, to the worktree-local env file (`hack.env.local.yaml`, or `hack.env.<overlay>.local.yaml` with --env). Tracked env files are never written. Repeating an import with the same values changes nothing; other local entries are kept. Values are never printed.",
+  group: "Project",
+  options: [
+    optPath,
+    optProject,
+    optEnv,
+    optJson,
+    optSecret,
+    optService,
+    optHydrateFile,
+    optHydrateFormat,
+  ],
+  positionals: [],
   subcommands: [],
 } as const);
 
@@ -1923,6 +1966,81 @@ const handleEnvSet: CommandHandlerFor<typeof setSpec> = async ({
   return 0;
 };
 
+const handleEnvHydrate: CommandHandlerFor<typeof hydrateSpec> = async ({
+  ctx,
+  args,
+}): Promise<number> => {
+  // Refuse bad options, select the project, and read and parse the whole
+  // input before anything is migrated or written, so a refusal stores nothing.
+  const format = parseEnvHydrateInputFormat(args.options.format);
+  const scope = parseEnvScopeOption({ scopeName: args.options.service });
+  const envName = resolveRequestedEnvName({ envOption: args.options.env });
+  const project = await resolveProjectForEnv({
+    ctx,
+    pathOpt: args.options.path,
+    projectOpt: args.options.project,
+  });
+  const entries = await readEnvHydrateInput({
+    format,
+    filePath:
+      args.options.file === undefined
+        ? null
+        : resolve(ctx.cwd, args.options.file),
+  });
+
+  const projectName = await resolveProjectName(project);
+  await maybeMigrateLegacyProjectEnv({
+    project,
+    projectName,
+    reason: "mutation",
+  });
+
+  const result = await hydrateProjectEnvLocalLayer({
+    projectRoot: project.projectRoot,
+    projectDir: project.projectDir,
+    envName: envName ?? null,
+    scope,
+    entries,
+    secret: args.options.secret === true,
+  });
+
+  if (args.options.json === true) {
+    process.stdout.write(
+      `${JSON.stringify(
+        {
+          file: result.filePath,
+          local: true,
+          scope: result.scope,
+          secret: args.options.secret === true,
+          changed: result.changed,
+          created_key: result.createdKey,
+          added: result.added,
+          updated: result.updated,
+          unchanged: result.unchanged,
+        },
+        null,
+        2
+      )}\n`
+    );
+    return 0;
+  }
+
+  logger.success({
+    message: [
+      result.changed
+        ? `Hydrated ${result.filePath}`
+        : `No changes needed in ${result.filePath}`,
+      "worktree-local override",
+      `scope=${result.scope}`,
+      `${result.added.length} added, ${result.updated.length} updated, ${result.unchanged.length} unchanged`,
+      result.createdKey ? "generated project env key" : null,
+    ]
+      .filter((value): value is string => typeof value === "string")
+      .join(" • "),
+  });
+  return 0;
+};
+
 const handleEnvMaterialize: CommandHandlerFor<typeof materializeSpec> = async ({
   ctx,
   args,
@@ -2516,6 +2634,7 @@ export const envCommand = defineCommand({
     withHandler(applySpec, handleEnvApply),
     withHandler(addSpec, handleEnvAdd),
     withHandler(setSpec, handleEnvSet),
+    withHandler(hydrateSpec, handleEnvHydrate),
     withHandler(materializeSpec, handleEnvMaterialize),
     withHandler(execSpec, handleEnvExec),
     withHandler(shellSpec, handleEnvShell),

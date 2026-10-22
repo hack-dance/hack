@@ -10,6 +10,7 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { DEFAULT_COMPOSE_STARTUP_TIMEOUT_MS } from "../../src/lib/compose-startup-budget.ts";
 import { isRecord } from "../../src/lib/guards.ts";
 import { openLegacyComposeAdoptedGenerationStore } from "../../src/lib/native-compose-adoption-generation.ts";
 import { parseLegacyComposeAdoptionReceipt } from "../../src/lib/native-compose-adoption-receipt.ts";
@@ -24,6 +25,29 @@ import { restoreEnv } from "./env.ts";
 export const ROUTING_CANARY = "synthetic-retained-sql-row";
 /** Closed set: the product's 15 s default proof deadline or its 60 s cap. */
 export type RetainedRoutingStoreTimeoutMs = 15_000 | 60_000;
+/** Closed set of caller deadlines for one `operation()`: the harness's 15 s
+ * default, kept by the deadline-refusal controls, or the product's own default
+ * caller deadline for a retained operation (`hack up`/`down` pass the 90 s
+ * Compose startup budget to `withMutation`). */
+export type RetainedRoutingOperationDeadlineMs =
+  | 15_000
+  | typeof DEFAULT_COMPOSE_STARTUP_TIMEOUT_MS;
+/** Value-free timing of the most recent `operation()` call. A retained mutation
+ * refuses as `E_LEGACY_ADOPTION_CHANGED` both when its observed binding differs
+ * from the recorded one and when its caller deadline expires (the product's
+ * fail-closed deadline guard). `deadlineExpired` and `bindingUnchanged` (whether
+ * every synthetic binding fact except the running state still equals the
+ * fixture's original) tell the two apart without exposing any value. */
+export interface RetainedRoutingOperationTiming {
+  readonly operation: "start" | "stop";
+  readonly preparation: boolean;
+  readonly deadlineMs: RetainedRoutingOperationDeadlineMs;
+  readonly elapsedMs: number;
+  readonly outcome: "returned" | "refused";
+  readonly code?: string;
+  readonly deadlineExpired: boolean;
+  readonly bindingUnchanged: boolean;
+}
 export const ROUTING_IDS = {
   db: "a".repeat(64),
   web: "b".repeat(64),
@@ -531,6 +555,14 @@ else {
     root,
     ".hack/.internal/legacy-compose-adoption-v1/receipt.json"
   );
+  let lastOperation: RetainedRoutingOperationTiming | undefined;
+  /** Every synthetic binding fact except the running state, which lifecycle
+   * operations legitimately change. Compared, never reported. */
+  const bindingFacts = () => {
+    const { running: _running, ...facts } = model;
+    return JSON.stringify(facts);
+  };
+  const originalBinding = bindingFacts();
   return {
     root,
     outer,
@@ -543,6 +575,8 @@ else {
     hooks,
     commands,
     effects,
+    /** Timing of the most recent `operation()` call, for failure attribution. */
+    lastOperation: () => lastOperation,
     receiptPath,
     canRestore: lifetime.canRestore,
     track: lifetime.track,
@@ -577,9 +611,33 @@ else {
         readonly recover?: boolean;
         readonly numeric?: boolean;
         readonly preparation?: boolean;
+        /** The caller deadline for this one operation. Deadline-refusal controls
+         * keep the 15 s default; a compound lifecycle test passes the product's
+         * default caller deadline, so a slow but unchanged operation under suite
+         * load is not refused by a harness deadline shorter than the product's. */
+        readonly deadlineMs?: RetainedRoutingOperationDeadlineMs;
       } = {}
     ) => {
-      const deadline = Date.now() + 15_000;
+      const deadlineMs = opts.deadlineMs ?? 15_000;
+      const started = Date.now();
+      const deadline = started + deadlineMs;
+      const record = (outcome: "returned" | "refused", error?: unknown) => {
+        const now = Date.now();
+        const code =
+          isRecord(error) && typeof error.code === "string"
+            ? error.code
+            : undefined;
+        lastOperation = {
+          operation,
+          preparation: opts.preparation === true,
+          deadlineMs,
+          elapsedMs: now - started,
+          outcome,
+          ...(code ? { code } : {}),
+          deadlineExpired: now >= deadline,
+          bindingUnchanged: bindingFacts() === originalBinding,
+        };
+      };
       const run = async (
         input: Parameters<Parameters<typeof store.withMutation>[0]["run"]>[0]
       ) =>
@@ -590,23 +648,30 @@ else {
               operation,
               deadline,
             });
-      return opts.preparation
-        ? await store.withPreparationStop({
-            generation,
-            binary: compiler,
-            deadline,
-            recover: opts.recover,
-            run,
-          })
-        : await store.withMutation({
-            generation,
-            operation,
-            services: [],
-            binary: compiler,
-            deadline,
-            recover: opts.recover,
-            run,
-          });
+      try {
+        const code = opts.preparation
+          ? await store.withPreparationStop({
+              generation,
+              binary: compiler,
+              deadline,
+              recover: opts.recover,
+              run,
+            })
+          : await store.withMutation({
+              generation,
+              operation,
+              services: [],
+              binary: compiler,
+              deadline,
+              recover: opts.recover,
+              run,
+            });
+        record("returned");
+        return code;
+      } catch (error: unknown) {
+        record("refused", error);
+        throw error;
+      }
     },
     cleanup: async () => {
       if (!lifetime.canRestore()) {

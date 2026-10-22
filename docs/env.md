@@ -51,6 +51,7 @@ worktrees inherit the rules with zero setup. It covers (patterns relative to
 - `.env.state.json`
 - `hack.env.local.yaml`
 - `hack.env.*.local.yaml`
+- `.hack.env*.tmp` (staging files an interrupted env write can leave behind)
 - `tickets/` (retained only to contain retired machine-local ticket caches during upgrades)
 
 How it is maintained:
@@ -341,6 +342,8 @@ into a host command, and `--target` on env and host commands chooses the `host` 
 | `hack config validate` | `--env` | Per invocation; resolves the native selection without reading managed env documents. | Not needed. | Authored native projects only; cannot be combined with `--file`. |
 | `hack config plan` | `--env` | Per invocation; metadata only (names, scopes, secret flags), never decrypted. | Not needed. | Authored native projects only. |
 | `hack project target` | `--env`, `--service` | Per invocation, read-only; reports the overlay selection (explicit, project default or base) without reading env files or values. | Not needed. | Selection only: overlay existence is not checked; no runtime required. |
+| `hack project task list` | `--env` | Per invocation, read-only; selects the overlay that each recipe's reviewed env scope is compared with, without reading env files or values. | Not needed. | Selection only; lists recipes and runs nothing, so no runtime is required. |
+| `hack project task inspect` | `--env` | Per invocation, read-only; as for `hack project task list`, for one recipe. | Not needed. | Selection only; runs nothing, so no runtime is required. |
 | `hack session start` | `--env`, `--service` | When the workspace is created; the name gains `.env-<name>` (`.env-base` for base spellings), and `--up` runs `hack up -d` with the same selection. | Start a new workspace or pass `--env` to `hack session exec`. | Injects into the workspace shell, not into containers. |
 | `hack session exec` | `--env`, `--service` | Per command; omitted reuses the selection encoded in the workspace name. | Each command resolves again. | Injects into the workspace command, not into containers. |
 
@@ -489,6 +492,37 @@ input and without writing anything:
 `--local` writes to the worktree-local override file (`.hack/hack.env.local.yaml` or
 `.hack/hack.env.<overlay>.local.yaml`) instead of the shared repo env file — use it for
 per-checkout values you don't want to commit.
+
+Repeating `hack env add` or `hack env set` with the value already stored is a no-op: when
+the existing secret decrypts to the same value under the current key, its ciphertext is
+kept, so once Hack has written the file it stays byte-identical and Git shows no change.
+A hand-edited file (comments, other formatting, or no `global: {}`) is normalized on the
+first repeat and stays byte-identical after that. A different value, a plain entry
+becoming secret, or an entry that does not decrypt under the current key gets new
+ciphertext with a fresh IV. Each command writes one key; a script that sets several keys
+is not atomic across them.
+
+Each env file write goes to a hidden `.<file>.<id>.tmp` file in the same directory and
+replaces the file by rename, so an interrupted write leaves the previous file in place.
+A write killed before the rename can leave that staging file behind. It holds the whole
+new layer, so `.hack/.gitignore` ignores `.hack.env*.tmp`, and you can delete it. Hack
+does not remove it on the next write, because another write may still be using it. The
+rename has these effects:
+
+- a symlinked env file keeps its link; the new contents land at the file the link points
+  to, and the staging file is created next to that file
+- a symlink whose target does not exist is replaced by a regular file
+- a hard link is broken: the env file gets a new inode, and any other name for the old
+  file keeps the previous contents
+- the directory must be writable, even when the env file itself is writable
+
+A rename does not need write access to the file it replaces, so Hack checks that access
+itself before it stages anything. It refuses to replace an existing env file that it
+cannot read, that is not a regular file, that is not writable, or whose owner and group
+it cannot keep (for example a root-owned file left by an earlier `sudo hack`). The error
+names the file and the reason, never a value, and the file is left as it was. Fix the
+file's permissions or ownership and run the command again. A rewrite keeps the file's
+permission bits, owner and group.
 
 If you omit `key`, `value`, or `--service`, `hack env add` prompts for them interactively.
 Pass `--no-interactive` (or set `HACK_NO_INTERACTIVE=1`) for scripted/agent usage: the

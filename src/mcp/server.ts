@@ -40,6 +40,11 @@ import {
   parseTargetInspectEnvelope,
   TARGET_GENERATION_PATTERN,
 } from "../lib/target-inspect.ts";
+import {
+  parseTaskInspectEnvelope,
+  parseTaskListEnvelope,
+} from "../lib/task-catalog.ts";
+import { TASK_ID_PATTERN } from "../lib/task-catalog-recipe.ts";
 import { readLinesFromStream } from "../ui/lines.ts";
 import type { McpCommandAdmission } from "./command-admission.ts";
 import { superviseMcpCommand } from "./command-lifetime.ts";
@@ -1267,6 +1272,78 @@ function registerTools(opts: {
     },
   });
 
+  const taskTargetInput = {
+    projectName: z
+      .string()
+      .max(IDENTIFIER_MAX_LENGTH)
+      .describe("Registered project name (exclusive with path)")
+      .optional(),
+    path: z
+      .string()
+      .max(TARGET_PATH_MAX_LENGTH)
+      .describe(
+        "Checkout path, absolute or relative (exclusive with projectName)"
+      )
+      .optional(),
+    ...branchInput,
+    env: composeIdentifierInput(
+      "Env overlay name; 'base' or 'default' selects base layers only"
+    ).optional(),
+    expectGeneration: z
+      .string()
+      .regex(TARGET_GENERATION_PATTERN)
+      .describe("Refuse unless the config generation still equals this id")
+      .optional(),
+  };
+
+  register({
+    name: "hack.project.task.list",
+    title: "List reviewed tasks",
+    description:
+      "List the reviewed task recipes in the target project's .hack/tasks.json catalog, with closed refusals for stale, ambiguous, untrusted, out-of-scope or capability-missing recipes (hack project task list --json). Read-only: nothing is executed, there is no execution path, and results grant no authority. Refused recipes never echo their argv. Names and fields are provisional.",
+    annotations: READ_ONLY_TOOL_ANNOTATIONS,
+    inputSchema: taskTargetInput,
+    handler: async (input, extra) => {
+      const result = await runHackCommand({
+        context: opts.context,
+        signal: extra.signal,
+        tool: "hack.project.task.list",
+        args: buildTaskListArgs(input),
+      });
+      return buildToolResult({
+        result: { ...result, stdout: "" },
+        data: parseTaskListEnvelope(parseJson(result.stdout)),
+      });
+    },
+  });
+
+  register({
+    name: "hack.project.task.inspect",
+    title: "Inspect a reviewed task",
+    description:
+      "Show one reviewed task recipe: exact argv, Compose service, workdir, env scope, required capabilities, effects, prerequisites, checks, cleanup and pinned provenance (hack project task inspect --json). A refused recipe returns its closed refusal without echoing its argv. Read-only: nothing is executed and the result grants no authority. Names and fields are provisional.",
+    annotations: READ_ONLY_TOOL_ANNOTATIONS,
+    inputSchema: {
+      task: z
+        .string()
+        .regex(TASK_ID_PATTERN)
+        .describe("Task id from hack.project.task.list"),
+      ...taskTargetInput,
+    },
+    handler: async (input, extra) => {
+      const result = await runHackCommand({
+        context: opts.context,
+        signal: extra.signal,
+        tool: "hack.project.task.inspect",
+        args: buildTaskInspectArgs(input),
+      });
+      return buildToolResult({
+        result: { ...result, stdout: "" },
+        data: parseTaskInspectEnvelope(parseJson(result.stdout)),
+      });
+    },
+  });
+
   installTypedToolDispatch({ server: opts.server, tools });
 }
 
@@ -1627,6 +1704,51 @@ export function buildTargetInspectArgs(opts: {
     ...(opts.expectGeneration === undefined
       ? []
       : [`--expect-generation=${opts.expectGeneration}`]),
+  ];
+}
+
+type TaskTargetArgs = {
+  readonly projectName?: string;
+  readonly path?: string;
+  readonly branch?: string;
+  readonly env?: string;
+  readonly expectGeneration?: string;
+};
+
+function taskTargetArgs(opts: TaskTargetArgs): string[] {
+  return [
+    ...(opts.projectName === undefined
+      ? []
+      : [`--project=${opts.projectName}`]),
+    ...(opts.path === undefined ? [] : [`--path=${opts.path}`]),
+    ...(opts.branch === undefined ? [] : [`--branch=${opts.branch}`]),
+    ...(opts.env === undefined ? [] : [`--env=${opts.env}`]),
+    ...(opts.expectGeneration === undefined
+      ? []
+      : [`--expect-generation=${opts.expectGeneration}`]),
+  ];
+}
+
+/**
+ * `hack project task list --json` argv. Like the target tool, selection is
+ * passed through unresolved so the CLI owns every refusal.
+ */
+export function buildTaskListArgs(opts: TaskTargetArgs): string[] {
+  return ["project", "task", "list", "--json", ...taskTargetArgs(opts)];
+}
+
+/** `hack project task inspect --json` argv; the task id follows `--`. */
+export function buildTaskInspectArgs(
+  opts: TaskTargetArgs & { readonly task: string }
+): string[] {
+  return [
+    "project",
+    "task",
+    "inspect",
+    "--json",
+    ...taskTargetArgs(opts),
+    "--",
+    opts.task,
   ];
 }
 

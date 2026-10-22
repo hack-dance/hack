@@ -12,6 +12,7 @@ import {
   copyNativeComposeEffectRefusal,
   nativeComposeEffectReason,
   nativeComposeEffectRefusal,
+  nativeComposeEffectRefusalSummary,
   retainNativeComposeEffectRefusal,
 } from "../src/lib/native-compose-effect-diagnostics.ts";
 import * as generation from "../src/lib/native-compose-generation.ts";
@@ -227,6 +228,105 @@ test("reason classification preserves an original issued probe refusal without c
   }
   const copied = { ...caught };
   expect(nativeComposeEffectReason(copied)).toBe("unclassified");
+});
+
+test.each([
+  "issued",
+  "unissued",
+] as const)("an unclassified native failure keeps only an %s boundary under its fixed E_COMPOSE_FAILED text", async (kind) => {
+  const root = await realpath(
+    await mkdtemp(join(tmpdir(), "native-effect-fallback-"))
+  );
+  const oldBackend = process.env.HACK_RUNTIME_BACKEND;
+  // A storage carrier refuses with a plain Error whose text is never public.
+  const error = new Error("private-carrier-canary");
+  const diagnostic = {
+    stage: "storage-helper-policy",
+    reason: "unclassified",
+  } as const;
+  if (kind === "issued") {
+    retainNativeComposeEffectRefusal(error, diagnostic);
+  }
+  const opened = spyOn(
+    generation,
+    "openNativeComposeGenerationStore"
+  ).mockImplementation(() => Promise.reject(error));
+  try {
+    process.env.HACK_RUNTIME_BACKEND = "compose";
+    await mkdir(join(root, ".hack"));
+    await Bun.write(
+      join(root, ".hack/hack.project.json"),
+      JSON.stringify({ schema_version: 1, name: "fixture" })
+    );
+    let caught: unknown;
+    try {
+      await tryNativeComposeCommand({
+        cwd: root,
+        operation: "down",
+        json: true,
+      });
+    } catch (value) {
+      caught = value;
+    }
+    expect(opened).toHaveBeenCalledTimes(1);
+    const result = errorResultFromUnknown({ error: caught });
+    expect(result).toEqual({
+      ok: false,
+      error: {
+        code: "E_COMPOSE_FAILED",
+        message:
+          "Native Compose operation failed; saved ownership and persistent data are retained. Values omitted.",
+        ...(kind === "issued"
+          ? { detail: { native_compose_effect_refusal: diagnostic } }
+          : {}),
+      },
+    });
+    expect(JSON.stringify(result)).not.toContain("private-carrier-canary");
+  } finally {
+    opened.mockRestore();
+    restoreEnv("HACK_RUNTIME_BACKEND", oldBackend);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("the human boundary summary names only a known stage and reason pair", () => {
+  expect(
+    nativeComposeEffectRefusalSummary({
+      native_compose_effect_refusal: {
+        stage: "storage-helper-start",
+        reason: "probe-timeout",
+      },
+    })
+  ).toBe(
+    "Refusal boundary: storage-helper-start (probe-timeout); values omitted."
+  );
+  const canary = "private-summary-canary";
+  for (const detail of [
+    undefined,
+    null,
+    canary,
+    {
+      native_compose_effect_refusal: { stage: canary, reason: "unclassified" },
+    },
+    {
+      native_compose_effect_refusal: {
+        stage: "storage-target",
+        reason: canary,
+      },
+    },
+    {
+      native_compose_effect_refusal: new Proxy(
+        {},
+        {
+          getOwnPropertyDescriptor: () => {
+            throw new Error(canary);
+          },
+        }
+      ),
+    },
+  ]) {
+    expect(nativeComposeEffectRefusalSummary(detail)).toBeNull();
+  }
 });
 
 test.each([

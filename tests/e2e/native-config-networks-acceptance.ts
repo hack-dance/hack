@@ -19,6 +19,7 @@ import type {
 } from "../../packages/config-compiler/generated/native-config.ts";
 import { isRecord } from "../../src/lib/guards.ts";
 import {
+  NativeComposeGenerationError,
   type NativeComposeIdentity,
   openNativeComposeGenerationStore,
   readNativeComposeNetworkTopology,
@@ -39,6 +40,7 @@ const GENERATION = "io.hack.native-config.generation";
 const STORAGE = "io.hack.native-config.storage";
 const GLOBAL_PROJECT = "hack-dev-proxy";
 const FIXTURE = "hack.e2e.native-config-networks";
+const CARRIER_OWNER = "io.hack.storage-witness.owner";
 const OUTPUT_LIMIT = 2 * 1024 * 1024;
 const COMMAND_TIMEOUT = 180_000;
 // Witness-bearing exec/up verification runs three fresh helper carriers per proof; on the
@@ -101,6 +103,411 @@ export function nativeNetworkFixtureRefusalDiagnostic(opts: {
     fragmentPresent: opts.fragmentPresent,
     dockerInvoked: opts.dockerInvoked,
   })}`;
+}
+const HACK_VERBS = [
+  "up",
+  "down",
+  "exec",
+  "run",
+  "restart",
+  "ps",
+  "config",
+] as const;
+const DOCKER_VERBS = [
+  "container",
+  "network",
+  "volume",
+  "image",
+  "info",
+  "compose",
+  "exec",
+] as const;
+const DOCKER_ACTIONS = [
+  "create",
+  "start",
+  "stop",
+  "rm",
+  "inspect",
+  "ls",
+  "version",
+] as const;
+export const NATIVE_NETWORK_FIXTURE_ROLES = [
+  "primary",
+  "sibling-a",
+  "sibling-b",
+  "fixture",
+] as const;
+type FixtureRole = (typeof NATIVE_NETWORK_FIXTURE_ROLES)[number];
+const CONTAINER_STATES = [
+  "created",
+  "running",
+  "paused",
+  "restarting",
+  "removing",
+  "exited",
+  "dead",
+] as const;
+const CLOSED_CODE = /^E_[A-Z0-9_]{1,62}$/;
+const CLOSED_TOKEN = /^[a-z][a-z0-9-]{0,62}$/;
+
+/** Fixed command class only: executable role, one closed verb and one closed action. */
+export function nativeNetworkFixtureStep(
+  argv: readonly string[],
+  executables: { readonly cli: string; readonly engine: string }
+): string {
+  const [executable, first, second] = argv;
+  if (executable === executables.cli) {
+    const verb = HACK_VERBS.find((value) => value === first) ?? "other";
+    return `hack:${verb}${argv.includes("--recover") ? "+recover" : ""}`;
+  }
+  if (executable === executables.engine) {
+    const verb = DOCKER_VERBS.find((value) => value === first) ?? "other";
+    const action = DOCKER_ACTIONS.find((value) => value === second);
+    return action ? `docker:${verb}:${action}` : `docker:${verb}`;
+  }
+  return "other";
+}
+
+type ClosedFailure = {
+  readonly code: string | null;
+  readonly stage: string | null;
+  readonly reason: string | null;
+  readonly message: string | null;
+};
+
+/**
+ * Exact fixed product sentences, each named by a closed label. A failure that
+ * issues no refusal boundary (for example an incomplete saved stop) is still
+ * classified; any other text, or a changed sentence, yields null.
+ */
+const FIXED_MESSAGES: ReadonlyMap<string, string> = new Map([
+  [
+    "Native Compose stop is incomplete; saved ownership and persistent data are retained.",
+    "stop-incomplete",
+  ],
+  [
+    "Native Compose operation failed; saved ownership and persistent data are retained. Values omitted.",
+    "operation-failed",
+  ],
+  ...(
+    [
+      ["E_NATIVE_COMPOSE_STATE", "native-state"],
+      ["E_NATIVE_COMPOSE_BUSY", "native-busy"],
+      ["E_NATIVE_COMPOSE_UNCERTAIN", "native-uncertain"],
+      ["E_NATIVE_COMPOSE_STALE", "native-stale"],
+    ] as const
+  ).map(
+    ([code, label]) =>
+      [new NativeComposeGenerationError(code).message, label] as const
+  ),
+]);
+
+function fixedMessage(value: unknown): string | null {
+  return typeof value === "string" ? (FIXED_MESSAGES.get(value) ?? null) : null;
+}
+
+function closedToken(value: unknown, pattern: RegExp): string | null {
+  return typeof value === "string" && pattern.test(value) ? value : null;
+}
+
+/** The JSON envelope's closed code and issued boundary; null when stdout is not JSON. */
+function jsonClosedFailure(stdout: string): ClosedFailure | null {
+  let value: unknown;
+  try {
+    value = JSON.parse(stdout);
+  } catch {
+    return null;
+  }
+  const error = isRecord(value) ? own(value, "error") : undefined;
+  if (!isRecord(error)) {
+    return { code: null, stage: null, reason: null, message: null };
+  }
+  const detail = own(error, "detail");
+  const refusal = isRecord(detail)
+    ? own(detail, "native_compose_effect_refusal")
+    : undefined;
+  return {
+    code: closedToken(own(error, "code"), CLOSED_CODE),
+    stage: isRecord(refusal)
+      ? closedToken(own(refusal, "stage"), CLOSED_TOKEN)
+      : null,
+    reason: isRecord(refusal)
+      ? closedToken(own(refusal, "reason"), CLOSED_TOKEN)
+      : null,
+    message: fixedMessage(own(error, "message")),
+  };
+}
+
+function closedFailure(
+  result: Pick<CliResult, "stdout" | "stderr">
+): ClosedFailure {
+  const json = jsonClosedFailure(result.stdout);
+  if (json) {
+    return json;
+  }
+  const boundary = humanBoundary(result.stdout) ?? humanBoundary(result.stderr);
+  return {
+    code: humanClosedCode(result.stdout) ?? humanClosedCode(result.stderr),
+    stage: boundary?.stage ?? null,
+    reason: boundary?.reason ?? null,
+    message:
+      humanFixedMessage(result.stdout) ?? humanFixedMessage(result.stderr),
+  };
+}
+
+const HUMAN_MESSAGE = /^[^\w\n]*(?:ERROR:?[ \t]+)?E_[A-Z0-9_]{1,62}: (.+)$/m;
+
+/** The closed label of a human error line's exact fixed sentence; never its text. */
+export function humanFixedMessage(text: string): string | null {
+  return fixedMessage(HUMAN_MESSAGE.exec(text.replace(ANSI, ""))?.[1]);
+}
+
+const HUMAN_BOUNDARY =
+  /^[^\w\n]*(?:ERROR:?[ \t]+)?Refusal boundary: ([a-z][a-z0-9-]{0,62}) \(([a-z][a-z0-9-]{0,62})\); values omitted\.$/m;
+
+/** The closed refusal boundary line a human CLI error prints after its code. */
+export function humanBoundary(
+  text: string
+): { readonly stage: string; readonly reason: string } | null {
+  const match = HUMAN_BOUNDARY.exec(text.replace(ANSI, ""));
+  return match?.[1] && match[2] ? { stage: match[1], reason: match[2] } : null;
+}
+
+const ANSI = /\u001b\[[0-9;]*m/g;
+// A human error line opens with the logger's glyph or level, then `E_CODE: `:
+// clack writes `■  E_CODE: ` to stdout, gum `ERROR E_CODE: ` and console
+// `ERROR: E_CODE: ` to stderr. Only the closed code is kept.
+const HUMAN_CODE = /^[^\w\n]*(?:ERROR:?[ \t]+)?(E_[A-Z0-9_]{1,62}): /m;
+
+/** The leading closed error code of human CLI output; nothing else of the text. */
+export function humanClosedCode(text: string): string | null {
+  return HUMAN_CODE.exec(text.replace(ANSI, ""))?.[1] ?? null;
+}
+
+/**
+ * Closed exit codes of the in-container probe scripts. Every script failure
+ * exits with one of them, so a failing `hack exec` that exits 1 is the product
+ * (or the runtime), never an uncaught probe error.
+ */
+export const NATIVE_NETWORK_PROBE_EXIT = {
+  environment: 23,
+  response: 24,
+  marker: 25,
+  rejected: 26,
+  timeout: 27,
+  unreadable: 28,
+  unwritable: 29,
+} as const;
+const PROBE = NATIVE_NETWORK_PROBE_EXIT;
+
+/** Fetches the endpoint origin and its alias; both must answer the exact marker. */
+export function nativeNetworkFixturePeerProbe(opts: {
+  readonly origin: string;
+  readonly alias: string;
+  readonly expected: string;
+  readonly timeoutMs?: number;
+}): string {
+  const timeout = opts.timeoutMs ?? 4000;
+  return `if(process.env.PEER_ORIGIN!==${JSON.stringify(opts.origin)})process.exit(${PROBE.environment});for(const url of [process.env.PEER_ORIGIN,${JSON.stringify(opts.alias)}]){let ok=false;try{const r=await fetch(url,{signal:AbortSignal.timeout(${timeout})});ok=r.ok&&await r.text()===${JSON.stringify(opts.expected)}}catch(e){process.exit(e?.name==="TimeoutError"?${PROBE.timeout}:${PROBE.rejected})}if(!ok)process.exit(${PROBE.response})}`;
+}
+
+/** Reads the retained marker; a missing or unreadable file has its own code. */
+export function nativeNetworkFixtureMarkerRead(opts: {
+  readonly path: string;
+  readonly marker: string;
+}): string {
+  return `let t;try{t=await Bun.file(${JSON.stringify(opts.path)}).text()}catch{process.exit(${PROBE.unreadable})}if(t!==${JSON.stringify(opts.marker)})process.exit(${PROBE.marker})`;
+}
+
+/** Writes the retained marker. */
+export function nativeNetworkFixtureMarkerWrite(opts: {
+  readonly path: string;
+  readonly marker: string;
+}): string {
+  return `try{await Bun.write(${JSON.stringify(opts.path)},${JSON.stringify(opts.marker)})}catch{process.exit(${PROBE.unwritable})}`;
+}
+
+/** Fixed failing-command evidence: command class, checkout role, sequence, exit and closed product codes. Never argv, output text, values or paths. */
+export function nativeNetworkFixtureCommandDiagnostic(opts: {
+  readonly step: string;
+  readonly role: FixtureRole;
+  readonly sequence: number;
+  readonly expected: number;
+  readonly result: Pick<
+    CliResult,
+    "exitCode" | "timedOut" | "stdout" | "stderr" | "durationMs"
+  >;
+}): string {
+  const step = /^(hack|docker):[a-z]{1,16}(?::[a-z]{1,16}|\+recover)?$|^other$/;
+  if (
+    !(
+      step.test(opts.step) &&
+      NATIVE_NETWORK_FIXTURE_ROLES.includes(opts.role) &&
+      Number.isSafeInteger(opts.sequence) &&
+      Number.isSafeInteger(opts.expected) &&
+      Number.isSafeInteger(opts.result.exitCode) &&
+      typeof opts.result.timedOut === "boolean" &&
+      Number.isSafeInteger(opts.result.durationMs) &&
+      typeof opts.result.stdout === "string" &&
+      typeof opts.result.stderr === "string"
+    )
+  ) {
+    return "Network command diagnostic unavailable";
+  }
+  return `Network command diagnostic ${JSON.stringify({
+    step: opts.step,
+    role: opts.role,
+    sequence: opts.sequence,
+    expected: opts.expected,
+    exit: opts.result.exitCode,
+    timedOut: opts.result.timedOut,
+    durationMs: opts.result.durationMs,
+    ...closedFailure(opts.result),
+  })}`;
+}
+
+const RUNNER_FAILURES = [
+  [
+    "Fixture command timed out; uncertain engine outcome and captures retained",
+    "timeout",
+  ],
+  [
+    "Fixture command exceeded its output bound; bounded captures retained",
+    "output-bound",
+  ],
+  [
+    "Fixture could not confirm owned group cleanup; captures retained",
+    "group-unconfirmed",
+  ],
+  [
+    "Fixture capture failed after owned command reap; captures retained",
+    "capture",
+  ],
+] as const;
+
+/**
+ * A command the runner could not return (a timeout kills it) still names its
+ * closed class, role, sequence, duration and runner outcome; never its output.
+ */
+export function nativeNetworkFixtureRunnerDiagnostic(opts: {
+  readonly step: string;
+  readonly role: FixtureRole;
+  readonly sequence: number;
+  readonly durationMs: number;
+  readonly error: unknown;
+}): string {
+  const step = /^(hack|docker):[a-z]{1,16}(?::[a-z]{1,16}|\+recover)?$|^other$/;
+  if (
+    !(
+      step.test(opts.step) &&
+      NATIVE_NETWORK_FIXTURE_ROLES.includes(opts.role) &&
+      Number.isSafeInteger(opts.sequence) &&
+      Number.isSafeInteger(opts.durationMs)
+    )
+  ) {
+    return "Network command diagnostic unavailable";
+  }
+  const message = opts.error instanceof Error ? opts.error.message : null;
+  const outcome =
+    RUNNER_FAILURES.find(([text]) => text === message)?.[1] ?? "other";
+  return `Network command diagnostic ${JSON.stringify({
+    step: opts.step,
+    role: opts.role,
+    sequence: opts.sequence,
+    durationMs: opts.durationMs,
+    runner: outcome,
+  })}`;
+}
+
+/** A fixture-authored assertion is a fixed sentence; anything else (paths, values, product text) is withheld. */
+export function nativeNetworkFixtureFailureLabel(error: unknown): string {
+  const message = error instanceof Error ? error.message : null;
+  return typeof message === "string" &&
+    message.length <= 160 &&
+    /^[A-Z](?:[A-Za-z ,;'-]|(?<=[a-z])\/(?=[a-z]))*$/.test(message)
+    ? `Network failure ${JSON.stringify(message)}`
+    : "Network failure withheld";
+}
+
+const CENSUS_KINDS = [
+  "service",
+  "oneoff",
+  "stray",
+  "carrier",
+  "fixture",
+] as const;
+
+/** A project-labelled container is a canonical service, a Compose one-off, or a stray (for example a recreate temporary). */
+export function nativeNetworkFixtureProjectKind(opts: {
+  readonly project: string;
+  readonly name: string;
+  readonly service: string;
+  readonly oneoff: string;
+}): "service" | "oneoff" | "stray" {
+  if (opts.oneoff === "True") {
+    return "oneoff";
+  }
+  return opts.oneoff === "False" &&
+    NAMES.includes(opts.service as Name) &&
+    opts.name === `${opts.project}-${opts.service}-1`
+    ? "service"
+    : "stray";
+}
+
+/** Counts exact owned engine objects by fixed role, kind and closed state; foreign rows are never selected. */
+export function nativeNetworkFixtureCensus(
+  rows: readonly {
+    readonly role: FixtureRole;
+    readonly kind: (typeof CENSUS_KINDS)[number];
+    readonly state: string;
+  }[]
+): string {
+  const counts: Record<string, number> = {};
+  for (const row of rows) {
+    const state = CONTAINER_STATES.find((value) => value === row.state);
+    const key = `${NATIVE_NETWORK_FIXTURE_ROLES.includes(row.role) ? row.role : "unknown"}:${CENSUS_KINDS.includes(row.kind) ? row.kind : "unknown"}:${state ?? "unknown"}`;
+    counts[key] = (counts[key] ?? 0) + 1;
+  }
+  return `Network failure census ${JSON.stringify(
+    Object.fromEntries(
+      Object.entries(counts).sort(([a], [b]) => a.localeCompare(b))
+    )
+  )}`;
+}
+const PENDING_OPERATIONS = ["up", "restart", "run", "down"] as const;
+
+/** Saved intent per started checkout: closed booleans and the pending operation only. */
+export function nativeNetworkFixtureSavedEvidence(
+  rows: readonly {
+    readonly role: FixtureRole;
+    readonly stopped: unknown;
+    readonly pending: unknown;
+    readonly storageWitnessesPending: unknown;
+    readonly beforeHooksPending: unknown;
+  }[]
+): string {
+  const flag = (value: unknown) =>
+    typeof value === "boolean" ? value : "unknown";
+  const entries = rows.map((row) => {
+    const operation =
+      isRecord(row.pending) && typeof row.pending.operation === "string"
+        ? row.pending.operation
+        : null;
+    return [
+      NATIVE_NETWORK_FIXTURE_ROLES.includes(row.role) ? row.role : "unknown",
+      {
+        stopped: flag(row.stopped),
+        pending:
+          row.pending === null
+            ? "none"
+            : (PENDING_OPERATIONS.find((value) => value === operation) ??
+              "unknown"),
+        storageWitnessesPending: flag(row.storageWitnessesPending),
+        beforeHooksPending: flag(row.beforeHooksPending),
+      },
+    ] as const;
+  });
+  return `Network failure saved state ${JSON.stringify(Object.fromEntries(entries))}`;
 }
 function object(text: string): Record<string, unknown> {
   let value: unknown;
@@ -1166,6 +1573,18 @@ export const nativeConfigNetworksScenario: Scenario = {
       "Fixture requires absolute Docker and Git executables"
     );
     let cleanupStarted: number | null = null;
+    // Closed failure evidence: hosted captures stay private, so the log carries only fixed fields.
+    const roles = new Map<string, FixtureRole>();
+    const commands = new WeakMap<
+      CliResult,
+      {
+        readonly step: string;
+        readonly role: FixtureRole;
+        readonly sequence: number;
+      }
+    >();
+    let sequence = 0;
+    let stepExecutables = { cli: "", engine: engine ?? "" };
     const execute = async (
       argv: readonly string[],
       cwd = ctx.tempRoot,
@@ -1179,15 +1598,51 @@ export const nativeConfigNetworksScenario: Scenario = {
         remaining > 0,
         "Network scenario exceeded its whole-run budget"
       );
-      return await runNativeNetworkFixtureCommand({
-        argv,
-        cwd,
-        env: { ...env, ...extra },
-        captures,
-        timeoutMs: Math.min(COMMAND_TIMEOUT, remaining),
-      });
+      sequence += 1;
+      const command = {
+        step: nativeNetworkFixtureStep(argv, stepExecutables),
+        role: roles.get(cwd) ?? ("fixture" as const),
+        sequence,
+      };
+      const begun = Date.now();
+      let result: CliResult;
+      try {
+        result = await runNativeNetworkFixtureCommand({
+          argv,
+          cwd,
+          env: { ...env, ...extra },
+          captures,
+          timeoutMs: Math.min(COMMAND_TIMEOUT, remaining),
+        });
+      } catch (error: unknown) {
+        // A killed or unreturned command has no result for ok(); name it here.
+        ctx.log(
+          nativeNetworkFixtureRunnerDiagnostic({
+            ...command,
+            durationMs: Date.now() - begun,
+            error,
+          })
+        );
+        throw error;
+      }
+      commands.set(result, command);
+      return result;
+    };
+    const ok = (result: CliResult, expected = 0): void => {
+      const command = commands.get(result);
+      if (command && !(result.exitCode === expected && !result.timedOut)) {
+        ctx.log(
+          nativeNetworkFixtureCommandDiagnostic({
+            ...command,
+            expected,
+            result,
+          })
+        );
+      }
+      resultOk(result, expected);
     };
     const manifest = await qualifyArtifacts(ctx, execute);
+    stepExecutables = { cli: manifest.cli.path, engine: engine ?? "" };
     const composePlugin = await provisionNativeNetworkFixtureComposePlugin({
       path: manifest.composePlugin.path,
       expectedHash: manifest.composePlugin.sha256,
@@ -1203,7 +1658,7 @@ export const nativeConfigNetworksScenario: Scenario = {
       "version",
       "--short",
     ]);
-    resultOk(pluginVersion);
+    ok(pluginVersion);
     const composeVersion = pluginVersion.stdout.trim();
     requireValue(
       /^v?\d+\.\d+\.\d+(?:[-+][A-Za-z0-9._-]+)?$/.test(composeVersion),
@@ -1211,7 +1666,7 @@ export const nativeConfigNetworksScenario: Scenario = {
     );
     const docker: Docker = async (args) => {
       const result = await execute([engine, ...args]);
-      resultOk(result);
+      ok(result);
       return result.stdout.trim();
     };
     const raw = (
@@ -1224,7 +1679,7 @@ export const nativeConfigNetworksScenario: Scenario = {
       args: readonly string[]
     ): Promise<CliResult> => {
       const result = await raw(checkout, args);
-      resultOk(result);
+      ok(result);
       return result;
     };
     requireValue(
@@ -1257,6 +1712,7 @@ export const nativeConfigNetworksScenario: Scenario = {
     const name = `e2e-net-${token.slice(0, 12)}`;
     const root = join(await realpath(ctx.tempRoot), name);
     await mkdir(join(root, ".hack"), { recursive: true, mode: 0o700 });
+    roles.set(root, "primary");
     const baseText = `${JSON.stringify(authored({ name, image, marker: "primary" }))}\n`;
     await Bun.write(join(root, ".hack", "hack.project.json"), baseText);
     await Bun.write(
@@ -1280,7 +1736,7 @@ export const nativeConfigNetworksScenario: Scenario = {
         "Fixture native networks",
       ],
     ]) {
-      resultOk(await execute([git, ...args], root));
+      ok(await execute([git, ...args], root));
     }
     const checkouts: Checkout[] = [
       {
@@ -1291,11 +1747,9 @@ export const nativeConfigNetworksScenario: Scenario = {
         text: baseText,
       },
     ];
-    for (const branch of ["sibling-a", "sibling-b"]) {
+    for (const branch of ["sibling-a", "sibling-b"] as const) {
       const linked = join(ctx.tempRoot, `${name}-${branch}`);
-      resultOk(
-        await execute([git, "worktree", "add", "-qb", branch, linked], root)
-      );
+      ok(await execute([git, "worktree", "add", "-qb", branch, linked], root));
       const text = `${JSON.stringify(authored({ name, image, marker: branch }))}\n`;
       const checkout = {
         root: await realpath(linked),
@@ -1304,6 +1758,7 @@ export const nativeConfigNetworksScenario: Scenario = {
         path: join(linked, ".hack", "hack.project.json"),
         text,
       };
+      roles.set(checkout.root, branch);
       await Bun.write(checkout.path, text);
       checkouts.push(checkout);
     }
@@ -1365,9 +1820,7 @@ export const nativeConfigNetworksScenario: Scenario = {
       service: Name,
       script: string
     ): Promise<void> => {
-      resultOk(
-        await raw(checkout, ["exec", service, "--", "bun", "-e", script])
-      );
+      ok(await raw(checkout, ["exec", service, "--", "bun", "-e", script]));
     };
     const markers = async (checkout: Checkout): Promise<void> => {
       for (const [service, target, alias] of [
@@ -1376,17 +1829,23 @@ export const nativeConfigNetworksScenario: Scenario = {
         ["vault", "reader", "reader-alias"],
         ["reader", "vault", "vault-alias"],
       ] as const) {
-        const expected = JSON.stringify(`${checkout.marker}:${target}`);
         await exec(
           checkout,
           service,
-          `if(process.env.PEER_ORIGIN!==${JSON.stringify(`http://${target}:3000`)})process.exit(23);for(const url of [process.env.PEER_ORIGIN,${JSON.stringify(`http://${alias}:3000/`)}]){const r=await fetch(url,{signal:AbortSignal.timeout(4000)});if(!r.ok||await r.text()!==${expected})process.exit(24)}`
+          nativeNetworkFixturePeerProbe({
+            origin: `http://${target}:3000`,
+            alias: `http://${alias}:3000/`,
+            expected: `${checkout.marker}:${target}`,
+          })
         );
       }
       await exec(
         checkout,
         "web",
-        `if(await Bun.file("/state/marker").text()!==${JSON.stringify(checkout.marker)})process.exit(25)`
+        nativeNetworkFixtureMarkerRead({
+          path: "/state/marker",
+          marker: checkout.marker,
+        })
       );
     };
     const siblings = checkouts.slice(1);
@@ -1423,7 +1882,7 @@ export const nativeConfigNetworksScenario: Scenario = {
         receipt,
       });
       const result = await raw(checkout, args, { PATH: `${shim}:${env.PATH}` });
-      resultOk(result, 1);
+      ok(result, 1);
       const fragmentPresent = result.combined.includes(fragment);
       const dockerInvoked = await Bun.file(receipt).exists();
       if (!fragmentPresent || dockerInvoked) {
@@ -1580,6 +2039,96 @@ export const nativeConfigNetworksScenario: Scenario = {
         "Proxy cleanup requires exact no-port/tmpfs/readonly-socket fixture identity"
       );
     };
+    // Owned objects only, selected by exact saved identity or fixture token; logs counts by closed state.
+    const census = async (): Promise<void> => {
+      try {
+        const rows: Parameters<typeof nativeNetworkFixtureCensus>[0][number][] =
+          [];
+        const listed = async (filter: string): Promise<string[][]> =>
+          (
+            await docker([
+              "container",
+              "ls",
+              "-a",
+              "--no-trunc",
+              "--filter",
+              filter,
+              "--format",
+              `{{.State}}|{{.Names}}|{{.Label "${SERVICE}"}}|{{.Label "com.docker.compose.oneoff"}}`,
+            ])
+          )
+            .split("\n")
+            .filter(Boolean)
+            .map((line) => line.split("|"));
+        const states = async (filter: string): Promise<string[]> =>
+          (await listed(filter)).map(([state]) => state ?? "unknown");
+        const savedRows: Parameters<
+          typeof nativeNetworkFixtureSavedEvidence
+        >[0][number][] = [];
+        for (const checkout of checkouts) {
+          if (!startedRoots.has(checkout.root)) {
+            continue;
+          }
+          const store = await openNativeComposeGenerationStore({
+            projectRoot: checkout.root,
+            instance: null,
+            mode: "saved",
+          });
+          const identity = store.identity;
+          const role = roles.get(checkout.root) ?? "fixture";
+          try {
+            // storageWitnessesPending is nonenumerable; read each field explicitly.
+            const state = await store.loadCurrent();
+            savedRows.push({
+              role,
+              stopped: state.stopped,
+              pending: state.pending,
+              storageWitnessesPending: state.storageWitnessesPending,
+              beforeHooksPending: state.beforeHooksPending,
+            });
+          } catch {
+            savedRows.push({
+              role,
+              stopped: null,
+              pending: undefined,
+              storageWitnessesPending: null,
+              beforeHooksPending: null,
+            });
+          } finally {
+            await store.close();
+          }
+          for (const [
+            state = "unknown",
+            name = "",
+            service = "",
+            oneoff = "",
+          ] of await listed(`label=${PROJECT}=${identity.composeProject}`)) {
+            rows.push({
+              role,
+              kind: nativeNetworkFixtureProjectKind({
+                project: identity.composeProject,
+                name,
+                service,
+                oneoff,
+              }),
+              state,
+            });
+          }
+          for (const state of await states(
+            `label=${CARRIER_OWNER}=${identity.ownerToken}`
+          )) {
+            rows.push({ role, kind: "carrier", state });
+          }
+        }
+        for (const state of await states(`label=${FIXTURE}=${token}`)) {
+          rows.push({ role: "fixture", kind: "fixture", state });
+        }
+        ctx.log(nativeNetworkFixtureCensus(rows));
+        ctx.log(nativeNetworkFixtureSavedEvidence(savedRows));
+      } catch {
+        ctx.log("Network failure census unavailable");
+      }
+    };
     const runPhases = async (): Promise<void> => {
       const store = await openNativeComposeGenerationStore({
         projectRoot: primary.root,
@@ -1598,7 +2147,7 @@ export const nativeConfigNetworksScenario: Scenario = {
         receipt: createReceipt,
       });
       startedRoots.add(primary.root);
-      resultOk(
+      ok(
         await raw(primary, ["up", "--detach", "--json"], {
           PATH: `${shim}:${env.PATH}`,
         }),
@@ -1629,7 +2178,7 @@ export const nativeConfigNetworksScenario: Scenario = {
           "Controlled create must expose the actual empty NetworkID recovery window"
         );
       }
-      resultOk(await raw(primary, ["up", "--detach", "--json"]), 1);
+      ok(await raw(primary, ["up", "--detach", "--json"]), 1);
       await cli(primary, ["down", "--recover", "--json"]);
       await resourceAbsent(primary);
       ctx.log(
@@ -1642,7 +2191,10 @@ export const nativeConfigNetworksScenario: Scenario = {
         await exec(
           checkout,
           "web",
-          `await Bun.write("/state/marker",${JSON.stringify(checkout.marker)})`
+          nativeNetworkFixtureMarkerWrite({
+            path: "/state/marker",
+            marker: checkout.marker,
+          })
         );
         await markers(checkout);
         await cli(checkout, ["ps", "--json"]);
@@ -1805,7 +2357,7 @@ export const nativeConfigNetworksScenario: Scenario = {
         "Foreign endpoint must be running on the pinned bridge before admission"
       );
       const foreign = await raw(primary, ["up", "--detach", "--json"]);
-      resultOk(foreign, 1);
+      ok(foreign, 1);
       const foreignState = await saved(primary.root);
       const foreignSnapshot = await observe(primary);
       requireValue(
@@ -1859,7 +2411,7 @@ export const nativeConfigNetworksScenario: Scenario = {
         internal: true,
       };
       const beforeTamper = await saved(primary.root);
-      resultOk(await raw(primary, ["up", "--detach", "--json"]), 1);
+      ok(await raw(primary, ["up", "--detach", "--json"]), 1);
       requireValue(
         (await inventory(docker, "container", original.identity.composeProject))
           .length === 0 &&
@@ -2083,6 +2635,7 @@ export const nativeConfigNetworksScenario: Scenario = {
       await runPhases();
     } catch (error: unknown) {
       failure = error;
+      await census();
     }
 
     cleanupStarted = Date.now();
@@ -2199,6 +2752,8 @@ export const nativeConfigNetworksScenario: Scenario = {
         ctx.log(
           "Cleanup also failed; original failure retained in private captures"
         );
+        ctx.log(nativeNetworkFixtureFailureLabel(cleanupError));
+        await census();
       }
     }
     if (failure !== undefined) {

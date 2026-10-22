@@ -292,6 +292,44 @@ for (const request of [
   }, 30_000);
 }
 
+/**
+ * HACK-1371: a profile list is empty only when every entry is. An empty entry
+ * beside a real profile is dropped, so the list is compared with the running
+ * selection like any other: it runs when the real entries match and refuses
+ * with the mismatch refusal (not the empty one) when they differ.
+ */
+for (const profile of ["toolchain,", ",toolchain", " , toolchain , "]) {
+  test(`run --profile ${JSON.stringify(profile)} keeps its real entry and runs`, async () => {
+    const f = await fixture({ profiles: ["toolchain"] });
+    const result = await cli({
+      fixture: f,
+      args: ["run", "--profile", profile, "toolchain", "bun", "--version"],
+    });
+    expect(result.stderr).toBe("");
+    expect(result.code).toBe(0);
+    expect(result.stdout).toBe(CHILD_STDOUT);
+    expect(operations(await nativeCalls(f.root))).toEqual([
+      "refresh-dependencies",
+      "run-selection",
+      "run-service",
+    ]);
+  }, 30_000);
+}
+
+test('run --profile "web," with a different running profile refuses as a mismatch', async () => {
+  const f = await fixture({ profiles: ["toolchain"] });
+  const result = await cli({
+    fixture: f,
+    args: ["run", "--profile", "web,", "toolchain", "bun", "--version"],
+  });
+  expect(result.code).toBe(1);
+  expect(result.stdout).toBe("");
+  expect(result.stderr).toBe(
+    `ERROR: E_USAGE: ${NATIVE_RUN_SELECTION_REFUSAL}\n`
+  );
+  expect(await nativeCalls(f.root)).toEqual([]);
+}, 30_000);
+
 test("run without --env or --profile still inherits the running selection", async () => {
   const f = await fixture({ profiles: [], effectiveEnvName: null });
   const result = await cli({

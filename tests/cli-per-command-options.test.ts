@@ -4,10 +4,12 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import {
   type AnyCommandSpec,
+  builtinOptions,
   defineCli,
   defineCommand,
   defineOption,
   findPassthroughStart,
+  type OptionSpec,
   parseCliArgv,
   resolveCommand,
 } from "../src/cli/command.ts";
@@ -94,6 +96,47 @@ test("an option another command declares is refused as not valid here", () => {
   // Parsed by long name so the refusal can name it; never by its short flag.
   expect(parse(["up", "--port", "2222"]).values).toEqual({ port: "2222" });
   expect(() => parse(["up", "-x"])).toThrow("Unknown option '-x'");
+});
+
+/**
+ * HACK-1371: only a long spelling reaches the "not valid for" refusal. A short
+ * spelling the resolved command does not declare is unknown to its parse even
+ * when another command declares it (`-f` is `--follow` for `logs`, `-d` is
+ * `--detach` for `up`). The parse over every command's options that #370
+ * replaced read it as that long option and refused it as not valid instead.
+ */
+test("a short spelling only another command declares is unknown here", () => {
+  const ownOptions: readonly OptionSpec[] = [
+    ...builtinOptions(),
+    ...CLI_SPEC.globalOptions,
+    ...(CLI_SPEC.commands.find((command) => command.name === "doctor")
+      ?.options ?? []),
+  ];
+  const own = new Set(
+    ownOptions.flatMap((option) => (option.short ? [option.short] : []))
+  );
+  const others = new Set<string>();
+  const walk = (commands: readonly AnyCommandSpec[]) => {
+    for (const command of commands) {
+      for (const option of command.options) {
+        if (option.short && !own.has(option.short)) {
+          others.add(option.short);
+        }
+      }
+      walk(command.subcommands);
+    }
+  };
+  walk(CLI_SPEC.commands);
+  for (const expected of ["-f", "-d", "-c", "-H", "-u", "-t"]) {
+    expect(others).toContain(expected);
+  }
+  for (const short of others) {
+    expect(() => parse(["doctor", short])).toThrow(
+      `Unknown option '${short}'. To specify a positional argument starting with a '-'`
+    );
+  }
+  // The long spelling still parses, so the CLI can name it as not valid.
+  expect(parse(["doctor", "--follow"]).values).toEqual({ follow: true });
 });
 
 test("config adopt --rollback stays boolean; setup migrate --rollback-manifest takes a value", () => {
